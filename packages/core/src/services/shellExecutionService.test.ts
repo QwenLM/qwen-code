@@ -240,6 +240,8 @@ const makePty = () =>
     onExit: vi.fn().mockReturnValue({ dispose: vi.fn() }),
     write: vi.fn(),
     resize: vi.fn(),
+    pause: vi.fn(),
+    resume: vi.fn(),
   });
 
 // Like a live Node ChildProcess, exitCode / signalCode are null: the promote
@@ -502,7 +504,10 @@ describe('ShellExecutionService', () => {
         );
         expect(mockGetShellConfiguration).not.toHaveBeenCalled();
         if (pty) ptyExit({ exitCode: 0 });
-        else child.emit('exit', 0, null);
+        else {
+          child.emit('exit', 0, null);
+          child.emit('close', 0, null);
+        }
         expect((await handle.result).exitCode).toBe(0);
       },
     );
@@ -540,6 +545,7 @@ describe('ShellExecutionService', () => {
           expect.objectContaining({ env: input.env }),
         );
         child.emit('exit', 0, null);
+        child.emit('close', 0, null);
         await handle.result;
       },
     );
@@ -571,6 +577,7 @@ describe('ShellExecutionService', () => {
       const error = Object.assign(new Error('closed'), { code: 'EPIPE' });
       child.stdin.emit('error', error);
       child.emit('exit', 0, null);
+      child.emit('close', 0, null);
       const result = await handle.result;
       // The exit status is authoritative: a transport EPIPE (stdin closed
       // early) must not fill the error slot that downstream gates read as a
@@ -593,6 +600,7 @@ describe('ShellExecutionService', () => {
       ]);
       expect(child.stdin.end).not.toHaveBeenCalled();
       child.emit('exit', 0, null);
+      child.emit('close', 0, null);
       await handle.result;
     });
 
@@ -603,6 +611,7 @@ describe('ShellExecutionService', () => {
       const error = Object.assign(new Error('closed'), { code: 'EPIPE' });
       child.stdin.emit('error', error);
       child.emit('exit', null, null);
+      child.emit('close', null, null);
       expect((await handle.result).error).toBe(error);
       expect(mockCpSpawn).toHaveBeenCalledTimes(1);
     });
@@ -617,6 +626,7 @@ describe('ShellExecutionService', () => {
       const handle = await pending;
       expect(child.stdin.end).toHaveBeenCalledWith(Buffer.from('request'));
       child.emit('exit', 0, null);
+      child.emit('close', 0, null);
       await handle.result;
     });
 
@@ -777,6 +787,7 @@ describe('ShellExecutionService', () => {
         maxBufferedOutputBytes: 10,
       });
 
+      expect(result.outputCaptureLimitExceeded).toBe(true);
       expect(result.rawOutput.length).toBe(10);
       expect(result.output).toContain('12345678ab');
       expect(result.output).toContain(CAP_NOTICE);
@@ -794,6 +805,7 @@ describe('ShellExecutionService', () => {
         { ...shellExecutionConfig, maxBufferedOutputBytes: 10 },
       );
 
+      expect(result.outputCaptureLimitExceeded).toBe(true);
       expect(result.rawOutput.toString()).toBe('12345678ab');
       expect(result.output).toContain('12345678ab');
       expect(result.output).toContain(CAP_NOTICE);
@@ -806,6 +818,7 @@ describe('ShellExecutionService', () => {
         maxBufferedOutputBytes: 10,
       });
 
+      expect(result.outputCaptureLimitExceeded).toBe(false);
       expect(result.rawOutput.length).toBe(10);
       expect(result.output).toBe('1234567890');
       expect(result.output).not.toContain(CAP_NOTICE);
@@ -961,6 +974,64 @@ describe('ShellExecutionService', () => {
       });
     });
 
+    it('converges a qwen-bun-pty resource-limit error into a failed result with no fabricated exit code', async () => {
+      const limitError = Object.assign(new Error('resource limit reached'), {
+        code: 'QWEN_PTY_WRITE_LIMIT',
+      });
+      const { result } = await simulateExecution(
+        'yes | head -c 100000000',
+        () => {
+          ptyData('1234567890discarded');
+          // The qwen-bun-pty backend has already killed the tree and closed
+          // the fd when it emits this; no onExit follows.
+          expect(() => mockPtyProcess.emit('error', limitError)).not.toThrow();
+        },
+        { ...shellExecutionConfig, maxBufferedOutputBytes: 10 },
+      );
+
+      expect(result.outputCaptureLimitExceeded).toBe(true);
+      expect(result.rawOutput.toString()).toBe('1234567890');
+      expect(result.output).toContain(CAP_NOTICE);
+      expect(result.error).toBe(limitError);
+      expect(result.exitCode).toBeNull();
+      expect(result.signal).toBeNull();
+      expect(result.aborted).toBe(false);
+    });
+
+    it('settles a limit failure after an output consumer rejects', async () => {
+      mockIsBinary.mockReturnValueOnce(true);
+      onOutputEventMock.mockImplementation((event) => {
+        if (event.type === 'binary_detected') throw new Error('consumer boom');
+      });
+      const error = Object.assign(new Error('resource limit reached'), {
+        code: 'QWEN_PTY_WRITE_LIMIT',
+      });
+      const { result } = await simulateExecution('echo binary', async () => {
+        ptyData(Buffer.from([0, 1, 2]));
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        mockPtyProcess.emit('error', error);
+        ptyExit({ exitCode: 7, signal: 0 });
+      });
+      expect(result.error).toBe(error);
+      expect(result.exitCode).toBeNull();
+      expect(result.signal).toBeNull();
+    });
+
+    it('reports pre-spawn capacity refusal without fallback or a native exit', async () => {
+      const error = Object.assign(new Error('capacity reached'), {
+        code: 'QWEN_PTY_ACTIVE_LIMIT',
+      });
+      mockPtySpawn.mockImplementationOnce(() => {
+        throw error;
+      });
+      const { result } = await simulateExecution('never-run', () => {});
+      expect(result.error).toBe(error);
+      expect(result.exitCode).toBeNull();
+      expect(result.signal).toBeNull();
+      expect(result.executionMethod).toBe('none');
+      expect(mockCpSpawn).not.toHaveBeenCalled();
+    });
+
     it('should ignore ioctl EBADF message-only resize race errors', async () => {
       mockPtyProcess.resize.mockImplementationOnce(() => {
         throw new Error('ioctl(2) failed, EBADF');
@@ -1029,6 +1100,21 @@ describe('ShellExecutionService', () => {
     it('should abort a running process and set the aborted flag', async () => {
       // cancelPty checks the aborted flag (the process kill is mocked).
       await cancelPty();
+    });
+
+    it('resumes a flow-control-paused pty before signalling its group', async () => {
+      // XOFF can leave the master unread, and macOS finishes the exit of a
+      // child killed with output undrained only once it is read again.
+      await cancelPty();
+
+      expect(mockPtyProcess.resume).toHaveBeenCalledTimes(1);
+      const sigterm = mockProcessKill.mock.calls.findIndex(
+        ([pid, signal]) => pid === -mockPtyProcess.pid && signal === 'SIGTERM',
+      );
+      expect(sigterm).toBeGreaterThanOrEqual(0);
+      expect(mockPtyProcess.resume.mock.invocationCallOrder[0]).toBeLessThan(
+        mockProcessKill.mock.invocationCallOrder[sigterm]!,
+      );
     });
 
     it('signal.reason = { kind: "cancel" } still tree-kills (same as default)', async () => {
@@ -2329,6 +2415,7 @@ describe('ShellExecutionService child_process fallback', () => {
 
       const result = await handle.result;
 
+      expect(result.outputCaptureLimitExceeded).toBe(true);
       expect(result.rawOutput.length).toBe(10);
       expect(result.output).toContain('12345678ab');
       expect(result.output).toContain(CAP_NOTICE);
@@ -2344,6 +2431,7 @@ describe('ShellExecutionService child_process fallback', () => {
         maxBufferedOutputBytes: 10,
       });
 
+      expect(result.outputCaptureLimitExceeded).toBe(false);
       expect(result.rawOutput.length).toBe(10);
       expect(result.output).toBe('1234567890');
       expect(result.output).not.toContain(CAP_NOTICE);
@@ -2415,6 +2503,106 @@ describe('ShellExecutionService child_process fallback', () => {
       expect(result.output).toBe(stdout + 'end\nerror');
     });
 
+    it('keeps buffered stdout and stderr until post-exit close', async () => {
+      vi.useFakeTimers();
+      const handle = await exec('late-output', { usePty: false });
+      const settled = vi.fn();
+      void handle.result.then(settled);
+      try {
+        emitOut(Buffer.from([0xe2]));
+        mockChildProcess.emit('exit', 0, null);
+        await Promise.resolve();
+        expect(settled).not.toHaveBeenCalled();
+
+        emitOut(Buffer.from([0x82, 0xac]));
+        emitOut('late diagnostic', 'stderr');
+        mockChildProcess.stdout?.emit('end');
+        mockChildProcess.stderr?.emit('end');
+        mockChildProcess.emit('close', 0, null);
+
+        await Promise.resolve();
+        expect(settled).toHaveBeenCalledOnce();
+
+        const result = await handle.result;
+        expect(result.output).toBe('€\nlate diagnostic');
+        expect(result.exitCode).toBe(0);
+        expect(result.stdoutHeldAfterExit).toBeUndefined();
+        expect(onOutputEventMock).toHaveBeenCalledExactlyOnceWith(
+          dataEvent('€\nlate diagnostic'),
+        );
+      } finally {
+        mockChildProcess.emit('close', 0, null);
+        vi.useRealTimers();
+      }
+    });
+
+    it.each([false, true])(
+      'bounds buffered post-exit drain to 200ms (stdout ended: %s)',
+      async (stdoutEnded) => {
+        vi.useFakeTimers();
+        const handle = await exec('inherited-pipe', { usePty: false });
+        const settled = vi.fn();
+        void handle.result.then(settled);
+        try {
+          emitOut('before');
+          if (stdoutEnded) mockChildProcess.stdout?.emit('end');
+          mockChildProcess.emit('exit', 7, null);
+          await vi.advanceTimersByTimeAsync(199);
+          expect(settled).not.toHaveBeenCalled();
+          emitOut('late diagnostic', 'stderr');
+          await vi.advanceTimersByTimeAsync(1);
+
+          const result = await handle.result;
+          expect(result.output).toBe('before\nlate diagnostic');
+          expect(result.exitCode).toBe(7);
+          expect(result.aborted).toBe(false);
+          expect(result.stdoutHeldAfterExit).toBe(
+            stdoutEnded ? undefined : true,
+          );
+        } finally {
+          mockChildProcess.emit('close', 7, null);
+          vi.useRealTimers();
+        }
+      },
+    );
+
+    it.each(['streamStdout', 'rawCapture'] as const)(
+      'bounds %s post-exit drain to 1000ms',
+      async (mode) => {
+        vi.useFakeTimers();
+        const capture = {
+          write: vi.fn(async () => {}),
+          finish: vi.fn(async () => {}),
+          setStarted: vi.fn(),
+          setProcessResult: vi.fn(),
+        };
+        const handle = await exec('inherited-pipe', {
+          usePty: false,
+          options:
+            mode === 'streamStdout'
+              ? { streamStdout: true }
+              : { rawCapture: capture },
+        });
+        const settled = vi.fn();
+        void handle.result.then(settled);
+        try {
+          mockChildProcess.emit('exit', 7, null);
+          await vi.advanceTimersByTimeAsync(999);
+          expect(settled).not.toHaveBeenCalled();
+          await vi.advanceTimersByTimeAsync(1);
+          expect(settled).toHaveBeenCalledOnce();
+          expect(await handle.result).toMatchObject({
+            exitCode: 7,
+            aborted: false,
+            stdoutHeldAfterExit: true,
+          });
+        } finally {
+          mockChildProcess.emit('close', 7, null);
+          vi.useRealTimers();
+        }
+      },
+    );
+
     it('keeps streaming both pipes after exit until stdio closes', async () => {
       await simulateExecution(
         'monitor',
@@ -2465,6 +2653,7 @@ describe('ShellExecutionService child_process fallback', () => {
       const result = await handle.result;
       expect(settledEarly).toBe(true);
       expect(result.exitCode).toBe(0);
+      expect(result.stdoutHeldAfterExit).toBeUndefined();
       expect(onOutputEventMock).toHaveBeenCalledWith(stdoutEvent('after'));
     });
 
@@ -2484,7 +2673,26 @@ describe('ShellExecutionService child_process fallback', () => {
       );
       expect(result.exitCode).toBe(0);
       expect(result.aborted).toBe(false);
+      // Callers that need the background part's output can tell it was cut.
+      expect(result.stdoutHeldAfterExit).toBe(true);
       expect(onOutputEventMock).toHaveBeenCalledWith(stdoutEvent('before'));
+    });
+
+    it('does not report a held stdout when only stderr stays open past the drain', async () => {
+      // A helper that silenced its stdout but kept stderr: what the caller
+      // reads from stdout is complete.
+      const { result } = await simulateExecution(
+        'stderr-held',
+        (cp) => {
+          emitOut('before');
+          cp.stdout?.emit('end');
+          cp.emit('exit', 0, null);
+          // No 'close': the helper holds stderr.
+        },
+        { streamStdout: true },
+      );
+      expect(result.exitCode).toBe(0);
+      expect(result.stdoutHeldAfterExit).toBeUndefined();
     });
 
     it('reports capture-limit notice for streaming child_process output', async () => {
@@ -2709,16 +2917,26 @@ describe('ShellExecutionService child_process fallback', () => {
       // promote, post-promote bytes re-enter handleOutput and either hit the
       // finalized decoder (TypeError crash) or reach the foreground
       // onOutputEvent (ownership leak / duplicated emit).
+      const stdoutEndObserver = vi.fn();
+      const stderrEndObserver = vi.fn();
+      mockChildProcess.stdout?.on('end', stdoutEndObserver);
+      mockChildProcess.stderr?.on('end', stderrEndObserver);
       const { result } = await simulateExecution(
         'tail -f /tmp/never.log',
-        (_cp, ac) => {
+        (cp, ac) => {
           emitOut('pre-promote\n');
           ac.abort(bg('bg_test123'));
+          expect(cp.stdout?.listeners('end')).toEqual([stdoutEndObserver]);
+          expect(cp.stderr?.listeners('end')).toEqual([stderrEndObserver]);
           // More data on the live streams: no onOutputEvent, no decoder throw.
           const eventCountAtPromote = onOutputEventMock.mock.calls.length;
           emitOut('post-promote-stdout\n');
           emitOut('post-promote-stderr\n', 'stderr');
           expect(onOutputEventMock.mock.calls.length).toBe(eventCountAtPromote);
+          cp.stdout?.emit('end');
+          cp.stderr?.emit('end');
+          expect(stdoutEndObserver).toHaveBeenCalledOnce();
+          expect(stderrEndObserver).toHaveBeenCalledOnce();
         },
       );
 
@@ -2962,10 +3180,10 @@ describe('ShellExecutionService child_process fallback', () => {
       const binaryChunk1 = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
       const binaryChunk2 = Buffer.from([0x0d, 0x0a, 0x1a, 0x0a]);
 
-      const { result } = await simulateExecution('cat image.png', (cp) => {
+      const { result } = await simulateExecution('cat image.png', () => {
         emitOut(binaryChunk1);
         emitOut(binaryChunk2);
-        cp.emit('exit', 0, null);
+        finish();
       });
 
       expect(result.rawOutput).toEqual(
@@ -3001,7 +3219,7 @@ describe('ShellExecutionService child_process fallback', () => {
       useShell(BASH_SHELL);
     });
 
-    const exitOnly: Simulation = (cp) => cp.emit('exit', 0, null);
+    const exitAndClose: Simulation = () => finish();
 
     const windowsSpawn = (windowsVerbatimArguments: boolean) =>
       expect.objectContaining({
@@ -3036,7 +3254,7 @@ describe('ShellExecutionService child_process fallback', () => {
     ])('%s', async (_title, shell, command, args, spawnOptions) => {
       mockPlatform.mockReturnValue('win32');
       useShell(shell);
-      await simulateExecution(command, exitOnly);
+      await simulateExecution(command, exitAndClose);
 
       expect(mockCpSpawn).toHaveBeenCalledWith(shell[0], args, spawnOptions);
     });
@@ -3046,7 +3264,7 @@ describe('ShellExecutionService child_process fallback', () => {
       vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
       setupConflictingPathEnv();
 
-      await simulateExecution('dir', exitOnly);
+      await simulateExecution('dir', exitAndClose);
 
       expectNormalizedWindowsPathEnv(mockCpSpawn.mock.calls[0][2].env);
     });
@@ -3058,7 +3276,7 @@ describe('ShellExecutionService child_process fallback', () => {
       vi.stubEnv('GIT_PAGER', undefined);
       await simulateExecution(
         'echo hello',
-        exitOnly,
+        exitAndClose,
         {},
         shellExecutionConfigWithoutPager,
       );
@@ -3073,7 +3291,7 @@ describe('ShellExecutionService child_process fallback', () => {
       useShell(CMD_SHELL);
 
       vi.stubEnv('GIT_PAGER', undefined);
-      await simulateExecution('echo hello', exitOnly);
+      await simulateExecution('echo hello', exitAndClose);
 
       const spawnOptions = mockCpSpawn.mock.calls[0][2];
       expect(spawnOptions.env['PAGER']).toBe('cat');
@@ -3082,7 +3300,7 @@ describe('ShellExecutionService child_process fallback', () => {
 
     it('should use bash and detached process group on Linux', async () => {
       mockPlatform.mockReturnValue('linux');
-      await simulateExecution('ls "foo bar"', exitOnly);
+      await simulateExecution('ls "foo bar"', exitAndClose);
 
       expect(mockCpSpawn).toHaveBeenCalledWith(
         'bash',
@@ -3229,6 +3447,7 @@ describe('ShellExecutionService execution method selection', () => {
     const handle = await exec('test command', { usePty: false, config: {} });
 
     mockChildProcess.emit('exit', 0, null);
+    mockChildProcess.emit('close', 0, null);
     const result = await handle.result;
 
     expect(mockGetPty).not.toHaveBeenCalled();
@@ -3243,6 +3462,7 @@ describe('ShellExecutionService execution method selection', () => {
     const handle = await exec('test command');
 
     mockChildProcess.emit('exit', 0, null);
+    mockChildProcess.emit('close', 0, null);
     const result = await handle.result;
 
     expect(mockGetPty).toHaveBeenCalled();

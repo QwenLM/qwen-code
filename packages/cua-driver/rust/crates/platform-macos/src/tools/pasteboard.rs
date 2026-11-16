@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
-    Arc, OnceLock,
+    Arc, Mutex, OnceLock,
 };
 use std::time::Duration;
 
@@ -386,12 +386,15 @@ thread_local! {
 }
 
 struct MainCall<T> {
-    work: Box<dyn FnOnce() -> anyhow::Result<T> + Send>,
+    work: Arc<Mutex<Option<Box<dyn FnOnce() -> anyhow::Result<T> + Send>>>>,
     sender: std::sync::mpsc::Sender<anyhow::Result<T>>,
 }
 
 unsafe extern "C" fn call_on_main<T: Send + 'static>(context: *mut c_void) {
     let MainCall { work, sender } = *Box::from_raw(context.cast::<MainCall<T>>());
+    let Some(work) = work.lock().unwrap().take() else {
+        return;
+    };
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         objc2::rc::autoreleasepool(|_| work())
     }))
@@ -401,13 +404,16 @@ unsafe extern "C" fn call_on_main<T: Send + 'static>(context: *mut c_void) {
 
 fn main_call<T: Send + 'static>(
     work: impl FnOnce() -> anyhow::Result<T> + Send + 'static,
+    start_timeout: Option<Duration>,
 ) -> anyhow::Result<T> {
     if objc2_foundation::MainThreadMarker::new().is_some() {
         return work();
     }
     let (sender, receiver) = std::sync::mpsc::channel();
+    let work: Arc<Mutex<Option<Box<dyn FnOnce() -> anyhow::Result<T> + Send>>>> =
+        Arc::new(Mutex::new(Some(Box::new(work))));
     let request = Box::new(MainCall {
-        work: Box::new(work),
+        work: Arc::clone(&work),
         sender,
     });
     unsafe {
@@ -417,9 +423,31 @@ fn main_call<T: Send + 'static>(
             call_on_main::<T>,
         );
     }
-    // This worker keeps its mutation/clipboard leases until the main-thread
-    // operation finishes. A timeout here could leave a late clipboard write
-    // running after cancellation and after a subsequent transaction begins.
+    receive_main_call(receiver, &work, start_timeout)
+}
+
+fn receive_main_call<T>(
+    receiver: std::sync::mpsc::Receiver<anyhow::Result<T>>,
+    work: &Mutex<Option<Box<dyn FnOnce() -> anyhow::Result<T> + Send>>>,
+    start_timeout: Option<Duration>,
+) -> anyhow::Result<T> {
+    if let Some(timeout) = start_timeout {
+        match receiver.recv_timeout(timeout) {
+            Ok(result) => return result,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                bail!("pasteboard main-thread operation stopped");
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // Taking the pending closure prevents a late clipboard write
+                // even if this host starts servicing its main queue later.
+                if work.lock().unwrap().take().is_some() {
+                    bail!("clipboard_main_thread_unavailable: the main-thread host did not start the paste operation; clipboard was not modified");
+                }
+            }
+        }
+    }
+    // Once work has started, keep the clipboard/mutation leases until it
+    // finishes. Cleanup must not race a still-running clipboard operation.
     receiver
         .recv()
         .context("pasteboard main-thread operation stopped")?
@@ -440,27 +468,33 @@ impl Transaction {
         signals: Arc<Signals>,
         board: impl FnOnce() -> anyhow::Result<Retained<NSPasteboard>> + Send + 'static,
     ) -> anyhow::Result<Self> {
-        main_call(move || {
-            let transaction = NativeTransaction::begin_on(board()?, content, signals)?;
-            static NEXT: AtomicU64 = AtomicU64::new(1);
-            let id = NEXT.fetch_add(1, Ordering::Relaxed);
-            TRANSACTIONS.with(|transactions| {
-                transactions.borrow_mut().insert(id, transaction);
-            });
-            Ok(Self { id, active: true })
-        })
+        main_call(
+            move || {
+                let transaction = NativeTransaction::begin_on(board()?, content, signals)?;
+                static NEXT: AtomicU64 = AtomicU64::new(1);
+                let id = NEXT.fetch_add(1, Ordering::Relaxed);
+                TRANSACTIONS.with(|transactions| {
+                    transactions.borrow_mut().insert(id, transaction);
+                });
+                Ok(Self { id, active: true })
+            },
+            Some(Duration::from_secs(3)),
+        )
     }
 
     pub(super) fn owns_clipboard(&self) -> bool {
         let id = self.id;
-        main_call(move || {
-            TRANSACTIONS.with(|transactions| {
-                Ok(transactions
-                    .borrow()
-                    .get(&id)
-                    .is_some_and(NativeTransaction::owns_clipboard))
-            })
-        })
+        main_call(
+            move || {
+                TRANSACTIONS.with(|transactions| {
+                    Ok(transactions
+                        .borrow()
+                        .get(&id)
+                        .is_some_and(NativeTransaction::owns_clipboard))
+                })
+            },
+            None,
+        )
         .unwrap_or(false)
     }
 
@@ -470,12 +504,15 @@ impl Transaction {
         }
         self.active = false;
         let id = self.id;
-        main_call(move || {
-            let mut transaction = TRANSACTIONS
-                .with(|transactions| transactions.borrow_mut().remove(&id))
-                .ok_or_else(|| anyhow!("paste clipboard transaction is unavailable"))?;
-            transaction.restore()
-        })
+        main_call(
+            move || {
+                let mut transaction = TRANSACTIONS
+                    .with(|transactions| transactions.borrow_mut().remove(&id))
+                    .ok_or_else(|| anyhow!("paste clipboard transaction is unavailable"))?;
+                transaction.restore()
+            },
+            None,
+        )
     }
 }
 
@@ -492,6 +529,60 @@ impl Drop for Transaction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn main_call_timeout_cancels_pending_work_before_any_late_callback() {
+        let executed = Arc::new(AtomicBool::new(false));
+        let captured = Arc::new(());
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let flag = Arc::clone(&executed);
+        let payload = Arc::clone(&captured);
+        let work: Arc<Mutex<Option<Box<dyn FnOnce() -> anyhow::Result<()> + Send>>>> =
+            Arc::new(Mutex::new(Some(Box::new(move || {
+                flag.store(true, Ordering::Release);
+                drop(payload);
+                Ok(())
+            }))));
+        let request = Box::into_raw(Box::new(MainCall {
+            work: Arc::clone(&work),
+            sender,
+        }));
+        let result = receive_main_call(receiver, &work, Some(Duration::ZERO));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("clipboard_main_thread_unavailable"));
+        assert_eq!(Arc::strong_count(&captured), 1);
+        unsafe { call_on_main::<()>(request.cast()) };
+        assert!(!executed.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn main_call_timeout_waits_for_work_that_already_started() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (finish_tx, finish_rx) = std::sync::mpsc::channel();
+        let work: Arc<Mutex<Option<Box<dyn FnOnce() -> anyhow::Result<u32> + Send>>>> =
+            Arc::new(Mutex::new(Some(Box::new(move || {
+                started_tx.send(()).unwrap();
+                finish_rx.recv().unwrap();
+                Ok(7)
+            }))));
+        let request = Box::into_raw(Box::new(MainCall {
+            work: Arc::clone(&work),
+            sender,
+        })) as usize;
+        let callback =
+            std::thread::spawn(move || unsafe { call_on_main::<u32>(request as *mut c_void) });
+        started_rx.recv().unwrap();
+        let waiter =
+            std::thread::spawn(move || receive_main_call(receiver, &work, Some(Duration::ZERO)));
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(!waiter.is_finished());
+        finish_tx.send(()).unwrap();
+        assert_eq!(waiter.join().unwrap().unwrap(), 7);
+        callback.join().unwrap();
+    }
 
     #[test]
     fn markdown_preserves_semantic_rich_content() {

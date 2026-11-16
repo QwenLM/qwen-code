@@ -46,7 +46,9 @@ type GoalRecordProvenance =
   | 'system'
   // Session multi-agent records (agent_mention/agent_message) share the
   // transcript; they carry no Goal context and are never evidence.
-  | 'external_agent';
+  | 'external_agent'
+  // A Mod's own prompt is not the person's words, so it is never evidence.
+  | 'mod_prompt';
 
 export interface GoalEvidenceRecord {
   uuid: string;
@@ -287,6 +289,8 @@ function coherentEvidenceProvenance(
   record: GoalEvidenceRecord,
 ): GoalEvidenceProvenance | undefined {
   if (record.type === 'system') return undefined;
+  // Never the person's words, though its record has a typed prompt's shape.
+  if (record.provenance === 'mod_prompt') return undefined;
   const provenance = record.provenance ?? legacySafeProvenance(record);
   if (provenance === 'real_user') {
     return record.type === 'user' &&

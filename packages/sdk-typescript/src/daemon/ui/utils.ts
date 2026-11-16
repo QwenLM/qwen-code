@@ -16,7 +16,7 @@ export function getString(value: unknown, key: string): string | undefined {
   return typeof entry === 'string' ? entry : undefined;
 }
 
-function getFiniteNumber(
+export function getFiniteNumber(
   value: Record<string, unknown>,
   key: string,
 ): number | undefined {

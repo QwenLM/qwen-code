@@ -43,7 +43,7 @@ The facts below are from `main` at `73aa65a4b4`.
 
 ## Placement
 
-The code is the package `com.alibaba.qwen.code.runtimebroker.managedworkspace` inside the existing `packages/sdk-java/runtime-broker` module, as #12380 decided. A separate Maven module was set aside: it would have needed its own pom, CI lane and workflow-guard tests before any Registry logic was reviewable. A package keeps the change to the domain code and lets W0c wire the binding through `HarnessSessionResolver` in the same module. If the Registry later needs its own schema lifecycle, or a consumer that must not pull in the Broker, it can move to a module of its own then.
+The code is the package `com.alibaba.qwen.code.runtimebroker.managedworkspace` inside the existing `packages/managed-agent-server` module, as #12380 decided. A separate Maven module was set aside: it would have needed its own pom, CI lane and workflow-guard tests before any Registry logic was reviewable. A package keeps the change to the domain code and lets W0c wire the binding through `HarnessSessionResolver` in the same module. If the Registry later needs its own schema lifecycle, or a consumer that must not pull in the Broker, it can move to a module of its own then.
 
 The package stays framework-neutral: it uses only the JDK and no other Broker class, no Spring, no CLI internals and no scheduler, and nothing falls back to in-memory state behind a failing durable source. The shared fixtures and the TypeScript twin of the rule and the digest live under `packages/cli/src/serve`, next to the existing Runtime contracts.
 
@@ -251,13 +251,13 @@ None of these succeeds on an unchanged retry. W0a raises them as one exception t
 
 ## Files affected
 
-- The package `com.alibaba.qwen.code.runtimebroker.managedworkspace` in `packages/sdk-java/runtime-broker` (new):
+- The package `com.alibaba.qwen.code.runtimebroker.managedworkspace` in `packages/managed-agent-server` (new):
   - The Registry record and state, the Registry interface and the configuration snapshot with its successor check.
   - The actor, the access levels and policy, and the explicit-grant policy.
   - The catalog that lists and resolves.
   - The selection and resolved Workspace, the working-directory rule, `ContextBinding` and the exception type.
   - Tests in the matching test package, including the fixture consumer.
-- `packages/sdk-java/runtime-broker/README.md` and `QWEN.md`: a section on the package.
+- `packages/managed-agent-server/README.md` and `QWEN.md`: a section on the package.
 - `packages/cli/src/serve/contracts/managed-workspace-binding-v1.fixtures.json` and `.schema.json` (new).
 - `packages/cli/src/serve/managed-workspace-binding.ts` and its test (new). This is the TypeScript twin of the working-directory rule and the digest. The worker uses it since W0c-1.
 - This design document, in both languages.
@@ -274,7 +274,7 @@ No existing Broker class, the Broker schema, the daemon `WorkspaceRegistry`, the
   - The working-directory rule, and ContextBinding validation and digest.
 - **Fixture consumers:** Java and TypeScript both run every path, binding and character-probe case. TypeScript validates the fixture file against its schema with strict Ajv.
 - **Mutation check:** revert or weaken each guard. This includes widening or narrowing each character class by any probed code point; exempting one control character; adding regular-expression flags; comparing case-insensitively; dropping the type check from `equals`; and making a constructor public. A mutant that changes behavior must fail a test, and a surviving mutant must be shown to be equivalent.
-- **Commands:** `mvn test` and `mvn checkstyle:check` in `packages/sdk-java/runtime-broker` on JDK 21; `npm run build && npm run typecheck`; focused Vitest runs.
+- **Commands:** `mvn test` and `mvn checkstyle:check` in `packages/managed-agent-server` on JDK 21; `npm run build && npm run typecheck`; focused Vitest runs.
 - **CI:** the existing `runtime-broker` steps run the package's tests in the Java 21 jobs on Linux, macOS and Windows, and Checkstyle on Linux. The module's Checkstyle configuration checks the main sources only, not the tests.
 
 ## Acceptance criteria

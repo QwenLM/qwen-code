@@ -9,6 +9,7 @@ import * as path from 'node:path';
 import { Storage } from '../config/storage.js';
 import type { InputModalities } from '../core/contentGenerator.js';
 import { normalize } from '../core/tokenLimits.js';
+import { KIMI_K3_GENERATION } from './constants.js';
 import bundledCatalog from './generated/model-registry.json' with { type: 'json' };
 
 export interface ModelCatalogEntry {
@@ -259,11 +260,24 @@ const CATALOG_CONTEXT_CORRECTIONS: Readonly<Record<string, number>> = {
   // curated row or the presets declare, so compaction thresholds computed
   // from it fire too late and the request 400s at the vendor.
   'qwen3-coder-plus': 1_000_000,
-  'kimi-k3': 1_000_000,
+  // The K3 generation's 256K variant is catalogued beside the 1M tiers; it
+  // must keep its own window under both a missing and an over-stated entry.
+  'k3-256k': 262_144,
   'minimax-m2.5': 196_608,
   'minimax-m2.5-highspeed': 196_608,
   'glm-4.7': 202_752,
 };
+
+/**
+ * The same correction for a whole generation, matched rather than enumerated:
+ * models.dev lists each Kimi K3 sub-version under both its dotted and dashed
+ * spellings (`kimi-k3.1-pro-highspeed`, `kimi-k3-1-pro-highspeed`) and keeps
+ * adding tiers, so an id-by-id table would leave the next one over-stated.
+ * The shared pattern excludes `k3-256k`, which keeps the window corrected
+ * for it in the table above.
+ */
+const CATALOG_CONTEXT_GENERATION_CORRECTIONS: ReadonlyArray<[RegExp, number]> =
+  [[KIMI_K3_GENERATION, 1_000_000]];
 
 /**
  * The refreshed cache wins only when it is newer than the snapshot bundled
@@ -295,6 +309,14 @@ export function loadModelCatalog(): ModelCatalog {
       for (const key of versionSpellings(id)) {
         const entry = models[key];
         if (entry) {
+          models[key] = { ...entry, context };
+          corrected = true;
+        }
+      }
+    }
+    for (const [pattern, context] of CATALOG_CONTEXT_GENERATION_CORRECTIONS) {
+      for (const [key, entry] of Object.entries(models)) {
+        if (pattern.test(key)) {
           models[key] = { ...entry, context };
           corrected = true;
         }

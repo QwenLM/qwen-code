@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash } from 'node:crypto';
 import { stripVTControlCharacters } from 'node:util';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
@@ -15,6 +16,13 @@ import {
   type ReportItem,
   type ReportSnapshot,
 } from './contracts.js';
+import {
+  failureIdsSchema,
+  MAX_VIEW_CHARS,
+  viewSpecSchema,
+  type ViewFallbackReason,
+  type ViewSpecV1,
+} from './view-spec.js';
 
 const offsetSchema = z.number().int().safe().nonnegative();
 export const querySchema = z.discriminatedUnion('kind', [
@@ -25,6 +33,7 @@ export const querySchema = z.discriminatedUnion('kind', [
       collection: z.enum(['failures', 'assertions', 'file-errors']),
       text: z.string().max(512).optional(),
       status: testStatusSchema.optional(),
+      failureIds: failureIdsSchema.optional(),
       offset: offsetSchema.default(0),
       limit: z.number().int().min(1).max(50).default(25),
     })
@@ -131,41 +140,133 @@ export function importResult(snapshot: ReportSnapshot): CallToolResult {
   return initialResult(snapshot, 'import');
 }
 
-export function showResult(snapshot: ReportSnapshot): CallToolResult {
-  return initialResult(snapshot, 'show');
+type ResolvedView =
+  | {
+      viewResolution: { mode: 'fixed'; reason?: ViewFallbackReason };
+      view?: undefined;
+    }
+  | {
+      viewResolution: { mode: 'generated'; digest: string };
+      view: ViewSpecV1;
+    };
+
+function resolveView(
+  snapshot: ReportSnapshot,
+  candidate: unknown,
+): ResolvedView {
+  const fixed = (reason?: ViewFallbackReason): ResolvedView => ({
+    viewResolution: { mode: 'fixed', ...(reason ? { reason } : {}) },
+  });
+  if (candidate === undefined) return fixed();
+  try {
+    if (JSON.stringify(candidate).length > MAX_VIEW_CHARS)
+      return fixed('spec-too-large');
+  } catch {
+    return fixed('invalid-schema');
+  }
+  if (
+    candidate !== null &&
+    typeof candidate === 'object' &&
+    'schemaVersion' in candidate &&
+    candidate.schemaVersion !== 1
+  )
+    return fixed('unsupported-version');
+  const parsed = viewSpecSchema.safeParse(candidate);
+  if (!parsed.success) return fixed('invalid-schema');
+  const view = parsed.data;
+  const failures = new Set(
+    snapshot.files.flatMap((file) =>
+      file.items
+        .filter((item) => item.status === 'failed')
+        .map((item) => item.itemId),
+    ),
+  );
+  if (
+    view.reportId !== snapshot.reportId ||
+    view.sections.some((section) =>
+      section.kind === 'evidence'
+        ? section.initialFailureId !== undefined &&
+          !failures.has(section.initialFailureId)
+        : section.kind === 'hypothesis-groups' &&
+          section.groups.some((group) =>
+            group.failureIds.some((id) => !failures.has(id)),
+          ),
+    )
+  )
+    return fixed('invalid-reference');
+  return {
+    view,
+    viewResolution: {
+      mode: 'generated',
+      digest: createHash('sha256').update(JSON.stringify(view)).digest('hex'),
+    },
+  };
+}
+
+export function showResult(
+  snapshot: ReportSnapshot,
+  candidate?: unknown,
+): CallToolResult {
+  return initialResult(snapshot, 'show', resolveView(snapshot, candidate));
 }
 
 function initialResult(
   snapshot: ReportSnapshot,
   kind: 'import' | 'show',
+  resolved: ResolvedView = { viewResolution: { mode: 'fixed' } },
 ): CallToolResult {
+  const list = resolved.view?.sections.find(
+    (section) => section.kind === 'failure-list',
+  );
+  const evidence = resolved.view?.sections.find(
+    (section) => section.kind === 'evidence',
+  );
   const page = queryReport(snapshot, {
     kind: 'list',
     collection: 'failures',
+    ...(list?.initialTextFilter !== undefined
+      ? { text: list.initialTextFilter }
+      : {}),
     limit: 5,
   }).structuredContent;
+  const detail = evidence?.initialFailureId
+    ? queryReport(snapshot, {
+        kind: 'detail',
+        itemId: evidence.initialFailureId,
+      }).structuredContent
+    : undefined;
   const envelope = {
     kind,
     summary: summary(snapshot),
-    ...(kind === 'show' ? { viewResolution: { mode: 'fixed' } } : {}),
+    ...(kind === 'show' ? resolved : {}),
   };
   const verb = kind === 'import' ? 'Imported' : 'Explore';
-  const value = result(
-    snapshot,
-    { ...envelope, firstPage: page },
-    `${verb} ${snapshot.reportId}: ${snapshot.computed.fileEntries} file entries, ${snapshot.computed.assertions} assertions, ${snapshot.computed.failures} failure entries. Report success: ${snapshot.reported.success}. Process exit and run completeness are unknown. ${snapshot.consistencyWarnings.length} consistency warnings. Query this reportId for evidence.`,
-  );
+  const description = `${verb} ${snapshot.reportId}: ${snapshot.computed.fileEntries} file entries, ${snapshot.computed.assertions} assertions, ${snapshot.computed.failures} failure entries. Report success: ${snapshot.reported.success}. Process exit and run completeness are unknown. ${snapshot.consistencyWarnings.length} consistency warnings. Query this reportId for evidence.`;
+  if (detail) {
+    const withDetail = result(
+      snapshot,
+      { ...envelope, firstPage: page, initialDetail: detail },
+      description,
+    );
+    if (fits(withDetail)) return withDetail;
+  }
+  const value = result(snapshot, { ...envelope, firstPage: page }, description);
   if (fits(value)) return value;
   const compact = result(
     snapshot,
     envelope,
     `${verb} ${snapshot.reportId}. Query failures for evidence. Process exit is unknown.`,
   );
-  if (!fits(compact))
+  if (!fits(compact)) {
+    if (resolved.view)
+      return initialResult(snapshot, 'show', {
+        viewResolution: { mode: 'fixed', reason: 'result-too-large' },
+      });
     throw new ExplorerError(
       'REPORT_TOO_LARGE',
       'Report summary exceeds the tool result budget.',
     );
+  }
   return compact;
 }
 
@@ -196,6 +297,19 @@ export function queryReport(
   }
   const items = snapshot.files.flatMap((file) => file.items);
   if (input.kind === 'list') {
+    const failureIds = input.failureIds ? new Set(input.failureIds) : undefined;
+    if (failureIds) {
+      const available = new Set(
+        items
+          .filter((item) => item.status === 'failed')
+          .map((item) => item.itemId),
+      );
+      if (input.failureIds?.some((id) => !available.has(id)))
+        throw new ExplorerError(
+          'INVALID_QUERY',
+          'Every failureId must identify a failed entry in this report.',
+        );
+    }
     if (
       (input.collection === 'failures' &&
         input.status &&
@@ -213,6 +327,7 @@ export function queryReport(
     const needle =
       input.text === undefined ? undefined : terminalText(input.text);
     const matched = items.filter((item) => {
+      if (failureIds && !failureIds.has(item.itemId)) return false;
       if (input.collection === 'assertions' && item.kind !== 'assertion')
         return false;
       if (input.collection === 'file-errors' && item.kind !== 'file-error')

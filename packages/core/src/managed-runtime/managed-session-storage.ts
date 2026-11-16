@@ -56,6 +56,13 @@ export interface ManagedSessionActivationState {
   readonly installRef: ManagedSessionDurableRef | null;
 }
 
+export interface ManagedSessionActivationLease {
+  readonly activationId: string;
+  readonly epoch: number;
+  readonly renewalSeq: number;
+  readonly expiresAt: number;
+}
+
 export interface ManagedSessionCommittedTransaction {
   readonly receipt: ManagedSessionCommitReceipt;
   readonly contentDigest: string;
@@ -108,6 +115,22 @@ export interface ManagedSessionCommitProof {
 export interface ManagedSessionJournalHandle
   extends ManagedSessionJournalReader {
   appendTransaction(records: readonly unknown[]): Promise<void>;
+  /** Undefined means the store requires event-based activation renewal. */
+  renewActivation?(request: {
+    readonly activationId: string;
+    readonly epoch: number;
+    readonly renewalSeq: number;
+    readonly leaseDurationMs: number;
+  }): Promise<ManagedSessionActivationLease | undefined>;
+  /**
+   * Settles the append that last failed with an unknown outcome, by comparing
+   * the durable head against the attempt it kept. `landed` means those exact
+   * records are committed; `absent` means the head proves they never were.
+   * Implemented only by stores whose head is authoritative and re-acquirable
+   * after a lapsed writer lease; a local journal leaves an unknown outcome
+   * permanently fenced.
+   */
+  settleAppend?(): Promise<'landed' | 'absent'>;
   blockRecovery?(request: {
     readonly status:
       | 'BLOCKED_RESOURCE'
@@ -116,6 +139,12 @@ export interface ManagedSessionJournalHandle
     readonly detailCode: string;
   }): Promise<void>;
   seal(commit: ManagedSessionCommitProof): Promise<void>;
+  /**
+   * True once the seal committed. A `seal()` rejection before that point
+   * left the writer open and still able to append, so durability decisions
+   * must key on this outcome rather than on the call having been attempted.
+   */
+  readonly writerSealed: boolean;
   /**
    * The commit proof this handle took over from a sealed writer, when it did.
    * Durable stores keep the proof server-side and omit it here.

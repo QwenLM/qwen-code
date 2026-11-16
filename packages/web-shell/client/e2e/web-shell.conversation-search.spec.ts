@@ -51,7 +51,7 @@ test('search locates persisted history outside the live window without changing 
 
 for (const theme of ['light', 'dark']) {
   for (const language of ['en', 'zh-CN']) {
-    for (const width of [1440, 390]) {
+    for (const width of [1600, 1440, 390]) {
       test(`conversation search content and layout ${theme} ${language} ${width} @smoke`, async ({
         page,
         baseURL,
@@ -74,19 +74,20 @@ for (const theme of ['light', 'dark']) {
           exact: true,
         });
         await expect(bottom).toBeVisible();
+        await expect(button).toBeVisible();
         const searchBox = await button.boundingBox();
         const timeline = page.getByRole('navigation', {
           name: /Session timeline|会话时间线/,
         });
-        await expect(
-          timeline.getByRole('button', {
-            name: /Search this conversation|搜索当前会话/,
-            exact: true,
-          }),
-        ).toBeVisible();
         expect(searchBox!.width).toBeLessThanOrEqual(20);
         expect(searchBox!.height).toBe(24);
-        if (width === 1440) {
+        if (width >= 1440) {
+          await expect(
+            timeline.getByRole('button', {
+              name: /Search this conversation|搜索当前会话/,
+              exact: true,
+            }),
+          ).toBeVisible();
           const tick = await timeline
             .locator('li button span')
             .first()
@@ -96,6 +97,8 @@ for (const theme of ['light', 'dark']) {
               searchBox!.x + searchBox!.width / 2 - (tick!.x + tick!.width / 2),
             ),
           ).toBeLessThan(1);
+        } else {
+          await expect(timeline).toBeHidden();
         }
         await page.screenshot({
           path: `/tmp/qwen-12231-entry-${theme}-${language}-${width}.png`,
@@ -205,7 +208,7 @@ test('search keyboard and previous/next controls wrap and Enter locates the sele
   ).toContainText(/Synthetic message 1$/);
 });
 
-test('search stays reachable when the expanded rail hides the timeline', async ({
+test('search stays reachable with the expanded rail and visible timeline', async ({
   page,
   baseURL,
 }) => {
@@ -215,7 +218,7 @@ test('search stays reachable when the expanded rail hides the timeline', async (
   await expect(button).toBeVisible();
   await expect(
     page.getByRole('navigation', { name: /Session timeline/ }),
-  ).toBeHidden();
+  ).toBeVisible();
   await button.click();
   await expect(page.locator('[data-conversation-search] input')).toBeFocused();
 });

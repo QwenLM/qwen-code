@@ -37,6 +37,7 @@ const refreshCapabilities = vi.fn();
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', async () => {
   const React = await import('react');
   return {
+    DAEMON_APPROVAL_MODES: ['default', 'plan', 'auto-edit', 'auto', 'yolo'],
     DaemonWorkspaceProvider: ({ children }: { children: React.ReactNode }) => {
       if (workspaceShouldThrow) throw new Error('provider boom');
       return React.createElement(React.Fragment, null, children);
@@ -141,6 +142,23 @@ it('re-exports the published setting item ids from the public entry', async () =
   const { WEB_SHELL_SETTING_ITEM_IDS: direct } = await import('./settings');
   expect(WEB_SHELL_SETTING_ITEM_IDS).toBe(direct);
   expect(WEB_SHELL_SETTING_ITEM_IDS.length).toBeGreaterThan(0);
+});
+
+it('hides the view without detaching providers through the public wrapper', async () => {
+  const container = render(<WebShellWithProviders sessionId="session-1" />);
+  const { root } = mounted[mounted.length - 1];
+  expect(container.querySelector('[data-testid="app-ok"]')).not.toBeNull();
+  await act(async () => {
+    root.render(<WebShellWithProviders sessionId="session-1" viewHidden />);
+  });
+  expect(container.querySelector('[data-testid="app-ok"]')).toBeNull();
+  expect(sessionUnmounted).not.toHaveBeenCalled();
+  expect(sessionProviderProps.at(-1)?.sessionId).toBe('session-1');
+  await act(async () => {
+    root.render(<WebShellWithProviders sessionId="session-1" />);
+  });
+  expect(container.querySelector('[data-testid="app-ok"]')).not.toBeNull();
+  expect(sessionUnmounted).not.toHaveBeenCalled();
 });
 
 describe('WebShellWithProviders top-level boundary', () => {

@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-config
+  labels:
+    {{- include "managed-agent.labels" . | nindent 4 }}
+data:
+  settings.json: |
+    {{- $model := required "Set model.id to an OpenAI-compatible model ID." .Values.model.id }}
+    {{- $baseUrl := required "Set model.baseUrl to the OpenAI-compatible endpoint." .Values.model.baseUrl }}
+    {{- dict "security" (dict "auth" (dict "selectedType" "openai")) "model" (dict "name" $model) "modelProviders" (dict "openai" (list (dict "id" $model "baseUrl" $baseUrl "envKey" "OPENAI_API_KEY"))) "telemetry" (dict "enabled" false) | toPrettyJson | nindent 4 }}
+  mysql-init.sql: |
+    GRANT SELECT ON performance_schema.user_variables_by_thread TO 'qwen'@'%';
+  {{- if .Values.web.enabled }}
+  managed-web.json: |
+    {{- $tenantError := "Set web.tenantId for the fixed browser identity." }}
+    {{- $actorError := "Set web.actorId for the fixed browser identity." }}
+    {{- $tenant := required $tenantError (required $tenantError .Values.web.tenantId | toString | trim) }}
+    {{- $actor := required $actorError (required $actorError .Values.web.actorId | toString | trim) }}
+    {{- dict "apiUrl" "http://127.0.0.1:8080" "tenantId" $tenant "actorId" $actor "signingKeyFile" "/run/qwen-web/auth-signing-key" | toPrettyJson | nindent 4 }}
+  {{- end }}

@@ -14,6 +14,7 @@ import {
   MAX_EXTENSION_WORKFLOW_SCRIPT_BYTES,
 } from './workflow-extension.js';
 import { computeWorkflowScriptDigest } from './workflow-saved.js';
+import { arePermissionBitsEnforced } from '../../test-utils/permission-bits.js';
 
 const isWindows = process.platform === 'win32';
 
@@ -249,11 +250,12 @@ describe('loadExtensionWorkflows', () => {
     ).toEqual([]);
   });
 
-  it.skipIf(isWindows || process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'keeps later declared paths when an earlier one cannot be read',
     async () => {
       await write('good/x.js', workflowSource('x'));
-      await fs.mkdir(path.join(root, 'bad'));
+      // Read, `bad` would add gcp:y, so the result shows it was refused.
+      await write('bad/y.js', workflowSource('y'));
       await fs.chmod(path.join(root, 'bad'), 0o000);
       try {
         expect(await names(['bad', 'good'])).toEqual(['gcp:x']);

@@ -122,11 +122,35 @@ export const cdCommand: SlashCommand = {
       fs.realpath(targetPath).catch(() => targetPath),
     ]);
 
+    if (context.abortSignal?.aborted || !context.ui.isIdleRef.current) {
+      return;
+    }
+
     if (realTargetPath === realOldDir) {
       return {
         type: 'message' as const,
         messageType: 'info' as const,
         content: `Already in ${realTargetPath}.`,
+      };
+    }
+
+    if (
+      config
+        .getBackgroundTaskRegistry()
+        .getAll()
+        .some(
+          (task) =>
+            task.isBackgrounded &&
+            task.status === 'running' &&
+            !task.workspacePinned,
+        )
+    ) {
+      return {
+        type: 'message' as const,
+        messageType: 'error' as const,
+        content: t(
+          'Wait for background agents to finish or stop them in /tasks before changing directories.',
+        ),
       };
     }
 
@@ -162,6 +186,10 @@ export const cdCommand: SlashCommand = {
           };
         }
       }
+    }
+
+    if (context.beginCommit?.() === false) {
+      return;
     }
 
     const warnings: string[] = [];

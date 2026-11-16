@@ -427,6 +427,21 @@ describe('SshExecutionEnvironment', () => {
     expect(files.get(remoteFile)).toBe('overwrite');
   });
 
+  it('declares the raw size unknown when its bound cuts the body', async () => {
+    // The environment bounds every result body itself; a cut body must not be
+    // offered to the scheduler as its own pre-reduction size (#13652 R5-1).
+    const intact = await read();
+    expect(intact.rawOutputSize).toBeUndefined();
+    expect(intact.truncatedByProducer).toBeUndefined();
+
+    files.set(remoteFile, 'x'.repeat(40_000));
+    const cut = await read();
+    expect(cut.llmContent).toContain('truncated');
+    expect(cut.rawOutputSize).toBeNull();
+    // The size is gone but the cut is known (#14742).
+    expect(cut.truncatedByProducer).toBe(true);
+  });
+
   it('routes shell cwd and streaming output to SSH and clears prior-read rights', async () => {
     await read();
     transport.execute.mockImplementationOnce(async (_command, options) => {

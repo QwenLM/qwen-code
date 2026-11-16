@@ -29,17 +29,31 @@ import {
   automationRunIdOfInput,
   automationRunSettleBody,
   automationTurnText,
+  decodeAutomationGateOutput,
+  encodeAutomationGateOutput,
   encodeAutomationInputEnvelope,
   scheduleOpenBody,
   scheduleRetireBody,
   scheduleRevisionBody,
   type AutomationDefinition,
+  type AutomationGateOutput,
   type AutomationRunOutcome,
   type AutomationRunTrigger,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-automation-operations.js';
+import {
+  HostedAutomationGateHeld,
+  type HostedAutomationGateResult,
+  type HostedAutomationGateRunner,
+} from './hosted-automation-gate.js';
 import { isTerminalRunState } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
+import {
+  CRON_GATE_OUTPUT_CAP_BYTES,
+  gateStderrTail,
+  sanitizeGateOutput,
+} from '@qwen-code/qwen-code-core/services/cron-gate.js';
 import type {
   CommittedExtensionOperation,
+  LocalManagedSessionAuthority,
   ManagedSessionActor,
   ManagedSessionCommand,
   ManagedSessionInputRequest,
@@ -66,6 +80,7 @@ import { wakeHasPriorAttempt } from './hosted-monitor-wake.js';
 export interface HostedAutomationStore {
   readonly authority: {
     readonly committedSequence: number;
+    appendExecutionEvent: LocalManagedSessionAuthority['appendExecutionEvent'];
     eventsInSequenceRange(
       from: number,
       to: number,
@@ -149,10 +164,86 @@ export interface AutomationFireParams {
   readonly firedAt: number;
 }
 
+/**
+ * How the definition's gate decided one fire. `delivered` comes with the
+ * run; every other outcome answers without one, and the control plane
+ * records the occurrence as skipped with the outcome as its reason.
+ */
+export interface AutomationGateSummary {
+  readonly outcome: 'delivered' | 'quiet' | 'failed' | 'blocked' | 'unknown';
+  /** What went wrong, for the occurrence's `last_error`; absent when nothing did. */
+  readonly detail?: string;
+  readonly durationMs?: number;
+}
+
 export interface AutomationFireResult {
-  readonly run: AutomationRun;
+  /** Absent when the gate withheld the fire: nothing was claimed. */
+  readonly run?: AutomationRun;
   readonly inputId: string;
   readonly replayed: boolean;
+  /** Present exactly for a gated definition. */
+  readonly gate?: AutomationGateSummary;
+}
+
+/** The definition names a gate this Session cannot run as its deployment
+ * requires. */
+export class AutomationGateUnsupportedError extends Error {
+  constructor(
+    scheduleId: string,
+    reason = "the Session's tool profile declares no Shell to run it",
+  ) {
+    super(`Automation ${scheduleId} names a gate, but ${reason}.`);
+    this.name = 'AutomationGateUnsupportedError';
+  }
+}
+
+/**
+ * The probe's output as the model sees it, cut back to the output cap on a
+ * character boundary: sanitizing may lengthen it (a defanged tag gains a
+ * character), and the input budget and the resource limit assume no more
+ * than the cap.
+ */
+function sanitizedWithinCap(stdout: string): { stdout: string; cut: boolean } {
+  const sanitized = sanitizeGateOutput(stdout);
+  const bytes = Buffer.from(sanitized, 'utf8');
+  if (bytes.length <= CRON_GATE_OUTPUT_CAP_BYTES) {
+    return { stdout: sanitized, cut: false };
+  }
+  let end = CRON_GATE_OUTPUT_CAP_BYTES;
+  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end--;
+  return { stdout: bytes.subarray(0, end).toString('utf8'), cut: true };
+}
+
+/** How long a release nobody owes may hold up the fire that asks it. */
+const COURTESY_RELEASE_WAIT_MS = 2_000;
+
+/** Owed probe releases remembered at most, oldest forgotten first. */
+const OWED_GATE_RELEASES_LIMIT = 1024;
+
+/** Why a Session whose deployment pins a Hook catalog runs no gate. */
+const GATE_HOOKS_REASON =
+  'the deployment pins a Hook catalog for this Session, and a probe does not run through its Hooks yet (PreToolUse and PermissionRequest would never see the gate command)';
+
+export interface HostedAutomationSessionOptions {
+  /** Runs a definition's gate; absent, every gated fire is `blocked`. */
+  readonly gate?: HostedAutomationGateRunner;
+  /**
+   * Releases the derived Session of an occurrence's probe under a revision,
+   * for a fire that ends without probing again; throws when it could not.
+   */
+  readonly releaseGate?: (
+    automationRunId: string,
+    definitionRevision: number,
+  ) => Promise<void>;
+  /** Whether this Session's tool profile declares Shell, at define time. */
+  readonly shellAvailable?: () => boolean;
+  /**
+   * Whether the deployment pins a Hook catalog for this Session. A gate
+   * would run around its Hooks, so such a Session refuses and blocks gates;
+   * the catalog's contents are not read for this (an empty one counts too),
+   * which keeps the answer synchronous and off the Broker.
+   */
+  readonly hooksConfigured?: () => boolean;
 }
 
 /** The definition moved since the caller read it; re-read and decide again. */
@@ -213,13 +304,59 @@ export function isAutomationScheduleId(value: unknown): value is string {
   return typeof value === 'string' && SCHEDULE_ID.test(value);
 }
 
+/** The longest gate detail the control plane keeps (`ma_schedule` and the
+ * occurrence's `last_error` are 1024 characters). */
+const AUTOMATION_GATE_DETAIL_MAX_CHARS = 1024;
+
+/** The control plane's view of a probe that withheld the fire. */
+function summarizeGate(
+  result: Exclude<HostedAutomationGateResult, { kind: 'output' }>,
+): AutomationGateSummary {
+  switch (result.kind) {
+    case 'quiet':
+      return { outcome: 'quiet', durationMs: result.durationMs };
+    case 'failed': {
+      // A failed gate runs no turn, so its stderr has nowhere else to go:
+      // its tail rides in the detail, cut so the whole detail fits what the
+      // control plane keeps and its newest lines survive.
+      const prefix = `${result.detail}; stderr: `;
+      const tail = gateStderrTail(
+        result.stderr,
+        AUTOMATION_GATE_DETAIL_MAX_CHARS - prefix.length,
+      );
+      return {
+        outcome: 'failed',
+        detail: tail === '' ? result.detail : prefix + tail,
+        durationMs: result.durationMs,
+      };
+    }
+    case 'blocked':
+      return { outcome: 'blocked', detail: result.reason };
+    default:
+      return { outcome: 'unknown', detail: result.reason };
+  }
+}
+
 export class HostedAutomationSession {
   private writes: Promise<void> = Promise.resolve();
+  /**
+   * Probes this process ran whose attempt ended without the Session's
+   * release (`<runId>|<revision>`): the next fire of that occurrence owes it.
+   * Bounded, oldest first: an occurrence the scanner gave up on never fires
+   * again to settle its entry.
+   */
+  private readonly owedGateReleases = new Set<string>();
+  private gateReleaseDebtOverflowed = false;
 
   constructor(
     private readonly store: HostedAutomationStore,
     private readonly key: ManagedSessionKey,
+    private readonly options: HostedAutomationSessionOptions = {},
   ) {}
+
+  get hasPendingGateReleases(): boolean {
+    return this.gateReleaseDebtOverflowed || this.owedGateReleases.size > 0;
+  }
 
   schedule(scheduleId: string): Schedule | undefined {
     const existing = this.store.authority.extensionRecord(
@@ -241,6 +378,63 @@ export class HostedAutomationSession {
       automationRunId,
     );
     return existing ? parseAutomationRunRecord(existing.record) : undefined;
+  }
+
+  cancelRequested(turnId: string): boolean {
+    return this.store.authority
+      .eventsInSequenceRange(1, this.store.authority.committedSequence)
+      .some(
+        (event) =>
+          event.kind === 'cancel.requested' &&
+          (event.payload['target'] as { turnId?: unknown } | undefined)
+            ?.turnId === turnId,
+      );
+  }
+
+  requestCancel(runId: string): Promise<AutomationRun> {
+    return this.serial(async () => {
+      const turnId = automationInputId(runId);
+      await this.settleRunUnserialized(turnId);
+      const run = this.run(runId);
+      if (run === undefined) throw new AutomationNotFoundError(runId);
+      if (isTerminalRunState(run.run.state)) return run;
+      if (run.run.execution === 'intent') {
+        const cancelled = automationRunSettleBody(run, 'cancelled', false);
+        await this.commitRun(
+          cancelled,
+          this.revisionOf(runId) + 1,
+          'settleRun',
+        );
+        return cancelled;
+      }
+      if (!this.cancelRequested(turnId)) {
+        const commandId = `automation-cancel:${runId}`;
+        await this.store.authority.appendExecutionEvent(
+          {
+            operation: 'requestCancel',
+            commandId,
+            contentDigest: digest(turnId),
+            sessionKey: this.key,
+          },
+          (sequence) => ({
+            v: 1,
+            sequence,
+            eventId: commandId,
+            sessionKey: this.key,
+            kind: 'cancel.requested',
+            occurredAt: Date.now(),
+            payload: {
+              requestId: commandId,
+              target: { turnId },
+              reason: 'user',
+              requestedBy: 'hosted',
+            },
+          }),
+          TRUSTED,
+        );
+      }
+      return run;
+    });
   }
 
   runs(): AutomationRun[] {
@@ -289,6 +483,7 @@ export class HostedAutomationSession {
               catchUp: existing.catchUp,
               catchUpLimit: existing.catchUpLimit,
               enabled: existing.enabled,
+              gate: existing.gate,
             };
       const definition = assertAutomationDefinition(
         params.definition,
@@ -298,6 +493,22 @@ export class HostedAutomationSession {
       // nothing: the pre-flight throws the same error before the prompt
       // resource, so a refused define leaves no orphan body behind.
       assertManagedSessionScheduleSessionModeEnabled(definition.sessionMode);
+      // A gate runs as a Shell execution of this Session: a profile with
+      // no Shell could never run it, so the definition is refused here
+      // rather than blocked at every fire.
+      if (
+        definition.gate !== null &&
+        this.options.shellAvailable !== undefined &&
+        !this.options.shellAvailable()
+      ) {
+        throw new AutomationGateUnsupportedError(params.scheduleId);
+      }
+      if (definition.gate !== null && this.options.hooksConfigured?.()) {
+        throw new AutomationGateUnsupportedError(
+          params.scheduleId,
+          GATE_HOOKS_REASON,
+        );
+      }
       const definitionDigest = automationDefinitionDigest(definition);
       if (
         existing !== undefined &&
@@ -420,23 +631,36 @@ export class HostedAutomationSession {
   }
 
   /**
-   * `fireRun`: the claim (revision 1) and, in one transaction with the
-   * run's input and wake, the dispatch (revision 2). A replay answers the
-   * committed run first — whatever the definition did since — and
-   * completes a dispatch a crash left out: with the definition's current
-   * prompt while it is live, or by cancelling the claim once it retired.
+   * `fireRun`: for a gated definition, the probe first — in the Workspace
+   * Runtime, under identities derived from the occurrence, so a retried
+   * fire meets the Broker's receipt and never runs the command twice —
+   * and only an output claims; then the claim (revision 1) and, in one
+   * transaction with the run's input and wake, the dispatch (revision 2).
+   * A replay answers the committed run first — whatever the definition did
+   * since — and completes a dispatch a crash left out: with the
+   * definition's current prompt and the output the claim recorded while it
+   * is live, or by cancelling the claim once it retired.
    */
   fire(params: AutomationFireParams): Promise<AutomationFireResult> {
     return this.serial(async () => {
       const runId = automationRunId(params.scheduleId, params.occurrenceKey);
       const inputId = automationInputId(runId);
       const existing = this.run(runId);
+      const gateOf = (
+        run: AutomationRun,
+      ): Pick<AutomationFireResult, 'gate'> =>
+        run.gateOutputRef === null ? {} : { gate: { outcome: 'delivered' } };
       if (existing !== undefined) {
         if (
           existing.run.execution !== 'intent' ||
           isTerminalRunState(existing.run.state)
         ) {
-          return { run: existing, inputId, replayed: true };
+          return {
+            run: existing,
+            inputId,
+            replayed: true,
+            ...gateOf(existing),
+          };
         }
         const schedule = this.schedule(params.scheduleId);
         if (schedule === undefined || isTerminalRunState(schedule.run.state)) {
@@ -448,39 +672,179 @@ export class HostedAutomationSession {
             false,
           );
           await this.commitRun(cancelled, 2, 'fireRun');
-          return { run: cancelled, inputId, replayed: true };
+          return {
+            run: cancelled,
+            inputId,
+            replayed: true,
+            ...gateOf(existing),
+          };
         }
         return {
           run: await this.dispatch(existing, schedule, params, inputId),
           inputId,
           replayed: true,
+          ...gateOf(existing),
         };
       }
       const schedule = this.schedule(params.scheduleId);
+      const ending =
+        schedule === undefined
+          ? new AutomationNotFoundError(params.scheduleId)
+          : isTerminalRunState(schedule.run.state)
+            ? new AutomationRetiredError(params.scheduleId)
+            : undefined;
+      const stale =
+        schedule !== undefined &&
+        schedule.definitionRevision !== params.definitionRevision;
+      if (ending !== undefined || stale) {
+        // This occurrence is not probed under its pinned revision again,
+        // so an earlier attempt's probe Session, which that attempt could
+        // not release, is released here; while this process knows it owes
+        // that release, the scanner retries the fire until it is done.
+        await this.releaseGateSession(runId, params.definitionRevision);
+      }
+      if (ending !== undefined) throw ending;
       if (schedule === undefined) {
         throw new AutomationNotFoundError(params.scheduleId);
       }
-      if (isTerminalRunState(schedule.run.state)) {
-        throw new AutomationRetiredError(params.scheduleId);
-      }
-      if (schedule.definitionRevision !== params.definitionRevision) {
+      if (stale) {
         throw new AutomationRevisionStaleError(
           params.scheduleId,
           schedule.definitionRevision,
           params.definitionRevision,
         );
       }
+      let gateOutputRef: ManagedSessionDurableRef | null = null;
+      let gate: AutomationGateSummary | undefined;
+      if (schedule.gate !== null) {
+        const result = await this.probe(
+          schedule.gate,
+          runId,
+          params.definitionRevision,
+        );
+        if (result.kind !== 'output') {
+          return { inputId, replayed: false, gate: summarizeGate(result) };
+        }
+        // Stored as the model sees it: raw control bytes would only grow
+        // the resource (each escapes to six bytes) past its limit.
+        const stored = sanitizedWithinCap(result.stdout);
+        const output: AutomationGateOutput = {
+          gate: schedule.gate,
+          stdout: stored.stdout,
+          truncated: result.truncated || stored.cut,
+          durationMs: result.durationMs,
+        };
+        gateOutputRef = await this.store.resources.publish(
+          AUTOMATION_RESOURCE_KINDS.gateOutput,
+          encodeAutomationGateOutput(output),
+        );
+        gate = { outcome: 'delivered', durationMs: result.durationMs };
+      }
       const claim = automationRunClaimBody({
         schedule,
         occurrenceKey: params.occurrenceKey,
+        gateOutputRef,
       });
       await this.commitRun(claim, 1, 'fireRun');
       return {
         run: await this.dispatch(claim, schedule, params, inputId),
         inputId,
         replayed: false,
+        ...(gate === undefined ? {} : { gate }),
       };
     });
+  }
+
+  /**
+   * Releases the probe Session of `automationRunId` under `revision`, if any.
+   * A probe this process left unreleased makes a failure retry the fire;
+   * otherwise the release is a courtesy — most such fires never probed (an
+   * ungated definition, a first attempt) and must not wait on the Broker.
+   */
+  private async releaseGateSession(
+    automationRunId: string,
+    revision: number,
+  ): Promise<void> {
+    if (this.options.releaseGate === undefined) return;
+    const owed = `${automationRunId}|${revision}`;
+    if (!this.owedGateReleases.has(owed)) {
+      // A courtesy waits briefly: a Broker that hangs must not hold up a
+      // definition that needs no Broker, nor the funnel queued behind it.
+      const release = this.options
+        .releaseGate(automationRunId, revision)
+        .catch(() => undefined);
+      let timer: NodeJS.Timeout | undefined;
+      await Promise.race([
+        release,
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, COURTESY_RELEASE_WAIT_MS);
+          timer.unref?.();
+        }),
+      ]);
+      clearTimeout(timer);
+      return;
+    }
+    try {
+      await this.options.releaseGate(automationRunId, revision);
+      this.owedGateReleases.delete(owed);
+    } catch (cause) {
+      throw new HostedAutomationGateHeld(
+        cause instanceof Error ? cause.message : String(cause),
+      );
+    }
+  }
+
+  /** The gate probe of one occurrence; a funnel with no runner blocks it. */
+  private probe(
+    gate: string,
+    automationRunId: string,
+    definitionRevision: number,
+  ): Promise<HostedAutomationGateResult> {
+    if (this.options.gate === undefined) {
+      return Promise.resolve({
+        kind: 'blocked',
+        reason: 'this Session cannot run gate commands',
+      });
+    }
+    if (this.options.hooksConfigured?.()) {
+      return Promise.resolve({ kind: 'blocked', reason: GATE_HOOKS_REASON });
+    }
+    const owed = `${automationRunId}|${definitionRevision}`;
+    return this.options
+      .gate({
+        automationRunId,
+        definitionRevision,
+        gate,
+        // Never aborted, on purpose: a fire whose relay request timed out is
+        // a lost reply, and its re-drive reads the probe's receipt, so the
+        // probe must run on rather than be cancelled; a Session that closes
+        // takes its Runtime, and the probe with it, down through the cascade.
+        signal: new AbortController().signal,
+      })
+      .then(
+        async (result) => {
+          // The runner released any Session this attempt may have held; one
+          // an earlier attempt left behind is released here when this one
+          // never came to hold it (a refusal before it acquired). A release
+          // that fails retries the fire rather than settle it unreleased.
+          if (this.owedGateReleases.has(owed)) {
+            await this.releaseGateSession(automationRunId, definitionRevision);
+          }
+          return result;
+        },
+        (cause: unknown) => {
+          this.owedGateReleases.delete(owed);
+          this.owedGateReleases.add(owed);
+          if (this.owedGateReleases.size > OWED_GATE_RELEASES_LIMIT) {
+            // Forgetting a release key cannot prove its Runtime was released.
+            this.gateReleaseDebtOverflowed = true;
+            this.owedGateReleases.delete(
+              this.owedGateReleases.values().next().value!,
+            );
+          }
+          throw cause;
+        },
+      );
   }
 
   /** Revision 2: the input and its wake, in one transaction with the run. */
@@ -490,12 +854,21 @@ export class HostedAutomationSession {
     params: AutomationFireParams,
     inputId: string,
   ): Promise<AutomationRun> {
+    // The output the claim recorded, never a second probe: a replay after
+    // a crash between the claim and this dispatch composes the same text.
+    const gateOutput =
+      claim.gateOutputRef === null
+        ? null
+        : decodeAutomationGateOutput(
+            await this.store.resources.read(claim.gateOutputRef),
+          );
     const text = automationTurnText({
       schedule,
       occurrenceKey: params.occurrenceKey,
       trigger: params.trigger,
       firedAt: params.firedAt,
       prompt: await this.promptOf(schedule),
+      gateOutput,
     });
     const input: ManagedSessionInputRequest = {
       inputId,
@@ -723,6 +1096,7 @@ export class HostedAutomationSession {
         catchUp: recorded.catchUp,
         catchUpLimit: recorded.catchUpLimit,
         enabled: recorded.enabled,
+        gate: recorded.gate,
       });
     } catch (error) {
       conflict(`its definition does not stand (${(error as Error).message})`);

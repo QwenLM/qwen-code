@@ -47,8 +47,8 @@ message、model-attempt 和 tool-result record，因为它们是文件授权的�
 | 资源读取         | 持久化 OPEN/RETURNED/UNKNOWN 读 ownership，并重查原 writer、resource 字节/metadata 和 delivery 边界。不确定读取仍有记录。                                    |
 | Schema           | 为 request pin、首次 activation、native authorization 和 resource-read ownership 使用新的未发布 migration。已发布 migration 不变。                           |
 
-主要影响 `packages/sdk-java/runtime-broker` 和
-`packages/sdk-java/managed-agent-server`。既有共享 store、transport、schema 和
+主要影响 `packages/managed-agent-server` 和
+`packages/managed-agent-server`。既有共享 store、transport、schema 和
 configuration 仅接入必要 CSI 增量；从固定来源拆出私有类及测试。保留主干已有
 workspace execution lease schema，以及后续普通 reader、collection、definition、
 rename 和 cancellation 行为。
@@ -84,7 +84,7 @@ MQ wake claim 在插入或推进 `journal_wake` 进度、调度 Hosted activatio
 
 普通 publication 在分配读取租约和 PUT attempt 时拒绝私有 Session。Session 的 profile 与请求 pin 在创建时确定，支持的 API 不会将普通 Session 转换为私有 Session。已准入租约继续检查到期与退役，close 只清除该租约；已准入 PUT 必须记录 RETURNED 或 UNKNOWN，不能因再次准入而丢失物理写入证据。这些收尾操作无需再次锁 journal head。collector 的私有检查和锁顺序继续保留。主干的预算断言不变：空 materialize tick 为 4 条语句，完整批次为 35 条、末批为 17 条，受测 publish 路径为 6 次 head 加锁读取。
 
-身份实现由 Broker 与 Server 共享；旧 `com.alibaba.qwen.code.managedagent.service.WorkspaceCsiRuntimeIdentity` 保留已公开的 `verify`、`boot` 与 `expectedPod` 静态方法，并委托给 Broker 实现。旧入口标记为 deprecated，不复制身份验证逻辑。新增的 Broker API 与本 feature 仍需 maintainer 评审。
+身份实现由 Broker 与 Server 共享；Spring 适配器 `com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceCsiRuntimeIdentity` 保留已公开的 `verify`、`boot` 与 `expectedPod` 静态方法，并委托给 Broker 实现。该适配器标记为 deprecated，不复制身份验证逻辑。新增的 Broker API 与本 feature 仍需 maintainer 评审。
 
 与主干整合时保留普通 Monitor control 分类、准确 watch ownership、exit-evidence 收尾与 hold-row 栅栏。私有 CSI history dispatch 继续要求原 READY owner 及独立 control 栅栏。所有通用 control（包括 Monitor）在 transport 前拒绝私有 CSI Runtime。这是两条既有路径，整合不新增私有 Monitor 或 Hosted 入口。
 

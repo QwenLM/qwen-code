@@ -161,7 +161,11 @@ sequenceDiagram
     D-->>SC: SSE: permission_request
     SC-->>BR: DaemonEvent
     alt config.approvalMode == 'auto'
-        BR->>SC: session.respondToPermission({...})
+        alt daemon advertises session_permission_vote
+            BR->>SC: session.respondToSessionPermission({...})
+        else host does not advertise it
+            BR->>SC: session.respondToPermission({...})
+        end
     else 'prompt'
         BR-->>AD: emit 'permissionRequest' (renders chat-native UI)
         AD->>BR: user picks option → respondToPermission

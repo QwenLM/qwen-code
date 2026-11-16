@@ -836,6 +836,59 @@ describe('authorization — URL-shaped host and repo binding at the submit call 
       }).recordedHost,
     ).toBeUndefined();
   });
+
+  it('a prose re-review record never authorises posting — the resolution is not a record', () => {
+    // Review P2 on #15998: the skill's conversational routing resolves a
+    // prose request to a PR for the REVIEW, but this gate re-parses the
+    // CLI's verbatim record on purpose — a model-written resolution file
+    // is not an authorization source. The prose record names no PR, so
+    // posting refuses with `unbound` even though the resolved invocation
+    // parses as an effective --comment PR run; the skill must present that
+    // invocation and ask for an explicit re-run instead of completing a
+    // review whose submission is already refused.
+    const prose = authFor('有更新了，重新评审 --comment', { pr: 15998 });
+    expect(prose.ok).toBe(false);
+    expect(prose.cls).toBe('unbound');
+    expect(prose.why).toContain('do not name a pull request');
+    // The explicit re-invocation the skill presents authorises normally.
+    expect(authFor('15998 --comment', { pr: 15998 }).ok).toBe(true);
+    // The setting-driven arm refuses the same way: the record, not the
+    // flag, is what names no PR.
+    const bySetting = authFor('有更新了，重新评审', {
+      pr: 15998,
+      defaultComment: true,
+    });
+    expect(bySetting.ok).toBe(false);
+    expect(bySetting.cls).toBe('unbound');
+  });
+
+  it('a promoted count never authorises posting to the PR it names (R2-1 Critical)', () => {
+    // The exact witness from the review: the sentence names #15998, but the
+    // classifier promotes the count "2" to the target. Before the authority
+    // withdrawal the gate authorised posting to PR #2 — a PR the user never
+    // named. The parser now withholds comment.effective for a promoted bare
+    // number, and the gate refuses with the promotion-specific cause.
+    const count = authFor('--comment the 2 follow-ups to 15998', { pr: 2 });
+    expect(count.ok).toBe(false);
+    expect(count.cls).toBe('unbound');
+    expect(count.why).toContain('promoted from prose');
+    expect(count.why).toContain('re-invoke with the number first');
+    // The sentence-final count is the same hazard, and the setting-driven
+    // arm needs no flag at all — both refuse.
+    expect(authFor('review the last 3 --comment', { pr: 3 }).ok).toBe(false);
+    expect(
+      authFor('review the last 3', { pr: 3, defaultComment: true }).ok,
+    ).toBe(false);
+    // The explicit re-invocation — number typed first — authorises normally.
+    expect(authFor('2 --comment', { pr: 2 }).ok).toBe(true);
+    // A PR URL is an explicit target even beside prose: authority intact.
+    expect(
+      authFor('重新评审 https://github.com/o/r/pull/15998 --comment', {
+        pr: 15998,
+        repo: 'o/r',
+      }).ok,
+    ).toBe(true);
+  });
 });
 
 describe('the user-authorized fast path binds a recorded Aone target (round-6 witness)', () => {
@@ -3940,10 +3993,21 @@ describe('submit receipt (producer half of the audit contract)', () => {
   it('accumulates ids across two submits in the same window (drift restart)', () => {
     ghMock.mockImplementationOnce(() => JSON.stringify({ id: 42 }));
     runSubmit(authorizedPost());
+    // A real drift restart posts the NEW head — the same-commit tripwire
+    // refuses a re-post at the commit already reviewed (PR #15853), so the
+    // second leg carries the moved head's payload, as the restart would.
     ghMock.mockImplementationOnce(() => JSON.stringify({ id: 43 }));
-    runSubmit(authorizedPost());
+    runSubmit(
+      authorizedPost({
+        review: file('review-restart.json', {
+          ...REVIEW,
+          commit_id: 'def456',
+        }),
+      }),
+    );
     const receipt = JSON.parse(readFileSync(receiptPath(), 'utf8'));
     expect(receipt.reviewIds).toEqual([42, 43]);
+    expect(receipt.lastCommitId).toBe('def456');
   });
 
   it('migrates a legacy single-id receipt on the next submit', () => {
@@ -3982,6 +4046,74 @@ describe('submit receipt (producer half of the audit contract)', () => {
     const tmpDir = join(dir, '.qwen', 'tmp');
     const leftovers = readdirSync(tmpDir).filter((f) => f.endsWith('.tmp'));
     expect(leftovers).toEqual([]);
+  });
+
+  it('records the posted commit — the same-commit retry tripwire key', () => {
+    ghMock.mockImplementationOnce(() => JSON.stringify({ id: 42 }));
+    runSubmit(authorizedPost());
+    const receipt = JSON.parse(readFileSync(receiptPath(), 'utf8'));
+    expect(receipt.lastCommitId).toBe(REVIEW.commit_id);
+  });
+
+  it('refuses a re-submit at the commit already posted (PR #15853)', () => {
+    // The retry that replied to itself: the first submit lands the review,
+    // the second finds this round's own roots and would reply a duplicate
+    // of every finding into its own thread. The tripwire refuses before
+    // any write — exit 3, the one refusal shape, nothing posted.
+    ghMock.mockImplementationOnce(() => JSON.stringify({ id: 42 }));
+    runSubmit(authorizedPost());
+    ghMock.mockClear();
+    process.exitCode = undefined;
+    runSubmit(authorizedPost());
+    expect(process.exitCode).toBe(3);
+    expect(ghMock).not.toHaveBeenCalled();
+    const out = JSON.parse(writeStdoutSpy.mock.calls.at(-1)![0] as string) as {
+      posted: boolean;
+      reason: string;
+    };
+    expect(out).toEqual({
+      posted: false,
+      reason: 'already-posted-this-commit',
+    });
+    const stderr = writeStderrSpy.mock.calls
+      .map((c) => String(c[0]))
+      .join('\n');
+    expect(stderr).toContain('already posted from this workspace');
+    expect(stderr).toContain('review 42');
+  });
+
+  it('a dry-run over a landed commit previews the refusal, writes nothing', () => {
+    ghMock.mockImplementationOnce(() => JSON.stringify({ id: 42 }));
+    runSubmit(authorizedPost());
+    ghMock.mockClear();
+    process.exitCode = undefined;
+    runSubmit(authorizedPost({ dryRun: true }));
+    expect(process.exitCode).toBeUndefined();
+    expect(ghMock).not.toHaveBeenCalled();
+    const out = JSON.parse(writeStdoutSpy.mock.calls.at(-1)![0] as string) as {
+      posted: boolean;
+      wouldPost: boolean;
+      reason: string;
+    };
+    expect(out.posted).toBe(false);
+    expect(out.wouldPost).toBe(false);
+    expect(out.reason).toBe('already-posted-this-commit');
+  });
+
+  it('a legacy receipt without lastCommitId does not trip the wire', () => {
+    // Receipts written before the tripwire carry no commit — the guard is
+    // inert for them (it is a retry tripwire, not a migration refusal).
+    mkdirSync(join(dir, '.qwen', 'tmp'), { recursive: true });
+    writeFileSync(
+      receiptPath(),
+      JSON.stringify({ reviewIds: [7], event: 'COMMENT', postedAt: 'x' }),
+    );
+    ghMock.mockImplementationOnce(() => JSON.stringify({ id: 8 }));
+    runSubmit(authorizedPost());
+    expect(process.exitCode).toBeUndefined();
+    const receipt = JSON.parse(readFileSync(receiptPath(), 'utf8'));
+    expect(receipt.reviewIds).toEqual([7, 8]);
+    expect(receipt.lastCommitId).toBe(REVIEW.commit_id);
   });
 });
 

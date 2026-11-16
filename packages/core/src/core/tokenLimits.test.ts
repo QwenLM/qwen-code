@@ -20,6 +20,7 @@ vi.mock('../models/model-catalog.js', async (importOriginal) => {
     'catalog-model': { context: 123_456, output: 7_890 },
     'qwen-catalog-context-only': { context: 50_000 },
     'qwen-catalog-tiny': { context: 5 },
+    'qwen4-catalog-override': { context: 400_000 },
     // Spelling twins: `findTokenLimit` consults OUTPUT_PATTERNS against the
     // other spelling only when this one matched no row.
     'glm-4-7': { context: 200_000, output: 131_072 },
@@ -62,6 +63,7 @@ describe('normalize', () => {
     // form above — so the half worth keeping is the left one.
     expect(normalize('qwen/qwen3-coder:free')).toBe('qwen3-coder');
     expect(normalize('google/gemini-2.5-pro:online')).toBe('gemini-2.5-pro');
+    expect(normalize('qwen/qwen3-coder:exacto')).toBe('qwen3-coder');
     expect(normalize('qwen2.5-coder:32b')).toBe('qwen2.5-coder');
     expect(normalize('llama3.1:8b-instruct-q4_k_m')).toBe('llama3.1');
     expect(normalize('qwen2.5-coder:latest')).toBe('qwen2.5-coder');
@@ -265,9 +267,42 @@ describe('tokenLimit', () => {
       expect(tokenLimit('qwen3-coder-next')).toBe(262144);
     });
 
+    it('should return 1M for the qwen4 generation', () => {
+      expect(tokenLimit('qwen4')).toBe(1000000);
+      expect(tokenLimit('qwen4-max')).toBe(1000000);
+      expect(tokenLimit('qwen4-plus')).toBe(1000000);
+      expect(tokenLimit('qwen4-coder-plus')).toBe(1000000);
+      // A later minor must not need another code change.
+      expect(tokenLimit('qwen4.5-max')).toBe(1000000);
+      expect(tokenLimit('qwen4-max-2026-10-01')).toBe(1000000);
+      expect(tokenLimit('openai/qwen4-max')).toBe(1000000);
+    });
+
+    it('should let a qwen4 catalog entry outrank the family row', () => {
+      expect(tokenLimit('qwen4-catalog-override')).toBe(400000);
+    });
+
     it('should return 1M for studio latest models', () => {
       expect(tokenLimit('qwen-plus-latest')).toBe(1000000);
       expect(tokenLimit('qwen-flash-latest')).toBe(1000000);
+    });
+
+    it('should return 1M for the invite-only latest series aliases', () => {
+      expect(tokenLimit('qwen-latest-series-invite-202610-m4')).toBe(1000000);
+      // A later invite code must not need another code change.
+      expect(tokenLimit('qwen-latest-series-invite-202611-m5')).toBe(1000000);
+      // The beta-series spelling, whose trailing -v28 normalize() strips as a
+      // version rather than a date.
+      expect(tokenLimit('qwen-latest-series-invite-beta-v28')).toBe(1000000);
+      // Without the trailing code, normalize() strips the date instead.
+      expect(tokenLimit('qwen-latest-series-invite-202610')).toBe(1000000);
+      expect(tokenLimit('openai/qwen-latest-series-invite-202610-m4')).toBe(
+        1000000,
+      );
+    });
+
+    it('should not claim ids that only share the series prefix letters', () => {
+      expect(tokenLimit('qwen-latest-seriesfoo')).toBe(262144);
     });
 
     it('should return 256K for Qwen fallback', () => {
@@ -353,6 +388,22 @@ describe('tokenLimit', () => {
       expect(tokenLimit('kimi-k2-0905')).toBe(262144);
       expect(tokenLimit('kimi-k2-turbo')).toBe(262144);
     });
+
+    it('should return 1M for the K3 generation, prefixed or bare', () => {
+      expect(tokenLimit('kimi-k3')).toBe(1000000);
+      expect(tokenLimit('kimi-k3.1-pro')).toBe(1000000);
+      expect(tokenLimit('kimi-k3.1-pro-highspeed')).toBe(1000000);
+      expect(tokenLimit('k3.1-pro')).toBe(1000000);
+      expect(tokenLimit('k3.1-pro-highspeed')).toBe(1000000);
+      expect(tokenLimit('k3.1-pro-high-speed')).toBe(1000000);
+      expect(tokenLimit('moonshot/k3.1-pro')).toBe(1000000);
+    });
+
+    it('should keep the K3 256K variant out of the 1M rule', () => {
+      expect(tokenLimit('k3-256k')).toBe(262144);
+      expect(tokenLimit('kimi-k3-256k')).toBe(262144);
+      expect(tokenLimit('moonshot/k3-256k')).toBe(262144);
+    });
   });
 
   describe('Other models', () => {
@@ -388,6 +439,8 @@ describe('variant-tagged model ids', () => {
       ['openai/gpt-5:free', 'openai/gpt-5'],
       ['qwen2.5-coder:32b', 'qwen2.5-coder'],
       ['qwen3-coder-plus:nitro', 'qwen3-coder-plus'],
+      ['qwen/qwen3-coder:exacto', 'qwen/qwen3-coder'],
+      ['moonshotai/kimi-k2-0905:exacto', 'moonshotai/kimi-k2-0905'],
     ] as Array<[string, string]>) {
       expect(tokenLimit(tagged)).toBe(tokenLimit(bare));
       expect(tokenLimit(tagged, 'output')).toBe(tokenLimit(bare, 'output'));
@@ -401,6 +454,7 @@ describe('variant-tagged model ids', () => {
     expect(tokenLimit('google/gemini-2.5-pro:online')).toBe(1_000_000);
     expect(tokenLimit('openai/gpt-5:free')).toBe(272_000);
     expect(tokenLimit('qwen2.5-coder:32b')).toBe(262_144);
+    expect(tokenLimit('qwen/qwen3-coder:exacto')).toBe(262_144);
   });
 
   it('still keeps the right half of a prefixed id', () => {

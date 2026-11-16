@@ -5,6 +5,7 @@
 
 use anyhow::Result;
 use x11rb::connection::Connection;
+use x11rb::protocol::res::{ClientIdMask, ClientIdSpec, ConnectionExt as _};
 use x11rb::protocol::xproto::*;
 use x11rb::rust_connection::RustConnection;
 
@@ -47,7 +48,7 @@ pub(crate) fn window_owner_pid(xid: u64) -> Option<u32> {
     let Ok((conn, _)) = RustConnection::connect(None) else {
         return None;
     };
-    get_window_pid(&conn, xid).ok().flatten()
+    OwnerResolver::new(&conn).owner_pid(xid)
 }
 
 pub(crate) fn is_minimized(xid: u64) -> bool {
@@ -115,6 +116,7 @@ fn try_list_windows_inner(
     filter_pid: Option<u32>,
     include_untitled: bool,
 ) -> Result<Vec<WindowInfo>> {
+    crate::require_x11()?;
     let (conn, screen_num) = RustConnection::connect(None)?;
     let screen = &conn.setup().roots[screen_num];
     let root = screen.root;
@@ -122,9 +124,10 @@ fn try_list_windows_inner(
     // Get _NET_CLIENT_LIST_STACKING (or fallback to _NET_CLIENT_LIST).
     let (windows, stacking_known) = get_window_list(&conn, root)?;
 
+    let owners = OwnerResolver::new(&conn);
     let mut result = Vec::new();
     for (z_index, xid) in windows.into_iter().enumerate() {
-        let pid = get_window_pid(&conn, xid).ok().flatten();
+        let pid = owners.owner_pid(xid);
         if let Some(fp) = filter_pid {
             if pid != Some(fp) {
                 continue;
@@ -171,6 +174,24 @@ fn try_list_windows_inner(
     }
 
     Ok(result)
+}
+
+pub(crate) fn window_manager_name() -> Option<String> {
+    let (conn, screen) = RustConnection::connect(None).ok()?;
+    let root = conn.setup().roots[screen].root;
+    let atom = get_atom(&conn, "_NET_SUPPORTING_WM_CHECK").ok()?;
+    let read = |window| {
+        conn.get_property(false, window, atom, AtomEnum::WINDOW, 0, 1)
+            .ok()?
+            .reply()
+            .ok()?
+            .value32()?
+            .next()
+    };
+    let window = read(root).filter(|window| *window != 0)?;
+    (read(window) == Some(window))
+        .then(|| get_window_title(&conn, window).ok())
+        .flatten()
 }
 
 pub fn resolve_app_window(windows: &[WindowInfo]) -> Option<u64> {
@@ -336,11 +357,10 @@ pub fn set_window_frame(
     let xid = u32::try_from(xid).map_err(|_| anyhow::anyhow!("window_id is out of X11 range"))?;
     let (conn, screen_num) = RustConnection::connect(None)?;
     let root = conn.setup().roots[screen_num].root;
-    let owner = get_window_pid(&conn, xid)?;
-    match owner {
+    match OwnerResolver::new(&conn).owner_pid(xid) {
         Some(owner) if owner == pid => {}
         Some(owner) => anyhow::bail!("window_id {xid} belongs to pid {owner}, not pid {pid}"),
-        None => anyhow::bail!("window_id {xid} has no verifiable _NET_WM_PID owner"),
+        None => anyhow::bail!("window_id {xid} has no verifiable owner pid ({UNATTRIBUTED_OWNER})"),
     }
 
     let atom = get_atom(&conn, "_NET_MOVERESIZE_WINDOW")?;
@@ -395,6 +415,118 @@ fn get_window_pid(conn: &RustConnection, window: Window) -> Result<Option<u32>> 
         .get_property(false, window, atom, AtomEnum::CARDINAL, 0, 1)?
         .reply()?;
     Ok(reply.value32().and_then(|mut i| i.next()))
+}
+
+/// Why an X11 toplevel can be listed with no owner pid.
+const UNATTRIBUTED_OWNER: &str = "the client publishes no _NET_WM_PID and the X server's \
+X-Resource extension could not attribute it to a local process: XRes 1.2 is unavailable, \
+the client is remote or forwarded, or the server is outside this PID namespace";
+
+/// Owner pid of client-list toplevels: `_NET_WM_PID` when published, else
+/// the X-Resource `LocalClientPID` of the connection that created the window,
+/// subject to the fail-closed rules in [`crate::x11_client_pid`]. The XRes
+/// probe runs at most once per connection and only for windows that lack
+/// `_NET_WM_PID`.
+struct OwnerResolver<'c> {
+    conn: &'c RustConnection,
+    xres: std::cell::OnceCell<bool>,
+    hostname: std::cell::OnceCell<Option<String>>,
+}
+
+impl<'c> OwnerResolver<'c> {
+    fn new(conn: &'c RustConnection) -> Self {
+        Self {
+            conn,
+            xres: std::cell::OnceCell::new(),
+            hostname: std::cell::OnceCell::new(),
+        }
+    }
+
+    fn owner_pid(&self, window: Window) -> Option<u32> {
+        match get_window_pid(self.conn, window) {
+            Ok(Some(pid)) => Some(pid),
+            Ok(None) => self.xres_pid(window),
+            Err(_) => None,
+        }
+    }
+
+    fn xres_pid(&self, window: Window) -> Option<u32> {
+        use crate::x11_client_pid::{
+            client_base, client_machine_is_local, select_owner_pid, xres_supports_client_ids,
+            XresClientValue,
+        };
+        let available = *self.xres.get_or_init(|| {
+            self.conn
+                .res_query_version(1, 2)
+                .ok()
+                .and_then(|cookie| cookie.reply().ok())
+                .is_some_and(|v| xres_supports_client_ids(v.server_major, v.server_minor))
+        });
+        if !available {
+            return None;
+        }
+        let machine = get_client_machine(self.conn, window).ok()?;
+        let hostname = self.hostname.get_or_init(|| {
+            std::fs::read_to_string("/proc/sys/kernel/hostname")
+                .ok()
+                .map(|h| h.trim().to_owned())
+        });
+        if !client_machine_is_local(machine.as_deref(), hostname.as_deref()) {
+            return None;
+        }
+        let setup = self.conn.setup();
+        let own_base = setup.resource_id_base;
+        let specs = [
+            ClientIdSpec {
+                client: own_base,
+                mask: ClientIdMask::LOCAL_CLIENT_PID,
+            },
+            ClientIdSpec {
+                client: window,
+                mask: ClientIdMask::LOCAL_CLIENT_PID,
+            },
+        ];
+        let reply = self.conn.res_query_client_ids(&specs).ok()?.reply().ok()?;
+        let values: Vec<XresClientValue<'_>> = reply
+            .ids
+            .iter()
+            .map(|id| XresClientValue {
+                client: id.spec.client,
+                mask: u32::from(id.spec.mask),
+                value: &id.value,
+            })
+            .collect();
+        let pid = select_owner_pid(
+            &values,
+            own_base,
+            std::process::id(),
+            client_base(window, setup.resource_id_mask),
+        )?;
+        // The server keys the query by the client slot in the XID. A window
+        // that still exists after the reply proves its creator held that slot
+        // when the server answered, so a recycled slot cannot be attributed.
+        self.conn.get_window_attributes(window).ok()?.reply().ok()?;
+        Some(pid)
+    }
+}
+
+/// `WM_CLIENT_MACHINE`, `None` when unset. Errors when the window is gone.
+fn get_client_machine(conn: &RustConnection, window: Window) -> Result<Option<String>> {
+    let reply = conn
+        .get_property(
+            false,
+            window,
+            AtomEnum::WM_CLIENT_MACHINE,
+            AtomEnum::ANY,
+            0,
+            256,
+        )?
+        .reply()?;
+    if reply.type_ == x11rb::NONE {
+        return Ok(None);
+    }
+    let value = String::from_utf8_lossy(&reply.value);
+    Ok(Some(value.trim_end_matches('\0').to_owned()))
 }
 
 fn get_window_title(conn: &RustConnection, window: Window) -> Result<String> {
@@ -543,4 +675,41 @@ mod tests {
         assert_eq!(indices, vec![0, 1, 2]);
         assert!(indices[2] > indices[0]);
     }
+}
+
+pub fn window_info(xid: u64) -> Option<WindowInfo> {
+    let window = u32::try_from(xid).ok()?;
+    let (conn, screen_num) = RustConnection::connect(None).ok()?;
+    let root = conn.setup().roots[screen_num].root;
+    let attributes = conn.get_window_attributes(window).ok()?.reply().ok()?;
+    let geom = conn.get_geometry(window).ok()?.reply().ok()?;
+    let trans = conn
+        .translate_coordinates(window, root, 0, 0)
+        .ok()?
+        .reply()
+        .ok()?;
+    let pid = OwnerResolver::new(&conn).owner_pid(window);
+    let title = get_window_title(&conn, window).unwrap_or_default();
+    let app_name = get_window_class(&conn, window)
+        .map(|(instance, class)| if class.is_empty() { instance } else { class })
+        .unwrap_or_default();
+    Some(WindowInfo {
+        xid,
+        pid,
+        app_name,
+        title,
+        is_on_screen: attributes.map_state == MapState::VIEWABLE,
+        z_index: None,
+        x: i32::from(trans.dst_x),
+        y: i32::from(trans.dst_y),
+        width: u32::from(geom.width),
+        height: u32::from(geom.height),
+    })
+}
+
+// Parent/child walks must not attribute a window-manager frame to the manager.
+pub fn window_pid(xid: u64) -> Option<u32> {
+    let xid = u32::try_from(xid).ok()?;
+    let (conn, _) = RustConnection::connect(None).ok()?;
+    get_window_pid(&conn, xid).ok().flatten()
 }

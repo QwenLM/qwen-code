@@ -40,18 +40,17 @@ try {
   const tools = await client.listTools();
   const names = tools.tools.map((t) => t.name).sort();
   check(
-    'lists the five node_repl tools',
-    names.join(',') ===
-      'node_repl,node_repl_add_node_module_dir,node_repl_cancel,node_repl_reset,node_repl_wait',
+    'lists the two JavaScript tools',
+    names.join(',') === 'js,js_reset',
     names.join(','),
   );
 
   await client.callTool({
-    name: 'node_repl',
+    name: 'js',
     arguments: { code: 'const x = 40;' },
   });
   const r = await client.callTool({
-    name: 'node_repl',
+    name: 'js',
     arguments: { code: 'nodeRepl.write(String(x + 2));' },
   });
   check(
@@ -60,9 +59,9 @@ try {
     textOf(r).trim(),
   );
 
-  await client.callTool({ name: 'node_repl_reset', arguments: {} });
+  await client.callTool({ name: 'js_reset', arguments: {} });
   const r2 = await client.callTool({
-    name: 'node_repl',
+    name: 'js',
     arguments: { code: 'nodeRepl.write(typeof x);' },
   });
   check(

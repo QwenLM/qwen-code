@@ -222,6 +222,32 @@ describe('managed auto-memory lifecycle integration', () => {
   }
 
   afterEach(async () => {
+    // A failed or timed-out attempt can leave an extraction running, and a
+    // finishing extraction starts its queued successor from a finally block,
+    // after drain() has snapshotted the in-flight set. Wait until no extract
+    // work is left, or teardown deletes a live extraction's tree and the
+    // writes surface as ENOENT — even when a retry passed.
+    while (
+      mgr
+        .listTasksByType('extract', projectRoot)
+        .some((task) => task.status === 'running' || task.status === 'pending')
+    ) {
+      await mgr.drain();
+    }
+    // Pin the wait loop: extract work must be terminal before fs.rm runs, and
+    // any failure while waiting has only its task record as a trace (the
+    // debugLogger is a no-op without a bound session).
+    const extractTasks = mgr.listTasksByType('extract', projectRoot);
+    expect(
+      extractTasks.filter(
+        (task) => task.status === 'running' || task.status === 'pending',
+      ),
+    ).toEqual([]);
+    expect(
+      extractTasks
+        .filter((task) => task.status === 'failed')
+        .map((task) => task.error),
+    ).toEqual([]);
     mgr.resetExtractStateForTests();
     if (originalMemoryBase === undefined) {
       delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
@@ -337,6 +363,54 @@ describe('managed auto-memory lifecycle integration', () => {
     expect(recall.prompt).toContain('project:reference/latency-dashboard.md');
     expect(recall.prompt).not.toContain('This is temporary for this task.');
     expect(recall.prompt).not.toContain('Why: User repeatedly asks');
+  });
+
+  it('waits for a queued extraction that starts during teardown', async () => {
+    let releaseFirst = () => {};
+    const firstRun = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    vi.mocked(runAutoMemoryExtractionByAgent).mockImplementationOnce(
+      async (_config, root: string) => {
+        await firstRun;
+        await writeMemoryDoc(
+          root,
+          path.join('user', 'first.md'),
+          memoryDoc('user', 'First', 'First extraction.'),
+        );
+        return {
+          touchedTopics: ['user'],
+          touchedProjectScope: true,
+          touchedUserScope: false,
+          hasToolActivity: true,
+          systemMessage: undefined,
+        };
+      },
+    );
+
+    // Release the running extraction only once teardown starts draining, so
+    // the wait loop is what lets both runs finish before fs.rm.
+    const drain = mgr.drain.bind(mgr);
+    vi.spyOn(mgr, 'drain').mockImplementation(async (options) => {
+      releaseFirst();
+      return drain(options);
+    });
+
+    void mgr.scheduleExtract({
+      projectRoot,
+      sessionId: 'session-1',
+      config: mockConfig,
+      history: [userTurn('Remember the first thing.')],
+    });
+    const queued = await mgr.scheduleExtract({
+      projectRoot,
+      sessionId: 'session-1',
+      config: mockConfig,
+      history: [userTurn('Remember the second thing.')],
+    });
+    expect(queued.skippedReason).toBe('queued');
+    // The body returns with the first extraction running and the second
+    // queued; afterEach must drain the first and the successor it starts.
   });
 
   it('recalls a relevant topic beyond the general 200-document scan cap', async () => {

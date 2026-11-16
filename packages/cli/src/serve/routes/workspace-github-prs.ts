@@ -12,6 +12,7 @@ import {
   getDefaultBranch,
   type FetchGitHubPullRequestsResult,
 } from '@qwen-code/qwen-code-core';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import type { SendBridgeError } from '../server/error-response.js';
 import { safeBody } from '../server/request-helpers.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
@@ -24,9 +25,38 @@ import {
 import { applyReadHeaders } from './workspace-file-read.js';
 
 const DEFAULT_CACHE_TTL_MS = 60_000;
+const debugLogger = createDebugLogger('GITHUB_PRS');
 
 function sanitizeMessage(message: string, workspaceCwd: string): string {
   return message.split(workspaceCwd).join('<workspace>');
+}
+
+// The resolved fallback binary can contain spaces (`/Users/John Smith/...`),
+// which a whitespace-bounded token sweep cannot own; redacting the exact value
+// the producer reported removes it whole.
+function redactKnownValue(message: string, value: string | undefined): string {
+  return value === undefined || value === ''
+    ? message
+    : message.split(value).join('<path>');
+}
+
+// The resolved gh binary can be an absolute install path (a launchd-shaped
+// daemon's PATH does not carry the package-manager bin dir), and Node's spawn
+// errors embed it — as can gh's own stderr. Sweep ANY surviving absolute-path
+// token, whatever sentence wraps it, AFTER the two known-path replacements so
+// they still label their payloads, and BEFORE the caller truncates: the
+// display cap must never cut a path before it is redacted.
+//
+// The negative lookbehind is what keeps the sweep honest about token starts:
+// a path glued after `=`, `,`, `[` or a backtick is still a path (`open=/Users/…`
+// from gh's own stderr, `` `/Users/…` `` from Node), while `:` and `/` stay
+// excluded so `https://…` and a mid-path slash are never re-matched, and `>`
+// stays excluded so the `<workspace>/sub` label survives.
+function sweepAbsolutePaths(message: string): string {
+  return message.replace(
+    /(?<![\w~.:/\\<>-])(?:\/|[A-Za-z]:[\\/]|\\\\)[^\s'"<>]*/g,
+    '<path>',
+  );
 }
 
 export function registerWorkspaceQualifiedGitHubPrsRoutes(
@@ -126,11 +156,24 @@ export function registerWorkspaceQualifiedGitHubPrsRoutes(
           });
           return;
         case 'failed': {
+          // Raw text stays server-side: the wire body is redacted, and the
+          // sweep deletes exactly the token an operator needs to tell which
+          // binary or config file failed.
+          debugLogger.debug('GitHub PR list failed', {
+            workspaceCwd: runtime.workspaceCwd,
+            gitRoot: result.gitRoot,
+            message: result.message,
+          });
           // Sanitize workspace paths before truncating so a path straddling
           // the display boundary is redacted rather than cut mid-token.
-          const error = sanitizeMessage(
-            sanitizeMessage(result.message, runtime.workspaceCwd),
-            result.gitRoot,
+          const error = sweepAbsolutePaths(
+            sanitizeMessage(
+              sanitizeMessage(
+                redactKnownValue(result.message, result.binary),
+                runtime.workspaceCwd,
+              ),
+              result.gitRoot,
+            ),
           ).slice(0, GITHUB_PR_ERROR_MESSAGE_MAX);
           res.status(502).json({
             error,
@@ -220,12 +263,23 @@ export function registerWorkspaceQualifiedGitHubPrsRoutes(
             });
             return;
           case 'failed':
+            // Raw text stays server-side; the wire body is redacted.
+            debugLogger.debug('GitHub PR create failed', {
+              workspaceCwd: runtime.workspaceCwd,
+              gitRoot: result.gitRoot,
+              message: result.message,
+            });
             // Sanitize both the workspace cwd and the git root (gh runs at the
             // git root, which may be a parent of the workspace) before truncating.
             res.status(502).json({
-              error: sanitizeMessage(
-                sanitizeMessage(result.message, runtime.workspaceCwd),
-                result.gitRoot,
+              error: sweepAbsolutePaths(
+                sanitizeMessage(
+                  sanitizeMessage(
+                    redactKnownValue(result.message, result.binary),
+                    runtime.workspaceCwd,
+                  ),
+                  result.gitRoot,
+                ),
               ).slice(0, GITHUB_PR_ERROR_MESSAGE_MAX),
               code: 'github_pr_create_failed',
             });

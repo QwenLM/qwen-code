@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { EventEmitter } from 'node:events';
 import {
   parsePDFPageRange,
   isPdftotextAvailable,
@@ -51,6 +52,12 @@ vi.mock('./pdf-command.js', async (importOriginal) => {
 });
 
 import { execFile } from 'node:child_process';
+import { readFileWithinBase64Limit } from './inline-media.js';
+
+vi.mock('./inline-media.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./inline-media.js')>();
+  return { ...actual, readFileWithinBase64Limit: vi.fn() };
+});
 import type { FileHandle } from 'node:fs/promises';
 import { lstat, open, readdir, readFile, rm } from 'node:fs/promises';
 import { execPDFCommandFromHandle } from './pdf-command.js';
@@ -119,6 +126,142 @@ describe('pdf utilities', () => {
     resetPdftoppmCache();
   });
 
+  it.each(['pdfinfo', 'pdftotext', 'pdftoppm'])(
+    'does not settle cancelled %s at its abort callback before child close',
+    async (command) => {
+      if (command !== 'pdfinfo') mockExecResult();
+      const child = Object.assign(new EventEmitter(), { pid: 123 });
+      let callback!: ExecCallback;
+      mockExecFile.mockImplementationOnce(
+        (_command: unknown, _args: unknown, _options: unknown, cb: unknown) => {
+          callback = cb as ExecCallback;
+          return child as ReturnType<typeof execFile>;
+        },
+      );
+      const controller = new AbortController();
+      const operation =
+        command === 'pdfinfo'
+          ? getPDFPageCount('/test.pdf', controller.signal)
+          : command === 'pdftotext'
+            ? extractPDFText('/test.pdf', { signal: controller.signal })
+            : renderPDFPagesToImages('/test.pdf', {
+                signal: controller.signal,
+              });
+      await vi.waitFor(() => expect(callback).toBeDefined());
+      let settled = false;
+      const outcome = operation.then(
+        () => {
+          settled = true;
+          return undefined;
+        },
+        (error: unknown) => {
+          settled = true;
+          return error;
+        },
+      );
+      controller.abort();
+      callback(errorWith('cancelled', { name: 'AbortError' }), '', '');
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(settled).toBe(false);
+      if (command === 'pdftoppm') {
+        const { rm } = await import('node:fs/promises');
+        expect(rm).not.toHaveBeenCalled();
+      }
+      child.emit('close');
+      expect(await outcome).toMatchObject({ name: 'AbortError' });
+      if (command === 'pdftoppm') {
+        const { rm } = await import('node:fs/promises');
+        expect(rm).toHaveBeenCalledWith('/tmp/pdf-render-test', {
+          recursive: true,
+          force: true,
+        });
+      }
+    },
+  );
+
+  it('does not bind a shared availability probe to one caller signal', async () => {
+    let callback!: ExecCallback;
+    mockExecFile.mockImplementationOnce(
+      (_command: unknown, _args: unknown, _options: unknown, cb: unknown) => {
+        callback = cb as ExecCallback;
+        return {} as ReturnType<typeof execFile>;
+      },
+    );
+    const controller = new AbortController();
+    const cancelled = extractPDFText('/first.pdf', {
+      signal: controller.signal,
+    }).catch((error: unknown) => error);
+    const other = extractPDFText('/second.pdf');
+    controller.abort();
+    mockExecResult({ stdout: 'second caller text' });
+    callback(null, '', '');
+    expect(await cancelled).toMatchObject({ name: 'AbortError' });
+    expect(await other).toEqual({ success: true, text: 'second caller text' });
+    expect(mockExecFile.mock.calls[0]![2]).not.toHaveProperty('signal');
+    expect(mockExecFile).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['pdfinfo', 'pdftotext', 'pdftoppm'])(
+    'bounds cancelled %s even when SIGKILL produces no close event',
+    async (command) => {
+      if (command !== 'pdfinfo') mockExecResult();
+      const child = Object.assign(new EventEmitter(), {
+        pid: 123,
+        kill: vi.fn(),
+        unref: vi.fn(),
+        stdout: { destroy: vi.fn() },
+        stderr: { destroy: vi.fn() },
+      });
+      let callback!: ExecCallback;
+      mockExecFile.mockImplementationOnce(
+        (_command: unknown, _args: unknown, _options: unknown, cb: unknown) => {
+          callback = cb as ExecCallback;
+          return child as unknown as ReturnType<typeof execFile>;
+        },
+      );
+      const controller = new AbortController();
+      const operation =
+        command === 'pdfinfo'
+          ? getPDFPageCount('/test.pdf', controller.signal)
+          : command === 'pdftotext'
+            ? extractPDFText('/test.pdf', { signal: controller.signal })
+            : renderPDFPagesToImages('/test.pdf', {
+                signal: controller.signal,
+              });
+      await vi.waitFor(() => expect(callback).toBeDefined());
+      let settled = false;
+      const outcome = operation.catch((error: unknown) => {
+        settled = true;
+        return error;
+      });
+      vi.useFakeTimers();
+      try {
+        controller.abort();
+        callback(errorWith('cancelled', { name: 'AbortError' }), '', '');
+        await vi.advanceTimersByTimeAsync(999);
+        expect(child.kill).not.toHaveBeenCalled();
+        expect(settled).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+        expect(settled).toBe(false);
+        await vi.advanceTimersByTimeAsync(1000);
+        expect(await outcome).toMatchObject({ name: 'AbortError' });
+        expect(child.unref).toHaveBeenCalledOnce();
+        expect(child.stdout.destroy).toHaveBeenCalledOnce();
+        expect(child.stderr.destroy).toHaveBeenCalledOnce();
+        if (command === 'pdftoppm') {
+          const { rm } = await import('node:fs/promises');
+          expect(rm).toHaveBeenCalledWith('/tmp/pdf-render-test', {
+            recursive: true,
+            force: true,
+          });
+        }
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
   it('propagates page-count cancellation instead of returning unknown', async () => {
     const controller = new AbortController();
     const cancelled = new Error('page-count-cancelled');
@@ -668,6 +811,66 @@ describe('pdf utilities', () => {
       },
     );
 
+    it.skipIf(!['linux', 'darwin'].includes(process.platform)).each([3, 4])(
+      'checks a descriptor page of %i bytes before reading against a 4-byte base64 ceiling',
+      async (size) => {
+        vi.mocked(execPDFCommandFromHandle).mockResolvedValue({
+          stdout: '',
+          stderr: '',
+          code: 0,
+          maxBufferExceeded: false,
+          timedOut: false,
+        });
+        const directory = {
+          fd: 8,
+          stat: async () => ({ dev: 1, ino: 2, isDirectory: () => true }),
+          close: vi.fn(async () => undefined),
+        };
+        const output = {
+          fd: 9,
+          stat: async () => ({ size, isFile: () => true }),
+          read: vi.fn(async (buffer: Buffer) => {
+            Buffer.from('abc').copy(buffer);
+            return { bytesRead: 3, buffer };
+          }),
+          close: vi.fn(async () => undefined),
+        };
+        vi.mocked(open)
+          .mockResolvedValueOnce(directory as unknown as FileHandle)
+          .mockResolvedValueOnce(output as unknown as FileHandle);
+        vi.mocked(lstat).mockResolvedValue({
+          dev: 1,
+          ino: 2,
+          isDirectory: () => true,
+        } as unknown as Awaited<ReturnType<typeof lstat>>);
+        mockReaddir.mockResolvedValueOnce(['page-1.jpg'] as never);
+        const input = { fd: 3, close: vi.fn() } as unknown as FileHandle;
+        const result = await renderPDFPagesToImages(input, {
+          maxTotalBase64Bytes: 4,
+        });
+        if (size === 3) {
+          expect(result).toEqual({
+            success: true,
+            images: [{ data: 'YWJj', mimeType: 'image/jpeg' }],
+            bytesTruncated: false,
+          });
+          expect(output.read).toHaveBeenCalledOnce();
+        } else {
+          expect(result).toMatchObject({ success: false, tooLarge: true });
+          expect(output.read).not.toHaveBeenCalled();
+        }
+        expect(output.close).toHaveBeenCalledOnce();
+        expect(directory.close).toHaveBeenCalledOnce();
+        expect(input.close).not.toHaveBeenCalled();
+        expect(mockReadFile).not.toHaveBeenCalled();
+        expect(readFileWithinBase64Limit).not.toHaveBeenCalled();
+        expect(rm).toHaveBeenCalledWith('/tmp/pdf-render-test', {
+          recursive: true,
+          force: true,
+        });
+      },
+    );
+
     it('errors when pdftoppm produces no images', async () => {
       mockRendered([]);
       expectError(await renderPDFPagesToImages('/test.pdf'), 'no image output');
@@ -688,6 +891,47 @@ describe('pdf utilities', () => {
         expect(result.images).toHaveLength(1);
         expect(result.bytesTruncated).toBe(true);
       }
+    });
+
+    it('applies the caller ceiling to the first page and cleans up', async () => {
+      mockRendered(['page-1.jpg']);
+      vi.mocked(readFileWithinBase64Limit).mockResolvedValueOnce(undefined);
+      const result = await renderPDFPagesToImages('/test.pdf', {
+        maxTotalBase64Bytes: 4,
+      });
+      expect(result).toMatchObject({ success: false, tooLarge: true });
+      expect(readFileWithinBase64Limit).toHaveBeenLastCalledWith(
+        '/tmp/pdf-render-test/page-1.jpg',
+        4,
+        undefined,
+      );
+      const { rm } = await import('node:fs/promises');
+      expect(rm).toHaveBeenCalledWith('/tmp/pdf-render-test', {
+        recursive: true,
+        force: true,
+      });
+      expect(mockReadFile).not.toHaveBeenCalled();
+    });
+
+    it('accepts the exact aggregate ceiling and stops before encoding an oversized next page', async () => {
+      mockRendered(['page-1.jpg', 'page-2.jpg']);
+      vi.mocked(readFileWithinBase64Limit)
+        .mockResolvedValueOnce(Buffer.from('abc'))
+        .mockResolvedValueOnce(undefined);
+      const result = await renderPDFPagesToImages('/test.pdf', {
+        maxTotalBase64Bytes: 4,
+      });
+      expect(result).toEqual({
+        success: true,
+        images: [{ data: 'YWJj', mimeType: 'image/jpeg' }],
+        bytesTruncated: true,
+      });
+      expect(readFileWithinBase64Limit).toHaveBeenLastCalledWith(
+        '/tmp/pdf-render-test/page-2.jpg',
+        0,
+        undefined,
+      );
+      expect(mockReadFile).not.toHaveBeenCalled();
     });
   });
 });

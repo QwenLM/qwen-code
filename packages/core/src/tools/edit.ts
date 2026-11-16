@@ -35,6 +35,7 @@ import {
   FileEncoding,
   needsUtf8Bom,
   detectLineEnding,
+  ensureCrlfLineEndings,
 } from '../services/fileSystemService.js';
 import type {
   LineEnding,
@@ -68,6 +69,12 @@ import {
   maybeAugmentOldStringForDeletion,
   normalizeEditStrings,
 } from '../utils/editHelper.js';
+import {
+  buildWorkspaceArtifactCandidate,
+  formatRecordArtifactReminder,
+} from './artifact/workspace-auto-record.js';
+import { backgroundFixHolding } from './autofix-pr-grants.js';
+import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
 
 const debugLogger = createDebugLogger('EDIT_PRIOR_READ');
 
@@ -138,6 +145,12 @@ export interface EditToolParams {
    * Initially proposed content.
    */
   ai_proposed_content?: string;
+
+  /**
+   * When false, do not create a session artifact for this edit. An artifact
+   * the session already has for this path is still refreshed.
+   */
+  record_as_artifact?: boolean;
 }
 
 interface CalculatedEdit {
@@ -443,6 +456,19 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
   }
 
   /**
+   * A write into the worktree of a fix of /autofix-pr running in the
+   * background, by anyone but its own agent, is the user's to approve: that
+   * agent builds and runs what is there without asking.
+   */
+  requiresUserInteraction(): boolean {
+    return (
+      // As written: resolved as the kernel will.
+      backgroundFixHolding(this.params.file_path, getCurrentAgentId()) !==
+      undefined
+    );
+  }
+
+  /**
    * Edit operations always need user confirmation, except for the private
    * managed auto-memory files (user/project) which are written autonomously.
    * Team memory is shared and committed to the repo, so it is NOT auto-allowed
@@ -737,12 +763,14 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       // pre-edit placeholder. Best-effort: a stat failure here does
       // not undo the successful write — the next Read will simply
       // re-stat and treat the cache entry as stale.
+      let postWriteSizeBytes: number | undefined;
       try {
         if (mutation && !committedStats)
           throw new Error('Scoped file write returned no committed stats.');
         const postWriteStats = mutation
           ? committedStats!
           : fs.statSync(this.params.file_path);
+        postWriteSizeBytes = postWriteStats.size;
         this.config
           .getFileReadCache()
           .recordWrite(this.params.file_path, postWriteStats);
@@ -809,6 +837,20 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
           : `The file: ${this.params.file_path} has been updated.`,
       ];
 
+      const artifact = buildWorkspaceArtifactCandidate(
+        this.config,
+        this.params.file_path,
+        {
+          recordAsArtifact: this.params.record_as_artifact,
+          sizeBytes: postWriteSizeBytes,
+        },
+      );
+      if (artifact && !artifact.updateOnly) {
+        llmSuccessMessageParts.push(
+          formatRecordArtifactReminder(artifact.workspacePath),
+        );
+      }
+
       const snippetResult = extractEditSnippet(
         editData.currentContent,
         editData.newContent,
@@ -821,6 +863,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       return {
         llmContent: llmSuccessMessageParts.join(' '),
         returnDisplay: displayResult,
+        ...(artifact ? { artifacts: [artifact] } : {}),
       };
     } catch (error) {
       return this.writeFailure(error);
@@ -901,6 +944,10 @@ Expectation for required parameters:
             type: 'boolean',
             description:
               'Replace all occurrences of old_string (default false).',
+          },
+          record_as_artifact: {
+            type: 'boolean',
+            description: 'Refresh existing only.',
           },
         },
         required: ['file_path', 'old_string', 'new_string'],
@@ -1000,27 +1047,16 @@ Expectation for required parameters:
         const observation = await this.config
           .getFileSystemService()
           .textFileIo?.inspect(params.file_path, signal);
+        let currentContent: string;
         if (observation) {
           if (observation.kind === 'missing') return '';
-          const content = observation.response.content;
-          return applyReplacement(
-            content,
-            params.old_string,
-            params.new_string,
-            params.old_string === '' && content === '',
-          );
-        }
-        if (fs.existsSync(params.file_path)) {
+          currentContent = observation.response.content;
+        } else if (fs.existsSync(params.file_path)) {
           try {
-            const { content: currentContent } = await this.config
+            const { content } = await this.config
               .getFileSystemService()
               .readTextFile({ path: params.file_path });
-            return applyReplacement(
-              currentContent,
-              params.old_string,
-              params.new_string,
-              params.old_string === '' && currentContent === '',
-            );
+            currentContent = content;
           } catch (err) {
             if (!isNodeError(err) || err.code !== 'ENOENT') throw err;
             return '';
@@ -1028,6 +1064,33 @@ Expectation for required parameters:
         } else {
           return '';
         }
+        const originalContent = currentContent;
+        const lineEnding = detectLineEnding(currentContent);
+        currentContent = currentContent.replace(/\r\n/g, '\n');
+        const normalized = normalizeEditStrings(
+          currentContent,
+          params.old_string,
+          params.new_string,
+        );
+        const oldString = maybeAugmentOldStringForDeletion(
+          currentContent,
+          normalized.oldString,
+          normalized.newString,
+          normalized.lineBasedMatch,
+        );
+        const proposed = applyReplacement(
+          currentContent,
+          oldString,
+          normalized.newString,
+          params.old_string === '' && currentContent === '',
+          normalized.lineBasedMatch
+            ? findLineBasedMatchOffsets(currentContent, oldString)
+            : undefined,
+        );
+        if (proposed === currentContent) return originalContent;
+        return lineEnding === 'crlf'
+          ? ensureCrlfLineEndings(proposed)
+          : proposed;
       },
       createUpdatedParams: (
         oldContent: string,

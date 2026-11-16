@@ -7,21 +7,17 @@
 // assigned. The diff's file paths are matched against the optional `paths`
 // list of each area in .github/issue-owners.json; the longest matching
 // prefix wins, so a module-level entry overrides the coarser fallback area
-// that contains it. The assignee is the area's least loaded eligible
-// owner, rotated by PR number on ties — the same load metric and rotation as
-// issue assignment. Push access is re-verified against the live collaborator
-// API before the write, coverage is re-checked against the live PR
+// that contains it. The assignee is sampled from the area's eligible owners
+// with weight 1 / (open issues + 1), so lower loads are more likely without
+// monopolizing assignments. Push access is re-verified against the live
+// collaborator API before the write, coverage is re-checked against the live PR
 // immediately before it, and the run no-ops once any mapped owner is already
 // an assignee or has reviewed, so repeated pushes never stack assignments.
 import { appendFileSync, readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 
-import {
-  loadPolicy,
-  openIssueCount,
-  pickOwner,
-} from './assign-issue-owner.mjs';
+import { loadPolicy, openIssueCount } from './assign-issue-owner.mjs';
 
 const OWNERS_FILE = '.github/issue-owners.json';
 const WRITE_PERMISSIONS = new Set(['admin', 'maintain', 'write']);
@@ -80,6 +76,17 @@ export function matchAreaByPath(policy, files) {
   return matchedAreasByPath(policy, files)[0] ?? null;
 }
 
+export function pickPrOwner(owners, loadByOwner, randomValue) {
+  const weights = owners.map((owner) => 1 / (loadByOwner.get(owner) + 1));
+  const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
+  let remaining = randomValue * totalWeight;
+  for (let index = 0; index < owners.length; index += 1) {
+    remaining -= weights[index];
+    if (remaining < 0) return owners[index];
+  }
+  return owners.at(-1);
+}
+
 // An assignee or a non-dismissed review by any mapped owner means this
 // routing already happened; never stack a second assignment. A dismissed
 // review is a removed review, so it must not count as coverage.
@@ -122,8 +129,8 @@ function canWrite(repository, login) {
 // `gh issue list` per eligible owner (up to 15 for the core pool), and one
 // transient failure — secondary rate limit, 5xx, issues disabled — must not
 // fail the run on the contributor's PR. Retry once, then degrade to a zero
-// load so the rotation still lands an owner; the load metric is a tie-break
-// heuristic, not a gate on assigning.
+// load so the weighted draw still lands an owner; the load metric biases
+// the probabilities rather than gating assignment.
 function ownerLoad(repository, login) {
   let lastError;
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -136,7 +143,7 @@ function ownerLoad(repository, login) {
   console.warn(
     `::warning::Cannot read open-issue load for @${login}: ${lastError.message}`,
   );
-  return 0;
+  return undefined;
 }
 
 // `gh pr view --json files` caps at 100 entries, so the REST files endpoint
@@ -228,15 +235,23 @@ function main() {
     ]);
   }
 
+  const unavailableLoads = [];
   const loadByOwner = new Map(
-    eligible.map((owner) => [owner, ownerLoad(repository, owner)]),
+    eligible.map((owner) => {
+      const load = ownerLoad(repository, owner);
+      if (load === undefined) unavailableLoads.push(owner);
+      return [owner, load ?? 0];
+    }),
   );
-  const assignee = pickOwner(eligible, loadByOwner, prNumber);
+  const draw = Math.random();
+  const assignee = pickPrOwner(eligible, loadByOwner, draw);
+  const selectionSummary = `Selection: draw ${draw}; loads ${eligible.map((owner) => `${owner}:${loadByOwner.get(owner)}`).join(' ')}; unavailable: ${unavailableLoads.join(', ') || 'none'}`;
 
   if (dryRun) {
     record([
       `Area: ${area.name}`,
       `Assignment: dry-run — would assign @${assignee} (${loadByOwner.get(assignee)} open)`,
+      selectionSummary,
     ]);
     return;
   }
@@ -324,12 +339,14 @@ function main() {
     record([
       `Area: ${area.name}`,
       `Assignment: skipped — GitHub did not accept @${assignee} as an assignee`,
+      selectionSummary,
     ]);
     return;
   }
   record([
     `Area: ${area.name}`,
     `Assignment: assigned @${assignee} (${loadByOwner.get(assignee)} open)`,
+    selectionSummary,
   ]);
 }
 

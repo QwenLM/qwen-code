@@ -40,6 +40,7 @@ import {
   priorSessionIds,
   recordResume,
 } from './lib/run-ledger.js';
+import { arePermissionBitsEnforced } from '../../test-utils/permission-bits.js';
 
 // Lets a test pose as a volume whose 64-bit file ids exceed the JS
 // safe-integer range (NTFS — #12574). While armed, each DISTINCT file (by
@@ -798,11 +799,12 @@ describe('repo-context providers and trust boundary', () => {
     expect(provide).toHaveBeenCalledOnce();
   });
 
-  // Permission-based failure injection is meaningless to root, and chmod(0)
-  // does not block reads on Windows — the repo convention for this case.
-  const isRoot = process.platform === 'win32' || process.getuid?.() === 0;
+  // Permission-based failure injection is meaningless where permission bits
+  // do not bind: root with its DAC capabilities ignores them, and chmod(0)
+  // does not block reads on Windows.
+  const permissionBitsIgnored = !arePermissionBitsEnforced();
 
-  it.skipIf(isRoot)(
+  it.skipIf(permissionBitsIgnored)(
     'fails closed when a present local identity file cannot be read',
     () => {
       const root = temp();
@@ -827,36 +829,39 @@ describe('repo-context providers and trust boundary', () => {
     },
   );
 
-  it.skipIf(isRoot)('keeps the artifact when the plan write fails', () => {
-    // Write ordering is artifact-then-plan on purpose: when the plan write is
-    // the one that fails, the artifact has landed but the plan is untouched,
-    // so the two never disagree about a run — the next invocation rewrites
-    // both.
-    const root = temp();
-    const worktree = join(root, 'worktree');
-    mkdirSync(worktree);
-    const planDir = join(root, 'plan-dir');
-    mkdirSync(planDir);
-    const planPath = join(planDir, 'plan.json');
-    write(
-      planPath,
-      `${JSON.stringify({ files: [{ path: 'src/change.ts' }] })}\n`,
-    );
-    const outPath = join(root, 'context.json');
-    const before = readFileSync(planPath, 'utf8');
-    chmodSync(planDir, 0o555);
-    try {
-      expect(() =>
-        runRepoContext({ plan: planPath, worktree, out: outPath }, [
-          { provide: () => context() },
-        ]),
-      ).toThrow();
-      expect(readJson(outPath)).toEqual(context());
-      expect(readFileSync(planPath, 'utf8')).toBe(before);
-    } finally {
-      chmodSync(planDir, 0o755);
-    }
-  });
+  it.skipIf(permissionBitsIgnored)(
+    'keeps the artifact when the plan write fails',
+    () => {
+      // Write ordering is artifact-then-plan on purpose: when the plan write is
+      // the one that fails, the artifact has landed but the plan is untouched,
+      // so the two never disagree about a run — the next invocation rewrites
+      // both.
+      const root = temp();
+      const worktree = join(root, 'worktree');
+      mkdirSync(worktree);
+      const planDir = join(root, 'plan-dir');
+      mkdirSync(planDir);
+      const planPath = join(planDir, 'plan.json');
+      write(
+        planPath,
+        `${JSON.stringify({ files: [{ path: 'src/change.ts' }] })}\n`,
+      );
+      const outPath = join(root, 'context.json');
+      const before = readFileSync(planPath, 'utf8');
+      chmodSync(planDir, 0o555);
+      try {
+        expect(() =>
+          runRepoContext({ plan: planPath, worktree, out: outPath }, [
+            { provide: () => context() },
+          ]),
+        ).toThrow();
+        expect(readJson(outPath)).toEqual(context());
+        expect(readFileSync(planPath, 'utf8')).toBe(before);
+      } finally {
+        chmodSync(planDir, 0o755);
+      }
+    },
+  );
 
   it('supports recorded linked-worktree paths', () => {
     const root = temp();

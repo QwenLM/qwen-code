@@ -18,6 +18,8 @@ export {
   createDaemonTranscriptState,
   estimateDaemonTranscriptBlockBytes,
   formatBlockTimestamp,
+  findDaemonRewindUserBlock,
+  isDaemonRewindUserBlock,
   isSubagentChildBlock,
   isTaskExecutionMode,
   isTrimmedPermissionBlockId,
@@ -77,6 +79,7 @@ export {
 } from './types.js';
 export type { DaemonUiContentPart } from './utils.js';
 export type {
+  DaemonLoopStop,
   DaemonShellTranscriptBlock,
   DaemonTranscriptTimingMeta,
   DaemonUserShellTranscriptBlock,
@@ -156,6 +159,24 @@ export type {
   DaemonUiAuthDeviceFlowCancelledEvent,
   NormalizeDaemonEventOptions,
 } from './types.js';
+
+export {
+  parseHookLifecycle,
+  extractHookLifecycle,
+  createHookLifecycleState,
+  reduceHookLifecycle,
+  summarizeHookExecutions,
+} from './hook-lifecycle.js';
+export type {
+  HookLifecycleOutcome,
+  HookLifecycleSource,
+  HookLifecycleBase,
+  HookLifecycleEvent,
+  HookExecutionEntry,
+  HookLifecycleState,
+  HookLifecycleSummary,
+  HookTurnPage,
+} from './hook-lifecycle.js';
 
 export {
   createExecutionLifecycleState,

@@ -6,7 +6,7 @@
 
 L3 只支持活跃的 `hosted-workspace-files/1` 会话关闭和删除。Shell capture、publication、后台 Shell、Monitor 与 MCP 连接必须先完成持久结算，才能复用关闭与删除屏障。本设计实现 #13164 L4，分 Shell、MCP 两片交付；开发基线包含 #13673、#13674、#13889 的原 worker 恢复、公开 Shell 准入和 H3 drain 接口。
 
-精确支持 `hosted-workspace-shell/1` 与 `hosted-workspace-mcp/1`；不扩展 `/2`、CSI、内部 TeamLead profile、UI 控件或子会话前台取消策略。沿用已有子会话级联。授权仍为会话 owner 且当前可读；幂等键仍按 actor 隔离。前台 Turn 运行、取消或等待审批时返回 `turn_active`。
+精确支持 `hosted-workspace-shell/1` 与 `hosted-workspace-mcp/1`；不扩展 `hosted-workspace-files/2`、CSI、内部 TeamLead profile、UI 控件或子会话前台取消策略。沿用已有子会话级联。授权仍为会话 owner 且当前可读；幂等键仍按 actor 隔离。前台 Turn 运行、取消或等待审批时返回 `turn_active`。
 
 close 保留字节。archive/unarchive 复用 L1，unarchive 恢复 closed，不恢复 active。delete 复用 L2，原子提交 tombstone 与私有恢复/publication 退役。物理回收归 O4-2；保留其他会话和共享 Workspace 文件。关闭 profile 新执行开关不关闭已有会话的生命周期清理。
 
@@ -26,7 +26,7 @@ close 保留字节。archive/unarchive 复用 L1，unarchive 恢复 closed，不
 
 ## 清理授权与恢复
 
-v2 `DRAINING` 允许当前 operation claim 获取仅供清理的 writer。协调器停机期间租约过期的驻留 writer，只有 token、writer ID 和 generation 仍拥有已锁定的 journal head，且当前资源 claim 有效时，才可续租。冷 acquire 与该续租通过同一 head 串行决策，先成功的一方围栏另一方。普通续租、files v1、effects 阶段、旧 claim 和已被替换的 writer 保留租约检查。冷 attachment 读取已保存 definition 与原身份，不运行 SessionStart、模型、普通工具、configure/discover/invoke 或 Monitor rebuild。Broker recovery acquire、status、release 自身校验当前 claim 和保存的 binding/generation；禁止新普通 acquire。
+v2 `DRAINING` 允许当前 operation claim 获取仅供清理的 writer。协调器停机期间租约过期的驻留 writer，只有 token、writer ID 和 generation 仍拥有已锁定的 journal head，且当前资源 claim 有效时，才可续租。冷 acquire 与该续租通过同一 head 串行决策，先成功的一方围栏另一方。普通续租、files v1、effects 阶段、旧 claim 和已被替换的 writer 保留租约检查。首次 v2 准入按数据库时间为仍有效写者保留一个已配置的 Session Store 写者租期。重放、重新提交和 claim 变化不刷新期限；过期写者不被复活。超过有限交接时间的 effects 仍执行租约拒绝，详见[交接设计](2026-10-23-managed-shell-lifecycle.zh-CN.md)。冷 attachment 读取已保存 definition 与原身份，不运行 SessionStart、模型、普通工具、configure/discover/invoke 或 Monitor rebuild。Broker recovery acquire、status、release 自身校验当前 claim 和保存的 binding/generation；禁止新普通 acquire。
 
 journal/publication 写入按已有资源身份严格限定为输出引用推进、终态、释放证据和已有通知取消。拒绝新执行、换 Runtime 身份和新普通输入。新生命周期 Hook dispatch 仍校验当前 ACL 与挂载授权。claim 接管更新驻留和冷 attachment，旧 claim 不能修改清理记录。
 
@@ -63,14 +63,14 @@ worker 已停止不能证明缺失输出已发布。未知输出继续阻塞；�
 | Managed server     | profile 准入、当前 claim 的 writer/record 授权、独立效果/资源校验和最终原子退役。       |
 | Runtime Broker     | 持久 owner 枚举、原 RuntimeSession drain 与 recovery control 的 claim 检查。            |
 
-源代码变更集中在 `packages/cli/src/serve/`、`packages/sdk-java/qwencode/`、`packages/sdk-java/managed-agent-server/` 和 `packages/sdk-java/runtime-broker/`，测试与源码同目录。E2E 计划及执行结果保存在 `.qwen/e2e-tests/workspace-profile-lifecycle.md`。
+源代码变更集中在 `packages/cli/src/serve/`、`packages/sdk-java/qwencode/`、`packages/managed-agent-server/` 和 `packages/managed-agent-server/`，测试与源码同目录。E2E 计划及执行结果保存在 `.qwen/e2e-tests/workspace-profile-lifecycle.md`。
 
 ## 验证与发布
 
-Harness 默认不声明 v2。Shell 片验收通过后设置 `QWEN_HOSTED_LIFECYCLE_V2_PROFILES=hosted-workspace-shell/1`，MCP 验收通过后才加入 `hosted-workspace-mcp/1`。启动时拒绝不支持或重复的条目。publication 对象内容在最终 SQL 事务前校验；事务内复核不可变回执/catalog 身份、资源终态与停止证明。
+Harness 默认声明 `hosted-workspace-shell/1` 的 v2 能力。显式设置 `QWEN_HOSTED_LIFECYCLE_V2_PROFILES` 会替换完整列表；空值禁用 v2。MCP 验收通过后才加入 `hosted-workspace-mcp/1`。启动时拒绝不支持或重复的条目。publication 对象内容在最终 SQL 事务前校验；事务内复核不可变回执/catalog 身份、资源终态与停止证明。
 
 验证计划覆盖精确协商、files v1、关闭新执行后的清理、actor 幂等与权限、活跃 Turn 拒绝、phase/claim fencing 和 DRAINING 冷恢复。Shell 覆盖前台、后台、Monitor、持久旧 hold、停止时最后输出和已知失败/未知输出。MCP 覆盖 stdio/HTTP/SSE、多 revision、Hook-only owner、release ACK 丢失、worker 死亡与未知业务效果。
 
-真实 MySQL 与进程故障测试覆盖 Hook/effects、drain、publication seal、detach、stop、tombstone 前的切断；claim 接管不能重复 Hook 或业务效果。公开 API 删除 Shell 后直接触发 O4-2 回收，不使用测试接缝。close 不运行 SessionDelete，删除与退役原子提交。完成前执行 build、typecheck、bundle、针对性测试与 review；实际结果单独记录，不能以设计替代验证。macOS 开发环境的结果不能替代 Linux 原 worker/H3 cgroup 用例及完整 MCP transport 释放矩阵；这些仍是发布门槛，v2 profile 默认不声明。
+真实 MySQL 与进程故障测试覆盖 Hook/effects、drain、publication seal、detach、stop、tombstone 前的切断；claim 接管不能重复 Hook 或业务效果。公开 API 删除 Shell 后直接触发 O4-2 回收，不使用测试接缝。close 不运行 SessionDelete，删除与退役原子提交。完成前执行 build、typecheck、bundle、针对性测试与 review；实际结果单独记录，不能以设计替代验证。macOS 开发环境的结果不能替代 Linux 原 worker/H3 cgroup 用例及完整 MCP transport 释放矩阵；这些仍是发布门槛，不能以 Shell 默认能力声明代替部署验收。
 
 先升级全部 Java/Broker 生命周期消费者，再部署声明 v2 的 Harness。Shell 验证通过后再启用 MCP。有未完成 v2 操作时不得降级到仅支持 v1 的消费者。没有未决产品问题。

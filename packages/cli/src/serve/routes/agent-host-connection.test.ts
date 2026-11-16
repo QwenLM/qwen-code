@@ -23,6 +23,8 @@ const {
   stopConnection,
   saveConnection,
   removeConnection,
+  findConnection,
+  findConnectionChecked,
 } = vi.hoisted(() => ({
   issueEnrollment: vi.fn(),
   writeStderrLine: vi.fn(),
@@ -30,6 +32,8 @@ const {
   stopConnection: vi.fn(),
   saveConnection: vi.fn(),
   removeConnection: vi.fn(),
+  findConnection: vi.fn(),
+  findConnectionChecked: vi.fn(),
 }));
 vi.mock('@qwen-code/qwen-code-core/agents/workspace-agents/store.js', () => ({
   issueAgentHostEnrollment: issueEnrollment,
@@ -43,6 +47,8 @@ vi.mock('../agent-host-client.js', () => ({
 vi.mock('../agent-host-connections.js', () => ({
   saveAgentHostConnection: saveConnection,
   removeAgentHostConnection: removeConnection,
+  findAgentHostConnection: findConnection,
+  findAgentHostConnectionChecked: findConnectionChecked,
 }));
 vi.mock('../agent-host-programs.js', () => ({
   getHostProgramProbe: async () => [
@@ -242,8 +248,10 @@ it('connects without a provider and remembers the connection', async () => {
   expect(response.status).toBe(200);
   expect(response.body).toMatchObject({
     connected: true,
+    saved: true,
     providers: ['qwen', 'claude'],
   });
+  expect(response.body).not.toHaveProperty('saveError');
   expect(startConnection).toHaveBeenCalledWith(
     expect.objectContaining({
       serverUrl: 'https://coordinator.example',
@@ -260,6 +268,204 @@ it('connects without a provider and remembers the connection', async () => {
   });
 });
 
+const joined = {
+  serverUrl: 'https://coordinator.example',
+  workspaceId: 'ws_1',
+  workspaceCwd: '/selected',
+  allowHttp: false,
+};
+
+function join() {
+  return request(runtimeApp(selected())).post('/agent/hosts/connect').send({
+    serverUrl: 'https://coordinator.example',
+    workspaceId: 'ws_1',
+    enrollmentToken: 'fresh-token',
+  });
+}
+
+it('reports a join it could not save as connected but not saved', async () => {
+  // The token is spent by now, so this must stay a success: a client told
+  // the join failed would rerun it with the same token.
+  startConnection.mockResolvedValue(undefined);
+  saveConnection.mockRejectedValue(
+    new Error('Lock file is already being held'),
+  );
+  findConnection.mockResolvedValue(undefined);
+
+  const response = await join();
+
+  expect(response.status).toBe(200);
+  expect(response.body).toMatchObject({
+    connected: true,
+    saved: false,
+    saveError: 'Lock file is already being held',
+  });
+  expect(writeStderrLine).toHaveBeenCalledWith(
+    'qwen serve: could not save the Agent Host connection: Lock file is already being held',
+  );
+});
+
+it('reports a join as saved when an earlier record for it still stands', async () => {
+  // A rejoin whose save failed still reconnects after a restart, from the
+  // record the previous join left.
+  startConnection.mockResolvedValue(undefined);
+  saveConnection.mockRejectedValue(new Error('disk full'));
+  findConnection.mockResolvedValue({ ...joined, allowHttp: true });
+
+  const response = await join();
+
+  expect(response.status).toBe(200);
+  expect(response.body).toMatchObject({ connected: true, saved: true });
+  expect(response.body).not.toHaveProperty('saveError');
+  expect(findConnection).toHaveBeenCalledWith(joined);
+  expect(writeStderrLine).toHaveBeenCalledWith(
+    'qwen serve: could not save the Agent Host connection: disk full',
+  );
+});
+
+it.each([
+  [
+    'cannot be parsed',
+    Object.assign(new Error('unexpected content in /q/connections.json'), {
+      code: 'ECORRUPT',
+    }),
+    'Could not read the saved Agent Host connections, so nothing was stopped: unexpected content in /q/connections.json. Fix or remove that file, then retry. Forgetting the connection failed with: EROFS: read-only file system',
+  ],
+  [
+    'was written by a newer version',
+    Object.assign(
+      new Error(
+        'connections.json was written by a newer version of Qwen Code (schema 2); not replacing it.',
+      ),
+      { code: 'ENEWERSCHEMA' },
+    ),
+    'Could not forget the saved connection, so nothing was stopped: connections.json was written by a newer version of Qwen Code (schema 2); not replacing it. This version does not reconnect from that file, so the connection ends when this daemon stops.',
+  ],
+] as const)(
+  'says what helps when the saved connections %s',
+  async (_label, cause, message) => {
+    // The removal failed before it read the file (a read-only directory);
+    // the lookup finds why the file cannot be used.
+    removeConnection.mockRejectedValue(
+      Object.assign(new Error('EROFS: read-only file system'), {
+        code: 'EROFS',
+      }),
+    );
+    findConnectionChecked.mockResolvedValue({
+      kind: 'unreadable',
+      error: cause,
+    });
+
+    const response = await disconnect();
+
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({ error: message });
+    expect(stopConnection).not.toHaveBeenCalled();
+  },
+);
+
+it('saves nothing for a join that fails', async () => {
+  startConnection.mockRejectedValue(
+    new Error('Invalid or expired Agent Host enrollment token.'),
+  );
+
+  const response = await join();
+
+  expect(response.status).toBe(400);
+  expect(response.body).toEqual({
+    error: 'Invalid or expired Agent Host enrollment token.',
+  });
+  expect(saveConnection).not.toHaveBeenCalled();
+});
+
+it('passes on, unchanged, a remote join that could not be saved', async () => {
+  const runtime = selected();
+  // Each leg answers as its handler does, so passing on the probe's answer
+  // instead of the join's would show.
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(
+      async (url: string) =>
+        new Response(
+          JSON.stringify(
+            url.endsWith('/service')
+              ? { protocol: 2, providers: ['qwen'] }
+              : {
+                  protocol: 2,
+                  providers: ['qwen'],
+                  connected: true,
+                  saved: false,
+                  saveError: 'disk full',
+                },
+          ),
+        ),
+    ),
+  );
+  issueEnrollment.mockResolvedValue({ token: 'enrollment-token' });
+  const app = express();
+  app.use(express.json());
+  registerAgentHostRemoteConnectRoute(
+    app,
+    '/agent',
+    () => runtime,
+    () => (_req, _res, next) => next(),
+  );
+
+  const response = await request(app).post('/agent/hosts/remote-connect').send({
+    remoteUrl: 'https://worker.example',
+    serverUrl: 'https://coordinator.example',
+    remoteCwd: '/remote',
+    remoteToken: 'remote-token',
+  });
+
+  expect(response.status).toBe(200);
+  expect(response.body).toMatchObject({
+    connected: true,
+    saved: false,
+    saveError: 'disk full',
+  });
+});
+
+it('gives the remote join longer than the service probe, so a spent token is not reported as failed', async () => {
+  // The remote's join is program probes, enrollment and heartbeats (up to
+  // 10 s each) and a save that can wait about 13.5 s for its lock.
+  const runtime = selected();
+  const timeout = vi.spyOn(AbortSignal, 'timeout');
+  const fetch = vi.fn(
+    async () =>
+      new Response(
+        JSON.stringify({ protocol: 2, providers: ['qwen'], connected: true }),
+      ),
+  );
+  vi.stubGlobal('fetch', fetch);
+  issueEnrollment.mockResolvedValue({ token: 'enrollment-token' });
+  const app = express();
+  app.use(express.json());
+  registerAgentHostRemoteConnectRoute(
+    app,
+    '/agent',
+    () => runtime,
+    () => (_req, _res, next) => next(),
+  );
+
+  try {
+    const response = await request(app)
+      .post('/agent/hosts/remote-connect')
+      .send({
+        remoteUrl: 'https://worker.example',
+        serverUrl: 'https://coordinator.example',
+        remoteCwd: '/remote',
+        remoteToken: 'remote-token',
+      });
+
+    expect(response.status).toBe(200);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(timeout.mock.calls.map(([ms]) => ms)).toEqual([20_000, 90_000]);
+  } finally {
+    timeout.mockRestore();
+  }
+});
+
 it('disconnects and forgets a saved connection', async () => {
   stopConnection.mockReturnValue(false);
   removeConnection.mockResolvedValue(true);
@@ -270,12 +476,158 @@ it('disconnects and forgets a saved connection', async () => {
 
   expect(response.status).toBe(200);
   expect(response.body).toEqual({ disconnected: true });
-  expect(removeConnection).toHaveBeenCalledWith({
-    serverUrl: 'https://coordinator.example',
-    workspaceId: 'ws_1',
-    workspaceCwd: '/selected',
-    allowHttp: false,
+  expect(removeConnection).toHaveBeenCalledWith(joined);
+  expect(stopConnection).toHaveBeenCalledWith(joined);
+  // Forgotten before it is stopped (see the next case).
+  expect(removeConnection.mock.invocationCallOrder[0]).toBeLessThan(
+    stopConnection.mock.invocationCallOrder[0]!,
+  );
+});
+
+function disconnect() {
+  return request(runtimeApp(selected()))
+    .delete('/agent/hosts/connect')
+    .send({ serverUrl: 'https://coordinator.example', workspaceId: 'ws_1' });
+}
+
+it('answers busy, and stops nothing, when the saved connections are locked', async () => {
+  // A held lock clears soon; the file is not read past it, since another
+  // writer may be about to change it.
+  removeConnection.mockRejectedValue(
+    Object.assign(new Error('Lock file is already being held'), {
+      code: 'ELOCKED',
+    }),
+  );
+
+  const response = await disconnect();
+
+  expect(response.status).toBe(503);
+  expect(response.body).toEqual({
+    error:
+      'The saved Agent Host connections are busy, so nothing was stopped. Retry the request.',
   });
+  expect(stopConnection).not.toHaveBeenCalled();
+  expect(findConnectionChecked).not.toHaveBeenCalled();
+});
+
+it('answers busy, and stops nothing, when another writer took the lock over', async () => {
+  // The removal was refused before it wrote, so a retry can go through.
+  removeConnection.mockRejectedValue(
+    Object.assign(new Error('Held the lock too long'), {
+      code: 'ECOMPROMISED',
+    }),
+  );
+
+  const response = await disconnect();
+
+  expect(response.status).toBe(503);
+  expect(response.body).toEqual({
+    error:
+      'The saved Agent Host connections are busy, so nothing was stopped. Retry the request.',
+  });
+  expect(stopConnection).not.toHaveBeenCalled();
+  expect(findConnectionChecked).not.toHaveBeenCalled();
+});
+
+it('says why, and stops nothing, when a newer version wrote the saved connections', async () => {
+  // Retrying cannot help, so the reason is passed on instead of "Retry".
+  removeConnection.mockRejectedValue(
+    Object.assign(
+      new Error(
+        'connections.json was written by a newer version of Qwen Code (schema 2); not replacing it.',
+      ),
+      { code: 'ENEWERSCHEMA' },
+    ),
+  );
+
+  const response = await disconnect();
+
+  expect(response.status).toBe(400);
+  expect(response.body).toEqual({
+    error:
+      'Could not forget the saved connection, so nothing was stopped: connections.json was written by a newer version of Qwen Code (schema 2); not replacing it. This version does not reconnect from that file, so the connection ends when this daemon stops.',
+  });
+  expect(stopConnection).not.toHaveBeenCalled();
+  expect(findConnectionChecked).not.toHaveBeenCalled();
+});
+
+it('leaves the connection as it was when it cannot forget its saved record', async () => {
+  // Stopping it would abort its turns, and the restore loop would
+  // reconnect the record it still finds saved a few seconds later.
+  removeConnection.mockRejectedValue(
+    Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }),
+  );
+  findConnectionChecked.mockResolvedValue({ kind: 'found', record: joined });
+
+  const response = await disconnect();
+
+  expect(response.status).toBe(400);
+  expect(response.body).toEqual({
+    error:
+      'Could not forget the saved connection, so nothing was stopped: EACCES: permission denied',
+  });
+  expect(stopConnection).not.toHaveBeenCalled();
+});
+
+it.each([true, false])(
+  'stops a connection with no saved record even when the file cannot be written (running: %s)',
+  async (running) => {
+    // Joined at boot, or a join that was not saved: the restore loop has
+    // nothing to bring it back from.
+    removeConnection.mockRejectedValue(
+      Object.assign(new Error('EACCES: permission denied'), {
+        code: 'EACCES',
+      }),
+    );
+    findConnectionChecked.mockResolvedValue({ kind: 'absent' });
+    stopConnection.mockReturnValue(running);
+
+    const response = await disconnect();
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ disconnected: running });
+    expect(findConnectionChecked).toHaveBeenCalledWith(joined);
+    expect(stopConnection).toHaveBeenCalledWith(joined);
+  },
+);
+
+it('refuses to stop when the saved connections cannot be read', async () => {
+  // The Critical: an unreadable file (a transient EMFILE/EIO, a mode change)
+  // is not "no record". removeAgentHostConnection failed, and the lookup
+  // cannot confirm the record is gone, so stopping would abort the turns and
+  // the restore loop would reconnect the record still on disk — undoing the
+  // disconnect. Refuse instead.
+  removeConnection.mockRejectedValue(
+    Object.assign(new Error('EMFILE: too many open files'), { code: 'EMFILE' }),
+  );
+  findConnectionChecked.mockResolvedValue({
+    kind: 'unreadable',
+    error: Object.assign(
+      new Error("EACCES: permission denied, open '/q/connections.json'"),
+      { code: 'EACCES' },
+    ),
+  });
+
+  const response = await disconnect();
+
+  // Says why: a retry helps a transient error, not a permission.
+  expect(response.status).toBe(400);
+  expect(response.body).toEqual({
+    error:
+      "Could not read the saved Agent Host connections, so nothing was stopped: EACCES: permission denied, open '/q/connections.json'",
+  });
+  expect(stopConnection).not.toHaveBeenCalled();
+});
+
+it('stops a connection whose record was already gone', async () => {
+  removeConnection.mockResolvedValue(false);
+  stopConnection.mockReturnValue(true);
+
+  const response = await disconnect();
+
+  expect(response.status).toBe(200);
+  expect(response.body).toEqual({ disconnected: true });
+  expect(stopConnection).toHaveBeenCalledWith(joined);
 });
 
 it('refuses to pull in a remote that speaks the v1 Host protocol', async () => {

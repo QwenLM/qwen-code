@@ -19,7 +19,10 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonContextMemoryDetail,
+  DaemonSessionArtifact,
+} from '@qwen-code/sdk/daemon';
 import type {
   ToolGroupMessage as DaemonToolGroupMessage,
   ThinkingMessage as DaemonThinkingMessage,
@@ -50,6 +53,7 @@ import {
 } from '../customization';
 import { useI18n } from '../i18n';
 import { formatContextTokens } from '../utils/formatTokenCount';
+import { formatTurnDuration } from '../utils/turnDuration';
 import { useWebShellPortalRoot } from '../portalRoot';
 import { useTranscriptRenderMode } from '../transcriptRenderMode';
 import { useAssistantFeedback } from '../hooks/useAssistantFeedback';
@@ -59,6 +63,8 @@ import {
   shouldOfferAssistantFeedback,
 } from '../utils/assistantFeedback';
 import { MessageItem } from './MessageItem';
+import { Checkbox } from './ui/checkbox';
+import type { MessageDeletionControls } from '../hooks/useMessageDeletion';
 import { summaryRunFirstMemberId, summaryRunId } from './summaryRunId';
 import type { SessionContentGenerator } from './messages/AssistantMessage';
 import { MessageTimestamp } from './MessageTimestamp';
@@ -98,12 +104,18 @@ const AGENT_SUMMARY_COLLAPSE_DELAY_MS = 400;
 const UNMATCHED_AGENT_COMPLETION_GRACE_MS = 5_000;
 
 export interface MessageListProps {
+  deletion?: MessageDeletionControls;
   messages: Message[];
   frozenViewport?: boolean;
   terminalBackgroundShellTaskIds?: ReadonlySet<string>;
   pendingApproval: PermissionRequest | null;
   /** Run /context detail, exactly like typing it (context-usage panels). */
   onShowContextDetail?: () => void;
+  /** Open a context instruction file in a read-only preview. */
+  onOpenMemoryFile?: (
+    file: DaemonContextMemoryDetail,
+    workspaceCwd: string,
+  ) => void;
   /** Click an uploaded image in a user message to preview it in the right panel. */
   onImagePreview?: (src: string, alt?: string) => void;
   onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
@@ -127,10 +139,8 @@ export interface MessageListProps {
   onLoadOlderHistory?: (options?: { force?: boolean }) => Promise<void>;
   /**
    * Identity of the session whose transcript `messages` show. Block ids are
-   * per-session ordinals, so changing it resets every session-scoped UI state
-   * (collapse overrides, pagination keep-open, pending page snapshots, the
-   * scroll anchor, the settled-stale-message latch) — a direct session switch
-   * never renders empty messages.
+   * per-session ordinals, so changing it resets the reading pause, collapse
+   * overrides, pagination keep-open, pending page snapshots and scroll anchor.
    */
   sessionKey?: string;
   transcriptBlockCount?: number;
@@ -2431,14 +2441,6 @@ export function shouldAdjustVirtualScrollPosition(
   return itemEnd <= scrollOffset;
 }
 
-function formatDuration(ms: number): string {
-  const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
-  if (totalSeconds < 60) return `${totalSeconds}s`;
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds - minutes * 60;
-  return `${minutes}m ${seconds}s`;
-}
-
 type Translate = (
   key: string,
   vars?: Record<string, string | number>,
@@ -2446,7 +2448,7 @@ type Translate = (
 
 function durationMetricText(elapsedMs: number | undefined): string {
   return elapsedMs !== undefined && elapsedMs >= 0
-    ? formatDuration(elapsedMs)
+    ? formatTurnDuration(elapsedMs)
     : '';
 }
 
@@ -2495,6 +2497,14 @@ interface TurnCollapseRowProps {
   onToggleCollapse: (turnId: string, nextExpanded: boolean) => void;
 }
 
+function hasTurnMetadataRow(turn: TurnCollapseHead): boolean {
+  return (
+    turn.hiddenCount > 0 ||
+    turn.liveStartedAt !== undefined ||
+    hasNonDurationMetrics(turn)
+  );
+}
+
 const TurnCollapseRow = memo(function TurnCollapseRow({
   turnCollapse,
   onToggleCollapse,
@@ -2502,10 +2512,7 @@ const TurnCollapseRow = memo(function TurnCollapseRow({
   const { t } = useI18n();
   const hasToggle = turnCollapse.hiddenCount > 0;
   const liveStartedAt = turnCollapse.liveStartedAt;
-  const showMetadataRow =
-    hasToggle ||
-    liveStartedAt !== undefined ||
-    hasNonDurationMetrics(turnCollapse);
+  const showMetadataRow = hasTurnMetadataRow(turnCollapse);
 
   const now = useSharedNow(liveStartedAt !== undefined && showMetadataRow);
   const elapsedSeenRef = useRef(0);
@@ -2707,7 +2714,8 @@ const SessionTimeline = memo(function SessionTimeline({
       return {
         entry,
         top: rect.top + rect.height / 2,
-        left: rect.right + 8,
+        // Anchor to the 28px hovered tick, not the full-width button.
+        left: rect.left + 28 + 8,
         clamped: false,
         themeVars: Object.fromEntries(
           SESSION_TIMELINE_TOOLTIP_THEME_VARS.map((name) => [
@@ -3029,11 +3037,13 @@ export const MessageList = memo(
   forwardRef<MessageListHandle, MessageListProps>(function MessageList(
     {
       messages,
+      deletion,
       frozenViewport = false,
       sessionKey,
       terminalBackgroundShellTaskIds,
       pendingApproval,
       onShowContextDetail,
+      onOpenMemoryFile,
       onImagePreview,
       onAttachmentPreview,
       onInsightReportOpen,
@@ -3714,6 +3724,13 @@ export const MessageList = memo(
       isResponding,
       latestTurnAwaitsAgentSummary,
     ]);
+    const latestFinalAssistantTurnId = useMemo(() => {
+      let latest: string | undefined;
+      for (const turnId of finalAssistantTurnIdByAssistantId.values()) {
+        latest = turnId;
+      }
+      return latest;
+    }, [finalAssistantTurnIdByAssistantId]);
 
     // ── Per-turn collapse ────────────────────────────────────────────────
     // Completed turns fold down to their prompt + final answer (toggle on the
@@ -3936,23 +3953,47 @@ export const MessageList = memo(
       setSuppressOlderHistoryLoadingStatus,
     ] = useState(false);
 
-    // A direct session switch never renders empty messages (the provider
-    // batches the store reset and the replay into one notification), so the
-    // /clear reset never runs for it. Block ids are per-session ordinals, so
-    // every session-scoped state must drop when the displayed session
-    // changes: stale keep-open and snapshot entries would collide with the
-    // new session's reused ids, and an old anchor would restore the previous
-    // session's scroll metrics into the new transcript.
+    // Shared subset of the per-session reset performed by the render-phase
+    // session switch below and the /clear effect; each caller keeps its
+    // remaining resets at the call site.
+    const resetSessionScopedViewState = useCallback(() => {
+      if (pendingFollowRecheckFrame.current !== undefined) {
+        window.cancelAnimationFrame(pendingFollowRecheckFrame.current);
+        pendingFollowRecheckFrame.current = undefined;
+      }
+      pendingFollowRecheck.current = false;
+      if (turnLayoutAnimationTimer.current !== undefined) {
+        window.clearTimeout(turnLayoutAnimationTimer.current);
+        turnLayoutAnimationTimer.current = undefined;
+      }
+      turnLayoutTransitionStarted.current = false;
+      turnLayoutRowTops.current.clear();
+      for (const animation of turnLayoutAnimations.current) {
+        animation.cancel();
+      }
+      turnLayoutAnimations.current = [];
+      followPausedByUserRef.current = false;
+      pendingPaginationTurnCompares.current.clear();
+      setCollapseOverrides((prev) => (prev.size ? new Map() : prev));
+      setPaginatedExpandedTurns((prev) => (prev.size ? new Set() : prev));
+    }, []);
+
+    // Shipped routes either remount this list on a session change or, on the
+    // managed route, render an empty transcript first so the /clear leg below
+    // also resets; two other render sites pass no `sessionKey` at all. The
+    // reset below is the component contract for any consumer that keeps one
+    // instance mounted across a `sessionKey` change: block ids are
+    // per-session ordinals, so stale keep-open and snapshot entries would
+    // collide with the new session's reused ids, and an old anchor would
+    // restore the previous session's scroll metrics into the new transcript.
     const [trackedSessionKey, setTrackedSessionKey] = useState(sessionKey);
     if (trackedSessionKey !== sessionKey) {
       setTrackedSessionKey(sessionKey);
-      pendingPaginationTurnCompares.current.clear();
+      resetSessionScopedViewState();
       olderHistoryLoadGeneration.current += 1;
       olderHistoryLoadInFlight.current = false;
       olderHistoryRetryBlocked.current = false;
       setOlderHistoryAnchor(null);
-      setCollapseOverrides((prev) => (prev.size ? new Map() : prev));
-      setPaginatedExpandedTurns((prev) => (prev.size ? new Set() : prev));
     }
 
     useEffect(() => {
@@ -4234,8 +4275,8 @@ export const MessageList = memo(
     //   5. Session restore / reconnect — during history replay
     //      (`catchingUp === true`), all auto-scrolling is suppressed to
     //      avoid fighting the rapidly replaying transcript. Once replay
-    //      finishes (`catchingUp` flips to falsy), a single scroll-to-
-    //      bottom fires so the user lands at the latest content.
+    //      finishes (`catchingUp` flips to falsy), scroll to the bottom
+    //      unless the user paused follow to read earlier content.
     //
     //   6. Short content — if the content doesn't overflow the container
     //      (no scrollbar), scrollToBottom is a no-op. This avoids a
@@ -5587,20 +5628,18 @@ export const MessageList = memo(
     // against the next session.
     useEffect(() => {
       if (messages.length === 0) {
-        followPausedByUserRef.current = false;
+        // Without this a stale pre-clear snapshot survives into the next
+        // session and can mislabel a complete turn as keep-open (block ids
+        // are per-session ordinals), and an old follow recheck or turn-layout
+        // timer reads the next transcript's geometry as a user reading pause.
+        resetSessionScopedViewState();
         pendingBottomFollowAfterCooldown.current = false;
         setShouldFollow(true);
         pendingScrollRef.current = null;
-        // Drop the in-flight pagination snapshots too: without this a stale
-        // pre-clear snapshot survives into the next session and can mislabel
-        // a complete turn as keep-open (block ids are per-session ordinals).
-        pendingPaginationTurnCompares.current.clear();
         settledStaleMessagesRef.current = undefined;
         pendingSettledMessagesRef.current = undefined;
-        setCollapseOverrides((prev) => (prev.size ? new Map() : prev));
-        setPaginatedExpandedTurns((prev) => (prev.size ? new Set() : prev));
       }
-    }, [messages.length, setShouldFollow]);
+    }, [messages.length, resetSessionScopedViewState, setShouldFollow]);
 
     // Container-resize guard: when floating panels (e.g. TodoPanel)
     // appear or disappear the scroll container's clientHeight changes.
@@ -5660,11 +5699,13 @@ export const MessageList = memo(
     }, [messages, catchingUp, loadingTranscript, setShouldFollow]);
 
     // Rule 5: session restore — when catchingUp flips from true → falsy,
-    // replay just finished. Scroll to bottom once so the user sees the
-    // latest content without the viewport fighting the replay.
+    // replay just finished. Preserve a reading pause across reconnects.
     useLayoutEffect(() => {
-      if (prevCatchingUp.current && !catchingUp) {
-        followPausedByUserRef.current = false;
+      if (
+        prevCatchingUp.current &&
+        !catchingUp &&
+        !followPausedByUserRef.current
+      ) {
         setShouldFollow(true);
         scrollToBottom('auto');
       }
@@ -5937,8 +5978,22 @@ export const MessageList = memo(
                   ? scrollToMessage
                   : undefined
               }
+              onDeleteMessage={
+                deletion &&
+                (deletion.active || !deletion.disabled) &&
+                deletion.canDelete(displayItem.message) &&
+                (displayItem.message.role === 'user' ||
+                  displayItem.message.localCommandId) &&
+                (displayItem.message.promptId ||
+                  displayItem.message.sourceRecordIds?.length ||
+                  displayItem.message.localCommandId)
+                  ? () => deletion.start(displayItem.message)
+                  : undefined
+              }
+              deleteMessageDisabled={deletion?.active}
               pendingApproval={pendingApproval}
               onShowContextDetail={onShowContextDetail}
+              onOpenMemoryFile={onOpenMemoryFile}
               onImagePreview={onImagePreview}
               onAttachmentPreview={onAttachmentPreview}
               onTurnOutputOpen={onTurnOutputOpen}
@@ -5976,6 +6031,11 @@ export const MessageList = memo(
                 displayItem.message.role === 'assistant' &&
                 (agentReply ||
                   finalAssistantTurnIdByAssistantId.has(displayItem.message.id))
+              }
+              assistantFooterAlwaysVisible={
+                !isResponding &&
+                finalAssistantTurnId !== undefined &&
+                finalAssistantTurnId === latestFinalAssistantTurnId
               }
               showAssistantBranch={
                 displayItem.message.role === 'assistant' &&
@@ -6044,12 +6104,14 @@ export const MessageList = memo(
         transcriptRenderMode,
         handleAutomaticAgentExpansionChange,
         onShowContextDetail,
+        onOpenMemoryFile,
         displayItems,
         scrollToMessage,
         onImagePreview,
         onAttachmentPreview,
         onInsightReportOpen,
         onEditUserMessage,
+        deletion,
         onSubmitUserMessageEdit,
         editableUserTurn,
         hasOlderHistory,
@@ -6059,6 +6121,7 @@ export const MessageList = memo(
         visibleItems,
         flashTarget,
         finalAssistantTurnIdByAssistantId,
+        latestFinalAssistantTurnId,
         assistantFeedbackEnabled,
         assistantFeedbackHeadById,
         assistantFeedbackRatings,
@@ -6138,50 +6201,78 @@ export const MessageList = memo(
       scheduleScrollOverflowReport();
     }, [autoScrollContentSignal, scheduleScrollOverflowReport, totalCount]);
 
+    const selectionByItem = useMemo(() => {
+      const selections = new Map<DisplayItem, string | undefined>();
+      if (!deletion?.active) return selections;
+      const groupOf = (item: DisplayItem) => {
+        const messageId =
+          item.type === 'message'
+            ? item.message.id
+            : item.type === 'turn_collapse'
+              ? item.turnCollapse.turnId
+              : item.turnId;
+        return (
+          deletion.groupByMessage.get(messageId) ??
+          deletion.groupByMessage.get(
+            summaryRunFirstMemberId(messageId) ?? messageId,
+          )
+        );
+      };
+      const replyGroups = new Set<string>();
+      for (const item of visibleItems) {
+        if (
+          item.type === 'turn_collapse' &&
+          hasTurnMetadataRow(item.turnCollapse)
+        ) {
+          const group = groupOf(item);
+          const key = group ?? item.turnCollapse.turnId;
+          if (!replyGroups.has(key)) {
+            selections.set(item, group);
+            replyGroups.add(key);
+          }
+        }
+      }
+      let turnId = 'unowned';
+      for (const item of visibleItems) {
+        if (item.type === 'turn_collapse' || item.type === 'turn_outputs')
+          continue;
+        const group = groupOf(item);
+        if (item.type === 'message' && isTurnStartMessage(item.message)) {
+          turnId = item.message.id;
+          selections.set(item, group);
+        } else {
+          const key = group ?? turnId;
+          if (!replyGroups.has(key)) {
+            selections.set(item, group);
+            replyGroups.add(key);
+          }
+        }
+      }
+      return selections;
+    }, [deletion, visibleItems]);
+
+    const renderSelection = (item: DisplayItem | undefined) => {
+      if (!deletion?.active || !item || !selectionByItem.has(item)) return null;
+      const groupId = selectionByItem.get(item);
+      return (
+        <Checkbox
+          className={styles.deletionCheckbox}
+          aria-label={t('messageDelete.selectGroup')}
+          title={!groupId ? t('messageDelete.unavailable') : undefined}
+          checked={groupId ? deletion.selected.has(groupId) : false}
+          disabled={
+            !groupId || deletion.disabled || !deletion.allowed.has(groupId)
+          }
+          onCheckedChange={() => {
+            if (groupId) deletion.toggle(groupId);
+          }}
+        />
+      );
+    };
+
     return (
       <McpAppSessionContext.Provider value={mcpAppSessionId}>
-        <div
-          ref={containerRef}
-          className={joinClassNames(
-            styles.list,
-            hasHeader && centerWelcomeHeader
-              ? styles.listWithWelcomeHeader
-              : undefined,
-          )}
-          data-web-shell-message-list
-          onClickCapture={handleDisclosureClickCapture}
-        >
-          {showLoadingSkeleton && (
-            <LoadingTranscriptSkeleton label={t('editor.sessionLoading')} />
-          )}
-          {loadingOlderHistory &&
-            !showLoadingSkeleton &&
-            !suppressOlderHistoryLoadingStatus && (
-              <div className={styles.historyStatus} role="status">
-                {t('history.loadingEarlier')}
-              </div>
-            )}
-          {historyCapacityReached && !showLoadingSkeleton && (
-            <div className={styles.historyStatus} role="status">
-              {t('history.capacityReached')}
-            </div>
-          )}
-          {historyPaginationError &&
-            !showLoadingSkeleton &&
-            !historyCapacityReached && (
-              <div className={styles.historyStatus}>
-                <span role="status">{t('history.paginationError')}</span>
-                {onLoadOlderHistory && (
-                  <button
-                    type="button"
-                    className={styles.historyRetryButton}
-                    onClick={retryOlderHistory}
-                  >
-                    {t('history.retry')}
-                  </button>
-                )}
-              </div>
-            )}
+        <div className={styles.listFrame}>
           <SessionTimeline
             action={timelineAction}
             entries={sessionTimelineEntries}
@@ -6192,57 +6283,108 @@ export const MessageList = memo(
             }
             onSelect={scrollToMessage}
           />
-          {useVirtualScroll ? (
-            <div ref={virtualizer.containerRef} className={styles.virtualSizer}>
-              {virtualItems.map((virtualRow) => (
-                <div
-                  key={virtualRow.key}
-                  data-index={virtualRow.index}
-                  ref={measureVirtualRow}
-                  className={joinClassNames(
-                    styles.virtualRow,
-                    getRowClassName(
+          <div
+            ref={containerRef}
+            className={joinClassNames(
+              styles.list,
+              deletion?.active ? styles.deletionMode : undefined,
+              hasHeader && centerWelcomeHeader
+                ? styles.listWithWelcomeHeader
+                : undefined,
+            )}
+            data-web-shell-message-list
+            onClickCapture={handleDisclosureClickCapture}
+          >
+            {showLoadingSkeleton && (
+              <LoadingTranscriptSkeleton label={t('editor.sessionLoading')} />
+            )}
+            {loadingOlderHistory &&
+              !showLoadingSkeleton &&
+              !suppressOlderHistoryLoadingStatus && (
+                <div className={styles.historyStatus} role="status">
+                  {t('history.loadingEarlier')}
+                </div>
+              )}
+            {historyCapacityReached && !showLoadingSkeleton && (
+              <div className={styles.historyStatus} role="status">
+                {t('history.capacityReached')}
+              </div>
+            )}
+            {historyPaginationError &&
+              !showLoadingSkeleton &&
+              !historyCapacityReached && (
+                <div className={styles.historyStatus}>
+                  <span role="status">{t('history.paginationError')}</span>
+                  {onLoadOlderHistory && (
+                    <button
+                      type="button"
+                      className={styles.historyRetryButton}
+                      onClick={retryOlderHistory}
+                    >
+                      {t('history.retry')}
+                    </button>
+                  )}
+                </div>
+              )}
+            {useVirtualScroll ? (
+              <div
+                ref={virtualizer.containerRef}
+                className={styles.virtualSizer}
+              >
+                {virtualItems.map((virtualRow) => (
+                  <div
+                    key={virtualRow.key}
+                    data-index={virtualRow.index}
+                    ref={measureVirtualRow}
+                    className={joinClassNames(
+                      styles.virtualRow,
+                      getRowClassName(
+                        visibleItems[virtualRow.index - headerOffset],
+                      ),
+                    )}
+                    data-message-row-key={String(getItemKey(virtualRow.index))}
+                    data-source-block-ids={displayItemSourceBlockIds(
                       visibleItems[virtualRow.index - headerOffset],
-                    ),
-                  )}
-                  data-message-row-key={String(getItemKey(virtualRow.index))}
-                  data-source-block-ids={displayItemSourceBlockIds(
-                    visibleItems[virtualRow.index - headerOffset],
-                    messages,
-                  )}
-                  data-web-shell-message-row
-                  style={{
-                    position: 'absolute',
-                    top: 0,
-                    left: 0,
-                    right: 0,
-                  }}
-                >
-                  {renderVirtualItem(virtualRow.index)}
-                </div>
-              ))}
-            </div>
-          ) : (
-            Array.from({ length: totalCount }, (_, index) => {
-              const key = getItemKey(index);
-              const item = visibleItems[index - headerOffset];
-              return (
-                <div
-                  key={key}
-                  data-index={index}
-                  className={getRowClassName(item)}
-                  data-message-row-key={String(key)}
-                  data-source-block-ids={displayItemSourceBlockIds(
-                    item,
-                    messages,
-                  )}
-                  data-web-shell-message-row
-                >
-                  {renderVirtualItem(index)}
-                </div>
-              );
-            })
-          )}
+                      messages,
+                    )}
+                    data-web-shell-message-row
+                    style={{
+                      position: 'absolute',
+                      top: 0,
+                      left: 0,
+                      right: 0,
+                    }}
+                  >
+                    {renderSelection(
+                      visibleItems[virtualRow.index - headerOffset],
+                    )}
+                    {renderVirtualItem(virtualRow.index)}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              Array.from({ length: totalCount }, (_, index) => {
+                const key = getItemKey(index);
+                const item = visibleItems[index - headerOffset];
+                return (
+                  <div
+                    key={key}
+                    data-index={index}
+                    className={getRowClassName(item)}
+                    data-message-row-key={String(key)}
+                    data-source-block-ids={displayItemSourceBlockIds(
+                      item,
+                      messages,
+                    )}
+                    data-web-shell-message-row
+                  >
+                    {renderSelection(item)}
+                    {renderVirtualItem(index)}
+                  </div>
+                );
+              })
+            )}
+          </div>
         </div>
       </McpAppSessionContext.Provider>
     );

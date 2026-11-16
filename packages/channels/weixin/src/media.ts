@@ -63,7 +63,10 @@ export async function downloadAndDecrypt(
 }
 
 /** AES-128-ECB encryption for CDN upload. */
-export function encryptAesEcb(plaintext: Buffer, key: Buffer): Buffer {
+export function encryptAesEcb(
+  plaintext: Buffer,
+  key: Buffer,
+): Buffer<ArrayBuffer> {
   const cipher = createCipheriv('aes-128-ecb', key, null);
   return Buffer.concat([cipher.update(plaintext), cipher.final()]);
 }

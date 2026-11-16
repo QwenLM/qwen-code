@@ -17,3 +17,22 @@ export function getShadowAwareActiveElement(
     ? root.activeElement
     : null;
 }
+
+// Use the root captured before removal; detached nodes no longer identify it.
+export function isFocusUnclaimed(root: Node): boolean {
+  let expectedHost: Element | null = null;
+  while (root instanceof Document || root instanceof ShadowRoot) {
+    const active = root.activeElement;
+    if (
+      active &&
+      active !== expectedHost &&
+      !(root instanceof Document && active === root.body)
+    ) {
+      return false;
+    }
+    if (root instanceof Document) return true;
+    expectedHost = root.host;
+    root = root.host.getRootNode();
+  }
+  return false;
+}

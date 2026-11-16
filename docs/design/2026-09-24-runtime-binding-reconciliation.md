@@ -2,7 +2,7 @@
 
 [English](2026-09-24-runtime-binding-reconciliation.md) | [简体中文](2026-09-24-runtime-binding-reconciliation.zh-CN.md)
 
-Status: implemented in `packages/sdk-java/runtime-broker`. Updated 2026-09-27:
+Status: implemented in `packages/managed-agent-server`. Updated 2026-09-27:
 the production local-process provisioner uses durable identity, but worker
 ownership is still process-local; restart adoption remains unimplemented.
 
@@ -196,7 +196,7 @@ every outcome.
 
 ## 4. Validation
 
-`mvn test` in `packages/sdk-java/runtime-broker`: 188 tests, including the new
+`mvn test` in `packages/managed-agent-server`: 188 tests, including the new
 `DurableRuntimeRecoveryTest` (29 cases: gated reconcile-and-adopt, unknown
 never replaces and retries to the deadline, starting never replaces, timeout
 releases the claim and resumes, in-flight reconcile bounded by the deadline,

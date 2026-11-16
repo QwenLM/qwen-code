@@ -255,6 +255,7 @@ export function SettingsDialog({
             newValue = nextBooleanSettingValue(
               currentValue,
               definition.default,
+              definition.unsetToggleValue,
             );
             setPendingSettings((prev) =>
               setPendingSettingValue(key, newValue as boolean, prev),
@@ -314,6 +315,12 @@ export function SettingsDialog({
                   error,
                 );
               }
+            }
+
+            if (key === 'ui.disableWorkflowKeywordTrigger') {
+              config?.setWorkflowKeywordTriggerEnabled(
+                settings.merged.ui?.disableWorkflowKeywordTrigger !== true,
+              );
             }
 
             // Remove from modifiedSettings since it's now saved

@@ -184,6 +184,31 @@ fn starts_with_drive_letter(path: &str) -> bool {
     matches!(path.as_bytes(), [drive, b':', ..] if drive.is_ascii_alphabetic())
 }
 
+#[cfg(any(target_os = "windows", test))]
+const ELEVATE_PS: &str = r#"
+$p = $null
+try {
+    $p = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-NonInteractive','-Command',__INNER_COMMAND__) -Verb RunAs -Wait -PassThru -ErrorAction Stop
+} catch {
+    [Console]::Error.WriteLine("qwen-cua-driver: autostart elevation failed: " + $_.Exception.Message)
+    exit 1
+}
+if ($null -eq $p -or $null -eq $p.ExitCode) {
+    [Console]::Error.WriteLine("qwen-cua-driver: autostart elevation returned no exit code.")
+    exit 1
+}
+exit $p.ExitCode
+"#;
+
+#[cfg(any(target_os = "windows", test))]
+fn elevation_script(exe: &str) -> String {
+    let inner = format!("& '{}' autostart enable", exe.replace('\'', "''"));
+    ELEVATE_PS.replace(
+        "__INNER_COMMAND__",
+        &format!("'{}'", inner.replace('\'', "''")),
+    )
+}
+
 // ── Windows impl ──────────────────────────────────────────────────────────
 
 #[cfg(target_os = "windows")]
@@ -250,8 +275,7 @@ $action = New-ScheduledTaskAction `
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $user
 $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Hours 0)
-Unregister-ScheduledTask -TaskName $env:CUA_DRIVER_AS_TASK -Confirm:$false -ErrorAction SilentlyContinue
-Register-ScheduledTask -TaskName $env:CUA_DRIVER_AS_TASK -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description "${env:CUA_DRIVER_AS_CLI}: serve daemon, auto-start at interactive logon, RunLevel=Highest for UWP/AppContainer support" | Out-Null
+Register-ScheduledTask -Force -TaskName $env:CUA_DRIVER_AS_TASK -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description "${env:CUA_DRIVER_AS_CLI}: serve daemon, auto-start at interactive logon, RunLevel=Highest for UWP/AppContainer support" | Out-Null
 
 # The uiAccess worker (`qwen-cua-driver-uia.exe`) has no public client route and is
 # not started by this task. The High-IL daemon is the supported path for
@@ -273,7 +297,7 @@ Register-ScheduledTask -TaskName $env:CUA_DRIVER_AS_TASK -Action $action -Trigge
             .output()
             .map_err(|e| anyhow!("failed to invoke powershell: {e}"))?;
         if out.status.success() {
-            return Ok(());
+            return confirm_registered();
         }
 
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -311,14 +335,7 @@ Register-ScheduledTask -TaskName $env:CUA_DRIVER_AS_TASK -Action $action -Trigge
             // happens INSIDE the elevated process (where it'll succeed on
             // the first attempt and not re-enter this branch). -Wait so we
             // can capture the child's exit code.
-            let inner = format!("& \"{}\" autostart enable", exe.replace('"', "`\""));
-            let outer = format!(
-                "$p = Start-Process -FilePath '{}' -ArgumentList @('-NoProfile','-NonInteractive','-Command',{}) -Verb RunAs -Wait -PassThru; exit $p.ExitCode",
-                "powershell.exe",
-                // Embed the inner command as a single-quoted PowerShell string
-                // (PS escapes ' as '' inside ''-strings).
-                format!("'{}'", inner.replace('\'', "''"))
-            );
+            let outer = elevation_script(exe);
             Command::new("powershell")
                 .args(["-NoProfile", "-NonInteractive", "-Command", &outer])
                 .creation_flags(CREATE_NO_WINDOW)
@@ -327,7 +344,7 @@ Register-ScheduledTask -TaskName $env:CUA_DRIVER_AS_TASK -Action $action -Trigge
         };
 
         if elevated_status.success() {
-            Ok(())
+            confirm_registered()
         } else {
             Err(anyhow!(
                 "self-elevation for autostart registration failed (exit {}). The UAC \
@@ -336,6 +353,19 @@ Register-ScheduledTask -TaskName $env:CUA_DRIVER_AS_TASK -Action $action -Trigge
                  same self-elevation flow.",
                 elevated_status.code().unwrap_or(-1)
             ))
+        }
+    }
+
+    fn confirm_registered() -> Result<()> {
+        match status() {
+            Ok(Status::NotRegistered) => Err(anyhow!(
+                "autostart registration reported success but task '{}' does not exist",
+                task_name()
+            )),
+            Ok(Status::RegisteredIdle | Status::RegisteredRunning) => Ok(()),
+            Err(error) => Err(anyhow!(
+                "autostart registration may have completed, but could not be verified: {error}"
+            )),
         }
     }
 
@@ -522,6 +552,36 @@ pub fn run_autostart_cmd(subcommand: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn elevation_quotes_the_executable_as_a_literal_argument() {
+        let script = elevation_script(r"C:\o'brien\$data`files\qwen-cua-driver.exe");
+        assert!(script
+            .contains("'& ''C:\\o''''brien\\$data`files\\qwen-cua-driver.exe'' autostart enable'"));
+        assert!(!script.contains("__INNER_COMMAND__"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn elevation_returns_failure_or_the_actual_child_exit_code() {
+        for (body, expected) in [
+            ("Write-Error 'UAC cancelled'", 1),
+            ("return $null", 1),
+            ("return [pscustomobject]@{ ExitCode = $null }", 1),
+            ("return [pscustomobject]@{ ExitCode = 0 }", 0),
+            ("return [pscustomobject]@{ ExitCode = 7 }", 7),
+        ] {
+            let script = format!(
+                "function Start-Process {{ [CmdletBinding()] param([string]$FilePath, [string[]]$ArgumentList, [string]$Verb, [switch]$Wait, [switch]$PassThru)\n{body}\n}}\n{}",
+                elevation_script(r"C:\Qwen\qwen-cua-driver.exe")
+            );
+            let status = std::process::Command::new("powershell")
+                .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+                .status()
+                .expect("run the elevation payload with a stubbed Start-Process");
+            assert_eq!(status.code(), Some(expected), "{body}");
+        }
+    }
 
     #[test]
     fn windows_task_path_strips_short_extended_drive_prefix() {

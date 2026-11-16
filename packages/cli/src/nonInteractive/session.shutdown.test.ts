@@ -74,6 +74,9 @@ describe('Session shutdown background notifications', () => {
         getApprovalMode: () => 'auto',
         getOutputFormat: () => 'stream-json',
         getWarnings: () => [],
+        getLlmClient: () => ({
+          getPendingMemoryTaskPromises: () => [],
+        }),
         initialize: vi.fn(),
         waitForMcpReady: vi.fn().mockResolvedValue(undefined),
         getMonitorRegistry: () => monitor,

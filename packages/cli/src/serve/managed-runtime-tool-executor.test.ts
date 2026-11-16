@@ -22,6 +22,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import type { ToolResultEnvelope } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import type { LocalShellCaptureRequest } from '@qwen-code/qwen-code-core/managed-runtime/managed-shell-result-session.js';
+import { formatRecordArtifactReminder } from '@qwen-code/qwen-code-core/tools/artifact/workspace-auto-record.js';
+import { isPdftotextAvailable } from '@qwen-code/qwen-code-core/utils/pdf.js';
 import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
 import type { AnyDeclarativeTool } from '@qwen-code/qwen-code-core/tools/tools.js';
 import {
@@ -52,12 +54,51 @@ import {
   ManagedToolExecutor,
   ManagedToolInvalidError,
   ManagedToolUnavailableError,
+  createManagedToolSet,
   relativizeGlobText,
   type ManagedShellCapturePublisher,
   type ManagedShellCaptureSink,
   type ManagedToolReference,
   type ManagedToolSet,
 } from './managed-runtime-tool-executor.js';
+
+vi.mock(
+  '@qwen-code/qwen-code-core/utils/runtimeFetchOptions.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/utils/runtimeFetchOptions.js')
+      >();
+    return {
+      ...actual,
+      loadUndici: async () => ({
+        ...(await actual.loadUndici()),
+        fetch: globalThis.fetch,
+      }),
+    };
+  },
+);
+
+// Records each call into the Bash parser module so a test can pin a Shell
+// path that should never load the parser. Calls pass through unchanged.
+const bashParserCalls = vi.hoisted(() => [] as string[]);
+vi.mock(
+  '@qwen-code/qwen-code-core/utils/shellAstParser.js',
+  async (importOriginal) => {
+    const actual = await importOriginal<Record<string, unknown>>();
+    return Object.fromEntries(
+      Object.entries(actual).map(([name, value]) => [
+        name,
+        typeof value === 'function'
+          ? (...args: unknown[]) => {
+              bashParserCalls.push(name);
+              return (value as (...callArgs: unknown[]) => unknown)(...args);
+            }
+          : value,
+      ]),
+    );
+  },
+);
 
 // A long-running foreground command the Shell tool admits: a bare
 // `sleep N` trips its standalone-sleep refusal long before the budget.
@@ -147,6 +188,41 @@ describe.skipIf(process.platform === 'win32')(
 
       const result = await running;
       expect(result.executionStatus).toBe('success');
+      strayGroups.delete(pgid);
+    });
+
+    it('records a gate probe’s group like a Shell’s, so an SSH foreground stop reaches what it leaves behind', async () => {
+      // The probe's script starts a child it does not wait for; on an SSH
+      // Runtime the group is stopped at completion, as for a Shell call.
+      await writeFile(
+        path.join(workspace, 'probe.sh'),
+        'sleep 30 >/dev/null 2>&1 &\nsleep 0.5\necho started\n',
+      );
+      const tools = createManagedToolSet(workspace, 'session-b');
+      const exec = new ManagedToolExecutor(
+        async () => tools,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { ledger, sshForegroundOnly: true, groupEvidenceTimeoutMs: 2_000 },
+      );
+      const input = { gate: 'sh ./probe.sh' };
+      const running = exec.execute(
+        reference('gate-1', input),
+        'managed_automation_gate',
+        input,
+      );
+      const pgid = await recordedGroup();
+      strayGroups.add(pgid);
+      const result = await running;
+      expect(result.executionStatus).toBe('success');
+      expect(JSON.stringify(result.responseParts)).toContain('started');
+      expect(processGroupLiveness(pgid)).toBe('gone');
+      await exec.close();
       strayGroups.delete(pgid);
     });
 
@@ -372,6 +448,306 @@ describe.skipIf(process.platform === 'win32')(
       expect(exec.status(ref)).toMatchObject({ state: 'unknown' });
       await exec.close();
       strayGroups.delete(pgid);
+    });
+
+    it('strict SSH retirement refuses a failed or incomplete ledger sweep', async () => {
+      const exec = executor();
+      const sweep = vi
+        .spyOn(ledger, 'killOutstanding')
+        .mockResolvedValue([
+          { pgid: 42424242, callId: 'unproven', startedAt: 1 },
+        ]);
+      await expect(
+        exec.retireSsh('550e8400-e29b-41d4-a716-446655440000'),
+      ).rejects.toBeInstanceOf(ManagedToolUnavailableError);
+      expect(existsSync(ledgerFile)).toBe(true);
+      sweep.mockRejectedValueOnce(new Error('disk failed'));
+      await expect(
+        exec.retireSsh('550e8400-e29b-41d4-a716-446655440000'),
+      ).rejects.toThrow('disk failed');
+      sweep.mockRestore();
+      vi.spyOn(ledger, 'complete').mockReturnValueOnce(false);
+      await expect(
+        exec.retireSsh('550e8400-e29b-41d4-a716-446655440000'),
+      ).rejects.toBeInstanceOf(ManagedToolUnavailableError);
+      await exec.close();
+    });
+
+    it('refuses SSH background and monitor requests before resolving any tools or capture', async () => {
+      const toolsFor = vi.fn(async () => undefined);
+      const prepare = vi.fn();
+      const exec = new ManagedToolExecutor(
+        toolsFor,
+        { prepare },
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { ledger, sshForegroundOnly: true },
+      );
+      for (const input of [
+        { command: 'true', is_background: true },
+        { command: 'true', is_monitor: true },
+      ]) {
+        await expect(
+          exec.execute(
+            reference('blocked-v2', input),
+            'run_shell_command',
+            input,
+          ),
+        ).rejects.toBeInstanceOf(ManagedToolConflictError);
+      }
+      for (const kind of [
+        'background',
+        'monitor',
+        'capture-background',
+        'native-monitor',
+      ]) {
+        const input = {
+          command: 'true',
+          ...(kind === 'background' ? { is_background: true } : {}),
+          ...(kind === 'monitor' ? { is_monitor: true } : {}),
+        };
+        await expect(
+          exec.executeV3({
+            reference: reference(`blocked-${kind}`, input),
+            capture: {
+              ...csiAckFixture.response.captureIdentity,
+              capturePolicy: 'complete_required',
+              ...(kind === 'capture-background' ? { background: true } : {}),
+            },
+            toolName:
+              kind === 'native-monitor' ? 'monitor' : 'run_shell_command',
+            input,
+          }),
+        ).rejects.toBeInstanceOf(ManagedToolConflictError);
+      }
+      expect(toolsFor).not.toHaveBeenCalled();
+      expect(prepare).not.toHaveBeenCalled();
+      await exec.retireSsh('550e8400-e29b-41d4-a716-446655440000');
+    });
+
+    it.each([2, 3])(
+      'stops only the SSH v%i foreground group before settling a leader that leaves children',
+      async (version) => {
+        const tools = createManagedToolSet(workspace, 'session-b');
+        const identity = { ...csiAckFixture.response.captureIdentity };
+        const manifest = { ...csiAckFixture.request.acknowledgement.manifest };
+        const sink = {
+          identity,
+          write: async () => {},
+          finish: async () => {},
+          setStarted: () => {},
+          setProcessResult: () => {},
+          finalize: async (): Promise<ToolResultEnvelope> => ({
+            executionStatus: 'success',
+            responseParts: [],
+            capture: {
+              captureStatus: 'complete',
+              captureReason: null,
+              manifest,
+              deliveryStatus: 'pending',
+              previewTruncated: false,
+            },
+          }),
+        } as unknown as ManagedShellCaptureSink;
+        const exec = new ManagedToolExecutor(
+          async () => tools,
+          { prepare: async () => ({ identity, sink }) },
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          { ledger, sshForegroundOnly: true, groupEvidenceTimeoutMs: 1_000 },
+        );
+        const slowInput = {
+          command: LONG_RUN,
+          description: 'independent running call',
+        };
+        const slowRef = reference('independent', slowInput);
+        const slow = exec.execute(slowRef, 'run_shell_command', slowInput);
+        const independent = await recordedGroup();
+        strayGroups.add(independent);
+        const pidFile = path.join(workspace, 'orphan.pid');
+        const input = {
+          command: `nohup sleep 35 </dev/null >/dev/null 2>&1 & echo $! > '${pidFile.replaceAll("'", "'\\''")}'; sleep 0.3`,
+          description:
+            'foreground leader with an inherited process group child',
+        };
+        try {
+          const ref = reference('orphan', input);
+          const result =
+            version === 2
+              ? await exec.execute(ref, 'run_shell_command', input)
+              : await exec.executeV3({
+                  reference: ref,
+                  toolName: 'run_shell_command',
+                  input,
+                  capture: {
+                    ...csiAckFixture.capture,
+                    sessionId: ref.sessionId,
+                    turnId: ref.promptId,
+                  },
+                });
+          for (const group of ledger.outstandingGroups())
+            strayGroups.add(group.pgid);
+          expect(result).toMatchObject(
+            version === 2
+              ? { executionStatus: 'success' }
+              : { state: 'settled', result: { executionStatus: 'success' } },
+          );
+          const childPid = Number(await readFile(pidFile, 'utf8'));
+          expect(() => process.kill(childPid, 0)).toThrow();
+          expect(processGroupLiveness(independent)).toBe('alive');
+        } finally {
+          exec.cancel(slowRef);
+          await slow;
+          await exec.close();
+        }
+      },
+    );
+
+    it('records a captured v3 Shell group and retires only after its committed ACK', async () => {
+      const tools = createManagedToolSet(workspace, 'session-b');
+      const identity = { ...csiAckFixture.response.captureIdentity };
+      const manifest = { ...csiAckFixture.request.acknowledgement.manifest };
+      const sink = {
+        identity,
+        write: async () => {},
+        finish: async () => {},
+        setStarted: () => {},
+        setProcessResult: () => {},
+        finalize: async (): Promise<ToolResultEnvelope> => ({
+          executionStatus: 'success',
+          responseParts: [],
+          capture: {
+            captureStatus: 'complete',
+            captureReason: null,
+            manifest,
+            deliveryStatus: 'pending',
+            previewTruncated: false,
+          },
+        }),
+      } as unknown as ManagedShellCaptureSink;
+      const exec = new ManagedToolExecutor(
+        async () => tools,
+        { prepare: async () => ({ identity, sink }) },
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { ledger },
+      );
+      const input = {
+        command: 'sleep 0.2',
+        description: 'captured foreground command',
+      };
+      const ref = reference('ssh-v3', input);
+      const capture = {
+        ...csiAckFixture.capture,
+        sessionId: ref.sessionId,
+        turnId: ref.promptId,
+      };
+      const running = exec.executeV3({
+        reference: ref,
+        toolName: 'run_shell_command',
+        input,
+        capture,
+      });
+      const pgid = await recordedGroup();
+      strayGroups.add(pgid);
+      expect(
+        ledgerTestInternals
+          .readLedgerDocument(ledgerFile)
+          ?.groups.some((group) => group.pgid === pgid),
+      ).toBe(true);
+      expect((await running).state).toBe('settled');
+      const retirementId = '550e8400-e29b-41d4-a716-446655440000';
+      await expect(exec.retireSsh(retirementId)).rejects.toBeInstanceOf(
+        ManagedToolUnavailableError,
+      );
+      exec.acknowledgeV3(ref, {
+        executionCallId: capture.executionCallId,
+        manifest,
+        deliveryStatus: 'committed',
+        historyRevision: 1,
+      });
+      await expect(exec.retireSsh(retirementId)).resolves.toBeUndefined();
+      expect(existsSync(ledgerFile)).toBe(false);
+      expect(processGroupLiveness(pgid)).toBe('gone');
+      strayGroups.delete(pgid);
+    });
+
+    it.each(['denied', 'throw', 'integrity'] as const)(
+      'keeps SSH Shell outcome unknown when its group proof fails: %s',
+      async (failure) => {
+        const tools = createManagedToolSet(workspace, 'session-b');
+        const exec = new ManagedToolExecutor(
+          async () => tools,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          { ledger, sshForegroundOnly: true },
+        );
+        const stop = vi.spyOn(ledger, 'stopGroup');
+        if (failure === 'throw')
+          stop.mockRejectedValue(new Error('group proof failed'));
+        else stop.mockResolvedValue(failure === 'denied' ? 'denied' : 'gone');
+        const integrity =
+          failure === 'integrity'
+            ? vi
+                .spyOn(ledger, 'hasIntegrityFailure', 'get')
+                .mockReturnValue(true)
+            : undefined;
+        const input = {
+          command: 'true',
+          description: 'uncertain foreground cleanup',
+        };
+        const ref = reference('unproven-ssh', input);
+        try {
+          await expect(
+            exec.execute(ref, 'run_shell_command', input),
+          ).rejects.toBeInstanceOf(ManagedMcpToolUnknownError);
+          expect(exec.status(ref)).toMatchObject({ state: 'unknown' });
+          expect(() => exec.acknowledge(ref)).toThrow('has not settled');
+          await expect(
+            exec.retireSsh('550e8400-e29b-41d4-a716-446655440000'),
+          ).rejects.toBeInstanceOf(ManagedToolUnavailableError);
+        } finally {
+          stop.mockRestore();
+          integrity?.mockRestore();
+          await exec.close();
+        }
+      },
+    );
+
+    it('never turns a failed Shell ledger write into a later clean proof', async () => {
+      const exec = executor();
+      const write = vi.spyOn(ledger, 'addGroup').mockImplementation(() => {
+        throw new Error('ledger write failed');
+      });
+      const input = {
+        command: 'sleep 0.2',
+        description: 'fail ledger registration',
+      };
+      const ref = reference('bad-ledger', input);
+      await exec.execute(ref, 'run_shell_command', input);
+      write.mockRestore();
+      exec.acknowledge(ref);
+      await expect(
+        exec.retireSsh('550e8400-e29b-41d4-a716-446655440000'),
+      ).rejects.toThrow('ledger integrity');
+      await exec.close();
     });
 
     it('close() leaves an unproven survivor named in the ledger on disk', async () => {
@@ -2086,6 +2462,216 @@ describe('original CSI worker synchronous ACK confirmation', () => {
   });
 });
 
+// #15076: `todo_write` runs in the Worker as per-Session bookkeeping under
+// the Worker's own runtime directory. `web_fetch` is admitted as well, since
+// it ships on `main`; this block covers only the todo tool.
+describe('todo_write in the Worker', () => {
+  let workspace: string;
+  let runtimeDir: string;
+
+  function reference(callId: string, input: unknown): ManagedToolReference {
+    return {
+      sessionId: 'session-15076',
+      promptId: 'prompt-15076',
+      callId,
+      argsDigest: managedToolDigest(input as Record<string, unknown>),
+    };
+  }
+
+  beforeEach(async () => {
+    workspace = await mkdtemp(path.join(tmpdir(), 'qwen-15076-'));
+    runtimeDir = await mkdtemp(path.join(tmpdir(), 'qwen-15076-runtime-'));
+    Storage.setRuntimeBaseDir(runtimeDir);
+  });
+
+  afterEach(async () => {
+    Storage.setRuntimeBaseDir(undefined);
+    await rm(workspace, { recursive: true, force: true });
+    await rm(runtimeDir, { recursive: true, force: true });
+  });
+
+  it('admits todo_write alongside the shipped web_fetch', () => {
+    const exec = ManagedToolExecutor.forWorkspace(workspace, 'session-15076');
+    expect(exec.hasTool('todo_write')).toBe(true);
+    // web_fetch ships on `main` independently of this profile.
+    expect(exec.hasTool('web_fetch')).toBe(true);
+  });
+
+  it('keeps a task list across calls in one Session and refuses a cycle', async () => {
+    const exec = ManagedToolExecutor.forWorkspace(workspace, 'session-15076');
+    const first = {
+      todos: [
+        { id: 'a', content: 'first', status: 'completed' as const },
+        { id: 'b', content: 'second', status: 'in_progress' as const },
+      ],
+    };
+    const created = await exec.execute(
+      reference('todo-1', first),
+      'todo_write',
+      first,
+    );
+    expect(created.executionStatus).toBe('success');
+
+    const second = {
+      todos: [
+        { id: 'a', content: 'first', status: 'completed' as const },
+        { id: 'b', content: 'second', status: 'completed' as const },
+      ],
+    };
+    const updated = await exec.execute(
+      reference('todo-2', second),
+      'todo_write',
+      second,
+    );
+    expect(updated.executionStatus).toBe('success');
+
+    const stored = JSON.parse(
+      await readFile(
+        path.join(runtimeDir, 'todos', 'session-15076.json'),
+        'utf8',
+      ),
+    ) as { todos: Array<{ id: string; status: string }> };
+    expect(stored.todos.map((todo) => [todo.id, todo.status])).toEqual([
+      ['a', 'completed'],
+      ['b', 'completed'],
+    ]);
+
+    const cycle = {
+      todos: [
+        { id: 'a', content: 'a', status: 'pending' as const, blockedBy: ['b'] },
+        { id: 'b', content: 'b', status: 'pending' as const, blockedBy: ['a'] },
+      ],
+    };
+    const refused = await exec.execute(
+      reference('todo-3', cycle),
+      'todo_write',
+      cycle,
+    );
+    expect(refused.executionStatus).toBe('error');
+    expect(refused.error?.message).toContain('cycle');
+    await exec.close();
+  });
+
+  it('scrubs the runtime root from a failed write reported as success', async () => {
+    // A file where the todos directory belongs makes the write fail. Core then
+    // reports the failure inside a success-shaped result whose text names the
+    // absolute runtime path, outside the tenant Workspace.
+    await writeFile(path.join(runtimeDir, 'todos'), 'not a directory');
+    const exec = ManagedToolExecutor.forWorkspace(workspace, 'session-15076');
+    const todos = { todos: [{ id: 'a', content: 'a', status: 'pending' }] };
+    const result = await exec.execute(
+      reference('todo-failed-write', todos),
+      'todo_write',
+      todos,
+    );
+    const text = (result.responseParts as Array<{ text?: string }>)
+      .map((part) => part.text ?? '')
+      .join('');
+    expect(result.executionStatus).toBe('success');
+    expect(text).toContain('Failed to modify todos');
+    expect(text).not.toContain(runtimeDir);
+    await exec.close();
+  });
+});
+
+// A Hosted Session declares no record_artifact and the Worker forwards no
+// artifact metadata, so no Worker result may ask the model to record one.
+describe.skipIf(process.platform === 'win32')(
+  'record_artifact guidance in the Worker',
+  () => {
+    let workspace: string;
+    let runtimeDir: string;
+
+    function reference(callId: string, input: unknown): ManagedToolReference {
+      return {
+        sessionId: 'session-artifact',
+        promptId: 'prompt-artifact',
+        callId,
+        argsDigest: managedToolDigest(input as Record<string, unknown>),
+      };
+    }
+
+    async function resultText(
+      exec: ManagedToolExecutor,
+      callId: string,
+      toolName: string,
+      input: Record<string, unknown>,
+    ): Promise<string> {
+      const result = await exec.execute(
+        reference(callId, input),
+        toolName,
+        input,
+      );
+      expect(result.executionStatus).toBe('success');
+      return (result.responseParts as Array<{ text?: string }>)
+        .map((part) => part.text ?? '')
+        .join('');
+    }
+
+    beforeEach(async () => {
+      workspace = await mkdtemp(path.join(tmpdir(), 'qwen-artifact-'));
+      runtimeDir = await mkdtemp(path.join(tmpdir(), 'qwen-artifact-runtime-'));
+      Storage.setRuntimeBaseDir(runtimeDir);
+    });
+
+    afterEach(async () => {
+      vi.unstubAllEnvs();
+      Storage.setRuntimeBaseDir(undefined);
+      await rm(workspace, { recursive: true, force: true });
+      await rm(runtimeDir, { recursive: true, force: true });
+    });
+
+    it.each(['', '1'])(
+      'leaves it out of a Shell result that wrote a file (QWEN_CODE_ENABLE_ARTIFACT=%j)',
+      async (flag) => {
+        vi.stubEnv('QWEN_CODE_ENABLE_ARTIFACT', flag);
+        const exec = ManagedToolExecutor.forWorkspace(
+          workspace,
+          'session-artifact',
+        );
+        bashParserCalls.length = 0;
+        const text = await resultText(exec, 'shell', 'run_shell_command', {
+          command: 'echo hello > notes.md',
+        });
+        expect(await readFile(path.join(workspace, 'notes.md'), 'utf8')).toBe(
+          'hello\n',
+        );
+        expect(text).not.toContain('record_artifact');
+        // The reminder was the only reason this path parsed the command, and
+        // loading the parser is what grows each resident Worker.
+        expect(bashParserCalls).toEqual([]);
+        await exec.close();
+      },
+    );
+
+    it.each(['', '1'])(
+      'does not claim a written or edited Markdown file was recorded (QWEN_CODE_ENABLE_ARTIFACT=%j)',
+      async (flag) => {
+        vi.stubEnv('QWEN_CODE_ENABLE_ARTIFACT', flag);
+        const exec = ManagedToolExecutor.forWorkspace(
+          workspace,
+          'session-artifact',
+        );
+        const file = path.join(workspace, 'report.md');
+        const written = await resultText(exec, 'write', 'write_file', {
+          file_path: file,
+          content: '# Report\n',
+        });
+        const edited = await resultText(exec, 'edit', 'edit', {
+          file_path: file,
+          old_string: '# Report',
+          new_string: '# Final report',
+        });
+        expect(await readFile(file, 'utf8')).toBe('# Final report\n');
+        const claim = formatRecordArtifactReminder('report.md');
+        expect(written).not.toContain(claim);
+        expect(edited).not.toContain(claim);
+        await exec.close();
+      },
+    );
+  },
+);
+
 // The route-level fixtures cannot express these geometries (a Session root is
 // always a deep unique tmpdir path), so the anchoring invariants are pinned
 // against the function directly.
@@ -2446,6 +3032,122 @@ describe('readWorkspaceContext', () => {
   });
 });
 
+describe('ManagedToolExecutor PDF page reads', () => {
+  const markers = [
+    'FIRST_PAGE_MARKER',
+    'SECOND_PAGE_MARKER',
+    'THIRD_PAGE_MARKER',
+  ];
+  let workspace: string;
+  let runtimeDir: string;
+  let executor: ManagedToolExecutor;
+
+  function pdfFixture(): Buffer {
+    const objects = [
+      '<< /Type /Catalog /Pages 2 0 R >>',
+      '<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 >>',
+      ...markers.map(
+        (_, index) =>
+          `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources << /Font << /F1 6 0 R >> >> /Contents ${7 + index} 0 R >>`,
+      ),
+      '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+      ...markers.map((marker) => {
+        const stream = `BT /F1 12 Tf 20 100 Td (${marker}) Tj ET`;
+        return `<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}\nendstream`;
+      }),
+    ];
+    const offsets: number[] = [];
+    let pdf = '%PDF-1.4\n';
+    objects.forEach((object, index) => {
+      offsets.push(Buffer.byteLength(pdf));
+      pdf += `${index + 1} 0 obj\n${object}\nendobj\n`;
+    });
+    const xref = Buffer.byteLength(pdf);
+    pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+    pdf += offsets
+      .map((offset) => `${String(offset).padStart(10, '0')} 00000 n \n`)
+      .join('');
+    pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+    return Buffer.from(pdf);
+  }
+
+  beforeEach(async () => {
+    workspace = fs.realpathSync(
+      await mkdtemp(path.join(tmpdir(), 'qwen-managed-pdf-')),
+    );
+    runtimeDir = await mkdtemp(
+      path.join(tmpdir(), 'qwen-managed-pdf-runtime-'),
+    );
+    Storage.setRuntimeBaseDir(runtimeDir);
+    executor = ManagedToolExecutor.forWorkspace(workspace, 'pdf-session');
+    await writeFile(path.join(workspace, 'document.pdf'), pdfFixture());
+  });
+
+  afterEach(async () => {
+    await executor.close();
+    unregisterSessionModel('pdf-session');
+    unregisterSessionProjectDir('pdf-session');
+    Storage.setRuntimeBaseDir(undefined);
+    await rm(workspace, { recursive: true, force: true });
+    await rm(runtimeDir, { recursive: true, force: true });
+  });
+
+  function read(input: Record<string, unknown>) {
+    return executor.execute(
+      {
+        sessionId: 'pdf-session',
+        promptId: 'pdf-prompt',
+        callId: 'pdf-read',
+        argsDigest: managedToolDigest(input),
+      },
+      'read_file',
+      input,
+    );
+  }
+
+  it('extracts only page 2 from a real three-page PDF', async ({ skip }) => {
+    if (!(await isPdftotextAvailable())) return skip();
+    const result = await read({ file_path: 'document.pdf', pages: '2' });
+    expect(result.executionStatus).toBe('success');
+    const output = JSON.stringify(result.responseParts);
+    expect(output).toContain(markers[1]);
+    expect(output).not.toContain(markers[0]);
+    expect(output).not.toContain(markers[2]);
+  });
+
+  it.each([
+    ['0', 'Invalid pages parameter'],
+    ['3-1', 'Invalid pages parameter'],
+    ['2-', 'Open-ended page ranges'],
+    ['1-21', 'maximum of 20 pages'],
+  ])(
+    'rejects unsupported PDF pages %s through Core',
+    async (pages, message) => {
+      const result = await read({ file_path: 'document.pdf', pages });
+      expect(result.executionStatus).toBe('error');
+      expect(result.error?.message).toContain(message);
+    },
+  );
+
+  it('retains text line selection when PDF pages are omitted with null', async () => {
+    await writeFile(
+      path.join(workspace, 'notes.txt'),
+      'FIRST_TEXT_LINE\nSECOND_TEXT_LINE\nTHIRD_TEXT_LINE\n',
+    );
+    const result = await read({
+      file_path: 'notes.txt',
+      offset: 1,
+      limit: 1,
+      pages: null,
+    });
+    expect(result.executionStatus).toBe('success');
+    const output = JSON.stringify(result.responseParts);
+    expect(output).toContain('SECOND_TEXT_LINE');
+    expect(output).not.toContain('FIRST_TEXT_LINE');
+    expect(output).not.toContain('THIRD_TEXT_LINE');
+  });
+});
+
 describe('ManagedToolExecutor acknowledgement', () => {
   const roots = new Set<string>();
   afterEach(() => {
@@ -2466,6 +3168,64 @@ describe('ManagedToolExecutor acknowledgement', () => {
     callId: 'call-1',
     argsDigest: createHash('sha256').update('args').digest('hex'),
   };
+
+  it('executes web_fetch as text once without a worker model or host files', async () => {
+    const root = workspace();
+    const executor = ManagedToolExecutor.forWorkspace(root, 'runtime-01');
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response('<h1>Public docs</h1>', {
+        headers: { 'Content-Type': 'text/html' },
+      }),
+    );
+    const input = { url: 'https://8.8.8.8/docs', prompt: 'Summarize' };
+    try {
+      expect(executor.hasTool('web_fetch')).toBe(true);
+      const result = await executor.execute(
+        sessionReference,
+        'web_fetch',
+        input,
+      );
+      expect(result.executionStatus).toBe('success');
+      expect(result.responseParts).toEqual([
+        expect.objectContaining({
+          text: expect.stringContaining('Public docs\n==========='),
+        }),
+      ]);
+      expect(JSON.stringify(result)).not.toContain('processing failed');
+      expect(
+        await executor.execute(sessionReference, 'web_fetch', input),
+      ).toEqual(result);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(fs.readdirSync(root)).toEqual(['a.txt']);
+      expect(executor.acknowledge(sessionReference)?.state).toBe(
+        'acknowledged',
+      );
+      expect(() => executor.closeSessionAdmission('session-a')).not.toThrow();
+    } finally {
+      fetch.mockRestore();
+      await executor.close();
+    }
+  });
+
+  it('blocks web_fetch to Runtime-local addresses before making a request', async () => {
+    const executor = ManagedToolExecutor.forWorkspace(
+      workspace(),
+      'runtime-01',
+    );
+    const fetch = vi.spyOn(globalThis, 'fetch');
+    try {
+      const result = await executor.execute(sessionReference, 'web_fetch', {
+        url: 'https://169.254.169.254/latest/meta-data',
+        prompt: 'Read',
+      });
+      expect(result.executionStatus).toBe('error');
+      expect(JSON.stringify(result)).toContain('blocked address');
+      expect(fetch).not.toHaveBeenCalled();
+    } finally {
+      fetch.mockRestore();
+      await executor.close();
+    }
+  });
 
   it('lets a session close after its settled call is acknowledged', async () => {
     const executor = ManagedToolExecutor.forWorkspace(

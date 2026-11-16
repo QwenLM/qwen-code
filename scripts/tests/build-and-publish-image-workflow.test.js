@@ -10,6 +10,7 @@ import {
   existsSync,
   mkdtempSync,
   readFileSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -35,6 +36,14 @@ const buildStep =
 const retryStep =
   workflow.match(
     /- name: 'Build and push Docker image \(retry\)'[\s\S]*?(?=\n[ ]{2}# One issue per version)/,
+  )?.[0] ?? '';
+const proxyDetectStep =
+  workflow.match(
+    /- name: 'Detect egress proxy for buildkitd'[\s\S]*?(?=\n[ ]{6}- name: 'Set up QEMU')/,
+  )?.[0] ?? '';
+const buildxStep =
+  workflow.match(
+    /- name: 'Set up Docker Buildx'[\s\S]*?(?=\n[ ]{6}- name: 'Extract metadata)/,
   )?.[0] ?? '';
 const failureIssueJob =
   workflow.match(/file-failure-issue:[\s\S]*$/)?.[0] ?? '';
@@ -184,6 +193,40 @@ describe('build-and-publish-image workflow', () => {
     expect(lookupScript).not.toContain('--search');
     expect(lookupScript).toContain('jq -r --arg marker_html "${MARKER_HTML}"');
     expect(lookupScript).toContain('contains($marker_html)');
+  });
+
+  it('feeds buildx a probed proxy decision, never a pinned proxy', () => {
+    // #16039/#16162: the docker-container driver's buildkitd inherits
+    // neither the runner's proxy env nor the host network, so on mainland
+    // release hosts its registry dial hits poisoned DNS and the image
+    // build dies before any application step. The fix must stay a probe:
+    // hosted and HK runners have clean direct egress and NO local proxy,
+    // so a hardcoded 127.0.0.1:7890 in the YAML would aim their buildkitd
+    // at a dead port and break the paths that work today.
+    expect(proxyDetectStep).toContain("id: 'buildkit_proxy'");
+    // One ordered pin instead of four independent substrings: hoisting the
+    // probe call out of the `{ ... } >> "$GITHUB_OUTPUT"` group leaves
+    // driver_opts empty while each substring pin stays green. The script's
+    // stdout must stay inside the group; its probe log goes to stderr and
+    // stays in the step log.
+    expect(proxyDetectStep).toContain(
+      [
+        'run: |',
+        '          {',
+        "            echo 'driver_opts<<EOF'",
+        '            bash .github/scripts/buildkitd-proxy-opts.sh',
+        "            echo 'EOF'",
+        '          } >> "$GITHUB_OUTPUT"',
+      ].join('\n'),
+    );
+    expect(buildxStep).toContain(
+      "driver-opts: '${{ steps.buildkit_proxy.outputs.driver_opts }}'",
+    );
+    // The decision must exist before the builder that consumes it.
+    expect(
+      workflow.indexOf("'Detect egress proxy for buildkitd'"),
+    ).toBeLessThan(workflow.indexOf("'Set up Docker Buildx'"));
+    expect(workflow).not.toContain('127.0.0.1:7890');
   });
 });
 
@@ -717,6 +760,243 @@ describe.skipIf(!replayable)(
       expect(result.out).toContain('::error::');
       expect(result.calls).not.toContain('issue create');
       expect(result.calls).not.toContain('issue edit');
+    });
+  },
+);
+
+// Replay the proxy probe under a recording curl stub. The decision is
+// fail-closed: anything short of a reachable registry through a usable
+// local proxy must emit NOTHING, because an injected-but-dead proxy breaks
+// the hosted/HK builds that work today (#16039/#16162). Text pins cannot
+// see that contract; the replay can. POSIX paths and an extensionless curl
+// stub keep this off the Windows lane, same as the gh-stub replay above.
+describe.skipIf(process.platform === 'win32')(
+  'buildkitd-proxy-opts script behavior',
+  () => {
+    const runProbe = ({
+      proxyEnv,
+      curlCode = '401',
+      curlExit = 0,
+      noCurl = false,
+    }) => {
+      const dir = mkdtempSync(join(tmpdir(), 'buildkitd-proxy-'));
+      const callsLog = join(dir, 'curl-calls.log');
+      if (!noCurl) {
+        writeFileSync(
+          join(dir, 'curl'),
+          [
+            '#!/bin/bash',
+            // One token per NUL: `$*` joins argv with single spaces, which
+            // hides a deleted empty argument (`--noproxy ''`) from every
+            // assertion written against the joined line.
+            'printf "%s\\0" "$@" >> "' + callsLog + '"',
+            `printf '%s' '${curlCode}'`,
+            `exit ${curlExit}`,
+            '',
+          ].join('\n'),
+        );
+        chmodSync(join(dir, 'curl'), 0o755);
+      } else {
+        // A PATH carrying the script's other tools but no curl: the
+        // curl-absent branch must fail closed, not crash under set -e.
+        for (const tool of ['bash', 'sed', 'head', 'cat']) {
+          const located = spawnSync('which', [tool], {
+            encoding: 'utf8',
+          }).stdout.trim();
+          symlinkSync(located, join(dir, tool));
+        }
+      }
+      const envFile = join(dir, 'proxy.env');
+      if (proxyEnv !== undefined) writeFileSync(envFile, proxyEnv);
+      const result = spawnSync(
+        'bash',
+        ['.github/scripts/buildkitd-proxy-opts.sh'],
+        {
+          encoding: 'utf8',
+          env: {
+            PATH: noCurl ? dir : dir + ':' + (process.env.PATH ?? ''),
+            QWEN_PROXY_ENV_FILE: envFile,
+          },
+        },
+      );
+      const calls = existsSync(callsLog) ? readFileSync(callsLog, 'utf8') : '';
+      return {
+        status: result.status,
+        out: result.stdout,
+        err: result.stderr,
+        // Raw NUL-separated log, kept as a string so the "no probe ran"
+        // cases can still assert ''.
+        calls,
+        // One token per entry: an empty argument survives the round trip, so
+        // deleting the `''` value of `--noproxy` cannot pass unnoticed.
+        argv: calls === '' ? [] : calls.split('\0').slice(0, -1),
+      };
+    };
+
+    it('emits host-network proxy opts when the probe reaches the registry', () => {
+      const result = runProbe({
+        proxyEnv:
+          'http_proxy=http://127.0.0.1:7890\nhttps_proxy=http://127.0.0.1:7890\n',
+      });
+      expect(result.status).toBe(0);
+      // network=host is load-bearing: on the default bridge the injected
+      // 127.0.0.1:7890 would point at the container's own loopback, not the
+      // host proxy. Both spellings of each variable ride along because
+      // resolvers disagree about which case they read. No NO_PROXY line:
+      // buildx CSV-parses driver-opts and rejects comma lists both unquoted
+      // and value-quoted (both verified live); buildkitd only dials
+      // external registries, so the exclusion list buys nothing.
+      expect(result.out).toBe(
+        [
+          'network=host',
+          'env.HTTP_PROXY=http://127.0.0.1:7890',
+          'env.HTTPS_PROXY=http://127.0.0.1:7890',
+          'env.http_proxy=http://127.0.0.1:7890',
+          'env.https_proxy=http://127.0.0.1:7890',
+          '',
+        ].join('\n'),
+      );
+      // Exact argv, token by token. The probe must aim at the exact endpoint
+      // whose poisoned resolution caused the incident, through the exact
+      // proxy it will inject, and `--noproxy ''` must stay adjacent to `-x`:
+      // an inherited NO_PROXY/no_proxy matching the registry would make curl
+      // dial direct while still printing 401, so a dead proxy would pass.
+      // `-o /dev/null` and `--max-time 5` are held here for the same reason:
+      // deleting either lets a chatty or hung probe report a healthy code.
+      // The empty string also proves the log kept argv shape instead of
+      // `$*`-joining that value away.
+      expect(result.argv).toEqual([
+        '-s',
+        '-o',
+        '/dev/null',
+        '--max-time',
+        '5',
+        '--noproxy',
+        '',
+        '-x',
+        'http://127.0.0.1:7890',
+        '-w',
+        '%{http_code}',
+        'https://registry-1.docker.io/v2/',
+      ]);
+      // The measurement reaches the step log, or the next broken build is
+      // another manual SSH investigation (#16218 precedent).
+      expect(result.err).toContain('buildkitd proxy:');
+      expect(result.err).toContain('401');
+    });
+
+    it('keeps the fleet path as the default when the override is absent', () => {
+      // Every replay above injects QWEN_PROXY_ENV_FILE, so nothing read the
+      // production default. It cannot be replayed: the fleet manages that
+      // absolute path and a self-hosted host may legitimately have it, so a
+      // replay asserting "missing" would misread such a host as a defect.
+      // The literal is therefore the deterministic half — the override stays
+      // optional and points at the fleet file when unset.
+      const source = readFileSync(
+        '.github/scripts/buildkitd-proxy-opts.sh',
+        'utf8',
+      );
+      expect(source).toContain(
+        'PROXY_ENV_FILE="${QWEN_PROXY_ENV_FILE:-/etc/qwen-proxy-client/proxy.env}"',
+      );
+    });
+
+    it('accepts a 200 probe answer as well', () => {
+      const result = runProbe({
+        proxyEnv: 'https_proxy=http://127.0.0.1:7890\n',
+        curlCode: '200',
+      });
+      expect(result.status).toBe(0);
+      expect(result.out).toContain('network=host');
+    });
+
+    it('stays silent when the marker file does not exist', () => {
+      // Hosted runners and the HK pool: no proxy configured, direct egress
+      // is clean. Emitting opts here would break them.
+      const result = runProbe({ proxyEnv: undefined });
+      expect(result.status).toBe(0);
+      expect(result.out).toBe('');
+      expect(result.calls).toBe('');
+    });
+
+    it('stays silent when the proxy cannot reach the registry', () => {
+      // A configured-but-broken proxy must not capture buildkitd: fail
+      // closed to the default direct route (the pre-fix behavior), not
+      // into a dead proxy.
+      const result = runProbe({
+        proxyEnv: 'https_proxy=http://127.0.0.1:7890\n',
+        curlCode: '000',
+        curlExit: 28,
+      });
+      expect(result.status).toBe(0);
+      expect(result.out).toBe('');
+      expect(result.err).toContain('buildkitd proxy: none');
+    });
+
+    it('stays silent on a 5xx probe answer', () => {
+      // A proxy that answers but cannot carry registry traffic is no
+      // better than a dead one for this decision.
+      const result = runProbe({
+        proxyEnv: 'https_proxy=http://127.0.0.1:7890\n',
+        curlCode: '502',
+      });
+      expect(result.status).toBe(0);
+      expect(result.out).toBe('');
+      expect(result.err).toContain('502');
+    });
+
+    it('stays silent when curl is unavailable', () => {
+      const result = runProbe({
+        proxyEnv: 'https_proxy=http://127.0.0.1:7890\n',
+        noCurl: true,
+      });
+      expect(result.status).toBe(0);
+      expect(result.out).toBe('');
+      expect(result.err).toContain('curl unavailable');
+    });
+
+    it('stays silent when the file has no usable https_proxy value', () => {
+      const result = runProbe({
+        proxyEnv: 'HTTP_PROXY=http://127.0.0.1:7890\n',
+      });
+      expect(result.status).toBe(0);
+      expect(result.out).toBe('');
+      expect(result.calls).toBe('');
+    });
+
+    it('rejects a value that could inject extra driver opts', () => {
+      // The value lands verbatim in driver-opts lines; whitespace or a
+      // non-URL shape must disqualify it instead of emitting more options.
+      const result = runProbe({
+        proxyEnv: 'https_proxy=http://127.0.0.1:7890 env.evil=1\n',
+      });
+      expect(result.status).toBe(0);
+      expect(result.out).toBe('');
+      expect(result.calls).toBe('');
+    });
+
+    it('rejects a comma that would CSV-split the emitted opt', () => {
+      // buildx parses each driver-opt as CSV. A comma riding in the URL
+      // userinfo still probes fine (the host is after the @), but the
+      // emitted env line would split into an injected env.EVIL opt plus a
+      // truncated proxy value — so the validator must exclude commas.
+      const result = runProbe({
+        proxyEnv: 'https_proxy=http://u,env.EVIL=1@127.0.0.1:7890\n',
+      });
+      expect(result.status).toBe(0);
+      expect(result.out).toBe('');
+      expect(result.calls).toBe('');
+    });
+
+    it('rejects a double quote that would break CSV parsing', () => {
+      // A bare quote in the value makes buildx's CSV reader error out and
+      // fails builder creation; disqualify it at the probe instead.
+      const result = runProbe({
+        proxyEnv: 'https_proxy=http://127.0.0.1:7890"\n',
+      });
+      expect(result.status).toBe(0);
+      expect(result.out).toBe('');
+      expect(result.calls).toBe('');
     });
   },
 );

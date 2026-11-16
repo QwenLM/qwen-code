@@ -22,6 +22,9 @@ export function daemonUiEventToTerminalText(event: DaemonUiEvent): string {
     case 'thought.text.delta':
       return terminalLine('thought', event.text, '2');
     case 'tool.update':
+      // Lifecycle name-only events carry no status; rendering one would emit
+      // "tool undefined <name>" for every tool call.
+      if (event.nameOnly) return '';
       return terminalLine(
         `tool ${event.status}`,
         `${event.title ?? event.toolName ?? event.toolKind ?? 'Tool'}${event.details ? ` ${event.details}` : ''}`,

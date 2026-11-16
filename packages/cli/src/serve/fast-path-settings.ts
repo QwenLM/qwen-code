@@ -20,6 +20,7 @@ import {
   isHardcodedProjectEnvExclusion,
   isLoaderEnvKey,
   isPrivateProvenanceEnvKey,
+  keepsEmptyHomeEnvValue,
   reportRejectedLoaderKeys,
 } from '../config/shared-env-keys.js';
 import {
@@ -50,16 +51,24 @@ export type ServeFastPathSettings = Pick<
   Settings,
   'advanced' | 'context' | 'env' | 'security' | 'tools'
 > & {
-  general?: Pick<NonNullable<Settings['general']>, 'chatRecording'>;
+  general?: Pick<
+    NonNullable<Settings['general']>,
+    'chatRecording' | 'language'
+  >;
   policy?: ServeFastPathPolicyInput;
-  serve?: { channels?: unknown; tokenQr?: unknown };
+  serve?: {
+    channels?: unknown;
+    tokenQr?: unknown;
+    maxSessions?: unknown;
+    sessionPrWatch?: unknown;
+  };
   /**
    * Report-only: keys a workspace settings file set that only
-   * operator-owned scopes may set (today only `serve.tokenQr` can produce
-   * an entry — it is the one restricted key this reader would otherwise
-   * honor). The values never enter the summary; the serve boot names the
-   * drop on stderr, matching the warning the interactive CLI raises through
-   * getSettingsWarnings.
+   * operator-owned scopes may set (`serve.tokenQr`, `serve.maxSessions` and
+   * `serve.sessionPrWatch` are the restricted keys this reader would
+   * otherwise honor). The values never enter the summary; the serve boot
+   * names the drop on stderr, matching the warning the interactive CLI
+   * raises through getSettingsWarnings.
    */
   ignoredWorkspaceKeys?: string[];
 };
@@ -115,7 +124,11 @@ function readHomeEnvIntoFastPath(file: string): void {
   try {
     const parsed = dotenv.parse(fs.readFileSync(file, 'utf8'));
     for (const key of HOME_ENV_BOOTSTRAP_KEYS) {
-      if (parsed[key] && !Object.hasOwn(process.env, key)) {
+      if (
+        (parsed[key] ||
+          (keepsEmptyHomeEnvValue(key) && parsed[key] !== undefined)) &&
+        !Object.hasOwn(process.env, key)
+      ) {
         process.env[key] = parsed[key];
       }
     }
@@ -440,7 +453,7 @@ function isWorkspaceTrustedFastPath(
 function readSettingsSummary(
   filePath: string,
   includeServe = false,
-  includeTokenQr = false,
+  includeOperatorServe = false,
   ignoredKeys?: string[],
 ): ServeFastPathSettings {
   if (!fs.existsSync(filePath)) return {};
@@ -462,19 +475,26 @@ function readSettingsSummary(
       `Serve fast path settings file ${filePath} must be a JSON object.`,
     );
   }
-  // serve.tokenQr is honored from operator-owned scopes only (see
-  // pickFastPathSettings); a workspace file that sets it gets the drop
-  // reported, never the value.
+  // serve.tokenQr, serve.maxSessions and serve.sessionPrWatch are honored
+  // from operator-owned scopes only (see pickFastPathSettings); a workspace
+  // file that sets any of them gets the drop reported, never the value.
   const serveSection = parsed['serve'];
   if (
     ignoredKeys !== undefined &&
-    !includeTokenQr &&
-    isPlainObject(serveSection) &&
-    serveSection['tokenQr'] !== undefined
+    !includeOperatorServe &&
+    isPlainObject(serveSection)
   ) {
-    ignoredKeys.push('serve.tokenQr');
+    if (serveSection['tokenQr'] !== undefined) {
+      ignoredKeys.push('serve.tokenQr');
+    }
+    if (serveSection['maxSessions'] !== undefined) {
+      ignoredKeys.push('serve.maxSessions');
+    }
+    if (serveSection['sessionPrWatch'] !== undefined) {
+      ignoredKeys.push('serve.sessionPrWatch');
+    }
   }
-  return pickFastPathSettings(parsed, includeServe, includeTokenQr);
+  return pickFastPathSettings(parsed, includeServe, includeOperatorServe);
 }
 
 function shouldUseLegacyFastPathKeys(value: Record<string, unknown>): boolean {
@@ -492,7 +512,7 @@ function shouldUseLegacyFastPathKeys(value: Record<string, unknown>): boolean {
 function pickFastPathSettings(
   value: Record<string, unknown>,
   includeServe = false,
-  includeTokenQr = false,
+  includeOperatorServe = false,
 ): ServeFastPathSettings {
   const out: ServeFastPathSettings = {};
   const useLegacyKeys = shouldUseLegacyFastPathKeys(value);
@@ -509,8 +529,16 @@ function pickFastPathSettings(
         'Serve fast path settings general.chatRecording must be a boolean.',
       );
     }
-    if (chatRecording !== undefined) {
-      out.general = { chatRecording };
+    // Tolerated, not thrown: resolveChannelLocale already reads a non-string
+    // as English, and throwing here would discard the whole summary — taking
+    // the PR-watch subscription and the permission policy with it.
+    const language =
+      typeof general['language'] === 'string' ? general['language'] : undefined;
+    if (chatRecording !== undefined || language !== undefined) {
+      out.general = {
+        ...(chatRecording !== undefined ? { chatRecording } : {}),
+        ...(language !== undefined ? { language } : {}),
+      };
     }
   }
 
@@ -689,17 +717,33 @@ function pickFastPathSettings(
   if (isPlainObject(serve)) {
     const channels = includeServe ? serve['channels'] : undefined;
     // serve.tokenQr pushes the operator's stable bearer into captured
-    // stdout, so only operator-owned scopes (user/system/system-defaults)
-    // may set it — never a workspace file, trusted or not. The value is
-    // passed through untyped on purpose: this reader is shared with
-    // policy.* and serve.channels, and throwing here would discard the
-    // whole summary — downgrading permission mediation to its default —
-    // because of a display knob. The consumer validates and warns.
-    const tokenQr = includeTokenQr ? serve['tokenQr'] : undefined;
-    if (channels !== undefined || tokenQr !== undefined) {
+    // stdout, and serve.maxSessions is a daemon-wide resource cap, so only
+    // operator-owned scopes (user/system/system-defaults) may set either —
+    // never a workspace file, trusted or not. Values are passed through
+    // untyped on purpose: this reader is shared with policy.* and
+    // serve.channels, and throwing here would discard the whole summary —
+    // downgrading permission mediation to its default — because of one bad
+    // value. The consumers validate and warn.
+    const tokenQr = includeOperatorServe ? serve['tokenQr'] : undefined;
+    const maxSessions = includeOperatorServe ? serve['maxSessions'] : undefined;
+    // serve.sessionPrWatch spends daemon-wide gh budget and injects prompts
+    // into sessions across workspaces, so a repository must not switch it on
+    // for the whole daemon. The trust-gated channel alias is the per-workspace
+    // path.
+    const sessionPrWatch = includeOperatorServe
+      ? serve['sessionPrWatch']
+      : undefined;
+    if (
+      channels !== undefined ||
+      tokenQr !== undefined ||
+      maxSessions !== undefined ||
+      sessionPrWatch !== undefined
+    ) {
       out.serve = {
         ...(channels !== undefined ? { channels } : {}),
         ...(tokenQr !== undefined ? { tokenQr } : {}),
+        ...(maxSessions !== undefined ? { maxSessions } : {}),
+        ...(sessionPrWatch !== undefined ? { sessionPrWatch } : {}),
       };
     }
   }
@@ -762,18 +806,37 @@ function mergeFastPathSettings(
     if (source.policy) {
       merged.policy = { ...(merged.policy ?? {}), ...source.policy };
     }
-    if (source.serve?.tokenQr !== undefined) {
-      merged.serve = {
-        ...(merged.serve ?? {}),
-        tokenQr: source.serve.tokenQr,
-      };
+    if (source.serve) {
+      const { tokenQr, maxSessions, sessionPrWatch } = source.serve;
+      if (
+        tokenQr !== undefined ||
+        maxSessions !== undefined ||
+        sessionPrWatch !== undefined
+      ) {
+        merged.serve = {
+          ...(merged.serve ?? {}),
+          ...(tokenQr !== undefined ? { tokenQr } : {}),
+          ...(maxSessions !== undefined ? { maxSessions } : {}),
+          ...(sessionPrWatch !== undefined ? { sessionPrWatch } : {}),
+        };
+      }
     }
   }
   return merged;
 }
 
+export interface ServeFastPathLoadOptions {
+  /**
+   * Reports a workspace settings document that exists but cannot be read.
+   * Operator scopes are already read by then; a repo-local file must not be
+   * able to discard them (and with them `serve.maxSessions`).
+   */
+  onWorkspaceSettingsError?: (error: Error) => void;
+}
+
 export function loadServeFastPathSettings(
   workspaceDir: string,
+  options: ServeFastPathLoadOptions = {},
 ): ServeFastPathSettings {
   preResolveServeFastPathHomeEnvOverrides();
   const operator = readOperatorSandboxSettings();
@@ -830,14 +893,26 @@ export function loadServeFastPathSettings(
   );
   const workspaceSettingsActive = realWorkspaceDir !== realHomeDir;
   const ignoredWorkspaceKeys: string[] = [];
-  const workspaceFromDisk = workspaceSettingsActive
-    ? readSettingsSummary(
+  let workspaceFromDisk: ServeFastPathSettings = {};
+  if (workspaceSettingsActive) {
+    try {
+      workspaceFromDisk = readSettingsSummary(
         workspaceSettingsPath,
         startupChannelsTrusted,
         false,
         ignoredWorkspaceKeys,
-      )
-    : {};
+      );
+    } catch (err) {
+      // Default contract: throw so the fast-path launcher can fall back to the
+      // full settings loader. Callers that must preserve already-read operator
+      // settings (the serve boot) pass onWorkspaceSettingsError to skip only
+      // this scope and report it.
+      if (!options.onWorkspaceSettingsError) throw err;
+      options.onWorkspaceSettingsError(
+        err instanceof Error ? err : new Error(String(err)),
+      );
+    }
+  }
   const workspace = isTrusted ? workspaceFromDisk : {};
 
   const merged = mergeFastPathSettings(systemDefaults, user, workspace, system);

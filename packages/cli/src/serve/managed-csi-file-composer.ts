@@ -12,7 +12,7 @@ import { WriteFileTool } from '@qwen-code/qwen-code-core/tools/write-file.js';
 import { EditTool } from '@qwen-code/qwen-code-core/tools/edit.js';
 import type { AnyDeclarativeTool } from '@qwen-code/qwen-code-core/tools/tools.js';
 import { ManagedCsiFileBackend } from './managed-csi-file-backend.js';
-import { CSI_FILES_RETIREMENT_CAPABILITY_DIGEST } from './managed-csi-file-profile.js';
+import { matchesCsiFilesProfile } from './managed-csi-file-profile.js';
 import type { ManagedCsiMount } from './managed-csi-mount.js';
 import { ManagedRuntimeFileHistory } from './managed-runtime-file-history.js';
 import type { ManagedToolSet } from './managed-runtime-tool-executor.js';
@@ -31,14 +31,23 @@ export async function composeManagedCsiFiles(options: {
     storage: Awaited<ReturnType<ManagedCsiFileBackend['observeRetained']>>;
   }>;
   close: () => Promise<void>;
+  retirementInventory: () => Promise<{
+    history: ReturnType<ManagedRuntimeFileHistory['state']>;
+    backend: Awaited<ReturnType<ManagedCsiFileBackend['retirementInventory']>>;
+    mount: Awaited<ReturnType<ManagedCsiMount['retirementInspection']>>;
+  }>;
+  retirementCloseInspection: () => Promise<{
+    compositionClosed: boolean;
+    backend: ReturnType<ManagedCsiFileBackend['retirementCloseInspection']>;
+    mount: Awaited<ReturnType<ManagedCsiMount['retirementInspection']>>;
+  }>;
 }> {
   if (
     options.ownerSessionId !== options.runtimeSessionId ||
     !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
       options.ownerSessionId,
     ) ||
-    options.profile !== 'csi-files-retirement/1' ||
-    options.capabilityDigest !== CSI_FILES_RETIREMENT_CAPABILITY_DIGEST
+    !matchesCsiFilesProfile(options.profile, options.capabilityDigest)
   )
     throw new Error('Managed CSI file composition identity is unavailable.');
 
@@ -62,6 +71,9 @@ export async function composeManagedCsiFiles(options: {
         approvalMode: ApprovalMode.YOLO,
         fileCheckpointingEnabled: false,
         fileReadCacheDisabled: true,
+        // The CSI profile declares no record_artifact and its results carry
+        // no artifact metadata to the host.
+        artifactRecordingSupported: false,
       });
       config.setFileSystemService(storage);
       const history = new ManagedRuntimeFileHistory(
@@ -104,6 +116,42 @@ export async function composeManagedCsiFiles(options: {
             throw new Error('Managed CSI history changed during observation.');
           return { history: result, storage: observation };
         },
+        retirementInventory: async () => {
+          if (closed)
+            throw new Error('Managed CSI file composition is closed.');
+          await history.history.drain();
+          const state = history.state();
+          const backendInventory = await storage.retirementInventory(
+            Object.keys(state.files),
+          );
+          for (const file of backendInventory.files) {
+            const expected = state.files[file.path];
+            if (
+              !isDeepStrictEqual(
+                expected,
+                file.pin
+                  ? { digest: file.pin.digest, mode: file.pin.mode }
+                  : null,
+              )
+            )
+              throw new Error(
+                'Managed CSI working file changed before retirement.',
+              );
+          }
+          const mountInventory = await options.mount.retirementInspection();
+          if (closed || !isDeepStrictEqual(state, history.state()))
+            throw new Error('Managed CSI history changed before retirement.');
+          return {
+            history: state,
+            backend: backendInventory,
+            mount: mountInventory,
+          };
+        },
+        retirementCloseInspection: async () => ({
+          compositionClosed: closed,
+          backend: storage.retirementCloseInspection(),
+          mount: await options.mount.retirementInspection(),
+        }),
         close: () => {
           closed = true;
           closing ??= (async () => {

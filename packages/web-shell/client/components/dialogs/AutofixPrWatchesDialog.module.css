@@ -1,0 +1,50 @@
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.description {
+  font-size: 13px;
+  color: var(--muted-foreground);
+}
+
+.loadError {
+  color: var(--error-color);
+  font-size: 13px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.empty {
+  padding: 32px 16px;
+  text-align: center;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--background);
+}
+
+.workspace {
+  font-size: 11px;
+  color: var(--muted-foreground);
+}
+
+.hint {
+  font-size: 12px;
+  color: var(--muted-foreground);
+}

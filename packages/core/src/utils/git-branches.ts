@@ -214,7 +214,7 @@ export function streamGitRecords(
       }
       return true;
     };
-    let pending = Buffer.alloc(0);
+    let pending: Buffer = Buffer.alloc(0);
     child.stdout.on('data', (chunk: Buffer) => {
       if (settled) return;
       pending = pending.length ? Buffer.concat([pending, chunk]) : chunk;

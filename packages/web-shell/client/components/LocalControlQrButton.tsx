@@ -8,6 +8,8 @@ import { useEffect, useState } from 'react';
 import { CopyIcon, QrCodeIcon } from 'lucide-react';
 import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../i18n';
+import { useDaemonAvailabilityController } from '../daemon/availability-context.js';
+import { isDaemonUnavailableError } from '../daemon/availability.js';
 import {
   warnClipboardWriteFailure,
   writeClipboardText,
@@ -33,12 +35,14 @@ export function LocalControlQrButton({
   className,
 }: LocalControlQrButtonProps) {
   const { t } = useI18n();
-  const { baseUrl, token } = useWorkspace();
+  const availability = useDaemonAvailabilityController();
+  const { baseUrl, token, client } = useWorkspace();
   const [open, setOpen] = useState(false);
   const [status, setStatus] = useState<
     LocalControlStatus & { expiresAt?: number; dynamic?: boolean }
   >();
   const [error, setError] = useState('');
+  const [paused, setPaused] = useState(false);
   const [address, setAddress] = useState<string>();
   const [attempt, setAttempt] = useState(0);
   const [now, setNow] = useState(Date.now);
@@ -48,9 +52,26 @@ export function LocalControlQrButton({
     let ignore = false;
     let refreshTimer: ReturnType<typeof setTimeout>;
     let emptyReplies = 0;
+    const clock = setInterval(() => setNow(Date.now()), 1000);
     setStatus(undefined);
     setError('');
+    setPaused(false);
+    const pause = () => {
+      ignore = true;
+      clearTimeout(refreshTimer);
+      clearInterval(clock);
+      setStatus(undefined);
+      setError('');
+      setPaused(true);
+    };
+    const unsubscribe = availability?.subscribe(() => {
+      if (availability.getSnapshot() !== 'available') pause();
+    });
     const refresh = async () => {
+      if (availability && availability.getSnapshot() !== 'available') {
+        pause();
+        return;
+      }
       try {
         let next: LocalControlStatus;
         let dynamic = false;
@@ -61,6 +82,7 @@ export function LocalControlQrButton({
             'POST',
             '/web-shell/pairing',
             address ? { address } : undefined,
+            client,
           );
           dynamic = next.active;
         } catch (failure) {
@@ -78,6 +100,8 @@ export function LocalControlQrButton({
             token,
             'GET',
             '/workspace/local-control',
+            undefined,
+            client,
           );
         }
         if (ignore) return;
@@ -115,18 +139,22 @@ export function LocalControlQrButton({
         }
       } catch (failure) {
         if (ignore) return;
+        if (isDaemonUnavailableError(failure)) {
+          pause();
+          return;
+        }
         setError(failure instanceof Error ? failure.message : String(failure));
         refreshTimer = setTimeout(() => void refresh(), 5000);
       }
     };
     void refresh();
-    const clock = setInterval(() => setNow(Date.now()), 1000);
     return () => {
       ignore = true;
       clearTimeout(refreshTimer);
       clearInterval(clock);
+      unsubscribe?.();
     };
-  }, [open, baseUrl, token, address, attempt]);
+  }, [open, baseUrl, token, client, address, attempt, availability]);
 
   const remaining =
     status?.expiresAt === undefined
@@ -141,6 +169,7 @@ export function LocalControlQrButton({
         if (!next) {
           setStatus(undefined);
           setError('');
+          setPaused(false);
         }
       }}
     >
@@ -157,7 +186,7 @@ export function LocalControlQrButton({
         </Button>
       </PopoverTrigger>
       <PopoverContent align="end" className="w-80">
-        {!status && !error && <Spinner />}
+        {!status && !error && !paused && <Spinner />}
         {status?.active && status.url && remaining !== 0 && (
           <div className="flex flex-col items-center gap-3">
             {remaining !== undefined && (
@@ -269,10 +298,10 @@ export function LocalControlQrButton({
             </Button>
           </div>
         )}
-        {error && (
+        {(error || paused) && (
           <div className="flex flex-col items-start gap-2">
             <p className="text-sm text-destructive" role="alert">
-              {error}
+              {paused ? t('localControl.connectionRetry') : error}
             </p>
             <Button
               variant="outline"

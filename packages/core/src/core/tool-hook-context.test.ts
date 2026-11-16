@@ -6,6 +6,12 @@
 
 import { describe, expect, it } from 'vitest';
 import type { Part } from '@google/genai';
+import { buildTranscriptMarker } from '../tools/agent/transcript-marker.js';
+import {
+  getToolOutputRecovery,
+  setToolOutputRecovery,
+} from '../tools/tool-output-recovery.js';
+import { enforceFunctionResponseBudget } from '../tools/tool-response-finalizer.js';
 import {
   appendToolHookContextToParts,
   boundToolHookContext,
@@ -79,7 +85,40 @@ describe('appendToolHookContextToParts', () => {
     });
     expect(result[2]).toBe(media);
     expect(parts[1].functionResponse!.response).toEqual({ output: 'ok' });
+    expect(getToolOutputRecovery(result[1])).toBeUndefined();
   });
+
+  it.each(['output', 'error'])(
+    'preserves producer recovery through context and another budget (%s)',
+    (key) => {
+      const reason =
+        "Subagent did not complete (terminate mode: TIMEOUT). It ran out of time, so re-running the same call will time out again; raise the agent's `runConfig.max_time_minutes` instead.";
+      const marker = buildTranscriptMarker('/tmp/subagent-transcript.jsonl');
+      const recoveryText = `${reason}\n\n${marker}`;
+      const body = `${recoveryText}\n\n${'a'.repeat(4_000)}`;
+      const part = fr('c1', { [key]: body });
+      setToolOutputRecovery(part, {
+        text: recoveryText,
+        persistedOutputFiles: [],
+      });
+      const responseParts = appendToolHookContextToParts([part], 'c1', 'ctx');
+      const [finalized] = enforceFunctionResponseBudget(
+        [{ callId: 'c1', toolName: 'agent', responseParts }],
+        660,
+        true,
+        false,
+      );
+      const output = finalized.responseParts[0].functionResponse!.response![
+        key
+      ] as string;
+
+      expect(output.length).toBeLessThanOrEqual(660);
+      expect(output).toContain(reason);
+      expect(output).toContain(marker);
+      expect(output).toContain('ctx');
+      expect(part.functionResponse!.response![key]).toBe(body);
+    },
+  );
 
   it('appends to the error text of an error response', () => {
     const [part] = appendToolHookContextToParts(

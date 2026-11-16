@@ -1,49 +1,100 @@
-//! PiP frame-push hook — registered once by `main.rs` when the
-//! `--experimental-pip` flag is on argv.
-//!
-//! The trait + factory live in the `pip-preview` crate so the platform
-//! backends can implement them without depending on `cua-driver-core`.
-//! What lives here is just the per-process callback that the tool
-//! dispatcher uses to push frames after each successful tool call —
-//! a thin shim so `tool.rs` doesn't need to know about `pip-preview`
-//! directly and we keep the dependency graph one-directional.
-//!
-//! The PNG bytes pushed through here come from the existing
-//! `SCREENSHOT_FN` callback (the same source `screenshot.png` uses in
-//! the recording pipeline), so PiP shows exactly what the recorder
-//! captures.
+//! Internal, local-only preview notifications after an authorized observation.
 
-use std::sync::OnceLock;
+use std::sync::{Arc, RwLock};
 
-/// Synthesized per-call frame payload. Kept structurally identical
-/// to `pip_preview::PipFrame` — duplicated here to keep `cua-driver-core`
-/// from importing `pip-preview` (the dependency would be circular once
-/// platform backends pull both crates in).
-pub struct PipHookFrame {
-    pub png_bytes: Vec<u8>,
-    pub action_label: String,
-    pub timestamp_ms: u64,
+#[derive(Clone)]
+pub struct PipTarget {
+    pub session: String,
+    pub pid: i32,
+    pub window_id: u32,
+    /// Rechecks the observation's authority without extending its lifetime.
+    pub is_live: Arc<dyn Fn() -> bool + Send + Sync>,
 }
 
-type PipPushFnBox = Box<dyn Fn(PipHookFrame) + Send + Sync>;
-static PIP_PUSH_FN: OnceLock<PipPushFnBox> = OnceLock::new();
-
-/// Register the platform-side push callback. `main.rs` calls this
-/// once after starting the PiP backend.
-pub fn set_pip_push_fn(f: impl Fn(PipHookFrame) + Send + Sync + 'static) {
-    let _ = PIP_PUSH_FN.set(Box::new(f));
+pub trait PipSink: Send + Sync {
+    fn observe(&self, target: PipTarget);
+    fn remove_session(&self, session: &str);
+    fn remove_runtime(&self, prefix: &str);
 }
 
-/// True when a PiP backend is wired up. Tool dispatcher uses this to
-/// skip the screenshot-bytes path when nothing would consume the
-/// frame (avoiding wasted capture work in the common --pip-off case).
-pub fn pip_enabled() -> bool {
-    PIP_PUSH_FN.get().is_some()
+static SINK: RwLock<Option<Arc<dyn PipSink>>> = RwLock::new(None);
+
+pub fn set_pip_sink(sink: Option<Arc<dyn PipSink>>) {
+    *SINK.write().unwrap() = sink;
 }
 
-/// Push a frame to the PiP window. No-op when no backend is registered.
-pub fn push_pip_frame(frame: PipHookFrame) {
-    if let Some(f) = PIP_PUSH_FN.get() {
-        f(frame);
+pub fn enabled() -> bool {
+    SINK.read().unwrap().is_some()
+}
+
+pub fn observe_target(target: PipTarget) {
+    let sink = SINK.read().unwrap().clone();
+    if let Some(sink) = sink {
+        sink.observe(target);
+    }
+}
+
+pub fn remove_session(session: &str) {
+    let sink = SINK.read().unwrap().clone();
+    if let Some(sink) = sink {
+        sink.remove_session(session);
+    }
+}
+
+pub fn remove_runtime(prefix: &str) {
+    let sink = SINK.read().unwrap().clone();
+    if let Some(sink) = sink {
+        sink.remove_runtime(prefix);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct Receiver(Mutex<Vec<String>>);
+
+    impl PipSink for Receiver {
+        fn observe(&self, target: PipTarget) {
+            if target.session == "pip-hook-test/two" {
+                self.0.lock().unwrap().push(target.session);
+                // Receivers may release the hook during teardown.
+                set_pip_sink(None);
+            }
+        }
+        fn remove_session(&self, session: &str) {
+            if session == "pip-hook-test/one" {
+                self.0.lock().unwrap().push(format!("session:{session}"));
+            }
+        }
+        fn remove_runtime(&self, prefix: &str) {
+            if prefix == "pip-hook-test/runtime/" {
+                self.0.lock().unwrap().push(format!("runtime:{prefix}"));
+            }
+        }
+    }
+
+    #[test]
+    fn replaceable_sink_is_called_without_holding_its_registry_lock() {
+        let first = Arc::new(Receiver::default());
+        set_pip_sink(Some(first.clone()));
+        remove_session("pip-hook-test/one");
+        let second = Arc::new(Receiver::default());
+        set_pip_sink(Some(second.clone()));
+        remove_runtime("pip-hook-test/runtime/");
+        observe_target(PipTarget {
+            session: "pip-hook-test/two".into(),
+            pid: 1,
+            window_id: 2,
+            is_live: Arc::new(|| true),
+        });
+        remove_session("ignored");
+        assert_eq!(*first.0.lock().unwrap(), ["session:pip-hook-test/one"]);
+        assert_eq!(
+            *second.0.lock().unwrap(),
+            ["runtime:pip-hook-test/runtime/", "pip-hook-test/two"]
+        );
     }
 }

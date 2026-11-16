@@ -84,6 +84,12 @@ const MAX_SNAPSHOT_BACKOFF_MULTIPLIER = 4;
 const MAX_TOMBSTONED_IDS = 500;
 const MAX_STICKY_EPHEMERAL_IDS = 500;
 const MAX_WORKSPACE_HASH_BYTES = 100 * 1024 * 1024;
+// Built-in file-write tools whose results auto-record workspace artifacts.
+const WORKSPACE_AUTO_RECORD_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'write_file',
+  'edit',
+  'notebook_edit',
+]);
 const SECRET_TOKEN_VALUE_PATTERN =
   /(?:^|\s)(?:bearer\s+\S{8,}|sk-[A-Za-z0-9_-]{12,}|(?:gh[pousr]|github_pat)_[A-Za-z0-9_/-]{12,}|[a-f0-9]{40,}|[A-Za-z0-9+/]{48,}={0,2})(?:$|\s)/i;
 const RESTORE_FAILED_WARNING_PREFIX = 'artifact snapshot restore failed';
@@ -118,6 +124,11 @@ export interface SessionArtifactInput extends ToolArtifactLike {
   toolName?: string;
   hookEventName?: string;
   clientId?: string;
+  /**
+   * Refresh an existing workspace artifact at `workspacePath`; never create
+   * one. Dropped when `workspacePath` is absent.
+   */
+  updateOnly?: boolean;
 }
 
 type RestoreSessionArtifactInput = Omit<SessionArtifactInput, 'retention'> & {
@@ -368,6 +379,12 @@ export class SessionArtifactStore {
       const warningDetails: SessionArtifactWarningDetail[] = [];
       for (const input of inputs) {
         try {
+          if (await this.isUnmatchedWorkspaceUpdate(input)) {
+            writeStderrLine(
+              `[artifacts] session=${this.sessionId} action=dropped reason="unmatched workspace update" workspacePath=${JSON.stringify(input.workspacePath ?? '')}`,
+            );
+            continue;
+          }
           const expanded = await this.expandWorkspaceDirectoryInput(input);
           for (const item of expanded.inputs) {
             try {
@@ -443,9 +460,13 @@ export class SessionArtifactStore {
           }
 
           try {
-            this.denyCrossClientMutation('upsert', existing.id, existing, {
-              clientId: artifact.clientId,
-            });
+            // Agent file writes keep a client-owned artifact's content in
+            // sync; the merge never takes over its title, source, or owner.
+            if (!isWorkspaceAutoRecordInput(artifact)) {
+              this.denyCrossClientMutation('upsert', existing.id, existing, {
+                clientId: artifact.clientId,
+              });
+            }
           } catch (error) {
             if (validationStrict) {
               throw error;
@@ -664,8 +685,43 @@ export class SessionArtifactStore {
     return undefined;
   }
 
+  /**
+   * An `updateOnly` input, or an auto-recorded file write whose artifact the
+   * user deleted, may only refresh an artifact that already exists. Resolved
+   * before the input is stat'd or hashed so unknown files cost nothing.
+   */
+  private async isUnmatchedWorkspaceUpdate(
+    input: SessionArtifactInput,
+  ): Promise<boolean> {
+    const updateOnly = input.updateOnly === true;
+    if (!updateOnly && !isWorkspaceAutoRecordInput(input)) {
+      return false;
+    }
+    if (!input.workspacePath) {
+      return updateOnly;
+    }
+    const workspacePath = normalizeWorkspacePath(
+      input.workspacePath,
+      await this.getRealWorkspaceCwdForValidation(),
+    );
+    const id = stableSessionArtifactId(
+      this.sessionId,
+      buildIdentityKey({ workspacePath }),
+    );
+    if (!updateOnly && !this.tombstonedIds.has(id)) {
+      return false;
+    }
+    return (
+      !this.artifacts.has(id) &&
+      !this.findPublishedWorkspaceTarget({
+        storage: 'workspace',
+        workspacePath,
+      })
+    );
+  }
+
   private findPublishedWorkspaceTarget(
-    artifact: NormalizedArtifact,
+    artifact: Pick<NormalizedArtifact, 'storage' | 'workspacePath'>,
   ): StoredArtifact | undefined {
     if (artifact.storage !== 'workspace' || !artifact.workspacePath) {
       return undefined;
@@ -685,9 +741,69 @@ export class SessionArtifactStore {
     return undefined;
   }
 
+  async readPersistedLibrary(
+    snapshot: RebuiltSessionArtifactSnapshot,
+  ): Promise<SessionArtifactsEnvelope> {
+    const artifacts: DaemonSessionArtifact[] = [];
+    const warnings = [...snapshot.warnings];
+    for (const artifact of snapshot.artifacts) {
+      if (this.dropLegacyLocalPublished(artifact)) continue;
+      if (artifact.retention === 'pinned') {
+        warnings.push(
+          `pinned artifact ${artifact.id} downgraded to restorable; runtime does not support pinned retention`,
+        );
+      }
+      try {
+        const normalized = await this.normalizeInput(
+          {
+            ...persistedArtifactToInput(artifact),
+            retention:
+              artifact.retention === 'pinned'
+                ? 'restorable'
+                : artifact.retention,
+          },
+          0,
+          artifact.storage === 'published' &&
+            !isNonSnapshotFileLocator(artifact),
+          {
+            metadataBudget: 'persisted',
+            workspaceAccess: 'metadata-only',
+            workspaceStatus: artifact.status,
+            hashWorkspaceContent: false,
+          },
+        );
+        if (normalized.id !== artifact.id)
+          throw new Error('Artifact identity mismatch');
+        artifacts.push(
+          toPublicArtifact({
+            ...normalized,
+            createdAt: artifact.createdAt,
+            updatedAt: artifact.updatedAt,
+            persistedAt: artifact.persistedAt,
+            restoreState: 'restored',
+            persistenceWarning:
+              normalized.status !== 'available'
+                ? 'metadata_only_restore'
+                : undefined,
+          }),
+        );
+      } catch {
+        warnings.push(`artifact ${artifact.id} is unavailable`);
+      }
+    }
+    return {
+      v: 1,
+      sessionId: this.sessionId,
+      artifacts,
+      generatedAt: new Date().toISOString(),
+      limits: { maxArtifacts: this.maxArtifacts },
+      ...(warnings.length ? { warnings } : {}),
+    };
+  }
+
   async remove(
     artifactId: string,
-    options?: { clientId?: string },
+    options?: { clientId?: string; workspaceOwner?: boolean },
   ): Promise<SessionArtifactMutationResult> {
     return this.enqueue(async () => {
       const existing = this.artifacts.get(artifactId);
@@ -697,7 +813,10 @@ export class SessionArtifactStore {
       // Client-created artifacts with an owner require the same client id.
       // Tool/hook artifacts are session-scoped outputs and may be removed by
       // any caller that already passed session mutation auth.
-      this.denyCrossClientMutation('remove', artifactId, existing, options);
+      // Management routes act for the authenticated workspace owner; legacy
+      // client routes cannot grant this authority.
+      if (!options?.workspaceOwner)
+        this.denyCrossClientMutation('remove', artifactId, existing, options);
       const removedAt = new Date().toISOString();
       const removedArtifact = isNonSnapshotPublishedFileUrl(existing)
         ? undefined
@@ -2288,7 +2407,10 @@ function mergeBatchArtifact(
     toolName: refreshDisplay ? next.toolName : existing.toolName,
     source: refreshDisplay ? next.source : existing.source,
     hookEventName: refreshDisplay ? next.hookEventName : existing.hookEventName,
-    toolCallId: refreshDisplay ? next.toolCallId : existing.toolCallId,
+    toolCallId:
+      refreshDisplay || isLatestWorkspaceWrite(existing, next)
+        ? next.toolCallId
+        : existing.toolCallId,
     status: next.status,
     sizeBytes: mergeSizeBytes(existing, next),
     metadata: stripDerivedFromTitleMarker(
@@ -2404,6 +2526,9 @@ function mergeArtifact(
     next.metadata = stripDerivedFromTitleMarker(
       stripExpandedFromDirectoryMarker(next.metadata),
     );
+  }
+  if (isLatestWorkspaceWrite(existing, incoming)) {
+    next.toolCallId = incoming.toolCallId;
   }
 
   coerceMergedPublishedFile(next, wasDurablyJournaled(existing));
@@ -2573,10 +2698,12 @@ function mergeMetadata(
   existing: DaemonSessionArtifact,
   incoming: NormalizedArtifact,
 ): Record<string, string | number | boolean | null> | undefined {
+  // A file write from another producer only re-baselines the content.
+  const fingerprintsOnly = incoming.source !== existing.source;
   if (
     !incoming.metadata ||
     incoming.source === 'hook' ||
-    incoming.source !== existing.source
+    (fingerprintsOnly && !isWorkspaceAutoRecordInput(incoming))
   ) {
     return existing.metadata;
   }
@@ -2586,7 +2713,7 @@ function mergeMetadata(
     if (isAdoptableContentFingerprintKey(key) && merged[key] !== value) {
       merged[key] = value;
       changed = true;
-    } else if (!Object.hasOwn(merged, key)) {
+    } else if (!fingerprintsOnly && !Object.hasOwn(merged, key)) {
       merged[key] = value;
       changed = true;
     }
@@ -2623,11 +2750,41 @@ function countByRetentionSource(
   return counts;
 }
 
+function isWorkspaceAutoRecordInput(
+  artifact: Pick<SessionArtifactInput, 'source' | 'toolName'>,
+): boolean {
+  return (
+    (artifact.source ?? 'tool') === 'tool' &&
+    isWorkspaceAutoRecordToolName(artifact.toolName)
+  );
+}
+
+/**
+ * The latest file write owns the turn attribution even when it may not
+ * refresh the display fields of an artifact another producer created.
+ */
+function isLatestWorkspaceWrite(
+  existing: Pick<NormalizedArtifact, 'storage'>,
+  incoming: NormalizedArtifact,
+): boolean {
+  return (
+    existing.storage === 'workspace' &&
+    isWorkspaceAutoRecordInput(incoming) &&
+    Boolean(incoming.toolCallId)
+  );
+}
+
+function isWorkspaceAutoRecordToolName(toolName: string | undefined): boolean {
+  return (
+    toolName !== undefined && WORKSPACE_AUTO_RECORD_TOOL_NAMES.has(toolName)
+  );
+}
+
 function isVanishedAutoRecordedWorkspaceArtifact(
   artifact: StoredArtifact,
 ): boolean {
   return (
-    artifact.toolName === 'write_file' &&
+    isWorkspaceAutoRecordToolName(artifact.toolName) &&
     artifact.workspacePath !== undefined &&
     artifact.status === 'missing' &&
     artifact.missingFromStatError !== true &&
@@ -2657,7 +2814,7 @@ function needsWorkspaceStatusRefresh(
 
 function shouldRecheckWriteFilePresence(artifact: StoredArtifact): boolean {
   return (
-    artifact.toolName === 'write_file' &&
+    isWorkspaceAutoRecordToolName(artifact.toolName) &&
     (artifact.status === 'available' ||
       (artifact.status === 'missing' &&
         artifact.missingFromStatError !== true &&

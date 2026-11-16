@@ -14,6 +14,10 @@ import { workflowsCommand } from '../ui/commands/workflowsCommand.js';
 import { agentsCommand } from '../ui/commands/agentsCommand.js';
 import { arenaCommand } from '../ui/commands/arenaCommand.js';
 import { approvalModeCommand } from '../ui/commands/approvalModeCommand.js';
+import {
+  logoutCommand,
+  upgradeCommand,
+} from '../ui/commands/subscription-commands.js';
 import { authCommand } from '../ui/commands/authCommand.js';
 import { branchCommand } from '../ui/commands/branchCommand.js';
 import { peersCommand } from '../ui/commands/peers-command.js';
@@ -56,6 +60,7 @@ import { outputStyleCommand } from '../ui/commands/output-style-command.js';
 import { rememberCommand } from '../ui/commands/rememberCommand.js';
 import { planCommand } from '../ui/commands/planCommand.js';
 import { permissionsCommand } from '../ui/commands/permissionsCommand.js';
+import { prCommand } from '../ui/commands/pr-command.js';
 import { trustCommand } from '../ui/commands/trustCommand.js';
 import { quitCommand } from '../ui/commands/quitCommand.js';
 import { recapCommand } from '../ui/commands/recapCommand.js';
@@ -126,15 +131,15 @@ export class BuiltinCommandLoader implements ICommandLoader {
       advisorCommand,
       agentsCommand,
       tasksCommand,
-      // Gated behind isWorkflowsEnabled — feature flag honors
-      // tools.workflowsEnabled, QWEN_CODE_ENABLE_WORKFLOWS (opt-in), and
-      // QWEN_CODE_DISABLE_WORKFLOWS (kill switch). When the flag is off the
-      // command vanishes entirely from typeahead and help, matching the
-      // established convention for experimental builtins.
-      this.config?.isWorkflowsEnabled() ? workflowsCommand : null,
+      this.config?.isWorkflowsEnabled() ||
+      this.config?.isWorkflowModeSupported?.()
+        ? workflowsCommand
+        : null,
       arenaCommand,
       approvalModeCommand,
       authCommand,
+      upgradeCommand,
+      logoutCommand,
       branchCommand,
       peersCommand,
       btwCommand,
@@ -177,6 +182,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       rememberCommand,
       planCommand,
       permissionsCommand,
+      prCommand,
       ...(this.config?.getFolderTrust() ? [trustCommand] : []),
       quitCommand,
       recapCommand,

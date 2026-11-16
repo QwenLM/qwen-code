@@ -463,6 +463,44 @@ describe('<ModelStatsDisplay />', () => {
           pricing,
         );
 
+      it.each([0, 180_000])(
+        'uses authoritative output %i instead of raw aggregate arithmetic',
+        (output) => {
+          const core = makeCore(120_000, 60_000, 120_000);
+          core.tokens.total = 270_000;
+          const { lastFrame } = renderWithMockedStats(
+            {
+              models: { model: mainOnly(core) },
+              tools: baseTools,
+              files: baseFiles,
+              billableOutputTokens: {
+                model: { total: output, bySource: { main: output } },
+              },
+            },
+            { model: { outputPerMillionTokens: 1 } },
+          );
+          expect(lastFrame()).toContain(`$${(output / 1_000_000).toFixed(4)}`);
+        },
+      );
+
+      it('omits Cost when only reasoning is reported and billable usage is zero', () => {
+        const core = makeCore(0, 0, 50_000);
+        core.tokens.total = 0;
+        const { lastFrame } = renderWithMockedStats(
+          {
+            models: { model: mainOnly(core) },
+            tools: baseTools,
+            files: baseFiles,
+            billableOutputTokens: {
+              model: { total: 0, bySource: { main: 0 } },
+            },
+          },
+          { model: { outputPerMillionTokens: 1 } },
+        );
+        expect(lastFrame()).not.toContain('Cost');
+        expect(lastFrame()).not.toContain('Estimated');
+      });
+
       it('should not display Cost section when no pricing and no thoughts', () => {
         const { lastFrame } = renderCostTest(
           { 'gemini-2.5-pro': mainOnly(makeCore(10, 20, 0)) },
@@ -534,6 +572,30 @@ describe('<ModelStatsDisplay />', () => {
         );
         expect(lastFrame()).toContain('Cost');
         expect(lastFrame()).toContain('0.0060');
+      });
+
+      it('bills total - prompt for OpenAI-shaped usage (#15444)', () => {
+        // `makeCore` derives total = prompt + candidates + thoughts, i.e. the
+        // disjoint shape on which both derivations agree, so this leg needs its
+        // own literal tokens: reasoning is already inside `candidates` here.
+        const openAiCore: ModelMetricsCore = {
+          api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 100 },
+          tokens: {
+            prompt: 100_000,
+            candidates: 150_000,
+            total: 250_000,
+            cached: 0,
+            thoughts: 120_000,
+            tool: 0,
+          },
+        };
+        const { lastFrame } = renderCostTest(
+          { 'qwen3-max-001': mainOnly(openAiCore) },
+          // Output at $1/M makes the rendered figure exactly output / 1M.
+          { 'qwen3-max-001': { outputPerMillionTokens: 1 } },
+        );
+        expect(lastFrame()).toContain('$0.1500');
+        expect(lastFrame()).not.toContain('$0.2700');
       });
 
       it('should use raw model name for pricing with subagent attribution', () => {

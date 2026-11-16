@@ -65,6 +65,7 @@ it.each(
     const detachIds: Array<string | null> = [];
     let capabilityAttempts = 0;
     let failRefresh = false;
+    let healthReady = false;
     const json = (value: unknown) =>
       new Response(JSON.stringify(value), {
         headers: { 'Content-Type': 'application/json' },
@@ -74,6 +75,11 @@ it.each(
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = new URL(String(input));
         calls.push(`${init?.method ?? 'GET'} ${url.pathname}`);
+        if (url.pathname === '/health') {
+          return healthReady && !failRefresh
+            ? json({ status: 'ok' })
+            : new Response('Service restarting', { status: 503 });
+        }
         if (url.pathname === '/capabilities') {
           capabilityAttempts++;
           await capabilityReady;
@@ -227,11 +233,19 @@ it.each(
           (button) => button.textContent === 'Try again',
         );
         expect(retry).toBeDefined();
+        healthReady = true;
+        const beforeRetry = calls.length;
         await act(async () => {
           retry!.click();
           await new Promise((resolve) => setTimeout(resolve, 100));
         });
-        expect(container.textContent).toContain('Retry discovery failed');
+        expect(calls.slice(beforeRetry)).toEqual([
+          'GET /health',
+          'GET /capabilities',
+        ]);
+        expect(container.textContent).toContain(
+          initialFailure === 'http' ? 'HTTP 502' : 'Failed to fetch',
+        );
         expect(container.textContent).toContain(
           'The workspace service could not be reached. Check the daemon and try again.',
         );

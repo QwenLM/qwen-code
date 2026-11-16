@@ -1,3 +1,5 @@
+import { randomUUID } from '../../utils/random-uuid.js';
+import type { DaemonClient } from '@qwen-code/sdk/daemon';
 import {
   useCallback,
   useEffect,
@@ -116,6 +118,12 @@ export interface AgentMentionSession {
   sessionId: string;
   /** Unset: the hook's own `cwd`. */
   workspaceCwd?: string;
+  /**
+   * Releases a detached session client. The daemon closes an idle session
+   * when its last client detaches, so this must run only after the mention
+   * posts — the hook calls it in its finally.
+   */
+  release?: () => void;
 }
 
 /**
@@ -176,10 +184,7 @@ const NO_MENTION_TEXTS: readonly string[] = [];
 
 /** Idempotency key for one @-mention post (`[A-Za-z0-9_.:-]{1,128}`). */
 function newClientMessageId(): string {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
-    return `mention:${crypto.randomUUID()}`;
-  const random = Math.random().toString(36).slice(2);
-  return `mention:${Date.now().toString(36)}-${random}`;
+  return `mention:${randomUUID()}`;
 }
 
 export function useAgentChatEntry({
@@ -187,6 +192,7 @@ export function useAgentChatEntry({
   cwd,
   baseUrl,
   token,
+  client,
   sessionApi,
   sessionApiFor,
   ensureSession,
@@ -201,6 +207,7 @@ export function useAgentChatEntry({
   cwd?: string;
   baseUrl: string;
   token?: string;
+  client?: DaemonClient;
   /** The session routes of the same workspace (`cwd`). */
   sessionApi?: SessionAgentsApi;
   /**
@@ -245,8 +252,10 @@ export function useAgentChatEntry({
   >(undefined);
   const api = useMemo(
     () =>
-      enabled && cwd ? createThreadsHttpApi(baseUrl, token, cwd) : undefined,
-    [enabled, cwd, baseUrl, token],
+      enabled && cwd
+        ? createThreadsHttpApi(baseUrl, token, cwd, client)
+        : undefined,
+    [enabled, cwd, baseUrl, token, client],
   );
   const activeApi = useRef(api);
   activeApi.current = api;
@@ -427,6 +436,7 @@ export function useAgentChatEntry({
       setPending(true);
       const submissionId = ++submission.current;
       void (async () => {
+        let releaseDetachedSession: (() => void) | undefined;
         try {
           // No roster (collaboration off here, or the daemon unreachable)
           // means no agent can be addressed: send it as an ordinary message.
@@ -466,6 +476,7 @@ export function useAgentChatEntry({
           const ensured = await ensureSessionRef.current();
           const target: AgentMentionSession | undefined =
             typeof ensured === 'string' ? { sessionId: ensured } : ensured;
+          releaseDetachedSession = target?.release;
           if (!target?.sessionId)
             throw new Error(t('collab.mention.noSession'));
           // A new chat whose workspace picker pointed elsewhere created its
@@ -478,7 +489,12 @@ export function useAgentChatEntry({
               : undefined;
           const routes = otherWorkspace
             ? (sessionApiForRef.current?.(otherWorkspace) ??
-              createSessionAgentsHttpApi(baseUrl, token, otherWorkspace))
+              createSessionAgentsHttpApi(
+                baseUrl,
+                token,
+                otherWorkspace,
+                client,
+              ))
             : sessionApi;
           const targetSessionId = target.sessionId;
           // Counted before posting, so a record that lands quickly is still
@@ -533,6 +549,9 @@ export function useAgentChatEntry({
             error instanceof Error ? error.message : String(error),
           );
         } finally {
+          // After the mention settles (or fails): releasing earlier would
+          // let the daemon close the idle session before the post lands.
+          releaseDetachedSession?.();
           if (submission.current === submissionId) {
             busy.current = false;
             setPending(false);
@@ -541,7 +560,18 @@ export function useAgentChatEntry({
       })();
       return false;
     },
-    [api, sessionApi, cwd, baseUrl, token, onSubmit, listAgents, listSquads, t],
+    [
+      api,
+      sessionApi,
+      cwd,
+      baseUrl,
+      token,
+      client,
+      onSubmit,
+      listAgents,
+      listSquads,
+      t,
+    ],
   );
   return {
     providers,

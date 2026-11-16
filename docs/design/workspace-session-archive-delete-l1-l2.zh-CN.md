@@ -276,11 +276,11 @@ claim 续租和重试只操作 operation，不能随后再获取 Session/journal
 | `.../api/WebShellAgentController.java`、`ApiModels.java`                                                  | Unarchive adapter 与可选能力字段              | 可选 delete 字段                               |
 | `.../service/SessionLifecycleCoordinator.java`                                                            | Archive 不派发                                | 仅对已准入的 L2 路径跳过资源清理               |
 | `.../store/ManagedSessionStore.java`、`ToolPublicationRetentionStore.java`、`ManagedToolResultStore.java` | 不改 retirement                               | 协调 writer 锁顺序、复用退役、验证投影顺序     |
-| `packages/sdk-java/managed-agent-server/src/main/resources/openapi/managed-agent-public-api.openapi.json` | 路由、重放、授权与 capability                 | 状态限制、退役与墓碑行为                       |
+| `packages/managed-agent-server/src/main/resources/openapi/managed-agent-public-api.openapi.json`          | 路由、重放、授权与 capability                 | 状态限制、退役与墓碑行为                       |
 | `packages/web-shell/client/components/managed/generated/managed-agent-api.ts`                             | 重新生成可选字段与 unarchive 路由类型         | 重新生成 delete capability                     |
 
 上表 Java 路径中的 `...` 前缀为
-`packages/sdk-java/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent`。
+`packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent`。
 定向测试扩展既有 lifecycle、operation-store、API、retention 和 Hosted/MySQL 测试。
 核对所有新 capability 的读取点，以及 adapter/service/store 的每个调用方；
 不能留下只有声明却没有赋值的 flag 或 option。

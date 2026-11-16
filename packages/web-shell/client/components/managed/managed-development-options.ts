@@ -1,3 +1,4 @@
+import type { ManagedModelPreset } from './managed-agent-provider';
 import type { JavaManagedAgentProviderOptions } from './java-managed-agent-provider';
 
 /** Local Vite configuration; the production host supplies these provider options directly. */
@@ -25,6 +26,9 @@ export function managedDevelopmentOptions(
       return (
         typeof preset['agentId'] !== 'string' ||
         !preset['agentId'].trim() ||
+        (preset['modelId'] !== undefined &&
+          (typeof preset['modelId'] !== 'string' ||
+            !preset['modelId'].trim())) ||
         typeof preset['label'] !== 'string' ||
         !preset['label'].trim()
       );
@@ -33,9 +37,9 @@ export function managedDevelopmentOptions(
     throw new Error(
       'VITE_MANAGED_AGENT_MODEL_PRESETS must be an array of {agentId, label}',
     );
-  const modelPresets = raw as { agentId: string; label: string }[];
+  const modelPresets = raw as ManagedModelPreset[];
   if (
-    new Set(modelPresets.map((item) => item.agentId)).size !==
+    new Set(modelPresets.map((item) => item.modelId ?? item.agentId)).size !==
     modelPresets.length
   )
     throw new Error('Managed model preset agentId values must be unique');

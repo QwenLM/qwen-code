@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  SYSTEM_REMINDER_CLOSE,
+  SYSTEM_REMINDER_OPEN,
+} from '@qwen-code/qwen-code-core/core/environmentContext.js';
 import type { HistoryItem, HistoryItemWithoutId } from '../types.js';
 
 /**
@@ -136,6 +140,36 @@ export function findLastUserItemIndex(history: readonly HistoryItem[]): number {
   return -1;
 }
 
+/**
+ * The user-authored text of a model-bound prompt, with the one-shot
+ * `<system-reminder>` envelopes the TUI prepends left out.
+ *
+ * `handleFinalSubmit` folds recovered-agent, worktree-restore and
+ * workflow-steering notices into the same string that is queued, sent to the
+ * model, and rendered. The model must keep seeing them; the transcript, the
+ * cross-session recall log and the cancel-restore buffer must not (#11553).
+ * Only a leading run of complete envelopes is removed, so text the user typed
+ * is never touched or swallowed, and a prompt that is nothing but envelopes
+ * keeps its raw text rather than displaying as empty.
+ */
+export function stripLeadingSystemReminders(text: string): string {
+  let rest = text;
+  while (rest.startsWith(SYSTEM_REMINDER_OPEN)) {
+    const close = rest.indexOf(
+      SYSTEM_REMINDER_CLOSE,
+      SYSTEM_REMINDER_OPEN.length,
+    );
+    // Require the closing tag to end its own line (or the string), the shape
+    // every producer emits; anything else is text the user typed.
+    const after = close === -1 ? -1 : close + SYSTEM_REMINDER_CLOSE.length;
+    if (after === -1 || (after < rest.length && rest[after] !== '\n')) {
+      return text;
+    }
+    rest = rest.slice(after).replace(/^\n+/, '');
+  }
+  return rest.trim() === '' ? text : rest.trim();
+}
+
 /** Texts of real (non-steer) user prompts in `history`, oldest-first. */
 export function realUserPromptTexts(history: readonly HistoryItem[]): string[] {
   return history
@@ -146,7 +180,7 @@ export function realUserPromptTexts(history: readonly HistoryItem[]): string[] {
         typeof item.text === 'string' &&
         item.text.trim() !== '',
     )
-    .map((item) => item.text);
+    .map((item) => item.recallText ?? item.text);
 }
 
 /**

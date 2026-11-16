@@ -2,6 +2,8 @@
 
 [English](2026-10-09-managed-workspace-w2-capability.md) | [简体中文](2026-10-09-managed-workspace-w2-capability.zh-CN.md)
 
+Current status: new directory-change admission and UI are retired; only existing operation query/settlement remains. See [retirement design](2026-10-26-retire-managed-cwd-change.md).
+
 ## Problem and scope
 
 The durable same-Workspace cwd routes already exist, but the WebShell Session capability is reserved. A browser needs an explicit per-caller support/permission signal before offering the operation. The BFF portion of the combined W2 PR implements only `capabilities.cwdChange`, marks it implemented in OpenAPI v1.42 and regenerates the WebShell type. The [WebShell design](2026-10-09-managed-workspace-w2-webshell.md) describes the UI and recovery delivered in the same PR. This capability change adds no route, table, operation list, public capability or WorkspaceContext state derivation.

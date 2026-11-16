@@ -22,6 +22,7 @@ import {
   type SessionRecord,
   writeOwnRecord,
 } from '../../../src/peer/registry.js';
+import { arePermissionBitsEnforced } from '../../test-utils/permission-bits.js';
 
 const isPosix = process.platform !== 'win32';
 const isLinux = process.platform === 'linux';
@@ -274,7 +275,7 @@ describe('writeOwnRecord — defensive paths', () => {
     },
   );
 
-  it.runIf(isPosix && process.getuid?.() !== 0)(
+  it.runIf(arePermissionBitsEnforced())(
     'does not replace a record it merely failed to read',
     async () => {
       const shared = plant(

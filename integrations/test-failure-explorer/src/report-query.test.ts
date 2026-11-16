@@ -5,12 +5,14 @@
  */
 
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { MAX_RESULT_CHARS, type ReportSnapshot } from './contracts.js';
 import { importResult, queryReport, showResult } from './report-query.js';
 import { showSchema } from './app-contract.js';
 import { parseVitestReport } from './vitest-report.js';
+import { viewSpecSchema, type ViewSpecV1 } from './view-spec.js';
 
 function snapshot(count = 80, diagnostic = 'Failure evidence'): ReportSnapshot {
   const normalized = parseVitestReport({
@@ -59,8 +61,259 @@ function payload(value: CallToolResult): Record<string, unknown> {
   expect(JSON.stringify(value).length).toBeLessThanOrEqual(MAX_RESULT_CHARS);
   return value.structuredContent!;
 }
+function generatedView(data: ReportSnapshot): ViewSpecV1 {
+  return {
+    schemaVersion: 1,
+    reportId: data.reportId,
+    sections: [
+      {
+        kind: 'failure-list',
+        groupBy: 'file',
+        columns: ['title', 'path'],
+      },
+    ],
+  };
+}
 
 describe('bounded report queries', () => {
+  it('returns the effective view, canonical digest, filtered first page and original evidence', () => {
+    const data = snapshot(80, 'Original failure evidence');
+    const before = JSON.stringify(data);
+    const view = generatedView(data);
+    view.sections = [
+      { kind: 'evidence', initialFailureId: 'f0:a79' },
+      {
+        kind: 'failure-list',
+        groupBy: 'none',
+        columns: ['duration', 'title'],
+        initialTextFilter: 'item 79',
+      },
+    ];
+    const shown = payload(showResult(data, view));
+    expect(shown).toMatchObject({
+      kind: 'show',
+      view,
+      viewResolution: {
+        mode: 'generated',
+        digest: createHash('sha256')
+          .update(JSON.stringify(viewSpecSchema.parse(view)))
+          .digest('hex'),
+      },
+      firstPage: {
+        matchedCount: 1,
+        items: [{ itemId: 'f0:a79' }],
+      },
+      initialDetail: {
+        reportId: data.reportId,
+        kind: 'detail',
+        item: { itemId: 'f0:a79' },
+        field: 'diagnostics',
+        offset: 0,
+        text: 'Original failure evidence',
+      },
+    });
+    expect(JSON.stringify(data)).toBe(before);
+    expect(
+      payload(
+        showResult(data, {
+          sections: view.sections.map((section) =>
+            Object.fromEntries(Object.entries(section).reverse()),
+          ),
+          reportId: view.reportId,
+          schemaVersion: 1,
+        }),
+      )['viewResolution'],
+    ).toEqual(shown['viewResolution']);
+    expect(
+      payload(
+        showResult(data, { ...view, sections: [...view.sections].reverse() }),
+      )['viewResolution'],
+    ).not.toEqual(shown['viewResolution']);
+  });
+
+  it.each([
+    { candidate: null, reason: 'invalid-schema' },
+    { candidate: { schemaVersion: 2 }, reason: 'unsupported-version' },
+    { candidate: { sections: [{ kind: 'html' }] }, reason: 'invalid-schema' },
+    {
+      candidate: { ['x'.repeat(9_000)]: 'untrusted' },
+      reason: 'spec-too-large',
+    },
+  ])(
+    'keeps a bounded fixed view for invalid candidates: $reason',
+    ({ candidate, reason }) => {
+      const data = snapshot(1);
+      const shown = payload(showResult(data, candidate));
+      expect(shown).toMatchObject({
+        viewResolution: { mode: 'fixed', reason },
+        firstPage: { matchedCount: 1 },
+      });
+      expect(shown).not.toHaveProperty('view');
+      expect(shown).not.toHaveProperty('initialDetail');
+      expect(JSON.stringify(shown)).not.toContain('untrusted');
+    },
+  );
+
+  it('rejects foreign, missing and nonfailed references without hiding the report', () => {
+    const data = snapshot(2);
+    data.files[0].items[0].status = 'passed';
+    const view = generatedView(data);
+    const candidates = [
+      { ...view, reportId: `r1_${'b'.repeat(64)}` },
+      ...['f0:a0', 'f0:a99'].flatMap((failureId) => [
+        {
+          ...view,
+          sections: [
+            ...view.sections,
+            { kind: 'evidence', initialFailureId: failureId },
+          ],
+        },
+        {
+          ...view,
+          sections: [
+            ...view.sections,
+            {
+              kind: 'hypothesis-groups',
+              groups: [
+                {
+                  label: 'Cause',
+                  hypothesis: 'Possible cause',
+                  failureIds: [failureId],
+                },
+              ],
+            },
+          ],
+        },
+      ]),
+    ];
+    for (const candidate of candidates) {
+      expect(payload(showResult(data, candidate))).toMatchObject({
+        viewResolution: { mode: 'fixed', reason: 'invalid-reference' },
+        firstPage: { matchedCount: 1, items: [{ itemId: 'f0:a1' }] },
+      });
+    }
+  });
+
+  it('retains generated layout while dropping optional initial detail before the page', () => {
+    const data = snapshot(5, '"\\'.repeat(8_000));
+    data.consistencyWarnings = Array.from({ length: 8 }, () => 'w'.repeat(320));
+    const view = generatedView(data);
+    view.sections.push({ kind: 'evidence', initialFailureId: 'f0:a0' });
+    const shown = payload(showResult(data, view));
+    expect(shown).toMatchObject({
+      viewResolution: { mode: 'generated' },
+      view,
+    });
+    expect(shown).toHaveProperty('firstPage');
+    expect(shown).not.toHaveProperty('initialDetail');
+  });
+
+  it('drops an oversized initial page, then falls back if even the generated envelope exceeds the result budget', () => {
+    const data = snapshot(5);
+    data.source.relativePath = '"\\'.repeat(2_000);
+    data.consistencyWarnings = Array.from({ length: 8 }, () =>
+      '"\\'.repeat(1_000),
+    );
+    for (const item of data.files[0].items) {
+      item.path = '"\\'.repeat(2_000);
+      item.fullName = '"\\'.repeat(2_000);
+    }
+    const view = generatedView(data);
+    const compact = payload(showResult(data, view));
+    expect(compact).toMatchObject({
+      viewResolution: { mode: 'generated' },
+      view,
+    });
+    expect(compact).not.toHaveProperty('firstPage');
+    view.sections.push({
+      kind: 'hypothesis-groups',
+      groups: Array.from({ length: 8 }, () => ({
+        label: 'x'.repeat(120),
+        hypothesis: '"'.repeat(300),
+        failureIds: ['f0:a0'],
+      })),
+    });
+    expect(viewSpecSchema.safeParse(view).success).toBe(true);
+    const fallback = payload(showResult(data, view));
+    expect(fallback).toMatchObject({
+      viewResolution: { mode: 'fixed', reason: 'result-too-large' },
+    });
+    expect(fallback).not.toHaveProperty('view');
+  });
+
+  it('intersects failure IDs with filters and preserves canonical order and pagination', () => {
+    const data = snapshot(150);
+    const failureIds = Array.from(
+      { length: 128 },
+      (_, index) => `f0:a${127 - index}`,
+    );
+    const ids: string[] = [];
+    let offset: number | null = 0;
+    while (offset !== null) {
+      const page = payload(
+        queryReport(data, {
+          kind: 'list',
+          collection: 'failures',
+          failureIds,
+          offset,
+          limit: 50,
+        }),
+      );
+      expect(page['matchedCount']).toBe(128);
+      ids.push(
+        ...(page['items'] as Array<{ itemId: string }>).map(
+          (item) => item.itemId,
+        ),
+      );
+      offset = page['nextOffset'] as number | null;
+    }
+    expect(ids).toEqual([...failureIds].reverse());
+    expect(
+      payload(
+        queryReport(data, {
+          kind: 'list',
+          collection: 'assertions',
+          failureIds,
+          text: 'item 127',
+          status: 'failed',
+        }),
+      ),
+    ).toMatchObject({ matchedCount: 1, items: [{ itemId: 'f0:a127' }] });
+    expect(
+      payload(
+        queryReport(data, {
+          kind: 'list',
+          collection: 'file-errors',
+          failureIds,
+        }),
+      ),
+    ).toMatchObject({ matchedCount: 0 });
+  });
+
+  it.each(
+    [
+      [],
+      ['f0:a0', 'f0:a0'],
+      ['f0:a999'],
+      ['f0:a1'],
+      ['f0:a0', 'f0:a1'],
+      Array.from({ length: 129 }, (_, index) => `f0:a${index}`),
+    ].map((failureIds) => ({ failureIds })),
+  )(
+    'rejects invalid failure filters instead of silently omitting IDs: %j',
+    ({ failureIds }) => {
+      const data = snapshot(150);
+      data.files[0].items[1].status = 'passed';
+      expect(() =>
+        queryReport(data, {
+          kind: 'list',
+          collection: 'failures',
+          failureIds,
+        }),
+      ).toThrow(expect.objectContaining({ code: 'INVALID_QUERY' }));
+    },
+  );
+
   it('shows a fixed view and falls back to a bounded summary when escaped fields exceed the initial page budget', () => {
     const data = snapshot(5);
     data.source.relativePath = '"\\'.repeat(2000);
@@ -164,6 +417,30 @@ describe('bounded report queries', () => {
       queryReport(data, { kind: 'detail', itemId: 'f0:error' }),
     );
     expect(detail['text']).toBe('Fixture module failed while collecting tests');
+    const view = generatedView(data);
+    view.sections.push({ kind: 'evidence', initialFailureId: 'f0:error' });
+    expect(payload(showResult(data, view))).toMatchObject({
+      viewResolution: { mode: 'generated' },
+      initialDetail: { item: { itemId: 'f0:error', kind: 'file-error' } },
+    });
+    expect(
+      payload(
+        queryReport(data, {
+          kind: 'list',
+          collection: 'failures',
+          failureIds: ['f0:error'],
+        }),
+      ),
+    ).toMatchObject({ matchedCount: 1 });
+    expect(
+      payload(
+        queryReport(data, {
+          kind: 'list',
+          collection: 'assertions',
+          failureIds: ['f0:error'],
+        }),
+      ),
+    ).toMatchObject({ matchedCount: 0 });
   });
 
   it('keeps real hostile fixture evidence as bounded plain text', () => {

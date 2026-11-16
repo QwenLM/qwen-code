@@ -13,8 +13,21 @@ import {
 } from '../../utils/errors.js';
 import { getRateLimitErrorDetails } from '../../utils/rateLimit.js';
 import { getTransportCode } from '../../utils/retryErrorClassification.js';
-import { redactProxyError } from '../../utils/runtimeFetchOptions.js';
+import {
+  redactProxyCredentials,
+  redactProxyError,
+} from '../../utils/runtimeFetchOptions.js';
 import type { ErrorHandler, RequestContext } from './types.js';
+import {
+  isSubscriptionSessionExpired,
+  subscriptionErrorMessage,
+} from '../../qwen/subscription-errors.js';
+import {
+  formatSubscriptionQuotaDisplay,
+  subscriptionQuotaDisplay,
+} from '../../utils/subscription-quota.js';
+import { resolveApiErrorRequestId } from '../../utils/errorParsing.js';
+import { AuthType } from '../../utils/auth-type.js';
 
 const debugLogger = createDebugLogger('OPENAI_ERROR');
 export type { ErrorHandler } from './types.js';
@@ -36,6 +49,7 @@ export class EnhancedErrorHandler implements ErrorHandler {
       error: unknown,
       request: GenerateContentParameters,
     ) => boolean = () => false,
+    private readonly authType?: AuthType,
   ) {}
 
   handle(
@@ -44,7 +58,43 @@ export class EnhancedErrorHandler implements ErrorHandler {
     request: GenerateContentParameters,
   ): never {
     const redactedError = redactProxyError(error);
-    const isTimeoutError = this.isTimeoutError(redactedError);
+    const status = getErrorStatus(redactedError);
+    let hasSubscriptionGatewayMessage = false;
+    if (
+      this.authType === AuthType.QWEN_SUBSCRIPTION &&
+      status !== undefined &&
+      status >= 400 &&
+      redactedError instanceof Error &&
+      'error' in redactedError &&
+      redactedError.error &&
+      typeof redactedError.error === 'object'
+    ) {
+      const detail = redactedError.error as Record<string, unknown>;
+      const quota = subscriptionQuotaDisplay(status, detail);
+      if (quota) {
+        Object.assign(redactedError, {
+          subscriptionQuota: {
+            ...quota,
+            requestId: resolveApiErrorRequestId(redactedError),
+          },
+        });
+      }
+      const message =
+        formatSubscriptionQuotaDisplay(quota) ?? detail['message'];
+      if (typeof message === 'string' && message.trim()) {
+        redactedError.message = redactProxyCredentials(message);
+        hasSubscriptionGatewayMessage = true;
+      }
+    }
+    const failure =
+      redactedError instanceof Error ? redactedError.cause : undefined;
+    if (isSubscriptionSessionExpired(failure)) {
+      throw Object.assign(new Error(subscriptionErrorMessage(failure)), {
+        code: failure.code,
+      });
+    }
+    const isTimeoutError =
+      !hasSubscriptionGatewayMessage && this.isTimeoutError(redactedError);
     const errorMessage = this.buildErrorMessage(
       redactedError,
       context,

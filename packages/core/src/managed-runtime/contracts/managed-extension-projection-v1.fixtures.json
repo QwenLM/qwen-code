@@ -13,9 +13,11 @@
     },
     "child_acceptance": null,
     "channel_route": null,
-    "channel_delivery": null
+    "channel_delivery": "channel_delivery"
   },
   "additionalRecordBodies": {
+    "tool_stage": null,
+    "history_maintenance": null,
     "schedule": null,
     "automation_run": "automation_run",
     "session_message": null,
@@ -46,6 +48,7 @@
   "taskKinds": [
     "automation_run",
     "background_shell",
+    "channel_delivery",
     "child_agent",
     "monitor",
     "workflow"

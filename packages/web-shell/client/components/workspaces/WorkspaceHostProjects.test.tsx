@@ -1,7 +1,9 @@
 // @vitest-environment jsdom
-import type { ReactElement } from 'react';
+import { act, type ReactElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../i18n';
+import { DaemonAvailability } from '../../daemon/availability.js';
+import { DaemonAvailabilityContext } from '../../daemon/availability-context.js';
 import { cleanupReact, flushReact, mountReact } from '../../test/reactHarness';
 
 const state = vi.hoisted(() => ({
@@ -11,9 +13,17 @@ const state = vi.hoisted(() => ({
     {
       capabilities: () => Promise<unknown>;
       capabilitiesCalls?: number;
-      listWorkspaceSessionsPage?: (cwd: string) => Promise<unknown>;
+      listWorkspaceSessionsPage?: (
+        cwd: string,
+        options?: Record<string, unknown>,
+      ) => Promise<unknown>;
     }
   >,
+  sessionPages: [] as Array<{
+    origin: string;
+    cwd: string;
+    options: Record<string, unknown>;
+  }>,
   clientConstructs: [] as Array<{ baseUrl: string; token?: string }>,
   openHostedWorkspace: vi.fn(),
 }));
@@ -32,8 +42,8 @@ vi.mock('@qwen-code/sdk/daemon', () => ({
       Promise.reject(new Error(`no daemon for ${this.baseUrl}`));
 
     workspaceByCwd = (cwd: string) => ({
-      listWorkspaceSessionsPage: () =>
-        state.hosts[this.baseUrl]?.listWorkspaceSessionsPage?.(cwd) ??
+      listWorkspaceSessionsPage: (options?: Record<string, unknown>) =>
+        state.hosts[this.baseUrl]?.listWorkspaceSessionsPage?.(cwd, options) ??
         Promise.reject(new Error(`no sessions for ${this.baseUrl}`)),
     });
 
@@ -73,6 +83,7 @@ function registerHost(
   origin: string,
   options: {
     failWith?: Error;
+    features?: string[];
     workspaces?: unknown[];
     sessions?: Record<string, unknown[]>;
   } = {},
@@ -87,10 +98,19 @@ function registerHost(
       : () => {
           const host = state.hosts[origin]!;
           host.capabilitiesCalls = (host.capabilitiesCalls ?? 0) + 1;
-          return Promise.resolve({ workspaces: options.workspaces ?? [] });
+          return Promise.resolve({
+            workspaces: options.workspaces ?? [],
+            features: options.features ?? [],
+          });
         },
-    listWorkspaceSessionsPage: (cwd) =>
-      Promise.resolve({ sessions: options.sessions?.[cwd] ?? [] }),
+    listWorkspaceSessionsPage: (cwd, pageOptions) => {
+      state.sessionPages.push({
+        origin,
+        cwd,
+        options: pageOptions ?? {},
+      });
+      return Promise.resolve({ sessions: options.sessions?.[cwd] ?? [] });
+    },
   };
 }
 
@@ -129,6 +149,7 @@ describe('WorkspaceHostHeading / OtherHostProjects', () => {
     window.history.replaceState({}, '', '/');
     state.baseUrl = '';
     for (const origin of Object.keys(state.hosts)) delete state.hosts[origin];
+    state.sessionPages.length = 0;
     state.clientConstructs.length = 0;
     state.openHostedWorkspace.mockReset();
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
@@ -146,6 +167,42 @@ describe('WorkspaceHostHeading / OtherHostProjects', () => {
     expect(
       others.querySelector('[data-testid="other-host-projects"]'),
     ).toBeNull();
+  });
+
+  it('updates the focused host badge after disconnect, rejected credentials, and recovery', async () => {
+    state.baseUrl = 'http://remote.example:4173';
+    let status = 200;
+    const availability = new DaemonAvailability(
+      state.baseUrl,
+      undefined,
+      async (url) =>
+        Response.json(
+          String(url).endsWith('/health') ? { status: 'ok' } : { features: [] },
+          { status },
+        ),
+    );
+    const heading = renderWithHosts(
+      <DaemonAvailabilityContext.Provider value={availability}>
+        <WorkspaceHostHeading />
+      </DaemonAvailabilityContext.Provider>,
+    );
+    const badge = () =>
+      heading.querySelector('[data-testid="host-focused-badge"]');
+    try {
+      expect(badge()?.textContent).toBe('connected');
+      for (const [code, label] of [
+        [503, 'offline'],
+        [401, 'unauthorized'],
+        [200, 'connected'],
+      ] as const) {
+        status = code;
+        await act(async () => availability.check(true));
+        expect(badge()?.textContent).toBe(label);
+        expect(heading.textContent).toContain('remote.example:4173');
+      }
+    } finally {
+      availability.dispose();
+    }
   });
 
   it('renders live workspaces and sessions from every online host', async () => {
@@ -217,6 +274,87 @@ describe('WorkspaceHostHeading / OtherHostProjects', () => {
       's-b',
       '/opt/repo-b',
     );
+  });
+
+  it("applies each host's own stored question sort only when that host advertises it", async () => {
+    rememberWorkspaceHost('https://host-q.example', []);
+    registerHost('https://host-q.example', {
+      features: ['session_last_user_prompt_sort'],
+      workspaces: [
+        { id: 'wq', cwd: '/srv/repo-q', primary: true, trusted: true },
+      ],
+      sessions: {
+        '/srv/repo-q': [
+          {
+            sessionId: 's-q',
+            workspaceCwd: '/srv/repo-q',
+            displayName: 'Question sort',
+          },
+        ],
+      },
+    });
+    rememberWorkspaceHost('https://host-r.example', []);
+    registerHost('https://host-r.example', {
+      workspaces: [
+        { id: 'wr', cwd: '/srv/repo-r', primary: true, trusted: true },
+      ],
+      sessions: {
+        '/srv/repo-r': [
+          {
+            sessionId: 's-r',
+            workspaceCwd: '/srv/repo-r',
+            displayName: 'Activity sort',
+          },
+        ],
+      },
+    });
+    localStorage.setItem(
+      'web-shell:session-sort:https://host-q.example',
+      'lastUserPromptAt',
+    );
+    localStorage.setItem(
+      'web-shell:session-sort:https://host-r.example',
+      'lastUserPromptAt',
+    );
+    renderWithHosts(<OtherHostProjects />);
+    await settle();
+
+    const queryFor = (cwd: string) =>
+      state.sessionPages.filter((page) => page.cwd === cwd).at(-1);
+    expect(queryFor('/srv/repo-q')?.options.sortBy).toBe('lastUserPromptAt');
+    expect(queryFor('/srv/repo-r')?.options.sortBy).toBeUndefined();
+  });
+
+  it('renders the untitled label for a nameless fanout session', async () => {
+    rememberWorkspaceHost('https://host-n.example', []);
+    registerHost('https://host-n.example', {
+      workspaces: [
+        { id: 'wn', cwd: '/srv/repo-n', primary: true, trusted: true },
+      ],
+      sessions: {
+        '/srv/repo-n': [
+          {
+            sessionId: 'nameless',
+            workspaceCwd: '/srv/repo-n',
+            displayName: '',
+          },
+        ],
+      },
+    });
+    const container = renderWithHosts(
+      <>
+        <WorkspaceHostHeading />
+        <OtherHostProjects onOpenHostSession={vi.fn()} />
+      </>,
+    );
+    await settle();
+
+    const row = sessionRow(container, 'Untitled session');
+    expect(row).not.toBeNull();
+    expect(sessionRow(container, 'nameless')).toBeNull();
+    // The row has no visible id and no details tooltip; the title attribute
+    // keeps the id so two nameless rows stay distinguishable.
+    expect(row!.getAttribute('title')).toContain('nameless');
   });
 
   it('falls back to the legacy navigation when no in-app opener is wired', async () => {

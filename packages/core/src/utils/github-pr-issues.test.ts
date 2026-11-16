@@ -235,7 +235,7 @@ describe('fetchGitHubPullRequestIssues', () => {
       ]),
     });
     expect(mockExecFile).toHaveBeenCalledWith(
-      'gh',
+      expect.stringMatching(/(?:^|[/\\])gh$/),
       [
         'api',
         'graphql',
@@ -254,7 +254,7 @@ describe('fetchGitHubPullRequestIssues', () => {
       expect.any(Function),
     );
     expect(mockExecFile).toHaveBeenCalledWith(
-      'gh',
+      expect.stringMatching(/(?:^|[/\\])gh$/),
       expect.any(Array),
       expect.objectContaining({
         env: expect.not.objectContaining({ GH_REPO: 'other/repo' }),
@@ -262,6 +262,23 @@ describe('fetchGitHubPullRequestIssues', () => {
       expect.any(Function),
     );
   });
+  it('spawns the fallback gh when PATH cannot resolve it', async () => {
+    fs.mkdirSync(path.join(dir, '.git'));
+    const home = path.join(dir, 'home');
+    const binary = path.join(home, '.local', 'bin', 'gh');
+    fs.mkdirSync(path.dirname(binary), { recursive: true });
+    fs.writeFileSync(binary, '');
+    mockGh(() => ({ stdout: ghOutput({ p42: prNode(42, []) }) }));
+
+    await fetchGitHubPullRequestIssues(
+      dir,
+      { PATH: '/nonexistent', HOME: home },
+      [42],
+    );
+
+    expect(mockExecFile.mock.calls[0]?.[0]).toBe(binary);
+  });
+
   it('derives GH_CONFIG_DIR from XDG_CONFIG_HOME without exposing it', async () => {
     // gh's credentials live at $XDG_CONFIG_HOME/gh; the scrubbed env must
     // re-derive GH_CONFIG_DIR (as github-prs does) or gh falls back to

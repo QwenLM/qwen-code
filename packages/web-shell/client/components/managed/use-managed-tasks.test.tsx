@@ -268,6 +268,23 @@ describe('useManagedTasks', () => {
     expect(current.task?.taskId).toBe('task_new');
   });
 
+  it('reads and applies a task of any kind', async () => {
+    const workflow = { ...task, kind: 'workflow' as const };
+    vi.mocked(provider.tasks!.list).mockResolvedValue({
+      data: [workflow],
+      hasMore: false,
+    });
+    vi.mocked(provider.tasks!.get).mockResolvedValue(workflow);
+    await render();
+    await act(async () => current.select(workflow.taskId));
+    expect(current.error).toBeUndefined();
+    expect(current.task?.kind).toBe('workflow');
+    await act(async () =>
+      current.apply({ ...workflow, state: 'cancelled', settledAt: 5 }),
+    );
+    expect(current.page.data[0].state).toBe('cancelled');
+  });
+
   it('does not let event state override the authoritative task snapshot', async () => {
     vi.mocked(provider.tasks!.get).mockResolvedValue({
       ...task,

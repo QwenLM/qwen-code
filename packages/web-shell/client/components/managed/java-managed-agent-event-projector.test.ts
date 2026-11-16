@@ -1,8 +1,8 @@
-import { describe, expect, it, vi } from 'vitest';
+import { getLatestSuccessfulTodos } from '../../utils/todos';
+import { describe, expect, it } from 'vitest';
 import {
   projectJavaAgentEvent,
   projectJavaAgentItem,
-  toTimestamp,
 } from './java-managed-agent-event-projector';
 import { result } from './managed-tool-result.test-fixtures';
 import { managedEventsToMessages } from './managed-session-messages';
@@ -13,12 +13,69 @@ import type {
 } from './java-managed-agent-client';
 
 describe('java managed agent event projector', () => {
-  it('projects a context change without creating or settling a chat message', () => {
+  it('rebuilds attachment-only history from materialized and snapshot attributes without losing bytes', () => {
+    const prompt = [
+      {
+        type: 'resource',
+        resource: {
+          uri: 'managed-input:///notes%201.md',
+          mimeType: 'text/markdown',
+          text: '你好\ncontents',
+        },
+      },
+      { type: 'image', mimeType: 'image/png', data: 'aW1hZ2U=' },
+    ];
+    const item: JavaAgentItem = {
+      itemId: 'user-file',
+      sessionId: 's',
+      turnId: 't',
+      type: 'message',
+      role: 'user',
+      status: 'completed',
+      content: [],
+      attributes: { inputAttachments: prompt },
+      firstSequence: 2,
+      lastSequence: 2,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const snapshot = managedEventsToMessages(projectJavaAgentItem(item), '');
+    const live = projectJavaAgentEvent({
+      schemaVersion: 1,
+      projectionVersion: 1,
+      sequence: 2,
+      eventId: 'accepted',
+      sessionId: 's',
+      turnId: 't',
+      type: 'turn.accepted',
+      createdAt: 1,
+      terminal: false,
+      data: { input: prompt },
+    });
+    expect(snapshot).toEqual(managedEventsToMessages([live!], ''));
+    expect(snapshot[0]).toMatchObject({
+      role: 'user',
+      content: '',
+      files: [
+        {
+          name: 'notes 1.md',
+          mimeType: 'text/markdown',
+          text: '你好\ncontents',
+        },
+      ],
+      images: [{ data: 'aW1hZ2U=', mimeType: 'image/png' }],
+    });
+  });
+  it.each([
+    'session.context.changed',
+    'session.approval.changed',
+    'session.updated',
+  ])('projects %s without creating or settling a chat message', (type) => {
     const context = projectJavaAgentEvent({
       sequence: 2,
       eventId: 'e2',
       sessionId: 's1',
-      type: 'session.context.changed',
+      type,
       createdAt: 2,
       terminal: false,
       data: {
@@ -373,11 +430,6 @@ describe('java managed agent event projector', () => {
     );
   });
 
-  it('uses a safe timestamp fallback for invalid legacy values', () => {
-    vi.spyOn(Date, 'now').mockReturnValue(42);
-    expect(toTimestamp('not-a-date')).toBe(42);
-  });
-
   it('projects a durable message part as one complete delta', () => {
     expect(
       projectJavaAgentItem({
@@ -462,4 +514,61 @@ it('reports cancellation consistently for live and restored result-less tools', 
   expect(liveMessages[0]).toMatchObject({
     tools: [{ status: 'failed', wasCancelled: true }],
   });
+});
+
+it('restores a committed Todo snapshot from live events and materialized Items', () => {
+  const todos = [{ id: 'a', content: 'first', status: 'pending' }];
+  const attributes = {
+    kind: 'tool_call_update',
+    toolCallId: 'call-1',
+    name: 'todo_write',
+    status: 'completed',
+    sourceSequence: 5,
+    itemId: 'todo-item',
+    todoSnapshot: JSON.stringify(todos),
+  };
+  const live = projectJavaAgentEvent({
+    sequence: 5,
+    eventId: 'evt-5',
+    sessionId: 's',
+    turnId: 't',
+    type: 'item.tool_call.updated',
+    createdAt: 5,
+    terminal: false,
+    data: attributes,
+  })!;
+  const replay = projectJavaAgentItem({
+    itemId: 'todo-item',
+    sessionId: 's',
+    turnId: 't',
+    type: 'tool_call',
+    role: 'assistant',
+    status: 'completed',
+    content: [],
+    attributes,
+    firstSequence: 5,
+    lastSequence: 5,
+    createdAt: 5,
+    updatedAt: 5,
+  });
+  for (const events of [[live], replay]) {
+    expect(
+      getLatestSuccessfulTodos(managedEventsToMessages(events, '[truncated]')),
+    ).toEqual(todos);
+  }
+  const stale = {
+    ...live,
+    id: 6,
+    data: {
+      ...attributes,
+      toolName: 'todo_write',
+      sourceSequence: 4,
+      todoSnapshot: '[]',
+    },
+  };
+  expect(
+    getLatestSuccessfulTodos(
+      managedEventsToMessages([live, stale], '[truncated]'),
+    ),
+  ).toEqual(todos);
 });

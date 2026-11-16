@@ -1,6 +1,7 @@
 import { useI18n } from '../../i18n';
 import { DialogShell } from './DialogShell';
 import { Button } from '../ui/button';
+import type { ReactNode } from 'react';
 
 /**
  * The folder step before it can show folders: the daemon's capabilities are
@@ -12,11 +13,13 @@ export function WorkspaceAddStatusDialog({
   tone,
   subtitle,
   onClose,
+  children,
 }: {
   message: string;
   tone: 'status' | 'alert';
   subtitle?: string;
   onClose: () => void;
+  children?: ReactNode;
 }) {
   const { t } = useI18n();
   return (
@@ -27,6 +30,7 @@ export function WorkspaceAddStatusDialog({
       onClose={onClose}
     >
       <div className="flex flex-col gap-5">
+        {children}
         <p role={tone}>{message}</p>
         <div className="flex justify-end gap-2">
           <Button type="button" variant="outline" onClick={onClose}>

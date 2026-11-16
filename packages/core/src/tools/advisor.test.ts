@@ -40,7 +40,10 @@ function forked(
   return { text, jsonResult, usage, model: 'advisor-model' };
 }
 
-function makeConfig(history?: Content[]): Config {
+function makeConfig(
+  history?: Content[],
+  dispatchedInstruction?: string,
+): Config {
   return {
     getModel: () => 'executor-model',
     getAdvisorModel: () => 'advisor-model',
@@ -50,6 +53,11 @@ function makeConfig(history?: Content[]): Config {
     getAllConfiguredModels: () => [],
     getGeminiClient: () => ({
       getChat: () => ({
+        ...(dispatchedInstruction !== undefined && {
+          getDispatchedGenerationConfig: () => ({
+            systemInstruction: dispatchedInstruction,
+          }),
+        }),
         getGenerationConfig: () => ({
           systemInstruction: { parts: [{ text: 'executor system' }] },
           tools: [{ functionDeclarations: [{ name: 'read_file' }] }],
@@ -136,6 +144,13 @@ describe('AdvisorTool', () => {
       { role: 'user', parts: [{ text: 'fix the bug' }] },
       { role: 'model', parts: [{ text: 'I inspected the package.' }] },
     ]);
+  });
+
+  it('reports the dispatched executor instruction after a temporary model request', async () => {
+    await run(makeConfig(undefined, 'temporary model instruction'));
+    expect(forkedInput()['executorSystemInstruction']).toBe(
+      'temporary model instruction',
+    );
   });
 
   it('declares an empty, no-permission tool contract', async () => {
