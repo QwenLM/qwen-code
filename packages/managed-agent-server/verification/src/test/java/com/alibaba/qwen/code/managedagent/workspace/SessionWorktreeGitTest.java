@@ -46,6 +46,45 @@ class SessionWorktreeGitTest {
     private Path repository;
     private SessionWorktreeGit git;
 
+    @org.junit.jupiter.api.condition.EnabledOnOs(org.junit.jupiter.api.condition.OS.MAC)
+    @Test
+    void explicitOfflineUpgradeKeepsAllLegacyAnchorsAndDirtyWork() throws Exception {
+        Plan initial = plan("project", null);
+        String stable = git.prepare(initial);
+        var mapper = new ObjectMapper();
+        Path checkout = target(initial);
+        Path gitdir = Path.of(mapper.readTree(stable).path("gitdir").asText());
+        var legacyPlan = (com.fasterxml.jackson.databind.node.ObjectNode) mapper.valueToTree(initial);
+        legacyPlan.put("rootIdentity", legacyIdentity(root)).put("commonIdentity", legacyIdentity(Path.of(initial.commonDirectory())));
+        Plan saved = mapper.treeToValue(legacyPlan, Plan.class);
+        var identity = mapper.createObjectNode().put("target", legacyIdentity(checkout))
+                .put("gitfile", legacyIdentity(checkout.resolve(".git"))).put("gitdir", gitdir.toString())
+                .put("gitdirIdentity", legacyIdentity(gitdir));
+        Path container = root.resolve(SessionWorktreeGit.CONTAINER);
+        Files.writeString(container.resolve(saved.worktreeId() + ".json"), mapper.writeValueAsString(saved));
+        Files.writeString(container.resolve(saved.worktreeId() + ".ready"), identity.toString());
+        assertThat(mapper.readTree(SessionWorktreeGit.verify(saved, null))).isEqualTo(identity);
+        Files.writeString(checkout.resolve("file.txt"), "valuable after reboot\n");
+        String volume = com.alibaba.qwen.code.runtimebroker.host.MacOsHostIdentity.volumeUuid(root);
+        assertThatThrownBy(() -> SessionWorktreeGit.reattest(saved, identity.toString(), "a".repeat(32)))
+                .isInstanceOf(ManagedAgentException.class);
+        var upgraded = SessionWorktreeGit.reattest(saved, identity.toString(), volume);
+        Plan next = mapper.readValue(upgraded.get("plan"), Plan.class);
+        assertThat(next.storageIdentity()).isEqualTo(saved.storageIdentity());
+        assertThat(next.rootIdentity()).startsWith("macos-volume/1:" + volume);
+        Files.writeString(container.resolve(saved.worktreeId() + ".json"), upgraded.get("plan"));
+        Files.writeString(container.resolve(saved.worktreeId() + ".ready"), upgraded.get("identity"));
+        assertThat(mapper.readTree(SessionWorktreeGit.verify(next, upgraded.get("identity"))))
+                .isEqualTo(mapper.readTree(upgraded.get("identity")));
+        assertThat(Files.readString(checkout.resolve("file.txt"))).isEqualTo("valuable after reboot\n");
+        assertThat(git.cleanupBlocker(next, upgraded.get("identity"))).isEqualTo("worktree_dirty");
+    }
+
+    private static String legacyIdentity(Path path) throws Exception {
+        var attributes = Files.readAttributes(path, java.nio.file.attribute.BasicFileAttributes.class);
+        return attributes.fileKey() + ":" + attributes.creationTime();
+    }
+
     @BeforeEach
     void setup() throws Exception {
         root = root.toRealPath();
