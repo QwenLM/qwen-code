@@ -1155,6 +1155,90 @@ describe('ToolConfirmationMessage', () => {
       expect(frame).toContain('No');
     });
 
+    it('announces an edit diff dropped to a two-row body budget', async () => {
+      // Surrounding chrome for this shape is seven rows (two outer padding, one
+      // body margin, the question, its margin, two options), so nine rows leave
+      // a two-row body: one row for the warning, one for the announcement.
+      const availableTerminalHeight = 9;
+      const { lastFrame } = render(
+        <OverflowProvider>
+          {withProviders(
+            <ToolConfirmationMessage
+              confirmationDetails={{
+                ...editConfirmationDetails,
+                fileDiff: '@@ -1 +1 @@\n-a\n+b',
+                hideAlwaysAllow: true,
+                hideModify: true,
+                warnings: ['Unknown shell safety'],
+              }}
+              config={mockConfig}
+              availableTerminalHeight={availableTerminalHeight}
+              contentWidth={50}
+            />,
+          )}
+          <OverflowProbe />
+        </OverflowProvider>,
+      );
+
+      await vi.waitFor(() => {
+        const frame = lastFrame() ?? '';
+        expect(frame).toMatch(/\.\.\. diff hidden \.\.\./);
+        expect(frame).toContain('overflowing:1');
+      }, WAIT_FOR_FRAME);
+      const frame = lastFrame() ?? '';
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(
+        availableTerminalHeight + 1,
+      );
+      expect(frame).toContain('Unknown shell safety');
+      expect(frame).toContain('Apply this change?');
+      expect(frame).toContain('Yes, allow once');
+    });
+
+    it('counts the edit warnings a one-row body budget cannot show', async () => {
+      // Eight rows leave a one-row body, and the warning side wins that row: the
+      // warning naming the exact action is the one that changes the approval, so
+      // the mode warning is what goes — and it goes announced, not silently.
+      const availableTerminalHeight = 8;
+      const { lastFrame } = render(
+        <OverflowProvider>
+          {withProviders(
+            <ToolConfirmationMessage
+              confirmationDetails={{
+                ...editConfirmationDetails,
+                fileDiff: '@@ -1 +1 @@\n-a\n+b',
+                hideAlwaysAllow: true,
+                hideModify: true,
+                warnings: [
+                  'Unknown shell safety',
+                  'Exact shell command: sed -i s/a/b/ test.txt',
+                ],
+              }}
+              config={mockConfig}
+              availableTerminalHeight={availableTerminalHeight}
+              contentWidth={50}
+            />,
+          )}
+          <OverflowProbe />
+        </OverflowProvider>,
+      );
+
+      await vi.waitFor(() => {
+        const frame = lastFrame() ?? '';
+        expect(frame).toMatch(/\+1 warning\(s\) hidden/);
+        expect(frame).toContain('overflowing:1');
+      }, WAIT_FOR_FRAME);
+      const frame = lastFrame() ?? '';
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(
+        availableTerminalHeight + 1,
+      );
+      // The kept row is truncated to pay for its own count, so assert its head:
+      // the dropped warning would occupy that head instead.
+      expect(frame).toContain('Exact shell command:');
+      expect(frame).not.toContain('Unknown shell safety');
+      expect(frame).toContain('Apply this change?');
+      expect(frame).toContain('Yes, allow once');
+    });
+
     it('resolves ordinary IDE edits but skips confirmations that have no IDE diff', async () => {
       const resolveDiffFromCli = vi.fn().mockResolvedValue(undefined);
       const isDiffingEnabled = vi.fn().mockReturnValue(true);

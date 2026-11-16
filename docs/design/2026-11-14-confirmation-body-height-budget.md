@@ -262,6 +262,12 @@ outright.
   - a long MCP identity at a one-row budget: the two identity rows give way to
     one pinned truncated row, because the sizing box cannot answer a one-row
     ask and would otherwise render past the cap;
+  - an edit body at an extreme budget: with two body rows and one warning the
+    diff gives way to a `... diff hidden ...` announcement, and with one body
+    row and two warnings the warning naming the exact action survives on a
+    pinned row that counts the rest as `+N warning(s) hidden`; both register an
+    overflow, so a dropped diff lights the reveal hint the way a dropped plan
+    does;
   - a plain-text prompt squeezed out by its own footer: the dropped prose is
     announced; and at a budget where the last row is contested, the destination
     footer keeps it and the prose footer is omitted rather than clipping the
