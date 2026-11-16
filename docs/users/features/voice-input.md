@@ -55,6 +55,13 @@ Any of these paths selects the transcription model:
 - Set `voiceModel` in `settings.json` (see the
   [settings reference](../configuration/settings.md#voicemodel)).
 
+For DashScope, the voice route's `baseUrl` is the OpenAI-compatible root
+`https://dashscope.aliyuncs.com/compatible-mode/v1`: the batch model calls
+Chat Completions there, and the streaming models derive their WebSocket from
+the same host. The image generation API root (`.../api/v1`, taught by the
+[Image Generation](./image-generation.md) guide) is **not** a voice base URL
+and breaks both transports.
+
 The route's `baseUrl` must be HTTPS. Loopback endpoints (`http://localhost`,
 `http://127.0.0.1`, `http://[::1]`) are allowed, and a trusted managed HTTP or
 private-network endpoint can be exempted by listing its exact complete URL in
