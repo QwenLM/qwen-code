@@ -540,12 +540,15 @@ authority to certify the round.
    writes a per-round **nonce** to `$HOME/.qwen-verify-nonce` (container-local,
    not the shared mount) and stores only its **sha256** in the gate record
    (`nonceSha256`), never the plaintext. The round MUST read that
-   container-local nonce and echo it into its raw harness logs (e.g. a
-   `container-nonce: <nonce>` line at the start of every harness run), so
-   step 7 and the checker can tie the `mode:"container"` declaration to
-   execution inside this container — a battery run on the host cannot read
-   the container-local nonce, and the record's hash does not reveal it. If
-   the battery cannot run in this container (e.g. a Java-heavy
+   container-local nonce and echo a line beginning `container-nonce: <nonce>`
+   into a log file under the round dir at the start of every harness run —
+   step 7 and the checker match only that prefix and hash the first
+   whitespace-delimited token after it, so any other spelling (a bare nonce,
+   `verify nonce=<value>`, a separate nonce file) is refused. This ties the
+   `mode:"container"` declaration to execution inside this container — a
+   battery run on the host cannot read the container-local nonce, and the
+   record's hash does not reveal it. If the battery cannot run in this
+   container (e.g. a Java-heavy
    round whose image carries no JDK), do NOT declare `mode:"container"`:
    declare `mode:"waived"` with the maintainer's approval instead.
 
@@ -645,10 +648,21 @@ authority to certify the round.
      # declaration; the checker below enforces the same binding authoritatively.
      expected="$(sed -n 's/.*"nonceSha256"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$rd/boundary-gate.json" | head -1)"
      matched=0
-     # sha256sum (GNU) or shasum -a 256 (macOS): the host check runs on either.
-     for val in $(grep -rhF --exclude=boundary-gate.json --exclude=boundary.json -- 'container-nonce:' "$rd" 2>/dev/null | sed 's/.*container-nonce:[[:space:]]*//' | awk '{print $1}'); do
-       if [ "$(printf '%s' "$val" | { sha256sum 2>/dev/null || shasum -a 256; } | cut -d' ' -f1)" = "$expected" ]; then matched=1; break; fi
-     done
+     # Match the checker's semantics (R1-3): the first container-nonce: marker
+     # on a line, its first whitespace-delimited token, trailing CR stripped;
+     # grep -a treats a NUL-containing log as text. Iterate via process
+     # substitution so matched stays in this shell (a pipe would subshell it),
+     # bound the candidate lines, and never word-split/glob-expand PR-controlled
+     # tokens. sha256sum (GNU) or shasum -a 256 (macOS): the host runs either.
+     if [ -n "$expected" ]; then
+       while IFS= read -r line; do
+         rest="${line#*container-nonce:}"
+         read -r val _ <<< "$rest"
+         val="${val%$'\r'}"
+         [ -n "$val" ] || continue
+         if [ "$(printf '%s' "$val" | { sha256sum 2>/dev/null || shasum -a 256; } | cut -d' ' -f1)" = "$expected" ]; then matched=1; break; fi
+       done < <(grep -rahF --exclude=boundary-gate.json --exclude=boundary.json -- 'container-nonce:' "$rd" 2>/dev/null | head -n 1000)
+     fi
      if [ -z "$expected" ] || [ "$matched" -ne 1 ]; then
        echo "round logs carry no container nonce matching the gate record; refusing mode:container — declare mode:waived with the maintainer's approval if the battery ran on the host" >&2; rc=1
      fi

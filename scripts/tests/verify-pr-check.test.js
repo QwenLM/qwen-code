@@ -2536,14 +2536,16 @@ describe('containerNonceErrors (R16-1 / D17-1 / D17-2)', () => {
     expect(containerNonceErrors(boundary, gateWith(), dir)).toEqual([]);
   });
 
-  // A real harness log can exceed 1 MiB; the nonce line is echoed at the
-  // start, so a size cap that skips the whole file would falsely refuse a
+  // R1-2: a real harness log can grow past any whole-file cap; the nonce line
+  // is echoed at the start, so a bounded prefix read must still accept it. A
+  // 17 MiB log (larger than the old 16 MiB whole-file bound) with the nonce on
+  // line 1 is accepted; skipping the file outright would falsely refuse a
   // legitimate round the shell grep accepts.
-  it('accepts a nonce line at the start of a log larger than 1 MiB', () => {
+  it('accepts a nonce line at the start of a 17 MiB log via a bounded prefix', () => {
     const dir = dirWithLog(null);
     writeFileSync(
       join(dir, 'big.log'),
-      `container-nonce: ${NONCE}\n` + 'x'.repeat(2 * 1024 * 1024),
+      `container-nonce: ${NONCE}\n` + 'x'.repeat(17 * 1024 * 1024),
     );
     expect(containerNonceErrors(boundary, gateWith(), dir)).toEqual([]);
   });
@@ -2641,6 +2643,34 @@ describe('containerNonceErrors (R16-1 / D17-1 / D17-2)', () => {
     });
     expect(res.status).toBe(1);
     expect(res.stdout).toMatch(/no container-nonce line whose sha256 matches/);
+  });
+
+  // R1-7: the exemption is the record, not the flag. A local run that passes
+  // --publish-lane with a require-isolation record and no nonce line is still
+  // refused; the ci-lane record the publish job writes stays exempt.
+  it('refuses a no-nonce require-isolation round even under --publish-lane', () => {
+    const dir = makeArtifactDir(validFiles({}));
+    rmSync(join(dir, 'harness.log'));
+    const res = spawnSync(process.execPath, [SCRIPT, '--publish-lane', dir], {
+      encoding: 'utf8',
+      env: { ...process.env, QWEN_VERIFY_CONTEXT: '' },
+    });
+    expect(res.status).toBe(1);
+    expect(res.stdout).toMatch(/no container-nonce line whose sha256 matches/);
+  });
+
+  it('exempts the ci-lane record under --publish-lane without a nonce line', () => {
+    const dir = makeArtifactDir(
+      validFiles({
+        boundaryGate: JSON.stringify({ gate: 'ci-lane', passed: true }),
+      }),
+    );
+    rmSync(join(dir, 'harness.log'));
+    const res = spawnSync(process.execPath, [SCRIPT, '--publish-lane', dir], {
+      encoding: 'utf8',
+      env: { ...process.env, QWEN_VERIFY_CONTEXT: '' },
+    });
+    expect(res.status).toBe(0);
   });
 });
 

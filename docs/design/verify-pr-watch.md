@@ -136,7 +136,12 @@ probe stays a CLI command and the trigger stays a gated scheduled task.
   verdict and its dedup. A late completion for a _different_ head changes
   the top-level view but erases no verification. A corrupt state body is
   refused (exit 1), never silently rewritten from empty lists; the refusal
-  covers unparseable JSON, a non-object and an array. The lists themselves
+  covers unparseable JSON, a non-object, an array, and a well-formed object
+  that carries no state-bearing key (`inFlightHeads`, `verifiedHeads`, …; a
+  legacy `inFlight` counts only as a non-empty string head) — so an identity
+  key plus a misspelled head marker is not read as "no state" and erased. A
+  bare `inFlightHead` is state-bearing and the migration ladder consumes it,
+  blocking a second round on that head. The lists themselves
   are validated lazily — each is filtered on read, and an entry without a
   usable head is dropped — so a malformed list degrades the dedup silently
   rather than being refused. `--start` writes the sha

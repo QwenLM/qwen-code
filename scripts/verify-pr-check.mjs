@@ -23,10 +23,13 @@
  */
 
 import {
+  closeSync,
   existsSync,
   lstatSync,
+  openSync,
   readFileSync,
   readdirSync,
+  readSync,
   realpathSync,
   statSync,
 } from 'node:fs';
@@ -329,10 +332,12 @@ function gateRecordErrors(gateText, { publishLane = false } = {}) {
  * host battery that never ran inside the boundary cannot produce a match.
  */
 function nonceLogMatches(roundDir, expected) {
-  // A safety bound against a PR-planted huge regular file, generous enough
-  // for a real harness log (the shell grep reads whole files too); a file
-  // beyond it is skipped, which fails closed rather than stalling the check.
-  const MAX_FILE_BYTES = 16 * 1024 * 1024;
+  // Read a bounded head of each regular file rather than skipping large files
+  // outright: the battery echoes the nonce at the start of every harness run
+  // (step 5), so a prefix preserves the binding even for a multi-MiB log,
+  // while the byte bound keeps a PR-planted huge file from stalling the check
+  // (R1-2). A symlink is not followed; the declaration and record are skipped.
+  const PREFIX_BYTES = 1024 * 1024;
   const walk = (d) => {
     let entries;
     try {
@@ -355,8 +360,14 @@ function nonceLogMatches(roundDir, expected) {
       }
       let text;
       try {
-        if (statSync(p).size > MAX_FILE_BYTES) continue;
-        text = readFileSync(p, 'utf8');
+        const fd = openSync(p, 'r');
+        try {
+          const buf = Buffer.alloc(PREFIX_BYTES);
+          const n = readSync(fd, buf, 0, PREFIX_BYTES, 0);
+          text = buf.toString('utf8', 0, n);
+        } finally {
+          closeSync(fd);
+        }
       } catch {
         continue;
       }
@@ -1426,9 +1437,12 @@ function main(argv) {
     unreadableKeys,
   });
   // The container nonce corroboration (R16-1) needs the round dir to scan the
-  // battery's logs, so it lives here rather than in checkArtifacts. The CI
-  // publish lane writes its own ci-lane record and is exempt.
-  if (!publisherOwnsBoundary && !publishLane) {
+  // battery's logs, so it lives here rather than in checkArtifacts. The
+  // exemption is the RECORD, not the --publish-lane flag: containerNonceErrors
+  // already exempts the ci-lane record the publish job writes, so a local run
+  // that passes the flag with a require-isolation record is still checked
+  // (R1-7). The CI entry path owns its declaration separately.
+  if (!publisherOwnsBoundary) {
     result.errors.push(
       ...containerNonceErrors(files.boundary, files.boundaryGate, dir),
     );

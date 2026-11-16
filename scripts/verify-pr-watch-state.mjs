@@ -215,16 +215,19 @@ function inFlightEntries(existing) {
   if (Array.isArray(existing?.inFlightHeads)) {
     return existing.inFlightHeads.filter(hasHead);
   }
-  // A hand-written legacy marker may name the head in `inFlight` itself
-  // (a string) rather than `inFlightHead`; accept either spelling so it
-  // still blocks a second round instead of reading as "no round in flight".
+  // A hand-written legacy marker may name the head in `inFlightHead` alone
+  // or in `inFlight` itself (a string); consume either spelling so it still
+  // blocks a second round instead of reading as "no round in flight". The
+  // guard admits a bare `inFlightHead` as state-bearing, so the ladder must
+  // consume it without an `inFlight` companion — otherwise --start reads the
+  // file as empty and erases the marker (R1-1).
   const legacyHead =
     typeof existing?.inFlightHead === 'string' && existing.inFlightHead !== ''
       ? existing.inFlightHead
       : typeof existing?.inFlight === 'string' && existing.inFlight !== ''
         ? existing.inFlight
         : null;
-  if (existing?.inFlight && legacyHead) {
+  if (legacyHead) {
     return [
       {
         head: legacyHead,

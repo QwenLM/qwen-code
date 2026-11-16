@@ -58,9 +58,12 @@ VM 路径**不跑** `--require-isolation` 门禁。这句未限定的话可能�
 `STATE_BEARING_KEYS` = `inFlightHeads`、`inFlightHead`、`inFlight`、`verifiedHeads`、
 `verifiedHead`、`previousHead`、`deferredHeads`、`releasedHeads`、`retiredSeqs`、
 `seqCounter`。`IDENTITY_KEYS` = `pr`、`repo`、`round`、`artifactDir`、`startedAt`、
-`completedAt`、`verdict`、`commentId`。迁移梯（`inFlightEntries`、`verifiedEntries`
-……）不变；D17-3 由钉住其边界的见证关闭（字符串 `inFlight`/`inFlightHead` 可迁移并
-阻挡；`inFlight:true` 或单独对象不行）。
+`completedAt`、`verdict`、`commentId`。守卫的接纳与迁移梯的消费必须一致：
+`inFlightEntries` 既消费字符串 `inFlight`，也消费裸 `inFlightHead`（非空字符串、
+无 `inFlight` 伴随），于是守卫认作承载状态的正文会阻挡第二轮，而不是被读作空并抹掉
+（R1-1）。D17-3 由钉住边界的见证关闭（字符串 `inFlight`/`inFlightHead` 可迁移并阻挡；
+`inFlight:true`、空串或单独对象不行），键分区另以字面量钉住，使跨集合移动的名字先在
+字面量断言上变红、而非随之改变守卫（R1-6）。
 
 ### B —— 记录只存 nonce 哈希；佐证由 checker 强制
 
@@ -68,12 +71,18 @@ VM 路径**不跑** `--require-isolation` 门禁。这句未限定的话可能�
   只写到容器本地 `$HOME/.qwen-verify-nonce`。宿主电池无法从哈希还原明文，因此产不出
   匹配的日志行。
 - `verify-pr-check.mjs` 新增权威的机器强制层：`containerNonceErrors(boundaryText,
-gateText, roundDir)`，由 `runCheck` 调用（轮目录在那里可用，`checkArtifacts` 没
+gateText, roundDir)`，由 `main` 调用（轮目录在那里可用，`checkArtifacts` 没
   有）。对由 `require-isolation` 记录支撑的 `mode:"container"` 声明，要求
   `gate.nonceSha256`（64 位十六进制串）**且**轮日志里有一行 `container-nonce:
 <value>`，其值的 sha256 等于它。扫描遍历轮目录，跳过 `boundary.json` /
-  `boundary-gate.json` 与非常规文件（不跟随符号链接），并对每个文件读取设上限。哈希
-  缺失/不匹配或无匹配行即拒绝容器声明。`ci-lane` 记录与 CI 入口路径豁免。
+  `boundary-gate.json` 与非常规文件（不跟随符号链接），并读取每个常规文件的有界
+  1 MiB 前缀：nonce 在每次 harness 运行开头 echo，故前缀即使对数 MiB 日志也保留绑定，
+  同时让工作量有界（R1-2）。哈希缺失/不匹配或无匹配行即拒绝容器声明。豁免基于**记录**
+  而非 `--publish-lane` 旗标：`containerNonceErrors` 按 gate 名称豁免 `ci-lane` 记录，
+  故本地带该旗标但持 `require-isolation` 记录的运行仍被检查（R1-7）。
+- 容器本地 nonce 写入是门禁的一部分：`$HOME` 不可写或缺失时，门禁在通过行之前以
+  exit 3 失败，而不是静默写下一个明文无处存在的记录、让该轮直到电池跑完才无法认证
+  （R1-4）。
 - step-7 的 shell 预拒绝**保留**但改为基于哈希：从记录取 `nonceSha256`，除非某
   `container-nonce:` 日志行的 sha256 与之匹配，否则在铸声明前拒绝（既有行为级 replay
   用 shim 掉的 node 见证这一先于 checker 的拒绝）。checker 是第二道权威层。step-5 与
@@ -97,7 +106,7 @@ gateText, roundDir)`，由 `runCheck` 调用（轮目录在那里可用，`check
 - `scripts/verify-pr-watch-state.mjs` —— 拆分键集合；收紧形状守卫。
 - `scripts/verify-pr-prepare.mjs` —— 记录 `nonceSha256`，去掉明文 `nonce`；导出
   `requireBoundary` 并加 `{env, exists, home}` 接缝。
-- `scripts/verify-pr-check.mjs` —— `containerNonceErrors` + 日志扫描，由 `runCheck`
+- `scripts/verify-pr-check.mjs` —— `containerNonceErrors` + 日志扫描，由 `main`
   对容器声明调用。
 - `.qwen/skills/verify-pr/SKILL.md` —— step-5 nonce 正文、step-7 基于哈希的预拒绝、
   VM 句限定。
@@ -116,7 +125,12 @@ gateText, roundDir)`，由 `runCheck` 调用（轮目录在那里可用，`check
 - 簇 D（R17-2 活性）、E（R8 长尾）、F（D17-4…14）仍由 #17371 跟踪；本改动不触碰。
 - 核心 `--context` 信任边界与 sha256 内容绑定（#17375）不变。
 - 不新增脚本或 CLI 入口；checker 加一个依赖目录的 nonce 检查，shell 保留其预拒绝
-  （现基于哈希）。`requireBoundary` 仅作可测试性接缝导出，与已导出的检测器一致。
+  （现基于哈希，并与 checker 的首标记/首 token 语义对齐）。`requireBoundary` 仅作可测试性
+  接缝导出，与已导出的检测器一致。
+- 单记录/单 nonce 绑定约束多容器 Java 配方（R1-10）：checker 只读一份记录与一个哈希，
+  故持有 nonce 的容器必须 echo `container-nonce:` 行，电池跑在另一容器的轮次声明
+  `mode:"waived"`（或佐证门禁容器）。该配方的声明步骤已在双语中记录此约束；它是提案，
+  非已发布代码。
 
 ## 待决问题
 

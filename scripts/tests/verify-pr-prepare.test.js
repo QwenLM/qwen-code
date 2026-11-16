@@ -1270,6 +1270,21 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     expect(JSON.stringify(record)).not.toContain(plaintext);
   });
 
+  // R1-4: an unwritable/absent $HOME must fail the gate before the pass line,
+  // not silently write a record whose nonce plaintext exists nowhere (which
+  // would leave the round uncertifiable only after the whole battery ran).
+  it('fails the gate when the container-local nonce cannot be written', () => {
+    const art = makeTmpDir();
+    const missingHome = join(makeTmpDir(), 'no-such-home');
+    const rc = requireBoundary(art, {
+      env: { QWEN_VERIFY_CREDENTIAL_FREE: '1' },
+      exists: (p) => p === '/.dockerenv',
+      home: missingHome,
+    });
+    expect(rc).toBe(3);
+    expect(existsSync(join(art, 'boundary-gate.json'))).toBe(false);
+  });
+
   // R10-20: a self-chosen container= string is a declaration, not an observed
   // boundary. On a bare host it must not mint a passing gate record.
   // Reachable only where no observed marker exists; inside the recipe's

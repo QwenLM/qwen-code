@@ -7059,6 +7059,8 @@ describe('qwen-triage verify hardening round 2', () => {
       spacesInPath = false,
       slashSuffix = '',
       noNonce = false,
+      nonceLine = null,
+      nulLog = false,
     } = {}) => {
       const root = mkdtempSync(join(tmpdir(), 'verify-step7-'));
       // R10-48: a round path with a space exercises the quoted expansions.
@@ -7100,9 +7102,15 @@ describe('qwen-triage verify hardening round 2', () => {
             nonceSha256: createHash('sha256').update(nonce).digest('hex'),
           }),
         );
+        // R1-3 variants: nonceLine overrides the marker line (two-marker,
+        // CRLF); nulLog puts a NUL on a separate line so grep must treat the
+        // log as text (-a) while the nonce token itself stays clean.
+        const tail = nulLog ? 'PASS\x00cell\n' : 'PASS cell\n';
         writeFileSync(
           join(round, 'harness.log'),
-          noNonce ? 'PASS cell\n' : `container-nonce: ${nonce}\nPASS cell\n`,
+          noNonce
+            ? 'PASS cell\n'
+            : `${nonceLine ?? `container-nonce: ${nonce}`}\n${tail}`,
         );
       }
       const calls = join(root, 'calls.log');
@@ -7199,6 +7207,32 @@ describe('qwen-triage verify hardening round 2', () => {
         rmSync(root, { recursive: true, force: true });
       }
     });
+
+    // R1-3: the shell pre-refusal matches the checker's semantics, so these
+    // edge shapes still mint the declaration (first marker's first token, CR
+    // stripped, NUL log read as text) instead of falsely refusing a round the
+    // checker accepts and naming mode:"waived" as the only remedy.
+    const NOUNCE = 'n0nce1234567890abcdef';
+    for (const [name, opts] of [
+      [
+        'a two-marker line (first token wins)',
+        { nonceLine: `container-nonce: ${NOUNCE} container-nonce: deadbeef` },
+      ],
+      ['a CRLF-terminated line', { nonceLine: `container-nonce: ${NOUNCE}\r` }],
+      ['a NUL-containing log', { nulLog: true }],
+    ]) {
+      it(`mints the declaration for ${name}`, () => {
+        const { res, round, root } = replay(opts);
+        try {
+          expect(res.status).toBe(0);
+          expect(readFileSync(join(round, 'boundary.json'), 'utf8')).toContain(
+            '"mode":"container"',
+          );
+        } finally {
+          rmSync(root, { recursive: true, force: true });
+        }
+      });
+    }
 
     // R10-47: a PR-planted symlink at the round dir is refused, the victim
     // is untouched, and the proxy is still torn down.

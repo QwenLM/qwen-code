@@ -987,12 +987,21 @@ export function requireBoundary(
       credentialFree: true,
       nonceSha256: createHash('sha256').update(nonce).digest('hex'),
     };
+    // The plaintext must exist somewhere the battery can read it, or the
+    // record's hash binds a nonce nobody can echo and the round is silently
+    // uncertifiable after the whole battery ran (R1-4). Fail the gate now,
+    // before the pass line, naming $HOME. This refusal is reached only inside
+    // the boundary (a host re-run exits 4 above), so invalidating the record
+    // here does not contradict a record minted inside one.
+    const noncePath = join(home, '.qwen-verify-nonce');
     try {
-      writeFileSync(join(home, '.qwen-verify-nonce'), `${nonce}\n`);
-    } catch {
-      // Best-effort: a home that cannot be written does not fail the gate;
-      // the battery then cannot echo the nonce and the checker refuses the
-      // container claim, which is the safe direction.
+      writeFileSync(noncePath, `${nonce}\n`);
+    } catch (error) {
+      invalidateRecord();
+      return fail(
+        3,
+        `could not write the container-local nonce to ${noncePath} ($HOME unwritable or absent): the round cannot declare mode:"container" without it: ${error.message}`,
+      );
     }
     const tmp = `${recordPath}.${process.pid}.tmp`;
     // A filesystem failure here is the documented exit-3 path, not an

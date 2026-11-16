@@ -93,7 +93,19 @@ claim to mirror the gate's full trigger:
    the seed/gate image. If a model turn runs in a separate `node:22-bookworm`
    container, that container needs its own gate record too — one
    `boundary-gate.json` per PR-code-bearing container, each recording the
-   container it observed.
+   container it observed. **Nonce binding (R16-1, #17371).** The gate record
+   carries only `nonceSha256`; the plaintext lives in the gate container's
+   `$HOME/.qwen-verify-nonce`, and the checker reads ONE record and ONE hash,
+   refusing `mode:"container"` unless a round log carries a `container-nonce:`
+   line whose sha256 matches. The per-container gate records are
+   `checkBoundary` evidence only — they do not multiply the nonce binding. So
+   the container whose `$HOME` holds the nonce (the seed/gate) must echo the
+   `container-nonce:` line into the round dir; the offline battery runs in a
+   different container and cannot read that plaintext. A multi-container round
+   therefore either has the seed/gate container echo the line (the attestation
+   then covers the gate container, not the battery) or declares `mode:"waived"`
+   with the maintainer's approval — it cannot mint `mode:"container"` from the
+   battery container alone.
 2. **Offline Maven repository, seeded inside a boundary.** No host step runs
    a Maven goal against the PR's poms: `mvn install` walks the whole default
    lifecycle, so any plugin execution the PR binds to `compile` or `test`

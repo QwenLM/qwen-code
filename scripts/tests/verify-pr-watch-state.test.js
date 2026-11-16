@@ -1172,6 +1172,35 @@ describe('readState', () => {
     expect(() => readState(root, 1)).not.toThrow();
   });
 
+  // R1-6: pin the partition literally. The acceptance loops below take their
+  // oracle from the exported sets, so a name moved between them would change
+  // the assertion and the behaviour together and stay green; these literals
+  // red first on such a slip.
+  it('pins the identity / state-bearing key partition literally', () => {
+    expect([...IDENTITY_KEYS].sort()).toEqual([
+      'artifactDir',
+      'commentId',
+      'completedAt',
+      'pr',
+      'repo',
+      'round',
+      'startedAt',
+      'verdict',
+    ]);
+    expect([...STATE_BEARING_KEYS].sort()).toEqual([
+      'deferredHeads',
+      'inFlight',
+      'inFlightHead',
+      'inFlightHeads',
+      'previousHead',
+      'releasedHeads',
+      'retiredSeqs',
+      'seqCounter',
+      'verifiedHead',
+      'verifiedHeads',
+    ]);
+  });
+
   // R16-2 (residual): an identity key alone must not satisfy the guard. One
   // identity key plus a misspelled head marker reads as "no state" under the
   // old STATE_KEYS set and lets --start erase the operator's intended marker.
@@ -1240,6 +1269,27 @@ describe('readState', () => {
       startRound(root, { pr: 1, head: HEAD, round: 11, artifactDir: 'r11' })
         .duplicate,
     ).toBe('in-flight');
+    // R1-1: a bare inFlightHead (no inFlight companion) is state-bearing, so
+    // the ladder must consume it too — the marker blocks a second round on
+    // that head and survives the refused start, not read as empty and erased.
+    writeFileSync(
+      statePath(root, 1),
+      JSON.stringify({ pr: 1, inFlightHead: HEAD }),
+    );
+    expect(
+      startRound(root, { pr: 1, head: HEAD, round: 12, artifactDir: 'r12' })
+        .duplicate,
+    ).toBe('in-flight');
+    expect(readState(root, 1).inFlightHead).toBe(HEAD);
+    // The pre-list shape with both keys still migrates and blocks.
+    writeFileSync(
+      statePath(root, 1),
+      JSON.stringify({ pr: 1, inFlight: true, inFlightHead: HEAD }),
+    );
+    expect(
+      startRound(root, { pr: 1, head: HEAD, round: 13, artifactDir: 'r13' })
+        .duplicate,
+    ).toBe('in-flight');
   });
 
   it('--start refuses an unknown-key body exit 1 and leaves it byte-identical', () => {
@@ -1265,7 +1315,8 @@ describe('duplicateHead', () => {
     expect(duplicateHead({ inFlight: true, inFlightHead: HEAD }, HEAD)).toBe(
       'in-flight',
     );
-    expect(duplicateHead({ inFlightHead: HEAD }, HEAD)).toBeNull();
+    // R1-1: a bare inFlightHead is a migratable in-flight marker, not empty.
+    expect(duplicateHead({ inFlightHead: HEAD }, HEAD)).toBe('in-flight');
     expect(duplicateHead(null, HEAD)).toBeNull();
     expect(duplicateHead({ verifiedHead: PREV }, HEAD)).toBeNull();
     // One round per PR: any in-flight entry blocks a different head too.
