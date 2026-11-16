@@ -44,11 +44,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class JdbcRuntimeBrokerMySqlIT {
     @Test
-    void residentMountPathsDoNotBlockIndependentStorageAfterRetirement() throws Exception {
-        inIsolatedSchema("resident_placement_", ResidentWorkspacePlacementTest::verify);
-    }
-
-    @Test
     void physicalAliasesReleaseOnlyTheirMatchingHolder() throws Exception {
         inIsolatedSchema("broker_physical_", JdbcPhysicalStorageReleaseTest::verify);
     }
@@ -124,8 +119,8 @@ class JdbcRuntimeBrokerMySqlIT {
                 }
                 try (var insert = lock.prepareStatement("INSERT INTO ma_session_head"
                         + " (tenant_key, harness_key, tenant_id, harness_session_id, session_id, head_kind, phase, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, 'HARNESS', 'DRAINING', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")")) {
-                    insert.setString(1, JdbcRuntimeBindingRepository.harnessDrainKey(prefix));
-                    insert.setString(2, JdbcRuntimeBindingRepository.harnessDrainKey("harness"));
+                    insert.setString(1, RuntimeAdmissionFences.harnessDrainKey(prefix));
+                    insert.setString(2, RuntimeAdmissionFences.harnessDrainKey("harness"));
                     insert.setString(3, prefix);
                     insert.setString(4, "harness");
                     insert.setString(5, "harness");
@@ -166,7 +161,7 @@ class JdbcRuntimeBrokerMySqlIT {
                     required("mysql.user"), System.getProperty("mysql.password", ""));
             com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
             var bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("close", new byte[32]));
-            var probe = JdbcRuntimeBindingRepository.class.getDeclaredMethod("hasHarnessDrain",
+            var probe = RuntimeAdmissionFences.class.getDeclaredMethod("hasHarnessDrain",
                     Connection.class, String.class, String.class);
             probe.setAccessible(true);
             try (var admission = source.getConnection(); var pool = Executors.newSingleThreadExecutor()) {

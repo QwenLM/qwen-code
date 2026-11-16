@@ -5,6 +5,7 @@
  */
 
 import type { BundledGeneratedUiStatus } from '@qwen-code/qwen-code-core/config/generated-ui.js';
+import type { ChannelWorkflowOrigin } from '@qwen-code/qwen-code-core/utils/invocation-context.js';
 import type {
   ApprovalMode,
   McpAppToolResult,
@@ -18,6 +19,8 @@ import type {
   SessionSourcesResult,
   SessionSourceUpsertResult,
   SessionSourceRemoveResult,
+  GeneratedUiStateSnapshot,
+  GeneratedUiStateWriteResult,
   TurnResultCode,
   TurnResultErrorPayload,
   SessionExternalRecordRequest,
@@ -47,6 +50,7 @@ import type {
 import type { PermissionPolicy } from './permission.js';
 import type { BridgeExecutionEngine } from './bridgeOptions.js';
 import type {
+  DaemonSessionArtifact,
   SessionArtifactInput,
   SessionArtifactMutationResult,
   SessionArtifactsEnvelope,
@@ -605,6 +609,8 @@ export const SESSION_INITIALIZATION_DEADLINE_META_KEY =
   'qwen.daemon.sessionInitializationDeadlineMs';
 export const SESSION_INITIALIZATION_TIMEOUT_ERROR_KIND =
   'session_initialization_timeout';
+export const SESSION_STARTUP_SUBSCRIPTION_MODEL_META_KEY =
+  'qwen.session.startupSubscriptionModel';
 export const SESSION_MODEL_PERSIST_DEFAULT_META_KEY =
   'qwen.session.modelPersistDefault';
 
@@ -844,6 +850,12 @@ export interface BridgeRestoredSession extends BridgeSession {
   state: BridgeSessionState;
   /** Artifact restore warnings surfaced during session load/resume. */
   artifactWarnings?: string[];
+  /**
+   * Restored artifact snapshot embedded in the restore response so clients can
+   * surface a session-level artifact entry before the replay renders. Omitted
+   * when the session has no artifacts.
+   */
+  artifacts?: DaemonSessionArtifact[];
   /** True when response-mode history replay aborted after emitting a prefix. */
   partial?: true;
   /** Agent-provided replay failure detail when `partial` is true. */
@@ -1225,6 +1237,9 @@ export interface BridgeSessionSummary {
   workspaceCwd: string;
   createdAt: string;
   updatedAt?: string;
+  /** Recorded ISO time of the latest real user input on the active main branch.
+   * Absent when unavailable; never substitute createdAt or updatedAt. */
+  lastUserPromptAt?: string;
   displayName?: string;
   titleSource?: 'manual' | 'auto';
   /** Id of the session that spawned this one (via `create_sub_session`), or
@@ -1427,6 +1442,7 @@ export interface BridgeClientRequestContext {
    * wire key from untrusted callers and re-injects it only from this flag.
    */
   channelPrompt?: boolean;
+  channelWorkflowOrigin?: ChannelWorkflowOrigin;
   /** Trusted Channel delivery correlation injected by the daemon prompt
    * route. Never populated from caller-controlled ACP metadata. */
   channelDelivery?: {
@@ -1525,10 +1541,12 @@ export const IMAGE_ONLY_PROMPT_TEXT = '[image]';
 // (`sdk-typescript/src/daemon/ui/types.ts`) and already-written transcripts
 // pin the value, so it must stay `inputAnnotations`.
 export const DAEMON_INPUT_ANNOTATIONS_META_KEY = 'inputAnnotations';
-// Wire twin of channel-base's CHANNEL_PROMPT_META_KEY; the packages have no
-// dependency path between them, so a cross-package test pins the value.
+// Wire twins of channel-base's keys of the same names; the packages have no
+// dependency path between them, so a cross-package test
+// (`channel-prompt-wire-key.test.ts`) pins all three values.
 export const CHANNEL_PROMPT_META_KEY = 'qwen.channel.prompt';
 export const CHANNEL_OUTPUT_MODE_META_KEY = 'qwen.channel.outputMode';
+export const CHANNEL_WORKFLOW_ORIGIN_META_KEY = 'qwen.channel.workflowOrigin';
 
 /**
  * Returned from `recordHeartbeat`. `lastSeenAt` is the server-side
@@ -1886,6 +1904,11 @@ export type BridgeGenerationStreamEvent =
       requestId: string;
       seq: number;
       text: string;
+    }
+  | {
+      /** A retry restarted the answer; text from earlier deltas is void. */
+      type: 'reset';
+      requestId: string;
     }
   | {
       type: 'done';
@@ -2627,6 +2650,28 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   /** Read sanitized LSP server status for a live session. */
   getSessionLspStatus(sessionId: string): Promise<ServeSessionLspStatus>;
 
+  /**
+   * Read one Generated UI card's saved view state on the session's active
+   * branch. A card that was never saved has revision 0 and value null. Throws
+   * `GeneratedUiStateError` when the state cannot be read.
+   */
+  getGeneratedUiState(
+    sessionId: string,
+    cardId: string,
+    context: { clientId: string },
+  ): Promise<GeneratedUiStateSnapshot>;
+
+  /**
+   * Save one card's view state if `baseRevision` is still current; a stale or
+   * oversized write is reported in the result, not thrown.
+   */
+  setGeneratedUiState(
+    sessionId: string,
+    cardId: string,
+    write: { baseRevision: number; value: unknown },
+    context: { clientId: string },
+  ): Promise<GeneratedUiStateWriteResult>;
+
   /** Execute an App-visible tool through the bound session permission pipeline. */
   callMcpAppTool(
     sessionId: string,
@@ -3233,6 +3278,16 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    * session has no other live attaches/subscribers.
    */
   detachClient(sessionId: string, clientId?: string): Promise<void>;
+
+  /**
+   * Suspend one disconnected ACP registration for designated workflow
+   * approvals while its foreground prompt finishes. Returns the release
+   * callback used on stream reattach or before detaching that registration.
+   */
+  suspendClientWorkflowApprovals(
+    sessionId: string,
+    clientId: string,
+  ): (() => void) | undefined;
 
   /** Test/inspection hook: number of live sessions. */
   readonly sessionCount: number;

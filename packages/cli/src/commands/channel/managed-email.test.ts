@@ -67,6 +67,14 @@ beforeEach(() => {
 
 describe('managed-email command workspace resolution', () => {
   it('threads --cwd through channel config resolution, matching the Legacy daemon', async () => {
+    // Keep the resolved config cwd distinct from the raw --cwd so a swap of the
+    // two in the adapter factory is observable (R1-5).
+    vi.mocked(parseConfiguredChannels).mockResolvedValueOnce([
+      {
+        name: 'mail',
+        config: { type: 'email', cwd: '/configured/workspace' },
+      },
+    ] as never);
     const running = handler(argv('/daemon/workspace'));
     await new Promise((resolve) => setImmediate(resolve));
     process.emit('SIGINT');
@@ -75,7 +83,7 @@ describe('managed-email command workspace resolution', () => {
     expect(parseConfiguredChannels).toHaveBeenCalledWith({}, ['mail'], {
       defaultCwd: '/daemon/workspace',
     });
-    expect(adapterInstances).toEqual([{ cwd: '/daemon/workspace' }]);
+    expect(adapterInstances).toEqual([{ cwd: '/configured/workspace' }]);
   });
 
   it('resolves a different state directory per --cwd, pinning the diverge', async () => {

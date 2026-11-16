@@ -56,6 +56,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // the underlying ACP method from unstable_resumeSession to resumeSession.
   unstable_session_resume: { since: 'v1' },
   session_list: { since: 'v1' },
+  session_last_user_prompt_sort: { since: 'v1' },
   session_catalog_batch: { since: 'v1' },
   // Aggregate persisted session counts via
   // `GET /workspace/:id/session-info` (and the plural
@@ -94,6 +95,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   workspace_artifact_library: { since: 'v1' },
   workspace_artifact_library_stream: { since: 'v1' },
   session_sources: { since: 'v1' },
+  generated_ui_state: { since: 'v1' },
   // Daemon emits `slow_client_warning` synthetic frames at 75% queue
   // fill and honors `?maxQueued=N` (range [16, 2048]) on
   // `GET /session/:id/events`. Old daemons silently lack both — SDK
@@ -826,6 +828,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ],
   [
     'session_sources',
+    (toggles) => toggles.sessionArtifactsPersistenceAvailable === true,
+  ],
+  [
+    'generated_ui_state',
     (toggles) => toggles.sessionArtifactsPersistenceAvailable === true,
   ],
   [

@@ -52,12 +52,12 @@ public final class ManagedEventEnvelopes {
     private static final Pattern DIGEST = Pattern.compile("[0-9a-f]{64}");
 
     public static final String KIND_WAKE_REQUESTED = "wake.requested";
-    // Ordered (the failure message joins it) — the frozen contract's 20-kind
-    // vocabulary in fixture order.
+    // Ordered (the failure message joins it) — the journal vocabulary
+    // in fixture order.
     public static final List<String> KINDS = List.of(
             "input.accepted", KIND_WAKE_REQUESTED, "activation.changed",
             "model.attempt", "message.committed", "tool.intent",
-            "action.changed", "tool.receipt", "checkpoint.committed",
+            "action.changed", "tool.receipt", "tool.measured", "checkpoint.committed",
             "context.compacted", "cancel.requested", "turn.settled",
             "config.bound", "lifecycle.changed", "domain.committed",
             "message.delta", "message.retracted", "operation.replayed",

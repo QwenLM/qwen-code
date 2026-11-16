@@ -89,18 +89,55 @@ describe('Subscription transport', () => {
     const controller = new AbortController();
     const result = await client
       .workspaceById('secondary')
-      .activateSubscription({ signal: controller.signal });
+      .activateSubscription({
+        signal: controller.signal,
+        settingsScope: 'user',
+      });
     expect(result.runtimeSync.status).toBe('deferred');
     expect(fetch.mock.calls[0][0]).toBe(
       `${baseUrl}/workspaces/secondary/auth/subscription`,
     );
     const init = fetch.mock.calls[0][1];
     expect(init?.method).toBe('POST');
-    expect(JSON.parse(String(init?.body))).toEqual({});
+    expect(JSON.parse(String(init?.body))).toEqual({ settingsScope: 'user' });
     expect(new Headers(init?.headers).get('Authorization')).toBe(
       'Bearer daemon-token',
     );
     controller.abort();
     expect(init?.signal?.aborted).toBe(true);
+  });
+  it('requests provider settings scope only when standalone activation opts in', async () => {
+    const { client, fetch } = clientWith(200, { modelId: 'qwen3.8-max' });
+    await client.getSubscriptionDefaultModel();
+    fetch.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          modelId: 'qwen3.8-max',
+          runtimeSync: { status: 'failed' },
+        }),
+      ),
+    );
+    const result = await client.getSubscriptionDefaultModel({
+      settingsScope: 'provider',
+    });
+    expect(result.runtimeSync?.status).toBe('failed');
+    expect(
+      fetch.mock.calls.map(([, init]) => JSON.parse(String(init?.body))),
+    ).toEqual([{}, { settingsScope: 'provider' }]);
+  });
+
+  it('can switch a live session without saving defaults again', async () => {
+    const { client, fetch } = clientWith(200, {});
+    const modelId = 'qwen3.8-max(qwen-subscription)';
+    await client.setSessionModel('session', modelId);
+    await client.setSessionModel('session', modelId, undefined, {
+      persistDefault: false,
+    });
+    expect(
+      fetch.mock.calls.map(([, init]) => JSON.parse(String(init?.body))),
+    ).toEqual([
+      { modelId },
+      { modelId, _meta: { 'qwen.session.modelPersistDefault': false } },
+    ]);
   });
 });

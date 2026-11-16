@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { ruPlural } from '../../utils/plural.js';
+
 type TokenUsageMessage =
   | string
   | ((vars?: Record<string, string | number>) => string);
@@ -68,6 +70,12 @@ export const TOKEN_USAGE_MESSAGES_EN: Record<string, TokenUsageMessage> = {
     `p50 ${v?.p50 ?? ''} · p10–p90 ${v?.p10 ?? ''}–${v?.p90 ?? ''} tok/s`,
   'tokenUsage.failuresByKind': (v) => `Failed: ${v?.kinds ?? ''}`,
   'tokenUsage.unavailable': 'Token usage is unavailable for this session.',
+  'tokenUsage.bar.turns': (v) =>
+    `${v?.count ?? 0} ${Number(v?.count) === 1 ? 'turn' : 'turns'}`,
+  'tokenUsage.bar.tokens': (v) => `${v?.count ?? 0} tok`,
+  'tokenUsage.bar.cacheHit': (v) => `${v?.percent ?? 0}% cache hit`,
+  'tokenUsage.bar.detailTokens': (v) =>
+    `Total ${v?.total ?? 0} · Input ${v?.input ?? 0} (cache ${v?.cached ?? 0}) · Output ${v?.output ?? 0}`,
 };
 
 export const TOKEN_USAGE_MESSAGES_ZH: Record<string, TokenUsageMessage> = {
@@ -129,4 +137,78 @@ export const TOKEN_USAGE_MESSAGES_ZH: Record<string, TokenUsageMessage> = {
     `p50 ${v?.p50 ?? ''} · p10–p90 ${v?.p10 ?? ''}–${v?.p90 ?? ''} tok/s`,
   'tokenUsage.failuresByKind': (v) => `失败：${v?.kinds ?? ''}`,
   'tokenUsage.unavailable': '当前会话无法读取 Token 消耗。',
+  'tokenUsage.bar.turns': (v) => `${v?.count ?? 0} 轮`,
+  'tokenUsage.bar.tokens': (v) => `${v?.count ?? 0} tok`,
+  'tokenUsage.bar.cacheHit': (v) => `缓存命中 ${v?.percent ?? 0}%`,
+  'tokenUsage.bar.detailTokens': (v) =>
+    `总计 ${v?.total ?? 0} · 输入 ${v?.input ?? 0}（缓存 ${v?.cached ?? 0}） · 输出 ${v?.output ?? 0}`,
+};
+
+export const TOKEN_USAGE_MESSAGES_RU: Record<string, TokenUsageMessage> = {
+  'tokenUsage.total': 'Всего токенов',
+  'tokenUsage.shareTooltip': (v) => `Доля токенов: ${v?.percent ?? '0.0'}%`,
+  'tokenUsage.avgLatency': 'Средняя задержка',
+  'tokenUsage.firstToken': 'Первый токен',
+  'tokenUsage.generation': 'Генерация',
+  'tokenUsage.outputSpeed': 'Скорость вывода',
+  'tokenUsage.tokensPerSecond': (v) => `${v?.rate ?? ''} ток/с`,
+  'tokenUsage.valueWithRate': (v) =>
+    `${v?.count ?? 0} (${v?.percent ?? '0.0'}%)`,
+  'tokenUsage.cached': 'Кэш',
+  'tokenUsage.cachedDetail': (v) =>
+    `Кэш: ${v?.count ?? 0} (${v?.percent ?? '0.0'}%)`,
+  'tokenUsage.thoughtsDetail': (v) => `Рассуждение: ${v?.count ?? 0}`,
+  'tokenUsage.input': 'Ввод',
+  'tokenUsage.inputWithCacheRate': (v) =>
+    `${v?.count ?? 0} (доля кэша: ${v?.percent ?? '0.0'}%)`,
+  'tokenUsage.loadError': 'Не удалось загрузить расход токенов.',
+  'tokenUsage.models': 'По моделям',
+  'tokenUsage.noData': 'В этой сессии ещё не было вызовов API.',
+  'tokenUsage.noTools': 'В этой сессии ещё не было вызовов инструментов.',
+  'tokenUsage.open': 'Расход токенов сессии',
+  'tokenUsage.output': 'Всего вывода',
+  'tokenUsage.refresh': 'Обновить',
+  'tokenUsage.requests': 'Запросы',
+  'tokenUsage.retry': 'Повторить',
+  'tokenUsage.agents': 'По агентам',
+  'tokenUsage.mainAgent': 'Основной Agent',
+  'tokenUsage.thoughts': 'Рассуждение',
+  'tokenUsage.title': 'Расход токенов',
+  'tokenUsage.toolRow': (v) =>
+    `${v?.count ?? 0} вызовов · ${v?.rate ?? 0}% ок · ${v?.duration ?? ''}`,
+  'tokenUsage.tools': 'Инструменты',
+  'tokenUsage.updatedAt': (v) => `Обновлено ${v?.time ?? ''}`,
+  'tokenUsage.successRate': 'Доля успеха',
+  'tokenUsage.successRateHint':
+    'Вызовы API, вернувшиеся без ошибки. Каждая повторная попытка считается вызовом.',
+  'tokenUsage.successDetail': (v) =>
+    String(v?.failed ?? '0') === '0'
+      ? `Все ${v?.requests ?? 0} ${ruPlural(v?.requests, 'запрос успешен', 'запроса успешны', 'запросов успешны')}`
+      : `${v?.failed} из ${v?.requests ?? 0} ${ruPlural(v?.requests, 'запроса', 'запросов', 'запросов')} не удались`,
+  'tokenUsage.firstTokenDetail': (v) =>
+    `Среднее до первого токена ${v?.duration ?? ''}`,
+  'tokenUsage.modelSharesLabel': 'Доля токенов по моделям',
+  'tokenUsage.trendTitle': 'Скорость во времени',
+  'tokenUsage.trendSeconds': 'секунды',
+  'tokenUsage.trendFailed': 'Ошибка',
+  'tokenUsage.trendNote':
+    'Каждая точка — один запрос; линия — медиана пяти соседей. × отмечает неудачный запрос.',
+  'tokenUsage.trendSummary': (v) =>
+    `${v?.metric ?? ''} на запрос во времени. Медиана: ${v?.models ?? ''}`,
+  'tokenUsage.trendFailure': (v) => `Ошибка · ${v?.kind ?? ''}`,
+  'tokenUsage.trendSpeed': (v) =>
+    `${v?.rate ?? ''} ток/с · первый токен ${v?.ttft ?? ''}`,
+  'tokenUsage.trendTtftOnly': (v) => `Первый токен ${v?.ttft ?? ''}`,
+  'tokenUsage.trendOutput': (v) =>
+    `${v?.count ?? 0} выходных токенов за ${v?.duration ?? ''}`,
+  'tokenUsage.speedSpread': (v) =>
+    `p50 ${v?.p50 ?? ''} · p10–p90 ${v?.p10 ?? ''}–${v?.p90 ?? ''} ток/с`,
+  'tokenUsage.failuresByKind': (v) => `Ошибки: ${v?.kinds ?? ''}`,
+  'tokenUsage.unavailable': 'Расход токенов для этой сессии недоступен.',
+  'tokenUsage.bar.turns': (v) =>
+    `${v?.count ?? 0} ${ruPlural(v?.count, 'ход', 'хода', 'ходов')}`,
+  'tokenUsage.bar.tokens': (v) => `${v?.count ?? 0} ток`,
+  'tokenUsage.bar.cacheHit': (v) => `${v?.percent ?? 0}% попаданий в кэш`,
+  'tokenUsage.bar.detailTokens': (v) =>
+    `Всего ${v?.total ?? 0} · Ввод ${v?.input ?? 0} (кэш ${v?.cached ?? 0}) · Вывод ${v?.output ?? 0}`,
 };

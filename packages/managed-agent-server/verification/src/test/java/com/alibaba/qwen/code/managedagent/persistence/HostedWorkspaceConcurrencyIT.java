@@ -450,7 +450,7 @@ class HostedWorkspaceConcurrencyIT {
     private static ManagedAgentStore store(DriverManagerDataSource source, ManagedAgentProperties properties) {
         var jdbc = new ManagedSchemaJdbcTemplate(source);
         return com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> {},
-                new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+                new JdbcManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
     }
 
     private static ManagedAgentProperties properties(String tenant, Path root, Path state) {
@@ -668,7 +668,7 @@ class HostedWorkspaceConcurrencyIT {
             var bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
             var sessions = new JdbcRuntimeSessionRepository(source);
             var executions = new JdbcToolExecutionRepository(source);
-            var authority = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(new ManagedSchemaJdbcTemplate(source), new DataSourceTransactionManager(source), guard) {
+            var authority = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(new ManagedSchemaJdbcTemplate(source), new DataSourceTransactionManager(source), guard) {
                 private void pause(String stage) {
                     try {
                         Path armed = directory.resolve("armed");

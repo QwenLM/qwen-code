@@ -78,6 +78,82 @@ async function writeOne(
 }
 
 describe('ndJsonStream', () => {
+  it('rejects malformed ACP params before dispatch and keeps the channel usable', async () => {
+    let inputController!: ReadableStreamDefaultController<Uint8Array>;
+    const input = new ReadableStream<Uint8Array>({
+      start(controller) {
+        inputController = controller;
+      },
+    });
+    const responses: AnyMessage[] = [];
+    const decoder = new TextDecoder();
+    const readTextFile = vi.fn().mockResolvedValue({ content: 'ok' });
+    const stream = ndJsonStream(
+      new WritableStream<Uint8Array>({
+        write(chunk) {
+          responses.push(JSON.parse(decoder.decode(chunk)) as AnyMessage);
+        },
+      }),
+      input,
+    );
+    const connection = new ClientSideConnection(
+      () => ({
+        requestPermission: vi.fn(),
+        sessionUpdate: vi.fn(),
+        readTextFile,
+      }),
+      stream,
+    );
+
+    try {
+      inputController.enqueue(
+        encoder.encode(
+          `${JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'fs/read_text_file',
+            params: { sessionId: 'session', path: 42 },
+          })}\n`,
+        ),
+      );
+      await vi.waitFor(() =>
+        expect(responses).toContainEqual(
+          expect.objectContaining({
+            id: 1,
+            error: expect.objectContaining({ code: -32602 }),
+          }),
+        ),
+      );
+      expect(readTextFile).not.toHaveBeenCalled();
+
+      inputController.enqueue(
+        encoder.encode(
+          `${JSON.stringify({
+            jsonrpc: '2.0',
+            id: 2,
+            method: 'fs/read_text_file',
+            params: { sessionId: 'session', path: '/tmp/valid' },
+          })}\n`,
+        ),
+      );
+      await vi.waitFor(() =>
+        expect(responses).toContainEqual({
+          jsonrpc: '2.0',
+          id: 2,
+          result: { content: 'ok' },
+        }),
+      );
+      expect(readTextFile).toHaveBeenCalledOnce();
+      expect(readTextFile).toHaveBeenCalledWith({
+        sessionId: 'session',
+        path: '/tmp/valid',
+      });
+    } finally {
+      inputController.close();
+      await connection.closed;
+    }
+  });
+
   it('round-trips one message', async () => {
     const sent = message('hello', { n: 1 });
     const line = `${JSON.stringify(sent)}\n`;

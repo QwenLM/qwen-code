@@ -8,7 +8,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerOperations;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -128,8 +128,8 @@ public final class WorkspaceMigrationStore {
                     + " VALUES (?, ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE"
                     + " gmt_modified = CASE WHEN fence_operation_id IS NULL THEN VALUES(gmt_modified) ELSE gmt_modified END,"
                     + " fence_operation_id = COALESCE(fence_operation_id, VALUES(fence_operation_id))",
-                    JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage),
-                    JdbcRuntimeBindingRepository.storageFenceKey(tenant), JdbcRuntimeBindingRepository.storageFenceKey(storage),
+                    RuntimeAdmissionFences.storageAliasKey(tenant, storage),
+                    RuntimeAdmissionFences.storageFenceKey(tenant), RuntimeAdmissionFences.storageFenceKey(storage),
                     tenant, storage, id);
             requireOwner();
         });
@@ -381,12 +381,6 @@ public final class WorkspaceMigrationStore {
                 + " ON c.tenant_id = s.tenant_id AND c.session_id = s.session_id WHERE s.tenant_id = ?"
                 + " AND s.workspace_storage_id = ? AND c.namespace = 'SESSION_COMMAND' AND c.state = 'PENDING'") == 0,
                 "migration_work_unsettled");
-        // An open or parked title waits; one a later title superseded, or
-        // one proven never delivered, has settled.
-        check(countIn(reader, "SELECT COUNT(*) FROM ma_session s JOIN ma_operation r"
-                + " ON r.session_scope_key = s.session_scope_key AND r.tenant_id = s.tenant_id AND r.session_id = s.session_id WHERE s.tenant_id = ?"
-                + " AND s.workspace_storage_id = ? AND r.operation_kind = 'RENAME' AND r.state IN ('PENDING', 'RUNNING', 'RECOVERY_BLOCKED')") == 0,
-                "migration_work_unsettled");
         // A child Workspace's worktree records absolute paths of this root
         // (#13753 I1): it must be merged or discarded before the storage
         // moves. A conflicted one keeps only refs, which move with it.
@@ -395,7 +389,7 @@ public final class WorkspaceMigrationStore {
                 "migration_work_unsettled");
         check(reader.queryForObject("SELECT COUNT(*) FROM ma_session_worktree WHERE physical_key IN"
                         + " (SELECT physical_key FROM ma_storage WHERE alias_key = ?) AND state <> 'REMOVED'", Integer.class,
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage)) == 0,
+                RuntimeAdmissionFences.storageAliasKey(tenant, storage)) == 0,
                 "migration_work_unsettled");
         long now = reader.queryForObject("SELECT UNIX_TIMESTAMP(), EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6))",
                 (row, index) -> Math.addExact(Math.multiplyExact(row.getLong(1), 1000), row.getLong(2) / 1000));
@@ -456,7 +450,7 @@ public final class WorkspaceMigrationStore {
     private void clearFence() {
         // The same index as owner(), which already locked this row.
         check(jdbc.update("UPDATE ma_storage SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", fence_operation_id = NULL"
-                + " WHERE alias_key = ? AND fence_operation_id = ?", JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage),
+                + " WHERE alias_key = ? AND fence_operation_id = ?", RuntimeAdmissionFences.storageAliasKey(tenant, storage),
                 id) == 1, "migration_conflict");
     }
 

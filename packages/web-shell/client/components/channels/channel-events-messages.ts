@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { ruPlural } from '../../utils/plural.js';
+
 type ChannelEventsMessage =
   | string
   | ((vars?: Record<string, string | number>) => string);
@@ -58,6 +60,11 @@ export const CHANNEL_EVENTS_MESSAGES_EN: Record<string, ChannelEventsMessage> =
       `${v?.count ?? 0} consecutive binding scan${v?.count === 1 ? '' : 's'}`,
     'channelEvents.sessions': (v) =>
       `${v?.count ?? 0} session${v?.count === 1 ? '' : 's'} listed`,
+    // Both numbers, not just the reason: 199/200 is a near-boundary trip on a
+    // shared token while 12/200 means mentions are about to starve, and the
+    // reserve confirms what is actually in force after an operator edits it.
+    'channelEvents.budget': (v) =>
+      `budget ${v?.remaining ?? 0} remaining, reserve ${v?.reserve ?? 0}`,
     'channelEvents.openTarget': (v) => `Open ${v?.target ?? ''} on GitHub`,
     'channelEvents.openSession': 'Open session',
   };
@@ -104,6 +111,62 @@ export const CHANNEL_EVENTS_MESSAGES_ZH: Record<string, ChannelEventsMessage> =
     'channelEvents.session': (v) => `会话 ${v?.id ?? ''}`,
     'channelEvents.streak': (v) => `连续 ${v?.count ?? 0} 次绑定扫描`,
     'channelEvents.sessions': (v) => `列出 ${v?.count ?? 0} 个会话`,
+    'channelEvents.budget': (v) =>
+      `预算剩余 ${v?.remaining ?? 0}，预留 ${v?.reserve ?? 0}`,
     'channelEvents.openTarget': (v) => `在 GitHub 上打开 ${v?.target ?? ''}`,
     'channelEvents.openSession': '打开会话',
+  };
+
+export const CHANNEL_EVENTS_MESSAGES_RU: Record<string, ChannelEventsMessage> =
+  {
+    'channelEvents.title': 'События Channel',
+    'channelEvents.subtitle':
+      'Что сделал каждый Channel: что принял или пропустил, что опубликовал, как двигались его задачи и как прошли опросы.',
+    'channelEvents.refresh': 'Обновить',
+    'channelEvents.filterChannel': 'Channel',
+    'channelEvents.allChannels': 'Все каналы',
+    'channelEvents.filterType': 'Тип',
+    'channelEvents.typeAll': 'Все',
+    'channelEvents.type.inbound': 'Входящие',
+    'channelEvents.type.outbound': 'Исходящие',
+    'channelEvents.type.task': 'Задача',
+    'channelEvents.type.poll': 'Опрос',
+    'channelEvents.outcome.accepted': 'Принято',
+    'channelEvents.outcome.skipped': 'Пропущено',
+    'channelEvents.outcome.posted': 'Опубликовано',
+    'channelEvents.outcome.suppressed': 'Подавлено',
+    'channelEvents.outcome.posting': 'Публикация',
+    'channelEvents.outcome.failed': 'Ошибка',
+    'channelEvents.outcome.failed_ambiguous':
+      'Ошибка (возможно, уже опубликовано)',
+    'channelEvents.outcome.ok': 'OK',
+    'channelEvents.outcome.degraded': 'С ограничениями',
+    'channelEvents.outcome.recovered': 'Восстановлено',
+    'channelEvents.outcome.running': 'Выполняется',
+    'channelEvents.outcome.delivered': 'Доставлено',
+    'channelEvents.outcome.retired': 'Снято',
+    'channelEvents.outcome.reply_pending': 'Ответ ожидает',
+    'channelEvents.outcome.cancelled': 'Отменено',
+    'channelEvents.emptyTitle': 'Событий пока нет',
+    'channelEvents.emptyDescription':
+      'События появляются, как только Channel опрашивает, получает сообщение или публикует ответ.',
+    'channelEvents.errorTitle': 'Не удалось загрузить события Channel',
+    'channelEvents.unavailable':
+      'События Channel требуют управления Channel в этой рабочей области.',
+    'channelEvents.truncated': 'Более ранние события не показаны.',
+    'channelEvents.loading': 'Загрузка событий…',
+    'channelEvents.duration': (v) => `${v?.ms ?? 0} мс`,
+    'channelEvents.notifications': (v) =>
+      `${v?.count ?? 0} ${ruPlural(v?.count, 'уведомление', 'уведомления', 'уведомлений')}`,
+    'channelEvents.moreFiltered': (v) =>
+      `ещё ${v?.count ?? 0} отфильтровано в этом опросе`,
+    'channelEvents.session': (v) => `сессия ${v?.id ?? ''}`,
+    'channelEvents.streak': (v) =>
+      `${v?.count ?? 0} ${ruPlural(v?.count, 'последовательное сканирование привязок', 'последовательных сканирования привязок', 'последовательных сканирований привязок')}`,
+    'channelEvents.sessions': (v) =>
+      `${v?.count ?? 0} ${ruPlural(v?.count, 'сессия в списке', 'сессии в списке', 'сессий в списке')}`,
+    'channelEvents.budget': (v) =>
+      `бюджет: осталось ${v?.remaining ?? 0}, резерв ${v?.reserve ?? 0}`,
+    'channelEvents.openTarget': (v) => `Открыть ${v?.target ?? ''} на GitHub`,
+    'channelEvents.openSession': 'Открыть сессию',
   };

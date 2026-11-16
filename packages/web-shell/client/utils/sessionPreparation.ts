@@ -6,6 +6,7 @@ import {
 import type {
   DaemonSessionClient,
   ReasoningSelection,
+  SessionStartupConfig,
 } from '@qwen-code/sdk/daemon';
 import { WEB_SHELL_SESSION_SOURCE_TYPE } from '../constants/sessions';
 
@@ -17,6 +18,7 @@ type PromptSessionActions = {
     getCurrentWorkspaceCwd?: () => string | undefined;
     sessionContext?: DaemonProductSessionContext;
     modelServiceId?: string;
+    startupConfig?: SessionStartupConfig;
     approvalMode?: DaemonApprovalMode;
     sourceType?: string;
     worktree?: { slug?: string };
@@ -60,6 +62,7 @@ function isSupersededSessionLoad(error: unknown): boolean {
 export async function createAndAttachSessionForPrompt({
   sessionActions,
   modelId,
+  startupConfig,
   reasoningEffort,
   modeId,
   planMode = false,
@@ -78,6 +81,7 @@ export async function createAndAttachSessionForPrompt({
 }: {
   sessionActions: PromptSessionActions;
   modelId?: string;
+  startupConfig?: SessionStartupConfig;
   reasoningEffort?: ReasoningSelection;
   modeId?: string;
   planMode?: boolean;
@@ -143,6 +147,7 @@ export async function createAndAttachSessionForPrompt({
           getCurrentWorkspaceCwd,
           sessionContext,
           sourceType: sessionSourceType,
+          ...(startupConfig ? { startupConfig } : {}),
           ...(approvalMode ? { approvalMode } : {}),
           ...(worktree ? { worktree } : {}),
           ...(branch ? { branch } : {}),

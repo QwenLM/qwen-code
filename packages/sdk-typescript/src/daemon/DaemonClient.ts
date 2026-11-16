@@ -17,6 +17,7 @@ import {
   MCP_RESTART_CLIENT_HEADROOM_MS,
 } from '@qwen-code/acp-bridge/mcpTimeouts';
 import { CHANNEL_CONTROL_DEFAULT_TIMEOUT_MS } from '@qwen-code/acp-bridge/channelControlTimeouts';
+import { SESSION_MODEL_PERSIST_DEFAULT_META_KEY } from '@qwen-code/acp-bridge/bridgeTypes';
 import { DaemonAuthFlow } from './DaemonAuthFlow.js';
 import { isDaemonSessionPrInfo } from './session-pr.js';
 import { DaemonHttpError } from './DaemonHttpError.js';
@@ -31,7 +32,14 @@ import { RestSseTransport } from './RestSseTransport.js';
 import { DaemonCapabilityMissingError } from './types.js';
 import type {
   DaemonAgentMutationResult,
+  DaemonMemoryImportPreview,
+  DaemonMemoryImportRequest,
+  DaemonMemoryImportSection,
+  DaemonMemoryImportSource,
+  DaemonMemoryImportTask,
   DaemonMcpAppToolCall,
+  DaemonGeneratedUiState,
+  DaemonGeneratedUiStateWriteResult,
   DaemonMcpAppToolResult,
   DaemonAuthProviderId,
   DaemonAuthProviderCatalog,
@@ -78,6 +86,8 @@ import type {
   DaemonSessionTranscriptPageOptions,
   DaemonSessionTurnIndexPage,
   DaemonSessionTurnIndexPageOptions,
+  DaemonSessionTurnHooksPageOptions,
+  DaemonSessionTurnHooksPage,
   SideTaskSessionRequest,
   DaemonSubagentSessionResolution,
   DaemonSessionGroup,
@@ -206,6 +216,8 @@ import type {
   DaemonChannelPairingApprovalResult,
   DaemonChannelPairingApprovalsSnapshot,
   DaemonChannelPairingRequestsSnapshot,
+  DaemonChannelQrLoginStartResult,
+  DaemonChannelQrLoginView,
   DaemonChannelPairingRevocationRequest,
   DaemonChannelPairingRevocationResult,
   DaemonChannelEventsQuery,
@@ -480,6 +492,7 @@ const CAPABILITY_PREFLIGHT_TTL_MS = 60_000;
 // Provider mutations persist before their bounded runtime sync. A default
 // client deadline could report failure while the daemon still completes it.
 const DEFAULT_PROVIDER_MUTATION_TIMEOUT_MS = 0;
+const SUBSCRIPTION_ACTIVATION_TIMEOUT_MS = 65_000;
 const DEFAULT_SESSION_RESTORE_TIMEOUT_MS = 70_000;
 const SESSION_RESTORE_TIMEOUT_HEADROOM_MS = 10_000;
 const VOICE_TRANSCRIPTION_DEFAULT_TIMEOUT_MS = 65_000;
@@ -1200,7 +1213,12 @@ export class DaemonClient {
         );
       }
     }
-    return new DaemonHttpError(res.status, body, `${label}: ${detail}`);
+    return new DaemonHttpError(
+      res.status,
+      body,
+      `${label}: ${detail}`,
+      res.headers.get('Retry-After') ?? undefined,
+    );
   }
 
   private async jsonRequest<T>(
@@ -1481,7 +1499,10 @@ export class DaemonClient {
 
   async requireCapability(capability: string): Promise<void> {
     let supported: boolean;
-    if (capability === 'session_source_metadata') {
+    if (
+      capability === 'session_source_metadata' ||
+      capability === 'session_last_user_prompt_sort'
+    ) {
       while (
         this.capabilitiesRequest ||
         !this.capabilityFeatures ||
@@ -1726,11 +1747,18 @@ export class DaemonClient {
     );
   }
 
-  async workspaceGitCheckout(ref: string): Promise<DaemonGitCheckoutResult> {
+  async workspaceGitCheckout(
+    ref: string,
+    opts?: { stash?: boolean; force?: boolean },
+    // The stash/force flows chain several git commands server-side, each
+    // with its own budget, so callers can outsize the client's default
+    // fetch timeout instead of aborting mid-flow while the daemon runs on.
+    timeoutMs?: number,
+  ): Promise<DaemonGitCheckoutResult> {
     return await this.jsonRequest<DaemonGitCheckoutResult>(
       '/workspace/git/checkout',
       'POST /workspace/git/checkout',
-      { method: 'POST', body: { ref }, mode: 'rest' },
+      { method: 'POST', body: { ref, ...opts }, mode: 'rest', timeoutMs },
     );
   }
 
@@ -3305,7 +3333,10 @@ export class DaemonClient {
   async listStandaloneSessionsPage(
     options: DaemonStandaloneSessionListOptions = {},
   ): Promise<DaemonStandaloneSessionListPage> {
+    if (options?.sortBy !== undefined)
+      await this.requireCapability('session_last_user_prompt_sort');
     const query = new URLSearchParams();
+    if (options?.sortBy !== undefined) query.set('sortBy', options.sortBy);
     if (options.cursor !== undefined) query.set('cursor', options.cursor);
     if (options.pageSize !== undefined) {
       query.set('size', String(options.pageSize));
@@ -3604,6 +3635,7 @@ export class DaemonClient {
   async listWorkspaceSessions(
     workspaceCwd: string,
     options?: {
+      sortBy?: 'updatedAt' | 'lastUserPromptAt';
       pageSize?: number;
       archiveState?: DaemonSessionArchiveState;
       parentSessionId?: string;
@@ -3619,6 +3651,8 @@ export class DaemonClient {
     workspaceCwd: string,
     options?: DaemonSessionListPageOptions,
   ): Promise<DaemonSessionListPage> {
+    if (options?.sortBy !== undefined)
+      await this.requireCapability('session_last_user_prompt_sort');
     if (options?.sourceType !== undefined || options?.sourceId !== undefined) {
       await this.requireCapability('session_source_metadata');
     }
@@ -3636,6 +3670,7 @@ export class DaemonClient {
       ),
     );
     const query = new URLSearchParams({ size: String(pageSize) });
+    if (options?.sortBy !== undefined) query.set('sortBy', options.sortBy);
     if (options?.cursor !== undefined) {
       query.set('cursor', options.cursor);
     }
@@ -3660,12 +3695,14 @@ export class DaemonClient {
     if (options?.liveOnly === true) {
       query.set('liveOnly', '1');
     }
-    // The ACP session/list mapping does not carry liveOnly; force native REST
-    // rather than silently serving persisted history.
+    // The ACP session/list mapping carries neither liveOnly nor sortBy; force
+    // native REST rather than silently serving a different result.
     return await this.jsonRequest<DaemonSessionListPage>(
       `/workspace/${urlEncode(workspaceCwd)}/sessions?${query.toString()}`,
       'GET /workspace/sessions',
-      options?.liveOnly === true ? { mode: 'rest' } : {},
+      options?.liveOnly === true || options?.sortBy !== undefined
+        ? { mode: 'rest' }
+        : {},
     );
   }
 
@@ -3679,6 +3716,8 @@ export class DaemonClient {
     request: DaemonSessionCatalogRequest,
     opts?: { signal?: AbortSignal; timeoutMs?: number },
   ): Promise<DaemonSessionCatalogResult> {
+    if (request.options?.sortBy !== undefined)
+      await this.requireCapability('session_last_user_prompt_sort');
     const { pageSize, ...options } = request.options ?? {};
     return await this.jsonRequest<DaemonSessionCatalogResult>(
       '/sessions/catalog',
@@ -3853,6 +3892,18 @@ export class DaemonClient {
         clientId: opts.clientId,
         mode: 'rest',
       },
+    );
+  }
+
+  async getSessionTurnHooksPage(
+    sessionId: string,
+    promptId: string,
+    opts: DaemonSessionTurnHooksPageOptions = {},
+  ): Promise<DaemonSessionTurnHooksPage> {
+    return this.jsonRequest<DaemonSessionTurnHooksPage>(
+      `/session/${urlEncode(sessionId)}/turns/${urlEncode(promptId)}/hooks${turnIndexPageSuffix(opts)}`,
+      'GET /session/:id/turns/:promptId/hooks',
+      { clientId: opts.clientId, mode: 'rest' },
     );
   }
 
@@ -4100,7 +4151,8 @@ export class DaemonClient {
   }
 
   /**
-   * Read the current in-memory runtime status for one live daemon session.
+   * Read one live session's runtime status and optional persisted
+   * summary metadata.
    */
   async sessionStatus(
     sessionId: string,
@@ -5708,6 +5760,8 @@ export class DaemonClient {
         }
         return (await res.json()) as DaemonSkillToggleResult;
       },
+      undefined,
+      'rest',
     );
   }
 
@@ -5739,6 +5793,8 @@ export class DaemonClient {
         }
         return (await res.json()) as DaemonSkillBatchToggleResult;
       },
+      undefined,
+      'rest',
     );
   }
 
@@ -5762,6 +5818,7 @@ export class DaemonClient {
     return this.jsonRequest('/workspace/skills/install', 'Skill', {
       method: 'POST',
       body: request,
+      mode: 'rest',
     });
   }
 
@@ -5772,7 +5829,7 @@ export class DaemonClient {
     return this.jsonRequest(
       `/workspace/skills/${urlEncode(skillName)}?scope=${scope}`,
       'Skill',
-      { method: 'DELETE' },
+      { method: 'DELETE', mode: 'rest' },
     );
   }
 
@@ -6638,6 +6695,49 @@ export class DaemonClient {
     );
   }
 
+  startWorkspaceChannelQrLogin(
+    name: string,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelQrLoginStartResult> {
+    return this.jsonRequest<DaemonChannelQrLoginStartResult>(
+      `/workspace/channels/${urlEncode(name)}/qr-login`,
+      'POST /workspace/channels/:name/qr-login',
+      {
+        method: 'POST',
+        clientId: opts?.clientId,
+        timeoutMs: opts?.timeoutMs ?? CHANNEL_CONTROL_DEFAULT_TIMEOUT_MS,
+        mode: 'rest',
+      },
+    );
+  }
+
+  workspaceChannelQrLogin(
+    loginId: string,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelQrLoginView> {
+    return this.jsonRequest<DaemonChannelQrLoginView>(
+      `/workspace/channel-qr-logins/${urlEncode(loginId)}`,
+      'GET /workspace/channel-qr-logins/:loginId',
+      { clientId: opts?.clientId, timeoutMs: opts?.timeoutMs, mode: 'rest' },
+    );
+  }
+
+  cancelWorkspaceChannelQrLogin(
+    loginId: string,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelQrLoginView> {
+    return this.jsonRequest<DaemonChannelQrLoginView>(
+      `/workspace/channel-qr-logins/${urlEncode(loginId)}`,
+      'DELETE /workspace/channel-qr-logins/:loginId',
+      {
+        method: 'DELETE',
+        clientId: opts?.clientId,
+        timeoutMs: opts?.timeoutMs ?? CHANNEL_CONTROL_DEFAULT_TIMEOUT_MS,
+        mode: 'rest',
+      },
+    );
+  }
+
   private workspaceChannelAction(
     name: string,
     action: 'start' | 'stop' | 'restart',
@@ -6808,13 +6908,19 @@ export class DaemonClient {
     sessionId: string,
     modelId: string,
     clientId?: string,
+    options?: { persistDefault: false },
   ): Promise<SetModelResult> {
     return await this.fetchWithTimeout(
       `${this.baseUrl}/session/${urlEncode(sessionId)}/model`,
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
-        body: JSON.stringify({ modelId }),
+        body: JSON.stringify({
+          modelId,
+          ...(options?.persistDefault === false
+            ? { _meta: { [SESSION_MODEL_PERSIST_DEFAULT_META_KEY]: false } }
+            : {}),
+        }),
       },
       async (res) => {
         if (!res.ok) {
@@ -7483,21 +7589,30 @@ export class DaemonClient {
   }
 
   async getSubscriptionDefaultModel(
-    opts: { signal?: AbortSignal } = {},
-  ): Promise<{ modelId: string }> {
+    opts: { signal?: AbortSignal; settingsScope?: 'provider' } = {},
+  ): Promise<{
+    modelId: string;
+    runtimeSync?: DaemonModelProviderRuntimeSyncResult;
+  }> {
     const route = '/auth/subscription/model';
     return this.fetchWithTimeout(
       `${this.baseUrl}${route}`,
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }),
-        body: '{}',
+        body: JSON.stringify({ settingsScope: opts.settingsScope }),
         signal: opts.signal,
       },
       async (res) => {
         if (!res.ok) throw await this.failOnError(res, `POST ${route}`);
-        return (await res.json()) as { modelId: string };
+        return (await res.json()) as {
+          modelId: string;
+          runtimeSync?: DaemonModelProviderRuntimeSyncResult;
+        };
       },
+      opts.settingsScope === 'provider' && !this.hasExplicitFetchTimeout
+        ? SUBSCRIPTION_ACTIVATION_TIMEOUT_MS
+        : undefined,
     );
   }
 
@@ -7848,6 +7963,58 @@ export class DaemonClient {
         timeoutMs: 310_000,
         mode: 'rest',
       },
+    );
+  }
+
+  getGeneratedUiState(
+    sessionId: string,
+    cardId: string,
+    clientId: string,
+  ): Promise<DaemonGeneratedUiState> {
+    return this.jsonRequest(
+      `/session/${urlEncode(sessionId)}/generated-ui/state/${urlEncode(cardId)}`,
+      'GET /session/:id/generated-ui/state/:cardId',
+      { clientId, mode: 'rest' },
+    );
+  }
+
+  /** Stale and oversized writes resolve with their outcome; other failures throw. */
+  async setGeneratedUiState(
+    sessionId: string,
+    cardId: string,
+    write: { baseRevision: number; value: unknown },
+    clientId: string,
+  ): Promise<DaemonGeneratedUiStateWriteResult> {
+    const label = 'PUT /session/:id/generated-ui/state/:cardId';
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/generated-ui/state/${urlEncode(cardId)}`,
+      {
+        method: 'PUT',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify(write),
+      },
+      async (res) => {
+        // 409 also covers the card limit, which is an error without an outcome.
+        if (res.status !== 409 && res.status !== 413 && !res.ok)
+          throw await this.failOnError(res, label);
+        const body = (await res.json()) as {
+          outcome?: unknown;
+          error?: unknown;
+        };
+        if (
+          body.outcome === 'saved' ||
+          body.outcome === 'stale' ||
+          body.outcome === 'too_large'
+        )
+          return body as DaemonGeneratedUiStateWriteResult;
+        throw new DaemonHttpError(
+          res.status,
+          body,
+          `${label}: ${typeof body.error === 'string' ? body.error : `HTTP ${res.status}`}`,
+        );
+      },
+      undefined,
+      'rest',
     );
   }
 
@@ -8364,6 +8531,42 @@ export class WorkspaceDaemonClient {
     );
   }
 
+  startWorkspaceChannelQrLogin(
+    name: string,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelQrLoginStartResult> {
+    return this.channelRequest<DaemonChannelQrLoginStartResult>(
+      `/channels/${urlEncode(name)}/qr-login`,
+      'POST /workspaces/:workspace/channels/:name/qr-login',
+      { method: 'POST', body: undefined },
+      opts,
+    );
+  }
+
+  workspaceChannelQrLogin(
+    loginId: string,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelQrLoginView> {
+    return this.channelRequest<DaemonChannelQrLoginView>(
+      `/channel-qr-logins/${urlEncode(loginId)}`,
+      'GET /workspaces/:workspace/channel-qr-logins/:loginId',
+      undefined,
+      opts,
+    );
+  }
+
+  cancelWorkspaceChannelQrLogin(
+    loginId: string,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelQrLoginView> {
+    return this.channelRequest<DaemonChannelQrLoginView>(
+      `/channel-qr-logins/${urlEncode(loginId)}`,
+      'DELETE /workspaces/:workspace/channel-qr-logins/:loginId',
+      { method: 'DELETE', body: undefined },
+      opts,
+    );
+  }
+
   private channelAction(
     name: string,
     action: 'start' | 'stop' | 'restart',
@@ -8634,6 +8837,11 @@ export class WorkspaceDaemonClient {
     ref: string,
     cwd?: string,
     sessionId?: string,
+    opts?: { stash?: boolean; force?: boolean },
+    // The stash/force flows chain several git commands server-side, each
+    // with its own budget, so callers can outsize the client's default
+    // fetch timeout instead of aborting mid-flow while the daemon runs on.
+    timeoutMs?: number,
   ): Promise<DaemonGitCheckoutResult> {
     const params = new URLSearchParams();
     if (cwd != null) params.set('cwd', cwd);
@@ -8644,7 +8852,12 @@ export class WorkspaceDaemonClient {
       this.workspaceSelector,
       suffix,
       'POST /workspaces/:workspace/git/checkout',
-      { method: 'POST', body: { ref }, mode: 'rest' },
+      {
+        method: 'POST',
+        body: { ref, ...opts },
+        mode: 'rest',
+        timeoutMs,
+      },
     );
   }
 
@@ -9007,6 +9220,78 @@ export class WorkspaceDaemonClient {
     return this.get('/memory', 'GET /workspaces/:workspace/memory');
   }
 
+  previewMemoryImport(
+    source: DaemonMemoryImportSource,
+    clientId?: string,
+  ): Promise<DaemonMemoryImportPreview> {
+    return this.memoryImportRequest('/preview', 'POST', source, clientId);
+  }
+
+  /** A successful submission is a durable receipt, not a completed import. */
+  submitMemoryImport(
+    request: DaemonMemoryImportRequest,
+    clientId?: string,
+  ): Promise<DaemonMemoryImportTask> {
+    return this.memoryImportRequest('/batches', 'POST', request, clientId);
+  }
+
+  listMemoryImports(): Promise<DaemonMemoryImportTask[]> {
+    return this.memoryImportRequest('/batches', 'GET');
+  }
+
+  getMemoryImport(batchId: string): Promise<DaemonMemoryImportTask> {
+    return this.memoryImportRequest(`/batches/${urlEncode(batchId)}`, 'GET');
+  }
+
+  getMemoryImportSource(
+    batchId: string,
+    sectionId: string,
+  ): Promise<DaemonMemoryImportSection> {
+    return this.memoryImportRequest(
+      `/batches/${urlEncode(batchId)}/sources/${urlEncode(sectionId)}`,
+      'GET',
+    );
+  }
+
+  cancelMemoryImport(
+    batchId: string,
+    clientId?: string,
+  ): Promise<DaemonMemoryImportTask> {
+    return this.memoryImportRequest(
+      `/batches/${urlEncode(batchId)}/cancel`,
+      'POST',
+      undefined,
+      clientId,
+    );
+  }
+
+  retryMemoryImport(
+    batchId: string,
+    clientId?: string,
+  ): Promise<DaemonMemoryImportTask> {
+    return this.memoryImportRequest(
+      `/batches/${urlEncode(batchId)}/retry`,
+      'POST',
+      undefined,
+      clientId,
+    );
+  }
+
+  private async memoryImportRequest<T>(
+    path: string,
+    method: 'GET' | 'POST',
+    body?: unknown,
+    clientId?: string,
+  ): Promise<T> {
+    await this.client.requireCapability('memory_import_v1');
+    return this.client.workspaceJsonRequest<T>(
+      this.workspaceSelector,
+      `/memory/import${path}`,
+      `${method} /workspaces/:workspace/memory/import${path}`,
+      { method, body, clientId, mode: 'rest' },
+    );
+  }
+
   remove(options?: {
     force?: boolean;
     timeoutMs?: number;
@@ -9115,6 +9400,8 @@ export class WorkspaceDaemonClient {
   async listWorkspaceSessionsPage(
     options?: DaemonSessionListPageOptions,
   ): Promise<DaemonSessionListPage> {
+    if (options?.sortBy !== undefined)
+      await this.client.requireCapability('session_last_user_prompt_sort');
     if (options?.sourceType !== undefined || options?.sourceId !== undefined) {
       await this.client.requireCapability('session_source_metadata');
     }
@@ -9132,6 +9419,7 @@ export class WorkspaceDaemonClient {
       ),
     );
     const query = new URLSearchParams({ size: String(pageSize) });
+    if (options?.sortBy !== undefined) query.set('sortBy', options.sortBy);
     if (options?.cursor !== undefined) query.set('cursor', options.cursor);
     if (options?.archiveState !== undefined) {
       query.set('archiveState', options.archiveState);
@@ -9150,13 +9438,15 @@ export class WorkspaceDaemonClient {
     if (options?.liveOnly === true) {
       query.set('liveOnly', '1');
     }
-    // The ACP session/list mapping does not carry liveOnly; force native REST
-    // rather than silently serving persisted history.
+    // The ACP session/list mapping carries neither liveOnly nor sortBy; force
+    // native REST rather than silently serving a different result.
     return await this.client.workspaceJsonRequest<DaemonSessionListPage>(
       this.workspaceSelector,
       `/sessions?${query.toString()}`,
       'GET /workspaces/:workspace/sessions',
-      options?.liveOnly === true ? { mode: 'rest' } : {},
+      options?.liveOnly === true || options?.sortBy !== undefined
+        ? { mode: 'rest' }
+        : {},
     );
   }
 
@@ -9223,6 +9513,19 @@ export class WorkspaceDaemonClient {
       `/session/${urlEncode(sessionId)}/tool-calls?${query.toString()}`,
       'GET /workspaces/:workspace/session/:id/tool-calls',
       { mode: 'rest' },
+    );
+  }
+
+  getSessionTurnHooksPage(
+    sessionId: string,
+    promptId: string,
+    opts: DaemonSessionTurnHooksPageOptions = {},
+  ): Promise<DaemonSessionTurnHooksPage> {
+    return this.client.workspaceJsonRequest<DaemonSessionTurnHooksPage>(
+      this.workspaceSelector,
+      `/session/${urlEncode(sessionId)}/turns/${urlEncode(promptId)}/hooks${turnIndexPageSuffix(opts)}`,
+      'GET /workspaces/:workspace/session/:id/turns/:promptId/hooks',
+      { clientId: opts.clientId, mode: 'rest' },
     );
   }
 
@@ -9657,11 +9960,16 @@ export class WorkspaceDaemonClient {
     enabled: boolean,
     opts?: { clientId?: string },
   ): Promise<DaemonSkillToggleResult> {
-    return this.post(
+    return this.client.workspaceJsonRequest<DaemonSkillToggleResult>(
+      this.workspaceSelector,
       `/skills/${urlEncode(skillName)}/enable`,
       'POST /workspaces/:workspace/skills/:name/enable',
-      { enabled },
-      opts?.clientId,
+      {
+        method: 'POST',
+        body: { enabled },
+        clientId: opts?.clientId,
+        mode: 'rest',
+      },
     );
   }
 
@@ -9670,11 +9978,16 @@ export class WorkspaceDaemonClient {
     enabled: boolean,
     opts?: { clientId?: string },
   ): Promise<DaemonSkillBatchToggleResult> {
-    return this.post(
+    return this.client.workspaceJsonRequest<DaemonSkillBatchToggleResult>(
+      this.workspaceSelector,
       '/skills/enable',
       'POST /workspaces/:workspace/skills/enable',
-      { skillNames, enabled },
-      opts?.clientId,
+      {
+        method: 'POST',
+        body: { skillNames, enabled },
+        clientId: opts?.clientId,
+        mode: 'rest',
+      },
     );
   }
 
@@ -9696,7 +10009,7 @@ export class WorkspaceDaemonClient {
   }
 
   activateSubscription(
-    opts: { signal?: AbortSignal } = {},
+    opts: { signal?: AbortSignal; settingsScope?: 'provider' | 'user' } = {},
   ): Promise<DaemonSubscriptionActivation> {
     return this.client.workspaceJsonRequest(
       this.workspaceSelector,
@@ -9704,10 +10017,10 @@ export class WorkspaceDaemonClient {
       'POST /workspaces/:workspace/auth/subscription',
       {
         method: 'POST',
-        body: {},
+        body: { settingsScope: opts.settingsScope },
         signal: opts.signal,
         mode: 'rest',
-        timeoutMs: 65000,
+        timeoutMs: SUBSCRIPTION_ACTIVATION_TIMEOUT_MS,
       },
     );
   }
