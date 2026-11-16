@@ -129,36 +129,45 @@ completed with exit code 1` on a noisy multi-error log), and an 8 MiB
    supplies the word boundary the anchored secret patterns (`\bnpm_…`,
    `\bsk-…`, `\beyJ…`, `\b<scheme>://`) need, and it still bounds the
    line-scoped `Cookie:` / `Authorization:` rules, whose `[^\r\n]*` must stop
-   at the header's own line. The second pass, `redactWeldedTokens`, runs AFTER
-   the strip; every difference from the first is forced by the strip deleting
-   characters that rules use as terminators. The `\b` anchors are dropped: a
-   control byte INSIDE a credential (`npm_\rABC…`) defeats every anchor on the
-   first pass, and the same strip can weld a word character onto the token's
-   front (`x\rnpm_…` becomes `xnpm_…`), leaving `\b` nothing to match.
-   Over-redaction is the safe direction for a pass that only ever sees
+   at the header's own line. Line SELECTION also runs before the strip: the
+   selectors need the whitespace a leading `\r` supplies (`\sFAIL\s`), and a
+   weld must not consume the failure line before it can be chosen. The second
+   pass, `redactWeldedTokens`, therefore runs over the SELECTED lines only,
+   after the strip; a weld never crosses a `\n`, so this is equivalent for the
+   text that ships. Every difference from the first pass is forced by the strip
+   deleting characters that rules use as terminators. The `\b` anchors are
+   dropped: a control byte INSIDE a credential (`npm_\rABC…`) defeats every
+   anchor on the first pass, and the same strip can weld a word character onto
+   the token's front (`x\rnpm_…` becomes `xnpm_…`), leaving `\b` nothing to
+   match. Over-redaction is the safe direction for a pass that only ever sees
    already-redacted text; the cost is that an unanchored `sk-` also redacts a
-   `task-…` identifier carrying 20+ alphanumerics. Every rule whose value ends
-   at whitespace (`Bearer`'s `\S+`, the `TOKEN`/`KEY`/… rule's `[^"',\s}]+`)
-   carries `(?!\[redacted\])`: `\r` is whitespace, so the first pass stops the
-   value at the CR, and re-redacting it after the strip welded it onto the next
-   logical line would eat the `##[error]` marker the excerpt exists to show.
-   The first pass redacts the value whenever it can see the keyword, so an
-   already-`[redacted]` value must never be re-matched — the only legitimate
-   post-strip match is a keyword the control split, which the first pass could
-   not see at all. The two header rules stay out of this pass for the same
-   reason: their value runs to the line end. The URL rule keeps one userinfo
-   segment whose class drops the gen-delims `#` `[` `]` (illegal in userinfo per
-   RFC 3986) and `@`, so it cannot reach across a welded marker, and its scheme
-   keeps a boundary as a lookbehind rather than `\b`, without which every
+   `task-…` identifier carrying 20+ alphanumerics. The value classes stop at
+   `#`, the first character of the `##[error]` marker, so a weld cannot carry a
+   value across the marker — including when the control split the credential
+   KEYWORD, which is exactly the case the first pass cannot see. This replaces
+   an earlier "skip an already-`[redacted]` value" guard, which a fork could
+   defeat by writing `[redacted]realsecret…` itself: the value class keeps `[`
+   and `]`, so that shape is still redacted, while `#` stops the value before
+   the marker. The two header rules stay out of this pass: their value runs to
+   the line end. The URL rule keeps one userinfo segment whose class drops the
+   gen-delims `#` `[` `]` (illegal in userinfo per RFC 3986) and `@`, and its
+   scheme keeps a boundary as a lookbehind rather than `\b`, without which every
    position in a long word run is a candidate start and the rule turns
-   quadratic. Three costs are recorded rather than closed: a control inside a
-   header value leaves the post-CR fragment visible (`Cookie: [redacted]=abc`),
-   as the unstripped base does; a control inside the header keyword
-   (`Coo\rkie: sid=abc`) escapes both passes, so the welded value stays
-   unredacted, and an empty-value header (`Cookie:` then CR) already loses the
-   next line in the first pass, in base too; and the `TOKEN`/`KEY`/… rule is
-   quadratic on a long word run in base (about a second at 40k characters),
-   which running it twice doubles. Living in
+   quadratic.
+   Costs recorded rather than closed: a control inside a header value leaves the
+   post-CR fragment visible (`Cookie: [redacted]=abc`), as the unstripped base
+   does; a control inside the header keyword (`Coo\rkie: sid=abc`) escapes both
+   passes, so the welded value stays unredacted, and an empty-value header
+   (`Cookie:` then CR) already loses the next line in the first pass, in base
+   too; the `TOKEN`/`KEY`/… rule is quadratic on a long word run in base (about a
+   second at 40k characters), which running it twice doubles; and a char-class
+   token rule cannot tell a weld INSIDE the credential from a weld BEFORE
+   following word-like text — both are the same span once the control is gone —
+   so `s\rk-<token>\rAssertionError: …` loses the bare `AssertionError` (the
+   message tail survives) and a host-only URL welded onto `…expected@host` loses
+   that text. Bounding at the weld would also break the inside-token repair the
+   suite pins; the `##[error]` marker itself is protected by the `#` bound.
+   Living in
    `skillLog`, the strip covers both the collector's excerpt and the patrol's
    rendered evidence (its only `jobLog` caller goes through `skillLog`). The
    sibling fetches themselves are unchanged: `ci-log.ts`'s `jobLog` still
@@ -200,11 +209,13 @@ completed with exit code 1` on a noisy multi-error log), and an 8 MiB
   strip end-to-end: a secret after a bare `\r` is still redacted (the first
   `redactLog` pass runs before the strip), neither a CR-terminated header nor a
   CR-terminated token value (`SSH_AUTH_SOCK=`, `Bearer`) swallows the
-  `##[error]` line that follows it, backspace/C0/C1 and Bidi controls are
-  stripped while tab and newline survive, and the text past the first control is
-  retained (a truncating implementation stays red). The Bidi case feeds every
-  `Bidi_Control` code point and asserts `/\p{Bidi_Control}/u` against stdout, so
-  narrowing the class to a sample cannot stay green.
+  `##[error]` line that follows it, a control that splits the credential keyword
+  still leaves that failure text in the excerpt, backspace/C0/C1 and Bidi
+  controls are stripped while tab and newline survive, and the text past the
+  first control is retained (a truncating implementation stays red). The Bidi
+  case feeds every `Bidi_Control` code point and asserts
+  `/\p{Bidi_Control}/u` against stdout, so narrowing the class to a sample
+  cannot stay green.
 - `scripts/tests/ci-flaky-rerun.test.js` (vitest): the patrol's `GhClient.jobLog`
   passes the flag, falls back only on `unknown flag`, strips VT control
   characters, and propagates a non-refusal error; `skillLog` strips terminal
@@ -215,11 +226,15 @@ completed with exit code 1` on a noisy multi-error log), and an 8 MiB
   that follows a CR-terminated header or a CR-terminated value of any
   whitespace-bounded rule (five prefixes × CR/VT/FF), keeps the failure line a
   welded URL userinfo would otherwise reach (both the shape the first pass
-  redacted and the shape it never matched), repairs every one of the nine
-  credential families a control byte split — one fixture per post-strip rule, so
-  deleting any rule turns this red — and strips every C0/DEL/C1 and
-  `Bidi_Control` code point, asserted against Unicode's own property with `\n`
-  and `\t` still surviving.
+  redacted and the shape it never matched), keeps the `##[error]` marker when a
+  control splits the credential KEYWORD itself (env, `Bearer`, private-key
+  label, inside a 30/40-line noise window), selects a `FAIL` line whose leading
+  whitespace is a control, redacts a credential the log hid behind a literal
+  `[redacted]` prefix (four shapes including the quoted one), repairs every one
+  of the nine credential families a control byte split — one fixture per
+  post-strip rule, so deleting any rule turns this red — and strips every
+  C0/DEL/C1 and `Bidi_Control` code point, asserted against Unicode's own
+  property with `\n` and `\t` still surviving.
 - `scripts/tests/qwen-autofix-workflow.test.js` (vitest): the call precedes the
   checkout and uses the working-tree path; the tolerant fallbacks and stderr
   sink; the section's position between the name-only lists and the gate
@@ -238,11 +253,14 @@ completed with exit code 1` on a noisy multi-error log), and an 8 MiB
   narrowing it to `\r` alone, narrowing the Bidi class to the sampled points,
   dropping a single unsampled `Bidi_Control` point, truncating at the first
   control, or widening the class to eat `\n`/`\t` each turn the collector or
-  patrol witness red; dropping either `(?!\[redacted\])` guard reds the
-  CR-terminated-value case in both suites, letting the gen-delims back into the
-  URL userinfo class reds the welded-URL case, and deleting any one of the nine
-  post-strip rules reds the per-family repair case; dropping the patrol's flag
-  turns its witness red. The URL lookbehind is a cost fix, not a behavior one:
+  patrol witness red; moving the strip back before line selection reds the
+  leading-control `FAIL` case, letting `#` back into the env value class reds
+  the CR-terminated-value and split-keyword cases in both suites, letting it
+  back into `Bearer`'s value class or the private-key body reds the corresponding
+  case, letting the gen-delims back into the URL userinfo class reds the
+  welded-URL case, and deleting any one of the nine post-strip rules reds the
+  per-family repair case; dropping the patrol's flag turns its witness red. The
+  URL lookbehind is a cost fix, not a behavior one:
   removing it leaves every test green and is measured instead — the isolated
   rule costs 0.65–1.0 s across runs on a 40k-character line without it and 0 ms
   with it, and the whole `skillLog` call went from about 2.9 s to about 2.4 s
@@ -259,9 +277,12 @@ completed with exit code 1` on a noisy multi-error log), and an 8 MiB
   stdout.
 - No secret from a job log reaches `feedback.md` or step stdout, including a
   credential the strip welds into a contiguous token — whether the control sat
-  inside it or in front of its leading word boundary.
+  inside it, in front of its leading word boundary, or inside its keyword — and
+  including one the log itself hid behind a literal `[redacted]` prefix.
 - A header line, or any whitespace-bounded credential value, terminated by a
-  bare CR still leaves the failure line that follows it in the excerpt.
+  bare CR still leaves the failure line that follows it in the excerpt, and a
+  control that splits the credential keyword does not consume the `##[error]`
+  marker.
 - An absent script, an unreadable rollup, or a failed API read never fails a
   round.
 - The collector and its imported helper execute from the trusted base, before

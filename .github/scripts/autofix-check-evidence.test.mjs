@@ -464,6 +464,32 @@ describe('CLI', () => {
     }
   });
 
+  it('keeps the failure text when a control splits the credential keyword', () => {
+    // Selection runs before the strip, so the line carrying ##[error] is still
+    // chosen; the post-strip value classes stop at `#`, so repairing the split
+    // keyword cannot carry the value over the marker. Without both, the excerpt
+    // ships failed step names with no failure text at all.
+    const noise = Array.from({ length: 30 }, (_, i) => `noise line ${i}`).join(
+      '\n',
+    );
+    const tail = Array.from({ length: 40 }, (_, i) => `tail line ${i}`).join(
+      '\n',
+    );
+    const result = runCli(
+      { statusCheckRollup: [failedCheck()] },
+      {
+        log: `${noise}\nNPM_TO\rKEN=abc\r##[error]AssertionError: real failure\n${tail}\n`,
+      },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(
+      result.stdout.includes('##[error]AssertionError: real failure'),
+      result.stdout,
+    );
+    assert.ok(result.stdout.includes('NPM_TOKEN=[redacted]'));
+    assert.ok(!result.stdout.includes('abc##[error]'));
+  });
+
   it('strips backspace, C0/C1 and Bidi controls, keeping tab and newline', () => {
     // A \r-only strip leaves \b, \x0b, \x0c, DEL and the C1 range, which a
     // terminal still applies to repaint the line, and the Bidi overrides that

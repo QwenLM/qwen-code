@@ -224,45 +224,49 @@ function redactLog(log) {
     );
 }
 
-// The post-strip pass. Keep these rules in sync with redactLog. Every
-// difference from it is forced by the strip deleting characters that rules use
-// as terminators:
+// The post-strip pass, run over the SELECTED lines only (see skillLog). Keep
+// these rules in sync with redactLog. Every difference from it is forced by the
+// strip deleting characters that rules use as terminators:
 //   - the \b anchors are dropped: a control byte INSIDE a credential
 //     (`npm_\rABC…`) defeats every anchor on the first pass, and the same strip
 //     can weld a word character onto the token's front (`x\rnpm_…` → `xnpm_…`),
 //     leaving \b nothing to match. Over-redaction is the safe direction for a
 //     pass that only ever sees already-redacted text.
-//   - every rule whose value ends at whitespace carries (?!\[redacted\]). \r is
-//     whitespace, so the first pass stops such a value at the CR; once the
-//     strip deletes it, re-running the rule extends the value across the weld
-//     and eats the ##[error] line the excerpt exists to show. The first pass
-//     redacts the value whenever it can see the keyword, so a value that
-//     already reads [redacted] must never be re-matched: the only legitimate
-//     post-strip match is a keyword the control split, which the first pass
-//     could not see at all.
+//   - the value classes stop at `#`, the first character of the `##[error]`
+//     marker, so a weld cannot carry a value across the marker. This replaces
+//     the round-4 "skip an already-[redacted] value" guard, which a fork could
+//     defeat by writing `[redacted]realsecret…` itself: the value class keeps
+//     `[` and `]`, so that shape is still redacted, while `#` stops the value
+//     before the marker. `#` is not a credential character in these shapes; the
+//     first pass still redacts a value containing it in full when the keyword
+//     is intact.
 // The URL userinfo is a single segment whose class drops the gen-delims # [ ]
-// (illegal in userinfo per RFC 3986) and @: it cannot reach across a welded
-// ##[error] marker, and without the nested quantifier it cannot backtrack
-// quadratically over a long token. The scheme keeps a boundary as a lookbehind
-// rather than \b: without one, every position inside a long word run is a
-// candidate start and the rule turns quadratic (0.65–1.0 s across runs on a
-// 40k-char line, 0 ms with the lookbehind); the lookbehind admits a scheme
-// preceded by any non-scheme character, which is what a weld leaves behind.
+// (illegal in userinfo per RFC 3986) and @, and without the nested quantifier
+// it cannot backtrack quadratically over a long token. The scheme keeps a
+// boundary as a lookbehind rather than \b: without one, every position inside a
+// long word run is a candidate start and the rule turns quadratic (0.65–1.0 s
+// across runs on a 40k-char line, 0 ms with the lookbehind).
 // Cookie:/Authorization: stay out: their value runs to the line end, so over
 // CR-free text they swallow the following line. A control inside the keyword
-// itself (`Coo\rkie:`) therefore escapes both passes — a gap recorded in the
-// design doc, not closed here.
+// itself (`Coo\rkie:`) therefore escapes both passes.
+// Residual, inherent to deleting the control: a char-class token rule cannot
+// tell a weld INSIDE the credential from a weld BEFORE following word-like
+// text — both are the same span once the control is gone — so `s\rk-<token>\r
+// AssertionError: …` still loses the bare `AssertionError`, and a host-only URL
+// welded onto `…expected@host` still loses that text. Bounding at the weld
+// would also break the inside-token repair the suite pins. Recorded in the
+// design doc; the `##[error]` marker itself is protected by the `#` bound.
 function redactWeldedTokens(log) {
   return log
     .replace(
-      /-----BEGIN [^-\r\n]+-----[\s\S]*?-----END [^-\r\n]+-----/g,
+      /-----BEGIN [^-\r\n]+-----[^#]*?-----END [^-\r\n]+-----/g,
       '[redacted private key]',
     )
     .replace(
       /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g,
       '[redacted jwt]',
     )
-    .replace(/(Bearer\s+)(?!\[redacted\])\S+/gi, '$1[redacted]')
+    .replace(/(Bearer\s+)[^\s#]+/gi, '$1[redacted]')
     .replace(
       /(?:gh[pousr]_|github_pat_|glpat-|xox[bp]-)[A-Za-z0-9_-]{8,}/g,
       '[redacted]',
@@ -275,26 +279,20 @@ function redactWeldedTokens(log) {
       '$1[redacted]@',
     )
     .replace(
-      /(["']?)([A-Za-z_][A-Za-z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|AUTH|CREDENTIAL)[A-Za-z0-9_]*)(\1\s*[:=]\s*)["']?(?!\[redacted\])[^"',\s}]+["']?/gi,
+      /(["']?)([A-Za-z_][A-Za-z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|AUTH|CREDENTIAL)[A-Za-z0-9_]*)(\1\s*[:=]\s*)["']?[^"',\s}#]+["']?/gi,
       '$1$2$3[redacted]',
     );
 }
 
 export function skillLog(log) {
-  // Redact, strip, then redact the welded tokens. The first pass runs BEFORE
-  // the strip so a bare \r still supplies both the word boundary the anchored
-  // patterns (\bnpm_…, \bsk-…, \beyJ…) need and the line end that bounds the
-  // header rules. The strip drops the terminal controls (C0/DEL/C1, keeping
-  // \n and \t) plus the full Unicode Bidi_Control set — the same class
-  // safeReason drops — so a fork-controlled line can neither repaint nor
-  // reorder the excerpt.
-  const lines = redactWeldedTokens(
-    redactLog(log).replace(
-      // eslint-disable-next-line no-control-regex -- log text must not control the terminal
-      /[\x00-\x08\x0b-\x1f\x7f-\x9f\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/g,
-      '',
-    ),
-  ).split('\n');
+  // Select BEFORE stripping. The strip deletes characters the selectors use as
+  // terminators (\sFAIL\s needs the whitespace a leading \r supplies) and
+  // characters the value classes stop at, so selecting after it lets a weld
+  // consume the failure line before it can ever be chosen. The first pass runs
+  // on the unstripped text so a bare \r still supplies both the word boundary
+  // the anchored patterns (\bnpm_…, \bsk-…, \beyJ…) need and the line end that
+  // bounds the header rules.
+  const lines = redactLog(log).split('\n');
   const selected = new Set();
   const primary = new Set();
   const summary =
@@ -327,9 +325,25 @@ export function skillLog(log) {
     .filter((index) => !primary.has(index))
     .sort((a, b) => a - b)
     .slice(-(120 - primary.size));
-  return [...primary, ...remaining]
-    .sort((a, b) => a - b)
-    .map((index) => lines[index].slice(0, 300))
+  // Strip and repair welds over the selected lines only. The strip drops the
+  // terminal controls (C0/DEL/C1, keeping \n and \t) plus the full Unicode
+  // Bidi_Control set — the same class safeReason drops — so a fork-controlled
+  // line can neither repaint nor reorder the excerpt. A weld never crosses a
+  // \n, so running it here is equivalent for the text that actually ships.
+  const shipped = redactWeldedTokens(
+    [...primary, ...remaining]
+      .sort((a, b) => a - b)
+      .map((index) => lines[index])
+      .join('\n')
+      .replace(
+        // eslint-disable-next-line no-control-regex -- log text must not control the terminal
+        /[\x00-\x08\x0b-\x1f\x7f-\x9f\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/g,
+        '',
+      ),
+  );
+  return shipped
+    .split('\n')
+    .map((line) => line.slice(0, 300))
     .join('\n');
 }
 

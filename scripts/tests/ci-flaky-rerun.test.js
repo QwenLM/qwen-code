@@ -1214,6 +1214,66 @@ describe('ci flaky rerun patrol', () => {
     ).toContain('https://[redacted]@');
   });
 
+  it('keeps the marker when a control splits the credential keyword itself', () => {
+    // The guard's premise ("the first pass redacted the value") is false exactly
+    // when the control split the keyword — the case this pass exists to repair.
+    // Selection runs before the strip so the line is still chosen, and the value
+    // classes stop at `#` so the weld cannot carry the value over the marker.
+    const noise = Array.from({ length: 30 }, (_, i) => `noise line ${i}`).join(
+      '\n',
+    );
+    const tail = Array.from({ length: 40 }, (_, i) => `tail line ${i}`).join(
+      '\n',
+    );
+    for (const [line, marker] of [
+      [
+        'SSH_AU\rTH_SOCK=abc\r##[error]AssertionError: real failure',
+        '##[error]AssertionError: real failure',
+      ],
+      ['Bea\rrer abc123\r##[error]Build failed', '##[error]Build failed'],
+      [
+        '-----BEGIN RSA\rKEY-----\r##[error]AssertionError: boom\r-----END RSA\rKEY-----',
+        '##[error]AssertionError: boom',
+      ],
+    ]) {
+      const evidence = skillLog(`${noise}\n${line}\n${tail}`);
+      expect(evidence, line).toContain(marker);
+    }
+    expect(
+      skillLog('SSH_AU\rTH_SOCK=abc\r##[error]AssertionError: real failure'),
+    ).toContain('SSH_AUTH_SOCK=[redacted]');
+    expect(skillLog('Bea\rrer abc123\r##[error]Build failed')).toContain(
+      'Bearer [redacted]',
+    );
+  });
+
+  it('selects a FAIL line whose leading whitespace is a control', () => {
+    // \sFAIL\s needs the whitespace a leading \r supplies. Stripping before
+    // selection deleted it, so the line was never chosen and the excerpt fell
+    // back to noise.
+    const noise = Array.from({ length: 30 }, (_, i) => `noise line ${i}`).join(
+      '\n',
+    );
+    const evidence = skillLog(`${noise}\n\rFAIL src/a.test.ts\n${noise}`);
+    expect(evidence).toContain('FAIL src/a.test.ts');
+  });
+
+  it('redacts a credential the log hid behind a literal [redacted] prefix', () => {
+    // The placeholder guard must skip a value the FIRST pass redacted, not one
+    // the log itself wrote as [redacted]…: with the keyword split, the first pass
+    // saw nothing and this pass is the only chance to scrub it.
+    for (const [line, secret] of [
+      ['##[error]API_KE\rY=[redacted]realsecretvalue123', 'realsecretvalue123'],
+      ['##[error]NPM_TO\rKEN=[redacted]abcdefghijklmno', 'abcdefghijklmno'],
+      ['##[error]Bea\rrer [redacted]realsecretvalue123', 'realsecretvalue123'],
+      ["##[error]API_KE\rY='[redacted]abcdefghijklmno'", 'abcdefghijklmno'],
+    ]) {
+      const evidence = skillLog(line);
+      expect(evidence, line).toContain('[redacted]');
+      expect(evidence, line).not.toContain(secret);
+    }
+  });
+
   it('repairs every credential family a control byte split', () => {
     // The post-strip rule list is a hand-copy of redactLog's; pin each rule
     // individually so deleting one cannot leave both suites green.

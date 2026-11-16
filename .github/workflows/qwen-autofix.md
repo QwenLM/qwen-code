@@ -5052,19 +5052,22 @@ overwrite a line's start in a terminal (`\b` and the rest of C0/C1
 repaint it, the Bidi set reorders it). The first pass is the unchanged
 redactLog and runs before the strip, so the anchored secret patterns
 keep the word boundary a bare `\r` supplies and the CR-bounded
-Cookie:/Authorization: rules stop at the header's own line. The
-second, redactWeldedTokens, runs after and drops the \b anchors: a
-control byte inside a credential defeats every anchor until the
-strip welds the fragments back into a token, and the same strip can
-weld a word character onto its front. Every rule whose value ends at
-whitespace (Bearer, the TOKEN/KEY/... rule) carries a
-"not already [redacted]" guard, because \r is whitespace too: the
-first pass stops the value at the CR, and re-redacting it once the
-strip welded it onto the next logical line would eat the ##[error]
-line the excerpt exists to show. The header rules stay out of that
-pass for the same reason, and the URL rule keeps a single userinfo
-segment that excludes the gen-delims # [ ] so it cannot reach across
-a welded marker. The behavioral suite's fake gh reproduces
+Cookie:/Authorization: rules stop at the header's own line. Line
+SELECTION also runs before the strip, because the selectors need the
+whitespace a leading \r supplies and a weld must not eat the failure
+line before it can be chosen. The second pass, redactWeldedTokens,
+runs over the selected lines only and drops the \b anchors: a control
+byte inside a credential defeats every anchor until the strip welds
+the fragments back into a token, and the same strip can weld a word
+character onto its front. Its value classes stop at #, the first
+character of the ##[error] marker, so a weld cannot carry a value
+across the marker even when the control split the credential keyword
+— the case the first pass cannot see. That replaces an earlier
+"skip an already-[redacted] value" guard, which a fork could defeat
+by writing [redacted]realsecret itself. The header rules stay out of
+that pass, and the URL rule keeps a single userinfo segment that
+excludes the gen-delims # [ ] so it cannot reach across a welded
+marker. The behavioral suite's fake gh reproduces
 the refusal, so a missing flag turns it red. The same fix lands on
 the patrol's own GhClient.jobLog, which was equally log-blind on
 current gh. The excerpt fence is sized past any backtick run inside
