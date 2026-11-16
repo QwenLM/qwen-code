@@ -89,6 +89,48 @@ const ZH: Record<keyof typeof EN, string> = {
   backgroundBusy: '请等待后台任务结束后再清理。',
 };
 
+const ZH_TW: Record<keyof typeof EN, string> = {
+  mode: '會話檔案',
+  current: '當前目錄',
+  isolated: '獨立 worktree',
+  base: '起始分支或提交',
+  head: '當前 HEAD',
+  committed: '從已提交版本開始，未提交修改保留在當前目錄。',
+  checking: '正在檢查 worktree 支援情況…',
+  files: 'worktree 就緒後再選擇工作區檔案，已有檔案引用需要重新選擇。',
+  manage: '會話 worktree',
+  retained: '關閉、歸檔或刪除會話後會保留 worktree。清理只刪除目錄，保留分支。',
+  empty: '此工作區沒有會話 worktree。',
+  inspect: '檢查清理條件',
+  cleanup: '刪除 worktree 目錄',
+  confirm: '刪除此目錄？',
+  confirmDescription:
+    '會話需要已關閉，且 worktree 沒有未提交修改。目錄將被刪除，Git 分支仍會保留。',
+  blocked: '暫時無法清理',
+  session: '會話',
+  branch: '分支',
+  baseCommit: '起始提交',
+  preparing: '正在準備 worktree',
+  ready: 'worktree 已就緒',
+  failed: 'worktree 準備失敗',
+  blockedState: 'worktree 需要處理',
+  removing: '正在刪除 worktree 目錄',
+  removed: '目錄已刪除，分支已保留',
+  reasonUnavailable: '此 worktree 操作暫不可用。',
+  workspaceBusy: '正在等待工作區空閒。',
+  unsupported: '當前部署或執行環境不支援會話 worktree。',
+  notGit: '所選目錄不在 Git 倉庫中。',
+  layoutUnsupported:
+    '倉庫和 Git 後設資料需要位於同一已授權儲存中，請選擇原 checkout。',
+  invalidRef: '所選起始分支或提交無效。',
+  dirty:
+    'worktree 中存在未提交修改、未跟蹤檔案或忽略檔案，請先儲存或移除這些內容再清理。',
+  identityConflict: '原 worktree 目錄缺失或已發生變化。',
+  stopUnverified: '尚未確認上一次 Git 執行已經停止。',
+  sessionActive: '請先關閉會話，再刪除它的 worktree。',
+  backgroundBusy: '請等待後臺任務結束後再清理。',
+};
+
 const RU: Record<keyof typeof EN, string> = {
   mode: 'Файлы сессии',
   current: 'Текущий каталог',
@@ -155,7 +197,13 @@ const REASON_KEYS: Record<string, keyof typeof EN> = {
 export function useManagedWorktreeText() {
   const { language } = useI18n();
   return (key: keyof typeof EN): string =>
-    (language === 'zh-CN' ? ZH : language === 'ru' ? RU : EN)[key];
+    (language === 'zh-TW'
+      ? ZH_TW
+      : language === 'zh-CN'
+        ? ZH
+        : language === 'ru'
+          ? RU
+          : EN)[key];
 }
 
 export function useManagedWorktreeReason() {

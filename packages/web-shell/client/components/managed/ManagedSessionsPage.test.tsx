@@ -357,7 +357,7 @@ describe('ManagedSessionsPage', () => {
 
   async function render(
     sessionId?: string,
-    language: 'en' | 'zh-CN' = 'en',
+    language: 'en' | 'zh-CN' | 'zh-TW' | 'ru' = 'en',
     managedAgentProvider: ManagedAgentProvider | null = provider,
     navigationTarget?: HTMLElement | null,
     interactive = true,
@@ -453,9 +453,14 @@ describe('ManagedSessionsPage', () => {
     expect(mocks.client.cancel).not.toHaveBeenCalled();
   });
 
-  it.each([false, true])(
-    'opens diagnostics in a read-only Session and closes them on owner change (home: %s)',
-    async (home) => {
+  it.each([
+    { home: false, language: 'en', title: 'Session diagnostics' },
+    { home: true, language: 'zh-CN', title: '会话诊断' },
+    { home: false, language: 'zh-TW', title: '會話診斷' },
+    { home: true, language: 'ru', title: 'Диагностика сессии' },
+  ] as const)(
+    'opens $language diagnostics in a read-only Session and closes them on owner change (home: $home)',
+    async ({ home, language, title }) => {
       const getContextUsage = vi.fn().mockResolvedValue(diagnosticContext);
       provider = {
         ...provider,
@@ -473,10 +478,10 @@ describe('ManagedSessionsPage', () => {
         }),
       );
       const navigation = home ? null : undefined;
-      await render('s1', 'en', provider, navigation, false);
+      await render('s1', language, provider, navigation, false);
       expect(getContextUsage).not.toHaveBeenCalled();
       const button = [...container.querySelectorAll('button')].find(
-        (item) => item.textContent === 'Session diagnostics',
+        (item) => item.textContent === title,
       );
       expect(button).toBeDefined();
       await act(async () => button!.click());
@@ -484,10 +489,10 @@ describe('ManagedSessionsPage', () => {
         'model-a',
       );
       const signal = getContextUsage.mock.calls[0][1].signal as AbortSignal;
-      await render('s2', 'en', provider, navigation, false);
+      await render('s2', language, provider, navigation, false);
       expect(signal.aborted).toBe(true);
       expect(document.querySelector('[role="dialog"]')).toBeNull();
-      await render('s1', 'en', provider, navigation, false);
+      await render('s1', language, provider, navigation, false);
       expect(document.querySelector('[role="dialog"]')).toBeNull();
       expect(getContextUsage).toHaveBeenCalledTimes(1);
       expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
@@ -1370,6 +1375,8 @@ describe('ManagedSessionsPage', () => {
   it.each([
     ['en', 'billing'],
     ['zh-CN', '余额'],
+    ['zh-TW', '餘額'],
+    ['ru', 'баланс'],
   ] as const)(
     'explains a payment failure in %s without submitting another prompt',
     async (language, guidance) => {

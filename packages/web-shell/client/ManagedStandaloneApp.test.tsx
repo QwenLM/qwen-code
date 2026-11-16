@@ -262,17 +262,22 @@ describe('Managed standalone application', () => {
     ).toEqual(modelPresets);
   });
 
-  it('waits for authenticated boot before composing the shell', async () => {
+  it.each([
+    ['en', 'Connecting…'],
+    ['zh-CN', '正在连接…'],
+    ['zh-TW', '正在連線…'],
+    ['ru', 'Подключение…'],
+  ] as const)('shows the boot status in %s', async (language, expected) => {
     fetch.mockReturnValue(new Promise(() => {}));
     await act(async () =>
       root.render(
-        <ManagedStandaloneApp daemonToken="browser-token" language="zh-CN">
+        <ManagedStandaloneApp daemonToken="browser-token" language={language}>
           {renderShell}
         </ManagedStandaloneApp>,
       ),
     );
     expect(container.querySelector('[role="status"]')?.textContent).toBe(
-      '正在连接…',
+      expected,
     );
     expect(renderShell).not.toHaveBeenCalled();
   });

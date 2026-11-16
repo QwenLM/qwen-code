@@ -8,7 +8,12 @@ import {
   type SubscriptionTransport,
 } from './use-subscription';
 
-it('renders subscription errors from the Russian catalog', async () => {
+it.each([
+  ['en', 'Could not complete authorization. Please try signing in again.'],
+  ['zh-CN', '无法完成授权，请重新登录。'],
+  ['zh-TW', '無法完成授權，請重新登入。'],
+  ['ru', 'Не удалось завершить авторизацию. Попробуйте войти снова.'],
+] as const)('renders subscription errors in %s', async (language, message) => {
   const transport: SubscriptionTransport = {
     getSubscriptionConfig: vi.fn().mockRejectedValue(new Error('offline')),
     startSubscriptionLogin: vi.fn(),
@@ -22,14 +27,14 @@ it('renders subscription errors from the Russian catalog', async () => {
     () => useSubscription(transport, openExternal),
     {
       wrapper: ({ children }: PropsWithChildren) => (
-        <I18nProvider language="ru">{children}</I18nProvider>
+        <I18nProvider language={language}>{children}</I18nProvider>
       ),
     },
   );
   await waitFor(() =>
     expect(result.current.state).toMatchObject({
       status: 'error',
-      message: 'Не удалось завершить авторизацию. Попробуйте войти снова.',
+      message,
     }),
   );
   expect(openExternal).not.toHaveBeenCalled();

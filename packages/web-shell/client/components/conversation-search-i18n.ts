@@ -35,6 +35,26 @@ const EN_MESSAGES: Record<string, Message> = {
 
 const messages: Record<WebShellLanguage, Record<string, Message>> = {
   en: EN_MESSAGES,
+  'zh-TW': {
+    'chat.searchConversation': '搜尋當前會話',
+    'chat.searchConversationPlaceholder': '搜尋訊息和程式碼…',
+    'chat.searchConversationHint': '輸入關鍵詞，查詢之前的內容。',
+    'chat.searchingConversation': '正在搜尋會話歷史…',
+    'chat.searchLoadedOnly':
+      '僅可搜尋已載入訊息，更新 Qwen Code 後可搜尋完整歷史。',
+    'chat.searchResultPosition': (vars) =>
+      `${vars?.['current']} / ${vars?.['total']} 條結果`,
+    'chat.searchNoResults': '沒有匹配的訊息。',
+    'chat.searchPrevious': '上一個結果',
+    'chat.searchNext': '下一個結果',
+    'chat.searchResults': '搜尋結果',
+    'chat.searchResultsLimited': (vars) =>
+      `僅顯示前 ${vars?.['count']} 條結果，請使用更具體的關鍵詞。`,
+    'chat.searchFailed': '未能搜尋全部歷史，結果可能不完整。',
+    'chat.searchLocateFailed': '無法定位此結果，請重新搜尋以重新整理結果。',
+    'chat.searchUser': '你',
+    'chat.searchAssistant': '助手',
+  },
   'zh-CN': {
     'chat.searchConversation': '搜索当前会话',
     'chat.searchConversationPlaceholder': '搜索消息和代码…',

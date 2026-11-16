@@ -19,6 +19,13 @@ describe('readLanguage', () => {
     expect(readLanguage()).toBe('zh-CN');
   });
 
+  it('keeps Traditional Chinese out of the Simplified catalog', () => {
+    document.documentElement.lang = 'zh-TW';
+    expect(readLanguage()).toBe('zh-TW');
+    expect(createChromeStrings('zh-TW')('header.newSession')).toBe('新建會話');
+    expect(createChromeStrings('zh-CN')('header.newSession')).toBe('新建会话');
+  });
+
   it('falls back to the navigator language when lang is unset', () => {
     document.documentElement.lang = '';
     expect(readLanguage()).toBe('en');
