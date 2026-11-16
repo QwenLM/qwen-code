@@ -10,6 +10,54 @@ import { KeypressProvider } from '../../contexts/KeypressContext.js';
 import { MultiSelect } from './MultiSelect.js';
 
 describe('MultiSelect', () => {
+  it.each([
+    {
+      selected: false,
+      checkedText: '[✓]',
+      uncheckedText: '[ ]',
+      expected: '[ ]',
+    },
+    {
+      selected: true,
+      checkedText: '[✓]',
+      uncheckedText: '[ ]',
+      expected: '[✓]',
+    },
+    {
+      selected: false,
+      checkedText: 'on',
+      uncheckedText: 'off',
+      expected: 'off',
+    },
+    { selected: true, checkedText: 'on', uncheckedText: 'off', expected: 'on' },
+  ])(
+    'shows the actual selection for a disabled row: $expected',
+    ({ selected, checkedText, uncheckedText, expected }) => {
+      const result = render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <MultiSelect
+            items={[
+              {
+                key: 'locked',
+                value: 'locked',
+                label: 'Locked item',
+                disabled: true,
+              },
+            ]}
+            selectedKeys={selected ? ['locked'] : []}
+            checkedText={checkedText}
+            uncheckedText={uncheckedText}
+            onConfirm={vi.fn()}
+          />
+        </KeypressProvider>,
+      );
+
+      expect(result.lastFrame()?.startsWith(`${expected} `)).toBe(true);
+      expect(result.lastFrame()).toContain('Locked item');
+      result.unmount();
+    },
+  );
+
   it('wraps labels by default so shared prefixes stay distinguishable', () => {
     const ui = (
       <KeypressProvider kittyProtocolEnabled={false}>

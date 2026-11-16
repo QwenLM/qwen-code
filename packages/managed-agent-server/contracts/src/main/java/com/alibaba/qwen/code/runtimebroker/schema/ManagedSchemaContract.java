@@ -97,6 +97,7 @@ public final class ManagedSchemaContract {
         ACTION_DECISION,
         WORKSPACE_CREATE,
         EXTERNAL_STORAGE,
+        EXTERNAL_WORKSPACE,
         MEMORY,
         SIDE_QUERY,
         RESOURCE_ALLOCATE
