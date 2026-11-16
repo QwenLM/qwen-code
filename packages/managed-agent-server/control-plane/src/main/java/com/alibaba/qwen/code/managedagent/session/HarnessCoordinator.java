@@ -1140,8 +1140,27 @@ public class HarnessCoordinator {
         }
     }
 
-    private void runtimeWarmResult(SessionRecord session, TurnRecord turn,
+    static boolean identityProbeTimedOut(Throwable error) {
+        // Control-plane does not depend on runtime-host. The probe type is
+        // the stable name of MacOsIdentityProbeTimeoutException.
+        for (Throwable current = error; current != null; current = current.getCause()) {
+            if ("MacOsIdentityProbeTimeoutException"
+                    .equals(current.getClass().getSimpleName())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void runtimeWarmResult(SessionRecord session, TurnRecord turn,
             Throwable error) {
+        if (error != null && identityProbeTimedOut(error)) {
+            LOG.warn(
+                    "Managed Runtime warm probe timed out tenant={} session={} turn={}",
+                    session.tenantId(), session.sessionId(), turn.turnId(),
+                    error);
+            return;
+        }
         String suffix = error == null ? "ready" : "failed";
         String type = "environment." + suffix;
         Map<String, Object> data = error == null ? Map.of()

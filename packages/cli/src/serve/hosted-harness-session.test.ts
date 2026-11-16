@@ -282,6 +282,13 @@ const state = vi.hoisted(() => ({
     { mode: 'default' | 'auto-edit' | 'yolo'; revision: number }
   >(),
   approvalQueries: [] as string[],
+  appendFault: undefined as
+    | ((
+        journal: LocalJsonlManagedSessionJournalHandle,
+        records: readonly unknown[],
+        append: (records: readonly unknown[]) => Promise<void>,
+      ) => Promise<boolean | void>)
+    | undefined,
   model: vi.fn(
     async (_input: {
       signal: AbortSignal;
@@ -411,8 +418,19 @@ vi.mock(
       });
       let journal: Awaited<ReturnType<typeof journalStore.open>> | undefined;
       const openJournal = journalStore.open.bind(journalStore);
-      journalStore.open = async (request) =>
-        (journal = await openJournal(request));
+      journalStore.open = async (request) => {
+        const opened = await openJournal(request);
+        journal = opened;
+        const append = opened.appendTransaction.bind(opened);
+        opened.appendTransaction = async (records) => {
+          if (state.appendFault) {
+            const consumed = await state.appendFault(opened, records, append);
+            if (consumed) return;
+          }
+          return append(records);
+        };
+        return opened;
+      };
       return {
         journalStore,
         resourceStore,
@@ -566,6 +584,7 @@ beforeEach(({ task }) => {
   ).mockResolvedValue();
   state.approvalSelections.clear();
   state.approvalQueries.length = 0;
+  state.appendFault = undefined;
   state.modelConfig.mockReset();
   state.memory.mockReset();
   vi.spyOn(
@@ -28501,6 +28520,85 @@ describe('Hosted Harness refusal reasons', () => {
       ),
     );
     log.mockRestore();
+  });
+
+  it('finishes a turn whose lost journal acknowledgement then settles', async () => {
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    expect(created.status).toBe(200);
+    const clientId = created.body.clientId as string;
+    let resumed = false;
+    state.appendFault = async (journal, records, append) => {
+      if (resumed) return false;
+      resumed = true;
+      (
+        journal as LocalJsonlManagedSessionJournalHandle & {
+          settleAppend?: () => Promise<'landed' | 'absent'>;
+        }
+      ).settleAppend = async () => 'landed';
+      await append(records);
+      throw new ManagedSessionAppendUnsettledError(new Error('ack lost'));
+    };
+    const prompt = [{ type: 'text', text: 'hello' }];
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        prompt,
+        promptId: PROMPT_ID,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .expect(202);
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(resumed).toBe(true);
+        expect(status.body.recoveryBlocked).toBe(false);
+        expect(status.body.hasActivePrompt).toBe(false);
+      },
+      { timeout: settleTimeoutMs() },
+    );
+  });
+
+  it('blocks a turn whose journal append is fenced', async () => {
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    expect(created.status).toBe(200);
+    const clientId = created.body.clientId as string;
+    let writes = 0;
+    state.appendFault = async () => {
+      writes += 1;
+      if (writes < 2) return false;
+      throw new ManagedSessionJournalFencedError('head moved');
+    };
+    const prompt = [{ type: 'text', text: 'hello' }];
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        prompt,
+        promptId: PROMPT_ID,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .expect(202);
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(status.body.recoveryBlocked).toBe(true);
+        expect(status.body.hasActivePrompt).toBe(false);
+      },
+      { timeout: settleTimeoutMs() },
+    );
   });
 
   it('names an unsettled turn on a bare cold load', async () => {
