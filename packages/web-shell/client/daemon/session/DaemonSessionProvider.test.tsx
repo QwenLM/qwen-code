@@ -27683,6 +27683,9 @@ describe('DaemonSessionProvider', () => {
           },
         });
         const h = await mountWorkflow(session);
+        await act(async () => {
+          await vi.waitFor(() => expect(context).toHaveBeenCalledTimes(2));
+        });
         const older = createDeferred<DaemonSessionContextStatus>();
         const policy = createDeferred<DaemonSessionContextStatus>();
         context
@@ -27692,13 +27695,12 @@ describe('DaemonSessionProvider', () => {
         await act(async () => {
           pending = h.getActions().getContext();
           reload.resolve();
-          await flushPromises();
+          await vi.waitFor(() => expect(context).toHaveBeenCalledTimes(4));
         });
         await act(async () => {
           terminal.resolve();
-          await flushPromises();
+          await vi.waitFor(() => expect(context).toHaveBeenCalledTimes(5));
         });
-        expect(context).toHaveBeenCalledTimes(5);
         await act(async () => {
           if (outcome === 'rejected') policy.reject(new Error('read failed'));
           else
