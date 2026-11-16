@@ -11,7 +11,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.GeneralSecurityException;
 import java.security.KeyStore;
-import java.security.cert.CertificateFactory;
 import java.util.Arrays;
 
 public final class HarnessTls {
@@ -42,28 +41,6 @@ public final class HarnessTls {
         } finally {
             Arrays.fill(keyPassword, '\0');
             Arrays.fill(trustPassword, '\0');
-        }
-    }
-
-    static SSLContext kubernetesContext(Path caFile) {
-        try (var input = Files.newInputStream(caFile)) {
-            var certificates = CertificateFactory.getInstance("X.509").generateCertificates(input);
-            if (certificates.isEmpty()) {
-                throw new GeneralSecurityException("Empty Kubernetes CA");
-            }
-            KeyStore trust = KeyStore.getInstance(KeyStore.getDefaultType());
-            trust.load(null, null);
-            int index = 0;
-            for (var certificate : certificates) {
-                trust.setCertificateEntry("ca-" + index++, certificate);
-            }
-            var managers = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
-            managers.init(trust);
-            SSLContext context = SSLContext.getInstance("TLS");
-            context.init(null, managers.getTrustManagers(), null);
-            return context;
-        } catch (IOException | GeneralSecurityException error) {
-            throw new IllegalArgumentException("Kubernetes discovery CA could not be loaded");
         }
     }
 

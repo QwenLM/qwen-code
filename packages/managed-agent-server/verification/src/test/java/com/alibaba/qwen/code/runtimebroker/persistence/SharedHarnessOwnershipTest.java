@@ -72,9 +72,9 @@ class SharedHarnessOwnershipTest {
                 new RuntimeLifecycleAuthority("close", 1)));
         bindings.requireHarnessAdmission(SHARED, SCOPE, "harness-b", null);
 
-        // Unbound and private Kubernetes Workspace placements keep today's unfenced Workspace isolation.
+        // Unbound and private external Workspace placements keep today's unfenced Workspace isolation.
         bindings.requireHarnessAdmission(new RuntimeProvisionRequest(SCOPE, null, "legacy", null), SCOPE, "harness-a", null);
-        bindings.requireHarnessAdmission(new RuntimeProvisionRequest(SCOPE, null, "kubernetes-workspace", "storage"),
+        bindings.requireHarnessAdmission(new RuntimeProvisionRequest(SCOPE, null, "external-workspace", "storage"),
                 SCOPE, "harness-a", null);
         bindings.requireHarnessAdmission(SCOPE, "harness-a", null);
     }

@@ -172,6 +172,10 @@ saw:
 | `QWEN_CODE_MESSAGING_TOKEN` from the target's own environment                 | a process that session started | delivered under the parity default; `origin="own-process"`                       |
 | A controller token `qpc_<64 hex>` minted with `qwen sessions controllers add` | a program the user trusts      | delivered under the parity default; `origin="controller"` with the grant's label |
 
+A shared ACP inbox accepts the registry and controller credentials. The
+own-process credential is available only when the inbox belongs to one
+session.
+
 A first line that is not an auth line, or that presents a token matching
 none of the three, drops the connection silently. When the record has no
 `ipcToken`, do not send an auth line; an older inbox reads it as an
@@ -216,6 +220,11 @@ that is delivered and one that waits for review. Writing
 | `toSessionId` | The `sessionId` you read from the record. A receiver holding a different id answers `misaddressed`. Always send it.                                                                                                           |
 | `priority`    | `"now"` or `"next"`; anything else reads as `"next"`. Carried for a future interrupt path; today the receiver queues both for the next turn.                                                                                  |
 | `message`     | `role` must be `"user"`; `content` a non-empty string.                                                                                                                                                                        |
+
+After `/clear`, a shared ACP inbox also recognizes the session's original
+published ID as an alias when it resolves to exactly one registered
+session. An ID that matches multiple registered sessions receives
+`misaddressed`.
 
 Unknown fields are ignored.
 
@@ -280,8 +289,8 @@ In order:
 1. **Admission.** Per sender: a burst of 30, then one message every two seconds. All senders together: a burst of 32, then one a second — a sender names itself on the frame, so rotating that name buys a fresh allowance from the first limit but not the second. The same body from another session inside 30 seconds is a `duplicate`; a process the session started and a trusted controller are exempt from that check, and rate-limited like everyone else. A dropped message is never held, never delivered, and leaves no record, so a sender that waits out its burst and retries still lands.
 2. **Settled ids.** A `msgId` the gate already decided repeats its earlier verdict.
 3. **Policy.** `agents.crossSessionInbound` set to `accept`, `hold` or `refuse` wins. Unset: a process the session started or a trusted controller is accepted; otherwise a message is accepted only when `fromMode` names the same review class the receiver is in, and held in every other case, including when `fromMode` is absent.
-4. **Hold.** Up to 50 messages wait. A message arriving at a full buffer is `dropped` with `queue-full` rather than evicting one already parked. A held message expires after `agents.crossSessionHeldExpiry` (`1m`, `5m`, `10m`, `never`; default `5m`). The user releases or denies from `/peers`; a mode change re-evaluates the backlog.
-5. **Queue.** An accepted message joins the session's input queue, which holds at most 50 from peers. A full queue is `dropped` with `queue-full` too.
+4. **Hold.** A session a program drives over ACP has nobody to review a hold, so it answers `refused` instead. Elsewhere, up to 50 messages wait. A message arriving at a full buffer is `dropped` with `queue-full` rather than evicting one already parked. A held message expires after `agents.crossSessionHeldExpiry` (`1m`, `5m`, `10m`, `never`; default `5m`). The user releases or denies from `/peers`; a mode change re-evaluates the backlog.
+5. **Queue.** An accepted message joins the session's input queue, which holds at most 50 from peers. A session a program drives over ACP gives peer messages their own 20-slot allowance, separate from its 20 slots for background results. A full allowance is `dropped` with `queue-full`. The ACP host sends `expired` for unread peer messages detached when the conversation changes or closes.
 
 A sender does not have to discover the limits the hard way: a Qwen Code
 session mirrors them per address and refuses its own send before writing
@@ -323,12 +332,11 @@ that look like the envelope are defanged inside `content`.
   renamed itself, are both still to come.
 - **Same-name reporting.** `qwen sessions ps` and `list_agents` do not
   flag records that still collide.
-- **Inbound messages to ACP-driven sessions.** A session a program
-  drives over ACP — daemon-spawned or not — registers and can send, but
-  answers `refused` to anything sent to it: a hold is a question put to
-  a person, and nobody is watching a hold list on its behalf. Where a
-  held message should surface for those sessions — its client, or the
-  daemon's own API — is still open.
+- **Held messages for ACP-driven sessions.** A session a program
+  drives over ACP (daemon-spawned or not) takes the messages its rules
+  accept, but it cannot present a held one, so a message that would be
+  held is answered `refused`. Where a held message should surface for
+  those sessions (its client, or the daemon's own API) is still open.
 - **Sessions behind one inbox are one sender to every peer.** A process
   hosting several sessions sends with one `from` address, so a
   receiver's per-sender budget and duplicate window (§6) are shared by
