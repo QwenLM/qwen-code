@@ -8,6 +8,7 @@ import org.junit.jupiter.api.condition.OS;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.FileTime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -48,6 +49,43 @@ class MacOsHostIdentityTest {
         Path link = root.resolve("link");
         Files.createSymbolicLink(link, root);
         assertThrows(IOException.class, () -> MacOsHostIdentity.fileIdentity(link));
+    }
+
+    @EnabledOnOs(OS.MAC)
+    @Timeout(60)
+    @Test
+    void identityProbeToleratesChildEntryWritesDuringTheProbe(@org.junit.jupiter.api.io.TempDir Path directory)
+            throws Exception {
+        Path root = directory.toRealPath();
+        var reader = new com.alibaba.qwen.code.runtimebroker.provisioning.NativeStorageIdentityReader();
+        Thread writer = new Thread(() -> {
+            try {
+                while (!Thread.currentThread().isInterrupted()) {
+                    Path child = root.resolve("probe-churn");
+                    Files.deleteIfExists(child);
+                    Files.createFile(child);
+                }
+            } catch (IOException directoryRemovedAfterTheTest) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        writer.setDaemon(true);
+        writer.start();
+        try {
+            FileTime mtimeBefore = Files.getLastModifiedTime(root);
+            var first = reader.read(root);
+            for (int i = 0; i < 2; i++) {
+                var next = reader.read(root);
+                assertEquals(first.device(), next.device());
+                assertEquals(first.inode(), next.inode());
+                assertEquals(first.birthTime(), next.birthTime());
+            }
+            assertTrue(Files.getLastModifiedTime(root).compareTo(mtimeBefore) > 0,
+                    "child-entry writes must churn the root mtime during the probes");
+        } finally {
+            writer.interrupt();
+            writer.join(5000);
+        }
     }
 
     @Test
