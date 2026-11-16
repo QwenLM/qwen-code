@@ -510,6 +510,8 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
       ownsSessionId: (id) => hosted.has(id),
     });
+    expect(process.env[MESSAGING_SOCKET_ENV]).toBeUndefined();
+    expect(process.env[MESSAGING_TOKEN_ENV]).toBeUndefined();
 
     const mine = peerFrame({
       content: 'for session-b',
@@ -896,6 +898,10 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     await settle();
     expect(statusesOf(again.msgId)).toEqual(['delivered']);
     expect(queued).toHaveLength(2);
+
+    await started.close([queued[1]!]);
+    await settle();
+    expect(statusesOf(again.msgId)).toEqual(['delivered', 'expired']);
   });
 
   it('holds a message when the receiver bypasses prompts and the sender says nothing', async () => {

@@ -69,6 +69,11 @@ every reader uses it:
   takes nothing, so its sender gets `queue-full` and, on a retry after
   the session is gone, `misaddressed`.
 
+**Child credentials require a single-session inbox.** A process-wide
+credential proves descent from the host. The shared ACP inbox accepts
+peer and controller credentials. Terminal inboxes keep the own-process
+credential.
+
 **Delivery is wired before the socket binds.** `PeerMessaging.start`
 accepts the submit function as an option and installs it before the
 inbox listens, as it already does for the gate. A host with a submit
@@ -79,8 +84,9 @@ it.
 **An accepted message is a background notification of kind `peer`.**
 The host hands the message to the addressed session, which queues it on
 the same notification queue that carries finished agents and shells.
-The queue records it in the transcript, shows it to the client, and
-gives it to the model as a turn of its own once the session is idle.
+Once the session is idle, its turn records the message in the transcript,
+shows it to the client, and gives it to the model. Recording at that
+point keeps a message that expired in the queue out of transcript replay.
 That is the "next turn" a terminal session gets too, not an interruption
 of running work. The kind `peer` is already recognized by every parser
 between a session and a client (#12342). While a message waits, the
@@ -91,21 +97,18 @@ Web Shell shows the label next to the cross-session marker, so the
 person reading the transcript sees who sent what. A label the sender
 chose could impersonate a trusted controller, so it is not used.
 
-Peer messages are kept out of the queue's eviction rule in both
-directions. A full queue answers a new message `queue-full`, and the
-sender can retry. A queued message is never evicted to make room for a
-result. The sender was told `delivered`, and its message cannot be
-produced again the way a task result can.
+Peer messages have a separate 20-slot allowance within the notification
+queue, leaving all 20 background-result slots available to results. A
+full peer allowance answers `queue-full`, and the sender can retry. This
+preserves room for the completion a deferred work chain needs to resume.
 
 **Messages a session never reads are corrected to `expired`.** When the
-host removes a session, it first takes the peer messages still in that
-session's queue and reports each one `expired` to its sender. When the
-process shuts down, it does the same for every hosted session, after the
-inbox closes, so no message can join a queue after it was read. Messages
-are matched by id, not by counting from the end of one FIFO, because
-several sessions drain their queues independently. The receipts go out
-in batches of the outbound send ceiling (64), because a send past it is
-refused and the `delivered` would stand.
+host removes a session, it detaches the messages still in that queue and
+sends `expired`. When `/clear` switches conversations, it does the same
+for messages queued under the old conversation ID. Process shutdown
+stops intake and detaches unread messages before awaiting socket
+teardown. The per-message receipts use the shared outbound send limit
+(64) and wait for capacity when other sends occupy the slots.
 
 ## Files
 
@@ -151,12 +154,11 @@ refused and the `delivered` would stand.
 ## Verification
 
 - Unit: the gate refuses a would-be hold with `presentsHolds: false` and
-  still accepts a controller and an own-process message under the unset
-  default. The host routes an accepted message to the addressed session
-  by either of its names, does not answer for a session it does not
-  hold, and corrects queued messages to `expired` when a session closes
-  and after the inbox closes. The session refuses at a full queue without evicting, and
-  never evicts a queued peer message.
+  retains the default controller and single-session own-process rules.
+  The shared inbox only exports an address through the peer registry.
+  The host routes by either name for a registered session. Peer messages
+  have a separate allowance from task results, expire on conversation
+  change and close, and enter the transcript when a turn takes them.
 - End to end: a terminal session and a Web Shell session in the same
   review class send each other a message. The Web Shell session shows the
   message and answers it in a turn of its own. A message from a session

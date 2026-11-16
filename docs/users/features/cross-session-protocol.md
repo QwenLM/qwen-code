@@ -172,6 +172,10 @@ saw:
 | `QWEN_CODE_MESSAGING_TOKEN` from the target's own environment                 | a process that session started | delivered under the parity default; `origin="own-process"`                       |
 | A controller token `qpc_<64 hex>` minted with `qwen sessions controllers add` | a program the user trusts      | delivered under the parity default; `origin="controller"` with the grant's label |
 
+A shared ACP inbox accepts the registry and controller credentials. The
+own-process credential is available only when the inbox belongs to one
+session.
+
 A first line that is not an auth line, or that presents a token matching
 none of the three, drops the connection silently. When the record has no
 `ipcToken`, do not send an auth line; an older inbox reads it as an
@@ -281,7 +285,7 @@ In order:
 2. **Settled ids.** A `msgId` the gate already decided repeats its earlier verdict.
 3. **Policy.** `agents.crossSessionInbound` set to `accept`, `hold` or `refuse` wins. Unset: a process the session started or a trusted controller is accepted; otherwise a message is accepted only when `fromMode` names the same review class the receiver is in, and held in every other case, including when `fromMode` is absent.
 4. **Hold.** A session a program drives over ACP has nobody to review a hold, so it answers `refused` instead. Elsewhere, up to 50 messages wait. A message arriving at a full buffer is `dropped` with `queue-full` rather than evicting one already parked. A held message expires after `agents.crossSessionHeldExpiry` (`1m`, `5m`, `10m`, `never`; default `5m`). The user releases or denies from `/peers`; a mode change re-evaluates the backlog.
-5. **Queue.** An accepted message joins the session's input queue, which holds at most 50 from peers. A session a program drives over ACP queues it with its background notifications instead, which hold at most 20 in all. A message there neither evicts another queued notification nor is evicted by one. A full queue is `dropped` with `queue-full` too.
+5. **Queue.** An accepted message joins the session's input queue, which holds at most 50 from peers. A session a program drives over ACP gives peer messages their own 20-slot allowance, separate from its 20 slots for background results. A full allowance is `dropped` with `queue-full`. The ACP host sends `expired` for unread peer messages detached when the conversation changes or closes.
 
 A sender does not have to discover the limits the hard way: a Qwen Code
 session mirrors them per address and refuses its own send before writing

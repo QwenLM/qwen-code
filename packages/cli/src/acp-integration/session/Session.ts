@@ -2135,7 +2135,7 @@ interface QueuedBackgroundNotification extends BackgroundNotificationQueueItem {
   persisted?: true;
   turn?: BackgroundNotificationTurn;
   admissionRetries?: number;
-  peerDelivery?: PeerQueuedDelivery;
+  peer?: { sessionId: string; delivery: PeerQueuedDelivery };
 }
 
 /**
@@ -3029,6 +3029,9 @@ export class Session implements SessionContext {
     private readonly isWorkflowRunLiveInSiblingSession: (
       runId: string,
     ) => boolean = () => false,
+    private readonly onPeerDeliveriesExpired?: (
+      deliveries: PeerQueuedDelivery[],
+    ) => void,
   ) {
     this.sessionId = id;
     this.requestLifecycleSessionId = id;
@@ -3257,6 +3260,8 @@ export class Session implements SessionContext {
     // and record ids from the finalized chain must not answer a re-send.
     this.pendingExternalAgentContext = [];
     this.#externalRecordIds.clear();
+    const expired = this.takeQueuedPeerDeliveries(this.config.getSessionId());
+    if (expired.length > 0) this.onPeerDeliveriesExpired?.(expired);
     this.#bindGoalRuntime();
   }
 
@@ -13820,7 +13825,10 @@ export class Session implements SessionContext {
   }
 
   #enqueueBackgroundNotification(item: QueuedBackgroundNotification): void {
-    while (this.notificationQueue.length >= MAX_BACKGROUND_NOTIFICATION_QUEUE) {
+    const backgroundQueue = this.notificationQueue.filter(
+      (queued) => queued.kind !== 'peer',
+    );
+    while (backgroundQueue.length >= MAX_BACKGROUND_NOTIFICATION_QUEUE) {
       // While the todo-stop guard defers unrelated automatic turns, a queued
       // notification that continues the current work chain is the one thing
       // that can release it — so those are protected and the unrelated ones
@@ -13834,16 +13842,15 @@ export class Session implements SessionContext {
       // reads the original entry by index, since the guard predicate needs
       // fields the projection deliberately drops.
       const admission = decideNotificationAdmission(
-        this.notificationQueue.map(toAdmissibleNotification),
+        backgroundQueue.map(toAdmissibleNotification),
         toAdmissibleNotification(item),
         {
           max: MAX_BACKGROUND_NOTIFICATION_QUEUE,
           isProtected: (_projected, index) =>
-            this.notificationQueue[index]!.kind === 'peer' ||
-            (guardDefersUnrelatedWork &&
-              this.#notificationContinuesTodoStopGuardWorkChain(
-                this.notificationQueue[index]!,
-              )),
+            guardDefersUnrelatedWork &&
+            this.#notificationContinuesTodoStopGuardWorkChain(
+              backgroundQueue[index]!,
+            ),
         },
       );
       if (admission.action === 'drop') {
@@ -13858,11 +13865,15 @@ export class Session implements SessionContext {
         return;
       }
       if (admission.action === 'push') break;
-      const [evicted] = this.notificationQueue.splice(admission.index, 1);
+      const [evicted] = backgroundQueue.splice(admission.index, 1);
       debugLogger.warn(
         `Notification queue overflow: evicting task=${evicted?.taskId ?? 'unknown'} kind=${evicted?.kind ?? 'unknown'}`,
       );
       if (evicted) {
+        this.notificationQueue.splice(
+          this.notificationQueue.indexOf(evicted),
+          1,
+        );
         this.droppedNotifications.record(toAdmissibleNotification(evicted));
       }
     }
@@ -13903,10 +13914,15 @@ export class Session implements SessionContext {
     delivery: PeerQueuedDelivery,
   ): boolean {
     if (this.disposed || this.closing) return false;
-    if (this.notificationQueue.length >= MAX_BACKGROUND_NOTIFICATION_QUEUE) {
+    if (
+      this.notificationQueue.filter((item) => item.kind === 'peer').length >=
+      MAX_BACKGROUND_NOTIFICATION_QUEUE
+    ) {
       return false;
     }
-    this.#enqueueBackgroundNotification({
+    // Persist and display the message when its turn takes it. An early
+    // completion record would replay as pending after the queue is gone.
+    this.notificationQueue.push({
       displayText,
       modelText,
       taskId: delivery.msgId,
@@ -13917,16 +13933,23 @@ export class Session implements SessionContext {
       // misled about where the message came from.
       label: truncateNotificationLabel(displayText),
       continuesTodoStopGuardWorkChain: false,
-      peerDelivery: delivery,
+      peer: { sessionId: this.config.getSessionId(), delivery },
     });
+    this.#activeWorkChanged();
+    void this.#drainNotificationQueue();
     return true;
   }
 
-  /** Accepted cross-session messages still waiting for a turn. */
-  queuedPeerDeliveries(): PeerQueuedDelivery[] {
-    return this.notificationQueue.flatMap((item) =>
-      item.peerDelivery ? [item.peerDelivery] : [],
-    );
+  /** Detach unread messages, optionally keeping those for the current conversation. */
+  takeQueuedPeerDeliveries(keepSessionId?: string): PeerQueuedDelivery[] {
+    const deliveries: PeerQueuedDelivery[] = [];
+    this.notificationQueue = this.notificationQueue.filter((item) => {
+      if (!item.peer || item.peer.sessionId === keepSessionId) return true;
+      deliveries.push(item.peer.delivery);
+      return false;
+    });
+    if (deliveries.length > 0) this.#activeWorkChanged();
+    return deliveries;
   }
 
   async enqueueBackgroundNotification(

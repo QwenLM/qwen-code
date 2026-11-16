@@ -408,7 +408,10 @@ import { ACP_ERROR_CODES } from './errorCodes.js';
 import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
 import { QWEN_CODE_SERVE_ENV } from '../config/acp-channel-fallback.js';
 import { isSshWorkspaceExtMethodAllowed } from './ssh-workspace-guards.js';
-import { PeerMessaging } from '../peerMessaging/peer-messaging.js';
+import {
+  PeerMessaging,
+  type PeerQueuedDelivery,
+} from '../peerMessaging/peer-messaging.js';
 import { isCrossSessionMessagingActive } from '../peerMessaging/enabled.js';
 import { startNonInteractiveOpenAILogHousekeeping } from '../services/housekeeping/scheduler.js';
 import { appEvents, AppEvent } from '../utils/events.js';
@@ -3974,15 +3977,14 @@ class QwenAgent implements Agent {
    * and binding a socket per session would multiply file descriptors by
    * the session count for no added reach.
    *
-   * Outbound only for now. Inbound is refused rather than held, because a
-   * hold is a question put to a person and nobody is watching a hold list
-   * on a daemon-managed session's behalf; a sender is told so at once
-   * instead of waiting out an expiry.
+   * Inbound messages the gate would hold are refused immediately. ACP
+   * clients have no hold list to present to the user.
    */
   private peerMessagingStart: Promise<PeerMessaging | null> | null = null;
   // Set by closePeerMessaging: a retry must not resurrect an inbox after
   // teardown ran.
   private peerMessagingClosed = false;
+  private peerMessagingClose: Promise<void> | undefined;
   /**
    * Sessions already given a record. A session is published once, but a
    * reload can hand the same id back through the same path, and two
@@ -4758,12 +4760,7 @@ class QwenAgent implements Agent {
     options: { shutdownConfig?: boolean } = {},
   ): Promise<void> {
     if (this.sessions.get(sessionId) !== session) return;
-    const unreadPeerMessages = session.queuedPeerDeliveries();
-    if (unreadPeerMessages.length > 0) {
-      void this.peerMessagingStart?.then((messaging) =>
-        messaging?.expireQueued(unreadPeerMessages),
-      );
-    }
+    const unreadPeerMessages = session.takeQueuedPeerDeliveries();
     try {
       session.dispose();
     } catch (error) {
@@ -4773,6 +4770,7 @@ class QwenAgent implements Agent {
     // a record left behind advertises a session that is gone, and peers
     // would keep addressing it until this process exits.
     this.registeredSessions.delete(sessionId);
+    this.expireHostedPeerDeliveries(unreadPeerMessages);
     try {
       await session.getConfig().unregisterSessionRegistry();
     } catch (error) {
@@ -5263,6 +5261,7 @@ class QwenAgent implements Agent {
             this.publishInboxAddress(ipcPath, ipcToken),
           ownsSessionId: (id) => this.peerAddressedSession(id) !== undefined,
           submit: (modelText, displayText, delivery) =>
+            !this.peerMessagingClosed &&
             delivery !== undefined &&
             (this.peerAddressedSession(
               delivery.toSessionId,
@@ -5319,20 +5318,32 @@ class QwenAgent implements Agent {
   }
 
   /** Close the inbox and stop advertising it. Safe to call more than once. */
-  async closePeerMessaging(): Promise<void> {
+  closePeerMessaging(): Promise<void> {
+    return (this.peerMessagingClose ??= this.finishPeerMessagingClose());
+  }
+
+  private expireHostedPeerDeliveries(
+    deliveries: readonly PeerQueuedDelivery[],
+  ): void {
+    if (deliveries.length === 0) return;
+    void this.peerMessagingStart
+      ?.then((messaging) => messaging?.expireQueued(deliveries))
+      .catch((error: unknown) => {
+        debugLogger.debug('[ACP] sending peer expiry receipts failed:', error);
+      });
+  }
+
+  private async finishPeerMessagingClose(): Promise<void> {
     this.peerMessagingClosed = true;
     const pending = this.peerMessagingStart;
     if (!pending) return;
-    this.peerMessagingStart = null;
+    // Detach before the first await. An active turn can finish while the
+    // socket closes, and nothing we expire should still be runnable.
+    const unread = [...this.sessions.values()].flatMap((session) =>
+      session.takeQueuedPeerDeliveries(),
+    );
     try {
-      const messaging = await pending;
-      await messaging?.close();
-      // After the inbox closes, so nothing can join a queue behind this
-      // read: these senders were told `delivered`.
-      const unread = [...this.sessions.values()].flatMap((session) =>
-        session.queuedPeerDeliveries(),
-      );
-      if (unread.length > 0) await messaging?.expireQueued(unread);
+      await (await pending)?.close(unread);
     } catch (error) {
       debugLogger.debug(
         `[ACP] closing cross-session messaging failed: ${
@@ -17744,6 +17755,7 @@ class QwenAgent implements Agent {
       () => this.activeWorkReporter?.notifyChanged(),
       workflowHistory,
       (runId) => this.isWorkflowRunLiveOutsideSession(sessionId, runId),
+      (deliveries) => this.expireHostedPeerDeliveries(deliveries),
     );
     const replaySessionHistory = async () => {
       if (

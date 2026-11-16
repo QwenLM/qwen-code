@@ -1145,6 +1145,7 @@ vi.mock('./session/Session.js', () => {
   // even tests that never look at reporting need this to exist on instances.
   SessionMock.prototype.collectActiveWorkHolds = () => [];
   SessionMock.prototype.getBackgroundTurn = () => undefined;
+  SessionMock.prototype.takeQueuedPeerDeliveries = () => [];
   return {
     Session: SessionMock,
     // Awaited by every session creation before the session is published.
@@ -2513,7 +2514,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         cancelPromptAdmission: ReturnType<typeof vi.fn>;
         enqueueBackgroundNotification: ReturnType<typeof vi.fn>;
         enqueuePeerMessage: ReturnType<typeof vi.fn>;
-        queuedPeerDeliveries: ReturnType<typeof vi.fn>;
+        takeQueuedPeerDeliveries: ReturnType<typeof vi.fn>;
         appendExternalRecord: ReturnType<typeof vi.fn>;
         enableLiveScreenContext: ReturnType<typeof vi.fn>;
         buildAvailableCommandsSnapshot: ReturnType<typeof vi.fn>;
@@ -4207,6 +4208,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           installRewriter: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
+          takeQueuedPeerDeliveries: () => [],
         }) as unknown as InstanceType<typeof Session>,
     );
 
@@ -4607,6 +4609,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           installRewriter: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
+          takeQueuedPeerDeliveries: () => [],
         }) as unknown as InstanceType<typeof Session>,
     );
 
@@ -4676,6 +4679,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           installRewriter: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
+          takeQueuedPeerDeliveries: () => [],
         }) as unknown as InstanceType<typeof Session>,
     );
 
@@ -5644,6 +5648,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           installRewriter: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
+          takeQueuedPeerDeliveries: () => [],
         }) as unknown as InstanceType<typeof Session>,
     );
 
@@ -6011,6 +6016,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           installRewriter: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
+          takeQueuedPeerDeliveries: () => [],
         }) as unknown as InstanceType<typeof Session>,
     );
 
@@ -6261,7 +6267,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           dispose: vi.fn(),
           getSettings: vi.fn().mockReturnValue(_settings),
           enqueuePeerMessage: vi.fn().mockReturnValue(true),
-          queuedPeerDeliveries: vi.fn().mockReturnValue([]),
+          takeQueuedPeerDeliveries: vi.fn().mockReturnValue([]),
           emitGoalStatus: vi.fn(),
           renderLegacyGoalSupersession: vi.fn().mockReturnValue([]),
           captureHistorySnapshot: vi
@@ -6611,9 +6617,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     });
 
     it('tells the senders of messages a session never read', async () => {
-      const expireQueued = vi.fn().mockResolvedValue(undefined);
       const close = vi.fn().mockResolvedValue(undefined);
-      mockPeerMessagingStart.mockResolvedValue({ close, expireQueued });
+      mockPeerMessagingStart.mockResolvedValue({ close });
       await setupSessionMocks('hosted-unread');
       vi.mocked(loadSettings).mockReturnValue(messagingOn());
       const { agent, agentPromise } =
@@ -6621,17 +6626,17 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       await agent.newSession({ cwd: '/tmp', mcpServers: [] });
       await vi.waitFor(() => expect(mockPeerMessagingStart).toHaveBeenCalled());
       const unread = [{ msgId: 'm-unread', from: '/tmp/sender.sock' }];
-      vi.mocked(lastSessionMock!.queuedPeerDeliveries).mockReturnValue(unread);
+      const take = lastSessionMock!.takeQueuedPeerDeliveries;
+      vi.mocked(take).mockReturnValueOnce(unread);
 
       mockConnectionState.resolve();
       await agentPromise;
 
-      // After the inbox closes, so no message can be queued behind the
-      // read.
-      expect(expireQueued).toHaveBeenCalledWith(unread);
-      expect(close.mock.invocationCallOrder[0]).toBeLessThan(
-        expireQueued.mock.invocationCallOrder[0]!,
+      // Detach before yielding to inbox teardown and sending the correction.
+      expect(take.mock.invocationCallOrder[0]).toBeLessThan(
+        close.mock.invocationCallOrder[0]!,
       );
+      expect(close).toHaveBeenCalledExactlyOnceWith(unread);
     });
 
     it('tells the senders of messages a closed session never read', async () => {
@@ -6647,7 +6652,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       await agent.newSession({ cwd: '/tmp', mcpServers: [] });
       await vi.waitFor(() => expect(mockPeerMessagingStart).toHaveBeenCalled());
       const unread = [{ msgId: 'm-unread', from: '/tmp/sender.sock' }];
-      vi.mocked(lastSessionMock!.queuedPeerDeliveries).mockReturnValue(unread);
+      vi.mocked(lastSessionMock!.takeQueuedPeerDeliveries).mockReturnValueOnce(
+        unread,
+      );
 
       await agent.extMethod('qwen/control/session/close', {
         sessionId: 'hosted-closing',
@@ -16614,6 +16621,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           installRewriter: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
+          takeQueuedPeerDeliveries: () => [],
         }) as unknown as InstanceType<typeof Session>,
     );
     vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
@@ -16694,6 +16702,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           installRewriter: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
+          takeQueuedPeerDeliveries: () => [],
         }) as unknown as InstanceType<typeof Session>,
     );
     vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
@@ -16774,6 +16783,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           installRewriter: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
+          takeQueuedPeerDeliveries: () => [],
         }) as unknown as InstanceType<typeof Session>,
     );
     vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
@@ -26977,6 +26987,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         installRewriter: vi.fn(),
         startCronScheduler: vi.fn(),
         dispose: vi.fn(),
+        takeQueuedPeerDeliveries: () => [],
       } as unknown as InstanceType<typeof Session>;
     });
     vi.mocked(loadSettings).mockReturnValue(makeSessionSettings());
@@ -28667,7 +28678,7 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
           installRewriter: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
-          queuedPeerDeliveries: vi.fn().mockReturnValue([]),
+          takeQueuedPeerDeliveries: vi.fn().mockReturnValue([]),
         }) as unknown as InstanceType<typeof Session>,
     );
 
@@ -31151,7 +31162,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
           : vi.fn().mockResolvedValue(undefined),
         clearActiveTodoPlanRevision: vi.fn(),
         dispose: vi.fn(),
-        queuedPeerDeliveries: vi.fn().mockReturnValue([]),
+        takeQueuedPeerDeliveries: vi.fn().mockReturnValue([]),
       };
       lastSessionMock = sessionMock;
       return sessionMock as unknown as InstanceType<typeof Session>;
@@ -34160,6 +34171,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       waitForActiveTurnsToSettle: vi.fn().mockResolvedValue(undefined),
       isTurnIdle: vi.fn().mockReturnValue(true),
       dispose: replacementDispose,
+      takeQueuedPeerDeliveries: () => [],
     } as unknown as InstanceType<typeof Session>;
     const sessions = (
       agent as unknown as {
@@ -36264,6 +36276,7 @@ describe('sessionLanguage multi-session propagation', () => {
         installRewriter: vi.fn(),
         startCronScheduler: vi.fn(),
         dispose: vi.fn(),
+        takeQueuedPeerDeliveries: () => [],
       };
       sessionIdx++;
       return mock as unknown as InstanceType<typeof Session>;
@@ -36371,6 +36384,7 @@ describe('sessionLanguage multi-session propagation', () => {
         installRewriter: vi.fn(),
         startCronScheduler: vi.fn(),
         dispose: vi.fn(),
+        takeQueuedPeerDeliveries: () => [],
       };
       sessionIdx++;
       return mock as unknown as InstanceType<typeof Session>;
@@ -36459,6 +36473,7 @@ describe('sessionLanguage multi-session propagation', () => {
         installRewriter: vi.fn(),
         startCronScheduler: vi.fn(),
         dispose: vi.fn(),
+        takeQueuedPeerDeliveries: () => [],
       } as unknown as InstanceType<typeof Session>;
     });
     vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
@@ -36548,6 +36563,7 @@ describe('sessionLanguage multi-session propagation', () => {
           installRewriter: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
+          takeQueuedPeerDeliveries: () => [],
         }) as unknown as InstanceType<typeof Session>,
     );
     const agentPromise = runAcpAgent(
@@ -36649,6 +36665,7 @@ describe('sessionLanguage multi-session propagation', () => {
         installRewriter: vi.fn(),
         startCronScheduler: vi.fn(),
         dispose: vi.fn(),
+        takeQueuedPeerDeliveries: () => [],
       } as unknown as InstanceType<typeof Session>;
     });
     vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
@@ -36844,6 +36861,7 @@ describe('sessionLanguage multi-session propagation', () => {
           installRewriter: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
+          takeQueuedPeerDeliveries: () => [],
         } as unknown as InstanceType<typeof Session>;
       });
       vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
@@ -36956,6 +36974,7 @@ describe('sessionLanguage multi-session propagation', () => {
           installRewriter: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
+          takeQueuedPeerDeliveries: () => [],
         }) as unknown as InstanceType<typeof Session>,
     );
     vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
@@ -37045,6 +37064,7 @@ describe('sessionLanguage multi-session propagation', () => {
           installRewriter: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
+          takeQueuedPeerDeliveries: () => [],
         }) as unknown as InstanceType<typeof Session>,
     );
     vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
@@ -37151,6 +37171,7 @@ describe('sessionLanguage multi-session propagation', () => {
           installRewriter: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
+          takeQueuedPeerDeliveries: () => [],
         }) as unknown as InstanceType<typeof Session>,
     );
     vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
@@ -37266,6 +37287,7 @@ describe('sessionLanguage multi-session propagation', () => {
           installRewriter: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
+          takeQueuedPeerDeliveries: () => [],
         }) as unknown as InstanceType<typeof Session>,
     );
     vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
@@ -37374,6 +37396,7 @@ describe('sessionLanguage multi-session propagation', () => {
           installRewriter: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
+          takeQueuedPeerDeliveries: () => [],
         }) as unknown as InstanceType<typeof Session>,
     );
     vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
@@ -37474,6 +37497,7 @@ describe('sessionLanguage multi-session propagation', () => {
           installRewriter: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
+          takeQueuedPeerDeliveries: () => [],
         }) as unknown as InstanceType<typeof Session>,
     );
     vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
@@ -37589,6 +37613,7 @@ describe('sessionLanguage multi-session propagation', () => {
           installRewriter: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
+          takeQueuedPeerDeliveries: () => [],
         }) as unknown as InstanceType<typeof Session>,
     );
     vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
@@ -37705,6 +37730,7 @@ describe('sessionLanguage multi-session propagation', () => {
           installRewriter: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
+          takeQueuedPeerDeliveries: () => [],
         }) as unknown as InstanceType<typeof Session>,
     );
     vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
@@ -37826,6 +37852,7 @@ describe('sessionLanguage multi-session propagation', () => {
           installRewriter: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
+          takeQueuedPeerDeliveries: () => [],
         }) as unknown as InstanceType<typeof Session>,
     );
     vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
@@ -37941,6 +37968,7 @@ describe('sessionLanguage multi-session propagation', () => {
           installRewriter: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
+          takeQueuedPeerDeliveries: () => [],
         }) as unknown as InstanceType<typeof Session>,
     );
     vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
@@ -38034,6 +38062,7 @@ describe('sessionLanguage multi-session propagation', () => {
           installRewriter: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
+          takeQueuedPeerDeliveries: () => [],
         }) as unknown as InstanceType<typeof Session>,
     );
     vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
@@ -38129,6 +38158,7 @@ describe('sessionLanguage multi-session propagation', () => {
         installRewriter: vi.fn(),
         startCronScheduler: vi.fn(),
         dispose: vi.fn(),
+        takeQueuedPeerDeliveries: () => [],
       } as unknown as InstanceType<typeof Session>;
       return { cfg, session, clearActiveTodoPlanRevision };
     }
@@ -38264,6 +38294,7 @@ describe('sessionLanguage multi-session propagation', () => {
           installRewriter: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
+          takeQueuedPeerDeliveries: () => [],
         }) as unknown as InstanceType<typeof Session>,
     );
     vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
@@ -38349,6 +38380,7 @@ describe('sessionLanguage multi-session propagation', () => {
           installRewriter: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
+          takeQueuedPeerDeliveries: () => [],
         }) as unknown as InstanceType<typeof Session>,
     );
     vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
@@ -38431,6 +38463,7 @@ describe('sessionLanguage multi-session propagation', () => {
           installRewriter: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
+          takeQueuedPeerDeliveries: () => [],
         }) as unknown as InstanceType<typeof Session>,
     );
     vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
@@ -38520,6 +38553,7 @@ describe('sessionLanguage multi-session propagation', () => {
           installRewriter: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
+          takeQueuedPeerDeliveries: () => [],
         }) as unknown as InstanceType<typeof Session>,
     );
     vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
@@ -38622,6 +38656,7 @@ describe('sessionLanguage multi-session propagation', () => {
           installRewriter: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
+          takeQueuedPeerDeliveries: () => [],
         }) as unknown as InstanceType<typeof Session>,
     );
     vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
@@ -38790,6 +38825,7 @@ describe('sessionLanguage multi-session propagation', () => {
             installRewriter: vi.fn(),
             startCronScheduler: vi.fn(),
             dispose: vi.fn(),
+            takeQueuedPeerDeliveries: () => [],
           }) as unknown as InstanceType<typeof Session>,
       );
       const agentPromise = runAcpAgent(
@@ -39020,6 +39056,7 @@ describe('sessionLanguage multi-session propagation', () => {
             installRewriter: vi.fn(),
             startCronScheduler: vi.fn(),
             dispose: vi.fn(),
+            takeQueuedPeerDeliveries: () => [],
           }) as unknown as InstanceType<typeof Session>,
       );
 
@@ -39186,6 +39223,7 @@ describe('sessionLanguage multi-session propagation', () => {
             installRewriter: vi.fn(),
             startCronScheduler: vi.fn(),
             dispose: vi.fn(),
+            takeQueuedPeerDeliveries: () => [],
           }) as unknown as InstanceType<typeof Session>,
       );
 
@@ -39387,6 +39425,7 @@ describe('sessionLanguage multi-session propagation', () => {
         installRewriter: vi.fn(),
         startCronScheduler: vi.fn(),
         dispose: vi.fn(),
+        takeQueuedPeerDeliveries: () => [],
       } as unknown as InstanceType<typeof Session>;
     });
     const agentPromise = runAcpAgent(
@@ -39499,6 +39538,7 @@ describe('sessionLanguage multi-session propagation', () => {
           installRewriter: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
+          takeQueuedPeerDeliveries: () => [],
         }) as unknown as InstanceType<typeof Session>,
     );
 
@@ -39627,6 +39667,7 @@ describe('sessionLanguage multi-session propagation', () => {
           installRewriter: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
+          takeQueuedPeerDeliveries: () => [],
         }) as unknown as InstanceType<typeof Session>,
     );
     const agentPromise = runAcpAgent(
@@ -39745,6 +39786,7 @@ describe('sessionLanguage multi-session propagation', () => {
           installRewriter: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
+          takeQueuedPeerDeliveries: () => [],
         }) as unknown as InstanceType<typeof Session>,
     );
 
@@ -39851,6 +39893,7 @@ describe('sessionLanguage multi-session propagation', () => {
           installRewriter: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
+          takeQueuedPeerDeliveries: () => [],
         }) as unknown as InstanceType<typeof Session>,
     );
 
@@ -39930,6 +39973,7 @@ describe('sessionLanguage multi-session propagation', () => {
           installRewriter: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
+          takeQueuedPeerDeliveries: () => [],
         }) as unknown as InstanceType<typeof Session>,
     );
 
@@ -40094,6 +40138,7 @@ describe('sessionLanguage multi-session propagation', () => {
         installRewriter: vi.fn(),
         startCronScheduler: vi.fn(),
         dispose: vi.fn(),
+        takeQueuedPeerDeliveries: () => [],
       } as unknown as InstanceType<typeof Session>;
     });
     vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
@@ -40165,6 +40210,7 @@ describe('sessionLanguage multi-session propagation', () => {
           installRewriter: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
+          takeQueuedPeerDeliveries: () => [],
         }) as unknown as InstanceType<typeof Session>,
     );
     vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({

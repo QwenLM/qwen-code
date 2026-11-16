@@ -296,6 +296,7 @@ export class PeerMessaging {
    * Settled with a corrective receipt at close.
    */
   private readonly outstanding: PeerUserFrame[] = [];
+  private expiryTail = Promise.resolve();
   private queuedPeerCount: (() => number) | null = null;
   private readonly heldListeners = new Set<
     (held: readonly HeldMessage[]) => void
@@ -424,16 +425,18 @@ export class PeerMessaging {
     clearInheritedPeerMessagingEnv();
 
     // Two tokens for two audiences. The first is published in the registry
-    // record for peers; the second exists only in this process's
-    // environment, so presenting it proves descent from this session.
+    // record for peers; the second proves descent from a single session.
+    // A shared host cannot prove which session started a child.
     const ipcToken = options.ipcToken ?? randomBytes(32).toString('hex');
-    const childToken = options.childToken ?? randomBytes(32).toString('hex');
+    const childToken = options.ownsSessionId
+      ? undefined
+      : (options.childToken ?? randomBytes(32).toString('hex'));
     const inbox = await startPeerInbox({
       ...(options.socketPath !== undefined
         ? { socketPath: options.socketPath }
         : {}),
       requiredToken: ipcToken,
-      childToken,
+      ...(childToken !== undefined ? { childToken } : {}),
       // Read from disk per auth line rather than captured here: a grant
       // the user mints or revokes mid-session must take effect on the
       // next connection, with nothing to restart.
@@ -463,8 +466,10 @@ export class PeerMessaging {
     // way. Children get the child token, never the published one: what
     // makes a child's message recognizable as the session's own is that
     // nothing else ever holds this value.
-    process.env[MESSAGING_SOCKET_ENV] = inbox.socketPath;
-    process.env[MESSAGING_TOKEN_ENV] = childToken;
+    if (childToken !== undefined) {
+      process.env[MESSAGING_SOCKET_ENV] = inbox.socketPath;
+      process.env[MESSAGING_TOKEN_ENV] = childToken;
+    }
 
     return messaging;
   }
@@ -702,7 +707,7 @@ export class PeerMessaging {
     }
   }
 
-  async close(): Promise<void> {
+  async close(deliveries: readonly PeerQueuedDelivery[] = []): Promise<void> {
     if (this.closed) return;
     this.closed = true;
     // The exit path gives this whole method one bounded slot, and three
@@ -716,7 +721,7 @@ export class PeerMessaging {
     //    the same slots.
     //  - the inbox closes next, so no new drop can be noted into a
     //    coalescer that is about to be flushed.
-    //  - `settleUnconsumed()` corrects receipts this session already sent
+    //  - The input queue corrections update receipts this host already sent
     //    as `delivered` for messages it never read. Those are the only
     //    ones that are actively *wrong* rather than merely missing, so
     //    they go before the drop receipts.
@@ -731,6 +736,7 @@ export class PeerMessaging {
     await this.inbox?.close();
     await shuttingDown;
     await this.settleUnconsumed();
+    await this.expireQueued(deliveries);
     // Same pair, same removal as the startup scrub — one writer for it.
     clearInheritedPeerMessagingEnv();
     await this.updateSessionRegistryIpcPath(undefined);
@@ -1047,10 +1053,20 @@ export class PeerMessaging {
    * their session went that nobody read them. For a host of several
    * sessions, which names the messages rather than counting them: its
    * queues drain independently, so `setQueuedPeerCount` cannot say which
-   * ones are left. Sent in batches under the outbound send ceiling, past
-   * which a send is refused and the `delivered` would stand.
+   * ones are left. Wait for send slots shared with other outbound frames.
    */
-  async expireQueued(deliveries: readonly PeerQueuedDelivery[]): Promise<void> {
+  expireQueued(deliveries: readonly PeerQueuedDelivery[]): Promise<void> {
+    if (deliveries.length > 0) {
+      this.expiryTail = this.expiryTail.then(() =>
+        this.sendExpiryReceipts(deliveries),
+      );
+    }
+    return this.expiryTail;
+  }
+
+  private async sendExpiryReceipts(
+    deliveries: readonly PeerQueuedDelivery[],
+  ): Promise<void> {
     for (
       let start = 0;
       start < deliveries.length;
@@ -1075,6 +1091,7 @@ export class PeerMessaging {
                 from: this.inbox?.socketPath,
               },
               delivery.replyToken,
+              { waitForCapacity: true },
             );
           }),
       );
