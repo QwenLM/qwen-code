@@ -76,7 +76,7 @@ export const createMcpServer = (): McpServer => {
           instructions: `All x/y coordinate inputs use 0-${coordinateScale()} normalized coordinates (top-left origin), not pixels. Call mobile_get_screen_size to understand the device dimensions.`,
         }
       : {}),
-  });
+  }, { maxToolInputElements: 100_000 });
 
   const getClientName = (): string => {
     try {

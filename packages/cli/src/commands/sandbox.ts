@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { commandMetadata } from './command-metadata.js';
 import { getJsInterpreterCommand } from '@qwen-code/qwen-code-core/utils/runtime-info.js';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -23,8 +24,7 @@ interface SandboxArgs {
 }
 
 export const sandboxCommand: CommandModule = {
-  command: 'sandbox [cmd...]',
-  describe: 'Inspect tool confinement, verify it, or run one confined command',
+  ...commandMetadata.sandbox,
   builder: (yargs) =>
     yargs
       .parserConfiguration({

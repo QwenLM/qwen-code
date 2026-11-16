@@ -8,9 +8,9 @@ import com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorkspaceExce
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.TenantContext;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcSessionWorktreeStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.SessionWorktreeStore;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.ResolvedBinding;
 import com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore.Plan;
 import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
@@ -114,10 +114,10 @@ class SessionWorktreeGitTest {
         run(repository, "branch", "topic");
         run(repository, "tag", "start");
         String commit = run(repository, "rev-parse", "HEAD").strip();
-        var store = mock(SessionWorktreeStore.class);
+        var store = mock(JdbcSessionWorktreeStore.class);
         var selection = new WorkspaceSelection("workspace", "project");
         var binding = new ContextBinding("tenant", "workspace", 1, "storage", "project", "config", 1);
-        when(store.source("tenant", "actor", selection)).thenReturn(new SessionWorktreeStore.SourceLocation(
+        when(store.source("tenant", "actor", selection)).thenReturn(new JdbcSessionWorktreeStore.SourceLocation(
                 new ResolvedBinding(binding, "config", "policy"), root, null));
         var properties = new ManagedAgentProperties();
         var broker = properties.getRuntimeBroker();
@@ -126,7 +126,7 @@ class SessionWorktreeGitTest {
         broker.setDurableLocalProcess(true);
         broker.setProvisioner("local-process");
         broker.setBoundSessionIsolationClass("session");
-        var service = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new SessionWorktreeService(store, mock(WorkspaceExecutionStore.class), properties,
+        var service = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new SessionWorktreeService(store, mock(JdbcWorkspaceExecutionStore.class), properties,
                 mock(ManagedAgentStore.class), mock(HarnessCoordinator.class)));
         try {
             for (String ref : List.of("topic", "start", commit, "missing", "../invalid")) {
@@ -169,10 +169,10 @@ class SessionWorktreeGitTest {
         Plan plan = plan("project", null);
         String identity = git.prepare(plan);
         Files.writeString(target(plan).resolve("file.txt"), "preserved after interruption\n");
-        var store = mock(SessionWorktreeStore.class);
-        var execution = mock(WorkspaceExecutionStore.class);
+        var store = mock(JdbcSessionWorktreeStore.class);
+        var execution = mock(JdbcWorkspaceExecutionStore.class);
         var coordinator = mock(HarnessCoordinator.class);
-        var row = new SessionWorktreeStore.Row("tenant", "session", "workspace",
+        var row = new JdbcSessionWorktreeStore.Row("tenant", "session", "workspace",
                 plan.worktreeId(), "PREPARING", plan, null, "operation", null, 1, null, "PREPARING", 0, 1, null, "actor");
         when(store.claim(eq(row), anyString(),
                 anyLong())).thenReturn(row);

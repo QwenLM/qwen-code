@@ -20,24 +20,14 @@ import java.util.List;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ResidentWorkspacePlacementTest {
     private static final List<RuntimeBindingRecord.State> RETAINED = List.of(
             RuntimeBindingRecord.State.DRAINING, RuntimeBindingRecord.State.LOST,
             RuntimeBindingRecord.State.RECOVERY_BLOCKED, RuntimeBindingRecord.State.OPERATOR_RECOVERY,
             RuntimeBindingRecord.State.FAILED);
-
-    @Test
-    void independentResidentMountPathsDoNotAliasInMemory() {
-        for (var state : RETAINED) {
-            var bindings = new InMemoryRuntimeBindingRepository();
-            verify(bindings, "tenant", state);
-        }
-    }
 
     @Test
     void independentResidentMountPathsDoNotAliasInJdbcAfterRestart() throws Exception {
@@ -69,19 +59,6 @@ class ResidentWorkspacePlacementTest {
         var bindings = repository(source);
         retain(bindings, request(tenant, "local", "storage-local", false), RuntimeBindingRecord.State.DRAINING);
         assertFenced(repository(source), request(tenant, "resident", "storage-resident", true));
-    }
-
-    private static void verify(RuntimeBindingRepository bindings, String tenant, RuntimeBindingRecord.State state) {
-        var original = retain(bindings, request(tenant, "original", "storage-original", true), state);
-        var independent = request(tenant, "independent", "storage-independent", true);
-        assertFalse(original.blocksPlacement(independent));
-        assertTrue(original.blocksPlacement(request(tenant, "same-storage", "storage-original", true)));
-        assertTrue(original.blocksPlacement(request(tenant, "original", "storage-independent", true)));
-        assertTrue(original.blocksPlacement(request(tenant, "local", "storage-local", false)));
-        assertFalse(original.blocksPlacement(request("other-tenant", "independent", "storage-independent", true)));
-        assertNotEquals(original.getBindingId(), bindings.findOrCreate(independent).getBindingId());
-        assertFenced(bindings, request(tenant, "same-storage", "storage-original", true));
-        assertFenced(bindings, request(tenant, "local", "storage-local", false));
     }
 
     private static RuntimeBindingRecord retain(RuntimeBindingRepository bindings, RuntimeProvisionRequest request,

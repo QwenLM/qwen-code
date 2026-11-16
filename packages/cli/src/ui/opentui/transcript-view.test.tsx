@@ -118,6 +118,10 @@ vi.mock('@opentui/react/jsx-dev-runtime', () => mocks.buildJsxRuntime());
 vi.mock('@opentui/react', () => ({ useRenderer: () => mocks.renderer }));
 
 import { OpenTuiTranscriptView } from './transcript-view.js';
+import * as modRowHooks from '../hooks/use-mod-row.js';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import type { ModAssistantMessageProps } from '@qwen-code/qwen-code-core/mods/render-tree.js';
+import type { OpenTuiStreamEvent } from './event-adapter.js';
 import { C } from './theme.js';
 import {
   foldLiveEvent,
@@ -952,6 +956,153 @@ describe('OpenTuiTranscriptView', () => {
 
     const plain = render(<OpenTuiTranscriptView items={items} />);
     expect(plain.container.textContent).not.toMatch(/\[\d{2}:\d{2}:\d{2}\]/);
+  });
+
+  it('draws the text the Mods rewrote for a complete reply block in the main transcript', () => {
+    const modRow = vi
+      .spyOn(modRowHooks, 'useModRow')
+      .mockImplementation((_config, _sessionId, input) =>
+        input
+          ? {
+              ...(input.props as ModAssistantMessageProps),
+              text: 'REWRITTEN_BODY',
+            }
+          : undefined,
+      );
+    try {
+      const config = {} as Config;
+      const item = (streaming: boolean): LiveAssistantItem => ({
+        kind: 'assistant',
+        id: 'a1',
+        text: 'ANSWER_BODY',
+        streaming,
+      });
+      const content = (container: HTMLElement) =>
+        container.querySelector('markdown')?.getAttribute('content');
+
+      const done = render(
+        <OpenTuiTranscriptView
+          items={[item(false)]}
+          modRows={{ config, sessionId: 'session-1' }}
+        />,
+      );
+      expect(content(done.container)).toContain('REWRITTEN_BODY');
+      expect(modRow).toHaveBeenLastCalledWith(config, 'session-1', {
+        surface: 'terminal',
+        component: 'AssistantMessage',
+        requestId: 'a1',
+        props: { text: 'ANSWER_BODY', isFirstOfReply: true },
+      });
+      done.unmount();
+
+      // A streaming block and a view without Mod rows are not offered.
+      const live = render(
+        <OpenTuiTranscriptView
+          items={[item(true)]}
+          modRows={{ config, sessionId: 'session-1' }}
+        />,
+      );
+      expect(content(live.container)).toContain('ANSWER_BODY');
+      expect(modRow).toHaveBeenLastCalledWith(config, 'session-1', undefined);
+      live.unmount();
+      const preview = render(<OpenTuiTranscriptView items={[item(false)]} />);
+      expect(content(preview.container)).toContain('ANSWER_BODY');
+      expect(modRow).toHaveBeenLastCalledWith(undefined, undefined, undefined);
+    } finally {
+      modRow.mockRestore();
+    }
+  });
+
+  it.each<[string, OpenTuiStreamEvent[]]>([
+    [
+      'live',
+      [
+        { type: 'user', text: 'Prompt' },
+        { type: 'text', delta: 'Opening block' },
+        { type: 'thinking', delta: 'Thought' },
+        { type: 'thinking-end' },
+        { type: 'text', delta: 'Continuation block' },
+        { type: 'done' },
+      ],
+    ],
+    [
+      'replayed',
+      projectHistoryToStreamEvents(
+        [
+          { id: 1, type: 'gemini', text: 'Opening block' },
+          { id: 2, type: 'gemini_content', text: 'Continuation block' },
+        ],
+        {},
+      ),
+    ],
+  ])('marks only the first block of a %s reply', (_mode, events) => {
+    const items = events.reduce<readonly LiveHistoryItem[]>(foldLiveEvent, []);
+    const modRow = vi
+      .spyOn(modRowHooks, 'useModRow')
+      .mockReturnValue(undefined);
+    try {
+      render(
+        <OpenTuiTranscriptView
+          items={items}
+          modRows={{ config: {} as Config, sessionId: 'session-1' }}
+        />,
+      );
+      expect(modRow.mock.calls.map(([, , input]) => input?.props)).toEqual([
+        { text: 'Opening block', isFirstOfReply: true },
+        { text: 'Continuation block', isFirstOfReply: false },
+      ]);
+    } finally {
+      modRow.mockRestore();
+    }
+  });
+
+  const inlineImage = { mimeType: 'image/png', data: 'aGVsbG8=' };
+  const caption = '  Image caption\n';
+
+  it.each<[string, OpenTuiStreamEvent[]]>([
+    [
+      'live',
+      [
+        { type: 'image', ...inlineImage },
+        { type: 'text', delta: '\n' },
+        { type: 'image', ...inlineImage },
+        { type: 'text', delta: caption },
+        { type: 'done' },
+      ],
+    ],
+    [
+      'replayed',
+      projectHistoryToStreamEvents(
+        [
+          { id: 1, type: 'gemini', text: '', images: [inlineImage] },
+          { id: 2, type: 'gemini_content', text: '\n' },
+          { id: 3, type: 'gemini_content', text: '', images: [inlineImage] },
+          { id: 4, type: 'gemini_content', text: caption },
+        ],
+        {},
+      ),
+    ],
+  ])('skips blank image separators in %s replies', (_mode, events) => {
+    const items = events.reduce<readonly LiveHistoryItem[]>(foldLiveEvent, []);
+    const modRow = vi
+      .spyOn(modRowHooks, 'useModRow')
+      .mockReturnValue(undefined);
+    try {
+      render(
+        <OpenTuiTranscriptView
+          items={items}
+          modRows={{ config: {} as Config, sessionId: 'session-1' }}
+        />,
+      );
+      const inputs = modRow.mock.calls
+        .map(([, , input]) => input)
+        .filter((input) => input !== undefined);
+      expect(inputs.map((input) => input.props)).toEqual([
+        { text: caption, isFirstOfReply: false },
+      ]);
+    } finally {
+      modRow.mockRestore();
+    }
   });
 
   it('remounts the assistant row when the stamp setting flips (#170)', () => {

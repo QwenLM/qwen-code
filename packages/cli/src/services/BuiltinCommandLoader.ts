@@ -60,6 +60,7 @@ import { outputStyleCommand } from '../ui/commands/output-style-command.js';
 import { rememberCommand } from '../ui/commands/rememberCommand.js';
 import { planCommand } from '../ui/commands/planCommand.js';
 import { permissionsCommand } from '../ui/commands/permissionsCommand.js';
+import { prCommand } from '../ui/commands/pr-command.js';
 import { trustCommand } from '../ui/commands/trustCommand.js';
 import { quitCommand } from '../ui/commands/quitCommand.js';
 import { recapCommand } from '../ui/commands/recapCommand.js';
@@ -181,6 +182,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       rememberCommand,
       planCommand,
       permissionsCommand,
+      prCommand,
       ...(this.config?.getFolderTrust() ? [trustCommand] : []),
       quitCommand,
       recapCommand,

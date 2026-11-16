@@ -3,7 +3,7 @@ package com.alibaba.qwen.code.managedagent;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ToolPublicationConfiguration;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore;
 import org.junit.jupiter.api.Test;
@@ -21,16 +21,14 @@ class ToolPublicationConfigurationTest {
     void disabledPublicationHasNoImplicitVerificationBudget() {
         var settings = new ManagedAgentProperties().getToolPublication();
         assertThat(settings.isEnabled()).isFalse();
-        assertThat(settings.isAsyncVerificationEnabled()).isFalse();
         assertThat(settings.getVerificationConcurrency()).isEqualTo(2);
         assertThat(settings.getVerificationBytesPerSecond()).isNull();
         assertThat(settings.getMaxVerificationTimeout()).isNull();
     }
 
     @Test
-    void asyncAdmissionRequiresASeparateBoundedPool() {
+    void verificationRequiresASeparateBoundedPool() {
         var properties = new ManagedAgentProperties();
-        properties.getToolPublication().setAsyncVerificationEnabled(true);
         properties.getToolPublication().setVerificationConcurrency(0);
         assertThatThrownBy(() -> new ToolPublicationConfiguration().toolPublicationVerifier(
                 mock(ToolPublicationDataStore.class), properties)).hasMessageContaining("Invalid verification concurrency");
@@ -99,6 +97,6 @@ class ToolPublicationConfigurationTest {
     private ToolPublicationDataStore data(ManagedAgentProperties properties) {
         return new ToolPublicationConfiguration().toolPublicationDataStore(mock(JdbcTemplate.class),
                 mock(PlatformTransactionManager.class), mock(ToolPublicationStore.class),
-                mock(ManagedSessionStore.class), mock(ToolPublicationObjectStore.class), properties);
+                mock(JdbcManagedSessionStore.class), mock(ToolPublicationObjectStore.class), properties);
     }
 }

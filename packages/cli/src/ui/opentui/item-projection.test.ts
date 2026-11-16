@@ -850,6 +850,25 @@ describe('projectAbout proxy redaction (R1-6)', () => {
   });
 });
 
+describe('projectAbout agent loop (slice 3 parity with AboutBox)', () => {
+  it('shows the Agent Loop line right after Fast Model', () => {
+    const text = projectAbout({
+      modelVersion: 'qwen3',
+      agentLoop: 'opentui: legacy',
+    });
+    const lines = text.split('\n');
+    expect(lines).toContain('Agent Loop: opentui: legacy');
+    expect(lines.indexOf('Agent Loop: opentui: legacy')).toBe(
+      lines.indexOf('Fast Model: qwen3') + 1,
+    );
+  });
+
+  it('omits the Agent Loop line when the value is empty', () => {
+    const text = projectAbout({ modelVersion: 'qwen3' });
+    expect(text).not.toContain('Agent Loop');
+  });
+});
+
 describe('projectExtensionsList resolved settings (R1-8)', () => {
   it('lists resolved setting names and values from the array', () => {
     const config = {
@@ -1140,13 +1159,24 @@ describe('projectItemToStreamEvent (U-28 project-on-write)', () => {
       { type: 'gemini_thought', text: 'g' },
       { type: 'gemini_thought_content', text: 'g' },
       { type: 'help', timestamp: new Date() },
-      { type: 'notification', text: 'n' },
       { type: 'tool_use_summary', text: 't' },
       { type: 'diff_stats', text: 'd' },
     ] as unknown as HistoryItemWithoutId[];
     for (const item of noOps) {
       expect(projectItemToStreamEvent(item, ctx)).toBeNull();
     }
+  });
+
+  it('draws a notice as an info row, as ink does', () => {
+    expect(
+      projectItemToStreamEvent(
+        {
+          type: 'notification',
+          text: 'Mod followup-mod: List the TODOs',
+        },
+        ctx,
+      ),
+    ).toEqual({ type: 'info', text: 'Mod followup-mod: List the TODOs' });
   });
 
   it('carries the user_shell command row structurally (U-33)', () => {

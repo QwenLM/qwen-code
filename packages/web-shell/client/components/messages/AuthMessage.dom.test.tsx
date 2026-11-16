@@ -141,6 +141,7 @@ async function openAndSave(
 ) {
   const onMessage = vi.fn();
   const onClose = vi.fn();
+  const onChatProviderConfigured = vi.fn();
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
@@ -150,6 +151,7 @@ async function openAndSave(
         <AuthMessage
           activateSessionSubscriptionModel={vi.fn()}
           onMessage={onMessage}
+          onChatProviderConfigured={onChatProviderConfigured}
           onClose={onClose}
           allowAdd={allowAdd}
         />
@@ -179,12 +181,13 @@ async function openAndSave(
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
-  return { onMessage, onClose };
+  return { onMessage, onClose, onChatProviderConfigured };
 }
 
 describe('AuthMessage runtime provider sync', () => {
   it('closes after save and appends a warning when runtime sync failed', async () => {
-    const { onMessage, onClose } = await install('failed');
+    const { onMessage, onClose, onChatProviderConfigured } =
+      await install('failed');
 
     expect(onMessage).toHaveBeenCalledWith(
       expect.stringContaining(
@@ -192,16 +195,19 @@ describe('AuthMessage runtime provider sync', () => {
       ),
     );
     expect(onClose).toHaveBeenCalledOnce();
+    expect(onChatProviderConfigured).not.toHaveBeenCalled();
     expect(sessionActions.refreshModels).not.toHaveBeenCalled();
   });
 
   it.each([undefined, 'applied', 'deferred'] as const)(
     'keeps the existing success message for runtime sync %s',
     async (status) => {
-      const { onMessage, onClose } = await install(status);
+      const { onMessage, onClose, onChatProviderConfigured } =
+        await install(status);
 
       expect(onMessage).toHaveBeenCalledWith('Provider saved.');
       expect(onClose).toHaveBeenCalledOnce();
+      expect(onChatProviderConfigured).toHaveBeenCalledOnce();
       expect(sessionActions.refreshModels).toHaveBeenCalledExactlyOnceWith(
         undefined,
         { reloadProviders: false },
@@ -1025,11 +1031,12 @@ describe('subscription development entry', () => {
     },
   );
 
-  it.each(['runtime', 'model', 'catalog'] as const)(
+  it.each(['runtime', 'standalone-runtime', 'model', 'catalog'] as const)(
     'closes desktop authorization with a saved-settings warning after %s sync fails',
     async (stage) => {
       Object.assign(window, { __TAURI__: { core: { invoke: vi.fn() } } });
       try {
+        const standalone = stage === 'standalone-runtime';
         sessionState.sessionId =
           stage === 'model' ? 'current-session' : undefined;
         actions.getSubscriptionConfig.mockResolvedValue({
@@ -1045,9 +1052,14 @@ describe('subscription development entry', () => {
             member_type: 'pro',
           },
         });
-        const completion = await openAuth(true);
+        const completion = await openAuth(true, 'en', undefined, standalone);
         if (stage === 'runtime') {
           actions.activateSubscription.mockResolvedValueOnce({
+            modelId: 'qwen3.8-max',
+            runtimeSync: { status: 'failed' },
+          });
+        } else if (standalone) {
+          actions.getSubscriptionDefaultModel.mockResolvedValueOnce({
             modelId: 'qwen3.8-max',
             runtimeSync: { status: 'failed' },
           });
@@ -1079,7 +1091,20 @@ describe('subscription development entry', () => {
         ).toBeNull();
         expect(document.querySelector('[role="alert"]')).toBeNull();
         expect(actions.startSubscriptionLogin).toHaveBeenCalledOnce();
-        expect(actions.activateSubscription).toHaveBeenCalledOnce();
+        if (standalone) {
+          expect(
+            actions.getSubscriptionDefaultModel,
+          ).toHaveBeenCalledExactlyOnceWith({
+            signal: expect.any(AbortSignal),
+            settingsScope: 'provider',
+          });
+        } else {
+          expect(actions.activateSubscription).toHaveBeenCalledExactlyOnceWith({
+            workspaceCwd: '/workspace',
+            signal: expect.any(AbortSignal),
+            settingsScope: 'provider',
+          });
+        }
       } finally {
         delete (window as Window & { __TAURI__?: unknown }).__TAURI__;
       }
@@ -1244,9 +1269,14 @@ describe('subscription development entry', () => {
     );
   });
 
-  it.each(['draft', 'connected', 'connecting'] as const)(
-    'activates a no-workspace %s without writing workspace settings',
-    async (target) => {
+  it.each([
+    ['draft', false],
+    ['connected', false],
+    ['connecting', false],
+    ['draft', true],
+  ] as const)(
+    'activates a no-workspace %s with the right settings scope (Desktop: %s)',
+    async (target, desktop) => {
       sessionState.workspaceCwd =
         target === 'draft' ? undefined : '/private/standalone';
       sessionState.sessionId = target === 'draft' ? undefined : 'standalone';
@@ -1270,11 +1300,21 @@ describe('subscription development entry', () => {
       const entry = container!.querySelector<HTMLButtonElement>(
         'button[aria-label="Qwen Account with Subscription"]',
       )!;
-      await act(async () => entry.click());
+      if (desktop)
+        Object.assign(window, { __TAURI__: { core: { invoke: vi.fn() } } });
+      try {
+        await act(async () => entry.click());
+      } finally {
+        if (desktop)
+          delete (window as Window & { __TAURI__?: unknown }).__TAURI__;
+      }
 
       expect(
         actions.getSubscriptionDefaultModel,
-      ).toHaveBeenCalledExactlyOnceWith({ signal: expect.any(AbortSignal) });
+      ).toHaveBeenCalledExactlyOnceWith({
+        signal: expect.any(AbortSignal),
+        ...(desktop ? { settingsScope: 'provider' } : {}),
+      });
       expect(actions.activateSubscription).not.toHaveBeenCalled();
       if (target === 'draft') {
         expect(completion.onModelActivated).toHaveBeenCalledExactlyOnceWith(

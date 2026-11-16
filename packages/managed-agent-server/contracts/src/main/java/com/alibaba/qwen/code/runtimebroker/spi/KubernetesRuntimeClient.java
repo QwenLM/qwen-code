@@ -16,10 +16,4 @@ public interface KubernetesRuntimeClient {
     }
 
     public CompletionStage<Map<String, Object>> create(String resource, String namespace, Map<String, Object> body);
-
-    /** Bounded current log segment; rotation and kubelet container selection are not proven here. */
-    public default CompletionStage<String> readCsiPodLog(String podName) {
-        return CompletableFuture.failedFuture(
-                new UnsupportedOperationException("CSI log reads are unavailable"));
-    }
 }

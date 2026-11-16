@@ -78,6 +78,25 @@ public class ManagedAgentTraceService {
                 continue;
             }
             JsonNode body = target.get().body();
+            String predecessor = body.path("predecessorChildRunId").isTextual() ? body.path("predecessorChildRunId").asText() : null;
+            item.putNull("predecessorTaskId");
+            if (predecessor != null && !predecessor.equals(target.get().recordId())) {
+                String previousTask = com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection.taskId(
+                        com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection.recordKey(sessionId, "child_run", predecessor));
+                try {
+                    var previous = records.findTaskTarget(tenant, sessionId, previousTask);
+                    if (previous.isPresent() && "child_agent".equals(previous.get().kind())) {
+                        item.put("predecessorTaskId", previousTask);
+                    }
+                } catch (ManagedAgentException error) {
+                    if (error.getStatus() != 409) {
+                        throw error;
+                    }
+                    reason(reasons, "predecessor_unavailable");
+                } catch (InvalidRecordException error) {
+                    reason(reasons, "predecessor_unavailable");
+                }
+            }
             description(tenant, sessionId, body, item, reasons);
             String child = body.path("childSessionId").isTextual() ? body.get("childSessionId").asText() : null;
             if (child == null) {

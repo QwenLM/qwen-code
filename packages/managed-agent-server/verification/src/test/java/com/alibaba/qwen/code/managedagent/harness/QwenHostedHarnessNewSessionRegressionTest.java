@@ -9,7 +9,7 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
 
@@ -51,7 +51,7 @@ class QwenHostedHarnessNewSessionRegressionTest {
                         "ACTIVE", null, null, 0, 0, 1, 1, null, 1));
         QwenHostedHarnessConnector connector =
                 new QwenHostedHarnessConnector(properties, sessions,
-                        mock(WorkspaceExecutionStore.class));
+                        mock(JdbcWorkspaceExecutionStore.class));
         ReflectionTestUtils.setField(connector, "client", client);
 
         HarnessConnector.Attachment attachment = connector.createOrLoad(

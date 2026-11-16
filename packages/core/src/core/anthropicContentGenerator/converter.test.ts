@@ -1084,12 +1084,12 @@ describe('AnthropicContentConverter', () => {
     });
   });
 
-  describe('unsigned proxy thinking history', () => {
+  describe('unsigned assistant thinking history', () => {
     const dropUnsigned = { dropUnsignedAssistantThinking: true };
     const dropUnsignedNoCache = { ...dropUnsigned, enableCacheControl: false };
-    const expectProxyThrow = (...contents: Content[]) =>
+    const expectUnsignedThrow = (...contents: Content[]) =>
       expect(() => convert(contents, dropUnsigned)).toThrow(
-        'proxy omitted the thinking signature',
+        'thinking signature is missing',
       );
 
     it('drops unsigned thinking while preserving visible content and signed blocks', () => {
@@ -1127,7 +1127,7 @@ describe('AnthropicContentConverter', () => {
     });
 
     it('fails locally when an unsigned thinking block belongs to a tool-use turn', () => {
-      expectProxyThrow(
+      expectUnsignedThrow(
         userText('Run tool'),
         content('model', thought('unsigned'), call('t1')),
         answer('t1'),
@@ -1147,7 +1147,7 @@ describe('AnthropicContentConverter', () => {
       // ordering, so a one-step fixture can't tell the orderings apart.
       // Step 1's empty-text thinking must be on a NON-latest turn still in
       // the unbroken tool_use/tool_result chain reaching the end of history.
-      expectProxyThrow(
+      expectUnsignedThrow(
         userText('Run tool'),
         content('model', thought(''), call('t1')),
         answer('t1'),
@@ -1172,7 +1172,7 @@ describe('AnthropicContentConverter', () => {
     });
 
     it('fails when an earlier step in the active tool loop has unsigned thinking', () => {
-      expectProxyThrow(
+      expectUnsignedThrow(
         userText('Run tools'),
         content('model', thought('unsigned'), call('t1', 'first')),
         answer('t1', 'one', 'first'),
@@ -2108,7 +2108,10 @@ describe('AnthropicContentConverter', () => {
     const anthropicNativeSignature =
       'EqQBCgIYAhIkAc6dE9c2eN8aBf1c5d7e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6E=';
     const noCache = { enableCacheControl: false };
-    const dropUnsigned = { dropUnsignedAssistantThinking: true };
+    const dropUnsigned = {
+      dropUnsignedAssistantThinking: true,
+      demoteForeignThoughtToText: true,
+    };
     /** A summary thought signed with `sig`. */
     const summary = (sig: string) => thought('Reasoning summary', sig);
     /** First / summary + answer / Second, converted under `opts`. */
@@ -2153,6 +2156,34 @@ describe('AnthropicContentConverter', () => {
       ).toEqual(assistant(txt('Visible answer')));
     });
 
+    it('drops foreign thinking without exposing its summary when demotion is disabled', () => {
+      expect(
+        replay(responsesReplaySignature, {
+          dropUnsignedAssistantThinking: true,
+          ...noCache,
+        })[1],
+      ).toEqual(assistant(txt('Visible answer')));
+    });
+
+    it('does not couple demotion to unsigned-thinking cleanup', () => {
+      const { messages } = convert(
+        [
+          userText('First'),
+          content(
+            'model',
+            thought('unsigned'),
+            summary(responsesReplaySignature),
+          ),
+          userText('Second'),
+        ],
+        { demoteForeignThoughtToText: true, ...noCache },
+      );
+
+      expect(messages[1]).toEqual(
+        assistant(think('unsigned'), txt('Reasoning summary')),
+      );
+    });
+
     it('does not throw on an active tool-use turn when dropping the replay payload', () => {
       const { messages } = convert(
         [
@@ -2167,7 +2198,7 @@ describe('AnthropicContentConverter', () => {
         dropUnsigned,
       );
 
-      // Must not throw "proxy omitted the thinking signature": the replay
+      // Must not throw "thinking signature is missing": the replay
       // payload is dropped rather than emitted as an unsigned thinking block,
       // so dropUnsignedThinkingFromAssistantMessages never sees one on this
       // active tool-use turn. The demoted summary survives as plain text and

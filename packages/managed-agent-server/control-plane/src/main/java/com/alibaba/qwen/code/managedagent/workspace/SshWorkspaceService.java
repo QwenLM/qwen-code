@@ -95,8 +95,8 @@ public class SshWorkspaceService implements AutoCloseable, AcceptanceEvidence,
     public Directory check(String tenant, String actor, String nodeId, String path) {
         var node = admit(tenant, actor, nodeId);
         Map<String, Object> result = probe(node, path, ".");
-        return new Directory(nodeId, com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore.string(com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore.object(result, "identity"), "root"),
-                com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore.string(result, "platform"));
+        return new Directory(nodeId, SshWorkspaceStore.string(SshWorkspaceStore.object(result, "identity"), "root"),
+                SshWorkspaceStore.string(result, "platform"));
     }
 
     public Operation create(String tenant, String actor, String node, String path, String name, String key) {
@@ -245,7 +245,7 @@ public class SshWorkspaceService implements AutoCloseable, AcceptanceEvidence,
         if (!node.qwenVersion().equals(result.get("qwenVersion"))) {
             throw new ManagedAgentException(409, "ssh_runtime_version_mismatch", "Remote qwen-code version does not match its pinned version.");
         }
-        if (com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore.string(com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore.object(result, "identity"), "root").length() > 512) {
+        if (SshWorkspaceStore.string(SshWorkspaceStore.object(result, "identity"), "root").length() > 512) {
             throw new ManagedAgentException(400, "invalid_request", "Canonical Workspace path exceeds its limit.");
         }
         return result;
@@ -281,7 +281,7 @@ public class SshWorkspaceService implements AutoCloseable, AcceptanceEvidence,
                 throw unavailable();
             }
             var result = probe(node, intent.path(), ".");
-            Map<String, Object> identity = com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore.object(result, "identity");
+            Map<String, Object> identity = SshWorkspaceStore.object(result, "identity");
             Map<String, Object> marker = new LinkedHashMap<>(identity);
             marker.put("version", 2);
             marker.put("tenantId", tenant);
@@ -302,7 +302,7 @@ public class SshWorkspaceService implements AutoCloseable, AcceptanceEvidence,
             if (!identity.equals(confirmed.get("identity")) || !marker.equals(confirmed.get("marker"))) {
                 throw unavailable();
             }
-            var finalProbe = probe(node, com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore.string(identity, "root"), ".");
+            var finalProbe = probe(node, SshWorkspaceStore.string(identity, "root"), ".");
             if (!identity.equals(finalProbe.get("identity")) || !marker.equals(finalProbe.get("marker"))) {
                 throw unavailable();
             }
@@ -352,9 +352,9 @@ public class SshWorkspaceService implements AutoCloseable, AcceptanceEvidence,
         if (node == null || !node.admits(intent.tenantId(), intent.actorId())) {
             return AcceptanceVerdict.unknown();
         }
-        Map<String, Object> identity = com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore.object(intent.registration(), "identity");
-        Map<String, Object> marker = com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore.object(intent.registration(), "marker");
-        Map<String, Object> probed = probe(node, com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore.string(identity, "root"), ".");
+        Map<String, Object> identity = SshWorkspaceStore.object(intent.registration(), "identity");
+        Map<String, Object> marker = SshWorkspaceStore.object(intent.registration(), "marker");
+        Map<String, Object> probed = probe(node, SshWorkspaceStore.string(identity, "root"), ".");
         if (!identity.equals(probed.get("identity"))) {
             return AcceptanceVerdict.notCommitted("ssh_runtime_identity_mismatch");
         }

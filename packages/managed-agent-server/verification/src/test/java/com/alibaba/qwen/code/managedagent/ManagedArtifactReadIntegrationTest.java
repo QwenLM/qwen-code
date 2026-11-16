@@ -10,7 +10,7 @@ import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.artifact.ManagedArtifactService;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ManagedArtifactPolicy;
 import com.alibaba.qwen.code.managedagent.model.TenantContext;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedArtifactReader;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationArtifactReader;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.web.servlet.MockMvc;
@@ -503,7 +503,7 @@ class ManagedArtifactReadIntegrationTest {
         var beans = new org.springframework.beans.factory.support.StaticListableBeanFactory();
         beans.addBean("publication", data);
         var reader =
-                new ManagedArtifactReader(
+                new ToolPublicationArtifactReader(
                         beans.getBeanProvider(
                                 com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore
                                         .class));
@@ -631,7 +631,7 @@ class ManagedArtifactReadIntegrationTest {
         };
     }
 
-    private static ManagedArtifactReader oneBytePerReadReader(
+    private static ToolPublicationArtifactReader oneBytePerReadReader(
             ToolPublicationStoreTest.ApiFixture fixture, long perReadDelayMillis) {
         var reader = spy(fixture.reader());
         doAnswer(

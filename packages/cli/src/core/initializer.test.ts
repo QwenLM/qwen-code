@@ -5,6 +5,8 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
+import { LoadedSettings, type SettingsFile } from '../config/settings.js';
 import { connectIdeForStartup, initializeApp } from './initializer.js';
 
 const mockPerformInitialAuth = vi.fn();
@@ -135,6 +137,82 @@ describe('initializeApp', () => {
       expect(result.skipStartupAuthDialog).toBe(true);
       expect(result.authNotice).toBe(error ?? undefined);
       expect(result.authError).toBe(error);
+    },
+  );
+
+  it.each<{
+    label: string;
+    allow?: boolean;
+    workspace?: SettingsFile['settings'];
+    system?: SettingsFile['settings'];
+    expected?: string;
+  }>([
+    { label: 'model-only override', expected: 'user-model' },
+    { label: 'explicit CLI selection', allow: false },
+    {
+      label: 'empty workspace endpoint',
+      workspace: { model: { name: 'saved-model', baseUrl: '' } },
+      expected: 'user-model',
+    },
+    {
+      label: 'workspace endpoint',
+      workspace: {
+        model: { name: 'saved-model', baseUrl: 'https://example.test/v1' },
+      },
+    },
+    {
+      label: 'workspace authentication',
+      workspace: {
+        security: { auth: { selectedType: AuthType.QWEN_SUBSCRIPTION } },
+      },
+    },
+    { label: 'workspace providers', workspace: { modelProviders: {} } },
+    {
+      label: 'system authentication',
+      system: {
+        security: { auth: { selectedType: AuthType.QWEN_SUBSCRIPTION } },
+      },
+    },
+    {
+      label: 'a policy requiring another authentication type',
+      system: { security: { auth: { enforcedType: AuthType.USE_OPENAI } } },
+    },
+  ])(
+    'resolves the startup subscription fallback for $label',
+    async ({ allow = true, workspace, system, expected }) => {
+      mockConfig
+        .getModelsConfig()
+        .getCurrentAuthType.mockReturnValue(AuthType.QWEN_SUBSCRIPTION);
+      const layer = (
+        settings: SettingsFile['settings'] = {},
+      ): SettingsFile => ({
+        path: '',
+        settings,
+        originalSettings: settings,
+      });
+      const settings = new LoadedSettings(
+        layer(system),
+        layer(),
+        layer({
+          security: { auth: { selectedType: AuthType.QWEN_SUBSCRIPTION } },
+          model: { name: 'user-model' },
+        }),
+        layer({ model: { name: 'saved-model' }, ...workspace }),
+        true,
+        new Set(),
+      );
+
+      await initializeApp(mockConfig as never, settings, {
+        allowSubscriptionStartupFallback: allow,
+        allowUnlistedSubscriptionModel: true,
+      });
+
+      expect(mockPerformInitialAuth).toHaveBeenCalledExactlyOnceWith(
+        mockConfig,
+        AuthType.QWEN_SUBSCRIPTION,
+        expected,
+        true,
+      );
     },
   );
 
