@@ -263,9 +263,7 @@ describe('AoneChannel', () => {
       );
       await ch.connect();
       expect(
-        stderr.mock.calls.some((c) =>
-          String(c[0]).includes('any commenter on a watched repository'),
-        ),
+        stderr.mock.calls.some((c) => String(c[0]).includes('any commenter')),
       ).toBe(true);
       ch.disconnect();
       stderr.mockClear();
@@ -278,11 +276,78 @@ describe('AoneChannel', () => {
       );
       await restricted.connect();
       expect(
-        stderr.mock.calls.some((c) =>
-          String(c[0]).includes('any commenter on a watched repository'),
-        ),
+        stderr.mock.calls.some((c) => String(c[0]).includes('any commenter')),
       ).toBe(false);
       restricted.disconnect();
+      stderr.mockRestore();
+    });
+
+    it('a per-repo allowlist with no "*" entry does NOT warn (R3-4)', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const ch = new TestableAoneChannel(
+        'test-aone',
+        makeConfig({
+          groups: {
+            'test/repo': { senders: 'allowlist', allowedUsers: ['alice'] },
+          },
+        }),
+        makeBridge(),
+      );
+      await ch.connect();
+      expect(
+        stderr.mock.calls.some((c) => String(c[0]).includes('any commenter')),
+      ).toBe(false);
+      ch.disconnect();
+      stderr.mockRestore();
+    });
+
+    it('allowlist with no watched-repo groups entry warns dead channel (R3-4)', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const ch = new TestableAoneChannel(
+        'test-aone',
+        makeConfig({ groupPolicy: 'allowlist', groups: { '*': {} } }),
+        makeBridge(),
+      );
+      await ch.connect();
+      expect(
+        stderr.mock.calls.some((c) =>
+          String(c[0]).includes(
+            'every event will be rejected as not_allowlisted',
+          ),
+        ),
+      ).toBe(true);
+      ch.disconnect();
+      stderr.mockRestore();
+    });
+
+    it('allowlist membership with open "*" senders warns permissive, not dead', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const ch = new TestableAoneChannel(
+        'test-aone',
+        makeConfig({
+          groupPolicy: 'allowlist',
+          groups: { '*': {}, 'test/repo': {} },
+        }),
+        makeBridge(),
+      );
+      await ch.connect();
+      expect(
+        stderr.mock.calls.some((c) => String(c[0]).includes('any commenter')),
+      ).toBe(true);
+      expect(
+        stderr.mock.calls.some((c) =>
+          String(c[0]).includes(
+            'every event will be rejected as not_allowlisted',
+          ),
+        ),
+      ).toBe(false);
+      ch.disconnect();
       stderr.mockRestore();
     });
   });
@@ -709,6 +774,33 @@ describe('AoneChannel', () => {
       ).toBe(true);
       stderr.mockRestore();
     });
+
+    it('a type-drifted author is skipped closed, no public error comment (R3-2)', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      installFakeA1({ events: pagedEvents([makeEvent({ id: 1000 })]) });
+      await channel.connect();
+      await channel.testPollOnce(); // baseline
+      const calls = installFakeA1({
+        events: pagedEvents([
+          makeEvent({ id: 1001, author: 12345, user: undefined }),
+        ]),
+      });
+      await channel.testPollOnce();
+      channel.disconnect();
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(channel.cursor.repos['test/repo']).toBe(1001);
+      expect(
+        calls.filter((a) => a[0] === 'repo' && a[3] === 'create'),
+      ).toHaveLength(0);
+      expect(
+        stderr.mock.calls.some((c) =>
+          String(c[0]).includes('event 1001 has no author'),
+        ),
+      ).toBe(true);
+      stderr.mockRestore();
+    });
   });
 
   describe('failure isolation', () => {
@@ -856,6 +948,59 @@ describe('AoneChannel', () => {
       // Both repos fail their baseline fetch → total failure → rethrow.
       await expect(ch.testPollOnce()).rejects.toThrow('SYSTEM_FORBIDDEN_ERROR');
       ch.disconnect();
+    });
+
+    it('a partial failure leaves a durable per-repo journal record (R3-3)', async () => {
+      installFakeA1({
+        events: (repo) =>
+          repo === 'good/repo' ? [makeEvent({ id: 2001 })] : [],
+      });
+      const ch = new TestableAoneChannel(
+        'test-aone',
+        makeConfig({ repos: ['good/repo', 'bad/repo'] }),
+        makeBridge(),
+      );
+      await ch.connect();
+      await ch.testPollOnce(); // baseline both
+      installFakeA1({
+        events: (repo) => {
+          if (repo === 'bad/repo') {
+            throw {
+              code: 1,
+              stdout: JSON.stringify({
+                schemaVersion: 'a1.error/v1',
+                message: 'SYSTEM_FORBIDDEN_ERROR',
+              }),
+              stderr: '',
+            };
+          }
+          return [makeEvent({ id: 2002 })];
+        },
+      });
+      await expect(ch.testPollOnce()).resolves.toBeUndefined();
+      ch.disconnect();
+      // The round resolved (partial failure), so the base journal shows ok;
+      // the broken repo must still leave a durable repo_failed record.
+      const files = readdirSync(join(tempDir, 'channels'), {
+        recursive: true,
+      }) as string[];
+      const journal = files.find((f) =>
+        String(f).endsWith('-channel-events.jsonl'),
+      );
+      expect(journal).toBeDefined();
+      const records = readFileSync(
+        join(tempDir, 'channels', String(journal)),
+        'utf8',
+      )
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l));
+      const failure = records.find(
+        (r) => r.outcome === 'repo_failed' && r.repository === 'bad/repo',
+      );
+      expect(failure).toBeDefined();
+      expect(failure.type).toBe('poll');
+      expect(String(failure.error)).toContain('SYSTEM_FORBIDDEN_ERROR');
     });
   });
 
@@ -1046,6 +1191,39 @@ describe('AoneChannel', () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+
+    it('an aged-out cursor jump is diagnosed; a dormant repo is not (R3-1)', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      installFakeA1({ events: pagedEvents([makeEvent({ id: 1000 })]) });
+      await channel.connect();
+      await channel.testPollOnce(); // baseline at 1000
+      // Dormant: empty window, cursor unchanged, NO aging warning.
+      installFakeA1({ events: () => [] });
+      await channel.testPollOnce();
+      expect(
+        stderr.mock.calls.some((c) => String(c[0]).includes('aged out')),
+      ).toBe(false);
+      expect(channel.cursor.repos['test/repo']).toBe(1000);
+      stderr.mockClear();
+      // Resume: the cursor event aged out; all window events are newer.
+      installFakeA1({
+        events: pagedEvents(
+          Array.from({ length: 50 }, (_, i) => makeEvent({ id: 2050 - i })),
+        ),
+      });
+      await channel.testPollOnce();
+      channel.disconnect();
+      expect(
+        stderr.mock.calls.some((c) =>
+          String(c[0]).includes('cursor for test/repo aged out'),
+        ),
+      ).toBe(true);
+      expect(channel.inboundEnvelopes).toHaveLength(50);
+      expect(channel.cursor.repos['test/repo']).toBe(2050);
+      stderr.mockRestore();
     });
 
     it('the dispatch budget is monotonic: a 500-event backlog caps at 100', async () => {

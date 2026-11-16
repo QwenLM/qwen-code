@@ -132,30 +132,43 @@ hosts (it is what the local E2E harness used), not the recommended default.
 - Access boundary: every Aone inbound is group-shaped (`isGroup: true`),
   so `ChannelBase.senderGateFor` uses the GROUP sender gate —
   `groups[<repo>].senders` (falling back to `groups["*"].senders`, default
-  `open`) with `groups[<repo>].allowedUsers` when that policy is
-  `allowlist`. The TOP-LEVEL `allowedUsers`/`privatePolicy` apply only to
-  DM-shaped traffic, which this channel never produces; configuring them
-  alone restricts nothing. `groupPolicy` must be `open`/`allowlist`/`pairing`
-  for dispatch (connect warns otherwise); the plugin declares the field
-  with default `open` because the shared injected field defaults to
-  `disabled`, which would dispatch nothing for an editor-created channel.
-  The management UI seeds `groupPolicy` from that default and cannot edit
-  `groups` (not a plugin or shared access field), so a UI-created channel
-  starts in the permissive open/open posture — `connect()` therefore emits
-  a loud warning whenever `groupPolicy` is open and the default group
-  senders policy is open, naming the restriction to configure. The sample
-  below shows the restrictive hand-written configuration.
-  `sessionScope` defaults to `chat_thread` (one session per repo+MR
-  thread). No `token` field — a1 authenticates through its own login on
-  the channel host.
+  `open`) with the allowlist resolved as `groups[<repo>].allowedUsers`
+  falling back to `groups["*"].allowedUsers`, and to an EMPTY list (which
+  admits nobody) when neither entry names one. The TOP-LEVEL
+  `allowedUsers`/`privatePolicy` apply only to DM-shaped traffic, which
+  this channel never produces; configuring them alone restricts nothing.
+  `groupPolicy` must be `open`/`allowlist`/`pairing` for dispatch (connect
+  warns otherwise); the plugin declares the field with default `open`
+  because the shared injected field defaults to `disabled`, which would
+  dispatch nothing for an editor-created channel. The management UI seeds
+  `groupPolicy` from that default, and its shared group-sender fields DO
+  write `groups["*"].senders` / `groups["*"].allowedUsers` (channel-wide),
+  and its allowlist membership field creates `groups[<repo>]` entries;
+  what it cannot write for this plugin is a per-repository SENDERS
+  override (those rows exist only for the repository-only types
+  github/gitlab), so a membership entry's senders fall back to the
+  channel-wide `*` policy. A UI-created channel is therefore permissive
+  only while the operator leaves Group senders at its default.
+  `connect()` warns about the watched repos that are ACTUALLY open (a
+  per-repo allowlist with no `*` entry is restricted and does not warn),
+  and separately warns about the dead posture: `groupPolicy: allowlist`
+  with no watched-repo `groups` entry rejects every event as
+  `not_allowlisted`, because under allowlist `*` is a default config, not
+  a wildcard allow. The sample below shows the per-repository tightening
+  a hand-written config must do. `sessionScope` defaults to `chat_thread`
+  (one session per repo+MR thread). No `token` field — a1 authenticates
+  through its own login on the channel host.
 
 ### Inbound pipeline (`pollOnce`)
 
 Each configured repo is polled in its own try/catch: a failing repo logs
-its error and the round CONTINUES with the remaining repos. The round
-rethrows ONLY when EVERY repo failed, so the base loop records a failed
-poll and backs off; a PARTIAL failure completes normally and keeps the
-configured `pollInterval` cadence (the base failure path skips the
+its error, records a durable `repo_failed` journal event (the round
+resolves on partial failure, so the base loop's own poll record would
+otherwise show ok and the broken repo would leave no trace the status
+page can show), and the round CONTINUES with the remaining repos. The
+round rethrows ONLY when EVERY repo failed, so the base loop records a
+failed poll and backs off; a PARTIAL failure completes normally and keeps
+the configured `pollInterval` cadence (the base failure path skips the
 interval sleep — rethrowing on a partial failure would poll the healthy
 repos on the backoff ladder, ~30s instead of 60s, 120× at a one-hour
 interval). Without the isolation an uncaught throw unwinds the round, the
@@ -177,12 +190,18 @@ Per repo:
    boundary event when a comment lands between two page fetches and
    shifts every offset, and one comment must never dispatch twice in one
    poll. The walk pages to the tail whenever the backlog is deeper than
-   one page (a1 caps `--page` at 100) so the cursor-side gap is never
-   crossed. EVERY poll then dispatches at most the oldest 100 events
-   (`DISPATCH_BUDGET`, universal and monotonic — a 500-event backlog caps
-   at 100 just like a 1200-event one); the remainder drains on later
-   polls. A full page 100 — beyond the platform's addressable window —
-   throws with the cursor untouched (defensive; see Risks for that band).
+   one page (a1 caps `--page` at 100), so the slice never crosses an
+   unfetched gap WITHIN the window. The invariant is window-scoped: when
+   the cursor event itself has aged out of the 3-day window (downtime or
+   a drain slower than arrival), the walk ends without meeting it and
+   the cursor jumps over the aged-out ids — the poll LOGS that jump when
+   it resumes with events to dispatch (a dormant repo with an empty
+   window skips nothing and does not warn). Each repo's slice dispatches at most the
+   oldest 100 events (`DISPATCH_BUDGET`, universal and monotonic — a
+   500-event backlog caps at 100 just like a 1200-event one; a poll's
+   worst case is repos.length × 100 dispatches); the remainder drains on
+   later polls. A full page 100 — beyond the platform's addressable
+   window — throws with the cursor untouched (defensive; see Risks).
 2. First observation of a repo (no cursor entry): baseline to the max event
    id, dispatch nothing (GitLab first-poll drain precedent). A repo added to
    the config later baselines the same way — no historical backlog dispatch.
@@ -282,22 +301,29 @@ connect where a rule exists (GitHub `validateRepoFilterConfig` pattern).
   error (`SYSTEM_FORBIDDEN_ERROR`) on one repo is logged, not a silent
   skip, and the per-repo isolation keeps the other watched repos polling
   at the configured interval (only a TOTAL failure backs off).
-- **Event-window loss** — outages > 3 days lose older events (v1 limit).
-- **Flood bounded in the 100–10 000 band** — every poll dispatches at most
-  the oldest 100 events (universal budget, monotonic); a deeper backlog
-  walks to the window tail first so the slice never crosses an unfetched
-  gap, and the remainder drains on later polls. Under a sustained flood
-  heavier than the drain rate, events older than the 3-day window still
-  age out — the bounded slice keeps the channel live and the loss is the
-  window's, not a silent cursor jump. **Above 10 000 in-window events**
-  (a full page 100, ~2.3 repo-wide comments/minute sustained) the walk
-  cannot reach the tail: the poll throws with the cursor untouched,
+- **Event-window loss** — outages > 3 days lose older events (v1 limit);
+  when the cursor itself ages out, the resuming poll logs the jump.
+- **Flood bounded in the 100–10 000 band, PER REPO** — each repo's slice
+  dispatches at most the oldest 100 events per poll (universal budget,
+  monotonic), so a poll's worst case is repos.length × 100 dispatches; a
+  deeper backlog walks to the window tail first so the slice never
+  crosses an unfetched gap within the window, and the remainder drains
+  on later polls. Under a sustained flood heavier than the drain rate,
+  events older than the 3-day window still age out — the bounded slice
+  keeps the channel live and the loss is the window's, not a silent
+  cursor jump. **Above 10 000 in-window events PER REPO** (a full page
+  100, ~2.3 repo-wide comments/minute sustained) the walk cannot reach
+  the tail: that repo's poll throws with its cursor untouched,
   dispatches NOTHING, and repeats the up-to-100-call walk every round
-  until window aging drops the backlog below the ceiling — i.e. it
-  recovers only by losing events, and drags the channel onto the backoff
-  cadence while doing so. That band is a documented limitation, not a
-  protected state; the constants are PAGE_SIZE 100, PLATFORM_MAX_PAGES
-  100, DISPATCH_BUDGET 100, A1_TIMEOUT_MS 20 000.
+  until window aging drops its backlog below the ceiling — per repo it
+  recovers only by losing events; the round throws (dragging the channel
+  onto the backoff cadence) only when EVERY watched repo is in this band,
+  since a partial failure resolves at the configured interval. The walk
+  and the slice are both per repo, so the a1 fan-out is one events call
+  per repo per poll in steady state, rising to repos.length ×
+  PLATFORM_MAX_PAGES while backlogs drain. That band is a documented
+  limitation, not a protected state; the constants are PAGE_SIZE 100,
+  PLATFORM_MAX_PAGES 100, DISPATCH_BUDGET 100, A1_TIMEOUT_MS 20 000.
 - **Write-once** — a failed comment create is surfaced, never retried; the
   agent's reply may be lost on a transient write failure (same trade-off as
   the review provider).
@@ -321,11 +347,16 @@ connect where a rule exists (GitHub `validateRepoFilterConfig` pattern).
   no starvation, partial failure keeps interval cadence, total failure
   rethrows); negative view cache incl. per-poll scope (two-poll retry);
   empty AND whitespace template fallback; createdAt/author/body drift
-  diagnostics; permissive-config warning; descriptor groupPolicy default;
-  repo-path lowercasing. Mutation-witnessed: dedup, per-repo isolation,
-  overflow walk, cursor-reached break, prune save, whitespace fallback,
-  partial-failure cadence, universal budget, platform ceiling, per-poll
-  cache clear, permissive warning, drift diagnostics, midnight window.
+  diagnostics incl. author TYPE drift (no public error comment);
+  permissive-config warning scoped to actually-open repos + dead-posture
+  allowlist warning; durable repo_failed journal record on partial
+  failure; aged-out cursor jump diagnostic (dormant repo silent);
+  descriptor groupPolicy default; repo-path lowercasing. Mutation-
+  witnessed: dedup, per-repo isolation, overflow walk, cursor-reached
+  break, prune save, whitespace fallback, partial-failure cadence,
+  universal budget, platform ceiling, per-poll cache clear, permissive
+  warning, drift diagnostics, midnight window, aging diagnostic, author
+  type guard, durable failure record, warning scope, dead-posture warning.
 - Live read-only smoke: real `a1 events repo middleware/tddl5` fetch+parse,
   no dispatch, no writes (env-gated).
 - Full-loop E2E with a stubbed `a1` on PATH (canned whoami/events; comment
@@ -341,7 +372,9 @@ connect where a rule exists (GitHub `validateRepoFilterConfig` pattern).
   agent; the reply lands as one MR comment (stub-verified argv).
 - Bot's own comments, non-MR notes, and non-prefix comments never dispatch.
 - Restart resumes from the persisted cursor without re-dispatch.
-- a1 error objects (exit 0 or 1) surface as poll errors with backoff; a
+- a1 error objects (exit 0 or 1) surface as poll errors: a single-repo
+  watch list backs off; a multi-repo list logs a durable repo_failed
+  record and keeps the configured interval unless EVERY repo fails. A
   missing a1 binary fails connect with an actionable message.
 - Build, typecheck, and the package's unit tests pass; the workspace-mirror
   meta-test stays green.
@@ -353,4 +386,6 @@ connect where a rule exists (GitHub `validateRepoFilterConfig` pattern).
 - `--reply-to` behavior on inline comment roots: unverified; follow-up.
 - Aone comment size limit (chunking): unknown; v1 posts one comment.
 - Rate limits of the a1 backend under multi-repo polling: unquantified;
-  default 60s interval keeps fan-out at one events call per repo per poll.
+  the default 60s interval keeps steady-state fan-out at one events call
+  per repo per poll, rising to repos.length × PLATFORM_MAX_PAGES calls
+  per poll while backlogs drain (the walk is per page, not per repo).

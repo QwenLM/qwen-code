@@ -18,6 +18,7 @@ import type {
 import {
   lowercaseGroupAllowedUsers,
   PollingChannelBase,
+  sanitizeLogText,
 } from '@qwen-code/channel-base';
 import { z } from 'zod';
 import { AoneCommandError, aoneWhoamiAccount, runA1Json } from './a1-client.js';
@@ -67,10 +68,12 @@ const PAGE_SIZE = 100;
  */
 const PLATFORM_MAX_PAGES = 100;
 /**
- * Every poll dispatches at most this many (oldest) events; the remainder
- * drains on later polls. Universal, not overflow-only: a 101–999 event
- * backlog must not dispatch unbounded agent turns in one poll while a 1001
- * backlog caps at 100 (the protection has to be monotonic).
+ * Each repo's slice in a poll dispatches at most this many (oldest) events;
+ * the remainder drains on later polls. A poll's worst case is therefore
+ * repos.length × DISPATCH_BUDGET dispatches (and up to repos.length ×
+ * PLATFORM_MAX_PAGES fetches while backlogs drain). Universal, not
+ * overflow-only: a 101–999 event backlog must not dispatch unbounded agent
+ * turns in one poll while a 1001 backlog caps at 100 (monotonic protection).
  */
 const DISPATCH_BUDGET = PAGE_SIZE;
 
@@ -215,15 +218,48 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
       );
     }
     // The management UI seeds groupPolicy from the descriptor default
-    // (open, GitLab/GitHub parity) and cannot edit `groups`, whose senders
-    // policy then falls back to open — a UI-created channel is permissive
-    // by default. Say so loudly; the design sample shows the restriction.
-    if (
-      cfg.groupPolicy === 'open' &&
-      this.groupSendersFor({ chatId: '*' }) === 'open'
-    ) {
+    // (open, GitLab/GitHub parity); its shared group-sender fields write
+    // groups["*"].senders / allowedUsers (channel-wide) and its allowlist
+    // membership field creates groups[<repo>] entries, but per-repository
+    // SENDERS overrides exist only for github/gitlab. A UI-created channel
+    // is permissive only while the operator leaves Group senders at its
+    // default — warn about the repos that are ACTUALLY open, not the
+    // wildcard entry alone (a per-repo allowlist with no "*" entry is
+    // restricted and must not warn).
+    const openRepos = this.repos.filter(
+      (repo) => this.groupSendersFor({ chatId: repo }) === 'open',
+    );
+    // The dead posture: under allowlist, "*" is a default config, NOT a
+    // wildcard allow (GroupGate.check), so a watch list with no per-repo
+    // groups entry rejects every event as not_allowlisted while the cursor
+    // advances. The entry check mirrors ChannelBase.groupConfigFor
+    // (private): exact key, then normalized-match.
+    const groups = this.config.groups ?? {};
+    const hasGroupsEntry = (repo: string) => {
+      if (Object.hasOwn(groups, repo)) return true;
+      const normalized = this.normalizeGroupId(repo);
+      return Object.keys(groups).some(
+        (key) => this.normalizeGroupId(key) === normalized,
+      );
+    };
+    const deadAllowlist =
+      cfg.groupPolicy === 'allowlist' &&
+      !this.repos.some((repo) => hasGroupsEntry(repo));
+    if (deadAllowlist) {
       process.stderr.write(
-        `[Channel:${this.name}] warning: groupPolicy "open" with open group senders — any commenter on a watched repository can drive the agent as the a1-login account; set groups["<repo>"].senders to "allowlist" with allowedUsers to restrict (see the design doc sample)\n`,
+        `[Channel:${this.name}] warning: groupPolicy "allowlist" but no watched repository has a groups entry — every event will be rejected as not_allowlisted (the "*" entry is a default, not a wildcard, under allowlist)\n`,
+      );
+    } else if (
+      (cfg.groupPolicy === 'open' || cfg.groupPolicy === 'allowlist') &&
+      openRepos.length > 0
+    ) {
+      // Permissive posture: open senders on a watched repo — under
+      // groupPolicy open directly, or under allowlist via a membership
+      // entry whose senders fall back to an open "*" default. Suppressed
+      // for the dead posture (nothing dispatches there, so "any commenter
+      // can drive the agent" would be noise).
+      process.stderr.write(
+        `[Channel:${this.name}] warning: open group senders on ${openRepos.join(', ')} — any commenter on those repositories can drive the agent as the a1-login account; set groups["<repo>"].senders to "allowlist" with allowedUsers to restrict (see the design doc sample)\n`,
       );
     }
 
@@ -291,6 +327,18 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
         // it in the watch list (the base loop restarts from repos[0] on a
         // failed poll, so an uncaught throw skips every later repo forever).
         failures.push(err);
+        // Durable trace: a partial failure resolves the round, so the base
+        // loop journals it ok — without this record the broken repo would
+        // leave no trace the status page can show while its comments age out.
+        this.recordChannelEvent({
+          type: 'poll',
+          outcome: 'repo_failed',
+          repository: repo,
+          error: sanitizeLogText(
+            err instanceof Error ? err.message : String(err),
+            200,
+          ),
+        });
         process.stderr.write(
           `[Channel:${this.name}] poll failed for ${repo}: ${err}\n`,
         );
@@ -357,11 +405,23 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
       }
     }
 
+    // The cursor event itself aged out of the 3-day window: events between
+    // the cursor and the window's oldest are gone to window aging, and the
+    // cursor will jump over them. Diagnose the jump (only when there is
+    // something to resume to — a dormant repo with an empty window skips
+    // nothing and must not warn every poll).
+    if (!reachedCursor && fresh.length > 0) {
+      process.stderr.write(
+        `[Channel:${this.name}] cursor for ${repo} aged out of the events window; events older than the window were lost to aging; resuming from the oldest fetched event\n`,
+      );
+    }
+
     fresh.sort((a, b) => a.id - b.id);
-    // The walk reached the tail (or the cursor), so `fresh` is complete and
-    // the oldest slice sits right above the cursor — dispatching it advances
-    // the cursor without crossing any unfetched gap. The budget is universal
-    // (monotonic protection): the remainder drains on later polls.
+    // Within the window, `fresh` is complete down to the cursor when the
+    // walk met it; the oldest slice never crosses an unfetched gap WITHIN
+    // the window. When the cursor aged out (diagnosed above), older events
+    // are already lost to the window, not to this slice. The budget is
+    // per repo and monotonic; the remainder drains on later polls.
     const slice = fresh.slice(0, DISPATCH_BUDGET);
     if (fresh.length > slice.length) {
       process.stderr.write(
@@ -441,17 +501,20 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
     repo: string,
     event: AoneCommentEvent,
   ): Promise<void> {
-    const author = (event.author ?? event.user?.username ?? '').toLowerCase();
-    // Drift-prone fields fail LOUD (same rule as createdAt): a payload
-    // rename would otherwise mute the channel silently while the cursor
-    // advances past every event. The self-comment skip stays silent — it
-    // is normal traffic, not drift.
-    if (!author) {
+    // Drift-prone fields fail LOUD and CLOSED (same rule as createdAt): a
+    // payload rename OR type drift would otherwise throw out of here into
+    // the per-event catch, which posts a public error comment on the MR for
+    // every drifted event. Type-guard before use; the self-comment skip
+    // stays silent — it is normal traffic, not drift.
+    const rawAuthor =
+      typeof event.author === 'string' ? event.author : event.user?.username;
+    if (typeof rawAuthor !== 'string' || rawAuthor.length === 0) {
       process.stderr.write(
         `[Channel:${this.name}] event ${event.id} has no author; skipping\n`,
       );
       return;
     }
+    const author = rawAuthor.toLowerCase();
     if (author === this.botAccount) return;
     // Non-MR notes (issue comments) are a legitimate silent skip.
     if (event.note?.noteable_type !== 'MergeRequest') return;
@@ -467,11 +530,20 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
     const trigger = matchTrigger(body, this.prefixes);
     if (!trigger || !trigger.text) return;
 
-    const chatId = event.projectDetail?.path_with_namespace ?? repo;
+    const rawChatId = event.projectDetail?.path_with_namespace;
+    const chatId =
+      typeof rawChatId === 'string' && rawChatId.length > 0 ? rawChatId : repo;
+    const rawName = event.user?.name;
+    const senderName =
+      typeof rawName === 'string' && rawName.length > 0
+        ? rawName
+        : typeof event.author === 'string' && event.author.length > 0
+          ? event.author
+          : author;
     const envelope: Envelope = {
       channelName: this.name,
       senderId: author,
-      senderName: event.user?.name || event.author || author,
+      senderName,
       chatId,
       threadId: `mr:${mrId}`,
       messageId: String(event.note.id ?? event.id),
