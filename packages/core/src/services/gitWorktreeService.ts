@@ -1924,6 +1924,31 @@ export class GitWorktreeService {
         .getRepoTopLevel()
         .catch(() => null)) ?? targetCwd;
     const realTargetTop = await fs.realpath(targetTop).catch(() => targetTop);
+    // The stash cannot carry this deletion, so the 3-way apply never sees it
+    // and cannot flag a conflict. Enforce the same rule here: if the target
+    // file was modified locally (its blob differs from the version this
+    // checkout is deleting), removing it would silently drop local work —
+    // refuse as a conflict instead (the plain-deletion path answers 409).
+    const { simpleGit } = await loadSimpleGit();
+    const targetGit = simpleGit(targetTop).env(gitEnv());
+    for (const relPath of removedPaths) {
+      const dst = path.join(targetTop, relPath);
+      const st = await fs.lstat(dst).catch(() => null);
+      if (!st || !st.isFile()) continue;
+      const srcBlob = await (await this.getGit())
+        .revparse([`HEAD:${relPath}`])
+        .catch(() => null);
+      if (srcBlob === null) continue;
+      const dstBlob = await targetGit
+        .raw(['hash-object', '--', dst])
+        .catch(() => null);
+      if (dstBlob !== null && dstBlob.trim() !== srcBlob.trim()) {
+        throw new WorktreeDirtyCarryConflictError(
+          `The file-to-directory carry conflicts with local modifications to ${relPath}`,
+          { conflict: true },
+        );
+      }
+    }
     return this.removeOverlayFilesContained(
       targetTop,
       realTargetTop,
@@ -3214,14 +3239,24 @@ export class GitWorktreeService {
   /**
    * Checks out an existing branch in a checkout (handoff carry). Throws on
    * git's own refusals (dirty tree, branch checked out elsewhere) so the
-   * caller can map them to a typed refusal.
+   * caller can map them to a typed refusal. With `noOverwriteIgnore`, git
+   * refuses (atomically, before any mutation) to overwrite a local ignored
+   * file the branch tracks — the clean gate uses `git status`, which does not
+   * see ignored files, so without this a handoff could silently destroy an
+   * ignored file whose content is not in the object store.
    */
   async checkoutBranchInCheckout(
     checkoutPath: string,
     branchName: string,
+    options?: { noOverwriteIgnore?: boolean },
   ): Promise<void> {
     const { simpleGit } = await loadSimpleGit();
-    await simpleGit(checkoutPath).env(gitEnv()).raw(['checkout', branchName]);
+    const args = ['checkout'];
+    if (options?.noOverwriteIgnore === true) {
+      args.push('--no-overwrite-ignore');
+    }
+    args.push(branchName);
+    await simpleGit(checkoutPath).env(gitEnv()).raw(args);
   }
 
   /**

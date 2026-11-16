@@ -5487,7 +5487,16 @@ export function registerSessionRoutes(
                   // at the same commit (its dirty state survives).
                   await wtService.detachCheckout(realTarget);
                   detachedFrom = branch;
-                  await localService.checkoutBranchInCheckout(localCwd, branch);
+                  // Refuse (atomically) to overwrite a local ignored file the
+                  // branch tracks: the clean gate cannot see ignored files, so
+                  // a plain checkout could destroy unrecoverable local content.
+                  await localService.checkoutBranchInCheckout(
+                    localCwd,
+                    branch,
+                    {
+                      noOverwriteIgnore: true,
+                    },
+                  );
                 } catch (error) {
                   await rollback();
                   res.status(409).json({
@@ -5535,8 +5544,30 @@ export function registerSessionRoutes(
                 // mkdir the directory there (R11-10, the create-direction
                 // carry already does this). The removed tracked file is
                 // restored by rollback's forceCheckoutBranch, so it is not
-                // added to copiedUntracked.
-                await wtCheckoutService.removeDeletedToDirectoryFiles(localCwd);
+                // added to copiedUntracked. A local modification to that file
+                // conflicts just like a snapshot conflict — refuse, not clobber.
+                try {
+                  await wtCheckoutService.removeDeletedToDirectoryFiles(
+                    localCwd,
+                  );
+                } catch (error) {
+                  if (
+                    error instanceof WorktreeDirtyCarryConflictError &&
+                    error.conflict
+                  ) {
+                    await rollback();
+                    res.status(409).json({
+                      error:
+                        'The worktree snapshot conflicts with the local checkout',
+                      code: 'handoff_snapshot_conflict',
+                      detail:
+                        error instanceof Error ? error.message : String(error),
+                      sessionId: storageSessionId,
+                    });
+                    return;
+                  }
+                  throw error;
+                }
                 copiedUntracked =
                   await wtCheckoutService.carryUntrackedFilesTo(localCwd);
                 assertRuntimeGenerationOpen?.();

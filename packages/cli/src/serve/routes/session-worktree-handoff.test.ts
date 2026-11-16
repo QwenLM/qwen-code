@@ -783,6 +783,74 @@ describe('POST /session/:id/worktree-handoff', () => {
     ).toBe('plan\n');
   });
 
+  it('refuses a handoff whose checkout would overwrite a local ignored file', async () => {
+    const fixture = makeFixture();
+    fixture.writeTranscript();
+    writeFileSync(
+      path.join(fixture.workspaceDir, '.gitignore'),
+      'secret.env\n',
+    );
+    git(fixture.workspaceDir, 'add', '.gitignore');
+    git(fixture.workspaceDir, 'commit', '-qm', 'ignore', '--no-verify');
+    await fixture.createDetachedWorktree();
+    // The worktree force-adds and commits secret.env, so the promoted branch
+    // tracks it; the local checkout has its own ignored copy.
+    writeFileSync(
+      path.join(fixture.worktreeDir, 'secret.env'),
+      'AGENT_TEMPLATE\n',
+    );
+    git(fixture.worktreeDir, 'add', '-f', 'secret.env');
+    git(fixture.worktreeDir, 'commit', '-qm', 'agent secret', '--no-verify');
+    writeFileSync(
+      path.join(fixture.workspaceDir, 'secret.env'),
+      'LOCAL_UNIQUE_SECRET\n',
+    );
+
+    const res = await request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-handoff`)
+      .send({ to: 'local' });
+
+    // The clean gate cannot see the ignored file; the checkout must refuse to
+    // overwrite it rather than destroy unrecoverable local content.
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('handoff_checkout_failed');
+    expect(
+      readFileSync(path.join(fixture.workspaceDir, 'secret.env'), 'utf8'),
+    ).toBe('LOCAL_UNIQUE_SECRET\n');
+  });
+
+  it('refuses a file-to-directory carry that would clobber a local commit', async () => {
+    const fixture = makeFixture();
+    fixture.writeTranscript();
+    await fixture.createDetachedWorktree();
+    // Worktree (still at the base): delete README.md into a directory.
+    rmSync(path.join(fixture.worktreeDir, 'README.md'));
+    mkdirSync(path.join(fixture.worktreeDir, 'README.md'));
+    writeFileSync(
+      path.join(fixture.worktreeDir, 'README.md', 'agent.txt'),
+      'agent\n',
+    );
+    // The user commits new README.md content locally (ahead of the base).
+    writeFileSync(
+      path.join(fixture.workspaceDir, 'README.md'),
+      'LOCAL_NEW_CONTENT\n',
+    );
+    git(fixture.workspaceDir, 'add', 'README.md');
+    git(fixture.workspaceDir, 'commit', '-qm', 'local readme', '--no-verify');
+
+    const res = await request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-handoff`)
+      .send({ to: 'local' });
+
+    // The stash omits the file->directory deletion, so the supplemental
+    // removal must apply the same conflict rule as the snapshot apply.
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('handoff_snapshot_conflict');
+    expect(
+      readFileSync(path.join(fixture.workspaceDir, 'README.md'), 'utf8'),
+    ).toBe('LOCAL_NEW_CONTENT\n');
+  });
+
   it('fails closed when the local checkout is not the bound workspace (R9-1)', async () => {
     // Daemon bound to a subdirectory; a branch-route-shaped sidecar records
     // originalCwd as the repo top. listWorkspaceSessions cannot answer for the
