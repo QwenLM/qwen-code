@@ -1540,6 +1540,9 @@ export async function main() {
         process.env,
         config.getScreenReader(),
       );
+      const { setTuiRendererOfRecord } = await import(
+        './ui/tui-renderer-of-record.js'
+      );
       if (selection.renderer === 'opentui') {
         try {
           const { startOpenTuiUI } = await import(
@@ -1557,6 +1560,7 @@ export async function main() {
             },
           );
           if (started) {
+            setTuiRendererOfRecord('opentui');
             clearCorruptionEnvVars();
             return;
           }
@@ -1580,6 +1584,9 @@ export async function main() {
       } else {
         debugLogger.debug(`TUI renderer: ${selection.reason}`);
       }
+      // Reached for the default ink renderer and for every non-strict OpenTUI
+      // boot fallback, so the diagnostic records the renderer actually serving.
+      setTuiRendererOfRecord('ink');
       const { startInteractiveUI } = await import('./ui/startInteractiveUI.js');
       await startInteractiveUI(
         config,
