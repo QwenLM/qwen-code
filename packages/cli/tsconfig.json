@@ -164,6 +164,7 @@
     { "path": "../channels/email" },
     { "path": "../channels/wecom" },
     { "path": "../channels/feishu" },
+    { "path": "../channels/generic-webhook" },
     { "path": "../channels/gitlab" }
   ]
 }

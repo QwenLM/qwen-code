@@ -438,6 +438,10 @@ function ensureBuiltins(): Promise<void> {
             ({ webhookPlugin }) => ({ plugin: webhookPlugin }),
           ),
         },
+        {
+          name: 'generic-webhook',
+          promise: import('@qwen-code/channel-generic-webhook'),
+        },
         { name: 'qqbot', promise: import('@qwen-code/channel-qqbot') },
         { name: 'github', promise: import('@qwen-code/channel-github') },
         { name: 'gitlab', promise: import('@qwen-code/channel-gitlab') },

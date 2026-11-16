@@ -21,6 +21,7 @@ import dingtalkConfig from '../../packages/channels/dingtalk/vitest.config.js';
 import dwsConfig from '../../packages/channels/dws/vitest.config.js';
 import emailConfig from '../../packages/channels/email/vitest.config.js';
 import feishuConfig from '../../packages/channels/feishu/vitest.config.js';
+import genericWebhookConfig from '../../packages/channels/generic-webhook/vitest.config.js';
 import githubConfig from '../../packages/channels/github/vitest.config.js';
 import gitlabConfig from '../../packages/channels/gitlab/vitest.config.js';
 import qqbotConfig from '../../packages/channels/qqbot/vitest.config.js';
@@ -30,6 +31,7 @@ import weixinConfig from '../../packages/channels/weixin/vitest.config.js';
 import chromeExtensionConfig from '../../packages/chrome-extension/vitest.config.js';
 import cliConfig from '../../packages/cli/vitest.config.js';
 import coreConfig from '../../packages/core/vitest.config.js';
+import networkPolicyConfig from '../../packages/network-policy/vitest.config.js';
 import nodeReplConfig from '../../packages/node-repl/vitest.config.js';
 import sdkTypescriptConfig from '../../packages/sdk-typescript/vitest.config.js';
 import vscodeCompanionConfig from '../../packages/vscode-ide-companion/vitest.config.js';
@@ -109,6 +111,7 @@ const configs: Record<string, ExemptionConfig> = {
   'packages/channels/dws': dwsConfig,
   'packages/channels/email': emailConfig,
   'packages/channels/feishu': feishuConfig,
+  'packages/channels/generic-webhook': genericWebhookConfig,
   'packages/channels/github': githubConfig,
   'packages/channels/gitlab': gitlabConfig,
   'packages/channels/qqbot': qqbotConfig,
@@ -118,6 +121,7 @@ const configs: Record<string, ExemptionConfig> = {
   'packages/chrome-extension': chromeExtensionConfig,
   'packages/cli': cliConfig,
   'packages/core': coreConfig,
+  'packages/network-policy': networkPolicyConfig,
   'packages/node-repl': nodeReplConfig,
   'packages/sdk-typescript': sdkTypescriptConfig,
   'packages/vscode-ide-companion': vscodeCompanionConfig,
@@ -306,6 +310,8 @@ const configModules: Record<
     import('../../packages/channels/email/vitest.config.js'),
   'packages/channels/feishu': () =>
     import('../../packages/channels/feishu/vitest.config.js'),
+  'packages/channels/generic-webhook': () =>
+    import('../../packages/channels/generic-webhook/vitest.config.js'),
   'packages/channels/github': () =>
     import('../../packages/channels/github/vitest.config.js'),
   'packages/channels/gitlab': () =>
@@ -322,6 +328,8 @@ const configModules: Record<
     import('../../packages/chrome-extension/vitest.config.js'),
   'packages/cli': () => import('../../packages/cli/vitest.config.js'),
   'packages/core': () => import('../../packages/core/vitest.config.js'),
+  'packages/network-policy': () =>
+    import('../../packages/network-policy/vitest.config.js'),
   'packages/node-repl': () =>
     import('../../packages/node-repl/vitest.config.js'),
   // qwen-live's ceiling is unconditional (its config carries a flat 60s), so
@@ -393,6 +401,8 @@ describe('shared-pool test timeout', () => {
     'packages/channels/dws',
     'packages/channels/email',
     'packages/channels/feishu',
+    'packages/channels/generic-webhook',
+    'packages/network-policy',
     'packages/channels/github',
     'packages/channels/gitlab',
     'packages/channels/qqbot',
