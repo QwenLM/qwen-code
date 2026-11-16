@@ -46,6 +46,12 @@ export interface DingtalkSettings {
   clientId: string;
   clientSecret: string;
   pollInterval: number;
+  /**
+   * True when a configured pollInterval was rejected and the default used.
+   * Reported by dingtalkSettings itself so the constructor's diagnostic
+   * never re-derives the clamp decision (#17396 R1-3).
+   */
+  pollIntervalRewritten?: boolean;
 }
 
 /** A connected stream the adapter reads robot messages from. */
@@ -85,6 +91,11 @@ export interface ManagedDingtalkAdapterOptions {
 
 const CLAIM_BATCH = 16;
 const DEFAULT_POLL_INTERVAL = 2_000;
+// Shared by the clamp and the operator-facing diagnostic so a bound change
+// cannot leave the message stating a range the code no longer enforces
+// (#17396 R1-3).
+const MIN_POLL_INTERVAL = 250;
+const MAX_POLL_INTERVAL = 2_147_483_647;
 const INSTANCE_SCOPED_REFUSALS = new Set([
   'workspace_not_found',
   'workspace_forbidden',
@@ -115,16 +126,17 @@ export function dingtalkSettings(
     throw new Error('DingTalk channel requires a clientId.');
   if (!validCredential(clientSecret))
     throw new Error('DingTalk channel requires a clientSecret.');
-  const pollInterval = Number(config['pollInterval'] ?? DEFAULT_POLL_INTERVAL);
+  const rawInterval = config['pollInterval'];
+  const pollInterval = Number(rawInterval ?? DEFAULT_POLL_INTERVAL);
+  const intervalAccepted =
+    Number.isSafeInteger(pollInterval) &&
+    pollInterval >= MIN_POLL_INTERVAL &&
+    pollInterval <= MAX_POLL_INTERVAL;
   return {
     clientId: (clientId as string).trim(),
     clientSecret: (clientSecret as string).trim(),
-    pollInterval:
-      Number.isSafeInteger(pollInterval) &&
-      pollInterval >= 250 &&
-      pollInterval <= 2_147_483_647
-        ? pollInterval
-        : DEFAULT_POLL_INTERVAL,
+    pollInterval: intervalAccepted ? pollInterval : DEFAULT_POLL_INTERVAL,
+    pollIntervalRewritten: rawInterval !== undefined && !intervalAccepted,
   };
 }
 
@@ -153,6 +165,8 @@ export class ManagedDingtalkAdapter {
   private registeredGeneration?: number;
   private instanceStalled = false;
   private loggedNoClaimSlot = false;
+  private loggedAcceptFailure = false;
+  private loggedNoReplyTarget = false;
 
   constructor(options: ManagedDingtalkAdapterOptions) {
     this.settings = dingtalkSettings(options.config);
@@ -186,17 +200,13 @@ export class ManagedDingtalkAdapter {
     this.deps = options.deps;
     this.log =
       options.deps.log ?? ((line) => process.stderr.write(`${line}\n`));
-    // The clamp in dingtalkSettings is silent; say so when a configured
-    // value was rewritten, or an operator tuning the poll rate sees no
-    // effect and no explanation (#17173 R12).
-    const requestedInterval = options.config['pollInterval'];
-    if (
-      requestedInterval !== undefined &&
-      Number(requestedInterval ?? DEFAULT_POLL_INTERVAL) !==
-        this.settings.pollInterval
-    ) {
+    // The clamp in dingtalkSettings is silent; say so when it reports a
+    // rewrite, or an operator tuning the poll rate sees no effect and no
+    // explanation (#17173 R12). The decision and the bounds come from the
+    // settings clamp itself, never re-derived here (#17396 R1-3).
+    if (this.settings.pollIntervalRewritten) {
       this.log(
-        `Managed DingTalk pollInterval ${String(requestedInterval)} is not an integer in [250, 2147483647]; using ${this.settings.pollInterval} ms.`,
+        `Managed DingTalk pollInterval ${String(options.config['pollInterval'])} is not an integer in [${MIN_POLL_INTERVAL}, ${MAX_POLL_INTERVAL}]; using ${this.settings.pollInterval} ms.`,
       );
     }
     this.pollLoop = options.pollLoop ?? true;
@@ -249,6 +259,8 @@ export class ManagedDingtalkAdapter {
       this.abort = new AbortController();
       this.running = true;
       this.loggedNoClaimSlot = false;
+      this.loggedAcceptFailure = false;
+      this.loggedNoReplyTarget = false;
       this.registeredGeneration = undefined;
       this.stream = this.deps.createStreamClient(
         this.settings,
@@ -320,15 +332,25 @@ export class ManagedDingtalkAdapter {
       return false;
     }
     try {
-      this.stageInbound({ messageId, data });
-      this.loggedNoClaimSlot = false;
+      // Only a staged claim is an acceptance: a skipped frame also returns
+      // normally (it is acked), and must not re-arm the outage latches.
+      if (this.stageInbound({ messageId, data })) {
+        this.loggedNoClaimSlot = false;
+        this.loggedAcceptFailure = false;
+        this.loggedNoReplyTarget = false;
+      }
       return true;
     } catch (error) {
       // A failed save leaves the frame unacked (LATER); say why, or a disk
-      // outage reads as silent message loss (#17173 R10).
-      this.log(
-        `Managed DingTalk could not durably accept message ${messageId}: ${String(error)}; it is left unacked for redelivery.`,
-      );
+      // outage reads as silent message loss (#17173 R10). Latched like the
+      // no-slot line: a persistent store failure redelivers every frame, and
+      // a line per redelivery would drown the log (#17396 R1-2).
+      if (!this.loggedAcceptFailure) {
+        this.loggedAcceptFailure = true;
+        this.log(
+          `Managed DingTalk could not durably accept message ${messageId}: ${String(error)}; it is left unacked for redelivery.`,
+        );
+      }
       return false;
     }
   }
@@ -367,8 +389,9 @@ export class ManagedDingtalkAdapter {
   // before the provider is told the frame was received and a hard kill in the
   // window before the next tick cannot lose it. The async submit() is left to
   // the tick (resubmitPending). A store.save() failure throws and onMessage
-  // returns false (LATER) so the provider redelivers.
-  private stageInbound(item: InboxItem): void {
+  // returns false (LATER) so the provider redelivers. Returns whether a claim
+  // was staged: a skipped frame is acked too, but is not an acceptance.
+  private stageInbound(item: InboxItem): boolean {
     const state = this.state!;
     let parsed: Record<string, unknown>;
     try {
@@ -377,7 +400,7 @@ export class ManagedDingtalkAdapter {
       this.log(
         `Managed DingTalk message ${item.messageId} is not JSON; skipped.`,
       );
-      return;
+      return false;
     }
     const conversationId = str(parsed['conversationId']);
     const sessionWebhook = str(parsed['sessionWebhook']);
@@ -403,16 +426,32 @@ export class ManagedDingtalkAdapter {
         `Managed DingTalk group message ${item.messageId} is skipped; the managed path serves private chats only.`,
       );
       skip();
-      return;
+      return false;
     }
     if (!conversationId || !senderId || !text) {
       // A non-text or unroutable frame is acked and dropped; leave a line so
-      // the drop is visible instead of silent (#17173 R12).
+      // the drop is visible instead of silent (#17173 R12). Name the actual
+      // cause: a non-text frame carrying both ids is the common trigger and
+      // must not read as a malformed frame (#17396 R1-4). Only the messageId
+      // and the field/msgtype are logged — never the text or the webhook.
+      const msgtype = str(parsed['msgtype']);
+      const missing = [
+        !conversationId ? 'conversationId' : undefined,
+        !senderId ? 'senderId' : undefined,
+        !text ? 'text' : undefined,
+      ].filter((field): field is string => field !== undefined);
+      const reason =
+        missing.length === 1 &&
+        missing[0] === 'text' &&
+        msgtype &&
+        msgtype !== 'text'
+          ? `is not a text frame (msgtype ${msgtype})`
+          : `is missing ${missing.join(', ')}`;
       this.log(
-        `Managed DingTalk message ${item.messageId} has no conversationId, senderId or text; skipped.`,
+        `Managed DingTalk message ${item.messageId} ${reason}; skipped.`,
       );
       skip();
-      return;
+      return false;
     }
     // Evaluate the allowlist before touching the cache: a sender the policy
     // refuses must not spend the webhook-cache budget admission depends on
@@ -422,7 +461,7 @@ export class ManagedDingtalkAdapter {
         `Managed DingTalk sender ${senderId} is not allowed; message skipped.`,
       );
       skip();
-      return;
+      return false;
     }
     // Remember the newest webhook for the conversation: the reply may arrive
     // after this webhook's own message is long gone. Only private frames from
@@ -437,8 +476,19 @@ export class ManagedDingtalkAdapter {
     // reply the send path would only reject (#17173 R1-32).
     const cached = this.cachedWebhook(conversationId);
     if (cached === undefined) {
+      // Eviction of a definitively refused webhook makes this a routine
+      // path; leave a line so the acked drop is diagnosable (#17396 R1-1).
+      // Latched: a dead cache entry lands a whole burst here, and the gate
+      // runs before the recent-window dedupe. Only ids are logged — the
+      // webhook is a bearer capability.
+      if (!this.loggedNoReplyTarget) {
+        this.loggedNoReplyTarget = true;
+        this.log(
+          `Managed DingTalk message ${item.messageId} has no sessionWebhook and none cached for conversation ${conversationId}; skipped.`,
+        );
+      }
       skip();
-      return;
+      return false;
     }
     // A webhook-less frame admitted on the cached entry still counts as seen:
     // refresh its recency so the busiest conversation is not the one evicted
@@ -453,7 +503,7 @@ export class ManagedDingtalkAdapter {
       state.recent.includes(eventId) ||
       state.pending.some((entry) => entry.eventId === eventId)
     ) {
-      return;
+      return false;
     }
     const event: ManagedInboundEvent = {
       accountGeneration: state.generation,
@@ -496,6 +546,7 @@ export class ManagedDingtalkAdapter {
       state.pending = previousPending;
       throw error;
     }
+    return true;
   }
 
   private async submit(
@@ -776,6 +827,12 @@ export class ManagedDingtalkAdapter {
           this.cachedWebhook(conversationId) === webhook
         ) {
           delete state.webhooks[conversationId];
+          // The eviction is load-bearing for admission; make it visible.
+          // Only the conversation id is logged — the webhook is a bearer
+          // capability and the provider errmsg is not trusted text.
+          this.log(
+            `Managed DingTalk evicted the cached webhook for conversation ${conversationId} after a definitive send refusal; the next frame must commit a fresh webhook.`,
+          );
         }
         outcome = definitive ? { outcome: 'rejected' } : { outcome: 'unknown' };
       }

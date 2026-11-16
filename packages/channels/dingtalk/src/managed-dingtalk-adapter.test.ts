@@ -1689,7 +1689,10 @@ describe('managed DingTalk adapter review fixes', () => {
 
 describe('managed DingTalk webhook cache authority (#17173 round 5)', () => {
   it('a definitively refused webhook is evicted so admission stops trusting it', async () => {
-    const { adapter, plane, fake } = await connectedAdapter();
+    const lines: string[] = [];
+    const { adapter, plane, fake } = await connectedAdapter(tempCwd(), {
+      log: (line) => lines.push(line),
+    });
     fake.push('seed', messageData({ msgId: 'seed' }));
     await adapter.tick();
     fake.setBehavior('definitive');
@@ -1698,15 +1701,33 @@ describe('managed DingTalk webhook cache authority (#17173 round 5)', () => {
     expect((plane.receipts[0]!.receipt as { outcome: string }).outcome).toBe(
       'rejected',
     );
-    // The dead target is gone from the persisted cache the gate trusts.
+    // The dead target is gone from the persisted cache the gate trusts, and
+    // the eviction itself is visible (R1-1).
     const persisted = JSON.parse(readFileSync(adapter.stateFile, 'utf8'));
     expect(Object.hasOwn(persisted.webhooks, 'conv-1')).toBe(false);
-    // A webhook-less frame can no longer be admitted against the dead target.
+    expect(
+      lines.some(
+        (line) =>
+          line.includes('evicted the cached webhook') &&
+          line.includes('conv-1'),
+      ),
+    ).toBe(true);
+    // A webhook-less frame can no longer be admitted against the dead target;
+    // the acked drop is logged once for the burst, never the webhook (R1-1).
     fake.push('after', messageData({ msgId: 'after', sessionWebhook: '' }));
+    fake.push('after-2', messageData({ msgId: 'after-2', sessionWebhook: '' }));
     await adapter.tick();
     expect(plane.submit.map((event) => event.platformEventId)).toEqual([
       'dingtalk:seed',
     ]);
+    const gateDrops = lines.filter(
+      (line) =>
+        line.includes('no sessionWebhook and none cached') &&
+        line.includes('conv-1'),
+    );
+    expect(gateDrops).toHaveLength(1);
+    expect(gateDrops[0]).toContain('after');
+    expect(lines.join('\n')).not.toContain('session=abc');
     // A fresh webhook re-commits the conversation.
     fake.push(
       'recommit',
@@ -1822,9 +1843,23 @@ describe('managed DingTalk admission diagnostics (#17173 R10/R12)', () => {
       fake.push('pic', messageData({ msgId: 'pic', msgtype: 'picture' })),
     ).toBe(true);
     await adapter.tick();
+    // The common trigger — a non-text frame carrying both ids — must be
+    // diagnosed as non-text, not as a malformed frame (R1-4).
+    const picLine = lines.find((line) => line.includes('pic'));
+    expect(picLine).toContain('not a text frame');
+    expect(picLine).toContain('picture');
+    expect(picLine).not.toContain('conversationId');
+    // A genuinely missing field names that field instead.
     expect(
-      lines.some((line) => line.includes('pic') && line.includes('skipped')),
+      fake.push(
+        'nosender',
+        messageData({ msgId: 'nosender', senderStaffId: '', senderId: '' }),
+      ),
     ).toBe(true);
+    await adapter.tick();
+    const noSenderLine = lines.find((line) => line.includes('nosender'));
+    expect(noSenderLine).toContain('missing senderId');
+    expect(noSenderLine).not.toContain('not a text frame');
     await adapter.disconnect();
   });
 
@@ -1841,13 +1876,20 @@ describe('managed DingTalk admission diagnostics (#17173 R10/R12)', () => {
         deps: fake.deps,
         pollLoop: false,
       });
-    expect(make('fast').settings.pollInterval).toBe(2_000);
-    expect(lines.filter((line) => line.includes('pollInterval'))).toHaveLength(
-      1,
-    );
+    const rewritten = make('fast');
+    expect(rewritten.settings.pollInterval).toBe(2_000);
+    expect(rewritten.settings.pollIntervalRewritten).toBe(true);
+    const announced = lines.filter((line) => line.includes('pollInterval'));
+    expect(announced).toHaveLength(1);
+    // The message must state the bounds the clamp actually enforces: the
+    // production line derives them from the shared constants, so moving a
+    // bound moves the message and reds this pin (R1-3).
+    expect(announced[0]).toContain('[250, 2147483647]');
     lines.length = 0;
     expect(make(500).settings.pollInterval).toBe(500);
+    expect(make(500).settings.pollIntervalRewritten).toBe(false);
     expect(make('2000').settings.pollInterval).toBe(2_000);
+    expect(make('2000').settings.pollIntervalRewritten).toBe(false);
     expect(lines).toHaveLength(0);
   });
 
@@ -1861,16 +1903,30 @@ describe('managed DingTalk admission diagnostics (#17173 R10/R12)', () => {
     const store = (
       adapter as unknown as { store: { save: (s: unknown) => void } }
     ).store;
-    const saveSpy = vi.spyOn(store, 'save').mockImplementation(() => {
-      throw new Error('disk full');
-    });
+    const realSave = store.save.bind(store);
+    let failing = true;
+    const saveSpy = vi
+      .spyOn(store, 'save')
+      .mockImplementation((state: unknown) => {
+        if (failing) throw new Error('disk full');
+        realSave(state);
+      });
+    const acceptFailures = () =>
+      lines.filter((line) => line.includes('could not durably accept'));
     expect(fake.push('m1', messageData({ msgId: 'm1' }))).toBe(false);
-    expect(
-      lines.some(
-        (line) =>
-          line.includes('could not durably accept') && line.includes('m1'),
-      ),
-    ).toBe(true);
+    expect(acceptFailures()).toHaveLength(1);
+    expect(acceptFailures()[0]).toContain('m1');
+    // A persistent store outage redelivers every frame; the line is latched
+    // to one per episode, not one per redelivery (R1-2).
+    expect(fake.push('m2', messageData({ msgId: 'm2' }))).toBe(false);
+    expect(acceptFailures()).toHaveLength(1);
+    // Recovery re-arms the line: an accepted frame clears the latch, so the
+    // next outage episode logs again.
+    failing = false;
+    expect(fake.push('m3', messageData({ msgId: 'm3' }))).toBe(true);
+    failing = true;
+    expect(fake.push('m4', messageData({ msgId: 'm4' }))).toBe(false);
+    expect(acceptFailures()).toHaveLength(2);
     saveSpy.mockRestore();
     await adapter.disconnect();
   });
