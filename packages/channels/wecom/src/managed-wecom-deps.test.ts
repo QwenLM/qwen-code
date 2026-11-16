@@ -376,3 +376,84 @@ describe('managed WeCom deps send path', () => {
     stream.disconnect();
   });
 });
+
+describe('managed WeCom deps review fixes (round 2)', () => {
+  it('a non-text frame is dropped with a latched diagnostic naming the type', async () => {
+    const written: string[] = [];
+    const spy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk: unknown) => {
+        written.push(String(chunk));
+        return true;
+      });
+    const { stream, received, stops } = await authenticatedSetup();
+    // The real SDK emits the generic 'message' event for every type.
+    mockState.instance!.emit('message', textFrame({ msgtype: 'image' }));
+    mockState.instance!.emit('message', textFrame({ msgtype: 'image' }));
+    const nonText = written.filter((l) => l.includes('non-text frame'));
+    expect(nonText).toHaveLength(1);
+    expect(nonText[0]).toContain('image');
+    expect(received).toEqual([]);
+    expect(stops).toEqual([]);
+    spy.mockRestore();
+    stream.disconnect();
+  });
+
+  it('disconnect interrupts a pending connect promptly with the stop reason', async () => {
+    const { stream } = setup();
+    const connecting = stream.connect();
+    // Never authenticate; disconnect must settle the handshake now, not 30s later.
+    await new Promise((resolve) => setImmediate(resolve));
+    stream.disconnect();
+    await expect(connecting).rejects.toThrow(/stopped before authentication/);
+  });
+
+  it('the SDK error logger sanitizes a multi-line credential-bearing message', async () => {
+    const written: string[] = [];
+    const spy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk: unknown) => {
+        written.push(String(chunk));
+        return true;
+      });
+    const { stream } = await authenticatedSetup();
+    mockState.instance!.emit(
+      'error',
+      new Error('secret=ABC123\nsecond line\r\nthird'),
+    );
+    const errLines = written.filter((l) => l.includes('SDK error'));
+    expect(errLines).toHaveLength(1);
+    // One physical line: real newlines are rendered as escapes, not emitted.
+    expect(errLines[0]!.includes('\nsecond line')).toBe(false);
+    expect(errLines[0]).toContain('\\n');
+    spy.mockRestore();
+    stream.disconnect();
+  });
+
+  it('deps.lock creates the directory 0700 and a second acquire refuses', async () => {
+    const { mkdtempSync, rmSync, statSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const parent = mkdtempSync(join(tmpdir(), 'wecom-lock-'));
+    const dir = join(parent, 'state-dir');
+    const deps = createManagedWecomDeps();
+    const release = await deps.lock(dir, () => {});
+    expect(statSync(dir).mode & 0o777).toBe(0o700);
+    // retries:0 → a second owner surfaces the refusal immediately, not blocks.
+    await expect(deps.lock(dir, () => {})).rejects.toThrow();
+    await release();
+    rmSync(parent, { recursive: true, force: true });
+  });
+
+  it('a transient disconnect keeps the inbound gate open across reconnect', async () => {
+    const { stream, received, stops } = await authenticatedSetup();
+    mockState.instance!.emit('disconnected', 'network blip');
+    // The SDK reconnects and re-authenticates on the same client; the deps
+    // must NOT close the inbound gate (only a kick is fatal).
+    mockState.instance!.emit('authenticated');
+    mockState.instance!.emit('message.text', textFrame());
+    expect(received).toHaveLength(1);
+    expect(stops).toEqual([]);
+    stream.disconnect();
+  });
+});

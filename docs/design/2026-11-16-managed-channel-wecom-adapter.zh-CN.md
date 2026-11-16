@@ -79,6 +79,13 @@ SDK 事件处理器在返回前把帧同步暂存为持久认领；异步准入�
 事件，绝不重建。`store.save()` 失败无法把帧留待重投——丢帧并记录丢失日志
 （latched，磁盘故障不会刷屏）。这是相对 DingTalk LATER 臂的刻意分歧。
 
+还有两条路径会丢弃已暂存的认领，在不重投的提供方上这就是永久丢失：32 条认领表
+已满会在门禁处丢弃来帧（是丢弃而非 stall——闩锁诊断点名原因）；确定性准入拒绝
+会丢弃该认领并把其 id 记入 `recent`。逐消息裁决（400/403/409）首次拒绝即丢弃；
+instance 级拒绝（`workspace_not_found` 及同类）牺牲第一条、从第二条起 held，
+停摆准入直到绑定应答。held 认领每个 tick 重驱动；被丢弃的认领已消失，其 id 的
+重投会被 `recent` 排重吃掉。
+
 帧仅在以下条件全部满足时暂存；其余帧一律丢弃并输出点名原因的诊断行（只记 id，
 不记正文）：
 
@@ -138,21 +145,25 @@ DingTalk 适配器同款钳制收敛到线上界：至多 32,000 UTF-16 单元�
   DingTalk deps 的永久重试纪律。SDK 的心跳与 missed-pong 检测驱动重连。
 - 服务端踢下线（`event.disconnected_event`，新连接取代了本连接）是致命的：重连
   会反过来取代新主人。deps 经 `onStopped` 回调通知适配器；适配器记录日志并停止，
-  与所有权丢失停止同一形状。状态锁已按工作区范围串行化同一 bot 应用的托管实例；
-  被踢意味着另一个进程或机器现在拥有该 bot。
-- 只订阅 `message.text`。非文本帧（图片、语音、文件、视频、图文混排）不到达
-  适配器；媒体与混排文本支持是后续工作，不在本切片。
+  与所有权丢失停止同一形状。状态锁已按工作区范围串行化同一配置条目（name + botId）
+  的托管实例；被踢意味着另一个进程或机器现在拥有该 bot。
+- 只把 `message.text` 转发给适配器。非文本帧（图片、语音、文件、视频、图文混排）
+  被丢弃并输出点名帧类型的闩锁诊断；媒体与混排文本支持是后续工作，不在本切片。
 
 ### 状态
 
 适配器的带锁状态镜像 DingTalk 存储、去掉 webhook 映射：版本、账号 generation、
 实例拒绝连击、pending 认领（完整持久化事件，上限 32）、出站分段账本（上限 64，
-共享 `MANAGED_OUTBOUND_LIMIT`）、已落定排重窗口（上限 256）。每个 bot 应用每个
-工作区范围一个目录（`~/.qwen/channels/<workspace-scope>/wecom-<hash>`），`0700`
-目录内 `0600` 状态文件，原子写 + fsync + rename，校验器拒绝不可读或非法状态而
-非静默重置。目录锁（`proper-lockfile`，WeCom 包的新依赖）串行化该 bot 应用的
-并发托管实例；锁被破坏时适配器停止并停止持久化，与 DingTalk 一致。reply context
-不携带 bearer 能力，因此盘上暴露面严格小于 DingTalk 持久化的 session webhook。
+共享 `MANAGED_OUTBOUND_LIMIT`）、已落定排重窗口（上限 256）。每个配置条目
+（渠道 name + botId）每个工作区范围一个目录
+（`~/.qwen/channels/<workspace-scope>/wecom-<hash>`），与 DingTalk 存储相同的
+name+account key 形状；`0700` 目录内 `0600` 状态文件，原子写 + fsync + rename，
+校验器拒绝不可读或非法状态而非静默重置。目录锁（`proper-lockfile`，WeCom 包的
+新依赖）串行化该条目的并发托管实例；共用同一 botId 的两个条目得到不同目录与不同
+锁（SDK 随即只允许一个连接并踢掉另一个），因此复制或改名条目是运维配置问题，
+锁不会合并它们。Legacy WeCom 渠道不加锁，所以锁不仲裁 managed-vs-Legacy。锁被
+破坏时适配器停止并停止持久化，与 DingTalk 一致。reply context 不携带 bearer
+能力，因此盘上暴露面严格小于 DingTalk 持久化的 session webhook。
 
 ## 涉及文件
 

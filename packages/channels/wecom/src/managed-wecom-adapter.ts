@@ -122,11 +122,18 @@ export function wecomSettings(
     throw new Error('WeCom channel requires a secret.');
   const rawWsUrl = config['wsUrl'];
   let wsUrl: string | undefined;
-  if (rawWsUrl !== undefined) {
-    const trimmed = typeof rawWsUrl === 'string' ? rawWsUrl.trim() : '';
-    if (!trimmed || !isSecureWebSocketUrl(trimmed))
+  // A blank or null optional wsUrl is absent, like the Legacy parser and the
+  // sibling pollInterval key — not a refusal of the whole channel. A real
+  // value still must be a wss:// URL, and a non-string is refused.
+  if (rawWsUrl !== undefined && rawWsUrl !== null) {
+    if (typeof rawWsUrl !== 'string')
       throw new Error('WeCom channel requires wsUrl to use wss://.');
-    wsUrl = trimmed;
+    const trimmed = rawWsUrl.trim();
+    if (trimmed) {
+      if (!isSecureWebSocketUrl(trimmed))
+        throw new Error('WeCom channel requires wsUrl to use wss://.');
+      wsUrl = trimmed;
+    }
   }
   const rawInterval = config['pollInterval'];
   const pollInterval = Number(rawInterval ?? DEFAULT_POLL_INTERVAL);
@@ -176,7 +183,9 @@ export class ManagedWecomAdapter {
   private registeredGeneration?: number;
   private instanceStalled = false;
   private loggedNoClaimSlot = false;
+  private lastDropCause?: string;
   private loggedAcceptFailure = false;
+  private loggedRegistrationFailure = false;
 
   constructor(options: ManagedWecomAdapterOptions) {
     this.settings = wecomSettings(options.config);
@@ -268,7 +277,9 @@ export class ManagedWecomAdapter {
       this.abort = new AbortController();
       this.running = true;
       this.loggedNoClaimSlot = false;
+      this.lastDropCause = undefined;
       this.loggedAcceptFailure = false;
+      this.loggedRegistrationFailure = false;
       this.registeredGeneration = undefined;
       this.stream = this.deps.createStreamClient(
         this.settings,
@@ -285,7 +296,15 @@ export class ManagedWecomAdapter {
       if (!this.running)
         throw new Error('Managed WeCom adapter stopped during connection.');
       await this.ensureRegistered(this.state);
-      await this.reportOrphanedOutbound();
+      // A stale orphan row must not keep a healthy stream from starting: a
+      // transient receipt refusal here is re-driven by the poll loop seconds
+      // later. Swallow only at this call site — reportOrphanedOutbound keeps
+      // rethrowing so the tick-level discipline (keep the entry) stands.
+      await this.reportOrphanedOutbound().catch((error) => {
+        this.log(
+          `Managed WeCom orphan-receipt replay at connect failed (${String(error)}); the poll loop re-drives it.`,
+        );
+      });
       // A lock compromise or a kick can land during the awaits above. Re-check
       // so connect() rejects rather than resolving a healthy-looking start for
       // a stopped, deaf adapter the CLI would then park on.
@@ -326,18 +345,23 @@ export class ManagedWecomAdapter {
   // redelivery to leave it for, and the loss must be visible instead of silent.
   private onMessage(messageId: string, data: string): void {
     if (!this.running || this.ownershipLost) return;
-    if (
-      this.instanceStalled ||
-      this.registeredGeneration === 0 ||
-      (this.state?.pending.length ?? 0) >= MANAGED_WECOM_PENDING_LIMIT
-    ) {
-      // Log only on the transition into the outage: during a stall every
-      // frame meets this gate, and a line per frame would drown the log. The
-      // next accepted frame re-arms the line.
-      if (!this.loggedNoClaimSlot) {
+    const tableFull =
+      (this.state?.pending.length ?? 0) >= MANAGED_WECOM_PENDING_LIMIT;
+    if (this.instanceStalled || this.registeredGeneration === 0 || tableFull) {
+      // Name the actual cause: a stall or a registration outage drops frames
+      // with slots free, so a claim-slot line would blame the wrong thing.
+      // Latched per cause transition: one outage yields one line, and a cause
+      // change mid-outage is still announced. The next accepted frame re-arms.
+      const cause = this.instanceStalled
+        ? 'admission is stalled (instance-scoped refusal)'
+        : this.registeredGeneration === 0
+          ? 'the channel is re-registering'
+          : 'no durable claim slot';
+      if (!this.loggedNoClaimSlot || this.lastDropCause !== cause) {
         this.loggedNoClaimSlot = true;
+        this.lastDropCause = cause;
         this.log(
-          `Managed WeCom has no durable claim slot; message ${messageId} is dropped (the provider does not redeliver).`,
+          `Managed WeCom dropped message ${messageId}: ${cause} (the provider does not redeliver).`,
         );
       }
       return;
@@ -347,6 +371,7 @@ export class ManagedWecomAdapter {
       // normally, and must not re-arm the outage latches.
       if (this.stageInbound({ messageId, data })) {
         this.loggedNoClaimSlot = false;
+        this.lastDropCause = undefined;
         this.loggedAcceptFailure = false;
       }
     } catch (error) {
@@ -369,7 +394,21 @@ export class ManagedWecomAdapter {
         try {
           await this.tick();
         } catch (error) {
-          this.log(`Managed WeCom tick failed: ${String(error)}`);
+          // A persistent registration failure rethrows every tick; latch it
+          // like the other outage diagnostics so the most important failure
+          // does not flood one raw line per poll interval.
+          if (
+            (error as { registrationFailure?: boolean }).registrationFailure
+          ) {
+            if (!this.loggedRegistrationFailure) {
+              this.loggedRegistrationFailure = true;
+              this.log(
+                `Managed WeCom registration is failing (${String(error)}); inbound is dropped until it recovers.`,
+              );
+            }
+          } else {
+            this.log(`Managed WeCom tick failed: ${String(error)}`);
+          }
         }
         if (this.running)
           await delay(this.settings.pollInterval, undefined, {
@@ -405,6 +444,15 @@ export class ManagedWecomAdapter {
       parsed = JSON.parse(item.data) as Record<string, unknown>;
     } catch {
       this.log(`Managed WeCom message ${item.messageId} is not JSON; skipped.`);
+      return false;
+    }
+    // `null`, arrays and primitives parse successfully but are not frames;
+    // reject them here so indexing below cannot throw into onMessage's catch
+    // and poison the durable-store loss latch with a malformed-frame error.
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      this.log(
+        `Managed WeCom message ${item.messageId} is not a JSON object; skipped.`,
+      );
       return false;
     }
     const senderId = str(getRecord(parsed, 'from')?.['userid']) ?? '';
@@ -513,22 +561,9 @@ export class ManagedWecomAdapter {
     event: ManagedInboundEvent,
   ): Promise<void> {
     const state = this.state!;
+    let admitted: { inputId: string; sessionId: string; replayed: boolean };
     try {
-      const admitted = await this.controlPlane.submitInbound(event);
-      const wasHeld = state.pending.some(
-        (entry) => entry.eventId === eventId && entry.held === true,
-      );
-      state.pending = state.pending.filter(
-        (entry) => entry.eventId !== eventId,
-      );
-      state.recent = [...state.recent, eventId].slice(-RECENT_LIMIT);
-      if (!admitted.replayed && wasHeld) {
-        state.instanceRefusals = 0;
-        this.instanceStalled = false;
-      } else {
-        this.liftStallWhenNothingHeld();
-      }
-      this.persist();
+      admitted = await this.controlPlane.submitInbound(event);
     } catch (error) {
       const status = (error as { status?: unknown }).status;
       const code = (error as { code?: unknown }).code;
@@ -579,6 +614,29 @@ export class ManagedWecomAdapter {
       // A lost answer or a transient refusal: the claim, with its persisted
       // event, stays in pending so the next tick re-drives the identical
       // event, never a rebuilt one.
+      return;
+    }
+    // Success path — outside the control-plane classifier so a store failure
+    // here is handled as a store failure, never swallowed as a transient
+    // refusal that leaves memory settled while disk still holds the claim.
+    const wasHeld = state.pending.some(
+      (entry) => entry.eventId === eventId && entry.held === true,
+    );
+    state.pending = state.pending.filter((entry) => entry.eventId !== eventId);
+    state.recent = [...state.recent, eventId].slice(-RECENT_LIMIT);
+    if (!admitted.replayed && wasHeld) {
+      state.instanceRefusals = 0;
+    }
+    // Lift (and log) the stall when the last held claim leaves — including a
+    // fresh held admission, so recovery is visible, not silent.
+    this.liftStallWhenNothingHeld();
+    try {
+      this.persist();
+    } catch (error) {
+      this.log(
+        `Managed WeCom could not persist settled claim ${eventId}: ${String(error)}`,
+      );
+      throw error;
     }
   }
 
@@ -653,8 +711,14 @@ export class ManagedWecomAdapter {
         policy: this.policy,
       });
       this.registeredGeneration = state.generation;
+      this.loggedRegistrationFailure = false;
     } catch (error) {
       this.registeredGeneration = 0;
+      // Mark the failure so runLoop latches its diagnostic instead of logging
+      // one raw line per poll interval for as long as registration is broken.
+      if (error && typeof error === 'object') {
+        (error as { registrationFailure?: boolean }).registrationFailure = true;
+      }
       throw error;
     }
   }

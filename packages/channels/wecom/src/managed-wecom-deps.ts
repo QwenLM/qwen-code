@@ -60,7 +60,24 @@ function createStreamClient(
   const client = new WSClient(options);
   let authenticated = false;
   let stopped = false;
+  let loggedNonText = false;
+  // Hoisted so disconnect() can interrupt a pending connect() instead of
+  // leaving it to reject 30s later as a misleading authentication timeout.
+  let interruptConnect: ((error: Error) => void) | undefined;
 
+  // The managed path serves text only; the SDK emits message.<msgtype> per
+  // type, so a non-text frame would otherwise vanish with no trace on a
+  // provider that never redelivers. Name the drop once (latched).
+  client.on('message', (frame) => {
+    if (!authenticated || stopped) return;
+    const msgtype = frame.body?.msgtype;
+    if (msgtype && msgtype !== 'text' && !loggedNonText) {
+      loggedNonText = true;
+      process.stderr.write(
+        `Managed WeCom dropped a non-text frame (msgtype ${sanitizeLogText(String(msgtype), 40)}); the managed path serves text only (the provider does not redeliver).\n`,
+      );
+    }
+  });
   client.on('message.text', (frame) => {
     if (!authenticated || stopped) return;
     const body = frame.body;
@@ -121,6 +138,7 @@ function createStreamClient(
         const finish = (error?: Error) => {
           if (settled) return;
           settled = true;
+          interruptConnect = undefined;
           clearTimeout(timer);
           detach();
           if (error) {
@@ -157,12 +175,18 @@ function createStreamClient(
         client.on('authenticated', onAuth);
         client.on('error', onError);
         client.on('event.disconnected_event', onKicked);
+        interruptConnect = (error) => finish(error);
         client.connect();
       }),
     disconnect: () => {
       stopped = true;
       authenticated = false;
       onClient(undefined);
+      // Interrupt a pending handshake promptly with the stop reason rather
+      // than letting it time out 30s later as a credential error.
+      interruptConnect?.(
+        new Error('WeCom connection stopped before authentication.'),
+      );
       client.disconnect();
     },
   };

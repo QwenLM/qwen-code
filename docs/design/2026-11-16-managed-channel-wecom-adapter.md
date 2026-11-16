@@ -104,6 +104,16 @@ a restart re-drives the exact persisted event, never a rebuilt one. A
 frame and logs the loss (latched, so a disk outage does not drown the log).
 This is the deliberate divergence from DingTalk's LATER arm.
 
+Two further paths discard an already-staged claim, and on a no-redelivery
+provider that loss is permanent: a full 32-entry claim table drops the incoming
+frame at the gate (a drop, not a stall — the latched diagnostic names the
+cause), and a deterministic admission refusal drops the claim and records its
+id in `recent`. A per-message verdict (400/403/409) drops on the first refusal;
+an instance-scoped refusal (`workspace_not_found` and siblings) sacrifices the
+first frame and holds from the second, stalling admission until the binding
+answers. A held claim is re-driven each tick; a dropped one is gone, and a
+redelivery of its id is deduped away by `recent`.
+
 A frame is staged only when all of the following hold; every other frame is
 dropped with a diagnostic line naming the cause (ids only, never the text):
 
@@ -186,11 +196,12 @@ The production deps wrap the SDK client:
   one) is fatal: reconnecting would displace the new owner in turn. The deps
   notify the adapter through an `onStopped` callback; the adapter logs and
   stops, the same shape as the ownership-loss stop. The state lock already
-  serializes managed instances of one bot app per workspace scope; a kick
-  means another process or machine owns the bot now.
-- Only `message.text` is subscribed. Non-text frames (image, voice, file,
-  video, mixed) never reach the adapter; media and mixed-text support is a
-  follow-up, not part of this slice.
+  serializes managed instances of one configured entry (name + botId) per
+  workspace scope; a kick means another process or machine owns the bot now.
+- Only `message.text` is forwarded to the adapter. Non-text frames (image,
+  voice, file, video, mixed) are dropped with a latched diagnostic naming the
+  frame type; media and mixed-text support is a follow-up, not part of this
+  slice.
 
 ### State
 
@@ -198,15 +209,20 @@ The adapter's locked state mirrors the DingTalk store minus the webhook map:
 version, account generation, the instance-refusal streak, the pending claims
 (full persisted events, cap 32), the outbound segment ledger (cap 64, the
 shared `MANAGED_OUTBOUND_LIMIT`), and the settled dedupe window (cap 256). One
-directory per bot app per workspace scope
-(`~/.qwen/channels/<workspace-scope>/wecom-<hash>`), a `0600` state file inside
-a `0700` directory, atomic write + fsync + rename, and a validator that refuses
-an unreadable or invalid state rather than silently resetting it. The
-directory lock (`proper-lockfile`, a new dependency of the WeCom package)
-serializes concurrent managed instances of the bot app; a compromised lock
-stops the adapter and stops persisting, as in DingTalk. The reply context
-carries no bearer capability, so the on-disk exposure is strictly smaller than
-DingTalk's persisted session webhooks.
+directory per configured entry (channel name + botId) per workspace scope
+(`~/.qwen/channels/<workspace-scope>/wecom-<hash>`), the same name+account key
+shape the DingTalk store uses; a `0600` state file inside a `0700` directory,
+atomic write + fsync + rename, and a validator that refuses an unreadable or
+invalid state rather than silently resetting it. The directory lock
+(`proper-lockfile`, a new dependency of the WeCom package) serializes concurrent
+managed instances of the entry; two entries sharing a botId get separate
+directories and locks (the SDK then admits one connection and kicks the other),
+so a duplicated or renamed entry is an operator config concern, not something
+the lock merges. The Legacy WeCom channel takes no lock, so the lock does not
+arbitrate managed-versus-Legacy. A compromised lock stops the adapter and stops
+persisting, as in DingTalk. The reply context carries no bearer capability, so
+the on-disk exposure is strictly smaller than DingTalk's persisted session
+webhooks.
 
 ## Files affected
 

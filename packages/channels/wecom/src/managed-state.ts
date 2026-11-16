@@ -91,7 +91,11 @@ export function validManagedWecomState(
         typeof entry.event === 'object' &&
         entry.event.platformEventId === entry.eventId &&
         typeof entry.event.text === 'string' &&
-        (entry.inputId === undefined || typeof entry.inputId === 'string'),
+        (entry.inputId === undefined || typeof entry.inputId === 'string') &&
+        // held is persisted and re-read at startup; the stall re-arm reads
+        // truthiness while the lift and the probe sort require === true, so a
+        // non-boolean (e.g. "false") must fail closed, not load.
+        (entry.held === undefined || typeof entry.held === 'boolean'),
     ) &&
     Array.isArray(state.outbound) &&
     state.outbound.length <= MANAGED_OUTBOUND_LIMIT &&
@@ -117,10 +121,14 @@ export class ManagedWecomStateStore {
   readonly file: string;
 
   constructor(name: string, cwd: string, botId: string) {
-    // One directory per bot app per workspace, beside the other channel
-    // state. Its lock serializes concurrent managed instances of this bot
-    // app; the Legacy WeCom channel keeps no on-disk state and takes no lock,
-    // so the lock does not arbitrate managed-versus-Legacy.
+    // One directory per configured entry (channel name + botId) per workspace,
+    // beside the other channel state — the same name+account key shape the
+    // DingTalk store uses. Its lock serializes concurrent managed instances of
+    // this entry; two entries sharing a botId get separate directories and
+    // locks (the SDK then admits one connection and kicks the other), so a
+    // duplicated or renamed entry is an operator config concern, not something
+    // the lock merges. The Legacy WeCom channel keeps no on-disk state and
+    // takes no lock, so the lock does not arbitrate managed-versus-Legacy.
     const key = createHash('sha256')
       .update(`${name}\u0000${botId}`)
       .digest('hex')

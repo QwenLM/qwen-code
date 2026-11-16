@@ -1493,6 +1493,11 @@ describe('managed WeCom adapter lifecycle pins', () => {
       deps: fake.deps,
     });
     await adapter.connect();
+    // Let the first tick finish and the loop enter the (maximum-interval)
+    // delay, so disconnect must abort an in-flight sleep — not just exit via
+    // the running guard before the delay is reached. Without the abort signal
+    // this disconnect would hang ~24.8 days and the test times out.
+    await new Promise((resolve) => setTimeout(resolve, 150));
     const started = Date.now();
     await adapter.disconnect();
     expect(Date.now() - started).toBeLessThan(5_000);
@@ -1760,5 +1765,467 @@ describe('managed WeCom adapter hostile inputs', () => {
       }),
     );
     await expect(adapter.connect()).rejects.toThrow(/unreadable or invalid/);
+  });
+});
+
+describe('managed WeCom adapter review fixes (round 2)', () => {
+  it('treats a blank or null wsUrl as absent, still refuses a non-string', () => {
+    expect(wecomSettings({ ...CONFIG, wsUrl: null }).wsUrl).toBeUndefined();
+    expect(wecomSettings({ ...CONFIG, wsUrl: '' }).wsUrl).toBeUndefined();
+    expect(wecomSettings({ ...CONFIG, wsUrl: '   ' }).wsUrl).toBeUndefined();
+    expect(() => wecomSettings({ ...CONFIG, wsUrl: 42 })).toThrow(/wss/);
+    expect(() => wecomSettings({ ...CONFIG, wsUrl: 'http://x' })).toThrow(
+      /wss/,
+    );
+  });
+
+  it('connect rejects with the ownership sentence when the lock refuses, writing no state', async () => {
+    const plane = fakeControlPlane();
+    const fake = fakeDeps();
+    const adapter = new ManagedWecomAdapter({
+      name: 'wecom-1',
+      cwd: tempCwd(),
+      config: CONFIG,
+      controlPlane: plane.controlPlane,
+      deps: {
+        ...fake.deps,
+        lock: async () => {
+          throw new Error('ELOCKED');
+        },
+      },
+      pollLoop: false,
+    });
+    await expect(adapter.connect()).rejects.toThrow(/owned by another process/);
+    expect(plane.register).toHaveLength(0);
+    const { existsSync } = await import('node:fs');
+    expect(existsSync(adapter.stateFile)).toBe(false);
+  });
+
+  it('a second connect on one adapter rejects as already connected', async () => {
+    const { adapter } = await connectedAdapter();
+    await expect(adapter.connect()).rejects.toThrow(/already connected/);
+    await adapter.disconnect();
+  });
+
+  it('a transient orphan-receipt refusal at connect does not keep the channel from starting', async () => {
+    const cwd = tempCwd();
+    const first = await connectedAdapter(cwd);
+    // Leave an outcome-less orphan entry persisted (hard-kill shape).
+    const priv = first.adapter as unknown as {
+      state: { outbound: unknown[] };
+      store: { save: (s: unknown) => void };
+    };
+    priv.state.outbound = [
+      { deliveryId: 'd-orphan', ordinal: 0, messageId: 'm-orphan' },
+    ];
+    priv.store.save(priv.state);
+    await first.adapter.disconnect();
+
+    const plane = fakeControlPlane();
+    plane.setReceiptError(() =>
+      Object.assign(new Error('service unavailable'), { status: 503 }),
+    );
+    const fake = fakeDeps();
+    const lines: string[] = [];
+    const second = new ManagedWecomAdapter({
+      name: 'wecom-1',
+      cwd,
+      config: CONFIG,
+      controlPlane: plane.controlPlane,
+      deps: { ...fake.deps, log: (l) => lines.push(l) },
+      pollLoop: false,
+    });
+    // connect resolves despite the transient orphan refusal; the entry stays.
+    await second.connect();
+    expect(
+      lines.some((l) => l.includes('orphan-receipt replay at connect')),
+    ).toBe(true);
+    const persisted = JSON.parse(readFileSync(second.stateFile, 'utf8'));
+    expect(persisted.outbound).toHaveLength(1);
+    await second.disconnect();
+  });
+
+  it('a null JSON body is dropped as malformed and does not poison the loss latch', async () => {
+    const lines: string[] = [];
+    const { adapter, plane, fake } = await connectedAdapter(tempCwd(), {
+      log: (l) => lines.push(l),
+    });
+    fake.push('nullmsg', 'null');
+    await adapter.tick();
+    expect(plane.submit).toHaveLength(0);
+    expect(lines.some((l) => l.includes('is not a JSON object'))).toBe(true);
+    expect(lines.some((l) => l.includes('could not durably accept'))).toBe(
+      false,
+    );
+    // A genuine save failure on the NEXT frame must still log (latch unpoisoned).
+    const store = (
+      adapter as unknown as { store: { save: (s: unknown) => void } }
+    ).store;
+    const realSave = store.save.bind(store);
+    const spy = vi.spyOn(store, 'save').mockImplementation((s: unknown) => {
+      if ((s as { pending: unknown[] }).pending.length > 0)
+        throw new Error('disk full');
+      realSave(s);
+    });
+    fake.push('m1', messageData({ msgid: 'm1' }));
+    expect(
+      lines.some((l) => l.includes('could not durably accept message m1')),
+    ).toBe(true);
+    spy.mockRestore();
+    await adapter.disconnect();
+  });
+
+  it('a store failure on the settle path is logged and rethrown, not swallowed', async () => {
+    const lines: string[] = [];
+    const { adapter, fake } = await connectedAdapter(tempCwd(), {
+      log: (l) => lines.push(l),
+    });
+    fake.push('m1', messageData({ msgid: 'm1' }));
+    const store = (
+      adapter as unknown as { store: { save: (s: unknown) => void } }
+    ).store;
+    const realSave = store.save.bind(store);
+    // Let staging persist, then fail the settle-path save (pending emptied).
+    const spy = vi.spyOn(store, 'save').mockImplementation((s: unknown) => {
+      if (
+        (s as { pending: unknown[] }).pending.length === 0 &&
+        (s as { recent: string[] }).recent.includes('wecom:m1')
+      ) {
+        throw new Error('disk full');
+      }
+      realSave(s);
+    });
+    await expect(adapter.tick()).rejects.toThrow('disk full');
+    expect(
+      lines.some((l) => l.includes('could not persist settled claim wecom:m1')),
+    ).toBe(true);
+    spy.mockRestore();
+    await adapter.disconnect();
+  });
+
+  it('a persistent registration failure logs one latched line, re-arming on recovery', async () => {
+    const lines: string[] = [];
+    const plane = fakeControlPlane();
+    const fake = fakeDeps();
+    let failRegister = true;
+    const origRegister = plane.controlPlane.register.bind(plane.controlPlane);
+    plane.controlPlane.register = async (req) => {
+      if (failRegister)
+        throw Object.assign(new Error('channel row deleted'), {
+          status: 404,
+          code: 'channel_not_found',
+        });
+      return origRegister(req);
+    };
+    const adapter = new ManagedWecomAdapter({
+      name: 'wecom-1',
+      cwd: tempCwd(),
+      config: { ...CONFIG, pollInterval: 250 },
+      controlPlane: plane.controlPlane,
+      deps: { ...fake.deps, log: (l) => lines.push(l) },
+      pollLoop: true,
+    });
+    // connect's own ensureRegistered throws → connect rejects; drive via tick
+    // instead by connecting against a registering plane then breaking it.
+    failRegister = false;
+    await adapter.connect();
+    failRegister = true;
+    // Force re-registration each tick by resetting the registered generation.
+    (
+      adapter as unknown as { registeredGeneration: number }
+    ).registeredGeneration = 0;
+    await vi.waitFor(() => {
+      expect(
+        lines.filter((l) => l.includes('registration is failing')).length,
+      ).toBeGreaterThanOrEqual(1);
+    });
+    await new Promise((r) => setTimeout(r, 700));
+    expect(
+      lines.filter((l) => l.includes('registration is failing')),
+    ).toHaveLength(1);
+    expect(lines.some((l) => l.includes('tick failed'))).toBe(false);
+    failRegister = false;
+    (
+      adapter as unknown as { registeredGeneration: number }
+    ).registeredGeneration = 0;
+    await vi.waitFor(() => {
+      expect(
+        (adapter as unknown as { loggedRegistrationFailure: boolean })
+          .loggedRegistrationFailure,
+      ).toBe(false);
+    });
+    await adapter.disconnect();
+  });
+
+  it('admission diagnostics are visible: refusal, policy-drop and stall transition/resume lines', async () => {
+    const lines: string[] = [];
+    const { adapter, plane, fake } = await connectedAdapter(tempCwd(), {
+      log: (l) => lines.push(l),
+    });
+    // A deterministic refusal names the status.
+    plane.setRefuseSubmit({ status: 400 });
+    fake.push('poison', messageData({ msgid: 'poison' }));
+    await adapter.tick();
+    expect(
+      lines.filter((l) =>
+        l.includes('admission of wecom:poison was refused (400)'),
+      ),
+    ).toHaveLength(1);
+    // A policy drop names the sender.
+    plane.setRefuseSubmit(undefined);
+    fake.push(
+      'intruder',
+      messageData({ msgid: 'intruder', from: { userid: 'intruder' } }),
+    );
+    await adapter.tick();
+    expect(
+      lines.some((l) => l.includes('sender intruder is not allowed')),
+    ).toBe(true);
+    // Stall transition then resume, one line each.
+    plane.setRefuseSubmit({ status: 404, code: 'workspace_not_found' });
+    fake.push('s1', messageData({ msgid: 's1' }));
+    fake.push('s2', messageData({ msgid: 's2' }));
+    await adapter.tick();
+    expect(lines.filter((l) => l.includes('stopped admitting'))).toHaveLength(
+      1,
+    );
+    plane.setRefuseSubmit(undefined);
+    await adapter.tick();
+    expect(lines.filter((l) => l.includes('admission resumed'))).toHaveLength(
+      1,
+    );
+    await adapter.disconnect();
+  });
+
+  it('the no-claim-slot latch re-arms: a second outage after recovery logs again', async () => {
+    const lines: string[] = [];
+    const { adapter, plane, fake } = await connectedAdapter(tempCwd(), {
+      log: (l) => lines.push(l),
+    });
+    const slotLines = () =>
+      lines.filter((l) => l.includes('no durable claim slot'));
+    for (let i = 0; i < MANAGED_WECOM_PENDING_LIMIT; i += 1) {
+      fake.push(`m${i}`, messageData({ msgid: `m${i}` }));
+    }
+    fake.push('over', messageData({ msgid: 'over' }));
+    expect(slotLines()).toHaveLength(1);
+    // Recover: admit the backlog, freeing slots and re-arming the latch.
+    await adapter.tick();
+    expect(plane.submit.length).toBe(MANAGED_WECOM_PENDING_LIMIT);
+    // Refill and trip the gate a second time.
+    for (let i = 0; i < MANAGED_WECOM_PENDING_LIMIT; i += 1) {
+      fake.push(`n${i}`, messageData({ msgid: `n${i}` }));
+    }
+    fake.push('over2', messageData({ msgid: 'over2' }));
+    expect(slotLines()).toHaveLength(2);
+    await adapter.disconnect();
+  });
+
+  it('the ledger cap keeps the newest entries (identity, not just count)', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    plane.setReceiptError(() =>
+      Object.assign(new Error('lost'), { status: 503 }),
+    );
+    const ids = Array.from(
+      { length: MANAGED_OUTBOUND_LIMIT + 1 },
+      (_, i) => `d-${i}`,
+    );
+    plane.enqueue(ids.map((id) => delivery(id, 1)));
+    await adapter.tick();
+    expect(fake.sent).toHaveLength(MANAGED_OUTBOUND_LIMIT + 1);
+    const state = (
+      adapter as unknown as {
+        state: { outbound: Array<{ deliveryId: string }> };
+      }
+    ).state;
+    // The oldest is evicted; the newest (just appended) survives.
+    expect(state.outbound.map((e) => e.deliveryId)).toEqual(ids.slice(1));
+    const persisted = JSON.parse(readFileSync(adapter.stateFile, 'utf8'));
+    expect(
+      persisted.outbound.map((e: { deliveryId: string }) => e.deliveryId),
+    ).toEqual(ids.slice(1));
+    await adapter.disconnect();
+  });
+
+  it('the recent window keeps the newest ids at exactly the cap', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    const total = RECENT_LIMIT + 8;
+    for (let i = 0; i < total; i += 1) {
+      fake.push(`m${i}`, messageData({ msgid: `m${i}` }));
+      await adapter.tick();
+    }
+    const persisted = JSON.parse(readFileSync(adapter.stateFile, 'utf8'));
+    expect(persisted.recent).toHaveLength(RECENT_LIMIT);
+    // The oldest ids are gone; the newest survive.
+    expect(persisted.recent).not.toContain('wecom:m0');
+    expect(persisted.recent).toContain(`wecom:m${total - 1}`);
+    expect(plane.submit).toHaveLength(total);
+    await adapter.disconnect();
+  });
+
+  it('a settled segment is never re-sent: the orphan replay reports the receipt, not a send', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    // Fail the first receipt report so the entry stays in the ledger with its
+    // ACCEPTED receipt persisted; the next report succeeds.
+    let once = true;
+    plane.setReceiptError(() => {
+      if (once) {
+        once = false;
+        return Object.assign(new Error('lost'), { status: 503 });
+      }
+      return undefined;
+    });
+    plane.enqueue([delivery('d1', 1)]);
+    await adapter.tick();
+    expect(fake.sent).toHaveLength(1);
+    expect(plane.receipts).toHaveLength(0);
+    // The next tick replays the persisted accepted receipt; never a second send.
+    await adapter.tick();
+    expect(fake.sent).toHaveLength(1);
+    expect(plane.receipts).toHaveLength(1);
+    expect(plane.receipts[0]!.receipt).toMatchObject({
+      outcome: 'accepted',
+      ordinal: 0,
+    });
+    await adapter.disconnect();
+  });
+
+  it('a stop before the pre-claim guard claims nothing', async () => {
+    const plane = fakeControlPlane();
+    const fake = fakeDeps();
+    let claimCalls = 0;
+    const origClaim = plane.controlPlane.claimDeliveries.bind(
+      plane.controlPlane,
+    );
+    plane.controlPlane.claimDeliveries = async (limit) => {
+      claimCalls += 1;
+      return origClaim(limit);
+    };
+    const adapter = new ManagedWecomAdapter({
+      name: 'wecom-1',
+      cwd: tempCwd(),
+      config: CONFIG,
+      controlPlane: plane.controlPlane,
+      deps: fake.deps,
+      pollLoop: false,
+    });
+    await adapter.connect();
+    plane.enqueue([delivery('d1', 1)]);
+    // Stop at an await that PRECEDES the pull (the submit phase), so the
+    // pre-claim guard is reached with running=false.
+    const origSubmit = plane.controlPlane.submitInbound.bind(
+      plane.controlPlane,
+    );
+    plane.controlPlane.submitInbound = async (e) => {
+      fake.kick();
+      return origSubmit(e);
+    };
+    fake.push('m1', messageData({ msgid: 'm1' }));
+    await adapter.tick();
+    expect(claimCalls).toBe(0);
+    expect(fake.sent).toHaveLength(0);
+    await adapter.disconnect();
+  });
+
+  it('the poll loop contains a transient tick error and recovers', async () => {
+    const cwd = tempCwd();
+    const plane = fakeControlPlane();
+    const fake = fakeDeps();
+    // Seed an outcome-less orphan so reportOrphanedOutbound rethrows a 503.
+    const seeder = new ManagedWecomAdapter({
+      name: 'wecom-1',
+      cwd,
+      config: CONFIG,
+      controlPlane: plane.controlPlane,
+      deps: fake.deps,
+      pollLoop: false,
+    });
+    await seeder.connect();
+    const priv = seeder as unknown as {
+      state: { outbound: unknown[] };
+      store: { save: (s: unknown) => void };
+    };
+    priv.state.outbound = [
+      { deliveryId: 'd-orphan', ordinal: 0, messageId: 'm' },
+    ];
+    priv.store.save(priv.state);
+    await seeder.disconnect();
+
+    const lines: string[] = [];
+    const plane2 = fakeControlPlane();
+    let fail = true;
+    plane2.setReceiptError(() =>
+      fail
+        ? Object.assign(new Error('unavailable'), { status: 503 })
+        : undefined,
+    );
+    const fake2 = fakeDeps();
+    // Same name + cwd → same state dir → connect loads the persisted orphan.
+    const looped = new ManagedWecomAdapter({
+      name: 'wecom-1',
+      cwd,
+      config: { ...CONFIG, pollInterval: 250 },
+      controlPlane: plane2.controlPlane,
+      deps: { ...fake2.deps, log: (l) => lines.push(l) },
+      pollLoop: true,
+    });
+    await looped.connect();
+    // The default poll loop must contain the transient orphan-replay rejection
+    // (logged "tick failed"), not crash the process as an unhandled rejection.
+    await vi.waitFor(() => {
+      expect(lines.some((l) => l.includes('tick failed'))).toBe(true);
+    });
+    fail = false;
+    await vi.waitFor(() => {
+      expect(plane2.receipts.length).toBeGreaterThanOrEqual(1);
+    });
+    await looped.disconnect();
+  });
+
+  it('the claim batch is bounded and the socket connect/disconnect are observable', async () => {
+    const plane = fakeControlPlane();
+    const fake = fakeDeps();
+    const claimLimits: number[] = [];
+    const origClaim = plane.controlPlane.claimDeliveries.bind(
+      plane.controlPlane,
+    );
+    plane.controlPlane.claimDeliveries = async (limit) => {
+      claimLimits.push(limit);
+      return origClaim(limit);
+    };
+    let connects = 0;
+    let disconnects = 0;
+    const adapter = new ManagedWecomAdapter({
+      name: 'wecom-1',
+      cwd: tempCwd(),
+      config: CONFIG,
+      controlPlane: plane.controlPlane,
+      deps: {
+        ...fake.deps,
+        createStreamClient: (s, onMessage, onStopped) => {
+          const inner = fake.deps.createStreamClient(s, onMessage, onStopped);
+          return {
+            connect: async () => {
+              connects += 1;
+              return inner.connect();
+            },
+            disconnect: () => {
+              disconnects += 1;
+              inner.disconnect();
+            },
+          };
+        },
+      },
+      pollLoop: false,
+    });
+    await adapter.connect();
+    expect(connects).toBe(1);
+    // Enqueue more than CLAIM_BATCH (16); the fake now slices by limit.
+    plane.enqueue(Array.from({ length: 20 }, (_, i) => delivery(`d${i}`, 1)));
+    await adapter.tick();
+    expect(claimLimits.every((l) => l === 16)).toBe(true);
+    expect(claimLimits.length).toBeGreaterThanOrEqual(1);
+    await adapter.disconnect();
+    expect(disconnects).toBeGreaterThanOrEqual(1);
   });
 });

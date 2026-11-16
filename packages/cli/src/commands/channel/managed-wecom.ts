@@ -23,9 +23,10 @@ export const managedWecomCommand = createManagedChannelCommand({
   label: 'WeCom',
   nameDescribe: 'The configured WeCom channel to run on the managed path',
   cwdDescribe:
-    'Local workspace for channel config resolution; it also scopes' +
-    ' the managed state directory, so one state directory and one' +
-    ' lock serialize the managed instances of this bot app',
+    'Local workspace for channel config resolution; the channel' +
+    " config's own cwd (defaulting to this flag) scopes the managed" +
+    ' state directory, so one state directory and one lock serialize' +
+    ' the managed instances of this configured entry',
   createAdapter: (channel, controlPlane) =>
     new ManagedWecomAdapter({
       name: channel.name,

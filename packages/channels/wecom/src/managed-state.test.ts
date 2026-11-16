@@ -10,6 +10,8 @@ import {
   statSync,
   writeFileSync,
   mkdirSync,
+  readdirSync,
+  chmodSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -23,6 +25,8 @@ import {
 import type { ManagedWecomState } from './managed-state.js';
 import {
   MANAGED_OUTBOUND_LIMIT,
+  getGlobalQwenDir,
+  getWorkspaceScopeDirName,
   type ManagedInboundEvent,
 } from '@qwen-code/channel-base';
 
@@ -183,6 +187,36 @@ describe('validManagedWecomState', () => {
       ),
     ).toBe(false);
     expect(validManagedWecomState(withPending(null))).toBe(false);
+    // held is persisted and re-read; a non-boolean must fail closed (the stall
+    // re-arm reads truthiness, the lift/sort require === true).
+    expect(
+      validManagedWecomState(
+        withPending({ eventId: 'e1', event: inbound('e1'), held: 'yes' }),
+      ),
+    ).toBe(false);
+    expect(
+      validManagedWecomState(
+        withPending({ eventId: 'e1', event: inbound('e1'), held: 'false' }),
+      ),
+    ).toBe(false);
+    expect(
+      validManagedWecomState(
+        withPending({ eventId: 'e1', event: inbound('e1'), held: true }),
+      ),
+    ).toBe(true);
+    // The event body guards: a non-string text or a non-object event must not
+    // load and re-drive verbatim into submitInbound.
+    expect(
+      validManagedWecomState(
+        withPending({
+          eventId: 'e1',
+          event: { ...inbound('e1'), text: 42 },
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      validManagedWecomState(withPending({ eventId: 'e1', event: 'e1' })),
+    ).toBe(false);
   });
 
   it('rejects pending beyond the admission limit', () => {
@@ -283,5 +317,52 @@ describe('ManagedWecomStateStore', () => {
     const b = new ManagedWecomStateStore('bot', cwd, 'bot-2');
     expect(a.directory).not.toBe(b.directory);
     expect(a.directory).toMatch(/wecom-[0-9a-f]{16}$/);
+    // The name is part of the key: a renamed entry is a different directory.
+    const renamed = new ManagedWecomStateStore('other', cwd, 'bot-1');
+    expect(renamed.directory).not.toBe(a.directory);
+  });
+
+  it('keys the directory deterministically on the canonical workspace scope', () => {
+    const cwd = tempHome();
+    const a = new ManagedWecomStateStore('bot', cwd, 'bot-1');
+    // Determinism: a fresh store with the same inputs must resolve the SAME
+    // directory, or a restart silently loses every un-receipted claim.
+    const again = new ManagedWecomStateStore('bot', cwd, 'bot-1');
+    expect(again.directory).toBe(a.directory);
+    // The workspace-scope term is load-bearing: two cwds must not collapse
+    // onto one directory (which would re-drive A's claims into B).
+    const otherCwd = tempHome();
+    const elsewhere = new ManagedWecomStateStore('bot', otherCwd, 'bot-1');
+    expect(elsewhere.directory).not.toBe(a.directory);
+    // The full path prefix, not just the leaf regex.
+    expect(a.directory).toBe(
+      join(
+        getGlobalQwenDir(),
+        'channels',
+        getWorkspaceScopeDirName(cwd),
+        a.directory.split('/').pop()!,
+      ),
+    );
+  });
+
+  it('save is atomic: a write failure leaves the prior state loadable and no tmp', () => {
+    const s = store();
+    s.save(populatedState());
+    const before = s.load();
+    // Force a real write failure: remove the directory's write bit so the
+    // temp-file open fails. An in-place write would instead truncate the
+    // prior state; the atomic temp+rename must leave it intact.
+    chmodSync(s.directory, 0o500);
+    try {
+      expect(() => s.save({ ...baseState(), generation: 9 })).toThrow(
+        /could not be saved/,
+      );
+    } finally {
+      chmodSync(s.directory, 0o700);
+    }
+    expect(s.load()).toEqual(before);
+    expect(readdirSync(s.directory).filter((f) => f.endsWith('.tmp'))).toEqual(
+      [],
+    );
   });
 });
