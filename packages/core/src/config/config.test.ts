@@ -7432,6 +7432,32 @@ describe('Server Config (config.ts)', () => {
       });
     });
 
+    describe('modelAvailabilityTracking', () => {
+      it('defaults to off', () => {
+        expect(makeConfig().isModelAvailabilityTrackingEnabled()).toBe(false);
+      });
+
+      it('honors the constructor parameter', () => {
+        expect(
+          makeConfig({
+            modelAvailabilityTracking: true,
+          }).isModelAvailabilityTrackingEnabled(),
+        ).toBe(true);
+        expect(
+          makeConfig({
+            modelAvailabilityTracking: false,
+          }).isModelAvailabilityTrackingEnabled(),
+        ).toBe(false);
+      });
+
+      it('returns one stable lazily-created service instance', () => {
+        const config = makeConfig({ modelAvailabilityTracking: true });
+        const first = config.getModelAvailabilityService();
+        expect(first).toBeDefined();
+        expect(config.getModelAvailabilityService()).toBe(first);
+      });
+    });
+
     describe('isUnifiedAgentLoopEnabled', () => {
       beforeEach(() => {
         vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', undefined);

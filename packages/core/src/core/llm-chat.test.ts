@@ -8574,6 +8574,177 @@ describe('LlmChat', async () => {
       expect(fallbackB).toHaveBeenCalledTimes(2);
     });
 
+    it('a forked send does not wipe the live turn consumed fallback state', async () => {
+      const service = new ModelAvailabilityService();
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+
+      const fallbackA = vi.fn();
+      const fallbackB = vi.fn();
+      wireFallbacks(
+        ['fallback-a', 'fallback-b'],
+        vi
+          .fn()
+          .mockImplementation(async (modelId: string) =>
+            modelId === 'fallback-a'
+              ? fallbackRoute('fallback-a', fallbackA)
+              : fallbackRoute('fallback-b', fallbackB),
+          ),
+      );
+      const capacityError = tpmCapacityError();
+      streamMock().mockRejectedValue(capacityError);
+      fallbackA.mockRejectedValue(capacityError);
+      fallbackB.mockImplementation(async () => textStream('fallback-b ok'));
+
+      // Live turn 1: fallback-a exhausts and is consumed for this turn.
+      await sendCollect('test', 'turn-1');
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+
+      // A forked query shares the Config but uses a constant internal prompt id.
+      // It must not rotate the live turn's key (which would un-consume
+      // fallback-a); it keeps the gate-off behaviour and tries fallback-a itself.
+      await sendCollect('test', 'forked_query');
+      expect(fallbackA).toHaveBeenCalledTimes(2);
+
+      // Back on live turn 1: fallback-a is still consumed, so it stays skipped.
+      const events3 = await sendCollect('test', 'turn-1');
+      expect(hasChunkText(events3, 'fallback-b ok')).toBe(true);
+      expect(fallbackA).toHaveBeenCalledTimes(2);
+      expect(fallbackB).toHaveBeenCalledTimes(3);
+    });
+
+    it('two consecutive forked sends re-probe a transiently exhausted fallback', async () => {
+      const service = new ModelAvailabilityService();
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+
+      const fallbackA = vi.fn();
+      wireFallbacks(
+        ['fallback-a'],
+        vi
+          .fn()
+          .mockImplementation(async () =>
+            fallbackRoute('fallback-a', fallbackA),
+          ),
+      );
+      const capacityError = tpmCapacityError();
+      streamMock().mockRejectedValue(capacityError);
+      // fallback-a 429s once, then recovers.
+      fallbackA
+        .mockRejectedValueOnce(capacityError)
+        .mockResolvedValueOnce(textStream('fallback-a ok'));
+
+      // First forked send: fallback-a exhausts; the request fails. The internal
+      // send must not mark fallback-a consumed in the shared ledger.
+      await expect(sendCollect('test', 'forked_query')).rejects.toThrow();
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+
+      // Second forked send: fallback-a has recovered and must be tried again,
+      // not skipped because a prior forked send consumed it.
+      const events2 = await sendCollect('test', 'forked_query');
+      expect(hasChunkText(events2, 'fallback-a ok')).toBe(true);
+      expect(fallbackA).toHaveBeenCalledTimes(2);
+    });
+
+    it('an explicit Retry served by the primary still re-probes consumed fallbacks', async () => {
+      const service = new ModelAvailabilityService();
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+
+      const fallbackA = vi.fn();
+      const fallbackB = vi.fn();
+      wireFallbacks(
+        ['fallback-a', 'fallback-b'],
+        vi
+          .fn()
+          .mockImplementation(async (modelId: string) =>
+            modelId === 'fallback-a'
+              ? fallbackRoute('fallback-a', fallbackA)
+              : fallbackRoute('fallback-b', fallbackB),
+          ),
+      );
+      const capacityError = tpmCapacityError();
+      // Primary: 429 on request 1, recovered on the Retry, 429 again on request 3.
+      streamMock()
+        .mockRejectedValueOnce(capacityError)
+        .mockResolvedValueOnce(textStream('primary ok'))
+        .mockRejectedValueOnce(capacityError);
+      fallbackA.mockRejectedValue(capacityError);
+      fallbackB.mockImplementation(async () => textStream('fallback-b ok'));
+
+      // Request 1: fallback-a exhausts and is consumed for the turn.
+      await sendCollect('test', 'prompt-retry-primary');
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+
+      // Request 2 is an explicit Retry that the recovered primary serves. The
+      // turn boundary must still reset the ledger even though no fallback runs.
+      const retryEvents = await collect(
+        await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-retry-primary',
+          undefined,
+          { isExplicitRetry: true },
+        ),
+      );
+      expect(hasChunkText(retryEvents, 'primary ok')).toBe(true);
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+
+      // Request 3 (a continuation, not a Retry) hits a capacity error again:
+      // fallback-a was re-probed by the Retry's reset, so it is attempted.
+      await sendCollect('test', 'prompt-retry-primary');
+      expect(fallbackA).toHaveBeenCalledTimes(2);
+    });
+
+    it('the gate off keeps the fallback chain stateless even with a service present', async () => {
+      const service = new ModelAvailabilityService();
+      // Gate OFF, but a real service is injected: the gate must short-circuit
+      // before the getter, and the chain must not skip exhausted fallbacks.
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        false,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+
+      const fallbackA = vi.fn();
+      const fallbackB = vi.fn();
+      wireFallbacks(
+        ['fallback-a', 'fallback-b'],
+        vi
+          .fn()
+          .mockImplementation(async (modelId: string) =>
+            modelId === 'fallback-a'
+              ? fallbackRoute('fallback-a', fallbackA)
+              : fallbackRoute('fallback-b', fallbackB),
+          ),
+      );
+      const capacityError = tpmCapacityError();
+      streamMock().mockRejectedValue(capacityError);
+      fallbackA.mockRejectedValue(capacityError);
+      fallbackB.mockImplementation(async () => textStream('fallback-b ok'));
+
+      await sendCollect('test', 'prompt-gate-off');
+      await sendCollect('test', 'prompt-gate-off');
+
+      // With the gate off the exhausted fallback-a is retried on request 2.
+      expect(fallbackA).toHaveBeenCalledTimes(2);
+      expect(fallbackB).toHaveBeenCalledTimes(2);
+      expect(mockConfig.getModelAvailabilityService).not.toHaveBeenCalled();
+    });
+
     it('does not try the next fallback after a fallback emits output', async () => {
       const { fallbackA, fallbackB, resolveForModel } = wireTwoFallbacks();
       const capacityError = tpmCapacityError();

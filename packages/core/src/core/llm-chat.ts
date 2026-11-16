@@ -52,6 +52,7 @@ import {
 import { getErrorStatus, isAbortError } from '../utils/errors.js';
 import { unescapePath } from '../utils/paths.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { isInternalPromptId } from '../utils/internalPromptIds.js';
 import {
   containsXmlToolCalls,
   tryRecoverXmlToolCalls,
@@ -3550,6 +3551,26 @@ export class LlmChat {
     // must not continue: it could repeat a call that already took effect.
     const managedSessionBlock = this.config.getManagedSessionBlock?.();
     if (managedSessionBlock) throw managedSessionBlock;
+    // Model health ledger (experimental, opt-in). The turn boundary runs once
+    // per request here — not inside the fallback branch — so an explicit Retry
+    // whose first request the primary serves still re-probes the fallbacks the
+    // failed attempt consumed. Internal background sends (forked queries,
+    // speculation, side queries, suggestions) share this Config but use constant
+    // prompt ids; they must neither rotate the live turn's key nor consult its
+    // ledger, so they are excluded and keep the gate-off fallback behaviour.
+    // Optional-chain the gate: partial Config mocks omit the new accessor, and
+    // an absent gate must read as "off".
+    const availability =
+      !isInternalPromptId(prompt_id) &&
+      this.config.isModelAvailabilityTrackingEnabled?.()
+        ? this.config.getModelAvailabilityService()
+        : undefined;
+    if (availability) {
+      availability.beginTurn(prompt_id);
+      if (options?.isExplicitRetry) {
+        availability.resetTurn();
+      }
+    }
     const turnGoalContext = goalContext ? { ...goalContext } : undefined;
     const fullTurnRoute = model.endsWith('\0');
     const exactRoute = fullTurnRoute
@@ -5837,25 +5858,9 @@ export class LlmChat {
               let currentResolvedModel = cgConfig?.model ?? model;
               let fallbackStreamYieldedAnyChunk = false;
 
-              // Model health ledger (experimental, opt-in): fallback models
-              // exhausted on a capacity error are skipped for the rest of this
-              // turn and re-probed once on the next turn. The primary is still
-              // attempted each request (it may have recovered); only fallback
-              // selection consults the ledger. An explicit Retry is a turn
-              // boundary so it re-probes fallbacks the failed attempt consumed.
-              // Optional-chain the gate: llm-chat's partial Config mocks omit
-              // the new accessor, and an absent gate must read as "off".
-              const availability =
-                self.config.isModelAvailabilityTrackingEnabled?.()
-                  ? self.config.getModelAvailabilityService()
-                  : undefined;
-              if (availability) {
-                availability.beginTurn(prompt_id);
-                if (options?.isExplicitRetry) {
-                  availability.resetTurn();
-                }
-              }
-
+              // The health ledger (`availability`) is bound at the request entry
+              // above; here only fallback selection consults it. The primary is
+              // still attempted each request (it may have recovered).
               for (const fallbackModelId of fallbackModels) {
                 // Skip fallback models that match the current/primary model
                 if (
