@@ -176,7 +176,7 @@ removed by the existing sweeps: session deletion
 directory) and housekeeping (`cleanupOldFileHistoryBackups` sweeps session
 directories by mtime). No new sweeper is added.
 
-### Per-snapshot `cwd`: evaluated, no change
+### Per-snapshot `cwd`: no change for worktrees; implemented for relocation (#16982)
 
 The issue asks to record the producing `cwd` per snapshot **only if a real
 wrong-restore defect is confirmed across enter/exit worktree**. Investigation
@@ -195,19 +195,34 @@ of main at the pilot's base commit shows no such path:
 - ACP managed conversations refuse `enter_worktree` / `exit_worktree`
   outright; the standalone ACP path uses the same non-relocating tools.
 
-Recording a per-snapshot `cwd` would therefore add no correctness to
-enter/exit worktree. The item closes as "documented, no change".
+Recording a per-snapshot `cwd` therefore adds no correctness for
+enter/exit worktree; the worktree half of the item stays closed as
+"documented, no change".
 
-Adjacent observation (out of pilot scope, candidate follow-up): `/cd`
-(`cdCommand`) and ACP `session/cd` call `relocateWorkingDirectory`, which
-resets `fileHistoryService` but leaves `sessionData` untouched; the lazy
-`getFileHistoryService()` then rehydrates `sessionData.fileHistorySnapshots`
-(the resume-time payload) against the **new** cwd. In a resumed session, a
-rewind to a pre-`cd` checkpoint could restore relative tracking paths under
-the new directory. This is a directory-relocation question, not a worktree
-enter/exit question; it is tracked as #16982 (which asks for an end-to-end
-reproduction before implementing per-snapshot cwd) and is not changed by
-this pilot.
+The adjacent relocation observation — `/cd` (`cdCommand`) and ACP
+`session/cd` call `relocateWorkingDirectory`, which resets
+`fileHistoryService` while the lazy `getFileHistoryService()` rehydrates
+`sessionData.fileHistorySnapshots` (the resume-time payload) against the
+**new** cwd — is the P1 reported as #16982 and is implemented by PR #17400:
+
+- **Decision**: `FileHistorySnapshot` gains an optional `cwd` recording the
+  working directory the snapshot was captured under (`makeSnapshot`
+  resolves it). Serialized payloads without the field keep their previous
+  meaning; the managed CSI contract carries the field with the same
+  absolute-path validation used for `absolutePath`.
+- **Refusal semantics**: file rewind refuses at the application point when
+  the timeline holds any checkpoint captured under a different root —
+  `rewind` throws before any file is touched or history is truncated, and
+  ACP `rewindToTurn` prechecks before truncating the session. Diff previews
+  (`getDiffStats`) report nothing for such timelines, and conversation-only
+  rewind stays available.
+- **Legacy fallback**: checkpoints created before this change carry no
+  `cwd` and never count as foreign — refusing them wholesale would make
+  every pre-upgrade session unrestorable. On unlabeled timelines the
+  original wrong-restore path therefore remains by design; tightening it
+  (for example marking a relocated timeline root-unknown and refusing file
+  restore while keeping conversation-only rewind) is an explicit follow-up
+  decision for the maintainers.
 
 ## Constraints
 

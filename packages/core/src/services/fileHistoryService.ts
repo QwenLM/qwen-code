@@ -1146,6 +1146,12 @@ export class FileHistoryService {
   async getDiffStats(promptId: string): Promise<DiffStats | undefined> {
     if (!this.enabled) return undefined;
 
+    // A timeline holding foreign-cwd checkpoints cannot restore files from
+    // this cwd (`rewind` refuses the whole application set), so a preview
+    // expanded against this root would describe writes that cannot happen.
+    // Report no stats; rewind surfaces keep offering conversation-only.
+    if (this.getForeignSnapshotCwds().length > 0) return undefined;
+
     const targetSnapshot = this.findSnapshot(promptId);
     if (!targetSnapshot) return undefined;
 

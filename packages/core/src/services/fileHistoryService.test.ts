@@ -938,6 +938,31 @@ describe('FileHistoryService', () => {
       const stats = await service.getDiffStats('nonexistent');
       expect(stats).toBeUndefined();
     });
+
+    it('should return undefined for a timeline holding foreign-cwd checkpoints', async () => {
+      const dirA = await mkdtemp(join(tmpdir(), 'fh-preview-a-'));
+      const dirB = await mkdtemp(join(tmpdir(), 'fh-preview-b-'));
+      try {
+        const fileA = join(dirA, 'file.txt');
+        await writeFile(fileA, 'line1\n');
+        const svcA = new FileHistoryService('test-session', true, dirA);
+        await svcA.makeSnapshot('p1');
+        await svcA.trackEdit(fileA);
+        await writeFile(fileA, 'line1\nline2\n');
+
+        // Same root: the preview still describes the restorable diff.
+        expect(await svcA.getDiffStats('p1')).toBeDefined();
+
+        // After a relocation the timeline is foreign: rewind would refuse,
+        // so a diff expanded against the new root would be misleading.
+        const svcB = new FileHistoryService('test-session', true, dirB);
+        svcB.restoreFromSnapshots(svcA.getSnapshots());
+        expect(await svcB.getDiffStats('p1')).toBeUndefined();
+      } finally {
+        await rm(dirA, { recursive: true, force: true });
+        await rm(dirB, { recursive: true, force: true });
+      }
+    });
   });
 
   describe('getTurnDiff', () => {

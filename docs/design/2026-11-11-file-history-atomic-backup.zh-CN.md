@@ -145,7 +145,7 @@ workflow journal）都经 `utils/atomicFileWrite.ts` 的 `renameWithRetry` 发�
 整个会话目录）与 housekeeping（`cleanupOldFileHistoryBackups` 按 mtime 清扫
 会话目录）。不新增清扫器。
 
-### 逐快照 `cwd`：已评估，无需改动
+### 逐快照 `cwd`：worktree 无需改动；relocation 已实现（#16982）
 
 issue 要求**仅在确认 enter/exit worktree 存在真实错误恢复缺陷时**才记录每个
 快照产生时的 `cwd`。对试点基线 commit 的 main 的调查表明不存在该路径：
@@ -161,16 +161,26 @@ issue 要求**仅在确认 enter/exit worktree 存在真实错误恢复缺陷时
 - ACP 托管会话直接拒绝 `enter_worktree` / `exit_worktree`；独立 ACP 路径使用
   同样的不 relocate 的工具。
 
-因此逐快照记录 `cwd` 不会为 enter/exit worktree 增加任何正确性。该项以
-「已评估、无需改动」关闭。
+因此逐快照记录 `cwd` 不会为 enter/exit worktree 增加任何正确性；该项的
+worktree 一半维持「已评估、无需改动」关闭。
 
-相邻观察（超出试点范围，候选后续项）：`/cd`（`cdCommand`）与 ACP `session/cd`
-调用 `relocateWorkingDirectory`，它重置 `fileHistoryService` 但不动
-`sessionData`；随后惰性的 `getFileHistoryService()` 会把
-`sessionData.fileHistorySnapshots`（resume 时载入的载荷）按**新** cwd 重新
-水合。在已 resume 的会话里，rewind 到 `cd` 之前的检查点可能把相对跟踪路径恢复
-到新目录下。这是目录 relocate 问题，不是 worktree enter/exit 问题；已立
-#16982 跟踪（要求实现逐快照 cwd 前先落端到端复现），本试点不改动。
+相邻的 relocate 观察——`/cd`（`cdCommand`）与 ACP `session/cd` 调用
+`relocateWorkingDirectory`，它重置 `fileHistoryService`，随后惰性的
+`getFileHistoryService()` 会把 `sessionData.fileHistorySnapshots`（resume 时
+载入的载荷）按**新** cwd 重新水合——即 #16982 报告的 P1，已由 PR #17400
+实现：
+
+- **决策**：`FileHistorySnapshot` 新增可选 `cwd`，记录快照产生时的工作目录
+  （`makeSnapshot` 做 resolve）；不含该字段的序列化载荷语义不变。托管 CSI
+  契约携带该字段，并用与 `absolutePath` 相同的绝对路径校验。
+- **拒绝语义**：时间线中存在其他根目录下捕获的检查点时，文件回退在应用点
+  整体拒绝——`rewind` 在触碰任何文件、截断任何历史之前抛错；ACP
+  `rewindToTurn` 在截断会话之前预检。此类时间线的 diff 预览
+  （`getDiffStats`）不再给出统计，conversation-only 回退保持可用。
+- **legacy 兜底**：本变更之前创建的检查点不带 `cwd`，永不计为外来——对其
+  全量拒绝会使所有升级前的会话无法恢复。因此无标签时间线上原始的错误恢复
+  路径是有意保留的；收紧它（例如把 relocate 后的时间线标记为根目录未知、
+  拒绝文件恢复但保留 conversation-only 回退）是留给维护者的后续决策。
 
 ## 约束
 

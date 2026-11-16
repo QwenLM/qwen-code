@@ -34,6 +34,7 @@ import { markToolCallArgumentsIncomplete } from '@qwen-code/qwen-code-core/core/
 import { runAgentLoop } from '@qwen-code/qwen-code-core/core/agent-loop.js';
 import * as agentLoopRollout from '@qwen-code/qwen-code-core/config/agent-loop-rollout.js';
 import { ManagedRuntimeOutcomeUnknownError } from '@qwen-code/qwen-code-core/services/execution-environment.js';
+import { FileHistoryService } from '@qwen-code/qwen-code-core/services/fileHistoryService.js';
 import {
   getApiHistoryPromptId,
   markApiHistoryPrompt,
@@ -13514,6 +13515,58 @@ describe('Session', () => {
         apiTruncateIndex: 2,
       });
       expect(mockChat.truncateHistory).toHaveBeenCalledWith(2);
+    });
+
+    it('refuses across the real capture → resume-after-relocate chain without touching either directory', async () => {
+      const dirA = await fs.mkdtemp(path.join(os.tmpdir(), 'acp-fh-a-'));
+      const dirB = await fs.mkdtemp(path.join(os.tmpdir(), 'acp-fh-b-'));
+      try {
+        const fileA = path.join(dirA, 'file.txt');
+        const fileB = path.join(dirB, 'file.txt');
+        await fs.writeFile(fileA, 'captured-in-a');
+        await fs.writeFile(fileB, 'unrelated-in-b');
+
+        // The session ran in dirA: a real service captures real checkpoints.
+        const origin = new FileHistoryService('acp-e2e-session', true, dirA);
+        await origin.makeSnapshot('p1');
+        await origin.trackEdit(fileA);
+        await origin.makeSnapshot('p2');
+
+        // A resumed session that relocated to dirB rebuilds its service the
+        // way Config.getFileHistoryService() does after /cd: constructed
+        // against the new cwd, then rehydrated from the resume payload.
+        const relocated = new FileHistoryService('acp-e2e-session', true, dirB);
+        relocated.restoreFromSnapshots(origin.getSnapshots());
+        vi.mocked(mockConfig.getFileHistoryService).mockReturnValue(relocated);
+
+        const history: Content[] = [
+          { role: 'user', parts: [{ text: 'first' }] },
+          { role: 'model', parts: [{ text: 'first reply' }] },
+          { role: 'user', parts: [{ text: 'second' }] },
+          { role: 'model', parts: [{ text: 'second reply' }] },
+        ];
+        markApiHistoryPrompt(history[0]!, 'p1');
+        markApiHistoryPrompt(history[2]!, 'p2');
+        vi.mocked(mockChat.getHistory).mockReturnValue(history);
+        vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+
+        expect(() => session.rewindToTurn(1)).toThrow(
+          /different working directory/,
+        );
+
+        // The refusal happens before anything is truncated or restored.
+        expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+        expect(relocated.getSnapshots().map((s) => s.promptId)).toEqual([
+          'p1',
+          'p2',
+        ]);
+        // Neither directory's file was touched.
+        expect(await fs.readFile(fileA, 'utf-8')).toBe('captured-in-a');
+        expect(await fs.readFile(fileB, 'utf-8')).toBe('unrelated-in-b');
+      } finally {
+        await fs.rm(dirA, { recursive: true, force: true });
+        await fs.rm(dirB, { recursive: true, force: true });
+      }
     });
 
     function identifyPrompts(history: Content[], indexes: number[]) {

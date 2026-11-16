@@ -10,6 +10,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.math.BigInteger;
+import java.nio.file.Path;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
@@ -115,10 +116,15 @@ public final class CsiFileHistoryProtocol {
         var names = new HashSet<String>();
         var prompts = new HashSet<String>();
         for (JsonNode snapshot : state.path("snapshots")) {
-            closed(snapshot, Set.of("promptId", "timestamp", "trackedFileBackups"));
+            closed(snapshot, snapshot.has("cwd")
+                    ? Set.of("promptId", "timestamp", "trackedFileBackups", "cwd")
+                    : Set.of("promptId", "timestamp", "trackedFileBackups"));
             String prompt = id(snapshot, "promptId");
             require(prompt.length() <= 128 && prompts.add(prompt) && snapshot.path("trackedFileBackups").isObject());
             timestamp(text(snapshot, "timestamp"));
+            if (snapshot.has("cwd")) {
+                absolutePath(text(snapshot, "cwd"));
+            }
             snapshot.path("trackedFileBackups").fields().forEachRemaining(entry -> {
                 path(entry.getKey());
                 paths.add(entry.getKey());
@@ -148,6 +154,20 @@ public final class CsiFileHistoryProtocol {
 
     private static void path(String path) {
         require(!".".equals(path) && WorkspaceRelativePath.normalize(path).equals(path));
+    }
+
+    /**
+     * Same absolute-path contract as the runtime side of the protocol: the
+     * recorded snapshot root must be absolute, lexically normalized and free
+     * of NUL, mirroring the TypeScript validator for `cwd`. Node's
+     * `path.normalize` preserves one trailing separator, so a single trailing
+     * slash stays acceptable while `java.nio.file.Path` would strip it.
+     */
+    private static void absolutePath(String value) {
+        require(value.indexOf('\0') < 0);
+        var normalized = Path.of(value).normalize();
+        require(normalized.isAbsolute() && (normalized.toString().equals(value)
+                || value.endsWith("/") && (normalized.toString() + "/").equals(value)));
     }
 
     private static void leaf(String value) {
