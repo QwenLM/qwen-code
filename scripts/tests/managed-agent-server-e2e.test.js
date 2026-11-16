@@ -2553,24 +2553,17 @@ describe('managed-agent-server e2e runner', () => {
     expect(source).toContain("lastEventId: '0',");
   });
 
-  // #12941: the Stage A acceptance criterion names a 15-second Runtime delay,
-  // but the ordering assertion was gated at 20 s, so a --runtime-delay-ms 15000
-  // run silently skipped it. Pin the threshold to the criterion's delay and
-  // the README's statement of the arming delay to the threshold.
-  it('arms the model-before-Runtime assertion at the criterion delay', () => {
+  it('requires Runtime readiness before model output regardless of the delay', () => {
     const source = read('scripts/run-managed-agent-server-e2e.ts');
-    expect(source).toContain('modelBeforeRuntimeAssertionDelayMs = 15_000');
     expect(source).toContain(
-      'runtimeDelayMs >= modelBeforeRuntimeAssertionDelayMs',
+      'if (runtimeReady.event.sequence >= firstModel.event.sequence) {',
     );
-    const delaySeconds =
-      Number(
-        source
-          .match(/modelBeforeRuntimeAssertionDelayMs = (\d[\d_]*)/)[1]
-          .replace(/_/g, ''),
-      ) / 1000;
+    expect(source).not.toContain('modelBeforeRuntimeAssertionDelayMs');
+    expect(source).toContain(
+      'Runtime readiness did not precede the first model event',
+    );
     expect(read('packages/managed-agent-server/README.md')).toContain(
-      `the ${delaySeconds} seconds the acceptance criterion`,
+      'Runtime readiness before the first model event',
     );
   });
 
