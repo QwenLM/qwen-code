@@ -141,6 +141,32 @@ describe('Hosted durable command expansion', () => {
     },
   );
 
+  it('keeps argument text literal when expanding a hosted file path', async () => {
+    const context = fixture('@{${extensionPath}/ctx-{{args}}.md}');
+    context.options.args = '$& ${extensionPath}';
+    const input = {
+      file_path: 'extension://sample/ctx-$& ${extensionPath}.md',
+    };
+
+    expect(await expandHostedExtensionCommand(context.options)).toContain(
+      '\nRESULT\n',
+    );
+    expect(context.decide).toHaveBeenCalledTimes(1);
+    expect(context.decide).toHaveBeenCalledWith(
+      expect.any(String),
+      'read_file',
+      input,
+    );
+    expect(context.control).toHaveBeenCalledTimes(1);
+    expect(context.control).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'execute',
+        toolName: 'read_file',
+        input,
+      }),
+    );
+  });
+
   it('expands pure prompt arguments without starting Runtime work', async () => {
     const context = fixture('Review {{args}}');
     const prompt = await expandHostedExtensionCommand(context.options);
