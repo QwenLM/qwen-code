@@ -51,6 +51,14 @@ public interface ManagedWorkspaceRegistry {
 
     public boolean externalFilesAllowed(ContextBinding binding);
 
+    /** Whether the external foreground-Shell profile is negotiated and current. */
+    public boolean externalShellAllowed(ContextBinding binding);
+
+    /** Whether the external foreground-Shell profile is negotiated at all. */
+    public default boolean externalShellAvailable() {
+        return false;
+    }
+
     public record WorkspaceSummary(String workspaceId, String displayName,
             String state, boolean canCreateSession, String defaultCwdRelative, boolean canSelectDirectory) {
         public WorkspaceSummary(String workspaceId, String displayName, String state, boolean canCreateSession) {

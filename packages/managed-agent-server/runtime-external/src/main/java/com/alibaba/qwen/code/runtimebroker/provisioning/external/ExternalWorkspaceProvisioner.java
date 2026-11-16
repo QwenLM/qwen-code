@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeDrainReceipt;
+import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeObservation;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
@@ -77,6 +78,24 @@ public final class ExternalWorkspaceProvisioner extends ExternalRuntimeProvision
         return WorkspaceExecutionProfile.isExternalWorkspaceRequest(request);
     }
 
+    /** The external foreground-Shell placement carries its own handle version. */
+    @Override
+    protected int handleVersion(RuntimeProvisionRequest request) {
+        return WorkspaceExecutionProfile.isExternalShellRequest(request)
+                ? WorkspaceExecutionProfile.EXTERNAL_SHELL_HANDLE_VERSION : HANDLE_VERSION;
+    }
+
+    /**
+     * Startup recovery sees only the handle, so both external Workspace
+     * versions are recoverable; the per-request check still refuses a files
+     * handle for a Shell request and the reverse.
+     */
+    @Override
+    protected boolean admitsHandleVersion(int version) {
+        return version == HANDLE_VERSION
+                || version == WorkspaceExecutionProfile.EXTERNAL_SHELL_HANDLE_VERSION;
+    }
+
     @Override
     protected boolean supportsReattach(RuntimeProvisionRequest request) {
         // Only the resident Workspace profile reattaches (design:
@@ -110,7 +129,10 @@ public final class ExternalWorkspaceProvisioner extends ExternalRuntimeProvision
                                 BrokerValues.exactLong(response.get("protocolVersion")))) {
                             throw refuse("external_workspace_acquisition_unverified", "Original provider response is invalid.");
                         }
-                        requireOriginalReady(binding, observation(request, seed, handle, response));
+                        // This path brings the saved original up or repairs it,
+                        // so the establishing probe runs — the same contract the
+                        // base class documents for this flag.
+                        requireOriginalReady(binding, observation(request, seed, handle, response, true));
                         if (!(response.get("storage") instanceof Map<?, ?> evidence)
                                 || !(binding(request).ephemeral()
                                         ? "same-runtime"
@@ -214,7 +236,7 @@ public final class ExternalWorkspaceProvisioner extends ExternalRuntimeProvision
      */
     @Override
     public RuntimeProvisionRequest createRequest(RuntimeScope scope, String isolationKey) {
-        if (!WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(scope.getCapabilityDigest())
+        if (!WorkspaceExecutionProfile.admitsExternalWorkspaceDigest(scope.getCapabilityDigest())
                 && !WorkspaceExecutionProfile.MEASURED_CAPABILITY_DIGEST.equals(scope.getCapabilityDigest())) {
             return super.createRequest(scope, isolationKey);
         }
@@ -249,14 +271,23 @@ public final class ExternalWorkspaceProvisioner extends ExternalRuntimeProvision
      */
     @Override
     protected RuntimeObservation observation(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
-            RuntimeResourceHandle handle, Map<String, Object> response) {
+            RuntimeResourceHandle handle, Map<String, Object> response, boolean establishing) {
         Object reported = response.get("storage");
         ExternalStorageRegistry.RegisteredExternalStorage registered = binding(request);
+        // The external foreground-Shell lane is session-isolated by contract,
+        // so its registration is durable even when a scratch-shaped alias
+        // would otherwise be read as ephemeral. It also needs positive
+        // publication readiness, which the files lane never asks for.
+        boolean shell = WorkspaceExecutionProfile.isExternalShellRequest(request);
         if (registered.ephemeral()) {
+            if (shell) {
+                throw refuse("external_shell_storage_required",
+                        "External foreground Shell requires durable registered storage.");
+            }
             if (reported == null) {
                 // Absent evidence keeps the phase-1 meaning on every state,
                 // RUNNING included: this profile authorizes no writes yet.
-                return super.observation(request, seed, handle, response);
+                return super.observation(request, seed, handle, response, establishing);
             }
             if (!"RUNNING".equals(response.get("state"))) {
                 throw refuse("ephemeral_workspace_identity_mismatch",
@@ -281,9 +312,19 @@ public final class ExternalWorkspaceProvisioner extends ExternalRuntimeProvision
                 throw refuse("ephemeral_workspace_continuity_lost",
                         "Original ephemeral runtime continuity is lost.");
             }
-            return super.observation(request, seed, handle, response);
+            return super.observation(request, seed, handle, response, establishing);
         }
-        if (reported != null) {
+        if (reported != null || shell) {
+            if (shell && reported == null) {
+                // Absent continuity with RUNNING is not proof of readiness:
+                // retry, adopt nothing, replace nothing. Any other state
+                // (GONE included) must follow the base mapper — a vanished
+                // external worker is never silently replaced.
+                if ("RUNNING".equals(response.get("state"))) {
+                    return RuntimeObservation.unknown(handle);
+                }
+                return super.observation(request, seed, handle, response, establishing);
+            }
             if (!"RUNNING".equals(response.get("state"))
                     || !(reported instanceof Map<?, ?> evidence)) {
                 throw refuse("external_storage_registration_mismatch",
@@ -318,7 +359,32 @@ public final class ExternalWorkspaceProvisioner extends ExternalRuntimeProvision
                 return RuntimeObservation.unknown(handle);
             }
         }
-        return super.observation(request, seed, handle, response);
+        RuntimeObservation observed = super.observation(request, seed, handle, response, establishing);
+        if (!shell || !establishing || observed.getOutcome() != RuntimeObservation.Outcome.READY) {
+            return observed;
+        }
+        // RUNNING plus confirmed continuity still does not prove the worker
+        // can capture a foreground Shell: its own publication lane has to
+        // answer for this exact lease, revision and incarnation. An unanswered
+        // probe loses readiness, never ownership. This runs only while the
+        // placement is being established or reconciled — repeating it on every
+        // live confirm would add an attested exchange to each dispatch, and the
+        // dispatch itself already refuses honestly against a closed channel.
+        return publicationReady(request, seed, observed, registered.registrationRevision())
+                ? observed : RuntimeObservation.unknown(handle);
+    }
+
+    private boolean publicationReady(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
+            RuntimeObservation observed, long registrationRevision) {
+        RuntimeLease probe = new RuntimeLease(observed.getRuntimeInstanceId(), observed.getEndpoint(),
+                seed.getToken(), observed.getLeaseId(), observed.getEpoch());
+        try {
+            return Boolean.TRUE.equals(transport
+                    .externalPublicationReady(probe, request, seed, registrationRevision)
+                    .toCompletableFuture().join());
+        } catch (RuntimeException failure) {
+            return false;
+        }
     }
 
     /**
@@ -360,7 +426,7 @@ public final class ExternalWorkspaceProvisioner extends ExternalRuntimeProvision
                 || !request.getScope().getWorkspaceId().equals(storage.tenantWorkspaceId())
                 || !provider.equals(storage.providerId())
                 || !request.getScope().getCanonicalCwd().equals(storage.mountRoot())
-                || (!WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(request.getScope().getCapabilityDigest())
+                || (!WorkspaceExecutionProfile.admitsExternalWorkspaceDigest(request.getScope().getCapabilityDigest())
                         && !WorkspaceExecutionProfile.MEASURED_CAPABILITY_DIGEST.equals(request.getScope().getCapabilityDigest()))) {
             throw refuse("external_storage_registration_mismatch",
                     "The external storage registration does not match this placement.");

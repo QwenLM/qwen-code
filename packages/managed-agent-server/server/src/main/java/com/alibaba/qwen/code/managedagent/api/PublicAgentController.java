@@ -102,6 +102,10 @@ public class PublicAgentController {
         if (selection == null && worktree != null) {
             throw new ManagedAgentException(400, "unsupported_feature", "Session worktrees require a bound Workspace.");
         }
+        if (selection == null && request.toolProfile() != null) {
+            throw new ManagedAgentException(400, "invalid_tool_profile",
+                    "A requested tool profile requires a bound Workspace.");
+        }
         CommandAdmission admission = selection == null
                 ? service.createSession(tenant.tenantId(), tenant.actorId(),
                         idempotencyKey, request.agentId(),
@@ -111,7 +115,8 @@ public class PublicAgentController {
                 : service.createWorkspaceSession(tenant.tenantId(), tenant.requireActorId(), idempotencyKey,
                         request.agentId(), request.agentRevision(), null, request.metadata(), request.input(),
                         selection, null, null, request.skills(), null, request.extensionPins(), worktree,
-                        com.alibaba.qwen.code.managedagent.model.SessionModelConfig.parse(request.modelConfig()), request.memoryStoreId());
+                        com.alibaba.qwen.code.managedagent.model.SessionModelConfig.parse(request.modelConfig()),
+                        request.memoryStoreId(), request.toolProfile());
         PublicSession session = service.getPublicSession(tenant.tenantId(),
                 tenant.actorId(), admission.sessionId());
         return ResponseEntity.status(HttpStatus.ACCEPTED)
