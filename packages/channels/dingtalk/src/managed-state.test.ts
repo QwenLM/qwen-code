@@ -4,7 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import {
+  mkdtempSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+  mkdirSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -291,5 +297,15 @@ describe('ManagedDingtalkStateStore', () => {
     mkdirSync(s.directory, { recursive: true });
     writeFileSync(s.file, JSON.stringify({ ...baseState(), generation: 0 }));
     expect(() => s.load()).toThrow(/unreadable or invalid/);
+  });
+
+  it('keeps the state file 0600 inside a 0700 directory (R4)', () => {
+    const s = store();
+    s.save(populatedState());
+    // The state carries live sessionWebhook bearer capabilities; the mode is
+    // load-bearing, not cosmetic. Mask to the permission bits: the save path
+    // sets them explicitly, independent of the process umask.
+    expect(statSync(s.file).mode & 0o777).toBe(0o600);
+    expect(statSync(s.directory).mode & 0o777).toBe(0o700);
   });
 });
