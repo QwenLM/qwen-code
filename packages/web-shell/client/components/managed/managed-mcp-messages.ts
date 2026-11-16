@@ -80,3 +80,44 @@ export const MANAGED_MCP_MESSAGES_ZH: Record<string, ManagedMcpMessage> = {
   'managed.mcp.noCatalog': '此服务尚未发布目录。',
   'managed.mcp.empty': '当前会话尚未配置 MCP 服务。',
 };
+
+export const MANAGED_MCP_MESSAGES_RU: Record<string, ManagedMcpMessage> = {
+  'managed.mcp.manage': 'Управление MCP',
+  'managed.mcp.selectSession':
+    'Выберите Managed-сессию, чтобы управлять её MCP-серверами.',
+  'managed.mcp.workspaceUnavailable': 'Workspace выбранной сессии недоступен.',
+  'managed.mcp.unsupported': 'Управление MCP для этой сессии недоступно.',
+  'managed.mcp.sessionRevision': (v) =>
+    `Сессия ${v?.sessionId} · редакция настроек ${v?.revision}`,
+  'managed.mcp.sessionSettings':
+    'Изменения применяются к этой сессии. Исходное определение Agent остаётся неизменным.',
+  'managed.mcp.publishedOnly':
+    'Выберите точное определение, опубликованное для этого Runtime и Workspace.',
+  'managed.mcp.definition': 'Опубликованное определение',
+  'managed.mcp.noPublished':
+    'Для этого выбора нет доступных опубликованных определений.',
+  'managed.mcp.apply': 'Применить',
+  'managed.mcp.action.add': 'Добавить сервер',
+  'managed.mcp.action.edit': 'Сменить определение',
+  'managed.mcp.action.remove': 'Удалить',
+  'managed.mcp.action.enable': 'Включить',
+  'managed.mcp.action.disable': 'Отключить',
+  'managed.mcp.action.reload': 'Перезагрузить',
+  'managed.mcp.action.restart': 'Перезапустить',
+  'managed.mcp.state.enabled': 'Настроено',
+  'managed.mcp.state.disabled': 'Отключено',
+  'managed.mcp.state.removed': 'Удалено',
+  'managed.mcp.drained': 'Освобождено',
+  'managed.mcp.operation.pending': 'Ожидает',
+  'managed.mcp.operation.settled': 'Завершено',
+  'managed.mcp.operation.failed': 'Ошибка',
+  'managed.mcp.operation.recovery_required': 'Требуется восстановление',
+  'managed.mcp.unconfirmed':
+    'Исходная команда всё ещё требует подтверждения. Проверьте её, прежде чем начинать другое изменение.',
+  'managed.mcp.checkOperation': 'Проверить исходную команду',
+  'managed.mcp.retryCommand': 'Повторить исходную команду',
+  'managed.mcp.metadataOnly':
+    'Метаданные каталога — сохранённый снимок. Тела ресурсов и раскрытие подсказок здесь недоступны.',
+  'managed.mcp.noCatalog': 'Для этого сервера каталог не опубликован.',
+  'managed.mcp.empty': 'Для этой сессии MCP-серверы не настроены.',
+};

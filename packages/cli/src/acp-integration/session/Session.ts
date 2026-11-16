@@ -4,6 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { HookProgress } from '@qwen-code/qwen-code-core/confirmation-bus/types.js';
+import { parseHookLifecycle } from '@qwen-code/qwen-code-core/telemetry/hook-lifecycle-contract.js';
+import {
+  createTranscriptHookLifecycleUpdate,
+  createAgentRecordTranscriptUpdate,
+  createTranscriptExecutionLifecycleUpdate,
+} from '@qwen-code/acp-bridge/transcriptReplay';
 import { removeFileHistorySnapshots } from '@qwen-code/qwen-code-core/utils/file-history-snapshots.js';
 import { getRequestModel } from '@qwen-code/qwen-code-core/core/request-model.js';
 import { resolveWorkflowIntent } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
@@ -26,6 +33,7 @@ import {
 } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import { FinishReason } from '@qwen-code/qwen-code-core/core/genai-compat.js';
 import {
+  runAgentLoop,
   runModelRound,
   type AgentLoopStopReason,
 } from '@qwen-code/qwen-code-core/core/agent-loop.js';
@@ -67,6 +75,7 @@ import {
 import type { LoopReminderInput } from '@qwen-code/qwen-code-core/services/loop-protection.js';
 import {
   captureHookExecutionOwner,
+  enterHookExecutionOwner,
   runWithHookExecutionOwner,
   type HookExecutionOwner,
 } from '@qwen-code/qwen-code-core/hooks/hook-execution-context.js';
@@ -336,6 +345,7 @@ import {
   MANAGED_RUNTIME_OUTCOME_UNKNOWN,
   ManagedRuntimeOutcomeUnknownError,
 } from '@qwen-code/qwen-code-core/services/execution-environment.js';
+import { logAgentLoopEntry } from '@qwen-code/qwen-code-core/config/agent-loop-rollout.js';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
   CHANNEL_OUTPUT_MODE_META_KEY,
@@ -351,6 +361,7 @@ import {
 import { QWEN_CODE_SERVE_ENV } from '../../config/acp-channel-fallback.js';
 import { ENV_ACP_REPEATED_TOOL_FAILURE_GUARD } from '../../config/shared-env-keys.js';
 import { normalizeSessionIdForLookup } from '../../config/session-id.js';
+import type { PeerQueuedDelivery } from '../../peerMessaging/peer-messaging.js';
 import {
   buildScheduledTaskRunPrompt,
   scheduledTaskRunSessionName,
@@ -379,10 +390,6 @@ import {
   INTERRUPTED_PROMPT_ABORT_REASON,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { isReservedStandaloneSessionSourceType } from '@qwen-code/acp-bridge/sessionSource';
-import {
-  createAgentRecordTranscriptUpdate,
-  createTranscriptExecutionLifecycleUpdate,
-} from '@qwen-code/acp-bridge/transcriptReplay';
 import type { SessionAttachmentReference } from '@qwen-code/acp-bridge/sessionAttachments';
 import {
   SERVE_CONTROL_EXT_METHODS,
@@ -466,6 +473,10 @@ import {
 } from '../../ui/commands/types.js';
 import { extractAtPathCommands } from '../../ui/hooks/atCommandProcessor.js';
 import {
+  startSharedLoopRound,
+  type SharedLoopRound,
+} from '../../ui/hooks/shared-loop-round.js';
+import {
   ACP_ROUTE_ID_PREFIX,
   buildAcpModelOptions,
   getCurrentAcpModelId,
@@ -539,7 +550,11 @@ import {
   unrestorableGoalStatus,
 } from './recovered-goal-update.js';
 import { SubAgentTracker } from './SubAgentTracker.js';
-import { runAcpToolBatch, type AcpToolBatchHost } from './acp-tool-batch.js';
+import {
+  deferredToolUpdateContext,
+  runAcpToolBatch,
+  type AcpToolBatchHost,
+} from './acp-tool-batch.js';
 import {
   buildPermissionRequestContent,
   interactionMetaFields,
@@ -986,6 +1001,11 @@ interface SharedRound {
   modelOverride?: string;
   stopPolicies?: StopPolicy[];
   sharedToolBatch: boolean;
+  /**
+   * Takes the `runAgentLoop` call a round on the shared batch runs in with
+   * its batch: the turn hands it the batch, or closes it when it leaves.
+   */
+  onLoop: (loop: SharedLoopRound) => void;
   /** The turn's signal. */
   signal: AbortSignal;
   /**
@@ -2096,7 +2116,7 @@ export interface BackgroundNotificationQueueItem {
   modelText: string;
   taskId: string;
   status: string;
-  kind: 'agent' | 'monitor' | 'shell' | 'workflow';
+  kind: 'agent' | 'monitor' | 'shell' | 'workflow' | 'peer';
   toolUseId?: string;
   todoWorkChainId?: string;
   label?: string;
@@ -2115,6 +2135,7 @@ interface QueuedBackgroundNotification extends BackgroundNotificationQueueItem {
   persisted?: true;
   turn?: BackgroundNotificationTurn;
   admissionRetries?: number;
+  peer?: { sessionId: string; delivery: PeerQueuedDelivery };
 }
 
 /**
@@ -2848,6 +2869,8 @@ export class Session implements SessionContext {
   private availableCommandsUpdateTail: Promise<void> = Promise.resolve();
   private lastSuccessfulAvailableCommandsHash?: string;
   private unsubscribeRequestLifecycle?: () => void;
+  private unsubscribeHookBusChange?: () => void;
+  private unsubscribeHookProgress?: () => void;
   private requestLifecycleSessionId: string;
   private readonly requestLifecycleExecutions = new Set<string>();
   /** The exact status-change callback this Session installed, so dispose can
@@ -3006,6 +3029,9 @@ export class Session implements SessionContext {
     private readonly isWorkflowRunLiveInSiblingSession: (
       runId: string,
     ) => boolean = () => false,
+    private readonly onPeerDeliveriesExpired?: (
+      deliveries: PeerQueuedDelivery[],
+    ) => void,
   ) {
     this.sessionId = id;
     this.requestLifecycleSessionId = id;
@@ -3075,6 +3101,24 @@ export class Session implements SessionContext {
     this.planEmitter = new PlanEmitter(this);
     this.historyReplayer = new HistoryReplayer(this);
     this.messageEmitter = new MessageEmitter(this);
+    this.unsubscribeHookBusChange = this.config.onMessageBusChange?.((bus) => {
+      this.unsubscribeHookProgress?.();
+      const listener = (message: HookProgress) => {
+        const event = parseHookLifecycle(message.hookLifecycle);
+        if (
+          this.disposed ||
+          !event ||
+          event.sessionId !== this.requestLifecycleSessionId
+        )
+          return;
+        void this.sendUpdate(createTranscriptHookLifecycleUpdate(event)).catch(
+          () => debugLogger.warn('Failed to send hook lifecycle'),
+        );
+      };
+      bus.subscribe(MessageBusType.HOOK_PROGRESS, listener);
+      this.unsubscribeHookProgress = () =>
+        bus.unsubscribe(MessageBusType.HOOK_PROGRESS, listener);
+    });
     this.unsubscribeRequestLifecycle = this.config.onRequestLifecycle?.(
       (event) => {
         if (this.disposed) return;
@@ -3216,6 +3260,8 @@ export class Session implements SessionContext {
     // and record ids from the finalized chain must not answer a re-send.
     this.pendingExternalAgentContext = [];
     this.#externalRecordIds.clear();
+    const expired = this.takeQueuedPeerDeliveries(this.config.getSessionId());
+    if (expired.length > 0) this.onPeerDeliveriesExpired?.(expired);
     this.#bindGoalRuntime();
   }
 
@@ -5154,7 +5200,9 @@ export class Session implements SessionContext {
       this.cronProcessing ||
       this.cronAbortController ||
       this.cronCompletion ||
-      this.notificationQueue.some((item) => item.kind === 'monitor') ||
+      this.notificationQueue.some(
+        (item) => item.kind === 'monitor' || item.kind === 'peer',
+      ) ||
       (this.notificationCompletion &&
         this.currentAgentNotificationTaskId === null &&
         this.currentWorkflowNotificationTaskId === null &&
@@ -5359,6 +5407,10 @@ export class Session implements SessionContext {
     this.unsubscribeWorkflowModeChange = undefined;
     this.unsubscribeApprovalModeChange?.();
     this.unsubscribeApprovalModeChange = undefined;
+    this.unsubscribeHookBusChange?.();
+    this.unsubscribeHookBusChange = undefined;
+    this.unsubscribeHookProgress?.();
+    this.unsubscribeHookProgress = undefined;
     this.unsubscribeRequestLifecycle?.();
     this.unsubscribeRequestLifecycle = undefined;
     this.requestLifecycleExecutions.clear();
@@ -7137,6 +7189,14 @@ export class Session implements SessionContext {
         promptIdContext.enterWith(promptId);
         const parentContext = extractDaemonTraceContext(params);
 
+        const hookOwner = captureHookExecutionOwner(this.config);
+        if (hookOwner)
+          enterHookExecutionOwner(
+            Object.freeze({
+              ...hookOwner,
+              historyPromptId: responseCapture.turnId,
+            }),
+          );
         return await withInteractionSpan(
           this.config,
           {
@@ -7561,11 +7621,14 @@ export class Session implements SessionContext {
             // itself: UserPromptSubmit on the admitted verdict, memory recall,
             // system reminders and workflow intent for a UserQuery, then the
             // Stop hook and stop-policy continuations. ACP keeps the user turn
-            // with its file-history snapshot and the interaction span. Live
-            // and Agent Host sessions also keep ACP's tool executor and guards
-            // instead of the shared tool batch.
+            // with its file-history snapshot and the interaction span; tool
+            // batches run on the shared loop's batch with live-tool trust and
+            // read-only refusal; the Agent Host invocation guard stays on the
+            // session Config and is evaluated by the scheduler at its
+            // execution boundary.
             const sharedModelRound =
-              this.config.isUnifiedAgentLoopEnabled?.() === true;
+              this.config.isUnifiedAgentLoopEnabled?.('acp') === true;
+            logAgentLoopEntry(this.config, 'acp');
             // A retry, a continue or a restore re-enters a turn: its first
             // round is a Retry.
             const firstRoundType = isRuntimeContinuation
@@ -7578,10 +7641,14 @@ export class Session implements SessionContext {
             const pauseGoalForLoopStop = () => {
               if (sharedModelRound && goalTurn) goalTurn.loopStopped = true;
             };
-            // Its tool batches run on the shared loop's batch, and the
-            // client then runs its own tool-call guards.
-            const sharedToolBatch =
-              sharedModelRound && this.#runsToolsOnSharedBatch();
+            // Every session's tool batches run on the shared loop's batch;
+            // the batch host carries live-tool trust and read-only refusal,
+            // while the Agent Host invocation guard stays on the session
+            // Config and is evaluated by the scheduler at its execution
+            // boundary. With the switch off the turn never reaches LlmClient
+            // at all: it sends through the session's own chat, so no client
+            // guard or reminder can run twice.
+            const sharedToolBatch = sharedModelRound;
             let promptAdmission: UserPromptAdmission | undefined;
             // A continue, a restore or a runtime continuation runs no
             // UserPromptSubmit hook.
@@ -7602,9 +7669,14 @@ export class Session implements SessionContext {
                 });
               if (promptAdmission.blocked) {
                 // The first round reports the block without sending anything.
-                await runModelRound(
-                  this.config.getLlmClient(),
-                  {
+                debugLogger.debug(
+                  `round in its own runAgentLoop call (prompt ${promptId})`,
+                );
+                await runAgentLoop({
+                  client: this.config.getLlmClient(),
+                  config: this.config,
+                  signal: pendingSend.signal,
+                  first: {
                     parts,
                     promptId,
                     options: {
@@ -7614,8 +7686,10 @@ export class Session implements SessionContext {
                       interactionSpan: getActiveInteractionSpan(promptId),
                     },
                   },
-                  pendingSend.signal,
-                  {
+                  maxRounds: 1,
+                  useEventBus:
+                    this.config.isEventBusAgentLoopEnabled?.('acp') === true,
+                  host: {
                     onModelEvent: async (event) => {
                       if (event.type === LlmEventType.UserPromptSubmitBlocked) {
                         await this.messageEmitter.emitAgentMessage(
@@ -7624,7 +7698,7 @@ export class Session implements SessionContext {
                       }
                     },
                   },
-                );
+                });
                 return { stopReason: 'end_turn' };
               }
             } else if (
@@ -8104,6 +8178,8 @@ export class Session implements SessionContext {
             // rather than by gating this loop), so unlike the CLI reference
             // (use-llm-stream.ts, which only emits in YOLO) this is
             // intentionally emitted for every mode.
+            // The loop call of the turn's latest round on the shared batch.
+            let roundLoop: SharedLoopRound | undefined;
             try {
               if (isRestoreAskUserQuestion) {
                 const restorable = findRestorableAskUserQuestion(
@@ -8372,6 +8448,9 @@ export class Session implements SessionContext {
                     modelOverride: fullTurnModelOverride,
                     stopPolicies,
                     sharedToolBatch,
+                    onLoop: (loop) => {
+                      roundLoop = loop;
+                    },
                     signal: pendingSend.signal,
                     responseCapture,
                     responseInterrupt,
@@ -8675,6 +8754,7 @@ export class Session implements SessionContext {
                             pendingSend.signal,
                             promptId,
                             toolRequests,
+                            roundLoop!,
                             toolLoopState,
                             onFullTurnModel,
                           )
@@ -8796,6 +8876,9 @@ export class Session implements SessionContext {
               );
               return { stopReason: result.stopReason };
             } finally {
+              // A turn that left before handing its round the batch ends the
+              // round's loop call.
+              void roundLoop?.close();
               logConversationFinishedEvent(
                 this.config,
                 new ConversationFinishedEvent(
@@ -8844,6 +8927,9 @@ export class Session implements SessionContext {
    * turn around it runs the tool batch and decides what is sent next.
    */
   async #runSharedRound(round: SharedRound): Promise<SharedRoundResult> {
+    debugLogger.debug(
+      `[ACP] model round on the shared agent loop (prompt ${round.promptId})`,
+    );
     const {
       message,
       promptId,
@@ -8918,13 +9004,37 @@ export class Session implements SessionContext {
       usageMetadata = null;
     };
     round.onOpen?.({ requestUnsent, emitResponseUsage });
+    // A round on the shared batch runs with its batch in one `runAgentLoop`
+    // call, which the turn takes to hand the batch over.
+    const sendRound: typeof runModelRound = round.sharedToolBatch
+      ? (_client, request, roundSignal, host) => {
+          debugLogger.debug(
+            `round in its own runAgentLoop call (prompt ${request.promptId})`,
+          );
+          const loop = startSharedLoopRound(
+            this.config.getLlmClient(),
+            request,
+            {
+              config: this.config,
+              signal: roundSignal,
+              // Each result is recorded as the batch settles it.
+              deferRecording: false,
+              useEventBus:
+                this.config.isEventBusAgentLoopEnabled?.('acp') === true,
+              onModelEvent: host.onModelEvent!,
+            },
+          );
+          round.onLoop(loop);
+          return loop.model;
+        }
+      : runModelRound;
     // Open from the send, as `watch` is open once the request is
     // out: input sent before the model answers cuts the wait.
     responseInterrupt.begin();
     // Whether the round's request reached history, on every exit.
     let pushed = false;
     try {
-      ({ stop: roundStop } = await runModelRound(
+      ({ stop: roundStop } = await sendRound(
         this.config.getLlmClient(),
         {
           parts: message.parts ?? [],
@@ -8933,9 +9043,6 @@ export class Session implements SessionContext {
             type: roundType,
             modelOverride: round.modelOverride,
             stopPolicies: round.stopPolicies,
-            ...(!round.sharedToolBatch && {
-              toolLoopGuardsByHost: true,
-            }),
             toolCallPreparations: true,
             ...round.options,
           },
@@ -9267,7 +9374,7 @@ export class Session implements SessionContext {
     stoppedShort?: boolean;
   }> {
     const { promptId, signal, responseCapture } = turn;
-    const sharedToolBatch = this.#runsToolsOnSharedBatch();
+    const sharedToolBatch = true;
     let toolLoopState = createDaemonToolLoopState('off');
     const resetToolLoopState = () => {
       toolLoopState = createDaemonToolLoopState('off');
@@ -9290,6 +9397,8 @@ export class Session implements SessionContext {
     };
     let nextMessage: Content | null = turn.message;
     let rounds = 0;
+    // The loop call of the turn's latest round on the shared batch.
+    let roundLoop: SharedLoopRound | undefined;
     try {
       while (nextMessage !== null) {
         rounds++;
@@ -9328,6 +9437,9 @@ export class Session implements SessionContext {
           },
           stopPolicies,
           sharedToolBatch,
+          onLoop: (loop) => {
+            roundLoop = loop;
+          },
           signal,
           signalAbortedBySession: true,
           responseCapture,
@@ -9377,6 +9489,7 @@ export class Session implements SessionContext {
               signal,
               promptId,
               toolRequests,
+              roundLoop!,
               toolLoopState,
             )
           : await this.runToolCalls(
@@ -9425,6 +9538,9 @@ export class Session implements SessionContext {
       await this.messageRewriter?.waitForPendingRewrites();
       return { stopReason: getAbortAwareEndTurnStopReason(signal) };
     } finally {
+      // A turn that left before handing its round the batch ends the round's
+      // loop call.
+      void roundLoop?.close();
       // The client started a cron turn's memory recall.
       if (turn.type === SendMessageType.Cron) {
         this.config.getLlmClient().finishManagedAutoMemoryRecall();
@@ -10783,15 +10899,34 @@ export class Session implements SessionContext {
 
   async sendUpdate(update: SessionUpdate): Promise<void> {
     const execution = backgroundTurnContext.getStore();
+    const deferredToolUpdate =
+      update.sessionUpdate === 'tool_call_update' &&
+      deferredToolUpdateContext.getStore();
+    if (deferredToolUpdate && (this.closing || this.disposed)) return;
     if (
-      execution?.active &&
-      execution.sessionId === this.sessionId &&
+      execution?.sessionId === this.sessionId &&
+      (execution.active || deferredToolUpdate) &&
       update._meta?.['source'] !== 'background_task_completed' &&
       update._meta?.['backgroundWorkflowApproval'] !== true
     ) {
       update = {
         ...update,
         _meta: { ...update._meta, backgroundTurn: { ...execution.turn } },
+      };
+    } else if (deferredToolUpdate) {
+      const invocation = getInvocationContext();
+      const owner =
+        invocation?.sessionId === this.sessionId ? invocation : undefined;
+      const promptId = owner?.promptId ?? promptIdContext.getStore();
+      update = {
+        ...update,
+        _meta: {
+          ...update._meta,
+          ...(promptId ? { promptId } : {}),
+          ...(owner?.originatorClientId
+            ? { originatorClientId: owner.originatorClientId }
+            : {}),
+        },
       };
     }
     const projectedUpdate = projectAcpToolResultUpdate(update);
@@ -13105,7 +13240,8 @@ export class Session implements SessionContext {
               // state, adds the system and todo reminders and recalls memory,
               // as for the other surfaces. The session records the prompt
               // once it reached history.
-              if (this.config.isUnifiedAgentLoopEnabled?.() === true) {
+              logAgentLoopEntry(this.config, 'acp');
+              if (this.config.isUnifiedAgentLoopEnabled?.('acp') === true) {
                 const cronRecord: UserTurnRecord = {
                   kind: 'cron',
                   message: [{ text: modelText }],
@@ -13689,7 +13825,10 @@ export class Session implements SessionContext {
   }
 
   #enqueueBackgroundNotification(item: QueuedBackgroundNotification): void {
-    while (this.notificationQueue.length >= MAX_BACKGROUND_NOTIFICATION_QUEUE) {
+    const backgroundQueue = this.notificationQueue.filter(
+      (queued) => queued.kind !== 'peer',
+    );
+    while (backgroundQueue.length >= MAX_BACKGROUND_NOTIFICATION_QUEUE) {
       // While the todo-stop guard defers unrelated automatic turns, a queued
       // notification that continues the current work chain is the one thing
       // that can release it — so those are protected and the unrelated ones
@@ -13703,14 +13842,14 @@ export class Session implements SessionContext {
       // reads the original entry by index, since the guard predicate needs
       // fields the projection deliberately drops.
       const admission = decideNotificationAdmission(
-        this.notificationQueue.map(toAdmissibleNotification),
+        backgroundQueue.map(toAdmissibleNotification),
         toAdmissibleNotification(item),
         {
           max: MAX_BACKGROUND_NOTIFICATION_QUEUE,
           isProtected: (_projected, index) =>
             guardDefersUnrelatedWork &&
             this.#notificationContinuesTodoStopGuardWorkChain(
-              this.notificationQueue[index]!,
+              backgroundQueue[index]!,
             ),
         },
       );
@@ -13726,11 +13865,15 @@ export class Session implements SessionContext {
         return;
       }
       if (admission.action === 'push') break;
-      const [evicted] = this.notificationQueue.splice(admission.index, 1);
+      const [evicted] = backgroundQueue.splice(admission.index, 1);
       debugLogger.warn(
         `Notification queue overflow: evicting task=${evicted?.taskId ?? 'unknown'} kind=${evicted?.kind ?? 'unknown'}`,
       );
       if (evicted) {
+        this.notificationQueue.splice(
+          this.notificationQueue.indexOf(evicted),
+          1,
+        );
         this.droppedNotifications.record(toAdmissibleNotification(evicted));
       }
     }
@@ -13754,6 +13897,59 @@ export class Session implements SessionContext {
     });
     this.#activeWorkChanged();
     void this.#drainNotificationQueue();
+  }
+
+  /**
+   * Queue a cross-session message the inbound gate accepted, as a turn of
+   * its own once the session is idle. Returns false when it cannot take
+   * one now, which the sender is told as `queue-full`.
+   *
+   * Only below the queue cap, and a queued message is never evicted: its
+   * sender was told `delivered`, and unlike a task result it cannot be
+   * produced again.
+   */
+  enqueuePeerMessage(
+    modelText: string,
+    displayText: string,
+    delivery: PeerQueuedDelivery,
+  ): boolean {
+    if (this.disposed || this.closing || this.notificationsPaused) return false;
+    if (
+      this.notificationQueue.filter((item) => item.kind === 'peer').length >=
+      MAX_BACKGROUND_NOTIFICATION_QUEUE
+    ) {
+      return false;
+    }
+    // Persist and display the message when its turn takes it. An early
+    // completion record would replay as pending after the queue is gone.
+    this.notificationQueue.push({
+      displayText,
+      modelText,
+      taskId: delivery.msgId,
+      status: 'completed',
+      kind: 'peer',
+      // The receiver's own attribution of who sent it, not a name the
+      // sender chose, so a client that shows the label alone cannot be
+      // misled about where the message came from.
+      label: truncateNotificationLabel(displayText),
+      continuesTodoStopGuardWorkChain: false,
+      peer: { sessionId: this.config.getSessionId(), delivery },
+    });
+    this.#activeWorkChanged();
+    void this.#drainNotificationQueue();
+    return true;
+  }
+
+  /** Detach unread messages, optionally keeping those for the current conversation. */
+  takeQueuedPeerDeliveries(keepSessionId?: string): PeerQueuedDelivery[] {
+    const deliveries: PeerQueuedDelivery[] = [];
+    this.notificationQueue = this.notificationQueue.filter((item) => {
+      if (!item.peer || item.peer.sessionId === keepSessionId) return true;
+      deliveries.push(item.peer.delivery);
+      return false;
+    });
+    if (deliveries.length > 0) this.#activeWorkChanged();
+    return deliveries;
   }
 
   async enqueueBackgroundNotification(
@@ -14532,7 +14728,8 @@ export class Session implements SessionContext {
           // `LlmClient` as a Notification send. The session keeps the
           // notification's record and reminders, and shows each response
           // as one background message once it ended.
-          if (this.config.isUnifiedAgentLoopEnabled?.() === true) {
+          logAgentLoopEntry(this.config, 'acp');
+          if (this.config.isUnifiedAgentLoopEnabled?.('acp') === true) {
             const result = await this.#runAutomaticTurnOnSharedLoop({
               message: nextMessage,
               type: SendMessageType.Notification,
@@ -15630,21 +15827,6 @@ export class Session implements SessionContext {
    * sequential batch to preserve the implicit ordering the model may rely
    * on. Response-part ordering matches the original `functionCalls` order.
    */
-  /**
-   * Whether a fresh prompt's tool batches run on the shared loop's batch.
-   * Live tools, which ACP trusts without the permission flow, and a
-   * read-only Agent Host session, which refuses approvals, keep ACP's own
-   * tool step.
-   */
-  #runsToolsOnSharedBatch(): boolean {
-    return (
-      !this.liveScreenContextTool &&
-      this.liveTaskTools.length === 0 &&
-      !this.liveSpeakToUserTool &&
-      this.config.getSessionSourceType?.() !== 'agent-host'
-    );
-  }
-
   /** The calls a loop stop left unrun, shown as skipped. */
   async #emitLoopSkippedToolCalls(
     requests: ReadonlyArray<{ callId: string; name: string }>,
@@ -15676,6 +15858,19 @@ export class Session implements SessionContext {
       client: this.client,
       toolCallEmitter: this.toolCallEmitter,
       messageEmitter: this.messageEmitter,
+      // The tools ACP's own executor bypassed the permission flow for:
+      // `capture_screen_context` and the five live-task tools, matched by
+      // instance so a same-named tool inherits none of it. `speak_to_user`
+      // stays on the flow, as it did there: its own default is `allow`, and a
+      // user's `permissions.deny` / `permissions.ask` rule still applies.
+      isTrustedLiveTool: (tool) =>
+        tool !== undefined &&
+        (tool === this.liveScreenContextTool ||
+          this.liveTaskTools.some((live) => live === tool)),
+      readOnlyRefusalMessage:
+        this.config.getSessionSourceType?.() === 'agent-host'
+          ? 'Tool "__name__" requires approval, which is unavailable on this read-only Agent Host.'
+          : undefined,
       sendUpdate: (update) => this.sendUpdate(update),
       requestPermission: (params, signal) =>
         this.#requestPermissionQueued(params, signal),
@@ -15785,7 +15980,8 @@ export class Session implements SessionContext {
   }
 
   /**
-   * A fresh prompt's tool batch on the shared loop's batch. The client checks
+   * A fresh prompt's tool batch on the shared loop's batch, in the
+   * `runAgentLoop` call of the round that requested it. The client checks
    * the tool-call patterns, the per-turn cap and the exploration budget; ACP
    * keeps its repeated parameter-error and partial-edit stops, per turn.
    */
@@ -15793,15 +15989,20 @@ export class Session implements SessionContext {
     abortSignal: AbortSignal,
     promptId: string,
     requests: ToolCallRequestInfo[],
+    loop: SharedLoopRound,
     toolLoopState: DaemonToolLoopState,
     onFullTurnModel?: (model: string) => boolean,
   ): Promise<RunToolResult> {
+    debugLogger.debug(
+      `[ACP] tool batch on the shared agent loop (prompt ${promptId}, ${requests.length} call(s))`,
+    );
     promptIdContext.enterWith(promptId);
     todoWorkChainContext.enterWith(
       this.config.getActiveTodoWorkChainOwner(promptId),
     );
     const batch = await runAcpToolBatch(this.#toolBatchHost(), {
       requests,
+      loop,
       signal: abortSignal,
       onFullTurnModel,
       duplicates: {

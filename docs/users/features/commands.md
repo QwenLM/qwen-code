@@ -1084,11 +1084,29 @@ you have open. Several of them share one process and one inbox, so a
 sender has to name the session it means — every Qwen Code session does
 that automatically.
 
-Messages sent _to_ one are refused rather than held. Holding is a
-question put to a person, and nobody is watching a held-message list on a
-driven session's behalf; a sender is told at once instead of
-waiting out an expiry. Where a held message should surface for those
-sessions is not settled yet.
+It can receive messages from sessions in the same review class and from
+trusted controllers when the inbound policy is unset. It shows an
+accepted message and hands it to the model as a turn of its own once
+the session is idle. A message the rules would hold is
+refused instead, because nobody is watching a held-message list on a
+driven session's behalf, and the sender is told at once rather than
+waiting out an expiry. An explicit `hold` setting is answered the same
+way. Where a held message should surface for these sessions is not
+settled yet.
+
+The shared ACP inbox accepts peer and controller credentials. The
+own-process credential described above is available to single-session
+terminal inboxes.
+
+After you stop a turn, messages that the gate would otherwise accept
+receive `queue-full` until you send another prompt. Inbound policy and
+rate limits still apply. Senders can retry after the next prompt.
+
+When the session closes or `/clear` switches its conversation, the host
+sends `expired` for messages still waiting in the old queue. Messages
+appear in the transcript when a turn takes them. A message whose turn
+was cancelled before the model saw it is not corrected. That gap exists
+in a terminal session too.
 
 A session registers unless its own settings turn
 `agents.crossSessionMessaging` off, or it was started with `--bare` or

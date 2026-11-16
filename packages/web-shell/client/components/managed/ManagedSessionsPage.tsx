@@ -94,6 +94,8 @@ import { ManagedTaskPanel, taskCancelMessage } from './ManagedTaskPanel';
 import { useManagedTasks } from './use-managed-tasks';
 import { ManagedChildSessionView } from './ManagedChildSessionView';
 import { ManagedDiagnosticsPanel } from './ManagedDiagnosticsPanel';
+import { ManagedTerminalPanel } from './ManagedTerminalPanel';
+import { newManagedTerminalId } from './managed-terminal-protocol';
 import { useManagedDiagnosticsText } from './managed-diagnostics-messages';
 import { useManagedTaskCancel } from './use-managed-task-cancel';
 import { TodoFullList } from '../messages/TodoView';
@@ -293,42 +295,51 @@ export function ManagedSessionsPage({
   return <p role="status">{t('managed.unavailable')}</p>;
 }
 
-const FAILURE_MESSAGES: Record<string, readonly [string, string]> = {
+const FAILURE_MESSAGES: Record<string, readonly [string, string, string]> = {
   model_payment_required: [
     'Model API payment required (HTTP 402). Check the provider account balance and billing before retrying.',
     '模型接口要求支付（HTTP 402），可能是余额不足或计费受限。请检查供应商账户余额与计费状态后重试。',
+    'Требуется оплата API модели (HTTP 402). Перед повтором проверьте баланс и биллинг аккаунта поставщика.',
   ],
   model_authentication_failed: [
     'Model API authentication failed (HTTP 401). Check the configured provider credentials.',
     '模型接口鉴权失败（HTTP 401）。请检查供应商凭据配置。',
+    'Ошибка аутентификации API модели (HTTP 401). Проверьте настроенные учётные данные поставщика.',
   ],
   model_access_denied: [
     'Model API access denied (HTTP 403). Check the provider account and model permissions.',
     '模型接口拒绝访问（HTTP 403）。请检查供应商账户与模型访问权限。',
+    'Доступ к API модели запрещён (HTTP 403). Проверьте аккаунт поставщика и права на модель.',
   ],
   model_request_timeout: [
     'The model API request timed out. Try again later.',
     '模型接口请求超时，请稍后重试。',
+    'Запрос к API модели превысил время ожидания. Попробуйте позже.',
   ],
   model_rate_limited: [
     'Model API rate limit exceeded (HTTP 429). Wait and try again later.',
     '模型接口触发限流（HTTP 429），请稍后重试。',
+    'Превышен лимит запросов API модели (HTTP 429). Подождите и попробуйте позже.',
   ],
   model_request_rejected: [
     'The model API rejected the request. Check the model configuration and input.',
     '模型接口拒绝了请求，请检查模型配置与输入内容。',
+    'API модели отклонил запрос. Проверьте конфигурацию модели и входные данные.',
   ],
   model_service_unavailable: [
     'The model API service is unavailable. Try again later.',
     '模型接口服务暂不可用，请稍后重试。',
+    'Сервис API модели недоступен. Попробуйте позже.',
   ],
   model_request_failed: [
     'Model API request failed. Check the server logs for this session before retrying.',
     '模型接口请求失败，请根据当前会话检查服务日志后再重试。',
+    'Запрос к API модели не удался. Перед повтором проверьте журналы сервера для этой сессии.',
   ],
   hosted_turn_failed: [
     'The turn failed. Check the server logs for this session to identify the cause.',
     '本轮执行失败，请根据当前会话检查服务日志以定位具体原因。',
+    'Ход не удался. Проверьте журналы сервера для этой сессии, чтобы найти причину.',
   ],
 };
 
@@ -485,6 +496,10 @@ function ManagedSessionsContent({
   const [wideTasks, setWideTasks] = useState(false);
   const [taskPanelSession, setTaskPanelSession] = useState<string>();
   const taskPanelOpen = !!sessionId && taskPanelSession === sessionId;
+  const terminalTriggerRef = useRef<HTMLButtonElement>(null);
+  const [terminalSession, setTerminalSession] = useState<string>();
+  const terminalIds = useRef(new Map<string, string>());
+  const terminalOpen = !!sessionId && terminalSession === sessionId;
   const publicChildren = detail.summary?.capabilities.childAgents === true;
   const tasks = useManagedTasks(
     provider,
@@ -533,6 +548,9 @@ function ManagedSessionsContent({
     // instance; without re-running here the observer never attaches.
   }, [sessionId, hostSessionOnly]);
   useEffect(() => setTaskPanelSession(undefined), [provider, sessionId]);
+  useEffect(() => {
+    setTerminalSession(undefined);
+  }, [provider, sessionId]);
   const [sessions, setSessions] = useState<ManagedAgentSessionSummary[]>([]);
   const [archivedSummaries, setArchivedSummaries] = useState<
     ManagedAgentSessionSummary[]
@@ -1166,7 +1184,9 @@ function ManagedSessionsContent({
         setError(
           language === 'zh-CN'
             ? '此会话暂不支持 BTW/回顾。'
-            : 'BTW/recap is unavailable for this session.',
+            : language === 'ru'
+              ? 'BTW/обзор недоступны для этой сессии.'
+              : 'BTW/recap is unavailable for this session.',
         );
         return;
       }
@@ -1178,7 +1198,9 @@ function ManagedSessionsContent({
         setError(
           language === 'zh-CN'
             ? 'BTW 仅支持文本问题，/recap 不接受参数。'
-            : 'BTW accepts text only; /recap accepts no arguments.',
+            : language === 'ru'
+              ? 'BTW принимает только текст; /recap не принимает аргументы.'
+              : 'BTW accepts text only; /recap accepts no arguments.',
         );
         return;
       }
@@ -1191,7 +1213,9 @@ function ManagedSessionsContent({
         setError(
           language === 'zh-CN'
             ? '此会话暂不支持 BTW/回顾生成。'
-            : 'BTW/recap generation is unavailable for this session.',
+            : language === 'ru'
+              ? 'Генерация BTW/обзора недоступна для этой сессии.'
+              : 'BTW/recap generation is unavailable for this session.',
         );
         return;
       }
@@ -1405,8 +1429,9 @@ function ManagedSessionsContent({
       summary.capabilities.inputAttachments === true && worktreeReady;
   const { request: requestTurnCancel, busy: turnCancelBusy } = turnCancel;
   const failureMessage = summary?.failure
-    ? (FAILURE_MESSAGES[summary.failure.code]?.[language === 'zh-CN' ? 1 : 0] ??
-      summary.failure.message)
+    ? (FAILURE_MESSAGES[summary.failure.code]?.[
+        language === 'zh-CN' ? 1 : language === 'ru' ? 2 : 0
+      ] ?? summary.failure.message)
     : undefined;
   const cancel = useCallback(async () => {
     const abort = lifetime.current;
@@ -1445,7 +1470,11 @@ function ManagedSessionsContent({
             size="sm"
             onClick={() => sideQueries.show('recap')}
           >
-            {language === 'zh-CN' ? '回顾' : 'Recap'}
+            {language === 'zh-CN'
+              ? '回顾'
+              : language === 'ru'
+                ? 'Обзор'
+                : 'Recap'}
           </Button>
         )}
       </>
@@ -1469,11 +1498,56 @@ function ManagedSessionsContent({
         {diagnosticsText('title')}
       </Button>
     ) : null;
+  const terminalPanelOpen =
+    terminalOpen &&
+    currentSummary?.capabilities.terminal === true &&
+    !!provider.terminal;
+  const terminalId = sessionId
+    ? terminalIds.current.get(`${provider.storageKey}:${sessionId}`)
+    : undefined;
+  // A non-true capabilities.terminal reading is transient server state (a DB
+  // or filesystem blip in a session-list poll), not proof the terminal died.
+  // The panel therefore stays mounted across capability dips: unmounting would
+  // send the release frame and SIGKILL a live PTY. The relay is the authority
+  // on loss — it maps worker loss to a non-retryable close code that renders
+  // the terminal-lost notice. Genuine close still unmounts via onClose and
+  // session change below.
+  function toggleTerminal() {
+    if (terminalPanelOpen) {
+      setTerminalSession(undefined);
+      return;
+    }
+    if (!sessionId || !currentSummary || !provider.terminal) return;
+    const key = `${provider.storageKey}:${sessionId}`;
+    if (!terminalIds.current.has(key)) {
+      terminalIds.current.set(key, newManagedTerminalId());
+    }
+    setTerminalSession(sessionId);
+  }
+  const terminalButton =
+    interactive &&
+    currentSummary?.capabilities.terminal === true &&
+    provider.terminal ? (
+      <Button
+        ref={terminalTriggerRef}
+        variant="outline"
+        size="sm"
+        aria-expanded={terminalPanelOpen}
+        onClick={toggleTerminal}
+      >
+        {t('terminal.title')}
+      </Button>
+    ) : null;
   const localFilesButton =
     provider.clientFiles && currentSummary?.capabilities.clientFiles ? (
       <ManagedLocalFilesControl
         provider={provider}
         sessionId={currentSummary.sessionId}
+        sessionName={
+          currentSummary.title === currentSummary.sessionId
+            ? undefined
+            : currentSummary.title
+        }
         triggerClassName="inline-flex h-8 w-8 items-center justify-center rounded-md border border-input bg-background text-muted-foreground hover:bg-accent hover:text-accent-foreground"
       />
     ) : null;
@@ -2099,6 +2173,7 @@ function ManagedSessionsContent({
                     )}
                     {sessionActions(summary)}
                     {diagnosticsButton}
+                    {terminalButton}
                     {sideQueryButtons}
                     {localFilesButton}
                   </span>
@@ -2154,6 +2229,7 @@ function ManagedSessionsContent({
                 </Button>
               )}
               {diagnosticsButton}
+              {terminalButton}
               {sideQueryButtons}
               {localFilesButton}
               {provider.tasks &&
@@ -2703,7 +2779,9 @@ function ManagedSessionsContent({
                           description:
                             language === 'zh-CN'
                               ? '私下继续追问当前会话'
-                              : 'Ask a private follow-up',
+                              : language === 'ru'
+                                ? 'Задать частный уточняющий вопрос'
+                                : 'Ask a private follow-up',
                           source: 'builtin-command',
                           displayCategory: 'system' as const,
                         },
@@ -2716,7 +2794,9 @@ function ManagedSessionsContent({
                           description:
                             language === 'zh-CN'
                               ? '回顾已完成的对话'
-                              : 'Recap the completed conversation',
+                              : language === 'ru'
+                                ? 'Обзор завершённого разговора'
+                                : 'Recap the completed conversation',
                           source: 'builtin-command',
                           displayCategory: 'system' as const,
                         },
@@ -3233,6 +3313,27 @@ function ManagedSessionsContent({
             restoreFocus={() => {
               if (taskTriggerRef.current?.isConnected)
                 taskTriggerRef.current.focus();
+              else (sessionsNavRef.current ?? pageRef.current)?.focus();
+            }}
+          />
+        )}
+        {/* Keep the panel mounted while the user has it open, independent of
+            transient dips: `interactive` goes false when a side panel opens and
+            the summary is briefly absent during a reload. Unmounting here would
+            send the release frame and SIGTERM the live PTY. The relay is the
+            authority on loss (a non-retryable close renders the terminal-lost
+            notice); genuine close unmounts via onClose and session change. */}
+        {terminalOpen && sessionId && terminalId && provider.terminal && (
+          <ManagedTerminalPanel
+            key={`${provider.storageKey}:${sessionId}:${terminalId}`}
+            terminal={provider.terminal}
+            sessionId={sessionId}
+            terminalId={terminalId}
+            clientId={clientId}
+            onClose={() => setTerminalSession(undefined)}
+            restoreFocus={() => {
+              if (terminalTriggerRef.current?.isConnected)
+                terminalTriggerRef.current.focus();
               else (sessionsNavRef.current ?? pageRef.current)?.focus();
             }}
           />
