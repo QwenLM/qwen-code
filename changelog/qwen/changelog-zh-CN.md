@@ -1,3 +1,10 @@
+## CLI 1.0.0-preview.2
+
+- Qwen 订阅新增 Qwen4-Max 模型（100 万上下文，支持图片与视频输入）。
+- Qwen 订阅额度用尽时显示重置倒计时，并新增 `/upgrade` 命令可直接打开订阅套餐页。
+- Qwen 订阅请求统一携带 QwenCode User-Agent 与网关 request id，便于问题定位；OAuth 请求遇到 429 限流时按 `Retry-After` 冷却后再重试。
+- Qoder 限免模型的付费确认提示按错误码区分文案，提示更准确。
+
 ## CLI 1.0.0-preview.1
 
 - 修复 Qwen 订阅账号登录后无法使用订阅模型的问题。模型目录现在随登录状态自动加载，无需手动配置 provider。
