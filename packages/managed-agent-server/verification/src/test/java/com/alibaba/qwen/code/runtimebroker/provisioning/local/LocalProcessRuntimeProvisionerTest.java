@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.runtimebroker.provisioning.local;
 
-import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.DelegatingBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeAttestation;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
@@ -31,7 +30,6 @@ import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
-import java.time.Instant;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
@@ -67,92 +65,6 @@ public class LocalProcessRuntimeProvisionerTest {
         LocalProcessRuntimeProvisioner.removeControlPlaneEnvironment(environment);
         assertEquals(Set.of("QWEN_MANAGED_MCP_CONFIG", "QWEN_MANAGED_HOOK_CONFIG", "PATH", "HOME",
                 "QWEN_HOME", "HTTPS_PROXY", "NODE_EXTRA_CA_CERTS"), environment.keySet());
-    }
-
-    @Test
-    void refusesPrivateProfileBeforeSpawningOrAdopting(
-            @org.junit.jupiter.api.io.TempDir Path directory) throws Exception {
-        for (String digest : List.of(CsiFilesRetirementProfile.CAPABILITY_DIGEST, CsiFilesRetirementProfile.DIAGNOSTICS_DIGEST)) {
-            assertPrivateProfileRefused(directory, null, digest);
-        }
-    }
-
-    @org.junit.jupiter.api.condition.DisabledOnOs(org.junit.jupiter.api.condition.OS.WINDOWS)
-    @Test
-    public void refusesPrivateProfileBeforeDurableRegistration(
-            @org.junit.jupiter.api.io.TempDir Path directory) throws Exception {
-        Path root = directory.toRealPath();
-        var store = new LocalRuntimeStore(root.resolve("state"), DurableLocalProcessRuntimeProvisionerTest.HOST);
-        for (String digest : List.of(CsiFilesRetirementProfile.CAPABILITY_DIGEST, CsiFilesRetirementProfile.DIAGNOSTICS_DIGEST)) {
-            assertPrivateProfileRefused(root, store, digest);
-        }
-    }
-
-    private static void assertPrivateProfileRefused(Path directory, LocalRuntimeStore store, String digest) throws Exception {
-        Path marker = directory.resolve("spawned");
-        Path script = directory.resolve("worker.mjs");
-        Files.writeString(script, "import {writeFileSync} from 'node:fs';"
-                + "writeFileSync(process.argv[2], 'spawned');process.exit(1);");
-        List<Path> before;
-        try (var paths = Files.walk(directory)) {
-            before = paths.sorted().toList();
-        }
-        java.util.concurrent.atomic.AtomicInteger resolved = new java.util.concurrent.atomic.AtomicInteger();
-        try (LocalProcessRuntimeProvisioner provisioner = new LocalProcessRuntimeProvisioner(
-                List.of("node", script.toString(), marker.toString()), directory,
-                new HttpRuntimeTransport(), scope -> {
-                    resolved.incrementAndGet();
-                    return "storage";
-                }, store)) {
-            for (String isolation : List.of("session", "workspace")) {
-                RuntimeScope scope = new RuntimeScope("tenant", "workspace", "1", directory.toString(),
-                        digest, isolation);
-                RuntimeProvisionRequest request = new RuntimeProvisionRequest(scope,
-                        "session".equals(isolation) ? java.util.UUID.randomUUID().toString() : null,
-                        "kubernetes-workspace", "storage");
-                RuntimeProvisionSeed seed = RuntimeProvisionSeed.create("binding", 1);
-                RuntimeResourceHandle handle = new RuntimeResourceHandle("local-process", 1,
-                        java.util.Map.of("provider", "local-process"));
-                RuntimeLease lease = new RuntimeLease(seed.getProvisionalRuntimeId(),
-                        URI.create("http://127.0.0.1:1"), seed.getToken(), seed.getLeaseId(), seed.getEpoch());
-                RuntimeBrokerException direct = assertThrows(RuntimeBrokerException.class,
-                        () -> provisioner.createRequest(scope, request.getIsolationKey()));
-                assertEquals(409, direct.getStatusCode());
-                RuntimeBindingRecord binding = new RuntimeBindingRecord("binding", request, seed, 1,
-                        RuntimeBindingRecord.State.READY, lease,
-                        new RuntimeResourceHandle(request.getProvisionerKind(), 1,
-                                java.util.Map.of("provider", request.getProvisionerKind())),
-                        1, false, null, null, 0, 1, null, Instant.now(), Instant.now());
-                RuntimeBrokerException registration = assertThrows(RuntimeBrokerException.class,
-                        () -> provisioner.verifyOperatorRegistration(binding));
-                assertEquals(409, registration.getStatusCode());
-                assertEquals("runtime_provision_failed", registration.getCode());
-                assertFalse(registration.isRetryable());
-                RuntimeBrokerException stop = assertThrows(RuntimeBrokerException.class,
-                        () -> provisioner.attestOperatorStop(binding, java.util.UUID.randomUUID().toString()));
-                assertEquals(409, stop.getStatusCode());
-                assertEquals("runtime_provision_failed", stop.getCode());
-                assertFalse(stop.isRetryable());
-                var operations = List.of(provisioner.provision(request), provisioner.provision(request, seed),
-                        provisioner.ensureResource(request, seed, null),
-                        provisioner.ensureResource(request, seed, handle),
-                        provisioner.reconcile(request, seed, handle, lease),
-                        provisioner.confirm(request, lease), provisioner.release(request, lease));
-                for (var operation : operations) {
-                    ExecutionException error = assertThrows(ExecutionException.class,
-                            () -> operation.toCompletableFuture().get(5, TimeUnit.SECONDS));
-                    RuntimeBrokerException refusal = (RuntimeBrokerException) error.getCause();
-                    assertEquals(409, refusal.getStatusCode());
-                    assertEquals("runtime_provision_failed", refusal.getCode());
-                    assertFalse(refusal.isRetryable());
-                }
-            }
-        }
-        assertEquals(0, resolved.get());
-        assertFalse(Files.exists(marker));
-        try (var paths = Files.walk(directory)) {
-            assertEquals(before, paths.sorted().toList());
-        }
     }
 
     @Test

@@ -26,6 +26,7 @@ import { deferredToolUpdateContext } from './acp-tool-batch.js';
 import {
   getStartupContextLength,
   markCompressedHistory,
+  RETAINED_COMPACTION_TAIL_REMINDER,
 } from '@qwen-code/qwen-code-core/core/environmentContext.js';
 import { detectTurnInterruption } from '@qwen-code/qwen-code-core/core/turn-interruption.js';
 import { FinishReason } from '@qwen-code/qwen-code-core/core/genai-compat.js';
@@ -13880,6 +13881,76 @@ describe('Session', () => {
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
 
       expect(session.getRewindCutPoint('p1')).toBe(0);
+    });
+
+    it('refuses ACP rewind to a summarized prompt with a retained model owner', () => {
+      const history: Content[] = [
+        {
+          role: 'user',
+          parts: [
+            {
+              text: '<state_snapshot>Earlier work.</state_snapshot>\nResume the prior task using the summary above.',
+            },
+          ],
+        },
+        {
+          role: 'model',
+          parts: [{ text: 'Got it. Thanks for the additional context!' }],
+        },
+        { role: 'user', parts: [{ text: RETAINED_COMPACTION_TAIL_REMINDER }] },
+        {
+          role: 'model',
+          parts: [
+            { functionCall: { id: 'call-1', name: 'read_file', args: {} } },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call-1',
+                name: 'read_file',
+                response: { output: 'contents' },
+              },
+            },
+          ],
+        },
+      ];
+      history.push({
+        role: 'user',
+        parts: [{ text: 'Continue with another task.' }],
+      });
+      markApiHistoryPrompt(history[3]!, 'p1');
+      markApiHistoryPrompt(history[5]!, 'p2');
+      vi.mocked(mockFileHistoryService.getSnapshots).mockReturnValue([
+        {
+          promptId: 'p1',
+          timestamp: new Date('2026-06-13T00:00:00.000Z'),
+          trackedFileBackups: {},
+        },
+        {
+          promptId: 'p2',
+          timestamp: new Date('2026-06-13T00:01:00.000Z'),
+          trackedFileBackups: {},
+        },
+      ]);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      expect(
+        getStartupContextLength(history, { includeCompressed: true }),
+      ).toBe(3);
+      expect(session.getRewindCutPoint('p1')).toBe(-1);
+      expect(() => session.rewindToTurn(0)).toThrow(
+        'Cannot rewind to the requested turn',
+      );
+      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+      expect(getApiHistoryPromptId(history[3]!)).toBe('p1');
+      expect(session.getRewindCutPoint('p2')).toBe(5);
+      expect(session.rewindToTurn(1)).toEqual({
+        targetTurnIndex: 1,
+        apiTruncateIndex: 5,
+      });
+      expect(mockChat.truncateHistory).toHaveBeenCalledWith(5);
     });
 
     it('resolves a cancelled turn whose tool-lap continuation repeats its mark', () => {

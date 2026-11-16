@@ -79,10 +79,7 @@ public final class JdbcExternalWorkspaceOwnership {
                         || !registration.mountRoot().equals(row.getString("mount_root"))
                         || registration.registrationRevision() != row.getLong("mount_revision")
                         || !"UNVERIFIED".equals(row.getString("mount_state"))
-                        || row.getObject("maintenance_id") != null || row.getObject("maintenance_generation") != null
-                        || !"RELEASED".equals(row.getString("csi_phase")) || row.getLong("csi_revision") != 0
-                        || row.getObject("csi_reservation_id") != null || row.getObject("csi_registration_key") != null
-                        || row.getObject("csi_registration_revision") != null || row.getObject("csi_provision_request_id") != null) {
+                        || row.getObject("maintenance_id") != null || row.getObject("maintenance_generation") != null) {
                     throw unavailable();
                 }
                 Long generation = row.getObject("runtime_generation") == null ? null : row.getLong("runtime_generation");
