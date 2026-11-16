@@ -4123,6 +4123,7 @@ describe('llm.tsx main function kitty protocol', () => {
       signalHandlers.get('SIGINT')?.();
       await Promise.resolve();
       expect(runExitCleanupMock).not.toHaveBeenCalled();
+      expect(mockPrepareFileWatchersForProcessExit).not.toHaveBeenCalled();
       expect(processExitSpy).not.toHaveBeenCalled();
       expect(mockWriteStderrLine).toHaveBeenCalledWith(
         'Press Ctrl+C again to exit.',
@@ -4134,6 +4135,7 @@ describe('llm.tsx main function kitty protocol', () => {
       signalHandlers.get('SIGINT')?.();
       await Promise.resolve();
       expect(runExitCleanupMock).not.toHaveBeenCalled();
+      expect(mockPrepareFileWatchersForProcessExit).not.toHaveBeenCalled();
       expect(processExitSpy).not.toHaveBeenCalled();
 
       // Second real press inside the confirm window: cleanup once, exit 130.
@@ -4144,6 +4146,10 @@ describe('llm.tsx main function kitty protocol', () => {
 
       expect(setRawModeSpy).toHaveBeenCalledWith(false);
       expect(runExitCleanupMock).toHaveBeenCalledTimes(1);
+      expect(mockPrepareFileWatchersForProcessExit).toHaveBeenCalledOnce();
+      expect(
+        mockPrepareFileWatchersForProcessExit.mock.invocationCallOrder[0],
+      ).toBeLessThan(runExitCleanupMock.mock.invocationCallOrder[0]);
       expect(processExitSpy).toHaveBeenCalledWith(130);
       // Cleanup registered a stand-in SIGINT listener so a stray Ctrl+C
       // while cleanup runs cannot fall back to Node's default handler
@@ -4157,6 +4163,7 @@ describe('llm.tsx main function kitty protocol', () => {
       signalHandlers.get('SIGINT')?.();
       await Promise.resolve();
       expect(runExitCleanupMock).toHaveBeenCalledTimes(1);
+      expect(mockPrepareFileWatchersForProcessExit).toHaveBeenCalledOnce();
     } finally {
       nowSpy.mockRestore();
       processOnSpy.mockRestore();
@@ -4264,6 +4271,10 @@ describe('llm.tsx main function kitty protocol', () => {
     await Promise.resolve();
 
     expect(runExitCleanupMock).toHaveBeenCalledTimes(1);
+    expect(mockPrepareFileWatchersForProcessExit).toHaveBeenCalledOnce();
+    expect(
+      mockPrepareFileWatchersForProcessExit.mock.invocationCallOrder[0],
+    ).toBeLessThan(runExitCleanupMock.mock.invocationCallOrder[0]);
     expect(processExitSpy).toHaveBeenCalledWith(143);
 
     processOnSpy.mockRestore();
@@ -4313,6 +4324,10 @@ describe('llm.tsx main function kitty protocol', () => {
     await Promise.resolve();
 
     expect(runExitCleanupMock).toHaveBeenCalledTimes(1);
+    expect(mockPrepareFileWatchersForProcessExit).toHaveBeenCalledOnce();
+    expect(
+      mockPrepareFileWatchersForProcessExit.mock.invocationCallOrder[0],
+    ).toBeLessThan(runExitCleanupMock.mock.invocationCallOrder[0]);
     expect(processExitSpy).toHaveBeenCalledWith(129);
 
     processOnSpy.mockRestore();
