@@ -1500,6 +1500,44 @@ describe('ToolConfirmationMessage', () => {
       expect(frame).not.toContain('Line 12');
       expect(frame).toMatch(/\.{3} last \d+ lines hidden \.{3}/);
     });
+
+    it('keeps a five-line compact command whole on a tall terminal', () => {
+      const command = [
+        'npm run deploy \\',
+        '  --dry-run \\',
+        '  --verbose \\',
+        '  --project=prod \\',
+        '  --force',
+      ].join('\n');
+      const confirmationDetails: ToolCallConfirmationDetails = {
+        type: 'exec',
+        title: 'Confirm Execution',
+        command,
+        rootCommand: 'npm',
+        hideAlwaysAllow: true,
+        onConfirm: vi.fn(),
+      };
+
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={confirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={40}
+          contentWidth={50}
+          compactMode={true}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      // The compact ceiling replaces the terminal-sized grant, it does not
+      // borrow rows out of it: the chrome was already charged, so a command
+      // exactly as tall as the ceiling keeps every row and pays no footer.
+      expect(frame).toContain('npm run deploy');
+      expect(frame).toContain('--force');
+      expect(frame).not.toMatch(/last \d+ lines hidden/);
+      expect(frame).toContain('Yes, allow once');
+      expect(frame).toContain('No');
+    });
   });
 
   // A body taller than the dialog's height budget pushes the question line and

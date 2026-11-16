@@ -282,7 +282,9 @@ outright.
     body never needs;
   - a compact confirmation at a height where a clamp is observable (40 rows,
     not 8, because 8 cannot distinguish clamped from unclamped): the body stays
-    within the compact cap;
+    within the compact cap; a command exactly as tall as the cap keeps every
+    row at that height, and an undefined grant keeps them all, because the cap
+    replaces the grant instead of charging the chrome twice;
   - every case additionally asserts a body row survives, not merely that the
     rendered height is under a bound — an upper bound is also satisfied by an
     empty body.
