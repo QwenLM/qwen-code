@@ -42,6 +42,7 @@ import {
   formatPeerEnvelope,
   getPeerControllerRegistryPath,
   InboundGate,
+  MAX_CONCURRENT_SENDS,
   MAX_HELD_MESSAGES,
   PEER_ADMISSION_LIMITS,
   type HeldMessage,
@@ -204,6 +205,14 @@ export interface PeerMessagingOptions {
    * single-session process holds, and here it could mean any of several.
    */
   ownsSessionId?: (id: string) => boolean;
+  /** See `InboundGateOptions.presentsHolds`. */
+  presentsHolds?: boolean;
+  /**
+   * Where accepted messages go, installed before the socket binds. A host
+   * that knows this up front never buffers: a buffered message whose
+   * session had gone would block every message behind it.
+   */
+  submit?: PeerSubmitFn;
   socketPath?: string;
   /**
    * Overrides the generated inbox token. A test seam like `socketPath`:
@@ -363,6 +372,9 @@ export class PeerMessaging {
       ...(options.ownsSessionId
         ? { ownsSessionId: options.ownsSessionId }
         : {}),
+      ...(options.presentsHolds !== undefined
+        ? { presentsHolds: options.presentsHolds }
+        : {}),
       deliver: (frame, origin) => messaging.deliver(frame, origin),
       reportDropped: (frame, reason, origin) =>
         dropReceipts.note(frame, origin ?? { selfSent: false }, reason),
@@ -393,6 +405,7 @@ export class PeerMessaging {
     // nulls a later assignment would leave in place.
     messaging.getSessionId = options.getSessionId ?? null;
     messaging.ownsSessionId = options.ownsSessionId ?? null;
+    messaging.submitFn = options.submit ?? null;
     messaging.settleSentMessage =
       options.settleSentMessage ?? settleSentPeerMessage;
     messaging.reassertSessionRecord = options.reassertSessionRecord ?? null;
@@ -1027,6 +1040,45 @@ export class PeerMessaging {
         },
       ) ?? false
     );
+  }
+
+  /**
+   * Tell the senders of accepted messages that were still queued when
+   * their session went that nobody read them. For a host of several
+   * sessions, which names the messages rather than counting them: its
+   * queues drain independently, so `setQueuedPeerCount` cannot say which
+   * ones are left. Sent in batches under the outbound send ceiling, past
+   * which a send is refused and the `delivered` would stand.
+   */
+  async expireQueued(deliveries: readonly PeerQueuedDelivery[]): Promise<void> {
+    for (
+      let start = 0;
+      start < deliveries.length;
+      start += MAX_CONCURRENT_SENDS
+    ) {
+      await Promise.allSettled(
+        deliveries
+          .slice(start, start + MAX_CONCURRENT_SENDS)
+          .map((delivery) => {
+            if (delivery.admissionKey !== undefined) {
+              this.gate?.forgetAdmittedMessage(
+                delivery.admissionKey,
+                delivery.msgId,
+              );
+            }
+            if (!delivery.from) return undefined;
+            return sendDeliveryStatus(
+              delivery.from,
+              {
+                status: 'expired',
+                origMsgId: delivery.msgId,
+                from: this.inbox?.socketPath,
+              },
+              delivery.replyToken,
+            );
+          }),
+      );
+    }
   }
 
   /** Drop a queued frame if an in-process session swap invalidated its pin. */

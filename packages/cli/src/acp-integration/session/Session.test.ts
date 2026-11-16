@@ -23938,6 +23938,112 @@ describe('Session', () => {
       internals.notificationProcessing = false;
     });
 
+    it('queues an accepted peer message that neither evicts nor is evicted', async () => {
+      vi.mocked(mockConfig.assertCanStartTurn).mockRejectedValue(
+        new Error('turn admission closed for peer queue test'),
+      );
+      const shellCallback = mockBackgroundShellRegistry.setNotificationCallback
+        .mock.calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { shellId: string; status: string },
+      ) => void;
+      const delivery = {
+        msgId: 'peer-1',
+        from: '/tmp/sender.sock',
+        toSessionId: 'test-session-id',
+      };
+
+      expect(
+        session.enqueuePeerMessage('<peer model />', 'peer display', delivery),
+      ).toBe(true);
+      expect(session.queuedPeerDeliveries()).toEqual([delivery]);
+      // A waiting message keeps a conditional close from discarding it.
+      expect(session.collectActiveWorkHolds()).toContainEqual({
+        category: 'session',
+        id: 'session:active-turn',
+      });
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: expect.objectContaining({
+            content: { type: 'text', text: 'peer display' },
+            _meta: expect.objectContaining({
+              source: 'background_task_completed',
+              backgroundTask: expect.objectContaining({
+                taskId: 'peer-1',
+                kind: 'peer',
+              }),
+            }),
+          }),
+        }),
+      );
+
+      for (let index = 0; index < MAX_BACKGROUND_NOTIFICATION_QUEUE; index++) {
+        shellCallback('shell done', `<shell-${index} />`, {
+          shellId: `shell-${index}`,
+          status: 'completed',
+        });
+      }
+      const internals = session as unknown as {
+        notificationQueue: Array<{ taskId: string }>;
+      };
+      // Results made room for each other; the message kept its place.
+      expect(internals.notificationQueue).toHaveLength(
+        MAX_BACKGROUND_NOTIFICATION_QUEUE,
+      );
+      expect(session.queuedPeerDeliveries()).toEqual([delivery]);
+      // A full queue turns a new message away rather than evicting.
+      expect(
+        session.enqueuePeerMessage('<peer model />', 'peer display', {
+          msgId: 'peer-2',
+        }),
+      ).toBe(false);
+      expect(session.queuedPeerDeliveries()).toEqual([delivery]);
+
+      session.dispose();
+      expect(
+        session.enqueuePeerMessage('<peer model />', 'peer display', {
+          msgId: 'peer-3',
+        }),
+      ).toBe(false);
+    });
+
+    it('gives a queued peer message to the model as a turn of its own', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      expect(
+        session.enqueuePeerMessage('<peer model />', 'peer display', {
+          msgId: 'peer-turn',
+        }),
+      ).toBe(true);
+
+      const sendMessageStream = vi.mocked(mockChat.sendMessageStream);
+      await vi.waitFor(() => {
+        expect(sendMessageStream).toHaveBeenCalledTimes(1);
+      });
+      const parts = (
+        sendMessageStream.mock.calls[0]![1] as {
+          message: Array<{ text: string }>;
+        }
+      ).message;
+      expect(parts.some((part) => part.text === '<peer model />')).toBe(true);
+      await vi.waitFor(() => {
+        expect(session.queuedPeerDeliveries()).toEqual([]);
+      });
+      // Clients that show a turn's label alone show who sent it.
+      expect(
+        vi
+          .mocked(mockClient.sessionUpdate)
+          .mock.calls.some(
+            ([{ update }]) =>
+              update._meta?.['backgroundTurn']?.kind === 'peer' &&
+              update._meta?.['backgroundTurn']?.label === 'peer display',
+          ),
+      ).toBe(true);
+    });
+
     it('tells the model what queue overflow discarded on the next notification turn', async () => {
       mockChat.sendMessageStream = vi
         .fn()

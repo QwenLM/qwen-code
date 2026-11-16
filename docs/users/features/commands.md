@@ -1084,11 +1084,25 @@ you have open. Several of them share one process and one inbox, so a
 sender has to name the session it means — every Qwen Code session does
 that automatically.
 
-Messages sent _to_ one are refused rather than held. Holding is a
-question put to a person, and nobody is watching a held-message list on a
-driven session's behalf; a sender is told at once instead of
-waiting out an expiry. Where a held message should surface for those
-sessions is not settled yet.
+It can receive too, under the same rules as a terminal session, with one
+difference: nothing is held. A message the rules accept (from a session
+in the same review class, a trusted controller, or a process the session
+started) is shown in the session and handed to its model as a turn of
+its own once the session is idle. A message the rules would hold is
+refused instead, because nobody is watching a held-message list on a
+driven session's behalf, and the sender is told at once rather than
+waiting out an expiry. An explicit `hold` setting is answered the same
+way. Where a held message should surface for these sessions is not
+settled yet.
+
+A script or hook that a driven session runs sends into that session the
+same way as above, but the frame must carry `"toSessionId"`, because one
+inbox serves every session in the process. The session's id is in the
+script's environment as `QWEN_CODE_SESSION_ID`.
+
+If a session closes with messages it has not read yet, their senders get
+`expired`. A message whose turn was cancelled before the model saw it is
+not corrected. That gap exists in a terminal session too.
 
 A session registers unless its own settings turn
 `agents.crossSessionMessaging` off, or it was started with `--bare` or

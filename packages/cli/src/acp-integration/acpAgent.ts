@@ -185,6 +185,7 @@ import {
   buildModelIdContext,
   registerSession,
   getLastPeerInboxFailure,
+  type InboundPolicy,
   SessionSourceService,
   SessionSourceError,
 } from '@qwen-code/qwen-code-core';
@@ -4757,6 +4758,12 @@ class QwenAgent implements Agent {
     options: { shutdownConfig?: boolean } = {},
   ): Promise<void> {
     if (this.sessions.get(sessionId) !== session) return;
+    const unreadPeerMessages = session.queuedPeerDeliveries();
+    if (unreadPeerMessages.length > 0) {
+      void this.peerMessagingStart?.then((messaging) =>
+        messaging?.expireQueued(unreadPeerMessages),
+      );
+    }
     try {
       session.dispose();
     } catch (error) {
@@ -5241,31 +5248,26 @@ class QwenAgent implements Agent {
     this.peerMessagingStart = (async () => {
       try {
         const messaging = await PeerMessaging.start({
-          // Inbound is refused outright, so neither the approval mode nor
-          // the parity rule it feeds is ever consulted. Stated rather than
-          // left to a default: what a daemon-managed session may be told
-          // is settled here and nowhere else.
-          getApprovalMode: () => null,
-          getPolicySetting: () => 'refuse',
+          // Every reader answers for the session the message is addressed
+          // to: one process can host sessions from several workspaces.
+          getApprovalMode: (id) =>
+            this.peerAddressedSession(id)?.getConfig().getApprovalMode() ??
+            null,
+          getPolicySetting: (id) =>
+            this.peerAddressedSession(id)?.getSettings().merged.agents
+              ?.crossSessionInbound as InboundPolicy | undefined,
+          // Nobody watches a hold list for a session a program drives, so
+          // a message that would wait for a review is refused instead.
+          presentsHolds: false,
           updateSessionRegistryIpcPath: (ipcPath, ipcToken) =>
             this.publishInboxAddress(ipcPath, ipcToken),
-          ownsSessionId: (id) => {
-            // The map key froze when the session was published, while
-            // the record a sender reads follows the Config's live id —
-            // /clear swaps the id under a running session. Test both, so
-            // a frame pinned to either spelling is answered by the
-            // session that holds it.
-            const wanted = normalizeSessionIdForLookup(id);
-            return (
-              this.sessions.has(wanted) ||
-              [...this.sessions.values()].some(
-                (session) =>
-                  normalizeSessionIdForLookup(
-                    session.getConfig().getSessionId(),
-                  ) === wanted,
-              )
-            );
-          },
+          ownsSessionId: (id) => this.peerAddressedSession(id) !== undefined,
+          submit: (modelText, displayText, delivery) =>
+            delivery !== undefined &&
+            (this.peerAddressedSession(
+              delivery.toSessionId,
+            )?.enqueuePeerMessage(modelText, displayText, delivery) ??
+              false),
         });
         // A bind that could not start is not "started": the next hosted
         // session retries rather than the process staying dark until exit.
@@ -5291,6 +5293,31 @@ class QwenAgent implements Agent {
     })();
   }
 
+  /**
+   * The hosted session a cross-session message addressed to `id` is for.
+   *
+   * The map key froze when the session was published, while the record a
+   * sender reads follows the Config's live id — /clear swaps the id under
+   * a running session — so either spelling finds it. Only a session that
+   * registered counts: one whose settings leave messaging off has no
+   * record and is not addressable.
+   */
+  private peerAddressedSession(id: string | undefined): Session | undefined {
+    if (id === undefined) return undefined;
+    const wanted = normalizeSessionIdForLookup(id);
+    for (const [key, session] of this.sessions) {
+      if (
+        this.registeredSessions.has(key) &&
+        (key === wanted ||
+          normalizeSessionIdForLookup(session.getConfig().getSessionId()) ===
+            wanted)
+      ) {
+        return session;
+      }
+    }
+    return undefined;
+  }
+
   /** Close the inbox and stop advertising it. Safe to call more than once. */
   async closePeerMessaging(): Promise<void> {
     this.peerMessagingClosed = true;
@@ -5298,7 +5325,14 @@ class QwenAgent implements Agent {
     if (!pending) return;
     this.peerMessagingStart = null;
     try {
-      await (await pending)?.close();
+      const messaging = await pending;
+      await messaging?.close();
+      // After the inbox closes, so nothing can join a queue behind this
+      // read: these senders were told `delivered`.
+      const unread = [...this.sessions.values()].flatMap((session) =>
+        session.queuedPeerDeliveries(),
+      );
+      if (unread.length > 0) await messaging?.expireQueued(unread);
     } catch (error) {
       debugLogger.debug(
         `[ACP] closing cross-session messaging failed: ${

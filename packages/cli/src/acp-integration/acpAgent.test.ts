@@ -2512,6 +2512,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         cancelPendingPrompt: ReturnType<typeof vi.fn>;
         cancelPromptAdmission: ReturnType<typeof vi.fn>;
         enqueueBackgroundNotification: ReturnType<typeof vi.fn>;
+        enqueuePeerMessage: ReturnType<typeof vi.fn>;
+        queuedPeerDeliveries: ReturnType<typeof vi.fn>;
         appendExternalRecord: ReturnType<typeof vi.fn>;
         enableLiveScreenContext: ReturnType<typeof vi.fn>;
         buildAvailableCommandsSnapshot: ReturnType<typeof vi.fn>;
@@ -6257,6 +6259,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           recoverMessageDeletionContext: vi.fn().mockResolvedValue(undefined),
           assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
           dispose: vi.fn(),
+          getSettings: vi.fn().mockReturnValue(_settings),
+          enqueuePeerMessage: vi.fn().mockReturnValue(true),
+          queuedPeerDeliveries: vi.fn().mockReturnValue([]),
           emitGoalStatus: vi.fn(),
           renderLegacyGoalSupersession: vi.fn().mockReturnValue([]),
           captureHistorySnapshot: vi
@@ -6406,7 +6411,6 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           path: string,
           token: string,
         ) => Promise<void>;
-        getPolicySetting: () => string;
         ownsSessionId: (id: string) => boolean;
       };
       await options.updateSessionRegistryIpcPath('/tmp/acp.sock', 'tok');
@@ -6427,9 +6431,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         '/tmp/acp.sock',
         'tok',
       );
-      // Inbound is turned away rather than parked: nobody is watching a
-      // hold list on a daemon-managed session's behalf.
-      expect(options.getPolicySetting()).toBe('refuse');
+      // What would be held is refused instead: nobody is watching a hold
+      // list on a daemon-managed session's behalf.
+      expect(mockPeerMessagingStart.mock.calls[0]![0]).toMatchObject({
+        presentsHolds: false,
+      });
       expect(options.ownsSessionId('hosted-a')).toBe(true);
       expect(options.ownsSessionId('someone-else')).toBe(false);
 
@@ -6547,6 +6553,108 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       expect(options.ownsSessionId('hosted-a')).toBe(true);
       expect(options.ownsSessionId('someone-else')).toBe(false);
 
+      mockConnectionState.resolve();
+      await agentPromise;
+    });
+
+    it('judges and queues a message for the session it is addressed to', async () => {
+      const innerConfig = await setupSessionMocks('hosted-a');
+      innerConfig.getApprovalMode = vi
+        .fn()
+        .mockReturnValue(ApprovalMode.AUTO_EDIT);
+      const settings = makeSessionSettings({
+        mcpServers: {},
+        agents: { crossSessionInbound: 'accept' },
+      });
+      vi.mocked(loadSettings).mockReturnValue(settings);
+      const { agent, agentPromise } = await bootInitializedAcpAgent(settings);
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      await vi.waitFor(() => expect(mockPeerMessagingStart).toHaveBeenCalled());
+      const session = lastSessionMock!;
+      const options = mockPeerMessagingStart.mock.calls[0]![0] as {
+        getApprovalMode: (id?: string) => unknown;
+        getPolicySetting: (id?: string) => unknown;
+        submit: (
+          modelText: string,
+          displayText: string,
+          delivery?: { msgId: string; toSessionId?: string },
+        ) => boolean;
+      };
+
+      // After a /clear the record advertises the new id; the frozen key
+      // still answers too.
+      vi.mocked(innerConfig.getSessionId).mockReturnValue('hosted-a-2');
+      for (const id of ['hosted-a', 'hosted-a-2']) {
+        expect(options.getApprovalMode(id)).toBe(ApprovalMode.AUTO_EDIT);
+        expect(options.getPolicySetting(id)).toBe('accept');
+      }
+      expect(options.getApprovalMode('someone-else')).toBeNull();
+
+      const delivery = { msgId: 'm-1', toSessionId: 'hosted-a-2' };
+      expect(options.submit('model', 'display', delivery)).toBe(true);
+      expect(session.enqueuePeerMessage).toHaveBeenCalledWith(
+        'model',
+        'display',
+        delivery,
+      );
+      expect(
+        options.submit('model', 'display', {
+          msgId: 'm-2',
+          toSessionId: 'someone-else',
+        }),
+      ).toBe(false);
+      vi.mocked(session.enqueuePeerMessage).mockReturnValue(false);
+      expect(options.submit('model', 'display', delivery)).toBe(false);
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    });
+
+    it('tells the senders of messages a session never read', async () => {
+      const expireQueued = vi.fn().mockResolvedValue(undefined);
+      const close = vi.fn().mockResolvedValue(undefined);
+      mockPeerMessagingStart.mockResolvedValue({ close, expireQueued });
+      await setupSessionMocks('hosted-unread');
+      vi.mocked(loadSettings).mockReturnValue(messagingOn());
+      const { agent, agentPromise } =
+        await bootInitializedAcpAgent(messagingOn());
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      await vi.waitFor(() => expect(mockPeerMessagingStart).toHaveBeenCalled());
+      const unread = [{ msgId: 'm-unread', from: '/tmp/sender.sock' }];
+      vi.mocked(lastSessionMock!.queuedPeerDeliveries).mockReturnValue(unread);
+
+      mockConnectionState.resolve();
+      await agentPromise;
+
+      // After the inbox closes, so no message can be queued behind the
+      // read.
+      expect(expireQueued).toHaveBeenCalledWith(unread);
+      expect(close.mock.invocationCallOrder[0]).toBeLessThan(
+        expireQueued.mock.invocationCallOrder[0]!,
+      );
+    });
+
+    it('tells the senders of messages a closed session never read', async () => {
+      const expireQueued = vi.fn().mockResolvedValue(undefined);
+      mockPeerMessagingStart.mockResolvedValue({
+        close: vi.fn().mockResolvedValue(undefined),
+        expireQueued,
+      });
+      await setupSessionMocks('hosted-closing');
+      vi.mocked(loadSettings).mockReturnValue(messagingOn());
+      const { agent, agentPromise } =
+        await bootInitializedAcpAgent(messagingOn());
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      await vi.waitFor(() => expect(mockPeerMessagingStart).toHaveBeenCalled());
+      const unread = [{ msgId: 'm-unread', from: '/tmp/sender.sock' }];
+      vi.mocked(lastSessionMock!.queuedPeerDeliveries).mockReturnValue(unread);
+
+      await agent.extMethod('qwen/control/session/close', {
+        sessionId: 'hosted-closing',
+        requireFlush: false,
+      });
+
+      await vi.waitFor(() => expect(expireQueued).toHaveBeenCalledWith(unread));
       mockConnectionState.resolve();
       await agentPromise;
     });
@@ -28559,6 +28667,7 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
           installRewriter: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
+          queuedPeerDeliveries: vi.fn().mockReturnValue([]),
         }) as unknown as InstanceType<typeof Session>,
     );
 
@@ -31042,6 +31151,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
           : vi.fn().mockResolvedValue(undefined),
         clearActiveTodoPlanRevision: vi.fn(),
         dispose: vi.fn(),
+        queuedPeerDeliveries: vi.fn().mockReturnValue([]),
       };
       lastSessionMock = sessionMock;
       return sessionMock as unknown as InstanceType<typeof Session>;

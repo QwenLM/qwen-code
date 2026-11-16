@@ -361,6 +361,7 @@ import {
 import { QWEN_CODE_SERVE_ENV } from '../../config/acp-channel-fallback.js';
 import { ENV_ACP_REPEATED_TOOL_FAILURE_GUARD } from '../../config/shared-env-keys.js';
 import { normalizeSessionIdForLookup } from '../../config/session-id.js';
+import type { PeerQueuedDelivery } from '../../peerMessaging/peer-messaging.js';
 import {
   buildScheduledTaskRunPrompt,
   scheduledTaskRunSessionName,
@@ -2115,7 +2116,7 @@ export interface BackgroundNotificationQueueItem {
   modelText: string;
   taskId: string;
   status: string;
-  kind: 'agent' | 'monitor' | 'shell' | 'workflow';
+  kind: 'agent' | 'monitor' | 'shell' | 'workflow' | 'peer';
   toolUseId?: string;
   todoWorkChainId?: string;
   label?: string;
@@ -2134,6 +2135,7 @@ interface QueuedBackgroundNotification extends BackgroundNotificationQueueItem {
   persisted?: true;
   turn?: BackgroundNotificationTurn;
   admissionRetries?: number;
+  peerDelivery?: PeerQueuedDelivery;
 }
 
 /**
@@ -5193,7 +5195,9 @@ export class Session implements SessionContext {
       this.cronProcessing ||
       this.cronAbortController ||
       this.cronCompletion ||
-      this.notificationQueue.some((item) => item.kind === 'monitor') ||
+      this.notificationQueue.some(
+        (item) => item.kind === 'monitor' || item.kind === 'peer',
+      ) ||
       (this.notificationCompletion &&
         this.currentAgentNotificationTaskId === null &&
         this.currentWorkflowNotificationTaskId === null &&
@@ -13835,10 +13839,11 @@ export class Session implements SessionContext {
         {
           max: MAX_BACKGROUND_NOTIFICATION_QUEUE,
           isProtected: (_projected, index) =>
-            guardDefersUnrelatedWork &&
-            this.#notificationContinuesTodoStopGuardWorkChain(
-              this.notificationQueue[index]!,
-            ),
+            this.notificationQueue[index]!.kind === 'peer' ||
+            (guardDefersUnrelatedWork &&
+              this.#notificationContinuesTodoStopGuardWorkChain(
+                this.notificationQueue[index]!,
+              )),
         },
       );
       if (admission.action === 'drop') {
@@ -13881,6 +13886,47 @@ export class Session implements SessionContext {
     });
     this.#activeWorkChanged();
     void this.#drainNotificationQueue();
+  }
+
+  /**
+   * Queue a cross-session message the inbound gate accepted, as a turn of
+   * its own once the session is idle. Returns false when it cannot take
+   * one now, which the sender is told as `queue-full`.
+   *
+   * Only below the queue cap, and a queued message is never evicted: its
+   * sender was told `delivered`, and unlike a task result it cannot be
+   * produced again.
+   */
+  enqueuePeerMessage(
+    modelText: string,
+    displayText: string,
+    delivery: PeerQueuedDelivery,
+  ): boolean {
+    if (this.disposed || this.closing) return false;
+    if (this.notificationQueue.length >= MAX_BACKGROUND_NOTIFICATION_QUEUE) {
+      return false;
+    }
+    this.#enqueueBackgroundNotification({
+      displayText,
+      modelText,
+      taskId: delivery.msgId,
+      status: 'completed',
+      kind: 'peer',
+      // The receiver's own attribution of who sent it, not a name the
+      // sender chose, so a client that shows the label alone cannot be
+      // misled about where the message came from.
+      label: truncateNotificationLabel(displayText),
+      continuesTodoStopGuardWorkChain: false,
+      peerDelivery: delivery,
+    });
+    return true;
+  }
+
+  /** Accepted cross-session messages still waiting for a turn. */
+  queuedPeerDeliveries(): PeerQueuedDelivery[] {
+    return this.notificationQueue.flatMap((item) =>
+      item.peerDelivery ? [item.peerDelivery] : [],
+    );
   }
 
   async enqueueBackgroundNotification(
