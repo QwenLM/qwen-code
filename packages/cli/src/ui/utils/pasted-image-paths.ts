@@ -57,7 +57,8 @@ export function classifyPastedImagePaths(pasted: string): {
       continue;
     }
     if (
-      path.isAbsolute(normalized) &&
+      (path.win32.isAbsolute(normalized) ||
+        path.posix.isAbsolute(normalized)) &&
       PASTED_IMAGE_EXTENSIONS.test(normalized)
     ) {
       imagePaths.push(normalized);

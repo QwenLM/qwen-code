@@ -2624,7 +2624,7 @@ describe('InputPrompt', () => {
     it('keeps a pasted image path as a command argument in shell mode', async () => {
       vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(false);
       vi.mocked(clipboardUtils.readClipboardText).mockResolvedValue(
-        'screenshot.png',
+        '/tmp/screenshot.png',
       );
       fsPromisesOverride.stat = async () => ({ isFile: () => true });
       fsPromisesOverride.copyFile = async () => {};
@@ -2644,7 +2644,7 @@ describe('InputPrompt', () => {
 
         // The path is a command argument here: it must reach the buffer and
         // never become an attachment chip the shell command cannot see.
-        expect(mockBuffer.insert).toHaveBeenCalledWith('screenshot.png', {
+        expect(mockBuffer.insert).toHaveBeenCalledWith('/tmp/screenshot.png', {
           paste: true,
         });
         unmount();
@@ -8122,6 +8122,15 @@ describe('classifyPastedImagePaths', () => {
     const result = classifyPastedImagePaths('"/a/my image.png"');
     expect(result.allImages).toBe(true);
     expect(result.imagePaths).toEqual(['/a/my image.png']);
+  });
+
+  it('treats drive-letter and POSIX-rooted image paths as absolute on any host', () => {
+    for (const token of ['C:\\Users\\me\\shot.png', '/tmp/shot.png']) {
+      expect(classifyPastedImagePaths(token)).toEqual({
+        imagePaths: [token],
+        allImages: true,
+      });
+    }
   });
 
   it('does not treat a bare or relative image file name as an image path', () => {
