@@ -787,6 +787,8 @@ export interface CreateSubSessionInfo {
  * (the sub-session's first-turn output) is present only for `'first-turn'`. */
 export interface CreateSubSessionResult {
   sessionId: string;
+  /** Canonical destination for a cross-workspace session link. */
+  workspaceCwd?: string;
   result?: string;
   stopReason?: string;
   /** Whether the parent lineage was durably written to the sub-session's

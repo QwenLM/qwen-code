@@ -2503,6 +2503,8 @@ export interface SubSessionSpawnRequest {
  * first-turn output) is present only for `completion: 'first-turn'`. */
 export interface SubSessionSpawnResult {
   sessionId: string;
+  /** Canonical destination for a cross-workspace session link. */
+  workspaceCwd?: string;
   result?: string;
   stopReason?: string;
   /** Whether the parent lineage was durably persisted to the sub-session's

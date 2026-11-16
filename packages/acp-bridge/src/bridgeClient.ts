@@ -2414,6 +2414,9 @@ export class BridgeClient implements Client {
     });
     return {
       sessionId: result.sessionId,
+      ...(result.workspaceCwd !== undefined
+        ? { workspaceCwd: result.workspaceCwd }
+        : {}),
       ...(result.result !== undefined ? { result: result.result } : {}),
       ...(result.stopReason !== undefined
         ? { stopReason: result.stopReason }

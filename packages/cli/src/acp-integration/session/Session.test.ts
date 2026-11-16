@@ -23170,6 +23170,18 @@ describe('Session', () => {
       );
     });
 
+    it('returns the resolved workspace from the daemon', async () => {
+      const spawn = vi.mocked(mockConfig.setSubSessionSpawner).mock
+        .calls[0]?.[0];
+      vi.mocked(mockClient.extMethod).mockResolvedValueOnce({
+        sessionId: 'child-id',
+        workspaceCwd: '/repos/b',
+      });
+      await expect(
+        spawn?.({ prompt: 'p', completion: 'first-turn', workspace: 'b-id' }),
+      ).resolves.toEqual({ sessionId: 'child-id', workspaceCwd: '/repos/b' });
+    });
+
     it('registers the create_sub_session tool on the daemon session registry', async () => {
       // The tool is daemon-only: it must exist on every session the daemon
       // creates so the model can call it, and nowhere else.

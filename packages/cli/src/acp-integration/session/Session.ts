@@ -4374,6 +4374,9 @@ export class Session implements SessionContext {
       }
       return {
         sessionId: resp['sessionId'],
+        ...(typeof resp['workspaceCwd'] === 'string'
+          ? { workspaceCwd: resp['workspaceCwd'] }
+          : {}),
         ...(typeof resp['result'] === 'string'
           ? { result: resp['result'] }
           : {}),

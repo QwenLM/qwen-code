@@ -6472,9 +6472,9 @@ async function runQwenServeImpl(
         runtimeBootSettings?.merged.serve ?? {},
       ),
       resolveWorkspace: subSessionWorkspaces.resolve,
-      isTrusted: () => subSessionWorkspaces.isTrusted(boundWorkspace),
+      isTrusted: (bridge) =>
+        subSessionWorkspaces.isTrusted(boundWorkspace, bridge),
     });
-    subSessionWorkspaces.register(boundWorkspace, subSessionLauncher);
     const attachmentsRoots = sessionAttachmentsRoots(
       boundWorkspace,
       primarySessionRuntimeBaseDir,
@@ -7003,10 +7003,6 @@ async function runQwenServeImpl(
     // (primary + secondaries). Called during shutdown so no new sub-sessions
     // are admitted while bridges are being torn down.
     const subSessionStoppers: Array<() => void> = [];
-    const subSessionStoppersByRuntime = new WeakMap<
-      WorkspaceRuntime,
-      () => void
-    >();
     const runtimeCleanupPromises = new WeakMap<
       WorkspaceRuntime,
       Promise<void>
@@ -7129,12 +7125,9 @@ async function runQwenServeImpl(
           secondarySettings?.merged.serve ?? {},
         ),
         resolveWorkspace: subSessionWorkspaces.resolve,
-        isTrusted: () => subSessionWorkspaces.isTrusted(workspaceInput.cwd),
+        isTrusted: (bridge) =>
+          subSessionWorkspaces.isTrusted(workspaceInput.cwd, bridge),
       });
-      subSessionWorkspaces.register(
-        workspaceInput.cwd,
-        secondarySubSessionLauncher,
-      );
       const secondaryAttachmentsRoots = sessionAttachmentsRoots(
         workspaceInput.cwd,
         secondaryEnv.sessionRuntimeBaseDir,
@@ -7458,9 +7451,9 @@ async function runQwenServeImpl(
           boundWorkspaces: [workspaceInput.cwd],
         }),
       };
-      subSessionStoppersByRuntime.set(
+      subSessionWorkspaces.register(
         secondaryRuntime,
-        secondarySubSessionLauncher.stop,
+        secondarySubSessionLauncher,
       );
       workspaceRuntimes.push(secondaryRuntime);
     }
@@ -7471,6 +7464,10 @@ async function runQwenServeImpl(
         scanUnindexedOwners: deps.bridge !== undefined,
       });
     workspaceRegistryForPersistence.current = workspaceRegistry;
+    subSessionWorkspaces.register(
+      workspaceRegistry.primary,
+      subSessionLauncher,
+    );
     const workspaceVoiceCoordinator = new WorkspaceVoiceCoordinator();
 
     core.registerDaemonGaugeCallbacks({
@@ -8165,7 +8162,7 @@ async function runQwenServeImpl(
           wsSettings?.merged.serve ?? {},
         ),
         resolveWorkspace: subSessionWorkspaces.resolve,
-        isTrusted: () => subSessionWorkspaces.isTrusted(cwd),
+        isTrusted: (bridge) => subSessionWorkspaces.isTrusted(cwd, bridge),
       });
       let wsBridge: ReturnType<typeof runtime.createAcpSessionBridge>;
       try {
@@ -8349,9 +8346,6 @@ async function runQwenServeImpl(
         throw err;
       }
       wsBridgeRef = wsBridge;
-      // Registered only once the bridge exists: a creation that failed must
-      // not leave a bridgeless launcher over this path.
-      subSessionWorkspaces.register(cwd, wsSubSessionLauncher);
       let wsService: ReturnType<typeof runtime.createDaemonWorkspaceService>;
       try {
         wsService = runtime.createDaemonWorkspaceService({
@@ -8555,7 +8549,7 @@ async function runQwenServeImpl(
             boundWorkspaces: [...runtimeBoundWorkspaces].sort(),
           }),
       };
-      subSessionStoppersByRuntime.set(wsRuntime, wsSubSessionLauncher.stop);
+      subSessionWorkspaces.register(wsRuntime, wsSubSessionLauncher);
       if (provenance === 'existing' && !buildOptions?.snapshot) {
         const latest = await trustPolicy.readDaemonTrustPolicySnapshot();
         if (latest.revision !== snapshot.revision) {
@@ -8570,7 +8564,6 @@ async function runQwenServeImpl(
                 // Continue removing the stale unpublished runtime.
               }
             });
-          subSessionStoppersByRuntime.delete(wsRuntime);
           removeArrayValue(subSessionStoppers, wsSubSessionLauncher.stop);
           removeArrayValue(runtimeBridges, wsBridge);
           removeArrayValue(internalRuntimeBridgesForCleanup, wsBridge);
@@ -8853,9 +8846,11 @@ async function runQwenServeImpl(
             );
           }
           const stopSubSessions =
-            subSessionStoppersByRuntime.get(runtimeToDrain);
+            subSessionWorkspaces.getLauncher(runtimeToDrain)?.stop;
           try {
-            stopSubSessions?.();
+            stopSubSessions?.(
+              reason === 'daemon_shutdown' ? undefined : 'workspace_stopped',
+            );
           } catch {
             // Continue to bridge teardown.
           }
@@ -8970,7 +8965,6 @@ async function runQwenServeImpl(
             bridgeStopped = true;
           } finally {
             if (bridgeStopped) {
-              subSessionStoppersByRuntime.delete(runtimeToDrain);
               if (stopSubSessions) {
                 removeArrayValue(subSessionStoppers, stopSubSessions);
               }
@@ -9315,10 +9309,6 @@ async function runQwenServeImpl(
       app.locals as { subSessionStoppers?: Array<() => void> }
     ).subSessionStoppers = subSessionStoppers;
     subSessionStoppers.push(subSessionLauncher.stop);
-    subSessionStoppersByRuntime.set(
-      workspaceRegistry.primary,
-      subSessionLauncher.stop,
-    );
     if (workspaceTrustHotReloadAvailable) {
       const [
         { createWorkspaceTrustReconciler },

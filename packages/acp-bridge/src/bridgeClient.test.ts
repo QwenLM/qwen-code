@@ -1730,18 +1730,23 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
   });
 
   it('forwards a target workspace and rejects an unusable one', async () => {
-    const onCreate = vi.fn(async () => ({ sessionId: 'sub-11' }));
+    const onCreate = vi.fn(async () => ({
+      sessionId: 'sub-11',
+      workspaceCwd: '/repos/b',
+    }));
     const client = makeClientWithCreateSubSession(onCreate);
-    await client.extMethod(METHOD, {
-      prompt: 'go',
-      completion: 'sent',
-      workspace: '/repos/b',
-      callerSessionId: 'caller-1',
-    });
+    await expect(
+      client.extMethod(METHOD, {
+        prompt: 'go',
+        completion: 'sent',
+        workspace: 'workspace-id',
+        callerSessionId: 'caller-1',
+      }),
+    ).resolves.toEqual({ sessionId: 'sub-11', workspaceCwd: '/repos/b' });
     expect(onCreate).toHaveBeenCalledWith({
       prompt: 'go',
       completion: 'sent',
-      workspace: '/repos/b',
+      workspace: 'workspace-id',
       callerSessionId: 'caller-1',
     });
     for (const extra of [

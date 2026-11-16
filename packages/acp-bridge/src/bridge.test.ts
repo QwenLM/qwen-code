@@ -19731,6 +19731,29 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('checks trusted prompt authorization again after queue admission', async () => {
+      const { channel, agent } = makeChannel();
+      const bridge = makeBridge({ channelFactory: async () => channel });
+      const { sessionId } = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      let active = true;
+      const prompt = bridge.sendPrompt(
+        sessionId,
+        { sessionId, prompt: [{ type: 'text', text: 'hello' }] },
+        undefined,
+        {
+          onPromptAdmitted: () => {
+            active = false;
+          },
+          assertCanDispatch: () => {
+            if (!active) throw new Error('Runtime is no longer active');
+          },
+        },
+      );
+      await expect(prompt).rejects.toThrow('Runtime is no longer active');
+      expect(agent.promptCalls).toEqual([]);
+      await bridge.shutdown();
+    });
+
     it('FIFO-serializes concurrent prompts on the same session', async () => {
       const order: string[] = [];
       let resolveFirst: (() => void) | undefined;

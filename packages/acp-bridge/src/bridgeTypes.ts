@@ -1416,6 +1416,8 @@ export interface BridgeClientRequestContext {
    * from request input.
    */
   onPromptAdmitted?: () => void;
+  /** Internal authorization check immediately before forwarding a queued prompt. */
+  assertCanDispatch?: () => void;
   /**
    * Internal model input that replaces the public prompt only inside the
    * trusted ACP child. The bridge still echoes and persists `PromptRequest`

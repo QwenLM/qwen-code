@@ -35,18 +35,42 @@ describe('CreateSubSessionTool', () => {
   });
 
   it('passes a target workspace to the spawner and names it for the approver', async () => {
-    const spawner = vi.fn(async () => ({ sessionId: 'sub-1', result: 'ok' }));
+    const spawner = vi.fn(async () => ({
+      sessionId: 'sub-1',
+      result: 'ok',
+      workspaceCwd: '/canonical/other repo',
+    }));
     const tool = new CreateSubSessionTool(makeConfig(spawner));
     const invocation = tool.build({ prompt: 'do X', workspace: '/repos/b' });
     expect(invocation.getDescription()).toBe('[first-turn] in /repos/b: do X');
     expect(
       tool.toAutoClassifierInput({ prompt: 'do X', workspace: '/repos/b' }),
     ).toMatchObject({ workspace: '/repos/b' });
-    await invocation.execute(new AbortController().signal);
+    const res = await invocation.execute(new AbortController().signal);
     expect(spawner).toHaveBeenCalledWith({
       prompt: 'do X',
       completion: 'first-turn',
       workspace: '/repos/b',
+    });
+    expect(res.returnDisplay).toContain(
+      'qwen-session://sub-1?workspace=%2Fcanonical%2Fother+repo)',
+    );
+  });
+
+  it('uses an execution confirmation for an explicit workspace', async () => {
+    const tool = new CreateSubSessionTool(makeConfig());
+    const signal = new AbortController().signal;
+    const remote = tool.build({ prompt: 'do X', workspace: '/repos/b' });
+    const local = tool.build({ prompt: 'do X' });
+
+    expect(await remote.getConfirmationDetails(signal)).toMatchObject({
+      type: 'exec',
+      title: '[first-turn] in /repos/b: do X',
+      command: 'do X',
+    });
+    expect(await remote.getDefaultPermission()).toBe('ask');
+    expect(await local.getConfirmationDetails(signal)).toMatchObject({
+      type: 'info',
     });
   });
 
@@ -108,6 +132,7 @@ describe('CreateSubSessionTool', () => {
     expect(res.error).toBeUndefined();
     expect(res.llmContent).toContain('sub-2');
     expect(res.llmContent).toMatch(/did not wait/i);
+    expect(res.returnDisplay).toContain('qwen-session://sub-2)');
   });
 
   it('reports a completed-but-empty first turn without an error', async () => {

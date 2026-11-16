@@ -27,7 +27,11 @@
  *                    its result to the caller (default).
  */
 
-import type { ToolInvocation, ToolResult } from './tools.js';
+import type {
+  ToolCallConfirmationDetails,
+  ToolInvocation,
+  ToolResult,
+} from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type { Config } from '../config/config.js';
@@ -133,6 +137,23 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
     return 'ask';
   }
 
+  override async getConfirmationDetails(
+    abortSignal: AbortSignal,
+  ): Promise<ToolCallConfirmationDetails> {
+    if (this.params.workspace === undefined) {
+      return super.getConfirmationDetails(abortSignal);
+    }
+    // An explicit destination runs work in another context. The generic
+    // info confirmation would let Auto Edit approve the delegation silently.
+    return {
+      type: 'exec',
+      title: this.getDescription(),
+      command: this.params.prompt.trim(),
+      rootCommand: ToolNames.CREATE_SUB_SESSION,
+      onConfirm: async () => {},
+    };
+  }
+
   async execute(signal: AbortSignal): Promise<ToolResult> {
     const spawner = this.config.getSubSessionSpawner();
     if (!spawner) {
@@ -188,7 +209,10 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
       // Embed a clickable session link in the display output so the web shell
       // can render a "jump to session" button. The `qwen-session://` scheme is
       // intercepted by the markdown renderer and dispatched as a DOM event.
-      const sessionLink = `[🧵 ${res.sessionId.slice(0, 8)}](qwen-session://${res.sessionId})`;
+      const workspaceQuery = res.workspaceCwd
+        ? `?${new URLSearchParams({ workspace: res.workspaceCwd })}`
+        : '';
+      const sessionLink = `[🧵 ${res.sessionId.slice(0, 8)}](qwen-session://${res.sessionId}${workspaceQuery})`;
 
       // The sub-session exists and is linked in memory, but the daemon reported
       // that the parent lineage was NOT durably written to its transcript — so
@@ -256,8 +280,8 @@ export class CreateSubSessionTool extends BaseDeclarativeTool<
         'back.\n' +
         '- `sent`: returns immediately after dispatching the prompt, without ' +
         'waiting. Use for fire-and-forget launches whose output you do not ' +
-        'need inline. When `workspace` is set, you are told when the ' +
-        'sub-session finishes, with its result.\n\n' +
+        'need inline. When the sub-session runs in another workspace, ' +
+        'you are told when it finishes, with its result.\n\n' +
         '## Another workspace\n' +
         'Set `workspace` to run the sub-session in another workspace ' +
         "registered with this daemon, with that workspace's own instructions, " +

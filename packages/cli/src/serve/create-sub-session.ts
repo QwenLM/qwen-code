@@ -46,7 +46,10 @@ import {
   escapeXml,
   escapeXmlWithinBudget,
 } from '@qwen-code/qwen-code-core/utils/xml.js';
-import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
+import {
+  APPROVAL_MODES,
+  ApprovalMode,
+} from '@qwen-code/qwen-code-core/config/approval-mode.js';
 import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import { ACTIVE_WORK_CLOSE_TIMEOUT_MS } from '@qwen-code/acp-bridge/bridgeTypes';
 import type {
@@ -65,8 +68,15 @@ import {
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import type { StandaloneSessionService } from './conversations/standalone-session-service.js';
 import { createSessionOrganizationService } from './session-organization-helpers.js';
-import type { WorkspaceRegistry } from './workspace-registry.js';
-import { resolveRegisteredWorkspaceRuntimeByPathSelector } from './workspace-route-runtime.js';
+import {
+  WorkspaceGenerationClosedError,
+  type WorkspaceRegistry,
+  type WorkspaceRuntime,
+} from './workspace-registry.js';
+import {
+  isPortableAbsolutePath,
+  resolveRegisteredWorkspaceRuntimeByPathSelector,
+} from './workspace-route-runtime.js';
 
 type StandaloneSubSessionService = Pick<
   StandaloneSessionService,
@@ -157,20 +167,25 @@ export interface SubSessionLauncher {
     caller: RemoteSubSessionCaller,
   ): Promise<CreateSubSessionResult>;
   /** Stop accepting new sub-sessions (daemon shutdown). Idempotent. */
-  stop(): void;
+  stop(reason?: 'workspace_stopped'): void;
 }
 
 /** What a target launcher needs to know about a caller in another workspace. */
 export interface RemoteSubSessionCaller {
   /** The caller's approval mode; the sub-session never runs looser. */
-  approvalMode: string;
+  approvalMode: ApprovalMode;
+  assertCurrent(): void;
   /** Hand a `sent` completion to the caller, on the caller's own bridge. */
   deliverCompletion(notification: BridgeBackgroundNotification): Promise<void>;
 }
 
 /** How a launcher finds another registered workspace's launcher. */
 export type SubSessionWorkspaceResolution =
-  | { kind: 'found'; workspaceCwd: string; launcher: SubSessionLauncher }
+  | {
+      kind: 'found';
+      launcher: SubSessionLauncher;
+      assertCurrent(): void;
+    }
   | { kind: 'refused'; reason: string };
 
 export interface CreateSubSessionLauncherOptions {
@@ -203,7 +218,7 @@ export interface CreateSubSessionLauncherOptions {
    */
   resolveWorkspace?: (selector: string) => SubSessionWorkspaceResolution;
   /** Whether this launcher's own workspace is trusted, read per launch. */
-  isTrusted?: () => boolean;
+  isTrusted?: (bridge: AcpSessionBridge) => boolean;
 }
 
 /**
@@ -218,13 +233,11 @@ export interface CreateSubSessionLauncherOptions {
 export function createSubSessionWorkspaceIndex(
   getRegistry: () => WorkspaceRegistry | undefined,
 ) {
-  const launchers = new Map<string, SubSessionLauncher>();
+  const launchers = new WeakMap<WorkspaceRuntime, SubSessionLauncher>();
   const nameable = (registry: WorkspaceRegistry): string =>
     registry
       .list()
-      .filter(
-        (runtime) => runtime.trusted && launchers.has(runtime.workspaceCwd),
-      )
+      .filter((runtime) => runtime.trusted && launchers.has(runtime))
       .map((runtime) =>
         runtime.displayName
           ? `${runtime.displayName} (${runtime.workspaceCwd})`
@@ -232,9 +245,10 @@ export function createSubSessionWorkspaceIndex(
       )
       .join(', ') || 'none';
   return {
-    register(workspaceCwd: string, launcher: SubSessionLauncher): void {
-      launchers.set(workspaceCwd, launcher);
+    register(runtime: WorkspaceRuntime, launcher: SubSessionLauncher): void {
+      launchers.set(runtime, launcher);
     },
+    getLauncher: (runtime: WorkspaceRuntime) => launchers.get(runtime),
     resolve(selector: string): SubSessionWorkspaceResolution {
       const registry = getRegistry();
       if (!registry) {
@@ -242,8 +256,10 @@ export function createSubSessionWorkspaceIndex(
       }
       const runtime =
         registry.getByWorkspaceId(selector) ??
-        resolveRegisteredWorkspaceRuntimeByPathSelector(registry, selector);
-      const launcher = runtime && launchers.get(runtime.workspaceCwd);
+        (isPortableAbsolutePath(selector)
+          ? resolveRegisteredWorkspaceRuntimeByPathSelector(registry, selector)
+          : undefined);
+      const launcher = runtime && launchers.get(runtime);
       if (!runtime || !launcher) {
         return {
           kind: 'refused',
@@ -256,44 +272,59 @@ export function createSubSessionWorkspaceIndex(
           reason: `Workspace ${runtime.workspaceCwd} is not trusted. Workspaces you can use: ${nameable(registry)}.`,
         };
       }
-      return { kind: 'found', workspaceCwd: runtime.workspaceCwd, launcher };
+      return {
+        kind: 'found',
+        launcher,
+        assertCurrent() {
+          runtime.generationGuard?.assertOpen();
+          if (registry.getByWorkspaceCwd(runtime.workspaceCwd) !== runtime) {
+            throw new WorkspaceGenerationClosedError();
+          }
+        },
+      };
     },
-    isTrusted(workspaceCwd: string): boolean {
-      return getRegistry()?.getByWorkspaceCwd(workspaceCwd)?.trusted === true;
+    isTrusted(workspaceCwd: string, bridge: AcpSessionBridge): boolean {
+      const runtime = getRegistry()?.getByWorkspaceCwd(workspaceCwd);
+      return (
+        runtime?.bridge === bridge &&
+        runtime.trusted &&
+        runtime.generationGuard?.closed !== true
+      );
     },
   };
 }
 
-/**
- * Approval modes from strictest to loosest. `auto` sits before `auto-edit`:
- * its classifier reviews every action, while `auto-edit` applies edits
- * without review.
- */
-const APPROVAL_MODE_STRICTNESS: readonly string[] = [
-  ApprovalMode.PLAN,
-  ApprovalMode.DEFAULT,
-  ApprovalMode.AUTO,
-  ApprovalMode.AUTO_EDIT,
-  ApprovalMode.YOLO,
-];
-
-/** The stricter of two modes; an unknown mode counts as `default`. */
-export function stricterApprovalMode(a: string, b: string): ApprovalMode {
-  const rank = (mode: string): number => {
-    const index = APPROVAL_MODE_STRICTNESS.indexOf(mode);
-    return index < 0 ? APPROVAL_MODE_STRICTNESS.indexOf('default') : index;
-  };
-  return APPROVAL_MODE_STRICTNESS[Math.min(rank(a), rank(b))] as ApprovalMode;
+function delegatedApprovalMode(
+  caller: ApprovalMode,
+  target: ApprovalMode,
+): ApprovalMode {
+  if (caller === target || caller === ApprovalMode.YOLO) return target;
+  if (target === ApprovalMode.YOLO) return caller;
+  // AUTO can approve shell commands that AUTO_EDIT would prompt for, and
+  // leaving AUTO on the target restores its broad permission rules.
+  if (
+    target === ApprovalMode.AUTO ||
+    (caller === ApprovalMode.AUTO && target === ApprovalMode.AUTO_EDIT)
+  ) {
+    throw new Error(
+      `Cannot combine caller approval mode "${caller}" with target mode "${target}" for cross-workspace delegation.`,
+    );
+  }
+  if (caller === ApprovalMode.PLAN || target === ApprovalMode.PLAN) {
+    return ApprovalMode.PLAN;
+  }
+  return ApprovalMode.DEFAULT;
 }
 
-function currentApprovalMode(
+async function currentApprovalMode(
   bridge: AcpSessionBridge,
   sessionId: string,
-): string | undefined {
-  return bridge
-    .getDaemonStatusSnapshot()
-    .sessions.find((session) => session.sessionId === sessionId)
-    ?.currentApprovalMode;
+): Promise<ApprovalMode | undefined> {
+  const { modes } = (await bridge.getSessionContextStatus(sessionId)).state;
+  if (typeof modes !== 'object' || !modes || !('currentModeId' in modes)) {
+    return undefined;
+  }
+  return APPROVAL_MODES.find((mode) => mode === modes.currentModeId);
 }
 
 type IsolatedWorkspace = NonNullable<
@@ -349,6 +380,7 @@ function buildSentCompletionNotification(
   label: string,
   result: string,
   stopReason: string,
+  workspaceCwd?: string,
 ) {
   const status = sentCompletionStatus(stopReason);
   const boundedStopReason = truncateCodePoints(stopReason, 128);
@@ -358,7 +390,12 @@ function buildSentCompletionNotification(
       : status === 'cancelled'
         ? 'was cancelled'
         : `failed (${boundedStopReason})`;
-  const sessionLink = `[🧵 ${sessionId.slice(0, 8)}](qwen-session://${sessionId})`;
+  const sessionUrl =
+    `qwen-session://${sessionId}` +
+    (workspaceCwd
+      ? `?${new URLSearchParams({ workspace: workspaceCwd })}`
+      : '');
+  const sessionLink = `[🧵 ${sessionId.slice(0, 8)}](${sessionUrl})`;
   const safeResult =
     result.trim() || `No text output (stopReason: ${stopReason}).`;
   const modelSessionId = truncateCodePoints(sessionId, 256);
@@ -368,7 +405,7 @@ function buildSentCompletionNotification(
     `<task-id>${escapeXml(modelSessionId)}</task-id>`,
     `<status>${status}</status>`,
     `<summary>Sub-session &quot;${escapeXml(modelLabel)}&quot; ${escapeXml(statusText)}.</summary>`,
-    `<session-link>qwen-session://${escapeXml(modelSessionId)}</session-link>`,
+    `<session-link>${escapeXml(sessionUrl)}</session-link>`,
     '<result>',
   ].join('');
   const modelTextSuffix = '</result></task-notification>';
@@ -927,6 +964,7 @@ export function createSubSessionLauncher(
           'This workspace cannot run sub-sessions for another workspace.',
         );
       }
+      remote.assertCurrent();
     } else {
       const caller = bridge.getSessionSummary(info.callerSessionId);
       standalone = isReservedStandaloneSessionSourceType(caller.sourceType);
@@ -1039,21 +1077,24 @@ export function createSubSessionLauncher(
       }
       rememberSpawned(sessionId);
       if (remote) {
-        // Never looser than the caller: another workspace's defaults must not
-        // widen what the caller's model may do. A mode that cannot be read
-        // cannot be compared, so the launch fails rather than guess.
-        const childMode = currentApprovalMode(bridge, sessionId);
+        // Use live approval modes. Each workspace keeps its own permission rules.
+        const childMode = await currentApprovalMode(bridge, sessionId);
         if (childMode === undefined) {
           throw new Error(
             'The new session did not report its approval mode; it was not used.',
           );
         }
-        const mode = stricterApprovalMode(remote.approvalMode, childMode);
+        remote.assertCurrent();
+        const mode = delegatedApprovalMode(remote.approvalMode, childMode);
         if (mode !== childMode) {
-          await bridge.setSessionApprovalMode(sessionId, mode, {
+          const change = await bridge.setSessionApprovalMode(sessionId, mode, {
             persist: false,
           });
+          if (change.mode !== mode) {
+            throw new Error('The new session did not apply its approval mode.');
+          }
         }
+        remote.assertCurrent();
       }
 
       try {
@@ -1071,6 +1112,9 @@ export function createSubSessionLauncher(
       }
 
       if (!standalone) {
+        if (remote && stopAc.signal.aborted) {
+          throw new Error('The target workspace stopped before dispatch.');
+        }
         lastEventId = bridge.getSessionLastEventId(sessionId);
         let markPromptAdmitted!: () => void;
         promptAdmission = new Promise<void>((resolve) => {
@@ -1086,8 +1130,12 @@ export function createSubSessionLauncher(
             sessionId,
             prompt: [{ type: 'text', text: info.prompt }],
           } as Parameters<AcpSessionBridge['sendPrompt']>[1],
-          undefined,
-          { promptId, onPromptAdmitted },
+          remote ? stopAc.signal : undefined,
+          {
+            promptId,
+            onPromptAdmitted,
+            ...(remote ? { assertCanDispatch: remote.assertCurrent } : {}),
+          },
         );
       }
 
@@ -1144,6 +1192,8 @@ export function createSubSessionLauncher(
         // isolated task exhaust the daemon's session pool.
         const drainAc = new AbortController();
         const drainSignal = AbortSignal.any([stopAc.signal, drainAc.signal]);
+        const targetStopped = () =>
+          remote !== undefined && stopAc.signal.reason === 'workspace_stopped';
         void (async () => {
           try {
             let notification:
@@ -1170,7 +1220,7 @@ export function createSubSessionLauncher(
                 ),
                 turnError,
               ]);
-              if (stopAc.signal.aborted) return;
+              if (stopAc.signal.aborted && !targetStopped()) return;
               if (completion.stopReason === 'timeout') {
                 writeStderrLine(
                   `qwen serve: sub-session ${sessionId} drain timed out after ` +
@@ -1184,17 +1234,19 @@ export function createSubSessionLauncher(
                   subSessionName(info.name ?? info.prompt, false),
                   completion.result,
                   completion.stopReason,
+                  remote ? boundWorkspace : undefined,
                 );
               }
             } catch (err) {
-              if (stopAc.signal.aborted) return;
+              if (stopAc.signal.aborted && !targetStopped()) return;
               if (!notifySentCompletion && !remote) return;
               const message = err instanceof Error ? err.message : String(err);
               notification = buildSentCompletionNotification(
                 sessionId,
                 subSessionName(info.name ?? info.prompt, false),
                 message,
-                'error',
+                targetStopped() ? 'shutdown' : 'error',
+                remote ? boundWorkspace : undefined,
               );
             }
             if (!notification) return;
@@ -1229,6 +1281,7 @@ export function createSubSessionLauncher(
         })();
         return {
           sessionId,
+          ...(remote ? { workspaceCwd: boundWorkspace } : {}),
           ...(sub.parentSessionPersisted !== undefined
             ? { parentSessionPersisted: sub.parentSessionPersisted }
             : {}),
@@ -1265,6 +1318,7 @@ export function createSubSessionLauncher(
         ]);
         return {
           sessionId,
+          ...(remote ? { workspaceCwd: boundWorkspace } : {}),
           result,
           stopReason,
           ...(sub.parentSessionPersisted !== undefined
@@ -1451,16 +1505,23 @@ export function createSubSessionLauncher(
         'Sub-sessions in another workspace are not available here.',
       );
     }
+    const assertCallerCurrent = () => {
+      if (stopAc.signal.aborted || isTrusted?.(bridge) !== true) {
+        throw new Error(
+          'This workspace is not trusted or is no longer active, so its sessions ' +
+            'cannot run sub-sessions in another workspace.',
+        );
+      }
+    };
+    assertCallerCurrent();
     const target = resolveWorkspace(workspace);
     if (target.kind === 'refused') throw new Error(target.reason);
+    target.assertCurrent();
     if (target.launcher === launcher) return run(local);
-    if (isTrusted?.() !== true) {
-      throw new Error(
-        'This workspace is not trusted, so its sessions cannot run ' +
-          'sub-sessions in another workspace.',
-      );
-    }
-    const approvalMode = currentApprovalMode(bridge, info.callerSessionId);
+    const approvalMode = await currentApprovalMode(
+      bridge,
+      info.callerSessionId,
+    );
     if (approvalMode === undefined) {
       throw new Error(
         'This session did not report its approval mode, so it cannot run ' +
@@ -1469,22 +1530,28 @@ export function createSubSessionLauncher(
     }
     return target.launcher.launchForRemoteCaller(local, {
       approvalMode,
-      deliverCompletion: (notification) =>
-        deliverSentCompletion(
+      assertCurrent() {
+        assertCallerCurrent();
+        target.assertCurrent();
+      },
+      deliverCompletion: async (notification) => {
+        assertCallerCurrent();
+        await deliverSentCompletion(
           bridge,
           boundWorkspace,
           info.callerSessionId,
           notification,
           stopAc.signal,
-        ),
+        );
+      },
     });
   };
 
   const launcher: SubSessionLauncher = {
     launch,
     launchForRemoteCaller: (info, caller) => run(info, caller),
-    stop: () => {
-      stopAc.abort(); // tears down every active subscription → releases slots
+    stop: (reason) => {
+      stopAc.abort(reason); // tears down every active subscription → releases slots
     },
   };
   return launcher;

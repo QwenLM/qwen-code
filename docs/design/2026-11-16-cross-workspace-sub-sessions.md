@@ -34,7 +34,8 @@ could later run on top of this.
   finishes.
 - A person in Web Shell can do the same from a session page.
 - B's work runs under B's runtime: B's directory, settings, trust and
-  permissions. Its approval mode is never looser than A's.
+  permissions. The launcher uses A's effective mode to choose the child's
+  approval mode.
 
 ## Steps
 
@@ -54,25 +55,22 @@ The work lands in three changes, each usable on its own.
 workspace id of a workspace registered with this daemon. Absent means the
 caller's workspace, which is today's behavior.
 
-`completion` keeps its two values. `first-turn` waits for the turn and
-returns its text, as today. `sent` returns at once, and when the turn
-finishes the caller gets a task notification with the result and a link to
-the session. Today that notification goes only to the Live conversation
-runtime. It now also goes to every call that names a `workspace`, because
-the caller cannot otherwise learn that work in another workspace finished.
-Fire-and-forget calls in the caller's own workspace keep their current
-behavior.
+`first-turn` waits for the first turn and returns its text. A cross-workspace
+`sent` call returns after dispatch. The caller gets a task notification with
+the result when the turn finishes, or a cancellation if the target runtime
+stops while the caller is still active. The tool result and the notification
+link to the child in the target workspace. A selector that resolves to the
+caller's own workspace uses the existing same-workspace behavior.
 
-The tool already asks for permission, and that flow is unchanged: default
-mode asks the person, auto mode asks the classifier, and yolo allows the
-call. The call's description names the target workspace, so whoever
-approves it can see where the prompt goes.
+Calls with a named workspace use execution confirmation. Default and auto-edit
+ask the person, auto asks the classifier, and yolo allows the call, subject to
+configured permission rules. The confirmation names the destination.
 
 ### Resolving the target
 
 The request travels as it does today: the tool, then the session's spawner,
 then the `qwen/control/create-sub-session` ext method, then the caller's
-launcher. The launchers are registered with the daemon by workspace. The
+launcher. The launchers are registered by runtime generation. The
 caller's launcher runs the caller-side checks: the depth gate, the
 standalone and Live refusal, and the caller's trust. It then hands the
 launch to the target workspace's launcher, which spawns, prompts and waits
@@ -85,25 +83,25 @@ conversation runtimes cannot be named. Both workspaces must be trusted. The
 primary workspace's usual exemption from the trust check does not apply here,
 because this path drives one workspace from another. An unknown or untrusted
 target is refused, and the error lists the workspaces that can be named so
-the model can correct itself. Nothing falls back to the caller's workspace or
-to the primary one.
+the model can correct itself. After asynchronous startup, the launcher
+rechecks both runtime generations before dispatching the first prompt.
 
 Standalone and Live callers cannot name a workspace. Their sub-sessions live
 in daemon-owned directories that have no meaning in another workspace.
 
 ### Approval mode
 
-The new session starts in B's default mode. Before the prompt is sent, the
-target launcher compares that mode with the caller's current mode and
-switches the session to whichever is stricter. The order runs from strictest
-to loosest:
+The launcher reads each session's effective approval mode from its live ACP
+configuration. Equal modes stay as they are. If one side uses `yolo`, the child
+uses the other side's mode. For other compatible pairs, `plan` takes precedence,
+and `default` takes precedence over `auto-edit` or a caller's `auto` mode.
 
-`plan` < `default` < `auto` < `auto-edit` < `yolo`
-
-`auto` comes before `auto-edit` because the classifier reviews every action
-under `auto`, while `auto-edit` applies edits without review. The switch is
-session-local and is not persisted. If either mode cannot
-be read, the launch fails rather than guess; a new session is closed again.
+A target in `auto` accepts callers in `auto` or `yolo`. Leaving `auto` would
+restore permission rules that the target suppressed. An `auto` caller also
+cannot delegate to an `auto-edit` target, since classification and automatic
+edit approval permit different operations. Mode changes apply to the child
+session only. A missing or unknown mode, a refused pair, or a failed mode
+change closes any unused child before dispatch.
 
 ### Caps and lineage
 
@@ -178,12 +176,11 @@ result shows in both places.
 
 ## Verification (step 1)
 
-- Unit: resolution by path and by id; unknown and untrusted targets; an
-  untrusted caller; a Live caller and a caller that is itself a sub-session;
-  the hand-off runs on the target launcher's bridge; the notification
-  arrives on the caller's bridge; the approval rule across the mode order.
-- End to end: a daemon with two workspaces. From a Web Shell session in A,
-  ask the model to start a session in B that reads B's `QWEN.md` and answers
-  (`first-turn`), then another with `sent`, and see the notification arrive
-  in A. Naming an untrusted workspace is refused with the list of
-  workspaces that can be named.
+- Unit: resolution by absolute path and id, refusal of unknown and untrusted
+  targets and callers, the depth gate, target-bridge dispatch, caller-bridge
+  notification delivery, live approval reads, incompatible modes, and target
+  runtime cancellation.
+- End to end: with two trusted workspaces, start a child in B from A, read B's
+  `QWEN.md` in `first-turn` mode, and verify `sent` notification delivery in A.
+  Open the child link from A and verify it loads B. Naming an untrusted target
+  returns a refusal and the list of eligible workspaces.

@@ -16,7 +16,7 @@
 
 - workspace A 里的模型可以在已注册的 workspace B 中新建会话，之后还能给同一个会话发后续 prompt。每条 prompt 都可以选择等待这一轮的结果，或者继续做别的、在这一轮结束时收到通知。
 - 用户可以在 Web Shell 的会话页里做同样的事。
-- B 里的工作在 B 的 runtime 下运行：B 的目录、设置、信任与权限。它的审批模式永远不比 A 宽松。
+- B 里的工作使用 B 的 runtime、目录、设置、信任与权限。启动器根据 A 的实际模式选择子会话的审批模式。
 
 ## 步骤
 
@@ -32,25 +32,23 @@
 
 `create_sub_session` 新增可选参数 `workspace`：本 daemon 已注册 workspace 的绝对路径或 workspace id。不填时使用调用方的 workspace，即现有行为。
 
-`completion` 保持原来的两个取值。`first-turn` 等待这一轮并返回其文本，与现在一样。`sent` 立即返回，这一轮结束时调用方会收到一条带结果和会话链接的任务通知。目前这个通知只发给 Live conversation runtime。现在它也会发给所有指定了 `workspace` 的调用，因为否则调用方无从得知另一个 workspace 里的工作已经完成。在调用方自己的 workspace 中发出就不管的调用保持现有行为。
+`first-turn` 等待第一轮结束并返回文本。跨 workspace 的 `sent` 调用在派发后返回。任务结束时，调用方会收到结果通知。如果目标 runtime 停止而调用方仍然活跃，调用方会收到取消通知。工具结果和通知都提供目标 workspace 的子会话链接。指向调用方自身 workspace 的选择器使用现有的同 workspace 行为。
 
-工具本来就要求权限确认，这个流程不变：default 模式询问用户，auto 模式交给分类器，yolo 直接放行。调用的描述会写明目标 workspace，批准的人能看到 prompt 去往哪里。
+指定 workspace 的调用使用执行确认。在既有权限规则约束下，default 和 auto-edit 询问用户，auto 交给分类器，yolo 直接放行。确认内容会写明目标 workspace。
 
 ### 解析目标
 
-请求的传递路径与现在相同：工具，然后会话的派发器，然后 `qwen/control/create-sub-session` ext 方法，然后调用方的启动器。各个启动器按 workspace 注册到 daemon。调用方的启动器做调用方一侧的检查：深度限制、拒绝 standalone 和 Live 调用方、调用方的信任。然后把这次启动交给目标 workspace 的启动器，由它在自己的 bridge 上新建会话、发送 prompt、等待结果，使用它自己的并发上限和回滚逻辑。完成通知在调用方的 bridge 上投递，因为调用方在那里。
+请求依次经过工具、会话的派发器、`qwen/control/create-sub-session` ext 方法和调用方启动器。各启动器按 runtime generation 注册到 daemon。调用方的启动器检查深度、调用方信任状态，以及调用方是否属于 standalone 或 Live。目标启动器在自己的 bridge 上新建会话、发送 prompt 和等待结果，并应用自己的并发上限和回滚逻辑。完成通知通过调用方的 bridge 投递。
 
-目标从注册表的公开列表中解析，所以内部 runtime 和 Live conversation runtime 无法被指名。两个 workspace 都必须是受信的。主 workspace 平时在信任检查上的豁免这里不适用，因为这条路径是用一个 workspace 去驱动另一个。未知或不受信的目标会被拒绝，错误信息会列出可以指名的 workspace，方便模型自行纠正。不会回退到调用方的 workspace 或主 workspace。
+目标从注册表的公开列表中解析。内部 runtime 和 Live conversation runtime 无法被指名。两个 workspace 都必须受信，包括主 workspace。未知或不受信的目标会被拒绝，错误信息会列出可以指名的 workspace。异步初始化完成后，启动器在派发第一条 prompt 前再次核对两边的 runtime generation。
 
 standalone 和 Live 调用方不能指定 workspace。它们的子会话位于 daemon 自有的目录里，这些目录在另一个 workspace 中没有意义。
 
 ### 审批模式
 
-新会话以 B 的默认模式启动。在发送 prompt 之前，目标启动器会比较这个模式与调用方当前的模式，并把会话切换到二者中更严格的那个。从最严到最宽的顺序是：
+启动器从活跃的 ACP 配置读取双方会话的实际审批模式。双方模式相同时沿用该模式，任何一方为 `yolo` 时采用另一方的模式。剩余兼容组合中，`plan` 优先，`default` 优先于 `auto-edit` 或调用方的 `auto`。
 
-`plan` < `default` < `auto` < `auto-edit` < `yolo`
-
-`auto` 排在 `auto-edit` 前面，因为在 `auto` 下分类器会审查每个操作，而 `auto-edit` 会不经审查直接应用编辑。这次切换只作用于该会话，不会持久化。只要有一方的模式读不到，启动就失败而不是猜测；已经新建的会话会被关闭。
+处于 `auto` 的目标只接受使用 `auto` 或 `yolo` 的调用方。退出 `auto` 会恢复目标在该模式下抑制的权限规则。使用 `auto` 的调用方也不能委派给 `auto-edit` 目标，因为分类器和自动编辑放行的操作范围不同。模式调整只作用于子会话。模式缺失、未知、不兼容或调整失败时，启动器会在派发前关闭未使用的子会话。
 
 ### 并发上限与血缘
 
@@ -86,5 +84,5 @@ standalone 和 Live 调用方不能指定 workspace。它们的子会话位于 d
 
 ## 验证（第 1 步）
 
-- 单元测试：按路径和按 id 解析；未知和不受信的目标；不受信的调用方；Live 调用方，以及本身就是子会话的调用方；交接后在目标启动器的 bridge 上运行；通知到达调用方的 bridge；审批规则覆盖整个模式顺序。
-- 端到端：一个带两个 workspace 的 daemon。在 A 的 Web Shell 会话里让模型在 B 新建一个会话，读取 B 的 `QWEN.md` 并回答（`first-turn`），再用 `sent` 建一个，看到通知到达 A。指名一个不受信的 workspace 会被拒绝，并列出可以指名的 workspace。
+- 单元测试覆盖按绝对路径和 id 解析，拒绝未知和不受信的目标和调用方，深度限制，在目标 bridge 派发、在调用方 bridge 通知，读取实际审批模式，拒绝不兼容模式，以及目标 runtime 停止时通知取消。
+- 端到端验证使用两个受信 workspace。从 A 在 B 中新建子会话，通过 `first-turn` 读取 B 的 `QWEN.md`，再验证 `sent` 在 A 中收到通知。通过 A 的子会话链接打开 B。指定不受信目标应收到拒绝与可用 workspace 列表。

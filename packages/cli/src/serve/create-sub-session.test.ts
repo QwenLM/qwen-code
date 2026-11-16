@@ -12,6 +12,8 @@ import {
   type AcpSessionBridge,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { SessionService, Storage } from '@qwen-code/qwen-code-core';
+import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
+import type { WorkspaceRuntime } from './workspace-registry.js';
 
 /** Captures the launcher's operator-facing stderr output. */
 const { stderrLines, updateSessionOrganization } = vi.hoisted(() => ({
@@ -28,7 +30,6 @@ vi.mock('./session-organization-helpers.js', () => ({
 const {
   createSubSessionLauncher,
   createSubSessionWorkspaceIndex,
-  stricterApprovalMode,
   MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER,
   MAX_CONCURRENT_SUB_SESSIONS_TOTAL,
   MAX_TRACKED_SPAWNED_SESSIONS,
@@ -86,8 +87,9 @@ function makeFakeBridge(opts?: {
   /** Persisted parent lineage for callers restored after a daemon restart. */
   restoredCallerParents?: Readonly<Record<string, string>>;
   callerSourceTypes?: Readonly<Record<string, string>>;
-  /** Live approval modes the daemon status snapshot reports, by session. */
+  /** Effective approval modes reported by the live ACP session. */
   approvalModes?: Record<string, string>;
+  beforeModeChange?: () => Promise<void>;
 }) {
   const spawns: Array<{
     workspaceCwd: string;
@@ -136,20 +138,16 @@ function makeFakeBridge(opts?: {
   let notificationAttempt = 0;
 
   const bridge = {
-    getDaemonStatusSnapshot: () => ({
-      sessions: Object.entries(opts?.approvalModes ?? {}).map(
-        ([sessionId, currentApprovalMode]) => ({
-          sessionId,
-          currentApprovalMode,
-        }),
-      ),
-    }),
+    getSessionContextStatus: vi.fn(async (sessionId: string) => ({
+      state: { modes: { currentModeId: opts?.approvalModes?.[sessionId] } },
+    })),
     setSessionApprovalMode: async (
       sessionId: string,
       mode: string,
       o: { persist: boolean },
     ) => {
       expect(o.persist).toBe(false);
+      await opts?.beforeModeChange?.();
       operations.push(`mode:${sessionId}`);
       modeChanges.push({ sessionId, mode });
       return { sessionId, mode, previous: 'auto', persisted: false };
@@ -2198,13 +2196,15 @@ describe('sub-sessions in another workspace', () => {
 
   /** A caller launcher in A wired to a target launcher in B. */
   function twoWorkspaces(opts?: {
-    /** `null` leaves the mode out of the status snapshot. */
+    /** `null` leaves the mode out of the live context status. */
     callerMode?: string | null;
     childMode?: string | null;
     callerTrusted?: boolean;
     callerParents?: Record<string, string>;
     callerSourceTypes?: Record<string, string>;
     events?: (promptId: string) => FakeEvent[];
+    blockAfterEvents?: boolean;
+    beforeModeChange?: () => Promise<void>;
   }) {
     const a = makeFakeBridge({
       approvalModes:
@@ -2220,36 +2220,71 @@ describe('sub-sessions in another workspace', () => {
     });
     const b = makeFakeBridge({
       approvalModes:
-        opts?.childMode === null ? {} : { 'sub-1': opts?.childMode ?? 'auto' },
+        opts?.childMode === null ? {} : { 'sub-1': opts?.childMode ?? 'yolo' },
       events: opts?.events ?? ((pid) => [chunk('from b'), turnComplete(pid)]),
+      blockAfterEvents: opts?.blockAfterEvents,
+      beforeModeChange: opts?.beforeModeChange,
     });
     const launcherB = createSubSessionLauncher({
       getBridge: () => b.bridge,
       boundWorkspace: WS_B,
     });
+    let targetActive = true;
+    const assertTargetCurrent = () => {
+      if (!targetActive) {
+        throw new Error('The target runtime is no longer active');
+      }
+    };
     const launcherA = createSubSessionLauncher({
       getBridge: () => a.bridge,
       boundWorkspace: WS_A,
       isTrusted: () => opts?.callerTrusted ?? true,
       resolveWorkspace: (selector) =>
         selector === WS_B
-          ? { kind: 'found', workspaceCwd: WS_B, launcher: launcherB }
+          ? {
+              kind: 'found',
+              launcher: launcherB,
+              assertCurrent: assertTargetCurrent,
+            }
           : selector === WS_A
-            ? { kind: 'found', workspaceCwd: WS_A, launcher: launcherA }
+            ? { kind: 'found', launcher: launcherA, assertCurrent: () => {} }
             : {
                 kind: 'refused',
                 reason: `No registered workspace matches "${selector}".`,
               },
     });
-    return { a, b, launcherA, launcherB };
+    return {
+      a,
+      b,
+      launcherA,
+      launcherB,
+      retireTarget: () => {
+        targetActive = false;
+        launcherB.stop('workspace_stopped');
+      },
+    };
   }
 
-  it('orders approval modes from strictest to loosest', () => {
-    expect(stricterApprovalMode('plan', 'yolo')).toBe('plan');
-    expect(stricterApprovalMode('auto-edit', 'auto')).toBe('auto');
-    expect(stricterApprovalMode('yolo', 'default')).toBe('default');
-    expect(stricterApprovalMode('unknown', 'yolo')).toBe('default');
-  });
+  it.each([
+    ['auto-edit', 'auto'],
+    ['auto', 'auto-edit'],
+    ['default', 'auto'],
+  ])(
+    'refuses caller mode %s with target mode %s',
+    async (callerMode, childMode) => {
+      const { b, launcherA } = twoWorkspaces({ callerMode, childMode });
+      await expect(
+        launcherA.launch({
+          prompt: 'p',
+          completion: 'first-turn',
+          workspace: WS_B,
+          callerSessionId: 'caller',
+        }),
+      ).rejects.toThrow('Cannot combine caller approval mode');
+      expect(b.prompts).toEqual([]);
+      expect(b.closes).toEqual(['sub-1']);
+    },
+  );
 
   it('first-turn: runs in the target workspace and returns its result', async () => {
     const { a, b, launcherA } = twoWorkspaces();
@@ -2259,7 +2294,11 @@ describe('sub-sessions in another workspace', () => {
       workspace: WS_B,
       callerSessionId: 'caller',
     });
-    expect(res).toMatchObject({ sessionId: 'sub-1', result: 'from b' });
+    expect(res).toMatchObject({
+      sessionId: 'sub-1',
+      result: 'from b',
+      workspaceCwd: WS_B,
+    });
     expect(a.spawns).toEqual([]);
     expect(b.spawns).toEqual([
       expect.objectContaining({
@@ -2268,8 +2307,9 @@ describe('sub-sessions in another workspace', () => {
         parentSessionId: 'caller',
       }),
     ]);
-    // B defaults to auto; the caller reviews every action, so the child
-    // does too, before its prompt is sent.
+    // B defaults to yolo. The caller and child modes come from the ACP sessions.
+    expect(a.bridge.getSessionContextStatus).toHaveBeenCalledWith('caller');
+    expect(b.bridge.getSessionContextStatus).toHaveBeenCalledWith('sub-1');
     expect(b.modeChanges).toEqual([{ sessionId: 'sub-1', mode: 'default' }]);
     expect(b.prompts).toEqual([
       expect.objectContaining({ sessionId: 'sub-1', text: 'read QWEN.md' }),
@@ -2299,13 +2339,65 @@ describe('sub-sessions in another workspace', () => {
       callerSessionId: 'caller',
     });
     expect(res.sessionId).toBe('sub-1');
+    expect(res.workspaceCwd).toBe(WS_B);
     await vi.waitFor(() => expect(a.notifications).toHaveLength(1));
     expect(a.notifications[0]).toMatchObject({
       sessionId: 'caller',
       notification: { taskId: 'sub-1', status: 'completed' },
     });
     expect(a.notifications[0]!.notification.modelText).toContain('from b');
+    expect(a.notifications[0]!.notification.displayText).toContain(
+      'qwen-session://sub-1?workspace=%2Ftmp%2Fws-b',
+    );
     expect(b.notifications).toEqual([]);
+  });
+
+  it('cancels a sent launch when only the destination runtime stops', async () => {
+    const { a, b, launcherA, retireTarget } = twoWorkspaces({
+      events: () => [],
+      blockAfterEvents: true,
+    });
+    await launcherA.launch({
+      prompt: 'p',
+      completion: 'sent',
+      workspace: WS_B,
+      callerSessionId: 'caller',
+    });
+    await vi.waitFor(() => expect(b.subscriptions).toHaveLength(1));
+    retireTarget();
+    await vi.waitFor(() => expect(a.notifications).toHaveLength(1));
+    expect(a.notifications[0]?.notification.status).toBe('cancelled');
+  });
+
+  it('rolls back a child when the target stops during initialization', async () => {
+    let markModeChangeStarted!: () => void;
+    const modeChangeStarted = new Promise<void>((resolve) => {
+      markModeChangeStarted = resolve;
+    });
+    let releaseModeChange!: () => void;
+    const modeChangeReleased = new Promise<void>((resolve) => {
+      releaseModeChange = resolve;
+    });
+    const { b, launcherA, retireTarget } = twoWorkspaces({
+      beforeModeChange: () => {
+        markModeChangeStarted();
+        return modeChangeReleased;
+      },
+    });
+    const launch = launcherA.launch({
+      prompt: 'p',
+      completion: 'first-turn',
+      workspace: WS_B,
+      callerSessionId: 'caller',
+    });
+    await modeChangeStarted;
+    retireTarget();
+    releaseModeChange();
+    await expect(launch).rejects.toThrow(
+      'The target runtime is no longer active',
+    );
+    expect(b.prompts).toEqual([]);
+    expect(b.closes).toEqual(['sub-1']);
   });
 
   it('runs locally when the named workspace is the caller own', async () => {
@@ -2357,18 +2449,21 @@ describe('sub-sessions in another workspace', () => {
     },
   );
 
-  it('refuses when it cannot read the caller approval mode', async () => {
-    const { b, launcherA } = twoWorkspaces({ callerMode: null });
-    await expect(
-      launcherA.launch({
-        prompt: 'p',
-        completion: 'first-turn',
-        workspace: WS_B,
-        callerSessionId: 'caller',
-      }),
-    ).rejects.toThrow('did not report its approval mode');
-    expect(b.spawns).toEqual([]);
-  });
+  it.each([null, 'unrecognized'])(
+    'refuses a missing or unknown caller approval mode (%s)',
+    async (callerMode) => {
+      const { b, launcherA } = twoWorkspaces({ callerMode });
+      await expect(
+        launcherA.launch({
+          prompt: 'p',
+          completion: 'first-turn',
+          workspace: WS_B,
+          callerSessionId: 'caller',
+        }),
+      ).rejects.toThrow('did not report its approval mode');
+      expect(b.spawns).toEqual([]);
+    },
+  );
 
   it('rolls the child back when it cannot read the child approval mode', async () => {
     const { b, launcherA } = twoWorkspaces({ childMode: null });
@@ -2412,7 +2507,11 @@ describe('sub-sessions in another workspace', () => {
     await expect(
       target.launchForRemoteCaller(
         { prompt: 'p', completion: 'first-turn', callerSessionId: 'caller' },
-        { approvalMode: 'default', deliverCompletion: async () => {} },
+        {
+          approvalMode: ApprovalMode.DEFAULT,
+          assertCurrent: () => {},
+          deliverCompletion: async () => {},
+        },
       ),
     ).rejects.toThrow('cannot run sub-sessions for another workspace');
     expect(live.spawns).toEqual([]);
@@ -2469,6 +2568,7 @@ describe('sub-session workspace index', () => {
     workspaceId: `id-${path.basename(workspaceCwd)}`,
     workspaceCwd,
     trusted,
+    bridge: makeFakeBridge().bridge,
     ...(displayName ? { displayName } : {}),
   });
 
@@ -2486,7 +2586,7 @@ describe('sub-session workspace index', () => {
         getBridge: () => undefined,
         boundWorkspace: r.workspaceCwd,
       });
-      index.register(r.workspaceCwd, launcher);
+      index.register(r as WorkspaceRuntime, launcher);
       return launcher;
     });
     return { index, launchers };
@@ -2497,16 +2597,30 @@ describe('sub-session workspace index', () => {
       runtime('/tmp/ws-a', true),
       runtime('/tmp/ws-b', true),
     ]);
-    expect(index.resolve('id-ws-b')).toEqual({
+    expect(index.resolve('id-ws-b')).toMatchObject({
       kind: 'found',
-      workspaceCwd: '/tmp/ws-b',
       launcher: launchers[1],
     });
     expect(index.resolve('/tmp/ws-b')).toMatchObject({
       kind: 'found',
-      workspaceCwd: '/tmp/ws-b',
+      launcher: launchers[1],
     });
-    expect(index.isTrusted('/tmp/ws-a')).toBe(true);
+  });
+
+  it('does not interpret a relative selector against the daemon cwd', () => {
+    const { index } = indexOf([runtime(process.cwd(), true)]);
+    expect(index.resolve('.')).toMatchObject({ kind: 'refused' });
+  });
+
+  it('binds the launcher to its runtime rather than the workspace path', () => {
+    const runtimes = [runtime('/tmp/ws-a', true)];
+    const { index } = indexOf(runtimes);
+    const target = index.resolve('/tmp/ws-a');
+    if (target.kind !== 'found') throw new Error(target.reason);
+    expect(index.isTrusted('/tmp/ws-a', runtimes[0]!.bridge)).toBe(true);
+    runtimes[0] = runtime('/tmp/ws-a', true);
+    expect(() => target.assertCurrent()).toThrow('no longer active');
+    expect(index.resolve('/tmp/ws-a')).toMatchObject({ kind: 'refused' });
   });
 
   it('refuses an unknown or untrusted workspace and lists the ones that can be named', () => {
@@ -2524,6 +2638,5 @@ describe('sub-session workspace index', () => {
       reason:
         'Workspace /tmp/ws-b is not trusted. Workspaces you can use: Main (/tmp/ws-a).',
     });
-    expect(index.isTrusted('/tmp/ws-b')).toBe(false);
   });
 });
