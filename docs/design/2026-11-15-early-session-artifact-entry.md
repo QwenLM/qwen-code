@@ -2,7 +2,7 @@
 
 [English](2026-11-15-early-session-artifact-entry.md) | [简体中文](2026-11-15-early-session-artifact-entry.zh-CN.md)
 
-Status: proposal (not implemented).
+Status: implemented (scope A); scope B proposed.
 
 ## Problem statement
 
@@ -17,7 +17,11 @@ joined to transcript turns by `getArtifactsByTurn`, so they require the replay.
 A **session-level** entry point, however, only needs the artifact list, not the
 replay. If the list arrives early, the entry point can appear early.
 
-## Current state (measured on the local daemon)
+## Baseline (measured before implementation)
+
+The measurements and behaviors below describe the pre-change baseline that
+motivated this work; scope A has since shipped and changed the response shape
+and client timing described here.
 
 Investigation of session `82c7298a-9233-4efc-b57e-cb1f79ccc06b` (workspace
 `qwen-code`, daemon `0.27.3`), cold-opened headlessly with network timing as the
@@ -42,7 +46,7 @@ But a **session-level header entry** that reads an early artifact list can appea
 at load-response time (~450 ms), ~250 ms before the body, because it does not
 need the replay.
 
-Relevant current behavior:
+Relevant baseline behavior (before this change):
 
 - The bridge restores artifacts into the in-memory store during `loadSession`
   (`packages/acp-bridge/src/session-control-plane.ts`, `entry.artifacts.restore`
@@ -69,7 +73,8 @@ Relevant current behavior:
 - Show a visible, session-level artifact entry in the chat header as soon as the
   artifact list is available from the load response (~450 ms on the measured
   session), before the conversation body renders.
-- The entry shows the artifact count and opens the existing artifact panel.
+- The entry shows the artifact count and opens the environment panel's
+  artifacts section.
 - Do not slow down `/load`.
 - Preserve existing behavior for older daemons and for the per-turn chips.
 
@@ -111,16 +116,22 @@ Relevant current behavior:
 - The daemon session client retains the restore response's `artifacts` as
   `restoredArtifacts`; the provider exposes them on the connection state.
 - To make the entry paint **before** the conversation body, the provider commits
-  `sessionId` + `restoredArtifacts` with `flushSync` in its own render before the
-  replay injects (only when `restoredArtifacts` is present). It touches only
-  those fields; `catchingUp` and the rest of the connection state are left to the
-  existing replay/attach logic. Without the forced commit, React batches the
-  snapshot with the replay injection and the entry would paint with the body.
+  `sessionId` + `restoredArtifacts` + `restoredArtifactsSessionId` with
+  `flushSync` in its own render before the replay injects (only when
+  `restoredArtifacts` is present). It touches only those fields; `catchingUp` and
+  the rest of the connection state are left to the existing replay/attach logic.
+  Without the forced commit, React batches the snapshot with the replay
+  injection and the entry would paint with the body.
 - `useSessionArtifacts` falls back to `connection.restoredArtifacts` when its
   per-session cache is empty, so `artifacts` is populated without waiting for the
-  `catchingUp` gate. The existing gated `refresh` and the `artifactsVersion`
-  -driven refresh remain the source of live updates and overwrite the fallback.
-  When the field is absent (older daemon), behavior is exactly as today.
+  `catchingUp` gate. The fallback is gated on
+  `connection.restoredArtifactsSessionId === sessionId` so an optimistic switch
+  (which spreads the previous connection and sets the new `sessionId` before the
+  restore lands) cannot show the previous session's snapshot under the new
+  session. The snapshot and its key are cleared together on session clear. The
+  existing gated `refresh` and the `artifactsVersion`-driven refresh remain the
+  source of live updates and overwrite the fallback. When the field is absent
+  (older daemon), behavior is exactly as today.
 - Add a new chat header item `artifacts` to `WebShellChatHeaderItem` and to the
   standalone default header items. Render a header button labeled with the
   artifact count (e.g. "Artifacts · N") that opens the environment panel, whose
@@ -143,18 +154,30 @@ Relevant current behavior:
   and live-update semantics intact.
 - **Header entry, not a flat strip.** A count button avoids duplicating the
   per-turn chips and is the smallest visible surface.
+- **Accessor: `listRestored()`, sharing one snapshot helper.** The cheap read
+  accessor is named `listRestored()`; it and `list()` both map through a shared
+  synchronous `snapshotPublicArtifacts()` helper so the two paths cannot drift
+  in ordering or public shape. The helper stays synchronous — `listRestored()`
+  wraps it in a single `enqueue`, and nesting another `enqueue` inside would
+  self-deadlock on the store's queue.
+- **Header item is on by default.** The `artifacts` header item ships enabled in
+  the standalone shell's default header items (not opt-in like `tokenUsage`),
+  for visibility; it still hides itself when the count is 0 or the capability
+  is absent.
 
 ## Files affected
 
 - `packages/acp-bridge/src/sessionArtifacts.ts` (cheap accessor).
 - `packages/acp-bridge/src/session-control-plane.ts` (restore response field).
-- `packages/acp-bridge/src/bridgeTypes.ts` (response typing, if required).
-- `packages/cli/src/serve/routes/session.ts` (forward field; redaction check).
+- `packages/acp-bridge/src/bridgeTypes.ts` (`BridgeRestoredSession` typing).
 - `packages/sdk-typescript/src/daemon/types.ts` (`DaemonRestoredSession`).
-- `packages/web-shell/client/daemon/session/*` (client retains/exposes field).
+- `packages/sdk-typescript/src/daemon/DaemonSessionClient.ts` (retains the field
+  as `restoredArtifacts` on every load/resume factory).
+- `packages/web-shell/client/daemon/session/*` (provider exposes/keys the field).
 - `packages/web-shell/client/hooks/useSessionArtifacts.ts` (early seed).
 - `packages/web-shell/client/customization.tsx` (header item type).
 - `packages/web-shell/client/App.tsx` (default items, header button wiring).
+- `packages/web-shell/client/main.tsx` (standalone default header items).
 - `ChatContextHeader` component (render the button).
 - `packages/web-shell/client/i18n.tsx` (labels).
 - Collocated tests for each changed behavior.
@@ -179,8 +202,8 @@ Relevant current behavior:
 - E2E (headless against a real daemon, network timing as load-bearing evidence):
   cold-open a session with published artifacts; assert the header artifact entry
   appears at load-response time (before body first paint) with the correct count,
-  and that clicking it opens the artifact panel. Reuse the eviction + cold-open
-  measurement harness.
+  and that clicking it opens the environment panel's artifacts section. Reuse
+  the eviction + cold-open measurement harness.
 - Regression: per-turn chips unchanged; `/load` latency not increased; sessions
   without artifacts show no button.
 
@@ -188,16 +211,13 @@ Relevant current behavior:
 
 - On a cold session with artifacts, the header artifact entry is visible before
   the conversation body first paint, with the correct count.
-- Clicking the entry opens the artifact panel populated with the session's
-  artifacts.
+- Clicking the entry opens the environment panel's artifacts section populated
+  with the session's artifacts.
 - `/load` server-side duration does not regress.
 - Older daemons (no field) behave exactly as today.
 - Build, typecheck, and focused unit tests pass.
 
 ## Open questions
 
-- Exact accessor name and whether to reuse an existing internal snapshot helper.
-- Whether the header item should be opt-in (like `tokenUsage`) or on by default
-  in the standalone shell; default-on is proposed for visibility.
 - Scope B follow-up: artifact-summary sidecar for click-time display in the
   session list.

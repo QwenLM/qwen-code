@@ -7298,6 +7298,9 @@ describe('createAcpSessionBridge', () => {
     expect(loaded.artifactWarnings).toEqual([
       'skipped corrupt artifact record',
     ]);
+    expect(loaded.artifacts).toMatchObject([
+      { id: artifactId, title: 'Restored link', url: artifactUrl },
+    ]);
 
     await expect(
       bridge.getSessionArtifacts(loaded.sessionId),
@@ -7345,6 +7348,7 @@ describe('createAcpSessionBridge', () => {
       'skipped artifact without id/title',
       'kept warning',
     ]);
+    expect(loaded).not.toHaveProperty('artifacts');
     await expect(
       bridge.getSessionArtifacts(loaded.sessionId),
     ).resolves.toMatchObject({

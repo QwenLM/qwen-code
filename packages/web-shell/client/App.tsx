@@ -24351,10 +24351,15 @@ export function App({
                           : undefined
                       }
                       artifactCount={
-                        artifactsHeaderItemVisible ? artifacts.length : undefined
+                        artifactsHeaderItemVisible && mainView === 'chat'
+                          ? artifacts.length
+                          : undefined
                       }
                       onOpenArtifacts={
-                        artifactsHeaderItemVisible && connection.sessionId
+                        artifactsHeaderItemVisible &&
+                        mainView === 'chat' &&
+                        environmentPanelItems.includes('artifacts') &&
+                        connection.sessionId
                           ? () => handleEnvironmentPanelOpenChange(true)
                           : undefined
                       }

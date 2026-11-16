@@ -303,6 +303,29 @@ describe('SessionArtifactStore', () => {
     expect(restored).toEqual((await store.list()).artifacts);
   });
 
+  it('listRestored skips the workspace status refresh that list performs', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's-early-nostat',
+      workspaceCwd: workspace,
+    });
+    await fs.writeFile(path.join(workspace, 'early.txt'), 'content');
+    await store.upsertMany([{ title: 'Early', workspacePath: 'early.txt' }]);
+
+    // Age the recorded stat past the refresh TTL so list() must re-stat.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+    const lstatSpy = spyOnLstatForwarding(() => {});
+    try {
+      await store.listRestored();
+      expect(lstatSpy).not.toHaveBeenCalled();
+      await store.list();
+      expect(lstatSpy).toHaveBeenCalled();
+    } finally {
+      lstatSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it('lists, removes, and idempotently ignores missing artifact deletes', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's1',

@@ -4337,6 +4337,60 @@ describe('task activity key', () => {
     expect(testState.latestBackgroundTasksRefreshTrigger).toBe(1);
   });
 
+  it('shows the header artifacts entry with the session count and opens the environment panel', async () => {
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    const makeArtifact = (id: string): DaemonSessionArtifact => ({
+      id,
+      kind: 'html',
+      storage: 'workspace',
+      source: 'tool',
+      status: 'available',
+      title: id,
+      workspacePath: `${id}.html`,
+      clientRetained: false,
+      createdAt: '2026-09-07T00:00:00.000Z',
+      updatedAt: '2026-09-07T00:00:00.000Z',
+    });
+    mockSessionActions.loadArtifacts.mockResolvedValue({
+      artifacts: [makeArtifact('report'), makeArtifact('chart')],
+    });
+    const { container } = renderApp();
+    await flush();
+
+    const entry = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-artifacts-entry]',
+    );
+    expect(entry).not.toBeNull();
+    expect(entry!.getAttribute('aria-label')).toBe('Open artifacts (2)');
+
+    await act(async () => {
+      entry!.click();
+    });
+    await flush();
+    expect(
+      container.querySelector(
+        '[data-testid="environment-panel"]:not([hidden])',
+      ),
+    ).not.toBeNull();
+  });
+
+  it('hides the header artifacts entry when the session has no artifacts', async () => {
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    mockSessionActions.loadArtifacts.mockResolvedValue({ artifacts: [] });
+    const { container } = renderApp();
+    await flush();
+
+    expect(
+      container.querySelector('[data-web-shell-artifacts-entry]'),
+    ).toBeNull();
+  });
+
   it('persists the environment panel open state across reloads', async () => {
     const first = renderApp();
     await flush();
@@ -18514,7 +18568,7 @@ describe('App session callbacks', () => {
         sessionId: 'session-1',
         sessionName: 'Session One',
         workspaceCwd: '/tmp/project',
-        items: ['title', 'environment', 'rightPanel'],
+        items: ['title', 'environment', 'rightPanel', 'artifacts'],
         environmentPanelOpen: false,
         rightPanelOpen: false,
         onEnvironmentPanelOpenChange: expect.any(Function),

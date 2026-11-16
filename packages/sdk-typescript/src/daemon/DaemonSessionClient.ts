@@ -218,6 +218,7 @@ function createStandaloneRestoredClient(
     replayError,
     lastEventId,
     eventEpoch,
+    artifacts,
     ...session
   } = restored;
   return new DaemonSessionClient({
@@ -227,6 +228,7 @@ function createStandaloneRestoredClient(
     state,
     lastEventId: lastEventId ?? 0,
     eventEpoch,
+    restoredArtifacts: artifacts,
     ...(includeReplay
       ? {
           replaySnapshot: {

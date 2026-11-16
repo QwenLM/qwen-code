@@ -856,6 +856,7 @@ describe('useSessionArtifacts', () => {
       capabilities: { features: ['session_artifacts'] },
       catchingUp: true,
       restoredArtifacts: [artifact('early-artifact')],
+      restoredArtifactsSessionId: 'session-a',
     };
     const liveLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
     sdkMock.actions.loadArtifacts.mockReturnValueOnce(liveLoad.promise);
@@ -871,6 +872,12 @@ describe('useSessionArtifacts', () => {
     sdkMock.connection.catchingUp = false;
     await rerenderHookHost();
     expect(sdkMock.actions.loadArtifacts).toHaveBeenCalledTimes(1);
+    // The snapshot still supplies the list while the gated fetch is in flight,
+    // so the panel must not flip to a skeleton (early-list -> spinner flicker).
+    expect(latestState?.loading).toBe(false);
+    expect(latestState?.artifacts.map((item) => item.id)).toEqual([
+      'early-artifact',
+    ]);
     await act(async () => {
       liveLoad.resolve({ artifacts: [artifact('live-artifact')] });
       await liveLoad.promise;
@@ -878,5 +885,28 @@ describe('useSessionArtifacts', () => {
     expect(latestState?.artifacts.map((item) => item.id)).toEqual([
       'live-artifact',
     ]);
+  });
+
+  it('does not leak the previous session snapshot after an optimistic switch to a session without artifacts', async () => {
+    sdkMock.connection = {
+      status: 'connected',
+      sessionId: 'session-a',
+      capabilities: { features: ['session_artifacts'] },
+      catchingUp: true,
+      restoredArtifacts: [artifact('a-only')],
+      restoredArtifactsSessionId: 'session-a',
+    };
+    await renderHookHost();
+    expect(latestState?.artifacts.map((item) => item.id)).toEqual(['a-only']);
+
+    // Optimistic switch: sessionId moves to B while the snapshot still carries
+    // A's id (the provider spreads ...current). B has no artifacts, so no new
+    // snapshot lands and the gated fetch stays blocked by catchingUp.
+    sdkMock.connection = {
+      ...sdkMock.connection,
+      sessionId: 'session-b',
+    };
+    await rerenderHookHost();
+    expect(latestState?.artifacts).toEqual([]);
   });
 });

@@ -2755,6 +2755,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   ...current,
                   sessionId: nextSession.sessionId,
                   restoredArtifacts: nextSession.restoredArtifacts,
+                  restoredArtifactsSessionId: nextSession.sessionId,
                 }));
               });
             }
@@ -3511,6 +3512,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 ? current.goalState
                 : undefined,
             restoredArtifacts: activeSession.restoredArtifacts,
+            restoredArtifactsSessionId: activeSession.sessionId,
             loadingTranscript: undefined,
             catchingUp: replayInjected
               ? current.catchingUp

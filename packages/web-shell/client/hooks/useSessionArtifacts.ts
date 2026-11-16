@@ -132,10 +132,14 @@ export function useSessionArtifacts(): SessionArtifactsState {
     }
   }, [artifactsVersion, refresh]);
 
+  const restoredSnapshot =
+    connection.restoredArtifactsSessionId === sessionId
+      ? connection.restoredArtifacts
+      : undefined;
   const visibleArtifacts =
     sessionKey && supportsArtifacts
       ? (artifactsBySessionRef.current.get(sessionKey)?.artifacts ??
-        connection.restoredArtifacts ??
+        restoredSnapshot ??
         EMPTY_ARTIFACTS)
       : EMPTY_ARTIFACTS;
   const artifactById = useMemo(
@@ -153,7 +157,10 @@ export function useSessionArtifacts(): SessionArtifactsState {
       Boolean(
         sessionId && isConnected && !connection.catchingUp && supportsArtifacts,
       ) &&
-      Boolean(sessionKey && !artifactsBySessionRef.current.has(sessionKey)),
+      Boolean(sessionKey && !artifactsBySessionRef.current.has(sessionKey)) &&
+      // The embedded snapshot already supplies a list; showing a skeleton over
+      // it between catch-up and the gated fetch would flicker the early entry.
+      restoredSnapshot === undefined,
     error: null,
     hydrated,
     refresh,
