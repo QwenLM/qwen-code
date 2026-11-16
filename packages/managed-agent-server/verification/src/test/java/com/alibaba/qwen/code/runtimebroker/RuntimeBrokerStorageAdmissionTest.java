@@ -49,7 +49,7 @@ class RuntimeBrokerStorageAdmissionTest {
         for (int round = 0; round < 2; round++) {
             try (var broker = broker(provisioner, bindings, source, Clock.systemUTC(), Duration.ofSeconds(30))) {
                 for (int retry = 0; retry < 2; retry++) {
-                    assertEquals("workspace_csi_busy", failure(broker.warm("harness")).getCode());
+                    assertEquals("workspace_busy", failure(broker.warm("harness")).getCode());
                     var current = bindings.findById(original.getBindingId());
                     assertEquals(RuntimeBindingRecord.State.PROVISIONING, current.getState());
                     assertEquals(original.getGeneration(), current.getGeneration());
@@ -62,7 +62,7 @@ class RuntimeBrokerStorageAdmissionTest {
         assertEquals(0, provisioner.ensureCalls);
         provisioner.admit = binding -> { };
         try (var broker = broker(provisioner, bindings, source, Clock.systemUTC(), Duration.ofSeconds(30))) {
-            assertEquals("workspace_csi_provenance_unavailable", failure(broker.warm("harness")).getCode());
+            assertEquals("workspace_migrating", failure(broker.warm("harness")).getCode());
         }
         assertEquals(1, provisioner.ensureCalls);
         assertEquals(original.getProvisionSeed(), provisioner.createdWith);
@@ -70,10 +70,10 @@ class RuntimeBrokerStorageAdmissionTest {
 
     @ParameterizedTest
     @CsvSource({
-            "kubernetes-scratch, runtime_kubernetes_capacity",
+            "ssh-process, ssh_runtime_busy",
             "external-scratch, runtime_external_capacity"
     })
-    void scratchCapacityPreservesTheOriginalSeedAcrossPreCreateRetries(String kind, String code) {
+    void retryableCapacityPreservesTheOriginalSeedAcrossPreCreateRetries(String kind, String code) {
         DataSource source = database();
         ManagedSchema.initialize(source);
         var bindings = new JdbcRuntimeBindingRepository(source, PROTECTOR);
@@ -97,7 +97,7 @@ class RuntimeBrokerStorageAdmissionTest {
         assertEquals(0, provisioner.ensureCalls);
         provisioner.admit = binding -> { };
         try (var broker = broker(provisioner, bindings, source, Clock.systemUTC(), Duration.ofSeconds(30))) {
-            assertEquals("workspace_csi_provenance_unavailable", failure(broker.warm("harness")).getCode());
+            assertEquals("workspace_migrating", failure(broker.warm("harness")).getCode());
         }
         assertEquals(1, provisioner.ensureCalls);
         assertEquals(original.getProvisionSeed(), provisioner.createdWith);
@@ -129,7 +129,7 @@ class RuntimeBrokerStorageAdmissionTest {
         assertEquals(0, provisioner.ensureCalls);
         provisioner.admit = binding -> { };
         try (var broker = broker(provisioner, bindings, source, Clock.systemUTC(), Duration.ofSeconds(30))) {
-            assertEquals("workspace_csi_provenance_unavailable", failure(broker.warm("harness")).getCode());
+            assertEquals("workspace_migrating", failure(broker.warm("harness")).getCode());
         }
         assertEquals(1, provisioner.ensureCalls);
         assertEquals(original.getProvisionSeed(), provisioner.createdWith);
@@ -158,9 +158,9 @@ class RuntimeBrokerStorageAdmissionTest {
         }
         assertEquals(2, provisioner.ensureCalls);
         provisioner.ensureFailure = new RuntimeBrokerException(409,
-                "workspace_csi_provenance_unavailable", "Provenance unavailable.", false);
+                "workspace_migrating", "Storage is under maintenance.", false);
         try (var broker = broker(provisioner, bindings, source, Clock.systemUTC(), Duration.ofSeconds(30))) {
-            assertEquals("workspace_csi_provenance_unavailable", failure(broker.warm("harness")).getCode());
+            assertEquals("workspace_migrating", failure(broker.warm("harness")).getCode());
             assertEquals(RuntimeBindingRecord.State.RECOVERY_BLOCKED,
                     bindings.findById(original.getBindingId()).getState());
         }
@@ -203,7 +203,7 @@ class RuntimeBrokerStorageAdmissionTest {
         assertEquals(0, provisioner.ensureCalls);
         provisioner.admit = binding -> { };
         try (var broker = broker(provisioner, bindings, source, Clock.systemUTC(), Duration.ofSeconds(30))) {
-            assertEquals("workspace_csi_provenance_unavailable", failure(broker.warm("harness")).getCode());
+            assertEquals("workspace_migrating", failure(broker.warm("harness")).getCode());
         }
         assertEquals(1, provisioner.ensureCalls);
         assertEquals(original.getProvisionSeed(), provisioner.createdWith);
@@ -213,9 +213,9 @@ class RuntimeBrokerStorageAdmissionTest {
     // no persisted handle leaves that kind adoptable instead of blocked.
     @ParameterizedTest
     @CsvSource({
-            "kubernetes-scratch, runtime_kubernetes_capacity"
+            "ssh-process, ssh_runtime_busy"
     })
-    void scratchCapacityAfterEnteringEnsureRemainsRecoveryBlocked(String kind, String code) {
+    void retryableCapacityAfterEnteringEnsureRemainsRecoveryBlocked(String kind, String code) {
         DataSource source = database();
         ManagedSchema.initialize(source);
         var bindings = new JdbcRuntimeBindingRepository(source, PROTECTOR);
@@ -307,16 +307,16 @@ class RuntimeBrokerStorageAdmissionTest {
     }
 
     private static RuntimeBrokerException busy() {
-        return new RuntimeBrokerException(409, "workspace_csi_busy", "Storage is reserved.", true);
+        return new RuntimeBrokerException(409, "workspace_busy", "Workspace is not available for this operation.", true);
     }
 
     private static final class AdmissionProvisioner implements RuntimeProvisioner {
-        private String provisionerKind = "kubernetes-workspace";
+        private String provisionerKind = "local-process";
         private Consumer<RuntimeBindingRecord> admit = binding -> { };
         private int ensureCalls;
         private RuntimeProvisionSeed createdWith;
         private RuntimeBrokerException ensureFailure = new RuntimeBrokerException(409,
-                "workspace_csi_provenance_unavailable", "Provenance unavailable.", false);
+                "workspace_migrating", "Storage is under maintenance.", false);
 
         @Override
         public String kind() {
@@ -326,7 +326,7 @@ class RuntimeBrokerStorageAdmissionTest {
         @Override
         public RuntimeProvisionRequest createRequest(RuntimeScope scope, String isolationKey) {
             return new RuntimeProvisionRequest(scope, isolationKey, kind(),
-                    "kubernetes-workspace".equals(kind()) ? "storage" : null);
+                    "local-process".equals(kind()) ? "storage" : null);
         }
 
         @Override
