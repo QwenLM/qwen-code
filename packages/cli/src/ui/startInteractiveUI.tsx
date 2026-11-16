@@ -69,6 +69,7 @@ import { sanitizeTerminalText } from './utils/textUtils.js';
 import { startPostRenderPrefetches } from '../startup/startup-prefetch.js';
 import { computeWindowTitle, writeTerminalTitle } from './utils/windowTitle.js';
 import { getCliVersion } from '../utils/version.js';
+import type { DeferredUserStartupWarnings } from '../utils/userStartupWarnings.js';
 import { primeGitBranchName } from './hooks/useGitBranchName.js';
 
 const debugLogger = createDebugLogger('STARTUP');
@@ -79,6 +80,7 @@ const debugLogger = createDebugLogger('STARTUP');
 const PRESSURE_CHECK_INTERVAL_MS = 30_000;
 
 export interface StartInteractiveUIOptions {
+  deferredUserStartupWarnings?: DeferredUserStartupWarnings;
   postRenderConnectIde?: boolean;
   postRenderInitializeTelemetry?: boolean;
   extensionRefreshState?: ExtensionRefreshState;
@@ -279,6 +281,9 @@ export async function startInteractiveUI(
                             config={config}
                             settings={settings}
                             startupWarnings={startupWarnings}
+                            deferredUserStartupWarnings={
+                              options.deferredUserStartupWarnings
+                            }
                             version={version}
                             initializationResult={initializationResult}
                             initialUseVirtualViewport={useVP}

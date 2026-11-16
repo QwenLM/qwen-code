@@ -28,6 +28,7 @@ const registerSession = vi.hoisted(() => vi.fn());
 const REGISTERED = { registered: true, slot: 'shared' };
 const registerCleanup = vi.hoisted(() => vi.fn());
 const inkRender = vi.hoisted(() => vi.fn());
+const observedDeferredWarnings = vi.hoisted(() => ({ value: null as unknown }));
 const lastPeerInboxFailure = vi.hoisted(() => ({ value: null as unknown }));
 const observedPeerInboxFailure = vi.hoisted(() => ({
   value: null as unknown,
@@ -56,7 +57,8 @@ vi.mock('./AppContainer.js', async () => {
     '../peerMessaging/PeerMessagingContext.js'
   );
   return {
-    AppContainer: () => {
+    AppContainer: (props: { deferredUserStartupWarnings?: unknown }) => {
+      observedDeferredWarnings.value = props.deferredUserStartupWarnings;
       observedPeerInboxFailure.value = usePeerInboxFailure();
       return React.createElement('div');
     },
@@ -206,6 +208,28 @@ async function start(
 describe('startInteractiveUI session registration', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it('passes the shared deferred warning request into the Ink container', async () => {
+    registerSession.mockResolvedValue(REGISTERED);
+    const config = makeConfig();
+    const pending = {
+      config,
+      workspaceRoot: process.cwd(),
+      signal: new AbortController().signal,
+      promise: Promise.resolve(['late warning']),
+    };
+    await startInteractiveUI(
+      config,
+      settings,
+      [],
+      '/work/app',
+      initializationResult,
+      { deferredUserStartupWarnings: pending },
+    );
+    const view = renderDom(inkRender.mock.calls.at(-1)![0] as ReactElement);
+    expect(observedDeferredWarnings.value).toBe(pending);
+    view.unmount();
   });
 
   it('registers the session with its id, target dir, CLI version, and kind', async () => {

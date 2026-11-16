@@ -4,7 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+const { canUseRipgrep } = vi.hoisted(() => ({ canUseRipgrep: vi.fn() }));
+vi.mock('@qwen-code/qwen-code-core/utils/ripgrepUtils.js', () => ({
+  canUseRipgrep,
+}));
+
 import { getUserStartupWarnings } from './userStartupWarnings.js';
 import * as os from 'node:os';
 import fs from 'node:fs/promises';
@@ -19,6 +24,7 @@ describe('getUserStartupWarnings', () => {
   };
 
   beforeEach(async () => {
+    canUseRipgrep.mockReset().mockResolvedValue(true);
     testRootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'warnings-test-'));
     startupOptions = {
       workspaceRoot: testRootDir,
@@ -28,6 +34,7 @@ describe('getUserStartupWarnings', () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await fs.rm(testRootDir, { recursive: true, force: true });
   });
 
@@ -57,6 +64,74 @@ describe('getUserStartupWarnings', () => {
         expect.stringContaining('root directory'),
       );
     });
+  });
+
+  it('preserves the original ripgrep call without a cancellation signal', async () => {
+    await getUserStartupWarnings(startupOptions);
+    expect(canUseRipgrep).toHaveBeenCalledExactlyOnceWith(true);
+  });
+
+  it('forwards abort and waits for the supported probe to settle', async () => {
+    const controller = new AbortController();
+    let closeProbe!: () => void;
+    canUseRipgrep.mockImplementationOnce(
+      (_builtin, signal: AbortSignal) =>
+        new Promise<boolean>((resolve) => {
+          signal.addEventListener('abort', () => {
+            closeProbe = () => resolve(false);
+          });
+        }),
+    );
+    let settled = false;
+    const warnings = getUserStartupWarnings({
+      ...startupOptions,
+      signal: controller.signal,
+    }).then((value) => {
+      settled = true;
+      return value;
+    });
+    controller.abort();
+    await Promise.resolve();
+    expect(canUseRipgrep).toHaveBeenCalledExactlyOnceWith(
+      true,
+      controller.signal,
+    );
+    expect(settled).toBe(false);
+    closeProbe();
+    expect(await warnings).toEqual([]);
+  });
+
+  it('skips work for an already aborted owner', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const realpath = vi.spyOn(fs, 'realpath');
+    expect(
+      await getUserStartupWarnings({
+        ...startupOptions,
+        signal: controller.signal,
+      }),
+    ).toEqual([]);
+    expect(realpath).not.toHaveBeenCalled();
+    expect(canUseRipgrep).not.toHaveBeenCalled();
+  });
+
+  it('discards an uncancellable late realpath result after abort', async () => {
+    const controller = new AbortController();
+    let finish!: (path: string) => void;
+    vi.spyOn(fs, 'realpath').mockImplementationOnce(
+      () =>
+        new Promise<string>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const warnings = getUserStartupWarnings({
+      ...startupOptions,
+      useRipgrep: false,
+      signal: controller.signal,
+    });
+    controller.abort();
+    finish(path.parse(testRootDir).root);
+    expect(await warnings).toEqual([]);
   });
 
   describe('error handling', () => {

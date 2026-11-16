@@ -6,13 +6,22 @@
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { canUseRipgrep } from '@qwen-code/qwen-code-core/utils/ripgrepUtils.js';
 
 type WarningCheckOptions = {
   workspaceRoot: string;
   useRipgrep: boolean;
   useBuiltinRipgrep: boolean;
+  signal?: AbortSignal;
 };
+
+export interface DeferredUserStartupWarnings {
+  readonly config: Config;
+  readonly workspaceRoot: string;
+  readonly signal: AbortSignal;
+  readonly promise: Promise<string[]>;
+}
 
 type WarningCheck = {
   id: string;
@@ -23,8 +32,10 @@ type WarningCheck = {
 const rootDirectoryCheck: WarningCheck = {
   id: 'root-directory',
   check: async (options: WarningCheckOptions) => {
+    if (options.signal?.aborted) return null;
     try {
       const workspaceRealPath = await fs.realpath(options.workspaceRoot);
+      if (options.signal?.aborted) return null;
       const errorMessage =
         'Warning: You are running Qwen Code in the root directory. Your entire folder structure will be used for context. It is strongly recommended to run in a project-specific directory.';
 
@@ -35,6 +46,7 @@ const rootDirectoryCheck: WarningCheck = {
 
       return null;
     } catch (_err: unknown) {
+      if (options.signal?.aborted) return null;
       return 'Could not verify the current directory due to a file system error.';
     }
   },
@@ -43,17 +55,21 @@ const rootDirectoryCheck: WarningCheck = {
 const ripgrepAvailabilityCheck: WarningCheck = {
   id: 'ripgrep-availability',
   check: async (options: WarningCheckOptions) => {
-    if (!options.useRipgrep) {
+    if (!options.useRipgrep || options.signal?.aborted) {
       return null;
     }
 
     try {
-      const isAvailable = await canUseRipgrep(options.useBuiltinRipgrep);
+      const isAvailable = options.signal
+        ? await canUseRipgrep(options.useBuiltinRipgrep, options.signal)
+        : await canUseRipgrep(options.useBuiltinRipgrep);
+      if (options.signal?.aborted) return null;
       if (!isAvailable) {
         return 'Ripgrep not available: Please install ripgrep globally to enable faster file content search. Falling back to built-in grep.';
       }
       return null;
     } catch (error) {
+      if (options.signal?.aborted) return null;
       return `Ripgrep not available: ${error instanceof Error ? error.message : 'Unknown error'}. Falling back to built-in grep.`;
     }
   },
