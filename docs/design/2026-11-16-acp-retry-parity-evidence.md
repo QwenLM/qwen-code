@@ -6,6 +6,7 @@
 
 A Linux Node 22 CI attempt failed the repeated-retry scenario because shared-loop round counts differed between arms. Its JUnit report retained the assertion but not the arm debug bytes, requests or updates needed to distinguish execution divergence from incomplete diagnostic output.
 A later local Node 24 directed run passed both its test and outer lifecycle: current/shared/kernel counts were 0/0, 3/0 and 3/3, with identical observed debug bytes before termination and after exit. A separate full-file run passed 25 inner tests but its outer cleanup was NQ, not a whole-pipeline pass. Neither observation reproduces, explains or erases the CI failure; earlier broad-meta timeout and platform date-tool failure remain failed records.
+Integration with `main` at `b5698f6b07c32dec2d587dc16d8658ec0abac9cd` preserves its pre-shutdown settled-log read (upstream #17365). The observer still snapshots before kill and after parent exit, but the assertion counts come from that upstream settled read; the post-exit snapshot does not overwrite them. Earlier local results above belong to the earlier candidate. This integrated candidate requires its own build, tests and CI.
 The test-side observer is locally exercised; CI admission and same-attempt remote evidence remain separate validation gates. This change is evidence retention, not a retry or runtime fix.
 
 ## Scope and ownership

@@ -51,6 +51,7 @@ type ExemptionConfig = {
     outputFile?: { junit?: string };
     reporters?: (string | [string, unknown])[];
     testTimeout?: number;
+    hookTimeout?: number;
     pool?: 'threads' | 'forks' | 'vmThreads';
     poolOptions?: { threads?: { maxThreads?: number } };
   };
@@ -433,6 +434,9 @@ describe('shared-pool test timeout', () => {
     // `expectOffPoolCeilings` asserts it, node-repl/sdk-typescript/scripts/tests
     // carry flat ceilings, and qwen-live's ceiling is unconditional.
     vi.stubEnv('RUNNER_NAME', 'ubuntu-latest-runner');
+    // cli also keys its ceiling on RUNNER_OS === 'macOS'; drop the ambient
+    // value so this arm reads the off-macOS figure even on a macOS runner.
+    vi.stubEnv('RUNNER_OS', undefined);
     vi.resetModules();
     try {
       await expectOffPoolCeilings();
@@ -452,10 +456,48 @@ describe('shared-pool test timeout', () => {
     // passes the on-pool floor and the foreign-string off-pool sample above;
     // it must fail here, on the state the configs actually see off CI.
     vi.stubEnv('RUNNER_NAME', undefined);
+    vi.stubEnv('RUNNER_OS', undefined);
     vi.resetModules();
     try {
       await expectOffPoolCeilings();
     } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('keys the cli hook and test ceilings on the macOS runner, not the host platform', async () => {
+    // cli gives the contended macOS nightly hosts the pool's hook AND test
+    // ceilings (the test ceiling moved here from a runtime vi.setConfig so it
+    // cannot outrank the autofix gate's --testTimeout; R4-1). Sample the
+    // runner signal against the host platform in both directions so this
+    // reads the config's logic on any host: dropping, inverting or flattening
+    // either arm fails here, and so does keying it on process.platform, which
+    // cannot tell a 3-core nightly runner from an idle laptop. The ECS arm
+    // stays pinned by `autofix gate load clamps`.
+    const originalPlatform = process.platform;
+    const setPlatform = (platform: NodeJS.Platform) =>
+      Object.defineProperty(process, 'platform', {
+        configurable: true,
+        enumerable: true,
+        value: platform,
+      });
+    vi.stubEnv('RUNNER_NAME', undefined);
+    try {
+      for (const [runnerOs, platform, hookTimeout, testTimeout] of [
+        ['macOS', 'linux', 60_000, 60_000],
+        ['Linux', 'darwin', undefined, 15_000],
+        [undefined, 'darwin', undefined, 15_000],
+      ] as const) {
+        vi.stubEnv('RUNNER_OS', runnerOs);
+        setPlatform(platform);
+        vi.resetModules();
+        const cli = await configModules['packages/cli']!();
+        const label = `RUNNER_OS=${runnerOs} platform=${platform}`;
+        expect(cli.default.test?.hookTimeout, label).toBe(hookTimeout);
+        expect(cli.default.test?.testTimeout, label).toBe(testTimeout);
+      }
+    } finally {
+      setPlatform(originalPlatform);
       vi.unstubAllEnvs();
     }
   });
@@ -716,5 +758,57 @@ describe('scripts suite timeout', () => {
       readFileSync(join(tests, 'qwen-autofix-workflow.test.js'), 'utf8'),
       'the deferred-findings harness bounds its subprocess with its own figure',
     ).toContain('QWEN_SCRIPTS_TEST_TIMEOUT_MS');
+  });
+});
+
+describe('autofix-gate per-file ceiling floor', () => {
+  // The autofix verification gate launches every changed workspace with
+  // --testTimeout=60000 through an env -i allowlist that drops RUNNER_NAME,
+  // so a runtime vi.setConfig keyed on the slow-host helper resolves to its
+  // fast arm and OUTRANKS the flag — the suite then gets 15s inside the gate
+  // instead of the 60s it provisions (R4-1). The suites this PR tunes must
+  // therefore own no runtime testTimeout: the config layer holds the ceiling
+  // (cli keys it on the macOS runner) and the describe ceilings leave their
+  // fast arm undefined so it inherits whatever the lane grants. Scoped to
+  // these files on purpose — the other runtime-setConfig suites are the
+  // gate's documented residual, closed in a separate slice.
+  const root = fileURLToPath(new URL('../../', import.meta.url));
+  const guarded = [
+    'packages/cli/src/ui/auth/SubscriptionDialog.test.tsx',
+    'packages/cli/src/serve/server/session-pr-refresh.test.ts',
+    'packages/core/src/hooks/file-changed-watcher.test.ts',
+  ];
+  it('keeps the tuned suites from overriding the granted testTimeout', () => {
+    for (const file of guarded) {
+      const src = readFileSync(join(root, file), 'utf8');
+      expect(
+        src,
+        `${file} overrides the testTimeout the lane grants`,
+      ).not.toMatch(/vi\.setConfig\(\{[^}]*testTimeout/);
+      // A describe-level `{ timeout }` outranks --testTimeout exactly like a
+      // runtime setConfig (vitest resolves options.timeout ?? config.testTimeout),
+      // so the floor must cover that spelling too (R5-1). Check every ceiling
+      // constant's FAST arm — the one in force inside the gate, where env -i
+      // drops RUNNER_NAME/RUNNER_OS and the worker clamp keeps loadavg under
+      // the slow-host threshold: it must inherit (undefined) or sit at/above
+      // the 60000 the gate grants, never below it.
+      for (const [, name, expr] of src.matchAll(
+        /const\s+(\w*CEILING\w*)\s*=\s*([^;]+);/g,
+      )) {
+        let fast = expr.trim();
+        const q = fast.indexOf('?');
+        if (q >= 0) fast = fast.slice(fast.indexOf(':', q) + 1).trim();
+        if (fast === 'undefined') continue;
+        const n = Number(fast.replace(/_/g, ''));
+        expect(
+          Number.isFinite(n),
+          `${file}: ${name} fast arm "${fast}" is not a plain literal`,
+        ).toBe(true);
+        expect(
+          n,
+          `${file}: ${name} fast arm ${n} sits below the gate's 60000 grant`,
+        ).toBeGreaterThanOrEqual(60_000);
+      }
+    }
   });
 });

@@ -3,7 +3,10 @@ import { setTimeout as delay } from 'node:timers/promises';
 import type { ImapFlow } from 'imapflow';
 import type { ParsedMail, simpleParser } from 'mailparser';
 import type { Transporter } from 'nodemailer';
-import { resolvePrivatePolicy } from '@qwen-code/channel-base';
+import {
+  MANAGED_OUTBOUND_LIMIT,
+  resolvePrivatePolicy,
+} from '@qwen-code/channel-base';
 import type {
   ManagedChannelPolicy,
   ManagedInboundEvent,
@@ -141,6 +144,7 @@ export class ManagedEmailAdapter {
   private parse?: typeof simpleParser;
   private releaseLock?: () => Promise<void>;
   private running = false;
+  private ownershipLost = false;
   private abort = new AbortController();
   private loop?: Promise<void>;
   /**
@@ -204,7 +208,10 @@ export class ManagedEmailAdapter {
     try {
       this.releaseLock = await this.deps.lock(this.store.directory, () => {
         // A reaped stale lock means a second owner won the mailbox: stop
-        // rather than keep polling as its silent twin.
+        // rather than keep polling as its silent twin, and stop persisting —
+        // an in-flight tick or the shutdown drain must not rewrite the state
+        // file the new owner now holds (parity with DingTalk R7-2, #17173).
+        this.ownershipLost = true;
         this.log(
           'Managed email state ownership was lost to another process; adapter stopped.',
         );
@@ -359,6 +366,9 @@ export class ManagedEmailAdapter {
   }
 
   private persist(): void {
+    // Once the lock is compromised the state file belongs to another process;
+    // never rewrite it, even from an in-flight tick's post-await persist.
+    if (this.ownershipLost) return;
     if (!this.state) throw new Error('Managed email state is unavailable.');
     this.store.save(this.state);
   }
@@ -1077,7 +1087,7 @@ export class ManagedEmailAdapter {
           ordinal: segment.ordinal,
           messageId,
         },
-      ].slice(-64);
+      ].slice(-MANAGED_OUTBOUND_LIMIT);
       this.persist();
       let outcome: ManagedReceipt;
       try {

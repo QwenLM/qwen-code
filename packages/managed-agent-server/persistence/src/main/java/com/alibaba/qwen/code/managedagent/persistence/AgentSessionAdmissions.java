@@ -140,7 +140,6 @@ final class AgentSessionAdmissions {
         List<Map<String, Object>> input = command.input();
         String payloadDigest = command.payloadDigest();
         WorkspaceSelection selection = command.selection();
-        String requestedApprovalMode = command.requestedApprovalMode();
         boolean approvalSelectionSupported = command.approvalSelectionSupported();
         Boolean requestedPlanMode = command.requestedPlanMode();
         boolean planModeSupported = command.planModeSupported();
@@ -182,8 +181,11 @@ final class AgentSessionAdmissions {
             throw new ManagedAgentException(400, "unsupported_model",
                     "The model is not published for this Agent.");
         }
-        AgentSessionPolicies.AgentPin pin = AgentSessionPolicies.selectApprovalMode(sessionPolicies.resolveAgentPin(tenantId, agentId,
-                requestedRevision, true), requestedApprovalMode, approvalSelectionSupported);
+        AgentSessionPolicies.AgentPin resolvedPin = sessionPolicies.resolveAgentPin(tenantId, agentId, requestedRevision, true);
+        requireCreationScope(tenantId, idempotencyKey, true);
+        ResolvedBinding workspace = workspaces.resolveForCreation(tenantId, actorId, selection);
+        boolean external = workspaces.isExternal(workspace.binding());
+        AgentSessionPolicies.AgentPin pin = ExternalWorkspaceSessionPolicies.creationPin(external, workspaces, workspace.binding(), resolvedPin, command);
         boolean planMode = Boolean.TRUE.equals(requestedPlanMode);
         if (planMode && (!planModeSupported || !approvalSelectionSupported
                 || pin.hooks() || pin.mcp() || !(WorkspaceToolProfiles.FILES.equals(pin.toolProfile())
@@ -194,9 +196,6 @@ final class AgentSessionAdmissions {
                 && !workspaceShellEnabled) {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
         }
-        requireCreationScope(tenantId, idempotencyKey, true);
-        ResolvedBinding workspace = workspaces.resolveForCreation(
-                tenantId, actorId, selection);
         requireModelConfiguration(modelConfig);
         if (extensionPins != null) {
             if (extensionPackages == null) {
@@ -223,22 +222,18 @@ final class AgentSessionAdmissions {
                 throw AgentSessionPolicies.workspaceExecutionUnavailable();
             }
             residentWorkspaces.requireCreation(jdbc, workspace.binding(), pin.toolProfile());
-        } else if (!sshWorkspace) {
+        } else if (!sshWorkspace && !external) {
             WorkspaceStorageKindGuard.requireLocalAlias(jdbc, tenantId, workspace.binding().getStorageId());
         }
         if (!resident && !input.isEmpty()
                 && (!WorkspaceExecutionProfile.CONFIG_REF.equals(workspace.configRef())
                         || !WorkspaceExecutionProfile.POLICY_REF.equals(workspace.policyRef())
-                        || !sshWorkspace && !configuredStorage(tenantId, workspace.binding().getStorageId()))) {
+                        || !sshWorkspace && !external && !configuredStorage(tenantId, workspace.binding().getStorageId()))) {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
         }
-        List<Map<String, Object>> merged = new ArrayList<>();
-        if (!skills.isEmpty() && pin.digest() != null) {
-            merged.addAll(AgentDefinitionExtensions.skills(storeRows.readMap(definitions.find(tenantId, agentId,
-                    Long.parseLong(pin.revision())).orElseThrow().definitionJson()).get("skills"), true));
-        }
-        merged.addAll(skills);
-        var effectiveSkills = AgentDefinitionExtensions.sessionSkills(merged);
+        List<Map<String, Object>> merged = new ArrayList<>(pin.skills());
+        var injectedCatalog = ManagedLoopSkill.mergeInto(merged, skills, pin.toolProfile(), command.sessionSkillsSupported());
+        var effectiveSkills = injectedCatalog != null ? injectedCatalog : AgentDefinitionExtensions.sessionSkills(merged);
         if (worktree != null && sessionWorktrees == null) {
             throw new ManagedAgentException(409, "worktree_unavailable", "Session worktrees are unavailable.");
         }
@@ -259,8 +254,8 @@ final class AgentSessionAdmissions {
             jdbc.update("UPDATE ma_session SET public_child_agents_version=1 WHERE tenant_id=? AND session_id=?",
                     tenantId, admission.sessionId());
         }
-        if (!skills.isEmpty()) {
-            creationSkills.save(tenantId, admission.sessionId(), effectiveSkills);
+        if (!effectiveSkills.isEmpty() && (!skills.isEmpty() || injectedCatalog != null)) {
+            creationSkills.save(tenantId, admission.sessionId(), effectiveSkills, injectedCatalog != null);
         }
         if (extensionPins != null) {
             creationSkills.saveInitialSelection(tenantId, admission.sessionId(), extensionPins);
@@ -306,7 +301,7 @@ final class AgentSessionAdmissions {
         }
         return insertSession(tenantId, "CREATE_SESSION", idempotencyKey, requestDigest,
                 "qwen-code", title, List.of(), null, workspace, actorId,
-                new AgentSessionPolicies.AgentPin(agentRevision, null, approvalMode, WorkspaceToolProfiles.INTERNAL_TEAM_LEAD, false, false));
+                new AgentSessionPolicies.AgentPin(agentRevision, null, approvalMode, WorkspaceToolProfiles.INTERNAL_TEAM_LEAD, false, false, List.of()));
     }
 
     Optional<Admission> findWorkspaceCreateReplay(String tenantId,
@@ -609,11 +604,15 @@ final class AgentSessionAdmissions {
         ManagedReceipts.insertCreation(jdbc, tenantId,
                 ManagedWorkspaceRegistry.actorKey(tenantId, ChildSessionCreation.childActorOf(parentSessionId)),
                 idempotencyKey, requestDigest, sessionId, turnId, now);
-        var inheritedSkills = snapshot == null ? creationSkills.snapshot(tenantId, parentSessionId)
-                : creationSkills.fromLaunchReference(tenantId, parentSessionId, snapshot.path("skillsRef"));
-        if (inheritedSkills != null) {
-            creationSkills.save(tenantId, sessionId, inheritedSkills);
-        }
+        var inheritedSkills = snapshot == null ? creationSkills.snapshot(tenantId, parentSessionId) : creationSkills.fromLaunchReference(tenantId, parentSessionId, snapshot.path("skillsRef"));
+        boolean parentDefinitionHasLoop = toolProfile != null
+                && parent.agentDefinitionDigest() != null
+                && AgentDefinitionExtensions.skills(definitions.pinnedContent(parent).get("skills"), true).stream()
+                        .anyMatch(skill -> ManagedLoopSkill.NAME.equals(skill.get("name")));
+        boolean parentServerLoop = creationSkills.serverLoopInjected(tenantId, parentSessionId);
+        boolean childServerLoop = toolProfile == null && parentServerLoop;
+        java.util.Optional.ofNullable(ManagedLoopSkill.childCatalog(inheritedSkills, toolProfile, parentDefinitionHasLoop, parentServerLoop))
+                .ifPresent(skills -> creationSkills.save(tenantId, sessionId, skills, childServerLoop));
         eventJournal.appendEvent(tenantId, sessionId, null, "session.created",
                 Map.of("sessionId", sessionId), false, null, now);
         if (turnId != null) {

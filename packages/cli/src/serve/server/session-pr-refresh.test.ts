@@ -53,6 +53,25 @@ import {
   startSessionPrRefreshTimer,
 } from './session-pr-refresh.js';
 import { arePermissionBitsEnforced } from '../../test-utils/permission-bits.js';
+import {
+  isSlowTestHost,
+  slowHostBudgetMs,
+} from '../../test-utils/slow-test-host.js';
+
+// The timer ceiling above is derived, so the waits under it have to be too:
+// a 15s fast ceiling cannot contain a hardcoded 10s + 10s + 30s chain, or
+// vitest truncates the case before the last wait reports its own assertion.
+// An idle host keeps vi.waitFor's 1s default; a saturated one gets the
+// contended budget.
+const OBSERVE_WAIT_MS = slowHostBudgetMs(1_000, 10_000);
+const SETTLE_WAIT_MS = slowHostBudgetMs(1_000, 30_000);
+
+// Captured at module load, before any case installs fake timers: the
+// rotation loop has to give the refresh tail REAL wall time, and inside a
+// fake-timer case `setTimeout` is the faked one. Vitest fakes `setImmediate`
+// as well (it excludes only nextTick/queueMicrotask), so the setImmediate
+// settle idiom used by the real-timer cases below cannot serve here.
+const realSetTimeout = globalThis.setTimeout;
 
 // dispose() stops the next tick but does not await the sweep already in
 // flight, so a sweep can still be writing under the temp tree while teardown
@@ -68,14 +87,27 @@ const removeTempTree = (dir: string) =>
   });
 
 // Delegating spy: the Aone tests seed a real repository, so resolution must
-// really run — the spy only makes its per-sweep cost observable.
+// really run — the spy only makes its per-sweep cost observable. The probe
+// budget is test-generous: on a saturated host the production spawn can time
+// out and degrade resolution to undefined, trading the case's value
+// assertion for a host artifact. A single attempt with headroom keeps the
+// assertion reading "resolution succeeded" instead of "the second attempt
+// succeeded".
 const aoneMocks = vi.hoisted(() => ({
   resolveAoneWorkspaceRepo: vi.fn(),
 }));
 vi.mock('./aone-mrs.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./aone-mrs.js')>();
   aoneMocks.resolveAoneWorkspaceRepo.mockImplementation(
-    actual.resolveAoneWorkspaceRepo,
+    (cwd: string, env?: Readonly<Record<string, string | undefined>>) =>
+      // Derived, not copied: a hand-written literal would drop below the
+      // production budget if GIT_ORIGIN_TIMEOUT_MS ever rose, and resolution
+      // would degrade to undefined again on a saturated host.
+      actual.resolveAoneWorkspaceRepo(
+        cwd,
+        env,
+        actual.GIT_ORIGIN_TIMEOUT_MS * 3,
+      ),
   );
   return {
     ...actual,
@@ -313,7 +345,14 @@ describe('refreshWorkspaceSessionPrStates', () => {
     );
   });
 
-  describe('on an Aone workspace', () => {
+  // The real-git origin probe runs under the test-generous budget above
+  // (GIT_ORIGIN_TIMEOUT_MS * 3 = 15s); the ceiling keeps probe + seeded git +
+  // refresh tail inside the lane budget on contended hosts. The arm is raised
+  // to a flat 60s — never below the probe budget on an idle host, and never
+  // below the 60s the autofix verification gate grants via --testTimeout
+  // (a lower per-file ceiling would outrank that flag; see R4-1).
+  const AONE_CEILING_MS = 60_000;
+  describe('on an Aone workspace', { timeout: AONE_CEILING_MS }, () => {
     const AONE_URL =
       'https://code.alibaba-inc.com/jspt/agentic_coding/codereview/26430560';
 
@@ -2638,7 +2677,18 @@ describe('refreshWorkspaceSessionPrStates', () => {
   });
 });
 
-describe('startSessionPrRefreshTimer', () => {
+// The timer cases chain real-clock vi.waitFor budgets (the rotation case
+// declares waits plus up to 40 interval advances interleaved with real
+// timer pauses for the refresh tail's real fs) and the Aone ones spawn the
+// real-git origin probe; the 15s off-ECS default would let the runner decide
+// the outcome before those waits on a contended host. vi.waitFor measures
+// real time even under vi.useFakeTimers(), so the fake clock does not renew
+// it. The waits are derived; the ceiling's fast arm is left undefined so it
+// inherits whatever the lane grants (15s off-ECS, or the autofix gate's
+// --testTimeout=60000) instead of outranking it with a lower per-file figure
+// (R4-1); a saturated host gets 120s of headroom for the nightly load.
+const TIMER_CEILING_MS = isSlowTestHost() ? 120_000 : undefined;
+describe('startSessionPrRefreshTimer', { timeout: TIMER_CEILING_MS }, () => {
   let baseDir: string;
   let trustedCwd: string;
   let untrustedCwd: string;
@@ -2779,12 +2829,17 @@ describe('startSessionPrRefreshTimer', () => {
   it('drainNow delivers nothing when no drain deps are provisioned', async () => {
     const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
     const registry = createWorkspaceRegistry([trustedRuntime]);
+    await seedPendingBinding(trustedRuntime, SESSION_A, 42);
+    // The drain's watch directory has exactly one source — drainDeps.watchDir,
+    // reached only after the deps gate — so a fixture cannot place a file where
+    // a deps-less drain would look. Pin the effects instead, the way the tick's
+    // sibling case does: no owner claim and no watch-file write. A drainNow
+    // that fell back to a default directory and delivered a previous owner's
+    // entry would have to claim and write, and this would redden.
     const getPrDrainDeps = vi.fn(() => undefined);
-    // No observationEnabled and no deps: enablement is deps presence, which
-    // the daemon derives from the operator's subscription. The getter IS
-    // consulted — the gate moved from "never read the seam" to "read it and
-    // find it unprovisioned" — and a resume must still deliver nothing from
-    // watch files a previous owner left behind.
+    const store = await import('./pr-watch-store.js');
+    const claim = vi.spyOn(store, 'claimPrWatchOwnershipSync');
+    const write = vi.spyOn(store, 'writePrWatchStateSync');
     const handle = startSessionPrRefreshTimer({
       workspaceRegistry: registry,
       env: {},
@@ -2793,8 +2848,12 @@ describe('startSessionPrRefreshTimer', () => {
     try {
       await handle?.drainNow(trustedCwd);
       expect(getPrDrainDeps).toHaveBeenCalled();
+      expect(claim).not.toHaveBeenCalled();
+      expect(write).not.toHaveBeenCalled();
     } finally {
       handle?.dispose();
+      claim.mockRestore();
+      write.mockRestore();
     }
   });
 
@@ -2805,7 +2864,10 @@ describe('startSessionPrRefreshTimer', () => {
     const untrusted = timerRuntime('un', untrustedCwd, false, false);
     const primary = timerRuntime('trusted', trustedCwd, true);
     const registry = createWorkspaceRegistry([primary, untrusted]);
-    const scanBindings = vi.fn(async () => ({ bindings: [], partial: false }));
+    const scanBindings = vi.fn(async () => ({
+      bindings: [],
+      partial: false,
+    }));
     const handle = startSessionPrRefreshTimer({
       workspaceRegistry: registry,
       env: {},
@@ -2832,7 +2894,10 @@ describe('startSessionPrRefreshTimer', () => {
   it('drainNow is inert without drain deps or a registered workspace', async () => {
     const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
     const registry = createWorkspaceRegistry([trustedRuntime]);
-    const scanBindings = vi.fn(async () => ({ bindings: [], partial: false }));
+    const scanBindings = vi.fn(async () => ({
+      bindings: [],
+      partial: false,
+    }));
     const handle = startSessionPrRefreshTimer({
       workspaceRegistry: registry,
       env: {},
@@ -3165,6 +3230,82 @@ describe('startSessionPrRefreshTimer', () => {
     }
   });
 
+  it('threads the language into the listing write producer', async () => {
+    // The listing write is the second summary producer. Pin the hop directly:
+    // the timer's watchSeam must carry watchDeps.language into prWatch.language
+    // and from there into the detector. A lost hop persists an English
+    // state_change while the view producer persists zh, and the drain passes
+    // the persisted summary through verbatim.
+    const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
+    const registry = createWorkspaceRegistry([trustedRuntime]);
+    await seedPendingBinding(trustedRuntime, SESSION_A, 42);
+    const watchDir = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pr-watch-listing-lang-'),
+    );
+    const identity = { host: 'github.com', repo: 'o/r', number: 42 };
+    const now = () => Date.parse('2026-11-08T00:00:00.000Z');
+    writePrWatchStateSync(watchDir, identity, {
+      pr: identity,
+      state: 'open',
+      headSha: 'a'.repeat(40),
+      checks: 'passing',
+      observedAt: '2026-11-07T00:00:00.000Z',
+    });
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'closed')],
+    });
+    const observation = await import('./pr-watch-observation.js');
+    const detect = vi.spyOn(observation, 'detectPrTransitions');
+    vi.useFakeTimers();
+    const handle = startSessionPrRefreshTimer({
+      workspaceRegistry: registry,
+      env: {},
+      now,
+      observationEnabled: true,
+      getPrWatchDeps: () => ({
+        watchDir,
+        locks: new PathMutexRegistry(),
+        allowedHosts: new Set(['github.com']),
+        language: 'zh' as const,
+        viewPullRequest: async (url: string) => ({
+          kind: 'ok' as const,
+          view: {
+            url,
+            title: 'PR 42',
+            headSha: 'a'.repeat(40),
+            state: 'open' as const,
+            checks: 'passing' as const,
+            failingChecks: [] as string[],
+          },
+        }),
+        now,
+      }),
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.waitFor(() => {
+        expect(detect).toHaveBeenCalled();
+      });
+      // Each listing-write call carries the language. The filter keeps only
+      // the closed-PR observations, which this fixture produces from the
+      // listing alone; the view producer is pinned by
+      // pr-watch-drain.scenario.test.ts.
+      const listingCalls = detect.mock.calls.filter(
+        (c) =>
+          c[2] !== undefined && (c[2] as { state: string }).state === 'closed',
+      );
+      expect(listingCalls.length).toBeGreaterThan(0);
+      for (const call of listingCalls) {
+        expect(call[5]).toBe('zh');
+      }
+    } finally {
+      handle?.dispose();
+      detect.mockRestore();
+      await removeTempTree(watchDir);
+    }
+  });
+
   it('threads the watch log into the listing write seam', async () => {
     const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
     const registry = createWorkspaceRegistry([trustedRuntime]);
@@ -3231,6 +3372,9 @@ describe('startSessionPrRefreshTimer', () => {
       pullRequests: [pr(42, 'open')],
     });
     const getPrWatchDeps = vi.fn(() => undefined);
+    const store = await import('./pr-watch-store.js');
+    const claim = vi.spyOn(store, 'claimPrWatchOwnershipSync');
+    const write = vi.spyOn(store, 'writePrWatchStateSync');
     vi.useFakeTimers();
 
     const handle = startSessionPrRefreshTimer({
@@ -3238,18 +3382,25 @@ describe('startSessionPrRefreshTimer', () => {
       env: {},
       getPrWatchDeps,
     });
-    await vi.advanceTimersByTimeAsync(60_000); // crosses the first-run delay
-    await vi.waitFor(() => {
-      expect(fetchGitHubPullRequestsMock).toHaveBeenCalled();
-    });
-    // Enablement is deps presence: the tick consults the seam, finds it
-    // unprovisioned, and does nothing further — no claim, no view, no
-    // watch-file write — while the state refresh below still runs.
-    expect(getPrWatchDeps).toHaveBeenCalled();
-    handle?.dispose();
+    try {
+      await vi.advanceTimersByTimeAsync(60_000); // crosses the first-run delay
+      await vi.waitFor(() => {
+        expect(fetchGitHubPullRequestsMock).toHaveBeenCalled();
+      });
+      // Enablement is deps presence: the tick consults the seam, finds it
+      // unprovisioned, and does nothing further. Pin each named effect, not
+      // just the seam read — a claim or a write would otherwise pass silently.
+      expect(getPrWatchDeps).toHaveBeenCalled();
+      expect(claim).not.toHaveBeenCalled();
+      expect(write).not.toHaveBeenCalled();
+    } finally {
+      handle?.dispose();
+      claim.mockRestore();
+      write.mockRestore();
+    }
   });
 
-  it('stopWatch reads no watch seam while the switch is off', async () => {
+  it('stopWatch reads no watch seam while no watch deps are provisioned', async () => {
     const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
     const registry = createWorkspaceRegistry([trustedRuntime]);
     const getPrWatchDeps = vi.fn(() => undefined);
@@ -3283,7 +3434,7 @@ describe('startSessionPrRefreshTimer', () => {
     }
   });
 
-  it('stopWatch stops the refresh timer while the switch is off', async () => {
+  it('stopWatch stops the refresh timer while no watch deps are provisioned', async () => {
     // The off path's early return calls the same dispose(); pin it by effect.
     // Stop before any tick runs, like 'stops ticking after dispose' — once a
     // sweep is in flight its `running` guard skips later ticks under fake
@@ -3587,7 +3738,7 @@ describe('startSessionPrRefreshTimer', () => {
     }
   });
 
-  it('never reads the PR-drain deps while the observation switch is off', async () => {
+  it('never reads the PR-drain deps while no watch deps are provisioned', async () => {
     const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
     const registry = createWorkspaceRegistry([trustedRuntime]);
     await seedPendingBinding(trustedRuntime, SESSION_A);
@@ -3607,8 +3758,8 @@ describe('startSessionPrRefreshTimer', () => {
     await vi.waitFor(() => {
       expect(fetchGitHubPullRequestsMock).toHaveBeenCalled();
     });
-    // The switch is off: the drain seam is never read (no drain, no admission,
-    // no restore, no deletion), exactly like the observation seam.
+    // No deps are provisioned: the drain seam is never read (no drain, no
+    // admission, no restore, no deletion), exactly like the observation seam.
     expect(getPrDrainDeps).not.toHaveBeenCalled();
     handle?.dispose();
   });
@@ -3793,7 +3944,7 @@ describe('startSessionPrRefreshTimer', () => {
           expect(view).toHaveBeenCalled();
           expect(fetchGitHubPullRequestsMock).toHaveBeenCalled();
         },
-        { timeout: 10_000 },
+        { timeout: OBSERVE_WAIT_MS },
       );
     } finally {
       handle?.dispose();
@@ -3864,9 +4015,15 @@ describe('startSessionPrRefreshTimer', () => {
     try {
       // Tick 1: rotation 0 → untrusted primary first, views PR 42.
       await vi.advanceTimersByTimeAsync(60_000);
-      await vi.waitFor(() => {
-        expect(view).toHaveBeenCalledTimes(1);
-      });
+      // The explicit timeout replaces waitFor's 1s default, which expires
+      // under load on the contended macOS nightly hosts (same shape as the
+      // sibling observation-order case above).
+      await vi.waitFor(
+        () => {
+          expect(view).toHaveBeenCalledTimes(1);
+        },
+        { timeout: OBSERVE_WAIT_MS },
+      );
       // Tick 1's refresh tail runs after the view and awaits real fs; the
       // re-entrancy guard silently skips the next interval while it is still
       // in flight (the race `sweepDone` documents). This tick commits no
@@ -3875,14 +4032,39 @@ describe('startSessionPrRefreshTimer', () => {
         () => {
           expect(fetchGitHubPullRequestIssuesMock).toHaveBeenCalledTimes(1);
         },
-        { timeout: 10_000 },
+        { timeout: OBSERVE_WAIT_MS },
       );
       await vi.advanceTimersByTimeAsync(0);
       // Tick 2: rotation 1 → trusted non-primary first, views PR 43.
-      await vi.advanceTimersByTimeAsync(60_000);
-      await vi.waitFor(() => {
-        expect(view).toHaveBeenCalledTimes(2);
-      });
+      // The re-entrancy guard skips an interval whose predecessor's refresh
+      // tail is still in flight (real fs under load), and a skipped tick
+      // does not advance the rotation counter — so keep advancing intervals
+      // until the second view lands instead of assuming the very next one
+      // runs; the executed tick's rotation is 1 either way, and the order
+      // stays [42, 43]. advanceTimersByTimeAsync drains fake timers and
+      // microtasks, so on its own every advance can run while tick()'s
+      // `if (running) return` is still set and none of them advances the
+      // rotation — dispatch 43599265724 (cli 1/3) ended at one view after
+      // the full 30s. Yielding real macrotasks instead (MessageChannel, 10
+      // per advance) is not enough either: measured on a host at load 14
+      // and again at load 22, that variant still failed at ~30s, because
+      // the tail's fs work needs wall time to finish, not just event-loop
+      // turns. So pause on a real timer. The pause cannot itself start a
+      // third tick: the fake clock is frozen while it runs, so no further
+      // interval fires, and the guard skips the next advance's tick while
+      // this one is still in flight. The loop reads the call count only
+      // after the tick it just triggered has had real time to finish, and
+      // exits on the second view.
+      for (let i = 0; i < 40 && view.mock.calls.length < 2; i++) {
+        await vi.advanceTimersByTimeAsync(60_000);
+        await new Promise((resolve) => realSetTimeout(resolve, 200));
+      }
+      await vi.waitFor(
+        () => {
+          expect(view).toHaveBeenCalledTimes(2);
+        },
+        { timeout: SETTLE_WAIT_MS },
+      );
       expect(view.mock.calls.map((call) => call[0])).toEqual([
         'https://github.com/o/r/pull/42',
         'https://github.com/o/r/pull/43',
@@ -4106,7 +4288,7 @@ describe('startSessionPrRefreshTimer', () => {
           runtime.bridge.markSessionCatalogChanged as ReturnType<typeof vi.fn>,
         ).toHaveBeenCalledTimes(times);
       },
-      { timeout: 30_000 },
+      { timeout: SETTLE_WAIT_MS },
     );
 
   it('rotates the Aone view window across timer ticks', async () => {
@@ -4352,7 +4534,7 @@ describe('startSessionPrRefreshTimer', () => {
       () => {
         expect(assertOpen).toHaveBeenCalled();
       },
-      { timeout: 30_000 },
+      { timeout: SETTLE_WAIT_MS },
     );
     expect(view).toHaveBeenCalledTimes(AONE_MAX_MR_VIEW_CALLS_PER_RUN);
 
