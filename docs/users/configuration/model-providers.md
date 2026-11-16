@@ -69,6 +69,9 @@ The selected route must declare an explicit HTTPS `baseUrl` and a non-empty
 if chat and image generation require different endpoints or credentials,
 configure two routes instead.
 
+See [Image Generation](../features/image-generation.md) for selecting the
+image model and generating images in the terminal or Web Shell.
+
 ### Live Voice routes
 
 Set `realtimeOnly: true` on a route that speaks the DashScope Realtime
@@ -129,6 +132,9 @@ elsewhere is rejected with `401`. The base URL is stored as entered and
 converted to `wss://<host>/api-ws/v1/realtime` when a call starts; the host must
 be a DashScope or `*.maas.aliyuncs.com` endpoint. While Live Voice is on, a new
 endpoint is checked with a Realtime handshake before it is saved.
+
+See [Qwen Live](../features/qwen-live.md) for enabling and using Live Voice in
+the Web Shell.
 
 ## Override reasoning capabilities
 

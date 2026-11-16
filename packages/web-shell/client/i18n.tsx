@@ -4,6 +4,7 @@ import {
 } from './components/managed/managed-extension-messages.js';
 import {
   MANAGED_LIFECYCLE_MESSAGES_EN,
+  MANAGED_LIFECYCLE_MESSAGES_RU,
   MANAGED_LIFECYCLE_MESSAGES_ZH,
 } from './components/managed/managed-lifecycle-messages.js';
 import { plural } from './utils/plural.js';
@@ -13,18 +14,22 @@ import {
 } from './components/sidebar/activity-messages.js';
 import {
   MESSAGE_DELETION_MESSAGES_EN,
+  MESSAGE_DELETION_MESSAGES_RU,
   MESSAGE_DELETION_MESSAGES_ZH,
 } from './components/message-deletion-messages.js';
 import {
   TRAJECTORY_EXECUTION_MESSAGES_EN,
+  TRAJECTORY_EXECUTION_MESSAGES_RU,
   TRAJECTORY_EXECUTION_MESSAGES_ZH,
 } from './trajectory/execution-messages.js';
 import {
   FILES_MESSAGES_EN,
+  FILES_MESSAGES_RU,
   FILES_MESSAGES_ZH,
 } from './components/artifacts/files-messages.js';
 import {
   TOKEN_USAGE_MESSAGES_EN,
+  TOKEN_USAGE_MESSAGES_RU,
   TOKEN_USAGE_MESSAGES_ZH,
 } from './components/artifacts/token-usage-messages.js';
 import {
@@ -40,48 +45,75 @@ import {
 
 import {
   TRAJECTORY_FILTER_MESSAGES_EN,
+  TRAJECTORY_FILTER_MESSAGES_RU,
   TRAJECTORY_FILTER_MESSAGES_ZH,
 } from './trajectory/filter-messages.js';
 
 import {
   TRAJECTORY_WINDOW_MESSAGES_EN,
+  TRAJECTORY_WINDOW_MESSAGES_RU,
   TRAJECTORY_WINDOW_MESSAGES_ZH,
 } from './trajectory/window-messages.js';
 
-import { VOICE_MESSAGES_EN, VOICE_MESSAGES_ZH } from './voice/messages.js';
-import { LIVE_MESSAGES_EN, LIVE_MESSAGES_ZH } from './live/messages.js';
+import {
+  VOICE_MESSAGES_EN,
+  VOICE_MESSAGES_RU,
+  VOICE_MESSAGES_ZH,
+} from './voice/messages.js';
+import {
+  LIVE_MESSAGES_EN,
+  LIVE_MESSAGES_RU,
+  LIVE_MESSAGES_ZH,
+} from './live/messages.js';
 import {
   MCP_APP_MESSAGES_EN,
+  MCP_APP_MESSAGES_RU,
   MCP_APP_MESSAGES_ZH,
 } from './mcp-app/messages.js';
 import {
   COLLAB_MESSAGES_EN,
+  COLLAB_MESSAGES_RU,
   COLLAB_MESSAGES_ZH,
 } from './components/workspace-agents/messages.js';
 import {
   SETTINGS_MESSAGES_EN,
+  SETTINGS_MESSAGES_RU,
   SETTINGS_MESSAGES_ZH,
 } from './settings/messages.js';
 
 import {
   MANAGED_TASK_MESSAGES_EN,
+  MANAGED_TASK_MESSAGES_RU,
   MANAGED_TASK_MESSAGES_ZH,
 } from './components/managed/managed-task-messages.js';
 
 import {
   BROWSER_NOTIFICATION_MESSAGES_EN,
+  BROWSER_NOTIFICATION_MESSAGES_RU,
   BROWSER_NOTIFICATION_MESSAGES_ZH,
 } from './browser-notifications/messages.js';
 
 import {
   WORKSPACE_REGISTRATION_MESSAGES_EN,
+  WORKSPACE_REGISTRATION_MESSAGES_RU,
   WORKSPACE_REGISTRATION_MESSAGES_ZH,
 } from './components/managed/managed-workspace-messages.js';
 
 import {
   MANAGED_MCP_MESSAGES_EN,
+  MANAGED_MCP_MESSAGES_RU,
   MANAGED_MCP_MESSAGES_ZH,
 } from './components/managed/managed-mcp-messages.js';
+// The Russian catalog is split so `--mode transcript` can stub these
+// modules (see vite.lib.config.ts). Exported HTML would otherwise ship a
+// third full UI dictionary to every reader.
+import { RU_PART1 } from './i18n-ru-part1.js';
+import { RU_PART2 } from './i18n-ru-part2.js';
+import { RU_PART3 } from './i18n-ru-part3.js';
+import { RU_PART4 } from './i18n-ru-part4.js';
+import { RU_PART5 } from './i18n-ru-part5.js';
+import { RU_PART6 } from './i18n-ru-part6.js';
+import { RU_REMAINDER } from './i18n-ru-remainder.js';
 
 export const WEB_SHELL_LANGUAGES = ['en', 'zh-CN', 'ru'] as const;
 
@@ -92,26 +124,6 @@ type MessageValue =
   | ((vars?: Record<string, string | number>) => string);
 
 type Messages = Record<string, MessageValue>;
-
-/**
- * Russian plural pick: 1 → `one`, 2–4 → `few`, otherwise → `many`, with the
- * 11–14 exception per decade (ход/ходов, токен/токенов, цель/целей).
- */
-function ruPlural(
-  count: string | number | undefined,
-  one: string,
-  few: string,
-  many: string,
-): string {
-  const value = typeof count === 'number' ? count : Number(count ?? 0);
-  const safe = Number.isFinite(value) ? value : 0;
-  const last = safe % 10;
-  const lastTwo = safe % 100;
-  if (lastTwo >= 11 && lastTwo <= 14) return many;
-  if (last === 1) return one;
-  if (last >= 2 && last <= 4) return few;
-  return many;
-}
 
 const EN: Messages = {
   "You've used up your weekly credits.{{reset}} You can wait or run /upgrade to get more credits.":
@@ -5343,8 +5355,22 @@ export const LOCAL_FILES_MESSAGE_KEYS = Object.keys(EN).filter((key) =>
  * descriptions. The role list mirrors PR_BINDING_ROLES in
  * @qwen-code/channel-base, which the client cannot import.
  */
+function githubBoundActionOptionDescriptions(
+  base: Record<string, string>,
+): Record<string, string> {
+  const prefix = 'channels.editor.field.github.boundSessionActions';
+  const entries: Record<string, string> = {};
+  for (const [key, description] of Object.entries(base)) {
+    entries[`${prefix}.optionDescription.${key}`] = description;
+    for (const role of ['review', 'verify', 'fix']) {
+      entries[`${prefix}.optionDescription.${role}:${key}`] = description;
+    }
+  }
+  return entries;
+}
+
 function githubBoundActionOptionDescriptionsZh(): Record<string, string> {
-  const base: Record<string, string> = {
+  return githubBoundActionOptionDescriptions({
     default: '没有更具体键的事件使用的回退模板',
     'watch:ci_failure': 'head 提交上的 CI 检查变红',
     'watch:merge_conflict': 'PR 出现合并冲突',
@@ -5365,16 +5391,7 @@ function githubBoundActionOptionDescriptionsZh(): Record<string, string> {
     invitation: '你收到协作邀请',
     member_feature_requested: '成员功能请求通知',
     security_advisory_credit: '你在安全公告中被署名致谢',
-  };
-  const prefix = 'channels.editor.field.github.boundSessionActions';
-  const entries: Record<string, string> = {};
-  for (const [key, description] of Object.entries(base)) {
-    entries[`${prefix}.optionDescription.${key}`] = description;
-    for (const role of ['review', 'verify', 'fix']) {
-      entries[`${prefix}.optionDescription.${role}:${key}`] = description;
-    }
-  }
-  return entries;
+  });
 }
 
 const ZH: Messages = {
@@ -10275,104 +10292,31 @@ const ZH: Messages = {
   ...TRAJECTORY_WINDOW_MESSAGES_ZH,
 };
 
-/**
- * Russian catalog — intentionally partial: it covers the Goal card and the
- * Goals dialog (#13391). `getTranslator` falls back to EN for every other
- * key (`messages[key] ?? EN[key] ?? key`), which is the behaviour this locale
- * has been running with since it was first introduced as an installer patch.
- */
 const RU: Messages = {
-  'goal.aborted': 'Цель прервана',
-  'goal.blocked': 'Цель заблокирована',
-  'goal.usageLimited': 'Лимит использования цели',
-  'goal.paused': 'Цель на паузе',
-  'goal.achieved': 'Цель достигнута',
-  'goal.check': 'Проверка цели',
-  'goal.cleared': 'Цель снята',
-  'goal.failed': 'Цель не достигнута',
-  'goal.judge': 'Оценка',
-  'goal.label': 'Цель',
-  'goal.expandDetails': 'Показать подробности',
-  'goal.collapseDetails': 'Скрыть подробности',
-  'goal.lastCheck': 'Последняя проверка',
-  'goal.notYetMet': 'условие не выполнено',
-  'goal.set': 'Цель задана',
-  'goal.statusActive': '/goal активен',
-  'goal.status.active': 'В работе',
-  'goal.status.paused': 'Пауза',
-  'goal.status.blocked': 'Заблокирована',
-  'goal.status.usage_limited': 'Лимит исчерпан',
-  'goal.status.complete': 'Выполнена',
-  'goal.activity.idle': 'Ожидание',
-  'goal.activity.running': 'Работает',
-  'goal.activity.verifying': 'Проверка',
-  'goal.edit': 'Изменить цель',
-  'goal.pause': 'Поставить на паузу',
-  'goal.resume': 'Продолжить',
-  'goal.turn': (v) =>
-    `${v?.count ?? 0} ${ruPlural(v?.count, 'ход', 'хода', 'ходов')}`,
-  'goal.turnLabel': (v) => `ход ${v?.count ?? 0}`,
-  'goal.turns': (v) =>
-    `${v?.count ?? 0} ${ruPlural(v?.count, 'ход', 'хода', 'ходов')}`,
-  'goal.turnsOfBudget': (v) =>
-    `${v?.count ?? 0} / ${v?.budget ?? 0} ${ruPlural(v?.budget, 'ход', 'хода', 'ходов')}`,
-  'goal.activeOfBudget': (v) => `${v?.used ?? ''} / ${v?.budget ?? ''}`,
-  'goal.tokens': (v) =>
-    `${v?.used ?? 0} ${ruPlural(v?.used, 'токен', 'токена', 'токенов')}`,
-  'goal.tokensOfBudget': (v) =>
-    `${v?.used ?? 0} / ${v?.budget ?? 0} ${ruPlural(v?.budget, 'токен', 'токена', 'токенов')}`,
-  'goals.title': 'Цели',
-  'goals.subtitle':
-    'Цель удерживает сессию в работе, пока условие не выполнено. Здесь видны только загруженные сейчас сессии — цель двигается, пока её сессия работает.',
-  'goals.loading': 'Загрузка целей…',
-  'goals.count': (v) =>
-    `${v?.count ?? 0} ${ruPlural(v?.count, 'активная цель', 'активные цели', 'активных целей')}`,
-  'goals.empty': 'Нет активных целей. Задайте: /goal <условие>.',
-  'goals.refresh': 'Обновить',
-  'goals.new': 'Новая цель',
-  'goals.workspace': 'Рабочая область',
-  'goals.newHint':
-    'Цель запускается в новой сессии и работает, пока условие не выполняется. Жёсткий лимит по числу ходов или времени задаётся в чате: /config model.goalMaxTurns=20 или /config model.goalMaxActiveMinutes=30 (применяется после перезапуска демона, к целям, созданным позже).',
-  'goals.condition': 'Условие',
-  'goals.conditionPlaceholder':
-    'напр. `npm test` завершается с кодом 0 и `npm run lint` без предупреждений (вставить вывод); не менять тестовые файлы; как указание модели — остановиться как blocked после 20 ходов',
-  'goals.cancel': 'Отмена',
-  'goals.create': 'Задать цель',
-  'goals.creating': 'Запуск…',
-  'goals.saving': 'Сохранение…',
-  'goals.save': 'Сохранить',
-  'goals.edit': 'Изменить цель',
-  'goals.objective': 'Целевое условие',
-  'goals.clear': 'Снять цель',
-  'goals.clearConfirm': (v) => `Снять цель "${v?.condition ?? ''}"?`,
-  'goals.running': 'Работает',
-  'goals.idle': 'Ожидание',
-  'goals.dropped': (v) =>
-    `не удалось связаться с ${v?.count ?? 0} ${ruPlural(v?.count, 'сессией', 'сессиями', 'сессиями')} — цели, которые они выполняли, отсутствуют в этом списке.`,
-  'goals.workspacesSkipped': (v) =>
-    `Не показано: ${v?.count ?? 0} ${ruPlural(v?.count, 'рабочая область', 'рабочие области', 'рабочих областей')} (нет доверия или удалённый доступ).`,
-  'goals.notYetEvaluated': 'ещё не оценено',
-  'goals.openSessionHint': 'Открыть сессию этой цели',
-  'goals.error.emptyCondition': 'Введите условие для цели.',
-  'goals.error.clearKeyword': (v) =>
-    `"${v?.word ?? ''}" снимает цель, а не задаёт её. Опишите условие, к которому нужно работать.`,
-  'goals.error.createFailed': 'Не удалось запустить цель',
-  'goals.error.workspaceUnavailable':
-    'Выбранная рабочая область недоступна или не пользуется доверием.',
-  'goals.error.saveFailed': 'Не удалось сохранить цель',
-  'goals.error.goalUnavailable': 'Цель больше недоступна.',
-  'goals.error.requiresObjective': (v) =>
-    `/goal ${v?.keyword ?? 'set'} требует целевого условия.`,
-  'goals.error.invalidCommand': 'Некорректная команда /goal',
-  'goals.error.goalsUnavailable': 'Панель целей недоступна в этом интерфейсе.',
-  'goals.error.attachmentsUnsupported': 'Уберите вложения перед /goal.',
-  'goals.error.editFailed': 'Не удалось изменить цель',
-  'goals.error.pauseFailed': 'Не удалось поставить цель на паузу',
-  'goals.error.resumeFailed': 'Не удалось продолжить цель',
-  'goals.error.clearFailed': 'Не удалось снять цель',
-  'goals.error.controlBusy':
-    'Другое управление целью ещё выполняется. Повторите, когда оно завершится.',
-  'terminal.notice.lost': 'Этот терминал больше недоступен.',
+  ...EN,
+  ...RU_PART1,
+  ...RU_PART2,
+  ...RU_PART3,
+  ...RU_PART4,
+  ...RU_PART5,
+  ...RU_PART6,
+  ...RU_REMAINDER,
+  ...FILES_MESSAGES_RU,
+  ...TOKEN_USAGE_MESSAGES_RU,
+  ...MESSAGE_DELETION_MESSAGES_RU,
+  ...BROWSER_NOTIFICATION_MESSAGES_RU,
+  ...MCP_APP_MESSAGES_RU,
+  ...VOICE_MESSAGES_RU,
+  ...LIVE_MESSAGES_RU,
+  ...COLLAB_MESSAGES_RU,
+  ...SETTINGS_MESSAGES_RU,
+  ...MANAGED_TASK_MESSAGES_RU,
+  ...MANAGED_LIFECYCLE_MESSAGES_RU,
+  ...WORKSPACE_REGISTRATION_MESSAGES_RU,
+  ...MANAGED_MCP_MESSAGES_RU,
+  ...TRAJECTORY_EXECUTION_MESSAGES_RU,
+  ...TRAJECTORY_FILTER_MESSAGES_RU,
+  ...TRAJECTORY_WINDOW_MESSAGES_RU,
 };
 
 const MESSAGES: Record<WebShellLanguage, Messages> = {
@@ -10404,8 +10348,8 @@ export function normalizeLanguage(
     return 'zh-CN';
   }
   // Prefix match: ru, region-qualified ru (ru-RU, ru-UA, ru-KZ, …) and the
-  // underscore form all resolve to the partial ru catalog — region-qualified
-  // Russian speakers must not fall through to en.
+  // underscore form all resolve to ru — region-qualified Russian speakers
+  // must not fall through to en.
   if (normalized.startsWith('ru') || normalized === 'русский') {
     return 'ru';
   }
@@ -10432,7 +10376,7 @@ export function languageSettingToWebShellLanguage(
     return 'zh-CN';
   }
   // Same prefix match as normalizeLanguage: region-qualified settings
-  // (ru-UA, …) map to the partial ru catalog instead of an unknown setting.
+  // (ru-UA, …) map to ru instead of an unknown setting.
   if (normalized.startsWith('ru') || normalized === 'русский') {
     return 'ru';
   }
