@@ -484,7 +484,7 @@ Commands for obtaining information and performing system settings.
 | `/insight`       | Generate programming insights from chat history                                                                                | `/insight`                                                                          |
 | `/setup-github`  | Set up GitHub Actions                                                                                                          | `/setup-github`                                                                     |
 | `/bug`           | Submit issue about Qwen Code                                                                                                   | `/bug Button click unresponsive`                                                    |
-| `/copy`          | Copy to clipboard: reply (Nth-last), code (by lang), LaTeX, or Mermaid                                                         | `/copy`, `/copy 2`, `/copy python`, `/copy latex`, `/copy mermaid`                  |
+| `/copy`          | Copy to clipboard: reply (Nth-last with text), code (by lang), LaTeX, or Mermaid                                               | `/copy`, `/copy 2`, `/copy python`, `/copy latex`, `/copy mermaid`                  |
 | `/quit`          | Exit Qwen Code immediately                                                                                                     | `/quit` or `/exit`                                                                  |
 
 > [!warning]

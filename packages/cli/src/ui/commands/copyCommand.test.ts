@@ -955,7 +955,7 @@ math then literal: $x^2\$$`,
     expect(await copyCommand.action(mockContext, '3')).toEqual({
       type: 'message',
       messageType: 'info',
-      content: 'Only 0 AI messages in this session.',
+      content: 'Only 0 AI messages with text in this session.',
     });
     // `/copy 1` is documented as equivalent to `/copy`.
     for (const args of ['', '1']) {
@@ -998,7 +998,7 @@ math then literal: $x^2\$$`,
     expect(await copyCommand.action(mockContext, '2')).toEqual({
       type: 'message',
       messageType: 'info',
-      content: 'Only 1 AI message in this session.',
+      content: 'Only 1 AI message with text in this session.',
     });
   });
 
@@ -1072,7 +1072,7 @@ math then literal: $x^2\$$`,
     expect(await copyCommand.action(mockContext, '3')).toEqual({
       type: 'message',
       messageType: 'info',
-      content: 'Only 2 AI messages in this session.',
+      content: 'Only 2 AI messages with text in this session.',
     });
   });
 
@@ -1092,7 +1092,7 @@ math then literal: $x^2\$$`,
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
-      content: 'Only 1 AI message in this session.',
+      content: 'Only 1 AI message with text in this session.',
     });
     expect(mockCopyToClipboard).not.toHaveBeenCalled();
   });
@@ -1137,7 +1137,7 @@ math then literal: $x^2\$$`,
     expect(await copyCommand.action(mockContext, '4')).toEqual({
       type: 'message',
       messageType: 'info',
-      content: 'Only 3 AI messages in this session.',
+      content: 'Only 3 AI messages with text in this session.',
     });
   });
 
@@ -1351,7 +1351,7 @@ math then literal: $x^2\$$`,
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
-      content: 'Only 1 AI message in this session.',
+      content: 'Only 1 AI message with text in this session.',
     });
     expect(mockCopyToClipboard).not.toHaveBeenCalled();
   });
@@ -1370,7 +1370,7 @@ math then literal: $x^2\$$`,
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
-      content: 'Only 3 AI messages in this session.',
+      content: 'Only 3 AI messages with text in this session.',
     });
     expect(mockCopyToClipboard).not.toHaveBeenCalled();
   });

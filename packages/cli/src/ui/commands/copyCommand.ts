@@ -358,7 +358,7 @@ export const copyCommand: SlashCommand = {
   name: 'copy',
   get description() {
     return t(
-      'Copy to clipboard: reply, code (by lang), LaTeX, or Mermaid. N = Nth-latest message, index = block number',
+      'Copy to clipboard: reply, code (by lang), LaTeX, or Mermaid. N = Nth-latest AI message with text, index = block number',
     );
   },
   argumentHint: '[N] [<lang>|code|latex|mermaid] [<index>]',
@@ -418,7 +418,7 @@ export const copyCommand: SlashCommand = {
         return {
           type: 'message',
           messageType: 'info',
-          content: `Only ${aiMessages.length} ${turnLabel} in this session.`,
+          content: `Only ${aiMessages.length} ${turnLabel} with text in this session.`,
         };
       }
       selectedAiMessage = aiMessages[aiMessages.length - messageIndex];
