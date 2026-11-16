@@ -2585,6 +2585,50 @@ describe('containerNonceErrors (R16-1 / D17-1 / D17-2)', () => {
     expect(containerNonceErrors(boundary, gateWith(), dir)).toEqual([]);
   });
 
+  // R3-1: the byte budget must not be charged against the binary evidence/
+  // subtree, or a compliant round with large evidence is refused even though
+  // harness.log carries the marker.
+  it('accepts a marker when evidence alone exceeds the byte budget', () => {
+    const dir = dirWithLog(`container-nonce: ${NONCE}\n`);
+    mkdirSync(join(dir, 'evidence'));
+    writeFileSync(
+      join(dir, 'evidence', 'big.png'),
+      'x'.repeat(65 * 1024 * 1024),
+    );
+    expect(containerNonceErrors(boundary, gateWith(), dir)).toEqual([]);
+  });
+
+  // R3-3: a marker line with no trailing newline is still matched (final carry),
+  // including at the end of a multi-MiB no-newline file (capped carry, bounded).
+  it('matches a marker line with no trailing newline', () => {
+    const dir = dirWithLog(`container-nonce: ${NONCE}`);
+    expect(containerNonceErrors(boundary, gateWith(), dir)).toEqual([]);
+  });
+
+  it('matches a marker at the end of a no-newline multi-MiB file', () => {
+    const dir = dirWithLog(null);
+    writeFileSync(
+      join(dir, 'harness.log'),
+      'x'.repeat(2 * 1024 * 1024) + `container-nonce: ${NONCE}`,
+    );
+    expect(containerNonceErrors(boundary, gateWith(), dir)).toEqual([]);
+  });
+
+  // R3-2: the matcher's own CRLF / NUL witnesses (the shell no longer mirrors it).
+  it('accepts a CRLF-terminated marker line', () => {
+    const dir = dirWithLog(`container-nonce: ${NONCE}\r\n`);
+    expect(containerNonceErrors(boundary, gateWith(), dir)).toEqual([]);
+  });
+
+  it('accepts a marker in a log that also contains a NUL byte', () => {
+    const dir = dirWithLog(null);
+    writeFileSync(
+      join(dir, 'harness.log'),
+      `PASS\x00cell\ncontainer-nonce: ${NONCE}\n`,
+    );
+    expect(containerNonceErrors(boundary, gateWith(), dir)).toEqual([]);
+  });
+
   it('refuses a plaintext-only legacy record with no nonceSha256', () => {
     const dir = dirWithLog(`container-nonce: ${NONCE}\n`);
     const legacy = JSON.stringify({

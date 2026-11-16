@@ -170,11 +170,13 @@ VM bullet.
   refusal, which runs before publication). `requireBoundary` is exported only as
   a testability seam, consistent with the already-exported detectors.
 - The one-record/one-nonce binding constrains the multi-container Java recipe
-  (R1-10): the checker reads one record and one hash, so the container holding
-  the nonce must echo the `container-nonce:` line, and a round whose battery
-  runs in another container declares `mode:"waived"` (or attests the gate
-  container). That recipe's declaration step records the constraint in both
-  languages; it is a proposal, not shipped code.
+  (R1-10, R3-6): the checker reads one record and one hash, and the
+  `container-nonce:` line must be echoed by the container that runs the battery.
+  A round whose battery runs in a different container than the gate cannot read
+  the gate's plaintext, so — per the skill's step 5 — it declares
+  `mode:"waived"` with the maintainer's approval; a gate-container attestation
+  is not a substitute. That recipe's declaration step records the constraint in
+  both languages; it is a proposal, not shipped code.
 
 ## Open questions
 

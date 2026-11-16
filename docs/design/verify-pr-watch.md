@@ -137,11 +137,16 @@ probe stays a CLI command and the trigger stays a gated scheduled task.
   the top-level view but erases no verification. A corrupt state body is
   refused (exit 1), never silently rewritten from empty lists; the refusal
   covers unparseable JSON, a non-object, an array, and a well-formed object
-  that carries no state-bearing key (`inFlightHeads`, `verifiedHeads`, …; a
-  legacy `inFlight` counts only as a non-empty string head) — so an identity
-  key plus a misspelled head marker is not read as "no state" and erased. A
-  bare `inFlightHead` is state-bearing and the migration ladder consumes it,
-  blocking a second round on that head. The lists themselves
+  the migration ladder cannot consume — the guard is derived from what the
+  ladder actually consumes, so a `*Heads` key holding a bare string, or an
+  empty list with no legacy marker, fails closed rather than being admitted
+  and erased (a legacy `inFlight`/`inFlightHead` counts only as a non-empty
+  string head). An identity key plus a misspelled head marker is likewise not
+  read as "no state". A bare `inFlightHead` is consumed even alongside the
+  resting empty `inFlightHeads: []`, blocking a second round on that head. The
+  refusal message names the condition (no state-bearing entry the ladder can
+  consume) and warns to inspect before removing, since removal discards the
+  verified/deferred dedup history. The lists themselves
   are validated lazily — each is filtered on read, and an entry without a
   usable head is dropped — so a malformed list degrades the dedup silently
   rather than being refused. `--start` writes the sha

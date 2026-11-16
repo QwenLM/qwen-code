@@ -7053,11 +7053,6 @@ describe('qwen-triage verify hardening round 2', () => {
       symlinkRound = false,
       spacesInPath = false,
       slashSuffix = '',
-      noNonce = false,
-      nonceLine = null,
-      nulLog = false,
-      longLine = false,
-      spawnTimeout = undefined,
     } = {}) => {
       const root = mkdtempSync(join(tmpdir(), 'verify-step7-'));
       // R10-48: a round path with a space exercises the quoted expansions.
@@ -7084,9 +7079,10 @@ describe('qwen-triage verify hardening round 2', () => {
       writeFileSync(join(proxyDir, 'proxy.json'), '{"token":"bearer"}');
       writeFileSync(join(proxyDir, 'proxy.err'), '');
       // R16-1: the gate record carries only the nonce HASH; the round's raw
-      // harness logs must echo the container-local plaintext (a container-nonce
-      // line whose sha256 matches) for step 7 to declare mode:"container".
-      // noNonce leaves the logs without it (the gate still passed).
+      // harness logs echo the container-local plaintext (a container-nonce line
+      // whose sha256 matches). The nonce accept/refuse/parity witnesses live in
+      // the checker tests (containerNonceErrors); this shimmed-node replay only
+      // pins the declaration write + checker invocation + proxy teardown.
       const nonce = 'n0nce1234567890abcdef';
       if (!planted && !readOnlyRound && !symlinkRound) {
         writeFileSync(
@@ -7099,18 +7095,10 @@ describe('qwen-triage verify hardening round 2', () => {
             nonceSha256: createHash('sha256').update(nonce).digest('hex'),
           }),
         );
-        // R1-3 variants: nonceLine overrides the marker line (two-marker,
-        // CRLF); nulLog puts a NUL on a separate line so grep must treat the
-        // log as text (-a) while the nonce token itself stays clean; longLine
-        // pads a single line to ~300 KB with the marker at the end (the
-        // quadratic-glob stall shape).
-        const tail = nulLog ? 'PASS\x00cell\n' : 'PASS cell\n';
-        const logContent = noNonce
-          ? 'PASS cell\n'
-          : longLine
-            ? 'x'.repeat(300 * 1024) + `container-nonce: ${nonce}\n`
-            : `${nonceLine ?? `container-nonce: ${nonce}`}\n${tail}`;
-        writeFileSync(join(round, 'harness.log'), logContent);
+        writeFileSync(
+          join(round, 'harness.log'),
+          `container-nonce: ${nonce}\nPASS cell\n`,
+        );
       }
       const calls = join(root, 'calls.log');
       for (const [tool, body] of [
@@ -7158,7 +7146,6 @@ describe('qwen-triage verify hardening round 2', () => {
         ['--noprofile', '--norc', '-e', '-c', script],
         {
           encoding: 'utf8',
-          timeout: spawnTimeout,
           env: {
             ...process.env,
             HOME: home,

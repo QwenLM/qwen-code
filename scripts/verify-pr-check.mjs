@@ -326,20 +326,29 @@ function gateRecordErrors(gateText, { publishLane = false } = {}) {
 /**
  * Whether a round log carries a `container-nonce: <value>` line whose value's
  * sha256 equals the gate record's hash (R16-1). Walks the round dir, skipping
- * the declaration and gate record themselves and any non-regular file (a
- * symlink is not followed). This is the SINGLE authoritative matcher (the
- * step-7 shell no longer re-implements it, R1-2/R2-6), so it reads each regular
- * file whole — a legitimate log whose marker sits behind earlier output is
- * still found — while bounding the AGGREGATE work: one hoisted scratch buffer
- * (no per-file allocation, R2-5) and a total byte budget across the walk so a
- * PR-planted dir of many or huge files cannot stall the check. The plaintext
- * lives only container-local, so a host battery cannot produce a match.
+ * the declaration and gate record themselves, the binary `evidence/` subtree
+ * (PNG artifacts never carry the nonce, and charging the byte budget against
+ * them would refuse a compliant round with large evidence — R3-1), and any
+ * non-regular file (a symlink is not followed). This is the SINGLE authoritative
+ * matcher (the step-7 shell no longer re-implements it, R1-2/R2-6), so it reads
+ * each log whole — a marker behind earlier output is still found — while
+ * bounding the AGGREGATE work: one hoisted scratch buffer (R2-5), a total byte
+ * budget, a capped carried partial line and a visited-entry cap so a PR-planted
+ * dir of huge no-newline files or many empty files cannot stall the check
+ * (R3-3). The plaintext lives only container-local, so a host battery cannot
+ * produce a match.
  */
 function nonceLogMatches(roundDir, expected) {
   const CHUNK_BYTES = 1024 * 1024;
   const TOTAL_BUDGET = 64 * 1024 * 1024;
+  // The marker line is short; retaining only the tail of a partial line bounds
+  // the per-chunk concatenation (a no-newline file would otherwise grow the
+  // carry quadratically, R3-3) while still joining a marker split across chunks.
+  const CARRY_CAP = 256;
+  const MAX_ENTRIES = 20000;
   const buf = Buffer.alloc(CHUNK_BYTES);
   let budget = TOTAL_BUDGET;
+  let visited = 0;
   const matches = (text) => {
     for (const line of text.split('\n')) {
       const match = /container-nonce:[ \t]*(\S+)/.exec(line);
@@ -360,9 +369,10 @@ function nonceLogMatches(roundDir, expected) {
       return false;
     }
     for (const entry of entries) {
-      if (budget <= 0) return false;
+      if (budget <= 0 || visited >= MAX_ENTRIES) return false;
       const p = join(d, entry.name);
       if (entry.isDirectory()) {
+        if (entry.name === 'evidence') continue;
         if (walk(p)) return true;
         continue;
       }
@@ -373,6 +383,7 @@ function nonceLogMatches(roundDir, expected) {
       ) {
         continue;
       }
+      visited++;
       let fd;
       try {
         fd = openSync(p, 'r');
@@ -390,13 +401,13 @@ function nonceLogMatches(roundDir, expected) {
           budget -= n;
           const text = carry + buf.toString('utf8', 0, n);
           const lastNl = text.lastIndexOf('\n');
-          // Scan only complete lines; carry the trailing partial line into the
-          // next chunk so a marker split across chunks is still matched.
+          // Scan only complete lines; carry the capped trailing partial line
+          // into the next chunk so a marker split across chunks is matched.
           if (lastNl >= 0) {
             if (matches(text.slice(0, lastNl))) return true;
-            carry = text.slice(lastNl + 1);
+            carry = text.slice(lastNl + 1).slice(-CARRY_CAP);
           } else {
-            carry = text;
+            carry = text.slice(-CARRY_CAP);
           }
           if (n < toRead) break;
         }

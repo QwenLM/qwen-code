@@ -875,7 +875,9 @@ function main(argv) {
     "/trusted-scripts mount, never the PR head's own copy of the script,",
     'and the record lands in the mounted artifact directory so it survives',
     'the container. A VM boundary runs the same file from its trusted copy',
-    'with its own artifact path. The gate writes boundary-gate.json into',
+    'with its own artifact path and NO --require-isolation gate (a VM carries',
+    'no observed container marker: use mode:"vm" with the maintainer\'s',
+    'approval). The gate writes boundary-gate.json into',
     'the artifact directory; the checker requires that record alongside',
     'the container declaration.',
   ]);

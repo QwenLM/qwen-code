@@ -129,10 +129,10 @@ gateText, roundDir)`，由 `main` 调用（轮目录在那里可用，`checkArti
 - 不新增脚本或 CLI 入口；checker 加一个依赖目录的 nonce 检查并成为**唯一**匹配器——
   step-7 shell 不再重复实现（#17185 的铸声明前 shell 拒绝由权威 checker 拒绝取代，后者
   在发布前运行）。`requireBoundary` 仅作可测试性接缝导出，与已导出的检测器一致。
-- 单记录/单 nonce 绑定约束多容器 Java 配方（R1-10）：checker 只读一份记录与一个哈希，
-  故持有 nonce 的容器必须 echo `container-nonce:` 行，电池跑在另一容器的轮次声明
-  `mode:"waived"`（或佐证门禁容器）。该配方的声明步骤已在双语中记录此约束；它是提案，
-  非已发布代码。
+- 单记录/单 nonce 绑定约束多容器 Java 配方（R1-10、R3-6）：checker 只读一份记录与一个
+  哈希，`container-nonce:` 行必须由跑电池的容器 echo。电池跑在与门禁不同容器的轮次读不到
+  门禁的明文，故按 skill 的 step 5 经维护者批准声明 `mode:"waived"`；门禁容器的佐证不能
+  替代。该配方的声明步骤已在双语中记录此约束；它是提案，非已发布代码。
 
 ## 待决问题
 

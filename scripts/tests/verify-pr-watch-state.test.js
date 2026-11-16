@@ -1163,7 +1163,7 @@ describe('readState', () => {
       JSON.stringify({ something: 'else' }),
     ]) {
       writeFileSync(statePath(root, 1), body);
-      expect(() => readState(root, 1)).toThrow(/no recognised state key/);
+      expect(() => readState(root, 1)).toThrow(/no state-bearing entry/);
     }
     // A legacy string inFlight head is still migratable.
     writeFileSync(statePath(root, 1), JSON.stringify({ inFlight: HEAD }));
@@ -1183,7 +1183,7 @@ describe('readState', () => {
       JSON.stringify({ pr: 1, verifiedHeads: HEAD }),
     ]) {
       writeFileSync(statePath(root, 1), body);
-      expect(() => readState(root, 1)).toThrow(/no recognised state key/);
+      expect(() => readState(root, 1)).toThrow(/no state-bearing entry/);
     }
     // A bare inFlightHead alongside the resting empty list (case B) blocks a
     // second round on that head and the marker survives the refused start.
@@ -1214,7 +1214,7 @@ describe('readState', () => {
         inflightHead: HEAD,
       }),
     );
-    expect(() => readState(root, 1)).toThrow(/no recognised state key/);
+    expect(() => readState(root, 1)).toThrow(/no state-bearing entry/);
     // Each identity key on its own (plus an unknown key) is still refused.
     for (const key of [
       'pr',
@@ -1230,7 +1230,7 @@ describe('readState', () => {
         statePath(root, 1),
         JSON.stringify({ [key]: 'x', weirdHead: HEAD }),
       );
-      expect(() => readState(root, 1)).toThrow(/no recognised state key/);
+      expect(() => readState(root, 1)).toThrow(/no state-bearing entry/);
     }
   });
 
@@ -1260,7 +1260,7 @@ describe('readState', () => {
       statePath(root, 1),
       JSON.stringify({ pr: 1, inFlightHeads: [], verifiedHeads: [] }),
     );
-    expect(() => readState(root, 1)).toThrow(/no recognised state key/);
+    expect(() => readState(root, 1)).toThrow(/no state-bearing entry/);
     // A legitimate written state always reads back.
     const root2 = makeRoot();
     startRound(root2, { pr: 1, head: HEAD, round: 11, artifactDir: 'r11' });
@@ -1279,7 +1279,7 @@ describe('readState', () => {
       JSON.stringify({ pr: 1, inFlight: { head: HEAD } }),
     ]) {
       writeFileSync(statePath(root, 1), body);
-      expect(() => readState(root, 1)).toThrow(/no recognised state key/);
+      expect(() => readState(root, 1)).toThrow(/no state-bearing entry/);
     }
     // A string inFlight head migrates and blocks a second round on that head.
     writeFileSync(
@@ -1320,7 +1320,7 @@ describe('readState', () => {
     writeFileSync(statePath(root, 16866), body);
     const res = run(root, [...START, '--artifact-dir', 'r11']);
     expect(res.status).toBe(1);
-    expect(res.stderr).toMatch(/no recognised state key/);
+    expect(res.stderr).toMatch(/no state-bearing entry/);
     expect(readFileSync(statePath(root, 16866), 'utf8')).toBe(body);
   });
 });

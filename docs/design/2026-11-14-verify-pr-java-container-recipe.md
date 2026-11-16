@@ -98,14 +98,15 @@ claim to mirror the gate's full trigger:
    `$HOME/.qwen-verify-nonce`, and the checker reads ONE record and ONE hash,
    refusing `mode:"container"` unless a round log carries a `container-nonce:`
    line whose sha256 matches. The per-container gate records are
-   `checkBoundary` evidence only — they do not multiply the nonce binding. So
-   the container whose `$HOME` holds the nonce (the seed/gate) must echo the
-   `container-nonce:` line into the round dir; the offline battery runs in a
-   different container and cannot read that plaintext. A multi-container round
-   therefore either has the seed/gate container echo the line (the attestation
-   then covers the gate container, not the battery) or declares `mode:"waived"`
-   with the maintainer's approval — it cannot mint `mode:"container"` from the
-   battery container alone.
+   `checkBoundary` evidence only — they do not multiply the nonce binding. The
+   `container-nonce:` line must be echoed by the container that runs the
+   battery, reading that container's own `$HOME/.qwen-verify-nonce`. The
+   offline battery runs in a different container than the seed/gate, so it
+   cannot read the gate container's plaintext and cannot mint
+   `mode:"container"`. Per the skill's step 5, a round whose battery cannot run
+   in the gate container declares `mode:"waived"` with the maintainer's
+   approval — a gate-container attestation is not a substitute for the
+   battery's own boundary (R3-6).
 2. **Offline Maven repository, seeded inside a boundary.** No host step runs
    a Maven goal against the PR's poms: `mvn install` walks the whole default
    lifecycle, so any plugin execution the PR binds to `compile` or `test`

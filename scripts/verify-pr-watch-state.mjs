@@ -156,7 +156,7 @@ export function readState(stateRoot, prNumber) {
       Object.keys(parsed.retiredSeqs).length > 0);
   if (Object.keys(parsed).length > 0 && !bearingPresent) {
     throw new Error(
-      `state file ${path} has no recognised state key; inspect or remove it before the next round`,
+      `state file ${path} carries no state-bearing entry the migration ladder can consume (a *Heads key must hold an array of {head} entries; inFlight/inFlightHead a non-empty string head); inspect it before removing — removal discards the verified/deferred dedup history`,
     );
   }
   return parsed;
