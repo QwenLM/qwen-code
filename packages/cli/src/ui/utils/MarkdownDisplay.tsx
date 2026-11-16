@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React from 'react';
+import React, { useContext } from 'react';
 import { Text, Box } from 'ink';
 import stringWidth from 'string-width';
 import { theme } from '../semantic-colors.js';
@@ -12,7 +12,7 @@ import { ICON } from '../constants.js';
 import { colorizeCode } from './CodeColorizer.js';
 import { TableRenderer, type ColumnAlign } from './TableRenderer.js';
 import { RenderInline } from './InlineMarkdownRenderer.js';
-import { useSettings } from '../contexts/SettingsContext.js';
+import { SettingsContext, useSettings } from '../contexts/SettingsContext.js';
 import { MermaidDiagram } from './MermaidDiagram.js';
 import { renderInlineLatex } from './latexRenderer.js';
 import { useRenderMode } from '../contexts/RenderModeContext.js';
@@ -187,7 +187,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   enforceHeightBudget = false,
 }) => {
   const { renderMode } = useRenderMode();
-  const settings = useSettings();
+  const settings = useContext(SettingsContext);
   const copyHint = React.useMemo(
     () =>
       sourceCopyText === undefined
@@ -270,7 +270,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
       contentWidth,
       renderedBudget,
       tableClampRows,
-      { showLineNumbers: settings.merged.ui?.showLineNumbers ?? true },
+      { showLineNumbers: settings?.merged.ui?.showLineNumbers ?? true },
     );
     if (keptLines < allLines.length) {
       lines = allLines.slice(0, keptLines);
