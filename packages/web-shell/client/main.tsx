@@ -432,6 +432,7 @@ export function StandaloneApp({
                         'title',
                         'environment',
                         'rightPanel',
+                        'artifacts',
                         'tokenUsage',
                         'contextUsage',
                       ],

@@ -58,9 +58,9 @@ public final class RuntimeBrokerTestAccess {
     }
 
     /**
-     * The execution-level authorizing CAS, without the binding-level CSI
-     * dispatch admission: mints authorization evidence on a claimed execution
-     * whose fixture deliberately omits CSI admission evidence.
+     * The execution-level authorizing CAS, without the binding-level dispatch
+     * admission: mints authorization evidence on a claimed execution whose
+     * fixture deliberately omits admission evidence.
      */
     public static ToolExecutionRecord authorizeDispatch(DataSource source, ToolExecutionRecord expected,
             String owner, long generation, long bindingVersion) {
@@ -70,8 +70,8 @@ public final class RuntimeBrokerTestAccess {
     }
 
     /**
-     * Installs an execution row directly, bypassing the CSI writer
-     * qualification the public findOrCreate enforces on profile bindings.
+     * Installs an execution row directly, bypassing the admission the public
+     * findOrCreate enforces.
      */
     public static ToolExecutionRecord insertExecution(DataSource source, ToolExecutionRecord record) {
         return JdbcRepositorySupport.transaction(source, connection -> {
@@ -80,10 +80,7 @@ public final class RuntimeBrokerTestAccess {
         });
     }
 
-    /**
-     * The owner dispatch CAS without the CSI continuation lock, for fixtures
-     * whose execution deliberately omits native CSI continuation evidence.
-     */
+    /** The owner dispatch CAS on the execution row alone, without binding-level admission. */
     public static ToolExecutionRecord compareAndSet(DataSource source, ToolExecutionRecord expected,
             ToolExecutionRecord replacement, String owner, long dispatchGeneration) {
         return JdbcRepositorySupport.transaction(source, connection -> {

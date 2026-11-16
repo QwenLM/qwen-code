@@ -1099,6 +1099,7 @@ const {
         ) => void;
         onPendingPanesChange?: (ids: string[]) => void;
         onPaneWorkspacesChange?: (cwds: readonly string[]) => void;
+        onOpenGoals?: () => void;
         showSessionDetails?: boolean;
         includeOtherWorkspaces?: boolean;
         workspaceCwd?: string;
@@ -2541,6 +2542,7 @@ vi.doMock('./components/SplitView', async () => {
       onPanesChange?: (ids: string[]) => void;
       onPendingPanesChange?: (ids: string[]) => void;
       onPaneWorkspacesChange?: (cwds: readonly string[]) => void;
+      onOpenGoals?: () => void;
       includeOtherWorkspaces?: boolean;
       workspaceCwd?: string;
       sessionWorkflowEnabled?: boolean;
@@ -4335,6 +4337,182 @@ describe('task activity key', () => {
 
     expect(mockSessionActions.loadArtifacts).toHaveBeenCalledTimes(2);
     expect(testState.latestBackgroundTasksRefreshTrigger).toBe(1);
+  });
+
+  it('shows the header artifacts entry with the session count and opens the environment panel', async () => {
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    const makeArtifact = (id: string): DaemonSessionArtifact => ({
+      id,
+      kind: 'html',
+      storage: 'workspace',
+      source: 'tool',
+      status: 'available',
+      title: id,
+      workspacePath: `${id}.html`,
+      clientRetained: false,
+      createdAt: '2026-09-07T00:00:00.000Z',
+      updatedAt: '2026-09-07T00:00:00.000Z',
+    });
+    mockSessionActions.loadArtifacts.mockResolvedValue({
+      artifacts: [makeArtifact('report'), makeArtifact('chart')],
+    });
+    const { container } = renderApp();
+    await flush();
+
+    const entry = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-artifacts-entry]',
+    );
+    expect(entry).not.toBeNull();
+    expect(entry!.getAttribute('aria-label')).toBe('Open artifacts (2)');
+
+    await act(async () => {
+      entry!.click();
+    });
+    await flush();
+    const panel = container.querySelector(
+      '[data-testid="environment-panel"]:not([hidden])',
+    );
+    expect(panel).not.toBeNull();
+    // The entry must reveal the artifact list, not just open the panel shell.
+    expect(panel?.textContent).toContain('report.html');
+    expect(panel?.textContent).toContain('chart.html');
+
+    // Collapse the artifacts section, close the panel, then re-click the entry:
+    // the App glue (signal bump + prop pass) must re-expand the section, since
+    // the panel keeps its local section state while hidden.
+    const sectionHeader = Array.from(
+      panel!.querySelectorAll<HTMLButtonElement>('button[aria-expanded]'),
+    ).find((button) => button.textContent?.trim() === 'Artifacts');
+    expect(sectionHeader).toBeTruthy();
+    await act(async () => {
+      sectionHeader!.click();
+    });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="environment-panel"]')?.textContent,
+    ).not.toContain('report.html');
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="chat-context-header"] button[aria-label="Toggle environment information"]',
+        )
+        ?.click();
+    });
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-artifacts-entry]')
+        ?.click();
+    });
+    await flush();
+    const reopened = container.querySelector(
+      '[data-testid="environment-panel"]:not([hidden])',
+    );
+    expect(reopened).not.toBeNull();
+    expect(reopened?.textContent).toContain('report.html');
+    expect(reopened?.textContent).toContain('chart.html');
+  });
+
+  it('hides the header artifacts entry when the session has no artifacts', async () => {
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    mockSessionActions.loadArtifacts.mockResolvedValue({ artifacts: [] });
+    const { container } = renderApp();
+    await flush();
+
+    expect(
+      container.querySelector('[data-web-shell-artifacts-entry]'),
+    ).toBeNull();
+  });
+
+  it('exposes the artifact count and opener to a custom chat header', async () => {
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    mockSessionActions.loadArtifacts.mockResolvedValue({
+      artifacts: [
+        {
+          id: 'report',
+          kind: 'html',
+          storage: 'workspace',
+          source: 'tool',
+          status: 'available',
+          title: 'report',
+          workspacePath: 'report.html',
+          clientRetained: false,
+          createdAt: '2026-09-07T00:00:00.000Z',
+          updatedAt: '2026-09-07T00:00:00.000Z',
+        },
+      ],
+    });
+    const renderChatHeader = vi.fn(
+      ({ artifactCount, onOpenArtifacts }: ChatHeaderRenderInfo) => (
+        <button type="button" onClick={onOpenArtifacts}>
+          Custom artifacts {artifactCount}
+        </button>
+      ),
+    );
+    const { container } = renderApp({ renderChatHeader });
+    await flush();
+
+    expect(renderChatHeader).toHaveBeenCalledWith(
+      expect.objectContaining({
+        artifactCount: 1,
+        onOpenArtifacts: expect.any(Function),
+      }),
+    );
+    await act(async () => {
+      Array.from(container.querySelectorAll('button'))
+        .find((button) => button.textContent === 'Custom artifacts 1')!
+        .click();
+    });
+    await flush();
+    expect(
+      container.querySelector(
+        '[data-testid="environment-panel"]:not([hidden])',
+      ),
+    ).not.toBeNull();
+  });
+
+  it('withholds the artifact count from a custom header when the panel has no artifacts section', async () => {
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    mockSessionActions.loadArtifacts.mockResolvedValue({
+      artifacts: [
+        {
+          id: 'report',
+          kind: 'html',
+          storage: 'workspace',
+          source: 'tool',
+          status: 'available',
+          title: 'report',
+          workspacePath: 'report.html',
+          clientRetained: false,
+          createdAt: '2026-09-07T00:00:00.000Z',
+          updatedAt: '2026-09-07T00:00:00.000Z',
+        },
+      ],
+    });
+    const renderChatHeader = vi.fn(() => null);
+    renderApp({
+      renderChatHeader,
+      environmentPanel: { items: ['environment'] },
+    });
+    await flush();
+
+    // The count and the opener share one gate: with no artifacts section in
+    // the panel there is nothing to open, so no count may be published either.
+    const info = renderChatHeader.mock.lastCall?.[0];
+    expect(info?.artifactCount).toBeUndefined();
+    expect(info?.onOpenArtifacts).toBeUndefined();
   });
 
   it('persists the environment panel open state across reloads', async () => {
@@ -12592,6 +12770,7 @@ function makePendingPermissionBlock(
       raw: Record<string, unknown>;
     }>;
     content?: unknown[];
+    rawInput?: Record<string, unknown>;
   } = {},
 ): unknown {
   const toolName = overrides.toolName ?? 'run_shell_command';
@@ -12610,6 +12789,7 @@ function makePendingPermissionBlock(
         ...(overrides.todoPlan ? { qwenTodoApproval: overrides.todoPlan } : {}),
       },
       ...(overrides.content ? { content: overrides.content } : {}),
+      ...(overrides.rawInput ? { rawInput: overrides.rawInput } : {}),
       ...(isAskUser
         ? { input: { questions: [{ question: 'Pick one', options: [] }] } }
         : {}),
@@ -18514,7 +18694,7 @@ describe('App session callbacks', () => {
         sessionId: 'session-1',
         sessionName: 'Session One',
         workspaceCwd: '/tmp/project',
-        items: ['title', 'environment', 'rightPanel'],
+        items: ['title', 'environment', 'rightPanel', 'artifacts'],
         environmentPanelOpen: false,
         rightPanelOpen: false,
         onEnvironmentPanelOpenChange: expect.any(Function),
@@ -29066,6 +29246,41 @@ describe('App session callbacks', () => {
     );
   });
 
+  it('only opens qualified transcript links within the workspace lock', async () => {
+    renderApp({ lockedWorkspaceCwd: '/locked' }, new EventTarget());
+    await flush();
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('qwen:open-session', {
+          detail: {
+            sessionId: 'other-session',
+            workspaceCwd: '/other',
+            source: 'session-link',
+          },
+        }),
+      );
+    });
+    expect(mockSessionActions.loadSession).not.toHaveBeenCalled();
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('qwen:open-session', {
+          detail: {
+            sessionId: 'locked-session',
+            workspaceCwd: '/locked',
+            source: 'session-link',
+          },
+        }),
+      );
+    });
+    expect(mockSessionActions.loadSession).toHaveBeenCalledExactlyOnceWith(
+      'locked-session',
+      {
+        workspaceCwd: '/locked',
+        sessionContext: { kind: 'workspace', cwd: '/locked' },
+      },
+    );
+  });
+
   it('keeps legacy window session links available with a workspace lock', async () => {
     renderApp({ lockedWorkspaceCwd: '/locked' }, new EventTarget());
     await flush();
@@ -29540,6 +29755,73 @@ describe('App session callbacks', () => {
 
     expect(snapshots.at(-1)).toBeNull();
     expect(activeGoals.at(-1)).toBeNull();
+  });
+
+  it('offers the strip Goals-page affordance when project features are available', async () => {
+    mockConnection.goalState = activeGoalSnapshot();
+    const { container } = renderApp();
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="goal-status-strip"]'),
+    ).not.toBeNull();
+    const openGoals = container.querySelector<HTMLButtonElement>(
+      '[data-testid="goal-open-goals"]',
+    );
+    expect(openGoals).not.toBeNull();
+    // Rendering is not enough: the button must be bound to the real Goals
+    // navigation, not a no-op. A `() => {}` mutant survives a presence-only
+    // assertion and ships a dead button.
+    await act(async () => {
+      openGoals!.click();
+      await flush();
+    });
+    expect(
+      container.querySelector('[data-testid="goals-page"]'),
+    ).not.toBeNull();
+  });
+
+  it('hides the strip Goals-page affordance when project features are unavailable', async () => {
+    // The Goals page renders under the same gate; offering the button where
+    // the page cannot open would navigate nowhere.
+    mockWorkspace.capabilities = {
+      workspaces: [],
+    } as typeof mockWorkspace.capabilities;
+    mockConnection.goalState = activeGoalSnapshot();
+    const { container } = renderApp();
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="goal-status-strip"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="goal-open-goals"]'),
+    ).toBeNull();
+  });
+
+  it('wires the split-view panes Goals affordance to the Goals page', async () => {
+    // SplitView mounts only under project features, so every pane gets the
+    // affordance. Pin the App-to-SplitView hop end to end: deleting
+    // `onOpenGoals={openGoals}` on the SplitView element must red this case,
+    // and the forwarded callback must open the real page, not a no-op.
+    mockConnection.goalState = activeGoalSnapshot();
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+        ?.click();
+    });
+    await flush();
+    const openGoals = testState.latestSplitViewProps?.onOpenGoals;
+    expect(openGoals).toBeDefined();
+    await act(async () => {
+      openGoals!();
+      await flush();
+    });
+    expect(
+      container.querySelector('[data-testid="goals-page"]'),
+    ).not.toBeNull();
   });
 
   it('refuses /language ui while a Goal owns the session', async () => {
@@ -37509,6 +37791,33 @@ describe('App session callbacks', () => {
     await flush();
     expect(firstHandler).not.toHaveBeenCalled();
     expect(secondHandler).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a named sub-session approval pending when switching to yolo', async () => {
+    testState.blocks = [
+      makePendingPermissionBlock({
+        toolName: 'create_sub_session',
+        kind: 'other',
+        rawInput: { workspace: '/repos/b' },
+        options: [
+          {
+            optionId: 'proceed_once',
+            label: 'Allow',
+            raw: { kind: 'allow_once' },
+          },
+        ],
+      }),
+    ];
+    renderApp();
+    await flush();
+    await act(async () => {
+      testState.latestChatEditorProps?.onSelectMode?.('yolo');
+    });
+
+    expect(mockSessionActions.setApprovalMode).toHaveBeenCalledWith('yolo', {
+      planMode: false,
+    });
+    expect(mockSessionActions.submitPermission).not.toHaveBeenCalled();
   });
 
   it.each(['default', 'auto-edit', 'auto', 'yolo'])(
