@@ -202,6 +202,68 @@ describe('runQwenServe PR-watch shutdown wiring', () => {
     );
   });
 
+  it('carries the boot language into both watch seams', async () => {
+    // The boot hop: general.language must reach the sources literal and from
+    // there both seams. A rewire that resolves the locale elsewhere would keep
+    // the constant read and stay green without this.
+    vi.unstubAllEnvs();
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-pr-watch-lang-')),
+    );
+    const workspace = path.join(tmpDir, 'project');
+    fs.mkdirSync(workspace);
+    let timerOptions:
+      | Parameters<typeof refreshModule.startSessionPrRefreshTimer>[0]
+      | undefined;
+    vi.spyOn(refreshModule, 'startSessionPrRefreshTimer').mockImplementation(
+      (options) => {
+        timerOptions = options;
+        return {
+          dispose: vi.fn(),
+          stopWatch: vi.fn(async () => {}),
+          drainNow: vi.fn(async () => {}),
+        };
+      },
+    );
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(
+      () => bridge() as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+    );
+    handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace,
+        maxSessions: 1,
+        token: 'secret-token',
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 0,
+        bootSettings: {
+          general: { language: 'zh' },
+          serve: { sessionPrWatch: { events: ['head_change'] } },
+        },
+      },
+    );
+    await fetch(`${handle.url}/health`, {
+      headers: { authorization: 'Bearer secret-token' },
+    });
+    await expect(handle.runtimeReady).resolves.toBeUndefined();
+    await vi.waitFor(() => expect(timerOptions).toBeDefined(), {
+      timeout: 15_000,
+    });
+    await vi.waitFor(
+      () => {
+        expect(timerOptions?.getPrWatchDeps?.()?.language).toBe('zh');
+        expect(timerOptions?.getPrDrainDeps?.()?.language).toBe('zh');
+      },
+      { timeout: 15_000 },
+    );
+  });
+
   it('loads hosted channel settings with env injection disabled', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-pr-watch-env-')),
