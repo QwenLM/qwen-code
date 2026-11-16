@@ -2737,10 +2737,10 @@ export class ManagedToolExecutor {
         }
         result = relativizeGlobResult(result, root);
       }
-      // #15076: core turns a `todo_write` filesystem failure into a
-      // success-shaped result whose text embeds the absolute runtime path,
-      // which sits outside the Workspace the glob rewrite anchors on. Scrub
-      // the runtime root itself before the result is durably committed.
+      // #15076: a `todo_write` filesystem failure carries the absolute runtime
+      // path in its message, which sits outside the Workspace the glob rewrite
+      // anchors on. Scrub the runtime root itself before the result is durably
+      // committed.
       if (entry.toolName === TodoWriteTool.Name) {
         result = relativizeRuntimeResult(result);
       }
