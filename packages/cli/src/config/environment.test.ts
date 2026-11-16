@@ -2505,6 +2505,74 @@ describe('home .env with the global dir in the XDG config directory', () => {
     }
   });
 
+  it('reports a settings.env that sets QWEN_HOME', () => {
+    const workspace = makeWorkspace();
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      loadEnvironment(
+        testSettings({ env: { QWEN_HOME: '/elsewhere' } }),
+        workspace,
+      );
+
+      expect(process.env['QWEN_HOME']).toBeUndefined();
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining(
+          `settings.env (${workspace}) cannot set the env vars that locate the global directory; ignored: QWEN_HOME.`,
+        ),
+      );
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('reports a dropped global-dir key from the runtime environment snapshot', () => {
+    // qwen serve builds each workspace's env only through this function.
+    const envFile = path.join(os.homedir(), '.env');
+    fs.writeFileSync(envFile, 'XDG_CONFIG_HOME=/opt/cfg\n');
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      const { effectiveEnv } = buildRuntimeEnvironment(
+        testSettings({}),
+        makeWorkspace(),
+        {},
+        true,
+      );
+
+      expect(effectiveEnv['XDG_CONFIG_HOME']).toBeUndefined();
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining(
+          `.env file ${envFile} cannot set the env vars that locate the global directory; ignored: XDG_CONFIG_HOME.`,
+        ),
+      );
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('reports a project .env that sets a global-dir key', () => {
+    const workspace = makeWorkspace();
+    const envFile = path.join(workspace, '.env');
+    fs.writeFileSync(envFile, 'XDG_CONFIG_HOME=/srv/qwen-config\n');
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      const { effectiveEnv } = buildRuntimeEnvironment(
+        testSettings({}),
+        workspace,
+        {},
+        true,
+      );
+
+      expect(effectiveEnv['XDG_CONFIG_HOME']).toBeUndefined();
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining(
+          `.env file ${envFile} cannot set the env vars that locate the global directory; ignored: XDG_CONFIG_HOME.`,
+        ),
+      );
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
   it('does not report the QWEN_HOME the home .env pre-read applied', () => {
     const qwenHome = makeWorkspace();
     fs.writeFileSync(

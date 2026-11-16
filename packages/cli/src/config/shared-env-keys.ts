@@ -747,31 +747,41 @@ export function reportRejectedLoaderKeys(
   return rejectedKeys;
 }
 
-// A home .env could set these before they decided where the global dir is,
-// so say why one is now ignored instead of dropping it silently. A key the
-// environment already holds with this value (QWEN_HOME from the home .env
-// pre-read, say) was not dropped.
+// Env files and settings.env at any scope could set some of these before
+// they decided where the global dir is, so say why one is now ignored instead
+// of dropping it silently. A key the environment already holds with this
+// value (QWEN_HOME from the home .env pre-read, say) was not dropped. Fresh
+// keys go to the daemon's durable log when it installed a sink, like loader
+// keys; the return value is every dropped key, for the serve fast path.
 export function reportRejectedGlobalDirKeys(
   source: string,
-  parsedEnv: Readonly<Record<string, string>>,
-): void {
+  env: Readonly<Record<string, unknown>>,
+): string[] {
+  const rejectedKeys = Object.keys(env).filter((key) => {
+    const value = env[key];
+    return (
+      isGlobalDirEnvKey(key) &&
+      typeof value === 'string' &&
+      value !== '' &&
+      process.env[key] !== value
+    );
+  });
   const warnedKeys =
     reportedLoaderKeyRejections.get(source) ?? new Set<string>();
-  const freshKeys = Object.keys(parsedEnv).filter(
-    (key) =>
-      isGlobalDirEnvKey(key) &&
-      parsedEnv[key] &&
-      process.env[key] !== parsedEnv[key] &&
-      !warnedKeys.has(key),
-  );
-  if (freshKeys.length === 0) return;
+  const freshKeys = rejectedKeys.filter((key) => !warnedKeys.has(key));
+  if (freshKeys.length === 0) return rejectedKeys;
   for (const key of freshKeys) warnedKeys.add(key);
   reportedLoaderKeyRejections.set(source, warnedKeys);
-  writeStderrLineSafe(
-    `qwen: ${source} cannot set the env vars that locate the global ` +
-      `directory; ignored: ${freshKeys.join(', ')}. Export them in the ` +
-      'launch environment instead.',
-  );
+  if (loaderKeyRejectionReporter) {
+    loaderKeyRejectionReporter(source, freshKeys);
+  } else {
+    writeStderrLineSafe(
+      `qwen: ${source} cannot set the env vars that locate the global ` +
+        `directory; ignored: ${freshKeys.join(', ')}. Export them in the ` +
+        'launch environment instead.',
+    );
+  }
+  return rejectedKeys;
 }
 
 /** Test-only: forget already-reported loader-key rejections. */

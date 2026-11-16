@@ -1849,6 +1849,31 @@ describe('serve fast path environment bootstrap', () => {
       }
     });
 
+    it('stashes a dropped XDG_CONFIG_HOME for the daemon log', () => {
+      // Boot stderr rarely survives a systemd or desktop launch, and the
+      // warn-once map silences the daemon's own later report of this file.
+      const home = useXdgHome();
+      tempWorkspace = realpathSync(
+        mkdtempSync(join(os.tmpdir(), 'qws-fast-path-xdg-workspace-')),
+      );
+      writeFileSync(join(home, '.env'), 'XDG_CONFIG_HOME=/elsewhere\n');
+      consumeServeFastPathRejectedLoaderKeys();
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        loadServeFastPathEnvironment(
+          { env: { QWEN_HOME: '/from-settings' } },
+          tempWorkspace,
+        );
+
+        expect([...consumeServeFastPathRejectedLoaderKeys()].sort()).toEqual([
+          'QWEN_HOME',
+          'XDG_CONFIG_HOME',
+        ]);
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
     it('lets a legacy ~/.qwen/.env fill in keys but not set QWEN_HOME', () => {
       const home = useXdgHome();
       tempWorkspace = realpathSync(

@@ -692,6 +692,7 @@ function reportRejectedSettingsEnv(
 ): void {
   const source = `settings.env (${startDir})`;
   reportRejectedLoaderKeys(source, Object.keys(env));
+  reportRejectedGlobalDirKeys(source, env);
   if (
     Object.entries(env).some(
       ([key, value]) =>
@@ -781,6 +782,7 @@ export function buildRuntimeEnvironment(
       `.env file ${envFile.path}`,
       Object.keys(envFile.parsedEnv),
     );
+    reportRejectedGlobalDirKeys(`.env file ${envFile.path}`, envFile.parsedEnv);
   }
 
   if (settings.env) {
@@ -865,12 +867,7 @@ export function loadEnvironment(
       `.env file ${envFile.path}`,
       Object.keys(envFile.parsedEnv),
     );
-    if (envFile.isHomeScopedEnvFile) {
-      reportRejectedGlobalDirKeys(
-        `.env file ${envFile.path}`,
-        envFile.parsedEnv,
-      );
-    }
+    reportRejectedGlobalDirKeys(`.env file ${envFile.path}`, envFile.parsedEnv);
   }
 
   // Step 2: settings.env fallback (lowest priority, no-override).
@@ -978,12 +975,7 @@ export function reloadEnvironment(
       `.env file ${envFile.path}`,
       Object.keys(envFile.parsedEnv),
     );
-    if (envFile.isHomeScopedEnvFile) {
-      reportRejectedGlobalDirKeys(
-        `.env file ${envFile.path}`,
-        envFile.parsedEnv,
-      );
-    }
+    reportRejectedGlobalDirKeys(`.env file ${envFile.path}`, envFile.parsedEnv);
   }
 
   if (settings.env) {

@@ -927,9 +927,10 @@ anything else loads, and from no other `.env` file, including a `~/.qwen/.env`
 left behind when the global directory is elsewhere. `XDG_CONFIG_HOME`, `HOME`
 and `USERPROFILE` are never read from a `.env` file, and none of the four is
 read from the `settings.json` `env` section. All four decide where the global
-directory is, and Qwen Code prints a warning when it ignores one from a
-user-level `.env` file. Any other variable in a `~/.qwen/.env` left behind still
-loads, after the global directory's `.env` and before `~/.env`.
+directory is, and Qwen Code prints a warning when it ignores one from a `.env`
+file or the `env` section; `qwen serve` writes it to the daemon log. Any other
+variable in a `~/.qwen/.env` left behind still loads, after the global
+directory's `.env` and before `~/.env`.
 
 ### Standalone update download source
 

@@ -17,6 +17,7 @@ import {
   isLoaderEnvKey,
   type LoaderKeyRejectionReporter,
   PROJECT_ENV_HARDCODED_EXCLUSIONS,
+  reportRejectedGlobalDirKeys,
   reportRejectedLoaderKeys,
   resetInheritedLoaderEnvScrubForTesting,
   resetLoaderKeyRejectionReportingForTesting,
@@ -456,6 +457,50 @@ describe('isHardcodedProjectEnvExclusion', () => {
     // (and not a listed literal) is not excluded: GIT_CONFIG_NOSYSTEM only
     // skips the system gitconfig read and injects nothing.
     expect(isHardcodedProjectEnvExclusion('GIT_CONFIG_NOSYSTEM')).toBe(false);
+  });
+});
+
+describe('reportRejectedGlobalDirKeys', () => {
+  afterEach(() => {
+    setLoaderKeyRejectionReporter(undefined);
+    resetLoaderKeyRejectionReportingForTesting();
+  });
+
+  it('sends fresh keys to the installed reporter instead of stderr', () => {
+    const reporter = vi.fn();
+    setLoaderKeyRejectionReporter(reporter);
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      expect(
+        reportRejectedGlobalDirKeys('.env file /home/u/.env', {
+          XDG_CONFIG_HOME: '/data/conf',
+          DEMO_VAR: 'kept',
+        }),
+      ).toEqual(['XDG_CONFIG_HOME']);
+      // Reported once per source and key, but still returned as dropped.
+      expect(
+        reportRejectedGlobalDirKeys('.env file /home/u/.env', {
+          XDG_CONFIG_HOME: '/data/conf',
+        }),
+      ).toEqual(['XDG_CONFIG_HOME']);
+
+      expect(reporter).toHaveBeenCalledTimes(1);
+      expect(reporter).toHaveBeenCalledWith('.env file /home/u/.env', [
+        'XDG_CONFIG_HOME',
+      ]);
+      expect(stderr).not.toHaveBeenCalled();
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('skips non-string values, as settings.env can hold them', () => {
+    expect(
+      reportRejectedGlobalDirKeys('settings.env (/w)', {
+        QWEN_HOME: 42,
+        HOME: '',
+      }),
+    ).toEqual([]);
   });
 });
 

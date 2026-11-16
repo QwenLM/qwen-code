@@ -348,9 +348,9 @@ export function loadServeFastPathEnvironment(
           Object.keys(parsedEnv),
         ),
       );
-      if (isHomeScopedEnvFile) {
-        reportRejectedGlobalDirKeys(`.env file ${envFilePath}`, parsedEnv);
-      }
+      rejectedLoaderKeys.push(
+        ...reportRejectedGlobalDirKeys(`.env file ${envFilePath}`, parsedEnv),
+      );
     } catch {
       // Errors are ignored to match dotenv quiet-mode behavior.
     }
@@ -369,6 +369,10 @@ export function loadServeFastPathEnvironment(
       ...reportRejectedLoaderKeys(
         `settings.env (${startDir})`,
         Object.keys(settings.env),
+      ),
+      ...reportRejectedGlobalDirKeys(
+        `settings.env (${startDir})`,
+        settings.env,
       ),
     );
   }
