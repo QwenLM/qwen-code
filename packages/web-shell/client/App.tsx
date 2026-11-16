@@ -1963,6 +1963,7 @@ const DEFAULT_CHAT_HEADER_ITEMS: readonly WebShellChatHeaderItem[] = [
   'title',
   'environment',
   'rightPanel',
+  'artifacts',
 ];
 const DEFAULT_RIGHT_PANEL_ITEMS: readonly WebShellRightPanelItem[] = [
   'review',
@@ -3836,6 +3837,7 @@ export function App({
   const titleHeaderItemVisible = chatHeaderItems.includes('title');
   const environmentHeaderItemVisible = chatHeaderItems.includes('environment');
   const rightPanelHeaderItemVisible = chatHeaderItems.includes('rightPanel');
+  const artifactsHeaderItemVisible = chatHeaderItems.includes('artifacts');
   const tokenUsageHeaderItemVisible = chatHeaderItems.includes('tokenUsage');
   const contextUsageHeaderItemVisible =
     chatHeaderItems.includes('contextUsage');
@@ -24346,6 +24348,14 @@ export function App({
                                 connection.sessionId!,
                                 sessionActions,
                               )
+                          : undefined
+                      }
+                      artifactCount={
+                        artifactsHeaderItemVisible ? artifacts.length : undefined
+                      }
+                      onOpenArtifacts={
+                        artifactsHeaderItemVisible && connection.sessionId
+                          ? () => handleEnvironmentPanelOpenChange(true)
                           : undefined
                       }
                       onOpenLocalControlSettings={

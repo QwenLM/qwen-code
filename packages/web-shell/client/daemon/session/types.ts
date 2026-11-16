@@ -43,6 +43,7 @@ import type {
   DaemonSessionWorkflowTaskStatus,
   DaemonSessionWorkflowTasksStatus,
   DaemonSessionStatsStatus,
+  DaemonSessionArtifact,
   DaemonSessionArtifactsEnvelope,
   DaemonSessionArtifactInput,
   DaemonSessionArtifactMutationResult,
@@ -177,6 +178,12 @@ export interface DaemonConnectionState {
   loadingTranscript?: boolean;
   /** True while replaying buffered events after a reconnect. */
   catchingUp?: boolean;
+  /**
+   * Restored artifact snapshot embedded in the load response. Available before
+   * the replay renders so a session-level artifact entry can appear early;
+   * live updates still come from the gated artifact fetch.
+   */
+  restoredArtifacts?: DaemonSessionArtifact[];
   error?: string;
   /** Latest HTTP error status kept for diagnostics; use missingSession for UI. */
   errorStatus?: number;

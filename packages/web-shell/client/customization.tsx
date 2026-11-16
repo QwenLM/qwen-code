@@ -201,6 +201,7 @@ export type WebShellChatHeaderItem =
   | 'title'
   | 'environment'
   | 'rightPanel'
+  | 'artifacts'
   | 'tokenUsage'
   | 'contextUsage';
 

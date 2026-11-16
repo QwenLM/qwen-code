@@ -848,4 +848,35 @@ describe('useSessionArtifacts', () => {
       'reconciled-artifact',
     ]);
   });
+
+  it('shows the load-embedded snapshot while catching up, then the live fetch wins', async () => {
+    sdkMock.connection = {
+      status: 'connected',
+      sessionId: 'session-a',
+      capabilities: { features: ['session_artifacts'] },
+      catchingUp: true,
+      restoredArtifacts: [artifact('early-artifact')],
+    };
+    const liveLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
+    sdkMock.actions.loadArtifacts.mockReturnValueOnce(liveLoad.promise);
+
+    await renderHookHost();
+    // The gated fetch is blocked by catchingUp, but the embedded snapshot is
+    // already visible so a session-level entry can render before the replay.
+    expect(sdkMock.actions.loadArtifacts).not.toHaveBeenCalled();
+    expect(latestState?.artifacts.map((item) => item.id)).toEqual([
+      'early-artifact',
+    ]);
+
+    sdkMock.connection.catchingUp = false;
+    await rerenderHookHost();
+    expect(sdkMock.actions.loadArtifacts).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      liveLoad.resolve({ artifacts: [artifact('live-artifact')] });
+      await liveLoad.promise;
+    });
+    expect(latestState?.artifacts.map((item) => item.id)).toEqual([
+      'live-artifact',
+    ]);
+  });
 });

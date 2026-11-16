@@ -135,6 +135,7 @@ export function useSessionArtifacts(): SessionArtifactsState {
   const visibleArtifacts =
     sessionKey && supportsArtifacts
       ? (artifactsBySessionRef.current.get(sessionKey)?.artifacts ??
+        connection.restoredArtifacts ??
         EMPTY_ARTIFACTS)
       : EMPTY_ARTIFACTS;
   const artifactById = useMemo(
