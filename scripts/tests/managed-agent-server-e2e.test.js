@@ -3343,7 +3343,7 @@ describe('managed-agent-server e2e runner', () => {
     // payload is printed eagerly. The freeze arm's wake record reads as a
     // pass line on stdout too, so it defers the same way — no eager
     // console.log of a JSON payload remains inside the try at all.
-    expect(source.match(/resultJson = JSON\.stringify\(/g)).toHaveLength(5);
+    expect(source.match(/resultJson = JSON\.stringify\(/g)).toHaveLength(6);
     // Native approvals share one summary; the rewritten-command arm has its
     // own receipt/stage summary instead of forging native execution fields.
     expect(
@@ -3403,6 +3403,55 @@ describe('managed-agent-server e2e runner', () => {
       wakePrint,
       'the freeze wake record must print only after the main result',
     ).toBeGreaterThan(print);
+  });
+
+  // The loop-skill arm attests a managed model-turn lifecycle; its guards
+  // must stay load-bearing: a turn.failed terminal, a body that only shows
+  // up in a later round, a union body served to a cron profile, a call id
+  // witnessed by substring, or a clear leg that never retires the minted
+  // automation would each forge a pass.
+  it('pins the loop-skill arm terminal, body-scope, and call-id contracts', () => {
+    const source = read('scripts/run-managed-agent-server-e2e.ts');
+    // Every /loop turn settles as exactly one turn.completed; the check
+    // lives at the call site because waitForTerminal returns on any terminal.
+    expect(source).toMatch(
+      /terminals\.length !== 1\s*\|\|\s*terminals\[0\]\.type !== 'turn\.completed'/,
+    );
+    // The condition is only as good as the table it is applied to: dropping
+    // a row would leave that turn's terminal unchecked while these pins stay
+    // green.
+    expect(source).toMatch(
+      /\['create', created\],\s*\['list', listed\],\s*\['clear', cleared\],/,
+    );
+    // The body checks read the first streamed round, and the positive
+    // requires the Skill tool result (role 'tool'), not the session prelude.
+    expect(source).toMatch(/loopRequests\[0\]\?\.body\['messages'\]/);
+    expect(source).toMatch(
+      /message\.role === 'tool' &&\s*JSON\.stringify\(message\)\.includes\(cronOnlyPhrase\)/,
+    );
+    // Cron-only positive plus union negative, verified against the committed
+    // sidecars so asset drift fails closed instead of silently drifting.
+    expect(source).toMatch(
+      /const cronOnlyPhrase = 'requires a fixed interval';/,
+    );
+    expect(source).toMatch(/const unionMarker = 'LoopWakeup';/);
+    expect(source).toMatch(/managed-loop-skill-\$\{variant\}\.json/);
+    expect(source).toMatch(/Loop sidecar discriminators drifted/);
+    // The clear leg retires the id the store minted and the result must state
+    // that retirement; a mere tool result is satisfied by a 404 error result.
+    expect(source).toMatch(/const createdId = \/asch_\[0-9a-f\]\{32\}\//);
+    expect(source).toMatch(/Retired cron schedule \$\{createdScheduleId\}\./);
+    expect(source).toMatch(/cron_create printed no automation id/);
+    // Call ids match structured fields on both the fake-model confirmation
+    // and the scenario assertions, never serialized substrings.
+    expect(source).toMatch(
+      /entry\.role === 'tool' && entry\.tool_call_id === callId/,
+    );
+    expect(source).toMatch(
+      /\(message as \{ tool_call_id\?: string \}\)\.tool_call_id === callId/,
+    );
+    expect(source).not.toMatch(/\.includes\(callId\)/);
+    expect(source).not.toMatch(/serialized\.includes\('loop-cron-/);
   });
 
   // A timed-out spawn sets error and leaves status null with empty stderr,
