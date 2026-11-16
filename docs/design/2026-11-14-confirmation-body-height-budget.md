@@ -261,6 +261,11 @@ outright.
     source: emphasis markers are stripped by the renderer, so the source is
     wider than the screen and a body that renders in one row must not be
     reported as having a hidden tail;
+  - a link target the renderer keeps visible, counted at that visible width: a
+    deceptive label renders as `label (target)`, longer than the label alone, so
+    counting the label hands the row to a box Ink then clips without a word,
+    while counting what is drawn drops the block whole and spends that row on
+    the announcement;
   - a plan body with room: the plan rows and the `o open full plan in editor`
     row occupy separate rows, and at a two-row budget the dropped plan is
     announced, which is also what lights the reveal shortcut;

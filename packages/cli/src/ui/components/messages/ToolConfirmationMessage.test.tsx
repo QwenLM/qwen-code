@@ -2106,6 +2106,49 @@ describe('ToolConfirmationMessage', () => {
       expect(frame).toContain('Do you want to proceed?');
     });
 
+    it('counts a link target the renderer keeps visible', async () => {
+      const availableTerminalHeight = 8;
+      const { lastFrame } = render(
+        <OverflowProvider>
+          {withProviders(
+            <ToolConfirmationMessage
+              confirmationDetails={{
+                type: 'info',
+                title: 'Confirm',
+                prompt:
+                  '[google.com](https://attacker.example/api/v1/export?signature=abcdef0123456789)',
+                hideAlwaysAllow: true,
+                onConfirm: vi.fn(),
+              }}
+              config={mockConfig}
+              availableTerminalHeight={availableTerminalHeight}
+              contentWidth={50}
+            />,
+          )}
+          <OverflowProbe />
+        </OverflowProvider>,
+      );
+
+      await vi.waitFor(() => {
+        const frame = lastFrame() ?? '';
+        expect(frame).toContain('... prompt hidden ...');
+        expect(frame).toContain('overflowing:1');
+      }, WAIT_FOR_FRAME);
+      const frame = lastFrame() ?? '';
+      // A deceptive label renders as `label (target)`, so the text on screen is
+      // longer than the label alone. Counting only the label sees a body that
+      // fits the single-row grant, hands it to a box that Ink then clips with
+      // nothing said; counting what the renderer draws drops the block whole
+      // and spends the row on the announcement instead.
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(
+        availableTerminalHeight + 1,
+      );
+      expect(frame).toContain('overflowing:1');
+      expect(frame).not.toContain('google.com');
+      expect(frame).toContain('Do you want to proceed?');
+      expect(frame).toContain('Yes, allow once');
+    });
+
     it('offers the reveal shortcut for a body clipped without MaxSizedBox', async () => {
       const { lastFrame } = render(
         <OverflowProvider>
