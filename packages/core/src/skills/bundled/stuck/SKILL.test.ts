@@ -117,15 +117,18 @@ describe.skipIf(process.platform === 'win32')(
       );
     });
 
-    it('expands a leading ~ in QWEN_HOME as core does', () => {
-      vi.stubEnv('QWEN_HOME', '~/custom-qwen');
-      expect(runPreamble('Linux', { QWEN_HOME: '~/custom-qwen' })).toBe(
-        path.join(home, 'custom-qwen'),
-      );
-      expect(runPreamble('Linux', { QWEN_HOME: '~/custom-qwen' })).toBe(
-        coreDir('linux'),
-      );
-    });
+    it.each(['~/custom-qwen', '~\\custom-qwen', '~/custom\\qwen'])(
+      'expands a leading ~ in QWEN_HOME=%s as core does',
+      (qwenHome) => {
+        vi.stubEnv('QWEN_HOME', qwenHome);
+        expect(runPreamble('Linux', { QWEN_HOME: qwenHome })).toBe(
+          coreDir('linux'),
+        );
+        expect(coreDir('linux').startsWith(path.join(home, 'custom'))).toBe(
+          true,
+        );
+      },
+    );
 
     it('uses an absolute XDG_CONFIG_HOME', () => {
       const configHome = path.join(home, 'xdg-config');
