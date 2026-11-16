@@ -12,6 +12,7 @@ import {
   createGitHubPullRequest,
   getDefaultBranch,
   type FetchGitHubPullRequestsResult,
+  type FetchGitHubPullRequestFilesResult,
 } from '@qwen-code/qwen-code-core';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import type { SendBridgeError } from '../server/error-response.js';
@@ -113,6 +114,32 @@ export function registerWorkspaceQualifiedGitHubPrsRoutes(
       );
     }
     return cache.get(workspaceCwd)!.promise;
+  };
+
+  // In-flight coalescing for the files route: concurrent requests for the same
+  // cwd+number+repo share one `gh` spawn, mirroring the PR-list cache's
+  // pending-load reuse. Entries clear once settled so a later open re-reads
+  // fresh data rather than a stale snapshot.
+  const prFilesInFlight = new Map<
+    string,
+    Promise<FetchGitHubPullRequestFilesResult>
+  >();
+  const getPrFiles = (
+    cwd: string,
+    number: number,
+    env?: Readonly<Record<string, string | undefined>>,
+    repo?: string,
+  ): Promise<FetchGitHubPullRequestFilesResult> => {
+    const key = `${cwd}\u0000${number}\u0000${repo ?? ''}`;
+    const existing = prFilesInFlight.get(key);
+    if (existing) return existing;
+    const promise = fetchGitHubPullRequestFiles(cwd, number, env, repo);
+    prFilesInFlight.set(key, promise);
+    const settle = () => {
+      if (prFilesInFlight.get(key) === promise) prFilesInFlight.delete(key);
+    };
+    promise.then(settle, settle);
+    return promise;
   };
 
   app.get('/workspaces/:workspace/github/prs', async (req, res) => {
@@ -234,7 +261,7 @@ export function registerWorkspaceQualifiedGitHubPrsRoutes(
 
       applyReadHeaders(res);
       try {
-        const result = await fetchGitHubPullRequestFiles(
+        const result = await getPrFiles(
           cwd,
           number,
           runtime.env.effectiveEnv,

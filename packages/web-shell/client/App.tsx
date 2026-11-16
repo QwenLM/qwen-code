@@ -1967,6 +1967,7 @@ const DEFAULT_CHAT_HEADER_ITEMS: readonly WebShellChatHeaderItem[] = [
 const DEFAULT_RIGHT_PANEL_ITEMS: readonly WebShellRightPanelItem[] = [
   'review',
   'sideTask',
+  'changeOverview',
 ];
 /**
  * Right-panel entries that work without a session; the empty new-task page
@@ -1976,6 +1977,7 @@ const EMPTY_STATE_RIGHT_PANEL_ITEMS: readonly WebShellRightPanelItem[] = [
   'files',
   'terminal',
   'webPreview',
+  'changeOverview',
 ];
 /**
  * Key prefix backing the empty new-task page's panel state: one draft entry
@@ -2290,6 +2292,10 @@ type PersistedArtifactPanelTab =
       'id' | 'kind' | 'title' | 'sessionId'
     >
   | Pick<
+      Extract<ArtifactPanelTab, { kind: 'change_overview' }>,
+      'id' | 'kind' | 'title' | 'workspaceCwd' | 'sessionId'
+    >
+  | Pick<
       Extract<ArtifactPanelTab, { kind: 'token_usage' }>,
       'id' | 'kind' | 'title' | 'sessionId' | 'closeWithPane'
     >
@@ -2503,6 +2509,14 @@ function parsePersistedArtifactPanelTab(
         kind: 'trajectory',
         sessionId: tab['sessionId'],
       } as PersistedArtifactPanelTab;
+    case 'change_overview':
+      if (typeof tab['workspaceCwd'] !== 'string') return;
+      return {
+        ...common,
+        kind: 'change_overview',
+        workspaceCwd: tab['workspaceCwd'],
+        sessionId: tab['sessionId'],
+      } as PersistedArtifactPanelTab;
     case 'token_usage':
     case 'context_usage':
       if (typeof tab['sessionId'] !== 'string') return;
@@ -2682,8 +2696,17 @@ function serializeArtifactPanelTabs(
       case 'workflow':
         return [{ id, kind: tab.kind, title, sessionId: tab.sessionId }];
       case 'change_overview':
-        // Refetched from git on open; nothing durable to persist.
-        return [];
+        // Persist the identity like the neighbouring trajectory/workflow arms;
+        // the panel refetches its content from git on mount.
+        return [
+          {
+            id,
+            kind: tab.kind,
+            title,
+            workspaceCwd: tab.workspaceCwd,
+            sessionId: tab.sessionId,
+          },
+        ];
       case 'pending': {
         const common = {
           id,
@@ -6693,6 +6716,25 @@ export function App({
     );
     setArtifactPanelOpen(true);
   }, [activeWorkspaceCwd, connection.sessionId, getDefaultReviewPanelWidth, t]);
+  // A change-overview tab opened on the new-task page has no session yet; when
+  // the first prompt materializes one, adopt the live session id so the per-PR
+  // units and worktree scoping appear without reopening the tab. Only tabs that
+  // lack a session are touched, so the draft-adoption path stays untouched.
+  useEffect(() => {
+    const liveSessionId = connection.sessionId;
+    if (!liveSessionId) return;
+    setArtifactPanelTabs((tabs) => {
+      let changed = false;
+      const next = tabs.map((tab) => {
+        if (tab.kind === 'change_overview' && !tab.sessionId) {
+          changed = true;
+          return { ...tab, sessionId: liveSessionId };
+        }
+        return tab;
+      });
+      return changed ? next : tabs;
+    });
+  }, [connection.sessionId]);
   const openScheduledTaskPanel = useCallback(
     (
       task: TurnOutputScheduledTask,
@@ -8124,6 +8166,11 @@ export function App({
                       sessionAgentTraceSupported)
                     ? tab
                     : undefined;
+                case 'change_overview':
+                  // Identity only; the panel refetches from git on mount. A
+                  // tab saved without a session picks up the live one via the
+                  // session-id reconciliation effect.
+                  return tab;
               }
             },
           ),

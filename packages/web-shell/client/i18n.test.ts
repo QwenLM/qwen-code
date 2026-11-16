@@ -239,8 +239,11 @@ describe('web-shell i18n catalog', () => {
       'changeOverview.empty',
       'changeOverview.files',
       'changeOverview.prUnavailable',
+      'changeOverview.prUnavailableCli',
+      'changeOverview.prUnavailableRoute',
       'changeOverview.refresh',
       'changeOverview.openPr',
+      'changeOverview.description',
       'changeOverview.hiddenFiles',
     ];
     for (const key of keys) {
@@ -250,6 +253,18 @@ describe('web-shell i18n catalog', () => {
       expect(zh(key, { count: 2 })).not.toBe(key);
       expect(zh(key, { count: 2 })).not.toBe(en(key, { count: 2 }));
     }
+  });
+
+  it('pluralises the change-overview count strings at count 1', () => {
+    const en = getTranslator('en');
+    expect(en('changeOverview.files', { count: 1 })).toBe('1 file');
+    expect(en('changeOverview.files', { count: 2 })).toBe('2 files');
+    expect(en('changeOverview.hiddenFiles', { count: 1 })).toBe(
+      '…and 1 file more',
+    );
+    expect(en('changeOverview.hiddenFiles', { count: 3 })).toBe(
+      '…and 3 files more',
+    );
   });
 
   it.each(WEB_SHELL_LANGUAGES)(

@@ -4,6 +4,7 @@ import {
   buildCommitFallbackUnits,
   commitFallbackRange,
   prRepoFromUrl,
+  prUnavailableCauseFromError,
 } from './change-overview';
 
 function detail(
@@ -34,6 +35,20 @@ describe('commitFallbackRange', () => {
 
   it('returns undefined when neither a PR head nor a base branch is known', () => {
     expect(commitFallbackRange(undefined, undefined)).toBeUndefined();
+  });
+
+  it('refuses a base branch the daemon range whitelist would drop', () => {
+    // git permits these refs, but isSafeLogRange rejects them; composing the
+    // range would make the daemon run an unscoped git log instead.
+    expect(commitFallbackRange(undefined, 'feat@2026')).toBeUndefined();
+    expect(commitFallbackRange(undefined, 'user#42')).toBeUndefined();
+    expect(commitFallbackRange(undefined, '-leading')).toBeUndefined();
+    expect(commitFallbackRange(undefined, '分支')).toBeUndefined();
+    // The PR-head and valid base forms must keep working.
+    expect(commitFallbackRange('abc1234', undefined)).toBe('abc1234..HEAD');
+    expect(commitFallbackRange(undefined, 'origin/main')).toBe(
+      'origin/main..HEAD',
+    );
   });
 });
 
@@ -129,5 +144,49 @@ describe('prRepoFromUrl', () => {
     expect(prRepoFromUrl('https://github.com/o/r/issues/1')).toBeUndefined();
     expect(prRepoFromUrl('not a url')).toBeUndefined();
     expect(prRepoFromUrl('')).toBeUndefined();
+  });
+});
+
+describe('prUnavailableCauseFromError', () => {
+  it('classifies gh-missing, old-daemon 404, and other failures distinctly', () => {
+    expect(
+      prUnavailableCauseFromError({
+        status: 502,
+        body: { code: 'github_cli_unavailable' },
+      }),
+    ).toBe('cli');
+    expect(prUnavailableCauseFromError({ status: 404, body: {} })).toBe(
+      'route',
+    );
+    expect(
+      prUnavailableCauseFromError({
+        status: 502,
+        body: { code: 'github_pr_files_failed' },
+      }),
+    ).toBe('error');
+    expect(prUnavailableCauseFromError(new Error('network'))).toBe('error');
+    expect(prUnavailableCauseFromError(undefined)).toBe('error');
+  });
+});
+
+describe('buildCommitFallbackUnits binary rows', () => {
+  it('carries isBinary so the panel can render a marker, not +0 -0', () => {
+    const entries = [
+      { sha: 'c1', shortSha: 'c1', subject: 'asset', parents: [] },
+    ];
+    const details = new Map([
+      [
+        'c1',
+        detail({
+          files: [{ path: 'logo.png', added: 0, removed: 0, isBinary: true }],
+          filesCount: 1,
+        }),
+      ],
+    ]);
+    const units = buildCommitFallbackUnits(entries, details);
+    expect(units[0]!.files[0]).toMatchObject({
+      path: 'logo.png',
+      isBinary: true,
+    });
   });
 });

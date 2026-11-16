@@ -191,7 +191,7 @@ describe('ChangeOverviewPanel', () => {
     };
     renderPanel();
     expect(container.textContent).toContain('60 files');
-    expect(container.textContent).toContain('…and 10 more files');
+    expect(container.textContent).toContain('…and 10 files more');
   });
 
   it('shows a retryable load-failed message on a transient fetch failure', () => {
@@ -206,6 +206,143 @@ describe('ChangeOverviewPanel', () => {
       'Couldn’t load the change overview',
     );
     expect(container.textContent).not.toContain('not a git repository');
+    expect(
+      container.querySelector('button[aria-label="Refresh"]'),
+    ).not.toBeNull();
+  });
+
+  it('treats a capped-but-empty uncommitted list as truncated, not empty', () => {
+    mock.state = {
+      gitAvailable: true,
+      loadFailed: false,
+      loading: false,
+      units: [
+        {
+          kind: 'uncommitted',
+          id: 'uncommitted',
+          files: [],
+          additions: 4000,
+          deletions: 3000,
+          filesCount: 501,
+          hiddenCount: 501,
+        },
+      ],
+    };
+    renderPanel();
+    expect(container.textContent).toContain('501 files');
+    expect(container.textContent).not.toContain('No changes in this scope');
+    expect(container.textContent).toContain('…and 501 files more');
+  });
+
+  it('omits the count, totals and badge for an unavailable PR', () => {
+    mock.state = {
+      gitAvailable: true,
+      loadFailed: false,
+      loading: false,
+      units: [
+        {
+          kind: 'pr',
+          id: 'pr:9',
+          number: 9,
+          title: '#9',
+          url: 'https://github.com/o/r/pull/9',
+          state: 'unavailable',
+          unavailableCause: 'error',
+          files: [],
+          additions: 0,
+          deletions: 0,
+          filesCount: 0,
+          hiddenCount: 0,
+        },
+      ],
+    };
+    renderPanel();
+    expect(container.textContent).not.toContain('0 files');
+    const badge = container.querySelector('[class*="scopeBadge"]');
+    expect(badge).toBeNull();
+  });
+
+  it('names the actual cause of an unavailable PR file list', () => {
+    const base = {
+      kind: 'pr' as const,
+      id: 'pr:9',
+      number: 9,
+      title: '#9',
+      url: 'https://github.com/o/r/pull/9',
+      state: 'unavailable' as const,
+      files: [],
+      additions: 0,
+      deletions: 0,
+      filesCount: 0,
+      hiddenCount: 0,
+    };
+    mock.state = {
+      gitAvailable: true,
+      loadFailed: false,
+      loading: false,
+      units: [{ ...base, unavailableCause: 'cli' }],
+    };
+    renderPanel();
+    expect(container.textContent).toContain('GitHub CLI (gh) is not installed');
+    mock.state = {
+      ...mock.state,
+      units: [{ ...base, unavailableCause: 'route' }],
+    };
+    renderPanel();
+    expect(container.textContent).toContain('predates the PR file-list route');
+  });
+
+  it('renders a binary marker instead of +0 -0 for binary rows', () => {
+    mock.state = {
+      gitAvailable: true,
+      loadFailed: false,
+      loading: false,
+      units: [
+        {
+          kind: 'uncommitted',
+          id: 'uncommitted',
+          files: [
+            { path: 'logo.png', additions: 0, deletions: 0, isBinary: true },
+          ],
+          additions: 0,
+          deletions: 0,
+          filesCount: 1,
+          hiddenCount: 0,
+        },
+      ],
+    };
+    renderPanel();
+    expect(container.textContent).toContain('logo.png');
+    // The binary row renders a marker, not a "+0 -0" LineStats. (The scope
+    // header may still total +0 for a binary-only scope; that is correct.)
+    const row = container.querySelector('[class*="fileRow"]');
+    expect(row?.textContent).toContain('~');
+    expect(row?.textContent).not.toContain('+0');
+    expect(row?.querySelector('[class*="lineStats"]')).toBeNull();
+  });
+
+  it('disables refresh while a pass is in flight', () => {
+    mock.state = {
+      gitAvailable: true,
+      loadFailed: false,
+      loading: true,
+      units: [],
+    };
+    renderPanel();
+    const refreshButton = container.querySelector(
+      'button[aria-label="Refresh"]',
+    ) as HTMLButtonElement;
+    expect(refreshButton.disabled).toBe(true);
+  });
+
+  it('keeps refresh available in the not-a-git state', () => {
+    mock.state = {
+      gitAvailable: false,
+      loadFailed: false,
+      loading: false,
+      units: [],
+    };
+    renderPanel();
     expect(
       container.querySelector('button[aria-label="Refresh"]'),
     ).not.toBeNull();

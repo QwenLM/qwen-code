@@ -3698,6 +3698,84 @@ describe('ArtifactPanel add menu', () => {
     const menuText = document.body.querySelector('[role="menu"]')?.textContent;
     expect(menuText).not.toContain('Change overview');
   });
+
+  it('offers the change overview as an empty-state action when no tab is open', () => {
+    const onOpenChangeOverview = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[]}
+            activeTabId={null}
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            changeOverviewAvailable
+            onOpenChangeOverview={onOpenChangeOverview}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const action = Array.from(
+      container.querySelectorAll<HTMLButtonElement>(
+        '[data-testid="right-panel-empty-actions"] button',
+      ),
+    ).find((button) => button.textContent?.includes('Change overview'));
+    expect(action).toBeDefined();
+    act(() => action?.click());
+    expect(onOpenChangeOverview).toHaveBeenCalledOnce();
+  });
+
+  it('respects the items allowlist and hides the change overview entry', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'artifact',
+                kind: 'artifact',
+                title: 'Report',
+                artifactId: 'report',
+                workspaceCwd: '/primary',
+                workspaceId: 'primary-id',
+              },
+            ]}
+            activeTabId="artifact"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            items={['review']}
+            changeOverviewAvailable
+            onOpenChangeOverview={vi.fn()}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    openAddMenu(container);
+    const menuText = document.body.querySelector('[role="menu"]')?.textContent;
+    expect(menuText).not.toContain('Change overview');
+  });
 });
 
 describe('ArtifactPanel review downloads', () => {

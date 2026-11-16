@@ -7,7 +7,7 @@ import { useChangeOverview } from './useChangeOverview';
 const mock = vi.hoisted(() => ({
   workspaceByCwd: vi.fn(),
   sessionStatus: vi.fn(),
-  features: ['workspace_github_prs'] as string[],
+  features: ['workspace_github_pr_files'] as string[],
 }));
 const client = {
   workspaceByCwd: mock.workspaceByCwd,
@@ -61,7 +61,7 @@ beforeEach(() => {
   const container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
-  mock.features = ['workspace_github_prs'];
+  mock.features = ['workspace_github_pr_files'];
   mock.sessionStatus.mockReset().mockResolvedValue({
     prs: [
       { number: 1, url: 'https://github.com/o/r/pull/1' },
@@ -249,5 +249,86 @@ describe('useChangeOverview', () => {
     await renderAndSettle();
     expect(ws.workspaceGitLog).not.toHaveBeenCalled();
     expect(output.units.map((unit) => unit.kind)).not.toContain('commit');
+  });
+
+  it('refetches when refresh is called', async () => {
+    await renderAndSettle();
+    const ws = mock.workspaceByCwd.mock.results[0]!.value;
+    expect(ws.workspaceGitDiff).toHaveBeenCalledTimes(1);
+    act(() => output.refresh());
+    await vi.waitFor(() =>
+      expect(ws.workspaceGitDiff).toHaveBeenCalledTimes(2),
+    );
+  });
+
+  it('reports loadFailed when the session summary fetch rejects', async () => {
+    mock.sessionStatus.mockRejectedValue(new Error('daemon busy'));
+    await renderAndSettle();
+    expect(output.loadFailed).toBe(true);
+    expect(output.gitAvailable).toBe(true);
+    expect(output.units).toEqual([]);
+  });
+
+  it('carries the daemon failure cause into an unavailable PR unit', async () => {
+    const ws = {
+      workspaceGitDiff: vi.fn().mockResolvedValue(gitDiff),
+      workspaceGitHubPullRequestFiles: vi.fn().mockRejectedValue({
+        status: 502,
+        body: { code: 'github_cli_unavailable' },
+      }),
+      workspaceGitLog: vi
+        .fn()
+        .mockResolvedValue({ entries: [], hasMore: false }),
+      workspaceGitCommitDetail: vi.fn(),
+    };
+    mock.workspaceByCwd.mockReturnValue(ws);
+    await renderAndSettle();
+    const pr1 = output.units.find((unit) => unit.id === 'pr:1');
+    expect(pr1).toMatchObject({
+      kind: 'pr',
+      state: 'unavailable',
+      unavailableCause: 'cli',
+    });
+  });
+
+  it('marks binary uncommitted rows so the panel can render a marker', async () => {
+    const ws = {
+      workspaceGitDiff: vi.fn().mockResolvedValue({
+        ...gitDiff,
+        files: [{ path: 'logo.png', added: 0, removed: 0, isBinary: true }],
+      }),
+      workspaceGitHubPullRequestFiles: vi
+        .fn()
+        .mockRejectedValue(new Error('n/a')),
+      workspaceGitLog: vi
+        .fn()
+        .mockResolvedValue({ entries: [], hasMore: false }),
+      workspaceGitCommitDetail: vi.fn(),
+    };
+    mock.workspaceByCwd.mockReturnValue(ws);
+    await renderAndSettle();
+    const uncommitted = output.units.find(
+      (unit) => unit.kind === 'uncommitted',
+    );
+    expect(uncommitted!.files[0]).toMatchObject({
+      path: 'logo.png',
+      isBinary: true,
+    });
+  });
+
+  it('excludes review-provenance bindings but keeps create/legacy ones', async () => {
+    mock.sessionStatus.mockResolvedValue({
+      prs: [
+        { number: 1, url: 'https://github.com/o/r/pull/1', source: 'create' },
+        { number: 2, url: 'https://github.com/o/r/pull/2', source: 'review' },
+        { number: 3, url: 'https://github.com/o/r/pull/3' },
+      ],
+      branch: { name: 'feat', baseBranch: 'origin/main' },
+    });
+    await renderAndSettle();
+    const prIds = output.units
+      .filter((unit) => unit.kind === 'pr')
+      .map((unit) => unit.id);
+    expect(prIds).toEqual(['pr:1', 'pr:3']);
   });
 });

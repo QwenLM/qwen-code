@@ -65,8 +65,9 @@ Shell 在三处展示变更信息，但都无法回答「按我交付的方式�
 ### 数据层（core）
 
 在 `packages/core/src/utils/github-prs.ts` 新增
-`fetchGitHubPullRequestFiles(cwd, number, env?)`，底层用
-`gh pr view <number> --json files,additions,deletions,headRefOid,baseRefName`。
+`fetchGitHubPullRequestFiles(cwd, number, env?, repo?)`，底层用
+`gh pr view <number> --json files,additions,deletions,headRefOid,baseRefName,changedFiles`
+（绑定 PR 属于其他仓库时另加 `--repo owner/repo`）。
 返回与现有 PR 助手一致的可辨识结果（`ok` / `cli_unavailable` / `failed`），并给出
 解析且设上限的文件列表：
 
@@ -85,11 +86,12 @@ Shell 在三处展示变更信息，但都无法回答「按我交付的方式�
 在 `packages/cli/src/serve/routes/workspace-github-prs.ts` 新增
 `GET /workspaces/:workspace/github/prs/:number/files`，沿用现有限定路由模式：
 解析可信运行时、解析会话托管的 git cwd、调用 core 助手、套用只读响应头并返回
-文件列表。该路由挂在**现有** `workspace_github_prs` capability 标签下（扩展其
-注释以覆盖 files 路由），而不新增标签：files 路由是 PRs 面的只读扩展，新增标签
-需要同步多处顺序敏感的钉死 capability 基线。客户端用 `workspace_github_prs`
-作为拉取 PR 文件的门槛；早于 files 路由的 daemon 会返回 404，总览将其渲染为
-「文件列表不可用」。
+文件列表。该路由挂在**新增**的 `workspace_github_pr_files` capability 标签下，
+遵循注册表「新行为要有新 tag」的规则——预检过 `workspace_github_prs` 的客户端
+据此能判断 files 路由是否存在，而不必乐观探测。钉死的 capability 基线
+（server.test.ts、capability-parity.ts、集成 capabilities 信封）随新 tag 同步。
+客户端用 `workspace_github_pr_files` 作为拉取 PR 文件的门槛；没有该标签的
+daemon 不显示 PR 范围，有标签但拉取失败的降级为「文件列表不可用」并给出真实原因。
 
 总览本身**在客户端组合**现成路由加这一个新路由，而不是新增一个大型聚合端点。
 这样每一块都小而可复用，也与 Git 对话框已经组合 `git/diff`、`git/log`、
@@ -98,8 +100,9 @@ Shell 在三处展示变更信息，但都无法回答「按我交付的方式�
 ### SDK
 
 在 `packages/sdk-typescript/src/daemon/types.ts`、`DaemonClient.ts` 新增
-`DaemonGitHubPullRequestFiles` 类型与
-`workspaceGitHubPullRequestFiles(number, cwd?, sessionId?)` 客户端方法，与现有
+`DaemonGitHubPullRequestFile` / `DaemonGitHubPullRequestFiles` 类型（并在 `daemon`
+barrel 中与兄弟 PR 类型一并重导出）与
+`workspaceGitHubPullRequestFiles(number, cwd?, sessionId?, repo?)` 客户端方法，与现有
 PR 方法保持一致。
 
 ### UI（web-shell）
@@ -141,12 +144,16 @@ PR 方法保持一致。
 
 - `packages/core/src/utils/github-prs.ts`（+ 同目录测试）：PR 文件统计。
 - `packages/cli/src/serve/routes/workspace-github-prs.ts`（+ 测试）：files 路由。
-- `packages/cli/src/serve/capabilities.ts`：扩展 `workspace_github_prs` 标签
-  注释（不新增标签、不改基线）。
-- `packages/sdk-typescript/src/daemon/types.ts`、`DaemonClient.ts`（+ 测试）。
+- `packages/cli/src/serve/capabilities.ts`、`capability-parity.ts`、
+  `server.test.ts`、`integration-tests/cli/qwen-serve-routes.test.ts`：新增
+  `workspace_github_pr_files` 标签及其钉死基线。
+- `packages/sdk-typescript/src/daemon/types.ts`、`DaemonClient.ts`、`index.ts`
+  （+ 测试）：类型、客户端方法与 barrel 重导出。
 - `packages/web-shell/client/components/artifacts/`：总览页 + hook（+ 测试）。
-- `packages/web-shell/client/App.tsx`：打开总览页、传入会话摘要。
-- `packages/web-shell/client/i18n.tsx`：中英文案。
+- `packages/web-shell/client/customization.tsx`：`changeOverview` 右面板项。
+- `packages/web-shell/client/App.tsx`：打开/持久化/恢复总览页并回填会话 id、传入
+  会话摘要。
+- `packages/web-shell/client/i18n.tsx`（+ 对齐测试）：中英文案。
 
 ## 范围边界
 

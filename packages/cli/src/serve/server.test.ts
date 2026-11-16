@@ -797,6 +797,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_init',
   'workspace_github_setup',
   'workspace_github_prs',
+  'workspace_github_pr_files',
   'workspace_git_worktrees',
   'workspace_git_check_ignore',
   'workspace_mcp_restart',
@@ -916,6 +917,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_init' &&
       f !== 'workspace_github_setup' &&
       f !== 'workspace_github_prs' &&
+      f !== 'workspace_github_pr_files' &&
       f !== 'workspace_git_worktrees' &&
       f !== 'workspace_git_check_ignore' &&
       f !== 'workspace_permissions' &&
@@ -969,6 +971,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_init',
   'workspace_github_setup',
   'workspace_github_prs',
+  'workspace_github_pr_files',
   'workspace_git_worktrees',
   'workspace_git_check_ignore',
   'workspace_mcp_restart',

@@ -443,6 +443,7 @@ export interface SideTaskListItem {
 const DEFAULT_RIGHT_PANEL_ITEMS: readonly WebShellRightPanelItem[] = [
   'review',
   'sideTask',
+  'changeOverview',
 ];
 
 interface ArtifactPanelProps {
@@ -821,6 +822,10 @@ export function ArtifactPanel({
         tab.workspaceCwd === workspaceCwd &&
         tab.workspaceId === filesOwner?.id,
     );
+  const showChangeOverviewMenuItem =
+    items.includes('changeOverview') &&
+    changeOverviewAvailable &&
+    Boolean(onOpenChangeOverview);
   const showAddMenu =
     Boolean(activeTab) &&
     (showFilesMenuItem ||
@@ -828,7 +833,8 @@ export function ArtifactPanel({
       showSideTaskMenuItems ||
       showTerminalMenuItem ||
       showWebPreviewMenuItem ||
-      showTrajectoryMenuItem);
+      showTrajectoryMenuItem ||
+      showChangeOverviewMenuItem);
   const activeWorkspaceIdentity =
     activeTab && isWorkspaceScopedTab(activeTab)
       ? {
@@ -1030,7 +1036,7 @@ export function ArtifactPanel({
                     </span>
                   </DropdownMenuItem>
                 )}
-                {changeOverviewAvailable && onOpenChangeOverview && (
+                {showChangeOverviewMenuItem && (
                   <DropdownMenuItem onSelect={onOpenChangeOverview}>
                     <FileDiffIcon
                       className={styles.sideTaskNewIcon}
@@ -1042,8 +1048,7 @@ export function ArtifactPanel({
                     </span>
                   </DropdownMenuItem>
                 )}
-                {(showReviewMenuItem ||
-                  (changeOverviewAvailable && onOpenChangeOverview)) &&
+                {(showReviewMenuItem || showChangeOverviewMenuItem) &&
                   showSideTaskMenuItems && <DropdownMenuSeparator />}
                 {showSideTaskMenuItems && (
                   <DropdownMenuItem
@@ -1273,6 +1278,28 @@ export function ArtifactPanel({
                 </span>
                 <span className={styles.emptyActionHint}>
                   {t('turnOutputs.reviewLatest')}
+                </span>
+                <ChevronRightIcon
+                  className={styles.emptyActionChevron}
+                  strokeWidth={1.6}
+                  aria-hidden="true"
+                />
+              </button>
+            )}
+            {showChangeOverviewMenuItem && (
+              <button
+                type="button"
+                className={styles.emptyAction}
+                onClick={onOpenChangeOverview}
+              >
+                <span className={styles.emptyActionIcon} aria-hidden="true">
+                  <FileDiffIcon strokeWidth={1.6} />
+                </span>
+                <span className={styles.emptyActionTitle}>
+                  {t('changeOverview.title')}
+                </span>
+                <span className={styles.emptyActionHint}>
+                  {t('changeOverview.description')}
                 </span>
                 <ChevronRightIcon
                   className={styles.emptyActionChevron}

@@ -2252,12 +2252,17 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'changeOverview.loadFailed':
     'Couldn’t load the change overview. Use refresh to retry.',
   'changeOverview.empty': 'No changes in this scope.',
-  'changeOverview.files': (v) => `${v?.count ?? 0} files`,
+  'changeOverview.files': (v) => plural(v?.count, 'file'),
   'changeOverview.prUnavailable':
-    'File list unavailable (gh missing, or the daemon predates this route).',
+    'File list unavailable: couldn’t load it. Use refresh to retry.',
+  'changeOverview.prUnavailableCli':
+    'File list unavailable: the GitHub CLI (gh) is not installed on the daemon host.',
+  'changeOverview.prUnavailableRoute':
+    'File list unavailable: this daemon predates the PR file-list route.',
   'changeOverview.refresh': 'Refresh',
   'changeOverview.openPr': 'Open PR',
-  'changeOverview.hiddenFiles': (v) => `…and ${v?.count ?? 0} more files`,
+  'changeOverview.description': 'Changed files and scale, by delivery unit.',
+  'changeOverview.hiddenFiles': (v) => `…and ${plural(v?.count, 'file')} more`,
   'codeReview.authoritativeVerdict': 'Authoritative verdict',
   'codeReview.targetEffort': (v) =>
     `Target: ${v?.target ?? ''} · Effort: ${v?.effort ?? ''}`,
@@ -7447,10 +7452,14 @@ const ZH: Messages = {
   'changeOverview.loadFailed': '无法加载变更总览，请点刷新重试。',
   'changeOverview.empty': '该范围暂无变更。',
   'changeOverview.files': (v) => `${v?.count ?? 0} 个文件`,
-  'changeOverview.prUnavailable':
-    '文件列表不可用（缺少 gh，或 daemon 版本早于该路由）。',
+  'changeOverview.prUnavailable': '文件列表不可用：加载失败，请点刷新重试。',
+  'changeOverview.prUnavailableCli':
+    '文件列表不可用：daemon 主机未安装 GitHub CLI（gh）。',
+  'changeOverview.prUnavailableRoute':
+    '文件列表不可用：该 daemon 版本早于 PR 文件列表路由。',
   'changeOverview.refresh': '刷新',
   'changeOverview.openPr': '打开 PR',
+  'changeOverview.description': '按交付单元查看变更文件与规模。',
   'changeOverview.hiddenFiles': (v) => `…另有 ${v?.count ?? 0} 个文件`,
   'codeReview.authoritativeVerdict': '权威裁决',
   'codeReview.targetEffort': (v) =>

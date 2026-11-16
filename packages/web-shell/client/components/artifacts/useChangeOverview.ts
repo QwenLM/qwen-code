@@ -3,13 +3,16 @@ import type {
   DaemonGitCommitDetail,
   DaemonGitLogEntry,
   DaemonSessionPrInfo,
+  DaemonSessionSummary,
 } from '@qwen-code/sdk/daemon';
 import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
 import {
   buildCommitFallbackUnits,
   commitFallbackRange,
   prRepoFromUrl,
+  prUnavailableCauseFromError,
   type ChangeOverviewUnit,
+  type PrUnavailableCause,
 } from './change-overview';
 
 const COMMIT_FALLBACK_LIMIT = 20;
@@ -35,8 +38,8 @@ export function useChangeOverview(
   sessionId?: string,
 ): ChangeOverviewState & { refresh: () => void } {
   const { client, capabilities } = useWorkspace();
-  const prsSupported =
-    capabilities?.features?.includes('workspace_github_prs') === true;
+  const prFilesSupported =
+    capabilities?.features?.includes('workspace_github_pr_files') === true;
   const [refreshKey, setRefreshKey] = useState(0);
   const refresh = useCallback(() => setRefreshKey((key) => key + 1), []);
   const [state, setState] = useState<ChangeOverviewState>({
@@ -60,11 +63,29 @@ export function useChangeOverview(
       let baseBranch: string | undefined;
       let gitCwd = workspaceCwd;
       if (sessionId) {
-        const summary = await client
-          .sessionStatus(sessionId)
-          .catch(() => undefined);
+        let summary: DaemonSessionSummary | undefined;
+        try {
+          summary = await client.sessionStatus(sessionId);
+        } catch {
+          // A rejected summary must not silently repoint a worktree session at
+          // the primary checkout and present that as the session's own work;
+          // surface a retryable failure instead.
+          if (active) {
+            setState({
+              gitAvailable: true,
+              loadFailed: true,
+              loading: false,
+              units: [],
+            });
+          }
+          return;
+        }
         if (!active) return;
-        boundPrs = summary?.prs ?? [];
+        // A `review`-provenance binding is a PR merely mentioned in a
+        // review/verify command, not this session's delivery; exclude it so a
+        // foreign PR's scale is not presented as the session's own work.
+        // Legacy bindings without a source stay included.
+        boundPrs = (summary?.prs ?? []).filter((pr) => pr.source !== 'review');
         baseBranch = summary?.branch?.baseBranch;
         gitCwd = summary?.worktree?.path ?? workspaceCwd;
       }
@@ -102,6 +123,7 @@ export function useChangeOverview(
             path: file.path,
             additions: file.added ?? 0,
             deletions: file.removed ?? 0,
+            isBinary: file.isBinary,
           })),
           additions: diff.linesAdded,
           deletions: diff.linesRemoved,
@@ -113,7 +135,7 @@ export function useChangeOverview(
       // PR units: fetch each bound PR's file list. A failure (gh missing, old
       // daemon without the route) leaves the unit visible but 'unavailable'.
       let latestPrHeadSha: string | undefined;
-      if (prsSupported && boundPrs.length > 0) {
+      if (prFilesSupported && boundPrs.length > 0) {
         const prResults = await Promise.all(
           boundPrs.map(async (pr) => {
             const base = {
@@ -123,6 +145,7 @@ export function useChangeOverview(
               title: `#${pr.number}`,
               url: pr.url,
             };
+            let cause: PrUnavailableCause = 'error';
             const result = await ws
               .workspaceGitHubPullRequestFiles(
                 pr.number,
@@ -130,13 +153,17 @@ export function useChangeOverview(
                 sessionId,
                 prRepoFromUrl(pr.url),
               )
-              .catch(() => undefined);
+              .catch((error: unknown) => {
+                cause = prUnavailableCauseFromError(error);
+                return undefined;
+              });
             if (!result || result.available === false) {
               return {
                 headSha: undefined as string | undefined,
                 unit: {
                   ...base,
                   state: 'unavailable',
+                  unavailableCause: result === undefined ? cause : 'error',
                   files: [],
                   additions: 0,
                   deletions: 0,
@@ -191,7 +218,11 @@ export function useChangeOverview(
           })
           .catch(() => undefined);
         if (!active) return;
-        const entries: DaemonGitLogEntry[] = log?.entries ?? [];
+        // Drop merge commits before the detail fan-out so they neither spend
+        // detail round-trips nor displace real loose commits in the window.
+        const entries: DaemonGitLogEntry[] = (log?.entries ?? []).filter(
+          (entry) => entry.parents.length <= 1,
+        );
         if (entries.length > 0) {
           const details = new Map<string, DaemonGitCommitDetail>();
           await Promise.all(
@@ -227,7 +258,7 @@ export function useChangeOverview(
     return () => {
       active = false;
     };
-  }, [client, workspaceCwd, sessionId, prsSupported, refreshKey]);
+  }, [client, workspaceCwd, sessionId, prFilesSupported, refreshKey]);
 
   return useMemo(() => ({ ...state, refresh }), [state, refresh]);
 }

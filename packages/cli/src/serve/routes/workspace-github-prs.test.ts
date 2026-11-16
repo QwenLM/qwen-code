@@ -12,6 +12,7 @@ import {
   fetchGitHubPullRequests,
   fetchGitHubPullRequestFiles,
   getDefaultBranch,
+  type FetchGitHubPullRequestFilesResult,
 } from '@qwen-code/qwen-code-core';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import { sendBridgeError } from '../server/error-response.js';
@@ -602,6 +603,48 @@ describe('workspace GitHub PR routes', () => {
       undefined,
       'other/repo',
     );
+  });
+
+  it('coalesces concurrent same-PR files requests into one gh call', async () => {
+    let resolveLoad: (r: FetchGitHubPullRequestFilesResult) => void = () => {};
+    const gate = new Promise<FetchGitHubPullRequestFilesResult>((r) => {
+      resolveLoad = r;
+    });
+    fetchGitHubPullRequestFilesMock.mockImplementation(() => gate);
+    const app = mount();
+
+    const p1 = request(app)
+      .get('/workspaces/primary/github/prs/42/files')
+      .then((r) => r);
+    const p2 = request(app)
+      .get('/workspaces/primary/github/prs/42/files')
+      .then((r) => r);
+    await new Promise((r) => setTimeout(r, 50));
+    resolveLoad({
+      kind: 'ok',
+      files: {
+        files: [],
+        hiddenCount: 0,
+        additions: 0,
+        deletions: 0,
+        headSha: '',
+        baseRefName: 'main',
+      },
+    });
+    const [r1, r2] = await Promise.all([p1, p2]);
+
+    expect(r1.status).toBe(200);
+    expect(r2.status).toBe(200);
+    expect(fetchGitHubPullRequestFilesMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects an invalid cwd query with 400 before calling gh', async () => {
+    const app = mount();
+    const response = await request(app).get(
+      '/workspaces/primary/github/prs/42/files?cwd=%2Fnonexistent-xyz',
+    );
+    expect(response.status).toBe(400);
+    expect(fetchGitHubPullRequestFilesMock).not.toHaveBeenCalled();
   });
 
   it('returns available:false for a PR files request outside a git repo', async () => {

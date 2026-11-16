@@ -1443,6 +1443,12 @@ export interface DaemonSessionPrInfo {
   /** Snapshot of the PR's state at last bind/refresh; optional. */
   state?: 'open' | 'merged' | 'closed';
   /**
+   * Binding provenance: `create`/`worktree` are the session's own delivery
+   * units; `review` is a PR merely mentioned in a review/verify command and is
+   * not this session's work. Absent on bindings persisted before provenance.
+   */
+  source?: 'create' | 'worktree' | 'review';
+  /**
    * Issues the PR closes (its GitHub closing references), derived by the
    * daemon's refresh sweep; absent until the first sweep after binding.
    */

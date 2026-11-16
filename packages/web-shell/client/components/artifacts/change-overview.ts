@@ -5,7 +5,12 @@ export interface ChangeOverviewFile {
   path: string;
   additions: number;
   deletions: number;
+  /** Binary rows carry zero counts by design; render a marker, not "+0 -0". */
+  isBinary?: boolean;
 }
+
+/** Why a PR's file list could not be fetched, so the panel can say so honestly. */
+export type PrUnavailableCause = 'cli' | 'route' | 'error';
 
 export type ChangeOverviewUnit =
   | {
@@ -25,6 +30,8 @@ export type ChangeOverviewUnit =
       url: string;
       /** 'unavailable' when the file list could not be fetched. */
       state: 'ready' | 'unavailable';
+      /** Present when state is 'unavailable'; names the actual failure cause. */
+      unavailableCause?: PrUnavailableCause;
       files: ChangeOverviewFile[];
       additions: number;
       deletions: number;
@@ -58,17 +65,54 @@ export function prRepoFromUrl(url: string): string | undefined {
 }
 
 /**
+ * Classify a failed PR-files fetch from the daemon error's wire shape, so the
+ * panel names the real cause instead of always blaming a missing `gh` or an
+ * old daemon. `github_cli_unavailable` → gh missing; a 404 → the daemon
+ * predates the route; anything else (expired token, rate limit, transient
+ * daemon error) → a generic retryable failure.
+ */
+export function prUnavailableCauseFromError(
+  error: unknown,
+): PrUnavailableCause {
+  if (typeof error !== 'object' || error === null) return 'error';
+  const status = (error as { status?: unknown }).status;
+  const body = (error as { body?: unknown }).body;
+  const code =
+    typeof body === 'object' && body !== null
+      ? (body as { code?: unknown }).code
+      : undefined;
+  if (code === 'github_cli_unavailable') return 'cli';
+  if (status === 404) return 'route';
+  return 'error';
+}
+
+/**
+ * Mirror of the daemon's `isSafeLogRange` predicate for a single ref. A base
+ * branch git permits but the whitelist rejects (e.g. `feat@2026`) would make
+ * the daemon silently drop the range and run an unscoped `git log`, re-listing
+ * pre-session history; refuse to compose such a range instead.
+ */
+function isSafeRangeRef(ref: string): boolean {
+  return (
+    !ref.startsWith('-') &&
+    !ref.startsWith('..') &&
+    /^[A-Za-z0-9_./~^-]+$/.test(ref)
+  );
+}
+
+/**
  * The git log range that yields the commit-fallback window: commits a bound PR
  * does not cover. With a known PR head, only commits after it are loose (the
  * PR units already show the rest); without one, the session's base branch (or
- * HEAD's recent history) bounds the window.
+ * HEAD's recent history) bounds the window. A base branch that cannot survive
+ * the daemon's range whitelist yields no range rather than an unscoped walk.
  */
 export function commitFallbackRange(
   latestPrHeadSha: string | undefined,
   baseBranch: string | undefined,
 ): string | undefined {
   if (latestPrHeadSha) return `${latestPrHeadSha}..HEAD`;
-  if (baseBranch) return `${baseBranch}..HEAD`;
+  if (baseBranch && isSafeRangeRef(baseBranch)) return `${baseBranch}..HEAD`;
   return undefined;
 }
 
@@ -96,6 +140,7 @@ export function buildCommitFallbackUnits(
       path: file.path,
       additions: file.added,
       deletions: file.removed,
+      isBinary: file.isBinary,
     }));
     const filesCount = detail.filesCount ?? files.length;
     units.push({

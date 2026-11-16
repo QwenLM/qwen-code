@@ -73,9 +73,10 @@ no file stats. There is no route that returns a PR's files.
 
 ### Data layer (core)
 
-Add `fetchGitHubPullRequestFiles(cwd, number, env?)` in
+Add `fetchGitHubPullRequestFiles(cwd, number, env?, repo?)` in
 `packages/core/src/utils/github-prs.ts`, backed by
-`gh pr view <number> --json files,additions,deletions,headRefOid,baseRefName`.
+`gh pr view <number> --json files,additions,deletions,headRefOid,baseRefName,changedFiles`
+(plus `--repo owner/repo` when the bound PR lives in another repository).
 It returns a discriminated result mirroring the existing PR helpers
 (`ok` / `cli_unavailable` / `failed`), with a parsed, capped file list:
 
@@ -97,13 +98,15 @@ Add `GET /workspaces/:workspace/github/prs/:number/files` in
 `packages/cli/src/serve/routes/workspace-github-prs.ts`, following the existing
 qualified-route pattern: resolve a trusted runtime, resolve the session-managed
 git cwd, call the core helper, apply read headers, and return the file list.
-The route is advertised under the **existing** `workspace_github_prs` capability
-tag (its comment is extended to cover the files route) rather than a new tag:
-the files route is a read-only extension of the PRs surface, and a new tag would
-require synchronizing several order-sensitive pinned capability baselines. The
-client gates PR-file fetching behind `workspace_github_prs`; a daemon predating
-the files route answers 404, which the overview renders as "file list
-unavailable".
+The route is advertised under a **new** `workspace_github_pr_files` capability
+tag, per the registry's rule that new behaviour gets a new tag so a client that
+preflighted `workspace_github_prs` can tell whether the files route exists
+instead of probing it optimistically. The pinned capability baselines
+(server.test.ts, capability-parity.ts, the integration capabilities envelope)
+are updated for the new tag. The client gates PR-file fetching behind
+`workspace_github_pr_files`; a daemon without the tag shows no PR scopes, and a
+daemon that advertises the tag but fails the fetch degrades to "file list
+unavailable" with the actual cause.
 
 The overview itself is **composed client-side** from existing routes plus this
 one new route, rather than adding a large aggregation endpoint. This keeps each
@@ -112,8 +115,9 @@ piece small and reusable and matches how the Git dialog already composes
 
 ### SDK
 
-Add `DaemonGitHubPullRequestFiles` types and a
-`workspaceGitHubPullRequestFiles(number, cwd?, sessionId?)` client method in
+Add `DaemonGitHubPullRequestFile` / `DaemonGitHubPullRequestFiles` types (re-exported
+from the `daemon` barrel beside the sibling PR types) and a
+`workspaceGitHubPullRequestFiles(number, cwd?, sessionId?, repo?)` client method in
 `packages/sdk-typescript/src/daemon/DaemonClient.ts`, mirroring the existing PR
 methods.
 
@@ -161,12 +165,16 @@ Degradation:
 
 - `packages/core/src/utils/github-prs.ts` (+ collocated test): PR file stats.
 - `packages/cli/src/serve/routes/workspace-github-prs.ts` (+ test): files route.
-- `packages/cli/src/serve/capabilities.ts`: extend the `workspace_github_prs`
-  tag comment (no new tag, no baseline changes).
-- `packages/sdk-typescript/src/daemon/types.ts`, `DaemonClient.ts` (+ test).
+- `packages/cli/src/serve/capabilities.ts`, `capability-parity.ts`,
+  `server.test.ts`, `integration-tests/cli/qwen-serve-routes.test.ts`: new
+  `workspace_github_pr_files` tag and its pinned baselines.
+- `packages/sdk-typescript/src/daemon/types.ts`, `DaemonClient.ts`, `index.ts`
+  (+ test): types, client method, and barrel re-export.
 - `packages/web-shell/client/components/artifacts/`: overview tab + hook (+ tests).
-- `packages/web-shell/client/App.tsx`: open the overview tab, pass session summary.
-- `packages/web-shell/client/i18n.tsx`: EN/ZH strings.
+- `packages/web-shell/client/customization.tsx`: `changeOverview` right-panel item.
+- `packages/web-shell/client/App.tsx`: open/persist/restore the overview tab and
+  reconcile its session id; pass the session summary.
+- `packages/web-shell/client/i18n.tsx` (+ parity test): EN/ZH strings.
 
 ## Scope boundaries
 

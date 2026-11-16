@@ -34,9 +34,14 @@
   cursor: pointer;
 }
 
-.refreshButton:hover {
+.refreshButton:hover:not(:disabled) {
   background: var(--accent);
   color: var(--foreground);
+}
+
+.refreshButton:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .scopeRow {
@@ -151,6 +156,11 @@
 
 .fileStats {
   flex: 0 0 auto;
+}
+
+.fileBinary {
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
 }
 
 .message {
