@@ -16,6 +16,13 @@ const workspaces = ['primary', 'second', 'third'].map((name, index) => ({
 let scenario: WebShellDaemonScenario;
 let daemon: MockDaemonController;
 
+function sessionDate(workspaceIndex: number, index: number): Date {
+  if (workspaceIndex < 2 || index < 2)
+    return new Date(2026, 0, workspaceIndex === 1 ? 1 : 2, 0, index);
+  if (index < 5) return new Date(2025, 11, 20, 0, index);
+  return new Date(2025, 9, 1, 0, index);
+}
+
 function workspaceRow(page: Page, index: number) {
   return page.locator(`[data-sidebar-workspace="${workspaces[index]!.cwd}"]`);
 }
@@ -90,20 +97,8 @@ test.beforeEach(async ({ page }, testInfo) => {
         sessionId: `${workspace.id}-${index}`,
         workspaceCwd: workspace.cwd,
         displayName: `${workspace.id} session ${index + 1}`,
-        createdAt: new Date(
-          2026,
-          0,
-          2 - (workspaceIndex % 2),
-          0,
-          index,
-        ).toISOString(),
-        updatedAt: new Date(
-          2026,
-          0,
-          2 - (workspaceIndex % 2),
-          0,
-          index,
-        ).toISOString(),
+        createdAt: sessionDate(workspaceIndex, index).toISOString(),
+        updatedAt: sessionDate(workspaceIndex, index).toISOString(),
         clientCount: 0,
         hasActivePrompt: false,
       })),
@@ -157,14 +152,7 @@ test('workspace filtering survives reload and restores defaults', async ({
 test('activity date grouping filters, persists, and restores workspace grouping', async ({
   page,
 }, testInfo) => {
-  const dateLabel = (date: Date) =>
-    date.toLocaleDateString('en', {
-      weekday: 'long',
-      month: 'short',
-      day: 'numeric',
-    });
-  const januarySecond = dateLabel(new Date(2026, 0, 2));
-  const januaryFirst = dateLabel(new Date(2026, 0, 1));
+  await page.clock.setFixedTime(new Date(2026, 0, 2, 12));
   await openGroupBy(page);
   await expect(
     page.getByRole('menuitemradio', { name: 'Workspace', exact: true }),
@@ -174,36 +162,43 @@ test('activity date grouping filters, persists, and restores workspace grouping'
     .getByRole('menuitemradio', { name: 'Activity date', exact: true })
     .click();
   await expect.poll(() => order(page)).toEqual([]);
-  const secondDay = page.getByRole('region', {
-    name: januarySecond,
+  const today = page.getByRole('region', { name: 'Today', exact: true });
+  const thisWeek = page.getByRole('region', {
+    name: 'This week',
     exact: true,
   });
-  const firstDay = page.getByRole('region', {
-    name: januaryFirst,
+  const last30Days = page.getByRole('region', {
+    name: 'Last 30 days',
     exact: true,
   });
-  await expect(secondDay).toContainText('· 14');
-  await expect(secondDay).toContainText('sidebar-primary session 7');
-  await expect(secondDay).toContainText('sidebar-third session 7');
-  await expect(firstDay).toContainText('sidebar-second session 7');
+  const older = page.getByRole('region', { name: 'Older', exact: true });
+  await expect(today).toContainText('· 9');
+  await today.getByRole('button', { name: 'Show 4 more', exact: true }).click();
+  await expect(today).toContainText('sidebar-primary session 7');
+  await expect(today).toContainText('sidebar-third session 2');
+  await expect(thisWeek).toContainText('sidebar-second session 7');
+  await expect(last30Days).toContainText('sidebar-third session 3');
+  await expect(older).toContainText('sidebar-third session 6');
   await page.screenshot({ path: testInfo.outputPath('activity-date.png') });
 
   await openWorkspaceFilter(page);
   await page
     .getByRole('menuitemradio', { name: 'sidebar-second', exact: true })
     .click();
-  await expect(secondDay).toHaveCount(0);
-  await expect(firstDay).toContainText('sidebar-second session 7');
-  await expect(firstDay).not.toContainText('sidebar-primary');
-  await expect(firstDay).not.toContainText('sidebar-third');
+  await expect(today).toHaveCount(0);
+  await expect(last30Days).toHaveCount(0);
+  await expect(older).toHaveCount(0);
+  await expect(thisWeek).toContainText('sidebar-second session 7');
+  await expect(thisWeek).not.toContainText('sidebar-primary');
+  await expect(thisWeek).not.toContainText('sidebar-third');
 
   await page.reload();
   await daemon.sse.waitForConnection(scenario.sessionId);
   await daemon.sendEvent(
     replayCompleteEvent({ sessionId: scenario.sessionId, replayedCount: 0 }),
   );
-  await expect(firstDay).toBeVisible();
-  await expect(firstDay).toContainText('sidebar-second session 7');
+  await expect(thisWeek).toBeVisible();
+  await expect(thisWeek).toContainText('sidebar-second session 7');
   await openGroupBy(page);
   await expect(
     page.getByRole('menuitemradio', { name: 'Activity date', exact: true }),
@@ -219,8 +214,8 @@ test('activity date grouping filters, persists, and restores workspace grouping'
   await expect
     .poll(() => order(page))
     .toEqual(workspaces.map((workspace) => workspace.cwd));
-  await expect(secondDay).toHaveCount(0);
-  await expect(firstDay).toHaveCount(0);
+  await expect(today).toHaveCount(0);
+  await expect(thisWeek).toHaveCount(0);
 });
 
 test('bulk collapse/expand retains headers and five-session previews', async ({

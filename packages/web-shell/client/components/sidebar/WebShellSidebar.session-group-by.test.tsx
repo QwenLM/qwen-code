@@ -371,6 +371,11 @@ afterEach(() => {
 
 describe('WebShellSidebar session grouping', () => {
   it('renders cross-workspace date groups with full rows and preserves search and outer sections', async () => {
+    connection.capabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'session_source_metadata'],
+    };
+    workspace.capabilities = connection.capabilities;
     localStorage.setItem(
       `web-shell:session-group-by:${window.location.origin}`,
       'activityDate',
@@ -385,6 +390,14 @@ describe('WebShellSidebar session grouping', () => {
         parentSessionId: 'parent',
       }),
       pinned,
+      activityEntry('scheduled', '/tmp/project', {
+        sourceType: 'default',
+        sourceId: 'scheduled_task_run:job',
+      }),
+      activityEntry('voice', '/tmp/project', {
+        sourceId: 'realtime_voice:call',
+      }),
+      activityEntry('channel', '/tmp/project', { sourceType: 'channel' }),
     ];
     active.sessions = [pinned.session];
     active.data = active.sessions;
@@ -398,6 +411,9 @@ describe('WebShellSidebar session grouping', () => {
     expect(today?.textContent).toContain('alpha');
     expect(today?.textContent).toContain('beta');
     expect(today?.textContent).not.toContain('pinned');
+    expect(today?.textContent).not.toContain('scheduled');
+    expect(today?.textContent).not.toContain('voice');
+    expect(today?.textContent).not.toContain('channel');
     expect(
       today?.querySelector('button[aria-label="More actions"]'),
     ).not.toBeNull();
@@ -428,9 +444,15 @@ describe('WebShellSidebar session grouping', () => {
     renderSidebar();
     await flushSidebar();
     expect(workspaceCwds()).toEqual(['/tmp/project', '/tmp/second']);
+    expect(
+      container.querySelector('span[aria-label="2 workspaces"]'),
+    ).not.toBeNull();
     await selectGroupBy('Activity date');
     expect(workspaceCwds()).toEqual([]);
     expect(activity.open).toBe(true);
+    expect(
+      container.querySelector('span[aria-label="2 workspaces"]'),
+    ).toBeNull();
     expect(
       localStorage.getItem(
         `web-shell:session-group-by:${window.location.origin}`,
@@ -439,6 +461,9 @@ describe('WebShellSidebar session grouping', () => {
     await selectGroupBy('Workspace');
     expect(workspaceCwds()).toEqual(['/tmp/project', '/tmp/second']);
     expect(activity.open).toBe(false);
+    expect(
+      container.querySelector('span[aria-label="2 workspaces"]'),
+    ).not.toBeNull();
   });
 
   it('offers grouping with one workspace and no other optional display features', async () => {
@@ -501,6 +526,77 @@ describe('WebShellSidebar session grouping', () => {
     ).toContain('candidate');
   });
 
+  it('tracks completion only for sessions rendered in date mode', async () => {
+    connection.capabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'session_source_metadata'],
+    };
+    workspace.capabilities = connection.capabilities;
+    localStorage.setItem(
+      `web-shell:session-group-by:${window.location.origin}`,
+      'activityDate',
+    );
+    const channel = activityEntry('channel', '/tmp/project', {
+      sourceType: 'channel',
+      hasActivePrompt: true,
+    });
+    activity.entries = [channel];
+    renderSidebar({ collapsed: true, layout: 'rail' });
+    await flushSidebar();
+    activity.entries = [
+      {
+        ...channel,
+        session: { ...channel.session, hasActivePrompt: false },
+      },
+    ];
+    renderSidebar({ collapsed: true, layout: 'rail' });
+    await flushSidebar();
+    const homeTrigger = container.querySelector<HTMLElement>(
+      '[data-web-shell-home-trigger]',
+    )!;
+    expect(homeTrigger.getAttribute('aria-label')).not.toContain('Finished');
+
+    const ordinary = activityEntry('ordinary', '/tmp/project', {
+      hasActivePrompt: true,
+    });
+    activity.entries = [ordinary];
+    renderSidebar({ collapsed: true, layout: 'rail' });
+    await flushSidebar();
+    activity.entries = [
+      {
+        ...ordinary,
+        session: { ...ordinary.session, hasActivePrompt: false },
+      },
+    ];
+    renderSidebar({ collapsed: true, layout: 'rail' });
+    await flushSidebar();
+    expect(homeTrigger.getAttribute('aria-label')).toContain('Finished');
+  });
+
+  it('keeps date groups visible when the workspace section was collapsed', async () => {
+    localStorage.setItem(
+      'qwen.web-shell.sidebar.workspace-expanded:projects',
+      'false',
+    );
+    localStorage.setItem(
+      `web-shell:session-group-by:${window.location.origin}`,
+      'activityDate',
+    );
+    activity.entries = [activityEntry('alpha', '/tmp/project')];
+    renderSidebar();
+    await flushSidebar();
+    const today = container.querySelector<HTMLElement>(
+      'section[aria-label="Today"]',
+    );
+    expect(today).not.toBeNull();
+    expect(today!.closest('[hidden]')).toBeNull();
+    expect(
+      Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent === 'Workspaces',
+      ),
+    ).toBeUndefined();
+  });
+
   it('falls back to Workspace when a visible workspace is untrusted', async () => {
     localStorage.setItem(
       `web-shell:session-group-by:${window.location.origin}`,
@@ -516,6 +612,70 @@ describe('WebShellSidebar session grouping', () => {
     workspace.capabilities = connection.capabilities;
     renderSidebar();
     await flushSidebar();
+    expect(activity.open).toBe(false);
+    expect(workspaceCwds()).toEqual(['/tmp/project', '/tmp/second']);
+    await openDisplayMenu();
+    expect(
+      Array.from(
+        document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+      ).some((item) => item.textContent?.startsWith('Group by')),
+    ).toBe(false);
+  });
+
+  it('falls back when organized sessions lack qualified REST support', async () => {
+    connection.capabilities = {
+      ...capabilities,
+      features: capabilities.features.filter(
+        (feature) => feature !== 'workspace_qualified_rest_core',
+      ),
+    };
+    workspace.capabilities = connection.capabilities;
+    localStorage.setItem(
+      `web-shell:session-group-by:${window.location.origin}`,
+      'activityDate',
+    );
+    renderSidebar();
+    await flushSidebar();
+    expect(activity.open).toBe(false);
+    expect(workspaceCwds()).toEqual(['/tmp/project', '/tmp/second']);
+    await openDisplayMenu();
+    expect(
+      Array.from(
+        document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+      ).some((item) => item.textContent?.startsWith('Group by')),
+    ).toBe(false);
+  });
+
+  it('falls back when the home source switch selects channels', async () => {
+    connection.capabilities = {
+      ...capabilities,
+      features: [
+        ...capabilities.features,
+        'session_source_metadata',
+        'channel_management',
+      ],
+    };
+    workspace.capabilities = connection.capabilities;
+    localStorage.setItem(
+      `web-shell:session-group-by:${window.location.origin}`,
+      'activityDate',
+    );
+    activity.entries = [activityEntry('alpha', '/tmp/project')];
+    renderSidebar();
+    await flushSidebar();
+    expect(activity.open).toBe(true);
+    const channelTab = Array.from(
+      container.querySelectorAll<HTMLElement>('[role="tab"]'),
+    ).find((tab) => tab.textContent === 'Channels')!;
+    await act(async () => {
+      channelTab.focus();
+      channelTab.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+      await Promise.resolve();
+    });
+    await flushSidebar();
+    expect(channelTab.getAttribute('aria-selected')).toBe('true');
     expect(activity.open).toBe(false);
     expect(workspaceCwds()).toEqual(['/tmp/project', '/tmp/second']);
     await openDisplayMenu();

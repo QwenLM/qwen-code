@@ -187,6 +187,18 @@ npm run typecheck
 
 Run affected Vitest files, the targeted Playwright spec, ESLint, and Prettier checks. Read the complete diff and newly created files in two open-ended audit passes; reproduce any suspected issue before changing code.
 
-- [ ] **Step 4: Commit, push, and create the PR**
+- [x] **Step 4: Commit, push, and create the PR**
 
 Stage only the intended implementation, tests, E2E plan, and synchronized design/plan documents. Use `feat(web-shell): add activity date session grouping`. Create the PR with the repository template, actual local verification, scope/fallback tradeoffs, both design links, synchronized Chinese description, and current UI screenshots.
+
+## Follow-up: rolling ranges and review hardening
+
+The product follow-up replaces natural-day buckets with four exclusive rolling ranges. `Today` starts at local midnight, `This week` starts at local Monday 00:00, `Last 30 days` starts 29 local days before today and ends before this week, and `Older` contains everything earlier. Empty ranges are hidden and order is fixed regardless of the selected row sort.
+
+- [x] Rewrite grouping tests with a fixed clock, Monday and 30-day boundaries, divergent activity/prompt order, reversed tie fixtures, a configurable sort prop, and preview lengths derived from `SIDEBAR_SESSION_PREVIEW_LIMIT`.
+- [x] Implement the rolling buckets with memoized grouping and lift preview limiting only when the editing row is at or beyond the preview boundary.
+- [x] Keep date groups visible when Workspaces was collapsed, make the Workspaces heading static in date mode, and preserve the stored expansion preference for Workspace mode.
+- [x] Apply Activity eligibility with an explicit include-children option, source filtering, and the same rendered set for unread/status tracking.
+- [x] Poll only root catalog queries while keeping historical cursor pages subscribed without polling timers; verify healthy pages are not refreshed by retry.
+- [x] Update Chromium fixtures to cover all four ranges, capture the new screenshots, and synchronize both design documents and the PR evidence.
+- [ ] Commit and push the follow-up to PR #17447 after final verification.
