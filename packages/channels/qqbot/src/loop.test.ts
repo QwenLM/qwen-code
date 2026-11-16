@@ -452,6 +452,46 @@ describe('QQ channel proactive loops', () => {
     expect(mockSendQQMessage).not.toHaveBeenCalled();
   });
 
+  it.each([true, false])(
+    'keeps passive replies and reports workflow delivery capability when active messages are %s',
+    async (enabled) => {
+      const { ch, raw } = makeChannel();
+      raw.groupActiveMsgEnabled.set(CHAT_ID, enabled);
+      const messageId = 'inbound-passive-workflow';
+      raw.replyContextByMessageId.set(messageId, {
+        chatId: CHAT_ID,
+        msgId: messageId,
+        timestamp: Date.now(),
+      });
+      mockPrompt.mockResolvedValueOnce('Passive reply');
+      mockSendQQMessage.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        text: async () => '{}',
+      });
+
+      await ch.handleInbound({
+        ...groupTarget(),
+        senderName: 'Member',
+        text: 'Run a workflow',
+        messageId,
+        isGroup: true,
+        isMentioned: true,
+        isReplyToBot: false,
+      });
+
+      expect(mockPrompt).toHaveBeenCalledOnce();
+      const origin = mockPrompt.mock.calls[0]?.[2]?.workflowOrigin;
+      expect(origin).toMatchObject({ ...groupTarget(), userInitiated: true });
+      expect(origin?.backgroundWorkflowBlocked).toBe(
+        enabled ? undefined : true,
+      );
+      expect(mockSendQQMessage.mock.calls[0]?.[3]).toMatchObject({
+        msg_id: messageId,
+      });
+    },
+  );
+
   it('refuses to create a loop when the group active-message toggle is off', async () => {
     const { raw, controller, getLoopHandler } = makeChannel();
     const sessionId = await bindSession(raw);

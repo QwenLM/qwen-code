@@ -484,7 +484,10 @@ function MermaidBlock({ code }: { code: string }) {
             {t('mermaid.errorLabel')}
           </span>
         </div>
-        <pre className={`${styles.codeBlockContent} ${styles.codeBlockPlain}`}>
+        <pre
+          className={`${styles.codeBlockContent} ${styles.codeBlockPlain}`}
+          dir="auto"
+        >
           <code>{code}</code>
         </pre>
       </div>
@@ -540,7 +543,10 @@ function MermaidBlock({ code }: { code: string }) {
         </span>
       </div>
       {viewMode === 'code' ? (
-        <pre className={`${styles.codeBlockContent} ${styles.codeBlockPlain}`}>
+        <pre
+          className={`${styles.codeBlockContent} ${styles.codeBlockPlain}`}
+          dir="auto"
+        >
           <code>{code}</code>
         </pre>
       ) : !svg ? (
@@ -690,10 +696,14 @@ function CodeBlock({
       {!documentMode && !isStreaming && html !== null ? (
         <div
           className={styles.codeBlockContent}
+          dir="auto"
           dangerouslySetInnerHTML={{ __html: html }}
         />
       ) : (
-        <pre className={`${styles.codeBlockContent} ${styles.codeBlockPlain}`}>
+        <pre
+          className={`${styles.codeBlockContent} ${styles.codeBlockPlain}`}
+          dir="auto"
+        >
           <code>{code}</code>
         </pre>
       )}
@@ -711,7 +721,11 @@ function extractRawFenceLanguage(className: string | undefined): string {
 }
 
 function InlineCode({ children }: { children: ReactNode }) {
-  return <code className={styles.inlineCode}>{children}</code>;
+  return (
+    <code className={styles.inlineCode} dir="auto">
+      {children}
+    </code>
+  );
 }
 
 function PlainMarkdownTable({ children }: { children?: ReactNode }) {
@@ -1267,6 +1281,7 @@ export const Markdown = memo(function Markdown({
       <div
         className={source !== 'thinking' ? styles.content : undefined}
         data-markdown-source={source}
+        dir="auto"
         data-markdown-streaming-plain-text="true"
       >
         <pre className={styles.streamingPlainText}>{renderedContent}</pre>
@@ -1300,6 +1315,7 @@ export const Markdown = memo(function Markdown({
     <div
       className={source !== 'thinking' ? styles.content : undefined}
       data-markdown-source={source}
+      dir="auto"
     >
       <IsStreamingContext.Provider value={!!isStreaming}>
         <MarkdownSourceContext.Provider value={source}>

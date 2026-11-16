@@ -212,6 +212,26 @@ async function setup(supported = true, cursorOnly = false, turnCount = 4) {
 }
 
 describe('TranscriptViewport', () => {
+  it('centers navigation for approval footers without treating them as tool approvals', async () => {
+    const { props } = await setup(true, false, 6);
+    for (const approvalOverlayActive of [false, true, false]) {
+      act(() =>
+        root!.render(
+          <TranscriptViewport
+            {...props}
+            isResponding={false}
+            approvalOverlayActive={approvalOverlayActive}
+          />,
+        ),
+      );
+      expect(
+        container!.querySelector('[data-history-viewport]')?.classList,
+      ).toContain(approvalOverlayActive ? 'static' : 'relative');
+      expect(observed.deletionArgs[1]).toBe(false);
+      expect(observed.props!.pendingApproval).toBeNull();
+    }
+  });
+
   it('hides deletion and marks it unavailable on a frozen history page', async () => {
     observed.deletion = {
       active: true,

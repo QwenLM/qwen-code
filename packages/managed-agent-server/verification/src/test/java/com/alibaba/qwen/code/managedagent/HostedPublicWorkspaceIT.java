@@ -98,6 +98,11 @@ class HostedPublicWorkspaceIT {
     private boolean publicChildQuestions;
     private boolean restarted;
     private boolean publicChildFallback;
+    private boolean personalMemory;
+    private final Map<String, Map<String, Object>> memoryEntries = new java.util.concurrent.ConcurrentHashMap<>();
+    private final AtomicInteger memoryRequests = new AtomicInteger();
+    private final AtomicInteger memoryWrites = new AtomicInteger();
+    private final String memoryFact = "Personal preference " + UUID.randomUUID() + ": use concise Chinese answers.";
     private Map<String, byte[]> publicationObjects;
     private String shellFault;
     private HttpServer storeRelay;
@@ -168,8 +173,11 @@ class HostedPublicWorkspaceIT {
                     String.class, tenant, session, turn)).isEqualTo("COMPLETED");
         });
         assertThat(modelRequests).hasSize(2);
-        assertThat(request("POST", "/api/agent/web-shell/v1/transcript/query", Map.of("sessionId", session), null, "actor", 200)
-                .toString()).contains("G0_USER_QUESTION_DONE");
+        await().atMost(Duration.ofSeconds(30)).untilAsserted(() -> {
+            assertThat(modelFailure.get()).isNull();
+            assertThat(request("POST", "/api/agent/web-shell/v1/transcript/query", Map.of("sessionId", session), null, "actor", 200)
+                    .toString()).contains("G0_USER_QUESTION_DONE");
+        });
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution WHERE harness_session_id = ?", Long.class, session)).isZero();
     }
 
@@ -179,7 +187,9 @@ class HostedPublicWorkspaceIT {
         assertThat(System.getProperty("mysql.url")).startsWith("jdbc:mysql:");
         publicChildren = true;
         publicChildQuestions = true;
+        approvals = true;
         shell = true;
+        approvals = true;
         definitionApproval = true;
         shellLifecycleV2 = true;
         Path root = boot().getFirst().resolve("child");
@@ -209,18 +219,24 @@ class HostedPublicWorkspaceIT {
                 .findFirst().orElseThrow();
         assertThat(first.path("sessionId")).isNotEqualTo(second.path("sessionId"));
         Map<String, String> originalBindings = new java.util.HashMap<>();
+        Map<String, String> runtimeSessions = new java.util.HashMap<>();
         for (JsonNode action : pending) {
             String child = action.path("sessionId").asText();
             String turn = action.path("turnId").asText();
+            String runtimeSession = jdbc.queryForObject(
+                    "SELECT prompt_id FROM ma_turn WHERE tenant_id=? AND session_id=? AND turn_id=?",
+                    String.class, tenant, child, turn);
+            assertThat(runtimeSession).isNotBlank();
+            runtimeSessions.put(child, runtimeSession);
             await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> assertThat(jdbc.queryForObject(
                     "SELECT COUNT(*) FROM ma_runtime_session rs JOIN ma_runtime_binding rb ON rs.binding_id=rb.binding_id"
                             + " AND rs.runtime_generation=rb.runtime_generation WHERE rs.tenant_id=? AND rs.harness_session_id=?"
                             + " AND rs.runtime_session_id=? AND rs.session_state='READY' AND rs.execution_storage_key IS NULL"
                             + " AND rb.binding_state='READY' AND rb.provisioner_kind='local-process'",
-                    Integer.class, tenant, child, turn)).isEqualTo(1));
+                    Integer.class, tenant, child, runtimeSession)).isEqualTo(1));
             originalBindings.put(child, jdbc.queryForObject(
                     "SELECT binding_id FROM ma_runtime_session WHERE tenant_id=? AND harness_session_id=? AND runtime_session_id=?",
-                    String.class, tenant, child, turn));
+                    String.class, tenant, child, runtimeSession));
         }
         assertThat(request("POST", "/api/agent/web-shell/v1/tasks/query", Map.of("sessionId", parent), null, "actor", 200)
                 .path("activeChildCount").asInt()).isEqualTo(2);
@@ -258,7 +274,7 @@ class HostedPublicWorkspaceIT {
                 assertThat(root.resolve("question-A.txt")).doesNotExist();
                 assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE tenant_id=? AND harness_session_id=?"
                         + " AND runtime_session_id=? AND binding_id=? AND session_state='READY' AND execution_storage_key IS NULL",
-                        Integer.class, tenant, first.path("sessionId").asText(), first.path("turnId").asText(),
+                        Integer.class, tenant, first.path("sessionId").asText(), runtimeSessions.get(first.path("sessionId").asText()),
                         originalBindings.get(first.path("sessionId").asText()))).isEqualTo(1);
             }
         }
@@ -270,6 +286,101 @@ class HostedPublicWorkspaceIT {
         });
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id=? AND parent_session_id=?",
                 Integer.class, tenant, parent)).isEqualTo(2);
+    }
+
+    @Test
+    @Timeout(240)
+    void personalMemorySurvivesApprovalRecoveryAndRecallsAcrossWorkspaces() throws Exception {
+        personalMemory = true;
+        approvals = true;
+        List<Path> roots = boot();
+        register("workspace-0", "storage-0");
+        register("workspace-1", "storage-1");
+        String store = request("POST", "/v1/agents/memory-stores", Map.of(), null, "actor", 200).path("id").asText();
+        assertThat(request("POST", "/v1/agents/memory-stores", Map.of(), null, "actor", 200).path("id").asText()).isEqualTo(store);
+        String session = memorySession("workspace-0", store, "memory-save");
+        request("GET", "/v1/agents/sessions/" + session, null, null, "operator2", 404);
+        request("GET", "/v1/agents/sessions/" + session + "/events", null, null, "reader", 404);
+        request("GET", "/v1/agents/sessions/" + session + "/artifacts", null, null, "reader", 404);
+        request("POST", "/api/agent/web-shell/v1/transcript/query", Map.of("sessionId", session), null, "reader", 404);
+        String turn = memoryTurn(session, "G0_MEMORY_SAVE Please remember exactly: " + memoryFact, "save");
+        JsonNode pending = awaitMemoryAction(session);
+        assertThat(memoryWrites).hasValue(0);
+        request("POST", "/api/agent/web-shell/v1/actions/query", Map.of("sessionId", session), null, "operator2", 404);
+
+        var properties = spring.getBean(com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.class);
+        int harnessPort = URI.create(properties.getHarness().getBaseUrl()).getPort();
+        int brokerPort = properties.getRuntimeBroker().getPort();
+        harness.destroyForcibly();
+        assertThat(harness.waitFor(10, TimeUnit.SECONDS)).isTrue();
+        spring.close();
+        restarted = true;
+        Path cli = Path.of(System.getProperty("qwen.cli.entry", "../../dist/cli.js")).toAbsolutePath();
+        startSpring(cli, roots, harnessPort, brokerPort);
+        startHarness(cli, harnessPort, brokerPort);
+        JsonNode restored = awaitMemoryAction(session);
+        assertThat(restored.path("actionId").asText()).isEqualTo(pending.path("actionId").asText());
+        assertThat(memoryWrites).hasValue(0);
+        assertThat(request("GET", "/v1/agents/sessions/" + session, null, null, "actor", 200)
+                .path("memory_store_id").asText()).isEqualTo(store);
+        String action = restored.path("actionId").asText();
+        request("POST", "/api/agent/web-shell/v1/actions/respond", Map.of("sessionId", session,
+                "actionId", action, "idempotencyKey", action, "response", Map.of("kind", "permission", "optionId", "allow",
+                        "inputRevision", restored.path("inputRevision").asLong(), "policyRevision", restored.path("policyRevision").asText())),
+                action, "actor", 202);
+        awaitMemoryTurn(session, turn);
+        assertThat(memoryWrites).hasValue(1);
+        assertThat(memoryEntries).hasSize(1);
+
+        String next = memorySession("workspace-1", store, "memory-recall");
+        int beforeRecall = modelRequests.size();
+        awaitMemoryTurn(next, memoryTurn(next, "G0_MEMORY_RECALL What is my preference?", "recall"));
+        assertThat(modelRequests.subList(beforeRecall, modelRequests.size())).isNotEmpty().allSatisfy(body ->
+                assertThat(body.path("messages").toString()).contains("untrusted_external_context", memoryFact));
+        assertThat(memoryWrites).hasValue(1);
+        request("GET", "/v1/agents/sessions/" + next, null, null, "operator2", 404);
+
+        int beforeUnbound = memoryRequests.get();
+        String unbound = memorySession("workspace-0", null, "memory-off");
+        awaitMemoryTurn(unbound, memoryTurn(unbound, "G0_MEMORY_OFF No personal memory is selected.", "off"));
+        assertThat(memoryRequests).hasValue(beforeUnbound);
+        request("GET", "/v1/agents/sessions/" + unbound, null, null, "reader", 200);
+        assertThat(modelFailure.get()).isNull();
+    }
+
+    private String memorySession(String workspace, String store, String key) throws Exception {
+        Map<String, Object> body = new java.util.LinkedHashMap<>(Map.of("agent_id", "qwen-code", "input", List.of(),
+                "workspace", Map.of("workspace_id", workspace, "cwd_relative", "child")));
+        if (store != null) {
+            body.put("memory_store_id", store);
+        }
+        return request("POST", "/v1/agents/sessions", body, key, "actor", 202).path("id").asText();
+    }
+
+    private String memoryTurn(String session, String prompt, String key) throws Exception {
+        return request("POST", "/api/agent/web-shell/v1/turns/submit", Map.of("sessionId", session,
+                "idempotencyKey", key, "input", List.of(Map.of("type", "input_text", "text", prompt))),
+                key, "actor", 202).path("turnId").asText();
+    }
+
+    private JsonNode awaitMemoryAction(String session) {
+        return await().atMost(Duration.ofSeconds(90)).until(() -> {
+            assertThat(modelFailure.get()).isNull();
+            if (jdbc.queryForObject("SELECT COUNT(*) FROM ma_turn WHERE tenant_id=? AND session_id=? AND status='FAILED'",
+                    Integer.class, tenant, session) != 0) {
+                throw new IllegalStateException("Memory Turn failed: " + Files.readString(temporary.resolve("harness.log")));
+            }
+            JsonNode actions = request("POST", "/api/agent/web-shell/v1/actions/query", Map.of("sessionId", session), null, "actor", 200);
+            return actions.path("data").isEmpty() ? null : actions.path("data").get(0);
+        }, Objects::nonNull);
+    }
+
+    private void awaitMemoryTurn(String session, String turn) {
+        await().atMost(Duration.ofSeconds(90)).untilAsserted(() -> {
+            assertThat(modelFailure.get()).isNull();
+            assertThat(jdbc.queryForObject("SELECT status FROM ma_turn WHERE tenant_id=? AND session_id=? AND turn_id=?",
+                    String.class, tenant, session, turn)).as("%s", Files.readString(temporary.resolve("harness.log"))).isEqualTo("COMPLETED");
+        });
     }
 
     @ParameterizedTest
@@ -1269,7 +1380,7 @@ class HostedPublicWorkspaceIT {
         assertThat(node).as("Pass -Dnode.executable with an absolute Node.js 22+ path").isNotBlank();
         temporary = temporary.toRealPath();
         decoy = Files.createDirectory(temporary.resolve("harness-decoy"));
-        if (durableClose || definitionApproval) {
+        if (durableClose || definitionApproval || personalMemory) {
             Files.createDirectory(temporary.resolve("broker"), PosixFilePermissions.asFileAttribute(
                     PosixFilePermissions.fromString("rwx------")));
         } else {
@@ -1292,6 +1403,10 @@ class HostedPublicWorkspaceIT {
             brokerPort = brokerSocket.getLocalPort();
             model = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
             model.createContext("/v1/chat/completions", this::modelReply);
+            if (personalMemory) {
+                model.createContext("/v1/memories/", this::memoryReply);
+                model.createContext("/v2/memories/search/", this::memoryReply);
+            }
             model.start();
             if (shellFault != null) {
                 storeRelay = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
@@ -1666,6 +1781,11 @@ class HostedPublicWorkspaceIT {
             arguments.add("--qwen.managed-agent.harness.approval-mode="
                     + (shell && "deny".equals(shellDecision) ? "auto-edit" : "default"));
         }
+        if (personalMemory) {
+            arguments.add("--qwen.managed-agent.memory.enabled=true");
+            arguments.add("--qwen.managed-agent.memory.endpoint=http://127.0.0.1:" + model.getAddress().getPort());
+            arguments.add("--qwen.managed-agent.memory.api-key=synthetic-memory-key");
+        }
         if (shell) {
             arguments.add("--qwen.managed-agent.harness.workspace-shell-enabled=true");
         }
@@ -1679,9 +1799,9 @@ class HostedPublicWorkspaceIT {
             arguments.addAll(HostedGateTestSupport.toolPublicationArgs(port,
                     "private-test-bucket", 1048576));
         }
-        arguments.add("--qwen.managed-agent.runtime-broker.durable-local-process=" + (durableClose || definitionApproval));
+        arguments.add("--qwen.managed-agent.runtime-broker.durable-local-process=" + (durableClose || definitionApproval || personalMemory));
         arguments.add("--qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled="
-                + (definitionApproval || "Linux".equals(System.getProperty("os.name"))));
+                + (definitionApproval || personalMemory || "Linux".equals(System.getProperty("os.name"))));
         if (resident) {
             com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentHostedRuntimeFixture.arguments(arguments, tenant, roots.getFirst());
         }
@@ -1709,7 +1829,7 @@ class HostedPublicWorkspaceIT {
                 })
                 .run(arguments.toArray(String[]::new));
         jdbc = spring.getBean("managedJdbcTemplate", JdbcTemplate.class);
-        if (!restarted && (definitionApproval || "Linux".equals(System.getProperty("os.name")))) {
+        if (!restarted && (definitionApproval || personalMemory || "Linux".equals(System.getProperty("os.name")))) {
             var guard = spring.getBean(com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard.class);
             for (int index = 0; index < roots.size(); index++) {
                 WorkspaceTestStorage.prepareNativeRoot(roots.get(index));
@@ -1869,6 +1989,10 @@ class HostedPublicWorkspaceIT {
         try {
             JsonNode body = json.readTree(exchange.getRequestBody());
             modelRequests.add(body);
+            if (personalMemory) {
+                memoryModelReply(exchange, body);
+                return;
+            }
             if (publicChildFallback && "g0-source".equals(body.path("model").asText())) {
                 byte[] response = "{\"error\":{\"message\":\"model overloaded\",\"type\":\"server_error\",\"code\":\"overloaded\"}}"
                         .getBytes(StandardCharsets.UTF_8);
@@ -2043,6 +2167,109 @@ class HostedPublicWorkspaceIT {
         }
     }
 
+    private void memoryModelReply(HttpExchange exchange, JsonNode body) throws IOException {
+        List<String> tools = new ArrayList<>();
+        body.path("tools").forEach(tool -> tools.add(tool.at("/function/name").asText()));
+        String prompt = "";
+        List<JsonNode> results = new ArrayList<>();
+        for (JsonNode message : body.path("messages")) {
+            String content = message.path("content").toString();
+            if ("user".equals(message.path("role").asText()) && content.contains("G0_MEMORY_")) {
+                prompt = content;
+                results.clear();
+            } else if ("tool".equals(message.path("role").asText())) {
+                results.add(message);
+            }
+        }
+        assertThat(prompt).contains("G0_MEMORY_");
+        if (prompt.contains("G0_MEMORY_OFF")) {
+            assertThat(tools).doesNotContain("context_search", "context_remember", "context_get", "context_forget");
+            assertThat(body.path("messages").toString()).doesNotContain(memoryFact);
+        } else {
+            assertThat(tools).contains("context_search", "context_remember", "context_get", "context_forget");
+            body.path("tools").forEach(tool -> {
+                if (tool.at("/function/name").asText().startsWith("context_")) {
+                    assertThat(tool.at("/function/parameters/properties").toString())
+                            .doesNotContain("tenantId", "userId", "user_id", "memoryStoreId", "endpoint", "apiKey");
+                }
+            });
+        }
+        if (prompt.contains("G0_MEMORY_RECALL")) {
+            assertThat(body.path("messages").toString()).contains("untrusted_external_context", memoryFact);
+        }
+        if (!results.isEmpty()) {
+            assertThat(results.getFirst().toString()).contains("stored");
+        }
+        boolean remember = prompt.contains("G0_MEMORY_SAVE") && results.isEmpty();
+        var chunk = json.createObjectNode().put("id", "g0-memory").put("object", "chat.completion.chunk")
+                .put("created", 0).put("model", "g0-fixture");
+        var choice = chunk.putArray("choices").addObject().put("index", 0);
+        var delta = choice.putObject("delta").put("role", "assistant");
+        if (remember) {
+            delta.putArray("tool_calls").addObject().put("index", 0).put("id", "g0-memory-remember")
+                    .put("type", "function").putObject("function").put("name", "context_remember")
+                    .put("arguments", json.writeValueAsString(Map.of("content", memoryFact)));
+        } else {
+            delta.put("content", "G0_MEMORY_DONE");
+        }
+        choice.putNull("finish_reason");
+        String first = "data: " + json.writeValueAsString(chunk) + "\n\n";
+        choice.putObject("delta");
+        choice.put("finish_reason", remember ? "tool_calls" : "stop");
+        byte[] response = (first + "data: " + json.writeValueAsString(chunk) + "\n\ndata: [DONE]\n\n")
+                .getBytes(StandardCharsets.UTF_8);
+        exchange.getResponseHeaders().set("Content-Type", "text/event-stream");
+        exchange.sendResponseHeaders(200, response.length);
+        exchange.getResponseBody().write(response);
+    }
+
+    private void memoryReply(HttpExchange exchange) throws IOException {
+        try {
+            memoryRequests.incrementAndGet();
+            assertThat(exchange.getRequestHeaders().getFirst("Authorization")).isEqualTo("Token synthetic-memory-key");
+            String path = exchange.getRequestURI().getPath();
+            Object response;
+            int status = 200;
+            if ("/v1/memories/".equals(path) && "POST".equals(exchange.getRequestMethod())) {
+                JsonNode body = json.readTree(exchange.getRequestBody());
+                assertThat(body.path("infer").asBoolean(true)).isFalse();
+                assertThat(body.path("user_id").asText()).startsWith("managed_");
+                String id = UUID.randomUUID().toString();
+                Map<String, Object> record = Map.of("id", id, "user_id", body.path("user_id").asText(),
+                        "memory", body.at("/messages/0/content").asText());
+                memoryEntries.put(id, record);
+                memoryWrites.incrementAndGet();
+                response = Map.of("results", List.of(record));
+            } else if ("/v2/memories/search/".equals(path)) {
+                JsonNode body = json.readTree(exchange.getRequestBody());
+                assertThat(body.path("limit").asInt()).isEqualTo(5);
+                String scope = body.at("/filters/user_id").asText();
+                assertThat(scope).startsWith("managed_");
+                response = Map.of("results", memoryEntries.values().stream().filter(entry -> scope.equals(entry.get("user_id"))).toList());
+            } else {
+                String id = path.substring("/v1/memories/".length(), path.length() - 1);
+                Map<String, Object> record = memoryEntries.get(id);
+                if (record == null) {
+                    status = 404;
+                    response = Map.of("error", "not_found");
+                } else if ("DELETE".equals(exchange.getRequestMethod())) {
+                    memoryEntries.remove(id);
+                    response = Map.of("message", "deleted");
+                } else {
+                    response = record;
+                }
+            }
+            byte[] bytes = json.writeValueAsBytes(response);
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.sendResponseHeaders(status, bytes.length);
+            exchange.getResponseBody().write(bytes);
+        } catch (Exception | AssertionError failure) {
+            modelFailure.compareAndSet(null, failure);
+        } finally {
+            exchange.close();
+        }
+    }
+
     private void relayStore(HttpExchange exchange) throws IOException {
         boolean receipt = false;
         try {
@@ -2150,7 +2377,7 @@ class HostedPublicWorkspaceIT {
                 () -> { if (relayExecutor != null) {
                     relayExecutor.close();
                 } },
-                () -> { if (durableClose || definitionApproval) {
+                () -> { if (durableClose || definitionApproval || personalMemory) {
                     HostedDurableWorkers.stop(temporary.resolve("broker"), json);
                 } },
                 () -> { if (model != null) {

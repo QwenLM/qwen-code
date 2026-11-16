@@ -533,8 +533,9 @@ jobs:
     # (default: 360); must stay above QWEN_REVIEW_MAX_TIMEOUT_MINUTES so
     # retry plus posting never hit the cap.
     timeout-minutes: '${{ fromJSON(vars.QWEN_REVIEW_JOB_TIMEOUT_MINUTES) }}'
-    # The schedule switches hk1/hk2 to `ecs-review` at 17:00 Asia/Shanghai
-    # and back to CI at 05:00. Reviews queue while the pool is closed.
+    # The schedule switches the managed fleet to `ecs-review` at 17:00
+    # Asia/Shanghai and back to CI at 05:00. Reviews queue while the pool
+    # is closed.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-review"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     permissions:
       contents: 'read'
@@ -610,7 +611,11 @@ jobs:
       # leftover draft comments (/tmp/stage-*.md, which survive `git clean`),
       # a stale `.qwen/tmp/review-pr-*` worktree / `qwen-review/*` branch from
       # an interrupted review, or stale per-run capture-tools dirs under
-      # RUNNER_TEMP. Reset all of them per run; never fail the job.
+      # RUNNER_TEMP. Reset all of them per run. The sweeps are best-effort
+      # EXCEPT the agent home: a foreign-owned qwen-home that survives the
+      # reclaim is renamed out of the way, and one that cannot even be
+      # renamed fails the job here, before checkout — proceeding would only
+      # die later at the first settings write (PR #16610 incident).
       - name: 'Clean stale agent state'
         run: |-
           set -uo pipefail
@@ -618,7 +623,88 @@ jobs:
           # below) + drop any leftover stage drafts.
           QWEN_HOME="${RUNNER_TEMP:?}/qwen-home"
           rm -rf "$QWEN_HOME" 2>/dev/null || true
+          # A foreign-owned leftover defeats the rm above: triage's node
+          # container chowns this same path to uid 1000, and on the shared
+          # pool this host user cannot unlink it. `rm || true` plus mkdir -p
+          # on the still-existing dir both "succeed", so the job used to run
+          # on and die minutes later writing settings.json (PR #16610
+          # incident). Reclaim via sudo when available; otherwise quarantine
+          # it with a same-parent rename, and fail HERE only when even that
+          # is refused — before the checkout, with the cause named.
+          if [ -e "$QWEN_HOME" ]; then
+            sudo -n rm -rf "$QWEN_HOME" 2>/dev/null ||
+              sudo -n chown -R "$(id -u):$(id -g)" "$QWEN_HOME" 2>/dev/null || true
+            rm -rf "$QWEN_HOME" 2>/dev/null || true
+          fi
+          # A quarantined copy left by an EARLIER run keeps the owner that
+          # made it unremovable. Triage's 'Restore workspace ownership after
+          # agent' hands these names back too (it runs as root in that
+          # container), and this unprivileged sweep deletes them once that has
+          # made them removable — chmod first, because a hand-back restores
+          # the owner without the write bit. It runs BEFORE the rung below, so
+          # it can never delete the copy this run is about to set aside. The
+          # -mmin gate measures the leftover's own mtime, which a same-parent
+          # rename preserves: a copy that was already stale when it was set
+          # aside drains on a later run, a fresh one waits. Name-scoped and
+          # never matching $QWEN_HOME itself. A runner that never runs triage
+          # hands nothing back, so the copies there stay until removed by hand.
+          # -type d is load-bearing: find matches a symlink by name and reports
+          # the link's own mtime, and chmod -R follows a symlink operand, so a
+          # planted `qwen-home.stale-*` link would make this pre-checkout step
+          # rewrite a tree outside RUNNER_TEMP. The rm below only unlinks the
+          # link, so it is no cover. The recursion itself must stay: a
+          # hand-back restores the owner without the write bit, so nested
+          # directories need u+w before rm can unlink them.
+          find "$RUNNER_TEMP" -maxdepth 1 -type d -name 'qwen-home.stale-*' -mmin +240 -exec chmod -R u+rwX {} + 2>/dev/null || true
+          find "$RUNNER_TEMP" -maxdepth 1 -type d -name 'qwen-home.stale-*' -mmin +240 -exec rm -rf {} + 2>/dev/null || true
+          # The deletion above is best-effort, but silence is not: a copy it
+          # could not remove would otherwise look exactly like a clean run,
+          # and the cost of the miss is a full tree walk on every later run.
+          # The report is deliberately NOT age-gated (a partial rm bumps the
+          # directory's own mtime) and never fatal — only the two $QWEN_HOME
+          # checks above may fail this step.
+          survivors="$(find "$RUNNER_TEMP" -maxdepth 1 -type d -name 'qwen-home.stale-*' 2>/dev/null | tr '\n' ' ' || true)"
+          if [ -n "$survivors" ]; then
+            echo "::warning::qwen-home quarantine(s) survived the drain (no ownership hand-back has made them removable yet); retried every run, and they need manual cleanup: $survivors"
+          fi
+          # Pool members without passwordless sudo would otherwise lose the
+          # whole review to a directory this user cannot unlink. On Linux a
+          # same-parent rename needs write access to the PARENT, not to the
+          # directory — the one permission this job is known to have, and the
+          # review pool is Linux-only (BSD also rewrites the moved directory's
+          # `..`, so it needs write on the directory itself and the rename
+          # buys nothing there). The review proceeds on a fresh home while the
+          # leftover keeps its contents under a timestamped name. Same posture
+          # as 'Clean stale .qwen before checkout', which renames what it
+          # cannot delete; a read-only parent refuses the rename and still
+          # fails fast below.
+          if [ -e "$QWEN_HOME" ]; then
+            quarantine="${QWEN_HOME}.stale-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+            if mv -- "$QWEN_HOME" "$quarantine" 2>/dev/null; then
+              echo "::warning::could not delete a foreign-owned qwen-home; moved it to $quarantine so this review can proceed — that directory needs manual cleanup"
+            fi
+          fi
+          if [ -e "$QWEN_HOME" ]; then
+            echo "::error::stale qwen-home survives cleanup (foreign-owned leftover on this runner): $QWEN_HOME — remove it on the runner host"
+            ls -ld "$QWEN_HOME" || true
+            exit 1
+          fi
           mkdir -p "$QWEN_HOME"
+          # mkdir just created this dir as the runner user, so under a normal
+          # umask it is already usable. This check covers the residual races
+          # and environments: another process re-creating the path between
+          # the sweep and mkdir, or a hostile umask stripping owner bits.
+          # settings.json needs write AND traverse, so test both — -w alone
+          # passes a mode-0600 home that cannot hold the file.
+          if [ ! -w "$QWEN_HOME" ] || [ ! -x "$QWEN_HOME" ]; then
+            sudo -n chown "$(id -u):$(id -g)" "$QWEN_HOME" 2>/dev/null || true
+            chmod u+rwx "$QWEN_HOME" 2>/dev/null || true
+          fi
+          if [ ! -w "$QWEN_HOME" ] || [ ! -x "$QWEN_HOME" ]; then
+            echo "::error::fresh qwen-home is not writable by the runner user: $QWEN_HOME"
+            ls -ld "$QWEN_HOME" || true
+            exit 1
+          fi
           rm -f /tmp/stage-*.md 2>/dev/null || true
           # Stale per-run capture-tools dirs: 'Install capture tools' creates
           # them under RUNNER_TEMP (the promoted tool dir every run, plus a

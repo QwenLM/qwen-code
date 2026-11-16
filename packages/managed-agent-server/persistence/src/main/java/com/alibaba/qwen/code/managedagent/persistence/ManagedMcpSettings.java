@@ -3,6 +3,8 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedConfigInstall;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
+import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -55,16 +57,22 @@ public final class ManagedMcpSettings {
             check(command.get("serverId").equals(command.path("server").get("serverId")), "MCP server identity conflicts");
         }
         JsonNode servers = body.get("servers");
-        check(servers.isArray() && servers.size() <= 32, "Invalid MCP settings servers");
+        check(servers.isArray() && servers.size() <= ManagedExtensionRecords.MAX_MCP_SELECTION_ENTRIES,
+                "Invalid MCP settings servers");
         Set<String> ids = new HashSet<>();
         int enabled = 0;
+        int selected = 0;
         for (JsonNode server : servers) {
             pin(server, true);
             check(ids.add(server.get("serverId").textValue()), "Duplicate MCP server");
+            if (!"removed".equals(server.get("state").textValue())) {
+                selected++;
+            }
             if ("enabled".equals(server.get("state").textValue())) {
                 enabled++;
             }
         }
+        check(selected <= 32, "MCP selection capacity exceeded");
         check(enabled <= 16, "MCP connection quota exceeded");
     }
 
@@ -75,12 +83,14 @@ public final class ManagedMcpSettings {
         check(pin.path("serverId").isTextual() && pin.path("serverId").asText().matches("[A-Za-z0-9._:-]{1,128}")
                 && pin.path("definitionDigest").isTextual() && pin.path("definitionDigest").asText().matches("[a-f0-9]{64}"),
                 "Invalid MCP server pin");
-        ManagedExtensionRecords.count(pin.get("serverRevision"), 1, MAX_REVISION, "MCP server revision");
+        // count() clamps to MAX_COUNT (MAX_REVISION - 1); passing the effective
+        // bound keeps the rejection message truthful with what is enforced.
+        ManagedExtensionRecords.count(pin.get("serverRevision"), 1, MAX_REVISION - 1, "MCP server revision");
         check(!state || Set.of("enabled", "disabled", "removed").contains(pin.path("state").asText()), "Invalid MCP server state");
     }
 
     public static JsonNode find(JdbcTemplate jdbc, String tenantId, String sessionId) {
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
+        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
         return jdbc.query("SELECT u.inline_bytes, u.byte_length, u.sha256, u.kind, u.schema_version, r.revision,"
                         + " u.state, u.storage_kind, u.object_key, u.object_version_id, u.encryption_key_id"
                         + " FROM ma_session_record r LEFT JOIN ma_resource u ON u.session_scope_key=r.session_scope_key"
@@ -97,7 +107,7 @@ public final class ManagedMcpSettings {
                             && row.getString("object_key") == null && row.getString("object_version_id") == null
                             && row.getString("encryption_key_id") == null,
                             "The committed MCP settings are corrupt");
-                    JsonNode body = com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(new String(bytes, StandardCharsets.UTF_8));
+                    JsonNode body = ManagedExtensionRecordStore.parse(new String(bytes, StandardCharsets.UTF_8));
                     require(body);
                     check(body.get("revision").longValue() == row.getLong("revision"), "MCP settings projection conflicts");
                     return body;

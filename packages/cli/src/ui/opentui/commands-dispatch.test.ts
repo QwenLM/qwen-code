@@ -50,6 +50,7 @@ import {
   REWRITE_CHANGED_PASTE,
 } from '../utils/paste-placeholders.js';
 import type { OpenTuiCommandHost } from './commands-context.js';
+import * as exitLifecycle from './exit-lifecycle.js';
 import * as interactiveMods from '../../services/interactive-mod-session.js';
 import { helpCommand } from '../commands/helpCommand.js';
 import { clearCommand } from '../commands/clearCommand.js';
@@ -1582,7 +1583,7 @@ describe('result mapping (all SlashCommandActionReturn kinds)', () => {
     });
   });
 
-  it('/resume <id> awaits handleResume', async () => {
+  it('/resume <id> stays processing after Esc until handleResume settles', async () => {
     const commands = [
       stub({
         name: 'resume',
@@ -1597,9 +1598,30 @@ describe('result mapping (all SlashCommandActionReturn kinds)', () => {
         }),
       }),
     ];
-    const resume = await dispatch('/resume', commands);
-    expect(resume.outcome).toEqual({ kind: 'handled' });
-    expect(resume.host.resumedSessions).toEqual(['s-9']);
+    let finishResume!: () => void;
+    const resumeGate = new Promise<void>((resolve) => {
+      finishResume = resolve;
+    });
+    const host = createFakeHost();
+    const handleResume = vi.fn(() => resumeGate);
+    host.handleResume = handleResume;
+    const dispatcher = new OpenTuiSlashDispatcher(host, services, commands);
+
+    const resume = dispatcher.handle('/resume');
+    try {
+      await vi.waitFor(() => {
+        expect(handleResume).toHaveBeenCalledExactlyOnceWith('s-9');
+      });
+      dispatcher.cancel();
+      expect(host.processingFlags).toEqual([true]);
+      expect(dispatcher.isCommitInProgress()).toBe(true);
+    } finally {
+      finishResume();
+      await resume;
+    }
+    expect(await resume).toEqual({ kind: 'handled' });
+    expect(dispatcher.isCommitInProgress()).toBe(false);
+    expect(host.processingFlags).toEqual([true, false]);
 
     const picker = await dispatch('/resume-picker', commands);
     expect(picker.outcome).toEqual({
@@ -1608,7 +1630,7 @@ describe('result mapping (all SlashCommandActionReturn kinds)', () => {
     });
   });
 
-  it('/branch awaits handleBranch', async () => {
+  it('/branch stays processing after Esc until handleBranch settles', async () => {
     // Gate is held closed. If dispatch properly awaits handleBranch, its promise
     // stays pending. If dispatch uses void, it resolves immediately.
     let resolveHandleBranch!: () => void;
@@ -1617,10 +1639,11 @@ describe('result mapping (all SlashCommandActionReturn kinds)', () => {
     });
     const branchNames: Array<string | undefined> = [];
     const host = createFakeHost();
-    host.handleBranch = async (name) => {
+    const handleBranch = vi.fn(async (name?: string) => {
       await handleBranchGate;
       branchNames.push(name);
-    };
+    });
+    host.handleBranch = handleBranch;
 
     const commands = [
       stub({
@@ -1632,24 +1655,43 @@ describe('result mapping (all SlashCommandActionReturn kinds)', () => {
 
     const handlePromise = dispatcher.handle('/branch');
 
-    // Race: if dispatch did NOT await handleBranch, it already resolved and wins.
-    // If dispatch IS awaiting, the race times out (undefined sentinel wins).
-    const sentinel = Symbol('pending');
-    const raceResult = await Promise.race([
-      handlePromise.then(() => 'resolved'),
-      Promise.resolve()
-        .then(() => Promise.resolve())
-        .then(() => sentinel),
-    ]);
-
-    // dispatch must still be pending (blocked on the gate) — not yet resolved.
-    expect(raceResult).toBe(sentinel);
-
-    // Now unblock and let everything complete.
-    resolveHandleBranch();
+    try {
+      await vi.waitFor(() => expect(handleBranch).toHaveBeenCalledOnce());
+      expect(dispatcher.isCommitInProgress()).toBe(true);
+      dispatcher.cancel();
+      expect(host.processingFlags).toEqual([true]);
+    } finally {
+      resolveHandleBranch();
+    }
     const outcome = await handlePromise;
     expect(outcome).toEqual({ kind: 'handled' });
+    expect(dispatcher.isCommitInProgress()).toBe(false);
+    expect(host.processingFlags).toEqual([true, false]);
     expect(branchNames).toEqual(['wip']);
+  });
+
+  it('refuses a pending commit and later dispatches once exit starts', async () => {
+    const exiting = vi
+      .spyOn(exitLifecycle, 'isExitInProgress')
+      .mockReturnValue(false);
+    try {
+      const host = createFakeHost();
+      const branch = vi.fn(() => {
+        exiting.mockReturnValue(true);
+        return { type: 'dialog', dialog: 'branch' } as const;
+      });
+      const handleBranch = vi.fn(async () => {});
+      host.handleBranch = handleBranch;
+      const dispatcher = new OpenTuiSlashDispatcher(host, services, [
+        stub({ name: 'branch', action: branch }),
+      ]);
+      await dispatcher.handle('/branch');
+      await dispatcher.handle('/branch');
+      expect(branch).toHaveBeenCalledOnce();
+      expect(handleBranch).not.toHaveBeenCalled();
+    } finally {
+      exiting.mockRestore();
+    }
   });
 
   it('quit and tool results surface untouched', async () => {
@@ -2217,6 +2259,7 @@ describe('cancellation, telemetry and recording', () => {
         gateway.cancel();
         await Promise.resolve();
         expect(gateway.isBusy()).toBe(true);
+        expect(gateway.isCommitInProgress()).toBe(false);
         expect(host.processingFlags.at(-1)).toBe(true);
         expect(
           host.items.some((item) => item.text === 'Command cancelled.'),
@@ -2576,6 +2619,7 @@ describe('isIdleRef parity (command actions see pre-dispatch idle state)', () =>
       config: {
         getTargetDir: () => os.tmpdir(),
         isRestrictiveSandbox: () => false,
+        getBackgroundTaskRegistry: () => ({ getAll: () => [] }),
         relocateWorkingDirectory,
         getLlmClient: () => ({
           addWorkingDirectoryChangedContext: vi

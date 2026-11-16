@@ -12,6 +12,8 @@ import {
   parseFindingsFile,
   type CompareSummary,
 } from './presubmit.js';
+import { resolveAnchors } from './lib/anchors.js';
+import { DOWNGRADE_REASON_MAX_CHARS } from './compose-review.js';
 
 // A `skipped` check run arrives as `status: completed` with `conclusion:
 // "skipped"`. It used to fall through both branches of the classifier and land
@@ -412,9 +414,16 @@ describe('presubmitCommand', () => {
       id?: string;
     }>,
   ) {
+    return presubmitWithRawFindings(JSON.stringify(newFindings), comments);
+  }
+
+  async function presubmitWithRawFindings(
+    raw: string,
+    comments: Array<Record<string, unknown>> = [],
+  ) {
     ghApiAllMock.mockReturnValue(comments);
     ghApiMock.mockReturnValue(null);
-    readFileSyncMock.mockReturnValue(JSON.stringify(newFindings));
+    readFileSyncMock.mockReturnValue(raw);
     // Per CALL, not only per test: a cell that runs several shapes reads
     // the report of ITS run, not the first report written in the test —
     // with the spy left uncleared, every later shape in a loop returned
@@ -681,6 +690,258 @@ describe('presubmitCommand', () => {
     expect(result.downgradeReasons.join(' ')).toContain(
       'the --new-findings file was malformed',
     );
+    // The reason names the shape and rules out both sibling files by name: the
+    // orchestrator has to produce a usable file, and the dogfood run that
+    // filed #9218 handed over the artifact Step 6 had just told it to write.
+    expect(result.downgradeReasons.join(' ')).toContain(
+      '{path, line, start_line?, id?}',
+    );
+    expect(result.downgradeReasons.join(' ')).toContain(
+      'Not the artifact or raw anchor files',
+    );
+  });
+
+  it('refuses the canonical findings artifact instead of deduping on claimed lines (#9218)', async () => {
+    // The issue's first remedy — accept the artifact's `locations[]` directly —
+    // was implemented and reverted, and this pins WHY so it is not "fixed" back
+    // in: a location's `line` is the agent's claim (the posted line is the one
+    // `resolve-anchors` computes elsewhere) and `id` is required on every
+    // finding, while presubmit reads the id as the carried-re-post signal.
+    // Both feed the overlap leg, so accepting the file would replace this loud
+    // refusal with a silent all-clear.
+    //
+    // The fixture is the shape a REAL artifact has: locations live in
+    // `locations[]`, never as a finding-level `file`/`line` (`validateFindings`
+    // canonicalizes the flat agent input before anything is written). A flat
+    // fixture would let a re-implementation that unwraps `locations[]` pass
+    // this guard while refusing it for the wrong reason (#9218 review, R1-3).
+    const result = await presubmitWithRawFindings(
+      JSON.stringify({
+        findings: [
+          {
+            id: 'R3-1',
+            severity: 'Critical',
+            confidence: 'high',
+            source: 'review',
+            summary: 'a defect',
+            shortSummary: 'a defect',
+            failureScenario: 'it fires once',
+            locations: [{ file: 'src/a.ts', line: 42, anchor: 'const a = 1;' }],
+          },
+        ],
+        counts: { total: 1 },
+        outcomesRecorded: false,
+      }),
+    );
+
+    expect(result.findingsFileInvalid).toBe(true);
+    expect(result.downgradeApprove).toBe(true);
+  });
+
+  it('refuses the resolver INPUT file — an array the minimal shape accepts in every other respect (#9218 review, R1-1)', async () => {
+    // `…-anchors.json` sits one suffix from the resolved file in the same
+    // directory and is a bare array of `{id, path, anchor, line}`: it passes
+    // `Array.isArray`, the string `path`, the ledger-shaped id and the numeric
+    // line, so without the `anchor` discriminator the gate reports
+    // `findingsFileInvalid: false` and dedups on the agent's claimed lines with
+    // an id on every finding — the silent all-clear this file's contract exists
+    // to prevent.
+    const result = await presubmitWithRawFindings(
+      '[{"id":"R3-2","path":"src/retry.ts","anchor":"charge(amt);","line":42}]',
+    );
+
+    expect(result.findingsFileInvalid).toBe(true);
+    expect(result.downgradeApprove).toBe(true);
+  });
+
+  it('rejects raw resolved metadata and accepts its minimal projection without losing overlap', async () => {
+    const added = [
+      'charge(amount);',
+      'const receipt = createReceipt();',
+      'receipt.setAmount(amount);',
+      'receipt.setCurrency(currency);',
+      'receipt.save();',
+      'notify(receipt);',
+      'return receipt;',
+    ];
+    const [resolved] = resolveAnchors(
+      [
+        'diff --git a/src/a.ts b/src/a.ts',
+        '--- a/src/a.ts',
+        '+++ b/src/a.ts',
+        '@@ -0,0 +42,7 @@',
+        ...added.map((line) => `+${line}`),
+      ].join('\n'),
+      [
+        {
+          id: 'R3-2',
+          path: 'src/a.ts',
+          anchor: added.join('\n'),
+          line: 999,
+        },
+      ],
+    );
+    expect(resolved).toMatchObject({
+      status: 'resolved',
+      startLine: 42,
+      line: 48,
+      claimedLine: 999,
+    });
+
+    const raw = await presubmitWithRawFindings(
+      JSON.stringify([{ ...resolved, start_line: resolved.startLine }]),
+    );
+    expect(raw.findingsFileInvalid).toBe(true);
+    expect(raw.downgradeApprove).toBe(true);
+    expect(raw.downgradeReasons.join(' ')).toContain('unexpected key "anchor"');
+
+    const projected = {
+      path: resolved.path,
+      line: resolved.line ?? 0,
+      start_line: resolved.startLine ?? 0,
+      id: resolved.id,
+    };
+    const withAnchor = await presubmitWithRawFindings(
+      JSON.stringify([{ ...projected, anchor: resolved.anchor }]),
+    );
+    expect(withAnchor.findingsFileInvalid).toBe(true);
+
+    const minimal = await presubmitWithComments(
+      [
+        {
+          id: 9,
+          body: '**[Critical]** existing finding via Qwen Code /review (v0.25.3)',
+          path: resolved.path,
+          line: 45,
+          commit_id: 'abc123',
+          user: { login: 'another-reviewer' },
+        },
+      ],
+      [projected],
+    );
+    expect(minimal.findingsFileInvalid).toBe(false);
+    expect(minimal.existingComments.byBucket.overlap).toBe(1);
+    expect(minimal.existingComments.byBucket.noConflict).toBe(0);
+  });
+
+  it.each(['startLine', 'claimedLine', 'status', 'futureMetadata', ''])(
+    'names the unexpected key %j instead of silently discarding it',
+    async (key) => {
+      const result = await presubmitWithRawFindings(
+        JSON.stringify([{ path: 'src/a.ts', line: 48, [key]: 42 }]),
+      );
+      expect(result.findingsFileInvalid).toBe(true);
+      expect(result.downgradeApprove).toBe(true);
+      expect(result.downgradeReasons.join(' ')).toContain(
+        `unexpected key ${JSON.stringify(key)}`,
+      );
+    },
+  );
+
+  it.each([
+    '😀'.repeat(30),
+    'a'.repeat(38) + '😀',
+    '\n"😀'.repeat(200),
+    '\u0000'.repeat(200),
+    '\ud800'.repeat(200),
+  ])(
+    'keeps the invalid-input remedy and a complete quoted fragment for long key %j',
+    async (key) => {
+      const result = await presubmitWithRawFindings(
+        JSON.stringify([{ path: 'src/a.ts', line: 48, [key]: true }]),
+      );
+      const reason: string = result.downgradeReasons.find((r: string) =>
+        r.startsWith('the --new-findings file was malformed'),
+      );
+      const quotedKey = reason.match(/\(unexpected key (.*)\) —/)?.[1];
+      expect(JSON.parse(quotedKey ?? '')).toMatch(/…$/u);
+      expect(reason).toBe(Buffer.from(reason, 'utf8').toString('utf8'));
+      expect(reason).toContain('{path, line, start_line?, id?}');
+      expect(reason).toContain('id only on carried findings');
+      expect(reason).toContain('id-less placeholder per body-only Critical');
+      expect(reason).toContain('regenerate and re-run');
+      expect([...reason].length).toBeLessThanOrEqual(
+        DOWNGRADE_REASON_MAX_CHARS,
+      );
+    },
+  );
+
+  it.each([
+    ['not json {', 'could not read a JSON file'],
+    ['{}', 'expected an array'],
+    ['[{"line":48}]', 'each entry needs a string path'],
+    ['[{"path":"src/a.ts","line":"48"}]', 'line must be a nonnegative integer'],
+    [
+      '[{"path":"src/a.ts","line":48,"start_line":"42"}]',
+      'start_line needs a positive integer and a positive line',
+    ],
+    ['[{"path":"src/a.ts","id":42}]', 'id must be R<round>-<n>'],
+  ])('explains why the findings file %s is invalid', async (raw, detail) => {
+    const result = await presubmitWithRawFindings(raw);
+    const reason: string = result.downgradeReasons.find((r: string) =>
+      r.startsWith('the --new-findings file was malformed'),
+    );
+    expect(result.findingsFileInvalid).toBe(true);
+    expect(result.downgradeApprove).toBe(true);
+    expect(reason).toContain(`(${detail})`);
+    expect(reason).toContain('regenerate and re-run');
+    expect([...reason].length).toBeLessThanOrEqual(DOWNGRADE_REASON_MAX_CHARS);
+  });
+
+  it.each([
+    ['[{"path":"src/a.ts","line":48,"start_line":"42"}]', 45],
+    ['[{"path":"src/a.ts","line":"48"}]', 48],
+    ['[{"path":"src/a.ts","line":48,"start_line":0}]', 30],
+    ['[{"path":"src/a.ts","start_line":42}]', 30],
+  ])(
+    'refuses %s before it can distort overlap at line %i',
+    async (raw, line) => {
+      const result = await presubmitWithRawFindings(raw, [
+        {
+          id: 9,
+          body: '**[Critical]** existing finding via Qwen Code /review',
+          path: 'src/a.ts',
+          line,
+          commit_id: 'abc123',
+          user: { login: 'qwen-code-ci-bot' },
+        },
+      ]);
+      expect(result.findingsFileInvalid).toBe(true);
+      expect(result.downgradeApprove).toBe(true);
+      expect(result.existingComments.byBucket.overlap).toBe(0);
+      expect(result.blockOnExistingComments).toBe(false);
+    },
+  );
+
+  it('refuses an aggregate’s <id>-k join key — the resolved file is not this list either (#9218 review, R1-5)', async () => {
+    // A mechanical projection of `resolved[]` copies the resolver's join key
+    // (`R3-2-1` for an aggregate's first location), which is not a ledger id.
+    // Admitting it would make the whole file vanish silently — the #9218
+    // downgrade this PR exists to prevent — and the alternative (stripping the
+    // suffix while keeping fresh findings' ids) defeats the single-id fallback.
+    // The rejection is the loud half of that pair.
+    const result = await presubmitWithRawFindings(
+      '[{"path":"src/a.ts","line":1,"id":"R3-2-1"}]',
+    );
+
+    expect(result.findingsFileInvalid).toBe(true);
+    expect(result.downgradeApprove).toBe(true);
+    expect(result.downgradeReasons.join(' ')).toContain(
+      'id must be R<round>-<n>: "R3-2-1"',
+    );
+  });
+
+  it('bounds a malformed id without losing the remedy', async () => {
+    const result = await presubmitWithRawFindings(
+      JSON.stringify([{ path: 'src/a.ts', id: '\u0000😀'.repeat(200) }]),
+    );
+    const reason: string = result.downgradeReasons.find((r: string) =>
+      r.startsWith('the --new-findings file was malformed'),
+    );
+    const quotedId = reason.match(/id must be R<round>-<n>: (.*)\) —/)?.[1];
+    expect(JSON.parse(quotedId ?? '')).toMatch(/…$/u);
+    expect(reason).toContain('regenerate and re-run');
+    expect([...reason].length).toBeLessThanOrEqual(DOWNGRADE_REASON_MAX_CHARS);
   });
 
   it('does not flag findingsFileInvalid when the file is valid or absent', async () => {
@@ -1073,6 +1334,31 @@ describe('presubmitCommand', () => {
       expect(result.existingComments.total).toBe(1);
       expect(result.existingComments.byBucket.overlap).toBe(1);
       expect(result.blockOnExistingComments).toBe(true);
+    });
+
+    it('widens the finding range with `start_line` — the span the shape now prints (#9218 review, R1-4)', async () => {
+      // The parser maps `start_line` onto `startLine`, and the overlap test
+      // widens the finding's range with it. A producer that follows the printed
+      // shape but drops the field — or copies the resolved entry's camelCase
+      // `startLine`, which this parser never reads — collapses a 42-48 span to
+      // a point at 48, so a prior comment at 45 reads as disjoint and the
+      // duplicate re-posts beside the thread that already carries it.
+      const result = await presubmitWithComments(
+        [
+          {
+            id: 9,
+            body: '**[Critical]** existing finding via Qwen Code /review (v0.25.3)',
+            path: 'src/a.ts',
+            line: 45,
+            commit_id: 'abc123',
+            user: { login: 'qwen-code-ci-bot' },
+          },
+        ],
+        [{ path: 'src/a.ts', line: 48, start_line: 42 }],
+      );
+
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.noConflict).toBe(0);
     });
   });
 
@@ -2181,11 +2467,41 @@ describe('parseFindingsFile (via mocked fs)', () => {
     ['{"path":"a.ts"}', null], // object, not array
     ['[{"line":5}]', null], // entry without a string path → reject WHOLE file
     ['[{"path":"a.ts","line":5}]', [{ path: 'a.ts', line: 5 }]],
+    ['[{"path":"a.ts","line":5,"startLine":3}]', null],
+    ['[{"path":"a.ts","line":5,"anchor":"a"}]', null],
+    ['[{"path":"a.ts","line":5,"status":"resolved"}]', null],
+    ['[{"path":"a.ts","line":5,"futureMetadata":false}]', null],
+    ['[{"path":"a.ts","line":5,"futureMetadata":0}]', null],
+    ['[{"path":"a.ts","line":5,"futureMetadata":""}]', null],
+    ['[{"path":"a.ts","line":5},{"path":"b.ts","startLine":3}]', null],
+    [
+      '[{"path":"a.ts","line":5,"start_line":3,"id":null,"anchor":null,"startLine":null,"status":null}]',
+      [{ path: 'a.ts', line: 5, startLine: 3 }],
+    ],
     [
       '[{"path":"a.ts","start_line":3,"line":5}]',
       [{ path: 'a.ts', startLine: 3, line: 5 }],
     ],
     ['[{"path":"a.ts"}]', [{ path: 'a.ts', line: 0 }]], // missing line → 0
+    ['[{"path":"a.ts","line":null}]', [{ path: 'a.ts', line: 0 }]],
+    [
+      '[{"path":"a.ts","line":0,"start_line":null}]',
+      [{ path: 'a.ts', line: 0 }],
+    ],
+    ['[{"path":"a.ts","line":"5"}]', null],
+    ['[{"path":"a.ts","line":true}]', null],
+    ['[{"path":"a.ts","line":-1}]', null],
+    ['[{"path":"a.ts","line":1.5}]', null],
+    ['[{"path":"a.ts","line":1e999}]', null],
+    ['[{"path":"a.ts","line":5,"start_line":"3"}]', null],
+    ['[{"path":"a.ts","line":5,"start_line":true}]', null],
+    ['[{"path":"a.ts","line":5,"start_line":0}]', null],
+    ['[{"path":"a.ts","line":5,"start_line":-1}]', null],
+    ['[{"path":"a.ts","line":5,"start_line":1.5}]', null],
+    ['[{"path":"a.ts","line":5,"start_line":1e999}]', null],
+    ['[{"path":"a.ts","start_line":3}]', null],
+    ['[{"path":"a.ts","line":null,"start_line":3}]', null],
+    ['[{"path":"a.ts","line":0,"start_line":3}]', null],
     // Carried ledger id for the re-post exemption (#9208); a present-but-
     // non-string id rejects the WHOLE file, same fail-safe as `path`.
     [

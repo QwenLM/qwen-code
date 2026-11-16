@@ -1,14 +1,19 @@
 package com.alibaba.qwen.code.runtimebroker;
 
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeSessionRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
+import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
+import java.lang.reflect.Proxy;
 import java.net.URI;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -16,6 +21,7 @@ import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CountDownLatch;
@@ -24,6 +30,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+
+import javax.sql.DataSource;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -39,8 +47,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 // carriers+2 acquire calls inside sessionRepository.findById (inside the
 // SessionContext guard), then proves an unrelated virtual-thread probe
 // still completes — the same mechanism the SSE-reader witness pins in
-// qwencode, asserted for the broker guards. The latched wrapper blocks
-// only that one call; everything else runs at in-memory speed. The
+// qwencode, asserted for the broker guards. The SQL gate blocks only
+// non-locking ma_runtime_session reads (the findById path); everything
+// else runs at local-database speed. The
 // arrival latch is sized to the carrier count, not the caller count:
 // under a pinning guard only one caller per carrier can ever arrive, so
 // a caller-sized latch would burn the whole timeout before the probe
@@ -51,13 +60,13 @@ class BrokerVirtualThreadPinningTest {
     private static final Instant START = Instant.parse(
             "2026-10-04T00:00:00Z");
 
-    private LatchedSessionRepository sessions;
+    private LatchedCalls latch;
     private RuntimeBrokerService service;
 
     @AfterEach
     void tearDown() {
-        if (sessions != null) {
-            sessions.open();
+        if (latch != null) {
+            latch.open();
         }
         if (service != null) {
             service.close();
@@ -71,14 +80,23 @@ class BrokerVirtualThreadPinningTest {
         Clock clock = Clock.fixed(START, ZoneOffset.UTC);
         int carriers = CarrierCount.resolve();
         int callerCount = carriers + 2;
-        sessions = new LatchedSessionRepository(
-                new InMemoryRuntimeSessionRepository(), carriers);
+        var source = new JdbcDataSource();
+        source.setURL("jdbc:h2:mem:broker-pinning-" + UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
+        latch = new LatchedCalls(carriers);
+        // JDBC admission requires the native session repository on the same
+        // DataSource, so the latch gates the guarded findById SQL instead of
+        // wrapping the repository.
+        DataSource gated = gateSessionReads(source, latch);
         service = com.alibaba.qwen.code.runtimebroker.service.BrokerServiceTestAccess.create(
                 ignored -> CompletableFuture.completedFuture(SCOPE),
                 new InlineProvisioner(), new InlineTransport(),
-                new InMemoryRuntimeBindingRepository(clock, () -> "binding"),
-                sessions,
-                new InMemoryToolExecutionRepository(clock),
+                new JdbcRuntimeBindingRepository(gated,
+                        new AesGcmSecretProtector("test", new byte[32]),
+                        () -> "binding"),
+                new JdbcRuntimeSessionRepository(gated),
+                new JdbcToolExecutionRepository(gated),
                 "broker-pinning", Duration.ofMinutes(1),
                 Duration.ofSeconds(1), clock, () -> "execution");
         // One Session per caller, so each parks inside its own
@@ -92,7 +110,7 @@ class BrokerVirtualThreadPinningTest {
         AtomicInteger probeProgress = new AtomicInteger();
         List<Thread> callers = new ArrayList<>();
         Throwable primary = null;
-        sessions.arm();
+        latch.arm();
         try {
             for (int index = 0; index < callerCount; index++) {
                 String runtimeId = "runtime-" + index;
@@ -113,7 +131,7 @@ class BrokerVirtualThreadPinningTest {
             // Every carrier must reach the latched repository call, parked
             // inside its SessionContext guard, before the probe starts;
             // that is exactly the state a pinning runtime wedges.
-            sessions.awaitArrived(60, TimeUnit.SECONDS);
+            latch.awaitArrived(60, TimeUnit.SECONDS);
             Thread.sleep(1000);
             Thread probe = Thread.ofVirtual().start(() -> {
                 for (int tick = 0; tick < 400; tick++) {
@@ -131,7 +149,7 @@ class BrokerVirtualThreadPinningTest {
             primary = failure;
             throw failure;
         } finally {
-            sessions.open();
+            latch.open();
             // The latch is carrier-sized, so it opens without the last two
             // callers; a caller wedged before the guarded call fails no other
             // assertion. One shared budget keeps the method inside @Timeout,
@@ -162,20 +180,52 @@ class BrokerVirtualThreadPinningTest {
         stage.toCompletableFuture().join();
     }
 
-    /** findById parks behind a latch while armed; everything else delegates. */
-    private static final class LatchedSessionRepository
-            implements RuntimeSessionRepository {
-        private final InMemoryRuntimeSessionRepository delegate;
+    /**
+     * Gates non-locking ma_runtime_session SELECTs — the findById path the
+     * SessionContext guard takes — behind a latch while armed. Locking reads
+     * (admission's FOR UPDATE) and every other table pass straight through.
+     */
+    private static DataSource gateSessionReads(DataSource delegate,
+            LatchedCalls latch) {
+        return (DataSource) Proxy.newProxyInstance(
+                DataSource.class.getClassLoader(),
+                new Class<?>[] {DataSource.class}, (proxy, method, args) -> {
+            if (!method.getName().startsWith("getConnection")) {
+                return method.invoke(delegate, args);
+            }
+            Connection connection = (Connection) method.invoke(delegate, args);
+            return Proxy.newProxyInstance(Connection.class.getClassLoader(),
+                    new Class<?>[] {Connection.class}, (cp, cm, ca) -> {
+                if (cm.getName().equals("prepareStatement")
+                        && ca[0] instanceof String sql
+                        && sql.contains("ma_runtime_session")
+                        && !sql.contains("FOR UPDATE")) {
+                    PreparedStatement statement =
+                            (PreparedStatement) cm.invoke(connection, ca);
+                    return Proxy.newProxyInstance(
+                            PreparedStatement.class.getClassLoader(),
+                            new Class<?>[] {PreparedStatement.class},
+                            (sp, sm, sa) -> {
+                        if (sm.getName().equals("executeQuery")) {
+                            latch.arriveAndPark();
+                        }
+                        return sm.invoke(statement, sa);
+                    });
+                }
+                return cm.invoke(connection, ca);
+            });
+        });
+    }
+
+    /** Arrival latch sized to the carrier count; parks gated reads while armed. */
+    private static final class LatchedCalls {
         private final AtomicBoolean armed = new AtomicBoolean();
         private final CountDownLatch arrived;
-        private final CountDownLatch open;
+        private final CountDownLatch open = new CountDownLatch(1);
         private final AtomicInteger waiting = new AtomicInteger();
 
-        LatchedSessionRepository(InMemoryRuntimeSessionRepository delegate,
-                int arrivals) {
-            this.delegate = delegate;
+        LatchedCalls(int arrivals) {
             arrived = new CountDownLatch(arrivals);
-            open = new CountDownLatch(1);
         }
 
         void arm() {
@@ -195,11 +245,9 @@ class BrokerVirtualThreadPinningTest {
             }
         }
 
-        @Override
-        public RuntimeSessionRecord findById(RuntimeScope scope,
-                String runtimeSessionId) {
+        void arriveAndPark() {
             if (!armed.get()) {
-                return delegate.findById(scope, runtimeSessionId);
+                return;
             }
             waiting.incrementAndGet();
             arrived.countDown();
@@ -209,41 +257,6 @@ class BrokerVirtualThreadPinningTest {
                 Thread.currentThread().interrupt();
             }
             waiting.decrementAndGet();
-            return delegate.findById(scope, runtimeSessionId);
-        }
-
-        @Override
-        public RuntimeSessionRecord findOrCreate(
-                RuntimeSessionRecord candidate) {
-            return delegate.findOrCreate(candidate);
-        }
-
-        @Override
-        public RuntimeSessionRecord findHistorical(String tenantId,
-                String harnessSessionId, String runtimeSessionId) {
-            return delegate.findHistorical(tenantId, harnessSessionId,
-                    runtimeSessionId);
-        }
-
-        @Override
-        public RuntimeSessionRecord compareAndSet(
-                RuntimeSessionRecord expected,
-                RuntimeSessionRecord replacement) {
-            return delegate.compareAndSet(expected, replacement);
-        }
-
-        @Override
-        public List<RuntimeSessionRecord> findByBinding(String bindingId,
-                long generation, String afterSessionId, int limit) {
-            return delegate.findByBinding(bindingId, generation,
-                    afterSessionId, limit);
-        }
-
-        @Override
-        public long countActiveByBinding(String bindingId,
-                long runtimeGeneration) {
-            return delegate.countActiveByBinding(bindingId,
-                    runtimeGeneration);
         }
     }
 

@@ -93,18 +93,18 @@ Helm 会将受管 Secret 内容保存到 release 元数据。若要独立管理�
 `credentials.existingSecret` 并省略 `model.apiKey`。该 Secret 必须已存在于 release
 namespace，包含以下全部键：
 
-| 键                          | 值                                                                                       |
-| --------------------------- | ---------------------------------------------------------------------------------------- |
-| `auth-signing-key`          | 至少 32 个 UTF-8 字节                                                                    |
-| `session-store-binding-key` | 独立密钥，至少 32 个 UTF-8 字节                                                          |
-| `harness-token`             | Java 与 Harness 共享的私有 bearer token                                                  |
-| `capability-digest`         | `sha256:` 后跟 64 位小写十六进制字符                                                     |
-| `mysql-password`            | 应用数据库密码                                                                           |
-| `mysql-root-password`       | MySQL 初始化 root 密码                                                                   |
-| `model-api-key`             | Provider API key                                                                         |
-| `runtime-broker-token`      | `runtime.enabled` 时必需；私有 Broker bearer token                                       |
-| `runtime-credential-key`    | `runtime.enabled` 时必需；32 个随机字节的 base64 编码                                    |
-| `web-token`                 | `web.enabled` 时必需；至少 32 字节的独立浏览器 bearer token，不能等于 `auth-signing-key` |
+| 键                          | 值                                                                               |
+| --------------------------- | -------------------------------------------------------------------------------- |
+| `auth-signing-key`          | 至少 32 个 UTF-8 字节                                                            |
+| `session-store-binding-key` | 独立密钥，至少 32 个 UTF-8 字节                                                  |
+| `harness-token`             | Java 与 Harness 共享的私有 bearer token                                          |
+| `capability-digest`         | `sha256:` 后跟 64 位小写十六进制字符                                             |
+| `mysql-password`            | 应用数据库密码                                                                   |
+| `mysql-root-password`       | MySQL 初始化 root 密码                                                           |
+| `model-api-key`             | Provider API key                                                                 |
+| `runtime-broker-token`      | `runtime.enabled` 时必需；私有 Broker bearer token                               |
+| `runtime-credential-key`    | `runtime.enabled` 时必需；32 个随机字节的 base64 编码                            |
+| `web-token`                 | `web.enabled` 时必需；非空的独立浏览器 bearer token，不能等于 `auth-signing-key` |
 
 Runtime credential key ID 固定为 `kubernetes-v1`；存在保留的 binding 时必须保留此
 密钥。连接集群时，Helm 会检查已有自管 Secret 的必需键；离线 `helm template` 无法

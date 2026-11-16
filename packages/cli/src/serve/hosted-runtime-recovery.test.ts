@@ -21,6 +21,7 @@ import {
   stopParkedRuntimeExecutions,
   settleParkedTurnCancelled,
   answerCommittedTurnCalls,
+  answerResumedTurnCalls,
   recoverHostedRuntimeTurn,
   HostedRecoveryQuiescingError,
   RecoveryDeclined,
@@ -129,6 +130,61 @@ describe('recoverHostedRuntimeTurn', () => {
       ...(refs ? { create: refs, requireNew: true } : {}),
     });
   }
+
+  it.each([
+    'context_remember',
+    'context_forget',
+    'context_get',
+    'context_search',
+  ])(
+    'preserves an unconfirmed personal memory outcome during generic recovery: %s',
+    async (name) => {
+      const session = await open('boot-1', true);
+      try {
+        await createManagedHarnessHandle(session).ensureRunnable();
+        await session.sink.write({
+          uuid: 'memory-batch',
+          parentUuid: null,
+          sessionId: SESSION_ID,
+          timestamp: new Date().toISOString(),
+          type: 'assistant',
+          cwd: root,
+          version: 'hosted-harness/1',
+          daemonPromptId: PROMPT_ID,
+          message: {
+            role: 'model',
+            parts: [{ functionCall: { id: 'memory-call', name, args: {} } }],
+          },
+        });
+        const input = {
+          session,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+        };
+        expect(await answerResumedTurnCalls(input)).toBe(1);
+        expect(await answerResumedTurnCalls(input)).toBe(0);
+        const results = (await session.sink.project()).filter(
+          (entry) => entry.type === 'tool_result',
+        );
+        expect(results).toHaveLength(1);
+        const response =
+          results[0].message?.parts?.[0].functionResponse?.response;
+        expect(response?.['executionStatus']).toBe('unknown');
+        expect(response?.['status']).toBe(
+          ['context_remember', 'context_forget'].includes(name)
+            ? 'unknown'
+            : 'unavailable',
+        );
+        expect(String(response?.['error'])).toContain(
+          'do not automatically retry',
+        );
+        expect(String(response?.['error'])).not.toContain('never ran');
+      } finally {
+        await session.close();
+      }
+    },
+  );
 
   /** Drives a fresh session to a parked await_runtime checkpoint. */
   async function parkAtAwaitRuntime(
