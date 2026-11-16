@@ -65,7 +65,7 @@ class GetContextRemainingInvocation extends BaseToolInvocation<
       `Context window: ${snapshot.contextWindowTokens} tokens`,
       `Used: ${used} tokens${used === 0 ? ' (no measurement yet — this is a fresh session or the first request is in flight)' : estimateNote}`,
       `Remaining: ${remaining} tokens`,
-      `Auto-compaction fires near ${autoCompactAt} tokens used; call request_compaction earlier if a large task is coming and its summary should capture specific state.`,
+      `Auto-compaction fires near ${autoCompactAt} tokens used; if a large task is coming and remaining context is tight, wrap up current work first so auto-compaction's summary captures what matters.`,
     ].join('\n');
     return { llmContent: message, returnDisplay: message };
   }
@@ -85,7 +85,7 @@ export class GetContextRemainingTool extends BaseDeclarativeTool<
         'Use before starting a large sub-task (a long file read, a big refactor, ' +
         'many tool results) to decide whether to wrap up, start a sub-task, or proceed. Returns the window size, tokens used (flagged as an ' +
         'estimate until the model reports real counts), tokens remaining, and ' +
-        'the level where auto-compaction will trigger. Read-only. ' +
+        'the level where auto-compaction will trigger. Read-only and costs no ' +
         'tokens beyond this declaration.',
       Kind.Read,
       {
