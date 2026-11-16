@@ -224,7 +224,10 @@ public class Session {
                             Optional.ofNullable(sessionEventConsumers.onUserMessageTimeout(this, sdkUserMessage)).orElse(defaultEventTimeout));
                     return false;
                 } else if ("result".equals(messageType)) {
-                    SDKResultMessage sdkResultMessage = jsonObject.to(SDKResultMessage.class);
+                    // Field-based binding: setError(boolean) and setError(Error) derive the
+                    // same bean property, and default binding keeps the boolean, which
+                    // drops the nested error object callers read the status from.
+                    SDKResultMessage sdkResultMessage = jsonObject.to(SDKResultMessage.class, Feature.FieldBased);
                     MyConcurrentUtils.runAndWait(() -> sessionEventConsumers.onResultMessage(this, sdkResultMessage),
                             Optional.ofNullable(sessionEventConsumers.onResultMessageTimeout(this, sdkResultMessage)).orElse(defaultEventTimeout));
                     return true;
