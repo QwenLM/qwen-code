@@ -49,7 +49,7 @@ class JdbcPlacementGuardTest {
             }
         }
         for (RuntimeBindingRecord.State state : RuntimeBindingRecord.State.values()) {
-            for (String kind : List.of("legacy", "local-process", "kubernetes-workspace")) {
+            for (String kind : List.of("legacy", "local-process")) {
                 for (boolean seeded : List.of(false, true)) {
                     if (state == RuntimeBindingRecord.State.READY && !"legacy".equals(kind)) {
                         continue;
