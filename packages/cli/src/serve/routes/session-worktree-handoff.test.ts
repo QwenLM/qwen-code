@@ -984,6 +984,61 @@ describe('POST /session/:id/worktree-handoff', () => {
     ).toBe('LOCAL_UNIQUE_SECRET\n');
   });
 
+  it('refuses a snapshot directory that would replace an ignored local file (R16-1)', async () => {
+    const fixture = makeFixture();
+    fixture.writeTranscript();
+    writeFileSync(path.join(fixture.workspaceDir, '.gitignore'), 'secret\n');
+    git(fixture.workspaceDir, 'add', '.gitignore');
+    git(fixture.workspaceDir, 'commit', '-qm', 'ignore', '--no-verify');
+    await fixture.createDetachedWorktree();
+    // The worktree carries secret/agent.txt; the local holds an ignored regular
+    // FILE secret. Applying would replace the file with a directory.
+    mkdirSync(path.join(fixture.worktreeDir, 'secret'));
+    writeFileSync(
+      path.join(fixture.worktreeDir, 'secret', 'agent.txt'),
+      'agent\n',
+    );
+    git(fixture.worktreeDir, 'add', '-f', 'secret/agent.txt');
+    writeFileSync(path.join(fixture.workspaceDir, 'secret'), 'LOCAL_UNIQUE\n');
+
+    const res = await request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-handoff`)
+      .send({ to: 'local' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('handoff_snapshot_conflict');
+    expect(
+      readFileSync(path.join(fixture.workspaceDir, 'secret'), 'utf8'),
+    ).toBe('LOCAL_UNIQUE\n');
+    expect(statSync(path.join(fixture.workspaceDir, 'secret')).isFile()).toBe(
+      true,
+    );
+  });
+
+  it('refuses a Unicode-equivalent snapshot path (R16-2)', async () => {
+    const fixture = makeFixture();
+    fixture.writeTranscript();
+    const nfc = 'caf\u00e9.env';
+    const nfd = 'cafe\u0301.env';
+    writeFileSync(path.join(fixture.workspaceDir, '.gitignore'), nfc + '\n');
+    git(fixture.workspaceDir, 'add', '.gitignore');
+    git(fixture.workspaceDir, 'commit', '-qm', 'ignore', '--no-verify');
+    await fixture.createDetachedWorktree();
+    writeFileSync(path.join(fixture.worktreeDir, nfd), 'AGENT_TEMPLATE\n');
+    git(fixture.worktreeDir, 'add', '-f', nfd);
+    writeFileSync(path.join(fixture.workspaceDir, nfc), 'LOCAL_UNIQUE\n');
+
+    const res = await request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-handoff`)
+      .send({ to: 'local' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('handoff_snapshot_conflict');
+    expect(readFileSync(path.join(fixture.workspaceDir, nfc), 'utf8')).toBe(
+      'LOCAL_UNIQUE\n',
+    );
+  });
+
   it('fails closed when the local checkout is not the bound workspace (R9-1)', async () => {
     // Daemon bound to a subdirectory; a branch-route-shaped sidecar records
     // originalCwd as the repo top. listWorkspaceSessions cannot answer for the

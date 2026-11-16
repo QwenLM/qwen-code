@@ -3434,8 +3434,28 @@ export class GitWorktreeService {
         // the same file as the ignored path (R15-3); fold case when the target
         // does so it is not missed by literal equality.
         const ignoresCase = await this.targetIgnoresCase(targetGit);
-        const norm = (p: string) => (ignoresCase ? p.toLowerCase() : p);
+        // Normalize Unicode to NFC so canonical-equivalent names (NFC `café`
+        // vs NFD `cafe` + combining acute) compare equal: a normalization-
+        // insensitive filesystem (macOS) treats them as one file (R16-2).
+        // Folding is conservative — on a normalization-sensitive filesystem it
+        // can only refuse a rare canonical-equivalent pair, never lose data.
+        // Case is folded when the target folds it (R15-3).
+        const norm = (p: string) => {
+          const n = p.normalize('NFC');
+          return ignoresCase ? n.toLowerCase() : n;
+        };
         const snapshotSet = new Set(snapshotPaths.map(norm));
+        const ignoredSet = new Set(ignoredPaths.map(norm));
+        const ancestorsOf = (p: string): string[] => {
+          const out: string[] = [];
+          let sep = p.lastIndexOf('/');
+          while (sep > 0) {
+            const a = p.slice(0, sep);
+            out.push(a);
+            sep = a.lastIndexOf('/');
+          }
+          return out;
+        };
         for (const ignoredPath of ignoredPaths) {
           const target = norm(ignoredPath);
           if (snapshotSet.has(target)) {
@@ -3447,17 +3467,27 @@ export class GitWorktreeService {
           // A snapshot file at an ancestor directory would replace the very
           // directory that holds the ignored content (R15-2): exact-path
           // equality alone misses `secret` clobbering `secret/unique.txt`.
-          let ancestor = target;
-          let sep = ancestor.lastIndexOf('/');
-          while (sep > 0) {
-            ancestor = ancestor.slice(0, sep);
+          for (const ancestor of ancestorsOf(target)) {
             if (snapshotSet.has(ancestor)) {
               throw new WorktreeDirtyCarryConflictError(
                 `Stash snapshot would replace the directory holding the ignored local file ${ignoredPath}`,
                 { conflict: true },
               );
             }
-            sep = ancestor.lastIndexOf('/');
+          }
+        }
+        // The reverse direction (R16-1): an ignored regular FILE sitting at an
+        // ancestor of a snapshot path would be replaced by the directory the
+        // snapshot creates there — `secret/agent.txt` clobbering the ignored
+        // file `secret`. Exact and forward-ancestor checks both miss it.
+        for (const snapshotPath of snapshotPaths) {
+          for (const ancestor of ancestorsOf(norm(snapshotPath))) {
+            if (ignoredSet.has(ancestor)) {
+              throw new WorktreeDirtyCarryConflictError(
+                `Stash snapshot would replace the ignored local file ${ancestor} with a directory`,
+                { conflict: true },
+              );
+            }
           }
         }
       }
