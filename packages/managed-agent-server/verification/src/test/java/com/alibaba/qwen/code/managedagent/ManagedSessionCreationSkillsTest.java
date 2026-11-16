@@ -605,6 +605,22 @@ class ManagedSessionCreationSkillsTest {
             var child3Catalog = snapshots.snapshot(tenant, child3.sessionId());
             assertThat(child3Catalog).extracting(s -> s.get("name")).containsExactlyInAnyOrder("loop", "review");
             assertThat(loopBody(child3Catalog)).isEqualTo("DEFINITION_LOOP_BODY");
+
+            // R7-1: a parent whose only loop is a user-authored caller skill (the
+            // definition owns none) must pass that loop into the READ snapshot
+            // child, not delete it by name.
+            var userLoop = Map.<String, Object>of("name", "loop", "description", "mine", "body", "MY_CUSTOM_LOOP_BODY");
+            String userLoopAgent = defineProfile("hosted-workspace-files/4", "snap-userloop-agent", List.of());
+            String userLoopParent = create(request(userLoopAgent, List.of(userLoop)), "snap-userloop-parent", false).get("id").asText();
+            assertThat(loopBody(snapshots.snapshot(tenant, userLoopParent))).isEqualTo("MY_CUSTOM_LOOP_BODY");
+            String childCwd4 = ".qwen-child-workspaces/dddddddddddddddddddddddddddddddd";
+            readySnapshotChildWorkspace(userLoopParent, "run-snap-4", childCwd4);
+            var child4 = store.insertChildSessionCommand(tenant, userLoopParent, UUID.randomUUID().toString(),
+                    "snap-child-digest-4", "audit", List.of(), null,
+                    new com.alibaba.qwen.code.managedagent.model.StoreModels.SessionLineage(userLoopParent, userLoopParent, "run-snap-4", 1), childCwd4);
+            var child4Catalog = snapshots.snapshot(tenant, child4.sessionId());
+            assertThat(child4Catalog).extracting(s -> s.get("name")).containsExactly("loop");
+            assertThat(loopBody(child4Catalog)).isEqualTo("MY_CUSTOM_LOOP_BODY");
         } finally {
             com.alibaba.qwen.code.managedagent.VerificationFixtures.setAgentStoreField(target, "definitionToolProfiles", previousProfiles);
         }

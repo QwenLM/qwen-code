@@ -96,17 +96,37 @@ class ManagedLoopSkillTest {
     }
 
     @Test
-    void childCatalogClassifiesAStaleServerBodyByDefinitionProvenanceNotBodyText() {
-        // A row written by an earlier build: its loop body matches no current sidecar.
-        var staleLoop = Map.<String, Object>of("name", "loop", "description", "old", "body", "RELEASE_N_BODY");
+    void childCatalogPreservesUnidentifiableLoopBodiesAndDropsOnlyServerSidecars() {
+        // A loop body that matches no current sidecar (user text, or a variant
+        // written by an earlier build) is never assumed to be the server's:
+        // deleting it would silently discard user content (R7-1). It is preserved
+        // whether or not the definition owns a loop. Only a body positively
+        // identified as a server sidecar is dropped for a READ child.
+        var unknownLoop = Map.<String, Object>of("name", "loop", "description", "old", "body", "RELEASE_N_BODY");
         var other = Map.<String, Object>of("name", "review", "description", "d", "body", "b");
-        var inherited = java.util.List.of(staleLoop, other);
-        // No definition loop: the stale server variant is still dropped for READ.
+        var inherited = java.util.List.of(unknownLoop, other);
         assertThat(ManagedLoopSkill.childCatalog(inherited, WorkspaceToolProfiles.READ, false))
-                .extracting(s -> s.get("name")).containsExactly("review");
-        // Definition-authored: preserved even though the body matches no sidecar.
+                .extracting(s -> s.get("name")).containsExactly("loop", "review");
+        // Definition-authored: preserved by the definition-provenance carve-out,
+        // classified by the parent's definition rather than by body text.
         assertThat(ManagedLoopSkill.childCatalog(inherited, WorkspaceToolProfiles.READ, true))
                 .extracting(s -> s.get("name")).containsExactly("loop", "review");
+        // A current server sidecar body is positively identified and dropped.
+        var serverLoop = ManagedLoopSkill.forProfile(WorkspaceToolProfiles.SHELL_V4);
+        assertThat(ManagedLoopSkill.childCatalog(java.util.List.of(serverLoop, other), WorkspaceToolProfiles.READ, false))
+                .extracting(s -> s.get("name")).containsExactly("review");
+    }
+
+    @Test
+    void childCatalogKeepsAUserAuthoredCallerLoopForAReadOnlyChild() {
+        // R7-1: a user-authored caller loop saved on the parent (definition owns
+        // no loop) must survive into the READ snapshot child, not be deleted by
+        // name. Reverting to removeIf(name==loop) reddens this case.
+        var userLoop = Map.<String, Object>of("name", "loop", "description", "mine", "body", "MY_CUSTOM_LOOP_BODY");
+        var other = Map.<String, Object>of("name", "review", "description", "d", "body", "b");
+        var readChild = ManagedLoopSkill.childCatalog(java.util.List.of(userLoop, other), WorkspaceToolProfiles.READ, false);
+        assertThat(readChild).extracting(s -> s.get("name")).containsExactly("loop", "review");
+        assertThat((String) readChild.get(0).get("body")).isEqualTo("MY_CUSTOM_LOOP_BODY");
     }
 
     @Test

@@ -301,17 +301,22 @@ later snapshot read would reject.
 - **Caller-imported local `loop`.** The Web Shell posts the bundled `loop`
   verbatim, so the server variant replaces it (D5); a test pins the replacement.
   Only the bundled import is replaced: a user-authored caller `loop` is preserved
-  on every profile, and on a creator-less profile only the bundled import is
-  dropped, so no body naming undeclared tools is published.
+  on every profile (it is the user's content, even where it names tools the
+  profile lacks), and on a creator-less profile only the bundled import is
+  dropped, so no server-published body names undeclared tools.
 - **Catalog capacity.** The injection is skipped (not refused) when the variant
   cannot fit the published 256-entry / 2 MiB cap; the bundled caller import stays
   dropped so the creation succeeds within capacity rather than being refused.
   Tests pin the skip at 256 entries and that the admission accepts the resulting
   catalog (a catalog already over capacity without the variant is still refused).
-- **Snapshot children.** A snapshot child is read-only; the server loop variant is
-  dropped before save (it names creators READ lacks) while a definition-authored
-  loop inherits unchanged. Provenance comes from the parent's pinned definition,
-  not body text, so it stays correct across sidecar regeneration.
+- **Snapshot children.** A snapshot child is read-only; a loop the server
+  publishes (a profile variant or the bundled import, identified by its sidecar
+  body) is dropped before save because it names creators READ lacks, while a
+  definition-authored loop inherits unchanged. A user-authored caller loop is the
+  user's content and is never deleted by name: a body that matches no sidecar is
+  kept rather than assumed to be the server's. The definition carve-out comes
+  from the parent's pinned definition, not body text, so it stays correct across
+  sidecar regeneration.
 
 ## Validation plan
 

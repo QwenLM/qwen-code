@@ -92,6 +92,16 @@ final class ManagedLoopSkill {
                 && sidecars().get("bundled").get("body").equals(skill.get("body"));
     }
 
+    /** Whether a loop body is one the server publishes (a profile variant or the
+     * verbatim bundled import), as opposed to user- or definition-authored text.
+     * Only a positively identified server loop may be dropped from a child; a
+     * body that matches no sidecar is never assumed to be the server's. */
+    private static boolean isServerLoopBody(Object body) {
+        return body instanceof String text
+                && sidecars().values().stream()
+                        .anyMatch(sidecar -> text.equals(sidecar.get("body")));
+    }
+
     /**
      * Append the caller skills and the profile's loop variant to the admission
      * catalog, returning the validated catalog when the variant was injected, or
@@ -170,13 +180,16 @@ final class ManagedLoopSkill {
      * The catalog to save for a child, or null when there is nothing to save. A
      * null inherited catalog saves nothing; a null child profile inherits the
      * parent catalog unchanged. The only non-null child profile is READ (a
-     * snapshot child): the server loop variant is dropped because it names
-     * creators READ does not declare, while a definition-authored loop (the
-     * parent's pinned definition owns a {@code loop}) inherits unchanged.
-     * Provenance comes from the parent's definition, not body text, so a row
-     * written by an earlier build is still classified correctly after the
-     * sidecars are regenerated. An empty resolved catalog saves nothing rather
-     * than an empty row, which every later snapshot read would reject.
+     * snapshot child): a loop the server publishes (a profile variant or the
+     * bundled import) is dropped because it names creators READ does not
+     * declare, while a definition-authored loop (the parent's pinned definition
+     * owns a {@code loop}) inherits unchanged. A user-authored caller loop is
+     * the user's content and is never silently deleted: only a body positively
+     * identified as a server sidecar is dropped, so a body that matches no
+     * sidecar (user text, or a variant written by an earlier build) is kept
+     * rather than assumed to be the server's. An empty resolved catalog saves
+     * nothing rather than an empty row, which every later snapshot read would
+     * reject.
      */
     static List<Map<String, Object>> childCatalog(
             List<Map<String, Object>> inherited, String childProfile,
@@ -189,7 +202,8 @@ final class ManagedLoopSkill {
         }
         List<Map<String, Object>> result = new ArrayList<>(inherited);
         if (!definitionHasLoop) {
-            result.removeIf(skill -> NAME.equals(skill.get("name")));
+            result.removeIf(skill -> NAME.equals(skill.get("name"))
+                    && isServerLoopBody(skill.get("body")));
         }
         return result.isEmpty() ? null : result;
     }

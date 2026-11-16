@@ -76,7 +76,7 @@ skill 发布有两个生产者、一个消费者；Harness 只是消费者。
 
 **D5 — 命名与归属。** 变体保持 skill 名 `loop`，使 `/loop` 调用与 `allowedTools` 源属性不变；只有 body 措辞与 profile 条件章节不同。Web Shell 从 daemon 快照原样导入 bundled `loop` skill，故默认创建路径的 caller 目录已含一个 `loop` 项。因此 `mergeInto` **替换 bundled 的 caller 导入**而非拒绝请求——拒绝会使所有携带 loop 的 profile 上的 Web Shell 创建都 409。替换按来源限定：只有 body 等于提交的 bundled-body 参考的条目才是服务端可替换的。**用户自定义的** caller `loop`（其它任何 body）与 **definition 作者自带的** `loop` 都予以保留——服务端既不替换它们、也不注入竞争项（目录须保持名字唯一）。这些行为均由准入测试钉住（bundled 导入被服务端变体替换；用户自定义或 definition 自带的 `loop` body 在无 creator 与携带 creator 的 profile 上都存活）。
 
-注入按协商的 Session Skills 能力门控（`sessionSkillsSupported`，循其他能力标志经 `SessionCreationCommand` 传入）：不通告 `session-skills/2` 的 Harness 得不到服务端行，使失败留在创建期而非派发期。save 守卫即 D1 所述：仅 caller 贡献或注入变体才写行（绝不写仅 definition 的目录、绝不写空目录），故注入的行携带 definition 的 skills 加 `loop`，绝不在消费端遮蔽 definition 目录。子会话目录在保存前重选：唯一的非空子 profile 是 READ（snapshot 子会话），服务端 loop 变体被丢弃（它点名 READ 未声明的 creator），definition 自带的 loop 原样继承。来源取自父会话 pinned definition（是否自带 `loop`），而非 body 文本，故 sidecar 重生成后旧版本写的行仍能正确分类。空的解析结果不写行，而非写一个此后每次快照读取都会拒绝的空行。
+注入按协商的 Session Skills 能力门控（`sessionSkillsSupported`，循其他能力标志经 `SessionCreationCommand` 传入）：不通告 `session-skills/2` 的 Harness 得不到服务端行，使失败留在创建期而非派发期。save 守卫即 D1 所述：仅 caller 贡献或注入变体才写行（绝不写仅 definition 的目录、绝不写空目录），故注入的行携带 definition 的 skills 加 `loop`，绝不在消费端遮蔽 definition 目录。子会话目录在保存前重选：唯一的非空子 profile 是 READ（snapshot 子会话），服务端发布的 loop（按 sidecar body 识别的 profile 变体或 bundled 导入）被丢弃（它点名 READ 未声明的 creator），definition 自带的 loop 原样继承，用户自定义的 caller loop 也保留（绝不按名删除用户内容）。definition 例外取自父会话 pinned definition（是否自带 `loop`），而非 body 文本，故 sidecar 重生成后仍正确。空的解析结果不写行，而非写一个此后每次快照读取都会拒绝的空行。
 
 ### 涉及文件
 
@@ -101,9 +101,9 @@ skill 发布有两个生产者、一个消费者；Harness 只是消费者。
 - **body 组合复杂度。** 两条路径在 body 中深度交织（Parsing、loop.md 模式、Autonomous 模式），故按 profile 组合很精细。缓解：组合住在 TypeScript 生成器（D3），Java 只选择；一致性测试把每个生成 body 逐字节钉回 bundled 源，删掉某 creator 章节的变异使其变红。
 - **单一来源漂移。** 两个提交 body（本地 + managed）可能分叉。缓解：D3 的一致性测试从 bundled 源派生 managed 资产。
 - **幂等交互。** 在请求 digest 之后注入不得改变重放结果。缓解：重放测试断言相同快照。
-- **caller 导入的本地 `loop`。** Web Shell 原样提交 bundled `loop`，故服务端变体替换它（D5）；测试钉住替换。仅替换 bundled 导入：用户自定义的 caller `loop` 在任何 profile 上保留；无 creator 的 profile 上仅丢弃 bundled 导入，故不会发布点名未声明工具的 body。
+- **caller 导入的本地 `loop`。** Web Shell 原样提交 bundled `loop`，故服务端变体替换它（D5）；测试钉住替换。仅替换 bundled 导入：用户自定义的 caller `loop` 在任何 profile 上保留（它是用户的内容，即便点名该 profile 缺失的工具）；无 creator 的 profile 上仅丢弃 bundled 导入，故服务端发布的 body 不会点名未声明的工具。
 - **目录容量。** 变体放不进 published 256 条 / 2 MiB 上限时跳过注入（而非拒绝）；bundled caller 导入保持丢弃，使创建在容量内成功而非被拒绝。测试钉住 256 条时的跳过，以及准入接受所得目录（去掉变体后本身已超容的目录仍被拒绝）。
-- **snapshot 子会话。** snapshot 子会话为只读；服务端 loop 变体在 save 前被丢弃（它点名 READ 缺失的 creator），definition 自带的 loop 原样继承。来源取自父会话 pinned definition，而非 body 文本，故 sidecar 重生成后仍正确。
+- **snapshot 子会话。** snapshot 子会话为只读；服务端发布的 loop（profile 变体或 bundled 导入，按 sidecar body 识别）在 save 前被丢弃（它点名 READ 缺失的 creator），definition 自带的 loop 原样继承。用户自定义的 caller loop 是用户的内容，绝不按名删除：body 不匹配任何 sidecar 的条目予以保留，而非假定其为服务端所有。definition 例外取自父会话 pinned definition，而非 body 文本，故 sidecar 重生成后仍正确。
 
 ## 验证计划
 
