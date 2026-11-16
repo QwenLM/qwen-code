@@ -664,7 +664,10 @@ describe('settingsWriter', () => {
         env: { K: 'v' },
       };
 
-      await expect(applyProviderInstallPlanToFile(plan)).rejects.toThrow();
+      // Named by its resolved path: ~/.qwen is not it on an XDG install.
+      await expect(applyProviderInstallPlanToFile(plan)).rejects.toThrow(
+        `Cannot parse ${settingsPath} (`,
+      );
       // Bad file is preserved, not silently clobbered with {}
       expect(fs.readFileSync(settingsPath, 'utf-8')).toBe('{ "broken": [1, 2');
     });
