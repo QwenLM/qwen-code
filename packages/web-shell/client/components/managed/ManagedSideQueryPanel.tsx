@@ -16,51 +16,85 @@ import { isManagedSideQueryActive } from './managed-side-query-types';
 import type { useManagedSideQueries } from './use-managed-side-queries';
 
 const messages = {
-  btw: ['BTW', 'BTW 追问'],
-  recap: ['Session recap', '会话回顾'],
+  btw: ['BTW', 'BTW 追问', 'BTW'],
+  recap: ['Session recap', '会话回顾', 'Обзор сессии'],
   private: [
     'Saved privately for your account. The main task keeps running.',
     '记录仅当前账号可见，主任务继续执行。',
+    'Сохранено только для вашей учётной записи. Основная задача продолжает выполняться.',
   ],
-  empty: ['No saved answers yet.', '暂无已保存的回答。'],
-  older: ['Older answers', '更早的回答'],
-  question: ['Ask a follow-up question', '继续追问'],
-  send: ['Ask', '提问'],
-  generate: ['Generate recap', '生成回顾'],
-  stop: ['Stop', '停止'],
-  retry: ['Retry', '重试'],
-  confirm: ['Confirm original submission', '确认原提交结果'],
+  empty: [
+    'No saved answers yet.',
+    '暂无已保存的回答。',
+    'Пока нет сохранённых ответов.',
+  ],
+  older: ['Older answers', '更早的回答', 'Более ранние ответы'],
+  question: [
+    'Ask a follow-up question',
+    '继续追问',
+    'Задать уточняющий вопрос',
+  ],
+  send: ['Ask', '提问', 'Спросить'],
+  generate: ['Generate recap', '生成回顾', 'Сгенерировать обзор'],
+  stop: ['Stop', '停止', 'Остановить'],
+  retry: ['Retry', '重试', 'Повторить'],
+  confirm: [
+    'Confirm original submission',
+    '确认原提交结果',
+    'Подтвердить исходную отправку',
+  ],
   unconfirmed: [
     'The submission is not confirmed. Confirm it using the original request.',
     '提交结果尚未确认，可使用原请求再次确认。',
+    'Отправка не подтверждена. Подтвердите её исходным запросом.',
   ],
-  preparing: ['Preparing', '准备中'],
-  running: ['Answering', '回答中'],
-  completed: ['Completed', '已完成'],
-  failed: ['Failed', '失败'],
-  cancelled: ['Stopped', '已停止'],
-  interrupted: ['Interrupted', '已中断'],
+  preparing: ['Preparing', '准备中', 'Подготовка'],
+  running: ['Answering', '回答中', 'Отвечает'],
+  completed: ['Completed', '已完成', 'Завершено'],
+  failed: ['Failed', '失败', 'Ошибка'],
+  cancelled: ['Stopped', '已停止', 'Остановлено'],
+  interrupted: ['Interrupted', '已中断', 'Прервано'],
   insufficient: [
     'There is not enough completed conversation to recap.',
     '已完成的对话不足，暂时无法生成回顾。',
+    'Недостаточно завершённого разговора для обзора.',
   ],
-  partial: ['This answer is incomplete.', '此回答不完整。'],
+  partial: [
+    'This answer is incomplete.',
+    '此回答不完整。',
+    'Этот ответ неполный.',
+  ],
   unavailable: [
     'Generation is unavailable for this session.',
     '此会话暂不支持生成。',
+    'Генерация недоступна для этой сессии.',
   ],
   storage: [
     'Browser storage is unavailable. The question was not submitted.',
     '浏览器存储不可用，问题尚未提交。',
+    'Хранилище браузера недоступно. Вопрос не был отправлен.',
   ],
-  automatic: ['Recap after I am away for five minutes', '离开五分钟后自动回顾'],
+  automatic: [
+    'Recap after I am away for five minutes',
+    '离开五分钟后自动回顾',
+    'Обзор, если меня нет пять минут',
+  ],
   automaticHint: [
     'Off by default. Runs after the main task and queue are idle.',
     '默认关闭，主任务与队列空闲后生成。',
+    'По умолчанию выключено. Запускается, когда основная задача и очередь простаивают.',
   ],
-  source: ['Completed user turns', '已完成的用户轮次'],
-  boundary: ['Source message boundary', '来源消息边界'],
-} as const;
+  source: [
+    'Completed user turns',
+    '已完成的用户轮次',
+    'Завершённые ходы пользователя',
+  ],
+  boundary: [
+    'Source message boundary',
+    '来源消息边界',
+    'Граница исходного сообщения',
+  ],
+} as const satisfies Record<string, readonly [string, string, string]>;
 
 export function ManagedSideQueryPanel({
   sideQueries,
@@ -71,7 +105,7 @@ export function ManagedSideQueryPanel({
 }) {
   const { language } = useI18n();
   const t = (key: keyof typeof messages) =>
-    messages[key][language === 'zh-CN' ? 1 : 0];
+    messages[key][language === 'zh-CN' ? 1 : language === 'ru' ? 2 : 0];
   const kind = sideQueries.open;
   const [question, setQuestion] = useState('');
   useEffect(() => setQuestion(''), [sideQueries.identity]);
