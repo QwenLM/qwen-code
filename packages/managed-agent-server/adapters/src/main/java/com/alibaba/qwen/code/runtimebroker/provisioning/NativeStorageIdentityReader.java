@@ -18,6 +18,7 @@ import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.format.ResolverStyle;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -27,6 +28,15 @@ public final class NativeStorageIdentityReader implements StorageIdentityReader 
             .ofPattern("uuuu-MM-dd HH:mm:ss.SSSSSSSSS xx", Locale.ROOT)
             .withResolverStyle(ResolverStyle.STRICT);
     public Identity read(Path root) throws IOException {
+        return read(root, true);
+    }
+
+    @Override
+    public Identity readLegacy(Path root) throws IOException {
+        return read(root, false);
+    }
+
+    private Identity read(Path root, boolean stable) throws IOException {
         String os = System.getProperty("os.name");
         if (!List.of("Linux", "Mac OS X").contains(os)) {
             throw new IOException("Unsupported mount identity provider");
@@ -58,7 +68,17 @@ public final class NativeStorageIdentityReader implements StorageIdentityReader 
             }
             throw error;
         }
-        return new Identity(root.toString(), host, device, inode, birthTime);
+        String persistentDevice = stable && "Mac OS X".equals(os) ? MacOsHostIdentity.volumeUuid(root) : device;
+        // mtime is the directory's content clock, not its identity: a child-entry
+        // write during the probe must not fail verification. linuxBirthTime still
+        // consumes the snapshot's lastModifiedTime above.
+        Map<String, Object> identityAttributes = new HashMap<>(attributes);
+        identityAttributes.remove("lastModifiedTime");
+        if (!identityAttributes.equals(Files.readAttributes(root,
+                "unix:isDirectory,dev,ino,creationTime", LinkOption.NOFOLLOW_LINKS))) {
+            throw new IOException("Workspace storage identity changed during its probe");
+        }
+        return new Identity(root.toString(), host, persistentDevice, inode, birthTime);
     }
 
     private static String linuxBirthTime(Path root, String device, String inode,
