@@ -318,3 +318,164 @@ export const LIVE_MESSAGES_ZH: Record<string, LiveMessage> = {
   'live.requirementState.unavailable': '不可用',
   'live.requirementState.checking': '检查中',
 };
+
+export const LIVE_MESSAGES_RU: Record<string, LiveMessage> = {
+  'live.feed.unsupported': 'Только снимки по запросу',
+  'live.feed.idle': 'Экран готов к звонку',
+  'live.feed.starting': 'Подключение живого экрана…',
+  'live.feed.streaming': 'Живой экран · спрашивайте о том, что видите',
+  'live.feed.stopped': 'Живой экран остановлен',
+  'live.feed.error':
+    'Трансляция экрана не удалась. Поделитесь снова, чтобы повторить.',
+  'live.more': 'Ещё',
+  'live.captions': 'Субтитры',
+  'live.feed.keepOpen':
+    'Держите эту страницу и звонок открытыми для живой демонстрации экрана.',
+  'live.title': 'Live Voice',
+  'live.open': 'Открыть Live Voice',
+  'live.manage': 'Управлять активным Live Voice',
+  'live.readyDescription':
+    'Qwen Live Host и все необходимые разрешения готовы.',
+  'live.setupDescription':
+    'Установите Qwen Live Host и выдайте все разрешения, прежде чем Live Voice сможет запуститься.',
+  'live.noFallback':
+    'Этот демон поддерживает Live Voice только через Qwen Live Host; он никогда не переходит в урезанный режим без Appshot.',
+  'live.shortcutHint': (v) => `Глобальная комбинация: ${v?.shortcut ?? ''}`,
+  'live.browser.connect': 'Говорить в этом браузере',
+  'live.browser.connecting': 'Подключение микрофона…',
+  'live.browser.requirement.host': 'Эта вкладка браузера',
+  'live.browser.level': 'Уровень микрофона',
+  'live.browser.levelMuted': 'Микрофон выключен',
+  'live.browser.levelDropping':
+    'Микрофон работает, но звук не доходит до демона',
+  'live.browser.requirement.runtime': 'Live runtime',
+  'live.browser.takeOver': 'Перехватить в этой вкладке',
+  'live.browser.disconnect': 'Освободить микрофон',
+  'live.browser.setupDescription':
+    'Используйте эту вкладку браузера как микрофон и динамик для Live Voice.',
+  'live.browser.readyDescription':
+    'Эта вкладка — микрофон и динамик для Live Voice.',
+  'live.browser.otherTabDescription':
+    'Другая вкладка Web Shell — микрофон и динамик для Live Voice.',
+  'live.browser.headphonesHint':
+    'Наушники дают лучший результат: ответ не попадает в микрофон.',
+  'live.browser.startScreenShare': 'Поделиться экраном',
+  'live.browser.stopScreenShare': 'Остановить демонстрацию экрана',
+  'live.browser.sharing': 'Экран демонстрируется',
+  'live.browser.sharingNamed': (v) => `${v?.target ?? 'Экран'}`,
+  'live.browser.screenRequested':
+    'Qwen просит увидеть ваш экран. Поделитесь им, чтобы он мог посмотреть.',
+  'live.browser.lookedAtScreen': 'Qwen посмотрел на ваш экран.',
+  'live.browser.closed.occupied':
+    'Другая конечная точка Live Voice уже подключена.',
+  'live.browser.closed.supersededNative':
+    'Qwen Live Host перехватил Live Voice из этой вкладки.',
+  'live.browser.closed.supersededTab':
+    'Другая вкладка Web Shell перехватила Live Voice.',
+  'live.browser.closed.refused':
+    'Live Voice выключен, или этой рабочей области нет доверия.',
+  'live.browser.closed.microphone': 'Не удалось открыть микрофон.',
+  'live.browser.closed.lost': 'Соединение Live Voice потеряно.',
+  'settings.liveShortcut.capture': 'Нажмите комбинацию',
+  'settings.liveShortcut.clear': 'Очистить',
+  'settings.liveShortcut.off': 'Выкл',
+  'settings.liveSetup.title': 'Qwen Live',
+  'settings.liveSetup.experimental': 'Экспериментально',
+  'settings.liveSetup.description':
+    'Говорите с Qwen с любого места на этом Mac с Realtime-голосом, Appshot и передачей задач.',
+  'settings.liveSetup.browserDescription':
+    'Говорите с Qwen с Realtime-голосом и передачей задач, используя этот браузер как микрофон и динамик.',
+  'settings.liveSetup.enable': 'Включить Qwen Live',
+  'settings.liveSetup.apiKey': 'Ключ DashScope Realtime API',
+  'settings.liveSetup.apiKeyPlaceholder': 'Введите ключ DashScope API',
+  'settings.liveSetup.apiKeyReplace': 'Введите новый ключ, чтобы заменить',
+  'settings.liveSetup.keyFromModel':
+    'Выбранная модель использует API-ключ из конфигурации её провайдера.',
+  'settings.liveSetup.keyFromEnv': (v) =>
+    `Читается из переменной окружения ${v?.env ?? ''} выбранной модели.`,
+  'settings.liveSetup.keyFromEnvMissing': (v) =>
+    `Выбранная модель читает ключ из ${v?.env ?? ''}, которая не задана в окружении демона.`,
+  'settings.liveSetup.model': 'Realtime-модель',
+  'settings.liveSetup.modelHint':
+    'Выберите «Другой id модели…», чтобы использовать любую Realtime-модель.',
+  'settings.liveSetup.modelCustom': 'Другой id модели…',
+  'settings.liveSetup.endpoint': 'Realtime-эндпоинт',
+  'settings.liveSetup.endpointUnchanged':
+    'Без изменений — оставить сохранённый эндпоинт',
+  'settings.liveSetup.endpointHint':
+    'Совместимый с OpenAI base URL региона вашего ключа или выделенного домена. Очистите поле, чтобы использовать значение по умолчанию (Пекин).',
+  'settings.liveSetup.endpointFromRoute':
+    'Следует base URL маршрута выбранной модели в modelProviders.',
+  'settings.liveSetup.voice': 'Голос',
+  'settings.liveSetup.voiceHint':
+    'Имя голоса выбранной модели. Проверяется у провайдера, когда Live Voice включён.',
+  'settings.liveSetup.appliesNextCall': 'Применится к следующему звонку.',
+  'settings.liveSetup.configured': 'Настроено',
+  'settings.liveSetup.notConfigured': 'Обязательно',
+  'settings.liveSetup.save': 'Сохранить',
+  'settings.liveSetup.removeKey': 'Удалить ключ',
+  'settings.liveSetup.shortcut': 'Глобальная комбинация',
+  'settings.liveSetup.host': 'Qwen Live Host',
+  'settings.liveSetup.openHost': 'Открыть Host',
+  'settings.liveSetup.retry': 'Повторить',
+  'settings.liveSetup.permission.microphone': 'Микрофон',
+  'settings.liveSetup.permission.accessibility': 'Универсальный доступ',
+  'settings.liveSetup.permission.screenRecording': 'Запись экрана',
+  'settings.liveSetup.permissionHint':
+    'Завершите ожидающие запросы разрешений в Qwen Live Host. Live недоступен, пока все разрешения не будут готовы.',
+  'settings.liveSetup.requirement.ready': 'Готово',
+  'settings.liveSetup.requirement.missing': 'Отсутствует',
+  'settings.liveSetup.requirement.denied': 'Не разрешено',
+  'settings.liveSetup.requirement.unavailable': 'Недоступно',
+  'settings.liveSetup.requirement.checking': 'Проверка',
+  'settings.liveSetup.install.missing': 'Ожидание установки',
+  'settings.liveSetup.install.checking': 'Проверка установки…',
+  'settings.liveSetup.install.downloading': 'Загрузка подписанного Host…',
+  'settings.liveSetup.install.verifying':
+    'Проверка подписи и контрольной суммы…',
+  'settings.liveSetup.install.installing': 'Установка…',
+  'settings.liveSetup.install.launching': 'Открытие Host…',
+  'settings.liveSetup.install.installed': 'Установлено',
+  'settings.liveSetup.install.error': 'Установка требует внимания',
+  'settings.liveSetup.confirmTitle': 'Включить экспериментальный Qwen Live?',
+  'settings.liveSetup.confirmDescription':
+    'Qwen Code скачает, проверит, установит и откроет подписанное приложение Qwen Live Host. Затем macOS попросит доступ к микрофону, универсальному доступу и записи экрана.',
+  'settings.liveSetup.conflict':
+    'Настройки изменились в другом месте, пока вы редактировали. Черновик не сохранён. Загрузите последние настройки и проверьте изменения перед сохранением.',
+  'settings.liveSetup.reloadSettings':
+    'Отбросить черновик и загрузить последние настройки',
+  'settings.liveSetup.keyRemovalPending': 'Ключ будет удалён при сохранении',
+  'settings.liveSetup.undoRemoveKey': 'Отменить удаление',
+  'settings.liveSetup.cancel': 'Отмена',
+  'settings.liveSetup.confirm': 'Включить и установить',
+  'live.refresh': 'Обновить статус',
+  'live.startOrResume': 'Начать или продолжить',
+  'live.newConversation': 'Новый разговор',
+  'live.stop': 'Остановить Live',
+  'live.muteInput': 'Выключить микрофон',
+  'live.unmuteInput': 'Включить микрофон',
+  'live.muteOutput': 'Выключить динамик',
+  'live.unmuteOutput': 'Включить динамик',
+  'live.state.unavailable': 'Голосовой чат недоступен',
+  'live.state.idle': 'Готов к голосовому чату',
+  'live.state.starting': 'Подготовка голосового чата…',
+  'live.state.listening': 'Слушает',
+  'live.state.thinking': 'Думает',
+  'live.state.speaking': 'Говорит',
+  'live.state.stopping': 'Остановка…',
+  'live.state.error': 'Голосовой чат остановлен',
+  'live.requirement.host': 'Qwen Live Host',
+  'live.requirement.microphone': 'Микрофон',
+  'live.requirement.accessibility': 'Универсальный доступ',
+  'live.requirement.screenRecording': 'Запись экрана',
+  'live.requirement.audioInput': 'Аудиовход',
+  'live.requirement.audioOutput': 'Аудиовыход',
+  'live.requirement.globalShortcut': 'Глобальная комбинация',
+  'live.requirement.appshot': 'Appshot',
+  'live.requirement.provider': 'Realtime-провайдер',
+  'live.requirementState.ready': 'Готово',
+  'live.requirementState.missing': 'Отсутствует',
+  'live.requirementState.denied': 'Не разрешено',
+  'live.requirementState.unavailable': 'Недоступно',
+  'live.requirementState.checking': 'Проверка',
+};

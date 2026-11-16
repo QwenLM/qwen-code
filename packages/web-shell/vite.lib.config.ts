@@ -243,6 +243,16 @@ const TRANSCRIPT_STUBS = new Map(
       './client/components/managed/managed-mcp-messages.ts',
       './client/components/managed/managed-mcp-messages.transcript-stub.ts',
     ],
+    ['./client/i18n-ru-part1.ts', './client/i18n-ru-part1.transcript-stub.ts'],
+    ['./client/i18n-ru-part2.ts', './client/i18n-ru-part2.transcript-stub.ts'],
+    ['./client/i18n-ru-part3.ts', './client/i18n-ru-part3.transcript-stub.ts'],
+    ['./client/i18n-ru-part4.ts', './client/i18n-ru-part4.transcript-stub.ts'],
+    ['./client/i18n-ru-part5.ts', './client/i18n-ru-part5.transcript-stub.ts'],
+    ['./client/i18n-ru-part6.ts', './client/i18n-ru-part6.transcript-stub.ts'],
+    [
+      './client/i18n-ru-remainder.ts',
+      './client/i18n-ru-remainder.transcript-stub.ts',
+    ],
   ].map(([module, stub]) => [
     normalizePath(resolve(__dirname, module)),
     normalizePath(resolve(__dirname, stub)),

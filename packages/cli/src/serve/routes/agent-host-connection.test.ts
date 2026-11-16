@@ -234,7 +234,7 @@ it('describes this daemon as a v2 Host with its probed programs', async () => {
 });
 
 it('connects without a provider and remembers the connection', async () => {
-  startConnection.mockResolvedValue(undefined);
+  startConnection.mockResolvedValue({ recorded: true });
   saveConnection.mockResolvedValue(undefined);
 
   const response = await request(runtimeApp(selected()))
@@ -249,6 +249,7 @@ it('connects without a provider and remembers the connection', async () => {
   expect(response.body).toMatchObject({
     connected: true,
     saved: true,
+    recorded: true,
     providers: ['qwen', 'claude'],
   });
   expect(response.body).not.toHaveProperty('saveError');
@@ -286,7 +287,7 @@ function join() {
 it('reports a join it could not save as connected but not saved', async () => {
   // The token is spent by now, so this must stay a success: a client told
   // the join failed would rerun it with the same token.
-  startConnection.mockResolvedValue(undefined);
+  startConnection.mockResolvedValue({ recorded: true });
   saveConnection.mockRejectedValue(
     new Error('Lock file is already being held'),
   );
@@ -305,10 +306,29 @@ it('reports a join it could not save as connected but not saved', async () => {
   );
 });
 
+it.each([true, false])(
+  'reports whether the credential recorded the join (recorded: %s), so a client can gate its rerun advice',
+  async (recorded) => {
+    startConnection.mockResolvedValue({ recorded });
+    saveConnection.mockRejectedValue(new Error('disk full'));
+    findConnection.mockResolvedValue(undefined);
+
+    const response = await join();
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      connected: true,
+      saved: false,
+      recorded,
+      saveError: 'disk full',
+    });
+  },
+);
+
 it('reports a join as saved when an earlier record for it still stands', async () => {
   // A rejoin whose save failed still reconnects after a restart, from the
   // record the previous join left.
-  startConnection.mockResolvedValue(undefined);
+  startConnection.mockResolvedValue({ recorded: true });
   saveConnection.mockRejectedValue(new Error('disk full'));
   findConnection.mockResolvedValue({ ...joined, allowHttp: true });
 
