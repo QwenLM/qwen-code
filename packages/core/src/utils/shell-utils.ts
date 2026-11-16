@@ -400,7 +400,7 @@ export function splitCommands(command: string): string[] {
         currentCommand = '';
       } else if (char === '&') {
         const prevChar = previousNonWhitespaceChar(i);
-        if (prevChar === '>' || prevChar === '<') {
+        if (prevChar === '>' || prevChar === '<' || nextChar === '>') {
           currentCommand += char;
         } else {
           commands.push(currentCommand.trim());

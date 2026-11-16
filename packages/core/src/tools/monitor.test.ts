@@ -423,10 +423,8 @@ describe('MonitorTool', () => {
   describe('confirmation details', () => {
     it.each([
       'git <&- push origin',
-      'git <&- show "*"',
       'git <&- show "(topic)[1]"',
       '  git <&- status  ',
-      '\tgit <> /tmp/gate status\t',
     ])(
       'persists and reloads a full-command fallback for %s',
       async (command) => {
@@ -482,6 +480,21 @@ describe('MonitorTool', () => {
         ).not.toBe('allow');
         expect(await reloaded.isCommandAllowed(command)).not.toBe('allow');
         expect(mockSpawn).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([
+      'for f in *',
+      'git > *.log push origin main',
+      'git 3>/tmp/protected push origin main',
+      'git <> /tmp/gate status',
+    ])(
+      'does not persist an unsafe full-command fallback for %s',
+      async (command) => {
+        mockExtractCommandRules.mockResolvedValue([]);
+        const details = await confirm(command);
+        expect(details.permissionRules).toEqual([]);
+        expect(details.hideAlwaysAllow).toBe(true);
       },
     );
 

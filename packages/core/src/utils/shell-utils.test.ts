@@ -545,6 +545,15 @@ describe('getCommandRoots', () => {
     expect(getCommandRoots('ls\n\ngrep foo')).toEqual(['ls', 'grep']);
   });
 
+  it.each(['&>', '&>>'])(
+    'keeps the command intact through combined output redirection %s',
+    async (operator) => {
+      const command = `git ${operator} /tmp/log push origin main`;
+      expect(splitCommands(command)).toEqual([command]);
+      expect(getCommandRoots(command)).toEqual(['git']);
+    },
+  );
+
   it('should not treat file descriptor redirection as a command separator', async () => {
     const result = getCommandRoots('npm run build 2>&1 | head -100');
     expect(result).toEqual(['npm', 'head']);

@@ -15,7 +15,10 @@ import {
   normalizeMcpToolName,
 } from '../utils/tool-name-utils.js';
 import { isNodeError } from '../utils/errors.js';
-import { getShellConfiguration } from '../utils/shell-utils.js';
+import {
+  detectCommandSubstitution,
+  getShellConfiguration,
+} from '../utils/shell-utils.js';
 
 const debugLogger = createDebugLogger('PERMISSIONS');
 
@@ -1223,9 +1226,77 @@ export function matchesCommandPattern(
 }
 
 function trimCommandPadding(command: string): string {
-  return command.includes('\\')
-    ? command
+  // A final unpaired backslash makes the trailing whitespace an argument.
+  return /(?:^|[^\\])(?:\\\\)*\\[ \t]*$/.test(command)
+    ? command.replace(/^[ \t]+/, '')
     : command.replace(/^[ \t]+|[ \t]+$/g, '');
+}
+
+/** Keep persistent grants within syntax the file-operation tracker can see. */
+export function hasUnsupportedShellSyntax(command: string): boolean {
+  if (detectCommandSubstitution(command)) return true;
+  let quote = '';
+  // Only an empty token or a bare 1/2 can precede a supported operator.
+  let token: '' | '1' | '2' | undefined = '';
+  for (let index = 0; index < command.length; index++) {
+    const character = command[index]!;
+    const ansiCQuote =
+      character === '$' ? /^\$(?:\\\n)*'/.exec(command.slice(index)) : null;
+    if (character === '\\' && quote !== "'") {
+      token = undefined;
+      index++;
+    } else if (
+      quote !== "'" &&
+      quote !== "$'" &&
+      (character === '`' ||
+        (character === '$' && /^(?:\\\n)*\(/.test(command.slice(index + 1))) ||
+        (character === '$' &&
+          /^\$\{[A-Za-z_][A-Za-z0-9_]*@P\}/.test(command.slice(index))) ||
+        (!quote &&
+          (character === '<' || character === '>') &&
+          command[index + 1] === '('))
+    ) {
+      // Keep escaped whitespace from turning a later substitution into a
+      // comment in the legacy detector's raw-character boundary check.
+      return true;
+    } else if (quote) {
+      if (character === quote || (quote === "$'" && character === "'")) {
+        quote = '';
+      }
+    } else if (ansiCQuote) {
+      quote = "$'";
+      token = undefined;
+      index += ansiCQuote[0].length - 1;
+    } else if (character === "'" || character === '"') {
+      quote = character;
+      token = undefined;
+    } else if (/[ \t\n]/.test(character)) {
+      token = '';
+    } else if (character === '#' && token === '') {
+      const newline = command.indexOf('\n', index);
+      if (newline < 0) break;
+      index = newline;
+    } else if (
+      character === '<' ||
+      character === '>' ||
+      (character === '&' && command[index + 1] === '>')
+    ) {
+      const supportedDescriptor =
+        character === '>' && (token === '1' || token === '2');
+      if (token !== '' && !supportedDescriptor) return true;
+      const operator = /^(?:&>>?|>>|>\||>&|>|<&|<)/.exec(
+        command.slice(index),
+      )![0];
+      index += operator.length - 1;
+      token = undefined;
+    } else {
+      token =
+        token === '' && (character === '1' || character === '2')
+          ? character
+          : undefined;
+    }
+  }
+  return false;
 }
 
 function matchesCommandText(pattern: string, command: string): boolean {
@@ -1293,9 +1364,51 @@ function matchesCommandText(pattern: string, command: string): boolean {
   }
 }
 
+/** Normalize only unquoted operator padding, retaining glob word boundaries. */
+function normalizeRedirectSpacing(command: string, pattern = false): string {
+  let result = '';
+  let quote = '';
+  let escaped = false;
+  for (let index = 0; index < command.length; index++) {
+    const character = command[index]!;
+    if (escaped) {
+      result += character;
+      escaped = false;
+    } else if (character === '\\' && quote !== "'") {
+      result += character;
+      escaped = true;
+    } else if (quote) {
+      result += character;
+      if (character === quote) quote = '';
+    } else if (character === "'" || character === '"') {
+      result += character;
+      quote = character;
+    } else if ('<>&|'.includes(character)) {
+      let end = index + 1;
+      while (end < command.length && '<>&|'.includes(command[end]!)) end++;
+      // An adjacent numeric descriptor is not a command argument. Keep it
+      // distinct from the spaced numeric word in `git 2 > file`.
+      const descriptor =
+        index > 0 &&
+        !/[ \t]/.test(command[index - 1]!) &&
+        /(?:^|[ \t])\d+$/.test(result);
+      result = result.replace(/[ \t]+$/, '');
+      if (result && !descriptor) result += ' ';
+      result += command.slice(index, end);
+      const adjacentStar = pattern && command[end] === '*';
+      while (command[end] === ' ' || command[end] === '\t') end++;
+      if (end < command.length && !adjacentStar) result += ' ';
+      index = end - 1;
+    } else {
+      result += character;
+    }
+  }
+  return result;
+}
+
 /**
- * Additional matching spelling for literal Bash redirects. Never replace the
- * original command: restrictive rules and virtual file operations need it.
+ * Additional restrictive spellings for literal Bash redirects. Never use
+ * these for grants: the file-operation tracker supports a narrower grammar.
  * Dynamic, escaped, here-document and compound syntax stay on the raw path.
  */
 function staticCommandSpellings(
@@ -2180,6 +2293,18 @@ export function matchesRule(
     return false;
   }
 
+  // Prefix/glob rules can also match additional redirect arguments. Such
+  // writes must not inherit approval when virtual file checks cannot see them.
+  if (
+    !restrictive &&
+    SHELL_TOOL_NAMES.has(canonicalCtxToolName) &&
+    command !== undefined &&
+    getShellConfiguration().shell === 'bash' &&
+    hasUnsupportedShellSyntax(command)
+  ) {
+    return false;
+  }
+
   // ── No specifier and no param matchers → match any invocation ────────
   if (!rule.specifier && !rule.toolParamMatchers?.length) {
     return true;
@@ -2204,15 +2329,22 @@ export function matchesRule(
           (restrictive &&
             (matchesCommandText(rule.specifier, command) ||
               matchesCommandText(rule.specifier, trimCommandPadding(command))));
-        if (!specifierMatched && getShellConfiguration().shell === 'bash') {
+        if (
+          !specifierMatched &&
+          restrictive &&
+          getShellConfiguration().shell === 'bash'
+        ) {
+          specifierMatched = matchesCommandText(
+            normalizeRedirectSpacing(rule.specifier, true),
+            normalizeRedirectSpacing(trimCommandPadding(command)),
+          );
           const spellings = staticCommandSpellings(command);
           if (spellings !== undefined) {
-            specifierMatched =
-              (restrictive &&
-                matchesCommandText(
-                  rule.specifier,
-                  spellings.withRedirections,
-                )) ||
+            specifierMatched ||=
+              matchesCommandText(
+                normalizeRedirectSpacing(rule.specifier, true),
+                normalizeRedirectSpacing(spellings.withRedirections),
+              ) ||
               matchesCommandPattern(
                 rule.specifier,
                 spellings.withoutRedirections,

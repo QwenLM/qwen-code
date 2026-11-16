@@ -14,7 +14,8 @@ import {
   persistPermissionOutcome,
 } from '../core/permission-helpers.js';
 import { ToolConfirmationOutcome } from '../tools/tools.js';
-import { extractCommandRules } from '../utils/shellAstParser.js';
+import { suggestCommandRules } from './command-rule-suggestions.js';
+import { splitCommands } from '../utils/shell-utils.js';
 import {
   matchesCommandPattern,
   matchesRule,
@@ -72,19 +73,20 @@ describe.each(['run_shell_command', 'monitor'])(
       'git > "/tmp/output file" push origin main',
       'git > /dev/null push > /tmp/output origin main',
       'FOO=1 git > /dev/null push origin main',
-    ])('matches a push rule through a static redirect: %j', async (command) => {
-      expect(
-        await evaluatePermissionRules(makeManager(), 'ask', {
-          toolName,
-          command,
-        }),
-      ).toEqual({ finalPermission: 'allow', pmForcedAsk: false });
-    });
+    ])(
+      'does not widen an existing push grant through a redirect: %j',
+      async (command) => {
+        expect(
+          await evaluatePermissionRules(makeManager(), 'ask', {
+            toolName,
+            command,
+          }),
+        ).toEqual({ finalPermission: 'ask', pmForcedAsk: false });
+      },
+    );
 
     it.each([
       'git > /dev/null push origin main',
-      'git 0<&3 push origin main',
-      'git 0< /dev/null push origin main',
       '! git > /dev/null push origin main',
       'git status && git > /dev/null push origin main',
       'git status | git > /dev/null push origin main',
@@ -93,9 +95,12 @@ describe.each(['run_shell_command', 'monitor'])(
       onTestFinished(() => fs.rm(directory, { recursive: true, force: true }));
       const settingsPath = path.join(directory, 'settings.json');
       const settings = { permissions: { allow: [] as string[] } };
-      const rules = (await extractCommandRules(command)).map(
-        (rule) => `${toolName === 'monitor' ? 'Monitor' : 'Bash'}(${rule})`,
-      );
+      const { permissionRules: rules = [], hideAlwaysAllow } =
+        await suggestCommandRules(
+          splitCommands(command),
+          toolName === 'monitor' ? 'Monitor' : 'Bash',
+        );
+      expect(hideAlwaysAllow).not.toBe(true);
       expect(rules).toContain(
         `${toolName === 'monitor' ? 'Monitor' : 'Bash'}(git push *)`,
       );
@@ -178,6 +183,11 @@ describe.each(['run_shell_command', 'monitor'])(
       [
         'Bash(git>/tmp/protected push *)',
         'git>/tmp/protected push origin main',
+        [pushRule],
+      ],
+      [
+        'Bash(git>/tmp/protected push *)',
+        'git >/tmp/protected push origin main',
         [pushRule],
       ],
       [
@@ -293,6 +303,8 @@ it('keeps full-command fallback equality literal', () => {
   for (const suffix of ['\r', '\v', '\f', '\u00a0']) {
     expect(matchesCommandPattern(command, command + suffix)).toBe(false);
   }
+  const escaped = 'git <&- show \"a\\\\b\"';
+  expect(matchesCommandPattern(escaped, ' \t' + escaped + '\t ')).toBe(true);
   expect(
     matchesCommandPattern('git <&- show path\\', 'git <&- show path\\ '),
   ).toBe(false);

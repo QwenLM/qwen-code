@@ -6182,6 +6182,7 @@ describe('ShellTool', () => {
         type: string;
         rootCommand: string;
         permissionRules: string[];
+        hideAlwaysAllow?: boolean;
         warnings?: string[];
       };
 
@@ -6296,7 +6297,10 @@ describe('ShellTool', () => {
       const invocation = build('git > /dev/null push origin main');
       expect(await invocation.getDefaultPermission()).toBe('ask');
       const details = await detailsOf(invocation);
-      expect(details.permissionRules).toEqual(['Bash(git push *)']);
+      expect(details.permissionRules).toEqual([
+        'Bash(git push *)',
+        'Bash(git > /dev/null push origin main)',
+      ]);
 
       const pm = new PermissionManager({
         getPermissionsAllow: () => details.permissionRules,
@@ -6335,10 +6339,8 @@ describe('ShellTool', () => {
 
     it.each([
       'git <&- push origin',
-      'git <&- show "*"',
       'git <&- show "(topic)[1]"',
       '  git <&- push origin  ',
-      '\tgit <> /tmp/gate status\t',
     ])(
       'persists and reloads a full-command fallback for %s',
       async (command) => {
@@ -6390,6 +6392,32 @@ describe('ShellTool', () => {
           'allow',
         );
         expect(mockShellExecutionService).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([
+      'for f in *; do echo $f; done',
+      'git > *.log push origin main',
+      'git 3>/tmp/protected push origin main',
+      'git <> /tmp/gate status',
+    ])(
+      'offers only single-use approval when a safe rule is unavailable: %s',
+      async (command) => {
+        const details = await detailsOf(build(command));
+        expect(details.permissionRules).toEqual([]);
+        expect(details.hideAlwaysAllow).toBe(true);
+      },
+    );
+
+    it.each(['&>', '&>>'])(
+      'keeps the push scope when both output streams are redirected with %s',
+      async (operator) => {
+        const command = `git ${operator} /tmp/log push origin main`;
+        const details = await detailsOf(build(command));
+        expect(details.permissionRules).toEqual([
+          'Bash(git push *)',
+          `Bash(${command})`,
+        ]);
       },
     );
 

@@ -540,7 +540,9 @@ Some rule names automatically cover multiple tools:
 | `"WebFetch(api.example.com)"` | Fetch from `api.example.com` and all its subdomains            |
 | `"mcp__puppeteer"`            | All tools from the puppeteer MCP server                        |
 
-Suggested shell rules retain subcommands after a file redirection: `git > /dev/null push origin main` produces `Bash(git push *)`, the same scope as `git push origin main`. Existing saved rules are not rewritten; a saved `Bash(git)` still allows every Git subcommand.
+Suggested shell rules retain subcommands after a file redirection. For example, `git > /dev/null push origin main` keeps `Bash(git push *)` and adds the original command when needed so the saved rules cover the invocation you approved. Existing command-rule prefix and wildcard semantics stay the same; saving a rule does not teach an existing `Bash(git push *)` rule to match other redirected spellings. The same suggestions are used for Shell, Monitor and scheduled command gates.
+
+Bash commands with redirections outside the file-operation tracker's supported syntax, including arbitrary file descriptors and redirections glued to words, require confirmation even under an existing allow rule. Command and process substitutions also require confirmation. Quoted or escaped operator characters remain ordinary arguments. When a reusable rule cannot safely represent the invocation, including a literal `*` in a required full-command fallback, only single-use approval is offered. This check does not resolve environment-variable values or replace the existing file-operation analysis. Existing saved rules are not rewritten; a saved `Bash(git)` retains its broad subcommand scope.
 
 **Path pattern prefixes:**
 
