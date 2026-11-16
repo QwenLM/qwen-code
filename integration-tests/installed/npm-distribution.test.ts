@@ -514,6 +514,10 @@ for (const kind of ['global', 'npx'] as const) {
       'no-relaunch-fallback',
     ] as const) {
       const id = `${kind}-${ignoreScripts ? 'ignore-scripts' : 'lifecycle-enabled'}`;
+      // Startup may spend the whole 90s ready-prompt budget on hosted macOS
+      // x64 (#15677) and the /about retry window is another 90s, so the case
+      // needs ~240s; 120s expired mid-case there (run 40537979533, job
+      // 122316223603).
       it(`${id} ${mode} uses actual installed entry and exits naturally`, async () => {
         const layout = layouts.find((row) => row.id === id)!;
         assert.ok(layout);
@@ -787,7 +791,7 @@ for (const kind of ['global', 'npx'] as const) {
           save(path.join(out, 'result.json'), facts);
         }
         if (failure) throw failure;
-      }, 120_000);
+      }, 240_000);
     }
   }
 }

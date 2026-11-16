@@ -191,7 +191,7 @@ export function projectEvents(
           ? Math.floor(Number(row['gmt_create']) / 1000)
           : row['gmt_create'],
       data: JSON.parse(String(row['data_json'])),
-      terminal: Boolean(row['terminal']),
+      terminal: Boolean(row['is_terminal']),
     };
     return Object.fromEntries(
       Object.entries(fields)

@@ -73,8 +73,12 @@ class HostedCommittedEventLineReplayIT {
         Files.writeString(input, events.toString(), StandardCharsets.UTF_8);
         Path script = root.resolve("reader-replay.mts");
         Files.writeString(script, DRIVER, StandardCharsets.UTF_8);
-        Path repo = Path.of(System.getProperty("user.dir")).getParent()
-                .getParent();
+        Path repo = Path.of(System.getProperty("user.dir")).toAbsolutePath();
+        while (repo != null && !Files.isRegularFile(repo.resolve(
+                "packages/core/src/managed-runtime/managed-session-records.ts"))) {
+            repo = repo.getParent();
+        }
+        assertThat(repo).as("Repository containing the TypeScript reader").isNotNull();
         String node = System.getProperty("qwen.node",
                 System.getProperty("node.executable", "node"));
         Process reader = new ProcessBuilder(node, "--import", "tsx",

@@ -33,6 +33,7 @@ import {
 import { E2E_MEMORY_SETTINGS_DEFAULTS } from '../e2e-memory-defaults.js';
 import { pickE2eRenderer, resolveE2eCliCommand } from '../renderer-matrix.js';
 import { InteractiveSession } from './interactive-session.js';
+import { createUntil } from './wait.js';
 
 type Frame = CLIMessage | ControlMessage;
 type Case =
@@ -58,17 +59,7 @@ const sha = (bytes: Buffer | string) =>
 const json = (file: string, value: unknown) =>
   writeFileSync(file, JSON.stringify(value, null, 2) + '\n');
 const sleep = (ms: number) => new Promise<void>((done) => setTimeout(done, ms));
-async function until(
-  check: () => boolean | Promise<boolean>,
-  description: string,
-  timeout = 15_000,
-) {
-  const deadline = Date.now() + timeout;
-  while (!(await check())) {
-    if (Date.now() >= deadline) throw new Error(description);
-    await sleep(50);
-  }
-}
+const until = createUntil(15_000);
 function blocks(frames: Frame[], type: 'user' | 'assistant'): ContentBlock[] {
   return frames.flatMap((frame) => {
     if (frame.type !== type) return [];

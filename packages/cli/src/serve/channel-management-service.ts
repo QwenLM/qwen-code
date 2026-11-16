@@ -21,6 +21,10 @@ import type {
   ChannelSettingsUpsertOptions,
   WorkspaceChannelSettingsStore,
 } from './channel-settings-store.js';
+import {
+  ChannelQrLoginRegistry,
+  type ChannelQrLoginView,
+} from './channel-qr-login.js';
 import { isAllChannelSelectionName } from './channel-selection.js';
 import type { ChannelRestoreFailures } from './channel-restore-failures.js';
 import { normalizeWorkerDiagnostic } from './channel-worker-diagnostics.js';
@@ -122,6 +126,15 @@ export interface ChannelManagementService {
     name: string,
     subject: ChannelPairingApprovalSubject,
   ): Promise<ChannelPairingRevocationResult>;
+  startQrLogin(
+    name: string,
+    initiatorClientId?: string,
+  ): Promise<{ view: ChannelQrLoginView; attached: boolean }>;
+  qrLoginState(
+    loginId: string,
+    callerClientId?: string,
+  ): ChannelQrLoginView | undefined;
+  cancelQrLogin(loginId: string, callerClientId?: string): boolean;
 }
 
 interface ChannelManagementSettingsStore {
@@ -480,7 +493,12 @@ export function createChannelManagementService(
     return new PairingStore(name, opts.workspaceCwd);
   };
 
-  const service: ChannelManagementService = {
+  // The QR-login members are added by the wrapper below, which owns the
+  // session registry; this inner object implements the rest of the contract.
+  const service: Omit<
+    ChannelManagementService,
+    'startQrLogin' | 'qrLoginState' | 'cancelQrLogin'
+  > = {
     async list() {
       return listFrom(opts.store.snapshot());
     },
@@ -728,6 +746,98 @@ export function createChannelManagementService(
       };
     },
   };
+  const qrLogins = new ChannelQrLoginRegistry({
+    renderQrCode: async (url) => {
+      const { default: QRCode } = await import('qrcode');
+      return QRCode.toDataURL(url, { margin: 1, width: 320 });
+    },
+    persist: async (channelName, values) => {
+      const missing = () =>
+        Object.assign(
+          new Error(
+            `Channel ${JSON.stringify(channelName)} must be saved before it can be bound.`,
+          ),
+          { code: 'channel_qr_login_channel_missing' },
+        );
+      await inMutationLane(async () => {
+        // Read, resolve and write in one lane turn: a concurrent save must not
+        // be able to change the entry's type or ownership between the read that
+        // picks the secret keys and the write that uses them.
+        const current = opts.store.snapshot();
+        if (!Object.hasOwn(current.channels, channelName)) throw missing();
+        const existing = current.channels[channelName]!;
+        assertWorkspaceConfig(existing);
+        const active = workspaceCommittedNames().includes(channelName);
+        if (active) assertOwnedRuntime(channelName);
+
+        const type = String(existing['type']);
+        const fields = (await getPlugin(type))?.management?.fields ?? [];
+        const secretKeys = new Set(
+          fields
+            .filter((field) => field.kind === 'secret')
+            .map((field) => field.key),
+        );
+        // The descriptor import above is an await point. Re-read and re-assert
+        // immediately before writing so a save that repointed the entry during
+        // that import cannot slip the write into another workspace.
+        const latest = opts.store.snapshot();
+        if (!Object.hasOwn(latest.channels, channelName)) throw missing();
+        const target = latest.channels[channelName]!;
+        assertWorkspaceConfig(target);
+        const targetType = String(target['type']);
+        // A save during the import may also have changed the type. Re-derive
+        // the secret keys from the type actually being written, or a secret
+        // would be persisted as a plain config value under the new descriptor.
+        const writeKeys =
+          targetType === type
+            ? secretKeys
+            : new Set(
+                ((await getPlugin(targetType))?.management?.fields ?? [])
+                  .filter((field) => field.kind === 'secret')
+                  .map((field) => field.key),
+              );
+        const config: Record<string, unknown> & { type: string } = {
+          ...target,
+          type: targetType,
+        };
+        // The stored snapshot resolves secret references to literals. Leaving
+        // them in config would submit the same secret twice and the store
+        // rejects any secret-kind config key, so a channel that already holds a
+        // credential could never be re-bound.
+        for (const key of writeKeys) delete config[key];
+        const secrets: Record<string, ChannelSecretUpdate> = {};
+        for (const [key, value] of Object.entries(values)) {
+          if (writeKeys.has(key)) {
+            secrets[key] = { operation: 'replace', value };
+          } else {
+            config[key] = value;
+          }
+        }
+        await opts.store.upsert(channelName, {
+          expectedRevision: latest.revision,
+          config,
+          secrets,
+        });
+        // Mirror the sibling upsert tail: a worker loads its config at fork
+        // time, so without this a bind reports success while the running
+        // channel keeps the old credential.
+        forgetDiagnostics(channelName);
+        if (active) {
+          try {
+            await opts.manager.reloadWorkspace(opts.workspaceCwd, channelName);
+          } catch (error) {
+            diagnostics.set(channelName, diagnostic(error));
+            try {
+              await stopChannel(channelName);
+            } catch {
+              // Keep the reload diagnostic when best-effort cleanup also fails.
+            }
+          }
+        }
+      });
+    },
+  });
+
   return {
     list: () => service.list(),
     upsert: (name, request) =>
@@ -745,5 +855,41 @@ export function createChannelManagementService(
     pairingApprovals: (name) => service.pairingApprovals(name),
     revokePairingApproval: (name, subject) =>
       inMutationLane(() => service.revokePairingApproval(name, subject)),
+    startQrLogin: async (name, initiatorClientId) => {
+      assertManageableInstanceName(name);
+      const channels = opts.store.snapshot().channels;
+      // Own-property, not truthiness: 'constructor' and 'toString' resolve to
+      // prototype members and would otherwise reach the capability check.
+      if (!Object.hasOwn(channels, name)) {
+        throw Object.assign(
+          new Error(
+            `Channel ${JSON.stringify(name)} must be saved before it can be bound.`,
+          ),
+          { code: 'channel_qr_login_channel_missing' },
+        );
+      }
+      const existing = channels[name]!;
+      assertWorkspaceConfig(existing);
+      const channelType = String(existing['type']);
+      const qrLogin = (await getPlugin(channelType))?.management?.qrLogin;
+      if (!qrLogin) {
+        throw Object.assign(
+          new Error(
+            `Channel type ${JSON.stringify(channelType)} does not support QR login.`,
+          ),
+          { code: 'channel_qr_login_unsupported' },
+        );
+      }
+      return qrLogins.start({
+        channelType,
+        channelName: name,
+        qrLogin,
+        ...(initiatorClientId !== undefined ? { initiatorClientId } : {}),
+      });
+    },
+    qrLoginState: (loginId, callerClientId) =>
+      qrLogins.get(loginId, callerClientId),
+    cancelQrLogin: (loginId, callerClientId) =>
+      qrLogins.cancel(loginId, callerClientId),
   };
 }

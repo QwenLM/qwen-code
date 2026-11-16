@@ -42,7 +42,7 @@ class ManagedExtensionAgentLaunchTest {
         jdbc.update("INSERT INTO ma_runtime_binding (binding_id, request_key, scope_key, tenant_id, workspace_id,"
                 + " workspace_generation, canonical_cwd, capability_digest, isolation_class, isolation_key, provisioner_kind,"
                 + " storage_id, runtime_generation, binding_state, runtime_instance_id, runtime_lease_id,"
-                + " attestation_generation, drain_requested, operation_generation, record_version, last_active_at)"
+                + " attestation_generation, is_drain_requested, operation_generation, record_version, last_active_at)"
                 + " VALUES ('binding', ?, ?, 'tenant', 'workspace', '1', '/workspace', ?, 'session', 'parent',"
                 + " 'local-process', 'storage', 1, 'READY', 'worker', 'lease', 1, FALSE, 0, 1, 0)",
                 request, DigestUtils.sha256Hex("scope"), capability);
@@ -56,9 +56,9 @@ class ManagedExtensionAgentLaunchTest {
         jdbc.update("UPDATE ma_runtime_slot SET active_binding_id='replacement'");
         assertThrows(ManagedAgentException.class, this::verify);
         jdbc.update("UPDATE ma_runtime_slot SET active_binding_id='binding'");
-        jdbc.update("UPDATE ma_runtime_binding SET drain_requested=TRUE");
+        jdbc.update("UPDATE ma_runtime_binding SET is_drain_requested=TRUE");
         assertThrows(ManagedAgentException.class, this::verify);
-        jdbc.update("UPDATE ma_runtime_binding SET drain_requested=FALSE, runtime_generation=2");
+        jdbc.update("UPDATE ma_runtime_binding SET is_drain_requested=FALSE, runtime_generation=2");
         jdbc.update("UPDATE ma_runtime_slot SET last_generation=2");
         assertThrows(ManagedAgentException.class, this::verify);
     }

@@ -105,11 +105,15 @@ test('simple mobile add drawer keeps advanced controls in advanced mode @smoke',
   await expect(drawer.locator('[data-web-shell-model-button]')).toHaveCount(0);
   await expect(drawer.locator('[data-web-shell-mode-button]')).toHaveCount(0);
   expect(
-    await drawer
-      .getByRole('button')
-      .evaluateAll((buttons) =>
-        buttons.map((button) => button.textContent?.trim()).filter(Boolean),
-      ),
+    await drawer.getByRole('button').evaluateAll((buttons) =>
+      buttons
+        .filter((button) => button.textContent?.trim())
+        .map(
+          (button) =>
+            button.getAttribute('aria-label') ?? button.textContent?.trim(),
+        )
+        .filter(Boolean),
+    ),
   ).toEqual([
     'Photos',
     'Take photo',
@@ -120,6 +124,11 @@ test('simple mobile add drawer keeps advanced controls in advanced mode @smoke',
     'MCP',
     'Skills',
   ]);
+  await expect(
+    drawer
+      .getByTestId('composer-add-menu-reference-file')
+      .getByText('Reference file', { exact: true }),
+  ).toBeVisible();
   await drawer.getByRole('button', { name: /^close$/i }).tap();
   await composer.locator('[data-web-shell-composer-expand]').tap();
   await expect(composer).toHaveAttribute(
@@ -136,6 +145,21 @@ test('simple mobile add drawer keeps advanced controls in advanced mode @smoke',
     .getByRole('button', { name: 'Qwen Test Alt', exact: true })
     .tap();
   await expect.poll(() => daemon.modelRequests().length).toBe(1);
+  await composer.getByTestId('composer-add-menu-trigger').tap();
+  await expect(drawer).toBeVisible();
+  const rows = drawer.locator('[data-vaul-no-drag] button');
+  const layout = await rows.evaluateAll((buttons) =>
+    buttons.map((button) => ({
+      minHeight: getComputedStyle(button).minHeight,
+      hasIcon: Boolean(
+        button.querySelector(':scope > span[aria-hidden="true"]'),
+      ),
+    })),
+  );
+  expect(layout.length).toBeGreaterThan(8);
+  expect(layout.every((row) => row.minHeight === '52px' && row.hasIcon)).toBe(
+    true,
+  );
 });
 
 test('simple mobile composer switches directly to advanced mode without losing its draft or attachments @smoke', async ({
@@ -331,7 +355,10 @@ test('switching to simple mode exits Shell before sending the retained draft @sm
     'data-web-shell-composer-variant',
     'default',
   );
-  await composer.getByRole('button', { name: 'Shell mode', exact: true }).tap();
+  await composer.getByTestId('composer-add-menu-trigger').tap();
+  const drawer = page.locator('[data-web-shell-mobile-add-menu]');
+  await drawer.getByRole('button', { name: 'Shell mode', exact: true }).tap();
+  await expect(drawer).toBeHidden();
   await expect(textarea).toHaveAttribute(
     'placeholder',
     'Enter terminal command',
@@ -471,7 +498,7 @@ test('keeps a persisted wide sidebar inside the mobile drawer and exposes close'
     path: 'client/e2e/test-results/responsive-sidebar-drawer.png',
     fullPage: true,
   });
-  await page.getByRole('button', { name: 'Collapse' }).tap();
+  await page.getByRole('button', { name: 'Collapse', exact: true }).tap();
   await expect(drawer).toBeHidden();
   await expect
     .poll(() =>
@@ -490,7 +517,7 @@ test('keeps a persisted wide sidebar inside the mobile drawer and exposes close'
       sidebar.evaluate((element) => element.getBoundingClientRect().width),
     )
     .toBeCloseTo(420, 0);
-  await page.getByRole('button', { name: 'Collapse' }).click();
+  await page.getByRole('button', { name: 'Collapse', exact: true }).click();
   await expect(drawer).toBeHidden();
 
   await page.setViewportSize({ width: 1000, height: 915 });
@@ -878,19 +905,147 @@ test('mobile history search stays reachable above a soft keyboard @smoke', async
   expect(daemon.promptRequests()).toHaveLength(0);
 });
 
-test('mobile workspace row stays clear of the editing row @smoke', async ({
+test('mobile context icon is centered in a compact toolbar target @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario({
+    state: {
+      models: {
+        currentModelId: 'qwen-test',
+        availableModels: [
+          { modelId: 'qwen-test', name: 'Qwen Test', contextLimit: 100_000 },
+        ],
+      },
+    },
+  });
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoSession(page, scenario, daemon);
+  await daemon.sendEvent({
+    id: 20,
+    v: 1,
+    type: 'session_update',
+    data: {
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: { usage: { inputTokens: 1000 } },
+      },
+    },
+  });
+  const context = page.locator('[data-web-shell-context-usage]');
+  await expect(context).toBeVisible();
+  const button = (await context.boundingBox())!;
+  const icon = (await context.locator('svg').boundingBox())!;
+  expect(button.width).toBe(44);
+  expect(button.height).toBe(44);
+  expect(
+    Math.abs(icon.x + icon.width / 2 - button.x - button.width / 2),
+  ).toBeLessThanOrEqual(1);
+  const send = (await page
+    .locator('[data-web-shell-composer-submit]')
+    .boundingBox())!;
+  expect(send.x - button.x - button.width).toBeGreaterThanOrEqual(0);
+  expect(send.x - button.x - button.width).toBeLessThanOrEqual(4);
+  const add = (await page
+    .getByTestId('composer-add-menu-trigger')
+    .boundingBox())!;
+  const approval = (await page
+    .locator('[data-web-shell-mode-button]')
+    .boundingBox())!;
+  expect(approval.x - add.x - add.width).toBe(0);
+  await page.locator('[data-web-shell-composer]').screenshot({
+    path: testInfo.outputPath('mobile-toolbar-spacing.png'),
+  });
+  await page.setViewportSize({ width: 1200, height: 844 });
+  const percentage = context.locator('span[aria-hidden="true"]');
+  await expect
+    .poll(() =>
+      percentage.evaluate((element) => {
+        const label = element.getBoundingClientRect();
+        const target = element.closest('button')!.getBoundingClientRect();
+        return (
+          label.width > 0 &&
+          label.left >= target.left &&
+          label.right <= target.right
+        );
+      }),
+    )
+    .toBe(true);
+});
+
+test('mobile workspace controls share the editing row without overlapping @smoke', async ({
   page,
 }, testInfo) => {
   await installScenario(page, createGitWorkspaceScenario(), testInfo);
   await page.goto('/');
   const branch = page.locator('[data-web-shell-git-branch]');
   await expect(branch).toBeVisible({ timeout: 10_000 });
+  const chevron = branch.locator(':scope > svg');
+  await expect(chevron).toHaveCSS('width', '9px');
+  await expect(chevron).toHaveCSS('height', '9px');
+  await expect(
+    page
+      .getByRole('button', { name: 'Expand editor', exact: true })
+      .locator('svg'),
+  ).toHaveCSS('width', '18px');
   const branchBox = (await branch.boundingBox())!;
-  const editingBox = (await page
-    .locator('[data-web-shell-mobile-editing-actions]')
+  const actions = page.locator('[data-web-shell-mobile-editing-actions]');
+  await expect(actions.locator('[data-web-shell-git-branch]')).toBeVisible();
+  const expandBox = (await page
+    .getByRole('button', { name: 'Expand editor', exact: true })
     .boundingBox())!;
-  expect(editingBox.y).toBeGreaterThanOrEqual(branchBox.y + branchBox.height);
+  expect(branchBox.x + branchBox.width).toBeLessThanOrEqual(expandBox.x);
 });
+
+for (const width of [390, 240]) {
+  test(`mobile workspace and editing actions fit one row at ${width}px @smoke`, async ({
+    page,
+  }, testInfo) => {
+    await page.setViewportSize({ width, height: 844 });
+    const scenario = createGitWorkspaceScenario();
+    scenario.gitStatus = undefined;
+    scenario.capabilities.workspaces![0]!.cwd = `/tmp/${'long-workspace-name-'.repeat(6)}`;
+    scenario.capabilities.workspaces!.push({
+      id: 'secondary',
+      cwd: '/tmp/another-project',
+      primary: false,
+      trusted: true,
+    });
+    await installScenario(page, scenario, testInfo);
+    await page.goto('/');
+    const textarea = page.locator(COMPOSER_TEXTAREA);
+    await textarea.tap();
+    const composer = page.locator('[data-web-shell-composer]');
+    const workspace = composer.getByRole('button', {
+      name: 'Workspace',
+      exact: true,
+    });
+    const keyboard = composer.getByRole('button', {
+      name: 'Hide keyboard',
+      exact: true,
+    });
+    await expect(keyboard).toBeVisible();
+    const workspaceBox = (await workspace.boundingBox())!;
+    const keyboardBox = (await keyboard.boundingBox())!;
+    await expect(workspace.locator(':scope > svg')).toHaveCSS('width', '16px');
+    expect(Math.abs(workspaceBox.y - keyboardBox.y)).toBeLessThanOrEqual(1);
+    expect(workspaceBox.x + workspaceBox.width).toBeLessThanOrEqual(
+      keyboardBox.x,
+    );
+    const value = workspace.locator('[data-slot="select-value"]');
+    expect(
+      await value.evaluate(
+        (element) => element.scrollWidth > element.clientWidth,
+      ),
+    ).toBe(true);
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth),
+    ).toBe(width);
+    await composer.screenshot({
+      path: testInfo.outputPath(`mobile-composer-${width}.png`),
+    });
+  });
+}
 
 // 412x450 is a Pixel 7 once the soft keyboard has resized the viewport. A
 // second workspace and a long branch wrap the workspace row onto two lines.

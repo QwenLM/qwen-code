@@ -113,7 +113,7 @@ it('keeps the rescan copy when an empty submit is rejected after a failed pairin
   expect(fetch).toHaveBeenCalledTimes(1);
   expect(container.textContent).toContain('Scan a fresh QR code');
   expect(container.textContent).not.toContain(
-    'Enter the bearer token from the daemon terminal.',
+    'Enter the bearer token from the server’s remote connection settings or startup output.',
   );
 });
 
@@ -487,7 +487,8 @@ it('distinguishes policy rejection from authentication failure', async () => {
     vi.fn().mockResolvedValue(stubResponse({ status: 403 })),
   );
   await mount();
-  expect(container.textContent).toContain('Origin or Host policy');
+  expect(container.textContent).toContain('HTTP 403');
+  expect(container.textContent).toContain('Host policy');
   expect(addressInput().value).toBe('http://daemon.test');
 });
 it('keeps tokenless loopback access working', async () => {
@@ -980,7 +981,7 @@ it('asks a first-visit operator to enter the token, not correct an invalid one',
   );
   await mount();
   expect(container.textContent).toContain(
-    'Enter the bearer token from the daemon terminal.',
+    'Enter the bearer token from the server’s remote connection settings or startup output.',
   );
   expect(container.textContent).not.toContain('Invalid or expired');
   expect(container.textContent).not.toContain('Connected ');
@@ -1088,10 +1089,48 @@ it('offers cross-origin diagnostics without treating network failures as permane
   const fetch = vi.fn().mockRejectedValue(new TypeError('Failed to fetch'));
   vi.stubGlobal('fetch', fetch);
   await mount();
-  expect(container.textContent).toContain('--allow-origin');
+  expect(container.textContent).toContain(
+    'advanced remote connection settings',
+  );
   expect(container.textContent).toContain('network');
+  expect(container.querySelector('details')?.open).toBe(true);
+  expect(container.textContent).toContain(window.location.origin);
+  expect(container.textContent).toContain('Allow remote connections');
+  expect(container.textContent).toContain('cannot distinguish');
   await act(async () => vi.advanceTimersByTimeAsync(2_000));
   expect(fetch).toHaveBeenCalledTimes(2);
+});
+
+it.each([
+  ['http://remote.example:4170', false],
+  ['http://127.0.0.1:4170', true],
+])('checks mixed content before probing %s', async (baseUrl, allowed) => {
+  const originalLocation = Object.getOwnPropertyDescriptor(window, 'location')!;
+  Object.defineProperty(window, 'location', {
+    configurable: true,
+    value: new URL('https://shell.example/'),
+  });
+  const fetchMock = vi.fn().mockResolvedValue(stubResponse({ status: 401 }));
+  vi.stubGlobal('fetch', fetchMock);
+  try {
+    await act(async () =>
+      root.render(
+        <StandaloneAuth baseUrl={baseUrl} initialToken="secret">
+          {() => <p>Connected</p>}
+        </StandaloneAuth>,
+      ),
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(allowed ? 1 : 0);
+    if (!allowed) {
+      expect(container.textContent).toContain('HTTPS page cannot connect');
+      expect(container.textContent).not.toContain('Connected');
+      expect(getDaemonToken(baseUrl)).not.toBe('secret');
+      await act(submitForm);
+      expect(fetchMock).not.toHaveBeenCalled();
+    }
+  } finally {
+    Object.defineProperty(window, 'location', originalLocation);
+  }
 });
 
 it('remembers only the selected daemon in the current tab across reload checks', async () => {

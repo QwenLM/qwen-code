@@ -57,6 +57,59 @@ describe('contextLengthError', () => {
   // #13415: a local llama.cpp server names its REAL context ceiling in wording
   // none of the patterns above covered, so the reactive compaction path in
   // llm-chat never fired and the session looped on the same 400 forever.
+  describe('Hugging Face TGI context overflow wording', () => {
+    it('parses the total-token wording with the inputs count as the prompt size', () => {
+      const info = getContextLengthExceededInfo(
+        new Error(
+          '422 Input validation error: `inputs` tokens + `max_new_tokens` must be <= 32768. Given: 40000 `inputs` tokens and 1000 `max_new_tokens`',
+        ),
+      );
+
+      expect(info.isExceeded).toBe(true);
+      expect(info.actualTokens).toBe(40000);
+      expect(info.limitTokens).toBe(32768);
+      expect(info.limitKind).toBe('total');
+    });
+
+    it('parses the input-length wording as an input bound', () => {
+      const info = getContextLengthExceededInfo(
+        new Error(
+          'Input validation error: `inputs` must have less than 32000 tokens. Given: 40000',
+        ),
+      );
+
+      expect(info.isExceeded).toBe(true);
+      expect(info.actualTokens).toBe(40000);
+      expect(info.limitTokens).toBe(32000);
+      expect(info.limitKind).toBe('input');
+    });
+
+    it('detects the wording in an error body object', () => {
+      const info = getContextLengthExceededInfo({
+        status: 422,
+        error: {
+          error:
+            'Input validation error: `inputs` tokens + `max_new_tokens` must be <= 4096. Given: 4000 `inputs` tokens and 200 `max_new_tokens`',
+          error_type: 'validation',
+        },
+      });
+
+      expect(info.isExceeded).toBe(true);
+      expect(info.actualTokens).toBe(4000);
+      expect(info.limitTokens).toBe(4096);
+    });
+
+    it('does not match other TGI validation errors', () => {
+      const info = getContextLengthExceededInfo(
+        new Error(
+          'Input validation error: `temperature` must be strictly positive',
+        ),
+      );
+
+      expect(info.isExceeded).toBe(false);
+    });
+  });
+
   describe('llama.cpp context overflow wording (#13415)', () => {
     const LLAMA_CPP_OVERFLOW =
       'request (279935 tokens) exceeds the available context size (262144 tokens), try increasing it';

@@ -24,9 +24,7 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
-import java.net.InetAddress;
 import java.net.InetSocketAddress;
-import java.net.ServerSocket;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -51,6 +49,7 @@ import java.util.stream.LongStream;
 
 import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.camel;
 import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.quote;
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.reservePort;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
@@ -161,16 +160,9 @@ class HostedHookStreamGapIT {
                 + json.writeValueAsString(cli.toString())
                 + "; await import("
                 + json.writeValueAsString(cli.toUri().toString()) + ");\n");
-        try (var control = new ServerSocket(0, 1,
-                InetAddress.getByName("127.0.0.1"));
-                var hosted = new ServerSocket(0, 1,
-                        InetAddress.getByName("127.0.0.1"));
-                var runtime = new ServerSocket(0, 1,
-                        InetAddress.getByName("127.0.0.1"))) {
-            port = control.getLocalPort();
-            harnessPort = hosted.getLocalPort();
-            brokerPort = runtime.getLocalPort();
-        }
+        port = reservePort();
+        harnessPort = reservePort();
+        brokerPort = reservePort();
         model = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         modelExecutor = Executors.newVirtualThreadPerTaskExecutor();
         model.setExecutor(modelExecutor);
@@ -525,7 +517,7 @@ class HostedHookStreamGapIT {
                 + " CAST(turn_id AS CHAR) AS turn_id,"
                 + " CAST(item_id AS CHAR) AS item_id,"
                 + " CAST(content_part_id AS CHAR) AS content_part_id,"
-                + " event_type, gmt_create, data_json, terminal"
+                + " event_type, gmt_create, data_json, is_terminal"
                 + " FROM ma_public_event WHERE tenant_id = ? AND"
                 + " session_id = ? AND stream_kind = 'SESSION' AND"
                 + " stream_id = X'' ORDER BY sequence_id", tenant, session);
@@ -551,7 +543,7 @@ class HostedHookStreamGapIT {
         fields.put("type", row.get("event_type"));
         fields.put("created_at", web ? millis : millis / 1000);
         fields.put("data", json.readTree(row.get("data_json").toString()));
-        Object terminal = row.get("terminal");
+        Object terminal = row.get("is_terminal");
         fields.put("terminal", terminal instanceof Boolean flag ? flag
                 : ((Number) terminal).intValue() != 0);
         ObjectNode node = json.createObjectNode();
@@ -807,7 +799,7 @@ class HostedHookStreamGapIT {
                             .toList());
             json.writeValue(destination.resolve("events.json").toFile(),
                     jdbc.queryForList("SELECT session_id, turn_id,"
-                            + " event_type, terminal FROM ma_public_event"
+                            + " event_type, is_terminal FROM ma_public_event"
                             + " WHERE tenant_id = ? ORDER BY sequence_id",
                             tenant));
             json.writeValue(destination.resolve("model-requests.json")

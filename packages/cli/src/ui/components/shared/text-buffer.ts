@@ -19,6 +19,10 @@ import {
   getCachedStringWidth,
 } from '../../utils/textUtils.js';
 import { editTextInExternalEditor } from '../../utils/external-editor.js';
+import {
+  releaseProgramStatus,
+  restoreProgramStatus,
+} from '../../../utils/program-status.js';
 import type { VimAction } from './vim-buffer-actions.js';
 import { handleVimAction } from './vim-buffer-actions.js';
 
@@ -2651,7 +2655,10 @@ export function useTextBuffer({
         const newText = editTextInExternalEditor(currentText, {
           editor: opts.editor,
           preferredEditor,
-          beforeLaunch: () => setRawMode?.(false),
+          beforeLaunch: () => {
+            setRawMode?.(false);
+            releaseProgramStatus();
+          },
         });
         if (newText !== currentText) {
           dispatch({ type: 'create_undo_snapshot' });
@@ -2660,6 +2667,7 @@ export function useTextBuffer({
       } catch (err) {
         debugLogger.error('[useTextBuffer] external editor error', err);
       } finally {
+        restoreProgramStatus();
         try {
           if (wasRaw) setRawMode?.(true);
         } catch (rawErr) {

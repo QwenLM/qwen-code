@@ -1,0 +1,21 @@
+{{- if .Values.runtime.enabled }}
+{{- range $suffix, $size := dict "workspaces" .Values.runtime.storage.workspaceSize "runtime" .Values.runtime.storage.stateSize }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $.Release.Name }}-{{ $suffix }}
+  labels:
+    {{- include "managed-agent.labels" $ | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- with $.Values.runtime.storage.className }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $size | quote }}
+{{- end }}
+{{- end }}

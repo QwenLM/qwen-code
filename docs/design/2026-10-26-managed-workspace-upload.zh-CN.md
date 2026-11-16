@@ -8,7 +8,7 @@ Managed WebShell 已支持随消息提交文本和图片附件，以及引用 Wo
 
 为这两种已有存储补齐上传，支持空文件和二进制文件，单文件上限 8 MiB。复用输入框的文件选择、拖放选择、进度与错误展示、取消和 Session 切换保护。文件写入当前工作目录或正在浏览的已有目录。目标已存在时返回冲突，绝不覆盖。文件夹上传、自动创建目录、CSI 和对象存储服务不在本次范围内。
 
-上传要求没有尚未释放的 execution-storage 成员。普通 Turn 结束后会释放成员；持久 MCP Runtime 可能仍保留成员，因此返回 `workspace_busy`。本次不会放宽这条所有权边界，也不会用 Session 表面空闲来证明工具进程已停止。
+上传与普通工具及其他上传共享目录成员身份，详见[共享 Workspace 上传](2026-11-03-managed-shared-workspace-uploads.zh-CN.md)。rewind、目录恢复、迁移和物理回收仍保持互斥。pending 上传持续占用成员身份，直至原进程完成对账；不能用 Session 表面空闲来证明文件进程已停止。
 
 ## 归属与 API
 
@@ -18,7 +18,7 @@ Managed WebShell 已支持随消息提交文本和图片附件，以及引用 Wo
 
 ## 持久准入与恢复
 
-短 SQL 事务在现有操作账本登记 `WORKSPACE_UPLOAD` 并取得物理存储 owner hold，冻结 actor、请求摘要、ContextBinding、存储身份和原始 bootstrap 目标；二进制内容不存入 SQL。现有工具执行、存储 fencing 和退役必须尊重这个 hold。子进程和 SSH 调用都在 SQL 事务外执行。确认完成或明确失败后，只释放本操作的 hold；超时、响应丢失或控制面重启时保留占用，直至原命令完成对账。
+短 SQL 事务在现有操作账本登记 `WORKSPACE_UPLOAD` 并增加物理存储 owner 的共享成员计数，冻结 actor、请求摘要、ContextBinding、存储身份和原始 bootstrap 目标；二进制内容不存入 SQL。普通工具和其他上传可以加入，rewind、存储 fencing 和退役必须尊重这个成员身份。子进程和 SSH 调用都在 SQL 事务外执行。确认完成或明确失败后，只释放本操作的成员身份；超时、响应丢失或控制面重启时保留占用，直至原命令完成对账。
 
 Runtime 在配置的私有状态目录下按 `uploadId` 保存仅 owner 可访问的回执。写入前原子认领操作并记录原始 PID，所有文件变更和临时文件清理结束后才发布终态回执。对账绝不执行上传：返回终态回执、保守等待仍存活的原进程，或在明确确认原进程不存在后检查原目标的大小与摘要。如果尚无 claim，对账会原子发布失败墓碑，阻止迟到的原命令开始执行。PID 复用可能延迟对账，但不能授权重放。未知结果不会通过替换 Runtime、重复写入或回滚删除来处理。
 
@@ -41,6 +41,8 @@ Runtime 在配置的私有状态目录下按 `uploadId` 保存仅 owner 可访�
 - 控制面：actor 与租户隔离、角色、过期作用域、禁用与不支持的存储、持久 hold、工具执行与 fencing 并发、请求变化、未知结果、原目标恢复以及响应大小和摘要校验。
 - UI：能力启用路径、旧能力禁用路径、二进制引用、上传失败、目标切换和原有文本快照。
 - 执行定向包测试、根目录 build/typecheck/bundle、OpenAPI 契约和 surface 门禁，以及 Java 模块共享十分钟本地验证预算内的定向检查。SQL 和并发案例需要真实 MySQL 证据；未运行的 SSH、CSI、Linux 或真实模型路径必须明确保留为验收缺口。
+
+以下结果描述共享上传成员身份引入前的原始上传实现；当前验收由共享上传设计跟踪。
 
 控制面、CLI bundle 和 WebShell 均已实现。根目录 build/typecheck/bundle、定向 TypeScript 与 Java 测试、契约与 surface 门禁、Checkstyle 均通过。Java 定向运行覆盖 99 个不同案例；新增上传测试还在一次性 MySQL 8.4.11 上通过 10 个案例。初轮 Java 环境准备、检查与清理使用 569 秒；审查后追加的回归、直接编译和样式检查仍在同一共享 600 秒本地预算内。独立审查发现 stdin writer 与 stdout reader 争用 common pool 时会阻塞；独立 JVM 复现了超时，改用虚拟线程后，原 probe 和永久 fork 子进程回归均通过。复查未再确认其他缺陷。
 

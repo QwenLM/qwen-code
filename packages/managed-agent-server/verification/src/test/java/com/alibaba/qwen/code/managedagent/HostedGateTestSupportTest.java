@@ -1,23 +1,47 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.daemon.HarnessSessionRef;
+import com.alibaba.qwen.code.daemon.HostedHarnessClient;
+import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.harness.QwenHostedHarnessConnector;
+import com.alibaba.qwen.code.managedagent.harness.SdkHarnessBoundary;
+import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import java.io.UncheckedIOException;
 import java.net.BindException;
+import java.net.InetAddress;
+import java.net.ServerSocket;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.PORT_CEILING;
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.PORT_FLOOR;
 import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.attachment;
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.attachmentsOf;
 import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.bootWithFreshPorts;
 import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.camel;
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.connectorOwning;
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.ephemeralFloor;
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.followingPort;
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.kernelPort;
 import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.quote;
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.reservePort;
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.windowBelow;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
@@ -48,8 +72,9 @@ class HostedGateTestSupportTest {
 
     // The lookup reads the connector's private field by name; renaming that
     // field turns this red here rather than in five Hosted gate classes.
-    @Test
-    void attachmentReturnsTheSessionsRefFromTheConnector() {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void attachmentReturnsTheSessionsRefFromTheConnector(boolean wrapped) {
         var connector = mock(QwenHostedHarnessConnector.class);
         var attachments = new LinkedHashMap<Object, HarnessSessionRef>();
         attachments.put("other", ref("session-b"));
@@ -57,8 +82,98 @@ class HostedGateTestSupportTest {
         attachments.put("mine", mine);
         ReflectionTestUtils.setField(connector, "attachments", attachments);
 
-        assertThat(attachment(connector, "session-a")).isSameAs(mine);
-        assertThat(attachment(connector, "session-c")).isNull();
+        HarnessConnector source = wrapped ? new SdkHarnessBoundary(connector) : connector;
+        assertThat(attachment(source, "session-a")).isSameAs(mine);
+        assertThat(attachment(source, "session-c")).isNull();
+    }
+
+    // The Spring bean is a decorator, not the connector that owns the map, so
+    // the lookup has to walk the delegate chain. Without this the Hosted gates
+    // fail in the test-support layer before the row under test runs (#15972).
+    @Test
+    void attachmentUnwrapsTheBoundaryToTheConnectorThatOwnsTheMap() {
+        var connector = mock(QwenHostedHarnessConnector.class);
+        var attachments = new LinkedHashMap<Object, HarnessSessionRef>();
+        HarnessSessionRef mine = ref("session-a");
+        attachments.put("mine", mine);
+        ReflectionTestUtils.setField(connector, "attachments", attachments);
+        var decorated = new SdkHarnessBoundary(new SdkHarnessBoundary(connector));
+
+        assertThat(attachment(decorated, "session-a")).isSameAs(mine);
+        assertThat(attachment(decorated, "session-c")).isNull();
+        assertThat(attachmentsOf(decorated)).isSameAs(attachments);
+    }
+
+    // The same bean is read for its client one line after its attachment, so
+    // resolving the owner has to serve every private read on it, not just the
+    // map (#15972 R1-1).
+    @Test
+    void connectorOwningServesEveryPrivateReadOnTheDecoratedBean() {
+        var connector = mock(QwenHostedHarnessConnector.class);
+        var attachments = new LinkedHashMap<Object, HarnessSessionRef>();
+        attachments.put("mine", ref("session-a"));
+        ReflectionTestUtils.setField(connector, "attachments", attachments);
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        ReflectionTestUtils.setField(connector, "client", client);
+        var decorated = new SdkHarnessBoundary(new SdkHarnessBoundary(connector));
+
+        assertThat(ReflectionTestUtils.getField(connectorOwning(decorated), "client"))
+                .isSameAs(client);
+        assertThat(connectorOwning(decorated)).isSameAs(connector);
+        assertThat(attachmentsOf(decorated)).isSameAs(attachments);
+    }
+
+    // A delegate that is itself null must not become a complaint about a
+    // missing target: fall back to the connector we started from, so the error
+    // still names the field the caller asked for.
+    @Test
+    void aNullDelegateStillFailsNamingTheRequestedField() {
+        var decorated = new SdkHarnessBoundary(null);
+
+        assertThatThrownBy(() -> attachmentsOf(decorated))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("attachments");
+    }
+
+    // findField's type argument matches the declared type exactly, so a
+    // decorator that declares its delegate as a concrete connector is only
+    // walked past by a name-plus-assignability match. Without this the next
+    // such wrapper silently reintroduces #15972 on a green build.
+    @Test
+    void theWalkFollowsADelegateDeclaredAsAConcreteConnector() {
+        var connector = mock(QwenHostedHarnessConnector.class);
+        var attachments = new LinkedHashMap<Object, HarnessSessionRef>();
+        attachments.put("mine", ref("session-a"));
+        ReflectionTestUtils.setField(connector, "attachments", attachments);
+        var decorated = new ConcreteTypedBoundary(connector);
+
+        assertThat(connectorOwning(decorated)).isSameAs(connector);
+        assertThat(attachmentsOf(decorated)).isSameAs(attachments);
+    }
+
+    // A chain whose leaf owns neither field — the pooled connector is shaped
+    // like this — must stop at the leaf, so the caller still gets the error
+    // naming the missing field rather than a NullPointerException from
+    // dereferencing past the end.
+    @Test
+    void aChainThatOwnsNoMapStopsAndStillNamesTheMissingField() {
+        var leaf = new UnavailableHarnessConnector();
+        var decorated = new SdkHarnessBoundary(leaf);
+
+        assertThat(connectorOwning(decorated)).isSameAs(leaf);
+        assertThatThrownBy(() -> attachmentsOf(decorated))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("attachments");
+    }
+
+    // Declares its delegate as the concrete connector, not the interface.
+    private static final class ConcreteTypedBoundary
+            extends UnavailableHarnessConnector {
+        private final QwenHostedHarnessConnector delegate;
+
+        ConcreteTypedBoundary(QwenHostedHarnessConnector delegate) {
+            this.delegate = delegate;
+        }
     }
 
     // The boot retry's only consumer is the deep MySQL lane; pin its contract
@@ -180,6 +295,106 @@ class HostedGateTestSupportTest {
                 .isSameAs(failure);
         assertThat(probes).hasValue(1);
         assertThat(boots).hasValue(0);
+    }
+
+    // Every Hosted IT reserves its advertised ports here. The window has to
+    // stay below the ephemeral ranges, where the kernel never picks a port on
+    // its own, and the counter must not hand a number out twice.
+    @Test
+    void reservePortHandsOutDistinctPortsBelowTheEphemeralRanges() {
+        AtomicInteger next = new AtomicInteger(randomStart());
+        List<Integer> ports = new ArrayList<>();
+        for (int i = 0; i < 200; i++) {
+            ports.add(reservePort(next));
+        }
+
+        assertThat(ports).doesNotHaveDuplicates().allSatisfy(port -> assertThat(port)
+                .isGreaterThanOrEqualTo(PORT_FLOOR).isLessThan(PORT_CEILING));
+        assertThat(PORT_FLOOR).isGreaterThanOrEqualTo(1024);
+        assertThat(PORT_CEILING).isLessThanOrEqualTo(32_768);
+    }
+
+    // The fork-wide entry point draws from the window only where the window
+    // lies below this host's ephemeral range, and never repeats a number
+    // back to back either way.
+    @Test
+    void reservePortUsesTheWindowOnlyBelowThisHostsEphemeralRange() throws Exception {
+        Path proc = Path.of("/proc/sys/net/ipv4/ip_local_port_range");
+        int floor = ephemeralFloor(proc);
+        if (Files.isReadable(proc)) {
+            // procfs files report size 0; the floor must come from the whole line.
+            assertThat(floor).isEqualTo(Integer.parseInt(
+                    Files.readAllLines(proc).get(0).trim().split("\\s+")[0]));
+        }
+        int first = reservePort();
+        int second = reservePort();
+
+        assertThat(second).isNotEqualTo(first);
+        if (floor >= PORT_CEILING) {
+            assertThat(List.of(first, second)).allSatisfy(port -> assertThat(port)
+                    .isGreaterThanOrEqualTo(PORT_FLOOR).isLessThan(PORT_CEILING));
+        } else {
+            assertThat(List.of(first, second)).allSatisfy(port -> assertThat(port)
+                    .isGreaterThanOrEqualTo(floor));
+        }
+    }
+
+    @Test
+    void reservePortSkipsANumberSomeoneElseListensOn() throws Exception {
+        AtomicInteger next = new AtomicInteger(reservePort(new AtomicInteger(randomStart())));
+        int held = next.get();
+
+        try (ServerSocket listener = new ServerSocket(held, 0, InetAddress.getByName("127.0.0.1"))) {
+            int port = reservePort(next);
+
+            assertThat(port).isNotEqualTo(held);
+            assertThat(next).hasValue(followingPort(port));
+        }
+    }
+
+    // The fallback asks the kernel, which can repeat a number once its probe
+    // has closed.
+    @Test
+    void kernelPortSkipsANumberAlreadyHandedOut() {
+        Set<Integer> handedOut = new HashSet<>(Set.of(40_001));
+        Iterator<Integer> kernel = List.of(40_001, 40_003, 40_003, 40_005).iterator();
+
+        assertThat(kernelPort(handedOut, kernel::next)).isEqualTo(40_003);
+        assertThat(kernelPort(handedOut, kernel::next)).isEqualTo(40_005);
+        assertThat(handedOut).containsExactlyInAnyOrder(40_001, 40_003, 40_005);
+    }
+
+    @Test
+    void ephemeralFloorReadsTheLowBoundAndDefaultsToNone(@TempDir Path directory) throws Exception {
+        Path range = directory.resolve("ip_local_port_range");
+
+        Files.writeString(range, "32768\t60999\n");
+        assertThat(ephemeralFloor(range)).isEqualTo(32_768);
+        Files.writeString(range, "1024 65535\n");
+        assertThat(ephemeralFloor(range)).isEqualTo(1024);
+        Files.writeString(range, "unreadable\n");
+        assertThat(ephemeralFloor(range)).isEqualTo(Integer.MAX_VALUE);
+        assertThat(ephemeralFloor(directory.resolve("absent"))).isEqualTo(Integer.MAX_VALUE);
+    }
+
+    @Test
+    void theWindowIsUsedOnlyWhenTheEphemeralRangeStartsAtOrAboveItsCeiling() {
+        assertThat(windowBelow(32_768)).isTrue();
+        assertThat(windowBelow(PORT_CEILING)).isTrue();
+        assertThat(windowBelow(PORT_CEILING - 1)).isFalse();
+        assertThat(windowBelow(1024)).isFalse();
+        assertThat(windowBelow(Integer.MAX_VALUE)).isTrue();
+    }
+
+    @Test
+    void followingPortWrapsFromTheCeilingBackToTheFloor() {
+        assertThat(followingPort(PORT_FLOOR)).isEqualTo(PORT_FLOOR + 1);
+        assertThat(followingPort(PORT_CEILING - 2)).isEqualTo(PORT_CEILING - 1);
+        assertThat(followingPort(PORT_CEILING - 1)).isEqualTo(PORT_FLOOR);
+    }
+
+    private static int randomStart() {
+        return PORT_FLOOR + ThreadLocalRandom.current().nextInt(PORT_CEILING - PORT_FLOOR);
     }
 
     private static RuntimeException bindConflict() {

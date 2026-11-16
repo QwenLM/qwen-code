@@ -37,12 +37,19 @@ import { lspServerConfigHash } from './configHash.js';
 
 const debugLogger = createDebugLogger('LSP');
 const SECURITY_SENSITIVE_ENV_KEYS = new Set([
+  // Loader and interpreter preload vectors.
   'DYLD_INSERT_LIBRARIES',
   'DYLD_LIBRARY_PATH',
   'LD_AUDIT',
   'LD_LIBRARY_PATH',
   'LD_PRELOAD',
   'NODE_OPTIONS',
+  // Shell startup files and npm's own node-options alias: npm maps
+  // npm_config_node_options onto the child's NODE_OPTIONS, so blocking only
+  // NODE_OPTIONS leaves the same preload reachable one level down.
+  'BASH_ENV',
+  'ENV',
+  'NPM_CONFIG_NODE_OPTIONS',
 ]);
 
 export interface LspServerManagerOptions {
@@ -383,11 +390,13 @@ export class LspServerManager {
   ): Promise<void> {
     const workspaceTrusted = this.config.isTrustedFolder();
     if (
-      (this.requireTrustedWorkspace || handle.config.trustRequired) &&
-      !workspaceTrusted
+      ((this.requireTrustedWorkspace || handle.config.trustRequired) &&
+        !workspaceTrusted) ||
+      (handle.config.source === 'workspace' &&
+        !this.config.isExplicitlyTrustedFolder())
     ) {
       debugLogger.warn(
-        `LSP server ${name} requires trusted workspace, skipping startup`,
+        `LSP server ${name} requires trusted workspace, skipping startup. Workspace .lsp.json requires explicit trust: enable security.folderTrust.enabled in user settings and trust this folder, or grant IDE workspace trust.`,
       );
       // The admission early-returns precede the `try` that assigns
       // handle.error, so record the cause here — a bare FAILED state gives

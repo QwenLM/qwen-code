@@ -5,6 +5,14 @@
  */
 
 import {
+  MANAGED_TOOL_MEASUREMENTS_KIND,
+  parseManagedToolMeasurementEvidence,
+} from './managed-tool-measurements.js';
+import {
+  EXECUTION_DIAGNOSTICS_KIND,
+  parseManagedExecutionEvidence,
+} from './managed-execution-diagnostics.js';
+import {
   parseManagedPermissionRules,
   nonEmptyManagedPermissionRules,
   type ManagedPermissionRules,
@@ -50,6 +58,10 @@ import {
   parseHostedRecoveryResource,
 } from './hosted-recovery-records.js';
 import { MANAGED_EXTENSION_RECORD_BODIES } from './managed-extension-projection.js';
+import {
+  MANAGED_MODEL_STATISTICS_RESOURCE_KINDS,
+  parseManagedStatisticsEnvelope,
+} from './managed-model-statistics.js';
 import type {
   HostedHarnessPlacement,
   HostedHarnessReleaseRequest,
@@ -157,7 +169,25 @@ export interface ManagedQueuedUserMessage {
   readonly input: readonly unknown[];
 }
 
+export interface ManagedMemoryQuery {
+  readonly operation:
+    | 'binding'
+    | 'recall'
+    | 'search'
+    | 'remember'
+    | 'get'
+    | 'forget';
+  readonly inputId?: string;
+  readonly callId?: string;
+  readonly query?: string;
+  readonly content?: string;
+  readonly memoryId?: string;
+  readonly expectedContent?: string;
+}
+
 export interface HttpManagedSessionStores {
+  supportsModelDiagnostics(): boolean;
+  supportsExecutionDiagnostics(): boolean;
   readonly journalStore: ManagedSessionJournalStore;
   readonly resourceStore: ManagedSessionResourceStore;
   readonly publication: HttpToolPublicationOwner;
@@ -183,6 +213,20 @@ export interface HttpManagedSessionStores {
     kind?: 'legacy-close' | `configuration:${string}`,
   ): Promise<void>;
   approvalSelection(): Promise<ManagedSessionApprovalSelection | undefined>;
+  modelConfig(expectedDigest: string, kind?: 'legacy-close'): Promise<unknown>;
+  memory(query: ManagedMemoryQuery): Promise<unknown>;
+  automationsCreate(
+    definition: ManagedAutomationDefinitionInput,
+    idempotencyKey: string,
+  ): Promise<ManagedAutomationResult>;
+  automationsList(
+    cursor?: string,
+    limit?: number,
+  ): Promise<ManagedAutomationPage>;
+  automationsRetire(
+    automationId: string,
+    idempotencyKey: string,
+  ): Promise<ManagedAutomationResult>;
   claimUserMessages(
     promptId: string,
     initialOnly?: boolean,
@@ -229,6 +273,114 @@ export class ManagedSessionStoreHttpError extends ManagedSessionRecordError {
 export class ManagedSessionStoreTransportError extends ManagedSessionRecordError {}
 
 /**
+ * The fixed-interval /loop definition the internal `automations:create`
+ * route admits (the H6 snake_case wire shape). The Session id is forced to
+ * the bound Session by the route, so the tool omits it.
+ */
+export interface ManagedAutomationDefinitionInput {
+  readonly cron: string;
+  readonly prompt: string;
+  readonly goal?: string;
+  readonly timezone?: string;
+  readonly session_mode: 'persistent';
+  readonly overlap?: string;
+  readonly catch_up?: string;
+  readonly catch_up_limit?: number;
+  readonly enabled?: boolean;
+  readonly gate?: unknown;
+}
+
+/** One H6 definition as the internal routes answer it (PublicAutomation). */
+export interface ManagedPublicAutomation {
+  readonly id: string;
+  readonly sessionId: string;
+  readonly cron: string;
+  readonly timezone: string;
+  readonly goal: string | null;
+  readonly state: string;
+  readonly enabled: boolean;
+}
+
+/** A create/retire answer: the definition plus the Idempotency-Key replay mark. */
+export interface ManagedAutomationResult {
+  readonly automation: ManagedPublicAutomation;
+  readonly replayed: boolean;
+}
+
+/** One page of the bound Session's definitions (PublicList). */
+export interface ManagedAutomationPage {
+  readonly data: readonly ManagedPublicAutomation[];
+  readonly hasMore: boolean;
+  readonly nextCursor: string | null;
+}
+
+async function readAutomationJson(response: Response): Promise<unknown> {
+  try {
+    return (await response.json()) as unknown;
+  } catch (error) {
+    if (error instanceof TypeError || error instanceof DOMException)
+      throw new ManagedSessionStoreTransportError(
+        'Managed automation response failed.',
+      );
+    if (error instanceof SyntaxError)
+      throw corrupt('Managed automation response is invalid JSON.');
+    throw error;
+  }
+}
+
+function asPublicAutomation(value: unknown): ManagedPublicAutomation {
+  const record = asRecord(value, 'automation definition');
+  if (
+    typeof record['id'] !== 'string' ||
+    typeof record['session_id'] !== 'string' ||
+    typeof record['cron'] !== 'string' ||
+    typeof record['timezone'] !== 'string' ||
+    typeof record['state'] !== 'string' ||
+    typeof record['enabled'] !== 'boolean'
+  )
+    throw corrupt('invalid automation definition.');
+  return {
+    id: record['id'],
+    sessionId: record['session_id'],
+    cron: record['cron'],
+    timezone: record['timezone'],
+    goal: typeof record['goal'] === 'string' ? record['goal'] : null,
+    state: record['state'],
+    enabled: record['enabled'],
+  };
+}
+
+function parseAutomationResult(
+  value: unknown,
+  route: string,
+): ManagedAutomationResult {
+  const record = asRecord(value, `automation result from ${route}`);
+  if (typeof record['replayed'] !== 'boolean')
+    throw corrupt(`invalid automation result from ${route}.`);
+  return {
+    automation: asPublicAutomation(record['body']),
+    replayed: record['replayed'],
+  };
+}
+
+function parseAutomationPage(
+  value: unknown,
+  route: string,
+): ManagedAutomationPage {
+  const record = asRecord(value, `automation list from ${route}`);
+  if (!Array.isArray(record['data']) || typeof record['has_more'] !== 'boolean')
+    throw corrupt(`invalid automation list from ${route}.`);
+  const next = record['next_cursor'];
+  if (next !== null && next !== undefined && typeof next !== 'string')
+    throw corrupt(`invalid automation list cursor from ${route}.`);
+  return {
+    data: record['data'].map((entry) => asPublicAutomation(entry)),
+    hasMore: record['has_more'],
+    nextCursor: typeof next === 'string' ? next : null,
+  };
+}
+
+/**
  * Failures that leave the commit's outcome unknown: the request may have
  * reached the store. A retry is safe only against a proved head, which the
  * writer re-establishes after its lease lapses.
@@ -244,6 +396,20 @@ function isUncertainStoreFailure(error: unknown): boolean {
   );
 }
 
+/**
+ * True when the Store refused this seal, with a 4xx other than 429, so it
+ * did not land. Any other failure, including one raised after a 2xx answer,
+ * may have left the head sealed.
+ */
+function sealRefused(error: unknown): boolean {
+  return (
+    error instanceof ManagedSessionStoreHttpError &&
+    error.status >= 400 &&
+    error.status < 500 &&
+    error.status !== 429
+  );
+}
+
 function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
@@ -255,6 +421,8 @@ export function createHttpManagedSessionStores(
   const client = new ManagedSessionStoreHttpClient(options, resources);
   resources.bind(client);
   return {
+    supportsModelDiagnostics: () => client.supportsModelDiagnostics(),
+    supportsExecutionDiagnostics: () => client.supportsExecutionDiagnostics(),
     journalStore: new HttpManagedSessionJournalStore(client),
     resourceStore: resources,
     publication: {
@@ -285,6 +453,14 @@ export function createHttpManagedSessionStores(
     authorizeLifecycle: (kind) => client.authorizeLifecycle(kind),
     authorizeOrdinary: (kind) => client.authorizeOrdinary(kind),
     approvalSelection: () => client.approvalSelection(),
+    modelConfig: (expectedDigest, kind) =>
+      client.modelConfig(expectedDigest, kind),
+    memory: (query) => client.memory(query),
+    automationsCreate: (definition, idempotencyKey) =>
+      client.automationsCreate(definition, idempotencyKey),
+    automationsList: (cursor, limit) => client.automationsList(cursor, limit),
+    automationsRetire: (automationId, idempotencyKey) =>
+      client.automationsRetire(automationId, idempotencyKey),
     claimUserMessages: (promptId, initialOnly) =>
       client.claimUserMessages(promptId, initialOnly),
   };
@@ -302,7 +478,7 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
   );
   const head = parseRestoreHead(snapshot['head']);
   if (
-    ![1, 2].includes(head.storageVersion) ||
+    ![1, 2, 3, 4, 5].includes(head.storageVersion) ||
     !['ACTIVE', 'SEALED'].includes(head.state) ||
     head.recoveryStatus !== 'READY' ||
     head.compactedThroughRevision !== 0
@@ -436,8 +612,16 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
       // inspectable by dropping the dangling page ref from the walk
       // without registering it — adding it would fire the enumeration
       // check below for exactly the snapshots this keeps readable
-      // (#13930 R1-43).
-      if (ref.kind === MANAGED_TOOL_RESULT_KINDS.page) continue;
+      // (#13930 R1-43). The same backward-compatibility applies to the
+      // extension closure's legacy kinds: a snapshot committed before that
+      // closure edge shipped recorded the bundle but never its contributions
+      // child (nor the manifest's parts), so an absent one degrades instead of
+      // condemning the whole snapshot (R3-1 / R7-1).
+      if (
+        ref.kind === MANAGED_TOOL_RESULT_KINDS.page ||
+        LEGACY_EXTENSION_CLOSURE_KINDS.has(ref.kind)
+      )
+        continue;
       throw corrupt('snapshot resource is missing.');
     }
     if (resourceRevisions.get(ref.resourceId)![0] > revision) {
@@ -456,6 +640,45 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
   if (resources.size !== references.size) {
     throw corrupt('snapshot resource enumeration conflicts.');
   }
+  if (
+    head.storageVersion < 5 &&
+    [...resources.values()].some(
+      ({ ref }) => ref.kind === MANAGED_TOOL_MEASUREMENTS_KIND,
+    )
+  )
+    throw corrupt('Tool measurements require storage version 5.');
+  const executionPresent = [...resources.values()].some(
+    ({ ref }) => ref.kind === EXECUTION_DIAGNOSTICS_KIND,
+  );
+  if (executionPresent && head.storageVersion < 4)
+    throw corrupt('Execution diagnostics require storage version 4.');
+  const diagnosticsPresent = [...resources.values()].some(({ ref }) =>
+    MANAGED_MODEL_STATISTICS_RESOURCE_KINDS.has(ref.kind),
+  );
+  if (diagnosticsPresent && head.storageVersion < 3)
+    throw corrupt('snapshot diagnostics require storage version 3.');
+  const definitionResource = resources.get(
+    scan.header.definitionRef.resourceId,
+  );
+  const profile =
+    definitionResource?.ref.kind === 'managed-definition'
+      ? (
+          JSON.parse(definitionResource.bytes.toString('utf8')) as {
+            toolProfile?: string;
+          }
+        ).toolProfile
+      : undefined;
+  if (
+    (profile === 'csi-files-retirement/1' &&
+      (diagnosticsPresent || head.storageVersion !== 1)) ||
+    (profile === 'csi-files-retirement/2' &&
+      (executionPresent ||
+        head.storageVersion !== (diagnosticsPresent ? 3 : 1))) ||
+    (profile === 'csi-files-retirement/3' &&
+      head.storageVersion !==
+        (executionPresent ? 4 : diagnosticsPresent ? 3 : 1))
+  )
+    throw corrupt('snapshot CSI profile storage floor conflicts.');
   for (const [resourceId, revisions] of references) {
     const actual = resourceRevisions.get(resourceId)!;
     if (actual.some((revision) => !revisions.has(revision))) {
@@ -605,10 +828,19 @@ const EXTENSION_RECORD_KINDS = new Set(
   ),
 );
 
+// Resources a pre-closure-edge snapshot may name without having staged them:
+// a bundle's contributions child and the contributions manifest's parts. The
+// inspection, native-page and commit walks degrade an absent one instead of
+// condemning the snapshot. One constant so the walks cannot drift (R7-1).
+const LEGACY_EXTENSION_CLOSURE_KINDS = new Set([
+  'managed-extension-contributions',
+  'managed-extension-contributions-part',
+]);
+
 class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
   private readonly staged = new Map<
     string,
-    { ref: ManagedSessionDurableRef; bytes: Buffer }
+    { ref: ManagedSessionDurableRef; bytes: Buffer; external?: boolean }
   >();
   private client: ManagedSessionStoreHttpClient | undefined;
 
@@ -622,11 +854,6 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
   ): Promise<ManagedSessionDurableRef> {
     const safeKind = assertManagedSessionStableId(kind, 'resource kind');
     const maxBytes = managedSessionInlineResourceBytes(safeKind);
-    if (source.byteLength > maxBytes) {
-      throw new ManagedSessionRecordError(
-        `resource bytes exceed the ${maxBytes}-byte inline limit (kind=${safeKind}, bytes=${source.byteLength}); OSS storage is not enabled.`,
-      );
-    }
     const bytes = Buffer.from(source);
     const ref: ManagedSessionDurableRef = {
       resourceId: randomUUID(),
@@ -635,6 +862,16 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
       byteLength: bytes.byteLength,
       digest: sha256(bytes),
     };
+    if (source.byteLength > maxBytes) {
+      if (this.client === undefined) {
+        throw new ManagedSessionRecordError(
+          `resource bytes exceed the ${maxBytes}-byte inline limit (kind=${safeKind}, bytes=${source.byteLength}); OSS storage is not enabled.`,
+        );
+      }
+      await this.client.externalizeResource(ref, bytes);
+      this.staged.set(ref.resourceId, { ref, bytes, external: true });
+      return ref;
+    }
     this.staged.set(ref.resourceId, { ref, bytes });
     return ref;
   }
@@ -655,6 +892,21 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
       );
     }
     return this.client.readResource(validated);
+  }
+
+  // Existence probe for the commit-side closure walk: a staged resource is
+  // present; a persisted one is present unless the store answers 404. Any other
+  // failure stays fatal (R6-1).
+  private async has(ref: ManagedSessionDurableRef): Promise<boolean> {
+    if (this.staged.has(ref.resourceId)) return true;
+    try {
+      await this.read(ref);
+      return true;
+    } catch (error) {
+      if (error instanceof ManagedSessionStoreHttpError && error.status === 404)
+        return false;
+      throw error;
+    }
   }
 
   async commitResources(
@@ -682,16 +934,39 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
       if (staged !== undefined) {
         requireSameRef(staged.ref, ref);
         const nested = collectNestedResourceRefs(ref, staged.bytes);
-        pending.push(
-          ...(ref.kind === CHECKPOINT_HISTORY_KIND
+        const children =
+          ref.kind === CHECKPOINT_HISTORY_KIND
             ? nested.filter((child) => this.staged.has(child.resourceId))
-            : nested),
-        );
+            : nested;
+        for (const child of children) {
+          // A re-staged legacy bundle may name a contributions child (or part)
+          // that was never uploaded; degrade it like the persisted arm (R7-1).
+          if (
+            LEGACY_EXTENSION_CLOSURE_KINDS.has(child.kind) &&
+            !(await this.has(child))
+          )
+            continue;
+          pending.push(child);
+        }
       } else if (
         ref.kind !== CHECKPOINT_HISTORY_KIND &&
         isReferenceContainer(ref.kind)
       ) {
-        pending.push(...collectNestedResourceRefs(ref, await this.read(ref)));
+        for (const nested of collectNestedResourceRefs(
+          ref,
+          await this.read(ref),
+        )) {
+          // A legacy bundle may name a contributions child (or part) that was
+          // never staged — the commit-side counterpart of the read-side
+          // tolerance (R6-1 / R7-1). Drop only an absent one from the closure;
+          // a present or conflicting one stays fatal.
+          if (
+            LEGACY_EXTENSION_CLOSURE_KINDS.has(nested.kind) &&
+            !(await this.has(nested))
+          )
+            continue;
+          pending.push(nested);
+        }
       }
     }
     return [...closure.values()].map((ref) => {
@@ -703,7 +978,7 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
         schemaVersion: ref.schemaVersion,
         byteLength: ref.byteLength,
         digest: ref.digest,
-        ...(staged === undefined
+        ...(staged === undefined || staged.external
           ? {}
           : { bytesBase64: staged.bytes.toString('base64') }),
       };
@@ -783,6 +1058,12 @@ interface TransactionDescriptor {
 }
 
 class ManagedSessionStoreHttpClient {
+  supportsExecutionDiagnostics(): boolean {
+    return (this.grant?.supportedStorageVersion ?? 1) >= 4;
+  }
+  supportsModelDiagnostics(): boolean {
+    return (this.grant?.supportedStorageVersion ?? 1) >= 3;
+  }
   readonly sessionKey: ManagedSessionKey;
   private readonly baseUrl: string;
   private readonly writerId: string;
@@ -814,6 +1095,14 @@ class ManagedSessionStoreHttpClient {
     preparedCommitSha256: string;
   };
   private sealed = false;
+  /** Settles once every seal started so far has answered. */
+  private sealsAnswered?: Promise<void>;
+  /**
+   * The last failure of a seal that may have landed; acquireWriter refuses
+   * while it is set. A writer-conflict refusal clears it, and once a seal
+   * succeeds `sealed` refuses first.
+   */
+  private uncertainSeal?: Error;
   private locallyStopped = false;
   private lifecycleAuthority?: ManagedSessionLifecycleAuthority;
   /**
@@ -892,6 +1181,217 @@ class ManagedSessionStoreHttpClient {
         input: message['input'],
       };
     });
+  }
+
+  async memory(query: ManagedMemoryQuery): Promise<unknown> {
+    await this.assertWritable();
+    return this.withRetry(false, 'POST', '/memory:query', async (timeoutMs) => {
+      const response = await this.request(
+        '/memory:query',
+        'POST',
+        {
+          ...query,
+          workspaceId: this.sessionKey.workspaceId,
+          writerId: this.writerId,
+          writerGeneration: this.grant!.writerGeneration,
+        },
+        Math.min(timeoutMs, 6_000),
+      );
+      const reader = response.body?.getReader();
+      if (!reader) throw corrupt('Memory response has no body.');
+      const chunks: Uint8Array[] = [];
+      let length = 0;
+      try {
+        while (true) {
+          const item = await reader.read();
+          if (item.done) break;
+          length += item.value.byteLength;
+          if (length > 64 * 1024) {
+            await reader.cancel();
+            throw corrupt('Memory response exceeds its byte limit.');
+          }
+          chunks.push(item.value);
+        }
+        return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown;
+      } catch (error) {
+        if (error instanceof TypeError || error instanceof DOMException)
+          throw new ManagedSessionStoreTransportError(
+            'Managed memory response failed.',
+          );
+        if (error instanceof SyntaxError)
+          throw corrupt('Memory response is invalid JSON.');
+        throw error;
+      } finally {
+        reader.releaseLock();
+      }
+    });
+  }
+
+  /**
+   * Fixed-interval /loop: create an H6 definition bound to this Session.
+   * The Idempotency-Key derives from the tool execution's identity, so a
+   * re-drive meets the claim or the replay rather than minting a second
+   * definition. A transport fault is not retried here — the tool execution
+   * stays pending and its re-drive reuses the key (design decision 9).
+   */
+  async automationsCreate(
+    definition: ManagedAutomationDefinitionInput,
+    idempotencyKey: string,
+  ): Promise<ManagedAutomationResult> {
+    await this.assertWritable();
+    return this.withRetry(
+      false,
+      'POST',
+      '/automations:create',
+      async (timeoutMs) => {
+        const response = await this.request(
+          '/automations:create',
+          'POST',
+          {
+            workspaceId: this.sessionKey.workspaceId,
+            writerId: this.writerId,
+            writerGeneration: this.grant!.writerGeneration,
+            definition,
+          },
+          timeoutMs,
+          'application/json',
+          { 'Idempotency-Key': idempotencyKey },
+        );
+        return parseAutomationResult(
+          await readAutomationJson(response),
+          'POST /automations:create',
+        );
+      },
+    );
+  }
+
+  /** One page of the bound Session's definitions (ungated, Session-scoped). */
+  async automationsList(
+    cursor?: string,
+    limit?: number,
+  ): Promise<ManagedAutomationPage> {
+    await this.assertWritable();
+    return this.withRetry(
+      false,
+      'POST',
+      '/automations:list',
+      async (timeoutMs) => {
+        const response = await this.request(
+          '/automations:list',
+          'POST',
+          {
+            workspaceId: this.sessionKey.workspaceId,
+            writerId: this.writerId,
+            writerGeneration: this.grant!.writerGeneration,
+            ...(cursor === undefined ? {} : { cursor }),
+            ...(limit === undefined ? {} : { limit }),
+          },
+          timeoutMs,
+        );
+        return parseAutomationPage(
+          await readAutomationJson(response),
+          'POST /automations:list',
+        );
+      },
+    );
+  }
+
+  /** Retire a definition of the bound Session; a retired id answers the replay. */
+  async automationsRetire(
+    automationId: string,
+    idempotencyKey: string,
+  ): Promise<ManagedAutomationResult> {
+    await this.assertWritable();
+    return this.withRetry(
+      false,
+      'POST',
+      '/automations:retire',
+      async (timeoutMs) => {
+        const response = await this.request(
+          '/automations:retire',
+          'POST',
+          {
+            workspaceId: this.sessionKey.workspaceId,
+            writerId: this.writerId,
+            writerGeneration: this.grant!.writerGeneration,
+            automationId,
+          },
+          timeoutMs,
+          'application/json',
+          { 'Idempotency-Key': idempotencyKey },
+        );
+        return parseAutomationResult(
+          await readAutomationJson(response),
+          'POST /automations:retire',
+        );
+      },
+    );
+  }
+
+  async modelConfig(
+    expectedDigest: string,
+    kind?: 'legacy-close',
+  ): Promise<unknown> {
+    if (!/^sha256:[0-9a-f]{64}$/u.test(expectedDigest)) {
+      throw corrupt('model configuration digest is invalid.');
+    }
+    await this.assertWritable();
+    return this.withRetry(
+      true,
+      'POST',
+      '/model-config:query',
+      async (timeoutMs) => {
+        const response = await this.request(
+          '/model-config:query',
+          'POST',
+          {
+            workspaceId: this.sessionKey.workspaceId,
+            writerId: this.writerId,
+            writerGeneration: this.grant!.writerGeneration,
+            expectedDigest,
+            ...(kind ? { kind } : {}),
+          },
+          timeoutMs,
+        );
+        const reader = response.body?.getReader();
+        if (!reader) throw corrupt('Model configuration response has no body.');
+        const chunks: Uint8Array[] = [];
+        let length = 0;
+        try {
+          while (true) {
+            let item: ReadableStreamReadResult<Uint8Array>;
+            try {
+              item = await reader.read();
+            } catch (error) {
+              if (error instanceof TypeError || error instanceof DOMException) {
+                throw new ManagedSessionStoreTransportError(
+                  'Managed Session Store model configuration response failed.',
+                );
+              }
+              throw error;
+            }
+            if (item.done) break;
+            length += item.value.byteLength;
+            if (length > 16 * 1024) {
+              await reader.cancel();
+              throw corrupt(
+                'Model configuration response exceeds its byte limit.',
+              );
+            }
+            chunks.push(item.value);
+          }
+          try {
+            return JSON.parse(
+              Buffer.concat(chunks).toString('utf8'),
+            ) as unknown;
+          } catch {
+            throw corrupt('Model configuration response is invalid JSON.');
+          }
+        } finally {
+          reader.releaseLock();
+        }
+      },
+    );
   }
 
   async approvalSelection(): Promise<
@@ -1021,6 +1521,11 @@ class ManagedSessionStoreHttpClient {
         'the HTTP Managed Session writer is already opened or sealed.',
       );
     }
+    // A seal that failed without the Store refusing it may have landed, and
+    // the Store gives a sealed head a new writer generation on acquire. Stay
+    // unsettled until a later seal succeeds or meets a writer conflict.
+    if (this.uncertainSeal !== undefined)
+      throw new ManagedSessionAppendUnsettledError(this.uncertainSeal);
     const grant = parseWriterGrant(
       await this.json('/writers:acquire', 'POST', {
         workspaceId: this.sessionKey.workspaceId,
@@ -1087,6 +1592,25 @@ class ManagedSessionStoreHttpClient {
         this.sessionKey,
       );
       requireStoredTransactionMatches(transaction, descriptor);
+      if (
+        head.storageVersion < 5 &&
+        descriptor.refs.some(
+          (ref) => ref.kind === MANAGED_TOOL_MEASUREMENTS_KIND,
+        )
+      )
+        throw corrupt('Tool measurements require storage version 5.');
+      if (
+        head.storageVersion < 4 &&
+        descriptor.refs.some((ref) => ref.kind === EXECUTION_DIAGNOSTICS_KIND)
+      )
+        throw corrupt('Execution diagnostics require storage version 4.');
+      if (
+        head.storageVersion < 3 &&
+        descriptor.refs.some((ref) =>
+          MANAGED_MODEL_STATISTICS_RESOURCE_KINDS.has(ref.kind),
+        )
+      )
+        throw corrupt('journal diagnostics require storage version 3.');
       if (
         usesSnapshot &&
         (transaction.previousCommitDigest !== lastCommitDigest ||
@@ -1311,7 +1835,7 @@ class ManagedSessionStoreHttpClient {
       raw['sessionId'] !== this.sessionKey.sessionId ||
       snapshot.snapshotId.length === 0 ||
       Buffer.byteLength(snapshot.snapshotId, 'utf8') > 512 ||
-      ![1, 2].includes(storageVersion) ||
+      ![1, 2, 3, 4, 5].includes(storageVersion) ||
       storageVersion > head.storageVersion ||
       snapshot.coveredJournalRevision < 1 ||
       snapshot.coveredJournalRevision > head.journalRevision ||
@@ -1421,11 +1945,54 @@ class ManagedSessionStoreHttpClient {
         if (transaction['journalRevision'] !== after + 1)
           throw corrupt('native snapshot transaction revision conflicts.');
         const declared = append(transaction).refs;
+        const nested: typeof declared = [];
         for (const resource of added) {
           const body = await this.readResource(resource);
-          declared.push(...collectNestedResourceRefs(resource, body));
+          if (
+            storageVersion < 5 &&
+            resource.kind === MANAGED_TOOL_MEASUREMENTS_KIND
+          )
+            throw corrupt('Tool measurements require storage version 5.');
+          if (
+            storageVersion < 4 &&
+            resource.kind === EXECUTION_DIAGNOSTICS_KIND
+          )
+            throw corrupt('Execution diagnostics require storage version 4.');
+          if (
+            storageVersion < 3 &&
+            (MANAGED_MODEL_STATISTICS_RESOURCE_KINDS.has(resource.kind) ||
+              (resource.kind === 'managed-history_maintenance' &&
+                (
+                  JSON.parse(body.toString('utf8')) as {
+                    schemaVersion?: number;
+                  }
+                ).schemaVersion === 2))
+          )
+            throw corrupt(
+              'native snapshot diagnostics require storage version 3.',
+            );
+          nested.push(...collectNestedResourceRefs(resource, body));
         }
+        // Direct references are the transaction's own census: a missing one is
+        // corrupt, exactly like the inspection walk's direct-reference guard.
         for (const resource of declared) {
+          if (!isDeepStrictEqual(resources.get(resource.resourceId), resource))
+            throw corrupt(
+              'native resource dependency is missing or conflicting.',
+            );
+        }
+        // Transitive refs collected from resource bodies: a bundle committed
+        // before the contributions closure edge shipped names a contributions
+        // child (and manifest parts) the snapshot never staged. Degrade only
+        // those absent legacy kinds, mirroring the inspection walk's tolerance
+        // (R3-1 / R4-6 / R7-1); a directly declared ref stays on the strict
+        // path above.
+        for (const resource of nested) {
+          if (
+            LEGACY_EXTENSION_CLOSURE_KINDS.has(resource.kind) &&
+            !resources.has(resource.resourceId)
+          )
+            continue;
           if (!isDeepStrictEqual(resources.get(resource.resourceId), resource))
             throw corrupt(
               'native resource dependency is missing or conflicting.',
@@ -1809,6 +2376,33 @@ class ManagedSessionStoreHttpClient {
       throw new ManagedSessionRecordError(
         'Managed Session Store does not support Hosted recovery storage version 2.',
       );
+    const needsVersionThree = commitResources.some(
+      (resource) =>
+        MANAGED_MODEL_STATISTICS_RESOURCE_KINDS.has(resource.kind) ||
+        (resource.kind === 'managed-history_maintenance' &&
+          resource.bytesBase64 &&
+          JSON.parse(
+            Buffer.from(resource.bytesBase64, 'base64').toString('utf8'),
+          ).schemaVersion === 2),
+    );
+    if (needsVersionThree && grant.supportedStorageVersion < 3)
+      throw new ManagedSessionRecordError(
+        'Managed Session Store does not support model diagnostics storage version 3.',
+      );
+    if (
+      commitResources.some(
+        (resource) => resource.kind === EXECUTION_DIAGNOSTICS_KIND,
+      ) &&
+      grant.supportedStorageVersion < 4
+    )
+      throw corrupt('Execution diagnostics require storage version 4.');
+    if (
+      descriptor.refs.some(
+        (ref) => ref.kind === MANAGED_TOOL_MEASUREMENTS_KIND,
+      ) &&
+      grant.supportedStorageVersion < 5
+    )
+      throw corrupt('Tool measurements require storage version 5.');
     const publicationIds = new Set(
       descriptor.refs.flatMap((ref) => {
         const id = this.publicationAdmissions.get(ref.resourceId);
@@ -2086,7 +2680,7 @@ class ManagedSessionStoreHttpClient {
           method,
           headers: {
             Accept: 'application/json',
-            'X-Qwen-Managed-Max-Readable-Storage-Version': '2',
+            'X-Qwen-Managed-Max-Readable-Storage-Version': '5',
             ...(readOnly ? {} : { 'Content-Type': 'application/json' }),
             [HTTP_MANAGED_SESSION_STORE_CONTRACT.tenantHeader]:
               this.sessionKey.tenantId,
@@ -2124,6 +2718,49 @@ class ManagedSessionStoreHttpClient {
       },
       contentionDeadline,
     );
+  }
+
+  async externalizeResource(
+    ref: ManagedSessionDurableRef,
+    bytes: Buffer,
+  ): Promise<void> {
+    await this.ensureWriter();
+    const grant = this.requireGrant();
+    const query =
+      `workspaceId=${encodeURIComponent(this.sessionKey.workspaceId)}` +
+      `&writerId=${encodeURIComponent(this.writerId)}` +
+      `&writerGeneration=${grant.writerGeneration}`;
+    const allocatePath = '/resources:allocate';
+    await this.withRetry(true, 'POST', allocatePath, async (timeoutMs) => {
+      await this.request(
+        allocatePath,
+        'POST',
+        {
+          workspaceId: this.sessionKey.workspaceId,
+          writerId: this.writerId,
+          writerGeneration: grant.writerGeneration,
+          resourceId: ref.resourceId,
+          kind: ref.kind,
+          schemaVersion: ref.schemaVersion,
+          byteLength: ref.byteLength,
+          digest: ref.digest,
+        },
+        timeoutMs,
+      );
+    });
+    const uploadPath = `/resources/${encodeURIComponent(ref.resourceId)}:upload?${query}`;
+    await this.withRetry(true, 'POST', uploadPath, async (timeoutMs) => {
+      await this.request(
+        uploadPath,
+        'POST',
+        { bytesBase64: bytes.toString('base64') },
+        timeoutMs,
+      );
+    });
+    const finalizePath = `/resources/${encodeURIComponent(ref.resourceId)}:finalize?${query}`;
+    await this.withRetry(true, 'POST', finalizePath, async (timeoutMs) => {
+      await this.request(finalizePath, 'POST', undefined, timeoutMs);
+    });
   }
 
   async readResource(ref: ManagedSessionDurableRef): Promise<Buffer> {
@@ -2261,8 +2898,31 @@ class ManagedSessionStoreHttpClient {
   async seal(): Promise<void> {
     if (this.retirementJoin)
       throw corrupt('original CSI retirement owns the final boundary.');
-    await this.acquirePromise?.catch(() => undefined);
-    return this.sealGrant();
+    // The seal joins sealsAnswered before it waits on acquirePromise, so a
+    // reacquire that starts meanwhile still waits for it.
+    const sealing = (async () => {
+      await this.acquirePromise?.catch(() => undefined);
+      await this.sealGrant();
+    })();
+    const answered = sealing.then(
+      () => undefined,
+      (error: unknown) => {
+        if (!sealRefused(error)) this.uncertainSeal = asError(error);
+        // Most refusals come before the Store replays a seal that landed, so
+        // they say nothing about an earlier one. A writer conflict comes
+        // after that replay: the head has left this writer generation, so no
+        // seal of it can still decide the Session.
+        else if (
+          error instanceof ManagedSessionStoreHttpError &&
+          error.remoteCode === 'managed_session_writer_conflict'
+        )
+          this.uncertainSeal = undefined;
+      },
+    );
+    this.sealsAnswered = Promise.all([this.sealsAnswered, answered]).then(
+      () => undefined,
+    );
+    return sealing;
   }
 
   private async sealGrant(): Promise<void> {
@@ -2448,6 +3108,45 @@ class ManagedSessionStoreHttpClient {
     const expired = this.grant;
     this.stopRenewal();
     await this.renewPromise?.catch(() => undefined);
+    // A seal on its way to the Store decides this writer's end first. The
+    // Store gives a sealed head a new writer generation on acquire, so an
+    // acquire that lands after the seal would reopen the Session behind it,
+    // and one that lands first would make the seal meet a newer writer. A
+    // seal that starts during this wait replaces sealsAnswered, so wait
+    // again until none has. Then acquireWriter refuses a sealed client, and
+    // one whose seal may have landed.
+    let answered = this.sealsAnswered;
+    while (answered !== undefined) {
+      await answered;
+      answered =
+        answered === this.sealsAnswered ? undefined : this.sealsAnswered;
+    }
+    // A renewal in flight may have answered after the caller saw the lease
+    // lapse; it moved the lease forward and re-armed the timer, so keep that
+    // grant. Dropping it for an acquire, which a Store holding the Session's
+    // lifecycle can delay, leaves authorizeLifecycle, and any caller that
+    // reads the grant without first waiting in ensureWriter, refusing
+    // locally until the acquire answers. Only a lease that moved past the
+    // lapsed one counts: a refused renewal leaves the lapsed lease in place,
+    // and a commit, a head adoption or a journal read copies it into a new
+    // grant; in either case a wall-clock step back could make the lapsed
+    // lease look live.
+    if (
+      expired !== undefined &&
+      this.grant !== undefined &&
+      this.grant.leaseUntil > expired.leaseUntil &&
+      this.grant.leaseUntil > Date.now()
+    )
+      return;
+    // No renewal may fire while there is no grant: renewWriter() would
+    // throw out of the timer callback. The wait may have re-armed the
+    // timer (for example, a renewal that answered schedules the next one,
+    // and a renewal the timer started or joined that met a transient error
+    // schedules a retry); reaching this line after that takes a wall-clock
+    // step back, or a renewed lease that ran out between that re-arm and
+    // the check above. A successful acquire arms its own timer; a failed
+    // one restores the lapsed grant without one.
+    this.stopRenewal();
     this.grant = undefined;
     const acquire = (async () => {
       await this.acquireWriter();
@@ -2611,7 +3310,8 @@ class ManagedSessionStoreHttpClient {
     const grant = this.requireGrant();
     if (
       head.state !== 'ACTIVE' ||
-      ![1, 2].includes(head.storageVersion) ||
+      ![1, 2, 3, 4, 5].includes(head.storageVersion) ||
+      head.storageVersion > grant.supportedStorageVersion ||
       head.writerGeneration !== grant.writerGeneration ||
       head.recoveryStatus !== 'READY' ||
       head.compactedThroughRevision !== 0
@@ -2809,6 +3509,7 @@ class ManagedSessionStoreHttpClient {
     body?: Readonly<Record<string, unknown>>,
     timeoutMs = this.requestTimeoutMs,
     accept = 'application/json',
+    extraHeaders?: Readonly<Record<string, string>>,
   ): Promise<Response> {
     if (this.ownershipRelease && path !== '/writers:release-ownership')
       throw corrupt('ownership release has fenced this writer.');
@@ -2824,7 +3525,7 @@ class ManagedSessionStoreHttpClient {
         redirect: 'error',
         headers: {
           Accept: accept,
-          'X-Qwen-Managed-Max-Readable-Storage-Version': '2',
+          'X-Qwen-Managed-Max-Readable-Storage-Version': '5',
           [HTTP_MANAGED_SESSION_STORE_CONTRACT.tenantHeader]:
             this.sessionKey.tenantId,
           [HTTP_MANAGED_SESSION_STORE_CONTRACT.writerTokenHeader]:
@@ -2839,6 +3540,7 @@ class ManagedSessionStoreHttpClient {
               }
             : {}),
           ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+          ...(extraHeaders ?? {}),
         },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         signal: AbortSignal.timeout(timeoutMs),
@@ -3310,7 +4012,11 @@ export function collectNestedResourceRefs(
     // re-admits its predecessor through preparation.intentRef, which SQL's
     // activation proof reads from this transaction.
     return record['schemaVersion'] === 2 &&
-      record['profile'] === 'csi-files-retirement/1'
+      [
+        'csi-files-retirement/1',
+        'csi-files-retirement/2',
+        'csi-files-retirement/3',
+      ].includes(String(record['profile']))
       ? collectRefs([record['preparation']])
       : [];
   }
@@ -3319,8 +4025,31 @@ export function collectNestedResourceRefs(
       parseHostedRecoveryResource(bytes, undefined, ref.kind),
     );
   }
+  if (ref.kind === MANAGED_TOOL_MEASUREMENTS_KIND) {
+    if (ref.schemaVersion !== 1)
+      throw corrupt('Unsupported tool measurements version.');
+    parseManagedToolMeasurementEvidence(bytes);
+    return [];
+  }
+  if (ref.kind === EXECUTION_DIAGNOSTICS_KIND) {
+    if (ref.schemaVersion !== 1)
+      throw corrupt('Unsupported execution diagnostics version.');
+    parseManagedExecutionEvidence(bytes);
+    return [];
+  }
+  if (MANAGED_MODEL_STATISTICS_RESOURCE_KINDS.has(ref.kind)) {
+    if (ref.schemaVersion !== 1)
+      throw corrupt('diagnostics resource schema is unsupported.');
+    parseManagedStatisticsEnvelope(
+      ref.kind,
+      parseManagedSessionRecordJson(bytes.toString('utf8'), 64 * 1024),
+    );
+    return [];
+  }
   if (
     EXTENSION_RECORD_KINDS.has(ref.kind) ||
+    ref.kind === 'managed-extension-config-bundle' ||
+    ref.kind === 'managed-extension-contributions' ||
     ref.kind === 'managed-definition' ||
     ref.kind === 'managed-action-options' ||
     ref.kind === 'managed-hook-plan' ||
@@ -3373,6 +4102,8 @@ function isReferenceContainer(kind: string): boolean {
     EXTENSION_RECORD_KINDS.has(kind) ||
     HOSTED_RECOVERY_RESOURCE_KINDS.has(kind) ||
     [
+      'managed-extension-config-bundle',
+      'managed-extension-contributions',
       'managed-definition',
       'managed-checkpoint',
       CHECKPOINT_HISTORY_KIND,

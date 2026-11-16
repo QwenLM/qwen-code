@@ -4,11 +4,26 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ManagedAgentProvider } from './components/managed/managed-agent-provider';
+import type { ManagedAgentWebShellProps } from './ManagedAgentWebShell';
 
 import {
   hasManagedAppMarker,
   ManagedStandaloneApp,
 } from './ManagedStandaloneApp';
+
+const gateway = vi.hoisted(() => ({
+  props: [] as ManagedAgentWebShellProps[],
+}));
+vi.mock('./ManagedAgentWebShell', () => ({
+  ManagedAgentWebShell: (props: ManagedAgentWebShellProps) => {
+    gateway.props.push(props);
+    return (
+      <button onClick={() => props.onSessionChange?.('session-new')}>
+        Managed only
+      </button>
+    );
+  },
+}));
 
 const BOOT = {
   mode: 'managed',
@@ -26,6 +41,7 @@ describe('Managed standalone application', () => {
   ));
 
   beforeEach(() => {
+    gateway.props = [];
     renderShell.mockClear();
     fetch.mockReset();
     vi.stubGlobal('fetch', fetch);
@@ -132,6 +148,87 @@ describe('Managed standalone application', () => {
     expect(fetch).toHaveBeenCalledOnce();
   });
 
+  it('boots the existing Managed-only UI without composing daemon contexts', async () => {
+    window.history.replaceState(
+      null,
+      '',
+      '/?managed=1&managedSession=session-kept',
+    );
+    fetch.mockResolvedValue(Response.json({ ...BOOT, managedOnly: true }));
+    await act(async () =>
+      root.render(
+        <ManagedStandaloneApp daemonToken="browser-token" language="zh-CN">
+          {renderShell}
+        </ManagedStandaloneApp>,
+      ),
+    );
+    expect(renderShell).not.toHaveBeenCalled();
+    expect(container.textContent).toBe('Managed only');
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(gateway.props.at(-1)).toMatchObject({
+      baseUrl: window.location.origin,
+      productScope: BOOT.productScope,
+      agentId: 'qwen-code',
+      enableWorkspaceBinding: true,
+      language: 'zh-CN',
+      sessionId: 'session-kept',
+    });
+    expect(await gateway.props.at(-1)?.getHeaders?.()).toEqual({
+      Authorization: 'Bearer browser-token',
+    });
+    await act(async () => container.querySelector('button')?.click());
+    expect(gateway.props.at(-1)?.sessionId).toBe('session-new');
+    expect(
+      new URL(window.location.href).searchParams.get('managedSession'),
+    ).toBe('session-new');
+    await act(async () => {
+      window.history.replaceState(
+        null,
+        '',
+        '/?managed=1&managedSession=session-kept',
+      );
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    });
+    expect(gateway.props.at(-1)?.sessionId).toBe('session-kept');
+  });
+
+  it('adds history only when the selected gateway Session changes', async () => {
+    window.history.replaceState(
+      null,
+      '',
+      '/?managed=1&managedSession=session-kept&view=history#fragment',
+    );
+    fetch.mockResolvedValue(Response.json({ ...BOOT, managedOnly: true }));
+    await act(async () =>
+      root.render(
+        <ManagedStandaloneApp daemonToken="browser-token">
+          {renderShell}
+        </ManagedStandaloneApp>,
+      ),
+    );
+    const initialLength = window.history.length;
+    await act(async () =>
+      gateway.props.at(-1)?.onSessionChange?.('session-kept'),
+    );
+    expect(window.history.length).toBe(initialLength);
+    await act(async () =>
+      gateway.props.at(-1)?.onSessionChange?.('session-new'),
+    );
+    expect(window.history.length).toBe(initialLength + 1);
+    await act(async () =>
+      gateway.props.at(-1)?.onSessionChange?.('session-new'),
+    );
+    expect(window.history.length).toBe(initialLength + 1);
+    expect(gateway.props.at(-1)?.sessionId).toBe('session-new');
+    expect(window.location.search).toContain('view=history');
+    expect(window.location.hash).toBe('#fragment');
+    await act(async () => gateway.props.at(-1)?.onSessionChange?.(undefined));
+    expect(window.history.length).toBe(initialLength + 2);
+    await act(async () => gateway.props.at(-1)?.onSessionChange?.(undefined));
+    expect(window.history.length).toBe(initialLength + 2);
+    expect(gateway.props.at(-1)?.sessionId).toBeUndefined();
+  });
+
   it('supplies admitted local model presets to the new-task picker', async () => {
     const modelPresets = [{ agentId: 'agent_model_b', label: 'Model B' }];
     fetch.mockResolvedValue(Response.json({ ...BOOT, modelPresets }));
@@ -186,6 +283,7 @@ describe('Managed standalone application', () => {
     new Response(JSON.stringify({ ...BOOT, productScope: '' })),
     new Response(JSON.stringify({ ...BOOT, agentId: '' })),
     new Response(JSON.stringify({ ...BOOT, enableWorkspaceBinding: false })),
+    Response.json({ ...BOOT, managedOnly: 'true' }),
     Response.json({ ...BOOT, modelPresets: null }),
     Response.json({
       ...BOOT,

@@ -8,9 +8,9 @@ import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.DispatchTarget;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.h2.jdbcx.JdbcDataSource;
@@ -40,17 +40,17 @@ class ManagedAgentReplayOutageTest {
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE"
                 + ";LOCK_TIMEOUT=10000");
         ManagedSchema.initialize(source);
-        ManagedAgentStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(
+        ManagedAgentStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(
                 new ManagedSchemaJdbcTemplate(source), new ObjectMapper(),
                 Clock.systemUTC(), events -> {},
-                mock(ManagedWorkspaceRegistry.class),
-                new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+                mock(JdbcManagedWorkspaceRegistry.class),
+                new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         HarnessCoordinator coordinator = mock(HarnessCoordinator.class);
         UnavailableHarnessConnector harness =
                 new UnavailableHarnessConnector();
         RequestDigests digests = new RequestDigests();
         ManagedAgentService service = new ManagedAgentService(store, digests,
-                coordinator, harness, mock(ManagedWorkspaceRegistry.class), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+                coordinator, harness, mock(JdbcManagedWorkspaceRegistry.class), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
 
         String tenant = "tenant-replay-outage";
         List<Map<String, Object>> input =

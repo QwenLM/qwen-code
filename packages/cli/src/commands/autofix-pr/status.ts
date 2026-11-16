@@ -13,7 +13,11 @@ import { join } from 'node:path';
 import type { CommandModule } from 'yargs';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { unsavedWork } from './cleanup.js';
-import { untrustedGitfile, untrustedSubmodules } from './worktree.js';
+import {
+  untrustedCheckoutGit,
+  untrustedGitfile,
+  untrustedSubmodules,
+} from './worktree.js';
 import { DEFAULT_EVERY } from './schedule.js';
 import {
   assertPositiveInteger,
@@ -25,6 +29,7 @@ import {
   readGateCursor,
   readState,
   sameRepository,
+  statePaths,
   trustAnchor,
   vouchedScanRoots,
   type AutofixPrGateCursor,
@@ -66,6 +71,9 @@ export interface WatchStatus {
   needsHuman: NeedsHumanItem[];
   worktreePath: string;
   worktreeExists: boolean;
+  /** `prepare --in-place`: the watch fixes in the user's own checkout
+   * (`worktreePath`), so `worktreeWork` is what that checkout holds. */
+  inPlace: boolean;
   /** Every git directory a command in the worktree reads — its own and
    * each checked-out submodule's — is one the clone keeps, outside the
    * worktree; read from the files (Section 6.12 of the design). */
@@ -237,6 +245,7 @@ export function runStatus(args: {
         ? modifiedAt(paths.checkedPath)
         : null;
       const every = state.watch?.every ?? DEFAULT_EVERY;
+      const watchPaths = statePaths(root, state);
       outcome.watches.push({
         pr,
         repo: `${state.owner}/${state.repo}`,
@@ -263,27 +272,35 @@ export function runStatus(args: {
         watch: state.watch ?? null,
         ended: state.ended ?? null,
         needsHuman: state.needsHuman ?? [],
-        // The recorded path goes stale when the clone moves; this one does not.
-        worktreePath: paths.worktreePath,
-        worktreeExists: existsSync(paths.worktreePath),
+        // The recorded path goes stale when the clone moves; this one does
+        // not — except an in-place watch's, which is the user's checkout
+        // the state names, not a path the PR number derives.
+        worktreePath: watchPaths.worktreePath,
+        worktreeExists: existsSync(watchPaths.worktreePath),
+        inPlace: state.inPlace === true,
         // Trust is anchored to the genuine clone recorded for the watch, never
         // to a discovered worktree whose `.git` a round's code could rewrite.
         // Only asked when git checks run — the daemon's `git: false` listing
         // runs no git.
         gitTrusted:
           args.git !== false &&
-          existsSync(paths.worktreePath) &&
-          (untrustedGitfile(paths.worktreePath, trustAnchor(state)) ??
-            untrustedSubmodules(paths.worktreePath, trustAnchor(state))) ===
-            null,
+          existsSync(watchPaths.worktreePath) &&
+          ((state.inPlace
+            ? untrustedCheckoutGit(watchPaths.worktreePath, trustAnchor(state))
+            : untrustedGitfile(watchPaths.worktreePath, trustAnchor(state))) ??
+            untrustedSubmodules(
+              watchPaths.worktreePath,
+              trustAnchor(state),
+            )) === null,
         worktreeWork:
           args.work === false || args.git === false
             ? null
             : unsavedWork(
-                paths,
+                watchPaths,
                 [state.lastKnownHeadSha, ...state.pushedShas],
                 undefined,
                 trustAnchor(state),
+                state.inPlace === true,
               ),
         fix: fixOf(paths, now),
       });

@@ -62,6 +62,11 @@ import { runRerun } from './rerun.js';
 import { runSchedule } from './schedule.js';
 import { runSnapshot } from './snapshot.js';
 import { runSync } from './sync.js';
+import type { RefusalCode } from './refusal.js';
+
+/** A refusal with its code: what the skill acts on. */
+const refused = (code: RefusalCode, message: RegExp) =>
+  expect.objectContaining({ code, message: expect.stringMatching(message) });
 
 const HEAD = 'a'.repeat(40);
 const ATTEMPT = '0123456789ab';
@@ -138,6 +143,15 @@ describe('fix-start and fix-end', () => {
     rmSync(repo, { recursive: true, force: true });
   });
 
+  it('refuses an in-place watch: no background fix in the checkout', () => {
+    write({ inPlace: true, worktreePath: repo, branch: 'main' });
+    round();
+    expect(() => runFixStart({ pr: 7, attempt: ATTEMPT })).toThrow(
+      refused('no_background_fix', /in-place watch/),
+    );
+    expect(existsSync(paths.fixPath)).toBe(false);
+  });
+
   it('opens an attempt on the watch task and head, and claims it once', () => {
     const opened = runFixStart({ pr: 7, attempt: ATTEMPT });
     expect(opened).toMatchObject({
@@ -148,7 +162,10 @@ describe('fix-start and fix-end', () => {
     });
     expect(fixInFlight(paths)?.attempt).toBe(ATTEMPT);
     expect(() => assertNoFixInFlight(paths, 7)).toThrow(
-      /a fix agent is working in PR #7's worktree \(attempt 0123456789ab/,
+      refused(
+        'fix_in_flight',
+        /a fix agent is working in PR #7's worktree \(attempt 0123456789ab/,
+      ),
     );
     expect(
       runFixEnd({ pr: 7, attempt: ATTEMPT, task: 'feedc0ffee12' }),
@@ -166,7 +183,7 @@ describe('fix-start and fix-end', () => {
       ROUND,
     );
     expect(() => runFixStart({ pr: 7, attempt: 'ba9876543210' })).toThrow(
-      /no round of PR #7 has a fix to start/,
+      refused('no_background_fix', /no round of PR #7 has a fix to start/),
     );
     expect(() => runFixEnd({ pr: 7, attempt: ATTEMPT })).toThrow(
       /attempt 0123456789ab of PR #7's fix is not in flight/,
@@ -176,7 +193,11 @@ describe('fix-start and fix-end', () => {
   it('refuses a second attempt while one is fresh, and while one its session left behind is there', () => {
     runFixStart({ pr: 7, attempt: ATTEMPT });
     expect(() => runFixStart({ pr: 7, attempt: 'ba9876543210' })).toThrow(
-      /attempt 0123456789ab of PR #7's fix is still in flight/,
+      refused(
+        'fix_in_flight',
+        // How that fix ends, as every refusal with this code says.
+        /a fix agent is working in PR #7's worktree \(attempt 0123456789ab.*\/autofix-pr stop 7.*within 45 minutes/,
+      ),
     );
     age(FIX_FRESH_MS + 1000);
     // The round's sync removes it first, and the round discards its work.
@@ -216,7 +237,7 @@ describe('fix-start and fix-end', () => {
     );
     write({ watch: undefined });
     expect(() => runFixStart({ pr: 7, attempt: ATTEMPT })).toThrow(
-      /has no scheduled task/,
+      refused('no_background_fix', /has no scheduled task/),
     );
     expect(existsSync(paths.fixPath)).toBe(false);
   });
@@ -314,7 +335,10 @@ describe('fix-start and fix-end', () => {
       );
     cursor('2026-10-26T10:00:01.000Z');
     expect(() => runFixStart({ pr: 7, attempt: ATTEMPT })).toThrow(
-      /no round of PR #7 has a fix to start: the gate reported more/,
+      refused(
+        'no_background_fix',
+        /no round of PR #7 has a fix to start: the gate reported more/,
+      ),
     );
     // A snapshot from before snapshots said when they read: the same.
     round({ ...ROUND, readAt: undefined });

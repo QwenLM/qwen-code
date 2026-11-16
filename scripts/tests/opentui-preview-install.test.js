@@ -156,6 +156,10 @@ function fixture() {
             'tmp',
             'ModuleAnalysisCache',
           ),
+          // PowerShell writes its own startup cache under these. Keep it out of
+          // the home tree whose contents the assertions attribute to installers.
+          APPDATA: path.join(root, 'appdata', 'Roaming'),
+          LOCALAPPDATA: path.join(root, 'appdata', 'Local'),
         }
       : { LC_ALL: 'C' }),
   };
@@ -179,16 +183,10 @@ function fixture() {
   const oldTree = tree(live);
   const launch = () => {
     const result = windows
-      ? checked(
-          powershell,
-          [
-            '-NoProfile',
-            '-NonInteractive',
-            '-Command',
-            `$ErrorActionPreference = 'Stop'; & ${psQuote(entry(live))}; if ($null -eq $LASTEXITCODE) { throw 'Launcher did not report a native exit code' }; exit $LASTEXITCODE`,
-          ],
-          { env },
-        )
+      ? // A .cmd cannot be spawned directly; route it through cmd.exe. Going via
+        // PowerShell's `&` plus `exit $LASTEXITCODE` returns before the batch
+        // child writes its output and leaves the process holding qwen.cmd.
+        checked(entry(live), [], { env, shell: true })
       : checked(entry(live), [], { env });
     const evidence = JSON.stringify({
       platform: process.platform,
@@ -454,7 +452,7 @@ describe(`real ${windows ? 'PowerShell' : 'POSIX'} preview installer preservatio
         expect(witnesses, evidence).toContain(
           `QWEN_DIAG_MODULE_ANALYSIS_CACHE=${path.join(f.root, 'tmp', 'ModuleAnalysisCache')}`,
         );
-        // Same original seed and env; the checked launch also detects PowerShell errors.
+        // Same original seed and env; keep the checked cmd launch independent.
         f.assertOld();
         f.assertNoStaging();
       });

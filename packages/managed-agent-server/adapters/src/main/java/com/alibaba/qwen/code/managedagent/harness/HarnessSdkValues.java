@@ -53,6 +53,9 @@ final class HarnessSdkValues {
         if (error instanceof com.alibaba.qwen.code.daemon.DaemonProtocolException value) {
             return new HarnessProtocolFailure(value.getMessage(), cause);
         }
+        if (error instanceof com.alibaba.qwen.code.daemon.HostedHarnessStreamIdleException value) {
+            return new HarnessStreamIdleFailure(value.getMessage(), cause, value.getIdleTimeout());
+        }
         if (error instanceof com.alibaba.qwen.code.daemon.DaemonTransportException value) {
             return new HarnessTransportFailure(value.getMessage(), cause);
         }

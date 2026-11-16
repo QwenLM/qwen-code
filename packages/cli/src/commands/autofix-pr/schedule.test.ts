@@ -86,6 +86,12 @@ describe('runSchedule', () => {
     rmSync(repo, { recursive: true, force: true });
   });
 
+  it('refuses an in-place watch: its rounds run only when asked', () => {
+    write({ inPlace: true, worktreePath: repo, branch: 'main' });
+    expect(() => runSchedule({ pr: 7 })).toThrow(/in-place watch/);
+    expect(state().watch).toBeUndefined();
+  });
+
   it('records the task and prints it as cron_create takes it', () => {
     const task = runSchedule({ pr: 7 });
     expect(task).toEqual({

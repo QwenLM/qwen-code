@@ -3,8 +3,8 @@ package com.alibaba.qwen.code.managedagent.session;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.session.AcceptanceEvidence;
-import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
-import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore.TaskCancelOutcome;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionLifecycleStore;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionLifecycleStore.TaskCancelOutcome;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.AcceptanceVerdict;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
@@ -109,7 +109,7 @@ public class TaskCancelCoordinator implements AcceptanceEvidence {
     private static final Set<String> BACKGROUND_TASK_KINDS = Set.of(
             "background_shell", "monitor");
 
-    private final AgentStateStore store;
+    private final SessionLifecycleStore store;
     private final ManagedExtensionRecordStore records;
     private final HarnessConnector harness;
     private final RuntimeBrokerOperations broker;
@@ -132,7 +132,7 @@ public class TaskCancelCoordinator implements AcceptanceEvidence {
     }
 
     @Autowired
-    public TaskCancelCoordinator(AgentStateStore store,
+    public TaskCancelCoordinator(SessionLifecycleStore store,
             ManagedExtensionRecordStore records, HarnessConnector harness,
             ObjectProvider<RuntimeBrokerOperations> broker,
             @Qualifier("managedAgentExecutor") ExecutorService executor, @Qualifier("managedAgentClock") Clock clock,
@@ -156,7 +156,7 @@ public class TaskCancelCoordinator implements AcceptanceEvidence {
                 : ATTEMPT_DEADLINE;
     }
 
-    TaskCancelCoordinator(AgentStateStore store,
+    TaskCancelCoordinator(SessionLifecycleStore store,
             ManagedExtensionRecordStore records, HarnessConnector harness,
             RuntimeBrokerOperations broker, ExecutorService executor,
             Clock clock, ManagedAgentSettings properties,

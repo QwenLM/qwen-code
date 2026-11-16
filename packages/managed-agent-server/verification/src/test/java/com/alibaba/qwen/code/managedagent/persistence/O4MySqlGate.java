@@ -58,7 +58,7 @@ public class O4MySqlGate extends ToolPublicationCollectorTest {
                 var writer = executor.submit(() -> tx.execute(status -> {
                     connection.set(jdbc.queryForObject("SELECT CONNECTION_ID()", Long.class));
                     entered.countDown();
-                    return com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc)).acquireWriter(tenant, session,
+                    return com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc).acquireWriter(tenant, session,
                             "a".repeat(32), new ManagedSessionStoreModels.AcquireWriterRequest("workspace-1", "late", 60000L));
                 }));
                 assertThat(entered.await(10, TimeUnit.SECONDS)).isTrue();

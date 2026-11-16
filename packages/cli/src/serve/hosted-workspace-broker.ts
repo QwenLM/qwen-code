@@ -22,10 +22,17 @@ import type {
 import { parseToolResultEnvelope } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import type { LocalShellReceipt } from '@qwen-code/qwen-code-core/managed-runtime/local-shell-result-session.js';
 import type { ManagedToolResultPayload } from './managed-runtime-tool-executor.js';
+import {
+  parseManagedToolMeasurements,
+  type ManagedToolMeasurements,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-measurements.js';
 import { resolveManagedRuntimeBrokerBaseUrl } from './managed-runtime-broker-url.js';
 import {
   WORKSPACE_CAPABILITY_DIGEST,
+  MEASURED_WORKSPACE_CAPABILITY_DIGEST,
+  MEASURED_WORKSPACE_TERMINAL_CAPABILITY_DIGEST,
   RESIDENT_WORKSPACE_CAPABILITY_DIGEST,
+  isMeasuredWorkspaceCapability,
 } from './managed-workspace-activation.js';
 import type {
   ManagedMcpControl,
@@ -49,6 +56,7 @@ import type {
   ManagedMonitorOperationView,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-monitor-protocol.js';
 import type { ManagedExtensionRuntimeControl } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-package.js';
+import type { ManagedRuntimeSkillControl } from './managed-runtime-skill-source.js';
 import {
   MANAGED_EXTENSION_LINUX_CAPABILITY_DIGEST,
   MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST,
@@ -121,6 +129,37 @@ export function isTerminalUnknownRejection(
   );
 }
 
+/**
+ * The release-mount handback sweeps nothing (unlike the drain release), so it
+ * refuses while any work is still live or unproven — background processes
+ * included. Those refusals are the handback's "keep it attached, retry once it
+ * settles" fence (R14-2): an owner closing non-terminally names them as
+ * recovery-required instead of letting a raw rejection escape as a generic
+ * close failure. The codes are the documented release-mount refusals
+ * (docs/design/workspace-execution-mount-recovery-block-release.md). The 503
+ * reconciliation answer joins them (R15-2): a Broker that restarted beside the
+ * Harness holds no resident Session Context, so it proves nothing was handed
+ * back — name it recovery-required (attached/retryable), exactly as the close's
+ * held-Runtime drain already tolerates it, never read it as a successful handback.
+ * The 409 admission_closed joins them (R15-2): a close, archive or delete racing
+ * the handback owns the mount release through its own drain, so the detach backs
+ * off attached/retryable instead of escaping as a generic close failure.
+ */
+export function fencedMountHandback(
+  cause: unknown,
+): cause is HostedWorkspaceBrokerRejection {
+  return (
+    cause instanceof HostedWorkspaceBrokerRejection &&
+    ((cause.status === 409 &&
+      (cause.code === 'runtime_session_busy' ||
+        cause.code === 'runtime_session_conflict' ||
+        cause.code === 'workspace_writer_unproven' ||
+        cause.code === 'runtime_admission_closed')) ||
+      (cause.status === 503 &&
+        cause.code === 'runtime_reconciliation_required'))
+  );
+}
+
 /** A recovery read asked the original Runtime once and still could not prove
  * whether the command committed. The caller reports the execution as unknown
  * and re-checks later; it must never dispatch the command again. */
@@ -135,7 +174,45 @@ export class HostedWorkspaceBroker {
   private readonly baseUrl: URL;
   private leaseAcquired = false;
   private capability?: string;
+  private readonly measuredResults = new Map<
+    string,
+    { measurements: ManagedToolMeasurements | null; resultDigest: string }
+  >();
+
+  releaseToolMeasurements(id: string): void {
+    this.measuredResults.delete(id);
+  }
+
+  toolMeasurements(id: string) {
+    return this.measuredResults.get(id);
+  }
+
+  private readToolResult(id: string, value: unknown): Record<string, unknown> {
+    const result = object(value);
+    const { diagnostics, ...base } = result;
+    if (diagnostics !== undefined) {
+      const metadata = object(diagnostics);
+      if (
+        metadata['protocolVersion'] !== 4 ||
+        ![2, 3].includes(metadata['executionProtocol'] as number) ||
+        Object.keys(metadata).sort().join(',') !==
+          'executionProtocol,measurements,protocolVersion,resultDigest' ||
+        typeof metadata['resultDigest'] !== 'string' ||
+        !/^[0-9a-f]{64}$/.test(metadata['resultDigest'])
+      )
+        throw new Error('Invalid measured tool result.');
+      this.measuredResults.set(id, {
+        measurements:
+          metadata['measurements'] === null
+            ? null
+            : parseManagedToolMeasurements(metadata['measurements']),
+        resultDigest: metadata['resultDigest'],
+      });
+    }
+    return base;
+  }
   private capabilityResolution?: Promise<void>;
+  provisionerKind?: string;
   private readonly identity: {
     harnessSessionId: string;
     runtimeSessionId: string;
@@ -148,6 +225,10 @@ export class HostedWorkspaceBroker {
 
   get runtimeSessionId(): string {
     return this.identity.runtimeSessionId;
+  }
+
+  get harnessSessionId(): string {
+    return this.identity.harnessSessionId;
   }
 
   get acquired(): boolean {
@@ -231,6 +312,35 @@ export class HostedWorkspaceBroker {
       }));
   }
 
+  async readWorkspaceContext(): Promise<{
+    cwdRelative: string;
+    contextRevision: string;
+  } | null> {
+    const response = await this.harnessRequest('/runtimes:capabilities', {});
+    this.readRuntime(response);
+    if (response['workspaceContext'] == null) return null;
+    const context = object(response['workspaceContext']);
+    const cwd = context['cwdRelative'];
+    const revision = context['contextRevision'];
+    if (
+      typeof cwd === 'string' &&
+      [...cwd].some((character) => character.codePointAt(0)! < 32)
+    )
+      throw new Error('Invalid saved Workspace context.');
+    if (
+      typeof cwd !== 'string' ||
+      !cwd ||
+      cwd.startsWith('/') ||
+      cwd.includes('\\') ||
+      cwd.includes('://') ||
+      cwd.split('/').some((part) => !part || part === '..') ||
+      typeof revision !== 'string' ||
+      !/^[1-9][0-9]{0,18}$/.test(revision)
+    )
+      throw new Error('Invalid saved Workspace context.');
+    return { cwdRelative: cwd, contextRevision: revision };
+  }
+
   async mcpDefinitions(
     originalOwner = false,
   ): Promise<readonly HostedPublishedMcpServer[]> {
@@ -301,6 +411,9 @@ export class HostedWorkspaceBroker {
       scope['tenantId'] !== this.key.tenantId ||
       scope['workspaceId'] !== this.key.workspaceId ||
       (scope['capabilityDigest'] !== WORKSPACE_CAPABILITY_DIGEST &&
+        scope['capabilityDigest'] !== MEASURED_WORKSPACE_CAPABILITY_DIGEST &&
+        scope['capabilityDigest'] !==
+          MEASURED_WORKSPACE_TERMINAL_CAPABILITY_DIGEST &&
         scope['capabilityDigest'] !==
           MANAGED_EXTENSION_LINUX_CAPABILITY_DIGEST &&
         scope['capabilityDigest'] !==
@@ -332,6 +445,13 @@ export class HostedWorkspaceBroker {
         generation,
         workspaceGeneration,
       };
+      if (
+        binding['provisionerKind'] !== undefined &&
+        (typeof binding['provisionerKind'] !== 'string' ||
+          binding['provisionerKind'].length === 0)
+      )
+        throw new Error('Runtime Broker provider is invalid.');
+      this.provisionerKind = binding['provisionerKind'] as string | undefined;
     }
   }
 
@@ -371,6 +491,9 @@ export class HostedWorkspaceBroker {
         promptId: turnId,
         callId,
         argsDigest: digest,
+        ...(isMeasuredWorkspaceCapability(this.capability ?? '')
+          ? { resultProtocol: 4 }
+          : {}),
         ...(inputDigest ? { runtimeProtocol: 3, inputDigest } : {}),
       },
     };
@@ -440,7 +563,13 @@ export class HostedWorkspaceBroker {
     const status = object(response['status']);
     if (status['state'] === 'prepared') return { executionCallId: id };
     if (status['state'] === 'settled') {
-      return { executionCallId: id, settled: settledResult(status) };
+      return {
+        executionCallId: id,
+        settled: settledResult({
+          ...status,
+          result: this.readToolResult(id, status['result']),
+        }),
+      };
     }
     throw new Error(
       'Hosted Workspace Broker answered a reservation that is neither fresh nor settled.',
@@ -475,6 +604,9 @@ export class HostedWorkspaceBroker {
         promptId: turnId,
         callId,
         argsDigest,
+        ...(isMeasuredWorkspaceCapability(this.capability ?? '')
+          ? { resultProtocol: 4 }
+          : {}),
       },
     });
     const executionCallId = response['executionCallId'];
@@ -535,7 +667,7 @@ export class HostedWorkspaceBroker {
         throw new Error('Tool v3 execution identity changed.');
       const status = object(response['status']);
       if (status['state'] === 'settled') {
-        const result = object(status['result']);
+        const result = this.readToolResult(id, status['result']);
         if (
           !['success', 'error', 'cancelled', 'not_started'].includes(
             String(result['executionStatus']),
@@ -598,9 +730,12 @@ export class HostedWorkspaceBroker {
       } catch (error) {
         if (
           error instanceof HostedWorkspaceBrokerRejection &&
-          error.status === 409 &&
-          (error.code === 'runtime_idempotency_conflict' ||
-            error.code === 'runtime_execution_conflict')
+          ((error.status === 409 &&
+            (error.code === 'runtime_idempotency_conflict' ||
+              error.code === 'runtime_execution_conflict')) ||
+            // A payload the Broker refused to parse never became an
+            // invocation, so no poll can turn it into a reply.
+            (error.status === 400 && error.code === 'runtime_payload_invalid'))
         )
           throw error;
         // A lost start reply is not permission to start another invocation.
@@ -660,7 +795,7 @@ export class HostedWorkspaceBroker {
         throw new Error('Runtime execution identity changed.');
       const status = object(response['status']);
       if (status['state'] === 'settled') {
-        const result = object(status['result']);
+        const result = this.readToolResult(id, status['result']);
         if (
           !['success', 'error', 'cancelled', 'not_started'].includes(
             String(result['executionStatus']),
@@ -710,7 +845,13 @@ export class HostedWorkspaceBroker {
     const status = object(response['status']);
     const state = String(status['state']);
     return state === 'settled'
-      ? { state, settled: settledResult(status) }
+      ? {
+          state,
+          settled: settledResult({
+            ...status,
+            result: this.readToolResult(id, status['result']),
+          }),
+        }
       : { state };
   }
 
@@ -758,6 +899,18 @@ export class HostedWorkspaceBroker {
 
   async extensionControl(
     operation: ManagedExtensionRuntimeControl,
+  ): Promise<Record<string, unknown>> {
+    return this.runtimeMetadataControl(operation);
+  }
+
+  async skillControl(
+    operation: ManagedRuntimeSkillControl,
+  ): Promise<Record<string, unknown>> {
+    return this.runtimeMetadataControl(operation);
+  }
+
+  private async runtimeMetadataControl(
+    operation: ManagedExtensionRuntimeControl | ManagedRuntimeSkillControl,
   ): Promise<Record<string, unknown>> {
     const envelope = await this.request(
       `/harness-sessions/${encodeURIComponent(this.key.sessionId)}/extensions/control`,
@@ -909,6 +1062,14 @@ export class HostedWorkspaceBroker {
     )
       throw new Error('Runtime execution outcome is unknown.');
     const result = status['result'];
+    if (
+      state === 'settled' &&
+      result &&
+      typeof result === 'object' &&
+      !Array.isArray(result)
+    ) {
+      this.readToolResult(id, result);
+    }
     const executionStatus =
       state === 'settled' &&
       typeof result === 'object' &&
@@ -958,7 +1119,7 @@ export class HostedWorkspaceBroker {
         'Original Shell result is not settled under its binding.',
       );
     }
-    const result = object(status['result']);
+    const result = this.readToolResult(id, status['result']);
     if (!('capture' in result)) {
       const error = 'error' in result ? object(result['error']) : undefined;
       if (

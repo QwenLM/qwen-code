@@ -635,6 +635,22 @@ describe('Turn', () => {
     // "[API Error: 400 status code (no body)]" and nothing to quote.
     // See https://github.com/QwenLM/qwen-code/issues/14115
     describe('request id on the Error event', () => {
+      it('retains marked subscription quota context for display formatting', async () => {
+        const subscriptionQuota = {
+          type: 'subscription_quota',
+          memberType: 'pro',
+        };
+        const error = Object.assign(new Error('quota fallback'), {
+          status: 402,
+          subscriptionQuota,
+        });
+        const events = await runFailing(error);
+        expect((events[0] as ServerLlmErrorEvent).value.error).toMatchObject({
+          message: 'quota fallback',
+          status: 402,
+          subscriptionQuota,
+        });
+      });
       const REQUEST_ID = 'a30a1854-1925-4da8-8803-73fee2865116';
 
       it('carries x-request-id from a real Headers instance', async () => {
@@ -907,6 +923,28 @@ describe('Turn', () => {
       expect(events).toEqual([
         contentEvent('Content blocked'),
         finished('SAFETY'),
+      ]);
+    });
+
+    it('should include a provider finish message', async () => {
+      const events = await run([
+        textChunk('Content blocked', {
+          finishReason: 'SAFETY',
+          finishMessage: 'Response refused due to cyber-related safety policy.',
+        }),
+      ]);
+
+      expect(events).toEqual([
+        contentEvent('Content blocked'),
+        {
+          type: LlmEventType.Finished,
+          value: {
+            reason: 'SAFETY',
+            usageMetadata: undefined,
+            finishMessage:
+              'Response refused due to cyber-related safety policy.',
+          },
+        },
       ]);
     });
 

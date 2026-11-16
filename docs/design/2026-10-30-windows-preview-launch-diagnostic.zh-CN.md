@@ -57,3 +57,9 @@ hosted Windows 不是原 ECS 主机。新的完整文件成功只能资格化已
 保留原六条 raw stderr 观测，增加第七条 `MODULE_ANALYSIS_CACHE`，由实际 PowerShell 子进程读取其环境。要求总共恰好七条、每个名称一条，并将新增记录值与计划的 owned 完整路径严格比较；结构化证据也记录配置路径。原字段仍允许空值，但新增路由值不能偏离计划。该受支持路径在 fixture readiness、raw 启动和安装器启动前均已设置。它是正常可写缓存位置，是否生成缓存是可选观测，不通过额外模块导入或 sleep 强制生成。
 
 不将 ModuleAnalysisCache 加入 HOME 白名单；四个精确允许新增域、全部已有条目检查、安装器脚本/参数、timeout 预算、PATH 与 staging 保护均不变。新 Windows 运行必须资格化实际 child 值及原完整 HOME 保护；仅环境见证通过不能证明保护通过。[精确 `b79e4f1` 的 Windows 运行](https://github.com/chiga0/qwen-code/actions/runs/41053808623/job/124056178125) 已通过完整文件：九个 Windows 业务用例、七个便携 map 用例、三个声明的 POSIX 跳过、零失败。实际观测全部七条 child 记录；已有初始化 HOME 条目不变，每个到达用例仅新增四个允许条目，HOME 无 ModuleAnalysisCache。这仅资格化 Node 22.23.4/Windows PowerShell 5.1.20348.5756 下的受控合成包 fixture，不代表 release artifact、真实 Bun ABI/TUI 或完整 Windows 验收。随后合并 main gate `cc6de38` 保持 fixture 字节，但该集成 head 本身尚未运行；仍须对应 workflow/meta 检查与精确 head CI。历史失败保持失败。
+
+## 当前 main 集成
+
+与 main `de865b41` 的集成保留其 owned `APPDATA`、`LOCALAPPDATA` 环境提示，以及通过命令 shell 检查 `.cmd` 启动的方式。这些提示不能证明 Windows known-folder 已重定向。独立 raw PowerShell 观测仍要求全部七条诊断记录及原始 `OLD_PREVIEW` 输出。冷 HOME 图与初始化 HOME 图均保留全部已有条目保护，以及上文四个精确路径的条件新增合同。
+
+此前移除环境覆盖及已记录的 `b79e4f1` Windows 通过均描述对应历史候选，不能资格化本次新集成候选；本次仍需重新安装依赖、构建、类型检查、相关完整文件测试及精确 head 的 Windows 验证。

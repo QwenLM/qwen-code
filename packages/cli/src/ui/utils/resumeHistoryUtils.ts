@@ -40,6 +40,7 @@ import {
   indexGapsByChild,
 } from './history-gap-notice.js';
 import { coalesceFindingsHistoryItems } from './findings-coalescing.js';
+import { modPromptRow } from '../../services/mod-prompt-frame.js';
 import { shouldDisplayGoalStateCause } from './goal-runtime.js';
 import {
   collectInlineImages,
@@ -415,6 +416,24 @@ function convertToHistoryItems(
                 text: name ? `${name}: ${text}` : text,
               });
             }
+          }
+          break;
+        }
+        // A Mod's own prompt restores as the row the terminal showed for it.
+        if (record.provenance === 'mod_prompt') {
+          const payload = record.systemPayload as { mod?: string } | undefined;
+          const text =
+            projectUserTranscriptForDisplay(record).displayText ||
+            extractTextFromParts(record.message?.parts as Part[]);
+          if (text) {
+            if (currentToolGroup.length > 0) {
+              items.push({ type: 'tool_group', tools: [...currentToolGroup] });
+              currentToolGroup = [];
+            }
+            items.push({
+              type: 'notification',
+              text: modPromptRow(payload?.mod ?? 'unknown', text),
+            });
           }
           break;
         }

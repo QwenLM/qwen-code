@@ -11,11 +11,13 @@ import {
 
 const {
   mockSendQQMessage,
+  mockRequestQQApi,
   mockFetchAccessToken,
   mockHandleInbound,
   pendingDispatches,
 } = vi.hoisted(() => ({
   mockSendQQMessage: vi.fn(),
+  mockRequestQQApi: vi.fn(),
   mockFetchAccessToken: vi.fn(),
   mockHandleInbound: vi.fn(),
   pendingDispatches: [] as Array<Promise<unknown>>,
@@ -58,6 +60,7 @@ vi.mock('node:fs', async (importOriginal) => {
 
 vi.mock('./api.js', () => ({
   sendQQMessage: mockSendQQMessage,
+  requestQQApi: mockRequestQQApi,
   getApiBase: () => 'https://api.sgroup.qq.com',
   fetchAccessToken: mockFetchAccessToken,
   fetchGatewayUrl: vi.fn(),
@@ -109,6 +112,15 @@ vi.mock('@qwen-code/channel-base', () => ({
     protected getResponseMessageId(_sessionId: string): string | undefined {
       return undefined;
     }
+    protected isProactivePromptTurn(_sessionId: string): boolean {
+      return false;
+    }
+    protected disableLoopJobsForChat(_chatId: string): Promise<number> {
+      return Promise.resolve(0);
+    }
+    protected getResponseSenderId(_sessionId: string): string | undefined {
+      return undefined;
+    }
     protected prepareThenHandleInbound(
       env: unknown,
       prepare: () => Promise<boolean | void>,
@@ -122,6 +134,11 @@ vi.mock('@qwen-code/channel-base', () => ({
     }
     protected onSessionDied(_sessionId: string): void {
       // no-op in mock
+    }
+    setBridge(bridge: Record<string, unknown>): void {
+      // Mirrors ChannelBase.setBridge's observable effect for the adapter:
+      // the replacement bridge becomes the one adapters register against.
+      this.bridge = bridge;
     }
   },
   SessionRouter: class {
@@ -179,6 +196,8 @@ function stubFetchBytes(bytes: Buffer, contentType = 'image/jpeg'): void {
 
 function makeChannel(
   configOverrides?: Record<string, unknown>,
+  bridgeOverrides?: Record<string, unknown>,
+  optionsOverrides?: Record<string, unknown>,
 ): InstanceType<typeof QQChannel> {
   const ch = new QQChannel(
     'test-bot',
@@ -197,7 +216,10 @@ function makeChannel(
       keywordTriggers: ['help', '问答'],
       ...configOverrides,
     },
-    {} as unknown as import('@qwen-code/channel-base').AcpBridge,
+    {
+      ...bridgeOverrides,
+    } as unknown as import('@qwen-code/channel-base').AcpBridge,
+    optionsOverrides as never,
   );
   return ch;
 }
@@ -432,7 +454,102 @@ describe('handleC2C', () => {
     expect(env.alreadyPrefixed).toBeUndefined();
   });
 
-  it('drops bot C2C messages', async () => {
+  it('forwards bot C2C messages with a [bot] tag when forwardBotMessages is on', async () => {
+    const ch = makeChannel({ forwardBotMessages: true });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleC2C'](
+      makeC2CEvent({ author: { bot: true, user_openid: 'bot-1' } }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as unknown as Envelope;
+    expect(env.text).toContain('[bot] ');
+    expect(env.text).toContain('你好，帮我查一下天气');
+  });
+
+  it('tags a non-boolean bot flag (truthiness, same as the drop guard)', async () => {
+    const ch = makeChannel({ forwardBotMessages: true });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleC2C'](
+      makeC2CEvent({
+        author: { bot: 1 as unknown as boolean, user_openid: 'bot-1' },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as unknown as Envelope;
+    expect(env.text).toContain('[bot] ');
+    expect(env.senderTag).toBe('bot');
+  });
+
+  it('logs a forwarded bot message once per chat per minute', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const ch = makeChannel({ forwardBotMessages: true });
+    const pvt = ch as unknown as QQChannelRaw;
+    const forwardedLines = () =>
+      stderr.mock.calls.filter(([line]) =>
+        String(line).includes('forwardBotMessages: bot-authored message'),
+      ).length;
+
+    pvt['handleC2C'](
+      makeC2CEvent({ id: 'm1', author: { bot: true, user_openid: 'bot-1' } }),
+    );
+    pvt['handleC2C'](
+      makeC2CEvent({ id: 'm2', author: { bot: true, user_openid: 'bot-1' } }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(forwardedLines()).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(61_000);
+    pvt['handleC2C'](
+      makeC2CEvent({ id: 'm3', author: { bot: true, user_openid: 'bot-1' } }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(forwardedLines()).toBe(2);
+    stderr.mockRestore();
+  });
+
+  it('forwards a routed bot !command to the model instead of the shell', async () => {
+    const ch = makeChannel({
+      forwardBotMessages: true,
+      messageRoutes: { '/proj': '/proj' },
+    });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleC2C'](
+      makeC2CEvent({
+        content: '!echo hi',
+        author: { bot: true, user_openid: 'bot-1' },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as unknown as Envelope;
+    // The routed text must reach matchMessageRoute unmarked, so the bot marker
+    // rides on the envelope and ChannelBase renders it after routing/sanitizing.
+    expect(env.text).toBe('!echo hi');
+    expect(env.senderTag).toBe('bot');
+  });
+
+  it('forwards a bot slash command to the model instead of running it', async () => {
+    const ch = makeChannel({ forwardBotMessages: true });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleC2C'](
+      makeC2CEvent({
+        content: '/clear',
+        author: { bot: true, user_openid: 'bot-1' },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as unknown as Envelope;
+    expect(env.text).toContain('[bot] ');
+    expect(env.text).toContain('/clear');
+    expect(env.text.startsWith('/')).toBe(false);
+  });
+
+  it('drops bot C2C messages unless forwardBotMessages is on', async () => {
     const ch = makeChannel();
     const pvt = ch as unknown as QQChannelRaw;
     pvt['handleC2C'](
@@ -749,7 +866,162 @@ describe('handleGroup', () => {
     expect(mockHandleInbound).toHaveBeenCalledTimes(1);
   });
 
-  it('bot 消息被 handleGroup 跳过（event.author.bot 守卫）', async () => {
+  it('bot 消息在 forwardBotMessages 开启时被转发并打 [bot] 标签', async () => {
+    const ch = makeChannel({ forwardBotMessages: true });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_BOT> auto reply',
+        author: {
+          member_openid: 'bot-1',
+          bot: true,
+        },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['text']).toContain('[bot] ');
+    expect(env['text']).toContain('auto reply');
+  });
+
+  it('tags a group author whose bot flag is truthy but not boolean', async () => {
+    const ch = makeChannel({ forwardBotMessages: true });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_BOT> auto reply',
+        author: {
+          member_openid: 'bot-1',
+          bot: 1 as unknown as boolean,
+        },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['text']).toContain('[bot] ');
+    expect(env['senderTag']).toBe('bot');
+  });
+
+  it('logs the forwarded notice for a delivered group message', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const ch = makeChannel({ forwardBotMessages: true });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_BOT> auto reply',
+        author: { member_openid: 'bot-1', bot: true },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    const notices = stderr.mock.calls.filter(([line]) =>
+      String(line).includes('forwardBotMessages: bot-authored message'),
+    ).length;
+    expect(notices).toBe(1);
+    stderr.mockRestore();
+  });
+
+  it('forwarded bot slash messages in a group reach the model, not the command table', async () => {
+    const ch = makeChannel({ forwardBotMessages: true });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_BOT> /clear',
+        author: {
+          member_openid: 'bot-1',
+          bot: true,
+        },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['text']).toContain('[bot] ');
+    expect(env['text']).toContain('/clear');
+    expect(String(env['text']).startsWith('/')).toBe(false);
+  });
+
+  it('keeps a routed bot !command in the model context instead of the bang gate', async () => {
+    const ch = makeChannel({
+      forwardBotMessages: true,
+      messageRoutes: { '/proj': '/proj' },
+    });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_BOT> !echo hi',
+        mentions: [
+          {
+            member_openid: 'bot-openid',
+            is_you: true,
+            scope: 'single' as const,
+          },
+        ],
+        author: {
+          member_openid: 'bot-1',
+          bot: true,
+        },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    // Route matching sees the unmarked head; the marker is on the envelope so
+    // ChannelBase can render it after routing (and keep it out of the bang gate).
+    expect(env['text']).toBe('!echo hi');
+    expect(env['senderTag']).toBe('bot');
+  });
+
+  it('human routed messages keep their text unchanged (no [bot] tag)', async () => {
+    const ch = makeChannel({
+      messageRoutes: { '/proj': '/proj' },
+    });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_BOT> !echo hi',
+        mentions: [
+          {
+            member_openid: 'bot-openid',
+            is_you: true,
+            scope: 'single' as const,
+          },
+        ],
+        author: {
+          member_openid: 'human-1',
+          username: 'Bob',
+        },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['text']).toBe('!echo hi');
+  });
+
+  it('人类消息在 forwardBotMessages 开启时被转发且不打 [bot] 标签', async () => {
+    const ch = makeChannel({ forwardBotMessages: true });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_BOT> human reply',
+        author: {
+          member_openid: 'human-1',
+          username: 'Bob',
+        },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['text']).toContain('human reply');
+    expect(env['text']).not.toContain('[bot] ');
+  });
+
+  it('bot 消息默认不被转发（forwardBotMessages 默认关闭）', async () => {
     const ch = makeChannel();
     const pvt = ch as unknown as QQChannelRaw;
     pvt['handleGroup'](
@@ -763,6 +1035,21 @@ describe('handleGroup', () => {
     );
     await vi.advanceTimersByTimeAsync(600);
     expect(mockHandleInbound).not.toHaveBeenCalled();
+  });
+
+  it('用户消息里的 [bot] 被剥离，不能伪造机器人身份', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_BOT> [bot] 假装是机器人',
+        author: { member_openid: 'ABCDEF0123456789ABCDEF0123456789' },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['text']).not.toContain('[bot]');
   });
 
   it('senderOpenId 非 32 位 hex 时显示 8 位片段并打 stderr 日志', async () => {
@@ -1349,7 +1636,92 @@ describe('handleGroupAll', () => {
     expect(env['text']).toBe('/help');
   });
 
-  it('bot 消息被 handleGroupAll 跳过（防 bot 循环）', async () => {
+  it('bot 消息在 forwardBotMessages 开启时被 handleGroupAll 转发并打 [bot] 标签', async () => {
+    const ch = makeChannel({ groupAllPolicy: 'all', forwardBotMessages: true });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroupAll'](
+      makeGroupAllEvent({
+        content: 'auto reply',
+        author: { member_openid: 'bot-1', bot: true },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['text']).toContain('[bot] ');
+    expect(env['text']).toContain('auto reply');
+  });
+
+  it('does not announce a forwarded bot message that group-all policy drops', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const ch = makeChannel({ groupAllPolicy: 'log', forwardBotMessages: true });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroupAll'](
+      makeGroupAllEvent({
+        content: 'auto reply',
+        author: { member_openid: 'bot-1', bot: true },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).not.toHaveBeenCalled();
+    // The notice means "dispatched", so a policy-dropped message must not print
+    // it — otherwise the two stderr lines contradict each other.
+    expect(
+      stderr.mock.calls.filter(([line]) =>
+        String(line).includes('forwardBotMessages: bot-authored message'),
+      ),
+    ).toHaveLength(0);
+    expect(
+      stderr.mock.calls.some(([line]) => String(line).includes('log policy')),
+    ).toBe(true);
+    stderr.mockRestore();
+  });
+
+  it('logs the forwarded notice for a delivered group-all message', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const ch = makeChannel({ groupAllPolicy: 'all', forwardBotMessages: true });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroupAll'](
+      makeGroupAllEvent({
+        content: 'auto reply',
+        mentions: [{ is_you: true }],
+        author: { member_openid: 'bot-1', bot: true },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(
+      stderr.mock.calls.filter(([line]) =>
+        String(line).includes('forwardBotMessages: bot-authored message'),
+      ),
+    ).toHaveLength(1);
+    stderr.mockRestore();
+  });
+
+  it('group-all routed bot messages keep route matching and carry the marker', async () => {
+    const ch = makeChannel({
+      groupAllPolicy: 'all',
+      forwardBotMessages: true,
+      messageRoutes: { '/proj': '/proj' },
+    });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroupAll'](
+      makeGroupAllEvent({
+        content: 'route me',
+        author: { member_openid: 'bot-1', bot: true },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['text']).toBe('route me');
+    expect(env['senderTag']).toBe('bot');
+  });
+
+  it('bot 消息默认不被 handleGroupAll 转发', async () => {
     const ch = makeChannel({ groupAllPolicy: 'all' });
     const pvt = ch as unknown as QQChannelRaw;
     pvt['handleGroupAll'](
@@ -1515,6 +1887,23 @@ describe('群管理事件', () => {
       expect(chatTypeMap.has('group-del-1')).toBe(false);
       expect(replyMsgId.has('group-del-1')).toBe(false);
       expect(groupActiveMsgEnabled.has('group-del-1')).toBe(false);
+    });
+
+    it('drops the group from the recent-inbound ring', () => {
+      const ch = makeChannel({ moderationTools: true });
+      const pvt = ch as unknown as QQChannelRaw;
+      const ring = (ch as unknown as { recentInbound: Map<string, unknown[]> })
+        .recentInbound;
+      pvt['recordRecentInbound']('group-del-1', 'alice', 'msg-1');
+      expect(ring.has('group-del-1')).toBe(true);
+
+      pvt['handleGroupDelRobot']({
+        group_openid: 'group-del-1',
+        op_member_openid: 'admin-1',
+        timestamp: Date.now(),
+      } as GroupDelRobotEvent);
+
+      expect(ring.has('group-del-1')).toBe(false);
     });
 
     it('清理 cron buffer/timer（cron-msg-experimental 启用）', () => {
@@ -2387,6 +2776,77 @@ describe('群管理事件', () => {
 });
 
 // ---------------------------------------------------------------------------
+// connect() default instructions
+// ---------------------------------------------------------------------------
+describe('connect() default instructions', () => {
+  it('surfaces the [bot] meaning when forwardBotMessages is on', async () => {
+    mockFetchAccessToken.mockRejectedValue(new Error('offline'));
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const ch = makeChannel({ forwardBotMessages: true });
+    // The default prompt is assembled synchronously, before the first await.
+    const connectPromise = ch.connect().catch(() => undefined);
+    const config = (ch as unknown as Record<string, unknown>)['config'] as {
+      instructions?: string;
+    };
+    expect(config.instructions).toContain(
+      '消息前缀 [bot] 表示该消息来自另一个机器人',
+    );
+    // Drain the 3-attempt retry loop so its timers cannot leak.
+    await vi.advanceTimersByTimeAsync(4000);
+    await connectPromise;
+    mockFetchAccessToken.mockReset();
+    stderrSpy.mockRestore();
+  });
+
+  it('does not surface the [bot] meaning when forwardBotMessages is off', async () => {
+    mockFetchAccessToken.mockRejectedValue(new Error('offline'));
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const ch = makeChannel();
+    const connectPromise = ch.connect().catch(() => undefined);
+    const config = (ch as unknown as Record<string, unknown>)['config'] as {
+      instructions?: string;
+    };
+    expect(config.instructions).not.toContain('消息前缀 [bot]');
+    await vi.advanceTimersByTimeAsync(4000);
+    await connectPromise;
+    mockFetchAccessToken.mockReset();
+    stderrSpy.mockRestore();
+  });
+
+  it('appends the brake to operator instructions once, across reconnects', async () => {
+    mockFetchAccessToken.mockRejectedValue(new Error('offline'));
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const ch = makeChannel({
+      forwardBotMessages: true,
+      instructions: '回答要简洁',
+    });
+    const config = (ch as unknown as Record<string, unknown>)['config'] as {
+      instructions?: string;
+    };
+    const first = ch.connect().catch(() => undefined);
+    expect(config.instructions).toContain('回答要简洁');
+    expect(config.instructions).toContain('消息前缀 [bot]');
+    expect(config.instructions).toContain('<noreply>');
+    await vi.advanceTimersByTimeAsync(4000);
+    await first;
+    // connect() re-runs on reconnect: the append must not stack.
+    const second = ch.connect().catch(() => undefined);
+    expect(config.instructions?.split('消息前缀 [bot]').length).toBe(2);
+    expect(config.instructions?.split('<noreply>').length).toBe(2);
+    await vi.advanceTimersByTimeAsync(4000);
+    await second;
+    mockFetchAccessToken.mockReset();
+    stderrSpy.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Gateway message handling (RESUMED, INVALID_SESSION coldStart)
 // ---------------------------------------------------------------------------
 describe('Gateway message handling', () => {
@@ -3137,6 +3597,95 @@ describe('inbound media', () => {
     expect(env.attachments?.[1]?.filePath).toBeDefined();
   });
 
+  it('leaves a media-only forwarded bot group message for the base attribution', async () => {
+    stubFetchBytes(PNG_BYTES);
+    const ch = makeChannel({ forwardBotMessages: true });
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_BOT>',
+        attachments: [imageAttachment()],
+        mentions: [
+          { member_openid: 'bot-openid', is_you: true, scope: 'single' },
+        ],
+        author: { member_openid: 'bot-1', bot: true },
+      }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(image)');
+    expect(env.senderTag).toBe('bot');
+    // No self-prefix to keep: the base renders the [bot] attribution instead.
+    expect(env.alreadyPrefixed).toBeUndefined();
+  });
+
+  it('leaves a media-only forwarded bot group-all message for the base attribution', async () => {
+    stubFetchBytes(PNG_BYTES);
+    const ch = makeChannel({ groupAllPolicy: 'all', forwardBotMessages: true });
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleGroupAll'](
+      makeGroupAllEvent({
+        content: '',
+        attachments: [imageAttachment()],
+        mentions: [{ is_you: true }],
+        author: { member_openid: 'bot-1', bot: true },
+      }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(image)');
+    expect(env.senderTag).toBe('bot');
+    expect(env.alreadyPrefixed).toBeUndefined();
+  });
+
+  it('leaves a media-only forwarded bot C2C message for the base attribution', async () => {
+    stubFetchBytes(PNG_BYTES);
+    const ch = makeChannel({ forwardBotMessages: true });
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({
+        content: '',
+        attachments: [imageAttachment()],
+        author: { bot: true, user_openid: 'bot-1' },
+      }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(image)');
+    expect(env.senderTag).toBe('bot');
+    expect(env.alreadyPrefixed).toBeUndefined();
+  });
+
+  it('keeps the forwarded-bot marker when the media download fails', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new Error('offline');
+      }),
+    );
+    const ch = makeChannel({ forwardBotMessages: true });
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({
+        content: '',
+        attachments: [imageAttachment()],
+        author: { bot: true, user_openid: 'bot-1' },
+      }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(User sent media but download failed)');
+    expect(env.senderTag).toBe('bot');
+  });
+
   it('keeps the caption as user text when an image is attached', async () => {
     stubFetchBytes(PNG_BYTES);
     const ch = makeChannel();
@@ -3833,6 +4382,723 @@ describe('inbound media', () => {
     expect(env.attachments?.every((entry) => entry.type === 'video')).toBe(
       true,
     );
+  });
+});
+
+// The moderation tools are what the model calls for group management, so the
+// registration path, the opt-in switch, and the recall target ring are pinned
+// here rather than only in the tool-unit tests.
+describe('qqbot moderation tools', () => {
+  const RECALL_WINDOW_MS = 120_000;
+
+  function registeredTools(
+    configOverrides?: Record<string, unknown>,
+  ): Array<{ name: string }> {
+    const registered: Array<{ name: string }> = [];
+    makeChannel(configOverrides, {
+      registerChannelTool: (tool: { name: string }) => registered.push(tool),
+    });
+    return registered;
+  }
+
+  it('registers nothing by default', () => {
+    expect(registeredTools()).toEqual([]);
+  });
+
+  it('registers the group-management tools when moderationTools is true', () => {
+    const names = registeredTools({ moderationTools: true }).map(
+      (tool) => tool.name,
+    );
+    expect(names).toHaveLength(18);
+    expect(names[0]).toBe('qq_recall_message');
+    expect(names).toContain('qq_kick_member');
+    expect(names).toContain('qq_execute_join_approval_strategy');
+  });
+
+  it('registers nothing when moderationTools is false', () => {
+    expect(registeredTools({ moderationTools: false })).toEqual([]);
+  });
+
+  it('registers nothing for a truthy but non-boolean value', () => {
+    expect(registeredTools({ moderationTools: 'yes' })).toEqual([]);
+  });
+
+  it('skips registration on bridges without channel tool support', () => {
+    expect(() => makeChannel({ moderationTools: true })).not.toThrow();
+  });
+
+  it('resolves the newest tracked message per sender', () => {
+    const ch = makeChannel({ moderationTools: true });
+    const raw = ch as unknown as QQChannelRaw;
+    raw['recordRecentInbound']('group-1', 'alice', 'msg-1');
+    raw['recordRecentInbound']('group-1', 'bob', 'msg-2');
+    raw['recordRecentInbound']('group-1', 'alice', 'msg-3');
+
+    expect(raw['recentMemberMessage']('group-1', 'alice')).toBe('msg-3');
+    expect(raw['recentMemberMessage']('group-1', 'bob')).toBe('msg-2');
+    expect(raw['recentMemberMessage']('group-1', 'carol')).toBeUndefined();
+    expect(raw['recentMemberMessage']('group-2', 'alice')).toBeUndefined();
+  });
+
+  it('ignores messages without an id or sender', () => {
+    const ch = makeChannel({ moderationTools: true });
+    const raw = ch as unknown as QQChannelRaw;
+    raw['recordRecentInbound']('group-1', undefined, 'msg-1');
+    raw['recordRecentInbound']('group-1', 'alice', '');
+    expect(raw['recentMemberMessage']('group-1', 'alice')).toBeUndefined();
+  });
+
+  it('drops messages past the configured recall window', () => {
+    vi.useFakeTimers();
+    try {
+      const ch = makeChannel({
+        moderationTools: true,
+        moderationRecallWindowMs: RECALL_WINDOW_MS,
+      });
+      const raw = ch as unknown as QQChannelRaw;
+      raw['recordRecentInbound']('group-1', 'alice', 'msg-old');
+      vi.advanceTimersByTime(RECALL_WINDOW_MS + 1);
+      expect(raw['recentMemberMessage']('group-1', 'alice')).toBeUndefined();
+
+      raw['recordRecentInbound']('group-1', 'alice', 'msg-new');
+      expect(raw['recentMemberMessage']('group-1', 'alice')).toBe('msg-new');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps an old message when no window is configured', () => {
+    const ch = makeChannel({ moderationTools: true });
+    const raw = ch as unknown as QQChannelRaw;
+    raw['recordRecentInbound']('group-1', 'alice', 'msg-old');
+    vi.advanceTimersByTime(10 * 60_000);
+    expect(raw['recentMemberMessage']('group-1', 'alice')).toBe('msg-old');
+  });
+
+  it('records nothing when moderationTools is false', () => {
+    const ch = makeChannel();
+    const raw = ch as unknown as QQChannelRaw;
+    raw['recordRecentInbound']('group-1', 'alice', 'msg-1');
+    const ring = (ch as unknown as { recentInbound: Map<string, unknown[]> })
+      .recentInbound;
+    expect(ring.size).toBe(0);
+    expect(raw['recentMemberMessage']('group-1', 'alice')).toBeUndefined();
+  });
+
+  it('records nothing and rejects member targets when the window is 0', async () => {
+    const tools: Array<{
+      name: string;
+      handler: (
+        args: Record<string, unknown>,
+        context: { sessionId: string },
+      ) => Promise<unknown>;
+    }> = [];
+    const ch = makeChannel(
+      { moderationTools: true, moderationRecallWindowMs: 0 },
+      {
+        registerChannelTool: (tool: { name: string }) =>
+          tools.push(tool as never),
+      },
+      {
+        router: {
+          getTarget: () => ({
+            channelName: 'test-bot',
+            chatId: 'G1',
+            isGroup: true,
+          }),
+        },
+      },
+    );
+    const raw = ch as unknown as QQChannelRaw;
+    raw['recordRecentInbound']('G1', 'alice', 'msg-1');
+    const ring = (ch as unknown as { recentInbound: Map<string, unknown[]> })
+      .recentInbound;
+    expect(ring.size).toBe(0);
+
+    const recall = tools.find((tool) => tool.name === 'qq_recall_message');
+    const rejected = (await recall?.handler(
+      { member_openid: 'alice' },
+      { sessionId: 's-1' },
+    )) as { text: string; isError?: boolean };
+    expect(rejected.isError).toBe(true);
+    expect(rejected.text).toContain('disabled');
+
+    const internals = ch as unknown as {
+      accessToken: string;
+      tokenExpiresAt: number;
+    };
+    internals.accessToken = 'tok';
+    internals.tokenExpiresAt = Date.now() + 3_600_000;
+    mockRequestQQApi.mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => '{}',
+    });
+    const recalled = await recall?.handler(
+      { message_id: 'msg-1' },
+      { sessionId: 's-1' },
+    );
+    expect(recalled).toBe('Message recalled (msg-1).');
+  });
+
+  it('warns and falls back to no time limit for an invalid window', () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    let written = '';
+    try {
+      const ch = makeChannel({
+        moderationTools: true,
+        moderationRecallWindowMs: 1.5,
+      });
+      written = stderr.mock.calls.map((call) => String(call[0])).join('');
+      const raw = ch as unknown as QQChannelRaw;
+      raw['recordRecentInbound']('group-1', 'alice', 'msg-1');
+      vi.advanceTimersByTime(10 * 60_000);
+      expect(raw['recentMemberMessage']('group-1', 'alice')).toBe('msg-1');
+    } finally {
+      stderr.mockRestore();
+    }
+    expect(written).toContain('invalid moderationRecallWindowMs=1.5');
+    expect(written.split('\n').filter(Boolean)).toHaveLength(1);
+  });
+
+  it('caps the per-chat ring at 50 entries', () => {
+    const ch = makeChannel({ moderationTools: true });
+    const raw = ch as unknown as QQChannelRaw;
+    const ring = (
+      ch as unknown as {
+        recentInbound: Map<string, Array<{ messageId: string }>>;
+      }
+    ).recentInbound;
+    for (let i = 0; i < 60; i++) {
+      raw['recordRecentInbound']('group-1', 'alice', `msg-${i}`);
+    }
+    const entries = ring.get('group-1') ?? [];
+    expect(entries).toHaveLength(50);
+    expect(entries[0]?.messageId).toBe('msg-10');
+    expect(entries[49]?.messageId).toBe('msg-59');
+  });
+
+  it('does not duplicate a replayed message id', () => {
+    const ch = makeChannel({ moderationTools: true });
+    const raw = ch as unknown as QQChannelRaw;
+    const ring = (
+      ch as unknown as {
+        recentInbound: Map<string, Array<{ messageId: string }>>;
+      }
+    ).recentInbound;
+    raw['recordRecentInbound']('group-1', 'alice', 'msg-1');
+    raw['recordRecentInbound']('group-1', 'alice', 'msg-1');
+    expect(ring.get('group-1')).toHaveLength(1);
+  });
+
+  it('keeps the first arrival order when a replayed id arrives again', () => {
+    const ch = makeChannel({ moderationTools: true });
+    const raw = ch as unknown as QQChannelRaw;
+    raw['recordRecentInbound']('group-1', 'alice', 'msg-a');
+    raw['recordRecentInbound']('group-1', 'alice', 'msg-b');
+    // A replay of the older message must not become the newest entry.
+    raw['recordRecentInbound']('group-1', 'alice', 'msg-a');
+
+    expect(raw['recentMemberMessage']('group-1', 'alice')).toBe('msg-b');
+  });
+
+  it('does not extend the recall window when a message is replayed', () => {
+    const ch = makeChannel({
+      moderationTools: true,
+      moderationRecallWindowMs: RECALL_WINDOW_MS,
+    });
+    const raw = ch as unknown as QQChannelRaw;
+    raw['recordRecentInbound']('group-1', 'alice', 'msg-a');
+    vi.advanceTimersByTime(RECALL_WINDOW_MS - 10_000);
+    raw['recordRecentInbound']('group-1', 'alice', 'msg-a');
+    vi.advanceTimersByTime(15_000);
+
+    expect(raw['recentMemberMessage']('group-1', 'alice')).toBeUndefined();
+  });
+
+  it('drops a recalled message from the ring, leaving the older target reachable', () => {
+    const ch = makeChannel({ moderationTools: true });
+    const raw = ch as unknown as QQChannelRaw;
+    raw['recordRecentInbound']('group-1', 'alice', 'msg-1');
+    raw['recordRecentInbound']('group-1', 'alice', 'msg-2');
+    expect(raw['recentMemberMessage']('group-1', 'alice')).toBe('msg-2');
+
+    raw['dropRecentMessage']('group-1', 'msg-2');
+
+    expect(raw['recentMemberMessage']('group-1', 'alice')).toBe('msg-1');
+  });
+
+  it('leaves the ring untouched when the recalled id is not tracked', () => {
+    const ch = makeChannel({ moderationTools: true });
+    const raw = ch as unknown as QQChannelRaw;
+    const ring = (
+      ch as unknown as {
+        recentInbound: Map<string, Array<{ messageId: string }>>;
+      }
+    ).recentInbound;
+    raw['recordRecentInbound']('group-1', 'alice', 'msg-1');
+
+    raw['dropRecentMessage']('group-1', 'msg-other');
+
+    expect(ring.get('group-1')?.map((entry) => entry.messageId)).toEqual([
+      'msg-1',
+    ]);
+  });
+
+  it('keeps direct-message traffic out of the group recall ring', () => {
+    const ch = makeChannel({ moderationTools: true });
+    const raw = ch as unknown as QQChannelRaw;
+    const ring = (ch as unknown as { recentInbound: Map<string, unknown[]> })
+      .recentInbound;
+    const sender = 'ABCDEF0123456789ABCDEF0123456789';
+
+    // A real group inbound event populates the ring through its own call site.
+    raw['handleGroup'](
+      makeGroupEvent({ id: 'msg-g', group_openid: 'GROUP_LIVE' }),
+    );
+    expect(raw['recentMemberMessage']('GROUP_LIVE', sender)).toBe('msg-g');
+
+    // DMs are unreachable for the group-only recall tool, so they must not
+    // consume the shared 256-chat ring budget (and evict GROUP_LIVE).
+    for (let i = 0; i < 300; i++) {
+      raw['handleC2C'](
+        makeC2CEvent({
+          id: `msg-c2c-${i}`,
+          author: { user_openid: `user-${i}`, username: 'DM User' },
+        }),
+      );
+    }
+
+    expect(ring.size).toBe(1);
+    expect(raw['recentMemberMessage']('GROUP_LIVE', sender)).toBe('msg-g');
+  });
+
+  it('drops a recall target when the platform call never completed', async () => {
+    const tools: Array<{
+      name: string;
+      handler: (
+        args: Record<string, unknown>,
+        context: { sessionId: string },
+      ) => Promise<unknown>;
+    }> = [];
+    const ch = makeChannel(
+      { moderationTools: true },
+      {
+        registerChannelTool: (tool: { name: string }) =>
+          tools.push(tool as never),
+      },
+      {
+        router: {
+          getTarget: () => ({
+            channelName: 'test-bot',
+            chatId: 'G1',
+            isGroup: true,
+          }),
+        },
+      },
+    );
+    const raw = ch as unknown as QQChannelRaw;
+    raw['recordRecentInbound']('G1', 'alice', 'msg-old');
+    raw['recordRecentInbound']('G1', 'alice', 'msg-new');
+    const internals = ch as unknown as {
+      accessToken: string;
+      tokenExpiresAt: number;
+    };
+    internals.accessToken = 'tok';
+    internals.tokenExpiresAt = Date.now() + 3_600_000;
+    mockRequestQQApi
+      .mockRejectedValueOnce(new Error('The operation was aborted'))
+      .mockResolvedValue({ ok: true, status: 204, text: async () => '' });
+
+    const recall = tools.find((tool) => tool.name === 'qq_recall_message');
+    const first = (await recall?.handler(
+      { member_openid: 'alice' },
+      { sessionId: 's-1' },
+    )) as { text: string; isError?: boolean };
+    expect(first.isError).toBe(true);
+    expect(first.text).toContain('message_id="msg-new"');
+
+    const second = await recall?.handler(
+      { member_openid: 'alice' },
+      { sessionId: 's-1' },
+    );
+    expect(second).toBe('Message recalled (msg-old).');
+    expect(mockRequestQQApi.mock.calls[1]?.[2]).toBe(
+      '/v2/groups/G1/messages/msg-old',
+    );
+  });
+
+  describe('requestModerationApi', () => {
+    function channelWithToken(): {
+      ch: InstanceType<typeof QQChannel>;
+      request: (input: Record<string, unknown>) => Promise<unknown>;
+    } {
+      const ch = makeChannel();
+      const internals = ch as unknown as {
+        accessToken: string;
+        tokenExpiresAt: number;
+        requestModerationApi: (
+          input: Record<string, unknown>,
+        ) => Promise<unknown>;
+      };
+      internals.accessToken = 'tok';
+      internals.tokenExpiresAt = Date.now() + 3_600_000;
+      return {
+        ch,
+        request: (input) => internals.requestModerationApi(input),
+      };
+    }
+
+    it('parses a JSON success body', async () => {
+      mockRequestQQApi.mockResolvedValue({
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ group_name: 'class' }),
+      });
+      const { request } = channelWithToken();
+      await expect(
+        request({ method: 'GET', path: '/v2/groups/g/info' }),
+      ).resolves.toEqual({
+        ok: true,
+        status: 200,
+        data: { group_name: 'class' },
+      });
+      expect(mockRequestQQApi).toHaveBeenCalledWith(
+        'https://api.sgroup.qq.com',
+        'GET',
+        '/v2/groups/g/info',
+        'tok',
+        undefined,
+      );
+    });
+
+    it('refuses to call the platform after the channel is disposed', async () => {
+      mockRequestQQApi.mockResolvedValue({
+        ok: true,
+        status: 200,
+        text: async () => '',
+      });
+      const { ch, request } = channelWithToken();
+      (ch as unknown as { disposed: boolean }).disposed = true;
+
+      await expect(
+        request({ method: 'DELETE', path: '/v2/groups/g/messages/m' }),
+      ).resolves.toEqual({
+        ok: false,
+        status: 0,
+        message: 'channel disposed',
+      });
+      expect(mockRequestQQApi).not.toHaveBeenCalled();
+    });
+
+    it('surfaces success with no body as undefined data', async () => {
+      mockRequestQQApi.mockResolvedValue({
+        ok: true,
+        status: 200,
+        text: async () => '',
+      });
+      const { request } = channelWithToken();
+      await expect(
+        request({ method: 'DELETE', path: '/v2/groups/g/messages/m' }),
+      ).resolves.toEqual({ ok: true, status: 200, data: undefined });
+    });
+
+    it('extracts the platform code and message on failure', async () => {
+      mockRequestQQApi.mockResolvedValue({
+        ok: false,
+        status: 403,
+        text: async () =>
+          JSON.stringify({ code: 11253, message: '应用无接口访问权限' }),
+      });
+      const { request } = channelWithToken();
+      await expect(
+        request({ method: 'POST', path: '/v2/groups/g/batch_remove_members' }),
+      ).resolves.toEqual({
+        ok: false,
+        status: 403,
+        code: 11253,
+        message: '应用无接口访问权限',
+      });
+    });
+
+    it('falls back to err_code and raw text', async () => {
+      mockRequestQQApi.mockResolvedValue({
+        ok: false,
+        status: 400,
+        text: async () => JSON.stringify({ err_code: 40061001 }),
+      });
+      const { request } = channelWithToken();
+      await expect(
+        request({ method: 'GET', path: '/v2/groups/g/info' }),
+      ).resolves.toEqual({
+        ok: false,
+        status: 400,
+        code: 40061001,
+        message: '{"err_code":40061001}',
+      });
+    });
+
+    it('reports a transport failure without a status', async () => {
+      mockRequestQQApi.mockRejectedValue(new Error('socket hang up'));
+      const { request } = channelWithToken();
+      await expect(
+        request({ method: 'GET', path: '/v2/groups/g/info' }),
+      ).resolves.toEqual({
+        ok: false,
+        status: 0,
+        message: 'socket hang up',
+      });
+    });
+  });
+});
+
+// One bridge can serve several channels, and crash recovery replaces the
+// bridge, so the tool registry must survive both: tools are tagged with the
+// owning channel and re-registered whenever the bridge instance changes.
+describe('qqbot moderation tool ownership and recovery', () => {
+  it('tags every registered tool with the owning channel', () => {
+    const tools: Array<{ name: string; owner?: string }> = [];
+    makeChannel(
+      { moderationTools: true },
+      {
+        registerChannelTool: (tool: { name: string; owner?: string }) =>
+          tools.push(tool),
+      },
+    );
+    const names = tools.map((tool) => tool.name);
+    expect(names).toHaveLength(18);
+    expect(names[0]).toBe('qq_recall_message');
+    expect(tools.every((tool) => tool.owner === 'test-bot')).toBe(true);
+  });
+
+  it('re-registers the moderation tools on a replacement bridge', () => {
+    const first: string[] = [];
+    const second: string[] = [];
+    const ch = makeChannel(
+      { moderationTools: true },
+      {
+        registerChannelTool: (tool: { name: string }) => first.push(tool.name),
+      },
+    );
+    expect(first).toHaveLength(18);
+    expect(first[0]).toBe('qq_recall_message');
+
+    ch.setBridge({
+      registerChannelTool: (tool: { name: string }) => second.push(tool.name),
+    } as never);
+
+    expect(second).toHaveLength(18);
+    expect(second[0]).toBe('qq_recall_message');
+    expect(second).toContain('qq_recall_message');
+  });
+
+  it('does not re-register on a replacement bridge when tools are disabled', () => {
+    const second: string[] = [];
+    const ch = makeChannel(
+      { moderationTools: false },
+      {
+        registerChannelTool: (tool: { name: string }) => second.push(tool.name),
+      },
+    );
+    ch.setBridge({
+      registerChannelTool: (tool: { name: string }) => second.push(tool.name),
+    } as never);
+    expect(second).toEqual([]);
+  });
+
+  it('refuses a session that belongs to another channel', async () => {
+    const tools: Array<{
+      name: string;
+      handler: (
+        args: Record<string, unknown>,
+        context: { sessionId: string },
+      ) => Promise<unknown>;
+    }> = [];
+    makeChannel(
+      { moderationTools: true },
+      {
+        registerChannelTool: (tool: { name: string }) =>
+          tools.push(tool as never),
+      },
+      {
+        router: {
+          getTarget: () => ({
+            channelName: 'other-bot',
+            chatId: 'G1',
+            isGroup: true,
+          }),
+        },
+      },
+    );
+
+    const recall = tools.find((tool) => tool.name === 'qq_recall_message');
+    const result = (await recall?.handler({}, { sessionId: 's-1' })) as {
+      text: string;
+      isError?: boolean;
+    };
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain('No QQ chat is bound');
+  });
+
+  it('recalls in the chat of the current turn under sessionScope single', async () => {
+    const tools: Array<{
+      name: string;
+      handler: (
+        args: Record<string, unknown>,
+        context: { sessionId: string },
+      ) => Promise<unknown>;
+    }> = [];
+    const ch = makeChannel(
+      { moderationTools: true, sessionScope: 'single' },
+      {
+        registerChannelTool: (tool: { name: string }) =>
+          tools.push(tool as never),
+      },
+      {
+        router: {
+          // Frozen at the chat that created the session: group A.
+          getTarget: () => ({
+            channelName: 'test-bot',
+            chatId: 'GROUP_A',
+            isGroup: true,
+          }),
+        },
+      },
+    );
+    const raw = ch as unknown as QQChannelRaw;
+    const groupEvent = (id: string, groupOpenid: string) =>
+      makeGroupEvent({
+        id,
+        group_openid: groupOpenid,
+        author: { member_openid: 'MEMBER', username: 'Alice' },
+      });
+    raw['handleGroup'](groupEvent('msg-a', 'GROUP_A'));
+    raw['handleGroup'](groupEvent('msg-b', 'GROUP_B'));
+    // ChannelBase brackets each turn with onPromptStart(chatId, sessionId,
+    // messageId); this is group B's turn, whose session is the shared one.
+    raw['onPromptStart']('GROUP_B', 's-shared', 'msg-b');
+
+    const internals = ch as unknown as {
+      accessToken: string;
+      tokenExpiresAt: number;
+    };
+    internals.accessToken = 'tok';
+    internals.tokenExpiresAt = Date.now() + 3_600_000;
+    mockRequestQQApi.mockResolvedValue({
+      ok: true,
+      status: 204,
+      text: async () => '',
+    });
+
+    const recall = tools.find((tool) => tool.name === 'qq_recall_message');
+    const result = await recall?.handler(
+      { member_openid: 'MEMBER' },
+      { sessionId: 's-shared' },
+    );
+
+    expect(result).toBe('Message recalled (msg-b).');
+    expect(mockRequestQQApi.mock.calls[0]?.[2]).toBe(
+      '/v2/groups/GROUP_B/messages/msg-b',
+    );
+  });
+
+  it('caps and sanitizes the stderr line for an unsanitized failure body', async () => {
+    const tools: Array<{
+      name: string;
+      handler: (
+        args: Record<string, unknown>,
+        context: { sessionId: string },
+      ) => Promise<unknown>;
+    }> = [];
+    const ch = makeChannel(
+      { moderationTools: true },
+      {
+        registerChannelTool: (tool: { name: string }) =>
+          tools.push(tool as never),
+      },
+      {
+        router: {
+          getTarget: () => ({
+            channelName: 'test-bot',
+            chatId: 'G1',
+            isGroup: true,
+          }),
+        },
+      },
+    );
+    const internals = ch as unknown as {
+      accessToken: string;
+      tokenExpiresAt: number;
+    };
+    internals.accessToken = 'tok';
+    internals.tokenExpiresAt = Date.now() + 3_600_000;
+    mockRequestQQApi.mockResolvedValue({
+      ok: false,
+      status: 502,
+      text: async () => '<html>' + 'x'.repeat(5_000) + '\u001b[31m',
+    });
+
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    let written = '';
+    let result: { text: string; isError?: boolean } | undefined;
+    try {
+      const recall = tools.find((tool) => tool.name === 'qq_recall_message');
+      result = (await recall?.handler(
+        { message_id: 'M1' },
+        { sessionId: 's-1' },
+      )) as { text: string; isError?: boolean };
+      written = stderr.mock.calls.map((call) => String(call[0])).join('');
+    } finally {
+      stderr.mockRestore();
+    }
+
+    // The model-visible half is what the agent relays; the log half is not
+    // the whole contract.
+    expect(result?.isError).toBe(true);
+    expect(result?.text).toContain('qq_recall_message');
+    expect(result?.text).toContain('502');
+    expect(written).toContain('qq_recall_message failed');
+    expect(written.length).toBeLessThan(400);
+    expect(written).not.toContain('\u001b');
+  });
+});
+
+describe('qqbot recent-inbound ring bounds', () => {
+  it('evicts the least recently active chat, not the first inserted', () => {
+    const ch = makeChannel({ moderationTools: true });
+    const raw = ch as unknown as QQChannelRaw;
+    const ring = (ch as unknown as { recentInbound: Map<string, unknown[]> })
+      .recentInbound;
+
+    vi.setSystemTime(1_000);
+    raw['recordRecentInbound']('group-old', 'alice', 'msg-old');
+    vi.setSystemTime(2_000);
+    raw['recordRecentInbound']('group-recent', 'alice', 'msg-r1');
+    for (let i = 0; i < 250; i++) {
+      vi.setSystemTime(3_000 + i);
+      raw['recordRecentInbound'](`group-${i}`, 'alice', `msg-${i}`);
+    }
+    // Touch the first-inserted chat last, so insertion order and activity
+    // order disagree: FIFO would drop group-old, LRU must drop group-recent.
+    vi.setSystemTime(5_000);
+    raw['recordRecentInbound']('group-old', 'alice', 'msg-old-2');
+    for (let i = 250; i < 310; i++) {
+      vi.setSystemTime(6_000 + i);
+      raw['recordRecentInbound'](`group-${i}`, 'alice', `msg-${i}`);
+    }
+
+    expect(ring.size).toBeLessThanOrEqual(256);
+    expect(raw['recentMemberMessage']('group-recent', 'alice')).toBeUndefined();
+    expect(raw['recentMemberMessage']('group-old', 'alice')).toBe('msg-old-2');
+    expect(raw['recentMemberMessage']('group-309', 'alice')).toBe('msg-309');
+  });
+});
+
+describe('channel construction', () => {
+  it('forwards optionsOverrides to the base channel', () => {
+    const router = { getTarget: vi.fn() };
+    const ch = makeChannel({}, {}, { router });
+    expect((ch as unknown as { router: unknown }).router).toBe(router);
   });
 });
 

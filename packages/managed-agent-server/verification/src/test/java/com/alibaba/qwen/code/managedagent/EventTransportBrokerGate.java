@@ -15,7 +15,7 @@ import com.alibaba.qwen.code.managedagent.event.MessageMaterializer;
 import com.alibaba.qwen.code.managedagent.event.TransportWakeActivator;
 import com.alibaba.qwen.code.managedagent.event.TransportWakeActivator.Outcome;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.EventRecord;
-import com.alibaba.qwen.code.managedagent.persistence.TransportConsumerStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcTransportConsumerStore;
 import com.alibaba.qwen.code.managedagent.session.SessionEventHub;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
@@ -124,7 +124,7 @@ class EventTransportBrokerGate {
     private TransportWakeActivator wakes;
 
     @MockitoSpyBean
-    private TransportConsumerStore consumerStore;
+    private JdbcTransportConsumerStore consumerStore;
 
     @MockitoSpyBean
     private MessageMaterializer materializer;
@@ -958,7 +958,7 @@ class EventTransportBrokerGate {
     private EventRecord storedPublicEvent(String session, long sequence,
             String type) {
         EventRecord event = publicEvent(session, sequence, type);
-        jdbc.update("INSERT INTO ma_public_event (tenant_id, session_id, sequence_id, event_id, turn_id, event_type, data_json, terminal, source_key, gmt_create) VALUES (?, ?, ?, ?, ?, ?, '{}', FALSE, NULL, ?)", TENANT, session, sequence,
+        jdbc.update("INSERT INTO ma_public_event (tenant_id, session_id, sequence_id, event_id, turn_id, event_type, data_json, is_terminal, source_key, gmt_create) VALUES (?, ?, ?, ?, ?, ?, '{}', FALSE, NULL, ?)", TENANT, session, sequence,
                 event.eventId(), event.turnId(), type, event.createdAt());
         jdbc.update("UPDATE ma_event_stream SET last_sequence = ? WHERE"
                 + " tenant_id = ? AND session_id = ? AND stream_kind ="

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useI18n } from '../../i18n';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../ui/tabs';
+import { sanitizeControlChars } from './toolFormatting';
 import styles from './ToolApproval.module.css';
 
 const sectionLabels: Record<string, string> = {
@@ -49,16 +50,23 @@ export function GoalApprovalContent({
   const [view, setView] = useState('overview');
   const sections = splitSections(objective);
   const fullText = content || objective;
+  const objectiveDisplay = sanitizeControlChars(objective);
+  const fullTextDisplay = sanitizeControlChars(fullText);
+  const sectionDisplays = sections.map((section) => ({
+    ...section,
+    text: sanitizeControlChars(section.text),
+  }));
   // Confirmation text can warn that an existing goal will be replaced. Keep
   // that notice in the overview too, rather than hiding it behind a tab.
   const trimmedObjective = objective.trim();
   const prompt = fullText.trimEnd();
-  const notice =
+  const noticeText =
     trimmedObjective && prompt.endsWith(trimmedObjective)
       ? prompt.slice(0, -trimmedObjective.length).trim()
       : fullText !== objective
         ? fullText
         : '';
+  const notice = sanitizeControlChars(noticeText);
 
   return (
     <Tabs
@@ -76,19 +84,19 @@ export function GoalApprovalContent({
       <div className={styles.goalBody} id={id}>
         <TabsContent value="overview" className={styles.goalPanel}>
           {objective && notice && <p className={styles.goalNotice}>{notice}</p>}
-          {sections.length ? (
-            sections.map((section, index) => (
+          {sectionDisplays.length ? (
+            sectionDisplays.map((section, index) => (
               <section key={index} className={styles.goalSection}>
                 <h3>{t(section.label)}</h3>
                 <p>{section.text}</p>
               </section>
             ))
           ) : (
-            <p>{objective || fullText}</p>
+            <p>{objective ? objectiveDisplay : fullTextDisplay}</p>
           )}
         </TabsContent>
         <TabsContent value="full" className={styles.goalPanel}>
-          <p>{fullText}</p>
+          <p>{fullTextDisplay}</p>
         </TabsContent>
       </div>
     </Tabs>

@@ -18,6 +18,22 @@ import {
 type AnyEv = Parameters<ReturnType<typeof createEventMapper>>[0];
 
 describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
+  it('formats marked quota results without touching ordinary text', async () => {
+    const { initializeI18n, setLanguageAsync } = await import(
+      '../../i18n/index.js'
+    );
+    await initializeI18n('zh-TW');
+    try {
+      expect(
+        renderResultDisplay({ type: 'subscription_quota', memberType: 'pro' }),
+      ).toBe('週額度已用完，請在額度恢復後重試。');
+      const text =
+        "You've used up your weekly credits. Please try again after the reset.";
+      expect(renderResultDisplay(text)).toBe(text);
+    } finally {
+      await setLanguageAsync('en');
+    }
+  });
   it('formats native Advisor advice and historical structured reviews', () => {
     expect(
       toolResultEvent('consult', {
@@ -261,6 +277,42 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
         type: 'info',
         text: '⚠  Response stopped due to image safety violations.',
       });
+    });
+
+    it('prefers the provider refusal message', () => {
+      const map = createEventMapper();
+      const out = map({
+        type: 'finished',
+        value: {
+          reason: 'SAFETY',
+          finishMessage: 'Response refused due to cyber-related safety policy.',
+        },
+      } as unknown as AnyEv);
+      expect(out).toContainEqual({
+        type: 'info',
+        text: '⚠  Response refused due to cyber-related safety policy.',
+      });
+    });
+
+    it('keeps the curated notice when a non-safety reason carries provider text', () => {
+      const map = createEventMapper();
+      const out = map({
+        type: 'finished',
+        value: {
+          reason: 'MAX_TOKENS',
+          finishMessage: 'Provider-authored stop detail.',
+        },
+      } as unknown as AnyEv);
+      expect(out).toContainEqual({
+        type: 'info',
+        text: '⚠  Response truncated due to token limits.',
+      });
+      expect(
+        out.some(
+          (item) =>
+            item.type === 'info' && item.text.includes('Provider-authored'),
+        ),
+      ).toBe(false);
     });
   });
 

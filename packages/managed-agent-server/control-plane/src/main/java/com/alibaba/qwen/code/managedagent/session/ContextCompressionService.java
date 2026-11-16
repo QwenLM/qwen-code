@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.managedagent.session;
 
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
-import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionLifecycleStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicContextCompressionOperation;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellContextCompressionOperation;
@@ -17,13 +17,13 @@ import java.util.Map;
 
 @Service
 public class ContextCompressionService {
-    private final AgentStateStore store;
+    private final SessionLifecycleStore store;
     private final RequestDigests digests;
     private final HarnessConnector harness;
     private final ContextCompressionCoordinator coordinator;
     private final ManagedExtensionRecordStore records;
 
-    public ContextCompressionService(AgentStateStore store, RequestDigests digests,
+    public ContextCompressionService(SessionLifecycleStore store, RequestDigests digests,
             HarnessConnector harness, ContextCompressionCoordinator coordinator,
             ManagedExtensionRecordStore records) {
         this.store = store;

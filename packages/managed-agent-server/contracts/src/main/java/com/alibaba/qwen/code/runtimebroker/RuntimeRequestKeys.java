@@ -1,9 +1,11 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import org.apache.commons.codec.digest.DigestUtils;
+
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
 
 public final class RuntimeRequestKeys {
     private RuntimeRequestKeys() { }
@@ -34,23 +36,18 @@ public final class RuntimeRequestKeys {
     }
 
     private static String digest(String... values) {
-        try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            for (String value : values) {
-                if (value == null) {
-                    digest.update(ByteBuffer.allocate(Integer.BYTES)
-                            .putInt(-1).array());
-                } else {
-                    byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
-                    digest.update(ByteBuffer.allocate(Integer.BYTES)
-                            .putInt(bytes.length).array());
-                    digest.update(bytes);
-                }
+        MessageDigest digest = DigestUtils.getSha256Digest();
+        for (String value : values) {
+            if (value == null) {
+                digest.update(ByteBuffer.allocate(Integer.BYTES)
+                        .putInt(-1).array());
+            } else {
+                byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
+                digest.update(ByteBuffer.allocate(Integer.BYTES)
+                        .putInt(bytes.length).array());
+                digest.update(bytes);
             }
-            return java.util.HexFormat.of().formatHex(digest.digest());
-        } catch (NoSuchAlgorithmException exception) {
-            throw new IllegalStateException("SHA-256 is unavailable",
-                    exception);
         }
+        return HexFormat.of().formatHex(digest.digest());
     }
 }

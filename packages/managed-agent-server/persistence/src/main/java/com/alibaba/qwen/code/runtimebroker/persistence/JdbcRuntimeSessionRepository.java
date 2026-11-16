@@ -1,16 +1,12 @@
 package com.alibaba.qwen.code.runtimebroker.persistence;
 
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
-import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
-import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
-import com.alibaba.qwen.code.runtimebroker.transport.CsiFileFinalizeProtocol;
-import com.alibaba.qwen.code.runtimebroker.transport.ManagedCsiFilesProtocol;
 
 import javax.sql.DataSource;
 
@@ -49,87 +45,6 @@ public final class JdbcRuntimeSessionRepository
         }
         return selectSession(connection, scope,
                 BrokerValues.requireId(runtimeSessionId, "runtimeSessionId"), true, 10);
-    }
-
-    public void completeCsiApplication(Connection connection, JdbcCsiApplicationRetirement.Authority authority,
-            JdbcRuntimeBindingRepository bindings, byte[] receipt) throws SQLException {
-        authority.requireConnection(connection);
-        if (authority.stage() != JdbcCsiApplicationRetirement.Stage.CUT || bindings == null
-                || !bindings.usesDataSource(dataSource) || receipt == null || receipt.length > 64 * 1024) {
-            throw new IllegalArgumentException("Original CUT authority and persisted receipt are required");
-        }
-        var original = authority.original();
-        var frozen = ManagedCsiFilesProtocol.parse(authority.frozenBytes(), 32 * 1024 * 1024);
-        var binding = bindings.findByIdForUpdate(connection, original.bindingId());
-        if (binding == null || !binding.getRequest().equals(original.request()) || binding.getGeneration() != 1
-                || binding.getVersion() != original.version()) {
-            throw new IllegalArgumentException("Original binding is required");
-        }
-        com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding context;
-        try (var statement = connection.prepareStatement("SELECT * FROM ma_session"
-                + " WHERE tenant_id = ? AND session_id = ? FOR UPDATE")) {
-            statement.setQueryTimeout(10);
-            JdbcRepositorySupport.setIdentity(statement, 1, original.request().getScope().getTenantId());
-            JdbcRepositorySupport.setIdentity(statement, 2, original.request().getIsolationKey());
-            try (var row = statement.executeQuery()) {
-                if (!row.next() || !row.getBoolean("csi_guard")) {
-                    throw new IllegalArgumentException("Original managed Session is required");
-                }
-                context = new com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(row, "tenant_id"),
-                        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(row, "workspace_id"), row.getLong("workspace_generation"), com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(row, "workspace_storage_id"),
-                        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(row, "cwd_relative"), com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(row, "context_config_ref"), row.getLong("context_revision"));
-                if (row.next()) {
-                    throw new IllegalArgumentException("Ambiguous original managed Session");
-                }
-            }
-        }
-        var operation = new java.util.LinkedHashMap<String, Object>();
-        operation.put("operation", "finalize");
-        operation.put("retirementId", authority.retirementId());
-        operation.put("preparedCommitSha256", frozen.get("preparedCommitSha256"));
-        operation.put("frozenRequestSha256", CsiNativeActivationProof.sha256(authority.frozenBytes()));
-        operation.put("cutSha256", CsiNativeActivationProof.sha256(authority.cutBytes()));
-        var expected = CsiFileFinalizeProtocol.request(binding, context, operation);
-        var response = CsiFileFinalizeProtocol.response(receipt, expected);
-        if (!java.util.Objects.equals(frozen.get("preCutObservationSha256"), response.get("preCutObservationSha256"))) {
-            throw new IllegalArgumentException("Original observation is required");
-        }
-        try (var statement = connection.prepareStatement("SELECT finalize_receipt_bytes, finalize_receipt_sha256"
-                + " FROM ma_operation WHERE operation_key = ? AND operation_kind = 'CSI_RETIREMENT'"
-                + " AND tenant_id = ? AND operation_id = ? AND target_kind = 'RUNTIME_BINDING'"
-                + " AND target_key = ? AND target_id = ? AND target_revision = ?"
-                + " AND progress_stage = 'CUT' AND progress_version = 3 FOR UPDATE")) {
-            statement.setQueryTimeout(10);
-            statement.setString(1, com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key("CSI_RETIREMENT", original.request().getScope().getTenantId(), authority.retirementId()));
-            JdbcRepositorySupport.setIdentity(statement, 2, original.request().getScope().getTenantId());
-            JdbcRepositorySupport.setIdentity(statement, 3, authority.retirementId());
-            statement.setString(4, com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(original.bindingId()));
-            JdbcRepositorySupport.setIdentity(statement, 5, original.bindingId());
-            statement.setLong(6, original.generation());
-            try (var row = statement.executeQuery()) {
-                if (!row.next() || !java.util.Arrays.equals(receipt, row.getBytes(1))
-                        || !CsiNativeActivationProof.sha256(receipt).equals(row.getString(2)) || row.next()) {
-                    throw new IllegalArgumentException("Exact persisted original receipt is required");
-                }
-            }
-        }
-        var saved = findByIdForUpdate(connection, original.request().getScope(), original.request().getIsolationKey());
-        original.requireSession(saved);
-        if (saved.getState() != RuntimeSessionRecord.State.READY || saved.getVersion() == Long.MAX_VALUE) {
-            throw new IllegalArgumentException("Original READY logical Session is required");
-        }
-        try (var statement = connection.prepareStatement("UPDATE ma_runtime_session SET session_state = 'RELEASED',"
-                + " record_version = record_version + 1 WHERE scope_key = ? AND runtime_session_id = ?"
-                + " AND binding_id = ? AND runtime_generation = 1 AND session_state = 'READY' AND record_version = ?")) {
-            statement.setQueryTimeout(10);
-            statement.setString(1, JdbcRepositorySupport.scopeKey(original.request().getScope()));
-            JdbcRepositorySupport.setIdentity(statement, 2, original.request().getIsolationKey());
-            JdbcRepositorySupport.setIdentity(statement, 3, original.bindingId());
-            statement.setLong(4, saved.getVersion());
-            if (statement.executeUpdate() != 1) {
-                throw new SQLException("Original logical Session completion failed");
-            }
-        }
     }
 
     static List<RuntimeSessionRecord> lockActiveSessions(Connection connection,
@@ -194,20 +109,6 @@ public final class JdbcRuntimeSessionRepository
             RuntimeSessionRecord candidate) {
         requireCandidate(candidate);
         RuntimeScope scope = candidate.getSession().getScope();
-        if (CsiFilesRetirementProfile.isProfile(scope)) {
-            return JdbcRepositorySupport.transaction(dataSource, connection -> {
-                var original = JdbcCsiFilesRetirementGuard.lockRuntimeSession(connection, candidate);
-                original.requireAdmission();
-                JdbcCsiFilesRetirementGuard.requireSingleSession(connection, original);
-                RuntimeSessionRecord existing = selectSession(connection, scope,
-                        candidate.getRuntimeSessionId(), true);
-                if (existing != null) {
-                    return requireSameIdentity(existing, candidate);
-                }
-                insertSession(connection, candidate);
-                return candidate;
-            });
-        }
         RuntimeSessionRecord existing = findById(scope,
                 candidate.getRuntimeSessionId());
         if (existing != null) {
@@ -346,22 +247,8 @@ public final class JdbcRuntimeSessionRepository
     public RuntimeSessionRecord compareAndSet(RuntimeSessionRecord expected,
             RuntimeSessionRecord replacement) {
         requireReplacement(expected, replacement);
-        return JdbcRepositorySupport.transaction(dataSource, connection -> {
-            JdbcCsiFilesRetirementGuard.Original original =
-                    JdbcCsiFilesRetirementGuard.lockRuntimeSession(connection, expected);
-            if (original != null) {
-                JdbcCsiFilesRetirementGuard.requireSingleSession(connection, original);
-                if (replacement.getState() == RuntimeSessionRecord.State.RELEASING
-                        || replacement.getState() == RuntimeSessionRecord.State.RELEASED) {
-                    throw CsiFilesRetirementProfile.releaseUnavailable();
-                }
-                if (expected.getState() == RuntimeSessionRecord.State.ACQUIRING
-                        && replacement.getState() == RuntimeSessionRecord.State.READY) {
-                    original.requireAdmission();
-                }
-            }
-            return compareAndSet(connection, expected, replacement);
-        });
+        return JdbcRepositorySupport.transaction(dataSource, connection ->
+            compareAndSet(connection, expected, replacement));
     }
 
     static RuntimeSessionRecord compareAndSet(Connection connection, RuntimeSessionRecord expected,
@@ -427,6 +314,12 @@ public final class JdbcRuntimeSessionRepository
     @Override
     public List<RuntimeSessionRecord> findActiveByHarnessSession(String tenantId, String harnessSessionId,
             RuntimeSessionRecord after, int limit) {
+        return findActiveByHarnessSession(tenantId, harnessSessionId, after, limit, null);
+    }
+
+    @Override
+    public List<RuntimeSessionRecord> findActiveByHarnessSession(String tenantId, String harnessSessionId,
+            RuntimeSessionRecord after, int limit, String excludeTurnKind) {
         BrokerValues.requireId(tenantId, "tenantId");
         BrokerValues.requireId(harnessSessionId, "harnessSessionId");
         if (limit < 1 || limit > 100) {
@@ -438,6 +331,7 @@ public final class JdbcRuntimeSessionRepository
                     + " FROM ma_runtime_session WHERE harness_session_id = ? AND tenant_id = ?"
                     + " AND session_state NOT IN ('RELEASED', 'FAILED')"
                     + " AND (scope_key > ? OR scope_key = ? AND runtime_session_id > ?)"
+                    + (excludeTurnKind == null ? "" : " AND turn_kind <> ?")
                     + " ORDER BY scope_key, runtime_session_id LIMIT ?")) {
                 String afterScope = after == null ? "" : JdbcRepositorySupport.scopeKey(after.getSession().getScope());
                 JdbcRepositorySupport.setIdentity(statement, 1, harnessSessionId);
@@ -445,7 +339,12 @@ public final class JdbcRuntimeSessionRepository
                 statement.setString(3, afterScope);
                 statement.setString(4, afterScope);
                 JdbcRepositorySupport.setIdentity(statement, 5, after == null ? "" : after.getRuntimeSessionId());
-                statement.setInt(6, limit);
+                if (excludeTurnKind == null) {
+                    statement.setInt(6, limit);
+                } else {
+                    statement.setString(6, excludeTurnKind);
+                    statement.setInt(7, limit);
+                }
                 try (ResultSet rows = statement.executeQuery()) {
                     while (rows.next()) {
                         result.add(mapSession(rows));

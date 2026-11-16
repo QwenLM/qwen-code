@@ -148,6 +148,7 @@ describe('runStatus', () => {
         needsHuman: [item],
         worktreePath: seven.worktreePath,
         worktreeExists: true,
+        inPlace: false,
         // A plain directory, with no gitfile: not a git directory to trust.
         gitTrusted: false,
         // A plain directory: git cannot tell what it holds.
@@ -826,5 +827,34 @@ describe('runStatus', () => {
       execFileSync('git', ['worktree', 'prune'], { cwd: repo });
       rmSync(linked, { recursive: true, force: true });
     }
+  });
+
+  it('reports an in-place watch from the checkout the state names', () => {
+    commitBase();
+    const sha = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: repo,
+      encoding: 'utf8',
+    }).trim();
+    // The checkout is the clone's main worktree: a .git directory, which
+    // the in-place trust check accepts and the watch's own .qwen/tmp files
+    // are not the user's work.
+    write(7, {
+      inPlace: true,
+      worktreePath: repo,
+      branch: 'main',
+      headRefName: 'main',
+      lastKnownHeadSha: sha,
+    });
+    expect(runStatus({}).watches[0]).toMatchObject({
+      inPlace: true,
+      worktreePath: repo,
+      worktreeExists: true,
+      gitTrusted: true,
+      worktreeWork: null,
+    });
+    writeFileSync(join(repo, 'dirty.txt'), 'x');
+    expect(runStatus({}).watches[0]!.worktreeWork).toBe(
+      'it has uncommitted changes',
+    );
   });
 });

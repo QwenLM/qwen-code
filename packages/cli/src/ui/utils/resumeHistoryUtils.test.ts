@@ -754,6 +754,51 @@ describe('resumeHistoryUtils', () => {
     ]);
   });
 
+  it('restores a Mod’s own prompt as the row naming the Mod, asUser or not', () => {
+    const framed = (text: string) => ({
+      parts: [
+        { text: `<qwen:mod-prompt mod="lint">\n${text}\n</qwen:mod-prompt>` },
+      ],
+    });
+    const conversation = {
+      messages: [
+        {
+          type: 'user',
+          provenance: 'mod_prompt',
+          promptId: 'prompt-2',
+          message: framed('List the TODOs'),
+          systemPayload: {
+            displayText: 'List the TODOs',
+            hookContext: '',
+            mod: 'lint',
+          },
+        },
+        {
+          type: 'user',
+          provenance: 'mod_prompt',
+          message: { parts: [{ text: 'Say done' }] },
+          systemPayload: {
+            displayText: 'Say done',
+            hookContext: '',
+            mod: 'lint',
+            asUser: true,
+          },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const items = buildResumedHistoryItems(
+      { conversation } as ResumedSessionData,
+      makeConfig({}),
+      30,
+    );
+
+    expect(items).toEqual([
+      { id: 31, type: 'notification', text: 'Mod lint: List the TODOs' },
+      { id: 32, type: 'notification', text: 'Mod lint: Say done' },
+    ]);
+  });
+
   it('restores ordinary user messages from clean display text', () => {
     const conversation = {
       messages: [

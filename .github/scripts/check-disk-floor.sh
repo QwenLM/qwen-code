@@ -11,9 +11,23 @@
 # Usage: check-disk-floor.sh [DIR ...]
 # With no directories, checks GITHUB_WORKSPACE and RUNNER_TEMP.
 #
+# The OS temp directory (TMPDIR, defaulting to /tmp) is ALWAYS checked in
+# addition to the caller's directories (deduplicated): on 2026-10-31 the hz
+# fleet's /tmp tmpfs hit 100% inodes while the workspace and RUNNER_TEMP sat
+# on a data disk with millions free, so every gate was green and the jobs
+# died on mkdtemp ENOSPC mid-suite. os.tmpdir() writes (node, surefire,
+# tsx, git subprocess temp files) do not follow RUNNER_TEMP.
+#
 # Floors, checked per directory's filesystem (env-overridable):
 #   DISK_FLOOR_MIN_FREE_KB      default 2097152 (2 GiB)
 #   DISK_FLOOR_MIN_FREE_INODES  default 100000
+#   DISK_FLOOR_MAX_USED_PCT     unset (disabled); 1-100 percent ceiling
+#
+# The percent ceiling exists for the RocketMQ broker lanes: the broker refuses
+# writes on its own used-ratio rule (CL/CQ/INDEX 0.94 in the #16003 incident)
+# while the volume still reports tens of GiB free, so absolute free bytes
+# cannot express that threshold. It is opt-in and per job; the shared default
+# stays absolute so one lane's calibration cannot move another lane's gate.
 #
 # Every check emits a DISKFLOOR sample tagged with runner and run ids so a
 # breached gate can be correlated with the GitHub job that hit it.
@@ -21,6 +35,7 @@ set -u
 
 MIN_FREE_KB="${DISK_FLOOR_MIN_FREE_KB:-2097152}"
 MIN_FREE_INODES="${DISK_FLOOR_MIN_FREE_INODES:-100000}"
+MAX_USED_PCT="${DISK_FLOOR_MAX_USED_PCT:-}"
 
 validate_floor_override() {
   local name="$1"
@@ -35,10 +50,39 @@ validate_floor_override() {
 validate_floor_override DISK_FLOOR_MIN_FREE_KB "$MIN_FREE_KB"
 validate_floor_override DISK_FLOOR_MIN_FREE_INODES "$MIN_FREE_INODES"
 
+validate_percent_override() {
+  local name="$1"
+  local value="$2"
+
+  if [ -z "$value" ]; then
+    return 0
+  fi
+  if ! [[ "$value" =~ ^[0-9]{1,3}$ ]] || [ "$value" -lt 1 ] || [ "$value" -gt 100 ]; then
+    echo "::error::${name} must be a percentage between 1 and 100"
+    exit 1
+  fi
+}
+
+validate_percent_override DISK_FLOOR_MAX_USED_PCT "$MAX_USED_PCT"
+
 TAG="runner[${RUNNER_NAME:-unknown}] run[${GITHUB_RUN_ID:-local}/${GITHUB_RUN_ATTEMPT:-1}] job[${GITHUB_JOB:-check-disk-floor}]"
 
 if [ "$#" -eq 0 ]; then
   set -- "${GITHUB_WORKSPACE:-.}" "${RUNNER_TEMP:-/tmp}"
+fi
+
+# Always include the OS temp directory: it is a distinct filesystem from the
+# caller's directories on this fleet, and its exhaustion is exactly the
+# failure class this gate exists to catch before the heavy step.
+os_tmp="${TMPDIR:-/tmp}"
+for existing in "$@"; do
+  if [ "$existing" = "$os_tmp" ]; then
+    os_tmp=''
+    break
+  fi
+done
+if [ -n "$os_tmp" ]; then
+  set -- "$@" "$os_tmp"
 fi
 
 status=0
@@ -52,13 +96,15 @@ for dir in "$@"; do
   space_line="$(df -kP "$dir" 2>/dev/null | tail -n 1 || true)"
   inode_line="$(df -kPi "$dir" 2>/dev/null | tail -n 1 || true)"
   avail_kb="$(awk '{print $4}' <<< "$space_line")"
+  used_pct="$(awk '{print $5}' <<< "$space_line" | tr -d '%')"
   mount="$(awk '{for (i = 6; i <= NF; i++) printf "%s%s", $i, (i < NF ? " " : ""); print ""}' <<< "$space_line")"
   free_inodes="$(awk '{print $4}' <<< "$inode_line")"
 
   case "$avail_kb" in '' | *[!0-9]*) avail_kb='' ;; esac
   case "$free_inodes" in '' | *[!0-9]*) free_inodes='' ;; esac
+  case "$used_pct" in '' | *[!0-9]*) used_pct='' ;; esac
 
-  echo "DISKFLOOR $(date -u +%Y-%m-%dT%H:%M:%SZ) ${TAG} dir[${dir}] fs[${mount}] avail_kb[${avail_kb:-unknown}] floor_kb[${MIN_FREE_KB}] free_inodes[${free_inodes:-unknown}] floor_inodes[${MIN_FREE_INODES}]"
+  echo "DISKFLOOR $(date -u +%Y-%m-%dT%H:%M:%SZ) ${TAG} dir[${dir}] fs[${mount}] avail_kb[${avail_kb:-unknown}] floor_kb[${MIN_FREE_KB}] used_pct[${used_pct:-unknown}] max_used_pct[${MAX_USED_PCT:-unset}] free_inodes[${free_inodes:-unknown}] floor_inodes[${MIN_FREE_INODES}]"
 
   if [ -z "$avail_kb" ] && [ -z "$free_inodes" ]; then
     echo "::warning::could not read disk usage for ${dir}; letting the job proceed"
@@ -67,6 +113,10 @@ for dir in "$@"; do
 
   if [ -n "$avail_kb" ] && [ "$avail_kb" -lt "$MIN_FREE_KB" ]; then
     echo "::error::Disk floor breached on ${RUNNER_NAME:-unknown}: ${dir} has ${avail_kb} KiB free, below the ${MIN_FREE_KB} KiB floor. Failing before the heavy step instead of dying on ENOSPC mid-run — re-run the job to land on a host with headroom."
+    status=1
+  fi
+  if [ -n "$MAX_USED_PCT" ] && [ -n "$used_pct" ] && [ "$used_pct" -ge "$MAX_USED_PCT" ]; then
+    echo "::error::Disk floor breached on ${RUNNER_NAME:-unknown}: ${dir} is ${used_pct}% used, at or above the ${MAX_USED_PCT}% ceiling. The RocketMQ broker refuses writes on its own used-ratio rule while free bytes still look healthy (#16003) — re-run the job to land on a host with headroom."
     status=1
   fi
   if [ -n "$free_inodes" ] && [ "$free_inodes" -lt "$MIN_FREE_INODES" ]; then

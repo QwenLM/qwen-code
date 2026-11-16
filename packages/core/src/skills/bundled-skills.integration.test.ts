@@ -72,7 +72,7 @@ describe('bundled SKILL.md files', () => {
   // MAX_SKILL_LISTING_CHARS, but that trim keeps bundled entries verbatim, so
   // whatever the bundled entries take is taken from the room left for the
   // user's project, user and extension skills and model-invocable commands
-  // (#12472). At 6,549 characters for 15 entries, that room is about 1,450.
+  // (#12472). At 6,742 characters for 14 entries, that room is about 1,250.
   // A failure here means compress a bundled frontmatter, or raise this number
   // as a decision about how much of the listing bundled skills may take.
   const BUNDLED_LISTING_BUDGET = 6_800;

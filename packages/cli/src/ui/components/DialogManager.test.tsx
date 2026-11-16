@@ -38,7 +38,7 @@ const createUIState = (overrides: Partial<UIState>): UIState =>
 
 const dialogTree = (uiState: UIState) => (
   <UIStateContext.Provider value={uiState}>
-    <UIActionsContext.Provider value={{} as UIActions}>
+    <UIActionsContext.Provider value={{ auth: {} } as UIActions}>
       <DialogManager addItem={vi.fn()} terminalWidth={100} />
     </UIActionsContext.Provider>
   </UIStateContext.Provider>
@@ -51,6 +51,31 @@ const renderDialogManager = (
   renderWithProviders(dialogTree(uiState), { config: config as Config });
 
 describe('DialogManager', () => {
+  it.each([14, 24, 40])(
+    'keeps the full provider menu at %i rows',
+    (terminalHeight) => {
+      const uiState = createUIState({
+        terminalHeight,
+        staticExtraHeight: 3,
+        auth: { isAuthDialogOpen: true } as UIState['auth'],
+      });
+      const { lastFrame, unmount } = renderDialogManager(uiState, {
+        getAuthType: () => undefined,
+        getContentGeneratorConfig: () => ({ model: 'test-model' }),
+      });
+      try {
+        const fullFrame = lastFrame();
+        expect(fullFrame).toContain('Connect a Provider');
+        expect(fullFrame).toContain('Custom Provider');
+        expect(fullFrame).toContain('Terms of Services and Privacy Notice:');
+        expect(fullFrame).toMatch(
+          /Token Plan or Standard API Key[^\n]*\n│\s*│\n/,
+        );
+      } finally {
+        unmount();
+      }
+    },
+  );
   // The picker's list comes from the hook, which re-reads the style
   // directories on every open; wiring it to the built-ins instead would hide
   // every custom style and mount the rows during the disk read.
@@ -80,6 +105,38 @@ describe('DialogManager', () => {
       expect(frame).toContain('Loading output styles…');
       expect(frame).not.toContain('1. default');
     });
+  });
+
+  describe('project hooks approval dialog', () => {
+    it.each([true, false])(
+      'keeps the dialog inside a 24-row terminal (constrainHeight: %s)',
+      (constrainHeight) => {
+        const { lastFrame } = renderDialogManager(
+          createUIState({
+            constrainHeight,
+            terminalHeight: 24,
+            isProjectHooksApprovalDialogOpen: true,
+            pendingProjectHooks: {
+              approval: {
+                root: '/r',
+                hooks: {},
+                resolved: {},
+                env: { files: {}, settings: null },
+              },
+              lines: Array.from({ length: 40 }, (_, i) => `Stop  hook-${i}.sh`),
+            },
+          }),
+          {},
+        );
+
+        const frame = lastFrame() ?? '';
+        expect(frame.split('\n').length).toBeLessThanOrEqual(24);
+        expect(frame).toContain('Untrusted hooks in .qwen/settings.json');
+        expect(frame).toContain('hook-0.sh');
+        expect(frame).toContain('more (see .qwen/settings.json)');
+        expect(frame).toContain('Approve these hooks');
+      },
+    );
   });
 
   describe('provider update prompt', () => {

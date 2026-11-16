@@ -9,6 +9,7 @@ import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
+import { execFileSync } from 'node:child_process';
 import * as tar from 'tar';
 import {
   acquireLock,
@@ -22,6 +23,7 @@ import {
   isSafeTarEntry,
   isSafeTarLinkTarget,
 } from './standalone-update.js';
+import { getInstallationInfo } from '../utils/installationInfo.js';
 
 const mockFetch = vi.hoisted(() => vi.fn());
 vi.mock('../utils/load-undici.js', () => ({
@@ -317,6 +319,109 @@ describe('standalone-update', () => {
     );
 
     it.skipIf(process.platform === 'win32')(
+      'refreshes a wrapper that targets a launcher the activated tree lacks',
+      () => {
+        const libDir = path.join(tempDir, '.local', 'lib');
+        const standaloneDir = path.join(libDir, 'qwen-code');
+        const binDir = path.join(tempDir, '.local', 'bin');
+        fs.mkdirSync(path.join(standaloneDir, 'lib'), { recursive: true });
+        fs.writeFileSync(path.join(standaloneDir, 'lib', 'cli-entry.js'), '');
+        fs.mkdirSync(path.join(standaloneDir, 'node', 'bin'), {
+          recursive: true,
+        });
+        fs.writeFileSync(
+          path.join(standaloneDir, 'node', 'bin', 'node'),
+          '#!/bin/sh\n',
+          { mode: 0o755 },
+        );
+        fs.mkdirSync(binDir, { recursive: true });
+        const wrapperPath = path.join(binDir, 'qwen');
+        fs.writeFileSync(
+          wrapperPath,
+          `#!/usr/bin/env sh\nexec '${standaloneDir}/bin/qwen' "$@"\n`,
+          { mode: 0o755 },
+        );
+
+        const origHome = process.env['HOME'];
+        const origShell = process.env['SHELL'];
+        process.env['HOME'] = tempDir;
+        process.env['SHELL'] = '/bin/zsh';
+        try {
+          ensureBinWrapper(standaloneDir, 'linux-x64');
+        } finally {
+          process.env['HOME'] = origHome;
+          process.env['SHELL'] = origShell;
+        }
+
+        const content = fs.readFileSync(wrapperPath, 'utf-8');
+        expect(content).toContain(
+          path.join(standaloneDir, 'lib', 'cli-entry.js'),
+        );
+        expect(content).not.toContain(path.join(standaloneDir, 'bin', 'qwen'));
+      },
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'launches the installed entry point when the archive has no launcher',
+      () => {
+        const libDir = path.join(tempDir, '.local', 'lib');
+        const standaloneDir = path.join(libDir, 'qwen-code');
+        fs.mkdirSync(path.join(standaloneDir, 'lib'), { recursive: true });
+        fs.writeFileSync(path.join(standaloneDir, 'lib', 'cli-entry.js'), '');
+        fs.mkdirSync(path.join(standaloneDir, 'node', 'bin'), {
+          recursive: true,
+        });
+        const marker = path.join(tempDir, 'argv.txt');
+        fs.writeFileSync(
+          path.join(standaloneDir, 'node', 'bin', 'node'),
+          `#!/bin/sh\nprintf '%s\\n' "$@" > '${marker}'\n`,
+          { mode: 0o755 },
+        );
+
+        const origHome = process.env['HOME'];
+        const origShell = process.env['SHELL'];
+        process.env['HOME'] = tempDir;
+        process.env['SHELL'] = '/bin/zsh';
+        try {
+          ensureBinWrapper(standaloneDir, 'linux-x64');
+        } finally {
+          process.env['HOME'] = origHome;
+          process.env['SHELL'] = origShell;
+        }
+
+        execFileSync(path.join(tempDir, '.local', 'bin', 'qwen'), [
+          '--target-version',
+          '1.2.3',
+        ]);
+        expect(fs.readFileSync(marker, 'utf8').trim().split('\n')).toEqual([
+          path.join(standaloneDir, 'lib', 'cli-entry.js'),
+          '--target-version',
+          '1.2.3',
+        ]);
+      },
+    );
+
+    it('writes a cmd wrapper that runs the entry point when the launcher is absent', () => {
+      const libDir = path.join(tempDir, '.local', 'lib');
+      const standaloneDir = path.join(libDir, 'qwen-code');
+      fs.mkdirSync(path.join(standaloneDir, 'lib'), { recursive: true });
+      fs.writeFileSync(path.join(standaloneDir, 'lib', 'cli-entry.js'), '');
+      fs.mkdirSync(path.join(standaloneDir, 'bun'), { recursive: true });
+      fs.writeFileSync(path.join(standaloneDir, 'bun', 'bun.exe'), '');
+
+      ensureBinWrapper(standaloneDir, 'win-x64', 'bun');
+
+      const wrapperPath = path.join(tempDir, '.local', 'bin', 'qwen.cmd');
+      const content = fs.readFileSync(wrapperPath, 'utf-8');
+      expect(content).toContain(path.join(standaloneDir, 'bun', 'bun.exe'));
+      expect(content).toContain(
+        path.join(standaloneDir, 'lib', 'cli-entry.js'),
+      );
+      expect(content).toContain('QWEN_TUI_RENDERER=opentui');
+      expect(content).not.toContain('call "');
+    });
+
+    it.skipIf(process.platform === 'win32')(
       'throws when wrapper creation fails safety validation',
       () => {
         const libDir = path.join(tempDir, 'bad\npath', '.local', 'lib');
@@ -433,6 +538,7 @@ describe('standalone-update', () => {
   describe('download sources', () => {
     const baseUrl = 'https://downloads.example.com/qwen-code';
     const filename = 'qwen-code-linux-x64.tar.gz';
+    const bunFilename = 'qwen-code-linux-x64-opentui-preview.tar.gz';
     let standaloneDir: string;
     let originalManifest: string;
 
@@ -449,10 +555,10 @@ describe('standalone-update', () => {
       );
     });
 
-    function expectInstallationPreserved() {
+    function expectInstallationPreserved(expectedManifest = originalManifest) {
       expect(
         fs.readFileSync(path.join(standaloneDir, 'manifest.json'), 'utf8'),
-      ).toBe(originalManifest);
+      ).toBe(expectedManifest);
       expect(fs.existsSync(`${standaloneDir}.old`)).toBe(false);
       expect(fs.existsSync(path.join(tempDir, '.qwen-update.lock'))).toBe(
         false,
@@ -468,14 +574,20 @@ describe('standalone-update', () => {
       options: {
         badChecksum?: boolean;
         runnable?: boolean;
+        reportedVersion?: string;
+        manifestVersion?: string;
+        nameless?: boolean;
+        target?: string;
         runtime?: 'node' | 'bun';
         manifest?: Record<string, unknown>;
         rawManifest?: string;
-        target?: string;
         interpreterIdentity?: string;
         interpreterPath?: string;
         interpreterExitCode?: number;
         cliSource?: string;
+        binless?: boolean;
+        entryless?: boolean;
+        omitRuntime?: boolean;
       } = {},
     ) {
       const fixtureTarget = options.target ?? 'linux-x64';
@@ -485,44 +597,70 @@ describe('standalone-update', () => {
           : filename;
       const fixture = path.join(tempDir, 'fixture');
       fs.mkdirSync(path.join(fixture, 'qwen-code'), { recursive: true });
+      const manifest: Record<string, unknown> = {
+        target: fixtureTarget,
+        version: options.manifestVersion ?? '1.2.3',
+        name: '@qwen-code/qwen-code',
+        ...(options.omitRuntime
+          ? {
+              nodeArchive: 'node-v22.23.2-linux-x64.tar.xz',
+              createdAt: '2026-08-22T00:00:00.000Z',
+            }
+          : { runtime: options.runtime ?? 'node' }),
+      };
+      if (options.nameless) delete manifest['name'];
       fs.writeFileSync(
         path.join(fixture, 'qwen-code', 'manifest.json'),
         options.rawManifest ??
-          JSON.stringify({
-            target: fixtureTarget,
-            version: '1.2.3',
-            name: '@qwen-code/qwen-code',
-            runtime: options.runtime ?? 'node',
-            ...options.manifest,
-          }),
+          JSON.stringify({ ...manifest, ...options.manifest }),
       );
-      if (options.runnable) {
-        fs.mkdirSync(
-          path.join(fixture, 'qwen-code', options.runtime ?? 'node', 'bin'),
-          {
-            recursive: true,
-          },
-        );
+      const runtime = options.runtime ?? 'node';
+      // A runnable tree exists whenever the caller stages a working CLI or a
+      // deliberately wrong version; `runnable` alone prints the expected one.
+      if (options.runnable || options.reportedVersion !== undefined) {
+        fs.mkdirSync(path.join(fixture, 'qwen-code', runtime, 'bin'), {
+          recursive: true,
+        });
         fs.mkdirSync(path.join(fixture, 'qwen-code', 'lib'));
         fs.writeFileSync(
-          path.join(
-            fixture,
-            'qwen-code',
-            options.runtime ?? 'node',
-            'bin',
-            options.runtime ?? 'node',
-          ),
-          `#!/bin/sh\nif [ "$1" = "-e" ]; then\n  printf '%s\\n' '${options.interpreterIdentity ?? JSON.stringify({ runtime: options.runtime ?? 'node', platform: fixtureTarget.split('-')[0], arch: fixtureTarget.split('-')[1] })}'\n  exit ${options.interpreterExitCode ?? 0}\nelse\n  printf "1.2.3\\n"\nfi\n`,
+          path.join(fixture, 'qwen-code', runtime, 'bin', runtime),
+          `#!/bin/sh\nif [ "$1" = "-e" ]; then\n  printf '%s\\n' '${options.interpreterIdentity ?? JSON.stringify({ runtime, platform: fixtureTarget.split('-')[0], arch: fixtureTarget.split('-')[1] })}'\n  exit ${options.interpreterExitCode ?? 0}\nelse\n  printf '%s\\n' '${options.reportedVersion ?? '1.2.3'}'\nfi\n`,
           { mode: 0o755 },
         );
         fs.writeFileSync(path.join(fixture, 'qwen-code', 'lib', 'cli.js'), '');
-        fs.writeFileSync(
-          path.join(fixture, 'qwen-code', 'lib', 'cli-entry.js'),
-          'import "./cli.js";',
-        );
+        // The shipped launcher execs lib/cli-entry.js; `entryless` stages a
+        // repacked archive without it.
+        if (!options.entryless) {
+          fs.writeFileSync(
+            path.join(fixture, 'qwen-code', 'lib', 'cli-entry.js'),
+            'import "./cli.js";',
+          );
+        }
+        if (runtime === 'bun') {
+          // Mirror installBunRuntime in scripts/create-standalone-package.js:
+          // official bun archives ship the node/bin/node compatibility shim
+          // alongside the real bun/bin/bun interpreter the smoke test runs.
+          fs.mkdirSync(path.join(fixture, 'qwen-code', 'node', 'bin'), {
+            recursive: true,
+          });
+          fs.writeFileSync(
+            path.join(fixture, 'qwen-code', 'node', 'bin', 'node'),
+            '#!/usr/bin/env sh\nexec "$(dirname "$0")/../../bun/bin/bun" "$@"\n',
+            { mode: 0o755 },
+          );
+        }
+        // Official archives ship an executable launcher; `binless` stages a
+        // repacked archive without one.
+        if (!options.binless) {
+          fs.mkdirSync(path.join(fixture, 'qwen-code', 'bin'));
+          fs.writeFileSync(
+            path.join(fixture, 'qwen-code', 'bin', 'qwen'),
+            '#!/bin/sh\nexec "$(dirname "$0")/../node/bin/node" "$(dirname "$0")/../lib/cli.js" "$@"\n',
+            { mode: 0o755 },
+          );
+        }
       }
       if (options.interpreterPath) {
-        const runtime = options.runtime ?? 'node';
         const interpreter = path.join(
           fixture,
           'qwen-code',
@@ -545,12 +683,18 @@ describe('standalone-update', () => {
       const checksum = options.badChecksum
         ? '0'.repeat(64)
         : createHash('sha256').update(archive).digest('hex');
+      // A release root hosts every flavor under one SHA256SUMS, so the
+      // staged archive answers every candidate name; the updater requests the
+      // one matching the installed runtime.
+      const servedFilenames = [archiveFilename, filename, bunFilename];
       mockFetch.mockImplementation(async (url: string) => {
-        if (url.endsWith(`/${archiveFilename}`)) {
+        if (servedFilenames.some((name) => url.endsWith(`/${name}`))) {
           return new Response(new Uint8Array(archive));
         }
         if (url.endsWith('/SHA256SUMS')) {
-          return new Response(`${checksum}  ${archiveFilename}\n`);
+          return new Response(
+            `${servedFilenames.map((name) => `${checksum}  ${name}`).join('\n')}\n`,
+          );
         }
         return new Response('', { status: 404 });
       });
@@ -642,7 +786,7 @@ describe('standalone-update', () => {
           ]);
         }
         // Positive control for both allocation families on the same observer.
-        await serveArchive();
+        await serveArchive({ reportedVersion: '9.9.9' });
         const start = allocations.prefixes.length;
         fs.writeFileSync(
           path.join(standaloneDir, 'manifest.json'),
@@ -1221,7 +1365,6 @@ describe('standalone-update', () => {
         { target: 'linux-arm64' },
         'does not match the expected target, runtime and version',
       ],
-      ['missing runtime', { runtime: undefined }, 'requires a valid runtime'],
       ['null runtime', { runtime: null }, 'requires a valid runtime'],
       ['unknown runtime', { runtime: 'deno' }, 'requires a valid runtime'],
       [
@@ -1284,6 +1427,27 @@ describe('standalone-update', () => {
                 entry.startsWith('qwen-code-update-'),
             ),
         ).toBe(false);
+      },
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'accepts a pre-v0.23.0 downloaded manifest without a runtime field',
+      async () => {
+        vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
+        await serveArchive({
+          runnable: true,
+          omitRuntime: true,
+          manifestVersion: '0.22.0',
+          reportedVersion: '0.22.0',
+        });
+        await expect(
+          performStandaloneUpdate(standaloneDir, '0.22.0'),
+        ).resolves.toBe('done');
+        expect(
+          JSON.parse(
+            fs.readFileSync(path.join(standaloneDir, 'manifest.json'), 'utf8'),
+          ),
+        ).toMatchObject({ version: '0.22.0' });
       },
     );
 
@@ -1351,6 +1515,223 @@ describe('standalone-update', () => {
       ).toBe(switched);
       expect(fs.existsSync(`${installed}.old`)).toBe(false);
     });
+
+    it.skipIf(process.platform === 'win32')(
+      'preserves the installation when a verified archive reports the wrong version',
+      async () => {
+        vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
+        await serveArchive({ reportedVersion: '9.9.9' });
+        await expect(
+          performStandaloneUpdate(standaloneDir, '1.2.3'),
+        ).rejects.toThrow(
+          'Smoke test failed: CLI version does not match the expected version',
+        );
+        expectInstallationPreserved();
+      },
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'preserves the installation when the smoke-tested binary reports a non-semver version',
+      async () => {
+        vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
+        await serveArchive({ reportedVersion: '01.2.3' });
+        await expect(
+          performStandaloneUpdate(standaloneDir, '1.2.3'),
+        ).rejects.toThrow(
+          'Smoke test failed: CLI version does not match the expected version',
+        );
+        expectInstallationPreserved();
+      },
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'preserves the installation when the smoke-tested binary reports a build-metadata version',
+      async () => {
+        vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
+        // semver.valid accepts build metadata; only the strict regex rejects
+        // it, so this case pins that half of the version predicate here.
+        await serveArchive({ reportedVersion: '1.2.3+build.5' });
+        await expect(
+          performStandaloneUpdate(standaloneDir, '1.2.3'),
+        ).rejects.toThrow('Smoke test failed: unexpected version output');
+        expectInstallationPreserved();
+      },
+    );
+
+    it('preserves the installation when the archive manifest version disagrees with the requested version', async () => {
+      vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
+      await serveArchive({ runnable: true, manifestVersion: '9.9.9' });
+      await expect(
+        performStandaloneUpdate(standaloneDir, '1.2.3'),
+      ).rejects.toThrow(
+        'Downloaded archive does not match the expected target, runtime and version',
+      );
+      expectInstallationPreserved();
+    });
+
+    it('preserves the installation when the archive manifest omits the package name', async () => {
+      vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
+      // Runnable so that only the name predicate can reject the archive. A
+      // nameless manifest would install fine and only break later: the
+      // directory would stop classifying as a managed standalone install.
+      await serveArchive({ runnable: true, nameless: true });
+      await expect(
+        performStandaloneUpdate(standaloneDir, '1.2.3'),
+      ).rejects.toThrow('Invalid downloaded standalone name or version');
+      expectInstallationPreserved();
+    });
+
+    it('preserves the installation when the archive targets a different platform', async () => {
+      vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
+      // Runnable so that only the target predicate can reject the archive.
+      await serveArchive({ runnable: true, target: 'darwin-arm64' });
+      await expect(
+        performStandaloneUpdate(standaloneDir, '1.2.3'),
+      ).rejects.toThrow(
+        'Downloaded archive does not match the expected target, runtime and version',
+      );
+      expectInstallationPreserved();
+    });
+
+    it('preserves the installation when the archive runtime differs from the installed runtime', async () => {
+      vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
+      const bunManifest = JSON.stringify({
+        target: 'linux-x64',
+        version: '0.1.0',
+        runtime: 'bun',
+      });
+      fs.writeFileSync(path.join(standaloneDir, 'manifest.json'), bunManifest);
+      // A Node-flavor archive must not replace an OpenTUI-preview (bun)
+      // install: every other check passes because flavors share name,
+      // target and version.
+      await serveArchive({ runnable: true, runtime: 'node' });
+      await expect(
+        performStandaloneUpdate(standaloneDir, '1.2.3'),
+      ).rejects.toThrow(
+        'Downloaded archive does not match the expected target, runtime and version',
+      );
+      expectInstallationPreserved(bunManifest);
+    });
+
+    it.skipIf(process.platform === 'win32')(
+      'installs a matching bun-flavor archive over a bun-flavor installation',
+      async () => {
+        vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
+        vi.stubEnv('SHELL', '');
+        const bunManifest = JSON.stringify({
+          target: 'linux-x64',
+          version: '0.1.0',
+          runtime: 'bun',
+        });
+        fs.writeFileSync(
+          path.join(standaloneDir, 'manifest.json'),
+          bunManifest,
+        );
+        await serveArchive({ runnable: true, runtime: 'bun' });
+
+        await expect(
+          performStandaloneUpdate(standaloneDir, '1.2.3'),
+        ).resolves.toBe('done');
+
+        // The updater must route to the flavor archive — the node archive
+        // would fail the gate's runtime clause for this install.
+        expect(mockFetch.mock.calls.map(([url]) => url)).toEqual([
+          `${baseUrl}/v1.2.3/${bunFilename}`,
+          `${baseUrl}/v1.2.3/SHA256SUMS`,
+          `${baseUrl}/v1.2.3/SHA256SUMS.sig`,
+        ]);
+        // The update preserves the flavor instead of converting the install.
+        expect(
+          JSON.parse(
+            fs.readFileSync(path.join(standaloneDir, 'manifest.json'), 'utf8'),
+          ),
+        ).toMatchObject({ version: '1.2.3', runtime: 'bun' });
+      },
+    );
+
+    it('preserves the installation when a bun-flavor archive targets a node installation', async () => {
+      vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
+      // The updater requests the node archive for a node install, so a
+      // mirror serving the bun flavor under that name must be rejected.
+      await serveArchive({ runnable: true, runtime: 'bun' });
+      await expect(
+        performStandaloneUpdate(standaloneDir, '1.2.3'),
+      ).rejects.toThrow(
+        'Downloaded archive does not match the expected target, runtime and version',
+      );
+      expectInstallationPreserved();
+    });
+
+    it.skipIf(process.platform === 'win32')(
+      'accepts an archive without a launcher once the entry point runs',
+      async () => {
+        vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
+        // The standalone-runtime harness repacks a minimal runnable tree without
+        // bin/qwen; the archive contract is the entry point plus the bundled
+        // runtime, and the wrapper falls back to the entry point.
+        const hostTarget = `${process.platform}-${process.arch}`;
+        fs.writeFileSync(
+          path.join(standaloneDir, 'manifest.json'),
+          JSON.stringify({ target: hostTarget, version: '0.1.0' }),
+        );
+        await serveArchive({
+          runnable: true,
+          binless: true,
+          target: hostTarget,
+        });
+        await expect(
+          performStandaloneUpdate(standaloneDir, '1.2.3'),
+        ).resolves.toBe('done');
+        expect(
+          JSON.parse(
+            fs.readFileSync(path.join(standaloneDir, 'manifest.json'), 'utf8'),
+          ),
+        ).toMatchObject({ version: '1.2.3' });
+
+        const originalArgv = process.argv;
+        process.argv = [...originalArgv];
+        process.argv[1] = path.join(standaloneDir, 'lib', 'cli.js');
+        try {
+          // The activated tree must still classify as standalone, or automatic
+          // updates and exact-version updates silently stop applying to it.
+          const info = getInstallationInfo(
+            path.join(testRoot, 'project'),
+            false,
+          );
+          expect(info.isStandalone).toBe(true);
+          expect(info.standaloneDir).toBe(standaloneDir);
+        } finally {
+          process.argv = originalArgv;
+        }
+      },
+    );
+
+    it('preserves the installation when the archive omits the launcher entry point', async () => {
+      vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
+      // The fixture interpreter ignores its arguments, so the smoke test's
+      // own lib/cli-entry.js probe exits 0 here; only this gate clause
+      // rejects the entryless tree. In production smokeTest also execs it.
+      await serveArchive({ runnable: true, entryless: true });
+      await expect(
+        performStandaloneUpdate(standaloneDir, '1.2.3'),
+      ).rejects.toThrow(
+        'Downloaded archive is missing the standalone executable layout (bundled runtime and lib/cli-entry.js)',
+      );
+      expectInstallationPreserved();
+    });
+
+    it.each(['01.2.3', '1.2.3-01', '1.2.3+build.5'])(
+      'preserves the installation when the archive manifest version is not valid semver: %s',
+      async (manifestVersion) => {
+        vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
+        // Runnable so that only the version predicates can reject the archive.
+        await serveArchive({ runnable: true, manifestVersion });
+        await expect(
+          performStandaloneUpdate(standaloneDir, '1.2.3'),
+        ).rejects.toThrow('Invalid downloaded standalone name or version');
+        expectInstallationPreserved();
+      },
+    );
 
     it.skipIf(process.platform === 'win32')(
       'prepares a verified archive without changing the installation, then activates offline',
@@ -1445,6 +1826,76 @@ describe('standalone-update', () => {
       },
     );
 
+    it.skipIf(process.platform === 'win32')(
+      'installs an explicit downgrade and keeps the newer installation for rollback',
+      async () => {
+        vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
+        vi.stubEnv('SHELL', '');
+        await serveArchive({
+          manifestVersion: '0.0.9',
+          reportedVersion: '0.0.9',
+        });
+        // Nested two levels so the bin wrapper the update writes lands in
+        // <tempDir>/bin instead of leaking into the shared os.tmpdir().
+        const installed = path.join(tempDir, 'install', 'qwen-code');
+        fs.mkdirSync(installed, { recursive: true });
+        fs.writeFileSync(
+          path.join(installed, 'manifest.json'),
+          originalManifest,
+        );
+
+        await expect(performStandaloneUpdate(installed, '0.0.9')).resolves.toBe(
+          'done',
+        );
+
+        expect(
+          JSON.parse(
+            fs.readFileSync(path.join(installed, 'manifest.json'), 'utf8'),
+          ),
+        ).toMatchObject({ version: '0.0.9' });
+        expect(
+          fs.readFileSync(
+            path.join(`${installed}.old`, 'manifest.json'),
+            'utf8',
+          ),
+        ).toBe(originalManifest);
+        expect(fs.existsSync(path.join(tempDir, 'bin', 'qwen'))).toBe(true);
+      },
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'reinstalls when the explicit target equals the installed version',
+      async () => {
+        vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
+        vi.stubEnv('SHELL', '');
+        await serveArchive({
+          manifestVersion: '0.1.0',
+          reportedVersion: '0.1.0',
+        });
+        const installed = path.join(tempDir, 'install', 'qwen-code');
+        fs.mkdirSync(installed, { recursive: true });
+        fs.writeFileSync(
+          path.join(installed, 'manifest.json'),
+          originalManifest,
+        );
+
+        await expect(performStandaloneUpdate(installed, '0.1.0')).resolves.toBe(
+          'done',
+        );
+
+        // The version alone cannot distinguish a reinstall from a no-op; the
+        // archive's lib/cli.js only exists if the replacement really ran.
+        expect(fs.existsSync(path.join(installed, 'lib', 'cli.js'))).toBe(true);
+        expect(
+          fs.readFileSync(
+            path.join(`${installed}.old`, 'manifest.json'),
+            'utf8',
+          ),
+        ).toBe(originalManifest);
+        expect(fs.existsSync(path.join(tempDir, 'bin', 'qwen'))).toBe(true);
+      },
+    );
+
     it('cleans downloaded archives after cancellation, verification failure and activation failure', async () => {
       vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
       for (const name of ['TMPDIR', 'TEMP', 'TMP']) vi.stubEnv(name, tempDir);
@@ -1468,7 +1919,9 @@ describe('standalone-update', () => {
 
         const failed = await prepareStandaloneUpdate(standaloneDir, '1.2.3');
         pending = failed;
-        await expect(failed.activate()).rejects.toThrow('Smoke test failed');
+        await expect(failed.activate()).rejects.toThrow(
+          'Downloaded archive is missing the standalone executable layout (bundled runtime and lib/cli-entry.js)',
+        );
         expect(cachedArchives()).toHaveLength(0);
         expectInstallationPreserved();
 
@@ -1489,11 +1942,14 @@ describe('standalone-update', () => {
         vi.stubEnv('QWEN_UPDATE_BASE_URL', configured);
         await serveArchive();
 
-        // The verified archive deliberately has no runtime, so it cannot replace
-        // the fixture installation even if the download and checksum succeed.
+        // The verified archive deliberately has no entry point, so it cannot
+        // replace the fixture installation even if the download and checksum
+        // succeed: the entry-point gate rejects it before activation.
         await expect(
           performStandaloneUpdate(standaloneDir, '1.2.3'),
-        ).rejects.toThrow('Smoke test failed: node binary not found');
+        ).rejects.toThrow(
+          'Downloaded archive is missing the standalone executable layout (bundled runtime and lib/cli-entry.js)',
+        );
 
         expect(mockFetch.mock.calls.map(([url]) => url)).toEqual([
           `${baseUrl}/v1.2.3/${filename}`,
@@ -1518,7 +1974,9 @@ describe('standalone-update', () => {
 
       await expect(
         performStandaloneUpdate(standaloneDir, 'v1.2.3'),
-      ).rejects.toThrow('Smoke test failed: node binary not found');
+      ).rejects.toThrow(
+        'Downloaded archive is missing the standalone executable layout (bundled runtime and lib/cli-entry.js)',
+      );
       expect(mockFetch.mock.calls.map(([url]) => url)).toEqual([
         `${baseUrl}/v1.2.3/${filename}`,
         `${baseUrl}/v1.2.3/SHA256SUMS`,

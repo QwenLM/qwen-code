@@ -1,0 +1,7 @@
+{
+  "action": "register",
+  "serverId": "local-files",
+  "generation": 1,
+  "url": "http://127.0.0.1:4170/internal/managed-client-files/v1/sessions/session/mcp",
+  "token": "fixture-token"
+}

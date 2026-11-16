@@ -41,7 +41,7 @@ worktree 状态独立于会话状态：`preparing`、`ready`、`failed`、`block
 已提交的结算证据；仅 checkout 受阻不能证明失败。界面显示该阻塞并保留取消入口。
 重试返回相同身份，不分配另一份目录。
 
-普通会话沿用现有共享执行模型。准备和清理独占整个物理存储，可能等待其他执行。
+普通会话沿用现有共享执行模型。主 worktree 创建可以与普通 Runtime 成员和上传共享物理存储，维护操作之间仍互斥。清理继续要求整个存储空闲，详见[并发设计](2026-11-05-managed-remaining-lock-optimization.zh-CN.md)。
 复用安全 Git runner 和布局检查，不复用 child 的重建、强制丢弃或合并语义。
 
 ## 恢复与清理

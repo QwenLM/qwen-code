@@ -186,7 +186,7 @@ describe('ContextUsage — CompactionThresholds section (review #4168 R1.6)', ()
     expect(frame(0)).toContain('Estimated pre-conversation overhead');
   });
 
-  it('renders the startup context, unattributed and cached prefix rows only when nonzero (#12033)', () => {
+  it('renders startup context and cached prefix while ignoring legacy residuals', () => {
     const present = render(
       <ContextUsage
         modelName="qwen3-coder"
@@ -205,18 +205,16 @@ describe('ContextUsage — CompactionThresholds section (review #4168 R1.6)', ()
     );
     const frame = present.lastFrame() ?? '';
     expect(frame).toContain('Startup context');
-    expect(frame).toContain('Unattributed');
+    expect(frame).not.toContain('Unattributed');
     expect(frame).toContain('Cached prefix');
     present.unmount();
 
-    // Zero-suppression half. `makeBreakdown`'s defaults omit all three fields,
+    // Zero-suppression half. `makeBreakdown`'s defaults omit the optional fields,
     // which is the shape of a `context_usage` item persisted by an older build
     // and replayed after `/restore`; `startupContext` is also 0 by
     // construction on a pre-first-send `/context`. Without the `> 0` guards
     // these rows render as `undefined tokens (NaN%)`.
-    // `totalTokens` must stay > 0: `Cached prefix` and `Unattributed` are
-    // `hasTokenCount`-gated, so at 0 neither can render with or without its
-    // guard, and only the `Startup context` row would be witnessed.
+    // Keep totalTokens positive so the cached-prefix guard is exercised.
     const absent = render(
       <ContextUsage
         modelName="qwen3-coder"

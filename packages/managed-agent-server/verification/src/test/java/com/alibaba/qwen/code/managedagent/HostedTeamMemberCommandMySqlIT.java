@@ -38,7 +38,6 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
-import java.net.ServerSocket;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -65,6 +64,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.reservePort;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
@@ -796,9 +796,9 @@ class HostedTeamMemberCommandMySqlIT {
         // The Runtime Broker resolves its workspace cwd eagerly; the decoy
         // directory must exist before the Spring context asks for it.
         Files.createDirectory(temporary.resolve("harness-decoy"));
-        port = freePort();
-        harnessPort = freePort();
-        brokerPort = freePort();
+        port = reservePort();
+        harnessPort = reservePort();
+        brokerPort = reservePort();
         model = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         modelThreads = Executors.newCachedThreadPool();
         model.setExecutor(modelThreads);
@@ -1003,12 +1003,6 @@ class HostedTeamMemberCommandMySqlIT {
         filter.setAsyncSupported(true);
         filter.addUrlPatterns("/v1/agents/*");
         return filter;
-    }
-
-    private static int freePort() throws IOException {
-        try (ServerSocket socket = new ServerSocket(0)) {
-            return socket.getLocalPort();
-        }
     }
 
     private static ConditionFactory waiting() {

@@ -4,9 +4,22 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /** Persistence boundary for idempotent Tool execution state. */
 public interface ToolExecutionRepository {
+    /**
+     * Adds observational metadata to the identical settled execution; cannot change its outcome.
+     */
+    public default ToolExecutionRecord attachMeasurements(
+            ToolExecutionRecord expected, Map<String, Object> metadata) {
+        throw new RuntimeBrokerException(
+                501,
+                "runtime_tool_v4_unsupported",
+                "Measured result persistence is unavailable.",
+                false);
+    }
+
     public ToolExecutionRecord findOrCreate(ToolExecutionRecord candidate);
 
     public ToolExecutionRecord findByExecutionCallId(String executionCallId);
@@ -121,7 +134,7 @@ public interface ToolExecutionRepository {
      * but the Session's own background processes still runs. */
     public boolean hasActiveByRuntimeSession(String bindingId, long runtimeGeneration,
             String runtimeSessionId,
-            java.util.Set<String> excludingExecutionCallIds);
+            Set<String> excludingExecutionCallIds);
 
     /** Any SETTLED execution of this Runtime Session whose captured output
      * never proved its producer stopped: a capture other than `complete`

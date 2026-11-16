@@ -98,12 +98,110 @@ export interface ModTurnUsage {
   model: string;
 }
 
+/** How hard a request asks the model to think, in Claude Code's levels. */
+export const MOD_MODEL_EFFORTS = [
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+] as const;
+export type ModModelEffort = (typeof MOD_MODEL_EFFORTS)[number];
+
+/** A block of `prompt` or `system`, sent as written. */
+export interface ModModelTextBlock {
+  text: string;
+  cache?: true;
+}
+
+/**
+ * What a `model.complete` hook reads as `e`, in Claude Code's
+ * `ModelCompleteInput`: the caller's blocks joined into `prompt` and
+ * `system`, and kept beside them as given.
+ */
+export interface ModModelCompleteInput {
+  model: string;
+  prompt: string;
+  /** `null` or `false`, written by a hook, sends none. */
+  system?: string | null | false;
+  promptBlocks?: ModModelTextBlock[];
+  systemBlocks?: ModModelTextBlock[];
+  maxTokens?: number;
+  effort?: ModModelEffort;
+  timeoutMs?: number;
+}
+
+/** What one model call cost, in the API's spelling. */
+export interface ModModelUsage {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_input_tokens: number;
+  cache_creation_input_tokens: number;
+}
+
+/** What `$.model.complete` resolves to, in Claude Code's shape. */
+export type ModModelCompleteResult =
+  | { isAnswered: true; text: string; usage: ModModelUsage }
+  | {
+      isAnswered: false;
+      reason: 'api-error';
+      status: number | null;
+      error: string;
+      usage: ModModelUsage;
+    }
+  | {
+      isAnswered: false;
+      reason: 'empty-reply' | 'aborted';
+      usage: ModModelUsage;
+    };
+
+/**
+ * Runs one completion for a Mod on the host. It rejects only a request the
+ * host refuses to send; what the provider did is a result.
+ */
+export type ModModelHost = (
+  input: ModModelCompleteInput,
+  signal: AbortSignal,
+) => Promise<ModModelCompleteResult>;
+
 export interface ModTurnStart {
   text: string;
   turnId: string;
   /** Set when `text` kept only its head and tail to fit the Mod payload. */
   isTextTruncated?: true;
 }
+
+/** Where a submitted prompt came from, in Claude Code's `PromptOrigin`. */
+export type ModPromptOrigin =
+  | { kind: 'composer' }
+  | { kind: 'sdk' }
+  | { kind: 'plugin'; name: string; asUser?: true };
+
+/**
+ * A prompt a Mod submitted with `$.prompt.submit`, as it arrived beneath the
+ * hooks: it waits for the session to be idle and then starts a turn.
+ */
+export interface ModQueuedPrompt {
+  plugin: string;
+  text: string;
+  context?: string[];
+  asUser?: true;
+}
+
+export interface ModPromptSubmit {
+  text: string;
+  wait: boolean;
+  origin: ModPromptOrigin;
+}
+
+/**
+ * How a submitted prompt fared: what arrived beneath the hooks, or why it
+ * did not enter. `byHook` tells a hook's own drop from one that answered
+ * without passing the prompt on.
+ */
+export type ModPromptSubmitted =
+  | { text: string; context?: string[] }
+  | { drop: string; byHook: boolean };
 
 export interface ModTurnComplete {
   answer: string;
@@ -116,6 +214,12 @@ export interface ModTurnComplete {
   isAnswerTruncated?: true;
 }
 
+/** A `$.store` call the host answers for the plugin that made it. */
+export type ModStoreOperation =
+  | { method: 'store.get' | 'store.delete'; plugin: string; key: string }
+  | { method: 'store.set'; plugin: string; key: string; value: unknown }
+  | { method: 'store.keys'; plugin: string };
+
 export type ModRequest =
   | {
       type: 'load';
@@ -125,6 +229,14 @@ export type ModRequest =
       version: string;
       /** The render sites this host draws; `ui.render` runs only where one is offered. */
       sites?: readonly ModRenderSite[];
+      /** Whether the host raises `prompt.submit`; its hooks are skipped otherwise. */
+      prompts?: boolean;
+      /** Whether the host runs the prompts `$.prompt.submit` submits. */
+      submits?: boolean;
+      /** Whether the host runs `$.model.complete` calls. */
+      models?: boolean;
+      /** Whether the host keeps each plugin's `$.store`. */
+      stores?: boolean;
     }
   | {
       type: 'command';
@@ -144,9 +256,18 @@ export type ModRequest =
     }
   | { type: 'end'; sessionId: string; reason: 'clear' | 'resume' | 'other' }
   | { type: 'turn-start'; input: ModTurnStart }
+  | { type: 'prompt-submit'; input: ModPromptSubmit }
   | { type: 'turn-complete'; input: ModTurnComplete }
   | { type: 'render'; input: ModRenderInput }
-  | { type: 'turn-abort-result'; id: number; error?: string };
+  | { type: 'turn-abort-result'; id: number; error?: string }
+  | { type: 'prompt-queue-result'; id: number; refused?: string }
+  | {
+      type: 'model-result';
+      id: number;
+      result?: ModModelCompleteResult;
+      error?: string;
+    }
+  | { type: 'store-result'; id: number; value?: unknown; error?: string };
 
 export type ModReply =
   | { type: 'result'; json: string }
@@ -161,6 +282,20 @@ export type ModReply =
       error?: string;
     }
   | { type: 'turn-abort'; id: number; turnId: string }
+  | { type: 'prompt-queue'; id: number; prompt: ModQueuedPrompt }
+  | {
+      type: 'model-complete';
+      id: number;
+      input: ModModelCompleteInput;
+      deadline: number;
+      cancellation: Int32Array;
+    }
+  | {
+      type: 'store';
+      id: number;
+      operation: ModStoreOperation;
+      deadline: number;
+    }
   | { type: 'invalidate'; plugin: string; event: string }
   | ({ type: 'log'; plugin: string } & ModLog);
 

@@ -45,6 +45,11 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
 }));
 
 import { runCiLog, tailJob } from './ci-log.js';
+import type { RefusalCode } from './refusal.js';
+
+/** A refusal with its code: what the skill acts on. */
+const refused = (code: RefusalCode, message: RegExp) =>
+  expect.objectContaining({ code, message: expect.stringMatching(message) });
 
 describe('tailJob', () => {
   const file = (lines: string[]) => `${lines.join('\n')}\n`;
@@ -263,7 +268,10 @@ describe('runCiLog', () => {
         : '',
     );
     expect(() => runCiLog(7, 456, 200)).toThrow(
-      /run 456 has no finished job that failed or timed out/,
+      refused(
+        'no_failed_job',
+        /run 456 has no finished job that failed or timed out/,
+      ),
     );
     expect(mocks.stdout).not.toHaveBeenCalled();
     expect(

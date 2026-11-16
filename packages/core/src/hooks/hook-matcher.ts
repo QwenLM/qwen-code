@@ -24,7 +24,7 @@ export interface HookPatternOptions {
  * pairs: in `C:\\temp\\|D:\\data` the pipe follows an escaped backslash, so it
  * does separate entries.
  */
-function splitListEntries(pattern: string): string[] {
+export function splitListEntries(pattern: string): string[] {
   const entries: string[] = [];
   let current = '';
   let escaped = false;

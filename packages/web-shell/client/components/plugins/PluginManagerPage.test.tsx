@@ -74,11 +74,32 @@ vi.mock('../skills/SkillsManagerPage', async () => {
     SkillsManagerPage: (props: {
       workspaceCwd?: string;
       workspaceControl?: ReactNode;
-      embedded?: { onDetailChange(open: boolean): void };
+      embedded?: {
+        onDetailChange(open: boolean): void;
+        onBack?: () => void;
+      };
     }) => {
       const [detail, setDetail] = React.useState(false);
       return detail ? (
         <div>
+          {props.embedded?.onBack ? (
+            <button
+              type="button"
+              aria-label="back"
+              onClick={props.embedded.onBack}
+            >
+              back
+            </button>
+          ) : null}
+          <button
+            type="button"
+            onClick={() => {
+              setDetail(false);
+              props.embedded?.onDetailChange(false);
+            }}
+          >
+            back to skills
+          </button>
           <span data-testid="workspace-cwd">{props.workspaceCwd}</span>
           {props.workspaceControl}
         </div>
@@ -136,6 +157,128 @@ it('keeps Managed Extensions separate from the daemon before Session selection',
   expect(container.textContent).toContain(
     'Select a workspace and session to manage extensions.',
   );
+});
+
+it('opens Managed Skills with immutable static-source labels instead of the daemon Skills editor', async () => {
+  const provider = {
+    storageKey: 'managed',
+    extensions: {
+      list: vi.fn(async () => ({ supported: true, extensions: [] })),
+      query: vi.fn(async () => ({
+        sessionId: 'session',
+        supported: true,
+        revision: 0,
+        extensions: [],
+        requestedExtensions: [],
+      })),
+    },
+    skills: {
+      list: vi.fn(async () => ({
+        skills: [{ name: 'base-skill', description: 'Fixed instructions' }],
+      })),
+    },
+  } as unknown as ManagedAgentProvider;
+  await act(async () =>
+    root.render(
+      <I18nProvider language="en">
+        <PluginManagerPage
+          onClose={vi.fn()}
+          onUseSkill={vi.fn()}
+          initialTab="skills"
+          managedSkills
+          managedExtensions={{
+            provider,
+            workspaceId: 'workspace',
+            sessionId: 'session',
+          }}
+        />
+      </I18nProvider>,
+    ),
+  );
+  expect(container.querySelector('h2')?.textContent).toBe('Managed Skills');
+  expect(container.textContent).toContain('base-skill');
+  expect(container.textContent).toContain('Static session snapshot');
+  expect(
+    [...container.querySelectorAll('button')].some(
+      (button) => button.textContent === 'open skill',
+    ),
+  ).toBe(false);
+});
+
+it('navigates composite MCP edits to the Managed Extensions tab', async () => {
+  const pin = {
+    extensionId: 'ext_00000000-0000-4000-8000-000000000001',
+    packageRevision: 1,
+    packageDigest: 'a'.repeat(64),
+  };
+  const manifest = {
+    schemaVersion: 1,
+    compilerVersion: 1,
+    name: 'composite',
+    version: '1',
+    target: { platform: 'linux', arch: 'x64' },
+    components: ['skills', 'mcp'],
+  };
+  const provider = {
+    storageKey: 'managed',
+    extensions: {
+      list: vi.fn(async () => ({
+        supported: true,
+        extensions: [{ pin, manifest }],
+        selfService: { supported: true, canPublish: true },
+      })),
+      query: vi.fn(async () => ({
+        sessionId: 'session',
+        supported: true,
+        revision: 0,
+        extensions: [pin],
+        requestedExtensions: [pin],
+        selfService: { supported: true, canApply: true },
+      })),
+      inspect: vi.fn(async () => ({
+        manifest,
+        mcpServers: [
+          { name: 'first', recipe: {}, redacted: false },
+          { name: 'second', recipe: {}, redacted: false },
+        ],
+        skills: [],
+        files: [],
+        fileCount: 0,
+        truncated: false,
+        settings: [],
+      })),
+      importPackage: vi.fn(),
+      previewPackage: vi.fn(),
+      lookupPackageOperation: vi.fn(),
+      lookupApplyOperation: vi.fn(),
+    },
+  } as unknown as ManagedAgentProvider;
+  await act(async () =>
+    root.render(
+      <I18nProvider language="en">
+        <PluginManagerPage
+          onClose={vi.fn()}
+          onUseSkill={vi.fn()}
+          initialTab="mcp"
+          managedExtensions={{
+            provider,
+            workspaceId: 'workspace',
+            sessionId: 'session',
+          }}
+          managedMcp={{
+            provider,
+            workspaceId: 'workspace',
+            sessionId: 'session',
+          }}
+        />
+      </I18nProvider>,
+    ),
+  );
+  const edit = [
+    ...container.querySelectorAll<HTMLButtonElement>('button'),
+  ].find((button) => button.textContent === 'Edit connection configuration')!;
+  await act(async () => edit.click());
+  expect(container.querySelector('h2')?.textContent).toBe('Managed extensions');
 });
 
 it('queries the selected Managed Extension Workspace and Session and follows selection changes', async () => {
@@ -378,6 +521,125 @@ describe('PluginManagerPage Skills workspace selector', () => {
     expect(
       container.querySelector('[data-testid="workspace-cwd"]')?.textContent,
     ).toBe('/work/a');
+  });
+});
+
+describe('PluginManagerPage back control', () => {
+  const backButton = () =>
+    container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Back to conversation"]',
+    );
+
+  it('renders a back control wired to onClose', async () => {
+    const onClose = vi.fn();
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <PluginManagerPage
+            onClose={onClose}
+            onUseSkill={vi.fn()}
+            showBackButton
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(backButton()).not.toBeNull();
+    await act(async () => backButton()!.click());
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the back control after switching tabs', async () => {
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <PluginManagerPage
+            onClose={vi.fn()}
+            onUseSkill={vi.fn()}
+            showBackButton
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const mcpTab = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'MCP',
+    );
+    await act(async () => {
+      mcpTab?.dispatchEvent(
+        new MouseEvent('mousedown', { bubbles: true, button: 0 }),
+      );
+      mcpTab?.click();
+    });
+
+    await vi.waitFor(() => {
+      expect(
+        container.querySelector('[data-testid="mcp-page"]'),
+      ).not.toBeNull();
+    });
+    expect(backButton()).not.toBeNull();
+  });
+
+  it('omits the back control by default', async () => {
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <PluginManagerPage onClose={vi.fn()} onUseSkill={vi.fn()} />
+        </I18nProvider>,
+      );
+    });
+
+    expect(backButton()).toBeNull();
+  });
+
+  it('keeps a back control in a detail view', async () => {
+    const onClose = vi.fn();
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <PluginManagerPage
+            onClose={onClose}
+            onUseSkill={vi.fn()}
+            showBackButton
+            initialTab="skills"
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const openSkill = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'open skill',
+    );
+    await act(async () => openSkill!.click());
+
+    expect(backButton()).toBeNull();
+    const detailBack = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="back"]',
+    );
+    expect(detailBack).not.toBeNull();
+    await act(async () => detailBack!.click());
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a single back control in managed mode', async () => {
+    const provider = { storageKey: 'managed' } as ManagedAgentProvider;
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <PluginManagerPage
+            onClose={vi.fn()}
+            onUseSkill={vi.fn()}
+            showBackButton
+            managedExtensions={{ provider }}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(
+      container.querySelectorAll('button[aria-label="back"]'),
+    ).toHaveLength(1);
+    expect(backButton()).not.toBeNull();
   });
 });
 

@@ -430,14 +430,20 @@ public final class RuntimeRecoveryContract {
 
         public Fixture(RuntimeBindingRepository bindings, RuntimeSessionRepository sessions,
                 ToolExecutionRepository executions, String id, String runtimeSessionId) {
+            this(bindings, sessions, executions, id, runtimeSessionId, false);
+        }
+
+        /** {@code sessionIsolated} binds a session-class Runtime to the harness Session {@code id + "-harness"}. */
+        public Fixture(RuntimeBindingRepository bindings, RuntimeSessionRepository sessions,
+                ToolExecutionRepository executions, String id, String runtimeSessionId, boolean sessionIsolated) {
             this.id = id;
             this.bindings = bindings;
             this.sessions = sessions;
             this.executions = executions;
             RuntimeScope scope = new RuntimeScope(id, "workspace", "generation", "/workspace",
-                    "profile", "workspace");
-            RuntimeBindingRecord created = bindings.findOrCreate(new RuntimeProvisionRequest(scope, null,
-                    "test-supervisor"));
+                    "profile", sessionIsolated ? "session" : "workspace");
+            RuntimeBindingRecord created = bindings.findOrCreate(new RuntimeProvisionRequest(scope,
+                    sessionIsolated ? id + "-harness" : null, "test-supervisor"));
             RuntimeBindingRecord claimed = bindings.claimOperation(created.getBindingId(), "recovery",
                     Duration.ofMinutes(5));
             RuntimeProvisionSeed seed = claimed.getProvisionSeed();

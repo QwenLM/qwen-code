@@ -33,6 +33,7 @@ public class ManagedAgentPersistenceConfiguration {
         source.setMaxActive(environment.getProperty(prefix + "max-active", Integer.class, 20));
         source.setMaxWait(30_000);
         source.setValidationQuery("SELECT 1");
+        ManagedDataSourceDefaults.applyMySqlDefaults(source);
         return source;
     }
 

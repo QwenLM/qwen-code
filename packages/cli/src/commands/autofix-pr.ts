@@ -19,6 +19,7 @@ import { rerunCommand } from './autofix-pr/rerun.js';
 import { scheduleCommand } from './autofix-pr/schedule.js';
 import { statusCommand } from './autofix-pr/status.js';
 import { syncCommand } from './autofix-pr/sync.js';
+import { withRefusals } from './autofix-pr/refusal.js';
 
 export const autofixPrCommand: CommandModule = {
   command: 'autofix-pr',
@@ -26,18 +27,18 @@ export const autofixPrCommand: CommandModule = {
     'Internal helpers used by the /autofix-pr skill (PR worktree setup, change snapshot and its gate probe, CI logs, guarded push, replies, re-runs, the scheduled task, background fixes, status, cleanup)',
   builder: (yargs: Argv) =>
     yargs
-      .command(prepareCommand)
-      .command(snapshotCommand)
-      .command(ciLogCommand)
-      .command(pushCommand)
-      .command(syncCommand)
-      .command(replyCommand)
-      .command(rerunCommand)
-      .command(scheduleCommand)
-      .command(fixStartCommand)
-      .command(fixEndCommand)
-      .command(statusCommand)
-      .command(cleanupCommand)
+      .command(withRefusals(prepareCommand))
+      .command(withRefusals(snapshotCommand))
+      .command(withRefusals(ciLogCommand))
+      .command(withRefusals(pushCommand))
+      .command(withRefusals(syncCommand))
+      .command(withRefusals(replyCommand))
+      .command(withRefusals(rerunCommand))
+      .command(withRefusals(scheduleCommand))
+      .command(withRefusals(fixStartCommand))
+      .command(withRefusals(fixEndCommand))
+      .command(withRefusals(statusCommand))
+      .command(withRefusals(cleanupCommand))
       .demandCommand(
         1,
         'Specify a subcommand: prepare, snapshot, ci-log, push, sync, reply, rerun, schedule, fix-start, fix-end, status, or cleanup.',

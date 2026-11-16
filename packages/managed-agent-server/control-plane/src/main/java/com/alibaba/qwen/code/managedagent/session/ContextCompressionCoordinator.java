@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.managedagent.session;
 
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
-import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionLifecycleStore;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
@@ -23,7 +23,7 @@ import java.util.concurrent.ExecutorService;
 @Component
 public class ContextCompressionCoordinator {
     private static final Logger LOG = LoggerFactory.getLogger(ContextCompressionCoordinator.class);
-    private final AgentStateStore store;
+    private final SessionLifecycleStore store;
     private final ManagedExtensionRecordStore records;
     private final HarnessConnector harness;
     private final ExecutorService executor;
@@ -32,7 +32,7 @@ public class ContextCompressionCoordinator {
     private final String owner = UUID.randomUUID().toString();
     private final Set<String> active = ConcurrentHashMap.newKeySet();
 
-    public ContextCompressionCoordinator(AgentStateStore store, ManagedExtensionRecordStore records,
+    public ContextCompressionCoordinator(SessionLifecycleStore store, ManagedExtensionRecordStore records,
             HarnessConnector harness, @Qualifier("managedAgentExecutor") ExecutorService executor, @Qualifier("managedAgentClock") Clock clock,
             ManagedAgentSettings properties) {
         this.store = store;

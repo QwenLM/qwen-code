@@ -7,6 +7,11 @@ import { describe, expect, it } from 'vitest';
 import { AlertDialogContent, AlertDialogOverlay } from './alert-dialog';
 import { Button } from './button';
 import { Checkbox } from './checkbox';
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from './collapsible';
 import { DialogContent, DialogOverlay } from './dialog';
 import { DrawerContent, DrawerOverlay } from './drawer';
 import { DropdownMenuSubTrigger, DropdownMenuTrigger } from './dropdown-menu';
@@ -51,6 +56,9 @@ describe('React 18 ref compatibility', () => {
     ['AlertDialogOverlay', AlertDialogOverlay],
     ['Button', Button],
     ['Checkbox', Checkbox],
+    ['Collapsible', Collapsible],
+    ['CollapsibleContent', CollapsibleContent],
+    ['CollapsibleTrigger', CollapsibleTrigger],
     ['DialogContent', DialogContent],
     ['DialogOverlay', DialogOverlay],
     ['DrawerContent', DrawerContent],
@@ -101,6 +109,32 @@ describe('React 18 ref compatibility', () => {
 
     act(() => root.render(<Checkbox ref={ref} />));
     expect(ref.current).toBeInstanceOf(HTMLButtonElement);
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('forwards Collapsible, trigger, and content refs to their DOM elements', () => {
+    const rootRef = React.createRef<HTMLDivElement>();
+    const triggerRef = React.createRef<HTMLButtonElement>();
+    const contentRef = React.createRef<HTMLDivElement>();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    // Content only mounts while open, so pin the open state explicitly.
+    act(() =>
+      root.render(
+        <Collapsible ref={rootRef} open>
+          <CollapsibleTrigger ref={triggerRef}>Toggle</CollapsibleTrigger>
+          <CollapsibleContent ref={contentRef}>Content</CollapsibleContent>
+        </Collapsible>,
+      ),
+    );
+    expect(rootRef.current).toBeInstanceOf(HTMLDivElement);
+    expect(triggerRef.current).toBeInstanceOf(HTMLButtonElement);
+    expect(contentRef.current).toBeInstanceOf(HTMLDivElement);
+    expect(contentRef.current?.textContent).toBe('Content');
 
     act(() => root.unmount());
     container.remove();

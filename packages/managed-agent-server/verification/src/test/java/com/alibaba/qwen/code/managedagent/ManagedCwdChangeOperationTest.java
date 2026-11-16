@@ -1,7 +1,8 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore.CwdChangeOutcome;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionLifecycleStore.CwdChangeOutcome;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
@@ -9,18 +10,20 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationAdmission;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationKind;
-import com.alibaba.qwen.code.managedagent.persistence.ChildResultRelayStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcChildResultRelayStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.session.SessionLifecycleCoordinator;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -135,7 +138,7 @@ class ManagedCwdChangeOperationTest {
 
     private void installMigrationFence(Fixture fixture) {
         fixture.jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, fence_operation_id) VALUES (?, ?, ?, ?, ?, ?)",
-                JdbcRuntimeBindingRepository.storageAliasKey(TENANT, STORAGE), JdbcRuntimeBindingRepository.storageFenceKey(TENANT), JdbcRuntimeBindingRepository.storageFenceKey(STORAGE),
+                RuntimeAdmissionFences.storageAliasKey(TENANT, STORAGE), RuntimeAdmissionFences.storageFenceKey(TENANT), RuntimeAdmissionFences.storageFenceKey(STORAGE),
                 TENANT, STORAGE, UUID.randomUUID().toString());
     }
 
@@ -829,7 +832,7 @@ class ManagedCwdChangeOperationTest {
         assertThat(warmer.verified).containsExactly("services/b");
         assertThat(warmer.bindings.get(0).getWorkspaceId()).isEqualTo(WS);
 
-        warmer.refuse(com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable());
+        warmer.refuse(WorkspaceExecutionStore.unavailable());
         String secondId = fixture.createBoundSession(TENANT, WS);
         String second = begin(fixture, secondId, "key", "digest", "gone",
                 1).operation().operationId();
@@ -881,7 +884,7 @@ class ManagedCwdChangeOperationTest {
         String sessionId = fixture.createBoundSession(TENANT, WS);
         String operationId = begin(fixture, sessionId, "key", "digest",
                 "services/b", 1).operation().operationId();
-        warmer.refuse(com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailableTransient(
+        warmer.refuse(WorkspaceExecutionStore.unavailableTransient(
                 new java.io.IOException("stale mount handle")));
         coordinator.dispatch(TENANT, sessionId, operationId);
         OperationRecord waiting = fixture.store.findOperation(TENANT,
@@ -917,7 +920,7 @@ class ManagedCwdChangeOperationTest {
         String sessionId = fixture.createBoundSession(TENANT, WS);
         String operationId = begin(fixture, sessionId, "key", "digest",
                 "services/b", 1).operation().operationId();
-        warmer.refuseAlways(com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailableTransient(
+        warmer.refuseAlways(WorkspaceExecutionStore.unavailableTransient(
                 new java.io.IOException("stale mount handle")));
         coordinator.dispatch(TENANT, sessionId, operationId);
         for (int attempts = 2; attempts <= 8; attempts++) {
@@ -974,7 +977,7 @@ class ManagedCwdChangeOperationTest {
         String sessionId = fixture.createBoundSession(TENANT, WS);
         String operationId = begin(fixture, sessionId, "key", "digest",
                 "services/b", 1).operation().operationId();
-        warmer.refuseAlways(com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailableTransient(
+        warmer.refuseAlways(WorkspaceExecutionStore.unavailableTransient(
                 new java.io.IOException("stale mount handle")));
         // Three deliveries pass the lifecycle budget of 2: the close/delete
         // terminal arm would fire at the second. The cwd change keeps its
@@ -1112,8 +1115,8 @@ class ManagedCwdChangeOperationTest {
             }
         };
         ObjectMapper mapper = new ObjectMapper();
-        ManagedAgentStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, mapper, clock,
-                ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        ManagedAgentStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper, clock,
+                ignored -> {}, new JdbcManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         return new Fixture(store, jdbc, mapper, properties, clock);
     }
 
@@ -1156,11 +1159,15 @@ class ManagedCwdChangeOperationTest {
                                 + " workspace_id", tenant, workspaceId,
                                 STORAGE, workspaceId);
                         grant(tenant, workspaceId, ACTOR, "OPERATOR");
-                        return store.insertWorkspaceSessionCommand(tenant,
-                                ACTOR, "create-" + UUID.randomUUID(),
-                                "create-digest", "qwen-code", null, null,
-                                List.of(), null, new WorkspaceSelection(
+                        return store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                                .tenantId(tenant)
+                                .actorId(ACTOR)
+                                .idempotencyKey("create-" + UUID.randomUUID())
+                                .requestDigest("create-digest")
+                                .agentId("qwen-code")
+                                .selection(new WorkspaceSelection(
                                         workspaceId, "services/api"))
+                                .build())
                                 .sessionId();
                     });
         }
@@ -1176,7 +1183,7 @@ class ManagedCwdChangeOperationTest {
         }
 
         void insertOperation(String sessionId, String operationId, String kind, String state, String delivery, String taskId) {
-            String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
+            String scope = ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
             String target = ManagedSchemaKeys.key(sessionId);
             jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, target_kind, target_key, target_id, request_json,"
                             + " tenant_id, session_id, operation_id, operation_kind, request_digest, state, phase, admission_stage,"
@@ -1191,7 +1198,7 @@ class ManagedCwdChangeOperationTest {
             jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, record_kind, domain, record_id, tenant_id,"
                             + " workspace_id, session_id, action_id, action_version, revision, state, options_json, gmt_create)"
                             + " VALUES (?, ?, 'ACTION', 'action', ?, ?, ?, ?, ?, 1, 1, 'requested', ?, 0)",
-                    com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(TENANT, sessionId), ManagedSchemaKeys.key("action", actionId),
+                    ManagedSessionStore.sessionScopeKey(TENANT, sessionId), ManagedSchemaKeys.key("action", actionId),
                     actionId, TENANT, WS, sessionId, actionId,
                     mapper.valueToTree(java.util.Map.of("expiresAt",
                             expiresAtMillis)).toString());
@@ -1245,7 +1252,7 @@ class ManagedCwdChangeOperationTest {
 
         SessionLifecycleCoordinator coordinator(RuntimeWarmer warmer) {
             return new SessionLifecycleCoordinator(store, null, null,
-                    warmer, new ChildResultRelayStore(jdbc),
+                    warmer, new JdbcChildResultRelayStore(jdbc),
                     new ObjectMapper(),
                     new com.alibaba.qwen.code.managedagent.workspace.ChildLifecycleAdmissions(
                             store,

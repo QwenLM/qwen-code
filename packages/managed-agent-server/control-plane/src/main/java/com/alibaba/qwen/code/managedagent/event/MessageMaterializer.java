@@ -1,6 +1,6 @@
 package com.alibaba.qwen.code.managedagent.event;
 
-import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.contracts.session.EventProjectionStore;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.MaterializationTarget;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -27,11 +27,11 @@ public class MessageMaterializer {
     // Only the exponential phase warns with the stack, so a poisoned
     // session can neither starve healthy ones nor warn at 10 Hz forever.
     private static final int MAX_BACKOFF_STREAK = 64;
-    private final AgentStateStore store;
+    private final EventProjectionStore store;
     private final Map<String, Integer> failures = new ConcurrentHashMap<>();
     private final Set<String> surfaced = ConcurrentHashMap.newKeySet();
 
-    public MessageMaterializer(AgentStateStore store) {
+    public MessageMaterializer(EventProjectionStore store) {
         this.store = store;
     }
 

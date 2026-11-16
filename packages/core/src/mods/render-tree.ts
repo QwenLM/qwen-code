@@ -4,11 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// The trees a `ui.render` hook draws, judged by Claude Code 2.1.310's rules.
+// The trees a `ui.render` hook draws, judged by Claude Code 2.1.318's rules.
 // The worker checks each hook's answer and the host the tree the chain settles
 // on, so a tree Qwen Code accepts is one Claude Code accepts.
 
-export const MOD_RENDER_SITES = ['AbovePrompt'] as const;
+export const MOD_RENDER_SITES = ['AbovePrompt', 'AssistantMessage'] as const;
 export type ModRenderSite = (typeof MOD_RENDER_SITES)[number];
 
 /** The terminal's element table, as Claude Code declares it. */
@@ -64,12 +64,53 @@ export interface ModAbovePromptProps {
   view: { agentId?: string };
 }
 
-export interface ModRenderInput {
+/**
+ * One block of an assistant reply in the transcript, raised once the block
+ * is complete. A hook rewrites `text` to change what the row shows; the
+ * stored message and what the model reads stay as they were.
+ */
+export interface ModAssistantMessageProps {
+  text: string;
+  isFirstOfReply: boolean;
+}
+
+interface ModRenderInputBase {
   surface: 'terminal';
-  component: ModRenderSite;
   requestId: string;
   viewport?: { columns: number; rows: number; isFullscreen?: boolean };
+}
+
+/** The band above the prompt. */
+export interface ModBandInput extends ModRenderInputBase {
+  component: 'AbovePrompt';
   props: ModAbovePromptProps;
+}
+
+/** A row of the transcript that shows an assistant reply's text. */
+export interface ModAssistantMessageInput extends ModRenderInputBase {
+  component: 'AssistantMessage';
+  props: ModAssistantMessageProps;
+}
+
+export type ModRenderInput = ModBandInput | ModAssistantMessageInput;
+
+/**
+ * The props each site pins: a hook that passes another value down fails.
+ * The others may be rewritten, each keeping its kind.
+ */
+export const MOD_RENDER_PINNED_PROPS: Record<ModRenderSite, readonly string[]> =
+  {
+    AbovePrompt: ['view'],
+    AssistantMessage: ['isFirstOfReply'],
+  };
+
+/** Whether a text a hook wrote into a row breaks the rules a tree's text keeps. */
+export function invalidRenderText(text: string): string | undefined {
+  if (text.length > MOD_RENDER_TEXT_CAP)
+    return `holds more than ${MOD_RENDER_TEXT_CAP} characters`;
+  if (CONTROL.test(text) || LONE_SURROGATE.test(text))
+    return 'holds a control character (an escape sequence)';
+  return undefined;
 }
 
 export const BORDER_STYLES = [

@@ -1,0 +1,524 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-11-13",
+  "baselineCommit": "2985fef4e9b9393601141c16031b2ba039181158",
+  "candidateCommit": "2aadc4b127ec24074e0e5ddfd402e978a0c43f5d",
+  "cliVersion": "0.27.2",
+  "sdkVersion": "0.1.32",
+  "nodeVersion": "v26.7.0",
+  "os": "macOS 26.6.2",
+  "arch": "arm64",
+  "rounds": 8,
+  "formalAttempts": 16,
+  "formalFailures": 0,
+  "excludedCapacityCohort": {
+    "attempts": 6,
+    "completed": 5,
+    "capacityFailures": 1,
+    "entireCohortExcluded": true
+  },
+  "workload": {
+    "resources": 31,
+    "extensionSuites": 14,
+    "standaloneSkills": 17,
+    "customSkills": 90,
+    "files": 3944,
+    "bytes": 81931741
+  },
+  "buildTreeDigests": {
+    "baseline": {
+      "files": 1412,
+      "sha256": "390ab600df72f9a631e012063ffeaf98e799790bcab3fd5f4ddccf86bfb54753"
+    },
+    "candidate": {
+      "files": 1412,
+      "sha256": "11ec13f77d793469dac1789095b23cd869fb8d66649d6565d40447d6b7caa38d"
+    },
+    "sdk": {
+      "files": 85,
+      "sha256": "ec2900fb95d22b54c491de5633f462cd05e4a2f9dbb9bb4fefa868f6ad812f70"
+    },
+    "seedCore": {
+      "files": 6415,
+      "sha256": "17db74c21de306e775b62fa981347d7c3a0614d5ea9efcc23bb579e6651ad742"
+    }
+  },
+  "stats": {
+    "baseline": {
+      "firstSdkCreateMs": {
+        "mean": 1099.047,
+        "median": 1096.099,
+        "min": 1078.334716796875,
+        "max": 1129.265869140625
+      },
+      "firstSdkSessionPostMs": {
+        "mean": 1078.543,
+        "median": 1075.726,
+        "min": 1058.846435546875,
+        "max": 1109.154296875
+      },
+      "spawnToListenerObservedMs": {
+        "mean": 334.541,
+        "median": 336.654,
+        "min": 322.5361328125,
+        "max": 341.531982421875
+      },
+      "spawnToRequestBoundaryMs": {
+        "mean": 630.126,
+        "median": 630.57,
+        "min": 618.680419921875,
+        "max": 644.461669921875
+      },
+      "spawnToFirstResponseMs": {
+        "mean": 1729.281,
+        "median": 1730.98,
+        "min": 1709.5849609375,
+        "max": 1748.038818359375
+      },
+      "firstRequestMs": {
+        "mean": 20.123,
+        "median": 18.662,
+        "min": 17.7001953125,
+        "max": 28.11328125
+      },
+      "firstAcpSpawnAfterRequestMs": {
+        "mean": 15.413,
+        "median": 14.209,
+        "min": 13.933349609375,
+        "max": 22.29345703125
+      },
+      "sdkCreate2Ms": {
+        "mean": 70.616,
+        "median": 71.06,
+        "min": 65.13134765625,
+        "max": 79.61376953125
+      },
+      "sdkCreate3Ms": {
+        "mean": 57.823,
+        "median": 56.884,
+        "min": 53.70263671875,
+        "max": 63.6708984375
+      }
+    },
+    "watcher-only": {
+      "firstSdkCreateMs": {
+        "mean": 781.662,
+        "median": 772.944,
+        "min": 758.4375,
+        "max": 824.12548828125
+      },
+      "firstSdkSessionPostMs": {
+        "mean": 761.849,
+        "median": 754.111,
+        "min": 739.324462890625,
+        "max": 798.49267578125
+      },
+      "spawnToListenerObservedMs": {
+        "mean": 331.475,
+        "median": 329.185,
+        "min": 323.114013671875,
+        "max": 358.482421875
+      },
+      "spawnToRequestBoundaryMs": {
+        "mean": 606.718,
+        "median": 605.274,
+        "min": 591.802978515625,
+        "max": 621.00146484375
+      },
+      "spawnToFirstResponseMs": {
+        "mean": 1388.483,
+        "median": 1384.481,
+        "min": 1355.462646484375,
+        "max": 1426.978271484375
+      },
+      "firstRequestMs": {
+        "mean": 19.425,
+        "median": 18.337,
+        "min": 18.144287109375,
+        "max": 25.14013671875
+      },
+      "firstAcpSpawnAfterRequestMs": {
+        "mean": 15.639,
+        "median": 14.203,
+        "min": 14.05908203125,
+        "max": 24.600830078125
+      },
+      "sdkCreate2Ms": {
+        "mean": 72.935,
+        "median": 73.952,
+        "min": 65.168701171875,
+        "max": 80.04248046875
+      },
+      "sdkCreate3Ms": {
+        "mean": 54.633,
+        "median": 54.415,
+        "min": 53.4306640625,
+        "max": 56.62158203125
+      }
+    }
+  },
+  "samples": [
+    {
+      "round": 1,
+      "condition": "baseline",
+      "firstSdkCreateMs": 1098.466,
+      "firstSdkSessionPostMs": 1075.806,
+      "spawnToListenerObservedMs": 341.532,
+      "spawnToRequestBoundaryMs": 644.462,
+      "spawnToFirstResponseMs": 1743.051,
+      "firstRequestMs": 22.271,
+      "firstAcpSpawnAfterRequestMs": 14.242,
+      "sdkCreate2Ms": 70.106,
+      "sdkCreate3Ms": 54.532,
+      "firstSdkHttpCount": 2,
+      "newSessions": 3,
+      "preheatDisabled": true,
+      "noSessionOrChannelBeforeCreate": true,
+      "acpSpawnedAfterCreate": true,
+      "normalClose": true,
+      "acpPidsAbsent": true
+    },
+    {
+      "round": 1,
+      "condition": "watcher-only",
+      "firstSdkCreateMs": 758.438,
+      "firstSdkSessionPostMs": 739.717,
+      "spawnToListenerObservedMs": 358.482,
+      "spawnToRequestBoundaryMs": 620.202,
+      "spawnToFirstResponseMs": 1378.73,
+      "firstRequestMs": 18.364,
+      "firstAcpSpawnAfterRequestMs": 14.127,
+      "sdkCreate2Ms": 76.242,
+      "sdkCreate3Ms": 54.165,
+      "firstSdkHttpCount": 2,
+      "newSessions": 3,
+      "preheatDisabled": true,
+      "noSessionOrChannelBeforeCreate": true,
+      "acpSpawnedAfterCreate": true,
+      "normalClose": true,
+      "acpPidsAbsent": true
+    },
+    {
+      "round": 2,
+      "condition": "watcher-only",
+      "firstSdkCreateMs": 771.055,
+      "firstSdkSessionPostMs": 751.974,
+      "spawnToListenerObservedMs": 332.655,
+      "spawnToRequestBoundaryMs": 607.798,
+      "spawnToFirstResponseMs": 1378.958,
+      "firstRequestMs": 18.71,
+      "firstAcpSpawnAfterRequestMs": 14.308,
+      "sdkCreate2Ms": 65.169,
+      "sdkCreate3Ms": 54.888,
+      "firstSdkHttpCount": 2,
+      "newSessions": 3,
+      "preheatDisabled": true,
+      "noSessionOrChannelBeforeCreate": true,
+      "acpSpawnedAfterCreate": true,
+      "normalClose": true,
+      "acpPidsAbsent": true
+    },
+    {
+      "round": 2,
+      "condition": "baseline",
+      "firstSdkCreateMs": 1078.335,
+      "firstSdkSessionPostMs": 1058.846,
+      "spawnToListenerObservedMs": 338.749,
+      "spawnToRequestBoundaryMs": 631.158,
+      "spawnToFirstResponseMs": 1709.585,
+      "firstRequestMs": 19.129,
+      "firstAcpSpawnAfterRequestMs": 14.928,
+      "sdkCreate2Ms": 72.015,
+      "sdkCreate3Ms": 55.764,
+      "firstSdkHttpCount": 2,
+      "newSessions": 3,
+      "preheatDisabled": true,
+      "noSessionOrChannelBeforeCreate": true,
+      "acpSpawnedAfterCreate": true,
+      "normalClose": true,
+      "acpPidsAbsent": true
+    },
+    {
+      "round": 3,
+      "condition": "baseline",
+      "firstSdkCreateMs": 1129.266,
+      "firstSdkSessionPostMs": 1109.154,
+      "spawnToListenerObservedMs": 322.536,
+      "spawnToRequestBoundaryMs": 618.68,
+      "spawnToFirstResponseMs": 1748.039,
+      "firstRequestMs": 19.727,
+      "firstAcpSpawnAfterRequestMs": 15.678,
+      "sdkCreate2Ms": 79.614,
+      "sdkCreate3Ms": 53.703,
+      "firstSdkHttpCount": 2,
+      "newSessions": 3,
+      "preheatDisabled": true,
+      "noSessionOrChannelBeforeCreate": true,
+      "acpSpawnedAfterCreate": true,
+      "normalClose": true,
+      "acpPidsAbsent": true
+    },
+    {
+      "round": 3,
+      "condition": "watcher-only",
+      "firstSdkCreateMs": 807.84,
+      "firstSdkSessionPostMs": 789.332,
+      "spawnToListenerObservedMs": 329.171,
+      "spawnToRequestBoundaryMs": 601.84,
+      "spawnToFirstResponseMs": 1409.771,
+      "firstRequestMs": 18.158,
+      "firstAcpSpawnAfterRequestMs": 14.166,
+      "sdkCreate2Ms": 74.584,
+      "sdkCreate3Ms": 54.613,
+      "firstSdkHttpCount": 2,
+      "newSessions": 3,
+      "preheatDisabled": true,
+      "noSessionOrChannelBeforeCreate": true,
+      "acpSpawnedAfterCreate": true,
+      "normalClose": true,
+      "acpPidsAbsent": true
+    },
+    {
+      "round": 4,
+      "condition": "watcher-only",
+      "firstSdkCreateMs": 760.109,
+      "firstSdkSessionPostMs": 739.324,
+      "spawnToListenerObservedMs": 323.29,
+      "spawnToRequestBoundaryMs": 595.24,
+      "spawnToFirstResponseMs": 1355.463,
+      "firstRequestMs": 20.378,
+      "firstAcpSpawnAfterRequestMs": 15.49,
+      "sdkCreate2Ms": 80.042,
+      "sdkCreate3Ms": 54.217,
+      "firstSdkHttpCount": 2,
+      "newSessions": 3,
+      "preheatDisabled": true,
+      "noSessionOrChannelBeforeCreate": true,
+      "acpSpawnedAfterCreate": true,
+      "normalClose": true,
+      "acpPidsAbsent": true
+    },
+    {
+      "round": 4,
+      "condition": "baseline",
+      "firstSdkCreateMs": 1110.247,
+      "firstSdkSessionPostMs": 1081.733,
+      "spawnToListenerObservedMs": 335.358,
+      "spawnToRequestBoundaryMs": 625.537,
+      "spawnToFirstResponseMs": 1735.895,
+      "firstRequestMs": 28.113,
+      "firstAcpSpawnAfterRequestMs": 22.293,
+      "sdkCreate2Ms": 65.762,
+      "sdkCreate3Ms": 63.671,
+      "firstSdkHttpCount": 2,
+      "newSessions": 3,
+      "preheatDisabled": true,
+      "noSessionOrChannelBeforeCreate": true,
+      "acpSpawnedAfterCreate": true,
+      "normalClose": true,
+      "acpPidsAbsent": true
+    },
+    {
+      "round": 5,
+      "condition": "baseline",
+      "firstSdkCreateMs": 1082.631,
+      "firstSdkSessionPostMs": 1064.546,
+      "spawnToListenerObservedMs": 331.021,
+      "spawnToRequestBoundaryMs": 627.32,
+      "spawnToFirstResponseMs": 1710.056,
+      "firstRequestMs": 17.7,
+      "firstAcpSpawnAfterRequestMs": 14.043,
+      "sdkCreate2Ms": 67.074,
+      "sdkCreate3Ms": 62.196,
+      "firstSdkHttpCount": 2,
+      "newSessions": 3,
+      "preheatDisabled": true,
+      "noSessionOrChannelBeforeCreate": true,
+      "acpSpawnedAfterCreate": true,
+      "normalClose": true,
+      "acpPidsAbsent": true
+    },
+    {
+      "round": 5,
+      "condition": "watcher-only",
+      "firstSdkCreateMs": 767.89,
+      "firstSdkSessionPostMs": 749.37,
+      "spawnToListenerObservedMs": 324.765,
+      "spawnToRequestBoundaryMs": 621.001,
+      "spawnToFirstResponseMs": 1388.998,
+      "firstRequestMs": 18.144,
+      "firstAcpSpawnAfterRequestMs": 14.059,
+      "sdkCreate2Ms": 68.814,
+      "sdkCreate3Ms": 56.622,
+      "firstSdkHttpCount": 2,
+      "newSessions": 3,
+      "preheatDisabled": true,
+      "noSessionOrChannelBeforeCreate": true,
+      "acpSpawnedAfterCreate": true,
+      "normalClose": true,
+      "acpPidsAbsent": true
+    },
+    {
+      "round": 6,
+      "condition": "watcher-only",
+      "firstSdkCreateMs": 774.833,
+      "firstSdkSessionPostMs": 756.248,
+      "spawnToListenerObservedMs": 331.122,
+      "spawnToRequestBoundaryMs": 613.11,
+      "spawnToFirstResponseMs": 1388.051,
+      "firstRequestMs": 18.192,
+      "firstAcpSpawnAfterRequestMs": 14.241,
+      "sdkCreate2Ms": 74.423,
+      "sdkCreate3Ms": 53.431,
+      "firstSdkHttpCount": 2,
+      "newSessions": 3,
+      "preheatDisabled": true,
+      "noSessionOrChannelBeforeCreate": true,
+      "acpSpawnedAfterCreate": true,
+      "normalClose": true,
+      "acpPidsAbsent": true
+    },
+    {
+      "round": 6,
+      "condition": "baseline",
+      "firstSdkCreateMs": 1089.196,
+      "firstSdkSessionPostMs": 1070.686,
+      "spawnToListenerObservedMs": 340.027,
+      "spawnToRequestBoundaryMs": 629.981,
+      "spawnToFirstResponseMs": 1719.28,
+      "firstRequestMs": 18.145,
+      "firstAcpSpawnAfterRequestMs": 14.011,
+      "sdkCreate2Ms": 65.131,
+      "sdkCreate3Ms": 59.166,
+      "firstSdkHttpCount": 2,
+      "newSessions": 3,
+      "preheatDisabled": true,
+      "noSessionOrChannelBeforeCreate": true,
+      "acpSpawnedAfterCreate": true,
+      "normalClose": true,
+      "acpPidsAbsent": true
+    },
+    {
+      "round": 7,
+      "condition": "baseline",
+      "firstSdkCreateMs": 1093.731,
+      "firstSdkSessionPostMs": 1075.646,
+      "spawnToListenerObservedMs": 337.951,
+      "spawnToRequestBoundaryMs": 632.218,
+      "spawnToFirstResponseMs": 1726.066,
+      "firstRequestMs": 17.705,
+      "firstAcpSpawnAfterRequestMs": 13.933,
+      "sdkCreate2Ms": 73.135,
+      "sdkCreate3Ms": 55.545,
+      "firstSdkHttpCount": 2,
+      "newSessions": 3,
+      "preheatDisabled": true,
+      "noSessionOrChannelBeforeCreate": true,
+      "acpSpawnedAfterCreate": true,
+      "normalClose": true,
+      "acpPidsAbsent": true
+    },
+    {
+      "round": 7,
+      "condition": "watcher-only",
+      "firstSdkCreateMs": 789.009,
+      "firstSdkSessionPostMs": 770.335,
+      "spawnToListenerObservedMs": 323.114,
+      "spawnToRequestBoundaryMs": 591.803,
+      "spawnToFirstResponseMs": 1380.911,
+      "firstRequestMs": 18.31,
+      "firstAcpSpawnAfterRequestMs": 14.117,
+      "sdkCreate2Ms": 70.724,
+      "sdkCreate3Ms": 54.004,
+      "firstSdkHttpCount": 2,
+      "newSessions": 3,
+      "preheatDisabled": true,
+      "noSessionOrChannelBeforeCreate": true,
+      "acpSpawnedAfterCreate": true,
+      "normalClose": true,
+      "acpPidsAbsent": true
+    },
+    {
+      "round": 8,
+      "condition": "watcher-only",
+      "firstSdkCreateMs": 824.125,
+      "firstSdkSessionPostMs": 798.493,
+      "spawnToListenerObservedMs": 329.199,
+      "spawnToRequestBoundaryMs": 602.751,
+      "spawnToFirstResponseMs": 1426.978,
+      "firstRequestMs": 25.14,
+      "firstAcpSpawnAfterRequestMs": 24.601,
+      "sdkCreate2Ms": 73.481,
+      "sdkCreate3Ms": 55.125,
+      "firstSdkHttpCount": 2,
+      "newSessions": 3,
+      "preheatDisabled": true,
+      "noSessionOrChannelBeforeCreate": true,
+      "acpSpawnedAfterCreate": true,
+      "normalClose": true,
+      "acpPidsAbsent": true
+    },
+    {
+      "round": 8,
+      "condition": "baseline",
+      "firstSdkCreateMs": 1110.502,
+      "firstSdkSessionPostMs": 1091.925,
+      "spawnToListenerObservedMs": 329.15,
+      "spawnToRequestBoundaryMs": 631.654,
+      "spawnToFirstResponseMs": 1742.274,
+      "firstRequestMs": 18.195,
+      "firstAcpSpawnAfterRequestMs": 14.176,
+      "sdkCreate2Ms": 72.095,
+      "sdkCreate3Ms": 58.003,
+      "firstSdkHttpCount": 2,
+      "newSessions": 3,
+      "preheatDisabled": true,
+      "noSessionOrChannelBeforeCreate": true,
+      "acpSpawnedAfterCreate": true,
+      "normalClose": true,
+      "acpPidsAbsent": true
+    }
+  ],
+  "pairDifferences": [
+    {
+      "round": 1,
+      "reductionMs": 340.029,
+      "reductionPercent": 30.955
+    },
+    {
+      "round": 2,
+      "reductionMs": 307.28,
+      "reductionPercent": 28.496
+    },
+    {
+      "round": 3,
+      "reductionMs": 321.426,
+      "reductionPercent": 28.463
+    },
+    {
+      "round": 4,
+      "reductionMs": 350.138,
+      "reductionPercent": 31.537
+    },
+    {
+      "round": 5,
+      "reductionMs": 314.741,
+      "reductionPercent": 29.072
+    },
+    {
+      "round": 6,
+      "reductionMs": 314.363,
+      "reductionPercent": 28.862
+    },
+    {
+      "round": 7,
+      "reductionMs": 304.722,
+      "reductionPercent": 27.861
+    },
+    {
+      "round": 8,
+      "reductionMs": 286.377,
+      "reductionPercent": 25.788
+    }
+  ]
+}

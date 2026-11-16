@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceActor;
@@ -22,8 +23,8 @@ class ManagedReceiptScopeTest {
             ManagedSchema.initialize(fixture.source());
             var jdbc = new ManagedSchemaJdbcTemplate(fixture.source());
             var tx = new TransactionTemplate(new DataSourceTransactionManager(fixture.source()));
-            var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {},
-                    new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+            var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {},
+                    new JdbcManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
             for (int size : List.of(384, 385, 512)) {
                 String tenant = "tenant-" + size;
                 String actor = new WorkspaceActor(tenant, "😀".repeat(size)).getActorId();
@@ -34,12 +35,24 @@ class ManagedReceiptScopeTest {
                         tenant);
                 jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                                 + " VALUES (?, 'workspace', ?, 'OPERATOR')", tenant, actorBytes);
-                var admission = tx.execute(status -> store.insertWorkspaceSessionCommand(tenant, actor, "create",
-                        "digest", "qwen-code", null, "title", List.of(), null,
-                        new WorkspaceSelection("workspace", ".")));
-                var replay = tx.execute(status -> store.insertWorkspaceSessionCommand(tenant, actor, "create",
-                        "digest", "qwen-code", null, "title", List.of(), null,
-                        new WorkspaceSelection("workspace", ".")));
+                var admission = tx.execute(status -> store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                        .tenantId(tenant)
+                        .actorId(actor)
+                        .idempotencyKey("create")
+                        .requestDigest("digest")
+                        .agentId("qwen-code")
+                        .title("title")
+                        .selection(new WorkspaceSelection("workspace", "."))
+                        .build()));
+                var replay = tx.execute(status -> store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                        .tenantId(tenant)
+                        .actorId(actor)
+                        .idempotencyKey("create")
+                        .requestDigest("digest")
+                        .agentId("qwen-code")
+                        .title("title")
+                        .selection(new WorkspaceSelection("workspace", "."))
+                        .build()));
                 assertThat(replay.sessionId()).isEqualTo(admission.sessionId());
                 assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id = ?",
                         Integer.class, tenant)).isOne();

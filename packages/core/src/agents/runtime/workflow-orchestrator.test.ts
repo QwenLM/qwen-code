@@ -1963,6 +1963,7 @@ describe('createProductionDispatch', () => {
   it('bubbles a production subagent approval through the run registry and resumes after ProceedOnce', async () => {
     const registry = new WorkflowRunRegistry();
     registry.setApprovalChangeCallback(() => {});
+    registry.setApprovalRequestCallback(() => {});
     const config = {
       getWorkflowRunRegistry: () => registry,
     } as unknown as Config;

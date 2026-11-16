@@ -336,7 +336,12 @@ describe('standalone session routes', () => {
 
   it('returns invalid_cursor for an invalid standalone list cursor', async () => {
     const { app, service } = createHarness();
-    service.list.mockRejectedValueOnce(new InvalidCursorError('invalid'));
+    // The standalone list passes `conversationKind: 'standalone-top-level'`,
+    // so its cursor parser reports the metadata kind (see
+    // listWorkspaceSessionsByMetadataForResponse).
+    service.list.mockRejectedValueOnce(
+      new InvalidCursorError('invalid', 'metadata'),
+    );
 
     const response = await request(app).get(
       '/standalone/sessions?cursor=invalid',
@@ -344,7 +349,7 @@ describe('standalone session routes', () => {
 
     expect(response.status).toBe(400);
     expect(response.body).toEqual({
-      error: 'Invalid cursor: "invalid" is not a valid numeric cursor',
+      error: 'Invalid cursor: "invalid" is not a valid metadata cursor',
       code: 'invalid_cursor',
     });
   });

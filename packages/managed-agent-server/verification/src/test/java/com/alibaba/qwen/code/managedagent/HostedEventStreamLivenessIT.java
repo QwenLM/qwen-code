@@ -25,9 +25,7 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.lang.management.ManagementFactory;
 import java.net.HttpURLConnection;
-import java.net.InetAddress;
 import java.net.InetSocketAddress;
-import java.net.ServerSocket;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -49,6 +47,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import java.util.regex.Pattern;
 
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.reservePort;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -75,7 +74,7 @@ class HostedEventStreamLivenessIT {
     // Longer than the bound, inside the Harness's 120 s first-response wait.
     private static final long QUIET_MILLIS = IDLE_BOUND_MILLIS + 10_000;
     private static final String IDLE_RETRY =
-            "failure=HostedHarnessStreamIdleException";
+            "failure=HarnessStreamIdleFailure";
 
     private final ObjectMapper json = new ObjectMapper();
     private final List<JsonNode> modelRequests = new CopyOnWriteArrayList<>();
@@ -225,10 +224,7 @@ class HostedEventStreamLivenessIT {
         startModel();
         startHarness(cli);
         relay = new HostedEventStreamRelay(harnessPort);
-        try (ServerSocket socket = new ServerSocket(0, 0,
-                InetAddress.getLoopbackAddress())) {
-            springPort = socket.getLocalPort();
-        }
+        springPort = reservePort();
         spring = (ServletWebServerApplicationContext)
                 new SpringApplicationBuilder(
                         ManagedAgentServerApplication.class).run(

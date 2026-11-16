@@ -19,6 +19,21 @@ import { AuthType, DEFAULT_QWEN_MODEL } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import { SettingScope } from '../../config/settings.js';
 import { getFilteredQwenModels } from '../models/availableModels.js';
+import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscription-oauth-client.js';
+
+const account = vi.hoisted(() => ({
+  signedIn: true,
+  listeners: new Set<() => void>(),
+}));
+vi.mock('@qwen-code/qwen-code-core/qwen/subscription-session.js', () => ({
+  QwenSubscriptionSession: class {
+    isSignedIn = () => account.signedIn;
+    onChange = (listener: () => void) => {
+      account.listeners.add(listener);
+      return () => account.listeners.delete(listener);
+    };
+  },
+}));
 
 vi.mock('../hooks/useKeypress.js', () => ({
   useKeypress: vi.fn(),
@@ -131,6 +146,8 @@ const renderComponent = (
 describe('<ModelDialog />', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    account.signedIn = true;
+    account.listeners.clear();
     // Ensure env-based fallback models don't leak into this suite from the developer environment.
     delete process.env['OPENAI_MODEL'];
     delete process.env['ANTHROPIC_MODEL'];
@@ -145,6 +162,104 @@ describe('<ModelDialog />', () => {
     expect(getByText('Select Model')).toBeDefined();
   });
 
+  it('hides subscription entries on external logout without changing the selected model and restores them after login', () => {
+    const { mockConfig, mockSettings, props } = renderComponent(
+      {},
+      {
+        getModel: () => 'qwen3.8-max',
+        getAuthType: () => AuthType.QWEN_SUBSCRIPTION,
+        getAllConfiguredModels: () => [
+          {
+            id: 'qwen3.8-max',
+            label: 'Subscription',
+            authType: AuthType.QWEN_SUBSCRIPTION,
+          },
+          {
+            id: 'qwen3.8-max',
+            label: 'API key model',
+            authType: AuthType.USE_OPENAI,
+          },
+        ],
+      },
+    );
+    const values = () =>
+      mockedSelect.mock.calls.at(-1)![0].items.map(({ value }) => value);
+    expect(values()).toContain(`${AuthType.QWEN_SUBSCRIPTION}::qwen3.8-max`);
+    act(() => {
+      account.signedIn = false;
+      account.listeners.forEach((listener) => listener());
+    });
+    expect(values()).not.toContain(
+      `${AuthType.QWEN_SUBSCRIPTION}::qwen3.8-max`,
+    );
+    expect(values()).toContain(`${AuthType.USE_OPENAI}::qwen3.8-max`);
+    expect(mockConfig.getModel()).toBe('qwen3.8-max');
+    expect(mockConfig.getAuthType()).toBe(AuthType.QWEN_SUBSCRIPTION);
+    expect(mockConfig.switchModel).not.toHaveBeenCalled();
+    expect(mockSettings.setValue).not.toHaveBeenCalled();
+    expect(props.onClose).not.toHaveBeenCalled();
+    act(() => {
+      account.signedIn = true;
+      account.listeners.forEach((listener) => listener());
+    });
+    expect(values()).toContain(`${AuthType.QWEN_SUBSCRIPTION}::qwen3.8-max`);
+  });
+
+  it('confirms subscription model selection without exposing API configuration', async () => {
+    const model = 'qwen3.8-max';
+    const baseUrl = 'https://api.qwen.ai/compatible-mode/v1';
+    const { mockConfig, mockHistoryManager, recordSlashCommand, props } =
+      renderComponent(
+        {},
+        {
+          getAuthType: () => AuthType.QWEN_SUBSCRIPTION,
+          getModel: () => model,
+          getAllConfiguredModels: () => [
+            {
+              id: model,
+              label: model,
+              authType: AuthType.QWEN_SUBSCRIPTION,
+              baseUrl,
+            },
+          ],
+          getContentGeneratorConfig: () => ({
+            authType: AuthType.QWEN_SUBSCRIPTION,
+            model,
+            baseUrl,
+            apiKey: 'qwen-subscription-placeholder',
+          }),
+        },
+      );
+    const select = mockedSelect.mock.calls.at(-1)![0];
+    const option = select.items.find(
+      (item) =>
+        typeof item.value === 'string' &&
+        item.value.startsWith(`${AuthType.QWEN_SUBSCRIPTION}::`),
+    );
+    expect(option).toBeDefined();
+    await act(async () => {
+      await select.onSelect(option!.value);
+    });
+    expect(mockConfig.switchModel).toHaveBeenCalledWith(
+      AuthType.QWEN_SUBSCRIPTION,
+      model,
+      { baseUrl, initializeIfNeeded: true },
+    );
+    const feedback = vi
+      .mocked(mockHistoryManager.addItem)
+      .mock.calls.at(-1)![0];
+    expect.soft(feedback).toEqual({ type: 'info', text: 'Model: qwen3.8-max' });
+    expect
+      .soft(JSON.stringify(feedback))
+      .not.toMatch(/authType|Base URL|API key|compatible-mode|placeholder/);
+    expect(recordSlashCommand).toHaveBeenCalledWith({
+      phase: 'result',
+      rawCommand: '/model',
+      outputHistoryItems: [{ type: 'info', text: 'Model: qwen3.8-max' }],
+    });
+    expect(props.onClose).toHaveBeenCalledOnce();
+  });
+
   it('passes all model options to DescriptiveRadioButtonSelect', () => {
     renderComponent();
     expect(mockedSelect).toHaveBeenCalledTimes(1);
@@ -156,6 +271,50 @@ describe('<ModelDialog />', () => {
       `${AuthType.QWEN_OAUTH}::${DEFAULT_QWEN_MODEL}`,
     );
     expect(props.showNumbers).toBe(true);
+  });
+
+  it('shows subscription models in gateway order ahead of other providers', () => {
+    renderComponent(
+      {},
+      {
+        getAuthType: () => AuthType.USE_OPENAI,
+        getModel: () => 'api',
+        getAllConfiguredModels: () => [
+          {
+            id: 'runtime',
+            label: 'Runtime',
+            authType: AuthType.USE_OPENAI,
+            isRuntimeModel: true,
+            runtimeSnapshotId: '$runtime|openai|runtime',
+          },
+          { id: 'api', label: 'API', authType: AuthType.USE_OPENAI },
+          {
+            id: 'qwen4',
+            label: 'Qwen4',
+            authType: AuthType.QWEN_SUBSCRIPTION,
+          },
+          {
+            id: 'qwen3.8-flash',
+            label: 'Flash',
+            authType: AuthType.QWEN_SUBSCRIPTION,
+          },
+          {
+            id: 'qwen3.8-max',
+            label: 'Max',
+            authType: AuthType.QWEN_SUBSCRIPTION,
+          },
+        ],
+      },
+    );
+    const select = mockedSelect.mock.calls[0][0];
+    expect(select.items.map(({ value }) => value)).toEqual([
+      'qwen-subscription::qwen4',
+      'qwen-subscription::qwen3.8-flash',
+      'qwen-subscription::qwen3.8-max',
+      '$runtime|openai|runtime',
+      'openai::api',
+    ]);
+    expect(select.items[select.initialIndex!]?.value).toBe('openai::api');
   });
 
   it('can turn Advisor off when no models are available', async () => {
@@ -610,6 +769,38 @@ describe('<ModelDialog />', () => {
     expect(propsAfterError.maxItemsToShow).toBe(1);
   });
 
+  it('shows every discovered subscription model in the selector', async () => {
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    renderComponent(
+      {},
+      {
+        getAuthType: vi.fn(() => AuthType.QWEN_SUBSCRIPTION),
+        getModel: vi.fn(() => 'independent-alpha'),
+        getAllConfiguredModels: vi.fn(() =>
+          ['independent-alpha', 'independent-beta'].map((id) => ({
+            id,
+            label: id,
+            authType: AuthType.QWEN_SUBSCRIPTION,
+          })),
+        ),
+        switchModel,
+      },
+    );
+    const select = mockedSelect.mock.calls[0][0];
+    expect(select.items.map((item) => item.value)).toEqual([
+      'qwen-subscription::independent-alpha',
+      'qwen-subscription::independent-beta',
+    ]);
+    await act(async () => {
+      await select.onSelect('qwen-subscription::independent-beta');
+    });
+    expect(switchModel).toHaveBeenCalledWith(
+      AuthType.QWEN_SUBSCRIPTION,
+      'independent-beta',
+      expect.any(Object),
+    );
+  });
+
   it('hides discontinued qwen-oauth models for other auth types', () => {
     renderComponent(
       {},
@@ -773,6 +964,7 @@ describe('<ModelDialog />', () => {
 
     expect(switchModel).toHaveBeenCalledWith(AuthType.USE_OPENAI, 'gpt-4', {
       baseUrl: undefined,
+      initializeIfNeeded: true,
     });
     expect(mockSettings.setValue).toHaveBeenCalledWith(
       SettingScope.User,
@@ -836,6 +1028,7 @@ describe('<ModelDialog />', () => {
       'qwen3.7-max',
       {
         baseUrl: 'https://idealab.example.com/v1',
+        initializeIfNeeded: true,
       },
     );
     expect(mockSettings.setValue).toHaveBeenCalledWith(
@@ -989,7 +1182,7 @@ describe('<ModelDialog />', () => {
       expect(switchModel).toHaveBeenCalledWith(
         AuthType.USE_OPENAI,
         'MiniMax-M3',
-        { baseUrl: 'https://api.minimaxi.com/v1' },
+        { baseUrl: 'https://api.minimaxi.com/v1', initializeIfNeeded: true },
       );
     } finally {
       if (previousMinimaxKey === undefined) {
@@ -2302,6 +2495,59 @@ describe('<ModelDialog />', () => {
     expect(mockHistoryManager.addItem).toHaveBeenCalledWith(
       { type: 'info', text: 'Kept model as gpt-4' },
       expect.any(Number),
+    );
+  });
+
+  it('explains expired subscription selection and still permits another provider', async () => {
+    const switchModel = vi.fn(async (authType: AuthType) => {
+      if (authType === AuthType.QWEN_SUBSCRIPTION)
+        throw new SubscriptionOAuthError('session_changed');
+    });
+    const { container, props, mockSettings } = renderComponent(
+      {},
+      {
+        getModel: () => 'qwen3.8-max',
+        getAuthType: () => AuthType.QWEN_SUBSCRIPTION,
+        switchModel,
+        getAllConfiguredModels: () => [
+          {
+            id: 'qwen3.8-flash',
+            label: 'Qwen Flash',
+            authType: AuthType.QWEN_SUBSCRIPTION,
+          },
+          {
+            id: 'alternate',
+            label: 'Alternate',
+            authType: AuthType.USE_OPENAI,
+          },
+        ],
+        getContentGeneratorConfig: () => ({
+          authType: AuthType.USE_OPENAI,
+          model: 'alternate',
+        }),
+      },
+    );
+    await act(async () => {
+      await mockedSelect.mock.calls
+        .at(-1)![0]
+        .onSelect(`${AuthType.QWEN_SUBSCRIPTION}::qwen3.8-flash`);
+    });
+    expect(container.textContent).toContain(
+      'Your login credentials are no longer valid. Run /auth to sign in again.',
+    );
+    expect(container.textContent).not.toContain('session_changed');
+    expect(props.onClose).not.toHaveBeenCalled();
+    expect(mockSettings.setValue).not.toHaveBeenCalled();
+    await act(async () => {
+      await mockedSelect.mock.calls
+        .at(-1)![0]
+        .onSelect(`${AuthType.USE_OPENAI}::alternate`);
+    });
+    expect(props.onClose).toHaveBeenCalledOnce();
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      expect.anything(),
+      'model.name',
+      'alternate',
     );
   });
 

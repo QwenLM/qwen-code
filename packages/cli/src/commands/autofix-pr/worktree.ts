@@ -8,10 +8,20 @@
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from 'node:path';
 import { GIT_TIMEOUT_MS, gitOpt, gitProbe, gitRaw } from '../review/lib/git.js';
+import { shellQuotePath } from '../review/lib/shell-quote.js';
 import { redirectedAncestor, sanitizedGitEnv } from '../review/lib/worktree.js';
 import type { AutofixPrPaths } from './state.js';
+import { AutofixPrRefusal } from './refusal.js';
 
 /**
  * Why the worktree's `.git` is not to be trusted, or null. It is a file a
@@ -62,6 +72,40 @@ export function untrustedGitfile(
     }
   } catch {
     return `${dotGit} points to ${pointer}, which is not this clone's entry for it`;
+  }
+  return null;
+}
+
+/**
+ * Why an in-place watch's checkout — the user's own, which may be the
+ * clone's main worktree — is not to be trusted, or null. A linked worktree
+ * is judged by `untrustedGitfile` as ever; the main worktree has a `.git`
+ * directory instead of a gitfile, and that directory must be this clone's
+ * own git directory, compared as the kernel resolves the paths — no git
+ * command runs in the checkout, which would read the config in question.
+ * `root` is the genuine clone (its main worktree), as for `untrustedGitfile`.
+ */
+export function untrustedCheckoutGit(
+  worktreePath: string,
+  root: string,
+): string | null {
+  const dotGit = join(worktreePath, '.git');
+  const kind = lstatSync(dotGit, { throwIfNoEntry: false });
+  if (!kind) return `${worktreePath} has no .git of its own`;
+  if (kind.isFile()) return untrustedGitfile(worktreePath, root);
+  if (!kind.isDirectory()) {
+    return `${dotGit} is neither a gitfile nor a git directory`;
+  }
+  const common = gitOpt('-C', root, 'rev-parse', '--git-common-dir');
+  if (common === null) return `git cannot find the git directory of ${root}`;
+  try {
+    if (
+      realpathSync.native(dotGit) !== realpathSync.native(resolve(root, common))
+    ) {
+      return `${dotGit} is not the git directory of this clone`;
+    }
+  } catch {
+    return `${dotGit} names a git directory this check cannot read`;
   }
   return null;
 }
@@ -221,6 +265,10 @@ function untrustedSubmodulesIn(
  * separate parameter, not `root`. This is defense-in-depth against the
  * git-level gitfile rewrite, not a boundary against a round that can write any
  * same-user file (see `anchorStoreRoot` in state.ts).
+ *
+ * `inPlace` marks the user's own checkout (`prepare --in-place`): the git
+ * trust check accepts the clone's main worktree too, and `switchBack` is
+ * never honored — a checkout on another branch is the user's to switch back.
  */
 export function requireWorktree(
   paths: AutofixPrPaths,
@@ -228,6 +276,7 @@ export function requireWorktree(
   root: string,
   switchBack = false,
   trustRoot: string = root,
+  inPlace = false,
 ): void {
   const worktreePath = paths.worktreePath;
   if (!existsSync(worktreePath)) {
@@ -244,7 +293,9 @@ export function requireWorktree(
       `${worktreePath} resolves through the symlink ${redirected}; it is not the watch's worktree.`,
     );
   }
-  const untrusted = untrustedGitfile(worktreePath, trustRoot);
+  const untrusted = inPlace
+    ? untrustedCheckoutGit(worktreePath, trustRoot)
+    : untrustedGitfile(worktreePath, trustRoot);
   if (untrusted !== null) {
     throw new Error(
       `${untrusted}: no git command runs in ${worktreePath} until the worktree is checked and removed.`,
@@ -259,8 +310,9 @@ export function requireWorktree(
   // one a fix switched to: that branch keeps its commits, and what is not
   // committed is discarded anyway. A merge, rebase or cherry-pick a fix
   // left stopped refuses the switch (a rebase holds HEAD detached), so it is
-  // quit first; none of these touches a branch.
-  if (branch !== `refs/heads/${paths.branch}` && switchBack) {
+  // quit first; none of these touches a branch. Never in the user's own
+  // checkout (`inPlace`): switching it is the user's to do.
+  if (branch !== `refs/heads/${paths.branch}` && switchBack && !inPlace) {
     for (const quit of [
       ['merge', '--quit'],
       ['rebase', '--quit'],
@@ -274,6 +326,7 @@ export function requireWorktree(
   if (
     branch !== `refs/heads/${paths.branch}` &&
     switchBack &&
+    !inPlace &&
     gitOpt(
       '-c',
       'submodule.recurse=false',
@@ -288,9 +341,118 @@ export function requireWorktree(
     return;
   }
   if (branch !== `refs/heads/${paths.branch}`) {
-    throw new Error(
-      `${worktreePath} has ${branch ? branch.replace(/^refs\/heads\//, 'branch ') : 'a detached HEAD'} checked out, not ${paths.branch}; switch it back before pushing or syncing.`,
+    const checkedOut = `${worktreePath} has ${branch ? branch.replace(/^refs\/heads\//, 'branch ') : 'a detached HEAD'} checked out, not ${paths.branch}`;
+    // Asked to switch back (`sync --discard`), git refused: the branch is
+    // checked out elsewhere, or a lock or a missing branch stops it.
+    // Discarding again would only ask the same.
+    if (switchBack && !inPlace) {
+      // The branch checked out in another worktree is the one cause no
+      // command of the watch can clear: `cleanup` cannot delete the branch
+      // either while that checkout holds it.
+      const holder = branchHolder(worktreePath, worktreePath, paths.branch);
+      throw new SwitchBackRefused(
+        holder
+          ? `${checkedOut}, and git could not switch it back: ${paths.branch} is checked out in ${holder.path}${freeing(holder, worktreePath)}; until then neither a round nor \`qwen autofix-pr cleanup ${prNumber}\` can use or remove the branch.`
+          : `${checkedOut}, and git could not switch it back; remove the watch with \`qwen autofix-pr cleanup ${prNumber} --force\` and prepare it again.`,
+      );
+    }
+    throw new AutofixPrRefusal(
+      'worktree_dirty',
+      `${checkedOut}; switch it back before pushing or syncing.`,
     );
+  }
+}
+
+/** Another worktree of the clone that git counts as having a branch checked
+ * out: `main` for the clone's own checkout, which git never removes;
+ * `stale` once it is no checkout any more (its directory or its `.git`
+ * deleted by hand), which git still counts until the record is pruned. */
+export interface Holder {
+  path: string;
+  main: boolean;
+  stale: boolean;
+  locked: boolean;
+}
+
+/** A directory's real path; for one that is gone, its parent's real path
+ * and its name. */
+function canonical(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    try {
+      return join(realpathSync(dirname(path)), basename(path));
+    } catch {
+      return resolve(path);
+    }
+  }
+}
+
+/** A worktree of the clone `cwd` is in, other than `self` (the watch's own,
+ * which may be gone), with `branch` checked out; or null. */
+export function branchHolder(
+  cwd: string,
+  self: string,
+  branch: string,
+): Holder | null {
+  // NUL-separated from git 2.36 on, so that a path keeps a newline in it;
+  // an older git has only the line form.
+  const z = gitOpt('-C', cwd, 'worktree', 'list', '--porcelain', '-z');
+  const out = z ?? gitOpt('-C', cwd, 'worktree', 'list', '--porcelain');
+  if (out === null) return null;
+  const end = z === null ? '\n' : '\0';
+  const own = canonical(self);
+  // git lists the main worktree first.
+  for (const [index, entry] of out.split(end.repeat(2)).entries()) {
+    const fields = entry.split(end);
+    const value = (name: string) =>
+      fields
+        .find((field) => field.startsWith(`${name} `))
+        ?.slice(name.length + 1);
+    const path = value('worktree');
+    if (!path || value('branch') !== `refs/heads/${branch}`) continue;
+    if (canonical(path) === own) continue;
+    return {
+      path,
+      main: index === 0,
+      // What makes git call a record `prunable`, asked here rather than
+      // read: git says it only from 2.31 on, and never of a locked record.
+      stale: !existsSync(join(path, '.git')),
+      locked: fields.some((field) => /^locked(?: |$)/.test(field)),
+    };
+  }
+  return null;
+}
+
+/** How the user frees the branch `holder` keeps. `git worktree prune`
+ * drops a stale record but not a locked one, and `git worktree remove`
+ * refuses a locked worktree, one whose `.git` is gone, and the clone's own
+ * checkout. Each command runs as printed from any directory: the path in it
+ * is quoted, and it names `anchor`, a directory of the clone git has just
+ * been run in, to run in. */
+export function freeing(
+  { path, main, stale, locked }: Holder,
+  anchor: string,
+): string {
+  if (main) return '. Switch that checkout to another branch';
+  const git = `git -C ${shellQuotePath(anchor)} worktree`;
+  const quoted = shellQuotePath(path);
+  const gone =
+    'worktree git still records although nothing is checked out there any more';
+  const free = stale
+    ? `drop its record with \`${git} prune\``
+    : `switch that checkout to another branch or remove it (\`${git} remove ${quoted}\`)`;
+  if (locked) {
+    return `, ${stale ? `a locked ${gone}` : 'which is locked'}. Unlock it (\`${git} unlock ${quoted}\`), then ${free}`;
+  }
+  return `${stale ? `, a ${gone}` : ''}. ${free[0].toUpperCase()}${free.slice(1)}`;
+}
+
+/** `sync --discard` asked to switch the worktree back to the watch's
+ * branch, and git refused: the worktree cannot be cleaned. */
+export class SwitchBackRefused extends AutofixPrRefusal {
+  constructor(message: string) {
+    super('failed', message);
   }
 }
 
@@ -359,6 +521,56 @@ export function remoteRef(
     if (name === ref && sha) return sha;
   }
   return null;
+}
+
+/**
+ * Whether a checkout holds work git reports, or null when git cannot read it.
+ * The flags override `status.showUntrackedFiles` and submodule `ignore`
+ * settings, as this directory's other scans do. Only `.qwen` is the watch's:
+ * anything beside its `tmp` directory under there is the user's work. An
+ * in-place watch's checkout holds the watch's own files under `.qwen/tmp`,
+ * so its dirty checks use this, not `hasUncommittedChanges`.
+ */
+export function checkoutHoldsWork(path: string): boolean | null {
+  // -z: porcelain v1 C-quotes a non-ASCII path, and a quoted `.qwen/tmp`
+  // watch file would read as the user's work. NUL-delimited records carry
+  // the path as git stores it; a rename's old path is its own record and,
+  // not starting `??`, still counts as work.
+  const status = gitOpt(
+    '--no-optional-locks',
+    '-C',
+    path,
+    'status',
+    '--porcelain',
+    '-z',
+    '--untracked-files=normal',
+    '--ignore-submodules=none',
+  );
+  if (status === null) return null;
+  const records = status.split('\0').filter((record) => record !== '');
+  const onlyWatchDir = (record: string) =>
+    record.startsWith('??') && isUnderQwen(record.slice(3));
+  if (records.some((record) => !onlyWatchDir(record))) return true;
+  if (records.length === 0) return false;
+  // Only `.qwen` is untracked: ask what it holds besides the watch's `tmp`.
+  const userFiles = gitOpt(
+    '--no-optional-locks',
+    '-C',
+    path,
+    'ls-files',
+    '--others',
+    '--exclude-standard',
+    '--',
+    '.qwen',
+    ':(exclude).qwen/tmp',
+  );
+  if (userFiles === null) return null;
+  return userFiles.trim() !== '';
+}
+
+/** A porcelain path at or under `.qwen`. */
+function isUnderQwen(file: string): boolean {
+  return file === '.qwen' || file.startsWith('.qwen/');
 }
 
 /**

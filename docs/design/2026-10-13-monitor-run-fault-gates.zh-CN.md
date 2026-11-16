@@ -105,7 +105,7 @@ driver 在 broker 与 store 监听器前内嵌反向代理；lose-once 故障转
 | `webshell-monitor-resume` | 在 WebShell 流上做同样注入                           | 同样的断言                                                                           |
 | `cursor-expired-resync`   | 以早于重放窗口的游标续传                             | 单帧 `agent.session.resync_required`，然后关闭；无伪造重放                           |
 
-`cursor-expired-resync` 暂缓、不进片 1 的字母：重放地板只有会话快照落地才会前移，所以一个诚实的过期游标需要先把重放地板机制驱动到那个点；该用例随片 2 落地，它的变异（下面的第 2 条）一并移动。本次交付的 FG8e 字母覆盖四个中止/续传用例。
+`cursor-expired-resync` 暂缓、不进片 1 的字母：重放地板只有会话快照落地才会前移，所以一个诚实的过期游标需要先把重放地板机制驱动到那个点。该用例后来在 FG9e（`docs/design/2026-10-15-session-relay-fault-gates.md`）作为 #15750 承接的格子交付，它的变异也一并移动。本次交付的 FG8e 字母覆盖四个中止/续传用例。
 
 一条付出了一个 flake 的 fixture 教训：60 s 的事件轮询/心跳间隔（为强制 live hub 承载投递而设）可把 WebShell 续传压住一个完整轮询周期，而 monitor watch 的空闲窗口必须长过它 —— 空闲超时设 30 s 时，watch 在断流中途把顶在门边的生产者空闲杀掉，用例就吊死在一扇永不再开的门上。watch 以 `idle_timeout_ms` = 180 s 运行。同一轮询也限制续传 observer 追平已提交台账的速度 —— 在重放读取与 relay 停止之间提交的行要晚一个轮询周期才到，所以追平等待设为 120 s，长过两个周期。第二条纪律：monitor producer 绝不自然退出 —— 打过最后一个 mark 后空转，配额停表的 kill 是唯一出路。自然退出会关闭作用域，其 cancel 写入与配额结算赛跑，胜出时把记录翻折成 `stop_requested` 而不是 `max_events`（lane 上实测两次）。
 
@@ -136,7 +136,7 @@ publisher 住在 Harness 进程内，所以「杀掉 publisher」是一次只断
 每个变异单独应用、证明恰好把它自己的门禁打红、然后回滚，沿用 FG6/FG7 记录在案的手动程序。下面的片 1 变异随本设计一起提交；片 2 与片 3 在落地时对着已合入的 #14021 / #13986 / #13918 语义细化自己的变异。
 
 1. FG8e —— 公开流重放的游标 tiebreak 被削弱为包含游标行：`public-run-resume` 红（续传边界处重复）。
-2. 随用例一并暂缓：FG8e —— 过期游标分支从序列 0 起播而不是回答 `resync_required`：`cursor-expired-resync` 红。随片 2 落地。
+2. 随用例一并暂缓、后在 FG9e 作为 #15750 的残余格子交付：FG8e —— 过期游标分支从序列 0 起播而不是回答 `resync_required`：`cursor-expired-resync` 红。
 3. FG8e —— WebShell 重放窗口在 `afterSequence` 边界差一：`webshell-run-resume` 红（边界处缺失或重复）。
 4. FG8f —— 恢复水位降为 0（resume 只在缓冲完全排空后才重新武装）：`in-flight-cap` 红 —— 生产者停摆后的第一个块要等整批滞留积压全部提交才会落地，恢复时点的已提交数因此到达停摆点而不是停在它后面。
 5. FG8f —— journal 提交的重试铸了新的事务身份而非重驱原事务：`receipt-drop-after-watermark` 红（重驱的结算提交与已落库的原提交冲突，记录永不结算）。

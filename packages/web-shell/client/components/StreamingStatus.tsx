@@ -1,4 +1,10 @@
-import { useCallback, useState, useEffect, useRef } from 'react';
+import {
+  useCallback,
+  useState,
+  useEffect,
+  useRef,
+  type ReactNode,
+} from 'react';
 import {
   PHRASE_CHANGE_INTERVAL_MS,
   getLoadingPhrases,
@@ -28,6 +34,8 @@ interface StreamingStatusProps {
    */
   hasActivePrompt?: boolean;
   showResponseTokensPerSecond?: boolean;
+  /** Optional control rendered after the status metadata, e.g. the minigame. */
+  trailing?: ReactNode;
 }
 
 const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -38,6 +46,7 @@ export function StreamingStatus({
   showPhrase = true,
   hasActivePrompt,
   showResponseTokensPerSecond = false,
+  trailing,
 }: StreamingStatusProps) {
   const streamingState = useStreamingState();
   const { estimatedOutputTokens, isReceivingContent } =
@@ -165,6 +174,7 @@ export function StreamingStatus({
         {tokenStr}
         {tokenRateStr} · {t('stream.cancel')}
       </span>
+      {trailing}
     </div>
   );
 }

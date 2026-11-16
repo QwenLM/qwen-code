@@ -20,7 +20,7 @@ import static org.mockito.Mockito.when;
 
 /**
  * The tool-publication surface funnels every writer-credential check through
- * {@code ManagedSessionStore.lockPublicationWriter}; with a bound policy a
+ * {@code JdbcManagedSessionStore.lockPublicationWriter}; with a bound policy a
  * self-minted token is refused before any state lookup.
  */
 class ManagedSessionStoreCredentialTest {
@@ -31,11 +31,10 @@ class ManagedSessionStoreCredentialTest {
     void lifecycleWriterPathsRefuseForeignCredentialsBeforeStateLookup(String route) {
         JdbcTemplate jdbc = mock(JdbcTemplate.class);
         when(jdbc.getDataSource()).thenReturn(new JdbcDataSource());
-        ManagedSessionStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getSessionStore().setBindingKey(KEY);
         WriterCredentialPolicy policy = new WriterCredentialPolicy(properties);
-        store.setCredentials(policy);
+        JdbcManagedSessionStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc, policy);
         reset(jdbc);
 
         for (String token : new String[]{null, "self-minted-token-self-minted-token-0",
@@ -51,7 +50,7 @@ class ManagedSessionStoreCredentialTest {
         }
     }
 
-    private static void invokeWriterPath(ManagedSessionStore store, String route, String token) {
+    private static void invokeWriterPath(JdbcManagedSessionStore store, String route, String token) {
         var authority = new com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority("operation", 1);
         switch (route) {
             case "ordinary" -> store.authorizeOrdinary("tenant", "session", token,
@@ -76,11 +75,11 @@ class ManagedSessionStoreCredentialTest {
     void publicationWriterLockRequiresTheBoundCredential() {
         JdbcDataSource dataSource = new JdbcDataSource();
         dataSource.setURL("jdbc:h2:mem:credential-check;MODE=MySQL");
-        ManagedSessionStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(
-                new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(dataSource)));
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getSessionStore().setBindingKey(KEY);
-        store.setCredentials(new WriterCredentialPolicy(properties));
+        JdbcManagedSessionStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(
+                new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(dataSource),
+                new WriterCredentialPolicy(properties));
 
         assertThatThrownBy(() -> store.lockPublicationWriter("tenant",
                 "workspace", "session", "writer", 1,
@@ -99,12 +98,11 @@ class ManagedSessionStoreCredentialTest {
                 + "DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
         Flyway.configure().dataSource(dataSource)
                 .locations("classpath:db/managed-schema").load().migrate();
-        ManagedSessionStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(
-                new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(dataSource)));
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getSessionStore().setBindingKey(KEY);
         WriterCredentialPolicy policy = new WriterCredentialPolicy(properties);
-        store.setCredentials(policy);
+        JdbcManagedSessionStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(
+                new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(dataSource), policy);
 
         // Any outcome other than the credential refusal means the issued
         // credential passed the gate; the session itself does not exist.

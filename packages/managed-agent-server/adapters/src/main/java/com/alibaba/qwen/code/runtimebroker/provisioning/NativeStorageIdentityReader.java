@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.runtimebroker.provisioning;
 
 import com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityReader;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityReader.Identity;
+import com.alibaba.qwen.code.runtimebroker.host.MacOsHostIdentity;
 import org.apache.commons.codec.digest.HmacAlgorithms;
 import org.apache.commons.codec.digest.HmacUtils;
 

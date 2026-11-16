@@ -10,6 +10,7 @@ import type { ContentGenerator } from '@qwen-code/qwen-code-core/core/contentGen
 import { PromptHookRunner } from '@qwen-code/qwen-code-core/hooks/promptHookRunner.js';
 import type { ManagedHookModelScope } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
 import { loadCliConfig, type CliArgs } from '../config/config.js';
+import type { HostedModelConfigReader } from './hosted-model-config.js';
 import { loadSettings } from '../config/settings.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import type { HostedPromptHookRunner } from './hosted-hook-session.js';
@@ -135,6 +136,7 @@ export async function runHostedHookOperation<T>(
     cwd: string;
     signal: AbortSignal;
     scope: ManagedHookModelScope;
+    modelConfig?: HostedModelConfigReader;
   },
   run: (runner: HostedPromptHookRunner) => Promise<T>,
 ): Promise<T> {
@@ -143,6 +145,7 @@ export async function runHostedHookOperation<T>(
     skipWorkspaceSettings: true,
     workspaceTrusted: false,
   });
+  const sessionModelConfig = await input.modelConfig?.();
   const config = await loadCliConfig(
     settings.merged,
     {
@@ -159,7 +162,11 @@ export async function runHostedHookOperation<T>(
     undefined,
     undefined,
     true,
-    { toolInvocationGuard: () => ({ allowed: false }) },
+    {
+      toolInvocationGuard: () => ({ allowed: false }),
+      lspDisabled: true,
+      ...(sessionModelConfig ? { modelConfiguration: sessionModelConfig } : {}),
+    },
   );
   try {
     await config.initialize({

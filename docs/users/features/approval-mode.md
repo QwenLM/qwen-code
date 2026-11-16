@@ -171,6 +171,8 @@ Auto-Edit Mode instructs Qwen Code to automatically approve file edits while req
 
 Auto-approved edit tools include `edit`, `write_file`, and `notebook_edit`.
 
+A call that matches a [`permissions.ask`](../configuration/settings.md#permissions) rule still asks for confirmation in this mode, the same as in Auto Mode. That applies to subagents too, which run in Auto-Edit by default when the session is in Ask Permissions mode in a trusted folder: a foreground subagent asks inline, and a background subagent, which cannot ask, has the call denied.
+
 ### When to use Auto-Accept Edits Mode
 
 - **Daily development**: Ideal for most coding tasks

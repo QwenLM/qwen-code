@@ -4,7 +4,6 @@ import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONReader;
 import com.alibaba.fastjson2.JSONWriter;
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
-import com.alibaba.qwen.code.runtimebroker.RuntimeAdmission;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
@@ -25,7 +24,6 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 /** JDBC ledger for idempotent Tool executions. */
 public final class JdbcToolExecutionRepository
@@ -37,24 +35,19 @@ public final class JdbcToolExecutionRepository
             "runtime_session_id", "runtime_session_key", "turn_id",
             "tool_call_id", "request_digest", "reference_json",
             "execution_state", "execution_status", "result_json",
-            "last_sequence", "cancel_requested", "dispatch_owner",
+            "last_sequence", "is_cancel_requested", "dispatch_owner",
             "dispatch_lease_until", "dispatch_generation", "record_version",
             "settled_at", "abandoned_at", "loss_evidence_id",
             "authorized_dispatch_generation", "authorized_binding_version");
     private final DataSource dataSource;
-    private final JdbcRuntimeBindingRepository csiBindings;
 
     public JdbcToolExecutionRepository(DataSource dataSource) {
-        this(dataSource, null);
+        this.dataSource = JdbcRepositorySupport.requireDataSource(dataSource);
     }
 
     public JdbcToolExecutionRepository(
             DataSource dataSource, JdbcRuntimeBindingRepository csiBindings) {
-        this.dataSource = JdbcRepositorySupport.requireDataSource(dataSource);
-        if (csiBindings != null && !csiBindings.usesDataSource(this.dataSource)) {
-            throw new IllegalArgumentException("CSI continuation requires the same DataSource");
-        }
-        this.csiBindings = csiBindings;
+        this(dataSource);
     }
 
     static void abandonByBinding(Connection connection, RuntimeBindingRecord binding)
@@ -135,13 +128,6 @@ public final class JdbcToolExecutionRepository
     @Override
     public ToolExecutionRecord findOrCreate(ToolExecutionRecord candidate) {
         requireCandidate(candidate);
-        JdbcRepositorySupport.read(
-                dataSource,
-                connection -> {
-                    JdbcCsiActivationAdmission.refuseUnqualifiedWriter(
-                            connection, candidate.getBindingId());
-                    return null;
-                });
         ToolExecutionRecord existing = findByIdempotencyKey(
                 candidate.getIdempotencyKey());
         if (existing != null) {
@@ -150,8 +136,6 @@ public final class JdbcToolExecutionRepository
         try {
             return JdbcRepositorySupport.transaction(dataSource,
                     connection -> {
-                        JdbcCsiActivationAdmission.refuseUnqualifiedWriter(
-                                connection, candidate.getBindingId());
                         insertExecution(connection, candidate);
                         return candidate;
                     });
@@ -245,43 +229,25 @@ public final class JdbcToolExecutionRepository
                     if (hint == null) {
                         return null;
                     }
-                    var continuation = lockCsiContinuation(connection, hint);
-                    if (continuation != null) {
-                        var current =
-                                selectByExecutionId(
-                                        connection, expected.getExecutionCallId(), true);
-                        continuation.require(current);
-                        if (!running(current)
-                                || replacement.getState() != ToolExecutionRecord.State.SETTLED
-                                        && replacement.getState()
-                                                != ToolExecutionRecord.State.UNKNOWN
-                                || current.isCancelRequested() != replacement.isCancelRequested()
-                                || replacement.getLastSequence() < current.getLastSequence()) {
-                            throw csiContinuationUnavailable();
-                        }
-                    }
                     return compareAndSet(
                             connection,
                             expected,
                             replacement,
                             owner,
                             dispatchGeneration,
-                            false,
-                            continuation);
+                            false);
                 });
     }
 
     static ToolExecutionRecord authorizeDispatch(Connection connection, ToolExecutionRecord expected,
             String owner, long dispatchGeneration, long bindingVersion) throws SQLException {
         return compareAndSet(connection, expected, expected.authorizeDispatch(bindingVersion),
-                owner, dispatchGeneration, true,
-                null);
+                owner, dispatchGeneration, true);
     }
 
     private static ToolExecutionRecord compareAndSet(Connection connection, ToolExecutionRecord expected,
             ToolExecutionRecord replacement, String owner, long dispatchGeneration,
-            boolean authorizing,
-            CsiContinuation continuation) throws SQLException {
+            boolean authorizing) throws SQLException {
         requireReplacement(expected, replacement);
         if (!authorizing && !expected.sameAuthorization(replacement)) {
             throw new IllegalArgumentException("replacement must preserve dispatch authorization");
@@ -322,7 +288,6 @@ public final class JdbcToolExecutionRepository
         }
         ToolExecutionRecord updated = replacement.withVersion(
                 expected.getVersion() + 1);
-        requireCsiCurrentTime(connection, continuation);
         updateExecution(connection, updated);
         return updated;
     }
@@ -342,17 +307,7 @@ public final class JdbcToolExecutionRepository
                     if (hint == null) {
                         return null;
                     }
-                    var continuation = lockCsiContinuation(connection, hint);
                     ToolExecutionRecord current = selectByExecutionId(connection, id, true);
-                    if (continuation != null) {
-                        continuation.require(current);
-                        if (!current.isTerminal()
-                                && current.getState() != ToolExecutionRecord.State.UNKNOWN
-                                && !running(current)) {
-                            continuation.original().requireAdmission();
-                        }
-                    }
-                    requireCsiCurrentTime(connection, continuation);
                     if (current == null
                             || current.isTerminal()
                             || current.getState() == ToolExecutionRecord.State.UNKNOWN) {
@@ -371,13 +326,8 @@ public final class JdbcToolExecutionRepository
                             || current.getState() == ToolExecutionRecord.State.CANCEL_REQUESTED) {
                         ToolExecutionRecord unknown =
                                 current.withUnknown().withVersion(current.getVersion() + 1);
-                        requireCsiCurrentTime(connection, continuation);
                         updateExecution(connection, unknown);
                         return null;
-                    }
-                    if (continuation != null) {
-                        JdbcCsiExecutionAdmission.requireDispatch(
-                                connection, continuation.original(), current);
                     }
                     ToolExecutionRecord claimed =
                             current.withDispatch(
@@ -386,15 +336,6 @@ public final class JdbcToolExecutionRepository
                                             current.getDispatchGeneration() + 1,
                                             ToolExecutionRecord.State.DISPATCHING)
                                     .withVersion(current.getVersion() + 1);
-                    if (continuation != null) {
-                        continuation
-                                .progress()
-                                .requireLease(
-                                        connection,
-                                        claimed.getDispatchLeaseUntil().toEpochMilli(),
-                                        claimed.getDispatchLeaseUntil().toEpochMilli());
-                    }
-                    requireCsiCurrentTime(connection, continuation);
                     updateExecution(connection, claimed);
                     return claimed;
                 });
@@ -415,17 +356,7 @@ public final class JdbcToolExecutionRepository
                     if (hint == null) {
                         return null;
                     }
-                    var continuation = lockCsiContinuation(connection, hint);
                     ToolExecutionRecord current = selectByExecutionId(connection, id, true);
-                    if (continuation != null) {
-                        continuation.require(current);
-                        if (!current.isTerminal()
-                                && current.getState() != ToolExecutionRecord.State.UNKNOWN
-                                && !running(current)) {
-                            continuation.original().requireAdmission();
-                        }
-                    }
-                    requireCsiCurrentTime(connection, continuation);
                     if (current == null
                             || current.isTerminal()
                             || current.getState() == ToolExecutionRecord.State.UNKNOWN) {
@@ -444,15 +375,6 @@ public final class JdbcToolExecutionRepository
                                             dispatchGeneration,
                                             current.getState())
                                     .withVersion(current.getVersion() + 1);
-                    if (continuation != null) {
-                        continuation
-                                .progress()
-                                .requireLease(
-                                        connection,
-                                        current.getDispatchLeaseUntil().toEpochMilli(),
-                                        renewed.getDispatchLeaseUntil().toEpochMilli());
-                    }
-                    requireCsiCurrentTime(connection, continuation);
                     updateExecution(connection, renewed);
                     return renewed;
                 });
@@ -470,23 +392,11 @@ public final class JdbcToolExecutionRepository
                     if (hint == null) {
                         return null;
                     }
-                    var continuation = lockCsiContinuation(connection, hint);
                     ToolExecutionRecord current = selectByExecutionId(connection, id, true);
-                    if (continuation != null) {
-                        continuation.require(current);
-                    }
-                    requireCsiCurrentTime(connection, continuation);
                     if (current == null
                             || current.isTerminal()
                             || current.getVersion() != expectedVersion) {
                         return null;
-                    }
-                    if (continuation != null && current.getAuthorizedDispatchGeneration() != null) {
-                        throw new RuntimeBrokerException(
-                                409,
-                                "csi_execution_cancel_unavailable",
-                                "An authorized private CSI execution does not support cancellation",
-                                false);
                     }
                     if (current.isCancelRequested()) {
                         return current;
@@ -497,21 +407,7 @@ public final class JdbcToolExecutionRepository
                                             ? ToolExecutionRecord.State.CANCEL_REQUESTED
                                             : current.getState(),
                                     true);
-                    if (continuation != null
-                            && current.getAuthorizedDispatchGeneration() == null
-                            && (current.getState() == ToolExecutionRecord.State.PREPARED
-                                    || current.getState()
-                                            == ToolExecutionRecord.State.DISPATCHING)) {
-                        requested =
-                                requested.withResult(
-                                        Map.of(
-                                                "executionStatus",
-                                                "not_started",
-                                                "responseParts",
-                                                List.of()),
-                                        current.getLastSequence(),
-                                        JdbcRepositorySupport.databaseNow(connection));
-                    } else if (current.getState() == ToolExecutionRecord.State.PREPARED) {
+                    if (current.getState() == ToolExecutionRecord.State.PREPARED) {
                         requested =
                                 requested.withResult(
                                         current.cancellationBeforeDispatch(),
@@ -519,7 +415,6 @@ public final class JdbcToolExecutionRepository
                                         JdbcRepositorySupport.databaseNow(connection));
                     }
                     ToolExecutionRecord updated = requested.withVersion(current.getVersion() + 1);
-                    requireCsiCurrentTime(connection, continuation);
                     updateExecution(connection, updated);
                     return updated;
                 });
@@ -535,8 +430,6 @@ public final class JdbcToolExecutionRepository
         return JdbcRepositorySupport.transaction(
                 dataSource,
                 connection -> {
-                    JdbcCsiActivationAdmission.refuseUnqualifiedWriter(
-                            connection, expected.getBindingId());
                     ToolExecutionRecord current =
                             selectByExecutionId(connection, expected.getExecutionCallId(), true);
                     if (current == null
@@ -557,149 +450,33 @@ public final class JdbcToolExecutionRepository
     @Override
     public ToolExecutionRecord resolveUnknown(ToolExecutionRecord expected,
             Map<String, Object> resolutionResult, Instant resolutionTime) {
-        return resolve(expected, resolutionResult, resolutionTime, true);
+        return JdbcToolExecutionObservations.resolve(dataSource, expected, resolutionResult, resolutionTime, true);
+    }
+
+    @Override
+    public ToolExecutionRecord attachMeasurements(
+            ToolExecutionRecord expected, Map<String, Object> metadata) {
+        return JdbcToolExecutionObservations.attachMeasurements(dataSource, expected, metadata);
     }
 
     @Override
     public ToolExecutionRecord resolveUnsettled(ToolExecutionRecord expected,
             Map<String, Object> resolutionResult, Instant resolutionTime) {
-        return resolve(expected, resolutionResult, resolutionTime, false);
+        return JdbcToolExecutionObservations.resolve(dataSource, expected, resolutionResult, resolutionTime, false);
     }
 
-    private ToolExecutionRecord resolve(ToolExecutionRecord expected,
-            Map<String, Object> resolutionResult, Instant resolutionTime,
-            boolean unknownOnly) {
-        if (expected == null) {
-            throw new IllegalArgumentException("expected is required");
+    private static String scanCursor(RuntimeSessionRecord session, String afterExecutionCallId, int limit) {
+        if (session == null || limit < 1 || limit > 100) {
+            throw new IllegalArgumentException("session and limit in [1, 100] are required");
         }
-        return JdbcRepositorySupport.transaction(
-                dataSource,
-                connection -> {
-                    JdbcCsiActivationAdmission.refuseUnqualifiedWriter(
-                            connection, expected.getBindingId());
-                    ToolExecutionRecord current =
-                            selectByExecutionId(connection, expected.getExecutionCallId(), true);
-                    if (current == null
-                            || !current.sameIdentity(expected)
-                            || current.getVersion() != expected.getVersion()
-                            || !current.needsReconciliation()
-                            || unknownOnly
-                                    && current.getState() != ToolExecutionRecord.State.UNKNOWN) {
-                        return null;
-                    }
-                    ToolExecutionRecord resolved =
-                            current.resolveUnsettled(resolutionResult, resolutionTime)
-                                    .withVersion(current.getVersion() + 1);
-                    updateExecution(connection, resolved);
-                    return resolved;
-                });
-    }
-
-    private CsiContinuation lockCsiContinuation(Connection connection, ToolExecutionRecord hint)
-            throws SQLException {
-        var scope =
-                JdbcCsiActivationAdmission.lockForContinuation(
-                        connection, hint.getBindingId(), csiBindings);
-        if (scope == null) {
-            return null;
-        }
-        var original = scope.original();
-        JdbcCsiActivationAdmission.requireExecution(original, hint);
-        JdbcCsiFilesRetirementGuard.requireSingleSession(connection, original);
-        var runtime =
-                JdbcRuntimeSessionRepository.selectSession(
-                        connection,
-                        original.request().getScope(),
-                        hint.getRuntimeSessionId(),
-                        true);
-        original.requireSession(runtime);
-        var continuation = new CsiContinuation(original, scope.progress(), scope.head(), runtime);
-        continuation.require(hint);
-        if (JdbcCsiExecutionAdmission.legacyReference(hint)) {
-            throw new RuntimeBrokerException(
-                    409,
-                    "csi_native_execution_unavailable",
-                    "The private CSI profile requires original native execution evidence.",
-                    false);
-        } else {
-            JdbcCsiExecutionAdmission.verifyRelated(connection, original);
-        }
-        requireCsiCurrentTime(connection, continuation);
-        return continuation;
-    }
-
-    private static void requireCsiCurrentTime(Connection connection, CsiContinuation continuation)
-            throws SQLException {
-        if (continuation != null) {
-            continuation.progress().requireCurrentTime(connection);
-            continuation.head().requireCurrentTime(connection);
-        }
-    }
-
-    private static boolean running(ToolExecutionRecord current) {
-        return current.getState() == ToolExecutionRecord.State.EXECUTING
-                || current.getState() == ToolExecutionRecord.State.CANCEL_REQUESTED;
-    }
-
-    private static RuntimeBrokerException csiContinuationUnavailable() {
-        return new RuntimeBrokerException(
-                409,
-                "csi_execution_continuation_unavailable",
-                "The original CSI execution continuation is unavailable.",
-                false);
-    }
-
-    private record CsiContinuation(
-            JdbcCsiFilesRetirementGuard.Original original,
-            JdbcCsiApplicationProgress.Continuation progress,
-            JdbcCsiActivationAdmission.NativeHead head,
-            RuntimeSessionRecord runtime) {
-        void require(ToolExecutionRecord execution) {
-            JdbcCsiActivationAdmission.requireExecution(original, execution);
-            RuntimeAdmission.requireSession(runtime, execution);
-            if (!"deferred".equals(execution.getReference().get("dispatchMode"))
-                    || !execution
-                            .getReference()
-                            .keySet()
-                            .equals(
-                                    Set.of(
-                                            "dispatchMode",
-                                            "sessionId",
-                                            "promptId",
-                                            "callId",
-                                            "argsDigest",
-                                            "batchId",
-                                            "functionCallId",
-                                            "partIndex",
-                                            "ordinal",
-                                            "inputRef",
-                                            "toolDefinitionRef"))
-                    || !execution.getRequestDigest().matches("sha256:[0-9a-f]{64}")) {
-                throw csiContinuationUnavailable();
-            }
-            Long authorized = execution.getAuthorizedBindingVersion();
-            if (authorized != null) {
-                if (authorized <= 0 || authorized > original.version()) {
-                    throw csiContinuationUnavailable();
-                }
-            } else if (running(execution)
-                    || execution.getState() == ToolExecutionRecord.State.UNKNOWN) {
-                throw csiContinuationUnavailable();
-            }
-        }
+        return afterExecutionCallId == null ? ""
+                : JdbcRepositorySupport.valueKey(BrokerValues.requireId(afterExecutionCallId, "cursor"));
     }
 
     @Override
     public List<ToolExecutionRecord> findUnsettled(RuntimeSessionRecord session,
             String afterExecutionCallId, int limit) {
-        if (session == null || limit < 1 || limit > 100) {
-            throw new IllegalArgumentException("session and limit in [1, 100] are required");
-        }
-        String after =
-                afterExecutionCallId == null
-                        ? ""
-                        : JdbcRepositorySupport.valueKey(
-                                BrokerValues.requireId(afterExecutionCallId, "cursor"));
+        String after = scanCursor(session, afterExecutionCallId, limit);
         return JdbcRepositorySupport.read(
                 dataSource,
                 connection -> {
@@ -739,14 +516,7 @@ public final class JdbcToolExecutionRepository
     @Override
     public List<ToolExecutionRecord> findBackgroundProcesses(
             RuntimeSessionRecord session, String afterExecutionCallId, int limit) {
-        if (session == null || limit < 1 || limit > 100) {
-            throw new IllegalArgumentException("session and limit in [1, 100] are required");
-        }
-        String after =
-                afterExecutionCallId == null
-                        ? ""
-                        : JdbcRepositorySupport.valueKey(
-                                BrokerValues.requireId(afterExecutionCallId, "cursor"));
+        String after = scanCursor(session, afterExecutionCallId, limit);
         return JdbcRepositorySupport.read(
                 dataSource,
                 connection -> {
@@ -1041,7 +811,7 @@ public final class JdbcToolExecutionRepository
         return false;
     }
 
-    private static ToolExecutionRecord selectByExecutionId(
+    static ToolExecutionRecord selectByExecutionId(
             Connection connection, String executionCallId, boolean forUpdate)
             throws SQLException {
         String sql = "SELECT " + EXECUTION_COLUMNS
@@ -1078,11 +848,11 @@ public final class JdbcToolExecutionRepository
         }
     }
 
-    private static void updateExecution(Connection connection,
+    static void updateExecution(Connection connection,
             ToolExecutionRecord record) throws SQLException {
         String sql = "UPDATE ma_tool_execution SET execution_state = ?, "
                 + "execution_status = ?, result_json = ?, "
-                + "last_sequence = ?, cancel_requested = ?, "
+                + "last_sequence = ?, is_cancel_requested = ?, "
                 + "dispatch_owner = ?, dispatch_lease_until = ?, "
                 + "dispatch_generation = ?, record_version = ?, "
                 + "settled_at = ?, abandoned_at = ?, loss_evidence_id = ?, "
@@ -1183,7 +953,7 @@ public final class JdbcToolExecutionRepository
                 result.getString("execution_status"),
                 fromJson(result.getString("result_json")),
                 result.getLong("last_sequence"),
-                result.getBoolean("cancel_requested"),
+                result.getBoolean("is_cancel_requested"),
                 result.getString("dispatch_owner"),
                 JdbcRepositorySupport.getInstant(result,
                         "dispatch_lease_until"),

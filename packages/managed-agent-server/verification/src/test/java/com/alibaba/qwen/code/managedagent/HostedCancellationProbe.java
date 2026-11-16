@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
@@ -33,6 +34,8 @@ final class HostedCancellationProbe implements AutoCloseable {
     private final String tenant;
     private final List<Map<String, Object>> sessions;
     private final Object service;
+    private final Object dispatcher;
+    private final Object cancellation;
     private final RuntimeTransport transport;
     private final Map<String, AtomicInteger> executions = new ConcurrentHashMap<>();
     private final Map<String, AtomicInteger> completions = new ConcurrentHashMap<>();
@@ -46,7 +49,9 @@ final class HostedCancellationProbe implements AutoCloseable {
         this.tenant = tenant;
         this.sessions = sessions;
         service = ReflectionTestUtils.getField(broker, "service");
-        transport = (RuntimeTransport) ReflectionTestUtils.getField(service, "transport");
+        dispatcher = ReflectionTestUtils.getField(service, "executionDispatcher");
+        cancellation = ReflectionTestUtils.getField(service, "executionCancellation");
+        transport = (RuntimeTransport) ReflectionTestUtils.getField(dispatcher, "transport");
         RuntimeTransport observed = (RuntimeTransport) Proxy.newProxyInstance(RuntimeTransport.class.getClassLoader(),
                 new Class<?>[] {RuntimeTransport.class}, (proxy, method, args) -> {
                     String session = args != null && args.length > 1 && args[1] instanceof RuntimeSession runtime
@@ -71,7 +76,8 @@ final class HostedCancellationProbe implements AutoCloseable {
                     }
                     return result;
                 });
-        ReflectionTestUtils.setField(service, "transport", observed);
+        ReflectionTestUtils.setField(dispatcher, "transport", observed);
+        ReflectionTestUtils.setField(cancellation, "transport", observed);
         server.createContext("/cancellation/", exchange -> {
             try {
                 assertThat(exchange.getRequestMethod()).isEqualTo("POST");
@@ -102,7 +108,7 @@ final class HostedCancellationProbe implements AutoCloseable {
     private Map<String, Object> owner(Map<String, Object> session) throws Exception {
         String storage = "storage-" + sessions.indexOf(session);
         var physical = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns("o") + " FROM ma_storage_owner o JOIN ma_storage s ON s.physical_key = o.storage_key WHERE s.alias_key = ? AND s.tenant_id = ? AND s.storage_id = ?",
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage),
+                RuntimeAdmissionFences.storageAliasKey(tenant, storage),
                 tenant, storage);
         var member = jdbc.queryForMap("SELECT binding_id, runtime_generation, runtime_session_id, execution_storage_key"
                 + " FROM ma_runtime_session WHERE tenant_id = ? AND harness_session_id = ?",
@@ -258,7 +264,8 @@ final class HostedCancellationProbe implements AutoCloseable {
 
     @Override
     public void close() throws InterruptedException {
-        ReflectionTestUtils.setField(service, "transport", transport);
+        ReflectionTestUtils.setField(dispatcher, "transport", transport);
+        ReflectionTestUtils.setField(cancellation, "transport", transport);
         Object provisioner = ReflectionTestUtils.getField(service, "provisioner");
         Object local = ReflectionTestUtils.getField(provisioner, "delegate");
         var owned = (Map<?, ?>) ReflectionTestUtils.getField(local, "owned");

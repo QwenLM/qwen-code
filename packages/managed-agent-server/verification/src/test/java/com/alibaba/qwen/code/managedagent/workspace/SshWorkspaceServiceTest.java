@@ -5,37 +5,44 @@ import com.alibaba.qwen.code.managedagent.config.SshRuntimeSettings;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.AcceptanceVerdict;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ParkedOperation;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcSshWorkspaceStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.persistence.SshWorkspaceStore;
+import com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.provisioning.SshConnectionManager;
+import com.alibaba.qwen.code.runtimebroker.provisioning.ssh.SshConnectionManager;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class SshWorkspaceServiceTest {
     private ManagedAgentProperties properties;
-    private SshWorkspaceStore store;
+    private JdbcSshWorkspaceStore store;
     private SshConnectionManager connections;
     private org.springframework.jdbc.core.JdbcTemplate jdbc;
 
     @BeforeEach
     void setup() {
         properties = new ManagedAgentProperties();
+        properties.getRuntimeBroker().setEnabled(true);
         properties.getRuntimeBroker().getSsh().setNodes(List.of(new SshRuntimeSettings.Node("mac", "Mac", "test-host",
                 "/node", "/cli.js", "/state", List.of("/work"), 41270, "0.25.1",
                 List.of(new SshRuntimeSettings.Access("tenant", "actor")))));
@@ -43,7 +50,7 @@ class SshWorkspaceServiceTest {
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE", "sa", "");
         ManagedSchema.initialize(source);
         jdbc = new ManagedSchemaJdbcTemplate(source);
-        store = new SshWorkspaceStore(jdbc, new DataSourceTransactionManager(source));
+        store = new JdbcSshWorkspaceStore(jdbc, new DataSourceTransactionManager(source));
         connections = mock(SshConnectionManager.class);
     }
 
@@ -62,6 +69,55 @@ class SshWorkspaceServiceTest {
     }
 
     @Test
+    void aDisabledBrokerPreservesPendingRegistrationQueriesAndReplays() {
+        var pending = store.begin("tenant", "actor", "key", "mac", "/work/project", "Project");
+        properties.getRuntimeBroker().setEnabled(false);
+        properties.getRuntimeBroker().getSsh().setEnabled(true);
+        try (var service = new SshWorkspaceService(properties, store, connections)) {
+            assertThat(service.configured()).isFalse();
+            assertThat(service.list("tenant", "actor").supported()).isFalse();
+            assertThat(service.get("tenant", "actor", pending.operationId()).status()).isEqualTo("pending");
+            assertThat(service.create("tenant", "actor", "mac", "/work/project", "Project", "key").operationId())
+                    .isEqualTo(pending.operationId());
+            var executor = (ThreadPoolExecutor) ReflectionTestUtils.getField(service, "executor");
+            assertThat(executor).isNotNull();
+            assertThat(executor.getTaskCount()).isZero();
+            assertThatThrownBy(() -> service.create("tenant", "actor", "mac", "/work/project", "Project", "new-key"))
+                    .isInstanceOf(ManagedAgentException.class);
+        }
+        assertThat(store.get("tenant", "actor", pending.operationId()).status()).isEqualTo("pending");
+        assertThat(store.get("tenant", "actor", pending.operationId()).failureCode()).isNull();
+        verifyNoInteractions(connections);
+    }
+
+    @Test
+    void anUnselectedSshBackendPreservesParkedRegistrationUntilItIsRestored() {
+        var intent = parkedReservation();
+        var nodes = properties.getRuntimeBroker().getSsh().getNodes();
+        properties.getRuntimeBroker().getSsh().setNodes(List.of());
+        try (var service = new SshWorkspaceService(properties, store, null)) {
+            var parked = service.parked(10).getFirst();
+            assertThat(service.read(parked)).contains(AcceptanceVerdict.unknown());
+            assertThat(service.get("tenant", "actor", intent.operationId()).status()).isEqualTo("recovery_blocked");
+        }
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner", Integer.class)).isEqualTo(1);
+        verifyNoInteractions(connections);
+        properties.getRuntimeBroker().getSsh().setNodes(nodes);
+        probeReturns(IDENTITY, marker(intent));
+        try (var service = new SshWorkspaceService(properties, store, connections)) {
+            assertThat(reconcile(service, intent)).isEqualTo(AcceptanceVerdict.committed());
+            assertThat(service.get("tenant", "actor", intent.operationId()).status()).isEqualTo("completed");
+        }
+    }
+
+    @Test
+    void closingTheServiceLeavesBorrowedConnectionsWithTheirOwner() {
+        var service = new SshWorkspaceService(properties, store, connections);
+        service.close();
+        verify(connections, never()).close();
+    }
+
+    @Test
     void completesRegistrationOutsideSqlTransactionsAndQueriesAfterAdmissionDisabled() throws Exception {
         properties.getRuntimeBroker().getSsh().setEnabled(true);
         var marker = new AtomicReference<Map<String, Object>>();
@@ -70,7 +126,7 @@ class SshWorkspaceServiceTest {
             assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
             Map<String, Object> request = invocation.getArgument(1);
             if ("register-storage".equals(request.get("operation"))) {
-                marker.set(com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore.object(request, "marker"));
+                marker.set(SshWorkspaceStore.object(request, "marker"));
                 return Map.of("identity", identity, "marker", marker.get());
             }
             var result = new LinkedHashMap<String, Object>();
@@ -168,7 +224,7 @@ class SshWorkspaceServiceTest {
             assertThat(reconcile(service, intent)).isEqualTo(AcceptanceVerdict.unknown());
             assertThat(service.get("tenant", "actor", intent.operationId()).status()).isEqualTo("recovery_blocked");
             when(connections.bootstrap(any(), any())).thenThrow(new IllegalStateException("node unreachable"));
-            var parked = new ParkedOperation("tenant", null, intent.operationId(), SshWorkspaceStore.OPERATION);
+            var parked = new ParkedOperation("tenant", null, intent.operationId(), JdbcSshWorkspaceStore.OPERATION);
             assertThatThrownBy(() -> service.read(parked)).isInstanceOf(IllegalStateException.class);
         }
         properties.getRuntimeBroker().getSsh().setNodes(List.of(new SshRuntimeSettings.Node("mac", "Mac",
@@ -202,7 +258,7 @@ class SshWorkspaceServiceTest {
     private static final Map<String, Object> IDENTITY = Map.of("root", "/work/project", "hostId", "host",
             "device", "1", "inode", "2", "birthTime", "3");
 
-    private SshWorkspaceStore.Intent parkedReservation() {
+    private JdbcSshWorkspaceStore.Intent parkedReservation() {
         var operation = store.begin("tenant", "actor", "key", "mac", "/work/project", "Project");
         var intent = store.claim("tenant", "actor", operation.operationId(), "owner");
         store.reserve(intent, "owner", Map.of("nodeId", "mac", "identity", IDENTITY, "marker", marker(intent),
@@ -212,7 +268,7 @@ class SshWorkspaceServiceTest {
         return intent;
     }
 
-    private static Map<String, Object> marker(SshWorkspaceStore.Intent intent) {
+    private static Map<String, Object> marker(JdbcSshWorkspaceStore.Intent intent) {
         var marker = new LinkedHashMap<String, Object>(IDENTITY);
         marker.put("version", 2);
         marker.put("tenantId", intent.tenantId());
@@ -232,7 +288,7 @@ class SshWorkspaceServiceTest {
         });
     }
 
-    private AcceptanceVerdict reconcile(SshWorkspaceService service, SshWorkspaceStore.Intent intent) {
+    private AcceptanceVerdict reconcile(SshWorkspaceService service, JdbcSshWorkspaceStore.Intent intent) {
         assertThat(service.parked(10)).extracting(ParkedOperation::operationId).containsExactly(intent.operationId());
         var parked = service.parked(10).getFirst();
         var verdict = service.read(parked).orElseThrow();

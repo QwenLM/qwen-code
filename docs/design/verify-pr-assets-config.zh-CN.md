@@ -20,7 +20,7 @@ Status: implementing with this change.
 - 把 `verifyPr` 列入 workspace 受限根设置：合并期剥离 workspace 值、告警说明其被忽略。设置路由本就不把这些键暴露给 workspace 写入，因此真正保护取值的是剥离而不是路由守卫。
 - 把 `QWEN_VERIFY_ASSETS_REPO` 与 `QWEN_VERIFY_ASSETS_BRANCH` 加入"项目 `.env` / `settings.env` 不得提供"的排除集。两者都由仓库控制，而环境加载器先于 settings 桥接执行；若不排除，仓库仍可通过自己 export 变量重定向目标。启动环境、home 作用域 `.env` 与 `verifyPr.*` 仍可设置它们。
 - 启动时 CLI 在这两个变量未被设置的前提下，把它们写入 `QWEN_VERIFY_ASSETS_REPO` / `QWEN_VERIFY_ASSETS_BRANCH`；skill 继续读它已经文档化的变量，一次性的 export 仍然优先。
-- skill 明确三级顺序——flag、变量（export / `.env` / settings）、默认值——并保持发布同意按次给出。
+- skill 明确三级顺序——flag、变量（export / `.env` / settings）、默认值——发布同意则交由 skill 的会话同意规则管辖，坐标绝不构成同意。
 
 ## 设计决策
 
@@ -33,7 +33,7 @@ Status: implementing with this change.
 - 写在 workspace 设置里的值不会生效。这是设计目的，但必须可见：schema 描述与 skill 都写明，避免维护者去排查一个被静默忽略的键。
 - 通过 `settings.env` 设置这两个变量在任何作用域都不生效（含 User），并在 stderr 明确提示改用 `verifyPr.*` 或启动环境。合并后的 map 无法区分 workspace 条目与 operator 条目，所以只能采用"不区分作用域"这一条可审计的规则；用户级通道是专用设置，`~/.qwen/.env` 仍然可用。
 - 桥接位于 `loadSettings` 应用环境的位置。跳过环境加载的调用方都是按请求读取配置，不需要它。
-- 坐标不是同意：`--publish` 仍然门控每条评论，发布前 guard 与发布后回读均不变。
+- 坐标不是同意：每条评论仍须有显式发布请求——在本轮调用中给出，或按 skill 的 **Manual re-verification** 在同一会话内继承——发布前 guard 与发布后回读均不变。
 
 ## 验证计划
 

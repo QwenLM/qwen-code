@@ -4,7 +4,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitReceipt;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitResource;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitTransactionRequest;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -28,9 +28,9 @@ import java.util.function.UnaryOperator;
 public final class ExtensionRecordJournal {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final String WRITER = "writer-extension";
-    private static final String TOKEN = "extension-writer-token-0123456789";
+    static final String TOKEN = "extension-writer-token-0123456789";
     public static final String OPERATION = "commitMonitorRun";
-    private final ManagedSessionStore store;
+    private final JdbcManagedSessionStore store;
     private final String tenantId;
     private final String workspaceId;
     private final String sessionId;
@@ -40,7 +40,7 @@ public final class ExtensionRecordJournal {
     private String lastCommitDigest;
     private int domainEvents;
 
-    public ExtensionRecordJournal(ManagedSessionStore store, String tenantId,
+    public ExtensionRecordJournal(JdbcManagedSessionStore store, String tenantId,
             String workspaceId, String sessionId) {
         this.store = store;
         this.tenantId = tenantId;

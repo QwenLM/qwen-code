@@ -20,5 +20,6 @@ public interface SshConnections extends AutoCloseable {
 
     public void forget(RuntimeLease lease);
 
+    @Override
     public void close();
 }

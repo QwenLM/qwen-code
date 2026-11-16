@@ -287,6 +287,7 @@ describe('createServeApp default bridge wiring', () => {
       maxSessions: 7,
       maxPendingPromptsPerSession: 8,
       eventRingSize: 1234,
+      eventRingMaxBytes: 1_234_567,
       compactedReplayMaxBytes: 2_345_678,
       maxJournalEvents: 3456,
       maxJournalBytes: 4_567_890,
@@ -298,7 +299,9 @@ describe('createServeApp default bridge wiring', () => {
       ...enabled,
       experimentalPairedEngines: true,
     });
+    expect(plain.eventRingMaxBytes).toBeUndefined();
     expect(plainEnabled).toMatchObject({
+      eventRingMaxBytes: 1_234_567,
       sessionShellCommandEnabled: true,
       initializeTimeoutMs: 12_345,
       permissionResponseTimeoutMs: 56_789,
