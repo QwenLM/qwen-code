@@ -3350,7 +3350,7 @@ describe('managed-agent-server e2e runner', () => {
     // payload is printed eagerly. The freeze arm's wake record reads as a
     // pass line on stdout too, so it defers the same way — no eager
     // console.log of a JSON payload remains inside the try at all.
-    expect(source.match(/resultJson = JSON\.stringify\(/g)).toHaveLength(5);
+    expect(source.match(/resultJson = JSON\.stringify\(/g)).toHaveLength(6);
     // Native approvals share one summary; the rewritten-command arm has its
     // own receipt/stage summary instead of forging native execution fields.
     expect(
