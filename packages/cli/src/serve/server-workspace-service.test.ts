@@ -30,6 +30,14 @@ vi.mock('./workspace-skills-status.js', () => ({
   createWorkspaceSkillsStatusProvider: mockCreateSkillsProvider,
 }));
 
+const stopPackagePreparation = vi.hoisted(() => vi.fn(async () => {}));
+vi.mock('./hosted-package-preparation.js', () => ({
+  registerHostedPackagePreparation: () => stopPackagePreparation,
+}));
+vi.mock('./hosted-harness-session.js', () => ({
+  registerHostedHarnessSessionRoutes: () => ({ accepting: () => true }),
+}));
+
 const { createServeApp } = await import('./server.js');
 
 const baseOpts: ServeOptions = {
@@ -53,6 +61,34 @@ function makeBridge() {
 }
 
 describe('createServeApp workspace service wiring', () => {
+  it.each([false, true])(
+    'drains Hosted preparation with an externally supplied lifecycle: %s',
+    async (supplied) => {
+      stopPackagePreparation.mockClear();
+      const lifecycle = new ServeAppLifecycleController();
+      const drain = vi.fn(async () => {});
+      if (supplied) lifecycle.setAppDrain(drain);
+      const app = createServeApp(
+        {
+          ...baseOpts,
+          profile: 'hosted-harness',
+          token: 'hosted-secret',
+          serveWebShell: false,
+          hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+        },
+        undefined,
+        {
+          boundWorkspace: '/workspace',
+          bridge: makeBridge(),
+          ...(supplied ? { serveAppLifecycle: lifecycle } : {}),
+        } as never,
+      );
+      await getServeAppLifecycle(app).close();
+      expect(stopPackagePreparation).toHaveBeenCalledOnce();
+      if (supplied) expect(drain).toHaveBeenCalledOnce();
+    },
+  );
+
   it.each(['before', 'after'] as const)(
     'preserves an injected lifecycle drain registered %s app creation',
     async (order) => {

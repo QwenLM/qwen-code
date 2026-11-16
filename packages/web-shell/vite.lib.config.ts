@@ -1,4 +1,5 @@
 import { pierreResources } from './pierre-build';
+import { exceljsBrowser } from './exceljs-build';
 import { defineConfig, normalizePath, type Plugin } from 'vite';
 import { resolve } from 'node:path';
 import react from '@vitejs/plugin-react';
@@ -263,11 +264,15 @@ function stubTranscriptModules(): Plugin {
 export default defineConfig(({ mode }) => ({
   plugins: [
     pierreResources(),
+    exceljsBrowser(),
     ...(mode === 'transcript' ? [stubTranscriptModules()] : []),
     react(),
     tailwindcss(),
     injectCssModules(),
   ],
+  worker: {
+    plugins: () => [exceljsBrowser()],
+  },
   resolve: {
     alias: {
       '@qwen-code/web-shell/daemon-react-sdk': resolve(
@@ -285,8 +290,12 @@ export default defineConfig(({ mode }) => ({
     jsxDev: false,
   },
   build: {
-    emptyOutDir: false,
-    outDir: mode === 'managed-host' ? 'dist/managed-host' : 'dist',
+    // Only the managed-host pass owns its outDir, so it can safely empty it;
+    // the other passes share `dist/` with the app build.
+    emptyOutDir: mode === 'managed-host',
+    // Outside `dist/`: the app build empties that directory, which would
+    // silently delete a host bundle a maintainer had just produced.
+    outDir: mode === 'managed-host' ? 'dist-managed-host' : 'dist',
     // Same floor as the app build: the lib bundle minifies the same xterm
     // (it is not external), and Vite 5's default target lowers its logical
     // assignments into code that throws on the first mode query. Also covers
@@ -336,9 +345,7 @@ export default defineConfig(({ mode }) => ({
           'remark-cjk-friendly',
           /^remark-cjk-friendly\//,
           'remark-gfm',
-          'remark-math',
-          'rehype-katex',
-          'mermaid',
+          'hast-util-from-html-isomorphic',
           'katex',
           /^katex\/(?!dist\/katex\.min\.css$)/,
           'codemirror',

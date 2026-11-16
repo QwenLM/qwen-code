@@ -22,11 +22,11 @@ import { AuthType } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 import {
+  QWEN_OAUTH_TOKEN_PLACEHOLDER,
   QWEN_SUBSCRIPTION_BASE_URL,
   QWEN_SUBSCRIPTION_MODEL,
   QWEN_SUBSCRIPTION_TOKEN_PLACEHOLDER,
 } from '../qwen/oauth-config.js';
-import { subscriptionModelModalities } from '../qwen/subscription-models.js';
 import { defaultModalities } from '../core/modalityDefaults.js';
 import { knownTokenLimit } from '../core/tokenLimits.js';
 import {
@@ -179,7 +179,7 @@ export function resolveModelConfig(
       model,
       baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
       apiKey: QWEN_SUBSCRIPTION_TOKEN_PLACEHOLDER,
-      modalities: subscriptionModelModalities(model),
+      modalities: defaultModalities(model),
       proxy,
     };
     for (const field of [
@@ -421,7 +421,7 @@ function resolveQwenOAuthConfig(
   const config: ContentGeneratorConfig = {
     authType: AuthType.QWEN_OAUTH,
     model: resolvedModel,
-    apiKey: 'QWEN_OAUTH_DYNAMIC_TOKEN',
+    apiKey: QWEN_OAUTH_TOKEN_PLACEHOLDER,
     proxy,
     ...generationConfig,
   };

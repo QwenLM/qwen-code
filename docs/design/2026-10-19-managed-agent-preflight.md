@@ -26,19 +26,27 @@ The command reads the configuration the server reads, prepared as
 keeps Spring's precedence:
 
 - the command line (`--server.address=...`, `--qwen.managed-agent.*`);
-- the process environment, `SPRING_APPLICATION_JSON` included, and the JVM
-  system properties (`-D…`, such as those in `JAVA_TOOL_OPTIONS`);
+- `SPRING_APPLICATION_JSON`, then the JVM system properties (`-D…`, such as
+  those in `JAVA_TOOL_OPTIONS`), then the rest of the process environment;
 - the configuration files Spring Boot reads: those named by
   `spring.config.location`, `spring.config.additional-location` or
   `spring.config.import`, as an argument or a `SPRING_CONFIG_*` variable (the
   launcher sets `SPRING_CONFIG_ADDITIONAL_LOCATION` when
   `config/application.yml` exists, and the systemd unit's `server.env` names
   `/etc/qwen-managed-agent/application.yml`); those at its default locations
-  `./`, `./config/` and `./config/*/`, unless `spring.config.location`
-  replaces them; as `.yml`, `.yaml`, `.properties` or `.xml`, under
-  `spring.config.name`; their profile variants, the files they import and
-  config trees;
+  `./`, `./config/` and `./config/*/`; as `.yml`, `.yaml`, `.properties` or
+  `.xml`, under `spring.config.name`; their profile variants, the files they
+  import and config trees;
 - the classpath `application.yml` that maps `QWEN_MANAGED_AGENT_*` variables.
+
+`spring.config.location` replaces every default location, the classpath ones
+among them, so with it set the server reads only the locations it names. Unless
+it names `classpath:/`, that leaves out the classpath `application.yml`: a
+variable only that file maps, such as `QWEN_MANAGED_AGENT_SERVER_ADDRESS`, then
+sets nothing, and its defaults, such as the loopback `server.address` and the
+Flyway locations, are gone. Without an address the server would listen on every
+address, which the default `auth.mode=auto` refuses to start with. Where Spring
+prepares the environment, the check reads the same configuration.
 
 Relative locations, the default ones among them, are read in the working
 directory, as the server reads them, so the command runs in the server's
@@ -52,7 +60,7 @@ server read from `config/application.yml` in its working directory.
 | Check        | Passing condition                                                                                                                                                                                                                                                                                    |
 | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `java`       | Runtime feature version is 21 or later.                                                                                                                                                                                                                                                              |
-| `config`     | One row per file the server reads: readable by the service account, not group- or world-readable when it holds a secret; WARN for none. FAIL where Spring would not start, for a YAML error, with its line and usually its file, or where this process cannot look in a directory or read a file.    |
+| `config`     | One row per file the server reads: readable by the service account; WARN for none, or where group or others can read one with a secret. FAIL where Spring would not start, for a YAML error, with its line and usually its file, or where this process cannot look in a directory or read a file.    |
 | `key-ring`   | At least an active key ID is configured; previous key IDs are reported.                                                                                                                                                                                                                              |
 | `validation` | The startup property validations accept the bound configuration.                                                                                                                                                                                                                                     |
 | `auth`       | A non-loopback bind does not use `auto`; signed mode has a signing key; insecure bind is reported.                                                                                                                                                                                                   |
@@ -132,12 +140,18 @@ Spring skips an optional file it cannot see, so where this process cannot enter
 a directory the server looks in for a configuration file or a config tree, or
 list one it lists, as it lists `config/` for `config/*/`, a `config` row names
 that directory and says to run the check as the service account or as root, or
-as root alone when that is the service account. When that account cannot look
-in it either, Spring reads nothing there, and the directory gets no row; nor
-does it without a service account, or when the check runs as that account, as
-this process then stands in for the server's, as it does for every file row. A
-service account of root reads and enters whatever the modes say, as the kernel
-lets it.
+as that account alone when its uid is 0. When that account cannot look in it
+either, Spring reads nothing there, and the directory gets no row; nor does it
+without a service account, or when the check runs as that account, as this
+process then stands in for the server's, as it does for every file row. A
+service account of root, the account whose uid is 0 by whatever name, reads and
+enters whatever the modes say, as the kernel lets it. Where this process cannot
+look along a file's path but the service account may, or cannot read a file the
+account can and the check reads, the file's row fails as a directory's does: it
+says the file is not readable by the account running the check, and whom to run
+the check as. Behind a directory this process may not enter, a missing file
+looks like one root reads, and a file system that refuses root looks the same,
+so the check does not judge it as present.
 
 A file holds a secret by one rule, the configuration reference's: a key named as
 a password, token, key or secret, or a map of keys, in any spelling Spring

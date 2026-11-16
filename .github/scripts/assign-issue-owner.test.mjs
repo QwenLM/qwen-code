@@ -404,11 +404,12 @@ describe('assign-issue-owner: workflow invariants', () => {
   });
 
   it('sparse-checks out a cone directory, not individual files', () => {
-    // The directory carries the script, and cone mode adds issue-owners.json
-    // as a direct child of .github/. File entries fail cone mode on a reused
-    // self-hosted workspace, and non-cone mode leaves the workspace sparse
-    // for the next job; see the matching pin in assign-pr-owner.test.mjs.
-    assert.equal(checkoutStep.with['sparse-checkout'], '.github/scripts');
+    // All of .github/, not a narrower subdirectory: git sparse-checkout set
+    // reuses the mode stored in a reused workspace, and non-cone residue
+    // would drop issue-owners.json from a narrower pattern. File entries
+    // fail cone mode on a reused self-hosted workspace; see the matching
+    // pin in assign-pr-owner.test.mjs.
+    assert.equal(checkoutStep.with['sparse-checkout'], '.github');
     assert.equal(checkoutStep.with['sparse-checkout-cone-mode'], undefined);
   });
 

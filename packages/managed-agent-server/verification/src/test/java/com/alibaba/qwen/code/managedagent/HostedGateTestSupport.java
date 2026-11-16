@@ -13,6 +13,7 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ProjectedEvent;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.session.HarnessEventProjector;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -458,7 +459,7 @@ public final class HostedGateTestSupport {
     static List<JsonNode> extensionRecords(JdbcTemplate jdbc, String tenant,
             String sessionId, String domain) {
         try {
-            String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant,
+            String scope = ManagedSessionStore.sessionScopeKey(tenant,
                     sessionId);
             var rows = jdbc.queryForList(
                     "SELECT record_id, record_resource_id FROM"

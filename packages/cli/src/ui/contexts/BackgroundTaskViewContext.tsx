@@ -23,6 +23,7 @@ import {
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import {
+  entryId,
   type DialogEntry,
   useBackgroundTaskView,
 } from '../hooks/useBackgroundTaskView.js';
@@ -161,7 +162,16 @@ export function BackgroundTaskViewProvider({
 }: BackgroundTaskViewProviderProps) {
   const { entries } = useBackgroundTaskView(config ?? null);
 
-  const [rawSelectedIndex, setRawSelectedIndex] = useState(0);
+  const [selection, setSelection] = useState<{ index: number; id?: string }>({
+    index: 0,
+  });
+  const setSelectedIndex = useCallback(
+    (index: number) => {
+      const entry = entries[index];
+      setSelection({ index, id: entry ? entryId(entry) : undefined });
+    },
+    [entries],
+  );
   const [dialogMode, setDialogMode] = useState<BackgroundDialogMode>('closed');
   const [autoOpened, setAutoOpened] = useState(false);
   const [pillFocused, setPillFocused] = useState(false);
@@ -232,39 +242,53 @@ export function BackgroundTaskViewProvider({
     const approval = entry.pendingApprovals[0];
     if (!approval) return;
     surfacedApprovalIdsRef.current.add(approval.approvalId);
-    setRawSelectedIndex(index);
+    setSelectedIndex(index);
     // Same invariant `openDialog` establishes: dialog open ⇒ pill unfocused.
     // The pill subscribes on `pillFocused` alone, so leaving it focused lets
     // its Enter run `openDialog()` and clear the disarm (#16432 R3-2).
     setPillFocused(false);
     setAutoOpened(true);
     setDialogMode('list');
-  }, [entries, dialogMode, parkedHeadIds]);
+  }, [entries, dialogMode, parkedHeadIds, setSelectedIndex]);
 
-  // rawSelectedIndex can fall out of range when entries shrink; clamp on read.
+  // Registry updates re-sort rows. Keep the chosen task selected by identity,
+  // falling back to the stored index if that task has been removed.
+  const identityIndex = entries.findIndex(
+    (entry) => entryId(entry) === selection.id,
+  );
   const selectedIndex =
-    entries.length === 0
-      ? 0
-      : Math.min(Math.max(0, rawSelectedIndex), entries.length - 1);
+    identityIndex >= 0
+      ? identityIndex
+      : Math.max(0, Math.min(selection.index, entries.length - 1));
+
+  // Remember the displayed position so removal falls back near the row the
+  // user last saw, even after a reorder moved the selected task.
+  useEffect(() => {
+    if (identityIndex < 0 || selection.index === identityIndex) return;
+    setSelection((current) =>
+      current === selection ? { ...current, index: identityIndex } : current,
+    );
+  }, [identityIndex, selection]);
 
   const moveSelectionUp = useCallback((): boolean => {
     if (selectedIndex <= 0) return false;
-    setRawSelectedIndex(selectedIndex - 1);
+    setSelectedIndex(selectedIndex - 1);
     return true;
-  }, [selectedIndex]);
+  }, [selectedIndex, setSelectedIndex]);
 
   const moveSelectionDown = useCallback((): boolean => {
     if (entries.length === 0) return false;
     if (selectedIndex >= entries.length - 1) return false;
-    setRawSelectedIndex(selectedIndex + 1);
+    setSelectedIndex(selectedIndex + 1);
     return true;
-  }, [entries.length, selectedIndex]);
+  }, [entries.length, selectedIndex, setSelectedIndex]);
 
   const openDialog = useCallback(() => {
+    setSelectedIndex(selectedIndex);
     setAutoOpened(false);
     setDialogMode('list');
     setPillFocused(false);
-  }, []);
+  }, [selectedIndex, setSelectedIndex]);
 
   const closeDialog = useCallback(() => {
     // A dismissal before the acknowledgment would consume the latch with the
@@ -437,7 +461,7 @@ export function BackgroundTaskViewProvider({
       setPillFocused,
       setLivePanelFocused,
       setLivePanelSelectedIndex,
-      setSelectedIndex: setRawSelectedIndex,
+      setSelectedIndex,
     }),
     [
       moveSelectionUp,
@@ -454,7 +478,7 @@ export function BackgroundTaskViewProvider({
       setPillFocused,
       setLivePanelFocused,
       setLivePanelSelectedIndex,
-      setRawSelectedIndex,
+      setSelectedIndex,
     ],
   );
 
