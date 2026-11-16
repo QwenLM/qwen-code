@@ -571,7 +571,7 @@ use the browser's site settings.
 
 ## Qwen Live (experimental)
 
-Qwen Live runs through the Web Shell on every platform: the browser tab is the microphone and speaker (WS `/live/web`), so open the Web Shell over `https` or `localhost` for microphone access. The native macOS `Qwen Live Host` app is off by default; to try it, start a macOS daemon with `QWEN_SERVE_LIVE_NATIVE_HOST=1`, which restores the `/live/host` WebSocket, the `realtime_voice` capability and the Host download when Live is turned on. Without it, a `Qwen Live Host.app` that is already installed stays unable to connect (the daemon does not register `/live/host`); quit it and use the Web Shell.
+Qwen Live runs through the Web Shell on every platform: the browser tab is the microphone and speaker (WS `/live/web`), so open the Web Shell over `https` or `localhost` for microphone access. The native macOS `Qwen Live Host` app is off by default; to try it, start a macOS daemon with `QWEN_SERVE_LIVE_NATIVE_HOST=1`, which restores the `/live/host` WebSocket, the `realtime_voice` capability and the Host download when Live is turned on. Without it, a `Qwen Live Host.app` that is already installed stays unable to connect (the daemon does not register `/live/host`); quit it and use the Web Shell. For setup and usage in the Web Shell, see [Qwen Live (Realtime Voice)](./features/qwen-live.md).
 
 ## CLI flags
 

@@ -106,6 +106,11 @@ API 接受不代表收件人收到或阅读；超时/取消也可能发生在远
 
 ## 共享 Web 集成
 
+仅包含后端 PR（#17223）、尚未包含 Web 集成（#17224）的版本，其 Web Shell
+不识别 `wecom-webhook`：频道管理器没有创建入口，并隐藏已有实例。过渡期请
+通过 `settings.json` 和 `qwen serve --channel <name>` 管理频道。以下 Web
+集成补齐创建入口及已有实例的展示和管理。
+
 将 `wecom` 和 `wecom-webhook` 归入企业微信平台，方式分别准确标注为
 `Intelligent bot` 和 `Webhook sending`。保留 `wecom-callback` 的独立
 入口。复用当前平台 helper、本地化标签、凭证控件、仅发送模式的设置显隐和

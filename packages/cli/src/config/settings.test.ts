@@ -4586,6 +4586,59 @@ describe('Settings Loading and Merging', () => {
     });
   });
 
+  describe('serve.sessionPrWatch scope handling', () => {
+    // Named key, not list iteration: dropping the entry must red here. The
+    // list-driven case above iterates whatever the list holds, so it stays
+    // green when an entry is removed.
+    it('is listed as workspace-restricted', () => {
+      expect(WORKSPACE_RESTRICTED_SETTING_KEYS).toContain(
+        'serve.sessionPrWatch',
+      );
+    });
+
+    it('honors serve.sessionPrWatch from user scope', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              serve: { sessionPrWatch: { events: ['head_change'] } },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.serve?.sessionPrWatch).toEqual({
+        events: ['head_change'],
+      });
+    });
+
+    it('strips serve.sessionPrWatch from workspace scope and warns', () => {
+      // A repository must not spend daemon-wide gh budget or inject prompts
+      // into sessions across workspaces; the trust-gated channel alias is
+      // its path.
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              serve: { sessionPrWatch: { events: ['head_change'] } },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.serve?.sessionPrWatch).toBeUndefined();
+      expect(
+        getSettingsWarnings(settings).some((warning) =>
+          warning.includes('serve.sessionPrWatch'),
+        ),
+      ).toBe(true);
+    });
+  });
+
   describe('goals.modelProposed scope handling', () => {
     it('is listed as workspace-restricted', () => {
       expect(WORKSPACE_RESTRICTED_SETTING_KEYS).toContain(

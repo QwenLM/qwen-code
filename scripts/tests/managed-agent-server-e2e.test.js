@@ -35,6 +35,46 @@ import { validateHostedHarnessProfile } from '../../packages/cli/src/serve/hoste
 const read = (file) =>
   readFileSync(new URL(`../../${file}`, import.meta.url), 'utf8');
 
+// The contract COPY lines must sit in the jar-building stage (the first FROM)
+// AND before the RUN that builds the jar: a COPY placed after the build reaches
+// the image too late to land on the classpath, so the packaged jar silently
+// lacks the asset. Returns the includes whose COPY is missing from that
+// pre-build slice. Dockerfile instructions are case-insensitive and may span
+// backslash continuations, so logical lines are joined before scanning; if the
+// jar build cannot be located the ordering is unverifiable and every include is
+// reported missing (fail closed) rather than blessing the whole stage.
+const contractCopiesMissingBeforeBuild = (dockerfile, includes) => {
+  const buildStage = dockerfile.split(/^FROM\s/im)[1] ?? '';
+  const logical = [];
+  for (const raw of buildStage.split('\n')) {
+    const line = raw.trim();
+    const prev = logical[logical.length - 1];
+    if (prev !== undefined && prev.endsWith('\\')) {
+      logical[logical.length - 1] = `${prev.slice(0, -1).trimEnd()} ${line}`;
+    } else {
+      logical.push(line);
+    }
+  }
+  const lines = logical.filter((line) => line && !line.startsWith('#'));
+  const buildRun = lines.findIndex(
+    (line) => /^RUN\b/i.test(line) && /\bmvn\b/i.test(line),
+  );
+  if (buildRun < 0) {
+    return [...includes];
+  }
+  const beforeBuild = lines.slice(0, buildRun);
+  return includes.filter(
+    (include) =>
+      !beforeBuild.some(
+        (line) =>
+          /^COPY\b/i.test(line) &&
+          line.includes(
+            `packages/core/src/managed-runtime/contracts/${include} packages/core/src/managed-runtime/contracts/`,
+          ),
+      ),
+  );
+};
+
 // Repo-root script mentions, bare or ./-prefixed. A package-relative tail such
 // as packages/foo/scripts/bar.js is not a root mention, so the lookbehind
 // still rejects a `scripts/` preceded by a path character.
@@ -3524,6 +3564,113 @@ describe('managed-agent-server e2e runner', () => {
   it('unrefs the waitUntil stall timer so a fast success does not idle the runner', () => {
     const source = read('scripts/run-managed-agent-server-e2e.ts');
     expect(source).toMatch(/stallTimer\.unref\(\)/);
+  });
+
+  it('copies every core contract asset the pom pulls into the image', () => {
+    // The contracts module copies a set of core/src/managed-runtime/contracts
+    // assets onto the classpath; the image build must COPY each one or the
+    // packaged jar silently lacks it (Maven does not fail on a missing include)
+    // and runtime resource reads throw. Pin the Dockerfile COPY set against the
+    // pom includes so adding an include without a COPY reddens here.
+    const pom = read('packages/managed-agent-server/contracts/pom.xml');
+    const block = pom.match(
+      /<resource>\s*<directory>\$\{managed\.module\.root\}\/\.\.\/core\/src\/managed-runtime\/contracts<\/directory>[\s\S]*?<\/resource>/,
+    )?.[0];
+    expect(block).toBeTruthy();
+    const includes = [...block.matchAll(/<include>([^<]+)<\/include>/g)].map(
+      (m) => m[1],
+    );
+    expect(includes.length).toBeGreaterThan(0);
+    const dockerfile = read('packages/managed-agent-server/Dockerfile');
+    // The COPY must precede the RUN that builds the jar, not merely exist in the
+    // build stage: a COPY moved below the build still ships a jar without the
+    // asset. A commented-out instruction or a COPY appended to the runtime stage
+    // cannot satisfy the pin either.
+    expect(contractCopiesMissingBeforeBuild(dockerfile, includes)).toEqual([]);
+  });
+
+  it('rejects a contract COPY moved below the jar build', () => {
+    const pom = read('packages/managed-agent-server/contracts/pom.xml');
+    const block = pom.match(
+      /<resource>\s*<directory>\$\{managed\.module\.root\}\/\.\.\/core\/src\/managed-runtime\/contracts<\/directory>[\s\S]*?<\/resource>/,
+    )?.[0];
+    const includes = [...block.matchAll(/<include>([^<]+)<\/include>/g)].map(
+      (m) => m[1],
+    );
+    const dockerfile = read('packages/managed-agent-server/Dockerfile');
+    const loopCopy =
+      'COPY packages/core/src/managed-runtime/contracts/managed-loop-skill-*.json packages/core/src/managed-runtime/contracts/';
+    expect(dockerfile).toContain(loopCopy);
+    // Move the loop COPY out of the pre-build slice to just before the runtime
+    // stage: the image would ship a jar without the sidecars (the round-1
+    // Critical), so the pin must report the include as missing.
+    const moved = dockerfile
+      .replace(`${loopCopy}\n`, '')
+      .replace(/^FROM eclipse-temurin/im, `${loopCopy}\nFROM eclipse-temurin`);
+    expect(moved).not.toBe(dockerfile);
+    // Self-verifying relocation: the COPY must actually land AFTER the jar build,
+    // not merely be deleted. A renamed runtime base makes the insert a no-op and
+    // leaves copyIdx at -1, reddening this control instead of passing on deletion.
+    const movedLines = moved.split('\n').map((line) => line.trim());
+    const copyIdx = movedLines.indexOf(loopCopy);
+    const runIdx = movedLines.findIndex(
+      (line) => /^RUN\b/i.test(line) && /\bmvn\b/i.test(line),
+    );
+    expect(runIdx).toBeGreaterThanOrEqual(0);
+    expect(copyIdx).toBeGreaterThan(runIdx);
+    expect(contractCopiesMissingBeforeBuild(moved, includes)).toContain(
+      'managed-loop-skill-*.json',
+    );
+  });
+
+  it('the COPY pin scans case-insensitively, joins continuations, and fails closed', () => {
+    const pom = read('packages/managed-agent-server/contracts/pom.xml');
+    const block = pom.match(
+      /<resource>\s*<directory>\$\{managed\.module\.root\}\/\.\.\/core\/src\/managed-runtime\/contracts<\/directory>[\s\S]*?<\/resource>/,
+    )?.[0];
+    const includes = [...block.matchAll(/<include>([^<]+)<\/include>/g)].map(
+      (m) => m[1],
+    );
+    const dockerfile = read('packages/managed-agent-server/Dockerfile');
+    const loopCopy =
+      'COPY packages/core/src/managed-runtime/contracts/managed-loop-skill-*.json packages/core/src/managed-runtime/contracts/';
+    const moveBelowBuild = (text) =>
+      text
+        .replace(`${loopCopy}\n`, '')
+        .replace(
+          /^FROM eclipse-temurin/im,
+          `${loopCopy}\nFROM eclipse-temurin`,
+        );
+    // Lowercase build instruction: Dockerfile instructions are case-insensitive,
+    // so the pin must still locate the build and catch a COPY moved below it.
+    const lower = moveBelowBuild(dockerfile.replace(/^RUN mvn/im, 'run mvn'));
+    expect(lower).not.toBe(dockerfile);
+    expect(contractCopiesMissingBeforeBuild(lower, includes)).toContain(
+      'managed-loop-skill-*.json',
+    );
+    // A continuation-wrapped build (RUN \ then mvn) is one logical instruction;
+    // the pin must still catch a COPY moved below it.
+    const wrappedRun = moveBelowBuild(
+      dockerfile.replace(/^RUN mvn/im, 'RUN \\\n  mvn'),
+    );
+    expect(wrappedRun).not.toBe(dockerfile);
+    expect(contractCopiesMissingBeforeBuild(wrappedRun, includes)).toContain(
+      'managed-loop-skill-*.json',
+    );
+    // A continuation-wrapped COPY before the build is still recognized (no false red).
+    const wrappedCopy = dockerfile.replace(
+      loopCopy,
+      'COPY \\\n  packages/core/src/managed-runtime/contracts/managed-loop-skill-*.json packages/core/src/managed-runtime/contracts/',
+    );
+    expect(wrappedCopy).not.toBe(dockerfile);
+    expect(contractCopiesMissingBeforeBuild(wrappedCopy, includes)).toEqual([]);
+    // No locatable jar build: the ordering is unverifiable, so fail closed and
+    // report every include missing rather than blessing the whole stage.
+    const noBuild = dockerfile.replace(/^RUN mvn[\s\S]*?(?=^FROM )/im, '');
+    expect(noBuild).not.toBe(dockerfile);
+    expect(contractCopiesMissingBeforeBuild(noBuild, includes)).toEqual(
+      includes,
+    );
   });
 
   it('resolves the project version from the real pom', () => {
