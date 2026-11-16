@@ -21,15 +21,25 @@ import { z } from 'zod';
 import { delay } from '../../utils/delay.js';
 import { runLogger } from '../../utils/runLogger.js';
 import {
+  getQwenSubscriptionUserAgent,
+  logQwenSubscriptionGatewayResponse,
+  resolveQwenSubscriptionHeaderRequestId,
+} from './gateway.js';
+import {
   getQwenOAuthConfig,
   getQwenSubscriptionCredentialsPath,
   QWEN_SUBSCRIPTION_BASE_URL,
 } from './oauth-config.js';
 import {
-   QWEN_SUBSCRIPTION_MODELS_UNAVAILABLE,
+  QWEN_SUBSCRIPTION_MODELS_UNAVAILABLE,
   type QwenSubscriptionModelCatalog,
   type QwenSubscriptionModelMetadata,
 } from './models.js';
+import {
+  formatQwenSubscriptionQuotaDisplay,
+  normalizeQwenSubscriptionRequestId,
+  qwenSubscriptionQuotaDisplay,
+} from './quota.js';
 import {
   QwenSubscriptionOAuthClient,
   QwenSubscriptionOAuthError,
@@ -68,6 +78,13 @@ const credentialSchema = z.object({
       scope: z.string(),
       expires_in: z.number().positive().finite(),
       expiresAt: z.number().finite(),
+    })
+    .optional(),
+  retryAfter: z
+    .object({
+      device: z.number().optional(),
+      refresh: z.number().optional(),
+      userinfo: z.number().optional(),
     })
     .optional(),
 });
@@ -169,7 +186,12 @@ export class QwenSubscriptionSession {
         signInAttempt,
       };
       await this.write(credentials, assertCanCommit);
-      return this.client.requestDeviceAuthorization(signal);
+      return this.requestWithCooldown(
+        credentials,
+        'device',
+        assertCanCommit,
+        () => this.client.requestDeviceAuthorization(signal),
+      );
     }, signal);
     signal?.throwIfAborted();
     onDevice(device);
@@ -190,7 +212,12 @@ export class QwenSubscriptionSession {
         tokens: { ...tokens, expiresAt },
       };
       await this.write(credentials, assertCanCommit);
-      return this.client.getUserInfo(tokens.access_token, signal);
+      return this.requestWithCooldown(
+        credentials,
+        'userinfo',
+        assertCanCommit,
+        () => this.client.getUserInfo(tokens.access_token, signal),
+      );
     }, signal);
   }
 
@@ -209,9 +236,12 @@ export class QwenSubscriptionSession {
         await refresh();
       }
       try {
-        return await this.client.getUserInfo(
-          credentials.tokens!.access_token,
-          signal,
+        return await this.requestWithCooldown(
+          credentials,
+          'userinfo',
+          assertCanCommit,
+          () =>
+            this.client.getUserInfo(credentials.tokens!.access_token, signal),
         );
       } catch (error) {
         if (
@@ -222,7 +252,13 @@ export class QwenSubscriptionSession {
           throw error;
         }
         await refresh();
-        return this.client.getUserInfo(credentials.tokens!.access_token, signal);
+        return this.requestWithCooldown(
+          credentials,
+          'userinfo',
+          assertCanCommit,
+          () =>
+            this.client.getUserInfo(credentials.tokens!.access_token, signal),
+        );
       }
     }, signal);
   }
@@ -385,6 +421,45 @@ export class QwenSubscriptionSession {
     }
   }
 
+  private async requestWithCooldown<T>(
+    credentials: Credentials,
+    stage: 'device' | 'refresh' | 'userinfo',
+    assertCanCommit: () => void,
+    request: () => Promise<T>,
+  ): Promise<T> {
+    const cooldownUntil = credentials.retryAfter?.[stage];
+    const remainingMs = (cooldownUntil ?? 0) - Date.now();
+    if (remainingMs > 0) {
+      throw new QwenSubscriptionOAuthError(
+        'rate_limited',
+        429,
+        undefined,
+        remainingMs,
+        stage,
+      );
+    }
+    try {
+      const result = await request();
+      if (cooldownUntil !== undefined && credentials.retryAfter) {
+        delete credentials.retryAfter[stage];
+        if (Object.keys(credentials.retryAfter).length === 0) {
+          delete credentials.retryAfter;
+        }
+      }
+      return result;
+    } catch (error) {
+      const failure = toSubscriptionOAuthError(error, stage);
+      if (failure.status === 429 && failure.retryAfterMs) {
+        credentials.retryAfter = {
+          ...credentials.retryAfter,
+          [stage]: Date.now() + failure.retryAfterMs,
+        };
+        await this.write(credentials, assertCanCommit).catch(() => undefined);
+      }
+      throw failure;
+    }
+  }
+
   private async refresh(
     credentials: Credentials,
     assertCanCommit: () => void,
@@ -392,9 +467,12 @@ export class QwenSubscriptionSession {
   ): Promise<void> {
     let tokens: QwenSubscriptionTokens;
     try {
-      tokens = await this.client.refreshToken(
-        credentials.tokens!.refresh_token,
-        signal,
+      tokens = await this.requestWithCooldown(
+        credentials,
+        'refresh',
+        assertCanCommit,
+        () =>
+          this.client.refreshToken(credentials.tokens!.refresh_token, signal),
       );
     } catch (error) {
       if (
@@ -430,10 +508,16 @@ export class QwenSubscriptionSession {
       headers: {
         Accept: 'application/json',
         Authorization: `Bearer ${token}`,
+        'User-Agent': getQwenSubscriptionUserAgent(),
       },
       redirect: 'error',
       signal: composed.signal,
-    }).finally(composed.cleanup);
+    })
+      .then((response) => {
+        logQwenSubscriptionGatewayResponse(response);
+        return response;
+      })
+      .finally(composed.cleanup);
   }
 
   private matches(credentials: Credentials): boolean {
@@ -650,8 +734,12 @@ async function parseModelsError(
   response: Response,
 ): Promise<QwenSubscriptionOAuthError> {
   const retryAfter = retryAfterMs(response.headers.get('Retry-After'));
+  const headerRequestId = resolveQwenSubscriptionHeaderRequestId(
+    response.headers,
+  );
   const text = await response.text().catch(() => '');
-  let code = 'models_request_failed';
+  let code =
+    response.status === 401 ? 'invalid_token' : 'models_request_failed';
   let description: string | undefined;
   if (text && text.length <= ERROR_MAX_BYTES) {
     try {
@@ -663,13 +751,31 @@ async function parseModelsError(
             ? (record['error'] as Record<string, unknown>)
             : undefined;
         const rawCode = nested?.['code'] ?? nested?.['type'] ?? record['error'];
+        const quota = nested
+          ? qwenSubscriptionQuotaDisplay(
+              response.status,
+              nested,
+              headerRequestId,
+            )
+          : undefined;
         const rawDescription =
-          nested?.['message'] ?? record['error_description'] ?? record['message'];
+          formatQwenSubscriptionQuotaDisplay(quota) ??
+          nested?.['message'] ??
+          record['error_description'] ??
+          record['message'];
         if (typeof rawCode === 'string' && rawCode.trim()) {
           code = rawCode.trim();
         }
         if (typeof rawDescription === 'string' && rawDescription.trim()) {
           description = rawDescription.trim();
+        }
+        const requestId =
+          normalizeQwenSubscriptionRequestId(nested?.['request_id']) ??
+          headerRequestId;
+        if (requestId) {
+          runLogger.debug(
+            `[qwen-subscription] gateway request failed status=${response.status} code=${code} requestId=${requestId}`,
+          );
         }
       }
     } catch {

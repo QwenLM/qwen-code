@@ -317,6 +317,48 @@ describe('QwenSubscriptionSession', () => {
     ).toBe(
       'https://chat.qwen.ai/authorize?user_code=ABCD-1234&client=cli&entry=qwen_code&paywallScene=cli',
     );
+    expect(getQwenSubscriptionAuthorizationUrl('ABCD-1234', 'desktop')).toBe(
+      'https://chat.qwen.ai/authorize?user_code=ABCD-1234&client=desktop&entry=qwen_code&paywallScene=desktop',
+    );
+  });
+
+  it('sends QwenCode User-Agent when requesting the model catalog', async () => {
+    await writeCredentials();
+    const fetch = fetchMock().mockResolvedValueOnce(
+      jsonResponse({ data: [{ id: 'qwen3.8-max' }] }),
+    );
+
+    await new QwenSubscriptionSession().getModels();
+
+    const init = fetch.mock.calls[0]![1] as RequestInit;
+    expect((init.headers as Record<string, string>)['User-Agent']).toMatch(
+      /^QwenCode\/\S+ \(\S+; \S+\)$/,
+    );
+  });
+
+  it('persists 429 Retry-After cooldowns across OAuth requests', async () => {
+    await writeCredentials({ expiresAt: Date.now() - 1_000 });
+    const fetch = fetchMock().mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: 'slow_down' }), {
+        status: 429,
+        headers: {
+          'Content-Type': 'application/json',
+          'Retry-After': '60',
+        },
+      }),
+    );
+    const session = new QwenSubscriptionSession();
+
+    await expect(session.getAccessToken()).rejects.toMatchObject({
+      status: 429,
+      stage: 'refresh',
+    });
+    await expect(session.getAccessToken()).rejects.toMatchObject({
+      code: 'rate_limited',
+      status: 429,
+      stage: 'refresh',
+    });
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 
   it('falls back to the cached catalog on server errors', async () => {

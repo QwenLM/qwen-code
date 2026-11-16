@@ -6,7 +6,8 @@
  */
 
 import type { SettingsService } from '@qwen-code/resource';
-import { CustomClientImpl } from '../../client/customClientImpl.js';
+import { ClientError } from '../../client/clientError.js';
+import type { CustomClient } from '../../client/customClient.js';
 import { createRetryingCustomInference } from '../../provider/impl/customModelInference.js';
 import { CustomModelSelector } from '../../provider/impl/customModelSelector.js';
 import { CustomProviderConfig } from '../../provider/impl/customProviderConfig.js';
@@ -17,6 +18,7 @@ import type { ModelSelectContext } from '../../provider/model/modelSelectContext
 import type { ModelSelection } from '../../provider/model/modelSelection.js';
 import {
   classifyClientError,
+  type ModelInferenceErrorClassifier,
   type ModelInferenceErrorDetail,
 } from '../../provider/modelInferenceError.js';
 import type { ModelProvider } from '../../provider/modelProvider.js';
@@ -27,11 +29,16 @@ import type { ModelTransportManager } from '../../provider/transport/modelTransp
 import { OPENAI_CHAT_COMPLETIONS } from '../../provider/transport/modelProtocol.js';
 import { ModelThinkingUtils } from '../../provider/utils/modelThinkingUtils.js';
 import { runLogger } from '../../utils/runLogger.js';
+import { createQwenSubscriptionClient } from './gateway.js';
 import { createQwenSubscriptionModelResolver } from './model-resolver.js';
 import {
   QWEN_SUBSCRIPTION_BASE_URL,
   QWEN_SUBSCRIPTION_PROVIDER_ID,
 } from './oauth-config.js';
+import {
+  formatQwenSubscriptionQuotaDisplay,
+  parseQwenSubscriptionQuotaFromBody,
+} from './quota.js';
 import {
   QWEN_SUBSCRIPTION_SIGNED_OUT_HINT,
   QwenSubscriptionSession,
@@ -81,6 +88,37 @@ export interface CreateQwenSubscriptionProviderOptions {
 }
 
 /**
+ * Rejected credentials surface the same recovery hint as the session, while
+ * preserving 403 server business messages and formatting 402 quota resets.
+ */
+export const classifyQwenSubscriptionError: ModelInferenceErrorClassifier = (
+  error,
+): ModelInferenceErrorDetail => {
+  const detail = classifyClientError(error);
+  if (error instanceof ClientError) {
+    const quota = parseQwenSubscriptionQuotaFromBody(
+      detail.status,
+      error.responseBody,
+      detail.requestId,
+    );
+    const quotaMessage = formatQwenSubscriptionQuotaDisplay(quota);
+    if (quotaMessage) {
+      return {
+        ...detail,
+        code: detail.code ?? 'insufficient_quota',
+        ...(quota?.requestId ? { requestId: quota.requestId } : {}),
+        kind: 'quota_exhausted',
+        message: quotaMessage,
+      };
+    }
+  }
+  if (detail.status === 401 || (detail.kind === 'auth' && !detail.message)) {
+    return { ...detail, message: QWEN_SUBSCRIPTION_SIGNED_OUT_HINT };
+  }
+  return detail;
+};
+
+/**
  * Account-backed Qwen membership provider.
  *
  * Mirrors `QoderProvider`: a dedicated `ModelProvider` whose catalog comes
@@ -93,7 +131,7 @@ export class QwenSubscriptionProvider implements ModelProvider {
   private readonly models: Model[] = [];
   private readonly config: QwenSubscriptionProviderConfig;
   private readonly transport: ModelTransport;
-  private readonly client: CustomClientImpl;
+  private readonly client: CustomClient;
   private readonly resolver: ReturnType<typeof createQwenSubscriptionModelResolver>;
   private readonly selector: CustomModelSelector;
   private readonly store: ModelConfigStore;
@@ -106,7 +144,7 @@ export class QwenSubscriptionProvider implements ModelProvider {
       session,
     });
     this.transport = options.transportManager.resolve(OPENAI_CHAT_COMPLETIONS);
-    this.client = new CustomClientImpl({ customProviderConfig: this.config });
+    this.client = createQwenSubscriptionClient(this.config);
     this.resolver = createQwenSubscriptionModelResolver(session, this.models);
     this.selector = new CustomModelSelector(this.config, this);
     this.store = new ModelConfigStore({
@@ -158,7 +196,7 @@ export class QwenSubscriptionProvider implements ModelProvider {
       this.transport,
       this.client,
       resolveQwenSubscriptionStreamRequest(request),
-      (error) => this.classifyError(error),
+      classifyQwenSubscriptionError,
       { firstPayloadTimeoutMs: this.config.firstPayloadTimeoutMs },
     );
     this.active.add(response);
@@ -167,21 +205,6 @@ export class QwenSubscriptionProvider implements ModelProvider {
     };
     void response.completed.then(cleanup, cleanup);
     return Promise.resolve(response);
-  }
-
-  /**
-   * Rejected credentials surface the same recovery hint as the session, while
-   * preserving 403 server business messages (e.g. model/plan access denied).
-   */
-  private classifyError(error: unknown): ModelInferenceErrorDetail {
-    const detail = classifyClientError(error);
-    if (
-      detail.status === 401 ||
-      (detail.kind === 'auth' && !detail.message)
-    ) {
-      return { ...detail, message: QWEN_SUBSCRIPTION_SIGNED_OUT_HINT };
-    }
-    return detail;
   }
 }
 

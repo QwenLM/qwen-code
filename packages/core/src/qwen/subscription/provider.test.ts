@@ -8,14 +8,19 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import type { SettingsService } from '@qwen-code/resource';
+import { ClientError } from '../../client/clientError.js';
+import { ModelInferenceError } from '../../provider/modelInferenceError.js';
 import type { ModelTransportManager } from '../../provider/transport/modelTransportManager.js';
 import { OPENAI_CHAT_COMPLETIONS } from '../../provider/transport/modelProtocol.js';
 import { buildChatCompletionsStreamReq } from '../../provider/transport/impl/chat-completions-factory/request/chatCompletionsStreamReqFactory.js';
+import { resolveErrorPresentation } from '../../utils/errorPresentation.js';
+import * as fetchUtils from '../../utils/fetch.js';
 import {
   qwenSubscriptionModel,
   type QwenSubscriptionModelMetadata,
 } from './models.js';
 import {
+  classifyQwenSubscriptionError,
   QwenSubscriptionProvider,
   QwenSubscriptionProviderConfig,
   resolveQwenSubscriptionStreamRequest,
@@ -184,5 +189,127 @@ describe('QwenSubscriptionProviderConfig', () => {
       enable_thinking: false,
     });
     expect(disabled).not.toHaveProperty('thinking_budget');
+  });
+
+  it('formats 402 insufficient_quota responses with reset countdown and upgrade hint', () => {
+    const resetAt = Math.floor((Date.now() + 26 * 3_600_000) / 1000);
+    const clientError = new ClientError('HTTP 402', {
+      statusCode: 402,
+      code: 'insufficient_quota',
+      requestId: 'req_quota_1',
+      responseBody: JSON.stringify({
+        error: {
+          code: 'insufficient_quota',
+          message: 'Quota exceeded',
+          quota: {
+            member_type: 'plus',
+            reset_at: resetAt,
+          },
+        },
+      }),
+    });
+
+    const classify = classifyQwenSubscriptionError(clientError);
+
+    expect(classify.kind).toBe('quota_exhausted');
+    expect(classify.message).toBe(
+      "You've used up your weekly credits. Your credits are expected to reset in 1 day and 2 hours. You can wait or run /upgrade to get more credits. (request_id: req_quota_1)",
+    );
+
+    const inferenceError = new ModelInferenceError(classify.message!, {
+      ...classify,
+      kind: 'quota_exhausted',
+      phase: 'before_output',
+    });
+    expect(
+      resolveErrorPresentation(inferenceError, 'qwen-subscription')
+        .fallbackMessage,
+    ).toBe(classify.message);
+
+    const exactTwoDays = Math.floor((Date.now() + 48 * 3_600_000) / 1000);
+    const exactDayError = new ClientError('HTTP 402', {
+      statusCode: 402,
+      code: 'insufficient_quota',
+      responseBody: JSON.stringify({
+        error: {
+          code: 'insufficient_quota',
+          quota: {
+            member_type: 'pro',
+            reset_at: exactTwoDays,
+          },
+        },
+      }),
+    });
+    expect(classifyQwenSubscriptionError(exactDayError).message).toBe(
+      "You've used up your weekly credits. Your credits are expected to reset in 2 days. Please try again after the reset.",
+    );
+  });
+
+  it('attaches QwenCode User-Agent and captures gateway request id headers on inference requests', async () => {
+    const fetchSpy = vi
+      .spyOn(fetchUtils, 'proxiedFetch')
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            error: {
+              code: 'insufficient_quota',
+              message: 'Quota exceeded',
+              quota: { member_type: 'pro' },
+            },
+          }),
+          {
+            status: 402,
+            headers: {
+              'Content-Type': 'application/json',
+              'x-request-id': 'invalid request id with spaces',
+              'x-gateway-request-id': 'gw_req_402',
+            },
+          },
+        ),
+      );
+
+    try {
+      const instance = provider(fakeSession({ cached: ['qwen3.8-max'] }));
+      const client = (
+        instance as unknown as {
+          client: {
+            api: {
+              inference: {
+                chatCompletions: {
+                  stream: (req: unknown) => AsyncIterable<unknown>;
+                };
+              };
+            };
+          };
+        }
+      ).client;
+
+      let caught: unknown;
+      try {
+        for await (const _ of client.api.inference.chatCompletions.stream({
+          model: 'qwen3.8-max',
+          messages: [],
+          stream: true,
+        })) {
+          // expect 402 before any event
+        }
+      } catch (err) {
+        caught = err;
+      }
+
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      const [, init] = fetchSpy.mock.calls[0]!;
+      expect((init?.headers as Record<string, string>)['User-Agent']).toMatch(
+        /^QwenCode\/\S+ \(\S+; \S+\)$/,
+      );
+
+      const classify = classifyQwenSubscriptionError(caught);
+
+      expect(classify.kind).toBe('quota_exhausted');
+      expect(classify.requestId).toBe('gw_req_402');
+      expect(classify.message).toContain('(request_id: gw_req_402)');
+    } finally {
+      fetchSpy.mockRestore();
+    }
   });
 });

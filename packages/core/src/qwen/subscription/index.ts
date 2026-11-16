@@ -18,6 +18,14 @@ export {
   type QwenPaywallScene,
 } from './oauth-config.js';
 export {
+  formatQwenSubscriptionQuotaDisplay,
+  parseQwenSubscriptionQuotaFromBody,
+  qwenSubscriptionQuotaDisplay,
+  readQwenSubscriptionQuotaDisplay,
+  type QwenSubscriptionQuotaDisplay,
+  type QwenSubscriptionQuotaTranslator,
+} from './quota.js';
+export {
   QwenSubscriptionOAuthClient,
   QwenSubscriptionOAuthError,
   retryAfterMs,

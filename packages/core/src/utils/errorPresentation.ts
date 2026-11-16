@@ -21,6 +21,7 @@ import {
 import { isAbortErrorDeep, collectErrorCodes } from './errors.js';
 import { QODER_PROVIDER_ID } from '../provider/modelProvider.js';
 import { getQoderErrorText } from '../provider/qoder/qoderErrorText.js';
+import { QWEN_SUBSCRIPTION_PROVIDER_ID } from '../qwen/subscription/oauth-config.js';
 import { getExecutionEnvironmentError } from './fsErrorMessages.js';
 import { getErrorStatus } from './httpErrors.js';
 import { getServerErrorMessage } from './serverErrorMessage.js';
@@ -150,6 +151,14 @@ export function getErrorCodeFallbackMessage(
       qoderMessage(causeCode) ??
       qoderMessage(messageCode);
     if (qoderText !== undefined) return qoderText;
+  }
+  if (
+    details?.providerSource === QWEN_SUBSCRIPTION_PROVIDER_ID &&
+    kind === 'quota_exhausted' &&
+    code === 'insufficient_quota' &&
+    details.message
+  ) {
+    return details.message;
   }
   if (kind === 'auth' && details?.status === 403) {
     return ERROR_FALLBACK_MESSAGES[403];

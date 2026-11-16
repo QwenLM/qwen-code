@@ -56,13 +56,16 @@ export function getQwenSubscriptionPlansUrl(
 
 /** Browser authorization page for a device code. */
 export function getQwenSubscriptionAuthorizationUrl(
-  device: {
-    readonly user_code: string;
-  },
+  device:
+    | string
+    | {
+        readonly user_code: string;
+      },
   scene: QwenPaywallScene = 'cli',
 ): string {
+  const userCode = typeof device === 'string' ? device : device.user_code;
   const url = new URL('/authorize', getQwenOAuthConfig().webOrigin);
-  url.searchParams.set('user_code', device.user_code);
+  url.searchParams.set('user_code', userCode);
   url.searchParams.set('client', scene);
   return formatQwenChatUrl(url, scene);
 }
