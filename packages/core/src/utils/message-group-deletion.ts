@@ -354,6 +354,7 @@ function pruneCompression(
     (id) => !known.has(id),
   );
   let removing = false;
+  let currentPromptId: string | undefined;
   const seen = new Set<string>();
   const retained: number[] = [];
   for (let index = 0; index < payload.compressedHistory.length; index++) {
@@ -369,9 +370,15 @@ function pruneCompression(
       );
     }
     if (promptId) {
+      const content = payload.compressedHistory[index]!;
+      const continuation =
+        content.role === 'user' &&
+        content.parts?.some((part) => part.functionResponse);
       if (
-        seen.has(promptId) ||
-        payload.compressedHistory[index]?.role !== 'user'
+        (seen.has(promptId) &&
+          (!continuation || promptId !== currentPromptId)) ||
+        (content.role !== 'user' &&
+          !(index === prefix && content.role === 'model'))
       ) {
         throw new MessageGroupDeletionError(
           'invalid_history',
@@ -379,6 +386,7 @@ function pruneCompression(
         );
       }
       seen.add(promptId);
+      currentPromptId = promptId;
       removing = removedPromptIds.has(promptId);
     } else if (
       payload.compressedHistory[index]?.role === 'user' &&
@@ -394,6 +402,7 @@ function pruneCompression(
       }
       // Unidentified injected input has no durable turn ownership.
       removing = false;
+      currentPromptId = undefined;
     }
     // Unidentified prefix entries hold summaries and injected restore context.
     if (!removing) retained.push(index);

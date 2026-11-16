@@ -121,17 +121,19 @@ function reaped(result) {
 describe('reap-isolated-home selection', () => {
   it('selects a daemon by its home-bearing environment, not its argv', () => {
     // The measured shape: argv names no home at all, HOME does.
+    // This synthetic PID cannot collide with the reaper's real ancestor chain.
+    const daemonPid = Number.MAX_SAFE_INTEGER;
     withRoot((root) => {
       const r = run({
         root,
         home: HOME,
         procs: [
-          { pid: 100, env: { HOME, QWEN_HOME: `${HOME}/.qwen` } },
+          { pid: daemonPid, env: { HOME, QWEN_HOME: `${HOME}/.qwen` } },
           { pid: 200, env: { HOME: OTHER } },
         ],
       });
       assert.equal(r.status, 0);
-      assert.deepEqual(reaped(r), [100]);
+      assert.deepEqual(reaped(r), [daemonPid]);
     });
   });
 

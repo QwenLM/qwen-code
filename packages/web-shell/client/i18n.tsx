@@ -4,6 +4,7 @@ import {
 } from './components/managed/managed-extension-messages.js';
 import {
   MANAGED_LIFECYCLE_MESSAGES_EN,
+  MANAGED_LIFECYCLE_MESSAGES_RU,
   MANAGED_LIFECYCLE_MESSAGES_ZH,
 } from './components/managed/managed-lifecycle-messages.js';
 import { plural } from './utils/plural.js';
@@ -13,18 +14,22 @@ import {
 } from './components/sidebar/activity-messages.js';
 import {
   MESSAGE_DELETION_MESSAGES_EN,
+  MESSAGE_DELETION_MESSAGES_RU,
   MESSAGE_DELETION_MESSAGES_ZH,
 } from './components/message-deletion-messages.js';
 import {
   TRAJECTORY_EXECUTION_MESSAGES_EN,
+  TRAJECTORY_EXECUTION_MESSAGES_RU,
   TRAJECTORY_EXECUTION_MESSAGES_ZH,
 } from './trajectory/execution-messages.js';
 import {
   FILES_MESSAGES_EN,
+  FILES_MESSAGES_RU,
   FILES_MESSAGES_ZH,
 } from './components/artifacts/files-messages.js';
 import {
   TOKEN_USAGE_MESSAGES_EN,
+  TOKEN_USAGE_MESSAGES_RU,
   TOKEN_USAGE_MESSAGES_ZH,
 } from './components/artifacts/token-usage-messages.js';
 import {
@@ -40,48 +45,75 @@ import {
 
 import {
   TRAJECTORY_FILTER_MESSAGES_EN,
+  TRAJECTORY_FILTER_MESSAGES_RU,
   TRAJECTORY_FILTER_MESSAGES_ZH,
 } from './trajectory/filter-messages.js';
 
 import {
   TRAJECTORY_WINDOW_MESSAGES_EN,
+  TRAJECTORY_WINDOW_MESSAGES_RU,
   TRAJECTORY_WINDOW_MESSAGES_ZH,
 } from './trajectory/window-messages.js';
 
-import { VOICE_MESSAGES_EN, VOICE_MESSAGES_ZH } from './voice/messages.js';
-import { LIVE_MESSAGES_EN, LIVE_MESSAGES_ZH } from './live/messages.js';
+import {
+  VOICE_MESSAGES_EN,
+  VOICE_MESSAGES_RU,
+  VOICE_MESSAGES_ZH,
+} from './voice/messages.js';
+import {
+  LIVE_MESSAGES_EN,
+  LIVE_MESSAGES_RU,
+  LIVE_MESSAGES_ZH,
+} from './live/messages.js';
 import {
   MCP_APP_MESSAGES_EN,
+  MCP_APP_MESSAGES_RU,
   MCP_APP_MESSAGES_ZH,
 } from './mcp-app/messages.js';
 import {
   COLLAB_MESSAGES_EN,
+  COLLAB_MESSAGES_RU,
   COLLAB_MESSAGES_ZH,
 } from './components/workspace-agents/messages.js';
 import {
   SETTINGS_MESSAGES_EN,
+  SETTINGS_MESSAGES_RU,
   SETTINGS_MESSAGES_ZH,
 } from './settings/messages.js';
 
 import {
   MANAGED_TASK_MESSAGES_EN,
+  MANAGED_TASK_MESSAGES_RU,
   MANAGED_TASK_MESSAGES_ZH,
 } from './components/managed/managed-task-messages.js';
 
 import {
   BROWSER_NOTIFICATION_MESSAGES_EN,
+  BROWSER_NOTIFICATION_MESSAGES_RU,
   BROWSER_NOTIFICATION_MESSAGES_ZH,
 } from './browser-notifications/messages.js';
 
 import {
   WORKSPACE_REGISTRATION_MESSAGES_EN,
+  WORKSPACE_REGISTRATION_MESSAGES_RU,
   WORKSPACE_REGISTRATION_MESSAGES_ZH,
 } from './components/managed/managed-workspace-messages.js';
 
 import {
   MANAGED_MCP_MESSAGES_EN,
+  MANAGED_MCP_MESSAGES_RU,
   MANAGED_MCP_MESSAGES_ZH,
 } from './components/managed/managed-mcp-messages.js';
+// The Russian catalog is split so `--mode transcript` can stub these
+// modules (see vite.lib.config.ts). Exported HTML would otherwise ship a
+// third full UI dictionary to every reader.
+import { RU_PART1 } from './i18n-ru-part1.js';
+import { RU_PART2 } from './i18n-ru-part2.js';
+import { RU_PART3 } from './i18n-ru-part3.js';
+import { RU_PART4 } from './i18n-ru-part4.js';
+import { RU_PART5 } from './i18n-ru-part5.js';
+import { RU_PART6 } from './i18n-ru-part6.js';
+import { RU_REMAINDER } from './i18n-ru-remainder.js';
 
 export const WEB_SHELL_LANGUAGES = ['en', 'zh-CN', 'ru'] as const;
 
@@ -92,26 +124,6 @@ type MessageValue =
   | ((vars?: Record<string, string | number>) => string);
 
 type Messages = Record<string, MessageValue>;
-
-/**
- * Russian plural pick: 1 → `one`, 2–4 → `few`, otherwise → `many`, with the
- * 11–14 exception per decade (ход/ходов, токен/токенов, цель/целей).
- */
-function ruPlural(
-  count: string | number | undefined,
-  one: string,
-  few: string,
-  many: string,
-): string {
-  const value = typeof count === 'number' ? count : Number(count ?? 0);
-  const safe = Number.isFinite(value) ? value : 0;
-  const last = safe % 10;
-  const lastTwo = safe % 100;
-  if (lastTwo >= 11 && lastTwo <= 14) return many;
-  if (last === 1) return one;
-  if (last >= 2 && last <= 4) return few;
-  return many;
-}
 
 const EN: Messages = {
   "You've used up your weekly credits.{{reset}} You can wait or run /upgrade to get more credits.":
@@ -2344,18 +2356,36 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'localFiles.status.resolving': 'Resolving…',
   'localFiles.needsSessionHint':
     'Start a session first. The bridge binds to exactly one session, so no other session can reach your files.',
-  'localFiles.blocker.insecureContext':
-    'This page is not a secure context, so the browser will not grant local file access. Serve the Web Shell over https, or forward the daemon port with SSH and open http://localhost:<port>.',
+  'localFiles.blocker.insecureContext': (v) =>
+    v?.localPort !== undefined
+      ? `This page is not a secure context, so the browser will not grant local file access. Serve the Web Shell over https, or run the copied SSH tunnel command and open http://localhost:${v.localPort}.`
+      : 'This page is not a secure context, so the browser will not grant local file access. Serve the Web Shell over https, or forward the daemon port with SSH and open http://localhost:<port>.',
   'localFiles.blocker.crossOriginFrame':
     'Local file access is blocked inside a cross-origin frame. Open the Web Shell in its own browser tab to connect a directory.',
   'localFiles.blocker.unsupportedBrowser':
     'This browser has no File System Access API. Use Chrome or Edge to connect a local directory.',
   'localFiles.blocker.workspaceIneligible':
-    "This conversation's workspace cannot host a local directory (untrusted or live workspace).",
+    "This conversation's workspace cannot host a local directory (untrusted or live workspace). Use a session in a trusted, regular workspace instead.",
   'localFiles.blocker.workspaceResolving':
     'Which workspace this conversation belongs to is not known yet.',
   'localFiles.blocker.unsupportedDaemon':
     'This daemon does not advertise the client filesystem bridge (client_mcp_over_ws). Start the daemon with QWEN_SERVE_CLIENT_MCP_OVER_WS=1 to enable local files.',
+  'localFiles.changeDirectory': 'Change directory…',
+  'localFiles.session': 'Session',
+  'localFiles.newSession': 'New session',
+  'localFiles.retry': 'Retry',
+  'localFiles.copyStartupCommand': 'Copy startup command',
+  'localFiles.copyTunnelCommand': 'Copy SSH tunnel command',
+  'localFiles.copied': 'Command copied',
+  'localFiles.copyFailed': 'Could not copy the command',
+  'localFiles.changeDirectoryFailed':
+    'Could not change the directory. The current directory is still connected.',
+  'localFiles.changeDirectoryDeferred':
+    'Directory change saved. It takes effect once the workspace finishes resolving; until then the current directory stays connected.',
+  'localFiles.gestureToast': (v) =>
+    v?.name
+      ? `Local directory "${v.name}" needs to be reconnected. Open Local files to grant access again.`
+      : 'Local files need to be reconnected. Open Local files to grant access again.',
   ...FILES_MESSAGES_EN,
   ...ACTIVITY_MESSAGES_EN,
   'rightPanel.add': 'Add panel',
@@ -5303,6 +5333,15 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
 };
 
 /**
+ * Every local-files message key, derived from the EN catalog so the
+ * locale-parity test covers new keys automatically instead of drifting
+ * behind a hardcoded subset.
+ */
+export const LOCAL_FILES_MESSAGE_KEYS = Object.keys(EN).filter((key) =>
+  key.startsWith('localFiles.'),
+);
+
+/**
  * zh-CN descriptions for the GitHub boundSessionActions keys. The 20 base
  * event descriptions are written once; the 60 role-qualified spellings
  * reuse them (the picker group header names the role). English needs no
@@ -5310,8 +5349,22 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
  * descriptions. The role list mirrors PR_BINDING_ROLES in
  * @qwen-code/channel-base, which the client cannot import.
  */
+function githubBoundActionOptionDescriptions(
+  base: Record<string, string>,
+): Record<string, string> {
+  const prefix = 'channels.editor.field.github.boundSessionActions';
+  const entries: Record<string, string> = {};
+  for (const [key, description] of Object.entries(base)) {
+    entries[`${prefix}.optionDescription.${key}`] = description;
+    for (const role of ['review', 'verify', 'fix']) {
+      entries[`${prefix}.optionDescription.${role}:${key}`] = description;
+    }
+  }
+  return entries;
+}
+
 function githubBoundActionOptionDescriptionsZh(): Record<string, string> {
-  const base: Record<string, string> = {
+  return githubBoundActionOptionDescriptions({
     default: '没有更具体键的事件使用的回退模板',
     'watch:ci_failure': 'head 提交上的 CI 检查变红',
     'watch:merge_conflict': 'PR 出现合并冲突',
@@ -5332,16 +5385,7 @@ function githubBoundActionOptionDescriptionsZh(): Record<string, string> {
     invitation: '你收到协作邀请',
     member_feature_requested: '成员功能请求通知',
     security_advisory_credit: '你在安全公告中被署名致谢',
-  };
-  const prefix = 'channels.editor.field.github.boundSessionActions';
-  const entries: Record<string, string> = {};
-  for (const [key, description] of Object.entries(base)) {
-    entries[`${prefix}.optionDescription.${key}`] = description;
-    for (const role of ['review', 'verify', 'fix']) {
-      entries[`${prefix}.optionDescription.${role}:${key}`] = description;
-    }
-  }
-  return entries;
+  });
 }
 
 const ZH: Messages = {
@@ -7494,17 +7538,34 @@ const ZH: Messages = {
   'localFiles.status.resolving': '解析中…',
   'localFiles.needsSessionHint':
     '请先创建一个会话。桥只绑定一个会话，因此其他会话无法访问你的文件。',
-  'localFiles.blocker.insecureContext':
-    '当前页面不是安全上下文，浏览器不会授予本地文件访问权。请通过 https 访问 Web Shell，或用 SSH 转发 daemon 端口后打开 http://localhost:<port>。',
+  'localFiles.blocker.insecureContext': (v) =>
+    v?.localPort !== undefined
+      ? `当前页面不是安全上下文，浏览器不会授予本地文件访问权。请通过 https 访问 Web Shell，或运行所复制的 SSH 隧道命令后打开 http://localhost:${v.localPort}。`
+      : '当前页面不是安全上下文，浏览器不会授予本地文件访问权。请通过 https 访问 Web Shell，或用 SSH 转发 daemon 端口后打开 http://localhost:<port>。',
   'localFiles.blocker.crossOriginFrame':
     '跨源 iframe 中本地文件访问被禁用。请在独立的浏览器标签页中打开 Web Shell 再连接目录。',
   'localFiles.blocker.unsupportedBrowser':
     '当前浏览器没有 File System Access API。请使用 Chrome 或 Edge 连接本地目录。',
   'localFiles.blocker.workspaceIneligible':
-    '该会话的工作区不能托管本地目录（不受信任或 live 工作区）。',
+    '该会话的工作区不能托管本地目录（不受信任或 live 工作区）。请改用受信任的普通工作区中的会话。',
   'localFiles.blocker.workspaceResolving': '尚不能确定该会话所属的工作区。',
   'localFiles.blocker.unsupportedDaemon':
     '该 daemon 未启用客户端文件桥（client_mcp_over_ws）。以 QWEN_SERVE_CLIENT_MCP_OVER_WS=1 启动 daemon 即可启用本地文件。',
+  'localFiles.changeDirectory': '更换目录…',
+  'localFiles.session': '会话',
+  'localFiles.newSession': '新建会话',
+  'localFiles.retry': '重试',
+  'localFiles.copyStartupCommand': '复制启动命令',
+  'localFiles.copyTunnelCommand': '复制 SSH 隧道命令',
+  'localFiles.copied': '命令已复制',
+  'localFiles.copyFailed': '复制命令失败',
+  'localFiles.changeDirectoryFailed': '无法更换目录。当前目录仍保持连接。',
+  'localFiles.changeDirectoryDeferred':
+    '目录变更已保存，将在工作区解析完成后生效；在此之前当前目录仍保持连接。',
+  'localFiles.gestureToast': (v) =>
+    v?.name
+      ? `本地目录「${v.name}」需要重新连接。打开「本地文件」即可重新授权。`
+      : '本地文件需要重新连接。打开「本地文件」即可重新授权。',
   ...FILES_MESSAGES_ZH,
   ...ACTIVITY_MESSAGES_ZH,
   'rightPanel.add': '添加页签',
@@ -8601,14 +8662,14 @@ const ZH: Messages = {
   'goals.dropped': (v) =>
     `有 ${v?.count ?? 0} 个会话无法访问——它们正在运行的目标未显示在此列表中。`,
   'goals.workspacesSkipped': (v) =>
-    `有 ${v?.count ?? 0} 个工作区未显示（未受信或远程）。`,
+    `有 ${v?.count ?? 0} 个工作区未显示（不受信任或远程）。`,
   'goals.notYetEvaluated': '尚未判定',
   'goals.openSessionHint': '打开该目标所在的会话',
   'goals.error.emptyCondition': '请输入目标条件。',
   'goals.error.clearKeyword': (v) =>
     `“${v?.word ?? ''}”是清除目标的指令，不是一个条件。请描述要达成的条件。`,
   'goals.error.createFailed': '启动目标失败',
-  'goals.error.workspaceUnavailable': '所选工作区不可用或未受信。',
+  'goals.error.workspaceUnavailable': '所选工作区不可用或不受信任。',
   'goals.error.saveFailed': '保存目标失败',
   'goals.error.goalUnavailable': '该目标已不可用。',
   'goals.error.requiresObjective': (v) =>
@@ -10219,104 +10280,31 @@ const ZH: Messages = {
   ...TRAJECTORY_WINDOW_MESSAGES_ZH,
 };
 
-/**
- * Russian catalog — intentionally partial: it covers the Goal card and the
- * Goals dialog (#13391). `getTranslator` falls back to EN for every other
- * key (`messages[key] ?? EN[key] ?? key`), which is the behaviour this locale
- * has been running with since it was first introduced as an installer patch.
- */
 const RU: Messages = {
-  'goal.aborted': 'Цель прервана',
-  'goal.blocked': 'Цель заблокирована',
-  'goal.usageLimited': 'Лимит использования цели',
-  'goal.paused': 'Цель на паузе',
-  'goal.achieved': 'Цель достигнута',
-  'goal.check': 'Проверка цели',
-  'goal.cleared': 'Цель снята',
-  'goal.failed': 'Цель не достигнута',
-  'goal.judge': 'Оценка',
-  'goal.label': 'Цель',
-  'goal.expandDetails': 'Показать подробности',
-  'goal.collapseDetails': 'Скрыть подробности',
-  'goal.lastCheck': 'Последняя проверка',
-  'goal.notYetMet': 'условие не выполнено',
-  'goal.set': 'Цель задана',
-  'goal.statusActive': '/goal активен',
-  'goal.status.active': 'В работе',
-  'goal.status.paused': 'Пауза',
-  'goal.status.blocked': 'Заблокирована',
-  'goal.status.usage_limited': 'Лимит исчерпан',
-  'goal.status.complete': 'Выполнена',
-  'goal.activity.idle': 'Ожидание',
-  'goal.activity.running': 'Работает',
-  'goal.activity.verifying': 'Проверка',
-  'goal.edit': 'Изменить цель',
-  'goal.pause': 'Поставить на паузу',
-  'goal.resume': 'Продолжить',
-  'goal.turn': (v) =>
-    `${v?.count ?? 0} ${ruPlural(v?.count, 'ход', 'хода', 'ходов')}`,
-  'goal.turnLabel': (v) => `ход ${v?.count ?? 0}`,
-  'goal.turns': (v) =>
-    `${v?.count ?? 0} ${ruPlural(v?.count, 'ход', 'хода', 'ходов')}`,
-  'goal.turnsOfBudget': (v) =>
-    `${v?.count ?? 0} / ${v?.budget ?? 0} ${ruPlural(v?.budget, 'ход', 'хода', 'ходов')}`,
-  'goal.activeOfBudget': (v) => `${v?.used ?? ''} / ${v?.budget ?? ''}`,
-  'goal.tokens': (v) =>
-    `${v?.used ?? 0} ${ruPlural(v?.used, 'токен', 'токена', 'токенов')}`,
-  'goal.tokensOfBudget': (v) =>
-    `${v?.used ?? 0} / ${v?.budget ?? 0} ${ruPlural(v?.budget, 'токен', 'токена', 'токенов')}`,
-  'goals.title': 'Цели',
-  'goals.subtitle':
-    'Цель удерживает сессию в работе, пока условие не выполнено. Здесь видны только загруженные сейчас сессии — цель двигается, пока её сессия работает.',
-  'goals.loading': 'Загрузка целей…',
-  'goals.count': (v) =>
-    `${v?.count ?? 0} ${ruPlural(v?.count, 'активная цель', 'активные цели', 'активных целей')}`,
-  'goals.empty': 'Нет активных целей. Задайте: /goal <условие>.',
-  'goals.refresh': 'Обновить',
-  'goals.new': 'Новая цель',
-  'goals.workspace': 'Рабочая область',
-  'goals.newHint':
-    'Цель запускается в новой сессии и работает, пока условие не выполняется. Жёсткий лимит по числу ходов или времени задаётся в чате: /config model.goalMaxTurns=20 или /config model.goalMaxActiveMinutes=30 (применяется после перезапуска демона, к целям, созданным позже).',
-  'goals.condition': 'Условие',
-  'goals.conditionPlaceholder':
-    'напр. `npm test` завершается с кодом 0 и `npm run lint` без предупреждений (вставить вывод); не менять тестовые файлы; как указание модели — остановиться как blocked после 20 ходов',
-  'goals.cancel': 'Отмена',
-  'goals.create': 'Задать цель',
-  'goals.creating': 'Запуск…',
-  'goals.saving': 'Сохранение…',
-  'goals.save': 'Сохранить',
-  'goals.edit': 'Изменить цель',
-  'goals.objective': 'Целевое условие',
-  'goals.clear': 'Снять цель',
-  'goals.clearConfirm': (v) => `Снять цель "${v?.condition ?? ''}"?`,
-  'goals.running': 'Работает',
-  'goals.idle': 'Ожидание',
-  'goals.dropped': (v) =>
-    `не удалось связаться с ${v?.count ?? 0} ${ruPlural(v?.count, 'сессией', 'сессиями', 'сессиями')} — цели, которые они выполняли, отсутствуют в этом списке.`,
-  'goals.workspacesSkipped': (v) =>
-    `${v?.count ?? 0} ${ruPlural(v?.count, 'рабочая область', 'рабочие области', 'рабочих областей')} не показано (нет доверия или удалённый доступ).`,
-  'goals.notYetEvaluated': 'ещё не оценено',
-  'goals.openSessionHint': 'Открыть сессию этой цели',
-  'goals.error.emptyCondition': 'Введите условие для цели.',
-  'goals.error.clearKeyword': (v) =>
-    `"${v?.word ?? ''}" снимает цель, а не задаёт её. Опишите условие, к которому нужно работать.`,
-  'goals.error.createFailed': 'Не удалось запустить цель',
-  'goals.error.workspaceUnavailable':
-    'Выбранная рабочая область недоступна или не пользуется доверием.',
-  'goals.error.saveFailed': 'Не удалось сохранить цель',
-  'goals.error.goalUnavailable': 'Цель больше недоступна.',
-  'goals.error.requiresObjective': (v) =>
-    `/goal ${v?.keyword ?? 'set'} требует целевого условия.`,
-  'goals.error.invalidCommand': 'Некорректная команда /goal',
-  'goals.error.goalsUnavailable': 'Панель целей недоступна в этом интерфейсе.',
-  'goals.error.attachmentsUnsupported': 'Уберите вложения перед /goal.',
-  'goals.error.editFailed': 'Не удалось изменить цель',
-  'goals.error.pauseFailed': 'Не удалось поставить цель на паузу',
-  'goals.error.resumeFailed': 'Не удалось продолжить цель',
-  'goals.error.clearFailed': 'Не удалось снять цель',
-  'goals.error.controlBusy':
-    'Другое управление целью ещё выполняется. Повторите, когда оно завершится.',
-  'terminal.notice.lost': 'Этот терминал больше недоступен.',
+  ...EN,
+  ...RU_PART1,
+  ...RU_PART2,
+  ...RU_PART3,
+  ...RU_PART4,
+  ...RU_PART5,
+  ...RU_PART6,
+  ...RU_REMAINDER,
+  ...FILES_MESSAGES_RU,
+  ...TOKEN_USAGE_MESSAGES_RU,
+  ...MESSAGE_DELETION_MESSAGES_RU,
+  ...BROWSER_NOTIFICATION_MESSAGES_RU,
+  ...MCP_APP_MESSAGES_RU,
+  ...VOICE_MESSAGES_RU,
+  ...LIVE_MESSAGES_RU,
+  ...COLLAB_MESSAGES_RU,
+  ...SETTINGS_MESSAGES_RU,
+  ...MANAGED_TASK_MESSAGES_RU,
+  ...MANAGED_LIFECYCLE_MESSAGES_RU,
+  ...WORKSPACE_REGISTRATION_MESSAGES_RU,
+  ...MANAGED_MCP_MESSAGES_RU,
+  ...TRAJECTORY_EXECUTION_MESSAGES_RU,
+  ...TRAJECTORY_FILTER_MESSAGES_RU,
+  ...TRAJECTORY_WINDOW_MESSAGES_RU,
 };
 
 const MESSAGES: Record<WebShellLanguage, Messages> = {
@@ -10348,8 +10336,8 @@ export function normalizeLanguage(
     return 'zh-CN';
   }
   // Prefix match: ru, region-qualified ru (ru-RU, ru-UA, ru-KZ, …) and the
-  // underscore form all resolve to the partial ru catalog — region-qualified
-  // Russian speakers must not fall through to en.
+  // underscore form all resolve to ru — region-qualified Russian speakers
+  // must not fall through to en.
   if (normalized.startsWith('ru') || normalized === 'русский') {
     return 'ru';
   }
@@ -10376,7 +10364,7 @@ export function languageSettingToWebShellLanguage(
     return 'zh-CN';
   }
   // Same prefix match as normalizeLanguage: region-qualified settings
-  // (ru-UA, …) map to the partial ru catalog instead of an unknown setting.
+  // (ru-UA, …) map to ru instead of an unknown setting.
   if (normalized.startsWith('ru') || normalized === 'русский') {
     return 'ru';
   }

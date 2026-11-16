@@ -345,6 +345,7 @@ import {
   MANAGED_RUNTIME_OUTCOME_UNKNOWN,
   ManagedRuntimeOutcomeUnknownError,
 } from '@qwen-code/qwen-code-core/services/execution-environment.js';
+import { logAgentLoopEntry } from '@qwen-code/qwen-code-core/config/agent-loop-rollout.js';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
   CHANNEL_OUTPUT_MODE_META_KEY,
@@ -7618,6 +7619,7 @@ export class Session implements SessionContext {
             // execution boundary.
             const sharedModelRound =
               this.config.isUnifiedAgentLoopEnabled?.('acp') === true;
+            logAgentLoopEntry(this.config, 'acp');
             // A retry, a continue or a restore re-enters a turn: its first
             // round is a Retry.
             const firstRoundType = isRuntimeContinuation
@@ -13229,6 +13231,7 @@ export class Session implements SessionContext {
               // state, adds the system and todo reminders and recalls memory,
               // as for the other surfaces. The session records the prompt
               // once it reached history.
+              logAgentLoopEntry(this.config, 'acp');
               if (this.config.isUnifiedAgentLoopEnabled?.('acp') === true) {
                 const cronRecord: UserTurnRecord = {
                   kind: 'cron',
@@ -14656,6 +14659,7 @@ export class Session implements SessionContext {
           // `LlmClient` as a Notification send. The session keeps the
           // notification's record and reminders, and shows each response
           // as one background message once it ended.
+          logAgentLoopEntry(this.config, 'acp');
           if (this.config.isUnifiedAgentLoopEnabled?.('acp') === true) {
             const result = await this.#runAutomaticTurnOnSharedLoop({
               message: nextMessage,

@@ -1018,7 +1018,7 @@ public final class ManagedAgentPreflight {
      * Whether a property holds a secret, as the configuration reference
      * marks them: a password, token or key, or one of a map of keys, such as
      * previous-credential-keys.<id>. A path to a file that holds one, such as
-     * kubernetes-token-file, and credential-key-id hold none.
+     * key-store-file, and credential-key-id hold none.
      */
     static boolean secretProperty(String property) {
         for (String element : property.split("[./\\[\\]]+")) {
@@ -1691,6 +1691,10 @@ public final class ManagedAgentPreflight {
         boolean files = harness.isWorkspaceFilesEnabled();
         boolean shell = harness.isWorkspaceShellEnabled();
         if (ExternalRuntimeKinds.isExternal(broker.getProvisioner()) && (files || shell)) {
+            if (properties.isExternalWorkspaceFilesConfigured()) {
+                return new Check("tool-path", Status.PASS,
+                        "External Workspace files configuration is supported; negotiated readiness and original-worker close proof remain required", null);
+            }
             return new Check("tool-path", Status.FAIL,
                     ExternalRuntimeKinds.isWorkspace(broker.getProvisioner())
                                     ? "External Workspace Runtime is a storage provisioning prerequisite"
