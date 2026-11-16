@@ -21,6 +21,7 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { detectTodoChanges, HookPhase, type TodoItem } from '../hooks/types.js';
 import { escapeSystemReminderTags } from '../utils/xml.js';
 import { promptIdContext } from '../utils/promptIdContext.js';
+import { ToolErrorType } from './tool-error.js';
 export type { TodoItem } from '../hooks/types.js';
 
 const debugLogger = createDebugLogger('TODO_WRITE');
@@ -629,9 +630,13 @@ ${todosJson}. Continue on with the tasks at hand if applicable.
 Todo list modification failed with error: ${errorMessage}. You may need to retry or handle this error appropriately.
 </system-reminder>`;
 
+      // The display string alone never reached `status`, telemetry, the
+      // persisted record or replay: every one of them reads `error`, so a
+      // failure inside execute looked like a success everywhere but the text.
       return {
         llmContent: errorLlmContent,
         returnDisplay: `Error writing todos: ${errorMessage}`,
+        error: { message: errorMessage, type: ToolErrorType.EXECUTION_FAILED },
       };
     }
   }
