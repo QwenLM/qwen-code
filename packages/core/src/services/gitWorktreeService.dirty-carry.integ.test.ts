@@ -703,31 +703,45 @@ describe('GitWorktreeService.createUserWorktree() — carryDirtyState', () => {
     expect(created.carriedPaths ?? []).not.toContain('out/escape.txt');
   });
 
-  it('createUserWorktree carry refuses when stash create fails on a held index lock (R8-6)', async () => {
-    // A tracked edit exists, but `git stash create` cannot run (held
-    // index.lock — the environment class carryApplyErrorDetection records).
-    // An empty carry here is NOT a clean source: the carry-requested
-    // creation must refuse rather than relocate the session without the
-    // user's edits and report success with an empty overlay.
+  it('createUserWorktree carry refuses when stash create fails on an unwritable object store (R8-6)', async () => {
+    // A tracked edit exists, but `git stash create` cannot write the stash
+    // commit. A held index.lock is NOT a portable injection: stash create
+    // does not lock the index (only apply/reset do), so it sailed through on
+    // the CI fleet's git. An unwritable object store blocks the create on
+    // every git build/user, while worktree add (which only reads objects)
+    // still succeeds first. An empty carry here is NOT a clean source: the
+    // carry-requested creation must refuse rather than relocate the session
+    // without the user's edits and report success with an empty overlay.
     await fs.writeFile(path.join(repoRoot, 'README.md'), 'edited\n');
     const gitDir = git(repoRoot, 'rev-parse', '--absolute-git-dir');
-    const lock = path.join(gitDir, 'index.lock');
-    await fs.writeFile(lock, '');
+    const objectsDir = path.join(gitDir, 'objects');
+    // Block every object-write path: the objects dir itself (new fanout
+    // mkdir) and any existing fanout/pack subdirs (new loose object / pack).
+    const setObjectsMode = async (mode: number) => {
+      await fs.chmod(objectsDir, mode).catch(() => undefined);
+      for (const entry of await fs.readdir(objectsDir).catch(() => [])) {
+        const p = path.join(objectsDir, entry);
+        if ((await fs.lstat(p).catch(() => null))?.isDirectory()) {
+          await fs.chmod(p, mode).catch(() => undefined);
+        }
+      }
+    };
+    await setObjectsMode(0o555);
     const service = new GitWorktreeService(repoRoot);
     let created: Awaited<ReturnType<typeof service.createUserWorktree>>;
     try {
-      created = await service.createUserWorktree('lockfail', 'main', {
+      created = await service.createUserWorktree('objfail', 'main', {
         detached: true,
         carryDirtyState: true,
       });
     } finally {
-      await fs.rm(lock, { force: true });
+      await setObjectsMode(0o755);
     }
     expect(created.success).toBe(false);
     expect(created.error).toContain('dirty state');
     // No checkout left behind for a refused carry.
     await expect(
-      fs.lstat(service.getUserWorktreePath('lockfail')),
+      fs.lstat(service.getUserWorktreePath('objfail')),
     ).rejects.toThrow();
     // The source edit is untouched.
     expect(await read(path.join(repoRoot, 'README.md'))).toBe('edited\n');
