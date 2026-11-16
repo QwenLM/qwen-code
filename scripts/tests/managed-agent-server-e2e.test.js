@@ -3412,6 +3412,44 @@ describe('managed-agent-server e2e runner', () => {
     ).toBeGreaterThan(print);
   });
 
+  // The loop-skill arm attests a managed model-turn lifecycle; its guards
+  // must stay load-bearing: a turn.failed terminal, a body that only shows
+  // up in a later round, a union body served to a cron profile, or a call
+  // id witnessed by substring (the delete fixture's 'loop-cron-created'
+  // argument prefixes the create id) would each forge a pass.
+  it('pins the loop-skill arm terminal, body-scope, and call-id contracts', () => {
+    const source = read('scripts/run-managed-agent-server-e2e.ts');
+    // Every /loop turn settles as exactly one turn.completed; the check
+    // lives at the call site because waitForTerminal returns on any terminal.
+    expect(source).toMatch(
+      /terminals\.length !== 1\s*\|\|\s*terminals\[0\]\.type !== 'turn\.completed'/,
+    );
+    // The body checks read the first streamed round, and the positive
+    // requires the Skill tool result (role 'tool'), not the session prelude.
+    expect(source).toMatch(/loopRequests\[0\]\?\.body\['messages'\]/);
+    expect(source).toMatch(
+      /message\.role === 'tool' &&\s*JSON\.stringify\(message\)\.includes\(cronOnlyPhrase\)/,
+    );
+    // Cron-only positive plus union negative, verified against the committed
+    // sidecars so asset drift fails closed instead of silently drifting.
+    expect(source).toMatch(
+      /const cronOnlyPhrase = 'requires a fixed interval';/,
+    );
+    expect(source).toMatch(/const unionMarker = 'LoopWakeup';/);
+    expect(source).toMatch(/managed-loop-skill-\$\{variant\}\.json/);
+    expect(source).toMatch(/Loop sidecar discriminators drifted/);
+    // Call ids match structured fields on both the fake-model confirmation
+    // and the scenario assertions, never serialized substrings.
+    expect(source).toMatch(
+      /entry\.role === 'tool' && entry\.tool_call_id === callId/,
+    );
+    expect(source).toMatch(
+      /\(message as \{ tool_call_id\?: string \}\)\.tool_call_id === callId/,
+    );
+    expect(source).not.toMatch(/\.includes\(callId\)/);
+    expect(source).not.toMatch(/serialized\.includes\('loop-cron-/);
+  });
+
   // A timed-out spawn sets error and leaves status null with empty stderr,
   // so a status-only check throws "MySQL command failed: " and the one
   // diagnostic a wedged durable-state dump exists to produce is lost.

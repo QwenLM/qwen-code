@@ -164,7 +164,7 @@ for (let index = 0; index < argumentsList.length; index += 1) {
     index += 1;
   } else {
     throw new Error(
-      'Usage: run-managed-agent-server-e2e.ts [--model ID] [--runtime-delay-ms N] [--settings PATH] [--session-failover|--inflight-failover|--continuation-failover|--model-round-failover|--big-output] [--harness-only] [--freeze] [--frozen-control-plane] [--g3-verify allow|deny|cancel|expiry|continuation] [--g3-fault after-decision|after-prepare|after-result|finished-before-commit|sibling-approval|command-rewrite|after-earlier-tools|cleanup-failed|decision-reply-lost|admission-reply-lost|load-reply-lost|terminal-reply-lost|terminal-write-failed]',
+      'Usage: run-managed-agent-server-e2e.ts [--model ID] [--runtime-delay-ms N] [--settings PATH] [--session-failover|--inflight-failover|--continuation-failover|--model-round-failover|--big-output|--loop-skill] [--harness-only] [--freeze] [--frozen-control-plane] [--g3-verify allow|deny|cancel|expiry|continuation] [--g3-fault after-decision|after-prepare|after-result|finished-before-commit|sibling-approval|command-rewrite|after-earlier-tools|cleanup-failed|decision-reply-lost|admission-reply-lost|load-reply-lost|terminal-reply-lost|terminal-write-failed]',
     );
   }
 }
@@ -2979,7 +2979,16 @@ try {
       }
       if (body['stream'] !== true) return { content: 'fixture' };
       const messages = Array.isArray(body['messages']) ? body['messages'] : [];
-      const serialized = JSON.stringify(messages);
+      // Confirm only when this turn's own cron call has a tool result in the
+      // history, matched by tool_call_id: a prior turn's result must not
+      // confirm this turn, and the delete fixture's 'loop-cron-created'
+      // argument prefixes the create id, so a substring match would lie.
+      // The skill tool result alone never confirms.
+      const hasToolResult = (callId: string) =>
+        messages.some((message) => {
+          const entry = message as { role?: string; tool_call_id?: string };
+          return entry.role === 'tool' && entry.tool_call_id === callId;
+        });
       let text = '';
       for (let i = messages.length - 1; i >= 0; i -= 1) {
         const message = messages[i] as { role?: string; content?: unknown };
@@ -2994,12 +3003,12 @@ try {
       // the history means it executed (a prior turn's cron id must not confirm
       // this turn). The skill tool result alone never confirms.
       if (/\/loop\s+list/.test(text)) {
-        return serialized.includes('loop-cron-list')
+        return hasToolResult('loop-cron-list')
           ? { content: 'LOOP_DONE' }
           : { toolCalls: [fakeToolCall('cron_list', {}, 'loop-cron-list')] };
       }
       if (/\/loop\s+clear/.test(text)) {
-        return serialized.includes('loop-cron-delete')
+        return hasToolResult('loop-cron-delete')
           ? { content: 'LOOP_DONE' }
           : {
               toolCalls: [
@@ -3011,7 +3020,7 @@ try {
               ],
             };
       }
-      return serialized.includes('loop-cron-create')
+      return hasToolResult('loop-cron-create')
         ? { content: 'LOOP_DONE' }
         : {
             toolCalls: [
@@ -3430,57 +3439,134 @@ try {
       );
     };
     const listed = await sendLoopInput('/loop list', created.lastSequence);
-    await sendLoopInput('/loop clear', listed.lastSequence);
+    const cleared = await sendLoopInput('/loop clear', listed.lastSequence);
 
-    // The model received the Managed loop body (not the local bundled wording)
-    // and drove the real cron tools; each tool's result reached a later round.
+    // waitForTerminal resolves on any terminal event, turn.failed included;
+    // each /loop turn must settle as exactly one turn.completed, or the arm
+    // would attest a lifecycle for a turn the server recorded as failed.
+    for (const [label, turn] of [
+      ['create', created],
+      ['list', listed],
+      ['clear', cleared],
+    ] as const) {
+      const terminals = turn.events.filter((event) => event.terminal);
+      if (terminals.length !== 1 || terminals[0].type !== 'turn.completed') {
+        throw new Error(
+          `Loop-skill ${label} turn ended with ${JSON.stringify(terminals.map((event) => event.type))}`,
+        );
+      }
+    }
+
     const loopRequests = (fake?.requests ?? []).filter(
       (request) => request.body['stream'] === true,
     );
-    const loopMessages = JSON.stringify(
-      loopRequests.map((request) => request.body['messages']),
+    // The skill body must reach the model before its first round, in the
+    // Skill tool result — not merely surface in some later round's history.
+    // Discriminate the cron sidecar from the union one with phrases verified
+    // against the committed assets: 'requires a fixed interval' is cron-only,
+    // 'LoopWakeup' is absent from cron but present in union/wakeup/bundled.
+    const contractsDir = path.join(
+      root,
+      'packages/core/src/managed-runtime/contracts',
     );
-    if (!loopMessages.includes('a Managed schedule is always durable')) {
-      throw new Error('Loop skill body never reached the model');
+    const sidecarBody = (variant: string) =>
+      (
+        JSON.parse(
+          readFileSync(
+            path.join(contractsDir, `managed-loop-skill-${variant}.json`),
+            'utf8',
+          ),
+        ) as { body: string }
+      ).body;
+    const cronOnlyPhrase = 'requires a fixed interval';
+    const unionMarker = 'LoopWakeup';
+    const cronBody = sidecarBody('cron');
+    const unionBody = sidecarBody('union');
+    if (
+      !cronBody.includes(cronOnlyPhrase) ||
+      unionBody.includes(cronOnlyPhrase) ||
+      cronBody.includes(unionMarker) ||
+      !unionBody.includes(unionMarker)
+    ) {
+      throw new Error(
+        'Loop sidecar discriminators drifted; update the loop-skill arm',
+      );
     }
-    if (loopMessages.includes('defaults to session-only')) {
+    const firstRoundMessages = (
+      Array.isArray(loopRequests[0]?.body['messages'])
+        ? loopRequests[0].body['messages']
+        : []
+    ) as { role?: string }[];
+    if (
+      JSON.stringify(firstRoundMessages).includes('defaults to session-only')
+    ) {
       throw new Error(
         'Model received the local bundled loop body, not the Managed variant',
       );
     }
+    const skillBodyMessage = firstRoundMessages.find(
+      (message) =>
+        message.role === 'tool' &&
+        JSON.stringify(message).includes(cronOnlyPhrase),
+    );
+    if (!skillBodyMessage) {
+      throw new Error(
+        'Managed cron loop body did not reach the model before its first round',
+      );
+    }
+    if (JSON.stringify(skillBodyMessage).includes(unionMarker)) {
+      throw new Error(
+        'Model received the union loop body, not the cron variant',
+      );
+    }
     // The cron tools are native harness tools (not broker-mediated), so their
     // execution is witnessed by the tool results reaching the model, not by
-    // ma_tool_execution. Each call id must appear with a tool result, and the
-    // created schedule's prompt must echo back in the cron_list result — proving
-    // create -> list lifecycle, not just that the model emitted the calls.
+    // ma_tool_execution. Match the structured call ids: 'loop-cron-create' is
+    // a prefix of the delete fixture's 'loop-cron-created' argument, so a
+    // substring match could witness the create from the delete's error text.
+    // The created schedule's prompt must echo back in the cron_list result —
+    // proving create -> list lifecycle, not just that the model emitted calls.
     const loopToolResults = loopRequests.flatMap((request) =>
       (Array.isArray(request.body['messages'])
         ? request.body['messages']
         : []
       ).filter((message) => (message as { role?: string }).role === 'tool'),
     );
+    const toolResultFor = (callId: string) =>
+      loopToolResults.find(
+        (message) =>
+          (message as { tool_call_id?: string }).tool_call_id === callId,
+      );
+    const calledIds = new Set(
+      loopRequests.flatMap((request) =>
+        (Array.isArray(request.body['messages'])
+          ? request.body['messages']
+          : []
+        )
+          .filter(
+            (message) => (message as { role?: string }).role === 'assistant',
+          )
+          .flatMap(
+            (message) =>
+              (message as { tool_calls?: { id?: string }[] }).tool_calls ?? [],
+          )
+          .map((call) => call.id),
+      ),
+    );
     for (const callId of [
       'loop-cron-create',
       'loop-cron-list',
       'loop-cron-delete',
     ]) {
-      if (!loopMessages.includes(callId)) {
+      if (!calledIds.has(callId)) {
         throw new Error(`Cron tool ${callId} was never called`);
       }
-      if (
-        !loopToolResults.some((message) =>
-          JSON.stringify(message).includes(callId),
-        )
-      ) {
+      if (!toolResultFor(callId)) {
         throw new Error(`Cron tool ${callId} produced no tool result`);
       }
     }
-    const createResult = loopToolResults.find((message) =>
-      JSON.stringify(message).includes('loop-cron-create'),
-    );
-    const listResult = loopToolResults.find((message) =>
-      JSON.stringify(message).includes('loop-cron-list'),
-    );
+    const createResult = toolResultFor('loop-cron-create');
+    const listResult = toolResultFor('loop-cron-list');
     if (!JSON.stringify(listResult ?? {}).includes('/loop check the deploy')) {
       throw new Error(
         `cron_list did not echo the created schedule; create -> list lifecycle not witnessed. createResult=${JSON.stringify(createResult ?? {}).slice(0, 800)} listResult=${JSON.stringify(listResult ?? {}).slice(0, 800)}`,
