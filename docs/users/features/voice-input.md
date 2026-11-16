@@ -40,15 +40,18 @@ daemon, but still needs a selected voice model and `general.voice.enabled`.
 
 ## Setup
 
-### 1. Add a voice model
+### 1. Add and select a voice model
 
-Any of these paths selects the transcription model:
+If you do not have a voice-capable route yet, add one via **Settings → Models
+→ + Add Model → Custom Provider**, with **Model purpose** set to **Voice
+transcription** (the Model purpose field exists only for the Custom Provider
+preset): enter the provider's OpenAI-compatible base URL and API key, then the
+ASR model id. This registers a voice-only route and keeps your current
+conversation model; it does **not** select the transcription model yet. The
+API key entered here is stored in clear text in the settings `env` block.
 
-- **Settings → Models → + Add Model → Custom Provider**, with **Model
-  purpose** set to **Voice transcription** (the Model purpose field exists
-  only for the Custom Provider preset). Enter the provider's OpenAI-compatible
-  base URL and API key, then the ASR model id. Adding a voice model keeps your
-  current conversation model.
+Then select the transcription model by any of these paths:
+
 - Type `/model --voice` in the composer to open the voice model picker, or
   `/model --voice <model-id>` to set one directly.
 - The **Voice Model** row in Settings opens the same picker.
@@ -120,16 +123,20 @@ again) — so tool execution and permission prompts can start right away.
 All settings live under `general.voice` (see the
 [settings reference](../configuration/settings.md) for defaults):
 
-| Setting                          | Effect                                                                                                                                                       |
-| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `general.voice.mode`             | `"hold"` (hold to talk) or `"tap"` (tap to start, tap again to stop).                                                                                        |
-| `general.voice.language`         | Preferred spoken language, e.g. `"english"` or `"chinese"`. Empty auto-detects.                                                                              |
-| `general.voice.keytermsFile`     | Path to a keyterms file (one term per line, `#` comments) that biases recognition toward domain terms.                                                       |
-| `general.voice.refineTranscript` | Clean up the transcript with the fast model before inserting it (default on). Interactive terminal only; the Web Shell inserts the ASR transcript unchanged. |
+| Setting                          | Effect                                                                                                                                                                        |
+| -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `general.voice.mode`             | `"hold"` (hold to talk) or `"tap"` (tap to start, tap again to stop).                                                                                                         |
+| `general.voice.language`         | Preferred spoken language, e.g. `"english"` or `"chinese"`. Empty auto-detects.                                                                                               |
+| `general.voice.keytermsFile`     | Path to a keyterms file (one term per line, `#` comments) that adds domain terms to the recognition bias list. User/system scope only; contents are sent to the ASR provider. |
+| `general.voice.refineTranscript` | Clean up the transcript with the fast model before inserting it (default on). Interactive terminal only; the Web Shell inserts the ASR transcript unchanged.                  |
 
-Keyterms default to `.qwen/voice-keyterms.txt` when that file exists. The file
-is read only in trusted workspaces and applies only to Qwen ASR models
-(`qwen3-asr-*`).
+On every `qwen3-asr-*` dictation, a built-in developer vocabulary (terms such
+as `Qwen`, `MCP`, `grep`, `TypeScript`) is sent to the ASR provider to bias
+recognition; your keyterms file adds terms on top. The file defaults to
+`.qwen/voice-keyterms.txt` when present, is read only in trusted workspaces,
+and applies only to Qwen ASR models. The `keytermsFile` setting is honored
+only from user/system settings (a workspace value is ignored), and the file's
+contents are sent to the provider along with the built-in list.
 
 In the interactive terminal, transcript refinement removes filler words and
 fixes recognition errors while preserving meaning. It falls back to the raw
