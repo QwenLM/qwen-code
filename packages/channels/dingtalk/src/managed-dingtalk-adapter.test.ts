@@ -22,6 +22,7 @@ import {
 } from '@qwen-code/channel-base';
 import {
   ManagedDingtalkAdapter,
+  dingtalkSettings,
   type ManagedDingtalkAdapterDeps,
   type DingtalkWebhookFailure,
 } from './managed-dingtalk-adapter.js';
@@ -59,6 +60,7 @@ function fakeControlPlane() {
   const receipts: Array<{ deliveryId: string; receipt: unknown }> = [];
   const admitted = new Map<string, string>();
   let queue: ManagedClaimedDelivery[] = [];
+  let disconnectCalls = 0;
   let submitError: (Error & { status?: number; code?: string }) | undefined;
   let refuseSubmit: { status: number; code?: string } | undefined;
   let submitErrorFor:
@@ -76,7 +78,9 @@ function fakeControlPlane() {
     register: async (request) => {
       register.push(request);
     },
-    disconnect: async () => {},
+    disconnect: async () => {
+      disconnectCalls += 1;
+    },
     submitInbound: async (event) => {
       submitAttempts += 1;
       const perEvent = submitErrorFor?.(event.platformEventId);
@@ -112,6 +116,7 @@ function fakeControlPlane() {
     register,
     submit,
     receipts,
+    disconnectCalls: () => disconnectCalls,
     enqueue: (deliveries: ManagedClaimedDelivery[]) => {
       queue = deliveries;
     },
@@ -570,11 +575,16 @@ describe('managed DingTalk adapter inbound', () => {
 
   it('clamps a CJK text to the byte envelope even under the character bound', async () => {
     const { adapter, plane, fake } = await connectedAdapter();
-    // 25,000 CJK characters are under the 32,000-character line but ~75 KB in
-    // UTF-8, over the 64 KiB envelope: the byte cut must land on a code point.
+    // The leading ASCII byte makes the 61,440-byte budget land MID-code-point
+    // for the 3-byte CJK char (61,439 is not divisible by 3), so the
+    // code-point walk must actually reject a partial character instead of
+    // landing on an exact boundary (#17173 R2-6).
     fake.push(
       'msg-cjk',
-      messageData({ msgId: 'msg-cjk', text: { content: '中'.repeat(25_000) } }),
+      messageData({
+        msgId: 'msg-cjk',
+        text: { content: 'a' + '中'.repeat(25_000) },
+      }),
     );
     await adapter.tick();
     expect(plane.submit).toHaveLength(1);
@@ -582,8 +592,25 @@ describe('managed DingTalk adapter inbound', () => {
     expect(Buffer.byteLength(text, 'utf8')).toBeLessThanOrEqual(
       64 * 1024 - 4096,
     );
-    expect(text.length).toBeLessThan(25_000);
-    expect(text).toBe('中'.repeat(text.length));
+    expect(text).toBe('a' + '中'.repeat(20_479));
+    await adapter.disconnect();
+  });
+
+  it('the byte cut keeps astral code points whole at a mid-pair budget', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    // 4-byte astral chars at a budget with a 3-byte remainder: the exact
+    // expected string pins the maximal whole-code-point fit, so an off-by-one
+    // in the walk or a miscomputed byte budget reds it (#17173 R2-6).
+    fake.push(
+      'msg-astral',
+      messageData({
+        msgId: 'msg-astral',
+        text: { content: 'a' + '😀'.repeat(20_000) },
+      }),
+    );
+    await adapter.tick();
+    expect(plane.submit).toHaveLength(1);
+    expect(plane.submit[0]!.text).toBe('a' + '😀'.repeat(15_359));
     await adapter.disconnect();
   });
 
@@ -1946,5 +1973,109 @@ describe('managed DingTalk admission diagnostics (#17173 R10/R12)', () => {
       expect.objectContaining({ deliveryId: 'd-pre', ordinal: 0 }),
     ]);
     await adapter.disconnect();
+  });
+});
+
+describe('managed DingTalk lifecycle pins (#17173 R2-7/R2-9/R4)', () => {
+  it('polls by default when the caller omits pollLoop (R2-7)', async () => {
+    const plane = fakeControlPlane();
+    const fake = fakeDeps();
+    // The production CLI caller omits pollLoop; the adapter must drive its
+    // own tick instead of waiting for a manual one.
+    const adapter = new ManagedDingtalkAdapter({
+      name: 'ding-1',
+      cwd: tempCwd(),
+      config: CONFIG,
+      controlPlane: plane.controlPlane,
+      deps: fake.deps,
+    });
+    await adapter.connect();
+    fake.push('auto', messageData({ msgId: 'auto' }));
+    await vi.waitFor(
+      () => {
+        expect(plane.submit.map((event) => event.platformEventId)).toEqual([
+          'dingtalk:auto',
+        ]);
+      },
+      { timeout: 5_000 },
+    );
+    await adapter.disconnect();
+  }, 10_000);
+
+  it('stop() aborts the in-flight poll delay so a large interval cannot hang shutdown (R2-9)', async () => {
+    vi.useFakeTimers();
+    try {
+      const plane = fakeControlPlane();
+      const fake = fakeDeps();
+      const adapter = new ManagedDingtalkAdapter({
+        name: 'ding-1',
+        cwd: tempCwd(),
+        config: { ...CONFIG, pollInterval: 2_147_483_647 },
+        controlPlane: plane.controlPlane,
+        deps: fake.deps,
+      });
+      await adapter.connect();
+      // Let the loop's first tick finish so it is actually parked in the
+      // poll delay; a disconnect that lands before the first tick completes
+      // would exit the loop without ever exercising the abort.
+      await vi.advanceTimersByTimeAsync(0);
+      // The loop is parked in a ~24.8-day delay; without the abort in stop()
+      // this disconnect never resolves and the test times out.
+      await adapter.disconnect();
+      expect(plane.disconnectCalls()).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 10_000);
+
+  it('disconnect() closes the control plane (R4)', async () => {
+    const { adapter, plane } = await connectedAdapter();
+    expect(plane.disconnectCalls()).toBe(0);
+    await adapter.disconnect();
+    expect(plane.disconnectCalls()).toBe(1);
+  });
+});
+
+describe('managed DingTalk settings pins (#17173 R2-11)', () => {
+  it('rejects credentials with whitespace edges or embedded control characters', () => {
+    const base = { clientId: 'robot-app', clientSecret: 'secret' };
+    expect(() =>
+      dingtalkSettings({ ...base, clientId: 'robot-app\n' }),
+    ).toThrow(/clientId/);
+    expect(() =>
+      dingtalkSettings({ ...base, clientSecret: 'sec\rret' }),
+    ).toThrow(/clientSecret/);
+    expect(() =>
+      dingtalkSettings({ ...base, clientSecret: 'sec\0ret' }),
+    ).toThrow(/clientSecret/);
+    expect(() => dingtalkSettings({ ...base, clientId: '   ' })).toThrow(
+      /clientId/,
+    );
+    expect(() => dingtalkSettings({ ...base, clientSecret: '' })).toThrow(
+      /clientSecret/,
+    );
+    const ok = dingtalkSettings(base);
+    expect(ok.clientId).toBe('robot-app');
+    expect(ok.clientSecret).toBe('secret');
+    // Copy-paste surrounding spaces are trimmed, not rejected.
+    expect(
+      dingtalkSettings({ ...base, clientId: ' robot-app ' }).clientId,
+    ).toBe('robot-app');
+  });
+
+  it('refuses privatePolicy pairing instead of silently coercing it', () => {
+    const plane = fakeControlPlane();
+    const fake = fakeDeps();
+    expect(
+      () =>
+        new ManagedDingtalkAdapter({
+          name: 'ding-1',
+          cwd: tempCwd(),
+          config: { ...CONFIG, privatePolicy: 'pairing' },
+          controlPlane: plane.controlPlane,
+          deps: fake.deps,
+          pollLoop: false,
+        }),
+    ).toThrow(/pairing/);
   });
 });

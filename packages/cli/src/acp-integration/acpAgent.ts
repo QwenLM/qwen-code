@@ -185,6 +185,7 @@ import {
   buildModelIdContext,
   registerSession,
   getLastPeerInboxFailure,
+  type InboundPolicy,
   SessionSourceService,
   SessionSourceError,
 } from '@qwen-code/qwen-code-core';
@@ -407,7 +408,10 @@ import { ACP_ERROR_CODES } from './errorCodes.js';
 import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
 import { QWEN_CODE_SERVE_ENV } from '../config/acp-channel-fallback.js';
 import { isSshWorkspaceExtMethodAllowed } from './ssh-workspace-guards.js';
-import { PeerMessaging } from '../peerMessaging/peer-messaging.js';
+import {
+  PeerMessaging,
+  type PeerQueuedDelivery,
+} from '../peerMessaging/peer-messaging.js';
 import { isCrossSessionMessagingActive } from '../peerMessaging/enabled.js';
 import { startNonInteractiveOpenAILogHousekeeping } from '../services/housekeeping/scheduler.js';
 import { appEvents, AppEvent } from '../utils/events.js';
@@ -3973,15 +3977,15 @@ class QwenAgent implements Agent {
    * and binding a socket per session would multiply file descriptors by
    * the session count for no added reach.
    *
-   * Outbound only for now. Inbound is refused rather than held, because a
-   * hold is a question put to a person and nobody is watching a hold list
-   * on a daemon-managed session's behalf; a sender is told so at once
-   * instead of waiting out an expiry.
+   * Inbound messages the gate would hold are refused immediately. ACP
+   * clients have no hold list to present to the user.
    */
   private peerMessagingStart: Promise<PeerMessaging | null> | null = null;
   // Set by closePeerMessaging: a retry must not resurrect an inbox after
   // teardown ran.
   private peerMessagingClosed = false;
+  private peerMessagingClose: Promise<void> | undefined;
+  private readonly pendingPeerExpiries = new Set<Promise<void>>();
   /**
    * Sessions already given a record. A session is published once, but a
    * reload can hand the same id back through the same path, and two
@@ -4328,6 +4332,7 @@ class QwenAgent implements Agent {
         shutdownConfig: false,
       });
     }
+    await Promise.all(this.pendingPeerExpiries);
     const results = await Promise.allSettled(
       configs.map((config) =>
         config.shutdown({
@@ -4757,6 +4762,7 @@ class QwenAgent implements Agent {
     options: { shutdownConfig?: boolean } = {},
   ): Promise<void> {
     if (this.sessions.get(sessionId) !== session) return;
+    const unreadPeerMessages = session.takeQueuedPeerDeliveries();
     try {
       session.dispose();
     } catch (error) {
@@ -4766,6 +4772,7 @@ class QwenAgent implements Agent {
     // a record left behind advertises a session that is gone, and peers
     // would keep addressing it until this process exits.
     this.registeredSessions.delete(sessionId);
+    this.expireHostedPeerDeliveries(unreadPeerMessages);
     try {
       await session.getConfig().unregisterSessionRegistry();
     } catch (error) {
@@ -5241,31 +5248,27 @@ class QwenAgent implements Agent {
     this.peerMessagingStart = (async () => {
       try {
         const messaging = await PeerMessaging.start({
-          // Inbound is refused outright, so neither the approval mode nor
-          // the parity rule it feeds is ever consulted. Stated rather than
-          // left to a default: what a daemon-managed session may be told
-          // is settled here and nowhere else.
-          getApprovalMode: () => null,
-          getPolicySetting: () => 'refuse',
+          // Every reader answers for the session the message is addressed
+          // to: one process can host sessions from several workspaces.
+          getApprovalMode: (id) =>
+            this.peerAddressedSession(id)?.getConfig().getApprovalMode() ??
+            null,
+          getPolicySetting: (id) =>
+            this.peerAddressedSession(id)?.getSettings().merged.agents
+              ?.crossSessionInbound as InboundPolicy | undefined,
+          // Nobody watches a hold list for a session a program drives, so
+          // a message that would wait for a review is refused instead.
+          presentsHolds: false,
           updateSessionRegistryIpcPath: (ipcPath, ipcToken) =>
             this.publishInboxAddress(ipcPath, ipcToken),
-          ownsSessionId: (id) => {
-            // The map key froze when the session was published, while
-            // the record a sender reads follows the Config's live id —
-            // /clear swaps the id under a running session. Test both, so
-            // a frame pinned to either spelling is answered by the
-            // session that holds it.
-            const wanted = normalizeSessionIdForLookup(id);
-            return (
-              this.sessions.has(wanted) ||
-              [...this.sessions.values()].some(
-                (session) =>
-                  normalizeSessionIdForLookup(
-                    session.getConfig().getSessionId(),
-                  ) === wanted,
-              )
-            );
-          },
+          ownsSessionId: (id) => this.peerAddressedSession(id) !== undefined,
+          submit: (modelText, displayText, delivery) =>
+            !this.peerMessagingClosed &&
+            delivery !== undefined &&
+            (this.peerAddressedSession(
+              delivery.toSessionId,
+            )?.enqueuePeerMessage(modelText, displayText, delivery) ??
+              false),
         });
         // A bind that could not start is not "started": the next hosted
         // session retries rather than the process staying dark until exit.
@@ -5291,14 +5294,62 @@ class QwenAgent implements Agent {
     })();
   }
 
+  /**
+   * The hosted session a cross-session message addressed to `id` is for.
+   *
+   * The map key froze when the session was published, while the record a
+   * sender reads follows the Config's live id — /clear swaps the id under
+   * a running session — so either spelling finds it. Only a session that
+   * registered counts: one whose settings leave messaging off has no
+   * record and is not addressable.
+   */
+  private peerAddressedSession(id: string | undefined): Session | undefined {
+    if (id === undefined) return undefined;
+    const wanted = normalizeSessionIdForLookup(id);
+    let addressed: Session | undefined;
+    for (const [key, session] of this.sessions) {
+      if (
+        this.registeredSessions.has(key) &&
+        (key === wanted ||
+          normalizeSessionIdForLookup(session.getConfig().getSessionId()) ===
+            wanted)
+      ) {
+        if (addressed !== undefined) return undefined;
+        addressed = session;
+      }
+    }
+    return addressed;
+  }
+
   /** Close the inbox and stop advertising it. Safe to call more than once. */
-  async closePeerMessaging(): Promise<void> {
+  closePeerMessaging(): Promise<void> {
+    return (this.peerMessagingClose ??= this.finishPeerMessagingClose());
+  }
+
+  private expireHostedPeerDeliveries(
+    deliveries: readonly PeerQueuedDelivery[],
+  ): void {
+    if (deliveries.length === 0 || !this.peerMessagingStart) return;
+    const expiry = this.peerMessagingStart
+      .then((messaging) => messaging?.expireQueued(deliveries))
+      .catch((error: unknown) => {
+        debugLogger.debug('[ACP] sending peer expiry receipts failed:', error);
+      });
+    this.pendingPeerExpiries.add(expiry);
+    void expiry.then(() => this.pendingPeerExpiries.delete(expiry));
+  }
+
+  private async finishPeerMessagingClose(): Promise<void> {
     this.peerMessagingClosed = true;
     const pending = this.peerMessagingStart;
     if (!pending) return;
-    this.peerMessagingStart = null;
+    // Detach before the first await. An active turn can finish while the
+    // socket closes, and nothing we expire should still be runnable.
+    const unread = [...this.sessions.values()].flatMap((session) =>
+      session.takeQueuedPeerDeliveries(),
+    );
     try {
-      await (await pending)?.close();
+      await (await pending)?.close(unread);
     } catch (error) {
       debugLogger.debug(
         `[ACP] closing cross-session messaging failed: ${
@@ -5307,6 +5358,7 @@ class QwenAgent implements Agent {
       );
     }
     this.inboxAddress = null;
+    await Promise.all(this.pendingPeerExpiries);
   }
 
   /**
@@ -5410,6 +5462,9 @@ class QwenAgent implements Agent {
         }),
       ),
     );
+    // Turn admission can return a peer item to the queue after the inbox's
+    // first snapshot. Session disposal detaches those items as well.
+    await Promise.all(this.pendingPeerExpiries);
     await Promise.allSettled(
       [...this.pendingConfigCleanup.values()]
         .flatMap((configs) => [...configs])
@@ -5836,9 +5891,30 @@ class QwenAgent implements Agent {
     }
   }
 
+  private hasHostedSessionId(sessionId: string): boolean {
+    return (
+      this.sessions.has(sessionId) ||
+      [...this.sessions.values()].some(
+        (session) =>
+          normalizeSessionIdForLookup(session.getConfig().getSessionId()) ===
+          sessionId,
+      )
+    );
+  }
+
+  private assertHostedSessionIdAvailable(sessionId: string): void {
+    if (this.hasHostedSessionId(sessionId)) {
+      throw new RequestError(
+        ACP_ERROR_CODES.INVALID_PARAMS,
+        `Session ${sessionId} is already active.`,
+        { errorKind: 'session_id_conflict', sessionId },
+      );
+    }
+  }
+
   private reserveStartingSessionId(sessionId: string): () => void {
     if (
-      this.sessions.has(sessionId) ||
+      this.hasHostedSessionId(sessionId) ||
       this.startingSessionIds.has(sessionId)
     ) {
       throw new RequestError(
@@ -17674,24 +17750,12 @@ class QwenAgent implements Agent {
     options.signal?.throwIfAborted();
     this.assertManagedSessionAdmission(this.hostExecutionEngine);
 
-    if (this.sessions.has(sessionId)) {
-      throw new RequestError(
-        ACP_ERROR_CODES.INVALID_PARAMS,
-        `Session ${sessionId} is already active.`,
-        { errorKind: 'session_id_conflict', sessionId },
-      );
-    }
+    this.assertHostedSessionIdAvailable(sessionId);
 
     await options.prepareBeforeSessionCreate?.();
     options.signal?.throwIfAborted();
     this.assertManagedSessionAdmission(this.hostExecutionEngine);
-    if (this.sessions.has(sessionId)) {
-      throw new RequestError(
-        ACP_ERROR_CODES.INVALID_PARAMS,
-        `Session ${sessionId} is already active.`,
-        { errorKind: 'session_id_conflict', sessionId },
-      );
-    }
+    this.assertHostedSessionIdAvailable(sessionId);
     // A run the previous daemon process was running when it exited has no
     // snapshot until something claims it; claimed here, it joins the history
     // this session lists as a failed run.
@@ -17710,6 +17774,7 @@ class QwenAgent implements Agent {
       () => this.activeWorkReporter?.notifyChanged(),
       workflowHistory,
       (runId) => this.isWorkflowRunLiveOutsideSession(sessionId, runId),
+      (deliveries) => this.expireHostedPeerDeliveries(deliveries),
     );
     const replaySessionHistory = async () => {
       if (
@@ -17858,6 +17923,7 @@ class QwenAgent implements Agent {
           () => this.sessionWorkflowEnabledOverride === true,
         );
       }
+      this.assertHostedSessionIdAvailable(sessionId);
       this.sessions.set(sessionId, session);
       session.bindWorkflowModeUpdates?.(
         () =>
