@@ -312,8 +312,9 @@ These are not real-cluster acceptance.
 Record image builds, installation, real MySQL, provider calls and restart results
 for each target cluster. ACK, node failure, CSI, physical retirement and production
 acceptance remain separate gates. The optional trusted LOCAL mode is separate
-from [K2 resident deployment](../k2-resident/README.md), which requires qualified
-CSI identities and does not support Shell. The chart does not enable K2. Design:
+from the former [K2 resident deployment](../../packages/sdk-java/managed-kubernetes-archive/deploy/k2-resident/README.md)
+(archived out of `managed-agent-server`), which required qualified CSI identities
+and did not support Shell. The chart does not enable K2. Design:
 [English](../../docs/design/2026-10-24-managed-agent-kubernetes.md) |
 [简体中文](../../docs/design/2026-10-24-managed-agent-kubernetes.zh-CN.md);
 tools and WebShell:
