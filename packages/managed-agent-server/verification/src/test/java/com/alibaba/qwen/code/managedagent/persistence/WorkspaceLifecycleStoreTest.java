@@ -250,82 +250,22 @@ class WorkspaceLifecycleStoreTest {
 
     /**
      * A content-only extension child is a real Session in the same Workspace, generation and
-     * storage, and its owner was copied from the parent by the launch. The external execution
-     * actor must therefore read the lineage's committed owner, not only parentless rows: the
-     * previous single-row read matched zero rows for every child and failed its Turn terminally
-     * with workspace_unavailable before admission. Walking the chain still refuses a child whose
-     * Workspace, generation or storage disagrees with the binding it is attached through.
+     * storage, and its owner was copied from the parent by the launch. The external-files profile
+     * does not admit child Sessions: {@code insertChildSession} refuses at creation, so the
+     * parent fails fast instead of minting a child that can never be admitted.
      */
     @Test
-    void externalAuthorizationResolvesTheOwnerThroughAChildSessionLineage() {
+    void externalFilesParentCannotAdmitAChildSession() {
         var fixture = fixture();
-        String storage = fixture.jdbc.queryForObject(
-                "SELECT storage_id FROM ma_workspace WHERE tenant_id = ? AND workspace_id = ?",
-                (row, index) -> new String(row.getBytes(1), java.nio.charset.StandardCharsets.UTF_8),
-                "tenant".getBytes(java.nio.charset.StandardCharsets.UTF_8),
-                "workspace".getBytes(java.nio.charset.StandardCharsets.UTF_8));
-        fixture.jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key,"
-                        + " tenant_id, storage_id, storage_kind) VALUES (?, ?, ?, 'tenant', ?, 'EXTERNAL')",
-                RuntimeAdmissionFences.storageAliasKey("tenant", storage),
-                RuntimeAdmissionFences.storageFenceKey("tenant"),
-                RuntimeAdmissionFences.storageFenceKey(storage), storage);
-        fixture.jdbc.update("UPDATE ma_session SET tool_profile = ?, owner_actor_key = ?",
-                WorkspaceToolProfiles.EXTERNAL_FILES, "explicit-owner".getBytes(StandardCharsets.UTF_8));
-        // The resolved execution actor is the parent's explicit owner, so that is the identity the
-        // downstream grant join uses -- exactly as a real launch grants the owning actor.
-        fixture.jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
-                        + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')",
-                "explicit-owner".getBytes(StandardCharsets.UTF_8));
-        // The child mirrors exactly what insertChildSession writes: same Workspace identity and
-        // context, the parent's resolved owner, and a non-null parent_session_id. Identity columns
-        // are VARBINARY, so every literal identity binds as bytes -- a bare string is not
-        // comparable on H2 and MySQL alike.
-        fixture.jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, agent_revision,"
-                        + " title, status, gmt_create, gmt_modified, workspace_id, workspace_generation,"
-                        + " workspace_storage_id, cwd_relative, context_config_ref, context_revision,"
-                        + " workspace_config_ref, workspace_policy_ref, tool_profile, creator_actor_key,"
-                        + " owner_actor_key, owner_only, approval_mode, parent_session_id, root_session_id,"
-                        + " parent_child_run_id, child_depth)"
-                        + " SELECT tenant_id, ?, agent_id, agent_revision, title, status,"
-                        + " gmt_create, gmt_modified, workspace_id, workspace_generation, workspace_storage_id,"
-                        + " cwd_relative, context_config_ref, context_revision, workspace_config_ref,"
-                        + " workspace_policy_ref, tool_profile, creator_actor_key,"
-                        + " COALESCE(owner_actor_key, creator_actor_key), owner_only, approval_mode,"
-                        + " session_id, session_id, ?, 1 FROM ma_session"
-                        + " WHERE tenant_id = ? AND session_id = ?",
-                ManagedSchemaKeys.identity("child-session"), ManagedSchemaKeys.identity("child-run"),
-                ManagedSchemaKeys.identity("tenant"), ManagedSchemaKeys.identity(fixture.session));
-        // insertChildSession also opens the child's own event stream in the same transaction.
-        fixture.jdbc.update("INSERT INTO ma_event_stream (tenant_id, session_id, stream_kind, stream_id,"
-                        + " covered_sequence, gmt_modified) VALUES (?, ?, 'SESSION', '', 0, 1000)",
-                ManagedSchemaKeys.identity("tenant"), ManagedSchemaKeys.identity("child-session"));
-        var execution = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(
-                new JdbcWorkspaceExecutionStore(fixture.jdbc,
-                        new DataSourceTransactionManager(fixture.jdbc.getDataSource())));
+        fixture.jdbc.update("UPDATE ma_session SET tool_profile = ? WHERE tenant_id = ? AND session_id = ?",
+                WorkspaceToolProfiles.EXTERNAL_FILES, "tenant", fixture.session);
 
-        // The child's own Turn is admitted: it resolves the parent's explicit owner, not the
-        // child's creator, and no Runtime binding is needed to prove that identity.
-        execution.authorizeExternal(fixture.store.requireSession("tenant", "child-session"), null);
-
-        // A child bound to a different generation is still refused: the walk validates every hop
-        // against the binding it is attached through, so lineage grants no cross-generation reach.
-        fixture.jdbc.update("UPDATE ma_session SET workspace_generation = 2 WHERE session_id = ?",
-                ManagedSchemaKeys.identity("child-session"));
-        assertThatThrownBy(() -> execution.authorizeExternal(
-                fixture.store.requireSession("tenant", "child-session"), null))
-                .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
-                    assertThat(error.getStatusCode()).isEqualTo(409);
-                    assertThat(error.getCode()).isEqualTo("workspace_unavailable");
-                });
-
-        // A cycle cannot spin: the visited set bounds the walk and the answer stays a refusal.
-        fixture.jdbc.update("UPDATE ma_session SET workspace_generation = 1, parent_session_id = ?"
-                + " WHERE session_id = ?",
-                ManagedSchemaKeys.identity("child-session"), ManagedSchemaKeys.identity("child-session"));
-        assertThatThrownBy(() -> execution.authorizeExternal(
-                fixture.store.requireSession("tenant", "child-session"), null))
-                .isInstanceOfSatisfying(RuntimeBrokerException.class,
-                        error -> assertThat(error.getCode()).isEqualTo("workspace_unavailable"));
+        assertThatThrownBy(() -> fixture.transactions.executeWithoutResult(ignored -> fixture.store.insertChildSessionCommand(
+                "tenant", fixture.session, "child-create", "digest", "child",
+                java.util.List.of(), "payload",
+                new com.alibaba.qwen.code.managedagent.model.StoreModels.SessionLineage(fixture.session, fixture.session, "child-run", 1))))
+                .isInstanceOfSatisfying(ManagedAgentException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("child_parent_unavailable"));
     }
 
     @Test

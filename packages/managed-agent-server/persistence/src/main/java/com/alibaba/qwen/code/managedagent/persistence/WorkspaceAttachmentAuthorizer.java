@@ -217,34 +217,26 @@ final class WorkspaceAttachmentAuthorizer {
     }
 
     private byte[] externalExecutionActor(ContextBinding binding, String sessionId) {
-        java.util.Set<String> visited = new java.util.HashSet<>();
-        String current = sessionId;
-        while (visited.add(current)) {
-            var rows = WorkspaceOperations.rows(jdbc, "SELECT tenant_id, session_id, parent_session_id,"
-                    + " workspace_id, workspace_generation, workspace_storage_id,"
-                    + " COALESCE(owner_actor_key, creator_actor_key) AS execution_actor FROM ma_session"
-                    + " WHERE tenant_id = ? AND session_id = ?", binding.getTenantId(), current);
-            if (rows.size() != 1) {
-                throw unavailable();
-            }
-            var row = rows.getFirst();
-            if (!binding.getTenantId().equals(row.get("tenant_id")) || !current.equals(row.get("session_id"))
-                    || !binding.getWorkspaceId().equals(row.get("workspace_id"))
-                    || !(row.get("workspace_generation") instanceof Number generation)
-                    || binding.getWorkspaceGeneration() != generation.longValue()
-                    || !binding.getStorageId().equals(row.get("workspace_storage_id"))) {
-                throw unavailable();
-            }
-            if (!(row.get("execution_actor") instanceof byte[] actor)) {
-                throw unavailable();
-            }
-            String parent = (String) row.get("parent_session_id");
-            if (parent == null) {
-                return actor;
-            }
-            current = parent;
+        var rows = WorkspaceOperations.rows(jdbc, "SELECT tenant_id, session_id,"
+                + " workspace_id, workspace_generation, workspace_storage_id,"
+                + " COALESCE(owner_actor_key, creator_actor_key) AS execution_actor FROM ma_session"
+                + " WHERE tenant_id = ? AND session_id = ? AND parent_session_id IS NULL",
+                binding.getTenantId(), sessionId);
+        if (rows.size() != 1) {
+            throw unavailable();
         }
-        throw unavailable();
+        var row = rows.getFirst();
+        if (!binding.getTenantId().equals(row.get("tenant_id")) || !sessionId.equals(row.get("session_id"))
+                || !binding.getWorkspaceId().equals(row.get("workspace_id"))
+                || !(row.get("workspace_generation") instanceof Number generation)
+                || binding.getWorkspaceGeneration() != generation.longValue()
+                || !binding.getStorageId().equals(row.get("workspace_storage_id"))) {
+            throw unavailable();
+        }
+        if (!(row.get("execution_actor") instanceof byte[] actor)) {
+            throw unavailable();
+        }
+        return actor;
     }
 
     // qwen-code, or a Session that pinned a compiled definition (D8c-1).

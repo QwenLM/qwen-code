@@ -459,6 +459,11 @@ final class AgentSessionAdmissions {
                     "child_parent_unavailable",
                     "The parent Session cannot admit a child.");
         }
+        if (WorkspaceToolProfiles.EXTERNAL_FILES.equals(parent.toolProfile())) {
+            throw new ManagedAgentException(409,
+                    "child_parent_unavailable",
+                    "The external-files profile does not admit child Sessions.");
+        }
         if (parent.publicChildAgentsVersion() == 1) {
             if (snapshot == null || !snapshot.path("version").isIntegralNumber() || !Set.of(1, 2).contains(snapshot.path("version").asInt()) || lineage.depth() != 1
                     || childCwdRelative != null || snapshot.size() != (snapshot.path("version").asInt() == 2 ? 9 : 8)
