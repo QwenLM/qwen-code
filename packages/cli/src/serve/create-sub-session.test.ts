@@ -4,6 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { randomUUID } from 'node:crypto';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
@@ -13,6 +16,7 @@ import {
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { SessionService, Storage } from '@qwen-code/qwen-code-core';
 import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
+import { SessionArchiveCoordinator } from './server/session-archive.js';
 import type { WorkspaceRuntime } from './workspace-registry.js';
 
 /** Captures the launcher's operator-facing stderr output. */
@@ -194,6 +198,8 @@ function makeFakeBridge(opts?: {
         sourceType: opts?.callerSourceTypes?.[sessionId],
       };
     },
+    hasSessionOrPendingRegistration: (sessionId: string) =>
+      !closedSessions.has(sessionId),
     spawnOrAttach: async (req: {
       workspaceCwd: string;
       sessionScope?: 'single' | 'thread';
@@ -2277,9 +2283,11 @@ describe('sub-sessions in another workspace', () => {
     canAcceptBackgroundNotifications?: boolean;
     sourceCap?: number;
     targetCap?: number;
+    targetRuntimeBaseDir?: string;
     sentModeDispatchTimeoutMs?: number;
     closeSessionFails?: 'not-found';
   }) {
+    const archiveCoordinator = new SessionArchiveCoordinator();
     const a = makeFakeBridge({
       beforeQueuedDispatch: opts?.beforeQueuedDispatch,
       beforeNotificationAck: opts?.beforeNotificationAck,
@@ -2305,13 +2313,16 @@ describe('sub-sessions in another workspace', () => {
       beforePromptDispatch: opts?.beforePromptDispatch,
       closeSessionFails: opts?.closeSessionFails,
     });
+    let targetActive = true;
     const launcherB = createSubSessionLauncher({
       getBridge: () => b.bridge,
+      getArchiveCoordinator: () => archiveCoordinator,
+      isTrusted: () => targetActive,
       boundWorkspace: WS_B,
+      runtimeBaseDir: opts?.targetRuntimeBaseDir,
       maxConcurrentTotal: opts?.targetCap,
       sentModeDispatchTimeoutMs: opts?.sentModeDispatchTimeoutMs,
     });
-    let targetActive = true;
     const assertTargetCurrent = () => {
       if (!targetActive) {
         throw new Error('The target runtime is no longer active');
@@ -2319,6 +2330,7 @@ describe('sub-sessions in another workspace', () => {
     };
     const launcherA = createSubSessionLauncher({
       getBridge: () => a.bridge,
+      getArchiveCoordinator: () => archiveCoordinator,
       boundWorkspace: WS_A,
       maxConcurrentTotal: opts?.sourceCap,
       isTrusted: () => opts?.callerTrusted ?? true,
@@ -2351,6 +2363,7 @@ describe('sub-sessions in another workspace', () => {
       b,
       launcherA,
       launcherB,
+      archiveCoordinator,
       retireTarget: () => {
         targetActive = false;
         launcherB.stop('workspace_stopped');
@@ -2503,8 +2516,8 @@ describe('sub-sessions in another workspace', () => {
   });
 
   it('rolls back a named sent child rejected after admission and releases both slots', async () => {
-    const removeSession = vi
-      .spyOn(SessionService.prototype, 'removeSession')
+    const removeUnusedSubSession = vi
+      .spyOn(SessionService.prototype, 'removeUnusedSubSession')
       .mockResolvedValue(true);
     try {
       const { a, b, launcherA } = twoWorkspaces({
@@ -2527,14 +2540,17 @@ describe('sub-sessions in another workspace', () => {
       );
       expect(b.prompts).toEqual([]);
       expect(b.closes).toEqual(['sub-1']);
-      expect(removeSession).toHaveBeenCalledWith('sub-1');
+      expect(removeUnusedSubSession).toHaveBeenCalledWith(
+        'sub-1',
+        expect.any(Function),
+      );
       expect(b.bridge.markSessionCatalogChanged).toHaveBeenCalledOnce();
       expect(a.notifications).toEqual([]);
       await expect(launcherA.launch(input)).resolves.toMatchObject({
         sessionId: 'sub-2',
       });
     } finally {
-      removeSession.mockRestore();
+      removeUnusedSubSession.mockRestore();
     }
   });
 
@@ -2543,8 +2559,8 @@ describe('sub-sessions in another workspace', () => {
     const held = new Promise<void>((resolve) => {
       resume = resolve;
     });
-    const removeSession = vi
-      .spyOn(SessionService.prototype, 'removeSession')
+    const removeUnusedSubSession = vi
+      .spyOn(SessionService.prototype, 'removeUnusedSubSession')
       .mockResolvedValue(true);
     try {
       const { b, launcherA } = twoWorkspaces({
@@ -2572,12 +2588,15 @@ describe('sub-sessions in another workspace', () => {
       });
       resume();
       await vi.waitFor(() =>
-        expect(removeSession).toHaveBeenCalledWith('sub-1'),
+        expect(removeUnusedSubSession).toHaveBeenCalledWith(
+          'sub-1',
+          expect.any(Function),
+        ),
       );
       expect(b.prompts.map(({ sessionId }) => sessionId)).toEqual(['sub-2']);
     } finally {
       resume();
-      removeSession.mockRestore();
+      removeUnusedSubSession.mockRestore();
     }
   });
 
@@ -2590,7 +2609,10 @@ describe('sub-sessions in another workspace', () => {
         return new Promise(() => {});
       },
     );
-    const removeSession = vi.spyOn(SessionService.prototype, 'removeSession');
+    const removeUnusedSubSession = vi.spyOn(
+      SessionService.prototype,
+      'removeUnusedSubSession',
+    );
     try {
       await expect(
         launcherA.launch({
@@ -2602,37 +2624,145 @@ describe('sub-sessions in another workspace', () => {
         }),
       ).rejects.toThrow('Session sub-1 may have received the prompt');
       expect(b.closes).toEqual([]);
-      expect(removeSession).not.toHaveBeenCalled();
+      expect(removeUnusedSubSession).not.toHaveBeenCalled();
     } finally {
-      removeSession.mockRestore();
+      removeUnusedSubSession.mockRestore();
     }
   });
 
-  it('removes an unused transcript when the ACP session has already exited', async () => {
-    const removeSession = vi
-      .spyOn(SessionService.prototype, 'removeSession')
-      .mockResolvedValue(true);
-    try {
-      const { b, launcherA } = twoWorkspaces({
-        beforeQueuedDispatch: () => Promise.reject(new Error('ACP exited')),
-        closeSessionFails: 'not-found',
-      });
-      await expect(
-        launcherA.launch({
-          prompt: 'p',
-          completion: 'sent',
-          workspace: WS_B,
-          workspaceGeneration: 'generation-b',
-          callerSessionId: 'caller',
-        }),
-      ).rejects.toThrow('ACP exited');
-      expect(b.kills).toEqual([]);
-      expect(removeSession).toHaveBeenCalledWith('sub-1');
-      expect(b.bridge.markSessionCatalogChanged).toHaveBeenCalledOnce();
-    } finally {
-      removeSession.mockRestore();
-    }
+  it('leaves a child open if another client has attached before dispatch fails', async () => {
+    const { b, launcherA } = twoWorkspaces({
+      beforeQueuedDispatch: () =>
+        Promise.reject(new Error('Dispatch rejected')),
+    });
+    const summary = b.bridge.getSessionSummary;
+    vi.spyOn(b.bridge, 'getSessionSummary').mockImplementation((id) => ({
+      ...summary(id),
+      clientCount: 2,
+    }));
+
+    await expect(
+      launcherA.launch({
+        prompt: 'p',
+        completion: 'sent',
+        workspace: WS_B,
+        workspaceGeneration: 'generation-b',
+        callerSessionId: 'caller',
+      }),
+    ).rejects.toThrow('Dispatch rejected');
+    expect(b.closes).toEqual([]);
+    expect(b.kills).toEqual([]);
   });
+
+  it.each([
+    'startup',
+    'user',
+    'incomplete',
+    'active writer',
+    'restoring',
+    'pending bridge registration',
+    'retired runtime',
+  ])(
+    'removes only unused startup history after ACP exit (%s)',
+    async (state) => {
+      const runtimeBaseDir = await mkdtemp(
+        path.join(tmpdir(), 'qwen-sub-session-rollback-'),
+      );
+      const sessionId = randomUUID();
+      try {
+        const service = new SessionService(WS_B, { runtimeBaseDir });
+        const transcript = service.getSessionTranscriptPath(sessionId);
+        const startupId = randomUUID();
+        const startup = {
+          uuid: startupId,
+          parentUuid: null,
+          sessionId,
+          cwd: WS_B,
+          timestamp: new Date().toISOString(),
+          type: 'system',
+          subtype: 'parent_session',
+          systemPayload: { parentSessionId: 'caller' },
+        };
+        const user = {
+          uuid: randomUUID(),
+          parentUuid: startupId,
+          sessionId,
+          cwd: WS_B,
+          timestamp: startup.timestamp,
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'Target user history' }] },
+        };
+        const records = state === 'user' ? [startup, user] : [startup];
+        const history =
+          records.map((record) => JSON.stringify(record)).join('\n') +
+          '\n' +
+          (state === 'incomplete' ? '{"type":' : '');
+        await mkdir(path.dirname(transcript), { recursive: true });
+        await writeFile(transcript, history);
+        const { b, launcherA, archiveCoordinator, retireTarget } =
+          twoWorkspaces({
+            targetRuntimeBaseDir: runtimeBaseDir,
+            beforeQueuedDispatch: () => {
+              if (state === 'retired runtime') retireTarget();
+              return Promise.reject(new Error('ACP exited before delegation'));
+            },
+            closeSessionFails: 'not-found',
+          });
+        const spawn = b.bridge.spawnOrAttach;
+        vi.spyOn(b.bridge, 'spawnOrAttach').mockImplementationOnce(
+          async (req) => ({
+            ...(await spawn(req)),
+            sessionId,
+          }),
+        );
+        if (state === 'pending bridge registration') {
+          vi.spyOn(b.bridge, 'hasSessionOrPendingRegistration').mockReturnValue(
+            true,
+          );
+        }
+
+        const activeWriter =
+          state === 'active writer'
+            ? await service.acquireSessionWriterLease(sessionId, {
+                processKind: 'daemon',
+                reclaimPolicy: 'never',
+              })
+            : undefined;
+        const refusedLaunch = async () => {
+          await expect(
+            launcherA.launch({
+              prompt: 'delegated prompt',
+              completion: 'sent',
+              workspace: WS_B,
+              workspaceGeneration: 'generation-b',
+              callerSessionId: 'caller',
+            }),
+          ).rejects.toThrow('ACP exited before delegation');
+        };
+        try {
+          if (state === 'restoring') {
+            await archiveCoordinator.runSharedMany([sessionId], refusedLaunch);
+          } else {
+            await refusedLaunch();
+          }
+        } finally {
+          await activeWriter?.release();
+        }
+
+        expect(b.kills).toEqual([]);
+        const read = readFile(transcript, 'utf8');
+        if (state !== 'startup') {
+          await expect(read).resolves.toBe(history);
+          expect(b.bridge.markSessionCatalogChanged).not.toHaveBeenCalled();
+        } else {
+          await expect(read).rejects.toMatchObject({ code: 'ENOENT' });
+          expect(b.bridge.markSessionCatalogChanged).toHaveBeenCalledOnce();
+        }
+      } finally {
+        await rm(runtimeBaseDir, { force: true, recursive: true });
+      }
+    },
+  );
 
   it('rolls back a child when the target stops during initialization', async () => {
     let markModeChangeStarted!: () => void;

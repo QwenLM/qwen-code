@@ -12388,12 +12388,15 @@ describe('createAcpSessionBridge', () => {
   });
 
   it('coalesces response restores with the same history page', async () => {
+    const sessionId = '5328e914-58a7-4a31-a966-e32e7fe9ef1a';
+    const requestedSessionId = sessionId.toUpperCase();
     const load = deferred<LoadSessionResponse>();
     const handle = makeChannel({ loadSessionImpl: () => load.promise });
     const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    expect(bridge.hasSessionOrPendingRegistration(sessionId)).toBe(false);
 
     const first = bridge.loadSession({
-      sessionId: 'coalesce-page',
+      sessionId: requestedSessionId,
       workspaceCwd: WS_A,
       historyReplay: 'response',
       historyPageSize: 100,
@@ -12401,8 +12404,12 @@ describe('createAcpSessionBridge', () => {
     for (let i = 0; i < 50 && handle.agent.loadSessionCalls.length !== 1; i++) {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
+    expect(() => bridge.getSessionSummary(requestedSessionId)).toThrow(
+      SessionNotFoundError,
+    );
+    expect(bridge.hasSessionOrPendingRegistration(sessionId)).toBe(true);
     const second = bridge.loadSession({
-      sessionId: 'coalesce-page',
+      sessionId: requestedSessionId,
       workspaceCwd: WS_A,
       historyReplay: 'response',
       historyPageSize: 100,

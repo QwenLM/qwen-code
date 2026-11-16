@@ -2500,6 +2500,9 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    */
   getSessionSummary(sessionId: string): BridgeSessionSummary;
 
+  /** Includes cold restores and explicit-id spawns before they become live. */
+  hasSessionOrPendingRegistration(sessionId: string): boolean;
+
   /** Daemon-internal execution location; never populated from client input. */
   getSessionExecutionSnapshot(
     sessionId: string,

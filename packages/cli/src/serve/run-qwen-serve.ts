@@ -6412,6 +6412,12 @@ async function runQwenServeImpl(
     const subSessionWorkspaces = createSubSessionWorkspaceIndex(
       () => workspaceRegistryForPersistence.current,
     );
+    const getSubSessionArchiveCoordinator = () =>
+      (
+        (runtimeApp ?? runtimeAppForCleanup)?.locals as
+          | { sessionArchiveCoordinator?: SessionArchiveCoordinator }
+          | undefined
+      )?.sessionArchiveCoordinator;
     const { sessionAttachmentsRoots } = await import(
       './session-attachments-root.js'
     );
@@ -6466,6 +6472,7 @@ async function runQwenServeImpl(
     // brings its own options.
     const subSessionLauncher = createSubSessionLauncher({
       getBridge: () => bridgeRef,
+      getArchiveCoordinator: getSubSessionArchiveCoordinator,
       boundWorkspace,
       runtimeBaseDir: primarySessionRuntimeBaseDir,
       ...subSessionConcurrencyCapsFromSettings(
@@ -7120,6 +7127,7 @@ async function runQwenServeImpl(
         | undefined;
       const secondarySubSessionLauncher = createSubSessionLauncher({
         getBridge: () => secondaryBridgeRef,
+        getArchiveCoordinator: getSubSessionArchiveCoordinator,
         boundWorkspace: workspaceInput.cwd,
         runtimeBaseDir: secondaryEnv.sessionRuntimeBaseDir,
         ...subSessionConcurrencyCapsFromSettings(
@@ -8140,6 +8148,7 @@ async function runQwenServeImpl(
         | undefined;
       const wsSubSessionLauncher = createSubSessionLauncher({
         getBridge: () => wsBridgeRef,
+        getArchiveCoordinator: getSubSessionArchiveCoordinator,
         boundWorkspace: cwd,
         runtimeBaseDir: wsEnv.sessionRuntimeBaseDir,
         ...(provenance === 'live-conversation'

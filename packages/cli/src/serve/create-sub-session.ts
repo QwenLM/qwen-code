@@ -68,6 +68,7 @@ import {
 } from '@qwen-code/acp-bridge/sessionSource';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import type { StandaloneSessionService } from './conversations/standalone-session-service.js';
+import type { SessionArchiveCoordinator } from './server/session-archive.js';
 import { createSessionOrganizationService } from './session-organization-helpers.js';
 import {
   WorkspaceGenerationClosedError,
@@ -197,6 +198,7 @@ export type SubSessionWorkspaceResolution =
   | { kind: 'refused'; reason: string };
 
 export interface CreateSubSessionLauncherOptions {
+  getArchiveCoordinator?: () => SessionArchiveCoordinator | undefined;
   getBridge: () => AcpSessionBridge | undefined;
   getStandaloneSessionService?: () => StandaloneSubSessionService | undefined;
   boundWorkspace: string;
@@ -909,6 +911,7 @@ export function createSubSessionLauncher(
 ): SubSessionLauncher {
   const {
     getBridge,
+    getArchiveCoordinator,
     getStandaloneSessionService,
     boundWorkspace,
     runtimeBaseDir,
@@ -968,15 +971,30 @@ export function createSubSessionLauncher(
   const rollbackChildSession = async (
     bridge: AcpSessionBridge,
     sessionId: string,
-    opts: { removeUnusedTranscript: boolean; conditionalClose: boolean },
+    opts: { removeUnusedTranscript: boolean; named: boolean },
   ): Promise<void> => {
+    const isMissing = (error: unknown) =>
+      error instanceof SessionNotFoundError &&
+      error.code === 'session_not_found';
+    const childIsClosed = () => {
+      try {
+        bridge.getSessionSummary(sessionId);
+        return false;
+      } catch (error) {
+        return isMissing(error);
+      }
+    };
     let sessionClosed = false;
     let closeTimer: ReturnType<typeof setTimeout> | undefined;
     try {
+      // The launcher itself has one registration. Keep an attached child's
+      // session open for any other client that joined through the catalog.
+      if (opts.named && bridge.getSessionSummary(sessionId).clientCount > 1)
+        return;
       await Promise.race([
         bridge.closeSession(sessionId, undefined, {
           reason: 'sub_session_rollback',
-          ...(opts.conditionalClose
+          ...(opts.named
             ? { closeIfUnheld: true }
             : { agentCloseTimeoutMs: ACTIVE_WORK_CLOSE_TIMEOUT_MS }),
         }),
@@ -993,16 +1011,14 @@ export function createSubSessionLauncher(
           closeTimer.unref();
         }),
       ]);
-      sessionClosed = !opts.conditionalClose;
+      sessionClosed = !opts.named;
     } catch (error) {
-      sessionClosed =
-        error instanceof SessionNotFoundError &&
-        error.code === 'session_not_found';
+      sessionClosed = isMissing(error);
       log.debug('sub-session: closeSession threw', sessionId, error);
     } finally {
       clearTimeout(closeTimer);
     }
-    if (!sessionClosed && !opts.conditionalClose) {
+    if (!sessionClosed && !opts.named) {
       try {
         await bridge.killSession(sessionId, {
           requireZeroAttaches: true,
@@ -1012,18 +1028,29 @@ export function createSubSessionLauncher(
       }
     }
     if (!sessionClosed && opts.removeUnusedTranscript) {
-      try {
-        bridge.getSessionSummary(sessionId);
-      } catch (error) {
-        sessionClosed =
-          error instanceof SessionNotFoundError &&
-          error.code === 'session_not_found';
-      }
+      sessionClosed = childIsClosed();
     }
     if (sessionClosed && opts.removeUnusedTranscript) {
       try {
-        const removeTranscript = () =>
-          new SessionService(boundWorkspace).removeSession(sessionId);
+        const removeTranscript = async () => {
+          const service = new SessionService(boundWorkspace);
+          if (!opts.named) return service.removeSession(sessionId);
+          const coordinator = getArchiveCoordinator?.();
+          if (!coordinator) return false;
+          const canRemove = () =>
+            isTrusted?.(bridge) === true &&
+            !bridge.hasSessionOrPendingRegistration(sessionId);
+          return coordinator.runExclusiveMany([sessionId], async () => {
+            if (!canRemove()) return false;
+            return service.removeUnusedSubSession(sessionId, () => {
+              if (!canRemove()) {
+                throw new Error(
+                  'The sub-session or its runtime changed during rollback.',
+                );
+              }
+            });
+          });
+        };
         const transcriptRemoved = runtimeBaseDir
           ? await Storage.runWithResolvedRuntimeBaseDir(
               runtimeBaseDir,
@@ -1576,11 +1603,11 @@ export function createSubSessionLauncher(
         const rollback = () =>
           rollbackChildSession(bridge, sessionId, {
             removeUnusedTranscript,
-            conditionalClose: timedOut,
+            named,
           });
-        if (!timedOut) {
+        if (!timedOut && (!named || removeUnusedTranscript)) {
           await rollback();
-        } else if (removeUnusedTranscript && queuedTurn) {
+        } else if (timedOut && removeUnusedTranscript && queuedTurn) {
           // Let the cancelled turn drop its queue slot before the idle close.
           void queuedTurn.then(rollback, rollback);
         }

@@ -13879,6 +13879,20 @@ export function createSessionControlPlane(
       return toSessionSummary(entry);
     },
 
+    hasSessionOrPendingRegistration(sessionId) {
+      const id = sessionId.toLowerCase();
+      for (const sessions of [
+        byId,
+        inFlightRestores,
+        inFlightSessionIdReservations,
+      ]) {
+        for (const registeredId of sessions.keys()) {
+          if (registeredId.toLowerCase() === id) return true;
+        }
+      }
+      return false;
+    },
+
     getSessionExecutionSnapshot(sessionId) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
