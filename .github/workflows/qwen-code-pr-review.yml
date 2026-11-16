@@ -1158,15 +1158,20 @@ jobs:
           scratch=$(mktemp -d "${RUNNER_TEMP:?}/qwen-review-scratch.XXXXXXXX")
           echo "dir=$scratch" >> "$GITHUB_OUTPUT"
 
-      # `QWEN_REVIEW_SANDBOX: required` on `Run review` refuses every command
-      # the PR's own install/build/test would run when no container runtime
-      # answers. The review then continues green with no prebuild and no
-      # build/test evidence — the #10108 regression this job exists to avoid —
-      # so fail here, in seconds, instead. The image resolves first for the
-      # same reason: an unpublished tag would otherwise surface as a failed
-      # install charged to the PR under review. This is the pair
-      # `qwen-autofix.yml` runs before its sandboxed agent, and the rule this
-      # file records on `Resolve conflicts`.
+      # Decide the execution-sandbox policy from what this runner can actually
+      # do, and say so. `required` is the point — a review that cannot contain
+      # the PR's own install/build/test reports no evidence rather than running
+      # it with this step's GH_TOKEN and OPENAI_API_KEY — but `required` on a
+      # host that cannot satisfy it is not a security win, it is a review that
+      # fails its own install (a contained command that fails is a
+      # PR-attributed failure, and a refused prebuild leaves the tree bare for
+      # every agent, #10108). Measured on the `ecs-review` pool 2026-11-16: the
+      # daemon answers, and `ghcr.io/qwenlm/qwen-code:<version>` does not pull
+      # (TLS handshake timeout to the blob CDN). So: `required` when both halves
+      # hold, `off` — today's behaviour — with a warning and a summary line
+      # when they do not, and containment turns on by itself once the pool can
+      # pull the image. The image resolves through the repo's resolver first,
+      # so an unpublished tag cannot be charged to the PR under review.
       - name: 'Resolve review sandbox'
         id: 'review_sandbox'
         if: "steps.context.outputs.should_run == 'true'"
@@ -1181,18 +1186,23 @@ jobs:
             # cli lib/sandboxed-exec.ts.
             if "$candidate" info > /dev/null 2>&1; then runtime="$candidate"; break; fi
           done
+          policy='off'
           if [ -z "$runtime" ]; then
-            echo "::error::no container runtime answered 'info' on this review runner and QWEN_REVIEW_SANDBOX requires one; without it every reviewed command is refused and the review loses its prebuild and all build/test evidence (#10108)."
-            exit 1
+            echo "::warning::no container runtime answered 'info' on this review runner; the PR's own install/build/test run unsandboxed for this review."
+          elif ! SANDBOX_COMMAND="$runtime" node .github/scripts/resolve-sandbox-image.mjs \
+            "$(node -p "require('./package.json').config.sandboxImageUri")"; then
+            echo "::warning::the review sandbox image is not available on this runner; the PR's own install/build/test run unsandboxed for this review."
+          else
+            policy='required'
           fi
-          echo "sandbox_runtime=$runtime"
-          echo "sandbox_runtime=$runtime" >> "$GITHUB_STEP_SUMMARY"
-          # The resolver every other sandboxed job uses: it pulls the requested
-          # image and, when that tag is gone, falls back to the latest published
-          # one instead of reporting the PR's install as broken. It exports
-          # QWEN_SANDBOX_IMAGE, which the CLI prefers over package.json's tag.
-          SANDBOX_COMMAND="$runtime" node .github/scripts/resolve-sandbox-image.mjs \
-            "$(node -p "require('./package.json').config.sandboxImageUri")"
+          echo "sandbox_runtime=${runtime:-none}"
+          echo "sandbox_policy=$policy"
+          {
+            echo "### Review sandbox"
+            echo "runtime: ${runtime:-none}"
+            echo "policy: $policy"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "policy=$policy" >> "$GITHUB_OUTPUT"
 
       - name: 'Run review'
         id: 'review'
@@ -1291,17 +1301,18 @@ jobs:
           # The #9556 execution sandbox around the PR's own install/build/test.
           # Without it those commands inherit this step's GH_TOKEN and
           # OPENAI_API_KEY, and a `postinstall` reads both in one line.
-          # `required`, not `auto`: a review that cannot contain them reports
-          # unavailable evidence rather than executing them on the host. The
-          # 'Resolve review sandbox' step above fails the job when no runtime
-          # answers, so that refusal can only follow a working runtime — the
-          # silent "no prebuild, no evidence" path (#10108) is closed there.
+          # `required` only when the 'Resolve review sandbox' step above found a
+          # runtime AND an image; `off` (today's behaviour) with a warning and a
+          # summary line otherwise. `required` on a host that cannot satisfy it
+          # would fail the PR's own install instead of containing it, and a
+          # silently refused prebuild leaves the tree bare for every agent
+          # (#10108) — so the policy follows what the runner can do, visibly.
           # A contained command that fails for environmental reasons (no git in
           # the mount, image toolchain gaps, egress) is a PR-attributed
           # failure, not "unavailable". It does NOT contain the agent's own
           # shell probes, so #9556 stays open. Mechanism: cli
           # lib/sandboxed-exec.ts; the CI row of the design.
-          QWEN_REVIEW_SANDBOX: 'required'
+          QWEN_REVIEW_SANDBOX: '${{ steps.review_sandbox.outputs.policy }}'
           TMPDIR: '${{ steps.review_scratch.outputs.dir }}'
         run: |-
           set -euo pipefail

@@ -3018,9 +3018,9 @@ describe('review worktree prebuild (issue #10108)', () => {
 
 describe('review execution sandbox opt-in (#9556)', () => {
   // `required` opts the PR's own install/build/test into the #9556 execution
-  // sandbox. Like the prebuild switch, the literal lives on two sides: the
-  // CLI's policy reader and this step's env. Read both out of the source so a
-  // rename or a typo on either side reds this test instead of silently
+  // sandbox, but only where the runner can honour it: the policy comes from
+  // the preflight's outputs. Read the key and the policy vocabulary out of the
+  // CLI source so a rename on either side reds this test instead of silently
   // resolving to `off` (the default) with CI green — the failure mode the
   // expression-length and unpullable-image incidents already taught us.
   const doc = parse(workflow);
@@ -3039,8 +3039,14 @@ describe('review execution sandbox opt-in (#9556)', () => {
 
   it('sets the policy the CLI reads on the Run review step', () => {
     expect(envName).toBe('QWEN_REVIEW_SANDBOX');
-    expect(review.env[envName]).toBe('required');
+    // The literal is the preflight's output, not a constant: `required` on a
+    // runner that cannot satisfy it fails the PR's own install rather than
+    // containing it.
+    expect(review.env[envName]).toBe(
+      '${{ steps.review_sandbox.outputs.policy }}',
+    );
     expect(policies).toContain('required');
+    expect(policies).toContain('off');
   });
 
   it('is opt-in from that step and nowhere else in the workflow', () => {
@@ -3054,11 +3060,7 @@ describe('review execution sandbox opt-in (#9556)', () => {
     }
   });
 
-  it('fails the job when no runtime answers, before any reviewed command runs', () => {
-    // `required` with no runtime refuses every phase: the prebuild leaves the
-    // tree bare and every agent loses its build/test evidence while the job
-    // stays green (#10108). The preflight is what turns that into a runner
-    // failure, so it must sit ahead of the review and must not be tolerated.
+  it('decides the policy from a probe that runs before any reviewed command', () => {
     const steps = doc.jobs['review-pr'].steps;
     const preflightIndex = steps.findIndex(
       (s) => s.name === 'Resolve review sandbox',
@@ -3067,18 +3069,27 @@ describe('review execution sandbox opt-in (#9556)', () => {
     expect(preflightIndex).toBeGreaterThan(-1);
     expect(preflightIndex).toBeLessThan(reviewIndex);
     const preflight = steps[preflightIndex];
+    expect(preflight.id).toBe('review_sandbox');
     expect(preflight['continue-on-error']).toBeUndefined();
     // A daemon round trip, and the same docker-then-podman order the CLI
     // probes. `command -v` alone would pass for a client with no daemon, which
     // is the shape that then refuses every command.
     expect(preflight.run).toContain('info > /dev/null');
     expect(preflight.run).toContain('podman');
-    expect(preflight.run).toContain('exit 1');
     // The image resolves through the repo's resolver, so a tag that is not on
-    // GHCR is a runner failure here instead of a failed install reported
-    // against the PR under review.
+    // GHCR is caught here instead of being reported as the PR's broken install.
     expect(preflight.run).toContain('resolve-sandbox-image.mjs');
     expect(preflight.run).toContain('sandboxImageUri');
+    // The decision is published, not implied: the output feeds `Run review`,
+    // and the summary line is how a run that ran uncontained says so.
+    expect(preflight.run).toContain('policy=$policy" >> "$GITHUB_OUTPUT"');
+    expect(preflight.run).toContain('sandbox_policy=$policy');
+    expect(preflight.run).toContain('::warning::');
+    // `off` is the default and the only fallback: a policy the CLI cannot
+    // parse resolves to `off` too, so anything else here would silently pick
+    // the wrong side.
+    expect(preflight.run).toMatch(/policy='off'/);
+    expect(preflight.run).toMatch(/policy='required'/);
   });
 });
 
