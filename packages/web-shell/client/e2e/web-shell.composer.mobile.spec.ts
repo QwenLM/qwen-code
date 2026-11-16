@@ -139,12 +139,15 @@ test('simple mobile add drawer keeps advanced controls in advanced mode @smoke',
   await expect(model).toBeVisible();
   await expect(composer.locator('[data-web-shell-mode-button]')).toBeVisible();
   await model.tap();
-  const picker = page.locator('[data-web-shell-toolbar-popover]');
+  const picker = page.locator('[data-web-shell-model-sheet]');
   await expect(picker).toBeVisible();
   await picker
     .getByRole('button', { name: 'Qwen Test Alt', exact: true })
     .tap();
   await expect.poll(() => daemon.modelRequests().length).toBe(1);
+  await expect(picker).toBeVisible();
+  await picker.getByRole('button', { name: 'Done', exact: true }).tap();
+  await expect(picker).toBeHidden();
   await composer.getByTestId('composer-add-menu-trigger').tap();
   await expect(drawer).toBeVisible();
   const rows = drawer.locator('[data-vaul-no-drag] button');

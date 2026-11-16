@@ -155,6 +155,12 @@ for (const width of [1280, 390]) {
     await page.getByRole('menuitemradio', { name: 'Project B' }).click();
     await page.getByRole('button', { name: /^Select Model:/ }).click();
     await page.getByText('Model B', { exact: true }).last().click();
+    if (width === 390) {
+      const sheet = page.locator('[data-web-shell-model-sheet]');
+      await expect(sheet).toBeVisible();
+      await sheet.getByRole('button', { name: 'Done', exact: true }).click();
+      await expect(sheet).toBeHidden();
+    }
     const editor = page.locator('[data-web-shell-composer-editor] .cm-content');
     await expect(
       page.locator('[data-web-shell-composer-editor]'),
