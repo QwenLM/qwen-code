@@ -1935,7 +1935,7 @@ export async function runNonInteractive(
       // `oneShotMonitorsFinalized` guard makes the second call a
       // no-op), so unconditional invocation is safe even when the drain
       // path already finalized monitors before reaching here.
-      const emitStructuredSuccess = async (): Promise<0> => {
+      const emitStructuredSuccess = async (): Promise<0 | 1> => {
         await modTurn?.complete();
         const owner = captureActiveInteractionOwner();
         if (
@@ -1985,7 +1985,10 @@ export async function runNonInteractive(
           outputFormat === OutputFormat.JSON
             ? uiTelemetryService.getMetrics()
             : undefined;
-        await emitResult({
+        // The envelope decides the exit status here too: a refusal latched
+        // earlier turns this success call into an error result, and a process
+        // that produced no answer must not report success for it.
+        const terminalResult = await emitResult({
           isError: false,
           durationMs: Date.now() - startTime,
           apiDurationMs: totalApiDurationMs,
@@ -1994,7 +1997,7 @@ export async function runNonInteractive(
           stats,
           structuredResult: structuredSubmission,
         });
-        return 0;
+        return terminalResult.is_error ? 1 : 0;
       };
 
       const emitLoopDetectedResult = async (): Promise<1> => {
