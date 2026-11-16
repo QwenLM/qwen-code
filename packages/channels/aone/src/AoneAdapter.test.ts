@@ -536,6 +536,62 @@ describe('AoneChannel', () => {
       expect(ch2.inboundEnvelopes).toHaveLength(0);
       expect(ch2.cursor.repos['test/repo']).toBe(700);
     });
+
+    it('prunes cursor keys for unwatched repos so a re-add baselines fresh', async () => {
+      installFakeA1({ events: pagedEvents([makeEvent({ id: 500 })]) });
+      await channel.connect();
+      await channel.testPollOnce(); // cursor test/repo=500 persisted
+      channel.disconnect();
+
+      // Operator drops test/repo, watches other/repo for a while.
+      const ch = new TestableAoneChannel(
+        'test-aone',
+        makeConfig({ repos: ['other/repo'] }),
+        makeBridge(),
+      );
+      await ch.connect();
+      expect(ch.cursor.repos['test/repo']).toBeUndefined();
+      await ch.testPollOnce();
+      ch.disconnect();
+
+      // Re-adding test/repo must baseline fresh (no 3-day window replay):
+      // the pruned cursor on disk has no stale test/repo key.
+      const ch2 = new TestableAoneChannel(
+        'test-aone',
+        makeConfig({ repos: ['test/repo', 'other/repo'] }),
+        makeBridge(),
+      );
+      expect(ch2.cursor.repos['test/repo']).toBeUndefined();
+      await ch2.connect();
+      await ch2.testPollOnce();
+      ch2.disconnect();
+      expect(ch2.inboundEnvelopes).toHaveLength(0);
+      expect(ch2.cursor.repos['test/repo']).toBe(500);
+    });
+
+    it('an unparseable createdAt is skipped fail-closed but logged', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      installFakeA1({ events: pagedEvents([makeEvent({ id: 1000 })]) });
+      await channel.connect();
+      await channel.testPollOnce(); // baseline
+      installFakeA1({
+        events: pagedEvents([
+          makeEvent({ id: 1001, createdAt: '16/11/2026 18:07' }),
+        ]),
+      });
+      await channel.testPollOnce();
+      channel.disconnect();
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(channel.cursor.repos['test/repo']).toBe(1001);
+      expect(
+        stderr.mock.calls.some((c) =>
+          String(c[0]).includes('unparseable createdAt on event 1001'),
+        ),
+      ).toBe(true);
+      stderr.mockRestore();
+    });
   });
 
   describe('failure isolation', () => {
@@ -612,6 +668,41 @@ describe('AoneChannel', () => {
       );
       expect(ch2.cursor.repos['good/repo']).toBe(2002);
     });
+
+    it('a failing repo FIRST does not starve the repos after it', async () => {
+      installFakeA1({
+        events: (repo) =>
+          repo === 'good/repo' ? [makeEvent({ id: 2001 })] : [],
+      });
+      const ch = new TestableAoneChannel(
+        'test-aone',
+        makeConfig({ repos: ['bad/repo', 'good/repo'] }),
+        makeBridge(),
+      );
+      await ch.connect();
+      await ch.testPollOnce(); // baseline both
+      installFakeA1({
+        events: (repo) => {
+          if (repo === 'bad/repo') {
+            throw {
+              code: 1,
+              stdout: JSON.stringify({
+                schemaVersion: 'a1.error/v1',
+                message: 'SYSTEM_FORBIDDEN_ERROR',
+              }),
+              stderr: '',
+            };
+          }
+          return [makeEvent({ id: 2002 })];
+        },
+      });
+      // The poll still reports failure (base backoff), but good/repo — listed
+      // AFTER the broken one — must be polled and dispatched this round.
+      await expect(ch.testPollOnce()).rejects.toThrow('SYSTEM_FORBIDDEN_ERROR');
+      ch.disconnect();
+      expect(ch.inboundEnvelopes).toHaveLength(1);
+      expect(ch.cursor.repos['good/repo']).toBe(2002);
+    });
   });
 
   describe('pagination', () => {
@@ -673,16 +764,108 @@ describe('AoneChannel', () => {
       expect(ch2.inboundEnvelopes).toHaveLength(100);
     });
 
-    it('fails closed when the backlog exceeds the page budget', async () => {
+    it('dispatches each boundary event once when offset pagination repeats it', async () => {
+      // A comment landing between the page-1 and page-2 fetches shifts every
+      // offset: page 2 repeats page 1's last event (id 1901).
+      const withNoteId = (id: number) =>
+        makeEvent({
+          id,
+          note: {
+            id,
+            note: 'qwen: do something',
+            noteable_type: 'MergeRequest',
+          },
+        });
+      const page1 = Array.from({ length: 100 }, (_, i) => withNoteId(2000 - i));
+      const page2 = [
+        withNoteId(1901),
+        ...Array.from({ length: 50 }, (_, i) => withNoteId(1900 - i)),
+      ];
+      installFakeA1({
+        events: (_repo, page) => (page === 1 ? page1 : page2),
+      });
+      await channel.connect();
+      channel.cursor.repos['test/repo'] = 1800;
+      await channel.testPollOnce();
+      channel.disconnect();
+      expect(channel.inboundEnvelopes).toHaveLength(150);
+      expect(
+        channel.inboundEnvelopes.filter((e) => e.messageId === '1901'),
+      ).toHaveLength(1);
+    });
+
+    it('breaks on the cursor inside a FULL page 10 (no overflow walk)', async () => {
+      // 1000 events ids 5000..4001; cursor 4100 sits inside page 10
+      // (4100..4001). reachedCursor must break the loop at page 10 and
+      // dispatch all 900 — without it the overflow arm dispatches only 100.
       const all = Array.from({ length: 1000 }, (_, i) =>
         makeEvent({ id: 5000 - i }),
       );
-      installFakeA1({ events: pagedEvents(all) });
+      const calls = installFakeA1({ events: pagedEvents(all) });
       await channel.connect();
-      channel.cursor.repos['test/repo'] = 100; // everything is newer
-      await expect(channel.testPollOnce()).rejects.toThrow(/backlog/);
+      channel.cursor.repos['test/repo'] = 4100;
+      await channel.testPollOnce();
       channel.disconnect();
-      expect(channel.cursor.repos['test/repo']).toBe(100);
+      const pages = calls
+        .filter((argv) => argv[0] === 'events')
+        .map((argv) => Number(argv[argv.indexOf('--page') + 1]));
+      expect(pages).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+      expect(channel.inboundEnvelopes).toHaveLength(900);
+      expect(channel.cursor.repos['test/repo']).toBe(5000);
+    });
+
+    it('overflow walks to the tail and dispatches the oldest bounded slice', async () => {
+      const all = Array.from({ length: 1200 }, (_, i) => {
+        const id = 5000 - i;
+        return makeEvent({
+          id,
+          note: {
+            id,
+            note: 'qwen: do something',
+            noteable_type: 'MergeRequest',
+          },
+        });
+      });
+      const calls = installFakeA1({ events: pagedEvents(all) });
+      await channel.connect();
+      channel.cursor.repos['test/repo'] = 3800; // everything is newer
+      await expect(channel.testPollOnce()).resolves.toBeUndefined();
+      const pages = calls
+        .filter((argv) => argv[0] === 'events')
+        .map((argv) => Number(argv[argv.indexOf('--page') + 1]));
+      // 12 full pages + the empty page 13 that ends the walk.
+      expect(pages).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+      // Oldest 100 (3801..3900) dispatched; the cursor never crosses the
+      // unfetched gap; the remainder drains on later polls.
+      expect(channel.inboundEnvelopes).toHaveLength(100);
+      expect(channel.cursor.repos['test/repo']).toBe(3900);
+      expect(
+        channel.inboundEnvelopes.every(
+          (e) => Number(e.messageId) >= 3801 && Number(e.messageId) <= 3900,
+        ),
+      ).toBe(true);
+
+      // Next poll drains the next oldest slice (progress, no wedge).
+      await channel.testPollOnce();
+      channel.disconnect();
+      expect(channel.inboundEnvelopes).toHaveLength(200);
+      expect(channel.cursor.repos['test/repo']).toBe(4000);
+    });
+
+    it('throws only beyond the platform window (100 full pages)', async () => {
+      installFakeA1({
+        events: (_repo, page) =>
+          Array.from({ length: 100 }, (_, i) =>
+            makeEvent({ id: 1000000 - (page - 1) * 100 - i }),
+          ),
+      });
+      await channel.connect();
+      channel.cursor.repos['test/repo'] = 0;
+      await expect(channel.testPollOnce()).rejects.toThrow(
+        /exceeds the platform window/,
+      );
+      channel.disconnect();
+      expect(channel.cursor.repos['test/repo']).toBe(0);
       expect(channel.inboundEnvelopes).toHaveLength(0);
     });
   });
@@ -738,15 +921,12 @@ describe('AoneChannel', () => {
       );
     });
 
-    it('degrades to empty title/url when the view fails', async () => {
+    it('a failing view is negatively cached: one call per MR per poll, not per event', async () => {
       const stderr = vi
         .spyOn(process.stderr, 'write')
         .mockImplementation(() => true);
       installFakeA1({
-        events: pagedEvents([makeEvent({ id: 1001 })]),
-        view: () => {
-          throw { code: 1, stdout: '', stderr: 'view forbidden' };
-        },
+        events: pagedEvents([makeEvent({ id: 1000 })]),
       });
       const ch = new TestableAoneChannel(
         'test-aone',
@@ -754,18 +934,40 @@ describe('AoneChannel', () => {
         makeBridge(),
       );
       await ch.connect();
-      await ch.testPollOnce(); // baseline
-      installFakeA1({
-        events: pagedEvents([makeEvent({ id: 1002 })]),
+      await ch.testPollOnce(); // baseline at 1000
+      const calls = installFakeA1({
+        events: pagedEvents([makeEvent({ id: 1002 }), makeEvent({ id: 1001 })]),
         view: () => {
           throw { code: 1, stdout: '', stderr: 'view forbidden' };
         },
       });
-      await ch.testPollOnce();
+      await ch.testPollOnce(); // two events, same MR, view fails
       ch.disconnect();
       stderr.mockRestore();
-      expect(ch.inboundEnvelopes).toHaveLength(1);
+      const views = calls.filter(
+        (argv) => argv[0] === 'repo' && argv[2] === 'view',
+      );
+      expect(views).toHaveLength(1);
+      expect(ch.inboundEnvelopes).toHaveLength(2);
       expect(ch.inboundEnvelopes[0]!.metadata).toBe('t= u=');
+      expect(ch.inboundEnvelopes[1]!.metadata).toBe('t= u=');
+    });
+
+    it('an empty promptTemplate falls back to the default (descriptor contract)', async () => {
+      installFakeA1({ events: pagedEvents([makeEvent({ id: 1000 })]) });
+      const ch = new TestableAoneChannel(
+        'test-aone',
+        makeConfig({ promptTemplate: '' }),
+        makeBridge(),
+      );
+      await ch.connect();
+      await ch.testPollOnce(); // baseline
+      installFakeA1({ events: pagedEvents([makeEvent({ id: 1001 })]) });
+      await ch.testPollOnce();
+      ch.disconnect();
+      expect(ch.inboundEnvelopes[0]!.metadata).toBe(
+        'Aone CR test/repo !30825167 (iid 1736615) | author: alice | comment: 5000',
+      );
     });
   });
 

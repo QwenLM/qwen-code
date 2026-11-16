@@ -85,14 +85,24 @@ packages/channels/aone/
       "cwd": "/path/to/an/aone/workspace",
       "repos": ["middleware/tddl5"],
       "triggerPrefixes": ["qwen:"],
-      "groupPolicy": "open",
-      "groups": { "*": { "senders": "open" } },
+      "groupPolicy": "allowlist",
+      "groups": {
+        "middleware/tddl5": {
+          "senders": "allowlist",
+          "allowedUsers": ["shaojin.wensj"]
+        }
+      },
       "sessionScope": "chat_thread",
       "pollInterval": 60000
     }
   }
 }
 ```
+
+示例刻意收紧：在全公司的代码主机上，否则任何评论者都能以 a1 登录账号的
+身份在 channel 的 `cwd` 里驱动 agent 并公开回复。`groupPolicy: "open"` 加
+`groups: { "*": { "senders": "open" } }` 是面向可信主机的显式 opt-in
+（本地 E2E harness 用的就是它），不是推荐缺省。
 
 - `repos`（string-list，必填，≥1）：监听的仓库全路径。没有收件箱，
   所以监听列表显式配置。匹配与存储均小写化（GitLab `normalizeGroupId`
@@ -104,27 +114,49 @@ packages/channels/aone/
   模板（与 `text` 分离，slash 命令解析只看到评论正文）。变量：`%repo%`、
   `%mr_id%`、`%mr_iid%`、`%author%`、`%comment_id%`、`%title%`、`%url%`；
   `%%` 转义字面 `%`。`%title%`/`%url%` 惰性拉取 `a1 repo mr view`（每 MR
-  每轮一次，缓存——GitLab `descriptionCache` 模式）；`detailUrl` 原样取自
-  view，绝不拼接。缺省模板：
+  每轮一次，缓存——GitLab `descriptionCache` 模式；**失败**的 view 同样
+  负缓存一轮，被禁止的 MR 上 N 个事件只花一次调用，而不是 N × 20s 超时）；
+  `detailUrl` 原样取自 view，绝不拼接。空串或纯空白回落到缺省模板
+  （descriptor 写明「留空即缺省」），不得静默剥掉 CR 上下文头。缺省模板：
   `Aone CR %repo% !%mr_id% (iid %mr_iid%) | author: %author% | comment: %comment_id%`。
-- 共享字段与 GitLab 一致：`groupPolicy` 须为 `open`/`allowlist`/`pairing`
-  才会派发（否则 connect 告警）；`allowedUsers` 为小写化的 aone 账号；
-  `sessionScope` 缺省 `chat_thread`（每仓库+MR 线程一个会话）。无 `token`
-  字段——a1 用 channel 主机上自己的登录态认证。
+- 访问边界：Aone 入站全部是 group 形态（`isGroup: true`），所以
+  `ChannelBase.senderGateFor` 走 **GROUP** 发送者门禁——
+  `groups[<repo>].senders`（回退 `groups["*"].senders`，缺省 `open`），
+  该策略为 `allowlist` 时用 `groups[<repo>].allowedUsers`。**顶层**
+  `allowedUsers`/`privatePolicy` 只作用于 DM 形态流量，本 channel 从不
+  产生；只配它们限制不了任何东西。`groupPolicy` 须为
+  `open`/`allowlist`/`pairing` 才会派发（否则 connect 告警）；插件自行
+  声明该字段、缺省 `open`，因为共享注入字段缺省 `disabled`，会让编辑器
+  创建的 channel 什么都不派发。`sessionScope` 缺省 `chat_thread`
+  （每仓库+MR 线程一个会话）。无 `token` 字段——a1 用 channel 主机上
+  自己的登录态认证。
 
 ### 入站管线（`pollOnce`）
 
-对每个配置仓库顺序执行：
+每个配置仓库在各自的 try/catch 里轮询：某仓库失败则记录错误并**继续**
+本轮其余仓库，最后重抛第一个失败，让 base 循环记录失败轮并退避。没有
+这层隔离时，未捕获的抛错会 unwind 整轮，base 循环从 `repos[0]` 重来，
+一个永久坏掉的仓库会饿死排在它后面的所有仓库（它们的评论在窗口里
+老化却从未被看见）。
+
+每仓库：
 
 1. 拉取 `events repo <repo> --type comments --since <今天−3天> --until
 <今天> --per-page 100 --format json`（显式本地日历日期——a1 0.2.51
-   拒绝省略），翻页（页号递增 = 事件更早）直到出现 `id ≤ cursor[repo]` 的事件、
-   空页、或达到页数上限（10）。若第 10 页仍满且最旧 id 仍 `> cursor`，
-   说明积压超出单轮预算：该仓库本轮**抛错**（base 退避、游标不动、
-   错误可见），而不是派发最新一片、静默丢掉更旧的缺口。单仓库一个轮询
-   间隔内 >1000 条新评论属于 bot 洪水；fail-closed 是诚实的行为。
+   拒绝省略），翻页（页号递增 = 事件更早）直到出现 `id ≤ cursor[repo]`
+   的事件或不满页/空页。收集时按 id **去重**：最新优先列表上的偏移分页
+   会在两次翻页之间有新评论插入、整体偏移移动时重复边界事件，一条评论
+   绝不能在单轮里派发两次。
+   若第 10 页仍满且游标未达（积压 > 1000），**继续**走到窗口尾部
+   （a1 的 `--page` 上限 100），保证不跨越游标侧的缺口，然后只派发
+   **最旧的 100 条**（单轮 agent 轮次有界）；余量在后续轮次排空。
+   第 100 页仍满——超出平台可寻址窗口——才抛错且游标不动（防御性）。
+   早先「第 10 页即抛错」的设计会让仓库在积压持续期间永久楔死，而滑动
+   窗口随后恰恰静默丢掉那个抛错声称要保护的缺口。
 2. 仓库首次观测（无游标条目）：基线化为最大事件 id，不派发（GitLab
    首轮排空先例）。之后新增到配置的仓库同样基线化——不派发历史积压。
+   `connect()` 会剪掉不再监听的仓库的游标键，因此「移除后再加回」的
+   仓库会重新基线化，而不是按陈旧 id 回放整个窗口。
 3. 新事件（`id > cursor[repo]`）按 id **升序**处理：
    - 跳过 bot 自己的评论（`author.username` 等于 whoami 账号，小写化）——防循环；
    - 跳过非 MR 笔记与缺 `mergeRequest.id` 的事件；
@@ -148,6 +180,9 @@ channel 创建时刻（ISO，必须可解析——不可解析的值会游标校
 它是派发地板：创建时刻之前的事件绝不派发。没有这个地板，首轮看到**空**窗口的
 仓库会基线化到 id 0，下一轮就会把整个 3 天窗口当作「新」事件派发——形成历史
 积压。每仓库条目的存在性即「已初始化」状态，没有单独的标志位。
+`createdAt` 解析失败的事件按 fail-closed 跳过（NaN 比较为 false），但
+**必须记日志**——否则载荷形状漂移会在游标持续推进的同时静默哑掉整个
+channel。
 
 停机超过 3 天缺省窗口会丢失窗口之前的事件——已记录的限制，v1 无 digest。
 
@@ -177,9 +212,11 @@ exit-0 的正文都解析 `a1.error/v1` 对象；非 JSON 输出 → 错误。�
 `channelType: 'aone'`、`displayName: 'Aone'`、
 `requiredConfigFields: ['repos', 'triggerPrefixes']`、
 `defaultSessionScope: 'chat_thread'`，管理面字段 `repos`、
-`triggerPrefixes`、`promptTemplate`、`pollInterval`（kind 依次
-`string-list`/`string-list`/`string`/`number`，number 以
-`exclusiveMinimum: 0` 与 `MAX_POLL_INTERVAL_MS` 为界）。connect 校验：
+`triggerPrefixes`、`groupPolicy`、`promptTemplate`、`pollInterval`
+（kind 依次 `string-list`/`string-list`/`enum`/`string`/`number`，number
+以 `exclusiveMinimum: 0` 与 `MAX_POLL_INTERVAL_MS` 为界）。`groupPolicy`
+自行声明、缺省 `open`、四选项齐全——共享注入字段缺省 `disabled`，会让
+编辑器创建的 channel 什么都不派发（GitLab 同样自行声明）。connect 校验：
 repos 非空、前缀非空、groupPolicy 告警、whoami 成功。存在规则处，校验消息在
 descriptor 与 connect 间共享（GitHub `validateRepoFilterConfig` 模式）。
 
@@ -198,21 +235,29 @@ descriptor 与 connect 间共享（GitHub `validateRepoFilterConfig` 模式）�
 ## 风险与约束
 
 - **a1 退出码会说谎**——每次读取都解析 JSON 形状；单仓库的权限错误
-  （`SYSTEM_FORBIDDEN_ERROR`）使该仓库本轮轮询失败并退避，而非静默跳过。
+  （`SYSTEM_FORBIDDEN_ERROR`）使该仓库本轮轮询失败并退避，而非静默跳过；
+  逐仓库隔离保证其余监听仓库继续轮询。
 - **事件窗口丢失**——停机 > 3 天丢失更旧事件（v1 限制）。
-- **洪水 fail-closed**——单仓库单轮 >1000 条新评论时抛错而非丢缺口；
-  持续洪水会让该仓库停摆并持续报可见错误。
+- **洪水有界而非楔死**——积压 >1000 时走到窗口尾部、每轮派发最旧 100 条
+  （余量后续排空）；只有超出平台 100 页可寻址窗口的积压才抛错。持续洪水
+  若重于排空速率，老于 3 天窗口的事件仍会老化丢失——有界切片让 channel
+  保持存活，丢失来自窗口而非静默的游标跳跃。
 - **写一次性**——失败的评论创建会被浮现但绝不重试；瞬时写失败可能丢
   agent 回复（与 review provider 相同的取舍）。
-- **共享主机认证**——channel 以主机上 a1 登录账号的身份行事；发送者
-  门禁（`allowedUsers`、`groupPolicy`）是访问边界。
+- **共享主机认证**——channel 以主机上 a1 登录账号的身份行事。访问边界是
+  `groupPolicy` 加 **GROUP** 发送者门禁（`groups[<repo>].senders` /
+  `groups[<repo>].allowedUsers`）；顶层 `allowedUsers` 不作用于本 channel
+  的 group 形态流量。随附配置示例在两层都收紧（allowlist）。
 
 ## 验证计划
 
 - 单元测试（同目录，mock a1 exec 接缝）：触发匹配/剥离；游标基线/推进/
-  校验；派发过滤（自身/非 MR/无前缀）；exit 0 与 1 的错误对象处理；
-  出站 argv；envelope 字段；翻页 + 溢出 fail-closed；逐事件游标保存；
-  失败隔离（派发失败后继续、跨仓库磁盘持久化）。
+  校验/剪枝；派发过滤（自身/非 MR/无前缀）；exit 0 与 1 的错误对象处理；
+  出站 argv；envelope 字段；翻页边界去重、满页第 10 页内命中游标即停、
+  溢出走尾 + 有界最旧切片 + 排空推进、平台窗口防御性抛错；逐事件游标
+  保存；失败隔离（派发失败后继续、跨仓库磁盘持久化、坏仓库在前不饿死
+  后续）；view 负缓存；空模板回落；createdAt 不可解析诊断；descriptor
+  groupPolicy 缺省。变异见证：去重、逐仓库隔离、溢出走尾、游标命中即停。
 - 线上只读冒烟：真实 `a1 events repo middleware/tddl5` 拉取+解析，
   不派发、不写（环境变量门控）。
 - 全链路 E2E（PATH 上打桩 a1： canned whoami/events；comment create

@@ -61,12 +61,17 @@ interface AoneCommentEvent {
 
 const PAGE_SIZE = 100;
 /**
- * Overflow bound: a full page 10 whose events are all newer than the cursor
- * means the backlog exceeds one poll's budget. Dispatching the newest slice
- * would advance the cursor past the older gap and lose it silently, so the
- * poll throws instead (base backoff, cursor untouched, visible error).
+ * Normal fetch budget. A backlog deeper than this switches to the overflow
+ * walk (see pollRepo): keep paging to the tail so the cursor-side gap is
+ * never crossed, then dispatch a bounded oldest slice. Throwing here instead
+ * wedged the repo for as long as the backlog lasted, and the sliding window
+ * then silently dropped the very gap the throw claimed to preserve.
  */
 const MAX_PAGES = 10;
+/** a1 caps --page at 100; a full page 100 is beyond the addressable window. */
+const PLATFORM_MAX_PAGES = 100;
+/** Overflow polls dispatch at most this many (oldest) events; rest next poll. */
+const OVERFLOW_DISPATCH_BUDGET = PAGE_SIZE;
 
 const DEFAULT_PROMPT_TEMPLATE =
   'Aone CR %repo% !%mr_id% (iid %mr_iid%) | author: %author% | comment: %comment_id%';
@@ -174,6 +179,17 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
   async connect(): Promise<void> {
     const cfg = this.config as AoneConfig;
     this.repos = normalizeRepos(cfg.repos, this.name);
+    // Prune cursor keys for repos no longer watched: a stale key would skip
+    // the first-observation baseline when the repo is re-added later and
+    // replay its whole 3-day window as "new".
+    let pruned = false;
+    for (const key of Object.keys(this.cursor.repos)) {
+      if (!this.repos.includes(key)) {
+        delete this.cursor.repos[key];
+        pruned = true;
+      }
+    }
+    if (pruned) this.saveCursor();
     this.prefixes = normalizeTriggerPrefixes(cfg.triggerPrefixes, this.name);
     if (cfg.promptTemplate !== undefined) {
       if (typeof cfg.promptTemplate !== 'string') {
@@ -181,7 +197,11 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
           `[Channel:${this.name}] promptTemplate must be a string.`,
         );
       }
-      this.promptTemplate = cfg.promptTemplate;
+      // The descriptor documents "leave empty for the default template";
+      // an empty string must not silently strip the CR context header.
+      this.promptTemplate = cfg.promptTemplate.trim()
+        ? cfg.promptTemplate
+        : DEFAULT_PROMPT_TEMPLATE;
     }
 
     if (
@@ -249,9 +269,23 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
 
   protected async pollOnce(): Promise<void> {
     this.viewCache.clear();
+    const failures: unknown[] = [];
     for (const repo of this.repos) {
-      await this.pollRepo(repo);
+      try {
+        await this.pollRepo(repo);
+      } catch (err) {
+        // Per-repo isolation: a broken repo must not starve the repos after
+        // it in the watch list (the base loop restarts from repos[0] on a
+        // failed poll, so an uncaught throw skips every later repo forever).
+        failures.push(err);
+        process.stderr.write(
+          `[Channel:${this.name}] poll failed for ${repo}: ${err}\n`,
+        );
+      }
     }
+    // Rethrow so the base loop records a failed poll and backs off — every
+    // repo still got its turn this round.
+    if (failures.length > 0) throw failures[0];
   }
 
   private async pollRepo(repo: string): Promise<void> {
@@ -266,26 +300,55 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
     }
 
     const fresh: AoneCommentEvent[] = [];
+    // Offset pagination over a newest-first list can repeat a boundary event
+    // when a comment lands between two page fetches and shifts every offset;
+    // dedupe by id so one comment is never dispatched twice in one poll.
+    const seen = new Set<number>();
     let reachedCursor = false;
-    for (let page = 1; page <= MAX_PAGES; page++) {
+    let overflow = false;
+    for (let page = 1; ; page++) {
       const events = await this.fetchEventsPage(repo, page);
       for (const event of events) {
         if (event.id <= cursorId) reachedCursor = true;
-        else fresh.push(event);
+        else if (!seen.has(event.id)) {
+          seen.add(event.id);
+          fresh.push(event);
+        }
       }
       if (reachedCursor || events.length < PAGE_SIZE) break;
-      if (page === MAX_PAGES) {
+      if (page === MAX_PAGES) overflow = true;
+      if (page === PLATFORM_MAX_PAGES) {
+        // Beyond the platform's addressable window (100 pages); the cursor
+        // stays put and the error is visible. Defensive: the window cannot
+        // legitimately hold more than this.
         throw new AoneCommandError(
-          `comment events backlog for ${repo} exceeds ${MAX_PAGES * PAGE_SIZE} events in one poll; not dispatching a partial window (cursor unchanged)`,
+          `comment events backlog for ${repo} exceeds the platform window (${PLATFORM_MAX_PAGES * PAGE_SIZE} events); cursor unchanged`,
         );
       }
     }
 
     fresh.sort((a, b) => a.id - b.id);
-    for (const event of fresh) {
+    // Overflow: the walk reached the tail, so `fresh` is complete and the
+    // oldest slice sits right above the cursor — dispatching it advances the
+    // cursor without crossing any unfetched gap. The remainder drains on
+    // later polls (bounded agent turns per poll even under a flood).
+    const slice = overflow ? fresh.slice(0, OVERFLOW_DISPATCH_BUDGET) : fresh;
+    if (overflow && fresh.length > slice.length) {
+      process.stderr.write(
+        `[Channel:${this.name}] backlog overflow for ${repo}: dispatching oldest ${slice.length} of ${fresh.length} events; remainder next poll\n`,
+      );
+    }
+    for (const event of slice) {
       // Events before channel creation never dispatch (empty-window baseline
-      // floor). An unparseable createdAt compares NaN → skipped, fail-closed.
-      if (Date.parse(event.createdAt ?? '') >= this.baselineMs) {
+      // floor). An unparseable createdAt is skipped fail-closed but MUST be
+      // visible: a payload drift would otherwise mute the channel silently
+      // while the cursor advances past every event.
+      const createdMs = Date.parse(event.createdAt ?? '');
+      if (Number.isNaN(createdMs)) {
+        process.stderr.write(
+          `[Channel:${this.name}] unparseable createdAt on event ${event.id} (${String(event.createdAt)}); skipping\n`,
+        );
+      } else if (createdMs >= this.baselineMs) {
         try {
           await this.dispatchEvent(repo, event);
         } catch (err) {
@@ -422,15 +485,25 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
     const key = `${repo}#${mrId}`;
     const cached = this.viewCache.get(key);
     if (cached) return cached;
-    const raw = await runA1Json<{
-      mergeRequest?: { title?: unknown; detailUrl?: unknown };
-    }>(['repo', 'mr', 'view', String(mrId), '--repo', repo]);
-    const mr = raw?.mergeRequest;
-    // detailUrl is the ONLY sanctioned Aone CR URL source — never assembled.
-    const view = {
-      title: typeof mr?.title === 'string' ? mr.title : '',
-      url: typeof mr?.detailUrl === 'string' ? mr.detailUrl : '',
-    };
+    let view: { title: string; url: string };
+    try {
+      const raw = await runA1Json<{
+        mergeRequest?: { title?: unknown; detailUrl?: unknown };
+      }>(['repo', 'mr', 'view', String(mrId), '--repo', repo]);
+      const mr = raw?.mergeRequest;
+      // detailUrl is the ONLY sanctioned Aone CR URL source — never assembled.
+      view = {
+        title: typeof mr?.title === 'string' ? mr.title : '',
+        url: typeof mr?.detailUrl === 'string' ? mr.detailUrl : '',
+      };
+    } catch (err) {
+      // Negative cache: a failing view costs ONE call per MR per poll, not
+      // one per event (N events × the 20s timeout could outlast the poll
+      // interval). The entry lives in the same per-poll cache pollOnce
+      // clears, so it cannot leak across polls.
+      this.viewCache.set(key, { title: '', url: '' });
+      throw err;
+    }
     this.viewCache.set(key, view);
     return view;
   }

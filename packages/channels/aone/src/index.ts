@@ -32,6 +32,24 @@ export const plugin: ChannelPlugin = {
           '(case-insensitive). The matched prefix is stripped from the prompt. Example: qwen:',
       },
       {
+        key: 'groupPolicy',
+        label: 'Group Policy',
+        kind: 'enum',
+        required: true,
+        description:
+          'Every Aone inbound is group-shaped (repository traffic), so this gates dispatch. ' +
+          '"Open" admits any watched repository; "Allowlist" requires the repository listed under groups; ' +
+          '"Pairing" requires one-time group approval. Declared here (default open) because the shared ' +
+          'injected field defaults to disabled, which would dispatch nothing.',
+        default: 'open',
+        options: [
+          { value: 'open', label: 'Open' },
+          { value: 'allowlist', label: 'Allowlist' },
+          { value: 'pairing', label: 'Pairing' },
+          { value: 'disabled', label: 'Disabled' },
+        ],
+      },
+      {
         key: 'promptTemplate',
         label: 'Prompt Metadata Template',
         kind: 'string',
