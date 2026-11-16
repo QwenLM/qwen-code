@@ -4370,11 +4370,13 @@ describe('task activity key', () => {
       entry!.click();
     });
     await flush();
-    expect(
-      container.querySelector(
-        '[data-testid="environment-panel"]:not([hidden])',
-      ),
-    ).not.toBeNull();
+    const panel = container.querySelector(
+      '[data-testid="environment-panel"]:not([hidden])',
+    );
+    expect(panel).not.toBeNull();
+    // The entry must reveal the artifact list, not just open the panel shell.
+    expect(panel?.textContent).toContain('report.html');
+    expect(panel?.textContent).toContain('chart.html');
   });
 
   it('hides the header artifacts entry when the session has no artifacts', async () => {
@@ -4389,6 +4391,56 @@ describe('task activity key', () => {
     expect(
       container.querySelector('[data-web-shell-artifacts-entry]'),
     ).toBeNull();
+  });
+
+  it('exposes the artifact count and opener to a custom chat header', async () => {
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    mockSessionActions.loadArtifacts.mockResolvedValue({
+      artifacts: [
+        {
+          id: 'report',
+          kind: 'html',
+          storage: 'workspace',
+          source: 'tool',
+          status: 'available',
+          title: 'report',
+          workspacePath: 'report.html',
+          clientRetained: false,
+          createdAt: '2026-09-07T00:00:00.000Z',
+          updatedAt: '2026-09-07T00:00:00.000Z',
+        },
+      ],
+    });
+    const renderChatHeader = vi.fn(
+      ({ artifactCount, onOpenArtifacts }: ChatHeaderRenderInfo) => (
+        <button type="button" onClick={onOpenArtifacts}>
+          Custom artifacts {artifactCount}
+        </button>
+      ),
+    );
+    const { container } = renderApp({ renderChatHeader });
+    await flush();
+
+    expect(renderChatHeader).toHaveBeenCalledWith(
+      expect.objectContaining({
+        artifactCount: 1,
+        onOpenArtifacts: expect.any(Function),
+      }),
+    );
+    await act(async () => {
+      Array.from(container.querySelectorAll('button'))
+        .find((button) => button.textContent === 'Custom artifacts 1')!
+        .click();
+    });
+    await flush();
+    expect(
+      container.querySelector(
+        '[data-testid="environment-panel"]:not([hidden])',
+      ),
+    ).not.toBeNull();
   });
 
   it('persists the environment panel open state across reloads', async () => {

@@ -283,23 +283,47 @@ describe('SessionArtifactStore', () => {
   }
 
   it('listRestored returns the current artifacts in insert order for the load response', async () => {
+    const sessionId = 's-early';
     const store = new SessionArtifactStore({
-      sessionId: 's-early',
+      sessionId,
       workspaceCwd: workspace,
     });
-    await store.upsertMany(
-      [
-        { title: 'First', source: 'client', url: 'https://example.com/first' },
-        {
-          title: 'Second',
-          source: 'client',
-          url: 'https://example.com/second',
-        },
+    const urlA = 'https://example.com/alpha';
+    const urlB = 'https://example.com/beta';
+    const idA = stableSessionArtifactId(sessionId, `url:${urlA}`);
+    const idB = stableSessionArtifactId(sessionId, `url:${urlB}`);
+    const link = (id: string, url: string, title: string) => ({
+      id,
+      kind: 'link' as const,
+      storage: 'external_url' as const,
+      source: 'client' as const,
+      status: 'available' as const,
+      title,
+      url,
+      retention: 'restorable' as const,
+      clientRetained: true,
+      createdAt: '2026-07-04T00:00:00.000Z',
+      updatedAt: '2026-07-04T00:00:00.000Z',
+    });
+    // The repeated identity (idA) is re-set during restore: it keeps its early
+    // Map slot but receives a later insertSeq, so Map iteration order diverges
+    // from insertSeq order. Only a real sort yields ['Beta', 'Alpha final'];
+    // dropping the sort would return the Map order ['Alpha final', 'Beta'].
+    await store.restore({
+      v: 2,
+      sessionId,
+      sequence: 1,
+      artifacts: [
+        link(idA, urlA, 'Alpha'),
+        link(idB, urlB, 'Beta'),
+        link(idA, urlA, 'Alpha final'),
       ],
-      { strict: true },
-    );
+      tombstonedIds: [],
+      stickyEphemeralIds: [],
+      warnings: [],
+    });
     const restored = await store.listRestored();
-    expect(restored.map((item) => item.title)).toEqual(['First', 'Second']);
+    expect(restored.map((item) => item.title)).toEqual(['Beta', 'Alpha final']);
     expect(restored).toEqual((await store.list()).artifacts);
   });
 

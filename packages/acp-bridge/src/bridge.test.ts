@@ -7315,6 +7315,18 @@ describe('createAcpSessionBridge', () => {
       ],
     });
 
+    // A warm re-attach (page reload / second tab on the still-live session)
+    // takes the already-live restore branch; it must carry the same snapshot
+    // so the header entry is early on the most common re-open path too.
+    const reattached = await bridge.loadSession({
+      sessionId,
+      workspaceCwd: WS_A,
+    });
+    expect(reattached.attached).toBe(true);
+    expect(reattached.artifacts).toMatchObject([
+      { id: artifactId, title: 'Restored link', url: artifactUrl },
+    ]);
+
     await bridge.shutdown();
   });
 

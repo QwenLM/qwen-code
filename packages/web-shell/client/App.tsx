@@ -22791,6 +22791,10 @@ export function App({
     sessionWorktree,
     gitStatusTarget,
   ]);
+  // Bumped when the header artifact entry opens the panel, so the panel
+  // expands its artifacts section even if the user had collapsed it (the
+  // panel hides rather than unmounts, so its local section state persists).
+  const [artifactsExpandSignal, setArtifactsExpandSignal] = useState(0);
   const handleEnvironmentPanelOpenChange = useCallback(
     (open: boolean) => {
       persistEnvironmentPanelOpen(open);
@@ -24279,6 +24283,20 @@ export function App({
                                 ),
                             }
                           : {}),
+                        artifactCount:
+                          artifactsHeaderItemVisible && mainView === 'chat'
+                            ? artifacts.length
+                            : undefined,
+                        onOpenArtifacts:
+                          artifactsHeaderItemVisible &&
+                          mainView === 'chat' &&
+                          environmentPanelItems.includes('artifacts') &&
+                          connection.sessionId
+                            ? () => {
+                                handleEnvironmentPanelOpenChange(true);
+                                setArtifactsExpandSignal((value) => value + 1);
+                              }
+                            : undefined,
                         onOpenLocalControlSettings:
                           showMobileAccess && workspaceContextActive
                             ? handleOpenLocalControlSettings
@@ -24360,7 +24378,10 @@ export function App({
                         mainView === 'chat' &&
                         environmentPanelItems.includes('artifacts') &&
                         connection.sessionId
-                          ? () => handleEnvironmentPanelOpenChange(true)
+                          ? () => {
+                              handleEnvironmentPanelOpenChange(true);
+                              setArtifactsExpandSignal((value) => value + 1);
+                            }
                           : undefined
                       }
                       onOpenLocalControlSettings={
@@ -26697,6 +26718,7 @@ export function App({
                 }
                 artifacts={artifacts}
                 artifactsLoading={artifactsLoading}
+                artifactsExpandSignal={artifactsExpandSignal}
                 items={environmentPanelItems}
                 onOpenGitDiff={
                   workspaceContextActive && gitDiffWorkspaceCwd

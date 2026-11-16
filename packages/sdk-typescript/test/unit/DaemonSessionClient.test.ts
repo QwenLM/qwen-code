@@ -1947,7 +1947,7 @@ describe('DaemonSessionClient', () => {
     expect(session.replayDegraded).toBe(true);
   });
 
-  it('surfaces restoredArtifacts from workspace load and standalone load/resume', async () => {
+  it('surfaces restoredArtifacts from workspace load/resume and standalone load/resume', async () => {
     const artifacts = [{ id: 'a1', title: 'T' }];
     const payload = (standalone: boolean) => ({
       sessionId: 's-1',
@@ -1980,6 +1980,10 @@ describe('DaemonSessionClient', () => {
       workspaceCwd: '/work/a',
     });
     expect(ws.restoredArtifacts).toEqual(artifacts);
+    const wr = await DaemonSessionClient.resume(makeClient(false), 's-1', {
+      workspaceCwd: '/work/a',
+    });
+    expect(wr.restoredArtifacts).toEqual(artifacts);
     const ls = await DaemonSessionClient.loadStandalone(
       makeClient(true),
       's-1',

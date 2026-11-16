@@ -80,7 +80,10 @@ replay。只要列表早到，入口就能早显示。
   已恢复的快照；workspace 状态由随后正常的门控 `/artifacts` 拉取刷新。
 - 在 bridge 恢复路径 `entry.artifacts.restore(...)` 之后，把该 accessor 的
   artifact 数组作为可选 `artifacts` 字段加入 load/resume 响应。会话无产物或
-  artifact 持久化不可用时省略该字段，使载荷保持小、旧客户端不受影响。
+  artifact 持久化不可用时省略该字段，使载荷保持小、旧客户端不受影响。「已存活
+  会话」的 attach 返回（daemon 仍持有该会话时刷新页面/开第二个标签页，以及与其
+  他注册竞态的恢复）也经同一廉价 accessor 携带相同快照，使最常见的「回到本会话」
+  路径同样早显示入口，而不仅是冷恢复。
 - `packages/cli/src/serve` 的恢复路由已经通过 `redactSdkSurfaceReplay` 转发
   bridge 响应；确保 artifact 数组不被脱敏（其中不含 skill 正文）。
 

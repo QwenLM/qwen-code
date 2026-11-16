@@ -100,7 +100,10 @@ Relevant baseline behavior (before this change):
   accessor's artifact array in the load/resume response as an optional
   `artifacts` field. Omit it when the session has no artifacts or when artifact
   persistence is unavailable, so the payload stays small and older clients are
-  unaffected.
+  unaffected. The already-live attach returns (a page reload / second tab on a
+  session the daemon still holds, and a restore that raced another registration)
+  carry the same snapshot via the same cheap accessor, so the entry is early on
+  the common re-open path too, not only on a cold restore.
 - The `packages/cli/src/serve` restore route already forwards the bridge
   response through `redactSdkSurfaceReplay`; ensure the artifact array passes
   through unredacted (it contains no skill bodies).
