@@ -972,6 +972,40 @@ describe('gitCheckout with a dirty working tree', () => {
     },
   );
 
+  it.skipIf(process.platform === 'win32')(
+    'stash capture does not adopt a label-only foreign entry',
+    async () => {
+      const dir = dirtyCheckoutFixture();
+      const env = gitShim(hermeticEnv(), [
+        // A terminal or an older client stashes with the documented label
+        // but no nonce, immediately before our push (making ours a no-op).
+        // The capture's subject carries this request's nonce, so the
+        // label-only entry must not satisfy endsWith.
+        {
+          match: '"stash push"*',
+          before:
+            '"$REAL" stash push --include-untracked -m "qwen-code: auto-stash before checkout"',
+        },
+      ]);
+
+      const failure = await checkoutFails(
+        dir,
+        'missing-branch',
+        { stash: true },
+        'checkout_failed',
+        env,
+      );
+
+      expect(failure.stashSha).toBeUndefined();
+      expect(failure.message).not.toContain('restored');
+      const entries = stashList(dir);
+      expect(entries).toHaveLength(1);
+      expect(entries[0]).toContain('qwen-code: auto-stash before checkout');
+      expect(failure.message).toContain('missing-branch');
+      expect(read(dir, 'a.txt')).toBe('one\n');
+    },
+  );
+
   it('stash checkout types the refusal when git cannot stash an intent-to-add entry', async () => {
     const dir = dirtyCheckoutFixture();
     write(dir, { 'new.txt': 'new\n' });
@@ -2853,8 +2887,10 @@ describe('gitPull with a dirty working tree', () => {
 
     await bothRefused(dir, 'operation_in_progress');
 
-    // The parameterised refusal carries the PULL action word on this
-    // arm (the checkout flows say "cannot checkout").
+    // The refusal carries the PULL action word ("cannot update"; the
+    // checkout flows say "cannot checkout"). It comes from stashPull's
+    // own pre-push guard, which fires before pushAutoStash's
+    // parameterised guard is reached.
     const pullFailure = await pullFails(
       dir,
       { stash: true },

@@ -375,6 +375,51 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
     expect(JSON.stringify(response.body)).not.toContain(dir);
   });
 
+  it('classifies a plain pull directory-collision refusal as dirty_working_tree', async () => {
+    const dir = makeRepo();
+    const clone = makeUpstream(dir);
+    // The upstream tracks a FILE at path d while the local tree holds d
+    // as an untracked directory: the merge refuses with the
+    // directory-collision shape. Plain pull throws git's error raw, so
+    // the shared classifier types it — the alternation reaches pull, not
+    // just checkout.
+    commitAndPush(clone, 'd', 'remote\n');
+    fs.mkdirSync(path.join(dir, 'd'));
+    fs.writeFileSync(path.join(dir, 'd', 'blocker.txt'), 'local\n');
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/pull')
+      .send({});
+
+    expect(response.status).toBe(409);
+    expect(response.body.error).toBe('dirty_working_tree');
+    expect(JSON.stringify(response.body)).not.toContain(dir);
+  });
+
+  it('classifies a branch-creation directory-collision refusal as dirty_working_tree', async () => {
+    const dir = makeRepo();
+    const mainBranch = git(dir, 'branch', '--show-current').trim();
+    // A start point tracking a FILE at path d while the worktree holds d
+    // as an untracked directory: checkout -b refuses with the same shape,
+    // and branch creation routes its raw git error through the same
+    // classifier.
+    git(dir, 'checkout', '-q', '-b', 'start');
+    fs.writeFileSync(path.join(dir, 'd'), 'tracked\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'track d as a file');
+    git(dir, 'checkout', '-q', mainBranch);
+    fs.mkdirSync(path.join(dir, 'd'));
+    fs.writeFileSync(path.join(dir, 'd', 'blocker.txt'), 'local\n');
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/branch')
+      .send({ name: 'created', startPoint: 'start' });
+
+    expect(response.status).toBe(409);
+    expect(response.body.error).toBe('dirty_working_tree');
+    expect(JSON.stringify(response.body)).not.toContain(dir);
+  });
+
   // The classifier is shared by every workspace git route, so the file that
   // owns it must be able to go red when the table changes — including the
   // remote-specific branches the remotes routes depend on.

@@ -13,13 +13,14 @@
 工作区 git checkout 路径（分支选择器弹层 → SDK `workspaceGitCheckout` →
 `POST /workspace(s)/git/checkout` → core `gitCheckout`）执行的是裸的
 `git checkout <ref> --`。当本地修改或未跟踪文件会被切换覆盖时，git 拒绝。
-路由已经把这些拒绝形态都归类为 `409 dirty_working_tree`（分类器匹配
-`dirty|uncommitted|would be overwritten|would lose untracked`，覆盖 git 的
-"Your local changes … would be overwritten by checkout"、"The following
-untracked working tree files would be overwritten by checkout"、以及
-目录碰撞的兄弟形态 "Updating the following directories would lose
-untracked files in them"——未跟踪目录挡住目标分支以文件跟踪的路径），
-但弹层只是把错误字符串渲染在 footer 里——没有任何可操作的出口。
+路由把文件碰撞的拒绝形态归类为 `409 dirty_working_tree`（分类器匹配
+`dirty|uncommitted|would be overwritten`，覆盖 git 的 "Your local
+changes … would be overwritten by checkout" 与 "The following untracked
+working tree files would be overwritten by checkout"），但弹层只是把
+错误字符串渲染在 footer 里——没有任何可操作的出口。目录碰撞的兄弟形态
+——"Updating the following directories would lose untracked files in
+them"，未跟踪目录挡住目标分支以文件跟踪的路径——一个关键词都不命中，
+落进未分类的 500，是同一类死胡同。
 
 典型成因是早前工作的残留：上一个会话留下的编辑、或构建产生的新文件，
 挡住了切换到另一个分支。pull 路径已经用 stash 或放弃两种解决方式回应同
@@ -100,6 +101,11 @@ untracked files in them"——未跟踪目录挡住目标分支以文件跟踪�
   完成臂里残留 clean 是尽力而为——其错误被吞掉，让 hook 拒绝保持为
   被报告的失败，残留可能幸存。
 
+阻塞的未跟踪目录里的 ignored 残留不会被保留：git 在切换过程中自己
+丢弃挡路的 ignored 文件，两种解决方式皆然（已探针证实），与文件碰撞
+形态完全一致。stash 条目保存的是已跟踪修改与非 ignored 的未跟踪文件；
+「你的修改被保留」不覆盖 ignored 的构建产物。
+
 两个选项在 worktree 里停着 merge、cherry-pick、revert、rebase 或 am 时
 都会被拒绝（`409 operation_in_progress`）：破坏性命令会吸收或扰动这些
 状态——已解决但未提交的 merge 只存在于 `MERGE_HEAD` 里。探针紧挨着
@@ -113,7 +119,8 @@ push 前的守卫不 stash 任何东西。
 是 stash checkout 成功时可选的 `stashSha` 字段、auto-stash 条目存活且
 SHA 可知的失败响应上携带的同名字段——保留恢复后的 `checkout_failed`、
 或 push 之后停放 merge 的 `operation_in_progress`（见下文）——以及目录
-碰撞拒绝：路由以往回未分类的 500，现在回 `409 dirty_working_tree`。
+碰撞拒绝：共享分类器以往回未分类的 500，现在回 `409 dirty_working_tree`，
+裸 checkout、建分支与裸 pull 皆然。
 
 失败按 core 实际做了什么来分类，而不是匹配 git 的文本：新的
 `GitCheckoutFailure` 携带稳定码 `operation_in_progress`、
@@ -121,8 +128,11 @@ SHA 可知的失败响应上携带的同名字段——保留恢复后的 `check
 脱敏后的消息，与它处理 `GitPullFailure` 的方式完全一致。共享 helper
 （`refuseOperationInProgress`、`pushAutoStash`）增加一个动作词参数，
 默认保持 pull 的措辞；`restoreStash` 原样复用，因为它的提示与动作无关。
-分类器为目录碰撞拒绝新增了 `would lose untracked` 分支；其余分支不变，
-裸 checkout 仍被覆盖。
+分类器为目录碰撞拒绝新增了 `would lose untracked` 分支；其余分支不变。
+分类器为所有工作区 git 路由共享，因此凡 git 裸错误能到达之处，该分支
+都会把这一拒绝形态归类——裸 checkout、建分支（`checkout -b`）与裸
+pull 皆然；stash 与 force pull 流程在分类器之前就把更新失败类型化，
+它们的响应不变。
 
 ## UI
 
@@ -299,7 +309,8 @@ SDK 的 `workspaceGitCheckout`（legacy 与 workspace 限定两个方法）接�
 - 因本地修改被拒的 checkout 提供 stash 与放弃两种解决方式，且都能端到端
   完成切换。
 - 裸 checkout 的调用不变；目录碰撞拒绝的响应从无分类 500 变为
-  `409 dirty_working_tree`。
+  `409 dirty_working_tree`——凡 git 裸错误到达共享分类器的路由皆然：
+  裸 checkout、建分支与裸 pull。
 - 上文列出的每道守卫都有一个"没有它就失败"的测试。
 - 设计文档双语齐备；lint、typecheck、build 与聚焦单测通过。
 
