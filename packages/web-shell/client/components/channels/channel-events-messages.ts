@@ -58,6 +58,11 @@ export const CHANNEL_EVENTS_MESSAGES_EN: Record<string, ChannelEventsMessage> =
       `${v?.count ?? 0} consecutive binding scan${v?.count === 1 ? '' : 's'}`,
     'channelEvents.sessions': (v) =>
       `${v?.count ?? 0} session${v?.count === 1 ? '' : 's'} listed`,
+    // Both numbers, not just the reason: 199/200 is a near-boundary trip on a
+    // shared token while 12/200 means mentions are about to starve, and the
+    // reserve confirms what is actually in force after an operator edits it.
+    'channelEvents.budget': (v) =>
+      `budget ${v?.remaining ?? 0} remaining, reserve ${v?.reserve ?? 0}`,
     'channelEvents.openTarget': (v) => `Open ${v?.target ?? ''} on GitHub`,
     'channelEvents.openSession': 'Open session',
   };
@@ -104,6 +109,8 @@ export const CHANNEL_EVENTS_MESSAGES_ZH: Record<string, ChannelEventsMessage> =
     'channelEvents.session': (v) => `会话 ${v?.id ?? ''}`,
     'channelEvents.streak': (v) => `连续 ${v?.count ?? 0} 次绑定扫描`,
     'channelEvents.sessions': (v) => `列出 ${v?.count ?? 0} 个会话`,
+    'channelEvents.budget': (v) =>
+      `预算剩余 ${v?.remaining ?? 0}，预留 ${v?.reserve ?? 0}`,
     'channelEvents.openTarget': (v) => `在 GitHub 上打开 ${v?.target ?? ''}`,
     'channelEvents.openSession': '打开会话',
   };

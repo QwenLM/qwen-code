@@ -39,6 +39,23 @@ class ManagedHistoryMaintenanceRecordsTest {
     }
 
     @Test
+    void newOperationsCarryStatisticsWithoutMigratingLegacyChains() {
+        ObjectNode legacy = record("admitted", "admitted", 0);
+        ObjectNode current = legacy.deepCopy().put("schemaVersion", 2).putNull("modelStatsRef");
+        assertThat(ManagedHistoryMaintenanceRecords.isStart(current)).isTrue();
+        ObjectNode generating = record("generating", "running", 1).put("schemaVersion", 2).putNull("modelStatsRef");
+        assertThat(ManagedHistoryMaintenanceRecords.isSuccessor(current, generating)).isTrue();
+        assertThat(ManagedHistoryMaintenanceRecords.isSuccessor(legacy, generating)).isFalse();
+        ObjectNode candidate = generating.deepCopy().put("phase", "candidate");
+        candidate.set("candidateRef", ref("candidate"));
+        candidate.set("modelStatsRef", ref("statistics").put("kind", ManagedModelDiagnostics.STATS_KIND));
+        assertThat(ManagedHistoryMaintenanceRecords.isSuccessor(generating, candidate)).isTrue();
+        candidate.withObject("/modelStatsRef").put("kind", ManagedModelDiagnostics.MAIN_KIND);
+        assertThatThrownBy(() -> ManagedHistoryMaintenanceRecords.requireRecord(candidate))
+                .isInstanceOf(ManagedExtensionRecords.InvalidRecordException.class);
+    }
+
+    @Test
     void noopAndKnownFailureCannotCarryACompactionRevision() {
         for (String outcome : List.of("noop", "failed")) {
             ObjectNode settled = record("settled", outcome.equals("failed") ? "failed" : "settled", 1);

@@ -68,6 +68,12 @@ export const TOKEN_USAGE_MESSAGES_EN: Record<string, TokenUsageMessage> = {
     `p50 ${v?.p50 ?? ''} · p10–p90 ${v?.p10 ?? ''}–${v?.p90 ?? ''} tok/s`,
   'tokenUsage.failuresByKind': (v) => `Failed: ${v?.kinds ?? ''}`,
   'tokenUsage.unavailable': 'Token usage is unavailable for this session.',
+  'tokenUsage.bar.turns': (v) =>
+    `${v?.count ?? 0} ${Number(v?.count) === 1 ? 'turn' : 'turns'}`,
+  'tokenUsage.bar.tokens': (v) => `${v?.count ?? 0} tok`,
+  'tokenUsage.bar.cacheHit': (v) => `${v?.percent ?? 0}% cache hit`,
+  'tokenUsage.bar.detailTokens': (v) =>
+    `Total ${v?.total ?? 0} · Input ${v?.input ?? 0} (cache ${v?.cached ?? 0}) · Output ${v?.output ?? 0}`,
 };
 
 export const TOKEN_USAGE_MESSAGES_ZH: Record<string, TokenUsageMessage> = {
@@ -129,4 +135,9 @@ export const TOKEN_USAGE_MESSAGES_ZH: Record<string, TokenUsageMessage> = {
     `p50 ${v?.p50 ?? ''} · p10–p90 ${v?.p10 ?? ''}–${v?.p90 ?? ''} tok/s`,
   'tokenUsage.failuresByKind': (v) => `失败：${v?.kinds ?? ''}`,
   'tokenUsage.unavailable': '当前会话无法读取 Token 消耗。',
+  'tokenUsage.bar.turns': (v) => `${v?.count ?? 0} 轮`,
+  'tokenUsage.bar.tokens': (v) => `${v?.count ?? 0} tok`,
+  'tokenUsage.bar.cacheHit': (v) => `缓存命中 ${v?.percent ?? 0}%`,
+  'tokenUsage.bar.detailTokens': (v) =>
+    `总计 ${v?.total ?? 0} · 输入 ${v?.input ?? 0}（缓存 ${v?.cached ?? 0}） · 输出 ${v?.output ?? 0}`,
 };

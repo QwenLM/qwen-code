@@ -1,7 +1,8 @@
 package com.alibaba.qwen.code.managedagent.workspace.runtime;
 
 import com.alibaba.qwen.code.managedagent.VerificationFixtures;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -27,26 +28,78 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.time.Instant;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.same;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 class WorkspaceRuntimeTransportTest {
     @Test
+    void ordinaryExecutionKeepsItsRecordedSessionAcrossMeasurementFlagChangesButRejectsChangedScope() throws Exception {
+        for (String recordedProfile : List.of(WorkspaceExecutionProfile.CAPABILITY_DIGEST,
+                WorkspaceExecutionProfile.MEASURED_CAPABILITY_DIGEST)) {
+            var fixture = sshAcquisitionFixture(recordedProfile);
+            var original = fixture.session().getScope();
+            var binding = fixture.resolver().savedBinding(fixture.session().getHarnessSessionId());
+            String desiredProfile = WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(recordedProfile)
+                    ? WorkspaceExecutionProfile.MEASURED_CAPABILITY_DIGEST : WorkspaceExecutionProfile.CAPABILITY_DIGEST;
+            var desired = new RuntimeScope(original.getTenantId(), original.getWorkspaceId(), original.getWorkspaceGeneration(),
+                    original.getCanonicalCwd(), desiredProfile, original.getIsolationClass());
+            when(fixture.resolver().resolve(fixture.session().getHarnessSessionId(), null))
+                    .thenReturn(new WorkspaceRuntimeResolver.Resolved(binding, desired));
+            Map<String, Object> reference = Map.of("callId", "original-file-call", "toolName", "read_file",
+                    "input", Map.of("file_path", "fixture.txt"));
+            Map<String, Object> result = Map.of("executionStatus", "success", "responseParts", List.of());
+            when(fixture.http().execute(fixture.lease(), fixture.session(), reference))
+                    .thenReturn(CompletableFuture.completedFuture(result));
+
+            assertThat(fixture.transport().execute(fixture.lease(), fixture.session(), reference)
+                    .toCompletableFuture().join()).isEqualTo(result);
+            assertThat(fixture.session().getScope()).isSameAs(original);
+            assertThat(fixture.session().getScope().getCapabilityDigest()).isEqualTo(recordedProfile);
+            verify(fixture.http()).execute(same(fixture.lease()), same(fixture.session()), same(reference));
+            verify(fixture.sessions()).findById(original, fixture.session().getRuntimeSessionId());
+            verify(fixture.ownership()).assertHeld(binding, fixture.record());
+
+            for (var changed : List.of(
+                    new RuntimeScope("other-tenant", original.getWorkspaceId(), original.getWorkspaceGeneration(),
+                            original.getCanonicalCwd(), desiredProfile, original.getIsolationClass()),
+                    new RuntimeScope(original.getTenantId(), "other-workspace", original.getWorkspaceGeneration(),
+                            original.getCanonicalCwd(), desiredProfile, original.getIsolationClass()),
+                    new RuntimeScope(original.getTenantId(), original.getWorkspaceId(), "other-generation",
+                            original.getCanonicalCwd(), desiredProfile, original.getIsolationClass()),
+                    new RuntimeScope(original.getTenantId(), original.getWorkspaceId(), original.getWorkspaceGeneration(),
+                            original.getCanonicalCwd() + "/other", desiredProfile, original.getIsolationClass()),
+                    new RuntimeScope(original.getTenantId(), original.getWorkspaceId(), original.getWorkspaceGeneration(),
+                            original.getCanonicalCwd(), desiredProfile, "workspace"))) {
+                when(fixture.resolver().resolve(fixture.session().getHarnessSessionId(), null))
+                        .thenReturn(new WorkspaceRuntimeResolver.Resolved(binding, changed));
+                assertThat(fixture.transport().execute(fixture.lease(), fixture.session(), reference)
+                        .toCompletableFuture().join()).containsEntry("executionStatus", "not_started")
+                        .containsEntry("error", Map.of("type", "workspace_unavailable",
+                                "message", "Workspace execution was refused before dispatch."));
+            }
+            verifyNoMoreInteractions(fixture.http());
+        }
+    }
+
+    @Test
     void invalidRemoteCwdIsRejectedBeforeClaimingStorageOrInstallingContext() throws Exception {
         var fixture = sshAcquisitionFixture();
         var binding = fixture.resolver().savedBinding(fixture.session().getHarnessSessionId());
-        doThrow(com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable()).when(fixture.resolver())
+        doThrow(WorkspaceExecutionStore.unavailable()).when(fixture.resolver())
                 .verifyInstallable(binding, binding.getCwdRelative());
         unavailable(() -> fixture.transport().acquire(fixture.lease(), fixture.session()));
         verifyNoInteractions(fixture.ownership(), fixture.http());
@@ -133,7 +186,7 @@ class WorkspaceRuntimeTransportTest {
     @Test
     void dedicatedWorkspaceExemptionDoesNotOpenTheExistingGenericRoutes() throws Exception {
         var fixture = fixture();
-        when(fixture.resolver().resolve(any(), any())).thenThrow(com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable());
+        when(fixture.resolver().resolve(any(), any())).thenThrow(WorkspaceExecutionStore.unavailable());
         Map<String, Object> reference = Map.of("runtimeProtocol", 3, "callId", "original");
         unavailable(() -> fixture.transport().statusV3(fixture.lease(), fixture.session(), reference, 0));
         unavailable(() -> fixture.transport().cancelV3(fixture.lease(), fixture.session(), reference));
@@ -194,7 +247,7 @@ class WorkspaceRuntimeTransportTest {
         when(bindings.findById("binding-a")).thenReturn(runtime);
         var sessions = mock(RuntimeSessionRepository.class);
         var http = mock(HttpRuntimeTransport.class);
-        var transport = new WorkspaceRuntimeTransport(http, mock(WorkspaceExecutionStore.class), bindings, sessions,
+        var transport = new WorkspaceRuntimeTransport(http, mock(JdbcWorkspaceExecutionStore.class), bindings, sessions,
                 harness -> new ContextBinding("tenant", "workspace", 7, "storage", ".", "config", 1));
         for (String harness : new String[] {"harness-a", "harness-b"}) {
             var session = new RuntimeSession(harness, harness + "-turn", "continuation", scope);
@@ -276,6 +329,149 @@ class WorkspaceRuntimeTransportTest {
         verify(fixture.ownership(), never()).release(any(), any());
     }
 
+    @Test
+    void externalVerifierRunsBeforeClaimAndAfterActivationAndReclaim() throws Exception {
+        var events = new java.util.ArrayList<String>();
+        var activation = new CompletableFuture<Void>();
+        var fixture = externalFixture(runtime -> {
+            events.add("verify");
+            return CompletableFuture.completedFuture(null);
+        });
+        org.mockito.Mockito.doAnswer(invocation -> {
+            events.add("claim");
+            return null;
+        }).when(fixture.ownership()).claim(any(), any(), any(), any());
+        org.mockito.Mockito.doAnswer(invocation -> {
+            events.add("assertHeld");
+            return null;
+        }).when(fixture.ownership()).assertHeld(any(), any(), any(), any());
+        when(fixture.http().installContext(any(), any(), any(), any())).thenAnswer(invocation -> {
+            events.add("install");
+            return CompletableFuture.completedFuture(Map.of());
+        });
+        when(fixture.http().activateWorkspace(any(), any(), any(), org.mockito.ArgumentMatchers.eq(true)))
+                .thenAnswer(invocation -> {
+                    events.add("activate");
+                    return activation;
+                });
+        var acquired = fixture.transport().acquire(fixture.lease(), fixture.session()).toCompletableFuture();
+        assertThat(acquired).isNotDone();
+        assertThat(events).containsExactly("verify", "claim", "install", "activate");
+        activation.complete(null);
+        acquired.join();
+        assertThat(events).containsExactly("verify", "claim", "install", "activate", "verify", "assertHeld");
+        events.clear();
+        fixture.transport().reclaimMount(fixture.lease(), fixture.session()).toCompletableFuture().join();
+        assertThat(events).containsExactly("verify", "claim", "assertHeld");
+        verify(fixture.resolver(), never()).verifyInstallable(any(), any());
+    }
+
+    @Test
+    void externalPreclaimFailureOwnsNothingAndRestartReleaseStillDetachesWithoutMembership() throws Exception {
+        var fixture = externalFixture(runtime -> CompletableFuture.failedFuture(com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable()));
+        assertThatThrownBy(() -> fixture.transport().acquire(fixture.lease(), fixture.session()).toCompletableFuture().join())
+                .hasCauseInstanceOf(RuntimeBrokerException.class);
+        verify(fixture.ownership()).requireExternalExecution(any());
+        verify(fixture.ownership(), never()).claim(any(), any(), any(), any());
+        verifyNoInteractions(fixture.http());
+        when(fixture.sessions().findById(fixture.session().getScope(), fixture.session().getRuntimeSessionId()))
+                .thenReturn(fixture.record().withState(RuntimeSessionRecord.State.RELEASING, Instant.now()));
+        when(fixture.http().release(any(), any())).thenReturn(CompletableFuture.completedFuture(true));
+        when(fixture.http().activateWorkspace(any(), any(), any(), org.mockito.ArgumentMatchers.eq(false)))
+                .thenReturn(CompletableFuture.completedFuture(null));
+        assertThat(fixture.transport().release(fixture.lease(), fixture.session()).toCompletableFuture().join()).isTrue();
+        verify(fixture.http()).release(fixture.lease(), fixture.session());
+        verify(fixture.ownership()).release(any(), any(), any(), any());
+        when(fixture.sessions().findById(fixture.session().getScope(), fixture.session().getRuntimeSessionId()))
+                .thenReturn(fixture.record().withState(RuntimeSessionRecord.State.RELEASED, Instant.now()));
+        when(fixture.http().acknowledgeV2(any(), any(), any())).thenReturn(CompletableFuture.completedFuture(null));
+        fixture.transport().acknowledgeV2(fixture.lease(), fixture.session(), Map.of("callId", "original")).toCompletableFuture().join();
+        verify(fixture.ownership()).assertOriginalExternal(any(), any(), any(), any());
+        verify(fixture.http()).acknowledgeV2(fixture.lease(), fixture.session(), Map.of("callId", "original"));
+    }
+
+    @Test
+    void externalReclaimRefusesUnavailableRegistrationBeforeClaimingStorage() throws Exception {
+        var fixture = externalFixture(runtime -> CompletableFuture.completedFuture(null));
+        doThrow(com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable()).when(fixture.ownership()).requireExternalExecution(any());
+        unavailable(() -> fixture.transport().reclaimMount(fixture.lease(), fixture.session()));
+        verify(fixture.ownership(), never()).claim(any(), any(), any(), any());
+        verifyNoInteractions(fixture.http());
+    }
+
+    @Test
+    void externalPreparePermanentlyRefusesInvalidAndNonCanonicalPaths() throws Exception {
+        var fixture = externalFixture(runtime -> CompletableFuture.completedFuture(null));
+        for (String path : java.util.List.of("../etc", "src/../lib", "src//lib", "src/./lib", ".")) {
+            assertThatThrownBy(() -> fixture.transport().control(fixture.lease(), fixture.session(),
+                    Map.of("kind", "raw-file-history", "action", "prepare", "promptId", "prompt-1", "paths", java.util.List.of(path))))
+                    .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
+                        assertThat(error.getStatusCode()).isEqualTo(409);
+                        assertThat(error.getCode()).isEqualTo("workspace_unavailable");
+                        assertThat(error.isRetryable()).isFalse();
+                    });
+        }
+        verifyNoInteractions(fixture.http());
+    }
+
+    @Test
+    void externalFileAuxiliaryControlsPreserveOriginalHolderAndRejectOtherOperations() throws Exception {
+        var fixture = externalFixture(runtime -> CompletableFuture.completedFuture(null));
+        when(fixture.http().control(any(), any(), any())).thenReturn(CompletableFuture.completedFuture(Map.of()));
+        when(fixture.ownership().isHeld(any(), any(), any(), any())).thenReturn(true);
+        var bind = new LinkedHashMap<String, Object>();
+        bind.put("kind", "raw-file-history");
+        bind.put("action", "bind");
+        bind.put("state", null);
+        for (var operation : java.util.List.of(bind, Map.<String, Object>of("kind", "workspace-context"),
+                Map.<String, Object>of("kind", "raw-file-history", "action", "prepare", "promptId", "prompt-1", "paths", java.util.List.of("README.md")),
+                Map.<String, Object>of("kind", "raw-file-history", "action", "snapshot"))) {
+            fixture.transport().control(fixture.lease(), fixture.session(), operation).toCompletableFuture().join();
+            verify(fixture.http()).control(fixture.lease(), fixture.session(), operation);
+        }
+        org.mockito.Mockito.clearInvocations(fixture.http());
+        for (var operation : java.util.List.of(Map.<String, Object>of("kind", "history"),
+                Map.<String, Object>of("kind", "manifest"), Map.<String, Object>of("kind", "prepare"),
+                Map.<String, Object>of("kind", "raw-file-history"),
+                Map.<String, Object>of("kind", "raw-file-history", "action", "rewind", "promptId", "prompt-1"),
+                Map.<String, Object>of("kind", "workspace-context", "extra", true),
+                Map.<String, Object>of("kind", "raw-file-history", "action", "snapshot", "extra", true),
+                Map.<String, Object>of("kind", "raw-file-history", "action", "bind", "state", Map.of("ownerSessionId", "other")))) {
+            assertThatThrownBy(() -> fixture.transport().control(fixture.lease(), fixture.session(), operation))
+                    .isInstanceOf(RuntimeBrokerException.class);
+        }
+        verifyNoInteractions(fixture.http());
+        doThrow(com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable()).when(fixture.ownership()).requireExternalExecution(any());
+        unavailable(() -> fixture.transport().control(fixture.lease(), fixture.session(), Map.of("kind", "workspace-context")));
+        fixture.transport().control(fixture.lease(), fixture.session(), Map.of("kind", "raw-file-history", "action", "snapshot"))
+                .toCompletableFuture().join();
+        org.mockito.Mockito.clearInvocations(fixture.http());
+        when(fixture.ownership().isHeld(any(), any(), any(), any())).thenReturn(false);
+        unavailable(() -> fixture.transport().control(fixture.lease(), fixture.session(),
+                Map.of("kind", "raw-file-history", "action", "snapshot")));
+        verifyNoInteractions(fixture.http());
+    }
+
+    private static Fixture externalFixture(java.util.function.Function<RuntimeBindingRecord,
+            java.util.concurrent.CompletionStage<Void>> verifier) throws Exception {
+        var fixture = sshAcquisitionFixture();
+        var scope = fixture.session().getScope();
+        var request = new RuntimeProvisionRequest(scope, fixture.session().getHarnessSessionId(), "external-workspace", scope.getWorkspaceId());
+        var context = new ContextBinding(scope.getTenantId(), scope.getWorkspaceId(), Long.parseLong(scope.getWorkspaceGeneration()),
+                scope.getWorkspaceId(), ".", WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1);
+        var runtime = new RuntimeBindingRecord(fixture.runtime().getBindingId(), request, fixture.runtime().getProvisionSeed(),
+                fixture.runtime().getGeneration(), RuntimeBindingRecord.State.READY, fixture.lease(),
+                new RuntimeResourceHandle("external-workspace", 1, Map.of("component-only", true)), 3, false,
+                null, null, 0, 1, null, Instant.now(), Instant.now());
+        when(fixture.bindings().findById(runtime.getBindingId())).thenReturn(runtime);
+        when(fixture.resolver().savedBinding(fixture.session().getHarnessSessionId())).thenReturn(context);
+        when(fixture.resolver().resolve(fixture.session().getHarnessSessionId(), null))
+                .thenReturn(new WorkspaceRuntimeResolver.Resolved(context, scope));
+        return new Fixture(new WorkspaceRuntimeTransport(fixture.http(), fixture.resolver(), fixture.ownership(), fixture.bindings(),
+                fixture.sessions(), verifier), fixture.http(), fixture.resolver(), fixture.ownership(), fixture.bindings(), fixture.sessions(),
+                runtime, fixture.record(), fixture.lease(), fixture.session(), fixture.boot(), fixture.pod(), fixture.request(), fixture.capture());
+    }
+
     private static void unavailable(Runnable action) {
         assertThatThrownBy(action::run).isInstanceOf(RuntimeBrokerException.class)
                 .extracting(error -> ((RuntimeBrokerException) error).getCode()).isEqualTo("workspace_unavailable");
@@ -319,18 +515,22 @@ class WorkspaceRuntimeTransportTest {
         when(bindings.findById("binding-a")).thenReturn(runtime);
         var sessions = mock(RuntimeSessionRepository.class);
         when(sessions.findById(scope, session.getRuntimeSessionId())).thenReturn(record);
-        var ownership = mock(WorkspaceExecutionStore.class);
+        var ownership = mock(JdbcWorkspaceExecutionStore.class);
         var http = mock(HttpRuntimeTransport.class);
         return new Fixture(new WorkspaceRuntimeTransport(http, resolver, ownership, bindings, sessions), http, resolver,
                 ownership, bindings, sessions, runtime, record, lease, session, boot, map(fixture.get("expectedPod")), request, capture);
     }
 
     private static Fixture sshAcquisitionFixture() throws Exception {
+        return sshAcquisitionFixture(WorkspaceExecutionProfile.CAPABILITY_DIGEST);
+    }
+
+    private static Fixture sshAcquisitionFixture(String capabilityDigest) throws Exception {
         var fixture = fixture();
         var original = fixture.runtime();
         var oldScope = fixture.session().getScope();
         var scope = new RuntimeScope(oldScope.getTenantId(), oldScope.getWorkspaceId(), oldScope.getWorkspaceGeneration(),
-                oldScope.getCanonicalCwd(), oldScope.getCapabilityDigest(), "session");
+                oldScope.getCanonicalCwd(), capabilityDigest, "session");
         var session = new RuntimeSession(fixture.session().getHarnessSessionId(), fixture.session().getRuntimeSessionId(),
                 fixture.session().getTurnKind(), scope);
         var request = new RuntimeProvisionRequest(scope, session.getHarnessSessionId(), "ssh-process", original.getRequest().getStorageId());
@@ -350,7 +550,7 @@ class WorkspaceRuntimeTransportTest {
     }
 
     private record Fixture(WorkspaceRuntimeTransport transport, HttpRuntimeTransport http, WorkspaceRuntimeResolver resolver,
-            WorkspaceExecutionStore ownership, RuntimeBindingRepository bindings, RuntimeSessionRepository sessions,
+            JdbcWorkspaceExecutionStore ownership, RuntimeBindingRepository bindings, RuntimeSessionRepository sessions,
             RuntimeBindingRecord runtime, RuntimeSessionRecord record, RuntimeLease lease, RuntimeSession session,
             Map<String, Object> boot, Map<String, Object> pod, Map<String, Object> request, Map<String, Object> capture) {
     }

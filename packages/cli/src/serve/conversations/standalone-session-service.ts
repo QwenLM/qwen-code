@@ -265,6 +265,7 @@ export type StandaloneSessionLookup =
   | StandaloneSessionCreating;
 
 export interface ListStandaloneSessionsOptions {
+  sortBy?: 'updatedAt' | 'lastUserPromptAt';
   cursor?: string;
   size?: number;
   archiveState?: SessionArchiveState;
@@ -720,6 +721,7 @@ export class StandaloneSessionService {
         runtime.workspaceCwd,
         {
           conversationKind: 'standalone-top-level',
+          ...(options.sortBy !== undefined ? { sortBy: options.sortBy } : {}),
           ...(options.cursor !== undefined ? { cursor: options.cursor } : {}),
           ...(options.size !== undefined ? { size: options.size } : {}),
           ...(options.archiveState !== undefined

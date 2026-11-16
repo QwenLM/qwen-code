@@ -58,6 +58,8 @@ export default tseslint.config(
     ignores: [
       'node_modules/*',
       'packages/**/dist/**',
+      // Built host bundle; the glob above needs a literal `dist` segment.
+      'packages/web-shell/dist-managed-host/**',
       'packages/web-templates/src/generated/**',
       // Generated UTS #39 confusables table (6.5k-entry literal): the
       // type-aware rules OOM the eslint heap on it, and generated data

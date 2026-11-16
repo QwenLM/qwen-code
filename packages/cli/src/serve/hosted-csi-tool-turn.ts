@@ -12,7 +12,12 @@ import { convertToFunctionErrorResponse } from '@qwen-code/qwen-code-core/core/c
 import { ManagedSessionRecordError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { ManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
-import { CSI_FILES_RETIREMENT_CAPABILITY_DIGEST } from './managed-csi-file-profile.js';
+import {
+  CSI_FILES_RETIREMENT_CAPABILITY_DIGEST,
+  CSI_FILES_DIAGNOSTICS_CAPABILITY_DIGEST,
+  CSI_FILES_ACTIVITY_CAPABILITY_DIGEST,
+} from './managed-csi-file-profile.js';
+import { getManagedSessionDiagnostics } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-diagnostics.js';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
@@ -38,6 +43,11 @@ import {
   publishHostedCsiReceipt,
 } from './hosted-csi-tool-evidence.js';
 import { requireClosedHostedCsiHistory } from './hosted-csi-cold-recovery.js';
+import {
+  getManagedExecutionDiagnostics,
+  executionDiagnosticDigest,
+  type ManagedInvocationObservation,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-execution-diagnostics.js';
 
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value))
@@ -50,6 +60,7 @@ export type HostedCsiTurnCommit = (
   parts: Part[],
   model: string,
   identity?: Pick<ChatRecord, 'uuid' | 'timestamp'>,
+  diagnostics?: readonly ManagedInvocationObservation[],
 ) => Promise<string>;
 
 export class HostedCsiToolTurn {
@@ -116,7 +127,19 @@ export class HostedCsiToolTurn {
         );
         if (!this.messageFitsInline('tool_result', converted, model))
           throw new Error('CSI refusal exceeds the durable Session limit.');
-        parentMessageId = await this.commit('tool_result', converted, model);
+        const fact = getManagedExecutionDiagnostics(
+          this.session.authority,
+        )?.observation(call.callId);
+        if (fact) {
+          fact.admission = 'invalid';
+          fact.execution = 'not_started';
+          fact.delivery = 'complete';
+        }
+        parentMessageId = fact
+          ? await this.commit('tool_result', converted, model, undefined, [
+              fact,
+            ])
+          : await this.commit('tool_result', converted, model);
         responses[ordinal] = converted;
       };
       for (const [ordinal, call] of calls.entries()) {
@@ -300,12 +323,63 @@ export class HostedCsiToolTurn {
       const activation = this.session.activation;
       for (const invocation of invocations) {
         signal.throwIfAborted();
+        const collector = getManagedExecutionDiagnostics(authority);
+        const fact = collector?.observation(invocation.functionCallId);
+        if (fact) {
+          const input = JSON.parse(
+            (await this.session.resources.read(invocation.inputRef)).toString(
+              'utf8',
+            ),
+          ) as { payloadJson: string };
+          const tool = JSON.parse(input.payloadJson) as {
+            input: { file_path: string };
+          };
+          fact.executionCallId = invocation.executionCallId;
+          fact.providerCallId =
+            calls[invocation.ordinal]?.providerCallId ?? null;
+          fact.toolKind = 'builtin';
+          fact.admission = 'allowed';
+          fact.file = {
+            operation:
+              invocation.toolName === 'read_file'
+                ? 'read'
+                : invocation.toolName === 'write_file'
+                  ? 'write'
+                  : 'edit',
+            path:
+              Buffer.byteLength(tool.input.file_path) <= 4096 &&
+              ![...tool.input.file_path].some(
+                (character) => character.codePointAt(0)! < 32,
+              )
+                ? tool.input.file_path
+                : null,
+            cwdRelative: '.',
+          };
+        }
+        const existingIntent = authority.committedEvent(
+          `tool-intent:${invocation.executionCallId}`,
+        );
+        const diagnosticsRef = existingIntent
+          ? (existingIntent.payload['diagnosticsRef'] as
+              | ManagedSessionDurableRef
+              | undefined)
+          : collector && fact
+            ? await collector.publish(
+                `tool-intent:${invocation.executionCallId}`,
+                [fact],
+              )
+            : undefined;
         await authority.appendExecutionEvent(
           {
             operation: 'toolIntent',
             commandId: `tool-intent:${invocation.executionCallId}`,
             sessionKey: authority.sessionHeader.sessionKey,
-            contentDigest: invocation.inputRef.digest,
+            contentDigest: diagnosticsRef
+              ? executionDiagnosticDigest(
+                  invocation.inputRef.digest,
+                  diagnosticsRef,
+                )
+              : invocation.inputRef.digest,
           },
           (sequence) => ({
             v: 1,
@@ -326,6 +400,7 @@ export class HostedCsiToolTurn {
               toolDefinitionRef: invocation.toolDefinitionRef,
               argsRef: invocation.inputRef,
               outcomeSource: 'runtime',
+              ...(diagnosticsRef ? { diagnosticsRef } : {}),
             },
           }),
           { class: 'harness', activation },
@@ -338,7 +413,13 @@ export class HostedCsiToolTurn {
           toolName: invocation.toolName,
           executionCallId: invocation.executionCallId,
           invocationBindingId: invocation.executionCallId,
-          capabilityVersion: CSI_FILES_RETIREMENT_CAPABILITY_DIGEST,
+          capabilityVersion: getManagedExecutionDiagnostics(
+            this.session.authority,
+          )
+            ? CSI_FILES_ACTIVITY_CAPABILITY_DIGEST
+            : getManagedSessionDiagnostics(this.session.authority)
+              ? CSI_FILES_DIAGNOSTICS_CAPABILITY_DIGEST
+              : CSI_FILES_RETIREMENT_CAPABILITY_DIGEST,
           policyVersion: 'csi-files-retirement-policy/1',
           mediaVersion: null,
           modelMessageId: batchId,

@@ -311,6 +311,121 @@ it('does not label current settings drained using an older completed command', a
   expect(card.textContent).not.toContain('Drained');
 });
 
+it('keeps independent controls when a package-owned server cannot open the installer', async () => {
+  const extensionId = 'ext_00000000-0000-4000-8000-000000000001';
+  const serverId = `${extensionId}:docs`;
+  snapshot = {
+    ...snapshot,
+    servers: [{ ...pin, serverId, state: 'enabled' }],
+  };
+  const inspect = vi.fn();
+  provider.extensions = {
+    list: vi.fn(async () => ({
+      supported: true,
+      extensions: [],
+      selfService: { supported: true, canPublish: true },
+    })),
+    query: vi.fn(async () => ({
+      sessionId: 'session-a',
+      supported: true,
+      revision: 0,
+      extensions: [
+        {
+          extensionId,
+          packageRevision: 1,
+          packageDigest: 'a'.repeat(64),
+        },
+      ],
+      requestedExtensions: [],
+      selfService: { supported: true, canApply: false },
+    })),
+    inspect,
+    importPackage: vi.fn(),
+    previewPackage: vi.fn(),
+    lookupPackageOperation: vi.fn(),
+    lookupApplyOperation: vi.fn(),
+  } as unknown as ManagedAgentProvider['extensions'];
+  await render();
+  await act(async () =>
+    container
+      .querySelector<HTMLElement>(`[role="button"][aria-label="${serverId}"]`)!
+      .click(),
+  );
+  const remove = [
+    ...container.querySelectorAll<HTMLButtonElement>('button'),
+  ].find((button) => button.textContent === 'Remove');
+  expect(remove?.disabled).toBe(false);
+  expect(container.textContent).not.toContain('Edit connection configuration');
+  expect(inspect).not.toHaveBeenCalled();
+});
+
+it('restores independent controls when a composite package cannot open as one MCP connection', async () => {
+  const extensionId = 'ext_00000000-0000-4000-8000-000000000001';
+  const serverId = `${extensionId}:docs`;
+  const pin = {
+    extensionId,
+    packageRevision: 1,
+    packageDigest: 'a'.repeat(64),
+  };
+  const manifest = {
+    schemaVersion: 1,
+    compilerVersion: 1,
+    name: 'composite',
+    version: '1',
+    target: { platform: 'linux', arch: 'x64' },
+    components: ['skills', 'mcp'],
+  };
+  snapshot = {
+    ...snapshot,
+    servers: [{ ...pin, serverId, state: 'enabled' }],
+  };
+  const inspect = vi.fn(async () => ({
+    manifest,
+    mcpServers: [{ name: 'docs', recipe: {}, redacted: false }],
+    skills: [],
+    files: [],
+    fileCount: 0,
+    truncated: false,
+    settings: [],
+  }));
+  provider.extensions = {
+    list: vi.fn(async () => ({
+      supported: true,
+      extensions: [{ pin, manifest }],
+      selfService: { supported: true, canPublish: true },
+    })),
+    query: vi.fn(async () => ({
+      sessionId: 'session-a',
+      supported: true,
+      revision: 0,
+      extensions: [pin],
+      requestedExtensions: [],
+      selfService: { supported: true, canApply: true },
+    })),
+    inspect,
+    importPackage: vi.fn(),
+    previewPackage: vi.fn(),
+    lookupPackageOperation: vi.fn(),
+    lookupApplyOperation: vi.fn(),
+  } as unknown as ManagedAgentProvider['extensions'];
+  await render();
+  await act(async () =>
+    container
+      .querySelector<HTMLElement>(`[role="button"][aria-label="${serverId}"]`)!
+      .click(),
+  );
+  await act(async () =>
+    [...container.querySelectorAll<HTMLButtonElement>('button')]
+      .find((button) => button.textContent === 'Edit connection configuration')!
+      .click(),
+  );
+  await vi.waitFor(() => expect(inspect).toHaveBeenCalledOnce());
+  const remove = [
+    ...container.querySelectorAll<HTMLButtonElement>('button'),
+  ].find((button) => button.textContent === 'Remove');
+  expect(remove?.disabled).toBe(false);
+});
+
 it('shows a selection prompt without calling a daemon or management endpoint', async () => {
   await render('en', null);
   expect(container.textContent).toContain('Select a Managed Session');
