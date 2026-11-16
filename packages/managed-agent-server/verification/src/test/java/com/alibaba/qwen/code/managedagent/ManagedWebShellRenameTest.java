@@ -2,6 +2,8 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.ManagedAgentServerIntegrationTest.FixtureHarness;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
+import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationKind;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -153,6 +155,47 @@ class ManagedWebShellRenameTest {
                 .andExpect(header().string("X-Qwen-Idempotent-Replay", "true"))
                 .andExpect(jsonPath("$.replayed").value(true));
         assertThat(harness.renameCount()).isEqualTo(sends + 1);
+    }
+
+    @Test
+    void aLegacyFailedReceiptRetrySettlesAndNotifies() throws Exception {
+        String tenant = tenant();
+        String session = create(tenant, false);
+        int sends = harness.renameCount();
+        // A pre-upgrade binary left a FAILED RENAME_SESSION receipt. The
+        // same-key retry re-settles under a new revision: it reports replayed,
+        // but a fresh settlement must still send the journal notification.
+        String digest = new RequestDigests().digest(Map.of(
+                "sessionId", session, "title", "revived title"));
+        store.beginSessionMutation(tenant, "RENAME_SESSION", "legacy", digest,
+                session, SessionMutationKind.RENAME);
+        store.abandonSessionMutation(tenant, "RENAME_SESSION", "legacy", session);
+        rename(tenant, session, "legacy", "revived title")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.title").value("revived title"))
+                .andExpect(jsonPath("$.replayed").value(true));
+        assertThat(store.requireSession(tenant, session).title()).isEqualTo("revived title");
+        assertThat(harness.renameCount()).isEqualTo(sends + 1);
+    }
+
+    @Test
+    void consecutiveRenamesCarryIncreasingNotificationRevisions() throws Exception {
+        String tenant = tenant();
+        String session = create(tenant, false);
+        rename(tenant, session, "rev-1", "first title").andExpect(status().isOk());
+        long first = harness.renameRevision(session);
+        rename(tenant, session, "rev-2", "second title").andExpect(status().isOk());
+        long second = harness.renameRevision(session);
+        assertThat(first).isPositive();
+        assertThat(second).isGreaterThan(first);
+        // A COMPLETED replay settles no new revision and sends no notification,
+        // so the recorded revision and the send count both stay put.
+        int sends = harness.renameCount();
+        rename(tenant, session, "rev-2", "second title")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.replayed").value(true));
+        assertThat(harness.renameCount()).isEqualTo(sends);
+        assertThat(harness.renameRevision(session)).isEqualTo(second);
     }
 
     @Test

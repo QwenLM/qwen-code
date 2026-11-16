@@ -45,6 +45,7 @@ final class JournalCommit {
     private final JdbcManagedExtensionRecordStore extensionRecords;
     private final JdbcManagedActionStore actions;
     private final JournalCheckpointValidation checkpoints;
+    private final JdbcJournalPacks packs;
 
     JournalCommit(JournalFencing fencing,
             JournalLifecycleAuthorization lifecycleAuthorization,
@@ -55,7 +56,8 @@ final class JournalCommit {
             JdbcManagedToolResultStore toolResults,
             JournalEventTransport journalEventTransport,
             JdbcManagedExtensionRecordStore extensionRecords,
-            JdbcManagedActionStore actions) {
+            JdbcManagedActionStore actions,
+            JdbcJournalPacks packs) {
         this.fencing = fencing;
         this.lifecycleAuthorization = lifecycleAuthorization;
         this.resourceWrites = resourceWrites;
@@ -66,6 +68,7 @@ final class JournalCommit {
         this.journalEventTransport = journalEventTransport;
         this.extensionRecords = extensionRecords;
         this.actions = actions;
+        this.packs = packs;
         this.checkpoints = new JournalCheckpointValidation(jdbc);
     }
 
@@ -138,7 +141,8 @@ final class JournalCommit {
                                             csiHead.journalRevision(),
                                             csiHead.committedSequence(),
                                             csiHead.lastCommitDigest(),
-                                            csiHead.writerId());
+                                            csiHead.writerId(),
+                                            packs);
                                     return null;
                                 });
                 fencing.requireCsiCurrentTime(continuation);
@@ -192,7 +196,8 @@ final class JournalCommit {
                                         head.journalRevision(),
                                         head.committedSequence(),
                                         head.lastCommitDigest(),
-                                        head.writerId());
+                                        head.writerId(),
+                                        packs);
                                 return null;
                             });
             fencing.requireWriter(
@@ -314,7 +319,8 @@ final class JournalCommit {
                                         head.lastCommitDigest(),
                                         head.writerId(),
                                         now.toInstant().toEpochMilli(),
-                                        continuation.progress());
+                                        continuation.progress(),
+                                        packs);
                                 return null;
                             });
             fencing.requireWriter(
@@ -499,7 +505,7 @@ final class JournalCommit {
         JournalFencing.requireCsiWriter(original, head);
         fencing.requireWriter(head, request.writerId(), request.writerGeneration(), writerToken, storeRows.databaseNow(), true);
         validateHead(head, request);
-        var proof = JdbcCsiActivationAdmission.terminalPreflight(target, authority, JournalStoreRows.CSI_JSON.valueToTree(request), bindings, true);
+        var proof = JdbcCsiActivationAdmission.terminalPreflight(target, authority, JournalStoreRows.CSI_JSON.valueToTree(request), bindings, true, packs);
         return new JdbcManagedSessionStore.TerminalCandidate(request, proof, head.leaseTokenHash());
     }
 

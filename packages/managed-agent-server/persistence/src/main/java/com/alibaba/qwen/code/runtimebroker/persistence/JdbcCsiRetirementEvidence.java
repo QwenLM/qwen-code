@@ -38,25 +38,26 @@ public final class JdbcCsiRetirementEvidence {
 
     /** A saved FROZEN application is re-read after its writer lease may have expired. */
     public static Evidence saved(Connection connection, JdbcCsiApplicationRetirement.Authority authority,
-            JdbcRuntimeBindingRepository bindings) throws SQLException {
+            JdbcRuntimeBindingRepository bindings,
+            com.alibaba.qwen.code.managedagent.persistence.JdbcJournalPacks packs) throws SQLException {
         authority.requireConnection(connection);
         require(authority.stage() != JdbcCsiApplicationRetirement.Stage.SETTLING);
         JsonNode metadata = frozenCommit(authority.frozenBytes());
         var proof = authority.stage() == JdbcCsiApplicationRetirement.Stage.FROZEN
-                ? JdbcCsiActivationAdmission.terminalPreflight(connection, authority, metadata, bindings, false)
-                : JdbcCsiActivationAdmission.terminalHistory(connection, authority);
+                ? JdbcCsiActivationAdmission.terminalPreflight(connection, authority, metadata, bindings, false, packs)
+                : JdbcCsiActivationAdmission.terminalHistory(connection, authority, packs);
         return evidence(connection, authority.original(), proof, JdbcCsiActivationAdmission.JournalRead.LIVE,
                 authority.sealedBindingVersion());
     }
 
     public static Evidence historical(Connection connection, RuntimeBindingRecord binding, byte[] frozenBytes,
-            long started) throws SQLException {
+            long started, com.alibaba.qwen.code.managedagent.persistence.JdbcJournalPacks packs) throws SQLException {
         var read = new JdbcCsiActivationAdmission.JournalRead(started);
         read.requireHistorical(connection);
         var original = JdbcCsiFilesRetirementGuard.readHistoricalBinding(connection, binding);
         long ceiling = JdbcCsiRetirementSeal.readHistorical(connection, original, frozenBytes, read);
-        var proof = JdbcCsiActivationAdmission.terminalHistory(connection, original, frozenBytes, read);
-        JdbcCsiExecutionAdmission.verifyHistoricalReceipts(connection, original, proof, ceiling, read);
+        var proof = JdbcCsiActivationAdmission.terminalHistory(connection, original, frozenBytes, read, packs);
+        JdbcCsiExecutionAdmission.verifyHistoricalReceipts(connection, original, proof, ceiling, read, packs);
         var result = evidence(connection, original, proof, read, ceiling);
         read.requireHistorical(connection);
         return result;

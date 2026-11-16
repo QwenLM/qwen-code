@@ -217,6 +217,19 @@ class SshWorkspaceStoreTest {
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_turn WHERE tenant_id = ? AND session_id = ?", Integer.class, "tenant", remote.sessionId())).isZero();
     }
 
+    @Test
+    void sshLaneAdmitsTheLoopShellRevisionExactlyLikeShell1() {
+        // D3: shell/3 is a public shell whose journal-based loop_wakeup/cron
+        // union is runtime-agnostic, so the SSH lane admits it like shell/1.
+        AgentSessionPolicies.requireSshToolProfile(WorkspaceToolProfiles.FILES);
+        AgentSessionPolicies.requireSshToolProfile(WorkspaceToolProfiles.SHELL);
+        AgentSessionPolicies.requireSshToolProfile(WorkspaceToolProfiles.SHELL_V3);
+        assertThatThrownBy(() -> AgentSessionPolicies.requireSshToolProfile(WorkspaceToolProfiles.MCP))
+                .isInstanceOf(ManagedAgentException.class);
+        assertThatThrownBy(() -> AgentSessionPolicies.requireSshToolProfile("hosted-workspace-shell/2"))
+                .isInstanceOf(ManagedAgentException.class);
+    }
+
     private static ManagedAgentProperties sshProperties(boolean shell) {
         var properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);

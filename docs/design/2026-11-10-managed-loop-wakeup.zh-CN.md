@@ -197,18 +197,23 @@ Managed Session 今天无法运行这条路径：
    `hosted_turn_recovery_required`。
 8. **工具面是 `loop_wakeup` 加共享的 cron list/cancel。** `loop_wakeup`
    由可写 profile 的新修订版声明，沿用添加 `todo_write` 的 `files/3`
-   先例。profile 修订版是持久化词汇，因此每个切片各自发布自己的修订版：
-   [固定间隔姊妹设计](2026-11-10-managed-loop-schedule.zh-CN.md)为其
-   cron 三件套钉住下一批修订版号，本切片取其后的一批（版号在落地时按
-   落地顺序分配）；无论哪个切片先落地都由它声明
+   先例。profile 修订版是持久化词汇，因此每个切片各自发布自己的修订版，
+   先落地的切片声明较小的版号：本切片已先落地、取
+   `hosted-workspace-shell/3`，[固定间隔姊妹设计](2026-11-10-managed-loop-schedule.zh-CN.md)
+   落地时为其 cron 三件套取下一批修订版号（版号在落地时按落地顺序分配）；
+   无论哪个切片先落地都由它声明
    `cron_list`/`cron_delete`，本切片把它们扩展到并集——`cron_list`
    加上未触发的 pending loop input（id、触发时刻、prompt），
    `cron_delete` 把 `loop:<wakeupId>` 路由到决策 7 的取消。不存在
    `loop_list` 或 `loop_cancel`：本地工具本就覆盖两类，skill 的
    `allowedTools` 保持不变。read profile 永不声明 `loop_wakeup`。
-   部署开关 `qwen.managed-agent.loop.enabled`（环境变量
-   `QWEN_MANAGED_AGENT_LOOP_ENABLED`）在验收证据落地前默认 false，
-   对应 automation 的 opt-in 历史。开关只门控安排：关闭时
+   部署开关 `qwen.managed-agent.loop.enabled` 在验收证据落地前默认 false，
+   对应 automation 的 opt-in 历史。它是进程级 Harness 契约，而非控制面
+   settings 键：部署通过在 Harness 环境设置
+   `QWEN_MANAGED_AGENT_LOOP_ENABLED=true` 启用。开关本身不选择工具面：
+   会话还须运行在 `hosted-workspace-shell/3` profile 上，由 Harness 经
+   `QWEN_HOSTED_LIFECYCLE_V2_PROFILES` 通告（profile 列表须包含
+   `hosted-workspace-shell/3`）。开关只门控安排：关闭时
    `loop_wakeup` 被拒绝，但已安排的唤醒存活——pump 投递 journal input
    不看工具是否声明——且 `cron_list`/`cron_delete` 仍能列出并取消它。
    由于该取消是模型调用的工具，运维还有一条非模型路径：控制面的内部
@@ -270,7 +275,8 @@ Managed Session 今天无法运行这条路径：
 - `packages/cli/src/serve/capability-parity.ts`：loop 工具面与开关的
   条目；过期的 `scheduled_task_gate` 条目另行修正（managed automation
   gate 已于 2026-10-22 落地）。
-- 部署 settings schema：`qwen.managed-agent.loop.enabled`。
+- 部署开关（进程级 Harness 环境契约，非控制面 settings 键）：
+  `QWEN_MANAGED_AGENT_LOOP_ENABLED`。
 
 ## 验证计划
 
@@ -344,10 +350,12 @@ Managed Session 今天无法运行这条路径：
    firing loop turn 内总存在存活 loop，重置在那里无法触发——模型驱动的
    先取消再安排只能从普通 turn 重启 24 h 预算。在实现前钉住该规则，以及
    它取代哪种读法。
-2. **profile 修订版号。** `loop_wakeup` 的修订版按落地顺序取
-   [固定间隔姊妹设计](2026-11-10-managed-loop-schedule.zh-CN.md)的
-   cron 三件套修订版之后的一批；切片落地时与控制面的 profile 准入核对
-   确认分配的版号。
+2. **profile 修订版号。** 本切片先落地，取 `hosted-workspace-shell/3`，
+   跳过统一 Shell 生命周期（#15330）已退役的 `shell/2`；
+   [固定间隔姊妹设计](2026-11-10-managed-loop-schedule.zh-CN.md)按其
+   落地顺序说明互换到更后的一批修订。控制面的规范 Shell 准入已随本切片
+   落地，将 `shell/3` 识别为生命周期协议 2 的公开 Shell
+   （`WorkspaceToolProfiles.isPublicShell`）；已退役的 `shell/2` 仍被拒绝。
 3. **开关默认值时间线。** 验收证据落地前为 false，之后像
    `qwen.managed-agent.automation.enabled` 一样默认 true；与部署负责人
    确认启用顺序。

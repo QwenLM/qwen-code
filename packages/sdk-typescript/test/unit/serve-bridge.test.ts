@@ -537,9 +537,17 @@ describe('serve-bridge', () => {
       }
     });
 
-    it.each(['started', 'ended', 'unknown'])(
-      'keeps the prompt collector open for lifecycle %s frames',
-      async (phase) => {
+    it.each([
+      ['executionLifecycle', 'started'],
+      ['executionLifecycle', 'ended'],
+      ['executionLifecycle', 'unknown'],
+      ['hookLifecycle', 'started'],
+      ['hookLifecycle', 'ended'],
+      ['hookLifecycle', 'dispatched'],
+      ['hookLifecycle', 'unknown'],
+    ])(
+      'keeps the prompt collector open for %s %s frames',
+      async (metaKey, phase) => {
         const { state } = makeMockState({
           defaultSessionId: 'test-session',
           fetchReply: () => jsonResponse(200, { stopReason: 'end_turn' }),
@@ -564,7 +572,7 @@ describe('serve-bridge', () => {
                   sessionUpdate: 'agent_message_chunk',
                   content: { type: 'text', text: '' },
                   _meta: {
-                    executionLifecycle: {
+                    [metaKey]: {
                       v: phase === 'unknown' ? 99 : 1,
                       phase,
                     },

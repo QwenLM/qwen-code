@@ -143,6 +143,12 @@ authorized caller; the notification is sent only when the Harness supports
 fenced titles, and skipped (logged) otherwise. This removes an availability
 coupling that existed only to protect the dual-store guarantee.
 
+The `rename` capability advertisement (`capabilities.rename`) stays deliberately
+Harness-bound — `isAvailable() && supportsFencedTitles()` — even though the
+mutation succeeds offline. It reports whether the journal copy can be kept in
+sync, not whether the SQL rename can succeed; this conservatism is intentional,
+not a leftover admission gate.
+
 ### Deletions
 
 - `control-plane/.../session/SessionRenameCoordinator.java` (whole class).

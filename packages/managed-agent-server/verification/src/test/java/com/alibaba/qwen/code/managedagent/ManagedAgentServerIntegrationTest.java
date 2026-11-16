@@ -3199,6 +3199,7 @@ class ManagedAgentServerIntegrationTest {
         private final AtomicInteger renameFailures = new AtomicInteger();
         private final AtomicInteger closeFailures = new AtomicInteger();
         private final Map<String, String> titles = new ConcurrentHashMap<>();
+        private final Map<String, Long> renameRevisions = new ConcurrentHashMap<>();
         private final Map<String, CountDownLatch> gates =
                 new ConcurrentHashMap<>();
         private final Set<String> cancelled =
@@ -3419,6 +3420,7 @@ class ManagedAgentServerIntegrationTest {
 
         @Override
         public void rename(String tenantId, String sessionId, String title, long revision) {
+            renameRevisions.put(sessionId, revision);
             rename(tenantId, sessionId, title);
         }
 
@@ -3469,6 +3471,10 @@ class ManagedAgentServerIntegrationTest {
 
         String title(String sessionId) {
             return titles.get(sessionId);
+        }
+
+        long renameRevision(String sessionId) {
+            return renameRevisions.getOrDefault(sessionId, 0L);
         }
 
         void failNextRename() {

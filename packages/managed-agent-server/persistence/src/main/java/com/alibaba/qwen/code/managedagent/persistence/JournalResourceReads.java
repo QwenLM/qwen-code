@@ -144,7 +144,8 @@ final class JournalResourceReads {
                                 jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
                                     JdbcCsiActivationAdmission.requireCheckpointContinuationRead(
                                             org.springframework.jdbc.datasource.DataSourceUtils.getTargetConnection(connection),
-                                            original, continuation.progress(), resourceId);
+                                            original, continuation.progress(), resourceId,
+                                            new JdbcJournalPacks(jdbc, publicationObjects, null));
                                     return null;
                                 });
                             } else {

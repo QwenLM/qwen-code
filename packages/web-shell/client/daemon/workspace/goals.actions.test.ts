@@ -107,6 +107,46 @@ describe('goals workspace actions', () => {
       fetchMock.mockResolvedValue(fail(500, { error: 'boom' }));
       await expect(makeActions().listGoals()).rejects.toThrow();
     });
+
+    it('GETs the qualified route when a workspaceId is given', async () => {
+      const goal = {
+        sessionId: 's1',
+        snapshot: { v: 2, goal: null, activity: 'idle' },
+      };
+      fetchMock.mockResolvedValue(ok({ v: 1, goals: [goal], droppedCount: 0 }));
+
+      const list = await makeActions('tok').listGoals('ws-2');
+
+      expect(list).toEqual({ goals: [goal], droppedCount: 0 });
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe('/workspaces/ws-2/goals');
+      expect(initOf(fetchMock.mock.calls[0]).method ?? 'GET').toBe('GET');
+      expect(headersOf(init).get('authorization')).toBe('Bearer tok');
+    });
+
+    it('encodes the workspace id in the qualified path', async () => {
+      fetchMock.mockResolvedValue(ok({ v: 1, goals: [], droppedCount: 0 }));
+
+      await makeActions().listGoals('a/b c');
+
+      expect(fetchMock.mock.calls[0][0]).toBe('/workspaces/a%2Fb%20c/goals');
+    });
+
+    it('keeps the unqualified primary route for an explicit undefined', async () => {
+      fetchMock.mockResolvedValue(ok({ v: 1, goals: [], droppedCount: 0 }));
+
+      await makeActions().listGoals(undefined);
+
+      expect(fetchMock.mock.calls[0][0]).toBe('/goals');
+    });
+
+    it('throws on a non-ok qualified response', async () => {
+      fetchMock.mockResolvedValue(
+        fail(403, { error: 'Workspace is not trusted.' }),
+      );
+      await expect(makeActions().listGoals('ws-2')).rejects.toThrow();
+      expect(fetchMock.mock.calls[0][0]).toBe('/workspaces/ws-2/goals');
+    });
   });
 
   describe('clearGoal', () => {

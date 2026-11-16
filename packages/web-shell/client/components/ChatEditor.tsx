@@ -104,7 +104,7 @@ import type {
   WebShellUnavailableModelTooltipMount,
 } from '../unavailableModels';
 import { appendUnavailableComposerModels } from '../utils/composerModels';
-import { VoiceButton } from '../voice/VoiceButton';
+import { VoiceButton, type VoiceButtonHandle } from '../voice/VoiceButton';
 import { LiveVoiceButton } from '../live/LiveVoiceButton';
 import type {
   VoiceStatusRevision,
@@ -242,6 +242,8 @@ interface ChatEditorProps {
   /** First Esc armed a cancel — the send button shows an "Esc to stop" hint. */
   cancelArmed?: boolean;
   disabled?: boolean;
+  /** Keep the editor editable but reject every submit path. */
+  submitDisabled?: boolean;
   placeholderText?: string;
   commands: CommandInfo[];
   skills?: SkillInfo[];
@@ -295,7 +297,6 @@ interface ChatEditorProps {
   workspaceColor?: DaemonSessionGroupPresetColor;
   chatWidthMode?: '1000' | 'wide';
   showChatWidthToggle?: boolean;
-  chatWidthToggleMin?: number;
   visibleToolbarActions?: readonly ComposerToolbarAction[];
   liveVoicePortalContainer?: HTMLElement | null;
   /**
@@ -1732,6 +1733,7 @@ export const ChatEditor = memo(
       isPreparing = false,
       cancelArmed = false,
       disabled = false,
+      submitDisabled = false,
       placeholderText = 'Type a message...',
       commands,
       skills = [],
@@ -1767,7 +1769,6 @@ export const ChatEditor = memo(
       workspaceColor,
       chatWidthMode = '1000',
       showChatWidthToggle = true,
-      chatWidthToggleMin,
       visibleToolbarActions,
       liveVoicePortalContainer,
       contextChipPlacement = 'toolbar',
@@ -1976,13 +1977,25 @@ export const ChatEditor = memo(
       [onAttachmentPreview, onComposerTagClick],
     );
 
+    const [voiceActive, setVoiceActive] = useState(false);
+    const voiceButtonRef = useRef<VoiceButtonHandle>(null);
+    // Assigned below once insertVoiceText exists; useComposerCore awaits it
+    // before a user-initiated submit so dictation lands in the sent message.
+    const prepareVoiceSubmitRef = useRef<() => Promise<void>>(async () => {});
     const core = useComposerCore({
       onSubmit,
+      // Only install the finalizer while a capture is active (voiceActive
+      // stays true through transcribing), so plain typed sends keep the
+      // synchronous submit path.
+      prepareSubmit: voiceActive
+        ? () => prepareVoiceSubmitRef.current()
+        : undefined,
       onInputTextChange,
       onCycleMode,
       cycleModeOnTab,
       onToggleShortcuts,
       disabled,
+      submitDisabled,
       fileDragEnabled: attachmentsEnabled,
       placeholderText,
       commands,
@@ -2507,8 +2520,8 @@ export const ChatEditor = memo(
     const toolbarEndRef = useRef<HTMLDivElement>(null);
     const toolbarRightCustomRef = useRef<HTMLDivElement>(null);
     const toolbarMeasurementsRef = useRef<HTMLDivElement>(null);
+    const widthToggleRef = useRef<HTMLButtonElement>(null);
     const [widthToggleFits, setWidthToggleFits] = useState(false);
-    const [voiceActive, setVoiceActive] = useState(false);
     const pendingVoiceInsertRef = useRef<{
       text: string;
       sessionId: string | undefined;
@@ -2537,6 +2550,16 @@ export const ChatEditor = memo(
       } else {
         insertVoiceText(text);
       }
+    };
+    // A send must include the active dictation: finalize the capture and
+    // insert its transcript before the submit reads the draft. Insert
+    // directly rather than through the deferred simple-mode path — the
+    // submit follows in the same continuation, so there is no review step
+    // that needs the editor revealed first.
+    prepareVoiceSubmitRef.current = async () => {
+      const text = await voiceButtonRef.current?.flush();
+      const trimmed = text?.trim();
+      if (trimmed) insertVoiceText(trimmed);
     };
     useLayoutEffect(() => {
       const pending = pendingVoiceInsertRef.current;
@@ -2610,26 +2633,6 @@ export const ChatEditor = memo(
       if (!glowRoot || !inputEl) return undefined;
       return attachComposerGlow(glowRoot, inputEl);
     }, [editorViewRef]);
-
-    useEffect(() => {
-      const container = containerRef.current;
-      const minWidth = chatWidthToggleMin;
-      if (!container || minWidth === undefined) {
-        setWidthToggleFits(false);
-        return;
-      }
-
-      const update = () => {
-        setWidthToggleFits(
-          container.getBoundingClientRect().width >= minWidth - 50,
-        );
-      };
-      update();
-
-      const resizeObserver = new ResizeObserver(update);
-      resizeObserver.observe(container);
-      return () => resizeObserver.disconnect();
-    }, [chatWidthToggleMin]);
 
     const visibleActionSet = useMemo(() => {
       if (!visibleToolbarActions) return null;
@@ -2781,7 +2784,19 @@ export const ChatEditor = memo(
       [onSelectModel, core, modelControlsDisabled, modelItems],
     );
     const showCancelButton = isRunning && !core.hasContent;
-    const composerPreparing = isPreparing || core.pendingImageBatchCount > 0;
+    // While a dictation is active the send intent wins over the stop role:
+    // on touch layouts Send is the only submit path, so the button must send
+    // (queue) the dictation, not cancel the turn. The separate stop button
+    // below stays reachable during dictation, and desktop keeps Escape.
+    const stopAffordance = showCancelButton && !voiceActive;
+    // Stopping a running agent is unrelated to submit finalization: a voice
+    // flush may hold submitPreparing for up to a minute, and the stop buttons
+    // must stay usable throughout (mobile/simple have no other composer exit).
+    const cancelPreparing = isPreparing || core.pendingImageBatchCount > 0;
+    const composerPreparing = cancelPreparing || core.submitPreparing;
+    // With an empty draft during a run the submit button doubles as the Stop
+    // control; finalization must not take that affordance away.
+    const submitLoading = composerPreparing && !stopAffordance;
 
     const {
       searchMode,
@@ -3161,10 +3176,25 @@ export const ChatEditor = memo(
         const gap = Math.ceil(
           Number.parseFloat(getComputedStyle(toolbar).columnGap) || 0,
         );
+        const toolbarWidth = Math.floor(toolbar.getBoundingClientRect().width);
+        const rightWidth = Math.ceil(
+          toolbarRight.getBoundingClientRect().width,
+        );
+        const rightGap =
+          Number.parseFloat(getComputedStyle(toolbarRight).columnGap) || 0;
+        const toggle = widthToggleRef.current;
+        // Exclude the toggle so its own visibility cannot affect the result.
+        const toggleSpace = toggle
+          ? toggle.getBoundingClientRect().width + rightGap
+          : 0;
+        setWidthToggleFits(
+          toolbarWidth - currentLeadingWidth - rightWidth + toggleSpace - gap >=
+            50,
+        );
         const availableWidth = getToolbarExpansionBudget({
-          toolbarWidth: Math.floor(toolbar.getBoundingClientRect().width),
+          toolbarWidth,
           leadingWidth: currentLeadingWidth,
-          rightWidth: Math.ceil(toolbarRight.getBoundingClientRect().width),
+          rightWidth,
           currentExpansionWidth,
           gap,
         });
@@ -3433,6 +3463,8 @@ export const ChatEditor = memo(
                   <button
                     className={`${styles.toolBtn} ${styles.modeToolBtn} ${
                       showModeLabel ? '' : styles.toolBtnCompact
+                    } ${
+                      currentMode === 'yolo' ? styles.modeToolBtnDanger : ''
                     }`}
                     data-web-shell-mode-button
                     disabled={
@@ -3769,6 +3801,7 @@ export const ChatEditor = memo(
           widthToggleFits &&
           showToolbarAction('widthMode') && (
             <button
+              ref={widthToggleRef}
               className={`${styles.toolBtn} ${styles.widthModeBtn}`}
               data-hide-during-mobile-voice
               onClick={(e) => {
@@ -3985,6 +4018,7 @@ export const ChatEditor = memo(
                   }}
                 >
                   <VoiceButton
+                    ref={voiceButtonRef}
                     disabled={disabled}
                     onActiveChange={setVoiceActive}
                     target={voiceTarget}
@@ -3994,52 +4028,54 @@ export const ChatEditor = memo(
                 </span>
               </>
             )}
-            {(isMobile || isSimple) && isRunning && core.hasContent && (
-              <button
-                type="button"
-                className={`${styles.sendBtn} ${styles.sendBtnRunning}`}
-                disabled={composerPreparing || !onCancel}
-                data-web-shell-composer-stop
-                aria-label={t('composerMobile.stop')}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onCancel?.();
-                }}
-              >
-                <StopIcon />
-              </button>
-            )}
+            {(isMobile || isSimple) &&
+              isRunning &&
+              (core.hasContent || voiceActive) && (
+                <button
+                  type="button"
+                  className={`${styles.sendBtn} ${styles.sendBtnRunning}`}
+                  disabled={cancelPreparing || !onCancel}
+                  data-web-shell-composer-stop
+                  aria-label={t('composerMobile.stop')}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onCancel?.();
+                  }}
+                >
+                  <StopIcon />
+                </button>
+              )}
             <button
               className={
-                composerPreparing || showCancelButton
+                submitLoading || stopAffordance
                   ? `${styles.sendBtn} ${styles.sendBtnRunning}${
                       cancelArmed ? ` ${styles.sendBtnArmed}` : ''
                     }`
                   : styles.sendBtn
               }
               disabled={
-                composerPreparing
+                submitLoading
                   ? true
-                  : showCancelButton
+                  : stopAffordance
                     ? !onCancel
-                    : !core.canSubmit
+                    : core.submitBlocked || (!core.hasContent && !voiceActive)
               }
               data-web-shell-composer-submit
               onClick={(e) => {
                 e.stopPropagation();
-                if (composerPreparing) {
+                if (submitLoading) {
                   return;
                 }
-                if (showCancelButton) {
+                if (stopAffordance) {
                   onCancel?.();
                   return;
                 }
                 core.submitText();
               }}
               aria-label={
-                composerPreparing
+                submitLoading
                   ? t('common.loading')
-                  : showCancelButton
+                  : stopAffordance
                     ? cancelArmed && !isMobile
                       ? t('stream.cancelArmed')
                       : t(isMobile ? 'composerMobile.stop' : 'stream.cancel')
@@ -4051,9 +4087,9 @@ export const ChatEditor = memo(
                   : undefined
               }
             >
-              {composerPreparing ? (
+              {submitLoading ? (
                 <LoadingIcon />
-              ) : showCancelButton ? (
+              ) : stopAffordance ? (
                 cancelArmed && !isMobile ? (
                   <span className={styles.escLabel} aria-hidden="true">
                     Esc
@@ -4992,7 +5028,7 @@ export const ChatEditor = memo(
                 <Button
                   variant="outline"
                   className="min-h-11"
-                  disabled={composerPreparing || !onCancel}
+                  disabled={cancelPreparing || !onCancel}
                   onClick={onCancel}
                 >
                   {t('composerMobile.stop')}

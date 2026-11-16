@@ -30,6 +30,9 @@ public interface ManagedSessionStore {
     public void authorizeOrdinary(String tenantId, String sessionId, String writerToken,
             ManagedSessionStoreModels.AuthorizeLifecycleRequest request);
 
+    /** The Session's creator actor; empty when it has no creator key. */
+    public String creatorActor(String tenantId, String sessionId);
+
     public Map<String, Object> approvalSelection(String tenantId, String sessionId, String writerToken,
             ManagedSessionStoreModels.AuthorizeLifecycleRequest request);
 

@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.maintenance;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiReservationStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
@@ -45,36 +46,47 @@ public final class WorkspaceCsiRetirementMain {
         }
         var source = new DriverManagerDataSource(required("K2_JDBC_URL"), required("K2_JDBC_USER"),
                 required("K2_JDBC_PASSWORD"));
-        var bindings = new JdbcRuntimeBindingRepository(source, AesGcmSecretProtector.fromBase64(
+        var protector = AesGcmSecretProtector.fromBase64(
                 required("QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID"),
-                required("QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY")));
-        var store = new WorkspaceCsiReservationStore(new JdbcTemplate(source),
-                new DataSourceTransactionManager(source), json);
-        RuntimeBindingRecord original = bindings.findById(args[2]);
-        if (original == null || original.getGeneration() != Long.parseLong(args[3])) {
-            throw new IllegalStateException("Original CSI generation is unavailable");
-        }
-        var prior = store.inspectRetirement(registration, bindings, original);
-        if ("inspect".equals(args[0])) {
-            System.out.println(json.writeValueAsString(prior));
-            return;
-        }
-        var expected = new WorkspaceCsiReservationStore.Reservation("RESERVED", Long.parseLong(args[5]),
-                args[4], registration.aliasKey(), registration.revision(), original.getBindingId(),
-                original.getGeneration(), original.getProvisionSeed().getProvisionRequestId());
-        String owner = "csi-retirement:" + UUID.randomUUID();
-        if (prior == null) {
-            original = bindings.claimOperation(original.getBindingId(), owner, Duration.ofSeconds(30));
-            if (original == null) {
-                throw new IllegalStateException("Original CSI coordinator claim is unavailable");
-            }
-        }
+                required("QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY"));
+        var oss = MaintenanceObjectStores.k2Oss();
         try {
-            System.out.println(json.writeValueAsString(store.beginRetirement(
-                    registration, bindings, original, expected, args[6])));
+            var objects = oss == null ? null
+                    : oss.objects(required("QWEN_MANAGED_AGENT_TOOL_PUBLICATION_OSS_BUCKET"));
+            var bindings = new JdbcRuntimeBindingRepository(source, protector,
+                    MaintenanceObjectStores.readPacks(new ManagedSchemaJdbcTemplate(source), objects));
+            var store = new WorkspaceCsiReservationStore(new JdbcTemplate(source),
+                    new DataSourceTransactionManager(source), json);
+            RuntimeBindingRecord original = bindings.findById(args[2]);
+            if (original == null || original.getGeneration() != Long.parseLong(args[3])) {
+                throw new IllegalStateException("Original CSI generation is unavailable");
+            }
+            var prior = store.inspectRetirement(registration, bindings, original);
+            if ("inspect".equals(args[0])) {
+                System.out.println(json.writeValueAsString(prior));
+                return;
+            }
+            var expected = new WorkspaceCsiReservationStore.Reservation("RESERVED", Long.parseLong(args[5]),
+                    args[4], registration.aliasKey(), registration.revision(), original.getBindingId(),
+                    original.getGeneration(), original.getProvisionSeed().getProvisionRequestId());
+            String owner = "csi-retirement:" + UUID.randomUUID();
+            if (prior == null) {
+                original = bindings.claimOperation(original.getBindingId(), owner, Duration.ofSeconds(30));
+                if (original == null) {
+                    throw new IllegalStateException("Original CSI coordinator claim is unavailable");
+                }
+            }
+            try {
+                System.out.println(json.writeValueAsString(store.beginRetirement(
+                        registration, bindings, original, expected, args[6])));
+            } finally {
+                if (owner.equals(original.getOperationOwner())) {
+                    bindings.releaseOperation(original.getBindingId(), owner, original.getOperationGeneration());
+                }
+            }
         } finally {
-            if (owner.equals(original.getOperationOwner())) {
-                bindings.releaseOperation(original.getBindingId(), owner, original.getOperationGeneration());
+            if (oss != null) {
+                oss.shutdown();
             }
         }
     }

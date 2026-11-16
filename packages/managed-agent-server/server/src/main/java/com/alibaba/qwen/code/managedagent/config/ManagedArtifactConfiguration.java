@@ -128,7 +128,7 @@ public class ManagedArtifactConfiguration {
         return builder.poolSize(1).threadNamePrefix("child-workspace-").build();
     }
 
-    @Bean
+    @Bean(defaultCandidate = false)
     public ThreadPoolTaskScheduler sessionWorktreeScheduler(ThreadPoolTaskSchedulerBuilder builder) {
         return builder.poolSize(1).threadNamePrefix("session-worktree-").build();
     }

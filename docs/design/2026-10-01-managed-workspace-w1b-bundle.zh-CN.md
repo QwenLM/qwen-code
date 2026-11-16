@@ -116,10 +116,10 @@ CLI bootstrap，因此保留自己的分派。私有 flag 用于 Java 的 stdio 
 操作、Session 和 asset 行，用于续办和回执审计；W1b 不自动清理这些记录。多次
 操作需预留数据库空间；批量写入及垃圾回收需后续设计，保持维护和回执边界。
 
-打包后的维护制品为 `qwen-managed-agent-server-0.1.0-alpha-workspace-bundle.jar`。
-运行 `java -jar <artifact> capture <request.json> --offline-confirmed`、
-`java -jar <artifact> verify <request.json> --offline-confirmed` 或
-`java -jar <artifact> inspect <request.json>`。先通过正常升级部署 schema，维护
+打包后的维护制品为可执行 server jar（`qwen-managed-agent-server-<version>-exec.jar`），以 `bin/qwen-managed-agent-admin workspace-recovery` 运行。
+运行 `bin/qwen-managed-agent-admin workspace-recovery capture <request.json> --offline-confirmed`、
+`bin/qwen-managed-agent-admin workspace-recovery verify <request.json> --offline-confirmed` 或
+`bin/qwen-managed-agent-admin workspace-recovery inspect <request.json>`。先通过正常升级部署 schema，维护
 可执行文件不运行迁移、不启动 Broker。设置 `W1_JDBC_URL`、`W1_JDBC_USER` 和
 `W1_JDBC_PASSWORD`。可选外部 O2 读取使用 `W1_OSS_ENDPOINT`、`W1_OSS_REGION`、
 `W1_OSS_BUCKET` 及现有 OSS 环境凭证 provider。Node 子进程环境删除这些凭证，

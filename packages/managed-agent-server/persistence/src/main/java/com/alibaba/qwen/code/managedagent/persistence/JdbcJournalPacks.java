@@ -89,6 +89,15 @@ public class JdbcJournalPacks {
         return objects;
     }
 
+    /**
+     * Whether an object store is configured to supply evicted pack bytes. Read-only callers use
+     * this to stay fail-closed with a null result (and raise their own admission exception) rather
+     * than invoking {@link #resolveBytes}, whose {@code store()} throws when no store is present.
+     */
+    public boolean hasObjectStore() {
+        return objects != null;
+    }
+
     /** Builds, verifies and atomically publishes one pack; returns false when nothing to do. */
     public boolean compactOnce(String tenant, String workspace, String session) {
         ManagedAgentSettings.SessionResources config = config();

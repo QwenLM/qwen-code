@@ -122,7 +122,7 @@ public class ManagedRuntimeSkillImportService {
 
     private SessionRecord requireSession(String tenant, String actor, String sessionId) {
         SessionRecord session = sessions.requireExtensionManagement(tenant, actor, sessionId, null, true);
-        if (session.workspace() == null || !Set.of("hosted-workspace-shell/1", "hosted-workspace-mcp/1").contains(session.toolProfile())
+        if (session.workspace() == null || !Set.of("hosted-workspace-shell/1", "hosted-workspace-shell/3", "hosted-workspace-shell/4", "hosted-workspace-mcp/1").contains(session.toolProfile())
                 || !packages.runtimeSkillImportEnabled() || !harness.supportsRuntimeSkillImport()) {
             throw new ManagedAgentException(409, "unsupported_feature", "Runtime Skill import is unavailable.");
         }

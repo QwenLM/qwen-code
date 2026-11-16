@@ -204,7 +204,7 @@ public class JdbcWorkspaceLifecycleStore
                         if ("input.accepted".equals(event.path("kind").asText())) {
                             accepted.add(turn);
                             String source = event.path("payload").path("source").asText();
-                            if (!v2 || !List.of("monitor", "child_agent", "automation", "session_message", "channel").contains(source)) {
+                            if (!v2 || !List.of("monitor", "child_agent", "automation", "session_message", "channel", "loop").contains(source)) {
                                 pending.add(turn);
                             }
                         } else if (v2 && "activation.changed".equals(event.path("kind").asText())
