@@ -76,7 +76,16 @@ latest save per card on the active branch is the card's state. This gives:
   to its retained parent, as it already does for artifact records, so the
   fork's cards start from the saved state. Saves on abandoned branches are not
   copied.
+- **Message deletion:** deleting messages never drops a save. A save whose
+  parent was deleted is re-attached to the nearest surviving record, as every
+  other surviving record is, so a card does not roll back to an older save.
+  Saves are not part of the message-group snapshot, so a save does not make a
+  pending deletion fail.
 - **Isolation:** state lives in its own session's transcript.
+
+A save needs a conversation record to hang from. Before the first turn there is
+none, and the save is refused with `state_unavailable`; a card cannot exist
+before a turn anyway.
 
 The agent owns a per-session `GeneratedUiStateService`. It loads states lazily
 from the transcript after a flush and caches them. The recorder exposes a
@@ -159,6 +168,9 @@ card can save while a turn is running.
   record as unknown and may treat a trailing save as the conversation leaf. A
   session with saved state should not be resumed by an older binary and then
   again by a newer one.
+- **Managed sessions:** the managed record sink does not carry this subtype, so
+  saves in a managed session fail with `state_unavailable`; the capability
+  parity table lists no managed equivalent.
 - **Concurrent views:** two tabs on the same card race on `baseRevision`; the
   slower one receives `stale` with the current value and must reload or merge.
 
@@ -172,12 +184,20 @@ Step 1:
 - Recorder tests that write through the real `ChatRecordingService` and read
   back through the transcript preparation used by the reader: saves at an idle
   tail, mid-turn and between side records are all read back; a rewind drops the
-  abandoned save and keeps a save made after it; artifact selection is unchanged
-  with saves interleaved.
+  abandoned save and keeps a save made after it; deleting the messages a save
+  followed keeps the save; a save before any conversation is refused; artifact
+  selection is unchanged with saves interleaved.
 - Fork test: saves on the copied branch are carried, saves on an abandoned
   branch are not, and an unreadable transcript reports `unavailable`.
 - Route tests: client id and card id checks, request validation, outcome status
-  codes, and error mapping.
+  codes, and error mapping. SDK tests: each write outcome and the errors without
+  one.
+- Daemon integration test (no browser, no credentials): a save while a turn is
+  running; a stale write; an artifact registered after a save still lists after
+  reload; with a save as the last record, the session resumes, takes another
+  prompt and still reads the state after a second reload; another session sees
+  nothing; an unknown session returns 404. Rewind through the daemon is covered
+  only by the recorder tests.
 
 Steps 2 and 3 add browser coverage (reload, reopen, two tabs, two sessions, an
 oversized value and a refused write) and the acceptance pins.

@@ -60,6 +60,8 @@ export function messageGroupsSnapshot(records: readonly ChatRecord[]): string {
     (record) =>
       record.type !== 'system' ||
       (record.subtype !== 'ui_telemetry' &&
+        // View state saves never belong to a message group.
+        record.subtype !== 'generated_ui_state' &&
         !(
           record.subtype === 'custom_title' &&
           (record.systemPayload as CustomTitleRecordPayload | undefined)

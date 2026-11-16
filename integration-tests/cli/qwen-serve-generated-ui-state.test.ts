@@ -91,86 +91,119 @@ describe('Generated UI view state through the daemon', () => {
           200,
         ),
       ).toEqual({ cardId: CARD, revision: 0, value: null });
-      expect(
-        await json(
-          await call(
-            'PUT',
-            state(session),
-            { baseRevision: 0, value: { items: ['Agenda'] } },
-            session.clientId,
-          ),
-          200,
-        ),
-      ).toEqual({ outcome: 'saved', cardId: CARD, revision: 1 });
+      const promptOf = (
+        target: { sessionId: string; clientId: string },
+        text: string,
+      ) =>
+        call(
+          'POST',
+          `/session/${target.sessionId}/prompt`,
+          { prompt: [{ type: 'text', text }] },
+          target.clientId,
+        );
+      const put = (
+        target: { sessionId: string; clientId: string },
+        baseRevision: number,
+        value: unknown,
+      ) => call('PUT', state(target), { baseRevision, value }, target.clientId);
 
       // A card saves while the model is still answering.
-      const prompt = call(
-        'POST',
-        `/session/${session.sessionId}/prompt`,
-        { prompt: [{ type: 'text', text: 'hello' }] },
-        session.clientId,
-      );
+      const firstPrompt = promptOf(session, 'first prompt');
       await expect
         .poll(() => fakeModel.requests.length, { timeout: 30_000 })
         .toBeGreaterThan(0);
       expect(
-        await json(
-          await call(
-            'PUT',
-            state(session),
-            { baseRevision: 1, value: { items: ['Agenda', 'Notes'] } },
-            session.clientId,
-          ),
-          200,
-        ),
-      ).toEqual({ outcome: 'saved', cardId: CARD, revision: 2 });
+        await json(await put(session, 0, { items: ['Agenda'] }), 200),
+      ).toEqual({ outcome: 'saved', cardId: CARD, revision: 1 });
       release();
-      await prompt;
+      const first = await firstPrompt;
+      expect(first.status, await first.text()).toBeLessThan(300);
 
-      expect(
-        await json(
-          await call(
-            'PUT',
-            state(session),
-            { baseRevision: 1, value: 'late' },
-            session.clientId,
-          ),
-          409,
+      // An artifact registered after a save still lists after reload.
+      await json(
+        await call(
+          'POST',
+          `/session/${session.sessionId}/artifacts`,
+          { title: 'Notes', url: 'https://example.com/notes' },
+          session.clientId,
         ),
-      ).toEqual({
+        200,
+      );
+      expect(
+        await json(await put(session, 1, { items: ['Agenda', 'Notes'] }), 200),
+      ).toEqual({ outcome: 'saved', cardId: CARD, revision: 2 });
+      expect(await json(await put(session, 1, 'late'), 409)).toEqual({
         outcome: 'stale',
         cardId: CARD,
         revision: 2,
         value: { items: ['Agenda', 'Notes'] },
       });
 
-      // Close and load the session again: state comes from the transcript.
-      expect(
-        (
-          await call(
-            'DELETE',
-            `/session/${session.sessionId}`,
-            undefined,
-            session.clientId,
-          )
-        ).status,
-      ).toBeLessThan(300);
-      const loaded = (await json(
-        await call('POST', `/session/${session.sessionId}/load`, {
-          cwd: workspace,
-        }),
-        200,
-      )) as { clientId: string };
-      expect(
-        await json(
-          await call('GET', state(session), undefined, loaded.clientId),
+      const reload = async () => {
+        expect(
+          (
+            await call(
+              'DELETE',
+              `/session/${session.sessionId}`,
+              undefined,
+              session.clientId,
+            )
+          ).status,
+        ).toBeLessThan(300);
+        const loaded = (await json(
+          await call('POST', `/session/${session.sessionId}/load`, {
+            cwd: workspace,
+          }),
           200,
-        ),
-      ).toEqual({
+        )) as { clientId: string };
+        session.clientId = loaded.clientId;
+      };
+      const saved = {
         cardId: CARD,
         revision: 2,
         value: { items: ['Agenda', 'Notes'] },
-      });
+      };
+
+      // The save is the last record; resume, prompt again and reload.
+      await reload();
+      expect(
+        await json(
+          await call('GET', state(session), undefined, session.clientId),
+          200,
+        ),
+      ).toEqual(saved);
+      const artifacts = await json(
+        await call(
+          'GET',
+          `/session/${session.sessionId}/artifacts`,
+          undefined,
+          session.clientId,
+        ),
+        200,
+      );
+      expect(JSON.stringify(artifacts)).toContain('https://example.com/notes');
+      const second = await promptOf(session, 'second prompt');
+      expect(second.status, await second.text()).toBeLessThan(300);
+      await reload();
+      expect(
+        await json(
+          await call('GET', state(session), undefined, session.clientId),
+          200,
+        ),
+      ).toEqual(saved);
+      const transcript = JSON.stringify(
+        await json(
+          await call(
+            'GET',
+            `/session/${session.sessionId}/transcript`,
+            undefined,
+            session.clientId,
+          ),
+          200,
+        ),
+      );
+      expect(transcript).toContain('first prompt');
+      expect(transcript).toContain('second prompt');
 
       const other = await create();
       expect(

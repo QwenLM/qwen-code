@@ -293,6 +293,34 @@ describe('Generated UI state in a recorded transcript', () => {
     expect((await read()).states.get(CARD)?.value).toBe('after rewind');
   });
 
+  it('refuses a save before there is any conversation to attach it to', async () => {
+    const { save, prompt, reply, read } = await recording();
+    await expect(save(CARD, 1, 'orphan')).rejects.toThrow();
+    prompt('first');
+    reply('one');
+    await save(CARD, 1, 'anchored');
+    expect((await read()).states.get(CARD)?.value).toBe('anchored');
+  });
+
+  it('keeps saves when the messages they were made after are deleted', async () => {
+    const { recorder, save, prompt, reply, read } = await recording();
+    prompt('first');
+    reply('one');
+    await save(CARD, 1, 'during first');
+    prompt('second');
+    reply('two');
+    await save(CARD, 2, 'during second');
+    const groups = await recorder.getMessageGroups();
+    expect(groups.groups).toHaveLength(2);
+    await recorder.deleteMessageGroups({
+      snapshot: groups.snapshot,
+      groupIds: [groups.groups[1]!.id],
+    });
+    expect(Object.fromEntries((await read()).states)).toEqual({
+      [CARD]: { revision: 2, value: 'during second' },
+    });
+  });
+
   it('leaves artifact selection unchanged when state saves sit between artifact records', async () => {
     const { recorder, save, prompt, reply, read } = await recording();
     prompt('first');

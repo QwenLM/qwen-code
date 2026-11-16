@@ -4614,10 +4614,15 @@ export class ChatRecordingService {
     return this.branchGeneration;
   }
 
-  /** One card's saved view state, beside the active tail. */
+  /**
+   * One card's saved view state, beside the active tail. A save needs a
+   * conversation record to hang from; without one it could not be read back.
+   */
   async recordGeneratedUiState(
     payload: GeneratedUiStateRecordPayload,
   ): Promise<void> {
+    if (this.lastRecordUuid === null)
+      throw new Error('There is no conversation to attach view state to');
     const record: ChatRecord = {
       ...this.createBaseRecord('system'),
       type: 'system',
