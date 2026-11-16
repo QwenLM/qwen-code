@@ -27,7 +27,7 @@ The amount nodes contain one visible money value each. A share row may also hold
 
 The bill reset check verifies all input values, allocations and the chart against their defaults. Chart comparison uses normalized markup and canvas pixels so regenerated element IDs (including ARIA references and `<style>` selectors) and iframe scrolling do not count as a changed chart, while a chart drawn only on a canvas still counts as changing.
 
-Checks observe behavior; none assumes a capability is missing. When a precondition fails, dependent checks report `not-applicable` with the reason, so every run reports the same check IDs. For example, isolation cannot be judged when nothing was persisted, and nothing can be checked or deleted when adding items failed. `checklist.save-acknowledged` is `not-applicable` until the host offers a save acknowledgement to observe.
+Checks observe behavior; none assumes a capability is missing. When a precondition fails, dependent checks report `not-applicable` with the reason, so every run reports the same check IDs. For example, isolation cannot be judged when nothing was persisted, and nothing can be checked or deleted when adding items failed.
 
 ## Harness contract
 

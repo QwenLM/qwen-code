@@ -150,6 +150,25 @@ describe('joinOutcome', () => {
     expect(joinOutcome({ connected: true })).toEqual({});
     expect(joinOutcome(undefined)).toEqual({});
   });
+
+  it('reports whether the credential recorded the join; silence is unknown', () => {
+    expect(
+      joinOutcome({
+        connected: true,
+        saved: false,
+        saveError: 'disk full',
+        recorded: false,
+      }),
+    ).toEqual({ saveError: 'disk full', recorded: false });
+    // Only an explicit boolean comes through: `true` earns the remedy,
+    // `false` drops it, and an older daemon's silence stays unknown.
+    expect(
+      joinOutcome({ connected: true, saved: false, recorded: true }),
+    ).toEqual({ saveError: '', recorded: true });
+    expect(joinOutcome({ connected: true, saved: false })).toEqual({
+      saveError: '',
+    });
+  });
 });
 
 describe('connectExistingWith', () => {

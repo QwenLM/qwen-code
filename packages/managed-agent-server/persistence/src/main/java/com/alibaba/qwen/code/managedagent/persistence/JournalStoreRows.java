@@ -94,9 +94,9 @@ final class JournalStoreRows {
 
     static final int STORAGE_VERSION = 1;
 
-    static final ObjectMapper CSI_JSON = new ObjectMapper();
+    static final ObjectMapper JSON = new ObjectMapper();
 
-    static final ObjectMapper CSI_TERMINAL_JSON = CSI_JSON.copy().enable(com.fasterxml.jackson.core.JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
+    static final ObjectMapper TERMINAL_JSON = JSON.copy().enable(com.fasterxml.jackson.core.JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
             .enable(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
             .enable(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
             .enable(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_MISSING_CREATOR_PROPERTIES)
@@ -177,7 +177,7 @@ final class JournalStoreRows {
                                     throw journalCorrupt();
                                 }
                                 String first = new String(raw, StandardCharsets.UTF_8).split("\n", 2)[0];
-                                JsonNode event = CSI_TERMINAL_JSON.readTree(first).path("managedSession");
+                                JsonNode event = TERMINAL_JSON.readTree(first).path("managedSession");
                                 JsonNode payload = event.path("payload");
                                 if (!"activation.changed".equals(event.path("kind").asText())
                                         || !"active".equals(payload.path("phase").asText())) {
