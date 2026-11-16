@@ -75,33 +75,18 @@ class ManagedRuntimeRetentionGuardMySqlIT {
     }
 
     @Test
-    void aCsiReservationWithNoHolderStillRetainsItsExactBinding() throws Exception {
-        contract.aCsiReservationWithNoHolderStillRetainsItsExactBinding();
-    }
-
-    @Test
     void releasedRuntimeSessionWithMembershipPinsItsBindingUntilEvidenceCleanup() throws Exception {
         contract.releasedRuntimeSessionWithMembershipPinsItsBindingUntilEvidenceCleanup();
     }
 
     @Test
-    void csiRetirementRetainsItsBinding() throws Exception {
-        contract.csiRetirementRetainsItsBinding();
+    void workspaceRetirementRetainsItsExactBindingAndGeneration() throws Exception {
+        contract.workspaceRetirementRetainsItsExactBindingAndGeneration();
     }
 
     @Test
     void collectedPublicationUsesRawHashWithoutReadingItsPayload() throws Exception {
         contract.collectedPublicationUsesRawHashWithoutReadingItsPayload();
-    }
-
-    @Test
-    void acknowledgementUsesRawHashAndSeesTheCallersUncommittedReference() throws Exception {
-        contract.acknowledgementUsesRawHashAndSeesTheCallersUncommittedReference();
-    }
-
-    @Test
-    void sharedWorkReferencesRequireTheCsiOperationAndAckKinds() throws Exception {
-        contract.sharedWorkReferencesRequireTheCsiOperationAndAckKinds();
     }
 
     @Test

@@ -2,7 +2,7 @@
 
 [English](2026-11-16-hosted-journal-append-settlement.md) | [简体中文](2026-11-16-hosted-journal-append-settlement.zh-CN.md)
 
-状态：提案
+状态：已实现；验证记录见 PR。
 
 ## 问题陈述
 
@@ -25,17 +25,21 @@
 
 H2 默认等锁 2 秒。加长等锁时间不是这次改动。更长的等待会让同租户的其他提交排在一个持有者后面。
 
+大量提交复用同一资源时，checkpoint 归属校验可能选中覆盖整个会话的引用索引。在保留的事故数据中，历史页查询扫描了 11,926 条引用，而该资源实际只需两条。这会增加持有会话围栏期间的工作。另一个问题是恢复投影的活动 Turn 快捷分支没有包含 `HARNESS_RECOVERY_BLOCKED`，因此已经停止、正在等待持久化证据的 Harness 会在读取证据前被报告成 `recovering/turn_active`。
+
 ## 目标
 
 - 丢失的提交回执在 Harness 停住会话之前被结算，或按同一个 command id 再提交一次。
 - 已经执行过的工具不重新执行。只结算它保存下来的那批日志。
 - 日志被 fencing、写租约无法重新取得、以及日志头被另一个 command 推进时，仍然立刻停住会话。
 - 5 秒内没有完成的探针不记录 `runtime_warm_failed`。真正的身份不匹配仍然记录。
+- checkpoint 归属查询使用资源索引，并保留全部租户、Workspace、Session、revision 和已提交 owner 谓词。
+- Harness 阻塞的 Turn 展示其持久恢复证据，不走普通活动执行的快捷分支。
 
 ## 范围边界
 
 - 会话行锁仍是 `commit` 的第一处一致性读，并持有到该事务结束。
-- 已经停在 0.27.4 进程里的轮次不会被这次改动解开。那一轮取消，或在新任务里继续。
+- 本次改动不修改或重放已经停驻的 Turn。取消的 Turn 在既有证明式恢复允许准入后，可以在同一会话后接新 Turn。内核重启恢复和文件系统身份升级属于另一项改动。
 - 本地 JSONL 日志没有 `settleAppend`。那里的未知追加仍然会停住 writer。
 
 ## 方案
@@ -59,6 +63,14 @@ Harness 仍只在这个最终失败以 `HostedToolRecoveryRequiredError` 出现�
 
 ## 设计决策
 
+### checkpoint 归属查询与恢复投影
+
+`JournalCheckpointValidation.priorCheckpointResourceRevision` 为现有归属 join 的资源引用侧指定 `USE INDEX (idx_ma_ref_resource)`。查询保留原有 scope、revision 上界和已提交 journal 条件，不后移或移除会话围栏。保留的 H2 事故数据确认，历史页资源的引用扫描从 11,926 条降至两条；这是查询计划证据，不代表复现了原始完整超时，也不证明 MySQL 行为。
+
+`SessionRecoveryService.recoveryIntent` 加入 `HARNESS_RECOVERY_BLOCKED`。这类 Turn 会读取 Harness 证据并展示 `awaiting_evidence/inputs_unsettled`；Harness 已 ready 时仍等待控制面 Turn 收敛。单独的 recheck-intent 门禁保持不变，因此仅调整分类不会重放工具或授权继续执行。
+
+### 既有结算决策
+
 - 续交使用保存的字节，因为重放会比较 `transactionId`、`commandId`、`recordDigest` 以及其余提交身份。把事件重新编码会生成新的 record digest，从而冲突。
 - `absent` 选择再提交，而不是丢掉。日志头没动，不能证明持有者已经回滚。
 - 会话行锁不改。它让续交等到原事务结束，然后恰好重放或写入一次。
@@ -80,6 +92,8 @@ Harness 仍只在这个最终失败以 `HostedToolRecoveryRequiredError` 出现�
 - 权威层：回执丢失且 `landed` 时，同一次调用应用原来的事件。`absent` 时按同一命令再提交一次。再提交仍然未被确认时，事件留在 `unsettledAppend`。结算被 fencing 时停住 writer。预算在截止后允许一次结算读，并且不等待墙上时钟。
 - Harness：提示词的第一次日志追加丢失回执并随后以 `landed` 结算时，结束状态的 `recoveryBlocked` 为 false。被 fencing 的追加结束时 `recoveryBlocked` 为 true。
 - Java：`/bin/sleep 20` 抛出 `MacOsIdentityProbeTimeoutException`。超时 cause 不追加 `environment.failed`。身份不匹配的 `IOException` 会追加。
+- 归属 SQL：重复引用不会导致扫描整个 Session 的资源引用；资源缺失、其他 scope、未来 revision、未提交或孤立 journal owner 仍被拒绝。真实 MySQL 8.4 验收仍需另行完成。
+- 恢复投影：已停止且输入未收敛的 Harness 报告 `awaiting_evidence/inputs_unsettled`；Harness 已 ready、但控制面 Turn 仍活动时报告 `turn_settlement_pending`。两种查询路径均不派发或重放工作。
 
 ## 验收标准
 
@@ -87,3 +101,5 @@ Harness 仍只在这个最终失败以 `HostedToolRecoveryRequiredError` 出现�
 - 未被确认的提交不会在 `absent` 时被丢掉。
 - 这次提交随后结算或被重放时，Harness 不设置 `session.blocked`。
 - 探针超时不发出 `runtime_warm_failed`。身份不匹配仍然发出。
+- 指定资源索引后，全部归属谓词和既有会话围栏保持。
+- 恢复状态与 Harness 证据一致，不扩大 recheck 或继续执行门禁。

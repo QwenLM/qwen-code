@@ -70,7 +70,8 @@ MCP and extension management, cwd change, task cancel, context compression,
 Session and child insertion, actions), the user message queue's `startNext`
 (it still takes the guard before submitting through the same path), lifecycle
 operations, Journal writers and publication. Each needs the same audit before its
-guard can go.
+guard can go. The [Session commands audit](2026-11-03-managed-session-commands-tenant-guard.md)
+later removed the guard from most of these commands, including rename.
 
 ## Risks
 

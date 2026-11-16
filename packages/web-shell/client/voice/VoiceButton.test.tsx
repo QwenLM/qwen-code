@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 
-import { act } from 'react';
+import { act, createRef } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { VoiceButton } from './VoiceButton';
+import { VoiceButton, type VoiceButtonHandle } from './VoiceButton';
 import { I18nProvider, type WebShellLanguage } from '../i18n';
 import type {
   UseVoiceCaptureOptions,
@@ -44,6 +44,7 @@ const mocks = vi.hoisted(() => ({
     start: vi.fn(),
     stop: vi.fn(),
     abort: vi.fn(),
+    flush: vi.fn(async () => ''),
   },
 }));
 
@@ -182,6 +183,7 @@ beforeEach(() => {
   mocks.capture.start.mockReset();
   mocks.capture.stop.mockReset();
   mocks.capture.abort.mockReset();
+  mocks.capture.flush.mockReset().mockResolvedValue('');
 });
 
 afterEach(() => {
@@ -1094,5 +1096,145 @@ describe('VoiceButton', () => {
     expect(button.disabled).toBe(true);
 
     expect(mocks.capture.start).not.toHaveBeenCalled();
+  });
+
+  it('exposes capture flush through the imperative handle', async () => {
+    mocks.capture.flush.mockResolvedValue('final transcript');
+    const ref = createRef<VoiceButtonHandle>();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <VoiceButton
+            ref={ref}
+            disabled={false}
+            onInsert={() => {}}
+            target={legacyTarget}
+          />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    expect(ref.current).not.toBeNull();
+    expect(await ref.current!.flush()).toBe('final transcript');
+    expect(mocks.capture.flush).toHaveBeenCalledOnce();
+  });
+
+  it('surfaces the no-speech notice when a send finalizes an empty transcript', async () => {
+    mocks.capture.status = 'recording';
+    mocks.capture.flush.mockResolvedValue('');
+    const ref = createRef<VoiceButtonHandle>();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <VoiceButton
+            ref={ref}
+            disabled={false}
+            onInsert={() => {}}
+            target={legacyTarget}
+          />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    await act(async () => {
+      expect(await ref.current!.flush()).toBe('');
+    });
+    expect(container.querySelector('[role="status"]')?.textContent).toBe(
+      'No speech detected.',
+    );
+  });
+
+  it('does not show the no-speech notice for a flush while idle', async () => {
+    mocks.capture.flush.mockResolvedValue('');
+    const ref = createRef<VoiceButtonHandle>();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <VoiceButton
+            ref={ref}
+            disabled={false}
+            onInsert={() => {}}
+            target={legacyTarget}
+          />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    await act(async () => {
+      expect(await ref.current!.flush()).toBe('');
+    });
+    expect(container.querySelector('[role="status"]')).toBeNull();
+  });
+
+  it('does not raise the no-speech notice when the owner changes mid-flush', async () => {
+    mocks.capture.status = 'recording';
+    let resolveFlush!: (text: string) => void;
+    mocks.capture.flush.mockImplementation(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveFlush = resolve;
+        }),
+    );
+    const ref = createRef<VoiceButtonHandle>();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <VoiceButton
+            ref={ref}
+            disabled={false}
+            onInsert={() => {}}
+            target={legacyTarget}
+          />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    let pending!: Promise<string>;
+    act(() => {
+      pending = ref.current!.flush();
+    });
+    // Session switch mid-flush: the app tears the capture down (abort
+    // settles ''), so the empty result is not the user's silence.
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <VoiceButton
+            ref={ref}
+            disabled={false}
+            onInsert={() => {}}
+            target={{
+              ...legacyTarget,
+              ownerKey: 'primary:session-2',
+              sessionId: 'session-2',
+            }}
+          />
+        </I18nProvider>,
+      );
+    });
+    await act(async () => {
+      resolveFlush('');
+      expect(await pending).toBe('');
+    });
+    expect(container.querySelector('[role="status"]')).toBeNull();
   });
 });

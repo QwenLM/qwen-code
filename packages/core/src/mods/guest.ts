@@ -5,7 +5,11 @@
  */
 
 import { CLAUDE_CODE_EVENTS } from './claude-events.js';
-import { INVALIDATABLE_EVENTS, TERMINAL_ELEMENTS } from './render-tree.js';
+import {
+  INVALIDATABLE_EVENTS,
+  MOD_RENDER_SITES,
+  TERMINAL_ELEMENTS,
+} from './render-tree.js';
 import { MOD_MAX_DEPTH } from './types.js';
 
 // Executed only inside QuickJS. The factory's handles stay private to the host.
@@ -222,6 +226,13 @@ export const MOD_GUEST_FACTORY = String.raw`
       // Async, so an input too large for the bridge rejects like a wrong shape.
       prompt: { submit: async input => invoke('prompt.submit', input) },
       turn: { abort: input => invoke('turn.abort', input) },
+      // Async, so a value that is no JSON (a cycle) rejects as a wrong shape does.
+      store: {
+        get: async key => invoke('store.get', { key }),
+        set: async (key, value) => invoke('store.set', { key, value }),
+        delete: async key => invoke('store.delete', { key }),
+        keys: async () => invoke('store.keys', {})
+      },
       ui: {
         log: (text, options = {}) => {
           if (!object(options) || keys(options).some(k => k !== 'to')) throw new Error('Invalid Mod log');
@@ -276,7 +287,15 @@ export const MOD_GUEST_FACTORY = String.raw`
       if (typeof register !== 'function') throw new Error('Mod must export register(on, options)');
       registering = true;
       try { await register(on, frozen(parse(options))); } finally { registering = false; }
-      return stringify(hooks.map(h => h.event));
+      // A render hook names the sites its matcher's component allows, so the
+      // host raises a site only where some hook may hear it.
+      const sites = ${JSON.stringify(MOD_RENDER_SITES)};
+      return stringify(hooks.map(h => ({
+        event: h.event,
+        sites: object(h.matcher) && hasOwn(h.matcher, 'component')
+          ? sites.filter(site => matches(h.matcher.component, site))
+          : null
+      })));
     },
     run: async json => {
       const run = parse(json);

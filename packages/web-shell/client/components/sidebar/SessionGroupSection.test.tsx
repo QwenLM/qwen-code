@@ -38,7 +38,7 @@ describe('SessionGroupSection', () => {
     container.remove();
   });
 
-  it('shows five sessions and resets Show all after collapsing', () => {
+  it('expands ten sessions at a time and resets after collapsing', () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -49,11 +49,11 @@ describe('SessionGroupSection', () => {
             <SessionGroupSection
               id="group"
               label="Group"
-              count={6}
+              count={16}
               expanded={expanded}
               onToggle={() => {}}
             >
-              {Array.from({ length: 6 }, (_, index) => (
+              {Array.from({ length: 16 }, (_, index) => (
                 <div key={index}>Session {index + 1}</div>
               ))}
             </SessionGroupSection>
@@ -61,19 +61,27 @@ describe('SessionGroupSection', () => {
         );
       });
     };
+    const expandButton = () =>
+      Array.from(container.querySelectorAll('button')).find((button) =>
+        /^Show \d+ more$/.test(button.textContent ?? ''),
+      );
 
     render(true);
     expect(container.textContent).toContain('Session 5');
     expect(container.textContent).not.toContain('Session 6');
-    const showAll = Array.from(container.querySelectorAll('button')).find(
-      (button) => button.textContent === 'Show all',
-    );
-    act(() => showAll?.click());
-    expect(container.textContent).toContain('Session 6');
+    expect(expandButton()?.textContent).toBe('Show 10 more');
+    act(() => expandButton()?.click());
+    expect(container.textContent).toContain('Session 15');
+    expect(container.textContent).not.toContain('Session 16');
+    expect(expandButton()?.textContent).toBe('Show 1 more');
+    act(() => expandButton()?.click());
+    expect(container.textContent).toContain('Session 16');
+    expect(expandButton()).toBeUndefined();
 
     render(false);
     render(true);
     expect(container.textContent).not.toContain('Session 6');
+    expect(expandButton()?.textContent).toBe('Show 10 more');
 
     act(() => root.unmount());
     container.remove();
@@ -103,7 +111,7 @@ describe('SessionGroupSection', () => {
     });
 
     expect(container.textContent).toContain('Session 6');
-    expect(container.textContent).not.toContain('Show all');
+    expect(container.textContent).not.toMatch(/Show \d+ more/);
     act(() => root.unmount());
     container.remove();
   });

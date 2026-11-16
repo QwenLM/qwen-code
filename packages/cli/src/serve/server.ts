@@ -135,6 +135,7 @@ import { createHealthRoutes } from './routes/health.js';
 import { registerWorkspaceAuthRoutes } from './routes/workspace-auth.js';
 import { registerWorkspaceSubscriptionRoutes } from './routes/workspace-subscription.js';
 import { registerSubscriptionAuthRoutes } from './routes/subscription-auth.js';
+import { registerWeixinAuthRoutes } from './routes/weixin-auth.js';
 import { registerWorkspaceExtensionRoutes } from './routes/workspace-extensions.js';
 import type { WorkspaceFileSystemFactory } from './fs/index.js';
 import {
@@ -163,6 +164,7 @@ import { registerStandaloneSessionRoutes } from './routes/standalone-sessions.js
 import {
   createRequestedSessionIdAdmission,
   requestedSessionIdPersistenceExists,
+  type RequestedSessionIdAdmission,
 } from './session-id-admission.js';
 import { sessionAttachmentsRoots } from './session-attachments-root.js';
 import {
@@ -174,7 +176,10 @@ import {
   registerWorkspaceQualifiedScheduledTasksRoutes,
 } from './routes/scheduled-tasks.js';
 import { registerChannelNotifyRoutes } from './routes/channel-notify.js';
-import { registerGoalsRoutes } from './routes/goals.js';
+import {
+  registerGoalsRoutes,
+  registerWorkspaceQualifiedGoalsRoutes,
+} from './routes/goals.js';
 import { registerWorkspaceAgentRoutes } from './routes/workspace-agents.js';
 import { registerSessionAgentSquadRoutes } from './routes/session-agent-squads.js';
 import {
@@ -3627,6 +3632,9 @@ export function createServeApp(
   );
   app.locals['stopSubscriptionAuth'] = stopSubscriptionAuth;
 
+  const stopWeixinAuth = registerWeixinAuthRoutes(app, mutate);
+  app.locals['stopWeixinAuth'] = stopWeixinAuth;
+
   registerWorkspaceAuthRoutes(app, {
     mutate,
     deviceFlowRegistry,
@@ -3652,6 +3660,15 @@ export function createServeApp(
     workspaceRegistry,
     archiveCoordinator,
     requestedSessionIdAdmission,
+    // Late-bound: the refresh timer is started before this app exists, so the
+    // serve root installs the hook on locals and it is read per restore.
+    onSessionRestored: ({ workspaceCwd, sessionId }) => {
+      (
+        app.locals as {
+          prWatchDrainNow?: (cwd: string, sessionId?: string) => void;
+        }
+      ).prWatchDrainNow?.(workspaceCwd, sessionId);
+    },
     mutate,
     sendBridgeError,
     daemonLog,
@@ -3675,6 +3692,27 @@ export function createServeApp(
         }
       : {}),
   });
+  // The PR watch's in-process wake shares this instance with the routes: a
+  // second tracker would not see these reservations and could restore over one.
+  (
+    app.locals as {
+      requestedSessionIdAdmission?: RequestedSessionIdAdmission;
+    }
+  ).requestedSessionIdAdmission = requestedSessionIdAdmission;
+  // Same reason: a live-conversation restore throws without this, so the wake
+  // would report every session in such a workspace unavailable.
+  if (liveConversationWorkspaceForRoutes) {
+    (
+      app.locals as {
+        materializeLiveConversationDirectory?: (
+          sessionId: string,
+        ) => Promise<string>;
+      }
+    ).materializeLiveConversationDirectory = (sessionId: string) =>
+      liveConversationWorkspaceForRoutes.materializeConversationDirectory(
+        sessionId,
+      );
+  }
 
   if (standaloneSessionService) {
     registerStandaloneSessionRoutes(app, {
@@ -3902,6 +3940,12 @@ export function createServeApp(
     bridge: primaryBridge,
     isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
     captureGenerationAssertion: capturePrimaryGenerationAssertion,
+  });
+  // The qualified listing lets a multi-workspace Web Shell aggregate every
+  // registered project's goals, not just the primary's.
+  registerWorkspaceQualifiedGoalsRoutes(app, {
+    workspaceRegistry,
+    conversationRuntimeActivity,
   });
 
   // The primary workspace's /autofix-pr watches, read from the clone's files
@@ -4480,6 +4524,7 @@ export function createServeApp(
       stopAppResource(locals.stopSessionAgentOrchestrators);
       stopAppResource(locals.stopHostedMountHandbacks);
       stopAppResource(stopSubscriptionAuth);
+      stopAppResource(stopWeixinAuth);
       stopAppResource(() => deviceFlowRegistry.dispose());
       stopAppResource(() => rateLimiter?.setDraining(true));
       stopAppResource(() => rateLimiter?.dispose());

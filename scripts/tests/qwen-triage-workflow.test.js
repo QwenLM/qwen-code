@@ -59,6 +59,13 @@ const hasGnuRealpath =
   spawnSync('realpath', ['-m', '--', '/'], {
     stdio: 'ignore',
   }).status === 0;
+// The deepen step runs in the bookworm container: GNU `date -d` and
+// `timeout -k`, which the macOS scripts lane lacks.
+const canRunDeepenStep =
+  spawnSync('date', ['-u', '-d', '90 days ago'], { stdio: 'ignore' }).status ===
+    0 &&
+  spawnSync('timeout', ['-k', '1', '5', 'true'], { stdio: 'ignore' }).status ===
+    0;
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -2049,6 +2056,618 @@ describe('qwen-triage verify workflow', () => {
     expect(flat).toContain('report item 7 (_Not covered_)');
     expect(verifySkill).toMatch(/^7\. \*\*Not covered\*\*/m);
     expect(flat).toContain('Title, body, comments, review threads,');
+  });
+
+  // The deepen step's cutoff comes from the resolve step, which holds the
+  // token. It must be the oldest date among the commits AND their parents:
+  // a shallow fetch also cuts every commit with one parent older than the
+  // cutoff, and the next test shows that cut hiding the PR's own commits.
+  it.skipIf(spawnSync('jq', ['--version']).status !== 0)(
+    'dates the history cutoff from the PR commits and their parents',
+    () => {
+      const resolveStep = stepIn('verify', 'Resolve PR and snapshot metadata');
+      const snippet = resolveStep
+        .match(
+          /\n( {10}# How far back[\s\S]*?\n {10}echo "history_since=\$\{history_since\}" >> "\$GITHUB_OUTPUT")\n/,
+        )?.[1]
+        ?.replace(/^ {10}/gm, '');
+      expect(snippet).toBeTruthy();
+      // Only a run pays for it: after every exit that skips.
+      const at = resolveStep.indexOf(snippet.split('\n')[0]);
+      expect(at).toBeLessThan(
+        resolveStep.lastIndexOf('echo "decision=run" >> "$GITHUB_OUTPUT"'),
+      );
+      for (const exit of ['echo "decision=skip"', 'echo "decision=na"']) {
+        expect(resolveStep.lastIndexOf(exit)).toBeGreaterThan(0);
+        expect(at).toBeGreaterThan(resolveStep.lastIndexOf(exit));
+      }
+      const { commentsFile, ...harness } = makeGhHarness('history-since');
+      try {
+        // The head the resolve step pinned, which the pin step checks.
+        mkdirSync(join(harness.dir, 'verify-context'));
+        writeFileSync(
+          join(harness.dir, 'verify-context', 'pr.json'),
+          JSON.stringify({ headRefOid: 'h1' }),
+        );
+        const run = (pages, env = {}) => {
+          writeFileSync(
+            commentsFile,
+            typeof pages === 'string' ? pages : JSON.stringify(pages),
+          );
+          const { outputs, calls } = harness.run(
+            `set -euo pipefail\n${snippet}`,
+            { PR_NUMBER: '7999', RUNNER_TEMP: harness.dir, ...env },
+          );
+          const lines = outputs.split('\n').filter(Boolean);
+          expect(lines).toHaveLength(1);
+          expect(calls).toHaveLength(1);
+          return { since: lines[0].replace(/^history_since=/, ''), calls };
+        };
+        const node = (date, ...parents) => ({
+          commit: {
+            committedDate: date,
+            parents: { nodes: parents.map((p) => ({ committedDate: p })) },
+          },
+        });
+        const page = (nodes, hasNextPage, headRefOid = 'h1') => ({
+          data: {
+            repository: {
+              pullRequest: {
+                headRefOid,
+                commits: {
+                  pageInfo: { hasNextPage, endCursor: 'c' },
+                  nodes,
+                },
+              },
+            },
+          },
+        });
+        // The oldest date is a parent's on the second page: the merge of
+        // a base tip older than every commit the PR authored.
+        const pages = [
+          page([node('2026-10-06T00:00:00Z', '2026-10-05T12:00:00Z')], true),
+          page(
+            [
+              node('2026-10-08T00:00:00Z', '2026-10-07T00:00:00Z'),
+              node(
+                '2026-10-09T00:00:00Z',
+                '2026-10-08T00:00:00Z',
+                '2026-10-01T00:00:00Z',
+              ),
+            ],
+            false,
+          ),
+        ];
+        const ok = run(pages);
+        expect(ok.since).toBe('2026-10-01T00:00:00Z');
+        expect(ok.calls[0]).toEqual(
+          expect.arrayContaining([
+            'graphql',
+            '--paginate',
+            '--slurp',
+            'owner=QwenLM',
+            'name=qwen-code',
+            'number=7999',
+          ]),
+        );
+        // `-F` types the number; `-f` would send a string, and `Int!`
+        // rejects it.
+        expect(ok.calls[0][ok.calls[0].indexOf('number=7999') - 1]).toBe('-F');
+        const query = ok.calls[0].find((a) => a.startsWith('query='));
+        // The stub serves both pages whatever it is asked; `--paginate`
+        // follows only a query that selects this.
+        expect(query).toContain('pageInfo { hasNextPage endCursor }');
+        // GitHub rejects a query that uses an undeclared variable, and the
+        // stub never reads the query: pin the declaration too.
+        expect(query).toContain(
+          'query($owner: String!, $name: String!, $number: Int!, $endCursor: String)',
+        );
+        expect(query).toContain(
+          'pullRequest(number: $number) { headRefOid commits(first: 100, after: $endCursor)',
+        );
+        expect(query).toContain(
+          'commit { committedDate parents(first: 10) { nodes { committedDate } } }',
+        );
+        // A commit dated before its parent (clock skew, or a rebase that
+        // kept author dates) is the oldest: its own date counts too.
+        expect(
+          run([
+            page(
+              [
+                node('2026-10-06T00:00:00Z', '2026-10-05T00:00:00Z'),
+                node('2026-10-03T00:00:00Z', '2026-10-06T00:00:00Z'),
+              ],
+              false,
+            ),
+          ]).since,
+        ).toBe('2026-10-03T00:00:00Z');
+        // A push after pr.json lists another head's commits: no date, so
+        // no cutoff that would leave the checked head on the boundary.
+        // Every page names the new head, or the head moves mid-pagination.
+        const moved = page(
+          pages[1].data.repository.pullRequest.commits.nodes,
+          false,
+          'h2',
+        );
+        expect(run([moved]).since).toBe('');
+        expect(run([pages[0], moved]).since).toBe('');
+        // Failure and odd answers leave the output empty, never a value the
+        // deepen step would pass to git: a failed call, an empty answer,
+        // pages without commits, and a string that is not a timestamp.
+        expect(run(pages, { GH_STUB_FAIL_LIST: '1' }).since).toBe('');
+        expect(run(pages, { GH_STUB_EMPTY_LIST: '1' }).since).toBe('');
+        expect(run([{ data: null }]).since).toBe('');
+        expect(run([page([node('--upload-pack=x')], false)]).since).toBe('');
+        expect(run([page([node('2026-10-01T00:00:00Z x')], false)]).since).toBe(
+          '',
+        );
+        expect(run('not json').since).toBe('');
+      } finally {
+        harness.cleanup();
+      }
+    },
+  );
+
+  // Depth 2 left 38 of 67 follow-up rounds without the previous head or a
+  // merge base, so they re-ran everything. Execute the real step against a
+  // file:// origin shaped like a PR that merged an older base: the merge's
+  // base parent predates every commit the PR authored.
+  it.skipIf(!canRunDeepenStep)(
+    'deepens the checkout so a round reaches every PR commit, the merge base and the previous head',
+    () => {
+      const deepenStep = stepIn(
+        'verify',
+        'Deepen history for the verify round',
+      );
+      const script = deepenStep
+        .match(/run: \|-\n([\s\S]*)$/)?.[1]
+        .replace(/^ {10}/gm, '');
+      expect(script).toBeTruthy();
+      const dir = mkdtempSync(join(tmpdir(), 'verify-deepen-'));
+      // No developer config: commit signing or a URL rewrite would change
+      // what these commands do.
+      const gitEnv = {
+        ...process.env,
+        GIT_CONFIG_GLOBAL: '/dev/null',
+        GIT_CONFIG_NOSYSTEM: '1',
+      };
+      const git = (cwd, args, env = {}) => {
+        const res = spawnSync('git', args, {
+          cwd,
+          encoding: 'utf8',
+          env: { ...gitEnv, ...env },
+        });
+        expect(res.status, `git ${args.join(' ')}: ${res.stderr}`).toBe(0);
+        return res.stdout.trim();
+      };
+      // Dates relative to one fixed now, whole seconds: a cutoff taken a
+      // second after the commit it names would cut that commit.
+      const now = Math.floor(Date.now() / 1000) * 1000;
+      const day = (n) =>
+        new Date(now - n * 86_400_000).toISOString().replace(/\.\d+Z$/, 'Z');
+      try {
+        const origin = join(dir, 'origin');
+        mkdirSync(origin);
+        git(origin, ['init', '-q', '-b', 'main']);
+        git(origin, ['config', 'user.email', 't@t']);
+        git(origin, ['config', 'user.name', 't']);
+        // GitHub serves any object by OID, force-pushed ones included.
+        git(origin, ['config', 'uploadpack.allowAnySHA1InWant', 'true']);
+        const commit = (msg, n, file) => {
+          writeFileSync(join(origin, file ?? msg.replace(/\W/g, '')), msg);
+          git(origin, ['add', '-A']);
+          const at = { GIT_AUTHOR_DATE: day(n), GIT_COMMITTER_DATE: day(n) };
+          git(origin, ['commit', '-qm', msg], at);
+          return git(origin, ['rev-parse', 'HEAD']);
+        };
+        const merge = (msg, n, other) => {
+          const at = { GIT_AUTHOR_DATE: day(n), GIT_COMMITTER_DATE: day(n) };
+          git(origin, ['merge', '-q', '--no-ff', other, '-m', msg], at);
+          return git(origin, ['rev-parse', 'HEAD']);
+        };
+        // Two days either side of the step's 90-day floor.
+        const ancient = commit('main 0', 92);
+        const recent = commit('main 0b', 88);
+        commit('main 1', 40);
+        commit('main 2', 39);
+        const fork = commit('main 3', 38);
+        commit('main 4', 37);
+        const oldTip = commit('main 5', 36);
+        git(origin, ['checkout', '-q', '-b', 'feat', fork]);
+        const pr1 = commit('pr 1', 30);
+        const pr2 = commit('pr 2', 29);
+        const mergedBase = merge('merge main', 28, 'main');
+        const pr3 = commit('pr 3', 27);
+        git(origin, ['checkout', '-q', 'main']);
+        commit('main 6', 20);
+        commit('main 7', 19);
+        git(origin, ['update-ref', 'refs/pull/7/head', 'feat']);
+        git(origin, ['checkout', '-q', '--detach', 'main']);
+        merge('merge ref', 18, 'feat');
+        git(origin, ['update-ref', 'refs/pull/7/merge', 'HEAD']);
+        // A head the author force-pushed away: in no ref any more.
+        git(origin, ['checkout', '-q', '--detach', pr2]);
+        const gone = commit('gone', 26);
+        git(origin, ['checkout', '-q', 'main']);
+        expect(git(origin, ['branch', '--contains', gone])).toBe('');
+
+        const context = join(dir, 'tmp', 'verify-context');
+        // The published shape: the head marker in the header, a blank
+        // line, then the report prose. The step reads the marker; the
+        // prose is for human readers and may name other heads.
+        const published = (head, prose) =>
+          `<!-- qwen-triage:verify -->\n<!-- qwen-triage:verify-run=1 -->\n<!-- qwen-triage:verify-substantive -->\n<!-- qwen-triage:verify-head=${head} -->\n\n${prose}`;
+        // The checkout as actions/checkout leaves it at fetch-depth 2.
+        const checkout = (name, previousHead, tail = '') => {
+          const ws = join(dir, name);
+          mkdirSync(ws);
+          git(ws, ['init', '-q']);
+          git(ws, ['remote', 'add', 'origin', `file://${origin}`]);
+          git(ws, [
+            'fetch',
+            '-q',
+            '--no-tags',
+            '--depth=2',
+            'origin',
+            '+refs/pull/7/merge:refs/remotes/pull/7/merge',
+          ]);
+          git(ws, ['checkout', '-q', '--detach', 'refs/remotes/pull/7/merge']);
+          rmSync(context, { recursive: true, force: true });
+          mkdirSync(context, { recursive: true });
+          if (previousHead) {
+            // The prose names the base tip too; only the marker names the
+            // previous head.
+            writeFileSync(
+              join(context, 'previous-report.md'),
+              published(
+                previousHead,
+                `Compared with base tip \`${fork}\`.\n\nPR 7 round 2 against \`${fork}\` — **Verdict: \`findings\`** — Verified head: \`${previousHead}\` (\`git rev-parse HEAD^2\`), base tip \`${fork}\`.${tail}\n`,
+              ),
+            );
+          }
+          return ws;
+        };
+        // The step summary a run wrote, beside its checkout.
+        const summaryOf = (ws) => readFileSync(`${ws}.summary`, 'utf8');
+        const run = (ws, since, env = {}) => {
+          const res = spawnSync(
+            'bash',
+            ['--noprofile', '--norc', '-eo', 'pipefail', '-c', script],
+            {
+              cwd: ws,
+              encoding: 'utf8',
+              env: {
+                ...gitEnv,
+                HISTORY_SINCE: since,
+                RUNNER_TEMP: join(dir, 'tmp'),
+                GITHUB_STEP_SUMMARY: `${ws}.summary`,
+                ...env,
+              },
+            },
+          );
+          expect(res.status, res.stderr).toBe(0);
+          return `${res.stdout}${res.stderr}`;
+        };
+        const prCommits = (ws) =>
+          git(ws, ['rev-list', '--no-merges', 'HEAD^2', '--not', 'HEAD^1'])
+            .split('\n')
+            .filter(Boolean)
+            .sort();
+        // The skill's check: empty at the shallow boundary, non-zero when the
+        // commit is not local.
+        const parents = (ws, oid) =>
+          git(ws, ['log', '-1', '--format=%P', oid]).split(' ').filter(Boolean);
+        const local = (ws, oid) =>
+          spawnSync('git', ['cat-file', '-e', `${oid}^{commit}`], { cwd: ws })
+            .status === 0;
+
+        // The resolve step's date: pr 1's parent, the oldest of all.
+        const deep = checkout('deep', pr2);
+        expect(prCommits(deep)).toEqual([pr3]);
+        const out = run(deep, day(38));
+        expect(prCommits(deep)).toEqual([pr1, pr2, pr3].sort());
+        for (const oid of [pr1, pr2, mergedBase, pr3]) {
+          expect(parents(deep, oid).length, oid).toBeGreaterThan(0);
+        }
+        expect(git(deep, ['merge-base', 'HEAD^1', 'HEAD^2'])).toBe(oldTip);
+        expect(git(deep, ['rev-list', '--count', `${oldTip}..HEAD^1`])).toBe(
+          '2',
+        );
+        // The previous head is an ancestor, so the merge on top of it
+        // classifies: a mechanical merge reproduces the merge's tree.
+        expect(
+          git(deep, ['merge-tree', '--write-tree', pr2, `${mergedBase}^2`]),
+        ).toBe(git(deep, ['rev-parse', `${mergedBase}^{tree}`]));
+        expect(
+          spawnSync(
+            'git',
+            ['rev-parse', '-q', '--verify', 'refs/verify/previous'],
+            {
+              cwd: deep,
+            },
+          ).status,
+        ).not.toBe(0);
+        // Merges included: pr 1, pr 2, the merge of main, pr 3.
+        expect(out).toContain('4 PR commits');
+        expect(out).toContain(`previous head ${pr2}`);
+        expect(out).not.toContain('::warning::');
+        expect(summaryOf(deep)).toBe(
+          `history from ${day(38)}: 4 PR commits, merge base ${oldTip}, previous head ${pr2}\n`,
+        );
+
+        // Dating the commits alone puts the cutoff after `main 5`, and the
+        // merge whose parent that is becomes the boundary: pr 1 and pr 2
+        // drop out, and the parentless merge now passes `--no-merges` as an
+        // ordinary commit that adds the whole tree.
+        const cut = checkout('cut');
+        // A first round: no previous report, so no warning about one. The
+        // cut leaves no merge base, which warns and reaches the summary.
+        const cutOut = run(cut, day(30));
+        expect(cutOut).not.toContain('previous report');
+        expect(cutOut).toContain('::warning::No merge base is local');
+        expect(summaryOf(cut)).toContain(
+          'merge base not reachable, previous head none',
+        );
+        expect(prCommits(cut)).toEqual([mergedBase, pr3].sort());
+        expect(parents(cut, mergedBase)).toEqual([]);
+
+        // After a force-push the previous head is fetched by OID. The prose
+        // goes on to name thousands more OIDs: the header read must not be
+        // disturbed by the body's size.
+        const pushed = checkout('pushed', gone, ` \`${fork}\``.repeat(5000));
+        const pushedOut = run(pushed, day(38));
+        expect(git(pushed, ['rev-parse', 'refs/verify/previous'])).toBe(gone);
+        expect(
+          git(pushed, ['diff', '--name-only', gone, 'HEAD^2']).split('\n'),
+        ).toContain('gone');
+        expect(pushedOut).not.toContain('::warning::');
+        // Fetching that one commit at depth 1 leaves the deepened history.
+        expect(prCommits(pushed)).toEqual([pr1, pr2, pr3].sort());
+        expect(parents(pushed, pr1)).toEqual([fork]);
+        expect(pushedOut).toContain(`4 PR commits, merge base ${oldTip}`);
+
+        // A previous report that names no verified head says so: that
+        // follow-up round re-runs everything, and the log tells why.
+        const unnamed = checkout('unnamed');
+        writeFileSync(
+          join(context, 'previous-report.md'),
+          `Compared with base tip \`${fork}\`.\n`,
+        );
+        const unnamedOut = run(unnamed, day(38));
+        expect(unnamedOut).toContain(
+          '::warning::The previous report names no verified head',
+        );
+        expect(unnamedOut).toContain('previous head none');
+        // The shape real reports use (PR #13601): a bullet list in which the
+        // previous round's own head follows the verified one. The marker,
+        // not the prose order, names the head.
+        const bullets = checkout('bullets');
+        writeFileSync(
+          join(context, 'previous-report.md'),
+          published(
+            gone,
+            `**Verdict: \`findings\`** — see below.\n\n- **Verified head:** \`${gone}\` (\`git rev-parse HEAD^2\`)\n- **Previous verified head (P):** \`${pr2}\`\n`,
+          ),
+        );
+        expect(run(bullets, day(38))).toContain(`previous head ${gone}`);
+        expect(git(bullets, ['rev-parse', 'refs/verify/previous'])).toBe(gone);
+        // The same bullets the other way round: the `(P)` line names the
+        // round before, and the marker still wins.
+        const reversed = checkout('reversed');
+        writeFileSync(
+          join(context, 'previous-report.md'),
+          published(
+            gone,
+            `**Verdict: \`findings\`** — see below.\n\n- **Previous verified head (P):** \`${pr2}\`\n- **Verified head:** \`${gone}\` (\`git rev-parse HEAD^2\`)\n`,
+          ),
+        );
+        expect(run(reversed, day(38))).toContain(`previous head ${gone}`);
+        // The verdict line's own prose mentions the previous round: the
+        // marker still names the head. The prose filter this read replaces
+        // deleted that line and emptied prev.
+        const mentioned = checkout('mentioned');
+        writeFileSync(
+          join(context, 'previous-report.md'),
+          published(
+            gone,
+            `PR 7 round 4 — addressed the previous round findings — **Verdict: pass** — 9/9 passed. Verified head: \`${gone}\`\n`,
+          ),
+        );
+        expect(run(mentioned, day(38))).toContain(`previous head ${gone}`);
+        expect(git(mentioned, ['rev-parse', 'refs/verify/previous'])).toBe(
+          gone,
+        );
+        // An earlier line names another round's head: the marker wins over
+        // the first prose match.
+        const stale = checkout('stale');
+        writeFileSync(
+          join(context, 'previous-report.md'),
+          published(
+            gone,
+            `Round 2 — **Verdict: pass** — Verified head: \`${pr2}\`\n\nPR 7 round 3 — **Verdict: \`findings\`** — Verified head: \`${gone}\`\n`,
+          ),
+        );
+        expect(run(stale, day(38))).toContain(`previous head ${gone}`);
+        expect(git(stale, ['rev-parse', 'refs/verify/previous'])).toBe(gone);
+        // A report published before the head marker: the usual header and
+        // a prose verdict line naming a head, but no marker to read — the
+        // round warns and classifies without one, never scraping the prose.
+        const legacy = checkout('legacy');
+        writeFileSync(
+          join(context, 'previous-report.md'),
+          `<!-- qwen-triage:verify -->\n<!-- qwen-triage:verify-run=1 -->\n<!-- qwen-triage:verify-substantive -->\n\nPR 7 round 2 — **Verdict: \`findings\`** — Verified head: \`${gone}\`\n`,
+        );
+        const legacyOut = run(legacy, day(38));
+        expect(legacyOut).toContain(
+          '::warning::The previous report names no verified head',
+        );
+        expect(legacyOut).toContain('previous head none');
+        expect(
+          spawnSync(
+            'git',
+            ['rev-parse', '-q', '--verify', 'refs/verify/previous'],
+            { cwd: legacy },
+          ).status,
+        ).not.toBe(0);
+        // The marker is header-scoped: quoted below the blank line — a
+        // report about this workflow would quote it — it is not read.
+        const quoted = checkout('quoted');
+        writeFileSync(
+          join(context, 'previous-report.md'),
+          `<!-- qwen-triage:verify -->\n<!-- qwen-triage:verify-substantive -->\n\nRound body:\n\n\`\`\`\n<!-- qwen-triage:verify-head=${gone} -->\n\`\`\`\n`,
+        );
+        const quotedOut = run(quoted, day(38));
+        expect(quotedOut).toContain(
+          '::warning::The previous report names no verified head',
+        );
+        expect(quotedOut).toContain('previous head none');
+        // What publish-verify stamps is what this step reads: run the
+        // publisher's own header assembly, append a report body, and feed
+        // the result through the step. A reword on either side breaks the
+        // chain.
+        const publishRun = stepIn(
+          'publish-verify',
+          'Post verification report comment',
+        )
+          .match(/run: \|-\n([\s\S]*)$/)?.[1]
+          .replace(/^ {10}/gm, '');
+        const stampHeader = publishRun.match(
+          /printf '%s\\n%s\\n' '<!-- qwen-triage:verify -->'[\s\S]*?(?=\n# The gate verdict travels)/,
+        )?.[0];
+        expect(stampHeader).toBeTruthy();
+        const stamped = checkout('stamped');
+        const headerFile = join(dir, 'stamped-header.md');
+        const stampRes = spawnSync(
+          'bash',
+          ['--noprofile', '--norc', '-eo', 'pipefail', '-c', stampHeader],
+          {
+            cwd: stamped,
+            encoding: 'utf8',
+            env: {
+              ...gitEnv,
+              BODY_FILE: headerFile,
+              RUN_MARKER: '<!-- qwen-triage:verify-run=1 -->',
+              FLAKE_VERDICT: '',
+              VERIFY_HEAD_OID: gone,
+            },
+          },
+        );
+        expect(stampRes.status, stampRes.stderr).toBe(0);
+        writeFileSync(
+          join(context, 'previous-report.md'),
+          `${readFileSync(headerFile, 'utf8')}\nPR 7 round 2 — **Verdict: \`findings\`** — Verified head: \`${gone}\`\n`,
+        );
+        expect(run(stamped, day(38))).toContain(`previous head ${gone}`);
+        expect(git(stamped, ['rev-parse', 'refs/verify/previous'])).toBe(gone);
+
+        // Older than the floor: deepened to the floor, with a warning.
+        const floored = checkout('floored');
+        expect(run(floored, day(200))).toContain('history stops at');
+        expect(prCommits(floored)).toEqual([pr1, pr2, pr3].sort());
+        expect(local(floored, ancient)).toBe(false);
+        expect(local(floored, recent)).toBe(true);
+        expect(local(deep, recent)).toBe(false);
+        // A `date` that fails, as BSD's does on `-d`, drops the floor and
+        // not the step.
+        const bin = join(dir, 'bin');
+        mkdirSync(bin);
+        writeFileSync(join(bin, 'date'), '#!/bin/sh\nexit 1\n', {
+          mode: 0o755,
+        });
+        const unfloored = checkout('unfloored');
+        expect(
+          run(unfloored, day(200), { PATH: `${bin}:${process.env.PATH}` }),
+        ).not.toContain('::warning::');
+        expect(local(unfloored, ancient)).toBe(true);
+
+        // Best-effort: no date, or an unreachable origin, leaves depth 2
+        // and says so, and the step still succeeds.
+        // With nothing deepened, the previous head arrives alone and
+        // parentless, whatever its ancestry.
+        const undated = checkout('undated', gone);
+        expect(run(undated, '')).toContain('No date to deepen to');
+        expect(prCommits(undated)).toEqual([pr3]);
+        expect(git(undated, ['rev-parse', 'refs/verify/previous'])).toBe(gone);
+        expect(
+          git(undated, ['rev-list', '--count', 'refs/verify/previous']),
+        ).toBe('1');
+        expect(parents(undated, gone)).toEqual([]);
+        const offline = checkout('offline', gone);
+        git(offline, ['remote', 'set-url', 'origin', `file://${dir}/missing`]);
+        const offlineOut = run(offline, day(38));
+        expect(offlineOut).toContain('Could not deepen the checkout');
+        expect(offlineOut).toContain(
+          'Could not fetch the previous verified head',
+        );
+        expect(prCommits(offline)).toEqual([pr3]);
+        // The summary records what the step reached, not what it asked for.
+        expect(summaryOf(offline)).toBe(
+          'history from nowhere: 1 PR commits, merge base not reachable, previous head none\n',
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('deepens as root before PR code, with no token, on the checkout it was handed', () => {
+    const verify = job('verify');
+    const at = verify.indexOf("- name: 'Deepen history for the verify round'");
+    expect(at).toBeGreaterThan(
+      verify.indexOf("- name: 'Pin agent inputs from base'"),
+    );
+    expect(at).toBeLessThan(
+      verify.indexOf("- name: 'Install and build PR app'"),
+    );
+    const deepen = stepIn('verify', 'Deepen history for the verify round');
+    expect(deepen).toContain('if: "steps.pr.outputs.decision == \'run\'"');
+    expect(deepen).toContain(
+      "HISTORY_SINCE: '${{ steps.pr.outputs.history_since }}'",
+    );
+    expect(deepen).not.toContain('secrets.');
+    expect(deepen).not.toContain('GH_TOKEN');
+    // By OID: the head the pin step checked, never a ref that may have
+    // moved since.
+    // The round needs commits, not tags.
+    expect(deepen).toContain(
+      'git fetch --no-tags --quiet --shallow-since="$since" origin "$base" "$head"',
+    );
+    // `-k`: a SIGKILL follows if a fetch outlives its SIGTERM.
+    expect(deepen).toContain('timeout -k 10 140 git fetch');
+    expect(deepen).toContain('timeout -k 5 25 git fetch');
+    // The job's timeout budget counts both caps: 150s + 30s.
+    expect(verify).toMatch(
+      /deepen history +≤ 3m: `timeout -k 10 140` on the\n +# +history fetch, `timeout -k 5 25` on/,
+    );
+  });
+
+  it('tells the agent what the deepened history holds and how to check it', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+    expect(flat).not.toContain('Only these three commits exist locally');
+    expect(flat).toContain(
+      "the lane deepens both sides back to the oldest date among the PR's commits and their parents, at most 90 days. A merge base older than that stays out: a PR forked earlier keeps one only through a later merge of the base whose parents both fall within those 90 days. The previous report's verified head arrives as a `verify-head` marker in its header; when that commit is still not local, the lane fetches it alone, without its parents, into `refs/verify/previous`.",
+    );
+    // `git rev-parse <oid>^@` prints the argument and exits 128 for a
+    // commit that is not local, so counting its lines finds a parent.
+    expect(flat).not.toContain('rev-parse <oid>^@');
+    expect(flat).toContain(
+      "`git log -1 --format=%P <oid>` for a commit's parents, which prints nothing for a commit at the shallow boundary and exits non-zero for one that is not local",
+    );
+    expect(flat).toContain(
+      '`git diff P H` still settles a test-only tip, but merge bases and ancestry tests do not work, and a failed `--is-ancestor` there is not evidence of a force-push. When `P` is missing, treat the round as a production change. When `git merge-tree` cannot run for want of a merge base (it exits 128 with `refusing to merge unrelated histories`), merge only is not established: say so in the report, and let `git diff P H` decide between a test-only tip and a production change.',
+    );
+    expect(flat).toContain(
+      "Every `commits[].oid` in `$QWEN_VERIFY_CONTEXT` must be local with its parents: `git log -1 --format=%P <oid>` exits zero and prints at least one parent. In CI, `git rev-list --no-merges HEAD^2 --not HEAD^1` must also list exactly the snapshot's commits whose `%P` shows one parent, and `HEAD^1` is the `<target>` in the mutation matrix's enumeration.",
+    );
+    expect(flat).toContain(
+      'When `git merge-base HEAD^1 HEAD^2` succeeds, `git log <merge-base>..HEAD^1` lists what the base added, but a listed commit whose `%P` is empty is a shallow cut and the list stops there.',
+    );
+    expect(flat).toContain(
+      'If any commit fails either check, claim no per-commit coverage',
+    );
+    expect(flat).toContain(
+      "(`git diff <merge-base> origin/main -- '*.sql'`; in CI, where no `origin/main` exists, `HEAD^1` takes its place)",
+    );
   });
 
   // The lane trigger was unpinned: deleting the gate from the verify job's
@@ -5992,16 +6611,37 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain('ask when that is ambiguous');
     // An unchanged head gets an answer, not a round.
     expect(flat).toContain('the head has not moved since');
-    // The shared state is checked and registered before the round runs.
+    // The shared state is checked and registered before the round runs,
+    // through the helper that owns the file: two consecutive rounds skipped
+    // the hand-written completion write and left the file two heads stale,
+    // so the contract now names one command per step instead of a JSON edit.
     expect(flat).toContain(
       'Register the round in the shared watch state before starting it',
     );
-    expect(flat).toContain('write `H` as in-flight');
+    expect(flat).toContain('never hand-write');
+    expect(flat).toContain(
+      'verify-pr-watch-state.mjs <n> --start --head <H> --round <r> --artifact-dir <dir> --repo <owner>/<repo>',
+    );
+    expect(flat).toContain(
+      'Exit 3 means the file already records `H` as verified or in flight',
+    );
+    // The cross-head/deferred continuation is the manual section's only
+    // statement of what to do with a deferred head; deleting it must red.
+    expect(flat).toContain(
+      "A cross-head refusal records `H` as deferred, and the running round's `--complete` output names it — start the latest deferred head it names as the next round",
+    );
+    // Under one-round-per-PR the blocking marker may belong to another
+    // head: recovery releases the head the error names, not `H` itself.
+    // Both forms carry --repo: the guard refuses them without it (D9-1).
+    expect(flat).toContain(
+      'verify-pr-watch-state.mjs <n> --release --head <blocking head> [--round <r>] --repo <owner>/<repo>',
+    );
+    expect(flat).toContain('the head the exit-3 message names as in flight');
     expect(flat).toContain(
       'the same write-before-start rule the watch prompt follows',
     );
     expect(flat).toContain(
-      'record `H` as verified in the same file once the round completes',
+      'verify-pr-watch-state.mjs <n> --complete --head <H> --round <r> --verdict <word> [--comment-id <id>] --repo <owner>/<repo>',
     );
     // Registration is a step of its own ahead of the round, not an
     // afterthought behind it.
@@ -6053,6 +6693,689 @@ describe('qwen-triage verify hardening round 2', () => {
       'a published comment found on the PR is evidence of a past round',
     );
     expect(flat).toContain('not consent for this one');
+  });
+
+  // The watch prompt must spell out the completion form: a fire that follows
+  // "the same script's --complete form" literally exits 2 (no --verdict) and
+  // strands the head in flight forever. <headSha> is unique to the prompt —
+  // the manual section's identical command uses <H> and cannot satisfy this.
+  it('spells out the watch prompt completion and release forms', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+    // The full registration form, every required flag included.
+    expect(flat).toContain(
+      'verify-pr-watch-state.mjs <n> --start --head <headSha> --round <r> --artifact-dir <dir> --repo <owner>/<repo>',
+    );
+    // The completion and release forms carry --repo too: the guard
+    // refuses a registered round's completion without it (D9-1).
+    expect(flat).toContain(
+      'verify-pr-watch-state.mjs <n> --complete --head <headSha> --round <r> --verdict <word> [--comment-id <id>] --repo <owner>/<repo>',
+    );
+    // The duty, not just the command string: deleting the consequence
+    // sentence while keeping the command must go red too.
+    expect(flat).toContain('Record the finished round');
+    expect(flat).toContain(
+      'a completion without it exits 2 and leaves the head in flight forever',
+    );
+    expect(flat).toContain(
+      'verify-pr-watch-state.mjs <n> --release --head <headSha> [--round <r>] --repo <owner>/<repo>',
+    );
+    // The state root is the trusted clone's main worktree, and <dir> is
+    // the directory prepare printed — not a value invented at registration.
+    expect(flat).toContain(
+      "The helper runs from the trusted clone — the state root defaults to its main worktree, never the round's PR clone",
+    );
+    expect(flat).toContain('`<dir>` is the artifact directory prepare printed');
+    // A copy outside the trusted clone resolves the default root to the
+    // mount's parent — the container's /trusted-scripts mount resolves it
+    // to / — so the prompt must demand an explicit absolute --state-root.
+    expect(flat).toContain(
+      "the container recipe's read-only `/trusted-scripts` mount resolves it to `/`",
+    );
+    expect(flat).toContain('--state-root <trusted main worktree>');
+    // One round per PR: a cross-head refusal is deferred, not dropped —
+    // the probe's cursor already advanced, so no second event arrives —
+    // and the completion output is the deferred head's only delivery.
+    expect(flat).toContain('recorded as deferred');
+    expect(flat).toContain('no second event will arrive');
+    expect(flat).toContain('deferred heads awaiting a round');
+    expect(flat).toContain(
+      'start the **last** head it names as the next round',
+    );
+    expect(flat).toContain('the list is in push order, newest last');
+    // inconclusive releases the marker without deduping the head away.
+    expect(flat).toContain(
+      '`inconclusive` releases the marker without filing the head as verified',
+    );
+    // A release with no marker is a refusal, not a silent success.
+    expect(flat).toContain('including when no markers exist at all');
+    // The round number is defined once and repeated in --complete; a
+    // mismatched or stale completion is refused, not a success line.
+    expect(flat).toContain('repeat the same value in `--complete`');
+    expect(flat).toContain(
+      'A completion whose `--round` differs from the in-flight marker',
+    );
+    // The held-lock exit-3 shape has its own reaction (retry / remove a
+    // killed holder's .lock), for --complete as well as --start.
+    expect(flat).toContain('The state lock is held by another invocation');
+    expect(flat).toContain('This applies to `--complete` too');
+    // A default root outside a git worktree is refused, not a shadow state.
+    expect(flat).toContain('is refused (exit 2) unless you pass an explicit');
+    // The release delivers deferred heads too, and corrupt state is refused.
+    expect(flat).toContain('The release also names any deferred heads');
+    expect(flat).toContain('A corrupt state file is refused (exit 1)');
+    // Section slices, not the whole flattened skill: a sentence that also
+    // exists in the manual section stays green after the watch prompt's
+    // own copy is deleted unless the pin reads the prompt's slice.
+    const promptStart = verifySkill.indexOf('The prompt consumes the gate');
+    const promptEnd = verifySkill.indexOf('On `action: "stop"`');
+    expect(promptStart).toBeGreaterThan(-1);
+    expect(promptEnd).toBeGreaterThan(promptStart);
+    const prompt = verifySkill
+      .slice(promptStart, promptEnd)
+      .replace(/\s+/g, ' ');
+    expect(prompt).toContain('repeat the same value in `--complete`');
+    expect(prompt).toContain('recorded as deferred');
+    expect(prompt).toContain('no second event will arrive');
+    expect(prompt).toContain('deferred heads awaiting a round');
+    expect(prompt).toContain('including when no markers exist at all');
+    // Round-8 contracts live in the prompt's own copy: the push-order
+    // re-defer, the terminal second inconclusive, the unregistered-head
+    // refusal, the release --round match, and the all-verb repo guard.
+    expect(prompt).toContain(
+      're-defers the head at its original push-order position',
+    );
+    expect(prompt).toContain(
+      'deferred heads not covered after repeated inconclusive rounds',
+    );
+    expect(prompt).toContain(
+      'a deferred head must be **started** before it can be completed',
+    );
+    expect(prompt).toContain(
+      'a replayed inconclusive completion is refused rather than counting a second retry',
+    );
+    expect(prompt).toContain(
+      "A supplied `--round` must match the marker's round",
+    );
+    expect(prompt).toContain(
+      'an omitted `--repo` does not disarm it once the state records a repo',
+    );
+    // The manual registration step names the repo-mismatch refusal too,
+    // in its own section — not only by reference to the watch prompt.
+    const manualStart = verifySkill.indexOf(
+      'When the maintainer says a previously verified PR has moved',
+    );
+    const manualEnd = verifySkill.indexOf('To make this trigger automatic');
+    expect(manualStart).toBeGreaterThan(-1);
+    expect(manualEnd).toBeGreaterThan(manualStart);
+    const manual = verifySkill
+      .slice(manualStart, manualEnd)
+      .replace(/\s+/g, ' ');
+    expect(manual).toContain(
+      'the state belongs to another repository — a PR number is only unique within its repo',
+    );
+  });
+
+  // Two local rounds on PR #16866 ran the whole battery on the host with no
+  // isolation gate and no waiver: the prose rule alone did not stop them.
+  // The declaration is the artifact the checker refuses to do without, and
+  // the waiver is an explicit per-round decision, never a silent fallback.
+  it('makes the isolation boundary a recorded declaration', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+    expect(flat).toContain('The boundary is a declaration, not a vibe');
+    expect(flat).toContain('`boundary.json` must be in the artifact directory');
+    expect(flat).toContain('the checker refuses a round without it');
+    // The boundary's operator owns the declaration, not the inner round —
+    // container, CI lane, and VM alike.
+    expect(flat).toContain("the boundary's operator writes it");
+    expect(flat).toContain("the VM's operator for a VM boundary");
+    // R16-4: the VM path runs no --require-isolation gate (no observed
+    // marker exists to pass, and mode:"vm" needs no gate record); the
+    // scratch HOME protects the round itself, and the home/env gate checks
+    // belong to the container recipe's step 5.
+    expect(flat).toContain(
+      'The VM path runs **no `--require-isolation` gate**',
+    );
+    expect(flat).toContain(
+      'The VM round still runs under a **scratch `HOME`**',
+    );
+    expect(flat).toContain(
+      '{"mode":"container","detail":"<image, network policy, credential-free mount>"}',
+    );
+    // A container declaration is backed by a gate record.
+    expect(flat).toContain('backed by `boundary-gate.json`');
+    // The record and the lane flag corroborate an operator; they are not
+    // proof against a round that forges them. The honest wording is the
+    // contract — an overclaim ("cannot be minted", "never for a local
+    // round") must not come back.
+    expect(flat).toContain('neither is proof against a round that forges them');
+    expect(flat).toContain('**corroborate an operator** who ran the gate');
+    expect(flat).not.toContain('cannot be minted without a gate run');
+    // Pin the in-container command with its interpreter prefix: the bare
+    // flag string also appears in prose, so deleting it from the command
+    // alone must red this.
+    expect(flat).toContain(
+      'node /trusted-scripts/verify-pr-prepare.mjs --require-isolation --artifact-dir <round-dir>',
+    );
+    // The ci-lane record is honored only under the publish invocation —
+    // an argv claim, not an authenticated identity.
+    expect(flat).toContain(
+      'which the checker honors only under `--publish-lane`, the flag the publish job passes',
+    );
+    expect(flat).toContain(
+      'a local shell that passes the flag itself is making an operator claim, not proving the lane',
+    );
+    // The VM recipe names the environment half of the credential scan,
+    // not only the scratch home: an agent-forwarded shell carries
+    // SSH_AUTH_SOCK even under a scratch HOME.
+    expect(flat).toContain(
+      'unset `SSH_AUTH_SOCK`, `GH_TOKEN`, `GITHUB_TOKEN`, `KUBECONFIG`, `OPENAI_API_KEY`',
+    );
+    expect(flat).toContain(
+      'an agent-forwarded shell carries `SSH_AUTH_SOCK` even under a scratch home',
+    );
+    expect(flat).toContain(
+      '{"mode":"waived","by":"<maintainer>","approval":"<permalink to the maintainer\'s approval comment>","reason":"<why this round may run outside a boundary>"}',
+    );
+    // The maintainer is the sole author of the approval comment: the
+    // round never posts the comment it cites (N9-1).
+    expect(flat).toContain(
+      'if the maintainer approves, **they** record that approval as a PR comment (the round never authors the comment it cites)',
+    );
+    expect(flat).not.toContain('or the round, under the local publish path');
+    // The coordinate check reads the host-held --context snapshot, never
+    // the PR-writable artifact context.json (R9-1).
+    expect(flat).toContain(
+      'When the host-held snapshot passed as `--context` carries `repo` and the PR number',
+    );
+    expect(flat).toContain(
+      "The round's own artifact-directory `context.json` never supplies these coordinates — it is PR-writable",
+    );
+    // The completion duty is a top-level paragraph, not folded into the
+    // last exit-3 bullet by a two-space indent.
+    expect(verifySkill).toContain('\nRecord the finished round');
+    // The VM attestation variables are the operator's, never the round's,
+    // and are unset when the round ends.
+    expect(flat).toContain(
+      "the **operator's attestation**, never set by the round itself",
+    );
+    expect(flat).toContain('unset it when the round ends');
+    // R10-20: a self-chosen container= string is not an observed boundary;
+    // an attested VM uses mode:"vm" with the maintainer's approval.
+    expect(flat).toContain(
+      'a self-chosen `container=<name>` string is a _declaration_, not an observed boundary',
+    );
+    expect(flat).toContain('"mode":"vm"');
+    expect(flat).toContain('explicitly approves host execution for this round');
+    expect(flat).toContain('The invocation itself is not that approval');
+    expect(flat).toContain(
+      'a waiver never carries over to the next round unasked',
+    );
+    // The Java gap is named, not left as a silent host fallback.
+    expect(flat).toContain('carries no JDK or Maven');
+    expect(flat).toContain('never a silent host fallback');
+    // The local container recipe's host check step declares the container
+    // it built — after stopping the container, refusing a symlinked round
+    // dir, and clearing any planted boundary.json (any node type), before
+    // the checker runs on the round dir.
+    expect(flat).toContain('> "$rd/boundary.json"');
+    expect(flat).toContain('rm -rf -- "$rd/boundary.json"');
+    // The symlink check runs on the trailing-slash-normalised spelling, or
+    // `test -L` dereferences the link and the refusal fails open. EVERY
+    // trailing slash is stripped (a single ${rd%/} leaves a doubled one)
+    // and the guards and the writes share the normalised path (R11-4/R14-2).
+    expect(flat).toContain(
+      'while [ "$rd" != "${rd%/}" ]; do rd="${rd%/}"; done',
+    );
+    expect(flat).toContain('[ -L "$rd" ]');
+    // Presence guards first: indexOf returns -1 for a deleted line, and -1
+    // is less than any positive index, so the ordering alone is vacuous.
+    expect(flat).toContain('docker rm -f qwen-verify-<n>');
+    const stop = flat.indexOf('docker rm -f qwen-verify-<n>');
+    const symlinkGuard = flat.indexOf('[ -L "$rd" ]');
+    const clear = flat.indexOf('rm -rf -- "$rd/boundary.json"');
+    const write = flat.indexOf('> "$rd/boundary.json"');
+    // The step-7 checker call, not the earlier generic mentions of the
+    // script: this exact context path appears only in the cleanup block.
+    // Whitespace flattening keeps the line-continuation backslash. The trust
+    // root is host-provided (--context-root), not derived from git (R14-1).
+    const checker = flat.indexOf(
+      'verify-pr-check.mjs" \\ --context ~/.cache/qwen-verify/pr<n>/pr.json \\ --context-sha256 "$(cat ~/.cache/qwen-verify/pr<n>/pr.sha256)" \\ --context-root "<pr-clone>" "$rd"',
+    );
+    // The snapshot's bytes are bound to the digest prepare printed host-side;
+    // a path/link-count check alone cannot prove the host wrote the copy
+    // (R2-1). Assert on the raw skill: the sed pattern's double spaces are
+    // significant and the flattened view collapses them.
+    expect(verifySkill).toContain(
+      "sed -n 's/^  context-sha256  //p' ~/.cache/qwen-verify/pr<n>/prepare.log > ~/.cache/qwen-verify/pr<n>/pr.sha256",
+    );
+    // R3-2: the digest must be captured and passed on every documented
+    // spelling, and an empty digest must fail at step 1 where the cause is
+    // visible — not at step 7 after the container has run.
+    expect(verifySkill).toContain(
+      'grep -Eq \'^[0-9a-f]{64}$\' ~/.cache/qwen-verify/pr<n>/pr.sha256 || { echo "prepare printed no valid context-sha256; see prepare.log" >&2; exit 1; }',
+    );
+    // R5-3: clear last round's log/digest and gate on prepare's own exit status,
+    // so a failed cd/prepare cannot certify a stale snapshot.
+    expect(verifySkill).toContain(
+      'rm -f ~/.cache/qwen-verify/pr<n>/prepare.log ~/.cache/qwen-verify/pr<n>/pr.sha256',
+    );
+    expect(verifySkill).toContain(
+      '|| { cat ~/.cache/qwen-verify/pr<n>/prepare.log >&2; exit 1; }',
+    );
+    // R5-1 structural: the authoritative snapshot is written straight to a host
+    // destination outside the clone, not copied out of the PR-writable tree.
+    expect(verifySkill).toContain(
+      '--context-out ~/.cache/qwen-verify/pr<n>/pr.json',
+    );
+    // Both checker overview spellings carry the binding flag.
+    expect(
+      verifySkill.split(
+        'verify-pr-check.mjs --context <host snapshot> --context-sha256 "$(cat ~/.cache/qwen-verify/pr<n>/pr.sha256)" <artifact dir>',
+      ).length - 1,
+    ).toBeGreaterThanOrEqual(2);
+    // Both prepare overview spellings point at the step-1 digest capture.
+    // Count on the flattened view: one spelling wraps between "snapshot" and
+    // "digest", so a raw toContain would pin only the other (R4-1).
+    expect(
+      flat.split('plus the `sed` that captures the snapshot digest').length - 1,
+    ).toBeGreaterThanOrEqual(2);
+    expect(stop).toBeGreaterThan(-1);
+    expect(symlinkGuard).toBeGreaterThan(-1);
+    expect(clear).toBeGreaterThan(-1);
+    expect(write).toBeGreaterThan(-1);
+    expect(checker).toBeGreaterThan(-1);
+    // Stop the container, refuse a symlinked round dir, clear the planted
+    // name, write the declaration, then run the checker — in that order.
+    expect(stop).toBeLessThan(symlinkGuard);
+    expect(symlinkGuard).toBeLessThan(clear);
+    expect(clear).toBeLessThan(write);
+    expect(write).toBeLessThan(checker);
+    // The symlink refusal records rc instead of exiting early, and checks
+    // the parent as well as the round dir itself (normalised spelling).
+    expect(flat).toContain(
+      'if [ -L "$rd" ] || [ -L "$(dirname "$rd")" ]; then echo "round dir is a symlink" >&2; rc=1 fi',
+    );
+    // Every write's status is captured: a planted chmod 444/555 declaration
+    // that resists removal must fail the block, not feed the checker.
+    expect(flat).toContain('docker rm -f qwen-verify-<n> || rc=1');
+    expect(flat).toContain(
+      'rm -rf -- "$rd/boundary.json" || { echo "cannot clear boundary.json" >&2; rc=1; }',
+    );
+    expect(flat).toContain('> "$rd/boundary.json" || rc=1');
+    expect(flat).toContain('"$rd" || rc=$?');
+    // Control flow, not just text: the clear/write/checker sit behind the
+    // rc gate, the teardown is unconditional (fi immediately before kill),
+    // and unset precedes the final exit.
+    expect(flat).toContain('if [ "$rc" -eq 0 ]; then rm -rf');
+    const teardown = flat.indexOf(
+      'kill "$(cat ~/.cache/qwen-verify/pr<n>/proxy.pid)"',
+    );
+    expect(teardown).toBeGreaterThan(-1);
+    expect(flat).toContain(
+      'fi kill "$(cat ~/.cache/qwen-verify/pr<n>/proxy.pid)"',
+    );
+    expect(flat.indexOf('rc=1')).toBeLessThan(teardown);
+    expect(checker).toBeLessThan(teardown);
+    expect(flat).toContain(
+      'unset QWEN_VERIFY_PROXY_TOKEN QWEN_VERIFY_CREDENTIAL_FREE container exit "$rc"',
+    );
+    // The report carries the boundary for human readers too.
+    expect(flat).toContain('Open it with a `**Boundary.**` line');
+  });
+
+  // The step-7 block driven verbatim, not just pinned as text: every
+  // failure path (planted chmod-resistant declaration, failing docker,
+  // read-only round dir) must fail the block WITHOUT running the checker,
+  // and the proxy teardown — kill AND the removal of the token-bearing
+  // files — must still run, under bash -e as well. Removing any `|| rc=1`
+  // capture or any of the three proxy-file removals reds these tests.
+  describe.skipIf(process.platform === 'win32')('step 7 block replay', () => {
+    const replay = ({
+      planted = false,
+      dockerFails = false,
+      readOnlyRound = false,
+      checkerFails = false,
+      killFails = false,
+      symlinkRound = false,
+      spacesInPath = false,
+      slashSuffix = '',
+      noNonce = false,
+    } = {}) => {
+      const root = mkdtempSync(join(tmpdir(), 'verify-step7-'));
+      // R10-48: a round path with a space exercises the quoted expansions.
+      const round = join(root, spacesInPath ? 'round dir' : 'round');
+      const home = join(root, 'home');
+      const trusted = join(root, 'trusted');
+      const shim = join(root, 'shim');
+      const proxyDir = join(home, '.cache', 'qwen-verify', 'pr16866');
+      let victim = null;
+      if (symlinkRound) {
+        // R10-47: a PR-planted symlink at the round dir must be refused.
+        victim = join(root, 'victim');
+        mkdirSync(victim, { recursive: true });
+        writeFileSync(join(victim, 'victim.txt'), 'host data');
+        symlinkSync(victim, round);
+      } else {
+        mkdirSync(round, { recursive: true });
+      }
+      mkdirSync(proxyDir, { recursive: true });
+      mkdirSync(trusted, { recursive: true });
+      mkdirSync(shim, { recursive: true });
+      // All three token-bearing files exist, so their removal is witnessed.
+      writeFileSync(join(proxyDir, 'proxy.pid'), '424242\n');
+      writeFileSync(join(proxyDir, 'proxy.json'), '{"token":"bearer"}');
+      writeFileSync(join(proxyDir, 'proxy.err'), '');
+      // R16-1: the gate record carries a per-round nonce; the round's raw
+      // harness logs must echo it for step 7 to declare mode:"container".
+      // noNonce leaves the logs without it (the gate still passed).
+      const nonce = 'n0nce1234567890abcdef';
+      if (!planted && !readOnlyRound && !symlinkRound) {
+        writeFileSync(
+          join(round, 'boundary-gate.json'),
+          JSON.stringify({
+            gate: 'require-isolation',
+            passed: true,
+            observed: ['/.dockerenv'],
+            credentialFree: true,
+            nonce,
+          }),
+        );
+        writeFileSync(
+          join(round, 'harness.log'),
+          noNonce ? 'PASS cell\n' : `container-nonce: ${nonce}\nPASS cell\n`,
+        );
+      }
+      const calls = join(root, 'calls.log');
+      for (const [tool, body] of [
+        [
+          'docker',
+          `echo "docker $*" >> "${calls}"\n${dockerFails ? 'exit 1\n' : ''}`,
+        ],
+        [
+          'kill',
+          `echo "kill $*" >> "${calls}"\n${killFails ? 'exit 1\n' : ''}`,
+        ],
+        [
+          'node',
+          `echo "node $*" >> "${calls}"\nexit ${checkerFails ? 1 : 0}\n`,
+        ],
+      ]) {
+        writeFileSync(join(shim, tool), `#!/usr/bin/env bash\n${body}`, {
+          mode: 0o755,
+        });
+      }
+      if (planted) {
+        writeFileSync(
+          join(round, 'boundary.json'),
+          '{"mode":"waived","by":"PR-code","reason":"forged"}',
+        );
+        chmodSync(join(round, 'boundary.json'), 0o444);
+        chmodSync(round, 0o555);
+      } else if (readOnlyRound) {
+        // No declaration to clear: the rm succeeds, the WRITE fails.
+        chmodSync(round, 0o555);
+      }
+      const step7 = verifySkill.slice(
+        verifySkill.indexOf('7. **After the round'),
+      );
+      const block = /```bash\n([\s\S]*?)```/.exec(step7)[1];
+      // kill is a bash builtin: disable it so the PATH shim records it.
+      const script =
+        'enable -n kill\n' +
+        block
+          .replaceAll('<n>', '16866')
+          .replaceAll('<round-dir>', `${round}${slashSuffix}`)
+          .replaceAll('<trusted-clone>', trusted);
+      const res = spawnSync(
+        'bash',
+        ['--noprofile', '--norc', '-e', '-c', script],
+        {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            HOME: home,
+            PATH: `${shim}:${process.env.PATH}`,
+          },
+        },
+      );
+      if (planted || readOnlyRound) chmodSync(round, 0o755);
+      const log = existsSync(calls) ? readFileSync(calls, 'utf8') : '';
+      return { res, log, round, root, proxyDir, victim };
+    };
+
+    it('runs the checker and tears the proxy down on the normal path', () => {
+      const { res, log, round, root, proxyDir } = replay();
+      try {
+        expect(res.status).toBe(0);
+        expect(log).toMatch(/^node /m);
+        expect(log).toMatch(/kill 424242/);
+        expect(readFileSync(join(round, 'boundary.json'), 'utf8')).toContain(
+          '"mode":"container"',
+        );
+        // The token-bearing files are gone, not just the process killed.
+        for (const f of ['proxy.pid', 'proxy.json', 'proxy.err']) {
+          expect(existsSync(join(proxyDir, f))).toBe(false);
+        }
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    // R16-1: the gate record passes but the round logs carry no container
+    // nonce (the battery ran on the host) — step 7 must refuse to mint a
+    // mode:"container" declaration and exit non-zero, proxy still torn down.
+    it('refuses a container declaration when the logs carry no nonce', () => {
+      const { res, log, round, root, proxyDir } = replay({ noNonce: true });
+      try {
+        expect(res.status).toBe(1);
+        expect(res.stderr).toMatch(/round logs carry no container nonce/);
+        expect(existsSync(join(round, 'boundary.json'))).toBe(false);
+        expect(log).not.toMatch(/^node /m);
+        expect(log).toMatch(/kill 424242/);
+        for (const f of ['proxy.pid', 'proxy.json', 'proxy.err']) {
+          expect(existsSync(join(proxyDir, f))).toBe(false);
+        }
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    // R10-47: a PR-planted symlink at the round dir is refused, the victim
+    // is untouched, and the proxy is still torn down.
+    it('refuses a symlinked round dir without touching the victim', () => {
+      const { res, log, root, proxyDir, victim } = replay({
+        symlinkRound: true,
+      });
+      try {
+        expect(res.status).toBe(1);
+        expect(res.stderr).toMatch(/round dir is a symlink/);
+        expect(log).not.toMatch(/^node /m);
+        expect(readFileSync(join(victim, 'victim.txt'), 'utf8')).toBe(
+          'host data',
+        );
+        expect(existsSync(join(victim, 'boundary.json'))).toBe(false);
+        expect(log).toMatch(/kill 424242/);
+        for (const f of ['proxy.pid', 'proxy.json', 'proxy.err']) {
+          expect(existsSync(join(proxyDir, f))).toBe(false);
+        }
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    // R11-4: a trailing slash on the round dir must not bypass the symlink
+    // refusal — `test -L "link/"` dereferences and `dirname "link/"` returns
+    // the grandparent, so the block normalises the spelling first.
+    it('refuses a symlinked round dir written with a trailing slash', () => {
+      const { res, log, root, victim } = replay({
+        symlinkRound: true,
+        slashSuffix: '/',
+      });
+      try {
+        expect(res.status).toBe(1);
+        expect(res.stderr).toMatch(/round dir is a symlink/);
+        expect(log).not.toMatch(/^node /m);
+        expect(readFileSync(join(victim, 'victim.txt'), 'utf8')).toBe(
+          'host data',
+        );
+        expect(existsSync(join(victim, 'boundary.json'))).toBe(false);
+        expect(log).toMatch(/kill 424242/);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    // R14-2: a doubled trailing slash survives a single ${rd%/}; the loop
+    // strips every slash so the refusal still fires and the victim is safe.
+    it('refuses a symlinked round dir written with a doubled trailing slash', () => {
+      const { res, log, root, victim } = replay({
+        symlinkRound: true,
+        slashSuffix: '//',
+      });
+      try {
+        expect(res.status).toBe(1);
+        expect(res.stderr).toMatch(/round dir is a symlink/);
+        expect(log).not.toMatch(/^node /m);
+        expect(readFileSync(join(victim, 'victim.txt'), 'utf8')).toBe(
+          'host data',
+        );
+        expect(existsSync(join(victim, 'boundary.json'))).toBe(false);
+        expect(log).toMatch(/kill 424242/);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    // R10-48: a round path containing a space works because the block quotes
+    // its <round-dir> expansions.
+    it('handles a round path containing a space', () => {
+      const { res, log, round, root, proxyDir } = replay({
+        spacesInPath: true,
+      });
+      try {
+        expect(round).toContain(' ');
+        expect(res.status).toBe(0);
+        expect(log).toMatch(/^node /m);
+        expect(readFileSync(join(round, 'boundary.json'), 'utf8')).toContain(
+          '"mode":"container"',
+        );
+        expect(log).toMatch(/kill 424242/);
+        for (const f of ['proxy.pid', 'proxy.json', 'proxy.err']) {
+          expect(existsSync(join(proxyDir, f))).toBe(false);
+        }
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    it.skipIf(!arePermissionBitsEnforced())(
+      'refuses a declaration it cannot clear, without running the checker',
+      () => {
+        const { res, log, round, root, proxyDir } = replay({ planted: true });
+        try {
+          expect(res.status).toBe(1);
+          expect(res.stderr).toMatch(/cannot clear boundary.json/);
+          // The checker never ran on the planted waiver.
+          expect(log).not.toMatch(/^node /m);
+          // The proxy was still torn down on the refusal path.
+          expect(log).toMatch(/kill 424242/);
+          for (const f of ['proxy.pid', 'proxy.json', 'proxy.err']) {
+            expect(existsSync(join(proxyDir, f))).toBe(false);
+          }
+          // The planted declaration is untouched, not silently trusted.
+          expect(readFileSync(join(round, 'boundary.json'), 'utf8')).toContain(
+            'forged',
+          );
+        } finally {
+          rmSync(root, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it('a failing docker stop skips the checker but still tears the proxy down', () => {
+      const { res, log, round, root, proxyDir } = replay({ dockerFails: true });
+      try {
+        expect(res.status).toBe(1);
+        expect(log).not.toMatch(/^node /m);
+        // No declaration was written: the block must not leave a
+        // container-mode boundary.json behind for a later checker run.
+        expect(existsSync(join(round, 'boundary.json'))).toBe(false);
+        expect(log).toMatch(/kill 424242/);
+        for (const f of ['proxy.pid', 'proxy.json', 'proxy.err']) {
+          expect(existsSync(join(proxyDir, f))).toBe(false);
+        }
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    // The checker's own exit code is the block's exit code: a shim that
+    // can only succeed leaves the `|| rc=$?` capture unpinned.
+    it('propagates the checker exit code and still tears the proxy down', () => {
+      const { res, log, root, proxyDir } = replay({ checkerFails: true });
+      try {
+        expect(res.status).toBe(1);
+        expect(log).toMatch(/^node /m);
+        expect(log).toMatch(/kill 424242/);
+        for (const f of ['proxy.pid', 'proxy.json', 'proxy.err']) {
+          expect(existsSync(join(proxyDir, f))).toBe(false);
+        }
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    // The teardown guards are `|| true`: a kill that fails (the process
+    // already died) must neither fail the block nor skip the removal of
+    // the token-bearing files.
+    it('a failing kill neither fails the block nor skips the file teardown', () => {
+      const { res, log, root, proxyDir } = replay({ killFails: true });
+      try {
+        expect(res.status).toBe(0);
+        expect(log).toMatch(/kill 424242/);
+        for (const f of ['proxy.pid', 'proxy.json', 'proxy.err']) {
+          expect(existsSync(join(proxyDir, f))).toBe(false);
+        }
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    it.skipIf(!arePermissionBitsEnforced())(
+      'a write it cannot perform skips the checker but still tears the proxy down',
+      () => {
+        const { res, log, root, proxyDir } = replay({ readOnlyRound: true });
+        try {
+          expect(res.status).toBe(1);
+          expect(log).not.toMatch(/^node /m);
+          expect(log).toMatch(/kill 424242/);
+          for (const f of ['proxy.pid', 'proxy.json', 'proxy.err']) {
+            expect(existsSync(join(proxyDir, f))).toBe(false);
+          }
+        } finally {
+          rmSync(root, { recursive: true, force: true });
+        }
+      },
+    );
+  });
+
+  // The rig traps and the waiting strategy are measured round behaviour,
+  // not advice: each cost a live round real time before it was written down.
+  it('teaches the rig backfill rule and event-driven waiting', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+    expect(flat).toContain(
+      "Reuse the prior round's rig — and feed every fix back into it",
+    );
+    expect(flat).toContain(
+      'fold the fix into the copy the next round will inherit',
+    );
+    expect(flat).toContain('A masking pipe eats the setup exit code');
+    expect(flat).toContain('Restore, then compare — never the reverse');
+    expect(flat).toContain('Fresh worktrees have no `dist`');
+    expect(flat).toContain('Wait on notifications, not foreground sleeps');
+    expect(flat).toContain(
+      'do the writable work — report draft, data files, read-only claim checks — while it runs',
+    );
   });
 
   // The TUI renders `argument-hint` beside the command name; without the field
@@ -6362,6 +7685,151 @@ describe('qwen-triage verify publish fidelity', () => {
       expect(body).toContain('results unavailable');
       expect(body).not.toContain('A/B against the base build');
       expect(body).not.toContain('merge-ready');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The checker refuses a round without a boundary declaration, and the CI
+  // agent's base-pinned skill may predate boundary.json — so the workflow
+  // declares the lane itself, before the checker runs, and the verdict is
+  // still trusted.
+  it('overwrites a round-authored boundary declaration before the artifact check', () => {
+    const dir = fixture();
+    try {
+      const art = join(dir, 'work', 'verify-results', 'prA-verify-1');
+      // A PR-authored waiver in the uploaded artifacts must be overwritten,
+      // not trusted: pin the overwrite, not merely the creation, so a
+      // `[ -f … ] ||` guard on the production write goes red.
+      writeFileSync(
+        join(art, 'boundary.json'),
+        JSON.stringify({
+          mode: 'waived',
+          by: 'pr-author',
+          reason: 'forged host approval',
+        }),
+      );
+      const body = render(dir, {
+        NAME: 'boundary',
+        AGENT_VERDICT: 'merge-ready',
+      });
+      expect(
+        JSON.parse(readFileSync(join(art, 'boundary.json'), 'utf8')),
+      ).toEqual({
+        mode: 'container',
+        detail: 'CI verify lane (credential-free container)',
+      });
+      // The checker ties the declaration to a gate record; the publish job
+      // writes the ci-lane record itself, overwriting any planted one.
+      expect(
+        JSON.parse(readFileSync(join(art, 'boundary-gate.json'), 'utf8')),
+      ).toEqual({ gate: 'ci-lane', passed: true });
+      // The trusted headline, not just the word: a demotion note quotes
+      // `merge-ready` too, so the bare word cannot tell trust from demotion.
+      expect(body).toContain('merge-ready (agent verdict)');
+      expect(body).not.toContain('was not trusted');
+      expect(body).not.toContain('reported as not passed');
+      const script = publishScript();
+      expect(script.indexOf('CI verify lane')).toBeGreaterThan(-1);
+      // The clear must precede the write, and the write the checker: a
+      // plain redirect into the PR-writable artifact tree would follow a
+      // planted symlink instead of replacing it.
+      expect(
+        script.indexOf('rm -rf -- "$(dirname "$REPORT")/boundary.json"'),
+      ).toBeGreaterThan(-1);
+      expect(
+        script.indexOf('rm -rf -- "$(dirname "$REPORT")/boundary.json"'),
+      ).toBeLessThan(script.indexOf('CI verify lane'));
+      expect(script.indexOf('CI verify lane')).toBeLessThan(
+        script.indexOf('VERIFY_PR_CHECK'),
+      );
+      // The gate record is cleared and written before the checker too.
+      expect(
+        script.indexOf('rm -rf -- "$(dirname "$REPORT")/boundary-gate.json"'),
+      ).toBeGreaterThan(-1);
+      expect(
+        script.indexOf('rm -rf -- "$(dirname "$REPORT")/boundary-gate.json"'),
+      ).toBeLessThan(script.indexOf('"gate":"ci-lane"'));
+      expect(script.indexOf('"gate":"ci-lane"')).toBeLessThan(
+        script.indexOf('VERIFY_PR_CHECK'),
+      );
+      // The publish job passes its own --publish-lane signal: only under
+      // it does the checker honor the ci-lane record.
+      expect(script).toContain('--publish-lane "$(dirname "$REPORT")"');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The artifact tree is PR-writable: a boundary.json symlink planted there
+  // must not turn the host's declaration write into a truncation of the
+  // link target. The unlink makes the write replace the link itself.
+  it('does not follow a planted boundary.json symlink in the artifacts', () => {
+    const dir = fixture();
+    try {
+      const art = join(dir, 'work', 'verify-results', 'prA-verify-1');
+      const victim = join(dir, 'victim.txt');
+      writeFileSync(victim, 'host data');
+      symlinkSync(victim, join(art, 'boundary.json'));
+      const gateVictim = join(dir, 'gate-victim.txt');
+      writeFileSync(gateVictim, 'gate host data');
+      symlinkSync(gateVictim, join(art, 'boundary-gate.json'));
+      const body = render(dir, {
+        NAME: 'symlink',
+        AGENT_VERDICT: 'merge-ready',
+      });
+      expect(readFileSync(victim, 'utf8')).toBe('host data');
+      expect(readFileSync(gateVictim, 'utf8')).toBe('gate host data');
+      expect(lstatSync(join(art, 'boundary.json')).isSymbolicLink()).toBe(
+        false,
+      );
+      expect(
+        JSON.parse(readFileSync(join(art, 'boundary.json'), 'utf8')),
+      ).toEqual({
+        mode: 'container',
+        detail: 'CI verify lane (credential-free container)',
+      });
+      expect(
+        JSON.parse(readFileSync(join(art, 'boundary-gate.json'), 'utf8')),
+      ).toEqual({ gate: 'ci-lane', passed: true });
+      expect(body).toContain('merge-ready (agent verdict)');
+      expect(body).not.toContain('was not trusted');
+      expect(body).not.toContain('reported as not passed');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // A directory named boundary.json survives the artifact staging (find
+  // -type f recreates it) and the scrub (links and specials only). rm -f
+  // aborts on it under set -euo pipefail, killing the verdict with no
+  // report; rm -rf clears the reserved name whatever node type was planted.
+  it('clears a planted boundary.json directory and still posts the verdict', () => {
+    const dir = fixture();
+    try {
+      const art = join(dir, 'work', 'verify-results', 'prA-verify-1');
+      mkdirSync(join(art, 'boundary.json', 'x'), { recursive: true });
+      mkdirSync(join(art, 'boundary-gate.json', 'x'), { recursive: true });
+      const body = render(dir, {
+        NAME: 'planted-dir',
+        AGENT_VERDICT: 'merge-ready',
+      });
+      expect(lstatSync(join(art, 'boundary.json')).isDirectory()).toBe(false);
+      expect(lstatSync(join(art, 'boundary-gate.json')).isDirectory()).toBe(
+        false,
+      );
+      expect(
+        JSON.parse(readFileSync(join(art, 'boundary.json'), 'utf8')),
+      ).toEqual({
+        mode: 'container',
+        detail: 'CI verify lane (credential-free container)',
+      });
+      expect(
+        JSON.parse(readFileSync(join(art, 'boundary-gate.json'), 'utf8')),
+      ).toEqual({ gate: 'ci-lane', passed: true });
+      expect(body).toContain('merge-ready (agent verdict)');
+      expect(body).not.toContain('was not trusted');
+      expect(body).not.toContain('reported as not passed');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -6891,6 +8359,48 @@ describe('qwen-triage verify publish fidelity', () => {
         expect(body).toContain(shown);
         expect(body.split('\n\n')[0].split('\n')).toEqual(header);
       });
+      // The pinned head travels as a header marker, ahead of the
+      // substantive marker the branch appends: the next round's deepen
+      // step reads it instead of scraping the report prose.
+      const oid = 'c3d5155f' + '0'.repeat(32);
+      const headMark = `<!-- qwen-triage:verify-head=${oid} -->`;
+      const substantive = '<!-- qwen-triage:verify-substantive -->';
+      const withHead = render(dir, {
+        NAME: 'hdr-head',
+        GITHUB_RUN_ID: '41',
+        AGENT_VERDICT: 'merge-ready',
+        VERIFY_HEAD_OID: oid,
+      });
+      expect(withHead.split('\n\n')[0].split('\n')).toEqual([
+        ...weak,
+        headMark,
+        substantive,
+      ]);
+      const flakyWithHead = render(dir, {
+        NAME: 'hdr-head-flaky',
+        GITHUB_RUN_ID: '41',
+        AGENT_VERDICT: 'merge-ready',
+        FLAKE_VERDICT: 'flaky',
+        VERIFY_HEAD_OID: oid,
+      });
+      expect(flakyWithHead.split('\n\n')[0].split('\n')).toEqual([
+        ...flakyWeak,
+        headMark,
+        substantive,
+      ]);
+      // Empty or malformed: no marker. A cancelled job's outputs come
+      // through empty, and a stray value must not reach the comment.
+      ['', 'XYZ', oid.slice(0, 39), `${oid}0`, 'g'.repeat(40)].forEach(
+        (bad, i) => {
+          const body = render(dir, {
+            NAME: `hdr-head-bad-${i}`,
+            GITHUB_RUN_ID: '41',
+            AGENT_VERDICT: 'merge-ready',
+            VERIFY_HEAD_OID: bad,
+          });
+          expect(body.split('\n\n')[0].split('\n')).toEqual(strong);
+        },
+      );
       // A run whose artifact holds no report has no findings to keep.
       rmSync(join(dir, 'work', 'verify-results', 'prA-verify-1', 'report.md'));
       const reportless = render(dir, {
@@ -6914,6 +8424,14 @@ describe('qwen-triage verify publish fidelity', () => {
         .join('\n');
       expect(code.match(/'<!-- qwen-triage:verify -->'/g)).toHaveLength(1);
       expect(code.match(/[^>]> "\$BODY_FILE"/g)).toHaveLength(1);
+      // The head marker names the head the pr step pinned and the pin step
+      // checked against the checkout — never an OID the agent's report wrote.
+      expect(
+        stepIn('publish-verify', 'Post verification report comment'),
+      ).toContain("VERIFY_HEAD_OID: '${{ needs.verify.outputs.head_oid }}'");
+      expect(job('verify')).toContain(
+        "head_oid: '${{ steps.pr.outputs.head_oid }}'",
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -7412,6 +8930,21 @@ describe('qwen-triage verify publish fidelity', () => {
             report: `merge-ready · 10 passed · 0 failed · 10 total · ${'b'.repeat(40)}\n\n# Report\n`,
             verdict: 'merge-ready\n',
             assertions: f.text,
+            boundary: JSON.stringify({
+              mode: 'container',
+              detail: 'CI verify lane (credential-free container)',
+            }),
+            // Without the gate record every row carries a boundary
+            // refusal the table never observes; an accepted row must be
+            // accepted WHOLE, or a gates regression that errors with a
+            // different message would slip through the gatesError probe.
+            boundaryGate: JSON.stringify({
+              gate: 'require-isolation',
+              passed: true,
+              observed: ['/.dockerenv'],
+              signals: ['/.dockerenv'],
+              credentialFree: true,
+            }),
           },
         });
         const gatesError = result.errors.some((e) =>
@@ -7421,6 +8954,7 @@ describe('qwen-triage verify publish fidelity', () => {
           NAME: `parity-${f.name}`,
           AGENT_VERDICT: 'merge-ready',
         });
+        if (f.accepts) expect(result.errors, f.name).toEqual([]);
         expect(gatesError, f.name).toBe(!f.accepts);
         expect(body.includes('Targeted gates'), f.name).toBe(f.renders);
       }
@@ -9504,6 +11038,29 @@ describe('qwen-triage pnpm store producer', () => {
     expect(cacheProducerWorkflow).toMatch(/branches:\s*\['main'\]/);
   });
 
+  it('resolves the pinned pnpm from a job-owned corepack cache', () => {
+    // The container inherits the HOST runner's home, so the default
+    // COREPACK_HOME outlives the job. corepack never re-verifies an existing
+    // pinned entry, and one left with pnpm.mjs missing fails every later run
+    // instantly with MODULE_NOT_FOUND — run 43016357930 died that way in 21s.
+    // The isolation step must precede the install that needs the binary.
+    const isolateIndex = cacheProducerWorkflow.indexOf(
+      "- name: 'Isolate the corepack cache'",
+    );
+    const installIndex = cacheProducerWorkflow.indexOf(
+      "- name: 'Populate pnpm store'",
+    );
+    expect(isolateIndex).toBeGreaterThan(-1);
+    expect(installIndex).toBeGreaterThan(isolateIndex);
+    expect(cacheProducerWorkflow).toContain(
+      'corepack_home="$RUNNER_TEMP/qwen-corepack"',
+    );
+    expect(cacheProducerWorkflow).toContain('rm -rf -- "$corepack_home"');
+    expect(cacheProducerWorkflow).toContain(
+      'echo "COREPACK_HOME=$corepack_home" >> "$GITHUB_ENV"',
+    );
+  });
+
   it('runs on the same target as the consumers so the cache version matches', () => {
     // actions/cache scopes an entry by a hash of the literal cache path plus
     // the compression method, so a producer on a different runner or outside
@@ -9757,8 +11314,8 @@ describe('qwen-triage verify Java toolchain', () => {
 
   it('keeps ten minutes of headroom above the java-inclusive worst case', () => {
     const verify = job('verify');
-    expect(verify).toContain('210 leaves 10m of headroom');
-    expect(verify.match(/^ {4}timeout-minutes: (\d+)/m)?.[1]).toBe('210');
+    expect(verify).toContain('213 leaves 10m of headroom');
+    expect(verify.match(/^ {4}timeout-minutes: (\d+)/m)?.[1]).toBe('213');
   });
 });
 

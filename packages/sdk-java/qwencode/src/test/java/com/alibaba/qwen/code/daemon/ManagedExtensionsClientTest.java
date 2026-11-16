@@ -76,12 +76,18 @@ class ManagedExtensionsClientTest {
             client.configurationOperation("session", "original");
             client.continueOperation("session", "original");
             client.recoverPrevious("session", "original");
+            client.importSource("workspace", "dataworks", "skill", "skill_1", "2", Map.of("platform", "linux", "arch", "any"), "source-original");
+            client.sourceImportReceipt("workspace", "original");
+            client.lookupSourceImport("workspace", "source-original");
             assertEquals(List.of("POST /prefix/v1/agents/workspaces/workspace/extensions",
                     "POST /prefix/v1/agents/workspaces/workspace/extensions/extension/settings",
                     "POST /prefix/v1/agents/sessions/session/extensions",
                     "GET /prefix/v1/agents/sessions/session/extensions/operations/original",
                     "POST /prefix/v1/agents/sessions/session/extensions/operations/original/continue",
-                    "POST /prefix/v1/agents/sessions/session/extensions/operations/original/recover-previous"), paths);
+                    "POST /prefix/v1/agents/sessions/session/extensions/operations/original/recover-previous",
+                    "POST /prefix/v1/agents/workspaces/workspace/extensions/source-imports",
+                    "GET /prefix/v1/agents/workspaces/workspace/extensions/source-imports/original",
+                    "GET /prefix/v1/agents/workspaces/workspace/extensions/source-imports"), paths);
             assertTrue(errors.isEmpty(), errors.toString());
         } finally {
             server.stop(0);

@@ -81,7 +81,7 @@ for (const theme of ['light', 'dark']) {
         });
         expect(searchBox!.width).toBeLessThanOrEqual(20);
         expect(searchBox!.height).toBe(24);
-        if (width === 1600) {
+        if (width >= 1440) {
           await expect(
             timeline.getByRole('button', {
               name: /Search this conversation|搜索当前会话/,
@@ -208,7 +208,7 @@ test('search keyboard and previous/next controls wrap and Enter locates the sele
   ).toContainText(/Synthetic message 1$/);
 });
 
-test('search stays reachable when the expanded rail hides the timeline', async ({
+test('search stays reachable with the expanded rail and visible timeline', async ({
   page,
   baseURL,
 }) => {
@@ -218,7 +218,7 @@ test('search stays reachable when the expanded rail hides the timeline', async (
   await expect(button).toBeVisible();
   await expect(
     page.getByRole('navigation', { name: /Session timeline/ }),
-  ).toBeHidden();
+  ).toBeVisible();
   await button.click();
   await expect(page.locator('[data-conversation-search] input')).toBeFocused();
 });

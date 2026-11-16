@@ -285,9 +285,6 @@ if (runtimeTakeover && !harnessOnly && process.platform !== 'linux') {
     `${inflightFailover ? '--inflight-failover' : '--continuation-failover'} requires Linux: the replacement owner must retire the dead worker's Runtime binding through the durable local-Worker reclaim (#12380 W0e), which only runs on Linux. Run the mode in the Hosted failover E2E CI job or a Linux container.`,
   );
 }
-// The Stage A acceptance criterion names a 15-second Runtime delay; the
-// real-provider TTFT margin under it is unrecorded (tracked in #12941).
-const modelBeforeRuntimeAssertionDelayMs = 15_000;
 // The frozen-arm teardown wakes the former writer by this registry key, so
 // the start name and the wake-up lookup must share it (a rename drift
 // would leave a stopped child wedged on the runner).
@@ -300,14 +297,11 @@ if (!Number.isSafeInteger(runtimeDelayMs) || runtimeDelayMs < 0) {
 const cliBundle = path.join(root, 'dist', 'cli.js');
 const springModule = path.join(root, 'packages', 'managed-agent-server');
 const springTarget = path.join(springModule, 'server', 'target');
-// The pom attaches classified repackage executions alongside the
-// unclassified server jar, so a wildcard over target/ matches several
-// artifacts. Read the project version from the
-// pom and name the unclassified jar exactly — version-independent without
-// assuming it is the only packaged artifact. The <version> immediately
-// following the module's own <artifactId> (not the <parent> block's). The
-// capture itself is whitespace-tolerant, so a formatter wrapping or
-// re-indenting the element cannot flow newlines into the jar path.
+// Name the executable jar exactly by the project version read from the pom,
+// so the path is version-independent. The <version> immediately following the
+// module's own <artifactId> (not the <parent> block's). The capture itself is
+// whitespace-tolerant, so a formatter wrapping or re-indenting the element
+// cannot flow newlines into the jar path.
 const pomXml = readFileSync(path.join(springModule, 'pom.xml'), 'utf8');
 const pomVersion = pomXml.match(
   /<artifactId>qwen-managed-agent-parent<\/artifactId>\s*<version>\s*([^<]*?\S)\s*<\/version>/,
@@ -6815,12 +6809,9 @@ try {
     if (terminal.event.type !== 'turn.completed') {
       throw new Error(`Managed Turn ended with ${terminal.event.type}`);
     }
-    if (
-      runtimeDelayMs >= modelBeforeRuntimeAssertionDelayMs &&
-      firstModel.event.sequence >= runtimeReady.event.sequence
-    ) {
+    if (runtimeReady.event.sequence >= firstModel.event.sequence) {
       throw new Error(
-        'First model event did not precede Runtime readiness ' +
+        'Runtime readiness did not precede the first model event ' +
           `(firstModelSequence=${firstModel.event.sequence}, ` +
           `runtimeReadySequence=${runtimeReady.event.sequence}, ` +
           `firstModelEventMs=${firstModel.observedAt - requestStartedAt}, ` +

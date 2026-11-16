@@ -21,6 +21,7 @@ import { parseJsoncObject, updateJsoncContent } from '../utils/jsonc-editor.js';
 import {
   arePathsEquivalent,
   getPathComparisonVariants,
+  isWithinRoot,
 } from './path-comparison.js';
 import {
   buildTrustPrecedenceRules,
@@ -390,6 +391,55 @@ function trustStatusToResult(status: WorkspaceTrustStatus): TrustResult {
   };
 }
 
+/**
+ * Whether the trust file's deciding rule for `location` sits on a folder
+ * strictly inside the IDE workspace root `root`. The IDE decides for its
+ * whole workspace; a rule set on a folder below it is more specific and
+ * wins, as the most specific rule does within the file.
+ */
+function hasTrustRuleBelowRoot(
+  trustConfig: Record<string, TrustLevel> | undefined,
+  location: string,
+  root: string | undefined,
+): boolean {
+  // The root itself (or the cwd the IDE answered for) is the IDE's to decide;
+  // only a nested location reads the trust file.
+  if (root === undefined || arePathsEquivalent(location, root)) return false;
+  const folders = loadTrustedFoldersWithOverrides(trustConfig);
+  const rule = resolveTrustRule(
+    buildTrustPrecedenceRules(folders.rules),
+    getPathComparisonVariants(location),
+  );
+  if (!rule) return false;
+  const rootVariants = getPathComparisonVariants(root);
+  return [...rule.variants].some((ruleVariant) =>
+    [...rootVariants].some(
+      (rootVariant) =>
+        ruleVariant !== rootVariant && isWithinRoot(ruleVariant, rootVariant),
+    ),
+  );
+}
+
+/**
+ * The trust file's decision for `location` when its deciding rule sits
+ * strictly inside the IDE workspace root `root`, which then wins over the
+ * IDE's answer; `undefined` leaves the decision to the IDE.
+ */
+export function getTrustFileDecisionBelowIdeRoot(
+  settings: Settings,
+  location: string,
+  root: string | undefined,
+  trustConfig?: Record<string, TrustLevel>,
+): boolean | undefined {
+  if (
+    !isFolderTrustEnabled(settings) ||
+    !hasTrustRuleBelowRoot(trustConfig, location, root)
+  ) {
+    return undefined;
+  }
+  return loadTrustedFoldersWithOverrides(trustConfig).isPathTrusted(location);
+}
+
 export function getWorkspaceTrustStatus(
   settings: Settings,
   workspaceCwd: string,
@@ -406,17 +456,17 @@ export function getWorkspaceTrustStatus(
     };
   }
 
-  const ideTrust = ideContextStore.get()?.workspaceState?.isTrusted;
+  const ideTrust = ideContextStore.getWorkspaceTrustScope(workspaceCwd);
   if (
     ideTrust !== undefined &&
-    arePathsEquivalent(workspaceCwd, process.cwd())
+    !hasTrustRuleBelowRoot(trustConfig, workspaceCwd, ideTrust.root)
   ) {
     return {
       v: 1,
       workspaceCwd,
       folderTrustEnabled: true,
       effective: {
-        state: ideTrust ? 'trusted' : 'untrusted',
+        state: ideTrust.isTrusted ? 'trusted' : 'untrusted',
         source: 'ide',
       },
       explicitTrustLevel: null,
@@ -457,13 +507,19 @@ export function isWorkspaceTrusted(
     return { isTrusted: true, source: undefined };
   }
 
-  const ideTrust = ideContextStore.get()?.workspaceState?.isTrusted;
-  if (
-    ideTrust !== undefined &&
-    (workspacePath === undefined ||
-      arePathsEquivalent(workspacePath, process.cwd()))
-  ) {
-    return { isTrusted: ideTrust, source: 'ide' };
+  if (workspacePath === undefined) {
+    const ideTrust = ideContextStore.get()?.workspaceState?.isTrusted;
+    if (ideTrust !== undefined) {
+      const fileTrust = getTrustFileDecisionBelowIdeRoot(
+        settings,
+        process.cwd(),
+        ideContextStore.getWorkspaceTrustScope(process.cwd())?.root,
+        trustConfig,
+      );
+      return fileTrust === undefined
+        ? { isTrusted: ideTrust, source: 'ide' }
+        : { isTrusted: fileTrust, source: 'file' };
+    }
   }
 
   return trustStatusToResult(

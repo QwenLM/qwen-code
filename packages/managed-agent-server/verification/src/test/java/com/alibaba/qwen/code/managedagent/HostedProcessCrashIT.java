@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.persistence.WorkspaceTestStorage;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -631,7 +632,7 @@ class HostedProcessCrashIT {
 
         private Map<String, Object> owner() throws Exception {
             return jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns("o") + " FROM ma_storage_owner o JOIN ma_storage s ON s.physical_key = o.storage_key WHERE s.alias_key = ? AND s.tenant_id = ? AND s.storage_id = ?",
-                    com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.storageAliasKey(tenant, "storage"),
+                    RuntimeAdmissionFences.storageAliasKey(tenant, "storage"),
                     tenant, "storage");
         }
 

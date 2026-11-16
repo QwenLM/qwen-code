@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { randomUUID } from '../utils/random-uuid.js';
 import {
   useCallback,
   useEffect,
@@ -3167,12 +3168,7 @@ export function useQueuedPrompts({
         !isCommandPrompt(trimmed);
       const midTurnMessageId =
         shouldInsertMidTurn && canQueryMidTurn
-          ? `webui_${
-              typeof crypto !== 'undefined' &&
-              typeof crypto.randomUUID === 'function'
-                ? crypto.randomUUID()
-                : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
-            }`
+          ? `webui_${randomUUID()}`
           : undefined;
 
       if (
@@ -4153,14 +4149,7 @@ export function useQueuedPrompts({
         return;
       }
 
-      const messageId = canQueryMidTurn
-        ? `webui_${
-            typeof crypto !== 'undefined' &&
-            typeof crypto.randomUUID === 'function'
-              ? crypto.randomUUID()
-              : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
-          }`
-        : undefined;
+      const messageId = canQueryMidTurn ? `webui_${randomUUID()}` : undefined;
       const targetSessionId = prompt.sessionId ?? latestSessionIdRef.current;
       const promptOwnerKey = queueOwnerKey(
         latestWorkspaceCwdRef.current,

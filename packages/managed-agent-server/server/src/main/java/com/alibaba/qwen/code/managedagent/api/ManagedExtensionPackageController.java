@@ -61,6 +61,25 @@ public class ManagedExtensionPackageController {
                 key, metadata, request.getInputStream(), request.getContentLengthLong()));
     }
 
+    @PostMapping(BASE + "/source-imports")
+    public ResponseEntity<ManagedExtensionPackages.SourceImportResult> importSource(TenantContext tenant,
+            @PathVariable String workspaceId, @RequestHeader("Idempotency-Key") String key,
+            @RequestBody ManagedExtensionPackages.SourceImport command) throws IOException {
+        return noStore(service.importSource(tenant.tenantId(), tenant.requireActorId(), workspaceId, key, command));
+    }
+
+    @GetMapping(BASE + "/source-imports/{operationId}")
+    public ResponseEntity<ManagedExtensionPackages.SourceImportResult> sourceReceipt(TenantContext tenant,
+            @PathVariable String workspaceId, @PathVariable String operationId) {
+        return noStore(service.sourceReceipt(tenant.tenantId(), tenant.requireActorId(), workspaceId, operationId));
+    }
+
+    @GetMapping(BASE + "/source-imports")
+    public ResponseEntity<ManagedExtensionPackages.SourceImportResult> lookupSourceImport(TenantContext tenant,
+            @PathVariable String workspaceId, @RequestHeader("Idempotency-Key") String key) {
+        return noStore(service.lookupSourceImport(tenant.tenantId(), tenant.requireActorId(), workspaceId, key));
+    }
+
     @GetMapping(BASE + "/{extensionId}/packages/{packageRevision}/inspection")
     public ResponseEntity<com.fasterxml.jackson.databind.JsonNode> inspection(TenantContext tenant,
             @PathVariable String workspaceId, @PathVariable String extensionId, @PathVariable long packageRevision,
@@ -107,10 +126,9 @@ public class ManagedExtensionPackageController {
             @PathVariable long packageRevision, @RequestParam String packageDigest) throws IOException {
         String actor = tenant.requireActorId();
         var saved = service.get(tenant.tenantId(), actor, workspaceId, extensionId, packageRevision, packageDigest);
-        var archive = service.archive(tenant.tenantId(), actor, workspaceId, extensionId, packageRevision, packageDigest);
         StreamingResponseBody body = output -> {
-            service.get(tenant.tenantId(), actor, workspaceId, extensionId, packageRevision, packageDigest);
-            try (var input = Files.newInputStream(archive, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+            try (var archive = service.archive(tenant.tenantId(), actor, workspaceId, extensionId, packageRevision, packageDigest);
+                    var input = Files.newInputStream(archive.path(), java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
                 input.transferTo(output);
             }
         };

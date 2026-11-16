@@ -2,7 +2,7 @@
 
 [English](2026-11-16-hosted-journal-append-settlement.md) | [简体中文](2026-11-16-hosted-journal-append-settlement.zh-CN.md)
 
-Status: proposed
+Status: implemented; validation is recorded in the PR.
 
 ## Problem statement
 
@@ -46,6 +46,8 @@ within 5 seconds and when it exits non-zero.
 H2's default lock wait is 2 seconds. Raising it is not this change. A longer
 wait queues other commits of the tenant behind one holder.
 
+Checkpoint ownership validation can choose a Session-wide reference index when many commits reuse the same resources. On preserved incident data, the history lookup scanned 11,926 reference entries instead of the two entries for that resource. This adds work while the Session fence is held. Separately, the recovery projection's active-Turn shortcut excludes `HARNESS_RECOVERY_BLOCKED`, so a stopped Harness waiting for durable evidence is reported as `recovering/turn_active` before its evidence is inspected.
+
 ## Goals
 
 - A lost commit acknowledgement is settled, or submitted again under the
@@ -56,13 +58,14 @@ wait queues other commits of the tenant behind one holder.
   advanced by a different command still park the session immediately.
 - A probe that does not finish within 5 seconds does not record
   `runtime_warm_failed`. A real identity mismatch still does.
+- Checkpoint ownership lookups use the resource index while preserving every tenant, Workspace, Session, revision and committed-owner predicate.
+- A Harness-blocked Turn exposes its durable recovery evidence instead of the ordinary active-work shortcut.
 
 ## Scope boundaries
 
 - The session-row lock stays the first consistent read of `commit` and is
   held until that transaction ends.
-- An already parked 0.27.4 process is not repaired by this change. That turn
-  is cancelled or continued in a new task.
+- Existing parked Turns are not mutated or replayed by this change. A cancelled Turn can be followed by a new Turn once its existing proof-checked recovery permits admission. Kernel reboot recovery and filesystem identity upgrades belong to a separate change.
 - Local JSONL journals have no `settleAppend`. An unknown append there still
   fences the writer.
 
@@ -113,6 +116,14 @@ including an identity mismatch, still appends `environment.failed` /
 
 ## Design decisions
 
+### Checkpoint ownership lookup and recovery projection
+
+`JournalCheckpointValidation.priorCheckpointResourceRevision` supplies `USE INDEX (idx_ma_ref_resource)` for the resource-reference side of the existing ownership join. The lookup keeps its original scope, revision ceiling and committed-journal conditions. It does not move or remove the Session fence. Preserved H2 incident data confirms reference scans fall from 11,926 to two for the history resource; this is query-plan evidence, not a reproduction of the entire original timeout or proof of MySQL behavior.
+
+`SessionRecoveryService.recoveryIntent` includes `HARNESS_RECOVERY_BLOCKED`. Such a Turn now reads Harness evidence and can expose `awaiting_evidence/inputs_unsettled`; an already-ready Harness still waits for control-plane Turn settlement. The separate recheck-intent gate is unchanged, so classification alone cannot replay tools or authorize continuation.
+
+### Existing settlement decisions
+
 - Resume uses the saved bytes because replay compares `transactionId`,
   `commandId`, `recordDigest` and the rest of the commit identity. Encoding
   the events again would mint a new record digest and conflict.
@@ -153,6 +164,8 @@ including an identity mismatch, still appends `environment.failed` /
 - Java: `/bin/sleep 20` throws `MacOsIdentityProbeTimeoutException`. A
   timeout cause does not append `environment.failed`. An identity-mismatch
   `IOException` does.
+- Ownership SQL: repeated references do not cause a Session-wide reference scan. Missing resources, foreign scope, future revisions and an uncommitted or orphan journal owner remain rejected. Real MySQL 8.4 acceptance remains a required separate check.
+- Recovery projection: a stopped Harness with unsettled input reports `awaiting_evidence/inputs_unsettled`, and a ready Harness with an active control-plane Turn reports `turn_settlement_pending`. Neither case dispatches or replays work through the query path.
 
 ## Acceptance criteria
 
@@ -163,3 +176,5 @@ including an identity mismatch, still appends `environment.failed` /
   or is replayed.
 - A probe timeout does not emit `runtime_warm_failed`. An identity mismatch
   still does.
+- Resource-index selection preserves all ownership predicates and the existing Session fence.
+- Recovery status matches the Harness evidence without widening the recheck or continuation gates.

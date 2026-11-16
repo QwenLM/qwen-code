@@ -81,9 +81,8 @@ import { registerManagedRuntimeProviderRoute } from './managed-runtime-provider-
 import {
   WorkspaceActivations,
   WORKSPACE_ACTIVATION_ROUTE,
-  isWorkspaceToolCapability,
   WORKSPACE_CONTEXT_CONFIG_REF,
-  RESIDENT_WORKSPACE_CAPABILITY_DIGEST,
+  resolveManagedShellPublisherMode,
 } from './managed-workspace-activation.js';
 import {
   ManagedHookRuntime,
@@ -381,19 +380,20 @@ export function registerManagedContextRoutes(
     : undefined;
   const foregroundOnly = sshForegroundOnly && !extensionConfiguration;
   const activations = new WorkspaceActivations();
-  const resident =
-    boot.capabilityDigest === RESIDENT_WORKSPACE_CAPABILITY_DIGEST;
+  const publisherMode = resolveManagedShellPublisherMode({
+    capabilityDigest: boot.capabilityDigest,
+    managedExtensions: extensionConfiguration !== undefined,
+    capturePublisher: capturePublisher !== undefined,
+    remotePublishers: remotePublishers !== undefined,
+  });
+  const resident = publisherMode.resident;
   if (resident && boot.isolationClass !== 'workspace')
     throw new Error('Resident Workspace requires Workspace isolation.');
-  const requiresActivation =
-    isWorkspaceToolCapability(boot.capabilityDigest) ||
-    resident ||
-    extensionConfiguration !== undefined;
+  const requiresActivation = publisherMode.requiresActivation;
   const admissionOpen = (): boolean => executor.isAdmissionOpen;
-  const remotePublisher =
-    !capturePublisher && requiresActivation && !resident
-      ? new RemoteShellResultPublisher()
-      : undefined;
+  const remotePublisher = publisherMode.remotePublisher
+    ? new RemoteShellResultPublisher()
+    : undefined;
   const publisher: ManagedShellCapturePublisher | undefined =
     capturePublisher ??
     (remotePublishers && remotePublisher

@@ -22,8 +22,8 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -138,7 +138,7 @@ class ManagedCwdChangeOperationTest {
 
     private void installMigrationFence(Fixture fixture) {
         fixture.jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, fence_operation_id) VALUES (?, ?, ?, ?, ?, ?)",
-                JdbcRuntimeBindingRepository.storageAliasKey(TENANT, STORAGE), JdbcRuntimeBindingRepository.storageFenceKey(TENANT), JdbcRuntimeBindingRepository.storageFenceKey(STORAGE),
+                RuntimeAdmissionFences.storageAliasKey(TENANT, STORAGE), RuntimeAdmissionFences.storageFenceKey(TENANT), RuntimeAdmissionFences.storageFenceKey(STORAGE),
                 TENANT, STORAGE, UUID.randomUUID().toString());
     }
 
