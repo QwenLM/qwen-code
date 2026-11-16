@@ -203,15 +203,42 @@ describe('Qoder auth plugin', () => {
     expect(context.ui.addItem).toHaveBeenCalled();
   });
 
-  it('does not register /upgrade in the CLI auth plugin', () => {
-    const commands = new AuthPlugin().getSlashCommands();
+  it('opens the plans page from /upgrade on a Qwen account', async () => {
+    const settings = createSettings({
+      auth: { selectedType: 'qwen-subscription' },
+    });
+    const context = createContext(settings);
+    const openBrowser = vi.fn(async () => {});
+    const command = new AuthPlugin({
+      openBrowser,
+      createSubscriptionSession: () => ({
+        signOut: vi.fn(async () => {}),
+        isSignedIn: () => true,
+      }),
+    })
+      .getSlashCommands?.()
+      .find((entry) => entry.name === 'upgrade')!;
 
-    expect(
-      commands.some(
-        (command) =>
-          command.name === 'upgrade' || command.altNames?.includes('upgrade'),
-      ),
-    ).toBe(false);
+    await command.action?.(context, '');
+
+    expect(openBrowser).toHaveBeenCalledWith(
+      'https://chat.qwen.ai/?memberPlan=qwen_code&entry=qwen_code&paywallScene=cli',
+    );
+    expect(context.ui.addItem).toHaveBeenCalled();
+  });
+
+  it('keeps /upgrade away from API-key connections', async () => {
+    const settings = createSettings({ auth: { selectedType: 'openai' } });
+    const context = createContext(settings);
+    const openBrowser = vi.fn(async () => {});
+    const command = new AuthPlugin({ openBrowser })
+      .getSlashCommands?.()
+      .find((entry) => entry.name === 'upgrade')!;
+
+    await command.action?.(context, '');
+
+    expect(openBrowser).not.toHaveBeenCalled();
+    expect(context.ui.addItem).toHaveBeenCalled();
   });
 
 });

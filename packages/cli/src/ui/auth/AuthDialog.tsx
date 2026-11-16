@@ -2506,10 +2506,12 @@ function planLabel(memberType: string): string {
 }
 
 function isCredentialFailure(error: unknown): boolean {
-  const failure = toSubscriptionOAuthError(error, 'userinfo');
+  if (!(error instanceof QwenSubscriptionOAuthError)) return false;
   return (
-    failure.code === 'session_changed' ||
-    (failure.stage === 'refresh' && failure.code === 'invalid_grant')
+    error.code === 'session_changed' ||
+    (error.stage === 'refresh' && error.code === 'invalid_grant') ||
+    ((error.stage === 'userinfo' || error.stage === undefined) &&
+      (error.status === 401 || error.code === 'invalid_token'))
   );
 }
 
@@ -2561,12 +2563,7 @@ function subscriptionErrorPatch(
         'Authentication timed out. Please try again or select a different authentication method.',
     };
   }
-  if (
-    failure.code === 'session_changed' ||
-    (failure.stage === 'refresh' && failure.code === 'invalid_grant') ||
-    (failure.stage === 'userinfo' &&
-      (failure.status === 401 || failure.code === 'invalid_token'))
-  ) {
+  if (isCredentialFailure(error)) {
     return {
       phase: 'error',
       message:
@@ -2577,6 +2574,13 @@ function subscriptionErrorPatch(
     return {
       phase: 'error',
       message: failure.description,
+    };
+  }
+  if (failure.code === 'invalid_token' || failure.status === 401) {
+    return {
+      phase: 'error',
+      message:
+        'Your login credentials are no longer valid. Run /auth to sign in again.',
     };
   }
   if (failure.code === 'models_request_failed') {

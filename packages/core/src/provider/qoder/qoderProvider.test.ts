@@ -667,7 +667,9 @@ describe('QoderProvider attribution through the real Responses API chain', () =>
         presentation.displayErrorCode,
         presentation.fallbackMessage,
       ),
-    ).toBe('赠送的免费额度已用尽，回答已暂停。继续回答将消耗您的付费额度。');
+    ).toBe(
+      '您今日使用该模型的免费次数已用完。您可以升级套餐以获得更多免费使用次数，或等待免费次数于每日 00:00（UTC+8）重置，也可以使用付费 Credits 继续使用该模型。',
+    );
     expect(h.wire.sends).toHaveLength(1);
   });
 

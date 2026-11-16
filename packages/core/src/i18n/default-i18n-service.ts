@@ -141,7 +141,7 @@ export class DefaultI18nService implements I18nService {
     const key = text.startsWith('error.code.') ? text : `error.code.${text}`;
     const normalizedCode = key.slice('error.code.'.length);
     if (isNewPaidConfirmationCode(normalizedCode)) {
-      return getPaidConfirmationMessage(this.locale);
+      return getPaidConfirmationMessage(this.locale, normalizedCode);
     }
     // Keep the existing fallback for callers that render legacy errors.
     return key === 'error.code.122'

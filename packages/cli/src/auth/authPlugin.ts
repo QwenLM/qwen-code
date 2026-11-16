@@ -12,6 +12,8 @@ import {
   QWEN_SUBSCRIPTION_PROVIDER_ID,
   QwenSubscriptionSession,
   createQoderClient,
+  getQwenSubscriptionPlansUrl,
+  openBrowserSecurely,
   runLogger,
   type QoderAccountRegion,
   type QoderClient,
@@ -25,13 +27,14 @@ import { requestAuthGate } from '../ui/auth/authFlow.js';
 
 export interface AuthPluginDeps {
   readonly createClient?: (region: QoderAccountRegion) => QoderClient;
-  readonly createSubscriptionSession?: () => Pick<
-    QwenSubscriptionSession,
-    'signOut'
-  >;
+  readonly openBrowser?: (url: string) => Promise<void>;
+  readonly createSubscriptionSession?: () => {
+    readonly signOut: QwenSubscriptionSession['signOut'];
+    readonly isSignedIn?: QwenSubscriptionSession['isSignedIn'];
+  };
 }
 
-/** `/auth` and `/logout` for the accounts. */
+/** `/auth`, `/logout` and `/upgrade` for the accounts. */
 export class AuthPlugin implements AppPlugin {
   readonly apiVersion = 1 as const;
   readonly id = 'qoder-auth';
@@ -46,6 +49,7 @@ export class AuthPlugin implements AppPlugin {
     return [
       createLoginCommand(this.deps),
       createLogoutCommand(this.deps),
+      createUpgradeCommand(this.deps),
     ];
   }
 
@@ -174,6 +178,43 @@ async function logoutSubscription(
     undefined,
   );
   return true;
+}
+
+function createUpgradeCommand(deps: AuthPluginDeps): SlashCommand {
+  return {
+    name: 'upgrade',
+    description: 'Open Qwen subscription plans',
+    kind: CommandKind.BUILT_IN,
+    action: async (context) => {
+      const session =
+        deps.createSubscriptionSession?.() ?? new QwenSubscriptionSession();
+      if (
+        context.services.settings.merged.security?.auth?.selectedType !==
+          AuthType.QWEN_SUBSCRIPTION ||
+        (session.isSignedIn ? !session.isSignedIn() : false)
+      ) {
+        addInfo(
+          context,
+          'This command is only available with Qwen Subscription login. Use /auth to sign in to Qwen Subscription.',
+        );
+        return undefined;
+      }
+      const url = getQwenSubscriptionPlansUrl('cli');
+      const suppressed =
+        context.services.agentContext?.config?.isBrowserLaunchSuppressed?.() ??
+        false;
+      if (!suppressed) {
+        try {
+          await (deps.openBrowser ?? openBrowserSecurely)(url);
+        } catch {
+          addInfo(context, `Could not open your browser. Visit ${url}`);
+          return undefined;
+        }
+      }
+      addInfo(context, `Qwen subscription plans: ${url}`);
+      return undefined;
+    },
+  };
 }
 
 function resolveClient(

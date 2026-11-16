@@ -428,7 +428,7 @@ describe('QoderClient', () => {
           business: { id: 'turn-1', type: 'agent' },
         }),
       ),
-    ).rejects.toThrow(/complimentary credits/);
+    ).rejects.toThrow(/free usage limit/);
     await collect(
       client.api.inference.stream({
         body,
@@ -482,7 +482,7 @@ describe('QoderClient', () => {
             business: { id: 'turn-1', type: 'agent' },
           }),
         ),
-      ).rejects.toThrow(/complimentary credits/);
+      ).rejects.toThrow(/free usage limit/);
       await collect(
         client.api.inference.stream({
           body,
@@ -539,7 +539,7 @@ describe('QoderClient', () => {
           business: { id: 'turn-1', type: 'agent' },
         }),
       ),
-    ).rejects.toThrow(/complimentary credits/);
+    ).rejects.toThrow(/free usage limit/);
     await expect(
       collect(
         client.api.inference.stream({
@@ -631,7 +631,7 @@ describe('QoderClient', () => {
             }),
         ),
       ).rejects.toThrow(
-        '赠送的免费额度已用尽，回答已暂停。继续回答将消耗您的付费额度。',
+        '您今日使用该模型的免费次数已用完。您可以升级套餐以获得更多免费使用次数，或等待免费次数于每日 00:00（UTC+8）重置，也可以使用付费 Credits 继续使用该模型。',
       );
     } finally {
       resetI18nService();
@@ -667,7 +667,7 @@ describe('QoderClient', () => {
           },
         }),
       ),
-    ).rejects.toThrow(/complimentary credits/);
+    ).rejects.toThrow(/exclusive pack/);
     await collect(
       client.api.inference.stream({
         body,
@@ -710,7 +710,7 @@ describe('QoderClient', () => {
 
     await expect(
       collect(client.api.inference.stream(userTurn('turn-1'))),
-    ).rejects.toThrow(/complimentary credits/);
+    ).rejects.toThrow(/free usage limit/);
     await expect(
       collect(client.api.inference.stream(userTurn('turn-2'))),
     ).rejects.toMatchObject({ code: '999' });
@@ -755,7 +755,7 @@ describe('QoderClient', () => {
           business: { id: 'turn-1', type: 'agent' },
         }),
       ),
-    ).rejects.toThrow(/complimentary credits/);
+    ).rejects.toThrow(/free usage limit/);
     await collect(
       client.api.inference.stream({
         body,
