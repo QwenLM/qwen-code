@@ -2,9 +2,15 @@
 
 [English](2026-11-15-opentui-stats-history.md) | [简体中文](2026-11-15-opentui-stats-history.zh-CN.md)
 
+## Validation checkpoint — 2026-11-16 (review fixes)
+
+The review-fix source tree is commit `e87a0ab90c60fd7c3231f2eae6a655f713c6a01f` on the PR head branch; this checkpoint commit changes documentation only. Build, typecheck, lint and formatting passed on that tree. The affected CLI suites passed 45 tests across the stats service, native history component and history hook files, 164 tests across the dialog frame, dialog mount and i18n files, and 59 core usage-history tests. The new and replacement regression cases each red when their fix is reverted (nine mutation witnesses, including the phantom hint row and the paging direction, multiplier and reset). The range golden now pins TZ=UTC: it failed under TZ=Etc/GMT+12 before the fix and passes after. A nine-locale probe confirmed the new `peak {{value}}` and `Statistics owner is unavailable.` keys load and interpolate in every catalog.
+
+The Groups A–D public legs, the native geometry replay and the workflow-test counts recorded in the earlier checkpoint below were not re-run here; that checkpoint's intermediate candidate tree is no longer fetchable, so its bundle identity cannot be re-verified. The public interactive acceptance asserts content inclusion (totals, month captions, project names) rather than exact frame bytes; re-run it before merge acceptance.
+
 ## Validation checkpoint — 2026-11-16
 
-This implementation was independently verified on base `88e3f19c01d52110353ed1013e5d750c45e0cb0d`. Earlier checkpoints below describe intermediate candidates and remain as history. The tested source tree is `52580959c379688b8e81335b6e6806e77cb7d1ee`; its source bundle contains 1,454 files, with entry SHA-256 `07ad9eae84861fedeb7ce452626c8f8c6fc5981f345120fc0dd5db68f88b6dce`.
+This implementation was independently verified on base `88e3f19c01d52110353ed1013e5d750c45e0cb0d`. Earlier checkpoints below describe intermediate candidates and remain as history. The tested source tree was an intermediate candidate that is no longer fetchable from the base repository or the head fork; its recorded bundle file count (1,454) and entry hash are historical only and cannot be re-verified. The current tested tree is the review-fix commit cited above.
 
 Build, typecheck, lint, formatting and bundle passed. The affected whole-file checks passed 220 CLI tests, 59 existing usage-history tests and 424 workflow tests, with four workflow tests skipped. The eight relocated public test/config files also passed typechecking.
 
@@ -12,7 +18,7 @@ Groups A–D passed on Node24 + Ink, Bun1.4.4 + Ink and strict Bun1.4.4 + OpenTU
 
 Native geometry passed at 120×40, 80×18, 40×18, 20×15 and 40×12. Independent review replayed all 61 saved frames and 80 inputs, including selected tabs, complete frame bounds and the tested PageUp/PageDown transitions. This does not establish reachability of every long value or every scroll position.
 
-This checkpoint changes documentation only. The other 17 source, test and workflow files retain the tested bytes; documentation formatting and reference checks are recorded separately. These checks do not qualify installed distributions, Windows/Linux, GUI, IME, exhaustive Unicode, continuous mid-open refresh or long-run stability. The separate Bun + Ink Trust restart failure remains unresolved. Default selection, removal of Ink and overall migration acceptance require their own approval and evidence.
+That checkpoint changed documentation only; the source, test and workflow files were unchanged at that step. Documentation formatting and reference checks are recorded separately. These checks do not qualify installed distributions, Windows/Linux, GUI, IME, exhaustive Unicode, continuous mid-open refresh or long-run stability. The separate Bun + Ink Trust restart failure remains unresolved. Default selection, removal of Ink and overall migration acceptance require their own approval and evidence.
 
 ## Status and problem
 
