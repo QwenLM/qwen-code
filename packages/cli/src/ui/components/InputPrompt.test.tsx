@@ -2654,6 +2654,28 @@ describe('InputPrompt', () => {
       }
     });
 
+    it('pastes a copied file name as text even when the workspace has that file', async () => {
+      fsPromisesOverride.stat = async () => ({ isFile: () => true });
+      fsPromisesOverride.copyFile = async () => {};
+      try {
+        const { stdin, unmount } = renderWithProviders(
+          <InputPrompt {...props} />,
+        );
+        await wait();
+
+        stdin.write('\x1b[200~test.jpg\x1b[201~');
+        await wait();
+
+        expect(props.buffer.handleInput).toHaveBeenCalledWith(
+          expect.objectContaining({ paste: true, sequence: 'test.jpg' }),
+        );
+        unmount();
+      } finally {
+        fsPromisesOverride.stat = undefined;
+        fsPromisesOverride.copyFile = undefined;
+      }
+    });
+
     it('collapses a large all-image-paths clipboard that resolves no files', async () => {
       const paths = Array.from(
         { length: 40 },
@@ -8100,6 +8122,15 @@ describe('classifyPastedImagePaths', () => {
     const result = classifyPastedImagePaths('"/a/my image.png"');
     expect(result.allImages).toBe(true);
     expect(result.imagePaths).toEqual(['/a/my image.png']);
+  });
+
+  it('does not treat a bare or relative image file name as an image path', () => {
+    for (const token of ['test.jpg', '@test.jpg', 'images/test.jpg']) {
+      expect(classifyPastedImagePaths(token)).toEqual({
+        imagePaths: [],
+        allImages: false,
+      });
+    }
   });
 
   it('does not treat plain text or non-image paths as image paste', () => {
