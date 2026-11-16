@@ -118,14 +118,18 @@ function isSafeRangeRef(ref: string): boolean {
  * means "refuse the fallback". A base branch git permits but the daemon's
  * whitelist rejects (e.g. `feat@2026`) would be dropped server-side into an
  * unscoped walk that re-lists pre-session history, so it must skip the fetch
- * entirely (`null`), not fall through to the omitted-range path.
+ * entirely (`null`), not fall through to the omitted-range path. The literal
+ * `'HEAD'` is the daemon's detached-HEAD sentinel (session.ts treats it the
+ * same way), not a baseline: composing `HEAD..HEAD` would be always-empty and
+ * silently render a committing session as having no loose commits, so it maps
+ * to the no-baseline walk instead.
  */
 export function commitFallbackRange(
   latestPrHeadSha: string | undefined,
   baseBranch: string | undefined,
 ): string | null | undefined {
   if (latestPrHeadSha) return `${latestPrHeadSha}..HEAD`;
-  if (baseBranch) {
+  if (baseBranch && baseBranch !== 'HEAD') {
     return isSafeRangeRef(baseBranch) ? `${baseBranch}..HEAD` : null;
   }
   return undefined;

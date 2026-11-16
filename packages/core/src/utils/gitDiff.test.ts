@@ -1966,7 +1966,7 @@ describe('isGitAncestorOfHead', () => {
     expect(await isGitAncestorOfHead(repo, 'HEAD')).toBe(true);
   });
 
-  it('is false for a divergent branch head (merged/rewritten PR shape)', async () => {
+  it('is false for a divergent branch head', async () => {
     const base = await headSha(repo);
     await git(repo, 'checkout', '-q', '-b', 'side');
     await commit(repo, { 'side.txt': 's' }, 'side work');
@@ -1975,6 +1975,20 @@ describe('isGitAncestorOfHead', () => {
     await commit(repo, { 'main.txt': 'm' }, 'main work');
     expect(await isGitAncestorOfHead(repo, side)).toBe(false);
     expect(await isGitAncestorOfHead(repo, base)).toBe(true);
+  });
+
+  it('is false for a squash-merged PR head (the merged-PR shape)', async () => {
+    // A squash merge absorbs the work into a NEW commit on main; the PR's
+    // original head stays reachable in the object database but is not an
+    // ancestor of HEAD — exactly the boundary the fallback must refuse.
+    await git(repo, 'checkout', '-q', '-b', 'pr');
+    await commit(repo, { 'pr.txt': 'p' }, 'PR work');
+    const prHead = await headSha(repo);
+    await git(repo, 'checkout', '-q', 'main');
+    await git(repo, 'merge', '-q', '--squash', 'pr');
+    await git(repo, 'commit', '-qm', 'squash-merge PR');
+    expect(await isGitAncestorOfHead(repo, prHead)).toBe(false);
+    expect(await isGitAncestorOfHead(repo, 'HEAD')).toBe(true);
   });
 
   it('is false for an unknown or unsafe ref', async () => {

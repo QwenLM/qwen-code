@@ -176,7 +176,11 @@ Assembly logic lives in a testable hook `useChangeOverview`:
   ancestor (merged or rewritten), even an older ancestor head's window would
   straddle the base history that absorbed the merged work, so the boundary
   falls back to the session's base branch — or, when no baseline is known and
-  no PR is bound, HEAD's recent history. Each entry is rendered from
+  no PR is bound, HEAD's recent history (the daemon's detached-HEAD `'HEAD'`
+  sentinel counts as no baseline; `HEAD..HEAD` would be always-empty). The
+  no-trustworthy-boundary suppression keys on the session's bound PRs, not on
+  the produced PR units, so it also holds when the files capability is absent.
+  Each entry is rendered from
   `workspaceGitCommitDetail`. Commits at or before the boundary are treated as
   covered by PRs and not duplicated. Merge commits are skipped; a failed
   commit-detail fetch fails the whole overview (see Degradation). A base branch

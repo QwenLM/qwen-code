@@ -668,6 +668,116 @@ describe('workspace GitHub PR routes', () => {
     expect(mockIsGitAncestorOfHead).not.toHaveBeenCalled();
   });
 
+  it('runs the ancestry probe under the workspace effectiveEnv', async () => {
+    // The probe must see the same overlay identity as the gh fetch: a
+    // workspace whose git config/credentials come from its overlay must not
+    // be probed under the daemon host's environment.
+    fetchGitHubPullRequestFilesMock.mockResolvedValue({
+      kind: 'ok',
+      files: {
+        files: [],
+        hiddenCount: 0,
+        additions: 0,
+        deletions: 0,
+        headSha: 'abc1234',
+      },
+    });
+    mockIsGitAncestorOfHead.mockResolvedValue(true);
+    const overlay = { GH_TOKEN: 'workspace-token' };
+    const app = express();
+    registerWorkspaceQualifiedGitHubPrsRoutes(app, {
+      workspaceRegistry: registry([
+        runtime('primary', '/work/main', true, overlay),
+      ]),
+      sendBridgeError,
+      mutate: passthroughMutate,
+    });
+
+    const response = await request(app).get(
+      '/workspaces/primary/github/prs/42/files',
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockIsGitAncestorOfHead).toHaveBeenCalledWith(
+      '/work/main',
+      'abc1234',
+      overlay,
+    );
+  });
+
+  it('keeps concurrent same-number requests in different workspaces separate', async () => {
+    // The coalescing key's cwd component: the same PR number in two
+    // workspaces is two different probes and two different gh calls.
+    const gates: Array<(r: FetchGitHubPullRequestFilesResult) => void> = [];
+    fetchGitHubPullRequestFilesMock.mockImplementation(
+      () =>
+        new Promise<FetchGitHubPullRequestFilesResult>((resolve) => {
+          gates.push(resolve);
+        }),
+    );
+    const app = express();
+    registerWorkspaceQualifiedGitHubPrsRoutes(app, {
+      workspaceRegistry: registry([
+        runtime('primary', '/work/main', true),
+        runtime('secondary', '/work/second', true),
+      ]),
+      sendBridgeError,
+      mutate: passthroughMutate,
+    });
+
+    const p1 = request(app)
+      .get('/workspaces/primary/github/prs/42/files')
+      .then((r) => r);
+    const p2 = request(app)
+      .get('/workspaces/secondary/github/prs/42/files')
+      .then((r) => r);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(gates).toHaveLength(2);
+    gates[0]!({
+      kind: 'ok',
+      files: {
+        files: [{ path: 'main.ts', additions: 1, deletions: 0 }],
+        hiddenCount: 0,
+        additions: 1,
+        deletions: 0,
+        headSha: 'mmm',
+      },
+    });
+    gates[1]!({
+      kind: 'ok',
+      files: {
+        files: [{ path: 'second.ts', additions: 2, deletions: 0 }],
+        hiddenCount: 0,
+        additions: 2,
+        deletions: 0,
+        headSha: 'sss',
+      },
+    });
+    const [r1, r2] = await Promise.all([p1, p2]);
+
+    expect(r1.body.files).toEqual([
+      { path: 'main.ts', additions: 1, deletions: 0 },
+    ]);
+    expect(r2.body.files).toEqual([
+      { path: 'second.ts', additions: 2, deletions: 0 },
+    ]);
+    expect(fetchGitHubPullRequestFilesMock).toHaveBeenCalledTimes(2);
+    expect(fetchGitHubPullRequestFilesMock).toHaveBeenNthCalledWith(
+      1,
+      '/work/main',
+      42,
+      undefined,
+      undefined,
+    );
+    expect(fetchGitHubPullRequestFilesMock).toHaveBeenNthCalledWith(
+      2,
+      '/work/second',
+      42,
+      undefined,
+      undefined,
+    );
+  });
+
   it('forwards the repo query parameter to the core helper', async () => {
     fetchGitHubPullRequestFilesMock.mockResolvedValue({
       kind: 'ok',

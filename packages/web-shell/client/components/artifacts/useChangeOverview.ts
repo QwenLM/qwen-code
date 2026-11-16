@@ -235,8 +235,11 @@ export function useChangeOverview(
         // the ancestry probe and no base branch is known). Both skip the fetch
         // rather than fall through to an unscoped walk that would re-list
         // pre-session or PR-covered history. With no bound PRs, undefined
-        // keeps the designed "HEAD's recent history" walk.
-        if (range !== null && !(range === undefined && prResults.length > 0)) {
+        // keeps the designed "HEAD's recent history" walk. Key on boundPrs,
+        // not prResults: without the files capability no PR unit is produced
+        // even though the session has bindings, and those bindings' commits
+        // must not be re-listed as loose work either.
+        if (range !== null && !(range === undefined && boundPrs.length > 0)) {
           let log = await ws
             .workspaceGitLog(COMMIT_FALLBACK_LIMIT, 0, gitCwd, range, {
               sessionId,

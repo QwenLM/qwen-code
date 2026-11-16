@@ -37,6 +37,15 @@ describe('commitFallbackRange', () => {
     expect(commitFallbackRange(undefined, undefined)).toBeUndefined();
   });
 
+  it('treats the detached-HEAD sentinel as no baseline, not HEAD..HEAD', () => {
+    // The daemon records baseBranch verbatim from the branch probe, whose
+    // detached-HEAD value is the literal 'HEAD' (session.ts treats it as a
+    // sentinel too). HEAD..HEAD is always empty and would silently render a
+    // committing session as having no loose commits; the designed
+    // recent-history walk must apply instead.
+    expect(commitFallbackRange(undefined, 'HEAD')).toBeUndefined();
+  });
+
   it('refuses a base branch the daemon range whitelist would drop', () => {
     // git permits these refs, but isSafeLogRange rejects them; composing the
     // range would make the daemon run an unscoped git log instead. Return the

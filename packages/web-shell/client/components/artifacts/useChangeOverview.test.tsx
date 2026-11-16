@@ -343,12 +343,39 @@ describe('useChangeOverview', () => {
   it('still shows the commit fallback when the files capability is absent', async () => {
     // Bound PRs come from the session sidecar, which is not gated by the files
     // capability; with no PR unit produced there is no head to duplicate, so
-    // the loose commits must not be suppressed.
+    // the loose commits must not be suppressed. With a base branch known the
+    // back-compat degradation still issues the base-branch window.
     mock.features = [];
     await renderAndSettle();
     const ws = mock.workspaceByCwd.mock.results[0]!.value;
     expect(ws.workspaceGitHubPullRequestFiles).not.toHaveBeenCalled();
+    expect(ws.workspaceGitLog).toHaveBeenCalledWith(
+      20,
+      0,
+      '/work/wt',
+      'origin/main..HEAD',
+      { sessionId: 's1' },
+    );
     expect(output.units.map((unit) => unit.kind)).toContain('commit');
+  });
+
+  it('suppresses the unscoped walk when bound PRs exist without the files capability', async () => {
+    // prResults stays empty without the capability even though the session
+    // has bindings; keying the suppression on prResults would walk HEAD
+    // unscoped and re-list the bindings' commits as this session's loose
+    // work. The discriminator must be the bindings themselves.
+    mock.features = [];
+    mock.sessionStatus.mockResolvedValue({
+      prs: [{ number: 1, url: 'https://github.com/o/r/pull/1' }],
+      branch: { name: 'feat' },
+      worktree: { path: '/work/wt' },
+    });
+    await renderAndSettle();
+    const ws = mock.workspaceByCwd.mock.results[0]!.value;
+    expect(ws.workspaceGitHubPullRequestFiles).not.toHaveBeenCalled();
+    expect(ws.workspaceGitLog).not.toHaveBeenCalled();
+    expect(output.units.map((unit) => unit.kind)).toEqual(['uncommitted']);
+    expect(output.loadFailed).toBe(false);
   });
 
   it('surfaces commit-window truncation from log.hasMore', async () => {

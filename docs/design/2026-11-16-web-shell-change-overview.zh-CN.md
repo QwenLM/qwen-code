@@ -148,7 +148,9 @@ PR 方法保持一致。
   且仅当**每个**绑定 PR head 都**是 HEAD 祖先**（`headIsAncestor`）时才以该
   head 为边界。任一绑定 PR head 不是祖先（已合并或被改写）时，即便较旧的祖先
   head，其窗口也会跨越吸收了合并工作的基线历史，因此边界退回会话基线分支；
-  无基线且无绑定 PR 时取 HEAD 近期历史。每项用 `workspaceGitCommitDetail`
+  无基线且无绑定 PR 时取 HEAD 近期历史（daemon 的 detached-HEAD `'HEAD'` 哨兵
+  视为无基线；`HEAD..HEAD` 恒空）。无可信边界的抑制以会话绑定 PR 为准，而非
+  产出的 PR 单元，因此 files 能力缺失时同样成立。每项用 `workspaceGitCommitDetail`
   渲染。位于边界及之前的 commit 视为已被 PR 覆盖，不重复展示。合并提交被跳过；
   commit detail 拉取失败会让整个总览失败（见降级）。基线分支若在 daemon 区间
   白名单之外，则整体跳过兜底（独立的「拒绝」哨兵），而不是落到无界遍历、把会话
