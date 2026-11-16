@@ -643,7 +643,6 @@ describe('Session', () => {
     recordBackgroundTaskCompleted: ReturnType<typeof vi.fn>;
     recordNotification: ReturnType<typeof vi.fn>;
     recordNotificationStrict: ReturnType<typeof vi.fn>;
-    recordBackgroundTaskCompleted: ReturnType<typeof vi.fn>;
     recordExternalAgentRecordStrict: ReturnType<typeof vi.fn>;
     findExternalAgentRecord: ReturnType<typeof vi.fn>;
     recordRealtimeConversation: ReturnType<typeof vi.fn>;
@@ -1054,7 +1053,6 @@ describe('Session', () => {
       recordBackgroundTaskCompleted: vi.fn(),
       recordNotification: vi.fn(),
       recordNotificationStrict: vi.fn().mockResolvedValue(undefined),
-      recordBackgroundTaskCompleted: vi.fn(),
       recordExternalAgentRecordStrict: vi.fn().mockResolvedValue({
         uuid: 'record-1',
         timestamp: '2026-10-06T01:02:03.000Z',
