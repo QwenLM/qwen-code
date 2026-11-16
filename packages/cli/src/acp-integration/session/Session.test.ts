@@ -11569,7 +11569,7 @@ describe('Session', () => {
       });
 
       function createSessionWithLedger(
-        lastRecord?: () => PromptLedgerRecord | undefined,
+        records?: () => readonly PromptLedgerRecord[] | undefined,
         history: typeof closedToolTail = closedToolTail,
       ): void {
         session.dispose();
@@ -11583,12 +11583,12 @@ describe('Session', () => {
           undefined,
           [],
           () => false,
-          lastRecord,
+          records,
         );
       }
 
       it('reports clean for a turn that settled end_turn on a closed tool pair', async () => {
-        createSessionWithLedger(() => completedTerminal());
+        createSessionWithLedger(() => [completedTerminal()]);
 
         // The conservative synchronous classification is unchanged...
         expect(session.getRecoveryStatus()).toEqual({
@@ -11608,17 +11608,20 @@ describe('Session', () => {
 
       it('keeps the banner when the ledger has no witness', async () => {
         const witnesses: Array<
-          (() => PromptLedgerRecord | undefined) | undefined
+          (() => readonly PromptLedgerRecord[] | undefined) | undefined
         > = [
           undefined,
           () => undefined,
           () => {
             throw new Error('I/O error');
           },
-          () => ({ v: 1, promptId: 'prompt-1', state: 'in_flight', at: 2 }),
-          () => completedTerminal({ terminal: 'cancelled' }),
-          () => completedTerminal({ terminal: 'error' }),
-          () => completedTerminal({ stopReason: 'max_tokens' }),
+          () => [{ v: 1, promptId: 'prompt-1', state: 'in_flight', at: 2 }],
+          () => [completedTerminal({ terminal: 'cancelled' })],
+          () => [completedTerminal({ terminal: 'error' })],
+          () => [completedTerminal({ stopReason: 'max_tokens' })],
+          // A completed terminal without a stop reason is ambiguous: the
+          // turn ended, but not necessarily end_turn.
+          () => [completedTerminal({ stopReason: undefined })],
         ];
         for (const witness of witnesses) {
           createSessionWithLedger(witness);
@@ -11631,7 +11634,7 @@ describe('Session', () => {
 
       it('keeps the banner when the tail carries a real prompt, not tool results', async () => {
         createSessionWithLedger(
-          () => completedTerminal(),
+          () => [completedTerminal()],
           [{ role: 'user', parts: [{ text: 'unanswered prompt' }] }],
         );
         expect(await session.getRecoveryStatusForClient()).toEqual({
@@ -11642,7 +11645,7 @@ describe('Session', () => {
 
       it('leaves a genuinely interrupted tool turn classified', async () => {
         createSessionWithLedger(
-          () => completedTerminal(),
+          () => [completedTerminal()],
           [
             { role: 'user', parts: [{ text: 'do the thing' }] },
             {
@@ -11679,7 +11682,7 @@ describe('Session', () => {
       }
 
       it('reports clean, not interrupted_prompt, while a turn is in flight', async () => {
-        createSessionWithLedger(() => completedTerminal());
+        createSessionWithLedger(() => [completedTerminal()]);
         withPendingPrompt(new AbortController());
 
         expect(session.getRecoveryStatus()).toEqual({
@@ -11697,7 +11700,7 @@ describe('Session', () => {
       });
 
       it('keeps the settled-tail certification once the turn settles', async () => {
-        createSessionWithLedger(() => completedTerminal());
+        createSessionWithLedger(() => [completedTerminal()]);
         withPendingPrompt(null);
 
         expect(session.getRecoveryStatus()).toEqual({
@@ -11708,6 +11711,94 @@ describe('Session', () => {
           kind: 'clean',
           canContinue: false,
         });
+      });
+
+      // A side task forked mid-turn copies the source's in-flight tail into
+      // a fresh session that never admitted a prompt — its ledger file is
+      // missing, not populated. The tail is still being answered in the
+      // source session, so it must not be reported as an interruption of the
+      // fork (whose "Continue execution" would duplicate the in-flight
+      // request). The conservative synchronous classification is unchanged.
+      it('reports clean for a tool-result tail inherited from a forked source (empty ledger)', async () => {
+        createSessionWithLedger(() => []);
+
+        expect(session.getRecoveryStatus()).toEqual({
+          kind: 'interrupted_prompt',
+          canContinue: true,
+        });
+        expect(await session.getRecoveryStatusForClient()).toEqual({
+          kind: 'clean',
+          canContinue: false,
+        });
+        expect(await session.continueLastTurn()).toEqual({
+          accepted: false,
+          interruption: 'none',
+        });
+      });
+
+      it('keeps the banner for an inherited tail that carries a real prompt', async () => {
+        createSessionWithLedger(
+          () => [],
+          [{ role: 'user', parts: [{ text: 'unanswered prompt' }] }],
+        );
+        expect(await session.getRecoveryStatusForClient()).toEqual({
+          kind: 'interrupted_prompt',
+          canContinue: true,
+        });
+      });
+
+      it('reports clean for an inherited dangling tool call (interrupted_turn, empty ledger)', async () => {
+        createSessionWithLedger(
+          () => [],
+          [
+            { role: 'user', parts: [{ text: 'do the thing' }] },
+            {
+              role: 'model',
+              parts: [
+                {
+                  functionCall: {
+                    id: 'call-inherited',
+                    name: 'run_shell_command',
+                    args: { command: 'ls' },
+                  },
+                },
+              ],
+            },
+          ],
+        );
+        expect(await session.getRecoveryStatusForClient()).toEqual({
+          kind: 'clean',
+          canContinue: false,
+        });
+      });
+
+      it('keeps the banner for a dangling tool call with any ledger record', async () => {
+        const danglingHistory: Content[] = [
+          { role: 'user', parts: [{ text: 'do the thing' }] },
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call-dangling-2',
+                  name: 'run_shell_command',
+                  args: { command: 'ls' },
+                },
+              },
+            ],
+          },
+        ];
+        const ledgers: Array<readonly PromptLedgerRecord[]> = [
+          [{ v: 1, promptId: 'prompt-1', state: 'in_flight', at: 2 }],
+          [completedTerminal()],
+        ];
+        for (const records of ledgers) {
+          createSessionWithLedger(() => records, danglingHistory);
+          expect(await session.getRecoveryStatusForClient()).toEqual({
+            kind: 'interrupted_turn',
+            canContinue: true,
+          });
+        }
       });
     });
   });

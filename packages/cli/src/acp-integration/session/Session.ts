@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { PromptLedgerRecord } from '@qwen-code/acp-bridge/promptLedger';
+import {
+  isPromptLedgerTerminalRecord,
+  type PromptLedgerRecord,
+} from '@qwen-code/acp-bridge/promptLedger';
 import type { HookProgress } from '@qwen-code/qwen-code-core/confirmation-bus/types.js';
 import { parseHookLifecycle } from '@qwen-code/qwen-code-core/telemetry/hook-lifecycle-contract.js';
 import {
@@ -218,6 +221,7 @@ import {
   resolveMainSessionOutputStyle,
   wrapSystemReminder,
   buildSessionRecoveryPlanFromApiHistory,
+  type SessionRecoveryPlan,
   TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
   evaluatePermissionFlow,
   buildPermissionCheckContext,
@@ -3029,16 +3033,17 @@ export class Session implements SessionContext {
       runId: string,
     ) => boolean = () => false,
     /**
-     * The newest prompt-terminal-ledger record for this session, or
-     * `undefined` without usable ledger evidence (missing file, torn tail,
-     * I/O error). Wired by the serve layer that owns the ledger layout;
-     * absent for non-serve runtimes, where recovery classification stays
-     * conservative. Synchronous by design: the read is a bounded ledger
-     * tail, and the recovery status path must not schedule I/O it cannot
-     * cancel.
+     * The bounded tail of this session's prompt terminal ledger: `[]` when
+     * the ledger file is missing or empty (on a ledger-wired runtime, no
+     * prompt was ever admitted in this session), records in file order when
+     * it has them, or `undefined` without usable ledger evidence (witness
+     * absent on non-serve runtimes, torn tail, I/O error). Wired by the
+     * serve layer that owns the ledger layout. Synchronous by design: the
+     * read is a bounded ledger tail, and the recovery status path must not
+     * schedule I/O it cannot cancel.
      */
-    private readonly lastPromptLedgerRecord?: () =>
-      | PromptLedgerRecord
+    private readonly promptLedgerRecords?: () =>
+      | readonly PromptLedgerRecord[]
       | undefined,
   ) {
     this.sessionId = id;
@@ -6749,7 +6754,12 @@ export class Session implements SessionContext {
   }
 
   getRecoveryStatus(): NonNullable<ServeSessionContextStatus['recovery']> {
-    const recoveryPlan = this.#getRecoveryPlan(false);
+    return this.#recoveryStatusFromPlan(this.#getRecoveryPlan(false));
+  }
+
+  #recoveryStatusFromPlan(
+    recoveryPlan: SessionRecoveryPlan | undefined,
+  ): NonNullable<ServeSessionContextStatus['recovery']> {
     const activeTurn = this.#hasActiveTurn();
     // A turn is still in flight, so there is no settled turn to continue.
     // `pendingPrompt` alone misses the automatic turns: notification and cron
@@ -6792,18 +6802,26 @@ export class Session implements SessionContext {
     if (!initial.canContinue) return initial;
     try {
       const cancellation = await this.#getTurnCancellation();
-      const status = this.getRecoveryStatus();
+      // Re-classify after the await: a turn may have started while the
+      // cancellation check was in flight.
+      const recoveryPlan = this.#getRecoveryPlan(false);
+      const status = this.#recoveryStatusFromPlan(recoveryPlan);
       if (cancellation && !cancellation.confirmationId) {
         return { ...status, canContinue: false };
       }
-      // A turn that settled `end_turn` may legitimately end on a closed tool
-      // pair (a final `todo_write` with no trailing model text): the tail
-      // classifier reads that `user` `functionResponse` as an interrupted
-      // tool-result submission and pins the recovery banner on a clean
-      // session. The prompt terminal ledger is the only witness that the
-      // turn settled, so consult it before reporting the tail — any missing
-      // or ambiguous evidence keeps the conservative kind.
-      if (status.canContinue && this.#isSettledClosedToolResultTail()) {
+      // The tail classifier cannot attribute the classified tail to the turn
+      // that produced it, so consult the session's own prompt terminal
+      // ledger before reporting it: a tail that settled `end_turn` on a
+      // closed tool pair, or a tail inherited from a forked source session
+      // (this session never admitted a prompt), is not an interruption of
+      // this session. Any missing or ambiguous evidence keeps the
+      // conservative kind. `status.canContinue` already implies the plan is
+      // present, but the classifier keeps a non-optional parameter.
+      if (
+        status.canContinue &&
+        recoveryPlan !== undefined &&
+        this.#isLedgerClearedInterruptedTail(recoveryPlan)
+      ) {
         return { kind: 'clean', canContinue: false };
       }
       return {
@@ -6818,28 +6836,70 @@ export class Session implements SessionContext {
   }
 
   /**
-   * Whether the current `interrupted_prompt` tail is a settled closed
-   * tool-result submission rather than an unfinished turn: the newest
-   * ledger record is a `completed`/`end_turn` terminal AND every part of
-   * the trailing user run is a `functionResponse` whose `functionCall`
-   * exists in the history. A tail carrying any other part (a real prompt
-   * text) is left classified. Fails conservative (`false`) on any missing
-   * or ambiguous evidence.
+   * Whether the session's own prompt terminal ledger clears the classified
+   * interrupted tail — i.e. the tail cannot belong to a turn that ran in
+   * this session:
+   *
+   * - **settled**: the newest record is a `completed`/`end_turn` terminal. A
+   *   turn may legitimately settle `end_turn` on a closed tool pair (a final
+   *   `todo_write` with no trailing model text); the tail classifier reads
+   *   that `user` `functionResponse` as an interrupted tool-result
+   *   submission, and the ledger is the only witness that the turn settled.
+   * - **inherited**: the ledger has no record at all. Prompt admission is
+   *   the only place an `in_flight` record is written, so on a ledger-wired
+   *   runtime a session that never admitted a prompt never ran a turn: the
+   *   dangling tail was copied from the forked source session (a side task
+   *   forked mid-turn), where it is still being answered.
+   *
+   * `interrupted_prompt` additionally requires the tail to be a pure closed
+   * tool-result submission — a tail carrying a real prompt text is a
+   * genuine interrupted prompt and keeps the banner. `interrupted_turn`
+   * (a dangling model `functionCall`) is cleared only in the inherited
+   * case: with any ledger record present, a settled terminal next to a
+   * dangling call is contradictory, not inherited, so it stays classified.
+   *
+   * Accepted residual (review round 1, R1-1): self-driven turns
+   * (notification / cron / goal) write no `in_flight` record — the ledger
+   * records control-plane prompt admissions only — so a self-driven turn
+   * that crashed on a closed tool pair is indistinguishable from the
+   * settled case (its newest record is an earlier prompt's terminal) and
+   * from the inherited case (an empty ledger) alike, and is cleared too.
+   * The live-conversation runtime deliberately wires no ledger sink, so the
+   * inherited case fires there as well. Both clear only the Continue
+   * affordance for a pure tool-result tail — a pending user prompt carries
+   * text and keeps the banner.
    */
-  #isSettledClosedToolResultTail(): boolean {
-    let record: PromptLedgerRecord | undefined;
+  #isLedgerClearedInterruptedTail(plan: SessionRecoveryPlan): boolean {
+    if (this.promptLedgerRecords === undefined) return false;
+    let records: readonly PromptLedgerRecord[] | undefined;
     try {
-      record = this.lastPromptLedgerRecord?.();
+      records = this.promptLedgerRecords();
     } catch {
       return false;
     }
-    if (!record || !('terminal' in record)) return false;
-    if (record.terminal !== 'completed') return false;
-    if (record.stopReason !== undefined && record.stopReason !== 'end_turn') {
-      return false;
+    if (records === undefined) return false;
+    if (plan.kind === 'interrupted_turn') {
+      return records.length === 0;
     }
-    const plan = this.#getRecoveryPlan(false);
-    if (plan?.kind !== 'interrupted_prompt') return false;
+    if (plan.kind !== 'interrupted_prompt') return false;
+    if (!this.#isClosedToolResultTail(plan)) return false;
+    if (records.length === 0) return true;
+    const newest = records.at(-1);
+    return (
+      newest !== undefined &&
+      isPromptLedgerTerminalRecord(newest) &&
+      newest.terminal === 'completed' &&
+      newest.stopReason === 'end_turn'
+    );
+  }
+
+  /**
+   * Whether the trailing user run of an `interrupted_prompt` plan is a pure
+   * closed tool-result submission: every part is a `functionResponse` whose
+   * `functionCall` exists in the history. A tail carrying any other part (a
+   * real prompt text) is not one.
+   */
+  #isClosedToolResultTail(plan: SessionRecoveryPlan): boolean {
     const parts = plan.continuation?.parts;
     if (!parts || parts.length === 0) return false;
     const callIds = new Set<string>();
