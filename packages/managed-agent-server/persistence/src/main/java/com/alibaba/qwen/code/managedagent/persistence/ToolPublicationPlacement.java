@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
-import com.alibaba.qwen.code.runtimebroker.ResidentWorkspaceProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
@@ -30,8 +29,8 @@ final class ToolPublicationPlacement {
 
     /**
      * Whether a publication of {@code session} on this original may skip
-     * placement: a native, non-CSI, non-Resident original whose binding is
-     * either shared by the Workspace or isolated to this same Session.
+     * placement: a native original whose binding is either shared by the
+     * Workspace or isolated to this same Session.
      */
     static boolean free(JdbcTemplate jdbc, RuntimeBindingRepository bindings,
             RuntimeBindingRecord runtime, String session) {
@@ -41,10 +40,6 @@ final class ToolPublicationPlacement {
         }
         var request = runtime.getRequest();
         var scope = request.getScope();
-        if (WorkspaceCsiReservationStore.PROVISIONER_KIND.equals(request.getProvisionerKind())
-                || ResidentWorkspaceProfile.selects(scope)) {
-            return false;
-        }
         return "workspace".equals(scope.getIsolationClass())
                 || "session".equals(scope.getIsolationClass()) && session.equals(request.getIsolationKey());
     }

@@ -157,7 +157,7 @@ final class JournalLifecycleAuthorization {
         if (row.get("permission_rules_json") != null) {
             try {
                 var rules = harnessRules.nonEmptyPermissionRules(harnessRules.permissionRules(
-                        JournalStoreRows.CSI_JSON.readValue((String) row.get("permission_rules_json"), java.util.Map.class)));
+                        JournalStoreRows.JSON.readValue((String) row.get("permission_rules_json"), java.util.Map.class)));
                 if (rules != null) {
                     result.put("permissionRules", rules);
                 }

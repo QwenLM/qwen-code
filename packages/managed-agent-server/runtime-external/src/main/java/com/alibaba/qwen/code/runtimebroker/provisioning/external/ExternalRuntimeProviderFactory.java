@@ -64,7 +64,6 @@ public final class ExternalRuntimeProviderFactory implements RuntimeProviderFact
         }
         if (harness.isWorkspaceFilesEnabled() || harness.isWorkspaceShellEnabled()
                 || !runtimeBroker.getWorkspaceMounts().isEmpty()
-                || !runtimeBroker.getResidentWorkspaces().isEmpty()
                 || StringUtils.isNotBlank(runtimeBroker.getWorkspaceCreationRoot())
                 || runtimeBroker.isLocalDirectoryImportEnabled()
                 || runtimeBroker.isVerifiedWorkspaceRecoveryEnabled()

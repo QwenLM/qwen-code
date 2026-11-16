@@ -34,12 +34,6 @@
         </dependency>
         <dependency>
             <groupId>com.alibaba</groupId>
-            <artifactId>qwen-managed-agent-runtime-kubernetes</artifactId>
-            <scope>runtime</scope>
-            <optional>true</optional>
-        </dependency>
-        <dependency>
-            <groupId>com.alibaba</groupId>
             <artifactId>qwen-managed-agent-runtime-ssh</artifactId>
             <scope>runtime</scope>
             <optional>true</optional>

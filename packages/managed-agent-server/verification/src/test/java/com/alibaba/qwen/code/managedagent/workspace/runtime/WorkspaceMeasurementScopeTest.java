@@ -1,8 +1,6 @@
 package com.alibaba.qwen.code.managedagent.workspace.runtime;
 
-import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile;
-import com.alibaba.qwen.code.runtimebroker.ResidentWorkspaceProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import org.junit.jupiter.api.Test;
@@ -34,13 +32,10 @@ class WorkspaceMeasurementScopeTest {
                     scope("tenant", "workspace", "1", "/workspace", measured, isolation.equals("session") ? "workspace" : "session"))) {
                 assertThat(WorkspaceRuntimeResolver.matchesRecordedScope(changed, original)).isFalse();
             }
-            for (String unrelated : List.of(CsiFilesRetirementProfile.CAPABILITY_DIGEST,
-                    CsiFilesRetirementProfile.DIAGNOSTICS_DIGEST, ResidentWorkspaceProfile.CAPABILITY_DIGEST,
-                    ManagedExtensionExecutionProfile.LINUX_CAPABILITY_DIGEST)) {
-                var foreign = scope("tenant", "workspace", "1", "/workspace", unrelated, isolation);
-                assertThat(WorkspaceRuntimeResolver.matchesRecordedScope(next, foreign)).isFalse();
-                assertThat(WorkspaceRuntimeResolver.matchesRecordedScope(foreign, original)).isFalse();
-            }
+            var foreign = scope("tenant", "workspace", "1", "/workspace",
+                    ManagedExtensionExecutionProfile.LINUX_CAPABILITY_DIGEST, isolation);
+            assertThat(WorkspaceRuntimeResolver.matchesRecordedScope(next, foreign)).isFalse();
+            assertThat(WorkspaceRuntimeResolver.matchesRecordedScope(foreign, original)).isFalse();
         }
     }
 }

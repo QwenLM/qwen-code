@@ -194,7 +194,7 @@ Before admitting file, Shell, or child Git work, complete the native storage reg
 
 ## Tier 3: Kubernetes
 
-The [Helm chart](https://github.com/QwenLM/qwen-code/tree/main/deploy/kubernetes) installs the signed Managed Agent API and a private Hosted Harness in one Pod, with MySQL 8.4 on a persistent volume, from images you build at a reviewed source revision. Its default runs text Sessions; optional settings add trusted single-node Workspace files and a foreground Shell, and a Managed WebShell gateway. It is installed from source rather than from this archive, follows its own guide, and does not extend this distribution's acceptance scope. K2 CSI resident Workspaces are a separate deployment, described in [`deploy/k2-resident`](https://github.com/QwenLM/qwen-code/tree/main/deploy/k2-resident).
+The [Helm chart](https://github.com/QwenLM/qwen-code/tree/main/deploy/kubernetes) installs the signed Managed Agent API and a private Hosted Harness in one Pod, with MySQL 8.4 on a persistent volume, from images you build at a reviewed source revision. Its default runs text Sessions; optional settings add trusted single-node Workspace files and a foreground Shell, and a Managed WebShell gateway. It is installed from source rather than from this archive, follows its own guide, and does not extend this distribution's acceptance scope. K2 CSI resident Workspaces were a separate deployment, now removed from `managed-agent-server` and archived at [`packages/sdk-java/managed-kubernetes-archive/deploy/k2-resident`](https://github.com/QwenLM/qwen-code/tree/main/packages/sdk-java/managed-kubernetes-archive/deploy/k2-resident).
 
 ## Operate the deployment
 

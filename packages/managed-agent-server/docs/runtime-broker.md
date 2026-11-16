@@ -2,7 +2,7 @@
 
 The `contracts` module owns `com.alibaba.qwen.code.runtimebroker` values and interfaces. The `runtime-broker` module owns the framework-neutral `runtimebroker.service.RuntimeBrokerService`. JDBC and memory implementations are in the `persistence` module; providers, HTTP clients and credential encryption are in `adapters`. The `server` module composes these implementations through the contracts, hosts HTTP endpoints, and owns resource lifecycle.
 
-None of the four implementation modules depends on another implementation module. In particular the Broker consumes `NativeCsiExecutionRepository` capability rather than a concrete JDBC class. Memory repositories do not provide private CSI execution capability. Capability checks do not replace transactional admission, same-DataSource identity or generation fencing.
+None of the implementation modules depends on another implementation module. Capability checks do not replace transactional admission, same-DataSource identity or generation fencing.
 
 The service acquires operation and dispatch leases, renews them while external
 work is in flight, converges idempotent Tool execution, records cancellation
@@ -255,21 +255,6 @@ Registration, owner and idempotency receipt commit atomically. The fresh V1 sche
 adds the `EXTERNAL_STORAGE` receipt namespace; existing development catalogs must
 be recreated under the existing fresh-schema policy. There is no update,
 re-registration, retirement, mount or execution API in this increment.
-
-## Private CSI evidence components
-
-The managed-server private CSI adapter and evidence commands are described in
-[the CSI design](../../../docs/design/2026-10-01-managed-kubernetes-k2.md) and
-[the durable worker ACK design](../../../docs/design/2026-10-03-csi-durable-worker-ack.md).
-They reserve storage before creation, persist API-observed original Pod identity,
-seal dispatch and retain original publication/checkpoint/ACK evidence. Public
-Hosted CSI selection and physical holder release remain disabled. ACK success
-keeps the holder DRAINING and does not prove worker stop or NodeUnpublish.
-
-The Kubernetes HTTP client rejects responses above one MiB. ConfigMap object
-reads separately allow one MiB plus 64 KiB for the JSON envelope so the largest
-admitted base64 worker chunk fits; other object reads and request bodies keep
-their one-MiB limit.
 
 ## Trusted local recovery
 

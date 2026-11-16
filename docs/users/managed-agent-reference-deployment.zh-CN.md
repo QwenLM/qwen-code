@@ -194,7 +194,7 @@ Hosted Harness 通过它自己的环境访问同一个 Broker，既不经命令�
 
 ## 第 3 档：Kubernetes
 
-[Helm chart](https://github.com/QwenLM/qwen-code/tree/main/deploy/kubernetes) 用你在已评审源码 revision 上构建的镜像，在一个 Pod 中安装签名认证的 Managed Agent API 和私有 Hosted Harness，并在持久卷上运行 MySQL 8.4。默认支持文本 Session；可选设置可开启可信单节点的 Workspace 文件和前台 Shell，以及 Managed WebShell 网关。它从源码安装，而不是从本压缩包安装，遵循自己的说明文档，也不扩大本分发产物的验收范围。K2 CSI 常驻 Workspace 是另一种独立部署，见 [`deploy/k2-resident`](https://github.com/QwenLM/qwen-code/tree/main/deploy/k2-resident)。
+[Helm chart](https://github.com/QwenLM/qwen-code/tree/main/deploy/kubernetes) 用你在已评审源码 revision 上构建的镜像，在一个 Pod 中安装签名认证的 Managed Agent API 和私有 Hosted Harness，并在持久卷上运行 MySQL 8.4。默认支持文本 Session；可选设置可开启可信单节点的 Workspace 文件和前台 Shell，以及 Managed WebShell 网关。它从源码安装，而不是从本压缩包安装，遵循自己的说明文档，也不扩大本分发产物的验收范围。K2 CSI 常驻 Workspace 曾是另一种独立部署，现已从 `managed-agent-server` 移除并归档至 [`packages/sdk-java/managed-kubernetes-archive/deploy/k2-resident`](https://github.com/QwenLM/qwen-code/tree/main/packages/sdk-java/managed-kubernetes-archive/deploy/k2-resident)。
 
 ## 运维部署
 
