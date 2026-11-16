@@ -172,6 +172,9 @@ createServer(async (request, response) => {
 }).listen(8787, '127.0.0.1');
 ```
 
+For this IPv4-only example, keep `127.0.0.1` in the webhook URL: `localhost`
+may resolve first to IPv6 `::1`, which this receiver does not listen on.
+
 For a hosted receiver, use HTTPS and validate the optional Bearer token before
 processing the body. Return 2xx only after your application has accepted the
 message.
