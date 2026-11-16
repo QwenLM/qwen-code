@@ -122,7 +122,8 @@ final class AgentSessionPolicies {
      * its digest and the approval mode and tool profile compiled from its content (D8c-1).
      */
     record AgentPin(String revision, String digest,
-            String approvalMode, String toolProfile, boolean hooks, boolean mcp) {
+            String approvalMode, String toolProfile, boolean hooks, boolean mcp,
+            List<Map<String, Object>> skills) {
     }
 
     boolean isSshWorkspace(ContextBinding binding) {
@@ -165,19 +166,6 @@ final class AgentSessionPolicies {
                 || !definitions.pinnedContent(session).containsKey("hook_catalog"));
     }
 
-    static AgentPin selectApprovalMode(AgentPin pin, String requested, boolean supported) {
-        if (requested == null) {
-            return pin;
-        }
-        if (!availableApprovalModes(pin).contains(requested)
-                && !(supported && pin.digest() == null && "yolo".equals(requested)
-                        && WorkspaceToolProfiles.isPublicShell(pin.toolProfile()))) {
-            throw new ManagedAgentException(400, "unsupported_approval_mode",
-                    "The selected approval mode is not available for this Agent.");
-        }
-        return new AgentPin(pin.revision(), pin.digest(), requested, pin.toolProfile(), pin.hooks(), pin.mcp());
-    }
-
     // Called only for a new admission; a retry has already replayed and
     // never resolves a definition again.
     AgentPin resolveAgentPin(String tenantId, String agentId,
@@ -192,7 +180,7 @@ final class AgentSessionPolicies {
                     ? (workspaceShellEnabled ? WorkspaceToolProfiles.SHELL
                             : WorkspaceToolProfiles.FILES)
                     : null;
-            return new AgentPin(agentRevision, null, approvalMode, toolProfile, false, false);
+            return new AgentPin(agentRevision, null, approvalMode, toolProfile, false, false, List.of());
         }
         if (definitions == null) {
             throw ManagedAgentDefinitionStore.notFound();
@@ -207,7 +195,8 @@ final class AgentSessionPolicies {
         return new AgentPin(Long.toString(revision.revision()),
                 revision.digest(), compiled.approvalMode(),
                 compiled.toolProfile(), content.containsKey("hook_catalog"),
-                !AgentDefinitionExtensions.mcpServers(content.get("mcp_servers"), compiled.toolProfile()).isEmpty());
+                !AgentDefinitionExtensions.mcpServers(content.get("mcp_servers"), compiled.toolProfile()).isEmpty(),
+                AgentDefinitionExtensions.skills(content.get("skills"), true));
     }
 
     boolean hasMcpServers(SessionRecord session) {
@@ -639,6 +628,9 @@ final class AgentSessionPolicies {
         }
         if (!supported || session.agentDefinitionDigest() != null && !agentDefinitionSupported
                 || !workspaceFilesEnabled || !WorkspaceToolProfiles.supportsApprovalSelection(session)
+                || WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile())
+                        && (!ExternalWorkspaceSessionPolicies.externalFilesAllowedOrRefuse(workspaces, session.workspace())
+                                || sessionQueries.findChildLineage(tenantId, sessionId) != null)
                 || WorkspaceToolProfiles.isPublicShell(session.toolProfile()) && !workspaceShellEnabled) {
             throw new ManagedAgentException(409, "unsupported_feature", "Approval selection is unavailable");
         }
@@ -695,6 +687,22 @@ final class AgentSessionPolicies {
     void requirePublicChildImmutable(SessionRecord session) {
         if (session.publicChildAgentsVersion() == 1 && sessionQueries.findChildLineage(session.tenantId(), session.sessionId()) != null) {
             throw new ManagedAgentException(409, "unsupported_feature", "Public child Sessions cannot change their delegated execution");
+        }
+    }
+
+    void requireExternalTurnAllowed(String tenantId, String actorId, String sessionId,
+            SessionRecord session, List<Map<String, Object>> input) {
+        if (!WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile())
+                || !ExternalWorkspaceSessionPolicies.externalFilesAllowedOrRefuse(workspaces, session.workspace())
+                || !workspaces.accessOf(tenantId, actorId, session.workspace().getWorkspaceId()).canCreate()
+                || !"qwen-code".equals(session.agentId()) || session.agentDefinitionDigest() != null
+                || sessionQueries.findChildLineage(tenantId, sessionId) != null || session.publicChildAgentsVersion() != 0
+                || hasMcpServers(session) || !creationSkills.effective(session).isEmpty()
+                || creationSkills.initialSelection(tenantId, sessionId) != null
+                || Boolean.TRUE.equals(jdbc.queryForObject("SELECT is_plan_enabled FROM ma_session WHERE tenant_id=? AND session_id=?",
+                        Boolean.class, tenantId, sessionId))
+                || input.stream().anyMatch(block -> !Set.of("input_text", "text").contains(block.get("type")))) {
+            throw workspaceExecutionUnavailable();
         }
     }
 

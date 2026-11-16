@@ -2,7 +2,7 @@
 
 [English](2026-10-23-unified-agent-loop.md) | [简体中文](2026-10-23-unified-agent-loop.zh-CN.md)
 
-- **状态**：已在 #15343 中通过。headless（PR 1，#15369）、ACP（PR 2，#15509–#16190）、Ink TUI（PR 3，#16206–#16704）与 OpenTUI（PR 4，#16743–#16820）的迁移均已合入；各 surface 的默认开启等待 nightly 统一 loop E2E 门控（#16192）。PR 5（AgentCore）正在进行：5a（#16880）和 5b（#17035）已合入。其余步骤在 #17045 中跟踪。PR 6a（speculation 的模型轮，#17029）已合入。
+- **状态**：已在 #15343 中通过。headless（PR 1，#15369）、ACP（PR 2，#15509–#16190）、Ink TUI（PR 3，#16206–#16704）与 OpenTUI（PR 4，#16743–#16820）的迁移均已合入；各 surface 的默认开启按[迁移计划](#迁移计划)中的阶梯进行，headless 是第一个。PR 5（AgentCore）正在进行：5a（#16880）和 5b（#17035）已合入。其余步骤在 #17045 中跟踪。PR 6a（speculation 的模型轮，#17029）已合入。
 - **日期**：2026-10-23，基于 upstream `779a4d5d0d`。
 - **相关**：
   - 跟踪 issue #15327，以及剩余步骤、灰度和能力台账的跟踪 issue #17045；
@@ -204,7 +204,7 @@ ACP 只传入一个策略：Todo Stop Guard。当前轮次的后台结果和中�
 
 ### 设置
 
-`experimental.unifiedAgentLoop` 是布尔值，默认 `false`，重启后生效。`QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` 环境变量按入口覆盖它：`1` 强制所有入口开启，`0` 强制所有入口关闭，逗号分隔的列表（如 `headless,acp=0`）强制指定入口。这便于 CI 和脚本在共享 loop 下运行测试，也让操作者能把某个入口强制关回。它在 `experimental.agentTeam` / `QWEN_CODE_ENABLE_AGENT_TEAM` 只强制开启的写法之上，增加了强制关闭与按入口控制；新增 loop 开关应沿用此文法，而非 agentTeam 的写法。
+`experimental.unifiedAgentLoop` 是布尔值，没有固定的默认值，重启后生效：未设置时，每个入口使用自己的内置默认值。`QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` 环境变量按入口覆盖它：`1` 强制所有入口开启，`0` 强制所有入口关闭，逗号分隔的列表（如 `headless,acp=0`）强制指定入口。这便于 CI 和脚本在共享 loop 下运行测试，也让操作者能把某个入口强制关回。它在 `experimental.agentTeam` / `QWEN_CODE_ENABLE_AGENT_TEAM` 只强制开启的写法之上，增加了强制关闭与按入口控制；新增 loop 开关应沿用此文法，而非 agentTeam 的写法。
 
 由 `Config.isUnifiedAgentLoopEnabled(surface)` 暴露该设置。每个入口在其 loop 的启动处读取它并写明自己的入口（`headless`、`acp`、`ink`、`opentui`、`agent-core`、`speculation`、`hosted`）：
 
@@ -217,7 +217,7 @@ if (config.isUnifiedAgentLoopEnabled('headless')) {
 
 现有 loop 作为 `else` 分支保留，在该设置存在期间不做重构。尚未迁移的入口忽略这个设置，设置的说明会列出它覆盖的入口。`qwen serve` 启动的 ACP 子进程读取同一份设置，所以对已迁移的 ACP 轮次，daemon 和 Web Shell 也会遵循这个设置。从 PR 2a 起，Web Shell 设置面板会列出这个设置。
 
-按入口解析已在 #17045（B 块）落地：环境变量指向该入口时优先，否则用被设置的显式设置，再否则用该入口的内置默认值（今天所有入口都是 `false`）。设置在运行时是三态——未设置与显式关闭不同——而 schema 保留 `default: false` 直到第一个入口默认值翻转。解析规则与灰度阶梯见 `2026-11-12-loop-rollout-switches.md`。
+按入口解析已在 #17045（B 块）落地：环境变量指向该入口时优先，否则用被设置的显式设置，再否则用该入口的内置默认值（headless 和 Ink TUI 是 `true`，其他入口都是 `false`）。设置在运行时是三态——未设置与显式关闭不同——headless 的默认值翻转后，schema 不再有默认值；设置对话框对未设置值的第一次切换写入 `true`。解析规则与灰度阶梯见 `2026-11-12-loop-rollout-switches.md`。
 
 ### Headless 迁到共享 loop（PR 1）
 
@@ -581,10 +581,11 @@ speculation 的 `runSpeculativeLoop`（`speculation.ts`）在用户确认前，�
 | 5c    | AgentCore：每一轮及其工具批在一次 `runAgentLoop` 调用中运行，内核开启时跑在事件总线内核上                 |
 | 5d    | AgentCore：默认开启，然后移除现有 loop                                                                    |
 | 6a    | speculation：每一模型轮走 loop 的模型轮，在 forked chat 的 `Turn` 上；speculation 保留其工具门与直接执行  |
-| 6b    | speculation：默认开启，然后删除其现有模型轮                                                               |
+| 6b    | speculation：工具步决策——保留自有工具步；见 [PR 6b 决策](2026-11-15-speculation-tool-step.zh-CN.md)       |
+| 6c    | speculation：默认开启，然后删除其现有模型轮                                                               |
 | —     | Hosted Harness：单独评估——见[迁移评估](2026-11-14-hosted-harness-loop-evaluation.md)                      |
 
-PR 6b 是 speculation 的默认开启与删除步骤。
+PR 6b 是 speculation 的工具步决策（保留自有工具步）；PR 6c 是其默认开启与删除步骤。
 
 一个入口分五步迁移，由 #17045 跟踪：
 
@@ -799,6 +800,8 @@ PR 6b 是 speculation 的默认开启与删除步骤。
 | 在 `turn.ts` 之外解析流式 chunk 的 loop      | 3                                         | 0    |
 | 调用 `finalizeToolResponses` 的 loop         | 6                                         | 1    |
 | 会话轮数上限的算法                           | 3                                         | 1    |
+
+这些目标假设全部入口完全迁移。保留自有的决策会留下特化副本：speculation 保留其投机循环与自己的 `finalizeToolResponses` 调用（`speculation.ts:607`；见 [PR 6b 决策](2026-11-15-speculation-tool-step.zh-CN.md)），Hosted Harness 保留其 journal 化循环与工具步（见[迁移评估](2026-11-14-hosted-harness-loop-evaluation.zh-CN.md)）。因此「agent loop 实现数」与「调用 `finalizeToolResponses` 的 loop」最终为共享实现加上这些决策保留的副本（speculation 的 finalizer 与共享批在 `agent-loop.ts:715` 的调用并存）；确切数字由 follow-up #17284 调和。
 
 ## 待定问题
 

@@ -770,8 +770,8 @@ importers:
         specifier: ^1.2.9
         version: 1.2.9
       diff:
-        specifier: ^7.0.0
-        version: 7.0.0
+        specifier: ^8.0.3
+        version: 8.0.3
       dotenv:
         specifier: ^17.1.0
         version: 17.4.2
@@ -920,9 +920,6 @@ importers:
       '@types/command-exists':
         specifier: ^1.2.3
         version: 1.2.3
-      '@types/diff':
-        specifier: ^7.0.2
-        version: 7.0.2
       '@types/dotenv':
         specifier: ^6.1.1
         version: 6.1.1
@@ -1120,8 +1117,8 @@ importers:
         specifier: ^4.0.3
         version: 4.0.3
       diff:
-        specifier: ^7.0.0
-        version: 7.0.0
+        specifier: ^8.0.3
+        version: 8.0.3
       dotenv:
         specifier: ^17.1.0
         version: 17.4.2
@@ -1210,8 +1207,8 @@ importers:
         specifier: 7.30.2
         version: 7.30.2
       uuid:
-        specifier: ^9.0.1
-        version: 9.0.1
+        specifier: ^11.1.1
+        version: 11.1.1
       web-tree-sitter:
         specifier: ^0.24.7
         version: 0.24.7
@@ -1231,9 +1228,6 @@ importers:
       '@qwen-code/browser-use':
         specifier: workspace:*
         version: link:../browser-use
-      '@types/diff':
-        specifier: ^7.0.2
-        version: 7.0.2
       '@types/dotenv':
         specifier: ^6.1.1
         version: 6.1.1
@@ -5098,9 +5092,6 @@ packages:
   '@types/deep-eql@4.0.2':
     resolution: {integrity: sha512-c9h9dVVMigMPc4bwTvC5dxqtqJZwQPePsWjPlpSOnojbor6pGqdk541lfA7AqFQr5pB1BRdq0juY9db81BwyFw==}
 
-  '@types/diff@7.0.2':
-    resolution: {integrity: sha512-JSWRMozjFKsGlEjiiKajUjIJVKuKdE3oVy2DNtK+fUo8q82nhFZ2CPQwicAIkXrofahDXrWJ7mjelvZphMS98Q==}
-
   '@types/dotenv@6.1.1':
     resolution: {integrity: sha512-ftQl3DtBvqHl9L16tpqqzA4YzCSXZfi7g8cQceTz5rOlYtk/IZbFjAv3mLOQlNIgOaylCQWQoBdDQHPgEBJPHg==}
 
@@ -6760,10 +6751,6 @@ packages:
   diff-sequences@29.6.3:
     resolution: {integrity: sha512-EjePK1srD3P08o2j4f0ExnylqRs5B9tJjcp9t1krH2qRi8CCdsYfwe9JgSLurFBWwq4uOlipzfk5fHNvwFKr8Q==}
     engines: {node: ^14.15.0 || ^16.10.0 || >=18.0.0}
-
-  diff@7.0.0:
-    resolution: {integrity: sha512-PJWHUb1RFevKCwaFA9RlG5tCd+FO5iRh9A8HEtkmBH2Li03iJriB6m6JIN4rGz3K3JLawI7/veA1xzRKP6ISBw==}
-    engines: {node: '>=0.3.1'}
 
   diff@8.0.3:
     resolution: {integrity: sha512-qejHi7bcSD4hQAZE0tNAawRK1ZtafHDmMTMkrrIGgSLl7hTnQHmKCeB45xAcbfTqK2zowkM3j3bHt/4b/ARbYQ==}
@@ -11003,11 +10990,6 @@ packages:
     resolution: {integrity: sha512-Qo+uWgilfSmAhXCMav1uYFynlQO7fMFiMVZsQqZRMIXp0O7rR7qjkj+cPvBHLgBqi960QCoo/PH2/6ZtVqKvrg==}
     hasBin: true
 
-  uuid@9.0.1:
-    resolution: {integrity: sha512-b+1eJOlsR9K8HJpow9Ok3fiWOWSIcIzXodvv0rQjVoOVNpWMpxf1wZNpt4y9h10odCNrqnYp1OBzRktckBe3sA==}
-    deprecated: uuid@10 and below is no longer supported.  For ESM codebases, update to uuid@latest.  For CommonJS codebases, use uuid@11 (but be aware this version will likely be deprecated in 2028).
-    hasBin: true
-
   v8-to-istanbul@9.3.0:
     resolution: {integrity: sha512-kiGUalWN+rgBJ/1OHZsBtU4rXZOfj/7rKQxULKlIzwzQSvMJUUNgPwJEEh7gU6xEVxC0ahoOBvN2YI8GH6FNgA==}
     engines: {node: '>=10.12.0'}
@@ -14761,8 +14743,6 @@ snapshots:
 
   '@types/deep-eql@4.0.2': {}
 
-  '@types/diff@7.0.2': {}
-
   '@types/dotenv@6.1.1':
     dependencies:
       '@types/node': 22.20.1
@@ -16858,8 +16838,6 @@ snapshots:
   didyoumean@1.2.2: {}
 
   diff-sequences@29.6.3: {}
-
-  diff@7.0.0: {}
 
   diff@8.0.3: {}
 
@@ -22229,8 +22207,6 @@ snapshots:
   uuid@11.1.1: {}
 
   uuid@14.0.0: {}
-
-  uuid@9.0.1: {}
 
   v8-to-istanbul@9.3.0:
     dependencies:
