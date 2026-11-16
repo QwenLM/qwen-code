@@ -62,8 +62,11 @@ function isUserMessageInput(
   );
 }
 
-function paidConfirmationMessage(): string {
-  return getPaidConfirmationMessage(getI18nService()?.locale ?? 'en');
+function paidConfirmationMessage(code?: string | number): string {
+  return getPaidConfirmationMessage(
+    getI18nService()?.locale ?? 'en',
+    code,
+  );
 }
 
 export interface QoderInferenceApiOptions {
@@ -270,7 +273,7 @@ function paidConfirmationError(
   const isNewCode = isNewPaidConfirmationCode(parsed.code);
   const modelKey = parsed.modelKey ?? fallbackModelKey;
   return new QoderInferenceError(
-    isNewCode ? paidConfirmationMessage() : PAID_CONFIRMATION_OLD_MESSAGE,
+    isNewCode ? paidConfirmationMessage(parsed.code) : PAID_CONFIRMATION_OLD_MESSAGE,
     {
       status,
       ...(parsed.code ? { code: parsed.code } : {}),
@@ -295,7 +298,7 @@ async function toInferenceError(
   const paidConfirmation =
     parsed?.subCode === 'MODEL_PAID_CONFIRM_REQUIRED'
       ? isNewPaidConfirmationCode(parsed.code)
-        ? paidConfirmationMessage()
+        ? paidConfirmationMessage(parsed.code)
         : PAID_CONFIRMATION_OLD_MESSAGE
       : undefined;
   const detail = paidConfirmation
