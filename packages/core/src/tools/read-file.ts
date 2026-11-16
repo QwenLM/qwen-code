@@ -248,14 +248,14 @@ class ReadFileToolInvocation extends BaseToolInvocation<
       cache.getClearGeneration() === cacheGeneration
     ) {
       const status = cache.check(stats);
-      const entry = status.entry;
       if (
         status.state === 'fresh' &&
-        entry.lastReadAt !== undefined &&
-        entry.lastReadCacheable &&
-        (entry.lastWriteAt === undefined ||
-          entry.lastReadAt > entry.lastWriteAt)
+        status.entry.lastReadAt !== undefined &&
+        status.entry.lastReadCacheable &&
+        (status.entry.lastWriteAt === undefined ||
+          status.entry.lastReadAt > status.entry.lastWriteAt)
       ) {
+        const entry = status.entry;
         const requestRange: FileReadRange = isFullRead
           ? 'full'
           : {

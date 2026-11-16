@@ -9,7 +9,11 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Stats } from 'node:fs';
-import { FileReadCache, type FileReadEntry } from './fileReadCache.js';
+import {
+  FileReadCache,
+  type FileReadEntry,
+  type FileReadRecordOpts,
+} from './fileReadCache.js';
 
 /**
  * Build a Stats-shaped object with the fields the cache actually reads.
@@ -44,7 +48,7 @@ describe('FileReadCache', () => {
   const read = (
     absPath: string,
     stats: Stats,
-    opts = { full: true, cacheable: true },
+    opts: FileReadRecordOpts = { full: true, cacheable: true },
   ) => cache.recordRead(absPath, stats, opts);
   // Full reads of `/x/<prefix>-<i>.ts` at ino i for i in [from, to].
   const readRange = (prefix: string, from: number, to: number) => {
