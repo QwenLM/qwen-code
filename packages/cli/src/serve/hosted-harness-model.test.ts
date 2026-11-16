@@ -15,12 +15,14 @@ import {
   type LlmPreparedRequest,
   type LlmPreparedRequestCallback,
 } from '@qwen-code/qwen-code-core/core/llm-chat.js';
+import * as agentLoop from '@qwen-code/qwen-code-core/core/agent-loop.js';
 import { createHash } from 'node:crypto';
 import * as classifier from '@qwen-code/qwen-code-core/permissions/classifier.js';
 import { getRuntimeContentGenerator } from '@qwen-code/qwen-code-core/agents/runtime/agent-context.js';
 import { AuthType } from '@qwen-code/qwen-code-core/core/contentGenerator.js';
 import { TurnBudget } from '@qwen-code/qwen-code-core/core/turn-budget.js';
 import type { Content, Part } from '@google/genai';
+import { getApiHistoryPromptId } from '@qwen-code/qwen-code-core/utils/api-history-metadata.js';
 import type { ConfigInitializeOptions } from '@qwen-code/qwen-code-core/config/config.js';
 import {
   HookEventName,
@@ -137,6 +139,7 @@ function config(
     }),
     getModel: () => 'test-model',
     getMaxSessionTurns: () => -1,
+    isUnifiedAgentLoopEnabled: () => false,
     getContentGeneratorConfig: () => undefined,
     getEffectiveInputModalities: () => ({ image: false }),
     setUserMemory,
@@ -1549,6 +1552,17 @@ describe('Hosted Harness model boundary', () => {
     const model = config([{ type: LlmEventType.Finished }]);
     const history: ChatRecord[] = [
       {
+        uuid: 'cancelled-source',
+        parentUuid: null,
+        sessionId: input.sessionId,
+        timestamp: '2026-10-22T00:00:00.000Z',
+        cwd: input.cwd,
+        version: 'hosted-harness/1',
+        type: 'user',
+        daemonPromptId: 'cancelled-prompt',
+        message: { role: 'user', parts: [{ text: 'cancelled secret' }] },
+      },
+      {
         uuid: 'compaction',
         parentUuid: null,
         sessionId: input.sessionId,
@@ -1569,7 +1583,7 @@ describe('Hosted Harness model boundary', () => {
             { role: 'user', parts: [{ text: 'cancelled secret' }] },
             { role: 'model', parts: [{ text: 'partial answer' }] },
           ],
-          promptIds: [null, null, 'cancelled-prompt', null],
+          promptIds: [null, null, 'legacy-record:cancelled-source', null],
           summaryPrefixLength: 2,
         },
       },
@@ -1585,8 +1599,129 @@ describe('Hosted Harness model boundary', () => {
   });
 
   it.each([false, true])(
-    'preserves compression around a recovered tool round without duplicating its pending response (current snapshot=%s)',
-    async (currentSnapshot) => {
+    'excludes cancelled compressed tools and guidance through the next prompt (guidance marked=%s)',
+    async (marked) => {
+      const model = config([{ type: LlmEventType.Finished }]);
+      const hooks = hostedHooks();
+      const prefix: Content[] = [
+        { role: 'user', parts: [{ text: 'compressed summary' }] },
+        { role: 'model', parts: [{ text: 'Understood.' }] },
+      ];
+      const kept: Content[] = [
+        { role: 'user', parts: [{ text: 'next request' }] },
+        { role: 'model', parts: [{ text: 'next answer' }] },
+      ];
+      const history: ChatRecord[] = [
+        ...[
+          ['cancelled-source', 'cancelled-prompt', 'cancelled instruction'],
+          ['guidance-source', 'cancelled-prompt', 'cancelled queued guidance'],
+          ['next-source', 'next-prompt', 'next request'],
+        ].map(([uuid, daemonPromptId, text]) => ({
+          uuid: uuid!,
+          parentUuid: null,
+          sessionId: input.sessionId,
+          timestamp: '2026-10-30T00:00:00.000Z',
+          cwd: input.cwd,
+          version: 'hosted-harness/1',
+          type: 'user' as const,
+          daemonPromptId,
+          message: { role: 'user', parts: [{ text }] },
+        })),
+        {
+          uuid: 'compression-with-cancelled-tools',
+          parentUuid: null,
+          sessionId: input.sessionId,
+          timestamp: '2026-10-30T00:00:00.000Z',
+          cwd: input.cwd,
+          version: 'test',
+          type: 'system',
+          subtype: 'chat_compression',
+          systemPayload: {
+            info: {
+              compressionStatus: CompressionStatus.COMPRESSED,
+              originalTokenCount: 100,
+              newTokenCount: 10,
+            },
+            compressedHistory: [
+              ...prefix,
+              { role: 'user', parts: [{ text: 'cancelled instruction' }] },
+              {
+                role: 'model',
+                parts: [
+                  { text: 'cancelled partial answer' },
+                  { functionCall: { id: 'cancelled-call', name: 'agent' } },
+                ],
+              },
+              {
+                role: 'user',
+                parts: [
+                  {
+                    functionResponse: {
+                      id: 'cancelled-call',
+                      name: 'agent',
+                      response: { output: 'cancelled result' },
+                    },
+                  },
+                ],
+              },
+              { role: 'user', parts: [{ text: 'cancelled queued guidance' }] },
+              {
+                role: 'model',
+                parts: [{ text: 'cancelled continued answer' }],
+              },
+              ...kept,
+            ],
+            promptIds: [
+              null,
+              null,
+              'legacy-record:cancelled-source',
+              null,
+              null,
+              marked ? 'legacy-record:guidance-source' : null,
+              null,
+              'legacy-record:next-source',
+              null,
+            ],
+            summaryPrefixLength: prefix.length,
+          },
+        },
+      ];
+      const original = structuredClone(history);
+      await runHostedHarnessTextTurn({
+        ...input,
+        history,
+        excludedPromptIds: new Set(['cancelled-prompt']),
+        hooks: hooks.session,
+        toolTurn: {
+          declarations: async () => [],
+          execute: async () => [],
+          consumeResults: async () => undefined,
+          setPromptHookRunner: () => undefined,
+        },
+      });
+      expect(structuredClone(model.setHistory.mock.calls[0]![0])).toEqual([
+        ...prefix,
+        ...kept,
+      ]);
+      const start = hooks.fire.mock.calls.find(
+        ([event]) => event === HookEventName.SessionStart,
+      );
+      expect(start?.[2]['messages']).toEqual([
+        ...prefix,
+        ...kept,
+        { role: 'user', parts: [{ text: input.prompt }] },
+      ]);
+      expect(history).toEqual(original);
+    },
+  );
+
+  it.each([
+    { currentSnapshot: false, retainedOperation: false },
+    { currentSnapshot: true, retainedOperation: false },
+    { currentSnapshot: true, retainedOperation: true },
+  ])(
+    'preserves compression around a recovered tool round without duplicating its pending response (%j)',
+    async ({ currentSnapshot, retainedOperation }) => {
       const model = config([{ type: LlmEventType.Finished }]);
       state.config['getEffectiveInputModalities'] = () => ({ image: true });
       const response: Part = {
@@ -1662,7 +1797,15 @@ describe('Hosted Harness model boundary', () => {
                 },
               ]
             : prefix,
-          summaryPrefixLength: prefix.length,
+          promptIds: [
+            ...prefix.map((_, index) =>
+              retainedOperation && index === prefix.length - 1
+                ? 'retained-owner'
+                : null,
+            ),
+            ...(currentSnapshot ? ['pending-owner'] : []),
+          ],
+          summaryPrefixLength: prefix.length - (retainedOperation ? 1 : 0),
           completedToolCallIds: ['old-call'],
         },
       };
@@ -1672,13 +1815,25 @@ describe('Hosted Harness model boundary', () => {
         ...input,
         history,
         resumeFromToolResults: [response],
+        toolTurn: {
+          execute: vi.fn(),
+          consumeResults: vi.fn(),
+          declarations: vi.fn().mockResolvedValue([]),
+        },
       });
       const restored = model.setHistory.mock.calls[0]![0] as Content[];
-      expect(restored).toEqual(
-        currentSnapshot ? prefix : [...prefix, call.message],
+      expect(JSON.stringify(restored)).toBe(
+        JSON.stringify(currentSnapshot ? prefix : [...prefix, call.message]),
       );
       expect(JSON.stringify(restored)).not.toContain(
         '"functionResponse":{"id":"current-call"',
+      );
+      expect(restored.map(getApiHistoryPromptId)).toEqual(
+        restored.map((_, index) =>
+          retainedOperation && index === prefix.length - 1
+            ? 'retained-owner'
+            : undefined,
+        ),
       );
       expect(model.requests[0]).toEqual([response]);
       expect(history).toEqual(original);
@@ -3072,6 +3227,7 @@ describe('Hosted Harness resume and retraction', () => {
       }),
       getModel: () => 'test-model',
       getMaxSessionTurns: () => -1,
+      isUnifiedAgentLoopEnabled: () => false,
       getContentGeneratorConfig: () => undefined,
       setUserMemory: vi.fn(),
       setPromptToolSnapshot: vi.fn(),
@@ -3682,5 +3838,168 @@ describe('createHostedLoopFireClassifier', () => {
     const verdict = await classifyFire(fireInput);
     expect(verdict.allowed).toBe(false);
     expect(verdict.unavailable).toBe(true);
+  });
+});
+
+describe('Hosted model-round-only migration parity (#17248)', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('runs the shared round with the setting on and matches the legacy text round', async () => {
+    const events = [
+      { type: LlmEventType.Content, value: 'hello ' },
+      { type: LlmEventType.Content, value: 'world' },
+      { type: LlmEventType.Finished },
+    ];
+    const off = config(events);
+    const offSpy = vi.spyOn(agentLoop, 'runModelRound');
+    const offResult = await runHostedHarnessTextTurn(input);
+    expect(offSpy).not.toHaveBeenCalled();
+    offSpy.mockRestore();
+
+    const on = config(events);
+    const flag = vi.fn(() => true);
+    state.config['isUnifiedAgentLoopEnabled'] = flag;
+    const onSpy = vi.spyOn(agentLoop, 'runModelRound');
+    const onResult = await runHostedHarnessTextTurn(input);
+    expect(onSpy).toHaveBeenCalledTimes(1);
+    expect(flag).toHaveBeenCalledWith('hosted');
+    onSpy.mockRestore();
+
+    expect(offResult.text).toBe('hello world');
+    expect(onResult.text).toBe(offResult.text);
+    expect(on.requests).toEqual(off.requests);
+    expect(on.sendOptions).toEqual(off.sendOptions);
+  });
+
+  it('retracts the abandoned prefix on a non-continuation retry, as the legacy path', async () => {
+    const events = [
+      { type: LlmEventType.Content, value: 'orphan' },
+      { type: LlmEventType.Retry },
+      { type: LlmEventType.Content, value: 'final' },
+      { type: LlmEventType.Finished },
+    ];
+    const off = config(events);
+    const offResult = await runHostedHarnessTextTurn(input);
+    const on = config(events);
+    const flag = vi.fn(() => true);
+    state.config['isUnifiedAgentLoopEnabled'] = flag;
+    const onSpy = vi.spyOn(agentLoop, 'runModelRound');
+    const onResult = await runHostedHarnessTextTurn(input);
+    expect(onSpy).toHaveBeenCalledTimes(1);
+    expect(flag).toHaveBeenCalledWith('hosted');
+    onSpy.mockRestore();
+    expect(offResult.text).toBe('final');
+    expect(onResult.text).toBe(offResult.text);
+    expect(on.requests).toEqual(off.requests);
+  });
+
+  it('keeps the published prefix on a continuation retry, as the legacy path', async () => {
+    const events = [
+      { type: LlmEventType.Content, value: 'keep' },
+      { type: LlmEventType.Retry, isContinuation: true },
+      { type: LlmEventType.Content, value: ' more' },
+      { type: LlmEventType.Finished },
+    ];
+    const off = config(events);
+    const offResult = await runHostedHarnessTextTurn(input);
+    const on = config(events);
+    const flag = vi.fn(() => true);
+    state.config['isUnifiedAgentLoopEnabled'] = flag;
+    const onSpy = vi.spyOn(agentLoop, 'runModelRound');
+    const onResult = await runHostedHarnessTextTurn(input);
+    expect(onSpy).toHaveBeenCalledTimes(1);
+    expect(flag).toHaveBeenCalledWith('hosted');
+    onSpy.mockRestore();
+    expect(offResult.text).toBe('keep more');
+    expect(onResult.text).toBe(offResult.text);
+    expect(on.requests).toEqual(off.requests);
+  });
+
+  it('observes the durable-feed retraction on a non-continuation retry, as the legacy path', async () => {
+    const events = [
+      { type: LlmEventType.Content, value: 'orphan' },
+      { type: LlmEventType.Retry },
+      { type: LlmEventType.Content, value: 'final' },
+      { type: LlmEventType.Finished },
+    ];
+    const offDeltas = {
+      delta: vi.fn(),
+      retract: vi.fn(async () => undefined),
+    };
+    config(events);
+    const offResult = await runHostedHarnessTextTurn({
+      ...input,
+      textDeltas: offDeltas,
+    });
+    const onDeltas = {
+      delta: vi.fn(),
+      retract: vi.fn(async () => undefined),
+    };
+    config(events);
+    const flag = vi.fn(() => true);
+    state.config['isUnifiedAgentLoopEnabled'] = flag;
+    const onSpy = vi.spyOn(agentLoop, 'runModelRound');
+    const onResult = await runHostedHarnessTextTurn({
+      ...input,
+      textDeltas: onDeltas,
+    });
+    expect(onSpy).toHaveBeenCalledTimes(1);
+    expect(flag).toHaveBeenCalledWith('hosted');
+    onSpy.mockRestore();
+    expect(offResult.text).toBe('final');
+    expect(onResult.text).toBe(offResult.text);
+    expect(offDeltas.retract).toHaveBeenCalledTimes(1);
+    expect(onDeltas.retract).toHaveBeenCalledTimes(1);
+    expect(onDeltas.delta.mock.calls).toEqual(offDeltas.delta.mock.calls);
+  });
+
+  it('runs a prepared-recovery resume through the shared round, as the legacy path', async () => {
+    const prepared = {
+      request: { model: 'saved-model', config: {}, contents: [] },
+    } as unknown as LlmPreparedRequest;
+    const resumeModel = { round: 0, prepared } as HostedModelRequest;
+    const replay = vi
+      .spyOn(Turn.prototype, 'run')
+      .mockImplementation(async function* () {
+        yield { type: LlmEventType.Content, value: 'recovered' };
+        yield {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: undefined },
+        };
+      });
+    try {
+      config([]);
+      const offResult = await runHostedHarnessTextTurn({
+        ...input,
+        resumeModel,
+      });
+      const offReplayCalls = replay.mock.calls.length;
+
+      config([]);
+      const flag = vi.fn(() => true);
+      state.config['isUnifiedAgentLoopEnabled'] = flag;
+      const onSpy = vi.spyOn(agentLoop, 'runModelRound');
+      const onResult = await runHostedHarnessTextTurn({
+        ...input,
+        resumeModel,
+      });
+      expect(onSpy).toHaveBeenCalledTimes(1);
+      expect(flag).toHaveBeenCalledWith('hosted');
+      onSpy.mockRestore();
+
+      expect(offResult.text).toBe('recovered');
+      expect(onResult.text).toBe(offResult.text);
+      expect(replay.mock.calls.length).toBe(offReplayCalls * 2);
+      // Both arms must replay the persisted prepared request, not build a fresh
+      // one: same model, empty contents, the turn signal, and the saved request
+      // as the fourth argument. Dropping or substituting it turns these red.
+      expect(replay.mock.calls[1]).toEqual(replay.mock.calls[0]);
+      expect(replay.mock.calls[0][0]).toBe('saved-model');
+      expect(replay.mock.calls[0][1]).toEqual([]);
+      expect(replay.mock.calls[0][2]).toBe(input.signal);
+      expect(replay.mock.calls[0][3]).toBe(prepared);
+    } finally {
+      replay.mockRestore();
+    }
   });
 });

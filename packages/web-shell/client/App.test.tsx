@@ -953,6 +953,7 @@ const {
       latestModelPicker: undefined as WebShellModelPickerOptions | undefined,
       onChatEditorLayout: null as ((props: ChatEditorTestProps) => void) | null,
       latestToastHostElevated: false,
+      toastRequestScopes: [] as Array<{ message: string; scope: unknown }>,
       latestTaskChipsTasks: null as
         | readonly DaemonSessionTaskWithWorkflowStatus[]
         | null,
@@ -1143,8 +1144,11 @@ const {
         onOpenSession?: (sessionId: string, workspaceCwd?: string) => void;
       } | null,
       latestGoalsProps: null as {
-        onCreateGoal?: (condition: string) => Promise<void>;
-        onOpenSession?: (sessionId: string) => void;
+        onCreateGoal?: (
+          condition: string,
+          workspaceCwd?: string,
+        ) => boolean | void | Promise<boolean | void>;
+        onOpenSession?: (sessionId: string, workspaceCwd?: string) => void;
       } | null,
       latestWorkflowRunsProps: null as {
         onCreateViaChat?: () => void;
@@ -2431,6 +2435,13 @@ vi.doMock('./components/ToastHost', async () => {
   );
   return {
     ...actual,
+    // Record the dispatch scope: a window listener cannot tell a scoped
+    // dispatch from an unscoped one (bubbling delivers both), so the
+    // mount-placement test asserts the third argument directly.
+    requestToast: (...args: [string, string, unknown?]) => {
+      testState.toastRequestScopes.push({ message: args[1], scope: args[2] });
+      return (actual.requestToast as (...a: unknown[]) => void)(...args);
+    },
     ToastHost: (props: { elevated?: boolean }) => {
       testState.latestToastHostElevated = props.elevated ?? false;
       return React.createElement('div');
@@ -2883,8 +2894,11 @@ vi.doMock('./components/dialogs/GoalsDialog', async () => {
   const React = await import('react');
   return {
     GoalsDialog: (props: {
-      onCreateGoal?: (condition: string) => Promise<void>;
-      onOpenSession?: (sessionId: string) => void;
+      onCreateGoal?: (
+        condition: string,
+        workspaceCwd?: string,
+      ) => boolean | void | Promise<boolean | void>;
+      onOpenSession?: (sessionId: string, workspaceCwd?: string) => void;
     }) => {
       testState.latestGoalsProps = props;
       return React.createElement('div');
@@ -12894,6 +12908,7 @@ beforeEach(() => {
   testState.latestModelPicker = undefined;
   testState.onChatEditorLayout = null;
   testState.latestToastHostElevated = false;
+  testState.toastRequestScopes = [];
   testState.latestTaskChipsTasks = null;
   testState.latestTaskChipsIncludeAgents = null;
   testState.latestTaskChipsOnSelectTask = null;
@@ -19600,6 +19615,53 @@ describe('App session callbacks', () => {
       );
       expect(stored['draft\0/tmp/other']?.tabs).toContainEqual(
         expect.objectContaining({ kind: 'files', workspaceCwd: '/tmp/other' }),
+      );
+    });
+
+    it('opens a terminal tab when crypto.randomUUID is unavailable (non-secure context)', async () => {
+      setupDraft();
+      mockConnection.capabilities.features = ['web_terminal'];
+      testState.captureArtifactPanelOnly = true;
+      const { container } = renderApp({
+        rightPanel: { items: ['files', 'terminal'] },
+      });
+      await flush();
+      act(() =>
+        container
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Toggle right panel"]',
+          )
+          ?.click(),
+      );
+      // Plain-HTTP remote origins are not secure contexts: randomUUID is
+      // simply not exposed there, and opening a tab must still work.
+      const cryptoObject = globalThis.crypto;
+      const descriptor = Object.getOwnPropertyDescriptor(
+        cryptoObject,
+        'randomUUID',
+      );
+      Object.defineProperty(cryptoObject, 'randomUUID', {
+        value: undefined,
+        configurable: true,
+      });
+      try {
+        expect(typeof cryptoObject.randomUUID).toBe('undefined');
+        act(() => testState.latestArtifactPanelProps?.onOpenTerminal?.());
+        await flush();
+      } finally {
+        if (descriptor) {
+          Object.defineProperty(cryptoObject, 'randomUUID', descriptor);
+        } else {
+          delete (cryptoObject as { randomUUID?: unknown }).randomUUID;
+        }
+      }
+      expect(testState.latestArtifactPanelProps?.tabs).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: 'terminal',
+            id: expect.stringMatching(/^terminal:/),
+          }),
+        ]),
       );
     });
 
@@ -43705,6 +43767,64 @@ describe('App session callbacks', () => {
     }
   });
 
+  it('scopes the main-view registration failure toast to the shell root (F1)', async () => {
+    // The registration mount must sit INSIDE the portal-root provider App
+    // returns: moved above it, the hook reads the null context default and
+    // the dispatch loses its scope. A window listener cannot discriminate
+    // (bubbling delivers both shapes), so pin the scope argument itself.
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    mockSessionActions.loadArtifacts.mockReset().mockResolvedValue({
+      artifacts: [],
+    });
+    mockSessionActions.addArtifact
+      .mockReset()
+      .mockRejectedValue(new Error('daemon exploded'));
+    testState.blocks = [
+      {
+        id: 'export-result',
+        kind: 'assistant',
+        text: 'Exported',
+        meta: {
+          source: 'slash_command',
+          sessionArtifacts: [
+            {
+              kind: 'file',
+              storage: 'workspace',
+              title: 'qwen-code-export-2026-01-01T00-00-00-000Z.md',
+              workspacePath: 'qwen-code-export-2026-01-01T00-00-00-000Z.md',
+            },
+          ],
+        },
+      },
+    ];
+    try {
+      renderApp();
+      await vi.waitFor(async () => {
+        await flush();
+        expect(mockSessionActions.addArtifact).toHaveBeenCalledTimes(1);
+      });
+      await flush();
+      const registrationToasts = testState.toastRequestScopes.filter(
+        (entry) =>
+          entry.message === 'Could not add exported artifact: daemon exploded',
+      );
+      expect(registrationToasts).toHaveLength(1);
+      const scope = registrationToasts[0]!.scope;
+      // App's provider value is the portal root it creates (marked with
+      // data-web-shell-portal-root); above the provider the hook reads the
+      // null context default instead.
+      expect(scope).toBeInstanceOf(HTMLElement);
+      expect(
+        (scope as HTMLElement).hasAttribute('data-web-shell-portal-root'),
+      ).toBe(true);
+    } finally {
+      mockSessionActions.addArtifact.mockReset().mockResolvedValue({});
+    }
+  });
+
   it('opens a split pane monitor in the right panel', async () => {
     const { container } = renderApp();
     await flush();
@@ -51476,6 +51596,55 @@ describe('App /goal command', () => {
     expect(mockSessionActions.controlGoal).not.toHaveBeenCalled();
   });
 
+  it('refuses a picker cwd outside the trusted workspace list without touching the session', async () => {
+    // The dialog reconciles stale selections itself; this guard is the
+    // backstop for a capabilities change racing the submit. It must refuse
+    // BEFORE createNewSession, which clears the current session first.
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'secondary',
+          cwd: '/tmp/secondary',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const onToast = vi.fn();
+    const { container } = renderApp({ onToast });
+    await flush();
+
+    testState.prompt = '/goal';
+    await clickSubmit(container);
+    await flush();
+    const onCreateGoal = testState.latestGoalsProps?.onCreateGoal;
+    if (!onCreateGoal) throw new Error('onCreateGoal was not captured');
+    mockSessionActions.clearSession.mockClear();
+    mockSessionActions.controlGoal.mockClear();
+
+    let result: boolean | void;
+    await act(async () => {
+      result = await onCreateGoal('all tests pass', '/tmp/revoked');
+    });
+
+    expect(result).toBe(false);
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.controlGoal).not.toHaveBeenCalled();
+    // The toast is the only user-visible surface of this refusal; removing
+    // the reportError call must red this assertion.
+    expect(onToast).toHaveBeenCalledWith(
+      'error',
+      'The selected workspace is unavailable or untrusted.',
+    );
+  });
+
   it.each(['resolve', 'reject'] as const)(
     'ignores a stale Goal edit %s after the session changes',
     async (outcome) => {
@@ -52120,6 +52289,34 @@ describe('App /goal command', () => {
     );
     // It must leave the Goals page, or the user loads a transcript they cannot see.
     expect(container.querySelector('[data-testid="goals-page"]')).toBeNull();
+  });
+
+  it("opens a goal's session in the goal's own workspace context", async () => {
+    // The dialog tags each goal with its workspace cwd; dropping the second
+    // argument here would load a secondary goal's transcript in the previously
+    // selected workspace, landing follow-up prompts in the wrong project.
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/goal';
+    await clickSubmit(container);
+    await flush();
+
+    const onOpenSession = testState.latestGoalsProps?.onOpenSession;
+    if (!onOpenSession) throw new Error('onOpenSession was not captured');
+    mockSessionActions.loadSession.mockClear();
+
+    await act(async () => {
+      onOpenSession('goal-session-9', '/tmp/secondary-workspace');
+    });
+    await flush();
+
+    expect(mockSessionActions.loadSession.mock.calls[0][0]).toBe(
+      'goal-session-9',
+    );
+    expect(mockSessionActions.loadSession.mock.calls[0][1]).toMatchObject({
+      workspaceCwd: '/tmp/secondary-workspace',
+    });
   });
 
   it("reports a failure to open a goal's session instead of swallowing it", async () => {
