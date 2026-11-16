@@ -111,6 +111,8 @@ All runs used a throwaway `HOME` with `QWEN_HOME` and `XDG_CONFIG_HOME` unset.
 
 The Linux groups above ran in a `node:22-bookworm` container as an unprivileged user, using the launcher from a built checkout (`node scripts/cli-entry.js`), a throwaway `HOME` per group and no credentials. All 44 checks passed. They cover a new install, bare mode with usage statistics off, an existing install, unrelated and recreated directories, the sign-in warning, `mcp list`, `serve --port 0`, `--version`, `--help`, a left-behind `~/.qwen/.env`, a custom and a relative `XDG_CONFIG_HOME`, one outside the home directory, `QWEN_HOME`, and the migration command with its refusals. The macOS group ran the same way on a Mac: `~/.qwen` was used with a `~/.config/qwen` present.
 
+After the round-5 changes, the groups they touch ran again the same way at `efa3b8e22b`, built with `npm run build && npm run bundle`: a new install, `XDG_CONFIG_HOME` outside the home directory (files only under `$XDG_CONFIG_HOME/qwen`, `HOME` left empty), and the sign-in warning with both files, only `oauth_creds.json` and only `settings.json` missing from the XDG directory. All 11 checks passed. In the same container, the migration command refused the `QWEN_HOME: value`, BOM and next-line spellings and a dangling destination symlink, and still moved `~/.qwen` with only a commented-out `QWEN_HOME`.
+
 The sandboxed group ran only on the host side. The container had no Docker or Podman, so the CLI stopped at "failed to determine command for sandbox", after writing `~/.config/qwen/.qwen-global-dir` and nothing else under `HOME`.
 
 ## Not run

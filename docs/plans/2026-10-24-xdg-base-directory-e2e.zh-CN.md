@@ -111,6 +111,8 @@ for var in $(compgen -e | grep -E '_API_KEY$|_AUTH_TOKEN$'); do unset "$var"; do
 
 上述 Linux 测试组在 `node:22-bookworm` 容器中以非特权用户运行，使用已构建检出目录中的启动器（`node scripts/cli-entry.js`），每个测试组使用一次性的 `HOME`，且没有任何凭据。全部 44 项检查通过，覆盖全新安装、关闭使用统计的 bare 模式、已有安装、无关和重新创建的目录、登录警告、`mcp list`、`serve --port 0`、`--version`、`--help`、遗留的 `~/.qwen/.env`、自定义和相对路径的 `XDG_CONFIG_HOME`、位于主目录之外的 `XDG_CONFIG_HOME`、`QWEN_HOME`，以及迁移命令及其拒绝情形。macOS 测试组以同样方式在 Mac 上运行：存在 `~/.config/qwen` 时仍使用 `~/.qwen`。
 
+第 5 轮改动之后，受影响的测试组以同样方式在 `efa3b8e22b` 上重新运行，构建命令为 `npm run build && npm run bundle`：全新安装、位于主目录之外的 `XDG_CONFIG_HOME`（文件只出现在 `$XDG_CONFIG_HOME/qwen` 下，`HOME` 保持为空），以及登录警告在 XDG 目录缺少两个文件、只缺 `oauth_creds.json` 和只缺 `settings.json` 时的三种情形。全部 11 项检查通过。在同一容器中，迁移命令拒绝了 `QWEN_HOME: value`、带 BOM 和值在下一行这几种写法以及悬空的目标符号链接，而当 `QWEN_HOME` 只出现在注释中时仍会移动 `~/.qwen`。
+
 沙箱运行测试组只运行了宿主一侧。容器中没有 Docker 或 Podman，因此 CLI 停在 "failed to determine command for sandbox"，此前它写入了 `~/.config/qwen/.qwen-global-dir`，`HOME` 下没有其他内容。
 
 ## 未运行
