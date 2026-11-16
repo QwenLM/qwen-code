@@ -134,10 +134,15 @@ describe.skipIf(process.platform === 'win32')(
       expect(readdirSync(cwd)).toEqual([]);
     });
 
+    // Every spelling the launcher or dotenv reads as QWEN_HOME.
     it.each([
-      ['~/.qwen/.env', () => join(home, '.qwen', '.env'), 'QWEN_HOME=~/.qwen'],
-      ['~/.env', () => join(home, '.env'), 'export QWEN_HOME=/data/qwen'],
-    ])('leaves ~/.qwen alone when %s sets QWEN_HOME', (_, file, line) => {
+      ['~/.qwen/.env', 'QWEN_HOME=~/.qwen', () => join(home, '.qwen', '.env')],
+      ['~/.env', 'export QWEN_HOME=/data/qwen', () => join(home, '.env')],
+      ['~/.qwen/.env', 'QWEN_HOME: ~/.qwen', () => join(home, '.qwen', '.env')],
+      ['~/.env', '\uFEFFQWEN_HOME=/data/qwen', () => join(home, '.env')],
+      ['~/.env', '\texport\tQWEN_HOME = /data/qwen', () => join(home, '.env')],
+      ['~/.env', 'QWEN_HOME:\n/data/qwen', () => join(home, '.env')],
+    ])('leaves ~/.qwen alone when %s sets QWEN_HOME as %j', (_, line, file) => {
       writeFileSync(file(), `${line}\n`);
       expectRefused(migrate(), 'a home .env sets QWEN_HOME');
       expect(existsSync(join(home, '.qwen', 'oauth_creds.json'))).toBe(true);
@@ -173,6 +178,47 @@ describe.skipIf(process.platform === 'win32')(
       mkdirSync(join(home, '.config', 'qwen'), { recursive: true });
       expectRefused(migrate(), 'already exists');
       expect(existsSync(join(home, '.qwen', 'oauth_creds.json'))).toBe(true);
+    });
+
+    it('leaves ~/.qwen alone when the destination is a dangling symlink', () => {
+      // A config volume that is not mounted yet.
+      mkdirSync(join(home, '.config'));
+      symlinkSync(
+        join(home, 'unmounted', 'qwen'),
+        join(home, '.config', 'qwen'),
+      );
+      expectRefused(migrate(), 'already exists');
+      expect(existsSync(join(home, '.qwen', 'oauth_creds.json'))).toBe(true);
+    });
+
+    it('writes no marker when the move fails', () => {
+      writeFileSync(
+        join(bin, 'mv'),
+        '#!/bin/sh\necho "mv: failed" >&2\nexit 1\n',
+        {
+          mode: 0o755,
+        },
+      );
+      const result = migrate();
+      expect(result.status).not.toBe(0);
+      expect(existsSync(join(home, '.qwen', 'oauth_creds.json'))).toBe(true);
+      expect(existsSync(join(home, '.config', 'qwen'))).toBe(false);
+    });
+
+    it('moves a ~/.qwen whose path has spaces', () => {
+      const spaced = join(home, 'jane doe');
+      mkdirSync(join(spaced, '.qwen'), { recursive: true });
+      writeFileSync(join(spaced, '.qwen', 'oauth_creds.json'), '{}');
+      const configHome = join(home, 'my config');
+      expect(
+        migrate({ HOME: spaced, XDG_CONFIG_HOME: configHome }).status,
+      ).toBe(0);
+      expect(existsSync(join(spaced, '.qwen'))).toBe(false);
+      expect(existsSync(join(configHome, 'qwen', 'oauth_creds.json'))).toBe(
+        true,
+      );
+      expect(existsSync(join(configHome, 'qwen', marker))).toBe(true);
+      expect(migrate({ HOME: spaced }).status).not.toBe(0);
     });
 
     it('creates nothing when there is no ~/.qwen', () => {
