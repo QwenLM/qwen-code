@@ -2789,4 +2789,15 @@ describe('R17-1 / R2-1 trust-boundary witnesses', () => {
       /missing or unreadable; cannot verify it against --context-sha256/,
     );
   });
+
+  it('discloses when a context is accepted without a digest binding', () => {
+    const { base, clone, dir } = cloneLayout('verify-pr-disclose-');
+    const host = join(base, 'host-snapshot.json');
+    writeFileSync(host, snapshot);
+    const res = run(['--context', host, '--context-root', clone, dir]);
+    expect(res.status).toBe(0);
+    expect(res.stdout).toMatch(
+      /no --context-sha256 binding; provenance rests on the path\/link checks alone/,
+    );
+  });
 });

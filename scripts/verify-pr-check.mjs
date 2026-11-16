@@ -163,14 +163,21 @@ function readIfExists(path) {
   }
 }
 
-// Root-aware containment. A root of '/' contains every path, so it must fail
-// closed rather than compare against '//' — no real path starts with '//',
-// which silently disabled the refusal for a round dir directly under a
+// A filesystem root contains every path on its volume: '/' on POSIX, a drive
+// root like 'C:\' on Windows. Both must fail closed rather than be used as a
+// discriminating trust root (R17-1, deferred Windows drive-root case).
+function isFilesystemRoot(root) {
+  return root === sep || /^[A-Za-z]:[\\/]$/.test(root);
+}
+
+// Root-aware containment. A filesystem root contains every path, so it must
+// fail closed rather than compare against '//' — no real path starts with
+// '//', which silently disabled the refusal for a round dir directly under a
 // root-level tmp/ (R17-1). Both the --context refusal and the --context-root
 // containment test use this so the two stay consistent.
 function withinRoot(root, p) {
   return (
-    root === sep ||
+    isFilesystemRoot(root) ||
     p === root ||
     p.startsWith(root.endsWith(sep) ? root : root + sep)
   );
@@ -1042,9 +1049,9 @@ function main(argv) {
     // PR-writable tree; it is a usage error, not a trust root (R2-2). Reject
     // it here even without --context, where the in-context refusal below is
     // never reached.
-    if (realRoot === sep) {
+    if (isFilesystemRoot(realRoot)) {
       process.stderr.write(
-        `verify-pr check: --context-root ${contextRoot} is the filesystem root, which cannot discriminate the PR-writable tree — pass the PR clone path\n\n${HELP}`,
+        `verify-pr check: --context-root ${contextRoot} is a filesystem root, which cannot discriminate the PR-writable tree — pass the PR clone path\n\n${HELP}`,
       );
       return 2;
     }
@@ -1209,13 +1216,14 @@ function main(argv) {
       let reason;
       if (contextIsAlias) {
         reason = `--context ${contextPath} is a hard link (${contextLinks} names) to a file the round can write; copy it instead of linking it, so the coordinates judging the waiver come from a host-held copy the round never saw`;
-      } else if (trustRoot === sep) {
-        // Only the derived root reaches here: an explicit --context-root '/'
-        // is already a usage error at the containment gate (R2-2). The
-        // artifact dir sits directly under root-level tmp/ and no PR clone can
-        // contain it, so the remedy is to move it, not to pass --context-root
-        // (which would only trade this refusal for a containment error, R1-4).
-        reason = `--context ${contextPath} cannot be trusted: the artifact dir sits directly under a root-level tmp/, so the derived trust root is '/', which contains every path — move the artifact dir out of root-level tmp/ (no PR clone can contain it)`;
+      } else if (isFilesystemRoot(trustRoot)) {
+        // Only the derived root reaches here: an explicit filesystem-root
+        // --context-root is already a usage error at the containment gate
+        // (R2-2). The artifact dir sits directly under root-level tmp/ and no
+        // PR clone can contain it, so the remedy is to move it, not to pass
+        // --context-root (which would only trade this refusal for a containment
+        // error, R1-4).
+        reason = `--context ${contextPath} cannot be trusted: the artifact dir sits directly under a root-level tmp/, so the derived trust root is '${trustRoot}', which contains every path — move the artifact dir out of root-level tmp/ (no PR clone can contain it)`;
       } else {
         reason = `--context must not point inside the PR-writable worktree (${contextPath}): it cannot judge its own waiver — pass a host-held copy the round never saw`;
       }
@@ -1243,6 +1251,10 @@ function main(argv) {
         );
         return 1;
       }
+    } else {
+      // Disclose that provenance was never bound, rather than letting a clean
+      // path/link check read as proof the host wrote the snapshot (deferred).
+      snapshotWarning = `--context ${contextPath} has no --context-sha256 binding; provenance rests on the path/link checks alone — pass the digest prepare printed to bind the snapshot's bytes`;
     }
     if (snapshotText !== null && snapshotText !== UNREADABLE) {
       try {

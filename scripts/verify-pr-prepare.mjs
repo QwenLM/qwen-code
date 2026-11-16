@@ -52,6 +52,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   renameSync,
@@ -699,6 +700,29 @@ function main(argv) {
     mkdirSync(join(artifacts, 'evidence'), { recursive: true });
   } catch (error) {
     return fail(3, `could not create the artifact directory: ${error.message}`);
+  }
+  // The snapshot dir/file live in the PR-controlled tree: a PR-committed
+  // symlink at either path would redirect this host-side write to an arbitrary
+  // location. Refuse rather than follow it (deferred symlink-guard case).
+  for (const p of [contextDir, contextPath]) {
+    let st;
+    try {
+      st = lstatSync(p);
+    } catch (error) {
+      if (error.code !== 'ENOENT') {
+        return fail(
+          3,
+          `could not inspect the snapshot path ${p}: ${error.message}`,
+        );
+      }
+      continue; // not created yet (first run) — nothing to redirect
+    }
+    if (st.isSymbolicLink()) {
+      return fail(
+        3,
+        `refusing to write the host snapshot through a symlink: ${p}`,
+      );
+    }
   }
   // The host-held snapshot carries the slug too: the checker compares a
   // waiver's approval permalink against these coordinates, and gh's field

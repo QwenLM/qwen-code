@@ -363,8 +363,9 @@ authority to certify the round.
    # wrote the copy (R2-1).
    sed -n 's/^  context-sha256  //p' ~/.cache/qwen-verify/pr<n>/prepare.log > ~/.cache/qwen-verify/pr<n>/pr.sha256
    # Fail here, where the cause is visible, rather than at step 7 after the
-   # container has run: an empty digest means prepare printed no context-sha256.
-   test -s ~/.cache/qwen-verify/pr<n>/pr.sha256 || { echo "prepare printed no context-sha256; see prepare.log" >&2; exit 1; }
+   # container has run: the digest must be the 64-hex shape the checker requires
+   # (a re-aligned row would capture a leading space and pass a non-empty test).
+   grep -Eq '^[0-9a-f]{64}$' ~/.cache/qwen-verify/pr<n>/pr.sha256 || { echo "prepare printed no valid context-sha256; see prepare.log" >&2; exit 1; }
    rm -rf ~/.cache/qwen-verify/pr<n>/qwen-base
    mkdir -p ~/.cache/qwen-verify/pr<n>/qwen-base
    cp <pr-clone>/tmp/verify-context/pr<n>.json ~/.cache/qwen-verify/pr<n>/pr.json

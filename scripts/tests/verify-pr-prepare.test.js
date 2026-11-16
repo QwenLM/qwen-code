@@ -14,6 +14,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -828,6 +829,27 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     expect(
       JSON.parse(readFileSync(join(artifacts, 'context.json'), 'utf8')),
     ).toEqual({ repo: REPO, pr: 42, baseRefOid: base, headRefOid: head });
+  });
+
+  // A PR-committed symlink at the snapshot path would redirect the host-side
+  // write; prepare must refuse rather than follow it (deferred symlink guard).
+  it('refuses to write the host snapshot through a symlink', () => {
+    const { dir, base, head } = makeRepo();
+    const env = installFakeGh(snapshotFor({ base, head }));
+    const root = realpathSync(dir);
+    const contextDir = join(root, 'tmp', 'verify-context');
+    mkdirSync(contextDir, { recursive: true });
+    // Both the link and its target stay under gitignored tmp/ so the tree is
+    // still clean and the refusal comes from the symlink guard, not tree state.
+    const target = join(root, 'tmp', 'redirect-target.json');
+    writeFileSync(target, '{}');
+    symlinkSync(target, join(contextDir, 'pr42.json'));
+    const result = runPrepare(dir, ['42', '--repo', REPO], env);
+    expect(result.status).toBe(3);
+    expect(result.stderr).toMatch(
+      /refusing to write the host snapshot through a symlink/,
+    );
+    expect(readFileSync(target, 'utf8')).toBe('{}');
   });
 
   // The CI lane writes the same review state beside its metadata, and a round
