@@ -9,6 +9,7 @@ import com.aliyun.oss.model.BucketVersioningConfiguration;
 import com.aliyun.oss.model.CannedAccessControlList;
 import com.aliyun.oss.model.GetObjectRequest;
 import com.aliyun.oss.model.OSSObject;
+import com.aliyun.oss.model.ObjectMetadata;
 import com.aliyun.oss.model.PutObjectRequest;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -17,11 +18,13 @@ import org.mockito.ArgumentCaptor;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -59,7 +62,12 @@ class AliyunToolPublicationObjectStoreTest {
                 .thenReturn(new BucketVersioningConfiguration(state));
         assertThatThrownBy(() -> objects.putIfAbsent("exact/key", new byte[] {1}))
                 .isInstanceOf(IllegalStateException.class);
+        // Cover the sibling stream overloads too: a refactor could write through
+        // putObject(bucket, key, stream[, metadata]) instead of PutObjectRequest,
+        // and never() on one overload alone would let that write slip through.
         verify(client, never()).putObject(any(PutObjectRequest.class));
+        verify(client, never()).putObject(anyString(), anyString(), any(InputStream.class));
+        verify(client, never()).putObject(anyString(), anyString(), any(InputStream.class), any(ObjectMetadata.class));
     }
 
     @Test
