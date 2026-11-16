@@ -55,12 +55,13 @@ import {
   lstatSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import { isEntryPoint } from './lib/entry-point.js';
 
 const OID = /^[0-9a-f]{40}$/;
@@ -765,16 +766,50 @@ function main(argv) {
   // only as the checker's untrusted no---context default.
   let reportedContextPath = contextPath;
   if (options.contextOut) {
+    // The host destination must be outside the PR-writable clone: step 1 runs
+    // with the clone as cwd, so a relative --context-out resolves inside it,
+    // where a PR-committed symlink would redirect this host-side write (R7-1).
+    // Apply the same containment + leaf guards the in-tree snapshot path uses.
+    const outPath = resolve(options.contextOut);
+    const realRoot = realpathSync(root);
+    if (outPath === realRoot || outPath.startsWith(realRoot + sep)) {
+      return fail(
+        3,
+        `refusing to write the host snapshot inside the PR clone: ${outPath}`,
+      );
+    }
     try {
-      mkdirSync(dirname(options.contextOut), { recursive: true });
-      writeFileSync(options.contextOut, contextBytes);
+      const st = lstatSync(outPath);
+      if (st.isSymbolicLink()) {
+        return fail(
+          3,
+          `refusing to write the host snapshot through a symlink: ${outPath}`,
+        );
+      }
+      if (!st.isFile() || st.nlink !== 1) {
+        return fail(
+          3,
+          `refusing to write the host snapshot through a non-single-link file: ${outPath}`,
+        );
+      }
+    } catch (error) {
+      if (error.code !== 'ENOENT') {
+        return fail(
+          3,
+          `could not inspect the host snapshot path ${outPath}: ${error.message}`,
+        );
+      }
+    }
+    try {
+      mkdirSync(dirname(outPath), { recursive: true });
+      writeFileSync(outPath, contextBytes);
     } catch (error) {
       return fail(
         3,
-        `could not write the host snapshot to ${options.contextOut}: ${error.message}`,
+        `could not write the host snapshot to ${outPath}: ${error.message}`,
       );
     }
-    reportedContextPath = options.contextOut;
+    reportedContextPath = outPath;
   }
   // The digest binds the snapshot's content for the checker (--context-sha256):
   // it is computed here host-side, before the round runs, so a later rewrite of

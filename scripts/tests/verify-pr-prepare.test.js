@@ -923,6 +923,59 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     rmSync(hostDir, { recursive: true, force: true });
   });
 
+  // R7-1: a relative --context-out resolves inside the PR-writable clone; a
+  // PR-committed symlink there must not redirect the host-side write.
+  it('refuses an in-clone --context-out target', () => {
+    const { dir, base } = makeRepo();
+    const root = realpathSync(dir);
+    const hostDir = mkdtempSync(join(tmpdir(), 'r7-host-'));
+    const hostTarget = join(hostDir, 'host-target.txt');
+    writeFileSync(hostTarget, 'ORIGINAL-HOST-FILE');
+    symlinkSync(hostTarget, join(root, 'snap.json'));
+    execFileSync('git', ['add', '-f', 'snap.json'], { cwd: dir, env: gitEnv });
+    execFileSync('git', ['commit', '--amend', '--no-edit', '-q'], {
+      cwd: dir,
+      env: gitEnv,
+    });
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: dir,
+      env: gitEnv,
+      encoding: 'utf8',
+    }).trim();
+    const env = installFakeGh(snapshotFor({ base, head }));
+    const result = runPrepare(
+      dir,
+      ['42', '--repo', REPO, '--context-out', 'snap.json'],
+      env,
+    );
+    const targetBytes = readFileSync(hostTarget, 'utf8');
+    rmSync(hostDir, { recursive: true, force: true });
+    expect(result.status).toBe(3);
+    expect(result.stderr).toMatch(/inside the PR clone/);
+    expect(targetBytes).toBe('ORIGINAL-HOST-FILE');
+  });
+
+  // R7-1: an outside destination that is a symlink is refused by the leaf guard.
+  it('refuses a symlink at an outside --context-out destination', () => {
+    const { dir, base, head } = makeRepo();
+    const env = installFakeGh(snapshotFor({ base, head }));
+    const hostDir = mkdtempSync(join(tmpdir(), 'r7-out-'));
+    const hostTarget = join(hostDir, 'host-target.txt');
+    writeFileSync(hostTarget, 'ORIGINAL-HOST-FILE');
+    const outPath = join(hostDir, 'pr42.json');
+    symlinkSync(hostTarget, outPath);
+    const result = runPrepare(
+      dir,
+      ['42', '--repo', REPO, '--context-out', outPath],
+      env,
+    );
+    const targetBytes = readFileSync(hostTarget, 'utf8');
+    rmSync(hostDir, { recursive: true, force: true });
+    expect(result.status).toBe(3);
+    expect(result.stderr).toMatch(/through a symlink/);
+    expect(targetBytes).toBe('ORIGINAL-HOST-FILE');
+  });
+
   // The CI lane writes the same review state beside its metadata, and a round
   // reads a missing file as "unknown": a failed fetch must leave none, not
   // even the one an earlier prepare wrote.
