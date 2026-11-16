@@ -2,7 +2,7 @@
 
 [English](2026-11-12-loop-rollout-switches.md) | [简体中文](2026-11-12-loop-rollout-switches.zh-CN.md)
 
-- **状态**：切片 1（nightly 组）已合入（#17050）；切片 2（按入口默认值）实现中；切片 3 未开始；切片 4 已由 #17172 交付。
+- **状态**：切片 1（nightly 组）已合入（#17050）；切片 2（按入口默认值）已合入（#17055），其中移除 schema 默认值的一步随 headless 默认值翻转完成；切片 3 未开始；切片 4 已由 #17172 交付。
 - **跟踪**：#17045 的 B 块。阶梯、灰度规则与能力台账属于统一 loop 设计（`2026-10-23-unified-agent-loop.md`）、事件总线设计（`2026-11-11-event-bus-agent-loop.md`）和 #17045 的 A 块；本文档只设计 B 块负责的开关机制与信号。
 - **核对提交**：upstream `acc07c2eb0`（2026-11-12）。
 
@@ -65,9 +65,9 @@ Linux 矩阵增加第三个 `agent-loop` 值 `kernel`，OpenTUI 任务加上它�
 
 1. 环境变量，当它指向该入口时；
 2. 显式设置（`experimental.unifiedAgentLoop` / `experimental.eventBusAgentLoop`），当它被设置时；
-3. 该入口的内置默认值——今天每个入口都是 `false`；之后的 PR 一次翻转一个入口的默认值，且只翻转那一个。
+3. 该入口的内置默认值——headless 和 Ink TUI 是 `true`，其他入口都是 `false`；每个灰度 PR 一次翻转一个入口的默认值，且只翻转那一个。
 
-**入口标识符。**`headless`、`acp`、`ink`、`opentui`、`agent-core`、`speculation`。它们命名的是 loop 入口，不是包：Ink TUI 是 `ink`，OpenTUI 渲染器是 `opentui`，跑在 AgentCore 上的子代理是 `agent-core`。
+**入口标识符。**`headless`、`acp`、`ink`、`opentui`、`agent-core`、`speculation`、`hosted`。它们命名的是 loop 入口，不是包：Ink TUI 是 `ink`，OpenTUI 渲染器是 `opentui`，跑在 AgentCore 上的子代理是 `agent-core`，Hosted Harness 是 `hosted`——它只开启模型轮，其 journal 化工具派发仍留在 `hosted-harness-model.ts`。
 
 **环境变量文法。**`QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` 与 `QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP` 都接受：
 
@@ -79,7 +79,7 @@ token 去除首尾空白；空 token 忽略；未知入口名忽略并记 debug 
 
 **getter 形状。**`Config.isUnifiedAgentLoopEnabled(surface)` 与 `Config.isEventBusAgentLoopEnabled(surface)` 接收入口标识符；每个调用点写明自己的入口。AgentCore 的 `runtimeContext` 钩子传 `agent-core`。#17029（已合入）的 speculation 读取点传 `speculation`。共享 loop 关闭时内核开关仍然无效——解析按开关各自进行，内核只作用于 `runAgentLoop` 内部。
 
-**设置在运行时变为三态。**CLI 不再把未设置塌缩成 `false`（今天 `packages/cli/src/config/config.ts:2920` 是 `?? false`）；core 参数变为 `boolean | undefined`。合并后的设置对未设置的键本来就保持 undefined——加载器不会物化 schema 默认值（`packages/cli/src/config/settings.test.ts:4624` 钉住了这一点）——所以运行时不需要任何 schema 改动就能区分「未设置」和「显式关闭」。schema 条目暂时**保留** `default: false`：当 schema 默认值为 undefined 时，`nextBooleanSettingValue`（`packages/cli/src/config/settingsUtils.ts:687`）对未设置布尔值的第一次切换会写入 `false`，这会翻转今天两个设置对话框「第一次切换即开启」的行为。schema 默认值在第一个入口的内置默认值翻转时一并移除，同时给对话框的未设置态一个呈现方式；Web Shell 设置面板读的是生效值而不是 schema 默认值，两种情况下都不受影响。
+**设置在运行时变为三态。**CLI 不再把未设置塌缩成 `false`（今天 `packages/cli/src/config/config.ts:2920` 是 `?? false`）；core 参数变为 `boolean | undefined`。合并后的设置对未设置的键本来就保持 undefined——加载器不会物化 schema 默认值（`packages/cli/src/config/settings.test.ts:4624` 钉住了这一点）——所以运行时不需要任何 schema 改动就能区分「未设置」和「显式关闭」。在那之前 schema 条目保留 `default: false`，`experimental.eventBusAgentLoop` 现在仍保留：当 schema 默认值为 undefined 时，`nextBooleanSettingValue`（`packages/cli/src/config/settingsUtils.ts:687`）对未设置布尔值的第一次切换会写入 `false`，这会翻转今天两个设置对话框「第一次切换即开启」的行为。schema 默认值在第一个入口的内置默认值翻转时一并移除，同时给对话框的未设置态一个呈现方式：该设置声明 `unsetToggleValue: true`，所以在两个对话框和 `/config` 中，对未设置值的第一次切换仍写入 `true`；Web Shell 设置面板读的是生效值而不是 schema 默认值，两种情况下都不受影响。
 
 **对拍两臂强制。**同一 PR 内：ACP 对拍的 off 臂把环境变量设为 `'0'` 而不是删除；TUI off 臂已在切片 1 钉住 `'0'`，切片 2 让 `'0'` 表示强制关闭。headless 对拍保留显式的按臂设置。有了切片 2 的强制关闭语义，`'0'` 无论默认值如何都钉住 off 臂；在切片 2 落地前，`'0'` 是惰性的（只读 `'1'`），所以 ACP 对拍改动可以与机制同 PR 安全落地。
 
@@ -114,7 +114,7 @@ token 去除首尾空白；空 token 忽略；未知入口名忽略并记 debug 
 - loop 契约（`AgentLoopHost`、`runAgentLoop` 选项）同一时间只有一个负责人（#17045 C 块）；切片 2 改的是 Config getter，不是契约，但 getter 签名与 #17029（speculation）共享——协调落地顺序。
 - 与 PR 17048 的强制关闭分工对顺序敏感：其 `current` 腿钉住必须在第一个入口默认值翻转之前落地，其 `true`/`false` 拼写在 rebase 到按入口 resolver 时必须保持仅整值。本切片不翻转任何默认值、整值只接受 `1`/`0`，因此两种落地顺序下都安全。
 - 内核组会在 K 块的取消与有界收尾落地之前每晚跑 headless 内核路径；那里的内核路径失败是信号，不是默认路径的回归，且不得阻塞其他组（`fail-fast: false` 已经保证）。
-- schema 默认值保留到第一个入口默认值翻转：更早移除会改变设置对话框的第一次切换行为（`nextBooleanSettingValue`），超出切片 2 的范围。
+- schema 默认值保留到第一个入口默认值翻转：更早移除会改变设置对话框的第一次切换行为（`nextBooleanSettingValue`），超出切片 2 的范围。headless 默认值翻转时连同对话框的处理一起移除它。
 - workflow 体积棘轮：`e2e.yml` 增长超过 4096 字节容差需要同 PR 更新基线。
 
 ## 验证计划
@@ -137,6 +137,6 @@ token 去除首尾空白；空 token 忽略；未知入口名忽略并记 debug 
 
 ## 待解问题
 
-- ~~设置加载器是否会把 schema 默认值注入合并后的设置对象？~~ 准备切片 1 时已解决：不会——合并后的设置对未设置的键保持 undefined（`packages/cli/src/config/settings.test.ts:4624` 对 `goals.modelProposed` 钉住了这一点），所以运行时三态只需要 CLI 不再把未设置塌缩成 `false`。schema 保留 `default: false` 直到第一个入口默认值翻转：更早移除会经由 `nextBooleanSettingValue`（`packages/cli/src/config/settingsUtils.ts:687`）把两个设置对话框的第一次切换从开启翻成关闭，因此 schema 默认值的移除推迟到那次翻转，不属于三态本身。
+- ~~设置加载器是否会把 schema 默认值注入合并后的设置对象？~~ 准备切片 1 时已解决：不会——合并后的设置对未设置的键保持 undefined（`packages/cli/src/config/settings.test.ts:4624` 对 `goals.modelProposed` 钉住了这一点），所以运行时三态只需要 CLI 不再把未设置塌缩成 `false`。schema 保留 `default: false` 直到第一个入口默认值翻转：更早移除会经由 `nextBooleanSettingValue`（`packages/cli/src/config/settingsUtils.ts:687`）把两个设置对话框的第一次切换从开启翻成关闭，因此 schema 默认值的移除推迟到那次翻转，不属于三态本身。headless 的翻转移除了它，并设置 `unsetToggleValue: true`，让第一次切换仍是开启。
 - ~~环境变量列表文法是否接受列表内的裸 `0`/`1` token（如 `1,acp=0`）？~~ 已定：不接受——整值 `1`/`0` 才表示「所有入口」，列表内的裸 `1`/`0` 无入口名会被丢弃；此行为已在用户可见文本中写明，并被解析模块单测钉住。
 - ~~#17029 的 speculation 读取点：切片 2 在它之前还是之后落地？~~ 已解决：#17029 已合入，其读取点传 `speculation`；保留本切片的必选 surface 签名并适配了调用点。

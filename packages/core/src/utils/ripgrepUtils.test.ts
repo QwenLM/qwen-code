@@ -615,6 +615,50 @@ describe('ripgrepUtils', () => {
       });
     };
 
+    it('does not resolve or execute ripgrep after cancellation', async () => {
+      const controller = new AbortController();
+      const reason = new Error('startup cancelled');
+      controller.abort(reason);
+
+      await expect(canUseRipgrep(true, controller.signal)).rejects.toBe(reason);
+
+      expect(fileExists).not.toHaveBeenCalled();
+      expect(execCommand).not.toHaveBeenCalled();
+    });
+
+    it('waits for probe exit after cancellation without starting a fallback process', async () => {
+      stubInstall({ builtin: true, system: true });
+      const controller = new AbortController();
+      const reason = new Error('startup cancelled');
+      const child = Object.assign(new EventEmitter(), { kill: vi.fn() });
+      let close!: () => void;
+      execFile.mockImplementationOnce((_command, _args, _options, callback) => {
+        close = () => {
+          callback(createExecError('terminated'), '', '');
+          child.emit('close', null, 'SIGKILL');
+        };
+        return child;
+      });
+      const probe = canUseRipgrep(true, controller.signal);
+      let settled = false;
+      void probe.catch(() => {
+        settled = true;
+      });
+      const result = probe.catch((error: unknown) => error);
+      await vi.waitFor(() => expect(execFile).toHaveBeenCalledOnce());
+      controller.abort(reason);
+      await Promise.resolve();
+
+      expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+      expect(settled).toBe(false);
+      close();
+      expect(await result).toBe(reason);
+
+      expect(execFile).toHaveBeenCalledOnce();
+      expect(execCommand).not.toHaveBeenCalled();
+      expect(isCommandAvailable).not.toHaveBeenCalled();
+    });
+
     it('falls back to system rg when the bundled binary exists but cannot run', async () => {
       builtinFailsSystemWorks();
 

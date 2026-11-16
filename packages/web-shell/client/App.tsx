@@ -237,10 +237,13 @@ import { readWaitingGamesEnabled } from './utils/waitingGamesConfig';
 import {
   ToastHost,
   TOAST_REQUEST_EVENT,
+  createWebShellToast,
+  appendToastDeduped,
   type ToastRequestDetail,
   type ToastTone,
   type WebShellToast,
 } from './components/ToastHost';
+import { ReportedArtifactRegistration } from './components/ReportedArtifactRegistration';
 import { TodoPanel } from './components/panels/TodoPanel';
 import {
   EnvironmentPanel,
@@ -649,8 +652,6 @@ import { WebShellPortalRootContext } from './portalRoot';
 import { CompactModeContext, TodoContextsProvider } from './WebShellContexts';
 import styles from './App.module.css';
 
-const MAX_TOASTS = 4;
-const TOAST_AUTO_DISMISS_MS = 5000;
 const DEFAULT_REVIEW_PANEL_WIDTH = 500;
 const MIN_ARTIFACT_PANEL_WIDTH = 320;
 const MIN_CHAT_PANE_WIDTH_WITH_ARTIFACT_PANEL = 500;
@@ -5074,21 +5075,8 @@ export function App({
       onToastRef.current(tone, message);
       return;
     }
-    const toast: WebShellToast = {
-      id: `web-shell-toast-${Date.now()}-${++toastIdRef.current}`,
-      tone,
-      message,
-      // Deadline instead of duration: the host remounts its items when the
-      // elevated portal moves, and a fresh timer per remount would keep a
-      // toast on screen indefinitely across repeated fullscreen toggles.
-      dismissAt: Date.now() + TOAST_AUTO_DISMISS_MS,
-    };
-    setToasts((current) => {
-      const withoutDuplicate = current.filter(
-        (item) => item.tone !== tone || item.message !== message,
-      );
-      return [...withoutDuplicate, toast].slice(-MAX_TOASTS);
-    });
+    const toast = createWebShellToast(tone, message, ++toastIdRef.current);
+    setToasts((current) => appendToastDeduped(current, toast));
   }, []);
 
   const messages = useMessagesFromBlocks(t, blocks, blockChangeSummary);
@@ -5250,7 +5238,7 @@ export function App({
     error: artifactsError,
     refresh: refreshArtifacts,
     hydrated: artifactsHydrated,
-  } = useSessionArtifacts(t);
+  } = useSessionArtifacts();
   const sourcesState = useSessionSources();
   const refreshSources = sourcesState.refresh;
   const [sourceRegistrationRetries, setSourceRegistrationRetries] = useState<
@@ -23349,6 +23337,15 @@ export function App({
         <McpAppHostContext.Provider value={workspace.baseUrl}>
           {/* prettier-ignore */}
           <WebShellPortalRootContext.Provider value={portalRoot}>
+          {/* Rendered inside the portal-root provider so the registration
+              failure toast is scoped to this shell; App's own body runs
+              above the provider it returns. */}
+          <ReportedArtifactRegistration
+            registered={artifacts}
+            hydrated={artifactsHydrated}
+            refresh={refreshArtifacts}
+            translateError={t}
+          />
           {/* Compact view is fixed on for every message surface (main chat,
               split panes, subagent detail, drawer) — no toggle remains. */}
           <CompactModeContext.Provider value={true}>
@@ -25107,14 +25104,54 @@ export function App({
                   </div>
                   <div className={styles.fullPageBody}>
                     <GoalsDialog
-                      onCreateGoal={async (condition) => {
+                      // Registered workspaces (multi-workspace daemons only) so
+                      // the page aggregates every project's goals and the New
+                      // form can target one; absent/single → primary-only view.
+                      workspaces={
+                        lockedWorkspaceCwd
+                          ? visibleWorkspaces
+                          : ordinaryWorkspaces
+                      }
+                      lockedWorkspace={lockedWorkspaceCapability}
+                      defaultWorkspaceCwd={resolveWorkspaceMaintenanceTargetCwd()}
+                      onCreateGoal={async (condition, workspaceCwd) => {
                         const stranded = strandedGoalSessionRef.current;
+                        // Reuse the stranded session only when the picker still
+                        // targets its workspace; otherwise a retry after a failed
+                        // attempt would silently create the goal in the previous
+                        // workspace while the picker displays the new one.
                         const canReuseStranded =
                           stranded !== undefined &&
-                          connectionRef.current.sessionId === stranded;
+                          connectionRef.current.sessionId === stranded &&
+                          (workspaceCwd === undefined ||
+                            workspaceCwd ===
+                              connectionRef.current.workspaceCwd);
                         if (!canReuseStranded) {
+                          // The picker can outlive a trust change or workspace
+                          // removal: re-validate its cwd before createNewSession,
+                          // which clears the current session before allocation
+                          // would refuse an untrusted target.
+                          const pickedCwd =
+                            workspaceCwd === undefined
+                              ? undefined
+                              : ordinaryWorkspaces.find(
+                                  (entry) =>
+                                    entry.cwd === workspaceCwd &&
+                                    entry.trusted !== false,
+                                )?.cwd;
+                          if (workspaceCwd !== undefined && !pickedCwd) {
+                            reportError(
+                              new Error(t('goals.error.workspaceUnavailable')),
+                              'Failed to create the goal',
+                            );
+                            return false;
+                          }
+                          // Only forget the stranded session once the retry
+                          // actually proceeds; a refused target must leave the
+                          // recovery handle intact for a later retry.
                           strandedGoalSessionRef.current = undefined;
                           const targetCwd =
+                            pickedCwd ??
                             resolveWorkspaceMaintenanceTargetCwd();
                           if (!targetCwd) return false;
                           const created = await createNewSession(
@@ -25196,10 +25233,11 @@ export function App({
                         strandedGoalSessionRef.current = undefined;
                         showChat();
                       }}
-                      onOpenSession={(sessionId) => {
-                        // The goal's session transcript IS its history.
+                      onOpenSession={(sessionId, workspaceCwd) => {
+                        // The goal's session transcript IS its history — load
+                        // it in the goal's own workspace.
                         showChat();
-                        loadSidebarSession(sessionId).catch(
+                        loadSidebarSession(sessionId, workspaceCwd).catch(
                           (error: unknown) => {
                             reportError(error, 'Failed to open session');
                           },

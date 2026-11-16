@@ -71,6 +71,10 @@ public class CLIControlResponse<R> extends MessageBase {
          */
         private String subtype = "success";
         /**
+         * The error message or structured error for an error response.
+         */
+        private Object error;
+        /**
          * The actual response.
          */
         R response;
@@ -112,6 +116,26 @@ public class CLIControlResponse<R> extends MessageBase {
          */
         public Response<R> setSubtype(String subtype) {
             this.subtype = subtype;
+            return this;
+        }
+
+        /**
+         * Gets the error message or structured error.
+         *
+         * @return The error, or null for a successful response
+         */
+        public Object getError() {
+            return error;
+        }
+
+        /**
+         * Sets the error message or structured error.
+         *
+         * @param error The error message or structured error
+         * @return This instance for method chaining
+         */
+        public Response<R> setError(Object error) {
+            this.error = error;
             return this;
         }
 
