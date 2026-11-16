@@ -1510,6 +1510,105 @@ describe('ToolConfirmationMessage', () => {
       (_, i) => `finding ${i + 1}`,
     ).join('\n\n');
 
+    it('caps exec warnings and the command they squeeze into one row', async () => {
+      // Seven rows of chrome (two outer padding, one body margin, the question,
+      // its margin, two options) leave a five-row body. Five one-row warnings
+      // cannot all fit that, so the box is capped with a counted footer and the
+      // command keeps the row left over as a pinned truncated row. Uncapped and
+      // unpinned, the same input puts seven body rows under a five-row cap, and
+      // the cap answers by compressing rows onto each other.
+      const availableTerminalHeight = 12;
+      const { lastFrame } = render(
+        <OverflowProvider>
+          {withProviders(
+            <ToolConfirmationMessage
+              confirmationDetails={{
+                type: 'exec',
+                title: 'Confirm Shell Command',
+                command: 'npm run deploy -- --dry-run --verbose --project=prod',
+                rootCommand: 'npm',
+                hideAlwaysAllow: true,
+                warnings: [
+                  'warning one: writes to production',
+                  'warning two: outside workspace',
+                  'warning three: network access',
+                  'warning four: reads secrets',
+                  'warning five: deletes state',
+                ],
+                onConfirm: vi.fn(),
+              }}
+              config={mockConfig}
+              availableTerminalHeight={availableTerminalHeight}
+              contentWidth={50}
+            />,
+          )}
+          <OverflowProbe />
+        </OverflowProvider>,
+      );
+
+      await vi.waitFor(() => {
+        const frame = lastFrame() ?? '';
+        expect(frame).toMatch(/last \d+ lines hidden/);
+        expect(frame).toMatch(/overflowing:[1-9]/);
+      }, WAIT_FOR_FRAME);
+      const frame = lastFrame() ?? '';
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(
+        availableTerminalHeight + 1,
+      );
+      // A contiguous prefix of the warnings, counted, with the head of the list
+      // intact: the compression artifact dropped `warning one` first.
+      expect(frame).toContain('warning one: writes to production');
+      expect(frame).toContain('warning two: outside workspace');
+      expect(frame).not.toContain('warning five: deletes state');
+      // The command keeps a row and says the rest continues; it was squeezed to
+      // one pinned truncated row, not dropped and not left as blank rows.
+      expect(frame).toContain('npm run deploy');
+      expect(frame).not.toContain('--project=prod');
+      expect(frame).toContain('Yes, allow once');
+      expect(frame).toContain('No, suggest changes (esc)');
+    });
+
+    it('announces an exec command the body budget shrinks to a single row', async () => {
+      // The floor of the body grant is one row, and with no warnings that row
+      // is the command's. `MaxSizedBox` cannot honour a one-row ask — its floor
+      // is two rows and one goes to its own footer — so the cue here is a
+      // pinned truncated row that registers the truncation.
+      const availableTerminalHeight = 8;
+      const { lastFrame } = render(
+        <OverflowProvider>
+          {withProviders(
+            <ToolConfirmationMessage
+              confirmationDetails={{
+                type: 'exec',
+                title: 'Confirm Shell Command',
+                command: 'npm run deploy -- --dry-run --verbose --project=prod',
+                rootCommand: 'npm',
+                hideAlwaysAllow: true,
+                onConfirm: vi.fn(),
+              }}
+              config={mockConfig}
+              availableTerminalHeight={availableTerminalHeight}
+              contentWidth={50}
+            />,
+          )}
+          <OverflowProbe />
+        </OverflowProvider>,
+      );
+
+      await vi.waitFor(() => {
+        const frame = lastFrame() ?? '';
+        expect(frame).toContain('npm run deploy');
+        expect(frame).toContain('overflowing:1');
+      }, WAIT_FOR_FRAME);
+      const frame = lastFrame() ?? '';
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(
+        availableTerminalHeight + 1,
+      );
+      expect(frame).not.toContain('--project=prod');
+      expect(frame).toContain('Yes, allow once');
+      expect(frame).toContain('No, suggest changes (esc)');
+    });
+
     it('caps a long inline-Markdown info prompt', () => {
       const availableTerminalHeight = 12;
       const { lastFrame } = renderWithProviders(

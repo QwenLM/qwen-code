@@ -245,6 +245,11 @@ outright.
   - exec confirmation with an unavailable classifier at a 12-row terminal: the
     command text and the `No` option are both on screen, and no blank block
     replaces the command;
+  - exec warnings at a budget that cannot hold them all: the list is capped to a
+    contiguous, counted prefix and the command keeps the leftover row as a
+    pinned truncated cue that registers the overflow, instead of seven body
+    rows being compressed under a five-row cap; a command shrunk to a single
+    row announces itself the same way;
   - 30 destinations at small budgets down to two body rows: the
     `URLs to fetch:` header, a contiguous prefix of destinations and a counted
     hidden-URLs row are on screen, and a scattered sample is not; the header is
