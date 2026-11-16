@@ -4338,24 +4338,17 @@ export class Session implements SessionContext {
     if (process.env[QWEN_CODE_SERVE_ENV] !== '1') {
       return;
     }
-    this.config.setSubSessionSpawner(async (req) => {
-      let resp: Record<string, unknown>;
+    const request = async (
+      method: string,
+      params: Record<string, unknown>,
+    ): Promise<Record<string, unknown>> => {
       try {
-        resp = await this.client.extMethod(
-          SERVE_CONTROL_EXT_METHODS.createSubSession,
-          {
-            prompt: req.prompt,
-            completion: req.completion,
-            ...(req.model ? { model: req.model } : {}),
-            ...(req.name ? { name: req.name } : {}),
-            ...(req.workspace ? { workspace: req.workspace } : {}),
-            callerSessionId: this.sessionId,
-          },
-        );
+        return await this.client.extMethod(method, {
+          ...params,
+          callerSessionId: this.sessionId,
+        });
       } catch (error) {
-        // The daemon's reason (a cap, a refused workspace) arrives as the
-        // RPC error's `data.details`; the error itself is a plain object
-        // whose message is only "Internal error".
+        // The daemon's refusal reason arrives as the RPC error's data.details.
         const details =
           isRecord(error) && isRecord(error['data'])
             ? error['data']['details']
@@ -4365,30 +4358,62 @@ export class Session implements SessionContext {
         }
         throw error;
       }
-      if (typeof resp['sessionId'] !== 'string' || !resp['sessionId']) {
-        throw new Error(
-          'create_sub_session: bridge returned non-string sessionId',
+    };
+    this.config.setSubSessionSpawner(
+      async (req) => {
+        const resp = await request(SERVE_CONTROL_EXT_METHODS.createSubSession, {
+          prompt: req.prompt,
+          completion: req.completion,
+          ...(req.model ? { model: req.model } : {}),
+          ...(req.name ? { name: req.name } : {}),
+          ...(req.workspace !== undefined
+            ? {
+                workspace: req.workspace,
+                workspaceGeneration: req.workspaceGeneration,
+              }
+            : {}),
+        });
+        if (typeof resp['sessionId'] !== 'string' || !resp['sessionId']) {
+          throw new Error(
+            'create_sub_session: bridge returned non-string sessionId',
+          );
+        }
+        if (req.completion === 'sent') {
+          this.relatedAgentIds.add(resp['sessionId']);
+        }
+        return {
+          sessionId: resp['sessionId'],
+          ...(typeof resp['workspaceCwd'] === 'string'
+            ? { workspaceCwd: resp['workspaceCwd'] }
+            : {}),
+          ...(typeof resp['result'] === 'string'
+            ? { result: resp['result'] }
+            : {}),
+          ...(typeof resp['stopReason'] === 'string'
+            ? { stopReason: resp['stopReason'] }
+            : {}),
+          ...(typeof resp['parentSessionPersisted'] === 'boolean'
+            ? { parentSessionPersisted: resp['parentSessionPersisted'] }
+            : {}),
+        };
+      },
+      async (workspace) => {
+        const resp = await request(
+          SERVE_CONTROL_EXT_METHODS.resolveSubSessionWorkspace,
+          { workspace },
         );
-      }
-      if (req.completion === 'sent') {
-        this.relatedAgentIds.add(resp['sessionId']);
-      }
-      return {
-        sessionId: resp['sessionId'],
-        ...(typeof resp['workspaceCwd'] === 'string'
-          ? { workspaceCwd: resp['workspaceCwd'] }
-          : {}),
-        ...(typeof resp['result'] === 'string'
-          ? { result: resp['result'] }
-          : {}),
-        ...(typeof resp['stopReason'] === 'string'
-          ? { stopReason: resp['stopReason'] }
-          : {}),
-        ...(typeof resp['parentSessionPersisted'] === 'boolean'
-          ? { parentSessionPersisted: resp['parentSessionPersisted'] }
-          : {}),
-      };
-    });
+        const { workspaceCwd, workspaceGeneration } = resp;
+        if (
+          typeof workspaceCwd !== 'string' ||
+          !workspaceCwd ||
+          typeof workspaceGeneration !== 'string' ||
+          !workspaceGeneration
+        ) {
+          throw new Error('create_sub_session: invalid workspace binding');
+        }
+        return { workspaceCwd, workspaceGeneration };
+      },
+    );
   }
 
   #registerCurrentSessionScheduledTaskCreator(): void {

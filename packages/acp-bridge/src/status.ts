@@ -305,6 +305,7 @@ export const SERVE_CONTROL_EXT_METHODS = {
     'qwen/control/session/managed-conversation-binding/commit',
   sessionManagedConversationBindingRelease:
     'qwen/control/session/managed-conversation-binding/release',
+  resolveSubSessionWorkspace: 'qwen/control/resolve-sub-session-workspace',
   /**
    * Also called by the CHILD UP into the parent (like `clientMcpMessage`): the
    * `create_sub_session` tool, running inside a child's agent turn, asks the

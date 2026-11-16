@@ -6500,6 +6500,7 @@ async function runQwenServeImpl(
         // connection that hosts a named client MCP server (#5626).
         clientMcpSender: clientMcpSenderRegistry.lookup,
         onCreateSubSession: subSessionLauncher.launch,
+        onResolveSubSessionWorkspace: subSessionLauncher.resolveDestination,
         onCreateCurrentSessionScheduledTask:
           createCurrentSessionScheduledTaskHandler(
             boundWorkspace,
@@ -7149,6 +7150,8 @@ async function runQwenServeImpl(
         sessionAttachmentsFallbackRoot: secondaryAttachmentsRoots.fallback,
         clientMcpSender: secondaryClientMcpSenderRegistry.lookup,
         onCreateSubSession: secondarySubSessionLauncher.launch,
+        onResolveSubSessionWorkspace:
+          secondarySubSessionLauncher.resolveDestination,
         onCreateCurrentSessionScheduledTask:
           createCurrentSessionScheduledTaskHandler(
             workspaceInput.cwd,
@@ -8187,6 +8190,7 @@ async function runQwenServeImpl(
           sessionAttachmentsFallbackRoot: wsAttachmentsRoots.fallback,
           clientMcpSender: wsClientMcpRegistry.lookup,
           onCreateSubSession: wsSubSessionLauncher.launch,
+          onResolveSubSessionWorkspace: wsSubSessionLauncher.resolveDestination,
           onCreateCurrentSessionScheduledTask:
             createCurrentSessionScheduledTaskHandler(
               cwd,

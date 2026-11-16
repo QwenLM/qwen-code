@@ -60,6 +60,7 @@ import type {
 import type {
   CreateSubSessionInfo,
   CreateSubSessionResult,
+  ResolveSubSessionWorkspaceHandler,
 } from '@qwen-code/acp-bridge/bridgeOptions';
 import {
   isReservedStandaloneSessionSourceType,
@@ -157,6 +158,7 @@ export interface SubSessionLauncher {
   /** The `onCreateSubSession` callback wired into the bridge. Returns a Promise
    * the child's tool awaits. */
   launch(info: CreateSubSessionInfo): Promise<CreateSubSessionResult>;
+  resolveDestination: ResolveSubSessionWorkspaceHandler;
   /**
    * Run a launch on behalf of a caller in another workspace. The caller's
    * launcher has already run the caller-side checks; this one spawns on its
@@ -185,6 +187,8 @@ export type SubSessionWorkspaceResolution =
   | {
       kind: 'found';
       launcher: SubSessionLauncher;
+      workspaceCwd: string;
+      workspaceGeneration: string;
       assertCurrent(): void;
     }
   | { kind: 'refused'; reason: string };
@@ -234,7 +238,10 @@ export interface CreateSubSessionLauncherOptions {
 export function createSubSessionWorkspaceIndex(
   getRegistry: () => WorkspaceRegistry | undefined,
 ) {
-  const launchers = new WeakMap<WorkspaceRuntime, SubSessionLauncher>();
+  const launchers = new WeakMap<
+    WorkspaceRuntime,
+    { launcher: SubSessionLauncher; workspaceGeneration: string }
+  >();
   const nameable = (registry: WorkspaceRegistry): string =>
     registry
       .list()
@@ -247,9 +254,10 @@ export function createSubSessionWorkspaceIndex(
       .join(', ') || 'none';
   return {
     register(runtime: WorkspaceRuntime, launcher: SubSessionLauncher): void {
-      launchers.set(runtime, launcher);
+      launchers.set(runtime, { launcher, workspaceGeneration: randomUUID() });
     },
-    getLauncher: (runtime: WorkspaceRuntime) => launchers.get(runtime),
+    getLauncher: (runtime: WorkspaceRuntime) =>
+      launchers.get(runtime)?.launcher,
     resolve(selector: string): SubSessionWorkspaceResolution {
       const registry = getRegistry();
       if (!registry) {
@@ -260,8 +268,8 @@ export function createSubSessionWorkspaceIndex(
         (isPortableAbsolutePath(selector)
           ? resolveRegisteredWorkspaceRuntimeByPathSelector(registry, selector)
           : undefined);
-      const launcher = runtime && launchers.get(runtime);
-      if (!runtime || !launcher) {
+      const registered = runtime && launchers.get(runtime);
+      if (!runtime || !registered) {
         return {
           kind: 'refused',
           reason: `No registered workspace matches "${selector}". Workspaces you can use: ${nameable(registry)}.`,
@@ -275,10 +283,14 @@ export function createSubSessionWorkspaceIndex(
       }
       return {
         kind: 'found',
-        launcher,
+        ...registered,
+        workspaceCwd: runtime.workspaceCwd,
         assertCurrent() {
           runtime.generationGuard?.assertOpen();
-          if (registry.getByWorkspaceCwd(runtime.workspaceCwd) !== runtime) {
+          if (
+            registry.getByWorkspaceCwd(runtime.workspaceCwd) !== runtime ||
+            launchers.get(runtime) !== registered
+          ) {
             throw new WorkspaceGenerationClosedError();
           }
         },
@@ -948,6 +960,7 @@ export function createSubSessionLauncher(
   const run = async (
     info: CreateSubSessionInfo,
     remote?: RemoteSubSessionCaller,
+    assertLocalCurrent?: () => void,
   ): Promise<CreateSubSessionResult> => {
     if (stopAc.signal.aborted) {
       throw new Error(
@@ -1141,6 +1154,7 @@ export function createSubSessionLauncher(
       }
 
       if (!standalone) {
+        assertLocalCurrent?.();
         if (remote && stopAc.signal.aborted) {
           throw new Error('The target workspace stopped before dispatch.');
         }
@@ -1163,6 +1177,7 @@ export function createSubSessionLauncher(
           {
             promptId,
             onPromptAdmitted,
+            assertCanDispatch: assertLocalCurrent,
             ...dispatchApproval,
           },
         );
@@ -1511,11 +1526,7 @@ export function createSubSessionLauncher(
     }
   };
 
-  const launch = async (
-    info: CreateSubSessionInfo,
-  ): Promise<CreateSubSessionResult> => {
-    const { workspace, ...local } = info;
-    if (workspace === undefined) return run(local);
+  const getNamedTarget = (callerSessionId: string, workspace: string) => {
     if (stopAc.signal.aborted) {
       throw new Error(
         'The daemon is shutting down; cannot create a sub-session.',
@@ -1525,7 +1536,7 @@ export function createSubSessionLauncher(
     if (!bridge) {
       throw new Error('Session bridge is not available.');
     }
-    const caller = bridge.getSessionSummary(info.callerSessionId);
+    const caller = bridge.getSessionSummary(callerSessionId);
     if (
       isolatedWorkspace ||
       isReservedStandaloneSessionSourceType(caller.sourceType)
@@ -1534,7 +1545,7 @@ export function createSubSessionLauncher(
         'This session cannot create sub-sessions in another workspace.',
       );
     }
-    assertMayDelegate(info.callerSessionId, caller.parentSessionId);
+    assertMayDelegate(callerSessionId, caller.parentSessionId);
     if (!resolveWorkspace) {
       throw new Error(
         'Sub-sessions in another workspace are not available here.',
@@ -1552,7 +1563,42 @@ export function createSubSessionLauncher(
     const target = resolveWorkspace(workspace);
     if (target.kind === 'refused') throw new Error(target.reason);
     target.assertCurrent();
-    if (target.launcher === launcher) return run(local);
+    return { bridge, target, assertCallerCurrent };
+  };
+
+  const resolveDestination: ResolveSubSessionWorkspaceHandler = (
+    callerSessionId,
+    workspace,
+  ) => {
+    const { target } = getNamedTarget(callerSessionId, workspace);
+    return {
+      workspaceCwd: target.workspaceCwd,
+      workspaceGeneration: target.workspaceGeneration,
+    };
+  };
+
+  const launch = async (
+    info: CreateSubSessionInfo,
+  ): Promise<CreateSubSessionResult> => {
+    const { workspace, workspaceGeneration, ...local } = info;
+    if (workspace === undefined) return run(local);
+    const { bridge, target, assertCallerCurrent } = getNamedTarget(
+      info.callerSessionId,
+      workspace,
+    );
+    if (
+      !workspaceGeneration ||
+      target.workspaceGeneration !== workspaceGeneration
+    ) {
+      throw new Error('The workspace target changed. Request approval again.');
+    }
+    const assertTargetCurrent = () => {
+      assertCallerCurrent();
+      target.assertCurrent();
+    };
+    if (target.launcher === launcher) {
+      return run(local, undefined, assertTargetCurrent);
+    }
     const callerApproval = await readApprovalMode(bridge, info.callerSessionId);
     if (callerApproval.mode === undefined) {
       throw new Error(
@@ -1583,8 +1629,7 @@ export function createSubSessionLauncher(
       return await target.launcher.launchForRemoteCaller(local, {
         approvalMode: callerApproval.mode,
         assertCurrent() {
-          assertCallerCurrent();
-          target.assertCurrent();
+          assertTargetCurrent();
           callerApproval.assertCurrent();
         },
         deliverCompletion: async (notification) => {
@@ -1607,6 +1652,7 @@ export function createSubSessionLauncher(
 
   const launcher: SubSessionLauncher = {
     launch,
+    resolveDestination,
     launchForRemoteCaller: (info, caller) => run(info, caller),
     stop: (reason) => {
       stopAc.abort(reason); // tears down every active subscription → releases slots

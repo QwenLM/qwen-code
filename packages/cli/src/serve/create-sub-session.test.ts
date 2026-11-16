@@ -2297,10 +2297,18 @@ describe('sub-sessions in another workspace', () => {
           ? {
               kind: 'found',
               launcher: launcherB,
+              workspaceCwd: WS_B,
+              workspaceGeneration: 'generation-b',
               assertCurrent: assertTargetCurrent,
             }
           : selector === WS_A
-            ? { kind: 'found', launcher: launcherA, assertCurrent: () => {} }
+            ? {
+                kind: 'found',
+                launcher: launcherA,
+                workspaceCwd: WS_A,
+                workspaceGeneration: 'generation-a',
+                assertCurrent: () => {},
+              }
             : {
                 kind: 'refused',
                 reason: `No registered workspace matches "${selector}".`,
@@ -2331,6 +2339,7 @@ describe('sub-sessions in another workspace', () => {
           prompt: 'p',
           completion: 'first-turn',
           workspace: WS_B,
+          workspaceGeneration: 'generation-b',
           callerSessionId: 'caller',
         }),
       ).rejects.toThrow('Cannot combine caller approval mode');
@@ -2341,10 +2350,14 @@ describe('sub-sessions in another workspace', () => {
 
   it('first-turn: runs in the target workspace and returns its result', async () => {
     const { a, b, launcherA } = twoWorkspaces();
+    const binding = launcherA.resolveDestination('caller', WS_B);
+    expect(binding.workspaceCwd).toBe(WS_B);
+    expect(b.spawns).toEqual([]);
     const res = await launcherA.launch({
       prompt: 'read QWEN.md',
       completion: 'first-turn',
       workspace: WS_B,
+      workspaceGeneration: binding.workspaceGeneration,
       callerSessionId: 'caller',
     });
     expect(res).toMatchObject({
@@ -2382,6 +2395,7 @@ describe('sub-sessions in another workspace', () => {
       prompt: 'p',
       completion: 'first-turn',
       workspace: WS_B,
+      workspaceGeneration: 'generation-b',
       callerSessionId: 'caller',
     });
     expect(b.modeChanges).toEqual([]);
@@ -2393,6 +2407,7 @@ describe('sub-sessions in another workspace', () => {
       prompt: 'p',
       completion: 'sent',
       workspace: WS_B,
+      workspaceGeneration: 'generation-b',
       callerSessionId: 'caller',
     });
     expect(res.sessionId).toBe('sub-1');
@@ -2418,6 +2433,7 @@ describe('sub-sessions in another workspace', () => {
       prompt: 'p',
       completion: 'sent',
       workspace: WS_B,
+      workspaceGeneration: 'generation-b',
       callerSessionId: 'caller',
     });
     await vi.waitFor(() => expect(b.subscriptions).toHaveLength(1));
@@ -2445,6 +2461,7 @@ describe('sub-sessions in another workspace', () => {
       prompt: 'p',
       completion: 'first-turn',
       workspace: WS_B,
+      workspaceGeneration: 'generation-b',
       callerSessionId: 'caller',
     });
     await modeChangeStarted;
@@ -2472,6 +2489,7 @@ describe('sub-sessions in another workspace', () => {
           prompt: 'read QWEN.md',
           completion: 'first-turn',
           workspace: WS_B,
+          workspaceGeneration: 'generation-b',
           callerSessionId: 'caller',
         }),
       ).rejects.toThrow('approval mode changed during delegation');
@@ -2484,7 +2502,12 @@ describe('sub-sessions in another workspace', () => {
     const { b, launcherA } = twoWorkspaces({
       canAcceptBackgroundNotifications: false,
     });
-    const input = { prompt: 'p', workspace: WS_B, callerSessionId: 'caller' };
+    const input = {
+      prompt: 'p',
+      workspace: WS_B,
+      workspaceGeneration: 'generation-b',
+      callerSessionId: 'caller',
+    };
     await expect(
       launcherA.launch({ ...input, completion: 'sent' }),
     ).rejects.toThrow('requires chat recording');
@@ -2508,6 +2531,7 @@ describe('sub-sessions in another workspace', () => {
     const input = {
       prompt: 'p',
       workspace: WS_B,
+      workspaceGeneration: 'generation-b',
       callerSessionId: 'caller',
       completion: 'sent' as const,
     };
@@ -2536,6 +2560,7 @@ describe('sub-sessions in another workspace', () => {
       prompt: 'p',
       completion: 'sent',
       workspace: WS_A,
+      workspaceGeneration: 'generation-a',
       callerSessionId: 'caller',
     });
     expect(a.spawns).toHaveLength(1);
@@ -2588,6 +2613,7 @@ describe('sub-sessions in another workspace', () => {
           prompt: 'p',
           completion: 'first-turn',
           workspace: WS_B,
+          workspaceGeneration: 'generation-b',
           callerSessionId: 'caller',
         }),
       ).rejects.toThrow('did not report its approval mode');
@@ -2602,6 +2628,7 @@ describe('sub-sessions in another workspace', () => {
         prompt: 'p',
         completion: 'first-turn',
         workspace: WS_B,
+        workspaceGeneration: 'generation-b',
         callerSessionId: 'caller',
       }),
     ).rejects.toThrow('did not report its approval mode');
@@ -2618,6 +2645,7 @@ describe('sub-sessions in another workspace', () => {
         prompt: 'p',
         completion: 'first-turn',
         workspace: WS_B,
+        workspaceGeneration: 'generation-b',
         callerSessionId: 'caller',
       }),
     ).rejects.toThrow('cannot create sub-sessions in another workspace');
@@ -2664,6 +2692,7 @@ describe('sub-sessions in another workspace', () => {
         prompt: 'p',
         completion: 'first-turn',
         workspace: WS_B,
+        workspaceGeneration: 'generation-b',
         callerSessionId: 'caller',
       }),
     ).rejects.toThrow('cannot create sub-sessions in another workspace');
@@ -2676,6 +2705,7 @@ describe('sub-sessions in another workspace', () => {
       prompt: 'p',
       completion: 'first-turn',
       workspace: WS_B,
+      workspaceGeneration: 'generation-b',
       callerSessionId: 'caller',
     });
     await expect(
@@ -2751,6 +2781,43 @@ describe('sub-session workspace index', () => {
     runtimes[0] = runtime('/tmp/ws-a', true);
     expect(() => target.assertCurrent()).toThrow('no longer active');
     expect(index.resolve('/tmp/ws-a')).toMatchObject({ kind: 'refused' });
+  });
+
+  it('requires renewed approval when a runtime is replaced under the same selector', async () => {
+    const callerCwd = '/tmp/ws-a';
+    const targetCwd = '/tmp/ws-b';
+    const runtimes = [runtime(callerCwd, true), runtime(targetCwd, true)];
+    const { index } = indexOf(runtimes);
+    const caller = createSubSessionLauncher({
+      getBridge: () => runtimes[0]!.bridge,
+      boundWorkspace: callerCwd,
+      resolveWorkspace: index.resolve,
+      isTrusted: (bridge) => index.isTrusted(callerCwd, bridge),
+    });
+    const selector = runtimes[1]!.workspaceId;
+    const approval = caller.resolveDestination('caller', selector);
+    const replacement = makeFakeBridge();
+    const newRuntime = { ...runtimes[1]!, bridge: replacement.bridge };
+    runtimes[1] = newRuntime;
+    index.register(
+      newRuntime as WorkspaceRuntime,
+      createSubSessionLauncher({
+        getBridge: () => replacement.bridge,
+        boundWorkspace: targetCwd,
+      }),
+    );
+
+    await expect(
+      caller.launch({
+        callerSessionId: 'caller',
+        workspace: selector,
+        workspaceGeneration: approval.workspaceGeneration,
+        completion: 'sent',
+        prompt: 'summarize',
+      }),
+    ).rejects.toThrow('Request approval again');
+    expect(replacement.spawns).toEqual([]);
+    expect(replacement.prompts).toEqual([]);
   });
 
   it('refuses an unknown or untrusted workspace and lists the ones that can be named', () => {

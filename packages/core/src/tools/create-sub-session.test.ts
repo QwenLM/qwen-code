@@ -9,11 +9,16 @@ import {
   CreateSubSessionTool,
   MAX_SUB_SESSION_PROMPT_CHARS,
 } from './create-sub-session.js';
+import { ToolConfirmationOutcome } from './tools.js';
 import type { Config, SubSessionSpawner } from '../config/config.js';
 
 function makeConfig(spawner?: SubSessionSpawner): Config {
   return {
     getSubSessionSpawner: () => spawner,
+    getSubSessionWorkspaceResolver: () => async () => ({
+      workspaceCwd: '/canonical/other repo',
+      workspaceGeneration: 'generation-b',
+    }),
   } as unknown as Config;
 }
 
@@ -42,7 +47,16 @@ describe('CreateSubSessionTool', () => {
     }));
     const tool = new CreateSubSessionTool(makeConfig(spawner));
     const invocation = tool.build({ prompt: 'do X', workspace: '/repos/b' });
-    expect(invocation.getDescription()).toBe('[first-turn] in /repos/b: do X');
+    const signal = new AbortController().signal;
+    const confirmation = await invocation.getConfirmationDetails(signal);
+    expect(invocation.getDescription()).toBe(
+      '[first-turn] in "/canonical/other repo": do X',
+    );
+    expect((await invocation.execute(signal)).error?.message).toContain(
+      'requires one-time approval',
+    );
+    expect(spawner).not.toHaveBeenCalled();
+    await confirmation!.onConfirm(ToolConfirmationOutcome.ProceedOnce);
     expect(
       tool.toAutoClassifierInput({ prompt: 'do X', workspace: '/repos/b' }),
     ).toMatchObject({ workspace: '/repos/b' });
@@ -51,7 +65,12 @@ describe('CreateSubSessionTool', () => {
       prompt: 'do X',
       completion: 'first-turn',
       workspace: '/repos/b',
+      workspaceGeneration: 'generation-b',
     });
+    expect((await invocation.execute(signal)).error?.message).toContain(
+      'requires one-time approval',
+    );
+    expect(spawner).toHaveBeenCalledOnce();
     expect(res.returnDisplay).toContain(
       'qwen-session://sub-1?workspace=%2Fcanonical%2Fother+repo)',
     );
@@ -66,7 +85,7 @@ describe('CreateSubSessionTool', () => {
     expect(remote.requiresUserInteraction?.()).toBe(true);
     expect(await remote.getConfirmationDetails(signal)).toMatchObject({
       type: 'exec',
-      title: '[first-turn] in /repos/b: do X',
+      title: '[first-turn] in "/canonical/other repo": do X',
       command: 'do X',
       hideAlwaysAllow: true,
       permissionRules: [],

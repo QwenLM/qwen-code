@@ -710,6 +710,8 @@ export interface BridgeOptions {
    * reports itself unavailable (daemon-only).
    */
   onCreateSubSession?: CreateSubSessionHandler;
+  /** Resolve the destination shown in the caller's one-time approval. */
+  onResolveSubSessionWorkspace?: ResolveSubSessionWorkspaceHandler;
   /** Handles a trusted `cron_create` request to bind a durable task to the
    * caller's currently executing daemon session. */
   onCreateCurrentSessionScheduledTask?: CurrentSessionScheduledTaskCreateHandler;
@@ -770,6 +772,7 @@ export interface CreateSubSessionInfo {
    * Absent means the caller's workspace. Never set for scheduled-task runs.
    */
   workspace?: string;
+  workspaceGeneration?: string;
   /** Optional immutable creator attribution for the fresh session. */
   sourceType?: string;
   /** Optional source-specific identifier paired with `sourceType`. */
@@ -802,6 +805,11 @@ export interface CreateSubSessionResult {
 export type CreateSubSessionHandler = (
   info: CreateSubSessionInfo,
 ) => Promise<CreateSubSessionResult>;
+
+export type ResolveSubSessionWorkspaceHandler = (
+  callerSessionId: string,
+  workspace: string,
+) => { workspaceCwd: string; workspaceGeneration: string };
 
 export interface CurrentSessionScheduledTaskCreateInfo {
   callerSessionId: string;

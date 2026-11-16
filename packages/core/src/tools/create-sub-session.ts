@@ -32,9 +32,14 @@ import type {
   ToolInvocation,
   ToolResult,
 } from './tools.js';
-import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
+import {
+  BaseDeclarativeTool,
+  BaseToolInvocation,
+  Kind,
+  ToolConfirmationOutcome,
+} from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
-import type { Config } from '../config/config.js';
+import type { Config, SubSessionWorkspaceBinding } from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import {
   MAX_SUB_SESSION_PROMPT_CHARS,
@@ -104,6 +109,9 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
   CreateSubSessionParams,
   ToolResult
 > {
+  private destination?: SubSessionWorkspaceBinding;
+  private approvedGeneration?: string;
+
   constructor(
     private config: Config,
     params: CreateSubSessionParams,
@@ -119,8 +127,9 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
     // eslint-disable-next-line no-control-regex -- stripping C0 control chars
     const cleaned = raw.replace(/[\r\n\t\x00-\x1f]/g, ' ').trim();
     const label = cleaned.length > 80 ? cleaned.slice(0, 77) + '…' : cleaned;
-    return this.params.workspace
-      ? `[${mode}] in ${this.params.workspace}: ${label}`
+    const workspace = this.destination?.workspaceCwd ?? this.params.workspace;
+    return workspace
+      ? `[${mode}] in ${JSON.stringify(workspace)}: ${label}`
       : `[${mode}] ${label}`;
   }
 
@@ -147,6 +156,12 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
     if (this.params.workspace === undefined) {
       return super.getConfirmationDetails(abortSignal);
     }
+    const resolveWorkspace = this.config.getSubSessionWorkspaceResolver();
+    if (!resolveWorkspace) throw new Error(DAEMON_ONLY_MESSAGE);
+
+    const destination = await resolveWorkspace(this.params.workspace);
+    abortSignal.throwIfAborted();
+    this.destination = destination;
     return {
       type: 'exec',
       title: this.getDescription(),
@@ -155,7 +170,13 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
       // A tool-wide rule cannot record which workspace the user approved.
       hideAlwaysAllow: true,
       permissionRules: [],
-      onConfirm: async () => {},
+      onConfirm: async (outcome) => {
+        this.approvedGeneration =
+          outcome === ToolConfirmationOutcome.ProceedOnce ||
+          outcome === ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault
+            ? destination.workspaceGeneration
+            : undefined;
+      },
     };
   }
 
@@ -179,14 +200,19 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
 
     try {
       const res = await raceCancellation(() => {
+        const workspaceGeneration = this.approvedGeneration;
+        this.approvedGeneration = undefined;
+        if (this.params.workspace !== undefined && !workspaceGeneration) {
+          throw new Error('A named workspace requires one-time approval.');
+        }
         spawnStarted = true;
         return spawner({
           prompt,
           completion,
           ...(this.params.model ? { model: this.params.model } : {}),
           ...(this.params.name ? { name: this.params.name } : {}),
-          ...(this.params.workspace
-            ? { workspace: this.params.workspace }
+          ...(this.params.workspace !== undefined
+            ? { workspace: this.params.workspace, workspaceGeneration }
             : {}),
         });
       }, signal);

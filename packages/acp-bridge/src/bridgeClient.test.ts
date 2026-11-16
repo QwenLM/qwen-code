@@ -1735,11 +1735,13 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
       workspaceCwd: '/repos/b',
     }));
     const client = makeClientWithCreateSubSession(onCreate);
+    const workspaceGeneration = '5103aa8c-9a6e-4ad6-9b3b-7c765cdcbee5';
     await expect(
       client.extMethod(METHOD, {
         prompt: 'go',
         completion: 'sent',
         workspace: 'workspace-id',
+        workspaceGeneration,
         callerSessionId: 'caller-1',
       }),
     ).resolves.toEqual({ sessionId: 'sub-11', workspaceCwd: '/repos/b' });
@@ -1747,9 +1749,13 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
       prompt: 'go',
       completion: 'sent',
       workspace: 'workspace-id',
+      workspaceGeneration,
       callerSessionId: 'caller-1',
     });
     for (const extra of [
+      { workspace: 'workspace-id' },
+      { workspaceGeneration },
+      { workspace: 'workspace-id', workspaceGeneration: '' },
       { workspace: '' },
       { workspace: 7 },
       { workspace: 'a\u0000b' },

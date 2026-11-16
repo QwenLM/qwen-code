@@ -23187,7 +23187,12 @@ describe('Session', () => {
         data: { details: 'No registered workspace matches "/x".' },
       });
       await expect(
-        spawn?.({ prompt: 'p', completion: 'first-turn', workspace: '/x' }),
+        spawn?.({
+          prompt: 'p',
+          completion: 'first-turn',
+          workspace: '/x',
+          workspaceGeneration: 'generation-x',
+        }),
       ).rejects.toThrow('No registered workspace matches "/x".');
       expect(mockClient.extMethod).toHaveBeenLastCalledWith(
         SERVE_CONTROL_EXT_METHODS.createSubSession,
@@ -23195,6 +23200,7 @@ describe('Session', () => {
           prompt: 'p',
           completion: 'first-turn',
           workspace: '/x',
+          workspaceGeneration: 'generation-x',
           callerSessionId: 'test-session-id',
         },
       );
@@ -23203,12 +23209,34 @@ describe('Session', () => {
     it('returns the resolved workspace from the daemon', async () => {
       const spawn = vi.mocked(mockConfig.setSubSessionSpawner).mock
         .calls[0]?.[0];
-      vi.mocked(mockClient.extMethod).mockResolvedValueOnce({
-        sessionId: 'child-id',
+      const resolveWorkspace = vi.mocked(mockConfig.setSubSessionSpawner).mock
+        .calls[0]?.[1];
+      expect(resolveWorkspace).toBeTypeOf('function');
+      vi.mocked(mockClient.extMethod)
+        .mockResolvedValueOnce({
+          workspaceCwd: '/repos/b',
+          workspaceGeneration: 'generation-b',
+        })
+        .mockResolvedValueOnce({
+          sessionId: 'child-id',
+          workspaceCwd: '/repos/b',
+        });
+      const destination = await resolveWorkspace?.('b-id');
+      expect(destination).toEqual({
         workspaceCwd: '/repos/b',
+        workspaceGeneration: 'generation-b',
       });
+      expect(mockClient.extMethod).toHaveBeenLastCalledWith(
+        SERVE_CONTROL_EXT_METHODS.resolveSubSessionWorkspace,
+        { workspace: 'b-id', callerSessionId: 'test-session-id' },
+      );
       await expect(
-        spawn?.({ prompt: 'p', completion: 'first-turn', workspace: 'b-id' }),
+        spawn?.({
+          prompt: 'p',
+          completion: 'first-turn',
+          workspace: 'b-id',
+          workspaceGeneration: destination?.workspaceGeneration,
+        }),
       ).resolves.toEqual({ sessionId: 'child-id', workspaceCwd: '/repos/b' });
     });
 
@@ -23252,7 +23280,11 @@ describe('Session', () => {
     ])(
       'honors sub-session approval for $label',
       async ({ mode, deny, local, persist, asks, launches }) => {
-        const workspace = '/repo-b';
+        const workspace = 'repo-b-id';
+        const resolveWorkspace = vi.fn().mockResolvedValue({
+          workspaceCwd: '/repo-b',
+          workspaceGeneration: 'generation-b',
+        });
         const toolName = core.ToolNames.CREATE_SUB_SESSION;
         const args = { prompt: 'summarize', ...(local ? {} : { workspace }) };
         const spawn = vi.fn().mockResolvedValue({ sessionId: 'child-id' });
@@ -23270,6 +23302,9 @@ describe('Session', () => {
         mockConfig.getPermissionManager = vi.fn(() => pm);
         mockConfig.getOnPersistPermissionRule = vi.fn(() => persistRule);
         mockConfig.getSubSessionSpawner = vi.fn(() => spawn);
+        mockConfig.getSubSessionWorkspaceResolver = vi.fn(
+          () => resolveWorkspace,
+        );
         mockConfig.getDisableAllHooks = vi.fn(() => false);
         mockConfig.getMessageBus = vi.fn().mockReturnValue({});
         vi.spyOn(core, 'firePreToolUseHook').mockResolvedValue({
@@ -23313,6 +23348,11 @@ describe('Session', () => {
         if (asks) {
           const { options, toolCall } = request.mock.calls[0]![0];
           expect(toolCall.rawInput).toEqual(args);
+          expect(toolCall.title).toBe('[first-turn] in "/repo-b": summarize');
+          expect(resolveWorkspace).toHaveBeenCalledExactlyOnceWith(workspace);
+          expect(resolveWorkspace.mock.invocationCallOrder[0]).toBeLessThan(
+            request.mock.invocationCallOrder[0],
+          );
           expect(
             options.map((option: PermissionOption) => option.optionId),
           ).toEqual([
@@ -23323,6 +23363,7 @@ describe('Session', () => {
         if (launches) {
           expect(spawn).toHaveBeenCalledExactlyOnceWith({
             ...args,
+            ...(local ? {} : { workspaceGeneration: 'generation-b' }),
             completion: 'first-turn',
           });
           if (asks) {

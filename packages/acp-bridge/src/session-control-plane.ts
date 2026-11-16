@@ -5086,6 +5086,7 @@ export function createSessionControlPlane(
           runtimeBaseDir: opts.artifactSnapshotRuntimeBaseDir,
         }).setLastUserPromptAt(entry.sessionId, timestamp);
       },
+      opts.onResolveSubSessionWorkspace,
     );
     const connection = harness.createConnection(client, channel);
     // Add to `aliveChannels` + register the `channel.exited` handler

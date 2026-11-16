@@ -65,15 +65,18 @@ for the caller's own workspace uses the same-runtime execution and
 completion path.
 
 Each call with a named workspace requires one-time human approval in the
-calling session. The confirmation shows the destination selector. Deny rules
-still apply. Existing permanent grants continue to apply to calls that omit
-the selector.
+calling session. The daemon resolves the selector before the confirmation,
+which shows the registered workspace's path. Approval is for that runtime
+generation. If the selector resolves to a different runtime at launch, the
+caller must request approval again. Deny rules still apply. Existing permanent
+grants continue to apply to calls that omit the selector.
 
 ### Resolving the target
 
-The request travels as it does today: the tool, then the session's spawner,
-then the `qwen/control/create-sub-session` ext method, then the caller's
-launcher. The launchers are registered by runtime generation. The
+The tool resolves the destination via `qwen/control/resolve-sub-session-workspace`
+before asking for approval. The approved launch request travels through the
+session's spawner and the `qwen/control/create-sub-session` ext method to the
+caller's launcher. The launchers are registered by runtime generation. The
 caller's launcher runs the caller-side checks: the depth gate, the
 standalone and Live refusal, and the caller's trust. It then hands the
 launch to the target workspace's launcher, which spawns, prompts and waits
