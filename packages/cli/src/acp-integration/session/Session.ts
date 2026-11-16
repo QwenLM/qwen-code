@@ -5475,7 +5475,16 @@ export class Session implements SessionContext {
     items: readonly QueuedBackgroundNotification[] = this.notificationQueue,
   ): void {
     const recording = this.config.getChatRecordingService();
-    if (!recording) return;
+    if (!recording) {
+      for (const item of items) {
+        if (item.kind !== 'peer' || item.persisted) continue;
+        debugLogger.warn(
+          `Peer report lost: no recording service available for task=${item.taskId}`,
+        );
+        this.droppedNotifications.record(toAdmissibleNotification(item));
+      }
+      return;
+    }
     for (const item of items) {
       if (item.kind !== 'peer' || item.persisted) continue;
       // Only cold copies get the task envelope: recovery trims these because

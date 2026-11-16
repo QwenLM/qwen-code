@@ -1763,6 +1763,32 @@ describe('Session', () => {
       session.dispose();
     });
 
+    it('records a dropped tally when a sealed peer report has no recorder', async () => {
+      // A hidden-workspace session has no recording service, so a report that
+      // arrives after the seal used to vanish without trace. The loss is now
+      // at least visible in the dropped summary.
+      const manager = makeFakeTeamManager();
+      session.dispose();
+      vi.mocked(mockConfig.isAgentTeamEnabled).mockReturnValue(true);
+      vi.mocked(mockConfig.getTeamManager).mockReturnValue(manager as never);
+      vi.mocked(mockConfig.getChatRecordingService).mockReturnValue(undefined);
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+      session.beginClose();
+
+      await session.flushPendingPeerNotifications();
+      manager.leaderCallback?.('late report', 'late report', ['security']);
+
+      const tally = session.droppedNotifications.take();
+      expect(tally).toBeDefined();
+      expect(tally!.modelText).toContain('teammate report');
+      session.dispose();
+    });
+
     it('quiesces the leader inbox before sealing so an in-flight report survives', async () => {
       // The 500 ms poll marks a mailbox row read as it consumes it, so a
       // report delivered after the seal is read on disk, landed into a writer
