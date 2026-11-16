@@ -31,6 +31,7 @@ import {
 import { projectUserTranscriptForDisplay } from '../utils/transcript-records.js';
 import type {
   ChatRecord,
+  CustomTitleRecordPayload,
   FileHistorySnapshotRecordPayload,
   TitleSource,
   UiTelemetryRecordPayload,
@@ -3918,16 +3919,43 @@ export class SessionService {
         if (
           !complete ||
           !records.length ||
-          records.some(
-            (record) =>
-              record?.sessionId !== sessionId ||
-              record.type !== 'system' ||
-              (record.subtype !== 'parent_session' &&
-                record.subtype !== 'session_source' &&
-                record.subtype !== 'session_execution_engine' &&
-                record.subtype !== 'session_model' &&
-                record.subtype !== 'session_approval_mode'),
-          )
+          records.some((record) => {
+            if (record?.sessionId !== sessionId || record.type !== 'system') {
+              return true;
+            }
+            if (record.subtype === 'custom_title') {
+              const title = record.systemPayload as
+                | CustomTitleRecordPayload
+                | undefined;
+              return title?.titleSource !== 'auto';
+            }
+            return (
+              record.subtype !== 'parent_session' &&
+              record.subtype !== 'session_source' &&
+              record.subtype !== 'session_execution_engine' &&
+              record.subtype !== 'session_model' &&
+              record.subtype !== 'session_approval_mode'
+            );
+          })
+        ) {
+          return false;
+        }
+        const titlePath = this.getSessionTitleSidecarPathForState(
+          sessionId,
+          'active',
+        );
+        if (
+          readSessionTitleSidecar(titlePath)?.source !== 'auto' &&
+          fs.lstatSync(titlePath, { throwIfNoEntry: false })
+        ) {
+          return false;
+        }
+        const organization = Storage.runWithResolvedRuntimeBaseDir(
+          this.storage.getRuntimeBaseDir(),
+          () => new SessionOrganizationService(this.projectRoot),
+        );
+        if (
+          (await organization.hasStoredSessionOrganization(sessionId)) !== false
         ) {
           return false;
         }

@@ -14,8 +14,16 @@ import {
   ACTIVE_WORK_CLOSE_TIMEOUT_MS,
   type AcpSessionBridge,
 } from '@qwen-code/acp-bridge/bridgeTypes';
-import { SessionService, Storage } from '@qwen-code/qwen-code-core';
+import {
+  SessionOrganizationService,
+  SessionService,
+  Storage,
+} from '@qwen-code/qwen-code-core';
 import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
+import {
+  sessionTitleSidecarPath,
+  writeSessionTitleSidecar,
+} from '@qwen-code/qwen-code-core/services/session-title-sidecar.js';
 import { SessionArchiveCoordinator } from './server/session-archive.js';
 import type { WorkspaceRuntime } from './workspace-registry.js';
 
@@ -2656,6 +2664,13 @@ describe('sub-sessions in another workspace', () => {
 
   it.each([
     'startup',
+    'auto title',
+    'manual title',
+    'manual title sidecar',
+    'unreadable title sidecar',
+    'organized',
+    'unreadable organization',
+    'malformed organization',
     'user',
     'incomplete',
     'active writer',
@@ -2692,13 +2707,78 @@ describe('sub-sessions in another workspace', () => {
           type: 'user',
           message: { role: 'user', parts: [{ text: 'Target user history' }] },
         };
-        const records = state === 'user' ? [startup, user] : [startup];
+        const title = {
+          ...startup,
+          uuid: randomUUID(),
+          parentUuid: startupId,
+          subtype: 'custom_title',
+          systemPayload: {
+            customTitle: 'Child name',
+            titleSource: state === 'auto title' ? 'auto' : 'manual',
+          },
+        };
+        const records = [
+          startup,
+          ...(state === 'user' ? [user] : []),
+          ...(state === 'auto title' || state === 'manual title'
+            ? [title]
+            : []),
+        ];
         const history =
           records.map((record) => JSON.stringify(record)).join('\n') +
           '\n' +
           (state === 'incomplete' ? '{"type":' : '');
         await mkdir(path.dirname(transcript), { recursive: true });
         await writeFile(transcript, history);
+        const titleSidecar = sessionTitleSidecarPath(
+          path.dirname(transcript),
+          sessionId,
+        );
+        if (state === 'auto title' || state === 'manual title sidecar') {
+          expect(
+            writeSessionTitleSidecar(
+              titleSidecar,
+              'Child name',
+              state === 'auto title' ? 'auto' : 'manual',
+            ),
+          ).toBe(true);
+        }
+        if (state === 'unreadable title sidecar') {
+          await writeFile(titleSidecar, '{');
+        }
+        const preserveTitle =
+          state === 'manual title sidecar' ||
+          state === 'unreadable title sidecar';
+        const previousTitle = preserveTitle
+          ? await readFile(titleSidecar, 'utf8')
+          : undefined;
+        const organization = Storage.runWithResolvedRuntimeBaseDir(
+          runtimeBaseDir,
+          () => new SessionOrganizationService(WS_B),
+        );
+        if (state === 'organized') {
+          const group = await organization.createGroup({
+            name: 'Test group',
+            color: 'blue',
+          });
+          await organization.updateSessionOrganization(sessionId, {
+            groupId: group.id,
+            isPinned: true,
+          });
+        }
+        if (state === 'unreadable organization') {
+          await writeFile(organization.getStorePath(), '{');
+        }
+        if (state === 'malformed organization') {
+          await writeFile(
+            organization.getStorePath(),
+            JSON.stringify({ schemaVersion: 1, groups: [], sessions: [] }),
+          );
+        }
+        const previousOrganization =
+          state === 'organized'
+            ? (await organization.readSnapshot()).sessions.get(sessionId)
+            : undefined;
         const { b, launcherA, archiveCoordinator, retireTarget } =
           twoWorkspaces({
             targetRuntimeBaseDir: runtimeBaseDir,
@@ -2751,12 +2831,27 @@ describe('sub-sessions in another workspace', () => {
 
         expect(b.kills).toEqual([]);
         const read = readFile(transcript, 'utf8');
-        if (state !== 'startup') {
+        if (state !== 'startup' && state !== 'auto title') {
           await expect(read).resolves.toBe(history);
           expect(b.bridge.markSessionCatalogChanged).not.toHaveBeenCalled();
         } else {
           await expect(read).rejects.toMatchObject({ code: 'ENOENT' });
           expect(b.bridge.markSessionCatalogChanged).toHaveBeenCalledOnce();
+        }
+        if (state === 'organized') {
+          expect(
+            (await organization.readSnapshot()).sessions.get(sessionId),
+          ).toEqual(previousOrganization);
+        }
+        if (state === 'auto title') {
+          await expect(readFile(titleSidecar)).rejects.toMatchObject({
+            code: 'ENOENT',
+          });
+        }
+        if (preserveTitle) {
+          await expect(readFile(titleSidecar, 'utf8')).resolves.toBe(
+            previousTitle,
+          );
         }
       } finally {
         await rm(runtimeBaseDir, { force: true, recursive: true });
