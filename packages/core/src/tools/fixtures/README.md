@@ -1,6 +1,6 @@
 # Edit stale-recovery fixtures
 
-`edit-stale-recovery.json` selects two unchanged anonymous case objects from
+`edit-stale-recovery.json` selects three unchanged anonymous case objects from
 [QwenLM/qwen-code PR #17216](https://github.com/QwenLM/qwen-code/pull/17216),
 commit `405575cfe2c1bf08ae77b96447889d12b7ddac34`:
 
@@ -17,7 +17,10 @@ the final newline. The test seeds the previous Read, recreates drift locally,
 and exercises the current exact-target recovery contract while preserving that
 external change. `noMatch` is case-021, an excerpt without a previous snapshot;
 its replay checks the ordinary fresh-file no-occurrence error and unchanged
-bytes, without inventing an external-change sequence.
+bytes, without inventing an external-change sequence. `noMatchRecoverable` is
+case-004, an excerpt with an independent recovery oracle; its replay verifies
+bounded failure-candidate localization and retrying without an intervening
+Read.
 
 These were observed failures, not verified successful production recoveries.
 The tests specify current tool behavior on the published anonymous data; they

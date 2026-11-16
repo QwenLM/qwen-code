@@ -75,6 +75,7 @@ import { safeLiteralReplace } from '../utils/textUtils.js';
 import {
   countOccurrences,
   extractEditSnippet,
+  findEditRecoveryCandidates,
   findLineBasedMatchOffsets,
   maybeAugmentOldStringForDeletion,
   normalizeEditStrings,
@@ -87,6 +88,8 @@ import { backgroundFixHolding } from './autofix-pr-grants.js';
 import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
 
 const debugLogger = createDebugLogger('EDIT_PRIOR_READ');
+const EDIT_FAILURE_CONTEXT_MAX_LINES = 120;
+const EDIT_FAILURE_CONTEXT_MAX_BYTES = 16 * 1024;
 
 export function applyReplacement(
   currentContent: string | null,
@@ -209,6 +212,11 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     if (!pm) {
       return true;
     }
+    if (
+      (await pm.getToolRegistrationStatus?.(ToolNames.READ_FILE)) === 'disabled'
+    ) {
+      return false;
+    }
     const pmCtx = buildPermissionCheckContext(
       ToolNames.READ_FILE,
       { file_path: filePath },
@@ -220,6 +228,52 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       pmCtx,
     );
     return finalPermission === 'allow' && !pmForcedAsk;
+  }
+
+  private withFailureContext(
+    error: { display: string; raw: string; type: ToolErrorType },
+    currentContent: string | null,
+    oldString: string,
+  ): { display: string; raw: string; type: ToolErrorType } {
+    if (!currentContent || !oldString) {
+      return error;
+    }
+    const normalizedContent = currentContent.replace(/\r\n/g, '\n');
+    const candidates = findEditRecoveryCandidates(
+      normalizedContent,
+      oldString.replace(/\r\n/g, '\n'),
+    );
+    if (candidates.length === 0) {
+      return error;
+    }
+    if (candidates.length > 1) {
+      const locations = candidates
+        .map((item) => `${item.startLine}-${item.endLine}`)
+        .join(', ');
+      return {
+        ...error,
+        raw: `${error.raw}\nPossible target line ranges: ${locations}. Read and disambiguate the target before retrying.`,
+      };
+    }
+    const candidate = candidates[0];
+    const text = normalizedContent.slice(candidate.start, candidate.end);
+    const lineCount = candidate.endLine - candidate.startLine + 1;
+    const guidance = `Read the target with ${ReadFileTool.Name}({file_path: ${JSON.stringify(this.params.file_path)}, offset: ${candidate.startLine - 1}, limit: ${Math.min(lineCount, EDIT_FAILURE_CONTEXT_MAX_LINES)}}).`;
+    const diagnostic =
+      candidate.mismatchLine === undefined
+        ? 'The submitted old_string occurs in the current file. Review this target before retrying.'
+        : `The submitted old_string differs from this candidate at file line ${candidate.mismatchLine}. This is a suggestion, not an applied match.`;
+    let block = `${diagnostic}\nCurrent candidate, lines ${candidate.startLine}-${candidate.endLine}:\n<current_edit_target>\n${text}\n</current_edit_target>`;
+    if (
+      lineCount > EDIT_FAILURE_CONTEXT_MAX_LINES ||
+      Buffer.byteLength(block, 'utf8') > EDIT_FAILURE_CONTEXT_MAX_BYTES
+    ) {
+      block = `${diagnostic}\nCandidate spans lines ${candidate.startLine}-${candidate.endLine}. ${guidance}`;
+    }
+    return {
+      ...error,
+      raw: `${error.raw}\n\n${block}`,
+    };
   }
 
   toolLocations(): ToolLocation[] {
@@ -264,6 +318,15 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     let recoveredFromStale = false;
     let staleSnapshot: StaleFileSnapshot | undefined;
     let staleRejection: PriorReadFailure | undefined;
+    let autoReadAllowed: boolean | undefined;
+    const isAutoReadAllowed = async (): Promise<boolean> => {
+      if (autoReadAllowed === undefined) {
+        autoReadAllowed = await this.canAutoReadFileForStaleRecovery(
+          params.file_path,
+        );
+      }
+      return autoReadAllowed;
+    };
     // Prior-read enforcement runs before any content is read so that
     // the read pipeline below (and the content-derived error codes
     // it can produce — NO_OCCURRENCE_FOUND, EXPECTED_OCCURRENCE_MISMATCH,
@@ -282,7 +345,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         params.old_string !== '' &&
         params.old_string !== params.new_string &&
         !(this.confirmationCompleted && !this.confirmedStaleSnapshot) &&
-        (await this.canAutoReadFileForStaleRecovery(params.file_path));
+        (await isAutoReadAllowed());
       const decision = await checkPriorRead(
         this.config.getFileReadCache(),
         params.file_path,
@@ -467,11 +530,19 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         staleRejection &&
         (occurrences !== 1 || finalOldString === finalNewString)
       ) {
-        error = {
+        const baseError = {
           display: staleRejection.displayMessage,
           raw: staleRejection.rawMessage,
           type: staleRejection.type,
         };
+        error =
+          finalOldString !== finalNewString && (await isAutoReadAllowed())
+            ? this.withFailureContext(
+                baseError,
+                currentContent,
+                params.old_string,
+              )
+            : baseError;
       } else if (params.old_string === '') {
         // Error: Trying to create a file that already exists
         error = {
@@ -480,11 +551,19 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
           type: ToolErrorType.ATTEMPT_TO_CREATE_EXISTING_FILE,
         };
       } else if (occurrences === 0) {
-        error = {
+        const baseError = {
           display: `Failed to edit, could not find the string to replace.`,
           raw: `Failed to edit, 0 occurrences found for old_string in ${params.file_path}. No edits made. The exact text in old_string was not found. Ensure you're not escaping content incorrectly and check whitespace, indentation, and context. Use ${ReadFileTool.Name} tool to verify.`,
           type: ToolErrorType.EDIT_NO_OCCURRENCE_FOUND,
         };
+        error =
+          !this.config.getFileReadCacheDisabled() && (await isAutoReadAllowed())
+            ? this.withFailureContext(
+                baseError,
+                currentContent,
+                params.old_string,
+              )
+            : baseError;
       } else if (!replaceAll && occurrences > 1) {
         error = {
           display: `Failed to edit because the text matches multiple locations. Provide more context or set replace_all to true.`,

@@ -31,7 +31,15 @@ ignore files, explicit ask/deny rules and scoped-I/O exclusion. An explicit allo
 rule does not widen an otherwise nonautomatic default root. Recovery never uses
 fuzzy whitespace, quotation or Unicode matching. Missing and multiple matches,
 no-ops and unsupported cases return `FILE_CHANGED_SINCE_READ` without exposing
-unread contents through distinct content-derived errors.
+unread contents through distinct content-derived errors. When a fresh `EDIT_NO_OCCURRENCE_FOUND` or an
+authorized stale `FILE_CHANGED_SINCE_READ` (non-no-op, with automatic `Read`
+permission and active prior-read enforcement) fails to match uniquely, the error
+response may include bounded candidate diagnostics — mismatch line,
+`<current_edit_target>` up to 120 lines and 16 KiB UTF-8, or up to three
+disambiguation line ranges / bounded `read_file` offset-limit guidance —
+without changing `ToolErrorType` or refreshing `FileReadCache`. When automatic
+`Read` permission is not granted (or `ReadFile` is disabled), no candidate
+content or line ranges are disclosed.
 
 ## Fingerprint, Read baseline and snapshot
 
@@ -86,7 +94,11 @@ when the existing line bound and an 8,000-character bound allow it; otherwise th
 ask for Read. Recovered results explain that WriteFile needs Read and subsequent
 Edit still uses recovery checks. Existing confirmation UI gets an informational
 warning without requiring an additional dialog. One debug event is emitted after
-a successful recovered write, never merely during preparation.
+a successful recovered write, never merely during preparation. Both execution
+and confirmation-time `EDIT_NO_OCCURRENCE_FOUND` and authorized stale-recovery
+`FILE_CHANGED_SINCE_READ` rejections preserve any bounded failure candidate
+diagnostics in their raw error message so the caller can inspect or adjust the
+target without clearing pending Read baselines.
 
 ## Verification and acceptance
 
@@ -106,6 +118,12 @@ a successful recovered write, never merely during preparation.
 - Hot restore and cold resume preserve original tool-call arguments, one paired
   result, actual disk bytes and trimmed history without depending on a success
   snippet. These assertions run on Node+Ink, Bun+Ink and Bun+OpenTUI.
+- Fresh `EDIT_NO_OCCURRENCE_FOUND` (including public anonymous `case-004` with
+  retry completion and confirmation-time errors) and authorized stale
+  `FILE_CHANGED_SINCE_READ` (fuzzy mismatch or multiple occurrences) surface
+  bounded candidate context or disambiguation/offset-limit `read_file` guidance
+  up to 120 lines / 16 KiB without refreshing `FileReadCache`, while withholding
+  candidate lines when `Read` is not auto-allowed or disabled.
 
 The regression tests specify current behavior; no model latency, token savings or
 production recovery-rate claim follows from deterministic replay results.

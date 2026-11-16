@@ -21,7 +21,13 @@
 已授权运行目录、忽略规则、显式 ask/deny 规则，以及 scoped I/O 排除条件。显式 allow
 规则不会扩大原本不能自动读取的默认目录范围。恢复不采用空白、引号或 Unicode 模糊匹配。
 零匹配、多匹配、no-op 和不支持的情况均返回 `FILE_CHANGED_SINCE_READ`，不会通过不同的
-内容派生错误泄露未读内容。
+内容派生错误泄露未读内容。当正常的 `EDIT_NO_OCCURRENCE_FOUND` 或已获授权的过期恢复
+`FILE_CHANGED_SINCE_READ`（非 no-op，且启用了先读检查与自动 `Read` 权限）未能产生
+唯一应用匹配时，错误响应可在不改变 `ToolErrorType` 且不刷新 `FileReadCache` 的
+前提下，附带有界候选诊断信息——首个失配行、最多 120 行且不超过 16 KiB UTF-8 的
+`<current_edit_target>` 原文，或最多三个消歧义行号范围 / 有界 `read_file`
+的 `offset`/`limit` 指引。未获自动 `Read` 权限或 `ReadFile` 被禁用时，不披露任何
+候选正文或行号范围。
 
 ## 指纹、Read 基线与快照
 
@@ -61,7 +67,9 @@ stat 至 write 的竞态，以及相同 mtime/size 的碰撞，仍是指纹检�
 `new_string`。用户修改和恢复结果在现有行数上限及 8,000 字符上限允许时展示编辑片段，
 否则提示 Read。恢复结果说明 WriteFile 需要 Read，后续 Edit 仍执行恢复检查。
 既有确认 UI 收到信息性警告，不增加确认对话框。仅在恢复写入成功后记录一次 debug 事件，
-准备阶段不会记录成功事件。
+准备阶段不会记录成功事件。执行期与确认期产生的 `EDIT_NO_OCCURRENCE_FOUND` 及已获
+授权的过期恢复 `FILE_CHANGED_SINCE_READ` 报错都会在原始错误文本中保留有界失败候选
+诊断信息，便于调用方检查或修正目标，同时不清除待刷新的 Read 基线。
 
 ## 验证与验收
 
@@ -76,5 +84,10 @@ stat 至 write 的竞态，以及相同 mtime/size 的碰撞，仍是指纹检�
 - 用户修改产生的整文件参数及很长的单行替换均不能导致无界回显。普通 Edit 结果保持精简。
 - hot restore 和 cold resume 保留原工具调用参数、唯一配对结果、实际磁盘内容和裁剪后的
   历史，不依赖成功片段。断言在 Node+Ink、Bun+Ink 和 Bun+OpenTUI 上运行。
+- 正常的 `EDIT_NO_OCCURRENCE_FOUND`（含公开匿名用例 `case-004` 的报错重试完成与确认期
+  错误）及已获授权的过期 `FILE_CHANGED_SINCE_READ`（模糊失配或多处匹配）在不刷新
+  `FileReadCache` 的前提下返回有界候选上下文（上限 120 行 / 16 KiB）或消歧义 /
+  `offset`+`limit` 的 `read_file` 指引；在未自动允许 `Read` 或其被禁用时则不暴露
+  任何候选内容。
 
 回归测试定义当前行为；确定性回放结果不代表真实模型延迟、token 收益或生产恢复触发率。

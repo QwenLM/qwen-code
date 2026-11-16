@@ -639,3 +639,277 @@ export function extractEditSnippet(
     content: snippetLines.join('\n'),
   };
 }
+
+export interface EditRecoveryCandidate {
+  start: number;
+  end: number;
+  startLine: number;
+  endLine: number;
+  mismatchLine?: number;
+}
+
+const MAX_FAILURE_CANDIDATES = 3;
+
+function sharesBoundaryAnchor(a: string, b: string): boolean {
+  const trimmedA = a.trim();
+  const trimmedB = b.trim();
+  if (trimmedA.length < 4 || trimmedB.length < 4) {
+    return false;
+  }
+  return (
+    trimmedA.slice(0, 4) === trimmedB.slice(0, 4) ||
+    trimmedA.slice(-4) === trimmedB.slice(-4)
+  );
+}
+
+function collapseBlankRuns(
+  lines: string[],
+): Array<{ text: string; origIndex: number }> {
+  const collapsed: Array<{ text: string; origIndex: number }> = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (
+      lines[i] === '' &&
+      collapsed.length > 0 &&
+      collapsed[collapsed.length - 1].text === ''
+    ) {
+      continue;
+    }
+    collapsed.push({ text: lines[i], origIndex: i });
+  }
+  return collapsed;
+}
+
+function findSubstringOffsets(
+  source: string,
+  substr: string,
+  limit: number,
+): number[] {
+  const offsets: number[] = [];
+  let pos = 0;
+  while (offsets.length < limit) {
+    const idx = source.indexOf(substr, pos);
+    if (idx < 0) {
+      break;
+    }
+    offsets.push(idx);
+    pos = idx + Math.max(1, substr.length);
+  }
+  return offsets;
+}
+
+function candidateEndOffset(
+  contentLength: number,
+  lines: string[],
+  offsets: number[],
+  endLine: number,
+  includeTrailingNewline: boolean,
+): number {
+  if (includeTrailingNewline) {
+    return endLine < lines.length ? offsets[endLine] : contentLength;
+  }
+  const lastIdx = endLine - 1;
+  return (offsets[lastIdx] ?? 0) + (lines[lastIdx]?.length ?? 0);
+}
+
+/**
+ * Locates up to three bounded candidate ranges in `content` when `oldString`
+ * cannot be applied directly. Suggestions only; callers must never use this
+ * locator to authorize a write.
+ */
+export function findEditRecoveryCandidates(
+  content: string,
+  oldString: string,
+): EditRecoveryCandidate[] {
+  const normalizedContent = content.replace(/\r\n/g, '\n');
+  const normalizedOld = oldString.replace(/\r\n/g, '\n');
+  if (!normalizedOld) {
+    return [];
+  }
+
+  // Pass 1: Exact literal occurrences (e.g., multiple matches on a stale file).
+  const exactOffsets = findSubstringOffsets(
+    normalizedContent,
+    normalizedOld,
+    MAX_FAILURE_CANDIDATES,
+  );
+  if (exactOffsets.length > 0) {
+    const lineSpan = normalizedOld.replace(/\n$/, '').split('\n').length;
+    return exactOffsets.map((start) => {
+      const startLine = normalizedContent.slice(0, start).split('\n').length;
+      return {
+        start,
+        end: start + normalizedOld.length,
+        startLine,
+        endLine: startLine + lineSpan - 1,
+      };
+    });
+  }
+
+  // Pass 2: Normalized match (e.g., curly quotes, trailing whitespace, or
+  // Unicode escape differences rejected on a stale file).
+  const normalized = normalizeEditStrings(normalizedContent, normalizedOld, '');
+  if (normalized.oldString && normalized.oldString !== normalizedOld) {
+    const canonical = normalized.oldString;
+    const matchStarts = normalized.lineBasedMatch
+      ? findLineBasedMatchOffsets(normalizedContent, canonical)
+      : findSubstringOffsets(
+          normalizedContent,
+          canonical,
+          MAX_FAILURE_CANDIDATES,
+        );
+    if (matchStarts.length > 0) {
+      const canonLines = canonical.replace(/\n$/, '').split('\n');
+      const oldLinesForDiff = normalizedOld.replace(/\n$/, '').split('\n');
+      let diffOffset = 0;
+      while (
+        diffOffset < canonLines.length &&
+        diffOffset < oldLinesForDiff.length &&
+        canonLines[diffOffset] === oldLinesForDiff[diffOffset]
+      ) {
+        diffOffset++;
+      }
+      if (diffOffset >= canonLines.length) {
+        diffOffset = Math.max(0, canonLines.length - 1);
+      }
+      return matchStarts.slice(0, MAX_FAILURE_CANDIDATES).map((start) => {
+        const startLine = normalizedContent.slice(0, start).split('\n').length;
+        return {
+          start,
+          end: start + canonical.length,
+          startLine,
+          endLine: startLine + canonLines.length - 1,
+          mismatchLine: startLine + diffOffset,
+        };
+      });
+    }
+  }
+
+  // Pass 3: Line-based anchor alignment for multi-line targets with bounded
+  // transcription drift.
+  const { lines, offsets } = buildLineIndex(normalizedContent);
+  const oldLines = normalizedOld.replace(/\n$/, '').split('\n');
+  if (oldLines.length < 2) {
+    return [];
+  }
+
+  const endsWithNewline = normalizedOld.endsWith('\n');
+  const candidates: EditRecoveryCandidate[] = [];
+  const maxMismatches = Math.max(1, Math.floor(oldLines.length / 4));
+  const minMatchingAnchors = oldLines.length >= 3 ? 2 : 1;
+  const lastIdx = oldLines.length - 1;
+
+  for (
+    let startLine = 0;
+    startLine + oldLines.length <= lines.length;
+    startLine++
+  ) {
+    const firstMatches =
+      lines[startLine] === oldLines[0] ||
+      sharesBoundaryAnchor(lines[startLine], oldLines[0]);
+    const lastMatches =
+      lines[startLine + lastIdx] === oldLines[lastIdx] ||
+      sharesBoundaryAnchor(lines[startLine + lastIdx], oldLines[lastIdx]);
+    if (!firstMatches || !lastMatches) {
+      continue;
+    }
+
+    const mismatches: number[] = [];
+    let matchingAnchors = 0;
+    for (let i = 0; i < oldLines.length; i++) {
+      if (lines[startLine + i] === oldLines[i]) {
+        if (oldLines[i].trim().length >= 4) {
+          matchingAnchors++;
+        }
+      } else {
+        mismatches.push(i);
+        if (mismatches.length > maxMismatches) {
+          break;
+        }
+      }
+    }
+    if (
+      mismatches.length === 0 ||
+      mismatches.length > maxMismatches ||
+      matchingAnchors < minMatchingAnchors
+    ) {
+      continue;
+    }
+
+    const endLine = startLine + oldLines.length;
+    const end = candidateEndOffset(
+      normalizedContent.length,
+      lines,
+      offsets,
+      endLine,
+      endsWithNewline,
+    );
+    candidates.push({
+      start: offsets[startLine],
+      end,
+      startLine: startLine + 1,
+      endLine,
+      mismatchLine: startLine + mismatches[0] + 1,
+    });
+    if (candidates.length === MAX_FAILURE_CANDIDATES) {
+      break;
+    }
+  }
+  if (candidates.length > 0) {
+    return candidates;
+  }
+
+  // Pass 4: Collapsed blank-line run alignment (e.g., extra or omitted blank
+  // lines inside an otherwise identical multi-line block).
+  const normOld = collapseBlankRuns(oldLines);
+  const normContent = collapseBlankRuns(lines);
+  if (normOld.length >= 2 && normOld.length !== oldLines.length) {
+    const normAnchors = normOld.filter(
+      (item) => item.text.trim().length >= 4,
+    ).length;
+    if (normAnchors >= 2) {
+      for (let s = 0; s + normOld.length <= normContent.length; s++) {
+        let matchesAll = true;
+        for (let i = 0; i < normOld.length; i++) {
+          if (normContent[s + i].text !== normOld[i].text) {
+            matchesAll = false;
+            break;
+          }
+        }
+        if (!matchesAll) {
+          continue;
+        }
+        const firstOrig = normContent[s].origIndex;
+        const lastOrig = normContent[s + normOld.length - 1].origIndex;
+        const endLine = lastOrig + 1;
+        const end = candidateEndOffset(
+          normalizedContent.length,
+          lines,
+          offsets,
+          endLine,
+          endsWithNewline,
+        );
+        let mismatchOffset = 0;
+        while (
+          mismatchOffset < oldLines.length &&
+          firstOrig + mismatchOffset <= lastOrig &&
+          lines[firstOrig + mismatchOffset] === oldLines[mismatchOffset]
+        ) {
+          mismatchOffset++;
+        }
+        candidates.push({
+          start: offsets[firstOrig],
+          end,
+          startLine: firstOrig + 1,
+          endLine,
+          mismatchLine:
+            firstOrig + Math.min(mismatchOffset, lastOrig - firstOrig) + 1,
+        });
+        if (candidates.length === MAX_FAILURE_CANDIDATES) {
+          break;
+        }
+      }
+    }
+  }
+
+  return candidates;
+}

@@ -34,6 +34,7 @@ import type { Mock } from 'vitest';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { EditToolParams } from './edit.js';
 import { applyReplacement, EditTool } from './edit.js';
+import { WriteFileTool } from './write-file.js';
 import type { FileDiff } from './tools.js';
 import { ToolErrorType } from './tool-error.js';
 import path from 'node:path';
@@ -2512,6 +2513,309 @@ describe('EditTool', () => {
         expect(deletedResult.error?.type).toBe(
           ToolErrorType.FILE_CHANGED_SINCE_READ,
         );
+      });
+    });
+
+    describe('bounded failure context and mismatch localization', () => {
+      const modifyExternally = (
+        target: string,
+        content: string,
+        deltaMs = 60_000,
+      ) => {
+        fs.writeFileSync(target, content, 'utf8');
+        const future = new Date(Date.now() + deltaMs);
+        fs.utimesSync(target, future, future);
+      };
+
+      it('replays public anonymous noMatchRecoverable case-004 and completes on retry without an intervening Read', async () => {
+        const fixture = replayCases.noMatchRecoverable;
+        seedFile(filePath, fixture.content);
+
+        const failure = await run(
+          edit(filePath, fixture.oldString, fixture.newString),
+        );
+
+        expect(failure.error?.type).toBe(
+          ToolErrorType.EDIT_NO_OCCURRENCE_FOUND,
+        );
+        expect(readText(filePath)).toBe(fixture.content);
+        expect(failure.llmContent).toContain(
+          'The submitted old_string differs from this candidate at file line 9.',
+        );
+        expect(failure.llmContent).toContain('Current candidate, lines 4-11:');
+        expect(failure.llmContent).toContain(
+          `<current_edit_target>\n${fixture.expectedCandidate}\n</current_edit_target>`,
+        );
+
+        const match = String(failure.llmContent).match(
+          /<current_edit_target>\n([\s\S]*?)\n<\/current_edit_target>/,
+        );
+        expect(match?.[1]).toBe(fixture.expectedCandidate);
+
+        const retry = await run(
+          edit(filePath, match![1], fixture.repairedNewString),
+        );
+        expect(retry.error).toBeUndefined();
+        expect(readText(filePath)).toBe(fixture.expectedContent);
+      });
+
+      it('attaches bounded candidate context on confirmation-time no-match rejection', async () => {
+        const fixture = replayCases.noMatchRecoverable;
+        seedFile(filePath, fixture.content);
+
+        const caught = await confirm(
+          edit(filePath, fixture.oldString, fixture.newString),
+        ).catch((err: unknown) => err);
+
+        expect((caught as { errorType?: string })?.errorType).toBe(
+          ToolErrorType.EDIT_NO_OCCURRENCE_FOUND,
+        );
+        expect((caught as Error).message).toContain(
+          `<current_edit_target>\n${fixture.expectedCandidate}\n</current_edit_target>`,
+        );
+      });
+
+      it('lists up to three candidate line ranges without <current_edit_target> on ambiguous matches', async () => {
+        const blockActual = [
+          'anchor_start();',
+          '  x = actual();',
+          'anchor_end();',
+        ].join('\n');
+        const blockWrong = [
+          'anchor_start();',
+          '  x = wrong();',
+          'anchor_end();',
+        ].join('\n');
+        seedFile(
+          filePath,
+          [blockActual, blockActual, blockActual, blockActual].join('\n'),
+        );
+
+        const noMatchMulti = await run(
+          edit(filePath, blockWrong, 'replacement'),
+        );
+        expect(noMatchMulti.error?.type).toBe(
+          ToolErrorType.EDIT_NO_OCCURRENCE_FOUND,
+        );
+        expect(noMatchMulti.llmContent).toContain(
+          'Possible target line ranges: 1-3, 4-6, 7-9.',
+        );
+        expect(noMatchMulti.llmContent).not.toContain('<current_edit_target>');
+
+        seedFile(filePath, ['v1', blockActual].join('\n'));
+        modifyExternally(filePath, ['v2', blockActual, blockActual].join('\n'));
+        const staleMulti = await run(
+          edit(filePath, blockActual, 'replacement'),
+        );
+        expect(staleMulti.error?.type).toBe(
+          ToolErrorType.FILE_CHANGED_SINCE_READ,
+        );
+        expect(staleMulti.llmContent).toContain(
+          'Possible target line ranges: 2-4, 5-7.',
+        );
+        expect(staleMulti.llmContent).not.toContain('<current_edit_target>');
+      });
+
+      it('returns normalized candidate on stale fuzzy mismatch without refreshing FileReadCache', async () => {
+        seedFile(filePath, 'v1\nconst title = \u201Chello\u201D;\n');
+        modifyExternally(filePath, 'v2\nconst title = \u201Chello\u201D;\n');
+
+        const result = await run(
+          edit(filePath, 'const title = "hello";', 'const title = "bye";'),
+        );
+
+        expect(result.error?.type).toBe(ToolErrorType.FILE_CHANGED_SINCE_READ);
+        expect(result.llmContent).toContain(
+          'The submitted old_string differs from this candidate at file line 2.',
+        );
+        expect(result.llmContent).toContain(
+          '<current_edit_target>\nconst title = \u201Chello\u201D;\n</current_edit_target>',
+        );
+        expect(fileReadCache.check(fs.statSync(filePath)).state).toBe('stale');
+
+        const writeResult = await new WriteFileTool(mockConfig)
+          .build({ file_path: filePath, content: 'overwrite' })
+          .execute(new AbortController().signal);
+        expect(writeResult.error?.type).toBe(
+          ToolErrorType.FILE_CHANGED_SINCE_READ,
+        );
+      });
+
+      it('falls back to bounded read_file guidance when candidate exceeds line or byte caps', async () => {
+        const manyLines = Array.from(
+          { length: 125 },
+          (_, i) => `line ${i + 1}`,
+        ).join('\n');
+        seedFile(filePath, manyLines);
+
+        const overLinesResult = await run(
+          edit(
+            filePath,
+            manyLines.replace('line 60', 'line sixty'),
+            'replacement',
+          ),
+        );
+        expect(overLinesResult.error?.type).toBe(
+          ToolErrorType.EDIT_NO_OCCURRENCE_FOUND,
+        );
+        expect(overLinesResult.llmContent).not.toContain(
+          '<current_edit_target>',
+        );
+        expect(overLinesResult.llmContent).toContain(`offset: 0, limit: 120`);
+        expect(overLinesResult.llmContent).toContain('read_file(');
+
+        const wideContent = [
+          'wide anchor start',
+          `const payload = "${'a'.repeat(17 * 1024)}";`,
+          'wide anchor end',
+        ].join('\n');
+        seedFile(filePath, wideContent);
+
+        const overBytesResult = await run(
+          edit(filePath, wideContent.replace('aaaaa', 'bbbbb'), 'replacement'),
+        );
+        expect(overBytesResult.error?.type).toBe(
+          ToolErrorType.EDIT_NO_OCCURRENCE_FOUND,
+        );
+        expect(overBytesResult.llmContent).not.toContain(
+          '<current_edit_target>',
+        );
+        expect(overBytesResult.llmContent).toContain('offset: 0, limit: 3');
+      });
+
+      it('withholds failure candidate context whenever auto-Read is not allowed or cache is disabled', async () => {
+        const block = [
+          'anchor_one();',
+          '  value = actual();',
+          'anchor_two();',
+        ].join('\n');
+        const wrongBlock = [
+          'anchor_one();',
+          '  value = wrong();',
+          'anchor_two();',
+        ].join('\n');
+
+        // 1. Outside workspace default-read roots
+        const outsidePath = path.join(tempDir, 'outside-nomatch.txt');
+        seedFile(outsidePath, block);
+        const outsideResult = await run(
+          edit(outsidePath, wrongBlock, 'replacement'),
+        );
+        expect(outsideResult.error?.type).toBe(
+          ToolErrorType.EDIT_NO_OCCURRENCE_FOUND,
+        );
+        expect(outsideResult.llmContent).not.toContain('<current_edit_target>');
+        expect(outsideResult.llmContent).not.toContain('actual()');
+
+        // 2. .qwenignore'd path
+        fs.writeFileSync(path.join(rootDir, '.qwenignore'), 'ignored.txt\n');
+        const ignoredPath = path.join(rootDir, 'ignored.txt');
+        seedFile(ignoredPath, block);
+        const fileService = new FileDiscoveryService(rootDir);
+        const ignoredConfig = {
+          ...mockConfig,
+          getFileService: () => fileService,
+        } as unknown as Config;
+        const ignoredResult = await new EditTool(ignoredConfig)
+          .build(edit(ignoredPath, wrongBlock, 'replacement'))
+          .execute(new AbortController().signal);
+        expect(ignoredResult.error?.type).toBe(
+          ToolErrorType.EDIT_NO_OCCURRENCE_FOUND,
+        );
+        expect(ignoredResult.llmContent).not.toContain('<current_edit_target>');
+
+        // 3. PermissionManager ask or deny rule on ReadFile
+        for (const rule of ['ask', 'deny'] as const) {
+          const pm = new PermissionManager({
+            getPermissionsAllow: () => undefined,
+            getPermissionsAsk: () =>
+              rule === 'ask' ? ['ReadFile'] : undefined,
+            getPermissionsDeny: () =>
+              rule === 'deny' ? ['ReadFile'] : undefined,
+            getProjectRoot: () => rootDir,
+            getCwd: () => rootDir,
+          });
+          pm.initialize();
+          const pmConfig = {
+            ...mockConfig,
+            getPermissionManager: () => pm,
+          } as unknown as Config;
+          seedFile(filePath, block);
+          const pmResult = await new EditTool(pmConfig)
+            .build(edit(filePath, wrongBlock, 'replacement'))
+            .execute(new AbortController().signal);
+          expect(pmResult.error?.type).toBe(
+            ToolErrorType.EDIT_NO_OCCURRENCE_FOUND,
+          );
+          expect(pmResult.llmContent).not.toContain('<current_edit_target>');
+        }
+
+        // 4. ReadFile disabled by coreTools allowlist
+        const coreToolsPm = new PermissionManager({
+          getPermissionsAllow: () => undefined,
+          getPermissionsAsk: () => undefined,
+          getPermissionsDeny: () => undefined,
+          getCoreTools: () => [EditTool.Name],
+          getProjectRoot: () => rootDir,
+          getCwd: () => rootDir,
+        });
+        coreToolsPm.initialize();
+        const coreToolsConfig = {
+          ...mockConfig,
+          getPermissionManager: () => coreToolsPm,
+        } as unknown as Config;
+        seedFile(filePath, block);
+        const disabledReadResult = await new EditTool(coreToolsConfig)
+          .build(edit(filePath, wrongBlock, 'replacement'))
+          .execute(new AbortController().signal);
+        expect(disabledReadResult.error?.type).toBe(
+          ToolErrorType.EDIT_NO_OCCURRENCE_FOUND,
+        );
+        expect(disabledReadResult.llmContent).not.toContain(
+          '<current_edit_target>',
+        );
+
+        // 5. fileReadCacheDisabled: true
+        const disabledCacheConfig = {
+          ...mockConfig,
+          getFileReadCacheDisabled: vi.fn().mockReturnValue(true),
+        } as unknown as Config;
+        seedFile(filePath, block);
+        const disabledCacheResult = await new EditTool(disabledCacheConfig)
+          .build(edit(filePath, wrongBlock, 'replacement'))
+          .execute(new AbortController().signal);
+        expect(disabledCacheResult.error?.type).toBe(
+          ToolErrorType.EDIT_NO_OCCURRENCE_FOUND,
+        );
+        expect(disabledCacheResult.llmContent).not.toContain(
+          '<current_edit_target>',
+        );
+
+        // 6. Scoped textFileIo
+        seedFile(filePath, block);
+        const io: TextFileIo = {
+          inspect: async () => ({
+            kind: 'file',
+            response: await fsService.readTextFile({ path: filePath }),
+            stats: fs.statSync(filePath),
+          }),
+          withMutation: async (_path, signal, operation) =>
+            operation({
+              original: await io.inspect(filePath, signal),
+              write: async (params) => {
+                await fsService.writeTextFile(params);
+                return fs.statSync(filePath);
+              },
+            }),
+        };
+        Object.assign(fsService, { textFileIo: io });
+        const scopedResult = await run(
+          edit(filePath, wrongBlock, 'replacement'),
+        );
+        expect(scopedResult.error?.type).toBe(
+          ToolErrorType.EDIT_NO_OCCURRENCE_FOUND,
+        );
+        expect(scopedResult.llmContent).not.toContain('<current_edit_target>');
       });
     });
   });

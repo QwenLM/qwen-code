@@ -7,6 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   countOccurrences,
+  findEditRecoveryCandidates,
   findLineBasedMatchOffsets,
   maybeAugmentOldStringForDeletion,
   normalizeEditStrings,
@@ -487,6 +488,166 @@ const two = 2;
       expect(round2.oldString).toBe('value = 1;   \n');
       expect(round2.newString).toBe('value = 2;\n');
     });
+  });
+});
+
+describe('findEditRecoveryCandidates', () => {
+  it('locates a unique candidate with an interior mismatch line', () => {
+    const content = [
+      'header line',
+      'function computeTotal(items) {',
+      '  const base = 10;',
+      '  return base + d.offset;',
+      '}',
+      'footer line',
+    ].join('\n');
+    const oldString = [
+      'function computeTotal(items) {',
+      '  const base = 10;',
+      '  return base + offset;',
+      '}',
+    ].join('\n');
+
+    expect(findEditRecoveryCandidates(content, oldString)).toEqual([
+      {
+        start: 12,
+        end: content.length - '\nfooter line'.length,
+        startLine: 2,
+        endLine: 5,
+        mismatchLine: 4,
+      },
+    ]);
+  });
+
+  it('matches when a first or last boundary line has a typo but shares an anchor', () => {
+    const content = [
+      'prefix line',
+      'logger.info("metrics", { owner: actualOwner, region: usEast });',
+      'return summary;',
+      'step 1: validate input schema carefully',
+      'step 2: load configuration values',
+      'step 3: persist normalized record',
+    ].join('\n');
+
+    const twoLineOld = [
+      'logger.info("metrics", { owner: wrongOwner, region: usEast });',
+      'return summary;',
+    ].join('\n');
+    expect(findEditRecoveryCandidates(content, twoLineOld)).toEqual([
+      {
+        start: 'prefix line\n'.length,
+        end: 'prefix line\nlogger.info("metrics", { owner: actualOwner, region: usEast });\nreturn summary;'
+          .length,
+        startLine: 2,
+        endLine: 3,
+        mismatchLine: 2,
+      },
+    ]);
+
+    const firstLineTyposOld = [
+      'step 1: validate inputs schema carefully',
+      'step 2: load configuration values',
+      'step 3: persist normalized record',
+    ].join('\n');
+    const firstLineCandidates = findEditRecoveryCandidates(
+      content,
+      firstLineTyposOld,
+    );
+    expect(firstLineCandidates).toHaveLength(1);
+    expect(firstLineCandidates[0]?.startLine).toBe(4);
+    expect(firstLineCandidates[0]?.endLine).toBe(6);
+    expect(firstLineCandidates[0]?.mismatchLine).toBe(4);
+    expect(
+      content.slice(firstLineCandidates[0]!.start, firstLineCandidates[0]!.end),
+    ).toBe(
+      [
+        'step 1: validate input schema carefully',
+        'step 2: load configuration values',
+        'step 3: persist normalized record',
+      ].join('\n'),
+    );
+  });
+
+  it('handles extra or collapsed blank lines in multi-line blocks', () => {
+    const content = [
+      'function parse() {',
+      '  const raw = read();',
+      '',
+      '  return raw.trim();',
+      '}',
+    ].join('\n');
+    const oldString = [
+      'function parse() {',
+      '  const raw = read();',
+      '',
+      '',
+      '  return raw.trim();',
+      '}',
+    ].join('\n');
+
+    const candidates = findEditRecoveryCandidates(content, oldString);
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]).toEqual({
+      start: 0,
+      end: content.length,
+      startLine: 1,
+      endLine: 5,
+      mismatchLine: 4,
+    });
+  });
+
+  it('finds normalized matches when stale recovery skips normalization', () => {
+    const content = 'alpha\nconst title = \u201Chello\u201D;\nbeta';
+    const candidates = findEditRecoveryCandidates(
+      content,
+      'const title = "hello";',
+    );
+    expect(candidates).toEqual([
+      {
+        start: 6,
+        end: 28,
+        startLine: 2,
+        endLine: 2,
+        mismatchLine: 2,
+      },
+    ]);
+  });
+
+  it('caps multiple exact or candidate matches at three ranges', () => {
+    const block = [
+      'start_anchor();',
+      '  middle_wrong();',
+      'end_anchor();',
+    ].join('\n');
+    const actualBlock = [
+      'start_anchor();',
+      '  middle_actual();',
+      'end_anchor();',
+    ].join('\n');
+    const content = [actualBlock, actualBlock, actualBlock, actualBlock].join(
+      '\n',
+    );
+
+    const candidates = findEditRecoveryCandidates(content, block);
+    expect(candidates).toHaveLength(3);
+    expect(candidates.map((item) => [item.startLine, item.endLine])).toEqual([
+      [1, 3],
+      [4, 6],
+      [7, 9],
+    ]);
+  });
+
+  it('rejects unrelated two-line windows sharing neither prefix nor suffix on the mismatched line', () => {
+    const content = [
+      'totally different first line here',
+      'common trailing anchor line',
+    ].join('\n');
+    const oldString = [
+      'another unrelated first line value',
+      'common trailing anchor line',
+    ].join('\n');
+
+    expect(findEditRecoveryCandidates(content, oldString)).toEqual([]);
   });
 });
 
