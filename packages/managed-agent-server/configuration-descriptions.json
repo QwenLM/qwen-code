@@ -20,6 +20,10 @@
       "en": "The trusted channel adapter surface on the internal listener and the lease on outbound delivery claims.",
       "zh": "内部监听端口上的受信渠道适配器接口，以及出站投递认领的租约。"
     },
+    "qwen.managed-agent.client-files": {
+      "en": "Registering a Managed Web Shell user's client directory into a Session through the control-plane MCP relay: the feature switch and relay endpoint, the binding and request lifetimes, and the queue depth and payload caps.",
+      "zh": "通过控制面 MCP relay 把 Managed Web Shell 用户的客户端目录注册进 Session：功能开关与 relay 端点、绑定与请求的生命周期，以及队列深度与 payload 上限。"
+    },
     "qwen.managed-agent.dispatch": {
       "en": "Leases, retry backoff and retry budgets for the work the control plane hands to the Hosted Harness, such as Turns, Session lifecycle operations and Action responses.",
       "zh": "控制面交给 Hosted Harness 执行的工作（如 Turn、Session 生命周期操作和 Action 应答）所用的租约、重试退避与重试预算。"
@@ -233,13 +237,39 @@
       "zh": "子 Workspace 任务两次运行之间的间隔；每次运行继续未完成的子 Workspace Git 步骤（准备、合并、应用、丢弃）。仅在 `qwen.managed-agent.runtime-broker.child-workspaces-enabled` 为 true 时生效。接受 `2s` 这类时长；不带单位的数字按毫秒计。",
       "type": "duration"
     },
+    "qwen.managed-agent.client-files.binding-ttl": {
+      "en": "How long one client filesystem registration stays valid before the browser must register again with a fresh directory grant. The relay credential expires with the binding. Accepts a duration such as `8h`; a plain number is seconds.",
+      "zh": "单次客户端文件系统注册的有效时长，到期后浏览器须以新的目录授权重新注册；relay 凭据随绑定一同过期。接受 `8h` 这类时长；不带单位的数字按秒计。",
+      "type": "duration"
+    },
+    "qwen.managed-agent.client-files.enabled": {
+      "en": "Whether a Managed Web Shell user may register a client directory into a Session and let the agent use its file tools through the control-plane relay. Off by default; while off, every client-files route refuses registration and no relay state is created. Registration is ephemeral session state: no credential or directory path is persisted, and the relay's bounded TTL queue holds the size-bounded JSON-RPC request/response bodies (which may include file content) only until they settle or expire, then deletes them. File content is kept out of relay state and never persisted by the relay; browser tool results follow the Session's normal durable tool-result policy.",
+      "zh": "是否允许 Managed Web Shell 用户把客户端目录注册进 Session，让 agent 经控制面 relay 使用其文件工具。默认关闭；关闭时所有 client-files 路由拒绝注册，不创建任何 relay 状态。注册是临时会话状态：不持久化任何凭据或目录路径，relay 的有界 TTL 队列仅在受大小限制的 JSON-RPC 请求/响应体（可能含文件内容）结算或过期前暂存，随后删除。文件内容不进入 relay 状态、relay 也从不持久化它；浏览器工具结果遵循 Session 常规的持久化工具结果策略。"
+    },
+    "qwen.managed-agent.client-files.max-payload-bytes": {
+      "en": "The largest JSON-RPC request or response body, in bytes, the relay forwards between the Runtime and the browser; a larger payload is refused with a structured error. Aligns with the worker MCP result cap by default (60 KiB).",
+      "zh": "relay 在 Runtime 与浏览器之间转发的单条 JSON-RPC 请求或响应体的最大字节数；更大的 payload 以结构化错误拒绝。默认与 worker MCP 结果上限对齐（60 KiB）。"
+    },
+    "qwen.managed-agent.client-files.queue-depth": {
+      "en": "The maximum number of unanswered JSON-RPC requests one Session registration may queue for the browser; a further request is refused with a structured error instead of blocking the Turn. Aligns with the worker MCP in-flight cap by default (32).",
+      "zh": "单个 Session 注册可为浏览器排队等待应答的 JSON-RPC 请求上限；超出的请求以结构化错误拒绝，而不是阻塞 Turn。默认与 worker MCP 在途上限对齐（32）。"
+    },
+    "qwen.managed-agent.client-files.request-ttl": {
+      "en": "How long one queued JSON-RPC request waits for the browser before it expires and the Runtime receives a structured offline error. Accepts a duration such as `25s`; a plain number is seconds.",
+      "zh": "单条排队 JSON-RPC 请求等待浏览器应答的时长，到期后过期并向 Runtime 返回结构化离线错误。接受 `25s` 这类时长；不带单位的数字按秒计。",
+      "type": "duration"
+    },
+    "qwen.managed-agent.client-files.relay-url": {
+      "en": "The base URL of this control plane's internal listener as reachable from the Hosted Harness, used to build the relay MCP endpoint the Harness connects back to (`<relay-url>/internal/managed-client-files/v1/sessions/<id>/mcp`). When left blank while `qwen.managed-agent.client-files.enabled` is true, it is derived from the internal listener; if no URL can be derived, startup fails. A configured value must be an http(s) URL without credentials, query or fragment.",
+      "zh": "从 Hosted Harness 可达的本控制面内部监听器基地址，用于构造 Harness 回连的 relay MCP 端点（`<relay-url>/internal/managed-client-files/v1/sessions/<id>/mcp`）。`qwen.managed-agent.client-files.enabled` 为 true 且留空时，从 internal listener 推导；推导不出则启动失败。显式配置的值必须是不带凭据、查询串或片段的 http(s) URL。"
+    },
     "qwen.managed-agent.definition-models": {
       "en": "The model IDs a stored AgentDefinition may name in `model.id`, as a comma-separated list; a Session whose definition names any other model is refused at admission. Each ID should match a model provider route configured in the Harness. Empty admits only definitions without a model.",
       "zh": "存储的 AgentDefinition 可在 `model.id` 中指定的模型 ID，以逗号分隔；定义中指定其他模型的 Session 会在准入时被拒绝。每个 ID 应对应 Harness 中配置的一个模型提供方路由。为空时只接受未指定模型的定义。"
     },
     "qwen.managed-agent.definition-tool-profiles": {
-      "en": "The hosted tool profiles a stored AgentDefinition may select in `tools`, as a comma-separated list (such as `hosted-workspace-files/1`, `hosted-workspace-shell/1`, `hosted-workspace-shell/3` or `hosted-workspace-mcp/1`); a Session whose definition selects another profile is refused at admission. `hosted-workspace-team-lead/1` and Shell profiles other than `hosted-workspace-shell/1` and `hosted-workspace-shell/3` are always refused, as is a Shell profile whose approval mode is `yolo`. Preflight checks that the Harness supports each listed profile.",
-      "zh": "存储的 AgentDefinition 可在 `tools` 中选择的托管工具配置，以逗号分隔（如 `hosted-workspace-files/1`、`hosted-workspace-shell/1`、`hosted-workspace-shell/3` 或 `hosted-workspace-mcp/1`）；定义选择其他配置的 Session 会在准入时被拒绝。`hosted-workspace-team-lead/1` 以及 `hosted-workspace-shell/1`、`hosted-workspace-shell/3` 以外的 Shell 配置始终被拒绝，审批模式为 `yolo` 的 Shell 配置同样被拒绝。预检会确认 Harness 支持所列的每个配置。"
+      "en": "The hosted tool profiles a stored AgentDefinition may select in `tools`, as a comma-separated list (such as `hosted-workspace-files/1`, `hosted-workspace-files/4`, `hosted-workspace-shell/1`, `hosted-workspace-shell/4` or `hosted-workspace-mcp/1`); a Session whose definition selects another profile is refused at admission. The internal `hosted-workspace-team-lead/1` and `hosted-workspace-team-lead/2` profiles, Shell profiles other than `hosted-workspace-shell/1`, `hosted-workspace-shell/3` and `hosted-workspace-shell/4`, and a Shell profile whose approval mode is `yolo` are always refused. Preflight checks that the Harness supports each listed profile.",
+      "zh": "存储的 AgentDefinition 可在 `tools` 中选择的托管工具配置，以逗号分隔（如 `hosted-workspace-files/1`、`hosted-workspace-files/4`、`hosted-workspace-shell/1`、`hosted-workspace-shell/4` 或 `hosted-workspace-mcp/1`）；定义选择其他配置的 Session 会在准入时被拒绝。内部的 `hosted-workspace-team-lead/1`、`hosted-workspace-team-lead/2` 配置，`hosted-workspace-shell/1`、`hosted-workspace-shell/3`、`hosted-workspace-shell/4` 以外的 Shell 配置，以及审批模式为 `yolo` 的 Shell 配置始终被拒绝。预检会确认 Harness 支持所列的每个配置。"
     },
     "qwen.managed-agent.dispatch.lease-duration": {
       "en": "How long a node's lease on dispatched work (a Turn, Session lifecycle operation, Action response, task cancel, rename or context compression) lasts before another node may take it over; Turn, lifecycle operation, Action response and task cancel holders renew it while working, but a rename or context compression does not. Startup refuses a value below twice `qwen.managed-agent.dispatch.lease-renew-interval`. A plain number is seconds.",
@@ -903,6 +933,10 @@
     "qwen.managed-agent.runtime-broker.tool-measurements": {
       "en": "Whether newly resolved ordinary Workspace bindings select the attested managed-workspace-execution/2 profile and Tool v4 numeric execution/file measurements. Defaults to false; existing bindings, extension/MCP owners, resident and CSI profiles retain their contracts. Deploy compatible Worker/Broker readers first. Measurement commits reuse existing activity evidence and require a storage-version-5 grant; no separate collector flag is introduced. See the [execution diagnostics design](../design/2026-11-07-managed-execution-diagnostics.md).",
       "zh": "是否让新解析的普通 Workspace binding 选择经过 attestation 的 managed-workspace-execution/2 profile 和 Tool v4 数值执行/文件测量。默认 false；已有 binding、extension/MCP owner、resident 和 CSI profile 保留原契约。先部署兼容 Worker/Broker reader。测量提交复用现有 activity evidence，并要求 storage grant 支持 version 5；不引入独立 collector 开关。参见[执行诊断设计](../design/2026-11-07-managed-execution-diagnostics.zh-CN.md)。"
+    },
+    "qwen.managed-agent.runtime-broker.web-terminal": {
+      "en": "Whether newly resolved ordinary local Workspace bindings select the terminal-capable measured profile (managed-workspace-execution/2 plus web-terminal/1), whose worker serves the interactive user-terminal upgrade route. Defaults to false and requires tool-measurements. The capability digest is a frozen binding input: deploy matching control-plane, Harness and Runtime artifacts together before enabling. SSH, extension, resident, CSI and external-scratch placements keep their existing profiles. See the [Managed Web Terminal design](../design/2026-11-10-managed-web-terminal.md).",
+      "zh": "是否让新解析的普通本地 Workspace binding 选择带终端能力的测量 profile（managed-workspace-execution/2 加 web-terminal/1），其 worker 提供交互式用户终端 upgrade 路由。默认 false，且要求开启 tool-measurements。capability digest 是冻结的 binding 输入：启用前先协同部署配套的控制平面、Harness 与 Runtime 制品。SSH、extension、resident、CSI 与 external-scratch 放置保留现有 profile。参见 [Managed Web 终端设计](../design/2026-11-10-managed-web-terminal.zh-CN.md)。"
     }
   }
 }

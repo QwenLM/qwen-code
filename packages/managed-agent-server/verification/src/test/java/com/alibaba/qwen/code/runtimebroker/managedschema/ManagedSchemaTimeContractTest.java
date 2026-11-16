@@ -51,7 +51,9 @@ class ManagedSchemaTimeContractTest {
             "ma_delivery=claimed_at,claim_until,available_at,gmt_create,gmt_modified",
             "ma_channel_segment=gmt_create,gmt_modified",
             "ma_schedule=armed_at,watermark_slot,lease_until,gate_last_at,gmt_create,gmt_modified",
-            "ma_schedule_occurrence=slot,next_retry_at,gmt_create,gmt_modified");
+            "ma_schedule_occurrence=slot,next_retry_at,gmt_create,gmt_modified",
+            "ma_client_files_binding=expires_at,gmt_create,gmt_modified",
+            "ma_client_files_request=expires_at,gmt_create,gmt_modified");
 
     @Test
     void canonicalSchemaUsesCreationAndModificationNamesWithoutLegacyAliases() {
@@ -77,7 +79,7 @@ class ManagedSchemaTimeContractTest {
                 });
             }
         }
-        assertEquals(81, count);
+        assertEquals(87, count);
         assertAll(checks);
     }
 

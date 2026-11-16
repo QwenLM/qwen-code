@@ -852,7 +852,8 @@ export class QwenAgentManager {
           ).uiEvent as Record<string, unknown>;
           if (
             uiEvent['event.name'] === 'request_lifecycle' ||
-            uiEvent['event.name'] === 'tool_lifecycle'
+            uiEvent['event.name'] === 'tool_lifecycle' ||
+            uiEvent['event.name'] === 'hook_lifecycle'
           ) {
             continue;
           }
