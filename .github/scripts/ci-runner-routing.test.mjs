@@ -206,11 +206,13 @@ function runPickRunnerOutputs({
   assert.ok(prTest, 'pr_test_runner not published');
   // R1-1 (#17231 review): the step must also log the inputs that decide
   // the selection, so a silent fallback is distinguishable from an
-  // ordinary fork run in the log.
+  // ordinary fork run in the log. The presence assertion lives in the
+  // owning test (R2-3): asserting here reds every caller when the line
+  // goes missing, so a log-line change that decides no routing fails the
+  // whole battery instead of the one test that owns the line.
   const inputsLine = result.stdout
     .split('\n')
     .find((line) => line.startsWith('Runner routing inputs: '));
-  assert.ok(inputsLine, `no routing-inputs line: ${result.stdout}`);
   return {
     ubuntuRunner,
     lintRunner,
@@ -672,28 +674,66 @@ describe('ci.yml pick_runner canonical-repo guard', () => {
     // dispatch input, which is the one the canonical-repo conjunction can
     // drop — and must not reuse a prefix the harness parses, since the
     // harness takes the FIRST line per prefix.
+    // R2-3: the presence assertion lives here, in the test that owns the
+    // line, not in runPickRunnerOutputs — asserting in the shared helper
+    // reds every caller when the line goes missing.
     const out = runPickRunnerOutputs({
       ecsDisabled: false,
       sameRepo: false,
-      assoc: 'NONE',
+      assoc: 'OWNER',
       eventName: 'workflow_dispatch',
       dispatch: 'self-hosted',
       fleet: 'arm64',
-      repoName: FORK,
+      repoName: 'QwenLM/qwen-code',
     });
+    assert.ok(out.inputsLine, 'no routing-inputs line in pick_runner output');
+    // R2-1: the values must differ per key, so the fragments pin which
+    // value lands on which label — with every flag false, a swapped or
+    // mislabeled echo stayed green. The empty kill-switch is pinned with
+    // its following delimiter, so hardcoding ECS_DISABLED=true reds.
     for (const fragment of [
-      'REPO_NAME=alice/qwen-code',
-      'canonical_repo=false',
+      'REPO_NAME=QwenLM/qwen-code',
+      'canonical_repo=true',
       'SAME_REPO=false',
-      'trusted_author=false',
+      'trusted_author=true',
       'EVENT_NAME=workflow_dispatch',
-      'ECS_DISABLED=',
-      'LINUX_RUNNER_FLEET=arm64',
+      'ECS_DISABLED= LINUX_RUNNER_FLEET=arm64',
       'DISPATCH_LINUX_RUNNER=self-hosted',
     ]) {
       assert.ok(
         out.inputsLine.includes(fragment),
         `inputs line must carry ${fragment}: ${out.inputsLine}`,
+      );
+    }
+    // R2-2: AUTHOR_ASSOCIATION is the raw input the step branches on, so
+    // the log must carry it — but only a pull-request run has one. On
+    // push/merge_group/dispatch the expression reads an absent
+    // pull_request, so the fragment is pinned here, in a PR context, and
+    // nowhere else.
+    const prOut = runPickRunnerOutputs({
+      ecsDisabled: false,
+      sameRepo: false,
+      assoc: 'OWNER',
+      eventName: 'pull_request',
+      fleet: 'arm64',
+      repoName: 'QwenLM/qwen-code',
+    });
+    assert.ok(
+      prOut.inputsLine,
+      'no routing-inputs line in pick_runner output',
+    );
+    for (const fragment of [
+      'AUTHOR_ASSOCIATION=OWNER',
+      'REPO_NAME=QwenLM/qwen-code',
+      'canonical_repo=true',
+      'SAME_REPO=false',
+      'trusted_author=true',
+      'EVENT_NAME=pull_request',
+      'ECS_DISABLED= LINUX_RUNNER_FLEET=arm64',
+    ]) {
+      assert.ok(
+        prOut.inputsLine.includes(fragment),
+        `inputs line must carry ${fragment}: ${prOut.inputsLine}`,
       );
     }
     for (const prefix of [

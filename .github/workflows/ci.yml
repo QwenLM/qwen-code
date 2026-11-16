@@ -263,7 +263,7 @@ jobs:
           # that decide the selection next to the selection itself. The
           # prefix is deliberately not one the routing harness parses (it
           # takes the FIRST line per prefix).
-          echo "Runner routing inputs: REPO_NAME=${REPO_NAME} canonical_repo=${canonical_repo} SAME_REPO=${SAME_REPO} trusted_author=${trusted_author} EVENT_NAME=${EVENT_NAME} ECS_DISABLED=${ECS_DISABLED} LINUX_RUNNER_FLEET=${LINUX_RUNNER_FLEET} DISPATCH_LINUX_RUNNER=${DISPATCH_LINUX_RUNNER}"
+          echo "Runner routing inputs: REPO_NAME=${REPO_NAME} canonical_repo=${canonical_repo} SAME_REPO=${SAME_REPO} AUTHOR_ASSOCIATION=${AUTHOR_ASSOCIATION} trusted_author=${trusted_author} EVENT_NAME=${EVENT_NAME} ECS_DISABLED=${ECS_DISABLED} LINUX_RUNNER_FLEET=${LINUX_RUNNER_FLEET} DISPATCH_LINUX_RUNNER=${DISPATCH_LINUX_RUNNER}"
           pr_test_runner="${ubuntu_runner}"
           lint_runner="${ubuntu_runner}"
           if [[ "${canonical_repo}" == "true" && "${ECS_DISABLED}" != "true" && "${LINUX_RUNNER_FLEET}" != "hosted" && "${EVENT_NAME}" == "pull_request" && "${SAME_REPO}" == "false" && "${trusted_author}" == "false" ]]; then
