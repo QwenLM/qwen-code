@@ -1236,6 +1236,61 @@ describe('compactionInputSlimming', () => {
         },
       );
 
+      describe('a block at an end of the text (#15936 R11-1)', () => {
+        const textPart = {
+          carrier: 'a text part',
+          call: (content: string): Content => ({
+            role: 'user',
+            parts: [{ text: content }],
+          }),
+          read: (history: Content[]) => history[0]!.parts![0]!.text as string,
+        };
+        const everyCarrier = [textPart, ...carriers];
+        const slim = (history: Content[]) =>
+          slimCompactionInput(history, undefined, { maxTextChars: 500 })
+            .slimmedHistory;
+
+        it.each(everyCarrier)(
+          'closes the block the text opens with when a later opening tag pairs with its closing tag, in $carrier',
+          ({ call, read }) => {
+            // The second opening tag sits past the cut and is the nearer
+            // partner of the only closing tag, so the pairing over the whole
+            // text leaves the first one without a pair.
+            const original = `<system-reminder>${'a'.repeat(700)}<system-reminder>${'b'.repeat(200)}</system-reminder>`;
+
+            expect(read(slim([call(original)]))).toBe(
+              original.slice(0, 500) +
+                SLIM_TEXT_TRUNCATION_MARKER +
+                '\n</system-reminder>',
+            );
+          },
+        );
+
+        it.each(everyCarrier)(
+          'adds one closing tag, not two, when the pairing already closes a block of that kind, in $carrier',
+          ({ call, read }) => {
+            const original = `<system-reminder>${'a'.repeat(100)}<system-reminder>${'b'.repeat(700)}</system-reminder>`;
+
+            expect(read(slim([call(original)]))).toBe(
+              original.slice(0, 500) +
+                SLIM_TEXT_TRUNCATION_MARKER +
+                '\n</system-reminder>',
+            );
+          },
+        );
+
+        it.each(everyCarrier)(
+          'adds no closing tag when the kept text already closed the block the text ends with, in $carrier',
+          ({ call, read }) => {
+            const original = `${'a'.repeat(100)}<system-reminder>b</system-reminder>${'c'.repeat(600)}</system-reminder>`;
+
+            expect(read(slim([call(original)]))).toBe(
+              original.slice(0, 500) + SLIM_TEXT_TRUNCATION_MARKER,
+            );
+          },
+        );
+      });
+
       it.each(carriers)(
         'adds no closing tag for an opening tag quoted alone, in $carrier',
         ({ call, read }) => {

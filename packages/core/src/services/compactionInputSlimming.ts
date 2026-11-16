@@ -642,7 +642,18 @@ function truncateKeepingEnvelopes(value: string, maxTextChars: number): string {
   }
   if (span.closeAt > maxTextChars) {
     const cut = truncateTextForSlimming(value, maxTextChars);
-    return [cut, ...closesOfBlocksOpenAt(value, maxTextChars)].join('\n');
+    const closes = closesOfBlocksOpenAt(value, maxTextChars);
+    // The pairing gives a closing tag to the nearest opening tag before it,
+    // so an opening tag of the same kind later in the text takes this
+    // envelope's own. The envelope is still open at the cut, so its closing
+    // tag is added unless the pairing already closes a block of that kind or
+    // the kept text closed it (#15936 R11-1).
+    const ownCloseMissing =
+      !closes.includes(span.close) &&
+      !value.slice(span.bodyAt, maxTextChars).includes(span.close);
+    return [cut, ...closes, ...(ownCloseMissing ? [span.close] : [])].join(
+      '\n',
+    );
   }
   const closedAt = span.closeAt + span.close.length;
   if (value.slice(closedAt).trim() === '') return value;
