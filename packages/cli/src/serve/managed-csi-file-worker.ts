@@ -132,8 +132,22 @@ export function historyFits(
       mode: 0o7777,
     };
   }
+  // The durable session record (commitHostedCsiHistory) serializes the
+  // snapshots TWICE: once inlined in the observation state and once in
+  // record.systemPayload.snapshots, under the same 64 KiB contract limit.
+  // Budget the snapshot section at two copies so an accepted preparation
+  // cannot outgrow the durable record after the history already changed.
+  const snapshotsForBudget = projected.state.snapshots;
+  const envelopeWithoutSnapshots = JSON.stringify({
+    ...request,
+    observation: { ...projected, state: { ...projected.state, snapshots: [] } },
+  });
+  const snapshotsBytes = Buffer.byteLength(
+    JSON.stringify(snapshotsForBudget),
+  );
   return (
-    Buffer.byteLength(JSON.stringify({ ...request, observation: projected })) +
+    Buffer.byteLength(envelopeWithoutSnapshots) +
+      2 * snapshotsBytes +
       1024 <=
     64 * 1024
   );

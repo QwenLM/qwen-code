@@ -766,8 +766,16 @@ export class FileHistoryService {
     for (const snapshot of snapshots) {
       const trackedFileBackups: Record<string, FileHistoryBackup> =
         Object.create(null);
+      // Key coordinate system: for a snapshot labeled with its capture cwd,
+      // shorten relative to THAT cwd, not the hydrating service's cwd.
+      // Otherwise an absolute external path captured under cwd A gets
+      // rewritten to a path relative to the hydrating directory B while the
+      // label still says A — reloading in A would then pass the
+      // cross-directory guard and restore B's content into an unrelated file.
+      // Legacy unlabeled snapshots keep the previous behavior (this.cwd).
+      const snapshotBaseCwd = snapshot.cwd ?? this.cwd;
       for (const [p, backup] of Object.entries(snapshot.trackedFileBackups)) {
-        const trackingPath = this.maybeShortenFilePath(p);
+        const trackingPath = this.maybeShortenFilePath(p, snapshotBaseCwd);
         trackedFiles.add(trackingPath);
         trackedFileBackups[trackingPath] = backup;
       }
@@ -778,7 +786,10 @@ export class FileHistoryService {
           ? {
               diffAfterBackups: Object.fromEntries(
                 Object.entries(snapshot.diffAfterBackups).map(([p, backup]) => {
-                  const trackingPath = this.maybeShortenFilePath(p);
+                  const trackingPath = this.maybeShortenFilePath(
+                    p,
+                    snapshotBaseCwd,
+                  );
                   trackedFiles.add(trackingPath);
                   return [trackingPath, backup];
                 }),
@@ -1712,10 +1723,11 @@ export class FileHistoryService {
     });
   }
 
-  private maybeShortenFilePath(filePath: string): string {
+  private maybeShortenFilePath(filePath: string, baseCwd?: string): string {
     if (!isAbsolute(filePath)) return filePath;
-    if (filePath.startsWith(this.cwd + sep) || filePath === this.cwd) {
-      return relative(this.cwd, filePath);
+    const cwd = baseCwd ?? this.cwd;
+    if (filePath.startsWith(cwd + sep) || filePath === cwd) {
+      return relative(cwd, filePath);
     }
     return filePath;
   }

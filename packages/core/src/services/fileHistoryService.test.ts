@@ -610,6 +610,28 @@ describe('FileHistoryService', () => {
       ]);
     });
 
+    it('does not rewrite an absolute external key against the hydrating cwd', () => {
+      const otherDir = join(tmpdir(), 'fh-other-root');
+      const capturedExternal = join(otherDir, 'x.txt');
+      const labeled: FileHistorySnapshot = {
+        ...restoredP1(capturedExternal, 'deadbeefcafebabe@v1'),
+        cwd: projectDir,
+      };
+
+      // Hydrate with a service rooted in otherDir: the absolute key captured
+      // under cwd=projectDir must NOT be shortened against otherDir. The key's
+      // coordinate system is the snapshot's own cwd label; rewriting it to
+      // 'x.txt' would let a later reload in projectDir pass the
+      // cross-directory guard and restore otherDir/x.txt's content into
+      // projectDir/x.txt.
+      const service = new FileHistoryService('hydrate-test', true, otherDir);
+      service.restoreFromSnapshots([labeled]);
+      const [snapshot] = service.getSnapshots();
+      expect(Object.keys(snapshot.trackedFileBackups)).toEqual([
+        capturedExternal,
+      ]);
+    });
+
     it('does not fold a deleted foreign checkpoint into a local survivor', () => {
       const otherDir = join(tmpdir(), 'fh-other-root');
       const survivor: FileHistorySnapshot = {
