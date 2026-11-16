@@ -26,6 +26,7 @@ import {
   type SetStateAction,
   useSyncExternalStore,
 } from 'react';
+import { flushSync } from 'react-dom';
 import {
   DAEMON_APPROVAL_MODES,
   type DaemonClient,
@@ -2747,6 +2748,21 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             if (previousSessionId !== nextSession.sessionId) {
               clearNotices();
             }
+            // Commit the load-embedded artifact snapshot in its own render
+            // before the replay injects, so the session-level header entry
+            // paints ahead of the conversation body. Only the artifact fields
+            // are touched; catchingUp and the rest of the connection state are
+            // left to the existing replay/attach logic below.
+            if (nextSession.restoredArtifacts !== undefined) {
+              flushSync(() => {
+                setConnection((current) => ({
+                  ...current,
+                  sessionId: nextSession.sessionId,
+                  restoredArtifacts: nextSession.restoredArtifacts,
+                  restoredArtifactsSessionId: nextSession.sessionId,
+                }));
+              });
+            }
             // Defer store.reset() until right before replay dispatch
             // (after the await below) so that reset + dispatch share a
             // single queueMicrotask notification. Without deferral, the
@@ -3499,6 +3515,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               current.sessionId === activeSession.sessionId
                 ? current.goalState
                 : undefined,
+            restoredArtifacts: activeSession.restoredArtifacts,
+            restoredArtifactsSessionId: activeSession.sessionId,
             loadingTranscript: undefined,
             catchingUp: replayInjected
               ? current.catchingUp
