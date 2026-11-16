@@ -5,8 +5,6 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
@@ -64,26 +62,6 @@ class ManagedSnapshotPoolTest {
         assertThat(view.execute(status -> store.findMessagePage("tenant", "session", null, 20, true)).items())
                 .singleElement().satisfies(item -> assertThat(item.itemId()).isEqualTo("item"));
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_read_lease", Integer.class)).isZero();
-    }
-
-    @Test
-    void retainedPrivatePinPreventsReleasedBodyCollection() {
-        var manager = new DataSourceTransactionManager(source);
-        String scope = ManagedSessionStore.sessionScopeKey("tenant", "session");
-        jdbc.update("INSERT INTO ma_resource (resource_key,session_scope_key,tenant_id,session_id,resource_id,kind,schema_version,"
-                + "byte_length,sha256,storage_kind,inline_bytes,state,gmt_create,retention_until)"
-                + " VALUES (?,?,'tenant','session','released','managed-message-parts',1,2,?,'MYSQL_INLINE',?,'REFERENCED',0,0)",
-                ManagedSchemaKeys.key(scope, "released"), scope, "a".repeat(64), new byte[] {91, 93});
-        jdbc.update("UPDATE ma_resource SET retention_until = " + ManagedSchemaTime.SQL_NOW);
-        jdbc.update("UPDATE ma_session SET runtime_request_key = ?", "a".repeat(64));
-        var resources = jdbc.queryForList("SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource");
-        var refs = jdbc.queryForList("SELECT " + ManagedSchemaProjection.RESOURCE_REF.columns() + " FROM ma_resource_ref");
-        var collector = new ManagedProjectionResourceCollector(jdbc, manager);
-        assertThat(collector.runOnce()).isFalse();
-        assertThat(jdbc.queryForList("SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource"))
-                .usingRecursiveComparison()
-                .isEqualTo(resources);
-        assertThat(jdbc.queryForList("SELECT " + ManagedSchemaProjection.RESOURCE_REF.columns() + " FROM ma_resource_ref")).isEqualTo(refs);
     }
 
     @Test

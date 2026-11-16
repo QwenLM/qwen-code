@@ -58,6 +58,35 @@ const ZH: typeof EN = {
   clickToTurnOff: '点击关闭。',
 };
 
+const RU: typeof EN = {
+  label: 'Режим Workflow',
+  menuDescription: 'Новые задачи можно поручать workflow',
+  short: {
+    unbound: 'Нужна активная сессия',
+    updating: 'Обновление…',
+    syncing: 'Синхронизация…',
+    unknown: 'Состояние не подтверждено',
+    onUnavailable: 'Вкл., но сейчас недоступно',
+    unavailable: 'Сейчас недоступно',
+  },
+  details: 'Сведения о режиме Workflow',
+  unbound: 'Создайте или возобновите сессию, чтобы проверить доступность.',
+  updating: 'Обновление режима Workflow…',
+  syncing: 'Синхронизация режима Workflow…',
+  unknown: 'Не удалось подтвердить режим Workflow.',
+  on: 'Режим Workflow включён.',
+  off: 'Режим Workflow выключен.',
+  onUnavailable: 'Режим Workflow включён, но сейчас недоступен.',
+  unavailable: 'Режим Workflow сейчас недоступен.',
+  initializing: 'Сессия ещё инициализируется.',
+  workflowUnavailable: 'Инструмент Workflow недоступен в этой сессии.',
+  unsupported: 'Эта сессия не поддерживает режим Workflow.',
+  nextTurn:
+    'Изменения применяются к следующему новому ходу, не прерывая текущий и не меняя интенсивность размышления.',
+  updateFailed: 'Не удалось обновить режим Workflow',
+  clickToTurnOff: 'Нажмите, чтобы выключить.',
+};
+
 const AR: typeof EN = {
   label: 'وضع سير العمل',
   menuDescription: 'السماح للمهام الجديدة باستخدام مسارات العمل',
@@ -89,6 +118,7 @@ const AR: typeof EN = {
 
 export function getWorkflowModeMessages(language: WebShellLanguage) {
   if (language === 'zh-CN') return ZH;
+  if (language === 'ru') return RU;
   if (language === 'ar') return AR;
   return EN;
 }

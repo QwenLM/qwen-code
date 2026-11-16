@@ -464,6 +464,118 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
     '启用后，Arena worktree 和会话状态文件会在会话结束或主智能体退出后保留。',
 };
 
+export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
+  'settings.label.general.outputLanguage': 'Язык: вывод модели',
+  'settings.description.general.outputLanguage':
+    'Язык, на котором модель отвечает. Оставьте пустым, чтобы следовать языку ввода (auto). Изменения перезаписывают output-language.md сессии и применяются к текущей сессии.',
+  'settings.placeholder.general.outputLanguage': 'auto (следовать вводу)',
+  'settings.option.general.outputLanguage.useCustom': (v) =>
+    `Использовать «${v?.value ?? ''}»`,
+  'settings.label.ui.accessibility.enableLoadingPhrases':
+    'Включить фразы загрузки',
+  'settings.description.ui.accessibility.enableLoadingPhrases':
+    'Показывать сменяющиеся фразы загрузки. Выключите, чтобы скрыть и встроенные, и предоставленные хостом фразы.',
+  'settings.label.experimental.generatedUi': 'Generated UI',
+  'settings.description.experimental.generatedUi':
+    'Показывать интерактивные виды из встроенного Generated UI в поддерживаемых локальных сессиях, например Web Shell. Включено по умолчанию. Перезапустите владеющую сессию, чтобы применить изменения.',
+
+  'settings.models.editWindow': 'Изменить окно контекста',
+  'settings.models.windowHint':
+    'Оставьте пустым, чтобы вывести лимит из ID модели. Существующим сессиям нужен перезапуск, чтобы использовать новый лимит.',
+  'settings.models.windowSaved':
+    'Сохранено. Перезапустите существующие сессии, чтобы применить.',
+  'settings.models.saved': 'Сохранено',
+  'settings.label.advisorModel': 'Модель Advisor',
+  'settings.label.imageModel': 'Модель изображений',
+  'settings.label.voiceModel': 'Голосовая модель',
+  'settings.description.advisorModel':
+    'Модель для проверки недавнего хода разговора. Оставьте пустым, чтобы использовать основную модель.',
+  'settings.description.imageModel':
+    'Модель для генерации изображений. Добавьте пользовательскую модель с назначением «генерация изображений», затем выберите её здесь.',
+  'settings.description.voiceModel':
+    'Модель для голосовой транскрипции. Добавьте пользовательскую модель с назначением «голосовая транскрипция», затем выберите её здесь.',
+
+  'settings.category.Archived': 'Архивные разговоры',
+  'settings.title': 'Настройки',
+  'settings.loading': 'Загрузка настроек...',
+  'settings.empty': 'Настройки недоступны.',
+  'settings.footer':
+    '↑↓ Навигация  Enter Переключить  Tab Область  r Обновить  ESC Закрыть',
+  'settings.footer.edit': 'Enter Сохранить  ESC Отмена',
+  'settings.footer.theme': '↑↓ Навигация  Enter Выбрать  ESC Назад',
+  'settings.scope.user': 'Пользователь',
+  'settings.scope.workspace': 'Рабочая область',
+  'settings.value.on': 'ВКЛ',
+  'settings.value.off': 'ВЫКЛ',
+  'settings.action.edit': 'Изменить',
+  'settings.action.select': 'Выбрать',
+  'settings.action.save': 'Сохранить',
+  'settings.modifiedIn': (v) => `(Изменено в ${v?.scope ?? ''})`,
+  'settings.alsoModifiedIn': (v) => `(Также изменено в ${v?.scope ?? ''})`,
+  'settings.invalidNumber': 'Некорректное число',
+  'settings.requiresRestart': 'Это изменение вступит в силу после перезапуска.',
+  'settings.localControl.title': 'Local Control',
+  'settings.localControl.description':
+    'Продолжите эту сессию Qwen Code с телефона в той же доверенной сети.',
+  'settings.localControl.on': 'Вкл',
+  'settings.localControl.off': 'Выкл',
+  'settings.localControl.network': 'Локальная сеть',
+  'settings.localControl.selectNetwork': 'Выберите сеть',
+  'settings.localControl.qr': 'QR-код Local Control',
+  'settings.localControl.enable': 'Включить Local Control',
+  'settings.localControl.disable': 'Отключить доступ с телефона',
+  'settings.localControl.explicitPick': 'Задано при запуске демона',
+  'settings.localControl.encrypted': 'Зашифровано',
+  'settings.localControl.unencrypted':
+    'Без шифрования — только доверенные сети; включите снова после смены сети',
+  'settings.localControl.awake': 'Этот Mac останется активным',
+  'settings.localControl.maySleep': 'Этот Mac может уснуть',
+  'settings.localControl.urlRedacted':
+    'URL сопряжения здесь не показан, потому что у этого демона нет bearer token. Он напечатан в терминале, где запущен демон — сопрягите оттуда.',
+  'settings.models.title': 'Модели',
+  'settings.models.context': (v) => `Контекст: ${v?.tokens ?? ''} токенов`,
+  'settings.models.credentialEnv': 'Переменная окружения ключа',
+  'settings.models.add': '+ Добавить модель',
+  'settings.models.addDisabled': 'Хост отключил добавление моделей.',
+  'settings.models.setCurrent': 'Сделать текущей',
+  'settings.models.current': 'Текущая',
+  'settings.models.runtime': 'Runtime',
+  'settings.models.savedConfiguration': 'Сохранённая конфигурация',
+  'settings.models.ambiguousWindow':
+    'Несколько конфигураций используют этот маршрут. Окно контекста здесь изменить нельзя.',
+  'settings.models.delete': 'Удалить',
+  'settings.models.confirmDelete': 'Подтвердить',
+  'settings.models.cancel': 'Отмена',
+  'settings.models.empty': 'Настроенных моделей пока нет.',
+  'settings.models.loading': 'Загрузка моделей…',
+  'settings.models.deleteFailed': 'Не удалось удалить модель',
+  'settings.models.runtimeSyncFailed':
+    'Изменение сохранено, но запущенные сессии не удалось обновить. Перезапустите qwen serve, прежде чем пользоваться обновлённым списком моделей.',
+  'settings.models.fallbacks.title': 'Резервные модели',
+  'settings.models.fallbacks.hint': (v) =>
+    `Выберите до ${v?.max ?? 3}; пробуются по порядку, когда основная модель на пределе.`,
+  'settings.models.fallbacks.confirm': 'Подтвердить',
+  'settings.models.fallbacks.empty': 'Нет доступных моделей.',
+  'settings.models.fallbacks.saveFailed':
+    'Не удалось сохранить резервные модели',
+  'settings.models.fallbacks.limitReached': (v) =>
+    `Выбрано максимум ${v?.max ?? 3} резервных моделей; снимите одну, чтобы выбрать другую.`,
+  'settings.corrupted': (v) =>
+    `Файл настроек повреждён${v?.recovered === 'true' ? ' (восстановлен из резервной копии)' : ''}`,
+  'settings.label.ui.chatWidth': 'Ширина чата',
+  'settings.description.ui.chatWidth':
+    'Ширина содержимого чата только на фронтенде. Хранится в этом браузере.',
+  'settings.label.ui.enableFollowupSuggestions':
+    'Включить предложения следующих шагов',
+  'settings.description.ui.enableFollowupSuggestions':
+    'Показывать контекстные предложения после завершения задачи. Нажмите Tab или стрелку вправо, чтобы вставить, Enter — чтобы принять и отправить.',
+  'settings.option.ui.chatWidth.1000': 'Обычная',
+  'settings.option.ui.chatWidth.wide': 'Сверхширокая',
+  'settings.label.visionModel': 'Модель зрения',
+  'settings.description.visionModel':
+    'Модель с поддержкой изображений, используемая как мост зрения. Оставьте пустым для автовыбора.',
+};
+
 export const SETTINGS_MESSAGES_AR: Record<string, SettingsMessage> = {
   'settings.label.experimental.generatedUi': 'الواجهة المولّدة (Generated UI)',
   'settings.description.experimental.generatedUi':

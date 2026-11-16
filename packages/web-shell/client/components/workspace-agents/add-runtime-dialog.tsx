@@ -179,6 +179,20 @@ function onlineIds(runtimes: readonly RuntimeSummary[]): Set<string> {
 const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
 
 /**
+ * What the Host answers for a join whose token the coordinator refused
+ * (invalid, expired, spent by another join, or turned down): sent again as
+ * it is, it would be refused again.
+ */
+const REFUSED_JOIN_TOKEN_ERRORS: ReadonlySet<string> = new Set([
+  'Invalid or expired Agent Host enrollment token.',
+  'Agent Host enrollment refused.',
+]);
+
+function isRefusedJoinToken(error: unknown): boolean {
+  return error instanceof Error && REFUSED_JOIN_TOKEN_ERRORS.has(error.message);
+}
+
+/**
  * Whether this computer's daemon refuses a coordinator address unless HTTP
  * is allowed, as its `hosts/connect` route checks it: plain HTTP off
  * loopback, where any 127.x address counts as loopback.
@@ -251,20 +265,29 @@ function CommandLine({ text }: { text: string }) {
 /**
  * A join that went through, as the dialog sees it: whether the computer that
  * joined saved the connection. A `saveError` means it will not reconnect
- * after a restart or a workspace reload. `workspaceCwd`, from a remote
- * connect: the workspace the remote answered from, which its runtime
- * reports too. `false` is a connect that failed and was already reported
- * elsewhere; a failed join throws instead.
+ * after a restart or a workspace reload. The notice advises a rerun only on
+ * `recorded: true`: the credential then records this join's token, so the
+ * same join again goes on. Absent means unknown (an older daemon), and
+ * `recorded: false` means the rerun can be refused; neither earns the
+ * advice. `workspaceCwd`, from a remote connect: the workspace the remote
+ * answered from, which its runtime reports too. `false` is a connect that
+ * failed and was already reported elsewhere; a failed join throws instead.
  */
 export type RuntimeJoinOutcome =
   | false
-  | { saveError?: string; workspaceCwd?: string };
+  | { saveError?: string; workspaceCwd?: string; recorded?: boolean };
 
 /**
  * Reads a `hosts/connect` answer, which `hosts/remote-connect` passes on. An
- * older daemon sends no `saved` field; it always claimed the save.
+ * older daemon sends no `saved` field; it always claimed the save. Nor
+ * `recorded`; absent means unknown, not recorded, and the notice then drops
+ * the remedy: a released daemon aborts the live connection on a token-bearing
+ * rerun and refuses the spent token.
  */
-export function joinOutcome(answer: unknown): { saveError?: string } {
+export function joinOutcome(answer: unknown): {
+  saveError?: string;
+  recorded?: boolean;
+} {
   if (
     typeof answer !== 'object' ||
     answer === null ||
@@ -273,7 +296,11 @@ export function joinOutcome(answer: unknown): { saveError?: string } {
     return {};
   }
   const detail = (answer as { saveError?: unknown }).saveError;
-  return { saveError: typeof detail === 'string' ? detail : '' };
+  const recorded = (answer as { recorded?: unknown }).recorded;
+  return {
+    saveError: typeof detail === 'string' ? detail : '',
+    ...(typeof recorded === 'boolean' ? { recorded } : {}),
+  };
 }
 
 /**
@@ -369,6 +396,9 @@ export function AddRuntimeDialog({
   );
   const [joinLink, setJoinLink] = useState('');
   const [joinToken, setJoinToken] = useState('');
+  // The link a kept token was sent with: it is kept for that link's retry
+  // only, never carried to another coordinator.
+  const [keptTokenLink, setKeptTokenLink] = useState<string>();
   const [joinAllowHttp, setJoinAllowHttp] = useState(false);
   // The coordinator this daemon joined, once it accepted.
   const [joined, setJoined] = useState<string>();
@@ -400,12 +430,15 @@ export function AddRuntimeDialog({
     }));
   // Why a computer that joined could not save the connection, one per
   // machine: this one (`here`, from the join form, shown on its joined
-  // result) and the remote (`there`, from the address-and-token form, shown
-  // under that form, and on the remote's connected result). An attempt
-  // replaces only its own, and a close drops only what was on screen.
-  const [notSaved, setNotSaved] = useState<{ here?: string; there?: string }>(
-    {},
-  );
+  // result, with `hereRecorded` saying whether a rerun of that join goes on)
+  // and the remote (`there`, from the address-and-token form, shown under
+  // that form, and on the remote's connected result). An attempt replaces
+  // only its own, and a close drops only what was on screen.
+  const [notSaved, setNotSaved] = useState<{
+    here?: string;
+    there?: string;
+    hereRecorded?: boolean;
+  }>({});
   // A join or connect in flight, read synchronously: a second submit in the
   // same tick (a double Enter) sees it before `busy` re-renders. Closing
   // does not cancel the request, so it stays in flight, the dialog stays busy
@@ -546,7 +579,11 @@ export function AddRuntimeDialog({
     if (!onJoinCoordinator || inFlight.current) return;
     // A new join replaces the previous one's notice, even one stopped by
     // validation.
-    setNotSaved((current) => ({ ...current, here: undefined }));
+    setNotSaved((current) => ({
+      ...current,
+      here: undefined,
+      hereRecorded: undefined,
+    }));
     if (!joinTarget) {
       setError('join', t('collab.runtime.joinBadLink'));
       return;
@@ -570,16 +607,25 @@ export function AddRuntimeDialog({
       if (outcome) {
         setJoined(joinTarget.serverUrl);
         setJoinToken('');
+        setKeptTokenLink(undefined);
         if (outcome.saveError !== undefined) {
           const here = outcome.saveError;
-          setNotSaved((current) => ({ ...current, here }));
+          const hereRecorded = outcome.recorded === true;
+          setNotSaved((current) => ({ ...current, here, hereRecorded }));
         }
       }
     } catch (cause) {
-      // Once sent, a token may be spent even by a join that failed (a proxy
-      // timeout, a dropped connection): never send it again as it is. One
-      // that never left (the daemon was unavailable) is kept.
-      if (!isDaemonUnavailableError(cause)) setJoinToken('');
+      // The same token sent again picks up what a failed join did (its
+      // answer lost, or its first heartbeat failed), so it is kept for the
+      // link it was sent with; only one the coordinator refused is dropped.
+      // A failure that never reached the daemon sent nothing: the token is
+      // the user's own, unbound, and survives any link edit.
+      if (isRefusedJoinToken(cause)) {
+        setJoinToken('');
+        setKeptTokenLink(undefined);
+      } else if (!isDaemonUnavailableError(cause)) {
+        setKeptTokenLink(joinLink);
+      }
       const name = (cause as Error | undefined)?.name;
       setError(
         'join',
@@ -666,7 +712,9 @@ export function AddRuntimeDialog({
     if (!next && shownErrorOf !== undefined) setError(shownErrorOf);
     if (!next) {
       setNotSaved((current) => ({
-        ...(shownHere === undefined ? { here: current.here } : {}),
+        ...(shownHere === undefined
+          ? { here: current.here, hereRecorded: current.hereRecorded }
+          : {}),
         ...(shownThere === undefined ? { there: current.there } : {}),
       }));
     }
@@ -860,7 +908,20 @@ export function AddRuntimeDialog({
                     required
                     readOnly={busy}
                     value={joinLink}
-                    onChange={(event) => setJoinLink(event.target.value)}
+                    onChange={(event) => {
+                      const link = event.target.value;
+                      setJoinLink(link);
+                      // A token kept from a failed join belongs to the link
+                      // it was sent with; another coordinator must not
+                      // receive it.
+                      if (
+                        keptTokenLink !== undefined &&
+                        link !== keptTokenLink
+                      ) {
+                        setKeptTokenLink(undefined);
+                        setJoinToken('');
+                      }
+                    }}
                     placeholder="https://coordinator:4170/join/<workspace>"
                     aria-invalid={
                       joinLink.trim() !== '' && !joinTarget ? true : undefined
@@ -876,7 +937,12 @@ export function AddRuntimeDialog({
                     required
                     readOnly={busy}
                     value={joinToken}
-                    onChange={(event) => setJoinToken(event.target.value)}
+                    onChange={(event) => {
+                      // A typed token is the user's own, not one kept from
+                      // a failed join.
+                      setKeptTokenLink(undefined);
+                      setJoinToken(event.target.value);
+                    }}
                   />
                 </label>
                 <label className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -948,17 +1014,20 @@ export function AddRuntimeDialog({
 
         {(
           [
-            ['collab.runtime.notSavedHere', shownHere],
-            ['collab.runtime.notSavedThere', shownThere],
+            ['collab.runtime.notSavedHere', shownHere, notSaved.hereRecorded],
+            ['collab.runtime.notSavedThere', shownThere, undefined],
           ] as const
-        ).map(([key, saveError]) =>
+        ).map(([key, saveError, recorded]) =>
           saveError === undefined ? null : (
             <p
               key={key}
               role="status"
               className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-muted-foreground break-words"
             >
-              {t(key, { error: saveError })}
+              {t(key, {
+                error: saveError,
+                recorded: recorded === false ? 'false' : 'true',
+              })}
             </p>
           ),
         )}

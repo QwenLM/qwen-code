@@ -156,9 +156,11 @@ export function ManagedStandaloneApp({
       >
         {language === 'zh-CN'
           ? '正在连接…'
-          : language === 'ar'
-            ? 'جارٍ الاتصال…'
-            : 'Connecting…'}
+          : language === 'ru'
+            ? 'Подключение…'
+            : language === 'ar'
+              ? 'جارٍ الاتصال…'
+              : 'Connecting…'}
       </div>
     );
   }

@@ -6,4 +6,5 @@
 
 export const VOICE_MESSAGES_EN = {};
 export const VOICE_MESSAGES_ZH = {};
+export const VOICE_MESSAGES_RU = {};
 export const VOICE_MESSAGES_AR = {};

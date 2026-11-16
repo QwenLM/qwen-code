@@ -11,4 +11,5 @@
  */
 export const COLLAB_MESSAGES_EN = {};
 export const COLLAB_MESSAGES_ZH = {};
+export const COLLAB_MESSAGES_RU = {};
 export const COLLAB_MESSAGES_AR = {};

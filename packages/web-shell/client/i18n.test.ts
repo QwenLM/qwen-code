@@ -12,6 +12,13 @@ import {
 } from './i18n';
 import type { WebShellLanguage } from './i18n';
 import { CHANNEL_METHOD_PLATFORMS } from './components/channels/channel-platform';
+import * as ruPart1Stub from './i18n-ru-part1.transcript-stub';
+import * as ruPart2Stub from './i18n-ru-part2.transcript-stub';
+import * as ruPart3Stub from './i18n-ru-part3.transcript-stub';
+import * as ruPart4Stub from './i18n-ru-part4.transcript-stub';
+import * as ruPart5Stub from './i18n-ru-part5.transcript-stub';
+import * as ruPart6Stub from './i18n-ru-part6.transcript-stub';
+import * as ruRemainderStub from './i18n-ru-remainder.transcript-stub';
 
 // getTranslator returns the raw key when EN has no entry. SettingsMessage
 // translateSettingText then substitutes the settingsSchema.ts description,
@@ -384,7 +391,7 @@ describe('web-shell i18n catalog', () => {
     ['zh-CN', '周额度已用完，预计将于2天 1小时后恢复，请在额度恢复后重试。'],
     [
       'ru',
-      "You've used up your weekly credits. Your credits are expected to reset in 2 days and 1 hour. Please try again after the reset.",
+      'Недельный лимит кредитов исчерпан. Ожидается сброс через 2 дня и 1 час. Повторите попытку после сброса.',
     ],
   ] as const)(
     'formats quota data through the %s catalog',
@@ -565,9 +572,8 @@ describe('web-shell i18n catalog', () => {
   });
 });
 
-// #13391: ru ships a PARTIAL catalog covering the Goal card and the Goals
-// dialog only; every other key must fall back to EN in getTranslator. These
-// pins guard the normalizer branches, the pluralisation and that fallback.
+// ru is a full shipped catalog. These pins guard the normalizer branches,
+// Goal pluralisation, and that chrome keys resolve from RU rather than EN.
 describe('web-shell ru locale', () => {
   it('normalizes ru spellings to ru and leaves the en/zh mappings untouched', () => {
     for (const value of [
@@ -623,7 +629,7 @@ describe('web-shell ru locale', () => {
   it('lists every shipped language in the /language error and usage copy', () => {
     // The /language gate, help and completions derive from WEB_SHELL_LANGUAGES;
     // the error/usage copy must carry the same set, in every locale.
-    for (const language of ['en', 'zh-CN', 'ar'] as const) {
+    for (const language of WEB_SHELL_LANGUAGES) {
       const t = getTranslator(language);
       expect(t('language.invalid')).toContain('en, zh-CN, ru, ar');
       expect(t('language.usage')).toContain('en|zh-CN|ru|ar');
@@ -774,16 +780,40 @@ describe('web-shell ru locale', () => {
     expect(t('goal.blocked')).not.toBe(en('goal.blocked'));
   });
 
-  it('falls back to EN for keys the partial ru catalog lacks', () => {
+  it('renders chrome from the ru catalog, not from EN', () => {
     const t = getTranslator('ru');
     const en = getTranslator('en');
-    // Plain and parameterised EN values both resolve, not the raw key.
-    expect(t('welcome.prompt')).toBe(en('welcome.prompt'));
-    expect(t('welcome.prompt')).not.toBe('welcome.prompt');
-    expect(t('capacityChoice.capacity', { used: 1, limit: 2 })).toBe(
+    expect(t('welcome.prompt')).toBe('Что вы хотите сделать?');
+    expect(t('session.new')).toBe('Новая сессия');
+    expect(t('sidebar.project')).toBe('Рабочие области');
+    expect(t('sidebar.recentSessions')).toBe('Недавние');
+    expect(t('activity.title')).toBe('Активность');
+    expect(
+      t(
+        'channels.editor.field.github.boundSessionActions.optionDescription.mention',
+      ),
+    ).toBe('Вас @упомянули в комментарии');
+    expect(t('capacityChoice.capacity', { used: 1, limit: 2 })).not.toBe(
       en('capacityChoice.capacity', { used: 1, limit: 2 }),
     );
     // Unknown in every catalog: the key itself, as in all locales.
     expect(t('no.such.key')).toBe('no.such.key');
+  });
+
+  it('drops the Russian catalog from the transcript build', () => {
+    expect(Object.keys(ruPart1Stub)).toEqual(['RU_PART1']);
+    expect(Object.keys(ruPart2Stub)).toEqual(['RU_PART2']);
+    expect(Object.keys(ruPart3Stub)).toEqual(['RU_PART3']);
+    expect(Object.keys(ruPart4Stub)).toEqual(['RU_PART4']);
+    expect(Object.keys(ruPart5Stub)).toEqual(['RU_PART5']);
+    expect(Object.keys(ruPart6Stub)).toEqual(['RU_PART6']);
+    expect(ruPart1Stub.RU_PART1).toEqual({});
+    expect(ruPart2Stub.RU_PART2).toEqual({});
+    expect(ruPart3Stub.RU_PART3).toEqual({});
+    expect(ruPart4Stub.RU_PART4).toEqual({});
+    expect(ruPart5Stub.RU_PART5).toEqual({});
+    expect(ruPart6Stub.RU_PART6).toEqual({});
+    expect(Object.keys(ruRemainderStub)).toEqual(['RU_REMAINDER']);
+    expect(ruRemainderStub.RU_REMAINDER).toEqual({});
   });
 });

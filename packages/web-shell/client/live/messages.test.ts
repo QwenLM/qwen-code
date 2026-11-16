@@ -12,6 +12,7 @@ import { getTranslator } from '../i18n';
 import {
   LIVE_MESSAGES_AR,
   LIVE_MESSAGES_EN,
+  LIVE_MESSAGES_RU,
   LIVE_MESSAGES_ZH,
 } from './messages';
 import * as transcriptStub from './messages.transcript-stub';
@@ -52,6 +53,7 @@ describe('Live Voice messages', () => {
       expect(LIVE_PREFIXES.some((prefix) => key.startsWith(prefix))).toBe(true);
     }
     expect(Object.keys(LIVE_MESSAGES_ZH).sort()).toEqual([...en].sort());
+    expect(Object.keys(LIVE_MESSAGES_RU).sort()).toEqual([...en].sort());
     expect(Object.keys(LIVE_MESSAGES_AR).sort()).toEqual([...en].sort());
   });
 
@@ -59,11 +61,13 @@ describe('Live Voice messages', () => {
     expect(Object.keys(transcriptStub).sort()).toEqual([
       'LIVE_MESSAGES_AR',
       'LIVE_MESSAGES_EN',
+      'LIVE_MESSAGES_RU',
       'LIVE_MESSAGES_ZH',
     ]);
     expect(transcriptStub.LIVE_MESSAGES_AR).toEqual({});
     expect(transcriptStub.LIVE_MESSAGES_EN).toEqual({});
     expect(transcriptStub.LIVE_MESSAGES_ZH).toEqual({});
+    expect(transcriptStub.LIVE_MESSAGES_RU).toEqual({});
   });
 
   // The transcript build drops this module. Whether anything the transcript

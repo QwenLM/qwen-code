@@ -11,4 +11,5 @@
  */
 export const SETTINGS_MESSAGES_EN = {};
 export const SETTINGS_MESSAGES_ZH = {};
+export const SETTINGS_MESSAGES_RU = {};
 export const SETTINGS_MESSAGES_AR = {};

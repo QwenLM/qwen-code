@@ -6,4 +6,5 @@
 
 export const MANAGED_TASK_MESSAGES_EN = {};
 export const MANAGED_TASK_MESSAGES_ZH = {};
+export const MANAGED_TASK_MESSAGES_RU = {};
 export const MANAGED_TASK_MESSAGES_AR = {};
