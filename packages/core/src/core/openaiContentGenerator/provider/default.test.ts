@@ -440,6 +440,14 @@ describe('DefaultOpenAICompatibleProvider', () => {
         );
         expect(control.max_tokens).toBe(4096);
         expect(control).not.toHaveProperty('max_completion_tokens');
+        // max_new_tokens in extra_body also stands alone.
+        const newTokens = build(
+          hello('gpt-5.5'),
+          providerWith({ extra_body: { max_new_tokens: 4096 } }),
+        );
+        expect(newTokens['max_new_tokens']).toBe(4096);
+        expect(newTokens).not.toHaveProperty('max_completion_tokens');
+        expect(newTokens).not.toHaveProperty('max_tokens');
       });
 
       it('keeps the family key when extra_body names no budget', () => {
