@@ -170,21 +170,23 @@ Assembly logic lives in a testable hook `useChangeOverview`:
 
 - Uncommitted unit ← `workspaceGitDiff(cwd, sessionId)`.
 - PR units ← `summary.prs`, each fetching `workspaceGitHubPullRequestFiles`.
-- Commit-fallback units ← `workspaceGitLog` of commits after the newest bound
-  PR head that is an **ancestor of HEAD** (`headIsAncestor`; or, when no bound
-  PR head qualifies, the session's base branch, or HEAD's recent history when
-  no baseline is known and no PR is bound), each rendered from
-  `workspaceGitCommitDetail`. Commits at or before that head are treated as
+- Commit-fallback units ← `workspaceGitLog` of commits after the latest bound
+  PR head, used as the boundary only when **every** bound PR head is an
+  **ancestor of HEAD** (`headIsAncestor`). If any bound PR head is not an
+  ancestor (merged or rewritten), even an older ancestor head's window would
+  straddle the base history that absorbed the merged work, so the boundary
+  falls back to the session's base branch — or, when no baseline is known and
+  no PR is bound, HEAD's recent history. Each entry is rendered from
+  `workspaceGitCommitDetail`. Commits at or before the boundary are treated as
   covered by PRs and not duplicated. Merge commits are skipped; a failed
   commit-detail fetch fails the whole overview (see Degradation). A base branch
   outside the daemon's range whitelist skips the fallback entirely (a distinct
   "refuse" sentinel) rather than falling through to an unscoped walk that would
-  re-list pre-session history; with bound PRs but neither an ancestor head nor a
-  known base branch there is no trustworthy boundary, so the fallback is
-  suppressed as well. When a head-boundary log comes back unavailable, the hook
-  retries once with the base-branch window — only when that window is a real
-  range string, never the "no baseline" sentinel, whose omitted range would
-  walk HEAD unscoped.
+  re-list pre-session history; with bound PRs but no trustworthy boundary and
+  no known base branch the fallback is suppressed as well. When a head-boundary
+  log comes back unavailable, the hook retries once with the base-branch window
+  — only when that window is a real range string, never the "no baseline"
+  sentinel, whose omitted range would walk HEAD unscoped.
 
 Degradation:
 
@@ -205,9 +207,11 @@ Degradation:
   state, not an empty session or a partial list presented as complete. A
   rejected base-window retry keeps the first response's unavailable verdict
   instead of erasing it into "no loose commits".
-- A merged or rewritten PR whose head is not an ancestor of HEAD: its head is
-  not used as the fallback boundary; the base-branch window is used instead, or
-  the fallback is suppressed when no base branch is known.
+- A merged or rewritten PR among the bindings (any head not an ancestor of
+  HEAD): no head is used as the fallback boundary — an older ancestor head's
+  window would straddle the base history that absorbed the merged work; the
+  base-branch window is used instead, or the fallback is suppressed when no
+  base branch is known.
 - A bound PR in another repository (or on an Enterprise host) is resolved there
   via `gh --repo [host/]owner/repo` derived from its URL — host included — not
   by number in the session's checkout.

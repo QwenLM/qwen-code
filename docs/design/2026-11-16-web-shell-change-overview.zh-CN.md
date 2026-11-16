@@ -144,16 +144,17 @@ PR 方法保持一致。
 
 - 未提交单元 ← `workspaceGitDiff(cwd, sessionId)`。
 - PR 单元 ← `summary.prs`，每项拉取 `workspaceGitHubPullRequestFiles`。
-- commit 兜底单元 ← 用 `workspaceGitLog` 取最新且**是 HEAD 祖先**的绑定 PR head
-  （`headIsAncestor`）之后的 commit（没有符合条件的绑定 PR head 时取会话基线
-  分支；无基线且无绑定 PR 时取 HEAD 近期历史），每项用
-  `workspaceGitCommitDetail` 渲染。位于该 head 及之前的 commit 视为已被 PR 覆盖，
-  不重复展示。合并提交被跳过；commit detail 拉取失败会让整个总览失败（见降级）。
-  基线分支若在 daemon 区间白名单之外，则整体跳过兜底（独立的「拒绝」哨兵），而不是
-  落到无界遍历、把会话之前的历史重新列出；有绑定 PR 但既无祖先 head 又无已知基线
-  分支时，没有可信边界，兜底同样被抑制。head 边界 log 被报为不可用时，hook 用基线
-  分支窗口重试一次——仅当该窗口是真实 range 字符串时才重试，绝不使用「无基线」
-  哨兵，因为其缺省 range 会无界遍历 HEAD。
+- commit 兜底单元 ← 用 `workspaceGitLog` 取最新绑定 PR head 之后的 commit，
+  且仅当**每个**绑定 PR head 都**是 HEAD 祖先**（`headIsAncestor`）时才以该
+  head 为边界。任一绑定 PR head 不是祖先（已合并或被改写）时，即便较旧的祖先
+  head，其窗口也会跨越吸收了合并工作的基线历史，因此边界退回会话基线分支；
+  无基线且无绑定 PR 时取 HEAD 近期历史。每项用 `workspaceGitCommitDetail`
+  渲染。位于边界及之前的 commit 视为已被 PR 覆盖，不重复展示。合并提交被跳过；
+  commit detail 拉取失败会让整个总览失败（见降级）。基线分支若在 daemon 区间
+  白名单之外，则整体跳过兜底（独立的「拒绝」哨兵），而不是落到无界遍历、把会话
+  之前的历史重新列出；有绑定 PR 但无可信边界且无已知基线分支时，兜底同样被抑制。
+  head 边界 log 被报为不可用时，hook 用基线分支窗口重试一次——仅当该窗口是真实
+  range 字符串时才重试，绝不使用「无基线」哨兵，因为其缺省 range 会无界遍历 HEAD。
 
 降级：
 
@@ -169,8 +170,9 @@ PR 方法保持一致。
 - commit log 被 daemon 报为不可用、commit log 拉取抛错（超时 / 5xx）、或 commit
   detail 拉取失败：可重试的「无法加载」状态，而非空会话或把部分列表当作完整列表。
   基线窗口重试被拒绝时保留首次响应的不可用结论，不会抹成「没有 loose commit」。
-- 已合并或被改写的 PR，其 head 不是 HEAD 祖先：不用该 head 作兜底边界，改用基线
-  分支窗口；无已知基线分支时抑制兜底。
+- 绑定中存在已合并或被改写的 PR（任一 head 不是 HEAD 祖先）：不用任何 head 作
+  兜底边界——较旧祖先 head 的窗口会跨越吸收了合并工作的基线历史；改用基线分支
+  窗口，无已知基线分支时抑制兜底。
 - 绑定 PR 属于另一仓库（或 Enterprise host）时，按其 URL 推导 `[host/]owner/repo`
   （含 host）并用 `gh --repo` 在该仓库解析，而非在会话检出里按编号查。
 - 共享（非 worktree）工作区：单元为工作区口径，而非仅会话归属。

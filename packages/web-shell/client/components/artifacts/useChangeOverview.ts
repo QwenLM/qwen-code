@@ -205,17 +205,16 @@ export function useChangeOverview(
         );
         if (!active) return;
         units.push(...prResults.map((result) => result.unit));
-        // Bound PRs are ordered last = latest; scope the commit fallback to the
-        // newest head that is an ANCESTOR of HEAD, not whichever fetch happened
-        // to finish last. A merged or rewritten PR's head still resolves locally
-        // but is not an ancestor, and <head>..HEAD would then re-list the base
-        // branch's history as this session's loose work.
-        for (let i = prResults.length - 1; i >= 0; i -= 1) {
-          const result = prResults[i]!;
-          if (result.headSha && result.headIsAncestor) {
-            latestPrHeadSha = result.headSha;
-            break;
-          }
+        // Bound PRs are ordered last = latest. The latest head is a trustworthy
+        // fallback boundary only when EVERY bound PR head is an ancestor of
+        // HEAD: a merged or rewritten PR anywhere in the set means the base
+        // history absorbed its work, and even an older ancestor head's window
+        // (<older>..HEAD) would straddle that history — re-listing main-only
+        // commits and the merged PR's squash commit as loose work. In that
+        // case fall back to the base-branch window (or suppress below when no
+        // baseline is known) instead of skipping to an older ancestor head.
+        if (prResults.every((result) => result.headIsAncestor)) {
+          latestPrHeadSha = prResults[prResults.length - 1]?.headSha;
         }
       }
 

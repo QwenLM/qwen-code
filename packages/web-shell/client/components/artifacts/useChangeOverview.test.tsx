@@ -591,7 +591,12 @@ describe('useChangeOverview', () => {
     expect(output.loadFailed).toBe(false);
   });
 
-  it('picks the newest ancestor head when a later-bound PR head is not one', async () => {
+  it('uses the base window when the latest bound PR head is not an ancestor', async () => {
+    // The newest PR was squash-merged (its head is not an ancestor) while an
+    // older bound PR's head is. Skipping to the older ancestor head would
+    // compose <older>..HEAD, straddling the main history that absorbed the
+    // merged PR — re-listing main-only commits and the squash commit as loose
+    // work. The base-branch window is the trustworthy boundary instead.
     const ws = {
       workspaceGitDiff: vi.fn().mockResolvedValue(gitDiff),
       workspaceGitHubPullRequestFiles: vi
@@ -612,13 +617,79 @@ describe('useChangeOverview', () => {
     };
     mock.workspaceByCwd.mockReturnValue(ws);
     await renderAndSettle();
+    expect(ws.workspaceGitLog).toHaveBeenCalledTimes(1);
     expect(ws.workspaceGitLog).toHaveBeenCalledWith(
       20,
       0,
       '/work/wt',
-      'head1..HEAD',
+      'origin/main..HEAD',
       { sessionId: 's1' },
     );
+  });
+
+  it('uses the base window when an older bound PR head is not an ancestor', async () => {
+    // Mirror: even with the latest head an ancestor, a merged older PR means
+    // the base history absorbed work the latest head's window could straddle
+    // once main is merged into the session branch; refuse the head boundary.
+    const ws = {
+      workspaceGitDiff: vi.fn().mockResolvedValue(gitDiff),
+      workspaceGitHubPullRequestFiles: vi
+        .fn()
+        .mockImplementation((number: number) =>
+          Promise.resolve({
+            ...prFiles(number),
+            headIsAncestor: number === 2,
+          }),
+        ),
+      workspaceGitLog: vi.fn().mockResolvedValue({
+        v: 1,
+        available: true,
+        entries: [],
+        hasMore: false,
+      }),
+      workspaceGitCommitDetail: vi.fn(),
+    };
+    mock.workspaceByCwd.mockReturnValue(ws);
+    await renderAndSettle();
+    expect(ws.workspaceGitLog).toHaveBeenCalledTimes(1);
+    expect(ws.workspaceGitLog).toHaveBeenCalledWith(
+      20,
+      0,
+      '/work/wt',
+      'origin/main..HEAD',
+      { sessionId: 's1' },
+    );
+  });
+
+  it('suppresses the fallback when a merged PR leaves no baseline', async () => {
+    // Same merged-PR shape with no base branch: no trustworthy boundary, so
+    // skip the fetch rather than walk HEAD unscoped.
+    mock.sessionStatus.mockResolvedValue({
+      prs: [
+        { number: 1, url: 'https://github.com/o/r/pull/1' },
+        { number: 2, url: 'https://github.com/o/r/pull/2' },
+      ],
+      branch: { name: 'feat' },
+      worktree: { path: '/work/wt' },
+    });
+    const ws = {
+      workspaceGitDiff: vi.fn().mockResolvedValue(gitDiff),
+      workspaceGitHubPullRequestFiles: vi
+        .fn()
+        .mockImplementation((number: number) =>
+          Promise.resolve({
+            ...prFiles(number),
+            headIsAncestor: number === 1,
+          }),
+        ),
+      workspaceGitLog: vi.fn(),
+      workspaceGitCommitDetail: vi.fn(),
+    };
+    mock.workspaceByCwd.mockReturnValue(ws);
+    await renderAndSettle();
+    expect(ws.workspaceGitLog).not.toHaveBeenCalled();
+    expect(output.units.map((unit) => unit.kind)).not.toContain('commit');
+    expect(output.loadFailed).toBe(false);
   });
 
   it('suppresses the fallback when no head is an ancestor and no baseline is known', async () => {
