@@ -18,6 +18,7 @@ import { spawn } from 'node:child_process';
 import {
   existsSync,
   mkdtempSync,
+  mkdirSync,
   readdirSync,
   readFileSync,
   writeFileSync,
@@ -396,6 +397,51 @@ const allowOnce = () => ({
       );
       let stderr = '';
       agent.stderr.on('data', (chunk: Buffer) => (stderr += chunk));
+      const dump = process.env['ACP_PARITY_DUMP'];
+      const arm = kernel ? 'kernel' : shared ? 'shared' : 'current';
+      const slug = scenario.name.replace(/[^a-z0-9]+/gi, '-');
+      const evidenceErrors: string[] = [];
+      const saveEvidence = (name: string, value: unknown) => {
+        if (!dump) return;
+        try {
+          const directory = join(dump, slug, `${arm}-${agent.pid}`);
+          mkdirSync(directory, { recursive: true });
+          writeFileSync(join(directory, name), JSON.stringify(value), {
+            flag: 'wx',
+          });
+        } catch (error) {
+          evidenceErrors.push(`${name}: ${String(error)}`);
+        }
+      };
+      const snapshotDebug = (phase: string) => {
+        if (!dump) return;
+        try {
+          const debugDir = join(qwenHome, 'debug');
+          const entries = existsSync(debugDir)
+            ? readdirSync(debugDir, { recursive: true, withFileTypes: true })
+            : [];
+          const files = entries
+            .filter((entry) => entry.isFile() && entry.name !== 'latest')
+            .map((entry) => {
+              const file = join(entry.parentPath, entry.name);
+              return {
+                file,
+                bytesBase64: readFileSync(file).toString('base64'),
+              };
+            });
+          saveEvidence(`${phase}.json`, {
+            observerPid: process.pid,
+            agentPid: agent.pid,
+            atMs: performance.now(),
+            exitCode: agent.exitCode,
+            signalCode: agent.signalCode,
+            stderr,
+            files,
+          });
+        } catch (error) {
+          evidenceErrors.push(`${phase}: ${String(error)}`);
+        }
+      };
 
       const updates: unknown[] = [];
       const goalTurnEnds: unknown[] = [];
@@ -564,11 +610,13 @@ const allowOnce = () => ({
           await new Promise((resolve) => setTimeout(resolve, 50));
         }
       } finally {
+        snapshotDebug('pre-kill');
         agent.kill();
         await new Promise((resolve) => {
           if (agent.exitCode !== null || agent.signalCode) resolve(undefined);
           else agent.once('exit', resolve);
         });
+        snapshotDebug('post-exit');
         debugLog = readDebugLog(qwenHome);
         // Keep the runtime state for post-mortem whenever TestRig.cleanup()
         // keeps the test directory, which it decides by truthiness.
@@ -581,7 +629,7 @@ const allowOnce = () => ({
       // avoids copying TestRig's seeded names, and a leak fails here directly
       // rather than only when the request equality loses a race.
       expect(readdirSync(join(dir, '.qwen-home')).sort()).toEqual(homeBefore);
-      return {
+      const result: Run = {
         requests: modelRequests(server, dir),
         dateReminders: streamingMessages(server).filter((messages) =>
           messages.some(
@@ -603,6 +651,9 @@ const allowOnce = () => ({
         sharedRounds: (debugLog.match(SHARED_ROUND_LOG) ?? []).length,
         kernelRounds: countKernelRounds(debugLog),
       };
+      saveEvidence('result.json', result);
+      saveEvidence('observer-status.json', { errors: evidenceErrors });
+      return result;
     }
 
     /** The current loop, the shared loop, and the shared loop on the kernel. */

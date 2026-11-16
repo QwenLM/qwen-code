@@ -2,6 +2,13 @@
 
 [English](2026-11-15-cli-final-watcher-exit-chain.md) | [简体中文](2026-11-15-cli-final-watcher-exit-chain.zh-CN.md)
 
+## 基于源码的真实子进程验证——2026-11-16
+
+下述此前 185 项及 20 项测试 checkpoint 的真实子进程导入已构建 CLI 模块，其证据仅属于那些精确构建树。当前测试按模块相对 URL 将当前 CLI 源码打包为一个所属临时 ESM 产物；合成入口仅 re-export 重启函数和清理注册，共享一个真实 cleanup 模块。不加载旧 CLI dist，也不把生产函数体复制到测试中。
+保持不变的纯 Core watcher-cleanup 和 text utilities 被别名到当前 TypeScript 源码，仅依赖 Node builtin。对未使用的 deferred Core runtime 导入只做 external 处理以避免遍历其 barrel，输出产物不得残留该引用。不 mock 或替换实际使用的实现。仍需已安装的根 esbuild 依赖，以及套件其余部分所需的普通 workspace 前置产物。
+新的完整类型检查、process utility 整文件（20 项通过）、定向测试 lint、格式、双语引用与 actionlint 已通过。直接 no-AK meta 整套 15 项通过、四项平台跳过；另七项选定的变更 job/邻接合同通过，193 项无关测试被过滤。这些定向合同不计整文件通过。
+不重新构建的源码绑定反证临时移除 launcher 预检：旧构建模块测试仍以子进程退出 42 通过，而当前源码测试按预期因原生 ENOENT/SIGABRT 失败。随后源码、测试及全部 1,455 个 bundle 文件均精确恢复。这证明该回归观察当前源码，而非陈旧 CLI 构建；不使所有原生 exec 失败可恢复。真实 owned Node 副本删除、execve 检查、core dump 限制、清理 marker、终态 42 oracle 和既有 15 秒子进程/20 秒测试上限均不变。不宣称 Core 或产品行为改动、平台资格或新的公开应用通过。
+
 ## 有界 launcher 后续修正——2026-11-16
 
 在既有 supervised exec 的 try 内、watcher 准备及清理之后检查已知 launcher 失败：当前可执行路径须解析为普通文件并通过 X_OK，合法符号链接会被跟随。已知预检失败与可捕获的 JavaScript exec 异常沿用既有安全错误报告并最终以代码 42 退出；没有 supervisor 时用户必须手动重启。成功路径的 PID、argv、GC 参数及清理顺序不变。原生系统调用失败可能直接终止运行时而非抛错，ENOEXEC、E2BIG 及检查后的文件或权限变化不在保证范围内；检查不是原子操作，不能消除 TOCTOU。受控 Node 副本删除自身 launcher 的基线已复现清理后出现原生 ENOENT/SIGABRT，而不是预期的 42；新增真实子进程回归现已记录清理并无终止信号地退出 42。此前通过的 exec 控制测试仅证明可捕获 JavaScript 异常行为，不证明全部原生失败都可恢复。下述旧结果保留各自精确源码的历史范围，本后续修正已有有限本地验证，应用、平台及最终 main 资格仍独立。
@@ -10,13 +17,13 @@ Root 已验证 build/type、七个完整 CLI 文件共 185 项通过、完整 li
 
 ## 已验证独立 Common/POLL checkpoint——2026-11-16
 
-固定 `main88e3` 上的独立 12 路径候选现已通过七 normal 阶段及七 CLI whole/181 项，包含原 2 秒 oracle 下全部六个真实文件系统 case；build/type/完整零 warning lint/format/bundle 通过。已测树 `8ed483a558fa7b7d04d5cbce4b7d1791170d271b`，source-bundle entry `9aa3e3ef3544c47e007a2785894eb5b6f1180efa9ee8915ed116c3d715aac222`，共 1,455 文件。
+固定 `main` 的 `88e3f19c01d5` 上的独立 12 路径候选现已通过七 normal 阶段及七 CLI whole/181 项，包含原 2 秒 oracle 下全部六个真实文件系统 case；build/type/完整零 warning lint/format/bundle 通过。已测树 `8ed483a558fa7b7d04d5cbce4b7d1791170d271b`，source-bundle entry `9aa3e3ef3544c47e007a2785894eb5b6f1180efa9ee8915ed116c3d715aac222`，共 1,455 文件。
 short-fit 公开流程通过 Node+Ink、Bun+Ink、strict Bun+OpenTUI，helper 前 3 次自然退出 0 及 18 个已关闭 loopback model 请求。每次都在一物理行完整显示 87-cell ASCII 删除命令、默认焦点 Yes 且恰一次 CR，两次当前 footer 变化均满足原 2 秒期限。这只授予声明的 sidecar 流程，不授予长命令换行、所有 signal 路径或 Trust 重启行为。
 本四文档 checkpoint 仅记录验证结果；八个已测源码/测试与编译 bundle 保持不变，出版记录包含文档格式、双语引用与精确源码对应核验。下文保留旧 checkpoint（含当时 pending/Trust 组合文字），不描述本 12 路径范围。既有 signal 5 通过 / 1 失败 / clean-main Native 首次提示失败及另案 Bun+Ink Trust 重启失败仍开；旧 filesystem 失败与新 polling 通过分层保留。仅更新现有 Draft #17334，CI/Ready/维护者审查与平台/稳定性资格独立。
 
 ## Common/POLL 逻辑候选提案——2026-11-16
 
-计划仅更新既有 Draft #17334，在固定 `main88e3` 上合并 Common 退出/重启接线与 worktree sidecar 精确文件轮询，共 12 路径；不含原生 Trust、Stats、exec 确认或 CI 路由改动，尚无独立 12 路径产物验收。下文旧 `MAIN39` 组合状态与结果仅作为历史；其中 Trust 组合/Trust CI 描述不属于本逻辑候选。保留这些记录及原失败，不把 39 路径结果继承为 12 路径资格。仍需新 owned 候选、normal 检查及有限 sidecar 验收；既定 exec 失败 terminal 42/手动重启政策不变。
+计划仅更新既有 Draft #17334，在固定 `main` 的 `88e3f19c01d5` 上合并 Common 退出/重启接线与 worktree sidecar 精确文件轮询，共 12 路径；不含原生 Trust、Stats、exec 确认或 CI 路由改动，尚无独立 12 路径产物验收。下文旧 `MAIN39` 组合状态与结果仅作为历史；其中 Trust 组合/Trust CI 描述不属于本逻辑候选。保留这些记录及原失败，不把 39 路径结果继承为 12 路径资格。仍需新 owned 候选、normal 检查及有限 sidecar 验收；既定 exec 失败 terminal 42/手动重启政策不变。
 
 ## 状态与问题
 

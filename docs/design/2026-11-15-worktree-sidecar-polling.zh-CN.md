@@ -8,13 +8,13 @@
 
 ## 已验证独立 Common/POLL checkpoint——2026-11-16
 
-固定 `main88e3` 上的独立 12 路径候选现已通过七 normal 阶段及七 CLI whole/181 项，包含原 2 秒 oracle 下全部六个真实文件系统 case；build/type/完整零 warning lint/format/bundle 通过。已测树 `8ed483a558fa7b7d04d5cbce4b7d1791170d271b`，source-bundle entry `9aa3e3ef3544c47e007a2785894eb5b6f1180efa9ee8915ed116c3d715aac222`，共 1,455 文件。
+固定 `main` 的 `88e3f19c01d5` 上的独立 12 路径候选现已通过七 normal 阶段及七 CLI whole/181 项，包含原 2 秒 oracle 下全部六个真实文件系统 case；build/type/完整零 warning lint/format/bundle 通过。已测树 `8ed483a558fa7b7d04d5cbce4b7d1791170d271b`，source-bundle entry `9aa3e3ef3544c47e007a2785894eb5b6f1180efa9ee8915ed116c3d715aac222`，共 1,455 文件。
 short-fit 公开流程通过 Node+Ink、Bun+Ink、strict Bun+OpenTUI，helper 前 3 次自然退出 0 及 18 个已关闭 loopback model 请求。每次都在一物理行完整显示 87-cell ASCII 删除命令、默认焦点 Yes 且恰一次 CR，两次当前 footer 变化均满足原 2 秒期限。这只授予声明的 sidecar 流程，不授予长命令换行、所有 signal 路径或 Trust 重启行为。
 本四文档 checkpoint 仅记录验证结果；八个已测源码/测试与编译 bundle 保持不变，出版记录包含文档格式、双语引用与精确源码对应核验。下文保留旧 checkpoint（含当时 pending/Trust 组合文字），不描述本 12 路径范围。既有 signal 5 通过 / 1 失败 / clean-main Native 首次提示失败及另案 Bun+Ink Trust 重启失败仍开；旧 filesystem 失败与新 polling 通过分层保留。仅更新现有 Draft #17334，CI/Ready/维护者审查与平台/稳定性资格独立。
 
 ## Common/POLL 逻辑候选提案——2026-11-16
 
-计划仅更新既有 Draft #17334，在固定 `main88e3` 上合并 Common 退出/重启接线与 worktree sidecar 精确文件轮询，共 12 路径；不含原生 Trust、Stats、exec 确认或 CI 路由改动，尚无独立 12 路径产物验收。下文旧 `MAIN39` 组合状态与结果仅作为历史；其中 Trust 组合/Trust CI 描述不属于本逻辑候选。保留这些记录及原失败，不把 39 路径结果继承为 12 路径资格。仍需新 owned 候选、normal 检查及有限 sidecar 验收；既定 exec 失败 terminal 42/手动重启政策不变。
+计划仅更新既有 Draft #17334，在固定 `main` 的 `88e3f19c01d5` 上合并 Common 退出/重启接线与 worktree sidecar 精确文件轮询，共 12 路径；不含原生 Trust、Stats、exec 确认或 CI 路由改动，尚无独立 12 路径产物验收。下文旧 `MAIN39` 组合状态与结果仅作为历史；其中 Trust 组合/Trust CI 描述不属于本逻辑候选。保留这些记录及原失败，不把 39 路径结果继承为 12 路径资格。仍需新 owned 候选、normal 检查及有限 sidecar 验收；既定 exec 失败 terminal 42/手动重启政策不变。
 
 ## 状态与已复现问题
 

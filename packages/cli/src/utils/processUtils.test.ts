@@ -8,7 +8,8 @@ import nativeFs, * as fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { buildSync } from 'esbuild';
 import { afterEach, beforeAll, beforeEach, vi } from 'vitest';
 import {
   RELAUNCH_EXIT_CODE,
@@ -144,20 +145,50 @@ describe('processUtils', () => {
       );
       const launcher = path.join(directory, 'node');
       const marker = path.join(directory, 'cleanup');
-      const utils = pathToFileURL(
-        path.resolve('dist/src/utils/processUtils.js'),
-      ).href;
-      const cleanupUrl = pathToFileURL(
-        path.resolve('dist/src/utils/cleanup.js'),
-      ).href;
       try {
+        const artifact = path.join(directory, 'relaunch.mjs');
+        const built = buildSync({
+          stdin: {
+            contents: `
+              export { relaunchApp, superviseInProcess } from './processUtils.ts';
+              export { registerCleanup } from './cleanup.ts';
+            `,
+            resolveDir: fileURLToPath(new URL('.', import.meta.url)),
+            loader: 'js',
+          },
+          bundle: true,
+          platform: 'node',
+          format: 'esm',
+          write: false,
+          alias: {
+            '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js':
+              fileURLToPath(
+                new URL(
+                  '../../../core/src/utils/file-watcher-cleanup.ts',
+                  import.meta.url,
+                ),
+              ),
+            '@qwen-code/qwen-code-core/utils/textUtils.js': fileURLToPath(
+              new URL('../../../core/src/utils/textUtils.ts', import.meta.url),
+            ),
+          },
+          external: [
+            fileURLToPath(
+              new URL('./deferred-core-runtime.ts', import.meta.url),
+            ),
+          ],
+        });
+        expect(built.outputFiles[0].text).not.toContain(
+          'deferred-core-runtime',
+        );
+        fs.writeFileSync(artifact, built.outputFiles[0].contents);
+        const utils = pathToFileURL(artifact).href;
         fs.copyFileSync(process.execPath, launcher);
         fs.chmodSync(launcher, 0o755);
         const source = `
           import assert from 'node:assert/strict';
           import { realpathSync, unlinkSync, writeFileSync } from 'node:fs';
-          import { relaunchApp, superviseInProcess } from ${JSON.stringify(utils)};
-          import { registerCleanup } from ${JSON.stringify(cleanupUrl)};
+          import { relaunchApp, superviseInProcess, registerCleanup } from ${JSON.stringify(utils)};
           assert.equal(typeof process.execve, 'function');
           registerCleanup(() => writeFileSync(${JSON.stringify(marker)}, 'cleaned'));
           superviseInProcess(() => 0);
