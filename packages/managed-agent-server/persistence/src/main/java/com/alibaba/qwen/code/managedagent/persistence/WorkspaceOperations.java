@@ -18,7 +18,7 @@ import java.util.Map;
 
 final class WorkspaceOperations {
     enum Kind {
-        WORKSPACE_RECOVERY, WORKSPACE_OPERATOR_RECOVERY, STORAGE_MIGRATION, CSI_RETIREMENT, WORKSPACE_RETIREMENT, CHILD_WORKSPACE, SESSION_WORKTREE
+        WORKSPACE_RECOVERY, WORKSPACE_OPERATOR_RECOVERY, STORAGE_MIGRATION, WORKSPACE_RETIREMENT, CHILD_WORKSPACE, SESSION_WORKTREE
     }
 
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -175,7 +175,6 @@ final class WorkspaceOperations {
             case WORKSPACE_RECOVERY -> java.util.Set.of("CAPTURING", "VERIFYING", "SEALED", "VERIFIED", "INVALIDATED");
             case WORKSPACE_OPERATOR_RECOVERY -> java.util.Set.of("PREPARED", "ATTESTED", "COMPLETED");
             case STORAGE_MIGRATION -> java.util.Set.of("RETIRING", "RETIRED", "PREPARING", "PREPARED", "COMPLETED", "ABORTED", "INVALIDATED");
-            case CSI_RETIREMENT -> java.util.Set.of("DRAINING");
             case WORKSPACE_RETIREMENT -> java.util.Set.of("DRAINING", "PLATFORM_CLEANED", "RELEASED");
             case CHILD_WORKSPACE -> java.util.Set.of(JdbcChildWorkspaceStore.PREPARING, JdbcChildWorkspaceStore.READY,
                     JdbcChildWorkspaceStore.MERGING, JdbcChildWorkspaceStore.APPLYING, JdbcChildWorkspaceStore.APPLIED,
@@ -204,7 +203,7 @@ final class WorkspaceOperations {
                     || "PREPARED".equals(from) && "COMPLETED".equals(to));
             case WORKSPACE_RETIREMENT -> "DRAINING".equals(from) && "PLATFORM_CLEANED".equals(to)
                     || "PLATFORM_CLEANED".equals(from) && "RELEASED".equals(to);
-            case CSI_RETIREMENT, CHILD_WORKSPACE, SESSION_WORKTREE -> false;
+            case CHILD_WORKSPACE, SESSION_WORKTREE -> false;
         };
         if (!allowed) {
             throw new IllegalStateException("Workspace operation transition conflicts");
