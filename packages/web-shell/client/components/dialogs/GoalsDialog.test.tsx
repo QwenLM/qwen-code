@@ -563,12 +563,69 @@ describe('GoalsDialog', () => {
             .querySelector('[data-testid="goal-budget-time"]')
             ?.getAttribute('aria-valuenow'),
         );
+      const figure = () =>
+        document.getElementById('sess-1-budget-time-value')?.textContent;
+      const before = valueNow();
+      expect(figure()).toBe('1m 0s / 30m 0s');
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(120_000);
+      });
+      expect(valueNow()).toBeGreaterThan(before);
+      // The figure beside the bar must advance with it: a tick that moved
+      // only the fill would leave the row's two readouts disagreeing.
+      expect(figure()).toBe('3m 0s / 30m 0s');
+      vi.useRealTimers();
+    });
+
+    it('ticks the active-time bar while the session is between turns', async () => {
+      // The timer gates on the goal's STATUS, not the session's activity:
+      // an active goal whose session is idle between turns still accrues
+      // active time. A gate rewritten to `activity !== 'idle'` survives the
+      // running-activity case above and dies here.
+      vi.useFakeTimers();
+      const goal = baseGoal({ hasActivePrompt: false });
+      goal.snapshot.goal.activeTimeMs = 60_000;
+      goal.snapshot.goal.activeTimeBudgetMs = 1_800_000;
+      goal.snapshot.goal.updatedAt = Date.now();
+      await mount([goal]);
+
+      const valueNow = () =>
+        Number(
+          document
+            .querySelector('[data-testid="goal-budget-time"]')
+            ?.getAttribute('aria-valuenow'),
+        );
       const before = valueNow();
       await act(async () => {
         await vi.advanceTimersByTimeAsync(120_000);
       });
       expect(valueNow()).toBeGreaterThan(before);
       vi.useRealTimers();
+    });
+
+    it('rounds the bar to the nearest percent while the figure stays exact', async () => {
+      // 1_794_000 / 1_800_000 = 99.67%: the bar rounds to full (a floor
+      // mutant reads 99) while the figure keeps attesting the remaining
+      // headroom — the two readouts serve different purposes.
+      await mount([
+        withSpend({
+          status: 'paused',
+          activeTimeMs: 1_794_000,
+          activeTimeBudgetMs: 1_800_000,
+        }),
+      ]);
+
+      expect(
+        document
+          .querySelector('[data-testid="goal-budget-time"]')
+          ?.getAttribute('aria-valuenow'),
+      ).toBe('100');
+      expect(
+        document.querySelector<HTMLElement>(
+          '[data-testid="goal-budget-time"] > div',
+        )?.style.width,
+      ).toBe('100%');
+      expect(barName('goal-budget-time')).toBe('Active time 29m 54s / 30m 0s');
     });
 
     it('keeps budget label ids unique across cards and scoped to each card', async () => {
@@ -822,6 +879,82 @@ describe('GoalsDialog', () => {
     click(document.querySelector('[data-testid="goal-open-session"]'));
 
     expect(onOpenSession).toHaveBeenCalledWith('sess-1', '/w-secondary');
+  });
+
+  it('keeps the footer session link enabled while a control is in flight', async () => {
+    // Same navigation exemption as the header action, pinned on the footer
+    // entry too: a busy gate added to only one of the two would otherwise
+    // ship undetected.
+    const onOpenSession = vi.fn();
+    await mount([baseGoal()], { onOpenSession });
+    let release: (() => void) | undefined;
+    actions.controlGoal.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          release = () =>
+            resolve({ snapshot: { v: 2, activity: 'idle', goal: null } });
+        }),
+    );
+
+    click(document.querySelector('button[aria-label="Clear goal"]'));
+    await flush();
+    expect(
+      document.querySelector<HTMLButtonElement>(
+        'button[aria-label="Clear goal"]',
+      )?.disabled,
+    ).toBe(true);
+
+    const link = document.querySelector<HTMLButtonElement>(
+      '[data-testid="goal-session-link"]',
+    );
+    expect(link?.disabled).toBe(false);
+    click(link);
+    expect(onOpenSession).toHaveBeenCalledWith('sess-1', undefined);
+
+    await act(async () => {
+      release?.();
+      await Promise.resolve();
+    });
+    await flush();
+  });
+
+  it('opens the session of a completed goal from both jump affordances', async () => {
+    // The listings filter completed goals today, but the card itself must
+    // still navigate if one is present: completion ends the controls, not
+    // the ability to read the goal's transcript.
+    const onOpenSession = vi.fn();
+    const completed = baseGoal();
+    completed.snapshot.goal.status = 'complete';
+    await mount([completed], { onOpenSession });
+
+    click(document.querySelector('[data-testid="goal-open-session"]'));
+    expect(onOpenSession).toHaveBeenCalledWith('sess-1', undefined);
+    click(document.querySelector('[data-testid="goal-session-link"]'));
+    expect(onOpenSession).toHaveBeenCalledTimes(2);
+  });
+
+  it('scopes the header and footer jumps to the card they sit on', async () => {
+    // Clicking only the list's first card cannot witness per-item scoping:
+    // a handler wired to a fixed row (or the wrong closure variable) would
+    // still pass. Click the SECOND card's affordances instead.
+    const onOpenSession = vi.fn();
+    const first = baseGoal();
+    const second = baseGoal({
+      sessionId: 'sess-2',
+      displayName: 'second-goal',
+      setAt: Date.now() - 10_000,
+    });
+    second.snapshot.goal.goalId = 'goal-2';
+    await mount([first, second], { onOpenSession });
+
+    const cards = document.querySelectorAll('[role="listitem"]');
+    expect(cards).toHaveLength(2);
+    const secondCard = cards[1];
+    click(secondCard.querySelector('[data-testid="goal-open-session"]'));
+    expect(onOpenSession).toHaveBeenLastCalledWith('sess-2', undefined);
+    click(secondCard.querySelector('[data-testid="goal-session-link"]'));
+    expect(onOpenSession).toHaveBeenLastCalledWith('sess-2', undefined);
+    expect(onOpenSession).toHaveBeenCalledTimes(2);
   });
 
   it('tones the status pill by lifecycle state', async () => {

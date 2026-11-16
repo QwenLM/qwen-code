@@ -319,6 +319,10 @@ describe('GoalStatusStrip', () => {
       '[data-testid="goal-open-goals"]',
     );
     expect(button).not.toBeNull();
+    // Navigation wears the link cue, not the grey control class: the blue
+    // tint itself is painted-proofed in the goals E2E; here pin the class
+    // wiring so dropping it reds a unit case too.
+    expect(button!.className).toContain('goalsAction');
     act(() => button!.click());
     expect(onOpenGoals).toHaveBeenCalledOnce();
   });
@@ -329,6 +333,38 @@ describe('GoalStatusStrip', () => {
     expect(
       container.querySelector('[data-testid="goal-open-goals"]'),
     ).toBeNull();
+  });
+
+  it('keeps the Goals jump enabled while a control is in flight', () => {
+    // Navigation is not a control: the busy gate that locks edit/pause/
+    // clear must never lock the jump to the Goals page.
+    const onOpenGoals = vi.fn();
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <GoalStatusStrip
+            snapshot={snapshot('active')}
+            busy
+            onEdit={vi.fn()}
+            onPause={vi.fn()}
+            onResume={vi.fn()}
+            onClear={vi.fn()}
+            onOpenGoals={onOpenGoals}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(
+      container.querySelector<HTMLButtonElement>('[aria-label="Edit goal"]')
+        ?.disabled,
+    ).toBe(true);
+    const button = container.querySelector<HTMLButtonElement>(
+      '[data-testid="goal-open-goals"]',
+    );
+    expect(button?.disabled).toBe(false);
+    act(() => button!.click());
+    expect(onOpenGoals).toHaveBeenCalledOnce();
   });
 
   it('tones the status text by lifecycle state', () => {

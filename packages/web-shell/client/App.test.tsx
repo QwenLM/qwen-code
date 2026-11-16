@@ -1099,6 +1099,7 @@ const {
         ) => void;
         onPendingPanesChange?: (ids: string[]) => void;
         onPaneWorkspacesChange?: (cwds: readonly string[]) => void;
+        onOpenGoals?: () => void;
         showSessionDetails?: boolean;
         includeOtherWorkspaces?: boolean;
         workspaceCwd?: string;
@@ -2541,6 +2542,7 @@ vi.doMock('./components/SplitView', async () => {
       onPanesChange?: (ids: string[]) => void;
       onPendingPanesChange?: (ids: string[]) => void;
       onPaneWorkspacesChange?: (cwds: readonly string[]) => void;
+      onOpenGoals?: () => void;
       includeOtherWorkspaces?: boolean;
       workspaceCwd?: string;
       sessionWorkflowEnabled?: boolean;
@@ -29582,6 +29584,31 @@ describe('App session callbacks', () => {
     expect(
       container.querySelector('[data-testid="goal-open-goals"]'),
     ).toBeNull();
+  });
+
+  it('wires the split-view panes Goals affordance to the Goals page', async () => {
+    // SplitView mounts only under project features, so every pane gets the
+    // affordance. Pin the App-to-SplitView hop end to end: deleting
+    // `onOpenGoals={openGoals}` on the SplitView element must red this case,
+    // and the forwarded callback must open the real page, not a no-op.
+    mockConnection.goalState = activeGoalSnapshot();
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+        ?.click();
+    });
+    await flush();
+    const openGoals = testState.latestSplitViewProps?.onOpenGoals;
+    expect(openGoals).toBeDefined();
+    await act(async () => {
+      openGoals!();
+      await flush();
+    });
+    expect(
+      container.querySelector('[data-testid="goals-page"]'),
+    ).not.toBeNull();
   });
 
   it('refuses /language ui while a Goal owns the session', async () => {

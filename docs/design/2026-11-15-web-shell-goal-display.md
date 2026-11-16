@@ -91,7 +91,11 @@ cannot reach the aggregate view without the sidebar.
   skipped when the daemon reports no usage figure; active time uses the same
   live `getGoalActiveTimeMs` the elapsed meta already ticks with, against
   `activeTimeBudgetMs`. Ratios clamp to `[0, 1]` so a spent budget reads as a
-  full bar. Unbounded goals render no section and keep the footer figures.
+  full bar, and the clamped ratio rounds to the nearest percent
+  (`Math.round`): a goal at 99.67% reads as a full bar while the figure keeps
+  attesting the exact headroom — the bar is the at-a-glance readout, the
+  figure the precise one. Unbounded goals render no section and keep the
+  footer figures.
   The fill's width transition is gated behind
   `@media (prefers-reduced-motion: no-preference)`, matching the sibling
   progress fills, because the active-time ratio advances every second.
@@ -104,7 +108,12 @@ cannot reach the aggregate view without the sidebar.
 - A new optional `onOpenGoals` prop renders a `Target` icon button
   (`data-testid="goal-open-goals"`, label `goals.viewAll`) as the first
   action. Absent prop → no button, so surfaces without the Goals page keep
-  the current shape.
+  the current shape. The jump is navigation, not a control: it wears the
+  same interactive blue as the card's jump affordances (`.goalsAction`,
+  declared after the `.action:hover` rules so the blue survives hover) and
+  is never disabled by `busy`. The `Target` glyph stays — it is the app-wide
+  Goals icon the sidebar's Goals entry also uses; the review-round fix was
+  the grey control class, not the icon.
 
 ### App wiring
 
@@ -134,7 +143,20 @@ cannot reach the aggregate view without the sidebar.
   meta text; reviewers could not find the jump in the screenshots. The footer
   entry now carries icon + name + arrow in the interactive blue with hover
   underline and a focus ring, and the header icon is tinted blue — colour and
-  shape, not position alone, signal "this navigates".
+  shape, not position alone, signal "this navigates". The rule extends to the
+  strip's Goals-page jump: round 6 caught it still wearing the grey control
+  class, and it now carries the same blue (`.goalsAction`).
+- **The bar rounds, the figure stays exact.** `aria-valuenow` and the fill
+  width round the clamped ratio to the nearest percent, so a goal at 99.67%
+  reads as a full bar while its figure still shows the remaining headroom.
+  The two readouts serve different purposes — glance vs. precision — and a
+  floor would understate progress just as a ceiling would overstate it.
+- **Row labels restate the unit on purpose.** The value templates are shared
+  with the label-less footer and strip surfaces, where the unit word is the
+  only carrier of the dimension. A unit-less row variant would fork the
+  single wording source this PR deliberately unified, so the label/unit
+  repetition in the row is the accepted cost; every locale's label and value
+  template is pinned instead.
 - **Shared palette, not new colours.** The tone mapping reuses
   `--status-*-fg/bg` so goals read identically to the cockpit and workflow
   surfaces in both themes; no new theme tokens are introduced.
@@ -159,7 +181,7 @@ cannot reach the aggregate view without the sidebar.
 - `packages/web-shell/client/components/ChatPane.tsx` (split-view strip wiring)
 - `packages/web-shell/client/i18n.tsx` (en / zh / ru keys)
 - Tests: `GoalsDialog.test.tsx`, `GoalStatusStrip.test.tsx`,
-  `ChatPane.test.tsx`, `App.test.tsx`,
+  `ChatPane.test.tsx`, `SplitView.test.tsx`, `App.test.tsx`, `i18n.test.ts`,
   `web-shell.goals-multi-workspace.spec.ts`
 
 ## Constraints and risks
@@ -180,21 +202,32 @@ cannot reach the aggregate view without the sidebar.
   present/absent/clamped with `role="progressbar"` and explicit
   `aria-valuemin`/`aria-valuemax`, token-bar skip, fill tone in BOTH running
   and attention states, inline fill width including the zero-progress `0%`,
-  the active-time bar advancing under fake timers, single-occurrence figure
-  witness, a mixed-budget case pinning that only the armed budget's footer
-  cell is suppressed, both jump affordances' accessible names, and a
+  the active-time bar AND its figure advancing under fake timers, a
+  between-turns case proving the timer gates on goal status rather than
+  session activity, nearest-percent rounding with the figure keeping its
+  exact headroom, single-occurrence figure witness, a mixed-budget case
+  pinning that only the armed budget's footer cell is suppressed, both jump
+  affordances' accessible names, a completed-goal case pinning both jumps
+  still navigate, a second-card case pinning per-item jump scoping, and a
   two-card case pinning per-session label-id uniqueness and card-scoped
   references). The accessible-name helper composes the `aria-labelledby`
   referenced text with spaces, the way the browser computes the name, and
   asserts `aria-label` is absent so a regression back to it reds every name
-  pin. `GoalStatusStrip.test.tsx` (affordance wired/absent, status tone,
-  tone mapping). `ChatPane.test.tsx` pins the split-view forward both ways:
-  wired renders the button and fires the handler once; unwired renders no
-  button while the strip keeps its controls.
-- `GoalsDialog.test.tsx` also pins that the header session action stays
-  enabled while a control is in flight (navigation is not a control), and
-  `App.test.tsx` pins the composer strip's `projectFeaturesAvailable` gate
-  both ways (affordance present with project features, absent without).
+  pin. `GoalStatusStrip.test.tsx` (affordance wired/absent, the wired button
+  carrying the `goalsAction` link-cue class, status tone, tone mapping).
+  `ChatPane.test.tsx` pins the split-view forward both ways: wired renders
+  the button and fires the handler once; unwired renders no button while the
+  strip keeps its controls. `SplitView.test.tsx` pins the middle hop both
+  ways (every pane receives `onOpenGoals` and fires it; unwired panes get
+  none), and `i18n.test.ts` full-string-pins `goals.viewAll` and the three
+  budget labels in en / zh / ru.
+- `GoalsDialog.test.tsx` also pins that BOTH the header action and the footer
+  link stay enabled while a control is in flight (navigation is not a
+  control), `GoalStatusStrip.test.tsx` pins the same exemption for the strip's
+  Goals jump under `busy`, and `App.test.tsx` pins the composer strip's
+  `projectFeaturesAvailable` gate both ways (affordance present with project
+  features, absent without) plus the App-to-SplitView hop end to end (the
+  forwarded callback opens the real Goals page).
 - Mutation witnesses (byte-level restore verified): removing the footer
   suppression, wiring the suppression to the wrong budget, deleting the
   `ChatPane` forward, dropping the header jump's workspace tag, hardcoding
@@ -203,7 +236,13 @@ cannot reach the aggregate view without the sidebar.
   STRIP's `[data-status='attention']` rule (pinned by the paused-goal
   navigation case), deleting both running rules together (caught by the
   untinted anchor), gating the header jump on `busy`, and diverging
-  `getGoalActiveTimeLabel` each turn their pin red.
+  `getGoalActiveTimeLabel` each turn their pin red. Round 6 adds: dropping
+  the strip jump's `goalsAction` class (unit) and deleting the `.goalsAction`
+  colour rule (E2E), flooring the percent instead of rounding it, rewriting
+  the timer gate from goal status to session activity, gating the footer
+  link or the strip jump on `busy`, deleting the SplitView or the App
+  `onOpenGoals` forward, and wiring the header jump to a fixed row instead of
+  its own card.
 - `npm run typecheck`, ESLint, Prettier on the touched files.
 - E2E: the existing `web-shell.goal.spec.ts` and
   `web-shell.goals-multi-workspace.spec.ts` suites must stay green (they pin
@@ -215,7 +254,9 @@ cannot reach the aggregate view without the sidebar.
   distinct from meta and the untinted `--foreground` anchor, fill equal to
   the pill's attention colour. The header-jump case pins the header action's
   painted colour against the grey control icons, the strip's goal identity,
-  and the load request's `cwd` (the goal's secondary workspace runtime). A
+  the load request's `cwd` (the goal's secondary workspace runtime), and the
+  strip's Goals jump reading the same blue as the card header jump while
+  differing from the strip's grey edit control and the untinted anchor. A
   dedicated paused-goal navigation case paints the strip in attention and
   pins its colour against the pill and the untinted anchor.
 

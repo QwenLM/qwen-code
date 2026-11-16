@@ -174,7 +174,7 @@ export function GoalStatusStrip({
         {onOpenGoals && (
           <button
             type="button"
-            className={styles.action}
+            className={`${styles.action} ${styles.goalsAction}`}
             onClick={onOpenGoals}
             title={t('goals.viewAll')}
             aria-label={t('goals.viewAll')}

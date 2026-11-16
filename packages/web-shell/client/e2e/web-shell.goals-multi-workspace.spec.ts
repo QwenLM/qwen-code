@@ -150,6 +150,23 @@ test('opening a goal from the card header loads its session @smoke', async ({
   expect(stripStatusColor).toBe(pillColor);
   expect(stripStatusColor).not.toBe(stripActivityColor);
   expect(stripStatusColor).not.toBe(untintedFg);
+
+  // The strip's Goals-page jump is navigation too: it must wear the same
+  // interactive blue as the card's header jump, not the grey control class
+  // its edit/pause/clear siblings use. Deleting the .goalsAction rule (or
+  // the class wiring) falls back to grey and goes red here.
+  const [stripGoalsColor, stripEditColor] = await strip.evaluate((root) => {
+    const goals = root.querySelector(
+      '[data-testid="goal-open-goals"]',
+    ) as HTMLElement;
+    const edit = root.querySelector(
+      'button[aria-label="Edit goal"]',
+    ) as HTMLElement;
+    return [getComputedStyle(goals).color, getComputedStyle(edit).color];
+  });
+  expect(stripGoalsColor).toBe(headerColor);
+  expect(stripGoalsColor).not.toBe(stripEditColor);
+  expect(stripGoalsColor).not.toBe(untintedFg);
 });
 
 test('a stopped goal shows its lifecycle tone and budget progress @smoke', async ({
