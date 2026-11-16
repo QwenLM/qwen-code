@@ -342,6 +342,57 @@ describe('readLoopTaskFile', () => {
     );
   });
 
+  it('reads the home loop.md from a global dir outside $HOME (absolute XDG_CONFIG_HOME)', async () => {
+    // Without QWEN_HOME the caller confines to $HOME, but an absolute
+    // XDG_CONFIG_HOME can put the global dir elsewhere; its own loop.md loads.
+    const globalDir = path.join(tempDir, 'xdg', 'qwen');
+    await fs.mkdir(globalDir, { recursive: true });
+    await fs.writeFile(path.join(globalDir, 'loop.md'), 'xdg user tasks');
+
+    expect(await read({ homeQwenDir: globalDir })).toEqual(
+      found('home', 'xdg user tasks', path.join(globalDir, 'loop.md')),
+    );
+  });
+
+  it('follows a global-dir loop.md symlinked into $HOME when the global dir is outside it', async () => {
+    const globalDir = path.join(tempDir, 'xdg', 'qwen');
+    await fs.mkdir(globalDir, { recursive: true });
+    const target = path.join(homeDir, 'dotfiles', 'loop.md');
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.writeFile(target, 'dotfiles tasks');
+    await fs.symlink(target, path.join(globalDir, 'loop.md'));
+
+    expect(await read({ homeQwenDir: globalDir })).toEqual(
+      found('home', 'dotfiles tasks', path.join(globalDir, 'loop.md')),
+    );
+  });
+
+  it('reads the home loop.md from a global dir under $HOME whose realpath is outside it', async () => {
+    // ~/mnt -> /elsewhere: the global dir is a lexical subpath of $HOME, but
+    // its loop.md realpaths outside $HOME.
+    const elsewhere = path.join(tempDir, 'elsewhere');
+    await fs.mkdir(path.join(elsewhere, 'config', 'qwen'), { recursive: true });
+    await fs.symlink(elsewhere, path.join(homeDir, 'mnt'));
+    const globalDir = path.join(homeDir, 'mnt', 'config', 'qwen');
+    await fs.writeFile(path.join(globalDir, 'loop.md'), 'mounted tasks');
+
+    expect(await read({ homeQwenDir: globalDir })).toEqual(
+      found('home', 'mounted tasks', path.join(globalDir, 'loop.md')),
+    );
+  });
+
+  it('refuses a global-dir loop.md that escapes both $HOME and the global dir', async () => {
+    const globalDir = path.join(tempDir, 'xdg', 'qwen');
+    await fs.mkdir(globalDir, { recursive: true });
+    const outside = path.join(tempDir, 'outside-secret');
+    await fs.writeFile(outside, 'SECRET=should-not-be-read');
+    await fs.symlink(outside, path.join(globalDir, 'loop.md'));
+
+    expect(await read({ homeQwenDir: globalDir })).toEqual(
+      missing(loopIn(projectRoot), path.join(globalDir, 'loop.md')),
+    );
+  });
+
   it('skips a home loop.md that is a self-referential symlink (ELOOP) instead of throwing', async () => {
     // fs.stat follows the home symlink; a self-referential link raises ELOOP,
     // which must skip the candidate (→ missing), not crash the tick — without

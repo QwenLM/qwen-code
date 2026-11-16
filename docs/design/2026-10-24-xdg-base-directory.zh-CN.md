@@ -35,7 +35,7 @@ Qwen Code 在所有平台上都把设置、凭据和其他全局状态保存在 
 - 无论全局目录在哪里，遗留的 `~/.qwen/.env` 都仍是用户级 `.env`：设置了 `QWEN_HOME` 时如此（与以前相同），在每个默认 XDG 安装上也是如此。它在全局目录的 `.env` 之后、`~/.env` 之前读取，并且由最先设置某个键的文件生效，因此在 XDG 安装上，留在 `~/.qwen/.env` 中的键会补充全局目录 `.env` 中缺少的键，并优先于 `~/.env`。这是有意为之：多年来文档一直让用户把配置写在 `~/.qwen/.env`，去掉它会悄悄忽略用户写在那里的键。`settings.json` 中 `${VAR}` 占位符的回退只读取全局目录的 `.env` 和 `~/.env`，与设置了 `QWEN_HOME` 时的现有行为一致。
 - Auto 模式的自我修改保护覆盖解析后的全局目录，因此 `~/.config/qwen/settings.json` 及其 `hooks/`、`skills/` 与 `~/.qwen/...` 一样受到路径模式的保护。写成 `~/...` 形式的 `QWEN_HOME` 也同样适用。在 Linux 上，即使正在使用 `~/.qwen`，它也会保护 XDG 目录及其标记，因为在那里写入标记会让 XDG 目录在下一次启动时成为全局目录。重定向目标按 shell 去除引号之后的形式匹配，因此 `$HOME/.config/qwe""n/settings.json` 和 `"$HOME"/.qwen/'settings.json'` 与不带引号的写法一样会被识别。保护逻辑无法解析的重定向目标（例如 `${XDG_CONFIG_HOME:-$HOME/.config}/qwen/settings.json`）会进入审查。
 - 需手动开启的诊断功能（启动与 CPU profile、堆快照）写入全局目录，因此在 XDG 安装上不会再创建 `~/.qwen`。
-- 用户输出样式和主目录级 `loop.md` 必须解析到主目录之内；当 `QWEN_HOME` 或位于主目录之外的 `XDG_CONFIG_HOME` 把全局目录放到别处时，则须解析到全局目录之内，因此它们在那里仍可加载。
+- 用户输出样式和主目录级 `loop.md` 必须解析到主目录或全局目录本身之内（按解析符号链接之后的路径比较）；设置了 `QWEN_HOME` 时只能解析到 `QWEN_HOME` 之内。因此，当绝对路径的 `XDG_CONFIG_HOME` 把全局目录放到主目录之外时，它们仍可加载，从那里链接回主目录的文件（例如 `loop.md -> ~/dotfiles/loop.md`）也仍然有效。
 - XDG 安装不会读取 `~/.qwen` 中的 `settings.json` 或 `oauth_creds.json`。如果 `~/.qwen` 中有其中某个文件而 XDG 目录中没有，例如旧版本重新创建了 `~/.qwen` 且用户在那里登录，CLI 会在启动时给出警告，列出这些文件以及两种解决办法：在当前安装中运行 `/auth`，或删除标记文件以重新使用 `~/.qwen`。XDG 目录有了自己的副本，或 `~/.qwen` 中的文件不复存在后，警告就不再出现。
 
 ## 考虑过的方案

@@ -35,7 +35,9 @@ export interface ReadLoopTaskFileOptions {
    * Confinement root for the home candidate's resolved (symlink-followed)
    * target — a target escaping this dir (e.g. `-> /etc/passwd`) is refused while
    * an in-root dotfile symlink is followed. Pass `$QWEN_HOME` when set, else
-   * `$HOME` (see `homeQwenDir`).
+   * `$HOME` (see `homeQwenDir`). A target inside `homeQwenDir` itself is
+   * accepted too, so a global dir outside `$HOME` (an absolute
+   * `XDG_CONFIG_HOME`) needs no other root.
    */
   homeDir: string;
   /**
@@ -183,9 +185,9 @@ async function readBoundedTaskFile(filePath: string): Promise<Buffer | null> {
  * always the real `~/.qwen`). It is the user's own dotfile, so a symlink IS
  * followed (a common, legitimate setup — e.g. into a synced dotfiles repo), but
  * the resolved target must be a regular file AND stay within the home
- * confinement root (`homeDir`: `$QWEN_HOME` or `$HOME`) so a FIFO/device/dir
- * can't hang the tick and an escaping symlink (e.g. `-> /etc/passwd`) can't be
- * exfiltrated.
+ * confinement root (`homeDir`: `$QWEN_HOME` or `$HOME`) or `homeQwenDir` itself,
+ * so a FIFO/device/dir can't hang the tick and an escaping symlink (e.g.
+ * `-> /etc/passwd`) can't be exfiltrated.
  */
 export async function readLoopTaskFile({
   projectRoot,
@@ -277,13 +279,17 @@ export async function readLoopTaskFile({
           debugLogger.debug('skipping hard-linked home loop.md', { filePath });
           continue;
         }
-        // A home symlink IS followed, but its target must stay WITHIN $HOME:
-        // otherwise `~/.qwen/loop.md -> /etc/passwd` (or `-> /dev/...`) would be
-        // read and fed to the model every tick. In-home dotfile symlinks (e.g.
-        // `-> ~/dotfiles/loop.md`) still resolve inside $HOME and are allowed.
-        const realHome = await resolveRealDir(homeDir, realDirCache);
+        // A home symlink IS followed, but its target must stay WITHIN $HOME or
+        // the global dir that holds loop.md: otherwise `~/.qwen/loop.md ->
+        // /etc/passwd` (or `-> /dev/...`) would be read and fed to the model
+        // every tick. In-home dotfile symlinks (e.g. `-> ~/dotfiles/loop.md`)
+        // still resolve inside $HOME and are allowed, also from a global dir
+        // that XDG_CONFIG_HOME puts outside $HOME. Both sides are realpaths.
         const real = await fs.realpath(filePath);
-        if (!isWithin(realHome, real)) {
+        if (
+          !isWithin(await resolveRealDir(homeQwenDir, realDirCache), real) &&
+          !isWithin(await resolveRealDir(homeDir, realDirCache), real)
+        ) {
           debugLogger.debug(
             'skipping home loop.md that escapes the home directory',
             { filePath, resolved: real },

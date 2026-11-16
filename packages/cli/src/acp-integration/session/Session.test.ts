@@ -36967,26 +36967,16 @@ describe('Session', () => {
         expect(roots.homeQwenDir).toBe(homeQwenDir);
       });
 
-      it('confines the home loop resolver within a global dir outside the home directory', () => {
-        // XDG_CONFIG_HOME can do this without QWEN_HOME; confining to the home
-        // directory would refuse the global dir's own loop.md.
-        const homeQwenDir = path.join(os.tmpdir(), 'xdg', 'qwen');
-
-        const roots = resolveHomeLoopResolverRoots({
-          homeDir: path.join(os.tmpdir(), 'real-home'),
-          homeQwenDir,
-          qwenHome: '',
-        });
-
-        expect(roots.homeConfineRoot).toBe(homeQwenDir);
-      });
-
       it('confines the home loop resolver within the home directory by default', () => {
+        // Also for a global dir that XDG_CONFIG_HOME puts outside the home
+        // directory: readLoopTaskFile accepts that dir's own files itself, and
+        // keeping the home root keeps a `-> ~/dotfiles/loop.md` link working.
         const homeDir = path.join(os.tmpdir(), 'real-home');
 
         for (const homeQwenDir of [
           path.join(homeDir, '.qwen'),
           path.join(homeDir, '.config', 'qwen'),
+          path.join(os.tmpdir(), 'xdg', 'qwen'),
         ]) {
           expect(
             resolveHomeLoopResolverRoots({ homeDir, homeQwenDir, qwenHome: '' })
