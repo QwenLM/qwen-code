@@ -5158,6 +5158,80 @@ describe('ChatEditor model picker host content', () => {
       );
     }
   });
+
+  it('keeps the bottom sheet open when interacting with host overlays', () => {
+    const media = vi.mocked(window.matchMedia).mockImplementation(
+      (query: string) =>
+        ({
+          matches:
+            query === '(hover: none) and (pointer: coarse), (max-width: 639px)',
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+        }) as unknown as MediaQueryList,
+    );
+    try {
+      const mountHeader = vi.fn<
+        WebShellModelPickerMount<WebShellModelPickerContext>
+      >((target, context) => {
+        const button = document.createElement('button');
+        button.textContent = 'Host overlay action';
+        context.overlayContainer.append(button);
+        return { update() {}, dispose() {} };
+      });
+      const container = renderChatEditor({
+        visibleToolbarActions: ['model'],
+        currentModel: modelA.id,
+        availableModels: [modelA, modelB],
+        reasoning: { enabled: true, effort: 'high', efforts: ['low', 'high'] },
+        customization: { modelPicker: { mountHeader } },
+      });
+      open(container);
+      act(() =>
+        document
+          .querySelector<HTMLButtonElement>(
+            '[data-web-shell-model-submenu-trigger]',
+          )!
+          .click(),
+      );
+      const overlayButton = document.querySelector<HTMLButtonElement>(
+        '[data-web-shell-model-picker-overlays] button',
+      )!;
+      expect(overlayButton).not.toBeNull();
+
+      const escapeEvent = new KeyboardEvent('keydown', {
+        key: 'Escape',
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => overlayButton.dispatchEvent(escapeEvent));
+      expect(escapeEvent.defaultPrevented).toBe(true);
+      expect(
+        document.querySelector('[data-web-shell-model-sheet]'),
+      ).not.toBeNull();
+
+      act(() =>
+        overlayButton.dispatchEvent(
+          new MouseEvent('pointerdown', {
+            bubbles: true,
+            button: 0,
+            cancelable: true,
+          }),
+        ),
+      );
+      expect(
+        document.querySelector('[data-web-shell-model-sheet]'),
+      ).not.toBeNull();
+    } finally {
+      media.mockImplementation(
+        () =>
+          ({
+            matches: false,
+            addEventListener: vi.fn(),
+            removeEventListener: vi.fn(),
+          }) as unknown as MediaQueryList,
+      );
+    }
+  });
 });
 
 describe('ChatEditor slash command popovers', () => {

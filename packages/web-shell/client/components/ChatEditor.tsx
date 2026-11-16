@@ -1156,6 +1156,19 @@ function ToolbarPopover({
           onClick={(event) => event.stopPropagation()}
           onOpenAutoFocus={(event) => event.preventDefault()}
           onCloseAutoFocus={(event) => event.preventDefault()}
+          onEscapeKeyDown={(event) => {
+            if (isHostOverlayEvent(event)) event.preventDefault();
+          }}
+          onPointerDownOutside={(event) => {
+            if (isHostOverlayEvent(event.detail.originalEvent)) {
+              event.preventDefault();
+            }
+          }}
+          onInteractOutside={(event) => {
+            if (isHostOverlayEvent(event.detail.originalEvent)) {
+              event.preventDefault();
+            }
+          }}
         >
           <DrawerTitle className="sr-only">
             {submenu?.sectionLabel ?? t('model.select')}
