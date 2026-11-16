@@ -32,16 +32,24 @@ Shell 在三处展示变更信息，但都无法回答「按我交付的方式�
 
 ## 现状（在本文撰写所在提交上核实）
 
-会话归属已经现成——无需自行推导 baseline：
+会话归属在会话摘要上现成可用——无需自行推导 baseline——但本设计依赖一个持久性
+前提：
 
 - `DaemonSessionSummary` 携带 `worktree?: DaemonWorktreeInfo`
   （`{ slug, path, branch }`）、`branch?: DaemonBranchInfo`（`{ name, baseBranch }`）、
   以及 `prs?: DaemonSessionPrInfo[]`（绑定的 PR，
   `{ number, url, state, source, issues }`，末位为最新）。`source` 记录绑定来源
-  （`create` / `worktree` / `review`）。见 `packages/sdk-typescript/src/daemon/types.ts`。
+  （`create` / `worktree` / `review`），由 wire 投影（`toSessionPrInfo`）透传。
+  见 `packages/sdk-typescript/src/daemon/types.ts`。
 - 从 Git 对话框创建 PR 时，PR 服务
   （`packages/core/src/services/session-pr-service.ts`）会把 PR 绑定到会话，并
   体现在会话摘要上。
+- daemon 重启/重载后 bridge 条目重建时**不带** `prs`，因此
+  `GET /session/:id/status`（`packages/cli/src/serve/routes/session.ts`）在读取
+  摘要**之前**先从持久化 sidecar 补齐绑定（`readSessionPrs` +
+  `bridge.seedSessionPrs`，实时条目已有绑定时为 no-op）。这条最常被调用的会话
+  路由上的无条件 sidecar 读取，正是绑定 PR 跨重启持久的原因；缺了它，重开的会话
+  会丢失全部 PR 范围，并把已被 PR 覆盖的 commit 当作 loose 工作重新列出。
 
 可直接复用的现成只读能力：
 
@@ -68,7 +76,11 @@ Shell 在三处展示变更信息，但都无法回答「按我交付的方式�
 在 `packages/core/src/utils/github-prs.ts` 新增
 `fetchGitHubPullRequestFiles(cwd, number, env?, repo?)`，底层用
 `gh pr view <number> --json files,additions,deletions,headRefOid,changedFiles`
-（绑定 PR 属于其他仓库时另加 `--repo owner/repo`）。
+（绑定 PR 属于其他仓库或 Enterprise host 时另加 `--repo [host/]owner/repo`）。
+host 按 `gh` 文档化的 `[HOST/]OWNER/REPO` 形式透传：裸 `owner/repo` 会在
+github.com（或 `GH_HOST`）上解析，可能返回外仓库同编号 PR 的数据。slug 校验器
+接受普通 `owner/repo`，或裸点分主机名（可带 `:port`）前缀——绝不接受 URL、空白
+或前导 `-`；host 必须点分或带端口，使 `owner/repo/extra` 无法冒充带 host 的形式。
 返回与现有 PR 助手一致的可辨识结果（`ok` / `not_a_repo` / `cli_unavailable` /
 `failed`），并给出解析且设上限的文件列表：
 
@@ -95,7 +107,12 @@ Shell 在三处展示变更信息，但都无法回答「按我交付的方式�
 daemon 不显示 PR 范围，有标签但拉取失败的降级为「文件列表不可用」并给出真实原因。
 传入但不可用的 `repo`（重复查询键、空值、或 core 校验器拒绝的 slug）属调用方错误，
 回 `400`，按机器可读的 `reason: 'invalid_repo'` 分类而非面向人的文案——改文案不会
-把它变成可重试的 `502`。未传 `repo` 时在会话自身仓库按编号解析。
+把它变成可重试的 `502`。未传 `repo` 时在会话自身仓库按编号解析。`ok` 结果还会探测
+`git merge-base --is-ancestor <headSha> HEAD`（`packages/core/src/utils/gitDiff.ts`
+的 `isGitAncestorOfHead`）并返回 `headIsAncestor`：客户端只在该 head 是 HEAD 祖先时
+才信任 `<head>..HEAD` 作为 commit 兜底边界——已合并或被改写的 PR 的 head 在本地仍
+可解析，但不是祖先，那个窗口会把基线分支历史当作本会话的 loose 工作重新列出。
+探测失败即拒绝该边界（`false`）。
 
 总览本身**在客户端组合**现成路由加这一个新路由，而不是新增一个大型聚合端点。
 这样每一块都小而可复用，也与 Git 对话框已经组合 `git/diff`、`git/log`、
@@ -127,12 +144,16 @@ PR 方法保持一致。
 
 - 未提交单元 ← `workspaceGitDiff(cwd, sessionId)`。
 - PR 单元 ← `summary.prs`，每项拉取 `workspaceGitHubPullRequestFiles`。
-- commit 兜底单元 ← 用 `workspaceGitLog` 取最新绑定 PR `headSha` 之后的 commit
-  （无绑定 PR 时取会话基线分支，无基线时取 HEAD 近期历史），每项用
-  `workspaceGitCommitDetail` 渲染。位于最新绑定 PR head 及之前的 commit 视为已被
-  PR 覆盖，不重复展示。合并提交与 detail 拉取失败的 commit 被丢弃。基线分支若在
-  daemon 区间白名单之外，则整体跳过兜底（独立的「拒绝」哨兵），而不是落到无界
-  遍历、把会话之前的历史重新列出。
+- commit 兜底单元 ← 用 `workspaceGitLog` 取最新且**是 HEAD 祖先**的绑定 PR head
+  （`headIsAncestor`）之后的 commit（没有符合条件的绑定 PR head 时取会话基线
+  分支；无基线且无绑定 PR 时取 HEAD 近期历史），每项用
+  `workspaceGitCommitDetail` 渲染。位于该 head 及之前的 commit 视为已被 PR 覆盖，
+  不重复展示。合并提交被跳过；commit detail 拉取失败会让整个总览失败（见降级）。
+  基线分支若在 daemon 区间白名单之外，则整体跳过兜底（独立的「拒绝」哨兵），而不是
+  落到无界遍历、把会话之前的历史重新列出；有绑定 PR 但既无祖先 head 又无已知基线
+  分支时，没有可信边界，兜底同样被抑制。head 边界 log 被报为不可用时，hook 用基线
+  分支窗口重试一次——仅当该窗口是真实 range 字符串时才重试，绝不使用「无基线」
+  哨兵，因为其缺省 range 会无界遍历 HEAD。
 
 降级：
 
@@ -145,18 +166,27 @@ PR 方法保持一致。
 - 任一产出的 PR 单元解析不出 head：完全抑制 commit 兜底，避免该 PR 的 commit
   在较旧 PR head 界定的窗口里被当作 loose 工作重新列出。files 能力缺失时不产出
   PR 单元，兜底仍运行。
-- commit log 被 daemon 报为不可用、或 commit detail 拉取失败：可重试的「无法加载」
-  状态，而非空会话或把部分列表当作完整列表。
-- 绑定 PR 属于另一仓库时，按其 URL 推导 `owner/repo` 并用 `gh --repo` 在该仓库
-  解析，而非在会话检出里按编号查。
+- commit log 被 daemon 报为不可用、commit log 拉取抛错（超时 / 5xx）、或 commit
+  detail 拉取失败：可重试的「无法加载」状态，而非空会话或把部分列表当作完整列表。
+  基线窗口重试被拒绝时保留首次响应的不可用结论，不会抹成「没有 loose commit」。
+- 已合并或被改写的 PR，其 head 不是 HEAD 祖先：不用该 head 作兜底边界，改用基线
+  分支窗口；无已知基线分支时抑制兜底。
+- 绑定 PR 属于另一仓库（或 Enterprise host）时，按其 URL 推导 `[host/]owner/repo`
+  （含 host）并用 `gh --repo` 在该仓库解析，而非在会话检出里按编号查。
 - 共享（非 worktree）工作区：单元为工作区口径，而非仅会话归属。
 
 ## 涉及文件
 
-- `packages/core/src/utils/github-prs.ts`（+ 同目录测试）：PR 文件统计。
+- `packages/core/src/utils/github-prs.ts`（+ 同目录测试）：PR 文件统计与带 host
+  的 `[host/]owner/repo` slug 校验。
+- `packages/core/src/utils/gitDiff.ts`（+ 同目录测试）：commit 兜底边界的
+  `isGitAncestorOfHead` 祖先探针。
 - `packages/core/src/services/session-pr-service.ts`（+ 测试）：wire 投影透传
   绑定 `source`。
-- `packages/cli/src/serve/routes/workspace-github-prs.ts`（+ 测试）：files 路由。
+- `packages/cli/src/serve/routes/workspace-github-prs.ts`（+ 测试）：files 路由，
+  含 `ok` 结果上的 `headIsAncestor` 探针。
+- `packages/cli/src/serve/routes/session.ts`（+ server.test.ts）：status 路由
+  绑定补齐（读摘要前先读 sidecar + `seedSessionPrs`）。
 - `packages/cli/src/serve/capabilities.ts`、`capability-parity.ts`、
   `server.test.ts`、`integration-tests/cli/qwen-serve-routes.test.ts`：新增
   `workspace_github_pr_files` 标签及其钉死基线。

@@ -5,6 +5,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DaemonProductSessionContext } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { WebShellProps } from './App';
+import type { WebShellRightPanelItem } from './customization';
 import { createJavaManagedAgentProvider } from './components/managed/java-managed-agent-provider';
 import { useBrowserNotificationSettings } from './browser-turn-notifications';
 import type { WebShellResolvedBrand } from './brandContext';
@@ -115,16 +116,19 @@ describe('StandaloneApp', () => {
     const items = testState.props?.webShellProps.rightPanel?.items ?? [];
     // The shipped standalone entry must list every WebShellRightPanelItem;
     // the explicit list wins over App's default, so omitting an entry here
-    // (e.g. changeOverview) makes that whole feature unreachable.
-    for (const item of [
-      'files',
-      'review',
-      'sideTask',
-      'terminal',
-      'webPreview',
-      'trajectory',
-      'changeOverview',
-    ] as const) {
+    // (e.g. changeOverview) makes that whole feature unreachable. The
+    // expectation is exhaustive BY TYPE: a new union member missing from this
+    // Record is a type error, where a hand-copied array would stay green.
+    const EXPECTED: Record<WebShellRightPanelItem, true> = {
+      files: true,
+      review: true,
+      sideTask: true,
+      terminal: true,
+      webPreview: true,
+      trajectory: true,
+      changeOverview: true,
+    };
+    for (const item of Object.keys(EXPECTED) as WebShellRightPanelItem[]) {
       expect(items).toContain(item);
     }
   });
@@ -529,8 +533,9 @@ describe('StandaloneApp brand', () => {
       '',
       '/?managed=1&managedProvider=java&tenant=tenant-a',
     );
-    const fetchMock = vi.fn(async () =>
-      Response.json({ data: [], hasMore: false }),
+    const fetchMock = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        Response.json({ data: [], hasMore: false }),
     );
     vi.stubGlobal('fetch', fetchMock);
 

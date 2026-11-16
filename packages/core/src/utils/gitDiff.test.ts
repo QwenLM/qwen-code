@@ -17,6 +17,7 @@ import {
   fetchGitLog,
   fetchGitCommitDetail,
   getGitWorkingTreeStatus,
+  isGitAncestorOfHead,
   MAX_DIFF_SIZE_BYTES,
   MAX_FILES,
   MAX_LINES_PER_FILE,
@@ -1952,5 +1953,44 @@ describe('getGitWorkingTreeStatus in a caller’s environment', () => {
       await rmDir(asked);
       await rmDir(elsewhere);
     }
+  });
+});
+
+describe('isGitAncestorOfHead', () => {
+  useFreshRepo({ 'a.txt': 'a' });
+
+  it('is true for a commit reachable from HEAD', async () => {
+    const first = await headSha(repo);
+    await commit(repo, { 'b.txt': 'b' }, 'second');
+    expect(await isGitAncestorOfHead(repo, first)).toBe(true);
+    expect(await isGitAncestorOfHead(repo, 'HEAD')).toBe(true);
+  });
+
+  it('is false for a divergent branch head (merged/rewritten PR shape)', async () => {
+    const base = await headSha(repo);
+    await git(repo, 'checkout', '-q', '-b', 'side');
+    await commit(repo, { 'side.txt': 's' }, 'side work');
+    const side = await headSha(repo);
+    await git(repo, 'checkout', '-q', 'main');
+    await commit(repo, { 'main.txt': 'm' }, 'main work');
+    expect(await isGitAncestorOfHead(repo, side)).toBe(false);
+    expect(await isGitAncestorOfHead(repo, base)).toBe(true);
+  });
+
+  it('is false for an unknown or unsafe ref', async () => {
+    expect(
+      await isGitAncestorOfHead(
+        repo,
+        'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
+      ),
+    ).toBe(false);
+    expect(await isGitAncestorOfHead(repo, '--upload-pack=evil')).toBe(false);
+    expect(await isGitAncestorOfHead(repo, 'HEAD;rm')).toBe(false);
+  });
+
+  it('is false outside a git repository', async () => {
+    await inPlainDir(async (dir) => {
+      expect(await isGitAncestorOfHead(dir, 'HEAD')).toBe(false);
+    });
   });
 });

@@ -40,17 +40,26 @@ Decided with the requester:
 
 ## Current state (verified at the commit this doc is written on)
 
-Session attribution is already available — no baseline discovery is needed:
+Session attribution is available on the session summary — no baseline discovery
+is needed — with one durability caveat this design relies on:
 
 - `DaemonSessionSummary` carries `worktree?: DaemonWorktreeInfo`
   (`{ slug, path, branch }`), `branch?: DaemonBranchInfo` (`{ name, baseBranch }`),
   and `prs?: DaemonSessionPrInfo[]` (bound PRs,
   `{ number, url, state, source, issues }`, last = latest). `source` records the
-  binding provenance (`create` / `worktree` / `review`). See
+  binding provenance (`create` / `worktree` / `review`) and is forwarded by the
+  wire projection (`toSessionPrInfo`). See
   `packages/sdk-typescript/src/daemon/types.ts`.
 - PRs are bound to the session by the PR service
   (`packages/core/src/services/session-pr-service.ts`) when created from the Git
   dialog, and surfaced on the session summary.
+- Bridge entries are re-created **without** `prs` on a daemon restart/reload, so
+  `GET /session/:id/status` (`packages/cli/src/serve/routes/session.ts`) hydrates
+  the persisted sidecar (`readSessionPrs` + `bridge.seedSessionPrs`, a no-op when
+  the live entry already carries bindings) **before** reading the summary. This
+  unconditional sidecar read on the most-consumed session route is what makes
+  bound PRs durable across restarts; without it a reopened session would drop
+  every PR scope and re-list PR-covered commits as loose work.
 
 Existing read capabilities that can be reused as-is:
 
@@ -78,7 +87,13 @@ no file stats. There is no route that returns a PR's files.
 Add `fetchGitHubPullRequestFiles(cwd, number, env?, repo?)` in
 `packages/core/src/utils/github-prs.ts`, backed by
 `gh pr view <number> --json files,additions,deletions,headRefOid,changedFiles`
-(plus `--repo owner/repo` when the bound PR lives in another repository).
+(plus `--repo [host/]owner/repo` when the bound PR lives in another repository
+or on an Enterprise host). The host is carried through in `gh`'s documented
+`[HOST/]OWNER/REPO` form: a bare `owner/repo` would resolve on github.com (or
+`GH_HOST`) and could answer with a foreign same-numbered PR. The slug validator
+accepts a plain `owner/repo` or a bare dotted hostname (optionally `:port`)
+prefix — never a URL, whitespace, or a leading `-`; the host must be dotted or
+carry a port so `owner/repo/extra` cannot pass as host-qualified.
 It returns a discriminated result mirroring the existing PR helpers
 (`ok` / `not_a_repo` / `cli_unavailable` / `failed`), with a parsed, capped file
 list:
@@ -114,6 +129,13 @@ query key, an empty value, or a slug the core validator refuses) is a caller
 error answered `400`, classified by the machine-readable `reason: 'invalid_repo'`
 rather than the human-readable message, so a reword cannot turn it into a
 retryable `502`. An absent `repo` resolves the number in the session's own repo.
+On an `ok` result the route also probes `git merge-base --is-ancestor <headSha>
+HEAD` (`isGitAncestorOfHead` in `packages/core/src/utils/gitDiff.ts`) and returns
+`headIsAncestor`: the client only trusts `<head>..HEAD` as a commit-fallback
+boundary when the head is an ancestor of HEAD — a merged or rewritten PR's head
+still resolves locally but is not one, and that window would re-list the base
+branch's history as the session's loose work. A failed probe refuses the
+boundary (`false`).
 
 The overview itself is **composed client-side** from existing routes plus this
 one new route, rather than adding a large aggregation endpoint. This keeps each
@@ -148,15 +170,21 @@ Assembly logic lives in a testable hook `useChangeOverview`:
 
 - Uncommitted unit ← `workspaceGitDiff(cwd, sessionId)`.
 - PR units ← `summary.prs`, each fetching `workspaceGitHubPullRequestFiles`.
-- Commit-fallback units ← `workspaceGitLog` of commits after the latest bound
-  PR's `headSha` (or, when there is no bound PR, the session's base branch, or
-  HEAD's recent history when no baseline is known), each rendered from
-  `workspaceGitCommitDetail`. Commits at or before the latest bound PR head are
-  treated as covered by PRs and not duplicated. Merge commits and commits whose
-  detail fetch fails are dropped. A base branch outside the daemon's range
-  whitelist skips the fallback entirely (a distinct "refuse" sentinel) rather
-  than falling through to an unscoped walk that would re-list pre-session
-  history.
+- Commit-fallback units ← `workspaceGitLog` of commits after the newest bound
+  PR head that is an **ancestor of HEAD** (`headIsAncestor`; or, when no bound
+  PR head qualifies, the session's base branch, or HEAD's recent history when
+  no baseline is known and no PR is bound), each rendered from
+  `workspaceGitCommitDetail`. Commits at or before that head are treated as
+  covered by PRs and not duplicated. Merge commits are skipped; a failed
+  commit-detail fetch fails the whole overview (see Degradation). A base branch
+  outside the daemon's range whitelist skips the fallback entirely (a distinct
+  "refuse" sentinel) rather than falling through to an unscoped walk that would
+  re-list pre-session history; with bound PRs but neither an ancestor head nor a
+  known base branch there is no trustworthy boundary, so the fallback is
+  suppressed as well. When a head-boundary log comes back unavailable, the hook
+  retries once with the base-branch window — only when that window is a real
+  range string, never the "no baseline" sentinel, whose omitted range would
+  walk HEAD unscoped.
 
 Degradation:
 
@@ -172,20 +200,32 @@ Degradation:
   suppressed entirely, so that PR's commits cannot be re-listed as loose work
   inside a window an older PR's head defines. With the files capability absent
   no PR unit is produced, so the fallback still runs.
-- A commit log the daemon reports unavailable, or a failed commit-detail fetch:
-  a retryable "couldn't load" state, not an empty session or a partial list
-  presented as complete.
-- A bound PR in another repository is resolved there via `gh --repo owner/repo`
-  derived from its URL, not by number in the session's checkout.
+- A commit log the daemon reports unavailable, a commit-log fetch that throws
+  (timeout / 5xx), or a failed commit-detail fetch: a retryable "couldn't load"
+  state, not an empty session or a partial list presented as complete. A
+  rejected base-window retry keeps the first response's unavailable verdict
+  instead of erasing it into "no loose commits".
+- A merged or rewritten PR whose head is not an ancestor of HEAD: its head is
+  not used as the fallback boundary; the base-branch window is used instead, or
+  the fallback is suppressed when no base branch is known.
+- A bound PR in another repository (or on an Enterprise host) is resolved there
+  via `gh --repo [host/]owner/repo` derived from its URL — host included — not
+  by number in the session's checkout.
 - Shared (non-worktree) workspace: units are workspace-scoped rather than
   session-attributed.
 
 ## Files affected
 
-- `packages/core/src/utils/github-prs.ts` (+ collocated test): PR file stats.
+- `packages/core/src/utils/github-prs.ts` (+ collocated test): PR file stats and
+  the host-qualified `[host/]owner/repo` slug validation.
+- `packages/core/src/utils/gitDiff.ts` (+ collocated test): `isGitAncestorOfHead`
+  ancestry probe for the commit-fallback boundary.
 - `packages/core/src/services/session-pr-service.ts` (+ test): forward the
   binding `source` on the wire projection.
-- `packages/cli/src/serve/routes/workspace-github-prs.ts` (+ test): files route.
+- `packages/cli/src/serve/routes/workspace-github-prs.ts` (+ test): files route,
+  including the `headIsAncestor` probe on `ok` results.
+- `packages/cli/src/serve/routes/session.ts` (+ server.test.ts): status-route
+  binding hydration (sidecar read + `seedSessionPrs` before the summary read).
 - `packages/cli/src/serve/capabilities.ts`, `capability-parity.ts`,
   `server.test.ts`, `integration-tests/cli/qwen-serve-routes.test.ts`: new
   `workspace_github_pr_files` tag and its pinned baselines.

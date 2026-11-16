@@ -7009,6 +7009,120 @@ describe('task activity key', () => {
     ).not.toBeNull();
   });
 
+  it('stamps the live session onto a change overview tab opened on the new-task page', async () => {
+    // A tab opened before the first prompt has no session; the reconciliation
+    // effect is the only writer that adopts the materialized session id.
+    // Without it the tab runs useChangeOverview(cwd, undefined) forever: no
+    // bound PRs, no base branch, no worktree scoping.
+    // Align the session-less workspace cwd with the session fixture's and
+    // arm the real first-prompt path (createSession materializes the session)
+    // so the draft panel state carries over to the session key.
+    mockConnection.sessionId = undefined;
+    testState.messages = [];
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        { id: 'project', cwd: '/tmp/project', primary: true, trusted: true },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockSessionActions.createSession.mockImplementation(async () => {
+      mockConnection.sessionId = 'session-1';
+      return { sessionId: 'session-1' };
+    });
+    const { container } = renderApp();
+    await flush();
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+    });
+    await flush();
+    const actions = container.querySelector(
+      '[data-testid="right-panel-empty-actions"]',
+    );
+    expect(actions).not.toBeNull();
+    const openButton = Array.from(actions!.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('Change overview'),
+    );
+    expect(openButton).toBeDefined();
+    await act(async () => {
+      openButton!.click();
+    });
+    await flush();
+    expect(
+      container.querySelector('button[title="Change overview"]'),
+    ).not.toBeNull();
+    expect(mockWorkspace.client.sessionStatus).not.toHaveBeenCalled();
+
+    // Materialize the session through the real first-prompt submission, the
+    // way the new-task panel regression harness does: createSession arms the
+    // draft carry-over and reports the session live.
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit(
+        'hello',
+        undefined,
+        undefined,
+        editorCommit,
+      );
+      await Promise.resolve();
+    });
+    await flush();
+    // The draft carry-over persists panel state in a layout effect before the
+    // passive reconciliation effect stamps the session id, so settle through
+    // re-renders rather than asserting on the first flush. Assert on the
+    // persisted tab itself: sessionStatus is a shared mock that sibling
+    // consumers also call once a session is live, so it cannot discriminate
+    // whether THIS tab adopted the session.
+    await vi.waitFor(async () => {
+      await flush();
+      const raw = window.localStorage.getItem(
+        'qwen-code-web-shell-right-panel-state',
+      );
+      const state = JSON.parse(raw ?? '{}') as Record<
+        string,
+        { tabs?: Array<{ kind?: string; sessionId?: string }> }
+      >;
+      const entry = state['/tmp/project\0session-1'];
+      expect(
+        entry?.tabs?.some(
+          (tab) =>
+            tab.kind === 'change_overview' && tab.sessionId === 'session-1',
+        ),
+      ).toBe(true);
+    });
+  });
+
+  it('does not duplicate the change overview tab when opened twice', async () => {
+    mockConnection.sessionId = undefined;
+    const { container } = renderApp();
+    await flush();
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+    });
+    await flush();
+    const actions = container.querySelector(
+      '[data-testid="right-panel-empty-actions"]',
+    );
+    const openButton = Array.from(actions!.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('Change overview'),
+    );
+    expect(openButton).toBeDefined();
+    await act(async () => {
+      openButton!.click();
+      openButton!.click();
+    });
+    await flush();
+    expect(
+      container.querySelectorAll('button[title="Change overview"]'),
+    ).toHaveLength(1);
+  });
+
   it('opens one trajectory tab from the panel and reuses it', async () => {
     window.localStorage.setItem(
       'qwen-code-web-shell-right-panel-state',

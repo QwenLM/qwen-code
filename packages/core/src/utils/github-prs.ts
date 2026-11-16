@@ -924,13 +924,23 @@ export async function fetchGitHubPullRequestFiles(
       gitRoot,
     };
   }
-  // `repo` reaches `gh --repo` argv; accept only a plain owner/repo slug so a
-  // crafted value can never introduce flags or a URL with its own host. Reject
-  // a leading '-' as well, mirroring isSafeLogRange, so the value can never be
-  // mistaken for a flag by the CLI's parser.
+  // `repo` reaches `gh --repo` argv in its documented [HOST/]OWNER/REPO form.
+  // A bound PR on an Enterprise host must keep that host: a bare owner/repo
+  // would resolve on github.com (or GH_HOST) and could answer with a foreign
+  // same-numbered PR. Accept a plain owner/repo or a bare dotted hostname
+  // (optionally :port) prefix — never a URL, whitespace, or a leading '-'
+  // (mirroring isSafeLogRange) so a crafted value can never introduce flags.
+  // The host must be dotted or carry a port so `owner/repo/extra` can never
+  // pass as host-qualified.
   if (
     repo !== undefined &&
-    (repo.startsWith('-') || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo))
+    (repo.startsWith('-') ||
+      !(
+        /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo) ||
+        /^(?:(?:[A-Za-z0-9-]+\.)+[A-Za-z0-9-]+(?::\d+)?|[A-Za-z0-9-]+:\d+)\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(
+          repo,
+        )
+      ))
   ) {
     return {
       kind: 'failed',

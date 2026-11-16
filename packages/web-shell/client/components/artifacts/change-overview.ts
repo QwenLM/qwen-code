@@ -52,16 +52,23 @@ export type ChangeOverviewUnit =
     };
 
 /**
- * The `owner/repo` a bound PR's URL points at, so its file list is resolved in
- * that repository rather than by number in the session's checkout (a same
- * number in another repo is a different PR). Returns undefined for anything
- * that is not a plain GitHub PR URL with a valid slug.
+ * The `[host/]owner/repo` a bound PR's URL points at, so its file list is
+ * resolved in that repository rather than by number in the session's checkout
+ * (a same number in another repo is a different PR). The host is carried
+ * through to `gh --repo` in its documented [HOST/]OWNER/REPO form: dropping it
+ * would resolve an Enterprise PR's slug on github.com and could render a
+ * foreign same-numbered PR's files under this PR's heading. Returns undefined
+ * for anything that is not a plain GitHub PR URL with a valid slug and a bare
+ * hostname[:port] host.
  */
 export function prRepoFromUrl(url: string): string | undefined {
-  const match = /^https?:\/\/[^/]+\/([^/]+)\/([^/]+)\/pull\/\d+/.exec(url);
+  const match = /^https?:\/\/([^/]+)\/([^/]+)\/([^/]+)\/pull\/\d+/.exec(url);
   if (!match) return undefined;
-  const repo = `${match[1]}/${match[2]}`;
-  return /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo) ? repo : undefined;
+  const repo = `${match[2]}/${match[3]}`;
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) return undefined;
+  const host = match[1]!;
+  if (!/^[A-Za-z0-9.-]+(?::\d+)?$/.test(host)) return undefined;
+  return `${host}/${repo}`;
 }
 
 /**

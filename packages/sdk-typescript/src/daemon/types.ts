@@ -732,6 +732,13 @@ export interface DaemonGitHubPullRequestFiles {
   deletions: number;
   /** The PR head commit (`headRefOid`), for scoping commit fallback. */
   headSha: string;
+  /**
+   * Whether `headSha` is an ancestor of the checkout's HEAD. Only an
+   * ancestor head is a trustworthy commit-fallback boundary; a merged or
+   * rewritten PR's head is not. Absent on daemons that predate the probe —
+   * treat as false.
+   */
+  headIsAncestor?: boolean;
 }
 
 /** Response from `POST /workspaces/:workspace/github/prs/create`. */

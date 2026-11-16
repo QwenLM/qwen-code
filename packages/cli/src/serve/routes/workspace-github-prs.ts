@@ -15,6 +15,7 @@ import {
   type FetchGitHubPullRequestFilesResult,
 } from '@qwen-code/qwen-code-core';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
+import { isGitAncestorOfHead } from '@qwen-code/qwen-code-core/utils/gitDiff.js';
 import type { SendBridgeError } from '../server/error-response.js';
 import { safeBody } from '../server/request-helpers.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
@@ -251,19 +252,20 @@ export function registerWorkspaceQualifiedGitHubPrsRoutes(
       );
       if (cwd === undefined) return;
 
-      // Optional owner/repo of the bound PR when it lives in a different
-      // repository than the session checkout. Distinguish absent (resolve the
-      // number in the session's repo) from supplied-but-unusable: a repeated
-      // key parses to an array and an empty value is not a slug, so reject both
-      // rather than silently dropping them and answering with a same-numbered
-      // local PR. The core helper validates the slug before `gh --repo`.
+      // Optional [host/]owner/repo of the bound PR when it lives in a different
+      // repository (or on an Enterprise host) than the session checkout.
+      // Distinguish absent (resolve the number in the session's repo) from
+      // supplied-but-unusable: a repeated key parses to an array and an empty
+      // value is not a slug, so reject both rather than silently dropping them
+      // and answering with a same-numbered local PR. The core helper validates
+      // the slug before `gh --repo`.
       const rawRepo = req.query['repo'];
       let repo: string | undefined;
       if (rawRepo !== undefined) {
         if (typeof rawRepo !== 'string' || rawRepo === '') {
           res.status(400).json({
             errorKind: 'parse_error',
-            error: 'repo must be a non-empty owner/repo slug',
+            error: 'repo must be a non-empty [host/]owner/repo slug',
             status: 400,
           });
           return;
@@ -280,14 +282,27 @@ export function registerWorkspaceQualifiedGitHubPrsRoutes(
           repo,
         );
         switch (result.kind) {
-          case 'ok':
+          case 'ok': {
+            // The client scopes its commit-fallback window to <head>..HEAD;
+            // that boundary is only trustworthy when the head is an ancestor
+            // of HEAD (a merged or rewritten PR's head is not). Probe it here
+            // where git runs; a failed probe refuses the boundary.
+            const headIsAncestor = result.files.headSha
+              ? await isGitAncestorOfHead(
+                  cwd,
+                  result.files.headSha,
+                  runtime.env.effectiveEnv,
+                )
+              : false;
             res.status(200).json({
               v: 1,
               workspaceCwd: runtime.workspaceCwd,
               available: true,
               ...result.files,
+              headIsAncestor,
             });
             return;
+          }
           case 'not_a_repo':
             res.status(200).json({
               v: 1,
@@ -298,6 +313,7 @@ export function registerWorkspaceQualifiedGitHubPrsRoutes(
               additions: 0,
               deletions: 0,
               headSha: '',
+              headIsAncestor: false,
             });
             return;
           case 'cli_unavailable':
@@ -316,7 +332,7 @@ export function registerWorkspaceQualifiedGitHubPrsRoutes(
             if (result.reason === 'invalid_repo') {
               res.status(400).json({
                 errorKind: 'parse_error',
-                error: 'repo must be a valid owner/repo slug',
+                error: 'repo must be a valid [host/]owner/repo slug',
                 status: 400,
               });
               return;

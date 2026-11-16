@@ -40,6 +40,17 @@ vi.mock('@qwen-code/qwen-code-core/utils/debugLogger.js', () => ({
   createDebugLogger: () => mockDebugLogger,
 }));
 
+const mockIsGitAncestorOfHead = vi.hoisted(() => vi.fn());
+vi.mock(
+  '@qwen-code/qwen-code-core/utils/gitDiff.js',
+  async (importOriginal) => ({
+    ...(await importOriginal<
+      typeof import('@qwen-code/qwen-code-core/utils/gitDiff.js')
+    >()),
+    isGitAncestorOfHead: mockIsGitAncestorOfHead,
+  }),
+);
+
 const createGitHubPullRequestMock = vi.mocked(createGitHubPullRequest);
 const fetchGitHubPullRequestsMock = vi.mocked(fetchGitHubPullRequests);
 const fetchGitHubPullRequestFilesMock = vi.mocked(fetchGitHubPullRequestFiles);
@@ -98,6 +109,7 @@ const PR = {
 describe('workspace GitHub PR routes', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockIsGitAncestorOfHead.mockResolvedValue(false);
   });
 
   it('lists pull requests for the selected trusted workspace', async () => {
@@ -572,6 +584,7 @@ describe('workspace GitHub PR routes', () => {
       additions: 10,
       deletions: 2,
       headSha: 'abc1234',
+      headIsAncestor: false,
     });
     expect(fetchGitHubPullRequestFilesMock).toHaveBeenCalledWith(
       '/work/main',
@@ -579,6 +592,80 @@ describe('workspace GitHub PR routes', () => {
       undefined,
       undefined,
     );
+  });
+
+  it('reports headIsAncestor from the git ancestry probe', async () => {
+    // The client only trusts <head>..HEAD as a fallback boundary when the
+    // head is an ancestor of HEAD; the probe runs where git runs (here), and
+    // its verdict rides along with the file list.
+    fetchGitHubPullRequestFilesMock.mockResolvedValue({
+      kind: 'ok',
+      files: {
+        files: [],
+        hiddenCount: 0,
+        additions: 0,
+        deletions: 0,
+        headSha: 'abc1234',
+      },
+    });
+    mockIsGitAncestorOfHead.mockResolvedValue(true);
+    const app = mount();
+
+    const response = await request(app).get(
+      '/workspaces/primary/github/prs/42/files',
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.headIsAncestor).toBe(true);
+    expect(mockIsGitAncestorOfHead).toHaveBeenCalledWith(
+      '/work/main',
+      'abc1234',
+      undefined,
+    );
+  });
+
+  it('refuses the boundary when the head is not an ancestor', async () => {
+    fetchGitHubPullRequestFilesMock.mockResolvedValue({
+      kind: 'ok',
+      files: {
+        files: [],
+        hiddenCount: 0,
+        additions: 0,
+        deletions: 0,
+        headSha: 'abc1234',
+      },
+    });
+    mockIsGitAncestorOfHead.mockResolvedValue(false);
+    const app = mount();
+
+    const response = await request(app).get(
+      '/workspaces/primary/github/prs/42/files',
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.headIsAncestor).toBe(false);
+  });
+
+  it('skips the ancestry probe when the PR head is empty', async () => {
+    fetchGitHubPullRequestFilesMock.mockResolvedValue({
+      kind: 'ok',
+      files: {
+        files: [],
+        hiddenCount: 0,
+        additions: 0,
+        deletions: 0,
+        headSha: '',
+      },
+    });
+    const app = mount();
+
+    const response = await request(app).get(
+      '/workspaces/primary/github/prs/42/files',
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.headIsAncestor).toBe(false);
+    expect(mockIsGitAncestorOfHead).not.toHaveBeenCalled();
   });
 
   it('forwards the repo query parameter to the core helper', async () => {
@@ -743,6 +830,136 @@ describe('workspace GitHub PR routes', () => {
     expect(r1.status).toBe(200);
     expect(r2.status).toBe(200);
     expect(fetchGitHubPullRequestFilesMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps concurrent requests for different PR numbers separate', async () => {
+    // The coalescing key must discriminate on number: collapsing it to cwd
+    // would hand the second caller the first PR's files under its own request.
+    const gates: Array<(r: FetchGitHubPullRequestFilesResult) => void> = [];
+    fetchGitHubPullRequestFilesMock.mockImplementation(
+      () =>
+        new Promise<FetchGitHubPullRequestFilesResult>((resolve) => {
+          gates.push(resolve);
+        }),
+    );
+    const app = mount();
+
+    const p1 = request(app)
+      .get('/workspaces/primary/github/prs/42/files')
+      .then((r) => r);
+    const p2 = request(app)
+      .get('/workspaces/primary/github/prs/43/files')
+      .then((r) => r);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(gates).toHaveLength(2);
+    gates[0]!({
+      kind: 'ok',
+      files: {
+        files: [{ path: 'a.ts', additions: 1, deletions: 0 }],
+        hiddenCount: 0,
+        additions: 1,
+        deletions: 0,
+        headSha: 'aaa',
+      },
+    });
+    gates[1]!({
+      kind: 'ok',
+      files: {
+        files: [{ path: 'b.ts', additions: 2, deletions: 0 }],
+        hiddenCount: 0,
+        additions: 2,
+        deletions: 0,
+        headSha: 'bbb',
+      },
+    });
+    const [r1, r2] = await Promise.all([p1, p2]);
+
+    expect(r1.body.files).toEqual([
+      { path: 'a.ts', additions: 1, deletions: 0 },
+    ]);
+    expect(r2.body.files).toEqual([
+      { path: 'b.ts', additions: 2, deletions: 0 },
+    ]);
+    expect(fetchGitHubPullRequestFilesMock).toHaveBeenCalledTimes(2);
+    expect(fetchGitHubPullRequestFilesMock).toHaveBeenNthCalledWith(
+      1,
+      '/work/main',
+      42,
+      undefined,
+      undefined,
+    );
+    expect(fetchGitHubPullRequestFilesMock).toHaveBeenNthCalledWith(
+      2,
+      '/work/main',
+      43,
+      undefined,
+      undefined,
+    );
+  });
+
+  it('keeps concurrent requests for the same number in different repos separate', async () => {
+    // The coalescing key must discriminate on repo: a same-numbered PR in
+    // another repository is a different PR with its own files and head.
+    const gates: Array<(r: FetchGitHubPullRequestFilesResult) => void> = [];
+    fetchGitHubPullRequestFilesMock.mockImplementation(
+      () =>
+        new Promise<FetchGitHubPullRequestFilesResult>((resolve) => {
+          gates.push(resolve);
+        }),
+    );
+    const app = mount();
+
+    const p1 = request(app)
+      .get('/workspaces/primary/github/prs/42/files?repo=o%2Fr')
+      .then((r) => r);
+    const p2 = request(app)
+      .get('/workspaces/primary/github/prs/42/files?repo=x%2Fy')
+      .then((r) => r);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(gates).toHaveLength(2);
+    gates[0]!({
+      kind: 'ok',
+      files: {
+        files: [{ path: 'r.ts', additions: 1, deletions: 0 }],
+        hiddenCount: 0,
+        additions: 1,
+        deletions: 0,
+        headSha: 'rrr',
+      },
+    });
+    gates[1]!({
+      kind: 'ok',
+      files: {
+        files: [{ path: 'y.ts', additions: 2, deletions: 0 }],
+        hiddenCount: 0,
+        additions: 2,
+        deletions: 0,
+        headSha: 'yyy',
+      },
+    });
+    const [r1, r2] = await Promise.all([p1, p2]);
+
+    expect(r1.body.files).toEqual([
+      { path: 'r.ts', additions: 1, deletions: 0 },
+    ]);
+    expect(r2.body.files).toEqual([
+      { path: 'y.ts', additions: 2, deletions: 0 },
+    ]);
+    expect(fetchGitHubPullRequestFilesMock).toHaveBeenCalledTimes(2);
+    expect(fetchGitHubPullRequestFilesMock).toHaveBeenNthCalledWith(
+      1,
+      '/work/main',
+      42,
+      undefined,
+      'o/r',
+    );
+    expect(fetchGitHubPullRequestFilesMock).toHaveBeenNthCalledWith(
+      2,
+      '/work/main',
+      42,
+      undefined,
+      'x/y',
+    );
   });
 
   it('re-reads fresh data on a sequential repeat request', async () => {

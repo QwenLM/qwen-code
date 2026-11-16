@@ -129,15 +129,24 @@ describe('buildCommitFallbackUnits', () => {
 });
 
 describe('prRepoFromUrl', () => {
-  it('extracts owner/repo from a GitHub PR URL', () => {
+  it('extracts host/owner/repo from a GitHub PR URL', () => {
+    // The host rides through to gh --repo: dropping it would resolve the slug
+    // on github.com (or GH_HOST) instead of the PR's own host.
     expect(
       prRepoFromUrl('https://github.com/QwenLM/qwen-code/pull/17378'),
-    ).toBe('QwenLM/qwen-code');
+    ).toBe('github.com/QwenLM/qwen-code');
+  });
+
+  it('keeps an Enterprise host (and port) instead of dropping it', () => {
+    expect(prRepoFromUrl('https://ghe.corp/o/r/pull/7')).toBe('ghe.corp/o/r');
+    expect(prRepoFromUrl('https://ghe.corp:8443/o/r/pull/7')).toBe(
+      'ghe.corp:8443/o/r',
+    );
   });
 
   it('accepts dotted and dashed slugs', () => {
     expect(prRepoFromUrl('https://github.com/my.org/my-repo/pull/1')).toBe(
-      'my.org/my-repo',
+      'github.com/my.org/my-repo',
     );
   });
 
@@ -146,6 +155,8 @@ describe('prRepoFromUrl', () => {
     expect(prRepoFromUrl('https://github.com/o/r/issues/1')).toBeUndefined();
     expect(prRepoFromUrl('not a url')).toBeUndefined();
     expect(prRepoFromUrl('')).toBeUndefined();
+    // A host carrying userinfo or a scheme is not a bare hostname[:port].
+    expect(prRepoFromUrl('https://user@ghe.corp/o/r/pull/7')).toBeUndefined();
   });
 });
 

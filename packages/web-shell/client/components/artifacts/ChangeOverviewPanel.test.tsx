@@ -259,6 +259,22 @@ describe('ChangeOverviewPanel', () => {
     expect(container.textContent).not.toContain('No changes in this scope');
   });
 
+  it('keeps the current scope visible while a refresh is in flight', () => {
+    // The hook keeps the previous units while re-fetching, so loading with
+    // populated units is the normal refresh state: the visible file list must
+    // not blank out to "Loading changes" on every refresh.
+    mock.state = {
+      gitAvailable: true,
+      loadFailed: false,
+      loading: true,
+      units,
+      commitsTruncated: false,
+    };
+    renderPanel();
+    expect(container.textContent).not.toContain('Loading changes');
+    expect(container.textContent).toContain('pending.ts');
+  });
+
   it('shows a retryable load-failed message on a transient fetch failure', () => {
     mock.state = {
       gitAvailable: true,

@@ -47,6 +47,7 @@ function prFiles(number: number) {
     additions: 5,
     deletions: 1,
     headSha: `head${number}`,
+    headIsAncestor: true,
   };
 }
 
@@ -217,13 +218,13 @@ describe('useChangeOverview', () => {
       1,
       '/work/wt',
       's1',
-      'o/r',
+      'github.com/o/r',
     );
     expect(ws.workspaceGitHubPullRequestFiles).toHaveBeenCalledWith(
       2,
       '/work/wt',
       's1',
-      'o/other',
+      'github.com/o/other',
     );
   });
 
@@ -260,7 +261,9 @@ describe('useChangeOverview', () => {
     await renderAndSettle();
     const ws = mock.workspaceByCwd.mock.results[0]!.value;
     expect(ws.workspaceGitDiff).toHaveBeenCalledTimes(1);
-    act(() => output.refresh());
+    await act(async () => {
+      output.refresh();
+    });
     await vi.waitFor(() =>
       expect(ws.workspaceGitDiff).toHaveBeenCalledTimes(2),
     );
@@ -554,5 +557,175 @@ describe('useChangeOverview', () => {
     );
     expect(output.units.map((unit) => unit.id)).toContain('commit:c9');
     expect(output.loadFailed).toBe(false);
+  });
+
+  it('does not scope the fallback to a head that is not an ancestor of HEAD', async () => {
+    // A merged or rewritten PR's head still resolves locally but is not an
+    // ancestor; <head>..HEAD would re-list the base branch's history as this
+    // session's loose work. The base-branch window must be used instead.
+    const ws = {
+      workspaceGitDiff: vi.fn().mockResolvedValue(gitDiff),
+      workspaceGitHubPullRequestFiles: vi
+        .fn()
+        .mockImplementation((number: number) =>
+          Promise.resolve({ ...prFiles(number), headIsAncestor: false }),
+        ),
+      workspaceGitLog: vi.fn().mockResolvedValue({
+        v: 1,
+        available: true,
+        entries: [],
+        hasMore: false,
+      }),
+      workspaceGitCommitDetail: vi.fn(),
+    };
+    mock.workspaceByCwd.mockReturnValue(ws);
+    await renderAndSettle();
+    expect(ws.workspaceGitLog).toHaveBeenCalledTimes(1);
+    expect(ws.workspaceGitLog).toHaveBeenCalledWith(
+      20,
+      0,
+      '/work/wt',
+      'origin/main..HEAD',
+      { sessionId: 's1' },
+    );
+    expect(output.loadFailed).toBe(false);
+  });
+
+  it('picks the newest ancestor head when a later-bound PR head is not one', async () => {
+    const ws = {
+      workspaceGitDiff: vi.fn().mockResolvedValue(gitDiff),
+      workspaceGitHubPullRequestFiles: vi
+        .fn()
+        .mockImplementation((number: number) =>
+          Promise.resolve({
+            ...prFiles(number),
+            headIsAncestor: number === 1,
+          }),
+        ),
+      workspaceGitLog: vi.fn().mockResolvedValue({
+        v: 1,
+        available: true,
+        entries: [],
+        hasMore: false,
+      }),
+      workspaceGitCommitDetail: vi.fn(),
+    };
+    mock.workspaceByCwd.mockReturnValue(ws);
+    await renderAndSettle();
+    expect(ws.workspaceGitLog).toHaveBeenCalledWith(
+      20,
+      0,
+      '/work/wt',
+      'head1..HEAD',
+      { sessionId: 's1' },
+    );
+  });
+
+  it('suppresses the fallback when no head is an ancestor and no baseline is known', async () => {
+    // With bound PRs but neither an ancestor head nor a base branch, an
+    // omitted range would walk HEAD unscoped and re-list PR-covered commits;
+    // there is no trustworthy boundary, so skip the fetch entirely.
+    mock.sessionStatus.mockResolvedValue({
+      prs: [
+        { number: 1, url: 'https://github.com/o/r/pull/1' },
+        { number: 2, url: 'https://github.com/o/r/pull/2' },
+      ],
+      branch: { name: 'feat' },
+      worktree: { path: '/work/wt' },
+    });
+    const ws = {
+      workspaceGitDiff: vi.fn().mockResolvedValue(gitDiff),
+      workspaceGitHubPullRequestFiles: vi
+        .fn()
+        .mockImplementation((number: number) =>
+          Promise.resolve({ ...prFiles(number), headIsAncestor: false }),
+        ),
+      workspaceGitLog: vi.fn(),
+      workspaceGitCommitDetail: vi.fn(),
+    };
+    mock.workspaceByCwd.mockReturnValue(ws);
+    await renderAndSettle();
+    expect(ws.workspaceGitLog).not.toHaveBeenCalled();
+    expect(output.units.map((unit) => unit.kind)).not.toContain('commit');
+    expect(output.loadFailed).toBe(false);
+  });
+
+  it('does not retry range-less when no base branch is known', async () => {
+    // The undefined "no baseline" sentinel must not pass the retry guard: a
+    // range-less retry would walk HEAD unscoped and render PR-covered commits
+    // as loose work. The unavailable verdict stands as a retryable failure.
+    mock.sessionStatus.mockResolvedValue({
+      prs: [{ number: 1, url: 'https://github.com/o/r/pull/1' }],
+      branch: { name: 'feat' },
+      worktree: { path: '/work/wt' },
+    });
+    const ws = {
+      workspaceGitDiff: vi.fn().mockResolvedValue(gitDiff),
+      workspaceGitHubPullRequestFiles: vi
+        .fn()
+        .mockImplementation((number: number) =>
+          Promise.resolve(prFiles(number)),
+        ),
+      workspaceGitLog: vi.fn().mockResolvedValue({
+        v: 1,
+        available: false,
+        entries: [],
+        hasMore: false,
+      }),
+      workspaceGitCommitDetail: vi.fn(),
+    };
+    mock.workspaceByCwd.mockReturnValue(ws);
+    await renderAndSettle();
+    expect(ws.workspaceGitLog).toHaveBeenCalledTimes(1);
+    expect(output.loadFailed).toBe(true);
+    expect(output.units).toEqual([]);
+  });
+
+  it('surfaces a retryable failure when the commit log fetch throws', async () => {
+    // A thrown fetch is not "no loose commits": a session that made 20
+    // commits must not report none just because /git/log returned a 504.
+    const ws = {
+      workspaceGitDiff: vi.fn().mockResolvedValue(gitDiff),
+      workspaceGitHubPullRequestFiles: vi
+        .fn()
+        .mockImplementation((number: number) =>
+          Promise.resolve(prFiles(number)),
+        ),
+      workspaceGitLog: vi.fn().mockRejectedValue(new Error('504')),
+      workspaceGitCommitDetail: vi.fn(),
+    };
+    mock.workspaceByCwd.mockReturnValue(ws);
+    await renderAndSettle();
+    expect(output.loadFailed).toBe(true);
+    expect(output.gitAvailable).toBe(true);
+    expect(output.units).toEqual([]);
+  });
+
+  it('keeps the unavailable verdict when the retry fetch throws', async () => {
+    // A rejected retry must not erase the first response's available:false
+    // into a silent "no loose commits".
+    const ws = {
+      workspaceGitDiff: vi.fn().mockResolvedValue(gitDiff),
+      workspaceGitHubPullRequestFiles: vi
+        .fn()
+        .mockImplementation((number: number) =>
+          Promise.resolve(prFiles(number)),
+        ),
+      workspaceGitLog: vi
+        .fn()
+        .mockResolvedValueOnce({
+          v: 1,
+          available: false,
+          entries: [],
+          hasMore: false,
+        })
+        .mockRejectedValueOnce(new Error('504')),
+      workspaceGitCommitDetail: vi.fn(),
+    };
+    mock.workspaceByCwd.mockReturnValue(ws);
+    await renderAndSettle();
+    expect(ws.workspaceGitLog).toHaveBeenCalledTimes(2);
+    expect(output.loadFailed).toBe(true);
+    expect(output.units).toEqual([]);
   });
 });

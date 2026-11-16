@@ -1102,14 +1102,58 @@ describe('fetchGitHubPullRequestFiles', () => {
     expect(result).toMatchObject({ kind: 'ok' });
   });
 
+  it('carries the Enterprise host through to gh --repo', async () => {
+    const repo = tmp.repo();
+    mockGhSuccess({ files: [], additions: 0, deletions: 0, changedFiles: 0 }, [
+      'pr',
+      'view',
+      '7',
+      '--json',
+      'files,additions,deletions,headRefOid,changedFiles',
+      '--repo',
+      'ghe.corp/other/repo',
+    ]);
+    const result = await fetchGitHubPullRequestFiles(
+      repo,
+      7,
+      undefined,
+      'ghe.corp/other/repo',
+    );
+    expect(result).toMatchObject({ kind: 'ok' });
+  });
+
+  it('accepts a host:port slug in gh --repo', async () => {
+    const repo = tmp.repo();
+    mockGhSuccess({ files: [], additions: 0, deletions: 0, changedFiles: 0 }, [
+      'pr',
+      'view',
+      '7',
+      '--json',
+      'files,additions,deletions,headRefOid,changedFiles',
+      '--repo',
+      'ghe.corp:8443/other/repo',
+    ]);
+    const result = await fetchGitHubPullRequestFiles(
+      repo,
+      7,
+      undefined,
+      'ghe.corp:8443/other/repo',
+    );
+    expect(result).toMatchObject({ kind: 'ok' });
+  });
+
   it('rejects a malformed repo slug before spawning gh', async () => {
     const repo = tmp.repo();
     for (const bad of [
       '--upload-pack=evil',
       '-owner/repo',
+      '-ghe.corp/o/r',
       'owner/repo/extra',
+      'ghe.corp/o/r/extra',
+      'ghe.corp:80:90/o/r',
       'owner repo',
       'https://github.com/o/r',
+      'https://ghe.corp/o/r',
       'owner/',
     ]) {
       const result = await fetchGitHubPullRequestFiles(repo, 7, undefined, bad);
