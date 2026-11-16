@@ -125,6 +125,7 @@ describe('attachTeamSink', () => {
   let manager: ReturnType<typeof makeManager>;
   let config: ReturnType<typeof makeConfig>;
   let injectLeaderMessage: ReturnType<typeof vi.fn>;
+  let injectLeaderNotice: ReturnType<typeof vi.fn>;
   let requestPermission: ReturnType<typeof vi.fn>;
   let reportRosterChange: ReturnType<typeof vi.fn>;
   let reportTeammateActivity: ReturnType<typeof vi.fn>;
@@ -142,6 +143,7 @@ describe('attachTeamSink', () => {
     manager = makeManager();
     config = makeConfig(manager);
     injectLeaderMessage = vi.fn();
+    injectLeaderNotice = vi.fn();
     requestPermission = vi.fn();
     reportRosterChange = vi.fn();
     reportTeammateActivity = vi.fn();
@@ -152,6 +154,7 @@ describe('attachTeamSink', () => {
       sessionId: 's1',
       signal: new AbortController().signal,
       injectLeaderMessage,
+      injectLeaderNotice,
       reportRosterChange,
       reportTeammateActivity,
       retireTeamBinding,
@@ -195,6 +198,54 @@ describe('attachTeamSink', () => {
       '[team] report',
       ['correctness'],
     );
+  });
+
+  it('routes a team_error off the peer path instead of framing it as a teammate report', () => {
+    // TeamManager.fireAndForget sends coordination failures through the same
+    // leader callback as reports; wrapping one as a peer report tells the
+    // leader model a teammate said it, and records it under the peer label.
+    attachTeamSink(deps);
+    manager.leaderCallback?.(
+      '<team_error>Coordination step "x" failed: boom</team_error>',
+      'Coordination step "x" failed',
+    );
+    expect(injectLeaderNotice).toHaveBeenCalledWith(
+      '<team_error>Coordination step "x" failed: boom</team_error>',
+      'Coordination step "x" failed',
+    );
+    expect(injectLeaderMessage).not.toHaveBeenCalled();
+  });
+
+  it('keeps the legacy single-callback delivery when no notice path exists', () => {
+    attachTeamSink({ ...deps, injectLeaderNotice: undefined });
+    manager.leaderCallback?.(
+      '<team_error>boom</team_error>',
+      'coordination failed',
+    );
+    expect(injectLeaderMessage).toHaveBeenCalledWith(
+      '<team_error>boom</team_error>',
+      'coordination failed',
+      undefined,
+    );
+  });
+
+  it('keeps a sender-carrying payload on the report path even when its body starts with notice markup', () => {
+    // The reroute guard requires BOTH no senders AND notice-shaped text: a
+    // teammate report that quotes `<team_notice>` markup still carries its
+    // sender, so it must stay a report. Deleting the `!senders` clause would
+    // reroute it to the notice path and lose the attribution.
+    attachTeamSink(deps);
+    manager.leaderCallback?.(
+      '<team_notice>deployment finished</team_notice>',
+      'deployment finished',
+      ['security'],
+    );
+    expect(injectLeaderMessage).toHaveBeenCalledWith(
+      '<team_notice>deployment finished</team_notice>',
+      'deployment finished',
+      ['security'],
+    );
+    expect(injectLeaderNotice).not.toHaveBeenCalled();
   });
 
   it('routes a teammate approval to the client and answers with its outcome', async () => {
@@ -415,10 +466,13 @@ describe('attachTeamSink', () => {
     await vi.waitFor(() => expect(respond).toHaveBeenCalled());
     expect(respond.mock.calls[0]![0]).toBe(ToolConfirmationOutcome.Cancel);
     // Without this the leader only sees a teammate that silently gave up.
-    expect(injectLeaderMessage).toHaveBeenCalledWith(
+    // The notice names no sender, so it travels the notice path, not the
+    // peer-report path.
+    expect(injectLeaderNotice).toHaveBeenCalledWith(
       expect.stringContaining('<team_notice>'),
       expect.stringContaining('[team]'),
     );
+    expect(injectLeaderMessage).not.toHaveBeenCalled();
   });
 
   it('does not tell the leader the host failed to answer once the host has answered', async () => {
@@ -538,6 +592,29 @@ describe('attachTeamSink', () => {
       timestamp: 3,
     });
     expect(reportRosterChange).toHaveBeenCalledTimes(2);
+  });
+
+  it('passes a teardown exit through so the leader wakes once, not per teammate', () => {
+    // `Session.#enqueueTeamRosterChange` coalesces a teardown burst into one
+    // automatic leader turn, but only while the flag survives the sink:
+    // dropping it turns one team deletion into up to ten leader wake-ups.
+    const detach = attachTeamSink(deps);
+
+    manager.emitter.emit(TeamEventType.TEAMMATE_EXITED, {
+      agentId: 'a1',
+      name: 'correctness',
+      status: 'cancelled',
+      timestamp: 1,
+      teardown: true,
+    });
+
+    expect(reportRosterChange).toHaveBeenCalledWith({
+      type: 'exited',
+      name: 'correctness',
+      status: 'cancelled',
+      teardown: true,
+    });
+    detach();
   });
 
   it('retires the exiting teammate\u2019s approvals on the host', () => {

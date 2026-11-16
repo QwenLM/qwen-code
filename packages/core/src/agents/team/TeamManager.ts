@@ -279,6 +279,14 @@ export class TeamManager {
   private pollingInterval: ReturnType<typeof setInterval> | null = null;
 
   /**
+   * The poll currently in flight, if any. Clearing the interval cannot recall
+   * a consume that already started, and a consume marks its mailbox rows read
+   * as it goes — so a caller that is about to stop accepting writes has to
+   * wait this out instead of racing it.
+   */
+  private inFlightLeaderPoll: Promise<void> | null = null;
+
+  /**
    * Callback to inject teammate messages into the leader. Receives the
    * full model-bound text (the `<teammate_message>` envelope) and a
    * compact, human-readable `display` line for the leader's UI — the
@@ -1193,10 +1201,17 @@ export class TeamManager {
    */
   private ensureLeaderInboxPolling(): void {
     if (this.pollingInterval) return;
-    this.pollingInterval = setInterval(
-      () => this.fireAndForget('pollLeaderInbox', this.pollLeaderInbox()),
-      500,
-    );
+    this.pollingInterval = setInterval(() => {
+      const poll = this.pollLeaderInbox();
+      this.inFlightLeaderPoll = poll;
+      const settle = () => {
+        if (this.inFlightLeaderPoll === poll) this.inFlightLeaderPoll = null;
+      };
+      // fireAndForget owns the rejection handling and the error report; this
+      // second derivation only clears the in-flight marker.
+      void poll.then(settle, settle);
+      this.fireAndForget('pollLeaderInbox', poll);
+    }, 500);
   }
 
   /**
@@ -1218,6 +1233,42 @@ export class TeamManager {
    */
   async drainLeaderInbox(): Promise<void> {
     await this.pollLeaderInbox();
+  }
+
+  /**
+   * Stop leader-inbox intake, then deliver whatever is still on disk.
+   *
+   * A session close seals its notification queue right after this, and a poll
+   * marks each mailbox row read as it consumes it — so a report consumed after
+   * the seal is read on disk, landed into a writer that has stopped accepting
+   * records, and lost. Quiescing first makes "consumed" and "durable" line up:
+   * stop the interval, wait out a poll already in flight, then drain once more
+   * for anything a teammate wrote in between.
+   */
+  async quiesceLeaderInbox(): Promise<void> {
+    this.stopLeaderInboxPolling();
+    const inFlight = this.inFlightLeaderPoll;
+    if (inFlight) await inFlight.catch(() => undefined);
+    await this.drainLeaderInbox();
+  }
+
+  /**
+   * Resume leader-inbox intake after a caller quiesced it and then decided to
+   * keep going. A rolled-back session close is the live case: it clears its
+   * seal, but `ensureLeaderInboxPolling()` otherwise runs only when a teammate
+   * is spawned, so the session would stay deaf for the rest of its life to
+   * reports that are already marked read in the mailbox.
+   *
+   * Idempotent — `ensureLeaderInboxPolling()` returns while the interval lives,
+   * so a poll already in flight is never doubled. It stays a no-op when there
+   * is nothing left to listen for: no leader callback attached, or every
+   * teammate already terminal, where restarting would only re-publish
+   * ALL_TEAMMATES_TERMINATED for a team that is gone.
+   */
+  resumeLeaderInboxPolling(): void {
+    if (!this.leaderMessageCallback) return;
+    if (this.allTeammatesTerminated()) return;
+    this.ensureLeaderInboxPolling();
   }
 
   /**
