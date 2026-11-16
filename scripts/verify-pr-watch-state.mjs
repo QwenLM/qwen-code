@@ -135,60 +135,32 @@ export function readState(stateRoot, prNumber) {
       `state file ${path} is not a JSON object; inspect or remove it before the next round`,
     );
   }
-  // A well-formed object that carries no state-bearing key is not a state
+  // A well-formed object the migration ladder cannot consume is not a state
   // this helper can migrate: reading it as "no state" would let --start
   // rewrite the file from empty lists and erase a live in-flight record
-  // (R16-2). Identity keys (pr/repo/startedAt/…) name the round but carry no
-  // head, so one identity key plus a misspelled head marker must fail closed
-  // like corrupt JSON, not silently reset. The legacy `inFlight` key counts
-  // only as a non-empty string head: `inFlight:true` (the old flag),
-  // `inFlight:{…}`, or `inFlight:""` alone is not a migratable marker.
-  const keys = Object.keys(parsed);
-  const bearingPresent = keys.some((key) =>
-    key === 'inFlight'
-      ? typeof parsed[key] === 'string' && parsed[key] !== ''
-      : STATE_BEARING_KEYS.has(key),
-  );
-  if (keys.length > 0 && !bearingPresent) {
+  // (R16-2). The guard is DERIVED from what the ladder actually consumes, so
+  // the two cannot drift (R2-1): a key whose value the ladder rejects (a
+  // string under an array key, an empty list with no legacy marker) does not
+  // count, and an identity key plus a misspelled head marker fails closed like
+  // corrupt JSON. Every state the helper writes goes through deriveView, which
+  // emits the lists as arrays plus an integer seqCounter, so a legitimate file
+  // is never refused.
+  const bearingPresent =
+    inFlightEntries(parsed).length > 0 ||
+    verifiedEntries(parsed).length > 0 ||
+    deferredEntries(parsed).length > 0 ||
+    releasedEntries(parsed).length > 0 ||
+    Number.isInteger(parsed.seqCounter) ||
+    (parsed.retiredSeqs != null &&
+      typeof parsed.retiredSeqs === 'object' &&
+      Object.keys(parsed.retiredSeqs).length > 0);
+  if (Object.keys(parsed).length > 0 && !bearingPresent) {
     throw new Error(
       `state file ${path} has no recognised state key; inspect or remove it before the next round`,
     );
   }
   return parsed;
 }
-
-/**
- * Identity keys name the round but carry no migratable head/list/seq state
- * (R16-2 shape guard). A body holding only these plus unknown keys is refused.
- */
-export const IDENTITY_KEYS = new Set([
-  'pr',
-  'repo',
-  'round',
-  'artifactDir',
-  'startedAt',
-  'completedAt',
-  'verdict',
-  'commentId',
-]);
-
-/**
- * State-bearing keys carry the head/list/seq state the migration ladder uses
- * (R16-2 shape guard). Every state this helper writes carries at least one, so
- * requiring one never refuses a legitimate state.
- */
-export const STATE_BEARING_KEYS = new Set([
-  'seqCounter',
-  'verifiedHeads',
-  'verifiedHead',
-  'previousHead',
-  'inFlightHeads',
-  'inFlightHead',
-  'inFlight',
-  'deferredHeads',
-  'releasedHeads',
-  'retiredSeqs',
-]);
 
 /**
  * OIDs are quoted at every length from 7 to 40; compare by prefix. An
@@ -212,15 +184,16 @@ function hasHead(entry) {
 
 /** In-flight entries, migrating the pre-list single-marker shape. */
 function inFlightEntries(existing) {
-  if (Array.isArray(existing?.inFlightHeads)) {
-    return existing.inFlightHeads.filter(hasHead);
-  }
-  // A hand-written legacy marker may name the head in `inFlightHead` alone
-  // or in `inFlight` itself (a string); consume either spelling so it still
-  // blocks a second round instead of reading as "no round in flight". The
-  // guard admits a bare `inFlightHead` as state-bearing, so the ladder must
-  // consume it without an `inFlight` companion — otherwise --start reads the
-  // file as empty and erases the marker (R1-1).
+  const list = Array.isArray(existing?.inFlightHeads)
+    ? existing.inFlightHeads.filter(hasHead)
+    : null;
+  // A non-empty list is authoritative (it is what deriveView writes). Only
+  // when the list is absent or EMPTY does a hand-written legacy marker name
+  // the head — in `inFlightHead` alone or in `inFlight` itself (a string).
+  // Consuming it even alongside an empty `inFlightHeads: []` (the helper's
+  // resting shape) is what makes the marker block a second round instead of
+  // being read as empty and erased (R1-1, R2-1).
+  if (list && list.length > 0) return list;
   const legacyHead =
     typeof existing?.inFlightHead === 'string' && existing.inFlightHead !== ''
       ? existing.inFlightHead
@@ -235,12 +208,12 @@ function inFlightEntries(existing) {
         // operation wrote last, verified or in-flight — so the migrated
         // marker matches completion by head alone (round null).
         round: null,
-        artifactDir: existing.artifactDir ?? null,
-        startedAt: existing.startedAt ?? null,
+        artifactDir: existing?.artifactDir ?? null,
+        startedAt: existing?.startedAt ?? null,
       },
     ];
   }
-  return [];
+  return list ?? [];
 }
 
 /** Verified entries, migrating the pre-list verifiedHead/previousHead pair. */

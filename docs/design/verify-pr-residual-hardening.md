@@ -62,22 +62,22 @@ the container gate (R16-4).
 
 ### A — require a state-bearing key (fail closed)
 
-Split `STATE_KEYS` into `IDENTITY_KEYS` and `STATE_BEARING_KEYS`. The shape guard
-admits a body only when at least one **state-bearing** key is present (the legacy
-`inFlight` key still counts only as a non-empty string head). Identity-only keys
-no longer satisfy the guard, so an identity key plus an unrecognised head spelling
-fails closed like corrupt JSON. `STATE_BEARING_KEYS` = `inFlightHeads`,
-`inFlightHead`, `inFlight`, `verifiedHeads`, `verifiedHead`, `previousHead`,
-`deferredHeads`, `releasedHeads`, `retiredSeqs`, `seqCounter`. `IDENTITY_KEYS` =
-`pr`, `repo`, `round`, `artifactDir`, `startedAt`, `completedAt`, `verdict`,
-`commentId`. The guard's acceptance and the ladder's consumption must agree:
-`inFlightEntries` consumes a bare `inFlightHead` (a non-empty string, no
-`inFlight` companion) as well as a string `inFlight`, so a body the guard admits
-as state-bearing blocks a second round instead of reading as empty and being
-erased (R1-1). D17-3 is closed by witnesses pinning the boundary (a string
-`inFlight`/`inFlightHead` migrates and blocks; `inFlight:true`, an empty string,
-or an object alone does not), and the key partition is pinned literally so a
-name moved between the sets reds before it can change the guard (R1-6).
+The shape guard is **derived from what the migration ladder actually consumes**,
+so the guard's acceptance and the ladder's consumption cannot drift (R2-1). A
+body is admitted only when `inFlightEntries`, `verifiedEntries`, `deferredEntries`
+or `releasedEntries` yields an entry, or `seqCounter` is an integer, or
+`retiredSeqs` is a non-empty object. A key whose value the ladder rejects — a
+string under an array key (`inFlightHeads:"<hex>"`), an empty list with no legacy
+marker — does not count, so it fails closed like corrupt JSON instead of being
+admitted and erased; an identity key plus a misspelled head marker is likewise
+refused (R16-2). `inFlightEntries` consumes a bare `inFlightHead` (a non-empty
+string) even alongside the resting empty `inFlightHeads: []`, as well as a string
+`inFlight`, so the marker blocks a second round and survives the refused start
+(R1-1, R2-1). Every state the helper writes goes through `deriveView`, which
+emits the lists as arrays plus an integer `seqCounter`, so a legitimate file is
+never refused. Witnesses pin the consumable shapes, the refused non-consumable
+shapes (string-under-array, empty lists), and the legacy migration boundary
+(`inFlight:true`, an empty string, or an object alone does not migrate).
 
 ### B — store only the nonce hash in the record; enforce corroboration in the checker
 
@@ -92,26 +92,30 @@ name moved between the sets reds before it can change the guard (R1-6).
   requires `gate.nonceSha256` (a 64-hex string) **and** a `container-nonce:
 <value>` line in the round's logs whose value's sha256 equals it. The scan
   walks the round dir, skips `boundary.json` / `boundary-gate.json` and
-  non-regular files (a symlink is not followed), and reads a bounded 1 MiB
-  prefix of each regular file: the nonce is echoed at the start of every
-  harness run, so a prefix preserves the binding even for a multi-MiB log
-  while bounding the work (R1-2). A missing/mismatched hash or absent matching
-  line refuses the container claim. The exemption is the RECORD, not the
-  `--publish-lane` flag: `containerNonceErrors` exempts the `ci-lane` record by
-  gate name, so a local run passing the flag with a `require-isolation` record
-  is still checked (R1-7).
+  non-regular files (a symlink is not followed), and reads each regular file
+  WHOLE in chunks — a legitimate log whose marker sits behind earlier output is
+  still found — while bounding the AGGREGATE work: one hoisted 1 MiB scratch
+  buffer (no per-file allocation) and a 64 MiB total byte budget across the walk
+  (R1-2, R2-5). A missing/mismatched hash or absent matching line refuses the
+  container claim. The check runs UNCONDITIONALLY: the exemption is the RECORD,
+  not a flag — `containerNonceErrors` returns `[]` for the `ci-lane` record and
+  for non-container modes, so neither `--publish-lane` (R1-7) nor
+  `$QWEN_VERIFY_CONTEXT` (R2-7) switches the binding off for a
+  `require-isolation` container claim.
 - The container-local nonce write is part of the gate: an unwritable or absent
-  `$HOME` fails the gate (exit 3) before the pass line, rather than silently
-  writing a record whose plaintext exists nowhere and leaving the round
-  uncertifiable only after the battery ran (R1-4).
-- The step-7 shell pre-refusal is **kept** but made hash-based: it extracts
-  `nonceSha256` from the record and refuses before minting the declaration
-  unless a `container-nonce:` log line's sha256 matches it (the existing
-  behavioral replay witnesses this pre-checker refusal with a shimmed node).
-  The checker is the second, authoritative layer. Step-5 and the boundary-gate
-  prose state that the record carries the hash, never the plaintext, and that
-  the battery echoes a `container-nonce:` line read from the container-local
-  file.
+  `$HOME` fails the gate (exit 3) before the pass line and invalidates any stale
+  pass record, rather than silently writing a record whose plaintext exists
+  nowhere and leaving the round uncertifiable only after the battery ran
+  (R1-4, R2-4).
+- The step-7 shell **no longer re-implements the nonce match**: the checker is
+  the SINGLE authoritative matcher, removing the shell↔checker parity drift
+  (R1-2, R2-6) and the second matcher that stalled on a PR-planted long line
+  (R1-3). The shell still writes the declaration and invokes the checker, which
+  refuses a host battery; the nonce accept/refuse/parity witnesses live in the
+  checker unit tests and the real-environment round trip. Step-5 and the
+  boundary-gate prose state that the record carries the hash, never the
+  plaintext, and that the battery echoes a `container-nonce:` line read from the
+  container-local file.
 - `requireBoundary` gains an optional `{env, exists, home}` seam (its detectors
   already accepted one) and is exported, so an ungated unit witness exercises
   the hash-only record write on a bare host; the gate-pass path is otherwise
@@ -132,23 +136,27 @@ VM bullet.
 
 ## Files affected
 
-- `scripts/verify-pr-watch-state.mjs` — split key sets; tighten the shape guard.
+- `scripts/verify-pr-watch-state.mjs` — ladder-derived shape guard;
+  `inFlightEntries` consumes a bare legacy marker alongside an empty list.
 - `scripts/verify-pr-prepare.mjs` — record `nonceSha256`, drop plaintext `nonce`;
-  export `requireBoundary` with an `{env, exists, home}` seam.
-- `scripts/verify-pr-check.mjs` — `containerNonceErrors` + log scan, run from
-  `main` for container declarations.
-- `.qwen/skills/verify-pr/SKILL.md` — step-5 nonce prose, step-7 hash-based
-  pre-refusal, VM sentence scoping.
-- `scripts/tests/verify-pr-watch-state.test.js` — identity-only fail-closed +
-  per-bearing-key acceptance + migration-boundary witnesses.
-- `scripts/tests/verify-pr-prepare.test.js` — gated record assertion plus an
-  ungated hash-only record witness via the seam.
+  fatal nonce-file write (exit 3) invalidating a stale record; export
+  `requireBoundary` with an `{env, exists, home}` seam.
+- `scripts/verify-pr-check.mjs` — `containerNonceErrors` + whole-file
+  aggregate-bounded log scan, run unconditionally from `main`.
+- `.qwen/skills/verify-pr/SKILL.md` — step-5 nonce prose, step-7 shell nonce
+  match removed (checker sole matcher), VM sentence scoping.
+- `scripts/tests/verify-pr-watch-state.test.js` — consumable / non-consumable
+  shape witnesses, identity-only fail-closed, migration-boundary witnesses.
+- `scripts/tests/verify-pr-prepare.test.js` — gated record assertion, ungated
+  hash-only record witness via the seam, stale-record invalidation witness.
 - `scripts/tests/verify-pr-check.test.js` — `containerNonceErrors` witnesses
   (matching line accepts; missing / mismatched hash or line refuses; symlink not
-  followed; ci-lane / non-container exempt) + a CLI refusal witness; the
-  container fixtures carry `nonceSha256` and a matching log line.
-- `scripts/tests/qwen-triage-workflow.test.js` — step-5/step-7 flat pins, the VM
-  scoping pin, and the replay gate record switched to `nonceSha256`.
+  followed; ci-lane / non-container exempt; whole-file & cross-chunk reads;
+  line-semantics parity) + CLI refusal witnesses (`--publish-lane`,
+  `$QWEN_VERIFY_CONTEXT`); container fixtures carry `nonceSha256` + a log line.
+- `scripts/tests/qwen-triage-workflow.test.js` — step-5 flat pins, the VM
+  scoping pin, the checker-sole-matcher pin; the shimmed-node replay keeps the
+  declaration/teardown witness (nonce witnesses moved to the checker tests).
 
 ## Scope boundaries
 
@@ -157,9 +165,10 @@ VM bullet.
 - The core `--context` trust boundary and sha256 content binding (#17375) are
   unchanged.
 - No new script or CLI entry point; the checker gains a dir-dependent nonce check
-  and the shell keeps its pre-refusal (now hash-based, aligned to the checker's
-  first-marker/first-token semantics). `requireBoundary` is exported only as a
-  testability seam, consistent with the already-exported detectors.
+  and is the SINGLE matcher — the step-7 shell no longer re-implements it (the
+  pre-minting shell refusal of #17185 is superseded by the authoritative checker
+  refusal, which runs before publication). `requireBoundary` is exported only as
+  a testability seam, consistent with the already-exported detectors.
 - The one-record/one-nonce binding constrains the multi-container Java recipe
   (R1-10): the checker reads one record and one hash, so the container holding
   the nonce must echo the `container-nonce:` line, and a round whose battery
@@ -169,8 +178,10 @@ VM bullet.
 
 ## Open questions
 
-- None blocking. Nonce enforcement is layered: the step-7 shell refuses before
-  minting the declaration (witnessed by the behavioral replay), and the checker
-  enforces the same binding authoritatively (witnessed by node unit tests). The
-  record carries only the hash, so neither layer reads a plaintext oracle from
-  the PR-writable record.
+- None blocking. Nonce enforcement has a SINGLE implementation (the checker),
+  witnessed by node unit tests and the real-environment round trip; removing the
+  shell's second matcher eliminates the parity drift the review loop kept
+  regenerating (R1-2/R2-2/R2-3/R2-6). The record carries only the hash, so the
+  matcher reads no plaintext oracle from the PR-writable record. The aggregate
+  byte budget means a log beyond 64 MiB total is not scanned (fails closed); a
+  legitimate round's logs are far below that bound.

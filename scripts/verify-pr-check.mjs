@@ -327,17 +327,31 @@ function gateRecordErrors(gateText, { publishLane = false } = {}) {
  * Whether a round log carries a `container-nonce: <value>` line whose value's
  * sha256 equals the gate record's hash (R16-1). Walks the round dir, skipping
  * the declaration and gate record themselves and any non-regular file (a
- * symlink is not followed), and bounds each file read so a huge or special
- * file cannot stall the check. The plaintext lives only container-local, so a
- * host battery that never ran inside the boundary cannot produce a match.
+ * symlink is not followed). This is the SINGLE authoritative matcher (the
+ * step-7 shell no longer re-implements it, R1-2/R2-6), so it reads each regular
+ * file whole — a legitimate log whose marker sits behind earlier output is
+ * still found — while bounding the AGGREGATE work: one hoisted scratch buffer
+ * (no per-file allocation, R2-5) and a total byte budget across the walk so a
+ * PR-planted dir of many or huge files cannot stall the check. The plaintext
+ * lives only container-local, so a host battery cannot produce a match.
  */
 function nonceLogMatches(roundDir, expected) {
-  // Read a bounded head of each regular file rather than skipping large files
-  // outright: the battery echoes the nonce at the start of every harness run
-  // (step 5), so a prefix preserves the binding even for a multi-MiB log,
-  // while the byte bound keeps a PR-planted huge file from stalling the check
-  // (R1-2). A symlink is not followed; the declaration and record are skipped.
-  const PREFIX_BYTES = 1024 * 1024;
+  const CHUNK_BYTES = 1024 * 1024;
+  const TOTAL_BUDGET = 64 * 1024 * 1024;
+  const buf = Buffer.alloc(CHUNK_BYTES);
+  let budget = TOTAL_BUDGET;
+  const matches = (text) => {
+    for (const line of text.split('\n')) {
+      const match = /container-nonce:[ \t]*(\S+)/.exec(line);
+      if (
+        match &&
+        createHash('sha256').update(match[1]).digest('hex') === expected
+      ) {
+        return true;
+      }
+    }
+    return false;
+  };
   const walk = (d) => {
     let entries;
     try {
@@ -346,6 +360,7 @@ function nonceLogMatches(roundDir, expected) {
       return false;
     }
     for (const entry of entries) {
+      if (budget <= 0) return false;
       const p = join(d, entry.name);
       if (entry.isDirectory()) {
         if (walk(p)) return true;
@@ -358,27 +373,38 @@ function nonceLogMatches(roundDir, expected) {
       ) {
         continue;
       }
-      let text;
+      let fd;
       try {
-        const fd = openSync(p, 'r');
-        try {
-          const buf = Buffer.alloc(PREFIX_BYTES);
-          const n = readSync(fd, buf, 0, PREFIX_BYTES, 0);
-          text = buf.toString('utf8', 0, n);
-        } finally {
-          closeSync(fd);
-        }
+        fd = openSync(p, 'r');
       } catch {
         continue;
       }
-      for (const line of text.split('\n')) {
-        const match = /container-nonce:[ \t]*(\S+)/.exec(line);
-        if (
-          match &&
-          createHash('sha256').update(match[1]).digest('hex') === expected
-        ) {
-          return true;
+      try {
+        let carry = '';
+        let pos = 0;
+        while (budget > 0) {
+          const toRead = Math.min(CHUNK_BYTES, budget);
+          const n = readSync(fd, buf, 0, toRead, pos);
+          if (n === 0) break;
+          pos += n;
+          budget -= n;
+          const text = carry + buf.toString('utf8', 0, n);
+          const lastNl = text.lastIndexOf('\n');
+          // Scan only complete lines; carry the trailing partial line into the
+          // next chunk so a marker split across chunks is still matched.
+          if (lastNl >= 0) {
+            if (matches(text.slice(0, lastNl))) return true;
+            carry = text.slice(lastNl + 1);
+          } else {
+            carry = text;
+          }
+          if (n < toRead) break;
         }
+        if (carry && matches(carry)) return true;
+      } catch {
+        // An unreadable file is skipped, not a crash out of the check.
+      } finally {
+        closeSync(fd);
       }
     }
     return false;
@@ -1437,16 +1463,16 @@ function main(argv) {
     unreadableKeys,
   });
   // The container nonce corroboration (R16-1) needs the round dir to scan the
-  // battery's logs, so it lives here rather than in checkArtifacts. The
-  // exemption is the RECORD, not the --publish-lane flag: containerNonceErrors
-  // already exempts the ci-lane record the publish job writes, so a local run
-  // that passes the flag with a require-isolation record is still checked
-  // (R1-7). The CI entry path owns its declaration separately.
-  if (!publisherOwnsBoundary) {
-    result.errors.push(
-      ...containerNonceErrors(files.boundary, files.boundaryGate, dir),
-    );
-  }
+  // battery's logs, so it lives here rather than in checkArtifacts. It runs
+  // UNCONDITIONALLY: the exemption is the RECORD, not a flag — containerNonceErrors
+  // returns [] for the ci-lane record the publish job writes and for non-container
+  // modes, so neither the --publish-lane flag (R1-7) nor $QWEN_VERIFY_CONTEXT
+  // (R2-7) can switch the binding off for a require-isolation container claim.
+  // publisherOwnsBoundary still governs the absent-declaration tolerance in
+  // checkArtifacts; it does not exempt the nonce binding.
+  result.errors.push(
+    ...containerNonceErrors(files.boundary, files.boundaryGate, dir),
+  );
   result.errors.unshift(...unreadableErrors);
   if (snapshotWarning) result.warnings.unshift(snapshotWarning);
   const lines = [`verify-pr check: ${dir}`];

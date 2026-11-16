@@ -24,13 +24,11 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   completeRound,
   duplicateHead,
-  IDENTITY_KEYS,
   readState,
   releaseRound,
   sameCommit,
   startRound,
   statePath,
-  STATE_BEARING_KEYS,
   withStateLock,
 } from '../../scripts/verify-pr-watch-state.mjs';
 import { arePermissionBitsEnforced } from '../../packages/cli/src/test-utils/permission-bits.js';
@@ -1172,33 +1170,33 @@ describe('readState', () => {
     expect(() => readState(root, 1)).not.toThrow();
   });
 
-  // R1-6: pin the partition literally. The acceptance loops below take their
-  // oracle from the exported sets, so a name moved between them would change
-  // the assertion and the behaviour together and stay green; these literals
-  // red first on such a slip.
-  it('pins the identity / state-bearing key partition literally', () => {
-    expect([...IDENTITY_KEYS].sort()).toEqual([
-      'artifactDir',
-      'commentId',
-      'completedAt',
-      'pr',
-      'repo',
-      'round',
-      'startedAt',
-      'verdict',
-    ]);
-    expect([...STATE_BEARING_KEYS].sort()).toEqual([
-      'deferredHeads',
-      'inFlight',
-      'inFlightHead',
-      'inFlightHeads',
-      'previousHead',
-      'releasedHeads',
-      'retiredSeqs',
-      'seqCounter',
-      'verifiedHead',
-      'verifiedHeads',
-    ]);
+  // R2-1: the guard is derived from what the migration ladder actually
+  // consumes, so the two cannot drift. A bearing key whose value the ladder
+  // rejects (a string under an array key) is refused, not admitted-and-erased;
+  // a legacy marker alongside the resting empty list still blocks and survives.
+  it('derives the shape guard from the migration ladder consumption', () => {
+    const root = makeRoot();
+    mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
+    // A string under an array key is not consumable -> refused (cases A/C).
+    for (const body of [
+      JSON.stringify({ pr: 1, inFlightHeads: HEAD }),
+      JSON.stringify({ pr: 1, verifiedHeads: HEAD }),
+    ]) {
+      writeFileSync(statePath(root, 1), body);
+      expect(() => readState(root, 1)).toThrow(/no recognised state key/);
+    }
+    // A bare inFlightHead alongside the resting empty list (case B) blocks a
+    // second round on that head and the marker survives the refused start.
+    writeFileSync(
+      statePath(root, 1),
+      JSON.stringify({ pr: 1, inFlightHeads: [], inFlightHead: HEAD }),
+    );
+    expect(() => readState(root, 1)).not.toThrow();
+    expect(
+      startRound(root, { pr: 1, head: HEAD, round: 12, artifactDir: 'r12' })
+        .duplicate,
+    ).toBe('in-flight');
+    expect(readState(root, 1).inFlightHead).toBe(HEAD);
   });
 
   // R16-2 (residual): an identity key alone must not satisfy the guard. One
@@ -1218,7 +1216,16 @@ describe('readState', () => {
     );
     expect(() => readState(root, 1)).toThrow(/no recognised state key/);
     // Each identity key on its own (plus an unknown key) is still refused.
-    for (const key of IDENTITY_KEYS) {
+    for (const key of [
+      'pr',
+      'repo',
+      'round',
+      'artifactDir',
+      'startedAt',
+      'completedAt',
+      'verdict',
+      'commentId',
+    ]) {
       writeFileSync(
         statePath(root, 1),
         JSON.stringify({ [key]: 'x', weirdHead: HEAD }),
@@ -1227,19 +1234,33 @@ describe('readState', () => {
     }
   });
 
-  // Every state-bearing key alone admits the body: the guard requires one of
-  // these, and every state the helper writes carries at least one.
-  it('admits a body carrying any single state-bearing key', () => {
+  // A body the migration ladder can consume is admitted; an empty list with
+  // no legacy marker and no seqCounter is not consumable and is refused.
+  it('admits a body the migration ladder can consume', () => {
     const root = makeRoot();
     mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
-    for (const key of STATE_BEARING_KEYS) {
-      const value = key === 'inFlight' ? HEAD : [];
-      writeFileSync(
-        statePath(root, 1),
-        JSON.stringify({ pr: 1, [key]: value }),
-      );
+    const bearing = [
+      { inFlightHeads: [{ head: HEAD }] },
+      { verifiedHeads: [{ head: HEAD }] },
+      { deferredHeads: [{ head: HEAD }] },
+      { releasedHeads: [{ head: HEAD }] },
+      { inFlightHead: HEAD },
+      { inFlight: HEAD },
+      { verifiedHead: HEAD },
+      { previousHead: HEAD },
+      { seqCounter: 3 },
+      { retiredSeqs: { [HEAD]: { seq: 1, retries: 0 } } },
+    ];
+    for (const shape of bearing) {
+      writeFileSync(statePath(root, 1), JSON.stringify({ pr: 1, ...shape }));
       expect(() => readState(root, 1)).not.toThrow();
     }
+    // Empty lists alone (no marker, no seqCounter) are not consumable.
+    writeFileSync(
+      statePath(root, 1),
+      JSON.stringify({ pr: 1, inFlightHeads: [], verifiedHeads: [] }),
+    );
+    expect(() => readState(root, 1)).toThrow(/no recognised state key/);
     // A legitimate written state always reads back.
     const root2 = makeRoot();
     startRound(root2, { pr: 1, head: HEAD, round: 11, artifactDir: 'r11' });
@@ -1337,9 +1358,16 @@ describe('duplicateHead', () => {
     expect(duplicateHead({ verifiedHeads: [{ head: '' }] }, HEAD)).toBeNull();
     const root = makeRoot();
     mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
+    // seqCounter makes the body consumable by the ladder-derived guard; the
+    // empty legacy heads still must not dedup every head.
     writeFileSync(
       statePath(root, 1),
-      JSON.stringify({ pr: 1, verifiedHead: '', previousHead: '' }),
+      JSON.stringify({
+        pr: 1,
+        verifiedHead: '',
+        previousHead: '',
+        seqCounter: 0,
+      }),
     );
     expect(
       startRound(root, { pr: 1, head: HEAD, round: 11, artifactDir: 'r11' })

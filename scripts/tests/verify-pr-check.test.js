@@ -2536,16 +2536,51 @@ describe('containerNonceErrors (R16-1 / D17-1 / D17-2)', () => {
     expect(containerNonceErrors(boundary, gateWith(), dir)).toEqual([]);
   });
 
-  // R1-2: a real harness log can grow past any whole-file cap; the nonce line
-  // is echoed at the start, so a bounded prefix read must still accept it. A
-  // 17 MiB log (larger than the old 16 MiB whole-file bound) with the nonce on
-  // line 1 is accepted; skipping the file outright would falsely refuse a
-  // legitimate round the shell grep accepts.
-  it('accepts a nonce line at the start of a 17 MiB log via a bounded prefix', () => {
+  // R1-2/R2-5: the checker is the single authoritative matcher and reads each
+  // file whole (aggregate-bounded), so a 17 MiB log with the nonce on line 1
+  // is accepted, and so is a marker sitting BEHIND >1 MiB of earlier output
+  // (a consolidated harness.log) — a per-file prefix cap would falsely refuse
+  // both. The aggregate budget, not a per-file cap, bounds the work.
+  it('accepts a nonce line at the start of a 17 MiB log', () => {
     const dir = dirWithLog(null);
     writeFileSync(
       join(dir, 'big.log'),
       `container-nonce: ${NONCE}\n` + 'x'.repeat(17 * 1024 * 1024),
+    );
+    expect(containerNonceErrors(boundary, gateWith(), dir)).toEqual([]);
+  });
+
+  it('accepts a marker behind more than 1 MiB of earlier output', () => {
+    const dir = dirWithLog(null);
+    writeFileSync(
+      join(dir, 'harness.log'),
+      'x'.repeat(2 * 1024 * 1024) + `\ncontainer-nonce: ${NONCE}\n`,
+    );
+    expect(containerNonceErrors(boundary, gateWith(), dir)).toEqual([]);
+  });
+
+  // R2-6: pin the checker's own line semantics (the shell no longer mirrors
+  // them). The marker may sit anywhere on the line (not anchored), and the
+  // WHOLE first whitespace-delimited token is hashed (a suffix changes it).
+  it('matches a marker preceded by other text on the line', () => {
+    const dir = dirWithLog(`[12:04] container-nonce: ${NONCE}\n`);
+    expect(containerNonceErrors(boundary, gateWith(), dir)).toEqual([]);
+  });
+
+  it('hashes the whole first token, so a suffix breaks the match', () => {
+    const dir = dirWithLog(`container-nonce: ${NONCE}XYZ\n`);
+    expect(containerNonceErrors(boundary, gateWith(), dir).join('\n')).toMatch(
+      /no container-nonce line whose sha256 matches/,
+    );
+  });
+
+  it('matches a marker line split across read chunks', () => {
+    const dir = dirWithLog(null);
+    // Pad to just under a chunk so the marker line straddles the 1 MiB boundary.
+    const pad = 'x'.repeat(1024 * 1024 - 10);
+    writeFileSync(
+      join(dir, 'harness.log'),
+      `${pad}\ncontainer-nonce: ${NONCE}\n`,
     );
     expect(containerNonceErrors(boundary, gateWith(), dir)).toEqual([]);
   });
@@ -2671,6 +2706,19 @@ describe('containerNonceErrors (R16-1 / D17-1 / D17-2)', () => {
       env: { ...process.env, QWEN_VERIFY_CONTEXT: '' },
     });
     expect(res.status).toBe(0);
+  });
+
+  // R2-7: $QWEN_VERIFY_CONTEXT non-empty must not switch the binding off for a
+  // require-isolation container claim — the exemption is the record, not a flag.
+  it('refuses a no-nonce require-isolation round even with QWEN_VERIFY_CONTEXT set', () => {
+    const dir = makeArtifactDir(validFiles({}));
+    rmSync(join(dir, 'harness.log'));
+    const res = spawnSync(process.execPath, [SCRIPT, dir], {
+      encoding: 'utf8',
+      env: { ...process.env, QWEN_VERIFY_CONTEXT: '1' },
+    });
+    expect(res.status).toBe(1);
+    expect(res.stdout).toMatch(/no container-nonce line whose sha256 matches/);
   });
 });
 

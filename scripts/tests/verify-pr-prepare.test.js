@@ -1273,9 +1273,15 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
   // R1-4: an unwritable/absent $HOME must fail the gate before the pass line,
   // not silently write a record whose nonce plaintext exists nowhere (which
   // would leave the round uncertifiable only after the whole battery ran).
+  // R2-4: seed a stale pass record so the refusal's invalidateRecord() is
+  // witnessed — a failed re-run must not leave an earlier pass's record behind.
   it('fails the gate when the container-local nonce cannot be written', () => {
     const art = makeTmpDir();
     const missingHome = join(makeTmpDir(), 'no-such-home');
+    writeFileSync(
+      join(art, 'boundary-gate.json'),
+      JSON.stringify({ gate: 'require-isolation', passed: true }),
+    );
     const rc = requireBoundary(art, {
       env: { QWEN_VERIFY_CREDENTIAL_FREE: '1' },
       exists: (p) => p === '/.dockerenv',
