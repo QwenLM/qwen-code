@@ -27006,6 +27006,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       const shaOf = (ref) => g(`git rev-parse ${ref}`).trim();
       const failShas = failAt.map(shaOf).join(' ');
       const baselineSha = shaOf('origin/feature');
+      const currentSha = shaOf('feature');
 
       // Stub npm. A failing `run build` prints a marker AND a tsc-style
       // diagnostic — the identity the A/B compares. BASELINE_CODE switches
@@ -27017,6 +27018,13 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       mkdirSync(bin);
       const installLog = join(dir, 'install-log');
       writeFileSync(installLog, '');
+      writeFileSync(`${installLog}.attempts`, '');
+      writeFileSync(`${installLog}.sleeps`, '');
+      writeFileSync(
+        join(bin, 'sleep'),
+        '#!/bin/bash\nprintf "%s\\n" "$*" >> "${INSTALL_LOG}.sleeps"\n',
+      );
+      chmodSync(join(bin, 'sleep'), 0o755);
       writeFileSync(
         join(bin, 'corepack'),
         [
@@ -27026,16 +27034,20 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
           '[[ -z "${GITHUB_OUTPUT:-}${GITHUB_ENV:-}${GITHUB_PATH:-}${GITHUB_STEP_SUMMARY:-}" ]] || exit 91',
           'head="$(git rev-parse HEAD)"',
           'echo "$head" >> "${INSTALL_LOG}"',
-          'phase="$(wc -l < "${INSTALL_LOG}" | tr -d " ")"',
+          'last_head=""; phase=0; attempt=0',
+          'if [[ -f "${INSTALL_LOG}.state" ]]; then read -r last_head phase attempt < "${INSTALL_LOG}.state"; fi',
+          'if [[ "$head" == "$last_head" ]]; then attempt=$((attempt + 1)); else phase=$((phase + 1)); attempt=1; fi',
+          'printf "%s %s %s\\n" "$head" "$phase" "$attempt" > "${INSTALL_LOG}.state"',
+          'echo "$phase:$attempt" >> "${INSTALL_LOG}.attempts"',
           'if [[ "$phase" == "3" && "${NOISY_RESTORE_INSTALL:-}" == "1" ]]; then',
           '  for i in $(seq 1 100); do echo "restore install banner $i: package progress output ********************"; done',
           'fi',
-          'if [[ "$phase" == "${INSTALL_FAIL_AT:-}" ]]; then',
-          // Install diagnostics must never become A/B check evidence.
-          '  echo "src/f.ts(7,3): error TS9999: stub failure"; exit 1',
-          'fi',
           'if [[ "$phase" == "${INSTALL_MUTATE_AT:-}" ]]; then',
           '  if [[ "${INSTALL_MUTATION}" == "head" ]]; then git checkout --quiet --detach origin/main; else echo install-dirt >> f.txt; fi',
+          'fi',
+          'if [[ "$phase" == "${INSTALL_FAIL_AT:-}" && ( -z "${INSTALL_FAIL_COUNT:-}" || "$attempt" -le "${INSTALL_FAIL_COUNT}" ) ]]; then',
+          // Install diagnostics must never become A/B check evidence.
+          '  echo "${INSTALL_ERROR:-src/f.ts(7,3): error TS9999: stub failure}"; exit 1',
           'fi',
           'echo "$head" > "${INSTALL_LOG}.head"',
           'if [[ "${REAL_WORKSPACE:-}" == "1" ]]; then exec "${REAL_COREPACK}" "$@"; fi',
@@ -27330,6 +27342,8 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
             BASELINE_SHA: baselineSha,
             INSTALL_LOG: installLog,
             INSTALL_FAIL_AT: String(install.failAt ?? ''),
+            INSTALL_FAIL_COUNT: String(install.failCount ?? ''),
+            INSTALL_ERROR: install.error ?? '',
             NOISY_RESTORE_INSTALL: install.noisyRestore ? '1' : '',
             INSTALL_MUTATE_AT: String(install.mutateAt ?? ''),
             INSTALL_MUTATION: install.mutation ?? '',
@@ -27378,7 +27392,16 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
           : '',
         headAfter: sh('git rev-parse --abbrev-ref HEAD', work).trim(),
         baselineSha,
+        currentSha,
         installHeads: readFileSync(installLog, 'utf8')
+          .trim()
+          .split('\n')
+          .filter(Boolean),
+        installAttempts: readFileSync(`${installLog}.attempts`, 'utf8')
+          .trim()
+          .split('\n')
+          .filter(Boolean),
+        installSleeps: readFileSync(`${installLog}.sleeps`, 'utf8')
           .trim()
           .split('\n')
           .filter(Boolean),
@@ -27410,33 +27433,110 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
   });
 
   it('rejects dependency installation before evaluating the branch', () => {
-    const r = runGate({ install: { failAt: 1 } });
+    const r = runGate({
+      install: {
+        failAt: 1,
+        error:
+          'ERR_PNPM_OUTDATED_LOCKFILE: lockfile does not match package.json',
+      },
+    });
     expect(r.status).toBe(1);
     expect(r.outputs).toContain('outcome=failed');
     expect(r.outputs).toContain('retryable=true');
     expect(r.outputs).not.toContain('preexisting=true');
     expect(r.rejection).toContain('dependency installation failed');
+    expect(r.rejection).toContain('ERR_PNPM_OUTDATED_LOCKFILE');
     expect(r.stdout).not.toContain('Baseline A/B');
+    expect(r.installAttempts).toEqual(['1:1', '1:2', '1:3']);
+    expect(r.installHeads).toEqual([r.currentSha, r.currentSha, r.currentSha]);
+    expect(r.installSleeps).toEqual(['15', '30']);
+  });
+
+  it.each([
+    [1, ['1:1', '1:2']],
+    [2, ['1:1', '2:1', '2:2', '3:1']],
+    [3, ['1:1', '2:1', '3:1', '3:2']],
+  ])(
+    'recovers a transient dependency failure in phase %s',
+    (phase, attempts) => {
+      const r = runGate({
+        ...(phase === 1
+          ? { agentCommit: false, noAction: true }
+          : { failAt: ['feature', 'origin/feature'] }),
+        install: {
+          failAt: phase,
+          failCount: 1,
+          error: 'ERR_PNPM_META_FETCH_FAIL: ECONNRESET',
+        },
+      });
+      if (phase === 1) {
+        expect(r.status, r.stdout).toBe(0);
+        expect(r.outputs).toContain('outcome=noop');
+      } else {
+        expect(r.status).toBe(1);
+        expect(r.outputs).toContain('preexisting=true');
+      }
+      expect(r.rejection).not.toContain('dependency installation failed');
+      expect(r.rejection).not.toContain(
+        'could not restore the verification tree',
+      );
+      expect(r.installAttempts).toEqual(attempts);
+      expect(r.installHeads).toEqual(
+        attempts.map((attempt) =>
+          attempt.startsWith('2:') ? r.baselineSha : r.currentSha,
+        ),
+      );
+      expect(r.installSleeps).toEqual(['15']);
+      expect(r.headAfter).toBe('feature');
+    },
+  );
+
+  it('recovers on the third dependency attempt without a final sleep', () => {
+    const r = runGate({
+      agentCommit: false,
+      noAction: true,
+      install: { failAt: 1, failCount: 2 },
+    });
+    expect(r.status, r.stdout).toBe(0);
+    expect(r.outputs).toContain('outcome=noop');
+    expect(r.installAttempts).toEqual(['1:1', '1:2', '1:3']);
+    expect(r.installSleeps).toEqual(['15', '30']);
   });
 
   it('does not classify baseline installation failures as pre-existing check failures', () => {
     const r = runGate({
       failAt: ['feature', 'origin/feature'],
-      install: { failAt: 2 },
+      install: {
+        failAt: 2,
+        error:
+          'src/f.ts(7,3): error TS9999: stub failure\nBASELINE_INSTALL_ERROR',
+      },
     });
     expect(r.status).toBe(1);
     expect(r.outputs).toContain('retryable=true');
     expect(r.outputs).not.toContain('preexisting=true');
     expect(r.rejection).toContain('baseline dependency installation failed');
-    expect(r.installHeads).toHaveLength(3);
-    expect(r.installHeads[0]).toBe(r.installHeads[2]);
+    expect(r.rejection).toContain('BASELINE_INSTALL_ERROR');
+    expect(r.installAttempts).toEqual(['1:1', '2:1', '2:2', '2:3', '3:1']);
+    expect(r.installHeads).toEqual([
+      r.currentSha,
+      r.baselineSha,
+      r.baselineSha,
+      r.baselineSha,
+      r.currentSha,
+    ]);
+    expect(r.installSleeps).toEqual(['15', '30']);
     expect(r.headAfter).toBe('feature');
   });
 
   it('stops without a verdict when dependency restoration fails', () => {
     const r = runGate({
       failAt: ['feature'],
-      install: { failAt: 3, noisyRestore: true },
+      install: {
+        failAt: 3,
+        noisyRestore: true,
+        error: 'RESTORE_INSTALL_ERROR',
+      },
     });
     expect(r.status).toBe(1);
     expect(r.outputs).not.toContain('outcome=');
@@ -27446,10 +27546,18 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       'could not restore the verification tree or its dependencies',
     );
     expect(r.rejection).toContain('restore install banner 100:');
-    expect(r.rejection).toContain('error TS9999: stub failure');
-    expect(r.rejection).not.toContain('restore install banner 1:');
+    expect(r.rejection).toContain('RESTORE_INSTALL_ERROR');
+    expect(r.rejection).not.toContain('restore install banner 70:');
     expect(r.rejection.length).toBeLessThanOrEqual(3900);
-    expect(r.installHeads).toHaveLength(3);
+    expect(r.installAttempts).toEqual(['1:1', '2:1', '3:1', '3:2', '3:3']);
+    expect(r.installHeads).toEqual([
+      r.currentSha,
+      r.baselineSha,
+      r.currentSha,
+      r.currentSha,
+      r.currentSha,
+    ]);
+    expect(r.installSleeps).toEqual(['15', '30']);
   });
 
   it('keeps the check failure past a chatty successful dependency restore', () => {
@@ -27470,20 +27578,36 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     'rejects dependency installation that mutates phase %s',
     (phase) => {
       for (const mutation of ['head', 'dirty']) {
-        const r = runGate({
-          failAt: ['feature', 'origin/feature'],
-          install: { mutateAt: phase, mutation },
-        });
-        expect(r.status, r.stdout).toBe(1);
-        expect(r.rejection).toContain(
-          'dependency installation changed HEAD or left the verification tree dirty',
-        );
-        expect(r.outputs).not.toContain('preexisting=true');
-        if (phase === 3) {
-          expect(r.outputs).not.toContain('outcome=');
-          expect(r.outputs).not.toContain('retryable=true');
-        } else {
-          expect(r.outputs).toContain('retryable=true');
+        for (const commandFails of [false, true]) {
+          const r = runGate({
+            failAt: ['feature', 'origin/feature'],
+            install: {
+              mutateAt: phase,
+              mutation,
+              ...(commandFails ? { failAt: phase, failCount: 1 } : {}),
+            },
+          });
+          expect(r.status, r.stdout).toBe(1);
+          expect(r.rejection).toContain(
+            'dependency installation changed HEAD or left the verification tree dirty',
+          );
+          if (mutation === 'dirty') expect(r.rejection).toContain(' M f.txt');
+          expect(r.outputs).not.toContain('preexisting=true');
+          expect(r.installSleeps).toEqual([]);
+          expect(r.installAttempts).toEqual(
+            phase === 1 ? ['1:1'] : ['1:1', '2:1', '3:1'],
+          );
+          expect(r.installHeads).toEqual(
+            phase === 1
+              ? [r.currentSha]
+              : [r.currentSha, r.baselineSha, r.currentSha],
+          );
+          if (phase === 3) {
+            expect(r.outputs).not.toContain('outcome=');
+            expect(r.outputs).not.toContain('retryable=true');
+          } else {
+            expect(r.outputs).toContain('retryable=true');
+          }
         }
       }
     },

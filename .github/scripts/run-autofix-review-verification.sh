@@ -557,15 +557,28 @@ assert_verification_tree() {
   fi
 }
 sync_dependencies() {
-  local expected_head="${1}" actual_head dirty
-  strip_runner_channels env QWEN_SKIP_PREPARE=1 \
-    corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only || return 1
-  actual_head="$(git rev-parse HEAD)" || return 1
-  dirty="$(git status --porcelain)" || return 1
-  if [[ "${actual_head}" != "${expected_head}" || -n "${dirty}" ]]; then
-    echo '::error::dependency installation changed HEAD or left the verification tree dirty'
-    return 1
-  fi
+  local expected_head="${1}" actual_head dirty attempt install_rc
+  for attempt in 1 2 3; do
+    install_rc=0
+    strip_runner_channels env QWEN_SKIP_PREPARE=1 \
+      corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only || install_rc=$?
+    # A failed lifecycle script can also mutate the tree; never retry it
+    # before checking, or a later attempt could hide that mutation.
+    actual_head="$(git rev-parse HEAD)" || return 1
+    dirty="$(git status --porcelain)" || return 1
+    if [[ "${actual_head}" != "${expected_head}" || -n "${dirty}" ]]; then
+      printf '%s\n' "${dirty}"
+      echo '::error::dependency installation changed HEAD or left the verification tree dirty'
+      return 1
+    fi
+    if [[ "${install_rc}" -eq 0 ]]; then
+      return 0
+    fi
+    if [[ "${attempt}" == '3' ]]; then
+      return 1
+    fi
+    sleep $((attempt * 15)) || return 1
+  done
 }
 
 if [[ -n "$(git status --porcelain)" ]]; then
