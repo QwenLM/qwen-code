@@ -519,6 +519,11 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
         409,
         'dirty_working_tree',
       ],
+      [
+        'error: The following untracked working tree files would be overwritten by checkout:\n\tnew.txt\nPlease move or remove them before you switch branches.\nAborting',
+        409,
+        'dirty_working_tree',
+      ],
       ['fatal: a branch named x already exists', 409, 'branch_already_exists'],
       ['remote still configured after removal', 409, 'remote_still_configured'],
       [

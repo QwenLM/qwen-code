@@ -1422,9 +1422,11 @@ describe('gitCheckout with a dirty working tree', () => {
       write(dir, { 'build/out.js': 'residue\n' });
       const counter = path.join(tmpDir('qwen-probe-count-'), 'n');
       const env = gitShim(hermeticEnv(), [
-        // Fail only the FIRST `rev-parse HEAD` (the before-probe); HEAD
-        // never moves, so the spurious identity difference must not
-        // certify a completed switch.
+        // Fail only the FIRST `rev-parse HEAD` (the before-probe). HEAD
+        // never moves and the target is unresolvable, so the attribution
+        // gate refuses: a failed before-probe with an unmoved HEAD
+        // certifies nothing. (The identity-trust gate itself is pinned by
+        // the after-identity and actor-landing cases.)
         {
           match: '"rev-parse HEAD"',
           script: `n=$(cat "${counter}" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "${counter}"; if [ "$n" = 1 ]; then echo "probe failure" >&2; exit 1; fi; exec "$REAL" "$@"`,
@@ -2099,6 +2101,92 @@ describe('gitCheckout with a dirty working tree', () => {
       expect(fs.existsSync(path.join(dir, '.git', 'MERGE_HEAD'))).toBe(true);
       expect(stashList(dir)).toHaveLength(0);
     },
+  );
+
+  it('stash checkout from a subdirectory switches the whole repository and keeps the entry', async () => {
+    const dir = dirtyCheckoutFixture();
+    const sub = path.join(dir, 'sub');
+    fs.mkdirSync(sub);
+    write(dir, { 'new.txt': 'untracked\n' });
+
+    const result = await gitCheckout(
+      sub,
+      'feature',
+      { stash: true },
+      hermeticEnv(),
+    );
+
+    // Parity with the pull flow: nothing is destroyed, the entry is kept
+    // and named, so the subdirectory stash is not refused.
+    expect(result.branch).toBe('feature');
+    expect(result.stashSha).toMatch(/^[0-9a-f]{40}$/);
+    expect(currentBranch(dir)).toBe('feature');
+    expect(read(dir, 'a.txt')).toBe('feature\n');
+    expectSoleStash(dir, 'qwen-code: auto-stash before checkout');
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'stash capture fails closed when the listing shows multiple candidates',
+    async () => {
+      const dir = dirtyCheckoutFixture();
+      const env = gitShim(hermeticEnv(), [
+        // Duplicate the listing's first row so the post-push capture sees
+        // two entries matching the nonce subject: a nonce collision is
+        // not a recovery this flow can reason about.
+        {
+          match: '"stash list"*',
+          script: '"$REAL" "$@"; "$REAL" "$@" | head -1',
+        },
+      ]);
+
+      const failure = await checkoutFails(
+        dir,
+        'feature',
+        { stash: true },
+        'checkout_failed',
+        env,
+      );
+
+      expect(failure.message).toContain(
+        'cannot identify the auto-stash entry uniquely',
+      );
+      expect(failure.stashSha).toBeUndefined();
+      // The changes are in the entry; nothing was restored or dropped.
+      expect(read(dir, 'a.txt')).toBe('one\n');
+      expect(currentBranch(dir)).toBe('master');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'force checkout times out a hung tracked-diff probe and keeps the residue',
+    async () => {
+      const dir = dirtyCheckoutFixture();
+      write(dir, { 'new.txt': 'untracked\n' });
+      installHook(dir, 'post-checkout', 'echo hook-edit > a.txt\nexit 1');
+      const counter = path.join(tmpDir('qwen-diff-hang-'), 'n');
+      const env = gitShim(hermeticEnv(), [
+        // The BEFORE diff probe hangs forever; the 30s timeout must turn
+        // it into a null the witness refuses to trust. The after-probe
+        // answers normally.
+        {
+          match: '"diff HEAD"*',
+          script: `n=$(cat "${counter}" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "${counter}"; if [ "$n" = 1 ]; then sleep 999; fi; exec "$REAL" "$@"`,
+        },
+      ]);
+
+      const failure = await checkoutFails(
+        dir,
+        'master',
+        { force: true },
+        'checkout_failed',
+        env,
+      );
+
+      expect(failure.message).toContain('cannot discard and switch');
+      expect(read(dir, 'a.txt')).toBe('hook-edit\n');
+      expect(read(dir, 'new.txt')).toBe('untracked\n');
+    },
+    45_000,
   );
 
   it.skipIf(process.platform === 'win32')(

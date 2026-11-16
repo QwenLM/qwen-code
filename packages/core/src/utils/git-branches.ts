@@ -494,8 +494,10 @@ export interface GitCheckoutResult {
   branch: string;
   detached: boolean;
   /**
-   * SHA of the auto-stash entry kept by a successful `stash` checkout.
-   * The entry holds the user's pre-switch changes; it is never restored
+   * SHA of the auto-stash entry kept by a `stash` checkout — on success,
+   * and on a GitCheckoutFailure whose entry survives with a known SHA (a
+   * failed restore, or a parked-operation refusal after the push). The
+   * entry holds the user's pre-switch changes; it is never restored
    * automatically, because switching branches is deliberate.
    */
   stashSha?: string;

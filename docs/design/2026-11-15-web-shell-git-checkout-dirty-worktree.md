@@ -138,8 +138,10 @@ guard stashes nothing.
 
 A plain checkout — no option — runs the exact git invocation it always
 has. The response-level changes are the optional `stashSha` field on a
-successful stash checkout, and the same field on a `checkout_failed`
-response whose auto-stash entry survives with a known SHA (see below).
+successful stash checkout, and the same field on a failure response
+whose auto-stash entry survives with a known SHA — `checkout_failed`
+after a kept restore, or `operation_in_progress` when a merge parks
+after the push (see below).
 
 Failures are classified by what the core did, not by matching git's text:
 a new `GitCheckoutFailure` carries the stable codes

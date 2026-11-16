@@ -109,7 +109,9 @@ push 前的守卫不 stash 任何东西。
 
 裸 checkout——不带选项——执行与以往完全相同的 git 调用。响应层面的变化
 是 stash checkout 成功时可选的 `stashSha` 字段，以及 auto-stash 条目
-存活且 SHA 可知的 `checkout_failed` 响应上携带的同名字段（见下文）。
+存活且 SHA 可知的失败响应上携带的同名字段——保留恢复后的
+`checkout_failed`、或 push 之后停放 merge 的 `operation_in_progress`
+（见下文）。
 
 失败按 core 实际做了什么来分类，而不是匹配 git 的文本：新的
 `GitCheckoutFailure` 携带稳定码 `operation_in_progress`、

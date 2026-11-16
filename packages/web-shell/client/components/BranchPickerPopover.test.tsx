@@ -1264,8 +1264,10 @@ describe('BranchPickerPopover checkout resolution panel', () => {
     mount({ open: true });
     await flush();
 
-    // The open reset clears the checkout discriminator too, not just the
-    // pull panel: no resolution buttons survive the reopen.
+    // The open reset drops the standing checkout panel: no resolution
+    // buttons survive the reopen. (The whole reset block is load-bearing;
+    // the individual discriminator setter is redundantly safe behind
+    // setPullBlocked(false), so this pins the observable contract.)
     expect(footerText()).not.toContain('Switch blocked by uncommitted changes');
     expect(footerText()).not.toContain('Stash Changes and Switch');
   });
@@ -1537,7 +1539,14 @@ describe('BranchPickerPopover checkout resolution panel', () => {
         'POST /workspaces/:workspace/git/checkout: checkout_failed',
       ),
     );
-    mountWithBranches(CHECKOUT_BRANCHES);
+    // The mount read answers dirty; the failure-path refresh answers the
+    // clean post-switch tree, so the hint transition witnesses that the
+    // refreshed STATUS was applied, not just requested.
+    workspaceGit.mockResolvedValueOnce(status({ unstaged: 2, computedAt: 2 }));
+    workspaceGit.mockResolvedValue(status({ branch: 'dev', computedAt: 3 }));
+    mountWithBranches(CHECKOUT_BRANCHES, {
+      status: status({ unstaged: 2 }),
+    });
     await flush();
 
     clickButton('dev');
@@ -1575,6 +1584,41 @@ describe('BranchPickerPopover checkout resolution panel', () => {
     );
     expect(workspaceGit.mock.calls.length).toBeGreaterThan(statusReadsBefore);
     expect(footerText()).toContain('↓1 · origin/dev');
+    expect(footerText()).not.toContain('uncommitted changes');
+  });
+
+  it('drops a checkout failure without a kept entry on reopen', async () => {
+    workspaceGitCheckout.mockRejectedValueOnce(checkoutDirtyError());
+    workspaceGitCheckout.mockRejectedValueOnce(
+      new DaemonHttpError(
+        409,
+        {
+          error: 'checkout_failed',
+          message: 'cannot discard and switch: fatal: invalid reference',
+        },
+        'POST /workspaces/:workspace/git/checkout: checkout_failed',
+      ),
+    );
+    mountWithBranches(CHECKOUT_BRANCHES);
+    await flush();
+
+    clickButton('dev');
+    await flush();
+    clickButton('Discard Changes and Switch…');
+    await flush();
+    clickButton('Discard and Switch');
+    await flush();
+    expect(footerText()).toContain('cannot discard and switch');
+
+    mount({ open: false });
+    await flush();
+    mount({ open: true });
+    await flush();
+
+    // The error side of the kept-stash split: a failure WITHOUT stashSha
+    // is a dismissible error, not a sticky warning — it must not survive
+    // the reopen (only the kept-entry warning does).
+    expect(footerText()).not.toContain('cannot discard and switch');
   });
 
   it('closes the picker after a plain checkout succeeds', async () => {
