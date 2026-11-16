@@ -12478,12 +12478,16 @@ describe('runNonInteractive', () => {
       // A drain item arms the second turn.
       mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
         if (!cb) return;
-        cb('Monitor "logs" event #1: ready', '<task-notification></task-notification>', {
-          monitorId: 'mon_refused',
-          toolUseId: 'tool_mon_refused',
-          status: 'running',
-          eventCount: 1,
-        });
+        cb(
+          'Monitor "logs" event #1: ready',
+          '<task-notification></task-notification>',
+          {
+            monitorId: 'mon_refused',
+            toolUseId: 'tool_mon_refused',
+            status: 'running',
+            eventCount: 1,
+          },
+        );
       });
 
       // Turn one is refused before its send, so the latch samples
