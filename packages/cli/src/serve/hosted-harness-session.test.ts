@@ -448,7 +448,13 @@ vi.mock(
       journalStore.open = async (request) => {
         const opened = await openJournal(request);
         journal = opened;
-        const append = opened.appendTransaction.bind(opened);
+        // Dispatch through the prototype at call time so a test's prototype
+        // spy still intercepts; a pre-bound copy would shadow it.
+        const proto = Object.getPrototypeOf(opened) as {
+          appendTransaction: (records: readonly unknown[]) => Promise<void>;
+        };
+        const append = (records: readonly unknown[]) =>
+          proto.appendTransaction.call(opened, records);
         opened.appendTransaction = async (records) => {
           if (state.appendFault) {
             const consumed = await state.appendFault(opened, records, append);

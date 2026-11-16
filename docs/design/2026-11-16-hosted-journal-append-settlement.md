@@ -138,6 +138,9 @@ including an identity mismatch, still appends `environment.failed` /
   the original transaction and then replay or write exactly once.
 - The probe timeout is not an identity change. Recording it as
   `runtime_warm_failed` tells the client the environment is terminal.
+- An activation install settles a pending batch before assigning its epoch.
+  A resubmitted install can land during settlement and advance the epoch; the
+  new install must present the epoch the log then expects.
 
 ## Constraints
 

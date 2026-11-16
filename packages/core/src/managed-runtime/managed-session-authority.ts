@@ -3796,6 +3796,14 @@ export class LocalManagedSessionAuthority {
     readonly leaseDurationMs: number;
     readonly subject?: ManagedSessionSubject;
   }): Promise<{ activationId: string; epoch: number }> {
+    // Settlement can land a pending install and advance the epoch; settle
+    // first so the epoch assigned below is the one the log will expect.
+    if (
+      this.unsettledAppend !== undefined ||
+      this.unsettledActivationRenewal !== undefined
+    ) {
+      await this.settlePendingAppend();
+    }
     // The install's command identity is its activation ID, so a repeated ID
     // would replay the earlier receipt without appending, and the epoch below
     // would name an activation the log never recorded. Refuse it before the
