@@ -3221,9 +3221,7 @@ export class GitWorktreeService {
       ]);
       return stdout.trim().toLowerCase() === 'true';
     } catch (error) {
-      debugLogger.debug(
-        `cannot read core.ignorecase in ${repoPath}: ${error}`,
-      );
+      debugLogger.debug(`cannot read core.ignorecase in ${repoPath}: ${error}`);
       return false;
     }
   }

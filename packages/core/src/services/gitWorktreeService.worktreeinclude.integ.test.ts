@@ -121,7 +121,9 @@ describe('listIgnoredFiles', () => {
 
     const listed = await listIgnoredFiles(repoRoot);
 
-    expect(Buffer.byteLength(listed.join('\0'))).toBeGreaterThan(10 * 1024 * 1024);
+    expect(Buffer.byteLength(listed.join('\0'))).toBeGreaterThan(
+      10 * 1024 * 1024,
+    );
     expect(listed.length).toBe(names.length);
   });
 });
@@ -266,7 +268,8 @@ describe('GitWorktreeService.setupWorktrees() — .worktreeinclude', () => {
     expect(await exists(path.join(wt, 'secrets', 'id.json'))).toBe(true);
   });
 
-  it('never copies a tracked file named by a pattern', async () => {    await fs.writeFile(
+  it('never copies a tracked file named by a pattern', async () => {
+    await fs.writeFile(
       path.join(repoRoot, WORKTREE_INCLUDE_FILE),
       'README.md\n',
     );
