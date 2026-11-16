@@ -58,6 +58,7 @@ import {
   type AttributionRepoKeys,
   type BranchPullRequestSnapshot,
 } from '../utils/github-prs.js';
+import { findGitRoot } from '../utils/gitUtils.js';
 import type {
   ShellExecutionConfig,
   ShellExecutionResult,
@@ -100,7 +101,9 @@ import { checkPriorRead, StructuredToolError } from './priorReadEnforcement.js';
 import {
   isShellCommandReadOnlyASTInDirectory,
   extractCommandRules,
+  parseShellCommand,
 } from '../utils/shellAstParser.js';
+import type Parser from 'web-tree-sitter';
 import {
   applySedSubstitution,
   parseSedEditCommand,
@@ -127,6 +130,15 @@ type GitHeadBeforeCommand =
 
 export const SHELL_RECORD_ARTIFACT_REMINDER =
   'If this command created or rewrote a deliverable file (csv, html, sql, py, md, json, notebook, image, pdf, or an office document), call record_artifact for each one. workspacePath is relative to the current execution directory, and title is required. Do not call it for files already recorded by write_file, edit, or notebook_edit.';
+
+/**
+ * Appended when a `gh pr create` command changes directory in a way the
+ * binder cannot resolve statically. Attribution then falls back to the
+ * launch directory, which usually has no PR on its branch, so the create
+ * would otherwise miss silently — the decline is only a debug log.
+ */
+export const SHELL_PR_BINDING_DIRECTORY_NOTICE =
+  'PR auto-binding fell back to the launch directory: this command\'s directory change is not statically resolvable. Set the shell tool\'s "directory" parameter to the repository you create the PR in, or register the PR on the session after creating it.';
 
 function getShellOutputThreshold(config: Config): number {
   return config.isTruncateToolOutputThresholdExplicit()
@@ -927,6 +939,1032 @@ function cdTargetMayChangeRepo(tokens: string[], cwd: string): boolean {
   // `-` is bash's "previous directory" — could be anywhere.
   if (target === '-') return true;
   return false;
+}
+
+type ShellSyntaxNode = Parser.SyntaxNode;
+
+/**
+ * The directory `gh pr create` attribution runs in. `launch` keeps the
+ * tool's launch directory (the `directory` param, else the target dir);
+ * `resolved` is a directory the command's own `cd` chain proved statically;
+ * `opaque` means the command changes directory in a way that cannot be
+ * proven without running it, so attribution falls back to `launch` and the
+ * tool result says so instead of missing silently.
+ */
+type GhPrCreateDirectory =
+  | { kind: 'launch' }
+  | { kind: 'resolved'; directory: string; repository?: string }
+  | { kind: 'opaque' };
+
+/**
+ * Programs that move the shell's directory. `cd`/`pushd` name a target the
+ * walk can try to prove; `popd` rotates a stack it does not model; and
+ * `eval`/`source`/`.` run arbitrary code in the CURRENT shell, so they can
+ * move it without naming a target anywhere in the command text. Executing a
+ * script (`./move.sh`) is deliberately absent — that runs in a child and
+ * cannot move us.
+ */
+const DIRECTORY_CHANGING_COMMANDS = new Set([
+  'cd',
+  'pushd',
+  'popd',
+  'eval',
+  'source',
+  '.',
+]);
+
+/**
+ * The literal program a command node invokes, or undefined when the name cannot
+ * be statically decoded. Every word encoding Bash accepts for the same builtin
+ * (`"cd"`, `'cd'`, `$'cd'`, `c"d"`) must decode to the literal; an undecodable
+ * name (an expansion or an escape we cannot evaluate) is unprovable, and the
+ * caller fails closed instead of silently dropping the move.
+ */
+function commandNodeProgramName(node: ShellSyntaxNode): string | undefined {
+  const nameNode = node.childForFieldName('name');
+  if (!nameNode) return undefined;
+  // The `name` field is a command_name wrapper around the value node
+  // (word / string / raw_string / ansi_c_string / concatenation).
+  const valueNode = nameNode.namedChildren[0] ?? nameNode;
+  return literalShellValue(valueNode);
+}
+
+/** The program a command node invokes, basename'd like the textual walks. */
+function commandNodeProgram(node: ShellSyntaxNode): string | undefined {
+  const name = commandNodeProgramName(node);
+  return name === undefined ? undefined : programBasename(name);
+}
+
+/**
+ * Whether a command invokes a directory-changing BUILTIN. A path-qualified
+ * program named `cd`/`pushd`/… (e.g. `/usr/bin/cd`, `./cd`) is an external
+ * executable that runs in a child process and cannot move this shell, so it
+ * must not be granted builtin cwd-changing semantics.
+ */
+function commandIsBuiltinDirectoryChanger(node: ShellSyntaxNode): boolean {
+  if (node.type !== 'command') return false;
+  const name = commandNodeProgramName(node);
+  return (
+    name !== undefined &&
+    !/[/\\]/.test(name) &&
+    DIRECTORY_CHANGING_COMMANDS.has(programBasename(name))
+  );
+}
+
+/**
+ * Whether a command creates a git worktree (`git worktree add …`). The
+ * snapshot precedes spawn, so a worktree created by this very command does not
+ * exist yet and a later `cd` into it would snapshot the wrong branch. Decodes
+ * quoted subcommands so `git "worktree" add` / `git worktree 'add'` match too.
+ */
+function commandCreatesWorktree(node: ShellSyntaxNode): boolean {
+  if (node.type !== 'command' || commandNodeProgram(node) !== 'git') {
+    return false;
+  }
+  const words = node.namedChildren
+    .filter(
+      (c) => c.type !== 'command_name' && c.type !== 'variable_assignment',
+    )
+    .map((c) => literalShellValue(c) ?? c.text);
+  return words.some((word, i) => word === 'worktree' && words[i + 1] === 'add');
+}
+
+/**
+ * Whether a subtree creates a git worktree anywhere, including inside command
+ * substitutions. A worktree's filesystem effect survives the child shell, so it
+ * matters even when the surrounding cd does not. A child-only cd (no worktree)
+ * is deliberately NOT flagged here.
+ */
+function subtreeCreatesWorktree(node: ShellSyntaxNode): boolean {
+  const stack: ShellSyntaxNode[] = [node];
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    if (commandCreatesWorktree(current)) return true;
+    stack.push(...current.namedChildren);
+  }
+  return false;
+}
+
+/**
+ * The names transitively invoked from EXECUTABLE call sites in a subtree. A
+ * call inside a function body is an executable call site only when that
+ * function is itself invoked, so uncalled functions cannot activate each
+ * other's effects: a call recorded inside a dormant body does not count. Calls
+ * outside any function body seed the closure, which then expands through the
+ * bodies of the functions it reaches.
+ */
+function invokedFunctionNames(node: ShellSyntaxNode): Set<string> {
+  // enclosing '' is the subtree's top level; a function name otherwise.
+  const callsBy = new Map<string, Set<string>>();
+  const stack: Array<{ n: ShellSyntaxNode; enclosing: string }> = [
+    { n: node, enclosing: '' },
+  ];
+  while (stack.length > 0) {
+    const { n, enclosing } = stack.pop()!;
+    if (n.type === 'function_definition') {
+      const name = n.childForFieldName('name')?.text ?? '';
+      for (const c of n.namedChildren) stack.push({ n: c, enclosing: name });
+      continue;
+    }
+    if (n.type === 'command') {
+      const program = commandNodeProgram(n);
+      if (program !== undefined) {
+        let calls = callsBy.get(enclosing);
+        if (!calls) {
+          calls = new Set();
+          callsBy.set(enclosing, calls);
+        }
+        calls.add(program);
+      }
+    }
+    for (const c of n.namedChildren) stack.push({ n: c, enclosing });
+  }
+  const invoked = new Set<string>();
+  const queue: string[] = [...(callsBy.get('') ?? [])];
+  while (queue.length > 0) {
+    const name = queue.pop()!;
+    if (invoked.has(name)) continue;
+    invoked.add(name);
+    for (const called of callsBy.get(name) ?? []) queue.push(called);
+  }
+  return invoked;
+}
+
+/**
+ * Whether a subtree contains a `gh pr create` invocation that actually
+ * executes. A function definition does not run its body, so a create inside a
+ * function counts only when that function is transitively invoked from an
+ * executable call site; a bare definition is dormant and must not cost an
+ * outer create its binding.
+ */
+function subtreeRunsGhPrCreate(node: ShellSyntaxNode): boolean {
+  const invoked = invokedFunctionNames(node);
+  const stack: ShellSyntaxNode[] = [node];
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    if (current.type === 'function_definition') {
+      const name = current.childForFieldName('name')?.text;
+      if (name && !invoked.has(name)) continue;
+    }
+    if (
+      current.type === 'command' &&
+      commandRunsGhPrCreate(createCandidateText(current))
+    ) {
+      return true;
+    }
+    stack.push(...current.namedChildren);
+  }
+  return false;
+}
+
+/**
+ * If a declaration marks a function readonly (`readonly -f`, `declare -r -f`,
+ * clustered options), return its literal function-name targets. Returns
+ * undefined when the declaration does not mark a function readonly, and
+ * `{ targets: undefined }` when it does but a target cannot be decoded (the
+ * readonly state is then unestablished and removal must stay conservative).
+ */
+function readonlyFunctionDeclaration(
+  node: ShellSyntaxNode,
+): { targets: string[] | undefined } | undefined {
+  if (node.type !== 'declaration_command') return undefined;
+  const keyword = node.firstChild?.text;
+  const optionChars = new Set<string>();
+  for (const c of node.namedChildren) {
+    if (c.type === 'word' && c.text.startsWith('-')) {
+      for (const ch of c.text.slice(1)) optionChars.add(ch);
+    }
+  }
+  const marksReadonly =
+    (keyword === 'readonly' && optionChars.has('f')) ||
+    ((keyword === 'declare' || keyword === 'typeset') &&
+      optionChars.has('r') &&
+      optionChars.has('f'));
+  if (!marksReadonly) return undefined;
+  const targets: string[] = [];
+  for (const c of node.namedChildren) {
+    if (c.type === 'word' && c.text.startsWith('-')) continue;
+    const value = c.type === 'variable_name' ? c.text : literalShellValue(c);
+    if (value === undefined) return { targets: undefined };
+    targets.push(value);
+  }
+  return { targets };
+}
+
+/**
+ * Decode a literal shell value (a `--repo` argument) to the string Bash would
+ * pass, or undefined when it carries an expansion we cannot evaluate. Handles
+ * the quoted equals form `--repo='o/r'`, which tree-sitter spells as a
+ * `concatenation` of the `--repo=` word and a quoted value node.
+ */
+function literalShellValue(
+  node: ShellSyntaxNode | undefined,
+): string | undefined {
+  if (!node) return undefined;
+  if (node.type === 'word') {
+    const text = node.text;
+    if (!text.includes('\\')) return text;
+    // An unquoted backslash escapes the next character (`c\d` is the cd
+    // builtin). Normalize `\X` to literal X; a trailing backslash with no
+    // following character is not a decodable escape, so leave it unprovable
+    // rather than letting the raw word fall through as a proven non-mover.
+    let decoded = '';
+    for (let i = 0; i < text.length; i++) {
+      if (text[i] === '\\') {
+        i++;
+        if (i >= text.length) return undefined;
+        decoded += text[i];
+      } else {
+        decoded += text[i];
+      }
+    }
+    return decoded;
+  }
+  if (node.type === 'raw_string') return node.text.slice(1, -1);
+  if (node.type === 'ansi_c_string') {
+    // `$'…'` ANSI-C quoting: without a backslash escape the content is literal;
+    // with escapes it cannot be statically decoded, so leave it unprovable.
+    const inner = node.text.slice(2, -1);
+    return inner.includes('\\') ? undefined : inner;
+  }
+  if (node.type === 'string') {
+    if (node.namedChildren.some((c) => c.type !== 'string_content')) {
+      return undefined;
+    }
+    return node.namedChildren.map((c) => c.text).join('');
+  }
+  if (node.type === 'concatenation') {
+    const parts = node.namedChildren.map(literalShellValue);
+    if (parts.some((p) => p === undefined)) return undefined;
+    return parts.join('');
+  }
+  return undefined;
+}
+
+/**
+ * The text to run the execution gate over for one AST command node.
+ *
+ * The gate splits on shell separators without tracking quotes, so feeding it
+ * a node's raw text lets a quoted argument forge a create:
+ * `printf 'example; gh pr create'` splits into a segment that starts with
+ * `gh pr create`, and the walk would stop on the printf at the launch
+ * directory while the real create runs elsewhere. Rebuilding the segment
+ * from the AST's own tokens and replacing any argument that carries a
+ * separator or expansion with a placeholder keeps the gate's grammar
+ * authoritative while making that forgery impossible: the executable still
+ * has to be gh (or a recognised wrapper) in argument position.
+ */
+function createCandidateText(node: ShellSyntaxNode): string {
+  const parts: string[] = [];
+  for (const child of node.namedChildren) {
+    if (child.type === 'command_name') {
+      // A quoted executable such as `'gh; gh pr create'` is NOT gh; copying its
+      // text verbatim lets the quote-blind gate find a create inside the name
+      // and stop the walk early. Sanitise it like an argument. Backslash and
+      // slash stay legal so path-qualified gh (incl. Windows) still matches.
+      parts.push(/[;&|`$\n'"]|\s/.test(child.text) ? 'X' : child.text);
+      continue;
+    }
+    if (child.type === 'variable_assignment') {
+      // Sanitise the VALUE but keep the assignment shape. Replacing the whole
+      // node with a bare token turns `GH_TOKEN=$TOK gh pr create` into
+      // `X gh pr create`, which the gate no longer recognises — losing a
+      // binding the unsanitised text used to make. Only the value can carry
+      // a forged separator, so only the value is replaced.
+      const name = child.namedChildren.find((c) => c.type === 'variable_name');
+      parts.push(name ? `${name.text}=X` : 'X');
+      continue;
+    }
+    parts.push(/[;&|`$\n]/.test(child.text) ? 'X' : child.text);
+  }
+  return parts.join(' ');
+}
+
+/** Whether a subtree the walk does not model may move the directory. */
+function subtreeMayChangeDirectory(node: ShellSyntaxNode): boolean {
+  const stack: ShellSyntaxNode[] = [node];
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    if (
+      commandIsBuiltinDirectoryChanger(current) ||
+      commandCreatesWorktree(current)
+    ) {
+      return true;
+    }
+    stack.push(...current.namedChildren);
+  }
+  return false;
+}
+
+/**
+ * Whether a subtree may move THIS shell's directory. A `cd` inside a subshell /
+ * command substitution / process substitution runs in a child and cannot move
+ * this shell, so it is not counted; a worktree created even in a child still
+ * lands on disk before spawn and is counted. Used where counting a child-only
+ * cd would raise a spurious fallback on a run that provably did not move.
+ */
+function subtreeMayChangeDirectoryInThisShell(node: ShellSyntaxNode): boolean {
+  if (subtreeCreatesWorktree(node)) return true;
+  const stack: ShellSyntaxNode[] = [node];
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    if (commandIsBuiltinDirectoryChanger(current)) return true;
+    if (
+      current.type === 'subshell' ||
+      current.type === 'command_substitution' ||
+      current.type === 'process_substitution'
+    ) {
+      continue;
+    }
+    stack.push(...current.namedChildren);
+  }
+  return false;
+}
+
+/**
+ * Whether a subtree contains a child context (subshell / command substitution /
+ * process substitution) that both may change directory AND contains the actual
+ * create. Such a create runs in the child's changed directory, which this walk
+ * does not attribute, so it must keep the visible fallback signal. A child-only
+ * cd with the create OUTSIDE it is exempt (it provably did not move this shell).
+ * A child context inside a dormant (uncalled) function body does not execute, so
+ * it is skipped just like the other scans skip dormant bodies.
+ */
+function subtreeHasCreateInMovingChild(node: ShellSyntaxNode): boolean {
+  const invoked = invokedFunctionNames(node);
+  const stack: ShellSyntaxNode[] = [node];
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    if (current.type === 'function_definition') {
+      const name = current.childForFieldName('name')?.text;
+      if (name && !invoked.has(name)) continue;
+    }
+    if (
+      (current.type === 'subshell' ||
+        current.type === 'command_substitution' ||
+        current.type === 'process_substitution') &&
+      subtreeRunsGhPrCreate(current) &&
+      subtreeMayChangeDirectory(current)
+    ) {
+      return true;
+    }
+    stack.push(...current.namedChildren);
+  }
+  return false;
+}
+
+/**
+ * Whether the command assigns `CDPATH` anywhere, as a leading assignment
+ * (`CDPATH=/x cd sub`) or a declaration (`export CDPATH=/x`). CDPATH makes
+ * the shell search its entries before the working directory, so a RELATIVE
+ * `cd sub` can land outside the repo while looking provable; an absolute
+ * target is unaffected. Ambient CDPATH from the inherited environment is
+ * out of scope — the walk models the command, not the environment.
+ */
+function assignsCdpath(node: ShellSyntaxNode): boolean {
+  const stack: ShellSyntaxNode[] = [node];
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    if (
+      current.type === 'variable_assignment' &&
+      current.namedChildren.some(
+        (c) => c.type === 'variable_name' && c.text === 'CDPATH',
+      )
+    ) {
+      return true;
+    }
+    stack.push(...current.namedChildren);
+  }
+  return false;
+}
+
+/**
+ * A `cd`/`pushd` target provable without running the command: a plain word
+ * or string carrying no expansion, substitution, tilde, glob, brace or
+ * escape. Returns undefined for everything else — including bare `cd`
+ * (goes to `$HOME`), `cd -` (previous directory), and any quoted form whose
+ * content tree-sitter had to split into expansion nodes.
+ */
+function literalCdTarget(node: ShellSyntaxNode): string | undefined {
+  let target: ShellSyntaxNode | undefined;
+  for (const arg of node.namedChildren) {
+    if (arg.type === 'command_name' || arg.type === 'variable_assignment') {
+      continue;
+    }
+    // `cd -L dir` / `cd -- dir`: skip option words, but `cd -` on its own
+    // is the previous-directory form and must reach the checks below.
+    if (arg.type === 'word' && arg.text.startsWith('-') && arg.text !== '-') {
+      continue;
+    }
+    target = arg;
+    break;
+  }
+  if (target === undefined) return undefined;
+  let text: string;
+  if (target.type === 'word') {
+    text = target.text;
+  } else if (target.type === 'raw_string') {
+    // Single quotes are wholly literal in bash — no expansion is possible
+    // inside them — so the body is the path with the quotes removed.
+    text = target.text.slice(1, -1);
+  } else if (target.type === 'string') {
+    // A double-quoted path is literal only when its body is plain content;
+    // `"$HOME/x"` and `"$(pwd)/x"` carry expansion children instead.
+    if (target.namedChildren.some((c) => c.type !== 'string_content')) {
+      return undefined;
+    }
+    text = target.namedChildren.map((c) => c.text).join('');
+  } else {
+    return undefined;
+  }
+  // `-` is bash's previous-directory form, not a path named "-".
+  if (text.length === 0 || text === '-' || text.startsWith('~'))
+    return undefined;
+  if (/[$`\\*?[\]{}]/.test(text)) return undefined;
+  return text;
+}
+
+/**
+ * Resolve the directory the first `gh pr create` in `command` runs in, so
+ * both attribution legs ask gh about the repo the create actually targeted.
+ * A model-authored `cd <worktree> && gh pr create` without the `directory`
+ * param otherwise resolves the launch directory's branch — which has no PR
+ * — and the binding declines silently.
+ *
+ * A directory is carried forward only across `&&`, the one separator that
+ * proves the preceding `cd` succeeded. Across `;`, a newline, `&` or `||`
+ * the next statement runs regardless of (or only on failure of) the previous
+ * one, so a skipped, failed or backgrounded `cd` never moved us; carrying it
+ * would query a directory the create never ran in and lose a binding the
+ * launch directory would have made.
+ *
+ * The walk is otherwise static and fails closed: it never runs the command,
+ * never guesses an expansion, and returns `opaque` for every directory
+ * change it cannot prove (`cd $VAR`, `cd ~`, `cd -`, `popd`, a `pushd +N`
+ * stack rotation, a subshell or control-flow body that moves the directory,
+ * an `env -C`/`sudo -D` wrapper, `eval`/`source`/`.`, a `CDPATH` that
+ * reroutes a relative target). `opaque` keeps the launch directory, so this
+ * can only add bindings, never remove one. A parse failure or an error node
+ * returns `launch`: the parser proved nothing, so behaviour is unchanged.
+ *
+ * Create recognition reuses `commandRunsGhPrCreate` rather than restating
+ * its closed grammar, but over text rebuilt from the AST's own tokens (see
+ * `createCandidateText`) so a quoted argument cannot forge a create. The
+ * walk stops at the first create — the gate binds one PR, so a later `cd`
+ * or a `|| gh pr view` retry tail cannot change the answer.
+ */
+async function resolveGhPrCreateDirectory(
+  command: string,
+  launchDir: string,
+): Promise<GhPrCreateDirectory> {
+  let tree: Parser.Tree;
+  try {
+    tree = await parseShellCommand(command);
+  } catch {
+    return { kind: 'launch' };
+  }
+  try {
+    const root = tree.rootNode;
+    if (root.hasError) return { kind: 'launch' };
+
+    let found: string | undefined;
+    let createRepo: string | undefined;
+    let opaque = false;
+    let lastpipeEnabled = false;
+    // Set when a `shopt -s lastpipe` may run but is not guaranteed (behind
+    // `&&` / `||` / `&`). Lastpipe is then neither proven on nor proven off, so
+    // a pipeline's final element may still run in this shell: its possible
+    // parent effects must be preserved, not discarded as child-only.
+    let lastpipeUncertain = false;
+    const cdpathSet = assignsCdpath(root);
+    // Function definitions take effect only when the walk reaches them in the
+    // current shell. Pre-scanning the whole tree would let a definition AFTER
+    // the create (or inside a subshell) wrongly shadow an earlier cd.
+    const shadowed = new Set<string>();
+    // Functions marked readonly (`readonly -f`, `declare -r -f`) cannot be
+    // removed by `unset -f`, so their shadow must survive an unset attempt.
+    const readonlyFunctions = new Set<string>();
+    // Set when a readonly declaration's target cannot be decoded: the readonly
+    // state is then unestablished, so no shadow may be lifted.
+    let readonlyUncertain = false;
+
+    const visit = (
+      node: ShellSyntaxNode,
+      dir: string,
+      guaranteed = true,
+    ): string => {
+      if (found !== undefined || opaque) return dir;
+      switch (node.type) {
+        case 'program':
+        case 'list': {
+          // A directory may only be carried into a statement whose execution
+          // is gated on the previous one SUCCEEDING. `&&` is the only
+          // separator that proves it: with `;`, a newline, or `&` the next
+          // statement runs regardless, so a `cd` that failed (missing
+          // target), was skipped (`false && cd w`), or ran in a background
+          // subshell (`cd w &`) never moved us — and carrying it anyway
+          // would query a directory the create never ran in.
+          //
+          // `||` is ambiguous in BOTH directions: the right branch runs only
+          // when the left failed, so a cd on the right may never execute
+          // (`true || cd w` skips it), and a cd on the left may have failed.
+          // Either side being able to move the directory makes the outcome
+          // unprovable. A create already found is unaffected, so
+          // `cd w && gh pr create || gh pr view` still attributes in `w`.
+          let current = dir;
+          let separator: string | undefined;
+          const children = node.children;
+          for (let i = 0; i < children.length; i++) {
+            const child = children[i]!;
+            if (!child.isNamed) {
+              separator = child.text;
+              continue;
+            }
+            // A comment is not a statement. Skipping it must not consume the
+            // pending operator, or `cd w && # note` + newline + `gh pr
+            // create` loses the `&&` that proves the cd succeeded.
+            if (child.type === 'comment') continue;
+            if (found !== undefined || opaque) return current;
+            if (separator === '||') {
+              if (
+                path.resolve(current) !== path.resolve(dir) ||
+                subtreeMayChangeDirectoryInThisShell(child)
+              ) {
+                opaque = true;
+                return current;
+              }
+            } else if (
+              separator !== '&&' &&
+              path.resolve(current) !== path.resolve(dir)
+            ) {
+              opaque = true;
+              return current;
+            }
+            // A statement behind `&&` / `||` may be skipped (its execution
+            // depends on the previous result, which we do not evaluate), and a
+            // statement terminated by `&` runs in a background subshell. None
+            // is guaranteed to run in THIS shell, so side-effects that REMOVE a
+            // conservative protection (lifting a function shadow via
+            // `unset -f`) must not apply to them.
+            let backgrounded = false;
+            for (let j = i + 1; j < children.length; j++) {
+              const next = children[j]!;
+              if (next.isNamed) break;
+              if (next.text === '&') {
+                backgrounded = true;
+                break;
+              }
+            }
+            const conditional =
+              separator === '&&' || separator === '||' || backgrounded;
+            current = visit(child, current, guaranteed && !conditional);
+            separator = undefined;
+          }
+          return current;
+        }
+        case 'pipeline': {
+          // Bash runs pipeline elements in subshells, so a `cd` inside one
+          // does not leak. With `shopt -s lastpipe` ONLY the final element runs
+          // in THIS shell; every preceding element is still a subshell, so its
+          // function/readonly/shopt state must be isolated, not leaked.
+          const elements = node.namedChildren;
+          for (let i = 0; i < elements.length; i++) {
+            const isLast = i === elements.length - 1;
+            if (isLast && lastpipeEnabled) {
+              visit(elements[i]!, dir, guaranteed);
+              continue;
+            }
+            if (isLast && lastpipeUncertain) {
+              // Enablement is unproven, so the final element MAY run in this
+              // shell. Keep its possible parent effects (readonly / shadow)
+              // by not isolating it, but do not grant it guaranteed
+              // shadow-removing execution.
+              visit(elements[i]!, dir, false);
+              continue;
+            }
+            const savedShadowed = new Set(shadowed);
+            const savedReadonly = new Set(readonlyFunctions);
+            const savedUncertain = readonlyUncertain;
+            const savedLastpipe = lastpipeEnabled;
+            const savedLastpipeUncertain = lastpipeUncertain;
+            visit(elements[i]!, dir, false);
+            shadowed.clear();
+            for (const name of savedShadowed) shadowed.add(name);
+            readonlyFunctions.clear();
+            for (const name of savedReadonly) readonlyFunctions.add(name);
+            readonlyUncertain = savedUncertain;
+            lastpipeEnabled = savedLastpipe;
+            lastpipeUncertain = savedLastpipeUncertain;
+          }
+          // Only the FINAL element may run in this shell under lastpipe; a cd
+          // in a preceding element is a child and cannot move us.
+          const lastElement = elements[elements.length - 1];
+          if (
+            (lastpipeEnabled || lastpipeUncertain) &&
+            lastElement &&
+            subtreeMayChangeDirectoryInThisShell(lastElement)
+          ) {
+            opaque = true;
+          }
+          return dir;
+        }
+        case 'redirected_statement': {
+          let current = dir;
+          for (const child of node.namedChildren) {
+            if (child.type.endsWith('_redirect')) continue;
+            // The redirection is set up before the command runs and can fail
+            // (e.g. a missing parent directory), so the command — and any
+            // `unset -f` it contains — is not guaranteed to execute.
+            current = visit(child, current, false);
+          }
+          return current;
+        }
+        case 'function_definition': {
+          const name = node.childForFieldName('name')?.text;
+          if (name) shadowed.add(name);
+          // The body executes only if the function is called. If it can move
+          // the directory itself, no later invoke can be attributed safely.
+          if (subtreeMayChangeDirectory(node)) opaque = true;
+          return dir;
+        }
+        case 'declaration_command': {
+          // `readonly -f cd` / `declare -r -f cd` (including clustered options
+          // and quoted targets) mark a function readonly; a later `unset -f`
+          // cannot remove it, so its shadow must survive. Marking conservatively
+          // (even if the declaration is skipped) only ever keeps a shadow.
+          const readonlyDecl = readonlyFunctionDeclaration(node);
+          if (readonlyDecl) {
+            if (readonlyDecl.targets === undefined) {
+              readonlyUncertain = true;
+            } else {
+              for (const t of readonlyDecl.targets) readonlyFunctions.add(t);
+            }
+          }
+          // A declaration can create a worktree inside a command substitution
+          // (`export WT="$(git worktree add …)"`); that filesystem effect
+          // survives the child and must fail closed. A child-only cd (no
+          // worktree) cannot move this shell and must NOT force a fallback.
+          if (subtreeCreatesWorktree(node)) opaque = true;
+          return dir;
+        }
+        case 'unset_command': {
+          // `unset -f cd` restores the builtin, lifting the shadow — but only
+          // when the unset is GUARANTEED to execute AND provably succeeds.
+          // Behind `&&` / `||` / `&` (e.g. `false && unset -f cd`) it may be
+          // skipped; under a failed redirection it never runs; and a readonly
+          // function cannot be removed. In all of those the shadow must be
+          // kept; lifting it would treat a later no-op function call as the
+          // real builtin and query a directory the create never ran in. Only
+          // literal function names can be removed; an expanded name stays
+          // conservative.
+          if (!guaranteed) return dir;
+          const hasFunctionFlag = node.namedChildren.some(
+            (c) => c.type === 'word' && c.text === '-f',
+          );
+          if (hasFunctionFlag) {
+            const targets = node.namedChildren.filter((c) => c.type !== 'word');
+            if (targets.every((c) => c.type === 'variable_name')) {
+              // If the readonly state is unestablished, or any target is
+              // readonly, the removal is not provably successful, so keep the
+              // shadows rather than clearing them.
+              if (
+                !readonlyUncertain &&
+                !targets.some((t) => readonlyFunctions.has(t.text))
+              ) {
+                for (const t of targets) shadowed.delete(t.text);
+              }
+            } else {
+              opaque = true;
+            }
+          }
+          return dir;
+        }
+        case 'command': {
+          const programName = commandNodeProgramName(node);
+          // An undecodable program name (an expansion or an escape we cannot
+          // evaluate) could be any builtin, including a directory changer.
+          // Falling through would silently attribute the create to the current
+          // directory; fail closed instead.
+          if (programName === undefined) {
+            opaque = true;
+            return dir;
+          }
+          const program = programBasename(programName);
+          // A same-named function shadows the builtin, so `cd()` / `pushd()` /
+          // `gh()` moving or creating nothing here is mis-attributed if we
+          // trust the name alone. No later command of that name is provable.
+          if (shadowed.has(program)) {
+            opaque = true;
+            return dir;
+          }
+          const candidateText = createCandidateText(node);
+          const candidateRunsCreate = commandRunsGhPrCreate(candidateText);
+          // These prefixes hide the command whose cwd semantics matter:
+          // `command cd`, `builtin cd`, `time cd`, or `command env -C … gh`.
+          // An unrelated `command printf` must not block a later provable cd.
+          if (
+            ['command', 'builtin', 'time'].includes(program) &&
+            (candidateRunsCreate ||
+              node.namedChildren.some((c) =>
+                DIRECTORY_CHANGING_COMMANDS.has(programBasename(c.text)),
+              ))
+          ) {
+            opaque = true;
+            return dir;
+          }
+          // A trap can run an arbitrary cd between any later two commands.
+          if (program === 'trap') {
+            opaque = true;
+            return dir;
+          }
+          // A quoted `bash -c`/`sh -c` body is a separate shell program. Only
+          // a body that the execution gate recognises as a create is opaque;
+          // `sh -c 'echo ok' && cd w && gh pr create` remains resolvable.
+          if (
+            ['bash', 'sh', 'zsh', 'dash', 'ksh'].includes(program) &&
+            node.namedChildren.some(
+              (c) => c.type === 'word' && c.text === '-c',
+            ) &&
+            commandRunsGhPrCreate(node.text)
+          ) {
+            opaque = true;
+            return dir;
+          }
+          if (commandCreatesWorktree(node)) {
+            // The snapshot precedes spawn, so a worktree created by this very
+            // command does not exist yet. findGitRoot on its future path would
+            // find the launch repo and snapshot the wrong branch. Fail closed
+            // for any worktree creation before the create.
+            opaque = true;
+            return dir;
+          }
+          // A GUARANTEED `shopt -s lastpipe` proves lastpipe on. Behind `&&` /
+          // `||` / `&` it may or may not run (`true && …` enables it, `false &&
+          // …` does not), so the state is UNCERTAIN — not proven off. Modeling
+          // it as off would discard the final element's possible parent effects
+          // and silently query a directory the create never ran in. A `shopt -u
+          // lastpipe` invalidates any proven-on state: guaranteed it proves
+          // lastpipe off; conditional it may disable, so the state becomes
+          // uncertain ONLY if it could have been on — a possible disable cannot
+          // enable an option already proven off. Leaving a proven-on flag set
+          // would grant a later final element current-shell semantics it no
+          // longer has.
+          if (
+            program === 'shopt' &&
+            node.namedChildren.some(
+              (c) => c.type === 'word' && c.text === 'lastpipe',
+            )
+          ) {
+            const enables = node.namedChildren.some(
+              (c) => c.type === 'word' && c.text === '-s',
+            );
+            const disables = node.namedChildren.some(
+              (c) => c.type === 'word' && c.text === '-u',
+            );
+            if (enables) {
+              if (guaranteed) {
+                lastpipeEnabled = true;
+              } else {
+                lastpipeUncertain = true;
+              }
+            } else if (disables) {
+              if (guaranteed) {
+                lastpipeEnabled = false;
+                lastpipeUncertain = false;
+              } else {
+                lastpipeUncertain = lastpipeEnabled || lastpipeUncertain;
+                lastpipeEnabled = false;
+              }
+            }
+          }
+          if (candidateRunsCreate) {
+            const shiftSet =
+              program === 'env'
+                ? ENV_FLAGS_SHIFT_CWD
+                : program === 'sudo'
+                  ? SUDO_FLAGS_SHIFT_CWD
+                  : undefined;
+            if (
+              shiftSet &&
+              node.namedChildren.some((c) => isShiftCwdFlag(c.text, shiftSet))
+            ) {
+              opaque = true;
+            } else {
+              const args = node.namedChildren;
+              let repoFlagSeen = false;
+              for (let i = 0; i < args.length; i++) {
+                const arg = args[i]!;
+                const text = arg.text;
+                if (
+                  arg.type === 'word' &&
+                  (text === '--repo' || text === '-R')
+                ) {
+                  repoFlagSeen = true;
+                  createRepo = literalShellValue(args[i + 1]);
+                } else if (
+                  text.startsWith('--repo=') ||
+                  text.startsWith('-R=')
+                ) {
+                  // `--repo=o/r` is one word; `--repo='o/r'` is a concatenation
+                  // of the `--repo=` word and a quoted value. Decode the whole
+                  // node, then drop the prefix, so quotes are not kept.
+                  repoFlagSeen = true;
+                  const prefix = text.startsWith('--repo=') ? '--repo=' : '-R=';
+                  const decoded = literalShellValue(arg);
+                  createRepo =
+                    decoded === undefined
+                      ? undefined
+                      : decoded.slice(prefix.length);
+                } else if (
+                  arg.type === 'word' &&
+                  text.startsWith('-R') &&
+                  text.length > 2
+                ) {
+                  // Attached short form `-Ro/r`.
+                  repoFlagSeen = true;
+                  createRepo = text.slice(2);
+                } else {
+                  continue;
+                }
+                break;
+              }
+              found = dir;
+              // An explicit repo flag whose value cannot be decoded is
+              // unprovable, not absent: fail closed instead of silently
+              // attributing to the derived directory.
+              if (repoFlagSeen && createRepo === undefined) opaque = true;
+            }
+            return dir;
+          }
+          // A path-qualified program named cd/pushd/popd/eval/source/. is an
+          // external executable running in a child; it cannot move this shell,
+          // so the directory is unprovable rather than the builtin's target.
+          if (
+            DIRECTORY_CHANGING_COMMANDS.has(program) &&
+            /[/\\]/.test(programName)
+          ) {
+            opaque = true;
+            return dir;
+          }
+          // `eval`/`source`/`.` run code in this shell that can move it
+          // without naming a target here, and `popd` rotates a stack we do
+          // not model. None of them is attributable from the command text.
+          if (
+            program === 'popd' ||
+            program === 'eval' ||
+            program === 'source' ||
+            program === '.'
+          ) {
+            opaque = true;
+            return dir;
+          }
+          if (program === 'cd' || program === 'pushd') {
+            // `pushd -n DIR` pushes DIR without entering it, and `pushd -N` /
+            // `+N` rotate the stack. Any option therefore means this is not a
+            // plain directory change, however literal the target looks.
+            if (
+              program === 'pushd' &&
+              node.namedChildren.some(
+                (c) =>
+                  c.type === 'word' && c.text.startsWith('-') && c.text !== '-',
+              )
+            ) {
+              opaque = true;
+              return dir;
+            }
+            const target = literalCdTarget(node);
+            // `pushd +N` / `pushd -N` rotate the directory stack instead of
+            // naming a path; only `cd` may treat `+1` as a directory name.
+            // A command that sets CDPATH reroutes relative targets through
+            // its entries, so only an absolute target stays provable.
+            if (
+              target === undefined ||
+              (program === 'pushd' && /^[+-]\d+$/.test(target)) ||
+              (cdpathSet && !path.isAbsolute(target))
+            ) {
+              opaque = true;
+              return dir;
+            }
+            return path.resolve(dir, target);
+          }
+          return dir;
+        }
+        default: {
+          // A subshell / command substitution / process substitution runs in a
+          // child: its cd cannot leak to this shell, so a create OUTSIDE it is
+          // provably at the incoming directory and needs no notice. A worktree
+          // created inside it still lands on disk before spawn, though, so a
+          // later cd into it would snapshot the wrong branch — stay fail-closed.
+          // A create INSIDE a moving subshell runs in a directory this walk does
+          // not attribute; like the brace/if body siblings, surface that as a
+          // visible fallback rather than a silent miss. Scope it to a create
+          // inside so `(cd WT); gh pr create` (create outside) is not flagged.
+          if (
+            node.type === 'subshell' ||
+            node.type === 'command_substitution' ||
+            node.type === 'process_substitution'
+          ) {
+            if (subtreeCreatesWorktree(node)) opaque = true;
+            else if (
+              subtreeRunsGhPrCreate(node) &&
+              subtreeMayChangeDirectory(node)
+            ) {
+              opaque = true;
+            }
+            return dir;
+          }
+          // Compound statements and control flow run in THIS shell: a directory
+          // change inside them is not attributable from here, but a subtree
+          // that never moves the directory cannot cost us a binding either.
+          // A function definition inside can still shadow a later builtin even
+          // when its body contains no cd; register it conservatively. A readonly
+          // declaration in current-shell control flow (`if true; then readonly
+          // -f cd; fi`) also blocks a later unset, so record it — but not when it
+          // sits inside a nested child context, whose effects die with it.
+          // A function body executes only when the function is transitively
+          // invoked from an executable call site, so its readonly marks count
+          // only for such functions; a call inside a dormant body does not
+          // activate another function's effects.
+          const invoked = invokedFunctionNames(node);
+          const stack: Array<{ n: ShellSyntaxNode; child: boolean }> = [
+            { n: node, child: false },
+          ];
+          while (stack.length > 0) {
+            const { n: current, child } = stack.pop()!;
+            if (current.type === 'function_definition') {
+              const name = current.childForFieldName('name')?.text;
+              if (name) shadowed.add(name);
+              // An uncalled body is dormant: its readonly declarations have not
+              // executed and must not block a later unset. A called body runs in
+              // this shell, so descend to record its readonly marks.
+              if (name && !invoked.has(name)) continue;
+            }
+            const nowChild =
+              child ||
+              current.type === 'subshell' ||
+              current.type === 'command_substitution' ||
+              current.type === 'process_substitution';
+            if (!nowChild) {
+              const readonlyDecl = readonlyFunctionDeclaration(current);
+              if (readonlyDecl) {
+                if (readonlyDecl.targets === undefined) {
+                  readonlyUncertain = true;
+                } else {
+                  for (const t of readonlyDecl.targets)
+                    readonlyFunctions.add(t);
+                }
+              }
+            }
+            if (current.type === 'pipeline') {
+              // With lastpipe proven on OR uncertain in current-shell context
+              // the FINAL element may run in THIS shell, so its readonly mark
+              // survives; every preceding element is still a child. Mirror the
+              // top-level pipeline arm.
+              const elements = current.namedChildren;
+              for (let i = 0; i < elements.length; i++) {
+                const isLast = i === elements.length - 1;
+                stack.push({
+                  n: elements[i]!,
+                  child:
+                    nowChild ||
+                    !(isLast && (lastpipeEnabled || lastpipeUncertain)),
+                });
+              }
+              continue;
+            }
+            for (const c of current.namedChildren) {
+              stack.push({ n: c, child: nowChild });
+            }
+          }
+          if (subtreeMayChangeDirectoryInThisShell(node)) opaque = true;
+          // A create inside a moving child nested in this body still runs in a
+          // directory the walk does not attribute; keep the fallback signal the
+          // child-only-cd exemption above must not remove.
+          if (subtreeHasCreateInMovingChild(node)) opaque = true;
+          return dir;
+        }
+      }
+    };
+
+    visit(root, launchDir);
+
+    if (opaque) return { kind: 'opaque' };
+    // Compare resolved forms: `cd /test/dir` from a launch dir of `/test/dir`
+    // is a no-op, but path.resolve spells it with the platform's separators
+    // (and a drive on Windows), so a raw string comparison would report a
+    // resolved directory that is really the launch one.
+    if (
+      found === undefined ||
+      path.resolve(found) === path.resolve(launchDir)
+    ) {
+      return { kind: 'launch' };
+    }
+    return { kind: 'resolved', directory: found, repository: createRepo };
+  } finally {
+    // The tree lives in WASM memory; every other parseShellCommand consumer
+    // releases it, and a daemon session outlives many creates.
+    tree.delete();
+  }
 }
 
 /**
@@ -2595,10 +3633,23 @@ export class ShellToolInvocation extends BaseToolInvocation<
     let preRunBranch: string | undefined;
     let preRunRepoKeys: AttributionRepoKeys | undefined;
     let preRunGhEnv: Readonly<Record<string, string | undefined>> | undefined;
+    // Both attribution legs must ask gh about the SAME directory, and that
+    // directory is where the create runs — not necessarily where the shell
+    // started. `cd <worktree> && gh pr create` without the `directory` param
+    // otherwise snapshots the launch branch (no PR) and declines silently.
+    let attributionDir = cwd;
+    let ghPrCreateDirectory: GhPrCreateDirectory = { kind: 'launch' };
     if (
       !this.config.getShellExecutionSandbox?.() &&
       commandRunsGhPrCreate(commandToExecute)
     ) {
+      ghPrCreateDirectory = await resolveGhPrCreateDirectory(
+        commandToExecute,
+        cwd,
+      );
+      if (ghPrCreateDirectory.kind === 'resolved') {
+        attributionDir = ghPrCreateDirectory.directory;
+      }
       // The verification legs must authenticate the way the create itself
       // does (inline GH_TOKEN with no ambient gh auth), or the gate's
       // advertised token shape binds nothing. The inline record is an
@@ -2609,10 +3660,67 @@ export class ShellToolInvocation extends BaseToolInvocation<
       const inlineEnv = ghPrCreateInlineEnv(commandToExecute);
       preRunGhEnv = inlineEnv ? { ...process.env, ...inlineEnv } : undefined;
       [preRunPrSnapshot, preRunBranch, preRunRepoKeys] = await Promise.all([
-        fetchCurrentBranchPullRequest(cwd, preRunGhEnv),
-        fetchCurrentBranchName(cwd),
-        fetchAttributionRepoKeys(cwd, preRunGhEnv),
+        fetchCurrentBranchPullRequest(attributionDir, preRunGhEnv),
+        fetchCurrentBranchName(attributionDir),
+        fetchAttributionRepoKeys(attributionDir, preRunGhEnv),
       ]);
+      // The derived directory returns `error` (no git repo there), or the
+      // command names a DIFFERENT repository than the derived one's own
+      // (`--repo` / `GH_REPO`). In both, snapshotting it hides a binding the
+      // launch directory would have made, so re-point both legs at the launch
+      // directory and re-snapshot there — what the parent commit always did.
+      // An explicit repo naming the SAME key as the derived one (e.g.
+      // `--repo o/r` in a worktree of o/r) is NOT a trigger: that is an
+      // ordinary create and must keep attributing to the worktree.
+      // `gh --repo` accepts `[HOST/]OWNER/REPO`, so the explicit value may or
+      // may not carry a host while the derived keys always do. Canonicalise
+      // BOTH sides to `host/owner/repo` (defaulting a host-less explicit value
+      // to the derived host) before deciding they differ — comparing a bare
+      // `o/r` against `github.com/o/r` would wrongly re-point a same-repo
+      // create to the launch directory.
+      const derivedHost =
+        preRunRepoKeys?.resolved?.split('/')[0] || 'github.com';
+      const canonicalRepo = (spec: string): string => {
+        const parts = spec.split('/').filter(Boolean);
+        let key: string;
+        if (parts.length >= 3) key = parts.slice(-3).join('/');
+        else if (parts.length === 2)
+          key = `${derivedHost}/${parts[0]}/${parts[1]}`;
+        else key = spec;
+        // GitHub repository identity is case-insensitive (gh compares owner and
+        // repo lowercased, and repoKeyFromWebUrl lowercases the derived keys),
+        // so `--repo O/R` must match a worktree of `o/r`.
+        return key.toLowerCase();
+      };
+      const repoKeys = [
+        preRunRepoKeys?.resolved,
+        preRunRepoKeys?.parent,
+      ].flatMap((key) => (key ? [canonicalRepo(key)] : []));
+      const explicitRepo =
+        (ghPrCreateDirectory.kind === 'resolved'
+          ? ghPrCreateDirectory.repository
+          : undefined) ??
+        // A real --repo flag overrides env for gh, so it must win here too.
+        // GITHUB_REPOSITORY is an Actions context variable, not gh's repo
+        // override; treating it as one would strand a local-repo create.
+        inlineEnv?.['GH_REPO'];
+      // An errored gh answer inside a REAL repo still fails closed. Re-point
+      // on error only when findGitRoot independently proves there is no repo;
+      // otherwise a transient gh flake could bind an existing launch PR.
+      const targetsOtherRepo =
+        (preRunPrSnapshot?.status === 'error' &&
+          findGitRoot(attributionDir) === null) ||
+        (explicitRepo !== undefined &&
+          repoKeys.length > 0 &&
+          !repoKeys.includes(canonicalRepo(explicitRepo)));
+      if (attributionDir !== cwd && targetsOtherRepo) {
+        attributionDir = cwd;
+        [preRunPrSnapshot, preRunBranch, preRunRepoKeys] = await Promise.all([
+          fetchCurrentBranchPullRequest(cwd, preRunGhEnv),
+          fetchCurrentBranchName(cwd),
+          fetchAttributionRepoKeys(cwd, preRunGhEnv),
+        ]);
+      }
     }
 
     let cumulativeOutput: string | AnsiOutput = '';
@@ -3027,7 +4135,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       this.bindGhPrCreate(
         commandToExecute,
         result.output,
-        cwd,
+        attributionDir,
         preRunPrSnapshot,
         preRunBranch,
         preRunRepoKeys,
@@ -3112,9 +4220,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
     ) {
       // Registration runs ahead of attribution:
       // `attachCommitAttribution` returns early on the
-      // `gitCoAuthor.commit` toggle, but the amend exemption must not
-      // depend on it, and an attribution failure must not cost the
-      // registration. Registration stays fail-closed: it still
+      // `gitCoAuthor.commit` toggle, but the registry must not depend on
+      // it, and an attribution failure must not cost the registration.
+      // Registration stays fail-closed: it still
       // requires a `commit:` reflog verb plus HEAD movement against
       // the captured preHead.
       await this.trackSessionCommit(cwd, preHead);
@@ -3254,9 +4362,19 @@ export class ShellToolInvocation extends BaseToolInvocation<
     ))
       ? SHELL_RECORD_ARTIFACT_REMINDER
       : null;
-    const appendedMetadata = [longRunHint, attributionWarning].filter(
-      (s): s is string => s !== null,
-    );
+    // Only a run that reached the binding gate can miss a binding; a failed
+    // or cancelled create produced no PR to register.
+    const prBindingDirectoryNotice =
+      ghPrCreateDirectory.kind === 'opaque' &&
+      (!result.aborted || wasPromoteRefused) &&
+      result.exitCode === 0
+        ? SHELL_PR_BINDING_DIRECTORY_NOTICE
+        : null;
+    const appendedMetadata = [
+      longRunHint,
+      attributionWarning,
+      prBindingDirectoryNotice,
+    ].filter((s): s is string => s !== null);
     const modelNotices = [...appendedMetadata, recordArtifactReminder].filter(
       (s): s is string => s !== null,
     );
@@ -3517,6 +4635,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
    * still race inside the snapshot→bind window, which this gate does not
    * serialize.
    *
+   * `cwd` is the ATTRIBUTION directory, not necessarily the launch one: the
+   * caller resolves the command's static `cd` chain first (see
+   * `resolveGhPrCreateDirectory`) and snapshots the same directory, so a
+   * `cd <worktree> && gh pr create` without the `directory` param attributes
+   * the worktree's branch rather than the launch branch's.
+   *
    * Scope (by design): only a FOREGROUND run that settled in this call —
    * an uninterrupted one, or one whose promote was refused because the
    * child had already exited — reaches this gate. A run promoted to the
@@ -3524,8 +4648,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
    * the background registry, whose output streams to a file and whose
    * pre-run snapshot was never taken; they are not bound live, and the
    * transcript is deliberately not a recovery source (no gh-side
-   * attribution). Such a PR binds through `/review <N>` or the worktree
-   * `pr-<N>` convention.
+   * attribution). Such a PR binds through `/review <N>`, `/verify-pr <N>`,
+   * or the worktree `pr-<N>` convention — the last only when the daemon
+   * created the worktree and wrote its sidecar; a plain `git worktree add`
+   * writes none, so backfill does NOT recover that shape.
    */
   private bindGhPrCreate(
     command: string,
@@ -3549,10 +4675,13 @@ export class ShellToolInvocation extends BaseToolInvocation<
           );
           return;
         }
-        // The launch directory (`directory` param, else target dir), not a
-        // repo the command may have `cd`'d into: gh resolves THIS repo's
-        // branch, so an internal-`cd` create binds only when this branch's
-        // PR URL is what the output carries — backfill recovers the rest.
+        // The attribution directory the caller resolved: the launch
+        // directory (`directory` param, else target dir), or the directory
+        // the command's own static `cd` chain proved. gh resolves THAT
+        // repo's branch, and the pre-run snapshot was taken in the same
+        // directory, so the two legs compare like with like. A directory
+        // change the resolver could not prove falls back to the launch
+        // directory and is surfaced as a tool-result notice.
         const created = await fetchCurrentBranchPullRequest(cwd, ghCreateEnv);
         if (created.status !== 'pr' || created.state !== 'open') {
           // Keep the facts distinct: `none` is gh's proved absence for this
@@ -4663,8 +5792,14 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
   /**
    * Record HEAD in the session registry (`permissions/destructive-commands.ts`)
-   * when a `git commit` put it there, so a later `git commit --amend` of it is
-   * exempt from the Auto-mode destructive-command block.
+   * when a `git commit` put it there.
+   *
+   * The registry used to exempt a later `git commit --amend` from the AUTO
+   * destructive-command block. Since #13570 every amend asks for approval and
+   * nothing reads it for that decision, but the attribution it records is still
+   * what the Co-authored-by trailer and the git notes are written against, so a
+   * wrong registration is still a real defect. The registry stays a published
+   * export; removing it and this wiring is a separate change.
    *
    * The criterion is "the newest HEAD reflog entry is a `commit` verb, and
    * HEAD moved". Exit code is too strict (`git commit -m x && npm test` can
@@ -4674,20 +5809,19 @@ export class ShellToolInvocation extends BaseToolInvocation<
    * non-zero — and because `gitCommitContext` does not treat
    * `pull`/`checkout`/`merge` as cwd-shifting and the call site has no
    * exit-code gate, that chain really does reach here. A movement-only test
-   * would register a human's SHA, trading the deterministic Layer-0 block for
-   * the classifier.
+   * would register a human's SHA as the agent's own.
    *
    * Where the reflog cannot answer at all (`core.logAllRefUpdates` off, reflog
-   * expired, git missing) nothing registers and the amend stays blocked, so
-   * that branch costs a blocked amend and never a lifted one.
+   * expired, git missing) nothing registers, so that branch costs a missing
+   * attribution and never a wrong one.
    *
    * The reflog read does *not* establish that this command's own `git commit`
    * created HEAD, and no local read can: `preHead` is taken before the spawn
    * and the reflog after the whole command, so a commit another process lands
    * in the same repository inside that window is the newest `commit:` entry
-   * and registers instead — degrading the next amend's deterministic Layer-0
-   * block to the L5.3 classifier, and costing the agent its own exemption,
-   * since the foreign entry is the newest one. Binding an entry to this child
+   * and registers instead — attributing a foreign commit to the agent and
+   * costing it its own attribution, since the foreign entry is the newest one.
+   * Binding an entry to this child
    * needs a signal not derivable from reflog shape, and the cheap candidate is
    * unsound: a chain-level `GIT_REFLOG_ACTION` stamp rewrites the action of
    * every reflog-writing git call in the single `/bin/bash -c` child, so a
@@ -4697,7 +5831,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
    * No multi-commit guard, unlike {@link attachCommitAttribution}, which has
    * to *partition* per-file contribution and so bails. In `commit a &&
    * commit b` HEAD is `b`, created by this command, so registering it is
-   * sound and `a` stays blocked.
+   * sound and `a` stays unregistered.
    *
    * `requirePredecessor` is the promoted path's lineage guard and is
    * deliberately not applied to the foreground one. There, the window
@@ -4734,10 +5868,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
       requirePredecessor !== undefined &&
       head.predecessor !== requirePredecessor
     ) {
-      // Same visibility contract as the `head === null` branch below: the
-      // only other output of this path is a block reason asserting the
-      // commit was not the agent's, so say which side of the lineage
-      // check failed.
+      // Same visibility contract as the `head === null` branch below: say
+      // which side of the lineage check failed.
       const predecessorLabel =
         requirePredecessor === null
           ? '(unborn)'
@@ -4756,14 +5888,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
     if (head !== null && head.createdByCommit && head.sha !== preHead) {
       registerSessionCommit(head.sha);
     } else if (head === null) {
-      // Failing closed is the intent; failing closed *invisibly* is not. The
-      // only other output of this path is a block reason asserting the
-      // commit was not the agent's, and nothing else separates "the reflog
-      // could not answer" (reflogs off, expired, probe timed out) from a
-      // genuine attribution failure. Same shape as the attribution refusal
-      // in `attachCommitAttribution`.
+      // Failing closed is the intent; failing closed *invisibly* is not.
+      // Nothing else separates "the reflog could not answer" (reflogs off,
+      // expired, probe timed out) from a genuine attribution failure. Same
+      // shape as the attribution refusal in `attachCommitAttribution`.
       debugLogger.warn(
-        `Session commit not registered in ${cwd}: the HEAD reflog could not answer, so a later amend stays blocked.`,
+        `Session commit not registered in ${cwd}: the HEAD reflog could not answer, so this commit is not attributed to the session.`,
       );
     }
   }

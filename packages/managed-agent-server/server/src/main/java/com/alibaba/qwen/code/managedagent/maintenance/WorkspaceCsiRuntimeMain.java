@@ -2,8 +2,9 @@ package com.alibaba.qwen.code.managedagent.maintenance;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiApplicationStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiReservationStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiRuntimeAccess;
@@ -96,19 +97,18 @@ public final class WorkspaceCsiRuntimeMain {
         var manager = new DataSourceTransactionManager(source);
         var properties = new ManagedAgentProperties();
         properties.setAgentRevision(required("K2_AGENT_REVISION"));
-        var bindings = new JdbcRuntimeBindingRepository(source, AesGcmSecretProtector.fromBase64(
+        var protector = AesGcmSecretProtector.fromBase64(
                 required("QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID"),
-                required("QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY")));
-        var sessions = new JdbcRuntimeSessionRepository(source);
-        var http = new HttpRuntimeTransport();
-        var nativeStore = new ManagedSessionStore(jdbc,
-                new com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore(jdbc), null, null,
-                com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy.inProcess(),
-                null, null, null, null, null,
-                com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound(), bindings);
-        var application = new WorkspaceCsiApplicationStore(jdbc, manager, nativeStore, bindings, sessions, new com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport());
-        var access = new WorkspaceCsiRuntimeAccess(jdbc, manager, json, properties, request.registration(),
-                request.sessionId(), request.runtimeRequestKey(), bindings, sessions, http, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+                required("QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY"));
+        var oss = MaintenanceObjectStores.k2Oss();
+        var objects = oss == null ? null
+                : oss.objects(required("QWEN_MANAGED_AGENT_TOOL_PUBLICATION_OSS_BUCKET"));
+        var graph = csiRuntimeGraph(source, jdbc, manager, protector, json, properties,
+                request.registration(), request.sessionId(), request.runtimeRequestKey(), objects);
+        var bindings = graph.bindings();
+        var sessions = graph.sessions();
+        var application = graph.application();
+        var access = graph.access();
         access.resolve(request.sessionId()).toCompletableFuture().join();
         var api = support.createClient(URI.create(required("K2_KUBERNETES_API_URL")),
                 Path.of(required("K2_KUBERNETES_TOKEN_FILE")), Path.of(required("K2_KUBERNETES_CA_FILE")));
@@ -117,9 +117,10 @@ public final class WorkspaceCsiRuntimeMain {
                 request.protection(), required("K2_CLUSTER_DOMAIN"), request.image(), request.command(), request.artifacts(),
                 Duration.ofSeconds(30), authorityOrigin);
         var provider = support.createWorkspaceRuntime(spec, api, storage, bindings);
-        try (var service = new RuntimeBrokerService(access, provider, access, bindings, sessions,
-                new JdbcToolExecutionRepository(source, bindings), UUID.randomUUID().toString(),
-                Duration.ofSeconds(30), Duration.ofSeconds(30));
+        try (var ownedOss = oss;
+                var service = new RuntimeBrokerService(access, provider, access, bindings, sessions,
+                        new JdbcToolExecutionRepository(source, bindings), UUID.randomUUID().toString(),
+                        Duration.ofSeconds(30), Duration.ofSeconds(30));
                 var server = new RuntimeBrokerHttpServer(new InetSocketAddress(InetAddress.getLoopbackAddress(), port),
                         token, service, false, access::readNative)) {
             requireAuthorityOrigin(authorityOrigin, server.getBaseUri());
@@ -136,6 +137,38 @@ public final class WorkspaceCsiRuntimeMain {
                     "runtimeRequestKey", request.runtimeRequestKey(), "baseUri", server.getBaseUri().toString())));
             stopped.await();
         }
+    }
+
+    /** The repository graph {@code serve()} constructs; extracted so its pack-aware wiring is testable. */
+    public record CsiRuntimeGraph(JdbcRuntimeBindingRepository bindings, JdbcRuntimeSessionRepository sessions,
+            WorkspaceCsiApplicationStore application, WorkspaceCsiRuntimeAccess access) {
+    }
+
+    /**
+     * Builds the serve() repository graph. When {@code objects} is non-null the binding repository,
+     * application store and runtime access all resolve evicted journal bytes from the published pack;
+     * when it is null every evicted read stays fail-closed. Mirrors the Spring broker wiring.
+     */
+    public static CsiRuntimeGraph csiRuntimeGraph(javax.sql.DataSource source,
+            org.springframework.jdbc.core.JdbcTemplate jdbc, DataSourceTransactionManager manager,
+            com.alibaba.qwen.code.runtimebroker.security.SecretProtector protector, ObjectMapper json,
+            com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings properties,
+            WorkspaceCsiRegistration registration, String sessionId, String requestKey,
+            com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore objects) {
+        var bindings = new JdbcRuntimeBindingRepository(source, protector,
+                MaintenanceObjectStores.readPacks(jdbc, objects));
+        var sessions = new JdbcRuntimeSessionRepository(source);
+        var nativeStore = new JdbcManagedSessionStore(jdbc,
+                new JdbcManagedExtensionRecordStore(jdbc), null, null,
+                com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy.inProcess(),
+                null, null, null, null, null,
+                com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound(), bindings, null);
+        var application = new WorkspaceCsiApplicationStore(jdbc, manager, nativeStore, bindings, sessions,
+                new HttpRuntimeTransport(), objects);
+        var access = new WorkspaceCsiRuntimeAccess(jdbc, manager, json, properties, registration,
+                sessionId, requestKey, bindings, sessions, new HttpRuntimeTransport(),
+                new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules(), objects);
+        return new CsiRuntimeGraph(bindings, sessions, application, access);
     }
 
     static void requireSelected(Request request, com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord binding) {

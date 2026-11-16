@@ -708,6 +708,82 @@ describe('Goal turn end history metadata', () => {
   });
 });
 
+describe('tool loop end history metadata', () => {
+  it.each([
+    ['tool_loop_end', 'stopped-call', 'clean'],
+    [undefined, 'stopped-call', 'interrupted_prompt'],
+    ['tool_loop_end', 'another-call', 'interrupted_prompt'],
+  ] as const)(
+    'classifies a tool result with subtype %s and call %s as %s',
+    (subtype, callId, expectedKind) => {
+      const base = {
+        sessionId: 'session',
+        timestamp: '2026-11-10T00:00:00.000Z',
+        cwd: '/workspace',
+        version: 'test',
+      };
+      const messages: ChatRecord[] = [
+        {
+          ...base,
+          uuid: 'prompt',
+          parentUuid: null,
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'Read a file' }] },
+        },
+        {
+          ...base,
+          uuid: 'call',
+          parentUuid: 'prompt',
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              { functionCall: { id: 'stopped-call', name: 'read_file' } },
+            ],
+          },
+        },
+        {
+          ...base,
+          uuid: 'result',
+          parentUuid: 'call',
+          type: 'tool_result',
+          subtype,
+          toolCallResult: {
+            callId,
+            status: 'cancelled',
+            executionStatus: 'not_started',
+          },
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'stopped-call',
+                  name: 'read_file',
+                  response: { error: 'Skipped after a tool loop' },
+                },
+              },
+            ],
+          },
+        },
+      ];
+      const restored = buildSessionHistoryFromConversation({ messages });
+      expect(restored.completedToolCallIds).toEqual(
+        expectedKind === 'clean' ? ['stopped-call'] : undefined,
+      );
+      expect(JSON.stringify(restored.apiHistory)).toBe(
+        JSON.stringify(messages.map((record) => record.message)),
+      );
+      expect(
+        buildSessionRecoveryPlanFromApiHistory({
+          sessionId: 'session',
+          ...restored,
+        }).kind,
+      ).toBe(expectedKind);
+    },
+  );
+});
+
 describe('trailingSystemNotifications provenance signal', () => {
   const envelope =
     '<task-notification><task-id>agent-1</task-id>' +

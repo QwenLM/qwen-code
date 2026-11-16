@@ -82,6 +82,10 @@
         </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-websocket</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-actuator</artifactId>
             <optional>true</optional>
         </dependency>
@@ -132,6 +136,10 @@
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-databind</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.yaml</groupId>
+            <artifactId>snakeyaml</artifactId>
         </dependency>
         <dependency>
             <groupId>com.alibaba.fastjson2</groupId>
@@ -214,66 +222,6 @@
                         </configuration>
                     </execution>
                     <execution>
-                        <id>workspace-bundle-resources</id>
-                        <phase>${managed.operator-tools.jar.phase}</phase>
-                        <goals>
-                            <goal>jar</goal>
-                        </goals>
-                        <configuration>
-                            <classifier>workspace-bundle</classifier>
-                        </configuration>
-                    </execution>
-                    <execution>
-                        <id>workspace-migration-resources</id>
-                        <phase>${managed.operator-tools.jar.phase}</phase>
-                        <goals>
-                            <goal>jar</goal>
-                        </goals>
-                        <configuration>
-                            <classifier>workspace-migration</classifier>
-                        </configuration>
-                    </execution>
-                    <execution>
-                        <id>workspace-maintenance-recovery-resources</id>
-                        <phase>${managed.operator-tools.jar.phase}</phase>
-                        <goals>
-                            <goal>jar</goal>
-                        </goals>
-                        <configuration>
-                            <classifier>workspace-maintenance-recovery</classifier>
-                        </configuration>
-                    </execution>
-                    <execution>
-                        <id>csi-session-resources</id>
-                        <phase>${managed.operator-tools.jar.phase}</phase>
-                        <goals>
-                            <goal>jar</goal>
-                        </goals>
-                        <configuration>
-                            <classifier>csi-session</classifier>
-                        </configuration>
-                    </execution>
-                    <execution>
-                        <id>csi-runtime-resources</id>
-                        <phase>${managed.operator-tools.jar.phase}</phase>
-                        <goals>
-                            <goal>jar</goal>
-                        </goals>
-                        <configuration>
-                            <classifier>csi-runtime</classifier>
-                        </configuration>
-                    </execution>
-                    <execution>
-                        <id>operator-recovery-resources</id>
-                        <phase>${managed.operator-tools.jar.phase}</phase>
-                        <goals>
-                            <goal>jar</goal>
-                        </goals>
-                        <configuration>
-                            <classifier>operator-recovery</classifier>
-                        </configuration>
-                    </execution>
-                    <execution>
                         <id>standalone-resources</id>
                         <goals>
                             <goal>jar</goal>
@@ -301,78 +249,6 @@
                         <configuration>
                             <classifier>exec</classifier>
                             <mainClass>com.alibaba.qwen.code.managedagent.ManagedAgentServerApplication</mainClass>
-                        </configuration>
-                    </execution>
-                    <execution>
-                        <id>workspace-bundle</id>
-                        <goals>
-                            <goal>repackage</goal>
-                        </goals>
-                        <configuration>
-                            <classifier>workspace-bundle</classifier>
-                            <attach>${managed.operator-tools.attach}</attach>
-                            <skip>${managed.operator-tools.skip}</skip>
-                            <mainClass>com.alibaba.qwen.code.managedagent.maintenance.WorkspaceRecoveryMain</mainClass>
-                        </configuration>
-                    </execution>
-                    <execution>
-                        <id>workspace-migration</id>
-                        <goals>
-                            <goal>repackage</goal>
-                        </goals>
-                        <configuration>
-                            <classifier>workspace-migration</classifier>
-                            <attach>${managed.operator-tools.attach}</attach>
-                            <skip>${managed.operator-tools.skip}</skip>
-                            <mainClass>com.alibaba.qwen.code.managedagent.maintenance.WorkspaceMigrationMain</mainClass>
-                        </configuration>
-                    </execution>
-                    <execution>
-                        <id>workspace-maintenance-recovery</id>
-                        <goals>
-                            <goal>repackage</goal>
-                        </goals>
-                        <configuration>
-                            <classifier>workspace-maintenance-recovery</classifier>
-                            <attach>${managed.operator-tools.attach}</attach>
-                            <skip>${managed.operator-tools.skip}</skip>
-                            <mainClass>com.alibaba.qwen.code.managedagent.maintenance.WorkspaceMaintenanceRecoveryMain</mainClass>
-                        </configuration>
-                    </execution>
-                    <execution>
-                        <id>csi-session</id>
-                        <goals>
-                            <goal>repackage</goal>
-                        </goals>
-                        <configuration>
-                            <classifier>csi-session</classifier>
-                            <attach>${managed.operator-tools.attach}</attach>
-                            <skip>${managed.operator-tools.skip}</skip>
-                            <mainClass>com.alibaba.qwen.code.managedagent.maintenance.WorkspaceCsiSessionMain</mainClass>
-                        </configuration>
-                    </execution>
-                    <execution>
-                        <id>csi-runtime</id>
-                        <goals>
-                            <goal>repackage</goal>
-                        </goals>
-                        <configuration>
-                            <classifier>csi-runtime</classifier>
-                            <attach>${managed.operator-tools.attach}</attach>
-                            <skip>${managed.operator-tools.skip}</skip>
-                            <mainClass>com.alibaba.qwen.code.managedagent.maintenance.WorkspaceCsiRuntimeMain</mainClass>
-                        </configuration>
-                    </execution>
-                    <execution>
-                        <id>operator-recovery</id>
-                        <goals>
-                            <goal>repackage</goal>
-                        </goals>
-                        <configuration>
-                            <classifier>operator-recovery</classifier>
-                            <attach>${managed.operator-tools.attach}</attach>
-                            <skip>${managed.operator-tools.skip}</skip>
-                            <mainClass>com.alibaba.qwen.code.managedagent.maintenance.WorkspaceRecoveryCommand</mainClass>
                         </configuration>
                     </execution>
                 </executions>

@@ -17,6 +17,7 @@ import {
 } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import type { Config } from '@qwen-code/qwen-code-core';
+import type { AgentTask } from '@qwen-code/qwen-code-core/agents/background-tasks.js';
 import {
   loadTrustedFolders,
   resetTrustedFoldersForTesting,
@@ -33,6 +34,16 @@ describe('cdCommand', () => {
   let context: CommandContext;
   let relocateWorkingDirectory: ReturnType<typeof vi.fn>;
   let addWorkingDirectoryChangedContext: ReturnType<typeof vi.fn>;
+  let getBackgroundTasks: ReturnType<
+    typeof vi.fn<
+      () => Array<
+        Pick<
+          AgentTask,
+          'isBackgrounded' | 'status' | 'subagentType' | 'workspacePinned'
+        >
+      >
+    >
+  >;
 
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-cd-command-'));
@@ -48,12 +59,14 @@ describe('cdCommand', () => {
 
     relocateWorkingDirectory = vi.fn().mockResolvedValue({});
     addWorkingDirectoryChangedContext = vi.fn().mockResolvedValue(undefined);
+    getBackgroundTasks = vi.fn(() => []);
     context = createMockCommandContext({
       services: {
         config: {
           getTargetDir: () => currentDir,
           getWorkingDir: () => currentDir,
           isRestrictiveSandbox: () => false,
+          getBackgroundTaskRegistry: () => ({ getAll: getBackgroundTasks }),
           relocateWorkingDirectory,
           getLlmClient: () => ({
             addWorkingDirectoryChangedContext,
@@ -154,6 +167,59 @@ describe('cdCommand', () => {
     expect(result.messageType).toBe('error');
     expect(result.content).toContain('Cannot change directory while');
     expect(relocateWorkingDirectory).not.toHaveBeenCalled();
+  });
+
+  it('leaves the working directory unchanged when cancelled during path lookup', async () => {
+    const controller = new AbortController();
+    const action = cdCommand.action!(
+      { ...context, abortSignal: controller.signal },
+      nextDir,
+    );
+    controller.abort();
+
+    await expect(action).resolves.toBeUndefined();
+    expect(relocateWorkingDirectory).not.toHaveBeenCalled();
+  });
+
+  it.each(['fork', 'general-purpose'])(
+    'checks for a running background %s after path lookup and allows retry after it settles',
+    async (subagentType) => {
+      const pendingMove = cdCommand.action!(context, nextDir);
+      const agent = { isBackgrounded: true, subagentType };
+      getBackgroundTasks.mockReturnValue([{ ...agent, status: 'running' }]);
+
+      await expect(pendingMove).resolves.toMatchObject({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining('Wait for background agents'),
+      });
+      expect(relocateWorkingDirectory).not.toHaveBeenCalled();
+
+      getBackgroundTasks.mockReturnValue([{ ...agent, status: 'completed' }]);
+      await cdCommand.action!(context, nextDir);
+      const targetDir = await realpath(nextDir);
+      expect(relocateWorkingDirectory).toHaveBeenCalledExactlyOnceWith(
+        targetDir,
+        targetDir,
+      );
+    },
+  );
+
+  it('allows switching while an independent worktree agent is running', async () => {
+    getBackgroundTasks.mockReturnValue([
+      {
+        isBackgrounded: true,
+        status: 'running',
+        subagentType: 'general-purpose',
+        workspacePinned: true,
+      },
+    ]);
+    await cdCommand.action!(context, nextDir);
+    const targetDir = await realpath(nextDir);
+    expect(relocateWorkingDirectory).toHaveBeenCalledExactlyOnceWith(
+      targetDir,
+      targetDir,
+    );
   });
 
   it('rejects restrictive sandbox sessions', async () => {

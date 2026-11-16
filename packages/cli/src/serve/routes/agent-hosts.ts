@@ -23,10 +23,14 @@ import {
   authenticateAgentHost,
   enrollAgentHost,
   heartbeatAgentHost,
+  isAgentHostEnrollmentRefusal,
   normalizeHostProgramProbes,
 } from '@qwen-code/qwen-code-core/agents/workspace-agents/store.js';
 import {
+  AGENT_HOST_ALREADY_ENROLLED,
   AGENT_HOST_CREDENTIAL_REJECTED,
+  AGENT_HOST_ENROLLMENT_REFUSED,
+  AGENT_HOST_ENROLLMENT_UNAVAILABLE,
   AGENT_HOST_REPLACEMENT_REQUIRED,
   hostAvailablePrograms,
   type AgentHostView,
@@ -660,13 +664,16 @@ export function registerAgentHostTransportRoutes(
     const name = input['name'];
     const workspaceCwd = input['workspaceCwd'];
     const providers = input['providers'];
+    // The secret the Host saved before enrolling; an older Host sends none.
+    const secret = input['secret'];
     if (
       typeof workspaceId !== 'string' ||
       typeof token !== 'string' ||
       typeof name !== 'string' ||
       typeof workspaceCwd !== 'string' ||
       !Array.isArray(providers) ||
-      !providers.every((provider) => typeof provider === 'string')
+      !providers.every((provider) => typeof provider === 'string') ||
+      (secret !== undefined && typeof secret !== 'string')
     ) {
       res.status(400).json({ error: 'Invalid Agent Host enrollment.' });
       return;
@@ -684,11 +691,26 @@ export function registerAgentHostTransportRoutes(
         name,
         workspaceCwd,
         providers,
+        ...(secret !== undefined ? { secret } : {}),
       });
       res.status(201).json(enrolled);
-    } catch {
-      // Unauthenticated: the store's message can name file paths.
-      res.status(401).json({ error: 'Agent Host enrollment refused.' });
+    } catch (error) {
+      // The Host makes a new secret and sends its Replace again.
+      if (
+        (error as Error | undefined)?.message === AGENT_HOST_ALREADY_ENROLLED
+      ) {
+        res.status(409).json({ error: AGENT_HOST_ALREADY_ENROLLED });
+        return;
+      }
+      // Unauthenticated: the store's message can name file paths. A refusal
+      // tells the Host its secret enrolled nothing; a busy or failing store
+      // does not, so the Host keeps it and retries.
+      if (isAgentHostEnrollmentRefusal(error)) {
+        res.status(401).json({ error: AGENT_HOST_ENROLLMENT_REFUSED });
+        return;
+      }
+      debugLogger.warn('Agent Host enrollment failed:', error);
+      res.status(503).json({ error: AGENT_HOST_ENROLLMENT_UNAVAILABLE });
     }
   });
 

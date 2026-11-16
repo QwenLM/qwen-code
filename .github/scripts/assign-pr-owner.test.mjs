@@ -787,15 +787,15 @@ describe('assign-pr-owner: workflow invariants', () => {
     );
     assert.match(checkout.with.ref, /pull_request\.base\.sha/);
     assert.equal(checkout.with['persist-credentials'], false);
-    // One cone-mode directory carries everything the run step needs: both
-    // entry scripts (the run step's guard skips without assign-pr-owner.mjs,
-    // and it statically imports assign-issue-owner.mjs), plus
-    // issue-owners.json, which cone mode adds as a direct child of .github/.
+    // All of .github/ carries everything the run step needs: both entry
+    // scripts (the run step's guard skips without assign-pr-owner.mjs, and
+    // it statically imports assign-issue-owner.mjs) plus issue-owners.json.
+    // A narrower pattern relies on cone mode adding the direct children of
+    // .github/, but git sparse-checkout set reuses the mode stored in the
+    // workspace, and non-cone residue from another job drops the owner map.
     // File entries break on a reused ECS workspace — cone mode dies with
-    // "is not a directory" once the index holds them as files — and
-    // non-cone mode leaves core.sparseCheckout behind, so the next full
-    // checkout on that runner comes out sparse.
-    assert.equal(checkout.with['sparse-checkout'], '.github/scripts');
+    // "is not a directory" once the index holds them as files.
+    assert.equal(checkout.with['sparse-checkout'], '.github');
     assert.equal(checkout.with['sparse-checkout-cone-mode'], undefined);
     // Nothing from the PR head can execute: the checkout never follows it.
     assert.doesNotMatch(checkout.with.ref, /head\.sha/);

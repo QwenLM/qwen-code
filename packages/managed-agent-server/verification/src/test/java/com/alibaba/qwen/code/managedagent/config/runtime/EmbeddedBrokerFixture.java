@@ -1,4 +1,7 @@
 package com.alibaba.qwen.code.managedagent.config.runtime;
+
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
+
 public final class EmbeddedBrokerFixture {
     private EmbeddedBrokerFixture() { }
     public static EmbeddedRuntimeBroker create(com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore store,
@@ -6,7 +9,7 @@ public final class EmbeddedBrokerFixture {
             com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository bindings,
             com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository sessions,
             com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository executions,
-            com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore workspaces,
+            JdbcWorkspaceExecutionStore workspaces,
             com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore publications,
             com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore data,
             org.springframework.jdbc.core.JdbcTemplate jdbc,

@@ -5,7 +5,15 @@
  */
 
 import type React from 'react';
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import {
+  forwardRef,
+  useEffect,
+  useImperativeHandle,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { XIcon } from 'lucide-react';
 import type { DaemonVoiceMode } from '@qwen-code/sdk';
 import {
@@ -37,6 +45,15 @@ export interface VoiceButtonProps {
   disabled?: boolean;
   target: VoiceWorkspaceTarget | undefined;
   statusRevision?: VoiceStatusRevision;
+}
+
+export interface VoiceButtonHandle {
+  /**
+   * Finalize an active capture for a send: resolves with the final transcript
+   * ('' when idle, empty, failed, or aborted) without inserting it — the
+   * caller owns insertion so the text lands in the message being sent.
+   */
+  flush: () => Promise<string>;
 }
 
 const MicIcon = (): React.JSX.Element => (
@@ -71,130 +88,143 @@ function formatElapsed(ms: number): string {
   return `${mm}:${ss}`;
 }
 
-export function VoiceButton({
-  onInsert,
-  onActiveChange,
-  disabled,
-  target,
-  statusRevision = { user: 0, workspace: 0 },
-}: VoiceButtonProps): React.JSX.Element | null {
-  const workspace = useWorkspace();
-  const connection = useConnection();
-  const signals = useWorkspaceEventSignals();
-  const { t } = useI18n();
-  const features = workspace.capabilities?.features ?? [];
-  const captureSupported = supportsVoiceCapture(target, features);
-  const settingsVersion =
-    target?.sessionId &&
-    target.sessionId === connection.sessionId &&
-    (!target.cwd || target.cwd === connection.workspaceCwd)
-      ? signals?.settingsVersion
-      : undefined;
-  const [localRevision, setLocalRevision] = useState(0);
-  const [capabilityRefreshFailed, setCapabilityRefreshFailed] = useState(false);
-  const queryKey = useMemo(
-    () =>
-      target
-        ? JSON.stringify([
-            target.workspaceKey,
-            target.ownerKey,
-            settingsVersion ?? null,
-            statusRevision.user,
-            statusRevision.workspace,
-            localRevision,
-          ])
-        : undefined,
-    [
-      localRevision,
-      settingsVersion,
-      statusRevision.user,
-      statusRevision.workspace,
+export const VoiceButton = forwardRef<VoiceButtonHandle, VoiceButtonProps>(
+  function VoiceButton(
+    {
+      onInsert,
+      onActiveChange,
+      disabled,
       target,
-    ],
-  );
-  const [voiceGate, setVoiceGate] = useState<{
-    queryKey: string | undefined;
-    enabled: boolean;
-    mode: DaemonVoiceMode;
-  }>(() => ({
-    queryKey,
-    enabled: false,
-    mode: 'hold',
-  }));
-  const holdPointerIdRef = useRef<number | null>(null);
-  const controlRef = useRef<HTMLButtonElement>(null);
-  const holdStartedAtRef = useRef(0);
-  const ignoreNextClickRef = useRef(false);
-  const targetRef = useRef(target);
-  targetRef.current = target;
-  const requestGenerationRef = useRef(0);
-  const capabilityRefreshGenerationRef = useRef(0);
-  const mountedRef = useRef(false);
-
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-      capabilityRefreshGenerationRef.current += 1;
-    };
-  }, []);
-
-  useEffect(() => {
-    const generation = ++requestGenerationRef.current;
-    const requestTarget = targetRef.current;
-    let current = true;
-    setVoiceGate({
+      statusRevision = { user: 0, workspace: 0 },
+    },
+    ref,
+  ): React.JSX.Element | null {
+    const workspace = useWorkspace();
+    const connection = useConnection();
+    const signals = useWorkspaceEventSignals();
+    const { t } = useI18n();
+    const features = workspace.capabilities?.features ?? [];
+    const captureSupported = supportsVoiceCapture(target, features);
+    const settingsVersion =
+      target?.sessionId &&
+      target.sessionId === connection.sessionId &&
+      (!target.cwd || target.cwd === connection.workspaceCwd)
+        ? signals?.settingsVersion
+        : undefined;
+    const [localRevision, setLocalRevision] = useState(0);
+    const [capabilityRefreshFailed, setCapabilityRefreshFailed] =
+      useState(false);
+    const queryKey = useMemo(
+      () =>
+        target
+          ? JSON.stringify([
+              target.workspaceKey,
+              target.ownerKey,
+              settingsVersion ?? null,
+              statusRevision.user,
+              statusRevision.workspace,
+              localRevision,
+            ])
+          : undefined,
+      [
+        localRevision,
+        settingsVersion,
+        statusRevision.user,
+        statusRevision.workspace,
+        target,
+      ],
+    );
+    const [voiceGate, setVoiceGate] = useState<{
+      queryKey: string | undefined;
+      enabled: boolean;
+      mode: DaemonVoiceMode;
+    }>(() => ({
       queryKey,
       enabled: false,
       mode: 'hold',
-    });
-    if (
-      !requestTarget ||
-      !queryKey ||
-      !captureSupported ||
-      capabilityRefreshFailed
-    ) {
-      return undefined;
-    }
+    }));
+    const holdPointerIdRef = useRef<number | null>(null);
+    const controlRef = useRef<HTMLButtonElement>(null);
+    const holdStartedAtRef = useRef(0);
+    const ignoreNextClickRef = useRef(false);
+    const targetRef = useRef(target);
+    targetRef.current = target;
+    const requestGenerationRef = useRef(0);
+    const capabilityRefreshGenerationRef = useRef(0);
+    const mountedRef = useRef(false);
 
-    void loadVoiceStatus(workspace.client, requestTarget)
-      .then((voice) => {
-        if (current && requestGenerationRef.current === generation) {
-          setVoiceGate({
-            queryKey,
-            enabled: voice.enabled === true,
-            mode: voice.mode,
-          });
-        }
-      })
-      .catch((error: unknown) => {
-        console.warn('[web-shell] Voice status probe failed:', error);
+    useEffect(() => {
+      mountedRef.current = true;
+      return () => {
+        mountedRef.current = false;
+        capabilityRefreshGenerationRef.current += 1;
+      };
+    }, []);
+
+    useEffect(() => {
+      const generation = ++requestGenerationRef.current;
+      const requestTarget = targetRef.current;
+      let current = true;
+      setVoiceGate({
+        queryKey,
+        enabled: false,
+        mode: 'hold',
       });
+      if (
+        !requestTarget ||
+        !queryKey ||
+        !captureSupported ||
+        capabilityRefreshFailed
+      ) {
+        return undefined;
+      }
 
-    return () => {
-      current = false;
-    };
-  }, [capabilityRefreshFailed, captureSupported, queryKey, workspace.client]);
+      void loadVoiceStatus(workspace.client, requestTarget)
+        .then((voice) => {
+          if (current && requestGenerationRef.current === generation) {
+            setVoiceGate({
+              queryKey,
+              enabled: voice.enabled === true,
+              mode: voice.mode,
+            });
+          }
+        })
+        .catch((error: unknown) => {
+          console.warn('[web-shell] Voice status probe failed:', error);
+        });
 
-  const voiceEnabled =
-    captureSupported &&
-    !capabilityRefreshFailed &&
-    voiceGate.queryKey === queryKey &&
-    voiceGate.enabled;
-  // Surfaced when a recording finalizes with no transcript (e.g. silence).
-  const [hasNoSpeech, setHasNoSpeech] = useState(false);
-  const noticeMessage = hasNoSpeech ? t('voice.noSpeech') : undefined;
-  useEffect(() => {
-    if (!hasNoSpeech) return undefined;
-    const timer = window.setTimeout(
-      () => setHasNoSpeech(false),
-      NOTICE_TIMEOUT_MS,
-    );
-    return () => window.clearTimeout(timer);
-  }, [hasNoSpeech]);
+      return () => {
+        current = false;
+      };
+    }, [capabilityRefreshFailed, captureSupported, queryKey, workspace.client]);
 
-  const { status, interimText, audioLevel, errorMessage, start, stop, abort } =
-    useVoiceCapture({
+    const voiceEnabled =
+      captureSupported &&
+      !capabilityRefreshFailed &&
+      voiceGate.queryKey === queryKey &&
+      voiceGate.enabled;
+    // Surfaced when a recording finalizes with no transcript (e.g. silence).
+    const [hasNoSpeech, setHasNoSpeech] = useState(false);
+    const noticeMessage = hasNoSpeech ? t('voice.noSpeech') : undefined;
+    useEffect(() => {
+      if (!hasNoSpeech) return undefined;
+      const timer = window.setTimeout(
+        () => setHasNoSpeech(false),
+        NOTICE_TIMEOUT_MS,
+      );
+      return () => window.clearTimeout(timer);
+    }, [hasNoSpeech]);
+
+    const {
+      status,
+      interimText,
+      audioLevel,
+      errorMessage,
+      start,
+      stop,
+      abort,
+      flush,
+    } = useVoiceCapture({
       baseUrl: workspace.baseUrl,
       token: workspace.token,
       target: target
@@ -240,273 +270,307 @@ export function VoiceButton({
       },
     });
 
-  const isActive =
-    status === 'connecting' ||
-    status === 'recording' ||
-    status === 'transcribing';
-  const isRecording = status === 'recording';
+    const isActive =
+      status === 'connecting' ||
+      status === 'recording' ||
+      status === 'transcribing';
 
-  useEffect(() => {
-    onActiveChange?.(isActive);
-  }, [isActive, onActiveChange]);
-
-  useEffect(
-    () => () => {
-      onActiveChange?.(false);
-    },
-    [onActiveChange],
-  );
-
-  // Rolling waveform history, fed by the live RMS meter while recording.
-  const [levels, setLevels] = useState<number[]>(() =>
-    new Array(BAR_COUNT).fill(0),
-  );
-  useEffect(() => {
-    if (!isRecording) {
-      setLevels(new Array(BAR_COUNT).fill(0));
-      return;
-    }
-    // Amplify the raw RMS for a livelier meter, clamped to [0, 1].
-    setLevels((prev) => [...prev.slice(1), Math.min(1, audioLevel * 8)]);
-  }, [audioLevel, isRecording]);
-
-  // Elapsed timer, reset on each recording session.
-  const [elapsedMs, setElapsedMs] = useState(0);
-  useEffect(() => {
-    if (!isRecording) {
-      setElapsedMs(0);
-      return;
-    }
-    const startedAt = performance.now();
-    const id = setInterval(
-      () => setElapsedMs(performance.now() - startedAt),
-      200,
+    useImperativeHandle(
+      ref,
+      () => ({
+        flush: async () => {
+          const ownerKey = targetRef.current?.ownerKey;
+          const generation = capabilityRefreshGenerationRef.current;
+          const text = await flush();
+          // A send that finalizes an empty transcript must still surface the
+          // no-speech notice — the suppressed onFinal would have shown it.
+          // Skip the write when the app tore the capture down mid-flush
+          // (owner switch, unmount): abort() also settles with '', but the
+          // notice would land on a session that never had the capture.
+          if (
+            isActive &&
+            !text.trim() &&
+            mountedRef.current &&
+            capabilityRefreshGenerationRef.current === generation &&
+            targetRef.current?.ownerKey === ownerKey
+          ) {
+            setHasNoSpeech(true);
+          }
+          return text;
+        },
+      }),
+      [flush, isActive],
     );
-    return () => clearInterval(id);
-  }, [isRecording]);
+    const isRecording = status === 'recording';
 
-  useLayoutEffect(() => {
-    if (
-      !voiceEnabled &&
-      (status === 'recording' ||
-        status === 'connecting' ||
-        status === 'transcribing')
-    ) {
-      abort();
-    }
-  }, [abort, status, voiceEnabled]);
+    useEffect(() => {
+      onActiveChange?.(isActive);
+    }, [isActive, onActiveChange]);
 
-  const previousOwnerRef = useRef(target?.ownerKey);
-  useLayoutEffect(() => {
-    if (previousOwnerRef.current === target?.ownerKey) return;
-    previousOwnerRef.current = target?.ownerKey;
-    capabilityRefreshGenerationRef.current += 1;
-    setHasNoSpeech(false);
-    setCapabilityRefreshFailed(false);
-  }, [target?.ownerKey]);
+    useEffect(
+      () => () => {
+        onActiveChange?.(false);
+      },
+      [onActiveChange],
+    );
 
-  if (!voiceEnabled) return null;
-
-  const isConnecting = status === 'connecting';
-  const isTranscribing = status === 'transcribing';
-  const isError = status === 'error';
-  const localizedError = isError
-    ? formatVoiceError(errorMessage, t)
-    : undefined;
-  const isNotice = Boolean(noticeMessage) && !isError;
-  // Stopping/aborting an in-progress capture must stay available even when the
-  // composer is disabled (e.g. mid-turn) — only starting a new one is blocked.
-  const canCancel = isRecording || isConnecting;
-
-  const handleClick = (event: React.MouseEvent<HTMLButtonElement>) => {
-    if (voiceGate.mode === 'hold') {
-      const ignore = event.detail !== 0 && ignoreNextClickRef.current;
-      ignoreNextClickRef.current = false;
-      if (ignore || (event.detail !== 0 && !isRecording && !isConnecting)) {
+    // Rolling waveform history, fed by the live RMS meter while recording.
+    const [levels, setLevels] = useState<number[]>(() =>
+      new Array(BAR_COUNT).fill(0),
+    );
+    useEffect(() => {
+      if (!isRecording) {
+        setLevels(new Array(BAR_COUNT).fill(0));
         return;
       }
-    }
-    if (isRecording) {
-      stop();
-    } else if (isConnecting) {
-      abort();
-    } else if (!disabled) {
+      // Amplify the raw RMS for a livelier meter, clamped to [0, 1].
+      setLevels((prev) => [...prev.slice(1), Math.min(1, audioLevel * 8)]);
+    }, [audioLevel, isRecording]);
+
+    // Elapsed timer, reset on each recording session.
+    const [elapsedMs, setElapsedMs] = useState(0);
+    useEffect(() => {
+      if (!isRecording) {
+        setElapsedMs(0);
+        return;
+      }
+      const startedAt = performance.now();
+      const id = setInterval(
+        () => setElapsedMs(performance.now() - startedAt),
+        200,
+      );
+      return () => clearInterval(id);
+    }, [isRecording]);
+
+    useLayoutEffect(() => {
+      if (
+        !voiceEnabled &&
+        (status === 'recording' ||
+          status === 'connecting' ||
+          status === 'transcribing')
+      ) {
+        abort();
+      }
+    }, [abort, status, voiceEnabled]);
+
+    const previousOwnerRef = useRef(target?.ownerKey);
+    useLayoutEffect(() => {
+      if (previousOwnerRef.current === target?.ownerKey) return;
+      previousOwnerRef.current = target?.ownerKey;
+      capabilityRefreshGenerationRef.current += 1;
+      setHasNoSpeech(false);
+      setCapabilityRefreshFailed(false);
+    }, [target?.ownerKey]);
+
+    if (!voiceEnabled) return null;
+
+    const isConnecting = status === 'connecting';
+    const isTranscribing = status === 'transcribing';
+    const isError = status === 'error';
+    const localizedError = isError
+      ? formatVoiceError(errorMessage, t)
+      : undefined;
+    const isNotice = Boolean(noticeMessage) && !isError;
+    // Stopping/aborting an in-progress capture must stay available even when the
+    // composer is disabled (e.g. mid-turn) — only starting a new one is blocked.
+    const canCancel = isRecording || isConnecting;
+
+    const handleClick = (event: React.MouseEvent<HTMLButtonElement>) => {
+      if (voiceGate.mode === 'hold') {
+        const ignore = event.detail !== 0 && ignoreNextClickRef.current;
+        ignoreNextClickRef.current = false;
+        if (ignore || (event.detail !== 0 && !isRecording && !isConnecting)) {
+          return;
+        }
+      }
+      if (isRecording) {
+        stop();
+      } else if (isConnecting) {
+        abort();
+      } else if (!disabled) {
+        setHasNoSpeech(false);
+        start();
+      }
+    };
+
+    const handlePointerDown = (
+      event: React.PointerEvent<HTMLButtonElement>,
+    ) => {
+      if (voiceGate.mode === 'hold' && holdPointerIdRef.current === null) {
+        ignoreNextClickRef.current = false;
+      }
+      if (
+        voiceGate.mode !== 'hold' ||
+        event.button !== 0 ||
+        disabled ||
+        isConnecting ||
+        isRecording
+      ) {
+        return;
+      }
+      event.preventDefault();
+      holdPointerIdRef.current = event.pointerId;
+      holdStartedAtRef.current = event.timeStamp;
+      ignoreNextClickRef.current = true;
+      try {
+        event.currentTarget.setPointerCapture(event.pointerId);
+      } catch {
+        // Pointer capture is best-effort; release on the button still works.
+      }
       setHasNoSpeech(false);
       start();
-    }
-  };
+    };
 
-  const handlePointerDown = (event: React.PointerEvent<HTMLButtonElement>) => {
-    if (voiceGate.mode === 'hold' && holdPointerIdRef.current === null) {
+    const handlePointerUp = (event: React.PointerEvent<HTMLButtonElement>) => {
+      if (
+        voiceGate.mode !== 'hold' ||
+        holdPointerIdRef.current !== event.pointerId
+      ) {
+        return;
+      }
+      holdPointerIdRef.current = null;
+      if (
+        event.timeStamp - holdStartedAtRef.current >= HOLD_THRESHOLD_MS &&
+        (isConnecting || isRecording)
+      ) {
+        stop();
+      }
+    };
+
+    const handlePointerCancel = (
+      event: React.PointerEvent<HTMLButtonElement>,
+    ) => {
+      if (
+        voiceGate.mode !== 'hold' ||
+        holdPointerIdRef.current !== event.pointerId
+      ) {
+        return;
+      }
+      holdPointerIdRef.current = null;
       ignoreNextClickRef.current = false;
-    }
-    if (
-      voiceGate.mode !== 'hold' ||
-      event.button !== 0 ||
-      disabled ||
-      isConnecting ||
-      isRecording
-    ) {
-      return;
-    }
-    event.preventDefault();
-    holdPointerIdRef.current = event.pointerId;
-    holdStartedAtRef.current = event.timeStamp;
-    ignoreNextClickRef.current = true;
-    try {
-      event.currentTarget.setPointerCapture(event.pointerId);
-    } catch {
-      // Pointer capture is best-effort; release on the button still works.
-    }
-    setHasNoSpeech(false);
-    start();
-  };
+      abort();
+    };
 
-  const handlePointerUp = (event: React.PointerEvent<HTMLButtonElement>) => {
-    if (
-      voiceGate.mode !== 'hold' ||
-      holdPointerIdRef.current !== event.pointerId
-    ) {
-      return;
-    }
-    holdPointerIdRef.current = null;
-    if (
-      event.timeStamp - holdStartedAtRef.current >= HOLD_THRESHOLD_MS &&
-      (isConnecting || isRecording)
-    ) {
-      stop();
-    }
-  };
+    const label = isRecording
+      ? t('voice.stopDictation')
+      : isTranscribing
+        ? t('voice.transcribing')
+        : isConnecting
+          ? t('voice.starting')
+          : isError
+            ? t('voice.errorRetry', { message: localizedError ?? '' })
+            : isNotice
+              ? t('voice.noSpeechRetry')
+              : t('voice.startDictation');
 
-  const handlePointerCancel = (
-    event: React.PointerEvent<HTMLButtonElement>,
-  ) => {
-    if (
-      voiceGate.mode !== 'hold' ||
-      holdPointerIdRef.current !== event.pointerId
-    ) {
-      return;
-    }
-    holdPointerIdRef.current = null;
-    ignoreNextClickRef.current = false;
-    abort();
-  };
-
-  const label = isRecording
-    ? t('voice.stopDictation')
-    : isTranscribing
-      ? t('voice.transcribing')
-      : isConnecting
-        ? t('voice.starting')
-        : isError
-          ? t('voice.errorRetry', { message: localizedError ?? '' })
-          : isNotice
-            ? t('voice.noSpeechRetry')
-            : t('voice.startDictation');
-
-  let control: React.JSX.Element;
-  if (isRecording) {
-    control = (
-      <button
-        ref={controlRef}
-        type="button"
-        className={styles.pill}
-        onClick={handleClick}
-        onPointerDown={handlePointerDown}
-        onPointerUp={handlePointerUp}
-        onPointerCancel={handlePointerCancel}
-        aria-label={label}
-        title={label}
-      >
-        <span className={styles.recDot} aria-hidden="true" />
-        <span
-          className={styles.wave}
-          data-web-shell-voice-waveform
-          aria-hidden="true"
+    let control: React.JSX.Element;
+    if (isRecording) {
+      control = (
+        <button
+          ref={controlRef}
+          type="button"
+          className={styles.pill}
+          onClick={handleClick}
+          onPointerDown={handlePointerDown}
+          onPointerUp={handlePointerUp}
+          onPointerCancel={handlePointerCancel}
+          aria-label={label}
+          title={label}
         >
-          {levels.map((lvl, i) => (
-            <span
-              key={i}
-              className={styles.bar}
-              style={{ height: `${2 + Math.round(lvl * 14)}px` }}
-            />
-          ))}
+          <span className={styles.recDot} aria-hidden="true" />
+          <span
+            className={styles.wave}
+            data-web-shell-voice-waveform
+            aria-hidden="true"
+          >
+            {levels.map((lvl, i) => (
+              <span
+                key={i}
+                className={styles.bar}
+                style={{ height: `${2 + Math.round(lvl * 14)}px` }}
+              />
+            ))}
+          </span>
+          <span className={styles.time}>{formatElapsed(elapsedMs)}</span>
+          <span className={styles.stop} aria-hidden="true">
+            <StopIcon />
+          </span>
+        </button>
+      );
+    } else if (isTranscribing) {
+      control = (
+        <span
+          className={`${styles.pill} ${styles.transcribing}`}
+          role="status"
+          aria-label={label}
+        >
+          <span className={styles.spinner} aria-hidden="true" />
+          <span className={styles.time}>…</span>
         </span>
-        <span className={styles.time}>{formatElapsed(elapsedMs)}</span>
-        <span className={styles.stop} aria-hidden="true">
-          <StopIcon />
-        </span>
-      </button>
-    );
-  } else if (isTranscribing) {
-    control = (
-      <span
-        className={`${styles.pill} ${styles.transcribing}`}
-        role="status"
-        aria-label={label}
-      >
-        <span className={styles.spinner} aria-hidden="true" />
-        <span className={styles.time}>…</span>
+      );
+    } else {
+      // idle / connecting / error / notice → icon button
+      const iconClass = [
+        styles.iconBtn,
+        isError ? styles.error : '',
+        isConnecting ? styles.connecting : '',
+      ]
+        .filter(Boolean)
+        .join(' ');
+      control = (
+        <button
+          ref={controlRef}
+          type="button"
+          className={iconClass}
+          onClick={handleClick}
+          onPointerDown={handlePointerDown}
+          onPointerUp={handlePointerUp}
+          onPointerCancel={handlePointerCancel}
+          disabled={Boolean(disabled) && !canCancel}
+          aria-label={label}
+          title={localizedError ?? noticeMessage ?? label}
+        >
+          <MicIcon />
+        </button>
+      );
+    }
+
+    const showInterim = (isRecording && interimText) || isError || isNotice;
+
+    return (
+      <span className={styles.root}>
+        {control}
+        {showInterim && (
+          <span
+            className={`${styles.interim}${isError ? ` ${styles.error}` : ''}${isError || isNotice ? ` ${styles.feedback}` : ''}`}
+          >
+            <span role="status" aria-live="polite">
+              {isError
+                ? localizedError
+                : isNotice
+                  ? noticeMessage
+                  : interimText}
+            </span>
+            {(isError || isNotice) && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                className={styles.dismiss}
+                aria-label={t('voice.dismissFeedback')}
+                title={t('voice.dismissFeedback')}
+                onClick={() => {
+                  setHasNoSpeech(false);
+                  if (isError) abort();
+                  controlRef.current?.focus();
+                }}
+              >
+                <XIcon aria-hidden="true" />
+              </Button>
+            )}
+          </span>
+        )}
       </span>
     );
-  } else {
-    // idle / connecting / error / notice → icon button
-    const iconClass = [
-      styles.iconBtn,
-      isError ? styles.error : '',
-      isConnecting ? styles.connecting : '',
-    ]
-      .filter(Boolean)
-      .join(' ');
-    control = (
-      <button
-        ref={controlRef}
-        type="button"
-        className={iconClass}
-        onClick={handleClick}
-        onPointerDown={handlePointerDown}
-        onPointerUp={handlePointerUp}
-        onPointerCancel={handlePointerCancel}
-        disabled={Boolean(disabled) && !canCancel}
-        aria-label={label}
-        title={localizedError ?? noticeMessage ?? label}
-      >
-        <MicIcon />
-      </button>
-    );
-  }
-
-  const showInterim = (isRecording && interimText) || isError || isNotice;
-
-  return (
-    <span className={styles.root}>
-      {control}
-      {showInterim && (
-        <span
-          className={`${styles.interim}${isError ? ` ${styles.error}` : ''}${isError || isNotice ? ` ${styles.feedback}` : ''}`}
-        >
-          <span role="status" aria-live="polite">
-            {isError ? localizedError : isNotice ? noticeMessage : interimText}
-          </span>
-          {(isError || isNotice) && (
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-xs"
-              className={styles.dismiss}
-              aria-label={t('voice.dismissFeedback')}
-              title={t('voice.dismissFeedback')}
-              onClick={() => {
-                setHasNoSpeech(false);
-                if (isError) abort();
-                controlRef.current?.focus();
-              }}
-            >
-              <XIcon aria-hidden="true" />
-            </Button>
-          )}
-        </span>
-      )}
-    </span>
-  );
-}
+  },
+);

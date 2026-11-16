@@ -1,9 +1,10 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityReader;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
@@ -20,9 +21,9 @@ final class LocalStorageOwners {
             + " AND state IN ('CAPTURING', 'VERIFYING', 'PREPARED', 'ATTESTED', 'RETIRING', 'RETIRED', 'PREPARING', 'INVALIDATED'))"
             + " OR (operation_kind = 'WORKSPACE_UPLOAD' AND state = 'RUNNING')"
             + " OR (operation_kind = 'CHILD_WORKSPACE' AND state IN ('"
-            + String.join("', '", ChildWorkspaceStore.PREPARING, ChildWorkspaceStore.READY, ChildWorkspaceStore.MERGING,
-                    ChildWorkspaceStore.APPLYING, ChildWorkspaceStore.APPLIED, ChildWorkspaceStore.DISCARDING,
-                    ChildWorkspaceStore.CONFLICTED, ChildWorkspaceStore.BLOCKED, ChildWorkspaceStore.FAILED) + "'))) LIMIT 1";
+            + String.join("', '", JdbcChildWorkspaceStore.PREPARING, JdbcChildWorkspaceStore.READY, JdbcChildWorkspaceStore.MERGING,
+                    JdbcChildWorkspaceStore.APPLYING, JdbcChildWorkspaceStore.APPLIED, JdbcChildWorkspaceStore.DISCARDING,
+                    JdbcChildWorkspaceStore.CONFLICTED, JdbcChildWorkspaceStore.BLOCKED, JdbcChildWorkspaceStore.FAILED) + "'))) LIMIT 1";
     static final String HEAD_AUTHORITY_SQL = "SELECT /*! STRAIGHT_JOIN */ 1 FROM ma_session s USE INDEX (idx_ma_session_storage_scope)"
             + " JOIN ma_session_head h ON h.tenant_key = s.tenant_key AND h.harness_key = s.session_key"
             + " JOIN ma_workspace w ON w.tenant_id = s.tenant_id AND w.workspace_id = h.workspace_id"
@@ -61,14 +62,14 @@ final class LocalStorageOwners {
 
     private static Map<String, Object> alias(JdbcTemplate jdbc, String tenant, String storage, String lock) {
         var rows = WorkspaceOperations.rows(jdbc, "SELECT " + ManagedSchemaProjection.STORAGE.columns() + " FROM ma_storage WHERE alias_key = ?" + lock,
-                JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage));
+                RuntimeAdmissionFences.storageAliasKey(tenant, storage));
         if (rows.isEmpty()) {
             return null;
         }
         var row = rows.getFirst();
         if (!tenant.equals(row.get("tenant_id")) || !storage.equals(row.get("storage_id"))
                 || !java.util.Set.of("LOCAL", "UNREGISTERED").contains(row.get("storage_kind"))) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         return row;
     }
@@ -88,13 +89,13 @@ final class LocalStorageOwners {
         if (alias == null || !"LOCAL".equals(alias.get("storage_kind"))
                 || !java.util.Set.of("REGISTERED", "RETIRING").contains(alias.get("registration_state"))
                 || !(alias.get("physical_key") instanceof String physical)) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         var owners = WorkspaceOperations.rows(jdbc, "SELECT storage_key, physical_key, storage_kind, mount_state FROM ma_storage_owner WHERE storage_key = ?"
                 + lock, physical);
         if (owners.size() != 1 || !physical.equals(owners.getFirst().get("physical_key"))
                 || !"LOCAL".equals(owners.getFirst().get("storage_kind"))) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         return owners.getFirst();
     }
@@ -104,9 +105,9 @@ final class LocalStorageOwners {
         }
         var source = alias(jdbc, tenant, storage, false);
         if (source == null || !(source.get("physical_key") instanceof String physical)) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
-        String sourceAlias = JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage);
+        String sourceAlias = RuntimeAdmissionFences.storageAliasKey(tenant, storage);
         // Lock the aliases through alias_key, in alias_key order, before the
         // scan below reaches their primary records: storage admission locks an
         // alias record before its primary record (WorkspaceMigrationAdmission
@@ -142,13 +143,13 @@ final class LocalStorageOwners {
                     "Physical recovery alias inventory is incomplete or exceeds 128 aliases.", false);
         }
         for (var candidate : aliases) {
-            if (!candidate[0].equals(JdbcRuntimeBindingRepository.storageAliasKey(candidate[1], candidate[2]))
+            if (!candidate[0].equals(RuntimeAdmissionFences.storageAliasKey(candidate[1], candidate[2]))
                     || !"LOCAL".equals(candidate[3])) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
         }
         if (!physical.equals(key(jdbc, tenant, storage))) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         // The caller may already hold a RR snapshot. Admissions wait on the locked aliases;
         // a committed, nonlocking read (committedRead) sees authorities without reversing binding locks.
@@ -162,7 +163,7 @@ final class LocalStorageOwners {
                         || exists(current, OPERATION_AUTHORITY_SQL, candidate[0])) {
                     throw uncovered();
                 }
-                if (exists(current, HEAD_AUTHORITY_SQL, candidate[1], JdbcRuntimeBindingRepository.harnessDrainKey(candidate[1]),
+                if (exists(current, HEAD_AUTHORITY_SQL, candidate[1], RuntimeAdmissionFences.harnessDrainKey(candidate[1]),
                         candidate[1], candidate[2])) {
                     throw uncovered();
                 }

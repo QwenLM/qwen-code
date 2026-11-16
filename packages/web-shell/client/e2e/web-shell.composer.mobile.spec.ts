@@ -498,7 +498,7 @@ test('keeps a persisted wide sidebar inside the mobile drawer and exposes close'
     path: 'client/e2e/test-results/responsive-sidebar-drawer.png',
     fullPage: true,
   });
-  await page.getByRole('button', { name: 'Collapse' }).tap();
+  await page.getByRole('button', { name: 'Collapse', exact: true }).tap();
   await expect(drawer).toBeHidden();
   await expect
     .poll(() =>
@@ -517,7 +517,7 @@ test('keeps a persisted wide sidebar inside the mobile drawer and exposes close'
       sidebar.evaluate((element) => element.getBoundingClientRect().width),
     )
     .toBeCloseTo(420, 0);
-  await page.getByRole('button', { name: 'Collapse' }).click();
+  await page.getByRole('button', { name: 'Collapse', exact: true }).click();
   await expect(drawer).toBeHidden();
 
   await page.setViewportSize({ width: 1000, height: 915 });

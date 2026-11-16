@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
-import com.alibaba.qwen.code.runtimebroker.managedschema.JdbcRuntimeBrokerSchema;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRepositoryContract;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
 import org.assertj.core.api.SoftAssertions;
@@ -33,7 +33,7 @@ class RuntimeBrokerFlywaySchemaTest {
     @Test
     void flywayCreatesTheBrokerSchema() throws SQLException {
         DataSource broker = dataSource();
-        JdbcRuntimeBrokerSchema.initialize(broker);
+        ManagedSchema.initialize(broker);
         Map<String, TableShape> expected = describe(broker);
         Map<String, TableShape> actual = describe(migrate(dataSource(), MigrationVersion.LATEST));
 
@@ -77,8 +77,8 @@ class RuntimeBrokerFlywaySchemaTest {
                 Map.of("sessionId", "runtime", "promptId", "turn", "callId", "call", "argsDigest", "digest")));
         var settled = executions.settlePrepared(prepared, Map.of("executionStatus", "success"),
                 java.time.Instant.parse("2000-01-01T00:00:00Z"));
-        JdbcRuntimeBrokerSchema.initialize(source);
-        JdbcRuntimeBrokerSchema.initialize(source);
+        ManagedSchema.initialize(source);
+        ManagedSchema.initialize(source);
         assertThat(executions.findByIdempotencyKey("retention-key")).usingRecursiveComparison().isEqualTo(settled);
         Map<String, TableShape> shape = describe(source);
         assertThat(shape).hasSize(com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.TABLES.size());
@@ -103,7 +103,7 @@ class RuntimeBrokerFlywaySchemaTest {
             sql.execute("INSERT INTO " + table + " VALUES ('legacy-witness')");
         }
         var before = describe(source);
-        assertThatThrownBy(() -> JdbcRuntimeBrokerSchema.initialize(source))
+        assertThatThrownBy(() -> ManagedSchema.initialize(source))
                 .isInstanceOf(IllegalStateException.class);
         assertThat(describe(source)).isEqualTo(before);
         try (var connection = source.getConnection();
