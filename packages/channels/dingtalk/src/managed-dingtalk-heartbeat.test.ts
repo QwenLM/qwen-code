@@ -76,6 +76,13 @@ const SETTINGS = {
   pollInterval: 2_000,
 };
 
+// DWClient.reconnectInterval / DWClient.heartbeat_interval
+// (dingtalk-stream-sdk-nodejs 2.0.4, dist/client.mjs — both private fields);
+// a dependency bump that changes either must change these with it
+// (#17462 R2-1).
+const SDK_RECONNECT_MS = 1_000;
+const SDK_HEARTBEAT_MS = 8_000;
+
 const latestSocket = (): FakeSocket =>
   wsState.instances[wsState.instances.length - 1] as FakeSocket;
 
@@ -109,7 +116,7 @@ describe('managed DingTalk heartbeat timer cleanup (#17173 R5)', () => {
     latestSocket().emit('close');
     expect(vi.getTimerCount()).toBe(1); // only the reconnect timeout remains
 
-    await vi.advanceTimersByTimeAsync(1_000); // the reconnect attempt runs
+    await vi.advanceTimersByTimeAsync(SDK_RECONNECT_MS); // the reconnect attempt runs
     await vi.advanceTimersByTimeAsync(0);
     const replacement = latestSocket();
     replacement.open();
@@ -120,7 +127,7 @@ describe('managed DingTalk heartbeat timer cleanup (#17173 R5)', () => {
 
     // One heartbeat period on the replacement socket: exactly one ping, and
     // no stale interval terminates it.
-    await vi.advanceTimersByTimeAsync(8_000);
+    await vi.advanceTimersByTimeAsync(SDK_HEARTBEAT_MS);
     expect(replacement.ping).toHaveBeenCalledTimes(1);
     expect(replacement.terminate).not.toHaveBeenCalled();
 
@@ -139,7 +146,7 @@ describe('managed DingTalk heartbeat timer cleanup (#17173 R5)', () => {
 
     // First drop: socket B replaces socket A.
     latestSocket().emit('close');
-    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(SDK_RECONNECT_MS);
     await vi.advanceTimersByTimeAsync(0);
     const socketB = latestSocket();
     socketB.open();
@@ -150,13 +157,13 @@ describe('managed DingTalk heartbeat timer cleanup (#17173 R5)', () => {
     // on the first socket) leaks B's interval into C here — the count would
     // be 2, and the leaked interval would survive disconnect.
     socketB.emit('close');
-    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(SDK_RECONNECT_MS);
     await vi.advanceTimersByTimeAsync(0);
     const socketC = latestSocket();
     socketC.open();
     await vi.advanceTimersByTimeAsync(0);
     expect(vi.getTimerCount()).toBe(1);
-    await vi.advanceTimersByTimeAsync(8_000);
+    await vi.advanceTimersByTimeAsync(SDK_HEARTBEAT_MS);
     expect(socketC.ping).toHaveBeenCalledTimes(1);
     expect(socketC.terminate).not.toHaveBeenCalled();
 
