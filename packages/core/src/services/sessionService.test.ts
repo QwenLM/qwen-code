@@ -3687,9 +3687,13 @@ describe('SessionService', () => {
           cwd,
         }),
         msg('abandoned', 'u1', 'assistant', 1, 'old answer', { cwd }),
-        sys('state-abandoned', 'abandoned', 'generated_ui_state', 2, {
-          ...state(1, 'abandoned'),
-        }),
+        sys(
+          'state-abandoned',
+          'abandoned',
+          'generated_ui_state',
+          2,
+          state(2, 'abandoned'),
+        ),
         msg('u2', 'u1', 'assistant', 3, 'hi', {
           provenance: 'assistant_output',
           cwd,
@@ -3698,6 +3702,7 @@ describe('SessionService', () => {
       ]);
       expect(await service.readGeneratedUiStates(oldId)).toEqual({
         states: new Map([[card, { revision: 1, value: 'kept' }]]),
+        maxRevision: 2,
       });
 
       const result = await fork();
@@ -3710,9 +3715,13 @@ describe('SessionService', () => {
       expect(written[2]).toMatchObject({ parentUuid: 'u2', sessionId: newId });
       expect(await service.readGeneratedUiStates(newId)).toEqual({
         states: new Map([[card, { revision: 1, value: 'kept' }]]),
+        maxRevision: 1,
       });
 
-      expect(await service.readGeneratedUiStates(nestedId)).toEqual({});
+      expect(await service.readGeneratedUiStates(nestedId)).toEqual({
+        states: new Map(),
+        maxRevision: 0,
+      });
       const actualJsonl = await vi.importActual<
         typeof import('../utils/jsonl-utils.js')
       >('../utils/jsonl-utils.js');

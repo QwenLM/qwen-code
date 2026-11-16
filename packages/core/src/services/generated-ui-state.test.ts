@@ -23,7 +23,6 @@ import {
   GeneratedUiStateError,
   GeneratedUiStateService,
   restoreGeneratedUiStates,
-  selectActiveGeneratedUiStateRecordUuids,
   type GeneratedUiStateRecordPayload,
   type GeneratedUiStateRestore,
 } from './generated-ui-state.js';
@@ -31,7 +30,17 @@ import {
 const CARD = 'gc_aaaaaaaaaaaaaaaaaaaaaa';
 const OTHER = 'gc_bbbbbbbbbbbbbbbbbbbbbb';
 
-function service(initial: GeneratedUiStateRestore = {}) {
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+function service(
+  initial: GeneratedUiStateRestore = { states: new Map(), maxRevision: 0 },
+) {
   let restore = initial;
   let generation = 0;
   const persisted: GeneratedUiStateRecordPayload[] = [];
@@ -132,7 +141,7 @@ describe('GeneratedUiStateService', () => {
         { revision: 1, value: index },
       ]),
     );
-    const { state } = service({ states });
+    const { state } = service({ states, maxRevision: 1 });
     await expect(state.set(CARD, 0, 1)).rejects.toMatchObject({
       code: 'state_card_limit',
     });
@@ -152,6 +161,7 @@ describe('GeneratedUiStateService', () => {
   it('reloads after a failed save and after the active branch is replaced', async () => {
     const harness = service({
       states: new Map([[CARD, { revision: 3, value: 'before' }]]),
+      maxRevision: 3,
     });
     harness.persist.mockRejectedValueOnce(new Error('disk full'));
     await expect(harness.state.set(CARD, 3, 'lost')).rejects.toMatchObject({
@@ -165,6 +175,7 @@ describe('GeneratedUiStateService', () => {
 
     harness.replaceBranch({
       states: new Map([[CARD, { revision: 1, value: 'rewound' }]]),
+      maxRevision: 3,
     });
     await expect(harness.state.get(CARD)).resolves.toMatchObject({
       revision: 1,
@@ -174,6 +185,34 @@ describe('GeneratedUiStateService', () => {
       revision: 0,
     });
     expect(harness.load).toHaveBeenCalledTimes(3);
+  });
+
+  it('rechecks the active branch after a rewind during transcript load', async () => {
+    const oldBranch = {
+      states: new Map([[CARD, { revision: 2, value: 'abandoned' }]]),
+      maxRevision: 2,
+    };
+    const harness = service(oldBranch);
+    const loadStarted = deferred();
+    const loadFinished = deferred();
+    harness.load.mockImplementationOnce(async () => {
+      loadStarted.resolve();
+      await loadFinished.promise;
+      return oldBranch;
+    });
+    const write = harness.state.set(CARD, 2, 'delayed');
+    await loadStarted.promise;
+    harness.replaceBranch({
+      states: new Map([[CARD, { revision: 1, value: 'retained' }]]),
+      maxRevision: 2,
+    });
+    loadFinished.resolve();
+    await expect(write).resolves.toMatchObject({
+      outcome: 'stale',
+      revision: 1,
+      value: 'retained',
+    });
+    expect(harness.persist).not.toHaveBeenCalled();
   });
 });
 
@@ -206,8 +245,16 @@ describe('Generated UI state in a recorded transcript', () => {
     recorder.activate(lease);
     cleanups.push(() => recorder.close().catch(() => undefined));
     let turn = 0;
-    const save = (cardId: string, revision: number, value: unknown) =>
-      recorder.recordGeneratedUiState({ version: 1, cardId, revision, value });
+    const save = (
+      cardId: string,
+      revision: number,
+      value: unknown,
+      generation = recorder.getBranchGeneration(),
+    ) =>
+      recorder.recordGeneratedUiState(
+        { version: 1, cardId, revision, value },
+        generation,
+      );
     const prompt = (text: string) =>
       recorder.recordUserMessage(
         text,
@@ -227,18 +274,20 @@ describe('Generated UI state in a recorded transcript', () => {
       const active = prepareTranscriptRecords(records).records.map(
         (record) => record.uuid,
       );
-      const selected = new Set(
-        selectActiveGeneratedUiStateRecordUuids(records, active),
-      );
       return {
         records,
         active,
-        states: restoreGeneratedUiStates(
-          records.filter((record) => selected.has(record.uuid)),
-        ),
+        ...restoreGeneratedUiStates(records, active),
       };
     };
-    return { recorder, save, prompt, reply, read };
+    const openState = () =>
+      new GeneratedUiStateService({
+        load: read,
+        persist: (payload, generation) =>
+          recorder.recordGeneratedUiState(payload, generation),
+        branchGeneration: () => recorder.getBranchGeneration(),
+      });
+    return { recorder, save, prompt, reply, read, openState };
   }
 
   it('reads back every acknowledged save, at an idle tail, mid-turn and between side records', async () => {
@@ -270,27 +319,95 @@ describe('Generated UI state in a recorded transcript', () => {
   });
 
   it('drops saves made on a branch that a rewind abandons', async () => {
-    const { recorder, save, prompt, reply, read } = await recording();
+    const { recorder, prompt, reply, read, openState } = await recording();
+    const state = openState();
     prompt('first');
     reply('one');
-    await save(CARD, 1, 'kept');
+    await state.set(CARD, 0, 'kept');
     prompt('second');
     reply('two');
-    await save(CARD, 2, 'abandoned');
+    await state.set(CARD, 1, 'abandoned');
     const before = recorder.getBranchGeneration();
     recorder.rewindRecording(1, { truncatedCount: 2 });
     expect(recorder.getBranchGeneration()).not.toBe(before);
     expect(Object.fromEntries((await read()).states)).toEqual({
       [CARD]: { revision: 1, value: 'kept' },
     });
-    // A save right after the rewind, before any new prompt, stays.
-    await save(CARD, 2, 'after rewind');
+    // Reopening the store still reserves revisions from the abandoned branch.
+    const reopened = openState();
+    await expect(reopened.set(CARD, 1, 'after rewind')).resolves.toMatchObject({
+      outcome: 'saved',
+      revision: 3,
+    });
+    await expect(reopened.set(CARD, 2, 'delayed')).resolves.toMatchObject({
+      outcome: 'stale',
+      revision: 3,
+      value: 'after rewind',
+    });
     expect(Object.fromEntries((await read()).states)).toEqual({
-      [CARD]: { revision: 2, value: 'after rewind' },
+      [CARD]: { revision: 3, value: 'after rewind' },
     });
     prompt('third');
     reply('three');
     expect((await read()).states.get(CARD)?.value).toBe('after rewind');
+  });
+
+  it('reserves the last saved revision after rewind to an empty branch', async () => {
+    const { recorder, prompt, reply, openState } = await recording();
+    prompt('first');
+    reply('one');
+    await openState().set(CARD, 0, 'abandoned');
+    recorder.rewindRecording(0, { truncatedCount: 2 });
+    const reopened = openState();
+    await expect(reopened.get(CARD)).resolves.toMatchObject({
+      revision: 0,
+      value: null,
+    });
+    await expect(reopened.set(CARD, 0, 'replacement')).resolves.toMatchObject({
+      outcome: 'saved',
+      revision: 2,
+    });
+  });
+
+  it('rejects a recorder write prepared before rewind', async () => {
+    const { recorder, save, prompt, reply, read } = await recording();
+    prompt('first');
+    reply('one');
+    prompt('second');
+    const generation = recorder.getBranchGeneration();
+    recorder.rewindRecording(1, { truncatedCount: 1 });
+    await expect(save(CARD, 1, 'delayed', generation)).rejects.toThrow();
+    expect((await read()).states.size).toBe(0);
+  });
+
+  it('keeps a save queued during a checkpoint on the same branch', async () => {
+    const { recorder, save, prompt, reply, read } = await recording();
+    const cursor = recorder.getBranchCheckpointCursor();
+    prompt('first');
+    reply('one');
+    const checkpoint = recorder.recordBranchCheckpointTransaction({
+      cursor,
+      stopReason: 'end_turn',
+    });
+    const [point] = await Promise.all([checkpoint, save(CARD, 1, 'queued')]);
+    expect(point).toBeDefined();
+    expect((await read()).states.get(CARD)?.value).toBe('queued');
+  });
+
+  it('rejects a queued save if deletion replaced the branch before append', async () => {
+    const { recorder, save, prompt, reply, read } = await recording();
+    prompt('first');
+    reply('one');
+    const groups = await recorder.getMessageGroups();
+    const deletion = recorder.deleteMessageGroups({
+      snapshot: groups.snapshot,
+      groupIds: [groups.groups[0]!.id],
+    });
+    await Promise.all([
+      deletion,
+      expect(save(CARD, 1, 'abandoned')).rejects.toThrow('branch change'),
+    ]);
+    expect((await read()).states.size).toBe(0);
   });
 
   it('refuses a save before there is any conversation to attach it to', async () => {
@@ -318,6 +435,57 @@ describe('Generated UI state in a recorded transcript', () => {
     });
     expect(Object.fromEntries((await read()).states)).toEqual({
       [CARD]: { revision: 2, value: 'during second' },
+    });
+  });
+
+  it('keeps first-turn saves when deleting the first or only remaining group', async () => {
+    const { recorder, save, prompt, reply, read } = await recording();
+    prompt('first');
+    reply('one');
+    await save(CARD, 1, 'first value');
+    await save(OTHER, 2, 'only value');
+    prompt('second');
+    reply('two');
+    await save(CARD, 3, 'latest value');
+    prompt('discarded');
+    reply('three');
+    await save(CARD, 4, 'abandoned');
+    recorder.rewindRecording(2, { truncatedCount: 2 });
+
+    const expected = {
+      [CARD]: { revision: 3, value: 'latest value' },
+      [OTHER]: { revision: 2, value: 'only value' },
+    };
+    for (const groupCount of [2, 1]) {
+      const groups = await recorder.getMessageGroups();
+      expect(groups.groups).toHaveLength(groupCount);
+      await recorder.deleteMessageGroups({
+        snapshot: groups.snapshot,
+        groupIds: [groups.groups[0]!.id],
+      });
+      const { states, maxRevision } = await read();
+      expect(Object.fromEntries(states)).toEqual(expected);
+      expect(maxRevision).toBe(4);
+    }
+  });
+
+  it('keeps a save from before the first remaining turn when that turn is rewound', async () => {
+    const { recorder, save, prompt, reply, read } = await recording();
+    prompt('first');
+    reply('one');
+    await save(CARD, 1, 'before later turn');
+    prompt('second');
+    reply('two');
+    await save(CARD, 2, 'after later turn');
+    const groups = await recorder.getMessageGroups();
+    await recorder.deleteMessageGroups({
+      snapshot: groups.snapshot,
+      groupIds: [groups.groups[0]!.id],
+    });
+    recorder.rewindRecording(0, { truncatedCount: 2 });
+    expect((await read()).states.get(CARD)).toEqual({
+      revision: 1,
+      value: 'before later turn',
     });
   });
 

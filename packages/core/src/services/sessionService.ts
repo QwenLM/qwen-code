@@ -9,9 +9,7 @@ import {
   type SessionSourcesRestoreState,
 } from './session-sources.js';
 import {
-  isGeneratedUiStateRecord,
   restoreGeneratedUiStates,
-  selectActiveGeneratedUiStateRecordUuids,
   type GeneratedUiStateRestore,
 } from './generated-ui-state.js';
 
@@ -31,8 +29,10 @@ import type { Content, Part } from '@google/genai';
 import * as jsonl from '../utils/jsonl-utils.js';
 import type { HistoryGap } from '../utils/conversation-chain.js';
 import {
+  isGeneratedUiStateRecord,
   isTranscriptConversationRecord,
   prepareTranscriptRecords,
+  selectActiveGeneratedUiStateRecordUuids,
 } from '../utils/transcript-records.js';
 import { projectUserTranscriptForDisplay } from '../utils/transcript-records.js';
 import type {
@@ -3555,7 +3555,8 @@ export class SessionService {
     try {
       await fs.promises.stat(filePath);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {};
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT')
+        return { states: new Map(), maxRevision: 0 };
       return { unavailable: true };
     }
     const { records, complete } =
@@ -3570,17 +3571,10 @@ export class SessionService {
     )
       throw new Error('Session workspace does not match');
     const { messages } = this.reconstructHistory(records);
-    const selected = new Set(
-      selectActiveGeneratedUiStateRecordUuids(
-        records,
-        messages.map((record) => record.uuid),
-      ),
+    return restoreGeneratedUiStates(
+      records,
+      messages.map((record) => record.uuid),
     );
-    return {
-      states: restoreGeneratedUiStates(
-        records.filter((record) => selected.has(record.uuid)),
-      ),
-    };
   }
 
   async readRestoreProjection(

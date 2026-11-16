@@ -97,6 +97,8 @@ export interface TranscriptUuidChainResult {
   readonly cycleUuid?: string;
 }
 
+export const GENERATED_UI_STATE_SUBTYPE = 'generated_ui_state';
+
 const RECORD_TYPES = new Set<TranscriptRecordType>([
   'user',
   'assistant',
@@ -118,7 +120,7 @@ const MANAGED_SESSION_RECORD_SUBTYPES = new Set([
 
 const NON_CONVERSATION_RECORD_SUBTYPES = new Set([
   'session_sources_snapshot',
-  'generated_ui_state',
+  GENERATED_UI_STATE_SUBTYPE,
   ...MANAGED_SESSION_RECORD_SUBTYPES,
 ]);
 
@@ -147,7 +149,7 @@ const KNOWN_RECORD_SUBTYPES = new Set([
   'omni_recall',
   'session_execution_engine',
   'session_sources_snapshot',
-  'generated_ui_state',
+  GENERATED_UI_STATE_SUBTYPE,
   'session_approval_mode',
   'session_workflow_mode',
   'branch_checkpoint',
@@ -305,6 +307,47 @@ export function isTranscriptArtifactRecord(record: {
     typeof record.subtype === 'string' &&
     ARTIFACT_RECORD_SUBTYPES.has(record.subtype)
   );
+}
+
+export function isGeneratedUiStateRecord(record: {
+  readonly type?: unknown;
+  readonly subtype?: unknown;
+}): boolean {
+  return (
+    record.type === 'system' && record.subtype === GENERATED_UI_STATE_SUBTYPE
+  );
+}
+
+/**
+ * A side save belongs to the active branch if it hangs from a conversation
+ * record on that branch. Follow any non-conversation parents to that record.
+ */
+export function selectActiveGeneratedUiStateRecordUuids(
+  records: ReadonlyArray<
+    Pick<TranscriptRecordInput, 'type' | 'subtype' | 'uuid' | 'parentUuid'>
+  >,
+  activeRecordUuids: readonly string[],
+): string[] {
+  const saves = records.filter(isGeneratedUiStateRecord);
+  if (saves.length === 0) return [];
+  const active = new Set(activeRecordUuids);
+  const byUuid = new Map<string, (typeof records)[number]>();
+  for (const record of records) {
+    if (!byUuid.has(record.uuid)) byUuid.set(record.uuid, record);
+  }
+  const selected: string[] = [];
+  for (const record of saves) {
+    let parent = record.parentUuid;
+    const seen = new Set<string>();
+    while (parent !== null && !active.has(parent) && !seen.has(parent)) {
+      seen.add(parent);
+      const next = byUuid.get(parent);
+      if (!next || isTranscriptConversationRecord(next)) break;
+      parent = next.parentUuid;
+    }
+    if (parent !== null && active.has(parent)) selected.push(record.uuid);
+  }
+  return selected;
 }
 
 export function isInternalCodeModeToolResult(record: {

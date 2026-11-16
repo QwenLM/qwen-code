@@ -7,10 +7,7 @@
 import { userPromptTimestamp } from './last-user-prompt-time.js';
 import { shellResultText } from '../utils/shell-result.js';
 import type { SessionSourcesSnapshot } from './session-sources.js';
-import {
-  GENERATED_UI_STATE_SUBTYPE,
-  type GeneratedUiStateRecordPayload,
-} from './generated-ui-state.js';
+import type { GeneratedUiStateRecordPayload } from './generated-ui-state.js';
 import type { ContentBlock } from '@agentclientprotocol/sdk';
 
 import { type Config } from '../config/config.js';
@@ -84,7 +81,10 @@ import {
   type SessionWriterCommitProof,
   SessionWriterLease,
 } from './session-writer-lease.js';
-import { prepareTranscriptRecords } from '../utils/transcript-records.js';
+import {
+  GENERATED_UI_STATE_SUBTYPE,
+  prepareTranscriptRecords,
+} from '../utils/transcript-records.js';
 import {
   getApiHistoryPromptId,
   isApiHistoryDirectoryContext,
@@ -1193,9 +1193,14 @@ export type ChatRecordingFailureListener = (
   event: ChatRecordingFailureEvent,
 ) => void | Promise<void>;
 
+interface StrictRecordAppendOptions {
+  updateActiveTail?: boolean;
+  expectedBranchGeneration?: number;
+}
+
 interface BufferedRecordAppend {
   record: ChatRecord;
-  options: { updateActiveTail?: boolean } | undefined;
+  options: StrictRecordAppendOptions | undefined;
   resolve?: () => void;
   reject?: (error: unknown) => void;
 }
@@ -2005,11 +2010,18 @@ export class ChatRecordingService {
 
   private async appendRecordStrict(
     record: ChatRecord,
-    options?: { updateActiveTail?: boolean },
+    options?: StrictRecordAppendOptions,
   ): Promise<void> {
     if (this.writeFailure) throw this.writeFailure;
     if (!this.acceptingWrites || this.state !== 'active')
       throw new SessionWriterUnavailableError();
+    if (
+      options?.expectedBranchGeneration !== undefined &&
+      this.branchGeneration !== options.expectedBranchGeneration
+    )
+      throw new Error(
+        'Cannot save view state during a transcript branch change',
+      );
     if (this.refusesManagedRecord(record)) {
       throw new ManagedSessionRecordRefusedError(record);
     }
@@ -4623,6 +4635,7 @@ export class ChatRecordingService {
    */
   async recordGeneratedUiState(
     payload: GeneratedUiStateRecordPayload,
+    generation: number,
   ): Promise<void> {
     if (this.lastRecordUuid === null)
       throw new Error('There is no conversation to attach view state to');
@@ -4632,7 +4645,10 @@ export class ChatRecordingService {
       subtype: GENERATED_UI_STATE_SUBTYPE,
       systemPayload: payload,
     };
-    await this.appendRecordStrict(record, { updateActiveTail: false });
+    await this.appendRecordStrict(record, {
+      updateActiveTail: false,
+      expectedBranchGeneration: generation,
+    });
   }
 
   async recordSessionSourcesSnapshot(

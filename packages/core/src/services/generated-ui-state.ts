@@ -5,7 +5,8 @@
  */
 
 import {
-  isTranscriptConversationRecord,
+  isGeneratedUiStateRecord,
+  selectActiveGeneratedUiStateRecordUuids,
   type TranscriptRecordInput,
 } from '../utils/transcript-records.js';
 
@@ -15,7 +16,6 @@ import {
  * past a save drops it, and a fork carries the saves on the copied branch.
  */
 
-export const GENERATED_UI_STATE_SUBTYPE = 'generated_ui_state';
 /** Serialized UTF-8 size of one card's state. */
 export const GENERATED_UI_STATE_MAX_BYTES = 16 * 1024;
 /** Distinct cards with saved state in one session. */
@@ -57,25 +57,18 @@ export class GeneratedUiStateError extends Error {
   }
 }
 
-export interface GeneratedUiStateRestore {
-  states?: ReadonlyMap<string, { revision: number; value: unknown }>;
-  /** The transcript could not be read completely. */
-  unavailable?: true;
-}
+export type GeneratedUiStateRestore =
+  | {
+      states: ReadonlyMap<string, { revision: number; value: unknown }>;
+      /** The highest saved revision, including on abandoned branches. */
+      maxRevision: number;
+    }
+  | { unavailable: true };
 
 type StateRecordLike = Pick<
   TranscriptRecordInput,
   'type' | 'subtype' | 'uuid' | 'parentUuid' | 'systemPayload'
 >;
-
-export function isGeneratedUiStateRecord(record: {
-  readonly type?: unknown;
-  readonly subtype?: unknown;
-}): boolean {
-  return (
-    record.type === 'system' && record.subtype === GENERATED_UI_STATE_SUBTYPE
-  );
-}
 
 export function assertGeneratedUiCardId(cardId: unknown): string {
   if (typeof cardId !== 'string' || !GENERATED_UI_CARD_ID_PATTERN.test(cardId))
@@ -98,54 +91,28 @@ function parsePayload(value: unknown): GeneratedUiStateRecordPayload | null {
   return payload as unknown as GeneratedUiStateRecordPayload;
 }
 
-/**
- * The state saves that belong to the active branch, in transcript order. A
- * save is written beside the active tail without moving it, so it belongs to
- * the branch when the conversation record it hangs from is on that branch;
- * records between them that are not conversation records are skipped.
- */
-export function selectActiveGeneratedUiStateRecordUuids(
+/** Restore active values and the revision floor from the entire transcript. */
+export function restoreGeneratedUiStates(
   records: readonly StateRecordLike[],
   activeRecordUuids: readonly string[],
-): string[] {
-  const active = new Set(activeRecordUuids);
-  const byUuid = new Map<string, StateRecordLike>();
-  for (const record of records) {
-    if (!byUuid.has(record.uuid)) byUuid.set(record.uuid, record);
-  }
-  const selected: string[] = [];
-  for (const record of records) {
-    if (!isGeneratedUiStateRecord(record)) continue;
-    let parent = record.parentUuid;
-    const seen = new Set<string>();
-    while (parent !== null && !active.has(parent) && !seen.has(parent)) {
-      seen.add(parent);
-      const next = byUuid.get(parent);
-      if (!next || isTranscriptConversationRecord(next)) break;
-      parent = next.parentUuid;
-    }
-    if (parent !== null && active.has(parent)) selected.push(record.uuid);
-  }
-  return selected;
-}
-
-/** The latest valid save per card among the given records. */
-export function restoreGeneratedUiStates(
-  records: ReadonlyArray<
-    Pick<TranscriptRecordInput, 'type' | 'subtype' | 'systemPayload'>
-  >,
-): Map<string, { revision: number; value: unknown }> {
+) {
+  const selected = new Set(
+    selectActiveGeneratedUiStateRecordUuids(records, activeRecordUuids),
+  );
   const states = new Map<string, { revision: number; value: unknown }>();
+  let maxRevision = 0;
   for (const record of records) {
     if (!isGeneratedUiStateRecord(record)) continue;
     const payload = parsePayload(record.systemPayload);
     if (!payload) continue;
+    maxRevision = Math.max(maxRevision, payload.revision);
+    if (!selected.has(record.uuid)) continue;
     states.set(payload.cardId, {
       revision: payload.revision,
       value: payload.value,
     });
   }
-  return states;
+  return { states, maxRevision };
 }
 
 function serialize(value: unknown): string {
@@ -165,42 +132,51 @@ function serialize(value: unknown): string {
 
 export class GeneratedUiStateService {
   private states = new Map<string, { revision: number; json: string }>();
+  private maxRevision = 0;
   private loadedGeneration: number | undefined;
   private queue: Promise<unknown> = Promise.resolve();
 
   constructor(
     private readonly options: {
       load: () => Promise<GeneratedUiStateRestore>;
-      persist: (payload: GeneratedUiStateRecordPayload) => Promise<void>;
+      persist: (
+        payload: GeneratedUiStateRecordPayload,
+        generation: number,
+      ) => Promise<void>;
       /** Changes whenever the active branch is replaced, e.g. by a rewind. */
       branchGeneration: () => number;
     },
   ) {}
 
-  private serial<T>(operation: () => Promise<T>): Promise<T> {
+  private serial<T>(
+    operation: (generation: number) => T | Promise<T>,
+  ): Promise<T> {
     const result = this.queue.then(async () => {
-      const generation = this.options.branchGeneration();
-      if (this.loadedGeneration !== generation) {
+      for (;;) {
+        const generation = this.options.branchGeneration();
+        if (this.loadedGeneration === generation) return operation(generation);
         let restored: GeneratedUiStateRestore;
         try {
           restored = await this.options.load();
         } catch {
           restored = { unavailable: true };
         }
-        if (restored.unavailable)
+        if (this.options.branchGeneration() !== generation) continue;
+        if ('unavailable' in restored)
           throw new GeneratedUiStateError(
             'state_unavailable',
             'Saved view state could not be read',
           );
         this.states = new Map(
-          [...(restored.states ?? [])].map(([cardId, state]) => [
+          [...restored.states].map(([cardId, state]) => [
             cardId,
             { revision: state.revision, json: serialize(state.value) },
           ]),
         );
+        this.maxRevision = restored.maxRevision;
         this.loadedGeneration = generation;
+        return operation(generation);
       }
-      return operation();
     });
     this.queue = result.catch(() => undefined);
     return result;
@@ -208,7 +184,7 @@ export class GeneratedUiStateService {
 
   get(cardId: unknown): Promise<GeneratedUiStateSnapshot> {
     const id = assertGeneratedUiCardId(cardId);
-    return this.serial(async () => {
+    return this.serial(() => {
       const state = this.states.get(id);
       return state
         ? {
@@ -238,7 +214,7 @@ export class GeneratedUiStateService {
         cardId: id,
         limitBytes: GENERATED_UI_STATE_MAX_BYTES,
       });
-    return this.serial(async () => {
+    return this.serial(async (generation) => {
       const current = this.states.get(id);
       const revision = current?.revision ?? 0;
       if (baseRevision !== revision)
@@ -256,14 +232,22 @@ export class GeneratedUiStateService {
           'state_card_limit',
           `At most ${GENERATED_UI_STATE_MAX_CARDS} cards can save state in one session`,
         );
-      const next = revision + 1;
+      const next = this.maxRevision + 1;
+      if (!Number.isSafeInteger(next))
+        throw new GeneratedUiStateError(
+          'state_unavailable',
+          'View state revisions are exhausted',
+        );
       try {
-        await this.options.persist({
-          version: 1,
-          cardId: id,
-          revision: next,
-          value: JSON.parse(json),
-        });
+        await this.options.persist(
+          {
+            version: 1,
+            cardId: id,
+            revision: next,
+            value: JSON.parse(json),
+          },
+          generation,
+        );
       } catch {
         // The recorder may or may not have the record; reload before trusting
         // the cache again.
@@ -274,6 +258,7 @@ export class GeneratedUiStateService {
         );
       }
       this.states.set(id, { revision: next, json });
+      this.maxRevision = next;
       return { outcome: 'saved', cardId: id, revision: next };
     });
   }

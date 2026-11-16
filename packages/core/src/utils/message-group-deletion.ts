@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type {
   ChatCompressionRecordPayload,
   CustomTitleRecordPayload,
@@ -13,7 +13,10 @@ import type {
   SlashCommandRecordPayload,
   UiTelemetryRecordPayload,
 } from '../services/chatRecordingService.js';
-import { prepareTranscriptRecords } from './transcript-records.js';
+import {
+  prepareTranscriptRecords,
+  selectActiveGeneratedUiStateRecordUuids,
+} from './transcript-records.js';
 
 import type { SerializedFileHistorySnapshot } from '../services/fileHistoryService.js';
 import { removeFileHistorySnapshots } from './file-history-snapshots.js';
@@ -607,6 +610,38 @@ export function deleteTranscriptMessageGroups(
     ...anchor,
     parentUuid: survivingParent(active.at(-1)?.uuid ?? null),
   });
+  const activeUuids = active.map((record) => record.uuid);
+  const activeSaves = selectActiveGeneratedUiStateRecordUuids(
+    records,
+    activeUuids,
+  );
+  if (activeSaves.length > 0) {
+    const retained = activeUuids.filter((uuid) => !removed.has(uuid));
+    const retainedSaves = new Set(
+      selectActiveGeneratedUiStateRecordUuids(rewritten, [
+        ...retained,
+        anchor.uuid,
+      ]),
+    );
+    const orphanedSaves = new Set(
+      activeSaves.filter((uuid) => !retainedSaves.has(uuid)),
+    );
+    if (orphanedSaves.size > 0) {
+      const root = {
+        ...anchor,
+        uuid: randomUUID(),
+        parentUuid: null,
+        timestamp: records[0]?.timestamp ?? anchor.timestamp,
+      };
+      const firstRetained = retained[0] ?? anchor.uuid;
+      // The saves predate the first retained turn, including after a rewind.
+      for (const record of rewritten) {
+        if (record.uuid === firstRetained || orphanedSaves.has(record.uuid))
+          record.parentUuid = root.uuid;
+      }
+      rewritten.unshift(root);
+    }
+  }
   return {
     records: rewritten,
     result: {

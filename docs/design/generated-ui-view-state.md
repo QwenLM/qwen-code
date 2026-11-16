@@ -76,9 +76,10 @@ latest save per card on the active branch is the card's state. This gives:
   to its retained parent, as it already does for artifact records, so the
   fork's cards start from the saved state. Saves on abandoned branches are not
   copied.
-- **Message deletion:** deleting messages never drops a save. A save whose
-  parent was deleted is re-attached to the nearest surviving record, as every
-  other surviving record is, so a card does not roll back to an older save.
+- **Message deletion:** deleting messages never drops an active save. A save
+  whose parent was deleted follows its nearest surviving ancestor. If none
+  remains, it attaches to a new root marker that precedes the surviving
+  conversation. Saves keep their original order.
   Saves are not part of the message-group snapshot, so a save does not make a
   pending deletion fail.
 - **Isolation:** state lives in its own session's transcript.
@@ -91,7 +92,14 @@ The agent owns a per-session `GeneratedUiStateService`. It loads states lazily
 from the transcript after a flush and caches them. The recorder exposes a
 branch generation that changes whenever the active branch is replaced (rewind,
 tool-branch restore, rebuild after resume or deletion); the service reloads when
-the generation it loaded at differs. Writes are serialized per session.
+the generation it loaded at differs. The recorder checks that generation
+before writing, including when it releases a queued save. Writes are
+serialized per session.
+
+A rewind restores the retained value and its original revision. Each changed
+save gets a revision higher than any saved revision in that session's
+transcript, including saves on abandoned branches. This prevents a delayed
+write from matching a revision issued again after rewind, even after reopening.
 
 ## Wire contract
 

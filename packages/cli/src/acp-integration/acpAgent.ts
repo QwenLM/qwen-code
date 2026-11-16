@@ -17247,9 +17247,9 @@ class QwenAgent implements Agent {
           await recording.flush();
           return sessions.readGeneratedUiStates(sessionId);
         },
-        persist: async (payload) => {
+        persist: async (payload, generation) => {
           if (!recording) throw new Error('Chat recording unavailable');
-          await recording.recordGeneratedUiState(payload);
+          await recording.recordGeneratedUiState(payload, generation);
         },
         branchGeneration: () => recording?.getBranchGeneration() ?? 0,
       });

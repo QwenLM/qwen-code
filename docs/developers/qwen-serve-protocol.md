@@ -3083,7 +3083,7 @@ enrichments are absent because their backing state is workspace-owned or keyed
 only by server name rather than by session. Status, discovery, and accounting
 from the selected session's own MCP manager remain available.
 
-### `GET` and `PUT /session/:id/generated-ui/state/:cardId`
+### `GET /session/:id/generated-ui/state/:cardId` and `PUT /session/:id/generated-ui/state/:cardId`
 
 Saved view state for one Generated UI card, advertised by
 `generated_ui_state`. Both methods require a session-bound
@@ -3104,6 +3104,10 @@ Other failures carry a `code`: `invalid_state` (400), `state_card_limit` (409,
 128 cards per session) and `state_unavailable` (503, the transcript could not
 be read or written; never reported as empty state). Saving the current value
 again returns `saved` without writing.
+
+A rewind restores the retained value and its original revision. Each changed
+save receives a revision greater than any previously saved revision in the
+session transcript, including those from abandoned branches.
 
 Both are live-session-owner routes: the read follows `GET` owner routing, the
 write requires strict mutation and the session's bound workspace. They never
