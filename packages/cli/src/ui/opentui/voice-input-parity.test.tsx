@@ -316,6 +316,7 @@ vi.mock('./theme.js', () => ({ C: new Proxy({}, { get: () => '#ffffff' }) }));
 const extensionManager = {
   setRequestConsent: vi.fn(),
   setRequestSetting: vi.fn(),
+  setRequestChoicePlugin: vi.fn(),
 };
 const config = {
   getAuthType: () => 'openai',

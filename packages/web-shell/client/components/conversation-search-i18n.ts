@@ -55,9 +55,29 @@ const messages: Record<WebShellLanguage, Record<string, Message>> = {
     'chat.searchUser': '你',
     'chat.searchAssistant': '助手',
   },
-  // Not translated yet — same partial-catalog policy as the ru table in
-  // i18n.tsx (#13391): ru reuses the EN copy.
-  ru: EN_MESSAGES,
+  ru: {
+    'chat.searchConversation': 'Искать в этом разговоре',
+    'chat.searchConversationPlaceholder': 'Искать сообщения и код…',
+    'chat.searchConversationHint':
+      'Введите ключевое слово, чтобы найти более раннее содержимое.',
+    'chat.searchingConversation': 'Поиск по истории разговора…',
+    'chat.searchLoadedOnly':
+      'Доступны только загруженные сообщения. Обновите Qwen Code, чтобы искать по всей истории.',
+    'chat.searchResultPosition': (vars) =>
+      `${vars?.['current']} / ${vars?.['total']} результатов`,
+    'chat.searchNoResults': 'Нет подходящих сообщений.',
+    'chat.searchPrevious': 'Предыдущий результат',
+    'chat.searchNext': 'Следующий результат',
+    'chat.searchResults': 'Результаты поиска',
+    'chat.searchResultsLimited': (vars) =>
+      `Показаны первые ${vars?.['count']} результатов. Уточните запрос для более точных совпадений.`,
+    'chat.searchFailed':
+      'Не удалось выполнить поиск по всей истории. Результаты могут быть неполными.',
+    'chat.searchLocateFailed':
+      'Этот результат не удалось найти. Повторите поиск, чтобы обновить его.',
+    'chat.searchUser': 'Вы',
+    'chat.searchAssistant': 'Ассистент',
+  },
 };
 
 export function useConversationSearchI18n() {
