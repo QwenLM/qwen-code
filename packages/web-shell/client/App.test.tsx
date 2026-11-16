@@ -953,6 +953,7 @@ const {
       latestModelPicker: undefined as WebShellModelPickerOptions | undefined,
       onChatEditorLayout: null as ((props: ChatEditorTestProps) => void) | null,
       latestToastHostElevated: false,
+      toastRequestScopes: [] as Array<{ message: string; scope: unknown }>,
       latestTaskChipsTasks: null as
         | readonly DaemonSessionTaskWithWorkflowStatus[]
         | null,
@@ -1098,6 +1099,7 @@ const {
         ) => void;
         onPendingPanesChange?: (ids: string[]) => void;
         onPaneWorkspacesChange?: (cwds: readonly string[]) => void;
+        onOpenGoals?: () => void;
         showSessionDetails?: boolean;
         includeOtherWorkspaces?: boolean;
         workspaceCwd?: string;
@@ -1143,8 +1145,11 @@ const {
         onOpenSession?: (sessionId: string, workspaceCwd?: string) => void;
       } | null,
       latestGoalsProps: null as {
-        onCreateGoal?: (condition: string) => Promise<void>;
-        onOpenSession?: (sessionId: string) => void;
+        onCreateGoal?: (
+          condition: string,
+          workspaceCwd?: string,
+        ) => boolean | void | Promise<boolean | void>;
+        onOpenSession?: (sessionId: string, workspaceCwd?: string) => void;
       } | null,
       latestWorkflowRunsProps: null as {
         onCreateViaChat?: () => void;
@@ -2431,6 +2436,13 @@ vi.doMock('./components/ToastHost', async () => {
   );
   return {
     ...actual,
+    // Record the dispatch scope: a window listener cannot tell a scoped
+    // dispatch from an unscoped one (bubbling delivers both), so the
+    // mount-placement test asserts the third argument directly.
+    requestToast: (...args: [string, string, unknown?]) => {
+      testState.toastRequestScopes.push({ message: args[1], scope: args[2] });
+      return (actual.requestToast as (...a: unknown[]) => void)(...args);
+    },
     ToastHost: (props: { elevated?: boolean }) => {
       testState.latestToastHostElevated = props.elevated ?? false;
       return React.createElement('div');
@@ -2530,6 +2542,7 @@ vi.doMock('./components/SplitView', async () => {
       onPanesChange?: (ids: string[]) => void;
       onPendingPanesChange?: (ids: string[]) => void;
       onPaneWorkspacesChange?: (cwds: readonly string[]) => void;
+      onOpenGoals?: () => void;
       includeOtherWorkspaces?: boolean;
       workspaceCwd?: string;
       sessionWorkflowEnabled?: boolean;
@@ -2883,8 +2896,11 @@ vi.doMock('./components/dialogs/GoalsDialog', async () => {
   const React = await import('react');
   return {
     GoalsDialog: (props: {
-      onCreateGoal?: (condition: string) => Promise<void>;
-      onOpenSession?: (sessionId: string) => void;
+      onCreateGoal?: (
+        condition: string,
+        workspaceCwd?: string,
+      ) => boolean | void | Promise<boolean | void>;
+      onOpenSession?: (sessionId: string, workspaceCwd?: string) => void;
     }) => {
       testState.latestGoalsProps = props;
       return React.createElement('div');
@@ -4321,6 +4337,182 @@ describe('task activity key', () => {
 
     expect(mockSessionActions.loadArtifacts).toHaveBeenCalledTimes(2);
     expect(testState.latestBackgroundTasksRefreshTrigger).toBe(1);
+  });
+
+  it('shows the header artifacts entry with the session count and opens the environment panel', async () => {
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    const makeArtifact = (id: string): DaemonSessionArtifact => ({
+      id,
+      kind: 'html',
+      storage: 'workspace',
+      source: 'tool',
+      status: 'available',
+      title: id,
+      workspacePath: `${id}.html`,
+      clientRetained: false,
+      createdAt: '2026-09-07T00:00:00.000Z',
+      updatedAt: '2026-09-07T00:00:00.000Z',
+    });
+    mockSessionActions.loadArtifacts.mockResolvedValue({
+      artifacts: [makeArtifact('report'), makeArtifact('chart')],
+    });
+    const { container } = renderApp();
+    await flush();
+
+    const entry = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-artifacts-entry]',
+    );
+    expect(entry).not.toBeNull();
+    expect(entry!.getAttribute('aria-label')).toBe('Open artifacts (2)');
+
+    await act(async () => {
+      entry!.click();
+    });
+    await flush();
+    const panel = container.querySelector(
+      '[data-testid="environment-panel"]:not([hidden])',
+    );
+    expect(panel).not.toBeNull();
+    // The entry must reveal the artifact list, not just open the panel shell.
+    expect(panel?.textContent).toContain('report.html');
+    expect(panel?.textContent).toContain('chart.html');
+
+    // Collapse the artifacts section, close the panel, then re-click the entry:
+    // the App glue (signal bump + prop pass) must re-expand the section, since
+    // the panel keeps its local section state while hidden.
+    const sectionHeader = Array.from(
+      panel!.querySelectorAll<HTMLButtonElement>('button[aria-expanded]'),
+    ).find((button) => button.textContent?.trim() === 'Artifacts');
+    expect(sectionHeader).toBeTruthy();
+    await act(async () => {
+      sectionHeader!.click();
+    });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="environment-panel"]')?.textContent,
+    ).not.toContain('report.html');
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="chat-context-header"] button[aria-label="Toggle environment information"]',
+        )
+        ?.click();
+    });
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-artifacts-entry]')
+        ?.click();
+    });
+    await flush();
+    const reopened = container.querySelector(
+      '[data-testid="environment-panel"]:not([hidden])',
+    );
+    expect(reopened).not.toBeNull();
+    expect(reopened?.textContent).toContain('report.html');
+    expect(reopened?.textContent).toContain('chart.html');
+  });
+
+  it('hides the header artifacts entry when the session has no artifacts', async () => {
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    mockSessionActions.loadArtifacts.mockResolvedValue({ artifacts: [] });
+    const { container } = renderApp();
+    await flush();
+
+    expect(
+      container.querySelector('[data-web-shell-artifacts-entry]'),
+    ).toBeNull();
+  });
+
+  it('exposes the artifact count and opener to a custom chat header', async () => {
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    mockSessionActions.loadArtifacts.mockResolvedValue({
+      artifacts: [
+        {
+          id: 'report',
+          kind: 'html',
+          storage: 'workspace',
+          source: 'tool',
+          status: 'available',
+          title: 'report',
+          workspacePath: 'report.html',
+          clientRetained: false,
+          createdAt: '2026-09-07T00:00:00.000Z',
+          updatedAt: '2026-09-07T00:00:00.000Z',
+        },
+      ],
+    });
+    const renderChatHeader = vi.fn(
+      ({ artifactCount, onOpenArtifacts }: ChatHeaderRenderInfo) => (
+        <button type="button" onClick={onOpenArtifacts}>
+          Custom artifacts {artifactCount}
+        </button>
+      ),
+    );
+    const { container } = renderApp({ renderChatHeader });
+    await flush();
+
+    expect(renderChatHeader).toHaveBeenCalledWith(
+      expect.objectContaining({
+        artifactCount: 1,
+        onOpenArtifacts: expect.any(Function),
+      }),
+    );
+    await act(async () => {
+      Array.from(container.querySelectorAll('button'))
+        .find((button) => button.textContent === 'Custom artifacts 1')!
+        .click();
+    });
+    await flush();
+    expect(
+      container.querySelector(
+        '[data-testid="environment-panel"]:not([hidden])',
+      ),
+    ).not.toBeNull();
+  });
+
+  it('withholds the artifact count from a custom header when the panel has no artifacts section', async () => {
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    mockSessionActions.loadArtifacts.mockResolvedValue({
+      artifacts: [
+        {
+          id: 'report',
+          kind: 'html',
+          storage: 'workspace',
+          source: 'tool',
+          status: 'available',
+          title: 'report',
+          workspacePath: 'report.html',
+          clientRetained: false,
+          createdAt: '2026-09-07T00:00:00.000Z',
+          updatedAt: '2026-09-07T00:00:00.000Z',
+        },
+      ],
+    });
+    const renderChatHeader = vi.fn(() => null);
+    renderApp({
+      renderChatHeader,
+      environmentPanel: { items: ['environment'] },
+    });
+    await flush();
+
+    // The count and the opener share one gate: with no artifacts section in
+    // the panel there is nothing to open, so no count may be published either.
+    const info = renderChatHeader.mock.lastCall?.[0];
+    expect(info?.artifactCount).toBeUndefined();
+    expect(info?.onOpenArtifacts).toBeUndefined();
   });
 
   it('persists the environment panel open state across reloads', async () => {
@@ -12578,6 +12770,7 @@ function makePendingPermissionBlock(
       raw: Record<string, unknown>;
     }>;
     content?: unknown[];
+    rawInput?: Record<string, unknown>;
   } = {},
 ): unknown {
   const toolName = overrides.toolName ?? 'run_shell_command';
@@ -12596,6 +12789,7 @@ function makePendingPermissionBlock(
         ...(overrides.todoPlan ? { qwenTodoApproval: overrides.todoPlan } : {}),
       },
       ...(overrides.content ? { content: overrides.content } : {}),
+      ...(overrides.rawInput ? { rawInput: overrides.rawInput } : {}),
       ...(isAskUser
         ? { input: { questions: [{ question: 'Pick one', options: [] }] } }
         : {}),
@@ -12894,6 +13088,7 @@ beforeEach(() => {
   testState.latestModelPicker = undefined;
   testState.onChatEditorLayout = null;
   testState.latestToastHostElevated = false;
+  testState.toastRequestScopes = [];
   testState.latestTaskChipsTasks = null;
   testState.latestTaskChipsIncludeAgents = null;
   testState.latestTaskChipsOnSelectTask = null;
@@ -18499,7 +18694,7 @@ describe('App session callbacks', () => {
         sessionId: 'session-1',
         sessionName: 'Session One',
         workspaceCwd: '/tmp/project',
-        items: ['title', 'environment', 'rightPanel'],
+        items: ['title', 'environment', 'rightPanel', 'artifacts'],
         environmentPanelOpen: false,
         rightPanelOpen: false,
         onEnvironmentPanelOpenChange: expect.any(Function),
@@ -19600,6 +19795,53 @@ describe('App session callbacks', () => {
       );
       expect(stored['draft\0/tmp/other']?.tabs).toContainEqual(
         expect.objectContaining({ kind: 'files', workspaceCwd: '/tmp/other' }),
+      );
+    });
+
+    it('opens a terminal tab when crypto.randomUUID is unavailable (non-secure context)', async () => {
+      setupDraft();
+      mockConnection.capabilities.features = ['web_terminal'];
+      testState.captureArtifactPanelOnly = true;
+      const { container } = renderApp({
+        rightPanel: { items: ['files', 'terminal'] },
+      });
+      await flush();
+      act(() =>
+        container
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Toggle right panel"]',
+          )
+          ?.click(),
+      );
+      // Plain-HTTP remote origins are not secure contexts: randomUUID is
+      // simply not exposed there, and opening a tab must still work.
+      const cryptoObject = globalThis.crypto;
+      const descriptor = Object.getOwnPropertyDescriptor(
+        cryptoObject,
+        'randomUUID',
+      );
+      Object.defineProperty(cryptoObject, 'randomUUID', {
+        value: undefined,
+        configurable: true,
+      });
+      try {
+        expect(typeof cryptoObject.randomUUID).toBe('undefined');
+        act(() => testState.latestArtifactPanelProps?.onOpenTerminal?.());
+        await flush();
+      } finally {
+        if (descriptor) {
+          Object.defineProperty(cryptoObject, 'randomUUID', descriptor);
+        } else {
+          delete (cryptoObject as { randomUUID?: unknown }).randomUUID;
+        }
+      }
+      expect(testState.latestArtifactPanelProps?.tabs).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: 'terminal',
+            id: expect.stringMatching(/^terminal:/),
+          }),
+        ]),
       );
     });
 
@@ -29004,6 +29246,41 @@ describe('App session callbacks', () => {
     );
   });
 
+  it('only opens qualified transcript links within the workspace lock', async () => {
+    renderApp({ lockedWorkspaceCwd: '/locked' }, new EventTarget());
+    await flush();
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('qwen:open-session', {
+          detail: {
+            sessionId: 'other-session',
+            workspaceCwd: '/other',
+            source: 'session-link',
+          },
+        }),
+      );
+    });
+    expect(mockSessionActions.loadSession).not.toHaveBeenCalled();
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('qwen:open-session', {
+          detail: {
+            sessionId: 'locked-session',
+            workspaceCwd: '/locked',
+            source: 'session-link',
+          },
+        }),
+      );
+    });
+    expect(mockSessionActions.loadSession).toHaveBeenCalledExactlyOnceWith(
+      'locked-session',
+      {
+        workspaceCwd: '/locked',
+        sessionContext: { kind: 'workspace', cwd: '/locked' },
+      },
+    );
+  });
+
   it('keeps legacy window session links available with a workspace lock', async () => {
     renderApp({ lockedWorkspaceCwd: '/locked' }, new EventTarget());
     await flush();
@@ -29478,6 +29755,73 @@ describe('App session callbacks', () => {
 
     expect(snapshots.at(-1)).toBeNull();
     expect(activeGoals.at(-1)).toBeNull();
+  });
+
+  it('offers the strip Goals-page affordance when project features are available', async () => {
+    mockConnection.goalState = activeGoalSnapshot();
+    const { container } = renderApp();
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="goal-status-strip"]'),
+    ).not.toBeNull();
+    const openGoals = container.querySelector<HTMLButtonElement>(
+      '[data-testid="goal-open-goals"]',
+    );
+    expect(openGoals).not.toBeNull();
+    // Rendering is not enough: the button must be bound to the real Goals
+    // navigation, not a no-op. A `() => {}` mutant survives a presence-only
+    // assertion and ships a dead button.
+    await act(async () => {
+      openGoals!.click();
+      await flush();
+    });
+    expect(
+      container.querySelector('[data-testid="goals-page"]'),
+    ).not.toBeNull();
+  });
+
+  it('hides the strip Goals-page affordance when project features are unavailable', async () => {
+    // The Goals page renders under the same gate; offering the button where
+    // the page cannot open would navigate nowhere.
+    mockWorkspace.capabilities = {
+      workspaces: [],
+    } as typeof mockWorkspace.capabilities;
+    mockConnection.goalState = activeGoalSnapshot();
+    const { container } = renderApp();
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="goal-status-strip"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="goal-open-goals"]'),
+    ).toBeNull();
+  });
+
+  it('wires the split-view panes Goals affordance to the Goals page', async () => {
+    // SplitView mounts only under project features, so every pane gets the
+    // affordance. Pin the App-to-SplitView hop end to end: deleting
+    // `onOpenGoals={openGoals}` on the SplitView element must red this case,
+    // and the forwarded callback must open the real page, not a no-op.
+    mockConnection.goalState = activeGoalSnapshot();
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+        ?.click();
+    });
+    await flush();
+    const openGoals = testState.latestSplitViewProps?.onOpenGoals;
+    expect(openGoals).toBeDefined();
+    await act(async () => {
+      openGoals!();
+      await flush();
+    });
+    expect(
+      container.querySelector('[data-testid="goals-page"]'),
+    ).not.toBeNull();
   });
 
   it('refuses /language ui while a Goal owns the session', async () => {
@@ -37449,6 +37793,33 @@ describe('App session callbacks', () => {
     expect(secondHandler).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps a named sub-session approval pending when switching to yolo', async () => {
+    testState.blocks = [
+      makePendingPermissionBlock({
+        toolName: 'create_sub_session',
+        kind: 'other',
+        rawInput: { workspace: '/repos/b' },
+        options: [
+          {
+            optionId: 'proceed_once',
+            label: 'Allow',
+            raw: { kind: 'allow_once' },
+          },
+        ],
+      }),
+    ];
+    renderApp();
+    await flush();
+    await act(async () => {
+      testState.latestChatEditorProps?.onSelectMode?.('yolo');
+    });
+
+    expect(mockSessionActions.setApprovalMode).toHaveBeenCalledWith('yolo', {
+      planMode: false,
+    });
+    expect(mockSessionActions.submitPermission).not.toHaveBeenCalled();
+  });
+
   it.each(['default', 'auto-edit', 'auto', 'yolo'])(
     'shows selected %s separately from Plan and follows approved completion',
     async (mode) => {
@@ -43701,6 +44072,64 @@ describe('App session callbacks', () => {
       ]);
     } finally {
       window.removeEventListener('qwen:toast-request', listener);
+      mockSessionActions.addArtifact.mockReset().mockResolvedValue({});
+    }
+  });
+
+  it('scopes the main-view registration failure toast to the shell root (F1)', async () => {
+    // The registration mount must sit INSIDE the portal-root provider App
+    // returns: moved above it, the hook reads the null context default and
+    // the dispatch loses its scope. A window listener cannot discriminate
+    // (bubbling delivers both shapes), so pin the scope argument itself.
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    mockSessionActions.loadArtifacts.mockReset().mockResolvedValue({
+      artifacts: [],
+    });
+    mockSessionActions.addArtifact
+      .mockReset()
+      .mockRejectedValue(new Error('daemon exploded'));
+    testState.blocks = [
+      {
+        id: 'export-result',
+        kind: 'assistant',
+        text: 'Exported',
+        meta: {
+          source: 'slash_command',
+          sessionArtifacts: [
+            {
+              kind: 'file',
+              storage: 'workspace',
+              title: 'qwen-code-export-2026-01-01T00-00-00-000Z.md',
+              workspacePath: 'qwen-code-export-2026-01-01T00-00-00-000Z.md',
+            },
+          ],
+        },
+      },
+    ];
+    try {
+      renderApp();
+      await vi.waitFor(async () => {
+        await flush();
+        expect(mockSessionActions.addArtifact).toHaveBeenCalledTimes(1);
+      });
+      await flush();
+      const registrationToasts = testState.toastRequestScopes.filter(
+        (entry) =>
+          entry.message === 'Could not add exported artifact: daemon exploded',
+      );
+      expect(registrationToasts).toHaveLength(1);
+      const scope = registrationToasts[0]!.scope;
+      // App's provider value is the portal root it creates (marked with
+      // data-web-shell-portal-root); above the provider the hook reads the
+      // null context default instead.
+      expect(scope).toBeInstanceOf(HTMLElement);
+      expect(
+        (scope as HTMLElement).hasAttribute('data-web-shell-portal-root'),
+      ).toBe(true);
+    } finally {
       mockSessionActions.addArtifact.mockReset().mockResolvedValue({});
     }
   });
@@ -51476,6 +51905,55 @@ describe('App /goal command', () => {
     expect(mockSessionActions.controlGoal).not.toHaveBeenCalled();
   });
 
+  it('refuses a picker cwd outside the trusted workspace list without touching the session', async () => {
+    // The dialog reconciles stale selections itself; this guard is the
+    // backstop for a capabilities change racing the submit. It must refuse
+    // BEFORE createNewSession, which clears the current session first.
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'secondary',
+          cwd: '/tmp/secondary',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const onToast = vi.fn();
+    const { container } = renderApp({ onToast });
+    await flush();
+
+    testState.prompt = '/goal';
+    await clickSubmit(container);
+    await flush();
+    const onCreateGoal = testState.latestGoalsProps?.onCreateGoal;
+    if (!onCreateGoal) throw new Error('onCreateGoal was not captured');
+    mockSessionActions.clearSession.mockClear();
+    mockSessionActions.controlGoal.mockClear();
+
+    let result: boolean | void;
+    await act(async () => {
+      result = await onCreateGoal('all tests pass', '/tmp/revoked');
+    });
+
+    expect(result).toBe(false);
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.controlGoal).not.toHaveBeenCalled();
+    // The toast is the only user-visible surface of this refusal; removing
+    // the reportError call must red this assertion.
+    expect(onToast).toHaveBeenCalledWith(
+      'error',
+      'The selected workspace is unavailable or untrusted.',
+    );
+  });
+
   it.each(['resolve', 'reject'] as const)(
     'ignores a stale Goal edit %s after the session changes',
     async (outcome) => {
@@ -52120,6 +52598,34 @@ describe('App /goal command', () => {
     );
     // It must leave the Goals page, or the user loads a transcript they cannot see.
     expect(container.querySelector('[data-testid="goals-page"]')).toBeNull();
+  });
+
+  it("opens a goal's session in the goal's own workspace context", async () => {
+    // The dialog tags each goal with its workspace cwd; dropping the second
+    // argument here would load a secondary goal's transcript in the previously
+    // selected workspace, landing follow-up prompts in the wrong project.
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/goal';
+    await clickSubmit(container);
+    await flush();
+
+    const onOpenSession = testState.latestGoalsProps?.onOpenSession;
+    if (!onOpenSession) throw new Error('onOpenSession was not captured');
+    mockSessionActions.loadSession.mockClear();
+
+    await act(async () => {
+      onOpenSession('goal-session-9', '/tmp/secondary-workspace');
+    });
+    await flush();
+
+    expect(mockSessionActions.loadSession.mock.calls[0][0]).toBe(
+      'goal-session-9',
+    );
+    expect(mockSessionActions.loadSession.mock.calls[0][1]).toMatchObject({
+      workspaceCwd: '/tmp/secondary-workspace',
+    });
   });
 
   it("reports a failure to open a goal's session instead of swallowing it", async () => {

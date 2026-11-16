@@ -21,6 +21,7 @@ import java.util.concurrent.locks.ReentrantLock;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.conflict;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.renewalDelayMillis;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.unavailable;
+import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.verifyDrainReceiptIdentity;
 
 /**
  * Renews one binding operation claim while a provision or drain leg is in
@@ -34,6 +35,11 @@ final class BindingRenewal implements AutoCloseable {
     private final AtomicReference<RuntimeBindingRecord> current;
     private final AtomicBoolean valid = new AtomicBoolean(true);
     private final AtomicBoolean stopped = new AtomicBoolean();
+    // A drain claimed from a LOST binding stays LOST until its stop proof
+    // commits, so that state is this claim's legitimate resting point —
+    // not a rival's. The stop proof, not a DRAINING transition, is what
+    // licenses the close.
+    private final boolean lostClaim;
     private final RuntimeBindingRepository bindingRepository;
     private final ToolExecutionRepository executionRepository;
     private final RuntimeBindingRegistry bindingRegistry;
@@ -56,6 +62,7 @@ final class BindingRenewal implements AutoCloseable {
             AtomicBoolean closed,
             ScheduledExecutorService renewalScheduler) {
         this.current = new AtomicReference<>(claimed);
+        this.lostClaim = claimed.getState() == RuntimeBindingRecord.State.LOST;
         this.bindingRepository = bindingRepository;
         this.executionRepository = executionRepository;
         this.bindingRegistry = bindingRegistry;
@@ -101,9 +108,7 @@ final class BindingRenewal implements AutoCloseable {
         monitor.lock();
         try {
             var expected = requireDrainClaim(authority != null);
-            if (receipt == null || !receipt.matches(expected)) {
-                throw conflict("workspace_close_identity_unverified", "Original stop receipt differs");
-            }
+            verifyDrainReceiptIdentity(expected, receipt);
             var replacement = expected.withDrainReceipt(receipt);
             if (authority != null) {
                 replacement = replacement.withLifecycleAuthority(authority)
@@ -150,16 +155,16 @@ final class BindingRenewal implements AutoCloseable {
         }
     }
 
-    private RuntimeBindingRecord requireDrainClaim() {
+    RuntimeBindingRecord requireDrainClaim() {
         return requireDrainClaim(false);
     }
 
-    private RuntimeBindingRecord requireDrainClaim(boolean stoppedRecovery) {
+    RuntimeBindingRecord requireDrainClaim(boolean stoppedRecovery) {
         var binding = current.get();
         if (closed.get() || stopped.get() || !valid.get()
                 || !brokerOwnerId.equals(binding.getOperationOwner())
-                || !binding.isDrainRequested() || !(binding.getState() == RuntimeBindingRecord.State.DRAINING
-                        || stoppedRecovery && binding.getState() == RuntimeBindingRecord.State.LOST)
+                || !binding.isDrainRequested()
+                || !RuntimeBrokerSupport.isDrainClaimStateValid(binding, stoppedRecovery, lostClaim)
                 || binding.getOperationLeaseUntil() == null
                 || !binding.getOperationLeaseUntil().isAfter(clock.instant())) {
             throw unavailable("runtime_close_claim_pending", "Original drain claim expired");
@@ -171,7 +176,7 @@ final class BindingRenewal implements AutoCloseable {
             RuntimeResourceHandle handle) {
         monitor.lock();
         try {
-            if (closed.get() || !valid.get()) {
+            if (closed.get() || stopped.get() || !valid.get()) {
                 return false;
             }
             RuntimeBindingRecord expected = current.get();

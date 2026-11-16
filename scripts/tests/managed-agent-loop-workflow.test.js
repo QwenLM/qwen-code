@@ -71,6 +71,36 @@ describe('Managed loop CI coverage', () => {
     expect(upload.if).toBe('${{ always() }}');
   });
 
+  it('preflights the fleet host before installing on it', () => {
+    // This lane joined the persistent fleet with the trusted-PR routing split,
+    // and every other heavy ecs-qwen lane fails fast on a saturated host before
+    // it installs and builds. Without the gate a trusted PR that lands on a
+    // host at its disk or inode floor reaches `Install dependencies` and dies
+    // mid-build, which reads as a loop regression on the lane whose job is
+    // telling that apart from a host fault.
+    const gate = job.steps.find(
+      (step) => step.name === 'Disk floor gate (self-hosted)',
+    );
+    expect(gate.if).toBe("${{ runner.environment == 'self-hosted' }}");
+    expect(gate.env).toEqual({
+      DISK_FLOOR_MIN_FREE_KB: '8388608',
+      DISK_FLOOR_MAX_USED_PCT: '85',
+    });
+    // The invocation and its position are what make the gate act: a gutted
+    // `run:` that keeps the name and both overrides, or a gate below the
+    // install it protects, must red here.
+    expect(gate.run).toBe(
+      'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"',
+    );
+    const names = job.steps.map((step) => step.name);
+    expect(names.indexOf('Disk floor gate (self-hosted)')).toBeGreaterThan(
+      names.indexOf('Recreate runner Git metadata'),
+    );
+    expect(names.indexOf('Disk floor gate (self-hosted)')).toBeLessThan(
+      names.indexOf('Install dependencies'),
+    );
+  });
+
   it('fails the actual completion guard when a path was skipped or its evidence is absent', () => {
     const guard = job.steps.find(
       (step) => step.name === 'Require both paths to have passed',
