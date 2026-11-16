@@ -358,6 +358,14 @@ export interface ManagedShellCapturePublisher {
     identity: ToolResultExpectedIdentity,
     result: ToolResultEnvelope,
   ): Promise<void>;
+  /**
+   * Whether this lane's retirement is proven by the publisher itself rather
+   * than by an acknowledgement naming the worker's own manifest. The external
+   * worker holds no control-plane credential: the Broker is its publication's
+   * producer and acknowledges the worker's sequences out of band, so no ACK
+   * ever arrives here and requiring one would refuse every close.
+   */
+  readonly retiresOnDrainProof?: boolean;
 }
 
 /**
@@ -464,8 +472,9 @@ export class ManagedToolExecutor {
           if (result.capture?.captureStatus !== 'complete')
             blockers.add('capture_incomplete');
           if (
-            result.capture?.deliveryStatus !== 'committed' ||
-            entry.acknowledgement?.deliveryStatus !== 'committed'
+            !entry.capturePublisher?.retiresOnDrainProof &&
+            (result.capture?.deliveryStatus !== 'committed' ||
+              entry.acknowledgement?.deliveryStatus !== 'committed')
           )
             blockers.add('capture_uncommitted');
         }
@@ -2238,7 +2247,8 @@ export class ManagedToolExecutor {
       [...this.entries.values()].some((entry) =>
         entry.version === 3
           ? entry.state !== 'settled' ||
-            entry.acknowledgement?.deliveryStatus !== 'committed'
+            (!entry.capturePublisher?.retiresOnDrainProof &&
+              entry.acknowledgement?.deliveryStatus !== 'committed')
           : entry.state !== 'acknowledged',
       )
     ) {
