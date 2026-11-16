@@ -16,10 +16,13 @@
 
 import { spawn } from 'node:child_process';
 import {
+  appendFileSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
+  rmSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -141,17 +144,25 @@ function readDebugLog(runtimeDir: string): string {
   return readDebugLogs(runtimeDir);
 }
 
+/** The rounds a debug log records the session running in a `runAgentLoop`. */
+const countSharedRounds = (debugLog: string) =>
+  (debugLog.match(SHARED_ROUND_LOG) ?? []).length;
+
 /** How long the debug log must stop growing before its writes have landed. */
 const DEBUG_LOG_QUIET_MS = 250;
 
 /**
- * The CLI runs ACP behind a relaunch supervisor, so the process this test
- * signals is not the agent: the supervised child sees its input close and
- * spends its shutdown writing the debug log. Its lines are appended
- * fire-and-forget, and a round's marker can still be in flight when the
- * supervisor exits. Read the log once it has stopped growing.
+ * The debug log is appended fire-and-forget, so a round's marker can still be
+ * queued when the last prompt response arrives. Read it once it has stopped
+ * growing and carries at least `minimumSharedRounds` markers: under load a
+ * queued append can pause longer than the quiet window, and a run missing its
+ * later rounds would be compared against one that has them. Sample before the
+ * kill below, because a killed process abandons its queued appends.
  */
-async function readSettledDebugLog(runtimeDir: string): Promise<string> {
+async function readSettledDebugLog(
+  runtimeDir: string,
+  minimumSharedRounds = 0,
+): Promise<string> {
   const deadline = Date.now() + 5_000;
   let quietSince = Date.now();
   let log = readDebugLog(runtimeDir);
@@ -161,7 +172,10 @@ async function readSettledDebugLog(runtimeDir: string): Promise<string> {
     if (next !== log) {
       log = next;
       quietSince = Date.now();
-    } else if (Date.now() - quietSince >= DEBUG_LOG_QUIET_MS) {
+    } else if (
+      Date.now() - quietSince >= DEBUG_LOG_QUIET_MS &&
+      countSharedRounds(log) >= minimumSharedRounds
+    ) {
       break;
     }
   }
@@ -338,6 +352,7 @@ const allowOnce = () => ({
       scenario: Scenario,
       shared: boolean,
       kernel = false,
+      minimumSharedRounds = 0,
     ): Promise<Run> {
       await server?.close();
       await rig?.cleanup();
@@ -590,8 +605,13 @@ const allowOnce = () => ({
         ) {
           await new Promise((resolve) => setTimeout(resolve, 50));
         }
-        // Every round has logged its marker; let those writes land first.
-        debugLog = await readSettledDebugLog(qwenHome);
+        // Every prompt's first round has logged by the time it returns; a
+        // shared run owes at least one marker per prompt, and the kernel arm
+        // also has the shared arm's count to reach.
+        debugLog = await readSettledDebugLog(
+          qwenHome,
+          shared ? Math.max(scenario.prompts.length, minimumSharedRounds) : 0,
+        );
       } finally {
         agent.kill();
         await new Promise((resolve) => {
@@ -628,7 +648,7 @@ const allowOnce = () => ({
         permissionsAt,
         goalTurnEnds,
         backgroundTurnEnds,
-        sharedRounds: (debugLog.match(SHARED_ROUND_LOG) ?? []).length,
+        sharedRounds: countSharedRounds(debugLog),
         kernelRounds: countKernelRounds(debugLog),
       };
     }
@@ -637,7 +657,7 @@ const allowOnce = () => ({
     async function arms(scenario: Scenario) {
       const current = await run(scenario, false);
       const shared = await run(scenario, true);
-      const kernel = await run(scenario, true, true);
+      const kernel = await run(scenario, true, true, shared.sharedRounds);
       const dump = process.env['ACP_PARITY_DUMP'];
       if (dump) {
         const slug = scenario.name.replace(/[^a-z0-9]+/gi, '-');
@@ -1176,6 +1196,25 @@ const allowOnce = () => ({
       // One reading per run, current first, and none wrote the file.
       expect(written).toEqual([false, false, false]);
     }, 120_000);
+
+    it('waits past a quiet gap for the round markers a run owes', async () => {
+      const runtimeDir = mkdtempSync(join(tmpdir(), 'qwen-settled-log-'));
+      mkdirSync(join(runtimeDir, 'debug'));
+      const logFile = join(runtimeDir, 'debug', 'run.txt');
+      const marker = (promptId: string) =>
+        `round in its own runAgentLoop call (prompt ${promptId})\n`;
+      writeFileSync(logFile, marker('first'));
+      const settled = readSettledDebugLog(runtimeDir, 2);
+      // Longer than the quiet window: without the marker floor the helper
+      // returns while the second round's append is still queued.
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      appendFileSync(logFile, marker('second'));
+      try {
+        expect(countSharedRounds(await settled)).toBe(2);
+      } finally {
+        rmSync(runtimeDir, { recursive: true, force: true });
+      }
+    }, 10_000);
 
     it('adds no date reminder to a first prompt, as other surfaces do', async () => {
       // The startup context already carries today's date; the client adds a
