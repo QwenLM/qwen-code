@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.runtimebroker.ExecutionReconciliation;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimePublicationVerifier;
+import com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
@@ -12,6 +13,7 @@ import com.alibaba.qwen.code.runtimebroker.service.RuntimeBindingRegistry.Sessio
 
 import java.time.Clock;
 import java.time.Duration;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -19,6 +21,7 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -27,6 +30,7 @@ import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.M
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.RUNTIME_STATUS_STATES;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.conflict;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.immutableMap;
+import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.isPublicationV3;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.mapFailure;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.notFound;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.requireOpen;
@@ -43,6 +47,7 @@ final class RuntimeExecutionReconciler {
     private final RuntimePublicationVerifier publicationVerifier;
     private final Duration operationLeaseDuration;
     private final Clock clock;
+    private final ScheduledExecutorService scheduler;
     private final AtomicBoolean closed;
     private final ExecutionObservationCooldown observationCooldown;
 
@@ -54,6 +59,7 @@ final class RuntimeExecutionReconciler {
             RuntimePublicationVerifier publicationVerifier,
             Duration operationLeaseDuration,
             Clock clock,
+            ScheduledExecutorService scheduler,
             AtomicBoolean closed,
             ExecutionObservationCooldown observationCooldown) {
         this.bindingRegistry = bindingRegistry;
@@ -64,6 +70,7 @@ final class RuntimeExecutionReconciler {
         this.publicationVerifier = publicationVerifier;
         this.operationLeaseDuration = operationLeaseDuration;
         this.clock = clock;
+        this.scheduler = scheduler;
         this.closed = closed;
         this.observationCooldown = observationCooldown;
     }
@@ -76,6 +83,74 @@ final class RuntimeExecutionReconciler {
 
     static final Set<String> RUNTIME_STATUS_FIELDS = Set.of(
             "state", "result");
+
+    CompletionStage<ToolExecutionRecord> measuredResult(ToolExecutionRecord original, int attempt) {
+        if (!original.isSettled() || !RuntimeToolMeasurements.selected(original.getReference())
+                || original.getResult().containsKey(RuntimeToolMeasurements.FIELD) || attempt >= 100) {
+            return CompletableFuture.completedFuture(original);
+        }
+        requireOpen(closed);
+        return bindingRegistry.requireReadySession(original.getHarnessSessionId(), original.getRuntimeSessionId()).thenCompose(context -> {
+            ToolExecutionRecord current = executionState.requireExecution(context, original.getExecutionCallId());
+            if (current.getResult().containsKey(RuntimeToolMeasurements.FIELD)) {
+                return CompletableFuture.completedFuture(current);
+            }
+            bindingRegistry.requireUsableLease(context);
+            return transport.statusV4(context.lease(), context.session(), current.getReference(), 0).thenCompose(status -> {
+                if ("settled".equals(status.get("state")) && status.get("result") instanceof Map<?, ?> raw) {
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> observed = (Map<String, Object>) raw;
+                    Map<String, Object> before = new LinkedHashMap<>(RuntimeToolMeasurements.base(current.getResult()));
+                    Map<String, Object> after = new LinkedHashMap<>(RuntimeToolMeasurements.base(observed));
+                    normalizeCaptureDelivery(before);
+                    normalizeCaptureDelivery(after);
+                    if (!BrokerValues.sameJsonMap(before, after)) {
+                        throw conflict("runtime_execution_conflict", "Original measured tool result changed");
+                    }
+                    ToolExecutionRecord updated = executionRepository.attachMeasurements(current, RuntimeToolMeasurements.metadata(observed));
+                    return updated != null ? CompletableFuture.completedFuture(updated)
+                            : measuredResult(executionState.requireExecution(context, current.getExecutionCallId()), attempt + 1);
+                }
+                if ("unknown".equals(status.get("state"))) {
+                    return CompletableFuture.completedFuture(current);
+                }
+                CompletableFuture<ToolExecutionRecord> next = new CompletableFuture<>();
+                next.orTimeout(operationLeaseDuration.toMillis(), TimeUnit.MILLISECONDS);
+                scheduler.schedule(() -> safeStage(() -> measuredResult(current, attempt + 1)).whenComplete((value, failure) -> {
+                    if (failure == null) {
+                        next.complete(value);
+                    } else {
+                        next.completeExceptionally(failure);
+                    }
+                }), 50, TimeUnit.MILLISECONDS);
+                return next;
+            });
+        }).exceptionallyCompose(failure -> {
+            Throwable cause = unwrap(failure);
+            if (cause instanceof RuntimeBrokerException problem && (problem.getStatusCode() == 404 || problem.getStatusCode() == 503)) {
+                return CompletableFuture.completedFuture(original);
+            }
+            return CompletableFuture.failedFuture(cause);
+        });
+    }
+
+    private static void normalizeCaptureDelivery(Map<String, Object> result) {
+        if (result.get("capture") instanceof Map<?, ?> capture) {
+            Map<String, Object> copy = new LinkedHashMap<>();
+            capture.forEach((key, value) -> {
+                if (!"deliveryStatus".equals(key)) {
+                    copy.put((String) key, value);
+                }
+            });
+            result.put("capture", copy);
+        }
+    }
+
+    CompletionStage<Map<String, Object>> acknowledgeMeasured(SessionContext context, ToolExecutionRecord original,
+            Map<String, Object> receipt) {
+        return measuredResult(original, 0).thenCompose(record -> transport.acknowledgeV4(context.lease(), context.session(),
+                record.getReference(), record.getResult(), receipt)).thenApply(ignored -> Map.of("state", "settled"));
+    }
 
     /**
      * Asks the original Runtime once whether an {@code UNKNOWN} execution
@@ -139,7 +214,7 @@ final class RuntimeExecutionReconciler {
             return CompletableFuture.completedFuture(notUnknown(unknown,
                     null));
         }
-        if ("deferred_v3".equals(unknown.getReference().get("dispatchMode"))
+        if (isPublicationV3(unknown.getReference())
                 && publicationVerifier != null) {
             Map<String, Object> durable = publicationVerifier.finished(unknown);
             if (durable != null) {
@@ -242,7 +317,11 @@ final class RuntimeExecutionReconciler {
                 new CompletableFuture<>();
         try {
             CompletionStage<Map<String, Object>> query = safeStage(() ->
-                    "deferred_v3".equals(unknown.getReference().get("dispatchMode"))
+                    RuntimeToolMeasurements.selected(unknown.getReference())
+                            ? transport.statusV4(context.lease(), context.session(),
+                                    unknown.getReference(), unknown.getLastSequence())
+                                    .thenApply(RuntimeBrokerSupport::projectV3Status)
+                            : isPublicationV3(unknown.getReference())
                             ? transport.statusV3(context.lease(), context.session(),
                                     unknown.getReference(), unknown.getLastSequence())
                                     .thenApply(RuntimeBrokerSupport::projectV3Status)

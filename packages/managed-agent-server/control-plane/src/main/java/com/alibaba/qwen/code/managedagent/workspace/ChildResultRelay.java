@@ -3,7 +3,7 @@ package com.alibaba.qwen.code.managedagent.workspace;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
-import com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorktreeGit;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorktreeOperations;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessHttpFailure;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.CommandAdmission;
@@ -867,6 +867,29 @@ public class ChildResultRelay {
                 : broker.findLatestBindingByHarnessSession(row.tenantId(),
                         row.childSessionId());
         if (binding == null) {
+            // A binding that never appears is not always a wait: the child's
+            // Session load can fail before it acquires a Runtime at all (a
+            // refused profile, an unreadable inherited configuration), and
+            // the coordinator then settles that Turn FAILED with no dispatch
+            // ever sent. Such a child will never bind, and `watching` -- the
+            // only arm that reads the child's Turn -- is unreachable from
+            // here, so retrying the binding alone would hide a decided
+            // failure until the parent's Turn hits its deadline with no
+            // output at all (#17261). Read the Turn the same way `watch`
+            // does and let the proven pre-admission terminal shape settle
+            // through the ordinary give-up chain, which already pairs
+            // `creation_failed` with the child's own committed evidence.
+            // A live Turn (enqueued, or dispatched) is still a genuine wait:
+            // only preAdmissionTerminal() may decide anything here.
+            ChildResultRelayStore.TurnLine childTurn = relayStore.latestTurn(
+                    row.tenantId(), row.childSessionId());
+            if (childTurn != null && childTurn.preAdmissionTerminal()) {
+                settleThenClassifyGaveUp(row, new RelayRetry(
+                        "child Turn " + childTurn.status()
+                                + " before admission without a Runtime"
+                                + " binding: " + childTurn.errorCode()), now);
+                return;
+            }
             throw new RelayRetry("child runtime binding is not visible yet");
         }
         String generation = Long.toString(binding.getGeneration());
@@ -1301,7 +1324,7 @@ public class ChildResultRelay {
             }
         }
         if (!"merged".equals(outcome) && workspace.resultCommit() != null) {
-            receipt.put("resultRef", ChildWorktreeGit.PIN_PREFIX
+            receipt.put("resultRef", ChildWorktreeOperations.PIN_PREFIX
                     + workspace.childWorkspaceId() + "/result");
         }
         return receipt;

@@ -425,6 +425,40 @@ describe('managed-agent-server e2e runner', () => {
     expect(commitCarriesTurnSettled(Buffer.from('not json'))).toBe(false);
   });
 
+  it('requires the promoted storage version before an approval crash', () => {
+    const source = read('scripts/run-managed-agent-server-e2e.ts');
+    const barrier = source.indexOf(
+      "'Approval snapshot was not committed before the crash barrier'",
+    );
+    expect(barrier).toBeGreaterThan(-1);
+    const condition = source.slice(
+      source.lastIndexOf('if (', barrier) + 4,
+      source.lastIndexOf(') {', barrier),
+    );
+    const rejects = new Function(
+      'privateHead',
+      'checkpoint',
+      'originalApprovalId',
+      `return (${condition});`,
+    );
+    const checkpoint = {
+      continuation: { phase: 'await_action' },
+      approval: { requestId: 'approval' },
+    };
+    expect(rejects(['4'], checkpoint, 'approval')).toBe(false);
+    for (const version of ['1', '2', '3', '5']) {
+      expect(rejects([version], checkpoint, 'approval')).toBe(true);
+    }
+    expect(
+      rejects(
+        ['4'],
+        { ...checkpoint, continuation: { phase: 'done' } },
+        'approval',
+      ),
+    ).toBe(true);
+    expect(rejects(['4'], checkpoint, 'other-approval')).toBe(true);
+  });
+
   it('builds the rewritten-command package with a rewriting, fsyncing command Hook', async () => {
     const temporary = mkdtempSync(join(tmpdir(), 'a3-package-contract-'));
     try {
@@ -1675,6 +1709,16 @@ describe('managed-agent-server e2e runner', () => {
         budget: budgetSnapshot,
         models: { m: { tokens: { candidates: 600 } } },
       },
+      usageDiagnostic: {
+        version: 2,
+        budget: budgetSnapshot,
+        statistics: {
+          rawOutputTokensTotal: 600.25,
+          models: [
+            { key: 'model-key', metrics: { tokens: { candidates: 600 } } },
+          ],
+        },
+      },
     };
     const run = (events) =>
       load(
@@ -1741,6 +1785,27 @@ describe('managed-agent-server e2e runner', () => {
       round: 2,
       budget: budgetSnapshot,
       models: { m: { tokens: { candidates: 600 } } },
+    });
+    expect(
+      run([
+        attempt(10, {
+          recoveryRef: { resourceId: 'req_round0' },
+          usageRef: { resourceId: 'usageOld' },
+        }),
+        attempt(20, {
+          recoveryRef: { resourceId: 'req_round2' },
+          usageRef: { resourceId: 'usageDiagnostic' },
+        }),
+        attempt(30, {
+          recoveryRef: { resourceId: 'req_round2' },
+          routeRef: { resourceId: 'route2' },
+        }),
+      ]),
+    ).toEqual({
+      round: 2,
+      budget: budgetSnapshot,
+      models: { 'model-key': { tokens: { candidates: 600 } } },
+      rawOutputTokensTotal: 600.25,
     });
     // No attempt at all.
     expect(() => run([])).toThrow(/no model attempt/);
@@ -1812,6 +1877,37 @@ describe('managed-agent-server e2e runner', () => {
       assertCost(before, { round: 2, budget: snapshot, models: ledger(100) }),
     ).toThrow(
       /wiped the per-model token ledger: model=fake-model before=600 after=100/,
+    );
+  });
+
+  it('keeps the B3 raw budget ledger separate from normalized model totals', () => {
+    const assertCost = load(
+      ['assertB3CostContinuity'],
+      'assertB3CostContinuity',
+      'isDeepStrictEqual',
+    )(isDeepStrictEqual).assertB3CostContinuity;
+    const before = {
+      round: 2,
+      budget: { budget: 500000, outputTokensAtTurnStart: 0 },
+      models: { 'model-key': { tokens: { candidates: 600 } } },
+      rawOutputTokensTotal: 600.25,
+    };
+    expect(() =>
+      assertCost(before, { ...before, rawOutputTokensTotal: 600.75 }),
+    ).not.toThrow();
+    for (const rawOutputTokensTotal of [undefined, 0, 600, NaN, Infinity]) {
+      expect(() =>
+        assertCost(before, { ...before, rawOutputTokensTotal }),
+      ).toThrow(/recovery wiped the raw output ledger/);
+    }
+    expect(() =>
+      assertCost(
+        { ...before, rawOutputTokensTotal: 0 },
+        { ...before, rawOutputTokensTotal: 0 },
+      ),
+    ).toThrow(/crash-boundary raw output ledger was not exercised/);
+    expect(() => assertCost(before, { ...before, models: {} })).toThrow(
+      /wiped the per-model token ledger/,
     );
   });
 

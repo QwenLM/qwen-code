@@ -2,7 +2,7 @@ package com.alibaba.qwen.code.managedagent.session;
 
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector.AttachedSession;
-import com.alibaba.qwen.code.managedagent.persistence.TransportConsumerStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcTransportConsumerStore;
 import org.apache.rocketmq.client.apis.ClientException;
 import org.apache.rocketmq.client.apis.consumer.LitePushConsumer;
 import org.junit.jupiter.api.BeforeEach;
@@ -25,7 +25,7 @@ class OwnerSubscriptionsTest {
     private static final String WRITER = "harness-boot-1";
 
     private HarnessConnector harness;
-    private TransportConsumerStore store;
+    private JdbcTransportConsumerStore store;
     private LitePushConsumer consumer;
     private OwnerSubscriptions owners;
 
@@ -33,7 +33,7 @@ class OwnerSubscriptionsTest {
     void setUp() {
         harness = mock(HarnessConnector.class);
         when(harness.writerIdentity()).thenReturn(WRITER);
-        store = mock(TransportConsumerStore.class);
+        store = mock(JdbcTransportConsumerStore.class);
         consumer = mock(LitePushConsumer.class);
         owners = new OwnerSubscriptions(harness, store);
         owners.bind(com.alibaba.qwen.code.managedagent.adapters.event.RocketMqMessages.subscriptions(consumer));

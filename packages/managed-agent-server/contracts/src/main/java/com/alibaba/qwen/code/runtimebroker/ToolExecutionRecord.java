@@ -412,6 +412,22 @@ public final class ToolExecutionRecord {
                 dispatchGeneration, version, completionTime);
     }
 
+    public ToolExecutionRecord withMeasurements(Map<String, Object> metadata) {
+        if (!isSettled() || !RuntimeToolMeasurements.selected(reference) || result == null) {
+            throw new IllegalStateException(
+                    "Only a measured settled execution accepts observations");
+        }
+        if (result.containsKey(RuntimeToolMeasurements.FIELD)) {
+            if (!BrokerValues.sameJsonMap(RuntimeToolMeasurements.metadata(result), metadata)) {
+                throw new IllegalArgumentException("Measured result metadata conflicts");
+            }
+            return this;
+        }
+        Map<String, Object> enriched = new java.util.LinkedHashMap<>(result);
+        enriched.put(RuntimeToolMeasurements.FIELD, metadata);
+        return withResult(enriched, lastSequence, settledAt);
+    }
+
     public static Map<String, Object> cancelledBeforeV3Start() {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("executionStatus", "not_started");

@@ -366,6 +366,10 @@ export interface WorkspaceSettingsWrite {
   value: unknown;
 }
 
+export type WorkspaceSettingsWrites =
+  | WorkspaceSettingsWrite[]
+  | ((settings: LoadedSettings) => WorkspaceSettingsWrite[]);
+
 export class WorkspaceSettingsPartialPersistError extends Error {
   readonly committedWrites: WorkspaceSettingsWrite[];
   override readonly cause: unknown;

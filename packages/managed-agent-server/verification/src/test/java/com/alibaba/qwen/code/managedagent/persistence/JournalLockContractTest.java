@@ -4,7 +4,7 @@ import com.alibaba.qwen.code.managedagent.VerificationFixtures;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.*;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -29,8 +29,8 @@ class JournalLockContractTest {
     private static final String SESSION = "journal-session";
     private static final String TOKEN = "a".repeat(32);
     protected StoreLockTrace trace;
-    private ManagedSessionStore raw;
-    private ManagedSessionStore proxy;
+    private JdbcManagedSessionStore raw;
+    private JdbcManagedSessionStore proxy;
     private TransactionTemplate transactions;
     private int notifications;
 
@@ -44,7 +44,7 @@ class JournalLockContractTest {
         trace = new StoreLockTrace(dataSource());
         ManagedSchema.initialize(trace);
         var jdbc = new ManagedSchemaJdbcTemplate(trace);
-        raw = VerificationFixtures.managedSessionStore(jdbc, new ManagedExtensionRecordStore(jdbc),
+        raw = VerificationFixtures.managedSessionStore(jdbc, new JdbcManagedExtensionRecordStore(jdbc),
                 null, null, null, null, null, bytes -> {
                     assertThat(trace.events()).anyMatch(event -> event.phase() == StoreLockTrace.Phase.COMMIT);
                     notifications++;
@@ -104,9 +104,9 @@ class JournalLockContractTest {
         jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, physical_key,"
                         + " storage_kind, registration_state, registration_revision, registration_json)"
                         + " VALUES (?, ?, ?, ?, 'storage', ?, 'LOCAL', 'REGISTERED', 1, '{}')",
-                JdbcRuntimeBindingRepository.storageAliasKey(TENANT, "storage"),
-                JdbcRuntimeBindingRepository.storageFenceKey(TENANT),
-                JdbcRuntimeBindingRepository.storageFenceKey("storage"), TENANT, physical);
+                RuntimeAdmissionFences.storageAliasKey(TENANT, "storage"),
+                RuntimeAdmissionFences.storageFenceKey(TENANT),
+                RuntimeAdmissionFences.storageFenceKey("storage"), TENANT, physical);
         jdbc.update("INSERT INTO ma_storage_owner (storage_key, physical_key, storage_kind, mount_state)"
                 + " VALUES (?, ?, 'LOCAL', 'READY')", physical, physical);
         jdbc.update("UPDATE ma_session SET workspace_storage_id = 'storage' WHERE tenant_id = ?", TENANT);

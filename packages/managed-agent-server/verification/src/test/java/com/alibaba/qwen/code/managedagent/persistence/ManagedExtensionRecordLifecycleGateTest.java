@@ -29,7 +29,7 @@ class ManagedExtensionRecordLifecycleGateTest {
     private static final String TENANT = "tenant-gate";
 
     @Autowired
-    private ManagedExtensionRecordStore records;
+    private JdbcManagedExtensionRecordStore records;
 
     private static final ObjectMapper JSON = new ObjectMapper();
 

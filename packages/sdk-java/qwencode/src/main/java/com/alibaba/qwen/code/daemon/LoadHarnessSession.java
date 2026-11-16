@@ -19,6 +19,7 @@ public final class LoadHarnessSession {
     private int lifecycleProtocolVersion = 1;
     private Map<String, Object> agentDefinition;
     private String modelConfigDigest;
+    private String memoryStoreId;
     private Map<String, Object> sessionSkillsRef;
     private Map<String, Object> initialSelection;
     private List<Map<String, Object>> mcpServers;
@@ -95,6 +96,14 @@ public final class LoadHarnessSession {
         return this;
     }
 
+    public LoadHarnessSession withMemoryStoreId(String value) {
+        if (value != null && (managedSessionStore == null || !value.matches("[A-Za-z0-9_-]{1,128}"))) {
+            throw new IllegalArgumentException("Invalid personal memory binding");
+        }
+        this.memoryStoreId = value;
+        return this;
+    }
+
     public LoadHarnessSession withModelConfigDigest(String value) {
         this.modelConfigDigest = value == null ? null : HostedHarnessClient.requireDigest(value, "modelConfigDigest");
         return this;
@@ -140,6 +149,7 @@ public final class LoadHarnessSession {
         copy.harnessPlacement = harnessPlacement;
         copy.agentDefinition = agentDefinition;
         copy.modelConfigDigest = modelConfigDigest;
+        copy.memoryStoreId = memoryStoreId;
         copy.sessionSkillsRef = sessionSkillsRef;
         copy.initialSelection = initialSelection;
         copy.mcpServers = mcpServers;
@@ -166,6 +176,7 @@ public final class LoadHarnessSession {
         copy.harnessPlacement = harnessPlacement;
         copy.agentDefinition = agentDefinition;
         copy.modelConfigDigest = modelConfigDigest;
+        copy.memoryStoreId = memoryStoreId;
         copy.sessionSkillsRef = sessionSkillsRef;
         copy.initialSelection = initialSelection;
         copy.mcpServers = mcpServers;
@@ -204,6 +215,7 @@ public final class LoadHarnessSession {
         copy.harnessPlacement = harnessPlacement;
         copy.agentDefinition = agentDefinition;
         copy.modelConfigDigest = modelConfigDigest;
+        copy.memoryStoreId = memoryStoreId;
         copy.sessionSkillsRef = sessionSkillsRef;
         copy.initialSelection = initialSelection;
         copy.mcpServers = mcpServers;
@@ -231,6 +243,7 @@ public final class LoadHarnessSession {
         copy.harnessPlacement = harnessPlacement;
         copy.agentDefinition = agentDefinition;
         copy.modelConfigDigest = modelConfigDigest;
+        copy.memoryStoreId = memoryStoreId;
         copy.sessionSkillsRef = sessionSkillsRef;
         copy.initialSelection = initialSelection;
         copy.mcpServers = mcpServers;
@@ -365,6 +378,9 @@ public final class LoadHarnessSession {
         }
         if (modelConfigDigest != null) {
             result.put("modelConfigDigest", modelConfigDigest);
+        }
+        if (memoryStoreId != null) {
+            result.put("memoryStoreId", memoryStoreId);
         }
         if (initialSelection != null) {
             result.put("initialSelection", initialSelection);

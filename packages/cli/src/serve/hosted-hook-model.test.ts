@@ -73,6 +73,7 @@ function fixture() {
   const scope: ManagedHookModelScope = {
     evaluate,
     bindBudget: vi.fn(),
+    diagnosticsEnabled: false,
     beginMainAttempt: vi.fn(),
   };
   return { config, generateContent, evaluate, usage, scope };

@@ -536,7 +536,8 @@ class ServerEnvironmentTest {
         Path own = write("own.yml", "server.port: 9090\n");
         Files.setPosixFilePermissions(shared, PosixFilePermissions.fromString("rw-r--r--"));
         Files.setPosixFilePermissions(own, PosixFilePermissions.fromString("rw-------"));
-        ServiceAccount stranger = new ServiceAccount("qwen-preflight-stranger", Set.of());
+        ServiceAccount stranger = new ServiceAccount("qwen-preflight-stranger",
+                ServiceAccountTest.OTHER_UID, Set.of());
         // The service account cannot read it either.
         ManagedAgentPreflight.Check check = ManagedAgentPreflight.configFailureCheck(
                 new ServerEnvironment.Failure("x", "y", own), stranger, "operator");
@@ -551,11 +552,27 @@ class ServerEnvironmentTest {
         assertEquals(shared + " is not readable by operator, which runs this check",
                 check.detail());
         assertEquals("run --check as qwen-preflight-stranger or as root", check.fix());
-        // A path this process cannot look along leaves the account's view unknown.
-        Path unseen = directory.resolve("gone/application.yml");
+        // A path this process cannot look along leaves the account's view
+        // unknown: behind a directory the account alone may search.
+        Path unseen = write("unseen/application.yml", "server.port: 9090\n");
+        Files.setPosixFilePermissions(unseen, PosixFilePermissions.fromString("rw-r--r--"));
+        Files.setPosixFilePermissions(unseen.getParent(),
+                PosixFilePermissions.fromString("-----x--x"));
+        try {
+            check = ManagedAgentPreflight.configFailureCheck(
+                    new ServerEnvironment.Failure("x", "y", unseen), stranger, "operator");
+            assertEquals(unseen + " is not readable by operator, which runs this check",
+                    check.detail());
+            assertEquals("run --check as qwen-preflight-stranger or as root", check.fix());
+        } finally {
+            Files.setPosixFilePermissions(unseen.getParent(),
+                    PosixFilePermissions.fromString("rwx------"));
+        }
+        // A path that is gone the account cannot read either.
+        Path gone = directory.resolve("gone/application.yml");
         check = ManagedAgentPreflight.configFailureCheck(
-                new ServerEnvironment.Failure("x", "y", unseen), stranger, "operator");
-        assertEquals("run --check as qwen-preflight-stranger or as root", check.fix());
+                new ServerEnvironment.Failure("x", "y", gone), stranger, "operator");
+        assertEquals(gone + " is not readable by qwen-preflight-stranger", check.detail());
         // Without a service account, the row names this process, as Spring's failure does.
         check = ManagedAgentPreflight.configFailureCheck(
                 new ServerEnvironment.Failure("x", "y", own), null, "operator");
@@ -603,7 +620,8 @@ class ServerEnvironmentTest {
             String group = Files.readAttributes(etc, PosixFileAttributes.class)
                     .group().getName();
             String runner = System.getProperty("user.name");
-            ServiceAccount member = new ServiceAccount("qwen-preflight-member", Set.of(group));
+            ServiceAccount member = new ServiceAccount("qwen-preflight-member",
+                    ServiceAccountTest.OTHER_UID, Set.of(group));
             ManagedAgentPreflight.Prepared prepared = prepare(
                     named("optional:file:" + secret), new ArrayList<>());
             assertNull(prepared.failure());
@@ -645,7 +663,8 @@ class ServerEnvironmentTest {
             // does this process, which stands in for a service account unset
             // or its own.
             for (ServiceAccount account : Arrays.asList(
-                    new ServiceAccount("qwen-preflight-stranger", Set.of()), null)) {
+                    new ServiceAccount("qwen-preflight-stranger", ServiceAccountTest.OTHER_UID,
+                            Set.of()), null)) {
                 rows = ManagedAgentPreflight.configChecks(prepared, account, runner);
                 assertEquals(1, rows.size(), rows.toString());
                 assertEquals("no configuration file; packaged defaults and the"
@@ -653,7 +672,7 @@ class ServerEnvironmentTest {
             }
             // Root enters it whatever its modes.
             rows = ManagedAgentPreflight.configChecks(prepared,
-                    new ServiceAccount("root", Set.of("root")), runner);
+                    new ServiceAccount("root", 0, Set.of("root")), runner);
             assertEquals(1, rows.size(), rows.toString());
             assertEquals(ManagedAgentPreflight.Status.FAIL, rows.get(0).status());
             assertEquals("run --check as root", rows.get(0).fix());
@@ -1707,15 +1726,17 @@ class ServerEnvironmentTest {
             Files.setPosixFilePermissions(file, PosixFilePermissions.fromString("rw-r--r--"));
         }
         assertEquals(ManagedAgentPreflight.Status.WARN, ManagedAgentPreflight.configFileCheck(
-                url, null, "spring.datasource.url", Set.of()).status());
+                url, null, ManagedAgentPreflight.runner(), "spring.datasource.url", Set.of())
+                .status());
         assertEquals(ManagedAgentPreflight.Status.PASS, ManagedAgentPreflight.configFileCheck(
-                port, null, "server.port", Set.of()).status());
+                port, null, ManagedAgentPreflight.runner(), "server.port", Set.of()).status());
         // In UTF-16 too, after its byte order mark.
         Path wide = directory.resolve("tree/spring.datasource.jdbc-url");
         Files.write(wide, "jdbc:mysql://app:s3cret@db/qwen".getBytes(StandardCharsets.UTF_16));
         Files.setPosixFilePermissions(wide, PosixFilePermissions.fromString("rw-r--r--"));
         assertEquals(ManagedAgentPreflight.Status.WARN, ManagedAgentPreflight.configFileCheck(
-                wide, null, "spring.datasource.jdbc-url", Set.of()).status());
+                wide, null, ManagedAgentPreflight.runner(), "spring.datasource.jdbc-url", Set.of())
+                .status());
         // A file whose extension Spring is told, as file:app.conf[.properties].
         Path hinted = write("etc/app.conf", "spring.datasource.password=s3cret\n");
         Files.setPosixFilePermissions(hinted, PosixFilePermissions.fromString("rw-r--r--"));
@@ -1962,7 +1983,8 @@ class ServerEnvironmentTest {
         Files.setPosixFilePermissions(shared, PosixFilePermissions.fromString("rw-r--r--"));
         Files.setPosixFilePermissions(own, PosixFilePermissions.fromString("rw-------"));
         List<ManagedAgentPreflight.Check> rows = ManagedAgentPreflight.configFileChecks(
-                List.of(shared, own), new ServiceAccount("qwen-preflight-stranger", Set.of()));
+                List.of(shared, own), new ServiceAccount("qwen-preflight-stranger",
+                        ServiceAccountTest.OTHER_UID, Set.of()));
         assertEquals(2, rows.size(), rows.toString());
         assertEquals(ManagedAgentPreflight.Status.PASS, rows.get(0).status(), rows.toString());
         assertEquals(ManagedAgentPreflight.Status.FAIL, rows.get(1).status());

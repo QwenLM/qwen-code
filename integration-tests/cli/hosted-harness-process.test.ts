@@ -12,6 +12,7 @@ import { createServer as createHttpServer } from 'node:http';
 import path from 'node:path';
 import WebSocket from 'ws';
 import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import { parseManagedExecutionEvidence } from '@qwen-code/qwen-code-core/managed-runtime/managed-execution-diagnostics.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   fakeToolCall,
@@ -98,13 +99,14 @@ afterEach(async ({ task }) => {
 async function start(
   handler: FakeOpenAIHandler = () => ({ content: 'HOSTED_REPLY' }),
   options: Parameters<HostedHarnessProcess['start']>[1] = {},
+  supportedStorageVersion: 2 | 4 = 2,
 ) {
   cli = new HostedHarnessProcess();
   clientId = '';
   model = await startFakeOpenAIServer(handler);
   await cli.start(model.baseUrl, options);
   sessionId = randomUUID();
-  store = await startHostedSessionStore(sessionId);
+  store = await startHostedSessionStore(sessionId, { supportedStorageVersion });
 }
 
 function connection() {
@@ -371,6 +373,69 @@ describe(
       ).toBe(true);
       await json(`/session/${sessionId}`, undefined, 204, 'DELETE');
       expect(store!.failures).toEqual([]);
+    });
+
+    it('persists an execution diagnostic epoch through packaged text output, replay and reload', async () => {
+      await start(undefined, {}, 4);
+      await open();
+      const body = payload('COLLECT_DIAGNOSTIC_EPOCH');
+      const receipt = await submit(body);
+      assertCompleted(await settled(), body.promptId, 'HOSTED_REPLY');
+      const evidence = async () => {
+        const messages = (await store!.scan()).events.filter(
+          (event) =>
+            event.kind === 'message.committed' &&
+            event.payload['role'] === 'assistant',
+        );
+        return Promise.all(
+          messages.map(async (event) => {
+            const ref = event.payload[
+              'diagnosticsRef'
+            ] as unknown as ManagedSessionDurableRef;
+            expect(ref).toMatchObject({
+              kind: 'managed-execution-diagnostics',
+              schemaVersion: 1,
+            });
+            return {
+              eventId: event.eventId,
+              facts: parseManagedExecutionEvidence(
+                await store!.readResource(ref),
+              ),
+            };
+          }),
+        );
+      };
+      const first = await evidence();
+      expect(first).toHaveLength(1);
+      expect(first[0].facts).toMatchObject({
+        schemaVersion: 1,
+        reducerVersion: 1,
+        startEventId: first[0].eventId,
+        sourceEventId: first[0].eventId,
+        observations: [],
+        omittedObservationCount: 0,
+      });
+      const committed = (await store!.scan()).committed;
+      expect(await submit(body)).toEqual(receipt);
+      expect((await store!.scan()).committed).toBe(committed);
+      expect(await evidence()).toEqual(first);
+      expect(model!.requests).toHaveLength(1);
+      await json(`/session/${sessionId}/detach`, {}, 204);
+      await open(true);
+      const next = payload('AFTER_DIAGNOSTIC_RELOAD');
+      await submit(next);
+      assertCompleted(await settled(), next.promptId, 'HOSTED_REPLY');
+      const restored = await evidence();
+      expect(restored).toHaveLength(2);
+      expect(restored[0]).toEqual(first[0]);
+      expect(restored[1].facts).toMatchObject({
+        epochId: first[0].facts.epochId,
+        startEventId: first[0].eventId,
+        sourceEventId: restored[1].eventId,
+        observations: [],
+      });
+      expect(restored[1].eventId).not.toBe(first[0].eventId);
+      expect(model!.requests).toHaveLength(2);
     });
 
     it('initializes a fresh canonical Session and replays committed text without duplicate inference', async () => {

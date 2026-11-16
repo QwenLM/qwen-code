@@ -117,10 +117,6 @@ public final class WorkspaceFileProcess implements LocalWorkspaceFiles {
         return new RuntimeBrokerException(503, "workspace_upload_pending", "Original Workspace upload must be reconciled.", true);
     }
 
-    static void requireCapability(HostCommandRunner.Result help) {
-        requireCapability(help, false);
-    }
-
     public static void requireCapability(HostCommandRunner.Result help, boolean upload) {
         try {
             if (help.exitCode() != 0 || help.stdout().length > 65536) {

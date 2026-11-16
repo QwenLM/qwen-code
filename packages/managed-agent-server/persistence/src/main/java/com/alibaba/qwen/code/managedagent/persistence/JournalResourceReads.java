@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObje
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredResource;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcCsiActivationAdmission;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcCsiFilesRetirementGuard;
@@ -59,7 +60,7 @@ final class JournalResourceReads {
         storeRows.requireHeadScope(head, tenantId, workspaceId, sessionId);
         fencing.requireReadGrant(head, writerToken);
         try (var lease = outputRetention.read(tenantId, sessionId)) {
-            String scopeKey = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
+            String scopeKey = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
             JournalStoreRows.ResourceRow resource = storeRows.findResource(scopeKey, resourceId, updateVerification);
             if (resource == null) {
                 throw new ManagedAgentException(404,
@@ -76,13 +77,30 @@ final class JournalResourceReads {
                         storeRows.databaseNow(), scopeKey, resourceId);
             }
             byte[] bytes = "TOOL_PUBLICATION".equals(resource.storageKind())
-                    ? readPublicationObject(resource, lease, updateVerification) : resource.bytes();
+                    ? readPublicationObject(resource, lease, updateVerification)
+                    : "OSS_OBJECT".equals(resource.storageKind())
+                            ? readSessionObject(resource) : resource.bytes();
             var result = new StoredResource(resource.resourceId(), resource.kind(),
                     resource.schemaVersion(), resource.byteLength(),
                     resource.digest(), bytes);
             lease.check();
             return result;
         }
+    }
+
+    private byte[] readSessionObject(JournalStoreRows.ResourceRow resource) {
+        byte[] bytes;
+        try (java.io.InputStream stream = publicationObjects.open(resource.objectKey(), () -> {})) {
+            bytes = stream.readAllBytes();
+        } catch (java.io.IOException error) {
+            throw new IllegalStateException("Session resource read failed", error);
+        }
+        if (bytes.length != resource.byteLength()
+                || !JournalStoreRows.sha256(bytes).equals(resource.digest())) {
+            throw JournalStoreRows.conflict(ManagedSessionStoreModels.ERROR_RESOURCE_MISSING,
+                    "The external resource object is missing or corrupt.");
+        }
+        return bytes;
     }
 
     StoredResource readOwnerResource(
@@ -126,7 +144,8 @@ final class JournalResourceReads {
                                 jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
                                     JdbcCsiActivationAdmission.requireCheckpointContinuationRead(
                                             org.springframework.jdbc.datasource.DataSourceUtils.getTargetConnection(connection),
-                                            original, continuation.progress(), resourceId);
+                                            original, continuation.progress(), resourceId,
+                                            new JdbcJournalPacks(jdbc, publicationObjects, null));
                                     return null;
                                 });
                             } else {
@@ -282,10 +301,10 @@ final class JournalResourceReads {
                             + " session_scope_key = ? AND resource_id = ? AND resource_key = ? FOR"
                             + " UPDATE",
                         storeRows.resourceMapper,
-                        com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session),
+                        ManagedSessionStore.sessionScopeKey(tenant, session),
                         resource,
                         com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(
-                                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session), resource));
+                                ManagedSessionStore.sessionScopeKey(tenant, session), resource));
         return rows.isEmpty() ? null : rows.getFirst();
     }
 
@@ -296,7 +315,7 @@ final class JournalResourceReads {
                                 "SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE session_scope_key = ? AND resource_id = ? AND resource_key = ?")) {
             statement.setQueryTimeout(10);
             statement.setString(
-                    1, com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(admission.head().tenantId(), admission.head().sessionId()));
+                    1, ManagedSessionStore.sessionScopeKey(admission.head().tenantId(), admission.head().sessionId()));
             statement.setBytes(
                     2,
                     com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(
@@ -304,7 +323,7 @@ final class JournalResourceReads {
             statement.setString(
                     3,
                     com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(
-                            com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(
+                            ManagedSessionStore.sessionScopeKey(
                                     admission.head().tenantId(), admission.head().sessionId()),
                             admission.resource().resourceId()));
             try (var rows = statement.executeQuery()) {
@@ -393,7 +412,7 @@ final class JournalResourceReads {
                                 "UPDATE ma_resource SET last_verified_at = ?"
                                         + " WHERE session_scope_key = ? AND resource_id = ?",
                                 storeRows.databaseNow(),
-                                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(head.tenantId(), head.sessionId()),
+                                ManagedSessionStore.sessionScopeKey(head.tenantId(), head.sessionId()),
                                 fetched.resourceId());
                     } catch (ManagedAgentException rejected) {
                         failure = rejected;

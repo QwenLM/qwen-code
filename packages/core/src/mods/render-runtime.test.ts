@@ -6,13 +6,11 @@
 
 import { afterEach, describe, expect, it } from 'vitest';
 import { ModRuntime, type ModRenderHost } from './runtime.js';
-import type { ModRenderInput } from './render-tree.js';
-import type { ModLog } from './types.js';
+import type { ModAssistantMessageInput, ModBandInput } from './render-tree.js';
+import { MOD_MAX_BYTES, type ModLog } from './types.js';
 
 const signal = () => new AbortController().signal;
-const band = (
-  props: Partial<ModRenderInput['props']> = {},
-): ModRenderInput => ({
+const band = (props: Partial<ModBandInput['props']> = {}): ModBandInput => ({
   surface: 'terminal',
   component: 'AbovePrompt',
   requestId: 'above-prompt',
@@ -80,7 +78,7 @@ describe('ui.render through the real QuickJS worker', () => {
         ] });
       });`),
     ]);
-    expect(runtime.renderHooks).toEqual(['mod-0']);
+    expect(runtime.renderHooksFor('AbovePrompt')).toEqual(['mod-0']);
     await expect(runtime.render(band(), signal())).resolves.toEqual({
       tree: {
         type: 'Box',
@@ -95,6 +93,23 @@ describe('ui.render through the real QuickJS worker', () => {
           { type: 'Text', props: { dimColor: true }, children: ['  done'] },
         ],
       },
+      notes: [],
+    });
+  });
+
+  it('keeps the whole reply budget available to an AbovePrompt tree', async () => {
+    const overhead = Buffer.byteLength(
+      JSON.stringify({ type: 'Text', children: [''] }),
+    );
+    const length = Math.floor(
+      (MOD_MAX_BYTES - overhead) / Buffer.byteLength('字'),
+    );
+    const runtime = await create([
+      mod(`on('ui.render', { component: 'AbovePrompt' }, ($, e) =>
+        $.ui.resolve(e).Text({ children: '字'.repeat(${length}) }));`),
+    ]);
+    await expect(runtime.render(band(), signal())).resolves.toEqual({
+      tree: { type: 'Text', children: ['字'.repeat(length)] },
       notes: [],
     });
   });
@@ -248,7 +263,7 @@ describe('ui.render through the real QuickJS worker', () => {
       });`),
       mod(`on('ui.render', ($, e, next) => next(e));`),
     ]);
-    expect(runtime.renderHooks).toEqual(['mod-0', 'mod-1']);
+    expect(runtime.renderHooksFor('AbovePrompt')).toEqual(['mod-0', 'mod-1']);
     await expect(runtime.render(band(), signal())).resolves.toEqual({
       tree: {
         type: 'Box',
@@ -382,7 +397,7 @@ describe('ui.render through the real QuickJS worker', () => {
         return next(e);
       });`);
     const headless = await create([source], null);
-    expect(headless.renderHooks).toEqual([]);
+    expect(headless.renderHooksFor('AbovePrompt')).toEqual([]);
     expect(logs.map((log) => log.text)).toEqual([
       'Hooks for unsupported events will not run: ui.render',
       'false:true',
@@ -394,5 +409,164 @@ describe('ui.render through the real QuickJS worker', () => {
     await create([source]);
     expect(logs.map((log) => log.text)).toEqual(['true:true']);
     expect(invalidated).toEqual(['mod-0']);
+  });
+  describe('AssistantMessage rows', () => {
+    const rows: ModRenderHost = {
+      sites: ['AbovePrompt', 'AssistantMessage'],
+      invalidate: (plugin) => invalidated.push(plugin),
+    };
+    const row = (
+      text = 'The worker runs one dispatch at a time.',
+      isFirstOfReply = true,
+    ): ModAssistantMessageInput => ({
+      surface: 'terminal',
+      component: 'AssistantMessage',
+      requestId: '7',
+      props: { text, isFirstOfReply },
+    });
+
+    it('names per site the plugins whose hooks may hear it', async () => {
+      const runtime = await create(
+        [
+          mod(
+            `on('ui.render', { component: 'AbovePrompt' }, ($, e, next) => next(e));`,
+          ),
+          mod(
+            `on('ui.render', { component: 'AssistantMessage' }, ($, e, next) => next(e));`,
+          ),
+          mod(`on('ui.render', ($, e, next) => next(e));`),
+          mod(
+            `on('ui.*', { component: /^Assistant/ }, ($, e, next) => next(e));`,
+          ),
+          mod(
+            `on('ui.render', { component: ['Spinner', 'Pane'] }, ($, e, next) => next(e));`,
+          ),
+        ],
+        rows,
+      );
+      expect(runtime.renderHooksFor('AbovePrompt')).toEqual(['mod-0', 'mod-2']);
+      expect(runtime.renderHooksFor('AssistantMessage')).toEqual([
+        'mod-1',
+        'mod-2',
+        'mod-3',
+      ]);
+      // A host that draws only the band offers no rows.
+      const band = await create([
+        mod(
+          `on('ui.render', { component: 'AssistantMessage' }, ($, e, next) => next(e));`,
+        ),
+      ]);
+      expect(band.renderHooksFor('AssistantMessage')).toEqual([]);
+    });
+
+    it('draws the props a hook rewrote, leaving the row otherwise as it was', async () => {
+      const runtime = await create(
+        [
+          mod(`on('ui.render', { component: 'AssistantMessage' }, ($, e, next) =>
+            next({ ...e, props: { ...e.props, text: '译：' + e.props.text } }));`),
+        ],
+        rows,
+      );
+      const drawn = await runtime.render(row(), signal());
+      expect(drawn.tree).toEqual({ type: 'engine', ref: 0 });
+      expect(drawn.props).toEqual({
+        text: '译：The worker runs one dispatch at a time.',
+        isFirstOfReply: true,
+      });
+    });
+
+    it('takes multi-line markdown, and an original text left as it is whatever it holds', async () => {
+      const runtime = await create(
+        [
+          mod(`on('ui.render', { component: 'AssistantMessage' }, ($, e, next) =>
+            e.props.text.startsWith('keep') ? next(e)
+              : next({ ...e, props: { ...e.props, text: e.props.text + '\\n\\n\\tmore' } }));`),
+        ],
+        rows,
+      );
+      const markdown = 'One.\n\n```sh\n\techo two\r\n```';
+      expect((await runtime.render(row(markdown), signal())).props).toEqual({
+        text: markdown + '\n\n\tmore',
+        isFirstOfReply: true,
+      });
+      // The reply's own escape passes through a hook that keeps it.
+      const kept = 'keep \u001b[1mbold';
+      expect((await runtime.render(row(kept), signal())).props).toEqual({
+        text: kept,
+        isFirstOfReply: true,
+      });
+      expect(
+        logs.filter((log) => log.text.startsWith('ui.render hook skipped')),
+      ).toEqual([]);
+    });
+
+    it('keeps the row when a hook draws a tree, pins isFirstOfReply and refuses control characters', async () => {
+      const runtime = await create(
+        [
+          mod(`on('ui.render', { component: 'AssistantMessage' }, ($, e, next) => {
+            if (e.props.text === 'tree') return $.ui.resolve(e).Text({ children: 'mine' });
+            if (e.props.text === 'first')
+              return next({ ...e, props: { ...e.props, isFirstOfReply: !e.props.isFirstOfReply } });
+            return next({ ...e, props: { ...e.props, text: '\\u001b[31mred' } });
+          });`),
+        ],
+        rows,
+      );
+      const notes: string[] = [];
+      for (const text of ['tree', 'first', 'escape', 'tree']) {
+        const drawn = await runtime.render(row(text), signal());
+        expect(drawn.props).toEqual({ text, isFirstOfReply: true });
+        notes.push(...drawn.notes);
+      }
+      // A tree is said once per load; the failing rewrites skip the hook.
+      expect(notes).toEqual([
+        "mod-0: ui.render (AssistantMessage) answered a tree; this host draws only a rewrite of the row's props, so the row was left as it was",
+      ]);
+      const skipped = logs
+        .filter((log) => log.text.startsWith('ui.render hook skipped'))
+        .map((log) => log.text);
+      expect(skipped).toEqual([
+        expect.stringContaining('pinned'),
+        expect.stringContaining('props.text holds a control character'),
+      ]);
+    });
+
+    it('waits for a hook that rewrites from a model call another Mod answers', async () => {
+      const runtime = await ModRuntime.createGroup(
+        [
+          mod(`on('model.complete', ($, e) => ({ value: { isAnswered: true,
+            text: '工作进程一次只运行一个 dispatch。', usage: { input_tokens: 0,
+            output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } }));`),
+          mod(`on('ui.render', { component: 'AssistantMessage' }, async ($, e, next) => {
+            const r = await $.model.complete({ model: 'haiku', prompt: e.props.text });
+            return next(r.isAnswered ? { ...e, props: { ...e.props, text: r.text } } : e);
+          });`),
+        ].map((source, index) => ({
+          id: `mod-${index}`,
+          name: `mod-${index}`,
+          source: { root: '/fixture', entry: '/fixture/mod.js', source },
+          options: {},
+        })),
+        '/workspace',
+        (log, plugin) => logs.push({ ...log, plugin }),
+        signal(),
+        undefined,
+        'terminal',
+        '1.0.0',
+        undefined,
+        undefined,
+        rows,
+        false,
+        undefined,
+        async () => {
+          throw new Error('the provider is never reached');
+        },
+      );
+      runtimes.push(runtime);
+      expect((await runtime.render(row(), signal())).props).toEqual({
+        text: '工作进程一次只运行一个 dispatch。',
+        isFirstOfReply: true,
+      });
+    });
   });
 });
