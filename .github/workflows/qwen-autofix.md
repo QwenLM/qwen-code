@@ -144,7 +144,7 @@ from N`, and bounding an engagement with `@qwen-code /takeover for N`.
 - [34. review-scan · Scan for PRs with new feedback — A red check is a persistent STATE, not the instant it turned red.](#af-034)
 - [35. review-scan · Scan for PRs with new feedback — Stamp the dispatch-pending marker now, while this scan still owns the decision: an…](#af-035)
 - [36. review-scan · Scan for PRs with new feedback — Fan out: emit EVERY eligible PR up to the per-scan budget. The address matrix bounds…](#af-036)
-- [37. build-cli · Prepare Qwen Code CLI — The repo-root dist/ plus packages/core/dist are shipped:](#af-037)
+- [37. build-cli · Prepare Qwen Code CLI — Ship the bundle plus core and its network-policy dependency:](#af-037)
 - [38. review-address — Secret-bearing and executes PR code, but every target is live-gated to write+ (internal)…](#af-038)
 - [39. review-address — Simultaneity bound for the whole fleet — the ONLY place different PRs wait on each other…](#af-039)
 - [40. review-address — Serialises every writer of THIS PR's head branch, across workflows.](#af-040)
@@ -1335,27 +1335,29 @@ the remainder (their signals persist).
 
 <a id="af-037"></a>
 
-### 37. build-cli · Prepare Qwen Code CLI — The repo-root dist/ plus packages/core/dist are shipped:
+### 37. build-cli · Prepare Qwen Code CLI — Ship the bundle plus core and its network-policy dependency:
 
 In `build-cli` · `Prepare Qwen Code CLI`.
 
 ```text
-The repo-root dist/ plus packages/core/dist are shipped:
+Ship the bundle plus core and its network-policy dependency:
 copy_bundle_assets.js already gathers every runtime asset (chunks,
 vendor, web-shell, locales) under the root dist/, and the remaining
 packages/*/dist would triple the artifact size without ever being
 read by the legs — the verify gate's full `npm run build` wipes and
 rebuilds each package's dist from branch sources (build_package.js
-rms it first, so no staleness leaks through). packages/core/dist is
-the exception: the settings-schema check runs BEFORE any build (on
-every path, including no-action), and its generator — tsx run from
-the repo root, whose tsconfig has NO `paths` — imports cli sources
-that resolve '@qwen-code/qwen-code-core' through the workspace
-symlink to core's dist entry point. Without it the generator crashes
-with ERR_MODULE_NOT_FOUND and the gate misreports a deterministic
-"settings schema is stale" rejection. The i18n check needs no dist:
-it runs with cwd packages/cli, whose tsconfig `paths` map the
-specifier to core's sources instead.
+rms it first, so no staleness leaks through). packages/core/dist and
+packages/network-policy/dist are exceptions: the settings-schema
+check runs BEFORE any build (on every path, including no-action),
+and its generator — tsx run from the repo root, whose tsconfig has
+NO `paths` — imports cli sources that resolve
+'@qwen-code/qwen-code-core' through the workspace symlink to core's
+dist entry point. Core also imports the built network-policy package.
+Both outputs must be archived and checked after restoration; without
+either, the generator crashes with ERR_MODULE_NOT_FOUND and the gate
+misreports a deterministic "settings schema is stale" rejection. The
+i18n check needs no dist: it imports translation metadata directly,
+and the CLI tsconfig maps its narrow core data import to source.
 ```
 
 <a id="af-038"></a>

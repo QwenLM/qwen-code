@@ -14,5 +14,6 @@ export default {
   email: 'Email',
   github: 'GitHub',
   gitlab: 'GitLab',
+  'generic-webhook': 'Generic Webhook Sending',
   plugins: 'Plugins',
 };

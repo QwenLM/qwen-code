@@ -12495,11 +12495,12 @@ exit 1
       reviewAddressJob.indexOf("- name: 'Validate bundle SHA'"),
     ).toBeLessThan(reviewAddressJob.indexOf("- name: 'Checkout trusted base'"));
 
-    // The artifact is the repo-root dist/ plus packages/core/dist —
+    // The artifact is the bundle plus core and its network-policy dependency —
     // copy_bundle_assets.js already gathers every runtime asset under the
     // root dist/, and the remaining packages/*/dist would triple the size
     // and are rebuilt from branch sources by the verify gate. core's dist
-    // is the exception: the settings-schema check runs BEFORE any build
+    // and its built workspace dependency are exceptions: the settings-schema
+    // check runs BEFORE any build
     // (on every path, including no-action) and its generator — tsx run
     // from the repo root, whose tsconfig has NO `paths` — imports cli
     // sources that resolve '@qwen-code/qwen-code-core' through the
@@ -12508,7 +12509,7 @@ exit 1
     // The regex anchors the line end, so appending another path to the
     // tarball fails here — a substring pin would let additive drift pass.
     expect(buildCliJob).toMatch(
-      /tar -czf "\$\{RUNNER_TEMP\}\/qwen-cli-dist\.tar\.gz" dist packages\/core\/dist\n/,
+      /tar -czf "\$\{RUNNER_TEMP\}\/qwen-cli-dist\.tar\.gz" dist packages\/core\/dist packages\/network-policy\/dist\n/,
     );
     expect(buildCliJob).toContain("name: 'qwen-autofix-cli-dist'");
     expect(buildCliJob).toContain('retention-days: 1');
@@ -12523,6 +12524,9 @@ exit 1
     // settings-schema generator crash with ERR_MODULE_NOT_FOUND — pin the
     // restore-side assertion.
     expect(restoreStep).toContain('test -f packages/core/dist/index.js');
+    expect(restoreStep).toContain(
+      'test -f packages/network-policy/dist/index.js',
+    );
     const downloadStep = stepOf(reviewAddressJob, 'Download CLI bundle');
     expect(downloadStep).toContain("name: 'qwen-autofix-cli-dist'");
     // Download directory and restore extract path are one contract — pin

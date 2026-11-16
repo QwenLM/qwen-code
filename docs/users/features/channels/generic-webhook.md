@@ -96,6 +96,10 @@ webhook tasks, failure/cancellation events or agent conversations.
 By default, the URL must use **HTTPS** and resolve only to public addresses.
 Credentials in URL user-info, fragments and redirects are not supported.
 
+URLs use standard URL parsing, including hostname case, default-port and
+internationalized-domain normalization. Validation and delivery use the same
+parser; the parsed hostname is resolved and checked before connecting.
+
 To reach your own local or private-network receiver, explicitly set the
 per-Channel `allowPrivateNetwork` option:
 

@@ -9,6 +9,7 @@ import { EventEmitter, once } from 'node:events';
 import { readFileSync } from 'node:fs';
 import {
   createServer as createHttpServer,
+  type IncomingHttpHeaders,
   type IncomingMessage,
   type ServerResponse,
 } from 'node:http';
@@ -53,10 +54,10 @@ function track(socket: Duplex) {
   socket.once('close', () => sockets.delete(socket));
 }
 
-async function listen(server: Server): Promise<number> {
+async function listen(server: Server, hostname = '127.0.0.1'): Promise<number> {
   servers.push(server);
   server.on('connection', track);
-  server.listen(0, '127.0.0.1');
+  server.listen(0, hostname);
   await once(server, 'listening');
   return (server.address() as AddressInfo).port;
 }
@@ -105,6 +106,7 @@ async function receiver(
   respond: (response: ServerResponse) => void = (response) => {
     response.writeHead(204).end();
   },
+  hostname = '127.0.0.1',
 ) {
   const receipts: Receipt[] = [];
   let requestReceived!: () => void;
@@ -136,11 +138,19 @@ async function receiver(
   const server = tls
     ? createHttpsServer({ key, cert: certificate }, handler)
     : createHttpServer(handler);
-  return { port: await listen(server), receipts, received };
+  return { port: await listen(server, hostname), receipts, received };
 }
 
-async function proxy(tls = false, hostname = '127.0.0.1') {
-  const tunnels: Array<{ authority?: string; authorization?: string }> = [];
+async function proxy(
+  tls = false,
+  hostname = '127.0.0.1',
+  defaultPortTarget?: { defaultPort: 80 | 443; receiverPort: number },
+) {
+  const tunnels: Array<{
+    authority?: string;
+    authorization?: string;
+    headers: IncomingHttpHeaders;
+  }> = [];
   const expectedAuthorization = `Basic ${Buffer.from('proxy-user:proxy-secret').toString('base64')}`;
   const server = tls
     ? createHttpsServer({ key, cert: certificate })
@@ -149,6 +159,7 @@ async function proxy(tls = false, hostname = '127.0.0.1') {
     tunnels.push({
       authority: request.url,
       authorization: request.headers['proxy-authorization'],
+      headers: { ...request.headers },
     });
     if (request.headers['proxy-authorization'] !== expectedAuthorization) {
       downstream.end(
@@ -156,16 +167,38 @@ async function proxy(tls = false, hostname = '127.0.0.1') {
       );
       return;
     }
-    const destination = new URL(`http://${request.url}`);
-    if (destination.hostname !== '127.0.0.1') {
+    let destination: URL;
+    try {
+      destination = new URL(`http://${request.url}`);
+    } catch {
+      downstream.end(
+        'HTTP/1.1 502 Invalid CONNECT authority\r\nContent-Length: 0\r\n\r\n',
+      );
+      return;
+    }
+    const destinationHostname = destination.hostname.startsWith('[')
+      ? destination.hostname.slice(1, -1)
+      : destination.hostname;
+    if (destinationHostname !== '127.0.0.1' && destinationHostname !== '::1') {
       downstream.end(
         'HTTP/1.1 502 Proxy DNS is forbidden\r\nContent-Length: 0\r\n\r\n',
       );
       return;
     }
+    // Default-port fixtures verify the wire authority before mapping it to an
+    // ephemeral receiver, so the test never needs a privileged listener.
+    if (
+      defaultPortTarget &&
+      request.url !== `127.0.0.1:${defaultPortTarget.defaultPort}`
+    ) {
+      downstream.end(
+        'HTTP/1.1 502 Unexpected default-port authority\r\nContent-Length: 0\r\n\r\n',
+      );
+      return;
+    }
     const upstream = connect(
-      Number(destination.port),
-      destination.hostname,
+      defaultPortTarget?.receiverPort ?? Number(destination.port),
+      destinationHostname,
       () => {
         downstream.write('HTTP/1.1 200 Connection Established\r\n\r\n');
         if (head.length) upstream.write(head);
@@ -297,16 +330,124 @@ describe('Generic webhook real network delivery', () => {
       expect(forward?.tunnels ?? []).toEqual(
         route === 'proxy'
           ? [
-              {
+              expect.objectContaining({
                 authority: `127.0.0.1:${origin.port}`,
                 authorization: forward!.expectedAuthorization,
-              },
+              }),
             ]
           : [],
       );
+      if (route === 'proxy') {
+        expect('authorization' in forward!.tunnels[0]!.headers).toBe(false);
+      }
       expect(dns.lookup).toHaveBeenCalledTimes(1);
       expect(bridge.newSession).not.toHaveBeenCalled();
       expect(bridge.prompt).not.toHaveBeenCalled();
+      for (const agent of dispatchers)
+        expect(agent).toHaveProperty('destroyed', true);
+    },
+  );
+
+  it.each([
+    { tls: true, defaultPort: 443 },
+    { tls: false, defaultPort: 80 },
+  ] as const)(
+    'pins an implicit port $defaultPort proxy tunnel without changing the origin',
+    async ({ tls, defaultPort }) => {
+      const origin = await receiver(tls);
+      const forward = await proxy(false, '127.0.0.1', {
+        defaultPort,
+        receiverPort: origin.port,
+      });
+      const { channel, bridge } = make(
+        `${tls ? 'https' : 'http'}://receiver.test/hook`,
+        forward.url,
+      );
+      await channel.connect();
+      const text = '**Default-port delivery** · 完成 🙂';
+      await expect(
+        channel.deliverProactive(target, text),
+      ).resolves.toBeUndefined();
+
+      expect(forward.tunnels).toEqual([
+        expect.objectContaining({
+          authority: `127.0.0.1:${defaultPort}`,
+          authorization: forward.expectedAuthorization,
+        }),
+      ]);
+      expect('authorization' in forward.tunnels[0]!.headers).toBe(false);
+      expect(origin.receipts).toEqual([
+        {
+          method: 'POST',
+          path: '/hook',
+          host: 'receiver.test',
+          authorization: 'Bearer receiver-secret',
+          proxyAuthorization: undefined,
+          sni: tls ? 'receiver.test' : undefined,
+          body: { version: 1, text },
+        },
+      ]);
+      expect(dns.lookup).toHaveBeenCalledTimes(1);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+      for (const agent of dispatchers)
+        expect(agent).toHaveProperty('destroyed', true);
+    },
+  );
+
+  it.for([
+    { hostname: 'receiver.test', tls: true },
+    { hostname: '[::1]', tls: false },
+  ])(
+    'pins IPv6 CONNECT authority for $hostname without exposing receiver credentials',
+    async ({ hostname, tls }, { skip }) => {
+      let origin: Awaited<ReturnType<typeof receiver>>;
+      try {
+        origin = await receiver(tls, undefined, '::1');
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          'code' in error &&
+          ['EAFNOSUPPORT', 'EADDRNOTAVAIL', 'EPROTONOSUPPORT'].includes(
+            String(error.code),
+          )
+        ) {
+          skip('IPv6 loopback is unavailable on this host.');
+        }
+        throw error;
+      }
+      vi.mocked(dns.lookup).mockResolvedValue([
+        { address: '::1', family: 6 },
+      ] as never);
+      const forward = await proxy();
+      const { channel } = make(
+        `${tls ? 'https' : 'http'}://${hostname}:${origin.port}/hook`,
+        forward.url,
+      );
+      await channel.connect();
+      const text = 'IPv6 delivery: 完成';
+      await expect(
+        channel.deliverProactive(target, text),
+      ).resolves.toBeUndefined();
+
+      expect(forward.tunnels).toEqual([
+        expect.objectContaining({
+          authority: `[::1]:${origin.port}`,
+          authorization: forward.expectedAuthorization,
+        }),
+      ]);
+      expect('authorization' in forward.tunnels[0]!.headers).toBe(false);
+      expect(origin.receipts).toEqual([
+        {
+          method: 'POST',
+          path: '/hook',
+          host: `${hostname}:${origin.port}`,
+          authorization: 'Bearer receiver-secret',
+          proxyAuthorization: undefined,
+          sni: tls ? hostname : undefined,
+          body: { version: 1, text },
+        },
+      ]);
+      expect(dns.lookup).toHaveBeenCalledTimes(hostname === '[::1]' ? 0 : 1);
       for (const agent of dispatchers)
         expect(agent).toHaveProperty('destroyed', true);
     },

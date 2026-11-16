@@ -23,10 +23,12 @@ import checkUnitTestPrerequisites, {
   GENERATED_PREREQUISITES,
   aliasedSpecifiers,
   checkAndReport,
+  distEntryFiles,
   findMissingPrerequisites,
   formatPrerequisiteMessage,
   normalizePackageKey,
 } from '../vitest-global-setup.js';
+import { getWorkspacePackageJsonPaths } from '../workspaces.js';
 
 const guardUrl = new URL('../vitest-global-setup.js', import.meta.url);
 
@@ -357,6 +359,44 @@ describe('DIST_PREREQUISITES stays in sync with channel-registry', () => {
         imported,
         `stale prerequisite entry ${entry}: no matching channel-registry import`,
       ).toContain(entry);
+    }
+  });
+});
+
+describe('DIST_PREREQUISITES stays in sync with core dependencies', () => {
+  it('lists every built core workspace dependency without a source alias', () => {
+    const root = fileURLToPath(new URL('../../', import.meta.url));
+    const readManifest = (file) =>
+      JSON.parse(readFileSync(path.join(root, file), 'utf8'));
+    const { workspaces } = readManifest('package.json');
+    const workspacePackages = new Map(
+      getWorkspacePackageJsonPaths(root, workspaces).map((file) => {
+        const manifest = readManifest(file);
+        return [
+          manifest.name,
+          { manifest, directory: path.posix.dirname(file) },
+        ];
+      }),
+    );
+    const core = readManifest('packages/core/package.json');
+    const aliases = aliasedSpecifiers(
+      path.join(root, 'packages/core/vitest.config.ts'),
+    );
+    for (const name of Object.keys(core.dependencies ?? {})) {
+      if (!name.startsWith('@qwen-code/') || aliases.has(name)) continue;
+      const dependency = workspacePackages.get(name);
+      expect(
+        dependency,
+        `missing workspace for core dependency ${name}`,
+      ).toBeDefined();
+      if (
+        distEntryFiles(dependency.manifest, dependency.directory).length === 0
+      )
+        continue;
+      expect(
+        DIST_PREREQUISITES['packages/core'],
+        `missing prerequisite entry for core dependency ${name}`,
+      ).toContain(dependency.directory);
     }
   });
 });

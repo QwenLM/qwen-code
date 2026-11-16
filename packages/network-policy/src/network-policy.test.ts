@@ -154,10 +154,10 @@ describe('resolveNetworkTarget address policies', () => {
     '2606:4700:4700::1111',
     '::ffff:808:808',
   ])('allows public HTTPS but rejects public HTTP at %s', async (address) => {
+    const url = `${addressUrl(address)}?topic=build%20result&tag=a&tag=b#details`;
     for (const policy of ['public', 'allow-private'] as const) {
-      await expect(
-        resolveNetworkTarget(addressUrl(address), policy),
-      ).resolves.toMatchObject({ url: new URL(addressUrl(address)) });
+      const target = await resolveNetworkTarget(url, policy);
+      expect(target.url.href).toBe(url);
       await expect(
         resolveNetworkTarget(addressUrl(address, 'http:'), policy),
       ).rejects.toThrow(NetworkPolicyError);

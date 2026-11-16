@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { parseNetworkTargetUrl } from '@qwen-code/network-policy';
 import { parseGenericWebhookConfig } from './config.js';
 import { plugin } from './index.js';
 
@@ -47,6 +48,23 @@ describe('generic webhook configuration', () => {
       networkPolicy: 'allow-private',
       bearerToken: 'a-Z_0.~+/==',
     });
+  });
+
+  it.each([
+    ['https://receiver.example', 'https://receiver.example/'],
+    ['HTTPS://RECEIVER.EXAMPLE:443/hook', 'https://receiver.example/hook'],
+    ['https://例子.测试/hook', 'https://xn--fsqu00a.xn--0zwm56d/hook'],
+    [
+      'https://receiver.example/通知?状态=完成',
+      'https://receiver.example/%E9%80%9A%E7%9F%A5?%E7%8A%B6%E6%80%81=%E5%AE%8C%E6%88%90',
+    ],
+  ])('allows standard URL normalization for %s', (webhookUrl, href) => {
+    const config = parseGenericWebhookConfig({ webhookUrl });
+    expect(config.webhookUrl).toBe(webhookUrl);
+    expect(plugin.management!.validateConfig!({ webhookUrl })).toBeUndefined();
+    expect(
+      parseNetworkTargetUrl(config.webhookUrl, config.networkPolicy).href,
+    ).toBe(href);
   });
 
   it.each([
