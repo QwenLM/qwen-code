@@ -167,6 +167,7 @@ export class ManagedDingtalkAdapter {
   private loggedNoClaimSlot = false;
   private loggedAcceptFailure = false;
   private loggedNoReplyTarget = false;
+  private loggedSettleFailure = false;
 
   constructor(options: ManagedDingtalkAdapterOptions) {
     this.settings = dingtalkSettings(options.config);
@@ -261,6 +262,7 @@ export class ManagedDingtalkAdapter {
       this.loggedNoClaimSlot = false;
       this.loggedAcceptFailure = false;
       this.loggedNoReplyTarget = false;
+      this.loggedSettleFailure = false;
       this.registeredGeneration = undefined;
       this.stream = this.deps.createStreamClient(
         this.settings,
@@ -348,7 +350,7 @@ export class ManagedDingtalkAdapter {
       if (!this.loggedAcceptFailure) {
         this.loggedAcceptFailure = true;
         this.log(
-          `Managed DingTalk could not durably accept message ${messageId}: ${String(error)}; it is left unacked for redelivery.`,
+          `Managed DingTalk could not durably accept message ${messageId}: ${persistErrorText(error)}; it is left unacked for redelivery.`,
         );
       }
       return false;
@@ -559,50 +561,50 @@ export class ManagedDingtalkAdapter {
       const wasHeld = state.pending.some(
         (entry) => entry.eventId === eventId && entry.held === true,
       );
+      // The streak reset and the settle share ONE write: a split would let a
+      // crash (or a failed second write) leave disk with pending:[] and the
+      // pre-reset streak, so the first transient refusal after a restart
+      // would immediately re-hold instead of paying the first-occurrence
+      // drop (#17432 R1-2).
       const previousPending = state.pending;
       const previousRecent = state.recent;
+      const previousRefusals = state.instanceRefusals;
+      const previousStalled = this.instanceStalled;
       state.pending = state.pending.filter(
         (entry) => entry.eventId !== eventId,
       );
       state.recent = [...state.recent, eventId].slice(-RECENT_LIMIT);
-      try {
-        this.persist();
-      } catch (error) {
-        // The admission answer arrived but the settle never reached disk.
-        // Roll back so the next tick re-drives the identical event and meets
-        // the idempotent replayed answer; a half-settled memory state would
-        // drop the claim from this process's re-drive while disk still holds
-        // it (#17173 R10).
-        state.pending = previousPending;
-        state.recent = previousRecent;
-        this.log(
-          `Managed DingTalk could not persist the admission of ${eventId}: ${String(error)}; it re-drives on the next tick.`,
-        );
-        return;
-      }
-      // The stall flags change only after the settle is durable, so a failed
-      // settle persist cannot leave a "resumed" flag over an unsettled claim.
-      const previousRefusals = state.instanceRefusals;
-      const previousStalled = this.instanceStalled;
+      // The stall logic reads the POST-settle pending: the lift arm must not
+      // see the held claim this settle is removing.
       if (!admitted.replayed && wasHeld) {
         state.instanceRefusals = 0;
         this.instanceStalled = false;
       } else {
         this.liftStallWhenNothingHeld();
       }
-      if (
-        state.instanceRefusals !== previousRefusals ||
-        this.instanceStalled !== previousStalled
-      ) {
-        // Best-effort: connect() re-arms the stall from the persisted held
-        // claim, so a lost flag write stays bounded and re-persists later.
-        try {
-          this.persist();
-        } catch (error) {
+      try {
+        this.persist();
+        this.loggedSettleFailure = false;
+      } catch (error) {
+        // The admission answer arrived but the settle never reached disk.
+        // Roll back everything the settle touched so the next tick re-drives
+        // the identical event into the idempotent replayed answer; a
+        // half-settled memory state would drop the claim from this process's
+        // re-drive while disk still holds it (#17173 R10).
+        state.pending = previousPending;
+        state.recent = previousRecent;
+        state.instanceRefusals = previousRefusals;
+        this.instanceStalled = previousStalled;
+        // Latched like the other outage lines: the rollback keeps the claim
+        // pending, so every tick re-drives it and an unlatched line would
+        // re-log per claim per tick (#17432 R1-1).
+        if (!this.loggedSettleFailure) {
+          this.loggedSettleFailure = true;
           this.log(
-            `Managed DingTalk could not persist the admission stall state: ${String(error)}; it re-persists on the next tick.`,
+            `Managed DingTalk could not persist the admission of ${eventId}: ${persistErrorText(error)}; it re-drives on the next tick.`,
           );
         }
+        return;
       }
     } catch (error) {
       const status = (error as { status?: unknown }).status;
@@ -636,7 +638,7 @@ export class ManagedDingtalkAdapter {
                 // before the write lands re-arms it after one refusal, which
                 // is the bounded first-occurrence tradeoff, never a loss.
                 this.log(
-                  `Managed DingTalk could not persist the held claim ${eventId}: ${String(error)}; the stall stays armed in memory.`,
+                  `Managed DingTalk could not persist the held claim ${eventId}: ${persistErrorText(error)}; the stall stays armed in memory.`,
                 );
               }
             }
@@ -664,7 +666,7 @@ export class ManagedDingtalkAdapter {
           // restart re-drives it into the same deterministic refusal and drops
           // it again. Never abort the batch over the failed write.
           this.log(
-            `Managed DingTalk could not persist the refused admission of ${eventId}: ${String(error)}; a restart re-drives it into the same refusal.`,
+            `Managed DingTalk could not persist the refused admission of ${eventId}: ${persistErrorText(error)}; a restart re-drives it into the same refusal.`,
           );
         }
         return;
@@ -723,7 +725,7 @@ export class ManagedDingtalkAdapter {
           // Same shape as the refusal drop: memory applied, disk keeps the
           // claim, a restart re-drives it into the same policy refusal.
           this.log(
-            `Managed DingTalk could not persist the policy drop of ${entry.eventId}: ${String(error)}; a restart re-drives it into the same refusal.`,
+            `Managed DingTalk could not persist the policy drop of ${entry.eventId}: ${persistErrorText(error)}; a restart re-drives it into the same refusal.`,
           );
         }
         continue;
@@ -873,7 +875,7 @@ export class ManagedDingtalkAdapter {
         // reconciler settles it unknown (#17173 R10).
         state.outbound = previousOutbound;
         this.log(
-          `Managed DingTalk could not persist the outbound ledger for ${delivery.deliveryId}: ${String(error)}; the send is abandoned and the lease reconciler settles it.`,
+          `Managed DingTalk could not persist the outbound ledger for ${delivery.deliveryId}: ${persistErrorText(error)}; the send is abandoned and the lease reconciler settles it.`,
         );
         return;
       }
@@ -923,7 +925,7 @@ export class ManagedDingtalkAdapter {
         // durable record, and the orphan re-drive replays the in-memory
         // receipt until the local write lands (#17173 R10).
         this.log(
-          `Managed DingTalk could not persist the receipt for ${delivery.deliveryId}: ${String(error)}; it is still reported and re-driven locally.`,
+          `Managed DingTalk could not persist the receipt for ${delivery.deliveryId}: ${persistErrorText(error)}; it is still reported and re-driven locally.`,
         );
       }
       try {
@@ -952,7 +954,7 @@ export class ManagedDingtalkAdapter {
         // The receipt is already reported; disk keeps the entry, so the next
         // tick's orphan re-drive replays the receipt and removes it again.
         this.log(
-          `Managed DingTalk could not persist the settled segment of ${delivery.deliveryId}: ${String(error)}; the orphan re-drive removes it on the next tick.`,
+          `Managed DingTalk could not persist the settled segment of ${delivery.deliveryId}: ${persistErrorText(error)}; the orphan re-drive removes it on the next tick.`,
         );
       }
       if (outcome.outcome !== 'accepted') return;
@@ -1013,7 +1015,7 @@ export class ManagedDingtalkAdapter {
         // Disk keeps the entry; the next tick replays the same idempotent
         // receipt and retries the removal. Never abort the remaining orphans.
         this.log(
-          `Managed DingTalk could not persist the orphan removal of ${entry.deliveryId}: ${String(error)}; it re-drives on the next tick.`,
+          `Managed DingTalk could not persist the orphan removal of ${entry.deliveryId}: ${persistErrorText(error)}; it re-drives on the next tick.`,
         );
       }
     }
@@ -1045,6 +1047,13 @@ export class ManagedDingtalkAdapter {
 
 function str(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+// The store rethrows a fixed sentence shared with the email channel; the fs
+// error rides on `cause`. Log the cause so ENOSPC, EACCES and a read-only
+// mount stay distinguishable (#17432 R1-3).
+function persistErrorText(error: unknown): string {
+  return String((error as Error).cause ?? error);
 }
 
 function extractText(parsed: Record<string, unknown>): string | undefined {
