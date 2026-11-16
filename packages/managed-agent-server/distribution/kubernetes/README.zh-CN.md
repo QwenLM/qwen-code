@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-> **历史部署模板。** 本文描述的 Kubernetes EndpointSlice 池发现已从 Java 控制面移除，并冷归档至 [`packages/sdk-java/managed-kubernetes-archive/`](../../../sdk-java/managed-kubernetes-archive/)。Java 现在仅支持 `discovery: static` 加显式 `instances` 列表；配置 `discovery: kubernetes` 及 `namespace`/`service-name`/`service-uid`/`port-name` 属性会在启动时以 `Harness pool discovery must be static` 拒绝，`discovery-rbac.yaml` / `discovery-role-binding.yaml` 也不再被任何代码读取。下文的 EndpointSlice 段落保留供恢复归档发现时使用；后续 issue 跟进本部署包的退役或改造。当前池请按“构建与配置”一节配置静态实例。
+> **历史部署模板。** 本文描述的 Kubernetes EndpointSlice 池发现已从 Java 控制面移除，并冷归档至 [`packages/sdk-java/managed-kubernetes-archive/`](../../../sdk-java/managed-kubernetes-archive/)。Java 现在仅支持 `discovery: static` 加显式 `instances` 列表；配置 `discovery: kubernetes` 及 `namespace`/`service-name`/`service-uid`/`port-name` 属性会在启动时以 `Harness pool discovery must be static` 拒绝，`discovery-rbac.yaml` / `discovery-role-binding.yaml` 也不再被任何代码读取。下文的 EndpointSlice 段落保留供恢复归档发现时使用；后续 issue [#17427](https://github.com/QwenLM/qwen-code/issues/17427) 跟进本部署包的退役或改造。当前池请按“构建与配置”一节配置静态实例。
 
 本部署包通过显式开启的方式，将 Hosted Harness 运行成可水平扩展的私有池。Java 继续负责租户和用户准入、持久化 placement 与订阅。Session RPC 绑定选定的 EndpointSlice Pod 地址和确切 instance/boot；Service 用作发现锚点。现有本地进程部署不设置池环境变量，也不启用 Java 池配置。
 
