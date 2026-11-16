@@ -12537,7 +12537,7 @@ describe('runNonInteractive', () => {
         .split('\n')
         .filter((line) => line.trim().length > 0)
         .map((line) => JSON.parse(line))
-        .flat() as ({ type?: string } & Row)[];
+        .flat() as Array<{ type?: string } & Row>;
       const result = events.find((frame) => frame.type === 'result');
       expect(result).toBeDefined();
       // A frame that reports a failure can never be paired with exit code 0.
