@@ -478,13 +478,16 @@ function MermaidBlock({ code }: { code: string }) {
 
   if (error) {
     return (
-      <div className={styles.codeBlock}>
-        <div className={styles.codeBlockHeader}>
+      <div className={styles.codeBlock} data-selection-code-language="mermaid">
+        <div className={styles.codeBlockHeader} data-selection-copy-ignore>
           <span className={styles.codeBlockLang}>
             {t('mermaid.errorLabel')}
           </span>
         </div>
-        <pre className={`${styles.codeBlockContent} ${styles.codeBlockPlain}`}>
+        <pre
+          className={`${styles.codeBlockContent} ${styles.codeBlockPlain}`}
+          dir="auto"
+        >
           <code>{code}</code>
         </pre>
       </div>
@@ -492,8 +495,8 @@ function MermaidBlock({ code }: { code: string }) {
   }
 
   return (
-    <div className={styles.codeBlock}>
-      <div className={styles.codeBlockHeader}>
+    <div className={styles.codeBlock} data-selection-code-language="mermaid">
+      <div className={styles.codeBlockHeader} data-selection-copy-ignore>
         <span className={styles.codeBlockLang}>{t('mermaid.label')}</span>
         <span className={styles.mermaidActions}>
           {viewMode === 'diagram' && (
@@ -540,12 +543,17 @@ function MermaidBlock({ code }: { code: string }) {
         </span>
       </div>
       {viewMode === 'code' ? (
-        <pre className={`${styles.codeBlockContent} ${styles.codeBlockPlain}`}>
+        <pre
+          className={`${styles.codeBlockContent} ${styles.codeBlockPlain}`}
+          dir="auto"
+        >
           <code>{code}</code>
         </pre>
       ) : !svg ? (
         <div
           className={`${styles.mermaidBlock} ${styles.mermaidLoading} ${styles.mermaidInline}`}
+          data-selection-copy-ignore
+          data-selection-copy-gesture
         >
           <span>{t('mermaid.rendering')}</span>
         </div>
@@ -555,6 +563,8 @@ function MermaidBlock({ code }: { code: string }) {
             canPan && isDragging ? styles.mermaidDragging : ''
           }`}
           ref={viewportRef}
+          data-selection-copy-ignore
+          data-selection-copy-gesture
           style={diagramBox ? { height: diagramBox.canvasHeight } : undefined}
           onMouseDown={handleMouseDown}
           onDoubleClick={resetZoomAndPan}
@@ -676,8 +686,8 @@ function CodeBlock({
   }
 
   return (
-    <div className={styles.codeBlock}>
-      <div className={styles.codeBlockHeader}>
+    <div className={styles.codeBlock} data-selection-code-language={lang}>
+      <div className={styles.codeBlockHeader} data-selection-copy-ignore>
         <span className={styles.codeBlockLang}>{label}</span>
         <button className={styles.codeBlockCopy} onClick={handleCopy}>
           {copied ? t('code.copied') : t('code.copy')}
@@ -686,10 +696,14 @@ function CodeBlock({
       {!documentMode && !isStreaming && html !== null ? (
         <div
           className={styles.codeBlockContent}
+          dir="auto"
           dangerouslySetInnerHTML={{ __html: html }}
         />
       ) : (
-        <pre className={`${styles.codeBlockContent} ${styles.codeBlockPlain}`}>
+        <pre
+          className={`${styles.codeBlockContent} ${styles.codeBlockPlain}`}
+          dir="auto"
+        >
           <code>{code}</code>
         </pre>
       )}
@@ -707,7 +721,11 @@ function extractRawFenceLanguage(className: string | undefined): string {
 }
 
 function InlineCode({ children }: { children: ReactNode }) {
-  return <code className={styles.inlineCode}>{children}</code>;
+  return (
+    <code className={styles.inlineCode} dir="auto">
+      {children}
+    </code>
+  );
 }
 
 function PlainMarkdownTable({ children }: { children?: ReactNode }) {
@@ -1119,9 +1137,12 @@ export const Markdown = memo(function Markdown({
   const renderedContent = useMemo(
     () =>
       throttledContent && source && sourceMarkdown?.transformMarkdown
-        ? sourceMarkdown.transformMarkdown(throttledContent, { source })
+        ? sourceMarkdown.transformMarkdown(throttledContent, {
+            source,
+            isStreaming: isStreaming === true,
+          })
         : throttledContent,
-    [source, sourceMarkdown, throttledContent],
+    [source, sourceMarkdown, throttledContent, isStreaming],
   );
 
   const effectiveTableMode = isStreaming
@@ -1260,6 +1281,7 @@ export const Markdown = memo(function Markdown({
       <div
         className={source !== 'thinking' ? styles.content : undefined}
         data-markdown-source={source}
+        dir="auto"
         data-markdown-streaming-plain-text="true"
       >
         <pre className={styles.streamingPlainText}>{renderedContent}</pre>
@@ -1293,6 +1315,7 @@ export const Markdown = memo(function Markdown({
     <div
       className={source !== 'thinking' ? styles.content : undefined}
       data-markdown-source={source}
+      dir="auto"
     >
       <IsStreamingContext.Provider value={!!isStreaming}>
         <MarkdownSourceContext.Provider value={source}>

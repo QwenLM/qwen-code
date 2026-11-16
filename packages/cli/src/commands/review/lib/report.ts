@@ -19,9 +19,17 @@ import {
   type ReviewBudget,
 } from './budget.js';
 import type { RepositoryContext } from './repository-context.js';
+import { buildSelectionIdentity, type SelectionIdentity } from './selection.js';
 
 export interface FileMetric {
   path: string;
+  /**
+   * The old path of a rename (`DiffFile.renameFrom`) — absent otherwise, so
+   * a plan without renames pays nothing for it. `build-test` reads it: what
+   * imported the old path is no longer in any import graph, so a rename
+   * runs every suite whole rather than only the tests related to the diff.
+   */
+  renameFrom?: string;
   kind: PathKind;
   /**
    * New-side line ranges this file's hunks occupy, 1-based inclusive.
@@ -111,6 +119,15 @@ export interface PlanReport {
    */
   budget: ReviewBudget;
   /**
+   * What this plan was computed from, digested — see lib/selection.ts.
+   *
+   * Coverage re-reads the plan from its path long after the agents ran, and
+   * until this existed the only thing tying the two together was the plan
+   * file's mtime, which says nothing about the diff the chunk ranges index
+   * into.
+   */
+  selection: SelectionIdentity;
+  /**
    * The review's wall, as a DURATION from the attempt's start, in seconds —
    * written by every capture command unless it was told `--deadline none`.
    * A duration rather than an epoch because the plan is never rewritten on
@@ -153,6 +170,17 @@ export function buildPlanReport(
   plan: DiffPlan,
   postImageLines: ((path: string) => number) | null,
   context: BudgetContext,
+  /**
+   * The diff text `plan` was built from, so the report can record what its
+   * chunk ranges index into (see lib/selection.ts).
+   *
+   * Required, and positional, for exactly the reason `context` is: three
+   * capture commands build a plan, and an identity that two of them record is
+   * worse than one none of them do — a reader cannot tell a plan with no
+   * identity apart from a plan whose writer forgot. The type system asks all
+   * three.
+   */
+  diffText: string,
 ): PlanReport {
   const files = plan.files.map((f): FileMetric => {
     const changedLines = f.addedLines + f.removedLines;
@@ -175,6 +203,7 @@ export function buildPlanReport(
     });
     return {
       path: f.path,
+      ...(f.renameFrom !== undefined ? { renameFrom: f.renameFrom } : {}),
       kind: f.kind,
       hunks: f.hunks
         .filter((h) => h.newCount > 0)
@@ -206,6 +235,7 @@ export function buildPlanReport(
     wrapperSignal: plan.wrapperSignal,
     chunks: plan.chunks,
     files,
+    selection: buildSelectionIdentity(diffText, plan.chunks),
     budget: reviewBudget(
       {
         srcDiffLines: plan.srcDiffLines,
@@ -346,4 +376,15 @@ export interface IncrementalScope {
    * count; absent when empty.
    */
   supersededPaths?: string[];
+}
+
+/**
+ * Render an incremental anchor for humans: truncate only sha-shaped labels.
+ * The label space holds 40-64-hex commit shas AND the literal
+ * `content-verdicts`; a blind 12-char slice printed `content-verd` into the
+ * summary line and every brief. One copy, because `agent-prompt`'s two call
+ * sites (the summary line and the chunk frames) must never drift.
+ */
+export function displayAnchor(label: string): string {
+  return /^[0-9a-f]{40,64}$/i.test(label) ? label.slice(0, 12) : label;
 }

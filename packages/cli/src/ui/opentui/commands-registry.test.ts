@@ -13,7 +13,7 @@
  *    against the real loader output and command objects.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import type { Config } from '@qwen-code/qwen-code-core';
 import type { OpenDialogActionReturn } from '../commands/types.js';
 import {
@@ -69,6 +69,7 @@ const ALL_DIALOG_KINDS: readonly InkDialogKind[] = [
   'memory',
   'model',
   'fast-model',
+  'advisor-model',
   'voice-model',
   'vision-model',
   'compaction-model',
@@ -123,14 +124,16 @@ describe('routeDialogToOpenTui (ink dialog-switch parity)', () => {
   it('maps each dialog kind onto its exact OpenTUI target', () => {
     // Pins the mapping itself, not just its existence: mis-routing one
     // dialog onto another (e.g. theme → settings) must fail here.
-    const targets: Array<[InkDialogKind, string]> = [
+    const targets: Array<[InkDialogKind, string, object?]> = [
       ['help', 'help'],
       ['theme', 'theme'],
       ['editor', 'editor'],
       ['settings', 'settings'],
       ['statusline', 'statusline'],
       ['memory', 'memory'],
-      ['auth', 'auth'],
+      // A command-opened auth dialog records its result; the boot auth-error
+      // open does not (ink useAuth's openedViaCommandRef).
+      ['auth', 'auth', { openedViaCommand: true }],
       ['trust', 'trust'],
       ['permissions', 'permissions'],
       ['approval-mode', 'approval-mode'],
@@ -145,13 +148,13 @@ describe('routeDialogToOpenTui (ink dialog-switch parity)', () => {
       ['diff', 'diff'],
       ['stats', 'stats'],
     ];
-    for (const [dialog, target] of targets) {
+    for (const [dialog, target, extras] of targets) {
       expect(
         routeDialogToOpenTui({
           type: 'dialog',
           dialog,
         } as OpenDialogActionReturn),
-      ).toEqual({ dialog: target });
+      ).toEqual({ dialog: target, ...extras });
     }
   });
 
@@ -159,6 +162,7 @@ describe('routeDialogToOpenTui (ink dialog-switch parity)', () => {
     const cases: Array<[InkDialogKind, string]> = [
       ['model', 'primary'],
       ['fast-model', 'fast'],
+      ['advisor-model', 'advisor'],
       ['voice-model', 'voice'],
       ['vision-model', 'vision'],
       ['compaction-model', 'compaction'],
@@ -228,6 +232,7 @@ describe('routeDialogToOpenTui (ink dialog-switch parity)', () => {
 });
 
 describe('OPEN_TUI_COMMAND_ROUTES (built-in registry parity)', () => {
+  afterEach(() => vi.unstubAllEnvs());
   it('has unique canonical names with no duplicate routes', () => {
     const names = OPEN_TUI_COMMAND_ROUTES.map((route) => route.name);
     expect(new Set(names).size).toBe(names.length);
@@ -238,6 +243,8 @@ describe('OPEN_TUI_COMMAND_ROUTES (built-in registry parity)', () => {
     // factory needs: every built-in registers, so route table and loader
     // output must be equal as sets — no hand-maintained gate list, no
     // escape hatches.
+    vi.stubEnv('DEV', true);
+    process.env['DEV'] = 'true';
     const loaded = await loadInteractiveCommands(createAllGatesOnConfig());
     const builtins = loaded.filter((cmd) => cmd.source === 'builtin-command');
     expect(builtins.length).toBeGreaterThan(0);
@@ -261,6 +268,7 @@ describe('OPEN_TUI_COMMAND_ROUTES (built-in registry parity)', () => {
     // A route claiming gatedBy must NOT register when the gates are off;
     // a bogus gate on an always-registered command fails here because that
     // command IS present in the null-config load.
+    vi.stubEnv('DEV', false);
     const off = await loadInteractiveCommands(null);
     const offNames = new Set(
       off.filter((cmd) => cmd.source === 'builtin-command').map((c) => c.name),
@@ -291,6 +299,8 @@ describe('OPEN_TUI_COMMAND_ROUTES (built-in registry parity)', () => {
   });
 
   it('matches the real commands’ aliases', async () => {
+    vi.stubEnv('DEV', true);
+    process.env['DEV'] = 'true';
     const loaded = await loadInteractiveCommands(createAllGatesOnConfig());
     const builtins = loaded.filter((cmd) => cmd.source === 'builtin-command');
     for (const cmd of builtins) {

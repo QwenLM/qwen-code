@@ -10,15 +10,23 @@ import * as path from 'node:path';
 import type { Content } from '@google/genai';
 import type { Config } from '@qwen-code/qwen-code-core';
 import {
+  buildAvailableSkillsReminder,
+  buildMcpServerInstructionsReminderFromEntries,
   buildSkillLlmContent,
   DiscoveredMCPTool,
   estimateContextTextTokens,
   getBuiltInOutputStyle,
   getCoreSystemPrompt,
   resolveInteractionMode,
+  ToolNames,
   resolveSlimmingConfig,
+  Storage,
   wrapSystemReminder,
 } from '@qwen-code/qwen-code-core';
+import { AUTO_MEMORY_SNAPSHOT_METADATA } from '@qwen-code/qwen-code-core/memory/request-context.js';
+import { ToolRegistry } from '@qwen-code/qwen-code-core/tools/tool-registry.js';
+import { SearchMemoryTool } from '@qwen-code/qwen-code-core/tools/search-memory.js';
+import { ManageMemoryTool } from '@qwen-code/qwen-code-core/tools/manage-memory.js';
 import { t } from '../../i18n/index.js';
 import type { ContextCategoryBreakdown } from '../types.js';
 import {
@@ -79,6 +87,7 @@ function makeMockConfig(contextWindowSize = 32_000): Config {
     getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
     isInteractive: vi.fn().mockReturnValue(true),
     getWorkingDir: vi.fn().mockReturnValue(process.cwd()),
+    storage: { getProjectRoot: vi.fn().mockReturnValue(process.cwd()) },
   } as unknown as Config;
 }
 
@@ -119,7 +128,115 @@ describe('collectContextData (contextCommand)', () => {
       getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
       isInteractive: vi.fn().mockReturnValue(true),
       getWorkingDir: vi.fn().mockReturnValue(process.cwd()),
+      storage: { getProjectRoot: vi.fn().mockReturnValue(process.cwd()) },
     } as unknown as Config;
+  });
+
+  it('exposes the absolute path of real memory files but not synthetic aggregates', async () => {
+    const config = {
+      ...makeMockConfig(200_000),
+      getWorkingDir: vi.fn().mockReturnValue('/workspace'),
+      storage: { getProjectRoot: vi.fn().mockReturnValue('/workspace') },
+      getUserMemory: vi
+        .fn()
+        .mockReturnValue(
+          '--- Context from: AGENTS.md ---\nproject rules\n--- End of Context from: AGENTS.md ---',
+        ),
+      getAutoMemoryPrompt: vi.fn().mockReturnValue('auto memory catalog'),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, true);
+
+    // Real instruction files carry an absolute path; the auto-memory
+    // aggregate is synthetic and must not.
+    const agents = data.instructionFiles?.find(
+      (file) => file.path === 'AGENTS.md',
+    );
+    expect(agents?.absolutePath).toBe(path.resolve('/workspace', 'AGENTS.md'));
+    const autoMemory = data.memoryFiles.find(
+      (file) => file.path === t('auto memory'),
+    );
+    expect(autoMemory).toBeDefined();
+    expect(autoMemory?.absolutePath).toBeUndefined();
+  });
+
+  it('gates openable paths on the admission root, not the live working dir', async () => {
+    // A session that cd'd into a subdirectory keeps its admission root. The
+    // gate must key on that root (the same one the client resolves the owner
+    // from), so the root's own AGENTS.md stays openable even though it is
+    // above the live cwd, while files outside the admission root (an
+    // unrelated directory, an installed extension) stay non-interactive.
+    const admissionRoot = '/workspace/repo';
+    const workingDir = '/workspace/repo/sub';
+    const globalMemory = path.join(Storage.getGlobalQwenDir(), 'QWEN.md');
+    const rootFile = path.join(admissionRoot, 'AGENTS.md');
+    const subdirFile = path.join(workingDir, 'AGENTS.md');
+    const outsideFile = '/tmp/outside/AGENTS.md';
+    const extensionFile = '/opt/extensions/foo/AGENTS.md';
+    const marker = (absolute: string) => {
+      const relative = path.relative(workingDir, absolute);
+      return `--- Context from: ${relative} ---\nbody\n--- End of Context from: ${relative} ---`;
+    };
+    const config = {
+      ...makeMockConfig(200_000),
+      getWorkingDir: vi.fn().mockReturnValue(workingDir),
+      storage: { getProjectRoot: vi.fn().mockReturnValue(admissionRoot) },
+      getUserMemory: vi
+        .fn()
+        .mockReturnValue(
+          [globalMemory, rootFile, subdirFile, outsideFile, extensionFile]
+            .map(marker)
+            .join('\n\n'),
+        ),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, true);
+    const rows = data.instructionFiles ?? [];
+    expect(rows).toHaveLength(5);
+    const openPaths = rows
+      .map((file) => file.absolutePath)
+      .filter((value): value is string => value !== undefined);
+    expect(new Set(openPaths)).toEqual(
+      new Set([globalMemory, rootFile, subdirFile]),
+    );
+    // The admission root's own file is openable after cd into a subdirectory.
+    expect(
+      rows.find((file) => file.absolutePath === rootFile)?.absolutePath,
+    ).toBe(rootFile);
+    expect(rows.filter((file) => file.absolutePath === undefined)).toHaveLength(
+      2,
+    );
+  });
+
+  it('keeps the global memory row openable when QWEN_HOME has a trailing separator', async () => {
+    // getGlobalQwenDir() returns an absolute QWEN_HOME verbatim, so a trailing
+    // separator must not defeat the exact-directory match against dirname().
+    const previousHome = process.env['QWEN_HOME'];
+    process.env['QWEN_HOME'] = '/srv/qwen/';
+    try {
+      const workingDir = '/workspace';
+      const globalMemory = path.join('/srv/qwen/', 'QWEN.md');
+      const relative = path.relative(workingDir, globalMemory);
+      const config = {
+        ...makeMockConfig(200_000),
+        getWorkingDir: vi.fn().mockReturnValue(workingDir),
+        storage: { getProjectRoot: vi.fn().mockReturnValue(workingDir) },
+        getUserMemory: vi
+          .fn()
+          .mockReturnValue(
+            `--- Context from: ${relative} ---\nbody\n--- End of Context from: ${relative} ---`,
+          ),
+      } as unknown as Config;
+
+      const data = await collectContextData(config, true);
+      const globalRow = (data.instructionFiles ?? []).find(
+        (file) => file.absolutePath === globalMemory,
+      );
+      expect(globalRow?.absolutePath).toBe(globalMemory);
+    } finally {
+      if (previousHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = previousHome;
+    }
   });
 
   it('queries getFunctionDeclarations with no args, matching the actual API request', async () => {
@@ -134,6 +251,45 @@ describe('collectContextData (contextCommand)', () => {
     expect(getFunctionDeclarationsSpy).toHaveBeenCalledTimes(1);
     expect(getFunctionDeclarationsSpy).toHaveBeenCalledWith();
   });
+
+  it.each(['legacy', 'structured'] as const)(
+    'reports only declared memory tools in %s recall mode',
+    async (mode) => {
+      const config = Object.assign(makeMockConfig(), {
+        getMemoryRecallMode: () => mode,
+        getMcpTransportPool: () => undefined,
+        getDisabledTools: () => new Set<string>(),
+      });
+      const registry = new ToolRegistry(config);
+      vi.mocked(config.getToolRegistry).mockReturnValue(registry);
+      registry.registerTool(new SearchMemoryTool(config));
+      registry.registerTool(new ManageMemoryTool(config));
+
+      const data = await collectContextData(config, true);
+
+      expect(data.builtinTools.map((tool) => tool.name).sort()).toEqual(
+        mode === 'structured' ? ['manage_memory', 'search_memory'] : [],
+      );
+      if (mode === 'structured') {
+        expect(data.builtinTools.every((tool) => tool.tokens > 0)).toBe(true);
+      }
+    },
+  );
+
+  it.each(['propose_goal', 'blocked_tool'])(
+    'omits a registered %s absent from the declarations',
+    async (name) => {
+      const config = makeMockConfig();
+      vi.mocked(config.getToolRegistry().getAllTools).mockReturnValue([
+        { name, schema: { name, description: 'Hidden tool' } },
+      ] as ReturnType<ToolRegistry['getAllTools']>);
+
+      const data = await collectContextData(config, true);
+
+      expect(data.builtinTools).toEqual([]);
+      expect(data.mcpTools).toEqual([]);
+    },
+  );
 
   it('reads the per-session chat token count, not the process-global singleton (#5763)', async () => {
     // uiTelemetryService is a module-level singleton shared by every session
@@ -186,6 +342,18 @@ describe('collectContextData (contextCommand)', () => {
     expect(getLastCachedContentTokenCount).toHaveBeenCalled();
     expect(data.totalTokens).toBe(65_267);
     expect(data.breakdown.cachedTokens).toBe(1_000);
+  });
+
+  it('shows a million-token context window in millions', async () => {
+    const text = async (window: number) =>
+      formatContextUsageText(
+        await collectContextData(makeMockConfig(window), false),
+      );
+
+    expect(await text(2_000_000)).toContain('Context window: 2.0m tokens');
+    expect(await text(1_000_000)).toContain('Context window: 1.0m tokens');
+    expect(await text(999_950)).toContain('Context window: 1.0m tokens');
+    expect(await text(999_949)).toContain('Context window: 999.9k tokens');
   });
 
   it('keeps a zero per-session cached count instead of the foreign global (#12047)', async () => {
@@ -274,9 +442,8 @@ describe('collectContextData (contextCommand)', () => {
       }) as unknown as Content;
 
     // A `skill` tool whose tracking is intact, i.e. the shape the live registry
-    // has once a body has been loaded. `getLoadedSkillNames()` is case-sensitive
-    // against the manager's name (contextCommand.ts), so the fixture uses the
-    // exact spelling `listSkills()` returns.
+    // has once a body has been loaded. Names use the same exact spelling as
+    // `listSkills()`, while bodies retain the bytes injected into the history.
     const skillToolSchema = {
       name: 'skill',
       description: 'Load a skill by name',
@@ -288,7 +455,8 @@ describe('collectContextData (contextCommand)', () => {
     const skillToolDouble = {
       name: 'skill',
       schema: skillToolSchema,
-      getLoadedSkillNames: vi.fn().mockReturnValue(new Set(['report-builder'])),
+      getLoadedSkillContentNames: () =>
+        new Map([[trackedBody, 'report-builder']]),
     };
     const skillBody = 'Report builder instructions.\n'.repeat(140);
     const trackedBody = buildSkillLlmContent(
@@ -314,10 +482,9 @@ describe('collectContextData (contextCommand)', () => {
       /** Registry contents; a `skill` double turns on loaded-body tracking. */
       tools?: unknown[];
       /**
-       * What getFunctionDeclarations() returns; defaults to [] so existing
-       * fixtures keep their shape. Production declares the non-deferred
-       * tools, so a fixture that cares about declaration totals should pass
-       * the matching schemas here.
+       * What getFunctionDeclarations() returns. Defaults to the schemas of
+       * `tools`. Pass `declared` explicitly for tools that are registered but
+       * hidden from the model, or declarations generated from their schemas.
        */
       declared?: unknown[];
       /** Overrides the default one-skill list. */
@@ -339,7 +506,12 @@ describe('collectContextData (contextCommand)', () => {
                 getAllTools: vi.fn().mockReturnValue(options.tools),
                 getFunctionDeclarations: vi
                   .fn()
-                  .mockReturnValue(options.declared ?? []),
+                  .mockReturnValue(
+                    options.declared ??
+                      options.tools.map(
+                        (tool) => (tool as { schema: unknown }).schema,
+                      ),
+                  ),
                 isDeferredAndHidden: vi.fn().mockReturnValue(false),
               }),
             }
@@ -363,18 +535,247 @@ describe('collectContextData (contextCommand)', () => {
       } as unknown as Config;
     }
 
+    it.each([0, 1, 100_000])(
+      'separates instruction and auto-memory accounting at total %s',
+      async (total) => {
+        const config = makeChatConfig({ total, history: [] });
+        const instructions = 'Project instructions. '.repeat(100);
+        const policy = 'Automatic memory policy. '.repeat(50);
+        Object.assign(config, {
+          getUserMemory: () =>
+            '--- Context from: QWEN.md ---\n' +
+            instructions +
+            '\n--- End of Context from: QWEN.md ---',
+          getAutoMemoryPrompt: () => policy,
+          getAutoMemoryContext: () => '',
+        });
+        const data = await collectContextData(config, true);
+        expect(data.instructionFiles?.map((file) => file.path)).toEqual([
+          'QWEN.md',
+        ]);
+        expect(data.memoryFiles.map((file) => file.path)).toEqual([
+          t('auto memory'),
+        ]);
+        expect(data.breakdown.instructionFiles).toBe(
+          estimateContextTextTokens(instructions + '\n'),
+        );
+        expect(data.breakdown.memoryFiles).toBe(
+          estimateContextTextTokens(policy),
+        );
+        expect(data.breakdown.messages).toBe(0);
+        if (total) {
+          expect(data.breakdown.freeSpace).toBe(
+            data.contextWindowSize - total - data.breakdown.autocompactBuffer,
+          );
+        } else {
+          expect(data.breakdown.freeSpace).toBe(
+            data.contextWindowSize -
+              sumRows(data.breakdown) -
+              data.breakdown.autocompactBuffer,
+          );
+        }
+        const summary = await collectContextData(config, false);
+        expect(summary.breakdown).toEqual(data.breakdown);
+        expect(summary.instructionFiles).toEqual([]);
+        expect(summary.memoryFiles).toEqual([]);
+        const text = formatContextUsageText(data);
+        expect(text).toContain('**Instruction files**');
+        expect(text).toContain('**Auto memory**');
+        expect(formatContextUsageText(summary)).toMatch(
+          /Instruction files\s+\S+ tokens/,
+        );
+        expect(formatContextUsageText(summary)).toMatch(
+          /Auto memory\s+\S+ tokens/,
+        );
+        expect(text).not.toContain('Memory files');
+      },
+    );
+
+    it('preserves instruction and auto-memory estimates above the provider total', async () => {
+      const sources = {
+        getUserMemory: () =>
+          '--- Context from: QWEN.md ---\n' +
+          'Project instructions. '.repeat(100) +
+          '\n--- End of Context from: QWEN.md ---',
+        getAutoMemoryPrompt: () => 'Automatic memory policy. '.repeat(50),
+        getAutoMemoryContext: () => '',
+      };
+      const collect = (total: number) =>
+        collectContextData(
+          Object.assign(makeChatConfig({ total, history: [] }), sources),
+          true,
+        );
+      const raw = await collect(0);
+      const total = 1000;
+      expect(sumRows(raw.breakdown)).toBeGreaterThan(total);
+      const data = await collect(total);
+
+      for (const category of ['instructionFiles', 'memoryFiles'] as const) {
+        expect(raw.breakdown[category]).toBeGreaterThan(0);
+        expect(data.breakdown[category]).toBe(raw.breakdown[category]);
+        expect(data[category]).toEqual(raw[category]);
+      }
+      expect(data.breakdown).not.toHaveProperty('unattributed');
+      expect(data.breakdown.messages).toBe(0);
+    });
+
     function sumRows(breakdown: ContextCategoryBreakdown): number {
       return (
         breakdown.systemPrompt +
         breakdown.builtinTools +
         breakdown.mcpTools +
+        (breakdown.instructionFiles ?? 0) +
         breakdown.memoryFiles +
         breakdown.skills +
         (breakdown.startupContext ?? 0) +
-        breakdown.messages +
-        (breakdown.unattributed ?? 0)
+        breakdown.messages
       );
     }
+
+    it.each([
+      {
+        name: 'unchanged retained catalogs',
+        retained: ['old', 'new'],
+        current: 'new',
+        billed: ['old', 'new'],
+        total: 0,
+      },
+      {
+        name: 'changed pending catalog',
+        retained: ['old'],
+        current: 'new',
+        billed: ['old', 'new'],
+        total: 0,
+      },
+      {
+        name: 'compacted history without snapshots',
+        summary:
+          '<state_snapshot>Earlier user work is complete.</state_snapshot>',
+        retained: [],
+        current: 'new',
+        billed: ['new'],
+        total: 0,
+      },
+      {
+        name: 'suppressed retained catalogs',
+        retained: ['old', 'new'],
+        current: '',
+        billed: [],
+        total: 0,
+      },
+      {
+        name: 'a pending version seen before the latest retained version',
+        retained: ['new', 'old'],
+        current: 'new',
+        billed: ['new', 'old', 'new'],
+        total: 0,
+      },
+      {
+        name: 'provider-reported total',
+        retained: ['old', 'new'],
+        current: 'new',
+        billed: ['old', 'new'],
+        total: 40_000,
+      },
+    ])(
+      'accounts for memory snapshots once: $name',
+      async ({ retained, current, billed, total, summary }) => {
+        const catalog = (version: string) =>
+          `${version} catalog entry\n`.repeat(version === 'old' ? 17 : 40);
+        const snapshotText = (version: string) =>
+          'Current memory catalog (full snapshot; supersedes all earlier memory catalogs):\n' +
+          catalog(version);
+        const policy = 'Stable auto-memory policy.';
+        const realUser = {
+          text: 'Please inspect my actual request.',
+          partMetadata: { user_note: true },
+        };
+        const reply = 'I inspected the request.';
+        // A user can quote a catalog; only marked parts belong to memory.
+        const quotedCatalog = {
+          text: snapshotText('quoted'),
+          partMetadata: { user_note: true },
+        };
+        const compacted: Content[] = summary
+          ? [
+              { role: 'user', parts: [{ text: summary }] },
+              { role: 'model', parts: [{ text: reply }] },
+            ]
+          : [];
+        const history: Content[] = [
+          prelude,
+          ...compacted,
+          ...retained.flatMap((version): Content[] => [
+            {
+              role: 'user',
+              parts: [
+                realUser,
+                {
+                  text: snapshotText(version),
+                  partMetadata: { [AUTO_MEMORY_SNAPSHOT_METADATA]: true },
+                },
+              ],
+            },
+            { role: 'model', parts: [{ text: reply }] },
+          ]),
+          { role: 'user', parts: [realUser, quotedCatalog] },
+        ];
+        const before = structuredClone(history);
+        const getHistoryShallow = vi.fn().mockReturnValue(history);
+        const config = makeChatConfig({ total, history });
+        const chat = config.getLlmClient().getChat();
+        Object.assign(chat, { getHistoryShallow });
+        Object.assign(config, {
+          getAutoMemoryPrompt: () => policy,
+          getAutoMemoryContext: () => (current ? catalog(current) : ''),
+        });
+
+        const data = await collectContextData(config, true);
+        const expectedMemory =
+          estimateContextTextTokens(policy) +
+          billed.reduce(
+            (sum, version) =>
+              sum + estimateContextTextTokens(snapshotText(version)),
+            0,
+          );
+        const expectedMessages =
+          (retained.length + 1) * estimateContextTextTokens(realUser.text) +
+          retained.length * estimateContextTextTokens(reply) +
+          estimateContextTextTokens(quotedCatalog.text) +
+          (summary
+            ? estimateContextTextTokens(summary) +
+              estimateContextTextTokens(reply)
+            : 0);
+        expect(data.breakdown.messages).toBe(expectedMessages);
+        expect(data.breakdown.memoryFiles).toBe(expectedMemory);
+        expect(data.memoryFiles).toEqual([
+          { path: t('auto memory'), tokens: expectedMemory },
+        ]);
+        expect(data.breakdown.startupContext).toBe(
+          estimateContextTextTokens(environmentReminder),
+        );
+        expect(data.breakdown.skills).toBe(
+          estimateContextTextTokens(listingReminder),
+        );
+        expect(data.totalTokens).toBe(total);
+        if (total) {
+          expect(data.breakdown.freeSpace).toBe(
+            200_000 - total - data.breakdown.autocompactBuffer,
+          );
+        } else {
+          expect(data.breakdown.freeSpace).toBe(
+            200_000 -
+              sumRows(data.breakdown) -
+              data.breakdown.autocompactBuffer,
+          );
+        }
+        expect(getHistoryShallow).toHaveBeenCalledWith();
+        expect(chat.getHistory).not.toHaveBeenCalled();
+        expect(history).toEqual(before);
+        expect(history.at(-1)?.parts?.[0]).toBe(realUser);
+        expect(history.at(-1)?.parts?.[1]).toBe(quotedCatalog);
+      },
+    );
 
     it('bills the skill listing as sent under skills and the rest of the prelude as startup context', async () => {
       const data = await collectContextData(
@@ -400,7 +801,7 @@ describe('collectContextData (contextCommand)', () => {
       expect(data.breakdown.messages).toBe(300);
     });
 
-    it('closes the rows against the provider total, reporting the gap as unattributed', async () => {
+    it('allows estimates below the provider total without generating a residual', async () => {
       const data = await collectContextData(
         makeChatConfig({
           total: 100_000,
@@ -409,54 +810,108 @@ describe('collectContextData (contextCommand)', () => {
         false,
       );
 
-      expect(data.breakdown.unattributed).toBeGreaterThan(0);
-      expect(sumRows(data.breakdown)).toBe(100_000);
+      expect(sumRows(data.breakdown)).toBeLessThan(data.totalTokens);
+      expect(data.breakdown.messages).toBe(300);
+      expect(data.breakdown).not.toHaveProperty('unattributed');
     });
 
-    it('scales every row down when the estimates exceed the provider total', async () => {
-      const data = await collectContextData(
-        makeChatConfig({
-          total: 5_000,
-          cached: 4_000,
-          history: [
-            prelude,
-            { role: 'user', parts: [{ text: 'c'.repeat(40_000) }] },
-          ],
-        }),
-        true,
-      );
+    it.each([
+      { total: 0, cached: 0, estimated: false },
+      { total: 7, cached: 0, estimated: false },
+      { total: 100_000, cached: 90_000, estimated: false },
+      { total: 500, cached: 0, estimated: true },
+    ])(
+      'keeps category and detail estimates independent of usage: %j',
+      async (usage) => {
+        const mcpSchema = {
+          name: 'mcp__server__report',
+          description: 'Build a report. '.repeat(40),
+        };
+        const mcpTool = Object.defineProperties(
+          Object.create(DiscoveredMCPTool.prototype),
+          {
+            name: { value: mcpSchema.name },
+            serverName: { value: 'server' },
+            serverToolName: { value: 'report' },
+            schema: { value: mcpSchema },
+          },
+        );
+        const builtinTool = {
+          name: 'read_file',
+          schema: { name: 'read_file', description: 'Read a file.' },
+        };
+        const history = [
+          prelude,
+          { role: 'user', parts: [{ text: 'c'.repeat(772) }] },
+          skillResponse(trackedBody),
+        ];
+        const config = makeChatConfig({
+          ...usage,
+          history,
+          tools: [skillToolDouble, mcpTool, builtinTool],
+          skillList: trackedSkillList,
+        });
+        vi.mocked(config.getSystemPrompt).mockReturnValue('s'.repeat(40_000));
+        vi.mocked(config.getUserMemory).mockReturnValue(
+          '--- Context from: QWEN.md ---\nProject instructions.\n--- End of Context from: QWEN.md ---',
+        );
+        vi.mocked(config.getAutoMemoryPrompt).mockReturnValue('Memory policy.');
+        const data = await collectContextData(config, true);
+        const chat = config.getLlmClient().getChat();
+        vi.mocked(chat.getLastPromptTokenCount).mockReturnValue(0);
+        const raw = await collectContextData(config, true);
 
-      expect(data.breakdown.unattributed).toBe(0);
-      expect(sumRows(data.breakdown)).toBe(5_000);
-      // The `scale < 1` branch forces `unattributed` to 0, so the row must be
-      // suppressed in the text renderer rather than printed as `0 tokens`.
-      // `totalTokens` is nonzero, so this witnesses the `> 0` guard and not
-      // the `hasTokenCount` gate.
-      expect(formatContextUsageText(data)).not.toContain('Unattributed');
-      // The cached count is an annotation, never a term of the row sum, and
-      // never subtracted when deriving `messages` (this is the only branch that
-      // still derives it by subtraction).
-      expect(data.breakdown.cachedTokens).toBe(4_000);
-      // Each row pinned against its own unscaled value: dropping `* scale` from
-      // a row this PR added leaves the two identities above intact, because
-      // `messages` absorbs the difference.
-      expect(data.breakdown.skills).toBeLessThan(
-        estimateContextTextTokens(listingReminder),
-      );
-      expect(data.breakdown.startupContext).toBeLessThan(
-        estimateContextTextTokens(environmentReminder),
-      );
-      expect(data.skills[0]!.tokens).toBeLessThan(
-        estimateContextTextTokens(skillEntry),
-      );
-    });
+        for (const category of [
+          'systemPrompt',
+          'builtinTools',
+          'mcpTools',
+          'instructionFiles',
+          'memoryFiles',
+          'skills',
+          'startupContext',
+          'messages',
+        ] as const) {
+          expect(data.breakdown[category]).toBe(raw.breakdown[category]);
+        }
+        for (const details of [
+          'builtinTools',
+          'mcpTools',
+          'instructionFiles',
+          'memoryFiles',
+          'skills',
+        ] as const) {
+          expect(data[details]).toEqual(raw[details]);
+        }
+        expect(data.totalTokens).toBe(usage.total);
+        expect(data.isEstimated).toBe(!usage.total || usage.estimated);
+        expect(data.breakdown.messages).toBe(193);
+        expect(data.breakdown).not.toHaveProperty('unattributed');
+        expect(formatContextUsageText(data)).not.toContain('Unattributed');
+        expect(data.breakdown.cachedTokens).toBe(usage.cached);
+        expect(data.breakdown.freeSpace).toBe(
+          Math.max(
+            0,
+            data.contextWindowSize -
+              (usage.total || sumRows(raw.breakdown)) -
+              data.breakdown.autocompactBuffer,
+          ),
+        );
+        expect(data.breakdown.startupContext).toBe(
+          estimateContextTextTokens(environmentReminder),
+        );
+        expect(data.skills[0]!.tokens).toBe(
+          estimateContextTextTokens(skillEntry),
+        );
+        expect(data.skills[0]!.bodyTokens).toBe(
+          estimateContextTextTokens(trackedBody),
+        );
+      },
+    );
 
     it('charges nested tool media at the flat image budget, not as base64 text', async () => {
       // Tool media rides on `functionResponse.parts[k].inlineData.data` — the
       // carrier core's tools actually use. Serializing the whole part bills
-      // 400,000 ASCII chars (~100,000 tokens) against a 40,000 provider total,
-      // which collapses `scale` and deflates every row, including this
-      // ASCII-only one.
+      // 400,000 ASCII chars (~100,000 tokens) as conversation text.
       const withScreenshot = [
         prelude,
         {
@@ -490,15 +945,21 @@ describe('collectContextData (contextCommand)', () => {
         false,
       );
 
-      // The screenshot must never reach `scale`, so no overhead row moves.
+      // Media belongs to messages, so no overhead row moves.
       expect(control.breakdown.systemPrompt).toBeGreaterThan(1_000);
       expect(billed.breakdown.systemPrompt).toBe(
         control.breakdown.systemPrompt,
       );
       expect(billed.breakdown.skills).toBe(control.breakdown.skills);
-      // Charged at the flat per-image budget rather than at chars/4.
-      expect(billed.breakdown.messages).toBeLessThan(5_000);
-      expect(sumRows(billed.breakdown)).toBe(40_000);
+      expect(billed.breakdown.messages).toBe(
+        estimateContextTextTokens(
+          JSON.stringify({
+            id: 'call-1',
+            name: 'read_file',
+            response: { output: 'ok' },
+          }),
+        ) + resolveSlimmingConfig(undefined).imageTokenEstimate,
+      );
     });
 
     it('charges a top-level media part at the flat image budget', async () => {
@@ -533,7 +994,6 @@ describe('collectContextData (contextCommand)', () => {
       // An exact delta, not an upper bound: the text part is 400 ASCII chars
       // (100 tokens) and the image is billed at the flat per-image budget.
       expect(data.breakdown.messages).toBe(100 + imageTokens);
-      expect(sumRows(data.breakdown)).toBe(100_000);
     });
 
     it('does not deflate rows when the total is itself a char/4 estimate', async () => {
@@ -562,18 +1022,17 @@ describe('collectContextData (contextCommand)', () => {
         unscaled.breakdown.startupContext,
       );
       expect(data.breakdown.skills).toBe(unscaled.breakdown.skills);
-      // The rows still close against the estimated total.
-      expect(sumRows(data.breakdown)).toBe(estimatedTotal);
+      expect(data.breakdown.messages).toBe(estimateContextTextTokens(cjk));
+      expect(data.breakdown.messages).toBe(unscaled.breakdown.messages);
     });
 
-    it('does not deflate overhead rows against a provider total when only the conversation overshoots', async () => {
+    it('preserves conversation estimates when only the conversation overshoots', async () => {
       // Two ordinary triggers push `rawContent` past a provider-reported total
       // without any overhead row being wrong: the CJK-aware estimator runs
       // several times higher than the provider's count on zh-heavy text, and
       // `totalTokens` is the last request's prompt count, which excludes the
       // answer added since. Scaling the rows by total/rawContent deflated every
-      // exactly-measured row; only an overhead-side overshoot may scale them.
-      // A conversation-side overshoot is absorbed by the `messages` cap.
+      // row. Neither case should cap the independently measured conversation.
       const cjkHistory: Content[] = [
         prelude,
         { role: 'user', parts: [{ text: '中'.repeat(100_000) }] },
@@ -591,7 +1050,8 @@ describe('collectContextData (contextCommand)', () => {
       expect(cjkData.breakdown.systemPrompt).toBe(
         cjkUnscaled.breakdown.systemPrompt,
       );
-      expect(sumRows(cjkData.breakdown)).toBe(57_000);
+      expect(cjkData.breakdown.messages).toBe(cjkUnscaled.breakdown.messages);
+      expect(cjkData.breakdown.messages).toBe(150_000);
 
       // Pure ASCII with an exact estimator: the stale-by-one-response gap
       // alone overshoots the provider total on every completed turn.
@@ -612,16 +1072,16 @@ describe('collectContextData (contextCommand)', () => {
       expect(asciiData.breakdown.systemPrompt).toBe(
         asciiUnscaled.breakdown.systemPrompt,
       );
-      expect(sumRows(asciiData.breakdown)).toBe(15_000);
+      expect(asciiData.breakdown.messages).toBe(
+        asciiUnscaled.breakdown.messages,
+      );
+      expect(asciiData.breakdown.messages).toBe(10_100);
     });
 
-    it('closes the rows against an estimated total that sits below the measured overhead', async () => {
+    it('preserves estimates above a total seeded by compression or resume', async () => {
       // The total core stamps after a compression or resume covers the
       // compressed history alone, so a session carrying heavy declarations can
-      // stamp a total smaller than the measured overhead. The rows must still
-      // close against `Used` — scaling against `rawOverhead` is unconditional,
-      // so this state scales the overhead rows down to the stamped total
-      // instead of letting the category rows sum above it.
+      // stamp a total smaller than the measured overhead.
       const data = await collectContextData(
         makeChatConfig({
           total: 500,
@@ -632,24 +1092,13 @@ describe('collectContextData (contextCommand)', () => {
       );
 
       expect(data.totalTokens).toBe(500);
-      expect(sumRows(data.breakdown)).toBeLessThanOrEqual(data.totalTokens);
-      // The rendered category rows must not exceed the printed `Used` either.
+      expect(data.isEstimated).toBe(true);
+      expect(data.breakdown.systemPrompt).toBeGreaterThan(data.totalTokens);
+      expect(data.breakdown.messages).toBe(300);
       const text = formatContextUsageText(data);
-      const usedMatch = text.match(/^ {2}Used +([\d.]+)(k?) tokens \(/m);
-      expect(usedMatch).not.toBeNull();
-      const used = Number(usedMatch![1]) * (usedMatch![2] === 'k' ? 1000 : 1);
-      expect(used).toBe(500);
-      const rowPattern = /^ {2}([A-Za-z][^\n]*?) +([\d.]+)(k?) tokens \(/gm;
-      let rowCount = 0;
-      for (const match of text.matchAll(rowPattern)) {
-        const label = match[1]!;
-        if (label === 'Used' || label === 'Free') continue;
-        const value = Number(match[2]) * (match[3] === 'k' ? 1000 : 1);
-        expect(value).toBeLessThanOrEqual(used);
-        rowCount += 1;
-      }
-      // The assertion above is vacuous unless the category rows were found.
-      expect(rowCount).toBeGreaterThanOrEqual(6);
+      expect(text).toMatch(/^ {2}Used +500 tokens \(/m);
+      expect(text).toMatch(/^ {2}Messages +300 tokens \(/m);
+      expect(text).toContain('Token usage is estimated');
     });
 
     it('never derives messages from the cached count', async () => {
@@ -665,7 +1114,6 @@ describe('collectContextData (contextCommand)', () => {
       // The old `total − cached` derivation would print 10_000 here.
       expect(data.breakdown.messages).toBe(300);
       expect(data.breakdown.cachedTokens).toBe(90_000);
-      expect(sumRows(data.breakdown)).toBe(100_000);
     });
 
     it('bills a tracked skill body under skills and keeps it out of messages', async () => {
@@ -696,15 +1144,69 @@ describe('collectContextData (contextCommand)', () => {
           estimateContextTextTokens(listingReminder) +
           estimateContextTextTokens(trackedBody),
       );
-      expect(sumRows(data.breakdown)).toBe(100_000);
+      const text = formatContextUsageText(data);
+      expect(text).not.toContain('report-builder (body loaded)');
+      expect(text).not.toContain('report-builder (active)');
+      expect(text.match(/body loaded/g)).toHaveLength(1);
     });
 
-    it('keeps a tracked skill body out of messages for a backslash skill filePath', async () => {
-      // Windows and mixed-separator skill paths: core renders the tracked body
-      // with `path.dirname(filePath)`, so the skip key must be derived the same
-      // way. A `/`-only dirname leaves the whole path in `baseDir`, the
-      // re-rendered body no longer matches, and the body is billed under both
-      // `skills` and `messages`.
+    it.each([
+      { total: 0, suffix: '' },
+      { total: 100_000, suffix: '' },
+      { total: 0, suffix: '\nRestored invocation metadata.' },
+      { total: 100_000, suffix: '\nRestored invocation metadata.' },
+    ])(
+      'bills repeated copies of a tracked body (API total $total, suffix "$suffix")',
+      async ({ total, suffix }) => {
+        const emittedBody = trackedBody + suffix;
+        const trackedBodies = new Map([[trackedBody, 'report-builder']]);
+        const options = {
+          total,
+          tools: [
+            {
+              ...skillToolDouble,
+              getLoadedSkillContentNames: () => trackedBodies,
+            },
+          ],
+          declared: [skillToolSchema],
+          skillList: trackedSkillList,
+          history: [prelude, conversation[0]!, skillResponse(emittedBody)],
+        };
+        const once = await collectContextData(makeChatConfig(options), true);
+        const repeatedConfig = makeChatConfig({
+          ...options,
+          history: [...options.history, skillResponse(emittedBody)],
+        });
+        const repeated = await collectContextData(repeatedConfig, true);
+        const responseTokens = estimateContextTextTokens(
+          JSON.stringify({ name: 'skill', response: { output: emittedBody } }),
+        );
+
+        // The estimated path reports the same conversation estimate as
+        // `messages` instead of hiding it, so both paths bill it identically.
+        expect(once.breakdown.messages).toBe(100);
+        expect(repeated.breakdown.messages).toBe(100 + responseTokens);
+        expect(repeated.breakdown.skills).toBe(once.breakdown.skills);
+        expect(repeated.skills).toEqual(once.skills);
+        expect(repeated.totalTokens).toBe(total);
+        if (!total) {
+          expect(repeated.breakdown.freeSpace).toBe(
+            once.breakdown.freeSpace - responseTokens,
+          );
+        }
+        // Accounting must not consume the live tool's history tracking.
+        expect(await collectContextData(repeatedConfig, true)).toEqual(
+          repeated,
+        );
+        expect(trackedBodies).toEqual(
+          new Map([[trackedBody, 'report-builder']]),
+        );
+      },
+    );
+
+    it('attributes the emitted body with a backslash skill filePath', async () => {
+      // Attribution uses the body actually emitted by core, without rebuilding
+      // it from the current file path or content.
       const windowsFilePath = 'C:\\skills\\report-builder\\SKILL.md';
       const windowsBody = buildSkillLlmContent(
         path.dirname(windowsFilePath),
@@ -713,7 +1215,13 @@ describe('collectContextData (contextCommand)', () => {
       const data = await collectContextData(
         makeChatConfig({
           total: 100_000,
-          tools: [skillToolDouble],
+          tools: [
+            {
+              ...skillToolDouble,
+              getLoadedSkillContentNames: () =>
+                new Map([[windowsBody, 'report-builder']]),
+            },
+          ],
           skillList: [
             {
               name: 'report-builder',
@@ -735,7 +1243,6 @@ describe('collectContextData (contextCommand)', () => {
         loaded: true,
         bodyTokens: estimateContextTextTokens(windowsBody),
       });
-      expect(sumRows(data.breakdown)).toBe(100_000);
     });
 
     it('bills a skill response whose body was never tracked as messages', async () => {
@@ -775,7 +1282,6 @@ describe('collectContextData (contextCommand)', () => {
 
       expect(untracked.breakdown.messages).toBe(expected);
       expect(trackingOtherBody.breakdown.messages).toBe(expected);
-      expect(sumRows(untracked.breakdown)).toBe(100_000);
     });
 
     it('gives a detail row to a listing entry listSkills does not return', async () => {
@@ -812,6 +1318,7 @@ describe('collectContextData (contextCommand)', () => {
       expect(data.skills).toContainEqual({
         name: 'deploy-check',
         tokens: estimateContextTextTokens(commandEntry),
+        loaded: false,
       });
     });
 
@@ -865,10 +1372,9 @@ describe('collectContextData (contextCommand)', () => {
           estimateContextTextTokens(delta),
       );
       expect(data.breakdown.messages).toBe(300);
-      expect(sumRows(data.breakdown)).toBe(100_000);
     });
 
-    it('prints the startup context, unattributed and cached rows in text output', async () => {
+    it('prints startup context and cached rows while ignoring legacy residuals', async () => {
       const data = await collectContextData(
         makeChatConfig({
           total: 100_000,
@@ -877,10 +1383,11 @@ describe('collectContextData (contextCommand)', () => {
         }),
         false,
       );
+      data.breakdown.unattributed = 900;
       const text = formatContextUsageText(data);
 
       expect(text).toContain('Startup context');
-      expect(text).toContain('Unattributed');
+      expect(text).not.toContain('Unattributed');
       expect(text).toContain('Cached prefix');
     });
 
@@ -928,16 +1435,9 @@ describe('collectContextData (contextCommand)', () => {
           estimateContextTextTokens(JSON.stringify(toolCall)) +
           estimateContextTextTokens(JSON.stringify(toolResponse)),
       );
-      expect(sumRows(data.breakdown)).toBe(100_000);
     });
 
-    it('charges the builtin-clamp deficit to the mcp row, not to messages', async () => {
-      // Under `tools.codeModeOnly` the declarations collapse to a few control
-      // tools while an `alwaysLoadTools` MCP server still bills every schema
-      // the detail loop sees, so the billed tools exceed the declared ones and
-      // `displayBuiltinTools` clamps at 0. The clamp deficit must come out of
-      // the mcp row — the row whose billing overshoots the declarations;
-      // otherwise `attributedOverhead` silently takes it out of `messages`.
+    it('bills generated control declarations without undeclared MCP schemas', async () => {
       // Own value properties shadow the prototype's getters (Object.assign
       // would trip the setter-less `schema` accessor on DeclarativeTool).
       const mcpToolDouble = Object.defineProperties(
@@ -946,6 +1446,7 @@ describe('collectContextData (contextCommand)', () => {
           name: { value: 'mcp__server__big_tool' },
           serverName: { value: 'server' },
           serverToolName: { value: 'big_tool' },
+          alwaysLoad: { value: true },
           schema: {
             value: {
               name: 'mcp__server__big_tool',
@@ -955,13 +1456,63 @@ describe('collectContextData (contextCommand)', () => {
           },
         },
       ) as DiscoveredMCPTool;
-      const tools = [skillToolDouble, mcpToolDouble];
-      const declared = [skillToolSchema];
+      const controlSchema = {
+        name: 'exec',
+        description: 'Generated code-mode bindings. '.repeat(8),
+        parameters: { type: 'OBJECT', properties: {} },
+      };
+      const tools = [
+        { ...skillToolDouble, getLoadedSkillContentNames: () => new Map() },
+        mcpToolDouble,
+        {
+          name: controlSchema.name,
+          schema: { ...controlSchema, description: 'Original exec schema' },
+        },
+      ];
+      const declared = [skillToolSchema, controlSchema];
       const history = [prelude, ...conversation];
 
       const unscaled = await collectContextData(
         makeChatConfig({ total: 0, tools, declared, history }),
-        false,
+        true,
+      );
+      // Free space retains its zero floor when the estimate exceeds the window.
+      expect(unscaled.breakdown.freeSpace).toBe(
+        Math.max(
+          0,
+          unscaled.contextWindowSize -
+            sumRows(unscaled.breakdown) -
+            unscaled.breakdown.autocompactBuffer,
+        ),
+      );
+      expect(unscaled.breakdown.mcpTools).toBe(0);
+      expect(unscaled.breakdown.builtinTools).toBe(
+        estimateContextTextTokens(JSON.stringify(declared)) -
+          estimateContextTextTokens(JSON.stringify(skillToolSchema)),
+      );
+      expect(unscaled.builtinTools).toEqual([
+        {
+          name: 'exec',
+          tokens: estimateContextTextTokens(JSON.stringify(controlSchema)),
+        },
+      ]);
+      const undeclared = await collectContextData(
+        makeChatConfig({ total: 0, tools, declared: [], history }),
+        true,
+      );
+      expect(undeclared.builtinTools).toEqual([]);
+      expect(undeclared.mcpTools).toEqual([]);
+      expect(undeclared.breakdown.mcpTools).toBe(0);
+      expect(undeclared.breakdown.skills).toBe(
+        estimateContextTextTokens(listingReminder),
+      );
+      expect(undeclared.breakdown.freeSpace).toBe(
+        Math.max(
+          0,
+          undeclared.contextWindowSize -
+            sumRows(undeclared.breakdown) -
+            undeclared.breakdown.autocompactBuffer,
+        ),
       );
       // The provider-side total: the measured overhead plus the 300-token
       // conversation, so exactly 300 tokens are left for `messages`.
@@ -976,14 +1527,397 @@ describe('collectContextData (contextCommand)', () => {
         false,
       );
 
-      // The fixture does put the clamp in force: billed skill definition plus
-      // mcp schemas exceed the declared tools.
-      expect(
-        estimateContextTextTokens(JSON.stringify(skillToolSchema)) +
-          estimateContextTextTokens(JSON.stringify(mcpToolDouble.schema)),
-      ).toBeGreaterThan(estimateContextTextTokens(JSON.stringify(declared)));
       expect(data.breakdown.messages).toBe(300);
       expect(sumRows(data.breakdown)).toBe(total);
+
+      for (const options of [
+        { total: 0, tools, declared, history },
+        { total: 0, tools, declared: [], history },
+        { total, tools, declared, history },
+        { total: 1, tools, declared, history },
+      ]) {
+        const detailed = await collectContextData(
+          makeChatConfig(options),
+          true,
+        );
+        expect(detailed.mcpTools).toEqual([]);
+        expect(detailed.breakdown.mcpTools).toBe(0);
+        expect(detailed.breakdown.messages).toBe(300);
+        const reference = options.declared.length ? unscaled : undeclared;
+        expect(detailed.builtinTools).toEqual(reference.builtinTools);
+        expect(detailed.breakdown.builtinTools).toBe(
+          reference.breakdown.builtinTools,
+        );
+      }
+
+      const exposed = await collectContextData(
+        makeChatConfig({
+          total: 0,
+          tools,
+          declared: [...declared, mcpToolDouble.schema],
+          history,
+        }),
+        true,
+      );
+      expect(exposed.mcpTools).toEqual([
+        {
+          name: 'server__big_tool',
+          tokens: estimateContextTextTokens(
+            JSON.stringify(mcpToolDouble.schema),
+          ),
+        },
+      ]);
+    });
+
+    it.each([false, true])(
+      'uses the emitted Skill schema while retaining its body (declared: %s)',
+      async (declared) => {
+        const declaration = {
+          ...skillToolSchema,
+          description: 'Emitted skill schema. '.repeat(20),
+        };
+        const data = await collectContextData(
+          makeChatConfig({
+            total: 100_000,
+            tools: [skillToolDouble],
+            declared: declared ? [declaration] : [],
+            skillList: trackedSkillList,
+            history: [prelude, conversation[0]!, skillResponse(trackedBody)],
+          }),
+          true,
+        );
+
+        expect(data.breakdown.skills).toBe(
+          (declared
+            ? estimateContextTextTokens(JSON.stringify(declaration))
+            : 0) +
+            estimateContextTextTokens(listingReminder) +
+            estimateContextTextTokens(trackedBody),
+        );
+        expect(data.skills[0].bodyTokens).toBe(
+          estimateContextTextTokens(trackedBody),
+        );
+        expect(data.breakdown.messages).toBe(100);
+        expect(data.builtinTools).toEqual([]);
+      },
+    );
+
+    it('bills a path-activation envelope folded into a tool response as messages (#12235)', async () => {
+      // coreToolScheduler appends this reminder to the tool result and then
+      // folds the whole result into `functionResponse.response.output`
+      // (`convertToFunctionResponse`), with any rules block first. No producer
+      // emits the envelope as its own text part, so the tail scan never sees it:
+      // the listing is billed with the tool result under `messages`. The
+      // activated skill is still returned by `listSkills()` (it applies no
+      // activity filter), so it keeps a detail row, which shows 0 because no
+      // text-part listing billed it. Pinning the real shape is what keeps a
+      // text-part scan from being re-added against a history that cannot occur.
+      const activatedEntry =
+        '<skill>\n<name>\nlate-skill\n</name>\n<description>\nActivated by a path\n</description>\n</skill>';
+      const activation = wrapSystemReminder(
+        `Project rules for src/**:\nUse tabs.\n\nThe following skill(s) became available via the Skill tool based on the file you just accessed; invoke a skill by passing its name to the Skill tool:\n<available_skills>\n${activatedEntry}\n</available_skills>`,
+      );
+      const response = { output: `File contents.\n\n${activation}` };
+      const toolResult = {
+        role: 'user',
+        parts: [{ functionResponse: { name: 'read_file', response } }],
+      } as unknown as Content;
+
+      const data = await collectContextData(
+        makeChatConfig({
+          total: 100_000,
+          skillList: [
+            {
+              name: 'report-builder',
+              description: 'Build reports',
+              level: 'project',
+              filePath: '/skills/report-builder/SKILL.md',
+            },
+            {
+              name: 'late-skill',
+              description: 'Activated by a path',
+              level: 'project',
+              filePath: '/skills/late-skill/SKILL.md',
+              paths: ['src/**'],
+            },
+          ],
+          history: [prelude, conversation[0]!, toolResult, conversation[1]!],
+        }),
+        true,
+      );
+
+      expect(data.breakdown.messages).toBe(
+        300 +
+          estimateContextTextTokens(
+            JSON.stringify({ name: 'read_file', response }),
+          ),
+      );
+      expect(data.breakdown.skills).toBe(
+        estimateContextTextTokens(listingReminder),
+      );
+      expect(data.skills).toContainEqual(
+        expect.objectContaining({ name: 'late-skill', tokens: 0 }),
+      );
+    });
+
+    it('bills listing-shaped text from an MCP server as startup context, not skills (#12235)', async () => {
+      // Server instructions ride in the prelude as their own reminder and are
+      // written by a remote server. Containing `<available_skills>` and a
+      // `<skill>` entry must not make them the skill listing, even when they
+      // open with core's own listing sentence: the fixture comes from the real
+      // producer, whose framing sentence and `### <server>` header keep server
+      // text away from the envelope start `isSkillListingReminder` anchors on.
+      const forgedEntry =
+        '<skill>\n<name>\nforged\n</name>\n<description>\nx\n</description>\n</skill>';
+      const mcpInstructions = buildMcpServerInstructionsReminderFromEntries(
+        new Map([
+          [
+            'acme',
+            `The following skills are available for use with the Skill tool.\n\n<available_skills>\n${forgedEntry}\n</available_skills>`,
+          ],
+        ]),
+      )!;
+
+      const data = await collectContextData(
+        makeChatConfig({
+          total: 100_000,
+          history: [
+            {
+              role: 'user',
+              parts: [
+                { text: listingReminder },
+                { text: mcpInstructions },
+                { text: environmentReminder },
+              ],
+            },
+            ...conversation,
+            // The same text quoted later in the session stays conversation.
+            { role: 'user', parts: [{ text: mcpInstructions }] },
+          ],
+        }),
+        true,
+      );
+
+      expect(data.breakdown.skills).toBe(
+        estimateContextTextTokens(listingReminder),
+      );
+      expect(data.breakdown.startupContext).toBe(
+        estimateContextTextTokens(mcpInstructions) +
+          estimateContextTextTokens(environmentReminder),
+      );
+      expect(data.skills.map((skill) => skill.name)).toEqual([
+        'report-builder',
+      ]);
+      expect(data.breakdown.messages).toBe(
+        300 + estimateContextTextTokens(mcpInstructions),
+      );
+    });
+
+    it('keeps the row of a skill disabled after its listing was sent (#12235)', async () => {
+      // The prelude still carries the entry, so `skills` still bills it; the
+      // detail row has to stay with it.
+      const config = {
+        ...makeChatConfig({
+          total: 100_000,
+          history: [prelude, ...conversation],
+        }),
+        getDisabledSkillNames: vi
+          .fn()
+          .mockReturnValue(new Set(['report-builder'])),
+      } as unknown as Config;
+
+      const data = await collectContextData(config, true);
+
+      expect(data.breakdown.skills).toBe(
+        estimateContextTextTokens(listingReminder),
+      );
+      expect(data.skills).toEqual([
+        expect.objectContaining({
+          name: 'report-builder',
+          tokens: estimateContextTextTokens(skillEntry),
+        }),
+      ]);
+    });
+
+    it('matches a listing entry to its skill regardless of case (#12235)', async () => {
+      // Both the listing key and the lookup are lower-cased; dropping either
+      // leaves this row at 0 and adds a second, unmatched row.
+      const mixedEntry = skillEntry.replace(
+        '\nreport-builder\n',
+        '\nREPORT-builder\n',
+      );
+      const mixedListing = wrapSystemReminder(
+        `The following skills are available for use with the Skill tool.\n\n<available_skills>\n${mixedEntry}\n</available_skills>`,
+      );
+
+      const data = await collectContextData(
+        makeChatConfig({
+          total: 100_000,
+          skillList: [
+            {
+              name: 'Report-Builder',
+              description: 'Build reports',
+              level: 'project',
+              filePath: '/skills/report-builder/SKILL.md',
+            },
+          ],
+          history: [
+            {
+              role: 'user',
+              parts: [{ text: mixedListing }, { text: environmentReminder }],
+            },
+            ...conversation,
+          ],
+        }),
+        true,
+      );
+
+      expect(data.skills).toEqual([
+        expect.objectContaining({
+          name: 'Report-Builder',
+          tokens: estimateContextTextTokens(mixedEntry),
+        }),
+      ]);
+    });
+
+    it('bills a skill response whose output is not a string as messages (#12235)', async () => {
+      const response = { output: { status: 'ok' } };
+      const structured = {
+        role: 'user',
+        parts: [{ functionResponse: { name: 'skill', response } }],
+      } as unknown as Content;
+
+      const data = await collectContextData(
+        makeChatConfig({
+          total: 100_000,
+          tools: [skillToolDouble],
+          skillList: trackedSkillList,
+          history: [prelude, conversation[0]!, structured],
+        }),
+        false,
+      );
+
+      expect(data.breakdown.messages).toBe(
+        100 +
+          estimateContextTextTokens(
+            JSON.stringify({ name: 'skill', response }),
+          ),
+      );
+    });
+
+    it('keeps a tracked body out of messages when the response appends a suffix (#12235)', async () => {
+      const data = await collectContextData(
+        makeChatConfig({
+          total: 100_000,
+          tools: [skillToolDouble],
+          skillList: trackedSkillList,
+          history: [
+            prelude,
+            conversation[0]!,
+            skillResponse(`${trackedBody}\n(loaded from project scope)`),
+          ],
+        }),
+        false,
+      );
+
+      expect(data.breakdown.messages).toBe(100);
+    });
+
+    it('does not bill the body of a skill that was never loaded (#12235)', async () => {
+      const notLoaded = {
+        ...skillToolDouble,
+        getLoadedSkillContentNames: () => new Map<string, string>(),
+      };
+
+      const data = await collectContextData(
+        makeChatConfig({
+          total: 100_000,
+          tools: [notLoaded],
+          skillList: trackedSkillList,
+          history: [prelude, ...conversation],
+        }),
+        true,
+      );
+
+      expect(data.skills[0]).toEqual(
+        expect.objectContaining({ loaded: false, bodyTokens: undefined }),
+      );
+      expect(data.breakdown.skills).toBe(
+        estimateContextTextTokens(JSON.stringify(skillToolSchema)) +
+          estimateContextTextTokens(listingReminder),
+      );
+    });
+
+    it('leaves a listing reminder with no entries in messages (#12235)', async () => {
+      const emptyDelta = wrapSystemReminder(
+        'The following skills/commands became available after startup and can now be invoked via the Skill tool by name.\n\n<available_skills>\n\n</available_skills>',
+      );
+
+      const data = await collectContextData(
+        makeChatConfig({
+          total: 100_000,
+          history: [
+            prelude,
+            conversation[0]!,
+            { role: 'user', parts: [{ text: emptyDelta }] },
+            conversation[1]!,
+          ],
+        }),
+        false,
+      );
+
+      expect(data.breakdown.skills).toBe(
+        estimateContextTextTokens(listingReminder),
+      );
+      expect(data.breakdown.messages).toBe(
+        300 + estimateContextTextTokens(emptyDelta),
+      );
+    });
+
+    it('charges nested file media and nested text in a tool response (#12235)', async () => {
+      const nestedText = 'n'.repeat(400);
+      const response = {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'call-2',
+              name: 'read_file',
+              response: { output: 'ok' },
+              parts: [
+                {
+                  fileData: {
+                    mimeType: 'application/pdf',
+                    fileUri: 'gs://bucket/report.pdf',
+                  },
+                },
+                { text: nestedText },
+              ],
+            },
+          },
+        ],
+      } as unknown as Content;
+
+      const data = await collectContextData(
+        makeChatConfig({
+          total: 100_000,
+          history: [prelude, conversation[0]!, response],
+        }),
+        false,
+      );
+
+      expect(data.breakdown.messages).toBe(
+        100 +
+          estimateContextTextTokens(
+            JSON.stringify({
+              id: 'call-2',
+              name: 'read_file',
+              response: { output: 'ok' },
+            }),
+          ) +
+          resolveSlimmingConfig(undefined).imageTokenEstimate +
+          estimateContextTextTokens(nestedText),
+      );
     });
   });
 
@@ -1072,14 +2006,13 @@ describe('collectContextData (contextCommand)', () => {
       getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
       isInteractive: vi.fn().mockReturnValue(true),
       getWorkingDir: vi.fn().mockReturnValue(process.cwd()),
+      storage: { getProjectRoot: vi.fn().mockReturnValue(process.cwd()) },
     } as unknown as Config;
 
     const data = await collectContextData(config, true);
 
     expect(data.builtinTools).toHaveLength(0);
     expect(data.mcpTools).toHaveLength(0);
-    expect(isDeferredAndHidden).toHaveBeenCalledWith('web_fetch');
-    expect(isDeferredAndHidden).toHaveBeenCalledWith('mcp__server__tool');
   });
 
   it('includes visibleTools in per-tool breakdown when deferred and not revealed (#6372)', async () => {
@@ -1123,6 +2056,7 @@ describe('collectContextData (contextCommand)', () => {
       getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
       isInteractive: vi.fn().mockReturnValue(true),
       getWorkingDir: vi.fn().mockReturnValue(process.cwd()),
+      storage: { getProjectRoot: vi.fn().mockReturnValue(process.cwd()) },
     } as unknown as Config;
 
     const data = await collectContextData(config, true);
@@ -1189,23 +2123,39 @@ describe('collectContextData (contextCommand)', () => {
 
   it('lists the auto-memory section as a separate memory entry (#7651)', async () => {
     // The managed auto-memory section is no longer part of getUserMemory(); its
-    // tokens are surfaced via getAutoMemoryPrompt(). Exercise the non-empty
-    // branch so a regression that drops the "auto memory" row from /context
-    // fails here instead of silently under-counting the memory breakdown.
-    const config = {
-      ...makeMockConfig(),
-      getUserMemory: vi.fn().mockReturnValue(''),
-      getOutputStyle: vi.fn().mockReturnValue(undefined),
-      getAutoMemoryPrompt: vi
-        .fn()
-        .mockReturnValue('# auto memory\nMEMORY_INDEX_MARKER'),
-    } as unknown as Config;
+    // tokens are surfaced via getAutoMemoryPrompt() plus the request-only
+    // catalog from getAutoMemoryContext(). Exercise the non-empty branch so a
+    // regression that drops the "auto memory" row from /context, or that drops
+    // either of its two terms, fails here instead of silently under-counting
+    // the memory breakdown.
+    const configWithCatalog = (catalog: string) =>
+      ({
+        ...makeMockConfig(),
+        getUserMemory: vi.fn().mockReturnValue(''),
+        getOutputStyle: vi.fn().mockReturnValue(undefined),
+        getAutoMemoryPrompt: vi
+          .fn()
+          .mockReturnValue('# auto memory\nStable policy'),
+        getAutoMemoryContext: vi.fn().mockReturnValue(catalog),
+      }) as unknown as Config;
 
-    const data = await collectContextData(config, true);
+    // contextCommand gates the row on the joined string, so a catalog-only
+    // config still yields exactly one row.
+    const policyOnly = await collectContextData(configWithCatalog(''), true);
+    const withCatalog = await collectContextData(
+      configWithCatalog('MEMORY_INDEX_MARKER\n'.repeat(200)),
+      true,
+    );
 
-    expect(data.memoryFiles).toHaveLength(1);
-    expect(data.memoryFiles[0].path).toBe(t('auto memory'));
-    expect(data.memoryFiles[0].tokens).toBeGreaterThan(0);
+    expect(policyOnly.memoryFiles).toHaveLength(1);
+    expect(policyOnly.memoryFiles[0].path).toBe(t('auto memory'));
+    expect(policyOnly.memoryFiles[0].tokens).toBeGreaterThan(0);
+
+    expect(withCatalog.memoryFiles).toHaveLength(1);
+    expect(withCatalog.memoryFiles[0].path).toBe(t('auto memory'));
+    expect(withCatalog.memoryFiles[0].tokens).toBeGreaterThan(
+      policyOnly.memoryFiles[0].tokens,
+    );
   });
 
   it('shortens home-dir memory marker paths to ~ in the breakdown', async () => {
@@ -1229,8 +2179,10 @@ describe('collectContextData (contextCommand)', () => {
 
     const data = await collectContextData(config, true);
 
-    expect(data.memoryFiles).toHaveLength(1);
-    expect(data.memoryFiles[0].path).toBe(path.join('~', '.qwen', 'QWEN.md'));
+    expect(data.instructionFiles!).toHaveLength(1);
+    expect(data.instructionFiles![0].path).toBe(
+      path.join('~', '.qwen', 'QWEN.md'),
+    );
   });
 
   it('renders project-local markers as relative paths when workingDir != cwd', async () => {
@@ -1255,9 +2207,107 @@ describe('collectContextData (contextCommand)', () => {
 
     const data = await collectContextData(config, true);
 
-    expect(data.memoryFiles).toHaveLength(2);
-    expect(data.memoryFiles[0].path).toBe('QWEN.md');
-    expect(data.memoryFiles[1].path).toBe(path.join('docs', 'QWEN.md'));
+    expect(data.instructionFiles!).toHaveLength(2);
+    expect(data.instructionFiles![0].path).toBe('QWEN.md');
+    expect(data.instructionFiles![1].path).toBe(path.join('docs', 'QWEN.md'));
+  });
+
+  it('attributes all injected skill bodies after refresh, removal and disable', async () => {
+    const listingEntries = new Map(
+      ['edited', 'removed', 'disabled'].map((name) => [
+        name,
+        `<skill>\n<name>\n${name}\n</name>\n<description>\nSkill\n</description>\n</skill>`,
+      ]),
+    );
+    const listing = wrapSystemReminder(
+      `The following skills are available for use with the Skill tool.\n\n<available_skills>\n${[...listingEntries.values()].join('\n')}\n</available_skills>`,
+    );
+    const history = new Map([
+      ['Earlier body retained in conversation.', 'edited'],
+      ['New body injected after refresh.', 'edited'],
+      ['Removed skill body retained in conversation.', 'removed'],
+      ['Disabled skill body retained in conversation.', 'disabled'],
+    ]);
+    const tool = {
+      name: ToolNames.SKILL,
+      schema: { name: ToolNames.SKILL, description: 'Static skill definition' },
+      getLoadedSkillNames: () => new Set(['edited']),
+      getLoadedSkillContents: () => new Set(history.keys()),
+      getLoadedSkillContentNames: () => history,
+    };
+    const config = {
+      ...makeMockConfig(),
+      getToolRegistry: vi.fn().mockReturnValue({
+        getAllTools: () => [tool],
+        getFunctionDeclarations: () => [tool.schema],
+        isDeferredAndHidden: () => false,
+      }),
+      getSkillManager: vi.fn().mockReturnValue({
+        listSkills: vi.fn().mockResolvedValue(
+          ['edited', 'disabled'].map((name) => ({
+            name,
+            description: 'Skill',
+            level: 'user',
+            filePath: `/skills/${name}/SKILL.md`,
+            body: 'Unloaded replacement content on disk.'.repeat(100),
+          })),
+        ),
+      }),
+      getDisabledSkillNames: () => new Set(['disabled']),
+      getLlmClient: () => ({
+        isInitialized: () => true,
+        getChat: () => ({
+          getLastPromptTokenCount: () => 100_000,
+          isLastPromptTokenCountEstimated: () => false,
+          getHistory: () => [
+            { role: 'user', parts: [{ text: listing }] },
+            { role: 'user', parts: [{ text: 'Current conversation.' }] },
+            ...[...history.keys()].map((output) => ({
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    name: ToolNames.SKILL,
+                    response: { output },
+                  },
+                },
+              ],
+            })),
+          ],
+        }),
+      }),
+    } as unknown as Config;
+    const data = await collectContextData(config, true);
+    const bodyTokens = [...history.keys()].reduce(
+      (sum, content) => sum + estimateContextTextTokens(content),
+      0,
+    );
+    expect(data.breakdown.skills).toBe(
+      estimateContextTextTokens(JSON.stringify(tool.schema)) +
+        estimateContextTextTokens(listing) +
+        bodyTokens,
+    );
+    expect(data.breakdown.messages).toBe(
+      estimateContextTextTokens('Current conversation.'),
+    );
+    expect(data.skills.find((skill) => skill.name === 'edited')).toMatchObject({
+      loaded: true,
+      bodyTokens:
+        estimateContextTextTokens('Earlier body retained in conversation.') +
+        estimateContextTextTokens('New body injected after refresh.'),
+    });
+    for (const name of ['removed', 'disabled']) {
+      expect(data.skills.filter((skill) => skill.name === name)).toEqual([
+        {
+          name,
+          loaded: true,
+          tokens: estimateContextTextTokens(listingEntries.get(name)!),
+          bodyTokens: estimateContextTextTokens(
+            [...history].find(([, skillName]) => skillName === name)![0],
+          ),
+        },
+      ]);
+    }
   });
 
   it('names the extension that contributes a context file (#12030)', async () => {
@@ -1295,10 +2345,10 @@ describe('collectContextData (contextCommand)', () => {
 
     const data = await collectContextData(config, true);
 
-    expect(data.memoryFiles).toHaveLength(2);
+    expect(data.instructionFiles!).toHaveLength(2);
     // The project file keeps its path; only the extension's file is renamed.
-    expect(data.memoryFiles[0].path).toBe('QWEN.md');
-    expect(data.memoryFiles[1].path).toBe(
+    expect(data.instructionFiles![0].path).toBe('QWEN.md');
+    expect(data.instructionFiles![1].path).toBe(
       `${t('Extension')}: Report Tools · QWEN.md`,
     );
   });
@@ -1334,14 +2384,14 @@ describe('collectContextData (contextCommand)', () => {
 
     const after = await collectContextData(config, true);
 
-    expect(after.memoryFiles.map((file) => file.path)).toEqual(
+    expect(after.instructionFiles!.map((file) => file.path)).toEqual(
       ['docs', 'prompts'].map(
         (dir) =>
           `${t('Extension')}: Report Tools · ${path.join(dir, 'QWEN.md')}`,
       ),
     );
-    expect(after.memoryFiles.map((file) => file.tokens)).toEqual(
-      before.memoryFiles.map((file) => file.tokens),
+    expect(after.instructionFiles!.map((file) => file.tokens)).toEqual(
+      before.instructionFiles!.map((file) => file.tokens),
     );
   });
 
@@ -1362,8 +2412,56 @@ describe('collectContextData (contextCommand)', () => {
 
     const data = await collectContextData(config, true);
 
-    expect(data.memoryFiles).toHaveLength(1);
-    expect(data.memoryFiles[0].path).toBe('QWEN.md');
+    expect(data.instructionFiles!).toHaveLength(1);
+    expect(data.instructionFiles![0].path).toBe('QWEN.md');
+  });
+
+  it('measures the listing a session would send before a chat exists (#12235)', async () => {
+    const config = {
+      ...makeMockConfig(),
+      getSkillManager: vi.fn().mockReturnValue({
+        listSkills: vi.fn().mockResolvedValue([
+          {
+            name: 'report-builder',
+            description: 'Build reports',
+            level: 'project',
+            filePath: '/skills/report-builder/SKILL.md',
+          },
+        ]),
+        isSkillActive: vi.fn().mockReturnValue(true),
+      }),
+      getModelInvocableCommandsProvider: vi.fn().mockReturnValue(undefined),
+    } as unknown as Config;
+    // Guards the fixture: a config the builder cannot read yields null, which
+    // is how this branch used to be entered without measuring anything.
+    const reminder = await buildAvailableSkillsReminder(config);
+    expect(reminder?.renderedEntries).toHaveLength(1);
+
+    const data = await collectContextData(config, true);
+
+    expect(data.breakdown.skills).toBe(
+      estimateContextTextTokens(reminder!.reminder),
+    );
+    expect(data.skills[0]!.tokens).toBeGreaterThan(0);
+  });
+
+  it('orders skill rows by size whether `loaded` is false or absent (#12235)', async () => {
+    const data = await collectContextData(makeMockConfig(), true);
+    const small = { name: 'small-skill', tokens: 10, loaded: false };
+    const big = { name: 'big-skill', tokens: 50 };
+
+    for (const skills of [
+      [small, big],
+      [big, small],
+    ]) {
+      const text = formatContextUsageText({ ...data, skills });
+      // Presence first: a missing row makes indexOf -1, which is "less than".
+      expect(text).toContain('big-skill');
+      expect(text).toContain('small-skill');
+      expect(text.indexOf('big-skill')).toBeLessThan(
+        text.indexOf('small-skill'),
+      );
+    }
   });
 
   it('excludes disabled skills from the detail breakdown', async () => {
@@ -1397,6 +2495,40 @@ describe('collectContextData (contextCommand)', () => {
     expect(data.skills.map((skill) => skill.name)).toEqual(['enabled-skill']);
   });
 });
+
+it.each([false, true])(
+  'preserves the combined memory category in legacy text snapshots (details: %s)',
+  (showDetails) => {
+    const text = formatContextUsageText({
+      type: 'context_usage',
+      modelName: 'legacy-model',
+      totalTokens: 200,
+      contextWindowSize: 1000,
+      breakdown: {
+        systemPrompt: 0,
+        builtinTools: 0,
+        mcpTools: 0,
+        memoryFiles: 200,
+        skills: 0,
+        messages: 0,
+        freeSpace: 600,
+        autocompactBuffer: 200,
+        thresholds: { effectiveWindow: 1000, warn: 700, auto: 800, hard: 900 },
+        currentTier: 'safe',
+      },
+      builtinTools: [],
+      mcpTools: [],
+      skills: [],
+      memoryFiles: [{ path: 'QWEN.md', tokens: 200 }],
+      showDetails,
+    });
+    expect(text).toMatch(/Memory files\s+200 tokens/);
+    expect(text).not.toContain('Instruction files');
+    expect(text).not.toContain('Auto memory');
+    expect(text.includes('QWEN.md')).toBe(showDetails);
+    expect(text.includes('**Memory files**')).toBe(showDetails);
+  },
+);
 
 describe('/context shows three-tier thresholds', () => {
   beforeEach(() => {
@@ -1484,6 +2616,15 @@ describe('/context shows three-tier thresholds', () => {
     expect(data.breakdown.currentTier).not.toBe('safe');
     // Free space has to account for the conversation as well.
     expect(data.breakdown.freeSpace).toBeLessThan(50_000);
+    // The estimate that moved the tier is shown, not hidden behind the
+    // provider-total gate (#12235).
+    expect(data.breakdown.messages).toBe(
+      estimateContextTextTokens('a'.repeat(600_000)),
+    );
+    const text = formatContextUsageText(data);
+    expect(text).toContain('Messages');
+    expect(text).toContain('**Estimated usage, including the conversation**');
+    expect(text).not.toContain('pre-conversation');
 
     // A top-level media part must count against the free window exactly like
     // text: the same fixture plus one pasted image lowers `freeSpace` by the

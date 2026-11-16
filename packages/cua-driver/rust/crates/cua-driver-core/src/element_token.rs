@@ -35,9 +35,8 @@
 //!
 //! ## Validity contract
 //!
-//! - Snapshot IDs are minted in `register_snapshot` (called by every
-//!   platform's `get_window_state` implementation immediately after the
-//!   AX/UIA/AT-SPI walk lands in the per-platform element cache).
+//! - Native snapshots publish their ID and owned payload together in
+//!   `register_snapshot_payload`. Resolution keeps that exact payload alive.
 //! - A snapshot is valid until either (a) the LRU evicts it, or (b) a
 //!   newer snapshot for the same `pid` pushes it past the LRU cap of
 //!   [`LRU_CAP_PER_PID`].
@@ -48,10 +47,11 @@
 //! The LRU is **per runtime and pid**, not global. Two snapshots in different
 //! lanes never collide even when their numeric counters match.
 
+use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Mutex;
 use std::sync::OnceLock;
+use std::sync::{Arc, Mutex};
 
 /// LRU cap of valid snapshots retained per pid. Only the newest snapshot for
 /// each `(pid, window_id)` remains valid; the cap bounds snapshots retained for
@@ -82,6 +82,40 @@ struct SnapshotEntry {
     element_count: usize,
     /// Linux window captures retain application-wide indices, including gaps.
     element_indices: Option<HashSet<usize>>,
+    binding: Option<SnapshotBinding>,
+    owner_session: Option<String>,
+}
+
+/// An immutable native snapshot retained at the token-resolution boundary.
+/// Type erasure keeps the core independent of platform native handle types.
+#[derive(Clone)]
+pub struct SnapshotBinding {
+    pid: i32,
+    window_id: u32,
+    payload: Arc<dyn Any + Send + Sync>,
+}
+
+impl std::fmt::Debug for SnapshotBinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SnapshotBinding")
+            .field("pid", &self.pid)
+            .field("window_id", &self.window_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SnapshotBinding {
+    pub fn with_payload<S: Any, R>(
+        &self,
+        pid: i32,
+        window_id: u32,
+        read: impl FnOnce(&S) -> R,
+    ) -> Option<R> {
+        if self.pid != pid || self.window_id != window_id {
+            return None;
+        }
+        self.payload.downcast_ref::<S>().map(read)
+    }
 }
 
 /// Process-global token registry. Thread-safe; tools resolve from any
@@ -114,7 +148,7 @@ impl TokenRegistry {
     /// in its lane, the oldest is evicted and any token that referenced
     /// it becomes stale — that's the contract.
     pub fn register_snapshot(&self, pid: i32, window_id: u32, element_count: usize) -> u32 {
-        self.register(pid, window_id, element_count, None)
+        self.register(pid, window_id, element_count, None, None, None)
     }
 
     pub fn register_snapshot_indices(
@@ -124,7 +158,40 @@ impl TokenRegistry {
         indices: impl IntoIterator<Item = usize>,
     ) -> u32 {
         let indices: HashSet<usize> = indices.into_iter().collect();
-        self.register(pid, window_id, indices.len(), Some(indices))
+        self.register(pid, window_id, indices.len(), Some(indices), None, None)
+    }
+
+    pub fn register_snapshot_payload<S: Any + Send + Sync>(
+        &self,
+        pid: i32,
+        window_id: u32,
+        indices: impl IntoIterator<Item = usize>,
+        payload: Arc<S>,
+    ) -> u32 {
+        self.register_snapshot_payload_for_session(pid, window_id, indices, payload, None)
+    }
+
+    pub fn register_snapshot_payload_for_session<S: Any + Send + Sync>(
+        &self,
+        pid: i32,
+        window_id: u32,
+        indices: impl IntoIterator<Item = usize>,
+        payload: Arc<S>,
+        owner_session: Option<&str>,
+    ) -> u32 {
+        let indices: HashSet<usize> = indices.into_iter().collect();
+        self.register(
+            pid,
+            window_id,
+            indices.len(),
+            Some(indices),
+            Some(SnapshotBinding {
+                pid,
+                window_id,
+                payload,
+            }),
+            owner_session.map(str::to_owned),
+        )
     }
 
     fn register(
@@ -133,6 +200,8 @@ impl TokenRegistry {
         window_id: u32,
         element_count: usize,
         element_indices: Option<HashSet<usize>>,
+        binding: Option<SnapshotBinding>,
+        owner_session: Option<String>,
     ) -> u32 {
         // Keep the full 32-bit counter. Truncating to 16 bits repeats an id
         // every 65,536 process-global snapshots. A long-lived daemon can then
@@ -142,16 +211,16 @@ impl TokenRegistry {
         let runtime_scope = current_runtime_scope();
         let mut entries = self.by_runtime_and_pid.lock().unwrap();
         let lane = entries.entry((runtime_scope, pid)).or_default();
-        // Every platform replaces its per-window element cache on the next
-        // snapshot. Retaining an older token for the same window would resolve
-        // that token against the new cache and could target a different row.
-        // Invalidate it at the same boundary as the cache replacement.
+        // Publication invalidates future resolutions of the preceding window
+        // snapshot. Already-resolved actions retain their original payload.
         lane.retain(|entry| entry.window_id != window_id);
         lane.push(SnapshotEntry {
             snapshot_id: id,
             window_id,
             element_count,
             element_indices,
+            binding,
+            owner_session,
         });
         // Evict oldest. The loop guards against pre-existing over-cap
         // state from a previous version of the binary; in steady state
@@ -174,6 +243,15 @@ impl TokenRegistry {
     /// - `"element_token element_index out of range"` — the index in
     ///   the token is past the max recorded for the snapshot.
     pub fn resolve(&self, pid: i32, token: &str) -> Result<(u32, usize), String> {
+        self.resolve_bound(pid, token)
+            .map(|(window, index, _)| (window, index))
+    }
+
+    pub fn resolve_bound(
+        &self,
+        pid: i32,
+        token: &str,
+    ) -> Result<(u32, usize, Option<SnapshotBinding>), String> {
         let (sid, idx) =
             parse_token(token).ok_or_else(|| "element_token has invalid format".to_string())?;
         let runtime_scope = current_runtime_scope();
@@ -209,7 +287,17 @@ impl TokenRegistry {
                 entry.element_count
             ));
         }
-        Ok((entry.window_id, idx))
+        Ok((entry.window_id, idx, entry.binding.clone()))
+    }
+
+    pub fn clear_session(&self, session_id: &str) -> usize {
+        let mut entries = self.by_runtime_and_pid.lock().unwrap();
+        let before = entries.values().map(Vec::len).sum::<usize>();
+        entries.retain(|_, snapshots| {
+            snapshots.retain(|entry| entry.owner_session.as_deref() != Some(session_id));
+            !snapshots.is_empty()
+        });
+        before - entries.values().map(Vec::len).sum::<usize>()
     }
 
     pub fn clear_runtime_scope(&self, runtime_scope: &str) -> usize {
@@ -227,6 +315,18 @@ impl TokenRegistry {
         let before = entries.len();
         entries.retain(|(_, entry_pid), _| *entry_pid != pid);
         before - entries.len()
+    }
+
+    /// Invalidate one observation target in the calling runtime only. A failed
+    /// observation is not proof that another runtime's target has disappeared.
+    pub fn clear_current_target(&self, pid: i32, window_id: u32) -> usize {
+        let mut entries = self.by_runtime_and_pid.lock().unwrap();
+        let Some(snapshots) = entries.get_mut(&(current_runtime_scope(), pid)) else {
+            return 0;
+        };
+        let before = snapshots.len();
+        snapshots.retain(|entry| entry.window_id != window_id);
+        before - snapshots.len()
     }
 
     /// Invalidate snapshots for one exact process/window target across runtime
@@ -374,7 +474,17 @@ pub enum ResolvedElement {
         /// through the registry — informational, used by tools that
         /// want to log "via token" in the success summary.
         via_token: bool,
+        binding: Option<SnapshotBinding>,
     },
+}
+
+impl ResolvedElement {
+    pub fn binding(&self) -> Option<SnapshotBinding> {
+        match self {
+            Self::Element { binding, .. } => binding.clone(),
+            Self::None => None,
+        }
+    }
 }
 
 /// Validate tool args that accept `element_index`, `snapshot_id`, and
@@ -418,8 +528,8 @@ pub fn resolve_element_args(
                     .resolve_current(pid, tok)
                     .map_err(|error| refusal(error.code(), error.to_string()))?;
             let snapshot_token = token_for(snapshot_id, element_index);
-            let (snapshot_window_id, snapshot_element_index) = global()
-                .resolve(pid, &snapshot_token)
+            let (snapshot_window_id, snapshot_element_index, binding) = global()
+                .resolve_bound(pid, &snapshot_token)
                 .map_err(|message| refusal("stale_element_token", message))?;
             if snapshot_window_id != window_id || snapshot_element_index != element_index {
                 return Err(refusal(
@@ -428,9 +538,9 @@ pub fn resolve_element_args(
                         .to_owned(),
                 ));
             }
-            return Ok((window_id, element_index));
+            return Ok((window_id, element_index, binding));
         }
-        let (wid, idx) = global().resolve(pid, tok).map_err(|message| {
+        let (wid, idx, binding) = global().resolve_bound(pid, tok).map_err(|message| {
             let code = if message.contains("another runtime generation") {
                 "generation_mismatch"
             } else if message == STALE_TOKEN_ERROR {
@@ -440,7 +550,7 @@ pub fn resolve_element_args(
             };
             refusal(code, message)
         })?;
-        Ok::<_, crate::protocol::ToolResult>((wid, idx))
+        Ok::<_, crate::protocol::ToolResult>((wid, idx, binding))
     };
 
     match (args_element_index, args_element_token, args_snapshot_id) {
@@ -463,7 +573,7 @@ pub fn resolve_element_args(
                 )
             })?;
             let token = format_token(snapshot_id, idx);
-            let (wid, resolved_idx) = resolve_token(&token)?;
+            let (wid, resolved_idx, binding) = resolve_token(&token)?;
             if args_window_id.is_some_and(|arg_wid| arg_wid != wid) {
                 return Err(refusal(
                     "conflicting_element_target",
@@ -477,10 +587,11 @@ pub fn resolve_element_args(
                 window_id: Some(wid),
                 element_index: resolved_idx,
                 via_token: false,
+                binding,
             })
         }
         (idx_opt, Some(tok), snapshot_opt) => {
-            let (wid, idx) = resolve_token(tok)?;
+            let (wid, idx, binding) = resolve_token(tok)?;
             if idx_opt.is_some_and(|arg_idx| arg_idx != idx)
                 || args_window_id.is_some_and(|arg_wid| arg_wid != wid)
                 || snapshot_opt.is_some_and(|handle| {
@@ -499,6 +610,7 @@ pub fn resolve_element_args(
                 window_id: Some(wid),
                 element_index: idx,
                 via_token: true,
+                binding,
             })
         }
     }
@@ -508,6 +620,118 @@ pub fn resolve_element_args(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn resolved_payload_does_not_switch_to_a_replacement_snapshot() {
+        let registry = super::TokenRegistry::new();
+        let first = registry.register_snapshot_payload(42, 7, [130], std::sync::Arc::new("first"));
+        let (_, _, binding) = registry
+            .resolve_bound(42, &super::token_for(first, 130))
+            .unwrap();
+        let binding = binding.unwrap();
+        registry.register_snapshot_payload(42, 7, [130], std::sync::Arc::new("replacement"));
+        assert_eq!(
+            binding.with_payload(42, 7, |value: &&str| *value),
+            Some("first")
+        );
+        assert_eq!(binding.with_payload(42, 8, |value: &&str| *value), None);
+        assert_eq!(binding.with_payload(43, 7, |value: &&str| *value), None);
+        assert_eq!(
+            registry.resolve(42, &super::token_for(first, 130)),
+            Err(super::STALE_TOKEN_ERROR.into())
+        );
+    }
+
+    #[test]
+    fn delayed_publication_owns_its_payload_instead_of_the_latest_window_cache() {
+        let registry = std::sync::Arc::new(super::TokenRegistry::new());
+        let (prepared_tx, prepared_rx) = std::sync::mpsc::channel();
+        let (publish_tx, publish_rx) = std::sync::mpsc::channel();
+        let delayed = registry.clone();
+        let first = std::thread::spawn(move || {
+            let pending = std::sync::Arc::new("first");
+            prepared_tx.send(()).unwrap();
+            publish_rx.recv().unwrap();
+            delayed.register_snapshot_payload(42, 7, [0], pending)
+        });
+        prepared_rx.recv().unwrap();
+        let second = registry.register_snapshot_payload(42, 7, [0], std::sync::Arc::new("second"));
+        publish_tx.send(()).unwrap();
+        let first = first.join().unwrap();
+        let (_, _, binding) = registry
+            .resolve_bound(42, &super::token_for(first, 0))
+            .unwrap();
+        assert_eq!(
+            binding.unwrap().with_payload(42, 7, |value: &&str| *value),
+            Some("first")
+        );
+        assert_eq!(
+            registry.resolve(42, &super::token_for(second, 0)),
+            Err(super::STALE_TOKEN_ERROR.into())
+        );
+    }
+
+    #[test]
+    fn snapshot_cleanup_releases_payload_after_the_last_resolved_action() {
+        struct Payload(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+        impl Drop for Payload {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let drops = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let registry = super::TokenRegistry::new();
+        let first = registry.register_snapshot_payload(
+            42,
+            7,
+            [0],
+            std::sync::Arc::new(Payload(drops.clone())),
+        );
+        let (_, _, binding) = registry
+            .resolve_bound(42, &super::token_for(first, 0))
+            .unwrap();
+        registry.clear_runtime_scope("legacy");
+        assert!(registry.resolve(42, &super::token_for(first, 0)).is_err());
+        assert_eq!(drops.load(std::sync::atomic::Ordering::SeqCst), 0);
+        drop(binding);
+        assert_eq!(drops.load(std::sync::atomic::Ordering::SeqCst), 1);
+        registry.register_snapshot_payload(42, 8, [0], std::sync::Arc::new(Payload(drops.clone())));
+        registry.clear_target(42, 8);
+        assert_eq!(drops.load(std::sync::atomic::Ordering::SeqCst), 2);
+        registry.register_snapshot_payload(42, 9, [0], std::sync::Arc::new(Payload(drops.clone())));
+        for window in 10..10 + super::LRU_CAP_PER_PID as u32 {
+            registry.register_snapshot(42, window, 1);
+        }
+        assert_eq!(drops.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn observation_invalidation_preserves_peer_runtime_and_resolved_payload() {
+        use crate::tool::with_runtime_scope;
+        let registry = super::TokenRegistry::new();
+        let peer = with_runtime_scope("invalidation-peer".into(), || {
+            registry.register_snapshot(42, 7, 1)
+        });
+        with_runtime_scope("invalidation-owner".into(), || {
+            let sid = registry.register_snapshot_payload(42, 7, [0], Arc::new("original"));
+            let sibling = registry.register_snapshot(42, 8, 1);
+            let token = super::token_for(sid, 0);
+            let binding = registry.resolve_bound(42, &token).unwrap().2.unwrap();
+            assert_eq!(registry.clear_current_target(42, 7), 1);
+            assert!(registry.resolve(42, &token).is_err());
+            assert!(registry.resolve(42, &super::token_for(sibling, 0)).is_ok());
+            assert_eq!(binding.with_payload(42, 7, |s: &&str| *s), Some("original"));
+            assert_eq!(registry.clear_current_target(42, 7), 0);
+        });
+        with_runtime_scope("invalidation-peer".into(), || {
+            assert!(registry.resolve(42, &super::token_for(peer, 0)).is_ok());
+        });
+        // A confirmed target close still revokes every runtime lane.
+        assert_eq!(registry.clear_target(42, 7), 1);
+        with_runtime_scope("invalidation-peer".into(), || {
+            assert!(registry.resolve(42, &super::token_for(peer, 0)).is_err());
+        });
+    }
+
     #[test]
     fn sparse_indices_are_membership_checked_and_window_scoped() {
         let registry = super::TokenRegistry::new();
@@ -797,6 +1021,7 @@ mod tests {
                 window_id,
                 element_index,
                 via_token,
+                ..
             } => {
                 assert_eq!(window_id, Some(555), "window_id comes from the snapshot");
                 assert_eq!(element_index, 2);
@@ -829,7 +1054,8 @@ mod tests {
             ResolvedElement::Element {
                 window_id: Some(888),
                 element_index: 2,
-                via_token: false
+                via_token: false,
+                ..
             }
         ));
     }

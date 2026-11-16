@@ -144,6 +144,59 @@ async function settle(): Promise<void> {
 }
 
 describe('AddMenu', () => {
+  it.each([
+    ['en', false],
+    ['zh-CN', false],
+    ['en', true],
+    ['zh-CN', true],
+  ] as const)(
+    'renders visible labels and linked descriptions in %s (mobile: %s)',
+    async (language, mobile) => {
+      renderWith(
+        baseProps({
+          getWorkspaceActions: () => ({
+            listDirectory: vi.fn().mockResolvedValue([]),
+            loadExtensionsStatus: vi.fn(),
+            loadMcpStatus: vi.fn(),
+          }),
+          onSkillsOpenChange: vi.fn(),
+          ...(mobile
+            ? {
+                mobileActions: {
+                  commands: [],
+                  onHistory: vi.fn(),
+                  onToggleShell: vi.fn(),
+                  shellMode: false,
+                },
+              }
+            : {}),
+        }),
+        language,
+      );
+      await openMenu();
+      const t = getTranslator(language);
+      for (const [testId, key] of [
+        ['file', 'file'],
+        ['reference-file', 'referenceFile'],
+        ['extensions', 'extensions'],
+        ['mcp', 'mcp'],
+        ['skills', 'skills'],
+      ] as const) {
+        if (mobile && key === 'file') continue;
+        const row = menuItem(`composer-add-menu-${testId}`)!;
+        const label = t(`composerAdd.${key}.label`);
+        const description = t(`composerAdd.${key}.description`);
+        expect(row.textContent).toBe(`${label}${description}`);
+        expect(row.getAttribute('aria-label')).toBe(label);
+        const descriptionId = row.getAttribute('aria-describedby');
+        expect(descriptionId).toBeTruthy();
+        expect(document.getElementById(descriptionId!)?.textContent).toBe(
+          description,
+        );
+      }
+    },
+  );
+
   it('renders a "+" trigger with an add-to-message label', () => {
     render();
     const trigger = container!.querySelector(
@@ -224,6 +277,110 @@ describe('AddMenu', () => {
     ...overrides,
   });
 
+  it('requests a change without optimistically changing the confirmed value', async () => {
+    const onWorkflowModeChange = vi.fn();
+    renderWith(
+      baseProps({
+        workflow: {
+          workflowModeStatus: 'ready',
+          workflowMode: { requested: false, available: true, effective: false },
+          onWorkflowModeChange,
+        },
+      }),
+    );
+    await openMenu();
+    expect(
+      menuItem('composer-add-menu-workflow')!.querySelector(
+        '[data-workflow-summary]',
+      )?.textContent,
+    ).toBe('Let new tasks use workflows');
+    await act(async () => menuItem('composer-add-menu-workflow')!.click());
+    await settle();
+    expect(onWorkflowModeChange).toHaveBeenCalledExactlyOnceWith(true);
+    await openMenu();
+    expect(
+      menuItem('composer-add-menu-workflow')!.getAttribute('aria-checked'),
+    ).toBe('false');
+  });
+
+  it.each([false, true])(
+    'toggles Workflow from the menu (simple: %s)',
+    async (simpleMode) => {
+      const onWorkflowModeChange = vi.fn();
+      renderWith(
+        baseProps({
+          simpleMode,
+          workflow: {
+            workflowModeStatus: 'ready',
+            workflowMode: {
+              requested: true,
+              available: false,
+              effective: false,
+              reason: 'workflow_unavailable',
+            },
+            onWorkflowModeChange,
+          },
+        }),
+      );
+      await openMenu();
+      const row = menuItem('composer-add-menu-workflow')!;
+      expect(row.getAttribute('role')).toBe('menuitemcheckbox');
+      expect(row.getAttribute('aria-checked')).toBe('true');
+      expect(row.textContent).toContain('The Workflow tool is unavailable');
+      await act(async () => row.click());
+      await settle();
+      expect(onWorkflowModeChange).toHaveBeenCalledExactlyOnceWith(false);
+      expect(menuItem('composer-add-menu-workflow')).toBeNull();
+    },
+  );
+
+  it.each(['unbound', 'syncing', 'unknown', 'ready'] as const)(
+    'keeps %s Workflow state visible and disabled',
+    async (workflowModeStatus) => {
+      const onWorkflowModeChange = vi.fn();
+      renderWith(
+        baseProps({
+          workflow: {
+            workflowModeStatus,
+            workflowMode: {
+              requested: false,
+              available: false,
+              effective: false,
+            },
+            onWorkflowModeChange,
+          },
+        }),
+      );
+      await openMenu();
+      const row = menuItem('composer-add-menu-workflow')!;
+      expect(row.getAttribute('data-disabled')).toBe('');
+      await act(async () => row.click());
+      expect(onWorkflowModeChange).not.toHaveBeenCalled();
+    },
+  );
+
+  it('omits unsupported Workflow and keeps pending writes disabled', async () => {
+    const props = baseProps({
+      workflow: { workflowModeStatus: 'unsupported' },
+    });
+    renderWith(props);
+    await openMenu();
+    expect(menuItem('composer-add-menu-workflow')).toBeNull();
+    rerenderWith({
+      ...props,
+      workflow: {
+        workflowModeStatus: 'ready',
+        workflowModePending: true,
+        workflowMode: { requested: true, available: true, effective: true },
+        onWorkflowModeChange: vi.fn(),
+      },
+    });
+    const row = menuItem('composer-add-menu-workflow')!;
+    expect(row.getAttribute('aria-busy')).toBe('true');
+    expect(row.getAttribute('data-disabled')).toBe('');
+    expect(row.textContent).toContain('Updating Workflow mode');
+  });
+
   it('omits the Plan entry unless the host supplies one', async () => {
     renderWith(baseProps());
     await openMenu();
@@ -247,14 +404,14 @@ describe('AddMenu', () => {
     expect(plan.getAttribute('role')).toBe('menuitemcheckbox');
     expect(plan.getAttribute('aria-checked')).toBe('true');
     expect(plan.textContent).toBe('Plan modePlan first, run after you approve');
-    // The description hides below the small-screen breakpoint, like the
-    // siblings' secondary text.
     const description = Array.from(plan.querySelectorAll('span')).find(
       (element) => element.textContent === 'Plan first, run after you approve',
     )!;
     expect(description).toBeDefined();
-    expect(description.className).toContain('hidden');
-    expect(description.className).toContain('sm:block');
+    expect(
+      plan.querySelector('[data-checked]')?.getAttribute('data-checked'),
+    ).toBe('true');
+    expect(plan.querySelector('button, [role="switch"]')).toBeNull();
   });
 
   it('puts the Plan entry last and states why it is disabled', async () => {
@@ -269,12 +426,14 @@ describe('AddMenu', () => {
     const rows = portalRoot!.querySelectorAll('[role^="menuitem"]');
     const plan = menuItem('composer-add-menu-plan')!;
     expect(rows[rows.length - 1]).toBe(plan);
-    // A separator sets the mode row apart from the add actions, and only this
-    // row carries a leading icon.
+    // A separator keeps the mode row apart from the add actions.
     expect(plan.previousElementSibling?.getAttribute('role')).toBe('separator');
     expect(plan.querySelector('span[style*="mode-icon-url"]')).not.toBeNull();
     expect(plan.hasAttribute('data-disabled')).toBe(true);
     expect(plan.textContent).toContain('Switching mode');
+    expect(
+      plan.querySelector('[data-checked]')?.getAttribute('data-checked'),
+    ).toBe('false');
     await act(async () => {
       plan.dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
     });
@@ -931,6 +1090,33 @@ describe('mobile AddMenu', () => {
     });
     await settle();
   }
+  it.each(['en', 'zh-CN'] as const)(
+    'explains unavailable simple actions in %s and discovers them on the next open',
+    async (language) => {
+      let actions: ReturnType<AddMenuProps['getWorkspaceActions']> = undefined;
+      renderWith(
+        mobileProps({
+          simpleMode: true,
+          addFileAvailable: false,
+          getWorkspaceActions: () => actions,
+        }),
+        language,
+      );
+      await openMenu();
+      expect(menuItem('composer-add-menu-empty')?.textContent).toBe(
+        getTranslator(language)('composerAdd.emptyState'),
+      );
+      const close = portalRoot!.querySelector<HTMLButtonElement>(
+        `[aria-label="${getTranslator(language)('common.close')}"]`,
+      )!;
+      await act(async () => close.click());
+      await settle();
+      actions = { listDirectory: vi.fn().mockResolvedValue([]) };
+      await openMenu();
+      expect(menuItem('composer-add-menu-empty')).toBeNull();
+      expect(menuItem('composer-add-menu-reference-file')).not.toBeNull();
+    },
+  );
   it('uses the scoped bottom drawer and supports reference search and back', async () => {
     const props = mobileProps({
       getWorkspaceActions: () => ({
@@ -1136,6 +1322,26 @@ describe('mobile AddMenu', () => {
       portalRoot!.querySelector('[data-web-shell-mobile-add-menu]'),
     ).toBeNull();
   });
+  it('opens live voice from a tiled row after closing the drawer', async () => {
+    const props = mobileProps();
+    const onLiveVoice = vi.fn(() => {
+      expect(
+        portalRoot!.querySelector('[data-web-shell-mobile-add-menu]'),
+      ).toBeNull();
+    });
+    props.mobileActions!.onLiveVoice = onLiveVoice;
+    renderWith(props);
+    await openMenu();
+    const row = Array.from(portalRoot!.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Open Live Voice',
+    )!;
+    expect(
+      row.querySelector(':scope > span[aria-hidden="true"] svg'),
+    ).not.toBeNull();
+    await tap('Open Live Voice');
+    expect(onLiveVoice).toHaveBeenCalledOnce();
+  });
+
   it.each(['en', 'zh-CN'] as const)(
     'localizes the busy mobile Plan row in %s',
     async (language) => {
@@ -1148,9 +1354,13 @@ describe('mobile AddMenu', () => {
       const row = menuItem('composer-add-menu-plan') as HTMLButtonElement;
       const t = getTranslator(language);
       expect(row.textContent).toBe(
-        `${t('composerAdd.plan.label')}${t('composerAdd.plan.busy')}`,
+        `${t('composerAdd.plan.label')}${t('composerAdd.plan.description')}${t('composerAdd.plan.busy')}`,
       );
       expect(row.disabled).toBe(true);
+      expect(
+        document.getElementById(row.getAttribute('aria-describedby')!)
+          ?.textContent,
+      ).toBe(t('composerAdd.plan.busy'));
       await act(async () => row.click());
       expect(onToggle).not.toHaveBeenCalled();
     },
@@ -1176,5 +1386,41 @@ describe('mobile AddMenu', () => {
     await openMenu();
     await tap('Input history');
     expect(props.mobileActions!.onHistory).toHaveBeenCalledOnce();
+  });
+});
+
+describe('AddMenu BTW entry', () => {
+  it.each(['en', 'zh-CN'] as const)('explains BTW in %s', async (language) => {
+    const t = getTranslator(language);
+    const props = baseProps({ btw: { onSelect: vi.fn() } });
+    renderWith(props, language);
+    await openMenu();
+    const item = menuItem('composer-add-menu-btw')!;
+    expect(item.textContent).toContain(t('composerAdd.btw.label'));
+    expect(item.textContent).toContain(t('composerAdd.btw.description'));
+    expect(item.textContent).toContain('/btw');
+  });
+
+  it('runs the mobile action after the drawer releases focus', async () => {
+    const onSelect = vi.fn(() => {
+      expect(
+        portalRoot!.querySelector('[data-web-shell-mobile-add-menu]'),
+      ).toBeNull();
+    });
+    renderWith(
+      baseProps({
+        btw: { onSelect },
+        mobileActions: {
+          commands: [],
+          onHistory: vi.fn(),
+          onToggleShell: vi.fn(),
+          shellMode: false,
+        },
+      }),
+    );
+    await openMenu();
+    await act(async () => menuItem('composer-add-menu-btw')!.click());
+    await settle();
+    expect(onSelect).toHaveBeenCalledOnce();
   });
 });

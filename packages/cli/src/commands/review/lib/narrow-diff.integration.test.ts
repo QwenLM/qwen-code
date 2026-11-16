@@ -103,7 +103,14 @@ beforeAll(() => {
 });
 
 afterAll(() => {
-  if (repo) rmSync(repo, { recursive: true, force: true });
+  if (repo) {
+    rmSync(repo, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 100,
+    });
+  }
   gitIsolation.dispose();
 });
 

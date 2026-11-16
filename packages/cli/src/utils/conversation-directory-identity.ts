@@ -14,13 +14,16 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path';
  *
  * FAT/exFAT and some SMB-style filesystems report `Stats.ino === 0`, while
  * Windows can expose file IDs that exceed JavaScript's safe integer range.
- * Neither value can be compared as an exact identity proof.
+ * Neither value can be compared as an exact identity proof by a
+ * number-backed `Stats`. A stat taken with `{ bigint: true }` reports the
+ * 64-bit id exactly, so there the safe-integer half of this rule is wrong
+ * and only `ino === 0` stays unverifiable — see the two bigint
+ * restatements in the ledger below.
  *
  * This predicate is the shared verifiability semantics for the
- * conversation-identity checks that import it (the standalone deletion
- * journal, the ACP agent, and review/lib/same-file.ts). Two call sites keep
- * a deliberate local restatement — edit them in lockstep with this
- * predicate:
+ * conversation-identity check that imports it
+ * (`acp-integration/acpAgent.ts`). Four call sites keep a deliberate local
+ * restatement — edit them in lockstep with this predicate:
  *
  * - `syncStandaloneRoot` (serve/conversations/conversation-workspace.ts)
  *   inlines the predicate and the root-identity composite around the open
@@ -28,11 +31,26 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path';
  * - `hasExpectedManagedDirectoryIdentity` (acp-integration/acpAgent.ts)
  *   inlines the composite because the wire expectation `{ device, inode }`
  *   carries no `inodeVerifiable` field and must keep deriving verifiability
- *   from `inode !== 0`.
+ *   from `inode !== 0`;
+ * - `isSameFile` (commands/review/lib/same-file.ts) and
+ *   `directoryIdentityOf`
+ *   (serve/conversations/standalone-deletion-journal.ts) restate only the
+ *   NON-ZERO half, over exact `{ bigint: true }` ids. Do not re-unify these
+ *   two onto the safe-integer rule above: their ids are exact, so refusing
+ *   them degrades both comparators and re-opens the >2^53 NTFS fail-open
+ *   tracked in #11848.
  *
- * Core's canonical predicate (core/src/utils/file-identity.ts) is
- * deliberately LOOSER (`Number(ino) !== 0`) — do not align the two; see the
- * same-file.ts import site for why.
+ * Core's canonical predicate (packages/core/src/utils/file-identity.ts)
+ * states the non-zero rule and is bigint-tolerant (`Number(ino) !== 0`).
+ * Do not align THIS predicate with it: widening it here would also flip
+ * `assertVerifiableTranscriptIdentity` on >2^53 Windows transcript inodes.
+ * The comment block above `tryStat` in commands/review/lib/same-file.ts
+ * records the full argument. The two bigint sites restate the rule instead
+ * of importing core's, each for the reason recorded at its own site:
+ * `standalone-deletion-journal.ts` is loaded from the serve entry and keeps
+ * core out of its import graph — the bundle-closure trade-off
+ * serve/managed-scratch-workspace.ts cites this docblock for — and
+ * `same-file.ts` is a leaf helper that imports only node builtins.
  */
 export function hasVerifiableInode(ino: number): boolean {
   return Number.isSafeInteger(ino) && ino > 0;

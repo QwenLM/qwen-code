@@ -38,9 +38,11 @@ const TooltipTrigger = React.forwardRef<
 
 const TooltipContent = React.forwardRef<
   React.ComponentRef<typeof TooltipPrimitive.Content>,
-  React.ComponentProps<typeof TooltipPrimitive.Content>
+  React.ComponentProps<typeof TooltipPrimitive.Content> & {
+    variant?: 'default' | 'black';
+  }
 >(function TooltipContent(
-  { className, sideOffset = 0, children, ...props },
+  { className, sideOffset = 0, variant = 'default', children, ...props },
   ref,
 ) {
   const portalRoot = useWebShellPortalRoot();
@@ -52,6 +54,8 @@ const TooltipContent = React.forwardRef<
         sideOffset={sideOffset}
         className={cn(
           'relative z-50 inline-flex w-fit max-w-xs origin-(--radix-tooltip-content-transform-origin) items-center gap-1.5 rounded-md bg-popover px-3 py-1.5 text-xs text-popover-foreground shadow-md ring-1 ring-foreground/10 [--floating-arrow-offset:-1px] data-[side=top]:[--floating-arrow-offset:0px] has-data-[slot=kbd]:pr-1.5 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 **:data-[slot=kbd]:relative **:data-[slot=kbd]:isolate **:data-[slot=kbd]:z-50 **:data-[slot=kbd]:rounded-sm data-[state=delayed-open]:animate-in data-[state=delayed-open]:fade-in-0 data-[state=delayed-open]:zoom-in-95 data-[state=instant-open]:animate-in data-[state=instant-open]:fade-in-0 data-[state=instant-open]:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95',
+          variant === 'black' &&
+            'ring-border [--popover:#000] [--popover-foreground:#fff] [--border:#404040] [--floating-arrow-offset:0px]',
           className,
         )}
         {...props}

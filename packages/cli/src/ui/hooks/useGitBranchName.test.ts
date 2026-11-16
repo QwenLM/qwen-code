@@ -23,6 +23,7 @@ import {
 import {
   useGitBranchName,
   BRANCH_POLL_INTERVAL_MS,
+  primeGitBranchName,
 } from './useGitBranchName.js';
 
 // The hook is a thin wrapper over core's gitDirect helpers; the direct-read
@@ -55,6 +56,15 @@ describe('useGitBranchName', () => {
   afterEach(() => {
     vi.restoreAllMocks();
     vi.useRealTimers();
+  });
+
+  it('starts from a primed branch name before any effect runs', async () => {
+    mockResolve.mockResolvedValue('primed');
+    await primeGitBranchName('/primed/project');
+
+    const { result } = renderHook(() => useGitBranchName('/primed/project'));
+
+    expect(result.current).toBe('primed');
   });
 
   it('reads the branch name on mount', async () => {

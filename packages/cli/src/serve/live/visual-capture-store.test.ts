@@ -139,11 +139,16 @@ describe('LiveVisualCaptureStore', () => {
     });
   });
 
-  it('refuses a capture asked for after shutdown', async () => {
-    const store = new LiveVisualCaptureStore(join(await scratch(), 'captures'));
+  it('refuses a capture asked for after shutdown without touching the disk', async () => {
+    const directory = join(await scratch(), 'captures');
+    const store = new LiveVisualCaptureStore(directory);
     store.dispose();
 
     await expect(store.store(IMAGE)).rejects.toThrow('shutting down');
+    // The rejection alone is also produced by the post-write undo, so it is
+    // the absence of I/O that pins the pre-write guard: a store that is done
+    // does not so much as create its directory.
+    await expect(lstat(directory)).rejects.toThrow();
   });
 
   it('removes what it still holds when the daemon shuts down', async () => {

@@ -17,9 +17,9 @@ import type { ACPToolCall, TodoItem } from '../../adapters/types';
 // suite next to it.
 const indexBuilds = vi.hoisted(() => ({ count: 0 }));
 
-vi.mock('../messages/PlanExecutionView', async (importOriginal) => {
+vi.mock('../messages/taskExecutionIndex', async (importOriginal) => {
   const actual =
-    await importOriginal<typeof import('../messages/PlanExecutionView')>();
+    await importOriginal<typeof import('../messages/taskExecutionIndex')>();
   return {
     ...actual,
     createTaskExecutionIndex: (

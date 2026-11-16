@@ -32,21 +32,42 @@ concurrency:
 jobs:
   assign:
     if: "${{ github.repository == 'QwenLM/qwen-code' }}"
-    runs-on: 'ubuntu-latest'
+    # In-repo heads, write-access authors and dispatches run on the ECS pool
+    # (#13245: this job sat 26 minutes in the hosted queue); runs triggered by
+    # other forks keep this token-bearing job on an ephemeral hosted runner.
+    # Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request_target'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     permissions:
       contents: 'read'
       issues: 'read'
       pull-requests: 'write'
     steps:
+      - name: 'Restore workspace ownership'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+
       - name: 'Checkout owner map'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: '${{ github.event.pull_request.base.sha || github.sha }}'
-          sparse-checkout: |-
-            .github/issue-owners.json
-            .github/scripts/assign-issue-owner.mjs
-            .github/scripts/assign-pr-owner.mjs
+          # Check out all of .github/, not just .github/scripts: cone mode
+          # would add the files directly under .github/ (issue-owners.json),
+          # but `git sparse-checkout set` reuses the mode already stored in a
+          # workspace, and a reused ECS workspace can be left in non-cone mode
+          # by another job (e.g. qwen-triage). In non-cone mode the narrower
+          # pattern drops issue-owners.json and the script fails with ENOENT.
+          # `.github` covers the scripts and the owner map under either mode.
+          # Don't list individual files — cone mode rejects them ("is not a
+          # directory") on a reused ECS workspace.
+          sparse-checkout: '.github'
           persist-credentials: false
 
       - name: 'Assign area owner'

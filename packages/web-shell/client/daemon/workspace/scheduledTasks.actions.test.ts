@@ -7,12 +7,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDaemonWorkspaceActions } from './actions.js';
 
-// The scheduled-task methods use raw global fetch (like glob/stat/list), so we
-// stub fetch and assert the HTTP method, path (with id encoding), JSON body,
-// auth header, and error handling.
+// Assert the native REST request sent by the SDK, including auth and bodies.
 function makeActions(token?: string) {
   return createDaemonWorkspaceActions({
-    // These methods never touch the client, only requireClient's non-null check.
     getClient: () => ({}) as never,
     getWorkspaceCwd: () => '/ws',
     baseUrl: '',
@@ -43,8 +40,7 @@ describe('scheduled-tasks workspace actions', () => {
   });
 
   const initOf = (call: unknown[]) => call[1] as RequestInit;
-  const headersOf = (init: RequestInit) =>
-    (init.headers ?? {}) as Record<string, string>;
+  const headersOf = (init: RequestInit) => new Headers(init.headers);
 
   it('lists tasks with a GET and returns the tasks array', async () => {
     fetchMock.mockResolvedValue(
@@ -55,7 +51,7 @@ describe('scheduled-tasks workspace actions', () => {
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toBe('/scheduled-tasks');
     expect(initOf(fetchMock.mock.calls[0]).method ?? 'GET').toBe('GET');
-    expect(headersOf(init)['Authorization']).toBe('Bearer tok');
+    expect(headersOf(init).get('Authorization')).toBe('Bearer tok');
   });
 
   it('returns [] when the response omits tasks', async () => {
@@ -73,7 +69,7 @@ describe('scheduled-tasks workspace actions', () => {
     const init = initOf(fetchMock.mock.calls[0]);
     expect(fetchMock.mock.calls[0][0]).toBe('/scheduled-tasks');
     expect(init.method).toBe('POST');
-    expect(headersOf(init)['Content-Type']).toBe('application/json');
+    expect(headersOf(init).get('Content-Type')).toBe('application/json');
     expect(JSON.parse(init.body as string)).toMatchObject({
       cron: '0 9 * * *',
       prompt: 'p',

@@ -82,6 +82,13 @@ import { normalizePastedText } from './input-prompt-model.js';
 import { caretSpans, useLineEdit } from './line-edit.js';
 import type { ShellConfirmationResolution } from './commands-context.js';
 import { McpApprovalChoice } from '../components/mcp/MCPServerApprovalDialog.js';
+import {
+  fitProjectHooksDescription,
+  layoutProjectHooksLines,
+  PROJECT_HOOKS_DIALOG_DESCRIPTION,
+  PROJECT_HOOKS_DIALOG_TITLE,
+  ProjectHooksApprovalChoice,
+} from '../components/hooks/ProjectHooksApprovalDialog.js';
 import { computeHeaderCap } from '../components/messages/AskUserQuestionDialog.js';
 import type { PendingMcpServer } from '../hooks/useMcpApproval.js';
 import { t } from '../../i18n/index.js';
@@ -544,7 +551,9 @@ function OutcomeSelect(props: {
       onHover={select.highlightIndex}
       onWheel={(direction) =>
         select.setActiveIndex(
-          direction === 'up' ? select.activeIndex - 1 : select.activeIndex + 1,
+          direction === 'up'
+            ? select.activeIndexRef.current - 1
+            : select.activeIndexRef.current + 1,
         )
       }
       onSelectIndex={select.selectIndex}
@@ -1111,6 +1120,8 @@ function AskUserQuestionFlow(props: {
     cpLen(caretLine.before),
     fieldCap,
   );
+  const before = sanitizeTerminalText(customField.before);
+  const after = sanitizeTerminalText(customField.after);
 
   return (
     <>
@@ -1165,9 +1176,7 @@ function AskUserQuestionFlow(props: {
             <text fg={C.accent}>{'> '}</text>
             {customValue ? (
               <>
-                <text fg={C.text}>
-                  {sanitizeTerminalText(customField.before)}
-                </text>
+                {before ? <text fg={C.text}>{before}</text> : null}
                 {/* ink's software cursor: a background-filled cell at the
                     caret, which a text frame cannot show. Past the window the
                     cell has nowhere to go, exactly as in ink's fixed-width
@@ -1177,9 +1186,7 @@ function AskUserQuestionFlow(props: {
                     {sanitizeTerminalText(customField.at) || ' '}
                   </text>
                 ) : null}
-                <text fg={C.text}>
-                  {sanitizeTerminalText(customField.after)}
-                </text>
+                {after ? <text fg={C.text}>{after}</text> : null}
               </>
             ) : (
               <>
@@ -1454,6 +1461,91 @@ export function OpenTuiMcpApprovalDialog(props: OpenTuiMcpApprovalProps) {
               </text>
             )}
           />
+        </box>
+      </DialogFrame>
+    </box>
+  );
+}
+
+interface OpenTuiProjectHooksApprovalProps {
+  /** One line per configured hook, e.g. `SessionStart  ./setup.sh`. */
+  lines: readonly string[];
+  /** The shell's dialog region, so the list budget matches the ink renderer. */
+  availableTerminalHeight?: number;
+  onSelect: (choice: ProjectHooksApprovalChoice) => void;
+}
+
+const PROJECT_HOOKS_APPROVAL_OPTIONS: Array<
+  DialogListItem<ProjectHooksApprovalChoice>
+> = [
+  { key: 'approve', value: ProjectHooksApprovalChoice.APPROVE },
+  { key: 'reject', value: ProjectHooksApprovalChoice.REJECT },
+];
+
+/**
+ * Startup approval for the workspace's project hooks, the hook counterpart
+ * of {@link OpenTuiMcpApprovalDialog}: the queue, the persisted hash-bound
+ * decision and the registry reload live in the renderer-agnostic hook.
+ */
+export function OpenTuiProjectHooksApprovalDialog(
+  props: OpenTuiProjectHooksApprovalProps,
+) {
+  const { lines, availableTerminalHeight, onSelect } = props;
+  const { width, height } = useTerminalDimensions();
+  const select = useDialogSelect<DialogListItem<ProjectHooksApprovalChoice>>({
+    items: PROJECT_HOOKS_APPROVAL_OPTIONS,
+    onSelect: (value) => onSelect(value),
+  });
+
+  useKeyboard((key) => {
+    if (toOriginalKey(key).name === 'escape') {
+      onSelect(ProjectHooksApprovalChoice.DISMISS);
+    }
+  });
+  const title = PROJECT_HOOKS_DIALOG_TITLE;
+  const description = fitProjectHooksDescription(
+    PROJECT_HOOKS_DIALOG_DESCRIPTION,
+    width,
+    availableTerminalHeight ?? height,
+  );
+
+  return (
+    <box marginLeft={3} width={Math.max(0, dialogAreaWidth(width) - 1)}>
+      <DialogFrame borderColor={C.yellow}>
+        <box flexDirection="column">
+          <box flexDirection="column" marginBottom={1}>
+            <text fg={C.text} attributes={1}>
+              {title}
+            </text>
+            {description !== '' && <text fg={C.text}>{description}</text>}
+          </box>
+          <box flexDirection="column" marginBottom={1}>
+            {layoutProjectHooksLines(
+              lines,
+              [title, PROJECT_HOOKS_DIALOG_DESCRIPTION],
+              width,
+              availableTerminalHeight ?? height,
+            ).map((line, index) => (
+              <text key={`${index}-${line}`} fg={C.text} wrapMode="none">
+                {`  ${line}`}
+              </text>
+            ))}
+          </box>
+          <DialogSelect
+            items={PROJECT_HOOKS_APPROVAL_OPTIONS}
+            activeIndex={select.activeIndex}
+            scrollOffset={select.scrollOffset}
+            onHover={select.highlightIndex}
+            onSelectIndex={select.selectIndex}
+            renderLabel={(item, { isSelected }) => (
+              <text fg={isSelected ? C.accent : C.text}>
+                {item.value === ProjectHooksApprovalChoice.APPROVE
+                  ? 'Approve these hooks'
+                  : 'Reject'}
+              </text>
+            )}
+          />
+          <text fg={C.dim}>Esc to decide later</text>
         </box>
       </DialogFrame>
     </box>

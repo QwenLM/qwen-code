@@ -16,7 +16,9 @@ import { findingsCommand } from './review/findings.js';
 import { recoverFindingsCommand } from './review/recover-findings.js';
 import { fetchPrCommand } from './review/fetch-pr.js';
 import { captureLocalCommand } from './review/capture-local.js';
+import { captureTuiCommand } from './review/capture-tui.js';
 import { planDiffCommand } from './review/plan-diff.js';
+import { cacheCommitCommand } from './review/cache-commit.js';
 import { repoContextCommand } from './review/repo-context.js';
 import { prContextCommand } from './review/pr-context.js';
 import { commentStatusCommand } from './review/comment-status.js';
@@ -31,6 +33,7 @@ import { buildTestCommand } from './review/build-test.js';
 import { baseTreeCommand } from './review/base-tree.js';
 import { scratchTreeCommand } from './review/scratch-tree.js';
 import { testDeltaCommand } from './review/test-delta.js';
+import { fixDeltaCommand } from './review/fix-delta.js';
 import { driveCommand } from './review/drive.js';
 import { abDriveCommand } from './review/ab-drive.js';
 import { mockProviderCommand } from './review/mock-provider.js';
@@ -49,6 +52,7 @@ import { metaCommand } from './review/meta.js';
 import { issueContextCommand } from './review/issue-context.js';
 import { fetchDiffCommand } from './review/fetch-diff.js';
 import { commentBodyCommand } from './review/comment-body.js';
+import { watchRepoCommand } from './review/watch-repo.js';
 
 export const reviewCommand: CommandModule = {
   command: 'review',
@@ -65,7 +69,9 @@ export const reviewCommand: CommandModule = {
       .command(commentBodyCommand)
       .command(fetchPrCommand)
       .command(captureLocalCommand)
+      .command(captureTuiCommand)
       .command(planDiffCommand)
+      .command(cacheCommitCommand)
       .command(repoContextCommand)
       .command(prContextCommand)
       .command(commentStatusCommand)
@@ -76,6 +82,7 @@ export const reviewCommand: CommandModule = {
       .command(baseTreeCommand)
       .command(scratchTreeCommand)
       .command(testDeltaCommand)
+      .command(fixDeltaCommand)
       .command(driveCommand)
       .command(abDriveCommand)
       .command(mockProviderCommand)
@@ -96,9 +103,10 @@ export const reviewCommand: CommandModule = {
       .command(saveArtifactCommand)
       .command(submitCommand)
       .command(cleanupCommand)
+      .command(watchRepoCommand)
       .demandCommand(
         1,
-        'Specify a subcommand: run, parse-args, match-remote, meta, issue-context, fetch-diff, comment-body, fetch-pr, capture-local, plan-diff, repo-context, pr-context, comment-status, load-rules, agent-prompt, emit-workflow, build-test, base-tree, scratch-tree, test-delta, drive, ab-drive, mock-provider, extract-step, script-lint, dedup-candidates, revert-hunk, resolve-anchors, check-coverage, cost-ledger, presubmit, test-efficacy, test-plan, findings, recover-findings, publish-assets, compose-review, save-artifact, submit, or cleanup.',
+        'Specify a subcommand: run, parse-args, match-remote, meta, issue-context, fetch-diff, comment-body, fetch-pr, capture-local, capture-tui, plan-diff, cache-commit, repo-context, pr-context, comment-status, load-rules, agent-prompt, emit-workflow, build-test, base-tree, scratch-tree, test-delta, fix-delta, drive, ab-drive, mock-provider, extract-step, script-lint, dedup-candidates, revert-hunk, resolve-anchors, check-coverage, cost-ledger, presubmit, test-efficacy, test-plan, findings, recover-findings, publish-assets, compose-review, save-artifact, submit, cleanup, or watch-repo.',
       )
       .version(false),
   handler: () => {

@@ -139,6 +139,128 @@ describe('DaemonClient standalone sessions', () => {
     vi.unstubAllGlobals();
   });
 
+  it('preflights startup capability outside creation recovery', async () => {
+    const { fetch, calls } = recordingFetch(() => capabilityResponse());
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    await expect(
+      client.createStandaloneSession({
+        startupConfig: {
+          modelServiceId: 'gpt-5.4(openai)',
+          reasoningEffort: 'high',
+        },
+      }),
+    ).rejects.toMatchObject({ name: 'DaemonCapabilityMissingError' });
+    expect(calls.every((call) => call.url.endsWith('/capabilities'))).toBe(
+      true,
+    );
+  });
+
+  it('serializes and confirms standalone startup selection', async () => {
+    const startupConfig = {
+      modelServiceId: 'gpt-5.4(openai)',
+      reasoningEffort: 'high' as const,
+    };
+    const startupConfigApplied = {
+      ...startupConfig,
+      effectiveReasoning: { state: 'enabled', effort: 'high' },
+    };
+    const { fetch, calls } = recordingFetch((request) =>
+      request.url.endsWith('/capabilities')
+        ? jsonResponse(200, {
+            v: 1,
+            features: ['standalone_sessions_v1', 'session_startup_config'],
+          })
+        : jsonResponse(200, {
+            ...standaloneSession(),
+            modelApplied: true,
+            startupConfigApplied,
+          }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    expect(
+      (
+        await client.createStandaloneSession({
+          sessionId: SESSION_ID,
+          startupConfig,
+        })
+      ).startupConfigApplied,
+    ).toEqual(startupConfigApplied);
+    expect(
+      JSON.parse(calls.find((call) => call.method === 'POST')!.body!),
+    ).toEqual({
+      sessionId: SESSION_ID,
+      startupConfig,
+    });
+  });
+
+  it('accepts a model-only standalone confirmation without reasoning fields', async () => {
+    const startupConfig = { modelServiceId: 'gpt-4.1(openai)' };
+    const { fetch, calls } = recordingFetch((request) =>
+      request.url.endsWith('/capabilities')
+        ? jsonResponse(200, {
+            v: 1,
+            features: ['standalone_sessions_v1', 'session_startup_config'],
+          })
+        : jsonResponse(200, {
+            ...standaloneSession(),
+            modelApplied: true,
+            startupConfigApplied: startupConfig,
+          }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    expect(
+      (
+        await client.createStandaloneSession({
+          sessionId: SESSION_ID,
+          startupConfig,
+        })
+      ).startupConfigApplied,
+    ).toEqual(startupConfig);
+    expect(
+      JSON.parse(calls.find((call) => call.method === 'POST')!.body!),
+    ).toEqual({ sessionId: SESSION_ID, startupConfig });
+  });
+
+  it.each([
+    undefined,
+    {
+      modelServiceId: 'gpt-5.4(openai)',
+      reasoningEffort: 'high',
+      effectiveReasoning: { state: 'enabled', effort: 'medium' },
+    },
+  ])(
+    'rejects a definite unconfirmed standalone result without recovery',
+    async (startupConfigApplied) => {
+      const { fetch, calls } = recordingFetch((request) =>
+        request.url.endsWith('/capabilities')
+          ? jsonResponse(200, {
+              v: 1,
+              features: ['standalone_sessions_v1', 'session_startup_config'],
+            })
+          : jsonResponse(200, {
+              ...standaloneSession(),
+              modelApplied: true,
+              startupConfigApplied,
+            }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.createStandaloneSession({
+          sessionId: SESSION_ID,
+          startupConfig: {
+            modelServiceId: 'gpt-5.4(openai)',
+            reasoningEffort: 'high',
+          },
+        }),
+      ).rejects.toThrow('did not confirm');
+      expect(
+        calls.filter(
+          (call) => call.method === 'GET' && call.url.includes('/standalone/'),
+        ),
+      ).toEqual([]);
+    },
+  );
+
   it('gates standalone options with their dedicated capability', async () => {
     const { fetch, calls } = recordingFetch(() =>
       capabilityResponse(true, false),
@@ -386,6 +508,35 @@ describe('DaemonClient standalone sessions', () => {
         'POST /standalone/sessions',
       ),
     ).toThrow(/expected modelApplied boolean/);
+  });
+
+  it('preserves optional last user prompt time through standalone summary validation', async () => {
+    const summary = {
+      ...standaloneSummary(),
+      lastUserPromptAt: '2026-01-02T00:00:00.000Z',
+      updatedAt: '2026-01-03T00:00:00.000Z',
+    };
+    const { fetch } = recordingFetch(({ url }) => {
+      const pathname = new URL(url).pathname;
+      if (pathname === '/capabilities') return capabilityResponse();
+      return jsonResponse(
+        200,
+        pathname === '/standalone/sessions'
+          ? {
+              sessions: [
+                summary,
+                standaloneSummary('660e8400-e29b-41d4-a716-446655440001'),
+              ],
+            }
+          : summary,
+      );
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    expect(await client.getStandaloneSession(SESSION_ID)).toEqual(summary);
+    const page = await client.listStandaloneSessionsPage();
+    expect(page.sessions[0]).toEqual(summary);
+    expect(page.sessions[1]).not.toHaveProperty('lastUserPromptAt');
   });
 
   it('canonicalizes a caller UUID and exercises the complete route family', async () => {

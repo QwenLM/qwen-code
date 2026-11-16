@@ -17,6 +17,7 @@ import {
   type AtMentionMenuState,
 } from '../hooks/useAtMentionMenu';
 import { cssUrlVar } from '../utils/cssUrlVar';
+import { POPOVER_MIN_HEIGHT, readPopoverSafeTop } from '../utils/popoverRoom';
 import styles from './ChatEditor.module.css';
 import { isSafeImageSrc } from './messages/Markdown';
 
@@ -111,12 +112,11 @@ export function AtMentionPanel({
     const updatePosition = () => {
       const rect = anchor.getBoundingClientRect();
       const panelWidth = panelRef.current?.offsetWidth ?? 360;
-      const computedStyle = getComputedStyle(anchor);
-      const safeTop =
-        Number.parseFloat(
-          computedStyle.getPropertyValue('--web-shell-popover-safe-top'),
-        ) || 48;
-      const maxHeight = Math.max(96, Math.min(300, rect.top - safeTop - 8));
+      const safeTop = readPopoverSafeTop(anchor) ?? 48;
+      const maxHeight = Math.max(
+        POPOVER_MIN_HEIGHT,
+        Math.min(300, rect.top - safeTop - 8),
+      );
       const next = {
         left: Math.max(
           compact ? 8 : 12,

@@ -31,6 +31,7 @@ import {
 } from './lib/deadline.js';
 import { getGhHost, setGhHost } from './lib/gh.js';
 import { BRIEFS } from './lib/agent-briefs.js';
+import { buildSelectionIdentity } from './lib/selection.js';
 import {
   LEDGER_MAX_CLOSED,
   LEDGER_MAX_FILE,
@@ -42,6 +43,7 @@ import {
   serializeLedger,
 } from './lib/ledger.js';
 import { countInlineFindings, readClaimHead } from './lib/inline-counts.js';
+import * as coverageModule from './lib/coverage.js';
 import {
   aboveChurnBar,
   CHURN_MIN_FRESH,
@@ -56,6 +58,7 @@ import {
   buildLedger,
   repositoryContextGate,
   scriptLintGate,
+  blockerReCheckGate,
   withoutGateReposts,
   testPlanGate,
   composeReviewCommand,
@@ -6595,6 +6598,14 @@ describe('coverage is recomputed, never accepted', () => {
     expect(r.body).toContain(
       '启动 prompt 为它指定了 diff 中的行，但它从未打开',
     );
+    // The Chinese half names the agent the same quoted, truncated way. With
+    // no `subjectZh` it falls back to the PUBLIC subject, never to the raw
+    // label: that is launch-prompt prose, and printed bare its `@mentions`
+    // and links go live on the PR page.
+    expect(r.body).toContain(
+      '未审查：`"This PR narrows the daemon-marker check from a truthy test…"`',
+    );
+    expect(r.body).not.toContain('未审查：This PR narrows');
   });
 
   it('keeps long agent labels distinct when their first word matches', () => {
@@ -7324,6 +7335,469 @@ describe('the Step 4/5 gate — verify and reverse audit must have run (high eff
     });
     expect(r.event).toBe('REQUEST_CHANGES');
     expect(r.body).not.toMatch(/verification/);
+  });
+});
+
+describe('a record for a chunk the plan does not carry', () => {
+  // A record launched as `chunk 9 of 12` over a plan carrying chunks 1 and 2,
+  // both read. Its disclosures arrive as `chunk 9`, and the body collapses
+  // `chunk <id>` subjects into the author's units AGAINST THIS PLAN — so it
+  // told the author that 1 of their diff's 2 sections went unreviewed,
+  // beside a coverage report counting both as read.
+  const PHRASE = 'an agent launched for a chunk this plan does not carry';
+  const onDiff = (): string =>
+    'You are reviewing chunk 9 of 12.\n' +
+    `read_file(file_path="${DIFF}", offset=800, limit=100)`;
+
+  // `coveredPlan()` lays its own transcripts down, so it runs only when the
+  // test did not build a plan of its own.
+  const compose = (over: Record<string, unknown> = {}) =>
+    composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      env: ENV,
+      modelId: MODEL,
+      ...over,
+      planPath: (over['planPath'] as string | undefined) ?? coveredPlan(),
+    });
+
+  // The arms of the coverage walk that disclose a chunk agent each name it
+  // `chunk <id>`, and they all reach the body through the one collapse — so
+  // each is driven here. `launch` runs before the plan is written; `stale`
+  // after, for the two arms that need a prompt record an earlier capture at
+  // this plan path left behind (`goodPrompt(9)` as its `chunk-9.txt`).
+  interface Arm {
+    launch: () => void;
+    stale?: boolean;
+    reason: RegExp;
+  }
+  const arms: Array<[string, Arm]> = [
+    [
+      'ran on a prompt nothing built',
+      {
+        launch: () =>
+          transcript('stale9', onDiff(), {
+            toolCalls: 1,
+            range: [800, 100],
+            text: 'Uncoverable: chunk 9 — line exceeds the read limit',
+          }),
+        reason: /ran on a prompt the run wrote itself/,
+      },
+    ],
+    [
+      'made no tool call',
+      {
+        launch: () => transcript('stale9', onDiff()),
+        reason: /made no tool call/,
+      },
+    ],
+    [
+      'was launched blind',
+      {
+        launch: () =>
+          transcript('stale9', 'The changes are in chunk 9 of 12.', {
+            toolCalls: 1,
+          }),
+        reason: /never named the diff|could not have read/,
+      },
+    ],
+    [
+      'never opened the diff it was pointed at',
+      {
+        launch: () =>
+          transcript('stale9', goodPrompt(9), {
+            toolCalls: 1,
+            toolPath: join(dir, 'elsewhere.ts'),
+          }),
+        stale: true,
+        reason: /pointed at diff lines it never opened/,
+      },
+    ],
+    [
+      'was launched on a rewrite of a leftover prompt',
+      {
+        launch: () =>
+          // Reworded INSIDE the built text: a launch that merely appends to
+          // it still contains it verbatim, and is no rewrite.
+          transcript('stale9', goodPrompt(9).replace('reviewing', 'skimming'), {
+            toolCalls: 1,
+            range: [800, 100],
+            opens: [],
+          }),
+        stale: true,
+        reason: /not the one the CLI built/,
+      },
+    ],
+  ];
+
+  it.each(arms)(
+    'is not counted as a section of this diff when it %s',
+    (_arm, { launch, stale, reason }) => {
+      launch();
+      const p = coveredPlan();
+      if (stale) recordBuilt(p, 9);
+      const r = compose({ planPath: p });
+      expect(r.body).toMatch(reason);
+      expect(r.body).not.toContain("of the diff's 2 sections");
+      expect(r.body).not.toContain('the entire diff');
+      expect(r.body).toContain(PHRASE);
+      // The CLI does not mint the run's chunk id into the PR page.
+      expect(r.body).not.toContain('chunk 9');
+      // Still disclosed, and still capping.
+      expect(r.cappedBy).toContain('unreviewed-dimension');
+      expect(r.event).not.toBe('APPROVE');
+    },
+  );
+
+  const DECLARED =
+    'Not reviewed: a line of the diff that no read can reach — reported by ' +
+    'an agent launched for a chunk this plan does not carry.';
+
+  it('still says a line could not be read, in the scenario this PR is about', () => {
+    // No prompt was ever built for a chunk 9, so the record is ALSO a
+    // rewritten launch — and the body keeps one reason per subject, the first.
+    // Disclosed under the same subject, the declaration lost to it: the gate
+    // held, and the PR page no longer said any line went unread.
+    transcript('stale9', onDiff(), {
+      toolCalls: 1,
+      range: [800, 100],
+      text: 'Uncoverable: chunk 9 — line exceeds the read limit',
+    });
+    const r = compose();
+    expect(r.body).toContain(DECLARED);
+    expect(r.body).toMatch(/ran on a prompt the run wrote itself/);
+    // The cap main raised for it, by the name main raised it under.
+    expect(r.cappedBy).toContain('uncoverable-chunk');
+    expect(r.event).not.toBe('APPROVE');
+  });
+
+  it('still withholds the Approve over a stale declarer nothing else discloses', () => {
+    // Launched verbatim from a prompt an earlier capture left behind, so it
+    // is no rewritten launch — the declaration is its only disclosure. It
+    // read this diff and reported a line it could not reach; chunk 2's
+    // credit does not show anyone did. Counted as a phantom section, main
+    // capped this run; dropped with the phantom, it approved.
+    transcript('stale9', goodPrompt(9), {
+      toolCalls: 1,
+      range: [800, 100],
+      text: 'Uncoverable: chunk 9 — line exceeds the read limit',
+    });
+    const p = coveredPlan();
+    recordBuilt(p, 9);
+    const r = compose({ planPath: p });
+    expect(r.event).not.toBe('APPROVE');
+    expect(r.cappedBy).toEqual(['uncoverable-chunk']);
+    // Everything an `uncoverable` entry moves, this moves: the reading is in
+    // doubt, so no incremental anchor is certified, and the opener says gaps
+    // were disclosed. Here the declaration is the ONLY thing that can.
+    expect(r.scopeUnproven).toBe(true);
+    expect(r.body).toContain('Partially reviewed');
+    expect(r.body).toContain(DECLARED);
+    expect(r.body).not.toContain("of the diff's 2 sections");
+    expect(r.body).not.toContain('chunk 9');
+  });
+
+  it('says it once when the caller relays the same declaration', () => {
+    // The skill tells the orchestrator to carry every `Uncoverable:` return
+    // into the verdict, so the relay is the compliant path, not a corner.
+    transcript('stale9', onDiff(), {
+      toolCalls: 1,
+      range: [800, 100],
+      text: 'Uncoverable: chunk 9 — line exceeds the read limit',
+    });
+    const r = compose({ uncoverableChunks: ['chunk 9'] });
+    expect(r.body.split(DECLARED)).toHaveLength(2);
+    expect(r.body).not.toContain('chunk 9');
+    expect(r.body).not.toContain("of the diff's 2 sections");
+    // …and no subject-less sentence is left where the relayed entry was.
+    expect(r.body).not.toMatch(/Not reviewed:\s+—/);
+    expect(r.cappedBy).toContain('uncoverable-chunk');
+  });
+
+  it('says it once when the relay names the file, and keeps the richer one', () => {
+    // The form the skill's own example gives for `uncoverableChunks`. Main
+    // keeps the caller's entry and does not add the walk's bare one beside
+    // it; the same here — the file is what the author can act on.
+    transcript('stale9', goodPrompt(9), {
+      toolCalls: 1,
+      range: [800, 100],
+      text: 'Uncoverable: chunk 9 — line exceeds the read limit',
+    });
+    const p = coveredPlan(undefined, { han: true });
+    recordBuilt(p, 9);
+    const r = compose({
+      planPath: p,
+      uncoverableChunks: ['chunk 9', 'chunk 9 (src/big.min.js)'],
+    });
+    expect(r.body).toContain(
+      'Not reviewed: chunk 9 (src/big.min.js) — a line there exceeds the read limit.',
+    );
+    expect(r.body).not.toContain('no read can reach');
+    expect(r.body).not.toContain('任何读取都无法到达');
+    expect(r.body.split('exceeds the read limit')).toHaveLength(2);
+    expect(r.cappedBy).toEqual(['uncoverable-chunk']);
+  });
+
+  it('counts the declaration sentence by chunk too, and only what is unsaid', () => {
+    // Two records share id 9 and both declare; a third declares 10; the
+    // caller relays 10 with its file. One chunk is left for the sentence.
+    const declares = (id: string, n: number): void =>
+      transcript(
+        id,
+        `You are reviewing chunk ${n} of 12.\n` +
+          `read_file(file_path="${DIFF}", offset=${n * 90}, limit=90)`,
+        {
+          toolCalls: 1,
+          range: [n * 90, 90],
+          text: `Uncoverable: chunk ${n} — line exceeds the read limit`,
+        },
+      );
+    declares('stale9a', 9);
+    declares('stale9b', 9);
+    declares('stale10', 10);
+    const both = compose();
+    expect(both.body).toContain(
+      'reported by agents launched for 2 chunks this plan does not carry.',
+    );
+
+    const one = compose({ uncoverableChunks: ['chunk 10 (src/other.ts)'] });
+    expect(one.body).toContain(
+      'reported by an agent launched for a chunk this plan does not carry.',
+    );
+    expect(one.body).toContain('chunk 10 (src/other.ts) — a line there');
+  });
+
+  it('takes only `chunk <id>` and `chunk <id> <more>` for a relay of it', () => {
+    // The same prefix rule the planned ids get (`startsWith(prefix + ' ')`):
+    // `chunk 9(src/x.ts)` is the caller's prose, not a relay the CLI can
+    // vouch for, so both statements stand — as they do on main.
+    transcript('stale9', onDiff(), {
+      toolCalls: 1,
+      range: [800, 100],
+      text: 'Uncoverable: chunk 9 — line exceeds the read limit',
+    });
+    const r = compose({ uncoverableChunks: ['chunk 9(src/x.ts)'] });
+    expect(r.body).toContain('chunk 9(src/x.ts) — a line there exceeds');
+    expect(r.body).toContain(DECLARED);
+  });
+
+  it('keeps every richer relay, and stands down only for the ids they name', () => {
+    const declares = (id: string, n: number): void =>
+      transcript(
+        id,
+        `You are reviewing chunk ${n} of 12.\n` +
+          `read_file(file_path="${DIFF}", offset=${n * 90}, limit=90)`,
+        {
+          toolCalls: 1,
+          range: [n * 90, 90],
+          text: `Uncoverable: chunk ${n} — line exceeds the read limit`,
+        },
+      );
+    declares('stale9', 9);
+    declares('stale10', 10);
+    // Both ids relayed with their files, one of them twice over: every
+    // entry is kept, and no sentence of the CLI's is left to say.
+    const r = compose({
+      uncoverableChunks: [
+        'chunk 10 (src/b.min.js)',
+        'chunk 9 (src/x.min.js)',
+        'chunk 9 (src/y.min.js)',
+      ],
+    });
+    expect(r.body).toContain(
+      'chunk 10 (src/b.min.js), chunk 9 (src/x.min.js), chunk 9 (src/y.min.js) — a line there',
+    );
+    expect(r.body).not.toContain('no read can reach');
+  });
+
+  it('does not take a trailing space for a richer relay', () => {
+    // `chunk 9 ` names no file: kept as the caller's words, it would leave
+    // "a line THERE" pointing at a chunk this plan does not have.
+    transcript('stale9', onDiff(), {
+      toolCalls: 1,
+      range: [800, 100],
+      text: 'Uncoverable: chunk 9 — line exceeds the read limit',
+    });
+    const r = compose({ uncoverableChunks: ['chunk 9 '] });
+    expect(r.body).toContain(DECLARED);
+  });
+
+  it('leaves the caller\u2019s own prose exactly as main rendered it', () => {
+    // Planned-only input: nothing here is this change's to touch, repeats
+    // included.
+    const r = compose({
+      uncoverableChunks: ['chunk 2 (src/b.ts)', 'chunk 2 (src/b.ts)'],
+    });
+    expect(r.body).toContain(
+      'Not reviewed: chunk 2 (src/b.ts), chunk 2 (src/b.ts) — a line there exceeds the read limit.',
+    );
+  });
+
+  it('does not swallow a relayed id that is not the one declared', () => {
+    transcript('stale9', onDiff(), {
+      toolCalls: 1,
+      range: [800, 100],
+      text: 'Uncoverable: chunk 9 — line exceeds the read limit',
+    });
+    const r = compose({ uncoverableChunks: ['chunk 10', 'chunk 10'] });
+    // The caller's only statement about chunk 10 — kept, and said once.
+    expect(r.body).toContain('chunk 10 — a line there exceeds the read limit');
+    expect(r.body).not.toContain('chunk 10, chunk 10');
+    expect(r.body).toContain(DECLARED);
+  });
+
+  it('does not swallow a relayed id the walk did NOT find declared', () => {
+    // An idle record for the same id discloses something else entirely; the
+    // caller's entry is then the only statement of an unreadable line.
+    transcript('stale9', onDiff());
+    const r = compose({ uncoverableChunks: ['chunk 9'] });
+    expect(r.body).toContain('chunk 9 — a line there exceeds the read limit');
+    expect(r.body).toContain(PHRASE);
+  });
+
+  it('says the declaration in Chinese too', () => {
+    transcript('stale9', onDiff(), {
+      toolCalls: 1,
+      range: [800, 100],
+      text: 'Uncoverable: chunk 9 — line exceeds the read limit',
+    });
+    const r = compose({ planPath: coveredPlan(undefined, { han: true }) });
+    expect(r.body).toContain(
+      '未审查：diff 中有一行超出单次读取上限、任何读取都无法到达——由一个被指派到当前 plan 中不存在的 chunk 的 agent 报告。',
+    );
+  });
+
+  it('counts several of them in the phrase, by chunk, in both languages', () => {
+    // Not `an agent … (×2)`, which is how other repeated subjects render —
+    // and by chunk, not by record: disclosures are kept one per subject, so
+    // records that share an id arrive here as one.
+    transcript('stale9', onDiff());
+    transcript(
+      'stale10',
+      'You are reviewing chunk 10 of 12.\n' +
+        `read_file(file_path="${DIFF}", offset=900, limit=100)`,
+    );
+    const r = compose({ planPath: coveredPlan(undefined, { han: true }) });
+    expect(r.body).toContain(
+      'agents launched for 2 chunks this plan does not carry',
+    );
+    expect(r.body).toContain(
+      '被指派到当前 plan 中不存在的 2 个 chunk 的 agent',
+    );
+    expect(r.body).not.toContain('×2');
+  });
+
+  it('still collapses a planned chunk into the units the author reads', () => {
+    // The control: only an id the plan does not carry leaves the collapse.
+    // Chunk 2's one agent made no tool call, so the same arm fires for an id
+    // the plan DOES carry.
+    transcript('a1', goodPrompt(1), { toolCalls: 3 });
+    transcript('a2', goodPrompt(2));
+    const p = plan({ step45: false });
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    recordMatrix(p);
+    recordStep45(p, ['verify', 'reverse-audit', '6d']);
+    const r = compose({ planPath: p });
+    expect(r.body).toMatch(/made no tool call/);
+    expect(r.body).toMatch(
+      /the diff section covering|of the diff's 2 sections/,
+    );
+    expect(r.body).not.toContain(PHRASE);
+  });
+
+  it('renders a caller-relayed bare id the plan lacks as the caller wrote it', () => {
+    const r = compose({ uncoverableChunks: ['chunk 9'] });
+    expect(r.body).not.toContain("of the diff's 2 sections");
+    expect(r.body).toContain('chunk 9');
+    expect(r.cappedBy).toContain('uncoverable-chunk');
+  });
+
+  it('keeps counting a caller-relayed bare id when there is no plan to ask', () => {
+    // With no chunk table nothing can be called foreign to it: the entry
+    // renders through the counting fallback exactly as it always has.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      env: ENV,
+      modelId: MODEL,
+      uncoverableChunks: ['chunk 5'],
+    });
+    expect(r.body).toContain('1 section of the diff');
+    expect(r.body).not.toContain('chunk 5');
+  });
+
+  it('names it in Chinese too, for an author who writes Chinese', () => {
+    transcript('stale9', onDiff());
+    const r = compose({ planPath: coveredPlan(undefined, { han: true }) });
+    expect(r.body).toContain('一个被指派到当前 plan 中不存在的 chunk 的 agent');
+    expect(r.body).not.toContain('diff 2 个片段中的 1 个');
+  });
+
+  it('still counts a caller-relayed bare id the plan does carry', () => {
+    const r = compose({ uncoverableChunks: ['chunk 2'] });
+    expect(r.body).not.toContain('chunk 2');
+    expect(r.cappedBy).toContain('uncoverable-chunk');
+  });
+});
+
+describe('the coverage-failure arms keep their own messages', () => {
+  const compose = (p: string) =>
+    composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+
+  it('names a partition failure as the coverage check\u2019s own defect', () => {
+    // Outcomes that do not partition the plan are a defect in coverage.ts.
+    // Folded into the generic arm, an operator handed "the plan could not be
+    // used" goes to re-capture a diff that was never the problem.
+    // A Chinese-writing author's plan, so the zh half of the arm renders too.
+    const p = coveredPlan(undefined, { han: true });
+    const spy = vi
+      .spyOn(coverageModule, 'coverageFromTranscripts')
+      .mockImplementation(() => {
+        throw new coverageModule.ChunkPartitionError(
+          'chunk 2 is both covered and missing',
+        );
+      });
+    try {
+      const r = compose(p);
+      expect(r.body).toContain('the coverage check contradicted its own plan');
+      expect(r.body).toContain('chunk 2 is both covered and missing');
+      expect(r.body).not.toContain('the plan could not be used');
+      expect(r.body).toContain('覆盖率检查与其自身的 plan 相矛盾');
+      expect(r.body).not.toContain('plan 无法使用');
+      // Fail-closed, like its two siblings: a run that cannot show what it
+      // read has not shown it read anything.
+      expect(r.cappedBy).toContain('unreviewed-dimension');
+      expect(r.event).not.toBe('APPROVE');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('keeps the unusable-plan message for an unusable plan', () => {
+    // The control: the new arm must not have taken the generic one's input.
+    const p = coveredPlan(undefined, { han: true });
+    const spy = vi
+      .spyOn(coverageModule, 'coverageFromTranscripts')
+      .mockImplementation(() => {
+        throw new Error('coverage: plan.json has no chunks[]');
+      });
+    try {
+      const r = compose(p);
+      expect(r.body).toContain('the plan could not be used');
+      expect(r.body).not.toContain('contradicted its own plan');
+      // …in the Chinese half as well.
+      expect(r.body).toContain('plan 无法使用');
+      expect(r.body).not.toContain('覆盖率检查与其自身的 plan 相矛盾');
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 
@@ -9552,6 +10026,52 @@ describe('scriptLintGate — the deterministic gate reads the report', () => {
     expect(g.unreviewed).toEqual([]);
   });
 
+  it('lintDiffPath hashes the refresh diff, so a report bound to it is fresh (re-anchor)', () => {
+    // PR #16001 review: the re-anchor round recomputes the lint at the new
+    // head; the report binds to the NEW diff while the plan stays fenced at
+    // the old one. Without the override basis the refreshed report reads as
+    // stale and the gate drops the still-standing findings.
+    const p = writePlan({});
+    const newDiff = join(dir, 'reanchor.diff');
+    writeFileSync(newDiff, 'diff --git a/x b/x\n@@ -0,0 +1 @@\n+still buggy\n');
+    const newHash = createHash('sha256')
+      .update(readFileSync(newDiff))
+      .digest('hex');
+    writeReport({ ...withFinding(finding()), diffHash: newHash });
+    const g = scriptLintGate(p, newDiff);
+    expect(g.criticals).toHaveLength(1);
+    expect(g.unreviewed).toEqual([]);
+  });
+
+  it('lintDiffPath does not revive a report bound to the OLD diff', () => {
+    // The stale old-head report must still fail closed when the round names
+    // the refresh diff — the override changes the basis, it does not waive
+    // the check.
+    const p = writePlan({});
+    const newDiff = join(dir, 'reanchor.diff');
+    writeFileSync(newDiff, 'diff --git a/x b/x\n@@ -0,0 +1 @@\n+fixed\n');
+    writeReport(withFinding(finding())); // bound to freshDiff (the old one)
+    const g = scriptLintGate(p, newDiff);
+    expect(g.criticals).toEqual([]);
+    expect(g.unreviewed).toHaveLength(1);
+    expect(g.unreviewed[0]).toContain('stale');
+  });
+
+  it.each([
+    ['empty', ''],
+    ['non-string', 42],
+  ])(
+    'a malformed lintDiffPath (%s) fails closed, never falls back to the plan diff',
+    (_label, bad) => {
+      const p = writePlan({});
+      writeReport(withFinding(finding())); // fresh against the PLAN diff
+      const g = scriptLintGate(p, bad);
+      expect(g.criticals).toEqual([]);
+      expect(g.unreviewed).toHaveLength(1);
+      expect(g.unreviewed[0]).toContain('lintDiffPath');
+    },
+  );
+
   it('fails closed on a STALE report — its diffHash disagrees with the plan diff', () => {
     const p = writePlan({}); // plan binds to the fresh diff
     writeReport({ ...withFinding(finding()), diffHash: 'a-different-hash' });
@@ -9638,8 +10158,8 @@ describe('scriptLintGate — the deterministic gate reads the report', () => {
     expect(g.disclosed[0].en).toContain('.github/workflows/ci.yml');
     expect(g.disclosed[0].en).toContain('source mapping not yet supported');
     // No "the executable-script lint" prefix: the body wraps this in a
-    // sentence that already opens "Not linted:", and the prefix rendered as
-    // "Not linted: the executable-script lint" — a lint not linted.
+    // sentence that already opens "Not fully linted:", and the prefix rendered
+    // as "Not linted: the executable-script lint" — a lint not linted.
     expect(g.disclosed[0].en).not.toContain('executable-script lint');
     // No `reasonZh` in this report — the Chinese half falls back to the
     // English reason rather than dropping the sentence.
@@ -9902,7 +10422,7 @@ describe('scriptLintGate — the deterministic gate reads the report', () => {
   });
 });
 
-describe('composeReview — the script-lint gate wired to the verdict', () => {
+describe('composeReview — the deterministic gates wired to the verdict', () => {
   // A worktree arms the gate (pr-worktree, not diff-only). That mode also owes the
   // cross-file (1c) and build-and-test (7) roles, so a test that wants the gate's
   // own outcome to decide the verdict — not an unrelated dimension gap — must record
@@ -9929,9 +10449,12 @@ describe('composeReview — the script-lint gate wired to the verdict', () => {
     utimesSync(p, old, old);
     return p;
   }
-  function writeGateReport(report: Record<string, unknown>): void {
+  function writeGateReport(
+    report: Record<string, unknown>,
+    name = 'qwen-review-script-lint.json',
+  ): void {
     writeFileSync(
-      join(dir, 'qwen-review-script-lint.json'),
+      join(dir, name),
       JSON.stringify({
         checked: [],
         skipped: [],
@@ -10086,13 +10609,13 @@ describe('composeReview — the script-lint gate wired to the verdict', () => {
     expect(r.event).toBe('APPROVE');
     // The whole composed sentence, both halves — pinned against the stutter
     // #10567's posted body carried ("Not linted: the executable-script lint —
-    // … — not linted"): the wrapper says "Not linted" once, then path and
-    // reason, nothing else.
+    // … — not linted"): the wrapper says "Not fully linted" once, then path
+    // and reason, nothing else.
     expect(r.body).toContain(
-      'Not linted (tool limitation, not a blocker): `.github/workflows/ci.yml` — source mapping not yet supported.',
+      'Not fully linted (tool limitation, not a blocker): `.github/workflows/ci.yml` — source mapping not yet supported.',
     );
     expect(r.body).toContain(
-      '未检查（工具限制，非阻断）：`.github/workflows/ci.yml`——source mapping not yet supported。',
+      '未完整检查（工具限制，非阻断）：`.github/workflows/ci.yml`——source mapping not yet supported。',
     );
     // the clean-approve copy is still there — the disclosure augments, it doesn't replace
     expect(r.body).toContain('No issues found. LGTM! ✅');
@@ -10131,11 +10654,232 @@ describe('composeReview — the script-lint gate wired to the verdict', () => {
     });
     expect(r.event).toBe('APPROVE');
     expect(r.body).toContain(
-      'Not linted (tool limitation, not a blocker): `.github/workflows/ci.yml` — source mapping not yet supported; `.github/workflows/release.yml` — source mapping not yet supported.',
+      'Not fully linted (tool limitation, not a blocker): `.github/workflows/ci.yml` — source mapping not yet supported; `.github/workflows/release.yml` — source mapping not yet supported.',
     );
     expect(r.body).toContain(
-      '未检查（工具限制，非阻断）：`.github/workflows/ci.yml`——尚未支持源映射；`.github/workflows/release.yml`——source mapping not yet supported。',
+      '未完整检查（工具限制，非阻断）：`.github/workflows/ci.yml`——尚未支持源映射；`.github/workflows/release.yml`——source mapping not yet supported。',
     );
+  });
+
+  it('an unruled blocker inventory key caps the verdict at COMMENT (#15974)', () => {
+    // The full-coverage plan would APPROVE; the inventory the round never
+    // accounted for is the only gap, and it must decide the verdict.
+    const p = gateReadyPlan(['verify', 'reverse-audit'], {
+      prNumber: 15974,
+      ownerRepo: 'QwenLM/qwen-code',
+    });
+    writeGateReport({});
+    writeFileSync(
+      join(dir, 'qwen-review-pr-15974-context-blockers.json'),
+      JSON.stringify({ blockers: ['review:5721490241'] }),
+    );
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+    expect(r.body).toContain('blocker re-check');
+    expect(r.body).toContain('review:5721490241');
+  });
+
+  it('the same inventory, fully accounted, restores the APPROVE', () => {
+    const p = gateReadyPlan(['verify', 'reverse-audit'], {
+      prNumber: 15974,
+      ownerRepo: 'QwenLM/qwen-code',
+    });
+    writeGateReport({});
+    writeFileSync(
+      join(dir, 'qwen-review-pr-15974-context-blockers.json'),
+      JSON.stringify({ blockers: ['review:5721490241'] }),
+    );
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+      blockerRulings: [{ key: 'review:5721490241', ruling: 'fixed' }],
+    });
+    expect(r.event).toBe('APPROVE');
+    expect(r.body).not.toContain('blocker re-check');
+  });
+
+  it('re-anchor: a lint blocker the delta fixed is NOT republished (PR #16001 review regression)', () => {
+    // The review's exact reproduction: the old head's report carries SC2086,
+    // the new head quotes the variable and lints clean. Dropping authored
+    // findings alone left the gate regenerating the stale blocker from the
+    // old report — REQUEST_CHANGES over a fixed file. With the refreshed
+    // report + lintDiffPath, the stale blocker is gone; the unread-delta
+    // disclosure still caps the verdict at COMMENT. A PR plan so the ledger
+    // marker rides the body: the not-contains assertion then covers the
+    // carried work list too — the marker builder's gate calls must read the
+    // same refresh basis as the body's, or the next round re-rules a ghost.
+    const p = gateReadyPlan(['verify', 'reverse-audit'], {
+      prNumber: 16001,
+      ownerRepo: 'QwenLM/qwen-code',
+    });
+    const reportName = 'qwen-review-pr-16001-script-lint.json';
+    writeGateReport({ checked: [lintFinding], ok: false }, reportName); // old head: SC2086
+    const newDiff = join(dir, 'reanchor.diff');
+    writeFileSync(
+      newDiff,
+      'diff --git a/deploy.sh b/deploy.sh\n@@ -1,3 +1,3 @@\n #!/bin/bash\n-rm $X\n+rm "$X"\n',
+    );
+    const newHash = createHash('sha256')
+      .update(readFileSync(newDiff))
+      .digest('hex');
+    // The protocol's step 4: the report at the derived path is REWRITTEN by
+    // the re-lint at the new head — clean, bound to the new diff.
+    writeGateReport({ diffHash: newHash }, reportName);
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+      lintDiffPath: newDiff,
+      unreviewedDimensions: [
+        'head advanced old..new — re-anchored: the delta was ruled per-finding, not fully reviewed',
+      ],
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).not.toContain('SC2086');
+    expect(r.body).toContain('re-anchored');
+  });
+
+  it('re-anchor: a lint blocker that STILL stands at the new head keeps gating', () => {
+    // The other direction the refresh must preserve: the refreshed report
+    // still carries the finding, and lintDiffPath makes the gate read it as
+    // fresh instead of dropping it as stale. PR plan again: the marker's
+    // work list must carry the still-standing gate Critical forward.
+    const p = gateReadyPlan(['verify', 'reverse-audit'], {
+      prNumber: 16001,
+      ownerRepo: 'QwenLM/qwen-code',
+    });
+    const newDiff = join(dir, 'reanchor.diff');
+    writeFileSync(
+      newDiff,
+      'diff --git a/deploy.sh b/deploy.sh\n@@ -0,0 +1,3 @@\n+#!/bin/bash\n+rm $X\n+echo done\n',
+    );
+    const newHash = createHash('sha256')
+      .update(readFileSync(newDiff))
+      .digest('hex');
+    writeGateReport(
+      { checked: [lintFinding], ok: false, diffHash: newHash },
+      'qwen-review-pr-16001-script-lint.json',
+    );
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+      lintDiffPath: newDiff,
+      unreviewedDimensions: [
+        'head advanced old..new — re-anchored: the delta was ruled per-finding, not fully reviewed',
+      ],
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.body).toContain('SC2086');
+  });
+});
+
+describe('blockerReCheckGate — the re-check walk is arithmetic, not prose', () => {
+  // The #15974 incident: a round posted past a blocker an earlier review had
+  // filed, because nothing verified the prose walk covered the promoted set.
+  // The gate joins pr-context's inventory with the round's blockerRulings;
+  // an unruled key is unreviewed scope.
+  const PR = 15974;
+  function writePlan(over: Record<string, unknown> = {}): string {
+    const p = join(dir, 'plan.json');
+    writeFileSync(p, JSON.stringify({ prNumber: PR, ...over }));
+    return p;
+  }
+  function writeInventory(blockers: unknown): void {
+    writeFileSync(
+      join(dir, `qwen-review-pr-${PR}-context-blockers.json`),
+      JSON.stringify({ blockers }),
+    );
+  }
+
+  it('caps on an inventory key the round never ruled on', () => {
+    const p = writePlan();
+    writeInventory(['comment:111', 'review:5721490241']);
+    const g = blockerReCheckGate(p, [{ key: 'comment:111', ruling: 'fixed' }]);
+    expect(g.unreviewed).toHaveLength(1);
+    expect(g.unreviewed[0]).toContain('1 blocker(s)');
+    expect(g.unreviewed[0]).toContain('review:5721490241');
+    expect(g.unreviewed[0]).not.toContain('comment:111');
+  });
+
+  it('caps when the rulings are absent entirely — a skipped walk leaves no trace otherwise', () => {
+    const p = writePlan();
+    writeInventory(['review:5721490241']);
+    const g = blockerReCheckGate(p, undefined);
+    expect(g.unreviewed).toHaveLength(1);
+    expect(g.unreviewed[0]).toContain('review:5721490241');
+  });
+
+  it('silent when every inventory key is accounted for', () => {
+    const p = writePlan();
+    writeInventory(['comment:111', 'review:222']);
+    const g = blockerReCheckGate(p, [
+      { key: 'comment:111', ruling: 'still-stands' },
+      { key: 'review:222', ruling: 'cannot-tell' },
+    ]);
+    expect(g.unreviewed).toEqual([]);
+  });
+
+  it('inert without an inventory file (older CLI, pr-context never ran)', () => {
+    const p = writePlan();
+    expect(blockerReCheckGate(p, undefined).unreviewed).toEqual([]);
+  });
+
+  it('inert on an empty inventory and on a non-PR plan', () => {
+    const p = writePlan();
+    writeInventory([]);
+    expect(blockerReCheckGate(p, undefined).unreviewed).toEqual([]);
+    const local = writePlan({ prNumber: undefined });
+    expect(blockerReCheckGate(local, undefined).unreviewed).toEqual([]);
+  });
+
+  it.each([
+    ['a non-array root', '{"blockers": "comment:1"}'],
+    ['a non-string key', '{"blockers": [42]}'],
+    ['a key outside the CLI shape', '{"blockers": ["comment:1\\n@team"]}'],
+    ['unparseable JSON', '{oops'],
+  ])('fails closed on %s in the inventory', (_label, raw) => {
+    const p = writePlan();
+    writeFileSync(join(dir, `qwen-review-pr-${PR}-context-blockers.json`), raw);
+    const g = blockerReCheckGate(p, []);
+    expect(g.unreviewed).toHaveLength(1);
+    expect(g.unreviewed[0]).toContain('malformed');
+  });
+
+  it.each([
+    ['a non-array', 'nope'],
+    ['an entry without a key', [{ ruling: 'fixed' }]],
+    ['an unknown ruling', [{ key: 'comment:1', ruling: 'looks-fine' }]],
+    ['a null entry', [null]],
+  ])('throws on %s in blockerRulings (typed channel)', (_label, rulings) => {
+    const p = writePlan();
+    writeInventory(['comment:1']);
+    expect(() => blockerReCheckGate(p, rulings)).toThrow(/blockerRulings/);
+  });
+
+  it('bounds the named keys so a pathological thread count cannot blow the body', () => {
+    const p = writePlan();
+    const keys = Array.from({ length: 15 }, (_, i) => `comment:${i + 1}`);
+    writeInventory(keys);
+    const g = blockerReCheckGate(p, []);
+    expect(g.unreviewed).toHaveLength(1);
+    expect(g.unreviewed[0]).toContain('15 blocker(s)');
+    expect(g.unreviewed[0]).toContain('(+5 more)');
+    expect(g.unreviewed[0]).not.toContain('comment:11');
   });
 });
 
@@ -11397,9 +12141,10 @@ describe('the ledger marker reaches the POSTED body', () => {
 
   it('withholds the anchor when a dimension gap is about LINES, not depth', () => {
     // The distinction the exemption turns on, and the one a live review of
-    // this change had to restore: Agent 7 is the only role whose brief sets
-    // `readsDiff: false`, so only its gap says nothing about which lines were
-    // read. Any other dimension in that field is a whiffed lens — a claim
+    // this change had to restore: Agent 7 is the only ROSTER role whose brief
+    // sets `readsDiff: false` (the post-verdict fix auditor is the other, and
+    // never reaches this field), so only its gap says nothing about which
+    // lines were read. Any other dimension in that field is a whiffed lens — a claim
     // about lines that no machine detector produces.
     const withLensGap = composeReview({
       planPath: coveredPlan(['verify', 'reverse-audit'], {
@@ -18952,13 +19697,13 @@ describe('composeReview — the decided-stop re-rule', () => {
     ).toThrow(/no nothingToReview decision/);
   });
 
-  it('renders the round-kind disclosure on its own line, never under "Not linted"', () => {
+  it('renders the round-kind disclosure on its own line, never under "Not fully linted"', () => {
     // The disclosure used to ride gateDisclosed, whose only renderer wraps
-    // every entry in "Not linted (tool limitation…)" — a round kind is not
-    // a linting gap.
+    // every entry in "Not fully linted (tool limitation…)" — a round kind is
+    // not a linting gap.
     const r = reRule();
     expect(r.body).toContain('Decided-stop re-rule');
-    expect(r.body).not.toMatch(/Not linted[^\n]*Decided-stop re-rule/);
+    expect(r.body).not.toMatch(/Not (fully )?linted[^\n]*Decided-stop re-rule/);
   });
 
   it('says why a cleared stop is a Comment — no dangling colon', () => {
@@ -20779,5 +21524,75 @@ describe('the fix-induced marking behind a source tag (#10291, review round 2)',
       id: 'R3-2',
       title: '[probe] the fix opened a new gap',
     });
+  });
+});
+
+describe('selection drift — report-only, end to end', () => {
+  /**
+   * `coveredPlan()` with the identity a capture command would have recorded
+   * for it, added in place and backdated again so the transcripts stay newer
+   * than the plan.
+   */
+  function coveredPlanWithIdentity(): string {
+    const p = coveredPlan();
+    const planJson = JSON.parse(readFileSync(p, 'utf8')) as {
+      chunks: Array<{ id: number; startLine: number; endLine: number }>;
+    };
+    writeFileSync(
+      p,
+      JSON.stringify({
+        ...planJson,
+        selection: buildSelectionIdentity(
+          readFileSync(DIFF, 'utf8'),
+          planJson.chunks,
+        ),
+      }),
+    );
+    const old = new Date(2020, 0, 1);
+    utimesSync(p, old, old);
+    return p;
+  }
+
+  const compose = (p: string) =>
+    composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+
+  it('says nothing while the diff is what the plan was written over', () => {
+    const r = compose(coveredPlanWithIdentity());
+    expect(r.remediation.join(' ')).not.toContain('selection drift:');
+    expect(r.waivedFixes.join(' ')).not.toContain('selection drift:');
+    expect(r.event).toBe('APPROVE');
+  });
+
+  it('lands among the NOTEs, caps nothing, and moves neither event nor body', () => {
+    // The diff rewritten AFTER the agents ran — the failure the identity
+    // exists to catch — disclosed on the operator's channel, and wired to
+    // nothing that caps or posts.
+    const p = coveredPlanWithIdentity();
+    const before = compose(p);
+    writeFileSync(DIFF, `${readFileSync(DIFF, 'utf8')}+moved under the plan\n`);
+
+    const after = compose(p);
+    const line = after.waivedFixes.find((l) =>
+      l.startsWith('selection drift:'),
+    );
+    expect(line).toMatch(/diff file has changed/);
+    // A NOTE, not a FIX: the skill performs FIX lines as this round's
+    // repairs, and re-planning mid-round orphans the round's own evidence.
+    expect(after.remediation.join(' ')).not.toContain('selection drift');
+    expect(line).toContain('do not re-capture or re-plan mid-round');
+    // No direction: `compose-review` prints no coverage summary, and what
+    // follows its NOTE lines on stderr is VOLUME and CONVERGENCE.
+    expect(line).toContain('The coverage this round reports');
+    expect(line).not.toMatch(/coverage (below|above)/);
+    expect(after.cappedBy).toEqual([]);
+    expect(after.event).toBe('APPROVE');
+    expect(after.event).toBe(before.event);
+    expect(after.body).toBe(before.body);
   });
 });

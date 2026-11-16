@@ -24,6 +24,14 @@ export function validateProviderBaseUrl(
   value: string,
   options?: { allowInsecureHttp?: boolean; allowInsecureHttpHint?: boolean },
 ): URL {
+  if (
+    [...value].some(
+      (char) =>
+        char.charCodeAt(0) <= 32 || char.charCodeAt(0) === 127 || char === '\\',
+    )
+  ) {
+    throw new Error('Provider URL is invalid.');
+  }
   let url: URL;
   try {
     url = new URL(value);

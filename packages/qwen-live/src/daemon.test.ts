@@ -1020,6 +1020,14 @@ describe('LiveDaemon', () => {
   });
 
   it('reclaims a stale dead-owner discovery record and republishes', async () => {
+    const kill = process.kill.bind(process);
+    vi.spyOn(process, 'kill').mockImplementation((pid, signal) => {
+      if (pid === 999_999 && signal === 0) {
+        throw Object.assign(new Error('No such process'), { code: 'ESRCH' });
+      }
+      return kill(pid, signal);
+    });
+
     const config = await testConfig();
     await plantDiscoveryRecord(config.discoveryDir, {
       url: 'http://127.0.0.1:3210',

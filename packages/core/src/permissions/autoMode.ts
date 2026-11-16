@@ -36,7 +36,11 @@ import type {
 } from '../tools/tools.js';
 import { normalizeMonitorCommand } from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { classifyAction, type ClassifierResult } from './classifier.js';
+import {
+  classifyAction,
+  sanitizeClassifierReason,
+  type ClassifierResult,
+} from './classifier.js';
 import { extractShellOperationsAcrossCommand } from './shell-semantics.js';
 import {
   consumePendingManualRetry,
@@ -51,6 +55,7 @@ import {
 import {
   isDestructiveCommand,
   extractLastUserPrompt,
+  amendNeedsApproval,
 } from './destructive-commands.js';
 import type { PermissionCheckContext } from './types.js';
 
@@ -319,6 +324,7 @@ export function shouldForceAutoModeReviewForAllow(
       : ctx.command;
   const cwd = ctx.cwd ?? cwdFallback;
 
+  if (amendNeedsApproval(command)) return true;
   if (hasRawProtectedRedirect(command, cwd)) return true;
   if (hasRawProtectedWriteCommand(command, cwd)) return true;
 
@@ -375,7 +381,8 @@ function hasRawProtectedWriteCommand(command: string, cwd: string): boolean {
         '',
       );
       for (const candidate of rawProtectedWriteTargets(target, line)) {
-        if (/\$[{(A-Za-z_]/.test(candidate)) return true;
+        // URLs can encode write targets. Review them without probing UNC paths.
+        if (/\$[{(A-Za-z_]|\bhttps?:\/\//i.test(candidate)) return true;
         if (containsProtectedPathFragment(candidate, cwd)) return true;
       }
     }
@@ -504,10 +511,23 @@ export type AutoModeDecision =
       shouldBlock: boolean;
       reason: string;
       unavailable: boolean;
-      stage: 'fast' | 'thinking';
+      stage: ClassifierResult['stage'];
       durationMs: number;
     }
-  | { via: 'fallback'; reason: FallbackToAskReason };
+  | {
+      via: 'fallback';
+      reason: FallbackToAskReason;
+      /**
+       * A deterministic floor only a human can confirm; a `PermissionRequest`
+       * hook answering `allow` must not waive it.
+       */
+      requiresHumanDecision?: boolean;
+      /**
+       * The approval-dialog explanation. The scheduler records an
+       * `autoModeFallback` (and hides "always allow") only when one is present.
+       */
+      message?: string;
+    };
 
 /**
  * Reasons AUTO mode itself is unavailable before a per-call decision can run.
@@ -529,6 +549,7 @@ export type FallbackToAskReason =
   | 'org_ask_ceiling'
   | 'classifier_unavailable'
   | 'external_write'
+  | 'external_directory'
   | DenialFallbackReason;
 
 /** Outcome of {@link applyAutoModeDecision}. */
@@ -543,6 +564,14 @@ export type AutoModeOutcome =
       kind: 'fallback';
       reason: FallbackToAskReason;
       message?: string;
+      /**
+       * Set when a deterministic security floor escalated rather than the
+       * classifier. The confirmation must be given by a human, so a
+       * `PermissionRequest` hook `allow` must not waive it — `hideAlwaysAllow`
+       * is not enough, since that suppresses persisted allow rules rather than
+       * programmatic approval.
+       */
+      requiresHumanDecision?: boolean;
     };
 
 /** Stable identity for an AUTO-mode action within its filesystem context. */
@@ -584,13 +613,46 @@ export function applyAutoModeDecision(
         recordAllow(denialState, actionFingerprint),
       );
       return { kind: 'approved' };
-    case 'blocked:destructive-command':
-      config.setAutoModeDenialState(recordBlock(denialState));
+    case 'blocked:destructive-command': {
+      const blockedState = recordBlock(denialState, actionFingerprint);
+      const fallback = shouldFallback(blockedState);
+      // The guard's reason is derived from the raw model-authored command
+      // (`isDestructiveCommand` can fall back to the whole command), and it
+      // reaches both the approval-dialog banner and the tool error the main
+      // model reads next. Sanitize it once here rather than at each
+      // interpolation point — the classifier producer does the same
+      // (classifier.ts).
+      const sanitizedReason = sanitizeClassifierReason(decision.reason);
+      if (fallback.fallback) {
+        config.setAutoModeDenialState(consumePendingManualRetry(blockedState));
+        // The scheduler's fallback log carries only the reason code, which a
+        // classifier escalation shares; name the guard so the two routes stay
+        // distinguishable to whoever reads the log.
+        autoModeDebugLogger.warn(
+          `Auto mode: destructive-command guard escalated to manual approval (${fallback.reason}): ${sanitizedReason}`,
+        );
+        return {
+          kind: 'fallback',
+          reason: fallback.reason,
+          message: formatDenialFallbackMessage(
+            fallback.reason,
+            sanitizedReason,
+          ),
+          // This arm is the deterministic floor the guard exists for, so the
+          // escalation it produces is the one a hook must not be able to
+          // waive: the reason code alone (`consecutive_block`/`total_denial`)
+          // is shared with the classifier arm and cannot distinguish them.
+          requiresHumanDecision: true,
+        };
+      }
+      config.setAutoModeDenialState(blockedState);
       return {
         kind: 'blocked',
-        errorMessage: `${decision.reason}\n${AUTO_MODE_DESTRUCTIVE_DENIAL_GUIDANCE}`,
+        // The guidance below is ours and must survive intact.
+        errorMessage: `${sanitizedReason}\n${AUTO_MODE_DESTRUCTIVE_DENIAL_GUIDANCE}`,
         reason: 'classifier_blocked',
       };
+    }
     case 'classifier':
       if (decision.shouldBlock) {
         if (decision.unavailable) {
@@ -627,7 +689,7 @@ export function applyAutoModeDecision(
         recordAllow(denialState, actionFingerprint),
       );
       return { kind: 'approved' };
-    case 'fallback':
+    case 'fallback': {
       if (
         actionFingerprint !== undefined &&
         denialState.pendingManualRetryFingerprint === actionFingerprint
@@ -642,13 +704,28 @@ export function applyAutoModeDecision(
             'Writes outside the workspace require manual approval in AUTO mode.',
         };
       }
+      if (decision.reason === 'external_directory') {
+        return {
+          kind: 'fallback',
+          reason: 'external_directory',
+          message:
+            'Commands outside the workspace require manual approval in AUTO mode.',
+        };
+      }
+      const message =
+        decision.message ??
+        (isDenialFallbackReason(decision.reason)
+          ? formatDenialFallbackMessage(decision.reason)
+          : undefined);
       return {
         kind: 'fallback',
         reason: decision.reason,
-        ...(isDenialFallbackReason(decision.reason)
-          ? { message: formatDenialFallbackMessage(decision.reason) }
+        ...(decision.requiresHumanDecision
+          ? { requiresHumanDecision: true }
           : {}),
+        ...(message ? { message } : {}),
       };
+    }
     default: {
       const _exhaustive: never = decision;
       // Make unexpected JS/interop values visible at runtime.
@@ -708,7 +785,7 @@ function formatDenialFallbackMessage(
     case 'consecutive_unavailable':
       return 'Auto mode could not classify consecutive actions. Review this action manually.';
     case 'total_denial':
-      return 'Auto mode reached its session denial limit. Review this action manually.';
+      return `Auto mode reached its session denial limit${classifierReason ? ` (${classifierReason})` : ''}. Review this action manually.`;
     default: {
       const _exhaustive: never = reason;
       return _exhaustive;
@@ -817,22 +894,33 @@ export async function evaluateAutoMode(
   // L5.2.5: deterministic destructive command guard.
   // Regex-based hard blocks that run BEFORE the LLM classifier, so API
   // failures or classifier misjudgment cannot allow destructive git/IaC
-  // commands through. Only applies to shell-like tools.
+  // commands through on the denying call. The `blocked:destructive-command`
+  // arm of `applyAutoModeDecision` keeps the denial hard until denial tracking
+  // reaches the consecutive-block or session-total cap, where it escalates to a
+  // confirmation only a human can give: unlike the classifier arm, it sets
+  // `requiresHumanDecision`, so a `PermissionRequest` hook returning `allow`
+  // cannot waive it. Only applies to shell-like tools.
   if (SHELL_LIKE_TOOL_NAMES.has(input.ctx.toolName) && input.ctx.command) {
     const command =
       input.ctx.toolName === ToolNames.MONITOR
         ? normalizeMonitorCommand(input.ctx.command).safetyCommand
         : input.ctx.command;
     const userPrompt = extractLastUserPrompt(input.messages) ?? '';
-    const destructiveResult = isDestructiveCommand(
-      command,
-      userPrompt,
-      input.ctx.cwd,
-    );
+    const destructiveResult = isDestructiveCommand(command, userPrompt);
     if (destructiveResult?.blocked) {
       return {
         via: 'blocked:destructive-command',
         reason: destructiveResult.reason,
+      };
+    }
+    // Ask instead of hard-blocking (#13570). The `message` is what makes the
+    // scheduler record the fallback and hide "always allow".
+    if (amendNeedsApproval(command)) {
+      return {
+        via: 'fallback',
+        reason: 'safety_check',
+        requiresHumanDecision: true,
+        message: 'Rewriting a commit requires manual approval in AUTO mode.',
       };
     }
   }
@@ -853,6 +941,17 @@ export async function evaluateAutoMode(
       .isPathWithinWorkspace(input.ctx.filePath)
   ) {
     return { via: 'fallback', reason: 'external_write' };
+  }
+
+  // L5.2.7: the same floor for a shell-like tool whose `directory` is outside
+  // the workspace. The classifier sees that directory as the call's cwd and is
+  // never told the workspace root, so a build there would read as routine.
+  if (
+    SHELL_LIKE_TOOL_NAMES.has(input.ctx.toolName) &&
+    input.ctx.cwd &&
+    !input.config.getWorkspaceContext().isPathWithinWorkspace(input.ctx.cwd)
+  ) {
+    return { via: 'fallback', reason: 'external_directory' };
   }
 
   // Caller (scheduler) has detected an armed fallback state; surface that

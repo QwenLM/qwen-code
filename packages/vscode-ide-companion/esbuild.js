@@ -194,6 +194,9 @@ async function main() {
     },
     define: {
       'import.meta.url': 'import_meta.url',
+      // VS Code guards extension-host navigator reads with a throwing getter.
+      navigator: 'undefined',
+      'globalThis.navigator': 'undefined',
     },
     plugins: [
       publicCliExportPlugin,

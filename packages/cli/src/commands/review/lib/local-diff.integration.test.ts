@@ -257,14 +257,10 @@ describe('captureLocalDiff — untracked files', () => {
   });
 
   it('does not capture the worktree leases, which moved out of .qwen/tmp', () => {
-    // The lease moved to `.qwen/review-leases` to get host-trusted state out of
-    // the directory the sandbox mounts read-write, and the filter kept naming
-    // its directories by hand — so a checkout holding a lease captured that
-    // lease JSON (session id, prompt id, worktree path, branch) as the user's
-    // untracked change. A lease is rewritten on every acquisition, so an
-    // interleaved local round re-reviewed the churned lease forever instead of
-    // ever reporting "no changes": the pathology the `.qwen/tmp` arm exists to
-    // prevent, on the directory that moved out of it.
+    // Leases now live outside the workspace, but an older build may have left
+    // `.qwen/review-leases` residue behind. The filter keeps excluding that
+    // retired directory so its session ids, prompt ids, worktree paths and
+    // branches never become review input.
     write(
       '.qwen/review-leases/qwen-review-lease-pr-1.json',
       '{"sessionId":"s","promptId":"p"}\n',

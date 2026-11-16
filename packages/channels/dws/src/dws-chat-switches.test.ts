@@ -91,7 +91,7 @@ class ProbeChannel extends DwsChannel {
   }
   disableChats(): void {
     this.config.groupPolicy = 'disabled';
-    this.config.dmPolicy = 'disabled';
+    Object.defineProperty(this, 'privatePolicy', { value: 'disabled' });
   }
   seedDirectPending(count: number): void {
     this.cursor.pendingMessages = Array.from({ length: count }, (_, index) => ({
@@ -249,6 +249,41 @@ describe('DWS independent chat switches', () => {
     },
   );
 
+  it.each([
+    ['disabled', 'open', false],
+    ['open', 'disabled', true],
+    ['pairing', 'disabled', true],
+    ['allowlist', 'disabled', true],
+  ] as const)(
+    'uses explicit privatePolicy=%s over dmPolicy=%s for direct sources',
+    async (privatePolicy, dmPolicy, enabled) => {
+      const { client, streams } = clientFixture();
+      const channel = await ready(client, { privatePolicy, dmPolicy });
+      await channel.poll();
+      expect(streams.some(({ source }) => source.kind === 'direct')).toBe(
+        enabled,
+      );
+      expect(client.listDirectMessages).toHaveBeenCalledTimes(enabled ? 1 : 0);
+    },
+  );
+
+  it('subscribes allowlisted groups using the inherited mention setting', async () => {
+    const { client, streams } = clientFixture();
+    await ready(client, {
+      groupPolicy: 'allowlist',
+      privatePolicy: 'disabled',
+      groups: {
+        '*': { requireMention: false },
+        'group-1': {},
+        'group-2': { requireMention: true },
+      },
+    });
+    expect(streams.map(({ source }) => source)).toEqual([
+      { kind: 'at' },
+      { kind: 'group', conversationId: 'group-1' },
+    ]);
+  });
+
   it('admits document notifications when direct chat is enabled', async () => {
     const { client, streams } = clientFixture();
     const channel = await ready(client);
@@ -396,11 +431,12 @@ describe('DWS independent chat switches', () => {
     ).toBe(true);
   });
 
-  it('starts native todo agent work with both chat sources disabled', async () => {
+  it('denies native todo agent work when private access is disabled', async () => {
     const { client } = clientFixture();
     const channel = await ready(client, {
       groupPolicy: 'disabled',
-      dmPolicy: 'disabled',
+      privatePolicy: 'disabled',
+      dmPolicy: 'open',
       watchTodos: true,
     });
     channel.forwardToBridge = true;
@@ -420,7 +456,8 @@ describe('DWS independent chat switches', () => {
     vi.mocked(client.listTodoTasks).mockResolvedValue([todo]);
     vi.mocked(client.getTodoTask).mockResolvedValue(todo);
     await channel.poll();
-    await vi.waitFor(() => expect(channel.prompt).toHaveBeenCalledTimes(1));
+    expect(channel.prompt).not.toHaveBeenCalled();
+    expect(client.addTodoComment).not.toHaveBeenCalled();
     expect(client.listDirectMessages).not.toHaveBeenCalled();
     expect(client.listMentionedMessages).not.toHaveBeenCalled();
   });

@@ -97,6 +97,7 @@ struct Observation {
     focus_after_is_new_child: bool,
     focus_after_is_other: bool,
     focus_after_is_other_child: bool,
+    focus_after_is_sibling: bool,
     restore_elapsed_ms: Option<u128>,
     new_child_key_events: usize,
     child_key_events: usize,
@@ -115,11 +116,35 @@ fn observe(scenario: &'static str) -> Observation {
     let child = unsafe { xlib::XCreateSimpleWindow(display, target, 5, 5, 50, 40, 0, 0, 0) };
     let child_b = unsafe { xlib::XCreateSimpleWindow(display, target, 65, 5, 50, 40, 0, 0, 0) };
     let other = unsafe { xlib::XCreateSimpleWindow(display, root, 250, 10, 200, 120, 0, 0, 0) };
+    let sibling = unsafe { xlib::XCreateSimpleWindow(display, root, 250, 160, 200, 120, 0, 0, 0) };
     let other_child = unsafe { xlib::XCreateSimpleWindow(display, other, 5, 5, 50, 40, 0, 0, 0) };
     unsafe {
-        for window in [target, child, child_b, other, other_child] {
+        for window in [target, child, child_b, other, other_child, sibling] {
             xlib::XMapWindow(display, window);
             xlib::XSelectInput(display, window, xlib::KeyPressMask);
+        }
+        let pid_atom = xlib::XInternAtom(display, c"_NET_WM_PID".as_ptr(), xlib::False);
+        for (window, pid) in [
+            (target, 101 as xlib::Window),
+            (
+                sibling,
+                if scenario == "foreign-focus" {
+                    202
+                } else {
+                    101
+                },
+            ),
+        ] {
+            xlib::XChangeProperty(
+                display,
+                window,
+                pid_atom,
+                xlib::XA_CARDINAL,
+                32,
+                xlib::PropModeReplace,
+                &pid as *const _ as *const u8,
+                1,
+            );
         }
         xlib::XSync(display, 0);
     }
@@ -238,6 +263,13 @@ fn observe(scenario: &'static str) -> Observation {
                 x11::xtest::XTestFakeKeyEvent(display, keycode as u32, xlib::False, 0);
                 xlib::XSync(display, 0);
             }
+            if matches!(scenario, "sibling-focus" | "foreign-focus") {
+                unsafe {
+                    set_active(display, root, active_atom, sibling);
+                    xlib::XSetInputFocus(display, sibling, xlib::RevertToParent, xlib::CurrentTime);
+                    xlib::XSync(display, 0);
+                }
+            }
             body_finished_at = Some(Instant::now());
             if scenario == "body-error" {
                 anyhow::bail!("fixture body error");
@@ -284,6 +316,7 @@ fn observe(scenario: &'static str) -> Observation {
         focus_after_is_new_child: focus_after == child_b,
         focus_after_is_other: focus_after == other,
         focus_after_is_other_child: focus_after == other_child,
+        focus_after_is_sibling: focus_after == sibling,
         restore_elapsed_ms,
         new_child_key_events,
         child_key_events,
@@ -307,6 +340,8 @@ fn x11_foreground_preserves_child_focus_and_bounds_activation_recovery() {
         "reject",
         "body-error",
         "missing-active",
+        "sibling-focus",
+        "foreign-focus",
     ] {
         let observation = observe(scenario);
         println!("{observation:?}");
@@ -346,15 +381,29 @@ fn x11_foreground_preserves_child_focus_and_bounds_activation_recovery() {
             }
             if scenario == "body-error" {
                 assert_eq!(observation.error.as_deref(), Some("fixture body error"));
+            } else if scenario == "sibling-focus" {
+                assert!(observation
+                    .error
+                    .as_deref()
+                    .unwrap()
+                    .contains("focus_restore_unconfirmed"));
             } else {
                 assert!(observation.error.is_none());
             }
         }
         if !matches!(
             scenario,
-            "child" | "child-move" | "body-error" | "restore-other-child"
+            "child"
+                | "child-move"
+                | "body-error"
+                | "restore-other-child"
+                | "sibling-focus"
+                | "foreign-focus"
         ) {
             assert!(observation.focus_after_is_other);
+        }
+        if matches!(scenario, "sibling-focus" | "foreign-focus") {
+            assert!(observation.focus_after_is_sibling);
         }
         if scenario == "restore-other-child" {
             assert!(observation.focus_after_is_other_child);

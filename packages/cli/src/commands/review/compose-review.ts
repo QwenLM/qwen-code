@@ -29,6 +29,7 @@ import { dirname, join } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { getCliVersion } from '../../utils/version.js';
 import {
+  ChunkPartitionError,
   coverageFromTranscripts,
   verificationGaps,
   TranscriptsUnavailableError,
@@ -1401,6 +1402,41 @@ export interface ComposeReviewInput {
    */
   cannotTellCriticals?: string[];
   /**
+   * One entry per blocker in `pr-context`'s machine-readable inventory
+   * (`qwen-review-pr-<n>-context-blockers.json`): `{key, ruling}`, the key
+   * copied verbatim from the inventory (`comment:<id>` / `review:<id>`),
+   * the ruling one of `fixed` | `still-stands` | `cannot-tell` |
+   * `superseded`. The inventory is the mechanical FLOOR of the Step 6
+   * re-check walk — the walk may rule on more (semantic blockers the
+   * signal test does not catch), never on less. `compose-review`
+   * cross-checks the two: an inventory item with no entry here caps the
+   * verdict at COMMENT as unreviewed scope, so a skipped walk cannot ship
+   * a `C=0` claim past a blocker it never ruled on (measured; DESIGN.md —
+   * The blocker the re-check never ruled (PR #15974)). The rulings
+   * themselves decide nothing here — a `fixed` blocker's thread lifecycle
+   * rides `fixedFindings`, a `cannot-tell` one's cap rides
+   * `cannotTellCriticals`, a still-standing one re-posts as a Critical;
+   * this field is the ACCOUNTING that proves the walk happened. Absent
+   * when the inventory is absent (older CLI, pr-context never ran) — the
+   * gate is inert then, exactly as the script-lint gate is inert without
+   * its report.
+   */
+  blockerRulings?: Array<{ key?: unknown; ruling?: unknown }>;
+  /**
+   * The re-anchor protocol's lint refresh diff (PR #16001 review): the path
+   * of the NEW head's full diff the round recomputed the executable-script
+   * lint against (`script-lint --diff`, report rewritten at the derived
+   * path). When present, the lint gate's freshness check hashes THIS diff
+   * instead of the plan's captured diff — so a lint blocker the delta fixed
+   * is gone from the recomposed body while one that still stands keeps
+   * gating, and the original plan/coverage evidence stays fenced at the old
+   * head. Absent on every ordinary round. A malformed value (non-string,
+   * empty) fails closed as unreviewed scope; it never falls back to the old
+   * basis, which would re-publish the stale report the refresh exists to
+   * retire.
+   */
+  lintDiffPath?: string;
+  /**
    * Step 6's `fixed` rulings — one `{id, by}` per finding whose mechanism
    * can no longer fire, the same ruling the status table renders as
    * `R1-2 fixed by <what>`. The id names the finding's thread: a
@@ -1553,9 +1589,11 @@ export interface ComposeReviewResult {
   remediation: string[];
   /**
    * The FIXes the coverage check withheld because the plan's wall would
-   * refuse the build they name, each with the gate's arithmetic — printed
-   * to stderr as `NOTE:` lines beside the FIX lines, never rendered into
-   * the body. A gap the body discloses with no FIX beside it is explained
+   * refuse the build they name, each with the gate's arithmetic — and the
+   * one repair that is named but never performed mid-round (selection
+   * drift: re-planning moves the epoch the round's evidence is fenced on).
+   * Printed to stderr as `NOTE:` lines beside the FIX lines, never rendered
+   * into the body. A gap the body discloses with no FIX beside it is explained
    * here, not left to look like an oversight.
    */
   waivedFixes: string[];
@@ -3324,7 +3362,7 @@ function buildPostedLedger(
       // every round.
       ...withoutGateReposts(
         ingestEntryList(input.bodyCriticals, 'bodyCriticals'),
-        scriptLintGate(planPath).criticals,
+        scriptLintGate(planPath, input.lintDiffPath).criticals,
       ),
       // The same split the body performed: a relocated Critical is a
       // posted, counted blocker and must enter the work list — carrying
@@ -3344,14 +3382,14 @@ function buildPostedLedger(
       // A SECOND invocation, not the body composer's result — the two
       // live in different functions and nothing passes the value across.
       // What makes them agree is that `scriptLintGate` is pure in
-      // `planPath` and its inputs (the plan JSON, the report, the diff)
-      // are immutable for the length of one synchronous compose; it is
-      // NOT the single-origin discipline `postedInline` gets one line
-      // below. So the standing hazard is an edit, not a race: anything
-      // that filters, caps, or carves out what the BODY pushes must
-      // change this list too, or the posted body and the carried work
-      // list stop describing the same round (R4-1).
-      ...scriptLintGate(planPath).criticals,
+      // `planPath`, `lintDiffPath` and its inputs (the plan JSON, the
+      // report, the diff) are immutable for the length of one synchronous
+      // compose; it is NOT the single-origin discipline `postedInline`
+      // gets one line below. So the standing hazard is an edit, not a
+      // race: anything that filters, caps, or carves out what the BODY
+      // pushes must change this list too, or the posted body and the
+      // carried work list stop describing the same round (R4-1).
+      ...scriptLintGate(planPath, input.lintDiffPath).criticals,
     ],
     carriedWorkList,
   );
@@ -5261,6 +5299,12 @@ function composeReviewBody(
   // and a fabrication about a chunk nobody receipted. The public body would give
   // the author a false cause.
   const missingReceipts: number[] = [];
+  // Declarations of an unreadable line from records whose chunk id the plan
+  // does not carry (`coverage.ts` — `unplannedDeclarations`). The same fact as
+  // an `uncoverable` entry and the same cap, kept apart because the id is not
+  // a chunk of this plan: rendered through the chunk translation it was
+  // counted as a section of the author's diff.
+  const unplannedDeclared: number[] = [];
 
   // The plan's chunk→files table and the chunks somebody demonstrably read,
   // for the body renderer and the opener. Empty when no plan could be used —
@@ -5495,7 +5539,7 @@ function composeReviewBody(
   })();
   const gate =
     input.planPath && !stopReRuleGranted
-      ? scriptLintGate(input.planPath)
+      ? scriptLintGate(input.planPath, input.lintDiffPath)
       : { criticals: [], unreviewed: [], disclosed: [] };
   const ownAfterGateDedup = withoutGateReposts(bodyCriticals, gate.criticals);
   bodyCriticals.length = 0;
@@ -5518,8 +5562,8 @@ function composeReviewBody(
     // orchestrator's re-rule of the open ledger. Disclosed on every verdict
     // so the body says what kind of round this was — through its OWN block
     // (`stopRoundBlock` below), never `gateDisclosed`: that channel's one
-    // renderer wraps every entry in "Not linted (tool limitation…)", and a
-    // round kind is not a linting gap.
+    // renderer wraps every entry in "Not fully linted (tool limitation…)",
+    // and a round kind is not a linting gap.
     // The body↔disposition cross-check, over the FINAL local set — the
     // ingested entries plus the deferral channel's relocated Criticals,
     // past the gate-repost dedup — because that set is what the body posts.
@@ -5658,6 +5702,13 @@ function composeReviewBody(
     bodyCriticals.push(...gate.criticals); // render + count toward `c`, deterministic
     unreviewed.push(...gate.unreviewed);
     gateDisclosed.push(...gate.disclosed);
+    // The blocker re-check accounting: an inventory item the round never
+    // ruled on is unreviewed scope. Inert without the inventory side file;
+    // a decided-stop round skips it with the other gates (its contract is
+    // the ledger re-rule, disclosed as such).
+    unreviewed.push(
+      ...blockerReCheckGate(input.planPath, input.blockerRulings).unreviewed,
+    );
     testPlanNotes.push(...testPlanGate(input.planPath).notes);
     repositoryContextNotes.push(...repositoryContextGate(input.planPath));
     // Modeled-executable-system diffs (declared by the manifest domain) owe
@@ -5764,7 +5815,31 @@ function composeReviewBody(
       const cov = coverageFromTranscripts(input.planPath, input.env);
       plannedChunks = cov.plannedChunks;
       coveredChunks = cov.coveredChunks;
+      // Operator register only, and NOT pushed through `coverageEntries`: that
+      // channel caps (every entry folds into the unreviewed-dimension cap and
+      // the posted "Not reviewed:" list), and a check this new must not be
+      // able to take an Approve away before anyone has seen how often it
+      // fires.
+      //
+      // A NOTE, not a FIX. A `FIX:` line is a repair the skill tells the
+      // orchestrator to perform this round, and re-capturing or re-planning
+      // must NOT be performed mid-round: the plan's mtime is the epoch the
+      // round's prompt records and transcripts are fenced on. So it rides the
+      // channel for repairs that are named and withheld. What is withheld is
+      // exactly that — the suffix does not forbid repairing an unreadable
+      // path, which moves no plan.
+      if (cov.selectionDrift !== null) {
+        waivedFixes.push(
+          // Names the artifact, not a direction: this command prints no
+          // coverage summary, so "the coverage below" pointed at the VOLUME
+          // and CONVERGENCE lines that follow it.
+          `selection drift: ${cov.selectionDrift}. The coverage this round ` +
+            `reports is against the plan as written; do not re-capture or ` +
+            `re-plan mid-round.`,
+        );
+      }
       for (const id of cov.missingChunks) missingReceipts.push(id);
+      unplannedDeclared.push(...cov.unplannedDeclarations);
       for (const id of cov.uncoverableChunks) {
         // The caller may already have named this chunk, but in a richer form:
         // `chunk 5 (src/big.min.js)` vs the bare `chunk 5` here. A strict-equality
@@ -5892,14 +5967,23 @@ function composeReviewBody(
       // Both cap — a run that cannot show what it read has not shown it read
       // anything — but a reader chasing "could not read the transcripts" over a
       // plan with no `chunks[]` is chasing the wrong thing.
+      //
+      // A third, for the same reason: outcomes that do not partition the plan
+      // are a defect in the coverage walk, and "the plan could not be used"
+      // would send the operator to re-capture a diff that was never the
+      // problem.
       const why =
         err instanceof TranscriptsUnavailableError
           ? `could not read the agents' transcripts (${err.message})`
-          : `the plan could not be used (${(err as Error).message})`;
+          : err instanceof ChunkPartitionError
+            ? `the coverage check contradicted its own plan (${err.message})`
+            : `the plan could not be used (${(err as Error).message})`;
       const whyZh =
         err instanceof TranscriptsUnavailableError
           ? `无法读取 agent 的运行记录（${err.message}）`
-          : `plan 无法使用（${(err as Error).message}）`;
+          : err instanceof ChunkPartitionError
+            ? `覆盖率检查与其自身的 plan 相矛盾（${err.message}）`
+            : `plan 无法使用（${(err as Error).message}）`;
       coverageEntries.push({
         subject: 'coverage',
         reason: `${why}, so this run cannot show that any of the diff was read`,
@@ -6215,7 +6299,9 @@ function composeReviewBody(
   const cappedBy: string[] = [];
   if (cannotTell.length > 0) cappedBy.push('cannot-tell-existing-critical');
   if (missingReceipts.length > 0) cappedBy.push('chunk-nobody-read');
-  if (uncoverable.length > 0) cappedBy.push('uncoverable-chunk');
+  if (uncoverable.length > 0 || unplannedDeclared.length > 0) {
+    cappedBy.push('uncoverable-chunk');
+  }
   if (unreviewed.length + coverageEntries.length > 0) {
     cappedBy.push('unreviewed-dimension');
   }
@@ -6239,16 +6325,19 @@ function composeReviewBody(
   const scopeUnproven =
     missingReceipts.length > 0 ||
     uncoverable.length > 0 ||
+    unplannedDeclared.length > 0 ||
     contextUnavailable ||
     coverageEntries.some((entry) => entry !== budgetEntry);
 
   // Is every dimension gap the orchestrator disclosed about DEPTH rather than
   // about which lines were read?
   //
-  // Only one dimension can answer yes, and it is not a judgement call: Agent 7
-  // is the single role whose brief declares `readsDiff: false` (agent-briefs).
-  // Its gap — "the integration suite CI skipped did not run locally" — says
-  // nothing about the diff, because that agent never reads the diff.
+  // Only a role that never reads the diff can answer yes, and it is not a
+  // judgement call: the set is derived from the briefs that declare
+  // `readsDiff: false` (agent-briefs). On the roster that is Agent 7, whose
+  // gap — "the integration suite CI skipped did not run locally" — says
+  // nothing about the diff; the Step 6B fix auditor declares it too, but runs
+  // after this verdict is composed and never appears in this field.
   //
   // Every OTHER entry is a line-coverage claim wearing dimension prose, and
   // the machine cannot see it: a whole-diff lens that made tool calls, opened
@@ -7103,6 +7192,8 @@ function composeReviewBody(
       });
     }
   }
+  // Unplanned declarations the caller relayed WITH the file they span.
+  const relayedInFull = new Set<number>();
   if (uncoverable.length > 0) {
     // The CLI's own entries are bare `chunk <id>` (pushed above, from the
     // report) and render through the same translation as every other chunk
@@ -7113,8 +7204,31 @@ function composeReviewBody(
     const callerNamed: string[] = [];
     for (const e of uncoverable) {
       const m = /^chunk (\d+)$/.exec(e);
-      if (m) bareIds.push(Number(m[1]));
-      else callerNamed.push(e);
+      // A bare id the plan does not carry can only be the caller's — the
+      // report's own are planned by construction — and it renders as the
+      // caller wrote it: counted as one of this diff's sections, it would
+      // state a gap in a plan that has none there.
+      if (m && planCarries(Number(m[1]), plannedChunks)) {
+        bareIds.push(Number(m[1]));
+        continue;
+      }
+      // One fact, said once, when the caller relays a declaration the
+      // coverage walk found itself — the same rule the planned ids get where
+      // the walk's are merged in (`chunk 5` vs `chunk 5 (src/big.min.js)`).
+      // A bare relay adds nothing to the walk's own sentence and is dropped;
+      // a richer one names the file, so IT is kept and the walk's sentence
+      // stands down for that id.
+      const relayed = /^chunk (\d+)(?= \S|$)/.exec(e);
+      if (relayed && unplannedDeclared.includes(Number(relayed[1]))) {
+        if (m) continue;
+        relayedInFull.add(Number(relayed[1]));
+      }
+      // A bare id the plan lacks used to collapse through the chunk
+      // translation, which counted it once however often it was relayed;
+      // rendered verbatim it is still said once. Every other entry is the
+      // caller's prose and renders exactly as it always has.
+      if (m && callerNamed.includes(e)) continue;
+      callerNamed.push(e);
     }
     const bareGap =
       bareIds.length > 0 ? describeChunkGap(bareIds, plannedChunks) : null;
@@ -7123,9 +7237,26 @@ function composeReviewBody(
     const callerShown = callerNamed.map((entry) => stripCommentGrammar(entry));
     const shown = [...(bareGap ? [bareGap.phrase] : []), ...callerShown];
     const shownZh = [...(bareGap ? [bareGap.phraseZh] : []), ...callerShown];
+    // Nothing left to name when every entry was the caller relaying what the
+    // walk already disclosed: a sentence with no subject is not a disclosure.
+    if (shown.length > 0) {
+      notReviewedParts.push({
+        en: `Not reviewed: ${shown.join(', ')} — a line there exceeds the read limit.`,
+        zh: `未审查：${shownZh.join('、')}——其中有一行超出单次读取上限。`,
+      });
+    }
+  }
+  const declaredUnsaid = new Set(
+    unplannedDeclared.filter((id) => !relayedInFull.has(id)),
+  );
+  if (declaredUnsaid.size > 0) {
+    // Said as what it is — a line, reported by an agent — and not through the
+    // sentence above: "a line THERE" needs a section of this diff to point
+    // at, and the plan has none for this id.
+    const by = unplannedChunkAgents(declaredUnsaid.size);
     notReviewedParts.push({
-      en: `Not reviewed: ${shown.join(', ')} — a line there exceeds the read limit.`,
-      zh: `未审查：${shownZh.join('、')}——其中有一行超出单次读取上限。`,
+      en: `Not reviewed: a line of the diff that no read can reach — reported by ${by.en}.`,
+      zh: `未审查：diff 中有一行超出单次读取上限、任何读取都无法到达——由${by.zh} 报告。`,
     });
   }
   // One disclosure per subject, one sentence per cause — structurally, not by
@@ -7287,10 +7418,19 @@ function composeReviewBody(
     // selector — and the partition below keys on the INTERNAL subject, so a
     // public phrase can never shadow a chunk id out of the chunk collapse.
     const chunkIds: number[] = [];
+    const unplannedIds = new Set<number>();
     const named = new Map<string, { zh: string; count: number }>();
     for (const e of entries) {
       const m = /^chunk (\d+)$/.exec(e.subject);
-      if (m) chunkIds.push(Number(m[1]));
+      if (m && !planCarries(Number(m[1]), plannedChunks)) {
+        // The id came out of a launch prompt's text, and this plan has no
+        // such chunk — a record from another chunking of the diff. Collapsed
+        // with the rest it was counted against THIS plan: a two-chunk plan
+        // read in full told the author that "1 of the diff's 2 sections"
+        // went unreviewed. It is an agent, not a section, and is named as
+        // one — in every arm, since they all arrive here as `chunk <id>`.
+        unplannedIds.add(Number(m[1]));
+      } else if (m) chunkIds.push(Number(m[1]));
       else {
         const subject = e.publicSubject ?? e.subject;
         const existing = named.get(subject);
@@ -7302,16 +7442,20 @@ function composeReviewBody(
           });
       }
     }
+    const unplanned =
+      unplannedIds.size > 0 ? unplannedChunkAgents(unplannedIds.size) : null;
     const gap =
       chunkIds.length > 0 ? describeChunkGap(chunkIds, plannedChunks) : null;
     const shown = [
       ...(gap ? [gap.phrase] : []),
+      ...(unplanned ? [unplanned.en] : []),
       ...[...named].map(([subject, { count }]) =>
         count > 1 ? `${subject} (×${count})` : subject,
       ),
     ].map((part) => stripCommentGrammar(part));
     const shownZh = [
       ...(gap ? [gap.phraseZh] : []),
+      ...(unplanned ? [unplanned.zh] : []),
       ...[...named.values()].map(({ zh, count }) =>
         count > 1 ? `${zh}（×${count}）` : zh,
       ),
@@ -7489,7 +7633,8 @@ function composeReviewBody(
   const hasCoverageGaps =
     unreviewed.length + coverageEntries.length > 0 ||
     missingReceipts.length > 0 ||
-    uncoverable.length > 0;
+    uncoverable.length > 0 ||
+    unplannedDeclared.length > 0;
   const coverageOpener: Bi | undefined = nothingCertified
     ? {
         keep: 1,
@@ -7505,8 +7650,8 @@ function composeReviewBody(
       : undefined;
 
   // The round-kind disclosure, on its own line — never inside the lint
-  // gate's "Not linted" wrapper: a decided-stop re-rule is not a tool
-  // limitation, and a reader handed "Not linted: Decided-stop re-rule …"
+  // gate's "Not fully linted" wrapper: a decided-stop re-rule is not a tool
+  // limitation, and a reader handed "Not fully linted: Decided-stop re-rule …"
   // reads the round kind as a linting gap. Rendered on the two events a
   // granted stop can produce (REQUEST_CHANGES and COMMENT; APPROVE is
   // demoted before the body composes).
@@ -7525,16 +7670,18 @@ function composeReviewBody(
       ]
     : [];
 
-  // A deferred checker (actionlint's embedded shell): disclosed on EVERY verdict —
-  // including Approve — so the reader knows a workflow's shell was not linted, but
-  // it does not cap the verdict (it is a tool limitation, not a finding or an
-  // unrun-checker gap). This is the "disclosed but not capping" half.
+  // A deferred checker portion (actionlint's embedded shell): disclosed on EVERY
+  // verdict — including Approve — so the reader knows a workflow's shell was not
+  // linted, but it does not cap the verdict (it is a tool limitation, not a
+  // finding or an unrun-checker gap). This is the "disclosed but not capping"
+  // half. "Not FULLY linted": the workflow-level checks now run and gate, so the
+  // file named here was partially linted — the deferral is its shell portion.
   const deferredBlock: Bi[] = gateDisclosed.length
     ? [
         {
           trim: 2,
-          en: `Not linted (tool limitation, not a blocker): ${gateDisclosed.map((g) => g.en).join('; ')}.`,
-          zh: `未检查（工具限制，非阻断）：${gateDisclosed.map((g) => g.zh).join('；')}。`,
+          en: `Not fully linted (tool limitation, not a blocker): ${gateDisclosed.map((g) => g.en).join('; ')}.`,
+          zh: `未完整检查（工具限制，非阻断）：${gateDisclosed.map((g) => g.zh).join('；')}。`,
         },
       ]
     : [];
@@ -8657,6 +8804,38 @@ function publicAgentSubject(label: string): string | undefined {
 }
 
 /**
+ * Does this plan carry the chunk? True when there is no plan to ask — with no
+ * chunk table nothing can be called foreign to it, and the callers keep the
+ * counting fallback they always had.
+ */
+function planCarries(
+  id: number,
+  planned: ReadonlyArray<{ id: number }>,
+): boolean {
+  return planned.length === 0 || planned.some((p) => p.id === id);
+}
+
+/**
+ * How the posted body names records whose chunk id the plan does not carry.
+ *
+ * Counted by CHUNK, because that is what is known: disclosures are kept one
+ * per subject, so three records that all claim `chunk 9` arrive as one. The
+ * count lives in the phrase itself — the `(×N)` suffix the named subjects
+ * take reads wrong after "an agent".
+ */
+function unplannedChunkAgents(chunks: number): { en: string; zh: string } {
+  return chunks === 1
+    ? {
+        en: 'an agent launched for a chunk this plan does not carry',
+        zh: '一个被指派到当前 plan 中不存在的 chunk 的 agent',
+      }
+    : {
+        en: `agents launched for ${chunks} chunks this plan does not carry`,
+        zh: `被指派到当前 plan 中不存在的 ${chunks} 个 chunk 的 agent`,
+      };
+}
+
+/**
  * A set of unreviewed chunk ids, said in the PR author's units.
  *
  * `chunk 28` is the run's own bookkeeping: the id selects a rebuild command
@@ -8892,7 +9071,16 @@ function structurallyValidReport(report: unknown): boolean {
   return true;
 }
 
-export function scriptLintGate(planPath: string): {
+export function scriptLintGate(
+  planPath: string,
+  /** The re-anchor protocol's refresh diff (PR #16001 review): when the round
+   *  recomputed the lint at a moved head, the report binds to THAT diff, and
+   *  the freshness check must hash it instead of the plan's captured diff —
+   *  otherwise the refreshed report reads as stale and the gate drops the
+   *  still-standing findings along with the fixed ones. Absent on every
+   *  ordinary round; the plan's diff stays the basis there. */
+  lintDiffPath?: unknown,
+): {
   criticals: string[];
   unreviewed: string[];
   disclosed: Array<{ en: string; zh: string }>;
@@ -8973,15 +9161,28 @@ export function scriptLintGate(planPath: string): {
     return { criticals, unreviewed, disclosed };
   }
   // Fail closed on a STALE report — bound to the diff's CONTENT, not a commit. The
-  // report carries a hash of the diff it ran against; we re-hash the plan's current
-  // diff. A mismatch means it is not this review's report: a later PR commit
-  // (different diff), OR — the local case HEAD cannot see — an uncommitted edit that
-  // changes the working-tree diff. An absent hash on EITHER side (the diff could not
-  // be read here or there) is unverifiable and also fails closed — `!planDiffHash`
+  // report carries a hash of the diff it ran against; we re-hash the freshness
+  // basis: the plan's captured diff, or the re-anchor refresh diff when the round
+  // names one (`lintDiffPath`, validated here — a malformed override must not
+  // silently fall back to the old basis and re-publish the stale report). A
+  // mismatch means it is not this review's report: a later PR commit (different
+  // diff), OR — the local case HEAD cannot see — an uncommitted edit that changes
+  // the working-tree diff. An absent hash on EITHER side (the diff could not be
+  // read here or there) is unverifiable and also fails closed — `!planDiffHash`
   // handles that explicitly, because `undefined !== undefined` is FALSE and would
-  // otherwise accept an arbitrary hashless report. Only both sides present and equal
-  // is fresh.
-  const planDiffHash = diffHashOf(plan.diffPathAbsolute);
+  // otherwise accept an arbitrary hashless report. Only both sides present and
+  // equal is fresh.
+  let freshnessBasis: unknown = plan.diffPathAbsolute;
+  if (lintDiffPath !== undefined) {
+    if (typeof lintDiffPath !== 'string' || lintDiffPath === '') {
+      unreviewed.push(
+        'the executable-script lint — lintDiffPath must be a non-empty path string',
+      );
+      return { criticals, unreviewed, disclosed };
+    }
+    freshnessBasis = lintDiffPath;
+  }
+  const planDiffHash = diffHashOf(freshnessBasis);
   if (!planDiffHash || report.diffHash !== planDiffHash) {
     unreviewed.push(
       'the executable-script lint — the report is stale or its diff could not be verified; re-run `qwen review script-lint`',
@@ -9027,11 +9228,13 @@ export function scriptLintGate(planPath: string): {
       `the executable-script lint — ${stripCommentGrammar(e.tool)} errored on ${mdField(e.path)}`,
     );
   }
-  // A deferred checker (actionlint) is disclosed but does not cap — the reader is
-  // told the workflow's embedded shell was not linted, without making every
-  // workflow PR un-Approvable on a checker we deliberately decline to run.
+  // A deferred checker portion (actionlint's embedded shell) is disclosed but
+  // does not cap — the reader is told the workflow's embedded shell was not
+  // linted, without making every workflow PR un-Approvable on the portion we
+  // deliberately decline to run. The workflow-level checks ran; their findings
+  // arrived through `checked` above and gate like any lint finding.
   // No "the executable-script lint —" prefix here: the body's own wrapper opens
-  // with "Not linted:", and naming the lint after that header rendered as
+  // with "Not fully linted:", and naming the lint after that header rendered as
   // "Not linted: the executable-script lint" — a sentence about not running a
   // lint on a lint (#10567's posted body). The path and reason carry the facts.
   for (const d of report.deferred ?? []) {
@@ -9056,6 +9259,129 @@ function scriptLintReportName(pr: unknown): string {
   return isPositivePrNumber(pr)
     ? `qwen-review-pr-${pr}-script-lint.json`
     : 'qwen-review-script-lint.json';
+}
+
+/** The ruling vocabulary the blocker inventory accounting accepts — the four
+ *  dispositions Step 6's re-check walk records. */
+const BLOCKER_RULINGS = new Set([
+  'fixed',
+  'still-stands',
+  'cannot-tell',
+  'superseded',
+]);
+
+/**
+ * Cross-check the round's blocker re-check accounting against the inventory
+ * `pr-context` wrote beside the context file. The walk itself is prose —
+ * "take each live blocker already on the PR and check it against the code" —
+ * and prose has been skipped: a round posted REQUEST_CHANGES while a blocker
+ * an earlier review had already filed went unruled, surfacing only as a
+ * post-review correction (measured; DESIGN.md — The blocker the re-check
+ * never ruled (PR #15974)). The inventory is the CLI's own promotion set
+ * (the mechanical floor of the walk), the rulings are the orchestrator's
+ * accounting, and this gate is the arithmetic that joins them: an inventory
+ * item with no ruling is unreviewed scope and caps a would-be Approve at
+ * COMMENT, exactly like a dimension nobody reviewed.
+ *
+ * Inert when the inventory is absent (an older CLI, a run whose pr-context
+ * never succeeded — the context-unavailable cap covers that state) or empty
+ * (no blockers owed). A MALFORMED inventory fails closed — it is a side file
+ * the review agent can rewrite, and a corrupt one must not read as "nothing
+ * owed". Malformed RULINGS throw: the channel is typed, and a wrong shape is
+ * a compose-time repair, not a silent pass.
+ */
+export function blockerReCheckGate(
+  planPath: string,
+  rulings: unknown,
+): { unreviewed: string[] } {
+  const unreviewed: string[] = [];
+  let plan: { prNumber?: unknown };
+  try {
+    plan = JSON.parse(readFileSync(planPath, 'utf8'));
+  } catch {
+    // Same fail-closed stance as scriptLintGate: an unreadable plan cannot
+    // prove the walk was unowed.
+    return {
+      unreviewed: [
+        'the blocker re-check — could not read the plan to check the gate',
+      ],
+    };
+  }
+  const pr = plan.prNumber;
+  if (!isPositivePrNumber(pr)) return { unreviewed };
+  const inventoryPath = join(
+    dirname(planPath),
+    `qwen-review-pr-${pr}-context-blockers.json`,
+  );
+  let raw: string;
+  try {
+    raw = readFileSync(inventoryPath, 'utf8');
+  } catch {
+    return { unreviewed }; // no inventory → no gate (the field's doc names the states)
+  }
+  let inventory: unknown;
+  try {
+    inventory = JSON.parse(raw);
+  } catch {
+    return {
+      unreviewed: [
+        'the blocker re-check — the blocker inventory is malformed; re-run `qwen review pr-context`',
+      ],
+    };
+  }
+  const keys = (inventory as { blockers?: unknown })?.blockers;
+  // The key shape is the CLI's own (`comment:<id>` / `review:<id>`), and the
+  // unruled keys render into the body — validating the shape here is what
+  // lets them render without a prose escape: a rewritten inventory carrying
+  // markdown or a newline in a "key" is malformed, not renderable.
+  if (
+    !Array.isArray(keys) ||
+    keys.some((k) => typeof k !== 'string' || !/^(comment|review):\d+$/.test(k))
+  ) {
+    return {
+      unreviewed: [
+        'the blocker re-check — the blocker inventory is malformed; re-run `qwen review pr-context`',
+      ],
+    };
+  }
+  if (keys.length === 0) return { unreviewed };
+  // Typed channel: validate the rulings' shape before accounting with them.
+  const accounted = new Set<string>();
+  if (rulings !== undefined) {
+    if (!Array.isArray(rulings)) {
+      throw new Error(
+        'compose-review: blockerRulings must be an array of {key, ruling} entries',
+      );
+    }
+    for (let i = 0; i < rulings.length; i++) {
+      const entry = rulings[i] as { key?: unknown; ruling?: unknown };
+      if (
+        !entry ||
+        typeof entry !== 'object' ||
+        typeof entry.key !== 'string' ||
+        entry.key === '' ||
+        typeof entry.ruling !== 'string' ||
+        !BLOCKER_RULINGS.has(entry.ruling)
+      ) {
+        throw new Error(
+          `compose-review: blockerRulings[${i}] must be {key: <inventory key>, ruling: fixed|still-stands|cannot-tell|superseded}, got ${JSON.stringify(entry)}`,
+        );
+      }
+      accounted.add(entry.key);
+    }
+  }
+  const missing = (keys as string[]).filter((k) => !accounted.has(k));
+  if (missing.length > 0) {
+    // Name the unruled keys — the disclosure is the repair instruction. The
+    // list is bounded the way every body-bound list is: a pathological
+    // thread count must not push the body past its own caps.
+    const named = missing.slice(0, 10).join(', ');
+    const tail = missing.length > 10 ? ` (+${missing.length - 10} more)` : '';
+    unreviewed.push(
+      `the blocker re-check — ${missing.length} blocker(s) on the PR were not ruled on (${named}${tail})`,
+    );
+  }
+  return { unreviewed };
 }
 
 /**

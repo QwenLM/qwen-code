@@ -45,7 +45,7 @@ export const GOAL_DEFAULT_TOKEN_BUDGET = 30_000_000;
 
 /** The `lastReason` a Goal stops with when `tokensUsed` reaches its budget. */
 export function goalTokenBudgetReason(tokenBudget: number): string {
-  return `The Goal spent its autonomous token budget (${tokenBudget.toLocaleString('en-US')} tokens). Resume the Goal to authorize another budget window, or clear it.`;
+  return `The Goal spent its autonomous token budget (${tokenBudget.toLocaleString('en-US')} ${tokenBudget === 1 ? 'token' : 'tokens'}). Resume the Goal to authorize another budget window, or clear it.`;
 }
 
 /**
@@ -202,17 +202,8 @@ export interface GoalTurnPermit extends GoalExpectedVersion {
 export type GoalEvidenceProofKind =
   | 'user_input'
   | 'delivered_output'
+  | 'execution_output'
   | 'external_fact';
-
-export function isGoalEvidenceProofKind(
-  value: unknown,
-): value is GoalEvidenceProofKind {
-  return (
-    value === 'user_input' ||
-    value === 'delivered_output' ||
-    value === 'external_fact'
-  );
-}
 
 export interface GoalRecord {
   goalId: string;
@@ -400,10 +391,13 @@ export function isRepeatedBlockerProposal(
 }
 
 /**
- * Appended to `lastReason` when an `infeasible` blocker is accepted, so the
- * stopped Goal tells the user what to do rather than only what went wrong.
- * The verifier's reason says why the objective cannot hold; this says that
- * resuming as-is will not change that.
+ * The next-step guidance for a stopped Goal whose `infeasible` blocker was
+ * accepted, so the Goal tells the user what to do rather than only what went
+ * wrong. The verifier's reason says why the objective cannot hold; this says
+ * that resuming as-is will not change that. The verifier's system prompt asks
+ * for a next-step note in the reason's own language rather than spelling this
+ * fixed English sentence into it, so the stored `lastReason` stays in one
+ * language; this is the reference wording for the guidance.
  */
 export const GOAL_INFEASIBLE_NEXT_STEP =
   'The objective cannot be satisfied as written; edit or replace the Goal with an objective the evidence allows before resuming it.';
@@ -466,6 +460,14 @@ export const GOAL_PAUSE_REASON_STOP_HOOK_CAP =
  */
 export const GOAL_PAUSE_REASON_SESSION_DISPOSED =
   'The session started closing before the turn finished. Run /goal resume to continue.';
+/**
+ * A Managed session blocked after a Runtime tool call ended without a known
+ * outcome. It refuses every later turn, including a `/goal` slash command,
+ * and a Goal resumed another way pauses again at once, so this names no
+ * command to resume with.
+ */
+export const GOAL_PAUSE_REASON_MANAGED_SESSION_BLOCKED =
+  'The session is blocked because a Runtime tool call ended without a known outcome, so no Goal turn can run in it.';
 /**
  * A headless run that ended while its Goal was still going. It is not a
  * failure, and it must not tell the reader to run a slash command in a

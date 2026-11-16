@@ -1,0 +1,344 @@
+/** @jsxImportSource @opentui/react */
+// @vitest-environment jsdom
+/**
+ * @license
+ * Copyright 2026 Qwen
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
+ * OpenTUI /permissions dialog: the rule rows are config-supplied, so every
+ * run a window charges as one physical row is sanitized and clipped to it.
+ * The native renderer is faked the same way as dialogs-arena.test.tsx:
+ * box/text render as div/span.
+ */
+
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  mkdtempSync,
+  mkdirSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { render, screen } from '@testing-library/react';
+
+const mocks = vi.hoisted(() => {
+  const state = {
+    keyboardHandlers: [] as Array<(key: unknown) => void>,
+    pasteHandlers: [] as Array<(event: unknown) => void>,
+    width: 100,
+  };
+  async function buildJsxRuntime() {
+    const React = await import('react');
+    const jsx = (
+      type: unknown,
+      props: { children?: unknown; key?: React.Key } | null,
+      key?: React.Key,
+    ) => {
+      const config = key === undefined ? props : { ...props, key };
+      const children = (config?.children ?? null) as React.ReactNode;
+      if (type === 'box' || type === 'text') {
+        return React.createElement(
+          type === 'box' ? 'div' : 'span',
+          key === undefined ? null : { key },
+          children,
+        );
+      }
+      return React.createElement(
+        type as React.ElementType,
+        config as Record<string, unknown>,
+        children,
+      );
+    };
+    return { jsx, jsxs: jsx, jsxDEV: jsx, Fragment: React.Fragment };
+  }
+  return { state, buildJsxRuntime };
+});
+
+vi.mock('@opentui/core', () => ({
+  SyntaxStyle: { fromStyles: () => ({}) },
+  MouseButton: { LEFT: 0 },
+  decodePasteBytes: (bytes: Uint8Array) => Buffer.from(bytes).toString('utf8'),
+}));
+
+vi.mock('@opentui/react', async () => {
+  const React = await import('react');
+  return {
+    useAppContext: (
+      await import('../../test-utils/opentui-catalog.js')
+    ).catalogAppContext(mocks.state.keyboardHandlers),
+    useKeyboard: (handler: (key: unknown) => void) => {
+      const ref = React.useRef(handler);
+      ref.current = handler;
+      React.useEffect(() => {
+        const fn = (key: unknown) => ref.current(key);
+        mocks.state.keyboardHandlers.push(fn);
+        return () => {
+          const index = mocks.state.keyboardHandlers.indexOf(fn);
+          if (index >= 0) mocks.state.keyboardHandlers.splice(index, 1);
+        };
+      }, []);
+    },
+    usePaste: (handler: (event: unknown) => void) => {
+      const ref = React.useRef(handler);
+      ref.current = handler;
+      React.useEffect(() => {
+        const fn = (event: unknown) => ref.current(event);
+        mocks.state.pasteHandlers.push(fn);
+        return () => {
+          const index = mocks.state.pasteHandlers.indexOf(fn);
+          if (index >= 0) mocks.state.pasteHandlers.splice(index, 1);
+        };
+      }, []);
+    },
+    useTerminalDimensions: () => ({ width: mocks.state.width, height: 40 }),
+  };
+});
+
+vi.mock('@opentui/react/jsx-runtime', () => mocks.buildJsxRuntime());
+vi.mock('@opentui/react/jsx-dev-runtime', () => mocks.buildJsxRuntime());
+
+import { act } from 'react';
+import { OpenTuiPermissionsDialog } from './dialogs-permissions.js';
+import type { PermissionRuleEntry } from './dialogs-permissions.js';
+import { getCachedStringWidth } from '../utils/textUtils.js';
+
+function press(name: string) {
+  act(() => {
+    for (const handler of [...mocks.state.keyboardHandlers]) {
+      handler({ name, sequence: name });
+    }
+  });
+}
+
+function renderPermissions(
+  rules: PermissionRuleEntry[],
+  availableTerminalHeight?: number,
+) {
+  return render(
+    <OpenTuiPermissionsDialog
+      rules={rules}
+      directories={[]}
+      initialDirectories={[]}
+      onAddRule={vi.fn()}
+      onDeleteRule={vi.fn()}
+      onAddDirectory={vi.fn()}
+      onRemoveDirectory={vi.fn()}
+      onExit={vi.fn()}
+      availableTerminalHeight={availableTerminalHeight}
+    />,
+  );
+}
+
+const temporaryDirectories: string[] = [];
+
+function paste(text: string) {
+  const event = { bytes: Buffer.from(text), preventDefault: vi.fn() };
+  act(() => {
+    for (const handler of [...mocks.state.pasteHandlers]) {
+      handler(event);
+    }
+  });
+  return event;
+}
+
+describe('OpenTuiPermissionsDialog rule rows', () => {
+  beforeEach(() => {
+    mocks.state.keyboardHandlers.length = 0;
+    mocks.state.pasteHandlers.length = 0;
+    mocks.state.width = 100;
+  });
+
+  afterEach(() => {
+    for (const directory of temporaryDirectories.splice(0)) {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('edits a permission rule at its caret before submitting it', () => {
+    renderPermissions([]);
+    press('return');
+    for (const character of 'Bash(lx)') press(character);
+    press('left');
+    press('backspace');
+    press('s');
+    press('return');
+    expect(screen.getByText('Bash(ls)')).toBeTruthy();
+    expect(screen.getByText('Where should this rule be saved?')).toBeTruthy();
+  });
+
+  it('pastes a rule and removes a supplementary code point at its caret', () => {
+    renderPermissions([]);
+    press('return');
+    paste('Bash(😀x)');
+    press('left');
+    press('left');
+    press('backspace');
+    press('return');
+    expect(screen.getByText('Bash(x)')).toBeTruthy();
+    expect(screen.getByText('Where should this rule be saved?')).toBeTruthy();
+  });
+
+  it('paints a pasted rule whose clipboard trailing newline would hide it', () => {
+    // A single-line field paints only the caret's line, so a kept LF leaves
+    // the caret on an empty second line: the row reads blank while Enter
+    // still submits the trimmed buffer the user never saw.
+    const { container } = renderPermissions([]);
+    press('return');
+    const event = paste('Bash(ls)\n');
+    expect(container.textContent).toContain('Bash(ls)');
+    expect(event.preventDefault).toHaveBeenCalledTimes(1);
+    press('return');
+    expect(screen.getByText('Where should this rule be saved?')).toBeTruthy();
+  });
+
+  it('paints both lines of a two-line rule paste as the one row it submits', () => {
+    const { container } = renderPermissions([]);
+    press('return');
+    paste('Bash(rm)\nBash(curl)');
+    expect(container.textContent).toContain('Bash(rm) Bash(curl)');
+  });
+
+  it('paints a pasted directory path whose trailing newline would hide it', () => {
+    const { container } = renderPermissions([]);
+    press('tab');
+    press('tab');
+    press('tab');
+    press('return');
+    expect(screen.getByText('Enter directory path…')).toBeTruthy();
+    paste('/tmp/pasted-directory\n');
+    expect(container.textContent).toContain('/tmp/pasted-directory');
+  });
+
+  it('lists directory candidates and applies the selected one with Tab', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'qwen-permissions-complete-'));
+    temporaryDirectories.push(directory);
+    mkdirSync(join(directory, 'alpha'));
+    mkdirSync(join(directory, 'beta'));
+    mkdirSync(join(directory, '.hidden'));
+    writeFileSync(join(directory, 'ordinary.txt'), 'fixture');
+    const onAddDirectory = vi.fn();
+    render(
+      <OpenTuiPermissionsDialog
+        rules={[]}
+        directories={[]}
+        initialDirectories={[]}
+        onAddRule={vi.fn()}
+        onDeleteRule={vi.fn()}
+        onAddDirectory={onAddDirectory}
+        onRemoveDirectory={vi.fn()}
+        onExit={vi.fn()}
+      />,
+    );
+    press('tab');
+    press('tab');
+    press('tab');
+    press('return');
+    paste(directory + '/');
+    expect(screen.getByText(/^alpha\/\s+directory$/)).toBeTruthy();
+    expect(screen.getByText(/^beta\/\s+directory$/)).toBeTruthy();
+    expect(screen.queryByText(/^\.hidden\/\s+directory$/)).toBeNull();
+    expect(screen.queryByText(/^ordinary\.txt\/\s+directory$/)).toBeNull();
+    const candidates = screen.getAllByText(/^(alpha|beta)\/\s+directory$/);
+    const selectedName = candidates[1].textContent!.split('/')[0];
+    press('down');
+    press('tab');
+    press('return');
+    expect(onAddDirectory).toHaveBeenCalledExactlyOnceWith(
+      realpathSync(join(directory, selectedName)),
+    );
+  });
+
+  it('clips the add-rule scope row to the framed width, so it cannot wrap', () => {
+    // The scope step paints inside the DialogFrame — border and padding take
+    // four columns of the area width first — but the label clip was budgeted
+    // from the bare-region width: at 62 columns the 52-column scope label
+    // fit the stale budget, wrapped onto a second physical row the window
+    // charged as one, and the frame grew past the region.
+    mocks.state.width = 62;
+    renderPermissions([], 22);
+    press('return'); // rule list → add-rule-input ('Add a new rule…' on top)
+    for (const ch of ['B', 'a', 's', 'h']) press(ch);
+    press('return'); // → add-rule-scope
+
+    const row = screen.getByText(/Project settings/);
+    // 58 area columns, less the frame (4), the marker box (2) and the number
+    // box (3), leave the label 49; the clip cuts without an ellipsis.
+    expect(getCachedStringWidth(row.textContent ?? '')).toBeLessThanOrEqual(49);
+    expect(row.textContent ?? '').not.toContain('.json');
+    expect(screen.getByText(/Enter to confirm/)).toBeTruthy();
+  });
+
+  it('flattens a newline inside a rule row into the one row it is charged', () => {
+    // Rule text is settings-file content: a surviving newline measures zero
+    // columns in the clip budget but paints a second physical row the window
+    // never paid for. Read the raw text content — testing-library's default
+    // normalizer collapses the newline to a space either way.
+    const { container } = renderPermissions([
+      {
+        raw: 'Bash(evil\n> spoof)',
+        toolName: 'Bash',
+        type: 'allow',
+        scope: 'project',
+      },
+    ]);
+    const painted = container.textContent ?? '';
+    expect(painted.includes('evil\n>')).toBe(false);
+    expect(painted.includes('evil > spoof')).toBe(true);
+  });
+
+  it('charges the scope step title, question and footer the rows they wrap into', () => {
+    // At a 34-column terminal the scope step's question wraps to two rows
+    // and the footer below the frame wraps to two, so the measured chrome is
+    // fourteen, not the flat ten-plus-rule-block: a thirteen-row region pays
+    // no scope row, where the flat count painted one — and the unshrinkable
+    // frame grew past the region. Two rows more and the first scope row is
+    // back.
+    mocks.state.width = 34;
+    renderPermissions([], 13);
+    press('return'); // rule list → add-rule-input
+    for (const ch of ['B', 'a', 's', 'h']) press(ch);
+    press('return'); // → add-rule-scope
+
+    expect(screen.getByText(/Add allow permission rule/)).toBeTruthy();
+    expect(screen.queryByText(/Project settings/)).toBeNull();
+  });
+
+  it('pays the scope list a row once the region covers the measured chrome', () => {
+    // Same step two rows taller: the region covers the measured chrome and
+    // the first scope row paints.
+    mocks.state.width = 34;
+    renderPermissions([], 15);
+    press('return');
+    for (const ch of ['B', 'a', 's', 'h']) press(ch);
+    press('return');
+
+    expect(screen.getByText(/Project settings/)).toBeTruthy();
+  });
+
+  it('flattens a newline inside a workspace directory row', () => {
+    const { container } = render(
+      <OpenTuiPermissionsDialog
+        rules={[]}
+        directories={[]}
+        initialDirectories={['/repo\n> spoofed']}
+        onAddRule={vi.fn()}
+        onDeleteRule={vi.fn()}
+        onAddDirectory={vi.fn()}
+        onRemoveDirectory={vi.fn()}
+        onExit={vi.fn()}
+      />,
+    );
+    // The workspace tab is the fourth: three Tabs cycle to it.
+    press('tab');
+    press('tab');
+    press('tab');
+    expect(screen.getByText('Workspace')).toBeTruthy();
+    const painted = container.textContent ?? '';
+    expect(painted.includes('repo\n')).toBe(false);
+    expect(painted.includes('/repo > spoofed')).toBe(true);
+  });
+});

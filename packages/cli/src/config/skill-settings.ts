@@ -14,6 +14,10 @@ export interface SkillDisablement {
 
 export type SkillSettingListKey = 'disabled' | 'defaultDisabled' | 'enabled';
 
+export type UserSkillActivation =
+  | { state: 'enabled' }
+  | { state: 'disabled'; mode?: 'hard' | 'default' };
+
 export interface ResolvedSkillSettings {
   disabledNames: ReadonlySet<string>;
   defaultDisabledNames: ReadonlySet<string>;
@@ -326,6 +330,32 @@ export function updateWorkspaceSkillSettingLists(
   return {
     disabled: updateTarget(lists.disabled, skillName, true),
     enabled: updateTarget(lists.enabled, skillName, false),
+  };
+}
+
+export function updateUserSkillSettingLists(
+  lists: Record<SkillSettingListKey, string[]>,
+  skillName: string,
+  activation: UserSkillActivation,
+): Record<SkillSettingListKey, string[]> {
+  const target =
+    activation.state === 'enabled'
+      ? 'enabled'
+      : activation.mode === 'default'
+        ? 'defaultDisabled'
+        : 'disabled';
+  const normalized = skillName.trim().toLowerCase();
+  const spelling =
+    lists[target].find((name) => name.trim().toLowerCase() === normalized) ??
+    skillName.trim();
+  return {
+    disabled: updateTarget(lists.disabled, spelling, target === 'disabled'),
+    defaultDisabled: updateTarget(
+      lists.defaultDisabled,
+      spelling,
+      target === 'defaultDisabled',
+    ),
+    enabled: updateTarget(lists.enabled, spelling, target === 'enabled'),
   };
 }
 

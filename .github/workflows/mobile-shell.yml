@@ -46,3 +46,51 @@ jobs:
       - name: 'Build, run unit tests, and lint'
         shell: 'bash'
         run: './gradlew --no-daemon assembleDebug testDebugUnitTest lintDebug'
+
+  device-tests:
+    name: 'Keystore and profiles (API ${{ matrix.api-level }})'
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - api-level: 26
+            arch: 'x86'
+            require-profiles: 'false'
+          - api-level: 36
+            arch: 'x86_64'
+            require-profiles: 'true'
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+
+      - name: 'Set up Java 17'
+        uses: 'actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3' # v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: 'Verify Gradle wrapper'
+        working-directory: 'packages/mobile-shell'
+        shell: 'bash'
+        run: |
+          expected="$(tr -d '[:space:]' < gradle/wrapper/gradle-wrapper.jar.sha256)"
+          actual="$(sha256sum gradle/wrapper/gradle-wrapper.jar | cut -d ' ' -f1)"
+          test "$actual" = "$expected"
+
+      - name: 'Enable emulator acceleration'
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: 'Run device tests'
+        uses: 'reactivecircus/android-emulator-runner@324029e2f414c084d8b15ba075288885e74aef9c' # v2.34.0
+        with:
+          api-level: '${{ matrix.api-level }}'
+          target: 'google_apis'
+          arch: '${{ matrix.arch }}'
+          disable-animations: true
+          working-directory: 'packages/mobile-shell'
+          script: './gradlew --no-daemon connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.requireProfileIsolation=${{ matrix.require-profiles }}'

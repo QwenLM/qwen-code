@@ -109,6 +109,9 @@ fn maybe_wrap_finite_command() {
     let Some(command_name) = cli::finite_command_name_from_argv() else {
         return;
     };
+    if !telemetry::is_enabled() {
+        return;
+    }
     let tool_name = cli::finite_tool_name_from_argv();
     let computer_action = cli::finite_computer_action_from_argv();
     let operation = cli::finite_operation_from_argv();
@@ -214,68 +217,6 @@ fn run_cursor_theme_command(args: &[String]) -> ! {
     std::process::exit(status.code().unwrap_or(1));
 }
 
-/// Wire up the experimental picture-in-picture preview window.
-///
-/// Called from every long-running entry point (Serve and Mcp on all
-/// platforms; the `Call` arm intentionally skips PiP since the
-/// per-call binaries don't keep an AppKit/event loop alive long
-/// enough to be useful).
-///
-/// No-op when `--experimental-pip` is not on argv. On Windows / Linux
-/// the factory returns "not yet implemented" — we log and continue
-/// without a window so the rest of the daemon keeps working.
-fn maybe_init_pip() {
-    let cfg = match pip_preview::default_config_path() {
-        Some(p) => pip_preview::PipConfig::from_args_and_file(&p),
-        None => pip_preview::PipConfig::from_args(),
-    };
-    if !cfg.enabled {
-        return;
-    }
-
-    // Register the platform factory. The set is idempotent so multiple
-    // entry points calling this in the same process is safe.
-    #[cfg(target_os = "macos")]
-    pip_preview::set_pip_backend_factory(Box::new(platform_macos::pip::MacosPipBackendFactory));
-    #[cfg(target_os = "windows")]
-    pip_preview::set_pip_backend_factory(Box::new(platform_windows::pip::WindowsPipBackendFactory));
-    #[cfg(target_os = "linux")]
-    pip_preview::set_pip_backend_factory(Box::new(platform_linux::pip::LinuxPipBackendFactory));
-
-    match pip_preview::start_pip(&cfg) {
-        Ok(backend) => {
-            // Bridge: when the tool dispatcher in cua-driver-core wants
-            // to push a frame, forward to the live backend handle.
-            // We move the Box into a static Mutex<Option<...>> so the
-            // closure can re-borrow on every call without taking
-            // ownership of the trait object.
-            use std::sync::Mutex as StdMutex;
-            static BACKEND: std::sync::OnceLock<
-                StdMutex<Option<Box<dyn pip_preview::PipBackend>>>,
-            > = std::sync::OnceLock::new();
-            let _ = BACKEND.set(StdMutex::new(Some(backend)));
-            cua_driver_core::pip_hook::set_pip_push_fn(|frame| {
-                if let Some(slot) = BACKEND.get() {
-                    if let Some(b) = slot.lock().unwrap().as_ref() {
-                        b.push_frame(pip_preview::PipFrame {
-                            png_bytes: frame.png_bytes,
-                            action_label: frame.action_label,
-                            timestamp_ms: frame.timestamp_ms,
-                        });
-                    }
-                }
-            });
-            eprintln!(
-                "⚗️  PiP preview enabled (experimental — macOS only today; \
-                 see https://github.com/QwenLM/qwen-code/issues for follow-up)"
-            );
-        }
-        Err(e) => {
-            eprintln!("⚗️  PiP preview requested but unavailable: {e}");
-        }
-    }
-}
-
 // ── Public SDK runtime host ──────────────────────────────────────────────
 
 /// Construct the canonical SDK-owned runtime for the CLI or daemon host.
@@ -343,21 +284,24 @@ fn run_mcp_direct(compatibility_mode: bool) -> anyhow::Result<()> {
     cua_driver_core::authorization::validate_startup_authorization()?;
     cua_driver_core::policy::validate_configured_policy()?;
     let cursor = cursor_overlay::CursorConfig::from_args();
-    // A plain stdio MCP process does not provide the required AppKit
-    // main-thread host adapter. Explicit direct mode on macOS must therefore
-    // expose facility_unavailable instead of initializing an overlay that can
-    // report success without a usable UI owner. Private-worker and app-service
-    // hosts keep the full facility.
-    #[cfg(target_os = "macos")]
-    let cursor = {
-        let mut cursor = cursor;
-        cursor.enabled = false;
-        cursor
-    };
     let driver = build_driver(cursor, compatibility_mode, true)?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
+    #[cfg(target_os = "macos")]
+    if cua_driver_sdk::native_ui_needs_pump() {
+        std::thread::Builder::new()
+            .name("cua-mcp".into())
+            .spawn(move || {
+                let result = runtime.block_on(proxy::run_direct(driver));
+                if let Err(error) = &result {
+                    eprintln!("qwen-cua-driver: {error}");
+                }
+                std::process::exit(if result.is_ok() { 0 } else { 1 });
+            })?;
+        platform_macos::pip::run_appkit_main_loop();
+        return Ok(());
+    }
     runtime.block_on(proxy::run_direct(driver))
 }
 
@@ -436,8 +380,20 @@ fn main() {
         std::process::exit(code);
     }
     if let Some(generation) = private_worker::requested_generation() {
+        if platform_macos::session::has_graphic_access() {
+            platform_macos::cursor::overlay::init(cursor_overlay::CursorConfig::from_args());
+            if let Err(error) = platform_macos::cursor::overlay::start_on_main_thread() {
+                eprintln!("qwen-cua-driver: cursor unavailable: {error}");
+            }
+            let config = pip_preview::default_config_path()
+                .map(|path| pip_preview::PipConfig::from_args_and_file(&path))
+                .unwrap_or_else(pip_preview::PipConfig::from_args);
+            if let Err(error) = platform_macos::pip::initialize(&config) {
+                eprintln!("qwen-cua-driver: preview unavailable: {error}");
+            }
+        }
         let (initialized_tx, initialized_rx) = std::sync::mpsc::sync_channel(1);
-        std::thread::spawn(move || {
+        let worker = std::thread::spawn(move || {
             let code = match private_worker::run(generation, Some(initialized_tx)) {
                 Ok(()) => 0,
                 Err(error) => {
@@ -450,8 +406,10 @@ fn main() {
             // worker process lifetime.
             std::process::exit(code);
         });
-        if initialized_rx.recv().unwrap_or(false) {
-            platform_macos::cursor::overlay::run_on_main_thread();
+        if initialized_rx.recv().unwrap_or(false) && platform_macos::session::has_graphic_access() {
+            platform_macos::pip::run_appkit_main_loop();
+        } else {
+            let _ = worker.join();
         }
         return;
     }
@@ -548,7 +506,6 @@ fn main() {
                 Some(p) => pip_preview::PipConfig::from_args_and_file(&p),
                 None => pip_preview::PipConfig::from_args(),
             };
-            maybe_init_pip();
 
             // Agent-cursor overlay. The DAEMON is the process that actually
             // performs clicks / AX presses, so the overlay NSWindow + render
@@ -661,20 +618,11 @@ fn main() {
             //
             // PiP needs the AppKit main run loop to process the
             // dispatch_async_f calls that push frames into NSImageView;
-            // park main in NSApplication.run() when --experimental-pip is
-            // on. Otherwise just join the serve thread so the process
-            // stays up as long as the daemon does.
-            if pip_cfg.enabled {
+            // Both UI surfaces share AppKit's main-thread event loop.
+            if (pip_cfg.enabled || cursor_cfg.enabled)
+                && platform_macos::session::has_graphic_access()
+            {
                 platform_macos::pip::run_appkit_main_loop();
-            } else if cursor_cfg.enabled {
-                // Render the agent-cursor overlay: park the main thread in the
-                // AppKit run loop so the overlay NSWindow draws. `run_on_main_thread`
-                // self-guards on `has_graphic_access()` and returns immediately
-                // when the daemon has no Window Server session — fall through to
-                // join so the daemon still serves headless. The serve thread runs
-                // on its background thread regardless.
-                platform_macos::cursor::overlay::run_on_main_thread();
-                let _ = serve_handle.join();
             } else {
                 let _ = serve_handle.join();
             }
@@ -817,6 +765,12 @@ fn main() {
 
 #[cfg(not(target_os = "macos"))]
 fn main() -> anyhow::Result<()> {
+    #[cfg(windows)]
+    if let Some(code) =
+        platform_windows::standard_user_launch::run_shell_launch_helper_if_requested()
+    {
+        std::process::exit(code);
+    }
     init_logging();
     if let Some(generation) = private_worker::requested_generation() {
         return private_worker::run(generation, None);
@@ -911,7 +865,6 @@ fn main() -> anyhow::Result<()> {
                 claude_code_compat,
                 cua_driver_core::embedded_mode(),
             )?;
-            maybe_init_pip();
             let sp = socket.unwrap_or_else(serve::default_socket_path);
             let pid_path = serve::default_pid_file_path();
             // run_serve_cmd builds its own runtime; must run on a fresh thread.

@@ -40,8 +40,8 @@ let simpleGitModulePromise: Promise<SimpleGitModule> | undefined;
  * wins (measured). The position that decides it is the subcommand — git only
  * reads `-c` before the subcommand, so no caller value can reach the guard as
  * long as nothing caller-derived precedes the subcommand. A leading *literal*
- * global flag (e.g. `--no-optional-locks` on the `worktreeCleanup` status
- * probe) is safe for the same reason: it is a fixed token, not a
+ * global flag (e.g. `--no-optional-locks` on a `status` probe) is safe for
+ * the same reason: it is a fixed token, not a
  * caller-supplied entry, so it can neither carry a `-c` nor push one ahead of
  * the subcommand. A call site must keep it that way: no caller-derived entry
  * before the subcommand, and, as on the extension git client, no user- or

@@ -54,7 +54,7 @@ export interface ArtifactToolParams {
   title?: string;
 }
 
-const DESCRIPTION = `Publishes a self-contained HTML page as an interactive Artifact, optionally opens it in the browser depending on settings, and returns a shareable link when a remote host is configured. Use it to turn session output into a durable, interactive page — a PR walkthrough, an architecture tour, a project dashboard.
+const DESCRIPTION = `Publishes a self-contained HTML page as an interactive Artifact, optionally opens it in the browser depending on settings, and returns a shareable link when a remote host is configured. Use it to turn session output into a durable, interactive page — a PR walkthrough, an architecture tour, a project dashboard. Use this, not record_artifact, for HTML.
 
 Workflow:
 - Write the page to a file first (via Write/Edit), then call Artifact with that file's absolute path.

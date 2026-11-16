@@ -117,12 +117,14 @@ impl Tool for RightClickTool {
             Ok(r) => r,
             Err(e) => return e,
         };
+        let element_cache = crate::ax::cache::BoundElementCache::from_resolved(&resolved);
         let (element_index, window_id) = match resolved {
             cua_driver_core::element_token::ResolvedElement::None => (None, window_id_arg),
             cua_driver_core::element_token::ResolvedElement::Element {
                 window_id: wid,
                 element_index: idx,
                 via_token: _,
+                ..
             } => (Some(idx), wid),
         };
         let x = args.opt_f64("x");
@@ -150,7 +152,7 @@ impl Tool for RightClickTool {
         if let (Some(idx), Some(wid)) = (element_index, window_id) {
             // Retain out of the cache so a concurrent get_window_state can't
             // free the element mid-action (use-after-free → daemon crash).
-            let element_guard = match self.state.element_cache.get_element_retained(pid, wid, idx) {
+            let element_guard = match element_cache.get_element_retained(pid, wid, idx) {
                 Some(e) => e,
                 None => {
                     return ToolResult::error(format!(
@@ -175,11 +177,16 @@ impl Tool for RightClickTool {
             let ax_result =
                 tokio::task::spawn_blocking(move || try_ax_show_menu(element_ptr, idx)).await;
             match ax_result {
-                Ok(Some(message)) => return ToolResult::text(message),
+                Ok(Some(result)) => return result,
                 Ok(None) => {}
                 Err(error) => return ToolResult::error(format!("Task error: {error}")),
             }
 
+            if let Some(refusal) = super::click::libreoffice_pixel_refusal(
+                crate::apps::bundle_id_for_pid(pid).as_deref(),
+            ) {
+                return refusal;
+            }
             if let Err(refusal_result) = mutation_lease
                 .gate_again(
                     wid,
@@ -256,6 +263,12 @@ impl Tool for RightClickTool {
             None
         };
 
+        if let Some(refusal) =
+            super::click::libreoffice_pixel_refusal(crate::apps::bundle_id_for_pid(pid).as_deref())
+        {
+            return refusal;
+        }
+
         // Pin overlay above the target window before animating.
         if let Some(wid) = window_id {
             crate::cursor::overlay::send_command(
@@ -325,7 +338,7 @@ impl Tool for RightClickTool {
 
 // ── Blocking AX path ─────────────────────────────────────────────────────────
 
-fn try_ax_show_menu(element_ptr: usize, idx: usize) -> Option<String> {
+fn try_ax_show_menu(element_ptr: usize, idx: usize) -> Option<ToolResult> {
     let element = element_ptr as AXUIElementRef;
 
     let role = unsafe { copy_string_attr(element, "AXRole") }.unwrap_or_default();
@@ -345,13 +358,11 @@ fn try_ax_show_menu(element_ptr: usize, idx: usize) -> Option<String> {
     if advertised.iter().any(|a| a == "AXShowMenu") {
         let err = unsafe { perform_action(element, "AXShowMenu") };
         if err == kAXErrorSuccess {
-            return Some(format!(
+            return Some(ToolResult::text(format!(
                 "Shown menu for [{idx}] {role} \"{title}\" (AXShowMenu)."
-            ));
+            )));
         }
-        // Advertised but the action failed — fall through to the pixel path
-        // rather than erroring out.
-        tracing::debug!("AXShowMenu returned {err} for [{idx}]; falling back to pixel right-click");
+        return Some(super::ax_action_unconfirmed("AXShowMenu", Some(idx), err));
     }
     None
 }

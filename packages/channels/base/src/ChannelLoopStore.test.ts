@@ -71,6 +71,26 @@ describe('ChannelLoopStore', () => {
     ).resolves.toEqual([first]);
   });
 
+  it('persists route identity and only lists jobs in that route', async () => {
+    const target = { ...input.target, messageRoute: '/review' };
+    const created = await store.create({ ...input, target });
+    const reloaded = new ChannelLoopStore({
+      filePath: path.join(tmpDir, 'channels', 'loops.json'),
+    });
+    await expect(
+      reloaded.listForTarget(input.channelName, target),
+    ).resolves.toEqual([created]);
+    await expect(
+      reloaded.listForTarget(input.channelName, {
+        ...target,
+        messageRoute: '/QA',
+      }),
+    ).resolves.toEqual([]);
+    await expect(
+      reloaded.listForTarget(input.channelName, input.target),
+    ).resolves.toEqual([]);
+  });
+
   it('matches targets after group context is promoted', async () => {
     const created = await store.create(input);
 

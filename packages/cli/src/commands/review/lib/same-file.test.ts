@@ -22,11 +22,19 @@ import { isSameFile } from './same-file.js';
 // Lets a test pose as a volume that exposes no inode numbers: statSync
 // reports ino 0 while enabled, everything else delegates to the real thing.
 const inoZeroVolume = vi.hoisted(() => ({ enabled: false }));
-// Lets a test pose as a Windows NTFS volume whose 64-bit file indices are
-// rounded at the JS boundary: while set, every stat reports that (unsafe)
-// inode value, so distinct files can surface with an equal `ino`.
-const roundedInodeVolume = vi.hoisted(() => ({
-  inode: undefined as number | undefined,
+// Lets a test pose as a volume whose 64-bit file ids exceed the JS
+// safe-integer range (NTFS): while set, every stat reports the id the pose
+// returns — a constant, or a function of the path and the path's REAL id, so
+// a test can lift genuine ids above 2^60 and keep a hard-linked pair sharing
+// one id while unrelated files stay distinct — as a bigint when the caller
+// asks for bigint stats, and as the rounded (unsafe) double a number-backed
+// `Stats` would carry. Only `ino` is posed: `dev` stays the real stat's, so
+// the inode comparison below is what decides.
+const bigInodeVolume = vi.hoisted(() => ({
+  inode: undefined as
+    | bigint
+    | ((filePath: string, realInode: bigint) => bigint)
+    | undefined,
 }));
 // Lets a test pose as a case-insensitive volume (FAT/exFAT/SMB): every
 // registered case-variant spelling stats and canonicalises as the file it
@@ -41,11 +49,26 @@ vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
   const resolveAlias = (filePath: string): string =>
     caseInsensitiveVolume.aliases.get(filePath) ?? filePath;
-  const statSync = ((filePath: string) => {
-    const stats = actual.statSync(resolveAlias(String(filePath)));
-    if (inoZeroVolume.enabled) stats.ino = 0;
-    else if (roundedInodeVolume.inode !== undefined)
-      stats.ino = roundedInodeVolume.inode;
+  // Forward the stat options through (precedent: no-follow-open.test.ts,
+  // session-writer-lease.test.ts): production stats with `{ bigint: true }`,
+  // and a mock that dropped the options bag would hand back a number-backed
+  // `Stats` — posing the unsafe-rounding case even when the code under test
+  // asked for the exact id, and letting the bigint cases below pass without
+  // exercising the path they name.
+  const statSync = ((filePath: string, options?: { bigint?: boolean }) => {
+    const bigint = options?.bigint === true;
+    const stats = actual.statSync(resolveAlias(String(filePath)), { bigint });
+    const posed = stats as { ino: number | bigint };
+    if (inoZeroVolume.enabled) {
+      posed.ino = bigint ? 0n : 0;
+    } else if (bigInodeVolume.inode !== undefined) {
+      const pose = bigInodeVolume.inode;
+      const inode =
+        typeof pose === 'function'
+          ? pose(String(filePath), BigInt(stats.ino))
+          : pose;
+      posed.ino = bigint ? inode : Number(inode);
+    }
     return stats;
   }) as typeof actual.statSync;
   const realpathSync = Object.assign(
@@ -87,19 +110,15 @@ describe('isSameFile', () => {
     writeFileSync(original, '{}');
     const linked = join(dir, 'linked.json');
     linkSync(original, linked);
-    // Hard-link identity rides dev/ino, so the gate below covers two cases
-    // that must not be read as one:
-    //   ino === 0 (FAT/exFAT/SMB) — degrading to canonical spellings is BY
-    //     DESIGN, and 'decides by canonical spelling when inodes are
-    //     unverifiable' below is the test that pins it.
-    //   ino above the safe-integer range (NTFS 64-bit file index) — the
-    //     degradation is a DEFECT, not a design: the id is knowable exactly,
-    //     and is only lost because `tryStat` asks for a number-backed `Stats`.
-    //     The alias guards that consume this answer fail open there.
-    // The second is tracked in #11848; converting `tryStat` to `{ bigint: true }`
-    // narrows this gate to the ino-0 case alone.
+    // Hard-link identity rides dev/ino, so this test needs a volume that
+    // exposes an id at all. `tryStat` stats with `{ bigint: true }` (the
+    // #11848 conversion), so a 64-bit NTFS file index above 2^53 arrives
+    // exact and the dev/ino comparison decides there too — the gate below
+    // covers the ino === 0 case alone (FAT/exFAT/SMB), where degrading to
+    // canonical spellings is BY DESIGN, pinned by 'decides by canonical
+    // spelling when inodes are unverifiable' below.
     const inode = statSync(original).ino;
-    if (!Number.isSafeInteger(inode) || inode <= 0) {
+    if (inode <= 0) {
       ctx.skip();
       return;
     }
@@ -155,41 +174,61 @@ describe('isSameFile', () => {
     }
   });
 
-  it('refuses inode identity above the safe-integer range', () => {
-    // Windows surfaces 64-bit NTFS file indices rounded at the JS boundary:
-    // distinct indices (say 2^60+1 and 2^60+2) can both surface as 2^60.
-    // Comparing those rounded doubles as identity would equate distinct
-    // files, so an unsafe `ino` must degrade to canonical-spelling
-    // comparison — never a dev/ino match.
+  it('keeps distinct files distinct above the safe-integer range', () => {
+    // 2^60+1 and 2^60+2 are distinct 64-bit NTFS file ids that round to the
+    // same double. A number-backed `Stats` cannot tell this pair apart —
+    // which is exactly why the comparison used to refuse unsafe inodes and
+    // degrade to canonical spellings. With bigint stats the ids are exact,
+    // and dev/ino alone decides: distinct files stay distinct.
     const left = join(dir, 'unsafe-left.json');
     const right = join(dir, 'unsafe-right.json');
     writeFileSync(left, '{}');
     writeFileSync(right, '{}');
-    roundedInodeVolume.inode = 2 ** 60;
+    bigInodeVolume.inode = (filePath) =>
+      filePath.endsWith('unsafe-left.json') ? 2n ** 60n + 1n : 2n ** 60n + 2n;
     try {
       expect(isSameFile(left, right)).toBe(false);
       expect(isSameFile(right, left)).toBe(false);
     } finally {
-      roundedInodeVolume.inode = undefined;
+      bigInodeVolume.inode = undefined;
     }
   });
 
-  it('still finds one file through an unsafe inode via canonical spelling', () => {
-    // The degradation must not over-refuse: two spellings of ONE file stay
-    // one file when the comparison falls back to the case-folding
-    // canonicaliser (hard-link identity is lost there by design, exactly as
-    // on ino-0 volumes — the affordable direction).
-    const real = join(dir, 'Unsafe.md');
-    writeFileSync(real, '{}');
-    const variant = join(dir, 'unsafe.md');
-    caseInsensitiveVolume.aliases.set(variant, real);
-    roundedInodeVolume.inode = 2 ** 60;
+  it('detects hard-link identity through an exact inode above the safe-integer range', () => {
+    // The #11848 acceptance case: on a volume whose 64-bit file ids exceed
+    // 2^53 (NTFS), two names of ONE inode must compare as one file.
+    // Number-backed stats rounded the id into the unsafe range, the
+    // comparison degraded to canonical spellings, and a hard link — two
+    // names, two spellings — was never seen through: the alias guards
+    // consuming this verdict (findings, repo-context, save-artifact) failed
+    // open. Bigint stats keep the id exact, so dev/ino decides and the
+    // canonical-spelling fallback is reserved for volumes reporting no id
+    // at all.
+    //
+    // The pose LIFTS each path's real id above 2^60 rather than reporting a
+    // constant, the shape `standalone-deletion-journal.test.ts` uses: the
+    // hard-linked pair keeps sharing one id and the unrelated file below
+    // keeps a different one, so the `toBe(true)` half fails if the
+    // comparator degrades to spellings again (the pre-fix shape) and the
+    // `toBe(false)` half fails if `{ bigint: true }` is dropped from
+    // `tryStat` — under a number-backed `Stats` the lifted ids round into
+    // one double and every pair on the volume would compare equal. A
+    // constant pose passes both halves for the wrong reason: it equates
+    // unrelated files too, so the hard link it creates is not load-bearing.
+    const original = join(dir, 'original.json');
+    writeFileSync(original, '{}');
+    const linked = join(dir, 'linked.json');
+    linkSync(original, linked);
+    const unrelated = join(dir, 'unrelated.json');
+    writeFileSync(unrelated, '{}');
+    bigInodeVolume.inode = (_filePath, realInode) => 2n ** 60n + realInode;
     try {
-      expect(isSameFile(real, variant)).toBe(true);
-      expect(isSameFile(variant, real)).toBe(true);
+      expect(isSameFile(original, linked)).toBe(true);
+      expect(isSameFile(linked, original)).toBe(true);
+      expect(isSameFile(original, unrelated)).toBe(false);
+      expect(isSameFile(unrelated, linked)).toBe(false);
     } finally {
-      roundedInodeVolume.inode = undefined;
-      caseInsensitiveVolume.aliases.clear();
+      bigInodeVolume.inode = undefined;
     }
   });
 

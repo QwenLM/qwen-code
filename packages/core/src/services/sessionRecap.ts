@@ -6,6 +6,7 @@
 
 import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
+import { withoutAutoMemorySnapshots } from '../memory/request-context.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   getStartupContextLength,
@@ -17,7 +18,7 @@ const debugLogger = createDebugLogger('SESSION_RECAP');
 
 const RECENT_MESSAGE_WINDOW = 30;
 
-const RECAP_SYSTEM_PROMPT = `You generate session recaps for a programming assistant CLI.
+export const RECAP_SYSTEM_PROMPT = `You generate session recaps for a programming assistant CLI.
 
 The user stepped away and is coming back. Recap in under 40 words, 1-2 plain sentences, no markdown. Lead with the overall goal and current task, then the one next action. Skip root-cause narrative, fix internals, secondary to-dos, and em-dash tangents.
 
@@ -54,7 +55,9 @@ export async function generateSessionRecap(
       return null;
     }
 
-    const fullHistory = llmClient.getHistoryShallow();
+    const fullHistory = withoutAutoMemorySnapshots(
+      llmClient.getHistoryShallow(),
+    );
     if (fullHistory.length < 2) {
       debugLogger.debug(
         `recap skipped: history too short (${fullHistory.length} messages)`,
@@ -144,7 +147,7 @@ function extractRecap(raw: string): string {
  * Each remaining message keeps only its visible text parts, and messages
  * with no remaining parts are dropped entirely.
  */
-function filterToDialog(history: Content[]): Content[] {
+export function filterToDialog(history: Content[]): Content[] {
   const out: Content[] = [];
   for (const msg of history.slice(getStartupContextLength(history))) {
     if (msg.role !== 'user' && msg.role !== 'model') continue;
@@ -173,7 +176,10 @@ function filterToDialog(history: Content[]): Content[] {
  * start the slice on a tool/model response that would dangle without its
  * preceding user message.
  */
-function takeRecentDialog(history: Content[], windowSize: number): Content[] {
+export function takeRecentDialog(
+  history: Content[],
+  windowSize: number,
+): Content[] {
   if (history.length <= windowSize) return history;
   let start = history.length - windowSize;
   while (start < history.length && history[start]?.role !== 'user') {

@@ -13,6 +13,7 @@ import * as path from 'path';
 import { parse as parseYaml } from '../utils/yaml-parser.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { normalizeContent } from '../utils/textUtils.js';
+import { isNodeError } from '../utils/errors.js';
 
 const debugLogger = createDebugLogger('SKILL_LOAD');
 
@@ -20,6 +21,7 @@ const SKILL_MANIFEST_FILE = 'SKILL.md';
 
 export async function loadSkillsFromDir(
   baseDir: string,
+  onError?: (error: unknown) => void,
 ): Promise<SkillConfig[]> {
   debugLogger.debug(`Loading skills from directory (skill-load): ${baseDir}`);
   try {
@@ -63,6 +65,12 @@ export async function loadSkillsFromDir(
       if (isSymlink) {
         const check = await validateSymlinkTarget(skillDir);
         if (!check.ok) {
+          if (
+            check.reason === 'invalid' &&
+            !(isNodeError(check.error) && check.error.code === 'ENOENT')
+          ) {
+            onError?.(check.error);
+          }
           if (check.reason === 'not-directory') {
             debugLogger.warn(
               `Skipping symlink ${entry.name} that does not point to a directory`,
@@ -85,6 +93,7 @@ export async function loadSkillsFromDir(
         const config = parseSkillContent(content, skillManifest);
         skills.push(config);
       } catch (error) {
+        if (!(isNodeError(error) && error.code === 'ENOENT')) onError?.(error);
         const errorMessage =
           error instanceof Error ? error.message : 'Unknown error';
         debugLogger.error(
@@ -96,6 +105,7 @@ export async function loadSkillsFromDir(
 
     return skills;
   } catch (error) {
+    if (!(isNodeError(error) && error.code === 'ENOENT')) onError?.(error);
     // Directory doesn't exist or can't be read
     const errorMessage =
       error instanceof Error ? error.message : 'Unknown error';

@@ -11,6 +11,18 @@ import os from 'node:os';
 import path from 'node:path';
 import { OmniObjectStore, prepareOmniDownloadsDir } from './storage.js';
 
+async function expectPrivateDir(dir: string): Promise<void> {
+  const st = await fs.stat(dir);
+  expect(st.isDirectory()).toBe(true);
+  if (process.platform !== 'win32') {
+    expect(st.mode & 0o777).toBe(0o700);
+  }
+}
+
+const readUtf8 = (file: string) => fs.readFile(file, 'utf8');
+const tmpEntries = (entries: string[]) =>
+  entries.filter((e) => e.startsWith('.tmp-'));
+
 describe('OmniObjectStore', () => {
   let qwenDir: string;
   let store: OmniObjectStore;
@@ -36,23 +48,17 @@ describe('OmniObjectStore', () => {
     };
   }
 
+  const shardDir = (sha256: string) =>
+    path.join(qwenDir, 'omni', 'objects', 'sha256', sha256.slice(0, 2));
+
   it('stores a file under its content hash', async () => {
     const { sourcePath, sha256 } = await makeSource('video-bytes');
     const result = await store.putFile(sourcePath, sha256, '.mp4');
     expect(result.deduped).toBe(false);
     expect(result.objectPath).toBe(
-      path.join(
-        qwenDir,
-        'omni',
-        'objects',
-        'sha256',
-        sha256.slice(0, 2),
-        `${sha256}.mp4`,
-      ),
+      path.join(shardDir(sha256), `${sha256}.mp4`),
     );
-    await expect(fs.readFile(result.objectPath, 'utf8')).resolves.toBe(
-      'video-bytes',
-    );
+    await expect(readUtf8(result.objectPath)).resolves.toBe('video-bytes');
   });
 
   it('dedups identical content from different sources', async () => {
@@ -71,10 +77,9 @@ describe('OmniObjectStore', () => {
   });
 
   it('a dedup hit refreshes the object mtime (touch-on-reference)', async () => {
-    // Every new memory reference is preceded by a putFile of the same
-    // bytes; the dedup touch re-arms the GC retention grace so a
-    // concurrent sweep whose snapshot predates the commit cannot delete
-    // freshly re-referenced old bytes on age.
+    // Every new memory reference is preceded by a putFile of the same bytes;
+    // the dedup touch re-arms the GC retention grace so a concurrent sweep
+    // whose snapshot predates the commit cannot delete re-referenced bytes.
     const a = await makeSource('old-bytes');
     const { objectPath } = await store.putFile(a.sourcePath, a.sha256, '.bin');
     const old = new Date(Date.now() - 30 * 24 * 3600_000);
@@ -91,7 +96,7 @@ describe('OmniObjectStore', () => {
     const { sourcePath, sha256 } = await makeSource('x');
     await store.putFile(sourcePath, sha256, '.mp4');
     const gitignorePath = path.join(qwenDir, 'omni', '.gitignore');
-    await expect(fs.readFile(gitignorePath, 'utf8')).resolves.toBe('*\n');
+    await expect(readUtf8(gitignorePath)).resolves.toBe('*\n');
     // Second put must not fail on the existing .gitignore.
     const other = await makeSource('y');
     await expect(
@@ -103,7 +108,7 @@ describe('OmniObjectStore', () => {
     const { sourcePath, sha256 } = await makeSource('clean');
     const { objectPath } = await store.putFile(sourcePath, sha256, '.mp4');
     const entries = await fs.readdir(path.dirname(objectPath));
-    expect(entries.filter((e) => e.startsWith('.tmp-'))).toEqual([]);
+    expect(tmpEntries(entries)).toEqual([]);
   });
 
   it('rejects malformed sha256 keys', async () => {
@@ -118,31 +123,18 @@ describe('OmniObjectStore', () => {
 
   describe('objectPathFor validates cache-sourced components (path traversal)', () => {
     const sha256 = 'a'.repeat(64);
+    const HASH_ERR = /invalid object hash/;
+    const EXT_ERR = /invalid object extension/;
 
     it.each([
-      [
-        'traversal hash',
-        '../../../../etc/passwd',
-        '.mp4',
-        /invalid object hash/,
-      ],
-      ['uppercase hash', 'A'.repeat(64), '.mp4', /invalid object hash/],
-      ['short hash', 'abc123', '.mp4', /invalid object hash/],
-      [
-        'traversal extension',
-        sha256,
-        '/../../../../tmp/evil',
-        /invalid object extension/,
-      ],
-      [
-        'multi-segment extension',
-        sha256,
-        '.jpg/../x',
-        /invalid object extension/,
-      ],
-      ['dotless extension', sha256, 'jpg', /invalid object extension/],
-      ['double-dot extension', sha256, '..', /invalid object extension/],
-      ['overlong extension', sha256, '.abcdefghi', /invalid object extension/],
+      ['traversal hash', '../../../../etc/passwd', '.mp4', HASH_ERR],
+      ['uppercase hash', 'A'.repeat(64), '.mp4', HASH_ERR],
+      ['short hash', 'abc123', '.mp4', HASH_ERR],
+      ['traversal extension', sha256, '/../../../../tmp/evil', EXT_ERR],
+      ['multi-segment extension', sha256, '.jpg/../x', EXT_ERR],
+      ['dotless extension', sha256, 'jpg', EXT_ERR],
+      ['double-dot extension', sha256, '..', EXT_ERR],
+      ['overlong extension', sha256, '.abcdefghi', EXT_ERR],
     ])('throws on %s', (_label, hash, ext, message) => {
       expect(() => store.objectPathFor(hash, ext)).toThrow(message);
     });
@@ -161,16 +153,9 @@ describe('OmniObjectStore', () => {
     const missing = path.join(qwenDir, 'does-not-exist.mp4');
     const sha256 = createHash('sha256').update('missing').digest('hex');
     await expect(store.putFile(missing, sha256, '.mp4')).rejects.toThrow();
-    const shard = path.join(
-      qwenDir,
-      'omni',
-      'objects',
-      'sha256',
-      sha256.slice(0, 2),
-    );
     // Shard dir may exist, but must contain no .tmp remnants.
-    const entries = await fs.readdir(shard).catch(() => []);
-    expect(entries.filter((e) => e.startsWith('.tmp-'))).toEqual([]);
+    const entries = await fs.readdir(shardDir(sha256)).catch(() => []);
+    expect(tmpEntries(entries)).toEqual([]);
   });
 
   it('fails closed when the source content does not match the claimed hash (TOCTOU)', async () => {
@@ -197,9 +182,7 @@ describe('OmniObjectStore', () => {
 
     const result = await store.putFile(sourcePath, sha256, '.mp4');
     expect(result.deduped).toBe(false);
-    await expect(fs.readFile(result.objectPath, 'utf8')).resolves.toBe(
-      'real-video-bytes',
-    );
+    await expect(readUtf8(result.objectPath)).resolves.toBe('real-video-bytes');
   });
 
   it('refuses a symlinked store root', async () => {
@@ -220,15 +203,12 @@ describe('OmniObjectStore', () => {
 
   describe('staging and quarantine areas', () => {
     const INVOCATION_ID = '0123456789abcdef';
+    const REASON = { policyId: 'p', toolName: 't', reason: 'r' };
 
     it('ensureLayout creates staging/ and quarantine/ with 0o700', async () => {
       await store.ensureLayout();
       for (const dir of [store.getStagingDir(), store.getQuarantineDir()]) {
-        const st = await fs.stat(dir);
-        expect(st.isDirectory()).toBe(true);
-        if (process.platform !== 'win32') {
-          expect(st.mode & 0o777).toBe(0o700);
-        }
+        await expectPrivateDir(dir);
       }
       expect(store.getStagingDir()).toBe(path.join(qwenDir, 'omni', 'staging'));
       expect(store.getQuarantineDir()).toBe(
@@ -239,11 +219,7 @@ describe('OmniObjectStore', () => {
     it('creates an exclusive per-invocation staging directory', async () => {
       const dir = await store.createStagingDir(INVOCATION_ID);
       expect(dir).toBe(path.join(store.getStagingDir(), INVOCATION_ID));
-      const st = await fs.stat(dir);
-      expect(st.isDirectory()).toBe(true);
-      if (process.platform !== 'win32') {
-        expect(st.mode & 0o777).toBe(0o700);
-      }
+      await expectPrivateDir(dir);
       // A second create with the same id must fail, never silently reuse.
       await expect(store.createStagingDir(INVOCATION_ID)).rejects.toThrow();
     });
@@ -260,13 +236,9 @@ describe('OmniObjectStore', () => {
       await expect(store.removeStagingDir(id)).rejects.toThrow(
         /Invalid omni policy invocation id/,
       );
-      await expect(
-        store.quarantineInvocation(id, {
-          policyId: 'p',
-          toolName: 't',
-          reason: 'r',
-        }),
-      ).rejects.toThrow(/Invalid omni policy invocation id/);
+      await expect(store.quarantineInvocation(id, REASON)).rejects.toThrow(
+        /Invalid omni policy invocation id/,
+      );
     });
 
     it('removeStagingDir deletes the invocation directory recursively', async () => {
@@ -296,10 +268,10 @@ describe('OmniObjectStore', () => {
       // Staging entry is gone; artifacts moved with original names.
       await expect(fs.lstat(dir)).rejects.toThrow();
       await expect(
-        fs.readFile(path.join(quarantineDir, 'partial.mp4'), 'utf8'),
+        readUtf8(path.join(quarantineDir, 'partial.mp4')),
       ).resolves.toBe('half-transcoded');
       const reason = JSON.parse(
-        await fs.readFile(path.join(quarantineDir, 'reason.json'), 'utf8'),
+        await readUtf8(path.join(quarantineDir, 'reason.json')),
       );
       expect(reason).toMatchObject({
         policyId: 'video-downscale-v1',
@@ -312,11 +284,7 @@ describe('OmniObjectStore', () => {
     it('quarantineInvocation fails when the staging directory is missing', async () => {
       await store.ensureLayout();
       await expect(
-        store.quarantineInvocation(INVOCATION_ID, {
-          policyId: 'p',
-          toolName: 't',
-          reason: 'r',
-        }),
+        store.quarantineInvocation(INVOCATION_ID, REASON),
       ).rejects.toThrow();
     });
 
@@ -329,11 +297,7 @@ describe('OmniObjectStore', () => {
         path.join(store.getStagingDir(), INVOCATION_ID),
       );
       await expect(
-        store.quarantineInvocation(INVOCATION_ID, {
-          policyId: 'p',
-          toolName: 't',
-          reason: 'r',
-        }),
+        store.quarantineInvocation(INVOCATION_ID, REASON),
       ).rejects.toThrow(/not a real directory/);
       // Nothing was written through the link.
       await expect(fs.readdir(outside)).resolves.toEqual([]);
@@ -355,11 +319,7 @@ describe('prepareOmniDownloadsDir', () => {
   it('creates a missing downloads dir with 0o700 and returns its path', async () => {
     const dir = path.join(root, 'omni', 'downloads');
     await expect(prepareOmniDownloadsDir(dir)).resolves.toBe(dir);
-    const st = await fs.stat(dir);
-    expect(st.isDirectory()).toBe(true);
-    if (process.platform !== 'win32') {
-      expect(st.mode & 0o777).toBe(0o700);
-    }
+    await expectPrivateDir(dir);
   });
 
   it('is idempotent over an existing real directory', async () => {
@@ -368,9 +328,7 @@ describe('prepareOmniDownloadsDir', () => {
     await fs.writeFile(path.join(dir, 'keep.part'), 'x');
     await expect(prepareOmniDownloadsDir(dir)).resolves.toBe(dir);
     // Existing contents survive — prepare never wipes the staging area.
-    await expect(
-      fs.readFile(path.join(dir, 'keep.part'), 'utf8'),
-    ).resolves.toBe('x');
+    await expect(readUtf8(path.join(dir, 'keep.part'))).resolves.toBe('x');
   });
 
   it('refuses a symlink planted at the downloads path (mkdir succeeds silently on it)', async () => {

@@ -54,6 +54,27 @@ describe('SyntheticOutputTool', () => {
     expect(result).not.toBeNull();
   });
 
+  it('validates with the given validator instead of the shared one', () => {
+    const seen: unknown[] = [];
+    const tool = new SyntheticOutputTool({ type: 42 }, (params) => {
+      seen.push(params);
+      return 'rejected by the call validator';
+    });
+    expect(() => tool.build({ anything: true })).toThrow(
+      'rejected by the call validator',
+    );
+    expect(seen).toEqual([{ anything: true }]);
+  });
+
+  it('keeps the shared validation when no validator is given', () => {
+    // The shared validator skips a schema it cannot compile; ordinary
+    // --json-schema and MCP callers rely on that, so it is unchanged.
+    expect(() =>
+      makeTool({ type: 42 }).build({ anything: true }),
+    ).not.toThrow();
+    expect(() => makeTool(objectSchema).build({ score: 1 })).toThrow(/summary/);
+  });
+
   it('execute() returns success llmContent that tells the model to stop', async () => {
     const tool = makeTool(objectSchema);
     const invocation = tool.build({ summary: 'hello' });

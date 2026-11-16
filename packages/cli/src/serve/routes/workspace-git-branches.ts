@@ -5,6 +5,7 @@
  */
 
 import type { Application, Request, RequestHandler, Response } from 'express';
+import * as path from 'node:path';
 import {
   fetchGitBranches,
   gitCheckout,
@@ -18,13 +19,11 @@ import {
 import { isValidRefName } from '@qwen-code/qwen-code-core/utils/gitDirect.js';
 import { findGitRoot } from '@qwen-code/qwen-code-core/utils/gitUtils.js';
 import * as fs from 'node:fs';
-import * as path from 'node:path';
 import type { SendBridgeError } from '../server/error-response.js';
 import { safeBody } from '../server/request-helpers.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 import {
-  resolveContainedCwd,
-  resolveContainedCwdOrFail,
+  resolveSessionManagedGitCwdForRoute,
   resolveTrustedRuntime,
   sendGenerationClosedError,
   sendUntrustedWorkspaceResponse,
@@ -39,19 +38,21 @@ const GIT_ERROR_MESSAGE_MAX = 512;
 // `.git/index.lock`) that must never reach the client.
 function redactGitPaths(detail: string, cwd: string): string {
   const gitRoot = findGitRoot(cwd);
-  let message = detail.split(cwd).join('<workspace>');
-  if (gitRoot && gitRoot !== cwd) {
-    message = message.split(gitRoot).join('<workspace>');
+  const roots = new Set([cwd, ...(gitRoot ? [gitRoot] : [])]);
+  const managedWorktreeSegment = `${path.sep}.qwen${path.sep}worktrees${path.sep}`;
+  const managedWorktreeOffset = path
+    .resolve(cwd)
+    .indexOf(managedWorktreeSegment);
+  if (managedWorktreeOffset > 0) {
+    roots.add(path.resolve(cwd).slice(0, managedWorktreeOffset));
   }
+  let message = detail;
   // The gitdir git echoes for config writes can live OUTSIDE the cwd's
   // tree: a linked worktree shares the MAIN repository's .git dir (`could
   // not lock config file /srv/main/.git/config`), a submodule's gitdir
   // lives under the superproject's .git/modules. Probe from the git root
   // (it holds the .git file; cwd may be a sub-directory).
   const externals = gitExternalDirs(gitRoot ?? cwd);
-  for (const dir of externals.dirs) {
-    message = message.split(dir).join('<workspace>');
-  }
   for (const key of externals.truncatedKeys) {
     // A target longer than the read head: git echoes it whole, so the
     // head is redacted as a PREFIX up to the end of its whitespace-
@@ -59,6 +60,11 @@ function redactGitPaths(detail: string, cwd: string): string {
     // absolute path on the wire. Per-token discipline, matching the
     // /etc/gitconfig arm below.
     message = replaceTruncatedKey(message, key);
+  }
+  for (const root of [...roots, ...externals.dirs].sort(
+    (a, b) => b.length - a.length,
+  )) {
+    message = message.split(root).join('<workspace>');
   }
   // Inherited-scope config files git echoes by absolute path when one is
   // malformed or unreadable (`fatal: bad config line N in file <path>`,
@@ -312,8 +318,61 @@ function readHead(
   }
 }
 
-function redactGitMessage(detail: string, cwd: string): string {
-  return redactGitPaths(detail, cwd).slice(0, GIT_ERROR_MESSAGE_MAX);
+/**
+ * The client-visible bound, applied to every string this module hands out.
+ *
+ * It counts UTF-16 units, so it can land between the halves of an astral
+ * character and leave a lone surrogate that JSON carries and a browser draws
+ * as a replacement glyph. Drop the orphan.
+ */
+function boundForClient(full: string): string {
+  const bounded = full.slice(0, GIT_ERROR_MESSAGE_MAX);
+  const last = bounded.charCodeAt(bounded.length - 1);
+  return last >= 0xd800 && last <= 0xdbff ? bounded.slice(0, -1) : bounded;
+}
+
+/**
+ * Workspace paths out, and bounded to what a client may be shown. For text
+ * that reaches a browser but did not come from a git *failure* — a lock
+ * reason, say, which anyone who can run git in the repository writes.
+ */
+export function redactGitMessage(detail: string, cwd: string): string {
+  return boundForClient(redactGitPaths(detail, cwd));
+}
+
+/**
+ * git's own words for a failure, with workspace paths redacted.
+ *
+ * `full` is what classification reads and `message` is what a client may
+ * see: slicing before matching would cut a long lock line's second line off
+ * before its `could not …` prefix (a deeply nested workspace path pushes the
+ * two-line lock chain past the cap) and misread a config-write failure as an
+ * unclassified 500. Only the client-visible half is bounded.
+ */
+export function gitErrorText(
+  err: unknown,
+  cwd: string,
+): { full: string; message: string } {
+  // Read stdout + stderr rather than err.message, which embeds the full
+  // command line and would false-positive on flags like --set-upstream
+  // present in every push invocation. Redacting first also avoids false
+  // positives when the workspace path itself contains a keyword ("dirty").
+  let detail: string;
+  if (err && typeof err === 'object' && ('stdout' in err || 'stderr' in err)) {
+    const e = err as { stdout?: string; stderr?: string };
+    // Empty parts are dropped so a genuine single-line message always sits
+    // at line 1: the anchored shapes in `sendGitError` match line 1 (or the
+    // documented two-line lock chain) ONLY, because a config-chosen value (a
+    // URL or a fetch refspec) can carry a real newline and inject a
+    // line-initial prefix of the attacker's choice deeper in the text.
+    detail = [e.stdout, e.stderr]
+      .filter((part) => typeof part === 'string' && part.length > 0)
+      .join('\n');
+  } else {
+    detail = err instanceof Error ? err.message : String(err);
+  }
+  const full = redactGitPaths(detail, cwd);
+  return { full, message: boundForClient(full) };
 }
 
 export function sendGitError(
@@ -323,34 +382,7 @@ export function sendGitError(
   sendBridgeError: SendBridgeError,
   cwd: string,
 ): void {
-  // Classify on the path-redacted message (derived from stdout + stderr),
-  // not err.message, which embeds the full command line and would
-  // false-positive on flags like --set-upstream present in every push
-  // invocation. Testing the redacted form also avoids false positives
-  // when the workspace path itself contains a keyword (e.g. "dirty").
-  let detail: string;
-  if (err && typeof err === 'object' && ('stdout' in err || 'stderr' in err)) {
-    const e = err as { stdout?: string; stderr?: string };
-    // Empty parts are dropped so a genuine single-line message always sits
-    // at line 1: the anchored shapes below match line 1 (or the documented
-    // two-line lock chain) ONLY, because a config-chosen value (a URL or a
-    // fetch refspec) can carry a real newline and inject a line-initial
-    // prefix of the attacker's choice deeper in the text.
-    detail = [e.stdout, e.stderr]
-      .filter((part) => typeof part === 'string' && part.length > 0)
-      .join('\n');
-  } else {
-    detail = err instanceof Error ? err.message : String(err);
-  }
-
-  // Classification reads the FULL redacted detail: slicing before
-  // matching would cut a long lock line's second line off before its
-  // `could not …` prefix (a deeply nested workspace path pushes the
-  // two-line lock chain past 512 chars) and misread a config-write
-  // failure as an unclassified 500. Only the client-visible message is
-  // bounded.
-  const fullMessage = redactGitPaths(detail, cwd);
-  const message = fullMessage.slice(0, GIT_ERROR_MESSAGE_MAX);
+  const { full: fullMessage, message } = gitErrorText(err, cwd);
 
   // git's remote config-write failures echo the name as `remote.<name>`
   // (no space) and the URL verbatim. Every remote-shape branch below is
@@ -839,14 +871,23 @@ export function registerWorkspaceQualifiedGitBranchRoutes(
     mutate: (opts?: { strict?: boolean }) => RequestHandler;
   },
 ): void {
-  app.get('/workspaces/:workspace/git/branches', (req, res) => {
+  app.get('/workspaces/:workspace/git/branches', async (req, res) => {
+    const route = 'GET /workspaces/:workspace/git/branches';
     const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
     if (!runtime) return;
+    const cwd = await resolveSessionManagedGitCwdForRoute(
+      req,
+      res,
+      runtime,
+      route,
+      deps.sendBridgeError,
+    );
+    if (!cwd) return;
     void handleBranches(
       res,
-      resolveContainedCwd(req, runtime.workspaceCwd),
+      cwd,
       deps.sendBridgeError,
-      'GET /workspaces/:workspace/git/branches',
+      route,
       () => runtime.generationGuard?.assertOpen(),
       runtime.env.effectiveEnv,
     );
@@ -854,32 +895,31 @@ export function registerWorkspaceQualifiedGitBranchRoutes(
   app.post(
     '/workspaces/:workspace/git/checkout',
     deps.mutate({ strict: true }),
-    (req, res) => {
+    async (req, res) => {
+      const route = 'POST /workspaces/:workspace/git/checkout';
       const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
       if (!runtime) return;
       try {
         runtime.generationGuard?.assertOpen();
       } catch (err) {
         if (sendGenerationClosedError(res, err)) return;
-        deps.sendBridgeError(res, err, {
-          route: 'POST /workspaces/:workspace/git/checkout',
-        });
+        deps.sendBridgeError(res, err, { route });
         return;
       }
-      const cwd = resolveContainedCwdOrFail(req, runtime.workspaceCwd);
-      if (cwd === null) {
-        res.status(400).json({
-          error: 'invalid_cwd',
-          message: 'The supplied cwd is invalid or outside the workspace',
-        });
-        return;
-      }
+      const cwd = await resolveSessionManagedGitCwdForRoute(
+        req,
+        res,
+        runtime,
+        route,
+        deps.sendBridgeError,
+      );
+      if (!cwd) return;
       void handleCheckout(
         req,
         res,
         cwd,
         deps.sendBridgeError,
-        'POST /workspaces/:workspace/git/checkout',
+        route,
         runtime.env.effectiveEnv,
       );
     },
@@ -887,32 +927,31 @@ export function registerWorkspaceQualifiedGitBranchRoutes(
   app.post(
     '/workspaces/:workspace/git/branch',
     deps.mutate({ strict: true }),
-    (req, res) => {
+    async (req, res) => {
+      const route = 'POST /workspaces/:workspace/git/branch';
       const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
       if (!runtime) return;
       try {
         runtime.generationGuard?.assertOpen();
       } catch (err) {
         if (sendGenerationClosedError(res, err)) return;
-        deps.sendBridgeError(res, err, {
-          route: 'POST /workspaces/:workspace/git/branch',
-        });
+        deps.sendBridgeError(res, err, { route });
         return;
       }
-      const cwd = resolveContainedCwdOrFail(req, runtime.workspaceCwd);
-      if (cwd === null) {
-        res.status(400).json({
-          error: 'invalid_cwd',
-          message: 'The supplied cwd is invalid or outside the workspace',
-        });
-        return;
-      }
+      const cwd = await resolveSessionManagedGitCwdForRoute(
+        req,
+        res,
+        runtime,
+        route,
+        deps.sendBridgeError,
+      );
+      if (!cwd) return;
       void handleCreateBranch(
         req,
         res,
         cwd,
         deps.sendBridgeError,
-        'POST /workspaces/:workspace/git/branch',
+        route,
         runtime.env.effectiveEnv,
       );
     },
@@ -920,32 +959,31 @@ export function registerWorkspaceQualifiedGitBranchRoutes(
   app.post(
     '/workspaces/:workspace/git/push',
     deps.mutate({ strict: true }),
-    (req, res) => {
+    async (req, res) => {
+      const route = 'POST /workspaces/:workspace/git/push';
       const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
       if (!runtime) return;
       try {
         runtime.generationGuard?.assertOpen();
       } catch (err) {
         if (sendGenerationClosedError(res, err)) return;
-        deps.sendBridgeError(res, err, {
-          route: 'POST /workspaces/:workspace/git/push',
-        });
+        deps.sendBridgeError(res, err, { route });
         return;
       }
-      const cwd = resolveContainedCwdOrFail(req, runtime.workspaceCwd);
-      if (cwd === null) {
-        res.status(400).json({
-          error: 'invalid_cwd',
-          message: 'The supplied cwd is invalid or outside the workspace',
-        });
-        return;
-      }
+      const cwd = await resolveSessionManagedGitCwdForRoute(
+        req,
+        res,
+        runtime,
+        route,
+        deps.sendBridgeError,
+      );
+      if (!cwd) return;
       void handlePush(
         req,
         res,
         cwd,
         deps.sendBridgeError,
-        'POST /workspaces/:workspace/git/push',
+        route,
         runtime.env.effectiveEnv,
       );
     },
@@ -953,32 +991,31 @@ export function registerWorkspaceQualifiedGitBranchRoutes(
   app.post(
     '/workspaces/:workspace/git/pull',
     deps.mutate({ strict: true }),
-    (req, res) => {
+    async (req, res) => {
+      const route = 'POST /workspaces/:workspace/git/pull';
       const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
       if (!runtime) return;
       try {
         runtime.generationGuard?.assertOpen();
       } catch (err) {
         if (sendGenerationClosedError(res, err)) return;
-        deps.sendBridgeError(res, err, {
-          route: 'POST /workspaces/:workspace/git/pull',
-        });
+        deps.sendBridgeError(res, err, { route });
         return;
       }
-      const cwd = resolveContainedCwdOrFail(req, runtime.workspaceCwd);
-      if (cwd === null) {
-        res.status(400).json({
-          error: 'invalid_cwd',
-          message: 'The supplied cwd is invalid or outside the workspace',
-        });
-        return;
-      }
+      const cwd = await resolveSessionManagedGitCwdForRoute(
+        req,
+        res,
+        runtime,
+        route,
+        deps.sendBridgeError,
+      );
+      if (!cwd) return;
       void handlePull(
         req,
         res,
         cwd,
         deps.sendBridgeError,
-        'POST /workspaces/:workspace/git/pull',
+        route,
         runtime.env.effectiveEnv,
       );
     },
@@ -986,32 +1023,31 @@ export function registerWorkspaceQualifiedGitBranchRoutes(
   app.post(
     '/workspaces/:workspace/git/commit',
     deps.mutate({ strict: true }),
-    (req, res) => {
+    async (req, res) => {
+      const route = 'POST /workspaces/:workspace/git/commit';
       const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
       if (!runtime) return;
       try {
         runtime.generationGuard?.assertOpen();
       } catch (err) {
         if (sendGenerationClosedError(res, err)) return;
-        deps.sendBridgeError(res, err, {
-          route: 'POST /workspaces/:workspace/git/commit',
-        });
+        deps.sendBridgeError(res, err, { route });
         return;
       }
-      const cwd = resolveContainedCwdOrFail(req, runtime.workspaceCwd);
-      if (cwd === null) {
-        res.status(400).json({
-          error: 'invalid_cwd',
-          message: 'The supplied cwd is invalid or outside the workspace',
-        });
-        return;
-      }
+      const cwd = await resolveSessionManagedGitCwdForRoute(
+        req,
+        res,
+        runtime,
+        route,
+        deps.sendBridgeError,
+      );
+      if (!cwd) return;
       void handleCommit(
         req,
         res,
         cwd,
         deps.sendBridgeError,
-        'POST /workspaces/:workspace/git/commit',
+        route,
         runtime.env.effectiveEnv,
       );
     },

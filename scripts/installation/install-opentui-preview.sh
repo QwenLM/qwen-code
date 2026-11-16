@@ -98,7 +98,26 @@ esac
 
 archive_name="qwen-code-${target}-opentui-preview.tar.gz"
 work=$(mktemp -d)
-trap 'rm -rf "${work}"' EXIT
+stage=""
+locked=""
+cleanup() {
+    status=$?
+    if [ -n "${stage}" ]; then
+        if [ -d "${stage}/previous" ]; then
+            printf 'error: previous preview preserved at %s/previous\n' "${stage}" >&2
+        else
+            rm -rf "${stage}" || printf 'warning: could not remove %s\n' "${stage}" >&2
+        fi
+    fi
+    if [ -n "${locked}" ]; then
+        rmdir "${locked}" || printf 'warning: could not remove %s\n' "${locked}" >&2
+    fi
+    rm -rf "${work}" || printf 'warning: could not remove %s\n' "${work}" >&2
+    exit "${status}"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 fetch() {
     if command -v curl >/dev/null 2>&1; then
@@ -134,8 +153,54 @@ else
 fi
 
 mkdir -p "${dir}"
-rm -rf "${dir}/qwen-code"
-tar -xzf "${archive_path}" -C "${dir}"
+lock="${dir}/.qwen-preview-install.lock"
+mkdir "${lock}" 2>/dev/null || fail "another preview installation is in progress: ${lock}"
+locked="${lock}"
+[ ! -L "${dir}/qwen-code" ] || fail "preview destination must not be a symlink"
+if [ -e "${dir}/qwen-code" ] && [ ! -d "${dir}/qwen-code" ]; then
+    fail "preview destination must be a directory"
+fi
+stage=$(mktemp -d "${dir}/.qwen-preview-stage.XXXXXX")
+tar -tzf "${archive_path}" > "${work}/entries" || fail "failed to inspect preview archive"
+[ -s "${work}/entries" ] || fail "preview archive is empty"
+while IFS= read -r entry; do
+    while [ "${entry#./}" != "${entry}" ]; do entry=${entry#./}; done
+    case "${entry}" in
+        qwen-code|qwen-code/|qwen-code/*) ;;
+        *) fail "archive entry is outside qwen-code: ${entry}" ;;
+    esac
+    case "${entry}" in
+        *\\*|*/../*|*/..|*/./*|*/.) fail "unsafe preview archive path: ${entry}" ;;
+    esac
+done < "${work}/entries"
+tar -tvzf "${archive_path}" > "${work}/types" || fail "failed to inspect preview archive types"
+awk 'substr($1,1,1) != "-" && substr($1,1,1) != "d" { exit 1 }' "${work}/types" ||
+    fail "preview archive contains a link or special entry"
+tar -xzf "${archive_path}" -C "${stage}" || fail "failed to extract preview archive"
+for file in manifest.json lib/package.json lib/cli.js lib/cli-entry.js; do
+    [ -f "${stage}/qwen-code/${file}" ] && [ ! -L "${stage}/qwen-code/${file}" ] &&
+        [ -s "${stage}/qwen-code/${file}" ] || fail "preview archive is missing ${file}"
+done
+for file in bin/qwen bun/bin/bun node/bin/node; do
+    [ -f "${stage}/qwen-code/${file}" ] && [ ! -L "${stage}/qwen-code/${file}" ] &&
+        [ -s "${stage}/qwen-code/${file}" ] && [ -x "${stage}/qwen-code/${file}" ] ||
+        fail "preview archive is missing executable ${file}"
+done
+
+# The per-destination guard serializes installers; keep the old tree until activation succeeds.
+trap '' INT TERM
+if [ -d "${dir}/qwen-code" ]; then
+    mv "${dir}/qwen-code" "${stage}/previous" || fail "failed to preserve previous preview"
+fi
+if ! mv "${stage}/qwen-code" "${dir}/"; then
+    if [ -d "${stage}/previous" ] && [ ! -e "${dir}/qwen-code" ]; then
+        mv "${stage}/previous" "${dir}/qwen-code" || fail "failed to restore previous preview; preserved at ${stage}/previous"
+    fi
+    fail "failed to activate preview"
+fi
+trap 'exit 130' INT
+trap 'exit 143' TERM
+rm -rf "${stage}/previous"
 
 printf 'installed: %s/qwen-code\n' "${dir}"
 printf 'run: %s/qwen-code/bin/qwen\n' "${dir}"

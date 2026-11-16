@@ -7,6 +7,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
+import type { WorkflowAncestorTrustProvider } from '@qwen-code/qwen-code-core/config/config.js';
 import {
   atomicWriteFileSync,
   createDebugLogger,
@@ -16,17 +17,18 @@ import {
   Storage,
 } from '@qwen-code/qwen-code-core';
 import type { Settings } from './settings.js';
-import stripJsonComments from 'strip-json-comments';
 import { parseJsoncObject, updateJsoncContent } from '../utils/jsonc-editor.js';
 import {
   arePathsEquivalent,
   getPathComparisonVariants,
+  isWithinRoot,
 } from './path-comparison.js';
 import {
   buildTrustPrecedenceRules,
   resolveTrustDecision,
   resolveTrustRule,
 } from './trust-precedence.js';
+import { isWorkflowAncestorDirectorySafe } from './workflow-ancestor-directory-safety.js';
 
 const debugLogger = createDebugLogger('TRUSTED_FOLDERS');
 
@@ -125,10 +127,24 @@ export class LoadedTrustedFolders {
     );
   }
 
-  setValue(path: string, trustLevel: TrustLevel): void {
+  setValue(
+    path: string,
+    trustLevel: TrustLevel,
+    preserveExistingTrust = false,
+  ): void {
     const committedConfig = writeTrustedFolders(
       this.user.path,
-      (diskConfig) => ({ ...diskConfig, [path]: trustLevel }),
+      (diskConfig) => {
+        const existing = diskConfig[path];
+        if (
+          preserveExistingTrust &&
+          (existing === TrustLevel.TRUST_FOLDER ||
+            existing === TrustLevel.TRUST_PARENT)
+        ) {
+          return diskConfig;
+        }
+        return { ...diskConfig, [path]: trustLevel };
+      },
     );
     this.user.config = committedConfig;
     notifyTrustedFoldersChanged();
@@ -146,10 +162,15 @@ export function resetTrustedFoldersForTesting(): void {
 }
 
 export function loadTrustedFolders(): LoadedTrustedFolders {
-  if (loadedTrustedFolders) {
-    return loadedTrustedFolders;
-  }
+  loadedTrustedFolders ??= readTrustedFoldersFile(false);
+  return loadedTrustedFolders;
+}
 
+export function loadTrustedFoldersFresh(): LoadedTrustedFolders {
+  return readTrustedFoldersFile(true);
+}
+
+function readTrustedFoldersFile(validateRules: boolean): LoadedTrustedFolders {
   const errors: TrustedFoldersError[] = [];
   let userConfig: Record<string, TrustLevel> = {};
 
@@ -159,33 +180,54 @@ export function loadTrustedFolders(): LoadedTrustedFolders {
   try {
     if (fs.existsSync(userPath)) {
       const content = fs.readFileSync(userPath, 'utf-8');
-      const parsed: unknown = JSON.parse(stripJsonComments(content));
-
-      if (
-        typeof parsed !== 'object' ||
-        parsed === null ||
-        Array.isArray(parsed)
-      ) {
-        errors.push({
-          message: 'Trusted folders file is not a valid JSON object.',
-          path: userPath,
-        });
-      } else {
-        userConfig = parsed as Record<string, TrustLevel>;
-      }
+      const parsed = parseJsoncObject(content);
+      if (validateRules) assertTrustedFoldersConfig(parsed);
+      userConfig = parsed as Record<string, TrustLevel>;
     }
   } catch (error: unknown) {
     errors.push({
-      message: getErrorMessage(error),
+      message:
+        error instanceof Error &&
+        error.message === 'JSONC document root is not a JSON object.'
+          ? 'Trusted folders file is not a valid JSON object.'
+          : getErrorMessage(error),
       path: userPath,
     });
   }
 
-  loadedTrustedFolders = new LoadedTrustedFolders(
+  return new LoadedTrustedFolders(
     { path: userPath, config: userConfig },
     errors,
   );
-  return loadedTrustedFolders;
+}
+
+export function createLocalWorkflowAncestorTrustProvider(
+  settings: Settings,
+): WorkflowAncestorTrustProvider {
+  return async (ancestorDirs, canonicalTargetDir) => {
+    if (!isFolderTrustEnabled(settings)) {
+      return ancestorDirs.map(isWorkflowAncestorDirectorySafe);
+    }
+    if (ideContextStore.get()?.workspaceState?.isTrusted === false) {
+      return ancestorDirs.map(() => false);
+    }
+    const folders = loadTrustedFoldersFresh();
+    if (folders.errors.length > 0) {
+      debugLogger.warn(
+        'Workflow ancestor trust denied: invalid trusted folders snapshot:',
+        folders.errors
+          .map((error) => `${error.path}: ${error.message}`)
+          .join('; '),
+      );
+      return ancestorDirs.map(() => false);
+    }
+    if (folders.isPathTrusted(canonicalTargetDir) !== true) {
+      return ancestorDirs.map(() => false);
+    }
+    return ancestorDirs.map(
+      (directory) => folders.isPathTrusted(directory) === true,
+    );
+  };
 }
 
 export function saveTrustedFolders(
@@ -349,6 +391,55 @@ function trustStatusToResult(status: WorkspaceTrustStatus): TrustResult {
   };
 }
 
+/**
+ * Whether the trust file's deciding rule for `location` sits on a folder
+ * strictly inside the IDE workspace root `root`. The IDE decides for its
+ * whole workspace; a rule set on a folder below it is more specific and
+ * wins, as the most specific rule does within the file.
+ */
+function hasTrustRuleBelowRoot(
+  trustConfig: Record<string, TrustLevel> | undefined,
+  location: string,
+  root: string | undefined,
+): boolean {
+  // The root itself (or the cwd the IDE answered for) is the IDE's to decide;
+  // only a nested location reads the trust file.
+  if (root === undefined || arePathsEquivalent(location, root)) return false;
+  const folders = loadTrustedFoldersWithOverrides(trustConfig);
+  const rule = resolveTrustRule(
+    buildTrustPrecedenceRules(folders.rules),
+    getPathComparisonVariants(location),
+  );
+  if (!rule) return false;
+  const rootVariants = getPathComparisonVariants(root);
+  return [...rule.variants].some((ruleVariant) =>
+    [...rootVariants].some(
+      (rootVariant) =>
+        ruleVariant !== rootVariant && isWithinRoot(ruleVariant, rootVariant),
+    ),
+  );
+}
+
+/**
+ * The trust file's decision for `location` when its deciding rule sits
+ * strictly inside the IDE workspace root `root`, which then wins over the
+ * IDE's answer; `undefined` leaves the decision to the IDE.
+ */
+export function getTrustFileDecisionBelowIdeRoot(
+  settings: Settings,
+  location: string,
+  root: string | undefined,
+  trustConfig?: Record<string, TrustLevel>,
+): boolean | undefined {
+  if (
+    !isFolderTrustEnabled(settings) ||
+    !hasTrustRuleBelowRoot(trustConfig, location, root)
+  ) {
+    return undefined;
+  }
+  return loadTrustedFoldersWithOverrides(trustConfig).isPathTrusted(location);
+}
+
 export function getWorkspaceTrustStatus(
   settings: Settings,
   workspaceCwd: string,
@@ -365,17 +456,17 @@ export function getWorkspaceTrustStatus(
     };
   }
 
-  const ideTrust = ideContextStore.get()?.workspaceState?.isTrusted;
+  const ideTrust = ideContextStore.getWorkspaceTrustScope(workspaceCwd);
   if (
     ideTrust !== undefined &&
-    arePathsEquivalent(workspaceCwd, process.cwd())
+    !hasTrustRuleBelowRoot(trustConfig, workspaceCwd, ideTrust.root)
   ) {
     return {
       v: 1,
       workspaceCwd,
       folderTrustEnabled: true,
       effective: {
-        state: ideTrust ? 'trusted' : 'untrusted',
+        state: ideTrust.isTrusted ? 'trusted' : 'untrusted',
         source: 'ide',
       },
       explicitTrustLevel: null,
@@ -416,13 +507,19 @@ export function isWorkspaceTrusted(
     return { isTrusted: true, source: undefined };
   }
 
-  const ideTrust = ideContextStore.get()?.workspaceState?.isTrusted;
-  if (
-    ideTrust !== undefined &&
-    (workspacePath === undefined ||
-      arePathsEquivalent(workspacePath, process.cwd()))
-  ) {
-    return { isTrusted: ideTrust, source: 'ide' };
+  if (workspacePath === undefined) {
+    const ideTrust = ideContextStore.get()?.workspaceState?.isTrusted;
+    if (ideTrust !== undefined) {
+      const fileTrust = getTrustFileDecisionBelowIdeRoot(
+        settings,
+        process.cwd(),
+        ideContextStore.getWorkspaceTrustScope(process.cwd())?.root,
+        trustConfig,
+      );
+      return fileTrust === undefined
+        ? { isTrusted: ideTrust, source: 'ide' }
+        : { isTrusted: fileTrust, source: 'file' };
+    }
   }
 
   return trustStatusToResult(

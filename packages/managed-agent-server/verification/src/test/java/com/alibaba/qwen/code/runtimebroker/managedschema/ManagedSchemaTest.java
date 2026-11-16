@@ -1,0 +1,746 @@
+package com.alibaba.qwen.code.runtimebroker.managedschema;
+
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
+import org.flywaydb.core.Flyway;
+import org.h2.jdbcx.JdbcDataSource;
+import org.junit.jupiter.api.Test;
+
+import javax.sql.DataSource;
+
+import java.sql.Connection;
+import java.sql.DatabaseMetaData;
+import java.sql.SQLException;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.UUID;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class ManagedSchemaTest {
+    // Pin the original business identities independently of the mutable DDL.
+    private static final Map<String, List<String>> BUSINESS_KEYS = Map.ofEntries(
+            Map.entry("ma_session", List.of("tenant_id", "session_id")),
+            Map.entry("ma_user_message_queue", List.of("tenant_id", "session_id")),
+            Map.entry("ma_user_message", List.of("tenant_id", "session_id", "message_id")),
+            Map.entry("ma_user_message_command", List.of("tenant_id", "session_id", "command_key")),
+            Map.entry("ma_turn", List.of("tenant_id", "session_id", "turn_id")),
+            Map.entry("ma_session_head", List.of("tenant_key", "harness_key")),
+            Map.entry("ma_session_journal_tx", List.of("tenant_id", "session_id", "journal_revision")),
+            Map.entry("ma_event_stream", List.of("tenant_id", "session_id", "stream_kind", "stream_id")),
+            Map.entry("ma_public_event", List.of("tenant_id", "session_id", "stream_kind", "stream_id", "sequence_id")),
+            Map.entry("ma_message", List.of("tenant_id", "session_id", "item_id")),
+            Map.entry("ma_session_record", List.of("session_scope_key", "record_key")),
+            Map.entry("ma_agent_definition", List.of("tenant_id", "agent_id", "revision")),
+            Map.entry("ma_resource", List.of("resource_key")),
+            Map.entry("ma_resource_ref", List.of("session_scope_key", "owner_kind", "owner_key", "owner_revision", "resource_key")),
+            Map.entry("ma_output_capture", List.of("scope_key", "publication_id")),
+            Map.entry("ma_artifact", List.of("artifact_id")),
+            Map.entry("ma_request_receipt", List.of("receipt_key")),
+            Map.entry("ma_memory_store", List.of("store_key")),
+            Map.entry("ma_memory_entry", List.of("entry_key")),
+            Map.entry("ma_side_query", List.of("query_key")),
+            Map.entry("ma_operation", List.of("operation_key")),
+            Map.entry("ma_operation_work", List.of("operation_key", "work_kind", "target_key")),
+            Map.entry("ma_workspace", List.of("tenant_id", "workspace_id")),
+            Map.entry("ma_workspace_access", List.of("tenant_id", "workspace_id", "actor_id")),
+            Map.entry("ma_extension_package", List.of("package_key")),
+            Map.entry("ma_extension_source_import", List.of("import_key")),
+            Map.entry("ma_extension_settings", List.of("settings_key")),
+            Map.entry("ma_extension_operation", List.of("operation_key")),
+            Map.entry("ma_storage", List.of("alias_key")),
+            Map.entry("ma_runtime_slot", List.of("request_key")),
+            Map.entry("ma_runtime_binding", List.of("binding_id")),
+            Map.entry("ma_runtime_session", List.of("scope_key", "runtime_session_id")),
+            Map.entry("ma_tool_execution", List.of("execution_call_id_hash")),
+            Map.entry("ma_storage_owner", List.of("storage_key")),
+            Map.entry("ma_tenant_guard", List.of("tenant_key", "guard_domain")),
+            Map.entry("ma_read_lease", List.of("lease_id")),
+            Map.entry("ma_channel_instance", List.of("tenant_id", "channel_id")),
+            Map.entry("ma_channel_binding", List.of("tenant_id", "channel_id", "route_id")),
+            Map.entry("ma_delivery", List.of("delivery_key")),
+            Map.entry("ma_channel_segment", List.of("delivery_key", "segment_id")),
+            Map.entry("ma_schedule", List.of("tenant_id", "schedule_id")),
+            Map.entry("ma_schedule_occurrence", List.of("tenant_id", "schedule_id", "occurrence_key")),
+            Map.entry("ma_session_worktree", List.of("tenant_id", "session_id")),
+            Map.entry("ma_client_files_binding", List.of("session_scope_key")),
+            Map.entry("ma_client_files_request", List.of("request_key")),
+            Map.entry("ma_journal_pack", List.of("session_scope_key", "from_revision")));
+
+    @Test
+    void generatesRowIdentitiesWithoutWeakeningBusinessUniqueness() throws Exception {
+        DataSource source = initialized();
+        assertEquals(ManagedSchemaContract.TABLES, BUSINESS_KEYS.keySet());
+        try (var connection = source.getConnection(); var statement = connection.createStatement()) {
+            for (String table : ManagedSchemaContract.TABLES) {
+                try (var columns = connection.getMetaData().getColumns(null, null, table, "id")) {
+                    assertTrue(columns.next(), table);
+                    assertEquals("YES", columns.getString("IS_AUTOINCREMENT"), table);
+                }
+                Map<Integer, String> primaryKey = new TreeMap<>();
+                try (var keys = connection.getMetaData().getPrimaryKeys(null, null, table)) {
+                    while (keys.next()) {
+                        primaryKey.put(keys.getInt("KEY_SEQ"), keys.getString("COLUMN_NAME"));
+                    }
+                }
+                List<String> expectedPrimary = switch (table) {
+                    case "ma_session", "ma_tenant_guard" -> BUSINESS_KEYS.get(table);
+                    default -> List.of("id");
+                };
+                assertEquals(expectedPrimary, List.copyOf(primaryKey.values()), table + " primary key");
+                try (var keys = connection.getMetaData().getImportedKeys(null, null, table)) {
+                    assertTrue(!keys.next(), table);
+                }
+                Map<String, Map<Integer, String>> uniqueKeys = new HashMap<>();
+                try (var keys = connection.getMetaData().getIndexInfo(null, null, table, true, false)) {
+                    while (keys.next()) {
+                        String column = keys.getString("COLUMN_NAME");
+                        if (column != null) {
+                            uniqueKeys.computeIfAbsent(keys.getString("INDEX_NAME"), ignored -> new TreeMap<>())
+                                    .put(keys.getInt("ORDINAL_POSITION"), column);
+                        }
+                    }
+                }
+                assertTrue(uniqueKeys.values().stream()
+                        .anyMatch(columns -> List.copyOf(columns.values()).equals(List.of("id"))),
+                        table + " row identity");
+                assertTrue(uniqueKeys.values().stream()
+                        .anyMatch(columns -> List.copyOf(columns.values()).equals(BUSINESS_KEYS.get(table))),
+                        table + " business key " + BUSINESS_KEYS.get(table));
+                for (String column : BUSINESS_KEYS.get(table)) {
+                    try (var columns = connection.getMetaData().getColumns(null, null, table, column)) {
+                        assertTrue(columns.next(), table + "." + column);
+                        assertEquals(DatabaseMetaData.columnNoNulls, columns.getInt("NULLABLE"), table + "." + column);
+                    }
+                }
+            }
+            statement.execute("INSERT INTO ma_session (tenant_id,session_id,agent_id,gmt_create,gmt_modified)"
+                    + " VALUES ('tenant','session','qwen-code',1,1)");
+            assertThrows(SQLException.class, () -> statement.execute(
+                    "INSERT INTO ma_session (tenant_id,session_id,agent_id,gmt_create,gmt_modified)"
+                            + " VALUES ('tenant','session','qwen-code',1,1)"));
+            assertThrows(SQLException.class,
+                    () -> statement.execute("UPDATE ma_session SET is_recovery_protected=2"));
+            statement.execute("UPDATE ma_session SET is_recovery_protected=1");
+            try (var row = statement.executeQuery("SELECT id,is_recovery_protected FROM ma_session")) {
+                assertTrue(row.next());
+                assertTrue(row.getLong(1) > 0);
+                assertTrue(row.getBoolean(2));
+            }
+        }
+        ManagedSchema.validate(source);
+    }
+
+    @Test
+    void rejectsMissingIdentityGenerationAndUnexpectedForeignKeys() throws Exception {
+        DataSource source = initialized();
+        try (var connection = source.getConnection(); var statement = connection.createStatement()) {
+            statement.execute("ALTER TABLE ma_read_lease ALTER COLUMN id DROP IDENTITY");
+        }
+        assertThrows(IllegalStateException.class, () -> ManagedSchema.validate(source));
+        DataSource foreignKey = initialized();
+        try (var connection = foreignKey.getConnection(); var statement = connection.createStatement()) {
+            statement.execute("ALTER TABLE ma_resource_ref ADD CONSTRAINT fk_unexpected"
+                    + " FOREIGN KEY (resource_key) REFERENCES ma_resource(resource_key)");
+        }
+        assertThrows(IllegalStateException.class, () -> ManagedSchema.validate(foreignKey));
+    }
+
+    @Test
+    void preservesSessionAndTurnModelsAcrossRestart() throws Exception {
+        DataSource source = source();
+        ManagedSchema.initialize(source);
+        assertEquals(1, ManagedSchema.schemaVersion(source));
+        try (var connection = source.getConnection(); var statement = connection.createStatement()) {
+            statement.execute("INSERT INTO ma_session (tenant_id,session_id,agent_id,gmt_create,gmt_modified)"
+                    + " VALUES ('tenant','session','qwen-code',1,1)");
+            statement.execute("INSERT INTO ma_turn (tenant_id,session_id,turn_id,prompt_id,input_json,"
+                    + "payload_digest,status,gmt_create,gmt_modified) VALUES ('tenant','session','turn',"
+                    + "'prompt','[]','digest','COMPLETED',1,1)");
+        }
+        ManagedSchema.initialize(source);
+        assertEquals(1, ManagedSchema.schemaVersion(source));
+        try (var connection = source.getConnection(); var statement = connection.createStatement()) {
+            try (var row = statement.executeQuery("SELECT model_id,model_revision FROM ma_session")) {
+                assertTrue(row.next());
+                assertNull(row.getObject(1));
+                assertEquals(0, row.getLong(2));
+            }
+            try (var row = statement.executeQuery("SELECT model_id,model_revision FROM ma_turn")) {
+                assertTrue(row.next());
+                assertNull(row.getObject(1));
+                assertNull(row.getObject(2));
+            }
+            assertThrows(SQLException.class, () -> statement.execute("UPDATE ma_session SET model_id='m'"));
+            assertThrows(SQLException.class, () -> statement.execute("UPDATE ma_turn SET model_id='m'"));
+            assertThrows(SQLException.class, () -> statement.execute("UPDATE ma_turn SET model_revision=1"));
+            statement.execute("UPDATE ma_session SET model_id='m',model_revision=1");
+            statement.execute("UPDATE ma_turn SET model_id='m',model_revision=1");
+            assertThrows(SQLException.class, () -> statement.execute("UPDATE ma_session SET model_revision=9007199254740992"));
+        }
+        ManagedSchema.validate(source);
+    }
+
+    @Test
+    void initializesExactlyTheTargetTablesAndValidatesWithoutRewriting() throws Exception {
+        DataSource source = source();
+        ManagedSchema.initialize(source);
+        ManagedSchema.initialize(source);
+        ManagedSchema.validate(source);
+        assertEquals(1, ManagedSchema.schemaVersion(source));
+        try (var connection = source.getConnection()) {
+            assertEquals(
+                    ManagedSchemaContract.TABLES, ManagedSchemaCatalog.tables(connection).keySet());
+            assertEquals(ManagedSchemaContract.TABLES.size(), ManagedSchemaCatalog.tables(connection).size());
+        }
+    }
+
+    @Test
+    void preservesReceiptsAndNamespaceConstraintsAcrossRestart() throws Exception {
+        DataSource source = initialized();
+        try (var connection = source.getConnection()) {
+            receipt(connection, "session", "SESSION_COMMAND");
+            receipt(connection, "workspace", "WORKSPACE_CREATE");
+        }
+        ManagedSchema.initialize(source);
+        assertEquals(1, ManagedSchema.schemaVersion(source));
+        try (var connection = source.getConnection(); var statement = connection.createStatement()) {
+            try (var row = statement.executeQuery("SELECT COUNT(*) FROM ma_request_receipt")) {
+                assertTrue(row.next());
+                assertEquals(2, row.getInt(1));
+            }
+            for (String invalid : Set.of("WORKSPACE_CREATE ", "workspace_create", "OTHER")) {
+                assertThrows(SQLException.class, () -> receipt(connection, invalid, invalid));
+            }
+        }
+    }
+
+    @Test
+    void rejectsSameNameNamespaceConstraintWithAnUnpublishedDefinition() throws Exception {
+        DataSource source = initialized();
+        String declaration =
+                ManagedSchema.ddl()
+                        .lines()
+                        .filter(line -> line.contains("CONSTRAINT ck_ma_request_namespace CHECK"))
+                        .findFirst()
+                        .orElseThrow()
+                        .trim()
+                        .replaceFirst(",$", "");
+        try (var connection = source.getConnection();
+                var statement = connection.createStatement()) {
+            statement.execute(
+                    "ALTER TABLE ma_request_receipt DROP CONSTRAINT ck_ma_request_namespace");
+            statement.execute(
+                    "ALTER TABLE ma_request_receipt ADD "
+                            + declaration.replace("'WORKSPACE_CREATE'", "'WORKSPACE_ATTACK'"));
+        }
+        assertThrows(IllegalStateException.class, () -> ManagedSchema.schemaVersion(source));
+        assertThrows(IllegalStateException.class, () -> ManagedSchema.initialize(source));
+    }
+
+    @Test
+    void supportsDriversThatReportUppercaseMetadata() {
+        JdbcDataSource source = new JdbcDataSource();
+        source.setURL(
+                "jdbc:h2:mem:managed-schema-upper-"
+                        + UUID.randomUUID()
+                        + ";MODE=MySQL;DB_CLOSE_DELAY=-1");
+        ManagedSchema.initialize(source);
+        ManagedSchema.validate(source);
+    }
+
+    @Test
+    void reportsMissingAndChangedProjectionExpressionsAsSchemaErrors() throws Exception {
+        DataSource source = source();
+        try (var connection = source.getConnection();
+                var statement = connection.createStatement()) {
+            int variant = 0;
+            for (String declaration : Set.of("BOOLEAN",
+                    "BOOLEAN GENERATED ALWAYS AS (last_sequence >= covered_sequence)")) {
+                String table = "ma_generated_drift_" + variant++;
+                statement.execute("CREATE TABLE " + table
+                        + " (last_sequence BIGINT, covered_sequence BIGINT, is_projection_pending "
+                        + declaration + ")");
+                var error = assertThrows(SQLException.class,
+                        () -> ManagedSchemaCatalog.validateGeneratedColumns(connection, table,
+                                "    is_projection_pending BOOLEAN GENERATED ALWAYS AS"
+                                        + " (last_sequence > covered_sequence)"));
+                assertTrue(error.getMessage().contains(
+                        "Managed schema generated column differs: " + table + ".is_projection_pending"));
+            }
+        }
+    }
+
+    @Test
+    void rejectsForeignLegacyAndPartialSchemasBeforeCreatingAnything() throws Exception {
+        for (String table : Set.of("managed_agent_session", "business_data", "ma_session")) {
+            DataSource source = source();
+            try (var connection = source.getConnection();
+                    var statement = connection.createStatement()) {
+                statement.execute("CREATE TABLE " + table + " (witness INT NOT NULL)");
+                statement.execute("INSERT INTO " + table + " VALUES (42)");
+            }
+            assertThrows(IllegalStateException.class, () -> ManagedSchema.initialize(source));
+            try (var connection = source.getConnection();
+                    var statement = connection.createStatement()) {
+                assertEquals(Set.of(table), ManagedSchemaCatalog.tables(connection).keySet());
+                try (var row = statement.executeQuery("SELECT witness FROM " + table)) {
+                    assertTrue(row.next());
+                    assertEquals(42, row.getInt(1));
+                }
+            }
+        }
+    }
+
+    @Test
+    void rejectsHistoryOnlyDatabaseBeforeCreatingTargetTables() throws Exception {
+        DataSource source = source();
+        try (var connection = source.getConnection();
+                var statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE flyway_schema_history (witness INT NOT NULL)");
+            statement.execute("INSERT INTO flyway_schema_history VALUES (42)");
+        }
+        assertThrows(IllegalStateException.class, () -> ManagedSchema.initialize(source));
+        try (var connection = source.getConnection();
+                var statement = connection.createStatement()) {
+            assertTrue(ManagedSchemaCatalog.tables(connection).isEmpty());
+            try (var row = statement.executeQuery("SELECT witness FROM flyway_schema_history")) {
+                assertTrue(row.next());
+                assertEquals(42, row.getInt(1));
+            }
+        }
+    }
+
+    @Test
+    void rejectsColumnAndConstraintDriftWithoutRepairingIt() throws Exception {
+        DataSource source = initialized();
+        try (var connection = source.getConnection();
+                var statement = connection.createStatement()) {
+            statement.execute("DROP INDEX idx_ma_read_session");
+            statement.execute("ALTER TABLE ma_read_lease DROP COLUMN expires_at");
+        }
+        assertThrows(IllegalStateException.class, () -> ManagedSchema.initialize(source));
+        DataSource missingConstraint = initialized();
+        try (var connection = missingConstraint.getConnection();
+                var statement = connection.createStatement()) {
+            statement.execute("ALTER TABLE ma_operation DROP CONSTRAINT ck_ma_operation_kind");
+        }
+        assertThrows(
+                IllegalStateException.class, () -> ManagedSchema.initialize(missingConstraint));
+    }
+
+    @Test
+    void requiresIndexedPhysicalStorageScopesWithoutRepairingDrift() throws Exception {
+        for (String index :
+                Set.of(
+                        "idx_ma_runtime_storage_alias_state",
+                        "idx_ma_session_storage_scope",
+                        "idx_ma_head_workspace",
+                        "idx_ma_work_evidence",
+                        "idx_ma_storage_owner_binding")) {
+            DataSource source = initialized();
+            try (var connection = source.getConnection();
+                    var statement = connection.createStatement()) {
+                statement.execute("DROP INDEX " + index);
+            }
+            assertThrows(IllegalStateException.class, () -> ManagedSchema.initialize(source));
+        }
+        DataSource source = initialized();
+        try (var connection = source.getConnection();
+                var statement = connection.createStatement()) {
+            statement.execute(
+                    "ALTER TABLE ma_runtime_binding ALTER COLUMN storage_alias_key SET NOT NULL");
+        }
+        assertThrows(IllegalStateException.class, () -> ManagedSchema.initialize(source));
+        DataSource missingCompletionCheck = initialized();
+        try (var connection = missingCompletionCheck.getConnection();
+                var statement = connection.createStatement()) {
+            statement.execute("ALTER TABLE ma_session DROP CONSTRAINT ck_ma_session_resource_gc");
+        }
+        assertThrows(
+                IllegalStateException.class,
+                () -> ManagedSchema.initialize(missingCompletionCheck));
+    }
+
+    @Test
+    void rejectsTightenedNullableControlHeadFields() throws Exception {
+        DataSource source = initialized();
+        try (var connection = source.getConnection();
+                var statement = connection.createStatement()) {
+            statement.execute(
+                    "ALTER TABLE ma_session_head ALTER COLUMN journal_revision SET NOT NULL");
+        }
+        assertThrows(IllegalStateException.class, () -> ManagedSchema.initialize(source));
+    }
+
+    @Test
+    void rejectsDatetimeLeaseColumns() throws Exception {
+        DataSource source = initialized();
+        try (var connection = source.getConnection();
+                var statement = connection.createStatement()) {
+            statement.execute(
+                    "ALTER TABLE ma_session_head ALTER COLUMN writer_lease_until DATETIME(0)");
+        }
+        assertThrows(IllegalStateException.class, () -> ManagedSchema.initialize(source));
+    }
+
+    @Test
+    void rejectsSameNameConstraintsWithDifferentRules() throws Exception {
+        DataSource source = initialized();
+        try (var connection = source.getConnection();
+                var statement = connection.createStatement()) {
+            statement.execute("ALTER TABLE ma_operation DROP CONSTRAINT ck_ma_operation_kind");
+            statement.execute(
+                    "ALTER TABLE ma_operation ADD CONSTRAINT ck_ma_operation_kind CHECK"
+                            + " (claim_generation >= 0)");
+        }
+        assertThrows(IllegalStateException.class, () -> ManagedSchema.initialize(source));
+    }
+
+    @Test
+    void rejectsChangedUnderscoredOwnerKindInsteadOfTreatingItAsCharsetMetadata() throws Exception {
+        DataSource source = initialized();
+        String declaration =
+                ManagedSchema.ddl()
+                        .lines()
+                        .filter(line -> line.contains("CONSTRAINT ck_ma_ref_owner CHECK"))
+                        .findFirst()
+                        .orElseThrow()
+                        .trim()
+                        .replaceFirst(",$", "");
+        try (var connection = source.getConnection();
+                var statement = connection.createStatement()) {
+            statement.execute("ALTER TABLE ma_resource_ref DROP CONSTRAINT ck_ma_ref_owner");
+            statement.execute(
+                    "ALTER TABLE ma_resource_ref ADD "
+                            + declaration.replace("'SESSION_RECORD'", "'SESSION_ATTACK'"));
+        }
+        assertThrows(IllegalStateException.class, () -> ManagedSchema.initialize(source));
+    }
+
+    @Test
+    void retainsBytePreciseIdentitiesAndSeparatePublicUniqueness() throws Exception {
+        DataSource source = initialized();
+        try (var connection = source.getConnection()) {
+            session(connection, "tenant", "session", "PUBLIC");
+            session(connection, "tenant", "session ", "PUBLIC");
+            session(connection, "tenant", "SESSION", "PUBLIC");
+            session(connection, "another", "session", "CONTROL");
+            assertThrows(
+                    SQLException.class, () -> session(connection, "third", "session", "PUBLIC"));
+            try (var statement = connection.createStatement();
+                    var result =
+                            statement.executeQuery(
+                                    "SELECT tenant_id, session_id, creator_actor_key FROM"
+                                            + " ma_session WHERE session_kind = 'CONTROL'")) {
+                assertTrue(result.next());
+                Map<String, Object> row = ManagedSchemaRows.read(result);
+                assertEquals("another", row.get("tenant_id"));
+                assertEquals("session", row.get("session_id"));
+                assertNull(row.get("creator_actor_key"));
+            }
+        }
+    }
+
+    @Test
+    void requiresCompletePublicBindingsWhileAllowingControlOnlyBindings() throws Exception {
+        DataSource source = initialized();
+        try (var connection = source.getConnection();
+                var statement = connection.createStatement()) {
+            session(connection, "tenant", "public", "PUBLIC");
+            assertThrows(
+                    SQLException.class,
+                    () -> statement.execute("UPDATE ma_session SET workspace_id = 'workspace'"));
+            statement.execute(
+                    "UPDATE ma_session SET workspace_id = 'workspace',workspace_generation ="
+                            + " 1,workspace_storage_id = 'storage',cwd_relative ="
+                            + " '.',context_config_ref = 'config',context_revision ="
+                            + " 1,workspace_config_ref = 'config',workspace_policy_ref = 'policy'");
+            assertThrows(
+                    SQLException.class,
+                    () -> statement.execute("UPDATE ma_session SET context_revision = NULL"));
+            assertThrows(
+                    SQLException.class,
+                    () -> statement.execute("UPDATE ma_session SET workspace_generation = 0"));
+            session(connection, "tenant", "control", "CONTROL");
+            statement.execute(
+                    "UPDATE ma_session SET workspace_id = 'control-workspace'"
+                            + " WHERE session_kind = 'CONTROL'");
+        }
+        ManagedSchema.validate(source);
+    }
+
+    @Test
+    void harnessBarrierHasNoInventedJournalAndStorageFenceHasNoInventedPhysicalOwner()
+            throws Exception {
+        DataSource source = initialized();
+        try (var connection = source.getConnection();
+                var statement = connection.createStatement()) {
+            statement.execute(
+                    "INSERT INTO ma_session_head"
+                        + " (tenant_key,harness_key,tenant_id,session_id,harness_session_id,head_kind,gmt_create,gmt_modified)"
+                        + " VALUES ('tenant',"
+                        + "'harness','tenant','harness','harness','HARNESS'," + ManagedSchemaTime.SQL_NOW + "," + ManagedSchemaTime.SQL_NOW + ")");
+            try (var row =
+                    statement.executeQuery(
+                            "SELECT journal_revision,writer_generation,activation_epoch FROM"
+                                    + " ma_session_head")) {
+                assertTrue(row.next());
+                assertNull(row.getObject(1));
+                assertNull(row.getObject(2));
+                assertNull(row.getObject(3));
+            }
+            assertThrows(
+                    SQLException.class,
+                    () -> statement.execute("UPDATE ma_session_head SET journal_revision = 0"));
+            statement.execute(
+                    "INSERT INTO ma_storage (alias_key,tenant_key,storage_key,tenant_id,storage_id)"
+                            + " VALUES ('alias','tenant','storage','tenant','storage')");
+            try (var row =
+                    statement.executeQuery(
+                            "SELECT registration_state,physical_key FROM ma_storage")) {
+                assertTrue(row.next());
+                assertEquals("FENCE_ONLY", row.getString(1));
+                assertNull(row.getObject(2));
+            }
+            assertThrows(
+                    SQLException.class,
+                    () ->
+                            statement.execute(
+                                    "UPDATE ma_storage SET registration_state = 'REGISTERED'"));
+        }
+    }
+
+    @Test
+    void enforcesWorkspaceDefaultAndStrictAclRoles() throws Exception {
+        DataSource source = initialized();
+        try (var connection = source.getConnection();
+                var statement = connection.createStatement()) {
+            workspace(statement, "first", true);
+            assertThrows(SQLException.class, () -> workspace(statement, "second", true));
+            workspace(statement, "second", false);
+            statement.execute(
+                    "INSERT INTO ma_workspace_access (tenant_id,workspace_id,actor_id,role)"
+                            + " VALUES ('tenant','first','actor','READER')");
+            assertThrows(
+                    SQLException.class,
+                    () ->
+                            statement.execute(
+                                    "INSERT INTO ma_workspace_access"
+                                            + " (tenant_id,workspace_id,actor_id,role) VALUES"
+                                            + " ('tenant','first','another','READER ' )"));
+        }
+    }
+
+    @Test
+    void operationKindsCannotBypassCaptureRequestIdentityOrGenerationChecks() throws Exception {
+        DataSource source = initialized();
+        try (var connection = source.getConnection();
+                var statement = connection.createStatement()) {
+            operation(statement, "one", "OUTPUT_UPLOAD", "same", "capture");
+            assertThrows(
+                    SQLException.class,
+                    () -> operation(statement, "two", "OUTPUT_FINISH", "same", "capture"));
+            operation(statement, "three", "OBJECT_PUT", "same", "capture");
+            operation(statement, "four", "CAPTURE_GC", "same", "capture");
+            assertThrows(
+                    SQLException.class,
+                    () -> operation(statement, "unknown", "ARBITRARY_WORKFLOW", "unknown", null));
+            assertThrows(
+                    SQLException.class,
+                    () -> operation(statement, "padded", "CLOSE ", "padded", null));
+            assertThrows(
+                    SQLException.class,
+                    () -> statement.execute("UPDATE ma_operation SET claim_generation = -1"));
+        }
+    }
+
+    // Server and Broker must admit every operation kind their routes write.
+    @Test
+    void theCurrentOperationKindCheckAdmitsEveryShippedKind() throws Exception {
+        DataSource migrated = source();
+        Flyway.configure()
+                .dataSource(migrated)
+                .locations(ManagedSchema.FLYWAY_LOCATION)
+                .load()
+                .migrate();
+        for (DataSource source : new DataSource[] {initialized(), migrated}) {
+            try (var connection = source.getConnection();
+                    var statement = connection.createStatement()) {
+                for (var kind : ManagedSchemaContract.OperationKind.values()) {
+                    operation(statement, kind.name(), kind.name(), kind.name(), null);
+                }
+                // SshWorkspaceStore writes this kind as a plain string.
+                operation(statement, "WORKSPACE_CREATE", "WORKSPACE_CREATE",
+                        "WORKSPACE_CREATE", null);
+                assertThrows(SQLException.class,
+                        () -> operation(statement, "unknown", "INPUT", "unknown", null));
+            }
+        }
+    }
+
+    // Every shipped receipt namespace must satisfy the length CHECK, including the
+    // RESOURCE_ALLOCATE namespace used by session resource allocation.
+    @Test
+    void theCurrentReceiptNamespaceCheckAdmitsEveryShippedNamespace() throws Exception {
+        DataSource migrated = source();
+        Flyway.configure()
+                .dataSource(migrated)
+                .locations(ManagedSchema.FLYWAY_LOCATION)
+                .load()
+                .migrate();
+        for (DataSource source : new DataSource[] {initialized(), migrated}) {
+            try (var connection = source.getConnection()) {
+                for (var namespace : ManagedSchemaContract.ReceiptNamespace.values()) {
+                    receipt(connection, namespace.name(), namespace.name());
+                }
+                assertThrows(SQLException.class,
+                        () -> receipt(connection, "unknown", "RESOURCE_ALLOCATE_EXTRA"));
+            }
+        }
+    }
+
+    @Test
+    void hookOnceRemainsUniqueWithoutDatabaseForeignKeys() throws Exception {
+        DataSource source = initialized();
+        try (var connection = source.getConnection();
+                var statement = connection.createStatement()) {
+            String prefix =
+                    "INSERT INTO ma_session_record"
+                        + " (session_scope_key,record_key,tenant_id,workspace_id,session_id,domain,record_id,revision,gmt_create,record_resource_id,hook_once_key_hash)"
+                        + " VALUES ";
+            statement.execute(
+                    prefix
+                            + "('scope','record1','tenant','workspace','session','hook','record1',1,0,'body','once')");
+            assertThrows(
+                    SQLException.class,
+                    () ->
+                            statement.execute(
+                                    prefix
+                                            + "('scope','record2','tenant','workspace','session','hook','record2',1,0,'body','once')"));
+            statement.execute(
+                    "INSERT INTO ma_resource_ref"
+                        + " (session_scope_key,owner_kind,owner_key,owner_revision,resource_key,tenant_id,session_id,gmt_create)"
+                        + " VALUES"
+                        + " ('scope','JOURNAL','scope',1,'missing','tenant','session'," + ManagedSchemaTime.SQL_NOW + ")");
+            ManagedSchema.validate(source);
+        }
+    }
+
+    @Test
+    void jdbcRowAdapterPreservesBodiesAndAuthBytesAndNormalizesTemporalValues() throws Exception {
+        try (var connection = source().getConnection();
+                var statement = connection.createStatement();
+                var row =
+                        statement.executeQuery(
+                                "SELECT CAST(X'0102' AS BLOB) AS inline_bytes, CAST('record' AS CLOB) AS record_json, CAST('tenant ' AS VARBINARY) AS tenant_id, CAST(X'0304' AS VARBINARY) AS actor_key, CAST(CURRENT_TIMESTAMP(6) AS TIMESTAMP) AS observed_at")) {
+            assertTrue(row.next());
+            var values = ManagedSchemaRows.read(row);
+            org.junit.jupiter.api.Assertions.assertArrayEquals(
+                    new byte[] {1, 2}, (byte[]) values.get("inline_bytes"));
+            org.junit.jupiter.api.Assertions.assertArrayEquals(
+                    new byte[] {3, 4}, (byte[]) values.get("actor_key"));
+            assertEquals("record", values.get("record_json"));
+            assertEquals("tenant ", values.get("tenant_id"));
+            assertTrue(values.get("observed_at") instanceof java.sql.Timestamp);
+        }
+    }
+
+    @Test
+    void tupleKeysDoNotNormalizeIdentityOrAmbiguouslyConcatenateComponents() {
+        assertNotEquals(ManagedSchemaKeys.key("ab", "c"), ManagedSchemaKeys.key("a", "bc"));
+        assertNotEquals(
+                ManagedSchemaKeys.key("tenant", "session"),
+                ManagedSchemaKeys.key("tenant", "session "));
+        assertNotEquals(
+                ManagedSchemaKeys.key("tenant", "SESSION"),
+                ManagedSchemaKeys.key("tenant", "session"));
+        assertNotEquals(ManagedSchemaKeys.key("é"), ManagedSchemaKeys.key("e\u0301"));
+        assertEquals(64, ManagedSchemaKeys.key("identity").length());
+        assertThrows(IllegalArgumentException.class, () -> ManagedSchemaKeys.key("\ud800"));
+        assertThrows(IllegalArgumentException.class, ManagedSchemaKeys::key);
+    }
+
+    private static void session(Connection connection, String tenant, String session, String kind)
+            throws SQLException {
+        try (var statement =
+                connection.prepareStatement(
+                        "INSERT INTO ma_session"
+                            + " (tenant_id,session_id,agent_id,session_kind,gmt_create,gmt_modified)"
+                            + " VALUES (?,?,?,?,0,0)")) {
+            statement.setBytes(1, ManagedSchemaKeys.identity(tenant));
+            statement.setBytes(2, ManagedSchemaKeys.identity(session));
+            statement.setBytes(3, ManagedSchemaKeys.identity("agent"));
+            statement.setString(4, kind);
+            statement.executeUpdate();
+        }
+    }
+
+    private static void workspace(java.sql.Statement statement, String id, boolean isDefault)
+            throws SQLException {
+        statement.execute(
+                "INSERT INTO ma_workspace (tenant_id,workspace_id,workspace_generation,storage_id,"
+                        + "display_name,config_ref,policy_ref,state,is_default) VALUES ('tenant','"
+                        + id
+                        + "',1,'storage','Workspace','config','policy','ACTIVE',"
+                        + isDefault
+                        + ")");
+    }
+
+    private static void operation(
+            java.sql.Statement statement, String key, String kind, String id, String capture)
+            throws SQLException {
+        statement.execute(
+                "INSERT INTO ma_operation"
+                    + " (operation_key,scope_key,operation_id,operation_kind,tenant_id,"
+                    + "target_kind,target_key,request_digest,request_json,state,phase,publication_id,gmt_create,gmt_modified)"
+                    + " VALUES ('"
+                        + key
+                        + "','scope','"
+                        + id
+                        + "','"
+                        + kind
+                        + "','tenant','CAPTURE','target','digest','{}','PENDING','ADMITTED',"
+                        + (capture == null ? "NULL" : "'" + capture + "'")
+                        + ",0,0)");
+    }
+
+    private static DataSource initialized() {
+        DataSource source = source();
+        ManagedSchema.initialize(source);
+        return source;
+    }
+
+    private static void receipt(Connection connection, String key, String namespace)
+            throws SQLException {
+        try (var statement =
+                connection.prepareStatement(
+                        "INSERT INTO ma_request_receipt (receipt_key, namespace, tenant_key,"
+                            + " tenant_id, scope_kind, scope_key, scope_id, idempotency_key,"
+                            + " idempotency_digest, request_digest, state, gmt_create, gmt_modified)"
+                            + " VALUES (?, ?, 'tenant-key', 'tenant', 'ACTOR', 'scope', 'actor', ?,"
+                            + " ?, 'digest', 'PENDING', 1, 1)")) {
+            statement.setString(1, ManagedSchemaKeys.key(key));
+            statement.setString(2, namespace);
+            statement.setString(3, key);
+            statement.setString(4, ManagedSchemaKeys.key(key));
+            statement.executeUpdate();
+        }
+    }
+
+    private static DataSource source() {
+        JdbcDataSource source = new JdbcDataSource();
+        source.setURL(
+                "jdbc:h2:mem:managed-schema-"
+                        + UUID.randomUUID()
+                        + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        return source;
+    }
+}

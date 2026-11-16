@@ -22,16 +22,11 @@ const MAX_MODELED_ACP_CHILDREN = 25;
  *
  * `admit` — enforce only the modeled process count, retaining legacy heap flags.
  *
- * There is deliberately no `enforce` yet. Applying the partition needs a way
- * to tell an operator beforehand whether their workload fits it, and that
- * observation does not exist: `refusals` below counts admission pressure, not
- * whether a child would have survived the ceiling. Enforcing on a signal that
- * cannot answer the question it is being read for is how a healthy daemon gets
- * switched into an OOM loop. The enforcing mode ships with the measurement
- * that justifies it — peak old-space per child, compared against
- * `perChildCeilingMb`.
+ * `enforce` — experimental opt-in count admission plus a fixed old-space
+ * ceiling. Workloads must be calibrated against that ceiling; neither the
+ * partition nor the refusal count establishes workload safety or bounds RSS.
  */
-export type ChildHeapMode = 'off' | 'observe' | 'admit';
+export type ChildHeapMode = 'off' | 'observe' | 'admit' | 'enforce';
 
 export interface ChildHeapPolicySnapshot {
   mode: ChildHeapMode;
@@ -64,9 +59,9 @@ export interface ChildHeapPolicySnapshot {
    * `maxConcurrentChildren`.
    *
    * Read it as admission pressure and nothing more. In particular a count of
-   * 0 does **not** mean the partition is safe to apply: children currently
-   * run on the far larger host-derived ceiling, so a workload needing more
-   * old space than `perChildCeilingMb` is perfectly healthy here and would
+   * 0 does **not** mean the partition is safe to apply: outside `enforce`,
+   * children run on the far larger host-derived ceiling, so a workload needing
+   * more old space than `perChildCeilingMb` is perfectly healthy here and would
    * only fail once the partition were applied.
    *
    * Two ways it counts something other than capacity pressure, both by
@@ -133,9 +128,9 @@ export function createChildHeapPolicy(options: {
   //
   // Refuse the model rather than shrink under the floor: a ceiling the module
   // says no child may run at is not a partition, and this is the figure a
-  // future `enforce` would hand to `--max-old-space-size`. Such a host already
-  // reports `insufficientMemory`, which is where an operator should be reading
-  // it from.
+  // configured `enforce` would hand to `--max-old-space-size`. Such a host
+  // already reports `insufficientMemory`, which is where an operator should
+  // be reading it from.
   const rawCeilingMb =
     admissible > 0
       ? Math.min(
@@ -149,7 +144,7 @@ export function createChildHeapPolicy(options: {
   const maxConcurrentChildren = modelable ? admissible : 0;
   const perChildCeilingMb = modelable ? rawCeilingMb : null;
 
-  if (mode === 'admit' && maxConcurrentChildren === 0) {
+  if ((mode === 'admit' || mode === 'enforce') && maxConcurrentChildren === 0) {
     throw new TypeError(
       'ACP admission requires a memory budget that models at least one child.',
     );

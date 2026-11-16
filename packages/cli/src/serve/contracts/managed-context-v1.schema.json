@@ -1,0 +1,654 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qwenlm.github.io/qwen-code/contracts/managed-context-v1.schema.json",
+  "title": "Managed context envelope v1 (managed-context/1) conformance fixtures",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contractVersion",
+    "managedContext",
+    "bootVersion",
+    "readyVersion",
+    "routes",
+    "errors",
+    "boot",
+    "ready",
+    "attestationResponse",
+    "bootCases",
+    "readyCases",
+    "attestationCases",
+    "installationSequences"
+  ],
+  "properties": {
+    "contractVersion": {
+      "const": 1
+    },
+    "managedContext": {
+      "$ref": "#/$defs/managedContext"
+    },
+    "bootVersion": {
+      "const": 2
+    },
+    "readyVersion": {
+      "const": 2
+    },
+    "routes": {
+      "const": [
+        {
+          "key": "attest",
+          "method": "POST",
+          "path": "/internal/managed-runtime/v3/attest",
+          "protocolVersion": 3,
+          "requestBodyLimitBytes": 16384,
+          "responseBodyLimitBytes": 16384,
+          "cacheControl": "no-store"
+        },
+        {
+          "key": "context",
+          "method": "POST",
+          "path": "/internal/managed-runtime/v3/context",
+          "protocolVersion": 3,
+          "requestBodyLimitBytes": 16384,
+          "responseBodyLimitBytes": 16384,
+          "cacheControl": "no-store"
+        }
+      ]
+    },
+    "errors": {
+      "const": [
+        {
+          "status": 400,
+          "code": "managed_runtime_attestation_invalid",
+          "classification": "protocol"
+        },
+        {
+          "status": 401,
+          "code": "managed_runtime_unauthorized",
+          "classification": "credentials"
+        },
+        {
+          "status": 404,
+          "code": null,
+          "classification": "incompatible"
+        },
+        {
+          "status": 409,
+          "code": "managed_runtime_identity_conflict",
+          "classification": "identity"
+        },
+        {
+          "status": 409,
+          "code": "managed_context_conflict",
+          "classification": "identity"
+        },
+        {
+          "status": 409,
+          "code": "managed_context_unavailable",
+          "classification": "recovery"
+        },
+        {
+          "status": 413,
+          "code": "managed_runtime_attestation_too_large",
+          "classification": "protocol"
+        }
+      ]
+    },
+    "boot": {
+      "$ref": "#/$defs/bootV2"
+    },
+    "ready": {
+      "$ref": "#/$defs/readyV2"
+    },
+    "attestationResponse": {
+      "$ref": "#/$defs/attestationResponseV3"
+    },
+    "bootCases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["boot", "id", "valid"],
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/caseId"
+          },
+          "boot": {},
+          "valid": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "readyCases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "ready", "valid"],
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/caseId"
+          },
+          "ready": {},
+          "valid": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "attestationCases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["body", "expected", "id"],
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/caseId"
+          },
+          "body": {},
+          "expected": {
+            "$ref": "#/$defs/attestationOutcome"
+          }
+        }
+      }
+    },
+    "installationSequences": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "steps"],
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/caseId"
+          },
+          "steps": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["request", "expected"],
+              "properties": {
+                "request": {},
+                "expected": {
+                  "$ref": "#/$defs/installationOutcome"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "caseId": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+    },
+    "bearerToken": {
+      "type": "string",
+      "maxLength": 512,
+      "pattern": "^[A-Za-z0-9._~+/-]+=*$"
+    },
+    "sessionId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^[^\\u0000\\ud800-\\udfff]*$"
+    },
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+    },
+    "decimal": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]{0,18}$"
+    },
+    "storageId": {
+      "type": "string",
+      "pattern": "^[\\x21-\\x7E]{1,256}$"
+    },
+    "reference": {
+      "type": "string",
+      "pattern": "^[\\x21-\\x7E]{1,512}$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "mountRoot": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^(?:/|[A-Za-z]:[\\\\/]|\\\\\\\\)[^\\u0000-\\u001f\\u007f-\\u009f\\ud800-\\udfff]*$"
+    },
+    "epoch": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "isolationClass": {
+      "enum": ["session", "workspace"]
+    },
+    "managedContext": {
+      "const": "managed-context/1"
+    },
+    "bootV2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capabilityDigest",
+        "epoch",
+        "isolationClass",
+        "leaseId",
+        "managedContext",
+        "mountRoot",
+        "provisionRequestId",
+        "runtimeIncarnation",
+        "runtimeInstanceId",
+        "storageId",
+        "tenantId",
+        "token",
+        "type",
+        "version",
+        "workspaceGeneration",
+        "workspaceId"
+      ],
+      "properties": {
+        "type": {
+          "const": "boot"
+        },
+        "version": {
+          "const": 2
+        },
+        "managedContext": {
+          "$ref": "#/$defs/managedContext"
+        },
+        "token": {
+          "$ref": "#/$defs/bearerToken"
+        },
+        "runtimeInstanceId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "runtimeIncarnation": {
+          "$ref": "#/$defs/identifier"
+        },
+        "leaseId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "epoch": {
+          "$ref": "#/$defs/epoch"
+        },
+        "provisionRequestId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "tenantId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "workspaceId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "workspaceGeneration": {
+          "$ref": "#/$defs/decimal"
+        },
+        "storageId": {
+          "$ref": "#/$defs/storageId"
+        },
+        "mountRoot": {
+          "$ref": "#/$defs/mountRoot"
+        },
+        "capabilityDigest": {
+          "$ref": "#/$defs/digest"
+        },
+        "isolationClass": {
+          "$ref": "#/$defs/isolationClass"
+        }
+      }
+    },
+    "readyV2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "epoch",
+        "leaseId",
+        "managedContext",
+        "runtimeIncarnation",
+        "runtimeInstanceId",
+        "type",
+        "url",
+        "version"
+      ],
+      "properties": {
+        "type": {
+          "const": "ready"
+        },
+        "version": {
+          "const": 2
+        },
+        "managedContext": {
+          "$ref": "#/$defs/managedContext"
+        },
+        "url": {
+          "type": "string",
+          "pattern": "^http://127\\.0\\.0\\.1:(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])$"
+        },
+        "runtimeInstanceId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "runtimeIncarnation": {
+          "$ref": "#/$defs/identifier"
+        },
+        "leaseId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "epoch": {
+          "$ref": "#/$defs/epoch"
+        }
+      }
+    },
+    "attestationRequestV3": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capabilityDigest",
+        "isolationClass",
+        "managedContext",
+        "mountRoot",
+        "protocolVersion",
+        "provisionRequestId",
+        "storageId",
+        "tenantId",
+        "workspaceGeneration",
+        "workspaceId"
+      ],
+      "properties": {
+        "protocolVersion": {
+          "const": 3
+        },
+        "managedContext": {
+          "$ref": "#/$defs/managedContext"
+        },
+        "provisionRequestId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "tenantId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "workspaceId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "workspaceGeneration": {
+          "$ref": "#/$defs/decimal"
+        },
+        "storageId": {
+          "$ref": "#/$defs/storageId"
+        },
+        "mountRoot": {
+          "$ref": "#/$defs/mountRoot"
+        },
+        "capabilityDigest": {
+          "$ref": "#/$defs/digest"
+        },
+        "isolationClass": {
+          "$ref": "#/$defs/isolationClass"
+        }
+      }
+    },
+    "attestationResponseV3": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capabilityDigest",
+        "epoch",
+        "isolationClass",
+        "leaseId",
+        "managedContext",
+        "mountRoot",
+        "protocolVersion",
+        "provisionRequestId",
+        "runtimeIncarnation",
+        "runtimeInstanceId",
+        "storageId",
+        "tenantId",
+        "workspaceGeneration",
+        "workspaceId"
+      ],
+      "properties": {
+        "protocolVersion": {
+          "const": 3
+        },
+        "managedContext": {
+          "$ref": "#/$defs/managedContext"
+        },
+        "provisionRequestId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "tenantId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "workspaceId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "workspaceGeneration": {
+          "$ref": "#/$defs/decimal"
+        },
+        "storageId": {
+          "$ref": "#/$defs/storageId"
+        },
+        "mountRoot": {
+          "$ref": "#/$defs/mountRoot"
+        },
+        "capabilityDigest": {
+          "$ref": "#/$defs/digest"
+        },
+        "isolationClass": {
+          "$ref": "#/$defs/isolationClass"
+        },
+        "runtimeInstanceId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "runtimeIncarnation": {
+          "$ref": "#/$defs/identifier"
+        },
+        "leaseId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "epoch": {
+          "$ref": "#/$defs/epoch"
+        }
+      }
+    },
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contextConfigRef",
+        "contextRevision",
+        "cwdRelative",
+        "storageId",
+        "tenantId",
+        "workspaceGeneration",
+        "workspaceId"
+      ],
+      "properties": {
+        "tenantId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "workspaceId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "workspaceGeneration": {
+          "$ref": "#/$defs/decimal"
+        },
+        "storageId": {
+          "$ref": "#/$defs/storageId"
+        },
+        "cwdRelative": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "pattern": "^(?!/|[A-Za-z]:)[^\\\\\\u0000-\\u001f\\u007f-\\u009f\\ud800-\\udfff]+$"
+        },
+        "contextConfigRef": {
+          "$ref": "#/$defs/reference"
+        },
+        "contextRevision": {
+          "$ref": "#/$defs/decimal"
+        }
+      }
+    },
+    "installationRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "binding",
+        "contextDigest",
+        "managedContext",
+        "operationId",
+        "protocolVersion",
+        "sessionId"
+      ],
+      "properties": {
+        "protocolVersion": {
+          "const": 3
+        },
+        "managedContext": {
+          "$ref": "#/$defs/managedContext"
+        },
+        "operationId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/sessionId"
+        },
+        "binding": {
+          "$ref": "#/$defs/binding"
+        },
+        "contextDigest": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contextDigest",
+        "contextRevision",
+        "epoch",
+        "managedContext",
+        "operationId",
+        "protocolVersion",
+        "runtimeIncarnation",
+        "runtimeInstanceId",
+        "sessionId",
+        "workspaceGeneration"
+      ],
+      "properties": {
+        "protocolVersion": {
+          "const": 3
+        },
+        "managedContext": {
+          "$ref": "#/$defs/managedContext"
+        },
+        "operationId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/sessionId"
+        },
+        "contextDigest": {
+          "$ref": "#/$defs/digest"
+        },
+        "contextRevision": {
+          "$ref": "#/$defs/decimal"
+        },
+        "workspaceGeneration": {
+          "$ref": "#/$defs/decimal"
+        },
+        "runtimeInstanceId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "runtimeIncarnation": {
+          "$ref": "#/$defs/identifier"
+        },
+        "epoch": {
+          "$ref": "#/$defs/epoch"
+        }
+      }
+    },
+    "attestationOutcome": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "body"],
+          "properties": {
+            "status": {
+              "const": 200
+            },
+            "body": {
+              "$ref": "#/$defs/attestationResponseV3"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "code"],
+          "properties": {
+            "status": {
+              "enum": [400, 409]
+            },
+            "code": {
+              "enum": [
+                "managed_runtime_attestation_invalid",
+                "managed_runtime_identity_conflict"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "installationOutcome": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "body"],
+          "properties": {
+            "status": {
+              "const": 200
+            },
+            "body": {
+              "$ref": "#/$defs/receipt"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "code"],
+          "properties": {
+            "status": {
+              "enum": [400, 409]
+            },
+            "code": {
+              "enum": [
+                "managed_runtime_attestation_invalid",
+                "managed_runtime_identity_conflict",
+                "managed_context_conflict"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  }
+}

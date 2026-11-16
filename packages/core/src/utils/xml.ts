@@ -28,6 +28,22 @@ export function escapeXml(text: string): string {
     .replace(/'/g, '&apos;');
 }
 
+/** Bound escaped UTF-16 length without splitting an entity or a code point. */
+export function escapeXmlWithinBudget(
+  value: string,
+  budget: number,
+): { text: string; truncated: boolean } {
+  let text = '';
+  for (const codePoint of value) {
+    const escaped = escapeXml(codePoint);
+    if (text.length + escaped.length > budget) {
+      return { text, truncated: true };
+    }
+    text += escaped;
+  }
+  return { text, truncated: false };
+}
+
 /** Escape text for an XML element body while preserving copyable quotes. */
 export function escapeXmlElementText(text: string): string {
   return text

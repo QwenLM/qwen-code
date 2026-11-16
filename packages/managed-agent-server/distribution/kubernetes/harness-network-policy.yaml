@@ -1,0 +1,36 @@
+apiVersion: 'networking.k8s.io/v1'
+kind: 'NetworkPolicy'
+metadata:
+  name: 'qwen-harness'
+spec:
+  podSelector:
+    matchLabels:
+      app: 'qwen-harness'
+  policyTypes:
+    - 'Ingress'
+    - 'Egress'
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: 'managed-agent-server'
+      ports:
+        - protocol: 'TCP'
+          port: 8443
+  # Narrow HTTPS destinations to the actual Store, Broker and model egress gateway.
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: 'kube-system'
+          podSelector:
+            matchLabels:
+              k8s-app: 'kube-dns'
+      ports:
+        - protocol: 'UDP'
+          port: 53
+        - protocol: 'TCP'
+          port: 53
+    - ports:
+        - protocol: 'TCP'
+          port: 443

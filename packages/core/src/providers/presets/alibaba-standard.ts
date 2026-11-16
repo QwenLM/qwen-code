@@ -80,7 +80,44 @@ export const alibabaStandardProvider: ProviderConfig = {
       contextWindowSize: 1000000,
       enableThinking: true,
     },
-    { id: 'glm-5.1', contextWindowSize: 202752, enableThinking: true },
+    {
+      id: 'glm-5.3',
+      capabilities: {
+        reasoning: {
+          thinking: true,
+          toggleOnly: true,
+          canDisable: false,
+          disableField: 'enable_thinking',
+        },
+      },
+      contextWindowSize: 1000000,
+      enableThinking: true,
+      thinkingMandatory: true,
+    },
+    {
+      id: 'glm-5.2',
+      capabilities: {
+        reasoning: {
+          thinking: true,
+          toggleOnly: true,
+          disableField: 'enable_thinking',
+        },
+      },
+      contextWindowSize: 1000000,
+      enableThinking: true,
+    },
+    {
+      id: 'glm-5.1',
+      capabilities: {
+        reasoning: {
+          thinking: true,
+          toggleOnly: true,
+          disableField: 'enable_thinking',
+        },
+      },
+      contextWindowSize: 202752,
+      enableThinking: true,
+    },
     {
       id: 'deepseek-v4-pro',
       capabilities: {
@@ -94,16 +131,30 @@ export const alibabaStandardProvider: ProviderConfig = {
       contextWindowSize: 1000000,
     },
     {
-      id: 'deepseek-v4-flash',
+      id: 'deepseek-v4.1-flash',
       capabilities: {
         reasoning: {
           thinking: true,
-          efforts: ['high', 'max'],
+          efforts: ['low', 'high', 'max'],
           defaultEffort: 'high',
           disableField: 'enable_thinking',
         },
       },
       contextWindowSize: 1000000,
+      modalities: { image: true },
+    },
+    {
+      id: 'deepseek-v4.1-flash-1017',
+      capabilities: {
+        reasoning: {
+          thinking: true,
+          efforts: ['low', 'high', 'max'],
+          defaultEffort: 'high',
+          disableField: 'enable_thinking',
+        },
+      },
+      contextWindowSize: 1000000,
+      modalities: { image: true },
     },
     {
       id: 'qwen3.8-max',
@@ -111,7 +162,7 @@ export const alibabaStandardProvider: ProviderConfig = {
       capabilities: {
         reasoning: {
           thinking: true,
-          efforts: ['low', 'medium', 'xhigh'],
+          efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
           defaultEffort: 'xhigh',
           disableField: 'reasoning_effort',
         },
@@ -124,7 +175,7 @@ export const alibabaStandardProvider: ProviderConfig = {
       capabilities: {
         reasoning: {
           thinking: true,
-          efforts: ['low', 'medium', 'xhigh'],
+          efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
           defaultEffort: 'xhigh',
           disableField: 'reasoning_effort',
         },
@@ -137,7 +188,7 @@ export const alibabaStandardProvider: ProviderConfig = {
       capabilities: {
         reasoning: {
           thinking: true,
-          efforts: ['low', 'medium', 'xhigh'],
+          efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
           defaultEffort: 'xhigh',
           disableField: 'reasoning_effort',
         },
@@ -213,7 +264,13 @@ export const alibabaStandardProvider: ProviderConfig = {
     },
   ],
   modelsEditable: true,
+  supportsModelDiscovery: true,
   modelNamePrefix: 'ModelStudio Standard',
+  apiKeyPlaceholder: 'sk-...',
+  validateApiKey: (key) =>
+    key.startsWith('sk-') && !key.startsWith('sk-sp-')
+      ? null
+      : 'Invalid API key. Pay-as-you-go keys start with "sk-" or "sk-ws-". Token Plan keys ("sk-sp-") need the Token Plan entry instead.',
   // The Responses API on these endpoints serves the server-side `web_search`
   // / `web_extractor` tools with the same key, so the built-in tool needs no
   // extra configuration.

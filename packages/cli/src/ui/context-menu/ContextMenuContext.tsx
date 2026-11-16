@@ -34,6 +34,7 @@ export interface ContextMenuState {
 
 export interface ContextMenuContextValue {
   menu: ContextMenuState | null;
+  isMenuOpen: () => boolean;
   selectedIndex: number;
   openMenu: (
     items: ContextMenuItem[],
@@ -47,6 +48,7 @@ export interface ContextMenuContextValue {
 
 const ContextMenuContext = createContext<ContextMenuContextValue>({
   menu: null,
+  isMenuOpen: () => false,
   selectedIndex: 0,
   openMenu: () => {},
   closeMenu: () => {},
@@ -71,14 +73,18 @@ export const ContextMenuProvider: React.FC<{
   // effects inside a state updater, which StrictMode double-invokes).
   const menuRef = useRef<ContextMenuState | null>(null);
   menuRef.current = menu;
+  const isMenuOpen = useCallback(() => menuRef.current !== null, []);
 
   const openMenu = useCallback(
     (items: ContextMenuItem[], position: { x: number; y: number }) => {
       if (items.length === 0) return;
-      setMenu({ items, position });
+      menuRef.current = { items, position };
+      // The app-level key handler sits outside this provider.
+      onMenuChange?.(true);
+      setMenu(menuRef.current);
       setSelectedIndexState(0);
     },
-    [],
+    [onMenuChange],
   );
 
   const closeMenu = useCallback(() => {
@@ -110,13 +116,22 @@ export const ContextMenuProvider: React.FC<{
   const value = useMemo(
     () => ({
       menu,
+      isMenuOpen,
       selectedIndex,
       openMenu,
       closeMenu,
       setSelectedIndex,
       executeIndex,
     }),
-    [menu, selectedIndex, openMenu, closeMenu, setSelectedIndex, executeIndex],
+    [
+      menu,
+      isMenuOpen,
+      selectedIndex,
+      openMenu,
+      closeMenu,
+      setSelectedIndex,
+      executeIndex,
+    ],
   );
 
   return (

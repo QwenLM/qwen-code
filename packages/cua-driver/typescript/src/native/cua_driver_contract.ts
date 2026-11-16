@@ -2449,7 +2449,11 @@ export type LaunchAppInput = {
     /**
      * Application name or absolute installation path discovered by list_apps.
      */
-    name: string
+    name: string,
+    /**
+     * Windows launcher command returned by list_apps, including shortcut arguments.
+     */
+    launchPath?: string
 }
 
 /**
@@ -2457,6 +2461,7 @@ export type LaunchAppInput = {
  */
 export const LaunchAppInput = (() => {
     const defaults = () => ({
+        launchPath: undefined
     });
     const create = (() => {
         return uniffiCreateRecord<LaunchAppInput, ReturnType<typeof defaults>>(defaults);
@@ -2473,14 +2478,17 @@ const FfiConverterTypeLaunchAppInput = (() => {
     class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
         read(from: RustBuffer): TypeName {
             return {
-                name: FfiConverterString.read(from)
+                name: FfiConverterString.read(from),
+                launchPath: FfiConverterOptionalString.read(from)
             };
         }
         write(value: TypeName, into: RustBuffer): void {
             FfiConverterString.write(value.name, into);
+            FfiConverterOptionalString.write(value.launchPath, into);
         }
         allocationSize(value: TypeName): number {
-            return FfiConverterString.allocationSize(value.name);
+            return FfiConverterString.allocationSize(value.name) +
+             FfiConverterOptionalString.allocationSize(value.launchPath);
 
         }
     };
@@ -4759,6 +4767,10 @@ const FfiConverterTypeWindowPressKeyInput = (() => {
 
 export type WindowScrollInput = {
     pid: number,
+    /**
+     * Use the app-bound target and focus policy independently of input delivery mode.
+     */
+    appContext?: boolean,
     windowId?: bigint,
     elementToken?: string,
     deliveryMode?: DeliveryMode,
@@ -4774,6 +4786,7 @@ export type WindowScrollInput = {
  */
 export const WindowScrollInput = (() => {
     const defaults = () => ({
+        appContext: undefined,
     });
     const create = (() => {
         return uniffiCreateRecord<WindowScrollInput, ReturnType<typeof defaults>>(defaults);
@@ -4791,6 +4804,7 @@ const FfiConverterTypeWindowScrollInput = (() => {
         read(from: RustBuffer): TypeName {
             return {
                 pid: FfiConverterUInt32.read(from),
+                appContext: FfiConverterOptionalBoolean.read(from),
                 windowId: FfiConverterOptionalUInt64.read(from),
                 elementToken: FfiConverterOptionalString.read(from),
                 deliveryMode: FfiConverterOptionalTypeDeliveryMode.read(from),
@@ -4803,6 +4817,7 @@ const FfiConverterTypeWindowScrollInput = (() => {
         }
         write(value: TypeName, into: RustBuffer): void {
             FfiConverterUInt32.write(value.pid, into);
+            FfiConverterOptionalBoolean.write(value.appContext, into);
             FfiConverterOptionalUInt64.write(value.windowId, into);
             FfiConverterOptionalString.write(value.elementToken, into);
             FfiConverterOptionalTypeDeliveryMode.write(value.deliveryMode, into);
@@ -4814,6 +4829,7 @@ const FfiConverterTypeWindowScrollInput = (() => {
         }
         allocationSize(value: TypeName): number {
             return FfiConverterUInt32.allocationSize(value.pid) +
+             FfiConverterOptionalBoolean.allocationSize(value.appContext) +
              FfiConverterOptionalUInt64.allocationSize(value.windowId) +
              FfiConverterOptionalString.allocationSize(value.elementToken) +
              FfiConverterOptionalTypeDeliveryMode.allocationSize(value.deliveryMode) +

@@ -97,7 +97,7 @@ Landable.
 | `.github/` — workflows, actions, CODEOWNERS                                                                                                                                                                                                                                                                                                                                                                                                                  | **Report-only** — consumed GitHub-side: triggers, required checks, cross-repo `uses:`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `package.json` dependencies                                                                                                                                                                                                                                                                                                                                                                                                                                  | **Report-only** — bundlers and postinstall hide consumers                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | Comments, JSDoc, commented-out code                                                                                                                                                                                                                                                                                                                                                                                                                          | **Out of scope** — `AGENTS.md` says do not delete existing comments as cleanup                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `packages/desktop-shell`, `packages/cua-driver`, `packages/mobile-mcp`, `**/generated/**`, `**/*.test.ts(x)`, `**/*.spec.ts(x)`, `**/__snapshots__/**`                                                                                                                                                                                                                                                                                                       | Never a target; always searched as consumers — vitest discovers tests by filename glob, nothing imports them, so an import-based orphan detector matches every live test vacuously                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `packages/desktop`, `packages/cua-driver`, `packages/mobile-mcp`, `**/generated/**`, `**/*.test.ts(x)`, `**/*.spec.ts(x)`, `**/__snapshots__/**`                                                                                                                                                                                                                                                                                                             | Never a target; always searched as consumers — vitest discovers tests by filename glob, nothing imports them, so an import-based orphan detector matches every live test vacuously                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 
 A settings key with zero read sites is still not cleanup. The key is likely
 documented under `docs/users/` and completed from the generated schema;
@@ -150,8 +150,41 @@ git fetch origin || exit 1
 # survey fresh code from a throwaway worktree at origin/main. Never switch
 # the user's checkout: the survey is read-only and must leave the checkout
 # exactly as it found it.
-SURVEY_PARENT="${TMPDIR:-/tmp}/find-simplifications-survey"
+# Under the checkout's gitignored tmp/, NOT ${TMPDIR:-/tmp}. A survey tree is
+# a whole repository: ~137k inodes. On the CI fleet /tmp is a tmpfs with a
+# FIXED nr_inodes=1m, independent of its size, so eight such trees exhaust it
+# while `df -h` still reads 15% used — and every job on the host then fails
+# the disk floor gate before running a test. Measured 2026-11-12 on the host
+# behind ecs-qwen-hz3-10/hz3-12: 1,038,264/1,048,576 inodes, 959,479 of them
+# in seven leftover checkouts totalling 15.6 GiB. The 1d tmpfiles policy
+# cannot save this: all seven were younger than a day. tmp/ sits on the data
+# disk (~64M free inodes) and is swept with the workspace.
+#
+# Anchored to the MAIN checkout, not $(pwd) and not --show-toplevel: this
+# block rm -rf's the parent, so a call whose cwd is a subdirectory must not
+# resolve it elsewhere, and a call already inside the survey tree would
+# otherwise resolve to that tree and delete itself (measured: --show-toplevel
+# returns the worktree's own root there). The common dir is the main .git
+# from both places, so its parent is stable. Fail closed with no repository
+# rather than fall back to /tmp and reintroduce the exhaustion above.
+SURVEY_ROOT=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)") || exit 1
+SURVEY_PARENT="$SURVEY_ROOT/tmp/find-simplifications-survey"
 SURVEY="$SURVEY_PARENT/main"
+# Step out of the tree this block is about to delete. A later call may have
+# left cwd inside the previous survey tree; the rm -rf below would then pull
+# the working directory out from under every git command that follows
+# (measured: "Unable to read current working directory"). cd to the main
+# checkout, which is also where `worktree add` should run from.
+cd "$SURVEY_ROOT" || exit 1
+# tmp/ is gitignored, so on a fresh checkout it does not exist yet and the
+# 0700 mkdir below (deliberately not -p, so it cannot adopt a planted dir)
+# would fail on the missing parent. Create only that parent, with -p.
+# -p follows a planted symlink for the parent (measured: exit 0, directory
+# created in the link target), which would put the survey outside a parent
+# this user controls — the same hole the 0700 mkdir below closes for the
+# survey dir itself. Refuse a symlinked tmp/ instead of writing through it.
+[ ! -L "$SURVEY_ROOT/tmp" ] || exit 1
+mkdir -p "$SURVEY_ROOT/tmp" || exit 1
 # Clear any leftover from a failed or interrupted earlier run first. The
 # fixed path (not mktemp) lets every call re-derive the worktree with no
 # shared state, so at most one leftover can ever exist. There is no EXIT
@@ -190,8 +223,8 @@ Each fenced block in this skill is ONE command: the consuming harness spawns
 a fresh shell per command, so environment variables, cwd, and traps set here
 do not survive to later calls. Every later call that needs the worktree
 re-derives the same fixed path
-(`${TMPDIR:-/tmp}/find-simplifications-survey/main`) and runs its commands
-from there (`cd "$SURVEY" && …`, or by setting the call's working
+(`tmp/find-simplifications-survey/main` under the checkout root) and runs its
+commands from there (`cd "$SURVEY" && …`, or by setting the call's working
 directory).
 
 | Slice | Territory                                                                                                                                                                        |

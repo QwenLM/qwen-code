@@ -6,6 +6,8 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 import path from 'node:path';
 import {
@@ -17,6 +19,65 @@ import {
   normalizeRepositoryUrl,
   runNoticeGeneration,
 } from './generate-notices.js';
+
+describe('ExcelJS browser source notices', () => {
+  it('uses installed dependencies and preserves their complete licenses', async () => {
+    const write = vi.spyOn(fs, 'writeFile').mockImplementation(async () => {});
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      await runNoticeGeneration({});
+      expect(write).toHaveBeenCalledTimes(1);
+      const notices = String(write.mock.calls[0][1]);
+      for (const key of [
+        'exceljs@4.4.0',
+        'uuid@11.1.1',
+        'jszip@3.10.2',
+        'buffer@5.2.1',
+        'inherits@2.0.3',
+      ]) {
+        expect(notices).toContain(`\n${key}\n`);
+      }
+      expect(notices).not.toContain('\nuuid@8.3.2\n');
+      expect(notices).not.toContain('\njszip@3.10.1\n');
+      expect(notices).toContain('Copyright (c) 2012 Raynos.');
+      expect(notices).toContain(
+        await fs.readFile(
+          new URL('./licenses/saxes-5.0.1.txt', import.meta.url),
+          'utf-8',
+        ),
+      );
+      const pakoNotice = notices
+        .split('\npako@1.0.11\n')[1]
+        .split(
+          '============================================================\n',
+        )[0];
+      expect(pakoNotice).toContain(
+        (
+          await fs.readFile(
+            new URL('./licenses/pako-1.0.11-zlib.txt', import.meta.url),
+            'utf-8',
+          )
+        ).trim(),
+      );
+      expect(pakoNotice).toContain("This software is provided 'as-is'");
+      expect(pakoNotice).toContain('1995-2013 Jean-loup Gailly and Mark Adler');
+      expect(pakoNotice).toContain(
+        '2014-2017 Vitaly Puzrin and Andrey Tupitsin',
+      );
+      expect(pakoNotice).toContain(
+        '3. This notice may not be removed or altered from any source distribution.',
+      );
+      expect(notices).not.toContain('License text not found.');
+      const noticeCount = [
+        ...notices.matchAll(/^={60}\n(?=[^\n]+@[^\n]+\n\()/gm),
+      ].length;
+      expect(log).toHaveBeenCalledWith(`Total dependencies: ${noticeCount}`);
+    } finally {
+      write.mockRestore();
+      log.mockRestore();
+    }
+  });
+});
 
 describe('runNoticeGeneration', () => {
   it('skips generation during dependency-only worktree setup', async () => {
@@ -92,6 +153,16 @@ describe('findLicenseFile', () => {
     const resolved = await findLicenseFile(packageDir);
 
     expect(resolved).toBe(path.join(packageDir, 'License'));
+  });
+
+  it('finds JSZip’s LICENSE.markdown attribution', async () => {
+    await fs.writeFile(
+      path.join(packageDir, 'LICENSE.markdown'),
+      'JSZip license',
+    );
+    expect(await findLicenseFile(packageDir)).toBe(
+      path.join(packageDir, 'LICENSE.markdown'),
+    );
   });
 
   it('prefers LICENSE over other variants', async () => {
@@ -180,6 +251,25 @@ describe('collectDependencies', () => {
     ]);
   });
 
+  it('excludes only ExcelJS Node-only branches while retaining other consumers', async () => {
+    await writePackage(path.join(root, 'node_modules', 'exceljs'), {
+      name: 'exceljs',
+      version: '4.4.0',
+      dependencies: { archiver: '*', unzipper: '*', tmp: '*', jszip: '*' },
+    });
+    for (const name of ['archiver', 'unzipper', 'tmp', 'jszip']) {
+      await writePackage(path.join(root, 'node_modules', name), {
+        name,
+        version: '1.0.0',
+      });
+    }
+    const dependencies = new Map();
+    await collectDependencies('exceljs', root, dependencies, new Set());
+    expect([...dependencies.keys()]).toEqual(['exceljs@4.4.0', 'jszip@1.0.0']);
+    await collectDependencies('archiver', root, dependencies, new Set());
+    expect(dependencies.has('archiver@1.0.0')).toBe(true);
+  });
+
   it('resolves each dependency from the nearest node_modules above it', async () => {
     const companion = path.join(root, 'packages', 'companion');
     await writePackage(companion, { name: 'companion' });
@@ -202,6 +292,95 @@ describe('collectDependencies', () => {
     await collectDependencies('hoisted', companion, dependencies, new Set());
 
     expect([...dependencies.keys()]).toEqual(['hoisted@2.0.0', 'leaf@3.1.0']);
+  });
+
+  it('rejects missing bundled seeds without overwriting committed attribution', async () => {
+    await writePackage(root, { bundledDevDependencies: ['missing-package'] });
+    const output = path.join(root, 'NOTICES.txt');
+    await fs.writeFile(output, 'EXISTING ATTRIBUTION');
+    await expect(
+      runNoticeGeneration({}, { packageDir: root, bundledOnly: true }),
+    ).rejects.toThrow('missing-package');
+    expect(await fs.readFile(output, 'utf8')).toBe('EXISTING ATTRIBUTION');
+  });
+
+  it('includes declared bundled dev dependencies and their notices, excluding other dev tools', async () => {
+    const workspace = path.join(root, 'packages', 'web-shell');
+    await writePackage(workspace, {
+      name: '@qwen-code/web-shell',
+      version: '1.0.0',
+      bundledDevDependencies: ['bundled'],
+      dependencies: { ordinary: '1.0.0' },
+      devDependencies: { bundled: '1.0.0', unused: '1.0.0' },
+    });
+    await fs.mkdir(path.join(root, 'node_modules', '@qwen-code'), {
+      recursive: true,
+    });
+    await fs.symlink(
+      workspace,
+      path.join(root, 'node_modules', '@qwen-code', 'web-shell'),
+      'junction',
+    );
+    for (const name of ['ordinary', 'unused', 'extra'])
+      await writePackage(path.join(root, 'node_modules', name), {
+        name,
+        version: '1.0.0',
+        license: 'MIT',
+      });
+    const bundled = path.join(root, 'node_modules', 'bundled');
+    await writePackage(bundled, {
+      name: 'bundled',
+      version: '1.0.0',
+      dependencies: { leaf: '1.0.0' },
+      bundledDevDependencies: ['extra'],
+    });
+    await fs.writeFile(path.join(bundled, 'LICENSE'), 'BUNDLED LICENSE');
+    await fs.writeFile(path.join(bundled, 'NOTICE.md'), 'DERIVED CODE CREDIT');
+    await writePackage(path.join(root, 'node_modules', 'leaf'), {
+      name: 'leaf',
+      version: '1.0.0',
+      license: 'MIT',
+    });
+    const dependencies = new Map();
+    await collectDependencies(
+      '@qwen-code/web-shell',
+      root,
+      dependencies,
+      new Set(),
+    );
+    expect([...dependencies.keys()]).toEqual([
+      'ordinary@1.0.0',
+      'bundled@1.0.0',
+      'leaf@1.0.0',
+    ]);
+    await runNoticeGeneration({}, { packageDir: workspace, bundledOnly: true });
+    const notice = await fs.readFile(
+      path.join(workspace, 'NOTICES.txt'),
+      'utf8',
+    );
+    expect(notice).toContain('bundled@1.0.0');
+    expect(notice).toContain('BUNDLED LICENSE');
+    expect(notice).toContain('DERIVED CODE CREDIT');
+    expect(notice).toContain('leaf@1.0.0');
+    expect(notice).not.toContain('unused');
+    expect(notice).not.toContain('ordinary');
+    await fs.unlink(path.join(workspace, 'NOTICES.txt'));
+    const result = spawnSync(
+      process.execPath,
+      [
+        fileURLToPath(new URL('./generate-notices.js', import.meta.url)),
+        '--bundled',
+        workspace,
+      ],
+      {
+        encoding: 'utf8',
+        env: { ...process.env, QWEN_SKIP_NOTICE_GENERATION: '' },
+      },
+    );
+    expect(result.status, result.stderr).toBe(0);
+    expect(await fs.readFile(path.join(workspace, 'NOTICES.txt'), 'utf8')).toBe(
+      notice,
+    );
   });
 });
 

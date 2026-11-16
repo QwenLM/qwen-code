@@ -2,7 +2,10 @@ import type { DaemonBackgroundTurn } from '@qwen-code/sdk/daemon';
 import { createContext, useContext, type ReactNode } from 'react';
 import type { ACPToolCall } from './adapters/types';
 
-export type OpenSubagentDetails = (tool: ACPToolCall) => void;
+export type OpenSubagentDetails = (
+  tool: ACPToolCall,
+  parentSessionId?: string,
+) => void;
 
 interface SubagentDetailsContextValue {
   onOpen: OpenSubagentDetails;

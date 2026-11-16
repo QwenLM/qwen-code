@@ -43,7 +43,18 @@ import {
   type PermissionResponse,
   type PromptRequest,
 } from '@qwen-code/sdk/daemon';
+import { installBootRetry } from './bootRetry';
 import { installSseTransport, type SseTransport } from './sseTransport';
+
+/** One transcript page as the mock daemon serves it. */
+export interface MockTranscriptPage {
+  events: DaemonEvent[];
+  hasMore?: boolean;
+  nextCursor?: string;
+}
+
+/** Cursors whose one-off failure has already been served, per scenario. */
+const failedTranscriptReads = new WeakMap<object, Set<string>>();
 
 export interface DaemonRequestRecord {
   method: string;
@@ -87,6 +98,8 @@ export interface WebShellDaemonScenario {
   pairingApprovals: Record<string, string[]>;
   pairingGroupApprovals: Record<string, string[]>;
   sessions: DaemonSessionSummary[];
+  workspaceOrder: string[];
+  workspaceOrderSaveError?: boolean;
   standaloneSessions: DaemonStandaloneSessionSummary[];
   standaloneCreateError?: {
     status: number;
@@ -102,10 +115,19 @@ export interface WebShellDaemonScenario {
   /** Artifact list returned by `GET /session/:id/artifacts`. */
   artifacts: DaemonSessionArtifact[];
   /**
-   * Page served by `GET /session/:id/transcript`. Unset answers an empty page,
-   * which is what a session with no persisted records reads as.
+   * Pages served by `GET /session/:id/transcript`. Unset answers an empty page,
+   * which is what a session with no persisted records reads as. `older` is
+   * keyed by the `cursor` the previous page handed back, so a spec can walk
+   * backwards. A `{ status }` entry answers that read with a failure instead
+   * of a page; with `then`, only the first read fails and later ones get the
+   * page, which is how a retry is exercised.
    */
-  transcriptPage?: { events: DaemonEvent[]; hasMore?: boolean };
+  transcriptPage?: MockTranscriptPage & {
+    older?: Record<
+      string,
+      MockTranscriptPage | { status: number; then?: MockTranscriptPage }
+    >;
+  };
   /** File contents served by `GET /file?path=...`, keyed by requested path. */
   workspaceFiles: Record<string, string>;
   /**
@@ -138,6 +160,36 @@ export interface WebShellDaemonScenario {
   /** Response for `POST /session/:id/btw`. */
   btwAnswer?: string;
   goalSnapshot: GoalSnapshotV2;
+  /**
+   * Per-workspace goal listings for `GET /workspaces/:id/goals`, keyed by
+   * workspace id. Each entry projects exactly like the primary `/goals`
+   * branch. The route gates on `capabilities.workspaces` registration (400
+   * `workspace_mismatch`) and trust (403 `untrusted_workspace`), not on map
+   * membership: an advertised workspace absent from the map lists empty.
+   * An entry keyed by the PRIMARY workspace id is ignored — the primary
+   * always derives from `goalSnapshot` on both surfaces.
+   */
+  goalsByWorkspace?: Record<
+    string,
+    {
+      sessionId: string;
+      displayName?: string | null;
+      snapshot: GoalSnapshotV2;
+    }
+  >;
+  /**
+   * Sessions allocated by `POST /session` with a non-primary cwd. The real
+   * daemon creates a fresh session in the requested workspace; the mock
+   * mirrors that so picker-targeted creation and stranded-retry flows can
+   * prove WHERE a goal landed (a fixed primary session id would reduce every
+   * goal into the primary snapshot). Each entry owns its goal snapshot.
+   */
+  allocatedSessions: Array<{
+    sessionId: string;
+    workspaceCwd: string;
+    displayName: string | null;
+    snapshot: GoalSnapshotV2;
+  }>;
   midTurnMessages: Array<{ messageId: string; text: string }>;
   /** Stateful response and replay used by historical branch E2E flows. */
   branch?: {
@@ -289,6 +341,7 @@ export function createWebShellDaemonScenario(
       'session_permission_vote',
       'session_scope_override',
       'session_source_metadata',
+      'session_btw_stream',
       'workspace_settings',
       'workspace_voice',
     ],
@@ -441,6 +494,8 @@ export function createWebShellDaemonScenario(
     pairingApprovals: overrides.pairingApprovals ?? {},
     pairingGroupApprovals: overrides.pairingGroupApprovals ?? {},
     sessions,
+    workspaceOrder: overrides.workspaceOrder ?? [],
+    workspaceOrderSaveError: overrides.workspaceOrderSaveError,
     standaloneSessions: overrides.standaloneSessions ?? [],
     standaloneCreateError: overrides.standaloneCreateError,
     sessionGroups: overrides.sessionGroups ?? [],
@@ -471,10 +526,33 @@ export function createWebShellDaemonScenario(
       goal: null,
       activity: 'idle',
     },
+    goalsByWorkspace: overrides.goalsByWorkspace
+      ? structuredClone(overrides.goalsByWorkspace)
+      : undefined,
+    allocatedSessions: [],
     midTurnMessages: overrides.midTurnMessages ?? [],
     branch: overrides.branch,
   };
 }
+
+/**
+ * One daemon installed on a page, addressable by the proxy routes the shell
+ * uses to reach a second computer without navigating away from the first.
+ */
+interface DaemonPeer {
+  scenario: WebShellDaemonScenario;
+  requests: DaemonRequestRecord[];
+}
+
+/**
+ * Daemons installed on one page, keyed by origin. A real daemon answers
+ * `/remote-workspace-path-suggestions` and `/remote-workspaces` by fetching the
+ * target daemon server-side; the mock has no server side, so the route handler
+ * for the page origin dispatches to the mock installed for the target origin
+ * and records the forwarded request there, exactly as the upstream daemon would
+ * see it. Keyed by page so scenarios never leak between tests.
+ */
+const installedDaemons = new WeakMap<Page, Map<string, DaemonPeer>>();
 
 export async function installMockDaemon(
   page: Page,
@@ -484,6 +562,14 @@ export async function installMockDaemon(
   const baseURL = options.baseURL ?? getPlaywrightBaseURL();
   const baseOrigin = new URL(baseURL).origin;
   const requests: DaemonRequestRecord[] = [];
+  const peers = installedDaemons.get(page) ?? new Map<string, DaemonPeer>();
+  installedDaemons.set(page, peers);
+  peers.set(baseOrigin, { scenario, requests });
+  const resolvePeer = (origin: string): DaemonPeer | undefined =>
+    origin ? peers.get(origin) : undefined;
+  // Most app specs install their daemon before navigating, so hooking the
+  // boot retry here covers them without a page-setup line in each spec.
+  await installBootRetry(page);
   const sse = await installSseTransport<DaemonEvent>(page, { baseURL });
 
   await page.route(`${baseOrigin}/**`, async (route) => {
@@ -522,6 +608,7 @@ export async function installMockDaemon(
       scenario,
       body,
       url.searchParams,
+      resolvePeer,
     );
   });
 
@@ -657,7 +744,7 @@ export function replayCompleteEvent(
 
 export function permissionRequestEvent(
   requestId: string,
-  options: { id?: number; sessionId?: string } = {},
+  options: { id?: number; sessionId?: string; toolCall?: unknown } = {},
 ): DaemonEvent {
   return {
     ...(options.id !== undefined ? { id: options.id } : {}),
@@ -666,15 +753,15 @@ export function permissionRequestEvent(
     data: {
       requestId,
       sessionId: options.sessionId,
-      toolCall: {
+      toolCall: options.toolCall ?? {
         name: 'Bash',
         input: {
           command: 'printf web-shell-e2e',
         },
       },
       options: [
-        { optionId: 'allow_once', label: 'Allow once' },
-        { optionId: 'reject_once', label: 'Reject' },
+        { optionId: 'allow_once', label: 'Allow', kind: 'allow_once' },
+        { optionId: 'cancel', label: 'Reject', kind: 'reject_once' },
       ],
     },
   };
@@ -781,8 +868,11 @@ function isDaemonPath(path: string): boolean {
   return (
     path === '/health' ||
     path === '/capabilities' ||
+    path === '/workspace-order' ||
     path === '/brand' ||
+    path === '/auth/subscription' ||
     path === '/workspace/settings' ||
+    path === '/workspace/hooks' ||
     path === '/workspace/providers' ||
     path === '/workspace/skills' ||
     path === '/workspace/tools' ||
@@ -792,6 +882,8 @@ function isDaemonPath(path: string): boolean {
     path === '/workspace/mcp' ||
     path === '/workspace/voice' ||
     path === '/workspace-path-suggestions' ||
+    path === '/remote-workspace-path-suggestions' ||
+    path === '/remote-workspaces' ||
     path === '/workspaces' ||
     /^\/workspaces\/[^/]+\/(voice|providers|settings)\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/skills\/?$/.test(path) ||
@@ -829,17 +921,22 @@ function isDaemonPath(path: string): boolean {
       path,
     ) ||
     path === '/goals' ||
+    /^\/workspaces\/[^/]+\/goals\/?$/.test(path) ||
     /^\/file\/?$/.test(path) ||
+    /^\/session\/[^/]+\/metadata\/?$/.test(path) ||
+    /^\/workspaces\/[^/]+\/session\/[^/]+\/metadata\/?$/.test(path) ||
     /^\/session\/[^/]+\/artifacts\/?$/.test(path) ||
     /^\/session\/[^/]+\/transcript\/?$/.test(path) ||
     /^\/permission\/[^/]+\/?$/.test(path) ||
     /^\/session\/[^/]+\/pending-prompts(?:\/[^/]+)?\/?$/.test(path) ||
     /^\/session\/[^/]+\/goal\/?$/.test(path) ||
     /^\/session\/[^/]+\/status\/?$/.test(path) ||
+    /^\/session\/[^/]+\/stats\/?$/.test(path) ||
     /^\/session\/[^/]+\/tasks\/?$/.test(path) ||
     /^\/session\/[^/]+\/saved-workflows\/[^/]+\/?$/.test(path) ||
     /^\/session\/[^/]+\/mid-turn-message\/?$/.test(path) ||
     /^\/session\/[^/]+\/mid-turn-messages(?:\/[^/]+)?\/?$/.test(path) ||
+    /^\/session\/[^/]+\/btw\/stream(?:\/[^/]+)?\/?$/.test(path) ||
     /^\/session\/[^/]+\/(load|resume|branch|prompt|permission\/[^/]+|context|supported-commands|events|model|config-option|approval-mode|heartbeat|cancel|detach|btw)\/?$/.test(
       path,
     )
@@ -847,14 +944,21 @@ function isDaemonPath(path: string): boolean {
 }
 
 function isDaemonRoute(method: string, path: string): boolean {
+  if ((method === 'GET' || method === 'POST') && path === '/workspace-order')
+    return true;
   if (
     method === 'GET' &&
     (path === '/health' || path === '/capabilities' || path === '/brand')
   ) {
     return true;
   }
+  if (method === 'GET' && path === '/auth/subscription') return true;
   if (method === 'GET' && path === '/workspace-path-suggestions') return true;
+  if (method === 'GET' && path === '/remote-workspace-path-suggestions') {
+    return true;
+  }
   if (method === 'POST' && path === '/workspaces') return true;
+  if (method === 'POST' && path === '/remote-workspaces') return true;
   if (
     (method === 'GET' || method === 'POST') &&
     path === '/workspace/settings'
@@ -868,6 +972,7 @@ function isDaemonRoute(method: string, path: string): boolean {
     return true;
   }
   if (method === 'GET' && path === '/workspace/providers') return true;
+  if (method === 'GET' && path === '/workspace/hooks') return true;
   if (method === 'GET' && path === '/workspace/skills') return true;
   if (method === 'GET' && path === '/workspace/tools') return true;
   if (method === 'GET' && path === '/workspace/extensions') return true;
@@ -987,7 +1092,13 @@ function isDaemonRoute(method: string, path: string): boolean {
     return true;
   if (method === 'POST' && /^\/workspace\/github\/prs\/create\/?$/.test(path))
     return true;
-  if (method === 'POST' && /^\/session\/[^/]+\/btw\/?$/.test(path)) return true;
+  if (method === 'POST' && /^\/session\/[^/]+\/btw(?:\/stream)?\/?$/.test(path))
+    return true;
+  if (
+    method === 'DELETE' &&
+    /^\/session\/[^/]+\/btw\/stream\/[^/]+$/.test(path)
+  )
+    return true;
   if (method === 'GET' && /^\/file\/?$/.test(path)) return true;
   if (method === 'GET' && /^\/session\/[^/]+\/artifacts\/?$/.test(path)) {
     return true;
@@ -1028,7 +1139,17 @@ function isDaemonRoute(method: string, path: string): boolean {
   ) {
     return true;
   }
+  if (
+    method === 'PATCH' &&
+    (/^\/session\/[^/]+\/metadata\/?$/.test(path) ||
+      /^\/workspaces\/[^/]+\/session\/[^/]+\/metadata\/?$/.test(path))
+  ) {
+    return true;
+  }
   if (method === 'GET' && path === '/goals') return true;
+  if (method === 'GET' && /^\/workspaces\/[^/]+\/goals\/?$/.test(path)) {
+    return true;
+  }
   if (
     (method === 'GET' || method === 'POST') &&
     /^\/session\/[^/]+\/goal\/?$/.test(path)
@@ -1058,6 +1179,9 @@ function isDaemonRoute(method: string, path: string): boolean {
     return true;
   }
   if (method === 'GET' && /^\/session\/[^/]+\/status\/?$/.test(path)) {
+    return true;
+  }
+  if (method === 'GET' && /^\/session\/[^/]+\/stats\/?$/.test(path)) {
     return true;
   }
   if (method === 'GET' && /^\/workspaces\/.+\/git\/?$/.test(path)) {
@@ -1116,6 +1240,74 @@ function plainRemote(name: string, url: string): DaemonGitRemoteInfo {
   };
 }
 
+/** Directory listing the daemon answers with, for a requested prefix. */
+function pathSuggestionsPayload(
+  scenario: WebShellDaemonScenario,
+  prefix: string,
+): Record<string, unknown> {
+  const listed =
+    scenario.pathSuggestions?.[prefix] ??
+    scenario.pathSuggestions?.[prefix.replace(/\/+$/, '')] ??
+    [];
+  const base = !prefix || prefix.endsWith('/') ? prefix : `${prefix}/`;
+  return {
+    kind: 'workspace-path-suggestions',
+    dir: prefix,
+    sep: '/',
+    suggestions: listed.map((name) => ({ name, path: `${base}${name}` })),
+    truncated: false,
+  };
+}
+
+/**
+ * Registers a workspace and reports it, the way `POST /workspaces` does. Also
+ * used by the proxy route, which registers on the target daemon's behalf.
+ */
+function registerWorkspacePayload(
+  scenario: WebShellDaemonScenario,
+  body: unknown,
+): Record<string, unknown> {
+  const record = isRecord(body) ? body : {};
+  const cwd = typeof record['cwd'] === 'string' ? record['cwd'] : '';
+  const displayName =
+    typeof record['displayName'] === 'string'
+      ? record['displayName']
+      : undefined;
+  const workspace = {
+    id: `e2e-${cwd.replace(/[^a-zA-Z0-9]+/g, '-')}`,
+    cwd,
+    ...(displayName ? { displayName } : {}),
+    primary: false,
+    trusted: true,
+  };
+  // Mutate the capability snapshot so the refresh the app performs right
+  // after registering reports the new workspace, as the real daemon does.
+  scenario.capabilities = {
+    ...scenario.capabilities,
+    workspaces: [...(scenario.capabilities.workspaces ?? []), workspace],
+  };
+  return { ...workspace, persisted: record['persist'] === true };
+}
+
+/** The proxy routes only forward to a plain HTTP(S) origin. */
+function daemonOriginParam(raw: string | null): string {
+  if (!raw) return '';
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return '';
+    return parsed.origin;
+  } catch {
+    return '';
+  }
+}
+
+function remoteUnreachable(): Record<string, unknown> {
+  return {
+    error: 'Failed to reach remote daemon',
+    code: 'remote_unreachable',
+  };
+}
+
 async function handleDaemonRoute(
   route: Route,
   method: string,
@@ -1123,9 +1315,28 @@ async function handleDaemonRoute(
   scenario: WebShellDaemonScenario,
   body: unknown,
   searchParams: URLSearchParams = new URLSearchParams(),
+  resolvePeer?: (origin: string) => DaemonPeer | undefined,
 ): Promise<void> {
+  if (path === '/workspace-order') {
+    if (method === 'POST') {
+      if (scenario.workspaceOrderSaveError) {
+        await json(
+          route,
+          {
+            error: 'Failed to persist workspace order',
+            code: 'workspace_registration_store_error',
+          },
+          500,
+        );
+        return;
+      }
+      scenario.workspaceOrder = getRecordValue(body, 'cwds') as string[];
+    }
+    await json(route, { cwds: scenario.workspaceOrder });
+    return;
+  }
   if (method === 'GET' && path === '/health') {
-    await json(route, { ok: true, healthy: true });
+    await json(route, { status: 'ok' });
     return;
   }
   if (method === 'GET' && path === '/capabilities') {
@@ -1139,43 +1350,70 @@ async function handleDaemonRoute(
     await json(route, {});
     return;
   }
+  if (method === 'GET' && path === '/auth/subscription') {
+    // The shell reads the subscription config at boot. Keep it disabled unless
+    // a spec opts in with its own route, so the read succeeds without reaching
+    // the real network and without turning subscription UI on everywhere.
+    await json(route, { enabled: false });
+    return;
+  }
   if (method === 'GET' && path === '/workspace-path-suggestions') {
-    const prefix = searchParams.get('prefix') ?? '';
-    const listed =
-      scenario.pathSuggestions?.[prefix] ??
-      scenario.pathSuggestions?.[prefix.replace(/\/+$/, '')] ??
-      [];
-    const base = !prefix || prefix.endsWith('/') ? prefix : `${prefix}/`;
-    await json(route, {
-      kind: 'workspace-path-suggestions',
-      dir: prefix,
-      sep: '/',
-      suggestions: listed.map((name) => ({ name, path: `${base}${name}` })),
-      truncated: false,
+    await json(
+      route,
+      pathSuggestionsPayload(scenario, searchParams.get('prefix') ?? ''),
+    );
+    return;
+  }
+  // The shell browses another computer through this daemon's proxy route, so
+  // the forwarded request is served by — and recorded against — the mock
+  // installed for the target origin.
+  if (method === 'GET' && path === '/remote-workspace-path-suggestions') {
+    const peer = resolvePeer?.(daemonOriginParam(searchParams.get('daemon')));
+    if (!peer) {
+      await json(route, remoteUnreachable(), 502);
+      return;
+    }
+    peer.requests.push({
+      method: 'GET',
+      path: '/workspace-path-suggestions',
+      body: null,
+      headers: {},
     });
+    await json(
+      route,
+      pathSuggestionsPayload(peer.scenario, searchParams.get('prefix') ?? ''),
+    );
     return;
   }
   if (method === 'POST' && path === '/workspaces') {
+    await json(route, registerWorkspacePayload(scenario, body));
+    return;
+  }
+  if (method === 'POST' && path === '/remote-workspaces') {
     const record = isRecord(body) ? body : {};
-    const cwd = typeof record['cwd'] === 'string' ? record['cwd'] : '';
-    const displayName =
-      typeof record['displayName'] === 'string'
-        ? record['displayName']
-        : undefined;
-    const workspace = {
-      id: `e2e-${cwd.replace(/[^a-zA-Z0-9]+/g, '-')}`,
-      cwd,
-      ...(displayName ? { displayName } : {}),
-      primary: false,
-      trusted: true,
+    const peer = resolvePeer?.(
+      daemonOriginParam(
+        typeof record['daemon'] === 'string' ? record['daemon'] : '',
+      ),
+    );
+    if (!peer || typeof record['cwd'] !== 'string' || !record['cwd']) {
+      await json(route, remoteUnreachable(), 502);
+      return;
+    }
+    const upstreamBody = {
+      cwd: record['cwd'],
+      ...(record['persist'] === true ? { persist: true } : {}),
+      ...(typeof record['displayName'] === 'string'
+        ? { displayName: record['displayName'] }
+        : {}),
     };
-    // Mutate the capability snapshot so the refresh the app performs right
-    // after registering reports the new workspace, as the real daemon does.
-    scenario.capabilities = {
-      ...scenario.capabilities,
-      workspaces: [...(scenario.capabilities.workspaces ?? []), workspace],
-    };
-    await json(route, { ...workspace, persisted: record['persist'] === true });
+    peer.requests.push({
+      method: 'POST',
+      path: '/workspaces',
+      body: upstreamBody,
+      headers: { 'content-type': 'application/json' },
+    });
+    await json(route, registerWorkspacePayload(peer.scenario, upstreamBody));
     return;
   }
   if (method === 'GET' && path === '/workspace/providers') {
@@ -1248,6 +1486,21 @@ async function handleDaemonRoute(
         ...(overrides.hooks ?? {}),
       });
     }
+    return;
+  }
+  if (method === 'GET' && path === '/workspace/hooks') {
+    // The legacy primary-workspace route answers the same projection as the
+    // scoped /workspaces/:cwd/hooks route above.
+    const overrides = scenario.workspaceOverviews[scenario.workspaceCwd] ?? {};
+    await json(route, {
+      v: 1,
+      workspaceCwd: scenario.workspaceCwd,
+      initialized: true,
+      disabled: false,
+      hooks: [],
+      events: {},
+      ...(overrides.hooks ?? {}),
+    });
     return;
   }
   if (method === 'GET' && path === '/workspace/settings') {
@@ -1828,6 +2081,28 @@ async function handleDaemonRoute(
     );
     return;
   }
+  if (method === 'POST' && /^\/session\/[^/]+\/btw\/stream\/?$/.test(path)) {
+    const requestId = (body as Record<string, unknown>)['requestId'];
+    const answer = scenario.btwAnswer ?? 'A side answer.';
+    await route.fulfill({
+      status: 200,
+      contentType: 'text/event-stream',
+      body: ['answer', 'done']
+        .map(
+          (type) =>
+            `event: ${type}\ndata: ${JSON.stringify({ v: 1, type, requestId, answer })}\n\n`,
+        )
+        .join(''),
+    });
+    return;
+  }
+  if (
+    method === 'DELETE' &&
+    /^\/session\/[^/]+\/btw\/stream\/[^/]+$/.test(path)
+  ) {
+    await route.fulfill({ status: 204 });
+    return;
+  }
   if (method === 'POST' && /^\/session\/[^/]+\/btw\/?$/.test(path)) {
     await json(route, {
       sessionId: path.split('/')[2],
@@ -1993,8 +2268,270 @@ async function handleDaemonRoute(
       return;
     }
   }
+  const sessionMetadataMatch =
+    path.match(/^\/session\/([^/]+)\/metadata\/?$/) ??
+    path.match(/^\/workspaces\/([^/]+)\/session\/([^/]+)\/metadata\/?$/);
+  if (method === 'PATCH' && sessionMetadataMatch) {
+    // The workspace-scoped route resolves the session INSIDE the named
+    // workspace; mirror that ownership rule so a wrong-workspace write
+    // fails here like it does in production. A workspace segment that
+    // cannot be decoded fails closed (workspace_mismatch), not as an
+    // unscoped route.
+    const isWorkspaceRoute = sessionMetadataMatch[2] !== undefined;
+    const workspaceSegment = isWorkspaceRoute
+      ? decodeRouteSegment(sessionMetadataMatch[1])
+      : undefined;
+    const sessionId = decodeRouteSegment(
+      sessionMetadataMatch[2] ?? sessionMetadataMatch[1],
+    );
+    const index =
+      sessionId === undefined
+        ? -1
+        : scenario.sessions.findIndex(
+            (session) => session.sessionId === sessionId,
+          );
+    if (index < 0) {
+      await json(
+        route,
+        {
+          code: 'session_not_found',
+          message: `Session ${sessionId ?? ''} was not found.`,
+        },
+        404,
+      );
+      return;
+    }
+    if (
+      isWorkspaceRoute &&
+      (workspaceSegment === undefined ||
+        scenario.sessions[index].workspaceCwd !== workspaceSegment)
+    ) {
+      await json(
+        route,
+        {
+          code: 'workspace_mismatch',
+          message: `Session ${sessionId} does not belong to the named workspace.`,
+        },
+        400,
+      );
+      return;
+    }
+    const summary = scenario.sessions[index];
+    const displayName = readStringField(body, 'displayName');
+    const prInput = getRecordValue(body, 'pr');
+    let prs = summary.prs ?? [];
+    if (prInput !== undefined) {
+      // Mirror the real route's parseSessionPrBody: an invalid pr is a 400
+      // invalid_metadata, not a payload the mock silently accepts.
+      const pr = isRecord(prInput) ? prInput : null;
+      const number = pr?.['number'];
+      const url = pr?.['url'];
+      const state = pr?.['state'];
+      const role = pr?.['role'];
+      if (
+        pr === null ||
+        typeof number !== 'number' ||
+        !Number.isInteger(number) ||
+        number <= 0 ||
+        typeof url !== 'string' ||
+        url.length > 2048 ||
+        !/^https?:\/\//i.test(url) ||
+        Array.from(url).some((character) => {
+          const code = character.charCodeAt(0);
+          return code <= 31 || code === 127;
+        }) ||
+        (state !== undefined &&
+          state !== 'open' &&
+          state !== 'merged' &&
+          state !== 'closed') ||
+        (role !== undefined &&
+          role !== null &&
+          role !== 'review' &&
+          role !== 'verify' &&
+          role !== 'fix')
+      ) {
+        await json(
+          route,
+          {
+            // The real route answers { error, code, field } and the SDK reads
+            // `error` first; keep the same shape AND the route's verbatim text
+            // so a test asserting the production body is written against the
+            // route, not a fixture paraphrase.
+            error:
+              '`pr` must be an object with a positive integer `number` and an http(s) `url` of at most 2048 characters, without control characters, an optional `state` that is one of `open`, `merged`, or `closed`, and an optional `role` that is one of `review`, `verify`, `fix`, or null to clear',
+            code: 'invalid_metadata',
+            field: 'pr',
+          },
+          400,
+        );
+        return;
+      }
+      // Mirror upsertSessionPr's merge: an omitted state/role preserves the
+      // known entry's value (matched by number AND url), and role:null clears.
+      // The route matches on the canonical URL; the fixture uses exact equality
+      // because the bind URLs here are already canonical. A different URL is a
+      // different PR and carries nothing across (no known entry matches).
+      const known = prs.find((p) => p.number === number && p.url === url);
+      const mergedState =
+        state === 'open' || state === 'merged' || state === 'closed'
+          ? state
+          : known?.state;
+      const mergedRole =
+        role === undefined
+          ? known?.role
+          : role === 'review' || role === 'verify' || role === 'fix'
+            ? role
+            : undefined;
+      const entry = {
+        number,
+        url,
+        ...(mergedState ? { state: mergedState } : {}),
+        ...(mergedRole ? { role: mergedRole } : {}),
+      };
+      prs = [...prs.filter((p) => p.number !== number), entry];
+    }
+    scenario.sessions[index] = {
+      ...summary,
+      ...(displayName !== undefined ? { displayName } : {}),
+      prs,
+      updatedAt: now,
+    };
+    await json(route, {
+      sessionId,
+      ...(displayName !== undefined ? { displayName } : {}),
+      prs,
+    });
+    return;
+  }
   if (method === 'POST' && path === '/session') {
-    await json(route, sessionEnvelope(scenario, { attached: false }));
+    const cwd = readStringField(body, 'cwd');
+    // The primary keeps ONE snapshot (scenario.goalSnapshot) on both listing
+    // surfaces, so a primary-targeted allocation returns the primary session
+    // rather than a second copy that could disagree with it.
+    const primaryCwd =
+      (scenario.capabilities.workspaces ?? []).find((w) => w.primary)?.cwd ??
+      scenario.workspaceCwd;
+    if (
+      cwd === undefined ||
+      cwd === scenario.workspaceCwd ||
+      cwd === primaryCwd
+    ) {
+      await json(route, sessionEnvelope(scenario, { attached: false }));
+      return;
+    }
+    // Mirror the real daemon: a session is allocated IN the requested
+    // workspace, with its own id and goal snapshot — not the primary's.
+    const ws = (scenario.capabilities.workspaces ?? []).find(
+      (w) => w.cwd === cwd,
+    );
+    if (!ws) {
+      await json(
+        route,
+        {
+          error:
+            'Workspace mismatch: daemon is bound to the registered workspaces; none matched the requested workspace.',
+          code: 'workspace_mismatch',
+        },
+        400,
+      );
+      return;
+    }
+    if (!ws.trusted) {
+      await json(
+        route,
+        { error: 'Workspace is not trusted.', code: 'untrusted_workspace' },
+        403,
+      );
+      return;
+    }
+    const sessionId = `sess-alloc-${scenario.allocatedSessions.length + 1}`;
+    scenario.allocatedSessions.push({
+      sessionId,
+      workspaceCwd: cwd,
+      displayName: null,
+      snapshot: { v: 2, goal: null, activity: 'idle' },
+    });
+    await json(route, {
+      sessionId,
+      workspaceCwd: cwd,
+      attached: false,
+      clientId: scenario.clientId,
+      createdAt: now,
+      hasActivePrompt: false,
+    });
+    return;
+  }
+  const workspaceGoalsMatch = path.match(/^\/workspaces\/([^/]+)\/goals\/?$/);
+  if (method === 'GET' && workspaceGoalsMatch) {
+    const selector = decodeURIComponent(workspaceGoalsMatch[1]!);
+    // Gate on registration and trust like the real route, not on map
+    // membership: an advertised workspace with no goals lists empty, and an
+    // untrusted one is rejected even if the fixture gave it goals.
+    const ws = (scenario.capabilities.workspaces ?? []).find(
+      (w) => w.id === selector || w.cwd === selector,
+    );
+    if (!ws) {
+      await json(
+        route,
+        {
+          error:
+            'Workspace mismatch: the requested workspace is not registered with this daemon.',
+          code: 'workspace_mismatch',
+        },
+        400,
+      );
+      return;
+    }
+    if (!ws.trusted) {
+      await json(
+        route,
+        { error: 'Workspace is not trusted.', code: 'untrusted_workspace' },
+        403,
+      );
+      return;
+    }
+    // The primary workspace derives from scenario.goalSnapshot on BOTH
+    // surfaces (the real daemon reads one runtime); a map entry keyed by the
+    // primary id is ignored so the two listings can never disagree.
+    const entry = ws.primary ? undefined : scenario.goalsByWorkspace?.[ws.id];
+    const fixtureSnapshot = ws.primary
+      ? scenario.goalSnapshot
+      : entry?.snapshot;
+    const fixtureSessionId = ws.primary ? scenario.sessionId : entry?.sessionId;
+    const fixtureDisplayName = ws.primary
+      ? scenario.displayName
+      : (entry?.displayName ?? null);
+    const project = (
+      sessionId: string | undefined,
+      displayName: string | null,
+      snapshot: GoalSnapshotV2 | undefined,
+    ) => {
+      const goal = snapshot?.goal;
+      return snapshot && goal && goal.status !== 'complete'
+        ? [
+            {
+              sessionId,
+              displayName,
+              condition: goal.objective,
+              iterations: goal.turnCount,
+              setAt: goal.createdAt,
+              hasActivePrompt: snapshot.activity !== 'idle',
+              snapshot,
+            },
+          ]
+        : [];
+    };
+    // Sessions allocated into this workspace by POST /session carry their
+    // own goals, exactly like the real route enumerating live sessions.
+    const goals = [
+      ...project(fixtureSessionId, fixtureDisplayName, fixtureSnapshot),
+      ...scenario.allocatedSessions
+        .filter((session) => session.workspaceCwd === ws.cwd)
+        .flatMap((session) =>
+          project(session.sessionId, session.displayName, session.snapshot),
+        ),
+    ].sort((a, b) => b.setAt - a.setAt);
+    await json(route, { v: 1, goals, droppedCount: 0 });
     return;
   }
   if (method === 'GET' && path === '/goals') {
@@ -2022,26 +2559,81 @@ async function handleDaemonRoute(
 
   const goalMatch = path.match(/^\/session\/([^/]+)\/goal\/?$/);
   if (goalMatch) {
+    // Resolve the target snapshot by session id so controlling a secondary
+    // goal does not mutate the primary's card (the real routes address the
+    // owning runtime). The primary session always derives from
+    // scenario.goalSnapshot — the map must not hold a second primary copy.
+    const sessionId = decodeURIComponent(goalMatch[1]!);
+    const wsEntry =
+      sessionId === scenario.sessionId
+        ? undefined
+        : Object.values(scenario.goalsByWorkspace ?? {}).find(
+            (entry) => entry.sessionId === sessionId,
+          );
+    const alloc = scenario.allocatedSessions.find(
+      (session) => session.sessionId === sessionId,
+    );
+    const snapshot = wsEntry
+      ? wsEntry.snapshot
+      : alloc
+        ? alloc.snapshot
+        : scenario.goalSnapshot;
     if (method === 'GET') {
-      await json(route, { snapshot: scenario.goalSnapshot });
+      await json(route, { snapshot });
       return;
     }
-    scenario.goalSnapshot = reduceMockGoal(
-      scenario.goalSnapshot,
-      body as GoalControlRequest,
-    );
-    await json(route, { snapshot: scenario.goalSnapshot });
+    const reduced = reduceMockGoal(snapshot, body as GoalControlRequest);
+    if (wsEntry) {
+      wsEntry.snapshot = reduced;
+    } else if (alloc) {
+      alloc.snapshot = reduced;
+    } else {
+      scenario.goalSnapshot = reduced;
+    }
+    await json(route, { snapshot: reduced });
     return;
   }
-  if (method === 'GET' && /^\/session\/[^/]+\/status\/?$/.test(path)) {
+  const statusMatch = path.match(/^\/session\/([^/]+)\/status\/?$/);
+  if (method === 'GET' && statusMatch) {
     // The real route answers with a flat `DaemonSessionSummary`; a `{v, state}`
     // envelope leaves every field the client reads (workspaceCwd, displayName,
     // worktree, branch) undefined, so session metadata restoration silently
     // does nothing in every scenario.
+    const statusSessionId = decodeURIComponent(statusMatch[1]!);
+    const statusAlloc = scenario.allocatedSessions.find(
+      (session) => session.sessionId === statusSessionId,
+    );
     await json(route, {
-      sessionId: scenario.sessionId,
+      sessionId: statusAlloc ? statusAlloc.sessionId : scenario.sessionId,
+      workspaceCwd: statusAlloc
+        ? statusAlloc.workspaceCwd
+        : scenario.workspaceCwd,
+      displayName: statusAlloc ? statusAlloc.displayName : scenario.displayName,
+    });
+    return;
+  }
+  const statsMatch = path.match(/^\/session\/([^/]+)\/stats\/?$/);
+  if (method === 'GET' && statsMatch) {
+    // The composer reads session usage in the background. A mock session makes
+    // no model API calls, so it reports zero usage and the reading renders
+    // nothing; specs that exercise the reading override this route with their
+    // own totals.
+    await json(route, {
+      v: 1,
+      sessionId: decodeURIComponent(statsMatch[1] ?? ''),
       workspaceCwd: scenario.workspaceCwd,
-      displayName: scenario.displayName,
+      sessionStartTimeMs: Date.now() - 60_000,
+      durationMs: 60_000,
+      promptCount: 0,
+      models: {},
+      tools: {
+        totalCalls: 0,
+        totalSuccess: 0,
+        totalFail: 0,
+        totalDurationMs: 0,
+        byName: {},
+      },
+      files: { totalLinesAdded: 0, totalLinesRemoved: 0 },
     });
     return;
   }
@@ -2120,12 +2712,58 @@ async function handleDaemonRoute(
       return;
     }
     if (action === 'transcript') {
-      const page = scenario.transcriptPage;
+      const cursor = searchParams.get('cursor');
+      // The daemon refuses a cursor sent with a direction or an anchor: the
+      // cursor already carries both. Answer the same way, so a client that
+      // sends the pair fails here rather than only against a real daemon.
+      if (
+        cursor &&
+        (searchParams.has('direction') ||
+          searchParams.has('beforeRecordId') ||
+          searchParams.has('atRecordId'))
+      ) {
+        await json(
+          route,
+          {
+            error: 'Invalid transcript cursor and anchor combination',
+            code: 'invalid_transcript_cursor',
+          },
+          400,
+        );
+        return;
+      }
+      const configured = scenario.transcriptPage;
+      let page: MockTranscriptPage | undefined = configured;
+      if (cursor) {
+        const entry = configured?.older?.[cursor];
+        if (entry && 'status' in entry) {
+          let failed = failedTranscriptReads.get(scenario);
+          if (!failed) {
+            failed = new Set();
+            failedTranscriptReads.set(scenario, failed);
+          }
+          if (!entry.then || !failed.has(cursor)) {
+            failed.add(cursor);
+            await json(
+              route,
+              { error: 'Transcript page is unavailable' },
+              entry.status,
+            );
+            return;
+          }
+          page = entry.then;
+        } else {
+          page = entry;
+        }
+      }
       await json(route, {
         v: 1,
         sessionId,
         events: page?.events ?? [],
         hasMore: page?.hasMore ?? false,
+        ...(page?.nextCursor !== undefined
+          ? { nextCursor: page.nextCursor }
+          : {}),
       });
       return;
     }
@@ -2213,6 +2851,46 @@ async function handleDaemonRoute(
       const configId = readStringField(body, 'configId');
       const value = readStringField(body, 'value');
       const persist = getRecordValue(body, 'persist');
+      if (configId === 'workflow_mode') {
+        const currentConfigOptions = Array.isArray(scenario.state.configOptions)
+          ? scenario.state.configOptions
+          : [];
+        const workflow = currentConfigOptions.find(
+          (option) => isRecord(option) && option['id'] === configId,
+        );
+        const metadata = getRecordValue(
+          getRecordValue(workflow, '_meta'),
+          'qwen.workflowMode',
+        );
+        if (
+          (value !== 'on' && value !== 'off') ||
+          (isRecord(body) && 'persist' in body) ||
+          !isRecord(metadata) ||
+          typeof metadata['available'] !== 'boolean' ||
+          (value === 'on' && !metadata['available'])
+        ) {
+          await badRequest(route, 'Unsupported workflow mode request.');
+          return;
+        }
+        const configOptions = currentConfigOptions.map((option) =>
+          isRecord(option) && option['id'] === configId
+            ? {
+                ...option,
+                currentValue: value,
+                _meta: {
+                  ...(isRecord(option['_meta']) ? option['_meta'] : {}),
+                  'qwen.workflowMode': {
+                    ...metadata,
+                    effective: value === 'on' && metadata['available'],
+                  },
+                },
+              }
+            : option,
+        );
+        scenario.state.configOptions = configOptions;
+        await json(route, { configOptions, persisted: true });
+        return;
+      }
       if (
         configId !== 'reasoning_effort' ||
         !value ||

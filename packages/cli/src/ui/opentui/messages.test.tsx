@@ -360,28 +360,32 @@ describe('message meta (ink glyph/color parity)', () => {
   });
 
   it('keeps the thinking collapse hint semantics', () => {
-    const live = thinkingMeta(false, false, true);
+    const live = thinkingMeta(false, false);
     expect(live.icon).toBe('∵\uFE0E');
     expect(live.collapsed).toBe(false);
-    const collapsed = thinkingMeta(true, false, true);
+    const collapsed = thinkingMeta(true, false);
     expect(collapsed.icon).toBe('∴\uFE0E');
     expect(collapsed.hint).toContain('ctrl+o');
+    // ink offers the click half only while the pointer is captured, so
+    // ui.mouseTracking: false must drop it rather than advertise a dead click.
+    expect(collapsed.hint).toContain('click');
+    expect(thinkingMeta(true, false, undefined, false).hint).toBe(
+      '(ctrl+o to expand)',
+    );
   });
 
   it('labels a committed thought with ink’s duration wording', () => {
-    expect(thinkingMeta(true, false, false, 400).label).toBe('Thought briefly');
-    expect(thinkingMeta(true, false, false, 12_000).label).toBe(
-      'Thought for 12s',
-    );
-    expect(thinkingMeta(true, true, false, 12_000).label).toBe(
-      'Thought for 12s',
-    );
+    expect(thinkingMeta(true, false, 400).label).toBe('Thought briefly');
+    expect(thinkingMeta(true, false, 12_000).label).toBe('Thought for 12s');
+    expect(thinkingMeta(true, true, 12_000).label).toBe('Thought for 12s');
     // No duration stamped: ink falls back to the pending wording rather than
     // naming a time it never measured.
-    expect(thinkingMeta(true, false, false).label).toBe('Thinking');
-    // The duration is only stamped when the thought ends, so a live row never
-    // carries one.
-    expect(thinkingMeta(false, false, false, 12_000).label).toBe('Thinking…');
+    expect(thinkingMeta(true, false).label).toBe('Thinking');
+  });
+
+  it('suffixes the live label with the elapsed time', () => {
+    expect(thinkingMeta(false, false).label).toBe('Thinking…');
+    expect(thinkingMeta(false, false, 12_000).label).toBe('Thinking… 12s');
   });
 
   it('marks canceled tools for strikethrough', () => {

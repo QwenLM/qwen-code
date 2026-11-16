@@ -119,7 +119,7 @@ describe('Omni integration with CodeModeOnly', () => {
           callId: 'exec-media',
           name: 'exec',
           args: {
-            source: `const result = await tools.read_media({}); result.content?.forEach(image); ${scriptFails ? "throw new Error('later failure');" : ''}`,
+            source: `const result = await tools.read_media({}); text(result.output); result.content?.forEach(image); ${scriptFails ? "throw new Error('later failure');" : ''}`,
           },
           isClientInitiated: false,
           prompt_id: 'media-prompt',

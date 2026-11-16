@@ -1,0 +1,20 @@
+[Unit]
+Description=Qwen Code ephemeral GitHub Actions runners
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/qwen-ephemeral-runner/credentials.env
+WorkingDirectory=/opt/qwen-ephemeral-runner
+ExecStart=/usr/bin/env node /opt/qwen-ephemeral-runner/manager.mjs /etc/qwen-ephemeral-runner/config.json
+Restart=always
+RestartSec=10
+KillMode=mixed
+# Must exceed drainTimeoutSeconds + shutdownGraceSeconds, or systemd kills the
+# manager mid-drain and leaves the containers it was still draining behind.
+TimeoutStopSec=3300
+
+[Install]
+WantedBy=multi-user.target

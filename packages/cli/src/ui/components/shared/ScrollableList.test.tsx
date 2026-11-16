@@ -324,6 +324,45 @@ describe('<ScrollableList /> mouse scrolling', () => {
     expect(lastFrame()).toContain('item-0');
   });
 
+  it('a focus loss cancels a still-pending wheel flush', async () => {
+    // Regression: whoever takes focus may have just pulled the tail into view
+    // (a pending approval dialog at the end of the transcript). A burst armed
+    // before that flip must not land after it — with both subscribers now off,
+    // it scrolls the answering surface out of the render window and nothing on
+    // this list can bring it back.
+    const renderItem = ({ item }: { item: Item }) => <Text>{item.label}</Text>;
+    const Wrapper = ({ focused }: { focused: boolean }) => (
+      <ScrollableList<Item>
+        hasFocus={focused}
+        data={makeItems(50)}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={0}
+        containerHeight={5}
+        width={40}
+        showScrollbar={false}
+      />
+    );
+
+    const { stdin, lastFrame, rerender } = render(
+      withKeypress(<Wrapper focused />),
+    );
+    rerender(withKeypress(<Wrapper focused />));
+    await act(async () => {});
+    expect(lastFrame()).toContain('item-0');
+
+    // Queue a burst, then take focus away inside the same coalescing window.
+    await act(async () => {
+      stdin.write(wheelDown(5, 5));
+      stdin.write(wheelDown(5, 5));
+      rerender(withKeypress(<Wrapper focused={false} />));
+    });
+    await flushScrollFrame();
+
+    expect(lastFrame()).toContain('item-0');
+  });
+
   it('does not start a scrollbar drag when content fits the viewport', async () => {
     const renderItem = ({ item }: { item: Item }) => <Text>{item.label}</Text>;
     const Wrapper = () => (

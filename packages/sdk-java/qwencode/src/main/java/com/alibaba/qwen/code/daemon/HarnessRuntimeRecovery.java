@@ -1,0 +1,70 @@
+package com.alibaba.qwen.code.daemon;
+
+import java.util.List;
+
+/** Read-only Runtime reconciliation snapshot returned by a Hosted load. */
+public final class HarnessRuntimeRecovery {
+    private final String phase;
+    private final String checkpointId;
+    private final String activationId;
+    private final List<HarnessRuntimeExecutionRecovery> executions;
+
+    HarnessRuntimeRecovery(String phase, String checkpointId,
+            String activationId,
+            List<HarnessRuntimeExecutionRecovery> executions) {
+        this.phase = phase;
+        this.checkpointId = checkpointId;
+        this.activationId = activationId;
+        this.executions = List.copyOf(executions);
+    }
+
+    public String getPhase() {
+        return phase;
+    }
+
+    public String getCheckpointId() {
+        return checkpointId;
+    }
+
+    public String getActivationId() {
+        return activationId;
+    }
+
+    public List<HarnessRuntimeExecutionRecovery> getExecutions() {
+        return executions;
+    }
+
+    public boolean hasUnknownOutcome() {
+        return executions.stream().anyMatch(
+                execution -> "unknown".equals(execution.getOutcome()));
+    }
+
+    public boolean isContinuationReady() {
+        // await_agent: every wait run is observable (the relay ledger), so
+        // outcomes are always known; the continue route re-enters the wait
+        // and folds what the checkpoint still owes (#13708). H4e-b3's
+        // await_command waits are the same shape: the member's own
+        // session_command journal is the ledger, and every run's reply is
+        // durable evidence once it lands.
+        if ("await_agent".equals(phase) || "await_command".equals(phase)) {
+            return !executions.isEmpty() && executions.stream().allMatch(
+                    execution -> "known".equals(execution.getOutcome()));
+        }
+        return "results_ready".equals(phase) && !executions.isEmpty()
+                && executions.stream().allMatch(execution ->
+                        "known".equals(execution.getOutcome())
+                                && "settled".equals(
+                                        execution.getStatus().get("state")));
+    }
+
+    public boolean isCancellationReady() {
+        return ("await_runtime".equals(phase)
+                || "await_agent".equals(phase)
+                || "await_command".equals(phase)
+                || "results_ready".equals(phase)) && !executions.isEmpty()
+                && executions.stream().allMatch(execution ->
+                        "known".equals(execution.getOutcome())
+                                || "await_runtime".equals(phase)
+                                        && "unknown".equals(execution.getOutcome()));
+    }
+}

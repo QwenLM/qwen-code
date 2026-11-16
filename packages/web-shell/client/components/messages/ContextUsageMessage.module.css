@@ -138,6 +138,24 @@
   color: var(--agent-blue-500);
 }
 
+.detailNameButton {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--agent-blue-500);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.detailNameButton:hover {
+  text-decoration: underline;
+}
+
 .sectionTitle {
   margin-top: 8px;
   color: var(--foreground);

@@ -23,7 +23,7 @@ interface EffortDialogProps {
   efforts?: readonly ReasoningEffort[];
 }
 
-const EFFORT_DESCRIPTIONS: Record<ReasoningEffort, string> = {
+export const EFFORT_DESCRIPTIONS: Record<ReasoningEffort, string> = {
   low: 'Fastest and cheapest; least reasoning.',
   medium: 'Balanced speed, cost, and reasoning.',
   high: 'Default — strong reasoning for hard tasks.',

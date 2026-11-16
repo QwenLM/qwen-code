@@ -5,6 +5,7 @@
 }
 
 .card {
+  container-type: inline-size;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--background);
@@ -41,6 +42,12 @@
   color: var(--foreground);
   font-size: 14px;
   font-weight: 400;
+}
+
+.artifactTitle {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .reviewSummary {
@@ -206,5 +213,18 @@
 .artifactMeta {
   color: var(--muted-foreground);
   font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+@container (max-width: 420px) {
+  .artifactSummary {
+    grid-template-columns: 36px minmax(0, 1fr);
+  }
+
+  .artifactSummary .actions {
+    grid-column: 2;
+    justify-self: end;
+  }
 }

@@ -202,6 +202,10 @@ d('BOM end-to-end integration', () => {
 });
 
 describe('BOM with defaultFileEncoding configuration', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it('should create new file with BOM when defaultFileEncoding is utf-8-bom', async () => {
     const rigWithBOM = new TestRig();
     await rigWithBOM.setup('bom-default-encoding', {
@@ -213,14 +217,19 @@ describe('BOM with defaultFileEncoding configuration', () => {
     });
 
     const filename = 'new-file-with-bom.js';
+    const filePath = join(rigWithBOM.testDir!, filename);
 
-    // Ask Qwen Code to create a new file
-    const prompt = `create a new file called ${filename} with content: const greeting = "hello";`;
-    await rigWithBOM.run(prompt);
-    await rigWithBOM.waitForToolCall('write_file');
+    await runForcedToolCallScenario({
+      rig: rigWithBOM,
+      toolCall: fakeToolCall('write_file', {
+        file_path: filePath,
+        content: 'const greeting = "hello";',
+      }),
+      prompt: `create a new file called ${filename} with content: const greeting = "hello";`,
+      finalResponse: 'Done.',
+    });
 
     // Read the created file as raw bytes
-    const filePath = join(rigWithBOM.testDir!, filename);
     const fileBuffer = readFileSync(filePath);
 
     // Verify BOM is present (first 3 bytes should be EF BB BF)

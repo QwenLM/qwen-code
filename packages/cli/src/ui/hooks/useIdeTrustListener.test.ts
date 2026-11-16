@@ -79,6 +79,19 @@ describe('useIdeTrustListener', () => {
     );
   });
 
+  it('does not initialize or disconnect an IDE client when disabled', () => {
+    vi.mocked(trustedFolders.isWorkspaceTrusted).mockReturnValue({
+      isTrusted: true,
+      source: undefined,
+    });
+    vi.mocked(IdeClient.getInstance).mockClear();
+    const { unmount } = renderHook(() => useIdeTrustListener(false));
+    unmount();
+    expect(IdeClient.getInstance).not.toHaveBeenCalled();
+    expect(mockIdeClient.addTrustChangeListener).not.toHaveBeenCalled();
+    expect(mockIdeClient.addStatusChangeListener).not.toHaveBeenCalled();
+  });
+
   it('should initialize correctly with no trust information', () => {
     vi.mocked(trustedFolders.isWorkspaceTrusted).mockReturnValue({
       isTrusted: undefined,

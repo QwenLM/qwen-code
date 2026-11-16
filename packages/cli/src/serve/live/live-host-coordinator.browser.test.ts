@@ -217,6 +217,26 @@ describe('LiveHostCoordinator browser Host', () => {
     ]);
   });
 
+  it('pushes the coordinator locator to the browser Host as soon as it exists', () => {
+    const value = coordinator();
+    const socket = connectBrowser(value);
+    const call = value.start('new');
+    value.setCoordinator(call.epoch, {
+      workspaceCwd: '/conversations/live-1',
+      sessionId: 'coordinator-1',
+    });
+
+    expect(socket.messages().at(-1)).toMatchObject({
+      type: 'host.state',
+      status: {
+        coordinator: {
+          workspaceCwd: '/conversations/live-1',
+          sessionId: 'coordinator-1',
+        },
+      },
+    });
+  });
+
   it('does not mark a native status with a kind', () => {
     const value = coordinator();
     connectNative(value);
@@ -499,5 +519,121 @@ describe('LiveHostCoordinator browser Host', () => {
       .messages()
       .find((message) => message.type === 'host.welcome');
     expect(welcome).toMatchObject({ status: { shortcut: 'Alt+Space' } });
+  });
+});
+
+describe('browser screen feed ownership', () => {
+  it('advertises the extension only for a wired browser endpoint', () => {
+    const value = coordinator({ handlers: { onScreenFeed: vi.fn() } });
+    const socket = connectBrowser(value, sharingHello());
+    expect(
+      socket.messages().find((m) => m.type === 'host.welcome'),
+    ).toMatchObject({ screenFeedV1: true });
+    const old = connectBrowser(coordinator(), sharingHello());
+    expect(
+      old.messages().find((m) => m.type === 'host.welcome'),
+    ).not.toHaveProperty('screenFeedV1');
+  });
+
+  it('routes only the active epoch and feed, without restarting retransmissions', () => {
+    const handler = vi.fn();
+    const value = coordinator({ handlers: { onScreenFeed: handler } });
+    const socket = connectBrowser(value, sharingHello());
+    const call = value.start('new');
+    value.setCallState(call.epoch, 'listening');
+    const start = {
+      type: 'host.screen_feed_start',
+      epoch: call.epoch,
+      feedId: 'watch-1',
+    };
+    socket.receive({ ...start, epoch: call.epoch - 1 });
+    expect(handler).not.toHaveBeenCalled();
+    socket.receive(start);
+    socket.receive(start);
+    expect(handler).toHaveBeenCalledExactlyOnceWith(start);
+    socket.receive({
+      type: 'host.screen_feed_frame',
+      epoch: call.epoch,
+      feedId: 'obsolete',
+      image: JPEG,
+    });
+    expect(handler).toHaveBeenCalledOnce();
+    socket.receive({
+      type: 'host.screen_feed_frame',
+      epoch: call.epoch,
+      feedId: 'watch-1',
+      image: JPEG,
+    });
+    expect(handler).toHaveBeenCalledTimes(2);
+    expect(
+      value.setScreenFeedState(call.epoch, 'obsolete', 'streaming', 'old'),
+    ).toBe(false);
+    expect(value.setScreenFeedState(call.epoch, 'watch-1', 'streaming')).toBe(
+      true,
+    );
+    socket.receive({
+      type: 'host.screen_feed_stop',
+      epoch: call.epoch,
+      feedId: 'watch-1',
+    });
+    expect(handler).toHaveBeenLastCalledWith({
+      type: 'host.screen_feed_stop',
+      epoch: call.epoch,
+      feedId: 'watch-1',
+    });
+    value.stop();
+    socket.receive(start);
+    expect(handler).toHaveBeenCalledTimes(3);
+  });
+
+  it('refuses streaming without a declared share capability', () => {
+    const handler = vi.fn();
+    const value = coordinator({ handlers: { onScreenFeed: handler } });
+    const socket = connectBrowser(value);
+    const call = value.start('new');
+    value.setCallState(call.epoch, 'listening');
+    socket.receive({
+      type: 'host.screen_feed_start',
+      epoch: call.epoch,
+      feedId: 'watch',
+    });
+    expect(handler).not.toHaveBeenCalled();
+    expect(socket.messages().at(-1)).toMatchObject({
+      type: 'host.error',
+      code: 'invalid_message',
+    });
+  });
+
+  it('rejects native-host feed messages', () => {
+    const handler = vi.fn();
+    const value = coordinator({ handlers: { onScreenFeed: handler } });
+    const socket = new FakeSocket();
+    value.attachHost(socket as unknown as WebSocket, value.daemonInstanceNonce);
+    socket.receive(nativeHello());
+    const call = value.start('new');
+    value.setCallState(call.epoch, 'listening');
+    socket.receive({
+      type: 'host.screen_feed_start',
+      epoch: call.epoch,
+      feedId: 'watch',
+    });
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { type: 'host.screen_feed_start', epoch: -1 },
+    { type: 'host.screen_feed_start', feedId: 'x'.repeat(129) },
+    { type: 'host.screen_feed_frame', image: 'not-jpeg' },
+    {
+      type: 'host.screen_feed_frame',
+      image: Buffer.alloc(191 * 1024).toString('base64'),
+    },
+  ])('rejects invalid or unbounded input: $type', (payload) => {
+    const handler = vi.fn();
+    const value = coordinator({ handlers: { onScreenFeed: handler } });
+    const socket = connectBrowser(value, sharingHello());
+    socket.receive({ epoch: 1, feedId: 'watch', ...payload });
+    expect(socket.closeCode).toBe(1002);
+    expect(handler).not.toHaveBeenCalled();
   });
 });

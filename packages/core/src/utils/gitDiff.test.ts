@@ -46,6 +46,80 @@ async function makeRepo(): Promise<string> {
   return dir;
 }
 
+const rmDir = (dir: string) => fs.rm(dir, { recursive: true, force: true });
+const ZERO_SHA = '0000000000000000000000000000000000000000\n';
+
+type Files = Record<string, string | Buffer>;
+
+async function write(dir: string, files: Files): Promise<void> {
+  for (const [name, data] of Object.entries(files)) {
+    await fs.writeFile(path.join(dir, name), data);
+  }
+}
+
+/** Writes `files`, then stages everything and commits. */
+async function commit(dir: string, files: Files, msg = 'init'): Promise<void> {
+  await write(dir, files);
+  await git(dir, 'add', '.');
+  await git(dir, 'commit', '-q', '-m', msg);
+}
+
+async function headSha(dir: string): Promise<string> {
+  const { stdout } = await execFileAsync('git', ['rev-parse', 'HEAD'], {
+    cwd: dir,
+  });
+  return stdout.trim();
+}
+
+async function addWorktree(dir: string): Promise<string> {
+  const wtPath = path.join(dir, 'wt');
+  await git(dir, 'worktree', 'add', '-q', wtPath, '-b', 'side');
+  return wtPath;
+}
+
+/** Runs `fn` in a fresh temp dir that is not a git repo, then removes it. */
+async function inPlainDir(fn: (dir: string) => Promise<void>): Promise<void> {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-plain-'));
+  try {
+    await fn(dir);
+  } finally {
+    await rmDir(dir);
+  }
+}
+
+let repo: string;
+
+/** A fresh `repo` per test in this describe, optionally seeded by a commit. */
+function useFreshRepo(seed?: Files): void {
+  beforeEach(async () => {
+    repo = await makeRepo();
+    if (seed) await commit(repo, seed);
+  });
+  afterEach(() => rmDir(repo));
+}
+
+/** fetchGitDiff result that must be non-null. */
+async function diffOf(cwd: string) {
+  const result = await fetchGitDiff(cwd);
+  expect(result).not.toBeNull();
+  return result!;
+}
+
+/** fetchGitDiffHunksForFile result that must be non-null. */
+async function hunksFor(cwd: string, file: string, oldPath?: string) {
+  const result = await fetchGitDiffHunksForFile(cwd, file, oldPath);
+  expect(result).not.toBeNull();
+  return result!;
+}
+
+const untrackedEntry = (added: number, isBinary = false) => ({
+  added,
+  removed: 0,
+  isBinary,
+  isUntracked: true,
+  truncated: false,
+});
+
 describe('parseGitNumstat', () => {
   it('parses added/removed counts and file totals (NUL-delimited -z format)', () => {
     const out = '3\t1\tsrc/a.ts\0' + '10\t0\tsrc/b.ts\0' + '0\t5\tsrc/c.ts\0';
@@ -96,9 +170,8 @@ describe('parseGitNumstat', () => {
   });
 
   it('preserves literal tabs in tracked filenames via the -z wire format', () => {
-    // With -z, git emits the raw path; no C-style quoting. `split('\t')`
-    // would mis-attribute characters after the first tab, so the parser has
-    // to use index-based slicing instead.
+    // -z emits the raw path, no C-quoting; `split('\t')` would mis-attribute
+    // characters after the first tab, so the parser slices by index.
     const out = '1\t2\tweird\tname.ts\0';
     const { perFileStats } = parseGitNumstat(out);
     expect(perFileStats.has('weird\tname.ts')).toBe(true);
@@ -114,8 +187,8 @@ describe('parseGitNumstat', () => {
     const out = '0\t0\t\0' + 'src/old.ts\0' + 'src/new.ts\0';
     const { stats, perFileStats } = parseGitNumstat(out);
     expect(stats.filesCount).toBe(1);
-    // Keyed by the current (new) path so the single-file endpoint can address
-    // it; the old path is carried for display.
+    // Keyed by the new path so the single-file endpoint can address it; the
+    // old path is carried for display.
     expect(perFileStats.has('src/new.ts')).toBe(true);
     expect(perFileStats.get('src/new.ts')?.oldPath).toBe('src/old.ts');
   });
@@ -131,8 +204,8 @@ describe('parseDeletedFromNameStatus', () => {
 
   it('skips both halves of rename and copy entries', () => {
     // Renames/copies span three tokens: `R<score>\0<old>\0<new>\0`. Neither
-    // path is "deleted" in the user sense — the file still exists under
-    // the new name.
+    // path is "deleted" in the user sense: the file lives on under the new
+    // name.
     const out =
       'R100\0old.txt\0new.txt\0' + 'C75\0src.txt\0copy.txt\0' + 'D\0gone.txt\0';
     expect(parseDeletedFromNameStatus(out)).toEqual(new Set(['gone.txt']));
@@ -239,9 +312,9 @@ index 0000000..3333333
   });
 
   it('skips a stray no-newline marker before any hunk header without throwing', () => {
-    // A malformed/truncated diff could carry a `\` line before any `@@`
-    // header; the pre-hunk guard skips it rather than throwing on a null
-    // currentHunk (which would lose every subsequent file's hunks).
+    // A malformed/truncated diff can carry a `\` line before any `@@`; the
+    // pre-hunk guard skips it instead of throwing on a null currentHunk
+    // (which would lose every subsequent file's hunks).
     const diff = `diff --git a/f.txt b/f.txt
 --- a/f.txt
 +++ b/f.txt
@@ -259,35 +332,23 @@ index 0000000..3333333
     expect(parseGitDiff('   \n').size).toBe(0);
   });
 
-  it('caps per-file lines at MAX_LINES_PER_FILE', () => {
-    const header = `diff --git a/big.ts b/big.ts
+  const n = MAX_LINES_PER_FILE + 50;
+  const bigDiff = `diff --git a/big.ts b/big.ts
 index 1111111..2222222 100644
 --- a/big.ts
 +++ b/big.ts
-@@ -1,${MAX_LINES_PER_FILE + 50} +1,${MAX_LINES_PER_FILE + 50} @@
+@@ -1,${n} +1,${n} @@
+${Array.from({ length: n }, (_, i) => ` line${i}`).join('\n')}
 `;
-    const body = Array.from(
-      { length: MAX_LINES_PER_FILE + 50 },
-      (_, i) => ` line${i}`,
-    ).join('\n');
-    const result = parseGitDiff(header + body + '\n');
-    const hunk = result.get('big.ts')![0];
+
+  it('caps per-file lines at MAX_LINES_PER_FILE', () => {
+    const hunk = parseGitDiff(bigDiff).get('big.ts')![0];
     expect(hunk.lines.length).toBe(MAX_LINES_PER_FILE);
   });
 
   it('records the capped file in the provided truncatedPaths set', () => {
-    const header = `diff --git a/big.ts b/big.ts
-index 1111111..2222222 100644
---- a/big.ts
-+++ b/big.ts
-@@ -1,${MAX_LINES_PER_FILE + 50} +1,${MAX_LINES_PER_FILE + 50} @@
-`;
-    const body = Array.from(
-      { length: MAX_LINES_PER_FILE + 50 },
-      (_, i) => ` line${i}`,
-    ).join('\n');
     const truncatedPaths = new Set<string>();
-    parseGitDiff(header + body + '\n', truncatedPaths);
+    parseGitDiff(bigDiff, truncatedPaths);
     // The caller keys its `truncated` flag off this set, so it must name the
     // file that actually lost lines to the cap.
     expect(truncatedPaths.has('big.ts')).toBe(true);
@@ -295,170 +356,102 @@ index 1111111..2222222 100644
 });
 
 describe('fetchGitDiff', () => {
-  let repo: string;
+  useFreshRepo();
 
-  beforeEach(async () => {
-    repo = await makeRepo();
-  });
-
-  afterEach(async () => {
-    await fs.rm(repo, { recursive: true, force: true });
-  });
-
-  it('returns null when not in a git repo', async () => {
-    const plain = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-plain-'));
-    try {
+  it('returns null when not in a git repo', () =>
+    inPlainDir(async (plain) => {
       expect(await fetchGitDiff(plain)).toBeNull();
-    } finally {
-      await fs.rm(plain, { recursive: true, force: true });
-    }
-  });
+    }));
 
   it('captures tracked modifications and counts lines in untracked text files', async () => {
-    await fs.writeFile(path.join(repo, 'tracked.txt'), 'one\ntwo\nthree\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'init');
-
-    await fs.writeFile(
-      path.join(repo, 'tracked.txt'),
-      'one\ntwo\nthree\nfour\n',
-    );
-    await fs.writeFile(path.join(repo, 'new.txt'), 'brand new\nsecond\n');
-
-    const result = await fetchGitDiff(repo);
-    expect(result).not.toBeNull();
-    expect(result!.stats.filesCount).toBe(2);
-    // Tracked: +1 from adding `four`. Untracked `new.txt`: 2 lines.
-    expect(result!.stats.linesAdded).toBe(3);
-    expect(result!.perFileStats.get('tracked.txt')?.added).toBe(1);
-    expect(result!.perFileStats.get('new.txt')).toEqual({
-      added: 2,
-      removed: 0,
-      isBinary: false,
-      isUntracked: true,
-      truncated: false,
+    await commit(repo, { 'tracked.txt': 'one\ntwo\nthree\n' });
+    await write(repo, {
+      'tracked.txt': 'one\ntwo\nthree\nfour\n',
+      'new.txt': 'brand new\nsecond\n',
     });
+
+    const result = await diffOf(repo);
+    expect(result.stats.filesCount).toBe(2);
+    // Tracked: +1 from adding `four`. Untracked `new.txt`: 2 lines.
+    expect(result.stats.linesAdded).toBe(3);
+    expect(result.perFileStats.get('tracked.txt')?.added).toBe(1);
+    expect(result.perFileStats.get('new.txt')).toEqual(untrackedEntry(2));
   });
 
   it('marks oversized untracked text files as truncated', async () => {
-    await fs.writeFile(path.join(repo, 'seed.txt'), 'x\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'init');
+    await commit(repo, { 'seed.txt': 'x\n' });
+    // 1.5 MB (15,000 × 100-byte lines) exceeds UNTRACKED_READ_CAP_BYTES
+    // (1 MB), so the counter sees only part of it. The flag lets the UI mark
+    // `+N` as a lower bound instead of silently under-reporting.
+    const totalLines = 15_000;
+    await write(repo, {
+      'big.log': ('a'.repeat(99) + '\n').repeat(totalLines),
+    });
 
-    // Write a 1.5 MB text file — larger than UNTRACKED_READ_CAP_BYTES (1 MB),
-    // so the counter can only see part of the lines. The flag lets the UI
-    // mark `+N` as a lower bound instead of silently under-reporting.
-    const line = 'a'.repeat(99) + '\n'; // 100 bytes per line
-    const totalLines = 15_000; // 1.5 MB
-    await fs.writeFile(path.join(repo, 'big.log'), line.repeat(totalLines));
-
-    const result = await fetchGitDiff(repo);
-    expect(result).not.toBeNull();
-    const entry = result!.perFileStats.get('big.log');
+    const entry = (await diffOf(repo)).perFileStats.get('big.log');
     expect(entry?.isUntracked).toBe(true);
     expect(entry?.isBinary).toBe(false);
     expect(entry?.truncated).toBe(true);
-    // We counted at most UNTRACKED_READ_CAP_BYTES / 100 = 10_000 lines, less
-    // than the file's real line count.
+    // At most UNTRACKED_READ_CAP_BYTES / 100 = 10,000 lines were counted.
     expect(entry?.added).toBeGreaterThan(0);
     expect(entry!.added).toBeLessThan(totalLines);
   });
 
   it('flags untracked binary files without counting lines', async () => {
-    await fs.writeFile(path.join(repo, 'seed.txt'), 'x\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'init');
-
+    await commit(repo, { 'seed.txt': 'x\n' });
     // A NUL byte in the first few bytes is git's own binary heuristic.
-    await fs.writeFile(
-      path.join(repo, 'blob.bin'),
-      Buffer.from([0x89, 0x00, 0xff, 0x10]),
-    );
+    await write(repo, { 'blob.bin': Buffer.from([0x89, 0x00, 0xff, 0x10]) });
 
-    const result = await fetchGitDiff(repo);
-    expect(result).not.toBeNull();
-    expect(result!.perFileStats.get('blob.bin')).toEqual({
-      added: 0,
-      removed: 0,
-      isBinary: true,
-      isUntracked: true,
-      truncated: false,
-    });
+    const result = await diffOf(repo);
+    expect(result.perFileStats.get('blob.bin')).toEqual(
+      untrackedEntry(0, true),
+    );
     // Binary bytes must not contaminate the linesAdded total.
-    expect(result!.stats.linesAdded).toBe(0);
+    expect(result.stats.linesAdded).toBe(0);
   });
 
   it('returns zero stats on a clean working tree', async () => {
-    await fs.writeFile(path.join(repo, 'a.txt'), 'hello\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'init');
+    await commit(repo, { 'a.txt': 'hello\n' });
 
-    const result = await fetchGitDiff(repo);
-    expect(result).not.toBeNull();
-    expect(result!.stats).toEqual({
+    const result = await diffOf(repo);
+    expect(result.stats).toEqual({
       filesCount: 0,
       linesAdded: 0,
       linesRemoved: 0,
     });
-    expect(result!.perFileStats.size).toBe(0);
+    expect(result.perFileStats.size).toBe(0);
   });
 
   it('returns null during a transient merge state', async () => {
-    await fs.writeFile(path.join(repo, 'a.txt'), 'hello\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'init');
+    await commit(repo, { 'a.txt': 'hello\n' });
     // Fake a merge in progress by writing MERGE_HEAD.
-    await fs.writeFile(
-      path.join(repo, '.git', 'MERGE_HEAD'),
-      '0000000000000000000000000000000000000000\n',
-    );
+    await write(repo, { '.git/MERGE_HEAD': ZERO_SHA });
     expect(await fetchGitDiff(repo)).toBeNull();
     expect((await fetchGitDiffHunks(repo)).size).toBe(0);
   });
 });
 
 describe('fetchGitDiffHunks', () => {
-  let repo: string;
-
-  beforeEach(async () => {
-    repo = await makeRepo();
-  });
-
-  afterEach(async () => {
-    await fs.rm(repo, { recursive: true, force: true });
-  });
+  useFreshRepo();
 
   it('returns hunks for modified tracked files', async () => {
-    await fs.writeFile(path.join(repo, 'a.txt'), 'one\ntwo\nthree\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'init');
-
-    await fs.writeFile(path.join(repo, 'a.txt'), 'one\nTWO\nthree\n');
-    const hunks = await fetchGitDiffHunks(repo);
-    const fileHunks = hunks.get('a.txt');
+    await commit(repo, { 'a.txt': 'one\ntwo\nthree\n' });
+    await write(repo, { 'a.txt': 'one\nTWO\nthree\n' });
+    const fileHunks = (await fetchGitDiffHunks(repo)).get('a.txt');
     expect(fileHunks).toBeDefined();
-    expect(fileHunks![0].lines.some((l: string) => l.startsWith('-two'))).toBe(
-      true,
-    );
-    expect(fileHunks![0].lines.some((l: string) => l.startsWith('+TWO'))).toBe(
-      true,
-    );
+    const lines = fileHunks![0].lines;
+    expect(lines.some((l: string) => l.startsWith('-two'))).toBe(true);
+    expect(lines.some((l: string) => l.startsWith('+TWO'))).toBe(true);
   });
 
   it('preserves content lines that start with --- / +++ / index', async () => {
-    await fs.writeFile(
-      path.join(repo, 'notes.md'),
-      'keep\n---a/foo\n+++b/bar\nindex deadbeef\nkeep2\n',
-    );
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'init');
-
-    // Remove every diff-lookalike line; the added/removed lines should still
-    // round-trip through parseGitDiff even though their prefixes match
-    // file-header sentinels.
-    await fs.writeFile(path.join(repo, 'notes.md'), 'keep\nkeep2\n');
-    const hunks = await fetchGitDiffHunks(repo);
-    const fileHunks = hunks.get('notes.md');
+    await commit(repo, {
+      'notes.md': 'keep\n---a/foo\n+++b/bar\nindex deadbeef\nkeep2\n',
+    });
+    // Remove every diff-lookalike line; they must still round-trip through
+    // parseGitDiff even though their prefixes match file-header sentinels.
+    await write(repo, { 'notes.md': 'keep\nkeep2\n' });
+    const fileHunks = (await fetchGitDiffHunks(repo)).get('notes.md');
     expect(fileHunks).toBeDefined();
     const removed = fileHunks!.flatMap((h) =>
       h.lines.filter((l: string) => l.startsWith('-')),
@@ -469,37 +462,29 @@ describe('fetchGitDiffHunks', () => {
   });
 
   it('keys hunks by the real path for files with tabs in the name (C-quoted in diff output)', async () => {
-    // Real git output for a tracked file named `tab\there.txt` looks like
-    // `+++ "b/tab\there.txt"` even with `core.quotepath=false` — C-quoting
-    // for tabs/newlines/quotes is independent of that config. Without the
-    // unquote step in `extractFilePath`, fetchGitDiffHunks would silently
-    // drop the file's hunks.
+    // Git C-quotes tabs/newlines/quotes (`+++ "b/tab\there.txt"`) even with
+    // `core.quotepath=false`. Without the unquote step in `extractFilePath`,
+    // fetchGitDiffHunks would silently drop the file's hunks.
     const weirdName = 'tab\there.txt';
     try {
-      await fs.writeFile(path.join(repo, weirdName), 'x\n');
+      await write(repo, { [weirdName]: 'x\n' });
     } catch {
       return; // Filesystem refused tab in name (e.g. Windows NTFS).
     }
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'init');
-    await fs.writeFile(path.join(repo, weirdName), 'y\n');
+    await commit(repo, {});
+    await write(repo, { [weirdName]: 'y\n' });
 
     const hunks = await fetchGitDiffHunks(repo);
     expect([...hunks.keys()]).toEqual([weirdName]);
-    expect(hunks.get(weirdName)![0].lines.some((l) => l.startsWith('-x'))).toBe(
-      true,
-    );
-    expect(hunks.get(weirdName)![0].lines.some((l) => l.startsWith('+y'))).toBe(
-      true,
-    );
+    const lines = hunks.get(weirdName)![0].lines;
+    expect(lines.some((l) => l.startsWith('-x'))).toBe(true);
+    expect(lines.some((l) => l.startsWith('+y'))).toBe(true);
   });
 
   it('keys hunks by the real path for files whose name contains " b/"', async () => {
     await fs.mkdir(path.join(repo, 'a b'), { recursive: true });
-    await fs.writeFile(path.join(repo, 'a b', 'c.txt'), 'x\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'init');
-    await fs.writeFile(path.join(repo, 'a b', 'c.txt'), 'y\n');
+    await commit(repo, { 'a b/c.txt': 'x\n' });
+    await write(repo, { 'a b/c.txt': 'y\n' });
 
     const hunks = await fetchGitDiffHunks(repo);
     // `diff --git a/a b/c.txt b/a b/c.txt` is ambiguous to split; the parser
@@ -508,54 +493,34 @@ describe('fetchGitDiffHunks', () => {
   });
 
   it('handles multi-hunk diffs', async () => {
-    const initial = Array.from({ length: 40 }, (_, i) => `line${i}`).join('\n');
-    await fs.writeFile(path.join(repo, 'big.txt'), initial + '\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'init');
-
-    const lines = initial.split('\n');
+    const lines = Array.from({ length: 40 }, (_, i) => `line${i}`);
+    await commit(repo, { 'big.txt': lines.join('\n') + '\n' });
     lines[2] = 'CHANGED_EARLY';
     lines[35] = 'CHANGED_LATE';
-    await fs.writeFile(path.join(repo, 'big.txt'), lines.join('\n') + '\n');
+    await write(repo, { 'big.txt': lines.join('\n') + '\n' });
 
-    const hunks = await fetchGitDiffHunks(repo);
-    const fileHunks = hunks.get('big.txt');
+    const fileHunks = (await fetchGitDiffHunks(repo)).get('big.txt');
     expect(fileHunks).toBeDefined();
     expect(fileHunks!.length).toBeGreaterThanOrEqual(2);
   });
 });
 
 describe('fetchGitDiffHunksForFile', () => {
-  let repo: string;
-
-  beforeEach(async () => {
-    repo = await makeRepo();
-  });
-
-  afterEach(async () => {
-    await fs.rm(repo, { recursive: true, force: true });
-  });
+  useFreshRepo();
 
   it('returns hunks for a modified tracked file', async () => {
-    await fs.writeFile(path.join(repo, 'a.txt'), 'one\ntwo\nthree\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'init');
-    await fs.writeFile(path.join(repo, 'a.txt'), 'one\nTWO\nthree\n');
+    await commit(repo, { 'a.txt': 'one\ntwo\nthree\n' });
+    await write(repo, { 'a.txt': 'one\nTWO\nthree\n' });
 
-    const result = await fetchGitDiffHunksForFile(repo, 'a.txt');
-    expect(result).not.toBeNull();
-    expect(result!.truncated).toBe(false);
-    expect(result!.hunks[0].lines.some((l) => l === '-two')).toBe(true);
-    expect(result!.hunks[0].lines.some((l) => l === '+TWO')).toBe(true);
+    const result = await hunksFor(repo, 'a.txt');
+    expect(result.truncated).toBe(false);
+    expect(result.hunks[0].lines.some((l) => l === '-two')).toBe(true);
+    expect(result.hunks[0].lines.some((l) => l === '+TWO')).toBe(true);
   });
 
   it('scopes the diff to the requested file only', async () => {
-    await fs.writeFile(path.join(repo, 'a.txt'), 'a\n');
-    await fs.writeFile(path.join(repo, 'b.txt'), 'b\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'init');
-    await fs.writeFile(path.join(repo, 'a.txt'), 'A\n');
-    await fs.writeFile(path.join(repo, 'b.txt'), 'B\n');
+    await commit(repo, { 'a.txt': 'a\n', 'b.txt': 'b\n' });
+    await write(repo, { 'a.txt': 'A\n', 'b.txt': 'B\n' });
 
     const result = await fetchGitDiffHunksForFile(repo, 'a.txt');
     expect(result!.hunks[0].lines.some((l) => l === '+A')).toBe(true);
@@ -564,41 +529,29 @@ describe('fetchGitDiffHunksForFile', () => {
   });
 
   it('returns null for an unchanged tracked file', async () => {
-    await fs.writeFile(path.join(repo, 'a.txt'), 'a\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'init');
-
+    await commit(repo, { 'a.txt': 'a\n' });
     expect(await fetchGitDiffHunksForFile(repo, 'a.txt')).toBeNull();
   });
 
   it('returns null during a transient merge state', async () => {
-    await fs.writeFile(path.join(repo, 'a.txt'), 'one\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'init');
-    await fs.writeFile(path.join(repo, 'a.txt'), 'TWO\n');
+    await commit(repo, { 'a.txt': 'one\n' });
     // Fake a merge in progress; the single-file endpoint must decline just
     // like fetchGitDiff/fetchGitDiffHunks do.
-    await fs.writeFile(
-      path.join(repo, '.git', 'MERGE_HEAD'),
-      '0000000000000000000000000000000000000000\n',
-    );
+    await write(repo, { 'a.txt': 'TWO\n', '.git/MERGE_HEAD': ZERO_SHA });
     expect(await fetchGitDiffHunksForFile(repo, 'a.txt')).toBeNull();
   });
 
   it('diffs a renamed file old→new when oldPath is provided', async () => {
-    await fs.writeFile(path.join(repo, 'old.txt'), 'one\ntwo\nthree\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'init');
+    await commit(repo, { 'old.txt': 'one\ntwo\nthree\n' });
     // Rename old.txt → new.txt and edit one line.
     await fs.rm(path.join(repo, 'old.txt'));
-    await fs.writeFile(path.join(repo, 'new.txt'), 'one\nTWO\nthree\n');
+    await write(repo, { 'new.txt': 'one\nTWO\nthree\n' });
     await git(repo, 'add', '-A');
 
     // With the pre-rename path, rename detection yields the actual edit
     // (-two/+TWO with one/three as context) instead of new.txt as fully added.
-    const result = await fetchGitDiffHunksForFile(repo, 'new.txt', 'old.txt');
-    expect(result).not.toBeNull();
-    const lines = result!.hunks.flatMap((h) => h.lines);
+    const result = await hunksFor(repo, 'new.txt', 'old.txt');
+    const lines = result.hunks.flatMap((h) => h.lines);
     expect(lines).toContain('-two');
     expect(lines).toContain('+TWO');
     expect(lines).toContain(' one');
@@ -606,65 +559,50 @@ describe('fetchGitDiffHunksForFile', () => {
   });
 
   it('synthesizes an all-added hunk for an untracked file', async () => {
-    await fs.writeFile(path.join(repo, 'a.txt'), 'a\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'init');
-    await fs.writeFile(path.join(repo, 'new.txt'), 'x\ny\n');
+    await commit(repo, { 'a.txt': 'a\n' });
+    await write(repo, { 'new.txt': 'x\ny\n' });
 
-    const result = await fetchGitDiffHunksForFile(repo, 'new.txt');
-    expect(result).not.toBeNull();
-    expect(result!.truncated).toBe(false);
-    expect(result!.hunks).toHaveLength(1);
-    expect(result!.hunks[0]).toMatchObject({
+    const result = await hunksFor(repo, 'new.txt');
+    expect(result.truncated).toBe(false);
+    expect(result.hunks).toHaveLength(1);
+    expect(result.hunks[0]).toMatchObject({
       oldStart: 0,
       oldLines: 0,
       newStart: 1,
       newLines: 2,
     });
-    expect(result!.hunks[0].lines).toEqual(['+x', '+y']);
+    expect(result.hunks[0].lines).toEqual(['+x', '+y']);
   });
 
-  it('reports truncation for an untracked file past the line cap', async () => {
-    await fs.writeFile(path.join(repo, 'a.txt'), 'a\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'init');
-    const body = Array.from(
-      { length: MAX_LINES_PER_FILE + 5 },
-      (_, i) => `line-${i}`,
-    ).join('\n');
-    await fs.writeFile(path.join(repo, 'big.txt'), body + '\n');
+  const overCap = () =>
+    Array.from({ length: MAX_LINES_PER_FILE + 5 }, (_, i) => `line-${i}`).join(
+      '\n',
+    ) + '\n';
 
-    const result = await fetchGitDiffHunksForFile(repo, 'big.txt');
-    expect(result).not.toBeNull();
-    expect(result!.truncated).toBe(true);
-    expect(result!.hunks[0].lines).toHaveLength(MAX_LINES_PER_FILE);
+  it('reports truncation for an untracked file past the line cap', async () => {
+    await commit(repo, { 'a.txt': 'a\n' });
+    await write(repo, { 'big.txt': overCap() });
+
+    const result = await hunksFor(repo, 'big.txt');
+    expect(result.truncated).toBe(true);
+    expect(result.hunks[0].lines).toHaveLength(MAX_LINES_PER_FILE);
     // The capped window is the file's head, all-added.
-    expect(result!.hunks[0].lines[0]).toBe('+line-0');
+    expect(result.hunks[0].lines[0]).toBe('+line-0');
   });
 
   it('reports truncation for a tracked diff past the parser line cap', async () => {
-    await fs.writeFile(path.join(repo, 'a.txt'), 'seed\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'init');
-    const body = Array.from(
-      { length: MAX_LINES_PER_FILE + 5 },
-      (_, i) => `line-${i}`,
-    ).join('\n');
-    await fs.writeFile(path.join(repo, 'a.txt'), body + '\n');
+    await commit(repo, { 'a.txt': 'seed\n' });
+    await write(repo, { 'a.txt': overCap() });
 
-    const result = await fetchGitDiffHunksForFile(repo, 'a.txt');
-    expect(result).not.toBeNull();
-    expect(result!.truncated).toBe(true);
-    const total = result!.hunks.reduce((n, h) => n + h.lines.length, 0);
+    const result = await hunksFor(repo, 'a.txt');
+    expect(result.truncated).toBe(true);
+    const total = result.hunks.reduce((n, h) => n + h.lines.length, 0);
     expect(total).toBe(MAX_LINES_PER_FILE);
   });
 
   it('returns null for a binary untracked file', async () => {
-    await fs.writeFile(path.join(repo, 'a.txt'), 'a\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'init');
-    await fs.writeFile(path.join(repo, 'blob.bin'), Buffer.from([0, 1, 2, 3]));
-
+    await commit(repo, { 'a.txt': 'a\n' });
+    await write(repo, { 'blob.bin': Buffer.from([0, 1, 2, 3]) });
     expect(await fetchGitDiffHunksForFile(repo, 'blob.bin')).toBeNull();
   });
 
@@ -674,22 +612,15 @@ describe('fetchGitDiffHunksForFile', () => {
       // `ls-files --others` can list a FIFO; open() on it blocks forever
       // waiting on a writer. synthesizeUntrackedHunk must lstat-gate so
       // expanding it in the diff dialog can't hang the daemon's event loop.
-      await fs.writeFile(path.join(repo, 'a.txt'), 'a\n');
-      await git(repo, 'add', '.');
-      await git(repo, 'commit', '-q', '-m', 'init');
+      await commit(repo, { 'a.txt': 'a\n' });
       await execFileAsync('mkfifo', [path.join(repo, 'pipe')]);
-
       expect(await fetchGitDiffHunksForFile(repo, 'pipe')).toBeNull();
     },
   );
 
   it('returns null for an ignored file', async () => {
-    await fs.writeFile(path.join(repo, 'a.txt'), 'a\n');
-    await fs.writeFile(path.join(repo, '.gitignore'), 'ignored.log\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'init');
-    await fs.writeFile(path.join(repo, 'ignored.log'), 'secret\n');
-
+    await commit(repo, { 'a.txt': 'a\n', '.gitignore': 'ignored.log\n' });
+    await write(repo, { 'ignored.log': 'secret\n' });
     expect(await fetchGitDiffHunksForFile(repo, 'ignored.log')).toBeNull();
   });
 
@@ -700,17 +631,11 @@ describe('fetchGitDiffHunksForFile', () => {
   });
 
   it('accepts an absolute path inside the repo and rejects one outside it', async () => {
-    await fs.writeFile(path.join(repo, 'a.txt'), 'one\ntwo\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'init');
-    await fs.writeFile(path.join(repo, 'a.txt'), 'one\nTWO\n');
+    await commit(repo, { 'a.txt': 'one\ntwo\n' });
+    await write(repo, { 'a.txt': 'one\nTWO\n' });
 
-    const result = await fetchGitDiffHunksForFile(
-      repo,
-      path.join(repo, 'a.txt'),
-    );
-    expect(result).not.toBeNull();
-    expect(result!.hunks[0].lines.some((l) => l === '+TWO')).toBe(true);
+    const result = await hunksFor(repo, path.join(repo, 'a.txt'));
+    expect(result.hunks[0].lines.some((l) => l === '+TWO')).toBe(true);
 
     // An absolute path outside the git root is rejected.
     const outside = path.join(os.tmpdir(), 'elsewhere.txt');
@@ -718,31 +643,32 @@ describe('fetchGitDiffHunksForFile', () => {
   });
 
   it('accepts a literal `..foo` filename at the root (not a traversal)', async () => {
-    // A file literally named `..foo` is not a `..` segment; the absolute-path
-    // normalization must allow it (a bare startsWith('..') wrongly rejected it,
-    // so the diff viewer could not render such a file).
-    await fs.writeFile(path.join(repo, '..foo'), 'one\ntwo\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'init');
-    await fs.writeFile(path.join(repo, '..foo'), 'one\nTWO\n');
+    // `..foo` is not a `..` segment; the absolute-path normalization must
+    // allow it (a bare startsWith('..') wrongly rejected it, so the diff
+    // viewer could not render such a file).
+    await commit(repo, { '..foo': 'one\ntwo\n' });
+    await write(repo, { '..foo': 'one\nTWO\n' });
 
-    const result = await fetchGitDiffHunksForFile(
-      repo,
-      path.join(repo, '..foo'),
-    );
-    expect(result).not.toBeNull();
-    expect(result!.hunks[0].lines.some((l) => l === '+TWO')).toBe(true);
+    const result = await hunksFor(repo, path.join(repo, '..foo'));
+    expect(result.hunks[0].lines.some((l) => l === '+TWO')).toBe(true);
   });
 
-  it('returns null outside a git repo', async () => {
-    const plain = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-plain-'));
-    try {
+  it('returns null outside a git repo', () =>
+    inPlainDir(async (plain) => {
       expect(await fetchGitDiffHunksForFile(plain, 'a.txt')).toBeNull();
-    } finally {
-      await fs.rm(plain, { recursive: true, force: true });
-    }
-  });
+    }));
 });
+
+/** One `-x`/`+y` hunk for a C-quoted path. */
+const quotedDiff = (name: string, index = '1111111..2222222') =>
+  `diff --git "a/${name}" "b/${name}"
+index ${index} 100644
+--- "a/${name}"
++++ "b/${name}"
+@@ -1 +1 @@
+-x
++y
+`;
 
 describe('parseGitDiff C-quoted path support', () => {
   it('decodes `+++ "b/..."` headers for files with tabs in the name', () => {
@@ -763,73 +689,31 @@ index 1111111..2222222 100644
   });
 
   it('decodes octal escapes in quoted paths (legacy quotepath=true output)', () => {
-    // Even with `core.quotepath=false` set on our git invocations, callers
-    // could feed us output produced by a different command. \346\226\207
-    // is the UTF-8 byte sequence for `文`.
-    const diff = `diff --git "a/\\346\\226\\207.txt" "b/\\346\\226\\207.txt"
-index 1111111..2222222 100644
---- "a/\\346\\226\\207.txt"
-+++ "b/\\346\\226\\207.txt"
-@@ -1 +1 @@
--x
-+y
-`;
-    const result = parseGitDiff(diff);
+    // Even with `core.quotepath=false` on our git invocations, callers could
+    // feed us output from another command. \346\226\207 is UTF-8 for `文`.
+    const result = parseGitDiff(quotedDiff('\\346\\226\\207.txt'));
     expect([...result.keys()]).toEqual(['文.txt']);
   });
 
   it('preserves non-BMP code points in quoted paths instead of splitting surrogates', () => {
     // Reproduces wenshao Critical (PR #3491 line 504): the previous walker
-    // advanced one UTF-16 code unit at a time, so a non-BMP codepoint such
-    // as the rocket emoji 🚀 (U+1F680) coexisting with a forced-quoting byte
-    // (here a TAB) was decoded as two lone surrogates → two replacement
-    // characters, corrupting the hunk key.
-    const diff = `diff --git "a/\\t🚀.txt" "b/\\t🚀.txt"
-index 1111111..2222222 100644
---- "a/\\t🚀.txt"
-+++ "b/\\t🚀.txt"
-@@ -1 +1 @@
--x
-+y
-`;
-    const result = parseGitDiff(diff);
+    // advanced one UTF-16 code unit at a time, so a non-BMP codepoint (🚀,
+    // U+1F680) next to a forced-quoting byte (here a TAB) decoded as two lone
+    // surrogates → two replacement characters, corrupting the hunk key.
+    const result = parseGitDiff(quotedDiff('\\t🚀.txt'));
     expect([...result.keys()]).toEqual(['\t🚀.txt']);
   });
 
   it('decodes the remaining C-style escapes (\\a, \\b, \\f, \\v)', () => {
     // Reproduces wenshao Critical (PR #3491 line 552): the previous switch
-    // dropped the leading backslash for these escapes, turning `\a` / `\b`
-    // / `\f` / `\v` into ordinary `a` / `b` / `f` / `v` and yielding a
-    // hunk key that did not match the real on-disk filename.
-    const diff = `diff --git "a/bell\\afile.txt" "b/bell\\afile.txt"
-index 1111111..2222222 100644
---- "a/bell\\afile.txt"
-+++ "b/bell\\afile.txt"
-@@ -1 +1 @@
--x
-+y
-diff --git "a/back\\bspace.txt" "b/back\\bspace.txt"
-index 3333333..4444444 100644
---- "a/back\\bspace.txt"
-+++ "b/back\\bspace.txt"
-@@ -1 +1 @@
--x
-+y
-diff --git "a/form\\ffeed.txt" "b/form\\ffeed.txt"
-index 5555555..6666666 100644
---- "a/form\\ffeed.txt"
-+++ "b/form\\ffeed.txt"
-@@ -1 +1 @@
--x
-+y
-diff --git "a/vert\\vtab.txt" "b/vert\\vtab.txt"
-index 7777777..8888888 100644
---- "a/vert\\vtab.txt"
-+++ "b/vert\\vtab.txt"
-@@ -1 +1 @@
--x
-+y
-`;
+    // dropped the leading backslash for these escapes, turning `\a` / `\b` /
+    // `\f` / `\v` into plain `a` / `b` / `f` / `v`, so the hunk key did not
+    // match the real on-disk filename.
+    const diff =
+      quotedDiff('bell\\afile.txt') +
+      quotedDiff('back\\bspace.txt', '3333333..4444444') +
+      quotedDiff('form\\ffeed.txt', '5555555..6666666') +
+      quotedDiff('vert\\vtab.txt', '7777777..8888888');
     const result = parseGitDiff(diff);
     expect([...result.keys()]).toEqual([
       'bell\x07file.txt',
@@ -864,9 +748,9 @@ similarity index 100%
 rename from old name.txt
 rename to renamed name.txt
 `;
-    // No hunks — nothing to key — but the extractor should still not confuse
-    // paths. The file block is dropped because there are no `@@` lines, which
-    // is the existing behavior for mode-only / rename-only changes.
+    // No hunks, so nothing to key, but the extractor must not confuse paths.
+    // The block is dropped for lack of `@@` lines, the existing behavior for
+    // mode-only / rename-only changes.
     const result = parseGitDiff(diff);
     expect(result.size).toBe(0);
   });
@@ -880,8 +764,7 @@ index 111..000
 @@ -1 +0,0 @@
 -bye
 `;
-    const result = parseGitDiff(diff);
-    expect([...result.keys()]).toEqual(['gone.txt']);
+    expect([...parseGitDiff(diff).keys()]).toEqual(['gone.txt']);
   });
 
   it('uses `+++ b/<path>` for newly-created files', () => {
@@ -893,8 +776,7 @@ index 000..111
 @@ -0,0 +1 @@
 +hi
 `;
-    const result = parseGitDiff(diff);
-    expect([...result.keys()]).toEqual(['new.txt']);
+    expect([...parseGitDiff(diff).keys()]).toEqual(['new.txt']);
   });
 });
 
@@ -949,125 +831,70 @@ describe('parseGitDiff size/line caps', () => {
 });
 
 describe('resolveGitDir', () => {
+  useFreshRepo();
+
   it('returns the .git directory for a regular repo', async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-gitdir-'));
-    try {
-      await execFileAsync('git', ['init', '-q', '-b', 'main'], { cwd: dir });
-      const resolved = await resolveGitDir(dir);
-      expect(resolved).toBe(path.join(dir, '.git'));
-    } finally {
-      await fs.rm(dir, { recursive: true, force: true });
-    }
+    const resolved = await resolveGitDir(repo);
+    expect(resolved).toBe(path.join(repo, '.git'));
   });
 
   it('follows the gitdir pointer for linked worktrees', async () => {
-    const main = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-gitmain-'));
-    try {
-      await execFileAsync('git', ['init', '-q', '-b', 'main'], { cwd: main });
-      await execFileAsync('git', ['config', 'user.email', 'test@example.com'], {
-        cwd: main,
-      });
-      await execFileAsync('git', ['config', 'user.name', 'Test'], {
-        cwd: main,
-      });
-      await execFileAsync('git', ['config', 'commit.gpgsign', 'false'], {
-        cwd: main,
-      });
-      await fs.writeFile(path.join(main, 'a.txt'), 'hi\n');
-      await execFileAsync('git', ['add', '.'], { cwd: main });
-      await execFileAsync('git', ['commit', '-q', '-m', 'init'], { cwd: main });
+    await commit(repo, { 'a.txt': 'hi\n' });
+    const wtPath = await addWorktree(repo);
 
-      const wtPath = path.join(main, 'wt');
-      await execFileAsync(
-        'git',
-        ['worktree', 'add', '-q', wtPath, '-b', 'side'],
-        { cwd: main },
-      );
+    const resolved = await resolveGitDir(wtPath);
+    expect(resolved).not.toBeNull();
+    // Git writes the linked-worktree pointer with forward slashes even on
+    // Windows (`gitdir: C:/.../main/.git/worktrees/wt`) and we surface it
+    // verbatim, so match either separator.
+    expect(resolved).toMatch(/[/\\]\.git[/\\]worktrees[/\\]/);
 
-      const resolved = await resolveGitDir(wtPath);
-      expect(resolved).not.toBeNull();
-      // Git writes the linked-worktree pointer with forward slashes even on
-      // Windows (`gitdir: C:/.../main/.git/worktrees/wt`), and we surface
-      // that string verbatim. Match either separator so the assertion is
-      // platform-independent.
-      expect(resolved).toMatch(/[/\\]\.git[/\\]worktrees[/\\]/);
-
-      // Fake a merge-in-progress inside the linked worktree's gitdir and
-      // confirm `fetchGitDiff` short-circuits, which would silently fail if
-      // transient detection only looked at `<wt>/.git/MERGE_HEAD`.
-      await fs.writeFile(
-        path.join(resolved!, 'MERGE_HEAD'),
-        '0000000000000000000000000000000000000000\n',
-      );
-      expect(await fetchGitDiff(wtPath)).toBeNull();
-    } finally {
-      await fs.rm(main, { recursive: true, force: true });
-    }
+    // A merge in progress inside the linked worktree's gitdir must make
+    // `fetchGitDiff` short-circuit; this would silently fail if transient
+    // detection only looked at `<wt>/.git/MERGE_HEAD`.
+    await fs.writeFile(path.join(resolved!, 'MERGE_HEAD'), ZERO_SHA);
+    expect(await fetchGitDiff(wtPath)).toBeNull();
   });
 });
 
 describe('getGitWorkingTreeStatus stash count in a linked worktree', () => {
-  let main: string;
-
+  useFreshRepo({ 'a.txt': 'hi\n' });
   beforeEach(async () => {
-    main = await makeRepo();
-    await fs.writeFile(path.join(main, 'a.txt'), 'hi\n');
-    await git(main, 'add', '.');
-    await git(main, 'commit', '-q', '-m', 'init');
     // Two entries so the assertion cannot pass on an off-by-one.
-    await fs.writeFile(path.join(main, 'a.txt'), 'one\n');
-    await git(main, 'stash', '-q');
-    await fs.writeFile(path.join(main, 'a.txt'), 'two\n');
-    await git(main, 'stash', '-q');
-  });
-
-  afterEach(async () => {
-    await fs.rm(main, { recursive: true, force: true });
+    await write(repo, { 'a.txt': 'one\n' });
+    await git(repo, 'stash', '-q');
+    await write(repo, { 'a.txt': 'two\n' });
+    await git(repo, 'stash', '-q');
   });
 
   it('counts the shared stash from inside a linked worktree', async () => {
-    const wtPath = path.join(main, 'wt');
-    await git(main, 'worktree', 'add', '-q', wtPath, '-b', 'side');
-
-    // `git stash list` reports both entries from either working tree, because
-    // the stash is one ref for the whole repository. Reading the reflog from
+    const wtPath = await addWorktree(repo);
+    // The stash is one ref for the whole repository, so `git stash list`
+    // reports both entries from either working tree. Reading the reflog from
     // the per-worktree gitdir found nothing and reported 0.
     expect((await getGitWorkingTreeStatus(wtPath))?.stashCount).toBe(2);
     // Same number from the main worktree: the two must not diverge.
-    expect((await getGitWorkingTreeStatus(main))?.stashCount).toBe(2);
+    expect((await getGitWorkingTreeStatus(repo))?.stashCount).toBe(2);
   });
 
   it('still reports the per-worktree operation, not the shared one', async () => {
-    // The guard against over-correcting. Only refs are shared; MERGE_HEAD and
+    // Guards against over-correcting: only refs are shared. MERGE_HEAD and
     // friends are per-worktree, so redirecting everything to the common dir
     // would make a merge in one worktree appear in all of them.
-    const wtPath = path.join(main, 'wt');
-    await git(main, 'worktree', 'add', '-q', wtPath, '-b', 'side');
-    await fs.writeFile(
-      path.join(main, '.git', 'MERGE_HEAD'),
-      '0000000000000000000000000000000000000000\n',
-    );
+    const wtPath = await addWorktree(repo);
+    await write(repo, { '.git/MERGE_HEAD': ZERO_SHA });
 
-    expect((await getGitWorkingTreeStatus(main))?.operation).toBe('merge');
+    expect((await getGitWorkingTreeStatus(repo))?.operation).toBe('merge');
     expect((await getGitWorkingTreeStatus(wtPath))?.operation).toBeUndefined();
   });
 
   it('still counts the stash in a plain repository', async () => {
-    expect((await getGitWorkingTreeStatus(main))?.stashCount).toBe(2);
+    expect((await getGitWorkingTreeStatus(repo))?.stashCount).toBe(2);
   });
 });
 
 describe('fetchGitDiff transient-state detection', () => {
-  let repo: string;
-  beforeEach(async () => {
-    repo = await makeRepo();
-    await fs.writeFile(path.join(repo, 'a.txt'), 'hi\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'init');
-  });
-  afterEach(async () => {
-    await fs.rm(repo, { recursive: true, force: true });
-  });
+  useFreshRepo({ 'a.txt': 'hi\n' });
 
   it.each([
     ['CHERRY_PICK_HEAD', 'file'],
@@ -1087,64 +914,34 @@ describe('fetchGitDiff transient-state detection', () => {
 });
 
 describe('fetchGitDiff tracked-file filename robustness', () => {
-  it('keeps the real filename for tracked files that contain a tab', async () => {
-    const repo = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-gitdiff-tab-'));
-    try {
-      await execFileAsync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
-      await execFileAsync('git', ['config', 'user.email', 't@e.com'], {
-        cwd: repo,
-      });
-      await execFileAsync('git', ['config', 'user.name', 'T'], { cwd: repo });
-      await execFileAsync('git', ['config', 'commit.gpgsign', 'false'], {
-        cwd: repo,
-      });
-      const weirdName = 'tab\there.txt';
-      try {
-        await fs.writeFile(path.join(repo, weirdName), 'x\n');
-      } catch {
-        return; // Filesystem refused the name; nothing to assert.
-      }
-      await execFileAsync('git', ['add', '.'], { cwd: repo });
-      await execFileAsync('git', ['commit', '-q', '-m', 'init'], { cwd: repo });
-      await fs.writeFile(path.join(repo, weirdName), 'y\n');
+  useFreshRepo();
 
-      const result = await fetchGitDiff(repo);
-      expect(result).not.toBeNull();
-      // With plain --numstat, git would C-quote this as `"tab\\there.txt"`
-      // and the map key would not match the real path. `--numstat -z` gives
-      // us the raw bytes back.
-      expect(result!.perFileStats.has(weirdName)).toBe(true);
-      expect(result!.perFileStats.has(`"tab\\there.txt"`)).toBe(false);
-    } finally {
-      await fs.rm(repo, { recursive: true, force: true });
+  it('keeps the real filename for tracked files that contain a tab', async () => {
+    const weirdName = 'tab\there.txt';
+    try {
+      await write(repo, { [weirdName]: 'x\n' });
+    } catch {
+      return; // Filesystem refused the name; nothing to assert.
     }
+    await commit(repo, {});
+    await write(repo, { [weirdName]: 'y\n' });
+
+    const result = await diffOf(repo);
+    // Plain --numstat would C-quote this as `"tab\\there.txt"` and the key
+    // would not match the real path; `--numstat -z` gives the raw bytes.
+    expect(result.perFileStats.has(weirdName)).toBe(true);
+    expect(result.perFileStats.has(`"tab\\there.txt"`)).toBe(false);
   });
 
   it('keys a rename by its new path and carries the old path', async () => {
-    const repo = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-gitdiff-mv-'));
-    try {
-      await execFileAsync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
-      await execFileAsync('git', ['config', 'user.email', 't@e.com'], {
-        cwd: repo,
-      });
-      await execFileAsync('git', ['config', 'user.name', 'T'], { cwd: repo });
-      await execFileAsync('git', ['config', 'commit.gpgsign', 'false'], {
-        cwd: repo,
-      });
-      await fs.writeFile(path.join(repo, 'old.txt'), 'x\n');
-      await execFileAsync('git', ['add', '.'], { cwd: repo });
-      await execFileAsync('git', ['commit', '-q', '-m', 'init'], { cwd: repo });
-      await execFileAsync('git', ['mv', 'old.txt', 'new.txt'], { cwd: repo });
+    await commit(repo, { 'old.txt': 'x\n' });
+    await git(repo, 'mv', 'old.txt', 'new.txt');
 
-      const result = await fetchGitDiff(repo);
-      expect(result).not.toBeNull();
-      // Keyed by the current path so the row can expand; the old path is
-      // carried for display instead of the synthetic `old => new` string
-      // (which git cannot address).
-      expect(result!.perFileStats.get('new.txt')?.oldPath).toBe('old.txt');
-    } finally {
-      await fs.rm(repo, { recursive: true, force: true });
-    }
+    const result = await diffOf(repo);
+    // Keyed by the current path so the row can expand; the old path is
+    // carried for display instead of the synthetic `old => new` string
+    // (which git cannot address).
+    expect(result.perFileStats.get('new.txt')?.oldPath).toBe('old.txt');
   });
 });
 
@@ -1158,505 +955,338 @@ describe('parseShortstat ReDoS guard', () => {
     const start = Date.now();
     const result = parseShortstat(adversarial);
     const elapsed = Date.now() - start;
-    // Expect the bounded regex to either reject (too long for \d{1,10}) or
-    // match trivially. Either way it must not spin.
+    // The bounded regex either rejects (too long for \d{1,10}) or matches
+    // trivially; either way it must not spin.
     expectWithinLatencyBudget(elapsed, 250, { poolMultiplier: 20 });
     expect(result).toBeNull();
   });
 });
 
 describe('fetchGitDiff non-ASCII filenames', () => {
-  it('does not octal-escape UTF-8 filenames via core.quotepath', async () => {
-    const repo = await makeRepo();
-    try {
-      const fname = '日本語.txt';
-      await fs.writeFile(path.join(repo, fname), 'alpha\n');
-      await git(repo, 'add', '.');
-      await git(repo, 'commit', '-q', '-m', 'init');
-      await fs.writeFile(path.join(repo, fname), 'beta\n');
+  useFreshRepo();
 
-      const result = await fetchGitDiff(repo);
-      expect(result).not.toBeNull();
-      expect(result!.perFileStats.has(fname)).toBe(true);
-      // Make sure we didn't end up with an octal-escaped key instead.
-      for (const key of result!.perFileStats.keys()) {
-        expect(key).not.toMatch(/\\\d{3}/);
-      }
-    } finally {
-      await fs.rm(repo, { recursive: true, force: true });
+  it('does not octal-escape UTF-8 filenames via core.quotepath', async () => {
+    const fname = '日本語.txt';
+    await commit(repo, { [fname]: 'alpha\n' });
+    await write(repo, { [fname]: 'beta\n' });
+
+    const result = await diffOf(repo);
+    expect(result.perFileStats.has(fname)).toBe(true);
+    // Make sure we didn't end up with an octal-escaped key instead.
+    for (const key of result.perFileStats.keys()) {
+      expect(key).not.toMatch(/\\\d{3}/);
     }
   });
 });
 
 describe('fetchGitDiff untracked with special filenames', () => {
+  useFreshRepo({ 'seed.txt': 'x\n' });
+
   it('counts an untracked file whose name contains a newline as one entry', async () => {
-    // Skip on platforms where the filesystem rejects `\n` in names (e.g. some
-    // Windows filesystems). POSIX filesystems accept it; we rely on that here.
-    const repo = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-gitdiff-nl-'));
+    // Some (e.g. Windows) filesystems reject `\n` in names; POSIX accepts it.
+    const weirdName = 'line1\nline2.txt';
     try {
-      await execFileAsync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
-      await execFileAsync('git', ['config', 'user.email', 't@example.com'], {
-        cwd: repo,
-      });
-      await execFileAsync('git', ['config', 'user.name', 'T'], { cwd: repo });
-      await execFileAsync('git', ['config', 'commit.gpgsign', 'false'], {
-        cwd: repo,
-      });
-      await fs.writeFile(path.join(repo, 'seed.txt'), 'x\n');
-      await execFileAsync('git', ['add', '.'], { cwd: repo });
-      await execFileAsync('git', ['commit', '-q', '-m', 'seed'], { cwd: repo });
-
-      const weirdName = 'line1\nline2.txt';
-      try {
-        await fs.writeFile(path.join(repo, weirdName), 'content\n');
-      } catch {
-        // Filesystem refused newline in name — nothing to assert here.
-        return;
-      }
-
-      const result = await fetchGitDiff(repo);
-      expect(result).not.toBeNull();
-      // Without `-z`, `ls-files` would quote this as `"line1\nline2.txt"`
-      // and split-on-\n would produce two phantom entries. With `-z` we get
-      // exactly one entry, keyed by the real name.
-      expect(result!.stats.filesCount).toBe(1);
-      expect(result!.perFileStats.has(weirdName)).toBe(true);
-    } finally {
-      await fs.rm(repo, { recursive: true, force: true });
+      await write(repo, { [weirdName]: 'content\n' });
+    } catch {
+      // Filesystem refused newline in name — nothing to assert here.
+      return;
     }
+
+    const result = await diffOf(repo);
+    // Without `-z`, `ls-files` would quote this as `"line1\nline2.txt"` and
+    // split-on-\n would produce two phantom entries. With `-z` we get exactly
+    // one entry, keyed by the real name.
+    expect(result.stats.filesCount).toBe(1);
+    expect(result.perFileStats.has(weirdName)).toBe(true);
   });
 });
 
 describe('fetchGitDiff invocation from a subdirectory', () => {
+  useFreshRepo();
+
   it('returns repo-wide changes with consistent repo-root-relative path keys', async () => {
-    // Reproduces wenshao Critical (PR #3491 line 63): when /diff was invoked
-    // from a subdir, `git diff --numstat` emitted repo-root-relative keys but
+    // Reproduces wenshao Critical (PR #3491 line 63): from a subdir,
+    // `git diff --numstat` emitted repo-root-relative keys but
     // `ls-files --others` was scoped to cwd, so untracked files outside the
     // subdir were silently dropped and the path basis was inconsistent.
-    const repo = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-gitdiff-sub-'));
-    try {
-      await execFileAsync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
-      await execFileAsync('git', ['config', 'user.email', 't@e.com'], {
-        cwd: repo,
-      });
-      await execFileAsync('git', ['config', 'user.name', 'T'], { cwd: repo });
-      await execFileAsync('git', ['config', 'commit.gpgsign', 'false'], {
-        cwd: repo,
-      });
-      await fs.mkdir(path.join(repo, 'sub'), { recursive: true });
-      await fs.writeFile(path.join(repo, 'sub', 'tracked.txt'), 'x\n');
-      await fs.writeFile(path.join(repo, 'rootkeep.txt'), 'k\n');
-      await execFileAsync('git', ['add', '.'], { cwd: repo });
-      await execFileAsync('git', ['commit', '-q', '-m', 'init'], { cwd: repo });
+    await fs.mkdir(path.join(repo, 'sub'), { recursive: true });
+    await commit(repo, { 'sub/tracked.txt': 'x\n', 'rootkeep.txt': 'k\n' });
+    await write(repo, {
+      'sub/tracked.txt': 'y\n', // tracked, modified inside the subdir
+      'rootnew.txt': 'fresh\n', // untracked, at the repo root
+      'sub/subnew.txt': 'a\nb\n', // untracked, inside the subdir
+    });
 
-      // Modify a tracked file inside the subdir.
-      await fs.writeFile(path.join(repo, 'sub', 'tracked.txt'), 'y\n');
-      // Add an untracked file in a sibling location at the repo root.
-      await fs.writeFile(path.join(repo, 'rootnew.txt'), 'fresh\n');
-      // And one in the subdir for good measure.
-      await fs.writeFile(path.join(repo, 'sub', 'subnew.txt'), 'a\nb\n');
-
-      // Invoke fetchGitDiff with cwd pointing at the SUBDIR, not the root.
-      const result = await fetchGitDiff(path.join(repo, 'sub'));
-      expect(result).not.toBeNull();
-      const keys = [...result!.perFileStats.keys()].sort();
-      // All path keys must be repo-root-relative (not "tracked.txt" or
-      // "subnew.txt" alone). And the root-level untracked file must be
-      // present even though we asked from sub/.
-      expect(keys).toEqual([
-        'rootnew.txt',
-        'sub/subnew.txt',
-        'sub/tracked.txt',
-      ]);
-      expect(result!.stats.filesCount).toBe(3);
-    } finally {
-      await fs.rm(repo, { recursive: true, force: true });
-    }
+    // Invoke fetchGitDiff with cwd pointing at the SUBDIR, not the root.
+    const result = await diffOf(path.join(repo, 'sub'));
+    const keys = [...result.perFileStats.keys()].sort();
+    // All keys must be repo-root-relative (not bare "tracked.txt" or
+    // "subnew.txt"), and the root-level untracked file must be present even
+    // though we asked from sub/.
+    expect(keys).toEqual(['rootnew.txt', 'sub/subnew.txt', 'sub/tracked.txt']);
+    expect(result.stats.filesCount).toBe(3);
   });
 });
 
 describe('fetchGitDiff fast path with untracked-only workspaces', () => {
+  useFreshRepo({ 'seed.txt': 'x\n' });
+
   it('takes the >MAX_FILES_FOR_DETAILS short-circuit when shortstat is empty', async () => {
-    // Reproduces wenshao Critical (PR #3491 line 146). 0 tracked changes
-    // + many untracked previously left `quickStats` null, so the fast
-    // path was skipped and the slow path under-reported `linesAdded`
-    // because it line-counted only the first MAX_FILES untracked files.
-    // The fix makes the threshold fire on tracked + untracked even when
-    // shortstat returns nothing.
-    const repo = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-gitdiff-fp-'));
-    try {
-      await execFileAsync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
-      await execFileAsync('git', ['config', 'user.email', 't@e.com'], {
-        cwd: repo,
-      });
-      await execFileAsync('git', ['config', 'user.name', 'T'], { cwd: repo });
-      await execFileAsync('git', ['config', 'commit.gpgsign', 'false'], {
-        cwd: repo,
-      });
-      await fs.writeFile(path.join(repo, 'seed.txt'), 'x\n');
-      await execFileAsync('git', ['add', '.'], { cwd: repo });
-      await execFileAsync('git', ['commit', '-q', '-m', 'seed'], { cwd: repo });
-
-      // Plant 501 untracked files (just over MAX_FILES_FOR_DETAILS = 500)
-      // and zero tracked changes.
-      const N = 501;
-      const writes: Array<Promise<void>> = [];
-      for (let i = 0; i < N; i++) {
-        writes.push(fs.writeFile(path.join(repo, `u${i}.txt`), 'a\n'));
-      }
-      await Promise.all(writes);
-
-      const result = await fetchGitDiff(repo);
-      expect(result).not.toBeNull();
-      // Header includes every untracked file in `filesCount`.
-      expect(result!.stats.filesCount).toBe(N);
-      // `perFileStats` is empty because we took the summary-only path,
-      // which is the whole point of the guardrail.
-      expect(result!.perFileStats.size).toBe(0);
-    } finally {
-      await fs.rm(repo, { recursive: true, force: true });
+    // Reproduces wenshao Critical (PR #3491 line 146). 0 tracked changes +
+    // many untracked left `quickStats` null, so the fast path was skipped and
+    // the slow path under-reported `linesAdded` (it line-counted only the
+    // first MAX_FILES untracked files). The fix makes the threshold fire on
+    // tracked + untracked even when shortstat returns nothing. Here: 501
+    // untracked files (just over MAX_FILES_FOR_DETAILS = 500), 0 tracked.
+    const N = 501;
+    const writes: Array<Promise<void>> = [];
+    for (let i = 0; i < N; i++) {
+      writes.push(fs.writeFile(path.join(repo, `u${i}.txt`), 'a\n'));
     }
+    await Promise.all(writes);
+
+    const result = await diffOf(repo);
+    // Header includes every untracked file in `filesCount`.
+    expect(result.stats.filesCount).toBe(N);
+    // `perFileStats` is empty because we took the summary-only path, which is
+    // the whole point of the guardrail.
+    expect(result.perFileStats.size).toBe(0);
   });
 });
 
 describe('fetchGitDiffHunks ignores external diff drivers', () => {
+  useFreshRepo();
+  let sentinel: string;
+  beforeEach(() => {
+    sentinel = path.join(os.tmpdir(), `qwen-driver-fired-${Date.now()}`);
+  });
+  afterEach(() => fs.rm(sentinel, { force: true }));
+
+  /** Driver script in the repo that writes the sentinel when invoked. */
+  async function plantDriver(name: string, tail = ''): Promise<string> {
+    const script = path.join(repo, name);
+    await fs.writeFile(
+      script,
+      `#!/bin/sh\necho fired > "${sentinel}"\n${tail}`,
+      {
+        mode: 0o755,
+      },
+    );
+    return script;
+  }
+  // ENOENT means the driver never ran.
+  const driverFired = () =>
+    fs.stat(sentinel).then(
+      () => true,
+      () => false,
+    );
+
   it('does not invoke GIT_EXTERNAL_DIFF when reading hunks', async () => {
     // Reproduces wenshao Critical (PR #3491 line 219). Plain `git diff`
     // honors `GIT_EXTERNAL_DIFF` / `diff.<name>.command`, so a malicious
-    // worktree could execute arbitrary commands when a caller of
-    // `fetchGitDiffHunks` only wants to inspect hunks. The fix is
-    // `--no-ext-diff`; this test plants an env-var driver that touches a
-    // sentinel file and asserts it never fires.
-    const repo = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-gitdiff-ext-'));
-    const sentinel = path.join(os.tmpdir(), `qwen-ext-fired-${Date.now()}`);
-    const driverScript = path.join(repo, 'evil-diff.sh');
+    // worktree could run arbitrary commands when a caller only wants to
+    // inspect hunks. The fix is `--no-ext-diff`; the planted env-var driver
+    // touches a sentinel file that must never appear.
+    await commit(repo, { 'a.txt': 'one\n' });
+    await write(repo, { 'a.txt': 'two\n' });
+    const driverScript = await plantDriver('evil-diff.sh');
+
+    // runGit's child processes inherit our env.
+    vi.stubEnv('GIT_EXTERNAL_DIFF', driverScript);
     try {
-      await execFileAsync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
-      await execFileAsync('git', ['config', 'user.email', 't@e.com'], {
-        cwd: repo,
-      });
-      await execFileAsync('git', ['config', 'user.name', 'T'], { cwd: repo });
-      await execFileAsync('git', ['config', 'commit.gpgsign', 'false'], {
-        cwd: repo,
-      });
-      await fs.writeFile(path.join(repo, 'a.txt'), 'one\n');
-      await execFileAsync('git', ['add', '.'], { cwd: repo });
-      await execFileAsync('git', ['commit', '-q', '-m', 'init'], { cwd: repo });
-      await fs.writeFile(path.join(repo, 'a.txt'), 'two\n');
-
-      // Driver writes the sentinel as a side effect when invoked.
-      await fs.writeFile(
-        driverScript,
-        `#!/bin/sh\necho fired > "${sentinel}"\n`,
-        { mode: 0o755 },
-      );
-
-      // Set GIT_EXTERNAL_DIFF for the rest of this test. fetchGitDiffHunks
-      // calls runGit which spawns child processes that inherit our env.
-      const prev = process.env['GIT_EXTERNAL_DIFF'];
-      process.env['GIT_EXTERNAL_DIFF'] = driverScript;
-      try {
-        const hunks = await fetchGitDiffHunks(repo);
-        expect(hunks.get('a.txt')).toBeDefined();
-      } finally {
-        if (prev === undefined) delete process.env['GIT_EXTERNAL_DIFF'];
-        else process.env['GIT_EXTERNAL_DIFF'] = prev;
-      }
-
-      // The sentinel must NOT exist — `--no-ext-diff` should have stopped
-      // git from running the driver.
-      let driverFired = false;
-      try {
-        await fs.stat(sentinel);
-        driverFired = true;
-      } catch {
-        // ENOENT — driver never ran. Expected.
-      }
-      expect(driverFired).toBe(false);
+      const hunks = await fetchGitDiffHunks(repo);
+      expect(hunks.get('a.txt')).toBeDefined();
     } finally {
-      await fs.rm(repo, { recursive: true, force: true });
-      await fs.rm(sentinel, { force: true });
+      vi.unstubAllEnvs();
     }
+    expect(await driverFired()).toBe(false);
   });
 
   it('does not invoke textconv drivers when reading hunks', async () => {
-    // Reproduces wenshao Critical (PR #3491 line 282). `--no-ext-diff`
-    // blocks GIT_EXTERNAL_DIFF / diff.<name>.command but is INDEPENDENT
-    // of textconv filters configured via .gitattributes +
-    // `diff.<name>.textconv`. Without `--no-textconv`, a malicious
-    // worktree can still execute commands when this utility runs.
-    const repo = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-gitdiff-tc-'));
-    const sentinel = path.join(os.tmpdir(), `qwen-tc-fired-${Date.now()}`);
-    const driverScript = path.join(repo, 'evil-textconv.sh');
-    try {
-      await execFileAsync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
-      await execFileAsync('git', ['config', 'user.email', 't@e.com'], {
-        cwd: repo,
-      });
-      await execFileAsync('git', ['config', 'user.name', 'T'], { cwd: repo });
-      await execFileAsync('git', ['config', 'commit.gpgsign', 'false'], {
-        cwd: repo,
-      });
+    // Reproduces wenshao Critical (PR #3491 line 282). `--no-ext-diff` blocks
+    // GIT_EXTERNAL_DIFF / diff.<name>.command but NOT textconv filters set
+    // via .gitattributes + `diff.<name>.textconv`. Without `--no-textconv`,
+    // a malicious worktree can still execute commands when this runs.
+    const driverScript = await plantDriver(
+      'evil-textconv.sh',
+      'cat "$1" 2>/dev/null\n',
+    );
+    await git(repo, 'config', 'diff.evil.textconv', driverScript);
+    await commit(repo, {
+      '.gitattributes': '*.pdf diff=evil\n',
+      'doc.pdf': 'a\n',
+    });
+    await write(repo, { 'doc.pdf': 'b\n' });
 
-      // Driver writes the sentinel as a side effect when invoked.
-      await fs.writeFile(
-        driverScript,
-        `#!/bin/sh\necho fired > "${sentinel}"\ncat "$1" 2>/dev/null\n`,
-        { mode: 0o755 },
-      );
-
-      // Wire the driver up: register textconv command + attribute.
-      await execFileAsync(
-        'git',
-        ['config', 'diff.evil.textconv', driverScript],
-        {
-          cwd: repo,
-        },
-      );
-      await fs.writeFile(
-        path.join(repo, '.gitattributes'),
-        '*.pdf diff=evil\n',
-      );
-      await fs.writeFile(path.join(repo, 'doc.pdf'), 'a\n');
-      await execFileAsync('git', ['add', '.'], { cwd: repo });
-      await execFileAsync('git', ['commit', '-q', '-m', 'init'], { cwd: repo });
-      await fs.writeFile(path.join(repo, 'doc.pdf'), 'b\n');
-
-      const hunks = await fetchGitDiffHunks(repo);
-      expect(hunks.get('doc.pdf')).toBeDefined();
-
-      let driverFired = false;
-      try {
-        await fs.stat(sentinel);
-        driverFired = true;
-      } catch {
-        // ENOENT — driver never ran. Expected.
-      }
-      expect(driverFired).toBe(false);
-    } finally {
-      await fs.rm(repo, { recursive: true, force: true });
-      await fs.rm(sentinel, { force: true });
-    }
+    const hunks = await fetchGitDiffHunks(repo);
+    expect(hunks.get('doc.pdf')).toBeDefined();
+    expect(await driverFired()).toBe(false);
   });
 });
 
 describe('fetchGitDiff deletion detection', () => {
-  let repo: string;
-  beforeEach(async () => {
-    repo = await makeRepo();
-  });
-  afterEach(async () => {
-    await fs.rm(repo, { recursive: true, force: true });
-  });
+  useFreshRepo();
 
   it('marks tracked files removed from the worktree as isDeleted', async () => {
-    await fs.writeFile(path.join(repo, 'kept.txt'), 'one\ntwo\n');
-    await fs.writeFile(path.join(repo, 'gone.txt'), 'a\nb\nc\n');
-    await fs.writeFile(
-      path.join(repo, 'gone.bin'),
-      Buffer.from([0x89, 0x00, 0xff]),
-    );
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'init');
-
+    await commit(repo, {
+      'kept.txt': 'one\ntwo\n',
+      'gone.txt': 'a\nb\nc\n',
+      'gone.bin': Buffer.from([0x89, 0x00, 0xff]),
+    });
     // Modify one tracked file (heavy edit), and remove two others.
-    await fs.writeFile(path.join(repo, 'kept.txt'), '');
+    await write(repo, { 'kept.txt': '' });
     await fs.rm(path.join(repo, 'gone.txt'));
     await fs.rm(path.join(repo, 'gone.bin'));
 
-    const result = await fetchGitDiff(repo);
-    expect(result).not.toBeNull();
-    // Heavy edit must NOT be marked deleted, even though numstat shows
-    // `0\t2\tkept.txt` (which looks identical to a delete shape).
-    expect(result!.perFileStats.get('kept.txt')?.isDeleted).toBeFalsy();
-    expect(result!.perFileStats.get('gone.txt')?.isDeleted).toBe(true);
-    expect(result!.perFileStats.get('gone.bin')).toMatchObject({
+    const result = await diffOf(repo);
+    // A heavy edit must NOT be marked deleted, even though its numstat
+    // `0\t2\tkept.txt` looks identical to a delete.
+    expect(result.perFileStats.get('kept.txt')?.isDeleted).toBeFalsy();
+    expect(result.perFileStats.get('gone.txt')?.isDeleted).toBe(true);
+    expect(result.perFileStats.get('gone.bin')).toMatchObject({
       isBinary: true,
       isDeleted: true,
     });
   });
 
   it('does not mark either side of a rename as deleted', async () => {
-    await fs.writeFile(path.join(repo, 'old.txt'), 'x\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'init');
+    await commit(repo, { 'old.txt': 'x\n' });
     await git(repo, 'mv', 'old.txt', 'new.txt');
 
-    const result = await fetchGitDiff(repo);
-    expect(result).not.toBeNull();
-    // The rename collapses to a single entry keyed by the new path (old path
+    const result = await diffOf(repo);
+    // The rename collapses to one entry keyed by the new path (old path
     // carried for display); it must not be flagged as deleted.
-    expect(result!.perFileStats.get('new.txt')?.oldPath).toBe('old.txt');
-    for (const s of result!.perFileStats.values()) {
+    expect(result.perFileStats.get('new.txt')?.oldPath).toBe('old.txt');
+    for (const s of result.perFileStats.values()) {
       expect(s.isDeleted).toBeFalsy();
     }
   });
 });
 
 describe('fetchGitDiff special filetypes among untracked files', () => {
-  it('marks untracked symlinks as binary and never follows them', async () => {
-    // Reproduces wenshao Critical (PR #3491 line 455): without an lstat
-    // gate, `open()` would dereference an untracked symlink and read its
-    // target — which can live outside the worktree.
-    const repo = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-gitdiff-lnk-'));
-    try {
-      await execFileAsync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
-      await execFileAsync('git', ['config', 'user.email', 't@e.com'], {
-        cwd: repo,
-      });
-      await execFileAsync('git', ['config', 'user.name', 'T'], { cwd: repo });
-      await execFileAsync('git', ['config', 'commit.gpgsign', 'false'], {
-        cwd: repo,
-      });
-      await fs.writeFile(path.join(repo, 'seed.txt'), 'x\n');
-      await execFileAsync('git', ['add', '.'], { cwd: repo });
-      await execFileAsync('git', ['commit', '-q', '-m', 'init'], { cwd: repo });
+  useFreshRepo({ 'seed.txt': 'x\n' });
 
-      // Create an outside-worktree target with content that, if followed,
-      // would push linesAdded up. The lstat gate means we never read it.
-      const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outside-'));
-      try {
-        await fs.writeFile(
-          path.join(outside, 'secret.txt'),
-          'one\ntwo\nthree\n',
-        );
-        await fs.symlink(
-          path.join(outside, 'secret.txt'),
-          path.join(repo, 'link.txt'),
-        );
+  it('marks untracked symlinks as binary and never follows them', () =>
+    // Reproduces wenshao Critical (PR #3491 line 455): without an lstat gate,
+    // `open()` would dereference an untracked symlink and read its target,
+    // which can live outside the worktree. The outside target has content
+    // that would push linesAdded up if it were followed.
+    inPlainDir(async (outside) => {
+      await write(outside, { 'secret.txt': 'one\ntwo\nthree\n' });
+      await fs.symlink(
+        path.join(outside, 'secret.txt'),
+        path.join(repo, 'link.txt'),
+      );
 
-        const result = await fetchGitDiff(repo);
-        expect(result).not.toBeNull();
-        const entry = result!.perFileStats.get('link.txt');
-        expect(entry).toBeDefined();
-        expect(entry?.isBinary).toBe(true);
-        expect(entry?.isUntracked).toBe(true);
-        // No content from the symlink target leaked into the totals.
-        expect(result!.stats.linesAdded).toBe(0);
-      } finally {
-        await fs.rm(outside, { recursive: true, force: true });
-      }
-    } finally {
-      await fs.rm(repo, { recursive: true, force: true });
-    }
-  });
+      const result = await diffOf(repo);
+      const entry = result.perFileStats.get('link.txt');
+      expect(entry).toBeDefined();
+      expect(entry?.isBinary).toBe(true);
+      expect(entry?.isUntracked).toBe(true);
+      // No content from the symlink target leaked into the totals.
+      expect(result.stats.linesAdded).toBe(0);
+    }));
 });
 
 describe('fetchGitDiff untracked counting', () => {
-  let repo: string;
-  beforeEach(async () => {
-    repo = await makeRepo();
-    await fs.writeFile(path.join(repo, 'seed.txt'), 'x\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'init');
-  });
-  afterEach(async () => {
-    await fs.rm(repo, { recursive: true, force: true });
-  });
+  useFreshRepo({ 'seed.txt': 'x\n' });
 
   it('aggregates untracked line counts into linesAdded even when the per-file map is full of tracked entries', async () => {
-    // Seed MAX_FILES tracked files, then modify them so the per-file map
-    // saturates with tracked entries. Add a handful of untracked files that
-    // would otherwise be cut out of the display slots — their line counts
-    // still need to land in `stats.linesAdded`.
+    // Saturate the per-file map with MAX_FILES modified tracked files, then
+    // add untracked files that get cut out of the display slots; their line
+    // counts must still land in `stats.linesAdded`.
     for (let i = 0; i < MAX_FILES; i++) {
-      await fs.writeFile(path.join(repo, `t${i}.txt`), `hello${i}\n`);
+      await write(repo, { [`t${i}.txt`]: `hello${i}\n` });
     }
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'seed');
+    await commit(repo, {}, 'seed');
     for (let i = 0; i < MAX_FILES; i++) {
-      await fs.writeFile(path.join(repo, `t${i}.txt`), `HELLO${i}\n`);
+      await write(repo, { [`t${i}.txt`]: `HELLO${i}\n` });
     }
     // Each untracked file has 3 lines; 5 files × 3 = 15 lines we must keep.
     const untrackedCount = 5;
     const linesPerFile = 3;
     for (let i = 0; i < untrackedCount; i++) {
-      await fs.writeFile(path.join(repo, `u${i}.txt`), 'a\nb\nc\n');
+      await write(repo, { [`u${i}.txt`]: 'a\nb\nc\n' });
     }
 
-    const result = await fetchGitDiff(repo);
-    expect(result).not.toBeNull();
-    expect(result!.stats.filesCount).toBe(MAX_FILES + untrackedCount);
-    // Per-file map is still capped — none of the u* entries will be visible
-    // because the t* entries filled every slot. But the totals must still
-    // include the untracked additions.
-    expect(result!.perFileStats.size).toBe(MAX_FILES);
+    const result = await diffOf(repo);
+    expect(result.stats.filesCount).toBe(MAX_FILES + untrackedCount);
+    // The per-file map stays capped (t* entries fill every slot, so no u*
+    // entry is visible), but the totals include the untracked additions.
+    expect(result.perFileStats.size).toBe(MAX_FILES);
     const trackedLinesAdded = MAX_FILES; // each t* gained 1 char → numstat 1/1
-    expect(result!.stats.linesAdded).toBe(
+    expect(result.stats.linesAdded).toBe(
       trackedLinesAdded + untrackedCount * linesPerFile,
     );
   });
 
   it('line-counts every untracked file in the slow path, not just the first MAX_FILES', async () => {
-    // Regression for the under-counted-totals bug: with 0 tracked changes
-    // and 51-500 untracked files, the slow path used to read line counts
-    // for `untrackedPaths.slice(0, MAX_FILES)` only, so files beyond the
-    // per-file display cap silently dropped out of `stats.linesAdded`.
-    // This test puts MAX_FILES + 10 = 60 untracked one-line files in a
-    // clean repo and asserts every one of them contributes to the total.
-    const extra = 10;
-    const totalUntracked = MAX_FILES + extra;
+    // Regression for under-counted totals: with 0 tracked changes and 51-500
+    // untracked files, the slow path read line counts only for
+    // `untrackedPaths.slice(0, MAX_FILES)`, so files past the display cap
+    // dropped out of `stats.linesAdded`. MAX_FILES + 10 one-line files here.
+    const totalUntracked = MAX_FILES + 10;
     for (let i = 0; i < totalUntracked; i++) {
-      // Padded filenames so `ls-files --others` returns them in stable
-      // order — otherwise the "first MAX_FILES" slicing in the bug case
-      // could randomly cover the test files.
+      // Padded names keep `ls-files --others` order stable; otherwise the
+      // "first MAX_FILES" slice in the bug case could randomly cover them.
       const name = `u${String(i).padStart(3, '0')}.txt`;
-      await fs.writeFile(path.join(repo, name), 'one-line\n');
+      await write(repo, { [name]: 'one-line\n' });
     }
-    const result = await fetchGitDiff(repo);
-    expect(result).not.toBeNull();
-    expect(result!.stats.filesCount).toBe(totalUntracked);
-    // Every untracked file is one line, so totals must equal totalUntracked.
-    // Pre-fix this would have been MAX_FILES (= 50).
-    expect(result!.stats.linesAdded).toBe(totalUntracked);
+    const result = await diffOf(repo);
+    expect(result.stats.filesCount).toBe(totalUntracked);
+    // One line each, so totals must equal totalUntracked (pre-fix: MAX_FILES).
+    expect(result.stats.linesAdded).toBe(totalUntracked);
     // Visible per-file rows still cap at MAX_FILES.
-    expect(result!.perFileStats.size).toBe(MAX_FILES);
+    expect(result.perFileStats.size).toBe(MAX_FILES);
   });
 });
 
 describe('parseStatusBranchLine', () => {
-  it('parses branch with upstream and ahead/behind', () => {
-    expect(
-      parseStatusBranchLine('## main...origin/main [ahead 2, behind 1]'),
-    ).toEqual({
-      branch: 'main',
-      detached: false,
-      hasUpstream: true,
-      ahead: 2,
-      behind: 1,
-    });
-  });
-
-  it('parses a local branch with no upstream', () => {
-    expect(parseStatusBranchLine('## feature/foo')).toEqual({
-      branch: 'feature/foo',
-      detached: false,
-      hasUpstream: false,
-      ahead: 0,
-      behind: 0,
-    });
-  });
-
-  it('parses upstream tracking with no divergence', () => {
-    expect(parseStatusBranchLine('## main...origin/main')).toEqual({
-      branch: 'main',
-      detached: false,
-      hasUpstream: true,
-      ahead: 0,
-      behind: 0,
-    });
-  });
-
-  it('splits the branch from upstream at the last "..."', () => {
+  const main = { branch: 'main', detached: false, hasUpstream: true };
+  it.each([
+    [
+      'parses branch with upstream and ahead/behind',
+      '## main...origin/main [ahead 2, behind 1]',
+      { ...main, ahead: 2, behind: 1 },
+    ],
+    [
+      'parses a local branch with no upstream',
+      '## feature/foo',
+      { ...main, branch: 'feature/foo', hasUpstream: false },
+    ],
+    [
+      'parses upstream tracking with no divergence',
+      '## main...origin/main',
+      main,
+    ],
     // Git forbids `..` in ref names so a real branch can't contain `...`, but
     // the split must use the last `...` (the branch/upstream separator) so a
     // dotted branch name isn't truncated at the first `...`.
-    expect(parseStatusBranchLine('## fix...feature...origin/main')).toEqual({
-      branch: 'fix...feature',
-      detached: false,
-      hasUpstream: true,
+    [
+      'splits the branch from upstream at the last "..."',
+      '## fix...feature...origin/main',
+      { ...main, branch: 'fix...feature' },
+    ],
+    [
+      'treats a gone upstream as tracked with zero divergence',
+      '## main...origin/main [gone]',
+      main,
+    ],
+    [
+      'detects a detached HEAD',
+      '## HEAD (no branch)',
+      { branch: null, detached: true, hasUpstream: false },
+    ],
+    [
+      'returns empty for a non-header line',
+      ' M src/foo.ts',
+      { branch: null, detached: false, hasUpstream: false },
+    ],
+  ])('%s', (_title, line, expected) => {
+    expect(parseStatusBranchLine(line)).toEqual({
       ahead: 0,
       behind: 0,
+      ...expected,
     });
   });
 
@@ -1669,26 +1299,6 @@ describe('parseStatusBranchLine', () => {
     ).toMatchObject({ ahead: 0, behind: 5 });
   });
 
-  it('treats a gone upstream as tracked with zero divergence', () => {
-    expect(parseStatusBranchLine('## main...origin/main [gone]')).toEqual({
-      branch: 'main',
-      detached: false,
-      hasUpstream: true,
-      ahead: 0,
-      behind: 0,
-    });
-  });
-
-  it('detects a detached HEAD', () => {
-    expect(parseStatusBranchLine('## HEAD (no branch)')).toEqual({
-      branch: null,
-      detached: true,
-      hasUpstream: false,
-      ahead: 0,
-      behind: 0,
-    });
-  });
-
   it('reads the branch from an unborn / initial-commit header', () => {
     expect(parseStatusBranchLine('## No commits yet on main')).toMatchObject({
       branch: 'main',
@@ -1697,16 +1307,6 @@ describe('parseStatusBranchLine', () => {
     expect(parseStatusBranchLine('## Initial commit on dev')).toMatchObject({
       branch: 'dev',
       detached: false,
-    });
-  });
-
-  it('returns empty for a non-header line', () => {
-    expect(parseStatusBranchLine(' M src/foo.ts')).toEqual({
-      branch: null,
-      detached: false,
-      hasUpstream: false,
-      ahead: 0,
-      behind: 0,
     });
   });
 });
@@ -1764,31 +1364,15 @@ describe('parseStatusEntries', () => {
 });
 
 describe('getGitWorkingTreeStatus', () => {
-  let repo: string;
+  useFreshRepo();
 
-  beforeEach(async () => {
-    repo = await makeRepo();
-  });
-
-  afterEach(async () => {
-    await fs.rm(repo, { recursive: true, force: true });
-  });
-
-  it('returns null when not in a git repo', async () => {
-    const plain = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-status-plain-'),
-    );
-    try {
+  it('returns null when not in a git repo', () =>
+    inPlainDir(async (plain) => {
       expect(await getGitWorkingTreeStatus(plain)).toBeNull();
-    } finally {
-      await fs.rm(plain, { recursive: true, force: true });
-    }
-  });
+    }));
 
   it('reports a clean repo on its branch with zero counts', async () => {
-    await fs.writeFile(path.join(repo, 'a.txt'), 'one\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'init');
+    await commit(repo, { 'a.txt': 'one\n' });
 
     const status = await getGitWorkingTreeStatus(repo);
     expect(status).toEqual({
@@ -1806,16 +1390,11 @@ describe('getGitWorkingTreeStatus', () => {
   });
 
   it('counts staged, unstaged, and untracked changes', async () => {
-    await fs.writeFile(path.join(repo, 'a.txt'), 'one\n');
-    await fs.writeFile(path.join(repo, 'b.txt'), 'one\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'init');
-
+    await commit(repo, { 'a.txt': 'one\n', 'b.txt': 'one\n' });
     // Stage a change to a.txt, leave b.txt modified-but-unstaged, add new.txt.
-    await fs.writeFile(path.join(repo, 'a.txt'), 'one\ntwo\n');
+    await write(repo, { 'a.txt': 'one\ntwo\n' });
     await git(repo, 'add', 'a.txt');
-    await fs.writeFile(path.join(repo, 'b.txt'), 'one\ntwo\n');
-    await fs.writeFile(path.join(repo, 'new.txt'), 'hi\n');
+    await write(repo, { 'b.txt': 'one\ntwo\n', 'new.txt': 'hi\n' });
 
     const status = await getGitWorkingTreeStatus(repo);
     expect(status).toMatchObject({
@@ -1827,15 +1406,9 @@ describe('getGitWorkingTreeStatus', () => {
   });
 
   it('detects a detached HEAD', async () => {
-    await fs.writeFile(path.join(repo, 'a.txt'), 'one\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'c1');
-    const sha = (
-      await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: repo })
-    ).stdout.trim();
-    await fs.writeFile(path.join(repo, 'a.txt'), 'one\ntwo\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'c2');
+    await commit(repo, { 'a.txt': 'one\n' }, 'c1');
+    const sha = await headSha(repo);
+    await commit(repo, { 'a.txt': 'one\ntwo\n' }, 'c2');
     await git(repo, 'checkout', '-q', sha);
 
     const status = await getGitWorkingTreeStatus(repo);
@@ -1843,10 +1416,8 @@ describe('getGitWorkingTreeStatus', () => {
   });
 
   it('counts stash entries', async () => {
-    await fs.writeFile(path.join(repo, 'a.txt'), 'one\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'init');
-    await fs.writeFile(path.join(repo, 'a.txt'), 'one\ntwo\n');
+    await commit(repo, { 'a.txt': 'one\n' });
+    await write(repo, { 'a.txt': 'one\ntwo\n' });
     await git(repo, 'stash', 'push', '-q');
 
     const status = await getGitWorkingTreeStatus(repo);
@@ -1855,148 +1426,102 @@ describe('getGitWorkingTreeStatus', () => {
 
   // Many git subprocesses (bare init, push, clone, fetch) make this slower
   // than the default 5s budget; the logic is unchanged, it just needs time.
-  it('reports ahead/behind against an upstream', async () => {
-    const remote = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-status-remote-'),
-    );
-    const other = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-status-clone-'),
-    );
-    try {
-      await git(remote, 'init', '--bare', '-q', '-b', 'main');
-      await fs.writeFile(path.join(repo, 'a.txt'), '1\n');
-      await git(repo, 'add', '.');
-      await git(repo, 'commit', '-q', '-m', 'c1');
-      await git(repo, 'remote', 'add', 'origin', remote);
-      await git(repo, 'push', '-q', '-u', 'origin', 'main');
+  it(
+    'reports ahead/behind against an upstream',
+    () =>
+      inPlainDir((remote) =>
+        inPlainDir(async (other) => {
+          await git(remote, 'init', '--bare', '-q', '-b', 'main');
+          await commit(repo, { 'a.txt': '1\n' }, 'c1');
+          await git(repo, 'remote', 'add', 'origin', remote);
+          await git(repo, 'push', '-q', '-u', 'origin', 'main');
 
-      // Local-only commit → ahead 1.
-      await fs.writeFile(path.join(repo, 'a.txt'), '2\n');
-      await git(repo, 'add', '.');
-      await git(repo, 'commit', '-q', '-m', 'c2-local');
+          // Local-only commit → ahead 1.
+          await commit(repo, { 'a.txt': '2\n' }, 'c2-local');
 
-      // Diverge the remote from a clone, then fetch → behind 1.
-      await execFileAsync('git', ['clone', '-q', remote, other]);
-      await execFileAsync('git', ['config', 'user.email', 'o@example.com'], {
-        cwd: other,
-      });
-      await execFileAsync('git', ['config', 'user.name', 'Other'], {
-        cwd: other,
-      });
-      await fs.writeFile(path.join(other, 'a.txt'), 'remote\n');
-      await execFileAsync('git', ['add', '.'], { cwd: other });
-      await execFileAsync('git', ['commit', '-q', '-m', 'c3-remote'], {
-        cwd: other,
-      });
-      await execFileAsync('git', ['push', '-q', 'origin', 'main'], {
-        cwd: other,
-      });
-      await git(repo, 'fetch', '-q', 'origin');
+          // Diverge the remote from a clone, then fetch → behind 1.
+          await execFileAsync('git', ['clone', '-q', remote, other]);
+          await git(other, 'config', 'user.email', 'o@example.com');
+          await git(other, 'config', 'user.name', 'Other');
+          await commit(other, { 'a.txt': 'remote\n' }, 'c3-remote');
+          await git(other, 'push', '-q', 'origin', 'main');
+          await git(repo, 'fetch', '-q', 'origin');
 
-      const status = await getGitWorkingTreeStatus(repo);
-      expect(status).toMatchObject({
-        branch: 'main',
-        hasUpstream: true,
-        ahead: 1,
-        behind: 1,
-      });
-    } finally {
-      await fs.rm(remote, { recursive: true, force: true });
-      await fs.rm(other, { recursive: true, force: true });
-    }
-  }, 20000);
+          const status = await getGitWorkingTreeStatus(repo);
+          expect(status).toMatchObject({
+            branch: 'main',
+            hasUpstream: true,
+            ahead: 1,
+            behind: 1,
+          });
+        }),
+      ),
+    20000,
+  );
 
-  it('surfaces an in-progress merge instead of returning null', async () => {
-    await fs.writeFile(path.join(repo, 'a.txt'), 'one\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'init');
-    const sha = (
-      await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: repo })
-    ).stdout.trim();
-    await fs.writeFile(path.join(repo, '.git', 'MERGE_HEAD'), `${sha}\n`);
-
-    const status = await getGitWorkingTreeStatus(repo);
-    expect(status).toMatchObject({ branch: 'main', operation: 'merge' });
-  });
-
-  it('detects an in-progress rebase (rebase-merge dir)', async () => {
-    await fs.writeFile(path.join(repo, 'a.txt'), 'one\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'init');
-    await fs.mkdir(path.join(repo, '.git', 'rebase-merge'));
-
-    const status = await getGitWorkingTreeStatus(repo);
-    expect(status).toMatchObject({ operation: 'rebase' });
-  });
-
-  it('detects an in-progress rebase (rebase-apply dir, e.g. git am)', async () => {
-    await fs.writeFile(path.join(repo, 'a.txt'), 'one\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'init');
+  it.each([
+    [
+      'surfaces an in-progress merge instead of returning null',
+      'MERGE_HEAD',
+      'sha',
+      { branch: 'main', operation: 'merge' },
+    ],
+    [
+      'detects an in-progress rebase (rebase-merge dir)',
+      'rebase-merge',
+      'dir',
+      { operation: 'rebase' },
+    ],
     // `git am` (and an interrupted `git rebase --apply`) creates rebase-apply;
     // detectGitOperation maps it to 'rebase' too.
-    await fs.mkdir(path.join(repo, '.git', 'rebase-apply'));
+    [
+      'detects an in-progress rebase (rebase-apply dir, e.g. git am)',
+      'rebase-apply',
+      'dir',
+      { operation: 'rebase' },
+    ],
+    [
+      'detects an in-progress cherry-pick',
+      'CHERRY_PICK_HEAD',
+      'sha',
+      { operation: 'cherry-pick' },
+    ],
+    [
+      'detects an in-progress revert',
+      'REVERT_HEAD',
+      'sha',
+      { operation: 'revert' },
+    ],
+    [
+      'detects an in-progress bisect',
+      'BISECT_LOG',
+      'bisect\n',
+      { operation: 'bisect' },
+    ],
+  ])('%s', async (_title, name, marker, expected) => {
+    await commit(repo, { 'a.txt': 'one\n' });
+    const target = path.join(repo, '.git', name);
+    if (marker === 'dir') {
+      await fs.mkdir(target);
+    } else {
+      const content = marker === 'sha' ? `${await headSha(repo)}\n` : marker;
+      await fs.writeFile(target, content);
+    }
 
     const status = await getGitWorkingTreeStatus(repo);
-    expect(status).toMatchObject({ operation: 'rebase' });
-  });
-
-  it('detects an in-progress cherry-pick', async () => {
-    await fs.writeFile(path.join(repo, 'a.txt'), 'one\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'init');
-    const sha = (
-      await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: repo })
-    ).stdout.trim();
-    await fs.writeFile(path.join(repo, '.git', 'CHERRY_PICK_HEAD'), `${sha}\n`);
-
-    const status = await getGitWorkingTreeStatus(repo);
-    expect(status).toMatchObject({ operation: 'cherry-pick' });
-  });
-
-  it('detects an in-progress revert', async () => {
-    await fs.writeFile(path.join(repo, 'a.txt'), 'one\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'init');
-    const sha = (
-      await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: repo })
-    ).stdout.trim();
-    await fs.writeFile(path.join(repo, '.git', 'REVERT_HEAD'), `${sha}\n`);
-
-    const status = await getGitWorkingTreeStatus(repo);
-    expect(status).toMatchObject({ operation: 'revert' });
-  });
-
-  it('detects an in-progress bisect', async () => {
-    await fs.writeFile(path.join(repo, 'a.txt'), 'one\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'init');
-    await fs.writeFile(path.join(repo, '.git', 'BISECT_LOG'), 'bisect\n');
-
-    const status = await getGitWorkingTreeStatus(repo);
-    expect(status).toMatchObject({ operation: 'bisect' });
+    expect(status).toMatchObject(expected);
   });
 });
 
 describe('fetchGitLog', () => {
-  let repo: string;
+  useFreshRepo();
+  const subjects = async (options?: Parameters<typeof fetchGitLog>[1]) =>
+    (await fetchGitLog(repo, options))!.entries.map((e) => e.subject);
 
-  beforeEach(async () => {
-    repo = await makeRepo();
-  });
-
-  afterEach(async () => {
-    await fs.rm(repo, { recursive: true, force: true });
-  });
-
-  it('returns null for a non-repo directory', async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-norepo-'));
-    try {
+  it('returns null for a non-repo directory', () =>
+    inPlainDir(async (dir) => {
       expect(await fetchGitLog(dir)).toBeNull();
-    } finally {
-      await fs.rm(dir, { recursive: true, force: true });
-    }
-  });
+    }));
 
   it('returns empty list for a repo with no commits', async () => {
     const result = await fetchGitLog(repo);
@@ -2004,12 +1529,8 @@ describe('fetchGitLog', () => {
   });
 
   it('returns commits newest-first with correct fields', async () => {
-    await fs.writeFile(path.join(repo, 'a.txt'), 'one\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'first commit');
-    await fs.writeFile(path.join(repo, 'b.txt'), 'two\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'second commit');
+    await commit(repo, { 'a.txt': 'one\n' }, 'first commit');
+    await commit(repo, { 'b.txt': 'two\n' }, 'second commit');
 
     const result = await fetchGitLog(repo);
     expect(result).not.toBeNull();
@@ -2032,9 +1553,7 @@ describe('fetchGitLog', () => {
 
   it('paginates with limit and hasMore', async () => {
     for (let i = 0; i < 5; i++) {
-      await fs.writeFile(path.join(repo, `f${i}.txt`), `${i}\n`);
-      await git(repo, 'add', '.');
-      await git(repo, 'commit', '-q', '-m', `commit ${i}`);
+      await commit(repo, { [`f${i}.txt`]: `${i}\n` }, `commit ${i}`);
     }
 
     const page1 = await fetchGitLog(repo, { limit: 3 });
@@ -2050,9 +1569,7 @@ describe('fetchGitLog', () => {
 
   it('respects limit and clamps edge values', async () => {
     for (let i = 0; i < 3; i++) {
-      await fs.writeFile(path.join(repo, `f${i}.txt`), `${i}\n`);
-      await git(repo, 'add', '.');
-      await git(repo, 'commit', '-q', '-m', `c${i}`);
+      await commit(repo, { [`f${i}.txt`]: `${i}\n` }, `c${i}`);
     }
 
     const limited = await fetchGitLog(repo, { limit: 2 });
@@ -2064,9 +1581,7 @@ describe('fetchGitLog', () => {
   }, 15_000);
 
   it('includes refs for HEAD', async () => {
-    await fs.writeFile(path.join(repo, 'a.txt'), 'x\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'c1');
+    await commit(repo, { 'a.txt': 'x\n' }, 'c1');
 
     const result = await fetchGitLog(repo);
     expect(result!.entries[0].refs).toContain('HEAD');
@@ -2075,9 +1590,7 @@ describe('fetchGitLog', () => {
 
   it('preserves a unit separator in the commit subject', async () => {
     const subject = 'subject\x1ftail';
-    await fs.writeFile(path.join(repo, 'a.txt'), 'x\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', subject);
+    await commit(repo, { 'a.txt': 'x\n' }, subject);
 
     const result = await fetchGitLog(repo);
     expect(result!.entries[0].subject).toBe(subject);
@@ -2085,18 +1598,13 @@ describe('fetchGitLog', () => {
     expect(result!.entries[0].parents).toHaveLength(0);
   });
   it('walks every branch and tag with `all`, children before parents', async () => {
-    await fs.writeFile(path.join(repo, 'a.txt'), 'x\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'base');
+    await commit(repo, { 'a.txt': 'x\n' }, 'base');
     await git(repo, 'checkout', '-q', '-b', 'feature');
-    await fs.writeFile(path.join(repo, 'f.txt'), 'f\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'feature work');
+    await commit(repo, { 'f.txt': 'f\n' }, 'feature work');
     await git(repo, 'tag', 'v1');
     await git(repo, 'checkout', '-q', 'main');
 
-    const headOnly = await fetchGitLog(repo);
-    expect(headOnly!.entries.map((e) => e.subject)).toEqual(['base']);
+    expect(await subjects()).toEqual(['base']);
 
     const all = await fetchGitLog(repo, { all: true });
     expect(all!.entries.map((e) => e.subject)).toEqual([
@@ -2108,49 +1616,31 @@ describe('fetchGitLog', () => {
   }, 15_000);
 
   it('ignores an unsafe range instead of passing it to git', async () => {
-    await fs.writeFile(path.join(repo, 'a.txt'), 'x\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'only');
+    await commit(repo, { 'a.txt': 'x\n' }, 'only');
 
-    const result = await fetchGitLog(repo, { range: '--output=/tmp/x' });
-    expect(result!.entries.map((e) => e.subject)).toEqual(['only']);
+    expect(await subjects({ range: '--output=/tmp/x' })).toEqual(['only']);
   });
 
   it('searches message, author, and hash prefix as a union', async () => {
-    await fs.writeFile(path.join(repo, 'a.txt'), 'x\n');
+    await commit(repo, { 'a.txt': 'x\n' }, 'Add parser');
+    await write(repo, { 'b.txt': 'y\n' });
     await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'Add parser');
-    await fs.writeFile(path.join(repo, 'b.txt'), 'y\n');
-    await git(repo, 'add', '.');
-    await git(
-      repo,
-      '-c',
-      'user.name=Grace Hopper',
-      'commit',
-      '-q',
-      '-m',
-      'Fix typo',
-    );
-    await fs.writeFile(path.join(repo, 'c.txt'), 'z\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'Unrelated [a.b]');
+    const asGrace = ['-c', 'user.name=Grace Hopper'];
+    await git(repo, ...asGrace, 'commit', '-q', '-m', 'Fix typo');
+    await commit(repo, { 'c.txt': 'z\n' }, 'Unrelated [a.b]');
     const unfiltered = await fetchGitLog(repo);
     const parserSha = unfiltered!.entries.find(
       (e) => e.subject === 'Add parser',
     )!.sha;
 
-    const byMessage = await fetchGitLog(repo, { search: 'PARSER' });
-    expect(byMessage!.entries.map((e) => e.subject)).toEqual(['Add parser']);
-
-    const byAuthor = await fetchGitLog(repo, { search: 'hopper' });
-    expect(byAuthor!.entries.map((e) => e.subject)).toEqual(['Fix typo']);
+    expect(await subjects({ search: 'PARSER' })).toEqual(['Add parser']);
+    expect(await subjects({ search: 'hopper' })).toEqual(['Fix typo']);
 
     const byHash = await fetchGitLog(repo, { search: parserSha.slice(0, 7) });
     expect(byHash!.entries.map((e) => e.sha)).toEqual([parserSha]);
 
     // Fixed-string matching: regex metacharacters are literal.
-    const literal = await fetchGitLog(repo, { search: '[a.b]' });
-    expect(literal!.entries.map((e) => e.subject)).toEqual(['Unrelated [a.b]']);
+    expect(await subjects({ search: '[a.b]' })).toEqual(['Unrelated [a.b]']);
 
     const none = await fetchGitLog(repo, { search: 'zzz-no-such' });
     expect(none).toEqual({ entries: [], hasMore: false });
@@ -2158,9 +1648,7 @@ describe('fetchGitLog', () => {
 
   it('pages search results newest-first with hasMore', async () => {
     for (let i = 0; i < 4; i++) {
-      await fs.writeFile(path.join(repo, `f${i}.txt`), `${i}\n`);
-      await git(repo, 'add', '.');
-      await git(repo, 'commit', '-q', '-m', `match ${i}`);
+      await commit(repo, { [`f${i}.txt`]: `${i}\n` }, `match ${i}`);
     }
     const page1 = await fetchGitLog(repo, { search: 'match', limit: 3 });
     expect(page1!.entries.map((e) => e.subject)).toEqual([
@@ -2180,15 +1668,11 @@ describe('fetchGitLog', () => {
 });
 
 describe('fetchGitCommitDetail', () => {
-  let repo: string;
+  useFreshRepo();
 
-  beforeEach(async () => {
-    repo = await makeRepo();
-  });
-
-  afterEach(async () => {
-    await fs.rm(repo, { recursive: true, force: true });
-  });
+  /** Commit detail for the newest commit, addressed by fetchGitLog's sha. */
+  const headDetail = async () =>
+    fetchGitCommitDetail(repo, (await fetchGitLog(repo))!.entries[0].sha);
 
   it('returns null for invalid sha', async () => {
     expect(await fetchGitCommitDetail(repo, 'not-a-sha')).toBeNull();
@@ -2196,23 +1680,15 @@ describe('fetchGitCommitDetail', () => {
     expect(await fetchGitCommitDetail(repo, '')).toBeNull();
   });
 
-  it('returns null for a non-repo directory', async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-norepo-'));
-    try {
+  it('returns null for a non-repo directory', () =>
+    inPlainDir(async (dir) => {
       expect(await fetchGitCommitDetail(dir, 'abcdef1')).toBeNull();
-    } finally {
-      await fs.rm(dir, { recursive: true, force: true });
-    }
-  });
+    }));
 
   it('returns detail with body and file stats', async () => {
-    await fs.writeFile(path.join(repo, 'a.txt'), 'line1\nline2\nline3\n');
-    await git(repo, 'add', '.');
-    await git(
+    await commit(
       repo,
-      'commit',
-      '-q',
-      '-m',
+      { 'a.txt': 'line1\nline2\nline3\n' },
       'subject line\n\nBody paragraph here.',
     );
 
@@ -2238,13 +1714,9 @@ describe('fetchGitCommitDetail', () => {
   it('preserves unit separators in the subject and body', async () => {
     const subject = 'subject\x1ftail';
     const body = 'body\x1ftail';
-    await fs.writeFile(path.join(repo, 'a.txt'), 'x\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', `${subject}\n\n${body}`);
+    await commit(repo, { 'a.txt': 'x\n' }, `${subject}\n\n${body}`);
 
-    const log = await fetchGitLog(repo);
-    const detail = await fetchGitCommitDetail(repo, log!.entries[0].sha);
-
+    const detail = await headDetail();
     expect(detail!.subject).toBe(subject);
     expect(detail!.body).toBe(body);
     expect(detail!.refs).toContain('HEAD');
@@ -2252,12 +1724,9 @@ describe('fetchGitCommitDetail', () => {
   });
 
   it('handles root commit (no parent)', async () => {
-    await fs.writeFile(path.join(repo, 'init.txt'), 'hello\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'root');
+    await commit(repo, { 'init.txt': 'hello\n' }, 'root');
 
-    const log = await fetchGitLog(repo);
-    const detail = await fetchGitCommitDetail(repo, log!.entries[0].sha);
+    const detail = await headDetail();
     expect(detail).not.toBeNull();
     expect(detail!.parents).toHaveLength(0);
     expect(detail!.filesCount).toBe(1);
@@ -2269,20 +1738,15 @@ describe('fetchGitCommitDetail', () => {
     const buf = Buffer.alloc(1024);
     buf.fill(0x89, 0, 512);
     buf.fill(0x00, 512);
-    await fs.writeFile(path.join(repo, 'img.png'), buf);
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'add image');
+    await commit(repo, { 'img.png': buf }, 'add image');
 
-    const log = await fetchGitLog(repo);
-    const detail = await fetchGitCommitDetail(repo, log!.entries[0].sha);
+    const detail = await headDetail();
     expect(detail!.files[0].isBinary).toBe(true);
     expect(detail!.files[0].added).toBe(0);
   });
 
   it('returns null for nonexistent sha', async () => {
-    await fs.writeFile(path.join(repo, 'a.txt'), 'x\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'c1');
+    await commit(repo, { 'a.txt': 'x\n' }, 'c1');
 
     const result = await fetchGitCommitDetail(
       repo,
@@ -2292,20 +1756,15 @@ describe('fetchGitCommitDetail', () => {
   });
 
   it('counts a renamed file by its new path (not dropped, not empty-path)', async () => {
-    await fs.writeFile(path.join(repo, 'old.txt'), 'a\nb\nc\nd\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'seed');
+    await commit(repo, { 'old.txt': 'a\nb\nc\nd\n' }, 'seed');
     // Rename + a small edit so git reports it as a rename with numstat counts.
     await git(repo, 'mv', 'old.txt', 'new.txt');
-    await fs.writeFile(path.join(repo, 'new.txt'), 'a\nB\nc\nd\ne\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'rename + edit');
+    await commit(repo, { 'new.txt': 'a\nB\nc\nd\ne\n' }, 'rename + edit');
 
-    const log = await fetchGitLog(repo);
-    const detail = await fetchGitCommitDetail(repo, log!.entries[0].sha);
+    const detail = await headDetail();
     expect(detail).not.toBeNull();
-    // The rename is one file, keyed by the NEW path — the three-token `-z`
-    // rename sequence must not record an empty path or drop it.
+    // One file keyed by the NEW path: the three-token `-z` rename sequence
+    // must not record an empty path or drop it.
     expect(detail!.filesCount).toBe(1);
     expect(detail!.files).toHaveLength(1);
     expect(detail!.files[0].path).toBe('new.txt');
@@ -2313,21 +1772,14 @@ describe('fetchGitCommitDetail', () => {
   });
 
   it('shows the first-parent diff for a merge commit', async () => {
-    await fs.writeFile(path.join(repo, 'base.txt'), 'base\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'base');
+    await commit(repo, { 'base.txt': 'base\n' }, 'base');
     await git(repo, 'checkout', '-q', '-b', 'feature');
-    await fs.writeFile(path.join(repo, 'feature.txt'), 'feature\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'feature work');
+    await commit(repo, { 'feature.txt': 'feature\n' }, 'feature work');
     await git(repo, 'checkout', '-q', 'main');
-    await fs.writeFile(path.join(repo, 'main.txt'), 'main\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'main work');
+    await commit(repo, { 'main.txt': 'main\n' }, 'main work');
     await git(repo, 'merge', '-q', '--no-ff', 'feature', '-m', 'merge feature');
 
-    const log = await fetchGitLog(repo);
-    const detail = await fetchGitCommitDetail(repo, log!.entries[0].sha);
+    const detail = await headDetail();
     expect(detail).not.toBeNull();
     expect(detail!.parents.length).toBe(2);
     // Plain diff-tree emits nothing for a merge; the first-parent diff must
@@ -2338,20 +1790,10 @@ describe('fetchGitCommitDetail', () => {
 });
 
 describe('fetchGitLog range argument injection guard', () => {
-  let repo: string;
-
+  useFreshRepo();
   beforeEach(async () => {
-    repo = await makeRepo();
-    await fs.writeFile(path.join(repo, 'a.txt'), 'one\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'first');
-    await fs.writeFile(path.join(repo, 'a.txt'), 'two\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'second');
-  });
-
-  afterEach(async () => {
-    await fs.rm(repo, { recursive: true, force: true });
+    await commit(repo, { 'a.txt': 'one\n' }, 'first');
+    await commit(repo, { 'a.txt': 'two\n' }, 'second');
   });
 
   it('honours a legitimate revision range', async () => {
@@ -2413,82 +1855,102 @@ vi.mock('./no-follow-open.js', async (importActual) => {
 });
 
 describe('untracked files on inode-unverifiable volumes (#8227 follow-up)', () => {
-  let repo: string;
-
-  beforeEach(async () => {
-    repo = await makeRepo();
-  });
-
-  afterEach(async () => {
+  useFreshRepo({ 'seed.txt': 'x\n' });
+  afterEach(() => {
     noFollowRefusal.code = undefined;
-    await fs.rm(repo, { recursive: true, force: true });
   });
+
+  const refuseUnverifiable = () =>
+    Object.assign(noFollowRefusal, {
+      code: UNVERIFIABLE_IDENTITY_CODE,
+      message: 'inode 0 cannot be verified',
+    });
 
   it('falls back to a plain open when inode identity is unverifiable', async () => {
     // On inode-0 volumes (FAT/exFAT, some SMB shares) openNoFollow refuses
     // with UNVERIFIABLE_IDENTITY_CODE because identity can never be proven
-    // there. Diff display is not identity-sensitive, so untracked text
-    // files must keep their line counts instead of collapsing to a binary
-    // row (#8227 follow-up).
-    await fs.writeFile(path.join(repo, 'seed.txt'), 'x\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'init');
-    await fs.writeFile(path.join(repo, 'fat-volume.txt'), 'a\nb\nc\n');
+    // there. Diff display is not identity-sensitive, so untracked text files
+    // must keep their line counts instead of collapsing to a binary row.
+    await write(repo, { 'fat-volume.txt': 'a\nb\nc\n' });
+    refuseUnverifiable();
 
-    noFollowRefusal.code = UNVERIFIABLE_IDENTITY_CODE;
-    noFollowRefusal.message = 'inode 0 cannot be verified';
-
-    const result = await fetchGitDiff(repo);
-    expect(result).not.toBeNull();
-    expect(result!.perFileStats.get('fat-volume.txt')).toEqual({
-      added: 3,
-      removed: 0,
-      isBinary: false,
-      isUntracked: true,
-      truncated: false,
-    });
+    const result = await diffOf(repo);
+    expect(result.perFileStats.get('fat-volume.txt')).toEqual(
+      untrackedEntry(3),
+    );
     // The fallback keeps the lines in the aggregate total too.
-    expect(result!.stats.linesAdded).toBe(3);
+    expect(result.stats.linesAdded).toBe(3);
   });
 
   it('still synthesizes an all-added hunk when inode identity is unverifiable', async () => {
-    await fs.writeFile(path.join(repo, 'seed.txt'), 'x\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'init');
-    await fs.writeFile(path.join(repo, 'new.txt'), 'x\ny\n');
+    await write(repo, { 'new.txt': 'x\ny\n' });
+    refuseUnverifiable();
 
-    noFollowRefusal.code = UNVERIFIABLE_IDENTITY_CODE;
-    noFollowRefusal.message = 'inode 0 cannot be verified';
-
-    const result = await fetchGitDiffHunksForFile(repo, 'new.txt');
-    expect(result).not.toBeNull();
-    expect(result!.truncated).toBe(false);
-    expect(result!.hunks).toHaveLength(1);
-    expect(result!.hunks[0].lines).toEqual(['+x', '+y']);
+    const result = await hunksFor(repo, 'new.txt');
+    expect(result.truncated).toBe(false);
+    expect(result.hunks).toHaveLength(1);
+    expect(result.hunks[0].lines).toEqual(['+x', '+y']);
   });
 
   it('never falls back to a plain open on a symlink refusal', async () => {
     // Any refusal OTHER than the inode-unverifiable one (a genuine symlink
-    // race, ELOOP) must NOT degrade to a plain open — that would follow
-    // the symlink the guard just refused. The file collapses to a binary
-    // row instead.
-    await fs.writeFile(path.join(repo, 'seed.txt'), 'x\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'init');
-    await fs.writeFile(path.join(repo, 'raced.txt'), 'a\nb\n');
-
-    noFollowRefusal.code = 'ELOOP';
-    noFollowRefusal.message = 'too many symbolic links';
-
-    const result = await fetchGitDiff(repo);
-    expect(result).not.toBeNull();
-    expect(result!.perFileStats.get('raced.txt')).toEqual({
-      added: 0,
-      removed: 0,
-      isBinary: true,
-      isUntracked: true,
-      truncated: false,
+    // race, ELOOP) must NOT degrade to a plain open, which would follow the
+    // symlink the guard just refused. The file collapses to a binary row.
+    await write(repo, { 'raced.txt': 'a\nb\n' });
+    Object.assign(noFollowRefusal, {
+      code: 'ELOOP',
+      message: 'too many symbolic links',
     });
-    expect(result!.stats.linesAdded).toBe(0);
+
+    const result = await diffOf(repo);
+    expect(result.perFileStats.get('raced.txt')).toEqual(
+      untrackedEntry(0, true),
+    );
+    expect(result.stats.linesAdded).toBe(0);
+  });
+});
+
+describe('getGitWorkingTreeStatus in a caller’s environment', () => {
+  it('answers about the checkout it was asked about, not the one GIT_DIR names', async () => {
+    const asked = await makeRepo();
+    const elsewhere = await makeRepo();
+    try {
+      await commit(asked, { 'a.txt': 'a\n' });
+      await git(asked, 'switch', '-q', '-c', 'asked-branch');
+      await write(asked, { 'new.txt': 'x\n' });
+      await write(elsewhere, {
+        '1.txt': 'y\n',
+        '2.txt': 'y\n',
+        '3.txt': 'y\n',
+      });
+      // The environment a daemon may have been started with: one that
+      // points every git it runs at some other repository. Given as the
+      // caller's environment, it has to be scrubbed of that, not obeyed.
+      const hostile = {
+        ...process.env,
+        GIT_DIR: path.join(elsewhere, '.git'),
+        GIT_WORK_TREE: elsewhere,
+      };
+      const status = await getGitWorkingTreeStatus(asked, { env: hostile });
+      expect([status?.branch, status?.untracked]).toEqual(['asked-branch', 1]);
+
+      // And the other half: the daemon's own environment is the hostile
+      // one, while the workspace's is clean. Running git in the process's
+      // environment instead of the one given would answer about `elsewhere`.
+      vi.stubEnv('GIT_DIR', path.join(elsewhere, '.git'));
+      vi.stubEnv('GIT_WORK_TREE', elsewhere);
+      const clean = { ...process.env };
+      delete clean['GIT_DIR'];
+      delete clean['GIT_WORK_TREE'];
+      const inClean = await getGitWorkingTreeStatus(asked, { env: clean });
+      expect([inClean?.branch, inClean?.untracked]).toEqual([
+        'asked-branch',
+        1,
+      ]);
+    } finally {
+      vi.unstubAllEnvs();
+      await rmDir(asked);
+      await rmDir(elsewhere);
+    }
   });
 });

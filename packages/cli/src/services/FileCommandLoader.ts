@@ -17,6 +17,7 @@ import {
   Storage,
 } from '@qwen-code/qwen-code-core';
 import type { ICommandLoader } from './types.js';
+import { stripUtf8Bom } from '../config/execution-sandbox-settings.js';
 import {
   parseMarkdownCommand,
   MarkdownCommandDefSchema,
@@ -40,8 +41,10 @@ const debugLogger = createDebugLogger('FILE_COMMAND_LOADER');
  */
 const TomlCommandDefSchema = z.object({
   prompt: z.string({
-    required_error: "The 'prompt' field is required.",
-    invalid_type_error: "The 'prompt' field must be a string.",
+    error: (issue) =>
+      issue.input === undefined
+        ? "The 'prompt' field is required."
+        : "The 'prompt' field must be a string.",
   }),
   description: z.string().optional(),
 });
@@ -274,7 +277,8 @@ export class FileCommandLoader implements ICommandLoader {
 
     let parsed: unknown;
     try {
-      parsed = toml.parse(fileContent);
+      // Markdown commands already ignore a leading BOM; do the same here.
+      parsed = toml.parse(stripUtf8Bom(fileContent));
     } catch (error: unknown) {
       debugLogger.error(
         `[FileCommandLoader] Failed to parse TOML file ${filePath}:`,

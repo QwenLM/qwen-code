@@ -4,19 +4,22 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { formatExecutionSandbox } from '../utils/execution-sandbox-display.js';
 import type React from 'react';
 import { type RefObject, useRef } from 'react';
 import { type DOMElement, Box, Text, useBoxMetrics } from 'ink';
 import { theme } from '../semantic-colors.js';
 import { ContextUsageDisplay } from './ContextUsageDisplay.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
+import { useWorkflowMode } from '../hooks/use-workflow-mode.js';
 import { AutoAcceptIndicator } from './AutoAcceptIndicator.js';
 import { ShellModeIndicator } from './ShellModeIndicator.js';
 import { BackgroundTasksPill } from './background-view/BackgroundTasksPill.js';
 import { MCPHealthPill } from './mcp/MCPHealthPill.js';
 import { isNarrowWidth } from '../utils/isNarrowWidth.js';
 
-import { MAX_STATUS_LINES, useStatusLine } from '../hooks/useStatusLine.js';
+import { MAX_STATUS_LINES } from '../hooks/useStatusLine.js';
+import { useStatusLine } from '../hooks/use-ink-status-line.js';
 import { useConfigInitMessage } from '../hooks/useConfigInitMessage.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
@@ -56,6 +59,7 @@ interface FooterProps {
 export const Footer: React.FC<FooterProps> = ({ containerRef }) => {
   const uiState = useUIState();
   const config = useConfig();
+  const workflowMode = useWorkflowMode(config);
   const settings = useSettings();
   const { vimEnabled, vimMode } = useVimModeState();
   const { columns: terminalWidth } = useTerminalSize();
@@ -80,15 +84,17 @@ export const Footer: React.FC<FooterProps> = ({ containerRef }) => {
     showAutoAcceptIndicator: uiState.showAutoAcceptIndicator,
   };
 
-  // Determine sandbox info from environment
+  const executionSandbox = formatExecutionSandbox(config);
+  // Legacy whole-CLI backends still use their inherited marker.
   const sandboxEnv = process.env['SANDBOX'];
-  const sandboxInfo = sandboxEnv
-    ? sandboxEnv === 'sandbox-exec'
-      ? 'seatbelt'
-      : sandboxEnv.startsWith('qwen-code')
-        ? 'docker'
-        : sandboxEnv
-    : null;
+  const sandboxInfo =
+    !executionSandbox && sandboxEnv
+      ? sandboxEnv === 'sandbox-exec'
+        ? 'seatbelt'
+        : sandboxEnv.startsWith('qwen-code')
+          ? 'docker'
+          : sandboxEnv
+      : null;
 
   // Check if debug mode is enabled
   const debugMode = config.getDebugMode();
@@ -228,6 +234,11 @@ export const Footer: React.FC<FooterProps> = ({ containerRef }) => {
         flexShrink={isNarrow ? 0 : 1}
         minWidth={0}
       >
+        {executionSandbox && (
+          <Text color={theme.text.secondary} wrap="wrap">
+            {executionSandbox}
+          </Text>
+        )}
         {statusLineLines.length > 0 &&
           !uiState.ctrlCPressedOnce &&
           !uiState.ctrlDPressedOnce && (
@@ -269,6 +280,22 @@ export const Footer: React.FC<FooterProps> = ({ containerRef }) => {
           !uiState.ctrlDPressedOnce && (
             <Text dimColor wrap="truncate">
               {`⎇ ${uiState.activeWorktree.branch} (${uiState.activeWorktree.slug})`}
+            </Text>
+          )}
+        {workflowMode?.requested &&
+          !uiState.ctrlCPressedOnce &&
+          !uiState.ctrlDPressedOnce && (
+            <Text
+              color={
+                workflowMode.effective
+                  ? theme.text.accent
+                  : theme.status.warning
+              }
+              wrap="truncate"
+            >
+              {workflowMode.effective
+                ? 'Workflow mode: on'
+                : 'Workflow mode: on (unavailable)'}
             </Text>
           )}
         {/* P7-trigger: the current turn was steered toward the Workflow tool

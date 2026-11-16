@@ -39,6 +39,7 @@ uuid = { workspace = true }
 base64 = { workspace = true }
 sha2 = "0.10"
 url = "2.5"
+time = "0.3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

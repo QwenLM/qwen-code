@@ -51,8 +51,18 @@ import {
   clearReviewWorktreeLease,
   createReviewWorktreeLease,
   recordReviewWorktreeLeaseMergeBase,
+  reviewLeasePath,
 } from '../../services/review-worktree-lease.js';
 import type { BuildTestReport } from './build-test.js';
+
+// Every test here drives real git through spawnSync/execFileSync, so the
+// worker's event loop does not turn for the whole file (~2 min on a hosted
+// runner). vitest's worker->main `onTaskUpdate` RPC times out after 60s and
+// the run exits 1 with every test green. Yielding between tests bounds each
+// stall to one test. The timer is captured at load so fake timers cannot
+// intercept it (same fix as scripts/tests/test-setup.ts).
+const realSetImmediate = setImmediate;
+beforeEach(() => new Promise<void>((resolve) => realSetImmediate(resolve)));
 
 // Set from exactly the cases that need it: `rmSync` fails for the paths the
 // predicate names — a stale build lock that will not delete. Mode bits cannot
@@ -114,11 +124,19 @@ const failedBuild = {
 // file's coverage for the lane the fence never speaks on.
 const itWhereContainmentExists = it.skipIf(process.platform === 'win32');
 
+// A fixture holding a raw 0xff name byte only exists where the filesystem
+// stores name bytes verbatim: NTFS is UTF-16 and cannot hold it, and APFS
+// rejects invalid UTF-8 with EILSEQ. Linux is the only lane this fixture is
+// verified on, so the gate is linux-only — the sibling `lib/worktree.test.ts`
+// gates its own `itWhereRawByteNamesExist` the same way.
+const itWhereByteExactNamesExist = it.skipIf(process.platform !== 'linux');
+
 describe('runBaseTree', () => {
   let repo: string;
   let worktree: string;
   let baseSha: string;
   let headSha: string;
+  let home: string;
 
   const git = (cwd: string, ...args: string[]) =>
     execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
@@ -187,7 +205,11 @@ describe('runBaseTree', () => {
     writeLease();
   };
 
-  beforeEach(() => init());
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'qwen-base-tree-home-'));
+    vi.stubEnv('QWEN_HOME', home);
+    init();
+  });
 
   /**
    * The lease fetch-pr holds for the whole review, at the host-side path —
@@ -232,10 +254,7 @@ describe('runBaseTree', () => {
    * sibling shard was mid-A/B in — with one `utimes`.
    */
   const nextRun = (): void => {
-    rmSync(
-      join(repo, '.qwen', 'review-leases', 'qwen-review-lease-pr-1.json'),
-      { force: true },
-    );
+    rmSync(reviewLeasePath(repo, 'pr-1'), { force: true });
     writeLease('prompt-next');
   };
 
@@ -367,7 +386,11 @@ describe('runBaseTree', () => {
     writeFileSync(config, readFileSync(config, 'utf8') + lines);
   };
 
-  afterEach(() => rmSync(repo, { recursive: true, force: true }));
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    rmSync(home, { recursive: true, force: true });
+    rmSync(repo, { recursive: true, force: true });
+  });
 
   itWhereContainmentExists(
     'reports BUSY and leaves the tree standing when a tree THIS RUN built fails a reuse check (tracked dirt)',
@@ -979,7 +1002,7 @@ describe('runBaseTree', () => {
     },
   );
 
-  itWhereContainmentExists(
+  itWhereByteExactNamesExist(
     'records a filename holding a non-UTF-8 byte instead of dying on it (R1-26)',
     () => {
       // `ls-files -z` exists to preserve a byte-exact filename, and decoding
@@ -1531,7 +1554,7 @@ describe('runBaseTree', () => {
       // builds, certifies and pins — on exactly the rounds where the capture
       // could not record one. The whole of the original hole, on a branch
       // that merely looked like an edge case.
-      rmSync(join(repo, '.qwen', 'review-leases'), {
+      rmSync(dirname(reviewLeasePath(repo, 'pr-1')), {
         recursive: true,
         force: true,
       });
@@ -3976,4 +3999,20 @@ describe('runBaseTree', () => {
       rmSync(foreign, { recursive: true, force: true });
     }
   });
+});
+
+// Pins the yield at the top of this file: without it the loop never reaches
+// the check phase between these two tests, so the flag never flips. Armed
+// with the same captured setImmediate the yield uses — immediates run FIFO,
+// so the armed one fires before the yield's own.
+let yieldObserved = false;
+
+it('arms a flag from a real macrotask callback', () => {
+  realSetImmediate(() => {
+    yieldObserved = true;
+  });
+});
+
+it('observes the event loop turned between tests', () => {
+  expect(yieldObserved).toBe(true);
 });

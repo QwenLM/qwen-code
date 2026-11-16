@@ -18,9 +18,23 @@ const logger = createDebugLogger('IMPORT_PROCESSOR');
  */
 interface ImportState {
   processedFiles: Set<string>;
+  topLevelFiles?: ReadonlySet<string>;
   maxDepth: number;
   currentDepth: number;
   currentFile?: string; // Track the current file being processed
+}
+
+async function isTopLevelFile(
+  filePath: string,
+  topLevelFiles?: ReadonlySet<string>,
+): Promise<boolean> {
+  if (!topLevelFiles) return false;
+  if (topLevelFiles.has(filePath)) return true;
+  try {
+    return topLevelFiles.has(await fs.realpath(filePath));
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -309,6 +323,7 @@ export async function processImports(
         }
 
         const fullPath = path.resolve(fileBasePath, importPath);
+        if (await isTopLevelFile(fullPath, importState.topLevelFiles)) continue;
         const normalizedFullPath = path.normalize(fullPath);
 
         // Skip if already expanded from here or shallower, so the file is not
@@ -402,7 +417,10 @@ export async function processImports(
       continue;
     }
     const fullPath = path.resolve(basePath, importPath);
-    if (importState.processedFiles.has(fullPath)) {
+    if (
+      importState.processedFiles.has(fullPath) ||
+      (await isTopLevelFile(fullPath, importState.topLevelFiles))
+    ) {
       result += `<!-- File already processed: ${importPath} -->`;
       continue;
     }

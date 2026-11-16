@@ -63,6 +63,23 @@ function makeSettings({
 }
 
 describe('getPersistScopeForModelSelection', () => {
+  it.each([true, false])(
+    'keeps subscription selection in its owning workspace only when trusted (%s)',
+    (isTrusted) => {
+      const settings = makeLoaded({
+        isTrusted,
+        workspace: {
+          security: { auth: { selectedType: 'qwen-subscription' } },
+          model: { name: 'removed-model' },
+        },
+        user: { modelProviders: { openai: [] } },
+      });
+      expect(getPersistScopeForModelSelection(settings)).toBe(
+        isTrusted ? SettingScope.Workspace : SettingScope.User,
+      );
+    },
+  );
+
   it('prefers workspace when trusted and workspace defines modelProviders', () => {
     const settings = makeSettings({
       isTrusted: true,

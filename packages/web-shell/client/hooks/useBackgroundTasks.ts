@@ -1,3 +1,8 @@
+import {
+  useDaemonAvailability,
+  useDaemonAvailabilityController,
+} from '../daemon/availability-context.js';
+import { isDaemonUnavailableError } from '../daemon/availability.js';
 import { useEffect, useRef, useState } from 'react';
 import type { DaemonSessionTaskWithWorkflowStatus } from '@qwen-code/sdk/daemon';
 import {
@@ -34,6 +39,8 @@ export function useBackgroundTasks(
   refreshTrigger = 0,
   workflowsEnabled = false,
 ): DaemonSessionTaskWithWorkflowStatus[] {
+  const available = useDaemonAvailability() === 'available';
+  const availability = useDaemonAvailabilityController();
   const actions = useActions();
   const ownerGuard = useDaemonSessionOwnerGuard();
   const ownerRef = useRef(ownerGuard.capture());
@@ -51,7 +58,7 @@ export function useBackgroundTasks(
     setTasks([]);
     setPollingActive(false);
     emptyPollsRef.current = 0;
-  }, [connected, owner, sessionId]);
+  }, [owner, sessionId]);
 
   useEffect(() => {
     // The pause latch belongs to the session, not the transport attachment.
@@ -76,12 +83,16 @@ export function useBackgroundTasks(
   ]);
 
   useEffect(() => {
-    if (tasksPanelActive) return;
+    if (!available || tasksPanelActive) return;
     if (!connected || !sessionId || !pollingActive) return;
 
     let disposed = false;
     const refresh = () => {
-      if (tasksRefreshInFlightRef.current === owner) return;
+      if (
+        (availability && availability.getSnapshot() !== 'available') ||
+        tasksRefreshInFlightRef.current === owner
+      )
+        return;
       tasksRefreshInFlightRef.current = owner;
       const request = workflowsEnabled
         ? actions.getWorkflowTasks({ silent: true })
@@ -109,7 +120,13 @@ export function useBackgroundTasks(
           }
         })
         .catch((error: unknown) => {
-          if (disposed || !owner.isCurrent()) return;
+          if (
+            disposed ||
+            !owner.isCurrent() ||
+            isDaemonUnavailableError(error) ||
+            (availability && availability.getSnapshot() !== 'available')
+          )
+            return;
           if (isSessionDisconnectedError(error)) {
             setPollingActive(false);
             return;
@@ -131,6 +148,8 @@ export function useBackgroundTasks(
     };
   }, [
     actions,
+    availability,
+    available,
     connected,
     owner,
     pollingActive,

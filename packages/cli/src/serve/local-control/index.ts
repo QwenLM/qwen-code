@@ -7,6 +7,7 @@
 export {
   CredentialStore,
   singleTokenCredentials,
+  type DesktopRelayCredentialClaim,
   type ListenerScopedCredentials,
 } from './credentials.js';
 export {

@@ -10,7 +10,7 @@ import { renderHook, act } from '@testing-library/react';
 import * as child_process from 'child_process';
 import { StreamingState } from '../types.js';
 import type { StatusLinePresetReasoning } from '../statusLinePresets.js';
-import { useStatusLine } from './useStatusLine.js';
+import { useStatusLine } from './use-ink-status-line.js';
 
 const debugLogMock = vi.hoisted(() => ({
   log: vi.fn(),
@@ -20,6 +20,9 @@ const debugLogMock = vi.hoisted(() => ({
 
 // --- Mock child_process (auto-mock, then override exec in beforeEach) ---
 vi.mock('child_process');
+vi.mock('@qwen-code/qwen-code-core/utils/debugLogger.js', () => ({
+  createDebugLogger: () => debugLogMock,
+}));
 
 // --- Mock context hooks ---
 
@@ -68,6 +71,7 @@ const getMockContentGeneratorConfig = (): MockContentGeneratorConfig => ({
 });
 
 const mockConfig = {
+  getShellExecutionSandbox: vi.fn<() => object | undefined>(() => undefined),
   getTargetDir: vi.fn(() => '/test/dir'),
   getModel: vi.fn(() => 'test-model'),
   getModelDisplayName: vi.fn(() => 'Test Model'),
@@ -154,6 +158,7 @@ describe('useStatusLine', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.clearAllMocks();
+    mockConfig.getShellExecutionSandbox.mockReturnValue(undefined);
     lastExecCommand = undefined;
     stdinWrittenData = '';
     stdinErrorHandler = undefined;
@@ -188,6 +193,7 @@ describe('useStatusLine', () => {
 
     // Reset mutable mock state
     setStatusLineConfig(undefined);
+    mockUIState.sessionStats.sessionId = 'test-session';
     mockUIState.sessionStats.lastPromptTokenCount = 100;
     mockUIState.currentModel = 'test-model';
     mockUIState.branchName = 'main';
@@ -212,6 +218,24 @@ describe('useStatusLine', () => {
   // --- getStatusLineConfig validation (tested through the hook) ---
 
   describe('config validation', () => {
+    it.each([
+      { type: 'command', command: 'touch outside' },
+      { type: 'preset' as const, items: ['pull-request-number', 'model'] },
+    ])(
+      'never starts host status commands in tool sandbox: $type',
+      (setting) => {
+        mockConfig.getShellExecutionSandbox.mockReturnValue({
+          network: 'closed',
+        });
+        setStatusLineConfig(setting);
+        renderHook(() => useStatusLine());
+        act(() => {
+          vi.advanceTimersByTime(10_000);
+        });
+        expect(child_process.exec).not.toHaveBeenCalled();
+      },
+    );
+
     it('renders the default preset when no statusLine config is set', () => {
       const { result } = renderHook(() => useStatusLine());
       expect(child_process.exec).not.toHaveBeenCalled();
@@ -1079,6 +1103,23 @@ describe('useStatusLine', () => {
   // --- State change triggers ---
 
   describe('state change triggers', () => {
+    it('refreshes a resumed session even when all displayed metrics stay the same', async () => {
+      setStatusLineConfig({ type: 'command', command: 'echo test' });
+      const { rerender } = renderHook(() => useStatusLine());
+      expect(JSON.parse(stdinWrittenData).session_id).toBe('test-session');
+      stdinWrittenData = '';
+      mockUIState.sessionStats = {
+        ...mockUIState.sessionStats,
+        sessionId: 'resumed-session',
+      };
+      rerender();
+      await act(async () => {
+        vi.advanceTimersByTime(300);
+      });
+      expect(child_process.exec).toHaveBeenCalledTimes(2);
+      expect(JSON.parse(stdinWrittenData).session_id).toBe('resumed-session');
+    });
+
     it('triggers update when prompt token count changes', async () => {
       setStatusLineConfig({ type: 'command', command: 'echo test' });
       const { rerender } = renderHook(() => useStatusLine());

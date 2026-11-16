@@ -39,18 +39,27 @@ function makeEnv(): NodeJS.ProcessEnv {
   };
 }
 
+// Budget for the first waitForScreen in each test: the model must chain
+// ToolSearch(select:cron_create) → cron_create → render, i.e. two LLM turns
+// plus tool execution. On a loaded self-hosted runner that exceeds the 120s
+// waitForScreen default (#12962).
+const CRON_CREATE_CONFIRMATION_TIMEOUT = 240_000;
+
 // These tests are flaky in the Docker sandbox environment, skip for now.
 (IS_SANDBOX ? describe.skip : describe)('cron interactive', () => {
   let session: InteractiveSession | null = null;
 
   afterEach(async () => {
     if (session) {
-      await session.close();
-      session = null;
+      try {
+        await session.close();
+      } finally {
+        session = null;
+      }
     }
   });
 
-  it('loop fires inline in conversation', { timeout: 300_000 }, async () => {
+  it('loop fires inline in conversation', { timeout: 420_000 }, async () => {
     session = await InteractiveSession.start({
       env: makeEnv(),
       args: ['--approval-mode', 'yolo'],
@@ -67,6 +76,7 @@ function makeEnv(): NodeJS.ProcessEnv {
     await session.waitForScreen(
       (scr) => scr.includes('Scheduled'),
       'cron_create confirmation',
+      CRON_CREATE_CONFIRMATION_TIMEOUT,
     );
 
     await session.waitForScreen(
@@ -83,7 +93,7 @@ function makeEnv(): NodeJS.ProcessEnv {
     expect(afterPrompt).toContain('◆');
   });
 
-  it('user input takes priority over cron', { timeout: 300_000 }, async () => {
+  it('user input takes priority over cron', { timeout: 480_000 }, async () => {
     session = await InteractiveSession.start({
       env: makeEnv(),
       args: ['--approval-mode', 'yolo'],
@@ -96,6 +106,7 @@ function makeEnv(): NodeJS.ProcessEnv {
     await session.waitForScreen(
       (scr) => scr.includes('Scheduled'),
       'cron_create confirmation',
+      CRON_CREATE_CONFIRMATION_TIMEOUT,
     );
 
     await session.waitForScreen(
@@ -117,7 +128,7 @@ function makeEnv(): NodeJS.ProcessEnv {
 
   it(
     'error during cron turn does not kill the loop',
-    { timeout: 300_000 },
+    { timeout: 540_000 },
     async () => {
       session = await InteractiveSession.start({
         env: makeEnv(),
@@ -131,6 +142,7 @@ function makeEnv(): NodeJS.ProcessEnv {
       await session.waitForScreen(
         (scr) => scr.includes('Scheduled'),
         'cron_create confirmation',
+        CRON_CREATE_CONFIRMATION_TIMEOUT,
       );
 
       // FILEERR88 must show up three times before the model's cron turn is

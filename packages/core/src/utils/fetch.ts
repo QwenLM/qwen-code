@@ -6,8 +6,14 @@
 
 import { getErrorMessage } from './errors.js';
 import { delay } from './retry.js';
-import { isTlsVerificationDisabled } from './runtimeFetchOptions.js';
+import {
+  detectRuntime,
+  isTlsVerificationDisabled,
+  loadUndici,
+} from './runtimeFetchOptions.js';
 import { URL } from 'node:url';
+import type { Agent } from 'undici';
+import { resolveNetworkTarget } from './network-policy.js';
 
 const PRIVATE_IP_RANGES = [
   /^10\./,
@@ -60,7 +66,14 @@ export class FetchError extends Error {
 // where falling back from an opportunistic https upgrade to the originally
 // requested http URL is reasonable (e.g. an intranet FQDN that resolves to
 // a private address and only serves plain http).
-const CONNECTION_LEVEL_ERROR_CODES = new Set([
+//
+// Every member is an https→http downgrade trigger (tools/web-fetch.ts), so
+// fetch.test.ts pins this set's exact membership in both directions. Note the
+// ...TLS_ERROR_CODES spread is a shared-source coupling: TLS_ERROR_CODES also
+// drives the user-facing TLS hint in shouldShowTlsHint, so adding a code there
+// for hint purposes alone would silently widen the downgrade trigger.
+/** @internal Exported for the membership pin in fetch.test.ts only. */
+export const CONNECTION_LEVEL_ERROR_CODES: ReadonlySet<string> = new Set([
   ...TLS_ERROR_CODES,
   'ECONNREFUSED',
   'EPROTO',
@@ -75,6 +88,10 @@ const CONNECTION_LEVEL_ERROR_CODES = new Set([
   // a healthy https server, and a fallback there would double a worst-case
   // 60s wait for an ambiguous gain.
   'UND_ERR_CONNECT_TIMEOUT',
+  // Port 443 unreachable at the network layer (ICMP host/net unreachable) —
+  // the routing-level sibling of ECONNREFUSED, same fallback rationale.
+  'EHOSTUNREACH',
+  'ENETUNREACH',
 ]);
 
 export function isConnectionLevelError(error: unknown): boolean {
@@ -178,12 +195,18 @@ export function isPermittedRedirect(
 }
 
 export interface FetchPolicyOptions {
+  /** HTTPS with public DNS addresses pinned to each connection. */
+  networkPolicy?: 'public';
   /** Budget for the entire transfer — headers AND body. */
   timeoutMs: number;
   /** Reject responses larger than this, before or during body read. */
   maxBytes: number;
   /** Same-host redirect hops to follow before erroring. */
   maxRedirects: number;
+  /** Disable browser-style transient retries for API requests. */
+  retryTransient?: boolean;
+  /** Read bounded JSON error bodies for API callers that display business errors. */
+  readErrorBody?: boolean;
   headers?: Record<string, string>;
   /** Caller cancellation (e.g. the tool's abort signal). */
   signal?: AbortSignal;
@@ -196,6 +219,7 @@ export interface FetchPolicyResponse {
   contentType: string;
   /** Content-Disposition header, if any — carries the server's filename. */
   contentDisposition: string;
+  retryAfter?: string;
   body: Buffer;
   /** URL after any followed same-host redirects. */
   finalUrl: string;
@@ -226,7 +250,8 @@ const RETRY_DELAY_MS = 500;
  * Fetch with manual redirect handling, a full-transfer timeout, a byte cap
  * enforced while streaming, caller-abort wiring, and a single retry on
  * transient failures (403/429 statuses, connection resets). Uses the global
- * fetch so the process-wide proxy dispatcher (setGlobalDispatcher) applies.
+ * fetch so the process-wide proxy dispatcher (setGlobalDispatcher) applies
+ * unless a public-only request supplies its own pinned, TLS-verified agent.
  * The timeout budget spans both attempts.
  */
 export async function fetchWithPolicy(
@@ -260,6 +285,7 @@ export async function fetchWithPolicy(
     first = await fetchPolicyAttempt(url, options, signal, timeoutSignal);
   } catch (error) {
     if (
+      options.retryTransient !== false &&
       error instanceof FetchError &&
       error.code !== undefined &&
       RETRYABLE_ERROR_CODES.has(error.code) &&
@@ -276,6 +302,7 @@ export async function fetchWithPolicy(
   }
 
   if (
+    options.retryTransient !== false &&
     first.kind === 'response' &&
     RETRYABLE_STATUSES.has(first.status) &&
     !signal.aborted
@@ -320,113 +347,135 @@ async function fetchPolicyAttempt(
       (error instanceof Error
         ? getErrorCode((error as Error & { cause?: unknown }).cause)
         : undefined);
-    throw new FetchError(getErrorMessage(error), code);
+    throw new FetchError(
+      getErrorMessage(error),
+      // A multi-address connect failure arrives as an AggregateError whose
+      // top-level code is only the FIRST attempt's, so a whitelisted attempt
+      // masked by a non-whitelisted one (e.g. ETIMEDOUT) must still classify
+      // as connection-level — otherwise the https→http fallback depends on
+      // address-attempt order (issue #12720).
+      findConnectionLevelCode(error) ?? code,
+    );
   };
 
   let currentUrl = url;
   for (let hop = 0; hop <= options.maxRedirects; hop++) {
-    let response: Response;
+    let dispatcher: Agent | undefined;
     try {
-      response = await fetch(currentUrl, {
-        signal,
-        headers: options.headers,
-        redirect: 'manual',
-      });
-    } catch (error) {
-      return wrapAbort(error);
-    }
-
-    if (REDIRECT_STATUSES.has(response.status)) {
-      const location = response.headers.get('location');
-      await response.body?.cancel().catch(() => {});
-      if (!location) {
-        throw new FetchError('Redirect response missing Location header');
+      let request = fetch;
+      if (options.networkPolicy === 'public') {
+        if (detectRuntime() !== 'node')
+          throw new FetchError(
+            'Public network requests require Node.js for DNS-pinned connections.',
+          );
+        const target = await resolveNetworkTarget(currentUrl, 'public', signal);
+        const undici = await loadUndici();
+        dispatcher = new undici.Agent({
+          connect: { lookup: target.lookup, rejectUnauthorized: true },
+        });
+        request = undici.fetch as unknown as typeof fetch;
       }
-      let redirectUrl: string;
+      let response: Response;
       try {
-        redirectUrl = new URL(location, currentUrl).toString();
-      } catch {
-        throw new FetchError(
-          `Redirect response has a malformed Location header: ${location}`,
-        );
-      }
-      if (!isPermittedRedirect(currentUrl, redirectUrl)) {
-        return {
-          kind: 'cross-host-redirect',
-          originalUrl: currentUrl,
-          redirectUrl,
-          status: response.status,
+        const init: RequestInit & { dispatcher?: Agent } = {
+          signal,
+          headers: options.headers,
+          redirect: 'manual',
+          ...(dispatcher ? { dispatcher } : {}),
         };
+        response = await request(currentUrl, init);
+      } catch (error) {
+        return wrapAbort(error);
       }
-      currentUrl = redirectUrl;
-      continue;
-    }
 
-    // The sole caller discards the body of every non-2xx response (only the
-    // status/statusText feed its failure message, and the 403/429 retry path
-    // inspects the status alone). Cancel the body without buffering it:
-    // otherwise an oversized error page reports EMSGSIZE instead of its real
-    // status, and a slow-trickling error body can burn the whole timeout for
-    // bytes that are never read.
-    if (response.status < 200 || response.status >= 300) {
-      await response.body?.cancel().catch(() => {});
-      return {
-        kind: 'response',
+      if (REDIRECT_STATUSES.has(response.status)) {
+        const location = response.headers.get('location');
+        await response.body?.cancel().catch(() => {});
+        if (!location) {
+          throw new FetchError('Redirect response missing Location header');
+        }
+        let redirectUrl: string;
+        try {
+          redirectUrl = new URL(location, currentUrl).toString();
+        } catch {
+          throw new FetchError(
+            `Redirect response has a malformed Location header: ${location}`,
+          );
+        }
+        if (!isPermittedRedirect(currentUrl, redirectUrl)) {
+          return {
+            kind: 'cross-host-redirect',
+            originalUrl: currentUrl,
+            redirectUrl,
+            status: response.status,
+          };
+        }
+        currentUrl = redirectUrl;
+        continue;
+      }
+
+      const failed = response.status < 200 || response.status >= 300;
+      const responseInfo = {
+        kind: 'response' as const,
         status: response.status,
         statusText: response.statusText,
         contentType: response.headers.get('content-type') ?? '',
         contentDisposition: response.headers.get('content-disposition') ?? '',
-        body: Buffer.alloc(0),
+        ...(response.headers.get('retry-after')
+          ? { retryAfter: response.headers.get('retry-after')! }
+          : {}),
         finalUrl: currentUrl,
       };
-    }
-
-    const contentLength = Number(response.headers.get('content-length'));
-    if (Number.isFinite(contentLength) && contentLength > options.maxBytes) {
-      await response.body?.cancel().catch(() => {});
-      throw new FetchError(
-        `Response too large: ${contentLength} bytes exceeds the ${options.maxBytes}-byte limit`,
-        'EMSGSIZE',
-      );
-    }
-
-    // Chunks are retained as-is (undici yields a fresh Uint8Array per read);
-    // Buffer.concat below performs the single necessary copy.
-    const chunks: Uint8Array[] = [];
-    let total = 0;
-    if (response.body) {
-      const reader = response.body.getReader();
-      try {
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          total += value.byteLength;
-          if (total > options.maxBytes) {
-            throw new FetchError(
-              `Response too large: exceeded the ${options.maxBytes}-byte limit while streaming`,
-              'EMSGSIZE',
-            );
-          }
-          chunks.push(value);
-        }
-      } catch (error) {
-        await reader.cancel().catch(() => {});
-        if (error instanceof FetchError) throw error;
-        return wrapAbort(error);
-      } finally {
-        reader.releaseLock();
+      // Web page callers only use status; avoid buffering slow or oversized error pages.
+      if (failed && !options.readErrorBody) {
+        await response.body?.cancel().catch(() => {});
+        return { ...responseInfo, body: Buffer.alloc(0) };
       }
-    }
 
-    return {
-      kind: 'response',
-      status: response.status,
-      statusText: response.statusText,
-      contentType: response.headers.get('content-type') ?? '',
-      contentDisposition: response.headers.get('content-disposition') ?? '',
-      body: Buffer.concat(chunks, total),
-      finalUrl: currentUrl,
-    };
+      const contentLength = Number(response.headers.get('content-length'));
+      if (Number.isFinite(contentLength) && contentLength > options.maxBytes) {
+        await response.body?.cancel().catch(() => {});
+        if (failed) return { ...responseInfo, body: Buffer.alloc(0) };
+        throw new FetchError(
+          `Response too large: ${contentLength} bytes exceeds the ${options.maxBytes}-byte limit`,
+          'EMSGSIZE',
+        );
+      }
+
+      // Chunks are retained as-is (undici yields a fresh Uint8Array per read);
+      // Buffer.concat below performs the single necessary copy.
+      const chunks: Uint8Array[] = [];
+      let total = 0;
+      if (response.body) {
+        const reader = response.body.getReader();
+        try {
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            total += value.byteLength;
+            if (total > options.maxBytes) {
+              throw new FetchError(
+                `Response too large: exceeded the ${options.maxBytes}-byte limit while streaming`,
+                'EMSGSIZE',
+              );
+            }
+            chunks.push(value);
+          }
+        } catch (error) {
+          await reader.cancel().catch(() => {});
+          if (failed && !options.signal?.aborted)
+            return { ...responseInfo, body: Buffer.alloc(0) };
+          if (error instanceof FetchError) throw error;
+          return wrapAbort(error);
+        } finally {
+          reader.releaseLock();
+        }
+      }
+
+      return { ...responseInfo, body: Buffer.concat(chunks, total) };
+    } finally {
+      await dispatcher?.close();
+    }
   }
   throw new FetchError(
     `Too many redirects (exceeded ${options.maxRedirects})`,
@@ -447,6 +496,57 @@ function getErrorCode(error: unknown): string | undefined {
   }
 
   return undefined;
+}
+
+/**
+ * Any-attempt-match classification for multi-address connect failures
+ * (issue #12720): Node surfaces an exhausted dual-stack connect as an
+ * AggregateError whose top-level `code` reflects only the FIRST attempted
+ * address (lib/internal/errors.js NodeAggregateError), so reading a single
+ * code makes the https→http fallback attempt-order dependent. If ANY
+ * attempt's code is connection-level, the failure is connection-level;
+ * per-attempt exemptions (e.g. ETIMEDOUT) hold simply by staying out of
+ * CONNECTION_LEVEL_ERROR_CODES.
+ *
+ * Traversal mirrors describeCodedCause (utils/errors.ts): unwrap
+ * AggregateError.errors[] and nested `.cause` chains — undici wraps each
+ * attempt in its own `TypeError: fetch failed` — with a depth cap and a
+ * visited set. A plain single-error chain resolves to the same code as
+ * before (its own code when whitelisted, otherwise undefined here and the
+ * caller keeps the first-derived code).
+ */
+function findConnectionLevelCode(
+  error: unknown,
+  depth = 0,
+  visited = new Set<object>(),
+): string | undefined {
+  if (
+    error == null ||
+    depth >= 8 ||
+    typeof error !== 'object' ||
+    visited.has(error)
+  ) {
+    return undefined;
+  }
+  visited.add(error);
+
+  const code = getErrorCode(error);
+  if (code !== undefined && CONNECTION_LEVEL_ERROR_CODES.has(code)) {
+    return code;
+  }
+
+  if (error instanceof AggregateError && Array.isArray(error.errors)) {
+    for (const attempt of error.errors) {
+      const found = findConnectionLevelCode(attempt, depth + 1, visited);
+      if (found !== undefined) return found;
+    }
+  }
+
+  return findConnectionLevelCode(
+    (error as { cause?: unknown }).cause,
+    depth + 1,
+    visited,
+  );
 }
 
 function formatUnknownErrorMessage(error: unknown): string | undefined {

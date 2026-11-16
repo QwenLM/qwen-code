@@ -70,7 +70,14 @@ export const DEFAULT_DASHSCOPE_BASE_URL =
   'https://dashscope.aliyuncs.com/compatible-mode/v1';
 export const DEFAULT_DEEPSEEK_BASE_URL = 'https://api.deepseek.com/v1';
 export const DEFAULT_OPEN_ROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
-export const DASHSCOPE_PROXY_BASE_URL = process.env['DASHSCOPE_PROXY_BASE_URL'];
+/**
+ * Read at call time, not at module load: `.env` files and `settings.env` are
+ * applied after this module is imported, and the CLI keeps running in the same
+ * process when those files only hold values that are read per request.
+ */
+export function getDashscopeProxyBaseUrl(): string | undefined {
+  return process.env['DASHSCOPE_PROXY_BASE_URL'];
+}
 
 /**
  * Normalize an OpenAI-family baseUrl to the origin the Responses wire dials:

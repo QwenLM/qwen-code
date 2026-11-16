@@ -63,7 +63,32 @@ export interface WorkflowScriptShape {
   readonly rows: readonly WorkflowShapeRow[];
   readonly agentCalls: number;
   readonly determinismViolations: readonly WorkflowDeterminismViolation[];
+  /**
+   * 1-based lines of `workflow(` call sites on the injected global; a
+   * member call (`x.workflow(`) is not the injected global and is absent.
+   */
+  readonly nestedWorkflowCalls: readonly number[];
+  /**
+   * `agent(` call sites whose literal options object names a key that
+   * reaches the dispatching host (tools, agentType, isolation, workingDir),
+   * in source order. Lexical only: options built elsewhere are not seen,
+   * so the runtime refusal stays the boundary and this is its early echo.
+   */
+  readonly hostBoundAgentOptions: readonly WorkflowHostBoundAgentOption[];
 }
+
+export interface WorkflowHostBoundAgentOption {
+  readonly option: (typeof HOST_BOUND_AGENT_OPTION_KEYS)[number];
+  /** 1-based line of the option key. */
+  readonly line: number;
+}
+
+const HOST_BOUND_AGENT_OPTION_KEYS = [
+  'tools',
+  'agentType',
+  'isolation',
+  'workingDir',
+] as const;
 
 const PROMPT_SUMMARY_CHARS = 60;
 const LOOP_HEAD_CHARS = 40;
@@ -123,10 +148,21 @@ function maskNonCode(source: string): string {
     const ch = source[i];
     const next = source[i + 1];
     if (ch === '/' && next === '/') {
-      const newline = source.indexOf('\n', i);
-      const end = newline === -1 ? n : newline;
-      blank(i, end);
-      i = end;
+      // ECMAScript ends a single-line comment at any LineTerminator, not
+      // just \n — a script whose comment ends in CR/LS/PS with no later
+      // \n would otherwise be blanked to end-of-source.
+      let j = i + 2;
+      while (
+        j < n &&
+        source[j] !== '\n' &&
+        source[j] !== '\r' &&
+        source[j] !== '\u2028' &&
+        source[j] !== '\u2029'
+      ) {
+        j++;
+      }
+      blank(i, j);
+      i = j;
       continue;
     }
     if (ch === '/' && next === '*') {
@@ -243,6 +279,8 @@ export function scanWorkflowScriptShape(source: string): WorkflowScriptShape {
   const rows: WorkflowShapeRow[] = [];
   const rowByContext = new Map<number, WorkflowShapeRow>();
   const violations: WorkflowDeterminismViolation[] = [];
+  const nestedWorkflowCalls: number[] = [];
+  const hostBoundAgentOptions: WorkflowHostBoundAgentOption[] = [];
   const stack: Context[] = [];
   // Indexes of the `}` that closed a `do { }` body, so its `while (...)` tail
   // is not read as a new loop around the next statement.
@@ -363,6 +401,45 @@ export function scanWorkflowScriptShape(source: string): WorkflowScriptShape {
     lastRowWasTopLevel = context === undefined;
   };
 
+  // Keys of an object literal that sits directly in the argument list:
+  // nested objects (a schema's own `tools` property) are not options.
+  const recordHostBoundOptions = (open: number): void => {
+    const close = matchingClose(open);
+    if (close < 0) return;
+    let parens = 0;
+    let braces = 0;
+    let keyLine = line;
+    for (let k = open + 1; k < close; k++) {
+      const c = code[k];
+      if (c === '\n') keyLine++;
+      if (c === '(' || c === '[') parens++;
+      else if (c === ')' || c === ']') parens--;
+      else if (c === '{') braces++;
+      else if (c === '}') braces--;
+      else if (
+        parens === 0 &&
+        braces === 1 &&
+        IDENT_START.test(c) &&
+        !IDENT_PART.test(code[k - 1] ?? '')
+      ) {
+        const key = readIdent(k);
+        const after = skipSpace(k + key.length);
+        const before = previousNonSpaceIndex(k);
+        if (
+          (HOST_BOUND_AGENT_OPTION_KEYS as readonly string[]).includes(key) &&
+          (code[before] === '{' || code[before] === ',') &&
+          (code[after] === ':' || code[after] === ',' || code[after] === '}')
+        ) {
+          hostBoundAgentOptions.push({
+            option: key as WorkflowHostBoundAgentOption['option'],
+            line: keyLine,
+          });
+        }
+        k += key.length - 1;
+      }
+    }
+  };
+
   const recordMemberCall = (
     object: 'Date' | 'Math',
     end: number,
@@ -384,7 +461,18 @@ export function scanWorkflowScriptShape(source: string): WorkflowScriptShape {
     switch (word) {
       case 'agent': {
         const open = skipSpace(end);
-        if (code[open] === '(') recordAgent(start, open);
+        if (code[open] === '(') {
+          recordAgent(start, open);
+          recordHostBoundOptions(open);
+        }
+        return;
+      }
+      case 'workflow': {
+        // A nested launch resolves script bytes the parent's launch block
+        // never pinned; the hosted profile refuses the script at admission
+        // on this signal, so the launched bytes stay exactly the pinned
+        // ones.
+        if (code[skipSpace(end)] === '(') nestedWorkflowCalls.push(line);
         return;
       }
       case 'parallel':
@@ -517,7 +605,13 @@ export function scanWorkflowScriptShape(source: string): WorkflowScriptShape {
     i = end - 1;
   }
 
-  return { rows, agentCalls, determinismViolations: violations };
+  return {
+    rows,
+    agentCalls,
+    determinismViolations: violations,
+    nestedWorkflowCalls,
+    hostBoundAgentOptions,
+  };
 }
 
 /**

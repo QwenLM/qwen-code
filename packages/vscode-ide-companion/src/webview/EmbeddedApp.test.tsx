@@ -39,12 +39,16 @@ const mocks = vi.hoisted(() => ({
     setState: vi.fn(),
   },
   embeddedProps: { current: null as CapturedProps | null },
+  subscriptionProps: { current: null as CapturedProps | null },
   connectionError: { current: undefined as string | undefined },
   errorNotifications: { current: 0 },
+  shellMounted: vi.fn(),
+  shellUnmounted: vi.fn(),
 }));
 
 interface RewindSnapshotStub {
   promptId: string;
+  daemonPromptId?: string;
   turnIndex: number;
   timestamp: string;
   diffStats: { filesChanged: number; insertions: number; deletions: number };
@@ -52,33 +56,80 @@ interface RewindSnapshotStub {
 
 const sdkMocks = vi.hoisted(() => ({
   listWorkspaceSessionsPage: vi.fn(),
+  getSubscriptionConfig: vi.fn(),
+  activateSubscription: vi.fn(),
+  setSessionModel: vi.fn(),
   getRewindSnapshots: vi.fn<
     (sessionId: string) => Promise<{
-      snapshots: Array<{ turnIndex: number; promptId: string }>;
+      snapshots: Array<{
+        turnIndex: number;
+        promptId: string;
+        daemonPromptId?: string;
+      }>;
     }>
   >(async () => ({ snapshots: [] })),
-  rewindSession: vi.fn(async () => ({})),
+  rewindSession: vi.fn<
+    (
+      sessionId: string,
+      promptId: string,
+      opts?: { clientId?: string; rewindFiles?: boolean },
+    ) => Promise<unknown>
+  >(async () => ({})),
+  // Mirrors the real class from `@qwen-code/sdk/daemon`: the edit branch
+  // branches on `status` to tell a transient daemon failure from a refusal.
+  DaemonHttpError: class DaemonHttpError extends Error {
+    readonly status: number;
+    constructor(status: number) {
+      super(`HTTP ${status}`);
+      this.status = status;
+    }
+  },
 }));
 
-vi.mock('@qwen-code/sdk/daemon', () => ({
+vi.mock('@qwen-code/sdk/daemon', async (importOriginal) => ({
+  findDaemonRewindUserBlock: (
+    await importOriginal<typeof import('@qwen-code/sdk/daemon')>()
+  ).findDaemonRewindUserBlock,
+  isDaemonRewindUserBlock: (
+    await importOriginal<typeof import('@qwen-code/sdk/daemon')>()
+  ).isDaemonRewindUserBlock,
   DaemonClient: class {
     workspaceByCwd() {
       return {
         listWorkspaceSessionsPage: sdkMocks.listWorkspaceSessionsPage,
+        activateSubscription: sdkMocks.activateSubscription,
         updateSessionMetadata: vi.fn(async () => ({})),
         deleteSessionsData: vi.fn(async () => ({})),
       };
     }
+    getSubscriptionConfig = sdkMocks.getSubscriptionConfig;
+    startSubscriptionLogin = vi.fn();
+    getSubscriptionLogin = vi.fn();
+    cancelSubscriptionLogin = vi.fn();
+    getSubscriptionUserInfo = vi.fn();
+    signOutSubscription = vi.fn(async () => ({}));
+    setSessionModel = sdkMocks.setSessionModel;
     getRewindSnapshots = sdkMocks.getRewindSnapshots;
     rewindSession = sdkMocks.rewindSession;
   },
+  DaemonHttpError: sdkMocks.DaemonHttpError,
 }));
 
 vi.mock('@qwen-code/web-shell', async () => {
   const { useEffect, useMemo, useRef, useState } = await import('react');
   return {
+    QwenSubscriptionPanel: (props: CapturedProps) => {
+      mocks.subscriptionProps.current = props;
+      return <div data-testid="subscription-real" />;
+    },
     WebShellWithProviders: (props: CapturedProps) => {
       mocks.embeddedProps.current = props;
+      const initialSessionId = useRef(props.sessionId);
+      useEffect(() => {
+        const sessionId = initialSessionId.current;
+        mocks.shellMounted(sessionId);
+        return () => mocks.shellUnmounted(sessionId);
+      }, []);
       // Mirror App.tsx's error-notification effect: while a connection error
       // persists, each distinct error value is reported once. Hosts may pass
       // an onError whose identity changes on every render, which re-runs the
@@ -127,6 +178,14 @@ vi.mock('./hooks/useVSCode.js', () => ({
 
 const mounted: RenderedApp[] = [];
 
+async function sendLegacySubscriptionEvent() {
+  await act(async () => {
+    window.dispatchEvent(
+      new MessageEvent('message', { data: { type: 'qwenSubscriptionAuth' } }),
+    );
+  });
+}
+
 async function renderApp(): Promise<CapturedProps> {
   const container = document.createElement('div');
   document.body.appendChild(container);
@@ -168,12 +227,22 @@ beforeAll(async () => {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  sdkMocks.getSubscriptionConfig
+    .mockReset()
+    .mockResolvedValue({ enabled: false });
+  sdkMocks.activateSubscription.mockReset().mockResolvedValue({
+    authType: 'qwen-subscription',
+    modelId: 'qwen3.8-max',
+    runtimeSync: { status: 'applied' },
+  });
+  sdkMocks.setSessionModel.mockReset().mockResolvedValue({});
   mocks.embeddedProps.current = null;
   mocks.connectionError.current = undefined;
   mocks.errorNotifications.current = 0;
 });
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   for (const { container, root } of mounted.splice(0)) {
     act(() => root.unmount());
     container.remove();
@@ -181,6 +250,621 @@ afterEach(() => {
 });
 
 describe('EmbeddedApp host wiring', () => {
+  it('refreshes models automatically after successful native subscription sign-in', async () => {
+    const props = await renderApp();
+    const refreshModels = vi.fn().mockResolvedValue(undefined);
+    const shellRef = props.shellRef as {
+      current: { refreshModels: typeof refreshModels } | null;
+    };
+    shellRef.current = { refreshModels };
+
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'authSuccess',
+            data: {
+              message: 'Qwen Code is ready. Model: qwen3.8-max.',
+            },
+          },
+        }),
+      );
+    });
+
+    expect(document.body.textContent).toContain(
+      'Qwen Code is ready. Model: qwen3.8-max.',
+    );
+    expect(refreshModels).toHaveBeenCalledOnce();
+  });
+
+  it('keeps sign-in successful when refreshing models fails', async () => {
+    const props = await renderApp();
+    const error = new Error('Model readback failed');
+    const refreshModels = vi.fn().mockRejectedValue(error);
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+    const shellRef = props.shellRef as { current: unknown };
+    shellRef.current = { refreshModels };
+    try {
+      await act(async () => {
+        window.dispatchEvent(
+          new MessageEvent('message', {
+            data: {
+              type: 'authSuccess',
+              data: { message: 'Signed in successfully.' },
+            },
+          }),
+        );
+      });
+      expect(consoleError).toHaveBeenCalledWith(
+        'Unable to refresh models after sign-in',
+        error,
+      );
+      expect(document.body.textContent).toContain('Signed in successfully.');
+      expect(document.body.textContent).not.toContain('Get Started');
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it.each(['agentConnected', 'authCancelled'])(
+    'does not refresh models on %s',
+    async (type) => {
+      const props = await renderApp();
+      const refreshModels = vi.fn().mockResolvedValue(undefined);
+      const shellRef = props.shellRef as { current: unknown };
+      shellRef.current = { refreshModels };
+      await act(async () => {
+        window.dispatchEvent(new MessageEvent('message', { data: { type } }));
+      });
+      expect(refreshModels).not.toHaveBeenCalled();
+    },
+  );
+
+  it('forwards model connection changes so the native host can cancel stale account actions', async () => {
+    const props = await renderApp();
+    callback<(modelId: string, authType: string) => void>(
+      props,
+      'onModelChange',
+    )('same-model', 'openai');
+    expect(mocks.vscode.postMessage).toHaveBeenCalledWith({
+      type: 'webShellModelChanged',
+      data: {
+        workspaceCwd: '/workspace',
+        modelId: 'same-model',
+        authType: 'openai',
+      },
+    });
+  });
+  it.each([true, false])(
+    'shows subscription slash entries only when bootstrap capability is %s',
+    async (subscriptionEnabled) => {
+      await renderApp();
+      await act(async () =>
+        window.dispatchEvent(
+          new MessageEvent('message', {
+            data: {
+              type: 'webShellBootstrap',
+              data: {
+                baseUrl: 'http://localhost:4141',
+                workspaceCwd: '/workspace',
+                sessionId: 'session-1',
+                hostKind: 'panel',
+                subscriptionEnabled,
+              },
+            },
+          }),
+        ),
+      );
+      const commands = mocks.embeddedProps.current![
+        'additionalSlashCommands'
+      ] as Array<{ name: string }>;
+      for (const name of ['logout', 'upgrade']) {
+        expect(commands.some((command) => command.name === name)).toBe(
+          subscriptionEnabled,
+        );
+      }
+    },
+  );
+
+  it.each(['logout', 'upgrade'])(
+    'handles subscription /%s in the native host',
+    async (command) => {
+      const props = await renderApp();
+      let handled: boolean | undefined;
+      await act(async () => {
+        handled = callback<
+          (input: { command: string; input: string }) => boolean
+        >(
+          props,
+          'onSlashCommand',
+        )({ command, input: '' });
+      });
+      expect(handled).toBe(true);
+      expect(mocks.vscode.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ type: command }),
+      );
+    },
+  );
+  it('keeps subscription authorization out of the sidebar on a legacy selection event', async () => {
+    sdkMocks.getSubscriptionConfig.mockResolvedValue({ enabled: true });
+    const props = await renderApp();
+    await act(async () =>
+      callback<(command: { command: string; input: string }) => boolean>(
+        props,
+        'onSlashCommand',
+      )({ command: 'auth', input: '' }),
+    );
+    await sendLegacySubscriptionEvent();
+    expect(
+      document.querySelector('[data-testid="subscription-real"]'),
+    ).toBeNull();
+  });
+
+  it('keeps account switching in the native flow and only announces final sign-out explicitly', async () => {
+    await renderApp();
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: { type: 'qwenSubscriptionAuth', data: { flowId: 'flow-a' } },
+        }),
+      );
+    });
+    const panel = mocks.subscriptionProps.current!;
+    const transport = panel.transport as {
+      signOutSubscription: () => Promise<void>;
+    };
+    await act(async () => transport.signOutSubscription());
+    expect(postMessagesOfType('qwenSubscriptionSignedOut')).toHaveLength(0);
+    expect(
+      document.querySelector('[data-testid="subscription-real"]'),
+    ).not.toBeNull();
+    act(() => callback<() => void>(panel, 'onSignedOut')());
+    expect(postMessagesOfType('qwenSubscriptionSignedOut')).toEqual([
+      { type: 'qwenSubscriptionSignedOut', data: { flowId: 'flow-a' } },
+    ]);
+  });
+
+  it.each(['complete', 'cancel'] as const)(
+    'preserves the live chat session throughout subscription %s',
+    async (outcome) => {
+      const props = await renderApp();
+      expect(props.sessionId).toBe('session-1');
+      expect(mocks.shellMounted).toHaveBeenCalledOnce();
+      await act(async () => {
+        window.dispatchEvent(
+          new MessageEvent('message', {
+            data: { type: 'authState', data: { authenticated: true } },
+          }),
+        );
+        window.dispatchEvent(
+          new MessageEvent('message', {
+            data: {
+              type: 'qwenSubscriptionAuth',
+              data: { flowId: 'flow-a' },
+            },
+          }),
+        );
+      });
+      expect.soft(mocks.shellUnmounted).not.toHaveBeenCalled();
+      expect(mocks.embeddedProps.current?.viewHidden).toBe(true);
+      const panel = mocks.subscriptionProps.current!;
+      if (outcome === 'complete') {
+        let activation!: Promise<string>;
+        await act(async () => {
+          activation = callback<(signal: AbortSignal) => Promise<string>>(
+            panel,
+            'onActivate',
+          )(new AbortController().signal);
+        });
+        const request = postMessagesOfType('qwenSubscriptionActivate')[0]!
+          .data as { flowId: string; requestId: string };
+        await act(async () => {
+          window.dispatchEvent(
+            new MessageEvent('message', {
+              data: {
+                type: 'qwenSubscriptionActivationResult',
+                data: { ...request, modelId: 'qwen3.8-max' },
+              },
+            }),
+          );
+          await activation;
+          callback<(message: string) => void>(
+            panel,
+            'onActivated',
+          )('Qwen connected');
+        });
+        expect(postMessagesOfType('qwenSubscriptionComplete')).toHaveLength(1);
+      } else {
+        act(() => callback<() => void>(panel, 'onClose')());
+        expect(postMessagesOfType('qwenSubscriptionCancel')).toHaveLength(1);
+      }
+      await act(async () => {
+        window.dispatchEvent(
+          new MessageEvent('message', {
+            data: {
+              type: 'qwenSubscriptionClosed',
+              data: { flowId: 'flow-a' },
+            },
+          }),
+        );
+      });
+      expect.soft(mocks.shellUnmounted).not.toHaveBeenCalled();
+      expect(mocks.shellMounted).toHaveBeenCalledOnce();
+      expect(mocks.embeddedProps.current?.sessionId).toBe('session-1');
+      expect(mocks.embeddedProps.current?.viewHidden).toBe(false);
+    },
+  );
+
+  it.each(['authenticated', 'signed-out'] as const)(
+    'preserves the %s session after authorization fails and is retried',
+    async (initialState) => {
+      await renderApp();
+      await act(async () => {
+        window.dispatchEvent(
+          new MessageEvent('message', {
+            data: { type: 'authState', data: { authenticated: true } },
+          }),
+        );
+      });
+      if (initialState === 'signed-out') {
+        await act(async () => {
+          window.dispatchEvent(
+            new MessageEvent('message', { data: { type: 'authSignedOut' } }),
+          );
+        });
+      }
+      await act(async () => {
+        window.dispatchEvent(
+          new MessageEvent('message', {
+            data: { type: 'qwenSubscriptionAuth', data: { flowId: 'flow-a' } },
+          }),
+        );
+      });
+      await act(async () => {
+        window.dispatchEvent(
+          new MessageEvent('message', {
+            data: {
+              type: 'qwenSubscriptionClosed',
+              data: { flowId: 'flow-a' },
+            },
+          }),
+        );
+        window.dispatchEvent(
+          new MessageEvent('message', {
+            data: {
+              type: 'authError',
+              data: { message: 'Authorization failed' },
+            },
+          }),
+        );
+      });
+      expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+        'Authorization failed',
+      );
+      expect(document.body.textContent).not.toContain('Get Started');
+      expect(mocks.embeddedProps.current?.viewHidden).toBe(false);
+      await act(async () => {
+        window.dispatchEvent(
+          new MessageEvent('message', {
+            data: { type: 'qwenSubscriptionAuth', data: { flowId: 'flow-b' } },
+          }),
+        );
+      });
+      expect(mocks.shellMounted).toHaveBeenCalledOnce();
+      expect(mocks.shellUnmounted).not.toHaveBeenCalled();
+      expect(mocks.embeddedProps.current?.sessionId).toBe('session-1');
+      expect(mocks.embeddedProps.current?.viewHidden).toBe(true);
+    },
+  );
+
+  it('does not mount a hidden chat during unauthenticated subscription login', async () => {
+    await renderApp();
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: { type: 'authState', data: { authenticated: false } },
+        }),
+      );
+    });
+    expect(mocks.shellUnmounted).toHaveBeenCalledOnce();
+    mocks.shellMounted.mockClear();
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: { type: 'qwenSubscriptionAuth', data: { flowId: 'flow-a' } },
+        }),
+      );
+    });
+    expect(
+      document.querySelector('[data-testid="subscription-real"]'),
+    ).not.toBeNull();
+    expect(document.body.textContent).not.toContain('Get Started');
+    expect(mocks.shellMounted).not.toHaveBeenCalled();
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: { type: 'qwenSubscriptionClosed', data: { flowId: 'flow-a' } },
+        }),
+      );
+    });
+    expect(document.body.textContent).toContain('Get Started');
+    expect(mocks.shellMounted).not.toHaveBeenCalled();
+  });
+
+  it('shows selected Qwen in the sidebar with VS Code theme tokens and host-owned activation', async () => {
+    await renderApp();
+    await act(async () =>
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: { type: 'qwenSubscriptionAuth', data: { flowId: 'flow-a' } },
+        }),
+      ),
+    );
+    expect(
+      document.querySelector('[data-testid="subscription-real"]'),
+    ).not.toBeNull();
+    expect(document.querySelector('img[alt="Qwen Code"]')).not.toBeNull();
+    expect(document.body.textContent).toContain(
+      'Connect a model provider to start coding with Qwen.',
+    );
+    expect(
+      [...document.querySelectorAll('button')].some(
+        (button) => button.textContent === 'Get Started',
+      ),
+    ).toBe(false);
+    expect(document.body.textContent).not.toContain(
+      'Supports Coding Plan, ModelStudio API Key, and OpenAI-compatible providers.',
+    );
+    const panel = mocks.subscriptionProps.current!;
+    expect(panel.style).toMatchObject({
+      '--background': 'var(--vscode-sideBar-background)',
+    });
+    const controller = new AbortController();
+    let activation!: Promise<string>;
+    await act(async () => {
+      activation = callback<(signal: AbortSignal) => Promise<string>>(
+        panel,
+        'onActivate',
+      )(controller.signal);
+    });
+    const request = postMessagesOfType('qwenSubscriptionActivate')[0]!.data as {
+      flowId: string;
+      requestId: string;
+    };
+    expect(request.flowId).toBe('flow-a');
+    expect(sdkMocks.activateSubscription).not.toHaveBeenCalled();
+    await act(async () =>
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'qwenSubscriptionActivationResult',
+            data: { ...request, modelId: 'qwen3.8-max' },
+          },
+        }),
+      ),
+    );
+    await expect(activation).resolves.toBe('qwen3.8-max');
+  });
+
+  it('returns a signed-in account to the existing composer after the host closes a model failure', async () => {
+    await renderApp();
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: { type: 'authState', data: { authenticated: false } },
+        }),
+      );
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: { type: 'qwenSubscriptionAuth', data: { flowId: 'flow-a' } },
+        }),
+      );
+    });
+    expect(
+      document.querySelector('[data-testid="subscription-real"]'),
+    ).not.toBeNull();
+    expect(
+      mocks.subscriptionProps.current?.onModelSelectionRequired,
+    ).toBeUndefined();
+    mocks.embeddedProps.current = null;
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: { type: 'qwenSubscriptionClosed', data: { flowId: 'flow-a' } },
+        }),
+      );
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: { type: 'authState', data: { authenticated: true } },
+        }),
+      );
+    });
+    expect(
+      document.querySelector('[data-testid="subscription-real"]'),
+    ).toBeNull();
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+    expect(mocks.embeddedProps.current).not.toBeNull();
+    expect(document.body.textContent).not.toContain('Signed in successfully');
+    expect(sdkMocks.setSessionModel).not.toHaveBeenCalled();
+  });
+
+  it('returns a Qwen login error to the Get Started button without clearing it', async () => {
+    await renderApp();
+    await act(async () =>
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: { type: 'qwenSubscriptionAuth', data: { flowId: 'flow-a' } },
+        }),
+      ),
+    );
+    await act(async () =>
+      callback<(message: string) => void>(
+        mocks.subscriptionProps.current!,
+        'onAuthError',
+      )('Could not authorize Qwen.'),
+    );
+    expect(postMessagesOfType('qwenSubscriptionError')).toEqual([
+      {
+        type: 'qwenSubscriptionError',
+        data: { flowId: 'flow-a', message: 'Could not authorize Qwen.' },
+      },
+    ]);
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: { type: 'qwenSubscriptionClosed', data: { flowId: 'flow-a' } },
+        }),
+      );
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'authError',
+            data: { message: 'Could not authorize Qwen.' },
+          },
+        }),
+      );
+    });
+    expect(
+      document.querySelector('[data-testid="subscription-real"]'),
+    ).toBeNull();
+    const alert = document.querySelector('[role="alert"]');
+    expect(alert?.textContent).toBe('Could not authorize Qwen.');
+    expect(alert?.previousElementSibling?.textContent).toBe('Get Started');
+  });
+
+  it('ignores stale close events and keeps the current sidebar flow', async () => {
+    await renderApp();
+    await act(async () =>
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: { type: 'qwenSubscriptionAuth', data: { flowId: 'flow-a' } },
+        }),
+      ),
+    );
+    await act(async () =>
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: { type: 'qwenSubscriptionClosed', data: { flowId: 'stale' } },
+        }),
+      ),
+    );
+    expect(
+      document.querySelector('[data-testid="subscription-real"]'),
+    ).not.toBeNull();
+    await act(async () =>
+      callback<() => void>(
+        mocks.subscriptionProps.current!,
+        'onOtherProviders',
+      )(),
+    );
+    expect(postMessagesOfType('qwenSubscriptionOtherProviders')).toEqual([
+      { type: 'qwenSubscriptionOtherProviders', data: { flowId: 'flow-a' } },
+    ]);
+  });
+
+  it.each(['auth', 'Get Started'])(
+    'opens the native provider picker from %s even when subscription OAuth is enabled',
+    async (entry) => {
+      sdkMocks.getSubscriptionConfig.mockResolvedValue({ enabled: true });
+      const props = await renderApp();
+      if (entry === 'auth') {
+        await act(async () =>
+          callback<(command: { command: string; input: string }) => boolean>(
+            props,
+            'onSlashCommand',
+          )({ command: 'auth', input: '' }),
+        );
+      } else {
+        await act(async () =>
+          window.dispatchEvent(
+            new MessageEvent('message', {
+              data: { type: 'authState', data: { authenticated: false } },
+            }),
+          ),
+        );
+        const button = [...document.querySelectorAll('button')].find(
+          (item) => item.textContent === 'Get Started',
+        );
+        expect(button).toBeDefined();
+        expect(document.body.textContent).not.toContain(
+          'Supports Coding Plan, ModelStudio API Key, and OpenAI-compatible providers.',
+        );
+        await act(async () => button!.click());
+      }
+      expect(postMessagesOfType('auth')).toEqual([
+        { type: 'auth', data: { subscriptionEnabled: true } },
+      ]);
+      expect(
+        document.querySelector('[data-testid="subscription-real"]'),
+      ).toBeNull();
+      expect(sdkMocks.activateSubscription).not.toHaveBeenCalled();
+    },
+  );
+
+  it('waits for capability before opening auth and never falls back to a preview', async () => {
+    let resolve!: (value: { enabled: boolean }) => void;
+    sdkMocks.getSubscriptionConfig.mockReturnValue(
+      new Promise((done) => {
+        resolve = done;
+      }),
+    );
+    const props = await renderApp();
+    await act(async () => {
+      callback<(command: { command: string; input: string }) => boolean>(
+        props,
+        'onSlashCommand',
+      )({ command: 'auth', input: '' });
+    });
+    expect(postMessagesOfType('auth')).toHaveLength(0);
+    expect(
+      document.querySelector('[data-testid="subscription-real"]'),
+    ).toBeNull();
+    await act(async () => resolve({ enabled: true }));
+    expect(postMessagesOfType('auth')).toHaveLength(1);
+    expect(
+      document.querySelector('[data-testid="subscription-real"]'),
+    ).toBeNull();
+    await sendLegacySubscriptionEvent();
+    expect(
+      document.querySelector('[data-testid="subscription-real"]'),
+    ).toBeNull();
+    expect(postMessagesOfType('auth')).toHaveLength(1);
+  });
+
+  it('shows the existing error on capability failure and allows another attempt', async () => {
+    sdkMocks.getSubscriptionConfig.mockRejectedValueOnce(new Error('offline'));
+    const props = await renderApp();
+    await act(async () => {
+      callback<(command: { command: string; input: string }) => boolean>(
+        props,
+        'onSlashCommand',
+      )({ command: 'auth', input: '' });
+    });
+    expect(document.querySelector('[role="alert"]')).not.toBeNull();
+    expect(postMessagesOfType('auth')).toHaveLength(0);
+    sdkMocks.getSubscriptionConfig.mockResolvedValue({ enabled: true });
+    await act(async () => {
+      callback<(command: { command: string; input: string }) => boolean>(
+        mocks.embeddedProps.current!,
+        'onSlashCommand',
+      )({ command: 'auth', input: '' });
+    });
+    expect(postMessagesOfType('auth')).toHaveLength(1);
+    await sendLegacySubscriptionEvent();
+    expect(
+      document.querySelector('[data-testid="subscription-real"]'),
+    ).toBeNull();
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it('allows the shared Workflow mode control in the modern webview', async () => {
+    const props = await renderApp();
+    expect(props.composerToolbarActions).toContain('workflowMode');
+    expect(props.composerToolbarActions).toContain('addMenu');
+  });
+
   it('attributes new sessions to the VS Code channel', async () => {
     const initialSessionId = document.body.dataset.qwenSessionId;
     delete document.body.dataset.qwenSessionId;
@@ -189,6 +873,21 @@ describe('EmbeddedApp host wiring', () => {
       expect(props['sessionSourceType']).toBe('vscode');
     } finally {
       document.body.dataset.qwenSessionId = initialSessionId;
+    }
+  });
+
+  it('never passes a language prop, so the shell resolves its own UI language', async () => {
+    // The shell resolves the UI language from its own sources (daemon setting,
+    // then browser locale). A language prop would pin the value read at mount
+    // and reset the pick back to the entry's stale readLanguage reading when
+    // the setting changes later; readLanguage still feeds the chrome copy.
+    const previousLang = document.documentElement.lang;
+    try {
+      document.documentElement.lang = 'ru';
+      const props = await renderApp();
+      expect(props.language).toBeUndefined();
+    } finally {
+      document.documentElement.lang = previousLang;
     }
   });
 
@@ -284,6 +983,41 @@ describe('EmbeddedApp host wiring', () => {
       );
     });
     expect(container.querySelector('#qwen-session-history')).toBeNull();
+  });
+
+  it('renders the Host-gate guidance for a daemonPreAuthHostGate bootstrap error', async () => {
+    await renderApp();
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'webShellBootstrapError',
+            data: { reason: 'daemonPreAuthHostGate' },
+          },
+        }),
+      );
+    });
+    // Runtime came from the dataset, so the error surfaces as the over-
+    // transcript notice rather than the pre-bootstrap full-panel state.
+    const notice = document.querySelector('[role="alert"]');
+    expect(notice?.textContent).toMatch(/4170:localhost:4170/);
+    expect(notice?.textContent).toMatch(/same port number/i);
+  });
+
+  it('still renders a plain bootstrap error message', async () => {
+    await renderApp();
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'webShellBootstrapError',
+            data: { message: 'daemon exploded' },
+          },
+        }),
+      );
+    });
+    const notice = document.querySelector('[role="alert"]');
+    expect(notice?.textContent).toContain('daemon exploded');
   });
 
   it('attributes an internal new session to VS Code after a foreign clear', async () => {
@@ -496,6 +1230,73 @@ describe('EmbeddedApp host wiring', () => {
 
     expect(container.textContent).toContain('Get Started');
   });
+
+  it.each([false, true])(
+    'keeps the composer after logout and waits for explicit /auth (sidebar flow: %s)',
+    async (sidebarFlow) => {
+      await renderApp();
+      const refreshModels = vi.fn().mockResolvedValue(undefined);
+      const shellRef = mocks.embeddedProps.current?.shellRef as {
+        current: unknown;
+      };
+      shellRef.current = { refreshModels };
+      await act(async () => {
+        window.dispatchEvent(
+          new MessageEvent('message', {
+            data: { type: 'authState', data: { authenticated: true } },
+          }),
+        );
+        if (sidebarFlow)
+          window.dispatchEvent(
+            new MessageEvent('message', {
+              data: {
+                type: 'qwenSubscriptionAuth',
+                data: { flowId: 'flow-a' },
+              },
+            }),
+          );
+      });
+      mocks.embeddedProps.current = null;
+      await act(async () => {
+        window.dispatchEvent(
+          new MessageEvent('message', { data: { type: 'authSignedOut' } }),
+        );
+        window.dispatchEvent(
+          new MessageEvent('message', {
+            data: { type: 'authState', data: { authenticated: false } },
+          }),
+        );
+        window.dispatchEvent(
+          new MessageEvent('message', { data: { type: 'authCancelled' } }),
+        );
+      });
+      expect(mocks.embeddedProps.current).not.toBeNull();
+      expect(document.body.textContent).not.toContain('Get Started');
+      expect(
+        document.querySelector('[data-testid="subscription-real"]'),
+      ).toBeNull();
+      expect(document.body.textContent).not.toContain(
+        'Signed out of Qwen. Use /auth to sign in again.',
+      );
+      expect(postMessagesOfType('auth')).toHaveLength(0);
+      expect(refreshModels).toHaveBeenCalledOnce();
+      await act(async () => {
+        callback<(sessionId: string) => void>(
+          mocks.embeddedProps.current!,
+          'onSessionIdChange',
+        )('session-after-logout');
+      });
+      expect(mocks.embeddedProps.current).not.toBeNull();
+      expect(document.body.textContent).not.toContain('Get Started');
+      await act(async () => {
+        callback<(command: { command: string; input: string }) => boolean>(
+          mocks.embeddedProps.current!,
+          'onSlashCommand',
+        )({ command: 'auth', input: '/auth' });
+      });
+      expect(postMessagesOfType('auth')).toHaveLength(1);
+    },
+  );
 
   it('keeps an explicit active-file exclusion across editor changes', async () => {
     await renderApp();
@@ -830,22 +1631,27 @@ describe('EmbeddedApp host wiring', () => {
   });
 
   it('routes auth and session-change host actions to the extension', async () => {
+    vi.stubEnv('NODE_ENV', 'production');
     const props = await renderApp();
 
     const onSlashCommand = callback<
       (command: { command: string; input: string }) => boolean | void
     >(props, 'onSlashCommand');
-    expect(onSlashCommand({ command: 'auth', input: '' })).toBe(true);
-    expect(onSlashCommand({ command: 'account', input: '' })).toBe(true);
+    await act(async () => {
+      expect(onSlashCommand({ command: 'auth', input: '' })).toBe(true);
+      expect(onSlashCommand({ command: 'account', input: '' })).toBe(true);
+    });
 
-    callback<(sessionId: string | undefined) => void>(
-      props,
-      'onSessionIdChange',
-    )('session-2');
-    callback<(session: { sessionId?: string; sessionName?: string }) => void>(
-      props,
-      'onSessionInfoChange',
-    )({ sessionId: 'session-2', sessionName: 'My Title' });
+    act(() => {
+      callback<(sessionId: string | undefined) => void>(
+        props,
+        'onSessionIdChange',
+      )('session-2');
+      callback<(session: { sessionId?: string; sessionName?: string }) => void>(
+        props,
+        'onSessionInfoChange',
+      )({ sessionId: 'session-2', sessionName: 'My Title' });
+    });
 
     expect(postMessagesOfType('auth')).toHaveLength(1);
     expect(postMessagesOfType('getAccountInfo')).toHaveLength(1);
@@ -1594,11 +2400,13 @@ describe('EmbeddedApp message edit rewind', () => {
     sessionId?: string;
     prompt: string;
     inputAnnotations: unknown[];
+    source?: 'mcp-app';
   }
 
   function snapshot(turnIndex: number): RewindSnapshotStub {
     return {
       promptId: `prompt-${turnIndex}`,
+      daemonPromptId: `daemon-${turnIndex}`,
       turnIndex,
       timestamp: '2026-09-06T00:00:00.000Z',
       diffStats: { filesChanged: 0, insertions: 0, deletions: 0 },
@@ -1630,15 +2438,130 @@ describe('EmbeddedApp message edit rewind', () => {
     sdkMocks.rewindSession.mockResolvedValue({});
   });
 
+  function userBlock(id: string, text: string): Record<string, unknown> {
+    return { id, kind: 'user', text, promptId: `daemon-${id.slice(1)}` };
+  }
+
+  async function deliverTranscript(
+    props: CapturedProps,
+    blocks: Array<Record<string, unknown>>,
+  ): Promise<void> {
+    const onTranscriptChange = callback<(blocks: unknown[]) => void>(
+      props,
+      'onTranscriptChange',
+    );
+    await act(async () => {
+      onTranscriptChange(blocks);
+      await Promise.resolve();
+    });
+  }
+
+  // Mirrors the shell's `prepareSubmitRef.current = prepareSubmit`: a real send
+  // invokes the latest closure, so assertions must not reuse one captured
+  // before the state change they are checking.
+  async function expectNextSubmitIsOrdinary(
+    sessionId = 'session-1',
+  ): Promise<void> {
+    sdkMocks.getRewindSnapshots.mockClear();
+    sdkMocks.rewindSession.mockClear();
+    const nextSubmit = callback<
+      (submission: PrepareSubmission) => Promise<unknown>
+    >(mocks.embeddedProps.current as CapturedProps, 'prepareSubmit');
+    await act(async () => {
+      await expect(
+        nextSubmit({
+          sessionId,
+          prompt: 'unrelated',
+          inputAnnotations: [],
+        }),
+      ).resolves.toBeUndefined();
+    });
+    expect(sdkMocks.getRewindSnapshots).not.toHaveBeenCalled();
+    expect(sdkMocks.rewindSession).not.toHaveBeenCalled();
+  }
+
   // The daemon-backed edit/rewind shipped with the cutover but nothing ever
   // exercised it: getRewindSnapshots and rewindSession appeared in this file
   // only as mock stubs (#9911).
+  it('keeps a pending composer edit intact when preparing an MCP App message', async () => {
+    const props = await renderApp();
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'activeEditorChanged',
+            data: {
+              fileName: 'editor.ts',
+              filePath: '/workspace/editor.ts',
+              selection: { startLine: 3, endLine: 5 },
+            },
+          },
+        }),
+      );
+    });
+    await deliverTranscript(props, [userBlock('u3', 'original text')]);
+    sdkMocks.rewindSession.mockImplementation(async () => {
+      await deliverTranscript(props, []);
+    });
+    sdkMocks.getRewindSnapshots.mockResolvedValue({ snapshots: [snapshot(3)] });
+    const prepareSubmit = await startEditing(props, 0);
+
+    await act(async () => {
+      await expect(
+        prepareSubmit({
+          sessionId: 'session-1',
+          prompt: 'Analyze selected failures',
+          inputAnnotations: [],
+          source: 'mcp-app',
+        }),
+      ).resolves.toBeUndefined();
+    });
+    expect(sdkMocks.getRewindSnapshots).not.toHaveBeenCalled();
+    expect(sdkMocks.rewindSession).not.toHaveBeenCalled();
+
+    const prepareComposer = callback<
+      (submission: PrepareSubmission) => Promise<unknown>
+    >(mocks.embeddedProps.current as CapturedProps, 'prepareSubmit');
+    await act(async () => {
+      await expect(
+        prepareComposer({
+          sessionId: 'session-1',
+          prompt: 'Edited composer message',
+          inputAnnotations: [],
+        }),
+      ).resolves.toEqual({
+        prompt: '@editor.ts (selected lines 3-5) Edited composer message',
+        inputAnnotations: [
+          expect.objectContaining({
+            type: 'reference',
+            reference: expect.objectContaining({
+              id: 'vscode-active-file:/workspace/editor.ts',
+              value: '/workspace/editor.ts',
+            }),
+          }),
+        ],
+      });
+    });
+    expect(sdkMocks.rewindSession).toHaveBeenCalledWith(
+      'session-1',
+      'prompt-3',
+      { rewindFiles: false },
+    );
+  });
+
   it('rewinds to the snapshot for the edited turn, not the newest one', async () => {
     const props = await renderApp();
+    await deliverTranscript(props, [
+      userBlock('u2', 'earlier'),
+      userBlock('u3', 'original text'),
+    ]);
+    sdkMocks.rewindSession.mockImplementation(async () => {
+      await deliverTranscript(props, [userBlock('u2', 'earlier')]);
+    });
     sdkMocks.getRewindSnapshots.mockResolvedValue({
       snapshots: [snapshot(2), snapshot(5), snapshot(3)],
     });
-    const prepareSubmit = await startEditing(props, 3);
+    const prepareSubmit = await startEditing(props, 1);
 
     await act(async () => {
       await prepareSubmit({
@@ -1649,7 +2572,235 @@ describe('EmbeddedApp message edit rewind', () => {
     });
 
     expect(sdkMocks.getRewindSnapshots).toHaveBeenCalledWith('session-1');
-    // Turn 3, even though turn 5 is newer and listed before it.
+    // Visible turn 1 maps to raw snapshot 3, not the newer snapshot 5.
+    expect(sdkMocks.rewindSession).toHaveBeenCalledWith(
+      'session-1',
+      'prompt-3',
+      expect.objectContaining({ rewindFiles: false }),
+    );
+    // The rewind must be unattributed: the daemon only accepts the client id
+    // it registered for the session at create/load (`client_<uuid>`), which a
+    // raw DaemonClient never learns — the host's own `vscode-<uuid>` is not
+    // registered, and passing it makes the daemon reject the rewind with 400
+    // `invalid_client_id`, surfacing as the localized "Failed to edit the
+    // message" toast on every edit attempt.
+    expect(sdkMocks.rewindSession.mock.lastCall?.[2]).not.toHaveProperty(
+      'clientId',
+    );
+  });
+
+  it('refuses a stale edit ordinal without touching the composer or arming rewind', async () => {
+    const props = await renderApp();
+    await deliverTranscript(props, [
+      userBlock('u0', 'first'),
+      userBlock('u1', 'second'),
+    ]);
+    const composer = { clear: vi.fn(), setText: vi.fn(), focus: vi.fn() };
+    (props.composerRef as { current: typeof composer | null }).current =
+      composer;
+    const onEdit = callback<(turnIndex: number, content: string) => boolean>(
+      props,
+      'onUserMessageEditRequest',
+    );
+    await act(async () => {
+      expect(onEdit(5, 'stale target')).toBe(false);
+    });
+    expect(composer.clear).not.toHaveBeenCalled();
+    expect(composer.setText).not.toHaveBeenCalled();
+    expect(composer.focus).not.toHaveBeenCalled();
+    await expectNextSubmitIsOrdinary();
+  });
+
+  it('explains a legacy checkpoint with no daemon identity before refusing the edit', async () => {
+    const props = await renderApp();
+    await deliverTranscript(props, [userBlock('u0', 'original text')]);
+    sdkMocks.getRewindSnapshots.mockResolvedValue({
+      snapshots: [{ promptId: 'legacy-prompt', turnIndex: 0 }],
+    });
+    const prepareSubmit = await startEditing(props, 0);
+    await act(async () => {
+      await expect(
+        prepareSubmit({
+          sessionId: 'session-1',
+          prompt: 'edited text',
+          inputAnnotations: [],
+        }),
+      ).rejects.toThrow('This checkpoint has no prompt identity to rewind to.');
+    });
+    expect(sdkMocks.rewindSession).not.toHaveBeenCalled();
+  });
+
+  it('refuses the edit when the turn no longer has a snapshot', async () => {
+    const props = await renderApp();
+    await deliverTranscript(
+      props,
+      Array.from({ length: 8 }, (_, index) =>
+        userBlock(`u${index}`, `turn ${index}`),
+      ),
+    );
+    sdkMocks.getRewindSnapshots.mockResolvedValue({
+      snapshots: [snapshot(2)],
+    });
+    const prepareSubmit = await startEditing(props, 7);
+
+    await act(async () => {
+      await expect(
+        prepareSubmit({
+          sessionId: 'session-1',
+          prompt: 'edited text',
+          inputAnnotations: [],
+        }),
+      ).rejects.toThrow('The original message can no longer be edited.');
+    });
+
+    // The rejection is what the web shell now surfaces to the user; rewinding
+    // to some other turn would silently discard different work.
+    expect(sdkMocks.rewindSession).not.toHaveBeenCalled();
+  });
+
+  it('edits the turn the web shell numbered, skipping an injected row', async () => {
+    const props = await renderApp();
+    const injectedRow = {
+      id: 'n1',
+      kind: 'user',
+      text: 'injected note',
+      promptId: 'daemon-1',
+      meta: { source: 'mid_turn_message_injected' },
+    };
+    await deliverTranscript(props, [
+      userBlock('u0', 'first'),
+      injectedRow,
+      userBlock('u1', 'original text'),
+    ]);
+    sdkMocks.getRewindSnapshots.mockResolvedValue({
+      snapshots: [snapshot(1)],
+    });
+    sdkMocks.rewindSession.mockImplementation(async () => {
+      await deliverTranscript(props, [userBlock('u0', 'first'), injectedRow]);
+    });
+    // The web shell numbers only `role === 'user'` rows and the injected row
+    // renders as `role: 'system'`, so ordinal 1 is u1, not n1.
+    const prepareSubmit = await startEditing(props, 1);
+
+    await act(async () => {
+      await prepareSubmit({
+        sessionId: 'session-1',
+        prompt: 'edited text',
+        inputAnnotations: [],
+      });
+    });
+
+    expect(sdkMocks.rewindSession).toHaveBeenCalledWith(
+      'session-1',
+      'prompt-1',
+      expect.objectContaining({ rewindFiles: false }),
+    );
+  });
+
+  // The clear has to happen before the branch can throw, not after the
+  // snapshot fetch: with no session there is no rewind to retry, so a refused
+  // send must leave edit mode instead of re-entering the branch every time.
+  it('leaves edit mode when the submission has no session to rewind', async () => {
+    const initialSessionId = document.body.dataset.qwenSessionId;
+    delete document.body.dataset.qwenSessionId;
+    try {
+      const props = await renderApp();
+      await deliverTranscript(props, [userBlock('u0', 'original text')]);
+      const prepareSubmit = await startEditing(props, 0);
+
+      await act(async () => {
+        await expect(
+          prepareSubmit({ prompt: 'edited text', inputAnnotations: [] }),
+        ).rejects.toThrow(
+          'The message cannot be edited before the session is ready.',
+        );
+      });
+      expect(sdkMocks.getRewindSnapshots).not.toHaveBeenCalled();
+
+      await expectNextSubmitIsOrdinary('session-1');
+    } finally {
+      document.body.dataset.qwenSessionId = initialSessionId;
+    }
+  });
+
+  it('leaves edit mode after a refused edit so the next send is not stuck', async () => {
+    const props = await renderApp();
+    await deliverTranscript(props, [userBlock('u0', 'original text')]);
+    const prepareSubmit = await startEditing(props, 0);
+
+    await act(async () => {
+      await expect(
+        prepareSubmit({
+          sessionId: 'session-1',
+          prompt: 'edited text',
+          inputAnnotations: [],
+        }),
+      ).rejects.toThrow('The original message can no longer be edited.');
+    });
+    expect(sdkMocks.getRewindSnapshots).toHaveBeenCalledOnce();
+    expect(sdkMocks.rewindSession).not.toHaveBeenCalled();
+
+    sdkMocks.getRewindSnapshots.mockClear();
+    const nextSubmit = callback<
+      (submission: PrepareSubmission) => Promise<unknown>
+    >(mocks.embeddedProps.current as CapturedProps, 'prepareSubmit');
+    await act(async () => {
+      await expect(
+        nextSubmit({
+          sessionId: 'session-1',
+          prompt: 'unrelated',
+          inputAnnotations: [],
+        }),
+      ).resolves.toBeUndefined();
+    });
+    expect(sdkMocks.getRewindSnapshots).not.toHaveBeenCalled();
+    expect(sdkMocks.rewindSession).not.toHaveBeenCalled();
+  });
+
+  // The localized toast says "Please try again", so a transient daemon failure
+  // must leave the edit armed: a retry that skipped the rewind would append
+  // the edited text as a new turn instead of replacing the original.
+  it('re-arms the edit after a transient snapshot failure so the retry rewinds', async () => {
+    const props = await renderApp();
+    await deliverTranscript(props, [userBlock('u3', 'original text')]);
+    sdkMocks.rewindSession.mockImplementation(async () => {
+      await deliverTranscript(props, []);
+    });
+    sdkMocks.getRewindSnapshots.mockRejectedValueOnce(
+      new sdkMocks.DaemonHttpError(503),
+    );
+    const prepareSubmit = await startEditing(props, 0);
+
+    await act(async () => {
+      await expect(
+        prepareSubmit({
+          sessionId: 'session-1',
+          prompt: 'edited text',
+          inputAnnotations: [],
+        }),
+      ).rejects.toThrow('Failed to edit the message. Please try again.');
+    });
+
+    sdkMocks.getRewindSnapshots.mockClear();
+    sdkMocks.rewindSession.mockClear();
+    sdkMocks.getRewindSnapshots.mockResolvedValue({ snapshots: [snapshot(3)] });
+    // The shell always invokes the latest closure, so the retry has to come
+    // from the re-rendered props, not the one captured before the failure.
+    const retry = callback<(submission: PrepareSubmission) => Promise<unknown>>(
+      mocks.embeddedProps.current as CapturedProps,
+      'prepareSubmit',
+    );
+    await act(async () => {
+      await expect(
+        retry({
+          sessionId: 'session-1',
+          prompt: 'edited text',
+          inputAnnotations: [],
+        }),
+      ).resolves.toBeUndefined();
+    });
+
+    expect(sdkMocks.getRewindSnapshots).toHaveBeenCalledWith('session-1');
     expect(sdkMocks.rewindSession).toHaveBeenCalledWith(
       'session-1',
       'prompt-3',
@@ -1657,28 +2808,111 @@ describe('EmbeddedApp message edit rewind', () => {
     );
   });
 
-  it('refuses the edit when the turn no longer has a snapshot', async () => {
+  // The 400 `invalid_client_id` documented above is a permanent refusal: if it
+  // re-armed the edit, every later send would retry a rewind that can never
+  // succeed — the wedged composer this change exists to remove.
+  it('keeps edit mode cleared when the rewind is refused permanently', async () => {
     const props = await renderApp();
+    await deliverTranscript(props, [userBlock('u3', 'original text')]);
     sdkMocks.getRewindSnapshots.mockResolvedValue({
-      snapshots: [snapshot(2)],
+      snapshots: [snapshot(3)],
     });
-    const prepareSubmit = await startEditing(props, 7);
+    sdkMocks.rewindSession.mockRejectedValueOnce(
+      new sdkMocks.DaemonHttpError(400),
+    );
+    const prepareSubmit = await startEditing(props, 0);
 
-    await expect(
-      prepareSubmit({
+    await act(async () => {
+      await expect(
+        prepareSubmit({
+          sessionId: 'session-1',
+          prompt: 'edited text',
+          inputAnnotations: [],
+        }),
+      ).rejects.toThrow('Failed to edit the message. Please try again.');
+    });
+
+    await expectNextSubmitIsOrdinary();
+  });
+
+  // A failure that lands after the user switched sessions must not re-arm the
+  // edit: the retry would rewind the session they are now looking at back to a
+  // turn index that belongs to the one they left.
+  it('does not re-arm the edit when the session switched during the failed fetch', async () => {
+    const props = await renderApp();
+    await deliverTranscript(props, [userBlock('u3', 'original text')]);
+    let rejectSnapshots!: (error: unknown) => void;
+    sdkMocks.getRewindSnapshots.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectSnapshots = reject;
+        }),
+    );
+    const prepareSubmit = await startEditing(props, 0);
+    let submission!: Promise<unknown>;
+    await act(async () => {
+      submission = prepareSubmit({
         sessionId: 'session-1',
         prompt: 'edited text',
         inputAnnotations: [],
-      }),
-    ).rejects.toThrow('The original message can no longer be edited.');
+      });
+    });
 
-    // The rejection is what the web shell now surfaces to the user; rewinding
-    // to some other turn would silently discard different work.
-    expect(sdkMocks.rewindSession).not.toHaveBeenCalled();
+    await act(async () => {
+      callback<(sessionId: string | undefined) => void>(
+        props,
+        'onSessionIdChange',
+      )('session-2');
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      rejectSnapshots(new Error('network down'));
+      await expect(submission).rejects.toThrow(
+        'Failed to edit the message. Please try again.',
+      );
+    });
+
+    await expectNextSubmitIsOrdinary('session-2');
+  });
+
+  // The other half of the invariant: a successful edit must not leave the next
+  // send inside the branch, or every later prompt would rewind the session.
+  it('treats the send after a successful edit as an ordinary prompt', async () => {
+    const props = await renderApp();
+    await deliverTranscript(props, [userBlock('u0', 'original text')]);
+    sdkMocks.rewindSession.mockImplementation(async () => {
+      await deliverTranscript(props, []);
+    });
+    sdkMocks.getRewindSnapshots.mockResolvedValue({
+      snapshots: [snapshot(0)],
+    });
+    const prepareSubmit = await startEditing(props, 0);
+
+    await act(async () => {
+      await expect(
+        prepareSubmit({
+          sessionId: 'session-1',
+          prompt: 'edited text',
+          inputAnnotations: [],
+        }),
+      ).resolves.toBeUndefined();
+    });
+    expect(sdkMocks.rewindSession).toHaveBeenCalledWith(
+      'session-1',
+      'prompt-0',
+      expect.objectContaining({ rewindFiles: false }),
+    );
+
+    await expectNextSubmitIsOrdinary();
   });
 
   it('rewinds the session captured before the snapshot fetch, not the one navigated to', async () => {
     const props = await renderApp();
+    await deliverTranscript(props, [userBlock('u3', 'original text')]);
+    sdkMocks.rewindSession.mockImplementation(async () => {
+      await deliverTranscript(props, []);
+    });
 
     // Hold the snapshot fetch open so the session can switch while it is in
     // flight.
@@ -1690,11 +2924,14 @@ describe('EmbeddedApp message edit rewind', () => {
         }),
     );
 
-    const prepareSubmit = await startEditing(props, 3);
-    const submission = prepareSubmit({
-      sessionId: 'session-1',
-      prompt: 'edited text',
-      inputAnnotations: [],
+    const prepareSubmit = await startEditing(props, 0);
+    let submission!: Promise<unknown>;
+    await act(async () => {
+      submission = prepareSubmit({
+        sessionId: 'session-1',
+        prompt: 'edited text',
+        inputAnnotations: [],
+      });
     });
 
     // The user navigates to another session before the fetch resolves; the
@@ -1719,12 +2956,113 @@ describe('EmbeddedApp message edit rewind', () => {
       expect.objectContaining({ rewindFiles: false }),
     );
   });
+
+  // The daemon delivers `session.rewound` on the session stream after the
+  // rewind HTTP response resolves. Returning from prepareSubmit before the
+  // event lands lets the web shell add its optimistic user message, and the
+  // late truncation then wipes that message from the view while the turn
+  // itself proceeds correctly — the message only reappears after a reload.
+  it('holds the submit until the rewind lands in the transcript', async () => {
+    const props = await renderApp();
+    sdkMocks.getRewindSnapshots.mockResolvedValue({
+      snapshots: [snapshot(3)],
+    });
+    await deliverTranscript(props, [
+      userBlock('u0', 'first'),
+      userBlock('u1', 'second'),
+      userBlock('u2', 'third'),
+      userBlock('u3', 'original text'),
+    ]);
+    const prepareSubmit = await startEditing(props, 3);
+
+    let settled = false;
+    let submission!: Promise<void>;
+    await act(async () => {
+      submission = prepareSubmit({
+        sessionId: 'session-1',
+        prompt: 'edited text',
+        inputAnnotations: [],
+      }).then(() => {
+        settled = true;
+      });
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(sdkMocks.rewindSession).toHaveBeenCalledOnce();
+    expect(settled).toBe(false);
+
+    // The `session.rewound` event truncates the transcript to the target turn.
+    await act(async () => {
+      await deliverTranscript(props, [
+        userBlock('u0', 'first'),
+        userBlock('u1', 'second'),
+        userBlock('u2', 'third'),
+      ]);
+      await submission;
+    });
+    expect(settled).toBe(true);
+  });
+
+  it('aborts the submit when the rewind does not land in the transcript', async () => {
+    const props = await renderApp();
+    sdkMocks.getRewindSnapshots.mockResolvedValue({
+      snapshots: [snapshot(3)],
+    });
+    await deliverTranscript(props, [
+      userBlock('u0', 'first'),
+      userBlock('u1', 'second'),
+      userBlock('u2', 'third'),
+      userBlock('u3', 'original text'),
+    ]);
+    const prepareSubmit = await startEditing(props, 3);
+
+    vi.useFakeTimers();
+    try {
+      let rejection: unknown;
+      let submission!: Promise<unknown>;
+      await act(async () => {
+        submission = prepareSubmit({
+          sessionId: 'session-1',
+          prompt: 'edited text',
+          inputAnnotations: [],
+        }).catch((error) => {
+          rejection = error;
+        });
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2100);
+        await submission;
+      });
+      expect(rejection).toBeInstanceOf(Error);
+      expect((rejection as Error).message).toContain(
+        'Could not confirm the rewind.',
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('EmbeddedApp rewind preflight localization', () => {
   it('rethrows a localized error when getRewindSnapshots rejects', async () => {
     await renderApp();
     const props = mocks.embeddedProps.current as CapturedProps;
+    await act(async () => {
+      callback<(blocks: unknown[]) => void>(
+        props,
+        'onTranscriptChange',
+      )([
+        {
+          id: 'u0',
+          kind: 'user',
+          text: 'original text',
+          promptId: 'daemon-localized',
+        },
+      ]);
+    });
 
     const onUserMessageEditRequest = callback<
       (turnIndex: number, content: string) => boolean
@@ -1743,14 +3081,58 @@ describe('EmbeddedApp rewind preflight localization', () => {
       }) => Promise<{ prompt: string; inputAnnotations: unknown[] } | undefined>
     >(mocks.embeddedProps.current as CapturedProps, 'prepareSubmit');
 
-    await expect(
-      prepareSubmit({ prompt: 'edited text', inputAnnotations: [] }),
-    ).rejects.toThrow('Failed to edit the message. Please try again.');
+    await act(async () => {
+      await expect(
+        prepareSubmit({ prompt: 'edited text', inputAnnotations: [] }),
+      ).rejects.toThrow('Failed to edit the message. Please try again.');
+    });
+
+    // A failure without an HTTP status is a network blip, not a refusal: the
+    // edit stays armed, so the retry re-enters the branch and rewinds instead
+    // of appending the edited text as a new turn.
+    sdkMocks.getRewindSnapshots.mockClear();
+    sdkMocks.getRewindSnapshots.mockResolvedValueOnce({
+      snapshots: [
+        { turnIndex: 0, promptId: 'p-1', daemonPromptId: 'daemon-localized' },
+      ],
+    });
+    sdkMocks.rewindSession.mockImplementationOnce(async () => {
+      callback<(blocks: unknown[]) => void>(props, 'onTranscriptChange')([]);
+    });
+    const retry = callback<
+      (submission: {
+        prompt: string;
+        inputAnnotations: unknown[];
+      }) => Promise<{ prompt: string; inputAnnotations: unknown[] } | undefined>
+    >(mocks.embeddedProps.current as CapturedProps, 'prepareSubmit');
+    await act(async () => {
+      await expect(
+        retry({ prompt: 'edited text', inputAnnotations: [] }),
+      ).resolves.toBeUndefined();
+    });
+    expect(sdkMocks.rewindSession).toHaveBeenCalledWith(
+      'session-1',
+      'p-1',
+      expect.objectContaining({ rewindFiles: false }),
+    );
   });
 
   it('rethrows a localized error when rewindSession rejects', async () => {
     await renderApp();
     const props = mocks.embeddedProps.current as CapturedProps;
+    await act(async () => {
+      callback<(blocks: unknown[]) => void>(
+        props,
+        'onTranscriptChange',
+      )([
+        {
+          id: 'u0',
+          kind: 'user',
+          text: 'original text',
+          promptId: 'daemon-localized',
+        },
+      ]);
+    });
 
     const onUserMessageEditRequest = callback<
       (turnIndex: number, content: string) => boolean
@@ -1761,7 +3143,9 @@ describe('EmbeddedApp rewind preflight localization', () => {
     });
 
     sdkMocks.getRewindSnapshots.mockResolvedValueOnce({
-      snapshots: [{ turnIndex: 0, promptId: 'p-1' }],
+      snapshots: [
+        { turnIndex: 0, promptId: 'p-1', daemonPromptId: 'daemon-localized' },
+      ],
     });
     sdkMocks.rewindSession.mockRejectedValueOnce(new Error('HTTP 503'));
 
@@ -1772,8 +3156,70 @@ describe('EmbeddedApp rewind preflight localization', () => {
       }) => Promise<{ prompt: string; inputAnnotations: unknown[] } | undefined>
     >(mocks.embeddedProps.current as CapturedProps, 'prepareSubmit');
 
-    await expect(
-      prepareSubmit({ prompt: 'edited text', inputAnnotations: [] }),
-    ).rejects.toThrow('Failed to edit the message. Please try again.');
+    await act(async () => {
+      await expect(
+        prepareSubmit({ prompt: 'edited text', inputAnnotations: [] }),
+      ).rejects.toThrow('Failed to edit the message. Please try again.');
+    });
+
+    // Same transient contract at the rewind call site: the retry must rewind
+    // again rather than send the edited text as a new prompt.
+    sdkMocks.getRewindSnapshots.mockClear();
+    sdkMocks.getRewindSnapshots.mockResolvedValueOnce({
+      snapshots: [
+        { turnIndex: 0, promptId: 'p-1', daemonPromptId: 'daemon-localized' },
+      ],
+    });
+    sdkMocks.rewindSession.mockImplementationOnce(async () => {
+      callback<(blocks: unknown[]) => void>(props, 'onTranscriptChange')([]);
+    });
+    const retry = callback<
+      (submission: {
+        prompt: string;
+        inputAnnotations: unknown[];
+      }) => Promise<{ prompt: string; inputAnnotations: unknown[] } | undefined>
+    >(mocks.embeddedProps.current as CapturedProps, 'prepareSubmit');
+    await act(async () => {
+      await expect(
+        retry({ prompt: 'edited text', inputAnnotations: [] }),
+      ).resolves.toBeUndefined();
+    });
+    expect(sdkMocks.getRewindSnapshots).toHaveBeenCalledOnce();
+    expect(sdkMocks.rewindSession).toHaveBeenCalledTimes(2);
+    expect(sdkMocks.rewindSession).toHaveBeenLastCalledWith(
+      'session-1',
+      'p-1',
+      expect.objectContaining({ rewindFiles: false }),
+    );
+  });
+});
+
+describe('EmbeddedApp selection copy keep-focus', () => {
+  it('focuses the app root on pointerdown outside controls so a transcript selection survives VS Code copy', async () => {
+    await renderApp();
+    const appRoot = document.querySelector<HTMLElement>(
+      '[data-vscode-context]',
+    );
+    expect(appRoot).not.toBeNull();
+    expect(appRoot!.getAttribute('tabindex')).toBe('-1');
+
+    const transcriptRow = document.createElement('p');
+    appRoot!.appendChild(transcriptRow);
+    transcriptRow.dispatchEvent(
+      new MouseEvent('pointerdown', { bubbles: true }),
+    );
+    expect(document.activeElement).toBe(appRoot);
+  });
+
+  it('does not move focus away from a control the pointer pressed', async () => {
+    await renderApp();
+    const appRoot = document.querySelector<HTMLElement>(
+      '[data-vscode-context]',
+    );
+    const button = document.createElement('button');
+    appRoot!.appendChild(button);
+    button.focus();
+    button.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
+    expect(document.activeElement).toBe(button);
   });
 });

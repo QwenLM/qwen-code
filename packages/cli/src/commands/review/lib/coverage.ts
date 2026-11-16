@@ -91,6 +91,8 @@ import {
   verifyBudgetExhausted,
 } from './deadline.js';
 import { budgetGapDisclosures } from './budget.js';
+import { inertPath } from './paths.js';
+import { selectionDrift, type SelectionDrift } from './selection.js';
 import { shellQuotePath } from './shell-quote.js';
 
 export interface CoverageFromTranscripts {
@@ -190,6 +192,27 @@ export interface CoverageFromTranscripts {
   /** Chunk ids an agent declared unreachable. */
   uncoverableChunks: number[];
   /**
+   * Chunk ids an agent declared unreachable that this plan does NOT carry —
+   * a record launched as `chunk 9 of 12` over a plan of two.
+   *
+   * The other half of what `uncoverableChunks` used to hold: the two are
+   * split by one test, under the same supersession guard, so their union is
+   * exactly the set main computed and `ok` is what it was. Kept out of
+   * `uncoverableChunks` because the id is not a chunk of this plan — listed
+   * there it was counted as a section of the diff, in the summary's
+   * denominator and in the posted body. Kept in the report, and in `ok`,
+   * because the declaration may still be evidence about this diff: a
+   * record passes the plan's mtime fence when its transcript was written
+   * after the plan, and a planned chunk is credited to any agent pointed at
+   * its lines that opened the diff at all, which does not show that agent
+   * reached the line this one could not.
+   *
+   * Ids, not records, like the list beside it: a chunk agent's label IS its
+   * chunk id, so two declarers of one id are one entry here as they were
+   * one entry there.
+   */
+  unplannedDeclarations: number[];
+  /**
    * `Budget gap: <the check>` lines parsed from agent returns — the fixed
    * disclosure format the tool-budget brief mandates when an agent's soft
    * ceiling stopped a check it wanted. Detection is deterministic (this
@@ -250,6 +273,17 @@ export interface CoverageFromTranscripts {
    * before chunks carried them.
    */
   plannedChunks: Array<{ id: number; files: string[] }>;
+  /**
+   * What the plan's recorded identity said when it was checked against the
+   * diff on disk — see lib/selection.ts — or `null` when it matched, and when
+   * the plan predates the field and carries none.
+   *
+   * REPORTED, and nothing else: it is not a conjunct of `ok`, and no chunk's
+   * outcome reads it. The check has never fired on a real run, so its
+   * false-positive rate is unknown, and an unmeasured predicate does not get
+   * to refuse a review.
+   */
+  selectionDrift: string | null;
 }
 
 /** The plan, as far as coverage needs it. The roster reads more of it — see RosterPlan. */
@@ -262,6 +296,13 @@ interface Plan {
     endLine: number;
     files?: Array<{ path: string }>;
   }>;
+  /**
+   * What the plan was computed from — see lib/selection.ts. `unknown`, not
+   * `SelectionIdentity`: this is parsed JSON, a plan written before the field
+   * existed carries none, and `selectionDrift` is what decides whether what
+   * is here can be read.
+   */
+  selection?: unknown;
 }
 
 function readPlan(path: string): { plan: Plan; mtimeMs: number } {
@@ -280,6 +321,89 @@ function readPlan(path: string): { plan: Plan; mtimeMs: number } {
     throw new Error(`coverage: ${path} has ${problem}`);
   }
   return { plan, mtimeMs: statSync(path).mtimeMs };
+}
+
+/**
+ * Does the plan still describe the diff it was planned over? Reported, never
+ * thrown — see `selectionDrift`'s own note on why an unmeasured predicate
+ * does not get to refuse a review. "Never thrown" is literal: whatever goes
+ * wrong in here comes back as a sentence, because a throw out of the coverage
+ * walk is a coverage failure, and that caps.
+ *
+ * Its own function rather than part of `readPlan`, because only the coverage
+ * walk reports it: `verificationGaps` reads the same plan and would hash the
+ * whole diff a second time per compose for a result it discards.
+ *
+ * `null` means the identity was checked and everything matched, so a diff
+ * that cannot be read is not `null` on a plan that carries an identity. An
+ * identity-less plan checks nothing and stays `null` — the same absence rule
+ * `selectionDrift` itself states.
+ */
+function planSelectionDrift(plan: Plan): SelectionDrift {
+  const identity = plan.selection;
+  if (identity === undefined || identity === null) return null;
+  // The path is the plan's, and a plan is a file anything can write. It goes
+  // through `inertPath` so a control character in it cannot open a second
+  // stderr line or reach the terminal as an escape sequence; it is cut to a
+  // length a path has any business being, because this string travels to
+  // stderr, the composed verdict and the run result; and it is quoted, so
+  // prose inside it reads as part of a path and not as the message.
+  const shown = inertPath(plan.diffPathAbsolute);
+  const at = JSON.stringify(
+    shown.length > 300 ? `${shown.slice(0, 300)}…` : shown,
+  );
+  try {
+    let diffText: string;
+    try {
+      // Read the way `diffHashOf` already reads this same path — one plain
+      // read, as bytes, decoded the way every capture command decoded what it
+      // chunked. Deliberately no cleverer than that precedent: in
+      // `compose-review`, whatever can make this read misbehave already
+      // makes that one misbehave whenever a script-lint or test-plan report
+      // is present. `check-coverage` did not open the diff before; it gains
+      // this one read.
+      diffText = readFileSync(plan.diffPathAbsolute).toString('utf8');
+    } catch (err) {
+      // The cause picks the repair. Every capture command writes a regular
+      // file, so a path that is now MISSING, or now something that cannot be
+      // read as a file at all, holds a file that was removed or replaced: the
+      // mutation the identity exists to catch, and re-capturing is its
+      // repair. A file that is there and cannot be read — a mode changed
+      // after the capture, an I/O fault — may never have moved, and sending
+      // the operator to re-capture it spends a review round on the wrong
+      // cause. Same rule as `fetch-pr`'s previous-report read.
+      const replaced = (how: string): string =>
+        `the diff file at ${at} ${how}, so the plan\u2019s chunk ranges ` +
+        'could not be verified against it — re-capture the diff and re-plan';
+      const code = (err as NodeJS.ErrnoException | null)?.code;
+      // Nothing at the path: the name is missing (ENOENT), or a component
+      // above it is a regular file — ENOTDIR here, ENOENT on Windows, and the
+      // same fact: no file can be there.
+      if (code === 'ENOENT' || code === 'ENOTDIR') return replaced('is gone');
+      // Something at the path that is not a file to read: a directory, a
+      // symlink loop, a socket where the platform reports one this way.
+      if (code === 'EISDIR' || code === 'ENXIO' || code === 'ELOOP') {
+        return replaced('is no longer a regular file');
+      }
+      return (
+        `the diff file at ${at} could not be read ` +
+        `(${typeof code === 'string' ? code : 'read failed'}) when the ` +
+        'selection identity was checked, so the plan\u2019s chunk ranges ' +
+        'could not be verified against it — the file may not have moved: ' +
+        'repair the read and check again before re-capturing'
+      );
+    }
+    return selectionDrift(identity, diffText, plan.chunks);
+  } catch {
+    // Not a read failure, and not to be reported as one: the check itself
+    // gave out. No plan is known to reach this — the boundary validation in
+    // `selectionDrift` stops the inputs that used to — and it stays so that
+    // one that does is a sentence, not a throw.
+    return (
+      'the plan\u2019s selection identity could not be checked against ' +
+      `the diff file at ${at} — re-plan`
+    );
+  }
 }
 
 /**
@@ -425,6 +549,64 @@ function label(rec: AgentRecord, chunk: number | null): string {
 }
 
 /**
+ * The three outcome sets do not partition the plan.
+ *
+ * Its own class because the callers' rule is that different failures do not
+ * wear each other's message: this one is a defect in this file, and an
+ * operator told "the plan could not be used" goes off to re-capture a diff
+ * that was never the problem.
+ */
+export class ChunkPartitionError extends Error {}
+
+/**
+ * Every planned chunk has exactly one outcome, and no outcome names a chunk
+ * the plan does not carry.
+ *
+ * Holds by construction today — `covered` is filled from `plan.chunks`,
+ * `uncoverable` is subtracted from it, and `missing` is what is left — so
+ * this guards the construction against its next edit rather than against any
+ * input. It exists because the coverage summary's denominator used to be the
+ * SUM of these three sets, which made "17 of 17 chunks reviewed"
+ * self-consistent whatever the sets did: a ratio that cannot disagree with
+ * itself cannot report a fault. The denominator now reads the plan, and a
+ * denominator read from somewhere else is only right while this holds.
+ */
+export function assertChunkPartition(
+  planned: readonly number[],
+  outcomes: {
+    covered: readonly number[];
+    missing: readonly number[];
+    uncoverable: readonly number[];
+  },
+): void {
+  const plannedIds = new Set(planned);
+  const seen = new Map<number, string>();
+  for (const [outcome, ids] of Object.entries(outcomes)) {
+    for (const id of ids) {
+      if (!plannedIds.has(id)) {
+        throw new ChunkPartitionError(
+          `chunk ${id} is ${outcome} but the plan does not carry it`,
+        );
+      }
+      const earlier = seen.get(id);
+      if (earlier !== undefined) {
+        throw new ChunkPartitionError(
+          earlier === outcome
+            ? `chunk ${id} is listed twice as ${outcome}`
+            : `chunk ${id} is both ${earlier} and ${outcome}`,
+        );
+      }
+      seen.set(id, outcome);
+    }
+  }
+  for (const id of planned) {
+    if (!seen.has(id)) {
+      throw new ChunkPartitionError(`chunk ${id} has no outcome`);
+    }
+  }
+}
+
+/**
  * What the agents of this run actually did, as the harness recorded it.
  *
  * Nothing here is supplied by the caller except the plan path. The transcripts
@@ -463,6 +645,7 @@ export function coverageFromTranscripts(
   const idleAgents: string[] = [];
   const unopenedAgents: string[] = [];
   const rewrittenPrompts: string[] = [];
+  const unplannedDeclared = new Set<number>();
   const driftedLaunches: string[] = [];
   // Used by the verbatim-drift rescue in both the chunk loop and the roster
   // walk, and by the roster's matching seed below.
@@ -815,10 +998,19 @@ export function coverageFromTranscripts(
       // other — the chunk lands in `missingChunks`, whose remediation
       // relaunches an agent that re-declares, forever. `gapsSuperseded`
       // below excludes same-shape records for exactly this reason.
+      //
+      // And as a CHUNK only when this plan carries it. `chunk` is read out of
+      // the launch prompt's text, so a record written against another
+      // chunking of this diff — `chunk 9 of 12` on a plan that now has two —
+      // declared an id nothing here plans, and admitting it reported a chunk
+      // that does not exist as not reviewed: `uncoverableChunks: [9]` beside
+      // `plannedChunks` 1 and 2. Same guard, other list — see
+      // `unplannedDeclarations` for why it still fails the gate.
       if (
         !chunkSatisfied(chunk, rec, (r) => !declaresOwnUncoverable(r, chunk))
       ) {
-        uncoverable.add(chunk);
+        if (plan.chunks.some((c) => c.id === chunk)) uncoverable.add(chunk);
+        else unplannedDeclared.add(chunk);
       }
       continue;
     }
@@ -1075,6 +1267,13 @@ export function coverageFromTranscripts(
   const missingChunks = planned.filter(
     (id) => !covered.has(id) && !uncoverable.has(id),
   );
+  // `check-coverage` prints its denominator from the plan, and the three
+  // sets below are what it counts against it — this is what proves they agree.
+  assertChunkPartition(planned, {
+    covered: [...covered],
+    missing: missingChunks,
+    uncoverable: [...uncoverable],
+  });
 
   // Prior-attempt records that clear the SAME certification bar as a live
   // launch — the resumed run's recovered work. The bar is deliberately the
@@ -1142,6 +1341,7 @@ export function coverageFromTranscripts(
       // no read can reach was not reviewed, and the verdict may not be Approve on
       // its strength. `compose-review` already caps on it; the report must agree.
       uncoverable.size === 0 &&
+      unplannedDeclared.size === 0 &&
       missingChunks.length === 0,
     agents: records.length,
     recoveredAgents,
@@ -1156,6 +1356,7 @@ export function coverageFromTranscripts(
     unreadBriefs,
     missingChunks,
     uncoverableChunks: [...uncoverable].sort((a, b) => a - b),
+    unplannedDeclarations: [...unplannedDeclared].sort((a, b) => a - b),
     budgetGaps,
     coveredChunks: [...covered].sort((a, b) => a - b),
     plannedChunks: plan.chunks.map((c) => ({
@@ -1164,6 +1365,7 @@ export function coverageFromTranscripts(
         .map((f) => f?.path)
         .filter((p): p is string => typeof p === 'string' && p !== ''),
     })),
+    selectionDrift: planSelectionDrift(plan),
   };
 }
 

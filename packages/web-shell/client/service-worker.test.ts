@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
+import { JSDOM } from 'jsdom';
 import { describe, expect, it, vi } from 'vitest';
 
 const source = readFileSync(new URL('./sw.js', import.meta.url), 'utf8');
@@ -157,6 +158,27 @@ describe('service worker navigation', () => {
     expect(html).toContain('Try again');
     expect(html).toContain('重试');
     expect(w.caches.open).not.toHaveBeenCalled();
+  });
+
+  it('reloads the current document and cancels Retry link navigation', async () => {
+    const w = worker();
+    w.fetch.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+    const event = w.fetchEvent('/session/123?workspace=review', {
+      mode: 'navigate',
+    });
+    const response: Response = await event.respondWith.mock.calls[0][0];
+    const dom = new JSDOM(await response.text());
+    const handler = dom.window.document
+      .querySelector('a')!
+      .getAttribute('onclick');
+    expect(handler).not.toBeNull();
+    const reload = vi.fn();
+    const result = runInNewContext(`(function () { ${handler} })()`, {
+      location: { reload },
+    });
+    expect(reload).toHaveBeenCalledOnce();
+    expect(result).toBe(false);
+    dom.window.close();
   });
 
   it('leaves subframe navigations to the browser network stack', () => {

@@ -46,8 +46,10 @@ const createSettings = (options?: {
 
 const createMockConfig = (overrides = {}) => ({
   getContentGeneratorConfig: vi.fn(() => ({ authType: undefined })),
+  getSubscriptionPlan: () => undefined,
   getModel: vi.fn(() => 'gemini-pro'),
   getModelDisplayName: vi.fn(() => 'Gemini Pro'),
+  getModelsConfig: () => ({ getModelDisplayName: () => 'Gemini Pro' }),
   getTargetDir: vi.fn(() => '/projects/qwen-code'),
   getMcpServers: vi.fn(() => ({})),
   getBlockedMcpServers: vi.fn(() => []),
@@ -88,6 +90,104 @@ const renderWithProviders = (
 };
 
 describe('<AppHeader />', () => {
+  it('keeps the selected executor model while an advisor runtime is active', () => {
+    const getModelDisplayName = vi.fn((model: string) => model);
+    const { lastFrame } = renderWithProviders(
+      createMockUIState({ currentModel: 'executor-model' }),
+      createSettings(),
+      createMockConfig({
+        getModelDisplayName: () => 'advisor-model',
+        getModelsConfig: () => ({ getModelDisplayName }),
+      }),
+    );
+    expect(lastFrame()).toContain('executor-model');
+    expect(lastFrame()).not.toContain('advisor-model');
+    expect(getModelDisplayName).toHaveBeenCalledWith('executor-model');
+  });
+
+  it.each(['plus', 'pro'] as const)(
+    'uses the real %s plan in the subscription header',
+    (plan) => {
+      const ui = renderWithProviders(
+        createMockUIState({ currentModel: 'qwen3.8-max' }),
+        createSettings(),
+        createMockConfig({
+          getContentGeneratorConfig: () => ({ authType: 'qwen-subscription' }),
+          getSubscriptionPlan: () => plan,
+          getModelsConfig: () => ({
+            getModelDisplayName: (model: string) => model,
+          }),
+        }),
+      );
+      expect(ui.lastFrame()).toContain(
+        `Qwen ${plan === 'pro' ? 'Pro' : 'Plus'} | [Qwen Subscription] qwen3.8-max`,
+      );
+      ui.unmount();
+    },
+  );
+
+  it('hides a stale plan when the active authentication is no longer subscription', () => {
+    const ui = renderWithProviders(
+      createMockUIState(),
+      createSettings(),
+      createMockConfig({
+        getContentGeneratorConfig: () => ({ authType: undefined }),
+        getSubscriptionPlan: () => 'pro',
+      }),
+    );
+    expect(ui.lastFrame()).not.toContain('Qwen Pro');
+    expect(ui.lastFrame()).not.toContain('[Qwen Subscription]');
+    ui.unmount();
+  });
+
+  it('omits the redundant subscription startup tip', () => {
+    const ui = renderWithProviders(
+      createMockUIState(),
+      createSettings({ hideTips: false }),
+      createMockConfig({
+        getContentGeneratorConfig: () => ({ authType: 'qwen-subscription' }),
+      }),
+    );
+    expect(ui.lastFrame()).not.toContain(
+      'Tip: Run /usage to see your plan usage.',
+    );
+    expect(ui.lastFrame()).not.toContain('Tips:');
+    ui.unmount();
+  });
+
+  it.each([
+    { hideTips: true, screenReader: false },
+    { hideTips: false, screenReader: true },
+  ])(
+    'hides the subscription usage tip when requested (%j)',
+    ({ hideTips, screenReader }) => {
+      const ui = renderWithProviders(
+        createMockUIState(),
+        createSettings({ hideTips }),
+        createMockConfig({
+          getContentGeneratorConfig: () => ({ authType: 'qwen-subscription' }),
+          getScreenReader: () => screenReader,
+        }),
+      );
+      expect(ui.lastFrame()).not.toContain(
+        'Tip: Run /usage to see your plan usage.',
+      );
+      ui.unmount();
+    },
+  );
+
+  it('retains the normal startup tip for other providers', () => {
+    const ui = renderWithProviders(
+      createMockUIState(),
+      createSettings({ hideTips: false }),
+    );
+    expect(ui.lastFrame()).toContain('Tips:');
+    expect(ui.lastFrame()).not.toContain(
+      'Tip: Run /usage to see your plan usage.',
+    );
+    ui.unmount();
+  });
+
   it('shows the working directory', () => {
     const { lastFrame } = renderWithProviders(createMockUIState());
     expect(lastFrame()).toContain('/projects/qwen-code');

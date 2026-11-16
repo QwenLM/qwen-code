@@ -15,6 +15,11 @@ import {
 } from '@qwen-code/sdk/daemon';
 import { App, type WebShellProps } from '../App';
 import {
+  WebShellNavigationBoundary,
+  useWebShellNavigation,
+  type WebShellUrlNavigationOptions,
+} from '../navigation';
+import {
   WEB_SHELL_HISTORY_PAGE_SIZE,
   WEB_SHELL_MAX_TRANSCRIPT_BLOCKS,
 } from '../constants/sessions';
@@ -26,6 +31,11 @@ import {
 import { WebShellThemeId, type WebShellTheme } from '../themeContext';
 import { Spinner } from './ui/spinner';
 import { WorkspaceUnavailableState } from './WorkspaceUnavailableState';
+import { useDaemonAvailabilityController } from '../daemon/availability-context.js';
+import {
+  hasManagedLocalTarget,
+  managedSelectionFromRoute,
+} from './managed/managed-session-storage';
 
 function surfaceTheme(theme: WebShellTheme | undefined): WebShellTheme {
   return theme ?? WebShellThemeId.Dark;
@@ -50,6 +60,8 @@ function withChrome(
 }
 
 interface WorkspaceSessionProviderProps {
+  viewHidden?: boolean;
+  urlNavigation?: WebShellUrlNavigationOptions;
   sessionId?: string;
   workspaceId?: string;
   workspaceCwd?: string;
@@ -64,6 +76,36 @@ interface WorkspaceSessionProviderProps {
 }
 
 export function WorkspaceSessionProvider(props: WorkspaceSessionProviderProps) {
+  if (!props.urlNavigation)
+    return <ResolvedWorkspaceSessionProvider {...props} />;
+  return (
+    <WebShellNavigationBoundary
+      options={props.urlNavigation}
+      externalTarget={{
+        sessionId: props.sessionId,
+        workspaceId: props.workspaceId,
+        workspaceCwd: props.workspaceCwd,
+        sessionContext: props.sessionContext,
+      }}
+      onSessionIdChange={props.webShellProps.onSessionIdChange}
+    >
+      {(target, onSessionIdChange) => (
+        <ResolvedWorkspaceSessionProvider
+          {...props}
+          sessionId={target.sessionId}
+          workspaceId={target.workspaceId}
+          workspaceCwd={target.workspaceCwd}
+          sessionContext={target.sessionContext}
+          webShellProps={{ ...props.webShellProps, onSessionIdChange }}
+        />
+      )}
+    </WebShellNavigationBoundary>
+  );
+}
+
+function ResolvedWorkspaceSessionProvider(
+  props: WorkspaceSessionProviderProps,
+) {
   const {
     sessionId,
     workspaceId,
@@ -150,6 +192,7 @@ export function WorkspaceSessionProvider(props: WorkspaceSessionProviderProps) {
 }
 
 function WorkspaceSessionProviderWorkspace({
+  viewHidden,
   sessionId,
   workspaceId,
   workspaceCwd,
@@ -162,8 +205,10 @@ function WorkspaceSessionProviderWorkspace({
   chromeLanguage,
   webShellProps: appProps,
 }: WorkspaceSessionProviderProps) {
+  const navigation = useWebShellNavigation();
   const webShellProps = withChrome(appProps, chromeTheme, chromeLanguage);
   const workspace = useWorkspace();
+  const availability = useDaemonAvailabilityController();
   const workspaceActions = useWorkspaceActions();
   const [usePrimaryNewSession, setUsePrimaryNewSession] = useState(false);
   const [registeredWorkspace, setRegisteredWorkspace] = useState<{
@@ -278,8 +323,24 @@ function WorkspaceSessionProviderWorkspace({
     lockWorkspaceCwd,
   ]);
 
+  // Managed 的工作区/会话由 managedAgentProvider 经宿主 HTTP provider 提供，不存在 daemon workspace/capabilities；
+  // 但这些门禁不能被「宿主注入了 provider」整体关掉——本组件在 App 之上，普通本地会话分支同样经过这里。
+  // 因此按 App 的同一份选择规则判定当前渲染的是不是 managed 视图（managed=1，或在默认为 managed home 的
+  // 页面且 URL 未写 managed=0）；本地会话目标（chat 页 + 会话 id）永远保留 daemon 门禁。
+  const managedProvided =
+    appProps.managedAgentProvider !== undefined &&
+    managedSelectionFromRoute(
+      navigation?.route,
+      hasManagedLocalTarget({
+        sessionId,
+        workspaceId,
+        workspaceCwd,
+        sessionContext,
+      }),
+    ).open;
   // Keep an unscoped session mounted when a later refresh fails.
   if (
+    !managedProvided &&
     (effectiveWorkspaceCwd ||
       effectiveWorkspaceId ||
       (effectiveSessionId && !workspace.capabilities)) &&
@@ -297,12 +358,17 @@ function WorkspaceSessionProviderWorkspace({
         theme={surfaceTheme(webShellProps.theme)}
         icon={<WifiOffIcon />}
         onAction={() => {
-          void workspace.refreshCapabilities?.().catch(() => {});
+          if (availability && availability.getSnapshot() !== 'available') {
+            void availability.check(true);
+          } else {
+            void workspace.refreshCapabilities?.().catch(() => {});
+          }
         }}
       />
     );
   }
   if (
+    !managedProvided &&
     (effectiveSessionId || effectiveWorkspaceCwd || effectiveWorkspaceId) &&
     !workspace.capabilities
   ) {
@@ -319,7 +385,11 @@ function WorkspaceSessionProviderWorkspace({
       </div>
     );
   }
-  if (lockWorkspaceCwd && registrationErrorCwd === lockWorkspaceCwd) {
+  if (
+    !managedProvided &&
+    lockWorkspaceCwd &&
+    registrationErrorCwd === lockWorkspaceCwd
+  ) {
     return (
       <WorkspaceUnavailableState
         title={t('workspace.loadFailed')}
@@ -334,7 +404,7 @@ function WorkspaceSessionProviderWorkspace({
       />
     );
   }
-  if (lockWorkspaceCwd && !targetWorkspace) {
+  if (!managedProvided && lockWorkspaceCwd && !targetWorkspace) {
     return (
       <div
         data-web-shell-root
@@ -348,7 +418,13 @@ function WorkspaceSessionProviderWorkspace({
       </div>
     );
   }
-  if ((effectiveWorkspaceCwd || effectiveWorkspaceId) && !targetWorkspace) {
+  // Managed 的工作区由 managedAgentProvider 经宿主 HTTP provider 提供（session.workspace 已 ready），
+  // 不存在 daemon targetWorkspace；沿用此门禁会把可用会话误报成「工作区不存在」。
+  if (
+    !managedProvided &&
+    (effectiveWorkspaceCwd || effectiveWorkspaceId) &&
+    !targetWorkspace
+  ) {
     return (
       <WorkspaceUnavailableState
         title={t('workspace.notFound')}
@@ -356,6 +432,7 @@ function WorkspaceSessionProviderWorkspace({
         actionLabel={t('session.new')}
         theme={surfaceTheme(webShellProps.theme)}
         onAction={() => {
+          navigation?.beginSessionNavigation();
           setUsePrimaryNewSession(true);
           webShellProps.onSessionIdChange?.(undefined, undefined);
         }}
@@ -390,18 +467,24 @@ function WorkspaceSessionProviderWorkspace({
       suppressOwnUserEcho
       restartEventStreamOnPrompt={restartSseOnPrompt}
     >
-      <App
-        {...appProps}
-        historyPageSize={historyPageSize}
-        restartSseOnPrompt={restartSseOnPrompt}
-        initialSelectedWorkspaceCwd={
-          !lockWorkspaceCwd && targetWorkspace ? targetWorkspace.cwd : undefined
-        }
-        lockedWorkspaceCwd={lockWorkspaceCwd ? targetWorkspace?.cwd : undefined}
-        lockedWorkspaceCapability={
-          lockWorkspaceCwd ? targetWorkspace : undefined
-        }
-      />
+      {!viewHidden && (
+        <App
+          {...appProps}
+          historyPageSize={historyPageSize}
+          restartSseOnPrompt={restartSseOnPrompt}
+          initialSelectedWorkspaceCwd={
+            !lockWorkspaceCwd && targetWorkspace
+              ? targetWorkspace.cwd
+              : undefined
+          }
+          lockedWorkspaceCwd={
+            lockWorkspaceCwd ? targetWorkspace?.cwd : undefined
+          }
+          lockedWorkspaceCapability={
+            lockWorkspaceCwd ? targetWorkspace : undefined
+          }
+        />
+      )}
     </DaemonSessionProvider>
   );
 }
@@ -427,8 +510,10 @@ function StandaloneSessionGate({
 }: WorkspaceSessionProviderProps & {
   attachedSessionId?: string;
 }) {
+  const navigation = useWebShellNavigation();
   const webShellProps = withChrome(appProps, chromeTheme, chromeLanguage);
   const workspace = useWorkspace();
+  const availability = useDaemonAvailabilityController();
   const [attempt, setAttempt] = useState(0);
   const [resolution, setResolution] = useState<StandaloneResolution>(() =>
     sessionId ? { status: 'loading' } : { status: 'ready' },
@@ -445,8 +530,28 @@ function StandaloneSessionGate({
       STANDALONE_SESSIONS_CAPABILITY,
     ) === true;
 
+  // Same selection rule as the render below: a managed view never resolves a
+  // daemon standalone session, even on a daemon that advertises the
+  // capability — otherwise the discarded resolution still issues lookup
+  // ladders in the background.
+  const managedProvided =
+    appProps.managedAgentProvider !== undefined &&
+    managedSelectionFromRoute(
+      navigation?.route,
+      hasManagedLocalTarget({
+        ...workspaceProviderProps,
+        sessionId,
+        sessionContext,
+      }),
+    ).open;
+
   useEffect(() => {
-    if (sessionContext?.kind !== 'standalone' || !standaloneSupported) return;
+    if (
+      sessionContext?.kind !== 'standalone' ||
+      !standaloneSupported ||
+      managedProvided
+    )
+      return;
     const generation = resolutionGenerationRef.current + 1;
     resolutionGenerationRef.current = generation;
     setResolutionSessionId(sessionId);
@@ -516,6 +621,7 @@ function StandaloneSessionGate({
     sessionId,
     sessionContext?.kind,
     standaloneSupported,
+    managedProvided,
     workspace.client,
   ]);
 
@@ -532,7 +638,8 @@ function StandaloneSessionGate({
   }
 
   const capabilities = workspace.capabilities;
-  if (workspace.status === 'error') {
+  // 与 workspace 分支同口径：只有 managed 视图才豁免 daemon 门禁，本地会话目标始终保留。
+  if (!managedProvided && workspace.status === 'error') {
     return (
       <WorkspaceUnavailableState
         title={t('session.loadFailed')}
@@ -541,12 +648,16 @@ function StandaloneSessionGate({
         theme={surfaceTheme(webShellProps.theme)}
         icon={<WifiOffIcon />}
         onAction={() => {
-          void workspace.refreshCapabilities?.().catch(() => {});
+          if (availability && availability.getSnapshot() !== 'available') {
+            void availability.check(true);
+          } else {
+            void workspace.refreshCapabilities?.().catch(() => {});
+          }
         }}
       />
     );
   }
-  if (!capabilities) {
+  if (!managedProvided && !capabilities) {
     return (
       <div
         data-web-shell-root
@@ -560,7 +671,7 @@ function StandaloneSessionGate({
       </div>
     );
   }
-  if (!standaloneSupported) {
+  if (!managedProvided && !standaloneSupported) {
     return (
       <WorkspaceUnavailableState
         title={t('session.standaloneUnavailable')}
@@ -569,6 +680,17 @@ function StandaloneSessionGate({
         icon={<WifiOffIcon />}
       />
     );
+  }
+  // A managed view carrying a standalone context (a bookmarked
+  // `?context=standalone&managed=1` on a host that does not mount
+  // ManagedStandaloneApp, or the managed→standalone transition window) never
+  // resolves a daemon standalone session: the resolver effect above carries
+  // the same `managedProvided` guard, so no lookup ladder runs even on a
+  // daemon that advertises the capability. Return before the resolution
+  // states so the view renders the managed page instead of stranding on
+  // "Resolving session…".
+  if (managedProvided) {
+    return <WorkspaceSessionProviderWorkspace {...routedProps} />;
   }
   if (attachedSessionId === sessionId) {
     return <WorkspaceSessionProviderWorkspace {...routedProps} />;
@@ -600,6 +722,7 @@ function StandaloneSessionGate({
         onAction={
           webShellProps.onSessionIdChange
             ? () => {
+                navigation?.beginSessionNavigation();
                 webShellProps.onSessionIdChange?.(
                   undefined,
                   undefined,

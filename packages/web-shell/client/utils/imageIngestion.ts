@@ -288,7 +288,6 @@ export function extractFileTransfer(
     fileCandidates: [],
     rejected: [],
   };
-  let hasUnavailableFileItem = false;
 
   if (dataTransfer.files.length > 0) {
     for (const file of Array.from(dataTransfer.files)) {
@@ -299,7 +298,6 @@ export function extractFileTransfer(
       if (item.kind !== 'file') continue;
       const file = item.getAsFile();
       if (!file) {
-        hasUnavailableFileItem = true;
         result.rejected.push({ reason: 'unavailable' });
         continue;
       }
@@ -307,15 +305,17 @@ export function extractFileTransfer(
     }
   }
 
-  return {
-    ...result,
-    claimed:
-      source === 'drop'
-        ? hasFileTransferPayload(dataTransfer)
-        : result.imageCandidates.length > 0 ||
-          result.fileCandidates.length > 0 ||
-          hasUnavailableFileItem,
-  };
+  const claimed = hasFileTransferPayload(dataTransfer);
+  if (
+    source === 'paste' &&
+    claimed &&
+    result.imageCandidates.length === 0 &&
+    result.fileCandidates.length === 0 &&
+    result.rejected.length === 0
+  ) {
+    result.rejected.push({ reason: 'unavailable' });
+  }
+  return { ...result, claimed };
 }
 
 function readImage(

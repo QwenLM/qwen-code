@@ -29,12 +29,19 @@ struct LinuxLineage {
 }
 
 impl LinuxLineage {
-    fn new() -> Result<Self, String> {
+    fn new(app_context: bool) -> Result<Self, String> {
         Ok(Self {
             revision: ObservationLineage::new(
                 format!("l_{}", uuid::Uuid::new_v4().simple()),
                 RETAINED_REVISIONS,
             )
+            .map(|lineage| {
+                if app_context {
+                    lineage.for_app()
+                } else {
+                    lineage
+                }
+            })
             .map_err(|error| error.to_string())?,
             owners: HashSet::new(),
         })
@@ -110,11 +117,11 @@ impl LinuxObservationRevisions {
         });
         if tree.backend == AtspiBackend::X11 {
             store.remove(&key);
-            return transient_full(&tree.nodes, FullResyncReason::UnsupportedBackend);
+            return transient_full(&tree.nodes, FullResyncReason::UnsupportedBackend, request);
         }
         if !tree.read_complete() {
             store.remove(&key);
-            return transient_full(&tree.nodes, FullResyncReason::CaptureIncomplete);
+            return transient_full(&tree.nodes, FullResyncReason::CaptureIncomplete, request);
         }
         let identities = tree
             .nodes
@@ -123,11 +130,11 @@ impl LinuxObservationRevisions {
             .collect::<Option<Vec<_>>>();
         let Some(identities) = identities else {
             store.remove(&key);
-            return transient_full(&tree.nodes, FullResyncReason::IdentityUnavailable);
+            return transient_full(&tree.nodes, FullResyncReason::IdentityUnavailable, request);
         };
         if identities.iter().collect::<HashSet<_>>().len() != identities.len() {
             store.remove(&key);
-            return transient_full(&tree.nodes, FullResyncReason::IdentityUnavailable);
+            return transient_full(&tree.nodes, FullResyncReason::IdentityUnavailable, request);
         }
         let owners = identities
             .iter()
@@ -140,11 +147,11 @@ impl LinuxObservationRevisions {
             .is_some_and(|lineage| !lineage.owners.is_empty() && lineage.owners != owners)
         {
             store.remove(&key);
-            return transient_full(&tree.nodes, FullResyncReason::ProviderInvalidated);
+            return transient_full(&tree.nodes, FullResyncReason::ProviderInvalidated, request);
         }
         if !store.lineages.contains_key(&key) {
             store.ensure_capacity();
-            store.lineages.insert(key.clone(), LinuxLineage::new()?);
+            store.lineages.insert(key.clone(), LinuxLineage::new(request.projection_version == cua_driver_core::observation_revision::APP_ACCESSIBILITY_PROJECTION_VERSION)?);
         }
         store.touch(&key);
         let lineage = store.lineages.get_mut(&key).expect("inserted above");
@@ -215,6 +222,7 @@ impl Default for LinuxObservationRevisions {
 fn transient_full(
     nodes: &[AtspiNode],
     reason: FullResyncReason,
+    request: &ObservationRevisionRequest,
 ) -> Result<ObservationRevisionResult, String> {
     let captured = nodes
         .iter()
@@ -231,6 +239,11 @@ fn transient_full(
         RETAINED_REVISIONS,
     )
     .map_err(|error| error.to_string())?;
+    if request.projection_version
+        == cua_driver_core::observation_revision::APP_ACCESSIBILITY_PROJECTION_VERSION
+    {
+        lineage = lineage.for_app();
+    }
     lineage
         .observe_unretained_full(captured, reason)
         .map_err(|error| error.to_string())
@@ -298,6 +311,27 @@ mod tests {
             truncated: false,
             incomplete_notes: Vec::new(),
         }
+    }
+
+    #[test]
+    fn app_projection_retains_numeric_ids_without_rendering_private_tokens() {
+        let revisions = LinuxObservationRevisions::new();
+        let capture = tree(vec![node("/button", "Save")]);
+        let mut req = request(None);
+        req.projection_version =
+            cua_driver_core::observation_revision::APP_ACCESSIBILITY_PROJECTION_VERSION.into();
+        let first = revisions
+            .observe(session(), 10, 20, 100, 10, &capture, &req)
+            .unwrap();
+        assert!(first.stable_element_ids);
+        assert!(first.text.contains("[0]"));
+        assert!(!first.text.contains("rv1:"));
+        req.base_revision_id = Some(first.revision_id.clone());
+        let second = revisions
+            .observe(session(), 10, 20, 100, 10, &capture, &req)
+            .unwrap();
+        assert_eq!(second.mode, ObservationMode::NoChange);
+        assert_eq!(second.nodes[0].element_id, first.nodes[0].element_id);
     }
 
     #[test]

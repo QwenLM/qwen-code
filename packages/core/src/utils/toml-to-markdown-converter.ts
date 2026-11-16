@@ -25,7 +25,11 @@ export interface TomlCommandFormat {
 export function convertTomlToMarkdown(tomlContent: string): string {
   let parsed: unknown;
   try {
-    parsed = toml.parse(tomlContent);
+    // `@iarna/toml` rejects U+FEFF, so a BOM that a Windows editor wrote makes
+    // an otherwise valid command file unparseable and the caller drops it.
+    // Strip one leading BOM, as the config readers do, and leave line endings
+    // and every other character alone.
+    parsed = toml.parse(tomlContent.replace(/^\uFEFF/, ''));
   } catch (error) {
     throw new Error(
       `Failed to parse TOML: ${error instanceof Error ? error.message : String(error)}`,
@@ -72,7 +76,11 @@ ${prompt}
  */
 export function isTomlFormat(content: string): boolean {
   try {
-    toml.parse(content);
+    // Strip one leading BOM so this detector agrees with
+    // `convertTomlToMarkdown`, which accepts BOM-prefixed files. Otherwise the
+    // natural `if (isTomlFormat(c)) convertTomlToMarkdown(c)` pair would skip a
+    // command a Windows editor saved with a BOM.
+    toml.parse(content.replace(/^\uFEFF/, ''));
     return true;
   } catch {
     return false;

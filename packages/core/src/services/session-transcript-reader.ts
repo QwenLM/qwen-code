@@ -5,6 +5,14 @@
  */
 
 import {
+  mergeHookExecution,
+  parseHookLifecycle,
+  summarizeHookExecutions,
+  type HookExecutionEntry,
+  type HookTurnPage,
+} from '../telemetry/hook-lifecycle-contract.js';
+
+import {
   restoreSessionSources,
   type SessionSourcesRestoreState,
 } from './session-sources.js';
@@ -16,20 +24,34 @@ import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import type { Content, Part } from '@google/genai';
 import { Storage } from '../config/storage.js';
+import { userPromptTimestamp } from './last-user-prompt-time.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { addDaemonRequestAttribute } from '../telemetry/daemon-tracing.js';
-import { readSessionTitleInfoFromFileSync } from '../utils/sessionStorageUtils.js';
+import {
+  localManagedSessionKey,
+  readSessionTitleInfoFromFileSync,
+} from '../utils/sessionStorageUtils.js';
+import { readManagedSessionRecordsAndTitle } from '../managed-runtime/managed-session-message-projection.js';
+import {
+  MANAGED_SESSION_HEADER_SUBTYPE,
+  ManagedSessionRecordError,
+} from '../managed-runtime/managed-session-records.js';
 import type { HistoryGap } from '../utils/conversation-chain.js';
 import { parseGoalStateRecordPayloadV2 } from '../goals/goal-reducer.js';
 import type { GoalStateRecordPayloadV2 } from '../goals/goal-protocol.js';
 import {
+  isValidSessionApprovalModePayload,
+  isValidSessionWorkflowModePayload,
   isValidSessionModelPayload,
   isTurnResultRecordPayload,
+  normalizeSessionApprovalModePayload,
   type AttributionSnapshotPayload,
   type ChatRecord,
   type ParentSessionRecordPayload,
   type SessionModelRecordPayload,
+  type SessionApprovalModeRecordPayload,
+  type SessionWorkflowModeRecordPayload,
   type SessionSourceRecordPayload,
   type TitleSource,
   type UiTelemetryRecordPayload,
@@ -59,6 +81,11 @@ import type { UiEvent } from '../telemetry/uiTelemetry.js';
 import type { AttributionSnapshot } from './commitAttribution.js';
 import type { FileHistorySnapshot } from './fileHistoryService.js';
 import { SessionFileHistoryAccumulator } from './session-file-history-state.js';
+import {
+  SessionExecutionEngineAccumulator,
+  type SessionExecutionEngine,
+  type SessionExecutionEngineState,
+} from './session-execution-engine.js';
 import {
   selectActiveSideArtifactRecordUuids,
   SessionArtifactSnapshotAccumulator,
@@ -180,6 +207,7 @@ export interface SessionTranscriptNavigationTurn {
   turnId: string;
   kind: SessionTranscriptNavigationTurnKind;
   promptId?: string;
+  historyPromptId?: string;
   timestamp?: string;
   label: string;
   detail?: string;
@@ -251,6 +279,7 @@ export interface SessionRestoreReplayPage {
   hasMore: boolean;
   anchorRecordId?: string;
   replay?: unknown;
+  branchPointsByAssistantUuid?: Readonly<Record<string, string>>;
   goalRecoverySourceUuid?: string;
   goalBootstrapRecords?: GoalRecoveryRecord[];
 }
@@ -265,13 +294,18 @@ export interface SessionRuntimeResumeState extends SessionSourcesRestoreState {
   recording: {
     lastCompletedUuid: string;
     turnParentUuids: Array<string | null>;
+    turnPromptIds?: Array<string | undefined>;
+    turnDaemonPromptIds?: Array<string | undefined>;
     customTitle?: string;
     titleSource?: TitleSource;
     parentSessionId?: string;
     sourceType?: string;
     sourceId?: string;
     sessionModel?: SessionModelRecordPayload;
+    sessionApprovalMode?: SessionApprovalModeRecordPayload;
+    sessionWorkflowMode?: SessionWorkflowModeRecordPayload;
     lastAssistantModel?: string;
+    executionEngine?: SessionExecutionEngine;
   };
   fileHistorySnapshots?: FileHistorySnapshot[];
   artifactSnapshot?: RebuiltSessionArtifactSnapshot;
@@ -287,7 +321,152 @@ export interface SessionRestoreProjection {
   startTime: string;
   lastUpdated: string;
   runtime: SessionRuntimeResumeState;
+  executionEngine?: SessionExecutionEngineState;
   replay?: SessionRestoreReplayPage;
+}
+
+interface ManagedSessionRestoreProjectionInput {
+  readonly sessionId: string;
+  readonly records: readonly ChatRecord[];
+  readonly replay: SessionRestoreReplaySelection;
+  readonly filePath: string;
+  readonly startTime: string;
+  readonly lastUpdated: string;
+  readonly executionEngine: SessionExecutionEngineState;
+  readonly fallbackLastCompletedUuid: string;
+  readonly customTitle?: string;
+  readonly titleSource?: TitleSource;
+}
+
+/** Rebuilds the existing runtime resume shape from a durable Managed journal. */
+function buildManagedSessionRestoreProjection(
+  input: ManagedSessionRestoreProjectionInput,
+): SessionRestoreProjection {
+  validateRestoreReplaySelection(input.replay);
+  const records = [...input.records];
+  const apiHistory = new SessionApiHistoryAccumulator();
+  const resumeTokenCounts = new ResumeTokenCountsAccumulator();
+  const turnState = new SessionTurnStateAccumulator(input.sessionId);
+  const fileHistory = new SessionFileHistoryAccumulator();
+  const uiTelemetryEvents: UiEvent[] = [];
+  const goalRecords: GoalRecoveryRecord[] = [];
+  let attributionSnapshot: AttributionSnapshot | undefined;
+  let lastAssistantModel: string | undefined;
+  let lastTokenCountsRecord: ChatRecord | undefined;
+  let sessionSource: SessionSourceRecordPayload | undefined;
+  for (const record of records) {
+    if (record.sessionId !== input.sessionId) {
+      throw new ManagedSessionRecordError(
+        'Managed Session projection contains a record from another session.',
+      );
+    }
+    turnState.addHint(getSessionTurnRecordHint(record, input.sessionId));
+    apiHistory.add(record);
+    try {
+      fileHistory.add(record);
+    } catch (error) {
+      // The sink admits any file_history_snapshot carrying a systemPayload
+      // and publishes it unvalidated, so a malformed batch does reach here;
+      // skip it as the Legacy dispatch path does rather than failing the
+      // whole restore.
+      debugLogger.warn(
+        `restore projection: skipping malformed file_history_snapshot: ${error}`,
+      );
+    }
+    if (isResumeTokenCountsCandidate(record)) lastTokenCountsRecord = record;
+    if (isGoalRecoveryCandidate(record)) {
+      const normalized = normalizeGoalRecoveryRecord(record);
+      if (normalized) goalRecords.push(normalized);
+    }
+    if (record.subtype === 'ui_telemetry') {
+      const uiEvent = (
+        record.systemPayload as UiTelemetryRecordPayload | undefined
+      )?.uiEvent;
+      if (
+        uiEvent &&
+        uiEvent['event.name'] !== 'request_lifecycle' &&
+        uiEvent['event.name'] !== 'tool_lifecycle' &&
+        uiEvent['event.name'] !== 'hook_lifecycle'
+      ) {
+        uiTelemetryEvents.push(uiEvent as UiEvent);
+      }
+    }
+    if (record.subtype === 'attribution_snapshot') {
+      const snapshot = (
+        record.systemPayload as AttributionSnapshotPayload | undefined
+      )?.snapshot;
+      if (snapshot && typeof snapshot === 'object') {
+        attributionSnapshot = snapshot;
+      }
+    }
+    // The last one, as a Legacy restore reads it.
+    if (record.type === 'system' && record.subtype === 'session_source') {
+      sessionSource = record.systemPayload as
+        | SessionSourceRecordPayload
+        | undefined;
+    }
+    if (
+      record.type === 'assistant' &&
+      typeof record.model === 'string' &&
+      record.model.trim()
+    ) {
+      lastAssistantModel = record.model;
+    }
+  }
+  if (lastTokenCountsRecord) resumeTokenCounts.add(lastTokenCountsRecord);
+  const turnStateValue = turnState.finish();
+  const goalRecovery = selectGoalRecoveryFromRecords(goalRecords);
+  const restoredTokenCounts = resumeTokenCounts.finish();
+  const restoredFileHistory = fileHistory.finish();
+  const runtime: SessionRuntimeResumeState = {
+    apiHistory: apiHistory.finish(),
+    ...(restoredTokenCounts ? { resumeTokenCounts: restoredTokenCounts } : {}),
+    uiTelemetryEvents,
+    ...(attributionSnapshot ? { attributionSnapshot } : {}),
+    recording: {
+      lastCompletedUuid:
+        records[records.length - 1]?.uuid ?? input.fallbackLastCompletedUuid,
+      turnParentUuids: turnStateValue.turnParentUuids,
+      turnPromptIds: turnStateValue.turnPromptIds,
+      turnDaemonPromptIds: turnStateValue.turnDaemonPromptIds,
+      ...(input.customTitle !== undefined
+        ? { customTitle: input.customTitle }
+        : {}),
+      ...(input.titleSource !== undefined
+        ? { titleSource: input.titleSource }
+        : {}),
+      ...(sessionSource?.sourceType !== undefined
+        ? { sourceType: sessionSource.sourceType }
+        : {}),
+      ...(sessionSource?.sourceId !== undefined
+        ? { sourceId: sessionSource.sourceId }
+        : {}),
+      ...(lastAssistantModel !== undefined ? { lastAssistantModel } : {}),
+      ...(input.executionEngine.status === 'verified' &&
+      input.executionEngine.recorded
+        ? { executionEngine: input.executionEngine.engine }
+        : {}),
+    },
+    goalRecords,
+    ...(goalRecovery.sourceUuid
+      ? { goalRecoverySourceUuid: goalRecovery.sourceUuid }
+      : {}),
+    ...(restoredFileHistory
+      ? { fileHistorySnapshots: restoredFileHistory }
+      : {}),
+    initialTurn: turnStateValue.initialTurn,
+    backgroundNotificationTaskIds: turnStateValue.backgroundNotificationTaskIds,
+  };
+  const replay = managedReplayPage(records, input.replay);
+  return {
+    sessionId: input.sessionId,
+    filePath: input.filePath,
+    startTime: input.startTime,
+    lastUpdated: input.lastUpdated,
+    runtime,
+    executionEngine: input.executionEngine,
+    ...(replay ? { replay } : {}),
+  };
 }
 
 export interface SessionLiveRestoreProjection
@@ -303,6 +482,18 @@ export interface SessionLiveRestoreProjection
 
 interface RestoreProjectionReadOptions {
   validateFirstRecord?: (record: ChatRecord) => boolean | Promise<boolean>;
+}
+
+interface LastUserPromptReadOptions {
+  preferCache?: boolean;
+  validateFirstRecord?: (
+    record: Pick<ChatRecord, 'sessionId' | 'cwd'>,
+  ) => boolean | Promise<boolean>;
+}
+
+interface LastUserPromptSnapshot {
+  lastUserPromptAt?: string;
+  firstRecordOwner?: Pick<ChatRecord, 'sessionId' | 'cwd'>;
 }
 
 interface SessionTranscriptFileIdentity {
@@ -339,6 +530,7 @@ interface AggregatedRecordReadContext {
 
 interface UuidIndexEntry {
   parentUuid: string | null;
+  lastUserPromptAt?: string;
   sessionIdMatchesFile: boolean;
   type: ChatRecord['type'];
   subtype?: TranscriptRecordInput['subtype'];
@@ -354,6 +546,7 @@ interface UuidIndexEntry {
   navigationTextSuppressed: boolean;
   assistantPreviewCandidate: boolean;
   turnResultPromptId?: string;
+  daemonPromptId?: string;
   segments: RecordSegment[];
 }
 
@@ -366,6 +559,7 @@ interface TranscriptNavigationTurnHint {
 }
 
 interface TranscriptIndex {
+  executionEngine: SessionExecutionEngineState;
   filePath: string;
   fileIdentity: SessionTranscriptFileIdentity;
   snapshotSize: number;
@@ -383,6 +577,12 @@ interface TranscriptIndex {
   lastUpdated: string;
   byUuid: Map<string, UuidIndexEntry>;
   branchPointsByAssistantUuid: ReadonlyMap<string, string>;
+  /**
+   * Present when the index was projected rather than scanned from the file.
+   * Such an index must not reach the index cache: its byte estimate does not
+   * account for these records.
+   */
+  projectedRecords?: ReadonlyMap<string, ChatRecord>;
 }
 
 interface CacheEntry {
@@ -390,6 +590,10 @@ interface CacheEntry {
   byteSize?: number;
   value?: TranscriptIndex;
   pending?: Promise<TranscriptIndex>;
+  hookTurns?: Map<
+    string,
+    Pick<HookTurnPage, 'executions' | 'summary' | 'coverage'>
+  >;
 }
 
 const INDEX_CACHE_MAX_ENTRIES = 32;
@@ -478,6 +682,43 @@ function recordRestoreSelectionAttributes(
 }
 
 const indexCache = new Map<string, CacheEntry>();
+interface LastUserPromptCacheEntry {
+  fileIdentity: SessionTranscriptFileIdentity;
+  size: number;
+  lastUpdated: string;
+  snapshot: Promise<LastUserPromptSnapshot>;
+}
+
+const lastUserPromptScopes = new Map<
+  string,
+  Map<string, LastUserPromptCacheEntry>
+>();
+const lastUserPromptUpdates = new Map<string, object>();
+const LAST_USER_PROMPT_CACHE_MAX_ENTRIES = 100_000;
+
+function promptTimeScope(filePath: string, workspaceCwd: string) {
+  const key = JSON.stringify([path.dirname(filePath), workspaceCwd]);
+  let entries = lastUserPromptScopes.get(key);
+  if (!entries) entries = new Map();
+  lastUserPromptScopes.delete(key);
+  lastUserPromptScopes.set(key, entries);
+  while (lastUserPromptScopes.size > 64) {
+    lastUserPromptScopes.delete(lastUserPromptScopes.keys().next().value!);
+  }
+  return entries;
+}
+
+function trimPromptTimeScopes(): void {
+  let count = [...lastUserPromptScopes.values()].reduce(
+    (sum, entries) => sum + entries.size,
+    0,
+  );
+  while (count > LAST_USER_PROMPT_CACHE_MAX_ENTRIES) {
+    const oldest = lastUserPromptScopes.keys().next().value!;
+    count -= lastUserPromptScopes.get(oldest)!.size;
+    lastUserPromptScopes.delete(oldest);
+  }
+}
 // Per-workspace HMAC signing keys are cached for the daemon's lifetime (keyed by
 // key-file path). Rotating a key file externally therefore requires a daemon
 // restart to take effect — the only in-process invalidation is the corrupt
@@ -1011,14 +1252,16 @@ function navigationDisplayText(text: string, systemPayload: unknown): string {
   return isUserPromptSubmitContextPartText(stripped) ? '' : stripped;
 }
 
-function navigationKindForRecord(
+export function navigationKindForRecord(
   record: ChatRecord,
 ): SessionTranscriptNavigationTurnKind | undefined {
   if (record.type !== 'user') return undefined;
   if (
     record.subtype === 'goal_runtime' ||
     record.subtype === 'notification' ||
-    record.subtype === 'mid_turn_user_message'
+    record.subtype === 'mid_turn_user_message' ||
+    record.subtype === 'agent_mention' ||
+    record.subtype === 'agent_message'
   ) {
     return undefined;
   }
@@ -1241,6 +1484,9 @@ const REPLAY_MID_TURN_USER_SUBTYPES: ReadonlySet<string> = new Set([
   'notification',
   'cron',
   'mid_turn_user_message',
+  // Session multi-agent records render inline and never open a turn.
+  'agent_mention',
+  'agent_message',
 ] satisfies ReadonlyArray<NonNullable<ChatRecord['subtype']>>);
 
 export function isReplayTurnStartType(
@@ -1629,12 +1875,18 @@ function estimateIndexCacheBytes(index: TranscriptIndex): number {
       entry.segments.length * INDEX_CONTAINER_SLOT_BYTES +
       estimateStringBytes(uuid) +
       estimateStringBytes(entry.parentUuid) +
+      estimateStringBytes(entry.lastUserPromptAt) +
       estimateStringBytes(entry.type) +
       estimateStringBytes(entry.subtype) +
       estimateStringBytes(entry.navigationKind) +
       estimateStringBytes(entry.turnResultPromptId) +
+      estimateStringBytes(entry.daemonPromptId) +
       estimateStringBytes(entry.turnHint.turnParentUuid) +
+      estimateStringBytes(entry.turnHint.turnPromptId) +
+      estimateStringBytes(entry.turnHint.turnDaemonPromptId) +
       estimateStringBytes(entry.turnHint.backgroundNotificationTaskId) +
+      estimateStringBytes(entry.turnHint.hookTurn?.promptId) +
+      estimateStringBytes(entry.turnHint.hookTurn?.parentUuid) +
       entry.segments.length * INDEX_SEGMENT_BYTES;
   }
   for (const turn of index.navigationTurns) {
@@ -1889,6 +2141,9 @@ async function withAggregatedRecordReadContext<T>(
     handle,
     scheduler: new CooperativeReadScheduler(),
     lineCache: {},
+    ...(index.projectedRecords
+      ? { preloadedRecords: new Map(index.projectedRecords) }
+      : {}),
   };
   try {
     return await callback(context);
@@ -1929,6 +2184,63 @@ async function readGoalStatePayloadBeforePosition(
   return parseGoalStateRecordPayloadV2(record?.systemPayload);
 }
 
+function lastUserPromptFromIndex(index: TranscriptIndex): string | undefined {
+  for (let position = index.replayUuids.length - 1; position >= 0; position--) {
+    const timestamp = index.byUuid.get(
+      index.replayUuids[position]!,
+    )?.lastUserPromptAt;
+    if (timestamp !== undefined) return timestamp;
+  }
+  return undefined;
+}
+
+/**
+ * The index entry for one record's first fragment.
+ *
+ * Shared so a projection-backed index answers navigation, goal and turn
+ * questions exactly the way the physical scanner does; two copies of this field
+ * list would drift and give a Managed session a different history than a legacy
+ * one.
+ */
+function newIndexEntry(
+  record: ChatRecord,
+  sessionId: string,
+  segments: RecordSegment[],
+): UuidIndexEntry {
+  const navigationKind = navigationKindForRecord(record);
+  return {
+    parentUuid: record.parentUuid,
+    lastUserPromptAt: userPromptTimestamp(record),
+    sessionIdMatchesFile: record.sessionId === sessionId,
+    type: record.type,
+    ...(record.subtype !== undefined ? { subtype: record.subtype } : {}),
+    inherited: record.forkedFrom !== undefined,
+    sideTaskSource:
+      record.type === 'system' &&
+      record.subtype === 'session_source' &&
+      isObjectRecord(record.systemPayload) &&
+      record.systemPayload['sourceType'] === 'side_task',
+    apiHistoryCompressionCandidate: isApiHistoryCompressionCandidate(record),
+    resumeTokenCountsCandidate: isResumeTokenCountsCandidate(record),
+    attributionSnapshotCandidate: isAttributionSnapshotCandidate(record),
+    goalRecoveryCandidate: isGoalRecoveryCandidate(record),
+    turnHint: getSessionTurnRecordHint(record, sessionId),
+    ...(navigationKind ? { navigationKind } : {}),
+    ...(typeof record.daemonPromptId === 'string'
+      ? { daemonPromptId: record.daemonPromptId }
+      : {}),
+    navigationTextSuppressed:
+      record.subtype === 'cron' ||
+      projectUserTranscriptForDisplay(record).displayText !== undefined,
+    assistantPreviewCandidate: isAssistantPreviewCandidate(record),
+    ...(record.subtype === 'turn_result' &&
+    isTurnResultRecordPayload(record.systemPayload)
+      ? { turnResultPromptId: record.systemPayload.promptId }
+      : {}),
+    segments,
+  };
+}
+
 async function buildIndex(params: {
   filePath: string;
   fileIdentity: SessionTranscriptFileIdentity;
@@ -1937,6 +2249,7 @@ async function buildIndex(params: {
 }): Promise<TranscriptIndex> {
   const { filePath, fileIdentity, snapshotSize, lastUpdated } = params;
   const sessionId = path.basename(filePath, '.jsonl');
+  const executionEngine = new SessionExecutionEngineAccumulator(sessionId);
   if (snapshotSize > SESSION_TRANSCRIPT_MAX_INDEX_BYTES) {
     debugLogger.warn(
       `index rejected: snapshot too large session=${sessionId} ` +
@@ -1971,13 +2284,7 @@ async function buildIndex(params: {
         const text = line.toString('utf8').trim();
         if (text.length === 0) return;
         let fragmentIndex = 0;
-        const parsed = jsonl.parseLineTolerantWithIntegrity<unknown>(
-          text,
-          filePath,
-        );
-        sourceReadComplete &&= parsed.complete;
-        for (const value of parsed.records) {
-          const record = validateTranscriptRecord(value).record;
+        for (const { record } of executionEngine.parseLine(text, filePath)) {
           if (!record) {
             sourceReadComplete = false;
             continue;
@@ -1986,11 +2293,6 @@ async function buildIndex(params: {
             firstRecordUuid = record.uuid;
             firstRecordTimestamp = record.timestamp;
           }
-          const sideTaskSource =
-            record.type === 'system' &&
-            record.subtype === 'session_source' &&
-            isObjectRecord(record.systemPayload) &&
-            record.systemPayload['sourceType'] === 'side_task';
           if (isTranscriptConversationRecord(record)) {
             appendBranchPointRecord(
               branchPointRecords,
@@ -2043,38 +2345,8 @@ async function buildIndex(params: {
             ).countsAsUserPrompt;
           } else {
             const chatRecord = record as unknown as ChatRecord;
-            const navigationKind = navigationKindForRecord(chatRecord);
-            const navigationTextSuppressed =
-              chatRecord.subtype === 'cron' ||
-              projectUserTranscriptForDisplay(chatRecord).displayText !==
-                undefined;
-            byUuid.set(record.uuid, {
-              parentUuid: record.parentUuid,
-              sessionIdMatchesFile: record.sessionId === sessionId,
-              type: record.type,
-              ...(record.subtype !== undefined
-                ? { subtype: record.subtype }
-                : {}),
-              inherited: record.forkedFrom !== undefined,
-              sideTaskSource,
-              apiHistoryCompressionCandidate:
-                isApiHistoryCompressionCandidate(chatRecord),
-              resumeTokenCountsCandidate:
-                isResumeTokenCountsCandidate(chatRecord),
-              attributionSnapshotCandidate:
-                isAttributionSnapshotCandidate(chatRecord),
-              goalRecoveryCandidate: isGoalRecoveryCandidate(chatRecord),
-              turnHint: getSessionTurnRecordHint(chatRecord, sessionId),
-              ...(navigationKind ? { navigationKind } : {}),
-              navigationTextSuppressed,
-              assistantPreviewCandidate:
-                isAssistantPreviewCandidate(chatRecord),
-              ...(record.subtype === 'turn_result' &&
-              isTurnResultRecordPayload(record.systemPayload)
-                ? { turnResultPromptId: record.systemPayload.promptId }
-                : {}),
-              segments: [segment],
-            });
+            const entry = newIndexEntry(chatRecord, sessionId, [segment]);
+            byUuid.set(record.uuid, entry);
           }
         }
       },
@@ -2085,6 +2357,7 @@ async function buildIndex(params: {
     }
     throw error;
   }
+  sourceReadComplete &&= executionEngine.sourceComplete;
 
   for (const [uuid, entry] of byUuid) {
     if (!entry.sessionIdMatchesFile) {
@@ -2141,6 +2414,7 @@ async function buildIndex(params: {
         turnId: uuid,
         replayPosition: position,
         kind: entry.navigationKind,
+        ...(entry.daemonPromptId ? { promptId: entry.daemonPromptId } : {}),
       };
       entry.navigationOrdinal = navigationTurns.length;
       navigationTurns.push(turn);
@@ -2160,7 +2434,7 @@ async function buildIndex(params: {
       if (targetTurn) targetTurn.finalAssistantRecordId = uuid;
     }
     if (entry?.turnResultPromptId && currentPromptTurn) {
-      currentPromptTurn.promptId = entry.turnResultPromptId;
+      currentPromptTurn.promptId ??= entry.turnResultPromptId;
       currentPromptTurn = undefined;
     }
   }
@@ -2192,6 +2466,12 @@ async function buildIndex(params: {
   await indexBuildCompleteHookForTest?.(filePath);
 
   return {
+    executionEngine: executionEngine.finish({
+      filePath,
+      ...fileIdentity,
+      size: snapshotSize,
+      lastUpdated,
+    }),
     filePath,
     fileIdentity,
     snapshotSize,
@@ -2376,6 +2656,7 @@ async function hasSnapshotSignature(
   fileIdentity: SessionTranscriptFileIdentity,
   snapshotSize: number,
   lastUpdated: string,
+  allowAppend = false,
 ): Promise<boolean> {
   let stats: fs.Stats;
   try {
@@ -2385,13 +2666,82 @@ async function hasSnapshotSignature(
     throw error;
   }
   return (
-    stats.size === snapshotSize &&
+    (stats.size === snapshotSize ||
+      (allowAppend && stats.size > snapshotSize)) &&
     sameFileIdentity(fileIdentityFromStats(stats), fileIdentity) &&
-    new Date(stats.mtimeMs).toISOString() === lastUpdated
+    ((allowAppend && stats.size > snapshotSize) ||
+      new Date(stats.mtimeMs).toISOString() === lastUpdated)
   );
 }
 
+export async function readSessionTranscriptSnapshot(
+  filePath: string,
+  sessionId: string,
+  collectRecords = true,
+): Promise<
+  | {
+      records: ChatRecord[];
+      firstRecord?: ChatRecord;
+      executionEngine: SessionExecutionEngineState;
+      stats: fs.Stats;
+      /** False when any line did not parse whole. */
+      sourceReadComplete: boolean;
+    }
+  | undefined
+> {
+  let stats: fs.Stats;
+  try {
+    stats = await fsp.stat(filePath);
+  } catch (error) {
+    if (isFileMissingError(error)) return undefined;
+    throw error;
+  }
+  if (!stats.isFile()) {
+    throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+  }
+  const fileIdentity = fileIdentityFromStats(stats);
+  const lastUpdated = new Date(stats.mtimeMs).toISOString();
+  const owner = new SessionExecutionEngineAccumulator(sessionId);
+  const records: ChatRecord[] = [];
+  let firstRecord: ChatRecord | undefined;
+  await forEachLineInSnapshot(filePath, stats.size, (line) => {
+    for (const { value } of owner.parseLine(
+      line.toString('utf8').trim(),
+      filePath,
+    )) {
+      firstRecord ??= value as ChatRecord;
+      if (collectRecords) records.push(value as ChatRecord);
+    }
+  });
+  if (
+    !(await hasSnapshotSignature(
+      filePath,
+      fileIdentity,
+      stats.size,
+      lastUpdated,
+    ))
+  ) {
+    throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+  }
+  return {
+    records,
+    firstRecord,
+    stats,
+    sourceReadComplete: owner.sourceComplete,
+    executionEngine: owner.finish({
+      filePath,
+      ...fileIdentity,
+      size: stats.size,
+      lastUpdated,
+    }),
+  };
+}
+
 function offerFreshIndexToCache(index: TranscriptIndex): void {
+  // Projected indexes are only built for a page request and their byte
+  // estimate ignores `projectedRecords`. Caching one would both inflate the
+  // 64MB budget and serve wrapper-free pages from the physical-index cache.
+  if (index.projectedRecords !== undefined) return;
   pruneCache();
   const key = makeCacheKey(
     index.filePath,
@@ -2441,6 +2791,198 @@ function selectArtifactUuids(index: TranscriptIndex): string[] {
   );
 }
 
+// Null prototype: record uuids are untrusted, and '__proto__' would silently
+// drop the entry on a plain object.
+function branchPointsForRecords(
+  index: TranscriptIndex,
+  records: readonly ChatRecord[],
+): Record<string, string> | undefined {
+  let branchPoints: Record<string, string> | undefined;
+  for (const record of records) {
+    const checkpointUuid = index.branchPointsByAssistantUuid.get(record.uuid);
+    if (checkpointUuid !== undefined) {
+      (branchPoints ??= Object.create(null))[record.uuid] = checkpointUuid;
+    }
+  }
+  return branchPoints;
+}
+
+function indexHasManagedHeader(index: TranscriptIndex): boolean {
+  return index.physicalRecords.some(
+    (record) => record.subtype === MANAGED_SESSION_HEADER_SUBTYPE,
+  );
+}
+
+/**
+ * Builds a replay page over projected records.
+ *
+ * There is nothing to select by uuid here: the projection is already the
+ * committed history in order, so the selection is a suffix of it. Inherited
+ * history has nothing to hide either -- forking a Managed session is refused, so
+ * no record in the log belongs to another session.
+ */
+function managedReplayPage(
+  records: ChatRecord[],
+  selection: SessionRestoreReplaySelection,
+): SessionRestoreReplayPage | undefined {
+  if (selection.kind === 'none') return undefined;
+  const selected =
+    selection.kind === 'recent' ? records.slice(-selection.limit) : records;
+  const hasMore = selected.length < records.length;
+  return {
+    records: selected,
+    gaps: [],
+    hasMore,
+    ...(hasMore && selected[0] ? { anchorRecordId: selected[0].uuid } : {}),
+  };
+}
+
+/**
+ * Derives navigation turns from projected records.
+ *
+ * The physical log of a Managed session holds only wrapper records, which carry
+ * no navigation kind, so deriving turns from the index would report a session
+ * with history as having no turns at all. The rules mirror the index builder's:
+ * the projection is the replay, so a record's position in it is its replay
+ * position.
+ */
+function managedNavigationTurns(
+  records: readonly ChatRecord[],
+): TranscriptNavigationTurnHint[] {
+  const turns: TranscriptNavigationTurnHint[] = [];
+  let currentPromptTurn: TranscriptNavigationTurnHint | undefined;
+  let currentRealtimeTurn: TranscriptNavigationTurnHint | undefined;
+  for (const [position, record] of records.entries()) {
+    const navigationKind = navigationKindForRecord(record);
+    if (navigationKind) {
+      const turn: TranscriptNavigationTurnHint = {
+        turnId: record.uuid,
+        replayPosition: position,
+        kind: navigationKind,
+        ...(typeof record.daemonPromptId === 'string' && record.daemonPromptId
+          ? { promptId: record.daemonPromptId }
+          : {}),
+      };
+      turns.push(turn);
+      if (navigationKind === 'realtime') {
+        currentRealtimeTurn = turn;
+      } else {
+        currentPromptTurn = turn;
+        currentRealtimeTurn = undefined;
+      }
+      continue;
+    }
+    if (isAssistantPreviewCandidate(record)) {
+      const targetTurn =
+        record.subtype === 'realtime_message'
+          ? currentRealtimeTurn
+          : currentPromptTurn;
+      if (targetTurn) targetTurn.finalAssistantRecordId = record.uuid;
+    }
+    if (
+      record.subtype === 'turn_result' &&
+      isTurnResultRecordPayload(record.systemPayload) &&
+      currentPromptTurn
+    ) {
+      currentPromptTurn.promptId ??= record.systemPayload.promptId;
+      currentPromptTurn = undefined;
+    }
+  }
+  return turns;
+}
+
+/**
+ * Projections of the snapshots the index cache still holds.
+ *
+ * Weakly keyed so it inherits that cache's invalidation exactly: a new file
+ * identity or snapshot size builds a new index, which misses here.
+ */
+const managedProjections = new WeakMap<
+  TranscriptIndex,
+  {
+    readonly records: ChatRecord[];
+    readonly titleInfo: { title?: string; source?: 'auto' | 'manual' };
+  }
+>();
+
+/**
+ * An index over projected records, shaped like the physical one.
+ *
+ * Selection, navigation anchors, goal positions and branch points all read the
+ * index rather than the file, so giving the projection the same shape is what
+ * lets paging work on a Managed log without a second copy of those rules. The
+ * snapshot identity stays the physical one: the turn reader issues snapshots
+ * from it, and a client anchors a page with them.
+ */
+function managedPageIndex(
+  index: TranscriptIndex,
+  records: ChatRecord[],
+): TranscriptIndex {
+  const sessionId = path.basename(index.filePath, '.jsonl');
+  const byUuid = new Map<string, UuidIndexEntry>();
+  const branchPointRecords = new Map<string, BranchPointRecord>();
+  const goalStatePositions: number[] = [];
+  const projectedRecords = new Map<string, ChatRecord>();
+  for (const [position, record] of records.entries()) {
+    if (
+      validateTranscriptRecord(record as unknown as TranscriptRecordInput)
+        .record === undefined ||
+      record.sessionId !== sessionId
+    ) {
+      debugLogger.warn(
+        `projected record rejected session=${sessionId} position=${position}`,
+      );
+      throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+    }
+    // The projection is already the whole record, so the segment carries no
+    // offset to read from; its length is what the page byte budget measures.
+    const entry = newIndexEntry(record, sessionId, [
+      {
+        offset: 0,
+        length: Buffer.byteLength(JSON.stringify(record), 'utf8'),
+        sequence: position,
+        fragmentIndex: 0,
+      },
+    ]);
+    byUuid.set(record.uuid, entry);
+    projectedRecords.set(record.uuid, record);
+    appendBranchPointRecord(branchPointRecords, record);
+    if (entry.type === 'system' && entry.subtype === 'goal_state') {
+      goalStatePositions.push(position);
+    }
+  }
+  const navigationTurns = managedNavigationTurns(records);
+  for (const [ordinal, turn] of navigationTurns.entries()) {
+    const entry = byUuid.get(turn.turnId);
+    if (entry) {
+      entry.navigationOrdinal = ordinal;
+    }
+  }
+  const replayUuids = records.map((record) => record.uuid);
+  return {
+    ...index,
+    runtimeUuids: replayUuids,
+    replayUuids,
+    navigationTurns,
+    goalStatePositions,
+    // The committed prefix is contiguous by construction, so a projected page
+    // never reports a hole the way a broken physical chain does.
+    gaps: [],
+    byUuid,
+    branchPointsByAssistantUuid: new Map(
+      [
+        ...resolveBranchPoints(
+          replayUuids.flatMap((uuid) => {
+            const record = branchPointRecords.get(uuid);
+            return record ? [record] : [];
+          }),
+        ).values(),
+      ].map((point) => [point.assistantRecordUuid, point.checkpointUuid]),
+    ),
+    projectedRecords,
+  };
+}
+
 export class SessionTranscriptReader {
   private readonly storage: Storage;
 
@@ -2452,7 +2994,10 @@ export class SessionTranscriptReader {
     this.storage = new Storage(workspaceCwd, runtimeBaseDir);
   }
 
-  getSessionFilePath(sessionId: string): string {
+  getSessionFilePath(
+    sessionId: string,
+    archiveState: 'active' | 'archived' = 'active',
+  ): string {
     if (!SESSION_TRANSCRIPT_SESSION_ID_PATTERN.test(sessionId)) {
       debugLogger.debug(`invalid session id for transcript read: ${sessionId}`);
       throw makeSessionTranscriptNotFoundError(sessionId);
@@ -2460,8 +3005,188 @@ export class SessionTranscriptReader {
     return path.join(
       this.storage.getProjectDir(),
       'chats',
+      ...(archiveState === 'archived' ? ['archive'] : []),
       `${sessionId}.jsonl`,
     );
+  }
+
+  async getLastUserPromptAt(
+    sessionId: string,
+    archiveState: 'active' | 'archived' = 'active',
+    readOptions: LastUserPromptReadOptions = {},
+  ): Promise<string | undefined> {
+    const filePath = this.getSessionFilePath(sessionId, archiveState);
+    let lastUserPromptCache = promptTimeScope(filePath, this.workspaceCwd);
+    const key = JSON.stringify([filePath, this.workspaceCwd]);
+    const warm = readOptions.preferCache
+      ? lastUserPromptCache.get(key)
+      : undefined;
+    if (warm) {
+      let snapshot = await warm.snapshot;
+      const current = promptTimeScope(filePath, this.workspaceCwd).get(key);
+      if (current && current !== warm) snapshot = await current.snapshot;
+      return readOptions.validateFirstRecord &&
+        (!snapshot.firstRecordOwner ||
+          !(await readOptions.validateFirstRecord(snapshot.firstRecordOwner)))
+        ? undefined
+        : snapshot.lastUserPromptAt;
+    }
+    const stats = await fsp.stat(filePath);
+    lastUserPromptCache = promptTimeScope(filePath, this.workspaceCwd);
+    const fileIdentity = fileIdentityFromStats(stats);
+    const lastUpdated = new Date(stats.mtimeMs).toISOString();
+    const cached = lastUserPromptCache.get(key);
+    if (
+      cached &&
+      fileIdentity.ino === 0 &&
+      cached.fileIdentity.ino === 0 &&
+      (stats.size !== cached.size || lastUpdated !== cached.lastUpdated)
+    )
+      return undefined;
+    if (
+      cached &&
+      sameFileIdentity(cached.fileIdentity, fileIdentity) &&
+      stats.size >= cached.size &&
+      (stats.size !== cached.size || lastUpdated === cached.lastUpdated)
+    ) {
+      lastUserPromptCache.delete(key);
+      lastUserPromptCache.set(key, cached);
+      let snapshot = await cached.snapshot;
+      const current = promptTimeScope(filePath, this.workspaceCwd).get(key);
+      if (current && current !== cached) snapshot = await current.snapshot;
+      cached.size = stats.size;
+      cached.lastUpdated = lastUpdated;
+      return readOptions.validateFirstRecord &&
+        (!snapshot.firstRecordOwner ||
+          !(await readOptions.validateFirstRecord(snapshot.firstRecordOwner)))
+        ? undefined
+        : snapshot.lastUserPromptAt;
+    }
+    if (stats.size > SESSION_TRANSCRIPT_MAX_INDEX_BYTES) return undefined;
+    const pending = (async (): Promise<LastUserPromptSnapshot> => {
+      let index: TranscriptIndex;
+      try {
+        index = await getCachedIndex({
+          filePath,
+          fileIdentity,
+          snapshotSize: stats.size,
+          lastUpdated,
+        });
+      } catch (error) {
+        if (
+          error instanceof EmptySessionTranscriptError &&
+          (await hasSnapshotSignature(
+            filePath,
+            fileIdentity,
+            stats.size,
+            lastUpdated,
+            true,
+          ))
+        )
+          return {};
+        throw error;
+      }
+      const [firstRecord] = await readAggregatedRecords(index, [
+        index.firstRecordUuid,
+      ]);
+      if (!firstRecord)
+        throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+      const effective = indexHasManagedHeader(index)
+        ? managedPageIndex(
+            index,
+            await this.readManagedRecords(sessionId, index, {}),
+          )
+        : index;
+      const timestamp = lastUserPromptFromIndex(effective);
+      if (
+        !(await hasSnapshotSignature(
+          filePath,
+          fileIdentity,
+          stats.size,
+          lastUpdated,
+          true,
+        ))
+      ) {
+        throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+      }
+      return {
+        lastUserPromptAt: timestamp,
+        firstRecordOwner: {
+          sessionId: firstRecord.sessionId,
+          cwd: firstRecord.cwd,
+        },
+      };
+    })();
+    const entry = {
+      fileIdentity,
+      size: stats.size,
+      lastUpdated,
+      snapshot: pending,
+    };
+    lastUserPromptCache.set(key, entry);
+    trimPromptTimeScopes();
+    let snapshot: LastUserPromptSnapshot;
+    try {
+      snapshot = await pending;
+      const current = promptTimeScope(filePath, this.workspaceCwd).get(key);
+      if (current && current !== entry) snapshot = await current.snapshot;
+    } catch (error) {
+      const currentScope = promptTimeScope(filePath, this.workspaceCwd);
+      if (currentScope.get(key) === entry) currentScope.delete(key);
+      throw error;
+    }
+    return readOptions.validateFirstRecord &&
+      (!snapshot.firstRecordOwner ||
+        !(await readOptions.validateFirstRecord(snapshot.firstRecordOwner)))
+      ? undefined
+      : snapshot.lastUserPromptAt;
+  }
+
+  invalidateLastUserPromptAt(sessionId: string): void {
+    for (const state of ['active', 'archived'] as const) {
+      const filePath = this.getSessionFilePath(sessionId, state);
+      const key = JSON.stringify([filePath, this.workspaceCwd]);
+      lastUserPromptUpdates.delete(key);
+      promptTimeScope(filePath, this.workspaceCwd).delete(key);
+    }
+  }
+
+  async setLastUserPromptAt(
+    sessionId: string,
+    timestamp: string | undefined,
+  ): Promise<void> {
+    const filePath = this.getSessionFilePath(sessionId);
+    let lastUserPromptCache = promptTimeScope(filePath, this.workspaceCwd);
+    const key = JSON.stringify([filePath, this.workspaceCwd]);
+    if (timestamp === undefined) {
+      this.invalidateLastUserPromptAt(sessionId);
+      return;
+    }
+    const update = {};
+    lastUserPromptUpdates.set(key, update);
+    try {
+      const stats = await fsp.stat(filePath);
+      if (lastUserPromptUpdates.get(key) !== update) return;
+      lastUserPromptCache = promptTimeScope(filePath, this.workspaceCwd);
+      lastUserPromptCache.delete(key);
+      lastUserPromptCache.set(key, {
+        fileIdentity: fileIdentityFromStats(stats),
+        size: stats.size,
+        lastUpdated: new Date(stats.mtimeMs).toISOString(),
+        snapshot: Promise.resolve({
+          lastUserPromptAt: timestamp,
+          firstRecordOwner: { sessionId, cwd: this.workspaceCwd },
+        }),
+      });
+      trimPromptTimeScopes();
+    } catch (error) {
+      if (lastUserPromptUpdates.get(key) === update)
+        promptTimeScope(filePath, this.workspaceCwd).delete(key);
+      throw error;
+    } finally {
+      if (lastUserPromptUpdates.get(key) === update)
+        lastUserPromptUpdates.delete(key);
+    }
   }
 
   private decodeSnapshot(snapshot: string): SessionTranscriptSnapshotState {
@@ -2478,24 +3203,14 @@ export class SessionTranscriptReader {
     );
   }
 
-  async readTurnIndexPage(
+  private async readTurnIndexSnapshot(
     sessionId: string,
-    options: SessionTranscriptReadTurnIndexOptions = {},
-  ): Promise<SessionTranscriptTurnIndexPage> {
-    const limit = normalizeLimit(options.limit);
-    if (options.start !== undefined && options.snapshot === undefined) {
-      throw new InvalidSessionTranscriptCursorError();
-    }
-    if (
-      options.start !== undefined &&
-      !isFiniteNonNegativeInteger(options.start)
-    ) {
-      throw new RangeError('Transcript turn index start must be non-negative');
-    }
+    encodedSnapshot?: string,
+  ) {
     const snapshot =
-      options.snapshot === undefined
+      encodedSnapshot === undefined
         ? undefined
-        : this.decodeSnapshot(options.snapshot);
+        : this.decodeSnapshot(encodedSnapshot);
     if (snapshot && snapshot.sessionId !== sessionId) {
       throw new InvalidSessionTranscriptCursorError();
     }
@@ -2507,7 +3222,10 @@ export class SessionTranscriptReader {
     const fileIdentity = snapshot?.fileIdentity ?? currentIdentity;
     if (
       stats.size < snapshotSize ||
-      !sameFileIdentity(currentIdentity, fileIdentity)
+      !sameFileIdentity(currentIdentity, fileIdentity) ||
+      (snapshot &&
+        stats.size === snapshotSize &&
+        new Date(stats.mtimeMs).toISOString() !== snapshot.lastUpdated)
     ) {
       throw new SessionTranscriptSnapshotUnavailableError(sessionId);
     }
@@ -2540,14 +3258,42 @@ export class SessionTranscriptReader {
       startTime,
       lastUpdated,
     };
-    const totalTurns = index?.navigationTurns.length ?? 0;
+    return { index, snapshotState };
+  }
+
+  async readTurnIndexPage(
+    sessionId: string,
+    options: SessionTranscriptReadTurnIndexOptions = {},
+  ): Promise<SessionTranscriptTurnIndexPage> {
+    const limit = normalizeLimit(options.limit);
+    if (options.start !== undefined && options.snapshot === undefined) {
+      throw new InvalidSessionTranscriptCursorError();
+    }
+    if (
+      options.start !== undefined &&
+      !isFiniteNonNegativeInteger(options.start)
+    ) {
+      throw new RangeError('Transcript turn index start must be non-negative');
+    }
+    const { index, snapshotState } = await this.readTurnIndexSnapshot(
+      sessionId,
+      options.snapshot,
+    );
+    const { startTime, lastUpdated } = snapshotState;
+    const projected =
+      index !== undefined && indexHasManagedHeader(index)
+        ? await this.readManagedRecords(sessionId, index, {})
+        : undefined;
+    const navigationTurns = projected
+      ? managedNavigationTurns(projected)
+      : (index?.navigationTurns ?? []);
+    const totalTurns = navigationTurns.length;
     const start =
       options.start ?? Math.max(0, totalTurns - Math.min(limit, totalTurns));
     if (start > totalTurns) {
       throw new InvalidSessionTranscriptCursorError();
     }
-    const selectedTurns =
-      index?.navigationTurns.slice(start, start + limit) ?? [];
+    const selectedTurns = navigationTurns.slice(start, start + limit);
     const selectedUuids = selectedTurns.flatMap((turn) => [
       turn.turnId,
       ...(turn.finalAssistantRecordId ? [turn.finalAssistantRecordId] : []),
@@ -2562,27 +3308,36 @@ export class SessionTranscriptReader {
     );
     const labels = new Map<string, { label: string; timestamp?: string }>();
     const details = new Map<string, string>();
-    if (index) {
+    const collectPreview = (record: ChatRecord): void => {
+      const kind = selectedKinds.get(record.uuid);
+      if (kind) {
+        labels.set(record.uuid, {
+          label: projectNavigationLabel(record, kind),
+          ...(record.timestamp ? { timestamp: record.timestamp } : {}),
+        });
+      }
+      if (selectedAssistantUuids.has(record.uuid)) {
+        const detail = projectNavigationDetail(record);
+        if (detail) details.set(record.uuid, detail);
+      }
+    };
+    if (projected) {
+      const wanted = new Set(selectedUuids);
+      for (const record of projected) {
+        if (wanted.has(record.uuid)) collectPreview(record);
+      }
+    } else if (index) {
       await forEachAggregatedRecord(
         index,
         [...new Set(selectedUuids)],
-        (record) => {
-          const kind = selectedKinds.get(record.uuid);
-          if (kind) {
-            labels.set(record.uuid, {
-              label: projectNavigationLabel(record, kind),
-              ...(record.timestamp ? { timestamp: record.timestamp } : {}),
-            });
-          }
-          if (selectedAssistantUuids.has(record.uuid)) {
-            const detail = projectNavigationDetail(record);
-            if (detail) details.set(record.uuid, detail);
-          }
-        },
+        collectPreview,
       );
     }
     const turns = selectedTurns.map((turn, offset) => {
       const preview = labels.get(turn.turnId);
+      const historyPromptId = projected
+        ? undefined
+        : index?.byUuid.get(turn.turnId)?.turnHint.turnPromptId;
       const detail = turn.finalAssistantRecordId
         ? details.get(turn.finalAssistantRecordId)
         : undefined;
@@ -2591,6 +3346,7 @@ export class SessionTranscriptReader {
         turnId: turn.turnId,
         kind: turn.kind,
         ...(turn.promptId ? { promptId: turn.promptId } : {}),
+        ...(historyPromptId ? { historyPromptId } : {}),
         ...(preview?.timestamp ? { timestamp: preview.timestamp } : {}),
         label: preview
           ? preview.label
@@ -2612,6 +3368,137 @@ export class SessionTranscriptReader {
       turns,
       startTime,
       lastUpdated,
+    };
+  }
+
+  async readTurnHooksPage(
+    sessionId: string,
+    promptId: string,
+    options: SessionTranscriptReadTurnIndexOptions = {},
+  ): Promise<HookTurnPage | undefined> {
+    const limit = normalizeLimit(options.limit ?? 50);
+    const start = options.start ?? 0;
+    if (
+      (options.start !== undefined && options.snapshot === undefined) ||
+      !isFiniteNonNegativeInteger(start)
+    )
+      throw new InvalidSessionTranscriptCursorError();
+    const { index, snapshotState } = await this.readTurnIndexSnapshot(
+      sessionId,
+      options.snapshot,
+    );
+    if (!index) return undefined;
+    const base = {
+      sessionId,
+      promptId,
+      snapshot: this.encodeSnapshot(snapshotState),
+      start,
+    };
+    if (indexHasManagedHeader(index)) {
+      return {
+        ...base,
+        totalExecutions: 0,
+        executions: [],
+        summary: null,
+        coverage: 'unsupported',
+      };
+    }
+    const cacheKey = makeCacheKey(
+      index.filePath,
+      index.fileIdentity,
+      index.snapshotSize,
+      index.lastUpdated,
+    );
+    const cached = indexCache.get(cacheKey);
+    let turn =
+      cached?.value === index ? cached.hookTurns?.get(promptId) : undefined;
+    if (!turn) {
+      const executionsById = new Map<string, HookExecutionEntry>();
+      let partial = !index.sourceReadComplete || index.gaps.length > 0;
+      await forEachAggregatedRecord(
+        index,
+        index.replayUuids.filter(
+          (uuid) =>
+            index.byUuid.get(uuid)?.turnHint.hookTurn?.promptId === promptId,
+        ),
+        (record) => {
+          const value = (
+            record.systemPayload as UiTelemetryRecordPayload | undefined
+          )?.uiEvent;
+          if (value?.['event.name'] !== 'hook_lifecycle') return;
+          const event = parseHookLifecycle(value);
+          if (!event) {
+            partial = true;
+            return;
+          }
+          if (event.sessionId !== sessionId || event.promptId !== promptId) {
+            partial = true;
+            return;
+          }
+          executionsById.set(
+            event.executionId,
+            mergeHookExecution(
+              executionsById.get(event.executionId),
+              event,
+              'replay',
+            ),
+          );
+        },
+      );
+      if (
+        executionsById.size === 0 &&
+        !index.replayUuids.some(
+          (uuid) => index.byUuid.get(uuid)?.turnHint.turnPromptId === promptId,
+        )
+      )
+        return undefined;
+      const entries = [...executionsById.values()].sort(
+        (a, b) =>
+          a.event.startedAt - b.event.startedAt ||
+          a.event.executionId.localeCompare(b.event.executionId),
+      );
+      partial ||= entries.some(
+        (entry) => entry.conflicted || entry.status === 'unknown',
+      );
+      turn = {
+        executions: entries,
+        summary: entries.length > 0 ? summarizeHookExecutions(entries) : null,
+        coverage: partial
+          ? 'partial'
+          : entries.length > 0
+            ? 'recorded'
+            : 'unrecorded',
+      };
+      if (
+        cached?.value === index &&
+        indexCache.get(cacheKey) === cached &&
+        !cached.hookTurns?.has(promptId)
+      ) {
+        const byteSize =
+          INDEX_CONTAINER_BASE_BYTES +
+          INDEX_MAP_ENTRY_BYTES +
+          entries.length *
+            (INDEX_ENTRY_BASE_BYTES + INDEX_CONTAINER_SLOT_BYTES) +
+          estimateStringBytes(promptId) +
+          estimateStringBytes(JSON.stringify(turn));
+        if (getIndexCacheBytes() + byteSize <= getIndexCacheMaxBytes()) {
+          cached.hookTurns ??= new Map();
+          cached.hookTurns.set(promptId, turn);
+          cached.byteSize = (cached.byteSize ?? 0) + byteSize;
+        }
+      }
+    }
+    const entries = turn.executions;
+    if (start > entries.length) throw new InvalidSessionTranscriptCursorError();
+    const executions = entries.slice(start, start + limit);
+    return {
+      ...base,
+      totalExecutions: entries.length,
+      ...structuredClone({ executions, summary: turn.summary }),
+      ...(start + executions.length < entries.length
+        ? { nextStart: start + executions.length }
+        : {}),
+      coverage: turn.coverage,
     };
   }
 
@@ -2668,6 +3555,14 @@ export class SessionTranscriptReader {
       recordRestoreStage('transcript_index', indexStartedAt);
     }
     recordRestoreIndexAttributes(index);
+    if (indexHasManagedHeader(index)) {
+      return this.readManagedRestoreProjection(
+        sessionId,
+        index,
+        options,
+        readOptions,
+      );
+    }
     const selectionStartedAt = performance.now();
     let replaySelection: ReturnType<typeof selectRestoreReplayUuids>;
     try {
@@ -2694,6 +3589,7 @@ export class SessionTranscriptReader {
       if (
         position === compressionPosition ||
         ((entry?.type !== 'system' ||
+          entry?.subtype === 'memory_catalog_snapshot' ||
           entry?.subtype === 'goal_turn_end' ||
           entry?.subtype === 'slash_command') &&
           (compressionPosition < 0 || position > compressionPosition))
@@ -2731,6 +3627,20 @@ export class SessionTranscriptReader {
       return entry?.type === 'system' && entry.subtype === 'session_model';
     });
     const sessionModelSet = new Set(sessionModelUuids);
+    const sessionApprovalModeUuids = index.runtimeUuids.filter((uuid) => {
+      const entry = index.byUuid.get(uuid);
+      return (
+        entry?.type === 'system' && entry.subtype === 'session_approval_mode'
+      );
+    });
+    const sessionApprovalModeSet = new Set(sessionApprovalModeUuids);
+    const sessionWorkflowModeUuids = index.runtimeUuids.filter((uuid) => {
+      const entry = index.byUuid.get(uuid);
+      return (
+        entry?.type === 'system' && entry.subtype === 'session_workflow_mode'
+      );
+    });
+    const sessionWorkflowModeSet = new Set(sessionWorkflowModeUuids);
     // The legacy-model fallback reads the last assistant record's `model`.
     // Without an explicit selection it is only dispatched when it happens to
     // land in the replay/model read sets, so on a resume whose tail is a
@@ -2779,6 +3689,8 @@ export class SessionTranscriptReader {
         parentSessionUuid,
         sessionSourceUuid,
         ...sessionModelUuids,
+        ...sessionApprovalModeUuids,
+        ...sessionWorkflowModeUuids,
         lastAssistantUuid,
       ].filter((uuid): uuid is string => uuid !== undefined),
     );
@@ -2803,6 +3715,8 @@ export class SessionTranscriptReader {
     let sourceType: string | undefined;
     let sourceId: string | undefined;
     let sessionModel: SessionModelRecordPayload | undefined;
+    let sessionApprovalMode: SessionApprovalModeRecordPayload | undefined;
+    let sessionWorkflowMode: SessionWorkflowModeRecordPayload | undefined;
     let lastAssistantModel: string | undefined;
     let firstRecordSeen = false;
     const deferredPreReadRecords = new Map<string, ChatRecord>();
@@ -2813,7 +3727,14 @@ export class SessionTranscriptReader {
         const uiEvent = (
           record.systemPayload as UiTelemetryRecordPayload | undefined
         )?.uiEvent;
-        if (uiEvent) uiTelemetryEvents.push(uiEvent);
+        if (
+          uiEvent &&
+          uiEvent['event.name'] !== 'request_lifecycle' &&
+          uiEvent['event.name'] !== 'tool_lifecycle' &&
+          uiEvent['event.name'] !== 'hook_lifecycle'
+        ) {
+          uiTelemetryEvents.push(uiEvent as UiEvent);
+        }
       }
       if (record.uuid === attributionUuid) {
         const snapshot = (
@@ -2836,6 +3757,16 @@ export class SessionTranscriptReader {
       } else if (sessionModelSet.has(record.uuid)) {
         if (isValidSessionModelPayload(record.systemPayload)) {
           sessionModel = record.systemPayload;
+        }
+      } else if (sessionWorkflowModeSet.has(record.uuid)) {
+        if (isValidSessionWorkflowModePayload(record.systemPayload)) {
+          sessionWorkflowMode = { enabled: record.systemPayload.enabled };
+        }
+      } else if (sessionApprovalModeSet.has(record.uuid)) {
+        if (isValidSessionApprovalModePayload(record.systemPayload)) {
+          sessionApprovalMode = normalizeSessionApprovalModePayload(
+            record.systemPayload,
+          );
         }
       }
       if (
@@ -3005,12 +3936,16 @@ export class SessionTranscriptReader {
       const goalState = goalStateUuid
         ? goalStatePayloads.get(goalStateUuid)
         : undefined;
+      const replayBranchPoints = branchPointsForRecords(index, replayRecords);
       replay = {
         records: replayRecords,
         gaps: index.gaps,
         hasMore: replaySelection.hasMore,
         ...(replaySelection.hasMore && replayRecords[0]
           ? { anchorRecordId: replayRecords[0].uuid }
+          : {}),
+        ...(replayBranchPoints
+          ? { branchPointsByAssistantUuid: replayBranchPoints }
           : {}),
         ...(replayGoalRecoverySourceUuid &&
         !replaySet.has(replayGoalRecoverySourceUuid)
@@ -3046,13 +3981,21 @@ export class SessionTranscriptReader {
       recording: {
         lastCompletedUuid: index.leafUuid,
         turnParentUuids: turnStateValue.turnParentUuids,
+        turnPromptIds: turnStateValue.turnPromptIds,
+        turnDaemonPromptIds: turnStateValue.turnDaemonPromptIds,
         ...(customTitle !== undefined ? { customTitle } : {}),
         ...(titleSource !== undefined ? { titleSource } : {}),
         ...(parentSessionId !== undefined ? { parentSessionId } : {}),
         ...(sourceType !== undefined ? { sourceType } : {}),
         ...(sourceId !== undefined ? { sourceId } : {}),
         ...(sessionModel !== undefined ? { sessionModel } : {}),
+        ...(sessionApprovalMode !== undefined ? { sessionApprovalMode } : {}),
+        ...(sessionWorkflowMode !== undefined ? { sessionWorkflowMode } : {}),
         ...(lastAssistantModel !== undefined ? { lastAssistantModel } : {}),
+        ...(index.executionEngine.status === 'verified' &&
+        index.executionEngine.recorded
+          ? { executionEngine: index.executionEngine.engine }
+          : {}),
       },
       ...(restoredFileHistory
         ? { fileHistorySnapshots: restoredFileHistory }
@@ -3081,8 +4024,145 @@ export class SessionTranscriptReader {
       startTime: index.restoreStartTime,
       lastUpdated: index.lastUpdated,
       runtime,
+      executionEngine: index.executionEngine,
       ...(replay ? { replay } : {}),
     };
+  }
+
+  /**
+   * Restores a Managed session from its committed events.
+   *
+   * The index locates physical records by byte offset, but a Managed log keeps
+   * the conversation in resource bodies the index cannot see, so selecting uuids
+   * from it would restore the wrapper records. The projected records are the
+   * whole history, so the accumulators run over them directly.
+   *
+   * Record shapes the sink does not admit, such as artifacts, the parent
+   * session and the session model, cannot appear in a Managed log at all, so
+   * they are absent here by construction.
+   */
+  private async readManagedRestoreProjection(
+    sessionId: string,
+    index: TranscriptIndex,
+    options: SelectiveSessionRestoreOptions,
+    readOptions: RestoreProjectionReadOptions,
+  ): Promise<SessionRestoreProjection> {
+    const records = await this.readManagedRecords(
+      sessionId,
+      index,
+      readOptions,
+    );
+    // Read from the whole log: a session whose title the session list no
+    // longer finds in its windows must not restore, and then re-anchor, an
+    // older one.
+    const persistedTitle = managedProjections.get(index)?.titleInfo ?? {};
+    const projection = buildManagedSessionRestoreProjection({
+      sessionId,
+      records,
+      replay: options.replay,
+      filePath: index.filePath,
+      startTime: index.restoreStartTime,
+      lastUpdated: index.lastUpdated,
+      executionEngine: index.executionEngine,
+      fallbackLastCompletedUuid: index.leafUuid,
+      ...(persistedTitle.title !== undefined
+        ? { customTitle: persistedTitle.title }
+        : {}),
+      ...(persistedTitle.source !== undefined
+        ? { titleSource: persistedTitle.source }
+        : {}),
+    });
+    await assertIndexSnapshotUnchanged(index, sessionId);
+    offerFreshIndexToCache(index);
+    return projection;
+  }
+
+  /** The live counterpart, which carries the replay page only. */
+  private async readManagedLiveRestoreProjection(
+    sessionId: string,
+    index: TranscriptIndex,
+    options: SelectiveSessionRestoreOptions,
+    readOptions: RestoreProjectionReadOptions,
+  ): Promise<SessionLiveRestoreProjection> {
+    const records = await this.readManagedRecords(
+      sessionId,
+      index,
+      readOptions,
+    );
+    const replay = managedReplayPage(records, options.replay);
+    await assertIndexSnapshotUnchanged(index, sessionId);
+    offerFreshIndexToCache(index);
+    return {
+      sessionId,
+      startTime: index.restoreStartTime,
+      lastUpdated: index.lastUpdated,
+      ...(replay ? { replay } : {}),
+    };
+  }
+
+  private async readManagedRecords(
+    sessionId: string,
+    index: TranscriptIndex,
+    readOptions: RestoreProjectionReadOptions,
+  ): Promise<ChatRecord[]> {
+    // Timed as the same stage the index-based path uses for its record reads:
+    // for a Managed log the projection is that read, and leaving it untimed
+    // would blank out the daemon's restore timings for these sessions.
+    const startedAt = performance.now();
+    try {
+      // The first physical record proves which project the session belongs to.
+      // Projecting without that gate would restore another project's session.
+      let firstRecordSeen = false;
+      await forEachAggregatedRecord(
+        index,
+        [index.firstRecordUuid],
+        async (record) => {
+          if (record.uuid !== index.firstRecordUuid) return;
+          if (
+            readOptions.validateFirstRecord &&
+            !(await readOptions.validateFirstRecord(record))
+          ) {
+            throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+          }
+          firstRecordSeen = true;
+        },
+      );
+      if (!firstRecordSeen) {
+        throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+      }
+      // Keyed by the index, which the cache already invalidates by file
+      // identity and snapshot size: paging a session would otherwise reproject
+      // the whole log on every request. The gate above stays outside the cache
+      // because it authorises this caller, not the projection.
+      let projection = managedProjections.get(index);
+      if (projection === undefined) {
+        try {
+          projection = await readManagedSessionRecordsAndTitle({
+            transcriptPath: index.filePath,
+            runtimeBaseDir: this.storage.getRuntimeBaseDir(),
+            sessionKey: localManagedSessionKey(
+              this.storage.getProjectRoot(),
+              sessionId,
+            ),
+            // The index froze a byte length, so the projection answers from
+            // the same prefix rather than from records appended since.
+            maxBytes: index.snapshotSize,
+          });
+        } catch (error) {
+          // A missing or corrupt body is the same class of failure as a
+          // snapshot that can no longer be served: the page contract maps
+          // that to 409, not an untyped 500 from JSON.parse(null).
+          if (error instanceof ManagedSessionRecordError) {
+            throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+          }
+          throw error;
+        }
+        managedProjections.set(index, projection);
+      }
+      return [...projection.records];
+    } finally {
+      recordRestoreStage('selected_record_read', startedAt);
+    }
   }
 
   async readLiveRestoreProjection(
@@ -3137,6 +4217,14 @@ export class SessionTranscriptReader {
       recordRestoreStage('transcript_index', indexStartedAt);
     }
     recordRestoreIndexAttributes(index);
+    if (indexHasManagedHeader(index)) {
+      return this.readManagedLiveRestoreProjection(
+        sessionId,
+        index,
+        options,
+        readOptions,
+      );
+    }
     const selectionStartedAt = performance.now();
     const replaySelection = selectRestoreReplayUuids(
       index,
@@ -3228,12 +4316,16 @@ export class SessionTranscriptReader {
       const goalState = goalStateUuid
         ? goalStatePayloads.get(goalStateUuid)
         : undefined;
+      const replayBranchPoints = branchPointsForRecords(index, replayRecords);
       replay = {
         records: replayRecords,
         gaps: index.gaps,
         hasMore: replaySelection.hasMore,
         ...(replaySelection.hasMore && replayRecords[0]
           ? { anchorRecordId: replayRecords[0].uuid }
+          : {}),
+        ...(replayBranchPoints
+          ? { branchPointsByAssistantUuid: replayBranchPoints }
           : {}),
         ...(goalState
           ? {
@@ -3338,7 +4430,7 @@ export class SessionTranscriptReader {
       throw new SessionTranscriptSnapshotUnavailableError(sessionId);
     }
 
-    const index = await getCachedIndex({
+    const physicalIndex = await getCachedIndex({
       filePath,
       fileIdentity,
       snapshotSize,
@@ -3347,6 +4439,16 @@ export class SessionTranscriptReader {
         snapshot?.lastUpdated ??
         new Date(stats.mtimeMs).toISOString(),
     });
+    // The physical lines of a Managed log are the authority's wrapper records,
+    // so paging that index would hand a client those envelopes as if they were
+    // the conversation. Page the projection instead, the way the restore and
+    // turn readers already read it.
+    const index = indexHasManagedHeader(physicalIndex)
+      ? managedPageIndex(
+          physicalIndex,
+          await this.readManagedRecords(sessionId, physicalIndex, {}),
+        )
+      : physicalIndex;
     const frozenLeafUuid = cursor?.leafUuid ?? snapshot?.leafUuid;
     if (frozenLeafUuid !== undefined && frozenLeafUuid !== index.leafUuid) {
       debugLogger.warn(
@@ -3411,15 +4513,7 @@ export class SessionTranscriptReader {
     const nextPosition =
       backwardPage?.nextPosition ?? pageStartPosition + pageUuids.length;
     const records = await readAggregatedRecords(index, pageUuids);
-    // Null prototype: record uuids are untrusted, and '__proto__' would
-    // silently drop the entry on a plain object.
-    const pageBranchPoints: Record<string, string> = Object.create(null);
-    for (const record of records) {
-      const checkpointUuid = index.branchPointsByAssistantUuid.get(record.uuid);
-      if (checkpointUuid !== undefined) {
-        pageBranchPoints[record.uuid] = checkpointUuid;
-      }
-    }
+    const pageBranchPoints = branchPointsForRecords(index, records);
     const backwardGoalState =
       direction === 'backward' || options.atRecordId !== undefined
         ? await readGoalStatePayloadBeforePosition(
@@ -3473,7 +4567,7 @@ export class SessionTranscriptReader {
           : {}),
       startTime: index.startTime,
       lastUpdated: index.lastUpdated,
-      ...(Object.keys(pageBranchPoints).length > 0
+      ...(pageBranchPoints
         ? { branchPointsByAssistantUuid: pageBranchPoints }
         : {}),
       ...(options.atRecordId !== undefined
@@ -3487,6 +4581,8 @@ export class SessionTranscriptReader {
 }
 
 export function resetSessionTranscriptIndexCacheForTest(): void {
+  lastUserPromptScopes.clear();
+  lastUserPromptUpdates.clear();
   indexCache.clear();
   cursorHmacKeys.clear();
   indexCacheMaxBytesForTest = undefined;

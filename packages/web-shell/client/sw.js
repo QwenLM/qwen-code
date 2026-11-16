@@ -87,7 +87,7 @@ self.addEventListener('fetch', function (event) {
             '<h1>Cannot reach Qwen Code / <span lang="zh-CN">无法连接 Qwen Code</span></h1>' +
             '<p>Reconnect to the daemon, then reload this page. / ' +
             '<span lang="zh-CN">请重新连接守护进程，然后重新加载此页面。</span></p>' +
-            '<a href="">Try again / <span lang="zh-CN">重试</span></a></body></html>',
+            '<a href="" onclick="location.reload();return false">Try again / <span lang="zh-CN">重试</span></a></body></html>',
           {
             status: 503,
             headers: {

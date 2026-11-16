@@ -6,7 +6,7 @@
 
 /**
  * U-33: user-invoked shell execution for the OpenTUI `!` shell mode. Runs
- * the command directly through core's ShellExecutionService — no model turn
+ * the command through core's runtime shell executor — no model turn
  * and no approval dialog (ink shellCommandProcessor parity: typing the
  * command IS the consent) — and reports through the stream events the
  * transcript already folds: a `user-shell` command row plus a synthetic
@@ -15,6 +15,7 @@
  * ink's processor, which owns that copy).
  */
 
+import { executeRuntimeShell } from '@qwen-code/qwen-code-core/sandbox/runtime-shell.js';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -23,7 +24,6 @@ import {
   compactToolResultDisplayForHistory,
   isBinary,
   isSignalTermination,
-  ShellExecutionService,
   type Config,
   type ShellOutputEvent,
 } from '@qwen-code/qwen-code-core';
@@ -53,7 +53,7 @@ export async function executeUserShell(
   let commandToExecute = rawQuery;
   let pwdFilePath: string | undefined;
 
-  if (os.platform() !== 'win32') {
+  if (os.platform() !== 'win32' && !config.getShellExecutionSandbox?.()) {
     // Capture the child's final working directory so a `cd` can be warned
     // about (shell mode is stateless) — lifted from ink's processor.
     let command = rawQuery.trim();
@@ -133,7 +133,8 @@ export async function executeUserShell(
     }
   };
 
-  return ShellExecutionService.execute(
+  return executeRuntimeShell(
+    config,
     commandToExecute,
     targetDir,
     onOutputEvent,

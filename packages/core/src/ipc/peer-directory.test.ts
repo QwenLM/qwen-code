@@ -78,35 +78,50 @@ describe('peerRef', () => {
   });
 });
 
+/** Lists peers with the registry holding `records`. */
+const listWith = (records: unknown[]) => {
+  listLiveSessions.mockResolvedValue(records);
+  return listMessageablePeers();
+};
+
+/** Two live records of one session id: pid 100 started first, pid 101 later. */
+const twins = (
+  older: Record<string, unknown>,
+  newer: Record<string, unknown>,
+) => [
+  record({ sessionId: 'shared', pid: 100, startedAt: 1_000, ...older }),
+  record({ sessionId: 'shared', pid: 101, startedAt: 2_000, ...newer }),
+];
+
+/** Probes answer `alive` only for addresses ending in `suffix`. */
+const aliveOnly = (suffix: string, otherwise: string = 'dead') =>
+  probePeerSocketVerdict.mockImplementation(async (path: string) =>
+    path.endsWith(suffix) ? 'alive' : otherwise,
+  );
+
+const one = (target: Peer) => ({ kind: 'one', peer: target });
+
 describe('toPeerSessionInfo', () => {
+  /** Projects a record that advertises `/tmp/s1.sock`. */
+  const info = (over: Record<string, unknown> = {}) =>
+    toPeerSessionInfo(record({ ipcPath: '/tmp/s1.sock', ...over }) as never);
+
   it('is null for a record with no inbox', () => {
     expect(toPeerSessionInfo(record({}) as never)).toBeNull();
   });
 
   it('flattens a name and cwd that carry control characters', () => {
-    const info = toPeerSessionInfo(
-      record({
-        ipcPath: '/tmp/s1.sock',
-        name: 'app\u001b[31m-ab\n',
-        cwd: '/w/\rapp',
-      }) as never,
-    );
-    expect(info?.name).toBe('app [31m-ab');
-    expect(info?.cwd).toBe('/w/ app');
+    const projected = info({ name: 'app\u001b[31m-ab\n', cwd: '/w/\rapp' });
+    expect(projected?.name).toBe('app [31m-ab');
+    expect(projected?.cwd).toBe('/w/ app');
   });
 
   it('is null for a record whose name flattens to nothing', () => {
-    expect(
-      toPeerSessionInfo(
-        record({ ipcPath: '/tmp/s1.sock', name: '\u0000\u0007' }) as never,
-      ),
-    ).toBeNull();
+    expect(info({ name: '\u0000\u0007' })).toBeNull();
   });
 
   it('projects the addressable fields and derives the ref', () => {
-    expect(
-      toPeerSessionInfo(record({ ipcPath: '/tmp/s1.sock' }) as never),
-    ).toEqual({
+    expect(info()).toEqual({
       sessionId: 's1',
       name: 'app-ab',
       ref: peerRef('s1'),
@@ -119,26 +134,19 @@ describe('toPeerSessionInfo', () => {
   });
 
   it("carries the record's own kind, and reads a record without one as tui", () => {
-    expect(
-      toPeerSessionInfo(
-        record({ ipcPath: '/tmp/s1.sock', kind: 'serve' }) as never,
-      )?.kind,
-    ).toBe('serve');
+    expect(info({ kind: 'serve' })?.kind).toBe('serve');
     // A record written before the field existed came from the interactive
     // UI: nothing else registered then.
-    expect(
-      toPeerSessionInfo(record({ ipcPath: '/tmp/s1.sock' }) as never)?.kind,
-    ).toBe('tui');
+    expect(info()?.kind).toBe('tui');
   });
 });
 
 describe('listMessageablePeers', () => {
   it('skips records with no inbox advertised', async () => {
-    listLiveSessions.mockResolvedValue([
+    const peers = await listWith([
       record({ sessionId: 's1', ipcPath: '/tmp/s1.sock' }),
       record({ sessionId: 's2' }),
     ]);
-    const peers = await listMessageablePeers();
     expect(peers.map((p) => p.sessionId)).toEqual(['s1']);
     expect(probePeerSocketVerdict).toHaveBeenCalledTimes(1);
   });
@@ -148,55 +156,24 @@ describe('listMessageablePeers', () => {
     // same session. Both records flatten to the same name AND the same ref,
     // so every address in the grammar would resolve `ambiguous` and the
     // session would vanish from list_agents until one process exits.
-    listLiveSessions.mockResolvedValue([
-      record({
-        sessionId: 'shared',
-        pid: 100,
-        ipcPath: '/tmp/a.sock',
-        startedAt: 1_000,
-      }),
-      record({
-        sessionId: 'shared',
-        pid: 101,
-        ipcPath: '/tmp/b.sock',
-        startedAt: 2_000,
-      }),
-    ]);
-
-    const peers = await listMessageablePeers();
+    const peers = await listWith(
+      twins({ ipcPath: '/tmp/a.sock' }, { ipcPath: '/tmp/b.sock' }),
+    );
 
     expect(peers).toHaveLength(1);
     expect(peers[0]).toMatchObject({ sessionId: 'shared', pid: 101 });
     // Newest wins.
-    expect(resolvePeerTarget(peers, 'app-ab')).toEqual({
-      kind: 'one',
-      peer: peers[0],
-    });
+    expect(resolvePeerTarget(peers, 'app-ab')).toEqual(one(peers[0]));
   });
 
   it('falls back to the older twin when the newest does not answer', async () => {
     // A record outlives its process by the width of a crash, so the newest
     // twin can be the dead one. Collapsing before the probe would drop the
     // reachable original along with it and black the session out anyway.
-    listLiveSessions.mockResolvedValue([
-      record({
-        sessionId: 'shared',
-        pid: 100,
-        ipcPath: '/tmp/a.sock',
-        startedAt: 1_000,
-      }),
-      record({
-        sessionId: 'shared',
-        pid: 101,
-        ipcPath: '/tmp/b.sock',
-        startedAt: 2_000,
-      }),
-    ]);
-    probePeerSocketVerdict.mockImplementation(async (path: string) =>
-      path.endsWith('a.sock') ? 'alive' : 'dead',
+    aliveOnly('a.sock');
+    const peers = await listWith(
+      twins({ ipcPath: '/tmp/a.sock' }, { ipcPath: '/tmp/b.sock' }),
     );
-
-    const peers = await listMessageablePeers();
 
     expect(peers).toHaveLength(1);
     expect(peers[0]).toMatchObject({ sessionId: 'shared', pid: 100 });
@@ -209,25 +186,13 @@ describe('listMessageablePeers', () => {
     // reachable, the newer non-answering twin would win the `startedAt`
     // tie-break and the one session that could receive the message would
     // be the one dropped.
-    listLiveSessions.mockResolvedValue([
-      record({
-        sessionId: 'shared',
-        pid: 100,
-        ipcPath: '/tmp/answering.sock',
-        startedAt: 1_000,
-      }),
-      record({
-        sessionId: 'shared',
-        pid: 101,
-        ipcPath: '/tmp/inconclusive.sock',
-        startedAt: 2_000,
-      }),
-    ]);
-    probePeerSocketVerdict.mockImplementation(async (path: string) =>
-      path.endsWith('answering.sock') ? 'alive' : 'unknown',
+    aliveOnly('answering.sock', 'unknown');
+    const peers = await listWith(
+      twins(
+        { ipcPath: '/tmp/answering.sock' },
+        { ipcPath: '/tmp/inconclusive.sock' },
+      ),
     );
-
-    const peers = await listMessageablePeers();
 
     expect(peers).toHaveLength(1);
     expect(peers[0]).toMatchObject({ pid: 100 });
@@ -239,26 +204,12 @@ describe('listMessageablePeers', () => {
     // Each bare name resolves on its own; only the shared ref is ambiguous.
     // Collapsing them would turn the older, still-listening process into
     // `not-found` for any peer that was told its name.
-    listLiveSessions.mockResolvedValue([
-      record({
-        sessionId: 'shared',
-        pid: 100,
-        cwd: '/w/app',
-        name: 'app-f7',
-        ipcPath: '/tmp/a.sock',
-        startedAt: 1_000,
-      }),
-      record({
-        sessionId: 'shared',
-        pid: 101,
-        cwd: '/w/other',
-        name: 'other-f7',
-        ipcPath: '/tmp/b.sock',
-        startedAt: 2_000,
-      }),
-    ]);
-
-    const peers = await listMessageablePeers();
+    const peers = await listWith(
+      twins(
+        { cwd: '/w/app', name: 'app-f7', ipcPath: '/tmp/a.sock' },
+        { cwd: '/w/other', name: 'other-f7', ipcPath: '/tmp/b.sock' },
+      ),
+    );
 
     expect(peers.map((p) => p.pid).sort()).toEqual([100, 101]);
     expect(resolvePeerTarget(peers, 'app-f7')).toMatchObject({
@@ -275,15 +226,11 @@ describe('listMessageablePeers', () => {
   });
 
   it('skips records whose socket does not answer', async () => {
-    listLiveSessions.mockResolvedValue([
+    aliveOnly('s1.sock');
+    const peers = await listWith([
       record({ sessionId: 's1', ipcPath: '/tmp/s1.sock' }),
       record({ sessionId: 's2', ipcPath: '/tmp/s2.sock' }),
     ]);
-    probePeerSocketVerdict.mockImplementation(async (path: string) =>
-      path.endsWith('s1.sock') ? 'alive' : 'dead',
-    );
-
-    const peers = await listMessageablePeers();
     expect(peers.map((p) => p.sessionId)).toEqual(['s1']);
   });
 
@@ -293,15 +240,13 @@ describe('listMessageablePeers', () => {
     // simultaneous connections to a single socket on every listing and
     // every send, from every session on the machine — and the answer is
     // a property of the address, so asking twice cannot differ.
-    listLiveSessions.mockResolvedValue([
+    probePeerSocketVerdict.mockResolvedValue('alive');
+    const peers = await listWith([
       record({ sessionId: 'a', cwd: '/w/a', ipcPath: '/tmp/hosted.sock' }),
       record({ sessionId: 'b', cwd: '/w/b', ipcPath: '/tmp/hosted.sock' }),
       record({ sessionId: 'c', cwd: '/w/c', ipcPath: '/tmp/hosted.sock' }),
       record({ sessionId: 'd', cwd: '/w/d', ipcPath: '/tmp/other.sock' }),
     ]);
-    probePeerSocketVerdict.mockResolvedValue('alive');
-
-    const peers = await listMessageablePeers();
 
     expect(probePeerSocketVerdict).toHaveBeenCalledTimes(2);
     expect(
@@ -317,26 +262,16 @@ describe('listMessageablePeers', () => {
   });
 
   it('drops every record behind an address that does not answer', async () => {
-    listLiveSessions.mockResolvedValue([
+    aliveOnly('/tmp/other.sock');
+    const peers = await listWith([
       record({ sessionId: 'a', cwd: '/w/a', ipcPath: '/tmp/hosted.sock' }),
       record({ sessionId: 'b', cwd: '/w/b', ipcPath: '/tmp/hosted.sock' }),
       record({ sessionId: 'd', cwd: '/w/d', ipcPath: '/tmp/other.sock' }),
     ]);
-    probePeerSocketVerdict.mockImplementation(async (path: string) =>
-      path === '/tmp/other.sock' ? 'alive' : 'dead',
-    );
-
-    expect(
-      (await listMessageablePeers()).map((peer) => peer.sessionId),
-    ).toEqual(['d']);
+    expect(peers.map((peer) => peer.sessionId)).toEqual(['d']);
   });
 
   it('probes concurrently rather than one at a time', async () => {
-    listLiveSessions.mockResolvedValue([
-      record({ sessionId: 's1', ipcPath: '/tmp/s1.sock' }),
-      record({ sessionId: 's2', ipcPath: '/tmp/s2.sock' }),
-      record({ sessionId: 's3', ipcPath: '/tmp/s3.sock' }),
-    ]);
     let inFlight = 0;
     let peak = 0;
     probePeerSocketVerdict.mockImplementation(async () => {
@@ -347,13 +282,16 @@ describe('listMessageablePeers', () => {
       return true;
     });
 
-    await listMessageablePeers();
+    await listWith([
+      record({ sessionId: 's1', ipcPath: '/tmp/s1.sock' }),
+      record({ sessionId: 's2', ipcPath: '/tmp/s2.sock' }),
+      record({ sessionId: 's3', ipcPath: '/tmp/s3.sock' }),
+    ]);
     expect(peak).toBe(3);
   });
 
   it('returns an empty list when nothing is registered', async () => {
-    listLiveSessions.mockResolvedValue([]);
-    expect(await listMessageablePeers()).toEqual([]);
+    expect(await listWith([])).toEqual([]);
     expect(probePeerSocketVerdict).not.toHaveBeenCalled();
   });
 });
@@ -362,122 +300,81 @@ describe('resolvePeerTarget', () => {
   const a = peer({ sessionId: 's1', name: 'app-ab' });
   const b = peer({ sessionId: 's2', name: 'app-ab', cwd: '/w/other' });
   const c = peer({ sessionId: 's3', name: 'docs-cd' });
+  const bracketed = peer({ sessionId: 's2', name: 'notes [deadbeef]' });
+  // Two sessions whose refs collide.
+  const x = peer({ sessionId: 's1', name: 'app-ab', ref: 'abc123' });
+  const y = peer({ sessionId: 's2', name: 'docs-cd', ref: 'abc123' });
+  const none = { kind: 'none' };
 
-  it('resolves a unique bare name', () => {
-    expect(resolvePeerTarget([a, c], 'docs-cd')).toEqual({
-      kind: 'one',
-      peer: c,
-    });
+  /** Resolves `target`, checks it is ambiguous, and returns the matches. */
+  const ambiguousMatches = (peers: Peer[], target: string) => {
+    const result = resolvePeerTarget(peers, target);
+    expect(result.kind).toBe('ambiguous');
+    return result.kind === 'ambiguous' ? result.matches : [];
+  };
+
+  it.each<[string, Peer[], string, object]>([
+    ['resolves a unique bare name', [a, c], 'docs-cd', one(c)],
+    ['resolves "name [ref]"', [a, b], `app-ab [${b.ref}]`, one(b)],
+    ['accepts a bare ref', [a, b], b.ref, one(b)],
+    ['accepts a bracketed ref with no name', [a, b], `[${b.ref}]`, one(b)],
+    [
+      'accepts an uppercase ref',
+      [a, b],
+      `app-ab [${b.ref.toUpperCase()}]`,
+      one(b),
+    ],
+    ['tolerates surrounding whitespace', [c], '  docs-cd  ', one(c)],
+    [
+      'rejects a ref that does not belong to the named session',
+      [a, c],
+      `docs-cd [${a.ref}]`,
+      none,
+    ],
+    ['rejects an unknown name', [a], 'nope', none],
+    ['rejects an empty target', [a], '   ', none],
+    ['resolves nothing against an empty directory', [], 'app-ab', none],
+    [
+      'round-trips a peer whose literal name carries brackets',
+      [a, bracketed],
+      'notes [deadbeef]',
+      one(bracketed),
+    ],
+  ])('%s', (_title, peers, target, expected) => {
+    expect(resolvePeerTarget(peers, target)).toEqual(expected);
   });
 
   it('refuses to guess between two sessions sharing a name', () => {
-    const result = resolvePeerTarget([a, b, c], 'app-ab');
-    expect(result.kind).toBe('ambiguous');
-    if (result.kind === 'ambiguous') {
-      expect(result.matches).toHaveLength(2);
-    }
-  });
-
-  it('resolves "name [ref]"', () => {
-    expect(resolvePeerTarget([a, b], `app-ab [${b.ref}]`)).toEqual({
-      kind: 'one',
-      peer: b,
-    });
-  });
-
-  it('accepts a bare ref', () => {
-    expect(resolvePeerTarget([a, b], b.ref)).toEqual({ kind: 'one', peer: b });
-  });
-
-  it('accepts a bracketed ref with no name', () => {
-    expect(resolvePeerTarget([a, b], `[${b.ref}]`)).toEqual({
-      kind: 'one',
-      peer: b,
-    });
-  });
-
-  it('accepts an uppercase ref', () => {
-    expect(
-      resolvePeerTarget([a, b], `app-ab [${b.ref.toUpperCase()}]`),
-    ).toEqual({ kind: 'one', peer: b });
-  });
-
-  it('tolerates surrounding whitespace', () => {
-    expect(resolvePeerTarget([c], '  docs-cd  ')).toEqual({
-      kind: 'one',
-      peer: c,
-    });
+    expect(ambiguousMatches([a, b, c], 'app-ab')).toHaveLength(2);
   });
 
   it("refuses to guess when a bare string is one peer's name and another's ref", () => {
     const victim = peer({ sessionId: 's1', name: 'app-ab', ref: 'abc123' });
     const shadow = peer({ sessionId: 's2', name: 'abc123', ref: 'ffffff' });
-    const result = resolvePeerTarget([victim, shadow], 'abc123');
-    expect(result.kind).toBe('ambiguous');
-    if (result.kind === 'ambiguous') {
-      expect(result.matches).toEqual(expect.arrayContaining([victim, shadow]));
-      expect(result.matches).toHaveLength(2);
-    }
+    const matches = ambiguousMatches([victim, shadow], 'abc123');
+    expect(matches).toEqual(expect.arrayContaining([victim, shadow]));
+    expect(matches).toHaveLength(2);
   });
 
   it('refuses to guess between two sessions whose refs collide', () => {
-    const x = peer({ sessionId: 's1', name: 'app-ab', ref: 'abc123' });
-    const y = peer({ sessionId: 's2', name: 'docs-cd', ref: 'abc123' });
-    const result = resolvePeerTarget([x, y], 'abc123');
-    expect(result.kind).toBe('ambiguous');
-    if (result.kind === 'ambiguous') expect(result.matches).toEqual([x, y]);
-  });
-
-  it('rejects a ref that does not belong to the named session', () => {
-    expect(resolvePeerTarget([a, c], `docs-cd [${a.ref}]`)).toEqual({
-      kind: 'none',
-    });
+    expect(ambiguousMatches([x, y], 'abc123')).toEqual([x, y]);
   });
 
   it('does not let a name match by prefix or case', () => {
-    expect(resolvePeerTarget([c], 'docs')).toEqual({ kind: 'none' });
-    expect(resolvePeerTarget([c], 'DOCS-CD')).toEqual({ kind: 'none' });
-  });
-
-  it('rejects an unknown name', () => {
-    expect(resolvePeerTarget([a], 'nope')).toEqual({ kind: 'none' });
-  });
-
-  it('rejects an empty target', () => {
-    expect(resolvePeerTarget([a], '   ')).toEqual({ kind: 'none' });
-  });
-
-  it('resolves nothing against an empty directory', () => {
-    expect(resolvePeerTarget([], 'app-ab')).toEqual({ kind: 'none' });
+    expect(resolvePeerTarget([c], 'docs')).toEqual(none);
+    expect(resolvePeerTarget([c], 'DOCS-CD')).toEqual(none);
   });
 
   it('refuses to guess a bracketed ref shared by two sessions', () => {
-    const x = peer({ sessionId: 's1', name: 'app-ab', ref: 'abc123' });
-    const y = peer({ sessionId: 's2', name: 'docs-cd', ref: 'abc123' });
-    const result = resolvePeerTarget([x, y], '[abc123]');
-    expect(result.kind).toBe('ambiguous');
-    if (result.kind === 'ambiguous') expect(result.matches).toEqual([x, y]);
-  });
-
-  it('round-trips a peer whose literal name carries brackets', () => {
-    const bracketed = peer({
-      sessionId: 's2',
-      name: 'notes [deadbeef]',
-    });
-    expect(resolvePeerTarget([a, bracketed], 'notes [deadbeef]')).toEqual({
-      kind: 'one',
-      peer: bracketed,
-    });
+    expect(ambiguousMatches([x, y], '[abc123]')).toEqual([x, y]);
   });
 
   it('treats literal and ref readings of the same address as ambiguous', () => {
     const notes = peer({ sessionId: 's1', name: 'notes', ref: 'cafe12' });
     const literal = peer({ sessionId: 's2', name: 'notes [cafe12]' });
-    const result = resolvePeerTarget([notes, literal], 'notes [cafe12]');
-    expect(result.kind).toBe('ambiguous');
-    if (result.kind === 'ambiguous') {
-      expect(result.matches).toEqual(expect.arrayContaining([notes, literal]));
-    }
+    expect(ambiguousMatches([notes, literal], 'notes [cafe12]')).toEqual(
+      expect.arrayContaining([notes, literal]),
+    );
   });
 });
 
@@ -503,10 +400,9 @@ describe('formatPeerAddress', () => {
   it('round-trips through resolvePeerTarget', () => {
     const peers = [a, b, c];
     for (const each of peers) {
-      expect(resolvePeerTarget(peers, formatPeerAddress(each, peers))).toEqual({
-        kind: 'one',
-        peer: each,
-      });
+      expect(resolvePeerTarget(peers, formatPeerAddress(each, peers))).toEqual(
+        one(each),
+      );
     }
   });
 });
@@ -557,15 +453,21 @@ describe('suggestPeerNames', () => {
   const b = peer({ sessionId: 's2', name: 'qwen-code-37' });
   const c = peer({ sessionId: 's3', name: 'docs-cd' });
 
-  it('suggests names sharing a prefix', () => {
-    expect(suggestPeerNames([a, b, c], 'qwen-code')).toEqual([
-      'qwen-code-f7',
-      'qwen-code-37',
-    ]);
-  });
-
-  it('suggests on a substring too', () => {
-    expect(suggestPeerNames([a, b, c], 'code-37')).toEqual(['qwen-code-37']);
+  it.each([
+    [
+      'suggests names sharing a prefix',
+      'qwen-code',
+      ['qwen-code-f7', 'qwen-code-37'],
+    ],
+    ['suggests on a substring too', 'code-37', ['qwen-code-37']],
+    [
+      'suggests for a bracketed target by its name part',
+      `docs-cd [${c.ref}]`,
+      ['docs-cd'],
+    ],
+    ['suggests for a truncated bracket too', 'docs-cd [aa', ['docs-cd']],
+  ])('%s', (_title, target, expected) => {
+    expect(suggestPeerNames([a, b, c], target)).toEqual(expected);
   });
 
   it('disambiguates its suggestions when names collide', () => {
@@ -593,16 +495,6 @@ describe('suggestPeerNames', () => {
       peer({ sessionId: `s${i}`, name: `app-${i}` }),
     );
     expect(suggestPeerNames(many, 'app')).toHaveLength(3);
-  });
-
-  it('suggests for a bracketed target by its name part', () => {
-    expect(suggestPeerNames([a, b, c], `docs-cd [${c.ref}]`)).toEqual([
-      'docs-cd',
-    ]);
-  });
-
-  it('suggests for a truncated bracket too', () => {
-    expect(suggestPeerNames([a, b, c], 'docs-cd [aa')).toEqual(['docs-cd']);
   });
 
   it('keeps a non-hex bracket that is part of the name', () => {

@@ -23,9 +23,12 @@ import {
 
 // The exact @lydell/node-pty pin whose JS field shape and native teardown
 // semantics the release path in conpty-host.ts was verified against. A
-// version bump turns this test red on purpose: re-check the WindowsPtyAgent
-// fields and src/win/conpty.cc (the baton erase became unconditional in
-// 1.2.0-beta.14 — see conpty-host.ts) before updating the constant.
+// version bump turns this test red on purpose: re-check PTY_INPUT_QUEUE_FIELDS
+// and queue mutation assumptions in pty-input-queue.ts, plus deferred _isReady
+// startup writes, alongside the cleanup fields and src/win/conpty.cc (the baton erase
+// became unconditional in 1.2.0-beta.14 — see conpty-host.ts), before updating
+// the constant. The native POSIX queue test cannot exercise Windows
+// _agent.inSocket or deferred _isReady writes: verify both on Windows manually.
 const VERIFIED_NODE_PTY = '1.2.0-beta.10';
 
 describe('conpty-host', () => {
@@ -61,12 +64,12 @@ describe('conpty-host', () => {
     // human re-check the comment above describes. The WindowsPtyAgent field
     // shape and conpty.cc baton-erase semantics live in the win32 prebuilds, so
     // those keys must trip the same guard as the loader.
-    expect(Object.keys(corePins)).toHaveLength(6);
+    expect(Object.keys(corePins)).toHaveLength(7);
     expect(
       Object.values(corePins).every((version) => version === VERIFIED_NODE_PTY),
     ).toBe(true);
     // packages/cli declares no node-pty and resolves the root-hoisted copy, so
-    // the root manifest's six must stay in lockstep with core's six — the
+    // the root manifest's seven must stay in lockstep with core's seven — the
     // declaration agent-view actually loads in a dev tree.
     expect(corePins).toEqual(rootPins);
   });

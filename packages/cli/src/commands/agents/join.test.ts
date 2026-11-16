@@ -1,0 +1,375 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { EventEmitter } from 'node:events';
+import { expect, it, vi } from 'vitest';
+import {
+  readHiddenLine,
+  runAgentsJoin,
+  type HiddenInput,
+  type JoinDeps,
+} from './join.js';
+
+function deps(overrides: Partial<JoinDeps> = {}) {
+  const out: string[] = [];
+  const err: string[] = [];
+  const value: JoinDeps = {
+    fetch: vi.fn(async () =>
+      Response.json({ connected: true, providers: ['qwen', 'claude'] }),
+    ) as unknown as typeof fetch,
+    env: { QWEN_AGENT_HOST_ENROLLMENT_TOKEN: ' join-token ' },
+    cwd: '/work/repo',
+    promptToken: vi.fn(async () => undefined),
+    out: (line) => out.push(line),
+    err: (line) => err.push(line),
+    ...overrides,
+  };
+  return { value, out, err };
+}
+
+it('waits long enough for a join whose save waits on its lock', async () => {
+  // Two program probes, enrollment, up to three heartbeats (10 s each) and a
+  // save that can wait about 13.5 s: past that the join is reported failed
+  // with the token already spent.
+  const timeout = vi.spyOn(AbortSignal, 'timeout');
+  try {
+    const { value } = deps();
+
+    await runAgentsJoin(
+      { link: 'https://hub.example:4170/join/ws_1', 'allow-http': false },
+      value,
+    );
+
+    expect(timeout).toHaveBeenCalledWith(90_000);
+    const [, init] = vi.mocked(value.fetch).mock.calls[0]!;
+    expect(init?.signal).toBe(timeout.mock.results[0]?.value);
+  } finally {
+    timeout.mockRestore();
+  }
+});
+
+it('asks the local daemon to connect with the link and token', async () => {
+  const { value, out } = deps({
+    env: {
+      QWEN_AGENT_HOST_ENROLLMENT_TOKEN: ' join-token ',
+      QWEN_SERVER_TOKEN: 'daemon-token',
+    },
+  });
+
+  const code = await runAgentsJoin(
+    { link: 'https://hub.example:4170/join/ws_1', 'allow-http': false },
+    value,
+  );
+
+  expect(code).toBe(0);
+  const [url, init] = vi.mocked(value.fetch).mock.calls[0]!;
+  expect(url).toBe(
+    'http://127.0.0.1:4170/workspaces/%2Fwork%2Frepo/agent/hosts/connect',
+  );
+  expect(init?.headers).toMatchObject({
+    authorization: 'Bearer daemon-token',
+  });
+  expect(JSON.parse(init?.body as string)).toEqual({
+    serverUrl: 'https://hub.example:4170',
+    workspaceId: 'ws_1',
+    enrollmentToken: 'join-token',
+    allowHttp: false,
+  });
+  expect(out.join('\n')).toContain('qwen, claude');
+  // No `saved` field, as from an older daemon: it always claimed the save.
+  expect(out.join('\n')).toContain('The daemon reconnects after restarts.');
+});
+
+it('warns, and still succeeds, when the daemon could not save the connection', async () => {
+  const { value, out, err } = deps({
+    fetch: vi.fn(async () =>
+      Response.json({
+        connected: true,
+        saved: false,
+        saveError: 'Lock file is already being held',
+        providers: ['qwen'],
+      }),
+    ) as unknown as typeof fetch,
+  });
+
+  const code = await runAgentsJoin(
+    { link: 'https://hub.example:4170/join/ws_1', 'allow-http': false },
+    value,
+  );
+
+  // The token is spent; a failure exit would invite a rerun with it.
+  expect(code).toBe(0);
+  expect(out.join('\n')).toContain('Joined https://hub.example:4170');
+  expect(out.join('\n')).not.toContain('reconnects after restarts');
+  expect(err).toEqual([
+    'Warning: the daemon could not save this connection, so it will not reconnect after a restart or a workspace reload: Lock file is already being held',
+  ]);
+});
+
+it('says "no detail" when the daemon gives no reason for the failed save', async () => {
+  const { value, err } = deps({
+    fetch: vi.fn(async () =>
+      Response.json({ connected: true, saved: false, saveError: '' }),
+    ) as unknown as typeof fetch,
+  });
+
+  await runAgentsJoin(
+    { link: 'https://hub.example:4170/join/ws_1', 'allow-http': false },
+    value,
+  );
+
+  expect(err).toEqual([
+    'Warning: the daemon could not save this connection, so it will not reconnect after a restart or a workspace reload: no detail',
+  ]);
+});
+
+it('reports a JSON null answer as a failed join rather than crashing', async () => {
+  const { value, err } = deps({
+    fetch: vi.fn(
+      async () => new Response('null', { status: 502 }),
+    ) as unknown as typeof fetch,
+  });
+
+  const code = await runAgentsJoin(
+    { link: 'https://hub.example:4170/join/ws_1', 'allow-http': false },
+    value,
+  );
+
+  expect(code).toBe(1);
+  expect(err.join('\n')).toContain('Join failed (502)');
+});
+
+it('points at `qwen serve --join` when no daemon is running', async () => {
+  const { value, err } = deps({
+    fetch: vi.fn(async () => {
+      throw new TypeError('fetch failed', {
+        cause: Object.assign(new Error('connect ECONNREFUSED'), {
+          code: 'ECONNREFUSED',
+        }),
+      });
+    }) as unknown as typeof fetch,
+  });
+
+  const code = await runAgentsJoin(
+    { link: 'http://10.0.0.2:4170/join/ws_1', 'allow-http': true },
+    value,
+  );
+
+  expect(code).toBe(1);
+  expect(err.join('\n')).toContain(
+    'qwen serve --join http://10.0.0.2:4170/join/ws_1 --agent-host-allow-http',
+  );
+});
+
+it.each([
+  [
+    'does not answer in time',
+    () => {
+      throw new DOMException(
+        'The operation was aborted due to timeout',
+        'TimeoutError',
+      );
+    },
+  ],
+  [
+    'drops the connection after the request',
+    () => {
+      throw new TypeError('fetch failed', {
+        cause: Object.assign(new Error('socket hang up'), {
+          code: 'ECONNRESET',
+        }),
+      });
+    },
+  ],
+  [
+    'closes the connection after the request',
+    () => {
+      throw new TypeError('fetch failed', {
+        cause: Object.assign(new Error('other side closed'), {
+          code: 'UND_ERR_SOCKET',
+        }),
+      });
+    },
+  ],
+  [
+    'stops reading the request',
+    () => {
+      throw new TypeError('fetch failed', {
+        cause: Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }),
+      });
+    },
+  ],
+  [
+    'does not finish sending the answer',
+    () =>
+      ({
+        ok: true,
+        status: 200,
+        json: async () => {
+          throw new DOMException('timed out', 'TimeoutError');
+        },
+      }) as unknown as Response,
+  ],
+  [
+    'answers 200 with a body that is not JSON',
+    () =>
+      ({
+        ok: true,
+        status: 200,
+        json: async () => {
+          throw new SyntaxError('Unexpected end of JSON input');
+        },
+      }) as unknown as Response,
+  ],
+  ['answers 200 with JSON null', () => new Response('null', { status: 200 })],
+  [
+    'answers 200 without saying it connected',
+    () => Response.json({ providers: ['qwen'] }),
+  ],
+] as const)(
+  'says the join may still complete when the daemon %s',
+  async (_label, answer) => {
+    // Not "no daemon": it took the request, and may have spent the token.
+    const { value, err } = deps({
+      fetch: vi.fn(async () => answer()) as unknown as typeof fetch,
+    });
+
+    const code = await runAgentsJoin(
+      { link: 'http://10.0.0.2:4170/join/ws_1', 'allow-http': true },
+      value,
+    );
+
+    expect(code).toBe(1);
+    expect(err.join('\n')).toContain('the join may still complete');
+    expect(err.join('\n')).not.toContain('No running qwen serve daemon');
+    expect(err.join('\n')).not.toContain('Join failed');
+    expect(err.join('\n')).not.toContain('qwen serve --join');
+  },
+);
+
+it.each([
+  [
+    'an answer that is not JSON',
+    () => new SyntaxError('Unexpected end of JSON input'),
+    'answered without confirming the join',
+  ],
+  [
+    'an answer cut off by a timeout',
+    () => new DOMException('timed out', 'TimeoutError'),
+    'did not finish answering',
+  ],
+] as const)('tells %s apart', async (_label, failure, phrase) => {
+  const { value, err } = deps({
+    fetch: vi.fn(
+      async () =>
+        ({
+          ok: true,
+          status: 200,
+          json: async () => {
+            throw failure();
+          },
+        }) as unknown as Response,
+    ) as unknown as typeof fetch,
+  });
+
+  await runAgentsJoin(
+    { link: 'https://hub.example:4170/join/ws_1', 'allow-http': false },
+    value,
+  );
+
+  expect(err.join('\n')).toContain(phrase);
+});
+
+it('prompts for the token when the environment has none, and refuses without one', async () => {
+  const promptToken = vi.fn(async () => undefined);
+  const { value, err } = deps({ env: {}, promptToken });
+
+  expect(
+    await runAgentsJoin({ link: 'https://hub.example/join/ws_1' }, value),
+  ).toBe(1);
+  expect(promptToken).toHaveBeenCalledOnce();
+  expect(value.fetch).not.toHaveBeenCalled();
+  expect(err.join('\n')).toContain('QWEN_AGENT_HOST_ENROLLMENT_TOKEN');
+});
+
+it('reports the daemon’s refusal and a malformed link', async () => {
+  const { value, err } = deps({
+    fetch: vi.fn(async () =>
+      Response.json(
+        { error: 'Invalid or expired Agent Host enrollment token.' },
+        { status: 400 },
+      ),
+    ) as unknown as typeof fetch,
+  });
+
+  expect(
+    await runAgentsJoin({ link: 'https://hub.example/join/ws_1' }, value),
+  ).toBe(1);
+  expect(err.join('\n')).toContain('expired');
+
+  expect(await runAgentsJoin({ link: 'not a link' }, value)).toBe(1);
+});
+
+function fakeTty(isTTY = true) {
+  const emitter = new EventEmitter();
+  const modes: boolean[] = [];
+  const input: HiddenInput = {
+    isTTY,
+    isRaw: false,
+    setRawMode: (raw) => modes.push(raw),
+    on: (event, listener) => emitter.on(event, listener),
+    off: (event, listener) => emitter.off(event, listener),
+    resume: () => undefined,
+    pause: () => undefined,
+  };
+  const type = (text: string) => emitter.emit('data', Buffer.from(text));
+  return { input, modes, type, emitter };
+}
+
+it('reads the enrollment token without echoing it', async () => {
+  const { input, modes, type, emitter } = fakeTty();
+  const written: string[] = [];
+
+  const answer = readHiddenLine('Token: ', input, (text) => written.push(text));
+  type('ab');
+  type('x\u007fc');
+  type('d\r');
+
+  await expect(answer).resolves.toBe('abcd');
+  // Raw mode on for the prompt, restored after; only the prompt and the
+  // closing newline are written, never the typed characters.
+  expect(modes).toEqual([true, false]);
+  expect(written).toEqual(['Token: ', '\n']);
+  expect(emitter.listenerCount('data')).toBe(0);
+});
+
+it('drops whole escape sequences instead of their printable tails', async () => {
+  const keys = fakeTty();
+  const typed = readHiddenLine('Token: ', keys.input, () => undefined);
+  // Arrow keys, Delete and an SS3 Home key between real characters.
+  keys.type('tok\u001b[A\u001b[D\u001b[3~\u001bOHen\r');
+  await expect(typed).resolves.toBe('token');
+
+  // Bracketed paste keeps the pasted text and drops both markers.
+  const paste = fakeTty();
+  const pasted = readHiddenLine('Token: ', paste.input, () => undefined);
+  paste.type('\u001b[200~abc\u001b[201~\r');
+  await expect(pasted).resolves.toBe('abc');
+});
+
+it('cancels the hidden prompt on Ctrl+C and skips it without a TTY', async () => {
+  const tty = fakeTty();
+  const cancelled = readHiddenLine('Token: ', tty.input, () => undefined);
+  tty.type('secr\u0003');
+  await expect(cancelled).resolves.toBeUndefined();
+  expect(tty.modes).toEqual([true, false]);
+
+  const piped = fakeTty(false);
+  await expect(
+    readHiddenLine('Token: ', piped.input, () => undefined),
+  ).resolves.toBeUndefined();
+  expect(piped.modes).toEqual([]);
+});

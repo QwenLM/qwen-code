@@ -400,6 +400,25 @@ describe('AtMentionPanel', () => {
     expect(onAccept).toHaveBeenCalledWith(0);
   });
 
+  it('honours a declared zero popover safe top', async () => {
+    mount(categoriesMenu());
+    const panel = document.body.querySelector<HTMLElement>('[role="region"]')!;
+    const remeasure = async (top: number) => {
+      anchor!.getBoundingClientRect = vi.fn(
+        () => ({ top, left: 20, width: 400 }) as DOMRect,
+      );
+      await act(async () => {
+        window.dispatchEvent(new Event('resize'));
+        await new Promise((resolve) => window.requestAnimationFrame(resolve));
+      });
+      return panel.style.getPropertyValue('--at-panel-max-height');
+    };
+
+    expect(await remeasure(200)).toBe('144px');
+    anchor!.style.setProperty('--web-shell-popover-safe-top', '0px');
+    expect(await remeasure(200)).toBe('192px');
+  });
+
   it('shows loading state', () => {
     mount({ ...itemsMenu(), items: [], loading: true });
     expect(document.body.textContent).toContain('Loading...');

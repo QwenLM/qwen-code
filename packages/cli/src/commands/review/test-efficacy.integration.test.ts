@@ -2626,6 +2626,9 @@ describe('per-hunk probes against real git', () => {
 
       const canaryDir = mkdtempSync(join(tmpdir(), 'qwen-apply-canary-'));
       const shimDir = mkdtempSync(join(tmpdir(), 'qwen-apply-shim-'));
+      // The git shim below is a CommonJS script; scope it explicitly so a
+      // "type": "module" package.json above os.tmpdir() cannot flip it.
+      writeFileSync(join(shimDir, 'package.json'), '{"type":"commonjs"}');
       const canary = join(canaryDir, 'PWNED-apply');
       const stamp = join(shimDir, 'armed');
       const savedPath = process.env['PATH'];
@@ -2633,6 +2636,10 @@ describe('per-hunk probes against real git', () => {
         const realGit = execFileSync('which', ['git'], {
           encoding: 'utf8',
         }).trim();
+        // Pin the shim to CommonJS: with no package type, Node's module
+        // detection runs this extensionless require(...) script as ESM and the
+        // require calls fail.
+        writeFileSync(join(shimDir, 'package.json'), '{"type":"commonjs"}\n');
         // Armed on the restore's LAST spawn, so the plant lands after that
         // function's screen. Paths go in through JSON.stringify rather than
         // shell interpolation: a TMPDIR holding a space would otherwise split

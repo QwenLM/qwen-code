@@ -109,6 +109,8 @@ export const CLIMcpServerConfigSchema = z.object({
   // Common
   timeout: z.number().optional(),
   versionNegotiation: z.enum(['auto', 'legacy']).optional(),
+  appResourceMaxBytes: z.number().optional(),
+  appResourceTimeoutMs: z.number().optional(),
   trust: z.boolean().optional(),
   // Metadata
   description: z.string().optional(),
@@ -227,6 +229,7 @@ export const QueryOptionsSchema = z
         'openai-responses',
         'anthropic',
         'qwen-oauth',
+        'qwen-subscription',
         'gemini',
         'vertex-ai',
       ])
@@ -238,8 +241,11 @@ export const QueryOptionsSchema = z
             !!(
               val &&
               typeof val === 'object' &&
+              'name' in val &&
               val.name &&
+              'description' in val &&
               val.description &&
+              'systemPrompt' in val &&
               val.systemPrompt
             ),
           {
@@ -250,6 +256,7 @@ export const QueryOptionsSchema = z
       )
       .optional(),
     effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).optional(),
+    workflowMode: z.boolean().optional(),
     includePartialMessages: z.boolean().optional(),
     continue: z.boolean().optional(),
     resume: z.string().optional(),
@@ -266,18 +273,17 @@ export const QueryOptionsSchema = z
       .optional(),
     extraArgs: z
       .array(z.string().min(1, 'extraArgs items cannot be empty'))
-      .refine(
-        (args) =>
-          !args.some((arg) => RESERVED_CLI_FLAGS.has(arg.split('=')[0] ?? '')),
-        (args) => {
-          const blocked = args.find((arg) =>
-            RESERVED_CLI_FLAGS.has(arg.split('=')[0] ?? ''),
-          );
-          return {
+      .superRefine((args, ctx) => {
+        const blocked = args.find((arg) =>
+          RESERVED_CLI_FLAGS.has(arg.split('=')[0] ?? ''),
+        );
+        if (blocked) {
+          ctx.addIssue({
+            code: 'custom',
             message: `extraArgs cannot contain reserved flag: ${blocked}`,
-          };
-        },
-      )
+          });
+        }
+      })
       .optional(),
     extensions: z
       .array(

@@ -5,9 +5,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as messageDeletion from '../utils/message-deletion';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, forwardRef, useImperativeHandle } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import { DAEMON_APPROVAL_MODES } from '../test/sidebarHarness';
 import {
   DaemonHttpError,
   GOAL_PAUSE_REASON_COMMAND,
@@ -37,6 +39,9 @@ let connectionState: any;
 let streamingStateValue: string;
 let pendingPermission: any;
 let sessionHasActivePromptValue: boolean;
+let queuedPromptDispatchError:
+  | ((text: string) => string | undefined)
+  | undefined;
 let queuedPromptStreamingState: string | undefined;
 let queuedPromptSessionHasActivePrompt: boolean | undefined;
 let latestOnSubmit:
@@ -74,7 +79,9 @@ const cancel = vi.fn(async () => {});
 const setApprovalMode = vi.fn(async (mode: string) => ({ mode }));
 const setModel = vi.fn(async () => ({}) as any);
 const setReasoningEffort = vi.fn(async () => {});
+const setWorkflowMode = vi.fn(async (_requested: boolean) => {});
 const loadArtifacts = vi.fn(async () => ({ artifacts: [] }));
+const addArtifact = vi.fn(async () => ({}) as any);
 const getTasks = vi.fn();
 const getWorkflowTasks = vi.fn();
 const getGoal = vi.fn();
@@ -83,6 +90,8 @@ const readAttachment = vi.fn();
 const getContextUsage = vi.fn();
 const loadSession = vi.fn(async () => {});
 const daemonActions = {
+  getContext: vi.fn(),
+  refreshModels: vi.fn().mockResolvedValue(undefined),
   loadSession,
   sendPrompt,
   submitPermission,
@@ -91,7 +100,9 @@ const daemonActions = {
   setApprovalMode,
   setModel,
   setReasoningEffort,
+  setWorkflowMode,
   loadArtifacts,
+  addArtifact,
   getTasks,
   getWorkflowTasks,
   getGoal,
@@ -102,6 +113,7 @@ const daemonActions = {
 const enqueuePrompt = vi.fn(() => true);
 const removeQueuedPrompt = vi.fn();
 const editQueuedPrompt = vi.fn();
+const sendQueuedPromptNow = vi.fn();
 const editLastQueuedPrompt = vi.fn(() => false);
 const clearQueuedPrompts = vi.fn(() => false);
 let queuedPromptsMock: any[] = [];
@@ -112,8 +124,23 @@ const latestComposerCoreOptions = vi.hoisted(() => ({
   current: null as Record<string, unknown> | null,
 }));
 
+const paneSettings = vi.fn(async () => ({ v: 1, settings: [] }));
+const workspaceByCwd = vi.fn(() => ({ workspaceSettings: paneSettings }));
+const paneWorkspaceClient = { workspaceByCwd, sessionStatus: vi.fn() };
+const subscriptionActions = {
+  getSubscriptionConfig: vi.fn().mockResolvedValue({ enabled: false }),
+  loadProviders: vi.fn().mockResolvedValue({ current: null }),
+  signOutSubscription: vi.fn().mockResolvedValue(undefined),
+};
+const ownerGuard = {
+  capture: () => {
+    const captured = ownerVersion;
+    return { isCurrent: () => ownerVersion === captured };
+  },
+};
+
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
-  DAEMON_APPROVAL_MODES: ['default', 'plan', 'auto-edit', 'auto', 'yolo'],
+  DAEMON_APPROVAL_MODES,
   useActions: () => daemonActions,
   useConnection: () => connectionState,
   useDaemonFollowupSuggestion: (options: any) => {
@@ -141,19 +168,16 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   }),
   usePromptStatus: () => 'idle',
   useOptionalWorkspace: () => undefined,
-  useWorkspaceActions: () => ({}),
+  useWorkspaceActions: () => subscriptionActions,
   useWorkspace: () => ({
+    baseUrl: 'https://pane.example/daemon/proxy',
     capabilities: connectionState.capabilities,
-    client: {},
+    client: paneWorkspaceClient,
+    status: connectionState.status,
     workspaceCwd: '/primary',
   }),
   useWorkspaceEventSignals: () => ({ artifactsVersion: 0 }),
-  useDaemonSessionOwnerGuard: () => ({
-    capture: () => {
-      const captured = ownerVersion;
-      return { isCurrent: () => ownerVersion === captured };
-    },
-  }),
+  useDaemonSessionOwnerGuard: () => ownerGuard,
 }));
 
 vi.mock('../session-catalog/session-catalog-hooks', () => ({
@@ -163,9 +187,11 @@ vi.mock('../session-catalog/session-catalog-hooks', () => ({
 
 vi.mock('../hooks/useQueuedPrompts', () => ({
   useQueuedPrompts: (args: {
+    getPromptDispatchError?: (text: string) => string | undefined;
     streamingState: string;
     sessionHasActivePrompt?: boolean;
   }) => {
+    queuedPromptDispatchError = args.getPromptDispatchError;
     queuedPromptStreamingState = args.streamingState;
     queuedPromptSessionHasActivePrompt = args.sessionHasActivePrompt;
     return {
@@ -173,6 +199,7 @@ vi.mock('../hooks/useQueuedPrompts', () => ({
       queuedTexts: queuedTextsMock,
       enqueuePrompt,
       removeQueuedPrompt,
+      sendQueuedPromptNow,
       editQueuedPrompt,
       editLastQueuedPrompt,
       clearQueuedPrompts,
@@ -186,8 +213,14 @@ vi.mock('../hooks/useMessages', () => ({
   useMessagesFromBlocks: () => messagesState,
 }));
 
+let transcriptBlocksMock: any[] = [];
 vi.mock('../hooks/useAnimationFrameTranscriptBlocks', () => ({
-  useAnimationFrameTranscriptSnapshot: () => ({ blocks: [] }),
+  // Fresh array per call, like the previous inline literal: consumers memo
+  // on `blocks` identity, and the mocked extractPendingPermission reads a
+  // mutable test variable that must be re-read on every render.
+  useAnimationFrameTranscriptSnapshot: () => ({
+    blocks: transcriptBlocksMock.slice(),
+  }),
 }));
 
 vi.mock('../adapters/transcriptAdapter', () => ({
@@ -212,6 +245,9 @@ vi.mock('./TranscriptViewport', () => ({
     <div
       data-testid="pane-messages"
       data-approval={props.pendingApproval ? 'yes' : 'no'}
+      data-file-changes={JSON.stringify(
+        [...(props.turnFileChanges?.values() ?? [])].flat(),
+      )}
     >
       {props.messages.length}
       <button
@@ -236,6 +272,27 @@ vi.mock('./TranscriptViewport', () => ({
           props.onAttachmentPreview?.({
             name: 'data.json',
             attachmentId: 'attachment-1',
+          })
+        }
+      />
+      <button
+        data-testid="pane-open-review"
+        type="button"
+        onClick={() =>
+          props.onTurnOutputOpen?.({
+            id: 'review',
+            kind: 'review',
+            title: 'Turn review',
+            turnId: 'turn-1',
+            changes: [
+              {
+                path: '/w/source.ts',
+                status: 'modified',
+                toolCallId: 'write-0',
+                isArtifact: false,
+                diffs: [],
+              },
+            ],
           })
         }
       />
@@ -373,6 +430,8 @@ vi.mock('./QueuedPromptDisplay', () => ({
       data-testid="pane-queue"
       data-can-mutate-mid-turn={String(props.canMutateMidTurn)}
       data-can-insert-mid-turn={String(props.canInsertMidTurn)}
+      data-can-send-mid-turn-now={String(props.canSendMidTurnNow)}
+      onClick={() => props.onSendNow?.(1)}
     >
       {String(props.prompts.length)}
     </div>
@@ -418,6 +477,18 @@ let container: HTMLDivElement | null = null;
 const EMPTY_CUSTOMIZATION: WebShellCustomization = {};
 
 beforeEach(() => {
+  subscriptionActions.getSubscriptionConfig.mockReset();
+  subscriptionActions.getSubscriptionConfig.mockResolvedValue({
+    enabled: false,
+  });
+  subscriptionActions.loadProviders.mockReset();
+  subscriptionActions.loadProviders.mockResolvedValue({ current: null });
+  subscriptionActions.signOutSubscription.mockReset();
+  subscriptionActions.signOutSubscription.mockResolvedValue(undefined);
+  paneSettings.mockReset();
+  paneSettings.mockResolvedValue({ v: 1, settings: [] });
+  workspaceByCwd.mockClear();
+  paneWorkspaceClient.sessionStatus.mockReset().mockResolvedValue({});
   connectionState = {
     status: 'connected',
     sessionId: 'sess-1',
@@ -449,6 +520,9 @@ beforeEach(() => {
   sendPrompt.mockReset();
   loadArtifacts.mockReset();
   loadArtifacts.mockResolvedValue({ artifacts: [] });
+  addArtifact.mockReset();
+  addArtifact.mockResolvedValue({} as any);
+  transcriptBlocksMock = [];
   getTasks.mockReset();
   getWorkflowTasks.mockReset();
   getGoal.mockReset();
@@ -474,6 +548,7 @@ beforeEach(() => {
   setApprovalMode.mockClear();
   setModel.mockClear();
   setReasoningEffort.mockClear();
+  setWorkflowMode.mockReset().mockResolvedValue(undefined);
   enqueuePrompt.mockClear();
   enqueuePrompt.mockReturnValue(true);
   removeQueuedPrompt.mockClear();
@@ -528,6 +603,61 @@ function rerender(
   );
 }
 
+describe('pane subscription logout', () => {
+  it('handles logout in the pane workspace without sending an ACP prompt', async () => {
+    daemonActions.getContext.mockResolvedValue({
+      state: { _meta: { authType: 'qwen-subscription' } },
+    });
+    subscriptionActions.getSubscriptionConfig.mockResolvedValue({
+      enabled: true,
+      signedIn: true,
+    });
+    subscriptionActions.loadProviders.mockResolvedValue({
+      current: { authType: 'qwen-subscription' },
+    });
+    render({ workspaceCwd: '/secondary' });
+    await act(async () => {
+      latestOnSubmit!('/logout');
+    });
+    expect(daemonActions.getContext).toHaveBeenCalled();
+    expect(subscriptionActions.signOutSubscription).toHaveBeenCalledOnce();
+    expect(sendPrompt).not.toHaveBeenCalled();
+    expect(enqueuePrompt).not.toHaveBeenCalled();
+    expect(daemonActions.refreshModels).toHaveBeenCalledWith(undefined, {
+      reloadProviders: false,
+    });
+    expect(transcriptDispatch).not.toHaveBeenCalledWith([
+      expect.objectContaining({ type: 'status' }),
+    ]);
+  });
+
+  it('keeps a busy pane from signing out or queuing logout', async () => {
+    streamingStateValue = 'responding';
+    render();
+    await act(async () => {
+      expect(latestOnSubmit!('/logout')).toBe(false);
+    });
+    expect(subscriptionActions.signOutSubscription).not.toHaveBeenCalled();
+    expect(sendPrompt).not.toHaveBeenCalled();
+    expect(enqueuePrompt).not.toHaveBeenCalled();
+  });
+
+  it('does not treat a plan prompt as an account command', async () => {
+    subscriptionActions.getSubscriptionConfig.mockResolvedValue({
+      enabled: true,
+    });
+    subscriptionActions.loadProviders.mockResolvedValue({
+      current: { authType: 'qwen-subscription' },
+    });
+    render();
+    await act(async () => {
+      latestOnSubmit!('/plan /logout');
+    });
+    expect(subscriptionActions.signOutSubscription).not.toHaveBeenCalled();
+    expect(sendPrompt).toHaveBeenCalled();
+  });
+});
+
 function testid(id: string): HTMLElement | null {
   return container!.querySelector(`[data-testid="${id}"]`);
 }
@@ -543,6 +673,110 @@ function deferred<T>() {
 }
 
 describe('ChatPane', () => {
+  it.each(['summary', 'metadata', 'withheld-cwd'])(
+    'keeps file changes in their execution scope (%s)',
+    async (mode) => {
+      connectionState.capabilities = { features: [] };
+      const worktree = '/repo/.qwen/worktrees/one';
+      connectionState.workspaceCwd =
+        mode === 'withheld-cwd' ? undefined : '/repo/packages/web';
+      paneWorkspaceClient.sessionStatus.mockResolvedValue({
+        worktree: { path: worktree },
+      });
+      const paths =
+        mode === 'withheld-cwd'
+          ? ['/conversations/report.md']
+          : [`${worktree}/source.ts`, '/repo/packages/web/base.ts'];
+      messagesState = [
+        { id: 'turn', role: 'user', content: 'write' },
+        {
+          id: 'tools',
+          role: 'tool_group',
+          tools: paths.map((file_path, index) => ({
+            callId: `write-${index}`,
+            toolName: 'write_file',
+            status: 'completed',
+            args: { file_path, content: 'source' },
+          })),
+        },
+      ];
+      render({
+        showSessionDetails: false,
+        sessionSummary:
+          mode === 'summary'
+            ? { sessionId: 'sess-1', worktree: { path: worktree } }
+            : undefined,
+      });
+      await act(async () => {});
+      const changes = JSON.parse(
+        testid('pane-messages')!.dataset['fileChanges']!,
+      ) as Array<{ path: string }>;
+      expect(changes.map((change) => change.path)).toEqual([paths[0]]);
+      if (mode === 'metadata')
+        expect(paneWorkspaceClient.sessionStatus).toHaveBeenCalledWith(
+          'sess-1',
+        );
+      else expect(paneWorkspaceClient.sessionStatus).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps the unfiltered review snapshot when opening a filtered review', async () => {
+    connectionState.workspaceCwd = '/w';
+    messagesState = [
+      { id: 'turn-1', role: 'user', content: 'write' },
+      {
+        id: 'tools',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'write-0',
+            toolName: 'write_file',
+            status: 'completed',
+            args: { file_path: '/w/source.ts', content: 'source' },
+          },
+          {
+            callId: 'write-1',
+            toolName: 'write_file',
+            status: 'completed',
+            args: { file_path: '/outside/notes.md', content: 'notes' },
+          },
+        ],
+      },
+    ];
+    const onRightPanelOpen = vi.fn();
+    render({ onRightPanelOpen });
+    await act(async () => testid('pane-open-review')!.click());
+    expect(onRightPanelOpen).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'review',
+        changes: [expect.objectContaining({ path: '/w/source.ts' })],
+        unfilteredChanges: [
+          expect.objectContaining({ path: '/w/source.ts' }),
+          expect.objectContaining({ path: '/outside/notes.md' }),
+        ],
+      }),
+    );
+  });
+
+  it('keeps the title without a details tooltip when details are disabled', () => {
+    render({
+      title: 'Hidden details',
+      showSessionDetails: false,
+      sessionSummary: {
+        sessionId: 'sess-1',
+        workspaceCwd: '/w',
+        createdAt: '2026-01-01T00:00:00Z',
+      },
+    });
+    expect(container!.textContent).toContain('Hidden details');
+    const anchors = Array.from(
+      container!.querySelectorAll('[data-slot="popover-anchor"]'),
+    );
+    expect(anchors.map((anchor) => anchor.textContent)).not.toContain(
+      'Hidden details',
+    );
+  });
+
   it('publishes owner-specific context controls and withdraws them on unmount', () => {
     connectionState.commands = [
       { name: 'compress', source: 'builtin-command' },
@@ -1104,6 +1338,8 @@ describe('ChatPane', () => {
     });
     expect(appendLocalUserMessage).toHaveBeenCalledWith(
       '/goal set ship the other thing',
+      undefined,
+      { localCommandId: expect.stringMatching(/^local-command:/) },
     );
   });
 
@@ -1558,6 +1794,7 @@ describe('ChatPane', () => {
     pendingPermission = { id: 'perm-1', toolName: 'write_file', rawInput: {} };
     render();
     expect(testid('pane-approval')).not.toBeNull();
+    expect(latestToolApprovalProps?.showBrowserNotifications).toBe(true);
     // The streaming status and the editor share the approval-hidden wrapper,
     // so neither lingers below the dialog.
     expect(testid('pane-streaming')?.parentElement?.className).toContain(
@@ -1655,6 +1892,45 @@ describe('ChatPane', () => {
     expect(testid('pane-messages')).not.toBeNull();
   });
 
+  it('threads unavailable models onto its composer', () => {
+    const unavailableModels = [
+      { id: 'qwen-max', label: 'Qwen Max', tooltip: 'Need Pro' },
+    ];
+    const mountUnavailableModelTooltip = () => null;
+    render({ unavailableModels, mountUnavailableModelTooltip });
+    expect(latestChatEditorProps.unavailableModels).toEqual(unavailableModels);
+    expect(latestChatEditorProps.mountUnavailableModelTooltip).toBe(
+      mountUnavailableModelTooltip,
+    );
+  });
+
+  it('scopes model picker content to its own pane and connected daemon', () => {
+    connectionState.currentModel = 'pane-model';
+    render({ workspaceCwd: '/pane-workspace' });
+    expect(latestChatEditorProps.modelPickerScope).toEqual({
+      sessionId: 'sess-1',
+      workspaceCwd: '/pane-workspace',
+      daemonBaseUrl: 'https://pane.example/daemon/proxy',
+    });
+    expect(latestChatEditorProps.currentModel).toBe('pane-model');
+
+    const initialScope = latestChatEditorProps.modelPickerScope;
+    messagesState = [
+      ...messagesState,
+      { id: 'm2', role: 'assistant', content: 'Streaming delta' },
+    ];
+    rerender({ workspaceCwd: '/pane-workspace' });
+    expect(latestChatEditorProps.modelPickerScope).toBe(initialScope);
+
+    connectionState.sessionId = 'other-pane-session';
+    rerender({ workspaceCwd: '/other-pane-workspace' });
+    expect(latestChatEditorProps.modelPickerScope).toEqual({
+      sessionId: 'other-pane-session',
+      workspaceCwd: '/other-pane-workspace',
+      daemonBaseUrl: 'https://pane.example/daemon/proxy',
+    });
+  });
+
   it('shows the Plan entry only when explicitly enabled and hides it on removal', () => {
     render();
     expect(latestChatEditorProps.visibleToolbarActions).not.toContain('plan');
@@ -1693,7 +1969,7 @@ describe('ChatPane', () => {
     expect(latestChatEditorProps.builtinAtProviders).toBeUndefined();
   });
 
-  it('shows the pane workspace as a toolbar chip on a multi-workspace daemon', () => {
+  it('keeps the workspace in the split header and only shows the toolbar chip when embedded', () => {
     connectionState.capabilities = {
       features: [],
       workspaceCwd: '/work/web-shell',
@@ -1710,6 +1986,19 @@ describe('ChatPane', () => {
     };
     // The split view hands each pane its own workspace explicitly.
     render({ title: 'Add pagination', workspaceCwd: '/work/api' });
+    expect(latestChatEditorProps.visibleToolbarActions).not.toContain(
+      'workspace',
+    );
+    expect(
+      container!.querySelector('[data-web-shell-pane-workspace]')?.textContent,
+    ).toContain('Payments API');
+
+    rerender({
+      title: 'Add pagination',
+      workspaceCwd: '/work/api',
+      embedded: true,
+    });
+    expect(container!.querySelector('header')).toBeNull();
     expect(latestChatEditorProps.visibleToolbarActions).toContain('workspace');
     expect(latestChatEditorProps.workspaceName).toBe('Payments API');
     expect(latestChatEditorProps.workspaceTitle).toBe('/work/api');
@@ -2840,6 +3129,41 @@ describe('ChatPane', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('passes this pane owner mode and allows changing it while a turn is active', async () => {
+    connectionState.workflowMode = {
+      requested: true,
+      available: false,
+      effective: false,
+    };
+    connectionState.workflowModeStatus = 'ready';
+    streamingStateValue = 'responding';
+    sessionHasActivePromptValue = true;
+    render();
+    expect(latestChatEditorProps.workflowMode).toBe(
+      connectionState.workflowMode,
+    );
+    expect(latestChatEditorProps.workflowModeStatus).toBe('ready');
+    expect(latestChatEditorProps.visibleToolbarActions).toContain(
+      'workflowMode',
+    );
+    await act(async () => latestChatEditorProps.onWorkflowModeChange(false));
+    expect(setWorkflowMode).toHaveBeenCalledExactlyOnceWith(false);
+    expect(setReasoningEffort).not.toHaveBeenCalled();
+    expect(sendPrompt).not.toHaveBeenCalled();
+    expect(cancel).not.toHaveBeenCalled();
+  });
+
+  it('does not publish a failed mode action after the pane owner changes', async () => {
+    const failure = deferred<void>();
+    setWorkflowMode.mockReturnValueOnce(failure.promise);
+    const onError = vi.fn();
+    render({ onError });
+    act(() => latestChatEditorProps.onWorkflowModeChange(true));
+    ownerVersion += 1;
+    await act(async () => failure.reject(new Error('Old owner disconnected')));
+    expect(onError).not.toHaveBeenCalled();
+  });
+
   it.each([false, true])(
     'keeps reasoning persistence scoped with standalone=%s',
     async (standalone) => {
@@ -2961,6 +3285,19 @@ describe('ChatPane', () => {
     expect(testid('pane-queue')?.dataset.canMutateMidTurn).toBe('false');
   });
 
+  it('offers send-now on queued rows only when advertised', () => {
+    queuedPromptsMock = [{ id: 1, text: 'queued next' }];
+    render();
+    expect(testid('pane-queue')?.dataset.canSendMidTurnNow).toBe('false');
+    connectionState.capabilities = {
+      features: ['session_mid_turn_send_now'],
+    };
+    rerender();
+    expect(testid('pane-queue')?.dataset.canSendMidTurnNow).toBe('true');
+    act(() => testid('pane-queue')?.click());
+    expect(sendQueuedPromptNow).toHaveBeenCalledWith(1);
+  });
+
   it('passes follow-up suggestions to the pane editor', () => {
     render();
     expect(testid('pane-followup')?.textContent).toBe('next idea');
@@ -3005,6 +3342,20 @@ describe('ChatPane', () => {
     );
   });
 
+  it('uses this local send clock while the server user echo has not arrived', () => {
+    streamingStateValue = 'waiting';
+    messagesState = [
+      { id: 'old-user', role: 'user', content: 'old', timestamp: 1000 },
+    ];
+    Object.assign(connectionState, {
+      localPrompt: { sessionId: connectionState.sessionId, startedAt: 9000 },
+    });
+    render();
+    expect(testid('pane-streaming')?.getAttribute('data-started-at')).toBe(
+      '9000',
+    );
+  });
+
   it('enables the interactive composer controls', () => {
     connectionState.tokenCount = 1200;
     connectionState.contextWindow = 8192;
@@ -3013,6 +3364,7 @@ describe('ChatPane', () => {
       JSON.stringify([
         'addMenu',
         'approvalMode',
+        'workflowMode',
         'contextUsage',
         'model',
         'voice',
@@ -3076,22 +3428,160 @@ describe('ChatPane', () => {
     expect(latestChatEditorProps.contextUsageControls).toBeUndefined();
   });
 
-  it('shows context usage for this pane session', async () => {
-    render();
-
-    await act(async () => {
-      latestChatEditorProps.onShowContextUsage();
-    });
-
-    expect(appendLocalUserMessage).toHaveBeenCalledWith('/context');
-    expect(getContextUsage).toHaveBeenCalledWith({ detail: false });
-    expect(transcriptDispatch).toHaveBeenCalledWith([
-      expect.objectContaining({
-        type: 'status',
-        clearActiveText: false,
-        text: expect.stringContaining('web-shell:context-usage:v1:'),
+  it('keeps the local context group unavailable for deletion until its result settles', async () => {
+    let resolve!: (value: unknown) => void;
+    getContextUsage.mockReturnValueOnce(
+      new Promise((done) => {
+        resolve = done;
       }),
-    ]);
+    );
+    const begin = vi.spyOn(messageDeletion, 'beginLocalCommand');
+    render();
+    act(() => latestChatEditorProps.onShowContextUsage());
+    expect(begin).toHaveBeenCalledTimes(1);
+    const [store] = begin.mock.calls[0]!;
+    expect(messageDeletion.hasPendingLocalCommands(store)).toBe(true);
+    transcriptDispatch.mockImplementationOnce(() => {
+      expect(messageDeletion.hasPendingLocalCommands(store)).toBe(false);
+    });
+    await act(async () => {
+      resolve({ usage: {} });
+    });
+    expect(messageDeletion.hasPendingLocalCommands(store)).toBe(false);
+    begin.mockRestore();
+  });
+
+  it.each(['idle', 'responding'])(
+    'shows context usage for this pane session while %s',
+    async (state) => {
+      streamingStateValue = state;
+      render();
+
+      await act(async () => {
+        latestChatEditorProps.onShowContextUsage();
+      });
+
+      if (state === 'idle')
+        expect(appendLocalUserMessage).toHaveBeenCalledWith(
+          '/context',
+          undefined,
+          { localCommandId: expect.stringMatching(/^local-command:/) },
+        );
+      else expect(appendLocalUserMessage).not.toHaveBeenCalled();
+      expect(getContextUsage).toHaveBeenCalledWith({ detail: false });
+      expect(transcriptDispatch).toHaveBeenCalledWith([
+        expect.objectContaining({
+          type: 'status',
+          clearActiveText: false,
+          text: 'Context Usage',
+          data: {
+            type: 'web-shell:context-usage:v1:',
+            status: { usage: { totalTokens: 1200, contextWindowSize: 8192 } },
+          },
+        }),
+      ]);
+    },
+  );
+
+  it('hides model setup dynamically while preserving model and session commands', () => {
+    connectionState.commands = [
+      { name: 'auth', description: 'Configure models' },
+      { name: 'model', description: 'Select model' },
+      { name: 'delete', description: 'Delete session' },
+    ];
+    render();
+    const names = () =>
+      latestChatEditorProps.commands.map(
+        (command: { name: string }) => command.name,
+      );
+    expect(names()).toContain('auth');
+    rerender({ modelManagement: { allowAdd: false } });
+    expect(names()).not.toContain('auth');
+    expect(names()).toContain('model');
+    expect(names()).toContain('delete');
+    rerender({ modelManagement: { allowDelete: false } });
+    expect(names()).toContain('auth');
+  });
+
+  it.each([false, true])(
+    'refuses model setup only after the host handler declines (busy=%s)',
+    (busy) => {
+      sessionHasActivePromptValue = busy;
+      const onSlashCommand = vi.fn(() => false);
+      const onImageIngestionNotice = vi.fn();
+      render({
+        modelManagement: { allowAdd: false },
+        onSlashCommand,
+        onImageIngestionNotice,
+      });
+      let accepted;
+      act(() => {
+        accepted = latestOnSubmit!('/auth');
+      });
+      expect(accepted).toBe(true);
+      expect(onSlashCommand).toHaveBeenCalledWith({
+        command: 'auth',
+        args: '',
+        input: '/auth',
+      });
+      expect(sendPrompt).not.toHaveBeenCalled();
+      expect(enqueuePrompt).not.toHaveBeenCalled();
+      expect(onImageIngestionNotice).toHaveBeenCalledWith(
+        'warning',
+        'Adding models is disabled by the host.',
+      );
+    },
+  );
+
+  it.each([false, true])(
+    'lets the host take over a disabled model setup command (busy=%s)',
+    (busy) => {
+      sessionHasActivePromptValue = busy;
+      const onSlashCommand = vi.fn(() => true);
+      const onImageIngestionNotice = vi.fn();
+      render({
+        modelManagement: { allowAdd: false },
+        onSlashCommand,
+        onImageIngestionNotice,
+      });
+      let accepted;
+      act(() => {
+        accepted = latestOnSubmit!('/auth');
+      });
+      expect(accepted).toBe(true);
+      expect(onSlashCommand).toHaveBeenCalledWith({
+        command: 'auth',
+        args: '',
+        input: '/auth',
+      });
+      expect(sendPrompt).not.toHaveBeenCalled();
+      expect(enqueuePrompt).not.toHaveBeenCalled();
+      expect(onImageIngestionNotice).not.toHaveBeenCalled();
+    },
+  );
+
+  it('uses current model management policy in a retained submit callback', () => {
+    const onSlashCommand = vi.fn(() => false);
+    render({ onSlashCommand });
+    const retainedSubmit = latestOnSubmit!;
+    const retainedDispatchPolicy = queuedPromptDispatchError!;
+    expect(retainedDispatchPolicy('/auth')).toBeUndefined();
+    rerender({ onSlashCommand, modelManagement: { allowAdd: false } });
+    expect(retainedDispatchPolicy('/auth')).toBe(
+      'Adding models is disabled by the host.',
+    );
+    expect(retainedDispatchPolicy('/model')).toBeUndefined();
+    act(() => {
+      expect(retainedSubmit('/auth')).toBe(true);
+    });
+    // The host saw the command first and declined; the policy refused it.
+    expect(onSlashCommand).toHaveBeenCalledWith({
+      command: 'auth',
+      args: '',
+      input: '/auth',
+    });
+    expect(sendPrompt).not.toHaveBeenCalled();
+    expect(enqueuePrompt).not.toHaveBeenCalled();
   });
 
   it("lists the pane session's own commands in the slash menu", () => {
@@ -3610,6 +4100,7 @@ describe('ChatPane continuation errors', () => {
       // Actual action + actual ChatPane/Banner; only SDK request and hook state
       // delivery are simulated. No SSE frames or provider replay are invented.
       const actions = createDaemonSessionActions({
+        getPromptStatus: () => 'idle',
         store: { getSnapshot: () => ({ activeAssistantBlockId: undefined }) },
         sessionRef,
         activePromptsRef: { current: new Map() },
@@ -3744,4 +4235,264 @@ it('does not submit a deferred /plan prompt after the runtime stops', async () =
   rerender();
   await act(async () => prepared.resolve({ mode: 'plan' }));
   expect(sendPrompt).not.toHaveBeenCalled();
+});
+
+it.each(['/auth', '/login', '/connect'])(
+  'blocks rewritten /plan %s before changing mode',
+  (command) => {
+    const notice = vi.fn();
+    connectionState.commands = [
+      {
+        name: 'auth',
+        source: 'builtin-command',
+        altNames: ['login', 'connect'],
+      },
+    ];
+    render({
+      modelManagement: { allowAdd: false },
+      onImageIngestionNotice: notice,
+    });
+    act(() => {
+      expect(latestOnSubmit!(`/plan ${command}`)).toBe(true);
+    });
+    expect(setApprovalMode).not.toHaveBeenCalled();
+    expect(sendPrompt).not.toHaveBeenCalled();
+    expect(notice).toHaveBeenCalledWith(
+      'warning',
+      'Adding models is disabled by the host.',
+    );
+  },
+);
+it('rechecks model policy after asynchronous plan preparation', async () => {
+  const prepared = deferred<{ mode: string }>();
+  setApprovalMode.mockReturnValueOnce(prepared.promise);
+  const notice = vi.fn();
+  render({ onImageIngestionNotice: notice });
+  act(() => {
+    latestOnSubmit!('/plan /auth');
+  });
+  expect(setApprovalMode).toHaveBeenCalledOnce();
+  rerender({
+    modelManagement: { allowAdd: false },
+    onImageIngestionNotice: notice,
+  });
+  await act(async () => {
+    prepared.resolve({ mode: 'yolo' });
+  });
+  expect(sendPrompt).not.toHaveBeenCalled();
+  expect(notice).toHaveBeenCalledWith(
+    'warning',
+    'Adding models is disabled by the host.',
+  );
+});
+it('preserves a stopped pane draft even when model setup is disabled', () => {
+  connectionState.runtimeStopped = true;
+  const notice = vi.fn();
+  render({
+    modelManagement: { allowAdd: false },
+    onImageIngestionNotice: notice,
+  });
+  act(() => {
+    expect(latestOnSubmit!('/auth')).toBe(false);
+  });
+  expect(notice).toHaveBeenCalledExactlyOnceWith(
+    'warning',
+    'This workspace was stopped to free ACP capacity. Resume this conversation when needed.',
+  );
+  expect(sendPrompt).not.toHaveBeenCalled();
+});
+it.each(['builtin-command', 'project', 'missing'])(
+  'uses loaded %s identity for the auth menu and dispatch',
+  async (source) => {
+    connectionState.commands = [
+      { name: 'clear', source: 'builtin-command' },
+      // A ready snapshot without any auth entry (disabled list, SSH
+      // whitelist) must fail closed exactly like the builtin identity does.
+      ...(source === 'missing' ? [] : [{ name: 'auth', source }]),
+    ];
+    render({ modelManagement: { allowAdd: false } });
+    const names = latestChatEditorProps.commands.map(
+      (command: { name: string }) => command.name,
+    );
+    expect(names.includes('auth')).toBe(source === 'project');
+    await act(async () => {
+      latestOnSubmit!('/auth');
+    });
+    expect(sendPrompt).toHaveBeenCalledTimes(source === 'project' ? 1 : 0);
+  },
+);
+
+describe('pane approval mode allowlist', () => {
+  beforeEach(() => {
+    connectionState.capabilities = {
+      features: ['workspace_qualified_rest_core', 'workspace_settings'],
+    };
+  });
+
+  it('applies host choices to split and embedded side-task composers', async () => {
+    connectionState.currentMode = 'yolo';
+    render({ embedded: true }, { allowedApprovalModes: ['default', 'auto'] });
+    expect(latestChatEditorProps.availableModes).toEqual(['default', 'auto']);
+    act(() => latestChatEditorProps.onSelectMode('yolo'));
+    expect(setApprovalMode).not.toHaveBeenCalled();
+    act(() => latestChatEditorProps.onCycleMode());
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(setApprovalMode).toHaveBeenCalledWith('default', {
+      planMode: false,
+    });
+    expect(workspaceByCwd).not.toHaveBeenCalled();
+    rerender({ embedded: true }, { allowedApprovalModes: [] });
+    setApprovalMode.mockClear();
+    act(() => latestChatEditorProps.onCycleMode());
+    expect(latestChatEditorProps.availableModes).toEqual([]);
+    expect(setApprovalMode).not.toHaveBeenCalled();
+  });
+
+  it('reports when a directly selected mode is not offered', () => {
+    const onError = vi.fn();
+    render({ onError }, { allowedApprovalModes: ['default', 'auto'] });
+    act(() => latestChatEditorProps.onSelectMode('yolo'));
+    expect(setApprovalMode).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: expect.stringContaining('not offered here: yolo'),
+      }),
+      expect.any(String),
+    );
+  });
+
+  it('keeps reporting plan as unsupported when an allowlist is set', async () => {
+    const onError = vi.fn();
+    render({ onError }, { allowedApprovalModes: ['auto'] });
+    await act(async () => {
+      latestChatEditorProps.onSelectMode('plan');
+      await Promise.resolve();
+    });
+    expect(setApprovalMode).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: expect.stringContaining(
+          'Unsupported execution approval mode: plan',
+        ),
+      }),
+      expect.any(String),
+    );
+  });
+
+  it('reads its own workspace settings and drops old choices on workspace change', async () => {
+    paneSettings.mockResolvedValueOnce({
+      v: 1,
+      settings: [
+        { key: 'ui.allowedApprovalModes', values: { effective: ['auto'] } },
+      ],
+    } as never);
+    render({ workspaceCwd: '/secondary' });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(workspaceByCwd).toHaveBeenCalledWith('/secondary');
+    expect(latestChatEditorProps.availableModes).toEqual(['auto']);
+    paneSettings.mockResolvedValueOnce({
+      v: 1,
+      settings: [
+        { key: 'ui.allowedApprovalModes', values: { effective: ['default'] } },
+      ],
+    } as never);
+    rerender({ workspaceCwd: '/third' });
+    expect(latestChatEditorProps.availableModes).toEqual([
+      'default',
+      'auto-edit',
+      'auto',
+      'yolo',
+    ]);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(workspaceByCwd).toHaveBeenLastCalledWith('/third');
+    expect(latestChatEditorProps.availableModes).toEqual(['default']);
+  });
+
+  it('ignores an older workspace response after the pane has moved', async () => {
+    const old = deferred<Awaited<ReturnType<typeof paneSettings>>>();
+    paneSettings.mockReturnValueOnce(old.promise);
+    render({ workspaceCwd: '/old' });
+    paneSettings.mockResolvedValueOnce({
+      v: 1,
+      settings: [
+        { key: 'ui.allowedApprovalModes', values: { effective: ['auto'] } },
+      ],
+    } as never);
+    rerender({ workspaceCwd: '/new' });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(latestChatEditorProps.availableModes).toEqual(['auto']);
+    await act(async () => {
+      old.resolve({
+        v: 1,
+        settings: [
+          { key: 'ui.allowedApprovalModes', values: { effective: ['yolo'] } },
+        ],
+      } as never);
+      await old.promise;
+    });
+    expect(latestChatEditorProps.availableModes).toEqual(['auto']);
+  });
+
+  it('does not read primary settings for standalone panes or failed qualified reads', async () => {
+    connectionState.sessionContext = { kind: 'standalone' };
+    render();
+    expect(workspaceByCwd).not.toHaveBeenCalled();
+    connectionState.sessionContext = undefined;
+    paneSettings.mockRejectedValueOnce(new Error('workspace unavailable'));
+    rerender({ workspaceCwd: '/missing' });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(workspaceByCwd).toHaveBeenCalledOnce();
+    // A failed scoped read fails closed rather than offering every mode.
+    expect(latestChatEditorProps.availableModes).toEqual([]);
+  });
+});
+
+describe('pane reported-artifact registration (R6-1)', () => {
+  it('registers reported artifacts for the pane session under its own provider', async () => {
+    // Split panes and side tasks render ChatPane under their own
+    // DaemonSessionProvider, so App's single registration mount (main
+    // session only) must not be the only registration site.
+    connectionState.sessionId = 'sess-pane';
+    connectionState.capabilities = { features: ['session_artifacts'] };
+    transcriptBlocksMock = [
+      {
+        kind: 'assistant',
+        meta: {
+          source: 'slash_command',
+          sessionArtifacts: [
+            {
+              title: 'report',
+              workspacePath: 'report.html',
+              kind: 'html',
+              storage: 'workspace',
+            },
+          ],
+        },
+      },
+    ];
+    render();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(addArtifact).toHaveBeenCalledTimes(1);
+    expect(addArtifact).toHaveBeenCalledWith({
+      title: 'report',
+      workspacePath: 'report.html',
+      kind: 'html',
+      storage: 'workspace',
+    });
+  });
 });

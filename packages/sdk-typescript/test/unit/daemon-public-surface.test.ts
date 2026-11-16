@@ -7,6 +7,7 @@
 import { describe, it, expect, expectTypeOf } from 'vitest';
 import type { DaemonContinueSessionResult } from '../../src/daemon/index.js';
 import * as Public from '../../src/index.js';
+import * as DaemonPublic from '../../src/daemon/index.js';
 
 import {
   DAEMON_KNOWN_EVENT_TYPE_VALUES,
@@ -112,6 +113,10 @@ import type {
   DaemonSessionCatalogError,
   DaemonSessionCatalogResult,
   DaemonSessionLiveState,
+  DaemonSessionLiveStateBatchRequest,
+  DaemonSessionLiveStateBatchSnapshot,
+  DaemonSessionLiveStateBatchError,
+  DaemonSessionLiveStateBatchResult,
   DaemonSessionTurnIndexEntry,
   DaemonSessionTurnIndexPage,
   DaemonSessionTurnIndexPageOptions,
@@ -121,6 +126,8 @@ import type {
   DaemonSkillBatchToggleErrorCode,
   DaemonSkillBatchToggleItem,
   DaemonSkillBatchToggleResult,
+  DaemonUserSkillActivation,
+  DaemonUserSkillsActivationResult,
   ExtensionDefaultActivationBatchItem,
   ExtensionMutationResponse,
   ExtensionWorkspaceActivationBatchItem,
@@ -196,6 +203,76 @@ import type {
   DaemonUnrecognizedDiagnosticReason as DaemonEntryUnrecognizedDiagnosticReason,
 } from '../../src/daemon/index.js';
 
+it('exports hook page contracts from the root and daemon entry points', () => {
+  expectTypeOf<
+    Public.DaemonSessionTurnIndexEntry['historyPromptId']
+  >().toEqualTypeOf<string | undefined>();
+  expectTypeOf<Public.DaemonSessionTurnHooksPage>().toEqualTypeOf<DaemonPublic.DaemonSessionTurnHooksPage>();
+  expectTypeOf<Public.DaemonSessionTurnHooksPageOptions>().toEqualTypeOf<DaemonPublic.DaemonSessionTurnHooksPageOptions>();
+  expectTypeOf<
+    ReturnType<Public.DaemonClient['getSessionTurnHooksPage']>
+  >().toEqualTypeOf<Promise<Public.DaemonSessionTurnHooksPage>>();
+  expectTypeOf<
+    ReturnType<Public.WorkspaceDaemonClient['getSessionTurnHooksPage']>
+  >().toEqualTypeOf<Promise<Public.DaemonSessionTurnHooksPage>>();
+});
+
+it('exports native Skill archive contracts without widening legacy runtime sources', () => {
+  expect(Public.DaemonSkillInstallError).toBe(
+    DaemonPublic.DaemonSkillInstallError,
+  );
+  expectTypeOf<Public.DaemonSkillArchiveInstallRequest>().toEqualTypeOf<DaemonPublic.DaemonSkillArchiveInstallRequest>();
+  expectTypeOf<Public.DaemonSkillArchiveInstallResult>().toEqualTypeOf<DaemonPublic.DaemonSkillArchiveInstallResult>();
+  expectTypeOf<Public.DaemonSkillInstallAttempt>().toEqualTypeOf<DaemonPublic.DaemonSkillInstallAttempt>();
+  expectTypeOf<Public.DaemonSkillInstallOptions>().toEqualTypeOf<DaemonPublic.DaemonSkillInstallOptions>();
+  expectTypeOf<
+    Extract<Public.DaemonSkillInstallSource, { type: 'zip-file' }>
+  >().toBeNever();
+  expectTypeOf<
+    Extract<
+      Public.DaemonSkillConfigInstallRequest['source'],
+      { type: 'zip-file' }
+    >
+  >().toEqualTypeOf<{ type: 'zip-file'; path: string; sha256?: string }>();
+});
+
+describe('memory import public types', () => {
+  it('exports the complete wire contract through both entries', () => {
+    expectTypeOf<Public.DaemonMemoryImportScope>().toEqualTypeOf<DaemonPublic.DaemonMemoryImportScope>();
+    expectTypeOf<Public.DaemonMemoryImportSourceFile>().toEqualTypeOf<DaemonPublic.DaemonMemoryImportSourceFile>();
+    expectTypeOf<Public.DaemonMemoryImportSource>().toEqualTypeOf<DaemonPublic.DaemonMemoryImportSource>();
+    expectTypeOf<Public.DaemonMemoryImportSection>().toEqualTypeOf<DaemonPublic.DaemonMemoryImportSection>();
+    expectTypeOf<Public.DaemonMemoryImportEstimate>().toEqualTypeOf<DaemonPublic.DaemonMemoryImportEstimate>();
+    expectTypeOf<Public.DaemonMemoryImportPreview>().toEqualTypeOf<DaemonPublic.DaemonMemoryImportPreview>();
+    expectTypeOf<Public.DaemonMemoryImportSelection>().toEqualTypeOf<DaemonPublic.DaemonMemoryImportSelection>();
+    expectTypeOf<Public.DaemonMemoryImportRequest>().toEqualTypeOf<DaemonPublic.DaemonMemoryImportRequest>();
+    expectTypeOf<Public.DaemonMemoryImportItemResult>().toEqualTypeOf<DaemonPublic.DaemonMemoryImportItemResult>();
+    expectTypeOf<Public.DaemonMemoryImportResult>().toEqualTypeOf<DaemonPublic.DaemonMemoryImportResult>();
+    expectTypeOf<Public.DaemonMemoryImportTask>().toEqualTypeOf<DaemonPublic.DaemonMemoryImportTask>();
+    expectTypeOf<
+      Public.WorkspaceDaemonClient['previewMemoryImport']
+    >().returns.toEqualTypeOf<Promise<Public.DaemonMemoryImportPreview>>();
+    expectTypeOf<
+      Public.WorkspaceDaemonClient['submitMemoryImport']
+    >().returns.toEqualTypeOf<Promise<Public.DaemonMemoryImportTask>>();
+    expectTypeOf<
+      Public.WorkspaceDaemonClient['listMemoryImports']
+    >().returns.toEqualTypeOf<Promise<Public.DaemonMemoryImportTask[]>>();
+    expectTypeOf<
+      Public.WorkspaceDaemonClient['getMemoryImport']
+    >().returns.toEqualTypeOf<Promise<Public.DaemonMemoryImportTask>>();
+    expectTypeOf<
+      Public.WorkspaceDaemonClient['getMemoryImportSource']
+    >().returns.toEqualTypeOf<Promise<Public.DaemonMemoryImportSection>>();
+    expectTypeOf<
+      Public.WorkspaceDaemonClient['cancelMemoryImport']
+    >().returns.toEqualTypeOf<Promise<Public.DaemonMemoryImportTask>>();
+    expectTypeOf<
+      Public.WorkspaceDaemonClient['retryMemoryImport']
+    >().returns.toEqualTypeOf<Promise<Public.DaemonMemoryImportTask>>();
+  });
+});
+
 describe('resource-link public surface', () => {
   it('keeps the ACP discriminator and nullable metadata in the daemon API', () => {
     const resourceLink: DaemonResourceLink = {
@@ -239,6 +316,7 @@ describe('continuation compatibility', () => {
 });
 describe('public SDK entry — typed daemon event surface (#4217)', () => {
   it('exports the runtime narrow + reducer surface', () => {
+    expect(typeof Public.DaemonAttachmentUploadError).toBe('function');
     expect(typeof Public.asKnownDaemonEvent).toBe('function');
     expect(typeof Public.isKnownDaemonEvent).toBe('function');
     expect(typeof Public.isDaemonEventType).toBe('function');
@@ -438,6 +516,15 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     // assertion a future barrel reshuffle could silently drop the
     // result type SDK consumers need to type `client.recapSession`.
     expectTypeOf<DaemonSessionRecapResult>().not.toBeNever();
+    expect(typeof Public.DaemonClient.prototype.setUserSkillsActivation).toBe(
+      'function',
+    );
+    expectTypeOf<
+      Awaited<ReturnType<DaemonClient['setUserSkillsActivation']>>
+    >().toEqualTypeOf<DaemonUserSkillsActivationResult>();
+    expectTypeOf<
+      Parameters<DaemonClient['setUserSkillsActivation']>[1]
+    >().toEqualTypeOf<DaemonUserSkillActivation>();
     expectTypeOf<DaemonLspServerStatus>().not.toBeNever();
     expectTypeOf<DaemonSessionLspStatus>().not.toBeNever();
     // Batch Skill toggle surface: type-only imports are erased at vitest
@@ -623,7 +710,10 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     }>();
     expectTypeOf<DaemonSessionCatalogRequest>().toEqualTypeOf<{
       workspaces: 'all' | DaemonSessionCatalogWorkspace[];
-      options?: Omit<Public.DaemonSessionListPageOptions, 'cursor'>;
+      options?: Omit<
+        Public.DaemonSessionListPageOptions,
+        'cursor' | 'liveOnly'
+      >;
       includeGroups?: boolean;
     }>();
     expectTypeOf<DaemonSessionCatalogPage>().toEqualTypeOf<{
@@ -708,6 +798,7 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
       hasRunningBackgroundTasks?: boolean;
       isWaitingForPermission: boolean;
       isWaitingForUserQuestion: boolean;
+      hasTurnError?: boolean;
       updatedAt?: string;
     }>();
     expectTypeOf<DaemonWorkspaceSessionLiveState>().toEqualTypeOf<{
@@ -715,6 +806,37 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
       catalogVersion: DaemonSessionCatalogVersion;
       sessions: DaemonSessionLiveState[];
     }>();
+    expect(typeof Public.DaemonClient.prototype.getSessionsLiveState).toBe(
+      'function',
+    );
+    expectTypeOf<DaemonSessionLiveStateBatchRequest>().toEqualTypeOf<{
+      workspaces: string[];
+    }>();
+    expectTypeOf<DaemonSessionLiveStateBatchSnapshot>().toEqualTypeOf<{
+      workspace: string;
+      workspaceId: string;
+      cwd: string;
+      v: 1;
+      catalogVersion: DaemonSessionCatalogVersion;
+      sessions: DaemonSessionLiveState[];
+    }>();
+    expectTypeOf<DaemonSessionLiveStateBatchError>().toEqualTypeOf<{
+      workspace: string;
+      workspaceId?: string;
+      cwd?: string;
+      error: { code: string; message: string; status: number };
+    }>();
+    expectTypeOf<DaemonSessionLiveStateBatchResult>().toEqualTypeOf<{
+      workspaces: Array<
+        DaemonSessionLiveStateBatchSnapshot | DaemonSessionLiveStateBatchError
+      >;
+    }>();
+    expectTypeOf<DaemonClient['getSessionsLiveState']>().toEqualTypeOf<
+      (
+        request: DaemonSessionLiveStateBatchRequest,
+        opts?: { signal?: AbortSignal; timeoutMs?: number },
+      ) => Promise<DaemonSessionLiveStateBatchResult>
+    >();
   });
 
   it('exposes the PR 21 auth device-flow surface at the public entry', () => {
@@ -805,7 +927,13 @@ describe('runtime MCP add/remove SDK types', () => {
   it('request type compiles', () => {
     const req: DaemonRuntimeMcpAddRequest = {
       name: 'echo',
-      config: { command: 'node', args: ['echo.js'], type: 'stdio' },
+      config: {
+        command: 'node',
+        args: ['echo.js'],
+        type: 'stdio',
+        appResourceMaxBytes: 4_194_304,
+        appResourceTimeoutMs: 30_000,
+      },
       displayName: 'Echo Server',
     };
     expect(req.name).toBe('echo');

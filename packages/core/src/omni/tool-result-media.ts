@@ -9,6 +9,16 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { Part } from '@google/genai';
 import type { Config } from '../config/config.js';
+import {
+  clampInlineMediaPart,
+  getMaxInlineMediaBytes,
+  TOOL_RESULT_MEDIA_REMEDY,
+} from '../core/inlineMediaLimit.js';
+import {
+  boundImageBuffer,
+  ImageViewError,
+  sniffBoundableImageMime,
+} from '../utils/image-view.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   buildAdditionalMediaParts,
@@ -33,6 +43,55 @@ const MAX_UPLOADS_PER_TOOL_RESULT = 8;
 const MAX_UPLOAD_BYTES_PER_TOOL_RESULT = 128 * 1024 * 1024;
 
 /**
+ * Bound a part the funnel keeps inline. Producers skip their inline clamp
+ * under omni delivery because this funnel takes the bytes over, which only
+ * holds on the upload branches; every decline exit bounds here instead. An
+ * image the renderer can output is first brought to the shared visual budget,
+ * then any part is held to the inline limit. Uploaded parts never get here.
+ */
+async function boundDeclinedInlinePart(
+  part: Part,
+  bytes: Buffer,
+  signal: AbortSignal,
+): Promise<Part> {
+  const inline = part.inlineData;
+  if (!inline?.data) return part;
+  const inlineByteCeiling = getMaxInlineMediaBytes();
+  let boundedPart = part;
+  if (sniffBoundableImageMime(bytes.subarray(0, 12))) {
+    try {
+      const view = await boundImageBuffer(
+        bytes,
+        `tool-result media (${inline.mimeType ?? 'unknown'})`,
+        signal,
+        inlineByteCeiling,
+      );
+      if (view) {
+        boundedPart = {
+          inlineData: {
+            ...inline,
+            data: view.bytes.toString('base64'),
+            mimeType: view.mimeType,
+          },
+        };
+      }
+    } catch (error) {
+      if (!(error instanceof ImageViewError)) {
+        throw error;
+      }
+      debugLogger.debug(
+        `tool-result media kept inline could not be bounded: ${error.message}`,
+      );
+    }
+  }
+  return clampInlineMediaPart(
+    boundedPart,
+    inlineByteCeiling,
+    TOOL_RESULT_MEDIA_REMEDY,
+  );
+}
+
+/**
  * Second normalization trigger point (design §5.2/§8.2): tool-result media
  * flows through the same recognize → guard → store → upload pipeline as
  * user input, converting inline base64 Parts into oss:// fileData Parts.
@@ -53,6 +112,8 @@ const MAX_UPLOAD_BYTES_PER_TOOL_RESULT = 128 * 1024 * 1024;
  *   transport-guard rejections, which are policy verdicts rather than
  *   transfer failures: those parts are withheld with a text placeholder,
  *   never delivered inline (that would bypass the enabled guard);
+ * - a part kept inline by any decline exit is bounded first
+ *   (`boundDeclinedInlinePart`);
  * - user aborts propagate.
  */
 export async function processToolResultOmniMedia(
@@ -71,6 +132,13 @@ export async function processToolResultOmniMedia(
   let uploadsRemaining = MAX_UPLOADS_PER_TOOL_RESULT;
   let uploadBytesRemaining = MAX_UPLOAD_BYTES_PER_TOOL_RESULT;
 
+  /** Keep-inline exit for a part the funnel declines to upload. */
+  const keepInline = async (part: Part, bytes: Buffer): Promise<Part[]> => {
+    const kept = await boundDeclinedInlinePart(part, bytes, signal);
+    if (kept !== part) changed = true;
+    return [kept];
+  };
+
   /** Returns the replacement Parts for one Part: `[part]` (unchanged),
    * `[fileData]`, or `[disclosureText, fileData]` when a fixed policy
    * degraded the media — the disclosure must sit IMMEDIATELY before its
@@ -88,13 +156,15 @@ export async function processToolResultOmniMedia(
     // config on the strength of its declared MIME type.
     const bytes = Buffer.from(inline.data, 'base64');
     const sniffed = sniffMediaType(bytes.subarray(0, 4096));
-    if (!sniffed) return [part];
-    if (!modalities[sniffed.modality]) return [part];
+    if (!sniffed) return keepInline(part, bytes);
+    if (!modalities[sniffed.modality]) {
+      return keepInline(part, bytes);
+    }
     if (uploadsRemaining <= 0 || bytes.length > uploadBytesRemaining) {
       debugLogger.debug(
         `tool-result media budget exhausted; keeping part inline (${bytes.length} bytes)`,
       );
-      return [part];
+      return keepInline(part, bytes);
     }
 
     // Everything from staging-dir setup onward sits inside the try: mkdir
@@ -240,7 +310,7 @@ export async function processToolResultOmniMedia(
           err instanceof Error ? err.message : String(err)
         }`,
       );
-      return [part];
+      return keepInline(part, bytes);
     } finally {
       if (tempPath !== undefined) {
         await fs.rm(tempPath, { force: true }).catch(() => {});

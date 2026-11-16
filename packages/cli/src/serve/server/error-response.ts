@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { isSessionStartupConfigError } from '@qwen-code/acp-bridge/sessionStartupConfig';
+import { SessionAttachmentUploadError } from '@qwen-code/acp-bridge/sessionAttachments';
 import {
   emitDaemonLog,
   InvalidSessionTranscriptCursorError,
@@ -20,6 +22,11 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { Response } from 'express';
 import { restoreRetryAfterSeconds } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
+import { SessionExecutionEngineError } from '@qwen-code/qwen-code-core/services/session-execution-engine.js';
+import {
+  SessionArtifactLibraryError,
+  SessionStorageEntryError,
+} from '@qwen-code/qwen-code-core/services/sessionService.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   AcpChildCapacityExceededError,
@@ -33,12 +40,14 @@ import {
   InvalidRewindTargetError,
   InvalidSessionMetadataError,
   InvalidSessionScopeError,
+  ManagedSessionBranchUnsupportedError,
   McpAuthenticationInProgressError,
   McpServerNotFoundError,
   McpServerRestartFailedError,
   PermissionForbiddenError,
   PermissionPolicyNotImplementedError,
   PromptQueueFullError,
+  RequestedSessionIdRejectedError,
   RestoreInProgressError,
   SessionRestoreTimeoutError,
   SessionArtifactAuthorizationError,
@@ -273,6 +282,21 @@ export function sendBridgeError(
   ctx?: BridgeErrorContext,
   daemonLog?: DaemonLogger,
 ): void {
+  if (err instanceof SessionAttachmentUploadError) {
+    if (err.status >= 500) {
+      reportBridgeError(err.cause ?? err, ctx, daemonLog);
+    } else {
+      recordExpectedBridgeError(err, ctx, daemonLog);
+    }
+    res.status(err.status).json({
+      error: err.message,
+      code: err.code,
+      ...(err.code === 'attachment_upload_store_busy'
+        ? { retryable: true }
+        : {}),
+    });
+    return;
+  }
   const sourceErrorKind =
     err instanceof SessionSourceError
       ? err.code
@@ -400,19 +424,40 @@ export function sendBridgeError(
   if (err instanceof StandaloneSessionServiceError) {
     const status = err.capacity
       ? 503
-      : err.code === 'invalid_request'
-        ? 400
-        : err.code === 'standalone_session_not_found'
-          ? 404
-          : err.code === 'standalone_creation_outcome_unknown' ||
-              err.code === 'standalone_creation_rolled_back' ||
-              err.code === 'standalone_session_operation_failed' ||
-              err.code === 'transcript_deletion_failed' ||
-              err.code === 'transcript_deletion_outcome_unknown' ||
-              err.code === 'working_directory_recovery_failed'
-            ? 500
-            : 409;
-    if (status === 500) recordExpectedBridgeError(err, ctx, daemonLog);
+      : err.code === 'managed_engine_quarantined'
+        ? 503
+        : err.code === 'invalid_request'
+          ? 400
+          : err.code === 'standalone_session_not_found'
+            ? 404
+            : err.code === 'standalone_creation_outcome_unknown' ||
+                err.code === 'standalone_creation_rolled_back' ||
+                err.code === 'standalone_session_operation_failed' ||
+                err.code === 'transcript_deletion_failed' ||
+                err.code === 'transcript_deletion_outcome_unknown' ||
+                err.code === 'working_directory_recovery_failed'
+              ? 500
+              : 409;
+    if (status === 500) {
+      const safeError = err.creationDiagnostic
+        ? Object.assign(new Error(err.message), {
+            name: err.name,
+            code: err.code,
+            stack: err.stack,
+          })
+        : err;
+      recordExpectedBridgeError(
+        safeError,
+        {
+          ...ctx,
+          sessionId:
+            ctx?.sessionId ??
+            err.creationDiagnostic?.sessionId ??
+            err.sessionId,
+        },
+        daemonLog,
+      );
+    }
     if (err.retryable && !err.capacity) res.set('Retry-After', '5');
     res.status(status).json({
       error: err.message,
@@ -467,9 +512,36 @@ export function sendBridgeError(
       .json({ error: err.message, code: err.code });
     return;
   }
+  if (err instanceof SessionArtifactLibraryError) {
+    recordExpectedBridgeError(err, ctx, daemonLog);
+    res.status(409).json({ error: err.message, code: err.code });
+    return;
+  }
+  if (err instanceof SessionStorageEntryError) {
+    const foreign = err.reason === 'foreign_project';
+    res.status(foreign ? 404 : 409).json({
+      error: foreign ? 'Session not found.' : err.message,
+      code: foreign ? 'session_not_found' : 'session_storage_conflict',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
   if (err instanceof SessionWriterError) {
     res.status(err.httpStatus).json({
       error: err.message,
+      code: err.errorKind,
+      errorKind: err.errorKind,
+    });
+    return;
+  }
+  if (err instanceof SessionExecutionEngineError) {
+    // The response names no cause, so the log keeps it: an operator must be
+    // able to tell a transcript that cannot prove its owner from an owner
+    // that cannot run here.
+    recordExpectedBridgeError(err, ctx, daemonLog);
+    res.status(409).json({
+      error:
+        'This session cannot be resumed with the current execution engine.',
       code: err.errorKind,
       errorKind: err.errorKind,
     });
@@ -614,6 +686,27 @@ export function sendBridgeError(
       error: err.message,
       code: 'branch_while_prompt_active',
       sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof ManagedSessionBranchUnsupportedError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'managed_session_branch_unsupported',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof RequestedSessionIdRejectedError) {
+    if (err.errorKind === 'invalid_session_id') {
+      res.status(400).json({ error: err.message, code: err.errorKind });
+      return;
+    }
+    res.status(409).json({
+      error: err.message,
+      code: err.errorKind,
+      sessionId: err.sessionId,
+      conflict: 'live',
     });
     return;
   }
@@ -819,6 +912,13 @@ export function sendBridgeError(
     });
     return;
   }
+  if (isSessionStartupConfigError(err)) {
+    res.status(err.code === 'invalid_startup_config' ? 400 : 422).json({
+      error: err.message,
+      code: err.code,
+    });
+    return;
+  }
   if (err instanceof InvalidSessionScopeError) {
     // Same wire shape as the route-layer 400 (`server.ts` validates
     // body['sessionScope'] before calling the bridge). A direct embed
@@ -939,12 +1039,50 @@ export function sendBridgeError(
     const data = (err as { data?: unknown }).data;
     if (data && typeof data === 'object') {
       const kind = (data as { errorKind?: unknown }).errorKind;
+      if (kind === 'auth_type_enforced') {
+        res.status(403).json({ error: errorMessage(err), code: kind });
+        return;
+      }
       const workflowStatus = workflowRequestErrorStatus(kind);
       if (workflowStatus !== undefined) {
         res.status(workflowStatus).json({
           error: errorMessage(err),
           code: kind,
         });
+        return;
+      }
+      if (kind === 'session_history_context_unavailable') {
+        res.status(503).json({ error: errorMessage(err), code: kind });
+        return;
+      }
+      if (kind === 'message_deletion_context_unavailable') {
+        res.status(503).json({
+          error: errorMessage(err),
+          code: kind,
+          persisted: true,
+          deletedGroupIds: (data as { deletedGroupIds?: unknown })
+            .deletedGroupIds,
+          deletedPromptIds: (data as { deletedPromptIds?: unknown })
+            .deletedPromptIds,
+        });
+        return;
+      }
+      if (
+        kind === 'message_groups_conflict' ||
+        kind === 'message_history_invalid' ||
+        kind === 'invalid_message_groups' ||
+        kind === 'session_message_deletion_unsupported'
+      ) {
+        res
+          .status(
+            kind === 'message_groups_conflict' ||
+              kind === 'message_history_invalid'
+              ? 409
+              : kind === 'invalid_message_groups'
+                ? 400
+                : 422,
+          )
+          .json({ error: errorMessage(err), code: kind });
         return;
       }
       if (kind === 'session_busy') {
@@ -996,6 +1134,36 @@ export function sendBridgeError(
         });
         return;
       }
+      if (kind === 'managed_engine_quarantined') {
+        // A temporary refusal while a Runtime worker's stop is unproven:
+        // the reason travels in the message, and 503 says "retry later",
+        // never the resume-conflict 409 the engine selector's errors take.
+        recordExpectedBridgeError(
+          err instanceof Error ? err : new Error(errorMessage(err)),
+          ctx,
+          daemonLog,
+        );
+        res.status(503).json({
+          error: errorMessage(err),
+          code: kind,
+          errorKind: kind,
+        });
+        return;
+      }
+      if (kind === 'session_execution_engine_unavailable') {
+        recordExpectedBridgeError(
+          err instanceof Error ? err : new Error(errorMessage(err)),
+          ctx,
+          daemonLog,
+        );
+        res.status(409).json({
+          error:
+            'This session cannot be resumed with the current execution engine.',
+          code: kind,
+          errorKind: kind,
+        });
+        return;
+      }
       if (kind === 'untrusted_workspace') {
         res.status(403).json({
           error: errorMessage(err),
@@ -1021,6 +1189,15 @@ export function sendBridgeError(
           error: errorMessage(err),
           code: 'branch_point_invalid',
           errorKind: kind,
+        });
+        return;
+      }
+      if (kind === 'session_not_found') {
+        res.status(404).json({
+          error: errorMessage(err),
+          code: kind,
+          errorKind: kind,
+          ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
         });
         return;
       }
@@ -1075,11 +1252,15 @@ export function sendBridgeError(
         });
         return;
       }
-      if (kind === 'directory_not_found') {
+      if (
+        kind === 'directory_not_found' ||
+        (kind === 'containment_violation' &&
+          ctx?.route === 'POST /session/:id/cd')
+      ) {
         const d = data as { path?: string };
         res.status(400).json({
           error: errorMessage(err),
-          code: 'directory_not_found',
+          code: kind,
           path: d.path,
         });
         return;
@@ -1090,6 +1271,15 @@ export function sendBridgeError(
           error: errorMessage(err),
           code: 'directory_not_trusted',
           path: d.path,
+        });
+        return;
+      }
+      // An operation this session does not offer, such as a directory change
+      // in an SSH workspace or a Managed session.
+      if (kind === 'unsupported_operation') {
+        res.status(400).json({
+          error: errorMessage(err),
+          code: 'unsupported_operation',
         });
         return;
       }

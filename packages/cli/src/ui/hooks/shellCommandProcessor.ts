@@ -21,12 +21,12 @@ import {
   createDebugLogger,
   isSignalTermination,
   isBinary,
-  ShellExecutionService,
 } from '@qwen-code/qwen-code-core';
 import { type PartListUnion } from '@google/genai';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import { SHELL_COMMAND_NAME } from '../constants.js';
 import { formatMemoryUsage } from '../utils/formatters.js';
+import { executeRuntimeShell } from '@qwen-code/qwen-code-core/sandbox/runtime-shell.js';
 import crypto from 'node:crypto';
 import path from 'node:path';
 import os from 'node:os';
@@ -107,7 +107,7 @@ export const useShellCommandProcessor = (
       let pwdFilePath: string | undefined;
 
       // On non-windows, wrap the command to capture the final working directory.
-      if (!isWindows) {
+      if (!isWindows && !config.getShellExecutionSandbox?.()) {
         let command = rawQuery.trim();
         const pwdFileName = `shell_pwd_${crypto.randomBytes(6).toString('hex')}.tmp`;
         pwdFilePath = path.join(os.tmpdir(), pwdFileName);
@@ -183,7 +183,8 @@ export const useShellCommandProcessor = (
             defaultBg: activeTheme.colors.Background,
           };
 
-          const { pid, result } = await ShellExecutionService.execute(
+          const { pid, result } = await executeRuntimeShell(
+            config,
             commandToExecute,
             targetDir,
             (event) => {

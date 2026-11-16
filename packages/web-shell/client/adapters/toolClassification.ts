@@ -7,6 +7,16 @@ function getRecord(value: unknown): Record<string, unknown> | undefined {
   return value as Record<string, unknown>;
 }
 
+export function resolveToolCallName(
+  toolName: string | undefined,
+  rawInput: unknown,
+): string | undefined {
+  const name = getRecord(rawInput)?.['name'];
+  return toolName === 'tool_call' && typeof name === 'string' && name.trim()
+    ? name
+    : toolName;
+}
+
 export function isActiveToolStatus(
   status: ACPToolCall['status'] | string,
 ): boolean {
@@ -57,7 +67,9 @@ export function isSubAgentToolCall(tool: ACPToolCall): boolean {
 // changes in core — the live rule lives in packages/core/src/tools/agent/
 // agent.ts (`backgroundRequested`/`shouldRunInBackground`), and the desktop
 // adapter that used to mirror it has been forked out of this repo. A
-// divergence already exists: `subagentConfig.background` is invisible here.
+// divergence is intentional: `subagentConfig.background` and
+// `agents.defaultBackground` are invisible here. Without `executionMode`, a
+// foreground launch under defaultBackground: false can still appear background.
 export function isBackgroundSubAgentToolCall(tool: ACPToolCall): boolean {
   if (!isSubAgentToolCall(tool)) return false;
   if (tool.executionMode) return tool.executionMode === 'background';

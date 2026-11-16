@@ -32,6 +32,28 @@ function mp4Header(brand = 'isom'): Buffer {
   ]);
 }
 
+// ["RIFF"][size:4][form type:4], optionally padded.
+function riff(form: string, padding = 0): Buffer {
+  return Buffer.concat([
+    Buffer.from('RIFF', 'latin1'),
+    Buffer.alloc(4),
+    Buffer.from(form, 'latin1'),
+    Buffer.alloc(padding),
+  ]);
+}
+
+async function withTempDir(
+  prefix: string,
+  fn: (dir: string) => Promise<void>,
+): Promise<void> {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
+  try {
+    await fn(dir);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+}
+
 describe('sniffVideoMimeType', () => {
   it('detects the MP4 family via ftyp', () => {
     expect(sniffVideoMimeType(mp4Header('isom'))).toBe('video/mp4');
@@ -51,23 +73,15 @@ describe('sniffVideoMimeType', () => {
   });
 
   it('detects AVI via RIFF/AVI', () => {
-    const header = Buffer.concat([
-      Buffer.from('RIFF', 'latin1'),
-      Buffer.alloc(4),
-      Buffer.from('AVI ', 'latin1'),
-      Buffer.alloc(8),
-    ]);
-    expect(sniffVideoMimeType(header)).toBe('video/x-msvideo');
+    expect(sniffVideoMimeType(riff('AVI ', 8))).toBe('video/x-msvideo');
   });
 
   it('returns null for non-video content', () => {
-    expect(sniffVideoMimeType(Buffer.from('hello world plain text data'))).toBe(
-      null,
-    );
-    expect(sniffVideoMimeType(Buffer.from([0x89, 0x50, 0x4e, 0x47]))).toBe(
-      null,
-    ); // PNG
-    expect(sniffVideoMimeType(Buffer.alloc(0))).toBe(null);
+    const text = Buffer.from('hello world plain text data');
+    expect(sniffVideoMimeType(text)).toBeNull();
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+    expect(sniffVideoMimeType(png)).toBeNull();
+    expect(sniffVideoMimeType(Buffer.alloc(0))).toBeNull();
   });
 });
 
@@ -85,97 +99,54 @@ describe('extensionForVideoMime', () => {
 });
 
 describe('hashFileSha256', () => {
-  it('matches crypto sha256 over the same bytes', async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'omni-hash-'));
-    try {
+  it('matches crypto sha256 over the same bytes', () =>
+    withTempDir('omni-hash-', async (dir) => {
       const data = randomBytes(256 * 1024 + 17);
       const filePath = path.join(dir, 'blob.bin');
       await fs.writeFile(filePath, data);
       const expected = createHash('sha256').update(data).digest('hex');
       await expect(hashFileSha256(filePath)).resolves.toBe(expected);
-    } finally {
-      await fs.rm(dir, { recursive: true, force: true });
-    }
-  });
+    }));
 });
 
 describe('sniffMediaType (S2 modalities)', async () => {
   const { sniffMediaType } = await import('./recognition.js');
+  const expectSniff = (header: Buffer, mimeType: string, modality: string) =>
+    expect(sniffMediaType(header)).toMatchObject({ mimeType, modality });
 
   it('detects images: png/jpeg/webp/gif', () => {
-    expect(
-      sniffMediaType(
-        Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47]), Buffer.alloc(8)]),
-      ),
-    ).toMatchObject({ mimeType: 'image/png', modality: 'image' });
-    expect(sniffMediaType(Buffer.from([0xff, 0xd8, 0xff, 0xe0]))).toMatchObject(
-      { mimeType: 'image/jpeg', modality: 'image' },
+    expectSniff(
+      Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47]), Buffer.alloc(8)]),
+      'image/png',
+      'image',
     );
-    expect(
-      sniffMediaType(
-        Buffer.concat([
-          Buffer.from('RIFF', 'latin1'),
-          Buffer.alloc(4),
-          Buffer.from('WEBP', 'latin1'),
-        ]),
-      ),
-    ).toMatchObject({ mimeType: 'image/webp', modality: 'image' });
-    expect(sniffMediaType(Buffer.from('GIF89a....'))).toMatchObject({
-      mimeType: 'image/gif',
-      modality: 'image',
-    });
+    expectSniff(Buffer.from([0xff, 0xd8, 0xff, 0xe0]), 'image/jpeg', 'image');
+    expectSniff(riff('WEBP'), 'image/webp', 'image');
+    expectSniff(Buffer.from('GIF89a....'), 'image/gif', 'image');
   });
 
   it('detects audio: mp3(id3/framesync)/wav/flac/ogg/m4a', () => {
-    expect(sniffMediaType(Buffer.from('ID3\x04\x00'))).toMatchObject({
-      mimeType: 'audio/mpeg',
-      modality: 'audio',
-    });
-    expect(sniffMediaType(Buffer.from([0xff, 0xfb, 0x90, 0x00]))).toMatchObject(
-      { mimeType: 'audio/mpeg', modality: 'audio' },
-    );
-    expect(
-      sniffMediaType(
-        Buffer.concat([
-          Buffer.from('RIFF', 'latin1'),
-          Buffer.alloc(4),
-          Buffer.from('WAVE', 'latin1'),
-        ]),
-      ),
-    ).toMatchObject({ mimeType: 'audio/wav', modality: 'audio' });
-    expect(sniffMediaType(Buffer.from('fLaC....'))).toMatchObject({
-      mimeType: 'audio/flac',
-      modality: 'audio',
-    });
-    expect(sniffMediaType(Buffer.from('OggS....'))).toMatchObject({
-      mimeType: 'audio/ogg',
-      modality: 'audio',
-    });
+    expectSniff(Buffer.from('ID3\x04\x00'), 'audio/mpeg', 'audio');
+    expectSniff(Buffer.from([0xff, 0xfb, 0x90, 0x00]), 'audio/mpeg', 'audio');
+    expectSniff(riff('WAVE'), 'audio/wav', 'audio');
+    expectSniff(Buffer.from('fLaC....'), 'audio/flac', 'audio');
+    expectSniff(Buffer.from('OggS....'), 'audio/ogg', 'audio');
     const m4a = Buffer.concat([
       Buffer.from([0, 0, 0, 0x18]),
       Buffer.from('ftypM4A ', 'latin1'),
       Buffer.alloc(4),
     ]);
-    expect(sniffMediaType(m4a)).toMatchObject({
-      mimeType: 'audio/mp4',
-      modality: 'audio',
-    });
+    expectSniff(m4a, 'audio/mp4', 'audio');
   });
 
   it('detects ADTS AAC (layer bits 00) as audio/aac, not audio/mpeg', () => {
     // ADTS header: syncword 0xFFF, MPEG-4, layer 00, no CRC → 0xFF 0xF1.
     // Layer 00 is reserved in MPEG audio, so no valid MP3 is lost.
-    expect(sniffMediaType(Buffer.from([0xff, 0xf1, 0x50, 0x80]))).toMatchObject(
-      { mimeType: 'audio/aac', modality: 'audio' },
-    );
+    expectSniff(Buffer.from([0xff, 0xf1, 0x50, 0x80]), 'audio/aac', 'audio');
     // MPEG-2 ADTS with CRC → 0xFF 0xF8.
-    expect(sniffMediaType(Buffer.from([0xff, 0xf8, 0x50, 0x80]))).toMatchObject(
-      { mimeType: 'audio/aac', modality: 'audio' },
-    );
+    expectSniff(Buffer.from([0xff, 0xf8, 0x50, 0x80]), 'audio/aac', 'audio');
     // A real MP3 frame (layer III = bits 01) still sniffs as audio/mpeg.
-    expect(sniffMediaType(Buffer.from([0xff, 0xfb, 0x90, 0x00]))).toMatchObject(
-      { mimeType: 'audio/mpeg', modality: 'audio' },
-    );
+    expectSniff(Buffer.from([0xff, 0xfb, 0x90, 0x00]), 'audio/mpeg', 'audio');
   });
 
   it('rejects non-media content', () => {
@@ -190,32 +161,22 @@ describe('sniffMediaType (S2 modalities)', async () => {
     expect(sniffMediaType(Buffer.from('GIF export notes, take 2'))).toBeNull();
     expect(sniffMediaType(Buffer.from('GIF90a....'))).toBeNull();
     // Both real signatures detect.
-    expect(sniffMediaType(Buffer.from('GIF87a....'))).toMatchObject({
-      mimeType: 'image/gif',
-      modality: 'image',
-    });
-    expect(sniffMediaType(Buffer.from('GIF89a....'))).toMatchObject({
-      mimeType: 'image/gif',
-      modality: 'image',
-    });
+    expectSniff(Buffer.from('GIF87a....'), 'image/gif', 'image');
+    expectSniff(Buffer.from('GIF89a....'), 'image/gif', 'image');
   });
 
   it('does not mistake the UTF-16 LE BOM for an MPEG frame sync', () => {
-    // 0xFF 0xFE passes the naive sync mask (0xFE & 0xE0 === 0xE0) and is even
-    // a technically valid MPEG-1 Layer I header, but it is also the UTF-16 LE
-    // BOM; the sniffer deliberately excludes it so UTF-16 LE text does not
-    // sniff as audio. Callers without a secondary modality gate must not see
-    // audio/mpeg here.
+    // 0xFF 0xFE passes the naive sync mask (0xFE & 0xE0 === 0xE0) and is even a
+    // valid MPEG-1 Layer I header, but it is also the UTF-16 LE BOM: the sniffer
+    // excludes it so UTF-16 LE text does not sniff as audio for callers without
+    // a secondary modality gate.
     const utf16le = Buffer.concat([
       Buffer.from([0xff, 0xfe]),
       Buffer.from('h\0e\0l\0l\0o\0', 'latin1'),
     ]);
     expect(sniffMediaType(utf16le)).toBeNull();
     // Genuine frame syncs still detect.
-    expect(sniffMediaType(Buffer.from([0xff, 0xfb, 0x90]))).toMatchObject({
-      mimeType: 'audio/mpeg',
-      modality: 'audio',
-    });
+    expectSniff(Buffer.from([0xff, 0xfb, 0x90]), 'audio/mpeg', 'audio');
     expect(sniffMediaType(Buffer.from([0xff, 0xf3, 0x00]))).toMatchObject({
       modality: 'audio',
     });
@@ -223,39 +184,37 @@ describe('sniffMediaType (S2 modalities)', async () => {
 });
 
 describe('sniffFileModality', () => {
-  it('reports the modality of a recognized media header', async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'omni-sniff-'));
-    try {
-      const video = path.join(dir, 'clip.mp4');
-      await fs.writeFile(video, mp4Header('isom'));
-      await expect(sniffFileModality(video)).resolves.toBe('video');
+  async function sniffWritten(
+    dir: string,
+    name: string,
+    content: Buffer | string,
+  ) {
+    const filePath = path.join(dir, name);
+    await fs.writeFile(filePath, content);
+    return sniffFileModality(filePath);
+  }
 
-      const audio = path.join(dir, 'song.mp3');
-      await fs.writeFile(audio, Buffer.from('ID3\0\0\0', 'latin1'));
-      await expect(sniffFileModality(audio)).resolves.toBe('audio');
+  it('reports the modality of a recognized media header', () =>
+    withTempDir('omni-sniff-', async (dir) => {
+      await expect(
+        sniffWritten(dir, 'clip.mp4', mp4Header('isom')),
+      ).resolves.toBe('video');
+      await expect(
+        sniffWritten(dir, 'song.mp3', Buffer.from('ID3\0\0\0', 'latin1')),
+      ).resolves.toBe('audio');
+      await expect(
+        sniffWritten(dir, 'pic.jpg', Buffer.from([0xff, 0xd8, 0xff, 0xe0])),
+      ).resolves.toBe('image');
+    }));
 
-      const image = path.join(dir, 'pic.jpg');
-      await fs.writeFile(image, Buffer.from([0xff, 0xd8, 0xff, 0xe0]));
-      await expect(sniffFileModality(image)).resolves.toBe('image');
-    } finally {
-      await fs.rm(dir, { recursive: true, force: true });
-    }
-  });
-
-  it('returns null for non-media content (legacy path keeps it)', async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'omni-sniff-'));
-    try {
-      const text = path.join(dir, 'notes.txt');
-      await fs.writeFile(text, 'just some text, definitely not media');
-      await expect(sniffFileModality(text)).resolves.toBeNull();
+  it('returns null for non-media content (legacy path keeps it)', () =>
+    withTempDir('omni-sniff-', async (dir) => {
+      await expect(
+        sniffWritten(dir, 'notes.txt', 'just some text, definitely not media'),
+      ).resolves.toBeNull();
       // Empty file: stat.size 0 → zero-length read, must not throw.
-      const empty = path.join(dir, 'empty.bin');
-      await fs.writeFile(empty, '');
-      await expect(sniffFileModality(empty)).resolves.toBeNull();
-    } finally {
-      await fs.rm(dir, { recursive: true, force: true });
-    }
-  });
+      await expect(sniffWritten(dir, 'empty.bin', '')).resolves.toBeNull();
+    }));
 
   it('returns null (never throws) for an unreadable path', async () => {
     // The pre-gate must degrade to "not omni", not break the read.
@@ -266,8 +225,7 @@ describe('sniffFileModality', () => {
 
   it('returns the sniffed modality even when close() rejects (never throws)', async () => {
     // Network mounts can fail the final close() (EIO/ESTALE); the pre-gate's
-    // never-throws contract must survive a rejecting close, not turn a
-    // successful sniff into a crash.
+    // never-throws contract must not turn a successful sniff into a crash.
     const header = mp4Header('isom');
     const openSpy = vi.spyOn(fs, 'open').mockResolvedValue({
       stat: async () => ({ size: header.length }),

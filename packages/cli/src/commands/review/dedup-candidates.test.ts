@@ -278,6 +278,69 @@ describe('runDedupCandidates — matching against the posted work list', () => {
     expect(r.droppedCount).toBe(0);
     expect(r.kept).toHaveLength(1);
   });
+
+  it('a kept candidate keeps every extra field — the shards are built from kept', () => {
+    // The orchestrator builds the Step 4 verify shard files from THIS list,
+    // so the posted layer must hand the entry on as the finder wrote it:
+    // narrowing it to the four matched fields would strip the shard's own
+    // inputs (failure scenario, source tags) with nothing downstream to
+    // recover them.
+    writeLedger([entry()]);
+    const extra = {
+      failureScenario: 'action@main re-tagged → the runner changes silently',
+      source: ['[review]'],
+      shortSummary: 'precheck-pr: unpinned action',
+      confidence: 'high',
+    };
+    const cand = candidate({ file: 'src/other.ts', ...extra });
+    const r = run([cand]);
+    expect(r.droppedCount).toBe(0);
+    expect(r.kept).toHaveLength(1);
+    expect(r.kept[0]).toEqual(cand);
+  });
+});
+
+describe('runDedupCandidates — an unreadable side file fails open', () => {
+  // The ABSENT side file is already pinned above ('round 1 — no side file').
+  // These pin the read's own two failure arms instead: a truncated or
+  // foreign-shaped file must neither throw out of the command nor take a
+  // candidate down with it — the side file sits on another account's
+  // writable surface, and the dedup is an optimization, not a gate.
+  const sideFile = (): string =>
+    join(planDir, `qwen-review-pr-${PR}-prev-ledger.json`);
+
+  it('a truncated side file lands in the parse catch — no throw, no drop', () => {
+    // Control first: with the same ledger intact the claim DOES drop, so
+    // the fail-open assertions below cannot be satisfied by a fixture that
+    // never reached the read.
+    writeLedger([entry()], 3);
+    expect(run([candidate()]).droppedCount).toBe(1);
+
+    writeFileSync(sideFile(), '{"v":1,"round":3,"findings":[');
+    const r = run([candidate()]);
+    expect(r.droppedCount).toBe(0);
+    expect(r.kept).toHaveLength(1);
+    expect(r.sources.ledger).toBeNull();
+    expect(r.note).toContain('posted-finding dedup skipped');
+  });
+
+  it('a side file failing the shape guard is refused, not crashed on', () => {
+    writeLedger([entry()], 3);
+    expect(run([candidate()]).droppedCount).toBe(1);
+
+    for (const malformed of [
+      // `.filter` on a non-array throws without the guard.
+      { v: 1, round: 3, findings: 'nope' },
+      // Round 0 is a work list this pipeline cannot have minted.
+      { v: 1, round: 0, findings: [entry()] },
+    ]) {
+      writeFileSync(sideFile(), JSON.stringify(malformed));
+      const r = run([candidate()]);
+      expect(r.droppedCount).toBe(0);
+      expect(r.kept).toHaveLength(1);
+      expect(r.sources.ledger).toBeNull();
+    }
+  });
 });
 
 describe('runDedupCandidates — the deferral half reads the findings artifact', () => {
@@ -388,6 +451,43 @@ describe('runDedupCandidates — the deferral half reads the findings artifact',
     writeArtifact([deferred()], undefined, 3);
     expect(run([candidate()]).droppedCount).toBe(1);
   });
+
+  it('keeps a candidate whose anchor sits outside the deferral line window', () => {
+    writeArtifact([deferred()], undefined, 3);
+    // Control: inside the window the same pair absorbs, so the keep below
+    // is the window's doing and not a fixture that never matched.
+    expect(run([candidate({ line: 44 })]).droppedCount).toBe(1);
+    expect(run([candidate({ line: 46 })]).droppedCount).toBe(0);
+  });
+
+  it('keeps a candidate whose claim only loosely overlaps a deferral', () => {
+    // Four shared tokens over a 13-token union: past the two-token
+    // coincidence floor, far under the 0.6 bar — the similarity leg alone
+    // decides, so a loosened bar is what this case catches.
+    writeArtifact(
+      [
+        deferred({
+          summary:
+            'precheck workflow ordering differs for the action metadata cache',
+          shortSummary: 'ordering differs',
+        }),
+      ],
+      undefined,
+      3,
+    );
+    expect(run([candidate()]).droppedCount).toBe(0);
+    // Control: the carried wording still absorbs.
+    writeArtifact([deferred()], undefined, 3);
+    expect(run([candidate()]).droppedCount).toBe(1);
+  });
+
+  it('never drops a Critical candidate against a non-Critical deferral', () => {
+    writeArtifact([deferred()], undefined, 3); // severity Suggestion
+    expect(run([candidate({ severity: 'Critical' })]).droppedCount).toBe(0);
+    // Control: a Critical deferral still absorbs the escalation.
+    writeArtifact([deferred({ severity: 'Critical' })], undefined, 3);
+    expect(run([candidate({ severity: 'Critical' })]).droppedCount).toBe(1);
+  });
 });
 
 describe('runDedupCandidates — the deferral half is fenced to the side file’s round', () => {
@@ -449,6 +549,34 @@ describe('runDedupCandidates — the deferral half is fenced to the side file’
     writeArtifact([deferredD31()], NAME, 5);
     expect(run([candidate()]).droppedCount).toBe(0);
     expect(run([candidate()]).sources.artifact).toBeNull();
+  });
+});
+
+describe('runDedupCandidates — a claim both carriers hold cites the posted carrier', () => {
+  it('drops once and cites the side file’s id, not the artifact mirror’s', () => {
+    // The carried set is posted-then-deferred, so the drop reason names the
+    // entry Step 6 will rule on. Both halves really are loaded here — a
+    // fixture carrying only one of them would pass whatever the order.
+    writeLedger([entry()], 3);
+    writeArtifact(
+      [
+        {
+          id: 'D2-1',
+          severity: 'Suggestion',
+          confidence: 'high',
+          summary: TITLE,
+          shortSummary: 'precheck-pr: unpinned action',
+          locations: [{ file: 'src/a.ts', line: 40 }],
+        },
+      ],
+      undefined,
+      3,
+    );
+    const r = run([candidate()]);
+    expect(r.droppedCount).toBe(1);
+    expect(r.dropped[0]).toMatchObject({ matchedId: 'R1-2', via: 'posted' });
+    expect(r.sources.ledger).toEqual({ round: 3, findings: 1 });
+    expect(r.sources.artifact).toMatchObject({ deferred: 1 });
   });
 });
 

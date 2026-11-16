@@ -1,0 +1,2896 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { once } from 'node:events';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdir, readdir, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { Worker } from 'node:worker_threads';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ModRuntime, type ModPromptQueue } from './runtime.js';
+import { ModBudget } from './dispatch.js';
+import { ModStore } from './store.js';
+import {
+  MOD_MAX_BYTES,
+  MOD_TIMEOUT_MS,
+  type ModLog,
+  type ModModelCompleteInput,
+  type ModModelCompleteResult,
+  type ModModelHost,
+  type ModOptions,
+  type ModQueuedPrompt,
+  type ModSessionFacts,
+  type ModWorkerReply,
+} from './types.js';
+import type { ModToolNext } from './tool-events.js';
+
+const signal = () => new AbortController().signal;
+const fixture = (
+  handler = "return { text: String(++count) + ':' + e.args };",
+) => `
+  let count = 0;
+  export async function register(on) {
+    await Promise.resolve();
+    on('session.start', async ($, e, next) => {
+      const registration = await $.command.register({name:'hello',description:'Hello'});
+      $.ui.log('start:' + registration.command + ':' + e.surface + ':' + e.isInteractive);
+      return next(e);
+    });
+    on('command.run', {command:'hello'}, async ($, e, next) => { ${handler} });
+    on('session.end', ($, e, next) => {
+      $.ui.log('end:' + e.reason + ':' + e.sessionId + ':' + e.resume.id);
+      return next(e);
+    });
+  }
+`;
+
+describe('ModRuntime with the real QuickJS worker', () => {
+  const runtimes: ModRuntime[] = [];
+  const logs: ModLog[] = [];
+  const create = async (
+    source = fixture(),
+    abort = signal(),
+    options: ModOptions = {},
+  ) => {
+    const runtime = await ModRuntime.create(
+      { root: '/fixture', entry: '/fixture/mod.js', source },
+      '/workspace',
+      (log) => logs.push(log),
+      abort,
+      options,
+    );
+    runtimes.push(runtime);
+    return runtime;
+  };
+  const createTerminal = async (sources = [fixture()]) => {
+    const runtime = await ModRuntime.createGroup(
+      sources.map((source, index) => ({
+        id: `mod-${index}`,
+        name: `mod-${index}`,
+        source: { root: '/fixture', entry: '/fixture/mod.js', source },
+        options: {},
+      })),
+      '/workspace',
+      (log) => logs.push(log),
+      signal(),
+      undefined,
+      'terminal',
+    );
+    runtimes.push(runtime);
+    return runtime;
+  };
+
+  afterEach(async () => {
+    await Promise.all(runtimes.splice(0).map((runtime) => runtime.dispose()));
+    logs.length = 0;
+  });
+
+  it('awaits register/start, retains closure state, and ends without reloading', async () => {
+    const runtime = await create();
+    expect(runtime.getCommands()).toEqual([
+      { name: 'hello', description: 'Hello' },
+    ]);
+    expect(logs).toEqual([
+      { to: 'transcript', text: 'start:hello:null:false' },
+    ]);
+    expect(await runtime.runCommand('hello', 'one', signal())).toBe('1:one');
+    await runtime.end('old', 'clear', signal());
+    expect(await runtime.runCommand('hello', 'two', signal())).toBe('2:two');
+    await runtime.end('new', 'other', signal());
+    expect(logs.map((log) => log.text)).toEqual([
+      'start:hello:null:false',
+      'end:clear:old:old',
+      'end:other:new:new',
+    ]);
+  });
+
+  it('uses terminal identity and current presentation while allowing argument middleware', async () => {
+    const runtime = await createTerminal([
+      `export function register(on) {
+        on('command.run', ($, e, next) => next({...e, args:'changed:' + e.args}));
+      }`,
+      fixture('return {text: JSON.stringify(e)};'),
+    ]);
+    expect(logs).toEqual([
+      { to: 'transcript', text: 'start:hello:terminal:true' },
+    ]);
+    for (const presentation of [
+      { isFullscreen: false, columns: 81 },
+      { isFullscreen: true, columns: 144 },
+    ]) {
+      expect(
+        JSON.parse(
+          await runtime.runCommand('hello', 'input', signal(), presentation),
+        ),
+      ).toEqual({
+        command: 'hello',
+        args: 'changed:input',
+        origin: { kind: 'composer' },
+        presentation,
+      });
+    }
+    await runtime.end('old', 'clear', signal());
+    expect(
+      await runtime.runCommand('hello', 'after-clear', signal()),
+    ).toContain('changed:after-clear');
+    expect(logs.filter((log) => log.text.startsWith('start:'))).toHaveLength(1);
+  });
+
+  it('preserves headless identity and presentation defaults', async () => {
+    const runtime = await create(fixture('return {text: JSON.stringify(e)};'));
+    expect(
+      JSON.parse(
+        await runtime.runCommand('hello', 'headless', signal(), {
+          isFullscreen: true,
+          columns: 144,
+        }),
+      ),
+    ).toEqual({
+      command: 'hello',
+      args: 'headless',
+      origin: { kind: 'sdk' },
+      presentation: { isFullscreen: false, columns: 80 },
+    });
+    expect(logs).toEqual([
+      { to: 'transcript', text: 'start:hello:null:false' },
+    ]);
+  });
+
+  it.each(['surface:null', 'isInteractive:false'])(
+    'pins terminal startup identity: %s',
+    async (change) => {
+      const runtime = await createTerminal([
+        `export function register(on) {
+          on('session.start', ($, e, next) => next({...e, ${change}}));
+        }`,
+        fixture(),
+      ]);
+      expect(logs).toContainEqual({
+        to: 'debug',
+        text: expect.stringContaining('pinned event fields'),
+      });
+      expect(logs).toContainEqual({
+        to: 'transcript',
+        text: 'start:hello:terminal:true',
+      });
+      expect(await runtime.runCommand('hello', '', signal())).toBe('1:');
+    },
+  );
+
+  it.each([
+    "origin:{kind:'sdk'}",
+    'presentation:{isFullscreen:false,columns:80}',
+  ])('pins terminal command identity and presentation: %s', async (change) => {
+    const runtime = await createTerminal([
+      `export function register(on) {
+        on('command.run', ($, e, next) => next({...e, ${change}}));
+      }`,
+      fixture('return {text: JSON.stringify(e)};'),
+    ]);
+    expect(
+      JSON.parse(
+        await runtime.runCommand('hello', '', signal(), {
+          isFullscreen: true,
+          columns: 144,
+        }),
+      ),
+    ).toEqual({
+      command: 'hello',
+      args: '',
+      origin: { kind: 'composer' },
+      presentation: { isFullscreen: true, columns: 144 },
+    });
+    expect(logs).toContainEqual({
+      to: 'debug',
+      text: expect.stringContaining('pinned event fields'),
+    });
+  });
+
+  it.each([
+    'tool.call',
+    'tool.check',
+    'tool.*',
+    '*',
+    '!session.*',
+    '!tool.call',
+  ])(
+    'dispatches terminal %s subscriptions through the real worker',
+    async (pattern) => {
+      const runtime = await createTerminal([
+        `export function register(on) {
+          on('${pattern}', ($, e, next) => {
+            $.ui.log('observed:' + ('input' in e ? 'check' : 'call'));
+            return next(e);
+          });
+        }`,
+        fixture(),
+      ]);
+      expect(runtime.hasToolHooks).toBe(true);
+      expect(logs.map((log) => log.text).join('\n')).not.toContain(
+        'not supported',
+      );
+      logs.length = 0;
+      const next = vi.fn<ModToolNext>(async (changed, active, check) => ({
+        result: await check(
+          {
+            tool: changed.tool,
+            input: { path: changed['path'] },
+            tool_use_id: changed.tool_use_id,
+          },
+          { decision: 'allow' },
+          active,
+        ),
+      }));
+      await expect(
+        runtime.runTool(
+          { tool: 'write_file', tool_use_id: 'call-1', path: '/unused' },
+          next,
+          signal(),
+        ),
+      ).resolves.toEqual({ result: { decision: 'allow' } });
+      expect(next).toHaveBeenCalledOnce();
+      const events = logs.map((log) => log.text);
+      expect(events.includes('observed:call')).toBe(
+        pattern !== 'tool.check' && pattern !== '!tool.call',
+      );
+      // The registration handling tool.call is an ancestor of its nested check.
+      expect(events.includes('observed:check')).toBe(
+        pattern === 'tool.check' || pattern === '!tool.call',
+      );
+    },
+  );
+
+  it('does not warn for terminal patterns that exclude tool events', async () => {
+    const runtime = await createTerminal([
+      `export function register(on) {
+        on('!tool.*', ($, e, next) => next(e));
+      }`,
+      fixture(),
+    ]);
+    expect(runtime.hasToolHooks).toBe(false);
+    expect(logs).toEqual([
+      { to: 'transcript', text: 'start:hello:terminal:true' },
+    ]);
+    expect(await runtime.runCommand('hello', '', signal())).toBe('1:');
+  });
+
+  it('isolates globals and state between plugins without Node capabilities', async () => {
+    const one = await create(
+      fixture(
+        `globalThis.secret = 'one'; return {text: [typeof process, typeof require, typeof fetch, new Function('return typeof process')()].join(',')};`,
+      ),
+    );
+    const two = await create(
+      fixture(`return { text: typeof globalThis.secret };`),
+    );
+    expect(await one.runCommand('hello', '', signal())).toBe(
+      'undefined,undefined,undefined,undefined',
+    );
+    expect(await two.runCommand('hello', '', signal())).toBe('undefined');
+  });
+
+  it('ignores a registration object returned from register', async () => {
+    const runtime = await create(`export function register(on) {
+      return on('session.start', ($, e, next) => next(e));
+    }`);
+    expect(runtime.getCommands()).toEqual([]);
+  });
+
+  it('suspends detached guest jobs between requests without losing logs or state', async () => {
+    const runtime = await create(
+      fixture(`
+        if (e.args === 'start') {
+          void (async () => { for (;;) { await null; count++; } })();
+          $.ui.log('queued'); return {text:'started'};
+        }
+        return {text:String(count)};
+      `),
+    );
+    expect(await runtime.runCommand('hello', 'start', signal())).toBe(
+      'started',
+    );
+    expect(logs.some((log) => log.text === 'queued')).toBe(true);
+    let previous = Number(
+      await runtime.runCommand('hello', 'inspect', signal()),
+    );
+    for (let i = 0; i < 2; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      const current = Number(
+        await runtime.runCommand('hello', 'inspect', signal()),
+      );
+      expect(current - previous).toBeLessThan(1000);
+      previous = current;
+    }
+  });
+
+  it('allows repeated next calls with equivalent frozen lifecycle input', async () => {
+    const runtime = await create(`export function register(on) {
+      on('session.start', async ($, e, next) => {
+        if (!Object.isFrozen(e)) throw new Error('not frozen');
+        const a = await next(e); const b = await next({...e});
+        if (a.cwd !== b.cwd) throw new Error('repeat failed');
+        await $.command.register({name:'hello',description:'ok'});
+        return b;
+      });
+      on('command.run',{command:'hello'},() => ({}));
+    }`);
+    expect(await runtime.runCommand('hello', '', signal())).toBe('');
+  });
+
+  it('skips hooks for known Claude Code events it does not run and reports them once', async () => {
+    const runtime = await create(`export function register(on) {
+      on('prompt.edit', ($, e, next) => next(e));
+      on('prompt.edit', {key:'enter'}, ($, e, next) => next(e)).catch(() => ({}));
+      on('prompt.*', ($, e, next) => next(e));
+      on('!prompt.change', async ($, e, next) => {
+        if (e.command === 'hello') $.ui.log('negated:' + next.event);
+        return next(e);
+      });
+      on('classic.Stop', ($, e, next) => next(e));
+      // Added in Claude Code 2.1.316 and 2.1.318.
+      on('prompt.paint', ($, e, next) => next(e));
+      on('ui.place', ($, e, next) => next(e));
+      on('ui.backdrop', ($, e, next) => next(e));
+      on('ui.render', {component:'Spinner'}, ($, e, next) => next(e));
+      on('session.start', async ($, e, next) => {
+        await $.command.register({name:'hello',description:'Hello'});
+        return next(e);
+      });
+      on('command.run', {command:'hello'}, () => ({text:'still works'}));
+    }`);
+    expect(logs).toEqual([
+      {
+        to: 'transcript',
+        text: 'Hooks for unsupported events will not run: classic.Stop, prompt.*, prompt.edit, prompt.paint, ui.backdrop, ui.place, ui.render',
+      },
+    ]);
+    expect(await runtime.runCommand('hello', '', signal())).toBe('still works');
+    expect(logs.at(-1)).toEqual({
+      to: 'transcript',
+      text: 'negated:command.run',
+    });
+  });
+
+  it('fails initialization for skipped hooks when the plugin opts in', async () => {
+    await expect(
+      ModRuntime.createGroup(
+        [
+          {
+            id: 'strict',
+            name: 'strict',
+            options: {},
+            unsupportedEvents: 'reject',
+            source: {
+              root: '/fixture',
+              entry: '/fixture/mod.js',
+              source: `export function register(on) {
+                on('turn.step', ($, e, next) => next(e));
+                on('prompt.submit', ($, e, next) => next(e));
+                on('session.start', ($, e, next) => next(e));
+              }`,
+            },
+          },
+        ],
+        '/workspace',
+        (log) => logs.push(log),
+        signal(),
+      ),
+    ).rejects.toThrow(
+      'Mod strict: Mod events not supported: prompt.submit, turn.step',
+    );
+    expect(logs).toEqual([]);
+  });
+
+  it('answers $.session.version through the API middleware chain', async () => {
+    const versionFixture = fixture(
+      'return {text: JSON.stringify(await $.session.version())};',
+    );
+    const runtime = await ModRuntime.createGroup(
+      [
+        `export function register(on) {
+          on('session.version', async ($, e, next) => {
+            const answer = await next(e);
+            if (next.origin.plugin !== 'mod-1') throw new Error('origin');
+            return {value: {...answer.value, version: answer.value.version + '+wrapped'}};
+          });
+        }`,
+        versionFixture,
+      ].map((source, index) => ({
+        id: `mod-${index}`,
+        name: `mod-${index}`,
+        source: { root: '/fixture', entry: '/fixture/mod.js', source },
+        options: {},
+      })),
+      '/workspace',
+      (log) => logs.push(log),
+      signal(),
+      undefined,
+      null,
+      '1.2.3',
+    );
+    runtimes.push(runtime);
+    expect(JSON.parse(await runtime.runCommand('hello', '', signal()))).toEqual(
+      {
+        version: '1.2.3+wrapped',
+        qwen: {
+          claudeCode: '2.1.318',
+          events: [
+            'clock.now',
+            'clock.sleep',
+            'command.register',
+            'command.run',
+            'model.complete',
+            'session.cwd',
+            'session.end',
+            'session.id',
+            'session.model',
+            'session.root',
+            'session.start',
+            'session.surface',
+            'session.surfaces',
+            'session.turns',
+            'session.usage',
+            'session.version',
+            'tool.call',
+            'tool.check',
+            'turn.abort',
+            'turn.complete',
+            'turn.start',
+            'ui.invalidate',
+            'ui.log',
+          ],
+          methods: [
+            'clock.now',
+            'clock.sleep',
+            'command.register',
+            'session.cwd',
+            'session.id',
+            'session.model',
+            'session.root',
+            'session.surface',
+            'session.surfaces',
+            'session.turns',
+            'session.usage',
+            'session.version',
+            'turn.abort',
+            'ui.invalidate',
+            'ui.log',
+            'ui.resolve',
+          ],
+        },
+      },
+    );
+    const denied = await createTerminal([
+      `export function register(on) {
+        on('session.version', () => ({deny: 'hidden'}));
+      }`,
+      fixture(
+        'try { await $.session.version(); return {text:"answered"}; } catch (error) { return {text:String(error)}; }',
+      ),
+    ]);
+    expect(await denied.runCommand('hello', '', signal())).toContain('hidden');
+  });
+
+  const facts = (changes: Partial<ModSessionFacts> = {}): ModSessionFacts => ({
+    id: 'session-1',
+    cwd: '/workspace',
+    root: '/workspace',
+    model: 'qwen-max',
+    turns: 2,
+    usage: {
+      startedAt: 1_000,
+      context: { tokens: 300, window: 1_000, percent: 30 },
+      rateLimits: [],
+    },
+    ...changes,
+  });
+  const createWithFacts = async (
+    sources: string[],
+    read: () => ModSessionFacts,
+  ) => {
+    const runtime = await ModRuntime.createGroup(
+      sources.map((source, index) => ({
+        id: `mod-${index}`,
+        name: `mod-${index}`,
+        source: {
+          root: `/plugins/mod-${index}`,
+          entry: `/plugins/mod-${index}/mod.js`,
+          source,
+        },
+        options: {},
+      })),
+      '/workspace',
+      (log) => logs.push(log),
+      signal(),
+      undefined,
+      'terminal',
+      '1.2.3',
+      read,
+    );
+    runtimes.push(runtime);
+    return runtime;
+  };
+
+  it('answers session facts and the plugin identity from each dispatch snapshot', async () => {
+    let current = facts();
+    const read = vi.fn(() => current);
+    const runtime = await createWithFacts(
+      [
+        `export function register(on) {
+          on('session.start', async ($, e, next) => {
+            $.ui.log('start model:' + await $.session.model());
+            return next(e);
+          });
+        }`,
+        fixture(`return {text: JSON.stringify({
+          plugin: JSON.parse(JSON.stringify($.plugin)),
+          plain: [String($.plugin), (await Promise.resolve($.plugin)).name, Object.isFrozen($.plugin)],
+          id: await $.session.id(),
+          cwd: await $.session.cwd(),
+          root: await $.session.root(),
+          model: await $.session.model(),
+          turns: await $.session.turns(),
+          surfaces: await $.session.surfaces(),
+          surface: await $.session.surface(),
+          usage: await $.session.usage({breakdown: 'summary', columns: 80}),
+          invalid: await $.session.usage({breakdown: 'detail'}).then(() => 'answered', String),
+        })};`),
+      ],
+      read,
+    );
+    expect(logs.map((log) => log.text)).toContain('start model:qwen-max');
+    expect(JSON.parse(await runtime.runCommand('hello', '', signal()))).toEqual(
+      {
+        plugin: { name: 'mod-1', root: '/plugins/mod-1' },
+        plain: ['[object Object]', 'mod-1', true],
+        id: 'session-1',
+        cwd: '/workspace',
+        root: '/workspace',
+        model: 'qwen-max',
+        turns: 2,
+        surfaces: ['terminal'],
+        surface: 'terminal',
+        usage: current.usage,
+        invalid: expect.stringContaining(
+          'Invalid Mod session.usage arguments.',
+        ),
+      },
+    );
+    current = facts({ id: 'session-2', turns: 0 });
+    expect(
+      JSON.parse(await runtime.runCommand('hello', '', signal())),
+    ).toMatchObject({ id: 'session-2', turns: 0 });
+    expect(read).toHaveBeenCalledTimes(3);
+  });
+
+  it('answers headless defaults when no snapshot is supplied', async () => {
+    const runtime = await create(
+      fixture(
+        'return {text: JSON.stringify([await $.session.surfaces(), await $.session.surface(), await $.session.cwd(), (await $.session.usage()).context])};',
+      ),
+    );
+    expect(JSON.parse(await runtime.runCommand('hello', '', signal()))).toEqual(
+      [[], null, '/workspace', { tokens: 0, window: 0 }],
+    );
+  });
+
+  it('lets another plugin answer, rewrite or deny the session and clock events', async () => {
+    const runtime = await createWithFacts(
+      [
+        `export function register(on) {
+          on('clock.now', () => ({value: 42}));
+          on('session.model', async ($, e, next) => {
+            const answer = await next(e);
+            return {value: answer.value + '+seen'};
+          });
+          on('session.turns', () => ({deny: 'private'}));
+          on('session.cwd', () => ({value: 7}));
+          on('clock.sleep', ($, e, next) => next({...e, ms: 0}));
+        }`,
+        fixture(`const started = Date.now();
+          await $.clock.sleep(5000);
+          return {text: JSON.stringify({
+            now: await $.clock.now(),
+            model: await $.session.model(),
+            turns: await $.session.turns().then(String, String),
+            cwd: await $.session.cwd(),
+            waited: Date.now() - started,
+          })};`),
+      ],
+      () => facts(),
+    );
+    const answer = JSON.parse(await runtime.runCommand('hello', '', signal()));
+    expect(answer).toMatchObject({
+      now: 42,
+      model: 'qwen-max+seen',
+      turns: expect.stringContaining('private'),
+      cwd: '/workspace',
+    });
+    expect(answer.waited).toBeLessThan(4000);
+  });
+
+  it('reads the clock and charges a sleep to the hook that waits', async () => {
+    const runtime = await create(
+      fixture(`
+        if (e.args === 'now') return {text: String(await $.clock.now())};
+        if (e.args === 'charge') {
+          const before = next.budget.remainingMs;
+          await $.clock.sleep(300);
+          return {text: String(before - next.budget.remainingMs)};
+        }
+        if (e.args === 'invalid')
+          return {text: await $.clock.sleep(-1).then(String, String) + '|' +
+            await $.clock.sleep(1, {timeout: 5}).then(String, String) + '|' +
+            await $.clock.sleep(1, {signal: next.signal}).then(() => 'next.signal', String)};
+        if (e.args === 'detach') {
+          void $.clock.sleep(5000).catch(() => {});
+          return {text: 'detached'};
+        }
+        const listeners = [];
+        const signal = {aborted: false, addEventListener: (type, fn) => listeners.push(fn), removeEventListener() {}};
+        const waiting = $.clock.sleep(5000, {signal});
+        signal.aborted = true;
+        for (const listener of listeners) listener();
+        return {text: await waiting.then(() => 'slept', () => 'aborted')};
+      `),
+    );
+    const before = Date.now();
+    const now = Number(await runtime.runCommand('hello', 'now', signal()));
+    expect(now).toBeGreaterThanOrEqual(before);
+    expect(now).toBeLessThanOrEqual(Date.now());
+    expect(
+      Number(await runtime.runCommand('hello', 'charge', signal())),
+    ).toBeGreaterThanOrEqual(250);
+    expect(await runtime.runCommand('hello', 'invalid', signal())).toMatch(
+      /non-negative number of milliseconds.*\|.*Invalid Mod sleep options.*\|next\.signal$/,
+    );
+    const started = performance.now();
+    expect(await runtime.runCommand('hello', 'detach', signal())).toBe(
+      'detached',
+    );
+    expect(await runtime.runCommand('hello', 'abort', signal())).toBe(
+      'aborted',
+    );
+    expect(performance.now() - started).toBeLessThan(3000);
+  });
+
+  it('times a hook out when its sleep outlasts the remaining budget', async () => {
+    const runtime = await create(`export function register(on) {
+      on('session.start', async ($, e, next) => {
+        await $.command.register({name:'hello',description:'Hello'});
+        return next(e);
+      });
+      on('command.run', async () => { throw new Error('first'); })
+        .catch(async ($, e) => {
+          // A wait past the timer range would fire at once without the clamp.
+          await $.clock.sleep(e.args === 'huge' ? 2 ** 32 : 5000);
+          return {text: 'woke'};
+        });
+    }`);
+    for (const args of ['', 'huge']) {
+      const started = performance.now();
+      await expect(runtime.runCommand('hello', args, signal())).rejects.toThrow(
+        'No Mod hook answered /hello',
+      );
+      expect(performance.now() - started).toBeLessThan(4000);
+    }
+  });
+
+  it('ends the sleep of a failed hook while its catch recovers', async () => {
+    const runtime = await create(`export function register(on) {
+      on('session.start', async ($, e, next) => {
+        await $.command.register({name:'hello',description:'Hello'});
+        return next(e);
+      });
+      on('command.run', async ($) => {
+        globalThis.detached = 'pending';
+        void $.clock.sleep(60000).then(
+          () => { globalThis.detached = 'slept'; },
+          () => { globalThis.detached = 'ended'; },
+        );
+        await $.clock.now();
+        throw new Error('first');
+      }).catch(async ($) => {
+        await $.clock.sleep(100);
+        return {text: globalThis.detached};
+      });
+    }`);
+    expect(await runtime.runCommand('hello', '', signal())).toBe('ended');
+  });
+
+  it.each([
+    ['missing export', 'export const other = 1;', /export register/],
+    [
+      'imports',
+      "import fs from 'node:fs'; export function register() {}",
+      /relative static/,
+    ],
+    [
+      'unknown event',
+      "export function register(on) { on('model.request', () => ({})); }",
+      /event not supported/,
+    ],
+    [
+      'misspelled event',
+      "export function register(on) { on('tool.calls', () => ({})); }",
+      /event not supported: tool\.calls/,
+    ],
+    [
+      'unknown namespace',
+      "export function register(on) { on('models.*', () => ({})); }",
+      /event not supported: models\.\*/,
+    ],
+    [
+      'unknown classic event',
+      "export function register(on) { on('classic.BeforeRun', () => ({})); }",
+      /event not supported: classic\.BeforeRun/,
+    ],
+    [
+      'negated unknown event',
+      "export function register(on) { on('!tool.calls', () => ({})); }",
+      /event not supported: !tool\.calls/,
+    ],
+  ])(
+    'rejects %s without leaving a usable failed runtime',
+    async (_name, source, error) => {
+      let runtime: ModRuntime | undefined;
+      await expect(
+        (async () => {
+          runtime = await create(source);
+          await runtime.runCommand('hello', '', signal());
+        })(),
+      ).rejects.toThrow(error);
+      if (runtime)
+        await expect(
+          runtime.runCommand('hello', '', signal()),
+        ).rejects.toThrow();
+    },
+  );
+
+  it.each(['while (true) {}', 'await new Promise(() => {});'])(
+    'cancels a worker executing %s',
+    async (body) => {
+      const runtime = await create(
+        fixture(`if (e.args === 'ok') return {text:'alive'}; ${body}`),
+      );
+      const started = Date.now();
+      await expect(
+        runtime.runCommand('hello', '', AbortSignal.timeout(100)),
+      ).rejects.toThrow(/cancelled/);
+      expect(Date.now() - started).toBeLessThan(3000);
+      expect(await runtime.runCommand('hello', 'ok', signal())).toBe('alive');
+    },
+  );
+
+  it('bounds registration even if it never resolves', async () => {
+    await expect(
+      create(
+        'export async function register() { await new Promise(() => {}); }',
+        AbortSignal.timeout(1500),
+      ),
+    ).rejects.toThrow(/cancelled/);
+  });
+
+  it('passes a frozen JSON copy of options into register', async () => {
+    const options = { label: 'original', tags: ['one'] };
+    const runtime = await create(
+      `export function register(on, options) {
+      if (!Object.isFrozen(options) || !Object.isFrozen(options.tags)) throw new Error('unfrozen');
+      on('session.start', async ($, e, next) => { await $.command.register({name:'hello',description:'options'}); return next(e); });
+      on('command.run', {command:'hello'}, () => ({ text: options.label + ':' + options.tags.join(',') }));
+    }`,
+      signal(),
+      options,
+    );
+    options.label = 'changed';
+    options.tags.push('two');
+    expect(await runtime.runCommand('hello', '', signal())).toBe(
+      'original:one',
+    );
+  });
+
+  const createTurns = async (
+    sources: string[],
+    abortTurn?: (turnId: string) => void,
+    queuePrompt?: ModPromptQueue,
+  ) => {
+    const runtime = await ModRuntime.createGroup(
+      sources.map((source, index) => ({
+        id: `mod-${index}`,
+        name: `mod-${index}`,
+        source: { root: '/fixture', entry: '/fixture/mod.js', source },
+        options: {},
+      })),
+      '/workspace',
+      (log) => logs.push(log),
+      signal(),
+      undefined,
+      'terminal',
+      '1.2.3',
+      undefined,
+      abortTurn,
+      undefined,
+      true,
+      queuePrompt,
+    );
+    runtimes.push(runtime);
+    return runtime;
+  };
+  const turnEnd = {
+    answer: 'Done.',
+    durationMs: 12,
+    isAborted: false,
+    turnId: 'turn-1',
+    reason: 'answer' as const,
+    usage: {
+      input_tokens: 10,
+      output_tokens: 5,
+      cache_read_input_tokens: 90,
+      cache_creation_input_tokens: 0,
+      model: 'qwen-max',
+    },
+  };
+
+  it('carries a prompt and an answer as long as the session lets them be', async () => {
+    const runtime = await createTurns([
+      `export function register(on) {
+        on('turn.start', ($, e, next) => {
+          $.ui.log('start ' + e.text.length + ' ' + e.isTextTruncated);
+          return next(e);
+        });
+        on('turn.complete', ($, e, next) => {
+          $.ui.log('complete ' + e.answer.length + ' ' + e.isAnswerTruncated);
+          return next(e);
+        });
+      }`,
+    ]);
+    // The session fits each text into half a payload, quotes included.
+    const text = 'x'.repeat(MOD_MAX_BYTES / 2 - 2);
+    await runtime.startTurn(
+      { text, turnId: 'turn-1', isTextTruncated: true },
+      signal(),
+    );
+    expect(
+      await runtime.completeTurn(
+        { ...turnEnd, answer: text, isAnswerTruncated: true },
+        signal(),
+      ),
+    ).toBe(text);
+    expect(logs.map((log) => log.text)).toEqual([
+      `start ${text.length} true`,
+      `complete ${text.length} true`,
+    ]);
+  });
+
+  it('names the plugins whose hooks hear the turn events', async () => {
+    const runtime = await createTurns([
+      `export function register(on) { on('turn.start', ($, e, next) => next(e)); }`,
+      `export function register(on) { on('turn.*', ($, e, next) => next(e)); }`,
+      `export function register(on) { on('!session.*', ($, e, next) => next(e)); }`,
+      `export function register(on) { on('tool.call', ($, e, next) => next(e)); }`,
+    ]);
+    expect(runtime.turnHooks).toEqual({
+      start: true,
+      complete: ['mod-1', 'mod-2'],
+    });
+    const none = await createTurns([fixture()]);
+    expect(none.turnHooks).toEqual({ start: false, complete: [] });
+  });
+
+  it('runs turn.start and turn.complete with pinned input and returns the answer or a text', async () => {
+    const runtime = await createTurns([
+      `export function register(on) {
+        on('turn.start', async ($, e, next) => {
+          const echoed = await next(e);
+          $.ui.log('start:' + JSON.stringify(e) + ':' + JSON.stringify(echoed));
+          return {turnId: 'ignored'};
+        });
+        on('turn.complete', async ($, e, next) => {
+          $.ui.log('complete:' + JSON.stringify(e));
+          try { await next({...e, answer: 'rewritten'}); } catch (error) { $.ui.log(String(error)); }
+          return next(e);
+        });
+      }`,
+      `export function register(on) {
+        on('turn.complete', {reason: 'answer'}, ($, e) => ({text: 'TL;DR ' + e.answer.length}));
+      }`,
+    ]);
+    const { usage: _usage, ...aborted } = {
+      ...turnEnd,
+      reason: 'aborted' as const,
+      isAborted: true,
+    };
+    await runtime.startTurn({ text: 'Fix it', turnId: 'turn-1' }, signal());
+    expect(await runtime.completeTurn(turnEnd, signal())).toBe('TL;DR 5');
+    expect(await runtime.completeTurn(aborted, signal())).toBe('Done.');
+    expect(logs.map((log) => log.text)).toEqual([
+      'start:{"text":"Fix it","turnId":"turn-1"}:{"turnId":"turn-1"}',
+      `complete:${JSON.stringify(turnEnd)}`,
+      expect.stringContaining('changed pinned event fields'),
+      `complete:${JSON.stringify(aborted)}`,
+      expect.stringContaining('changed pinned event fields'),
+    ]);
+  });
+
+  it('refuses a turn.complete answer of the wrong shape and keeps the answer', async () => {
+    const runtime = await createTurns([
+      `export function register(on) {
+        on('turn.complete', ($, e) => e.durationMs === 1
+          ? {text: 'x', usage: {...e.usage, input_tokens: 1.5}}
+          : {text: 7});
+      }`,
+    ]);
+    for (const durationMs of [1, 2])
+      expect(
+        await runtime.completeTurn({ ...turnEnd, durationMs }, signal()),
+      ).toBe('Done.');
+  });
+
+  it('asks the host to end the running turn and rejects with its reason', async () => {
+    const asked: string[] = [];
+    const source = `export function register(on) {
+      on('turn.start', async ($, e, next) => {
+        const results = [];
+        for (const input of [{turnId: e.turnId}, {turnId: 'turn-0'}, {}, 'turn-1']) {
+          try { results.push(String(await $.turn.abort(input))); }
+          catch (error) { results.push(String(error)); }
+        }
+        $.ui.log(JSON.stringify(results));
+        return next(e);
+      });
+    }`;
+    const runtime = await createTurns([source], (turnId) => {
+      asked.push(turnId);
+      if (turnId !== 'turn-1')
+        throw new Error(`$.turn.abort: ${turnId} is not the running turn`);
+    });
+    await runtime.startTurn({ text: '', turnId: 'turn-1' }, signal());
+    expect(asked).toEqual(['turn-1', 'turn-0']);
+    expect(JSON.parse(logs.at(-1)!.text)).toEqual([
+      'undefined',
+      expect.stringContaining('$.turn.abort: turn-0 is not the running turn'),
+      expect.stringContaining('takes { turnId } (the id turn.start carried)'),
+      expect.stringContaining('Invalid Mod event input'),
+    ]);
+    const unhosted = await createTurns([source]);
+    await unhosted.startTurn({ text: '', turnId: 'turn-1' }, signal());
+    expect(JSON.parse(logs.at(-1)!.text)[0]).toContain(
+      '$.turn.abort: no turn is running (asked for turn-1)',
+    );
+  });
+
+  it('settles a $.turn.abort its own turn ending leaves unanswered', async () => {
+    const turn = new AbortController();
+    const runtime = await createTurns(
+      [
+        `let state = 'unasked';
+        export function register(on) {
+          on('turn.start', async ($, e, next) => {
+            state = 'pending';
+            await $.turn.abort({turnId: e.turnId}).then(
+              () => { state = 'resolved'; },
+              (error) => { state = String(error); });
+            return next(e);
+          });
+          on('turn.complete', ($, e) => ({text: state}));
+        }`,
+      ],
+      // As a session does, ending the turn ends the dispatch that asked.
+      () => turn.abort(),
+    );
+    // The answer is lost, so only the dispatch's end can settle the call.
+    const post = runtime['post'].bind(runtime);
+    vi.spyOn(runtime as never, 'post').mockImplementation(((
+      request: Parameters<typeof post>[0],
+      root: number,
+    ) => {
+      if (request.type !== 'turn-abort-result') post(request, root);
+    }) as never);
+    await runtime
+      .startTurn({ text: '', turnId: 'turn-1' }, turn.signal)
+      .catch(() => {});
+    // The next dispatch runs; the abandoned hook never resumed.
+    expect(await runtime.completeTurn(turnEnd, signal())).toBe('pending');
+  });
+
+  it('lets another plugin deny or rewrite $.turn.abort', async () => {
+    const asked: string[] = [];
+    const runtime = await createTurns(
+      [
+        `export function register(on) {
+          on('turn.abort', ($, e, next) =>
+            e.turnId === 'keep' ? {deny: 'kept by mod-0'} : next({turnId: e.turnId + '!'}));
+        }`,
+        `export function register(on) {
+          on('turn.start', async ($, e, next) => {
+            const results = [];
+            for (const turnId of ['keep', 'turn-1'])
+              results.push(await $.turn.abort({turnId}).then(String, String));
+            $.ui.log(JSON.stringify(results));
+            return next(e);
+          });
+        }`,
+      ],
+      (turnId) => void asked.push(turnId),
+    );
+    await runtime.startTurn({ text: '', turnId: 'turn-1' }, signal());
+    expect(asked).toEqual(['turn-1!']);
+    expect(JSON.parse(logs.at(-1)!.text)).toEqual([
+      expect.stringContaining('kept by mod-0'),
+      'undefined',
+    ]);
+  });
+
+  const prompt = {
+    text: 'Fix it',
+    wait: false,
+    origin: { kind: 'composer' as const },
+  };
+
+  it('names the plugins whose hooks hear prompt.submit', async () => {
+    const runtime = await createTurns([
+      `export function register(on) { on('prompt.submit', ($, e, next) => next(e)); }`,
+      `export function register(on) { on('turn.start', ($, e, next) => next(e)); }`,
+      `export function register(on) { on('prompt.*', ($, e, next) => next(e)); }`,
+    ]);
+    expect(runtime.promptHooks).toEqual(['mod-0', 'mod-2']);
+    expect((await createTurns([fixture()])).promptHooks).toEqual([]);
+    // A host that raises no prompt.submit skips its hooks and says so.
+    const terminal = await createTerminal([
+      `export function register(on) { on('prompt.submit', ($, e, next) => next(e)); }`,
+    ]);
+    expect(terminal.promptHooks).toEqual([]);
+    expect(logs.at(-1)?.text).toBe(
+      'Hooks for unsupported events will not run: prompt.submit',
+    );
+  });
+
+  it('enters the prompt and the context that arrive beneath the hooks', async () => {
+    const runtime = await createTurns([
+      `export function register(on) {
+        on('prompt.submit', async ($, e, next) => {
+          $.ui.log('top:' + JSON.stringify(e));
+          const entered = await next({...e, text: e.text + '!', context: ['a']});
+          $.ui.log('entered:' + JSON.stringify(entered));
+          // What a hook answers after its next resolved changes nothing.
+          return {...entered, text: 'later', context: ['late']};
+        });
+      }`,
+      `export function register(on) {
+        on('prompt.submit', ($, e, next) =>
+          next({...e, text: e.text.toUpperCase(), context: [...e.context, 'b']}));
+      }`,
+    ]);
+    expect(await runtime.submitPrompt(prompt, signal())).toEqual({
+      text: 'FIX IT!',
+      context: ['a', 'b'],
+    });
+    expect(logs.map((log) => log.text)).toEqual([
+      'top:{"text":"Fix it","wait":false,"origin":{"kind":"composer"}}',
+      'entered:{"text":"FIX IT!","context":["a","b"],"origin":{"kind":"composer"}}',
+    ]);
+  });
+
+  it('drops a prompt for a hook, and for one that does not pass it on', async () => {
+    const runtime = await createTurns([
+      `export function register(on) {
+        on('prompt.submit', async ($, e, next) => {
+          if (e.text === 'answer') return {text: 'mine'};
+          const below = await next(e);
+          $.ui.log('below:' + JSON.stringify(below));
+          return below;
+        });
+      }`,
+      `export function register(on) {
+        on('prompt.submit', ($, e, next) =>
+          e.text.includes('secret') ? {drop: 'it holds a secret'} : next(e));
+      }`,
+    ]);
+    expect(
+      await runtime.submitPrompt({ ...prompt, text: 'a secret' }, signal()),
+    ).toEqual({ drop: 'it holds a secret', byHook: true });
+    expect(
+      await runtime.submitPrompt({ ...prompt, text: 'answer' }, signal()),
+    ).toEqual({
+      drop: 'a hook answered without passing the prompt on',
+      byHook: false,
+    });
+    expect(logs.map((log) => log.text)).toEqual([
+      'below:{"drop":"it holds a secret"}',
+    ]);
+  });
+
+  it.each([false, true])(
+    'retains a downstream drop after a text answer (same plugin: %s)',
+    async (samePlugin) => {
+      const handlers = [
+        `on('prompt.submit', async ($, e, next) => {
+          await next(e);
+          return {text: e.text};
+        });`,
+        `on('prompt.*', () => ({drop: 'secret guard'}));`,
+      ];
+      const runtime = await createTurns(
+        (samePlugin ? [handlers.join('\n')] : handlers).map(
+          (handler) => `export function register(on) { ${handler} }`,
+        ),
+      );
+
+      expect(await runtime.submitPrompt(prompt, signal())).toEqual({
+        drop: 'secret guard',
+        byHook: true,
+      });
+      expect(logs).toEqual([]);
+    },
+  );
+
+  it.each([false, true])(
+    'retains a downstream drop after a catch answers (next already called: %s)',
+    async (called) => {
+      const runtime = await createTurns([
+        `export function register(on) {
+          on('prompt.submit', async ($, e, next) => {
+            ${called ? 'await next(e);' : ''}
+            throw new Error('broken');
+          }).catch(async ($, e, next) => {
+            if (!next.called) await next(e);
+            return {text: e.text};
+          });
+        }`,
+        `export function register(on) {
+          on('prompt.submit', () => ({drop: 'secret guard'}));
+        }`,
+      ]);
+
+      expect(await runtime.submitPrompt(prompt, signal())).toEqual({
+        drop: 'secret guard',
+        byHook: true,
+      });
+      expect(logs).toEqual([]);
+    },
+  );
+
+  it.each([false, true])(
+    'retains the downstream outcome when rejecting a late drop (same plugin: %s)',
+    async (samePlugin) => {
+      const handlers = [
+        `on('prompt.submit', async ($, e, next) => {
+          await next(e);
+          return {drop: 'too late'};
+        });`,
+        `on('prompt.*', ($, e) =>
+          e.text === 'drop' ? {drop: 'secret guard'} : {text: 'held'});`,
+      ];
+      const runtime = await createTurns(
+        (samePlugin ? [handlers.join('\n')] : handlers).map(
+          (handler) => `export function register(on) { ${handler} }`,
+        ),
+      );
+
+      expect(
+        await runtime.submitPrompt({ ...prompt, text: 'drop' }, signal()),
+      ).toEqual({ drop: 'secret guard', byHook: true });
+      expect(
+        await runtime.submitPrompt({ ...prompt, text: 'answer' }, signal()),
+      ).toEqual({
+        drop: 'a hook answered without passing the prompt on',
+        byHook: false,
+      });
+      expect(logs.map((log) => log.text)).toEqual([
+        expect.stringContaining('a drop after its next(e) was answered'),
+        expect.stringContaining('a drop after its next(e) was answered'),
+      ]);
+    },
+  );
+
+  it.each([false, true])(
+    'retains the latest local next after catching a late drop (first reaches host: %s)',
+    async (reachesHost) => {
+      const runtime = await createTurns([
+        `export function register(on) {
+          on('prompt.submit', async ($, e, next) => {
+            try { await next({...e, text: 'first'}); }
+            catch (error) { $.ui.log(error.message); }
+            return next({...e, text: 'second'});
+          });
+          on('prompt.*', async ($, e, next) => {
+            const below = await next(e);
+            return e.text === 'first' ? {drop: 'too late'} : below;
+          });
+          on('*', {text: /^(first|second)$/}, ($, e, next) => {
+            $.ui.log('guard:' + e.text);
+            ${reachesHost ? "if (e.text === 'first') return next(e);" : ''}
+            return {drop: e.text + ' guard'};
+          });
+        }`,
+      ]);
+
+      expect(await runtime.submitPrompt(prompt, signal())).toEqual({
+        drop: 'second guard',
+        byHook: true,
+      });
+      expect(logs.map((log) => log.text)).toEqual([
+        'guard:first',
+        'a drop after its next(e) was answered',
+        'guard:second',
+      ]);
+    },
+  );
+
+  it.each([false, true])(
+    'retains a local drop after an earlier host next when rejecting a late drop (catch replays: %s)',
+    async (caught) => {
+      const runtime = await createTurns([
+        `export function register(on) {
+          on('prompt.submit', async ($, e, next) => {
+            $.ui.log('first:' + JSON.stringify(await next({...e, text: 'first'})));
+            $.ui.log('second:' + JSON.stringify(await next({...e, text: 'second'})));
+            return {drop: 'too late'};
+          })${
+            caught
+              ? `.catch(($, e, next) => {
+                  $.ui.log('called:' + next.called);
+                  return next(e);
+                })`
+              : ''
+          };
+          on('prompt.*', ($, e, next) =>
+            e.text === 'second' ? {drop: 'second guard'} : next(e));
+        }`,
+      ]);
+
+      expect(await runtime.submitPrompt(prompt, signal())).toEqual({
+        drop: 'second guard',
+        byHook: true,
+      });
+      expect(logs.map((log) => log.text)).toEqual([
+        'first:{"text":"first","origin":{"kind":"composer"}}',
+        'second:{"drop":"second guard"}',
+        caught
+          ? 'called:true'
+          : expect.stringContaining('a drop after its next(e) was answered'),
+      ]);
+    },
+  );
+
+  it('keeps next.called false for a late drop within one plugin', async () => {
+    const runtime = await createTurns([
+      `export function register(on) {
+        on('prompt.submit', async ($, e, next) => {
+          await next(e);
+          return {drop: 'too late'};
+        }).catch(($, e, next) => {
+          $.ui.log('called:' + next.called);
+          return {text: e.text};
+        });
+        on('prompt.*', () => ({drop: 'secret guard'}));
+      }`,
+    ]);
+
+    expect(await runtime.submitPrompt(prompt, signal())).toEqual({
+      drop: 'a hook answered without passing the prompt on',
+      byHook: false,
+    });
+    expect(logs.map((log) => log.text)).toEqual(['called:false']);
+  });
+
+  it('takes any answer after next from a hook that only watches', async () => {
+    const runtime = await createTurns([
+      `export function register(on) {
+        on('prompt.submit', async ($, e, next) => {
+          const entered = await next(e);
+          if (e.text === 'nothing') return undefined;
+          if (e.text === 'spread') return {...e, ...entered};
+          return {text: 'x'.repeat(300000)};
+        });
+      }`,
+      `export function register(on) {
+        on('prompt.submit', ($, e, next) => next({...e, text: e.text + '!'}));
+      }`,
+    ]);
+    const texts = ['nothing', 'spread', 'large'];
+    const entered = [];
+    for (const text of texts)
+      entered.push(await runtime.submitPrompt({ ...prompt, text }, signal()));
+    expect(entered).toEqual(texts.map((text) => ({ text: text + '!' })));
+    expect(logs).toEqual([]);
+  });
+
+  it('skips a hook that fails, drops after its next or changes what is pinned', async () => {
+    const runtime = await createTurns([
+      `export function register(on) {
+        on('prompt.submit', async ($, e, next) => {
+          if (e.text === 'late') { await next(e); return {drop: 'too late'}; }
+          if (e.text === 'origin') return next({...e, origin: {kind: 'sdk'}});
+          if (e.text === 'wait') return next({...e, wait: true});
+          if (e.text === 'context') return next({...e, context: 'one'});
+          if (e.text === 'answer') return {text: 'x', origin: {kind: 'sdk'}};
+          throw new Error('broken');
+        });
+      }`,
+    ]);
+    const texts = ['late', 'origin', 'wait', 'context', 'answer', 'other'];
+    const entered = [];
+    for (const text of texts)
+      entered.push(await runtime.submitPrompt({ ...prompt, text }, signal()));
+    expect(entered).toEqual(texts.map((text) => ({ text })));
+    expect(logs.map((log) => log.text)).toEqual([
+      expect.stringContaining('a drop after its next(e) was answered'),
+      ...Array.from({ length: 3 }, () =>
+        expect.stringContaining('origin, wait and turnId are pinned'),
+      ),
+      expect.stringContaining('Unsupported prompt.submit result fields'),
+      expect.stringContaining('broken'),
+    ]);
+  });
+
+  describe('$.prompt.submit', () => {
+    const queueing = () => {
+      const queued: ModQueuedPrompt[] = [];
+      return {
+        queued,
+        queue: (prompt: ModQueuedPrompt) => void queued.push(prompt),
+      };
+    };
+
+    it("raises prompt.submit through every hook but the caller's and queues what arrives", async () => {
+      const { queued, queue } = queueing();
+      const runtime = await createTurns(
+        [
+          `export function register(on) {
+            on('prompt.submit', ($, e, next) => {
+              $.ui.log('mod-0 heard:' + JSON.stringify(e));
+              return next({...e, text: e.text + '!', context: ['from mod-0']});
+            });
+            on('turn.start', async ($, e, next) => {
+              $.ui.log('result:' + JSON.stringify(await $.prompt.submit({text: 'next step'})));
+              return next(e);
+            });
+          }`,
+          `export function register(on) {
+            on('prompt.submit', async ($, e, next) => {
+              // A hook that submits does not hear its own submission.
+              if (e.origin.kind === 'composer')
+                $.ui.log('echo:' + JSON.stringify(await $.prompt.submit({text: 'echo', asUser: true})));
+              else $.ui.log('mod-1 heard:' + e.text);
+              return next(e);
+            });
+          }`,
+        ],
+        undefined,
+        queue,
+      );
+      await runtime.startTurn({ text: 'go', turnId: 'turn-1' }, signal());
+      expect(queued).toEqual([
+        { plugin: 'mod-0', text: 'next step!', context: ['from mod-0'] },
+      ]);
+      expect(logs.map((log) => log.text)).toEqual([
+        'mod-0 heard:{"text":"next step","wait":false,"origin":{"kind":"plugin","name":"mod-0"}}',
+        'mod-1 heard:next step!',
+        'result:{"text":"next step!","context":["from mod-0"],"origin":{"kind":"plugin","name":"mod-0"}}',
+      ]);
+
+      logs.length = 0;
+      expect(await runtime.submitPrompt(prompt, signal())).toEqual({
+        text: 'Fix it!',
+        context: ['from mod-0'],
+      });
+      // Nor does a hook it runs beneath: mod-0's hook passed this prompt on.
+      expect(queued.at(-1)).toEqual({
+        plugin: 'mod-1',
+        text: 'echo',
+        asUser: true,
+      });
+      expect(logs.map((log) => log.text)).toEqual([
+        'mod-0 heard:{"text":"Fix it","wait":false,"origin":{"kind":"composer"}}',
+        'echo:{"text":"echo","origin":{"kind":"plugin","name":"mod-1","asUser":true}}',
+      ]);
+    });
+
+    it('resolves a drop, queuing nothing, when a hook or the host refuses', async () => {
+      const { queued, queue } = queueing();
+      const submitting = `export function register(on) {
+        on('turn.start', async ($, e, next) => {
+          for (const text of ['secret', 'answer', 'full', ' ', 'blank'])
+            $.ui.log(JSON.stringify(await $.prompt.submit({text})));
+          return next(e);
+        });
+      }`;
+      const runtime = await createTurns(
+        [
+          `export function register(on) {
+            on('prompt.submit', ($, e, next) => {
+              if (!e.text.trim()) $.ui.log('"heard a blank prompt"');
+              return e.text === 'secret' ? {drop: 'it holds a secret'}
+                : e.text === 'answer' ? {text: 'mine'}
+                : next(e.text === 'blank' ? {...e, text: ''} : e);
+            });
+          }`,
+          submitting,
+        ],
+        undefined,
+        (prompt) =>
+          prompt.text === 'full' ? 'the queue is full' : queue(prompt),
+      );
+      await runtime.startTurn({ text: '', turnId: 'turn-1' }, signal());
+      expect(queued).toEqual([]);
+      expect(logs.map((log) => JSON.parse(log.text))).toEqual([
+        { drop: 'it holds a secret' },
+        { drop: 'a hook answered without passing the prompt on' },
+        { drop: 'the queue is full' },
+        { drop: 'the prompt is empty' },
+        { drop: 'a hook left the prompt empty' },
+      ]);
+
+      logs.length = 0;
+      // No hook hears a prompt the host would not run, nor lists the method.
+      const hostless = await createTurns([
+        `export function register(on) {
+          on('prompt.submit', ($, e, next) => { $.ui.log('heard'); return next(e); });
+        }`,
+        submitting,
+      ]);
+      await hostless.startTurn({ text: '', turnId: 'turn-1' }, signal());
+      expect(logs.map((log) => JSON.parse(log.text))).toEqual(
+        Array(5).fill({ drop: 'this host does not run prompts a Mod submits' }),
+      );
+    });
+
+    it('queues a call its hook does not await, once, as it last arrived', async () => {
+      const { queued, queue } = queueing();
+      const runtime = await createTurns(
+        [
+          `export function register(on) {
+            on('turn.start', ($, e, next) => {
+              void $.prompt.submit({text: 'later'});
+              return next(e);
+            });
+          }`,
+          `export function register(on) {
+            on('prompt.submit', async ($, e, next) => {
+              // Still running once the hook that submitted has returned.
+              await $.clock.sleep(30);
+              $.ui.log('first:' + JSON.stringify(await next(e)));
+              return next({...e, text: e.text + ' retry'});
+            });
+          }`,
+        ],
+        undefined,
+        queue,
+      );
+      await runtime.startTurn({ text: '', turnId: 'turn-1' }, signal());
+      expect(queued).toEqual([{ plugin: 'mod-0', text: 'later retry' }]);
+      expect(logs.map((log) => log.text)).toEqual([
+        'first:{"text":"later","origin":{"kind":"plugin","name":"mod-0"}}',
+      ]);
+    });
+
+    it('keeps charging the caller while the other Mods hear its submit', async () => {
+      const { queued, queue } = queueing();
+      const runtime = await createTurns(
+        [
+          `export function register(on) {
+            on('turn.start', async ($, e, next) => {
+              void $.prompt.submit({text: 'later'});
+              const before = next.budget.remainingMs;
+              await $.clock.sleep(300);
+              $.ui.log('charged:' + (before - next.budget.remainingMs >= 250));
+              return next(e);
+            });
+          }`,
+          `export function register(on) {
+            on('prompt.submit', async ($, e, next) => {
+              await $.clock.sleep(600);
+              return next(e);
+            });
+          }`,
+        ],
+        undefined,
+        queue,
+      );
+      await runtime.startTurn({ text: '', turnId: 'turn-1' }, signal());
+      expect(logs.map((log) => log.text)).toEqual(['charged:true']);
+      expect(queued).toEqual([{ plugin: 'mod-0', text: 'later' }]);
+    });
+
+    it('refuses a prompt too long for a Mod payload before it is queued', async () => {
+      const { queued, queue } = queueing();
+      const runtime = await createTurns(
+        [
+          `export function register(on) {
+            on('prompt.submit', ($, e, next) =>
+              next(e.text === 'grow' ? {...e, text: 'y'.repeat(140000)} : e));
+          }`,
+          `export function register(on) {
+            on('turn.start', async ($, e, next) => {
+              // Past half a payload, and in the band where the answer, which
+              // echoes the origin, would no longer fit one.
+              for (const text of ['x'.repeat(140000), 'x'.repeat(262100), 'grow'])
+                $.ui.log(JSON.stringify(await $.prompt.submit({text})));
+              // Too large for the bridge, the call rejects rather than throws.
+              const huge = $.prompt.submit({text: 'x'.repeat(300000)});
+              $.ui.log(await huge.then(() => 'resolved', (error) => 'rejected:' + error));
+              return next(e);
+            });
+          }`,
+        ],
+        undefined,
+        queue,
+      );
+      await runtime.startTurn({ text: '', turnId: 'turn-1' }, signal());
+      expect(queued).toEqual([]);
+      expect(logs.map((log) => log.text)).toEqual([
+        JSON.stringify({ drop: 'the prompt is too long for a Mod payload' }),
+        JSON.stringify({ drop: 'the prompt is too long for a Mod payload' }),
+        JSON.stringify({
+          drop: 'a hook made the prompt too long for a Mod payload',
+        }),
+        expect.stringMatching(/^rejected:.*too large/),
+      ]);
+    });
+
+    it('lists the method only for a host that runs such prompts', async () => {
+      const reporting = `export function register(on) {
+        on('turn.start', async ($, e, next) => {
+          $.ui.log(String((await $.session.version()).qwen.methods.includes('prompt.submit')));
+          return next(e);
+        });
+      }`;
+      for (const queue of [() => undefined, undefined]) {
+        const runtime = await createTurns([reporting], undefined, queue);
+        await runtime.startTurn({ text: '', turnId: 'turn-1' }, signal());
+      }
+      expect(logs.map((log) => log.text)).toEqual(['true', 'false']);
+    });
+
+    it('rejects a call of the wrong shape', async () => {
+      const { queued, queue } = queueing();
+      const runtime = await createTurns(
+        [
+          `export function register(on) {
+            on('turn.start', async ($, e, next) => {
+              for (const args of [{text: 1}, {text: 'a', asUser: false},
+                {text: 'a', attachments: []}, {text: 'a', origin: {kind: 'composer'}}])
+                $.ui.log(await $.prompt.submit(args).then(() => 'ok', String));
+              return next(e);
+            });
+          }`,
+        ],
+        undefined,
+        queue,
+      );
+      await runtime.startTurn({ text: '', turnId: 'turn-1' }, signal());
+      expect(queued).toEqual([]);
+      expect(logs.map((log) => log.text)).toEqual([
+        expect.stringContaining('takes { text, asUser? }'),
+        expect.stringContaining('takes { text, asUser? }'),
+        expect.stringContaining('does not take attachments'),
+        expect.stringContaining('takes { text, asUser? }'),
+      ]);
+    });
+  });
+
+  it('lets a .catch drop a prompt its failed guard never passed on', async () => {
+    const runtime = await createTurns([
+      `export function register(on) {
+        on('prompt.submit', () => { throw new Error('broken'); })
+          .catch(($, e, next) => next.called ? next(e) : {drop: 'no'});
+      }`,
+    ]);
+    expect(await runtime.submitPrompt(prompt, signal())).toEqual({
+      drop: 'no',
+      byHook: true,
+    });
+  });
+
+  it('bounds logs and applies a whole session.end timeout', async () => {
+    const noisy = await create(
+      fixture(
+        "for (let i=0;i<1000;i++) $.ui.log('x'.repeat(1000)); return {};",
+      ),
+    );
+    expect(await noisy.runCommand('hello', '', signal())).toBe('');
+    expect(logs.length).toBeLessThan(105);
+    const hanging = await create(`export function register(on) {
+      on('session.end', async () => { await new Promise(() => {}); });
+    }`);
+    const started = Date.now();
+    await expect(hanging.end('session', 'other', signal())).rejects.toThrow(
+      /timed out/,
+    );
+    expect(Date.now() - started).toBeLessThan(3000);
+  });
+  describe('$.model.complete', () => {
+    const usage = {
+      input_tokens: 3,
+      output_tokens: 2,
+      cache_read_input_tokens: 1,
+      cache_creation_input_tokens: 0,
+    };
+    const aborted = {
+      isAnswered: false,
+      reason: 'aborted',
+      usage: {
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+      },
+    };
+    const createModels = async (sources: string[], host?: ModModelHost) => {
+      const runtime = await ModRuntime.createGroup(
+        sources.map((source, index) => ({
+          id: `mod-${index}`,
+          name: `mod-${index}`,
+          source: { root: '/fixture', entry: '/fixture/mod.js', source },
+          options: {},
+        })),
+        '/workspace',
+        (log) => logs.push(log),
+        signal(),
+        undefined,
+        'terminal',
+        '1.2.3',
+        undefined,
+        undefined,
+        undefined,
+        false,
+        undefined,
+        host,
+      );
+      runtimes.push(runtime);
+      return runtime;
+    };
+    // A command that runs the requests its args name, one result each.
+    const asker = (requests: string) =>
+      fixture(`
+        const results = [];
+        for (const request of ${requests}) {
+          try { results.push(await $.model.complete(request)); }
+          catch (error) { results.push(String(error)); }
+        }
+        return {text: JSON.stringify(results)};`);
+    const guestSignal = `
+      const listeners = new Set();
+      const stop = {aborted: false, addEventListener: (_, f) => listeners.add(f),
+        removeEventListener: (_, f) => listeners.delete(f)};
+      const abort = () => {
+        stop.aborted = true;
+        for (const listener of listeners) listener();
+      };`;
+
+    it('runs a request on the host, its blocks joined and kept beside it', async () => {
+      const asked: ModModelCompleteInput[] = [];
+      const runtime = await createModels(
+        [
+          asker(`[{model: 'haiku', prompt: [{text: 'A', cache: true}, {text: 'B'}],
+            system: 'S', maxTokens: 10, effort: 'low', timeoutMs: 5000},
+            {model: 'm', prompt: 'p'}]`),
+        ],
+        async (input) => {
+          asked.push(input);
+          return input.prompt === 'p'
+            ? { isAnswered: false, reason: 'empty-reply', usage }
+            : { isAnswered: true, text: 'answer', usage };
+        },
+      );
+      expect(
+        JSON.parse(await runtime.runCommand('hello', '', signal())),
+      ).toEqual([
+        { isAnswered: true, text: 'answer', usage },
+        { isAnswered: false, reason: 'empty-reply', usage },
+      ]);
+      expect(asked).toEqual([
+        {
+          model: 'haiku',
+          prompt: 'AB',
+          system: 'S',
+          promptBlocks: [{ text: 'A', cache: true }, { text: 'B' }],
+          maxTokens: 10,
+          effort: 'low',
+          timeoutMs: 5000,
+        },
+        { model: 'm', prompt: 'p' },
+      ]);
+    });
+
+    it('rejects a request it will not send, and one the host refuses', async () => {
+      const host = vi.fn<ModModelHost>(async (input) => {
+        throw new Error(
+          `model ${JSON.stringify(input.model)} is not configured`,
+        );
+      });
+      const requests = `[{model: 'm'}, {model: '', prompt: 'p'},
+        {model: 'm', prompt: 'p', maxTokens: 64001},
+        {model: 'm', prompt: 'p', maxTokens: 1.5},
+        {model: 'm', prompt: 'p', effort: 'huge'},
+        {model: 'm', prompt: 'p', timeoutMs: 0},
+        {model: 'm', prompt: [{text: 'p', cache: false}]},
+        {model: 'm', prompt: 'p', tools: []},
+        {model: 'gone', prompt: 'p'}]`;
+      const runtime = await createModels([asker(requests)], host);
+      const results = JSON.parse(
+        await runtime.runCommand('hello', '', signal()),
+      );
+      expect(results.slice(0, 8)).toEqual(
+        Array(8).fill(expect.stringContaining('Mod model.complete')),
+      );
+      expect(results[2]).toContain('over the limit of 64000');
+      expect(results[8]).toContain(
+        'Mod model.complete: model "gone" is not configured',
+      );
+      expect(host).toHaveBeenCalledTimes(1);
+      const unhosted = await createModels([
+        asker(`[{model: 'm', prompt: 'p'}]`),
+      ]);
+      expect(
+        JSON.parse(await unhosted.runCommand('hello', '', signal())),
+      ).toEqual([expect.stringContaining('this host runs no model calls')]);
+    });
+
+    it('lets another plugin rewrite, answer or deny model.complete', async () => {
+      const asked: ModModelCompleteInput[] = [];
+      const runtime = await createModels(
+        [
+          `export function register(on) {
+            on('model.complete', ($, e, next) =>
+              e.prompt === 'mock'
+                ? {value: {isAnswered: true, text: 'mocked', usage: {input_tokens: 0,
+                    output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0}}}
+                : e.prompt === 'deny'
+                  ? {deny: 'no model calls here'}
+                  : next({...e, prompt: e.prompt + '!', system: null}));
+          }`,
+          asker(`[{model: 'm', prompt: 'mock'}, {model: 'm', prompt: 'deny'},
+            {model: 'm', prompt: 'x', system: 'S'}]`),
+        ],
+        async (input) => {
+          asked.push(input);
+          return { isAnswered: true, text: input.prompt, usage };
+        },
+      );
+      const results = JSON.parse(
+        await runtime.runCommand('hello', '', signal()),
+      );
+      expect(results[0]).toMatchObject({ isAnswered: true, text: 'mocked' });
+      expect(results[1]).toContain('no model calls here');
+      expect(results[2]).toEqual({ isAnswered: true, text: 'x!', usage });
+      expect(asked).toEqual([{ model: 'm', prompt: 'x!' }]);
+    });
+
+    it('cuts a discarded downstream call when model middleware returns', async () => {
+      let markStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        markStarted = resolve;
+      });
+      let downstream: AbortSignal | undefined;
+      let cancelledBeforeWitness: boolean | undefined;
+      const host = vi.fn<ModModelHost>(async ({ prompt }, active) => {
+        if (prompt === 'discarded') {
+          downstream = active;
+          markStarted();
+          await new Promise<never>((_, reject) => {
+            active.addEventListener('abort', () => reject(active.reason), {
+              once: true,
+            });
+          });
+        }
+        if (prompt === 'ready') await started;
+        if (prompt === 'witness') cancelledBeforeWitness = downstream?.aborted;
+        return { isAnswered: true, text: prompt, usage };
+      });
+      const runtime = await createModels(
+        [
+          `export function register(on) {
+            on('model.complete', {prompt:'outer'}, async ($, e, next) => {
+              void next({...e, prompt:'discarded'}).catch(() => {});
+              await $.model.complete({model:'m', prompt:'ready'});
+              return {value:{isAnswered:true, text:'local', usage:${JSON.stringify(usage)}}};
+            });
+          }`,
+          fixture(`
+            const local = await $.model.complete({model:'m', prompt:'outer'});
+            const witness = await $.model.complete({model:'m', prompt:'witness'});
+            return {text:JSON.stringify([local.text, witness.text])};`),
+        ],
+        host,
+      );
+      expect(
+        JSON.parse(
+          await runtime.runCommand('hello', '', AbortSignal.timeout(3000)),
+        ),
+      ).toEqual(['local', 'witness']);
+      expect(cancelledBeforeWitness).toBe(true);
+    });
+
+    it("cuts the call when the caller's signal aborts", async () => {
+      const cut: boolean[] = [];
+      const runtime = await createModels(
+        [
+          fixture(`
+            const listeners = [];
+            const stop = {aborted: false, addEventListener: (type, f) => listeners.push(f),
+              removeEventListener: () => {}};
+            const running = $.model.complete({model: 'm', prompt: 'slow'}, {signal: stop});
+            await $.clock.sleep(30);
+            stop.aborted = true;
+            for (const listener of listeners) listener();
+            const before = await $.model.complete({model: 'm', prompt: 'never'}, {signal: stop});
+            return {text: JSON.stringify([await running, before])};`),
+        ],
+        (input, hostSignal) =>
+          new Promise((resolve) => {
+            hostSignal.addEventListener('abort', () => {
+              cut.push(true);
+              resolve({ isAnswered: true, text: 'late', usage });
+            });
+          }),
+      );
+      expect(
+        JSON.parse(await runtime.runCommand('hello', '', signal())),
+      ).toEqual([aborted, aborted]);
+      // One request was made and cut; the already-aborted one was never sent.
+      expect(cut).toEqual([true]);
+    });
+
+    it('skips a model call aborted in the same guest execution slice', async () => {
+      const host = vi.fn<ModModelHost>(async ({ prompt }) => ({
+        isAnswered: true,
+        text: prompt,
+        usage,
+      }));
+      const runtime = await createModels(
+        [
+          fixture(`
+            ${guestSignal}
+            const pending = $.model.complete({model:'m', prompt:'skip'}, {signal:stop});
+            const sibling = $.model.complete({model:'m', prompt:'keep'});
+            abort();
+            return {text:JSON.stringify(await Promise.all([pending, sibling]))};`),
+        ],
+        host,
+      );
+      expect(
+        JSON.parse(await runtime.runCommand('hello', '', signal())),
+      ).toEqual([aborted, { isAnswered: true, text: 'keep', usage }]);
+      expect(host.mock.calls.map(([input]) => input.prompt)).toEqual(['keep']);
+    });
+
+    it('skips a model request whose signal aborts during serialization', async () => {
+      const host = vi.fn<ModModelHost>(async () => ({
+        isAnswered: true,
+        text: 'late',
+        usage,
+      }));
+      const runtime = await createModels(
+        [
+          fixture(`
+            const listeners = new Set();
+            const stop = {
+              aborted: false,
+              addEventListener: (type, fn) => listeners.add(fn),
+              removeEventListener: (type, fn) => listeners.delete(fn),
+            };
+            const result = await $.model.complete({
+              toJSON() {
+                stop.aborted = true;
+                for (const listener of listeners) listener();
+                return {model:'m', prompt:'skip'};
+              },
+            }, {signal: stop});
+            return {text: JSON.stringify({result, listeners: listeners.size})};`),
+        ],
+        host,
+      );
+      expect(
+        JSON.parse(await runtime.runCommand('hello', '', signal())),
+      ).toEqual({ result: aborted, listeners: 0 });
+      expect(host).not.toHaveBeenCalled();
+    });
+
+    it.each(['host', 'middleware'])(
+      'settles a retained %s model call as aborted when its dispatch ends',
+      async (mode) => {
+        const cut = vi.fn();
+        const host = vi.fn<ModModelHost>(
+          (_, active) =>
+            new Promise((_, reject) => {
+              active.addEventListener('abort', () => {
+                cut();
+                reject(active.reason);
+              });
+            }),
+        );
+        const runtime = await createModels(
+          [
+            `let pending;
+            export function register(on) {
+              on('session.start', async ($, e, next) => {
+                await $.command.register({name:'hello', description:'Hello'});
+                return next(e);
+              });
+              on('command.run', async ($, e) => {
+                if (e.args === 'start') {
+                  pending = $.model.complete({model:'m', prompt:'${mode}'});
+                  void pending.catch(() => {});
+                  await $.clock.sleep(50);
+                  return {text:'started'};
+                }
+                return {text:JSON.stringify(await pending)};
+              });
+              on('model.complete', {prompt:'middleware'}, async ($, e, next) => {
+                await $.model.complete({model:'m', prompt:'inner'});
+                return next({...e, prompt:'stale'});
+              });
+            }`,
+          ],
+          host,
+        );
+        expect(
+          await runtime.runCommand('hello', 'start', AbortSignal.timeout(3000)),
+        ).toBe('started');
+        expect(
+          JSON.parse(await runtime.runCommand('hello', 'read', signal())),
+        ).toEqual(aborted);
+        expect(host.mock.calls.map(([input]) => input.prompt)).toEqual([
+          mode === 'host' ? 'host' : 'inner',
+        ]);
+        expect(cut).toHaveBeenCalledOnce();
+      },
+    );
+
+    it.each(['signal', 'timeout'])(
+      'cancels middleware and its nested model call on %s',
+      async (mode) => {
+        const cut = vi.fn();
+        const host = vi.fn<ModModelHost>(async ({ prompt }, active) => {
+          if (prompt !== 'inner')
+            return { isAnswered: true, text: prompt, usage };
+          return new Promise((_, reject) => {
+            active.addEventListener('abort', () => {
+              cut();
+              reject(active.reason);
+            });
+          });
+        });
+        const runtime = await createModels(
+          [
+            `export function register(on) {
+              on('model.complete', {prompt:'outer'}, async ($) => ({
+                value: await $.model.complete({model:'m', prompt:'inner'})
+              }));
+            }`,
+            fixture(`
+              const listeners = [];
+              const stop = {aborted: false, addEventListener: (type, f) => listeners.push(f),
+                removeEventListener: () => {}};
+              const request = {model:'m', prompt:'outer'};
+              if (e.args === 'timeout') request.timeoutMs = 200;
+              const running = $.model.complete(request, {signal: stop});
+              if (e.args === 'signal') {
+                await $.clock.sleep(50);
+                stop.aborted = true;
+                for (const listener of listeners) listener();
+              }
+              const result = await running;
+              const after = await $.model.complete({model:'m', prompt:'after'});
+              return {text: JSON.stringify([result, after])};`),
+          ],
+          host,
+        );
+        expect(
+          JSON.parse(
+            await runtime.runCommand('hello', mode, AbortSignal.timeout(3000)),
+          ),
+        ).toEqual([aborted, { isAnswered: true, text: 'after', usage }]);
+        expect(host.mock.calls.map(([input]) => input.prompt)).toEqual([
+          'inner',
+          'after',
+        ]);
+        expect(cut).toHaveBeenCalledOnce();
+      },
+    );
+
+    it.each(['synchronous', 'resumed'])(
+      'keeps a %s sibling model hook running when another call expires',
+      async (mode) => {
+        const host = vi.fn<ModModelHost>(async ({ prompt }) => ({
+          isAnswered: true,
+          text: prompt,
+          usage,
+        }));
+        const runtime = await createModels(
+          [
+            `export function register(on) {
+              on('session.start', async ($, e, next) => {
+                await $.command.register({name:'hello', description:'Hello'});
+                return next(e);
+              });
+              on('command.run', async ($) => {
+                const answers = await Promise.all([
+                  $.model.complete({model:'m', prompt:'slow', timeoutMs:50}),
+                  $.model.complete({model:'m', prompt:'raw', timeoutMs:3000}),
+                ]);
+                return {text:JSON.stringify(answers)};
+              });
+              on('model.complete', async ($, e, next) => {
+                if (e.prompt === 'slow') await $.clock.sleep(300);
+                else {
+                  ${mode === 'resumed' ? 'await Promise.resolve();' : ''}
+                  const end = Date.now() + 150;
+                  while (Date.now() < end) {}
+                }
+                return next({...e, prompt:'sanitized'});
+              });
+            }`,
+          ],
+          host,
+        );
+        expect(
+          JSON.parse(await runtime.runCommand('hello', '', signal())),
+        ).toEqual([aborted, { isAnswered: true, text: 'sanitized', usage }]);
+        expect(host.mock.calls.map(([input]) => input.prompt)).toEqual([
+          'sanitized',
+        ]);
+      },
+    );
+
+    it('recovers an expired hook without interrupting its resumed sibling', async () => {
+      const host = vi.fn<ModModelHost>(async ({ prompt }) => ({
+        isAnswered: true,
+        text: prompt,
+        usage,
+      }));
+      const runtime = await createModels(
+        [
+          `export function register(on) {
+            on('session.start', async ($, e, next) => {
+              await $.command.register({name:'hello', description:'Hello'});
+              return next(e);
+            });
+            on('command.run', async ($) => {
+              const slow = $.model.complete({model:'m', prompt:'slow'});
+              await $.clock.sleep(${MOD_TIMEOUT_MS - 400});
+              const normal = $.model.complete({model:'m', prompt:'raw'});
+              return {text:JSON.stringify(await Promise.all([slow, normal]))};
+            });
+            on('model.complete', async ($, e, next) => {
+              if (e.prompt === 'slow') {
+                await $.clock.sleep(${MOD_TIMEOUT_MS + 1000});
+                return next(e);
+              }
+              await Promise.resolve();
+              const end = Date.now() + 750;
+              while (Date.now() < end) {}
+              return next({...e, prompt:'sanitized'});
+            }).catch(($, e, next) => {
+              if (e.prompt === 'slow' && next.error.kind === 'timeout')
+                return {value:{isAnswered:true, text:'recovered', usage:${JSON.stringify(usage)}}};
+            });
+          }`,
+        ],
+        host,
+      );
+      expect(
+        JSON.parse(
+          await runtime.runCommand('hello', '', AbortSignal.timeout(16000)),
+        ),
+      ).toEqual([
+        { isAnswered: true, text: 'recovered', usage },
+        { isAnswered: true, text: 'sanitized', usage },
+      ]);
+      expect(host.mock.calls.map(([input]) => input.prompt)).toEqual([
+        'sanitized',
+      ]);
+    }, 20_000);
+
+    it('does not forward a request after middleware exhausts its deadline', async () => {
+      const host = vi.fn<ModModelHost>(async () => ({
+        isAnswered: true,
+        text: 'too late',
+        usage,
+      }));
+      const runtime = await createModels(
+        [
+          `export function register(on) {
+            on('model.complete', ($, e, next) => {
+              const end = Date.now() + 200;
+              while (Date.now() < end) {}
+              return next(e);
+            });
+          }`,
+          asker(`[{model:'m', prompt:'p', timeoutMs:50}]`),
+        ],
+        host,
+      );
+      expect(
+        JSON.parse(await runtime.runCommand('hello', '', signal())),
+      ).toEqual([aborted]);
+      expect(host).not.toHaveBeenCalled();
+    });
+
+    it.each(['queued', 'running'])(
+      'cancels a %s model call with its root dispatch',
+      async (phase) => {
+        const root = new AbortController();
+        let cutImmediately = false;
+        const host = vi.fn<ModModelHost>(async (_, active) => {
+          root.abort();
+          cutImmediately = active.aborted;
+          return { isAnswered: true, text: 'late', usage };
+        });
+        const runtime = await createModels(
+          [asker(`[{model:'m', prompt:'p'}]`)],
+          host,
+        );
+        const worker = Reflect.get(runtime, 'worker') as Worker;
+        const onQueued = vi.fn((reply: ModWorkerReply) => {
+          if (reply.type === 'model-complete') root.abort();
+        });
+        // Abort after the worker posts the request, before the host handles it.
+        if (phase === 'queued') worker.prependListener('message', onQueued);
+        try {
+          await expect(
+            runtime.runCommand('hello', '', root.signal),
+          ).rejects.toThrow('Mod dispatch cancelled');
+          if (phase === 'queued') {
+            expect(onQueued).toHaveBeenCalledWith(
+              expect.objectContaining({ type: 'model-complete' }),
+            );
+            expect(host).not.toHaveBeenCalled();
+          } else {
+            expect(host).toHaveBeenCalledOnce();
+            expect(cutImmediately).toBe(true);
+          }
+        } finally {
+          worker.removeListener('message', onQueued);
+        }
+      },
+    );
+
+    it.each(['signal', 'owner'])(
+      'skips a queued model call cancelled by its %s before host admission',
+      async (mode) => {
+        const host = vi.fn<ModModelHost>(async () => ({
+          isAnswered: true,
+          text: 'too late',
+          usage,
+        }));
+        const runtime = await createModels(
+          [
+            `let retained;${fixture(`
+              if (e.args === 'read') return {text:JSON.stringify(await retained)};
+              ${guestSignal}
+              retained = $.model.complete({model:'m', prompt:'skip'}, {signal:stop});
+              await $.clock.sleep(1);
+              if (e.args === 'owner') return {text:'started'};
+              abort();
+              return {text:JSON.stringify(await retained)};`)}`,
+          ],
+          host,
+        );
+        const worker = Reflect.get(runtime, 'worker') as Worker;
+        const [receive] = worker.listeners('message') as Array<
+          (reply: ModWorkerReply) => void
+        >;
+        const queued: ModWorkerReply[] = [];
+        let released = false;
+        // Delay handling without changing the FIFO order of worker messages.
+        const delay = (reply: ModWorkerReply) => {
+          if (reply.type !== 'model-complete' && !queued.length) {
+            receive(reply);
+            return;
+          }
+          queued.push(reply);
+          if (reply.type === 'host-cancel') {
+            released = true;
+            for (const pending of queued.splice(0)) receive(pending);
+          }
+        };
+        worker.off('message', receive);
+        worker.on('message', delay);
+        try {
+          const answer = await runtime.runCommand(
+            'hello',
+            mode,
+            AbortSignal.timeout(3000),
+          );
+          if (mode === 'owner') {
+            expect(answer).toBe('started');
+            expect(
+              JSON.parse(await runtime.runCommand('hello', 'read', signal())),
+            ).toEqual(aborted);
+          } else {
+            expect(JSON.parse(answer)).toEqual(aborted);
+          }
+          expect(released).toBe(true);
+          expect(host).not.toHaveBeenCalled();
+        } finally {
+          worker.off('message', delay);
+          worker.on('message', receive);
+        }
+      },
+    );
+
+    it('does not send a model call that expires while queued for the host', async () => {
+      const host = vi.fn<ModModelHost>(async () => ({
+        isAnswered: true,
+        text: 'too late',
+        usage,
+      }));
+      const runtime = await createModels(
+        [asker(`[{model:'m', prompt:'p', timeoutMs:200}]`)],
+        host,
+      );
+      const worker = Reflect.get(runtime, 'worker') as Worker;
+      const stall = new Int32Array(new SharedArrayBuffer(4));
+      let queued = false;
+      const delay = (reply: ModWorkerReply) => {
+        if (reply.type !== 'model-complete') return;
+        queued = true;
+        Atomics.wait(stall, 0, 0, 250);
+      };
+      worker.prependListener('message', delay);
+      try {
+        expect(
+          JSON.parse(await runtime.runCommand('hello', '', signal())),
+        ).toEqual([aborted]);
+        expect(queued).toBe(true);
+        expect(host).not.toHaveBeenCalled();
+      } finally {
+        worker.removeListener('message', delay);
+      }
+    });
+
+    it('stops the dispatch clock while the host runs the call', async () => {
+      const pause = vi.spyOn(ModBudget.prototype, 'pause');
+      try {
+        const runtime = await createModels(
+          [asker(`[{model: 'm', prompt: 'p'}]`)],
+          async () => {
+            await new Promise((resolve) => setTimeout(resolve, 100));
+            return { isAnswered: true, text: 'done', usage };
+          },
+        );
+        pause.mockClear();
+        expect(
+          JSON.parse(await runtime.runCommand('hello', '', signal())),
+        ).toEqual([{ isAnswered: true, text: 'done', usage }]);
+        expect(pause).toHaveBeenCalled();
+      } finally {
+        pause.mockRestore();
+      }
+    });
+
+    it('lends the dispatch clock to the model a permission check waits for', async () => {
+      let started = false;
+      let resolve!: (result: ModModelCompleteResult) => void;
+      const reply = new Promise<ModModelCompleteResult>((done) => {
+        resolve = done;
+      });
+      const runtime = await createModels(
+        [
+          `export function register(on) {
+            on('tool.check', async ($, e, next) => {
+              await $.model.complete({model:'m', prompt:'p'});
+              return next(e);
+            });
+          }`,
+        ],
+        () => {
+          pause.mockClear();
+          started = true;
+          return reply;
+        },
+      );
+      const pause = vi.spyOn(ModBudget.prototype, 'pause');
+      const next: ModToolNext = async (changed, active, check) => ({
+        result: await check(
+          { tool: changed.tool, input: {}, tool_use_id: changed.tool_use_id },
+          { decision: 'allow' },
+          active,
+        ),
+      });
+      const tool = runtime.runTool(
+        { tool: 'write_file', tool_use_id: 'call-1' },
+        next,
+        AbortSignal.timeout(3000),
+      );
+      try {
+        const paused = vi.waitFor(() => {
+          expect(started).toBe(true);
+          expect(pause).toHaveBeenCalled();
+        });
+        expect(await Promise.race([paused, tool])).toBeUndefined();
+      } finally {
+        resolve({ isAnswered: true, text: 'done', usage });
+        pause.mockRestore();
+      }
+      await expect(tool).resolves.toEqual({ result: { decision: 'allow' } });
+    });
+
+    it('settles a dispatch abandoned while its hook awaits a model call', async () => {
+      const cut: boolean[] = [];
+      let started!: () => void;
+      const running = new Promise<void>((resolve) => (started = resolve));
+      const runtime = await createModels(
+        [
+          fixture(
+            "return {text: JSON.stringify([await $.model.complete({model: 'm', prompt: e.args})])};",
+          ),
+        ],
+        (input, hostSignal) =>
+          input.prompt === 'slow'
+            ? new Promise((resolve) => {
+                started();
+                hostSignal.addEventListener('abort', () => {
+                  cut.push(true);
+                  resolve({ isAnswered: true, text: 'late', usage });
+                });
+              })
+            : Promise.resolve({ isAnswered: true, text: 'fast', usage }),
+      );
+      const session = new AbortController();
+      const abandoned = runtime.runCommand('hello', 'slow', session.signal);
+      await running;
+      const before = Date.now();
+      session.abort();
+      await expect(abandoned).rejects.toThrow(/cancelled/);
+      expect(Date.now() - before).toBeLessThan(1000);
+      expect(cut).toEqual([true]);
+      // The worker survived: the next dispatch runs and calls the host again.
+      expect(
+        JSON.parse(await runtime.runCommand('hello', 'fast', signal())),
+      ).toEqual([{ isAnswered: true, text: 'fast', usage }]);
+    });
+
+    it('lists model.complete as a method only where the host runs it', async () => {
+      const version = fixture(
+        'return {text: JSON.stringify((await $.session.version()).qwen.methods)};',
+      );
+      const hosted = await createModels([version], async () => ({
+        isAnswered: true,
+        text: '',
+        usage,
+      }));
+      expect(
+        JSON.parse(await hosted.runCommand('hello', '', signal())),
+      ).toContain('model.complete');
+      const unhosted = await createModels([version]);
+      expect(
+        JSON.parse(await unhosted.runCommand('hello', '', signal())),
+      ).not.toContain('model.complete');
+    });
+  });
+
+  describe('$.store', () => {
+    const dirs: string[] = [];
+    afterEach(async () => {
+      await Promise.all(
+        dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })),
+      );
+    });
+    const storeDir = () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-mod-store-'));
+      dirs.push(dir);
+      return dir;
+    };
+    // Each plugin's `go` command runs `body` and answers with what it returns.
+    const command = (body: string) => `export function register(on) {
+      on('session.start', async ($, e, next) => {
+        await $.command.register({name: 'go-' + $.plugin.name, description: 'Go'});
+        return next(e);
+      });
+      on('command.run', async ($, e, next) => {
+        if (e.command !== 'go-' + $.plugin.name) return next(e);
+        try { return {text: JSON.stringify(await (async () => { ${body} })())}; }
+        catch (error) { return {text: JSON.stringify('rejected: ' + String(error))}; }
+      });
+    }`;
+    const createStore = async (
+      sources: string[],
+      store?: string | ModStore,
+      host?: ModModelHost,
+    ) => {
+      const runtime = await ModRuntime.createGroup(
+        sources.map((source, index) => ({
+          id: `mod-${index}`,
+          name: `mod-${index}`,
+          source: { root: '/fixture', entry: '/fixture/mod.js', source },
+          options: {},
+        })),
+        '/workspace',
+        (log) => logs.push(log),
+        signal(),
+        undefined,
+        null,
+        '1.2.3',
+        undefined,
+        undefined,
+        undefined,
+        false,
+        undefined,
+        host,
+        typeof store === 'string' ? new ModStore(store) : store,
+      );
+      runtimes.push(runtime);
+      return runtime;
+    };
+    const go = async (runtime: ModRuntime, plugin = 'mod-0') =>
+      JSON.parse(await runtime.runCommand(`go-${plugin}`, '', signal()));
+
+    it('keeps JSON values in the order their keys were first set, between sessions', async () => {
+      const dir = storeDir();
+      const writer = await createStore(
+        [
+          command(`
+            await $.store.set('first', 0);
+            await $.store.set('10', 'ten');
+            await $.store.set('2', 'two');
+            await $.store.set('__proto__', {own: true});
+            await $.store.set('when', {at: new Date(0), gone: undefined, map: new Map([[1, 2]])});
+            await $.store.set('10', 'ten again');
+            await $.store.delete('2');
+            await $.store.delete('never set');
+            return [await $.store.keys(), await $.store.get('10'), await $.store.get('nothing') === undefined];
+          `),
+        ],
+        dir,
+      );
+      expect(await go(writer)).toEqual([
+        ['first', '10', '__proto__', 'when'],
+        'ten again',
+        true,
+      ]);
+      // Another session, later, reads what this one kept.
+      const reader = await createStore(
+        [
+          command(
+            `return [await $.store.keys(), await $.store.get('__proto__'), await $.store.get('when')];`,
+          ),
+        ],
+        dir,
+      );
+      expect(await go(reader)).toEqual([
+        ['first', '10', '__proto__', 'when'],
+        { own: true },
+        { at: '1970-01-01T00:00:00.000Z', map: {} },
+      ]);
+    });
+
+    it('keeps one store per plugin', async () => {
+      const runtime = await createStore(
+        [
+          command(
+            `await $.store.set('k', $.plugin.name); return $.store.keys();`,
+          ),
+          command(
+            `return [await $.store.keys(), await $.store.get('k') === undefined];`,
+          ),
+        ],
+        storeDir(),
+      );
+      expect(await go(runtime, 'mod-0')).toEqual(['k']);
+      expect(await go(runtime, 'mod-1')).toEqual([[], true]);
+    });
+
+    it('rejects a new key before it would make keys() too large to return', async () => {
+      const runtime = await createStore(
+        [
+          command(`
+            const key = 'a'.repeat(140_000);
+            await $.store.set(key, 1);
+            let error;
+            try { await $.store.set('b'.repeat(140_000), 2); }
+            catch (caught) { error = String(caught); }
+            return [error, (await $.store.keys()).map(k => k.length), await $.store.get(key)];
+          `),
+          `export function register(on) {
+            on('store.keys', ($, e, next) => next(e));
+          }`,
+        ],
+        storeDir(),
+      );
+      expect(await go(runtime)).toEqual([
+        expect.stringContaining('the key list would be over'),
+        [140_000],
+        1,
+      ]);
+    });
+
+    it.each([
+      [
+        'undefined',
+        `await $.store.set('k', undefined)`,
+        /takes a string key and a JSON value/,
+      ],
+      [
+        'a function',
+        `await $.store.set('k', () => 1)`,
+        /takes a string key and a JSON value/,
+      ],
+      [
+        'a cycle',
+        `const a = {}; a.a = a; await $.store.set('k', a)`,
+        /circular|cyclic/i,
+      ],
+      [
+        'a key that is not a string',
+        `await $.store.get(7)`,
+        /takes a string key/,
+      ],
+    ])('rejects %s and keeps what was stored', async (_name, body, error) => {
+      const runtime = await createStore(
+        [
+          command(`
+            await $.store.set('kept', 1);
+            try { ${body}; return 'no rejection'; }
+            catch (error) { return [String(error), await $.store.get('kept')]; }
+          `),
+        ],
+        storeDir(),
+      );
+      const [message, kept] = await go(runtime);
+      expect(message).toMatch(error);
+      expect(kept).toBe(1);
+    });
+
+    it('fails the call on a store file it cannot read, and leaves the file as it is', async () => {
+      const dir = storeDir();
+      writeFileSync(join(dir, 'mod-0.json'), '{"not": "a store"}');
+      const runtime = await createStore(
+        [
+          command(`
+            const results = [];
+            for (const run of [() => $.store.get('k'), () => $.store.set('k', 1)])
+              try { await run(); results.push('ok'); } catch (error) { results.push(String(error)); }
+            return results;
+          `),
+        ],
+        dir,
+      );
+      const results = await go(runtime);
+      expect(results).toHaveLength(2);
+      for (const result of results)
+        expect(result).toMatch(/is not a store this version reads/);
+      expect(readFileSync(join(dir, 'mod-0.json'), 'utf8')).toBe(
+        '{"not": "a store"}',
+      );
+    });
+
+    it('bounds store reads across dispatches and cancels queued reads', async () => {
+      const started: string[] = [];
+      let release = () => {};
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      class PausedStore extends ModStore {
+        override async get(_plugin: string, key: string) {
+          started.push(key);
+          await gate;
+          return key;
+        }
+
+        override async keys(_plugin: string) {
+          started.push('keys');
+          await gate;
+          return [];
+        }
+      }
+      const runtime = await createStore(
+        [
+          command(`
+            const reads = Promise.all([
+              $.store.keys(),
+              ...[1, 2, 3, 4, 5].map(n => $.store.get(e.args + n)),
+            ]);
+            $.ui.log('reads posted: ' + e.args);
+            return reads;
+          `),
+        ],
+        new PausedStore(storeDir()),
+      );
+      const waitForReads = (args: string) =>
+        vi.waitFor(() => {
+          expect(logs.some((log) => log.text === `reads posted: ${args}`)).toBe(
+            true,
+          );
+        });
+      const dispatch = new AbortController();
+      const first = runtime.runCommand('go-mod-0', 'first', dispatch.signal);
+      void first.catch(() => {});
+      try {
+        await waitForReads('first');
+        const initialReads = ['keys', 'first1', 'first2', 'first3'];
+        expect(started).toEqual(initialReads);
+        expect(runtime['storeCalls'].size).toBe(6);
+        dispatch.abort();
+        await expect(first).rejects.toThrow('Mod dispatch cancelled.');
+        expect(runtime['storeCalls'].size).toBe(4);
+
+        const second = runtime.runCommand('go-mod-0', 'second', signal());
+        void second.catch(() => {});
+        await waitForReads('second');
+        expect(started).toEqual(initialReads);
+
+        release();
+        const secondKeys = [
+          'second1',
+          'second2',
+          'second3',
+          'second4',
+          'second5',
+        ];
+        expect(JSON.parse(await second)).toEqual([[], ...secondKeys]);
+        expect(started).toEqual([...initialReads, 'keys', ...secondKeys]);
+      } finally {
+        dispatch.abort();
+        release();
+      }
+    });
+
+    it('cancels waiting store writes with their dispatch', async () => {
+      const cleanup = new AbortController();
+      let started: (signal?: AbortSignal) => void = () => {};
+      const waiting = new Promise<AbortSignal | undefined>(
+        (resolve) => (started = resolve),
+      );
+      class WaitingStore extends ModStore {
+        override async set(
+          _plugin: string,
+          _key: string,
+          _value: unknown,
+          dispatch?: AbortSignal,
+        ) {
+          const signal = dispatch
+            ? AbortSignal.any([dispatch, cleanup.signal])
+            : cleanup.signal;
+          started(dispatch);
+          if (!signal.aborted) await once(signal, 'abort');
+          signal.throwIfAborted();
+        }
+      }
+      const runtime = await createStore(
+        [command(`await $.store.set('k', 1); return 'set';`)],
+        new WaitingStore(storeDir()),
+      );
+      const dispatch = new AbortController();
+      const ran = runtime.runCommand('go-mod-0', '', dispatch.signal);
+      void ran.catch(() => {});
+      try {
+        const pending = await waiting;
+        expect(pending?.aborted).toBe(false);
+        dispatch.abort();
+        expect(pending?.aborted).toBe(true);
+        await expect(ran).rejects.toThrow('Mod dispatch cancelled.');
+        await runtime.dispose();
+      } finally {
+        cleanup.abort();
+      }
+    });
+
+    it.each(['timeout', 'signal'])(
+      'cancels a waiting store write when its model middleware ends by %s',
+      async (mode) => {
+        const dir = storeDir();
+        const lock = 'mod-1.json.lock';
+        await mkdir(join(dir, lock, 'held'), { recursive: true });
+        const store = new ModStore(dir);
+        let allowAbort = () => {};
+        const gate = new Promise<void>((resolve) => (allowAbort = resolve));
+        let finishWitness = () => {};
+        const witness = new Promise<void>(
+          (resolve) => (finishWitness = resolve),
+        );
+        const host = vi.fn<ModModelHost>(async ({ prompt }) => {
+          await (prompt === 'gate' ? gate : witness);
+          return {
+            isAnswered: true,
+            text: 'continued',
+            usage: {
+              input_tokens: 0,
+              output_tokens: 0,
+              cache_read_input_tokens: 0,
+              cache_creation_input_tokens: 0,
+            },
+          };
+        });
+        const nested =
+          mode === 'timeout'
+            ? `const expired = await $.model.complete({model: 'm', prompt: 'write', timeoutMs: 1000});`
+            : `
+            const listeners = new Set();
+            const stop = {aborted: false, addEventListener: (_, f) => listeners.add(f),
+              removeEventListener: (_, f) => listeners.delete(f)};
+            const running = $.model.complete({model: 'm', prompt: 'write'}, {signal: stop});
+            await $.model.complete({model: 'm', prompt: 'gate'});
+            stop.aborted = true;
+            for (const listener of listeners) listener();
+            const expired = await running;`;
+        const runtime = await createStore(
+          [
+            command(`
+            ${nested}
+            const live = await $.model.complete({model: 'm', prompt: expired.reason});
+            return [expired.reason, live.text];
+          `),
+            `export function register(on) {
+            on('model.complete', {prompt: 'write'}, async ($, e, next) => {
+              await $.store.set('k', 1);
+              return next(e);
+            });
+          }`,
+          ],
+          store,
+          host,
+        );
+        const ran = runtime.runCommand(
+          'go-mod-0',
+          '',
+          AbortSignal.timeout(5000),
+        );
+        void ran.catch(() => {});
+        try {
+          await vi.waitFor(async () => {
+            expect(
+              (await readdir(dir)).some((entry) =>
+                entry.startsWith(lock + '.'),
+              ),
+            ).toBe(true);
+          });
+          allowAbort();
+          await vi.waitFor(
+            () =>
+              expect(host.mock.calls.map(([input]) => input.prompt)).toEqual(
+                mode === 'signal' ? ['gate', 'aborted'] : ['aborted'],
+              ),
+            { timeout: 3000 },
+          );
+          await vi.waitFor(async () => {
+            expect(await readdir(dir)).toEqual([lock]);
+          });
+          expect(host.mock.calls.at(-1)?.[1].aborted).toBe(false);
+          await rm(join(dir, lock), { recursive: true });
+          expect(await store.get('mod-1', 'k')).toBeUndefined();
+        } finally {
+          allowAbort();
+          finishWitness();
+        }
+        expect(JSON.parse(await ran)).toEqual(['aborted', 'continued']);
+        expect(await store.get('mod-1', 'k')).toBeUndefined();
+      },
+    );
+
+    it('finishes a write the session closes on before it is closed', async () => {
+      const dir = storeDir();
+      let started: () => void = () => {};
+      const writing = new Promise<void>((resolve) => (started = resolve));
+      // A store slow enough that the close comes while the write runs.
+      class SlowStore extends ModStore {
+        override async set(plugin: string, key: string, value: unknown) {
+          started();
+          await new Promise((resolve) => setTimeout(resolve, 200));
+          return super.set(plugin, key, value);
+        }
+      }
+      const runtime = await ModRuntime.createGroup(
+        [
+          {
+            id: 'mod-0',
+            name: 'mod-0',
+            source: {
+              root: '/fixture',
+              entry: '/fixture/mod.js',
+              source: command(`await $.store.set('k', 1); return 'set';`),
+            },
+            options: {},
+          },
+        ],
+        '/workspace',
+        (log) => logs.push(log),
+        signal(),
+        undefined,
+        null,
+        '1.2.3',
+        undefined,
+        undefined,
+        undefined,
+        false,
+        undefined,
+        undefined,
+        new SlowStore(dir),
+      );
+      const ran = runtime.runCommand('go-mod-0', '', signal());
+      void ran.catch(() => {});
+      await writing;
+      await runtime.dispose();
+      await expect(ran).rejects.toThrow();
+      expect(await new ModStore(dir).get('mod-0', 'k')).toBe(1);
+      expect(existsSync(join(dir, 'mod-0.json.lock'))).toBe(false);
+    });
+
+    it("runs the store calls through the other plugins' hooks", async () => {
+      const runtime = await createStore(
+        [
+          command(`
+            await $.store.set('note', 'draft');
+            const results = [await $.store.get('note')];
+            try { await $.store.delete('note'); } catch (error) { results.push(String(error)); }
+            try { await $.store.set('moved', 1); results.push('set'); } catch (error) { results.push(String(error)); }
+            results.push(await $.store.keys());
+            return results;
+          `),
+          `export function register(on) {
+            on('store.set', {key: 'note'}, ($, e, next) => next({...e, value: e.value + ' (seen by ' + $.plugin.name + ')'}));
+            on('store.delete', () => ({deny: 'kept by mod-1'}));
+            on('store.set', {key: 'moved'}, ($, e, next) => next({...e, key: 'elsewhere'}));
+          }`,
+        ],
+        storeDir(),
+      );
+      const [note, denied, moved, keys] = await go(runtime);
+      expect(note).toBe('draft (seen by mod-1)');
+      expect(denied).toContain('kept by mod-1');
+      // A hook cannot move a write to another key: it is skipped, and the
+      // write lands where it was asked.
+      expect(moved).toBe('set');
+      expect(keys).toEqual(['note', 'moved']);
+    });
+
+    it('rejects store calls before middleware where the host keeps no store', async () => {
+      const runtime = await createStore([
+        command(`
+          const { methods, events } = (await $.session.version()).qwen;
+          try { await $.store.get('k'); return 'no rejection'; }
+          catch (error) {
+            return [String(error), methods.filter(m => m.startsWith('store.')), events.filter(e => e.startsWith('store.'))];
+          }
+        `),
+        `export function register(on) {
+          on('store.get', () => ({ value: 'intercepted' }));
+        }`,
+      ]);
+      expect(await go(runtime)).toEqual([
+        expect.stringContaining('This host keeps no Mod store.'),
+        [],
+        [],
+      ]);
+      const kept = await createStore(
+        [
+          command(
+            `return (await $.session.version()).qwen.methods.filter((m) => m.startsWith('store.'));`,
+          ),
+        ],
+        storeDir(),
+      );
+      expect(await go(kept)).toEqual([
+        'store.delete',
+        'store.get',
+        'store.keys',
+        'store.set',
+      ]);
+    });
+  });
+});
