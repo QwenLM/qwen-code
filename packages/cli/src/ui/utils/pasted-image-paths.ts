@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as path from 'node:path';
 import { fileUriToLocalPath, isFileUri, isUncPath } from './file-uri.js';
 
 const PASTED_IMAGE_EXTENSIONS = /\.(png|jpe?g|gif|webp|bmp)$/i;
@@ -17,9 +18,11 @@ const PASTED_IMAGE_EXTENSIONS = /\.(png|jpe?g|gif|webp|bmp)$/i;
  * own Ctrl+V handler. Recognizing those lets Cmd+V (terminal-driven) converge
  * on the same attachment UX as Ctrl+V. Mirrors Claude Code's usePasteHandler:
  * split on newlines and on spaces that precede an absolute path (spaces inside
- * a path are shell-escaped), then normalize each token.
+ * a path are shell-escaped), then normalize each token. Those helpers inject
+ * absolute paths, so a bare name such as `test.jpg` copied from a file manager
+ * stays text.
  *
- * @returns `imagePaths` (normalized tokens with an image extension) and
+ * @returns `imagePaths` (normalized absolute tokens with an image extension) and
  *   `allImages` (true only when every token is such a path), so the caller can
  *   promote a pure image-path paste without swallowing mixed text.
  */
@@ -53,7 +56,10 @@ export function classifyPastedImagePaths(pasted: string): {
       allImages = false;
       continue;
     }
-    if (PASTED_IMAGE_EXTENSIONS.test(normalized)) {
+    if (
+      path.isAbsolute(normalized) &&
+      PASTED_IMAGE_EXTENSIONS.test(normalized)
+    ) {
       imagePaths.push(normalized);
     } else {
       allImages = false;

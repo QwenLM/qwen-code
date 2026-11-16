@@ -738,13 +738,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       // submit in between must not find its cleared buffer and attachment
       // list refilled by this late continuation.
       const submitEpoch = submitEpochRef.current;
-      const cwd = config.getTargetDir();
       const clipboardDir = path.join(Storage.getGlobalTempDir(), 'clipboard');
       const attachments: Attachment[] = [];
-      for (const imagePath of imagePaths) {
-        const sourcePath = path.isAbsolute(imagePath)
-          ? imagePath
-          : path.resolve(cwd, imagePath);
+      for (const sourcePath of imagePaths) {
         try {
           const stats = await fs.stat(sourcePath);
           if (!stats.isFile()) continue;
@@ -783,7 +779,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         buffer.insert(originalPasted, { paste: false });
       }
     },
-    [config, buffer, collapseLargePaste],
+    [buffer, collapseLargePaste],
   );
 
   // Put clipboard text into the input: a clipboard that is purely image-file
