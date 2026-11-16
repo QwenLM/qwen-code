@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels;
 public final class WorkspaceToolProfiles {
     public static final String FILES = "hosted-workspace-files/1";
     public static final String EXTERNAL_FILES = "hosted-workspace-external-files/1";
+    public static final String EXTERNAL_CONTENT = "hosted-workspace-external-files/2";
     public static final String MCP = "hosted-workspace-mcp/1";
     public static final String SHELL = "hosted-workspace-shell/1";
     /**
@@ -39,6 +40,14 @@ public final class WorkspaceToolProfiles {
                 || SHELL_V4.equals(profile);
     }
 
+    public static boolean isExternalFiles(String profile) {
+        return EXTERNAL_FILES.equals(profile) || EXTERNAL_CONTENT.equals(profile);
+    }
+
+    public static boolean isPublicChild(String profile) {
+        return isPublicShell(profile) || EXTERNAL_CONTENT.equals(profile);
+    }
+
     /** The internal team-lead lanes, never selectable by a public definition. */
     public static boolean isInternalTeamLead(String profile) {
         return INTERNAL_TEAM_LEAD.equals(profile) || INTERNAL_TEAM_LEAD_V2.equals(profile);
@@ -54,7 +63,7 @@ public final class WorkspaceToolProfiles {
             return 1;
         }
         if (SHELL.equals(profile) || SHELL_V3.equals(profile)
-                || SHELL_V4.equals(profile) || MCP.equals(profile)) {
+                || SHELL_V4.equals(profile) || MCP.equals(profile) || EXTERNAL_CONTENT.equals(profile)) {
             return 2;
         }
         return 0;
@@ -76,6 +85,7 @@ public final class WorkspaceToolProfiles {
                 && (EXTERNAL_FILES.equals(session.toolProfile())
                         ? "qwen-code".equals(session.agentId()) && session.agentDefinitionDigest() == null
                                 && session.publicChildAgentsVersion() == 0
+                        : EXTERNAL_CONTENT.equals(session.toolProfile()) ? session.publicChildAgentsVersion() == 1
                         : FILES.equals(session.toolProfile()) || FILES_V3.equals(session.toolProfile())
                                 || FILES_V4.equals(session.toolProfile())
                         || isPublicShell(session.toolProfile()));

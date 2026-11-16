@@ -31,7 +31,8 @@ public final class ManagedConfigInstall {
                 "previousConfigRevision", "phase", "previousBundleRef", "restoresBundleRef", "bundleRef", "rootSnapshotRef",
                 "stageAckRefs", "enableAckRefs", "error", "operationId", "revision", "previousRecordRef"), "Configuration install");
         check(KIND.equals(body.path("kind").textValue()) && body.path("formatVersion").isIntegralNumber()
-                && body.path("formatVersion").asLong() == 1, "Invalid configuration install kind");
+                && Set.of(1L, 2L).contains(body.path("formatVersion").asLong()), "Invalid configuration install kind");
+        boolean content = body.path("formatVersion").asLong() == 2;
         long revision = count(body.get("revision"), 1);
         JsonNode predecessor = body.get("previousRecordRef");
         ref(predecessor, true);
@@ -48,6 +49,7 @@ public final class ManagedConfigInstall {
                 ? Set.of("operationId", "actorKey", "expectedRevision", "extensions", "mcpChange")
                 : Set.of("operationId", "actorKey", "expectedRevision", "extensions"), "Extension apply command");
         if (command.has("mcpChange")) {
+            check(!content, "Content configuration cannot change MCP");
             mcpChange(command.get("mcpChange"));
         }
         check(uuid(command.path("operationId").asText()) && command.get("operationId").equals(body.get("operationId"))
@@ -56,6 +58,9 @@ public final class ManagedConfigInstall {
         check(body.path("phaseOperationId").asText().equals(compensation ? derivedOperationId("managed-extension-recoverPrevious:", command.path("operationId").asText().toLowerCase(Locale.ROOT))
                 : command.path("operationId").asText()), "Configuration phase operation conflicts");
         pins(command.get("extensions"));
+        if (content) {
+            command.get("extensions").forEach(pin -> check(!pin.has("settingsRevision"), "Content configuration cannot read settings"));
+        }
         ref(body.get("previousBundleRef"), true);
         ref(body.get("restoresBundleRef"), true);
         check(!body.get("restoresBundleRef").isNull() == compensation, "Invalid compensation content");
@@ -64,9 +69,19 @@ public final class ManagedConfigInstall {
         ref(body.get("rootSnapshotRef"), false);
         refs(body.get("stageAckRefs"));
         refs(body.get("enableAckRefs"));
-        check(!Set.of("prepared", "committed", "active").contains(phase) || body.get("stageAckRefs").size() >= 2,
-                "Both stage acknowledgements are required");
-        check(!"active".equals(phase) || body.get("enableAckRefs").size() >= 2, "Both enable acknowledgements are required");
+        if (content) {
+            contentRef(body.get("rootSnapshotRef"), "managed-extension-root");
+            for (String field : List.of("previousBundleRef", "restoresBundleRef", "bundleRef")) {
+                contentRef(body.get(field), "managed-extension-config-bundle");
+            }
+            body.get("stageAckRefs").forEach(ack -> contentRef(ack, "managed-extension-stage-ack"));
+            body.get("enableAckRefs").forEach(ack -> contentRef(ack, "managed-extension-enable-ack"));
+        }
+        check(!Set.of("prepared", "committed", "active").contains(phase)
+                || (content ? body.get("stageAckRefs").size() == 1 : body.get("stageAckRefs").size() >= 2),
+                "Configuration stage acknowledgements are required");
+        check(!"active".equals(phase) || (content ? body.get("enableAckRefs").size() == 1 : body.get("enableAckRefs").size() >= 2),
+                "Configuration enable acknowledgements are required");
         check(!Set.of("preparing", "prepared", "failed").contains(phase) || body.get("enableAckRefs").isEmpty(), "Unexpected enable acknowledgement");
         JsonNode error = body.get("error");
         check((Set.of("failed", "recovery_required").contains(phase)) == !error.isNull(), "Invalid configuration error");
@@ -129,6 +144,7 @@ public final class ManagedConfigInstall {
             return;
         }
         require(previous);
+        check(previous.get("formatVersion").equals(next.get("formatVersion")), "Configuration format changed");
         String phase = previous.path("phase").asText();
         if (!previous.get("operationId").equals(next.get("operationId"))) {
             check(Set.of("active", "failed").contains(phase)
@@ -197,6 +213,11 @@ public final class ManagedConfigInstall {
             ref(entry, false);
             check(ids.add(entry.path("resourceId").asText()), "Duplicate configuration acknowledgement");
         }
+    }
+
+    private static void contentRef(JsonNode ref, String kind) {
+        check(ref.isNull() || kind.equals(ref.path("kind").asText()) && ref.path("schemaVersion").asLong(-1) == 1,
+                "Invalid content configuration reference kind");
     }
 
     private static void check(boolean valid, String message) {

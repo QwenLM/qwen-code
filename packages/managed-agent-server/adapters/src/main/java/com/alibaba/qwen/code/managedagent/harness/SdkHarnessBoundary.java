@@ -33,6 +33,11 @@ public final class SdkHarnessBoundary implements HarnessConnector {
     }
 
     @Override
+    public boolean supportsPublicChildAgents(String profile) {
+        return call(() -> delegate.supportsPublicChildAgents(profile));
+    }
+
+    @Override
     public String closeSession(OperationRecord operation) {
         return call(() -> delegate.closeSession(operation));
     }
@@ -178,6 +183,11 @@ public final class SdkHarnessBoundary implements HarnessConnector {
     @Override
     public boolean supportsSessionExtensions() {
         return call(delegate::supportsSessionExtensions);
+    }
+
+    @Override
+    public boolean supportsSessionExtensions(String profile) {
+        return call(() -> delegate.supportsSessionExtensions(profile));
     }
 
     @Override

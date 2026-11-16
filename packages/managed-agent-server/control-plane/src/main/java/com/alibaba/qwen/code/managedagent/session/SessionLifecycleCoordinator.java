@@ -124,13 +124,13 @@ public class SessionLifecycleCoordinator {
     }
 
     public boolean supportsWorkspaceLifecycle(String profile) {
-        return (com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.EXTERNAL_FILES.equals(profile)
+        return (com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.isExternalFiles(profile)
                 ? runtimeWarmer.supportsWorkspaceClose(profile) : runtimeWarmer.supportsWorkspaceClose()) && harness.supportsLifecycle(profile);
     }
 
     public boolean supportsWorkspaceLifecycle(SessionRecord session) {
         return session.workspace() != null && RuntimeWarmer.supportsClose(runtimeWarmer, session.workspace())
-                && (com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile())
+                && (com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.isExternalFiles(session.toolProfile())
                         ? harness.supportsSavedLifecycle(session.toolProfile()) : harness.supportsLifecycle(session.toolProfile()));
     }
 
@@ -767,7 +767,7 @@ public class SessionLifecycleCoordinator {
             lifecycle.requireSettledExecutions(operation);
             JsonNode effects = lifecycle.recoverEffects(operation);
             if (effects == null) {
-                if (!(com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile())
+                if (!(com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.isExternalFiles(session.toolProfile())
                         ? harness.supportsSavedLifecycle(session.toolProfile()) : harness.supportsLifecycle(session.toolProfile()))) {
                     throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_protocol_unavailable");
                 }
@@ -1043,10 +1043,11 @@ public class SessionLifecycleCoordinator {
                 // MutationOutcomeUnknownException): a journal-side
                 // failure owes its revision, but must never skip the
                 // child's own physical close behind it.
-                RuntimeBindingRecord binding = findBinding(tenantId,
-                        childSessionId);
-                ChildResultRelayStore.TurnLine childTurn = childScopes
-                        .latestTurn(tenantId, childSessionId);
+                String originalCreationKey = creationKey == null ? ManagedAgentService.childCreationKey(sessionId, scope.childRunId()) : creationKey;
+                var admission = childScopes.bootstrapAdmission(new ChildResultRelayStore.RelayRow(tenantId, sessionId,
+                        scope.childRunId(), originalCreationKey, childSessionId, "creating", null, 0, 0, 0, null, 0, 0), childSessionId);
+                RuntimeBindingRecord binding = findBinding(tenantId, childSessionId, admission);
+                ChildResultRelayStore.TurnLine childTurn = admission == null ? childScopes.latestTurn(tenantId, childSessionId) : admission.turn();
                 if (body.runtimeBindingId() == null
                         && body.dispatchId() == null && binding == null
                         && (childTurn == null || !childTurn.dispatched())) {
@@ -1344,11 +1345,11 @@ public class SessionLifecycleCoordinator {
      * proves the dispatch it once was; warmth is a separate question
      * the relay answers READY-only. */
     private RuntimeBindingRecord findBinding(String tenantId,
-            String sessionId) {
+            String sessionId, ChildResultRelayStore.BootstrapAdmission admission) {
         RuntimeBrokerOperations broker = brokerProviders == null ? null
                 : brokerProviders.getIfAvailable();
-        return broker == null ? null
-                : broker.findLatestBindingByHarnessSessionAnyState(tenantId,
-                        sessionId);
+        return broker == null ? null : admission == null
+                ? broker.findLatestBindingByHarnessSessionAnyState(tenantId, sessionId)
+                : broker.findBindingByRuntimeSession(tenantId, sessionId, admission.promptId(), false);
     }
 }

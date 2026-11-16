@@ -42,7 +42,7 @@ final class AgentSessionPolicies {
     // refuse a revision (shell/3) that creation accepted.
     private static final Set<String> EXTENSION_APPLY_PROFILES = Set.of(WorkspaceToolProfiles.SHELL,
             WorkspaceToolProfiles.SHELL_V3, WorkspaceToolProfiles.SHELL_V4, WorkspaceToolProfiles.MCP,
-            WorkspaceToolProfiles.FILES, WorkspaceToolProfiles.READ);
+            WorkspaceToolProfiles.FILES, WorkspaceToolProfiles.READ, WorkspaceToolProfiles.EXTERNAL_CONTENT);
 
     private final AgentEventJournal eventJournal;
     private final AgentSessionQueries sessionQueries;
@@ -272,6 +272,7 @@ final class AgentSessionPolicies {
                 && operationId.equals(current.path("operationId").asText());
         if (mutation && (lineage != null && (!same || !childExtensionBootstrapCommand(session, lineage).equals(current.path("command")))
                 || !workspaceFilesEnabled
+                || !same && WorkspaceToolProfiles.EXTERNAL_CONTENT.equals(session.toolProfile()) && !workspaces.externalContentAvailable()
                 || !EXTENSION_APPLY_PROFILES.contains(session.toolProfile()))) {
             throw new ManagedAgentException(409, "unsupported_feature", "Extension management is unavailable.");
         }
@@ -290,6 +291,7 @@ final class AgentSessionPolicies {
     boolean canApplyExtensions(SessionRecord session) {
         return workspaceFilesEnabled && "ACTIVE".equals(session.status())
                 && EXTENSION_APPLY_PROFILES.contains(session.toolProfile())
+                && (!WorkspaceToolProfiles.EXTERNAL_CONTENT.equals(session.toolProfile()) || workspaces.externalContentAvailable())
                 && sessionQueries.findChildLineage(session.tenantId(), session.sessionId()) == null
                 && !hasActiveTurn(session.tenantId(), session.sessionId());
     }
@@ -298,6 +300,10 @@ final class AgentSessionPolicies {
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         if (session.workspace() == null || !workspaceId.equals(session.workspace().getWorkspaceId())) {
             throw new ManagedAgentException(409, "unsupported_feature", "Extension management is unavailable.");
+        }
+        boolean content = WorkspaceToolProfiles.EXTERNAL_CONTENT.equals(session.toolProfile());
+        if (body.path("formatVersion").asInt() != (content ? 2 : 1)) {
+            throw new ManagedAgentException(409, "configuration_format_conflict", "Configuration format conflicts with its Session profile");
         }
         requireSessionStatus(session.status(), "ACTIVE");
         var lineage = sessionQueries.findChildLineage(tenantId, sessionId);
@@ -626,7 +632,7 @@ final class AgentSessionPolicies {
         }
         if (!supported || session.agentDefinitionDigest() != null && !agentDefinitionSupported
                 || !workspaceFilesEnabled || !WorkspaceToolProfiles.supportsApprovalSelection(session)
-                || WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile())
+                || WorkspaceToolProfiles.isExternalFiles(session.toolProfile())
                         && (!ExternalWorkspaceSessionPolicies.externalFilesAllowedOrRefuse(workspaces, session.workspace())
                                 || sessionQueries.findChildLineage(tenantId, sessionId) != null)
                 || WorkspaceToolProfiles.isPublicShell(session.toolProfile()) && !workspaceShellEnabled) {
@@ -690,13 +696,14 @@ final class AgentSessionPolicies {
 
     void requireExternalTurnAllowed(String tenantId, String actorId, String sessionId,
             SessionRecord session, List<Map<String, Object>> input) {
-        if (!WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile())
+        boolean content = WorkspaceToolProfiles.EXTERNAL_CONTENT.equals(session.toolProfile());
+        if (!WorkspaceToolProfiles.isExternalFiles(session.toolProfile())
                 || !ExternalWorkspaceSessionPolicies.externalFilesAllowedOrRefuse(workspaces, session.workspace())
                 || !workspaces.accessOf(tenantId, actorId, session.workspace().getWorkspaceId()).canCreate()
                 || !"qwen-code".equals(session.agentId()) || session.agentDefinitionDigest() != null
-                || sessionQueries.findChildLineage(tenantId, sessionId) != null || session.publicChildAgentsVersion() != 0
-                || hasMcpServers(session) || !creationSkills.effective(session).isEmpty()
-                || creationSkills.initialSelection(tenantId, sessionId) != null
+                || sessionQueries.findChildLineage(tenantId, sessionId) != null || session.publicChildAgentsVersion() != (content ? 1 : 0)
+                || hasMcpServers(session) || !content && (!creationSkills.effective(session).isEmpty()
+                        || creationSkills.initialSelection(tenantId, sessionId) != null)
                 || Boolean.TRUE.equals(jdbc.queryForObject("SELECT is_plan_enabled FROM ma_session WHERE tenant_id=? AND session_id=?",
                         Boolean.class, tenantId, sessionId))
                 || input.stream().anyMatch(block -> !Set.of("input_text", "text").contains(block.get("type")))) {

@@ -32,7 +32,7 @@ export type ManagedConfigInstallPhase =
 
 export interface ManagedConfigInstallContent {
   readonly kind: typeof MANAGED_EXTENSION_CONFIG_KIND;
-  readonly formatVersion: 1;
+  readonly formatVersion: 1 | 2;
   readonly command: ManagedExtensionApplyCommand;
   readonly mode: 'apply' | 'recoverPrevious';
   readonly phaseOperationId: string;
@@ -115,7 +115,8 @@ function parse(
       (key) => !(expected as readonly string[]).includes(key),
     ) ||
     body['kind'] !== MANAGED_EXTENSION_CONFIG_KIND ||
-    body['formatVersion'] !== 1 ||
+    ![1, 2].includes(Number(body['formatVersion'])) ||
+    typeof body['formatVersion'] !== 'number' ||
     !['apply', 'recoverPrevious'].includes(String(body['mode'])) ||
     !revision(body['configRevision'], 1) ||
     !revision(body['previousConfigRevision'], 0) ||
@@ -126,6 +127,13 @@ function parse(
   )
     invalid();
   const command = parseManagedExtensionApplyCommand(body['command']);
+  const contentOnly = body['formatVersion'] === 2;
+  if (
+    contentOnly &&
+    (command.mcpChange ||
+      command.extensions.some((pin) => pin.settingsRevision !== undefined))
+  )
+    invalid();
   const phase = body['phase'] as ManagedConfigInstallPhase;
   const compensating = body['mode'] === 'recoverPrevious';
   if (
@@ -144,8 +152,9 @@ function parse(
   const enableAckRefs = refs(body['enableAckRefs']);
   if (
     (['prepared', 'committed', 'active'].includes(phase) &&
-      stageAckRefs.length < 2) ||
-    (phase === 'active' && enableAckRefs.length < 2) ||
+      (contentOnly ? stageAckRefs.length !== 1 : stageAckRefs.length < 2)) ||
+    (phase === 'active' &&
+      (contentOnly ? enableAckRefs.length !== 1 : enableAckRefs.length < 2)) ||
     (['preparing', 'prepared', 'failed'].includes(phase) &&
       enableAckRefs.length !== 0)
   )
@@ -165,7 +174,7 @@ function parse(
     invalid();
   const parsed: ManagedConfigInstallContent = {
     kind: MANAGED_EXTENSION_CONFIG_KIND,
-    formatVersion: 1,
+    formatVersion: body['formatVersion'] as 1 | 2,
     command,
     mode: body['mode'] as 'apply' | 'recoverPrevious',
     phaseOperationId: body['phaseOperationId'] as string,
@@ -186,6 +195,26 @@ function parse(
     enableAckRefs,
     error: error ? { code: error['code'] as string } : null,
   };
+  if (contentOnly) {
+    for (const [reference, kind] of [
+      [parsed.rootSnapshotRef, 'managed-extension-root'],
+      [parsed.previousBundleRef, 'managed-extension-config-bundle'],
+      [parsed.restoresBundleRef, 'managed-extension-config-bundle'],
+      [parsed.bundleRef, 'managed-extension-config-bundle'],
+      ...stageAckRefs.map(
+        (ack) => [ack, 'managed-extension-stage-ack'] as const,
+      ),
+      ...enableAckRefs.map(
+        (ack) => [ack, 'managed-extension-enable-ack'] as const,
+      ),
+    ] as const) {
+      if (
+        reference &&
+        (reference.kind !== kind || reference.schemaVersion !== 1)
+      )
+        invalid();
+    }
+  }
   if ((parsed.restoresBundleRef !== null) !== compensating) invalid();
   if (parsed.bundleRef === null && !['preparing', 'failed'].includes(phase))
     invalid();
@@ -237,6 +266,7 @@ export function assertManagedConfigInstallSuccessor(
       invalid();
     return;
   }
+  if (previous.formatVersion !== next.formatVersion) invalid();
   if (previous.command.operationId !== next.command.operationId) {
     if (
       !['active', 'failed'].includes(previous.phase) ||

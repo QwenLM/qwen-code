@@ -18,6 +18,10 @@ public interface HarnessConnector extends AutoCloseable {
     }
 
     public default boolean supportsPublicChildAgents() { return false; }
+    public default boolean supportsPublicChildAgents(String profile) {
+        return com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.isPublicShell(profile)
+                && supportsPublicChildAgents();
+    }
 
     public default String closeSession(OperationRecord operation) {
         return closeSession(operation.tenantId(), operation.sessionId());
@@ -130,6 +134,7 @@ public interface HarnessConnector extends AutoCloseable {
     }
 
     public default boolean supportsSessionExtensions() { return false; }
+    public default boolean supportsSessionExtensions(String profile) { return supportsSessionExtensions(); }
 
     public default boolean supportsPackagePreparation() { return false; }
 

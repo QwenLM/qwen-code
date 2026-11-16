@@ -41,16 +41,21 @@ final class ExternalWorkspaceSessionPolicies {
             AgentSessionPolicies.AgentPin resolvedPin, SessionCreationCommand command) {
         AgentSessionPolicies.AgentPin effective = resolvedPin;
         if (external) {
+            boolean content = workspaces.externalContentEnabled();
             if (!externalFilesAllowedOrRefuse(workspaces, binding)
+                    || content && (!workspaces.externalContentAvailable() || !command.publicChildrenSupported())
                     || !"qwen-code".equals(command.agentId())
                     || resolvedPin.digest() != null || resolvedPin.hooks() || resolvedPin.mcp()
-                    || Boolean.TRUE.equals(command.requestedPlanMode()) || !command.skills().isEmpty() || command.extensionPins() != null
+                    || Boolean.TRUE.equals(command.requestedPlanMode())
+                    || !content && (!command.skills().isEmpty() || command.extensionPins() != null)
+                    || content && command.extensionPins() != null
+                            && command.extensionPins().stream().anyMatch(pin -> pin.settingsRevision() != null)
                     || command.memoryStoreId() != null
                     || command.input().stream().anyMatch(block -> !Set.of("input_text", "text").contains(block.get("type")))) {
                 throw AgentSessionPolicies.workspaceExecutionUnavailable();
             }
             effective = new AgentSessionPolicies.AgentPin(resolvedPin.revision(), null, resolvedPin.approvalMode(),
-                    WorkspaceToolProfiles.EXTERNAL_FILES, false, false);
+                    content ? WorkspaceToolProfiles.EXTERNAL_CONTENT : WorkspaceToolProfiles.EXTERNAL_FILES, false, false);
         }
         return selectApprovalMode(effective, command.requestedApprovalMode(), command.approvalSelectionSupported());
     }

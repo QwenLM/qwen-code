@@ -77,6 +77,27 @@ final class RuntimeBindingRegistry {
         }
     }
 
+    RuntimeBindingRecord findBindingByRuntimeSession(String tenantId,
+            String harnessSessionId, String runtimeSessionId, boolean readyOnly) {
+        RuntimeSessionRecord member = sessionRepository.findHistorical(tenantId, harnessSessionId, runtimeSessionId);
+        if (member == null) {
+            return null;
+        }
+        RuntimeBindingRecord binding = bindingRepository.findById(member.getBindingId());
+        if (binding == null || binding.getGeneration() != member.getRuntimeGeneration()
+                || !member.getSession().getScope().equals(binding.getRequest().getScope())
+                || !com.alibaba.qwen.code.runtimebroker.HarnessOwnership.sharesRuntimeSessions(binding.getRequest())
+                        && !harnessSessionId.equals(binding.getRequest().getIsolationKey())
+                || !tenantId.equals(member.getSession().getScope().getTenantId())
+                || !harnessSessionId.equals(member.getSession().getHarnessSessionId())
+                || !runtimeSessionId.equals(member.getRuntimeSessionId())) {
+            throw conflict("runtime_session_conflict", "Original Runtime member identity differs");
+        }
+        return readyOnly && (member.getState() != RuntimeSessionRecord.State.READY
+                || binding.getState() != RuntimeBindingRecord.State.READY || binding.isDrainRequested())
+                ? null : binding;
+    }
+
     String runtimeProvisionerKind(RuntimeSessionRecord record) {
         RuntimeBindingRecord binding = bindingRepository.findById(record.getBindingId());
         if (binding == null || binding.getGeneration() != record.getRuntimeGeneration()) {

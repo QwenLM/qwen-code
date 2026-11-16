@@ -71,7 +71,7 @@ public class ManagedExtensionManagementService {
             return empty(sessionId, false);
         }
         boolean supported = packages.supported()
-                && harness.supportsSessionExtensions();
+                && supportsExtensions(session);
         JsonNode latest = records.currentMcpSettings(tenant, sessionId);
         if (!ManagedConfigInstall.isPackageConfig(latest)) {
             if (operationId != null) {
@@ -195,13 +195,18 @@ public class ManagedExtensionManagementService {
         }
         session = store.requireExtensionManagement(tenant, actor, sessionId, operationId, true);
         packages.requireExecutionAccess(tenant, actor, session.workspace().getWorkspaceId());
-        if (!harness.supportsSessionExtensions()) {
+        if (!supportsExtensions(session)) {
             throw unsupported();
         }
         List<com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Pin> pins = json.convertValue(command.get("extensions"), json.getTypeFactory().constructCollectionType(
                 List.class, com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Pin.class));
         packages.authorizeSelection(tenant, actor, session.workspace().getWorkspaceId(), pins);
         return invoke(() -> harness.applyExtensions(tenant, sessionId, request), sessionId, operationId);
+    }
+
+    private boolean supportsExtensions(SessionRecord session) {
+        return com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.EXTERNAL_CONTENT.equals(session.toolProfile())
+                ? harness.supportsSessionExtensions(session.toolProfile()) : harness.supportsSessionExtensions();
     }
 
     private boolean sameCommand(Map<String, Object> request, JsonNode saved) {
@@ -241,7 +246,7 @@ public class ManagedExtensionManagementService {
         if (!ManagedConfigInstall.isPackageConfig(current) || !operationId.equals(current.path("operationId").asText())) {
             throw missing();
         }
-        if (!harness.supportsSessionExtensions() || session.workspace() == null) {
+        if (!supportsExtensions(session) || session.workspace() == null) {
             throw unsupported();
         }
         packages.requireExecutionAccess(tenant, actor,

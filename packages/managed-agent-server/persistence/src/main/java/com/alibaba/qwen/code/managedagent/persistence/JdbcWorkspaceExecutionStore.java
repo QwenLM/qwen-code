@@ -95,7 +95,7 @@ public class JdbcWorkspaceExecutionStore
         requireExternalExecution(session.workspace());
         authorizePassiveAttachment(session);
         if (storageGuard != null && residents.find(session.workspace()) == null
-                && !(WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile()) && isExternal(session.workspace()))) {
+                && !(WorkspaceToolProfiles.isExternalFiles(session.toolProfile()) && isExternal(session.workspace()))) {
             storageGuard.verify(session.workspace());
         }
     }
@@ -108,7 +108,7 @@ public class JdbcWorkspaceExecutionStore
         }
         authorizePassiveAttachment(session, authority);
         if (storageGuard != null && residents.find(session.workspace()) == null
-                && !(WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile()) && isExternal(session.workspace()))) {
+                && !(WorkspaceToolProfiles.isExternalFiles(session.toolProfile()) && isExternal(session.workspace()))) {
             storageGuard.verify(session.workspace());
         }
     }
@@ -119,7 +119,7 @@ public class JdbcWorkspaceExecutionStore
         }
         authorizePassiveAttachment(session, null, true);
         if (storageGuard != null && residents.find(session.workspace()) == null
-                && !(WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile()) && isExternal(session.workspace()))) {
+                && !(WorkspaceToolProfiles.isExternalFiles(session.toolProfile()) && isExternal(session.workspace()))) {
             storageGuard.verify(session.workspace());
         }
     }
@@ -191,7 +191,7 @@ public class JdbcWorkspaceExecutionStore
 
     public void authorizeExternal(SessionRecord session,
             com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
-        if (!isExternal(session.workspace()) || !"hosted-workspace-external-files/1".equals(session.toolProfile())
+        if (!isExternal(session.workspace()) || !com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.isExternalFiles(session.toolProfile())
                 || !"qwen-code".equals(session.agentId()) || session.agentDefinitionDigest() != null) {
             throw unavailable();
         }
@@ -202,7 +202,8 @@ public class JdbcWorkspaceExecutionStore
                 throw lifecycleFailure(error);
             }
         }
-        authorizer.authorizeAttachment(session, false, false, authority, false, false, true);
+        authorizer.authorizeAttachment(session, false, false, authority, false,
+                authority != null && WorkspaceToolProfiles.EXTERNAL_CONTENT.equals(session.toolProfile()), true);
     }
 
     private static RuntimeBrokerException lifecycleFailure(ManagedAgentException error) {
@@ -305,13 +306,13 @@ public class JdbcWorkspaceExecutionStore
         return transaction.execute(status -> jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<T>) connection -> {
             var owner = JdbcExternalWorkspaceOwnership.lockOwner(connection, binding);
             var saved = JdbcExternalWorkspaceOwnership.savedContext(
-                    connection, binding, harnessSessionId, acquiring);
+                    connection, binding, harnessSessionId, acquiring && scope.getLifecycleAuthority() == null);
             if (context != null && !context.equals(saved)) {
                 throw unavailable();
             }
             JdbcExternalWorkspaceOwnership.requireExternalHarnessAdmission(
                     connection, binding.getRequest(), scope,
-                    harnessSessionId, !acquiring);
+                    harnessSessionId, !acquiring || scope.getLifecycleAuthority() != null);
             if (claimDriftRetryable) {
                 JdbcExternalWorkspaceOwnership.requireUnchangedClaimOrRetry(connection, original, binding);
             }

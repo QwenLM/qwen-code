@@ -5,7 +5,7 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, writeFile, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Part } from '@google/genai';
@@ -20,6 +20,7 @@ import {
   type ManagedSessionDurableRef,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
+import { publishManagedExtensionAssets } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-assets.js';
 import type { ToolResultEnvelope } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
 import { convertToFunctionErrorResponse } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
@@ -103,6 +104,7 @@ import {
   findHostedMemoryResults,
 } from './hosted-memory-session.js';
 import { readHostedApprovalContinuation } from './hosted-approval-continuation.js';
+import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import { writeHostedTodos } from './hosted-todo-session.js';
 import {
   HostedLoopSession,
@@ -3418,6 +3420,237 @@ it.each(['web_fetch', 'run_shell_command', 'glob', 'todo_write', 'skill'])(
     expect(broker.execute).not.toHaveBeenCalled();
     await resident.consumeResults();
     await resident.finish();
+  },
+);
+
+it.each([
+  [false, false, false],
+  [true, false, false],
+  [false, true, false],
+  [false, 'command', false],
+  [false, false, true],
+] as const)(
+  'reads content assets or static Skill with a pinned member (denied Read: %s, Skill: %s, lost acquire: %s)',
+  async (denied, skill, lostAcquire) => {
+    if (skill) {
+      const { sessionKey, rootSnapshotRef } = session.authority.sessionHeader;
+      const resources = session.resources;
+      const definitionRef = await resources.publish(
+        'managed-definition',
+        Buffer.from(
+          JSON.stringify({
+            toolProfile: 'hosted-workspace-external-files/2',
+            publicChildAgentsVersion: 1,
+          }),
+        ),
+      );
+      await session.close();
+      session = await openManagedSession({
+        runtimeBaseDir: path.join(root, 'content-child'),
+        cwd: root,
+        transcriptPath: path.join(root, 'content-child', 'transcript.jsonl'),
+        sessionId: sessionKey.sessionId,
+        sessionKey,
+        resourceStore: resources,
+        version: 'test',
+        workerId: 'worker',
+        activationLeaseDurationMs: 60_000,
+        create: { definitionRef, rootSnapshotRef, createdBy: 'test' },
+      });
+      harness = createManagedHarnessHandle(session);
+      await harness.ensureRunnable();
+    }
+    broker.warm.mockImplementation(async function (
+      this: HostedWorkspaceBroker,
+    ) {
+      this.runtime = {
+        bindingId: 'shared-binding',
+        generation: '1',
+        workspaceGeneration: '1',
+      };
+    });
+    const assets = path.join(root, 'package-assets');
+    await mkdir(assets);
+    await writeFile(
+      path.join(assets, 'reference.txt'),
+      'immutable package reference',
+    );
+    const assetsRef = await publishManagedExtensionAssets(
+      session.resources,
+      await realpath(assets),
+    );
+    const pin = {
+      extensionId: 'suite',
+      packageRevision: 1,
+      packageDigest: 'b'.repeat(64),
+    };
+    const createContentTurn = () => {
+      const contentTurn = new HostedWorkspaceToolTurn(
+        { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+        session,
+        harness,
+        'prompt',
+        commit,
+        messageFitsInline,
+        undefined,
+        undefined,
+        {
+          settings: {
+            mode: 'yolo',
+            timeoutMs: 60_000,
+            ...(denied
+              ? { permissionRules: { allow: [], ask: [], deny: ['Read'] } }
+              : {}),
+          },
+          waiters,
+        },
+        {
+          profile: 'hosted-workspace-external-files/2',
+          ...(skill
+            ? {
+                skills:
+                  skill === 'command'
+                    ? new HostedSkillCatalog(
+                        [],
+                        [
+                          {
+                            name: 'review:static',
+                            description: 'Static review instructions',
+                            prompt: 'Review $ARGUMENTS at ${extensionPath}',
+                            extensionId: 'suite',
+                            modelInvocable: true,
+                          },
+                        ],
+                      )
+                    : publishedSkills(),
+                childAgents: {
+                  funnel: new HostedChildAgentSession(
+                    {
+                      authority: session.authority,
+                      resources: session.resources,
+                    },
+                    session.authority.sessionHeader.sessionKey,
+                  ),
+                  publicChildren: true,
+                  depth: 1,
+                  queueConsumption: () => undefined,
+                },
+              }
+            : {}),
+          extensionConfig: {
+            revision: 1,
+            packages: [{ pin, assetRoot: 'extension://suite/', assetsRef }],
+          },
+        },
+      );
+      if (skill)
+        contentTurn.setChildModelRoute('model', {
+          authType: 'openai',
+          endpointDigest: 'a'.repeat(64),
+          providerPin: 'b'.repeat(64),
+        });
+      return contentTurn;
+    };
+    if (lostAcquire)
+      broker.acquire.mockRejectedValueOnce(new Error('Lost acquire reply'));
+    turn = createContentTurn();
+    if (lostAcquire) {
+      await expect(
+        turn.declarations(new AbortController().signal),
+      ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+      broker.warm.mockClear();
+      turn = createContentTurn();
+    }
+    const declared = await turn.declarations(new AbortController().signal);
+    expect(declared.map((item) => item.name)).toEqual([
+      'read_file',
+      'write_file',
+      'edit',
+      'glob',
+      ...(skill ? ['skill'] : []),
+    ]);
+    expect(broker.acquire).toHaveBeenCalledWith({
+      initialBindingId: 'shared-binding',
+      initialGeneration: '1',
+    });
+    if (lostAcquire) {
+      expect(broker.warm).not.toHaveBeenCalled();
+      expect(broker.acquire).toHaveBeenLastCalledWith({
+        runtimeBindingId: 'shared-binding',
+        generation: '1',
+      });
+    }
+    expect(broker.fileHistory).not.toHaveBeenCalled();
+    const call = {
+      ...calls[0],
+      name: skill ? 'skill' : calls[0].name,
+      args: skill
+        ? skill === 'command'
+          ? { skill: 'review:static', args: 'changes' }
+          : { skill: 'review' }
+        : {
+            file_path: 'extension://suite/reference.txt',
+            extension_source: pin,
+          },
+    };
+    const result = await turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+      'model',
+      new AbortController().signal,
+    );
+    const expected = denied
+      ? 'permission rules denied'
+      : skill === 'command'
+        ? 'Review changes at extension://suite'
+        : skill
+          ? 'Consult scripts/review.js'
+          : 'immutable package reference';
+    expect(JSON.stringify(result)).toContain(expected);
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+    expect(broker.fileHistory).not.toHaveBeenCalled();
+    expect(
+      session.authority
+        .eventsInSequenceRange(1, session.authority.committedSequence)
+        .some(
+          (event) =>
+            event.kind === 'hosted.cleanup' &&
+            event.payload['state'] === 'owed',
+        ),
+    ).toBe(true);
+    if (!denied) {
+      const planned = session.authority
+        .eventsInSequenceRange(1, session.authority.committedSequence)
+        .findLast((event) => event.kind === 'hosted.batch.planned')!;
+      const saved = await readHostedApprovalContinuation(
+        session,
+        planned.payload['planRef'] as unknown as ManagedSessionDurableRef,
+        'prompt',
+      );
+      const committedBefore = (await session.sink.project()).filter(
+        (entry) => entry.type === 'tool_result',
+      ).length;
+      broker.warm.mockClear();
+      turn = createContentTurn();
+      const replayed = await turn.resumeSavedNativeBatch(
+        saved,
+        saved.plan.calls.length,
+        new AbortController().signal,
+      );
+      expect(JSON.stringify(replayed)).toContain(expected);
+      expect(broker.warm).not.toHaveBeenCalled();
+      expect(broker.acquire).toHaveBeenLastCalledWith({
+        runtimeBindingId: 'shared-binding',
+        generation: '1',
+      });
+      expect(
+        (await session.sink.project()).filter(
+          (entry) => entry.type === 'tool_result',
+        ),
+      ).toHaveLength(committedBefore);
+      expect(broker.execute).not.toHaveBeenCalled();
+    }
   },
 );
 

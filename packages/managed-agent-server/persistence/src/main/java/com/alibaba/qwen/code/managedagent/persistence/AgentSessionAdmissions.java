@@ -308,7 +308,7 @@ final class AgentSessionAdmissions {
             if (extensionPackages == null) {
                 throw AgentSessionPolicies.workspaceExecutionUnavailable();
             }
-            if ((!WorkspaceToolProfiles.isPublicShell(pin.toolProfile()) && !WorkspaceToolProfiles.MCP.equals(pin.toolProfile()))
+            if ((!WorkspaceToolProfiles.isPublicChild(pin.toolProfile()) && !WorkspaceToolProfiles.MCP.equals(pin.toolProfile()))
                     || !extensionLifecycleProfiles.contains(pin.toolProfile())) {
                 throw new ManagedAgentException(409, "unsupported_feature",
                         "Extension configuration requires a negotiated Shell or MCP Session lifecycle profile.");
@@ -361,7 +361,7 @@ final class AgentSessionAdmissions {
         }
         if (workspaceChildAgentsEnabled && publicChildrenSupported && !resident && (!sshWorkspace || managedExtensionExecutionEnabled)
                 && (managedExtensionExecutionEnabled || "qwen-code".equals(agentId) && pin.digest() == null)
-                && WorkspaceToolProfiles.isPublicShell(pin.toolProfile())) {
+                && WorkspaceToolProfiles.isPublicChild(pin.toolProfile())) {
             jdbc.update("UPDATE ma_session SET public_child_agents_version=1 WHERE tenant_id=? AND session_id=?",
                     tenantId, admission.sessionId());
         }
@@ -566,8 +566,25 @@ final class AgentSessionAdmissions {
                     "idempotency_conflict",
                     "The idempotency key was reused with different content.");
         }
+        var children = jdbc.queryForList("SELECT parent_session_id, parent_child_run_id, tool_profile, root_session_id, child_depth"
+                + " FROM ma_session WHERE tenant_id=? AND session_id=?", tenantId, command.sessionId());
+        if (children.size() != 1 || !parentSessionId.equals(children.getFirst().get("parent_session_id"))
+                || WorkspaceToolProfiles.EXTERNAL_CONTENT.equals(children.getFirst().get("tool_profile"))
+                        && (!parentSessionId.equals(children.getFirst().get("root_session_id"))
+                                || !(children.getFirst().get("child_depth") instanceof Number depth) || depth.intValue() != 1
+                                || !idempotencyKey.equals(com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection.recordKey(
+                                        parentSessionId, "child_run", (String) children.getFirst().get("parent_child_run_id"))))) {
+            throw new ManagedAgentException(409, "idempotency_conflict", "The child receipt conflicts with its Session lineage");
+        }
         return new Admission(command.sessionId(), command.turnId(), true,
                 false);
+    }
+
+    Optional<Admission> findChildSessionReplay(String tenantId, String parentSessionId, String key, String digest) {
+        if (childSessionAdmissions.findWorkspaceCommand(tenantId, ChildSessionAdmissions.childActorOf(parentSessionId), key).isEmpty()) {
+            return Optional.empty();
+        }
+        return Optional.of(replayChildSessionCommand(tenantId, parentSessionId, key, digest));
     }
 
     Admission replayWorkspaceCommand(String tenantId, String actorId,

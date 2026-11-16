@@ -5,6 +5,11 @@
  */
 
 import { createHash } from 'node:crypto';
+import { promises as fs } from 'node:fs';
+import { Readable } from 'node:stream';
+import os from 'node:os';
+import path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import {
   publishManagedExtensionContributions,
@@ -24,9 +29,15 @@ import {
   type ManagedExtensionEffectiveBundle,
   type ManagedExtensionMcpSelection,
   type ManagedExtensionPrepareResult,
+  type ManagedExtensionPin,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-package.js';
+import { publishManagedExtensionAssets } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-assets.js';
 import { managedSessionInlineResourceBytes } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
-import type { ManagedPackageContributions } from '@qwen-code/qwen-code-core/extension/managed-package.js';
+import {
+  compileManagedExtensionPackage,
+  type ManagedPackageContributions,
+  type ManagedPackageTarget,
+} from '@qwen-code/qwen-code-core/extension/managed-package.js';
 import type { ManagedHookCatalogPin } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-protocol.js';
 import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import {
@@ -42,6 +53,7 @@ import {
   type HostedMcpCommand,
 } from './hosted-mcp-settings.js';
 import { HostedMcpConflictError } from './hosted-mcp-session.js';
+import { ManagedExtensionCache } from './managed-extension-cache.js';
 
 export interface HostedExtensionPackage {
   readonly extensionId: string;
@@ -64,7 +76,10 @@ export interface HostedExtensionCallbacks {
 interface RuntimeOwner {
   readonly rootSnapshotRef: ManagedSessionDurableRef;
   readonly runtimeSessionId: string;
-  readonly executionMode: ManagedExtensionEffectiveBundle['executionMode'];
+  readonly executionMode: Exclude<
+    ManagedExtensionEffectiveBundle['executionMode'],
+    'content-only'
+  >;
   readonly runtime: {
     readonly bindingId: string;
     readonly generation: string;
@@ -93,6 +108,11 @@ export class HostedExtensionSession {
       readonly hookCatalog: ManagedHookCatalogPin | null;
     },
     private readonly callbacks: HostedExtensionCallbacks,
+    private readonly contentPackage?: (
+      pin: ManagedExtensionPin,
+      operationId: string,
+    ) => Promise<{ manifest: unknown; archive: Buffer }>,
+    private readonly inheritedContentBundleRef?: ManagedSessionDurableRef,
   ) {}
 
   async open(): Promise<void> {
@@ -108,6 +128,8 @@ export class HostedExtensionSession {
       const value = await this.read<unknown>(current);
       if (!isManagedExtensionConfig(value)) break;
       const record = parseManagedConfigInstallRecord(value);
+      if ((record.formatVersion === 2) !== !!this.contentPackage)
+        throw new HostedExtensionRecoveryRequired();
       history.push(record);
       current = record.previousRecordRef ?? undefined;
     }
@@ -123,7 +145,13 @@ export class HostedExtensionSession {
    * under one of these revisions' owner ids (R5-1).
    */
   get configRevisions(): readonly number[] {
-    return [...new Set(this.history.map((entry) => entry.configRevision))];
+    return [
+      ...new Set(
+        this.history
+          .filter((entry) => entry.formatVersion === 1)
+          .map((entry) => entry.configRevision),
+      ),
+    ];
   }
 
   get activeBundleRef(): ManagedSessionDurableRef | undefined {
@@ -227,6 +255,41 @@ export class HostedExtensionSession {
       throw new HostedExtensionRevisionConflict(
         'Extension configuration revision conflicts.',
       );
+    if (this.contentPackage) {
+      if (command.mcpChange)
+        throw new Error('Content packages do not support MCP changes.');
+      const previousBundleRef = await this.publish(
+        'managed-extension-config-bundle',
+        active ?? this.contentBundle(0, []),
+      );
+      const header = this.session.authority.sessionHeader;
+      const rootSnapshotRef = await this.publish('managed-extension-root', {
+        formatVersion: 2,
+        executionMode: 'content-only',
+        sessionKey: header.sessionKey,
+        rootSnapshotRef: header.rootSnapshotRef,
+        definitionRef: header.definitionRef,
+      });
+      await this.commit({
+        kind: 'hosted-extension-config',
+        formatVersion: 2,
+        command,
+        mode: 'apply',
+        phaseOperationId: command.operationId,
+        configRevision: command.expectedRevision + 1,
+        previousConfigRevision: command.expectedRevision,
+        phase: 'preparing',
+        previousBundleRef,
+        restoresBundleRef: null,
+        bundleRef: null,
+        rootSnapshotRef,
+        stageAckRefs: [],
+        enableAckRefs: [],
+        error: null,
+      });
+      await this.continue(command.operationId);
+      return;
+    }
     const broker = await this.runtime(command.operationId);
     const executionMode = this.executionMode(broker);
     const baseline =
@@ -310,6 +373,10 @@ export class HostedExtensionSession {
     )
       return;
     if (latest.phase === 'failed') throw new HostedExtensionRecoveryRequired();
+    if (this.contentPackage) {
+      await this.continueContent(latest);
+      return;
+    }
     const broker = await this.runtime(operationId, latest.rootSnapshotRef);
     if (latest.phase === 'preparing') {
       try {
@@ -420,19 +487,23 @@ export class HostedExtensionSession {
       !latest.previousBundleRef
     )
       throw new HostedExtensionRecoveryRequired();
-    const broker = await this.runtime(operationId, latest.rootSnapshotRef);
-    const proof = await broker.extensionControl({
+    const broker = this.contentPackage
+      ? undefined
+      : await this.runtime(operationId, latest.rootSnapshotRef);
+    const proof = await broker?.extensionControl({
       kind: 'extension-reconcile',
       operationId,
       expectedRevision: latest.previousConfigRevision,
       revision: latest.configRevision,
     });
     if (
-      proof['state'] !== 'stopped' ||
-      proof['revision'] !== latest.configRevision ||
-      proof['executionMode'] !== this.executionMode(broker) ||
-      !Array.isArray(proof['receipts']) ||
-      !proof['receipts'].length
+      broker &&
+      (!proof ||
+        proof['state'] !== 'stopped' ||
+        proof['revision'] !== latest.configRevision ||
+        proof['executionMode'] !== this.executionMode(broker) ||
+        !Array.isArray(proof['receipts']) ||
+        !proof['receipts'].length)
     )
       throw new HostedExtensionRecoveryRequired();
     await this.callbacks.drain(await this.bundle(latest.previousBundleRef));
@@ -454,11 +525,14 @@ export class HostedExtensionSession {
   }
 
   async runtimeOwner(): Promise<RuntimeOwner | undefined> {
+    if (this.contentPackage) return undefined;
     const latest = this.history.findLast((entry) => entry.phase === 'active');
     return latest ? this.read<RuntimeOwner>(latest.rootSnapshotRef) : undefined;
   }
 
   async submitMcp(command: HostedMcpCommand): Promise<void> {
+    if (this.contentPackage)
+      throw new Error('Content packages do not support MCP changes.');
     const replay = this.history.findLast(
       (entry) => entry.command.operationId === command.operationId,
     );
@@ -738,7 +812,7 @@ export class HostedExtensionSession {
 
   private executionMode(
     broker: HostedWorkspaceBroker,
-  ): ManagedExtensionEffectiveBundle['executionMode'] {
+  ): Exclude<ManagedExtensionEffectiveBundle['executionMode'], 'content-only'> {
     if (broker.capabilityDigest === MANAGED_EXTENSION_LINUX_CAPABILITY_DIGEST)
       return 'linux-cgroup';
     if (
@@ -748,6 +822,164 @@ export class HostedExtensionSession {
     throw new Error(
       'The selected Runtime does not support extension packages.',
     );
+  }
+
+  private contentBundle(
+    configRevision: number,
+    packages: ManagedExtensionEffectiveBundle['packages'],
+  ): ManagedExtensionEffectiveBundle {
+    return parseManagedExtensionEffectiveBundle({
+      kind: 'managed-extension-config-bundle',
+      formatVersion: 2,
+      executionMode: 'content-only',
+      configRevision,
+      mcpRevision: 0,
+      independentMcpSelections: [],
+      baseMcpServers: [],
+      baseHookCatalog: null,
+      packages,
+      mcpServers: [],
+      hookCatalog: null,
+    });
+  }
+
+  private async continueContent(initial: ManagedConfigInstallRecord) {
+    let current = initial;
+    if (current.phase === 'preparing') {
+      try {
+        const inherited =
+          current.mode === 'recoverPrevious'
+            ? await this.bundle(current.restoresBundleRef!)
+            : this.inheritedContentBundleRef
+              ? await this.bundle(this.inheritedContentBundleRef)
+              : undefined;
+        if (
+          inherited &&
+          (inherited.formatVersion !== 2 ||
+            inherited.executionMode !== 'content-only' ||
+            (current.mode === 'apply' &&
+              !isDeepStrictEqual(
+                inherited.packages.map((entry) => entry.pin),
+                current.command.extensions,
+              )))
+        )
+          throw new Error('Content child package source changed.');
+        const packages = [...(inherited?.packages ?? [])];
+        if (!inherited)
+          for (const pin of current.command.extensions) {
+            const source = await this.contentPackage!(
+              pin,
+              current.command.operationId,
+            );
+            const manifest = source.manifest as {
+              target?: ManagedPackageTarget;
+            };
+            if (
+              !manifest?.target ||
+              !['linux', 'darwin'].includes(manifest.target.platform) ||
+              !['arm64', 'x64', 'any'].includes(manifest.target.arch) ||
+              pin.settingsRevision !== undefined
+            )
+              throw new Error('Invalid content package manifest.');
+            const directory = await fs.mkdtemp(
+              path.join(os.tmpdir(), 'qwen-content-package-'),
+            );
+            try {
+              const cache = new ManagedExtensionCache(directory);
+              await cache.upload(
+                pin.packageDigest,
+                Readable.from([source.archive]),
+              );
+              const root = await cache.materialize(pin.packageDigest);
+              const compiled = await compileManagedExtensionPackage(root, {
+                target: manifest.target,
+                resolveRecipes: false,
+              });
+              if (!isDeepStrictEqual(compiled.manifest, source.manifest))
+                throw new Error('Content package manifest changed.');
+              validateContentPackage(compiled.contributions);
+              packages.push({
+                pin,
+                assetRoot: `extension://${pin.extensionId}/`,
+                contributionsRef: await publishManagedExtensionContributions(
+                  this.session.resources,
+                  compiled.contributions,
+                ),
+                assetsRef: await publishManagedExtensionAssets(
+                  this.session.resources,
+                  await fs.realpath(root),
+                ),
+              });
+            } finally {
+              await fs.rm(directory, { recursive: true, force: true });
+            }
+          }
+        const bundle = this.contentBundle(current.configRevision, packages);
+        const contributions = await this.packages(bundle);
+        for (const entry of contributions)
+          validateContentPackage(entry.contributions);
+        this.callbacks.validate(contributions);
+        const bundleRef = await this.publish(
+          'managed-extension-config-bundle',
+          bundle,
+        );
+        const ack = await this.publish('managed-extension-stage-ack', {
+          operationId: current.command.operationId,
+          revision: current.configRevision,
+          bundleRef,
+          side: 'harness',
+        });
+        current = await this.commit({
+          ...this.content(current),
+          phase: 'prepared',
+          bundleRef,
+          stageAckRefs: [ack],
+        });
+      } catch (cause) {
+        if (current.mode === 'apply')
+          await this.commit({
+            ...this.content(current),
+            phase: 'failed',
+            error: { code: 'extension_prepare_failed' },
+          });
+        throw cause;
+      }
+    }
+    if (current.phase === 'prepared')
+      current = await this.commit({
+        ...this.content(current),
+        phase: 'committed',
+      });
+    if (!['committed', 'recovery_required'].includes(current.phase))
+      throw new HostedExtensionRecoveryRequired();
+    try {
+      const bundle = await this.bundle(current.bundleRef!);
+      await this.callbacks.enable(
+        bundle,
+        await this.packages(bundle),
+        current.phaseOperationId,
+      );
+      const ack = await this.publish('managed-extension-enable-ack', {
+        operationId: current.command.operationId,
+        revision: current.configRevision,
+        bundleRef: current.bundleRef,
+        side: 'harness',
+      });
+      await this.commit({
+        ...this.content(current),
+        phase: 'active',
+        enableAckRefs: [ack],
+        error: null,
+      });
+    } catch (cause) {
+      if (current.phase !== 'recovery_required')
+        await this.commit({
+          ...this.content(current),
+          phase: 'recovery_required',
+          error: { code: 'extension_recovery_required' },
+        });
+      throw cause;
+    }
   }
 
   private content(
@@ -811,4 +1043,22 @@ export class HostedExtensionSession {
 
 function hash(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex');
+}
+
+export function validateContentPackage(
+  contributions: ManagedPackageContributions,
+): void {
+  const tools = new Set(['read_file', 'write_file', 'edit', 'glob', 'skill']);
+  if (
+    Object.keys(contributions.mcpServers).length ||
+    Object.keys(contributions.hooks).length ||
+    contributions.settings.length ||
+    contributions.commands.some((command) => /[!@]\{/u.test(command.prompt)) ||
+    contributions.agents.some((agent) =>
+      agent.tools?.some((tool) => !tools.has(tool)),
+    )
+  )
+    throw new Error(
+      'Content packages admit only static Skills, commands, Agents, context and references.',
+    );
 }

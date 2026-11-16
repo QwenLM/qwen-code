@@ -628,22 +628,12 @@ public class JdbcChildResultRelayStore
         return turnLine(tenantId, sessionId, "ASC");
     }
 
+    public BootstrapAdmission bootstrapAdmission(RelayRow row, String childSessionId) {
+        return ChildTurnQueries.bootstrap(jdbc, row, childSessionId);
+    }
+
     private TurnLine turnLine(String tenantId, String sessionId, String order) {
-        List<TurnLine> rows = jdbc.query(
-                "SELECT turn_id, status, completed_at, error_code,"
-                        + " is_submission_attempted, harness_event_epoch"
-                        + " FROM ma_turn"
-                        + " WHERE tenant_id = ? AND session_id = ?"
-                        + " ORDER BY gmt_create " + order + ", turn_id "
-                        + order + " LIMIT 1",
-                (result, row) -> new TurnLine(result.getString("turn_id"),
-                        result.getString("status"),
-                        result.getObject("completed_at", Long.class),
-                        result.getString("error_code"),
-                        result.getBoolean("is_submission_attempted"),
-                        result.getString("harness_event_epoch")),
-                tenantId, sessionId);
-        return rows.isEmpty() ? null : rows.getFirst();
+        return ChildTurnQueries.ordered(jdbc, tenantId, sessionId, "DESC".equals(order));
     }
 
     /** The terminal result content: the completed Turn's newest assistant

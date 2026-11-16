@@ -43,8 +43,21 @@ public final class ManagedExtensionAgentLaunch {
             if (!"managed-extension-root".equals(ownerRef.path("kind").asText()) || ownerRef.path("schemaVersion").asInt() != 1) {
                 throw refused();
             }
-            requireRuntimeOwner(jdbc, parent, records.readRecordResource(parent.tenantId(), parent.sessionId(), ownerRef));
+            JsonNode owner = records.readRecordResource(parent.tenantId(), parent.sessionId(), ownerRef);
+            if (WorkspaceToolProfiles.EXTERNAL_CONTENT.equals(parent.toolProfile())) {
+                if (current.path("formatVersion").asInt() != 2) {
+                    throw refused();
+                }
+                com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedContentConfiguration.requireRoot(owner,
+                        records.readSessionHeader(parent.tenantId(), parent.sessionId()));
+            } else {
+                requireRuntimeOwner(jdbc, parent, owner);
+            }
             JsonNode bundle = records.readRecordResource(parent.tenantId(), parent.sessionId(), agent.get("bundleRef"));
+            if (WorkspaceToolProfiles.EXTERNAL_CONTENT.equals(parent.toolProfile())) {
+                com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedContentConfiguration.requireBundle(bundle,
+                        ref -> records.readCommittedResource(parent.tenantId(), parent.sessionId(), ref));
+            }
             JsonNode selected = null;
             for (JsonNode entry : bundle.path("packages")) {
                 if (entry.path("pin").equals(agent.get("pin"))) {
@@ -80,7 +93,11 @@ public final class ManagedExtensionAgentLaunch {
             }
             var policies = jdbc.queryForList("SELECT COALESCE(selected_approval_mode, approval_mode) AS mode, approval_revision"
                     + " FROM ma_session WHERE tenant_id=? AND session_id=? FOR UPDATE", parent.tenantId(), parent.sessionId());
-            if (policies.size() != 1 || !launch.path("approvalMode").asText().equals(policies.getFirst().get("mode"))
+            Object expectedMode = policies.size() == 1 ? policies.getFirst().get("mode") : null;
+            if (WorkspaceToolProfiles.EXTERNAL_CONTENT.equals(parent.toolProfile()) && "auto".equals(expectedMode)) {
+                expectedMode = "default";
+            }
+            if (policies.size() != 1 || !launch.path("approvalMode").asText().equals(expectedMode)
                     || !(policies.getFirst().get("approval_revision") instanceof Number revision)
                     || launch.path("approvalRevision").asLong(-1) != revision.longValue()) {
                 throw refused();
@@ -181,6 +198,9 @@ public final class ManagedExtensionAgentLaunch {
         }
         if (WorkspaceToolProfiles.READ.equals(profile)) {
             return false;
+        }
+        if (WorkspaceToolProfiles.EXTERNAL_CONTENT.equals(profile)) {
+            return Set.of("write_file", "edit").contains(name);
         }
         if (Set.of("write_file", "edit", "todo_write").contains(name)) {
             return true;

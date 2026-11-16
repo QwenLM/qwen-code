@@ -171,6 +171,8 @@ STORE_SNAPSHOT_PUBLISH POST /internal/managed-session-store/v1/sessions/{session
 STORE_LIFECYCLE_AUTHORIZE POST /internal/managed-session-store/v1/sessions/{sessionId}/lifecycle:authorize internal
 STORE_MEMORY_QUERY POST /internal/managed-session-store/v1/sessions/{sessionId}/memory:query internal
 STORE_MODEL_CONFIG_QUERY POST /internal/managed-session-store/v1/sessions/{sessionId}/model-config:query internal
+STORE_CONTENT_PACKAGE_QUERY POST /internal/managed-session-store/v1/sessions/{sessionId}/content-package:query internal
+STORE_CONTENT_PACKAGE_READ POST /internal/managed-session-store/v1/sessions/{sessionId}/content-package:read internal
 STORE_RECOVERY_BLOCK POST /internal/managed-session-store/v1/sessions/{sessionId}/recovery:block internal
 STORE_RESOURCE_FINALIZE POST /internal/managed-session-store/v1/sessions/{sessionId}/resources/{resourceId}:finalize internal
 STORE_RESOURCE_UPLOAD POST /internal/managed-session-store/v1/sessions/{sessionId}/resources/{resourceId}:upload internal

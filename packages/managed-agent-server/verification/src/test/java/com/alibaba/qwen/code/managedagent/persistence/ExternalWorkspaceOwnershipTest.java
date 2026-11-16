@@ -123,6 +123,35 @@ class ExternalWorkspaceOwnershipTest {
     }
 
     @Test
+    void contentChildActorRequiresCommittedSameScopeLineageAndAllowsOnlyCleanupAfterRootClose() {
+        jdbc.update("UPDATE ma_session SET tool_profile='hosted-workspace-external-files/2', public_child_agents_version=1"
+                + " WHERE tenant_id='tenant' AND session_id='harness'");
+        jdbc.update("INSERT INTO ma_session (tenant_id,session_id,agent_id,gmt_create,gmt_modified,workspace_id,workspace_generation,"
+                + "workspace_storage_id,cwd_relative,context_config_ref,context_revision,workspace_config_ref,workspace_policy_ref,tool_profile,"
+                + "creator_actor_key,owner_actor_key,parent_session_id,root_session_id,parent_child_run_id,child_depth,public_child_agents_version)"
+                + " SELECT tenant_id,'content-child',agent_id,1,1,workspace_id,workspace_generation,workspace_storage_id,cwd_relative,"
+                + "context_config_ref,context_revision,workspace_config_ref,workspace_policy_ref,tool_profile,creator_actor_key,"
+                + "COALESCE(owner_actor_key,creator_actor_key),session_id,session_id,'content-run',1,1 FROM ma_session"
+                + " WHERE tenant_id='tenant' AND session_id='harness'");
+        assertThatThrownBy(() -> contentChildActor(true)).isInstanceOf(RuntimeBrokerException.class);
+        jdbc.update("INSERT INTO ma_session_record (session_scope_key,record_key,tenant_id,workspace_id,session_id,domain,"
+                + "record_id,revision,record_resource_id,gmt_create) VALUES (?,?,'tenant','workspace','harness','child_run','content-run',1,'run-resource',1)",
+                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", "harness"),
+                com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection.recordKey("harness", "child_run", "content-run"));
+        assertThat(contentChildActor(true)).isEqualTo("actor".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        jdbc.update("UPDATE ma_session SET status='CLOSING' WHERE tenant_id='tenant' AND session_id='harness'");
+        assertThatThrownBy(() -> contentChildActor(true)).isInstanceOf(RuntimeBrokerException.class);
+        assertThat(contentChildActor(false)).isEqualTo("actor".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        jdbc.update("UPDATE ma_session SET owner_actor_key='other' WHERE tenant_id='tenant' AND session_id='content-child'");
+        assertThatThrownBy(() -> contentChildActor(false)).isInstanceOf(RuntimeBrokerException.class);
+    }
+
+    private byte[] contentChildActor(boolean acquiring) {
+        return jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<byte[]>) connection ->
+                ExternalWorkspaceSessionLineage.executionActor(connection, context, "content-child", acquiring));
+    }
+
+    @Test
     void malformedRegistrationPermanentlyRefusesOwnershipWithoutMutatingHolder() {
         ownership.claim(context, session, binding, bindings);
         var owner = jdbc.queryForMap("SELECT * FROM ma_storage_owner");

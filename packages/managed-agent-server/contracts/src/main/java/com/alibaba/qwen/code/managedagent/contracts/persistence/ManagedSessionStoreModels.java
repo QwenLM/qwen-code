@@ -85,7 +85,8 @@ public final class ManagedSessionStoreModels {
     public static final Set<String> INHERITED_EXTENSION_KINDS = Set.of(
             "managed-extension-config-bundle",
             "managed-extension-contributions",
-            "managed-extension-contributions-part");
+            "managed-extension-contributions-part", "managed-extension-assets",
+            "managed-extension-assets-page", "managed-extension-asset-part");
 
     /**
      * Whether a PUBLISHED row is already this Session's committed terminal

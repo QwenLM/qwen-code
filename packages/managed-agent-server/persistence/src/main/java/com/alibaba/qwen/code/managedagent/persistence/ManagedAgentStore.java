@@ -335,6 +335,12 @@ public class ManagedAgentStore extends ManagedAgentReadEntries implements AgentS
     }
 
     @Override
+    @Transactional
+    public Optional<Admission> findChildSessionReplay(String tenantId, String parentSessionId, String key, String digest) {
+        return sessionAdmissions.findChildSessionReplay(tenantId, parentSessionId, key, digest);
+    }
+
+    @Override
     public StoreModels.SessionLineage findChildLineage(String tenantId, String sessionId) {
         return sessionQueries.findChildLineage(tenantId, sessionId);
     }

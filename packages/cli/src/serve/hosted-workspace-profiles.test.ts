@@ -6,6 +6,7 @@
 import { expect, it } from 'vitest';
 import {
   HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
+  HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2,
   HOSTED_WORKSPACE_FILE_PROFILE,
   HOSTED_WORKSPACE_FILE_PROFILE_V2,
   HOSTED_WORKSPACE_FILE_PROFILE_V3,
@@ -19,9 +20,11 @@ import {
   isHostedWorkspaceGlobProfile,
   isHostedWorkspaceProfile,
   isHostedWorkspacePublicShellProfile,
+  isHostedWorkspacePublicChildProfile,
   isHostedWorkspaceShellProfile,
   isHostedWorkspaceSearchProfile,
   hasHostedExternalFilesExcludedOptions,
+  hasHostedExternalContentExcludedOptions,
 } from './hosted-workspace-profiles.js';
 
 it('admits the saved internal TeamLead as Shell execution without search', () => {
@@ -79,9 +82,36 @@ it('recognizes external files without enabling search or Shell', () => {
   expect(
     isHostedWorkspaceShellProfile(HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE),
   ).toBe(false);
-  expect(isHostedWorkspaceProfile('hosted-workspace-external-files/2')).toBe(
+  expect(isHostedWorkspaceProfile('hosted-workspace-external-files/3')).toBe(
     false,
   );
+});
+
+it('admits content children without granting process tools or widening external v1', () => {
+  const profile = HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2;
+  expect(isHostedWorkspaceProfile(profile)).toBe(true);
+  expect(isHostedWorkspaceGlobProfile(profile)).toBe(true);
+  expect(isHostedWorkspacePublicChildProfile(profile)).toBe(true);
+  expect(isHostedWorkspacePublicShellProfile(profile)).toBe(false);
+  expect(isHostedWorkspaceShellProfile(profile)).toBe(false);
+  expect(
+    hasHostedExternalContentExcludedOptions({
+      publicChildAgentsVersion: 1,
+      initialSelection: {},
+      lineage: {},
+    }),
+  ).toBe(false);
+  for (const options of [
+    { hookCatalog: {} },
+    { mcpServers: [] },
+    { captureBytes: 1 },
+    { childWorkspaces: true },
+    { foregroundOnly: true },
+  ])
+    expect(hasHostedExternalContentExcludedOptions(options)).toBe(true);
+  expect(
+    hasHostedExternalFilesExcludedOptions({ publicChildAgentsVersion: 1 }),
+  ).toBe(true);
 });
 
 it('rejects the removed Shell profile', () => {

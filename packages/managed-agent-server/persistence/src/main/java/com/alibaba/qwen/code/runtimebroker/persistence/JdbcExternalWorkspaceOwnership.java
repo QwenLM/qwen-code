@@ -194,8 +194,7 @@ public final class JdbcExternalWorkspaceOwnership {
                 if (!row.next() || !scope.getTenantId().equals(row.getString("tenant_id"))
                         || !harness.equals(row.getString("session_id")) || row.getObject("deleted_at") != null
                         || !"qwen-code".equals(row.getString("agent_id")) || row.getObject("agent_definition_digest") != null
-                        || row.getObject("parent_session_id") != null
-                        || !"hosted-workspace-external-files/1".equals(row.getString("tool_profile"))
+                        || !com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.isExternalFiles(row.getString("tool_profile"))
                         || !WorkspaceExecutionProfile.CONFIG_REF.equals(row.getString("workspace_config_ref"))
                         || !WorkspaceExecutionProfile.POLICY_REF.equals(row.getString("workspace_policy_ref"))
                         || !WorkspaceExecutionProfile.CONTEXT_CONFIG_REF.equals(row.getString("context_config_ref"))
@@ -205,9 +204,11 @@ public final class JdbcExternalWorkspaceOwnership {
                         || acquiring && !"ACTIVE".equals(row.getString("status"))) {
                     throw unavailable();
                 }
-                return new ContextBinding(scope.getTenantId(), scope.getWorkspaceId(), row.getLong("workspace_generation"),
+                ContextBinding context = new ContextBinding(scope.getTenantId(), scope.getWorkspaceId(), row.getLong("workspace_generation"),
                         row.getString("workspace_storage_id"), row.getString("cwd_relative"),
                         row.getString("context_config_ref"), row.getLong("context_revision"));
+                com.alibaba.qwen.code.managedagent.persistence.ExternalWorkspaceSessionLineage.executionActor(connection, context, harness, acquiring);
+                return context;
             }
         }
     }

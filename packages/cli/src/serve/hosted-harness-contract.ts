@@ -8,7 +8,10 @@ import { randomUUID } from 'node:crypto';
 import type { Application, RequestHandler } from 'express';
 import { markAccessLogError } from './server/access-log.js';
 import type { HostedHarnessCapabilities } from './types.js';
-import { HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE } from './hosted-workspace-profiles.js';
+import {
+  HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
+  HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2,
+} from './hosted-workspace-profiles.js';
 
 export const HOSTED_HARNESS_CAPABILITY_DIGEST_ENV =
   'QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST';
@@ -19,6 +22,7 @@ const LIFECYCLE_V2_PROFILES = [
   'hosted-workspace-shell/3',
   'hosted-workspace-shell/4',
   'hosted-workspace-mcp/1',
+  HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2,
 ] as const;
 export const HOSTED_HARNESS_PROTOCOL_VERSION = 1 as const;
 export const HOSTED_HARNESS_PROTOCOL_HEADER = 'X-Qwen-Harness-Protocol-Version';
@@ -114,6 +118,7 @@ export function createHostedHarnessContract(
       'event-keepalive/1',
       'web-fetch/1',
       HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
+      HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2,
     ]),
   });
 }

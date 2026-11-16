@@ -30,6 +30,7 @@ public class JdbcManagedWorkspaceRegistry
     private final JdbcTemplate jdbc;
     private com.alibaba.qwen.code.managedagent.settings.SshSettings ssh;
     private java.util.function.BooleanSupplier externalFilesActivation = () -> false;
+    private java.util.function.BooleanSupplier externalContentActivation = () -> false;
     private ExternalStorageRegistrationStore externalRegistrations;
     private com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings properties;
 
@@ -50,10 +51,28 @@ public class JdbcManagedWorkspaceRegistry
             return harness != null && warmer != null && harness.supportsLifecycle(profile)
                     && warmer.supportsWorkspaceClose(profile);
         };
+        this.externalContentActivation = () -> {
+            if (!externalContentEnabled()) {
+                return false;
+            }
+            var harness = harnesses.getIfAvailable();
+            var warmer = warmers.getIfAvailable();
+            String profile = com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.EXTERNAL_CONTENT;
+            return harness != null && warmer != null && harness.supportsLifecycle(profile)
+                    && harness.supportsPublicChildAgents(profile) && warmer.supportsWorkspaceClose(profile);
+        };
     }
 
     public boolean externalFilesAvailable() {
-        return externalFilesActivation.getAsBoolean();
+        return externalFilesActivation.getAsBoolean() || externalContentAvailable();
+    }
+
+    public boolean externalContentEnabled() {
+        return properties != null && properties.isExternalWorkspaceContentConfigured();
+    }
+
+    public boolean externalContentAvailable() {
+        return externalContentActivation.getAsBoolean();
     }
 
     public boolean isExternal(ContextBinding binding) {

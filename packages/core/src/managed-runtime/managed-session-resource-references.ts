@@ -104,8 +104,13 @@ const RESOURCE_REF_PATHS: Readonly<Record<string, readonly string[]>> = {
     'stageAckRefs.*',
     'enableAckRefs.*',
   ],
-  'managed-extension-config-bundle': ['packages.*.contributionsRef'],
+  'managed-extension-config-bundle': [
+    'packages.*.contributionsRef',
+    'packages.*.assetsRef',
+  ],
   'managed-extension-contributions': ['parts.*'],
+  'managed-extension-assets': ['pages.*'],
+  'managed-extension-assets-page': ['files.*.parts.*'],
 };
 
 const CHECKPOINT_REF_PATHS = [

@@ -306,6 +306,31 @@ public class JdbcManagedExtensionRecordStore
         return readBody(readCommittedResource(tenantId, sessionId, ref));
     }
 
+    public JsonNode readSessionHeader(String tenantId, String sessionId) {
+        var transactions = jdbc.queryForList("SELECT record_bytes, record_digest, byte_length FROM ma_session_journal_tx"
+                + " WHERE tenant_id=? AND session_id=? AND journal_revision=1", tenantId, sessionId);
+        require(transactions.size() == 1, "The Session header is unavailable");
+        var transaction = transactions.getFirst();
+        byte[] bytes = (byte[]) transaction.get("record_bytes");
+        String digest = (String) transaction.get("record_digest");
+        long length = ((Number) transaction.get("byte_length")).longValue();
+        if (bytes == null && packs != null && packs.hasObjectStore()) {
+            bytes = packs.resolveBytes(tenantId, sessionId, 1, digest, length);
+        }
+        require(bytes != null && bytes.length == length && DigestUtils.sha256Hex(bytes).equals(digest), "The Session header is unavailable");
+        JsonNode header = null;
+        for (String line : new String(bytes, StandardCharsets.UTF_8).split("\n")) {
+            JsonNode record = ManagedExtensionRecordStore.parse(line);
+            if (record != null && HEADER_SUBTYPE.equals(record.path("subtype").asText())) {
+                require(header == null, "Duplicate Session header");
+                header = record.path("managedSession");
+            }
+        }
+        require(header != null && tenantId.equals(header.path("sessionKey").path("tenantId").asText())
+                && sessionId.equals(header.path("sessionKey").path("sessionId").asText()), "The Session header conflicts");
+        return header;
+    }
+
     public StoredResource readCommittedResource(String tenantId, String sessionId,
             JsonNode ref) {
         ManagedExtensionRecords.durableRef(ref, "recordResource");
@@ -543,7 +568,7 @@ public class JdbcManagedExtensionRecordStore
             requireDomainCommitted(payload, domain, body != null);
             if (ManagedMcpSettings.DOMAIN.equals(domain)) {
                 mcpSettingsProjection.project(tenantId, workspaceId, sessionId, payload, resources,
-                        firstSequence + index, occurredAt, lines);
+                        firstSequence + index, occurredAt, lines, () -> readSessionHeader(tenantId, sessionId));
             }
             if (body != null) {
                 require(applied == 0, "A transaction carries at most one"

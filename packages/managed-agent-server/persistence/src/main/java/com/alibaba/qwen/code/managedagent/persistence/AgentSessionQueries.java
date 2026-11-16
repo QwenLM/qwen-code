@@ -585,7 +585,10 @@ final class AgentSessionQueries {
                                     : WorkspaceToolProfiles.FILES.equals(row.getString("tool_profile"))
                             || WorkspaceToolProfiles.FILES_V3.equals(row.getString("tool_profile"))
                             || WorkspaceToolProfiles.FILES_V4.equals(row.getString("tool_profile"))
-                            || WorkspaceToolProfiles.isPublicShell(row.getString("tool_profile")))) {
+                            || WorkspaceToolProfiles.isPublicShell(row.getString("tool_profile"))
+                            || WorkspaceToolProfiles.EXTERNAL_CONTENT.equals(row.getString("tool_profile"))
+                                    && "qwen-code".equals(row.getString("agent_id")) && row.getString("agent_definition_digest") == null
+                                    && row.getInt("public_child_agents_version") == 1)) {
                         return null;
                     }
                     String mode = row.getString("approval_mode");

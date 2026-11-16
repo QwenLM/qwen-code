@@ -67,9 +67,11 @@ public final class ExternalRuntimeProviderFactory implements RuntimeProviderFact
             return;
         }
         boolean workspace = ExternalRuntimeKinds.isWorkspace(provisioner);
+        boolean content = workspace && harness.isWorkspaceFilesEnabled() && harness.isWorkspaceChildAgentsEnabled()
+                && "workspace".equals(runtimeBroker.getBoundSessionIsolationClass()) && !settings.getManagedExtensions().isEnabled();
         if (harness.isWorkspaceFilesEnabled() && !workspace
                 || harness.isWorkspaceShellEnabled()
-                || workspace && (settings.getManagedExtensions().isEnabled() || settings.getExtensions().isEnabled())
+                || workspace && (settings.getManagedExtensions().isEnabled() || settings.getExtensions().isEnabled() && !content)
                 || !runtimeBroker.getWorkspaceMounts().isEmpty()
                 || !runtimeBroker.getResidentWorkspaces().isEmpty()
                 || StringUtils.isNotBlank(runtimeBroker.getWorkspaceCreationRoot())

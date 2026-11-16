@@ -11,6 +11,9 @@ public interface RuntimeBrokerOperations {
     public RuntimeBindingRecord findLatestBindingByHarnessSessionAnyState(
             String tenantId, String harnessSessionId);
 
+    public RuntimeBindingRecord findBindingByRuntimeSession(String tenantId,
+            String harnessSessionId, String runtimeSessionId, boolean readyOnly);
+
     public boolean supportsDrainedStop();
 
     public void requestHarnessDrain(String tenantId, String harnessSessionId);

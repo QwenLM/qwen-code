@@ -59,6 +59,11 @@ import {
 } from './hosted-recovery-records.js';
 import { MANAGED_EXTENSION_RECORD_BODIES } from './managed-extension-projection.js';
 import {
+  parseManagedExtensionPin,
+  type ManagedExtensionPin,
+} from './managed-extension-package.js';
+import { MANAGED_PACKAGE_MAX_ARCHIVE_BYTES } from '../extension/managed-package.js';
+import {
   MANAGED_MODEL_STATISTICS_RESOURCE_KINDS,
   parseManagedStatisticsEnvelope,
 } from './managed-model-statistics.js';
@@ -214,6 +219,10 @@ export interface HttpManagedSessionStores {
   ): Promise<void>;
   approvalSelection(): Promise<ManagedSessionApprovalSelection | undefined>;
   modelConfig(expectedDigest: string, kind?: 'legacy-close'): Promise<unknown>;
+  contentPackage(
+    pin: ManagedExtensionPin,
+    operationId: string,
+  ): Promise<{ manifest: unknown; archive: Buffer }>;
   memory(query: ManagedMemoryQuery): Promise<unknown>;
   automationsCreate(
     definition: ManagedAutomationDefinitionInput,
@@ -455,6 +464,8 @@ export function createHttpManagedSessionStores(
     approvalSelection: () => client.approvalSelection(),
     modelConfig: (expectedDigest, kind) =>
       client.modelConfig(expectedDigest, kind),
+    contentPackage: (pin, operationId) =>
+      client.contentPackage(pin, operationId),
     memory: (query) => client.memory(query),
     automationsCreate: (definition, idempotencyKey) =>
       client.automationsCreate(definition, idempotencyKey),
@@ -1390,6 +1401,78 @@ class ManagedSessionStoreHttpClient {
         } finally {
           reader.releaseLock();
         }
+      },
+    );
+  }
+
+  async contentPackage(
+    value: ManagedExtensionPin,
+    operationId: string,
+  ): Promise<{ manifest: unknown; archive: Buffer }> {
+    const pin = parseManagedExtensionPin(value);
+    if (
+      pin.settingsRevision !== undefined ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+        operationId,
+      )
+    )
+      throw corrupt('Invalid content package operation.');
+    await this.assertWritable();
+    return this.withRetry(
+      true,
+      'POST',
+      '/content-package:query',
+      async (timeoutMs) => {
+        const body = {
+          workspaceId: this.sessionKey.workspaceId,
+          writerId: this.writerId,
+          writerGeneration: this.grant!.writerGeneration,
+          operationId,
+          pin,
+        };
+        const metadataResponse = await this.request(
+          '/content-package:query',
+          'POST',
+          body,
+          timeoutMs,
+        );
+        const metadata = asRecord(
+          JSON.parse(
+            (
+              await readBoundedContentBytes(metadataResponse, 64 * 1024)
+            ).toString('utf8'),
+          ),
+          'content package metadata',
+        );
+        if (
+          Object.keys(metadata).sort().join(',') !== 'byteLength,manifest' ||
+          !Number.isSafeInteger(metadata['byteLength']) ||
+          Number(metadata['byteLength']) < 1 ||
+          Number(metadata['byteLength']) > MANAGED_PACKAGE_MAX_ARCHIVE_BYTES
+        )
+          throw corrupt('Invalid content package length.');
+        const response = await this.request(
+          '/content-package:read',
+          'POST',
+          body,
+          timeoutMs,
+          'application/octet-stream',
+        );
+        if (
+          response.headers.get('Content-Type')?.split(';')[0] !==
+          'application/octet-stream'
+        )
+          throw corrupt('Invalid content package response type.');
+        const archive = await readBoundedContentBytes(
+          response,
+          Number(metadata['byteLength']),
+        );
+        if (
+          archive.length !== metadata['byteLength'] ||
+          sha256(archive) !== pin.packageDigest
+        )
+          throw corrupt('Content package archive does not match its pin.');
+        return { manifest: metadata['manifest'], archive };
       },
     );
   }
@@ -4050,6 +4133,8 @@ export function collectNestedResourceRefs(
     EXTENSION_RECORD_KINDS.has(ref.kind) ||
     ref.kind === 'managed-extension-config-bundle' ||
     ref.kind === 'managed-extension-contributions' ||
+    ref.kind === 'managed-extension-assets' ||
+    ref.kind === 'managed-extension-assets-page' ||
     ref.kind === 'managed-definition' ||
     ref.kind === 'managed-action-options' ||
     ref.kind === 'managed-hook-plan' ||
@@ -4104,6 +4189,8 @@ function isReferenceContainer(kind: string): boolean {
     [
       'managed-extension-config-bundle',
       'managed-extension-contributions',
+      'managed-extension-assets',
+      'managed-extension-assets-page',
       'managed-definition',
       'managed-checkpoint',
       CHECKPOINT_HISTORY_KIND,
@@ -4162,6 +4249,31 @@ async function readHttpError(response: Response): Promise<{
       code: 'managed_session_store_http_error',
       message: `Managed Session Store returned HTTP ${response.status}.`,
     };
+  }
+}
+
+async function readBoundedContentBytes(
+  response: Response,
+  maxBytes: number,
+): Promise<Buffer> {
+  const reader = response.body?.getReader();
+  if (!reader) throw corrupt('Content package response has no body.');
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  try {
+    for (;;) {
+      const item = await reader.read();
+      if (item.done) break;
+      length += item.value.byteLength;
+      if (length > maxBytes) {
+        await reader.cancel();
+        throw corrupt('Content package response exceeds its byte limit.');
+      }
+      chunks.push(item.value);
+    }
+    return Buffer.concat(chunks);
+  } finally {
+    reader.releaseLock();
   }
 }
 

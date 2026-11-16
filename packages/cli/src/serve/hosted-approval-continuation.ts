@@ -36,7 +36,10 @@ import {
 import { isHostedMemoryTool } from './hosted-memory-session.js';
 import { hostedRuntimeSessionId } from './hosted-workspace-broker.js';
 import { readHostedTurnApprovalSelection } from './hosted-approval-selection.js';
-import { isHostedWorkspacePublicShellProfile } from './hosted-workspace-profiles.js';
+import {
+  HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2,
+  isHostedWorkspacePublicChildProfile,
+} from './hosted-workspace-profiles.js';
 
 /**
  * #17260: the saved continuation was captured under a public-child
@@ -246,6 +249,7 @@ export async function readHostedApprovalContinuation(
       'Original assistant batch does not match the continuation.',
     );
   const publicShell = plan.publicChildModel !== undefined;
+  let contentChildProfile = false;
   if (publicShell) {
     const model = plan.publicChildModel!;
     parsePublicChildModelRoute(model.route);
@@ -259,12 +263,16 @@ export async function readHostedApprovalContinuation(
     const definition = JSON.parse(
       (await session.resources.read(header.definitionRef)).toString('utf8'),
     );
+    contentChildProfile =
+      definition.toolProfile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2;
     if (
       definition.publicChildAgentsVersion !== 1 ||
-      !isHostedWorkspacePublicShellProfile(definition.toolProfile)
+      !isHostedWorkspacePublicChildProfile(definition.toolProfile)
     )
       throw new HostedPublicChildRecoveryProfileChanged();
   }
+  if (contentChildProfile && plan.commandStep)
+    throw new Error('Content-only continuation cannot contain command steps.');
   const ids = new Set<string>();
   const runtimeIds = new Set<string>();
   const partIndexes = new Set<number>();
@@ -294,10 +302,15 @@ export async function readHostedApprovalContinuation(
                 item.publicationId,
               ))))) ||
       !item.call ||
+      (contentChildProfile &&
+        !['read_file', 'write_file', 'edit', 'glob', 'skill', 'agent'].includes(
+          item.call.name,
+        )) ||
       !(
         NATIVE_TOOLS.has(item.call.name) ||
         isHostedMemoryTool(item.call.name) ||
         (plan.commandStep && item.call.name === 'skill') ||
+        (contentChildProfile && item.call.name === 'skill') ||
         publicPlanExit ||
         (publicShell && ['agent', 'run_shell_command'].includes(item.call.name))
       ) ||

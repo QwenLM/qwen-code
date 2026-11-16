@@ -384,20 +384,32 @@ export class HostedWorkspaceBroker {
     return this.claim;
   }
 
-  async acquire(expected?: {
-    runtimeBindingId: string;
-    generation: string;
-  }): Promise<void> {
+  async acquire(
+    expected?:
+      | {
+          runtimeBindingId: string;
+          generation: string;
+        }
+      | {
+          initialBindingId: string;
+          initialGeneration: string;
+        },
+  ): Promise<void> {
     this.claim = randomUUID();
     const response = await this.request('/tool-sessions:acquire', {
       turnKind: 'bootstrap',
       mountClaimId: this.claim,
-      ...(expected
+      ...(expected && 'runtimeBindingId' in expected
         ? {
             recoveryBindingId: expected.runtimeBindingId,
             recoveryGeneration: expected.generation,
           }
-        : {}),
+        : expected
+          ? {
+              expectedBindingId: expected.initialBindingId,
+              expectedGeneration: expected.initialGeneration,
+            }
+          : {}),
     });
     if (response['acquired'] !== true)
       throw new Error('Runtime did not acquire the Session.');

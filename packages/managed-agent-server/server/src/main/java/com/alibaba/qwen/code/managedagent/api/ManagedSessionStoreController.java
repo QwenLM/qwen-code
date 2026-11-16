@@ -52,6 +52,10 @@ public class ManagedSessionStoreController {
     private final com.alibaba.qwen.code.managedagent.persistence.JdbcSessionResourceObjects resourceObjects;
     @org.springframework.beans.factory.annotation.Autowired
     private com.alibaba.qwen.code.managedagent.persistence.ManagedSessionModelConfigs modelConfigs;
+    @org.springframework.beans.factory.annotation.Autowired
+    private com.alibaba.qwen.code.managedagent.persistence.ManagedContentPackageAuthorization contentPackages;
+    @org.springframework.beans.factory.annotation.Autowired
+    private com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages extensionPackages;
 
     public ManagedSessionStoreController(JdbcManagedSessionStore store, JdbcManagedUserMessageStore userMessages,
             ManagedNativeJournalSnapshots snapshots,
@@ -63,6 +67,54 @@ public class ManagedSessionStoreController {
     }
 
     public record QueueClaim(String workspaceId, String writerId, long writerGeneration, String promptId, boolean initialOnly) { }
+
+    public record ContentPackageQuery(
+            @NotBlank @Size(max = 512) String workspaceId,
+            @NotBlank @Size(max = 512) String writerId,
+            @Min(1) @Max(ManagedSessionStoreModels.MAX_SAFE_COUNTER) long writerGeneration,
+            @NotBlank String operationId,
+            @jakarta.validation.constraints.NotNull com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Pin pin) { }
+
+    @PostMapping("/content-package:query")
+    public ResponseEntity<Object> contentPackageQuery(TenantContext tenant, @PathVariable String sessionId,
+            @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
+            @Valid @RequestBody ContentPackageQuery request) throws java.io.IOException {
+        authorizeContentPackage(tenant, sessionId, writerToken, request);
+        try (var resolved = resolveContentPackage(tenant, request)) {
+            return ResponseEntity.ok().cacheControl(org.springframework.http.CacheControl.noStore())
+                    .body(java.util.Map.of("manifest", resolved.descriptor().manifest(), "byteLength", resolved.descriptor().byteLength()));
+        }
+    }
+
+    @PostMapping("/content-package:read")
+    public ResponseEntity<org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody> contentPackageRead(
+            TenantContext tenant, @PathVariable String sessionId,
+            @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
+            @Valid @RequestBody ContentPackageQuery request) {
+        authorizeContentPackage(tenant, sessionId, writerToken, request);
+        return ResponseEntity.ok().cacheControl(org.springframework.http.CacheControl.noStore())
+                .contentType(org.springframework.http.MediaType.APPLICATION_OCTET_STREAM).body(output -> {
+                    try (var resolved = resolveContentPackage(tenant, request)) {
+                        java.nio.file.Files.copy(resolved.archive(), output);
+                    }
+                });
+    }
+
+    private void authorizeContentPackage(TenantContext tenant, String sessionId, String token, ContentPackageQuery request) {
+        contentPackages.authorize(tenant.tenantId(), sessionId, token, request.workspaceId(), request.writerId(),
+                request.writerGeneration(), request.operationId(), request.pin());
+    }
+
+    private com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages.ResolvedPackage resolveContentPackage(
+            TenantContext tenant, ContentPackageQuery request) throws java.io.IOException {
+        var resolved = extensionPackages.resolvePin(tenant.tenantId(), request.workspaceId(), request.pin());
+        if (resolved.descriptor().manifest().components() == null
+                || !java.util.Set.of("skills", "commands", "agents", "context").containsAll(resolved.descriptor().manifest().components())) {
+            resolved.close();
+            throw new ManagedAgentException(409, "content_package_unsupported", "The package contains executable extension components");
+        }
+        return resolved;
+    }
 
     public record ModelConfigQuery(
             @NotBlank @Size(max = 512) String workspaceId,

@@ -37,11 +37,12 @@ final class WorkspaceAttachmentAuthorizer {
     void authorizeAttachment(SessionRecord session, boolean cancellation,
             boolean actionResponse, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority,
             boolean legacyClose, boolean committedStop) {
-        boolean external = WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile()) && store.isExternal(session.workspace());
+        boolean external = WorkspaceToolProfiles.isExternalFiles(session.toolProfile()) && store.isExternal(session.workspace());
         if (external && (!"qwen-code".equals(session.agentId()) || session.agentDefinitionDigest() != null)) {
             throw unavailable();
         }
-        authorizeAttachment(session, cancellation, actionResponse, authority, legacyClose, committedStop, external);
+        authorizeAttachment(session, cancellation, actionResponse, authority, legacyClose,
+                committedStop || external && WorkspaceToolProfiles.EXTERNAL_CONTENT.equals(session.toolProfile()) && authority != null, external);
     }
 
     void authorizeAttachment(SessionRecord session, boolean cancellation,
@@ -61,10 +62,14 @@ final class WorkspaceAttachmentAuthorizer {
             requireWorktreeAncestorsReady(jdbc, session.tenantId(), session.sessionId());
         }
         var resident = residents.find(binding);
+        byte[] externalActor = null;
         if (external) {
-            if (!store.isExternal(binding) || !"hosted-workspace-external-files/1".equals(session.toolProfile())) {
+            if (!store.isExternal(binding) || !WorkspaceToolProfiles.isExternalFiles(session.toolProfile())) {
                 throw unavailable();
             }
+            externalActor = jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<byte[]>) connection ->
+                    ExternalWorkspaceSessionLineage.executionActor(connection, binding, session.sessionId(),
+                            !cancellation && !committedStop && authority == null && !legacyClose));
         } else if (resident == null) {
             WorkspaceStorageKindGuard.requireExecutionAlias(jdbc, binding.getTenantId(), binding.getStorageId());
         } else {
@@ -78,7 +83,7 @@ final class WorkspaceAttachmentAuthorizer {
         // Verdicts per matched row: 0 structural mismatch, 1 refused only by
         // operator-mutable grant or registry state, 2 authorized.
         byte[] executionActor = cancellation || committedStop ? null
-                : external ? externalExecutionActor(binding, session.sessionId())
+                : external ? externalActor
                         : inheritedExecutionActor(jdbc, binding, session.sessionId());
         List<Integer> grants = jdbc.query("SELECT s.tenant_id, s.session_id,"
                 + " s.agent_id AS session_agent,"
@@ -214,17 +219,6 @@ final class WorkspaceAttachmentAuthorizer {
             current = parent;
         }
         throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
-    }
-
-    private byte[] externalExecutionActor(ContextBinding binding, String sessionId) {
-        var actors = jdbc.query("SELECT COALESCE(owner_actor_key, creator_actor_key) AS execution_actor"
-                + " FROM ma_session WHERE tenant_id = ? AND session_id = ? AND parent_session_id IS NULL",
-                (row, index) -> row.getBytes("execution_actor"),
-                binding.getTenantId(), sessionId);
-        if (actors.size() != 1 || actors.getFirst() == null) {
-            throw unavailable();
-        }
-        return actors.getFirst();
     }
 
     // qwen-code, or a Session that pinned a compiled definition (D8c-1).

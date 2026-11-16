@@ -7,6 +7,9 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
+import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
+import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
+import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBindingRegistry.BindingContext;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBindingRegistry.SessionContext;
@@ -47,6 +50,29 @@ class RuntimeBindingRegistryTest {
     private final RuntimeBindingRegistry registry = new RuntimeBindingRegistry(bindings, provisioner,
             mock(com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository.class),
             mock(com.alibaba.qwen.code.runtimebroker.HarnessSessionResolver.class), "broker", LEASE_DURATION, Clock.fixed(NOW, ZoneOffset.UTC));
+
+    @Test
+    void exactMemberLookupSeparatesLiveAdmissionFromReleasedDispatchEvidence() {
+        var members = mock(RuntimeSessionRepository.class);
+        var exact = new RuntimeBindingRegistry(bindings, provisioner, members,
+                mock(com.alibaba.qwen.code.runtimebroker.HarnessSessionResolver.class),
+                "broker", LEASE_DURATION, Clock.fixed(NOW, ZoneOffset.UTC));
+        var binding = binding(7, RuntimeBindingRecord.State.READY, LEASE);
+        var session = new RuntimeSession("harness", "prompt", "bootstrap", REQUEST.getScope());
+        var ready = new RuntimeSessionRecord(session, "binding", 7,
+                RuntimeSessionRecord.State.READY, 1, NOW);
+        when(members.findHistorical("tenant", "harness", "prompt")).thenReturn(ready);
+        when(bindings.findById("binding")).thenReturn(binding);
+        assertSame(binding, exact.findBindingByRuntimeSession("tenant", "harness", "prompt", true));
+        when(members.findHistorical("tenant", "harness", "prompt"))
+                .thenReturn(ready.withState(RuntimeSessionRecord.State.RELEASED, NOW));
+        assertNull(exact.findBindingByRuntimeSession("tenant", "harness", "prompt", true));
+        assertSame(binding, exact.findBindingByRuntimeSession("tenant", "harness", "prompt", false));
+        when(bindings.findById("binding")).thenReturn(binding(8, RuntimeBindingRecord.State.READY, LEASE));
+        assertThrows(RuntimeBrokerException.class,
+                () -> exact.findBindingByRuntimeSession("tenant", "harness", "prompt", false));
+        verifyNoInteractions(provisioner);
+    }
 
     @Test
     void routingRequiresTheExactLocallyAttestedGenerationAndLease() {
