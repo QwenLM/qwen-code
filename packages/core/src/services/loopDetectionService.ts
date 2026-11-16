@@ -149,6 +149,13 @@ const MAX_TRACKED_TOOL_REQUESTS = 500;
 // Thought tracking
 const THOUGHT_REPEAT_THRESHOLD = 3;
 const MAX_THOUGHT_HISTORY = 50;
+// Upper bound on streamed reasoning buffered while waiting for a segment end.
+// Reasoning without sentence punctuation or newlines is force-flushed as one
+// segment once it grows past this many characters.
+const MAX_PENDING_THOUGHT_CHARS = 8192;
+// End of a reasoning segment: a sentence terminator followed by whitespace,
+// or a newline.
+const THOUGHT_SEGMENT_END = /[.!?]\s|\n/;
 
 // File read tracking.
 //
@@ -407,6 +414,9 @@ export class LoopDetectionService {
 
   // Thought tracking
   private thoughtHistory: string[] = [];
+  // Streamed reasoning (thoughts with an empty subject) not yet judged: it is
+  // held until a whole segment is complete, see ingestThoughtDelta.
+  private pendingThoughtText = '';
 
   // Tool call tracking (for read-file loop + stagnation detection)
   private recentToolCalls: Array<{ name: string; args: object }> = [];
@@ -978,6 +988,22 @@ export class LoopDetectionService {
       return this.loopDetected;
     }
 
+    // Judge any reasoning still buffered when the stream moves on to another
+    // kind of event. A replay retry or a model fallback discards the failed
+    // attempt's text instead, so its buffered tail is dropped, not judged.
+    if (
+      (event.type === LlmEventType.Retry && !event.isContinuation) ||
+      event.type === LlmEventType.ModelFallback
+    ) {
+      this.pendingThoughtText = '';
+    } else if (
+      event.type !== LlmEventType.Thought &&
+      this.flushPendingThought()
+    ) {
+      this.loopDetected = true;
+      return true;
+    }
+
     switch (event.type) {
       case LlmEventType.ToolCallRequest: {
         // content chanting only happens in one single stream, reset if there
@@ -1051,8 +1077,17 @@ export class LoopDetectionService {
         break;
       }
       case LlmEventType.Thought: {
-        this.trackThought(event.value);
-        this.loopDetected = this.checkRepetitiveThoughts();
+        if (event.value.subject === '') {
+          // A streamed reasoning delta is an arbitrary slice of text (a
+          // single token, a digit, whitespace), so it is not a thought that
+          // can repeat. Judge whole segments instead.
+          this.loopDetected = this.ingestThoughtDelta(event.value.description);
+        } else {
+          // A structured summary is one complete thought per event. Keep
+          // reasoning that precedes it in order.
+          this.loopDetected =
+            this.flushPendingThought() || this.judgeThought(event.value);
+        }
         if (!this.loopDetected) {
           // Also route the thought text into the content-repetition
           // detector. OpenAI-compatible providers stream reasoning as
@@ -1839,6 +1874,49 @@ export class LoopDetectionService {
     }
   }
 
+  /** Tracks one thought and reports whether it completes a repetition run. */
+  private judgeThought(summary: ThoughtSummary): boolean {
+    this.trackThought(summary);
+    return this.checkRepetitiveThoughts();
+  }
+
+  /**
+   * Buffers a streamed reasoning delta and judges every segment it completes
+   * (a sentence end followed by whitespace, or a newline). Whitespace-only
+   * segments carry no reasoning and are skipped. A buffer that grows past
+   * MAX_PENDING_THOUGHT_CHARS without a segment end is judged as one segment.
+   * Returns true as soon as a segment completes a repetition run.
+   */
+  private ingestThoughtDelta(delta: string): boolean {
+    this.pendingThoughtText += delta;
+    for (;;) {
+      const match = THOUGHT_SEGMENT_END.exec(this.pendingThoughtText);
+      let end: number;
+      if (match) {
+        end = match.index + match[0].length;
+      } else if (this.pendingThoughtText.length > MAX_PENDING_THOUGHT_CHARS) {
+        end = this.pendingThoughtText.length;
+      } else {
+        return false;
+      }
+      const segment = this.pendingThoughtText.slice(0, end);
+      this.pendingThoughtText = this.pendingThoughtText.slice(end);
+      if (this.judgeSegment(segment)) return true;
+    }
+  }
+
+  /** Judges the buffered remainder of the reasoning stream, if any. */
+  private flushPendingThought(): boolean {
+    const segment = this.pendingThoughtText;
+    this.pendingThoughtText = '';
+    return this.judgeSegment(segment);
+  }
+
+  private judgeSegment(segment: string): boolean {
+    if (segment.trim() === '') return false;
+    return this.judgeThought({ subject: '', description: segment });
+  }
+
   /**
    * Checks for repetitive thoughts pattern.
    *
@@ -2093,6 +2171,7 @@ export class LoopDetectionService {
 
     // Reset new tracking variables
     this.thoughtHistory = [];
+    this.pendingThoughtText = '';
     this.recentToolCalls = [];
     this.sameNameStreak = 0;
     this.lastSeenToolName = null;
