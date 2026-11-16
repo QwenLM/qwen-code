@@ -1353,8 +1353,15 @@ and its generator — tsx run from the repo root, whose tsconfig has
 NO `paths` — imports cli sources that resolve
 '@qwen-code/qwen-code-core' through the workspace symlink to core's
 dist entry point. Core also imports the built network-policy package.
-Both outputs must be archived and checked after restoration; without
-either, the generator crashes with ERR_MODULE_NOT_FOUND and the gate
+The package exists only on newer bases: build-cli checks out the trusted
+default branch, which can predate this workspace while reviewing its PR.
+Archive and check network-policy/dist only when that checkout contains
+packages/network-policy/package.json. The restore leg uses the same
+source-presence guard against the producer's base_sha. A package that
+exists must have dist/index.js; checking for a dist directory instead
+would silently accept a broken build. When required, both outputs must
+be archived and checked after restoration; without either, the generator
+crashes with ERR_MODULE_NOT_FOUND and the gate
 misreports a deterministic "settings schema is stale" rejection. The
 i18n check needs no dist: it imports translation metadata directly,
 and the CLI tsconfig maps its narrow core data import to source.

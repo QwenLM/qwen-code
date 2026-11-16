@@ -12506,10 +12506,10 @@ exit 1
     // sources that resolve '@qwen-code/qwen-code-core' through the
     // workspace symlink to core's dist entry point (the i18n check
     // instead resolves core to sources via the packages/cli `paths` map).
-    // The regex anchors the line end, so appending another path to the
-    // tarball fails here — a substring pin would let additive drift pass.
+    // Execution tests below pin the exact archive members for trusted bases
+    // before and after the network-policy workspace was introduced.
     expect(buildCliJob).toMatch(
-      /tar -czf "\$\{RUNNER_TEMP\}\/qwen-cli-dist\.tar\.gz" dist packages\/core\/dist packages\/network-policy\/dist\n/,
+      /tar -czf "\$\{RUNNER_TEMP\}\/qwen-cli-dist\.tar\.gz" "\$\{bundle_paths\[@\]\}"\n/,
     );
     expect(buildCliJob).toContain("name: 'qwen-autofix-cli-dist'");
     expect(buildCliJob).toContain('retention-days: 1');
@@ -12542,6 +12542,139 @@ exit 1
     expect(legInstall).not.toContain('npm run build');
     expect(legInstall).not.toContain('npm run bundle');
   });
+
+  it.each([
+    { name: 'legacy base', hasPackage: false, build: 'absent' },
+    {
+      name: 'legacy base with stale output',
+      hasPackage: false,
+      build: 'complete',
+    },
+    { name: 'current base', hasPackage: true, build: 'complete' },
+    { name: 'current base without a build', hasPackage: true, build: 'absent' },
+    {
+      name: 'current base with an incomplete build',
+      hasPackage: true,
+      build: 'incomplete',
+    },
+    {
+      name: 'current base with an incomplete artifact',
+      hasPackage: true,
+      build: 'complete',
+      omitArtifactDependency: true,
+    },
+  ])(
+    'executes the CLI artifact handoff for $name',
+    ({ hasPackage, build, omitArtifactDependency }) => {
+      const root = mkdtempSync(join(tmpdir(), 'autofix-cli-artifact-'));
+      const producer = join(root, 'producer');
+      const consumer = join(root, 'consumer');
+      const write = (base, file, value = 'fixture') => {
+        const target = join(base, file);
+        mkdirSync(dirname(target), { recursive: true });
+        writeFileSync(target, value);
+      };
+      const run = (job, stepName, cwd) => {
+        const script = parse(workflow).jobs[job].steps.find(
+          (step) => step.name === stepName,
+        ).run;
+        return spawnSync('bash', ['-e', '-o', 'pipefail', '-c', script], {
+          cwd,
+          encoding: 'utf8',
+          timeout: subprocessTimeoutMs,
+          env: {
+            ...isolatedGitEnv,
+            RUNNER_TEMP: root,
+            GITHUB_OUTPUT: join(root, 'output'),
+          },
+        });
+      };
+      try {
+        write(producer, 'dist/cli.js');
+        write(producer, 'packages/core/dist/index.js');
+        write(producer, 'packages/unrelated/dist/index.js');
+        mkdirSync(consumer);
+        if (hasPackage) {
+          for (const base of [producer, consumer])
+            write(base, 'packages/network-policy/package.json', '{}');
+        }
+        if (build !== 'absent') {
+          write(
+            producer,
+            `packages/network-policy/dist/${build === 'complete' ? 'index.js' : 'other.js'}`,
+          );
+        }
+        execFileSync('git', ['init', '-q', producer], { env: isolatedGitEnv });
+        execFileSync(
+          'git',
+          [
+            '-C',
+            producer,
+            '-c',
+            'user.name=Fixture',
+            '-c',
+            'user.email=fixture@example.invalid',
+            'commit',
+            '--allow-empty',
+            '-qm',
+            'fixture',
+          ],
+          { env: isolatedGitEnv },
+        );
+        const uploaded = run('build-cli', 'Upload CLI bundle', producer);
+        expect(uploaded.error).toBeUndefined();
+        if (hasPackage && build !== 'complete') {
+          expect(uploaded.status, uploaded.stderr).toBe(1);
+          return;
+        }
+        expect(uploaded.status, uploaded.stderr).toBe(0);
+        const archive = join(root, 'qwen-cli-dist.tar.gz');
+        const members = execFileSync('tar', ['-tzf', archive], {
+          encoding: 'utf8',
+        })
+          .trim()
+          .split('\n')
+          .map((member) => member.replace(/\/$/, ''))
+          .sort();
+        expect(members).toEqual(
+          [
+            'dist',
+            'dist/cli.js',
+            'packages/core/dist',
+            'packages/core/dist/index.js',
+            ...(hasPackage
+              ? [
+                  'packages/network-policy/dist',
+                  'packages/network-policy/dist/index.js',
+                ]
+              : []),
+          ].sort(),
+        );
+        if (omitArtifactDependency) {
+          execFileSync('tar', ['-czf', archive, 'dist', 'packages/core/dist'], {
+            cwd: producer,
+          });
+        }
+        mkdirSync(join(root, 'cli-dist'));
+        copyFileSync(archive, join(root, 'cli-dist/qwen-cli-dist.tar.gz'));
+        const restored = run('review-address', 'Restore CLI bundle', consumer);
+        expect(restored.error).toBeUndefined();
+        if (omitArtifactDependency) {
+          expect(restored.status, restored.stderr).toBe(1);
+        } else {
+          expect(restored.status, restored.stderr).toBe(0);
+          expect(readFileSync(join(consumer, 'dist/cli.js'), 'utf8')).toBe(
+            'fixture',
+          );
+          expect(
+            existsSync(join(consumer, 'packages/network-policy/dist/index.js')),
+          ).toBe(hasPackage);
+        }
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('uses the standard checkout action for autonomous runner jobs', () => {
     expect(workflow).toContain('actions/checkout@');

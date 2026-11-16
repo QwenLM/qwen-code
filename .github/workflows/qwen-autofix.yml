@@ -3618,7 +3618,12 @@ jobs:
         id: 'meta'
         run: |-
           echo "base_sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
-          tar -czf "${RUNNER_TEMP}/qwen-cli-dist.tar.gz" dist packages/core/dist packages/network-policy/dist
+          bundle_paths=(dist packages/core/dist)
+          if [[ -f packages/network-policy/package.json ]]; then
+            test -f packages/network-policy/dist/index.js
+            bundle_paths+=(packages/network-policy/dist)
+          fi
+          tar -czf "${RUNNER_TEMP}/qwen-cli-dist.tar.gz" "${bundle_paths[@]}"
 
       - name: 'Publish CLI bundle artifact'
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
@@ -3989,7 +3994,9 @@ jobs:
           # `paths` map); a bundle without it makes the schema generator
           # crash with ERR_MODULE_NOT_FOUND.
           test -f packages/core/dist/index.js
-          test -f packages/network-policy/dist/index.js
+          if [[ -f packages/network-policy/package.json ]]; then
+            test -f packages/network-policy/dist/index.js
+          fi
 
       - name: 'Prepare Qwen Code CLI'
         run: |-
