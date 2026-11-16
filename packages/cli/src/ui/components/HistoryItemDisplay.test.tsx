@@ -701,6 +701,78 @@ describe('<HistoryItemDisplay />', () => {
     expect(output).toContain('Inspecting the repository');
   });
 
+  it.each(['gemini_thought', 'gemini_thought_content'] as const)(
+    'offers an expanded committed %s to the Mods and draws their text',
+    (type) => {
+      const item: HistoryItem = {
+        id: 7,
+        type,
+        text: 'Inspecting the repository\n\n',
+        durationMs: 1200,
+      };
+      const modRow = vi
+        .spyOn(modRowHooks, 'useModRow')
+        .mockImplementation((_config, _session, input) =>
+          input ? { text: 'Rewritten thought' } : undefined,
+        );
+      try {
+        const collapsed = renderWithProviders(
+          <HistoryItemDisplay
+            item={item}
+            terminalWidth={100}
+            isPending={false}
+            modSessionId="session"
+          />,
+        );
+        // A collapsed thought shows no text, so it is not offered.
+        expect(modRow).toHaveBeenLastCalledWith(
+          undefined,
+          'session',
+          undefined,
+        );
+        collapsed.unmount();
+
+        const { lastFrame } = renderWithProviders(
+          <HistoryItemDisplay
+            item={item}
+            terminalWidth={100}
+            isPending={false}
+            modSessionId="session"
+            fullDetail
+          />,
+        );
+        expect(modRow).toHaveBeenLastCalledWith(undefined, 'session', {
+          surface: 'terminal',
+          component: 'Thinking',
+          requestId: '7',
+          props: { text: 'Inspecting the repository' },
+        });
+        expect(lastFrame()).toContain('Rewritten thought');
+        expect(lastFrame()).not.toContain('Inspecting the repository');
+      } finally {
+        modRow.mockRestore();
+      }
+    },
+  );
+
+  it('does not offer a pending thought to the Mods', () => {
+    const modRow = vi.spyOn(modRowHooks, 'useModRow');
+    try {
+      renderWithProviders(
+        <HistoryItemDisplay
+          item={{ id: 1, type: 'gemini_thought', text: 'Still thinking' }}
+          terminalWidth={100}
+          isPending
+          modSessionId="session"
+          fullDetail
+        />,
+      );
+      expect(modRow).toHaveBeenLastCalledWith(undefined, 'session', undefined);
+    } finally {
+      modRow.mockRestore();
+    }
+  });
+
   it('forwards fullDetail to ToolGroupMessage for tool_group items', () => {
     vi.mocked(ToolGroupMessage).mockClear();
     const item: HistoryItem = {

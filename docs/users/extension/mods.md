@@ -1150,9 +1150,47 @@ in the terminal scrollback, a printed row cannot change, so the site is not
 offered and its hooks are skipped. OpenTUI always draws them. Subagent views,
 the session preview and headless runs do not raise the site yet. A row whose text is too large for a Mod payload is not raised.
 
+## Thinking rows
+
+`Thinking` is a Qwen Code site; Claude Code has no counterpart. The Ink and
+OpenTUI terminals raise it once for each complete block of the model's
+thinking in the main transcript, while the block is shown expanded. Thinking
+is collapsed by default, so a hook runs only for the thoughts a person opens
+(click the collapsed line, or `ctrl+o` for every thought). A hook receives:
+
+```js
+{
+  surface: 'terminal',
+  component: 'Thinking',
+  requestId: '41', // the transcript item's id
+  props: {
+    text: 'Check how the worker queues dispatches first.', // the block's markdown
+  },
+}
+```
+
+```js
+on('ui.render', { component: 'Thinking' }, ($, e, next) =>
+  next({ ...e, props: { ...e.props, text: e.props.text.toUpperCase() } }),
+);
+```
+
+Spread `e.props` as above, so the hook keeps working if a later release adds
+a prop. The rules of [reply rows](#reply-rows) apply. Only the expanded body changes;
+the collapsed line, the stored thought and what the model reads keep the
+original. The envelope is pinned and a hook may not add props. A rewritten
+`text` holds at most 100,000 characters and no control characters other than
+tabs and line breaks. A thought is never raised while it streams, and a
+collapsed thought shows no text, so it is not raised. Answers are kept, so a
+thought collapsed and opened again does not ask again. Ink offers the site
+only with the virtualized history, as with reply rows, and can split a long
+thought into several blocks, each raised on its own. A thought whose text is
+blank is not raised.
+
 The host raises a site only when some hook may hear it: a hook that names a
 `component` in its matcher hears only the sites it names, and `ui.invalidate`
-re-runs only the sites the calling Mod may hear.
+re-runs only the sites the calling Mod may hear. A hook with no `component`
+matcher hears every site, including `Thinking`.
 
 ## TypeScript, JSX and relative imports
 

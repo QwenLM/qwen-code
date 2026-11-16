@@ -1013,6 +1013,62 @@ describe('OpenTuiTranscriptView', () => {
     }
   });
 
+  it('draws the text the Mods rewrote for a complete thought once it is expanded', () => {
+    const modRow = vi
+      .spyOn(modRowHooks, 'useModRow')
+      .mockImplementation((_config, _sessionId, input) =>
+        input ? { text: 'REWRITTEN_THOUGHT' } : undefined,
+      );
+    try {
+      const config = {} as Config;
+      const modRows = { config, sessionId: 'session-1' };
+      const item = (done: boolean): LiveThinkingItem => ({
+        kind: 'thinking',
+        id: 'th1',
+        text: 'THOUGHT_BODY\n',
+        done,
+        durationMs: 12_000,
+      });
+      const content = (container: HTMLElement) =>
+        container.querySelector('markdown')?.getAttribute('content');
+
+      const expanded = render(
+        <OpenTuiTranscriptView
+          items={[item(true)]}
+          modRows={modRows}
+          thoughtsExpanded
+        />,
+      );
+      expect(content(expanded.container)).toContain('REWRITTEN_THOUGHT');
+      expect(modRow).toHaveBeenLastCalledWith(config, 'session-1', {
+        surface: 'terminal',
+        component: 'Thinking',
+        requestId: 'th1',
+        props: { text: 'THOUGHT_BODY' },
+      });
+      expanded.unmount();
+
+      // A collapsed or streaming thought is not offered.
+      const collapsed = render(
+        <OpenTuiTranscriptView items={[item(true)]} modRows={modRows} />,
+      );
+      expect(collapsed.container.textContent).toContain('Thought for 12s');
+      expect(modRow).toHaveBeenLastCalledWith(config, 'session-1', undefined);
+      collapsed.unmount();
+      const live = render(
+        <OpenTuiTranscriptView
+          items={[item(false)]}
+          modRows={modRows}
+          thoughtsExpanded
+        />,
+      );
+      expect(content(live.container)).toContain('THOUGHT_BODY');
+      expect(modRow).toHaveBeenLastCalledWith(config, 'session-1', undefined);
+    } finally {
+      modRow.mockRestore();
+    }
+  });
+
   it.each<[string, OpenTuiStreamEvent[]]>([
     [
       'live',
@@ -1047,7 +1103,11 @@ describe('OpenTuiTranscriptView', () => {
           modRows={{ config: {} as Config, sessionId: 'session-1' }}
         />,
       );
-      expect(modRow.mock.calls.map(([, , input]) => input?.props)).toEqual([
+      // The collapsed thought between the blocks is not offered.
+      const replyRows = modRow.mock.calls.filter(
+        ([, , input]) => input !== undefined,
+      );
+      expect(replyRows.map(([, , input]) => input?.props)).toEqual([
         { text: 'Opening block', isFirstOfReply: true },
         { text: 'Continuation block', isFirstOfReply: false },
       ]);

@@ -64,7 +64,10 @@ import {
 } from './transcript-window.js';
 import { assistantMarkdownForRender } from './markdown-heal.js';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
-import type { ModAssistantMessageInput } from '@qwen-code/qwen-code-core/mods/render-tree.js';
+import type {
+  ModAssistantMessageInput,
+  ModThinkingInput,
+} from '@qwen-code/qwen-code-core/mods/render-tree.js';
 import { useModRow } from '../hooks/use-mod-row.js';
 import { OpenTuiErrorBoundary } from './opentui-error-boundary.js';
 import { formatInlineToolArgsJson } from '../components/messages/ToolMessage.js';
@@ -698,6 +701,7 @@ function TranscriptItem({
           item={item}
           allExpanded={thoughtsExpanded}
           mouseTracking={mouseTracking}
+          modRows={modRows}
         />
       );
     case 'tool':
@@ -892,10 +896,12 @@ function ThinkingRow({
   item,
   allExpanded,
   mouseTracking,
+  modRows,
 }: {
   item: LiveThinkingItem;
   allExpanded: boolean;
   mouseTracking: boolean;
+  modRows?: TranscriptViewProps['modRows'];
 }) {
   const [clickedOpen, setClickedOpen] = useState(false);
   // ink resolves a thought as the global ctrl+O toggle or its own clicked-open
@@ -907,7 +913,23 @@ function ThinkingRow({
     item.durationMs ??
     (item.startedAt === undefined ? undefined : Date.now() - item.startedAt);
   const meta = thinkingMeta(item.done, expanded, durationMs, mouseTracking);
-  const body = item.text.trimEnd();
+  const text = item.text.trimEnd();
+  // The Mods can rewrite how a complete, expanded block is drawn. The item
+  // keeps its original text.
+  const modInput = useMemo<ModThinkingInput | undefined>(
+    () =>
+      modRows && item.done && expanded && text.trim().length > 0
+        ? {
+            surface: 'terminal',
+            component: 'Thinking',
+            requestId: item.id,
+            props: { text },
+          }
+        : undefined,
+    [modRows, item.done, item.id, expanded, text],
+  );
+  const modProps = useModRow(modRows?.config, modRows?.sessionId, modInput);
+  const body = modProps?.text ?? text;
   return (
     <box
       flexDirection="column"
