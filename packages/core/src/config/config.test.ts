@@ -7386,10 +7386,27 @@ describe('Server Config (config.ts)', () => {
       });
       afterEach(() => vi.unstubAllEnvs());
 
-      it('defaults to off for every surface', () => {
+      it('defaults to on for headless and off for every other surface', () => {
         for (const surface of AGENT_LOOP_SURFACES) {
-          expect(makeConfig().isEventBusAgentLoopEnabled(surface)).toBe(false);
+          expect(makeConfig().isEventBusAgentLoopEnabled(surface)).toBe(
+            surface === 'headless',
+          );
         }
+      });
+
+      it('keeps headless on the procedural path when the setting is false', () => {
+        expect(
+          makeConfig({
+            eventBusAgentLoopEnabled: false,
+          }).isEventBusAgentLoopEnabled('headless'),
+        ).toBe(false);
+      });
+
+      it('keeps headless on the procedural path when the environment turns it off', () => {
+        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', 'headless=0');
+        expect(makeConfig().isEventBusAgentLoopEnabled('headless')).toBe(false);
+        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', '0');
+        expect(makeConfig().isEventBusAgentLoopEnabled('headless')).toBe(false);
       });
 
       it('honors the constructor parameter', () => {
@@ -7563,10 +7580,14 @@ describe('Server Config (config.ts)', () => {
       });
       afterEach(() => vi.unstubAllEnvs());
 
-      it('defaults to shared for headless and the Ink TUI and legacy for every other surface', () => {
+      it('defaults to the kernel for headless, shared for the Ink TUI and legacy for every other surface', () => {
         for (const surface of AGENT_LOOP_SURFACES) {
           expect(makeConfig().getAgentLoopPath(surface)).toBe(
-            surface === 'headless' || surface === 'ink' ? 'shared' : 'legacy',
+            surface === 'headless'
+              ? 'kernel'
+              : surface === 'ink'
+                ? 'shared'
+                : 'legacy',
           );
         }
       });
@@ -7604,6 +7625,11 @@ describe('Server Config (config.ts)', () => {
         const config = makeConfig();
         expect(config.getAgentLoopPath('headless')).toBe('kernel');
         expect(config.getAgentLoopPath('acp')).toBe('legacy');
+      });
+
+      it('keeps headless on the shared loop when the kernel is turned off', () => {
+        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', 'headless=0');
+        expect(makeConfig().getAgentLoopPath('headless')).toBe('shared');
       });
 
       it('caps speculation and hosted at shared even with both switches on', () => {
