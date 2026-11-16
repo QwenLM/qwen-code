@@ -5411,7 +5411,8 @@ function remapSystemPayloadForFork(
       | undefined;
     if (
       payload?.uiEvent?.['event.name'] === 'request_lifecycle' ||
-      payload?.uiEvent?.['event.name'] === 'tool_lifecycle'
+      payload?.uiEvent?.['event.name'] === 'tool_lifecycle' ||
+      payload?.uiEvent?.['event.name'] === 'hook_lifecycle'
     ) {
       const event = payload.uiEvent;
       return {
@@ -5419,7 +5420,8 @@ function remapSystemPayloadForFork(
         uiEvent: {
           ...event,
           sessionId: newSessionId,
-          ...(event['event.name'] === 'request_lifecycle'
+          ...(event['event.name'] === 'request_lifecycle' ||
+          event['event.name'] === 'hook_lifecycle'
             ? {
                 promptId:
                   typeof event['promptId'] === 'string' &&
@@ -5565,7 +5567,8 @@ export function replayUiTelemetryFromConversation(
     if (
       uiEvent &&
       uiEvent['event.name'] !== 'request_lifecycle' &&
-      uiEvent['event.name'] !== 'tool_lifecycle'
+      uiEvent['event.name'] !== 'tool_lifecycle' &&
+      uiEvent['event.name'] !== 'hook_lifecycle'
     ) {
       uiTelemetryService.addEvent(uiEvent as UiEvent, sessionId);
     }

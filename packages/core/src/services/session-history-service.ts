@@ -46,6 +46,22 @@ interface HistoryCursor {
 
 function redactRecordedMediaText(text: string): string {
   const omitted = '[Recorded media omitted]';
+  if (/^\s*[{["]/u.test(text)) {
+    let json = false;
+    try {
+      JSON.parse(text);
+      json = true;
+    } catch {
+      // Ordinary text can begin with a brace without containing valid JSON.
+    }
+    if (json) {
+      return text.replace(/"(?:\\.|[^"\\])*"/gu, (literal) => {
+        const decoded = JSON.parse(literal) as string;
+        const redacted = redactRecordedMediaText(decoded);
+        return redacted === decoded ? literal : JSON.stringify(redacted);
+      });
+    }
+  }
   // Raw media (for example SVG) can contain quotes, spaces and nested markup;
   // its boundary inside ordinary text cannot be inferred safely.
   if (
@@ -53,54 +69,53 @@ function redactRecordedMediaText(text: string): string {
     /data:(?:image|audio|video)\/(?![^,:]*;base64,)[^,:]*,/iu.test(text)
   )
     return omitted;
-  return text.replace(
-    /data:[^,:\s"'<>]*;base64,[a-z0-9+/_=%\t\r\n-]*/giu,
-    omitted,
-  );
+  return text.replace(/data:[^,:\s"'<>]*;base64,[^"'<>)\]}]*/giu, omitted);
 }
 
 function historyJson(value: unknown): string {
-  return JSON.stringify(value, (key, entry: unknown) => {
-    if (
-      [
-        'thoughtSignature',
-        'encrypted_content',
-        'reasoning_details',
-        'providerMetadata',
-      ].includes(key)
-    )
-      return undefined;
-    if (/^(?:inline|file)[_-]?data$/iu.test(key))
-      return '[Recorded media omitted]';
-    if (key === 'b64_json' || key === 'bytesBase64Encoded')
-      return '[Recorded media omitted]';
-    if (
-      entry &&
-      typeof entry === 'object' &&
-      'type' in entry &&
-      [
-        'image',
-        'audio',
-        'video',
-        'image_url',
-        'video_url',
-        'input_audio',
-      ].includes(String(entry.type))
-    )
-      return '[Recorded media omitted]';
-    if (
-      entry &&
-      typeof entry === 'object' &&
-      ('data' in entry || 'source' in entry) &&
-      (Object.keys(entry).some((name) =>
-        /^(?:mime|media)[_-]?type$/iu.test(name),
-      ) ||
-        ('type' in entry && entry.type === 'base64'))
-    )
-      return '[Recorded media omitted]';
-    if (typeof entry === 'string') return redactRecordedMediaText(entry);
-    return entry;
-  });
+  return redactRecordedMediaText(
+    JSON.stringify(value, (key, entry: unknown) => {
+      if (
+        [
+          'thoughtSignature',
+          'encrypted_content',
+          'reasoning_details',
+          'providerMetadata',
+        ].includes(key)
+      )
+        return undefined;
+      if (/^(?:inline|file)[_-]?data$/iu.test(key))
+        return '[Recorded media omitted]';
+      if (key === 'b64_json' || key === 'bytesBase64Encoded')
+        return '[Recorded media omitted]';
+      if (
+        entry &&
+        typeof entry === 'object' &&
+        'type' in entry &&
+        [
+          'image',
+          'audio',
+          'video',
+          'image_url',
+          'video_url',
+          'input_audio',
+        ].includes(String(entry.type))
+      )
+        return '[Recorded media omitted]';
+      if (
+        entry &&
+        typeof entry === 'object' &&
+        ('data' in entry || 'source' in entry) &&
+        (Object.keys(entry).some((name) =>
+          /^(?:mime|media)[_-]?type$/iu.test(name),
+        ) ||
+          ('type' in entry && entry.type === 'base64'))
+      )
+        return '[Recorded media omitted]';
+      if (typeof entry === 'string') return redactRecordedMediaText(entry);
+      return entry;
+    }),
+  );
 }
 
 function historyPartText(part: Part): string {

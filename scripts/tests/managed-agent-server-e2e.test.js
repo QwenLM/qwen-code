@@ -445,18 +445,18 @@ describe('managed-agent-server e2e runner', () => {
       continuation: { phase: 'await_action' },
       approval: { requestId: 'approval' },
     };
-    expect(rejects(['3'], checkpoint, 'approval')).toBe(false);
-    for (const version of ['1', '2', '4']) {
+    expect(rejects(['4'], checkpoint, 'approval')).toBe(false);
+    for (const version of ['1', '2', '3', '5']) {
       expect(rejects([version], checkpoint, 'approval')).toBe(true);
     }
     expect(
       rejects(
-        ['3'],
+        ['4'],
         { ...checkpoint, continuation: { phase: 'done' } },
         'approval',
       ),
     ).toBe(true);
-    expect(rejects(['3'], checkpoint, 'other-approval')).toBe(true);
+    expect(rejects(['4'], checkpoint, 'other-approval')).toBe(true);
   });
 
   it('builds the rewritten-command package with a rewriting, fsyncing command Hook', async () => {

@@ -6,6 +6,8 @@ import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionP
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Pin;
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Settings;
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.SettingsCommand;
+import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.SourceImport;
+import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.SourceOrigin;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.repository.ExtensionPackageRepository;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
@@ -43,29 +45,113 @@ public class JdbcExtensionPackageRepository implements ExtensionPackageRepositor
         this.secrets = secrets.getIfAvailable();
     }
     public Operation preparePublish(String tenant, String actor, String workspace, String extensionId,
-            String id, String digest, String operationId, String requestDigest, String encodedManifest, Access access) {
+            String id, String digest, String operationId, String requestDigest, String encodedManifest, SourceOrigin source, Access access) {
         return transaction.execute(status -> {
             lockWorkspace(tenant, actor, workspace, access);
             Operation existing = existingOperation(tenant, actor, workspace, operationId, requestDigest, access);
             if (existing != null) {
+                Package saved = publication(tenant, workspace, existing);
+                if (!digest.equals(existing.packageDigest()) || !decode(encodedManifest, Manifest.class).equals(saved.manifest())
+                        || !java.util.Objects.equals(source, saved.source())) {
+                    throw new ManagedAgentException(409, "extension_source_changed", "The prepared extension no longer matches the original publication.");
+                }
                 return existing;
+            }
+            var bindings = jdbc.query("SELECT source_json, manifest_json FROM ma_extension_package WHERE scope_key = ? AND extension_id = ?",
+                    (row, index) -> new Package(null, decode(row.getString(2), Manifest.class), 0, decodeSource(row.getString(1))),
+                    scope(tenant, workspace), id);
+            for (Package binding : bindings) {
+                SourceOrigin previous = binding.source();
+                if ((previous == null) != (source == null)
+                        || previous != null && (!sameResource(previous, source)
+                        || previous.reference().revision().equals(source.reference().revision())
+                        && !previous.sourceDigest().equals(source.sourceDigest()))) {
+                    throw new ManagedAgentException(409, "extension_source_conflict", "Extension source bindings and revision contents are immutable.");
+                }
+                if (!binding.manifest().name().equals(decode(encodedManifest, Manifest.class).name())) {
+                    throw new ManagedAgentException(409, "extension_namespace_conflict", "An update must retain the package namespace.");
+                }
             }
             if (extensionId != null) {
                 requireExtension(tenant, workspace, id);
-            } else if (jdbc.queryForObject("SELECT COUNT(DISTINCT extension_id) FROM ma_extension_package WHERE scope_key = ?",
+            } else if (bindings.isEmpty() && jdbc.queryForObject("SELECT COUNT(DISTINCT extension_id) FROM ma_extension_package WHERE scope_key = ?",
                     Long.class, scope(tenant, workspace)) >= 256) {
                 throw new ManagedAgentException(409, "extension_catalog_too_large",
                         "The Workspace extension catalog is limited to 256 extensions.");
             }
             long revision = nextPackageRevision(tenant, workspace, id);
             jdbc.update("INSERT INTO ma_extension_package (package_key, scope_key, tenant_id, workspace_id, extension_id,"
-                            + " package_revision, package_digest, manifest_json, byte_length, state, gmt_create)"
-                            + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 'PREPARING', " + ManagedSchemaTime.SQL_NOW + ")",
+                            + " package_revision, package_digest, manifest_json, source_json, byte_length, state, gmt_create)"
+                            + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'PREPARING', " + ManagedSchemaTime.SQL_NOW + ")",
                     packageKey(tenant, workspace, id, revision), scope(tenant, workspace), tenant, workspace, id, revision,
-                    digest, encodedManifest);
+                    digest, encodedManifest, source == null ? null : encode(source));
             insertOperation(tenant, actor, workspace, operationId, id, "publish", revision, digest, requestDigest, "pending");
             return new Operation(operationId, id, "publish", "pending", revision, digest);
         });
+    }
+
+    public Operation findOperation(String tenant, String actor, String workspace, String operationId, String requestDigest, Access access) {
+        access.require(false);
+        return existingOperation(tenant, actor, workspace, operationId, requestDigest, access);
+    }
+
+    public void prepareSourceImport(String tenant, String actor, String workspace, String operationId,
+            String requestDigest, SourceImport command, Access access) {
+        transaction.executeWithoutResult(status -> {
+            lockWorkspace(tenant, actor, workspace, access);
+            var existing = jdbc.queryForList("SELECT request_digest FROM ma_extension_source_import WHERE import_key = ?",
+                    String.class, operationKey(tenant, workspace, operationId));
+            if (!existing.isEmpty()) {
+                if (!requestDigest.equals(existing.getFirst())) {
+                    throw new ManagedAgentException(409, "idempotency_conflict", "The source import key was used for another request.");
+                }
+                return;
+            }
+            jdbc.update("INSERT INTO ma_extension_source_import (import_key, tenant_id, workspace_id, actor_key, operation_id,"
+                            + " request_digest, request_json, gmt_create) VALUES (?, ?, ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
+                    operationKey(tenant, workspace, operationId), tenant, workspace, actorKey(tenant, actor), operationId,
+                    requestDigest, encode(command));
+        });
+    }
+
+    public SourceImport sourceImport(String tenant, String actor, String workspace, String operationId, Access access) {
+        access.require(false);
+        var rows = jdbc.queryForList("SELECT request_json FROM ma_extension_source_import WHERE import_key = ? AND actor_key = ?",
+                String.class, operationKey(tenant, workspace, operationId), actorKey(tenant, actor));
+        if (rows.size() != 1) {
+            throw missing();
+        }
+        return decode(rows.getFirst(), SourceImport.class);
+    }
+
+    public Package publication(String tenant, String workspace, Operation operation) {
+        var rows = jdbc.query("SELECT manifest_json, byte_length, source_json FROM ma_extension_package WHERE package_key = ? AND package_digest = ?",
+                (row, index) -> new Package(new Pin(operation.extensionId(), operation.revision(), operation.packageDigest(), null),
+                        decode(row.getString(1), Manifest.class), row.getLong(2), decodeSource(row.getString(3))),
+                packageKey(tenant, workspace, operation.extensionId(), operation.revision()), operation.packageDigest());
+        if (rows.size() != 1) {
+            throw missing();
+        }
+        return rows.getFirst();
+    }
+
+    private static boolean sameResource(SourceOrigin left, SourceOrigin right) {
+        return left.reference().providerId().equals(right.reference().providerId())
+                && left.reference().kind().equals(right.reference().kind())
+                && left.reference().resourceId().equals(right.reference().resourceId());
+    }
+
+    private SourceOrigin decodeSource(String value) {
+        if (value == null) {
+            return null;
+        }
+        SourceOrigin source = decode(value, SourceOrigin.class);
+        if (source == null || source.reference() == null || source.sourceDigest() == null
+                || !source.sourceDigest().matches("[a-f0-9]{64}") || source.requestDigest() == null
+                || !source.requestDigest().matches("[a-f0-9]{64}")) {
+            throw new ManagedAgentException(409, "extension_source_corrupt", "Saved extension source cannot be verified.");
+        }
+        return source;
     }
 
     public Operation finishPublish(String tenant, String actor, String workspace, String id,
@@ -270,9 +356,9 @@ public class JdbcExtensionPackageRepository implements ExtensionPackageRepositor
                 || pin.settingsRevision() != null && (pin.settingsRevision() < 1 || pin.settingsRevision() > 9_007_199_254_740_991L)) {
             throw invalid();
         }
-        var rows = jdbc.query("SELECT manifest_json, byte_length FROM ma_extension_package WHERE package_key = ?"
+        var rows = jdbc.query("SELECT manifest_json, byte_length, source_json FROM ma_extension_package WHERE package_key = ?"
                         + " AND package_digest = ? AND state = 'PUBLISHED'",
-                (row, index) -> new Package(pin, decode(row.getString(1), Manifest.class), row.getLong(2)),
+                (row, index) -> new Package(pin, decode(row.getString(1), Manifest.class), row.getLong(2), decodeSource(row.getString(3))),
                 packageKey(tenant, workspace, pin.extensionId(), pin.packageRevision()), pin.packageDigest());
         if (rows.size() != 1) {
             throw missing();
@@ -281,13 +367,13 @@ public class JdbcExtensionPackageRepository implements ExtensionPackageRepositor
     }
 
     public List<Package> list(String tenant, String workspace) {
-        var packages = jdbc.query("SELECT p.extension_id, p.package_revision, p.package_digest, p.manifest_json, p.byte_length"
+        var packages = jdbc.query("SELECT p.extension_id, p.package_revision, p.package_digest, p.manifest_json, p.byte_length, p.source_json"
                         + " FROM ma_extension_package p WHERE p.scope_key = ? AND p.state = 'PUBLISHED'"
                         + " AND p.package_revision = (SELECT MAX(v.package_revision) FROM ma_extension_package v"
                         + " WHERE v.scope_key = p.scope_key AND v.extension_id = p.extension_id AND v.state = 'PUBLISHED')"
                         + " ORDER BY extension_id, package_revision DESC LIMIT 257",
                 (row, index) -> new Package(new Pin(row.getString(1), row.getLong(2), row.getString(3), null),
-                        decode(row.getString(4), Manifest.class), row.getLong(5)), scope(tenant, workspace));
+                        decode(row.getString(4), Manifest.class), row.getLong(5), decodeSource(row.getString(6))), scope(tenant, workspace));
         if (packages.size() > 256) {
             throw new ManagedAgentException(409, "extension_catalog_too_large",
                     "The Workspace extension catalog exceeds 256 extensions.");

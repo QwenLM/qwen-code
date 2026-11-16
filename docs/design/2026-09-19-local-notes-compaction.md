@@ -258,8 +258,14 @@ omit reasoning, provider replay blobs, internal system records, and recursive
 notes/history maintenance traffic. Mark artifacts, media, truncation, and gaps.
 Reading an artifact body is a separate existing file/media operation; history
 does not expand arbitrary paths or inline base64. Explicit base64 data URLs
-embedded in text are replaced without discarding adjacent ordinary evidence,
-including URL-stripped tab and line-break characters in the encoded payload.
+embedded in text are replaced through the next structural delimiter (a quote,
+angle bracket, closing parenthesis, closing bracket, or closing brace), or the
+end of the string. Spaces, line breaks, and escaped characters do not end a
+payload. Evidence outside those boundaries and in sibling JSON fields remains
+available; an unquoted trailing phrase without a structural boundary is
+ambiguous and is omitted with the payload. JSON string tokens, including object
+keys and nested JSON-encoded strings, receive the same media redaction without
+round-tripping numeric literals or unrelated evidence.
 Standalone media strings and strings containing non-base64 media data URLs
 (such as raw SVG) are omitted as a whole: quotes, spaces, and nested markup
 make the raw payload boundary ambiguous. Other JSON fields remain available.

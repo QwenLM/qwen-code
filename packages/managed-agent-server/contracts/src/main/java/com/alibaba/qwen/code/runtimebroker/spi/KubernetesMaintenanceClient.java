@@ -33,5 +33,4 @@ public interface KubernetesMaintenanceClient extends KubernetesRuntimeClient {
     CompletionStage<List<Map<String, Object>>> listPersistentVolumes();
     CompletionStage<List<Map<String, Object>>> listVolumeAttachments();
     CompletionStage<List<Map<String, Object>>> listPods(String namespace);
-    CompletionStage<String> readCsiPodLog(String podName);
 }

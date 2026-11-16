@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitResource;
-import com.alibaba.qwen.code.managedagent.persistence.AutomationLedgerStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcAutomationLedgerStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -29,7 +29,7 @@ class ManagedSchemaJournalAtomicityTest {
     private FaultJdbc jdbc;
     private TransactionTemplate transactions;
     private ExtensionRecordJournal journal;
-    private AutomationLedgerStore automationLedger;
+    private JdbcAutomationLedgerStore automationLedger;
     private final String tenant = "atomic-tenant";
     private final String session = "atomic-session";
 
@@ -47,7 +47,7 @@ class ManagedSchemaJournalAtomicityTest {
         var source = dataSource();
         ManagedSchema.initialize(source);
         jdbc = new FaultJdbc(source);
-        automationLedger = new AutomationLedgerStore(jdbc);
+        automationLedger = new JdbcAutomationLedgerStore(jdbc);
         transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
         journal =
                 new ExtensionRecordJournal(

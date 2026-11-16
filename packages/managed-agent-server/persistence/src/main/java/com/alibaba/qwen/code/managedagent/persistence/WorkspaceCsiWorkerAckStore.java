@@ -116,9 +116,9 @@ public final class WorkspaceCsiWorkerAckStore {
                     .toCompletableFuture().get(timeout.toMillis(), TimeUnit.MILLISECONDS);
         } catch (InterruptedException error) {
             Thread.currentThread().interrupt();
-            throw new IllegalStateException("Original CSI acknowledgement was interrupted");
+            throw new IllegalStateException("Original CSI acknowledgement was interrupted", error);
         } catch (Exception error) {
-            throw new IllegalStateException("Original CSI acknowledgement is unavailable");
+            throw new IllegalStateException("Original CSI acknowledgement is unavailable", error);
         }
         Map<String, Object> confirmed = ManagedCsiProtocol.verifyAcknowledgement(response, plan.request(),
                 plan.boot(), plan.pod(), map(bundle.captureIdentity()));
@@ -350,7 +350,7 @@ public final class WorkspaceCsiWorkerAckStore {
             }
             return json.readTree(value);
         } catch (Exception error) {
-            throw new IllegalArgumentException("CSI ACK evidence document is invalid");
+            throw new IllegalArgumentException("CSI ACK evidence document is invalid", error);
         }
     }
 

@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.session.AcceptanceEvidence;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.AcceptanceVerdict;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ParkedOperation;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -22,11 +23,15 @@ import java.util.Optional;
 public class CancelEvidence implements AcceptanceEvidence {
     private final JdbcTemplate jdbc;
     private final ObjectMapper json;
+    private com.alibaba.qwen.code.managedagent.persistence.JdbcJournalPacks packs;
 
     public CancelEvidence(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentObjectMapper") ObjectMapper json) {
         this.jdbc = jdbc;
         this.json = json;
     }
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    void setJournalPacks(com.alibaba.qwen.code.managedagent.persistence.JdbcJournalPacks packs) { this.packs = packs; }
 
     @Override
     public String kind() {
@@ -46,7 +51,7 @@ public class CancelEvidence implements AcceptanceEvidence {
                         + " AND o.target_kind = 'TURN' AND o.state = 'RECOVERY_BLOCKED'"
                         + " AND o.delivery_state = 'BLOCKED' AND o.claim_owner IS NULL",
                 (row, index) -> new Target(row.getString(1), row.getString(2), row.getString(3)),
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(parked.tenantId(), parked.sessionId()),
+                ManagedSessionStore.sessionScopeKey(parked.tenantId(), parked.sessionId()),
                 parked.tenantId(), parked.sessionId(), parked.operationId());
         if (targets.isEmpty()) {
             return Optional.empty();
@@ -72,12 +77,13 @@ public class CancelEvidence implements AcceptanceEvidence {
             // recorder:<uuid>, so it cannot be looked up by the prompt's command hash.
             List<Journal> rows = jdbc.query("SELECT journal_revision, record_encoding,"
                             + " CASE WHEN OCTET_LENGTH(record_bytes) <= ? THEN record_bytes END AS record_bytes,"
-                            + " byte_length, record_digest FROM ma_session_journal_tx"
+                            + " byte_length, record_digest, record_bytes IS NULL AS is_packed"
+                            + " FROM ma_session_journal_tx"
                             + " WHERE tenant_id = ? AND workspace_id = ? AND session_id = ?"
                             + " AND operation = 'settleTurn' AND journal_revision <= ?"
                             + " ORDER BY journal_revision DESC LIMIT 1",
                     (row, index) -> new Journal(row.getLong(1), row.getString(2), row.getBytes(3),
-                            row.getLong(4), row.getString(5)),
+                            row.getLong(4), row.getString(5), row.getBoolean(6)),
                     ManagedSessionStoreModels.MAX_TRANSACTION_BYTES,
                     parked.tenantId(), head.workspaceId(), parked.sessionId(), through);
             if (rows.isEmpty()) {
@@ -85,12 +91,17 @@ public class CancelEvidence implements AcceptanceEvidence {
             }
             Journal journal = rows.getFirst();
             through = journal.revision() - 1;
-            if (!"identity".equals(journal.encoding()) || journal.bytes() == null
-                    || journal.bytes().length != journal.byteLength()
-                    || !DigestUtils.sha256Hex(journal.bytes()).equals(journal.digest())) {
+            byte[] evidence = journal.bytes();
+            if (evidence == null && journal.packed() && packs != null) {
+                evidence = packs.resolveBytes(parked.tenantId(), parked.sessionId(),
+                        journal.revision(), journal.digest(), journal.byteLength());
+            }
+            if (!"identity".equals(journal.encoding()) || evidence == null
+                    || evidence.length != journal.byteLength()
+                    || !DigestUtils.sha256Hex(evidence).equals(journal.digest())) {
                 throw new IllegalStateException("Stored cancel evidence is corrupt");
             }
-            for (String line : new String(journal.bytes(), StandardCharsets.UTF_8).split("\n")) {
+            for (String line : new String(evidence, StandardCharsets.UTF_8).split("\n")) {
                 JsonNode record = parse(line);
                 if (!"managed_session_event_v1".equals(record.path("subtype").asText())) {
                     continue;
@@ -135,5 +146,5 @@ public class CancelEvidence implements AcceptanceEvidence {
 
     private record Head(String workspaceId, long revision) {}
 
-    private record Journal(long revision, String encoding, byte[] bytes, long byteLength, String digest) {}
+    private record Journal(long revision, String encoding, byte[] bytes, long byteLength, String digest, boolean packed) {}
 }

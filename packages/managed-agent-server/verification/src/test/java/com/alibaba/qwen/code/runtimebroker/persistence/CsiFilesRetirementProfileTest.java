@@ -44,6 +44,20 @@ class CsiFilesRetirementProfileTest {
     }
 
     @Test
+    void activityProfileAddsEvidenceWithoutChangingExecutionCapabilities() {
+        String session = UUID.randomUUID().toString();
+        var previous = CsiFilesRetirementProfile.request(workspace, "/workspace", session, CsiFilesRetirementProfile.DIAGNOSTICS_PROFILE);
+        var activity = CsiFilesRetirementProfile.request(workspace, "/workspace", session, CsiFilesRetirementProfile.ACTIVITY_PROFILE);
+        assertTrue(CsiFilesRetirementProfile.hasActivityDiagnostics(activity.getScope()));
+        assertTrue(CsiFilesRetirementProfile.hasDiagnostics(activity.getScope()));
+        assertTrue(CsiFilesRetirementProfile.supportsStorage(activity.getScope(), 4));
+        assertFalse(CsiFilesRetirementProfile.supportsStorage(previous.getScope(), 4));
+        assertFalse(CsiFilesRetirementProfile.hasActivityDiagnostics(previous.getScope()));
+        assertEquals("csi-files-retirement/3", CsiFilesRetirementProfile.profile(activity.getScope()));
+        assertNotEquals(previous.requestKey(), activity.requestKey());
+    }
+
+    @Test
     void pinsExactSessionAndUsesTheExistingManagedRequestEncoding() {
         String id = UUID.randomUUID().toString();
         var request = CsiFilesRetirementProfile.request(workspace, "/workspace", id);

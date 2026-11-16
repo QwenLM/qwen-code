@@ -13,16 +13,21 @@ export const CSI_FILES_RETIREMENT_CAPABILITY_DIGEST =
 export const CSI_FILES_DIAGNOSTICS_CAPABILITY_DIGEST =
   'sha256:e973d9401c00a917e8b3de2d8fd63a0d1b09e3c4407aecf64826cdfff6c1c321';
 
+export const CSI_FILES_ACTIVITY_CAPABILITY_DIGEST =
+  'sha256:5462b4edf53081cbb4aabebdcb23801b30f355f7b365c467f6a851f2fefabbf0';
+
 export function isCsiFilesCapability(digest: unknown): boolean {
   return (
     digest === CSI_FILES_RETIREMENT_CAPABILITY_DIGEST ||
-    digest === CSI_FILES_DIAGNOSTICS_CAPABILITY_DIGEST
+    digest === CSI_FILES_DIAGNOSTICS_CAPABILITY_DIGEST ||
+    digest === CSI_FILES_ACTIVITY_CAPABILITY_DIGEST
   );
 }
 
 export type CsiFilesProfile =
   | 'csi-files-retirement/1'
-  | 'csi-files-retirement/2';
+  | 'csi-files-retirement/2'
+  | 'csi-files-retirement/3';
 
 const sessionProfiles = new WeakMap<
   ManagedSession['authority'],
@@ -44,7 +49,8 @@ export async function readHostedCsiFileProfile(
   const profile = definition.toolProfile;
   if (
     profile !== 'csi-files-retirement/1' &&
-    profile !== 'csi-files-retirement/2'
+    profile !== 'csi-files-retirement/2' &&
+    profile !== 'csi-files-retirement/3'
   )
     throw new Error('Invalid CSI Session profile.');
   sessionProfiles.set(session.authority, profile);
@@ -59,6 +65,8 @@ export function matchesCsiFilesProfile(
     (profile === 'csi-files-retirement/1' &&
       capabilityDigest === CSI_FILES_RETIREMENT_CAPABILITY_DIGEST) ||
     (profile === 'csi-files-retirement/2' &&
-      capabilityDigest === CSI_FILES_DIAGNOSTICS_CAPABILITY_DIGEST)
+      capabilityDigest === CSI_FILES_DIAGNOSTICS_CAPABILITY_DIGEST) ||
+    (profile === 'csi-files-retirement/3' &&
+      capabilityDigest === CSI_FILES_ACTIVITY_CAPABILITY_DIGEST)
   );
 }

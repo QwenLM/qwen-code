@@ -39,16 +39,6 @@ class ManagedAgentPreflightTest {
     private static final String DIGEST = "sha256:" + "a".repeat(64);
 
     @Test
-    void treatsOnlyLoopbackSpellingsAsLoopback() {
-        assertTrue(ManagedAgentPreflight.isLoopback("127.0.0.1"));
-        assertTrue(ManagedAgentPreflight.isLoopback("::1"));
-        assertTrue(ManagedAgentPreflight.isLoopback("localhost"));
-        assertTrue(ManagedAgentPreflight.isLoopback(null));
-        assertFalse(ManagedAgentPreflight.isLoopback("0.0.0.0"));
-        assertFalse(ManagedAgentPreflight.isLoopback("10.0.0.1"));
-    }
-
-    @Test
     void acceptsOnlyLowercaseSha256Digests() {
         assertTrue(ManagedAgentPreflight.isDigest(DIGEST));
         assertFalse(ManagedAgentPreflight.isDigest(

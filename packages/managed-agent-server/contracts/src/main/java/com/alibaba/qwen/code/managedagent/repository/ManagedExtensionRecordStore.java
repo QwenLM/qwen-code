@@ -62,6 +62,15 @@ public interface ManagedExtensionRecordStore {
 
     public ModelDiagnostics findModelDiagnostics(String tenantId, String sessionId);
 
+    public record ActivityPage(List<JsonNode> items, boolean hasMore, boolean partial, Long lastTime, String lastKey) { }
+
+    public JsonNode findActivityStatistics(String tenantId, String sessionId);
+
+    public String diagnosticCommittedSequence(String tenantId, String sessionId);
+
+    public ActivityPage listActivity(String tenantId, String sessionId, String domain, long upperSequence,
+            Long beforeCreatedAt, String beforeKey, int limit);
+
     public Optional<JsonNode> latestHookRegistration(String tenantId, String sessionId);
 
     public Optional<TaskTarget> findTaskTarget(String tenantId,

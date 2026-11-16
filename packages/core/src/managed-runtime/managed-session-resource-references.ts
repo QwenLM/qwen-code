@@ -226,9 +226,11 @@ export function managedSessionNestedResourceRefs(
     ...(domain ? ['previousRecordRef'] : []),
     ...(ref.kind === 'managed-file_history' &&
     (record as Record<string, unknown>)['schemaVersion'] === 2 &&
-    ['csi-files-retirement/1', 'csi-files-retirement/2'].includes(
-      String((record as Record<string, unknown>)['profile']),
-    )
+    [
+      'csi-files-retirement/1',
+      'csi-files-retirement/2',
+      'csi-files-retirement/3',
+    ].includes(String((record as Record<string, unknown>)['profile']))
       ? [
           'preparation.intentRef',
           'preparation.invocations.*.inputRef',

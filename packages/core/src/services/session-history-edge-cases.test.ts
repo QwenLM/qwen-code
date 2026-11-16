@@ -274,7 +274,7 @@ describe('history snapshot and paging boundaries', () => {
     async (separator) => {
       const ref = await append('user', [
         {
-          text: `BEFORE data:text/plain;base64,YWJj${separator}YWJjYWJj AFTER_ERROR`,
+          text: `BEFORE (data:text/plain;base64,YWJj${separator}YWJjYWJj) AFTER_ERROR`,
         },
       ]);
       const result = await service.query(

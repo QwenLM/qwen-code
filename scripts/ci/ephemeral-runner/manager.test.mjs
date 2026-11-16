@@ -48,6 +48,7 @@ async function fixture(t) {
   let foreignCounter = 0;
   let failRemove = false;
   let failNetworkRemove = false;
+  let failNetworkCreate = false;
   let keepContainerAfterRemove = false;
   let loseJit = false;
   let failDelete = false;
@@ -128,6 +129,8 @@ async function fixture(t) {
       return JSON.stringify(runner ? [runner, ...extraRunners] : extraRunners);
     }
     if (args[0] === 'inspect') {
+      if (args.includes('{{json .State}}'))
+        return JSON.stringify({ Status: 'running', ExitCode: 0 });
       const entry = containers.get(args[args.length - 1]);
       return `${entry?.labels['qwen.instance'] ?? ''}\n`;
     }
@@ -147,6 +150,7 @@ async function fixture(t) {
       return matched.length ? `${matched.map(([id]) => id).join('\n')}\n` : '';
     }
     if (args[0] === 'network' && args[1] === 'create') {
+      if (failNetworkCreate) throw new Error('network creation failed');
       const id = `network-${counter}`;
       networks.set(id, { labels: labelsFromArgs(args) });
       return id;
@@ -213,6 +217,9 @@ async function fixture(t) {
     },
     setFailNetworkRemove: (v) => {
       failNetworkRemove = v;
+    },
+    setFailNetworkCreate: (v) => {
+      failNetworkCreate = v;
     },
     setKeepContainerAfterRemove: (v) => {
       keepContainerAfterRemove = v;
@@ -506,18 +513,95 @@ test('a failed container start is cleaned up before another cycle', async (t) =>
   await manager.cycle(1);
 });
 
-test('watchdog removes a container that does not exit', async (t) => {
-  const f = await fixture(t);
-  f.config.ttlSeconds = 0.01;
-  const command = (program, args, options) =>
-    program === 'docker' && args[0] === 'wait'
-      ? new Promise(() => {})
-      : f.command(program, args, options);
-  await createManager(f.config, { command }).cycle(1);
-  assert.equal(
-    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'rm').length,
-    1,
-  );
+test('age checks retain healthy idle, busy and unreachable runners until the container exits', async (t) => {
+  for (const health of ['idle', 'busy', 'offline', 'unavailable']) {
+    await t.test(health, async (t) => {
+      const f = await fixture(t);
+      let now = 0;
+      let finish;
+      let registration;
+      let exited = false;
+      let checks = 0;
+      const alerts = [];
+      t.mock.method(console, 'log', (message) => {
+        if (message.includes('WATCHDOG ALERT')) alerts.push(message);
+      });
+      t.mock.method(Date, 'now', () => now);
+      const command = async (program, args, options) => {
+        if (program === 'docker' && args[0] === 'wait') {
+          assert.equal(options.timeout, 0);
+          return new Promise((resolve) => {
+            finish = resolve;
+          });
+        }
+        if (program === 'docker' && args[0] === 'rm')
+          assert.ok(
+            exited,
+            'age or health must never force-remove a live container',
+          );
+        if (
+          program === 'gh' &&
+          args.includes('/repos/owner/repo/actions/runners/1') &&
+          !args.includes('DELETE')
+        ) {
+          checks += 1;
+          if (health === 'unavailable') throw new Error('GitHub unavailable');
+          return JSON.stringify({
+            ...registration,
+            status: health === 'offline' ? 'offline' : 'online',
+            busy: health === 'busy',
+          });
+        }
+        const result = await f.command(program, args, options);
+        if (
+          program === 'gh' &&
+          args.includes('/repos/owner/repo/actions/runners/generate-jitconfig')
+        )
+          registration = JSON.parse(result).runner;
+        return result;
+      };
+      await createManager(f.config, {
+        command,
+        sleep: async (ms) => {
+          now += ms;
+          if (now >= 6000) {
+            exited = true;
+            finish('0\n');
+          }
+        },
+      }).cycle(1);
+      assert.equal(
+        checks,
+        1,
+        'health checks must be bounded, not run every second',
+      );
+      assert.equal(
+        alerts.length,
+        ['offline', 'unavailable'].includes(health) ? 1 : 0,
+      );
+      assert.equal(
+        f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'rm')
+          .length,
+        1,
+      );
+    });
+  }
+});
+
+test('an unbounded command can be cancelled without leaving its client running', async () => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 100);
+  try {
+    await assert.rejects(
+      runCommand(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+        timeout: 0,
+        signal: controller.signal,
+      }),
+      { name: 'AbortError' },
+    );
+  } finally {
+    clearTimeout(timer);
+  }
 });
 
 test('checks Docker root disk rather than the state directory', async (t) => {
@@ -1464,15 +1548,51 @@ test('does not penalize a fast successful container', async (t) => {
   assert.equal(result.earlyExit, false);
 });
 
-test('backs off when docker wait cannot determine container status', async (t) => {
+test('a failed wait client or unavailable Docker never proves that a container exited', async (t) => {
   const f = await fixture(t);
-  const command = (program, args, options) => {
-    if (program === 'docker' && args[0] === 'wait')
-      return Promise.reject(new Error('Docker disconnected'));
+  let waits = 0;
+  let exited = false;
+  let inspectFailed = false;
+  let listFailed = false;
+  const command = async (program, args, options) => {
+    if (program === 'docker' && args[0] === 'wait') {
+      waits += 1;
+      if (waits < 3) throw new Error('Docker disconnected');
+      exited = true;
+      return '0\n';
+    }
+    if (
+      program === 'docker' &&
+      args[0] === 'inspect' &&
+      args.includes('{{json .State}}') &&
+      !inspectFailed
+    ) {
+      inspectFailed = true;
+      throw new Error('Docker disconnected');
+    }
+    if (
+      program === 'docker' &&
+      args[0] === 'ps' &&
+      inspectFailed &&
+      !listFailed
+    ) {
+      listFailed = true;
+      throw new Error('Docker disconnected');
+    }
+    if (program === 'docker' && args[0] === 'rm')
+      assert.ok(
+        exited,
+        'a wait/inspect/list failure must not force-remove the container',
+      );
     return f.command(program, args, options);
   };
-  const result = await createManager(f.config, { command }).cycle(1);
-  assert.equal(result.earlyExit, true);
+  const result = await createManager(f.config, {
+    command,
+    sleep: async () => {},
+  }).cycle(1);
+  assert.equal(result.earlyExit, false);
+  assert.equal(waits, 3);
+  assert.ok(inspectFailed && listFailed);
 });
 
 test('starts through a symlink and reports invalid configuration', async (t) => {
@@ -1570,6 +1690,385 @@ test('label recovery deletes the orphaned suffixed registration', async (t) => {
         c.args.includes('/repos/owner/repo/actions/runners/77'),
     ),
     'the registration is deleted even though its display name is suffixed',
+  );
+});
+
+test('a rejected label-recovered deletion retries from the retained resources', async (t) => {
+  // Nothing about a label-recovered identity is persisted, so a rejected
+  // DELETE can only be retried if a labelled resource survives the throw.
+  // The CONTAINER is removed even on a retryable refusal — a
+  // retained container keeps its own runner heartbeating and the offline
+  // gate could then never clear — and the labelled network is the retry
+  // anchor. Cycle 2 must retry the same registration from that anchor.
+  const f = await fixture(t);
+  f.addOrphanContainer({
+    'qwen.pool': 'trial',
+    'qwen.slot': '1',
+    'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  f.setRunner({ id: 77, name: 'ecs-qwen-trial-01-cafe1234' });
+  f.setFailDelete(true, 422);
+  const manager = createManager(f.config, { command: f.command });
+  const deletes = () =>
+    f.calls.filter(
+      (c) =>
+        c.program === 'gh' &&
+        c.args.includes('DELETE') &&
+        c.args.includes('/repos/owner/repo/actions/runners/77'),
+    ).length;
+  await assert.rejects(
+    manager.cycle(1),
+    /Runner 77 deletion was rejected \(HTTP 422\)/,
+    'cycle 1 reports the rejected deletion it cannot complete yet',
+  );
+  assert.equal(deletes(), 1, 'cycle 1 attempted this registration once');
+  assert.equal(
+    f.runnerList().length,
+    1,
+    'the rejected registration survives cycle 1',
+  );
+  assert.ok(
+    f.calls.some(
+      (c) =>
+        c.program === 'docker' &&
+        c.args[0] === 'rm' &&
+        c.args.includes('container-orphan-0'),
+    ),
+    'the container is removed so its runner can actually reach offline',
+  );
+  assert.ok(
+    !f.calls.some(
+      (c) =>
+        c.program === 'docker' && c.args[0] === 'network' && c.args[1] === 'rm',
+    ),
+    'the labelled network anchor is retained so the next cycle still reaches the retry',
+  );
+  f.setFailDelete(false);
+  await manager.cycle(1);
+  assert.equal(deletes(), 2, 'cycle 2 retries the same registration');
+  assert.deepEqual(
+    f
+      .runnerList()
+      .map((entry) => entry.id)
+      .filter((id) => id === 77),
+    [],
+    'the registration is gone once the retry succeeds',
+  );
+});
+
+test('label recovery never deletes an online or unconfirmed registration', async (t) => {
+  // A label-recovered identity is not state-recorded: an online match may
+  // belong to a live runner outside this host's view, and a missing, null or
+  // unknown status must fail closed. The gate runs before the registration
+  // could be deleted; the container is removed so an online match backed by
+  // this slot's own leftover runner can actually reach offline, and
+  // the labelled network anchor — never a rebuilt pile and never a persisted
+  // state file — keeps the next cycle reaching the gate.
+  for (const status of ['online', undefined, null, 'busy']) {
+    const label = status === undefined ? 'status-less' : `status ${status}`;
+    const f = await fixture(t);
+    f.addOrphanContainer({
+      'qwen.pool': 'trial',
+      'qwen.slot': '1',
+      'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+    });
+    f.setRunner({
+      id: 77,
+      name: 'ecs-qwen-trial-01-cafe1234',
+      status,
+    });
+    const manager = createManager(f.config, { command: f.command });
+    await assert.rejects(
+      manager.cycle(1),
+      /not reported offline/,
+      `cycle 1 refuses to delete a ${label} registration`,
+    );
+    await assert.rejects(
+      manager.cycle(1),
+      /not reported offline/,
+      `cycle 2 reaches the gate again with no pile rebuilt (${label})`,
+    );
+    assert.ok(
+      !f.calls.some(
+        (c) =>
+          c.program === 'gh' &&
+          c.args.includes('DELETE') &&
+          c.args.includes('/repos/owner/repo/actions/runners/77'),
+      ),
+      `a ${label} registration is never deleted`,
+    );
+    assert.equal(
+      f.calls.filter(
+        (c) =>
+          c.program === 'gh' &&
+          c.args.includes(
+            '/repos/owner/repo/actions/runners/generate-jitconfig',
+          ),
+      ).length,
+      0,
+      `no JIT request while a ${label} registration survives`,
+    );
+    assert.equal(
+      f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'create')
+        .length,
+      0,
+      `no replacement while a ${label} registration survives`,
+    );
+    assert.ok(
+      f.calls.some(
+        (c) =>
+          c.program === 'docker' &&
+          c.args[0] === 'rm' &&
+          c.args.includes('container-orphan-0'),
+      ),
+      `the orphan container is removed so its runner can reach offline (${label})`,
+    );
+    assert.ok(
+      !f.calls.some(
+        (c) =>
+          c.program === 'docker' &&
+          c.args[0] === 'network' &&
+          c.args[1] === 'rm',
+      ),
+      `the labelled network anchor survives the refusal (${label})`,
+    );
+    // The refusing cycle still exports the container's diagnostics —
+    // the one artefact an operator of a wedged slot must inspect.
+    const exported = await readdir(f.config.logDir);
+    assert.ok(
+      exported.some(
+        (name) => name.includes('container-or') && name.endsWith('.log'),
+      ),
+      `container logs are captured before the refusal (${label})`,
+    );
+    assert.ok(
+      exported.some(
+        (name) => name.includes('container-or') && name.endsWith('.tar'),
+      ),
+      `the _diag archive is captured before the refusal (${label})`,
+    );
+    await assert.rejects(
+      readFile(join(f.config.stateDir, 'slot-1.json')),
+      { code: 'ENOENT' },
+      `no slot state is persisted to carry a ${label} identity`,
+    );
+  }
+});
+
+test('an online registration backed by the own orphan container self-heals', async (t) => {
+  // A retained container kept its runner heartbeating, so the
+  // offline gate threw identically every cycle and the slot never
+  // recovered. Removing the container lets the runner reach offline; the
+  // labelled network keeps the retry anchored, and the next cycle deletes
+  // the registration and replenishes the slot.
+  const f = await fixture(t);
+  f.addOrphanContainer({
+    'qwen.pool': 'trial',
+    'qwen.slot': '1',
+    'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  f.setRunner({
+    id: 77,
+    name: 'ecs-qwen-trial-01-cafe1234',
+    status: 'online',
+  });
+  const manager = createManager(f.config, { command: f.command });
+  await assert.rejects(manager.cycle(1), /not reported offline/);
+  assert.ok(
+    f.calls.some(
+      (c) =>
+        c.program === 'docker' &&
+        c.args[0] === 'rm' &&
+        c.args.includes('container-orphan-0'),
+    ),
+    'cycle 1 removes the container whose heartbeat sustains the refusal',
+  );
+  // The container is gone, so the real runner stops heartbeating and GitHub
+  // reports it offline.
+  f.setRunner({ id: 77, name: 'ecs-qwen-trial-01-cafe1234' });
+  await manager.cycle(1);
+  assert.ok(
+    f.calls.some(
+      (c) =>
+        c.program === 'gh' &&
+        c.args.includes('DELETE') &&
+        c.args.includes('/repos/owner/repo/actions/runners/77'),
+    ),
+    'cycle 2 deletes the now-offline registration',
+  );
+  assert.ok(
+    f.calls.some(
+      (c) =>
+        c.program === 'gh' &&
+        c.args.includes('/repos/owner/repo/actions/runners/generate-jitconfig'),
+    ),
+    'cycle 2 replenishes the slot',
+  );
+});
+
+test('a failed refusal-anchor creation keeps the containers and leaks nothing', async (t) => {
+  // The refusal path removes the containers and relies on a labelled
+  // network to bring the next cycle back. A container-only pile needs that
+  // anchor created first: if the creation fails AFTER the removal, the slot
+  // would find nothing to clean up, replenish, and leak the registration.
+  const f = await fixture(t);
+  f.addOrphanContainer({
+    'qwen.pool': 'trial',
+    'qwen.slot': '1',
+    'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  f.setRunner({ id: 77, name: 'ecs-qwen-trial-01-cafe1234', status: 'online' });
+  f.setFailNetworkCreate(true);
+  const manager = createManager(f.config, { command: f.command });
+  await assert.rejects(manager.cycle(1));
+  assert.ok(
+    !f.calls.some(
+      (c) =>
+        c.program === 'docker' &&
+        c.args[0] === 'rm' &&
+        c.args.includes('container-orphan-0'),
+    ),
+    'the container survives a failed anchor creation as the retry anchor',
+  );
+  assert.equal(
+    f.calls.filter(
+      (c) =>
+        c.program === 'gh' &&
+        c.args.includes('/repos/owner/repo/actions/runners/generate-jitconfig'),
+    ).length,
+    0,
+    'no replenishment while the registration is unreconciled',
+  );
+  f.setFailNetworkCreate(false);
+  f.setRunner({ id: 77, name: 'ecs-qwen-trial-01-cafe1234' });
+  await manager.cycle(1);
+  assert.ok(
+    f.calls.some(
+      (c) =>
+        c.program === 'gh' &&
+        c.args.includes('DELETE') &&
+        c.args.includes('/repos/owner/repo/actions/runners/77'),
+    ),
+    'the next cycle still reaches the registration and deletes it once offline',
+  );
+});
+
+test('a permanent identity refusal reclaims the container and keeps blocking', async (t) => {
+  // An ambiguous identity is permanent — no retry clears it — so the
+  // container must not be pinned behind it. Cycle 1 removes the container
+  // and keeps the labelled network anchor; cycle 2 still fails on the same
+  // ambiguity, deletes neither registration, and a manual fix (one
+  // registration left) lets the slot replenish.
+  const f = await fixture(t);
+  f.addOrphanContainer({
+    'qwen.pool': 'trial',
+    'qwen.slot': '1',
+    'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  f.setRunner({ id: 77, name: 'ecs-qwen-trial-01-cafe1234' });
+  f.setExtraRunners([{ id: 78, name: 'ecs-qwen-trial-01-beef5678' }]);
+  const manager = createManager(f.config, { command: f.command });
+  await assert.rejects(manager.cycle(1), /Ambiguous runner identity/);
+  assert.ok(
+    f.calls.some(
+      (c) =>
+        c.program === 'docker' &&
+        c.args[0] === 'rm' &&
+        c.args.includes('container-orphan-0'),
+    ),
+    'cycle 1 reclaims the container instead of pinning it',
+  );
+  assert.equal(
+    f.calls.filter((c) => c.program === 'gh' && c.args.includes('DELETE'))
+      .length,
+    0,
+    'the ambiguity deletes neither registration',
+  );
+  await assert.rejects(manager.cycle(1), /Ambiguous runner identity/);
+  assert.equal(
+    f.calls.filter(
+      (c) =>
+        c.program === 'gh' &&
+        c.args.includes('/repos/owner/repo/actions/runners/generate-jitconfig'),
+    ).length,
+    0,
+    'the slot stays blocked on the persisted ambiguity',
+  );
+  // Manual reconciliation removes one registration; the slot recovers.
+  f.setExtraRunners([]);
+  await manager.cycle(1);
+  assert.ok(
+    f.calls.some(
+      (c) =>
+        c.program === 'gh' &&
+        c.args.includes('/repos/owner/repo/actions/runners/generate-jitconfig'),
+    ),
+    'the slot replenishes once the ambiguity is resolved',
+  );
+});
+
+test('the call-site split reconciles each identity exactly once, at its own point', async (t) => {
+  // A label-recovered identity is reconciled BEFORE the container is
+  // removed (its only anchor), a state-anchored one only AFTER — deleting a
+  // still-connected runner's registration hits GitHub's "runner is busy"
+  // rejection on every watchdog kill. Widening the early flag to
+  // `Boolean(state?.name)` must turn the second half red.
+  const f = await fixture(t);
+  f.addOrphanContainer({
+    'qwen.pool': 'trial',
+    'qwen.slot': '1',
+    'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  f.setRunner({ id: 77, name: 'ecs-qwen-trial-01-cafe1234' });
+  const manager = createManager(f.config, { command: f.command });
+  await manager.cycle(1);
+  const deleteAt = f.calls.findIndex(
+    (c) =>
+      c.program === 'gh' &&
+      c.args.includes('DELETE') &&
+      c.args.includes('/repos/owner/repo/actions/runners/77'),
+  );
+  const removeAt = f.calls.findIndex(
+    (c) =>
+      c.program === 'docker' &&
+      c.args[0] === 'rm' &&
+      c.args.includes('container-orphan-0'),
+  );
+  assert.ok(deleteAt !== -1 && removeAt !== -1);
+  assert.equal(
+    f.calls.filter(
+      (c) =>
+        c.program === 'gh' &&
+        c.args.includes('DELETE') &&
+        c.args.includes('/repos/owner/repo/actions/runners/77'),
+    ).length,
+    1,
+    'the label-recovered identity is reconciled exactly once',
+  );
+  assert.ok(
+    deleteAt < removeAt,
+    'a label-recovered identity is reconciled before its anchor is removed',
+  );
+  // A state-anchored identity: the DELETE must come AFTER the docker rm.
+  const g = await fixture(t);
+  const anchored = createManager(g.config, { command: g.command });
+  await anchored.cycle(1);
+  const anchoredDeleteAt = g.calls.findIndex(
+    (c) => c.program === 'gh' && c.args.includes('DELETE'),
+  );
+  const anchoredRemoveAt = g.calls.findIndex(
+    (c) => c.program === 'docker' && c.args[0] === 'rm',
+  );
+  assert.ok(anchoredDeleteAt !== -1 && anchoredRemoveAt !== -1);
+  assert.ok(
+    anchoredRemoveAt < anchoredDeleteAt,
+    'a state-anchored identity is reconciled only after the container is removed',
+  );
+  assert.equal(
+    g.calls.filter((c) => c.program === 'gh' && c.args.includes('DELETE'))
+      .length,
+    1,
+    'the state-anchored identity is reconciled exactly once',
   );
 });
 
@@ -1915,6 +2414,306 @@ test('rejects an invalid stall alert threshold', async (t) => {
       () => createManager({ ...f.config, stallAlertSeconds }),
       /Invalid manager configuration/,
     );
+});
+
+test('rejects an invalid drain window', async (t) => {
+  const f = await fixture(t);
+  for (const drainTimeoutSeconds of [-1, '60', Number.NaN, Infinity])
+    assert.throws(
+      () => createManager({ ...f.config, drainTimeoutSeconds }),
+      /Invalid manager configuration/,
+    );
+});
+
+async function drainHarness(t) {
+  const f = await fixture(t);
+  await writeFile(join(f.config.stateDir, 'flock'), '#!/bin/sh\nexec cat\n', {
+    mode: 0o755,
+  });
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${f.config.stateDir}:${previousPath}`;
+  t.after(() => {
+    process.env.PATH = previousPath;
+  });
+  const clock = { now: 1_000_000 };
+  t.mock.method(Date, 'now', () => clock.now);
+  return { f, clock };
+}
+
+test('drain stops an idle runner instead of waiting out the window', async (t) => {
+  const { f, clock } = await drainHarness(t);
+  f.config.drainTimeoutSeconds = 600;
+  let manager;
+  const command = (program, args, options) => {
+    if (program === 'docker' && args[0] === 'start') manager.stop();
+    // An idle ephemeral runner never exits on its own, so the drain has to
+    // decide; the wait stays pending for the whole test.
+    if (program === 'docker' && args[0] === 'wait')
+      return new Promise(() => {});
+    if (program === 'docker' && args[0] === 'top') return 'sh\n';
+    return f.command(program, args, options);
+  };
+  manager = createManager(f.config, {
+    command,
+    sleep: async (ms) => {
+      clock.now += ms;
+      if (clock.now > 1_060_000)
+        throw new Error('an idle slot waited out the drain window');
+    },
+  });
+  await manager.start();
+  assert.ok(
+    clock.now - 1_000_000 <= 15_000,
+    `idle drain took ${clock.now - 1_000_000}ms`,
+  );
+  assert.equal(
+    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'rm').length,
+    1,
+  );
+});
+
+test('drain keeps draining when GitHub refuses the registration retirement', async (t) => {
+  const { f, clock } = await drainHarness(t);
+  f.config.drainTimeoutSeconds = 600;
+  // 422 (busy) and 404 (hidden resource) are the same decision: neither
+  // confirms the gate, so the container must keep draining and the job that
+  // may already be assigned must still run and exit on its own.
+  for (const status of [422, 404]) {
+    f.setRejectFirstDelete(status);
+    const callStart = f.calls.length;
+    const jobStartsAt = clock.now + 10_000;
+    const jobEndsAt = clock.now + 20_000;
+    let workerSeen = false;
+    let removedBeforeWorker = 0;
+    let releaseWait;
+    let manager;
+    const command = (program, args, options) => {
+      if (program === 'docker' && args[0] === 'start') manager.stop();
+      if (program === 'docker' && args[0] === 'wait')
+        return new Promise((resolveWait) => {
+          releaseWait = () => resolveWait('0\n');
+        });
+      if (program === 'docker' && args[0] === 'top') {
+        if (clock.now < jobStartsAt) return '';
+        workerSeen = true;
+        return 'Runner.Worker\n';
+      }
+      if (program === 'docker' && args[0] === 'rm' && !workerSeen)
+        removedBeforeWorker += 1;
+      return f.command(program, args, options);
+    };
+    manager = createManager(f.config, {
+      command,
+      sleep: async (ms) => {
+        clock.now += ms;
+        if (clock.now >= jobEndsAt) releaseWait?.();
+      },
+    });
+    await manager.start();
+    const calls = f.calls.slice(callStart);
+    assert.equal(
+      workerSeen,
+      true,
+      `the job assigned after a ${status} refusal must keep running`,
+    );
+    assert.equal(
+      removedBeforeWorker,
+      0,
+      `a ${status} refusal must not remove the container before the job runs`,
+    );
+    assert.equal(
+      calls.filter((c) => c.program === 'docker' && c.args[0] === 'rm').length,
+      1,
+      `a ${status} refusal must still remove the container exactly once, after the job exits`,
+    );
+    assert.equal(
+      calls.filter((c) => c.program === 'gh' && c.args.includes('DELETE'))
+        .length,
+      2,
+      `a ${status} refusal must be retried by cleanup after the job exits`,
+    );
+    assert.deepEqual(
+      f.runnerList(),
+      [],
+      `the registration must end up deleted after the ${status} episode`,
+    );
+  }
+});
+
+test('drain retires the registration before removing the container', async (t) => {
+  const { f, clock } = await drainHarness(t);
+  f.config.drainTimeoutSeconds = 600;
+  const order = [];
+  let deletes = 0;
+  let manager;
+  const command = (program, args, options) => {
+    if (program === 'docker' && args[0] === 'start') manager.stop();
+    if (program === 'docker' && args[0] === 'wait')
+      return new Promise(() => {});
+    if (program === 'docker' && args[0] === 'top') return 'sh\n';
+    if (program === 'docker' && args[0] === 'rm') order.push('rm');
+    if (program === 'gh' && args.includes('DELETE')) {
+      deletes += 1;
+      if (deletes === 1) {
+        order.push('delete-gate');
+        // The gate is accepted; the registration stays listed (GitHub's
+        // listing lag), so cleanup's delete hits 404 and must be tolerated
+        // rather than failing the cycle after the container is already gone.
+        return '';
+      }
+      order.push('delete-cleanup');
+      const error = Object.assign(new Error('gh failed (exit 1, HTTP 404)'), {
+        status: 404,
+      });
+      return Promise.reject(error);
+    }
+    return f.command(program, args, options);
+  };
+  manager = createManager(f.config, {
+    command,
+    sleep: async (ms) => {
+      clock.now += ms;
+    },
+  });
+  await manager.start();
+  assert.ok(
+    order.indexOf('delete-gate') < order.indexOf('rm'),
+    'the registration must be retired before the container is removed',
+  );
+  assert.equal(
+    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'rm').length,
+    1,
+    'the container must be removed exactly once',
+  );
+  assert.ok(
+    order.includes('delete-gate') && order.includes('delete-cleanup'),
+    'cleanup must retry the registration and tolerate its 404',
+  );
+});
+
+test('a rate-limited retirement backs off instead of polling every five seconds', async (t) => {
+  const { f, clock } = await drainHarness(t);
+  f.config.drainTimeoutSeconds = 600;
+  f.setRejectFirstDelete(429);
+  const deleteTimes = [];
+  let manager;
+  const command = (program, args, options) => {
+    if (program === 'docker' && args[0] === 'start') manager.stop();
+    if (program === 'docker' && args[0] === 'wait')
+      return new Promise(() => {});
+    if (program === 'docker' && args[0] === 'top') return '';
+    if (program === 'gh' && args.includes('DELETE'))
+      deleteTimes.push(clock.now);
+    return f.command(program, args, options);
+  };
+  manager = createManager(f.config, {
+    command,
+    sleep: async (ms) => {
+      clock.now += ms;
+    },
+  });
+  await manager.start();
+  assert.equal(deleteTimes.length, 2, 'the gate is retried after the refusal');
+  // The 429 pushes the next drain decision onto the rate-limit ladder
+  // (15-30 s), plus the fresh two-poll idle window, so it cannot come back at
+  // the five-second poll cadence.
+  const gap = deleteTimes[1] - deleteTimes[0];
+  assert.ok(
+    gap >= 20_000,
+    `a rate-limited retirement must back off, but retried after ${gap}ms`,
+  );
+});
+
+test('drain lets an assigned job exit before stopping the runner', async (t) => {
+  const { f, clock } = await drainHarness(t);
+  f.config.drainTimeoutSeconds = 600;
+  const jobEndsAt = clock.now + 120_000;
+  let releaseWait;
+  let manager;
+  const command = (program, args, options) => {
+    if (program === 'docker' && args[0] === 'start') manager.stop();
+    if (program === 'docker' && args[0] === 'wait')
+      return new Promise((resolveWait) => {
+        releaseWait = () => resolveWait('0\n');
+      });
+    if (program === 'docker' && args[0] === 'top')
+      return clock.now < jobEndsAt ? 'Runner.Worker\n' : '';
+    return f.command(program, args, options);
+  };
+  manager = createManager(f.config, {
+    command,
+    sleep: async (ms) => {
+      clock.now += ms;
+      if (clock.now >= jobEndsAt) releaseWait?.();
+    },
+  });
+  await manager.start();
+  assert.ok(
+    clock.now - 1_000_000 <= 125_000,
+    `drain stopped a running job early at ${clock.now - 1_000_000}ms`,
+  );
+  assert.equal(
+    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'rm').length,
+    1,
+  );
+});
+
+test('drain deadline stops a job that outlives the window', async (t) => {
+  const { f, clock } = await drainHarness(t);
+  f.config.drainTimeoutSeconds = 60;
+  f.config.shutdownGraceSeconds = 30;
+  const messages = [];
+  const previousLog = console.log;
+  console.log = (message) => messages.push(String(message));
+  t.after(() => {
+    console.log = previousLog;
+  });
+  let manager;
+  const command = (program, args, options) => {
+    if (program === 'docker' && args[0] === 'start') manager.stop();
+    if (program === 'docker' && args[0] === 'wait')
+      return new Promise(() => {});
+    if (program === 'docker' && args[0] === 'top') return 'Runner.Worker\n';
+    return f.command(program, args, options);
+  };
+  manager = createManager(f.config, {
+    command,
+    sleep: async (ms) => {
+      clock.now += ms;
+      if (clock.now > 1_300_000)
+        throw new Error('the drain window never expired');
+    },
+  });
+  await manager.start();
+  const elapsed = clock.now - 1_000_000;
+  assert.ok(
+    elapsed >= 90_000 && elapsed <= 95_000,
+    `drain deadline fired at ${elapsed}ms`,
+  );
+  assert.ok(
+    messages.some((message) => message.includes('drain window elapsed')),
+    'the forced stop must be visible in the journal',
+  );
+});
+
+test('the shipped unit allows the example drain window to finish', async () => {
+  const example = JSON.parse(
+    await readFile(new URL('./config.example.json', import.meta.url), 'utf8'),
+  );
+  const unit = await readFile(
+    new URL('./qwen-ephemeral-runner.service', import.meta.url),
+    'utf8',
+  );
+  const timeout = Number(unit.match(/^TimeoutStopSec=(\d+)$/m)?.[1]);
+  assert.ok(
+    Number.isFinite(timeout),
+    'the shipped unit must set a numeric TimeoutStopSec',
+  );
+  const budget = example.drainTimeoutSeconds + example.shutdownGraceSeconds;
+  assert.ok(
+    budget < timeout,
+    `drain + grace (${budget}s) must finish before TimeoutStopSec (${timeout}s)`,
+  );
 });
 
 test('a rate-limited runner deletion backs off on the 15-300 s ladder', async (t) => {

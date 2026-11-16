@@ -76,7 +76,7 @@ final class ExecutionAdmissionPlacement {
     private static boolean localOrAbsent(Connection connection, String tenant, String storage) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(
                 "SELECT storage_kind FROM ma_storage WHERE alias_key = ?")) {
-            statement.setString(1, JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage));
+            statement.setString(1, RuntimeAdmissionFences.storageAliasKey(tenant, storage));
             try (ResultSet row = statement.executeQuery()) {
                 return !row.next() || "LOCAL".equals(row.getString(1));
             }

@@ -22,6 +22,7 @@ import { ManagedSessionConflictError } from './managed-session-authority.js';
 import type { ManagedSessionDurableRef } from './managed-session-records.js';
 import { publishManagedMessageBody } from './managed-message-chunks.js';
 import { getManagedSessionDiagnostics } from './managed-session-diagnostics.js';
+import { getManagedExecutionDiagnostics } from './managed-execution-diagnostics.js';
 import {
   MANAGED_MODEL_STATISTICS_KINDS,
   type ManagedCommittedContext,
@@ -248,6 +249,7 @@ class LocalManagedHookModelScope {
           usageBytes: Buffer;
           usageRef: ManagedSessionDurableRef;
           contentRef: ManagedSessionDurableRef;
+          executionDiagnosticsRef?: ManagedSessionDurableRef;
         }
       | undefined;
     const finish = async (
@@ -310,24 +312,35 @@ class LocalManagedHookModelScope {
           this.session.resources,
           recordBytes,
         ),
+        executionDiagnosticsRef:
+          await getManagedExecutionDiagnostics(authority)?.message(
+            finalChatRecord,
+          ),
       };
-      const { usageRef, contentRef } = finalOutput;
+      const { usageRef, contentRef, executionDiagnosticsRef } = finalOutput;
       const contentDigest = createHash('sha256')
         .update(
           JSON.stringify([
-            'managed-final-output/1',
+            executionDiagnosticsRef
+              ? 'managed-final-output/2'
+              : 'managed-final-output/1',
             attemptId,
-            ...[routeRef, inputCheckpointRef, usageRef, contentRef].map(
-              (ref) =>
-                ref === null
-                  ? null
-                  : [
-                      ref.resourceId,
-                      ref.kind,
-                      ref.schemaVersion,
-                      ref.byteLength,
-                      ref.digest,
-                    ],
+            ...[
+              routeRef,
+              inputCheckpointRef,
+              usageRef,
+              contentRef,
+              ...(executionDiagnosticsRef ? [executionDiagnosticsRef] : []),
+            ].map((ref) =>
+              ref === null
+                ? null
+                : [
+                    ref.resourceId,
+                    ref.kind,
+                    ref.schemaVersion,
+                    ref.byteLength,
+                    ref.digest,
+                  ],
             ),
           ]),
         )
@@ -375,6 +388,9 @@ class LocalManagedHookModelScope {
                 messageId: finalChatRecord.uuid,
                 role: finalChatRecord.type,
                 contentRef,
+                ...(executionDiagnosticsRef
+                  ? { diagnosticsRef: executionDiagnosticsRef }
+                  : {}),
                 parentMessageId: finalChatRecord.parentUuid,
                 modelAttemptId: attemptId,
               },

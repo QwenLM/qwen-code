@@ -42,6 +42,16 @@ import java.util.function.Function;
 public final class CsiNativeActivationProof {
     private static final int MAX_TOOL_OUTCOME_BYTES = 4 * 1024 * 1024;
     private static final long MAX_SAFE = 9_007_199_254_740_990L;
+    /**
+     * The prepared retirement commit body and the two base64 fields it carries. Base64 expands by
+     * 4/3, so the two field limits must jointly fit inside the body budget, and the body's own
+     * base64 must fit the command envelope that carries it. Otherwise an outer cap becomes the real
+     * ceiling and a later raise of an inner limit fails without saying why.
+     */
+    public static final int TERMINAL_BODY_LIMIT = 256 * 1024;
+    public static final int TERMINAL_RECORD_LIMIT = 128 * 1024;
+    public static final int TERMINAL_CANDIDATE_LIMIT = 16 * 1024;
+    public static final int TERMINAL_COMMAND_LIMIT = 384 * 1024;
     private static final Set<String> ENVELOPE = Set.of("uuid", "parentUuid", "sessionId", "timestamp",
             "type", "subtype", "cwd", "version", "managedSession");
     private static final Set<String> MARKER = Set.of("transactionId", "commandId", "operation", "contentDigest",
@@ -82,14 +92,14 @@ public final class CsiNativeActivationProof {
             long predecessorSequence, String predecessorLastRecordUuid, String predecessorCommitDigest,
             long terminalSequence, String lastRecordUuid) {
         public TerminalProof {
-            predecessorActivation = snapshot(predecessorActivation, Activation.class);
+            predecessorActivation = copyActivation(predecessorActivation);
             predecessorPrefix = snapshot(predecessorPrefix, Prefix.class);
             boundaryRef = boundaryRef.deepCopy();
         }
 
         @Override
         public Activation predecessorActivation() {
-            return snapshot(predecessorActivation, Activation.class);
+            return copyActivation(predecessorActivation);
         }
 
         @Override
@@ -100,6 +110,16 @@ public final class CsiNativeActivationProof {
         @Override
         public JsonNode boundaryRef() {
             return boundaryRef.deepCopy();
+        }
+
+        // Activation is a flat record, so a field-wise copy with a deep-copied
+        // installRef gives the same fresh, deeply-immutable instance as a JSON
+        // round trip without serializing the whole proof on every read.
+        private static Activation copyActivation(Activation value) {
+            return value == null ? null : new Activation(value.activationId(), value.workerId(),
+                    value.installRef() == null ? null : value.installRef().deepCopy(),
+                    value.leaseDurationMs(), value.expiresAt(), value.renewalSequence(),
+                    value.epoch(), value.writerGeneration());
         }
 
         private static <T> T snapshot(T value, Class<T> type) {
@@ -430,10 +450,10 @@ public final class CsiNativeActivationProof {
             Function<JsonNode, byte[]> resources) {
         require(previous.pendingBatch() != null && transaction.events().size() == 1
                 && metadata.path("latestCheckpointResourceId").isNull()
-                && genesis.definitionDigest().equals(text(metadata, "contentDigest")));
+                && messageDigest(transaction, metadata, original, genesis, resources));
         JsonNode event = transaction.events().getFirst();
         JsonNode payload = harnessEvent(event, "message.committed", original, activation, previousSequence + 1);
-        closed(payload, Set.of("messageId", "role", "contentRef", "parentMessageId"));
+        closed(payload, diagnosticFields(payload, Set.of("messageId", "role", "contentRef", "parentMessageId")));
         String messageId = id(payload, "messageId");
         require("tool_result".equals(text(payload, "role")) && ("message:" + messageId).equals(id(event, "eventId"))
                 && ("recorder:" + messageId).equals(id(metadata, "commandId")));
@@ -595,7 +615,8 @@ public final class CsiNativeActivationProof {
                 && previousRevision > 0 && previousRevision < MAX_SAFE);
         JsonNode event = transaction.events().getFirst();
         JsonNode payload = harnessEvent(event, "tool.intent", original, activation, previousSequence + 1);
-        closed(payload, Set.of("executionCallId", "batchId", "ordinal", "toolDefinitionRef", "argsRef", "outcomeSource"));
+        closed(payload, diagnosticFields(payload, Set.of("executionCallId", "batchId", "ordinal", "toolDefinitionRef", "argsRef", "outcomeSource")));
+        diagnostics(event, original, resources);
         String execution = id(payload, "executionCallId");
         String batchId = id(payload, "batchId");
         long ordinal = number(payload.get("ordinal"));
@@ -605,7 +626,7 @@ public final class CsiNativeActivationProof {
                 && "runtime".equals(text(payload, "outcomeSource")) && !previous.intents().containsKey(execution)
                 && ("tool-intent:" + execution).equals(id(event, "eventId"))
                 && ("tool-intent:" + execution).equals(id(metadata, "commandId"))
-                && text(payload.path("argsRef"), "digest").equals(text(metadata, "contentDigest")));
+                && diagnosticCommitDigest(payload.path("argsRef").path("digest").asText(), payload).equals(text(metadata, "contentDigest")));
         for (var saved : previous.intents().values()) {
             if (batchId.equals(id(saved.payload(), "batchId"))) {
                 require(number(saved.payload().get("ordinal")) < ordinal);
@@ -1101,10 +1122,10 @@ public final class CsiNativeActivationProof {
         }
         require(previous.pendingBatch() == null && transaction.events().size() == 1
                 && metadata.path("latestCheckpointResourceId").isNull()
-                && genesis.definitionDigest().equals(text(metadata, "contentDigest")));
+                && messageDigest(transaction, metadata, original, genesis, resources));
         JsonNode event = transaction.events().getFirst();
         JsonNode payload = harnessEvent(event, "message.committed", original, activation, previousSequence + 1);
-        closed(payload, Set.of("messageId", "role", "contentRef", "parentMessageId"));
+        closed(payload, diagnosticFields(payload, Set.of("messageId", "role", "contentRef", "parentMessageId")));
         require(("recorder:" + id(payload, "messageId")).equals(id(metadata, "commandId")));
         return messageRecord(event, payload, original, previous, resources, false);
     }
@@ -1379,14 +1400,18 @@ public final class CsiNativeActivationProof {
         }
         JsonNode message = transaction.events().get(1);
         JsonNode messagePayload = harnessEvent(message, "message.committed", original, activation, previousSequence + 2);
-        closed(messagePayload, Set.of("messageId", "role", "contentRef", "parentMessageId", "modelAttemptId"));
+        closed(messagePayload, diagnosticFields(messagePayload, Set.of("messageId", "role", "contentRef", "parentMessageId", "modelAttemptId")));
+        diagnostics(message, original, resources);
         require(attemptId.equals(id(messagePayload, "modelAttemptId")));
         var digestInput = JSON.createArrayNode().add("managed-final-output/1").add(attemptId);
         for (JsonNode ref : List.of(routeRef, checkpointRef, payload.path("usageRef"), messagePayload.path("contentRef"))) {
             digestInput.add(JSON.createArrayNode().add(ref.path("resourceId")).add(ref.path("kind"))
                     .add(ref.path("schemaVersion")).add(ref.path("byteLength")).add(ref.path("digest")));
         }
-        require(sha256(utf8(digestInput.toString())).equals(text(metadata, "contentDigest")));
+        String digest = messagePayload.has("diagnosticsRef")
+                ? com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics.carrierDigest(transaction.events())
+                : sha256(utf8(digestInput.toString()));
+        require(digest.equals(text(metadata, "contentDigest")));
         return messageRecord(message, messagePayload, original, completed, resources, true);
     }
 
@@ -1781,8 +1806,8 @@ public final class CsiNativeActivationProof {
         require(candidates.isArray() && candidates.size() == 1);
         JsonNode candidate = candidates.get(0);
         closed(candidate, Set.of("resourceId", "kind", "schemaVersion", "byteLength", "digest", "bytesBase64"));
-        byte[] resourceBytes = canonicalBase64(candidate, "bytesBase64", 16 * 1024);
-        byte[] raw = canonicalBase64(metadata, "recordBytesBase64", 128 * 1024);
+        byte[] resourceBytes = canonicalBase64(candidate, "bytesBase64", TERMINAL_CANDIDATE_LIMIT);
+        byte[] raw = canonicalBase64(metadata, "recordBytesBase64", TERMINAL_RECORD_LIMIT);
         require(sha256(raw).equals(text(metadata, "recordDigest")));
         var records = records(raw);
         require(records.size() == 2 && number(metadata.get("recordCount")) == records.size());
@@ -1795,8 +1820,12 @@ public final class CsiNativeActivationProof {
                 });
     }
 
-    private static byte[] canonicalBase64(JsonNode value, String field, int limit) {
-        String encoded = text(value, field);
+    static byte[] canonicalBase64(JsonNode value, String field, int limit) {
+        // Read the text directly: text() caps a field at 4096 characters, which would silently
+        // clamp every caller's declared limit to 3072 decoded bytes.
+        JsonNode node = value.get(field);
+        require(node != null && node.isTextual() && !node.textValue().isEmpty());
+        String encoded = node.textValue();
         require(encoded.length() <= ((limit + 2) / 3) * 4);
         try {
             byte[] bytes = Base64.getDecoder().decode(encoded);
@@ -1927,6 +1956,42 @@ public final class CsiNativeActivationProof {
         } catch (IllegalArgumentException error) {
             throw invalid();
         }
+    }
+
+    private static Set<String> diagnosticFields(JsonNode payload, Set<String> original) {
+        if (!payload.has("diagnosticsRef")) {
+            return original;
+        }
+        Set<String> fields = new HashSet<>(original);
+        fields.add("diagnosticsRef");
+        return fields;
+    }
+
+    private static String diagnosticCommitDigest(String original, JsonNode payload) {
+        return payload.has("diagnosticsRef")
+                ? com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics.commitDigest(original, payload.path("diagnosticsRef"))
+                : original;
+    }
+
+    private static void diagnostics(JsonNode event, RuntimeProvisionRequest original, Function<JsonNode, byte[]> resources) {
+        JsonNode ref = event.path("payload").get("diagnosticsRef");
+        if (ref == null) {
+            return;
+        }
+        require(CsiFilesRetirementProfile.hasActivityDiagnostics(original.getScope()));
+        JsonNode body = readObject(reference(ref, com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics.KIND, resources));
+        com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics.requireEvidence(body);
+        require(event.path("eventId").equals(body.path("sourceEventId")));
+    }
+
+    private static boolean messageDigest(Transaction transaction, JsonNode metadata, RuntimeProvisionRequest original,
+            Genesis genesis, Function<JsonNode, byte[]> resources) {
+        JsonNode event = transaction.events().getFirst();
+        JsonNode payload = event.path("payload");
+        diagnostics(event, original, resources);
+        String expected = payload.has("diagnosticsRef")
+                ? diagnosticCommitDigest(payload.path("contentRef").path("digest").asText(), payload) : genesis.definitionDigest();
+        return expected.equals(text(metadata, "contentDigest"));
     }
 
     public static void closed(JsonNode node, Set<String> fields) {

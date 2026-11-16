@@ -48,8 +48,16 @@ class ManagedSessionReaderVersionTest {
         assertDoesNotThrow(() -> new ManagedSessionReaderVersion().requireReadable(3));
         request.removeHeader(ManagedSessionReaderVersion.HEADER);
         request.addHeader(ManagedSessionReaderVersion.HEADER, "4");
+        assertDoesNotThrow(() -> new ManagedSessionReaderVersion().requireReadable(4));
+        assertEquals(409, assertThrows(ManagedAgentException.class,
+                () -> new ManagedSessionReaderVersion().requireReadable(5)).getStatus());
+        request.removeHeader(ManagedSessionReaderVersion.HEADER);
+        request.addHeader(ManagedSessionReaderVersion.HEADER, "5");
+        assertDoesNotThrow(() -> new ManagedSessionReaderVersion().requireReadable(5));
+        request.removeHeader(ManagedSessionReaderVersion.HEADER);
+        request.addHeader(ManagedSessionReaderVersion.HEADER, "6");
         assertEquals(400, assertThrows(ManagedAgentException.class,
-                () -> new ManagedSessionReaderVersion().requireReadable(3)).getStatus());
+                () -> new ManagedSessionReaderVersion().requireReadable(4)).getStatus());
     }
 
     @Test
