@@ -289,9 +289,6 @@ if (runtimeTakeover && !harnessOnly && process.platform !== 'linux') {
     `${inflightFailover ? '--inflight-failover' : '--continuation-failover'} requires Linux: the replacement owner must retire the dead worker's Runtime binding through the durable local-Worker reclaim (#12380 W0e), which only runs on Linux. Run the mode in the Hosted failover E2E CI job or a Linux container.`,
   );
 }
-// The Stage A acceptance criterion names a 15-second Runtime delay; the
-// real-provider TTFT margin under it is unrecorded (tracked in #12941).
-const modelBeforeRuntimeAssertionDelayMs = 15_000;
 // The frozen-arm teardown wakes the former writer by this registry key, so
 // the start name and the wake-up lookup must share it (a rename drift
 // would leave a stopped child wedged on the runner).
@@ -7221,12 +7218,9 @@ try {
     if (terminal.event.type !== 'turn.completed') {
       throw new Error(`Managed Turn ended with ${terminal.event.type}`);
     }
-    if (
-      runtimeDelayMs >= modelBeforeRuntimeAssertionDelayMs &&
-      firstModel.event.sequence >= runtimeReady.event.sequence
-    ) {
+    if (runtimeReady.event.sequence >= firstModel.event.sequence) {
       throw new Error(
-        'First model event did not precede Runtime readiness ' +
+        'Runtime readiness did not precede the first model event ' +
           `(firstModelSequence=${firstModel.event.sequence}, ` +
           `runtimeReadySequence=${runtimeReady.event.sequence}, ` +
           `firstModelEventMs=${firstModel.observedAt - requestStartedAt}, ` +

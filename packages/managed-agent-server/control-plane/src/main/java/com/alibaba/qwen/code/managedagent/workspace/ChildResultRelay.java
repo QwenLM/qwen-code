@@ -485,15 +485,23 @@ public class ChildResultRelay {
             case "workflow" -> {
                 JsonNode definition = envelope.required("definition");
                 JsonNode args = envelope.get("args");
-                admission = sessions.createWorkflowChildSession(
-                        pending.tenantId(), pending.parentSessionId(),
-                        pending.childRunId(),
-                        definition.required("definitionId").asText(),
-                        definition.required("definitionRevision").asLong(),
-                        definition.required("definitionDigest").asText(),
-                        envelope.required("script").asText(),
-                        args == null || args.isNull() ? null
-                                : mapper.convertValue(args, Object.class));
+                try {
+                    admission = sessions.createWorkflowChildSession(
+                            pending.tenantId(), pending.parentSessionId(),
+                            pending.childRunId(),
+                            definition.required("definitionId").asText(),
+                            definition.required("definitionRevision").asLong(),
+                            definition.required("definitionDigest").asText(),
+                            envelope.required("script").asText(),
+                            args == null || args.isNull() ? null
+                                    : mapper.convertValue(args, Object.class));
+                } catch (ManagedAgentException refused) {
+                    if ("child_parent_unavailable".equals(refused.getCode())) {
+                        failCreation(row, refused.getCode(), now);
+                        return;
+                    }
+                    throw refused;
+                }
             }
             case "child_agent" -> {
                 String description = envelope.required("description").asText();
@@ -530,6 +538,10 @@ public class ChildResultRelay {
                     // check): the row moved off the parent's binding or was
                     // asked to finish since it read ready, and it never
                     // becomes ready again.
+                    if ("child_parent_unavailable".equals(refused.getCode())) {
+                        failCreation(row, refused.getCode(), now);
+                        return;
+                    }
                     if (!isolated || !"child_workspace_not_ready"
                             .equals(refused.getCode())) {
                         throw refused;
