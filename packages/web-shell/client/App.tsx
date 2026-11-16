@@ -14616,18 +14616,21 @@ export function App({
         !e.shiftKey &&
         (key === 'c' || key === 'd');
 
-      // Enter/Space on a button, link or field activate that control, and
-      // Escape inside the chip row belongs to the row's own handlers (close
-      // the list back to its chip). Every other key — Escape anywhere else,
-      // Ctrl+C/Ctrl+D — must reach the dismiss/cancel path below, which is
-      // what the panel's key hints advertise. The composer editor is never
-      // exempted: it is the dismiss shortcut's home surface.
+      // Enter/Space on an activatable control — button, link, field, menu
+      // item, tab, and the like — activate that control, and Escape inside
+      // the chip row belongs to the row's own handlers (close the list back
+      // to its chip). Every other key — Escape anywhere else, Ctrl+C/Ctrl+D
+      // — must reach the dismiss/cancel path below, which is what the
+      // panel's key hints advertise. The composer editor is never exempted:
+      // it is the dismiss shortcut's home surface. The selector names
+      // Enter/Space-activatable surfaces only — the chip row's own
+      // containers carry non-activatable roles (group, toolbar).
       if (
         target instanceof Element &&
         !target.closest('[data-web-shell-composer-editor]') &&
         (((e.key === 'Enter' || e.key === ' ') &&
           target.closest(
-            'button, a[href], [role="button"], input, select, textarea',
+            'button, a[href], [role="button"], [role="menuitem"], [role="option"], [role="tab"], [role="switch"], [role="checkbox"], [role="radio"], summary, [contenteditable], input, select, textarea',
           )) ||
           (e.key === 'Escape' &&
             target.closest('[data-web-shell-composer-task-chips]')))

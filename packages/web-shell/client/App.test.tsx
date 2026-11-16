@@ -19576,6 +19576,16 @@ describe('App session callbacks', () => {
       const signal = mockSessionActions.btwSessionStream.mock.calls.at(-1)?.[1]
         ?.signal as AbortSignal | undefined;
       expect(signal?.aborted).toBe(true);
+
+      // A done that lands after the dismissal must not resurrect the panel
+      // with a stale answer. Resolve only after the key dispatch and flush:
+      // the stream loop re-checks the abort ref per event.
+      await act(async () => {
+        finish.resolve();
+        await Promise.resolve();
+      });
+      await flush();
+      expect(document.querySelector('[class*="btwPanel"]')).toBeNull();
     },
   );
 
@@ -19635,6 +19645,87 @@ describe('App session callbacks', () => {
     });
     expect(editorEvent.defaultPrevented).toBe(true);
     expect(document.querySelector('[class*="btwPanel"]')).toBeNull();
+  });
+
+  it('dismisses a settled explanation with Enter in the composer editor', async () => {
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+    testState.prompt = '';
+
+    // On mobile the composer is a textarea carrying the editor marker, so
+    // it matches the guard's textarea selector; the marker exclusion is
+    // what keeps Enter reaching the dismiss path with an empty composer.
+    const editor = document.createElement('textarea');
+    editor.setAttribute('data-web-shell-composer-editor', '');
+    container.append(editor);
+    const event = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      editor.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(true);
+    expect(document.querySelector('[class*="btwPanel"]')).toBeNull();
+  });
+
+  it('keeps a settled explanation when Enter activates a menu item', async () => {
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+    testState.prompt = '';
+
+    // Radix menu items activate from their own keydown handler downstream
+    // of the window capture phase; the exemption must name their role or
+    // Enter dismisses the panel and the item never activates.
+    const item = document.createElement('div');
+    item.setAttribute('role', 'menuitem');
+    item.setAttribute('tabindex', '0');
+    container.append(item);
+    const event = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      item.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(false);
+    expect(document.querySelector('[class*="btwPanel"]')).not.toBeNull();
   });
 
   it('dismisses a settled explanation with Escape outside the chip row', async () => {
@@ -19737,6 +19828,14 @@ describe('App session callbacks', () => {
       panelButton.dispatchEvent(event);
     });
     expect(event.defaultPrevented).toBe(true);
+    expect(document.querySelector('[class*="btwPanel"]')).toBeNull();
+
+    // A done that lands after the dismissal must not resurrect the panel.
+    await act(async () => {
+      finish.resolve();
+      await Promise.resolve();
+    });
+    await flush();
     expect(document.querySelector('[class*="btwPanel"]')).toBeNull();
   });
 
