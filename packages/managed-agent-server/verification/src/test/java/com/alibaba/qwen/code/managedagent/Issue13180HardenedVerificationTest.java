@@ -253,8 +253,12 @@ class Issue13180HardenedVerificationTest {
                 sign("POST", path, tenant, "intruder", intruderTimestamp,
                         body, intruderKey),
                 intruderKey, body);
-        assertThat(intruder.statusCode()).as(intruder.body()).isEqualTo(403);
-        assertThat(intruder.body()).contains("action_forbidden");
+        // The attack is still refused, but under unified ownership the
+        // refusal is the read's own 404: a Session that carries an ownership
+        // row answers only its recorded principal, so a stranger must not be
+        // able to tell an existing Session from a missing one.
+        assertThat(intruder.statusCode()).as(intruder.body()).isEqualTo(404);
+        assertThat(intruder.body()).contains("session_not_found");
 
         // Fixed behavior: the recorded creator's answer is accepted.
         String ownerTimestamp = now();

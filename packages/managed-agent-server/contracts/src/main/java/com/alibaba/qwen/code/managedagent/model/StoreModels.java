@@ -134,16 +134,53 @@ public final class StoreModels {
             String idempotencyKey, String requestDigest, String sessionId,
             String turnId, String status, String sessionStatusBefore,
             byte[] actorKey, long createdAt, long updatedAt) {
-        public boolean admitsReplayBy(String actorId) {
-            if (actorId == null || actorKey == null) {
+        /**
+         * Whether the receipt names the caller as its recorder. Both stamps
+         * this build writes are accepted: the raw Workspace actor key (the
+         * raw twin and legacy rows) and the principal encoding (the principal
+         * twin). A rolling deploy replays through either twin, so one arm
+         * must not refuse what the other recorded. Unbound-Session callers
+         * carry a null raw actor id, which never matches a recorded key.
+         */
+        public boolean admitsReplayBy(String actorId, SessionPrincipal principal) {
+            if (actorKey == null) {
+                return false;
+            }
+            if (principal != null && Arrays.equals(actorKey, principal.receiptActorKey())) {
+                return true;
+            }
+            // A principal caller also answers a raw-twin stamp, which this
+            // build writes as the raw Workspace actor key of its user.
+            if (principal != null && principal.tenantId().equals(tenantId)) {
+                try {
+                    if (Arrays.equals(actorKey, ManagedWorkspaceRegistry
+                            .actorKey(tenantId, principal.userId()))) {
+                        return true;
+                    }
+                } catch (IllegalArgumentException error) {
+                    // A user id the registry key cannot encode never matches.
+                }
+            }
+            if (principal != null) {
+                // A principal caller never matches through the raw actor id
+                // below: the raw arm could admit a caller whose user id
+                // differs from the principal's user.
+                return false;
+            }
+            if (actorId == null) {
                 return false;
             }
             try {
-                return Arrays.equals(actorKey,
-                        ManagedWorkspaceRegistry.actorKey(tenantId, actorId));
+                if (Arrays.equals(actorKey,
+                        ManagedWorkspaceRegistry.actorKey(tenantId, actorId))) {
+                    return true;
+                }
             } catch (IllegalArgumentException error) {
                 return false;
             }
+            // A raw caller answers a principal-twin stamp through the user
+            // id the stamp itself recorded.
+            return actorId.equals(SessionPrincipal.replayUserId(actorKey));
         }
     }
 

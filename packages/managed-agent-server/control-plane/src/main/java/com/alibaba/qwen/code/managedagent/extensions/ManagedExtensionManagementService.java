@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.managedagent.contracts.session.SessionPolicyStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessFailure;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessHttpFailure;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
@@ -47,7 +48,22 @@ public class ManagedExtensionManagementService {
     }
 
     public JsonNode query(String tenant, String actor, String sessionId, String operationId) {
-        SessionRecord session = sessions.requireReadableSession(tenant, actor, sessionId);
+        // Extension management serves only Workspace Sessions: the raw
+        // filter-admitted actor never needs a byte-bounded principal (R7-1).
+        return query(tenant, actor, null, sessionId, operationId);
+    }
+
+    public JsonNode query(SessionPrincipal principal, String sessionId,
+            String operationId) {
+        return query(principal.tenantId(), principal.userId(), principal,
+                sessionId, operationId);
+    }
+
+    private JsonNode query(String tenant, String actor,
+            SessionPrincipal principal, String sessionId, String operationId) {
+        SessionRecord session = principal == null
+                ? sessions.requireReadableSession(tenant, actor, sessionId)
+                : sessions.requireReadableSession(principal, sessionId);
         if (session.workspace() == null) {
             if (operationId != null) {
                 throw missing();
@@ -86,6 +102,14 @@ public class ManagedExtensionManagementService {
         return query(tenant, actor, sessionId, applyOperationId(tenant, actor, sessionId, key));
     }
 
+    public JsonNode lookup(SessionPrincipal principal, String sessionId,
+            String key) {
+        ManagedAgentService.validateIdempotencyKey(key);
+        return query(principal, sessionId,
+                applyOperationId(principal.tenantId(), principal.userId(),
+                        principal, sessionId, key));
+    }
+
     private JsonNode withSelfService(ObjectNode result, String tenant, String actor, SessionRecord session, boolean supported) {
         boolean enabled = supported && packages.selfServiceSupported();
         result.putObject("selfService").put("supported", enabled).put("canApply", enabled && store.canApplyExtensions(session)
@@ -95,11 +119,37 @@ public class ManagedExtensionManagementService {
     }
 
     private static String applyOperationId(String tenant, String actor, String sessionId, String key) {
-        return UUID.nameUUIDFromBytes(("managed-extension-apply\0" + tenant + "\0" + actor + "\0" + sessionId + "\0" + key)
-                .getBytes(StandardCharsets.UTF_8)).toString();
+        return applyOperationId(tenant, actor, null, sessionId, key);
+    }
+
+    // A subjectless principal keeps the pre-ownership operation identity so
+    // keys recorded before the subject column existed still replay; only an
+    // actual subject joins the identity (the commandKey rule).
+    private static String applyOperationId(String tenant, String actor,
+            SessionPrincipal principal, String sessionId, String key) {
+        StringBuilder identity = new StringBuilder("managed-extension-apply\0")
+                .append(tenant).append('\0')
+                .append(actor).append('\0');
+        if (principal != null && principal.actorPresent()) {
+            identity.append(principal.actorSubjectId()).append('\0');
+        }
+        return UUID.nameUUIDFromBytes(identity.append(sessionId).append('\0')
+                .append(key).toString().getBytes(StandardCharsets.UTF_8)).toString();
     }
 
     public JsonNode submit(String tenant, String actor, String sessionId, String key, JsonNode command) {
+        return submit(tenant, actor, null, sessionId, key, command);
+    }
+
+    public JsonNode submit(SessionPrincipal principal, String sessionId, String key,
+            JsonNode command) {
+        return submit(principal.tenantId(), principal.userId(), principal,
+                sessionId, key, command);
+    }
+
+    private JsonNode submit(String tenant, String actor,
+            SessionPrincipal principal, String sessionId, String key,
+            JsonNode command) {
         ManagedAgentService.validateIdempotencyKey(key);
         if (command == null || !command.isObject() || command.size() != 2 || !command.has("extensions")
                 || !command.path("expectedConfigRevision").isIntegralNumber()
@@ -113,7 +163,15 @@ public class ManagedExtensionManagementService {
         } catch (ManagedExtensionRecords.InvalidRecordException error) {
             throw invalid();
         }
-        String operationId = applyOperationId(tenant, actor, sessionId, key);
+        String operationId = applyOperationId(tenant, actor, principal, sessionId, key);
+        // The unified ownership fence governs the principal twin too: the
+        // raw-actor visibility check inside requireExtensionManagement cannot
+        // substitute for it (R13-1).
+        if (principal == null) {
+            sessions.requireReadableSession(tenant, actor, sessionId);
+        } else {
+            sessions.requireReadableSession(principal, sessionId);
+        }
         SessionRecord session = store.requireExtensionManagement(tenant, actor, sessionId, operationId, false);
         Map<String, Object> request = new LinkedHashMap<>();
         request.put("operationId", operationId);
@@ -126,7 +184,9 @@ public class ManagedExtensionManagementService {
                 if (!sameCommand(request, previous.get("command"))) {
                     throw new ManagedAgentException(409, "idempotency_conflict", "The extension operation key was used for another request.");
                 }
-                return query(tenant, actor, sessionId, operationId);
+                return principal == null
+                        ? query(tenant, actor, sessionId, operationId)
+                        : query(principal, sessionId, operationId);
             }
             if (step >= 4095 || previous.path("previousRecordRef").isNull()) {
                 break;
@@ -153,19 +213,41 @@ public class ManagedExtensionManagementService {
     }
 
     public JsonNode resume(String tenant, String actor, String sessionId, String operationId, boolean recoverPrevious) {
+        return resume(tenant, actor, null, sessionId, operationId,
+                recoverPrevious);
+    }
+
+    public JsonNode resume(SessionPrincipal principal, String sessionId,
+            String operationId, boolean recoverPrevious) {
+        return resume(principal.tenantId(), principal.userId(), principal,
+                sessionId, operationId, recoverPrevious);
+    }
+
+    private JsonNode resume(String tenant, String actor,
+            SessionPrincipal principal, String sessionId,
+            String operationId, boolean recoverPrevious) {
         if (!ManagedConfigInstall.uuid(operationId)) {
             throw invalid();
         }
-        SessionRecord session = store.requireExtensionManagement(tenant, actor, sessionId, operationId, true);
-        JsonNode current = records.currentMcpSettings(tenant, sessionId);
+        if (principal == null) {
+            sessions.requireReadableSession(tenant, actor, sessionId);
+        } else {
+            sessions.requireReadableSession(principal, sessionId);
+        }
+        SessionRecord session = store.requireExtensionManagement(tenant,
+                actor, sessionId, operationId, true);
+        JsonNode current = records.currentMcpSettings(tenant,
+                sessionId);
         if (!ManagedConfigInstall.isPackageConfig(current) || !operationId.equals(current.path("operationId").asText())) {
             throw missing();
         }
         if (!harness.supportsSessionExtensions() || session.workspace() == null) {
             throw unsupported();
         }
-        packages.requireExecutionAccess(tenant, actor, session.workspace().getWorkspaceId());
-        return invoke(() -> harness.continueExtensionOperation(tenant, sessionId, operationId, recoverPrevious), sessionId, operationId);
+        packages.requireExecutionAccess(tenant, actor,
+                session.workspace().getWorkspaceId());
+        return invoke(() -> harness.continueExtensionOperation(tenant,
+                sessionId, operationId, recoverPrevious), sessionId, operationId);
     }
 
     private ObjectNode snapshot(String tenant, String sessionId, JsonNode body, boolean supported) {

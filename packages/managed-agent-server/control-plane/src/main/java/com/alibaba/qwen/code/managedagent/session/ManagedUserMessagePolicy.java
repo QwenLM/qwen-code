@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.contracts.session.UserMessagePolicy;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore;
@@ -57,12 +58,39 @@ public class ManagedUserMessagePolicy implements UserMessagePolicy {
     // has its own, narrower rule (requireCancellerRole/Shape).
     void requireSubmitterRole(SessionRecord session,
             String actorId) {
-        ManagedWorkspaceRegistry.requireSessionVisibility(session, actorId, workspaces);
+        ManagedWorkspaceRegistry.requireSessionVisibility(session, actorId,
+                workspaces);
+        // Same split as the read grant: both arms compare the raw actor
+        // (code-point bounded by the filter). The unified write authority is
+        // the read authority, so this gate takes the raw-actor twin instead
+        // of constructing a byte-bounded principal (R7-1).
+        if (session.workspace() == null) {
+            store.requireSessionReadAuthority(session.tenantId(),
+                    session.sessionId(), actorId);
+            return;
+        }
+        if (!workspaces.accessOf(session.tenantId(), actorId,
+                session.workspace().getWorkspaceId())
+                .atLeast(WorkspaceAccess.OPERATOR)) {
+            requireLegacyWorkspace(session, actorId);
+        }
+    }
+
+    void requireSubmitterRole(SessionRecord session,
+            SessionPrincipal principal) {
+        ManagedWorkspaceRegistry.requireSessionVisibility(session, principal,
+                workspaces);
+        if (session.workspace() == null) {
+            store.requireSessionAuthority(session.tenantId(),
+                    session.sessionId(), principal);
+            return;
+        }
         if (session.workspace() != null
-                && !workspaces.accessOf(session.tenantId(), actorId,
+                && !workspaces.accessOf(session.tenantId(),
+                        principal == null ? null : principal.userId(),
                         session.workspace().getWorkspaceId())
                         .atLeast(WorkspaceAccess.OPERATOR)) {
-            requireLegacyWorkspace(session, actorId);
+            requireLegacyWorkspace(session, principal);
         }
     }
 
@@ -71,9 +99,35 @@ public class ManagedUserMessagePolicy implements UserMessagePolicy {
         if (session.publicChildAgentsVersion() == 1 && store.findChildLineage(session.tenantId(), session.sessionId()) != null) {
             throw new ManagedAgentException(409, "unsupported_feature", "Public child Sessions accept only their delegated input");
         }
-        if (session.workspace() != null
-                && !maySubmitWorkspaceTurn(session, actorId)) {
+        if (session.workspace() == null) {
+            // Raw-actor twin, as in requireSubmitterRole: this gate answers
+            // a recorded outcome before any write needs a digest principal
+            // (R7-1).
+            store.requireSessionReadAuthority(session.tenantId(),
+                    session.sessionId(), actorId);
+            return;
+        }
+        if (!maySubmitWorkspaceTurn(session, actorId)) {
             requireLegacyWorkspace(session, actorId);
+        }
+    }
+
+    void requireSubmitterFacts(SessionRecord session,
+            SessionPrincipal principal) {
+        ManagedWorkspaceRegistry.requireSessionVisibility(session, principal,
+                workspaces);
+        if (session.publicChildAgentsVersion() == 1 && store.findChildLineage(session.tenantId(), session.sessionId()) != null) {
+            throw new ManagedAgentException(409, "unsupported_feature", "Public child Sessions accept only their delegated input");
+        }
+        if (session.workspace() == null) {
+            store.requireSessionAuthority(session.tenantId(),
+                    session.sessionId(), principal);
+            return;
+        }
+        if (session.workspace() != null
+                && !maySubmitWorkspaceTurn(session,
+                        principal == null ? null : principal.userId())) {
+            requireLegacyWorkspace(session, principal);
         }
     }
 
@@ -141,40 +195,71 @@ public class ManagedUserMessagePolicy implements UserMessagePolicy {
                 actorId);
     }
 
+    void requireLegacyWorkspace(String tenantId, SessionPrincipal principal,
+            String sessionId) {
+        requireLegacyWorkspace(store.requireSession(tenantId, sessionId),
+                principal);
+    }
+
     // The submitter family's bound-refusal split: an actor without a read
     // grant gets the invisible 404, a readable actor below OPERATOR the
     // 403 of the sibling lifecycle refusal, and an OPERATOR blocked by the
     // shape gates or the creator-keyed facts the family's domain 409.
     void requireLegacyWorkspace(SessionRecord session,
             String actorId) {
-        ManagedWorkspaceRegistry.requireSessionVisibility(session, actorId, workspaces);
-        if (session.workspace() != null) {
-            // A tombstone is invisible to every actor shape, as the reads
-            // answer: the fence stands above the role split, whose 403/409
-            // codes are live-Session answers. An unbound tombstone needs no
-            // fence here — its 404 stands below the replay in
-            // beginSessionMutation, and a recorded lifecycle outcome must
-            // keep answering above it.
-            if ("DELETED".equals(session.status())) {
-                throw new ManagedAgentException(404,
-                        "session_not_found", "The Session was not found.");
-            }
-            String workspaceId = session.workspace().getWorkspaceId();
-            WorkspaceAccess access = workspaces.accessOf(session.tenantId(),
-                    actorId, workspaceId);
-            if (!access.canRead()) {
-                throw new ManagedAgentException(404,
-                        "session_not_found", "The Session was not found.");
-            }
-            if (access.atLeast(WorkspaceAccess.OPERATOR)) {
-                throw new ManagedAgentException(409,
-                        "workspace_unavailable",
-                        "Hosted Workspace execution is not available.");
-            }
-            throw new ManagedAgentException(403,
-                    "session_operation_forbidden",
-                    "Only a Workspace operator may use the Session.");
+        ManagedWorkspaceRegistry.requireSessionVisibility(session, actorId,
+                workspaces);
+        if (session.workspace() == null) {
+            // The refusal path for a legacy Session is a gate too: the
+            // unified write authority is the read authority, so no
+            // byte-bounded principal is built here (R7-1).
+            store.requireSessionReadAuthority(session.tenantId(),
+                    session.sessionId(), actorId);
+            return;
         }
+        requireBoundLegacyWorkspace(session, actorId);
+    }
+
+    void requireLegacyWorkspace(SessionRecord session,
+            SessionPrincipal principal) {
+        ManagedWorkspaceRegistry.requireSessionVisibility(session, principal,
+                workspaces);
+        if (session.workspace() == null) {
+            store.requireSessionAuthority(session.tenantId(),
+                    session.sessionId(), principal);
+            return;
+        }
+        requireBoundLegacyWorkspace(session,
+                principal == null ? null : principal.userId());
+    }
+
+    private void requireBoundLegacyWorkspace(SessionRecord session,
+            String actorId) {
+        // A tombstone is invisible to every actor shape, as the reads
+        // answer: the fence stands above the role split, whose 403/409
+        // codes are live-Session answers. An unbound tombstone needs no
+        // fence here — its 404 stands below the replay in
+        // beginSessionMutation, and a recorded lifecycle outcome must
+        // keep answering above it.
+        if ("DELETED".equals(session.status())) {
+            throw new ManagedAgentException(404,
+                    "session_not_found", "The Session was not found.");
+        }
+        String workspaceId = session.workspace().getWorkspaceId();
+        WorkspaceAccess access = workspaces.accessOf(session.tenantId(),
+                actorId, workspaceId);
+        if (!access.canRead()) {
+            throw new ManagedAgentException(404,
+                    "session_not_found", "The Session was not found.");
+        }
+        if (access.atLeast(WorkspaceAccess.OPERATOR)) {
+            throw new ManagedAgentException(409,
+                    "workspace_unavailable",
+                    "Hosted Workspace execution is not available.");
+        }
+        throw new ManagedAgentException(403,
+                "session_operation_forbidden",
+                "Only a Workspace operator may use the Session.");
     }
 
     SessionRecord requireVisibleSession(String tenantId,
@@ -202,10 +287,38 @@ public class ManagedUserMessagePolicy implements UserMessagePolicy {
         return session;
     }
 
+    public SessionRecord authorizeUserMessageActor(
+            SessionPrincipal principal, String sessionId) {
+        if (principal == null) {
+            throw new ManagedAgentException(401, "actor_required",
+                    "An authenticated actor is required.");
+        }
+        SessionRecord session = store.requireSession(principal.tenantId(),
+                sessionId);
+        requireSubmitterRole(session, principal);
+        return session;
+    }
+
     public SessionRecord authorizeUserMessages(String tenantId, String actorId, String sessionId) {
         SessionRecord session = authorizeUserMessageActor(tenantId, actorId, sessionId);
         requireVisibleSession(session);
         requireSubmitterFacts(session, actorId);
+        if (!"ACTIVE".equals(session.status())) {
+            throw new ManagedAgentException(409, "session_not_active", "The Session does not accept messages.");
+        }
+        return session;
+    }
+
+    public SessionRecord authorizeUserMessages(
+            SessionPrincipal principal, String sessionId) {
+        SessionRecord session = authorizeUserMessageActor(principal, sessionId);
+        return authorizeUserMessages(principal, session);
+    }
+
+    private SessionRecord authorizeUserMessages(SessionPrincipal principal,
+            SessionRecord session) {
+        requireVisibleSession(session);
+        requireSubmitterFacts(session, principal);
         if (!"ACTIVE".equals(session.status())) {
             throw new ManagedAgentException(409, "session_not_active", "The Session does not accept messages.");
         }
@@ -218,6 +331,13 @@ public class ManagedUserMessagePolicy implements UserMessagePolicy {
             throw new ManagedAgentException(400, "unsupported_input", "Images require an idle Turn.");
         }
         return normalized;
+    }
+
+    static SessionPrincipal principalOf(String tenantId, String actorId) {
+        if (actorId == null || actorId.isBlank()) {
+            return null;
+        }
+        return SessionPrincipal.ofUser(tenantId, actorId);
     }
 
     List<Map<String, Object>> input(List<InputBlock> blocks,

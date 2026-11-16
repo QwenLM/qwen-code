@@ -7,6 +7,7 @@ public final class ManagedSchemaContract {
     public static final Set<String> TABLES =
             Set.of(
                     "ma_session",
+                    "ma_session_principal",
                     "ma_session_worktree",
                     "ma_session_head",
                     "ma_turn",

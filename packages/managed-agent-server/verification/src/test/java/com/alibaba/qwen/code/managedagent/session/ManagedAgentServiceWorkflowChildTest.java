@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.model.ApiModels;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
@@ -172,9 +173,14 @@ class ManagedAgentServiceWorkflowChildTest {
     @Test
     void userTextWithALoneSurrogateIsNormalizedTheSameWay() {
         when(harness.isAvailable()).thenReturn(true);
-        when(store.insertSessionCommand(anyString(), anyString(), anyString(),
-                anyString(), anyString(), any(), any(), any(), anyList(),
-                anyString())).thenReturn(new StoreModels.Admission(
+        // createSession admits through the principal-carrying overload since
+        // 982c194e805fa ("restore session principal ownership") wrote the
+        // ma_session_principal row in the creation transaction; the legacy
+        // String-actor stub no longer matches and left the admission null.
+        when(store.insertSessionCommand(anyString(),
+                any(SessionPrincipal.class), anyString(), anyString(),
+                anyString(), any(), any(), any(), anyList(), anyString(),
+                any(), any())).thenReturn(new StoreModels.Admission(
                         "session-new", null, false, true));
         String raw = "x surrogate " + (char) 0xD800 + " here";
 
@@ -184,9 +190,14 @@ class ManagedAgentServiceWorkflowChildTest {
         ArgumentCaptor<List<Map<String, Object>>> input =
                 ArgumentCaptor.forClass(List.class);
         ArgumentCaptor<String> digest = ArgumentCaptor.forClass(String.class);
-        verify(store).insertSessionCommand(anyString(), anyString(),
+        ArgumentCaptor<SessionPrincipal> principal =
+                ArgumentCaptor.forClass(SessionPrincipal.class);
+        verify(store).insertSessionCommand(anyString(), principal.capture(),
                 anyString(), anyString(), anyString(), any(), any(), any(),
-                input.capture(), digest.capture());
+                input.capture(), digest.capture(), any(), any());
+        // The trusted actor becomes the immutable ownership principal.
+        assertThat(principal.getValue())
+                .isEqualTo(SessionPrincipal.ofUser(TENANT, "actor"));
         List<Map<String, Object>> inserted = input.getValue();
         String normalized = raw.replace((char) 0xD800, '�');
         assertThat(inserted).containsExactly(

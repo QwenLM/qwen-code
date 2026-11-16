@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.catalog;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellSessionSkills;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellSkill;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionSkills;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import org.springframework.stereotype.Service;
@@ -21,6 +22,16 @@ public class ManagedSkillCatalogService {
 
     public WebShellSessionSkills get(String tenantId, String actorId, String sessionId) {
         var session = sessions.requireReadableSession(tenantId, actorId, sessionId);
+        return view(session);
+    }
+
+    public WebShellSessionSkills get(SessionPrincipal principal, String sessionId) {
+        var session = sessions.requireReadableSession(principal, sessionId);
+        return view(session);
+    }
+
+    private WebShellSessionSkills view(
+            com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord session) {
         if (session.workspace() == null
                 || WorkspaceToolProfiles.READ.equals(session.toolProfile())) {
             return new WebShellSessionSkills(List.of());

@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.session;
 
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -26,7 +27,19 @@ public class ManagedSessionDiagnosticsService {
     }
 
     public JsonNode context(String tenantId, String actorId, String sessionId) {
-        SessionRecord session = sessions.requireReadableSession(tenantId, actorId, sessionId);
+        return context(tenantId,
+                sessions.requireReadableSession(tenantId, actorId, sessionId),
+                sessionId);
+    }
+
+    public JsonNode context(SessionPrincipal principal, String sessionId) {
+        return context(principal.tenantId(),
+                sessions.requireReadableSession(principal, sessionId),
+                sessionId);
+    }
+
+    private JsonNode context(String tenantId, SessionRecord session,
+            String sessionId) {
         var read = records.findModelDiagnostics(tenantId, sessionId);
         JsonNode context = read.context();
         Set<String> reasons = new LinkedHashSet<>();
@@ -50,7 +63,19 @@ public class ManagedSessionDiagnosticsService {
     }
 
     public JsonNode statistics(String tenantId, String actorId, String sessionId) {
-        SessionRecord session = sessions.requireReadableSession(tenantId, actorId, sessionId);
+        return statistics(tenantId,
+                sessions.requireReadableSession(tenantId, actorId, sessionId),
+                sessionId);
+    }
+
+    public JsonNode statistics(SessionPrincipal principal, String sessionId) {
+        return statistics(principal.tenantId(),
+                sessions.requireReadableSession(principal, sessionId),
+                sessionId);
+    }
+
+    private JsonNode statistics(String tenantId, SessionRecord session,
+            String sessionId) {
         var read = records.findModelDiagnostics(tenantId, sessionId);
         JsonNode statistics = read.statistics();
         Set<String> reasons = new LinkedHashSet<>(read.coverageGaps());
