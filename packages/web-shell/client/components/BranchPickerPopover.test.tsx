@@ -1539,9 +1539,12 @@ describe('BranchPickerPopover checkout resolution panel', () => {
         'POST /workspaces/:workspace/git/checkout: checkout_failed',
       ),
     );
-    // The mount read answers dirty; the failure-path refresh answers the
-    // clean post-switch tree, so the hint transition witnesses that the
-    // refreshed STATUS was applied, not just requested.
+    // The mount read AND the dirty refusal's catch refresh both answer
+    // dirty; only the failure-path refresh answers the clean post-switch
+    // tree, so the hint transition witnesses that the refreshed STATUS
+    // was applied, not just requested (a single dirty seed would be
+    // consumed by the catch refresh, leaving the hint clean too early).
+    workspaceGit.mockResolvedValueOnce(status({ unstaged: 2, computedAt: 2 }));
     workspaceGit.mockResolvedValueOnce(status({ unstaged: 2, computedAt: 2 }));
     workspaceGit.mockResolvedValue(status({ branch: 'dev', computedAt: 3 }));
     mountWithBranches(CHECKOUT_BRANCHES, {
@@ -1551,6 +1554,9 @@ describe('BranchPickerPopover checkout resolution panel', () => {
 
     clickButton('dev');
     await flush();
+    // Still dirty after the catch refresh: the clean hint below can only
+    // come from the failure-path refresh.
+    expect(footerText()).toContain('↓1 · uncommitted changes');
     const listingReadsBefore = workspaceGitBranches.mock.calls.length;
     const statusReadsBefore = workspaceGit.mock.calls.length;
     // Only the post-switch listing can produce the '↓1 · origin/dev' hint.
@@ -1619,6 +1625,51 @@ describe('BranchPickerPopover checkout resolution panel', () => {
     // is a dismissible error, not a sticky warning — it must not survive
     // the reopen (only the kept-entry warning does).
     expect(footerText()).not.toContain('cannot discard and switch');
+  });
+
+  it('keeps the picker usable while the failure-path refresh is in flight', async () => {
+    let settleListing: ((value: DaemonGitBranchesResult) => void) | undefined;
+    workspaceGitCheckout.mockRejectedValueOnce(checkoutDirtyError());
+    workspaceGitCheckout.mockRejectedValueOnce(
+      new DaemonHttpError(
+        409,
+        {
+          error: 'checkout_failed',
+          message: 'cannot discard and switch: fatal: invalid reference',
+        },
+        'POST /workspaces/:workspace/git/checkout: checkout_failed',
+      ),
+    );
+    mountWithBranches(CHECKOUT_BRANCHES);
+    await flush();
+
+    clickButton('dev');
+    await flush();
+    // Arm a PENDING listing read for the failure-path refresh only (the
+    // mount and dirty-catch reads already consumed the default mock).
+    workspaceGitBranches.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          settleListing = resolve;
+        }),
+    );
+    clickButton('Discard Changes and Switch…');
+    await flush();
+    clickButton('Discard and Switch');
+    await flush();
+
+    // The catch does not await the refresh: busyAction is released, so a
+    // competing plain checkout starts even while the listing read hangs.
+    // ('dev', not 'main': the Update Project row's 'origin/main' hint
+    // would substring-match a 'main' click.)
+    clickButton('dev');
+    await flush();
+    expect(workspaceGitCheckout).toHaveBeenCalledTimes(3);
+
+    await act(async () => {
+      settleListing?.(CHECKOUT_BRANCHES);
+    });
+    await flush();
   });
 
   it('closes the picker after a plain checkout succeeds', async () => {
