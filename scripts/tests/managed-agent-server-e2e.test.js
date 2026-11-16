@@ -3427,20 +3427,53 @@ describe('managed-agent-server e2e runner', () => {
     // The Session-create body carries a caller loop import whose body is the
     // verbatim bundled reference (readSidecar('bundled-body')), so admission's
     // replace path runs; swapping that argument to another sidecar would take
-    // the preserve branch and silently stop exercising the replace path. The
-    // import's description is a marker the arm asserts is gone from the first
-    // round — a preserved caller entry would keep it.
+    // the preserve branch. A second non-loop probe skill carries a marker the
+    // server keeps, so the loop marker's absence attests replacement rather than
+    // caller skills never arriving. assertCallerImportReplaced checks both and
+    // is exercised below as executable code, not just pinned as text.
     expect(source).toMatch(/skills: \[/);
     expect(source).toMatch(/readSidecar\('bundled-body'\)/);
     expect(source).toMatch(/body: bundledLoopImport\.body/);
     expect(source).toMatch(
       /const callerImportMarker = 'CALLER-LOOP-IMPORT-MARKER';/,
     );
-    expect(source).toMatch(/description: callerImportMarker/);
     expect(source).toMatch(
-      /JSON\.stringify\(firstRoundMessages\)\.includes\(callerImportMarker\)/,
+      /const callerProbeMarker = 'CALLER-PROBE-SKILL-MARKER';/,
     );
-    expect(source).toMatch(/Caller loop import survived admission/);
+    expect(source).toMatch(/description: callerImportMarker/);
+    expect(source).toMatch(/name: 'loopprobe'/);
+    expect(source).toMatch(/description: callerProbeMarker/);
+    expect(source).toMatch(/function assertCallerImportReplaced\(/);
+    expect(source).toMatch(
+      /assertCallerImportReplaced\(\s*firstRoundMessages,\s*callerImportMarker,\s*callerProbeMarker,?\s*\)/,
+    );
+    expect(source).toMatch(
+      /Caller loop import survived admission; the replace path did not run\. firstRound=/,
+    );
+    expect(source).toMatch(
+      /Caller skills never reached admission; the probe skill marker is absent\. firstRound=/,
+    );
+    // Execute the guard: a severed guard (false &&, or a never-called closure)
+    // leaves the text pins green but these executable assertions red.
+    const { assertCallerImportReplaced } = load(
+      ['assertCallerImportReplaced'],
+      'assertCallerImportReplaced',
+    )();
+    const removed = 'CALLER-LOOP-IMPORT-MARKER';
+    const preserved = 'CALLER-PROBE-SKILL-MARKER';
+    expect(() =>
+      assertCallerImportReplaced([{ content: removed }], removed, preserved),
+    ).toThrow(/survived admission/);
+    expect(() =>
+      assertCallerImportReplaced(
+        [{ content: 'cron variant' }],
+        removed,
+        preserved,
+      ),
+    ).toThrow(/never reached admission/);
+    expect(() =>
+      assertCallerImportReplaced([{ content: preserved }], removed, preserved),
+    ).not.toThrow();
     // The body checks read the first streamed round, and the positive
     // requires the Skill tool result (role 'tool'), not the session prelude.
     expect(source).toMatch(/loopRequests\[0\]\?\.body\['messages'\]/);

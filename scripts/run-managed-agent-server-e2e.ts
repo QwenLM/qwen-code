@@ -2633,6 +2633,30 @@ async function waitForTerminal(
   return { events, lastSequence: cursor };
 }
 
+// Attests the admission replace path bidirectionally. The caller loop import's
+// marker must be gone (the server replaced it with the profile variant), and a
+// separate probe skill's marker must remain (caller skills reached admission and
+// were published). The loop marker's absence alone has two causes — the replace
+// path ran, or caller skills never arrived — so the preserved probe disambiguates.
+// Kept a top-level pure declaration so the meta-test can extract and execute it.
+function assertCallerImportReplaced(
+  messages: unknown,
+  removedMarker: string,
+  preservedMarker: string,
+): void {
+  const text = JSON.stringify(messages);
+  if (text.includes(removedMarker)) {
+    throw new Error(
+      `Caller loop import survived admission; the replace path did not run. firstRound=${text.slice(0, 1500)}`,
+    );
+  }
+  if (!text.includes(preservedMarker)) {
+    throw new Error(
+      `Caller skills never reached admission; the probe skill marker is absent. firstRound=${text.slice(0, 1500)}`,
+    );
+  }
+}
+
 const failoverFirstMarker = 'MANAGED_SESSION_FAILOVER_FIRST_TURN';
 const failoverSecondMarker = 'MANAGED_SESSION_FAILOVER_SECOND_TURN';
 const bigOutputSource = 'abcdefghijklmnopqrstu长😀'.repeat(
@@ -3396,9 +3420,12 @@ try {
     // description carries a marker instead of the bundled prose: the replace
     // path swaps in the server variant's own description, so the marker leaves
     // the catalog; a preserve branch would keep the caller entry and its
-    // marker. The arm asserts the marker is gone from the first round,
-    // attesting the replace path ran rather than the caller body being served.
+    // marker. A second, non-loop probe skill carries another marker the server
+    // does not rewrite: its presence proves caller skills reached admission,
+    // so the loop marker's absence attests the replace path ran rather than
+    // caller skills never arriving. assertCallerImportReplaced checks both.
     const callerImportMarker = 'CALLER-LOOP-IMPORT-MARKER';
+    const callerProbeMarker = 'CALLER-PROBE-SKILL-MARKER';
     const definitionResponse = await fetch(`${springUrl}/v1/agents`, {
       method: 'POST',
       headers: {
@@ -3437,6 +3464,13 @@ try {
             name: 'loop',
             description: callerImportMarker,
             body: bundledLoopImport.body,
+            model_invocable: true,
+            user_invocable: true,
+          },
+          {
+            name: 'loopprobe',
+            description: callerProbeMarker,
+            body: 'Probe skill: attests caller skills reached admission.',
             model_invocable: true,
             user_invocable: true,
           },
@@ -3534,16 +3568,14 @@ try {
         ? loopRequests[0].body['messages']
         : []
     ) as { role?: string }[];
-    // The caller import's marker description must be gone: the replace path
-    // swaps in the server variant's own description. A preserved caller entry
-    // (e.g. the import body swapped to a non-bundled sidecar) keeps the marker
-    // in the session-start skill listing, so its presence means the replace
-    // path did not run and the caller's body was merely served.
-    if (JSON.stringify(firstRoundMessages).includes(callerImportMarker)) {
-      throw new Error(
-        'Caller loop import survived admission; the replace path did not run',
-      );
-    }
+    // Bidirectional replace-path attestation: the loop import's marker must be
+    // gone (replaced by the server variant) while the probe skill's marker
+    // remains (caller skills reached admission). See assertCallerImportReplaced.
+    assertCallerImportReplaced(
+      firstRoundMessages,
+      callerImportMarker,
+      callerProbeMarker,
+    );
     if (
       JSON.stringify(firstRoundMessages).includes('defaults to session-only')
     ) {
