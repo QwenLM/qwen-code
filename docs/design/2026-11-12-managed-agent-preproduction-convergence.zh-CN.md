@@ -127,7 +127,8 @@ Public 已被 Java SDK、OpenAPI 契约与 README 业务流锚定。反之留 We
 
 ### 切片 6 —— preflight 简化
 
-- 在配置入口要求规范 `http(s)://host:port`；删除 WHATWG 子集与共享 URL fixture（或把校验挪到 Node 侧）。用 Spring ConfigData API 替换 `StackWalker` 格式嗅探；保留按值秘密检测（URL userinfo 口令与任意键下的 `?password=`/`?token=` 参数），只删除 YAML/注释 AST 与路径机器——仅按键名扫描会漏掉如 `spring.datasource.url` 中的凭据、丢失 `chmod 600` 告警；以服务身份实测 `ServiceAccount` 访问，而非 root 用户态 `namei`。
+- **已完成 —— 规范化 Broker URL 入口。** `HarnessBrokerUrl` 删除手写 WHATWG IPv4/IPv6 子集（410 → 约 210 行，IPv6 经 `InetAddress` 规范化）；它与 Node 解析器（`packages/cli/src/serve/managed-runtime-broker-url.ts`）现在在入口拒绝非规范写法——`inet_aton` 简写/八进制/十六进制 IPv4、缺失或多余的协议斜杠、点段路径、空或越界端口——共用同一份更新后的 fixture。其余子项为触及安全语义的重设计，另行跟踪。
+- 用 Spring ConfigData API 替换 `StackWalker` 格式嗅探；保留按值秘密检测（URL userinfo 口令与任意键下的 `?password=`/`?token=` 参数），只删除 YAML/注释 AST 与路径机器——仅按键名扫描会漏掉如 `spring.datasource.url` 中的凭据、丢失 `chmod 600` 告警；以服务身份实测 `ServiceAccount` 访问，而非 root 用户态 `namei`。
 - 理由：URL parity 契约只在接受任意 URL 写法时才需要；投产前可以拒绝它们。
 - 验证：对规范输入重写的 preflight 测试；`--check` 冒烟。
 

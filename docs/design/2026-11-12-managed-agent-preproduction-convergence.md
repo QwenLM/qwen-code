@@ -312,10 +312,16 @@ still wanted, it needs its own design effort; otherwise the dual server stands.
 
 ### Slice 6 — preflight simplification
 
-- Require canonical `http(s)://host:port` at the config entry; delete the
-  WHATWG subset and the shared URL fixtures (or move validation to the Node
-  side). Replace `StackWalker` format sniffing with Spring's ConfigData API;
-  keep value-based secret detection (URL user-information passwords and
+- **Done — canonical Broker URL entry.** `HarnessBrokerUrl` drops the
+  hand-written WHATWG IPv4/IPv6 subset (410 → ~210 lines; IPv6 canonicalized
+  via `InetAddress`). It and the Node resolver
+  (`packages/cli/src/serve/managed-runtime-broker-url.ts`) now refuse
+  non-canonical spellings at the entry — `inet_aton` shorthand/octal/hex IPv4,
+  missing or extra scheme slashes, dot-segment paths, empty or out-of-range
+  ports — against one shared, updated fixture set. The remaining sub-items
+  below are security-semantics redesigns, tracked separately.
+- Replace `StackWalker` format sniffing with Spring's ConfigData API; keep
+  value-based secret detection (URL user-information passwords and
   `?password=`/`?token=` parameters under any key) while removing only the
   YAML/comment AST and path machinery — a key-name-only scan would miss a
   credential in e.g. `spring.datasource.url` and lose the `chmod 600` warning;
