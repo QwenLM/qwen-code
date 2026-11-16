@@ -80,6 +80,12 @@ describe('bundled pkgdiet skill', () => {
       '`env`, `headers`, `url`, `httpUrl`, `tcp`, `oauth`, `trust`, `timeout`, `includeTools`, `excludeTools`',
     );
     expect(normalizedBody).toContain(
+      'report the entry, warn the user, and stop',
+    );
+    expect(normalizedBody).toContain(
+      'require a restart before the guardrail is used',
+    );
+    expect(normalizedBody).toContain(
       'explicit non-project `cwd` outside the project workspace',
     );
 
@@ -101,6 +107,9 @@ describe('bundled pkgdiet skill', () => {
     expect(normalizedBody).toContain("serverName === 'pkgdiet'");
     expect(normalizedBody).toContain('mcp__pkgdiet__check_dependency');
     expect(normalizedBody).toContain('retrying `tool_search`');
+    expect(normalizedBody).toContain(
+      'step 1 found no pre-existing entry, proceed to **Instructions** in the same session; if an existing entry was present at bootstrap, require a restart before using the guardrail',
+    );
     expect(normalizedBody).toContain('registered but not running');
     expect(normalizedBody).toContain(
       'inspect server connection status (`Connected` or `Disconnected`)',
@@ -222,6 +231,12 @@ describe('bundled pkgdiet skill', () => {
     expect(normalizedBody).toContain('node_modules/.bin');
     expect(normalizedBody).toContain('treat the verdict as not applicable');
     expect(normalizedBody).toContain('command runs normally');
+    expect(normalizedBody).toContain(
+      'resolves to a binary that exists on disk (`node_modules/.bin/<name>`, or an installed dependency) without fetching from a registry',
+    );
+    expect(normalizedBody).toContain(
+      'For a `package.json` script, read the script body and gate any registry-fetching command inside it; otherwise treat the command as a registry fetch and run the check',
+    );
 
     expect(normalizedBody).toContain('cannot be resolved');
     expect(normalizedBody).toContain('tool_call');

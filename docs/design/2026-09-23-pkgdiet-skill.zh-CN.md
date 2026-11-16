@@ -44,7 +44,7 @@
 - **未评估包安全闭门（Fail-Closed）**：若 `check_dependency` 返回 `ALLOW` 但附带未评估原因（如网络超时、私有 `.npmrc` 映射或降级模式），技能立刻终止并提示用户决策，绝不放行未经筛查的依赖。
 - **项目策略与智能体直接执行**：在每个项目目录检查前（以及切换工作目录时），技能排查仓库中的 `.pkgdietrc.json`、`pkgdiet.config.json`、`package.json#pkgdiet` 与 `.pkgdiet-cache.json`。策略规则明确展示给用户并由智能体直接执行：命中 `blockedPackages` 或未达 `minHealthScore` 的包一律禁止安装。若发现提交的 `.pkgdiet-cache.json`，立刻终止直至其被移除。
 - **直接执行与脚手架覆盖**：所有下载并执行包的命令（包括 `npx`、`npm exec`、`yarn dlx`、`pnpm dlx`、`bunx` 以及脚手架 `npm create`、`npm init <pkg>`、`pnpm create`、`yarn create`、`bun create`）均纳入拦截筛查范围。
-- **源地址对齐与本地解析识别**：判定仅对 `https://registry.npmjs.org` 的 latest 版本有效。若通过 `--registry`、项目 `.npmrc`、`npm_config_registry`、`.yarnrc.yml`、`.yarnrc`、`bunfig.toml` 或 lockfile 重定向，判定视为不适用；若执行命令解析为本地二进制文件（`node_modules/.bin`、scripts），则直接正常执行。
+- **源地址对齐与本地解析识别**：判定仅对 `https://registry.npmjs.org` 的 latest 版本有效。若通过 `--registry`、项目 `.npmrc`、`npm_config_registry`、`.yarnrc.yml`、`.yarnrc`、`bunfig.toml` 或 lockfile 重定向，判定视为不适用且不执行安装；若执行命令解析为磁盘上存在的本地二进制文件（`node_modules/.bin/<name>` 或已安装的依赖项）且未从源拉取，则直接正常执行。对于 `package.json` 中的 script，需审查其脚本正文并拦截筛查其中的源拉取命令；否则按源拉取命令处理并执行筛查。
 - **版本作用域与披露**：判定适用于 latest。若请求固定版本或范围，进入授权步骤并向用户披露该判定覆盖的是 latest。
 - **单跳替代建议限制**：调用 `suggest_alternative` 时，替代包仅评审一次（最多单跳），防止递归死循环。
 - **运行模式兼容**：直接工具模式下使用 `tool_call`；代码模式（Code Mode）下通过 `exec` 驱动工具函数（`tools.<jsName>`）。
