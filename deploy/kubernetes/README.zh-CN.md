@@ -272,7 +272,8 @@ Kubernetes API peer 验证凭据复用，通过受控 HTTP peer 验证签名 smo
 
 每个目标集群应独立记录镜像构建、安装、真实 MySQL、provider 调用和重启结果。
 ACK、节点故障、CSI、物理退役与生产验收仍是独立门槛。可选可信 LOCAL 模式与
-[K2 常驻部署](../k2-resident/README.zh-CN.md) 独立；后者需要经过资格验证的 CSI
+原 [K2 常驻部署](../../packages/sdk-java/managed-kubernetes-archive/deploy/k2-resident/README.zh-CN.md)
+（已从 `managed-agent-server` 移除并归档）独立；后者需要经过资格验证的 CSI
 身份，且不支持 Shell。chart 不开启 K2。
 设计：[English](../../docs/design/2026-10-24-managed-agent-kubernetes.md) |
 [简体中文](../../docs/design/2026-10-24-managed-agent-kubernetes.zh-CN.md)；工具与 WebShell：
