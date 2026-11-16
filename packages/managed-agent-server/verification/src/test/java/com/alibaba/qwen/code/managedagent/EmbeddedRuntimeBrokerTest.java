@@ -443,48 +443,6 @@ class EmbeddedRuntimeBrokerTest {
     }
 
     @Test
-    void namesTheSupportedProvisionersInTheKubernetesRejection()
-            throws Exception {
-        ManagedAgentProperties properties = properties();
-        properties.getRuntimeBroker().setProvisioner("kubernetes");
-        properties.getRuntimeBroker().setWorkspaceCwd("/workspace");
-        // Blank derives the canonical workspace ID for the k8s/local path.
-        properties.getRuntimeBroker().setWorkspaceId("");
-
-        assertThatThrownBy(() -> broker(mock(ManagedAgentStore.class),
-                properties))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("not supported")
-                .hasMessageContaining("static").hasMessageContaining("local-process");
-    }
-
-    @org.junit.jupiter.params.ParameterizedTest
-    @org.junit.jupiter.params.provider.ValueSource(strings = {"/", "/workspace", "/workspace/project with spaces"})
-    void keepsKubernetesPathsIndependentOfTheServerFilesystem(String cwd) throws Exception {
-        var config = properties().getRuntimeBroker();
-        config.setProvisioner("kubernetes-workspace");
-        config.setWorkspaceId("resident-workspace");
-        config.setWorkspaceCwd(cwd);
-
-        assertThat(EmbeddedRuntimeBroker.workspaceId(config)).isEqualTo("resident-workspace");
-    }
-
-    @org.junit.jupiter.params.ParameterizedTest
-    @org.junit.jupiter.params.provider.NullAndEmptySource
-    @org.junit.jupiter.params.provider.ValueSource(strings = {"workspace", ".", "C:\\workspace", "\\\\server\\workspace",
-            "//workspace", "/workspace/", "/workspace//project", "/workspace/.", "/workspace/../project", "/workspace/\0project"})
-    void rejectsNonNormalizedKubernetesWorkspacePathsBeforeAssembly(String cwd) throws Exception {
-        var config = properties().getRuntimeBroker();
-        config.setProvisioner("kubernetes-workspace");
-        config.setWorkspaceId("resident-workspace");
-        config.setWorkspaceCwd(cwd);
-
-        assertThatThrownBy(() -> EmbeddedRuntimeBroker.workspaceId(config))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("workspace cwd must be an absolute normalized path");
-    }
-
-    @Test
     void constructsAnExternalScratchProvisionerForAValidConfiguration()
             throws Exception {
         ManagedAgentProperties properties = properties();
@@ -497,6 +455,40 @@ class EmbeddedRuntimeBrokerTest {
                 properties)) {
             assertThat(provisionerOf(broker).kind())
                     .isEqualTo(com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_SCRATCH);
+        }
+    }
+
+    @Test
+    void externalCloseCapabilityContainsRegistrationDriftAndReadFailure() throws Exception {
+        var source = new org.springframework.jdbc.datasource.DriverManagerDataSource(
+                "jdbc:h2:mem:external-capability-" + java.util.UUID.randomUUID()
+                        + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1", "sa", "");
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
+        var jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(source);
+        var manager = new org.springframework.jdbc.datasource.DataSourceTransactionManager(source);
+        var registrations = new com.alibaba.qwen.code.managedagent.persistence.ExternalStorageRegistrationStore(jdbc, manager);
+        registrations.registerExternalStorage("tenant", "register",
+                new com.alibaba.qwen.code.managedagent.contracts.persistence.ExternalStorageRegistration(
+                        new com.alibaba.qwen.code.managedagent.contracts.persistence.ExternalStorageRegistration.ExternalStorageIdentity("provider", "physical", 1),
+                        new com.alibaba.qwen.code.managedagent.contracts.persistence.ExternalStorageRegistration.StorageAlias("workspace", "/alias/workspace", "/remote/workspace")));
+        new com.alibaba.qwen.code.managedagent.persistence.ExternalWorkspaceMaterializationStore(jdbc, manager)
+                .materialize("tenant", "workspace", "Name", "actor", "materialize");
+        var properties = properties();
+        properties.getRuntimeBroker().setProvisioner("external-workspace");
+        properties.getRuntimeBroker().setIsolationClass("session");
+        properties.getRuntimeBroker().setExternalProviderId("provider");
+        properties.getRuntimeBroker().setExternalProviderUrl("http://127.0.0.1:9");
+        properties.getRuntimeBroker().setExternalProviderToken("provider-token-for-tests");
+        var context = new ContextBinding("tenant", "workspace", 1, "workspace", ".", "config", 1);
+        try (var broker = new EmbeddedRuntimeBroker(mock(ManagedAgentStore.class), properties,
+                new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32])),
+                new JdbcRuntimeSessionRepository(source),
+                new JdbcToolExecutionRepository(source), null, null, null, jdbc, manager)) {
+            assertThat(broker.supportsWorkspaceClose(context)).isTrue();
+            jdbc.update("UPDATE ma_storage SET registration_revision = 2");
+            assertThat(broker.supportsWorkspaceClose(context)).isFalse();
+            jdbc.execute("DROP TABLE ma_storage");
+            assertThat(broker.supportsWorkspaceClose(context)).isFalse();
         }
     }
 

@@ -78,3 +78,42 @@ export const MCP_APP_MESSAGES_ZH: Record<string, Message> = {
   'mcpApp.message.unknown':
     '无法确认是否已接收。再次发送前请检查原会话，本请求不会自动重试。',
 };
+
+export const MCP_APP_MESSAGES_RU: Record<string, Message> = {
+  'mcpApp.generatedUi.reset': 'Открыть заново и сбросить',
+  'mcpApp.generatedUi.reopen': 'Снова открыть интерактивный вид',
+  'mcpApp.generatedUi.openElsewhere': 'Уже открыто в другом месте.',
+  'mcpApp.generatedUi.reopenNotice':
+    'Повторное открытие начинается с исходного содержимого и отбрасывает предыдущие взаимодействия. Сначала проверьте исходную сессию: уже отправленный анализ не отменяется и не пересылается автоматически.',
+  'mcpApp.generatedUi.unavailable':
+    'Интерактивные виды для этой сессии выключены, поэтому показана только сводка.',
+  'mcpApp.generatedUi.title': 'Интерактивный вид',
+  'mcpApp.generatedUi.contextTag': ({ title } = {}) =>
+    `Значения интерактивного вида: ${title}`,
+  'mcpApp.generatedUi.loading': 'Загрузка интерактивного вида…',
+  'mcpApp.loading': 'Загрузка MCP App…',
+  'toolName.mcp__generated-ui__generated_ui_show': 'Интерактивный вид',
+  'mcpApp.message.title': 'Проверить сообщение App',
+  'mcpApp.message.description':
+    'Этот текст пришёл из MCP App. Отправка запускает обычный запрос в сессии ниже; обычные подтверждения инструментов по-прежнему действуют.',
+  'mcpApp.message.server': 'Сервер',
+  'mcpApp.message.resource': 'Ресурс',
+  'mcpApp.message.session': 'Целевая сессия',
+  'mcpApp.message.receipt': 'Квитанция запроса',
+  'mcpApp.message.send': 'Отправить в сессию',
+  'mcpApp.message.stopWaiting': 'Перестать ждать квитанцию',
+  'mcpApp.message.busy':
+    'Сессия занята. Дождитесь завершения, затем отправьте сообщение снова.',
+  'mcpApp.message.reviewing': 'Просмотрите полное сообщение перед отправкой.',
+  'mcpApp.message.preparing': 'Сообщение готовится. Его ещё можно отменить.',
+  'mcpApp.message.dispatched':
+    'Отправка. Ожидание подтверждения приёма сессией.',
+  'mcpApp.message.accepted':
+    'Сессия приняла этот запрос. Анализ может ещё выполняться.',
+  'mcpApp.message.cancelled': 'Отменено до отправки.',
+  'mcpApp.message.expired':
+    'Проверка истекла до отправки. Запросите новую проверку из App.',
+  'mcpApp.message.failed': 'Сообщение не принято. Текст сохранён здесь.',
+  'mcpApp.message.unknown':
+    'Не удалось подтвердить приём. Перед повторной отправкой проверьте исходную сессию. Этот запрос не будет повторён автоматически.',
+};

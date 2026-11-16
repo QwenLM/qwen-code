@@ -210,6 +210,195 @@ describe('HTTP Managed Session store', () => {
     },
   );
 
+  describe('fixed-interval loop automation routes', () => {
+    const automation = {
+      id: 'asch_abc',
+      object: 'automation',
+      session_id: SESSION_KEY.sessionId,
+      definition_revision: 1,
+      digest: `sha256:${'b'.repeat(64)}`,
+      goal: 'watch the build',
+      cron: '*/5 * * * *',
+      timezone: 'UTC',
+      session_mode: 'persistent',
+      overlap: 'skip',
+      catch_up: 'none',
+      catch_up_limit: null,
+      enabled: true,
+      state: 'active',
+      created_at: 1,
+      updated_at: 1,
+      gate: null,
+      gate_status: null,
+    };
+    const parsedAutomation = {
+      id: 'asch_abc',
+      sessionId: SESSION_KEY.sessionId,
+      cron: '*/5 * * * *',
+      timezone: 'UTC',
+      goal: 'watch the build',
+      state: 'active',
+      enabled: true,
+    };
+    const openStores = (fetchFn: typeof fetch) =>
+      createHttpManagedSessionStores({
+        baseUrl: 'http://127.0.0.1:8080',
+        sessionKey: SESSION_KEY,
+        writerId: 'harness-a',
+        writerToken: TOKEN_A,
+        fetchFn,
+      });
+
+    it('creates a definition with the writer binding and the derived Idempotency-Key', async () => {
+      const server = new FakeManagedSessionStore();
+      const fetchFn = vi.fn<typeof fetch>(async (input, init) =>
+        requestUrl(input).endsWith('/automations:create')
+          ? jsonResponse({ body: automation, replayed: false })
+          : server.fetch(input, init),
+      );
+      const stores = openStores(fetchFn);
+      try {
+        await stores.journalStore.open({ sessionKey: SESSION_KEY });
+        const definition = {
+          cron: '*/5 * * * *',
+          prompt: 'check the build',
+          session_mode: 'persistent' as const,
+        };
+        const result = await stores.automationsCreate(
+          definition,
+          'loop:call-1:create',
+        );
+        expect(result).toEqual({
+          automation: parsedAutomation,
+          replayed: false,
+        });
+        const requests = fetchFn.mock.calls.filter(([input]) =>
+          requestUrl(input).endsWith('/automations:create'),
+        );
+        expect(requests).toHaveLength(1);
+        const init = requests[0]![1];
+        expect(JSON.parse(String(init?.body))).toEqual({
+          workspaceId: SESSION_KEY.workspaceId,
+          writerId: 'harness-a',
+          writerGeneration: 1,
+          definition,
+        });
+        expect(new Headers(init?.headers).get('Idempotency-Key')).toBe(
+          'loop:call-1:create',
+        );
+      } finally {
+        await stores.stopLocal();
+      }
+    });
+
+    it('does not retry a create whose reply was lost; the re-drive reuses the key', async () => {
+      const server = new FakeManagedSessionStore();
+      const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
+        if (requestUrl(input).endsWith('/automations:create'))
+          throw new TypeError('lost create reply');
+        return server.fetch(input, init);
+      });
+      const stores = openStores(fetchFn);
+      try {
+        await stores.journalStore.open({ sessionKey: SESSION_KEY });
+        await expect(
+          stores.automationsCreate(
+            {
+              cron: '*/5 * * * *',
+              prompt: 'check the build',
+              session_mode: 'persistent',
+            },
+            'loop:call-1:create',
+          ),
+        ).rejects.toBeInstanceOf(ManagedSessionStoreTransportError);
+        expect(
+          fetchFn.mock.calls.filter(([input]) =>
+            requestUrl(input).endsWith('/automations:create'),
+          ),
+        ).toHaveLength(1);
+      } finally {
+        await stores.stopLocal();
+      }
+    });
+
+    it('lists a page of the bound Session definitions with the cursor contract', async () => {
+      const server = new FakeManagedSessionStore();
+      const fetchFn = vi.fn<typeof fetch>(async (input, init) =>
+        requestUrl(input).endsWith('/automations:list')
+          ? jsonResponse({
+              object: 'list',
+              data: [automation],
+              has_more: true,
+              next_cursor: 'cursor-2',
+            })
+          : server.fetch(input, init),
+      );
+      const stores = openStores(fetchFn);
+      try {
+        await stores.journalStore.open({ sessionKey: SESSION_KEY });
+        const page = await stores.automationsList('cursor-1', 100);
+        expect(page).toEqual({
+          data: [parsedAutomation],
+          hasMore: true,
+          nextCursor: 'cursor-2',
+        });
+        const requests = fetchFn.mock.calls.filter(([input]) =>
+          requestUrl(input).endsWith('/automations:list'),
+        );
+        expect(requests).toHaveLength(1);
+        expect(JSON.parse(String(requests[0]![1]?.body))).toEqual({
+          workspaceId: SESSION_KEY.workspaceId,
+          writerId: 'harness-a',
+          writerGeneration: 1,
+          cursor: 'cursor-1',
+          limit: 100,
+        });
+      } finally {
+        await stores.stopLocal();
+      }
+    });
+
+    it('retires a definition with the writer binding and the derived Idempotency-Key', async () => {
+      const server = new FakeManagedSessionStore();
+      const fetchFn = vi.fn<typeof fetch>(async (input, init) =>
+        requestUrl(input).endsWith('/automations:retire')
+          ? jsonResponse({
+              body: { ...automation, state: 'retired' },
+              replayed: true,
+            })
+          : server.fetch(input, init),
+      );
+      const stores = openStores(fetchFn);
+      try {
+        await stores.journalStore.open({ sessionKey: SESSION_KEY });
+        const result = await stores.automationsRetire(
+          'asch_abc',
+          'loop:call-2:retire',
+        );
+        expect(result).toEqual({
+          automation: { ...parsedAutomation, state: 'retired' },
+          replayed: true,
+        });
+        const requests = fetchFn.mock.calls.filter(([input]) =>
+          requestUrl(input).endsWith('/automations:retire'),
+        );
+        expect(requests).toHaveLength(1);
+        const init = requests[0]![1];
+        expect(JSON.parse(String(init?.body))).toEqual({
+          workspaceId: SESSION_KEY.workspaceId,
+          writerId: 'harness-a',
+          writerGeneration: 1,
+          automationId: 'asch_abc',
+        });
+        expect(new Headers(init?.headers).get('Idempotency-Key')).toBe(
+          'loop:call-2:retire',
+        );
+      } finally {
+        await stores.stopLocal();
+      }
+    });
+  });
+
   it('reads a model configuration only with an acquired writer and a bound digest', async () => {
     const server = new FakeManagedSessionStore();
     const digest = `sha256:${'a'.repeat(64)}`;
