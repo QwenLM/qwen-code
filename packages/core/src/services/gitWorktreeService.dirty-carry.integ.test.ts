@@ -779,6 +779,9 @@ describe('GitWorktreeService.createUserWorktree() — carryDirtyState', () => {
       }
       expect(created.success).toBe(false);
       expect(created.error).toContain('dirty state');
+      // A genuine environment fault keeps the hard refusal: it is NOT the
+      // user-clearable merge state, so it carries no typed 409 code (R12-1).
+      expect(created.code).toBeUndefined();
       // No checkout left behind for a refused carry.
       await expect(
         fs.lstat(service.getUserWorktreePath('objfail')),
@@ -787,6 +790,95 @@ describe('GitWorktreeService.createUserWorktree() — carryDirtyState', () => {
       expect(await read(path.join(repoRoot, 'README.md'))).toBe('edited\n');
     },
   );
+
+  it('refuses a carry on an unmerged index with a typed merge-in-progress code (R12-1)', async () => {
+    // A real conflicted merge: `git stash create` cannot run on an unmerged
+    // index. That is a state the user can clear (resolve/abort), not a daemon
+    // fault, so the carry-requested creation must surface a typed code the
+    // route maps to a readable 409 rather than a 500.
+    git(repoRoot, 'checkout', '-q', '-b', 'side');
+    await fs.writeFile(path.join(repoRoot, 'tracked.txt'), 'side\n');
+    git(repoRoot, 'add', 'tracked.txt');
+    git(repoRoot, 'commit', '-qm', 'side', '--no-verify');
+    git(repoRoot, 'checkout', '-q', 'main');
+    await fs.writeFile(path.join(repoRoot, 'tracked.txt'), 'main\n');
+    git(repoRoot, 'add', 'tracked.txt');
+    git(repoRoot, 'commit', '-qm', 'main edit', '--no-verify');
+    expect(gitOk(repoRoot, 'merge', 'side')).toBe(false);
+    expect(git(repoRoot, 'ls-files', '-u')).not.toBe('');
+
+    const service = new GitWorktreeService(repoRoot);
+    const created = await service.createUserWorktree('merge-state', 'main', {
+      detached: true,
+      carryDirtyState: true,
+    });
+    expect(created.success).toBe(false);
+    expect(created.code).toBe('worktree_merge_in_progress');
+    // The fresh worktree was removed; no checkout is left behind.
+    await expect(
+      fs.lstat(service.getUserWorktreePath('merge-state')),
+    ).rejects.toThrow();
+  });
+
+  it.skipIf(!arePermissionBitsEnforced())(
+    'removeDeletedToDirectoryFiles fails closed when the target file cannot be hashed (R11-4)',
+    async () => {
+      // The source deletes tracked README.md into a directory; the target's
+      // README.md is the committed base version but mode 000, so hash-object
+      // cannot answer. The guard must refuse rather than delete a file it
+      // could not verify (the old `dstBlob !== null && …` skip deleted it).
+      const service = new GitWorktreeService(repoRoot);
+      const wt = await service.createUserWorktree('r114-hash', 'main', {
+        detached: true,
+      });
+      expect(wt.success).toBe(true);
+      const wtPath = wt.worktree!.path;
+      await fs.rm(path.join(wtPath, 'README.md'));
+      await fs.mkdir(path.join(wtPath, 'README.md'));
+      await fs.writeFile(
+        path.join(wtPath, 'README.md', 'agent.txt'),
+        'agent\n',
+      );
+      const targetReadme = path.join(repoRoot, 'README.md');
+      await fs.chmod(targetReadme, 0o000);
+      const wtService = new GitWorktreeService(wtPath);
+      try {
+        await expect(
+          wtService.removeDeletedToDirectoryFiles(repoRoot),
+        ).rejects.toMatchObject({ conflict: true });
+        expect(existsSync(targetReadme)).toBe(true);
+      } finally {
+        await fs.chmod(targetReadme, 0o644);
+      }
+    },
+  );
+
+  it('removeDeletedToDirectoryFiles fails closed when HEAD cannot resolve the path (R11-4)', async () => {
+    // An AD record (staged add, then deleted into a directory) names a path
+    // absent from HEAD, so srcBlob is null. The target holds a regular file
+    // at that path; the guard must refuse rather than delete it unchecked
+    // (the old `if (srcBlob === null) continue` skip deleted it).
+    const service = new GitWorktreeService(repoRoot);
+    const wt = await service.createUserWorktree('r114-ad', 'main', {
+      detached: true,
+    });
+    expect(wt.success).toBe(true);
+    const wtPath = wt.worktree!.path;
+    await fs.writeFile(path.join(wtPath, 'extra.txt'), 'staged\n');
+    git(wtPath, 'add', 'extra.txt');
+    await fs.rm(path.join(wtPath, 'extra.txt'));
+    await fs.mkdir(path.join(wtPath, 'extra.txt'));
+    await fs.writeFile(path.join(wtPath, 'extra.txt', 'inner.txt'), 'inner\n');
+    // The target has its own regular file at that path (not in the base HEAD).
+    const targetExtra = path.join(repoRoot, 'extra.txt');
+    await fs.writeFile(targetExtra, 'local\n');
+    const wtService = new GitWorktreeService(wtPath);
+    await expect(
+      wtService.removeDeletedToDirectoryFiles(repoRoot),
+    ).rejects.toMatchObject({ conflict: true });
+    expect(existsSync(targetExtra)).toBe(true);
+    expect(await read(targetExtra)).toBe('local\n');
+  });
 
   it('writes the exclude rule for an in-root directory named ..cache', async () => {
     // A '..' PREFIX is not a parent segment: a service rooted under an

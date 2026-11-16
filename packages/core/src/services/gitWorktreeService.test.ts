@@ -808,4 +808,69 @@ describe('applyStashSnapshot index-state verification', () => {
       ),
     });
   });
+
+  it('refuses before applying when the snapshot would overwrite an ignored local file (R12-2)', async () => {
+    // The snapshot carries secret.env (force-added in the worktree); the
+    // target holds it ignored-untracked. stash apply would silently replace
+    // unrecoverable local content with exit 0 and no unmerged entries, so
+    // the guard must refuse BEFORE mutating.
+    git.raw.mockClear();
+    git.raw.mockImplementation(async (args: string[]) => {
+      if (args[0] === 'diff') return 'secret.env\0';
+      if (args[0] === 'ls-files' && args[1] === '--others') {
+        return 'secret.env\0';
+      }
+      return '';
+    });
+    const service = new GitWorktreeService('/repo');
+    await expect(
+      service.applyStashSnapshot('/repo', 'snap'),
+    ).rejects.toMatchObject({ conflict: true, restoreFailed: false });
+    expect(git.raw).not.toHaveBeenCalledWith(['stash', 'apply', 'snap']);
+  });
+
+  it('applies when the snapshot paths do not intersect the ignored set (R12-2)', async () => {
+    git.raw.mockClear();
+    git.raw.mockImplementation(async (args: string[]) => {
+      if (args[0] === 'diff') return 'tracked.txt\0';
+      if (args[0] === 'ls-files' && args[1] === '--others') {
+        return 'other-ignored.env\0';
+      }
+      return '';
+    });
+    const service = new GitWorktreeService('/repo');
+    await expect(
+      service.applyStashSnapshot('/repo', 'snap'),
+    ).resolves.toBeUndefined();
+    expect(git.raw).toHaveBeenCalledWith(['stash', 'apply', 'snap']);
+  });
+
+  it('fails closed when the snapshot paths cannot be determined (R12-2)', async () => {
+    git.raw.mockClear();
+    git.raw.mockImplementation(async (args: string[]) => {
+      if (args[0] === 'diff') throw new Error('bad snapshot');
+      return '';
+    });
+    const service = new GitWorktreeService('/repo');
+    await expect(
+      service.applyStashSnapshot('/repo', 'snap'),
+    ).rejects.toMatchObject({ conflict: true });
+    expect(git.raw).not.toHaveBeenCalledWith(['stash', 'apply', 'snap']);
+  });
+
+  it('fails closed when the ignored set cannot be determined (R12-2)', async () => {
+    git.raw.mockClear();
+    git.raw.mockImplementation(async (args: string[]) => {
+      if (args[0] === 'diff') return 'secret.env\0';
+      if (args[0] === 'ls-files' && args[1] === '--others') {
+        throw new Error('index unreadable');
+      }
+      return '';
+    });
+    const service = new GitWorktreeService('/repo');
+    await expect(
+      service.applyStashSnapshot('/repo', 'snap'),
+    ).rejects.toMatchObject({ conflict: true });
+    expect(git.raw).not.toHaveBeenCalledWith(['stash', 'apply', 'snap']);
+  });
 });

@@ -1089,6 +1089,13 @@ export interface CreateWorktreeResult {
   worktree?: WorktreeInfo;
   error?: string;
   /**
+   * Machine-readable refusal code for a failed creation, when the cause is
+   * a state the caller can surface distinctly (e.g.
+   * `worktree_merge_in_progress` for an unmerged index). Absent for generic
+   * failures, which callers map to a server fault.
+   */
+  code?: string;
+  /**
    * Repo-relative paths the dirty carry applied (tracked + untracked),
    * present when carryDirtyState was requested. A prepared-worktree
    * rollback exempts exactly these from its cleanliness gate.
@@ -1475,11 +1482,13 @@ export class GitWorktreeService {
     removedPaths: string[];
     repoTop: string;
     captureError: string | null;
+    unmergedIndex: boolean;
   }> {
     // NOTE: `git stash create` does NOT support --include-untracked;
     // untracked files are handled separately via file copy.
     let stashCommit = '';
     let captureError: string | null = null;
+    let unmergedIndex = false;
     try {
       stashCommit = (await (await this.getGit()).stash(['create'])).trim();
     } catch (error) {
@@ -1487,6 +1496,16 @@ export class GitWorktreeService {
       // "nothing to carry": record it so a carry-requesting caller refuses
       // instead of moving the session without the user's tracked edits.
       captureError = error instanceof Error ? error.message : String(error);
+      // `stash create` also fails on an unmerged index (an in-progress merge
+      // or rebase). That is a state the user can clear, not a daemon fault:
+      // distinguish it so a carry-requesting caller answers a readable 409
+      // instead of a 500 (R12-1). ls-files reads the index without locking,
+      // so it still answers when index.lock is held; a probe that cannot
+      // answer leaves unmergedIndex false and keeps the hard refusal.
+      const unmerged = await (await this.getGit())
+        .raw(['ls-files', '-u'])
+        .catch(() => '');
+      unmergedIndex = unmerged.trim().length > 0;
     }
     // The tracked paths the stash carries, so a rollback can exempt
     // exactly the carried overlay from its cleanliness gate.
@@ -1536,6 +1555,7 @@ export class GitWorktreeService {
       removedPaths,
       repoTop: repoTop ?? this.sourceRepoPath,
       captureError,
+      unmergedIndex,
     };
   }
 
@@ -1938,11 +1958,20 @@ export class GitWorktreeService {
       const srcBlob = await (await this.getGit())
         .revparse([`HEAD:${relPath}`])
         .catch(() => null);
-      if (srcBlob === null) continue;
       const dstBlob = await targetGit
         .raw(['hash-object', '--', dst])
         .catch(() => null);
-      if (dstBlob !== null && dstBlob.trim() !== srcBlob.trim()) {
+      // Fail closed on every unverifiable shape: an unresolvable HEAD:path
+      // (e.g. an AD record) or an unhashable local file (mode 000) must not
+      // fall through to the removal — both skips used to leave the path in
+      // removedPaths, deleting local work with no comparison (R11-4). Only
+      // an exact blob match proves the local file is the version being
+      // deleted and is safe to remove.
+      if (
+        srcBlob === null ||
+        dstBlob === null ||
+        dstBlob.trim() !== srcBlob.trim()
+      ) {
         throw new WorktreeDirtyCarryConflictError(
           `The file-to-directory carry conflicts with local modifications to ${relPath}`,
           { conflict: true },
@@ -3153,12 +3182,27 @@ export class GitWorktreeService {
             : this;
         const dirtyState = await captureService.captureDirtyState();
         if (dirtyState.captureError !== null) {
-          // Capturing the tracked overlay failed (held index.lock, read-only
-          // git dir). An empty carry here is NOT a clean source: refuse and
-          // remove the worktree rather than relocate the session without the
-          // user's tracked edits. Scoped to carry-requesting callers —
-          // setupWorktrees ignores captureError and keeps its fail-open degrade.
+          // Capturing the tracked overlay failed. An empty carry here is NOT
+          // a clean source: refuse and remove the worktree rather than
+          // relocate the session without the user's tracked edits. Scoped to
+          // carry-requesting callers — setupWorktrees ignores captureError
+          // and keeps its fail-open degrade.
           await this.removeWorktree(worktreePath).catch(() => undefined);
+          if (dirtyState.unmergedIndex) {
+            // An in-progress merge/rebase (unmerged index) is a state the
+            // user can clear, not a daemon fault: surface a typed refusal the
+            // route maps to a readable 409 instead of a 500 (R12-1).
+            return {
+              success: false,
+              code: 'worktree_merge_in_progress',
+              error:
+                'The workspace has an in-progress merge or rebase (unmerged files). ' +
+                'Resolve or abort it before starting a worktree session.',
+            };
+          }
+          // A genuine environment fault (held index.lock, read-only git dir)
+          // keeps the hard refusal so a session is never relocated without
+          // the user's tracked edits.
           return {
             success: false,
             error: `Failed to capture the source checkout's dirty state: ${dirtyState.captureError}`,
@@ -3315,6 +3359,61 @@ export class GitWorktreeService {
     const git = simpleGit(checkoutPath, {
       errors: carryApplyErrorDetection,
     }).env(gitEnv());
+    // Refuse BEFORE mutating: `git stash apply` silently overwrites a local
+    // ignored-untracked file whose content lives in no object store, exits
+    // 0, and leaves no unmerged entries — so neither the conflict nor the
+    // error branch below would fire (R12-2). The checkout's
+    // --no-overwrite-ignore guard does not cover this apply, and in the
+    // detached-at-base shape no checkout runs at all. Intersect the
+    // snapshot's tracked paths with the target's ignored-untracked set;
+    // a hit (or a probe that cannot answer) fails closed as a conflict so
+    // the route answers 409 and the file survives.
+    let snapshotPathsRaw: string;
+    try {
+      snapshotPathsRaw = await git.raw([
+        'diff',
+        '--name-only',
+        '--no-renames',
+        '-z',
+        `${snapshot}^1`,
+        snapshot,
+      ]);
+    } catch (error) {
+      throw new WorktreeDirtyCarryConflictError(
+        `Cannot determine the stash snapshot's paths to guard ignored files: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        { conflict: true },
+      );
+    }
+    const snapshotPaths = new Set(snapshotPathsRaw.split('\0').filter(Boolean));
+    if (snapshotPaths.size > 0) {
+      let ignoredRaw: string;
+      try {
+        ignoredRaw = await git.raw([
+          'ls-files',
+          '--others',
+          '--ignored',
+          '--exclude-standard',
+          '-z',
+        ]);
+      } catch (error) {
+        throw new WorktreeDirtyCarryConflictError(
+          `Cannot determine the checkout's ignored files to guard the stash apply: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+          { conflict: true },
+        );
+      }
+      for (const ignoredPath of ignoredRaw.split('\0').filter(Boolean)) {
+        if (snapshotPaths.has(ignoredPath)) {
+          throw new WorktreeDirtyCarryConflictError(
+            `Stash snapshot would overwrite the ignored local file ${ignoredPath}`,
+            { conflict: true },
+          );
+        }
+      }
+    }
     let applyError: unknown;
     try {
       await git.raw(['stash', 'apply', snapshot]);

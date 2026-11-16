@@ -3411,6 +3411,15 @@ export function registerSessionRoutes(
           detached: true,
         });
         if (!wtResult.success || !wtResult.worktree) {
+          // An in-progress merge/rebase is a state the user can clear, not a
+          // daemon fault: answer a readable 409 rather than a 500 (R12-1).
+          if (wtResult.code === 'worktree_merge_in_progress') {
+            res.status(409).json({
+              error: wtResult.error ?? 'The workspace has an in-progress merge',
+              code: 'worktree_merge_in_progress',
+            });
+            return;
+          }
           res.status(500).json({
             error: wtResult.error ?? 'Failed to create worktree',
             code: 'worktree_create_failed',

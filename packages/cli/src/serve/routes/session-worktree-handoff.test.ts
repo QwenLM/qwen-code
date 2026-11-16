@@ -851,6 +851,41 @@ describe('POST /session/:id/worktree-handoff', () => {
     ).toBe('LOCAL_NEW_CONTENT\n');
   });
 
+  it('refuses a snapshot apply that would overwrite a local ignored file at base (R12-2)', async () => {
+    const fixture = makeFixture();
+    fixture.writeTranscript();
+    writeFileSync(
+      path.join(fixture.workspaceDir, '.gitignore'),
+      'secret.env\n',
+    );
+    git(fixture.workspaceDir, 'add', '.gitignore');
+    git(fixture.workspaceDir, 'commit', '-qm', 'ignore', '--no-verify');
+    await fixture.createDetachedWorktree();
+    // The worktree force-adds secret.env but does NOT commit it: HEAD stays
+    // at the base (branch '', head === base), so no branch checkout runs and
+    // --no-overwrite-ignore never fires. The staged file rides the stash
+    // snapshot, whose apply would silently replace the local ignored copy.
+    writeFileSync(
+      path.join(fixture.worktreeDir, 'secret.env'),
+      'AGENT_TEMPLATE\n',
+    );
+    git(fixture.worktreeDir, 'add', '-f', 'secret.env');
+    writeFileSync(
+      path.join(fixture.workspaceDir, 'secret.env'),
+      'LOCAL_UNIQUE_SECRET\n',
+    );
+
+    const res = await request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-handoff`)
+      .send({ to: 'local' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('handoff_snapshot_conflict');
+    expect(
+      readFileSync(path.join(fixture.workspaceDir, 'secret.env'), 'utf8'),
+    ).toBe('LOCAL_UNIQUE_SECRET\n');
+  });
+
   it('fails closed when the local checkout is not the bound workspace (R9-1)', async () => {
     // Daemon bound to a subdirectory; a branch-route-shaped sidecar records
     // originalCwd as the repo top. listWorkspaceSessions cannot answer for the

@@ -15856,6 +15856,77 @@ describe('createServeApp', () => {
       }
     });
 
+    it('409 when the workspace has an in-progress merge (R12-1)', async () => {
+      // An unmerged index makes the dirty carry refuse with a typed code;
+      // the route must surface a readable 409, not a 500 daemon fault.
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.impl = () => ({
+        isGitRepository: () => Promise.resolve(true),
+        getCurrentBranch: () => Promise.resolve('main'),
+        createUserWorktree: () =>
+          Promise.resolve({
+            success: false,
+            code: 'worktree_merge_in_progress',
+            error: 'The workspace has an in-progress merge or rebase',
+          }),
+      });
+      mockBranchOps.getHeadCommit = () => Promise.resolve('b'.repeat(40));
+
+      try {
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ worktree: { slug: 'my-task' } });
+
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('worktree_merge_in_progress');
+        expect(bridge.calls).toHaveLength(0);
+      } finally {
+        mockBranchOps.getHeadCommit = undefined;
+        mockWt.impl = undefined;
+      }
+    });
+
+    it('500 when worktree creation fails without a typed code (R12-1)', async () => {
+      // A genuine environment fault carries no code and stays a 500: the
+      // merge-state 409 must not swallow real daemon failures.
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.impl = () => ({
+        isGitRepository: () => Promise.resolve(true),
+        getCurrentBranch: () => Promise.resolve('main'),
+        createUserWorktree: () =>
+          Promise.resolve({
+            success: false,
+            error: "Failed to capture the source checkout's dirty state: boom",
+          }),
+      });
+      mockBranchOps.getHeadCommit = () => Promise.resolve('b'.repeat(40));
+
+      try {
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ worktree: { slug: 'my-task' } });
+
+        expect(res.status).toBe(500);
+        expect(res.body.code).toBe('worktree_create_failed');
+        expect(bridge.calls).toHaveLength(0);
+      } finally {
+        mockBranchOps.getHeadCommit = undefined;
+        mockWt.impl = undefined;
+      }
+    });
+
     it('persists the canonical worktree path returned by relocation', async () => {
       const createdPath = `${WS_BOUND}/.qwen/worktrees/my-task-link`;
       const canonicalPath = `${WS_BOUND}/.qwen/worktrees/my-task`;
