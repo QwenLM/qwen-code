@@ -12,6 +12,7 @@ import {
 import type { DaemonSessionTaskWithWorkflowStatus } from '@qwen-code/sdk/daemon';
 import {
   BotIcon,
+  CircleHelpIcon,
   CirclePauseIcon,
   LoaderCircleIcon,
   SquareActivityIcon,
@@ -40,6 +41,8 @@ export interface ComposerTaskChipsProps {
   includeAgents: boolean;
   /** Open the task: locate a workflow in the transcript, open a shell's output, … */
   onSelectTask: (task: DaemonSessionTaskWithWorkflowStatus) => void;
+  /** Ask the model to explain the task as a side question, without opening it. */
+  onExplainTask?: (task: DaemonSessionTaskWithWorkflowStatus) => void;
   /** Hand focus back to the composer, optionally with a typed character. */
   onReturnToInput?: (text?: string) => void;
 }
@@ -104,7 +107,7 @@ export const ComposerTaskChips = forwardRef<
   ComposerTaskChipsHandle,
   ComposerTaskChipsProps
 >(function ComposerTaskChips(
-  { tasks, includeAgents, onSelectTask, onReturnToInput },
+  { tasks, includeAgents, onSelectTask, onExplainTask, onReturnToInput },
   ref,
 ) {
   const { t } = useI18n();
@@ -184,6 +187,34 @@ export const ComposerTaskChips = forwardRef<
     setOpenKind(null);
     onSelectTask(task);
   };
+
+  const handleListKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    event.stopPropagation();
+    setOpenKind(null);
+    if (openGroup) {
+      chipRefs.current.get(openGroup.kind)?.focus({ preventScroll: true });
+    }
+  };
+
+  const explainButton = (
+    task: DaemonSessionTaskWithWorkflowStatus,
+    className: string,
+    onKeyDown: (event: KeyboardEvent<HTMLButtonElement>) => void,
+  ) => (
+    <button
+      type="button"
+      className={className}
+      aria-label={t('tasks.explain.aria', { label: taskLabel(task) })}
+      title={t('tasks.explain.tooltip')}
+      data-testid="composer-task-explain"
+      onClick={() => onExplainTask?.(task)}
+      onKeyDown={onKeyDown}
+    >
+      <CircleHelpIcon aria-hidden="true" />
+    </button>
+  );
 
   const activateChip = (group: ComposerTaskChipGroup) => {
     if (group.tasks.length === 1) {
@@ -275,28 +306,29 @@ export const ComposerTaskChips = forwardRef<
         >
           <div className={styles.listTitle}>{groupLabel(openGroup)}</div>
           {openGroup.tasks.map((task) => (
-            <button
+            <div
               key={task.id}
-              type="button"
               className={styles.listRow}
-              onClick={() => selectTask(task)}
-              onKeyDown={(event) => {
-                if (event.key === 'Escape') {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  setOpenKind(null);
-                  chipRefs.current
-                    .get(openGroup.kind)
-                    ?.focus({ preventScroll: true });
-                }
-              }}
+              data-testid="composer-task-row"
             >
-              <span className={styles.rowIcon}>{kindIcon(openGroup.kind)}</span>
-              <span className={styles.rowLabel} title={taskLabel(task)}>
-                {taskLabel(task)}
-              </span>
-              <TaskElapsed task={task} now={now} />
-            </button>
+              <button
+                type="button"
+                className={styles.listRowMain}
+                data-testid="composer-task-open"
+                onClick={() => selectTask(task)}
+                onKeyDown={handleListKeyDown}
+              >
+                <span className={styles.rowIcon}>
+                  {kindIcon(openGroup.kind)}
+                </span>
+                <span className={styles.rowLabel} title={taskLabel(task)}>
+                  {taskLabel(task)}
+                </span>
+                <TaskElapsed task={task} now={now} />
+              </button>
+              {onExplainTask &&
+                explainButton(task, styles.explainButton, handleListKeyDown)}
+            </div>
           ))}
         </div>
       )}
@@ -308,7 +340,7 @@ export const ComposerTaskChips = forwardRef<
         {groups.map((group, index) => {
           const moving = group.tasks.some(isMoving);
           const multiple = group.tasks.length > 1;
-          return (
+          const chip = (
             <button
               key={group.kind}
               ref={(node) => {
@@ -335,6 +367,17 @@ export const ComposerTaskChips = forwardRef<
               </span>
               <span className={styles.chipLabel}>{groupLabel(group)}</span>
             </button>
+          );
+          if (multiple || !onExplainTask) return chip;
+          return (
+            <span key={group.kind} className={styles.chipWrap}>
+              {chip}
+              {explainButton(
+                group.tasks[0],
+                `${styles.explainButton} ${styles.chipExplain}`,
+                (event) => handleChipKeyDown(event, index),
+              )}
+            </span>
           );
         })}
       </div>

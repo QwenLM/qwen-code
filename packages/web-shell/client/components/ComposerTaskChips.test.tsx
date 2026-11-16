@@ -378,4 +378,148 @@ describe('ComposerTaskChips', () => {
     });
     expect(onReturnToInput).toHaveBeenLastCalledWith('a');
   });
+
+  describe('explain affordance', () => {
+    const explainButtons = (scope: ParentNode = container) =>
+      Array.from(
+        scope.querySelectorAll<HTMLButtonElement>(
+          '[data-testid="composer-task-explain"]',
+        ),
+      );
+
+    it('offers a "?" beside a single-task chip that asks without opening', () => {
+      const task = shell('shell-1');
+      const onExplainTask = vi.fn();
+      const { onSelectTask } = render([task], { onExplainTask });
+
+      const explains = explainButtons();
+      expect(explains).toHaveLength(1);
+      expect(explains[0].getAttribute('aria-label')).toBe(
+        'Explain task: npm run dev',
+      );
+      expect(explains[0].getAttribute('title')).toBe(
+        'Explain what this task is doing',
+      );
+
+      act(() => explains[0].click());
+
+      expect(onExplainTask).toHaveBeenCalledExactlyOnceWith(task);
+      expect(onSelectTask).not.toHaveBeenCalled();
+    });
+
+    it('keeps the chip itself opening the task', () => {
+      const task = shell('shell-1');
+      const onExplainTask = vi.fn();
+      const { onSelectTask } = render([task], { onExplainTask });
+
+      act(() => chips()[0].click());
+
+      expect(onSelectTask).toHaveBeenCalledExactlyOnceWith(task);
+      expect(onExplainTask).not.toHaveBeenCalled();
+    });
+
+    it('offers one "?" per list row and keeps the list open on ask', () => {
+      const first = workflow('wf-1');
+      const second = workflow('wf-2');
+      const onExplainTask = vi.fn();
+      const { onSelectTask } = render([first, second], { onExplainTask });
+
+      // The multi-task chip itself has no "?"; its rows do.
+      expect(explainButtons()).toHaveLength(0);
+
+      act(() => chips()[0].click());
+      const list = container.querySelector(
+        '[data-testid="composer-task-list"]',
+      )!;
+      const explains = explainButtons(list);
+      expect(explains).toHaveLength(2);
+
+      act(() => explains[1].click());
+
+      expect(onExplainTask).toHaveBeenCalledExactlyOnceWith(second);
+      expect(onSelectTask).not.toHaveBeenCalled();
+      expect(
+        container.querySelector('[data-testid="composer-task-list"]'),
+      ).not.toBeNull();
+    });
+
+    it('renders no "?" when the host does not wire explanation', () => {
+      render([workflow('wf-1'), workflow('wf-2')]);
+      expect(explainButtons()).toHaveLength(0);
+
+      act(() => chips()[0].click());
+      expect(explainButtons()).toHaveLength(0);
+    });
+
+    it('closes the list back to its chip on Escape from a row "?"', () => {
+      const onExplainTask = vi.fn();
+      render([workflow('wf-1'), workflow('wf-2')], { onExplainTask });
+      act(() => chips()[0].click());
+
+      act(() => {
+        explainButtons()[1].dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+        );
+      });
+
+      expect(
+        container.querySelector('[data-testid="composer-task-list"]'),
+      ).toBeNull();
+      expect(document.activeElement).toBe(chips()[0]);
+      expect(onExplainTask).not.toHaveBeenCalled();
+    });
+
+    it('drops back to the composer from the chip "?" keyboard', () => {
+      const onExplainTask = vi.fn();
+      const { onReturnToInput } = render([shell('shell-1')], { onExplainTask });
+      const explain = explainButtons()[0];
+
+      act(() => {
+        explain.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }),
+        );
+      });
+      expect(onReturnToInput).toHaveBeenCalledWith();
+
+      act(() => {
+        explain.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'a', bubbles: true }),
+        );
+      });
+      expect(onReturnToInput).toHaveBeenLastCalledWith('a');
+    });
+
+    it('returns focus to the composer when the explained task finishes', () => {
+      const onExplainTask = vi.fn();
+      const onReturnToInput = vi.fn(() => outsideInput.focus());
+      render([workflow('wf-1')], { onExplainTask, onReturnToInput });
+      act(() => explainButtons()[0].focus());
+
+      render([workflow('wf-1', 'completed')], {
+        onExplainTask,
+        onReturnToInput,
+      });
+
+      expect(onReturnToInput).toHaveBeenCalledOnce();
+      expect(document.activeElement).toBe(outsideInput);
+    });
+
+    it('grows a chip "?" when its group shrinks to one task', () => {
+      const remaining = workflow('wf-1');
+      const onExplainTask = vi.fn();
+      render([remaining, workflow('wf-2')], { onExplainTask });
+      act(() => chips()[0].click());
+      expect(explainButtons()).toHaveLength(2);
+
+      render([remaining], { onExplainTask });
+
+      expect(
+        container.querySelector('[data-testid="composer-task-list"]'),
+      ).toBeNull();
+      const explains = explainButtons();
+      expect(explains).toHaveLength(1);
+      act(() => explains[0].click());
+      expect(onExplainTask).toHaveBeenCalledExactlyOnceWith(remaining);
+    });
+  });
 });

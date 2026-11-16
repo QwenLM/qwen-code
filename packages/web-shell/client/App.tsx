@@ -173,7 +173,10 @@ import { MonitorDetailsProvider } from './monitorDetailsContext';
 import { WorkflowDetailsProvider } from './workflowDetailsContext';
 import { createToolRevealStore, ToolRevealProvider } from './toolRevealContext';
 import { findMonitorTaskForTool } from './utils/monitorTasks';
-import { isComposerTask } from './utils/composerTasks';
+import {
+  buildTaskExplainQuestion,
+  isComposerTask,
+} from './utils/composerTasks';
 import {
   getTaskActivityKey,
   hasActiveTaskActivity,
@@ -18711,6 +18714,13 @@ export function App({
     ],
   );
 
+  const explainComposerTask = useCallback(
+    (task: DaemonSessionTaskWithWorkflowStatus) => {
+      runVisibleBtw(buildTaskExplainQuestion(task, t));
+    },
+    [runVisibleBtw, t],
+  );
+
   const refreshGoal = useCallback(async () => {
     const owner = sessionOwnerGuard.capture();
     const response = await sessionActions.getGoal();
@@ -26151,6 +26161,7 @@ export function App({
                             // their task surfaces.
                             includeAgents={environmentTasksReplacementEnabled}
                             onSelectTask={openComposerTask}
+                            onExplainTask={explainComposerTask}
                             onReturnToInput={handleReturnToEditor}
                           />
                         )}

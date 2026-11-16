@@ -200,10 +200,41 @@ test('a chip for several runs lists them to pick from', async ({
   });
 
   // A run with no row in this transcript opens in the tasks dialog.
-  await list.getByRole('button', { name: /Update the docs/ }).click();
+  await list
+    .getByTestId('composer-task-open')
+    .filter({ hasText: 'Update the docs' })
+    .click();
   await expect(
     page.getByRole('dialog', { name: 'Background tasks' }),
   ).toBeVisible();
+});
+
+test('a "?" on a task choice asks a side question for an explanation', async ({
+  page,
+}, testInfo) => {
+  await openSession(page, testInfo, [
+    workflowTask(),
+    workflowTask({
+      id: 'workflow-docs',
+      toolUseId: undefined,
+      label: 'Update the docs',
+      status: 'paused',
+    }),
+  ]);
+
+  await page
+    .getByTestId('composer-task-chips')
+    .getByRole('button', { name: '2 workflows' })
+    .click();
+  const list = page.getByTestId('composer-task-list');
+  await list.getByTestId('composer-task-explain').first().click();
+
+  // The mock daemon's stock side answer streams into the btw panel; the
+  // list stays open so another task can be asked about next.
+  await expect(page.locator('[class*="btwPanel"]')).toContainText(
+    'A side answer.',
+  );
+  await expect(list).toBeVisible();
 });
 
 test('an expired reveal does not reopen a collapsed workflow on sibling approval', async ({
@@ -266,15 +297,23 @@ test('keyboard focus leaving task choices closes the list', async ({
     .getByTestId('composer-task-chips')
     .getByRole('button', { name: '2 workflows' });
   const list = page.getByTestId('composer-task-list');
+  const firstOpen = list
+    .getByTestId('composer-task-open')
+    .filter({ hasText: 'Review and fix' });
+  const secondOpen = list
+    .getByTestId('composer-task-open')
+    .filter({ hasText: 'Update the docs' });
+  const explains = list.getByTestId('composer-task-explain');
   await chip.focus();
   await page.keyboard.press('Enter');
-  await expect(
-    list.getByRole('button', { name: /Review and fix/ }),
-  ).toBeFocused();
+  await expect(firstOpen).toBeFocused();
+  // Each row offers two actions: open the task, then ask "?" about it.
   await page.keyboard.press('Tab');
-  await expect(
-    list.getByRole('button', { name: /Update the docs/ }),
-  ).toBeFocused();
+  await expect(explains.first()).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(secondOpen).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(explains.last()).toBeFocused();
   await page.keyboard.press('Tab');
   await expect(chip).toBeFocused();
   await expect(list).toBeVisible();
@@ -300,11 +339,12 @@ test('selection and task completion keep focus near the composer', async ({
     .getByTestId('composer-task-chips')
     .locator('[data-kind="workflow"]');
   const list = page.getByTestId('composer-task-list');
+  const firstOpen = list
+    .getByTestId('composer-task-open')
+    .filter({ hasText: 'Review and fix' });
   await chip.focus();
   await page.keyboard.press('Enter');
-  await expect(
-    list.getByRole('button', { name: /Review and fix/ }),
-  ).toBeFocused();
+  await expect(firstOpen).toBeFocused();
   await page.keyboard.press('Enter');
   await expect(list).toHaveCount(0);
   await expect(
@@ -313,9 +353,7 @@ test('selection and task completion keep focus near the composer', async ({
   await expect(chip).toBeFocused();
 
   await page.keyboard.press('Enter');
-  await expect(
-    list.getByRole('button', { name: /Review and fix/ }),
-  ).toBeFocused();
+  await expect(firstOpen).toBeFocused();
   scenario.workflowTasks = [first, { ...second, status: 'completed' }];
   await expect(chip).toHaveText('1 workflow');
   await expect(list).toHaveCount(0);
@@ -349,8 +387,12 @@ test('a multi-task chip opens keyboard choices and returns focus on Escape @smok
     .getByTestId('composer-task-chips')
     .getByRole('button', { name: '2 workflows' });
   const list = page.getByTestId('composer-task-list');
-  const first = list.getByRole('button', { name: /Review and fix/ });
-  const second = list.getByRole('button', { name: /Update the docs/ });
+  const first = list
+    .getByTestId('composer-task-open')
+    .filter({ hasText: 'Review and fix' });
+  const second = list
+    .getByTestId('composer-task-open')
+    .filter({ hasText: 'Update the docs' });
   await chip.focus();
   await page.keyboard.press('Enter');
   await expect(first).toBeFocused();
@@ -360,6 +402,8 @@ test('a multi-task chip opens keyboard choices and returns focus on Escape @smok
 
   await page.keyboard.press('Space');
   await expect(first).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(list.getByTestId('composer-task-explain').first()).toBeFocused();
   await page.keyboard.press('Tab');
   await expect(second).toBeFocused();
   await page.keyboard.press('Enter');

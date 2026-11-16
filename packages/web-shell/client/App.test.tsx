@@ -961,6 +961,9 @@ const {
       latestTaskChipsOnSelectTask: null as
         | ((task: DaemonSessionTaskWithWorkflowStatus) => void)
         | null,
+      latestTaskChipsOnExplainTask: null as
+        | ((task: DaemonSessionTaskWithWorkflowStatus) => void)
+        | null,
       openTurnCalls: undefined as
         | ((
             turnId: string,
@@ -2398,10 +2401,12 @@ vi.doMock('./components/ComposerTaskChips', async () => {
       tasks: readonly DaemonSessionTaskWithWorkflowStatus[];
       includeAgents: boolean;
       onSelectTask: (task: DaemonSessionTaskWithWorkflowStatus) => void;
+      onExplainTask?: (task: DaemonSessionTaskWithWorkflowStatus) => void;
     }) {
       testState.latestTaskChipsTasks = props.tasks;
       testState.latestTaskChipsIncludeAgents = props.includeAgents;
       testState.latestTaskChipsOnSelectTask = props.onSelectTask;
+      testState.latestTaskChipsOnExplainTask = props.onExplainTask ?? null;
       return React.createElement('div', {
         'data-testid': 'composer-task-chips',
       });
@@ -12912,6 +12917,7 @@ beforeEach(() => {
   testState.latestTaskChipsTasks = null;
   testState.latestTaskChipsIncludeAgents = null;
   testState.latestTaskChipsOnSelectTask = null;
+  testState.latestTaskChipsOnExplainTask = null;
   testState.latestMessageListProps = null;
   testState.backgroundDetails = undefined;
   testState.openTurnCalls = undefined;
@@ -19131,6 +19137,35 @@ describe('App session callbacks', () => {
       container.querySelector('[data-testid="composer-task-chips"]'),
     ).toBeNull();
     expect(testState.latestTaskChipsTasks).toBeNull();
+  });
+
+  it('explains a task as a side question from the chips "?" affordance', async () => {
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(mockSessionActions.btwSessionStream).toHaveBeenCalledWith(
+      expect.stringContaining('Command: npm run build'),
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(container.querySelector('[class*="btwPanel"]')).not.toBeNull();
+    expect(testState.latestBtwMessageProps?.answer).toBe('side answer');
   });
 
   it('locates a workflow chip in the transcript and opens its row', async () => {

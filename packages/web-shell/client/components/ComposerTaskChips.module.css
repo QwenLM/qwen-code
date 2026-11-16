@@ -103,10 +103,24 @@
   min-height: 30px;
   box-sizing: border-box;
   align-items: center;
-  gap: 8px;
-  padding: 4px 8px;
-  border: 0;
+  gap: 4px;
+  padding: 2px 4px 2px 8px;
   border-radius: 8px;
+}
+
+.listRow:hover,
+.listRow:focus-within {
+  background: var(--accent);
+}
+
+.listRowMain {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+  border: 0;
   background: transparent;
   color: var(--foreground);
   font: inherit;
@@ -115,10 +129,55 @@
   cursor: pointer;
 }
 
-.listRow:hover,
-.listRow:focus-visible {
-  background: var(--accent);
+.listRowMain:focus-visible {
   outline: none;
+}
+
+.explainButton {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  box-sizing: border-box;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.explainButton:hover,
+.explainButton:focus-visible {
+  background: var(--background);
+  color: var(--foreground);
+  outline: none;
+}
+
+.explainButton svg {
+  width: 14px;
+  height: 14px;
+}
+
+.chipWrap {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: center;
+  gap: 2px;
+}
+
+.chipExplain {
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--border);
+  background: var(--background);
+}
+
+.chipExplain:hover,
+.chipExplain:focus-visible {
+  background: var(--accent);
 }
 
 .rowIcon {
