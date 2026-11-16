@@ -2243,7 +2243,7 @@ class ManagedWorkspaceAdmissionTest {
     }
 
     @Test
-    void compressionCapabilityAllowsResidentWorkspacesAndRequiresTheOperatorAndFrozenFacts() {
+    void compressionCapabilityRequiresTheOperatorAndFrozenFacts() {
         String tenant = "tenant-" + UUID.randomUUID();
         String session = boundSession(tenant);
         grant(tenant, "ws-a", "operator2", true);

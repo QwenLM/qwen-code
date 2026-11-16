@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { randomUUID } from '../utils/random-uuid.js';
 import { useWorkspaceFileChanges } from './artifacts/useWorkspaceFileChanges';
 import { useModelRefresh } from '../hooks/useModelRefresh';
 import { useSubscriptionLogout } from '../hooks/useSubscriptionLogout';
@@ -57,8 +58,10 @@ import {
 import { useAnimationFrameTranscriptSnapshot } from '../hooks/useAnimationFrameTranscriptBlocks';
 import { useMessagesFromBlocks } from '../hooks/useMessages';
 import { useSessionArtifacts } from '../hooks/useSessionArtifacts';
+import { ReportedArtifactRegistration } from './ReportedArtifactRegistration';
 import { useBackgroundTasks } from '../hooks/useBackgroundTasks';
 import { extractPendingPermission } from '../adapters/transcriptAdapter';
+import { isNamedSubSessionApproval } from '../adapters/toolClassification';
 import type { PromptFile, PromptImage } from '../adapters/promptTypes';
 import type { AttachmentPreviewRequest } from '../adapters/messageTypes';
 import type {
@@ -426,7 +429,7 @@ export function ChatPane({
     connection.sessionId,
     connectionGoalComplete,
   ]);
-  const { artifacts } = useSessionArtifacts();
+  const { artifacts, hydrated, refresh } = useSessionArtifacts();
   const openSubagentDetails = useCallback(
     (tool: ACPToolCall, parentSessionId = connection.sessionId) => {
       if (
@@ -651,7 +654,7 @@ export function ChatPane({
       store.dispatch([
         {
           type: 'status',
-          promptId: `local-command:${crypto.randomUUID()}`,
+          promptId: `local-command:${randomUUID()}`,
           text: message,
         },
       ]),
@@ -968,6 +971,7 @@ export function ChatPane({
           !enabled &&
           approval &&
           !isExitPlanApprovalRequest(approval) &&
+          !isNamedSubSessionApproval(approval) &&
           (modeId === 'yolo' ||
             (modeId === 'auto-edit' && approval.toolKind === 'edit'))
         ) {
@@ -1129,7 +1133,7 @@ export function ChatPane({
             ? operation.objective
             : undefined;
         store.appendLocalUserMessage(text, undefined, {
-          localCommandId: `local-command:${crypto.randomUUID()}`,
+          localCommandId: `local-command:${randomUUID()}`,
         });
         void controlGoal(action, objective).catch((error: unknown) => {
           reportError(error, `Failed to ${operation.kind} /goal`);
@@ -1569,7 +1573,7 @@ export function ChatPane({
       return;
     }
     const owner = sessionOwnerGuard.capture();
-    const localCommandId = `local-command:${crypto.randomUUID()}`;
+    const localCommandId = `local-command:${randomUUID()}`;
     beginLocalCommand(store, localCommandId);
     if (streamingStateRef.current === 'idle') {
       store.appendLocalUserMessage('/context', undefined, { localCommandId });
@@ -1749,6 +1753,14 @@ export function ChatPane({
       aria-current={isActive ? 'location' : undefined}
       aria-label={headerLabel}
     >
+      {/* Each pane runs under its own DaemonSessionProvider, so App's
+          registration mount only covers the main session; register this
+          pane's reported artifacts here. */}
+      <ReportedArtifactRegistration
+        registered={artifacts}
+        hydrated={hydrated}
+        refresh={refresh}
+      />
       {goalEditOpen && connection.goalState?.goal && (
         <GoalEditDialog
           objective={connection.goalState.goal.objective}
@@ -2065,6 +2077,7 @@ export function ChatPane({
                   onPause={() => runGoalControl('pause')}
                   onResume={() => runGoalControl('resume')}
                   onClear={() => runGoalControl('clear')}
+                  onOpenGoals={onOpenGoals}
                 />
               )}
             </div>

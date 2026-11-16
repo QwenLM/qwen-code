@@ -45,6 +45,7 @@ interface MarkdownDisplayProps {
   sourceCopyIndexOffsets?: MarkdownSourceCopyIndexOffsets;
   /** Original Markdown when the row displays a rewrite. */
   sourceCopyText?: string;
+  showSourceCopyHints?: boolean;
   /**
    * When true, enforce the rendered-height budget from `availableTerminalHeight`
    * even for non-pending content. Normally the height-aware pre-slice
@@ -193,16 +194,16 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   textColor = theme.text.primary,
   sourceCopyIndexOffsets,
   sourceCopyText,
+  showSourceCopyHints = true,
   enforceHeightBudget = false,
 }) => {
   const { renderMode } = useRenderMode();
-  const copyHint = React.useMemo(
-    () =>
-      sourceCopyText === undefined
-        ? undefined
-        : originalCopyHint(sourceCopyText, sourceCopyIndexOffsets),
-    [sourceCopyText, sourceCopyIndexOffsets],
-  );
+  const copyHint = React.useMemo(() => {
+    if (!showSourceCopyHints) return () => undefined;
+    return sourceCopyText === undefined
+      ? undefined
+      : originalCopyHint(sourceCopyText, sourceCopyIndexOffsets);
+  }, [showSourceCopyHints, sourceCopyText, sourceCopyIndexOffsets]);
   if (!text) return <></>;
 
   const renderVisualBlocks = renderMode === 'render';

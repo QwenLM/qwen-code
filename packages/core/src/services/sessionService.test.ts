@@ -3530,6 +3530,65 @@ describe('SessionService', () => {
     });
   });
 
+  describe('readGeneratedUiStates', () => {
+    const [sessionId] = realDiskIds;
+    const cardId = 'gc_aaaaaaaaaaaaaaaaaaaaaa';
+    const prompt = msgLine(sessionId, 'prompt', null, 'user', 0, 'hello');
+    const answer = (uuid: string, parentUuid: string) =>
+      msgLine(sessionId, uuid, parentUuid, 'assistant', 2, 'answer');
+    const save = (parentUuid: string, revision: number, value: string) =>
+      sysLine(
+        sessionId,
+        `save-${revision}`,
+        parentUuid,
+        'generated_ui_state',
+        1,
+        { version: 1, cardId, revision, value },
+      );
+
+    it.each([
+      ['missing parent', [answer('answer', 'missing')]],
+      ['parent cycle', [answer('answer', 'answer')]],
+      [
+        'conflicting parents',
+        [answer('answer', 'prompt'), answer('answer', 'missing')],
+      ],
+    ])(
+      'reports an active transcript with %s as unavailable',
+      async (_, tail) => {
+        vi.mocked(jsonl.readLines).mockResolvedValueOnce([
+          prompt,
+          save('prompt', 1, 'retained'),
+          ...tail,
+        ]);
+
+        await expect(
+          sessionService.readGeneratedUiStates(sessionId),
+        ).resolves.toEqual({ unavailable: true });
+      },
+    );
+
+    it('restores state after a rewind despite broken abandoned ancestry', async () => {
+      vi.mocked(jsonl.readLines).mockResolvedValueOnce([
+        prompt,
+        save('prompt', 1, 'retained'),
+        answer('abandoned', 'missing'),
+        answer('abandoned', 'another-missing'),
+        save('abandoned', 2, 'abandoned'),
+        sysLine(sessionId, 'rewind', 'prompt', 'rewind', 3, {
+          truncatedCount: 1,
+        }),
+      ]);
+
+      await expect(
+        sessionService.readGeneratedUiStates(sessionId),
+      ).resolves.toEqual({
+        states: new Map([[cardId, { revision: 1, value: 'retained' }]]),
+        maxRevision: 2,
+      });
+    });
+  });
+
   describe('forkSession', () => {
     // forkSession does real disk I/O through `jsonl.read` and `fs.*`, so the
     // fork reads and writes tmp files with the real implementations restored.
@@ -3671,6 +3730,70 @@ describe('SessionService', () => {
       expect(srcLines.every((r) => !r.forkedFrom)).toBe(true);
     });
 
+    it('carries Generated UI view state saved on the copied branch', async () => {
+      const card = 'gc_aaaaaaaaaaaaaaaaaaaaaa';
+      const state = (revision: number, value: string) => ({
+        version: 1,
+        cardId: card,
+        revision,
+        value,
+      });
+      const file = transcriptPath(oldId);
+      fs.mkdirSync(chatsDir(), { recursive: true });
+      writeJsonl(file, [
+        msg('u1', null, 'user', 0, 'hello', {
+          provenance: 'real_user',
+          cwd,
+        }),
+        msg('abandoned', 'u1', 'assistant', 1, 'old answer', { cwd }),
+        sys(
+          'state-abandoned',
+          'abandoned',
+          'generated_ui_state',
+          2,
+          state(2, 'abandoned'),
+        ),
+        msg('u2', 'u1', 'assistant', 3, 'hi', {
+          provenance: 'assistant_output',
+          cwd,
+        }),
+        sys('state-kept', 'u2', 'generated_ui_state', 4, state(1, 'kept')),
+      ]);
+      expect(await service.readGeneratedUiStates(oldId)).toEqual({
+        states: new Map([[card, { revision: 1, value: 'kept' }]]),
+        maxRevision: 2,
+      });
+
+      const result = await fork();
+      const written = readJsonl(result.filePath);
+      expect(written.map((record) => record['uuid'])).toEqual([
+        'u1',
+        'u2',
+        'state-kept',
+      ]);
+      expect(written[2]).toMatchObject({ parentUuid: 'u2', sessionId: newId });
+      expect(await service.readGeneratedUiStates(newId)).toEqual({
+        states: new Map([[card, { revision: 1, value: 'kept' }]]),
+        maxRevision: 1,
+      });
+
+      expect(await service.readGeneratedUiStates(nestedId)).toEqual({
+        states: new Map(),
+        maxRevision: 0,
+      });
+      const actualJsonl = await vi.importActual<
+        typeof import('../utils/jsonl-utils.js')
+      >('../utils/jsonl-utils.js');
+      vi.mocked(jsonl.readLinesWithIntegrity).mockImplementation(
+        actualJsonl.readLinesWithIntegrity,
+      );
+      fs.unlinkSync(file);
+      fs.mkdirSync(file);
+      await expect(service.readGeneratedUiStates(oldId)).resolves.toEqual({
+        unavailable: true,
+      });
+    });
+
     it('copies the selected branch approval state into a fork', async () => {
       const { file, lines } = seedSession();
       lines[1]!['parentUuid'] = 'approval-yolo';
@@ -3809,32 +3932,45 @@ describe('SessionService', () => {
       );
     });
 
-    it('remaps lifecycle ownership into the fork without changing execution identity', async () => {
-      seedSession([
-        sys('lifecycle-1', 'u2', 'ui_telemetry', 2, {
-          uiEvent: {
-            'event.name': 'request_lifecycle',
-            v: 1,
-            kind: 'request',
-            executionId: 'execution-1',
-            sessionId: oldId,
-            promptId: `${oldId}#Explore#0`,
-            model: 'model',
-            startedAt: 10,
-            phase: 'started',
-          },
-        }),
-      ]);
-      const result = await fork();
-      const telemetry = readJsonl(result.filePath).find(
-        (record) => record.subtype === 'ui_telemetry',
-      );
-      expect(telemetry.systemPayload.uiEvent).toMatchObject({
-        sessionId: newId,
-        promptId: `${newId}#Explore#0`,
-        executionId: 'execution-1',
-      });
-    });
+    it.each(['request_lifecycle', 'hook_lifecycle'])(
+      'remaps %s ownership into the fork without changing execution identity',
+      async (eventName) => {
+        seedSession([
+          sys('lifecycle-1', 'u2', 'ui_telemetry', 2, {
+            uiEvent: {
+              'event.name': eventName,
+              v: 1,
+              kind: eventName === 'hook_lifecycle' ? 'hook' : 'request',
+              ...(eventName === 'hook_lifecycle'
+                ? {
+                    runtimeId: 'runtime',
+                    agentId: null,
+                    eventName: 'Stop',
+                    hookType: 'command',
+                    source: 'project',
+                    name: 'safe',
+                  }
+                : {}),
+              executionId: 'execution-1',
+              sessionId: oldId,
+              promptId: `${oldId}#Explore#0`,
+              model: 'model',
+              startedAt: 10,
+              phase: 'started',
+            },
+          }),
+        ]);
+        const result = await fork();
+        const telemetry = readJsonl(result.filePath).find(
+          (record) => record.subtype === 'ui_telemetry',
+        );
+        expect(telemetry.systemPayload.uiEvent).toMatchObject({
+          sessionId: newId,
+          promptId: `${newId}#Explore#0`,
+          executionId: 'execution-1',
+        });
+      },
+    );
 
     it('remaps tool lifecycle owner without inventing a prompt id', async () => {
       const event = {

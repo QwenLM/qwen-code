@@ -6,7 +6,6 @@ import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageMarkers.Ma
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
@@ -248,8 +247,12 @@ public class WorkspaceStorageGuard {
     }
 
     private Map<String, String> fileRoot(Path path) {
-        Identity actual = identity(path);
-        return Map.of("root", path.toString(), "device", actual.device(), "inode", actual.inode());
+        try {
+            Identity actual = identities.readLegacy(path);
+            return Map.of("root", path.toString(), "device", actual.device(), "inode", actual.inode());
+        } catch (IOException error) {
+            throw WorkspaceExecutionStore.unavailable(error);
+        }
     }
 
     void registerCreated(String tenantId, String storageId, String operationId) {
@@ -269,7 +272,7 @@ public class WorkspaceStorageGuard {
             throw WorkspaceExecutionStore.unavailable();
         }
         WorkspaceStorageKindGuard.requireFreshTransaction();
-        Identity identity = identity(root);
+        Identity identity = expectedIdentity == null ? identity(root) : identity(root, expectedIdentity);
         if (expectedIdentity != null && !expectedIdentity.equals(identity)) {
             throw WorkspaceExecutionStore.unavailable();
         }
@@ -519,38 +522,7 @@ public class WorkspaceStorageGuard {
     }
 
     private void verifyHistory(String tenantId, String storageId, boolean probe) {
-        var migrations = jdbc.query("SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_kind = 'STORAGE_MIGRATION'"
-                + " AND tenant_id = ? AND storage_key = ? AND state = 'COMPLETED' ORDER BY gmt_modified DESC LIMIT 1",
-                (row, index) -> WorkspaceOperations.operation(row), tenantId,
-                RuntimeAdmissionFences.storageAliasKey(tenantId, storageId));
-        if (!migrations.isEmpty()) {
-            Identity expected;
-            try {
-                expected = json.readValue((String) migrations.getFirst().get("history_identity_json"), Identity.class);
-            } catch (IOException error) {
-                throw WorkspaceExecutionStore.unavailable();
-            }
-            String home = System.getenv("QWEN_HOME");
-            if (home == null || !Path.of(home).isAbsolute()
-                    || !Path.of(home).resolve("file-history").toString().equals(expected.root())) {
-                throw WorkspaceExecutionStore.unavailable();
-            }
-            try {
-                if (!Path.of(home).toRealPath().equals(Path.of(home))
-                        || !expected.equals(identities.read(Path.of(expected.root())))) {
-                    throw WorkspaceExecutionStore.unavailable();
-                }
-            } catch (NoSuchFileException | AccessDeniedException error) {
-                throw WorkspaceExecutionStore.unavailable();
-            } catch (IOException error) {
-                if (probe) {
-                    throw WorkspaceExecutionStore.unavailableTransient(error);
-                }
-                throw WorkspaceExecutionStore.unavailable();
-            } catch (RuntimeException error) {
-                throw WorkspaceExecutionStore.unavailable();
-            }
-        }
+        LocalStorageOwners.verifyHistory(jdbc, json, identities, tenantId, storageId, probe);
     }
 
     // Probe-only verification: identical structural checks to verify(), but
@@ -666,7 +638,8 @@ public class WorkspaceStorageGuard {
     byte[] migrationMarker(String tenant, String storage, Identity target, String registration) {
         requireOwnedRoot(tenant, storage);
         try {
-            return json.writeValueAsBytes(new Marker(2, tenant, storage, target.root(), target.hostId(),
+            return json.writeValueAsBytes(new Marker(target.device().matches("[0-9a-f]{32}") ? 3 : 2,
+                    tenant, storage, target.root(), target.hostId(),
                     target.device(), target.inode(), target.birthTime(), registration));
         } catch (IOException error) {
             throw WorkspaceExecutionStore.unavailable();
@@ -815,15 +788,28 @@ public class WorkspaceStorageGuard {
     }
 
     Identity identity(Path root) {
-        try {
-            return identities.read(root);
-        } catch (IOException | RuntimeException error) {
-            throw WorkspaceExecutionStore.unavailable(error);
-        }
+        return LocalStorageOwners.identity(jdbc, identities, root);
+    }
+
+    Identity identity(Path root, Identity expected) {
+        return LocalStorageOwners.identity(identities, root, expected);
     }
 
     private void requireMatching(Registration row, Identity identity,
             String tenantId, String storageId) {
+        if (row.device() != null && row.device().matches("[0-9]{1,20}")
+                && identity.device().matches("[0-9a-f]{32}")) {
+            try {
+                Identity legacy = identities.readLegacy(Path.of(identity.root()));
+                if (!identity.hostId().equals(legacy.hostId()) || !identity.inode().equals(legacy.inode())
+                        || !identity.birthTime().equals(legacy.birthTime())) {
+                    throw WorkspaceExecutionStore.unavailable();
+                }
+                identity = legacy;
+            } catch (IOException error) {
+                throw WorkspaceExecutionStore.unavailable(error);
+            }
+        }
         var alias = LocalStorageOwners.alias(jdbc, tenantId, storageId, false);
         if (alias == null || !LocalStorageOwners.physicalKey(identity).equals(alias.get("physical_key"))
                 || row.tenantId() == null || row.storageId() == null
@@ -835,8 +821,17 @@ public class WorkspaceStorageGuard {
     }
 
     private Marker marker(Registration row) {
-        return new Marker(2, row.tenantId(), row.storageId(), row.root(), row.hostId(),
+        return new Marker(row.device() != null && row.device().matches("[0-9a-f]{32}") ? 3 : 2,
+                row.tenantId(), row.storageId(), row.root(), row.hostId(),
                 row.device(), row.inode(), row.birthTime(), row.registrationId());
+    }
+
+    Path reattestationMarkerRoot(String physical) {
+        Registration saved = row(physical, false);
+        if (!enabled || saved == null || saved.root() == null) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        return markerRoot(marker(saved), Path.of(saved.root()), false);
     }
 
     void requireOwnedRoot(String tenant, String storage) {

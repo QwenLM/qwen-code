@@ -161,6 +161,24 @@ export type {
 } from './types.js';
 
 export {
+  parseHookLifecycle,
+  extractHookLifecycle,
+  createHookLifecycleState,
+  reduceHookLifecycle,
+  summarizeHookExecutions,
+} from './hook-lifecycle.js';
+export type {
+  HookLifecycleOutcome,
+  HookLifecycleSource,
+  HookLifecycleBase,
+  HookLifecycleEvent,
+  HookExecutionEntry,
+  HookLifecycleState,
+  HookLifecycleSummary,
+  HookTurnPage,
+} from './hook-lifecycle.js';
+
+export {
   createExecutionLifecycleState,
   extractExecutionLifecycle,
   reduceExecutionLifecycle,

@@ -34,10 +34,6 @@
         </dependency>
         <dependency>
             <groupId>com.alibaba</groupId>
-            <artifactId>qwen-managed-agent-runtime-kubernetes</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>com.alibaba</groupId>
             <artifactId>qwen-managed-agent-runtime-ssh</artifactId>
         </dependency>
         <dependency>
@@ -321,7 +317,7 @@
                                     qwen.hosted.mysql.isolation = true
                                 </configurationParameters>
                             </properties>
-                            <forkedProcessTimeoutInSeconds>11658</forkedProcessTimeoutInSeconds>
+                            <forkedProcessTimeoutInSeconds>11862</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
