@@ -398,8 +398,10 @@ baseline_also_fails() {
     fi
   fi
   git restore -- . 2>> "${GATE_LOG}" || true
-  if ! git checkout --quiet "${BRANCH}" 2>> "${GATE_LOG}" \
-    || ! sync_dependencies "${current}" >> "${GATE_LOG}" 2>&1; then
+  if ! {
+    git checkout --quiet "${BRANCH}" && sync_dependencies "${current}"
+  } > "${GATE_LOG}.restore-install" 2>&1; then
+    tail -c 1500 "${GATE_LOG}.restore-install" >> "${GATE_LOG}" 2> /dev/null || true
     # The tree or its dependencies could not be restored; the repair agent
     # must not run against baseline dependencies or a detached baseline.
     # But a transient restoration failure is

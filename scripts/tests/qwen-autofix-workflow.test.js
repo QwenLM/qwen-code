@@ -27027,6 +27027,9 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
           'head="$(git rev-parse HEAD)"',
           'echo "$head" >> "${INSTALL_LOG}"',
           'phase="$(wc -l < "${INSTALL_LOG}" | tr -d " ")"',
+          'if [[ "$phase" == "3" && "${NOISY_RESTORE_INSTALL:-}" == "1" ]]; then',
+          '  for i in $(seq 1 100); do echo "restore install banner $i: package progress output ********************"; done',
+          'fi',
           'if [[ "$phase" == "${INSTALL_FAIL_AT:-}" ]]; then',
           // Install diagnostics must never become A/B check evidence.
           '  echo "src/f.ts(7,3): error TS9999: stub failure"; exit 1',
@@ -27327,6 +27330,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
             BASELINE_SHA: baselineSha,
             INSTALL_LOG: installLog,
             INSTALL_FAIL_AT: String(install.failAt ?? ''),
+            NOISY_RESTORE_INSTALL: install.noisyRestore ? '1' : '',
             INSTALL_MUTATE_AT: String(install.mutateAt ?? ''),
             INSTALL_MUTATION: install.mutation ?? '',
             REAL_WORKSPACE: workspaceTransition ? '1' : '',
@@ -27430,7 +27434,10 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
   });
 
   it('stops without a verdict when dependency restoration fails', () => {
-    const r = runGate({ failAt: ['feature'], install: { failAt: 3 } });
+    const r = runGate({
+      failAt: ['feature'],
+      install: { failAt: 3, noisyRestore: true },
+    });
     expect(r.status).toBe(1);
     expect(r.outputs).not.toContain('outcome=');
     expect(r.outputs).not.toContain('retryable=true');
@@ -27438,6 +27445,24 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(r.rejection).toContain(
       'could not restore the verification tree or its dependencies',
     );
+    expect(r.rejection).toContain('restore install banner 100:');
+    expect(r.rejection).toContain('error TS9999: stub failure');
+    expect(r.rejection).not.toContain('restore install banner 1:');
+    expect(r.rejection.length).toBeLessThanOrEqual(3900);
+    expect(r.installHeads).toHaveLength(3);
+  });
+
+  it('keeps the check failure past a chatty successful dependency restore', () => {
+    const r = runGate({
+      failAt: ['feature'],
+      headMsg: 'root cause marker line',
+      install: { noisyRestore: true },
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('retryable=true');
+    expect(r.rejection).toContain('error TS9999: root cause marker line');
+    expect(r.rejection).not.toContain('restore install banner');
+    expect(r.rejection.length).toBeLessThanOrEqual(3900);
     expect(r.installHeads).toHaveLength(3);
   });
 
@@ -27528,6 +27553,9 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     const r = runGate({
       failAt: ['feature', 'origin/feature'],
       restoreClash: true,
+      workdirFiles: {
+        'gate-output.log.restore-install': 'stale restore install evidence\n',
+      },
     });
     expect(r.status).toBe(1);
     expect(r.outputs).not.toContain('outcome=');
@@ -27535,6 +27563,9 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(r.outputs).not.toContain('preexisting=true');
     expect(r.stdout).toContain('could not restore the verification tree');
     expect(r.rejection).toContain('could not restore the verification tree');
+    expect(r.rejection).toContain('clash.txt');
+    expect(r.rejection).not.toContain('stale restore install evidence');
+    expect(r.installHeads).toHaveLength(2);
   });
 
   it('short-circuits before the detach when the head has no failure identity', () => {
