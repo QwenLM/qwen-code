@@ -11,6 +11,7 @@ import {
   type SessionStartupConfig,
 } from './session-startup-config.js';
 import { randomUUID } from 'node:crypto';
+import { forwardPrompt } from './channel-connection.js';
 import * as path from 'node:path';
 import {
   type ClientSideConnection,
@@ -12037,8 +12038,23 @@ export function createSessionControlPlane(
                 }
                 pendingEntry.dispatched = true;
                 const precedingBackgroundTurnId = entry.backgroundTurn?.turnId;
-                const promptPromise = entry.connection
-                  .prompt(promptRequest)
+                const onDispatched = context?.onPromptDispatched;
+                const promptPromise = forwardPrompt(
+                  entry.connection,
+                  promptRequest,
+                  onDispatched
+                    ? () => {
+                        try {
+                          onDispatched();
+                        } catch (error) {
+                          opts.onDiagnosticLine?.(
+                            `qwen serve: prompt dispatch observer failed for session=${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+                            'warn',
+                          );
+                        }
+                      }
+                    : undefined,
+                )
                   .then((response) => {
                     // A successful RPC response proves the child drained its preceding automatic execution.
                     if (
@@ -12060,7 +12076,6 @@ export function createSessionControlPlane(
                     // (after the terminal broadcast), not here.
                     settleActivePromptState(entry, pendingEntry.promptId);
                   });
-
                 // Race against channel termination: if the underlying transport
                 // dies (child crashed, stream torn down) WHILE the prompt is in
                 // flight, the SDK's pending-request promise can hang because the

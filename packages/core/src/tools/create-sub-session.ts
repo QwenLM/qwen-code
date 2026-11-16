@@ -39,6 +39,8 @@ import {
   ToolConfirmationOutcome,
 } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
+import { StructuredToolError, ToolErrorType } from './tool-error.js';
+import { buildPermissionCheckContext } from '../core/permission-helpers.js';
 import type { Config, SubSessionWorkspaceBinding } from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import {
@@ -110,7 +112,7 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
   ToolResult
 > {
   private destination?: SubSessionWorkspaceBinding;
-  private approvedGeneration?: string;
+  private approvedDestination?: SubSessionWorkspaceBinding;
 
   constructor(
     private config: Config,
@@ -161,23 +163,52 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
 
     const destination = await resolveWorkspace(this.params.workspace);
     abortSignal.throwIfAborted();
+    this.assertWorkspaceAllowed(destination);
     this.destination = destination;
     return {
       type: 'exec',
       title: this.getDescription(),
       command: this.params.prompt.trim(),
+      approvalText: `Workspace: ${JSON.stringify(destination.workspaceCwd)}\n\n${this.params.prompt.trim()}`,
       rootCommand: ToolNames.CREATE_SUB_SESSION,
       // A tool-wide rule cannot record which workspace the user approved.
       hideAlwaysAllow: true,
       permissionRules: [],
       onConfirm: async (outcome) => {
-        this.approvedGeneration =
+        this.approvedDestination =
           outcome === ToolConfirmationOutcome.ProceedOnce ||
           outcome === ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault
-            ? destination.workspaceGeneration
+            ? destination
             : undefined;
       },
     };
+  }
+
+  private assertWorkspaceAllowed(
+    destination: SubSessionWorkspaceBinding,
+  ): void {
+    const permissions = this.config.getPermissionManager?.();
+    if (!permissions) return;
+
+    // Rules apply to both the requested selector and the registered identity.
+    const selectors = new Set([
+      this.params.workspace,
+      destination.workspaceCwd,
+      destination.workspaceId,
+    ]);
+    for (const workspace of selectors) {
+      const context = buildPermissionCheckContext(
+        ToolNames.CREATE_SUB_SESSION,
+        { ...this.params, workspace },
+        this.config.getTargetDir?.() ?? '',
+      );
+      if (permissions.findMatchingDenyRule(context)) {
+        throw new StructuredToolError(
+          'This create_sub_session destination was denied by permission rules.',
+          ToolErrorType.EXECUTION_DENIED,
+        );
+      }
+    }
   }
 
   async execute(signal: AbortSignal): Promise<ToolResult> {
@@ -200,11 +231,12 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
 
     try {
       const res = await raceCancellation(() => {
-        const workspaceGeneration = this.approvedGeneration;
-        this.approvedGeneration = undefined;
-        if (this.params.workspace !== undefined && !workspaceGeneration) {
+        const destination = this.approvedDestination;
+        this.approvedDestination = undefined;
+        if (this.params.workspace !== undefined && !destination) {
           throw new Error('A named workspace requires one-time approval.');
         }
+        if (destination) this.assertWorkspaceAllowed(destination);
         spawnStarted = true;
         return spawner({
           prompt,
@@ -212,7 +244,10 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
           ...(this.params.model ? { model: this.params.model } : {}),
           ...(this.params.name ? { name: this.params.name } : {}),
           ...(this.params.workspace !== undefined
-            ? { workspace: this.params.workspace, workspaceGeneration }
+            ? {
+                workspace: this.params.workspace,
+                workspaceGeneration: destination?.workspaceGeneration,
+              }
             : {}),
         });
       }, signal);
@@ -283,7 +318,12 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
       return {
         llmContent: `Error creating sub-session: ${message}`,
         returnDisplay: message,
-        error: { message },
+        error: {
+          message,
+          ...(error instanceof StructuredToolError
+            ? { type: error.errorType }
+            : {}),
+        },
       };
     }
   }

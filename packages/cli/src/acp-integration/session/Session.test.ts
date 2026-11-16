@@ -23214,6 +23214,7 @@ describe('Session', () => {
       expect(resolveWorkspace).toBeTypeOf('function');
       vi.mocked(mockClient.extMethod)
         .mockResolvedValueOnce({
+          workspaceId: 'b-id',
           workspaceCwd: '/repos/b',
           workspaceGeneration: 'generation-b',
         })
@@ -23223,6 +23224,7 @@ describe('Session', () => {
         });
       const destination = await resolveWorkspace?.('b-id');
       expect(destination).toEqual({
+        workspaceId: 'b-id',
         workspaceCwd: '/repos/b',
         workspaceGeneration: 'generation-b',
       });
@@ -23257,9 +23259,24 @@ describe('Session', () => {
       { label: 'YOLO', mode: ApprovalMode.YOLO, asks: true, launches: true },
       { label: 'Plan', mode: ApprovalMode.PLAN, asks: false, launches: false },
       {
-        label: 'deny rule',
+        label: 'deny rule on requested selector',
         mode: ApprovalMode.YOLO,
-        deny: true,
+        deny: 'repo-b-id',
+        asks: false,
+        launches: false,
+      },
+      {
+        label: 'deny rule on resolved path',
+        mode: ApprovalMode.YOLO,
+        deny: '/repo-b',
+        asks: false,
+        launches: false,
+      },
+      {
+        label: 'deny rule on resolved workspace ID',
+        mode: ApprovalMode.YOLO,
+        selector: '/repo-b',
+        deny: 'repo-b-id',
         asks: false,
         launches: false,
       },
@@ -23279,9 +23296,10 @@ describe('Session', () => {
       },
     ])(
       'honors sub-session approval for $label',
-      async ({ mode, deny, local, persist, asks, launches }) => {
-        const workspace = 'repo-b-id';
+      async ({ mode, deny, selector, local, persist, asks, launches }) => {
+        const workspace = selector ?? 'repo-b-id';
         const resolveWorkspace = vi.fn().mockResolvedValue({
+          workspaceId: 'repo-b-id',
           workspaceCwd: '/repo-b',
           workspaceGeneration: 'generation-b',
         });
@@ -23293,7 +23311,7 @@ describe('Session', () => {
           getPermissionsAllow: () => [toolName],
           getPermissionsAsk: () => [],
           getPermissionsDeny: () =>
-            deny ? [`${toolName}(workspace:${workspace})`] : [],
+            deny ? [`${toolName}(workspace:${deny})`] : [],
           getApprovalMode: () => mode,
         });
         pm.initialize();
@@ -23345,10 +23363,20 @@ describe('Session', () => {
 
         expect(permissionHook).toHaveBeenCalledTimes(asks ? 1 : 0);
         expect(request).toHaveBeenCalledTimes(asks ? 1 : 0);
+        if (deny && deny !== workspace) {
+          expect(resolveWorkspace).toHaveBeenCalledExactlyOnceWith(workspace);
+        }
         if (asks) {
           const { options, toolCall } = request.mock.calls[0]![0];
           expect(toolCall.rawInput).toEqual(args);
           expect(toolCall.title).toBe('[first-turn] in "/repo-b": summarize');
+          expect(toolCall.content).toContainEqual({
+            type: 'content',
+            content: {
+              type: 'text',
+              text: 'Workspace: "/repo-b"\n\nsummarize',
+            },
+          });
           expect(resolveWorkspace).toHaveBeenCalledExactlyOnceWith(workspace);
           expect(resolveWorkspace.mock.invocationCallOrder[0]).toBeLessThan(
             request.mock.invocationCallOrder[0],

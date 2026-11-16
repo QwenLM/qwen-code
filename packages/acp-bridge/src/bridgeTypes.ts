@@ -1416,6 +1416,8 @@ export interface BridgeClientRequestContext {
    * from request input.
    */
   onPromptAdmitted?: () => void;
+  /** Internal signal after the bridge writes the queued prompt to ACP. */
+  onPromptDispatched?: () => void;
   /** Internal authorization check immediately before forwarding a queued prompt. */
   assertCanDispatch?: () => void;
   /** Approval mode the trusted ACP child must still have at prompt admission. */

@@ -1702,7 +1702,7 @@ export class BridgeClient implements Client {
           'Invalid workspace selector',
         );
       }
-      return resolve(callerSessionId, workspace);
+      return { ...resolve(callerSessionId, workspace) };
     }
     if (method === SERVE_CONTROL_EXT_METHODS.createSubSession) {
       return this.handleCreateSubSession(params);

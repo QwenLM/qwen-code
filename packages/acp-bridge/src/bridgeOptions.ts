@@ -14,6 +14,7 @@
 import type {
   ApprovalMode,
   DaemonBridgeTelemetryMetrics,
+  SubSessionWorkspaceBinding,
 } from '@qwen-code/qwen-code-core';
 import {
   MAX_SUB_SESSION_PROMPT_CHARS,
@@ -809,7 +810,7 @@ export type CreateSubSessionHandler = (
 export type ResolveSubSessionWorkspaceHandler = (
   callerSessionId: string,
   workspace: string,
-) => { workspaceCwd: string; workspaceGeneration: string };
+) => SubSessionWorkspaceBinding;
 
 export interface CurrentSessionScheduledTaskCreateInfo {
   callerSessionId: string;

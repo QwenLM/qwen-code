@@ -10,12 +10,15 @@ import {
   MAX_SUB_SESSION_PROMPT_CHARS,
 } from './create-sub-session.js';
 import { ToolConfirmationOutcome } from './tools.js';
+import { ApprovalMode } from '../config/approval-mode.js';
+import { PermissionManager } from '../permissions/permission-manager.js';
 import type { Config, SubSessionSpawner } from '../config/config.js';
 
 function makeConfig(spawner?: SubSessionSpawner): Config {
   return {
     getSubSessionSpawner: () => spawner,
     getSubSessionWorkspaceResolver: () => async () => ({
+      workspaceId: 'repo-b',
       workspaceCwd: '/canonical/other repo',
       workspaceGeneration: 'generation-b',
     }),
@@ -95,6 +98,34 @@ describe('CreateSubSessionTool', () => {
     expect(await local.getConfirmationDetails(signal)).toMatchObject({
       type: 'info',
     });
+  });
+
+  it('honors a destination deny rule added while approval is pending', async () => {
+    const spawner = vi.fn(async () => ({ sessionId: 'sub-1' }));
+    const config = makeConfig(spawner);
+    const permissionManager = new PermissionManager({
+      getPermissionsAllow: () => [],
+      getPermissionsAsk: () => [],
+      getPermissionsDeny: () => [],
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+    });
+    permissionManager.initialize();
+    config.getPermissionManager = () => permissionManager;
+    const invocation = new CreateSubSessionTool(config).build({
+      prompt: 'summarize',
+      workspace: 'repo-b',
+    });
+    const signal = new AbortController().signal;
+    const confirmation = await invocation.getConfirmationDetails(signal);
+    permissionManager.addSessionDenyRule(
+      'CreateSubSession(workspace:/canonical/other repo)',
+    );
+    await confirmation!.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+
+    expect((await invocation.execute(signal)).error?.message).toContain(
+      'denied by permission rules',
+    );
+    expect(spawner).not.toHaveBeenCalled();
   });
 
   it('rejects an empty or unsafe workspace at validation', () => {

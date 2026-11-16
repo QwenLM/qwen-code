@@ -55,21 +55,23 @@ The work lands in three changes, each usable on its own.
 workspace id of a workspace registered with this daemon. Absent means the
 caller's workspace, which is today's behavior.
 
-`first-turn` waits for the first turn and returns its text. A cross-workspace
-`sent` call requires chat recording in the caller and returns after dispatch.
-The caller gets a task notification with the result when the turn finishes,
-or a cancellation if the target runtime
-stops while the caller is still active. The tool result and the notification
+`first-turn` waits for the first turn and returns its text. A named `sent`
+call returns once the bridge dispatches the prompt. A refusal before dispatch
+is returned directly. Cross-workspace `sent` also requires chat recording in
+the caller. The caller gets a task notification with the result when the turn
+finishes, or a cancellation if the target runtime stops while the caller is
+still active. The tool result and the notification
 link to the child in the target workspace. After confirmation, a selector
 for the caller's own workspace uses the same-runtime execution and
 completion path.
 
 Each call with a named workspace requires one-time human approval in the
 calling session. The daemon resolves the selector before the confirmation,
-which shows the registered workspace's path. Approval is for that runtime
-generation. If the selector resolves to a different runtime at launch, the
-caller must request approval again. Deny rules still apply. Existing permanent
-grants continue to apply to calls that omit the selector.
+which shows the registered workspace's path and the full prompt. The approval
+is tied to that runtime generation. If the selector resolves to a different
+runtime at launch, the caller must request approval again. Deny rules apply to the supplied selector,
+the registered path, and the workspace ID. Existing permanent grants continue
+to apply to calls that omit the selector.
 
 ### Resolving the target
 

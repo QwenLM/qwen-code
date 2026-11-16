@@ -32,9 +32,9 @@
 
 `create_sub_session` 新增可选参数 `workspace`：本 daemon 已注册 workspace 的绝对路径或 workspace id。不填时使用调用方的 workspace，即现有行为。
 
-`first-turn` 等待第一轮结束并返回文本。跨 workspace 的 `sent` 调用要求调用方开启聊天记录，并在派发后返回。任务结束时，调用方会收到结果通知。如果目标 runtime 停止而调用方仍然活跃，调用方会收到取消通知。工具结果和通知都提供目标 workspace 的子会话链接。确认后，指向调用方自身 workspace 的选择器沿用同 runtime 的执行和完成路径。
+`first-turn` 等待第一轮结束并返回文本。指定 workspace 的 `sent` 调用在 bridge 派发 prompt 后返回，派发前的拒绝会直接返回。跨 workspace 的 `sent` 还要求调用方开启聊天记录。任务结束时，调用方会收到结果通知。如果目标 runtime 停止而调用方仍然活跃，调用方会收到取消通知。工具结果和通知都提供目标 workspace 的子会话链接。确认后，指向调用方自身 workspace 的选择器沿用同 runtime 的执行和完成路径。
 
-每次指定 workspace 的调用都要求用户在调用会话中单次确认。daemon 在确认前解析选择器，确认内容显示已注册 workspace 的路径。批准绑定到当时的 runtime generation。如果启动时选择器解析到另一个 runtime，调用方须重新请求批准。拒绝规则继续生效，已有永久授权继续适用于省略选择器的调用。
+每次指定 workspace 的调用都要求用户在调用会话中单次确认。daemon 在确认前解析选择器，确认内容显示已注册 workspace 的路径和完整 prompt。批准绑定到当时的 runtime generation。如果启动时选择器解析到另一个 runtime，调用方须重新请求批准。拒绝规则适用于原始选择器、已注册路径和 workspace ID。已有永久授权继续适用于省略选择器的调用。
 
 ### 解析目标
 

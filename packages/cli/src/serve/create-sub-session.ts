@@ -187,6 +187,7 @@ export type SubSessionWorkspaceResolution =
   | {
       kind: 'found';
       launcher: SubSessionLauncher;
+      workspaceId: string;
       workspaceCwd: string;
       workspaceGeneration: string;
       assertCurrent(): void;
@@ -284,6 +285,7 @@ export function createSubSessionWorkspaceIndex(
       return {
         kind: 'found',
         ...registered,
+        workspaceId: runtime.workspaceId,
         workspaceCwd: runtime.workspaceCwd,
         assertCurrent() {
           runtime.generationGuard?.assertOpen();
@@ -1035,6 +1037,18 @@ export function createSubSessionLauncher(
     // the prompt may have been dispatched, but launch() reports failure).
     let spawnedSession: BridgeSession | undefined;
     let promptAdmitted = false;
+    let promptDispatched = false;
+    let onPromptDispatched: (() => void) | undefined;
+    const dispatch =
+      info.completion === 'sent' &&
+      (remote !== undefined || assertLocalCurrent !== undefined)
+        ? new Promise<void>((resolve) => {
+            onPromptDispatched = () => {
+              promptDispatched = true;
+              resolve();
+            };
+          })
+        : undefined;
 
     try {
       const promptId = randomUUID();
@@ -1173,10 +1187,11 @@ export function createSubSessionLauncher(
             sessionId,
             prompt: [{ type: 'text', text: info.prompt }],
           } as Parameters<AcpSessionBridge['sendPrompt']>[1],
-          remote ? stopAc.signal : undefined,
+          remote || dispatch ? stopAc.signal : undefined,
           {
             promptId,
             onPromptAdmitted,
+            onPromptDispatched,
             assertCanDispatch: assertLocalCurrent,
             ...dispatchApproval,
           },
@@ -1189,6 +1204,13 @@ export function createSubSessionLauncher(
       void turn.catch((err) => {
         log.debug('sub-session: sendPrompt rejected', sessionId, String(err));
       });
+
+      if (dispatch) {
+        await Promise.race([dispatch, turn]);
+        if (!promptDispatched) {
+          throw new Error('The sub-session prompt was not dispatched.');
+        }
+      }
 
       if (isScheduledTaskRunSource(info) && promptAdmission) {
         await Promise.race([
@@ -1379,7 +1401,7 @@ export function createSubSessionLauncher(
         releaseOnce();
       }
     } catch (err) {
-      // Spawn/admission failure — surface it as the tool's error.
+      // Spawn/admission/dispatch failure — surface it as the tool's error.
       releaseOnce();
       // If the spawn succeeded but a later step failed (e.g. sendPrompt threw
       // synchronously), roll back the orphaned session so it doesn't leak a slot
@@ -1476,7 +1498,7 @@ export function createSubSessionLauncher(
             log.debug('sub-session: killSession threw', sessionId, killErr);
           }
         }
-        if (sessionClosed && !promptAdmitted) {
+        if (sessionClosed && !(dispatch ? promptDispatched : promptAdmitted)) {
           try {
             const removeTranscript = () =>
               new SessionService(boundWorkspace).removeSession(sessionId);
@@ -1572,6 +1594,7 @@ export function createSubSessionLauncher(
   ) => {
     const { target } = getNamedTarget(callerSessionId, workspace);
     return {
+      workspaceId: target.workspaceId,
       workspaceCwd: target.workspaceCwd,
       workspaceGeneration: target.workspaceGeneration,
     };

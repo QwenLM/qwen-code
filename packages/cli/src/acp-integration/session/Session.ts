@@ -4402,8 +4402,10 @@ export class Session implements SessionContext {
           SERVE_CONTROL_EXT_METHODS.resolveSubSessionWorkspace,
           { workspace },
         );
-        const { workspaceCwd, workspaceGeneration } = resp;
+        const { workspaceId, workspaceCwd, workspaceGeneration } = resp;
         if (
+          typeof workspaceId !== 'string' ||
+          !workspaceId ||
           typeof workspaceCwd !== 'string' ||
           !workspaceCwd ||
           typeof workspaceGeneration !== 'string' ||
@@ -4411,7 +4413,7 @@ export class Session implements SessionContext {
         ) {
           throw new Error('create_sub_session: invalid workspace binding');
         }
-        return { workspaceCwd, workspaceGeneration };
+        return { workspaceId, workspaceCwd, workspaceGeneration };
       },
     );
   }

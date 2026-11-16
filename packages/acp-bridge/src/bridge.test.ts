@@ -12,6 +12,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { format } from 'node:util';
 import {
+  AGENT_METHODS,
   AgentSideConnection,
   PROTOCOL_VERSION,
   RequestError,
@@ -6541,12 +6542,19 @@ describe('createAcpSessionBridge', () => {
         .catch((error: unknown) => error);
       await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
 
+      const dispatched = vi.fn();
       await expect(
-        bridge.sendPrompt(second.sessionId, {
-          sessionId: second.sessionId,
-          prompt: [{ type: 'text', text: 'second' }],
-        }),
+        bridge.sendPrompt(
+          second.sessionId,
+          {
+            sessionId: second.sessionId,
+            prompt: [{ type: 'text', text: 'second' }],
+          },
+          undefined,
+          { onPromptDispatched: dispatched },
+        ),
       ).rejects.toBeDefined();
+      expect(dispatched).not.toHaveBeenCalled();
       expect(fail).toHaveBeenCalledWith(
         expect.objectContaining({ code: 'ndjson_queue_limit_exceeded' }),
       );
@@ -19711,38 +19719,82 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
-    it('signals prompt admission only after the pending queue owns the prompt', async () => {
-      const factory: ChannelFactory = async () => makeChannel().channel;
-      const bridge = makeBridge({ channelFactory: factory });
-      const admitted = vi.fn();
+    it.each(['accepts', 'rejects'] as const)(
+      'waits until the ACP stream %s the prompt write',
+      async (writeOutcome) => {
+        const response = deferred<PromptResponse>();
+        const { channel } = makeChannel({ promptImpl: () => response.promise });
+        const writing = deferred<void>();
+        const writeGate = deferred<void>();
+        const transport = channel.stream.writable;
+        channel.stream.writable = new WritableStream({
+          async write(message) {
+            if (
+              'method' in message &&
+              message.method === AGENT_METHODS.session_prompt
+            ) {
+              writing.resolve();
+              await writeGate.promise;
+            }
+            const writer = transport.getWriter();
+            try {
+              await writer.write(message);
+            } finally {
+              writer.releaseLock();
+            }
+          },
+        });
+        const bridge = makeBridge({ channelFactory: async () => channel });
+        onTestFinished(() => {
+          writeGate.resolve();
+          response.resolve({ stopReason: 'cancelled' });
+          return bridge.shutdown();
+        });
+        const admitted = vi.fn();
+        const forwarded = deferred<void>();
+        const dispatched = vi.fn(() => forwarded.resolve());
 
-      expect(() =>
-        bridge.sendPrompt(
-          'missing-session',
+        expect(() =>
+          bridge.sendPrompt(
+            'missing-session',
+            {
+              sessionId: 'missing-session',
+              prompt: [{ type: 'text', text: 'not admitted' }],
+            },
+            undefined,
+            { onPromptAdmitted: admitted, onPromptDispatched: dispatched },
+          ),
+        ).toThrow(SessionNotFoundError);
+        expect(admitted).not.toHaveBeenCalled();
+        expect(dispatched).not.toHaveBeenCalled();
+
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const turn = bridge.sendPrompt(
+          session.sessionId,
           {
-            sessionId: 'missing-session',
-            prompt: [{ type: 'text', text: 'not admitted' }],
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: 'admitted' }],
           },
           undefined,
-          { onPromptAdmitted: admitted },
-        ),
-      ).toThrow(SessionNotFoundError);
-      expect(admitted).not.toHaveBeenCalled();
+          { onPromptAdmitted: admitted, onPromptDispatched: dispatched },
+        );
+        expect(admitted).toHaveBeenCalledOnce();
+        await writing.promise;
+        expect(dispatched).not.toHaveBeenCalled();
 
-      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
-      await bridge.sendPrompt(
-        session.sessionId,
-        {
-          sessionId: session.sessionId,
-          prompt: [{ type: 'text', text: 'admitted' }],
-        },
-        undefined,
-        { onPromptAdmitted: admitted },
-      );
-      expect(admitted).toHaveBeenCalledOnce();
-
-      await bridge.shutdown();
-    });
+        if (writeOutcome === 'accepts') {
+          writeGate.resolve();
+          await forwarded.promise;
+          expect(dispatched).toHaveBeenCalledOnce();
+          response.resolve({ stopReason: 'end_turn' });
+          await expect(turn).resolves.toMatchObject({ stopReason: 'end_turn' });
+        } else {
+          writeGate.reject(new Error('ACP transport write failed'));
+          await expect(turn).rejects.toThrow('ACP transport write failed');
+          expect(dispatched).not.toHaveBeenCalled();
+        }
+      },
+    );
 
     it('checks trusted prompt authorization again after queue admission', async () => {
       const { channel, agent } = makeChannel();
@@ -19750,6 +19802,7 @@ describe('createAcpSessionBridge', () => {
       const { sessionId } = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       const caller = new AbortController();
       let active = true;
+      const dispatched = vi.fn();
       const prompt = bridge.sendPrompt(
         sessionId,
         { sessionId, prompt: [{ type: 'text', text: 'hello' }] },
@@ -19758,6 +19811,7 @@ describe('createAcpSessionBridge', () => {
           onPromptAdmitted: () => {
             active = false;
           },
+          onPromptDispatched: dispatched,
           assertCanDispatch: () => {
             if (!active) throw new Error('Runtime is no longer active');
           },
@@ -19766,6 +19820,7 @@ describe('createAcpSessionBridge', () => {
       await expect(prompt).rejects.toThrow('Runtime is no longer active');
       expect(getEventListeners(caller.signal, 'abort')).toHaveLength(0);
       expect(agent.promptCalls).toEqual([]);
+      expect(dispatched).not.toHaveBeenCalled();
       await bridge.shutdown();
     });
 

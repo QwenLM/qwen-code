@@ -93,6 +93,7 @@ function makeFakeBridge(opts?: {
   approvalModes?: Record<string, string>;
   defaultMode?: string;
   beforeModeChange?: () => Promise<void>;
+  beforeQueuedDispatch?: () => Promise<void>;
   beforePromptDispatch?: () => void;
 }) {
   const spawns: Array<{
@@ -278,27 +279,34 @@ function makeFakeBridge(opts?: {
       ctx?: {
         promptId?: string;
         onPromptAdmitted?: () => void;
+        onPromptDispatched?: () => void;
         assertCanDispatch?: () => void;
         expectedApprovalMode?: ApprovalMode;
       },
     ) => {
       capturedPromptId = ctx?.promptId ?? '';
-      opts?.beforePromptDispatch?.();
-      ctx?.assertCanDispatch?.();
-      prompts.push({
-        sessionId,
-        promptId: capturedPromptId,
-        text: req.prompt.map((p) => p.text ?? '').join(''),
-        ...(ctx?.expectedApprovalMode
-          ? { expectedApprovalMode: ctx.expectedApprovalMode }
-          : {}),
-      });
-      if (opts?.sendPromptRejects) {
-        return Promise.reject(new Error(opts.sendPromptRejects));
-      }
-      ctx?.onPromptAdmitted?.();
-      // Never resolves — the first-turn result comes from the event stream.
-      return new Promise(() => {});
+      const dispatch = () => {
+        opts?.beforePromptDispatch?.();
+        ctx?.assertCanDispatch?.();
+        prompts.push({
+          sessionId,
+          promptId: ctx?.promptId ?? '',
+          text: req.prompt.map((p) => p.text ?? '').join(''),
+          ...(ctx?.expectedApprovalMode
+            ? { expectedApprovalMode: ctx.expectedApprovalMode }
+            : {}),
+        });
+        if (opts?.sendPromptRejects) {
+          return Promise.reject(new Error(opts.sendPromptRejects));
+        }
+        ctx?.onPromptDispatched?.();
+        // Never resolves — the first-turn result comes from the event stream.
+        return new Promise(() => {});
+      };
+      if (!opts?.sendPromptRejects) ctx?.onPromptAdmitted?.();
+      return opts?.beforeQueuedDispatch
+        ? opts.beforeQueuedDispatch().then(dispatch)
+        : dispatch();
     },
     closeSession: (sessionId: string) => {
       closes.push(sessionId);
@@ -2248,6 +2256,7 @@ describe('sub-sessions in another workspace', () => {
     events?: (promptId: string) => FakeEvent[];
     blockAfterEvents?: boolean;
     beforeModeChange?: () => Promise<void>;
+    beforeQueuedDispatch?: () => Promise<void>;
     beforePromptDispatch?: () => void;
     beforeNotificationAck?: () => Promise<void>;
     canAcceptBackgroundNotifications?: boolean;
@@ -2255,6 +2264,7 @@ describe('sub-sessions in another workspace', () => {
     targetCap?: number;
   }) {
     const a = makeFakeBridge({
+      beforeQueuedDispatch: opts?.beforeQueuedDispatch,
       beforeNotificationAck: opts?.beforeNotificationAck,
       canAcceptBackgroundNotifications: opts?.canAcceptBackgroundNotifications,
       approvalModes:
@@ -2274,6 +2284,7 @@ describe('sub-sessions in another workspace', () => {
       events: opts?.events ?? ((pid) => [chunk('from b'), turnComplete(pid)]),
       blockAfterEvents: opts?.blockAfterEvents,
       beforeModeChange: opts?.beforeModeChange,
+      beforeQueuedDispatch: opts?.beforeQueuedDispatch,
       beforePromptDispatch: opts?.beforePromptDispatch,
     });
     const launcherB = createSubSessionLauncher({
@@ -2297,6 +2308,7 @@ describe('sub-sessions in another workspace', () => {
           ? {
               kind: 'found',
               launcher: launcherB,
+              workspaceId: 'ws-b',
               workspaceCwd: WS_B,
               workspaceGeneration: 'generation-b',
               assertCurrent: assertTargetCurrent,
@@ -2305,6 +2317,7 @@ describe('sub-sessions in another workspace', () => {
             ? {
                 kind: 'found',
                 launcher: launcherA,
+                workspaceId: 'ws-a',
                 workspaceCwd: WS_A,
                 workspaceGeneration: 'generation-a',
                 assertCurrent: () => {},
@@ -2440,6 +2453,70 @@ describe('sub-sessions in another workspace', () => {
     retireTarget();
     await vi.waitFor(() => expect(a.notifications).toHaveLength(1));
     expect(a.notifications[0]?.notification.status).toBe('cancelled');
+  });
+
+  it.each([
+    [WS_A, 'generation-a'],
+    [WS_B, 'generation-b'],
+  ])('waits for ACP dispatch in %s', async (workspace, generation) => {
+    let dispatch!: () => void;
+    const queued = new Promise<void>((resolve) => {
+      dispatch = resolve;
+    });
+    const beforeQueuedDispatch = vi.fn(() => queued);
+    const { a, b, launcherA } = twoWorkspaces({ beforeQueuedDispatch });
+    const target = workspace === WS_A ? a : b;
+    const settled = vi.fn();
+    const launch = launcherA.launch({
+      prompt: 'p',
+      completion: 'sent',
+      workspace,
+      workspaceGeneration: generation,
+      callerSessionId: 'caller',
+    });
+    void launch.then(settled, settled);
+    await vi.waitFor(() => expect(beforeQueuedDispatch).toHaveBeenCalledOnce());
+    expect(target.prompts).toEqual([]);
+    expect(settled).not.toHaveBeenCalled();
+    dispatch();
+    await expect(launch).resolves.toMatchObject({ sessionId: 'sub-1' });
+    expect(target.prompts).toHaveLength(1);
+  });
+
+  it('rolls back a named sent child rejected after admission and releases both slots', async () => {
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    try {
+      const { a, b, launcherA } = twoWorkspaces({
+        sourceCap: 1,
+        targetCap: 1,
+        beforeQueuedDispatch: vi
+          .fn<() => Promise<void>>()
+          .mockRejectedValueOnce(new Error('The queued prompt was rejected.'))
+          .mockResolvedValue(undefined),
+      });
+      const input = {
+        prompt: 'p',
+        completion: 'sent' as const,
+        workspace: WS_B,
+        workspaceGeneration: 'generation-b',
+        callerSessionId: 'caller',
+      };
+      await expect(launcherA.launch(input)).rejects.toThrow(
+        'The queued prompt was rejected.',
+      );
+      expect(b.prompts).toEqual([]);
+      expect(b.closes).toEqual(['sub-1']);
+      expect(removeSession).toHaveBeenCalledWith('sub-1');
+      expect(b.bridge.markSessionCatalogChanged).toHaveBeenCalledOnce();
+      expect(a.notifications).toEqual([]);
+      await expect(launcherA.launch(input)).resolves.toMatchObject({
+        sessionId: 'sub-2',
+      });
+    } finally {
+      removeSession.mockRestore();
+    }
   });
 
   it('rolls back a child when the target stops during initialization', async () => {

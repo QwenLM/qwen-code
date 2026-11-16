@@ -2501,6 +2501,7 @@ export interface SubSessionSpawnRequest {
 }
 
 export interface SubSessionWorkspaceBinding {
+  workspaceId: string;
   workspaceCwd: string;
   workspaceGeneration: string;
 }

@@ -9,6 +9,9 @@ import {
   ClientSideConnection,
   RequestError,
   type Client,
+  type PromptRequest,
+  type PromptResponse,
+  type Stream,
 } from '@agentclientprotocol/sdk';
 import type { AcpChannel, AcpChannelTransportGuard } from './channel.js';
 
@@ -347,6 +350,55 @@ function createOutboundGuardedConnection(
   });
 }
 
+const pendingPromptWrites = new WeakMap<
+  object,
+  { onDispatched: () => void; reject: (error: unknown) => void }
+>();
+
+export function forwardPrompt(
+  connection: ClientSideConnection,
+  request: PromptRequest,
+  onDispatched?: () => void,
+): Promise<PromptResponse> {
+  if (!onDispatched) return connection.prompt(request);
+  const writeFailure = new Promise<never>((_, reject) => {
+    pendingPromptWrites.set(request, { onDispatched, reject });
+  });
+  return Promise.race([connection.prompt(request), writeFailure]).finally(() =>
+    pendingPromptWrites.delete(request),
+  );
+}
+
+function observePromptWrites(stream: Stream): Stream {
+  return {
+    readable: stream.readable,
+    writable: new WritableStream({
+      async write(message) {
+        // The ACP SDK retains the prompt request object as JSON-RPC params.
+        const params = 'params' in message ? message.params : undefined;
+        const observer =
+          typeof params === 'object' && params !== null
+            ? pendingPromptWrites.get(params)
+            : undefined;
+        try {
+          const writer = stream.writable.getWriter();
+          try {
+            await writer.write(message);
+          } finally {
+            writer.releaseLock();
+          }
+        } catch (error) {
+          observer?.reject(error);
+          throw error;
+        }
+        observer?.onDispatched();
+      },
+      close: () => stream.writable.close(),
+      abort: (reason) => stream.writable.abort(reason),
+    }),
+  };
+}
+
 export function createHarnessConnection(
   client: Client,
   channel: AcpChannel,
@@ -356,7 +408,7 @@ export function createHarnessConnection(
       channel.transportGuard
         ? createLogSafeAcpClient(client, channel.transportGuard)
         : client,
-    channel.stream,
+    observePromptWrites(channel.stream),
   );
   return channel.transportGuard
     ? createOutboundGuardedConnection(rawConnection, channel.transportGuard)
