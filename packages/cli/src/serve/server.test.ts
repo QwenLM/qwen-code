@@ -45847,6 +45847,83 @@ describe('T2.9 SSE writer idle timeout (issue #4514)', () => {
     }
   });
 
+  it('destroys the socket and frees the slot when evicting a stalled writer', async () => {
+    // A graceful res.end() on a socket whose kernel send buffer is full
+    // queues a FIN that can never be sent: the connection — and its
+    // listener slot — lingers until the peer disconnects, defeating the
+    // reaper's purpose. The eviction must forcibly destroy the socket
+    // (as the bus-eviction path does). The kernel-level linger itself is
+    // verified end-to-end (a write-spy leaves the kernel buffer empty,
+    // so it cannot reproduce a full send buffer); here we pin the
+    // destroy call and the counter release it triggers.
+    const http = await import('node:http');
+    type WriteCallback = (error?: Error | null) => void;
+    const originalWrite = http.ServerResponse.prototype.write as unknown as (
+      this: ServerResponse,
+      chunk: string | Uint8Array,
+      encodingOrCb?: BufferEncoding | WriteCallback,
+      cb?: WriteCallback,
+    ) => boolean;
+    const writeSpy = vi.spyOn(http.ServerResponse.prototype, 'write');
+    const destroySpy = vi.spyOn(http.ServerResponse.prototype, 'destroy');
+    let forcedStall = false;
+    writeSpy.mockImplementation(function (
+      this: ServerResponse,
+      chunk: string | Uint8Array,
+      encodingOrCb?: BufferEncoding | WriteCallback,
+      cb?: WriteCallback,
+    ): boolean {
+      const text = typeof chunk === 'string' ? chunk : chunk.toString();
+      if (!forcedStall && text.includes('event: session_update')) {
+        forcedStall = true;
+        return false;
+      }
+      if (forcedStall) {
+        // Simulate a FULL kernel send buffer: every later write —
+        // including the reaper's terminal client_evicted frame — reports
+        // backpressure and is swallowed, so the graceful-end branch
+        // cannot deliver anything and the reaper must destroy.
+        return false;
+      }
+      return typeof encodingOrCb === 'function'
+        ? originalWrite.call(this, chunk, encodingOrCb)
+        : originalWrite.call(this, chunk, encodingOrCb, cb);
+    });
+    try {
+      const beforeActive = getActiveSseCount();
+      const bridge = fakeBridge({
+        async *subscribeImpl(_sessionId, _opts) {
+          yield { id: 1, v: 1, type: 'session_update', data: { tick: 1 } };
+          await new Promise(() => {});
+        },
+      });
+      handle = await runQwenServe(
+        {
+          hostname: '127.0.0.1',
+          port: 0,
+          mode: 'http-bridge',
+          writerIdleTimeoutMs: 200,
+        },
+        { bridge },
+      );
+      const port = (handle.server.address() as { port: number }).port;
+      const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
+      expect(res.status).toBe(200);
+      expect(getActiveSseCount()).toBe(beforeActive + 1);
+
+      // Past the 200ms budget + the 250ms polling floor.
+      await new Promise((r) => setTimeout(r, 800));
+
+      expect(forcedStall).toBe(true);
+      expect(destroySpy).toHaveBeenCalled();
+      expect(getActiveSseCount()).toBe(beforeActive);
+      await res.body!.cancel().catch(() => undefined);
+    } finally {
+      writeSpy.mockRestore();
+      destroySpy.mockRestore();
+    }
+  });
+
   it('does NOT evict a healthy idle stream even with a small explicit budget', async () => {
     // Discriminating pin for the stall-based semantics: the reaper keys
     // on an unresolved `drain` stall, NOT on the last successful flush.

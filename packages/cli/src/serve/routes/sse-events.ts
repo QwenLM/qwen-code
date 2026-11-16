@@ -886,8 +886,9 @@ export function registerSseEventsRoutes(
         // not, the client gets EPIPE on next read. Either way the
         // socket is closed in the next two statements, so any drop
         // is bounded.
+        let evictionFrameSettled = false;
         try {
-          const settled = res.write(
+          evictionFrameSettled = res.write(
             formatSseFrame({
               v: 1,
               type: 'client_evicted',
@@ -899,7 +900,7 @@ export function registerSseEventsRoutes(
               },
             }),
           );
-          if (settled) eventFramesWriteSettled += 1;
+          if (evictionFrameSettled) eventFramesWriteSettled += 1;
         } catch {
           /* socket already destroyed; nothing to send. */
         }
@@ -943,8 +944,32 @@ export function registerSseEventsRoutes(
           },
         );
         cleanup();
+        // Closing must actually free the listener slot. A graceful
+        // res.end() queues a FIN BEHIND the unsent data in a full kernel
+        // send buffer — exactly the state this reaper exists for — so
+        // the FIN can never be sent and the connection lingers until the
+        // peer disconnects. When the terminal frame could not even be
+        // queued (write returned false / threw), destroy the socket
+        // immediately: 'close' → finalize → activeSseCount-- frees the
+        // slot, matching the bus-eviction path above. When the frame DID
+        // queue, end gracefully so a reading client still sees it, with
+        // a bounded destroy fallback in case the buffer refills and the
+        // FIN lingers anyway.
         try {
-          if (!res.writableEnded) res.end();
+          if (evictionFrameSettled) {
+            if (!res.writableEnded) res.end();
+            const forceCloseTimer = setTimeout(() => {
+              try {
+                res.destroy();
+              } catch {
+                /* already closed */
+              }
+            }, 5_000);
+            forceCloseTimer.unref();
+            res.once('finish', () => clearTimeout(forceCloseTimer));
+          } else {
+            res.destroy();
+          }
         } catch {
           /* socket already destroyed; nothing more to do. */
         }
