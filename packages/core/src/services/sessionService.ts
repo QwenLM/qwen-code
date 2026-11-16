@@ -3570,11 +3570,21 @@ export class SessionService {
       ))
     )
       throw new Error('Session workspace does not match');
-    const { messages } = this.reconstructHistory(records);
-    return restoreGeneratedUiStates(
-      records,
-      messages.map((record) => record.uuid),
-    );
+    const prepared = prepareTranscriptRecords(records);
+    const activeUuids = prepared.records.map((record) => record.uuid);
+    if (
+      prepared.diagnostics.some(
+        ({ code, recordId }) =>
+          code === 'history_gap' ||
+          code === 'parent_cycle' ||
+          (code === 'conflicting_parent_uuid' &&
+            recordId !== undefined &&
+            activeUuids.includes(recordId)),
+      )
+    ) {
+      return { unavailable: true };
+    }
+    return restoreGeneratedUiStates(records, activeUuids);
   }
 
   async readRestoreProjection(

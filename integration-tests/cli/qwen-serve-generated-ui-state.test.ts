@@ -5,9 +5,16 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
+import { Storage, type ChatRecord } from '@qwen-code/qwen-code-core';
 import { describe, expect, it } from 'vitest';
 import { startFakeOpenAIServer } from '../fake-openai-server.js';
 import { spawnDaemon, type SpawnedDaemon } from './_daemon-harness.js';
@@ -220,6 +227,76 @@ describe('Generated UI view state through the daemon', () => {
         other.clientId,
       );
       expect(unknown.status).toBe(404);
+
+      // Load can replay the readable suffix, but view state can depend on
+      // records behind the missing active parent.
+      const partialId = randomUUID();
+      const cwd = realpathSync(workspace);
+      const storage = new Storage(cwd, path.join(home, '.qwen'));
+      const chatsDir = path.join(storage.getProjectDir(), 'chats');
+      const common = {
+        sessionId: partialId,
+        cwd,
+        timestamp: '2026-07-08T00:00:00Z',
+        version: '1.0.0',
+      };
+      const records: ChatRecord[] = [
+        {
+          ...common,
+          uuid: 'first-user',
+          parentUuid: null,
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'show a checklist' }] },
+        },
+        {
+          ...common,
+          uuid: 'card-save',
+          parentUuid: 'first-user',
+          type: 'system',
+          subtype: 'generated_ui_state',
+          systemPayload: {
+            version: 1,
+            cardId: CARD,
+            revision: 1,
+            value: { checked: true },
+          },
+        },
+        {
+          ...common,
+          uuid: 'later-user',
+          parentUuid: 'missing-answer',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'later prompt' }] },
+        },
+        {
+          ...common,
+          uuid: 'later-answer',
+          parentUuid: 'later-user',
+          type: 'assistant',
+          message: { role: 'model', parts: [{ text: 'later answer' }] },
+        },
+      ];
+      mkdirSync(chatsDir, { recursive: true });
+      writeFileSync(
+        path.join(chatsDir, `${partialId}.jsonl`),
+        records.map((record) => JSON.stringify(record)).join('\n') + '\n',
+      );
+      const loaded = (await json(
+        await call('POST', `/session/${partialId}/load`, { cwd }),
+        200,
+      )) as { clientId: string };
+      const partial = { sessionId: partialId, clientId: loaded.clientId };
+      expect(
+        await json(
+          await call('GET', state(partial), undefined, partial.clientId),
+          503,
+        ),
+      ).toMatchObject({ code: 'state_unavailable' });
+      expect(
+        await json(await put(partial, 0, { checked: false }), 503),
+      ).toMatchObject({
+        code: 'state_unavailable',
+      });
     } finally {
       release();
       await daemon?.dispose();

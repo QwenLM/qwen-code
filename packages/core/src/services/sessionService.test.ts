@@ -3530,6 +3530,65 @@ describe('SessionService', () => {
     });
   });
 
+  describe('readGeneratedUiStates', () => {
+    const [sessionId] = realDiskIds;
+    const cardId = 'gc_aaaaaaaaaaaaaaaaaaaaaa';
+    const prompt = msgLine(sessionId, 'prompt', null, 'user', 0, 'hello');
+    const answer = (uuid: string, parentUuid: string) =>
+      msgLine(sessionId, uuid, parentUuid, 'assistant', 2, 'answer');
+    const save = (parentUuid: string, revision: number, value: string) =>
+      sysLine(
+        sessionId,
+        `save-${revision}`,
+        parentUuid,
+        'generated_ui_state',
+        1,
+        { version: 1, cardId, revision, value },
+      );
+
+    it.each([
+      ['missing parent', [answer('answer', 'missing')]],
+      ['parent cycle', [answer('answer', 'answer')]],
+      [
+        'conflicting parents',
+        [answer('answer', 'prompt'), answer('answer', 'missing')],
+      ],
+    ])(
+      'reports an active transcript with %s as unavailable',
+      async (_, tail) => {
+        vi.mocked(jsonl.readLines).mockResolvedValueOnce([
+          prompt,
+          save('prompt', 1, 'retained'),
+          ...tail,
+        ]);
+
+        await expect(
+          sessionService.readGeneratedUiStates(sessionId),
+        ).resolves.toEqual({ unavailable: true });
+      },
+    );
+
+    it('restores state after a rewind despite broken abandoned ancestry', async () => {
+      vi.mocked(jsonl.readLines).mockResolvedValueOnce([
+        prompt,
+        save('prompt', 1, 'retained'),
+        answer('abandoned', 'missing'),
+        answer('abandoned', 'another-missing'),
+        save('abandoned', 2, 'abandoned'),
+        sysLine(sessionId, 'rewind', 'prompt', 'rewind', 3, {
+          truncatedCount: 1,
+        }),
+      ]);
+
+      await expect(
+        sessionService.readGeneratedUiStates(sessionId),
+      ).resolves.toEqual({
+        states: new Map([[cardId, { revision: 1, value: 'retained' }]]),
+        maxRevision: 2,
+      });
+    });
+  });
+
   describe('forkSession', () => {
     // forkSession does real disk I/O through `jsonl.read` and `fs.*`, so the
     // fork reads and writes tmp files with the real implementations restored.

@@ -16,6 +16,7 @@ import type {
 import {
   prepareTranscriptRecords,
   selectActiveGeneratedUiStateRecordUuids,
+  selectActiveSideArtifactRecordUuids,
 } from './transcript-records.js';
 
 import type { SerializedFileHistorySnapshot } from '../services/fileHistoryService.js';
@@ -617,26 +618,34 @@ export function deleteTranscriptMessageGroups(
   );
   if (activeSaves.length > 0) {
     const retained = activeUuids.filter((uuid) => !removed.has(uuid));
+    const activeAfterDeletion = [...retained, anchor.uuid];
     const retainedSaves = new Set(
-      selectActiveGeneratedUiStateRecordUuids(rewritten, [
-        ...retained,
-        anchor.uuid,
-      ]),
+      selectActiveGeneratedUiStateRecordUuids(rewritten, activeAfterDeletion),
     );
     const orphanedSaves = new Set(
       activeSaves.filter((uuid) => !retainedSaves.has(uuid)),
     );
     if (orphanedSaves.size > 0) {
+      const retainedArtifacts = new Set(
+        selectActiveSideArtifactRecordUuids(rewritten, activeAfterDeletion),
+      );
       const root = {
         ...anchor,
         uuid: randomUUID(),
         parentUuid: null,
         timestamp: records[0]?.timestamp ?? anchor.timestamp,
+        cwd: records[0]?.cwd ?? anchor.cwd,
+        gitBranch: records[0]?.gitBranch,
       };
       const firstRetained = retained[0] ?? anchor.uuid;
-      // The saves predate the first retained turn, including after a rewind.
+      // Preserve the saves before the first retained turn and the artifacts
+      // that previously belonged to the conversation root.
       for (const record of rewritten) {
-        if (record.uuid === firstRetained || orphanedSaves.has(record.uuid))
+        if (
+          record.uuid === firstRetained ||
+          orphanedSaves.has(record.uuid) ||
+          (record.parentUuid === null && retainedArtifacts.has(record.uuid))
+        )
           record.parentUuid = root.uuid;
       }
       rewritten.unshift(root);
