@@ -445,7 +445,7 @@ describe('Permissions field ownership across reads', () => {
     readWithTrailingPaste([], 'Bash(');
     press(ENTER);
     expect(
-      screen.getByText(/Malformed rule: unbalanced parentheses/),
+      screen.getByText(/Malformed rule: write it as ToolName\(specifier\)/),
     ).toBeTruthy();
     expect(onAddRule).not.toHaveBeenCalled();
     burst([...'ls)'.split('').map(text), ENTER]);
