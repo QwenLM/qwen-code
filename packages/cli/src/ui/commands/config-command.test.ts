@@ -525,6 +525,31 @@ describe('configCommand', () => {
       });
     });
 
+    it('masks sensitive values nested in an object read by its parent key', async () => {
+      const { ctx } = createMockContext({
+        security: {
+          auth: {
+            selectedType: 'openai',
+            apiKey: 'sk-demo-1234567890',
+            baseUrl: 'https://llm.example.com/v1',
+          },
+        },
+      });
+
+      expect(await configCommand.action!(ctx, 'security.auth')).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content:
+          'security.auth = {"selectedType":"openai","apiKey":"sk-d****","baseUrl":"http****"}',
+      });
+      expect(await configCommand.action!(ctx, 'security')).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content:
+          'security = {"auth":{"selectedType":"openai","apiKey":"sk-d****","baseUrl":"http****"}}',
+      });
+    });
+
     it('masks sensitive value in write confirmation message', async () => {
       const { ctx } = createMockContext({});
       const result = await configCommand.action!(

@@ -190,7 +190,9 @@ function coerceValue(
 function formatValue(value: unknown): string {
   if (value === undefined) return t('(not set)');
   if (typeof value === 'string') return value || t('(empty)');
-  return JSON.stringify(value);
+  return JSON.stringify(value, (key, nested) =>
+    key && isSensitiveKey(key) ? maskValue(nested) : nested,
+  );
 }
 
 function padRight(str: string, len: number): string {
