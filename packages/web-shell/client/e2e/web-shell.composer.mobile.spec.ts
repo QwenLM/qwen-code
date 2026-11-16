@@ -181,6 +181,62 @@ test('simple mobile add drawer keeps advanced controls in advanced mode @smoke',
   );
 });
 
+test('keeps the unavailable-model authorize action reachable inside the mobile sheet @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  const params = new URLSearchParams({
+    sessionId: scenario.sessionId,
+    theme: 'dark',
+    sidebar: 'false',
+    unavailableModels: '1',
+    unavailableMount: '1',
+  });
+  await page.goto(`/e2e/settings-harness.html?${params}`);
+  await completeReplay(page, daemon, scenario.sessionId);
+  await page.locator('[data-web-shell-model-button]').tap();
+  const sheet = page.locator('[data-web-shell-model-sheet]');
+  await expect(sheet).toBeVisible();
+  const modelSection = sheet.locator('[data-web-shell-model-submenu-trigger]');
+  if (await modelSection.count()) await modelSection.tap();
+  const disabled = sheet.locator(
+    '[data-web-shell-unavailable-model][data-model-id="qwen-max"]',
+  );
+  await expect(disabled).toBeVisible();
+  await disabled.focus();
+  const hint = page.locator('[data-web-shell-unavailable-model-tooltip]');
+  const authorize = hint.getByRole('button', { name: 'Authorize' });
+  await expect(authorize).toBeVisible();
+  await hint.evaluate(async (element) => {
+    await Promise.all(
+      element
+        .getAnimations({ subtree: true })
+        .map((animation) => animation.finished.catch(() => undefined)),
+    );
+  });
+  const box = (await authorize.boundingBox())!;
+  const viewport = page.viewportSize()!;
+  expect(box.x).toBeGreaterThanOrEqual(0);
+  expect(box.y).toBeGreaterThanOrEqual(0);
+  expect(box.x + box.width).toBeLessThanOrEqual(viewport.width);
+  expect(box.y + box.height).toBeLessThanOrEqual(viewport.height);
+  await page.screenshot({
+    path: testInfo.outputPath('unavailable-authorize-mobile.png'),
+  });
+  await authorize.evaluate((button) => {
+    button.addEventListener('click', () => {
+      document.documentElement.dataset.authorizeClicked = 'true';
+    });
+  });
+  await authorize.tap();
+  await expect(page.locator('html')).toHaveAttribute(
+    'data-authorize-clicked',
+    'true',
+  );
+  await expect(sheet).toBeVisible();
+});
+
 test('simple mobile composer switches directly to advanced mode without losing its draft or attachments @smoke', async ({
   page,
 }, testInfo) => {

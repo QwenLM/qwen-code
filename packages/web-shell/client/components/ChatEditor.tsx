@@ -17,6 +17,7 @@ import {
 } from 'react';
 import type {
   CSSProperties,
+  ComponentProps,
   ReactNode,
   RefObject,
   DragEvent as ReactDragEvent,
@@ -843,6 +844,7 @@ function ToolbarDropdownRow({
   hasCheckItems,
   onSelect,
   itemTooltipMount,
+  itemTooltipSide,
   modelPicker,
   pickerContext,
   overlayRoot,
@@ -853,6 +855,7 @@ function ToolbarDropdownRow({
   hasCheckItems: boolean;
   onSelect: (id: string) => void;
   itemTooltipMount?: WebShellUnavailableModelTooltipMount;
+  itemTooltipSide?: ComponentProps<typeof UnavailableModelTooltip>['side'];
   modelPicker?: WebShellModelPickerOptions;
   pickerContext?: ModelPickerContext;
   overlayRoot: HTMLElement | null;
@@ -948,6 +951,7 @@ function ToolbarDropdownRow({
       enabled={!customActive}
       model={{ id: item.id, label: item.label, tooltip: item.tooltip }}
       mount={itemTooltipMount}
+      side={itemTooltipSide}
     >
       {button}
     </UnavailableModelTooltip>
@@ -1104,6 +1108,7 @@ function ToolbarPopover({
             onSelect(id);
           }}
           itemTooltipMount={itemTooltipMount}
+          itemTooltipSide={mobileSheet ? 'top' : undefined}
           modelPicker={modelPicker}
           pickerContext={pickerContext}
           overlayRoot={overlayRoot}
@@ -2621,9 +2626,12 @@ export const ChatEditor = memo(
       focusComposer,
     ]);
     const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
+    const mobileModelSheet = useIsLargeScreen(MODEL_SHEET_QUERY);
     useEffect(() => {
-      if (modelControlsDisabled) setModelDropdownOpen(false);
-    }, [modelControlsDisabled]);
+      // Model changes disable Sheet controls while it stays open for adjustments.
+      if (modelControlsDisabled && !mobileModelSheet)
+        setModelDropdownOpen(false);
+    }, [modelControlsDisabled, mobileModelSheet]);
     const [branchPickerOpen, setBranchPickerOpen] = useState(false);
     const isMobile = Boolean(core.mobileComposer);
     const [mobileFocused, setMobileFocused] = useState(false);

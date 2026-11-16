@@ -5100,13 +5100,14 @@ describe('ChatEditor model picker host content', () => {
     );
     try {
       const onSelectModel = vi.fn();
-      const container = renderChatEditor({
+      const props: ChatEditorRenderProps = {
         visibleToolbarActions: ['model'],
         currentModel: modelA.id,
         availableModels: [modelA, modelB],
         onSelectModel,
         reasoning: { enabled: true, effort: 'high', efforts: ['low', 'high'] },
-      });
+      };
+      const container = renderChatEditor(props);
       open(container);
       const sheet = document.querySelector('[data-web-shell-model-sheet]')!;
       expect(sheet).not.toBeNull();
@@ -5165,6 +5166,11 @@ describe('ChatEditor model picker host content', () => {
       expect(
         sheet.querySelector('[data-web-shell-model-sheet-list]'),
       ).toBeNull();
+      rerenderChatEditor(container, { ...props, modelControlsDisabled: true });
+      expect(
+        document.querySelector('[data-web-shell-model-sheet]'),
+      ).not.toBeNull();
+      rerenderChatEditor(container, props);
 
       act(() => sectionTrigger.click());
       expect(
@@ -5228,7 +5234,7 @@ describe('ChatEditor model picker host content', () => {
     }
   });
 
-  it('keeps the bottom sheet open when interacting with host overlays', () => {
+  it('keeps the mode picker as a popover on coarse pointers', () => {
     const media = vi.mocked(window.matchMedia).mockImplementation(
       (query: string) =>
         ({
@@ -5238,11 +5244,49 @@ describe('ChatEditor model picker host content', () => {
         }) as unknown as MediaQueryList,
     );
     try {
+      const container = renderChatEditor({
+        visibleToolbarActions: ['approvalMode'],
+        currentMode: 'default',
+        availableModes: ['default', 'auto-edit'],
+      });
+      act(() =>
+        container
+          .querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')!
+          .click(),
+      );
+      expect(document.querySelector('[data-web-shell-model-sheet]')).toBeNull();
+      expect(
+        document.querySelector('[data-web-shell-mode-popover]'),
+      ).not.toBeNull();
+    } finally {
+      media.mockImplementation(
+        () =>
+          ({
+            matches: false,
+            addEventListener: vi.fn(),
+            removeEventListener: vi.fn(),
+          }) as unknown as MediaQueryList,
+      );
+    }
+  });
+
+  it('keeps the bottom sheet open when interacting with host overlays', async () => {
+    const media = vi.mocked(window.matchMedia).mockImplementation(
+      (query: string) =>
+        ({
+          matches: query === MODEL_SHEET_QUERY,
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+        }) as unknown as MediaQueryList,
+    );
+    try {
+      const hostAction = vi.fn();
       const mountHeader = vi.fn<
         WebShellModelPickerMount<WebShellModelPickerContext>
       >((target, context) => {
         const button = document.createElement('button');
         button.textContent = 'Host overlay action';
+        button.addEventListener('click', hostAction);
         context.overlayContainer.append(button);
         return { update() {}, dispose() {} };
       });
@@ -5289,9 +5333,66 @@ describe('ChatEditor model picker host content', () => {
           }),
         ),
       );
+      act(() =>
+        overlayButton.dispatchEvent(
+          new MouseEvent('click', { bubbles: true, button: 0 }),
+        ),
+      );
+      expect(hostAction).toHaveBeenCalledTimes(1);
       expect(
         document.querySelector('[data-web-shell-model-sheet]'),
       ).not.toBeNull();
+
+      const sheet = document.querySelector<HTMLElement>(
+        '[data-web-shell-model-sheet]',
+      )!;
+      act(() =>
+        sheet.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key: 'Escape',
+            bubbles: true,
+            cancelable: true,
+          }),
+        ),
+      );
+      await vi.waitFor(() => {
+        expect(
+          document.querySelector('[data-web-shell-model-sheet]'),
+        ).toBeNull();
+      });
+
+      act(() =>
+        container
+          .querySelector<HTMLButtonElement>('[data-web-shell-model-button]')!
+          .click(),
+      );
+      act(() =>
+        document
+          .querySelector<HTMLButtonElement>(
+            '[data-web-shell-model-submenu-trigger]',
+          )!
+          .click(),
+      );
+      const backdrop = document.querySelector<HTMLElement>(
+        '[data-slot="drawer-overlay"]',
+      )!;
+      act(() => {
+        backdrop.dispatchEvent(
+          new MouseEvent('pointerdown', {
+            bubbles: true,
+            button: 0,
+            cancelable: true,
+          }),
+        );
+        backdrop.dispatchEvent(
+          new MouseEvent('click', { bubbles: true, button: 0 }),
+        );
+      });
+      await vi.waitFor(() => {
+        expect(
+          document.querySelector('[data-web-shell-model-sheet]'),
+        ).toBeNull();
+      });
     } finally {
       media.mockImplementation(
         () =>

@@ -11,6 +11,7 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type ComponentProps,
   type ComponentRef,
   type ReactElement,
 } from 'react';
@@ -36,11 +37,13 @@ export function UnavailableModelTooltip({
   model,
   mount,
   enabled = true,
+  side = 'right',
   children,
 }: {
   model: WebShellUnavailableModel;
   mount?: WebShellUnavailableModelTooltipMount;
   enabled?: boolean;
+  side?: ComponentProps<typeof PopoverContent>['side'];
   children: ReactElement;
 }) {
   const canOpen = enabled && Boolean(mount || model.tooltip);
@@ -200,7 +203,7 @@ export function UnavailableModelTooltip({
       <PopoverContent
         id={id}
         ref={contentRef}
-        side="right"
+        side={side}
         align="start"
         sideOffset={10}
         collisionPadding={8}
