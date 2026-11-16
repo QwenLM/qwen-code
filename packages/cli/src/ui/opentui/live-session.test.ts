@@ -975,10 +975,10 @@ describe('livePromptEvents', () => {
       'terminal tool.call',
     );
     expect(sendMessageStream).not.toHaveBeenCalled();
-    // OpenTUI offers the band and reply rows, raises prompt.submit and runs
+    // OpenTUI offers the band and transcript rows, raises prompt.submit and runs
     // the prompts the Mods submit.
     expect(initializeMods).toHaveBeenCalledExactlyOnceWith(
-      ['AbovePrompt', 'AssistantMessage'],
+      ['AbovePrompt', 'AssistantMessage', 'Thinking'],
       {
         prompts: true,
         runsPrompts: true,
