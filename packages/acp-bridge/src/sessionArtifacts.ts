@@ -342,6 +342,17 @@ export class SessionArtifactStore {
     });
   }
 
+  // Restored-snapshot read for the load/resume response. Skips the workspace
+  // status refresh so it adds no stat/hash latency to session restore; the
+  // client's normal gated list() refreshes status shortly after.
+  async listRestored(): Promise<DaemonSessionArtifact[]> {
+    return this.enqueue(async () =>
+      Array.from(this.artifacts.values())
+        .sort((a, b) => a.insertSeq - b.insertSeq)
+        .map(toPublicArtifact),
+    );
+  }
+
   async get(artifactId: string): Promise<DaemonSessionArtifact | undefined> {
     return this.enqueue(async () => {
       const artifact = this.artifacts.get(artifactId);

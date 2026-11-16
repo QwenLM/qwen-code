@@ -282,6 +282,27 @@ describe('SessionArtifactStore', () => {
     }) as typeof fs.lstat);
   }
 
+  it('listRestored returns the current artifacts in insert order for the load response', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's-early',
+      workspaceCwd: workspace,
+    });
+    await store.upsertMany(
+      [
+        { title: 'First', source: 'client', url: 'https://example.com/first' },
+        {
+          title: 'Second',
+          source: 'client',
+          url: 'https://example.com/second',
+        },
+      ],
+      { strict: true },
+    );
+    const restored = await store.listRestored();
+    expect(restored.map((item) => item.title)).toEqual(['First', 'Second']);
+    expect(restored).toEqual((await store.list()).artifacts);
+  });
+
   it('lists, removes, and idempotently ignores missing artifact deletes', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's1',
