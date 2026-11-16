@@ -5056,18 +5056,21 @@ Cookie:/Authorization: rules stop at the header's own line. Line
 SELECTION also runs before the strip, because the selectors need the
 whitespace a leading \r supplies and a weld must not eat the failure
 line before it can be chosen. The second pass, redactWeldedTokens,
-runs over the selected lines only and drops the \b anchors: a control
-byte inside a credential defeats every anchor until the strip welds
-the fragments back into a token, and the same strip can weld a word
-character onto its front. Its value classes stop at #, the first
-character of the ##[error] marker, so a weld cannot carry a value
-across the marker even when the control split the credential keyword
-— the case the first pass cannot see. That replaces an earlier
-"skip an already-[redacted] value" guard, which a fork could defeat
-by writing [redacted]realsecret itself. The header rules stay out of
-that pass, and the URL rule keeps a single userinfo segment that
-excludes the gen-delims # [ ] so it cannot reach across a welded
-marker. The behavioral suite's fake gh reproduces
+runs after the strip per CONTIGUOUS run of selected lines — joining
+non-adjacent windows would let the private-key rule pair a BEGIN in
+one with an END in another and delete the failure between them — and
+drops the \b anchors: a control byte inside a credential defeats
+every anchor until the strip welds the fragments back into a token,
+and the same strip can weld a word character onto its front. A value
+is a TEMPERED token: it runs to the next whitespace but never across
+the ##[error] marker, so a credential legitimately containing # [ ]
+(a password, a PEM body, a log-supplied [redacted] prefix) is fully
+redacted while the marker still survives. The Bearer separator is
+zero-or-more horizontal whitespace so a deleted space still redacts;
+the URL scheme is length-bounded (not lookbehind-bounded, which would
+refuse a welded digit-prefixed start) and the userinfo is one-or-more
+@-segments. The header rules stay out of that pass. The behavioral
+suite's fake gh reproduces
 the refusal, so a missing flag turns it red. The same fix lands on
 the patrol's own GhClient.jobLog, which was equally log-blind on
 current gh. The excerpt fence is sized past any backtick run inside

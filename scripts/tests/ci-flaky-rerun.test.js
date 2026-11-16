@@ -1290,11 +1290,63 @@ describe('ci flaky rerun patrol', () => {
       ['npm_\rABCDEFGHIJKLMNOPQRSTUV0123', '[redacted]'],
       ['https://u\rser:pass@host', 'https://[redacted]@host'],
       ['NPM_TO\rKEN=abcdefghij', 'NPM_TOKEN=[redacted]'],
+      // Round-6 entrances: a value carrying a terminator character, a welded
+      // scheme prefix, a multi-@ userinfo, and a deleted Bearer separator.
+      ['https:/\r/[redacted]realsecretvalue@host', 'https://[redacted]@'],
+      ['42\rhttps://us\rer:pw@host', '42https://[redacted]@'],
+      ['NPM_TO\rKEN=abc#realsecret99', 'NPM_TOKEN=[redacted]'],
+      ['https://u\rser:p@ss@host', 'https://[redacted]@host'],
+      ['Bea\rrer\rrealsecretvalue123', 'Bearer[redacted]'],
     ];
     for (const [input, expected] of cases) {
       const evidence = skillLog(`##[error]${input} done`);
       expect(evidence, input).toContain(expected);
     }
+    // The secret tail must be gone, not just the placeholder present.
+    for (const [input, secret] of [
+      ['https:/\r/[redacted]realsecretvalue@host', 'realsecretvalue'],
+      ['42\rhttps://us\rer:pw@host', 'user:pw'],
+      ['NPM_TO\rKEN=abc#realsecret99', 'realsecret99'],
+      ['https://u\rser:p@ss@host', 'p@ss'],
+      ['Bea\rrer\rrealsecretvalue123', 'realsecretvalue123'],
+    ]) {
+      expect(skillLog(`##[error]${input} done`), input).not.toContain(secret);
+    }
+  });
+
+  it('keeps a marker inside a BEGIN…END span instead of redacting the span', () => {
+    // The tempered private-key body stops before ##[error], so a fork cannot
+    // delete the failure marker by wrapping it in a fake key block. A real PEM
+    // (no marker) and a body with a non-marker # are still fully redacted.
+    const withMarker = skillLog(
+      '-----BEGIN RSA\rKEY-----\nMIIEow\n##[error]x\n-----END RSA\rKEY-----',
+    );
+    expect(withMarker).toContain('##[error]x');
+    expect(
+      skillLog('-----BEGIN RSA\rKEY-----\nMIIEow\n-----END RSA\rKEY-----'),
+    ).toContain('[redacted private key]');
+    expect(
+      skillLog('-----BEGIN RSA\rKEY-----\nMIIE#ow\n-----END RSA\rKEY-----'),
+    ).toContain('[redacted private key]');
+  });
+
+  it('does not pair a key BEGIN and END across non-adjacent selected windows', () => {
+    // The selected windows are joined per contiguous run, so a control-split
+    // BEGIN in the primary window cannot pair with a control-split END in the
+    // always-selected tail and delete the failure line between them.
+    const log = [
+      'a line 1',
+      'a line 2',
+      '-----BEGIN RSA\rKEY-----',
+      'TypeError: boom',
+      ...Array.from({ length: 30 }, (_, i) => `b line ${i}`),
+      '-----END RSA\rKEY-----',
+      'tail one',
+      'tail two',
+    ].join('\n');
+    const evidence = skillLog(log);
+    expect(evidence).toContain('TypeError: boom');
+    expect(evidence).not.toContain('[redacted private key]');
   });
 
   it('strips every control and Bidi_Control code point, keeping tab and newline', () => {

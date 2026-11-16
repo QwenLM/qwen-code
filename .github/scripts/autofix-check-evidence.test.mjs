@@ -490,6 +490,23 @@ describe('CLI', () => {
     assert.ok(!result.stdout.includes('abc##[error]'));
   });
 
+  it('redacts a welded credential whose value carries a terminator character', () => {
+    // A password containing # (or a log-supplied [redacted] prefix, or a
+    // multi-@ userinfo) must not ship its tail just because the value class
+    // once stopped at that character. The tempered value redacts the whole
+    // value and still stops before the ##[error] marker.
+    const result = runCli(
+      { statusCheckRollup: [failedCheck()] },
+      {
+        log: '##[error]NPM_TO\rKEN=abc#realsecret99\r##[error]AssertionError: real failure\n',
+      },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(result.stdout.includes('NPM_TOKEN=[redacted]'));
+    assert.ok(!result.stdout.includes('realsecret99'));
+    assert.ok(result.stdout.includes('##[error]AssertionError: real failure'));
+  });
+
   it('strips backspace, C0/C1 and Bidi controls, keeping tab and newline', () => {
     // A \r-only strip leaves \b, \x0b, \x0c, DEL and the C1 range, which a
     // terminal still applies to repaint the line, and the Bidi overrides that
