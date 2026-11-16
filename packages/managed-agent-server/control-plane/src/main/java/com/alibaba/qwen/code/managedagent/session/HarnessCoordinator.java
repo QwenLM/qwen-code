@@ -43,13 +43,17 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 @Component
@@ -107,6 +111,7 @@ public class HarnessCoordinator {
     private final Duration renewInterval;
     private final Duration retryInitialDelay;
     private final Duration retryMaxDelay;
+    private final Duration preparationTimeout;
     private final int maxPreAdmissionRetries;
     private final int maxPostAdmissionRetries;
     private final Duration batchInterval;
@@ -146,6 +151,7 @@ public class HarnessCoordinator {
         this.retryInitialDelay = properties.getDispatch()
                 .getRetryInitialDelay();
         this.retryMaxDelay = properties.getDispatch().getRetryMaxDelay();
+        this.preparationTimeout = properties.getHarness().getLoadTimeout();
         this.maxPreAdmissionRetries = properties.getDispatch()
                 .getMaxPreAdmissionRetries();
         this.maxPostAdmissionRetries = properties.getDispatch()
@@ -153,6 +159,10 @@ public class HarnessCoordinator {
         this.batchInterval = properties.getEvents().getBatchInterval();
         this.batchMaxEvents = properties.getEvents().getBatchMaxEvents();
         this.batchMaxBytes = properties.getEvents().getBatchMaxBytes();
+        if (preparationTimeout.isNegative() || preparationTimeout.isZero()) {
+            throw new IllegalStateException(
+                    "Managed Runtime preparation timeout must be positive");
+        }
         if (batchInterval.isNegative() || batchInterval.isZero()
                 || batchMaxEvents <= 0 || batchMaxBytes <= 0) {
             throw new IllegalStateException(
@@ -530,8 +540,9 @@ public class HarnessCoordinator {
         }
         boolean recoveringCancellation =
                 "CANCELLING".equals(claimed.status());
-        if (!recoveringCancellation) {
-            warmRuntime(session, claimed);
+        if (!recoveringCancellation
+                && !prepareRuntime(session, claimed, leaseLost)) {
+            return false;
         }
         requireLease(leaseLost);
         Attachment attachment;
@@ -1139,20 +1150,97 @@ public class HarnessCoordinator {
             boolean end) {
     }
 
-    private void warmRuntime(SessionRecord session, TurnRecord turn) {
+    private CompletableFuture<Void> warmRuntime(SessionRecord session,
+            TurnRecord turn) {
         if (!runtimeWarmer.isEnabled()) {
-            return;
+            return null;
         }
         String startKey = "runtime:start:" + turn.turnId();
         store.appendPublicEventIfAbsent(session.tenantId(),
                 session.sessionId(), turn.turnId(),
                 "environment.provisioning", Map.of(), false, startKey);
         try {
-            runtimeWarmer.warm(session.sessionId()).whenComplete(
+            return runtimeWarmer.warm(session.sessionId()).whenComplete(
                     (ignored, error) -> runtimeWarmResult(session, turn,
-                            error));
+                            error)).toCompletableFuture();
         } catch (RuntimeException error) {
             runtimeWarmResult(session, turn, error);
+            return CompletableFuture.failedFuture(error);
+        }
+    }
+
+    private boolean prepareRuntime(SessionRecord session, TurnRecord turn,
+            AtomicBoolean leaseLost) {
+        long started = System.nanoTime();
+        CompletableFuture<Void> warming = warmRuntime(session, turn);
+        if (warming == null || session.workspace() == null
+                || turn.submissionAttempted()) {
+            return true;
+        }
+        long retryAt = 0;
+        boolean ready = false;
+        try {
+            while (true) {
+                requireLease(leaseLost);
+                TurnRecord current = store.findTurn(turn.tenantId(),
+                        turn.sessionId(), turn.turnId()).orElse(null);
+                if (current == null || !owner.equals(current.dispatchOwner())
+                        || current.dispatchLeaseUntil() == null
+                        || current.dispatchLeaseUntil() < clock.millis()
+                        || !Set.of("ACCEPTED", "RUNNING", "CANCELLING")
+                                .contains(current.status())) {
+                    return false;
+                }
+                if ("CANCELLING".equals(current.status())) {
+                    store.cancelBeforeAdmission(turn.tenantId(),
+                            turn.sessionId(), turn.turnId(), owner);
+                    return false;
+                }
+                if (ready) {
+                    return true;
+                }
+                long remaining = preparationTimeout.toNanos()
+                        - (System.nanoTime() - started);
+                if (remaining <= 0) {
+                    throw new RuntimeBrokerException(503,
+                            "runtime_preparation_timeout",
+                            "Managed Runtime preparation timed out.", false);
+                }
+                if (warming == null) {
+                    long delay = retryAt - System.nanoTime();
+                    if (delay > 0) {
+                        TimeUnit.NANOSECONDS.sleep(Math.min(remaining,
+                                Math.min(delay, TimeUnit.SECONDS.toNanos(1))));
+                        continue;
+                    }
+                    warming = warmRuntime(session, turn);
+                }
+                try {
+                    warming.get(Math.min(remaining, TimeUnit.SECONDS.toNanos(1)),
+                            TimeUnit.NANOSECONDS);
+                    ready = true;
+                } catch (TimeoutException pending) {
+                    // Recheck cancellation and the dispatch lease while waiting.
+                } catch (ExecutionException error) {
+                    Throwable cause = error.getCause();
+                    while (cause instanceof CompletionException
+                            && cause.getCause() != null) {
+                        cause = cause.getCause();
+                    }
+                    if (!(cause instanceof RuntimeBrokerException broker)) {
+                        throw new RuntimeBrokerException(503, "runtime_warm_failed",
+                                "Managed Runtime preparation failed.", false, cause);
+                    }
+                    if (!broker.isRetryable()) {
+                        throw broker;
+                    }
+                    retryAt = System.nanoTime() + retryInitialDelay.toNanos();
+                    warming = null;
+                }
+            }
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Managed Runtime preparation was interrupted", error);
         }
     }
 
@@ -1652,6 +1740,13 @@ public class HarnessCoordinator {
                 return fail(turn, refusal.getCode(),
                         "Hosted Harness refused to open the Session before"
                                 + " Turn admission.");
+            }
+            if (error instanceof HarnessHttpFailure http
+                    && http.getStatusCode() == 409
+                    && "workspace_unavailable".equals(http.getErrorCode())) {
+                return fail(turn, http.getErrorCode(),
+                        "Workspace runtime remained unavailable before Turn"
+                                + " admission.");
             }
             if (error instanceof HarnessHttpFailure http
                     && ("hosted_prompt_recovery_required"

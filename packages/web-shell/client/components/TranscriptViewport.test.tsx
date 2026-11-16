@@ -471,6 +471,7 @@ describe('TranscriptViewport', () => {
     expect(observed.props?.onReloadTranscript).toBeUndefined();
     expect(observed.props?.sourceEntries).toBeUndefined();
     expect(observed.props?.sourceSessionId).toBeUndefined();
+    expect(observed.props?.hookStatisticsSessionId).toBe('session');
     expect(observed.props?.onSourceOpen).toBeUndefined();
     const historical = observed.props?.messages;
     const nextLive: Message[] = [
