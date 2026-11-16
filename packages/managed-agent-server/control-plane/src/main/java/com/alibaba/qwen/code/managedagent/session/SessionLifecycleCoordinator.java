@@ -114,17 +114,24 @@ public class SessionLifecycleCoordinator {
         this.lifecycle = lifecycle;
     }
 
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setClientFilesRelay(ObjectProvider<ClientFilesRelayService> clientFilesRelay) {
+        this.clientFilesRelay = clientFilesRelay;
+    }
+
     public boolean supportsWorkspaceLifecycle() {
         return supportsWorkspaceLifecycle("hosted-workspace-files/1");
     }
 
     public boolean supportsWorkspaceLifecycle(String profile) {
-        return runtimeWarmer.supportsWorkspaceClose() && harness.supportsLifecycle(profile);
+        return (com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.EXTERNAL_FILES.equals(profile)
+                ? runtimeWarmer.supportsWorkspaceClose(profile) : runtimeWarmer.supportsWorkspaceClose()) && harness.supportsLifecycle(profile);
     }
 
     public boolean supportsWorkspaceLifecycle(SessionRecord session) {
         return session.workspace() != null && RuntimeWarmer.supportsClose(runtimeWarmer, session.workspace())
-                && harness.supportsLifecycle(session.toolProfile());
+                && (com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile())
+                        ? harness.supportsSavedLifecycle(session.toolProfile()) : harness.supportsLifecycle(session.toolProfile()));
     }
 
     private final ManagedSessionStore sessionStore;
@@ -136,6 +143,12 @@ public class SessionLifecycleCoordinator {
     private final ManagedAgentService sessions;
     private final ChildWorkspaceStore childWorkspaces;
     private final ObjectProvider<RuntimeBrokerOperations> brokerProviders;
+    // Lazy provider: the relay service depends on ManagedAgentService, so a
+    // constructor parameter here could form a cycle. Used to close the
+    // client-files binding when the harness detaches or the Session closes.
+    // Setter-injected (like setWorkspaceLifecycleStore) so tests can install a
+    // fake; unset means the teardown is a no-op rather than a swallowed NPE.
+    private ObjectProvider<ClientFilesRelayService> clientFilesRelay;
     private final ExecutorService executor;
     private final Clock clock;
     private final Duration leaseDuration;
@@ -153,6 +166,25 @@ public class SessionLifecycleCoordinator {
     @jakarta.annotation.PreDestroy
     void stopRenewals() {
         renewals.shutdownNow();
+    }
+
+    // The harness-local client-files catalog is gone once the harness detaches
+    // or the Session closes; close the control-plane binding so the panel stops
+    // reporting a registration the model can no longer use. Best-effort: a
+    // relay failure must not wedge the lifecycle.
+    private void closeClientFilesBinding(OperationRecord operation) {
+        if (clientFilesRelay == null) {
+            return;
+        }
+        try {
+            clientFilesRelay.ifAvailable(relay ->
+                    relay.closeForSession(operation.tenantId(), operation.sessionId()));
+        } catch (RuntimeException failure) {
+            // Best-effort: a relay failure must not wedge the lifecycle, but it
+            // must be diagnosable — the binding then lingers until binding-ttl.
+            LOG.warn("Client files binding teardown failed tenant={} session={}",
+                    operation.tenantId(), operation.sessionId(), failure);
+        }
     }
 
     private final Set<String> active = ConcurrentHashMap.newKeySet();
@@ -735,7 +767,8 @@ public class SessionLifecycleCoordinator {
             lifecycle.requireSettledExecutions(operation);
             JsonNode effects = lifecycle.recoverEffects(operation);
             if (effects == null) {
-                if (!harness.supportsLifecycle(session.toolProfile())) {
+                if (!(com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile())
+                        ? harness.supportsSavedLifecycle(session.toolProfile()) : harness.supportsLifecycle(session.toolProfile()))) {
                     throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_protocol_unavailable");
                 }
                 try {
@@ -818,6 +851,10 @@ public class SessionLifecycleCoordinator {
             if (sessionStore.hasLiveWriter(operation.tenantId(), operation.sessionId())) {
                 throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_writer_active");
             }
+            // Only tear the binding down once the detach is actually proceeding:
+            // a live writer means the Session was not detached, and closing the
+            // registration here would destroy a live client-files binding.
+            closeClientFilesBinding(operation);
             runtimeWarmer.closeWorkspace(operation.tenantId(), operation.sessionId()).toCompletableFuture().join();
             return true;
         }
@@ -851,6 +888,11 @@ public class SessionLifecycleCoordinator {
                 throw new IllegalStateException(
                         "A Harness still holds the Session's journal writer");
             }
+            // A harness that merely answered the close (possibly another
+            // server's) does not prove the Session closed; only tear the binding
+            // down once the live-writer gate confirms the close is proceeding,
+            // so a refused close cannot destroy a live client-files registration.
+            closeClientFilesBinding(operation);
         }
         if (bound) {
             runtimeWarmer.closeWorkspace(operation.tenantId(), operation.sessionId()).toCompletableFuture().join();

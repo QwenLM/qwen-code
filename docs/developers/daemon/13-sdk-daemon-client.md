@@ -167,6 +167,8 @@ await client
 
 `DaemonSkillBatchToggleResult` contains ordered `results`, a compatibility `errors` array, and batch-level activation/session-refresh counts. Current daemons process every structurally valid name in request order, persist all resulting declaration changes together in at most one locked settings write, refresh active sessions once when anything changed, and return an empty `errors` array without consulting the loaded Skill catalog. Enabling records an explicit workspace `skills.enabled` opt-in even for names not yet installed, so it can override Extension-internal disablement; an identical repeated declaration remains a no-op. The error item types remain available so the SDK can still decode responses from older daemons. The method throws on a non-200 response.
 
+`installWorkspaceSkill`, `deleteWorkspaceSkill`, `setWorkspaceSkillEnabled` and `setWorkspaceSkillsEnabled` use native REST even when the client negotiates ACP HTTP or WebSocket for other operations. Single and batch toggles follow the same rule on workspace-qualified clients. These mutations have no supported ACP methods; REST preserves the configured daemon base path, authentication and normal HTTP error handling; the single and batch toggles also forward the caller's optional `clientId`.
+
 Explicit Skill and Extension refreshes accept optional `sessionIds`:
 
 ```ts
@@ -514,10 +516,13 @@ The value must be a finite, non-negative integer (validated at construction). In
 ## Caveats & Known Limits
 
 - **Disposing the optional `AutoReconnectTransport` stops reconnect retries.** If an asynchronous transport factory finishes after disposal, its returned transport is released and pending retry calls reject with `DaemonTransportClosedError`.
+- **`AutoReconnectTransport.supportsReplay` follows the current transport.** Re-read it after reconnecting: a WebSocket-to-REST fallback enables replay, while a replacement WebSocket transport does not support it. The Web Shell availability wrapper also forwards the current transport type and replay capability.
 
 - **`fetchTimeoutMs` is per-call, not connection-level.** Long body reads share the timer. A daemon that streams responses must override per-call or set the timeout to `0`.
+- **Transport negotiation applies its deadline through the capabilities body.** `negotiateTransport` uses `probeTimeoutMs` (5 seconds by default) for both response headers and JSON body consumption; receiving headers alone does not end the deadline. The default fetch aborts a stalled request or body read and negotiation falls back to REST. An injected `fetchFn` must preserve `init.signal` and abort the pending request or body read for the same guarantee.
 - **SSE bypasses the fetch timeout** — long-lived SSE connections are not killed by `fetchTimeoutMs`. Use `AbortSignal` for caller-controlled cancellation.
 - **`parseSseStream` buffer cap is 16 MiB** as a defensive bound. A single frame larger than this aborts the iterator (the daemon never legitimately emits such frames).
+- **WebSocket negotiation releases its deadline.** A settled WebSocket probe clears its timeout, so a short-lived Node process is not held open by a probe timer.
 - **`asKnownDaemonEvent` returns `undefined` for unrecognized event types.** SDK consumers must handle this branch rather than assuming the union is exhaustive; that is the forward-compatibility contract. Unrecognized events increment `DaemonSessionViewState.unrecognizedKnownEventCount`.
 - **`client_evicted`, `slow_client_warning`, `stream_error` are not in the replay ring.** Reconnecting after eviction picks up from the daemon's ring; you will not see the eviction frame again.
 - **`DaemonClient` does not auto-retry.** Network failures surface as rejections; reconnect / replay strategy is the caller's responsibility (`DaemonSessionClient.events()` makes replay easy but reconnect is still per-call).

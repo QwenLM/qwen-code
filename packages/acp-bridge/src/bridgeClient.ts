@@ -1295,17 +1295,35 @@ export class BridgeClient implements Client {
     const backgroundTurn = backgroundWorkflowApproval
       ? undefined
       : parseBackgroundNotificationTurn(executionMeta?.['backgroundTurn']);
+    const toolPromptId = executionMeta?.['promptId'];
+    const explicitToolPromptId =
+      params.update.sessionUpdate === 'tool_call_update' &&
+      typeof toolPromptId === 'string' &&
+      toolPromptId.length > 0
+        ? toolPromptId
+        : undefined;
     const promptId = outsideTurn
       ? undefined
-      : (backgroundTurn?.turnId ?? entry?.activePromptId);
-    const turn = {
-      ...(promptId ? { promptId } : {}),
-      ...(!outsideTurn &&
-      !backgroundTurn &&
+      : (backgroundTurn?.turnId ??
+        explicitToolPromptId ??
+        entry?.activePromptId);
+    const toolOriginator = executionMeta?.['originatorClientId'];
+    const activeOriginator =
       (entry?.promptActive || !entry?.backgroundTurn) &&
       entry?.activePromptOriginatorClientId
-        ? { originatorClientId: entry.activePromptOriginatorClientId }
-        : {}),
+        ? entry.activePromptOriginatorClientId
+        : undefined;
+    const toolOriginatorClientId =
+      typeof toolOriginator === 'string' ? toolOriginator : undefined;
+    const originatorClientId =
+      outsideTurn || backgroundTurn
+        ? undefined
+        : explicitToolPromptId
+          ? toolOriginatorClientId
+          : activeOriginator;
+    const turn = {
+      ...(promptId ? { promptId } : {}),
+      ...(originatorClientId ? { originatorClientId } : {}),
     };
     const frames: Array<Omit<BridgeEvent, 'id' | 'v'>> = [];
     // A2UI-over-MCP: tool_call_update results from an A2UI UI server carry
@@ -2714,11 +2732,18 @@ export class BridgeClient implements Client {
     }
     if (method === '_qwencode/end_turn') {
       const sessionId = params['sessionId'];
+      if (typeof sessionId !== 'string' || sessionId.length === 0) return;
+      const entry = this.resolveEntry(sessionId);
+      if (!entry || !this.ownsSession(sessionId)) return;
       const reason = params['reason'];
       const source = params['source'];
+      // A malformed Goal terminal must not pin future loads to live replay
+      // or strand the queue when its turn_complete cannot be published.
+      if (source === 'goal') {
+        entry.goalTurnActive = false;
+        this.onAutomaticTurnEnded?.(sessionId);
+      }
       if (
-        typeof sessionId !== 'string' ||
-        sessionId.length === 0 ||
         typeof reason !== 'string' ||
         reason.length === 0 ||
         reason.length > 128 ||
@@ -2726,13 +2751,7 @@ export class BridgeClient implements Client {
       ) {
         return;
       }
-      const entry = this.resolveEntry(sessionId);
-      if (!entry || !this.ownsSession(sessionId)) return;
       if (source === 'goal') {
-        entry.goalTurnActive = false;
-        // Before the promptId validation below: a malformed id costs the
-        // session its `turn_complete`, but the queue must still be settled.
-        this.onAutomaticTurnEnded?.(sessionId);
         const promptId = params['promptId'];
         if (
           typeof promptId !== 'string' ||
