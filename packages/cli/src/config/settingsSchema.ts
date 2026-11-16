@@ -4658,7 +4658,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: false,
         description:
-          'Remember model health across requests within a session (experimental). When a model exhausts its retries on a capacity error (429/503/529), the model fallback chain skips it for the rest of the turn instead of re-trying it on every request, and re-probes it once on the next turn. When disabled, the fallback chain behaves exactly as before.',
+          'Remember model health across requests within a session (experimental). When a fallback model exhausts its retries on a capacity error (429/503/529), the model fallback chain skips it for the rest of the turn instead of re-trying it on every request, and re-probes it once on the next turn. The primary model is still attempted on every request. When disabled, the fallback chain behaves exactly as before.',
         showInDialog: true,
       },
       agentCollaboration: {
