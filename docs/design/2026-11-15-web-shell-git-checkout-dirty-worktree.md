@@ -141,10 +141,12 @@ guard stashes nothing.
 
 A plain checkout — no option — runs the exact git invocation it always
 has. The response-level changes are the optional `stashSha` field on a
-successful stash checkout, and the same field on a failure response
-whose auto-stash entry survives with a known SHA — `checkout_failed`
-after a kept restore, or `operation_in_progress` when a merge parks
-after the push (see below).
+successful stash checkout, the same field on a failure response whose
+auto-stash entry survives with a known SHA — `checkout_failed` after a
+kept restore, or `operation_in_progress` when a merge parks after the
+push (see below) — and, for the directory-collision refusal, a
+`409 dirty_working_tree` where the route previously answered an
+unclassified 500.
 
 Failures are classified by what the core did, not by matching git's text:
 a new `GitCheckoutFailure` carries the stable codes
@@ -254,12 +256,12 @@ omission:
   design guards only its destructive option for the same reason; adding
   a stash refusal here would also leave the panel offering an option
   that always fails in subdirectory workspaces.
-- **No cross-request serialization.** Concurrent index-writing git
-  operations (checkout, stash, branch) fail loudly on git's own
-  `index.lock`; the residue `clean -fd` does not take that lock (probed),
-  so a concurrent clean races on the files themselves — the same
-  confirmed-discard exposure the concurrent-session risk covers. The
-  stash capture carries a
+- **No cross-request serialization.** Concurrent git operations —
+  checkout and stash on git's own `index.lock`, branch creation on its
+  ref and config locks — fail loudly; the residue `clean -fd` takes
+  neither lock (probed), so a concurrent clean races on the files
+  themselves — the same confirmed-discard exposure the concurrent-session
+  risk covers. The stash capture carries a
   per-request nonce in the entry subject (the documented label stays as
   its prefix), so a request whose own push was a no-op — because a
   concurrent request stashed the tree first — adopts nothing and reports

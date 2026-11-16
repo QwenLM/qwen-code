@@ -110,10 +110,10 @@ untracked files in them"——未跟踪目录挡住目标分支以文件跟踪�
 push 前的守卫不 stash 任何东西。
 
 裸 checkout——不带选项——执行与以往完全相同的 git 调用。响应层面的变化
-是 stash checkout 成功时可选的 `stashSha` 字段，以及 auto-stash 条目
-存活且 SHA 可知的失败响应上携带的同名字段——保留恢复后的
-`checkout_failed`、或 push 之后停放 merge 的 `operation_in_progress`
-（见下文）。
+是 stash checkout 成功时可选的 `stashSha` 字段、auto-stash 条目存活且
+SHA 可知的失败响应上携带的同名字段——保留恢复后的 `checkout_failed`、
+或 push 之后停放 merge 的 `operation_in_progress`（见下文）——以及目录
+碰撞拒绝：路由以往回未分类的 500，现在回 `409 dirty_working_tree`。
 
 失败按 core 实际做了什么来分类，而不是匹配 git 的文本：新的
 `GitCheckoutFailure` 携带稳定码 `operation_in_progress`、
@@ -195,10 +195,10 @@ SDK 的 `workspaceGitCheckout`（legacy 与 workspace 限定两个方法）接�
   东西被销毁：条目保留并被点名，修改可恢复。pull 设计出于同样原因只守卫
   其破坏性选项；在这里拒绝 stash 还会让面板在子目录工作区里提供一个永远
   失败的选项。
-- **不做跨请求串行化。** 并发的写索引 git 操作（checkout、stash、
-  branch）会在 git 自己的 `index.lock` 上响亮地失败；残留 `clean -fd`
-  不取这把锁（已探针证实），因此并发 clean 在文件本身上竞争——与并发
-  会话风险同属已确认放弃的暴露面。stash 捕获在条目 subject 里携带每请求 nonce（文档化的标签
+- **不做跨请求串行化。** 并发的 git 操作——checkout 与 stash 取 git 自己的
+  `index.lock`，建分支取其 ref 与 config 锁——都会响亮地失败；残留
+  `clean -fd` 两把锁都不取（已探针证实），因此并发 clean 在文件本身上
+  竞争——与并发会话风险同属已确认放弃的暴露面。stash 捕获在条目 subject 里携带每请求 nonce（文档化的标签
   保留为其前缀），因此当本请求自己的 push 是空操作——因为并发请求先把
   树 stash 了——它什么都不会认领、也不报告条目；按身份恢复绝不会 apply
   或 drop 别人的条目。pull 流程共用该 helper 与同一保证。

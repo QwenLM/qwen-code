@@ -760,10 +760,12 @@ describe('gitCheckout with a dirty working tree', () => {
     expect(git(dir, 'show', `${result.stashSha!}^3:new.txt`)).toBe(
       'untracked\n',
     );
-    // A second request's nonce must DIFFER: a constant suffix would let
-    // the endsWith capture adopt the first request's entry. Compare the
+    // A second request's nonce must DIFFER from the first's. Compare the
     // SUFFIX, not the full subject — git's "On <branch>:" prefix differs
-    // across branches and would mask a constant nonce.
+    // across branches and would mask a constant nonce. Entry 1 sits in
+    // the second capture's pre-push SHA snapshot, so the snapshot — not
+    // the nonce — excludes it here; the nonce guards the concurrent
+    // window pinned by the adoption case below.
     write(dir, { 'a.txt': 'local edit 2\n' });
     const second = await gitCheckout(
       dir,
@@ -778,7 +780,8 @@ describe('gitCheckout with a dirty working tree', () => {
       /qwen-code: auto-stash before checkout [0-9a-f]{8}$/,
     );
     expect(subject2.slice(-8)).not.toBe(subject1.slice(-8));
-    expect(second.stashSha).not.toBe(result.stashSha);
+    // Identity, not just distinctness: not.toBe also passes on undefined.
+    expect(second.stashSha).toBe(git(dir, 'rev-parse', 'refs/stash').trim());
   });
 
   it('stash checkout on a clean tree keeps no entry', async () => {
@@ -1602,6 +1605,12 @@ describe('gitCheckout with a dirty working tree', () => {
         env,
       );
 
+      // Premise: HEAD really is detached at the other commit. The SHA
+      // alone would also hold on a drifted HEAD still on master (which
+      // advanced to that commit), and the case would pass on the
+      // fall-through path without reaching the equality arm.
+      expect(git(dir, 'rev-parse', 'HEAD').trim()).toBe(other);
+      expect(() => currentBranch(dir)).toThrow();
       expect(failure.message).toContain('cannot discard and switch');
       expect(read(dir, 'new.txt')).toBe('untracked\n');
     },
