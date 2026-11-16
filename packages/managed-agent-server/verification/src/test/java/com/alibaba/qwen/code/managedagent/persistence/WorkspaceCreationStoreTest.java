@@ -1,7 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityReader;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
@@ -9,6 +8,7 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -319,7 +319,7 @@ class WorkspaceCreationStoreTest {
         var parent = store(guard).create("tenant", "actor", "Projects", "remote-parent");
         assertThat(parent.canSelectDirectory()).isTrue();
         jdbc.update("UPDATE ma_storage SET storage_kind = 'SSH_LOCAL' WHERE alias_key = ?",
-                WorkspaceCsiRegistration.aliasKey("tenant", storage(parent.workspaceId())));
+                RuntimeAdmissionFences.storageAliasKey("tenant", storage(parent.workspaceId())));
         assertThat(registry.findReadable("tenant", "actor", parent.workspaceId()).canSelectDirectory()).isFalse();
         assertThat(registry.listReadable("tenant", "actor", null, 10))
                 .allSatisfy(item -> assertThat(item.canSelectDirectory()).isFalse());

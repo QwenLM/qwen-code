@@ -68,7 +68,7 @@ class RuntimeProviderPluginsTest {
 
     @Test
     void builtinProvidersAreTrulyOptionalOnTheApplicationClasspath() throws Exception {
-        for (String selected : List.of("none", "local", "external", "kubernetes", "ssh", "static", "local,ssh", "full", "fixture")) {
+        for (String selected : List.of("none", "local", "external", "ssh", "static", "local,ssh", "full", "fixture")) {
             try (var loader = isolated(selected)) {
                 withContextLoader(loader, () -> {
                     var registry = loader.loadClass(REGISTRY).getConstructor().newInstance();
@@ -76,7 +76,6 @@ class RuntimeProviderPluginsTest {
                     var implementations = Map.of(
                             "local", List.of("local-process", "local.LocalProcessRuntimeProvisioner"),
                             "external", List.of("external-scratch", "external.ExternalRuntimeProvisioner"),
-                            "kubernetes", List.of("kubernetes-workspace", "kubernetes.ResidentWorkspaceProvisioner"),
                             "ssh", List.of("ssh-process", "ssh.SshRuntimeProvisioner"),
                             "static", List.of("static", "staticruntime.StaticRuntimeProvisioner"));
                     for (var entry : implementations.entrySet()) {
@@ -195,7 +194,7 @@ class RuntimeProviderPluginsTest {
         for (String entry : System.getProperty("surefire.test.class.path", System.getProperty("java.class.path"))
                 .split(java.util.regex.Pattern.quote(File.pathSeparator))) {
             Path path = Path.of(entry).toAbsolutePath().normalize();
-            if (path.endsWith("test-classes") || Arrays.stream(new String[]{"local", "external", "kubernetes", "ssh", "static"})
+            if (path.endsWith("test-classes") || Arrays.stream(new String[]{"local", "external", "ssh", "static"})
                     .anyMatch(kind -> !selected.equals("full") && !Arrays.asList(selected.split(",")).contains(kind) && (path.endsWith("runtime-" + kind + "/target/classes")
                             || path.getFileName().toString().matches("qwen-managed-agent-runtime-" + kind + "-.+\\.jar")))) {
                 continue;
