@@ -6948,6 +6948,22 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(verifySkill).toContain(
       "sed -n 's/^  context-sha256  //p' ~/.cache/qwen-verify/pr<n>/prepare.log > ~/.cache/qwen-verify/pr<n>/pr.sha256",
     );
+    // R3-2: the digest must be captured and passed on every documented
+    // spelling, and an empty digest must fail at step 1 where the cause is
+    // visible — not at step 7 after the container has run.
+    expect(verifySkill).toContain(
+      'test -s ~/.cache/qwen-verify/pr<n>/pr.sha256 || { echo "prepare printed no context-sha256; see prepare.log" >&2; exit 1; }',
+    );
+    // Both checker overview spellings carry the binding flag.
+    expect(
+      verifySkill.split(
+        'verify-pr-check.mjs --context <host snapshot> --context-sha256 "$(cat ~/.cache/qwen-verify/pr<n>/pr.sha256)" <artifact dir>',
+      ).length - 1,
+    ).toBeGreaterThanOrEqual(2);
+    // Both prepare overview spellings point at the step-1 digest capture.
+    expect(verifySkill).toContain(
+      'plus the `sed` that captures the snapshot digest',
+    );
     expect(stop).toBeGreaterThan(-1);
     expect(symlinkGuard).toBeGreaterThan(-1);
     expect(clear).toBeGreaterThan(-1);

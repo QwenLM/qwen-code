@@ -2773,4 +2773,20 @@ describe('R17-1 / R2-1 trust-boundary witnesses', () => {
     expect(res.status).toBe(2);
     expect(res.stderr).toMatch(/--context-sha256 requires the 64-hex digest/);
   });
+
+  it('refuses a missing context with a diagnostic, not a crash (R3-3)', () => {
+    const dir = makeArtifactDir(validFiles({}), ['01-ab-cells.png']);
+    const missing = join(dir, '..', `nonexistent-${Date.now()}.json`);
+    const res = run([
+      '--context',
+      missing,
+      '--context-sha256',
+      sha256(snapshot),
+      dir,
+    ]);
+    expect(res.status).toBe(1);
+    expect(res.stderr).toMatch(
+      /missing or unreadable; cannot verify it against --context-sha256/,
+    );
+  });
 });

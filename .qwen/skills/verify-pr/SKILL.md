@@ -23,11 +23,13 @@ Two entry paths share the contract below.
   before running the checker, and the checker treats an absent declaration
   as a warning while `$QWEN_VERIFY_CONTEXT` is set — so the round's own
   pre-finish self-check never fails on a file only the later job writes.
-- **Maintainer round on a workstation** — `/verify-pr <n>`, starting with
+- **Maintainer round on a workstation** — `/verify-pr <n>`, starting with the
+  full step-1 prepare block (the trusted copy
   `cd <pr-clone> && node <trusted-clone>/scripts/verify-pr-prepare.mjs <n> --repo <owner>/<repo>`
-  (the trusted copy, with the PR clone only as its
-  cwd; see the container recipe below). The preflight requires the repository
-  explicitly; `origin` is not a fallback.
+  redirected to `prepare.log`, plus the `sed` that captures the snapshot digest
+  into `pr.sha256`; the PR clone only as its cwd — see the container recipe
+  below). The preflight requires the repository explicitly; `origin` is not a
+  fallback.
   It writes the round's coordinates (`repo`, `pr`, `baseRefOid`, `headRefOid`)
   to `context.json` and refuses a tree that is not a clean checkout of the PR
   head — when it passes, the current tree is the head side of the A/B, so stay
@@ -41,7 +43,7 @@ Two entry paths share the contract below.
 `/verify-pr <n>` proves the change and posts nothing. `--publish` adds the
 report comment and its image evidence; `--watch` installs a standing trigger.
 Before publishing a local round, run
-`node <trusted-clone>/scripts/verify-pr-check.mjs --context <host snapshot> <artifact dir>`
+`node <trusted-clone>/scripts/verify-pr-check.mjs --context <host snapshot> --context-sha256 "$(cat ~/.cache/qwen-verify/pr<n>/pr.sha256)" <artifact dir>`
 from a checkout the PR cannot write; it applies the
 consistency rules the publisher enforces in CI.
 
@@ -256,8 +258,10 @@ toolchain install succeeded. The alternative is a JDK-equipped
 credential-free boundary you build yourself; the recorded waiver is the
 last resort, never a silent host fallback.
 
-Run `cd <pr-clone> && node <trusted-clone>/scripts/verify-pr-prepare.mjs <n> --repo <owner>/<repo>`
-on the host before anything else: it fetches the metadata snapshot, resolves and verifies
+Run the full step-1 prepare block on the host before anything else — the
+`cd <pr-clone> && node <trusted-clone>/scripts/verify-pr-prepare.mjs <n> --repo <owner>/<repo>`
+command redirected to `prepare.log`, plus the `sed` that captures the snapshot
+digest into `pr.sha256` (step 7 binds the snapshot's bytes to it). It fetches the metadata snapshot, resolves and verifies
 both OIDs against this clone, refuses a tree that is not a clean, fully
 materialised checkout of the PR head (a wrong HEAD names the `git checkout`
 to run; uncommitted changes name the entries and a stash form that clears
@@ -358,6 +362,9 @@ authority to certify the round.
    # the snapshot's bytes; a path/link-count check alone cannot prove the host
    # wrote the copy (R2-1).
    sed -n 's/^  context-sha256  //p' ~/.cache/qwen-verify/pr<n>/prepare.log > ~/.cache/qwen-verify/pr<n>/pr.sha256
+   # Fail here, where the cause is visible, rather than at step 7 after the
+   # container has run: an empty digest means prepare printed no context-sha256.
+   test -s ~/.cache/qwen-verify/pr<n>/pr.sha256 || { echo "prepare printed no context-sha256; see prepare.log" >&2; exit 1; }
    rm -rf ~/.cache/qwen-verify/pr<n>/qwen-base
    mkdir -p ~/.cache/qwen-verify/pr<n>/qwen-base
    cp <pr-clone>/tmp/verify-context/pr<n>.json ~/.cache/qwen-verify/pr<n>/pr.json
@@ -1046,7 +1053,7 @@ artifact directory and post that file: it is what the read-back below
 compares against, and it gives the checker a place to verify the footer
 actually landed. The local path has no publisher enforcing the fail/mismatch
 rule, so run
-`node <trusted-clone>/scripts/verify-pr-check.mjs --context <host snapshot> <artifact dir>`
+`node <trusted-clone>/scripts/verify-pr-check.mjs --context <host snapshot> --context-sha256 "$(cat ~/.cache/qwen-verify/pr<n>/pr.sha256)" <artifact dir>`
 and clear its
 errors and its verdict-shape and footer warnings before publishing (a
 missing footer is legitimate only when the model could not be resolved),

@@ -5,6 +5,7 @@
  */
 
 import { execFileSync, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   chmodSync,
   existsSync,
@@ -810,6 +811,15 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     // has no repo member, so prepare adds it where the snapshot is written.
     expect(context.repo).toBe(REPO);
     expect(context.number).toBe(42);
+    // The printed digest must be the sha256 of exactly the bytes written to
+    // contextPath, under the two-space label the skill's sed anchors on: the
+    // checker rehashes what it reads back, so a re-aligned label, a renamed
+    // row, or a different serialisation would empty every round's pr.sha256
+    // while the consumer-side pin stayed green (R3-1).
+    const digest = createHash('sha256')
+      .update(readFileSync(contextPath))
+      .digest('hex');
+    expect(result.stdout).toContain(`  context-sha256  ${digest}`);
     const artifacts = result.stdout.match(/artifacts {2}(\S+)/)?.[1];
     expect(artifacts).toMatch(/pr42-verify-\d{8}-\d{6}$/);
     expect(existsSync(join(artifacts, 'evidence'))).toBe(true);
