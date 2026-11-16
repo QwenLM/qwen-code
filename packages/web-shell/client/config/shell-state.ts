@@ -61,18 +61,20 @@ let shellNonce: string | undefined;
  * The per-launch value Rust appends beside `token=` in the boot fragment. The
  * `shell_state_*` commands require it because Tauri reports the top-level
  * document's URL: a cross-origin frame inside the Web Shell clears the origin
- * check on Windows, and this is the piece it cannot read. Session storage keeps
- * it across an in-app reload that drops the fragment; memory keeps every call
- * in this document on the same value.
+ * check on Windows, so the nonce is the only piece left. It is removed from the
+ * URL as soon as it is read: a sandboxed `srcdoc` frame inherits this
+ * document's base URL — fragment included — and could otherwise read it. Session
+ * storage keeps it across an in-app reload that drops the fragment; memory keeps
+ * every call in this document on the same value.
  */
 function readShellNonce(): string {
   if (shellNonce !== undefined) return shellNonce;
   try {
-    const fromHash = new URLSearchParams(
-      window.location.hash.replace(/^#/, ''),
-    ).get('shell');
+    const params = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+    const fromHash = params.get('shell');
     if (fromHash) {
       shellNonce = fromHash;
+      stripShellParam(params);
       try {
         window.sessionStorage.setItem(SHELL_NONCE_STORAGE_KEY, fromHash);
       } catch {
@@ -85,6 +87,22 @@ function readShellNonce(): string {
     shellNonce = '';
   }
   return shellNonce;
+}
+
+/** Rewrites the fragment without `shell=`, keeping the rest of it intact. */
+function stripShellParam(params: URLSearchParams): void {
+  params.delete('shell');
+  const rest = params.toString();
+  try {
+    window.history.replaceState(
+      window.history.state,
+      '',
+      `${window.location.pathname}${window.location.search}${rest ? `#${rest}` : ''}`,
+    );
+  } catch {
+    // The nonce is already captured; a URL this document cannot rewrite must
+    // not cost it the session.
+  }
 }
 
 function readLocal(key: string): string | null {
@@ -201,6 +219,17 @@ export function writeShellState(key: ShellStateKey, value: string): void {
       // Native accepted this value, whatever the mirror holds now: the next
       // write's base is what the shell stored, not what the page displays.
       nativeValues.set(key, value);
+      // The stored base advances too. A mirror whose write landed names the
+      // value native holds afterwards, so a launch that finds native back at
+      // the older value drops that mirror instead of re-pushing a catalog
+      // someone has since deleted; only a rejected write leaves the older base
+      // standing, which is what makes its mirror the surviving copy.
+      if (readLocal(key) === null) return;
+      try {
+        window.localStorage.setItem(mirrorBaseKey(key), value);
+      } catch {
+        // Without storage the mirror cannot be adopted on a later launch.
+      }
     })
     .catch(() => {
       // The in-memory copy keeps this session usable, and the mirror below is

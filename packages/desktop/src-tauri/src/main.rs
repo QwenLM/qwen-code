@@ -160,7 +160,10 @@ struct ApplicationState {
     origin: Arc<Mutex<Option<Url>>>,
     /// This launch's value from the boot fragment. `webview.url()` is the
     /// top-level document, so a cross-origin frame inside the Web Shell passes
-    /// `require_runtime_origin`; the nonce is what it cannot obtain.
+    /// `require_runtime_origin`; the nonce is what it cannot obtain — the shell
+    /// deletes it from the fragment as soon as it reads it, because a sandboxed
+    /// `srcdoc` frame inherits the parent document's base URL, fragment
+    /// included.
     shell_nonce: Arc<Mutex<Option<String>>>,
     last_error: Mutex<Option<String>>,
     last_workspace: Mutex<Option<(PathBuf, bool)>>,

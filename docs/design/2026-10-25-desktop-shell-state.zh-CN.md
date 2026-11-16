@@ -37,7 +37,7 @@ WebView2 按 origin 隔离 `localStorage` 与 `sessionStorage`，因此每次启
 
 新增两个命令：`shell_state_read(key)` 和 `shell_state_write(key, value)`。
 
-两者都会调用 `require_runtime_origin`，把调用方 webview 的 URL origin 与本次启动记录的运行时 origin 比较。bootstrap 页面和其他 origin 都会被拒绝。该 URL 是顶层文档，因此 Web Shell 内部跨源子框架（网页预览会嵌入任意 http(s) 页面）同样能通过；因此两个命令还要求本次启动的 nonce——它随 `token=` 一起放在启动 URL 的 fragment 中。跨源子框架读不到顶层文档的 fragment，而外壳会把它存进 session storage，使丢失 fragment 的应用内重载仍然可用。命令在 `build.rs` 中注册，并且只授予 daemon 提供的 `web-shell-external-url` capability；其 `remote.urls` 已经是 `http://127.0.0.1:*`。
+两者都会调用 `require_runtime_origin`，把调用方 webview 的 URL origin 与本次启动记录的运行时 origin 比较。bootstrap 页面和其他 origin 都会被拒绝。该 URL 是顶层文档，因此 Web Shell 内部跨源子框架（网页预览会嵌入任意 http(s) 页面）同样能通过；因此两个命令还要求本次启动的 nonce——它随 `token=` 一起放在启动 URL 的 fragment 中。子框架读不到顶层文档自身的 fragment，但沙箱化的 `srcdoc` 框架会继承本文档的 base URL（包含 fragment），因此外壳只在读一次之后、在同一步里重写掉该 fragment；值同时存进 session storage，使丢失 fragment 的应用内重载仍然可用。命令在 `build.rs` 中注册，并且只授予 daemon 提供的 `web-shell-external-url` capability；其 `remote.urls` 已经是 `http://127.0.0.1:*`。
 
 `shell_state_read` 对缺失的键返回 `null`。`shell_state_write` 不返回负载。
 
@@ -45,7 +45,7 @@ WebView2 按 origin 隔离 `localStorage` 与 `sessionStorage`，因此每次启
 
 `packages/web-shell/client/config/shell-state.ts` 负责桌面分支：
 
-- `hydrateShellState()` 在首次渲染前运行。它通过 IPC 读取两个键并缓存到内存。与原生值相同的 `localStorage` 副本会被删除。与之不同的副本在带有**本次启动的标记**时会被采纳——`writeShellState` 会把启动 nonce 与镜像一起写入，**每个目录一个标记**，因此另一个目录的写入不能为本次启动从未写过的副本背书。属于其它启动的副本可能在其启动结束后留在磁盘上，并在临时端口被复用时重新出现。除标记外，`writeShellState` 还会把镜像派生自的原生值——即最后一次确认已在原生存储中的值（只有水合读取或成功返回的写入才会更新它；本次读取失败时保留上一次启动留下的记录）——作为每个目录一份的基准记录在 `localStorage` 中；原生值有大小上限，其键白名单也不允许任何元数据键。带外部标记的镜像只有在其记录的基准仍等于当前原生值时才会被采纳并回推：此时它是某次未能落盘的写入唯一幸存的副本。一旦基准不再匹配，说明目录已经前进，镜像会被删除，保留原生值；没有记录基准的镜像在存在原生值时同样被删除。若完全没有原生副本则无可损失，因此桌面端之前的镜像仍会被迁移。
+- `hydrateShellState()` 在首次渲染前运行。它通过 IPC 读取两个键并缓存到内存。与原生值相同的 `localStorage` 副本会被删除。与之不同的副本在带有**本次启动的标记**时会被采纳——`writeShellState` 会把启动 nonce 与镜像一起写入，**每个目录一个标记**，因此另一个目录的写入不能为本次启动从未写过的副本背书。属于其它启动的副本可能在其启动结束后留在磁盘上，并在临时端口被复用时重新出现。除标记外，`writeShellState` 还会把镜像派生自的原生值——即最后一次确认已在原生存储中的值（只有水合读取或成功返回的写入才会更新它，因此已落盘写入对应的镜像记录的是之后原生持有的值，目录日后回到旧值时该镜像会被删除而不是被复活；本次读取失败时则保留上一次启动留下的记录）——作为每个目录一份的基准记录在 `localStorage` 中；原生值有大小上限，其键白名单也不允许任何元数据键。带外部标记的镜像只有在其记录的基准仍等于当前原生值时才会被采纳并回推：此时它是某次未能落盘的写入唯一幸存的副本。一旦基准不再匹配，说明目录已经前进，镜像会被删除，保留原生值；没有记录基准的镜像在存在原生值时同样被删除。若完全没有原生副本则无可损失，因此桌面端之前的镜像仍会被迁移。
 - 迁移只取当前 origin 的 `localStorage` 条目。更早的启动写入的是已无法解析的端口，无法恢复。本次改动之前的构建没有仅限桌面外壳的页面 origin 规则，会把页面 origin 存进工作区主机目录，因此迁移在回推前剔除该条目，若其余为空则不写入。
 - `readShellState` 在桌面外壳中优先使用已水合的缓存，在其他环境中退回 `localStorage`。
 - `writeShellState` 同时写入 `localStorage`（浏览器路径与会话内回退）和 IPC。IPC 写入是 fire-and-forget：失败时当前会话仍可用，镜像在同源重载下存活；只要原生目录仍与记录的基准一致，下一次同源水合就会回推它。在全新 origin 上启动会丢失该值，而期间已落盘的原生写入会取代它。

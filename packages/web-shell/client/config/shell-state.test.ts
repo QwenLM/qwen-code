@@ -436,6 +436,60 @@ describe('desktop shell state', () => {
     });
   });
 
+  it('drops a mirror whose landed write native has since moved past', async () => {
+    // Launch 1 adds a host on this origin and the write lands, so the mirror
+    // records the value native is left holding, not the one it replaced.
+    let native = '["https://a.example"]';
+    const firstInvoke = vi.fn(
+      async (command: string, args?: Record<string, unknown>) => {
+        if (command === 'shell_state_read') return native;
+        if (command === 'shell_state_write') {
+          native = args?.['value'] as string;
+        }
+        return undefined;
+      },
+    );
+    installDesktop(firstInvoke);
+
+    const first = await import('./shell-state');
+    await first.hydrateShellState();
+    first.writeShellState(
+      'qwen-remote-connections',
+      '["https://a.example","https://b.example"]',
+    );
+    await Promise.resolve();
+    expect(
+      window.localStorage.getItem(
+        'qwen-shell-mirror-base:qwen-remote-connections',
+      ),
+    ).toBe('["https://a.example","https://b.example"]');
+
+    // A launch on another port deletes the host, so native is back at the value
+    // the mirror's base would have named had the write never landed. This
+    // origin's storage is untouched.
+    vi.resetModules();
+    window.history.replaceState(null, '', '/#token=secret&shell=launch-three');
+    const thirdInvoke = vi.fn(
+      async (command: string): Promise<unknown> =>
+        command === 'shell_state_read' ? '["https://a.example"]' : undefined,
+    );
+    installDesktop(thirdInvoke);
+
+    const third = await import('./shell-state');
+    await third.hydrateShellState();
+
+    // The mirror is superseded, not the surviving copy of a rejected write:
+    // re-pushing it here would resurrect the host someone deleted.
+    expect(third.readShellState('qwen-remote-connections')).toBe(
+      '["https://a.example"]',
+    );
+    expect(window.localStorage.getItem('qwen-remote-connections')).toBeNull();
+    expect(thirdInvoke).not.toHaveBeenCalledWith(
+      'shell_state_write',
+      expect.objectContaining({ key: 'qwen-remote-connections' }),
+    );
+  });
+
   it('keeps an earlier launch base when this launch cannot read the native value', async () => {
     // An earlier launch recorded the base of the mirror; this launch's read for
     // that key fails, so the native value is unknown here.
@@ -561,6 +615,31 @@ describe('desktop shell state', () => {
     const second = await import('./shell-state');
     await second.hydrateShellState();
 
+    expect(invoke).toHaveBeenCalledWith('shell_state_read', {
+      key: 'qwen-remote-connections',
+      nonce: 'launch-nonce',
+    });
+  });
+
+  it('removes the launch nonce from the URL once it is read', async () => {
+    // A sandboxed `srcdoc` frame inherits this document's base URL — fragment
+    // included — so a nonce left there is readable by the frames it excludes.
+    window.history.replaceState(
+      null,
+      '',
+      '/?keep=1#token=secret&shell=launch-nonce',
+    );
+    const invoke = vi.fn(async (): Promise<unknown> => null);
+    installDesktop(invoke);
+
+    const { hydrateShellState } = await import('./shell-state');
+    await hydrateShellState();
+
+    expect(window.location.hash).not.toContain('shell=');
+    // Only the nonce is dropped; the token strip stays the daemon's business.
+    expect(window.location.hash).toContain('token=secret');
+    expect(window.location.search).toBe('?keep=1');
+    // The strip runs after the capture: the calls still carry the boot nonce.
     expect(invoke).toHaveBeenCalledWith('shell_state_read', {
       key: 'qwen-remote-connections',
       nonce: 'launch-nonce',
