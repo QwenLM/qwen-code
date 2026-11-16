@@ -623,6 +623,53 @@ describe('ExtensionFileWatcher', () => {
     expect(ignored(path.join(root, 'settings.json'))).toBe(true);
   });
 
+  it('bootstrap watcher restarts when the extensions directory appears', async () => {
+    mockExistsSync.mockReturnValue(false);
+    const refreshState = createRefreshState();
+    const watcher = new ExtensionFileWatcher(
+      configWithExtensions([]),
+      extensionsDir,
+      refreshState,
+    );
+    watcher.startWatching();
+    expect(mockWatchers).toHaveLength(2);
+
+    mockExistsSync.mockReturnValue(true);
+    // chokidar's own spelling, which differs from extensionsDir on every host.
+    fireAllEvent(
+      1,
+      'addDir',
+      `${path.dirname(extensionsDir)}/extensions${path.sep}`,
+    );
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    expect(refreshState.markExtensionsChanged).toHaveBeenCalledWith(
+      'extension directory created',
+    );
+    expect(mockWatchers).toHaveLength(3);
+    expect(mockWatchers[2].target).toContain(extensionsDir);
+    watcher.stopWatching();
+  });
+
+  it('bootstrap watcher ignores a sibling of the extensions directory', async () => {
+    mockExistsSync.mockReturnValue(false);
+    const refreshState = createRefreshState();
+    const watcher = new ExtensionFileWatcher(
+      configWithExtensions([]),
+      extensionsDir,
+      refreshState,
+    );
+    watcher.startWatching();
+
+    mockExistsSync.mockReturnValue(true);
+    fireAllEvent(1, 'addDir', path.join(path.dirname(extensionsDir), 'other'));
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    expect(refreshState.markExtensionsChanged).not.toHaveBeenCalled();
+    expect(mockWatchers).toHaveLength(2);
+    watcher.stopWatching();
+  });
+
   it('restarts watching after extension manager mutations settle', () => {
     const refreshState = createRefreshState();
     let mutationListener:
