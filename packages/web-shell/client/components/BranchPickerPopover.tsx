@@ -49,6 +49,13 @@ import styles from './BranchPickerPopover.module.css';
 // still restoring the repository.
 const GIT_PULL_FETCH_TIMEOUT_MS = 600_000;
 
+// The checkout stash/force flows chain git commands with the same 30s
+// per-command budget (guards, stash push, listings, HEAD identity probes,
+// checkout, and the failure path's apply/drop) — the stash failure path
+// reaches ~18 of them (540s), sized to the same 600s UX ceiling as pull
+// so a slow repository surfaces as a client timeout rather than a hang.
+const GIT_CHECKOUT_FETCH_TIMEOUT_MS = 600_000;
+
 // A remote mutation chains git's add/rm plus the verification and
 // upstream-cleanup spawns (each with its own 30s budget). The chain
 // length grows with pointed branches and linked worktrees, so this is a
@@ -454,6 +461,12 @@ export function BranchPickerPopover({
   const [pullBlockedDetail, setPullBlockedDetail] = useState<string | null>(
     null,
   );
+  // Which action the resolution panel belongs to: null is the pull panel;
+  // a ref is the checkout that was refused, and the panel's buttons retry
+  // that checkout with the chosen resolution.
+  const [blockedCheckoutRef, setBlockedCheckoutRef] = useState<string | null>(
+    null,
+  );
   // Whether the footer currently shows a stash-restore warning: the only
   // signal that the user's changes sit in a stash entry, so it must survive
   // the reopen reset below even when the pull settled while closed.
@@ -630,6 +643,7 @@ export function BranchPickerPopover({
       setPullBlocked(false);
       setConfirmDiscard(false);
       setPullBlockedDetail(null);
+      setBlockedCheckoutRef(null);
       setTimeout(() => searchRef.current?.focus(), 50);
     }
   }, [open, fetchBranches, fetchStatus]);
@@ -699,6 +713,7 @@ export function BranchPickerPopover({
     setPullBlocked(false);
     setConfirmDiscard(false);
     setPullBlockedDetail(null);
+    setBlockedCheckoutRef(null);
     // The panel hides the status line while it is up; drop that stale
     // blocked message too so a competing action starts from a clean footer.
     setStatusMsg(null);
@@ -706,21 +721,83 @@ export function BranchPickerPopover({
   }, []);
 
   const handleCheckout = useCallback(
-    async (ref: string) => {
+    async (ref: string, opts?: { stash?: boolean; force?: boolean }) => {
       if (busyAction) return;
-      clearPullPanel();
-      setBusyAction('checkout');
+      // A plain checkout is a competing action and dismisses any standing
+      // panel; a resolution keeps its own panel mounted (with the button
+      // spinner) while the request is in flight, like the pull panel.
+      if (!opts) clearPullPanel();
+      const action = opts?.stash
+        ? 'checkoutStash'
+        : opts?.force
+          ? 'checkoutDiscard'
+          : 'checkout';
+      setBusyAction(action);
       try {
-        if (gitSessionId === undefined) {
-          await ws.workspaceGitCheckout(ref, gitCwd);
+        const result = await ws.workspaceGitCheckout(
+          ref,
+          gitCwd,
+          gitSessionId,
+          opts,
+          GIT_CHECKOUT_FETCH_TIMEOUT_MS,
+        );
+        clearPullPanel();
+        if (result.stashSha) {
+          // The kept entry is the only record of where the changes went;
+          // render it sticky like the pull stash warnings. Name the ref the
+          // user clicked, not the resolved HEAD (a tag detaches to a SHA).
+          showStatus(
+            t('branchPicker.checkoutStashKept', {
+              branch: ref,
+              sha: result.stashSha,
+            }),
+            'warning',
+          );
+          onBranchChanged?.();
+          // Keep the picker open so the warning is painted now: closing in
+          // the same update would hide the only record of the changes
+          // until the next reopen. The pull flow stays open for the same
+          // reason; plain checkouts keep the close-on-success contract.
+          // The open list AND the tree snapshot are stale after the switch
+          // (the hints would keep reporting uncommitted changes for a clean
+          // tree); re-read both silently, like the pull flow's refresh.
+          void refreshAfterAction();
         } else {
-          await ws.workspaceGitCheckout(ref, gitCwd, gitSessionId);
+          showStatus(t('branchPicker.checkedOut', { branch: ref }), 'success');
+          onBranchChanged?.();
+          onOpenChange(false);
         }
-        showStatus(t('branchPicker.checkedOut', { branch: ref }), 'success');
-        onBranchChanged?.();
-        onOpenChange(false);
       } catch (err) {
-        showStatus(err instanceof Error ? err.message : String(err), 'error');
+        if (isDirtyWorkingTreeError(err)) {
+          setPullBlocked(true);
+          setBlockedCheckoutRef(ref);
+          setConfirmDiscard(false);
+          setPullBlockedDetail(null);
+          showStatus(t('branchPicker.checkoutBlocked'), 'error');
+        } else if (isForceUnsupportedError(err)) {
+          setPullBlocked(true);
+          setBlockedCheckoutRef(ref);
+          setConfirmDiscard(false);
+          setPullBlockedDetail(pullErrorMessage(err));
+          showStatus(t('branchPicker.checkoutBlocked'), 'error');
+        } else {
+          clearPullPanel();
+          // The daemon's message carries git's own notice or the core's
+          // explanation; the SDK's error message only names the route.
+          // A kept stash entry is the only record of the user's changes:
+          // render it sticky like the pull stash warnings, not a
+          // dismissible error.
+          const keptSha = daemonErrorBody(err)?.['stashSha'];
+          showStatus(
+            pullErrorMessage(err),
+            typeof keptSha === 'string' ? 'warning' : 'error',
+          );
+        }
+        // A failed resolution may still have moved the tree (a kept-stash
+        // restore, a partial clean); re-read like the pull flow does. Not
+        // awaited: the panel this catch opened must not sit disabled for a
+        // listing round-trip it never needed.
+        void refreshAfterAction();
       } finally {
         setBusyAction(null);
       }
@@ -734,6 +811,7 @@ export function BranchPickerPopover({
       onOpenChange,
       showStatus,
       clearPullPanel,
+      refreshAfterAction,
       t,
     ],
   );
@@ -833,6 +911,10 @@ export function BranchPickerPopover({
   const handlePull = useCallback(
     async (opts?: { stash?: boolean; force?: boolean }) => {
       if (busyAction) return;
+      // A plain pull is a competing action and dismisses any standing
+      // panel (including a checkout's); a resolution keeps its own panel
+      // mounted while the request is in flight.
+      if (!opts) clearPullPanel();
       const action = opts?.stash
         ? 'pullStash'
         : opts?.force
@@ -872,11 +954,13 @@ export function BranchPickerPopover({
       } catch (err) {
         if (isDirtyWorkingTreeError(err)) {
           setPullBlocked(true);
+          setBlockedCheckoutRef(null);
           setConfirmDiscard(false);
           setPullBlockedDetail(null);
           showStatus(t('branchPicker.pullBlocked'), 'error');
         } else if (isForceUnsupportedError(err)) {
           setPullBlocked(true);
+          setBlockedCheckoutRef(null);
           setConfirmDiscard(false);
           setPullBlockedDetail(pullErrorMessage(err));
           showStatus(t('branchPicker.pullBlocked'), 'error');
@@ -1443,6 +1527,20 @@ export function BranchPickerPopover({
     [],
   );
 
+  // The resolution panel is shared by pull and checkout: dispatch to
+  // whichever action was blocked, with the matching busy key and wording.
+  const checkoutBlocked = blockedCheckoutRef !== null;
+  const runStashResolution = () =>
+    blockedCheckoutRef !== null
+      ? handleCheckout(blockedCheckoutRef, { stash: true })
+      : handlePull({ stash: true });
+  const runDiscardResolution = () =>
+    blockedCheckoutRef !== null
+      ? handleCheckout(blockedCheckoutRef, { force: true })
+      : handlePull({ force: true });
+  const stashBusyKey = checkoutBlocked ? 'checkoutStash' : 'pullStash';
+  const discardBusyKey = checkoutBlocked ? 'checkoutDiscard' : 'pullDiscard';
+
   return (
     <Popover open={open} onOpenChange={onOpenChange}>
       <PopoverTrigger asChild>{children}</PopoverTrigger>
@@ -1853,7 +1951,12 @@ export function BranchPickerPopover({
         {pullBlocked ? (
           <div className={styles.pullBlocked}>
             <div className={styles.pullBlockedMessage}>
-              {pullBlockedDetail ?? t('branchPicker.pullBlocked')}
+              {pullBlockedDetail ??
+                t(
+                  checkoutBlocked
+                    ? 'branchPicker.checkoutBlocked'
+                    : 'branchPicker.pullBlocked',
+                )}
             </div>
             {confirmDiscard ? (
               <>
@@ -1865,12 +1968,16 @@ export function BranchPickerPopover({
                     type="button"
                     className={`${styles.pullBlockedButton} ${styles.pullBlockedButtonDanger}`}
                     disabled={!!busyAction}
-                    onClick={() => void handlePull({ force: true })}
+                    onClick={() => void runDiscardResolution()}
                   >
-                    {busyAction === 'pullDiscard' && (
+                    {busyAction === discardBusyKey && (
                       <Loader2Icon size={13} className={styles.spin} />
                     )}
-                    {t('branchPicker.pullDiscardGo')}
+                    {t(
+                      checkoutBlocked
+                        ? 'branchPicker.checkoutDiscardGo'
+                        : 'branchPicker.pullDiscardGo',
+                    )}
                   </button>
                   <button
                     type="button"
@@ -1888,14 +1995,18 @@ export function BranchPickerPopover({
                   type="button"
                   className={styles.pullBlockedButton}
                   disabled={!!busyAction}
-                  onClick={() => void handlePull({ stash: true })}
+                  onClick={() => void runStashResolution()}
                 >
-                  {busyAction === 'pullStash' ? (
+                  {busyAction === stashBusyKey ? (
                     <Loader2Icon size={13} className={styles.spin} />
                   ) : (
                     <ArrowDownToLineIcon size={13} />
                   )}
-                  {t('branchPicker.pullStash')}
+                  {t(
+                    checkoutBlocked
+                      ? 'branchPicker.checkoutStash'
+                      : 'branchPicker.pullStash',
+                  )}
                 </button>
                 {pullBlockedDetail === null && (
                   <button
@@ -1904,7 +2015,11 @@ export function BranchPickerPopover({
                     disabled={!!busyAction}
                     onClick={() => setConfirmDiscard(true)}
                   >
-                    {t('branchPicker.pullDiscard')}
+                    {t(
+                      checkoutBlocked
+                        ? 'branchPicker.checkoutDiscard'
+                        : 'branchPicker.pullDiscard',
+                    )}
                   </button>
                 )}
                 <button

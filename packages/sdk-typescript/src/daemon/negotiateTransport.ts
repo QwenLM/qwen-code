@@ -12,7 +12,7 @@ import type { DaemonTransport } from './DaemonTransport.js';
 
 /** Options for {@link negotiateTransport}. */
 export interface NegotiateTransportOptions {
-  /** Timeout for the capabilities probe and WS handshake. Default 5000ms. */
+  /** Timeout for the complete capabilities body and WS handshake. Default 5000ms. */
   probeTimeoutMs?: number;
   /**
    * `fetch` implementation used for the capabilities probe and threaded
@@ -70,7 +70,6 @@ export async function negotiateTransport(
         headers,
         signal: ctrl.signal,
       });
-      clearTimeout(timer);
       if (res.ok) {
         const caps = (await res.json()) as {
           transports?: string[];
@@ -79,8 +78,9 @@ export async function negotiateTransport(
         transports = Array.isArray(caps.transports) ? caps.transports : [];
       }
     } catch {
-      clearTimeout(timer);
       // Probe failed — fall through to REST.
+    } finally {
+      clearTimeout(timer);
     }
   } catch {
     // Outer catch for timer setup errors (unlikely).
@@ -94,17 +94,14 @@ export async function negotiateTransport(
       const wsUrl = baseUrl.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:');
       const transport = new AcpWsTransport(wsUrl + '/acp', token, fetchFn);
       // Probe: try to connect with a timeout.
-      const probeTimer = setTimeout(() => {
-        /* timeout — handled by race */
-      }, probeTimeoutMs);
+      let probeTimer: ReturnType<typeof setTimeout> | undefined;
       try {
         const probeRes = await Promise.race([
           transport.fetch(`${baseUrl}/capabilities`, { method: 'GET' }),
-          new Promise<null>((resolve) =>
-            setTimeout(() => resolve(null), probeTimeoutMs),
-          ),
+          new Promise<null>((resolve) => {
+            probeTimer = setTimeout(() => resolve(null), probeTimeoutMs);
+          }),
         ]);
-        clearTimeout(probeTimer);
         if (probeRes) {
           return transport;
         }
@@ -115,13 +112,14 @@ export async function negotiateTransport(
           /* ignore dispose errors */
         }
       } catch {
-        clearTimeout(probeTimer);
         // WS probe failed — dispose and try next.
         try {
           transport.dispose();
         } catch {
           /* ignore dispose errors */
         }
+      } finally {
+        clearTimeout(probeTimer);
       }
     } catch {
       // WS import/creation failed — try next.

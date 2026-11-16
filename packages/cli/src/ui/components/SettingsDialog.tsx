@@ -255,6 +255,7 @@ export function SettingsDialog({
             newValue = nextBooleanSettingValue(
               currentValue,
               definition.default,
+              definition.unsetToggleValue,
             );
             setPendingSettings((prev) =>
               setPendingSettingValue(key, newValue as boolean, prev),

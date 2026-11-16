@@ -13,6 +13,7 @@ export interface HookExecutionOwner {
   readonly runtimeId: string;
   readonly sessionId: string;
   readonly agentId: string | null;
+  readonly historyPromptId?: string;
 }
 
 const storage = new AsyncLocalStorage<HookExecutionOwner | undefined>();
@@ -26,6 +27,10 @@ export function runWithHookExecutionOwner<T>(
   fn: () => T,
 ): T {
   return storage.run(owner, fn);
+}
+
+export function enterHookExecutionOwner(owner: HookExecutionOwner): void {
+  storage.enterWith(owner);
 }
 
 export function runOutsideHookExecutionOwner<T>(fn: () => T): T {

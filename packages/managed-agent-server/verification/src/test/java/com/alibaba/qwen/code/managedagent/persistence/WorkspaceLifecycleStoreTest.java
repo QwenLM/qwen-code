@@ -29,6 +29,7 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -68,7 +69,7 @@ class WorkspaceLifecycleStoreTest {
                 new DataSourceTransactionManager(fixture.jdbc.getDataSource())));
         var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(fixture.jdbc,
                 new JdbcManagedExtensionRecordStore(fixture.jdbc), null, executionStore, fixture.store, null, null, null,
-                com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound(), null);
+                com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound());
         var journal = fixture.transactions.execute(ignored -> new ExtensionRecordJournal(store, "tenant", "workspace", fixture.session).open());
         var templates = ManagedHookRecordContractTest.fixtures().get("templates");
         var data = new ManagedSessionStoreModels.CommitResource("hook-data", "hook-data", 1, 2,
@@ -216,6 +217,55 @@ class WorkspaceLifecycleStoreTest {
                     assertThat(error.getCode()).isEqualTo("workspace_lifecycle_claim_fenced");
                     assertThat(error.isRetryable()).isFalse();
                 });
+    }
+
+    @Test
+    void externalAuthorizationPreservesThePermanentLifecycleFence() {
+        var fixture = fixture();
+        String storage = fixture.jdbc.queryForObject(
+                "SELECT storage_id FROM ma_workspace WHERE tenant_id = ? AND workspace_id = ?",
+                (row, index) -> new String(row.getBytes(1), java.nio.charset.StandardCharsets.UTF_8),
+                "tenant".getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                "workspace".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        fixture.jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key,"
+                        + " tenant_id, storage_id, storage_kind) VALUES (?, ?, ?, 'tenant', ?, 'EXTERNAL')",
+                RuntimeAdmissionFences.storageAliasKey("tenant", storage),
+                RuntimeAdmissionFences.storageFenceKey("tenant"),
+                RuntimeAdmissionFences.storageFenceKey(storage), storage);
+        fixture.jdbc.update("UPDATE ma_session SET tool_profile = ?",
+                WorkspaceToolProfiles.EXTERNAL_FILES);
+        var execution = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(
+                new JdbcWorkspaceExecutionStore(fixture.jdbc,
+                        new DataSourceTransactionManager(fixture.jdbc.getDataSource())));
+
+        assertThatThrownBy(() -> execution.authorizeExternal(
+                fixture.store.requireSession("tenant", fixture.session),
+                new RuntimeLifecycleAuthority("missing-operation", 1)))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
+                    assertThat(error.getStatusCode()).isEqualTo(409);
+                    assertThat(error.getCode()).isEqualTo("workspace_lifecycle_claim_fenced");
+                    assertThat(error.isRetryable()).isFalse();
+                });
+    }
+
+    /**
+     * A content-only extension child is a real Session in the same Workspace, generation and
+     * storage, and its owner was copied from the parent by the launch. The external-files profile
+     * does not admit child Sessions: {@code insertChildSession} refuses at creation, so the
+     * parent fails fast instead of minting a child that can never be admitted.
+     */
+    @Test
+    void externalFilesParentCannotAdmitAChildSession() {
+        var fixture = fixture();
+        fixture.jdbc.update("UPDATE ma_session SET tool_profile = ? WHERE tenant_id = ? AND session_id = ?",
+                WorkspaceToolProfiles.EXTERNAL_FILES, "tenant", fixture.session);
+
+        assertThatThrownBy(() -> fixture.transactions.executeWithoutResult(ignored -> fixture.store.insertChildSessionCommand(
+                "tenant", fixture.session, "child-create", "digest", "child",
+                java.util.List.of(), "payload",
+                new com.alibaba.qwen.code.managedagent.model.StoreModels.SessionLineage(fixture.session, fixture.session, "child-run", 1))))
+                .isInstanceOfSatisfying(ManagedAgentException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("child_parent_unavailable"));
     }
 
     @Test
