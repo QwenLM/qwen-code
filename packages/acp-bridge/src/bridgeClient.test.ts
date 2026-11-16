@@ -1729,6 +1729,44 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
     });
   });
 
+  it('forwards a target workspace and rejects an unusable one', async () => {
+    const onCreate = vi.fn(async () => ({ sessionId: 'sub-11' }));
+    const client = makeClientWithCreateSubSession(onCreate);
+    await client.extMethod(METHOD, {
+      prompt: 'go',
+      completion: 'sent',
+      workspace: '/repos/b',
+      callerSessionId: 'caller-1',
+    });
+    expect(onCreate).toHaveBeenCalledWith({
+      prompt: 'go',
+      completion: 'sent',
+      workspace: '/repos/b',
+      callerSessionId: 'caller-1',
+    });
+    for (const extra of [
+      { workspace: '' },
+      { workspace: 7 },
+      { workspace: 'a\u0000b' },
+      { workspace: 'x'.repeat(4097) },
+      {
+        workspace: '/repos/b',
+        sourceType: 'default',
+        sourceId: 'scheduled_task_run:task-1',
+      },
+    ]) {
+      await expect(
+        client.extMethod(METHOD, {
+          prompt: 'go',
+          completion: 'sent',
+          callerSessionId: 'caller-1',
+          ...extra,
+        }),
+      ).rejects.toThrow(/workspace/);
+    }
+    expect(onCreate).toHaveBeenCalledTimes(1);
+  });
+
   it('omits result/stopReason when the handler does not return them (sent mode)', async () => {
     const client = makeClientWithCreateSubSession(async () => ({
       sessionId: 'sub-10',

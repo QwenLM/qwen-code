@@ -27,6 +27,8 @@ vi.mock('./session-organization-helpers.js', () => ({
 
 const {
   createSubSessionLauncher,
+  createSubSessionWorkspaceIndex,
+  stricterApprovalMode,
   MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER,
   MAX_CONCURRENT_SUB_SESSIONS_TOTAL,
   MAX_TRACKED_SPAWNED_SESSIONS,
@@ -84,6 +86,8 @@ function makeFakeBridge(opts?: {
   /** Persisted parent lineage for callers restored after a daemon restart. */
   restoredCallerParents?: Readonly<Record<string, string>>;
   callerSourceTypes?: Readonly<Record<string, string>>;
+  /** Live approval modes the daemon status snapshot reports, by session. */
+  approvalModes?: Record<string, string>;
 }) {
   const spawns: Array<{
     workspaceCwd: string;
@@ -120,6 +124,7 @@ function makeFakeBridge(opts?: {
     };
   }> = [];
   const parentObserverClosures: string[] = [];
+  const modeChanges: Array<{ sessionId: string; mode: string }> = [];
   const subscriptions: Array<{
     sessionId: string;
     lastEventId?: number;
@@ -131,6 +136,24 @@ function makeFakeBridge(opts?: {
   let notificationAttempt = 0;
 
   const bridge = {
+    getDaemonStatusSnapshot: () => ({
+      sessions: Object.entries(opts?.approvalModes ?? {}).map(
+        ([sessionId, currentApprovalMode]) => ({
+          sessionId,
+          currentApprovalMode,
+        }),
+      ),
+    }),
+    setSessionApprovalMode: async (
+      sessionId: string,
+      mode: string,
+      o: { persist: boolean },
+    ) => {
+      expect(o.persist).toBe(false);
+      operations.push(`mode:${sessionId}`);
+      modeChanges.push({ sessionId, mode });
+      return { sessionId, mode, previous: 'auto', persisted: false };
+    },
     getSessionSummary: (sessionId: string) => ({
       sessionId,
       parentSessionId: opts?.restoredCallerParents?.[sessionId],
@@ -332,6 +355,7 @@ function makeFakeBridge(opts?: {
     notifications,
     parentObserverClosures,
     subscriptions,
+    modeChanges,
     subscribeCalls: () => subscribeCalls,
   };
 }
@@ -2161,5 +2185,345 @@ describe('sub-session launcher', () => {
     const res = await promise;
     expect(res.stopReason).toBe('shutdown');
     expect(res.result).toContain('partial');
+  });
+});
+
+describe('sub-sessions in another workspace', () => {
+  const WS_A = '/tmp/ws-a';
+  const WS_B = '/tmp/ws-b';
+
+  beforeEach(() => {
+    stderrLines.length = 0;
+  });
+
+  /** A caller launcher in A wired to a target launcher in B. */
+  function twoWorkspaces(opts?: {
+    /** `null` leaves the mode out of the status snapshot. */
+    callerMode?: string | null;
+    childMode?: string | null;
+    callerTrusted?: boolean;
+    callerParents?: Record<string, string>;
+    callerSourceTypes?: Record<string, string>;
+    events?: (promptId: string) => FakeEvent[];
+  }) {
+    const a = makeFakeBridge({
+      approvalModes:
+        opts?.callerMode === null
+          ? {}
+          : { caller: opts?.callerMode ?? 'default' },
+      ...(opts?.callerParents
+        ? { restoredCallerParents: opts.callerParents }
+        : {}),
+      ...(opts?.callerSourceTypes
+        ? { callerSourceTypes: opts.callerSourceTypes }
+        : {}),
+    });
+    const b = makeFakeBridge({
+      approvalModes:
+        opts?.childMode === null ? {} : { 'sub-1': opts?.childMode ?? 'auto' },
+      events: opts?.events ?? ((pid) => [chunk('from b'), turnComplete(pid)]),
+    });
+    const launcherB = createSubSessionLauncher({
+      getBridge: () => b.bridge,
+      boundWorkspace: WS_B,
+    });
+    const launcherA = createSubSessionLauncher({
+      getBridge: () => a.bridge,
+      boundWorkspace: WS_A,
+      isTrusted: () => opts?.callerTrusted ?? true,
+      resolveWorkspace: (selector) =>
+        selector === WS_B
+          ? { kind: 'found', workspaceCwd: WS_B, launcher: launcherB }
+          : selector === WS_A
+            ? { kind: 'found', workspaceCwd: WS_A, launcher: launcherA }
+            : {
+                kind: 'refused',
+                reason: `No registered workspace matches "${selector}".`,
+              },
+    });
+    return { a, b, launcherA, launcherB };
+  }
+
+  it('orders approval modes from strictest to loosest', () => {
+    expect(stricterApprovalMode('plan', 'yolo')).toBe('plan');
+    expect(stricterApprovalMode('auto-edit', 'auto')).toBe('auto');
+    expect(stricterApprovalMode('yolo', 'default')).toBe('default');
+    expect(stricterApprovalMode('unknown', 'yolo')).toBe('default');
+  });
+
+  it('first-turn: runs in the target workspace and returns its result', async () => {
+    const { a, b, launcherA } = twoWorkspaces();
+    const res = await launcherA.launch({
+      prompt: 'read QWEN.md',
+      completion: 'first-turn',
+      workspace: WS_B,
+      callerSessionId: 'caller',
+    });
+    expect(res).toMatchObject({ sessionId: 'sub-1', result: 'from b' });
+    expect(a.spawns).toEqual([]);
+    expect(b.spawns).toEqual([
+      expect.objectContaining({
+        workspaceCwd: WS_B,
+        sessionScope: 'thread',
+        parentSessionId: 'caller',
+      }),
+    ]);
+    // B defaults to auto; the caller reviews every action, so the child
+    // does too, before its prompt is sent.
+    expect(b.modeChanges).toEqual([{ sessionId: 'sub-1', mode: 'default' }]);
+    expect(b.prompts).toEqual([
+      expect.objectContaining({ sessionId: 'sub-1', text: 'read QWEN.md' }),
+    ]);
+  });
+
+  it('keeps the target default when it is already the stricter mode', async () => {
+    const { b, launcherA } = twoWorkspaces({
+      callerMode: 'yolo',
+      childMode: 'plan',
+    });
+    await launcherA.launch({
+      prompt: 'p',
+      completion: 'first-turn',
+      workspace: WS_B,
+      callerSessionId: 'caller',
+    });
+    expect(b.modeChanges).toEqual([]);
+  });
+
+  it('sent: tells the caller on its own bridge when the turn finishes', async () => {
+    const { a, b, launcherA } = twoWorkspaces();
+    const res = await launcherA.launch({
+      prompt: 'p',
+      completion: 'sent',
+      workspace: WS_B,
+      callerSessionId: 'caller',
+    });
+    expect(res.sessionId).toBe('sub-1');
+    await vi.waitFor(() => expect(a.notifications).toHaveLength(1));
+    expect(a.notifications[0]).toMatchObject({
+      sessionId: 'caller',
+      notification: { taskId: 'sub-1', status: 'completed' },
+    });
+    expect(a.notifications[0]!.notification.modelText).toContain('from b');
+    expect(b.notifications).toEqual([]);
+  });
+
+  it('runs locally when the named workspace is the caller own', async () => {
+    const { a, b, launcherA } = twoWorkspaces();
+    await launcherA.launch({
+      prompt: 'p',
+      completion: 'sent',
+      workspace: WS_A,
+      callerSessionId: 'caller',
+    });
+    expect(a.spawns).toHaveLength(1);
+    expect(b.spawns).toEqual([]);
+    expect(a.modeChanges).toEqual([]);
+  });
+
+  it.each([
+    [
+      'an unknown workspace',
+      {},
+      '/tmp/ws-x',
+      'No registered workspace matches "/tmp/ws-x".',
+    ],
+    [
+      'an untrusted caller workspace',
+      { callerTrusted: false },
+      WS_B,
+      'This workspace is not trusted',
+    ],
+    [
+      'a caller that is itself a sub-session',
+      { callerParents: { caller: 'grandparent' } },
+      WS_B,
+      'nesting is capped at one level',
+    ],
+  ])(
+    'refuses %s and spawns nothing',
+    async (_label, opts, workspace, error) => {
+      const { a, b, launcherA } = twoWorkspaces(opts);
+      await expect(
+        launcherA.launch({
+          prompt: 'p',
+          completion: 'first-turn',
+          workspace,
+          callerSessionId: 'caller',
+        }),
+      ).rejects.toThrow(error);
+      expect(a.spawns).toEqual([]);
+      expect(b.spawns).toEqual([]);
+    },
+  );
+
+  it('refuses when it cannot read the caller approval mode', async () => {
+    const { b, launcherA } = twoWorkspaces({ callerMode: null });
+    await expect(
+      launcherA.launch({
+        prompt: 'p',
+        completion: 'first-turn',
+        workspace: WS_B,
+        callerSessionId: 'caller',
+      }),
+    ).rejects.toThrow('did not report its approval mode');
+    expect(b.spawns).toEqual([]);
+  });
+
+  it('rolls the child back when it cannot read the child approval mode', async () => {
+    const { b, launcherA } = twoWorkspaces({ childMode: null });
+    await expect(
+      launcherA.launch({
+        prompt: 'p',
+        completion: 'first-turn',
+        workspace: WS_B,
+        callerSessionId: 'caller',
+      }),
+    ).rejects.toThrow('did not report its approval mode');
+    expect(b.prompts).toEqual([]);
+    expect(b.closes).toEqual(['sub-1']);
+  });
+
+  it('refuses a standalone caller', async () => {
+    const { b, launcherA } = twoWorkspaces({
+      callerSourceTypes: { caller: 'standalone' },
+    });
+    await expect(
+      launcherA.launch({
+        prompt: 'p',
+        completion: 'first-turn',
+        workspace: WS_B,
+        callerSessionId: 'caller',
+      }),
+    ).rejects.toThrow('cannot create sub-sessions in another workspace');
+    expect(b.spawns).toEqual([]);
+  });
+
+  it('a Live conversation target refuses a caller from another workspace', async () => {
+    const live = makeFakeBridge();
+    const target = createSubSessionLauncher({
+      getBridge: () => live.bridge,
+      boundWorkspace: WS_B,
+      isolatedWorkspace: {
+        materializeDirectory: async (id) => `${WS_B}/${id}`,
+        discardEmptyDirectory: async () => undefined,
+      },
+    });
+    await expect(
+      target.launchForRemoteCaller(
+        { prompt: 'p', completion: 'first-turn', callerSessionId: 'caller' },
+        { approvalMode: 'default', deliverCompletion: async () => {} },
+      ),
+    ).rejects.toThrow('cannot run sub-sessions for another workspace');
+    expect(live.spawns).toEqual([]);
+  });
+
+  it('refuses a Live conversation caller', async () => {
+    const fake = makeFakeBridge();
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS_A,
+      isolatedWorkspace: {
+        materializeDirectory: async (id) => `${WS_A}/${id}`,
+        discardEmptyDirectory: async () => undefined,
+      },
+      isTrusted: () => true,
+      resolveWorkspace: () => ({ kind: 'refused', reason: 'unreachable' }),
+    });
+    await expect(
+      launcher.launch({
+        prompt: 'p',
+        completion: 'first-turn',
+        workspace: WS_B,
+        callerSessionId: 'caller',
+      }),
+    ).rejects.toThrow('cannot create sub-sessions in another workspace');
+    expect(fake.spawns).toEqual([]);
+  });
+
+  it('a child started from another workspace cannot delegate again', async () => {
+    const { b, launcherA, launcherB } = twoWorkspaces();
+    await launcherA.launch({
+      prompt: 'p',
+      completion: 'first-turn',
+      workspace: WS_B,
+      callerSessionId: 'caller',
+    });
+    await expect(
+      launcherB.launch({
+        prompt: 'again',
+        completion: 'first-turn',
+        callerSessionId: 'sub-1',
+      }),
+    ).rejects.toThrow('nesting is capped at one level');
+    expect(b.spawns).toHaveLength(1);
+  });
+});
+
+describe('sub-session workspace index', () => {
+  const runtime = (
+    workspaceCwd: string,
+    trusted: boolean,
+    displayName?: string,
+  ) => ({
+    workspaceId: `id-${path.basename(workspaceCwd)}`,
+    workspaceCwd,
+    trusted,
+    ...(displayName ? { displayName } : {}),
+  });
+
+  function indexOf(runtimes: Array<ReturnType<typeof runtime>>) {
+    const registry = {
+      list: () => runtimes,
+      getByWorkspaceId: (id: string) =>
+        runtimes.find((r) => r.workspaceId === id),
+      getByWorkspaceCwd: (cwd: string) =>
+        runtimes.find((r) => r.workspaceCwd === cwd),
+    };
+    const index = createSubSessionWorkspaceIndex(() => registry as never);
+    const launchers = runtimes.map((r) => {
+      const launcher = createSubSessionLauncher({
+        getBridge: () => undefined,
+        boundWorkspace: r.workspaceCwd,
+      });
+      index.register(r.workspaceCwd, launcher);
+      return launcher;
+    });
+    return { index, launchers };
+  }
+
+  it('resolves a trusted workspace by id or by path', () => {
+    const { index, launchers } = indexOf([
+      runtime('/tmp/ws-a', true),
+      runtime('/tmp/ws-b', true),
+    ]);
+    expect(index.resolve('id-ws-b')).toEqual({
+      kind: 'found',
+      workspaceCwd: '/tmp/ws-b',
+      launcher: launchers[1],
+    });
+    expect(index.resolve('/tmp/ws-b')).toMatchObject({
+      kind: 'found',
+      workspaceCwd: '/tmp/ws-b',
+    });
+    expect(index.isTrusted('/tmp/ws-a')).toBe(true);
+  });
+
+  it('refuses an unknown or untrusted workspace and lists the ones that can be named', () => {
+    const { index } = indexOf([
+      runtime('/tmp/ws-a', true, 'Main'),
+      runtime('/tmp/ws-b', false),
+    ]);
+    expect(index.resolve('/tmp/nowhere')).toEqual({
+      kind: 'refused',
+      reason:
+        'No registered workspace matches "/tmp/nowhere". Workspaces you can use: Main (/tmp/ws-a).',
+    });
+    expect(index.resolve('/tmp/ws-b')).toEqual({
+      kind: 'refused',
+      reason:
+        'Workspace /tmp/ws-b is not trusted. Workspaces you can use: Main (/tmp/ws-a).',
+    });
+    expect(index.isTrusted('/tmp/ws-b')).toBe(false);
   });
 });

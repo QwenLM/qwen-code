@@ -46,6 +46,7 @@ import {
   escapeXml,
   escapeXmlWithinBudget,
 } from '@qwen-code/qwen-code-core/utils/xml.js';
+import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
 import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import { ACTIVE_WORK_CLOSE_TIMEOUT_MS } from '@qwen-code/acp-bridge/bridgeTypes';
 import type {
@@ -64,6 +65,8 @@ import {
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import type { StandaloneSessionService } from './conversations/standalone-session-service.js';
 import { createSessionOrganizationService } from './session-organization-helpers.js';
+import type { WorkspaceRegistry } from './workspace-registry.js';
+import { resolveRegisteredWorkspaceRuntimeByPathSelector } from './workspace-route-runtime.js';
 
 type StandaloneSubSessionService = Pick<
   StandaloneSessionService,
@@ -144,9 +147,31 @@ export interface SubSessionLauncher {
   /** The `onCreateSubSession` callback wired into the bridge. Returns a Promise
    * the child's tool awaits. */
   launch(info: CreateSubSessionInfo): Promise<CreateSubSessionResult>;
+  /**
+   * Run a launch on behalf of a caller in another workspace. The caller's
+   * launcher has already run the caller-side checks; this one spawns on its
+   * own bridge, under its own caps.
+   */
+  launchForRemoteCaller(
+    info: CreateSubSessionInfo,
+    caller: RemoteSubSessionCaller,
+  ): Promise<CreateSubSessionResult>;
   /** Stop accepting new sub-sessions (daemon shutdown). Idempotent. */
   stop(): void;
 }
+
+/** What a target launcher needs to know about a caller in another workspace. */
+export interface RemoteSubSessionCaller {
+  /** The caller's approval mode; the sub-session never runs looser. */
+  approvalMode: string;
+  /** Hand a `sent` completion to the caller, on the caller's own bridge. */
+  deliverCompletion(notification: BridgeBackgroundNotification): Promise<void>;
+}
+
+/** How a launcher finds another registered workspace's launcher. */
+export type SubSessionWorkspaceResolution =
+  | { kind: 'found'; workspaceCwd: string; launcher: SubSessionLauncher }
+  | { kind: 'refused'; reason: string };
 
 export interface CreateSubSessionLauncherOptions {
   getBridge: () => AcpSessionBridge | undefined;
@@ -172,6 +197,103 @@ export interface CreateSubSessionLauncherOptions {
   /** Workspace-wide concurrency cap; defaults to
    * {@link MAX_CONCURRENT_SUB_SESSIONS_TOTAL}. */
   maxConcurrentTotal?: number;
+  /**
+   * Resolve a request's `workspace` to that workspace's launcher. Absent
+   * means this launcher cannot run sub-sessions in another workspace.
+   */
+  resolveWorkspace?: (selector: string) => SubSessionWorkspaceResolution;
+  /** Whether this launcher's own workspace is trusted, read per launch. */
+  isTrusted?: () => boolean;
+}
+
+/**
+ * The daemon's index of sub-session launchers by workspace, and the two
+ * readers every launcher is given: which launcher a request's `workspace`
+ * names, and whether a launcher's own workspace is trusted.
+ *
+ * Only the registry's public list can be named, so internal and Live
+ * conversation runtimes are out of reach, and only a trusted workspace can
+ * be a target. Nothing falls back to another workspace.
+ */
+export function createSubSessionWorkspaceIndex(
+  getRegistry: () => WorkspaceRegistry | undefined,
+) {
+  const launchers = new Map<string, SubSessionLauncher>();
+  const nameable = (registry: WorkspaceRegistry): string =>
+    registry
+      .list()
+      .filter(
+        (runtime) => runtime.trusted && launchers.has(runtime.workspaceCwd),
+      )
+      .map((runtime) =>
+        runtime.displayName
+          ? `${runtime.displayName} (${runtime.workspaceCwd})`
+          : runtime.workspaceCwd,
+      )
+      .join(', ') || 'none';
+  return {
+    register(workspaceCwd: string, launcher: SubSessionLauncher): void {
+      launchers.set(workspaceCwd, launcher);
+    },
+    resolve(selector: string): SubSessionWorkspaceResolution {
+      const registry = getRegistry();
+      if (!registry) {
+        return { kind: 'refused', reason: 'Workspaces are not available yet.' };
+      }
+      const runtime =
+        registry.getByWorkspaceId(selector) ??
+        resolveRegisteredWorkspaceRuntimeByPathSelector(registry, selector);
+      const launcher = runtime && launchers.get(runtime.workspaceCwd);
+      if (!runtime || !launcher) {
+        return {
+          kind: 'refused',
+          reason: `No registered workspace matches "${selector}". Workspaces you can use: ${nameable(registry)}.`,
+        };
+      }
+      if (!runtime.trusted) {
+        return {
+          kind: 'refused',
+          reason: `Workspace ${runtime.workspaceCwd} is not trusted. Workspaces you can use: ${nameable(registry)}.`,
+        };
+      }
+      return { kind: 'found', workspaceCwd: runtime.workspaceCwd, launcher };
+    },
+    isTrusted(workspaceCwd: string): boolean {
+      return getRegistry()?.getByWorkspaceCwd(workspaceCwd)?.trusted === true;
+    },
+  };
+}
+
+/**
+ * Approval modes from strictest to loosest. `auto` sits before `auto-edit`:
+ * its classifier reviews every action, while `auto-edit` applies edits
+ * without review.
+ */
+const APPROVAL_MODE_STRICTNESS: readonly string[] = [
+  ApprovalMode.PLAN,
+  ApprovalMode.DEFAULT,
+  ApprovalMode.AUTO,
+  ApprovalMode.AUTO_EDIT,
+  ApprovalMode.YOLO,
+];
+
+/** The stricter of two modes; an unknown mode counts as `default`. */
+export function stricterApprovalMode(a: string, b: string): ApprovalMode {
+  const rank = (mode: string): number => {
+    const index = APPROVAL_MODE_STRICTNESS.indexOf(mode);
+    return index < 0 ? APPROVAL_MODE_STRICTNESS.indexOf('default') : index;
+  };
+  return APPROVAL_MODE_STRICTNESS[Math.min(rank(a), rank(b))] as ApprovalMode;
+}
+
+function currentApprovalMode(
+  bridge: AcpSessionBridge,
+  sessionId: string,
+): string | undefined {
+  return bridge
+    .getDaemonStatusSnapshot()
+    .sessions.find((session) => session.sessionId === sessionId)
+    ?.currentApprovalMode;
 }
 
 type IsolatedWorkspace = NonNullable<
@@ -730,6 +852,8 @@ export function createSubSessionLauncher(
     runtimeBaseDir,
     notifySentCompletion = false,
     isolatedWorkspace,
+    resolveWorkspace,
+    isTrusted,
   } = opts;
   const firstTurnTimeoutMs = opts.firstTurnTimeoutMs ?? FIRST_TURN_TIMEOUT_MS;
   const sentModeDrainTimeoutMs =
@@ -776,8 +900,9 @@ export function createSubSessionLauncher(
     }
   };
 
-  const launch = async (
+  const run = async (
     info: CreateSubSessionInfo,
+    remote?: RemoteSubSessionCaller,
   ): Promise<CreateSubSessionResult> => {
     if (stopAc.signal.aborted) {
       throw new Error(
@@ -789,32 +914,29 @@ export function createSubSessionLauncher(
       throw new Error('Session bridge is not available.');
     }
 
-    // Depth-1 gate. Every daemon session wires a spawner, sub-sessions included,
-    // and each gets its own bucket — so without this a sub-session can spawn
-    // more, each of which spawns more (capⁿ), exhausting `maxSessions` from
-    // one prompt. `callerSessionId` is required and authenticated at the
-    // bridge (`ownsSession`), so it can neither be forged nor omitted to
-    // sidestep this gate or the per-caller cap below.
-    // The in-memory set catches children created by this launcher. The
-    // persisted parent lineage catches the same child after a daemon restart,
-    // when the launcher set is empty but the restored bridge entry has been
-    // re-seeded from its transcript metadata.
-    const caller = bridge.getSessionSummary(info.callerSessionId);
-    const standalone = isReservedStandaloneSessionSourceType(caller.sourceType);
-    const standaloneService = standalone
-      ? getStandaloneSessionService?.()
-      : undefined;
-    if (standalone && !standaloneService) {
-      throw new Error('Standalone session service is unavailable.');
-    }
-    if (
-      spawnedSessionIds.has(info.callerSessionId) ||
-      caller.parentSessionId !== undefined
-    ) {
-      throw new Error(
-        'A sub-session cannot create further sub-sessions (nesting is capped ' +
-          'at one level).',
-      );
+    // `callerSessionId` is required and authenticated at the bridge
+    // (`ownsSession`), so it can neither be forged nor omitted to sidestep the
+    // depth gate (`assertMayDelegate`) or the per-caller cap below.
+    let standalone = false;
+    let standaloneService: StandaloneSubSessionService | undefined;
+    if (remote) {
+      // The caller lives in another workspace, and its launcher ran the
+      // caller-side checks. Daemon-owned directories mean nothing there.
+      if (isolatedWorkspace || getStandaloneSessionService) {
+        throw new Error(
+          'This workspace cannot run sub-sessions for another workspace.',
+        );
+      }
+    } else {
+      const caller = bridge.getSessionSummary(info.callerSessionId);
+      standalone = isReservedStandaloneSessionSourceType(caller.sourceType);
+      standaloneService = standalone
+        ? getStandaloneSessionService?.()
+        : undefined;
+      if (standalone && !standaloneService) {
+        throw new Error('Standalone session service is unavailable.');
+      }
+      assertMayDelegate(info.callerSessionId, caller.parentSessionId);
     }
 
     // Per-caller concurrency key. Always a real, bridge-authenticated session
@@ -916,6 +1038,23 @@ export function createSubSessionLauncher(
         }
       }
       rememberSpawned(sessionId);
+      if (remote) {
+        // Never looser than the caller: another workspace's defaults must not
+        // widen what the caller's model may do. A mode that cannot be read
+        // cannot be compared, so the launch fails rather than guess.
+        const childMode = currentApprovalMode(bridge, sessionId);
+        if (childMode === undefined) {
+          throw new Error(
+            'The new session did not report its approval mode; it was not used.',
+          );
+        }
+        const mode = stricterApprovalMode(remote.approvalMode, childMode);
+        if (mode !== childMode) {
+          await bridge.setSessionApprovalMode(sessionId, mode, {
+            persist: false,
+          });
+        }
+      }
 
       try {
         bridge.updateSessionMetadata(sessionId, {
@@ -1039,7 +1178,7 @@ export function createSubSessionLauncher(
                     `concurrency slot (the sub-session may still be running)`,
                 );
               }
-              if (notifySentCompletion) {
+              if (notifySentCompletion || remote) {
                 notification = buildSentCompletionNotification(
                   sessionId,
                   subSessionName(info.name ?? info.prompt, false),
@@ -1049,7 +1188,7 @@ export function createSubSessionLauncher(
               }
             } catch (err) {
               if (stopAc.signal.aborted) return;
-              if (!notifySentCompletion) return;
+              if (!notifySentCompletion && !remote) return;
               const message = err instanceof Error ? err.message : String(err);
               notification = buildSentCompletionNotification(
                 sessionId,
@@ -1060,15 +1199,19 @@ export function createSubSessionLauncher(
             }
             if (!notification) return;
             try {
-              await deliverSentCompletion(
-                bridge,
-                boundWorkspace,
-                info.callerSessionId,
-                notification,
-                stopAc.signal,
-                isolatedWorkspace,
-                standaloneService,
-              );
+              if (remote) {
+                await remote.deliverCompletion(notification);
+              } else {
+                await deliverSentCompletion(
+                  bridge,
+                  boundWorkspace,
+                  info.callerSessionId,
+                  notification,
+                  stopAc.signal,
+                  isolatedWorkspace,
+                  standaloneService,
+                );
+              }
             } catch (notificationError) {
               if (!stopAc.signal.aborted) {
                 writeStderrLine(
@@ -1256,10 +1399,93 @@ export function createSubSessionLauncher(
     }
   };
 
-  return {
+  /**
+   * Depth-1 gate. Every daemon session wires a spawner, sub-sessions
+   * included, and each gets its own bucket — so without this a sub-session
+   * can spawn more, each of which spawns more (capⁿ), exhausting
+   * `maxSessions` from one prompt. The in-memory set catches children this
+   * launcher created; the persisted parent lineage catches the same child
+   * after a daemon restart, and a child another workspace's launcher created.
+   */
+  const assertMayDelegate = (
+    callerSessionId: string,
+    callerParentSessionId: string | undefined,
+  ): void => {
+    if (
+      spawnedSessionIds.has(callerSessionId) ||
+      callerParentSessionId !== undefined
+    ) {
+      throw new Error(
+        'A sub-session cannot create further sub-sessions (nesting is capped ' +
+          'at one level).',
+      );
+    }
+  };
+
+  const launch = async (
+    info: CreateSubSessionInfo,
+  ): Promise<CreateSubSessionResult> => {
+    const { workspace, ...local } = info;
+    if (workspace === undefined) return run(local);
+    if (stopAc.signal.aborted) {
+      throw new Error(
+        'The daemon is shutting down; cannot create a sub-session.',
+      );
+    }
+    const bridge = getBridge();
+    if (!bridge) {
+      throw new Error('Session bridge is not available.');
+    }
+    const caller = bridge.getSessionSummary(info.callerSessionId);
+    if (
+      isolatedWorkspace ||
+      isReservedStandaloneSessionSourceType(caller.sourceType)
+    ) {
+      throw new Error(
+        'This session cannot create sub-sessions in another workspace.',
+      );
+    }
+    assertMayDelegate(info.callerSessionId, caller.parentSessionId);
+    if (!resolveWorkspace) {
+      throw new Error(
+        'Sub-sessions in another workspace are not available here.',
+      );
+    }
+    const target = resolveWorkspace(workspace);
+    if (target.kind === 'refused') throw new Error(target.reason);
+    if (target.launcher === launcher) return run(local);
+    if (isTrusted?.() !== true) {
+      throw new Error(
+        'This workspace is not trusted, so its sessions cannot run ' +
+          'sub-sessions in another workspace.',
+      );
+    }
+    const approvalMode = currentApprovalMode(bridge, info.callerSessionId);
+    if (approvalMode === undefined) {
+      throw new Error(
+        'This session did not report its approval mode, so it cannot run ' +
+          'sub-sessions in another workspace.',
+      );
+    }
+    return target.launcher.launchForRemoteCaller(local, {
+      approvalMode,
+      deliverCompletion: (notification) =>
+        deliverSentCompletion(
+          bridge,
+          boundWorkspace,
+          info.callerSessionId,
+          notification,
+          stopAc.signal,
+        ),
+    });
+  };
+
+  const launcher: SubSessionLauncher = {
     launch,
+    launchForRemoteCaller: (info, caller) => run(info, caller),
     stop: () => {
       stopAc.abort(); // tears down every active subscription → releases slots
     },
   };
+  return launcher;
 }

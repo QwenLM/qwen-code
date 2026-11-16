@@ -23147,6 +23147,29 @@ describe('Session', () => {
       );
     });
 
+    it('forwards a target workspace and surfaces the daemon refusal text', async () => {
+      const spawn = vi.mocked(mockConfig.setSubSessionSpawner).mock
+        .calls[0]?.[0];
+      expect(spawn).toBeTypeOf('function');
+      vi.mocked(mockClient.extMethod).mockRejectedValueOnce({
+        code: -32603,
+        message: 'Internal error',
+        data: { details: 'No registered workspace matches "/x".' },
+      });
+      await expect(
+        spawn?.({ prompt: 'p', completion: 'first-turn', workspace: '/x' }),
+      ).rejects.toThrow('No registered workspace matches "/x".');
+      expect(mockClient.extMethod).toHaveBeenLastCalledWith(
+        SERVE_CONTROL_EXT_METHODS.createSubSession,
+        {
+          prompt: 'p',
+          completion: 'first-turn',
+          workspace: '/x',
+          callerSessionId: 'test-session-id',
+        },
+      );
+    });
+
     it('registers the create_sub_session tool on the daemon session registry', async () => {
       // The tool is daemon-only: it must exist on every session the daemon
       // creates so the model can call it, and nowhere else.

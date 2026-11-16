@@ -1,0 +1,189 @@
+# Sub-sessions in another workspace
+
+[English](2026-11-16-cross-workspace-sub-sessions.md) | [简体中文](2026-11-16-cross-workspace-sub-sessions.zh-CN.md)
+
+Status: step 1 implemented alongside this document; steps 2 and 3 proposed.
+
+## Problem
+
+A daemon serves several registered workspaces, and Web Shell already shows
+sessions from all of them side by side. A session can only delegate inside
+its own workspace, though. `create_sub_session` spawns a fresh session in
+the caller's workspace and runs one prompt there. It takes no target
+workspace and cannot give a follow-up to a session it created earlier. Each
+workspace's sub-session launcher is bound to its own bridge, and a bridge
+refuses a spawn for another workspace.
+
+So a session in workspace A cannot ask workspace B, with B's own
+`QWEN.md`, skills, settings and history, to do something and report back.
+The person has to switch to B, type the request there, and carry the answer
+back by hand.
+
+#17419 asks for the same outcome through Agent Collaboration (an `@`-able
+agent bound to B). This design takes the session route instead. It needs no
+persistent agent identity and no experimental flag, and it reuses the
+sub-session machinery that already has caps, timeouts, result truncation and
+completion delivery. The two are not exclusive: a workspace-bound agent
+could later run on top of this.
+
+## Goals
+
+- A model in workspace A can start a session in a registered workspace B,
+  and later send that same session a follow-up. For each prompt it can
+  either wait for the turn's result or carry on and be told when the turn
+  finishes.
+- A person in Web Shell can do the same from a session page.
+- B's work runs under B's runtime: B's directory, settings, trust and
+  permissions. Its approval mode is never looser than A's.
+
+## Steps
+
+The work lands in three changes, each usable on its own.
+
+1. **A new session in another workspace.** `create_sub_session` takes a
+   `workspace`. This change.
+2. **Follow-ups to a session the caller created.** `create_sub_session`
+   takes a `sessionId`.
+3. **Web Shell.** A "Send to session" action on a session page.
+
+## Step 1: a new session in another workspace
+
+### The tool
+
+`create_sub_session` gains an optional `workspace`: the absolute path or
+workspace id of a workspace registered with this daemon. Absent means the
+caller's workspace, which is today's behavior.
+
+`completion` keeps its two values. `first-turn` waits for the turn and
+returns its text, as today. `sent` returns at once, and when the turn
+finishes the caller gets a task notification with the result and a link to
+the session. Today that notification goes only to the Live conversation
+runtime. It now also goes to every call that names a `workspace`, because
+the caller cannot otherwise learn that work in another workspace finished.
+Fire-and-forget calls in the caller's own workspace keep their current
+behavior.
+
+The tool already asks for permission, and that flow is unchanged: default
+mode asks the person, auto mode asks the classifier, and yolo allows the
+call. The call's description names the target workspace, so whoever
+approves it can see where the prompt goes.
+
+### Resolving the target
+
+The request travels as it does today: the tool, then the session's spawner,
+then the `qwen/control/create-sub-session` ext method, then the caller's
+launcher. The launchers are registered with the daemon by workspace. The
+caller's launcher runs the caller-side checks: the depth gate, the
+standalone and Live refusal, and the caller's trust. It then hands the
+launch to the target workspace's launcher, which spawns, prompts and waits
+on its own bridge, under its own caps and with its own rollback. The
+completion notification is delivered on the caller's bridge, because that
+is where the caller lives.
+
+The target is resolved from the registry's public list, so internal and Live
+conversation runtimes cannot be named. Both workspaces must be trusted. The
+primary workspace's usual exemption from the trust check does not apply here,
+because this path drives one workspace from another. An unknown or untrusted
+target is refused, and the error lists the workspaces that can be named so
+the model can correct itself. Nothing falls back to the caller's workspace or
+to the primary one.
+
+Standalone and Live callers cannot name a workspace. Their sub-sessions live
+in daemon-owned directories that have no meaning in another workspace.
+
+### Approval mode
+
+The new session starts in B's default mode. Before the prompt is sent, the
+target launcher compares that mode with the caller's current mode and
+switches the session to whichever is stricter. The order runs from strictest
+to loosest:
+
+`plan` < `default` < `auto` < `auto-edit` < `yolo`
+
+`auto` comes before `auto-edit` because the classifier reviews every action
+under `auto`, while `auto-edit` applies edits without review. The switch is
+session-local and is not persisted. If either mode cannot
+be read, the launch fails rather than guess; a new session is closed again.
+
+### Caps and lineage
+
+A cross-workspace launch counts against the target launcher's caps:
+per caller (16) and per workspace (24). Those caps exist to keep sub-sessions
+from starving the interactive sessions of the workspace that runs them, and
+here that workspace is B. The child records the caller as its parent, so the
+depth gate refuses it if it tries to create sub-sessions of its own. The
+completion notification's task id is the new session's id, which is unique
+because every step 1 launch creates a session.
+
+## Step 2: follow-ups to a session the caller created (proposed)
+
+`create_sub_session` gains `sessionId`. The session must be one this caller
+created: its recorded parent is the caller. That lineage is persisted, so it
+holds across a daemon restart. The launcher resumes the session on its
+workspace's bridge, which attaches if it is live and restores it if it is
+not. It queues the prompt behind any running turn and waits on, or watches,
+the turn with its own prompt id. The approval rule from step 1 is applied
+again before the prompt. Each completion notification needs its own task id
+here, because a caller receives several from one session and the receiving
+session treats a repeated task id as a notification it already has.
+
+Sessions the caller did not create stay out of reach. Prompting one would
+put another session's model text into it as a user turn, and
+`send_message`, which carries no user authority, remains the way to talk to
+them. Because a child cannot delegate, a caller and its children cannot form
+a cycle, so no daemon-wide delegation record is needed. Rollback never closes
+or deletes a reused session.
+
+## Step 3: Web Shell (proposed)
+
+A "Send to session" action on a session page opens a picker: a registered
+workspace, then "New session" or one of the sessions this session created
+there, and the message. Sending goes through the same daemon path as the
+tool, with the open session as the caller and `sent` completion. The target
+opens in a split pane, which already supports sessions from other
+workspaces, so its reply streams there. When the turn finishes, the
+originating session receives the completion notification as well, so the
+result shows in both places.
+
+## Files (step 1)
+
+- `packages/core/src/tools/create-sub-session.ts`: the parameter, its
+  validation, and the description.
+- The ACP session's spawner and the bridge's request validation
+  (`packages/cli/src/acp-integration/session/Session.ts`,
+  `packages/acp-bridge/src/bridgeOptions.ts`, `bridgeClient.ts`): carry the
+  field. The spawner also passes on the daemon's refusal text: the RPC error
+  that carries it reaches the session as a plain object whose message is
+  only "Internal error", which the tool used to print as `[object Object]`.
+- `packages/cli/src/serve/create-sub-session.ts`: caller-side checks,
+  handing off to the target launcher, the approval rule, notification
+  routing.
+- `packages/cli/src/serve/run-qwen-serve.ts`: register each launcher by
+  workspace and give launchers the resolver.
+- User docs for the tool.
+
+## Out of scope
+
+- Agent Collaboration's `@`-mentions across workspaces (#17419).
+- Relaying a target's `ask_user_question` or tool approvals to the caller.
+  They wait in the target session, where its owner answers them.
+- Persisting in-flight `sent` launches across a daemon restart. A restart
+  loses a pending notification, as it does today.
+
+## Open questions
+
+- Should every `sent` sub-session notify its caller, not only one that names
+  a workspace? That would make the tool consistent, but it would change
+  existing fire-and-forget calls by adding an automatic turn.
+
+## Verification (step 1)
+
+- Unit: resolution by path and by id; unknown and untrusted targets; an
+  untrusted caller; a Live caller and a caller that is itself a sub-session;
+  the hand-off runs on the target launcher's bridge; the notification
+  arrives on the caller's bridge; the approval rule across the mode order.
+- End to end: a daemon with two workspaces. From a Web Shell session in A,
+  ask the model to start a session in B that reads B's `QWEN.md` and answers
+  (`first-turn`), then another with `sent`, and see the notification arrive
+  in A. Naming an untrusted workspace is refused with the list of
+  workspaces that can be named.

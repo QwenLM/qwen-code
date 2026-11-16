@@ -45,7 +45,11 @@ export interface CreateSubSessionParams {
   completion?: 'sent' | 'first-turn';
   model?: string;
   name?: string;
+  workspace?: string;
 }
+
+/** A workspace path or id; paths stay well under this on every platform. */
+const MAX_WORKSPACE_CHARS = 4096;
 
 const DAEMON_ONLY_MESSAGE =
   'create_sub_session is only available when running under `qwen serve` ' +
@@ -111,7 +115,9 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
     // eslint-disable-next-line no-control-regex -- stripping C0 control chars
     const cleaned = raw.replace(/[\r\n\t\x00-\x1f]/g, ' ').trim();
     const label = cleaned.length > 80 ? cleaned.slice(0, 77) + '…' : cleaned;
-    return `[${mode}] ${label}`;
+    return this.params.workspace
+      ? `[${mode}] in ${this.params.workspace}: ${label}`
+      : `[${mode}] ${label}`;
   }
 
   /**
@@ -153,6 +159,9 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
           completion,
           ...(this.params.model ? { model: this.params.model } : {}),
           ...(this.params.name ? { name: this.params.name } : {}),
+          ...(this.params.workspace
+            ? { workspace: this.params.workspace }
+            : {}),
         });
       }, signal);
 
@@ -247,7 +256,13 @@ export class CreateSubSessionTool extends BaseDeclarativeTool<
         'back.\n' +
         '- `sent`: returns immediately after dispatching the prompt, without ' +
         'waiting. Use for fire-and-forget launches whose output you do not ' +
-        'need inline.\n\n' +
+        'need inline. When `workspace` is set, you are told when the ' +
+        'sub-session finishes, with its result.\n\n' +
+        '## Another workspace\n' +
+        'Set `workspace` to run the sub-session in another workspace ' +
+        "registered with this daemon, with that workspace's own instructions, " +
+        'skills and settings. Both workspaces must be trusted; an unknown ' +
+        'name is refused with the list of workspaces you can use.\n\n' +
         'The sub-session runs the prompt with full tool access, starting from ' +
         'zero context — brief it completely in `prompt` (it cannot see this ' +
         'conversation).',
@@ -282,6 +297,13 @@ export class CreateSubSessionTool extends BaseDeclarativeTool<
             type: 'string',
             description:
               'Optional display name for the sub-session in the session list.',
+          },
+          workspace: {
+            type: 'string',
+            description:
+              'Optional absolute path or id of another workspace registered ' +
+              'with this daemon to run the sub-session in. Omit to use the ' +
+              'current workspace.',
           },
         },
         required: ['prompt'],
@@ -322,6 +344,12 @@ export class CreateSubSessionTool extends BaseDeclarativeTool<
     if (params.model !== undefined && !isValidCronTaskRoutingId(params.model)) {
       return `Parameter "model" must be a non-empty string of at most ${MAX_CRON_TASK_ROUTING_ID_LENGTH} characters without control characters.`;
     }
+    if (
+      params.workspace !== undefined &&
+      !isValidWorkspaceSelector(params.workspace)
+    ) {
+      return `Parameter "workspace" must be a non-empty string of at most ${MAX_WORKSPACE_CHARS} characters without control characters.`;
+    }
     return null;
   }
 
@@ -338,6 +366,16 @@ export class CreateSubSessionTool extends BaseDeclarativeTool<
       prompt: params.prompt,
       completion: params.completion ?? 'first-turn',
       ...(params.model ? { model: params.model } : {}),
+      ...(params.workspace ? { workspace: params.workspace } : {}),
     };
   }
+}
+
+function isValidWorkspaceSelector(value: string): boolean {
+  return (
+    value.trim().length > 0 &&
+    value.length <= MAX_WORKSPACE_CHARS &&
+    // eslint-disable-next-line no-control-regex -- rejecting C0 control chars
+    !/[\x00-\x1f\x7f]/.test(value)
+  );
 }

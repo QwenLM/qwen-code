@@ -2494,6 +2494,9 @@ export interface SubSessionSpawnRequest {
   model?: string;
   /** Optional display name for the sub-session in the session list. */
   name?: string;
+  /** Registered workspace (absolute path or id) to run the sub-session in;
+   * absent means the caller's workspace. */
+  workspace?: string;
 }
 
 /** Result returned to the `create_sub_session` tool. `result` (the sub-session's

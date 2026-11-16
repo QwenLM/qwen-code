@@ -745,6 +745,9 @@ export { MAX_SUB_SESSION_PROMPT_CHARS };
  * truncates it to 60 chars for display anyway. */
 export const MAX_SUB_SESSION_NAME_CHARS = 200;
 
+/** Ceiling on a sub-session request's `workspace` selector (a path or id). */
+export const MAX_SUB_SESSION_WORKSPACE_CHARS = 4096;
+
 /**
  * Payload the bridge forwards to {@link BridgeOptions.onCreateSubSession} when
  * the `create_sub_session` tool requests a sub-session.
@@ -762,6 +765,11 @@ export interface CreateSubSessionInfo {
   groupId?: string;
   /** Optional display name for the sub-session in the session list. */
   name?: string;
+  /**
+   * Registered workspace (absolute path or id) to run the sub-session in.
+   * Absent means the caller's workspace. Never set for scheduled-task runs.
+   */
+  workspace?: string;
   /** Optional immutable creator attribution for the fresh session. */
   sourceType?: string;
   /** Optional source-specific identifier paired with `sourceType`. */

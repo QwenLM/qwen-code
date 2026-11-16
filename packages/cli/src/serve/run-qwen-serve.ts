@@ -6401,11 +6401,17 @@ async function runQwenServeImpl(
     // from a child's agent turn and (for 'first-turn') return its result.
     // Dynamic-imported (not at module scope) so the serve fast-path bundle
     // closure check doesn't trace create-sub-session's transitive deps.
-    const [{ createSubSessionLauncher }, scheduledTaskRoutes] =
-      await Promise.all([
-        import('./create-sub-session.js'),
-        import('./routes/scheduled-tasks.js'),
-      ]);
+    const [
+      { createSubSessionLauncher, createSubSessionWorkspaceIndex },
+      scheduledTaskRoutes,
+    ] = await Promise.all([
+      import('./create-sub-session.js'),
+      import('./routes/scheduled-tasks.js'),
+    ]);
+    // Lets a session's sub-session run in another registered workspace.
+    const subSessionWorkspaces = createSubSessionWorkspaceIndex(
+      () => workspaceRegistryForPersistence.current,
+    );
     const { sessionAttachmentsRoots } = await import(
       './session-attachments-root.js'
     );
@@ -6465,7 +6471,10 @@ async function runQwenServeImpl(
       ...subSessionConcurrencyCapsFromSettings(
         runtimeBootSettings?.merged.serve ?? {},
       ),
+      resolveWorkspace: subSessionWorkspaces.resolve,
+      isTrusted: () => subSessionWorkspaces.isTrusted(boundWorkspace),
     });
+    subSessionWorkspaces.register(boundWorkspace, subSessionLauncher);
     const attachmentsRoots = sessionAttachmentsRoots(
       boundWorkspace,
       primarySessionRuntimeBaseDir,
@@ -7119,7 +7128,13 @@ async function runQwenServeImpl(
         ...subSessionConcurrencyCapsFromSettings(
           secondarySettings?.merged.serve ?? {},
         ),
+        resolveWorkspace: subSessionWorkspaces.resolve,
+        isTrusted: () => subSessionWorkspaces.isTrusted(workspaceInput.cwd),
       });
+      subSessionWorkspaces.register(
+        workspaceInput.cwd,
+        secondarySubSessionLauncher,
+      );
       const secondaryAttachmentsRoots = sessionAttachmentsRoots(
         workspaceInput.cwd,
         secondaryEnv.sessionRuntimeBaseDir,
@@ -8149,6 +8164,8 @@ async function runQwenServeImpl(
         ...subSessionConcurrencyCapsFromSettings(
           wsSettings?.merged.serve ?? {},
         ),
+        resolveWorkspace: subSessionWorkspaces.resolve,
+        isTrusted: () => subSessionWorkspaces.isTrusted(cwd),
       });
       let wsBridge: ReturnType<typeof runtime.createAcpSessionBridge>;
       try {
@@ -8332,6 +8349,9 @@ async function runQwenServeImpl(
         throw err;
       }
       wsBridgeRef = wsBridge;
+      // Registered only once the bridge exists: a creation that failed must
+      // not leave a bridgeless launcher over this path.
+      subSessionWorkspaces.register(cwd, wsSubSessionLauncher);
       let wsService: ReturnType<typeof runtime.createDaemonWorkspaceService>;
       try {
         wsService = runtime.createDaemonWorkspaceService({

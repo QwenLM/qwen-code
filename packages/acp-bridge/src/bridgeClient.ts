@@ -83,6 +83,7 @@ import {
   MAX_LIVE_SCREEN_CONTEXT_TEXT_CHARS,
   MAX_LIVE_SPEAK_TO_USER_MESSAGE_CHARS,
   MAX_SUB_SESSION_NAME_CHARS,
+  MAX_SUB_SESSION_WORKSPACE_CHARS,
   MAX_SUB_SESSION_PROMPT_CHARS,
 } from './bridgeOptions.js';
 import type { BridgeFileSystem } from './bridgeFileSystem.js';
@@ -2369,6 +2370,21 @@ export class BridgeClient implements Client {
         '`callerSessionId` is required and must name a session owned by this connection',
       );
     }
+    const workspace = params['workspace'];
+    if (
+      workspace !== undefined &&
+      (typeof workspace !== 'string' ||
+        workspace.trim().length === 0 ||
+        workspace.length > MAX_SUB_SESSION_WORKSPACE_CHARS ||
+        // eslint-disable-next-line no-control-regex -- rejecting C0 control chars
+        /[\x00-\x1f\x7f]/.test(workspace) ||
+        isScheduledTaskRunSource(source))
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        `\`workspace\` must be a non-empty string of at most ${MAX_SUB_SESSION_WORKSPACE_CHARS} characters without control characters, and is not supported for scheduled-task runs`,
+      );
+    }
     const model = params['model'];
     const groupId = params['groupId'];
     if (model !== undefined && !isValidCronTaskRoutingId(model)) {
@@ -2392,6 +2408,7 @@ export class BridgeClient implements Client {
       ...(typeof model === 'string' ? { model } : {}),
       ...(typeof groupId === 'string' ? { groupId } : {}),
       ...(typeof name === 'string' && name.length > 0 ? { name } : {}),
+      ...(typeof workspace === 'string' ? { workspace } : {}),
       ...source,
       callerSessionId,
     });

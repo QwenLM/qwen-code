@@ -4338,16 +4338,32 @@ export class Session implements SessionContext {
       return;
     }
     this.config.setSubSessionSpawner(async (req) => {
-      const resp = await this.client.extMethod(
-        SERVE_CONTROL_EXT_METHODS.createSubSession,
-        {
-          prompt: req.prompt,
-          completion: req.completion,
-          ...(req.model ? { model: req.model } : {}),
-          ...(req.name ? { name: req.name } : {}),
-          callerSessionId: this.sessionId,
-        },
-      );
+      let resp: Record<string, unknown>;
+      try {
+        resp = await this.client.extMethod(
+          SERVE_CONTROL_EXT_METHODS.createSubSession,
+          {
+            prompt: req.prompt,
+            completion: req.completion,
+            ...(req.model ? { model: req.model } : {}),
+            ...(req.name ? { name: req.name } : {}),
+            ...(req.workspace ? { workspace: req.workspace } : {}),
+            callerSessionId: this.sessionId,
+          },
+        );
+      } catch (error) {
+        // The daemon's reason (a cap, a refused workspace) arrives as the
+        // RPC error's `data.details`; the error itself is a plain object
+        // whose message is only "Internal error".
+        const details =
+          isRecord(error) && isRecord(error['data'])
+            ? error['data']['details']
+            : undefined;
+        if (typeof details === 'string' && details.length > 0) {
+          throw new Error(details);
+        }
+        throw error;
+      }
       if (typeof resp['sessionId'] !== 'string' || !resp['sessionId']) {
         throw new Error(
           'create_sub_session: bridge returned non-string sessionId',

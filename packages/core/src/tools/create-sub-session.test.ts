@@ -34,6 +34,32 @@ describe('CreateSubSessionTool', () => {
     );
   });
 
+  it('passes a target workspace to the spawner and names it for the approver', async () => {
+    const spawner = vi.fn(async () => ({ sessionId: 'sub-1', result: 'ok' }));
+    const tool = new CreateSubSessionTool(makeConfig(spawner));
+    const invocation = tool.build({ prompt: 'do X', workspace: '/repos/b' });
+    expect(invocation.getDescription()).toBe('[first-turn] in /repos/b: do X');
+    expect(
+      tool.toAutoClassifierInput({ prompt: 'do X', workspace: '/repos/b' }),
+    ).toMatchObject({ workspace: '/repos/b' });
+    await invocation.execute(new AbortController().signal);
+    expect(spawner).toHaveBeenCalledWith({
+      prompt: 'do X',
+      completion: 'first-turn',
+      workspace: '/repos/b',
+    });
+  });
+
+  it('rejects an empty or unsafe workspace at validation', () => {
+    const tool = new CreateSubSessionTool(makeConfig());
+    expect(() => tool.build({ prompt: 'do X', workspace: ' ' })).toThrow(
+      /workspace/,
+    );
+    expect(() => tool.build({ prompt: 'do X', workspace: 'a\nb' })).toThrow(
+      /control characters/,
+    );
+  });
+
   it('defaults to ask permission so delegated prompts face classifier review', async () => {
     const tool = new CreateSubSessionTool(makeConfig());
     const invocation = tool.build({ prompt: 'do X' });
