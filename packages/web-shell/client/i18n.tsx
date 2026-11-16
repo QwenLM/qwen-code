@@ -646,6 +646,12 @@ const EN: Messages = {
   'branchPicker.pullDiscardGo': 'Discard and Update',
   'branchPicker.pullStashConflict': (v) =>
     `Updated, but restoring your stashed changes failed. They are kept in stash entry ${String(v?.sha ?? '').slice(0, 12) || '(see git stash list)'} — resolve any conflict markers, then restore it manually.`,
+  'branchPicker.checkoutBlocked': 'Switch blocked by uncommitted changes',
+  'branchPicker.checkoutStash': 'Stash Changes and Switch',
+  'branchPicker.checkoutDiscard': 'Discard Changes and Switch…',
+  'branchPicker.checkoutDiscardGo': 'Discard and Switch',
+  'branchPicker.checkoutStashKept': (v) =>
+    `Switched to ${v?.branch ?? ''}. Your local changes are kept in stash entry ${String(v?.sha ?? '').slice(0, 12) || '(see git stash list)'} — restore them with git stash apply when wanted.`,
   'branchPicker.cancel': 'Cancel',
   'branchPicker.hint.upToDate': 'Up to date',
   'branchPicker.hint.noUpstream': 'No upstream',
@@ -3635,6 +3641,10 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     `${v?.count ?? 0} workspace${Number(v?.count) === 1 ? '' : 's'} not shown (untrusted or remote).`,
   'goals.notYetEvaluated': 'not yet evaluated',
   'goals.openSessionHint': "Open this goal's session",
+  'goals.viewAll': 'View all goals',
+  'goals.budget.turns': 'Turns',
+  'goals.budget.tokens': 'Tokens',
+  'goals.budget.time': 'Active time',
   'goals.error.emptyCondition': 'Enter a condition for the goal.',
   'goals.error.clearKeyword': (v) =>
     `"${v?.word ?? ''}" clears a goal rather than setting one. Describe the condition to work toward.`,
@@ -4341,6 +4351,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'chat.scrollToBottom': 'Scroll to bottom',
   'chatHeader.toggleEnvironment': 'Toggle environment information',
   'chatHeader.toggleRightPanel': 'Toggle right panel',
+  'chatHeader.openArtifacts': (v) => `Open artifacts (${v?.count ?? 0})`,
   'environment.title': 'Environment',
   'environment.changes': 'Changes',
   'environment.changeCount': (v) => `${v?.count ?? 0} changed`,
@@ -5917,6 +5928,12 @@ const ZH: Messages = {
   'branchPicker.pullDiscardGo': '放弃并更新',
   'branchPicker.pullStashConflict': (v) =>
     `更新成功，但恢复 Stash 中的修改失败。修改仍保留在 Stash 条目 ${String(v?.sha ?? '').slice(0, 12) || '（见 git stash list）'} 中 —— 请先解决冲突标记，再手动恢复。`,
+  'branchPicker.checkoutBlocked': '存在未提交的修改，无法切换分支',
+  'branchPicker.checkoutStash': 'Stash 修改并切换',
+  'branchPicker.checkoutDiscard': '放弃修改并切换…',
+  'branchPicker.checkoutDiscardGo': '放弃并切换',
+  'branchPicker.checkoutStashKept': (v) =>
+    `已切换到 ${v?.branch ?? ''}。本地修改保留在 Stash 条目 ${String(v?.sha ?? '').slice(0, 12) || '（见 git stash list）'} 中 —— 需要时可用 git stash apply 恢复。`,
   'branchPicker.cancel': '取消',
   'branchPicker.hint.upToDate': '已是最新',
   'branchPicker.hint.noUpstream': '无上游分支',
@@ -8754,6 +8771,10 @@ const ZH: Messages = {
     `有 ${v?.count ?? 0} 个工作区未显示（不受信任或远程）。`,
   'goals.notYetEvaluated': '尚未判定',
   'goals.openSessionHint': '打开该目标所在的会话',
+  'goals.viewAll': '查看全部目标',
+  'goals.budget.turns': '轮数',
+  'goals.budget.tokens': 'Tokens',
+  'goals.budget.time': '活跃时长',
   'goals.error.emptyCondition': '请输入目标条件。',
   'goals.error.clearKeyword': (v) =>
     `“${v?.word ?? ''}”是清除目标的指令，不是一个条件。请描述要达成的条件。`,
@@ -9407,6 +9428,7 @@ const ZH: Messages = {
   'chat.scrollToBottom': '回到底部',
   'chatHeader.toggleEnvironment': '切换环境信息',
   'chatHeader.toggleRightPanel': '切换右侧扩展区',
+  'chatHeader.openArtifacts': (v) => `打开产物（${v?.count ?? 0}）`,
   'environment.title': '环境信息',
   'environment.changes': '变更',
   'environment.changeCount': (v) => `${v?.count ?? 0} 项变更`,

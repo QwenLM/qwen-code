@@ -1967,6 +1967,7 @@ const DEFAULT_CHAT_HEADER_ITEMS: readonly WebShellChatHeaderItem[] = [
   'title',
   'environment',
   'rightPanel',
+  'artifacts',
 ];
 const DEFAULT_RIGHT_PANEL_ITEMS: readonly WebShellRightPanelItem[] = [
   'review',
@@ -3840,6 +3841,7 @@ export function App({
   const titleHeaderItemVisible = chatHeaderItems.includes('title');
   const environmentHeaderItemVisible = chatHeaderItems.includes('environment');
   const rightPanelHeaderItemVisible = chatHeaderItems.includes('rightPanel');
+  const artifactsHeaderItemVisible = chatHeaderItems.includes('artifacts');
   const tokenUsageHeaderItemVisible = chatHeaderItems.includes('tokenUsage');
   const contextUsageHeaderItemVisible =
     chatHeaderItems.includes('contextUsage');
@@ -22863,6 +22865,10 @@ export function App({
     sessionWorktree,
     gitStatusTarget,
   ]);
+  // Bumped when the header artifact entry opens the panel, so the panel
+  // expands its artifacts section even if the user had collapsed it (the
+  // panel hides rather than unmounts, so its local section state persists).
+  const [artifactsExpandSignal, setArtifactsExpandSignal] = useState(0);
   const handleEnvironmentPanelOpenChange = useCallback(
     (open: boolean) => {
       persistEnvironmentPanelOpen(open);
@@ -22876,6 +22882,22 @@ export function App({
     },
     [persistEnvironmentPanelOpen],
   );
+  // The count and the opener are derived from one gate so an embedder never
+  // receives a count it cannot act on: the built-in header additionally
+  // requires both props, but the custom renderChatHeader contract does not.
+  const artifactsHeaderEntry =
+    artifactsHeaderItemVisible &&
+    mainView === 'chat' &&
+    environmentPanelItems.includes('artifacts') &&
+    connection.sessionId
+      ? {
+          artifactCount: artifacts.length,
+          onOpenArtifacts: () => {
+            handleEnvironmentPanelOpenChange(true);
+            setArtifactsExpandSignal((value) => value + 1);
+          },
+        }
+      : {};
   const dismissEnvironmentPanel = useCallback(() => {
     preserveEnvironmentPanelOnArtifactOpenRef.current = false;
     persistEnvironmentPanelOpen(false);
@@ -24354,6 +24376,7 @@ export function App({
                                 ),
                             }
                           : {}),
+                        ...artifactsHeaderEntry,
                         onOpenLocalControlSettings:
                           showMobileAccess && workspaceContextActive
                             ? handleOpenLocalControlSettings
@@ -24425,6 +24448,7 @@ export function App({
                               )
                           : undefined
                       }
+                      {...artifactsHeaderEntry}
                       onOpenLocalControlSettings={
                         showMobileAccess && workspaceContextActive
                           ? handleOpenLocalControlSettings
@@ -26266,6 +26290,11 @@ export function App({
                                 onPause={() => runGoalControl('pause')}
                                 onResume={() => runGoalControl('resume')}
                                 onClear={() => runGoalControl('clear')}
+                                onOpenGoals={
+                                  projectFeaturesAvailable
+                                    ? openGoals
+                                    : undefined
+                                }
                               />
                             )}
                           </div>
@@ -26761,6 +26790,7 @@ export function App({
                 }
                 artifacts={artifacts}
                 artifactsLoading={artifactsLoading}
+                artifactsExpandSignal={artifactsExpandSignal}
                 items={environmentPanelItems}
                 onOpenGitDiff={
                   workspaceContextActive && gitDiffWorkspaceCwd

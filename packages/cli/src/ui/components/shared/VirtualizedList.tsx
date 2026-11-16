@@ -28,7 +28,11 @@ export const SCROLL_TO_ITEM_END = Number.MAX_SAFE_INTEGER;
 
 export type VirtualizedListProps<T> = {
   data: T[];
-  renderItem: (info: { item: T; index: number }) => React.ReactElement;
+  renderItem: (info: {
+    item: T;
+    index: number;
+    isInViewport: boolean;
+  }) => React.ReactElement;
   estimatedItemHeight: (index: number) => number;
   keyExtractor: (item: T, index: number) => string;
   initialScrollIndex?: number;
@@ -577,9 +581,17 @@ function VirtualizedList<T>(
   // cascade shrank the content and re-engaged sticking); windowing
   // around the anchor then leaves the visible bottom rows unmounted and
   // paints a fully blank frame that only a scroll heals.
+  const firstVisibleIndex = findLastLE(offsets, clampedScrollTop);
+  const viewportBottom = clampedScrollTop + scrollableContainerHeight;
+  const bottomIndex = findLastLE(offsets, viewportBottom);
+  // A run starting exactly at the bottom edge is outside the viewport.
+  const visibleEndIndex =
+    offsets[bottomIndex] === viewportBottom
+      ? firstIndexOfOffsetRun(offsets, bottomIndex)
+      : bottomIndex + 1;
   const startIndex = firstIndexOfOffsetRun(
     offsets,
-    Math.max(0, findLastLE(offsets, clampedScrollTop) - 1),
+    Math.max(0, firstVisibleIndex - 1),
   );
   const viewHeightForEndIndex =
     scrollableContainerHeight > 0 ? scrollableContainerHeight : 50;
@@ -625,9 +637,15 @@ function VirtualizedList<T>(
     for (let i = renderRangeStart; i <= renderRangeEnd; i++) {
       const item = data[i];
       if (item) {
-        const isOutsideViewport = i < startIndex || i > endIndex;
+        const key = keyExtractor(item, i);
+        // Keep unmeasured and zero-height rows mounted for layout only.
+        const isInViewport =
+          i >= firstVisibleIndex &&
+          i < visibleEndIndex &&
+          (heights[key] ?? 0) > 0;
+        const isOutsideWindow = i < startIndex || i > endIndex;
         const shouldBeStatic =
-          (renderStatic === true && isOutsideViewport) ||
+          (renderStatic === true && isOutsideWindow) ||
           isStaticItem?.(item, i) === true;
 
         // Isolate per-item render failures so one buggy history record
@@ -640,7 +658,7 @@ function VirtualizedList<T>(
         // to scrollback or screen-scrapers.
         let content: React.ReactElement;
         try {
-          content = renderItem({ item, index: i });
+          content = renderItem({ item, index: i, isInViewport });
         } catch (err) {
           debugLogger.debug(`renderItem threw at index ${i}`, err);
           content = (
@@ -649,8 +667,6 @@ function VirtualizedList<T>(
             </Box>
           );
         }
-        const key = keyExtractor(item, i);
-
         items.push(
           <VirtualizedListItem
             key={key}
@@ -670,6 +686,9 @@ function VirtualizedList<T>(
     renderRangeStart,
     renderRangeEnd,
     data,
+    firstVisibleIndex,
+    visibleEndIndex,
+    heights,
     startIndex,
     endIndex,
     renderStatic,

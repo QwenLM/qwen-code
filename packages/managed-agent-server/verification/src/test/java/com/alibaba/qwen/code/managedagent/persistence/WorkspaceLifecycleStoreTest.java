@@ -248,6 +248,26 @@ class WorkspaceLifecycleStoreTest {
                 });
     }
 
+    /**
+     * A content-only extension child is a real Session in the same Workspace, generation and
+     * storage, and its owner was copied from the parent by the launch. The external-files profile
+     * does not admit child Sessions: {@code insertChildSession} refuses at creation, so the
+     * parent fails fast instead of minting a child that can never be admitted.
+     */
+    @Test
+    void externalFilesParentCannotAdmitAChildSession() {
+        var fixture = fixture();
+        fixture.jdbc.update("UPDATE ma_session SET tool_profile = ? WHERE tenant_id = ? AND session_id = ?",
+                WorkspaceToolProfiles.EXTERNAL_FILES, "tenant", fixture.session);
+
+        assertThatThrownBy(() -> fixture.transactions.executeWithoutResult(ignored -> fixture.store.insertChildSessionCommand(
+                "tenant", fixture.session, "child-create", "digest", "child",
+                java.util.List.of(), "payload",
+                new com.alibaba.qwen.code.managedagent.model.StoreModels.SessionLineage(fixture.session, fixture.session, "child-run", 1))))
+                .isInstanceOfSatisfying(ManagedAgentException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("child_parent_unavailable"));
+    }
+
     @Test
     void brokerAdmissionRejectsAnExpiredMillisecondLifecycleClaim() {
         var fixture = fixture();
