@@ -214,43 +214,78 @@ export function useChangeOverview(
       }
 
       // Commit fallback: the loose window after the latest bound PR head (or
-      // since the base branch when there is no PR). Gate on the PR units
-      // actually produced, not on whether bound PRs exist: with the files
-      // capability absent no PR unit carries a head, so the fallback must still
-      // run. When PR units were produced but no head resolved, suppress the
-      // fallback entirely — an unbounded window would list history the PRs
-      // already cover, and duplicated units are worse than none.
-      const showFallback =
-        prResults.length === 0 || latestPrHeadSha !== undefined;
+      // since the base branch when there is no PR). Run only when every PR unit
+      // actually produced resolved a head: with the files capability absent no
+      // PR unit is produced, so the fallback still runs; but if any produced PR
+      // unit failed to resolve its head, that PR's commits could sit inside the
+      // window and be re-listed as loose work, so suppress the fallback.
+      const showFallback = prResults.every(
+        (result) => result.headSha !== undefined,
+      );
       let commitsTruncated = false;
       if (showFallback) {
         const range = commitFallbackRange(latestPrHeadSha, baseBranch);
-        const log = await ws
-          .workspaceGitLog(COMMIT_FALLBACK_LIMIT, 0, gitCwd, range, {
-            sessionId,
-          })
-          .catch(() => undefined);
-        if (!active) return;
-        // The log window is capped; surface that older commits exist rather
-        // than silently truncating the delivery scale.
-        commitsTruncated = log?.hasMore === true;
-        // Drop merge commits before the detail fan-out so they neither spend
-        // detail round-trips nor displace real loose commits in the window.
-        const entries: DaemonGitLogEntry[] = (log?.entries ?? []).filter(
-          (entry) => entry.parents.length <= 1,
-        );
-        if (entries.length > 0) {
-          const details = new Map<string, DaemonGitCommitDetail>();
-          await Promise.all(
-            entries.map(async (entry) => {
-              const detail = await ws
-                .workspaceGitCommitDetail(entry.sha, gitCwd, sessionId)
-                .catch(() => undefined);
-              if (detail) details.set(entry.sha, detail);
-            }),
-          );
+        // null = the base branch cannot survive the daemon's range whitelist;
+        // skip the fetch rather than fall through to an unscoped walk that
+        // would re-list pre-session history.
+        if (range !== null) {
+          const log = await ws
+            .workspaceGitLog(COMMIT_FALLBACK_LIMIT, 0, gitCwd, range, {
+              sessionId,
+            })
+            .catch(() => undefined);
           if (!active) return;
-          units.push(...buildCommitFallbackUnits(entries, details));
+          // A log the daemon reports unavailable (e.g. the range's head is not
+          // in the object database) is a retryable failure, not "no loose
+          // commits"; surface it instead of an empty session.
+          if (log && log.available === false) {
+            setState({
+              gitAvailable: true,
+              loadFailed: true,
+              loading: false,
+              units: [],
+              commitsTruncated: false,
+            });
+            return;
+          }
+          // The log window is capped; surface that older commits exist rather
+          // than silently truncating the delivery scale.
+          commitsTruncated = log?.hasMore === true;
+          // Drop merge commits before the detail fan-out so they neither spend
+          // detail round-trips nor displace real loose commits in the window.
+          const entries: DaemonGitLogEntry[] = (log?.entries ?? []).filter(
+            (entry) => entry.parents.length <= 1,
+          );
+          if (entries.length > 0) {
+            const details = new Map<string, DaemonGitCommitDetail>();
+            let detailFailed = false;
+            await Promise.all(
+              entries.map(async (entry) => {
+                const detail = await ws
+                  .workspaceGitCommitDetail(entry.sha, gitCwd, sessionId)
+                  .catch(() => undefined);
+                if (detail && detail.available !== false) {
+                  details.set(entry.sha, detail);
+                } else {
+                  detailFailed = true;
+                }
+              }),
+            );
+            if (!active) return;
+            // A partial detail fan-out must not render as a complete list;
+            // surface the retryable failure instead.
+            if (detailFailed) {
+              setState({
+                gitAvailable: true,
+                loadFailed: true,
+                loading: false,
+                units: [],
+                commitsTruncated: false,
+              });
+              return;
+            }
+            units.push(...buildCommitFallbackUnits(entries, details));
+          }
         }
       }
 

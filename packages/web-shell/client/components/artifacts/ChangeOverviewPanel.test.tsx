@@ -12,9 +12,13 @@ const mock = vi.hoisted(() => ({
     units: [],
   } as ChangeOverviewState,
   refresh: vi.fn(),
+  hook: vi.fn(),
 }));
 vi.mock('./useChangeOverview', () => ({
-  useChangeOverview: () => ({ ...mock.state, refresh: mock.refresh }),
+  useChangeOverview: (...args: unknown[]) => {
+    mock.hook(...args);
+    return { ...mock.state, refresh: mock.refresh };
+  },
 }));
 vi.mock('../../hooks/useExternalLinkOpener', () => ({
   useExternalLinkOpener: () => vi.fn(),
@@ -82,6 +86,7 @@ beforeEach(() => {
   root = createRoot(container);
   mock.state = { gitAvailable: true, loading: false, units };
   mock.refresh.mockClear();
+  mock.hook.mockClear();
 });
 
 afterEach(async () => {
@@ -216,6 +221,35 @@ describe('ChangeOverviewPanel', () => {
     };
     renderPanel();
     expect(container.textContent).not.toContain('…and more commits');
+  });
+
+  it('forwards its workspace cwd and session id to the hook', () => {
+    renderPanel();
+    expect(mock.hook).toHaveBeenCalledWith('/work', 's1');
+  });
+
+  it('passes an undefined session id when rendered session-less', () => {
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ChangeOverviewPanel workspaceCwd="/work" />
+        </I18nProvider>,
+      );
+    });
+    expect(mock.hook).toHaveBeenCalledWith('/work', undefined);
+  });
+
+  it('shows the loading message, not an empty scope, during the initial fetch', () => {
+    mock.state = {
+      gitAvailable: true,
+      loadFailed: false,
+      loading: true,
+      units: [],
+      commitsTruncated: false,
+    };
+    renderPanel();
+    expect(container.textContent).toContain('Loading changes');
+    expect(container.textContent).not.toContain('No changes in this scope');
   });
 
   it('shows a retryable load-failed message on a transient fetch failure', () => {

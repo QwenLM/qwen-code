@@ -187,6 +187,23 @@ vi.mock('./SideTaskPanel', () => ({
   },
 }));
 
+const changeOverviewHook = vi.hoisted(() => ({
+  args: undefined as unknown[] | undefined,
+}));
+vi.mock('./useChangeOverview', () => ({
+  useChangeOverview: (...args: unknown[]) => {
+    changeOverviewHook.args = args;
+    return {
+      gitAvailable: true,
+      loadFailed: false,
+      loading: false,
+      units: [],
+      commitsTruncated: false,
+      refresh: vi.fn(),
+    };
+  },
+}));
+
 const { ArtifactPanel } = await import('./ArtifactPanel');
 type ArtifactPanelTab = Parameters<typeof ArtifactPanel>[0]['tabs'][number];
 const { useArtifactWorkspaceTarget } = await import(
@@ -3775,6 +3792,138 @@ describe('ArtifactPanel add menu', () => {
     openAddMenu(container);
     const menuText = document.body.querySelector('[role="menu"]')?.textContent;
     expect(menuText).not.toContain('Change overview');
+  });
+
+  it('hides the change overview entry once its singleton tab is already open', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'artifact',
+                kind: 'artifact',
+                title: 'Report',
+                artifactId: 'report',
+                workspaceCwd: '/primary',
+                workspaceId: 'primary-id',
+              },
+              {
+                id: 'change_overview',
+                kind: 'change_overview',
+                title: 'Change overview',
+                workspaceCwd: '/primary',
+                sessionId: 's1',
+              },
+            ]}
+            activeTabId="artifact"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            changeOverviewAvailable
+            onOpenChangeOverview={vi.fn()}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    openAddMenu(container);
+    const menuText = document.body.querySelector('[role="menu"]')?.textContent;
+    expect(menuText).not.toContain('Change overview');
+  });
+
+  it('renders the change overview panel for a change_overview tab and wires the hook', () => {
+    changeOverviewHook.args = undefined;
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'change_overview',
+                kind: 'change_overview',
+                title: 'Change overview',
+                workspaceCwd: '/primary',
+                workspaceId: 'primary-id',
+                sessionId: 's1',
+              },
+            ]}
+            activeTabId="change_overview"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            changeOverviewAvailable
+            onOpenChangeOverview={vi.fn()}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(changeOverviewHook.args).toEqual(['/primary', 's1']);
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    // The panel body renders (the mocked hook yields an empty scope), not a
+    // blank slot — replacing the render branch with a <div/> fails this.
+    expect(container.textContent).toContain('No changes in this scope');
+  });
+
+  it('shows the workspace-not-found state when the change_overview workspace is gone', () => {
+    changeOverviewHook.args = undefined;
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'change_overview',
+                kind: 'change_overview',
+                title: 'Change overview',
+                workspaceCwd: '/removed',
+                workspaceId: 'removed-id',
+                sessionId: 's1',
+              },
+            ]}
+            activeTabId="change_overview"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            changeOverviewAvailable
+            onOpenChangeOverview={vi.fn()}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    // The accurate not-found guard fires instead of an endless retry, and the
+    // hook never runs for a workspace the daemon no longer advertises.
+    expect(container.querySelector('[role="alert"]')).not.toBeNull();
+    expect(changeOverviewHook.args).toBeUndefined();
   });
 });
 

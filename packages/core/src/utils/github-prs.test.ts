@@ -953,13 +953,12 @@ describe('parseGhPrFiles', () => {
     additions: 10,
     deletions: 7,
     headRefOid: 'abc1234',
-    baseRefName: 'main',
     ...overrides,
   });
   const parse = (overrides: Record<string, unknown> = {}) =>
     parseGhPrFiles(JSON.stringify(ghPrFiles(overrides)));
 
-  it('maps files, totals, head sha and base ref', () => {
+  it('maps files, totals and head sha', () => {
     expect(parse()).toEqual({
       files: [
         { path: 'src/a.ts', additions: 10, deletions: 2 },
@@ -969,7 +968,6 @@ describe('parseGhPrFiles', () => {
       additions: 10,
       deletions: 7,
       headSha: 'abc1234',
-      baseRefName: 'main',
     });
   });
 
@@ -1023,10 +1021,9 @@ describe('parseGhPrFiles', () => {
     ]);
   });
 
-  it('defaults missing head/base to empty strings', () => {
-    const result = parse({ headRefOid: undefined, baseRefName: undefined });
+  it('defaults a missing head sha to an empty string', () => {
+    const result = parse({ headRefOid: undefined });
     expect(result.headSha).toBe('');
-    expect(result.baseRefName).toBe('');
   });
 
   it.each([
@@ -1064,14 +1061,13 @@ describe('fetchGitHubPullRequestFiles', () => {
         additions: 3,
         deletions: 1,
         headRefOid: 'deadbee',
-        baseRefName: 'main',
       },
       [
         'pr',
         'view',
         '7',
         '--json',
-        'files,additions,deletions,headRefOid,baseRefName,changedFiles',
+        'files,additions,deletions,headRefOid,changedFiles',
       ],
     );
     const result = await fetchGitHubPullRequestFiles(repo, 7);
@@ -1082,7 +1078,6 @@ describe('fetchGitHubPullRequestFiles', () => {
         additions: 3,
         deletions: 1,
         headSha: 'deadbee',
-        baseRefName: 'main',
       },
     });
   });
@@ -1094,7 +1089,7 @@ describe('fetchGitHubPullRequestFiles', () => {
       'view',
       '7',
       '--json',
-      'files,additions,deletions,headRefOid,baseRefName,changedFiles',
+      'files,additions,deletions,headRefOid,changedFiles',
       '--repo',
       'other/repo',
     ]);
@@ -1121,6 +1116,7 @@ describe('fetchGitHubPullRequestFiles', () => {
       expect(result).toMatchObject({
         kind: 'failed',
         message: 'invalid pull request repository',
+        reason: 'invalid_repo',
       });
     }
     expect(mockExecFile).not.toHaveBeenCalled();

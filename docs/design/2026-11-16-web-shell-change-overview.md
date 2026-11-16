@@ -44,8 +44,10 @@ Session attribution is already available — no baseline discovery is needed:
 
 - `DaemonSessionSummary` carries `worktree?: DaemonWorktreeInfo`
   (`{ slug, path, branch }`), `branch?: DaemonBranchInfo` (`{ name, baseBranch }`),
-  and `prs?: DaemonSessionPrInfo[]` (bound PRs, `{ number, url, state, issues }`,
-  last = latest). See `packages/sdk-typescript/src/daemon/types.ts`.
+  and `prs?: DaemonSessionPrInfo[]` (bound PRs,
+  `{ number, url, state, source, issues }`, last = latest). `source` records the
+  binding provenance (`create` / `worktree` / `review`). See
+  `packages/sdk-typescript/src/daemon/types.ts`.
 - PRs are bound to the session by the PR service
   (`packages/core/src/services/session-pr-service.ts`) when created from the Git
   dialog, and surfaced on the session summary.
@@ -75,7 +77,7 @@ no file stats. There is no route that returns a PR's files.
 
 Add `fetchGitHubPullRequestFiles(cwd, number, env?, repo?)` in
 `packages/core/src/utils/github-prs.ts`, backed by
-`gh pr view <number> --json files,additions,deletions,headRefOid,baseRefName,changedFiles`
+`gh pr view <number> --json files,additions,deletions,headRefOid,changedFiles`
 (plus `--repo owner/repo` when the bound PR lives in another repository).
 It returns a discriminated result mirroring the existing PR helpers
 (`ok` / `not_a_repo` / `cli_unavailable` / `failed`), with a parsed, capped file
@@ -83,7 +85,7 @@ list:
 
 - `files: { path, additions, deletions }[]` (capped, with a `hiddenCount`),
 - `additions`, `deletions` totals,
-- `headSha` (`headRefOid`) and `baseRefName` for attribution and links.
+- `headSha` (`headRefOid`) to scope the commit fallback.
 
 `gh` output is untrusted; reuse the existing redaction / timeout / cwd-guard
 patterns from `fetchGitHubPullRequestView`. The per-file list is capped at
@@ -107,7 +109,11 @@ instead of probing it optimistically. The pinned capability baselines
 are updated for the new tag. The client gates PR-file fetching behind
 `workspace_github_pr_files`; a daemon without the tag shows no PR scopes, and a
 daemon that advertises the tag but fails the fetch degrades to "file list
-unavailable" with the actual cause.
+unavailable" with the actual cause. A supplied-but-unusable `repo` (a repeated
+query key, an empty value, or a slug the core validator refuses) is a caller
+error answered `400`, classified by the machine-readable `reason: 'invalid_repo'`
+rather than the human-readable message, so a reword cannot turn it into a
+retryable `502`. An absent `repo` resolves the number in the session's own repo.
 
 The overview itself is **composed client-side** from existing routes plus this
 one new route, rather than adding a large aggregation endpoint. This keeps each
@@ -129,8 +135,10 @@ menu (next to the existing "Changes" entry). It renders:
 
 - A **scope selector** listing the delivery units:
   - `Uncommitted` (always present when the workspace is a git repo),
-  - one entry per bound PR (`summary.prs`), labelled `#number` (the summary's
-    bound-PR entries carry no title), with a link to the PR,
+  - one entry per bound PR (`summary.prs`, excluding `source === 'review'`
+    bindings — a merely-reviewed PR is not this session's delivery), labelled
+    `#number` (the summary's bound-PR entries carry no title), with a link to
+    the PR,
   - commit-fallback entries for commits not covered by a bound PR.
 - The selected unit's **file list with per-file `+/-` and a total scale header**,
   reusing the existing `LineStats` rendering. Per-line diffs stay in the Git
@@ -141,9 +149,14 @@ Assembly logic lives in a testable hook `useChangeOverview`:
 - Uncommitted unit ← `workspaceGitDiff(cwd, sessionId)`.
 - PR units ← `summary.prs`, each fetching `workspaceGitHubPullRequestFiles`.
 - Commit-fallback units ← `workspaceGitLog` of commits after the latest bound
-  PR's `headSha` (or, when there is no bound PR, the session's recent commits),
-  each rendered from `workspaceGitCommitDetail`. Commits at or before the latest
-  bound PR head are treated as covered by PRs and not duplicated.
+  PR's `headSha` (or, when there is no bound PR, the session's base branch, or
+  HEAD's recent history when no baseline is known), each rendered from
+  `workspaceGitCommitDetail`. Commits at or before the latest bound PR head are
+  treated as covered by PRs and not duplicated. Merge commits and commits whose
+  detail fetch fails are dropped. A base branch outside the daemon's range
+  whitelist skips the fallback entirely (a distinct "refuse" sentinel) rather
+  than falling through to an unscoped walk that would re-list pre-session
+  history.
 
 Degradation:
 
@@ -155,8 +168,13 @@ Degradation:
   link) with a "file list unavailable" state, never a blank panel.
 - Transient git-diff fetch failure (timeout / 5xx): a distinct retryable
   "couldn't load" state, not mislabelled as "not a git repository".
-- Bound PRs present but no head SHA resolves: the commit fallback is suppressed
-  entirely, so an unbounded window cannot list history the PRs already cover.
+- Any produced PR unit fails to resolve its head: the commit fallback is
+  suppressed entirely, so that PR's commits cannot be re-listed as loose work
+  inside a window an older PR's head defines. With the files capability absent
+  no PR unit is produced, so the fallback still runs.
+- A commit log the daemon reports unavailable, or a failed commit-detail fetch:
+  a retryable "couldn't load" state, not an empty session or a partial list
+  presented as complete.
 - A bound PR in another repository is resolved there via `gh --repo owner/repo`
   derived from its URL, not by number in the session's checkout.
 - Shared (non-worktree) workspace: units are workspace-scoped rather than
@@ -165,6 +183,8 @@ Degradation:
 ## Files affected
 
 - `packages/core/src/utils/github-prs.ts` (+ collocated test): PR file stats.
+- `packages/core/src/services/session-pr-service.ts` (+ test): forward the
+  binding `source` on the wire projection.
 - `packages/cli/src/serve/routes/workspace-github-prs.ts` (+ test): files route.
 - `packages/cli/src/serve/capabilities.ts`, `capability-parity.ts`,
   `server.test.ts`, `integration-tests/cli/qwen-serve-routes.test.ts`: new
@@ -175,6 +195,8 @@ Degradation:
 - `packages/web-shell/client/customization.tsx`: `changeOverview` right-panel item.
 - `packages/web-shell/client/App.tsx`: open/persist/restore the overview tab and
   reconcile its session id; pass the session summary.
+- `packages/web-shell/client/main.tsx` (+ test): list `changeOverview` in the
+  standalone right-panel items so the feature is reachable in the shipped shell.
 - `packages/web-shell/client/i18n.tsx` (+ parity test): EN/ZH strings.
 
 ## Scope boundaries

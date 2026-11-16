@@ -790,8 +790,7 @@ export async function fetchGitHubPullRequestView(
 
 // ── PR changed files ───────────────────────────────────────
 
-const GH_PR_FILES_FIELDS =
-  'files,additions,deletions,headRefOid,baseRefName,changedFiles';
+const GH_PR_FILES_FIELDS = 'files,additions,deletions,headRefOid,changedFiles';
 
 /** Upper bound on the per-file rows a PR files result reports. */
 export const GITHUB_PR_FILES_MAX = 300;
@@ -816,7 +815,6 @@ export interface GitHubPullRequestFiles {
   deletions: number;
   /** `headRefOid`: the PR head commit, used to scope commit fallback. */
   headSha: string;
-  baseRefName: string;
 }
 
 export type FetchGitHubPullRequestFilesResult =
@@ -829,6 +827,12 @@ export type FetchGitHubPullRequestFilesResult =
       gitRoot: string;
       /** See {@link FetchGitHubPullRequestsResult} — the fallback gh binary. */
       binary?: string;
+      /**
+       * Machine-readable caller-error classification, so the route maps a bad
+       * slug to 400 without matching the human-readable prose (which a reword
+       * would silently break). Mirrors the view helper's `reason`.
+       */
+      reason?: 'invalid_repo';
     };
 
 interface GhPrFileEntry {
@@ -854,7 +858,6 @@ export function parseGhPrFiles(stdout: string): GitHubPullRequestFiles {
     additions?: unknown;
     deletions?: unknown;
     headRefOid?: unknown;
-    baseRefName?: unknown;
     changedFiles?: unknown;
   };
   if (!Array.isArray(entry.files)) {
@@ -893,7 +896,6 @@ export function parseGhPrFiles(stdout: string): GitHubPullRequestFiles {
     additions,
     deletions,
     headSha: typeof entry.headRefOid === 'string' ? entry.headRefOid : '',
-    baseRefName: typeof entry.baseRefName === 'string' ? entry.baseRefName : '',
   };
 }
 
@@ -933,6 +935,7 @@ export async function fetchGitHubPullRequestFiles(
     return {
       kind: 'failed',
       message: 'invalid pull request repository',
+      reason: 'invalid_repo',
       gitRoot,
     };
   }

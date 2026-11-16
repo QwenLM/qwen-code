@@ -384,6 +384,7 @@ export type ArtifactPanelTab =
       kind: 'change_overview';
       title: string;
       workspaceCwd: string;
+      workspaceId?: string;
       sessionId?: string;
     }
   | {
@@ -406,7 +407,9 @@ export type ArtifactPanelTab =
 
 type WorkspaceScopedArtifactPanelTab = Extract<
   ArtifactPanelTab,
-  { kind: 'review' | 'file' | 'artifact' | 'scheduled_task' }
+  {
+    kind: 'review' | 'file' | 'artifact' | 'scheduled_task' | 'change_overview';
+  }
 >;
 
 function isWorkspaceScopedTab(
@@ -416,7 +419,8 @@ function isWorkspaceScopedTab(
     tab.kind === 'review' ||
     tab.kind === 'file' ||
     tab.kind === 'artifact' ||
-    tab.kind === 'scheduled_task'
+    tab.kind === 'scheduled_task' ||
+    tab.kind === 'change_overview'
   );
 }
 
@@ -825,7 +829,8 @@ export function ArtifactPanel({
   const showChangeOverviewMenuItem =
     items.includes('changeOverview') &&
     changeOverviewAvailable &&
-    Boolean(onOpenChangeOverview);
+    Boolean(onOpenChangeOverview) &&
+    !tabs.some((tab) => tab.id === 'change_overview');
   const showAddMenu =
     Boolean(activeTab) &&
     (showFilesMenuItem ||

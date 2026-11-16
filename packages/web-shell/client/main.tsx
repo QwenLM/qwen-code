@@ -442,6 +442,9 @@ export function StandaloneApp({
                       ],
                     },
                     rightPanel: {
+                      // Every WebShellRightPanelItem, so a newly added entry
+                      // is not silently unreachable in the standalone shell
+                      // (main.test.tsx pins the completeness of this list).
                       items: [
                         'files',
                         'review',
@@ -449,6 +452,7 @@ export function StandaloneApp({
                         'terminal',
                         'webPreview',
                         'trajectory',
+                        'changeOverview',
                       ],
                     },
                     environmentPanel: {

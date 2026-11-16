@@ -104,15 +104,23 @@ function isSafeRangeRef(ref: string): boolean {
  * The git log range that yields the commit-fallback window: commits a bound PR
  * does not cover. With a known PR head, only commits after it are loose (the
  * PR units already show the rest); without one, the session's base branch (or
- * HEAD's recent history) bounds the window. A base branch that cannot survive
- * the daemon's range whitelist yields no range rather than an unscoped walk.
+ * HEAD's recent history) bounds the window.
+ *
+ * Returns a range string, or one of two distinct sentinels: `undefined` means
+ * "no baseline — walk HEAD's recent history" (an omitted range), while `null`
+ * means "refuse the fallback". A base branch git permits but the daemon's
+ * whitelist rejects (e.g. `feat@2026`) would be dropped server-side into an
+ * unscoped walk that re-lists pre-session history, so it must skip the fetch
+ * entirely (`null`), not fall through to the omitted-range path.
  */
 export function commitFallbackRange(
   latestPrHeadSha: string | undefined,
   baseBranch: string | undefined,
-): string | undefined {
+): string | null | undefined {
   if (latestPrHeadSha) return `${latestPrHeadSha}..HEAD`;
-  if (baseBranch && isSafeRangeRef(baseBranch)) return `${baseBranch}..HEAD`;
+  if (baseBranch) {
+    return isSafeRangeRef(baseBranch) ? `${baseBranch}..HEAD` : null;
+  }
   return undefined;
 }
 

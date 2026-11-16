@@ -732,7 +732,6 @@ export interface DaemonGitHubPullRequestFiles {
   deletions: number;
   /** The PR head commit (`headRefOid`), for scoping commit fallback. */
   headSha: string;
-  baseRefName: string;
 }
 
 /** Response from `POST /workspaces/:workspace/github/prs/create`. */

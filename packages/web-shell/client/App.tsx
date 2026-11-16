@@ -2293,7 +2293,7 @@ type PersistedArtifactPanelTab =
     >
   | Pick<
       Extract<ArtifactPanelTab, { kind: 'change_overview' }>,
-      'id' | 'kind' | 'title' | 'workspaceCwd' | 'sessionId'
+      'id' | 'kind' | 'title' | 'workspaceCwd' | 'workspaceId' | 'sessionId'
     >
   | Pick<
       Extract<ArtifactPanelTab, { kind: 'token_usage' }>,
@@ -2515,6 +2515,9 @@ function parsePersistedArtifactPanelTab(
         ...common,
         kind: 'change_overview',
         workspaceCwd: tab['workspaceCwd'],
+        ...(typeof tab['workspaceId'] === 'string'
+          ? { workspaceId: tab['workspaceId'] }
+          : {}),
         sessionId: tab['sessionId'],
       } as PersistedArtifactPanelTab;
     case 'token_usage':
@@ -2704,6 +2707,7 @@ function serializeArtifactPanelTabs(
             kind: tab.kind,
             title,
             workspaceCwd: tab.workspaceCwd,
+            workspaceId: tab.workspaceId,
             sessionId: tab.sessionId,
           },
         ];
@@ -6698,11 +6702,16 @@ export function App({
   const openChangeOverviewPanel = useCallback(() => {
     const cwd = activeWorkspaceCwd;
     if (!cwd) return;
+    const workspaceId = resolveArtifactWorkspaceOwner(
+      workspaceCapabilitiesRef.current,
+      cwd,
+    )?.id;
     const tab: ArtifactPanelTab = {
       id: 'change_overview',
       kind: 'change_overview',
       title: t('changeOverview.title'),
       workspaceCwd: cwd,
+      ...(workspaceId ? { workspaceId } : {}),
       ...(connection.sessionId ? { sessionId: connection.sessionId } : {}),
     };
     setArtifactPanelTabs((tabs) =>
@@ -8167,6 +8176,12 @@ export function App({
                     ? tab
                     : undefined;
                 case 'change_overview':
+                  // A stored tab outlives the host's opt-in, so a host that
+                  // has stopped listing the item must not get the panel back
+                  // — and fetching with it — through the browser profile.
+                  if (!rightPanelItems.includes('changeOverview')) {
+                    return undefined;
+                  }
                   // Identity only; the panel refetches from git on mount. A
                   // tab saved without a session picks up the live one via the
                   // session-id reconciliation effect.
@@ -8280,6 +8295,7 @@ export function App({
     hydrateRestoredAttachmentTab,
     panelStateKey,
     resetEmptyArtifactPanel,
+    rightPanelItems,
     sessionAgentTraceSupported,
     sessionActions,
     trajectoryAvailable,

@@ -298,7 +298,6 @@ export function registerWorkspaceQualifiedGitHubPrsRoutes(
               additions: 0,
               deletions: 0,
               headSha: '',
-              baseRefName: '',
             });
             return;
           case 'cli_unavailable':
@@ -311,8 +310,10 @@ export function registerWorkspaceQualifiedGitHubPrsRoutes(
             return;
           case 'failed': {
             // A malformed slug is a caller error, not a gh failure: the core
-            // helper refuses it before any process starts.
-            if (result.message === 'invalid pull request repository') {
+            // helper refuses it before any process starts. Classify by the
+            // machine-readable reason, not the prose — a reword of the message
+            // must not silently turn this into a retryable 502.
+            if (result.reason === 'invalid_repo') {
               res.status(400).json({
                 errorKind: 'parse_error',
                 error: 'repo must be a valid owner/repo slug',

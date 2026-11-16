@@ -39,11 +39,13 @@ describe('commitFallbackRange', () => {
 
   it('refuses a base branch the daemon range whitelist would drop', () => {
     // git permits these refs, but isSafeLogRange rejects them; composing the
-    // range would make the daemon run an unscoped git log instead.
-    expect(commitFallbackRange(undefined, 'feat@2026')).toBeUndefined();
-    expect(commitFallbackRange(undefined, 'user#42')).toBeUndefined();
-    expect(commitFallbackRange(undefined, '-leading')).toBeUndefined();
-    expect(commitFallbackRange(undefined, '分支')).toBeUndefined();
+    // range would make the daemon run an unscoped git log instead. Return the
+    // null "skip the fallback" sentinel — distinct from the undefined
+    // no-baseline case, which still walks HEAD's recent history.
+    expect(commitFallbackRange(undefined, 'feat@2026')).toBeNull();
+    expect(commitFallbackRange(undefined, 'user#42')).toBeNull();
+    expect(commitFallbackRange(undefined, '-leading')).toBeNull();
+    expect(commitFallbackRange(undefined, '分支')).toBeNull();
     // The PR-head and valid base forms must keep working.
     expect(commitFallbackRange('abc1234', undefined)).toBe('abc1234..HEAD');
     expect(commitFallbackRange(undefined, 'origin/main')).toBe(

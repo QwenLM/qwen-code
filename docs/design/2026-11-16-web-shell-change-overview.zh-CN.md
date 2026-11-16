@@ -36,8 +36,9 @@ Shell 在三处展示变更信息，但都无法回答「按我交付的方式�
 
 - `DaemonSessionSummary` 携带 `worktree?: DaemonWorktreeInfo`
   （`{ slug, path, branch }`）、`branch?: DaemonBranchInfo`（`{ name, baseBranch }`）、
-  以及 `prs?: DaemonSessionPrInfo[]`（绑定的 PR，`{ number, url, state, issues }`，
-  末位为最新）。见 `packages/sdk-typescript/src/daemon/types.ts`。
+  以及 `prs?: DaemonSessionPrInfo[]`（绑定的 PR，
+  `{ number, url, state, source, issues }`，末位为最新）。`source` 记录绑定来源
+  （`create` / `worktree` / `review`）。见 `packages/sdk-typescript/src/daemon/types.ts`。
 - 从 Git 对话框创建 PR 时，PR 服务
   （`packages/core/src/services/session-pr-service.ts`）会把 PR 绑定到会话，并
   体现在会话摘要上。
@@ -66,14 +67,14 @@ Shell 在三处展示变更信息，但都无法回答「按我交付的方式�
 
 在 `packages/core/src/utils/github-prs.ts` 新增
 `fetchGitHubPullRequestFiles(cwd, number, env?, repo?)`，底层用
-`gh pr view <number> --json files,additions,deletions,headRefOid,baseRefName,changedFiles`
+`gh pr view <number> --json files,additions,deletions,headRefOid,changedFiles`
 （绑定 PR 属于其他仓库时另加 `--repo owner/repo`）。
 返回与现有 PR 助手一致的可辨识结果（`ok` / `not_a_repo` / `cli_unavailable` /
 `failed`），并给出解析且设上限的文件列表：
 
 - `files: { path, additions, deletions }[]`（设上限，附 `hiddenCount`），
 - `additions`、`deletions` 汇总，
-- `headSha`（`headRefOid`）与 `baseRefName`，用于归属与链接。
+- `headSha`（`headRefOid`），用于界定 commit 兜底窗口。
 
 `gh` 输出不可信；复用 `fetchGitHubPullRequestView` 现有的脱敏 / 超时 / cwd 守卫
 模式。每文件列表以 `GITHUB_PR_FILES_MAX` 设上限，但 `gh` 自身会把 `files` 数组
@@ -92,6 +93,9 @@ Shell 在三处展示变更信息，但都无法回答「按我交付的方式�
 （server.test.ts、capability-parity.ts、集成 capabilities 信封）随新 tag 同步。
 客户端用 `workspace_github_pr_files` 作为拉取 PR 文件的门槛；没有该标签的
 daemon 不显示 PR 范围，有标签但拉取失败的降级为「文件列表不可用」并给出真实原因。
+传入但不可用的 `repo`（重复查询键、空值、或 core 校验器拒绝的 slug）属调用方错误，
+回 `400`，按机器可读的 `reason: 'invalid_repo'` 分类而非面向人的文案——改文案不会
+把它变成可重试的 `502`。未传 `repo` 时在会话自身仓库按编号解析。
 
 总览本身**在客户端组合**现成路由加这一个新路由，而不是新增一个大型聚合端点。
 这样每一块都小而可复用，也与 Git 对话框已经组合 `git/diff`、`git/log`、
@@ -112,7 +116,8 @@ PR 方法保持一致。
 
 - **范围选择器**，列出交付单元：
   - `未提交`（工作区是 git 仓库时始终存在），
-  - 每个绑定 PR 一项（`summary.prs`），标注 `#number`（摘要的绑定 PR 条目不含
+  - 每个绑定 PR 一项（`summary.prs`，排除 `source === 'review'` 的绑定——仅被
+    评审过的 PR 不是本会话的交付），标注 `#number`（摘要的绑定 PR 条目不含
     标题），并附 PR 链接，
   - 未被绑定 PR 覆盖的 commit 的兜底项。
 - 所选单元的**文件列表（每文件 `+/-`）与总规模头部**，复用现有 `LineStats`
@@ -123,8 +128,11 @@ PR 方法保持一致。
 - 未提交单元 ← `workspaceGitDiff(cwd, sessionId)`。
 - PR 单元 ← `summary.prs`，每项拉取 `workspaceGitHubPullRequestFiles`。
 - commit 兜底单元 ← 用 `workspaceGitLog` 取最新绑定 PR `headSha` 之后的 commit
-  （无绑定 PR 时取会话近期 commit），每项用 `workspaceGitCommitDetail` 渲染。
-  位于最新绑定 PR head 及之前的 commit 视为已被 PR 覆盖，不重复展示。
+  （无绑定 PR 时取会话基线分支，无基线时取 HEAD 近期历史），每项用
+  `workspaceGitCommitDetail` 渲染。位于最新绑定 PR head 及之前的 commit 视为已被
+  PR 覆盖，不重复展示。合并提交与 detail 拉取失败的 commit 被丢弃。基线分支若在
+  daemon 区间白名单之外，则整体跳过兜底（独立的「拒绝」哨兵），而不是落到无界
+  遍历、把会话之前的历史重新列出。
 
 降级：
 
@@ -134,8 +142,11 @@ PR 方法保持一致。
   「文件列表不可用」状态，绝不出现空白面板。
 - git diff 瞬时拉取失败（超时 / 5xx）：独立的「无法加载」可重试状态，不误标为
   「不是 git 仓库」。
-- 有绑定 PR 但解析不出任何 head SHA：完全抑制 commit 兜底，避免无界窗口列出
-  PR 已覆盖的历史。
+- 任一产出的 PR 单元解析不出 head：完全抑制 commit 兜底，避免该 PR 的 commit
+  在较旧 PR head 界定的窗口里被当作 loose 工作重新列出。files 能力缺失时不产出
+  PR 单元，兜底仍运行。
+- commit log 被 daemon 报为不可用、或 commit detail 拉取失败：可重试的「无法加载」
+  状态，而非空会话或把部分列表当作完整列表。
 - 绑定 PR 属于另一仓库时，按其 URL 推导 `owner/repo` 并用 `gh --repo` 在该仓库
   解析，而非在会话检出里按编号查。
 - 共享（非 worktree）工作区：单元为工作区口径，而非仅会话归属。
@@ -143,6 +154,8 @@ PR 方法保持一致。
 ## 涉及文件
 
 - `packages/core/src/utils/github-prs.ts`（+ 同目录测试）：PR 文件统计。
+- `packages/core/src/services/session-pr-service.ts`（+ 测试）：wire 投影透传
+  绑定 `source`。
 - `packages/cli/src/serve/routes/workspace-github-prs.ts`（+ 测试）：files 路由。
 - `packages/cli/src/serve/capabilities.ts`、`capability-parity.ts`、
   `server.test.ts`、`integration-tests/cli/qwen-serve-routes.test.ts`：新增
@@ -153,6 +166,8 @@ PR 方法保持一致。
 - `packages/web-shell/client/customization.tsx`：`changeOverview` 右面板项。
 - `packages/web-shell/client/App.tsx`：打开/持久化/恢复总览页并回填会话 id、传入
   会话摘要。
+- `packages/web-shell/client/main.tsx`（+ 测试）：独立入口 rightPanel items 列出
+  `changeOverview`，使功能在发行版 shell 中可达。
 - `packages/web-shell/client/i18n.tsx`（+ 对齐测试）：中英文案。
 
 ## 范围边界

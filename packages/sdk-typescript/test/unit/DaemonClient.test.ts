@@ -2285,7 +2285,6 @@ describe('DaemonClient', () => {
         additions: 10,
         deletions: 2,
         headSha: 'abc1234',
-        baseRefName: 'main',
       };
       const { fetch, calls } = recordingFetch(() => jsonResponse(200, files));
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
@@ -2313,7 +2312,6 @@ describe('DaemonClient', () => {
         additions: 0,
         deletions: 0,
         headSha: '',
-        baseRefName: 'main',
       };
       const { fetch, calls } = recordingFetch(() => jsonResponse(200, files));
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });

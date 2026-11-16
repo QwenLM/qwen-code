@@ -6947,6 +6947,68 @@ describe('task activity key', () => {
     ).not.toHaveBeenCalled();
   });
 
+  it('drops a restored change overview tab when the host stopped listing it', async () => {
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'change_overview',
+          tabs: [
+            {
+              id: 'change_overview',
+              kind: 'change_overview',
+              title: 'Change overview',
+              workspaceCwd: '/tmp/project',
+              sessionId: 'session-1',
+            },
+          ],
+        },
+      }),
+    );
+
+    // A stored tab must not be a second way in for a host that turned the
+    // feature off: it would render the panel and keep fetching git state.
+    const { container } = renderApp({ rightPanel: { items: ['review'] } });
+    await flush();
+    await flush();
+
+    expect(
+      container.querySelector('button[title="Change overview"]'),
+    ).toBeNull();
+  });
+
+  it('round-trips a persisted change overview tab when the host lists it', async () => {
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'change_overview',
+          tabs: [
+            {
+              id: 'change_overview',
+              kind: 'change_overview',
+              title: 'Change overview',
+              workspaceCwd: '/tmp/project',
+              sessionId: 'session-1',
+            },
+          ],
+        },
+      }),
+    );
+
+    const { container } = renderApp({
+      rightPanel: { items: ['review', 'changeOverview'] },
+    });
+    await flush();
+    await flush();
+
+    expect(
+      container.querySelector('button[title="Change overview"]'),
+    ).not.toBeNull();
+  });
+
   it('opens one trajectory tab from the panel and reuses it', async () => {
     window.localStorage.setItem(
       'qwen-code-web-shell-right-panel-state',
@@ -18415,7 +18477,11 @@ describe('App session callbacks', () => {
   it('hands workspace context from the welcome composer to the session header', async () => {
     mockConnection.sessionId = undefined;
     testState.messages = [];
-    const { container, rerender } = renderApp();
+    // Session-scoped entries only: the workspace-scoped changeOverview default
+    // would otherwise surface the header on the session-less welcome page.
+    const { container, rerender } = renderApp({
+      rightPanel: { items: ['review', 'sideTask'] },
+    });
     await flush();
     expect(testState.latestChatEditorProps?.contextChipPlacement).toBe('below');
     expect(
@@ -19907,7 +19973,11 @@ describe('App session callbacks', () => {
   it('hides the new-task header when nothing workspace-scoped is available', async () => {
     mockConnection.sessionId = undefined;
     testState.messages = [];
-    const { container } = renderApp();
+    // Session-scoped entries only, so nothing workspace-scoped is available on
+    // the new-task page (changeOverview is workspace-scoped and in the default).
+    const { container } = renderApp({
+      rightPanel: { items: ['review', 'sideTask'] },
+    });
     await flush();
 
     expect(
@@ -20186,7 +20256,9 @@ describe('App session callbacks', () => {
   });
 
   it('keeps the right-panel action visible and opens a review-only empty state', () => {
-    const { container } = renderApp();
+    // Scope to review only: the default list also offers the workspace-scoped
+    // changeOverview action, which this review-only assertion does not cover.
+    const { container } = renderApp({ rightPanel: { items: ['review'] } });
     const rightPanelButton = container.querySelector<HTMLButtonElement>(
       'button[aria-label="Toggle right panel"]',
     );

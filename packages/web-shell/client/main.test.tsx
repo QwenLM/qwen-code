@@ -110,6 +110,25 @@ describe('StandaloneApp', () => {
     expect(items).toContain('agents');
   });
 
+  it('offers every right-panel item, including Change overview, in the standalone shell', () => {
+    act(() => root.render(<StandaloneApp daemonToken="token" />));
+    const items = testState.props?.webShellProps.rightPanel?.items ?? [];
+    // The shipped standalone entry must list every WebShellRightPanelItem;
+    // the explicit list wins over App's default, so omitting an entry here
+    // (e.g. changeOverview) makes that whole feature unreachable.
+    for (const item of [
+      'files',
+      'review',
+      'sideTask',
+      'terminal',
+      'webPreview',
+      'trajectory',
+      'changeOverview',
+    ] as const) {
+      expect(items).toContain(item);
+    }
+  });
+
   it('reloads the page when the root error fallback retry is clicked', () => {
     testState.throwOnRender = true;
     const reload = vi.fn();

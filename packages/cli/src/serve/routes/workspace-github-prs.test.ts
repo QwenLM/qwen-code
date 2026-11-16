@@ -553,7 +553,6 @@ describe('workspace GitHub PR routes', () => {
         additions: 10,
         deletions: 2,
         headSha: 'abc1234',
-        baseRefName: 'main',
       },
     });
     const app = mount();
@@ -573,7 +572,6 @@ describe('workspace GitHub PR routes', () => {
       additions: 10,
       deletions: 2,
       headSha: 'abc1234',
-      baseRefName: 'main',
     });
     expect(fetchGitHubPullRequestFilesMock).toHaveBeenCalledWith(
       '/work/main',
@@ -592,7 +590,6 @@ describe('workspace GitHub PR routes', () => {
         additions: 0,
         deletions: 0,
         headSha: '',
-        baseRefName: 'main',
       },
     });
     const app = mount();
@@ -636,9 +633,12 @@ describe('workspace GitHub PR routes', () => {
     // A slug the core validator refuses (three path segments) is a caller
     // error, not a gh failure. (`../..` is NOT such a case: '.' is in the slug
     // charset, so it is valid-format and resolves via gh like any other repo.)
+    // The route classifies by the machine-readable reason the core test pins,
+    // not the prose — rewording the message must not turn this into a 502.
     fetchGitHubPullRequestFilesMock.mockResolvedValue({
       kind: 'failed',
       message: 'invalid pull request repository',
+      reason: 'invalid_repo',
       gitRoot: '/work/main',
     });
     const app = mount();
@@ -666,7 +666,6 @@ describe('workspace GitHub PR routes', () => {
         additions: 0,
         deletions: 0,
         headSha: '',
-        baseRefName: 'main',
       },
     });
     const overlay = { GH_TOKEN: 'workspace-token' };
@@ -737,7 +736,6 @@ describe('workspace GitHub PR routes', () => {
         additions: 0,
         deletions: 0,
         headSha: '',
-        baseRefName: 'main',
       },
     });
     const [r1, r2] = await Promise.all([p1, p2]);
@@ -745,6 +743,32 @@ describe('workspace GitHub PR routes', () => {
     expect(r1.status).toBe(200);
     expect(r2.status).toBe(200);
     expect(fetchGitHubPullRequestFilesMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('re-reads fresh data on a sequential repeat request', async () => {
+    // The in-flight entry must clear once settled, or a later open serves a
+    // frozen snapshot for the daemon's lifetime. Deleting the clear leaves the
+    // second request reusing the settled promise (one call instead of two).
+    fetchGitHubPullRequestFilesMock.mockResolvedValue({
+      kind: 'ok',
+      files: {
+        files: [],
+        hiddenCount: 0,
+        additions: 0,
+        deletions: 0,
+        headSha: '',
+      },
+    });
+    const app = mount();
+    const first = await request(app).get(
+      '/workspaces/primary/github/prs/42/files',
+    );
+    const second = await request(app).get(
+      '/workspaces/primary/github/prs/42/files',
+    );
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(fetchGitHubPullRequestFilesMock).toHaveBeenCalledTimes(2);
   });
 
   it('rejects an invalid cwd query with 400 before calling gh', async () => {

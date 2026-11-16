@@ -37074,7 +37074,7 @@ describe('createServeApp', () => {
       ).send({ pr });
       expect(res.status).toBe(200);
       expect(res.body.sessionId).toBe('550e8400-e29b-41d4-a716-446655440321');
-      expect(res.body.prs).toEqual([pr]);
+      expect(res.body.prs).toEqual([{ ...pr, source: 'create' }]);
       expect(bridge.updateMetadataCalls).toHaveLength(1);
       expect(bridge.updateMetadataCalls[0]?.metadata).toEqual({
         displayName: undefined,
@@ -37110,7 +37110,9 @@ describe('createServeApp', () => {
           ),
         ).send({ pr: { ...pr, role: 'fix' } });
         expect(set.status).toBe(200);
-        expect(set.body.prs).toEqual([{ ...pr, role: 'fix' }]);
+        expect(set.body.prs).toEqual([
+          { ...pr, role: 'fix', source: 'create' },
+        ]);
         expect((await readSessionPrs(sidecarPath))?.[0]?.role).toBe('fix');
 
         // An omitted role preserves the known one (a state refresh or
@@ -37122,7 +37124,7 @@ describe('createServeApp', () => {
         ).send({ pr: { ...pr, state: 'open' } });
         expect(preserve.status).toBe(200);
         expect(preserve.body.prs).toEqual([
-          { ...pr, state: 'open', role: 'fix' },
+          { ...pr, state: 'open', role: 'fix', source: 'create' },
         ]);
 
         // null is the explicit clear; the bridge never sees the null (the
@@ -37133,7 +37135,9 @@ describe('createServeApp', () => {
           ),
         ).send({ pr: { ...pr, role: null } });
         expect(clear.status).toBe(200);
-        expect(clear.body.prs).toEqual([{ ...pr, state: 'open' }]);
+        expect(clear.body.prs).toEqual([
+          { ...pr, state: 'open', source: 'create' },
+        ]);
         expect((await readSessionPrs(sidecarPath))?.[0]?.role).toBeUndefined();
         for (const call of bridge.updateMetadataCalls) {
           expect(
@@ -37415,7 +37419,7 @@ describe('createServeApp', () => {
         ),
       ).send({ pr });
       expect(res.status).toBe(200);
-      expect(res.body.prs).toEqual([pr]);
+      expect(res.body.prs).toEqual([{ ...pr, source: 'create' }]);
       expect(secondaryBridge.updateMetadataCalls).toEqual([
         {
           sessionId: '550e8400-e29b-41d4-a716-446655440321',
@@ -37551,7 +37555,7 @@ describe('createServeApp', () => {
           ),
         ).send({ pr });
         expect(res.status).toBe(200);
-        expect(res.body.prs).toEqual([pr]);
+        expect(res.body.prs).toEqual([{ ...pr, source: 'create' }]);
         // The binding lands at the located (archived) state only — no
         // orphan in the active chats dir that an unarchive would later
         // conflict with.
@@ -37623,7 +37627,7 @@ describe('createServeApp', () => {
           ),
         ).send({ pr });
         expect(res.status).toBe(200);
-        expect(res.body.prs).toEqual([pr]);
+        expect(res.body.prs).toEqual([{ ...pr, source: 'create' }]);
         const sidecar = await readSessionPrs(
           service.getPrSessionPathForArchiveState(
             '550e8400-e29b-41d4-a716-446655440321',
@@ -37940,7 +37944,11 @@ describe('createServeApp', () => {
         expect(retry.status).toBe(200);
         expect(retry.body.displayName).toBe('Doomed rename');
         expect(retry.body.prs).toEqual([
-          { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+          {
+            number: 9517,
+            url: 'https://github.com/o/r/pull/9517',
+            source: 'create',
+          },
         ]);
         expect(await fsp.readFile(filePath, 'utf8')).toContain('Doomed rename');
         expect(

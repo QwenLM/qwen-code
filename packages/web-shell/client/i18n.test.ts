@@ -245,6 +245,7 @@ describe('web-shell i18n catalog', () => {
       'changeOverview.openPr',
       'changeOverview.description',
       'changeOverview.hiddenFiles',
+      'changeOverview.hiddenCommits',
     ];
     for (const key of keys) {
       // zh against en, not against the key: the translator falls back to EN
