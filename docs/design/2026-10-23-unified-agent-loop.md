@@ -581,10 +581,11 @@ The unit suite in `speculation.test.ts` runs a text-only round, a single call, a
 | 5c    | AgentCore: each round and its batch in one `runAgentLoop` call, on the event-bus kernel when it is on                                               |
 | 5d    | AgentCore: default on, then remove its current loop                                                                                                 |
 | 6a    | speculation: every model round on the loop's round, on a `Turn` over the forked chat; speculation keeps its tool gate and direct execution          |
-| 6b    | speculation: default on, then remove its current round                                                                                              |
+| 6b    | speculation: tool-step decision — keep its own tool step; see the [PR 6b decision](2026-11-15-speculation-tool-step.md)                             |
+| 6c    | speculation: default on, then remove its current round                                                                                              |
 | —     | Hosted Harness: separate evaluation — see the [migration evaluation](2026-11-14-hosted-harness-loop-evaluation.md)                                  |
 
-PR 6b is speculation's default-on and removal step.
+PR 6b is speculation's tool-step decision (keep its own tool step); PR 6c is its default-on and removal step.
 
 A surface moves in five steps, tracked in #17045:
 
@@ -799,6 +800,8 @@ End state:
 | Loops that parse stream chunks outside `turn.ts`     | 3                                                | 0      |
 | Loops that call `finalizeToolResponses`              | 6                                                | 1      |
 | Session turn-cap formulas                            | 3                                                | 1      |
+
+These targets assume full migration. The keep-its-own decisions retain specialized copies: speculation keeps its speculative loop and its `finalizeToolResponses` call (`speculation.ts:607`; [PR 6b decision](2026-11-15-speculation-tool-step.md)), and the Hosted Harness keeps its journaled loop and tool step ([migration evaluation](2026-11-14-hosted-harness-loop-evaluation.md)). "Agent loop implementations" and "Loops that call `finalizeToolResponses`" therefore end at the shared implementation plus the copies these decisions retain (speculation's finalizer sits alongside the shared batch's at `agent-loop.ts:715`); the follow-up #17284 reconciles the exact numbers.
 
 ## Open questions
 
