@@ -160,7 +160,7 @@ describe('dedicated Managed Web gateway', () => {
         ['POST', '/desktop-relay/credential'],
         ['GET', '/acp'],
         ['GET', '/internal/managed-session-store/v1/read'],
-        ['GET', '/v1/agents/sessions'],
+        ['GET', '/v1/agents'],
       ]) {
         const response = await get(path!, {
           method,
@@ -211,6 +211,33 @@ describe('dedicated Managed Web gateway', () => {
     ).toBe(200);
     expect(calls[1]?.headers.range).toBe('bytes=0-2');
     expect(calls[1]?.headers['if-match']).toBe('"revision"');
+
+    // The Public surface is proxied with the same fixed principal and the
+    // Idempotency-Key header folded into the signature.
+    const publicBody = '{"display_name":"ws"}';
+    expect(
+      (
+        await get('/v1/agents/workspaces', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Idempotency-Key': 'workspace-1',
+          },
+          body: publicBody,
+        })
+      ).status,
+    ).toBe(200);
+    const publicCall = calls[2]!;
+    expect(publicCall.headers['x-qwen-tenant-id']).toBe('tenant-a');
+    expect(publicCall.headers['x-qwen-actor-id']).toBe('operator-a');
+    expect(publicCall.headers['idempotency-key']).toBe('workspace-1');
+    const publicCanonical = `qwen-broker-auth-v1\nPOST\n/v1/agents/workspaces\n\ntenant-a\noperator-a\n${publicCall.headers['x-qwen-signature-timestamp']}\n${createHash('sha256').update(publicBody).digest('hex')}\nworkspace-1`;
+    expect(publicCall.headers['x-qwen-signature']).toBe(
+      `v1=${createHmac('sha256', signingKey).update(publicCanonical).digest('hex')}`,
+    );
+    const listQuery = '/v1/agents/sessions?limit=20&archive_state=all';
+    expect((await get(listQuery)).status).toBe(200);
+    expect(calls[3]?.url).toBe(listQuery);
   });
 
   it('streams SSE without buffering and closes upstream on browser disconnect', async () => {
@@ -235,6 +262,22 @@ describe('dedicated Managed Web gateway', () => {
     );
     controller.abort();
     await reader.cancel().catch(() => {});
+    await vi.waitFor(() => expect(disconnected).toBe(true));
+
+    disconnected = false;
+    const publicResponse = await get(
+      '/v1/agents/sessions/s1/events?stream=true&after=0',
+      { headers: { Accept: 'text/event-stream' } },
+    );
+    expect(publicResponse.status).toBe(200);
+    expect(calls.at(-1)?.url).toBe(
+      '/v1/agents/sessions/s1/events?stream=true&after=0',
+    );
+    const publicReader = publicResponse.body!.getReader();
+    expect(
+      new TextDecoder().decode((await publicReader.read()).value),
+    ).toContain('ready');
+    await publicReader.cancel().catch(() => {});
     await vi.waitFor(() => expect(disconnected).toBe(true));
   });
 

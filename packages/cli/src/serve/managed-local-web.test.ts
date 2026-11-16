@@ -245,7 +245,7 @@ describe('Managed local front door', () => {
     expect(calls).toHaveLength(0);
   });
 
-  it('allows only exact artifact content reads and preserves range validators', async () => {
+  it('proxies the public surface and preserves artifact range validators', async () => {
     const target =
       '/v1/agents/sessions/session-1/artifacts/artifact-1/content?revision=abc';
     const response = await get(target, {
@@ -257,13 +257,21 @@ describe('Managed local front door', () => {
     expect(calls[0]?.headers.range).toBe('bytes=0-2');
     expect((await get(target, { method: 'HEAD' })).status).toBe(200);
     expect(calls[1]?.method).toBe('HEAD');
+    // The whole Public surface is proxied now; route and method admission
+    // belong to Java, so shapes the old artifact-only guard refused are
+    // forwarded for the server to answer.
+    expect((await get('/v1/agents/sessions/session-1/artifacts')).status).toBe(
+      200,
+    );
+    expect((await get(target, { method: 'POST' })).status).toBe(200);
+    expect(
+      (
+        await get(
+          '/v1/agents/sessions/session-1/artifacts/artifact-1/content/extra',
+        )
+      ).status,
+    ).toBe(200);
     for (const [method, url] of [
-      ['POST', target],
-      [
-        'GET',
-        '/v1/agents/sessions/session-1/artifacts/artifact-1/content/extra',
-      ],
-      ['GET', '/v1/agents/sessions/session-1/artifacts'],
       ['GET', '/internal/managed-session-store/v1/write'],
       ['GET', '/v1/agents'],
       ['GET', '/api/agent/web-shell/v10/sessions/query'],
@@ -275,8 +283,119 @@ describe('Managed local front door', () => {
       expect(denied.status).toBe(404);
       expect(denied.headers.get('content-type')).toContain('application/json');
     }
-    expect(calls).toHaveLength(2);
+    expect(calls).toHaveLength(5);
   });
+
+  it('signs public reads, writes and deletes with the wider path-parameter charset', async () => {
+    const body = Buffer.from('{"display_name":"ws"}');
+    const create = await get('/v1/agents/workspaces', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'ws-1',
+      },
+      body,
+    });
+    expect(create.status).toBe(200);
+    expect(calls[0]?.url).toBe('/v1/agents/workspaces');
+    expect(calls[0]?.headers['idempotency-key']).toBe('ws-1');
+    const createCanonical = `qwen-broker-auth-v1\nPOST\n/v1/agents/workspaces\n\nlocal\nowner\n${calls[0]!.headers['x-qwen-signature-timestamp']}\n${createHash('sha256').update(body).digest('hex')}\nws-1`;
+    expect(calls[0]?.headers['x-qwen-signature']).toBe(
+      `v1=${createHmac('sha256', SIGNING_KEY).update(createCanonical).digest('hex')}`,
+    );
+
+    const query = '/v1/agents/sessions?cursor=abc&limit=20&archive_state=all';
+    expect((await get(query)).status).toBe(200);
+    expect(calls[1]?.url).toBe(query);
+    const queryCanonical = `qwen-broker-auth-v1\nGET\n/v1/agents/sessions\ncursor=abc&limit=20&archive_state=all\nlocal\nowner\n${calls[1]!.headers['x-qwen-signature-timestamp']}\n${createHash('sha256').update(Buffer.alloc(0)).digest('hex')}\n`;
+    expect(calls[1]?.headers['x-qwen-signature']).toBe(
+      `v1=${createHmac('sha256', SIGNING_KEY).update(queryCanonical).digest('hex')}`,
+    );
+
+    expect(
+      (
+        await get('/v1/agents/sessions/session-1', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: '{"title":"t"}',
+        })
+      ).status,
+    ).toBe(200);
+    expect(calls[2]?.method).toBe('PATCH');
+    expect(
+      (
+        await get('/v1/agents/sessions/session-1', {
+          method: 'DELETE',
+          headers: { 'Idempotency-Key': 'del-1' },
+        })
+      ).status,
+    ).toBe(200);
+    expect(calls[3]?.method).toBe('DELETE');
+    expect(calls[3]?.headers['idempotency-key']).toBe('del-1');
+
+    // Package digests carry a raw colon; operator-configured node ids are
+    // arbitrary bounded strings the client percent-encodes.
+    const publish = `/v1/agents/workspaces/ws-1/extensions/ext-1/packages/sha256:${'a'.repeat(64)}`;
+    expect(
+      (await get(publish, { method: 'PUT', body: 'archive' })).status,
+    ).toBe(200);
+    expect(calls[4]?.url).toBe(publish);
+    const check = `/v1/agents/runtime-nodes/${encodeURIComponent('dev box.1:22')}/check-directory`;
+    expect(
+      (
+        await get(check, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: '{"path":"/tmp"}',
+        })
+      ).status,
+    ).toBe(200);
+    expect(calls[5]?.url).toBe(check);
+  });
+
+  // Send the paths raw: fetch and http.request(url) would normalize dot
+  // segments and drop fragments client-side, hiding them from the guard.
+  it.each([
+    '/v1/agents/../internal/managed-session-store/v1/write',
+    '/v1/agents/sessions/..%2f..%2finternal/x',
+    '/v1/agents/%2e%2e/internal/managed-session-store/v1/write',
+    '/v1/agents/sessions/%2E%2E/artifacts',
+    '/v1/agents/sessions/./x',
+    '/v1/agents/sessions/session-1/../../x',
+    '/v1/agents/sessions%5Cevil/x',
+    '/v1/agents/sessions/bad%zz/x',
+    '/v1/agents/sessions/x#fragment',
+    '/v1/agents/',
+  ])(
+    'refuses traversal and out-of-shape public path %s before signing',
+    async (rawPath) => {
+      const target = new URL(web!.url);
+      const status = await new Promise<number | undefined>(
+        (resolve, reject) => {
+          const request = httpRequest(
+            {
+              hostname: target.hostname,
+              port: target.port,
+              method: 'GET',
+              path: rawPath,
+              headers: {
+                Authorization: 'Bearer browser-token',
+                Accept: 'text/html',
+              },
+            },
+            (response) => {
+              response.resume();
+              response.once('end', () => resolve(response.statusCode));
+            },
+          );
+          request.once('error', reject);
+          request.end();
+        },
+      );
+      expect(status).toBe(404);
+      expect(calls).toHaveLength(0);
+    },
+  );
 
   it('rejects foreign browser origins and DNS-rebinding Host values', async () => {
     expect(
@@ -308,31 +427,37 @@ describe('Managed local front door', () => {
   });
 
   it('bounds signed bodies and refuses repeated idempotency headers before Java', async () => {
-    const target = '/api/agent/web-shell/v1/sessions/create';
-    const oversized = await get(target, {
-      method: 'POST',
-      body: Buffer.alloc(10 * 1024 * 1024 + 1),
-    });
-    expect(oversized.status).toBe(413);
-    const status = await new Promise<number | undefined>((resolve, reject) => {
-      const request = httpRequest(
-        `${web!.url}${target}`,
-        {
-          method: 'POST',
-          headers: {
-            Authorization: 'Bearer browser-token',
-            'Idempotency-Key': ['one', 'two'],
-          },
-        },
-        (response) => {
-          response.resume();
-          response.once('end', () => resolve(response.statusCode));
+    for (const target of [
+      '/api/agent/web-shell/v1/sessions/create',
+      '/v1/agents/sessions',
+    ]) {
+      const oversized = await get(target, {
+        method: 'POST',
+        body: Buffer.alloc(10 * 1024 * 1024 + 1),
+      });
+      expect(oversized.status).toBe(413);
+      const status = await new Promise<number | undefined>(
+        (resolve, reject) => {
+          const request = httpRequest(
+            `${web!.url}${target}`,
+            {
+              method: 'POST',
+              headers: {
+                Authorization: 'Bearer browser-token',
+                'Idempotency-Key': ['one', 'two'],
+              },
+            },
+            (response) => {
+              response.resume();
+              response.once('end', () => resolve(response.statusCode));
+            },
+          );
+          request.once('error', reject);
+          request.end();
         },
       );
-      request.once('error', reject);
-      request.end();
-    });
-    expect(status).toBe(400);
+      expect(status).toBe(400);
+    }
     expect(calls).toHaveLength(0);
   });
 
@@ -357,6 +482,25 @@ describe('Managed local front door', () => {
     );
     controller.abort();
     await reader.cancel().catch(() => undefined);
+    await vi.waitFor(() => expect(disconnected).toBe(true));
+
+    // The Public event stream is a GET with the cursor in the query; the
+    // proxy signs the query and pipes the same way.
+    disconnected = false;
+    const publicResponse = await get(
+      '/v1/agents/sessions/session-1/events?stream=true&after=0',
+      { headers: { Accept: 'text/event-stream' } },
+    );
+    expect(publicResponse.status).toBe(200);
+    expect(calls.at(-1)?.url).toBe(
+      '/v1/agents/sessions/session-1/events?stream=true&after=0',
+    );
+    expect(calls.at(-1)?.headers.accept).toBe('text/event-stream');
+    const publicReader = publicResponse.body!.getReader();
+    expect(
+      new TextDecoder().decode((await publicReader.read()).value),
+    ).toContain('ready');
+    await publicReader.cancel().catch(() => undefined);
     await vi.waitFor(() => expect(disconnected).toBe(true));
   });
 

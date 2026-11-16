@@ -139,7 +139,7 @@ PublicTurn schema 的 status enum **已声明** recovery_blocked（OAS:12128-121
 ### 5.1 managed-local-web.ts
 
 - mount 前缀加 `'/v1/agents'`（保留 WS 前缀与 ARTIFACT_CONTENT，4c 再删 WS）。
-- 白名单正则加 Public 分支：`^\/v1\/agents\/[a-z0-9_-]+(?:\/[a-z0-9_-]+)*\/?$`（i flag，与 WS 分支同构）。**实施时核实 nodeId 字符集**（check-directory 路径参数，SshWorkspaceService 校验 1..128）：若含 `.`/`:` 需为该段放宽字符集并加测试；其余路径参数（UUID、task*/item* 前缀 hex、sha256 digest、整数 revision、uploadId）都在现有字符集内。
+- 白名单正则加 Public 分支。**已核实**：nodeId 是运维配置的任意有界字符串（`BrokerValues.requireId` 只查长度/非空），packageDigest 带裸 `sha256:` 前缀（Public publish 把 digest 移入路径），extensionId 为 `[a-z][a-z0-9-]{0,63}`。故 Public 段字符集放宽为 RFC 3986 unreserved + `:` + 百分号八位组（客户端对路径参数一律 encodeURIComponent）；**并前置 traversal 防护**：拒绝 `%2f`/`%5c`/`%2e`（任意大小写）与裸点段（`/./`、`/../`），否则上游规范化可把已签名路径解析进 `/internal`。测试用 `http.request` options 形式发原始路径（fetch 与 `http.request(url)` 会在客户端规范化点段、丢 fragment，测不到守卫）。
 - catch-all 404 顺序不变（`/internal/managed-session-store` 与未列路径仍 404）；bare `/v1/agents`（无段）保持 404（客户端不用）。
 - **不加 Last-Event-ID 转发**（D-4b-5：客户端用 after query；qualification 脚本直连 Java 不受代理限制）。
 - Idempotency-Key 转发/签名/重复头 400、响应头白名单（含 x-qwen-idempotent-replay）、no-store、pipe——全部已就绪，零改动。

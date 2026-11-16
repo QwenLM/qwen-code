@@ -71,6 +71,19 @@ const RESPONSE_HEADERS = [
 ];
 const ARTIFACT_CONTENT =
   /^\/v1\/agents\/sessions\/[^/?]+\/artifacts\/[^/?]+\/content$/u;
+// Public path parameters are wider than the WebShell ones: package digests
+// carry a raw "sha256:" prefix and operator-configured SSH node ids are
+// arbitrary bounded strings, so segments accept the RFC 3986 unreserved
+// characters a client may leave unencoded plus percent octets. Encoded
+// slashes, backslashes and dots stay refused, as do raw dot segments:
+// upstream normalization must never be able to resolve a signed path
+// outside the Public surface (for example into /internal).
+const PUBLIC_SEGMENT = String.raw`(?:[a-z0-9_.~!*'():-]|%[0-9a-f]{2})+`;
+const PUBLIC_PATH = new RegExp(
+  String.raw`^\/v1\/agents\/${PUBLIC_SEGMENT}(?:\/${PUBLIC_SEGMENT})*\/?$`,
+  'iu',
+);
+const PUBLIC_TRAVERSAL = /%2f|%5c|%2e|(?:^|\/)\.{1,2}(?:\/|$)/iu;
 
 export function mountManagedLocalWeb(
   app: Application,
@@ -99,15 +112,17 @@ export function mountManagedLocalWeb(
     });
   });
   app.use(
-    ['/api/agent/web-shell/v1', ARTIFACT_CONTENT],
+    ['/api/agent/web-shell/v1', '/v1/agents', ARTIFACT_CONTENT],
     express.raw({ type: () => true, limit: 10 * 1024 * 1024, inflate: false }),
     (req, res) => {
       const rawPath = req.originalUrl.split('?')[0]!;
       if (
+        PUBLIC_TRAVERSAL.test(rawPath) ||
         !(
           /^\/api\/agent\/web-shell\/v1\/[a-z0-9_-]+(?:\/[a-z0-9_-]+)*\/?$/iu.test(
             rawPath,
           ) ||
+          PUBLIC_PATH.test(rawPath) ||
           ((req.method === 'GET' || req.method === 'HEAD') &&
             ARTIFACT_CONTENT.test(rawPath))
         )

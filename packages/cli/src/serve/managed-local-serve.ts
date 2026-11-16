@@ -348,12 +348,9 @@ export async function runManagedLocalServe(
         label: 'Server default model',
       });
     }
-    const route = '/api/agent/web-shell/v1/workspaces/create';
+    const route = '/v1/agents/workspaces';
     const body = Buffer.from(
-      JSON.stringify({
-        displayName: 'Local workspace',
-        idempotencyKey: 'managed-local-default-workspace-v1',
-      }),
+      JSON.stringify({ display_name: 'Local workspace' }),
     );
     const bootstrap = await fetch(`${javaUrl}${route}`, {
       method: 'POST',
@@ -365,6 +362,10 @@ export async function runManagedLocalServe(
           signingKey: state.signingKey,
           tenantId,
           actorId,
+          // The same receipt key as the former WebShell bootstrap: both
+          // surfaces share one creation store, so an upgrade replays the
+          // original Workspace instead of admitting a second one.
+          idempotencyKey: 'managed-local-default-workspace-v1',
         }),
         'Content-Type': 'application/json',
       },
