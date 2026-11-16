@@ -440,6 +440,30 @@ describe('CLI', () => {
     assert.ok(!result.stdout.includes('sid=abc'));
   });
 
+  it('keeps the failure line after a CR-terminated token value', () => {
+    // Bearer's \S+ and the env rule's value class stop at \r too, so the strip
+    // welds their already-redacted value onto the failure line. Re-redacting
+    // it post-strip eats the ##[error] marker and the round reports success
+    // with no evidence of the failure it fetched.
+    const noise = Array.from({ length: 30 }, (_, i) => `noise line ${i}`).join(
+      '\n',
+    );
+    for (const prefix of ['SSH_AUTH_SOCK=/tmp/agent', 'Bearer abc123']) {
+      const result = runCli(
+        { statusCheckRollup: [failedCheck()] },
+        {
+          log: `${noise}\n${prefix}\r##[error]AssertionError: real failure\n${noise}\n`,
+        },
+      );
+      assert.equal(result.status, 0, result.stderr);
+      assert.ok(
+        result.stdout.includes('##[error]AssertionError: real failure'),
+        prefix,
+      );
+      assert.ok(result.stdout.includes('[redacted]'), prefix);
+    }
+  });
+
   it('strips backspace, C0/C1 and Bidi controls, keeping tab and newline', () => {
     // A \r-only strip leaves \b, \x0b, \x0c, DEL and the C1 range, which a
     // terminal still applies to repaint the line, and the Bidi overrides that

@@ -224,20 +224,34 @@ function redactLog(log) {
     );
 }
 
-// The post-strip pass: the token rules of redactLog, without their \b anchors
-// and without its two line-scoped header rules. Keep the token rules in sync
-// with redactLog. Both differences are forced by the strip:
-//   - a control byte INSIDE a credential (`npm_\rABC…`) defeats every anchor on
-//     the first pass, and deleting it welds the fragments into a contiguous
-//     token; the same strip can also weld a word character onto the token's
-//     front (`x\rnpm_…` → `xnpm_…`), leaving \b nothing to match, so the
-//     anchors are dropped here. Over-redaction is the safe direction: this
-//     pass only ever sees already-redacted text.
-//   - `Cookie:` / `Authorization:` are bounded by \r as well as \n, which is
-//     what keeps them from swallowing the next line. Once the strip has
-//     deleted every \r they would run to the next newline and consume the
-//     ##[error] line the excerpt exists to show. The first pass, which still
-//     saw the CR, has already redacted their values.
+// The post-strip pass. Keep these rules in sync with redactLog. Two
+// differences, both forced by the strip deleting characters that rules use as
+// terminators:
+//   - the \b anchors are dropped: a control byte INSIDE a credential
+//     (`npm_\rABC…`) defeats every anchor on the first pass, and the same strip
+//     can weld a word character onto the token's front (`x\rnpm_…` → `xnpm_…`),
+//     leaving \b nothing to match. Over-redaction is the safe direction for a
+//     pass that only ever sees already-redacted text.
+//   - every rule whose value ends at whitespace carries (?!\[redacted\]). \r is
+//     whitespace, so the first pass stops such a value at the CR; once the
+//     strip deletes it, re-running the rule extends the value across the weld
+//     and eats the ##[error] line the excerpt exists to show. The first pass
+//     redacts the value whenever it can see the keyword, so a value that
+//     already reads [redacted] must never be re-matched: the only legitimate
+//     post-strip match is a keyword the control split, which the first pass
+//     could not see at all.
+// The URL userinfo is a single segment whose class drops the gen-delims # [ ]
+// (illegal in userinfo per RFC 3986) and @: it cannot reach across a welded
+// ##[error] marker, and without the nested quantifier it cannot backtrack
+// quadratically over a long token. The scheme keeps a boundary as a lookbehind
+// rather than \b: without one, every position inside a long word run is a
+// candidate start and the rule turns quadratic (measured 653 ms on a 40k-char
+// line); the lookbehind admits a scheme preceded by any non-scheme character,
+// which is what a weld leaves behind.
+// Cookie:/Authorization: stay out: their value runs to the line end, so over
+// CR-free text they swallow the following line. A control inside the keyword
+// itself (`Coo\rkie:`) therefore escapes both passes — a gap recorded in the
+// design doc, not closed here.
 function redactWeldedTokens(log) {
   return log
     .replace(
@@ -248,7 +262,7 @@ function redactWeldedTokens(log) {
       /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g,
       '[redacted jwt]',
     )
-    .replace(/(Bearer\s+)\S+/gi, '$1[redacted]')
+    .replace(/(Bearer\s+)(?!\[redacted\])\S+/gi, '$1[redacted]')
     .replace(
       /(?:gh[pousr]_|github_pat_|glpat-|xox[bp]-)[A-Za-z0-9_-]{8,}/g,
       '[redacted]',
@@ -256,9 +270,12 @@ function redactWeldedTokens(log) {
     .replace(/sk-(?:proj-)?[A-Za-z0-9-]{20,}/g, 'sk-[redacted]')
     .replace(/(?:AKIA|ASIA)[A-Z0-9]{16}/g, '[redacted]')
     .replace(/npm_[A-Za-z0-9]{20,}/g, '[redacted]')
-    .replace(/([a-z][a-z0-9+.-]*:\/\/)(?:[^/\s]+@)+/gi, '$1[redacted]@')
     .replace(
-      /(["']?)([A-Za-z_][A-Za-z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|AUTH|CREDENTIAL)[A-Za-z0-9_]*)(\1\s*[:=]\s*)["']?[^"',\s}]+["']?/gi,
+      /(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*:\/\/)[^/\s@#[\]]+@/gi,
+      '$1[redacted]@',
+    )
+    .replace(
+      /(["']?)([A-Za-z_][A-Za-z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|AUTH|CREDENTIAL)[A-Za-z0-9_]*)(\1\s*[:=]\s*)["']?(?!\[redacted\])[^"',\s}]+["']?/gi,
       '$1$2$3[redacted]',
     );
 }

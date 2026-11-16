@@ -1169,6 +1169,74 @@ describe('ci flaky rerun patrol', () => {
     expect(evidence).not.toContain('sid=abc');
   });
 
+  it('keeps the failure line after a CR-terminated value of a whitespace-bounded rule', () => {
+    // Bearer's \S+ and the env rule's [^"',\s}]+ also stop at \r, so the strip
+    // welds their value onto the next logical line just like the header rules.
+    // The post-strip pass must not re-redact a value that already reads
+    // [redacted], or it eats the ##[error] marker and the excerpt loses the
+    // failure it was fetched for.
+    const noise = Array.from({ length: 30 }, (_, i) => `noise line ${i}`).join(
+      '\n',
+    );
+    for (const prefix of [
+      'SSH_AUTH_SOCK=/tmp/agent',
+      'NPM_TOKEN=abc',
+      'API_KEY=abc',
+      'GITHUB_TOKEN=abc',
+      'Bearer abc123',
+    ]) {
+      for (const control of ['\r', '\x0b', '\x0c']) {
+        const evidence = skillLog(
+          `${noise}\n${prefix}${control}##[error]AssertionError: real failure\n${noise}`,
+        );
+        expect(evidence).toContain('##[error]AssertionError: real failure');
+        expect(evidence).toContain('[redacted]');
+      }
+    }
+  });
+
+  it('keeps the failure line a welded URL userinfo would otherwise reach', () => {
+    // The scheme rule's userinfo ends at whitespace, so a welded tail carrying
+    // a space-free run up to an @ is a candidate value. Two shapes: one where
+    // the first pass already redacted the userinfo (the guard must skip it),
+    // and one where it saw no @ at all and never matched — there only the
+    // gen-delims # [ ] (illegal in userinfo per RFC 3986) keep the rule off
+    // the ##[error] marker.
+    for (const line of [
+      'https://u@h\r##[error]AssertionError:real@failure',
+      'https://host\r##[error]AssertionError:real@failure',
+    ]) {
+      const evidence = skillLog(line);
+      expect(evidence, line).toContain('##[error]AssertionError:real@failure');
+    }
+    expect(
+      skillLog('https://u@h\r##[error]AssertionError:real@failure'),
+    ).toContain('https://[redacted]@');
+  });
+
+  it('repairs every credential family a control byte split', () => {
+    // The post-strip rule list is a hand-copy of redactLog's; pin each rule
+    // individually so deleting one cannot leave both suites green.
+    const cases = [
+      [
+        '-----BEGIN RSA\rKEY-----\nbody\n-----END RSA\rKEY-----',
+        '[redacted private key]',
+      ],
+      ['eyJ\rhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abcdefghij', '[redacted jwt]'],
+      ['Bea\rrer abcdefghij', 'Bearer [redacted]'],
+      ['ghp_\rABCDEFGHIJKLMNOPQRSTUV0123', '[redacted]'],
+      ['sk-\rabcdefghijklmnopqrstuvwx', 'sk-[redacted]'],
+      ['AKIA\rABCDEFGHIJKLMNOP', '[redacted]'],
+      ['npm_\rABCDEFGHIJKLMNOPQRSTUV0123', '[redacted]'],
+      ['https://u\rser:pass@host', 'https://[redacted]@host'],
+      ['NPM_TO\rKEN=abcdefghij', 'NPM_TOKEN=[redacted]'],
+    ];
+    for (const [input, expected] of cases) {
+      const evidence = skillLog(`##[error]${input} done`);
+      expect(evidence, input).toContain(expected);
+    }
+  });
+
   it('strips every control and Bidi_Control code point, keeping tab and newline', () => {
     // Pin the extent of the class, not the points a fixture happens to sample:
     // every member is fed, and the assertion asks Unicode itself, so narrowing

@@ -104,16 +104,27 @@ job id 直接来自检查的 `detailsUrl`（`…/actions/runs/<run>/job/<job>`�
    裸 `\r` 既提供锚定密钥模式（`\bnpm_…`、`\bsk-…`、`\beyJ…`、
    `\b<scheme>://`）所需的词边界，也界定按行作用的 `Cookie:` / `Authorization:`
    规则——它们的 `[^\r\n]*` 必须停在 header 自己那一行。第二遍
-   `redactWeldedTokens` 在剥离之后，与第一遍有两处差别，都由剥离本身迫使。
-   其一，它只带 token 规则：`\r` 全部消失后再跑那两条 header 规则，会一路吃到
-   下一个换行——包括摘要赖以存在的 `##[error]` 行——而它们的值已被第一遍脱敏。
-   其二，它去掉 `\b` 锚点：凭据内部的控制字节（`npm_\rABC…`）会让第一遍的所有
-   锚点失配，而同一次剥离还可能把单词字符焊到 token 前面（`x\rnpm_…` 变成
-   `xnpm_…`），使 `\b` 无从匹配。对只处理已脱敏文本的一遍来说，过度脱敏是安全
-   方向；代价是不加锚点的 `sk-` 也会把带 20 个以上字母数字的 `task-…` 标识符
-   脱敏。header 值内部的控制字符仍会留下 CR 之后的碎片
-   （`Cookie: [redacted]=abc`），与未剥离的 base 完全一致；要清掉这段残余就得在
-   无 CR 文本上重跑 header 规则，那正是上面的吞行。剥离位于 `skillLog`，因此
+   `redactWeldedTokens` 在剥离之后；它与第一遍的每一处差别，都源于剥离删掉了
+   规则用作终止符的字符。`\b` 锚点被去掉：凭据内部的控制字节（`npm_\rABC…`）
+   会让第一遍的所有锚点失配，而同一次剥离还可能把单词字符焊到 token 前面
+   （`x\rnpm_…` 变成 `xnpm_…`），使 `\b` 无从匹配。对只处理已脱敏文本的一遍
+   来说，过度脱敏是安全方向；代价是不加锚点的 `sk-` 也会把带 20 个以上字母
+   数字的 `task-…` 标识符脱敏。凡值以空白结尾的规则（`Bearer` 的 `\S+`、
+   `TOKEN`/`KEY`/… 规则的 `[^"',\s}]+`）都带上 `(?!\[redacted\])`：`\r` 属于
+   空白，第一遍会在 CR 处截断该值；剥离把它焊到下一逻辑行之后再脱敏一次，就会
+   吃掉摘要赖以存在的 `##[error]` 标记。第一遍只要看得见关键字就一定会脱敏其
+   值，因此已读作 `[redacted]` 的值绝不可再匹配——剥离后唯一合法的匹配，是
+   被控制字符拆开、第一遍根本看不见的关键字。两条 header 规则出于同一理由
+   留在这一遍之外：它们的值一直跑到行尾。URL 规则只保留单段 userinfo，其字符
+   类去掉 gen-delims `#` `[` `]`（按 RFC 3986 不得出现在 userinfo 中）与 `@`，
+   因此够不到被焊接的标记；scheme 则用 lookbehind 而非 `\b` 保留边界——否则
+   长单词串里的每个位置都是候选起点，规则会退化成平方复杂度。有三项代价是
+   记录而非关闭：header 值内部的控制字符仍留下 CR 之后的碎片
+   （`Cookie: [redacted]=abc`），与未剥离的 base 一致；header 关键字内部的
+   控制字符（`Coo\rkie: sid=abc`）两遍都够不到，焊接后的值因此仍未脱敏，而
+   空值 header（`Cookie:` 后接 CR）在第一遍就已丢掉下一行，base 亦然；
+   `TOKEN`/`KEY`/… 规则在 base 里对长单词串就是平方复杂度（40k 字符 1.1 秒），
+   跑两遍把它翻倍。剥离位于 `skillLog`，因此
    同时覆盖采集器摘要与巡逻渲染的证据（巡逻唯一的 `jobLog` 调用方经过
    `skillLog`）。两个兄弟抓取本身不变：`ci-log.ts` 的 `jobLog` 仍会把裸控制字符
    写进 `.qwen/tmp/autofix-pr-<n>-ci-<run>.log`，巡逻的 `GhClient.jobLog` 也仍
@@ -144,17 +155,21 @@ job id 直接来自检查的 `detailsUrl`（`…/actions/runs/<run>/job/<job>`�
   路径。假 `gh` 复现当前 gh 的转义序列拒绝（不传标志即 exit 1）与旧 gh 的
   `unknown flag`，因此渲染摘要的用例同时见证标志与脱 ANSI。另有用例端到端钉住
   控制字符剥离：裸 `\r` 之后的密钥仍被脱敏（第一遍 `redactLog` 在剥离之前）、
-  以裸 CR 结尾的 header 行不会吞掉紧随其后的 `##[error]` 行、backspace/C0/C1 与
-  Bidi 被剥离而 tab 与换行保留、首个控制字符之后的文本被保留（截断实现保持
-  红）。Bidi 用例喂入每一个 `Bidi_Control` 码点，并对 stdout 断言
+  以裸 CR 结尾的 header 行与以裸 CR 结尾的 token 值（`SSH_AUTH_SOCK=`、
+  `Bearer`）都不会吞掉紧随其后的 `##[error]` 行、backspace/C0/C1 与 Bidi 被
+  剥离而 tab 与换行保留、首个控制字符之后的文本被保留（截断实现保持红）。
+  Bidi 用例喂入每一个 `Bidi_Control` 码点，并对 stdout 断言
   `/\p{Bidi_Control}/u`，因此把字符类收窄到采样码点无法保持绿。
 - `scripts/tests/ci-flaky-rerun.test.js`（vitest）：巡逻的 `GhClient.jobLog` 传
   标志、仅在 `unknown flag` 时回退、脱去 VT 控制字符，并向上抛出非拒绝类错误；
   `skillLog` 在两遍脱敏之间剥离终端控制字符与 Bidi 覆盖字符（裸 CR 后的密钥仍
   被脱敏，backspace、纵向制表符与 Bidi 消失，被控制字符拆分的凭据在剥离拼合后
   仍被脱敏，前置词边界也被剥离删掉的凭据同样被脱敏），保住以 CR 结尾的 header
-  之后的失败行，并剥离每一个 C0/DEL/C1 与 `Bidi_Control` 码点——以 Unicode 自身
-  的属性断言，且 `\n` 与 `\t` 仍保留。
+  之后、以及任何以空白结尾的规则其值以 CR 结尾之后的失败行（5 个前缀 ×
+  CR/VT/FF），保住被焊接的 URL userinfo 本会够到的失败行（第一遍已脱敏的形状
+  与第一遍根本没匹配的形状各一条），逐条修复被控制字节拆开的九类凭据——每条
+  剥离后规则一个夹具，删掉任何一条规则都会变红——并剥离每一个 C0/DEL/C1 与
+  `Bidi_Control` 码点，以 Unicode 自身的属性断言，且 `\n` 与 `\t` 仍保留。
 - `scripts/tests/qwen-autofix-workflow.test.js`（vitest）：调用先于 checkout 且
   使用工作树路径；容错回退与 stderr 去向；段落位于仅名称列表与 gate rejection
   之间、且在去毒 echo 之前；两个 helper 测试列表的 CI 成员资格；af-161 指针与
@@ -167,8 +182,12 @@ job id 直接来自检查的 `detailsUrl`（`…/actions/runs/<run>/job/<job>`�
   重跑整个 `redactLog`、给剥离后的 `npm_` 规则重新加上锚点、把第二遍变成空操作、
   把控制字符剥离移到第一遍脱敏之前、删除剥离、收窄为仅 `\r`、把 Bidi 类收窄到
   采样码点、删掉单个未被采样的 `Bidi_Control` 码点、在首个控制字符处截断、或
-  放宽到吞掉 `\n`/`\t`，都会让采集器或巡逻见证变红；去掉巡逻的标志会让其见证
-  变红。
+  放宽到吞掉 `\n`/`\t`，都会让采集器或巡逻见证变红；去掉任一
+  `(?!\[redacted\])` guard 会让「以 CR 结尾的值」用例在两套里变红，把
+  gen-delims 放回 URL userinfo 字符类会让被焊接 URL 用例变红，删掉九条剥离后
+  规则中的任何一条会让逐类修复用例变红；去掉巡逻的标志会让其见证变红。URL 的
+  lookbehind 是成本修复而非行为修复：去掉它所有测试仍绿，改用计时见证（40k
+  字符行修复前耗时 2.9 秒，其中 653 毫秒来自它；同一行在 base 里是 1.1 秒）。
 - 因为改了 `ci.yml`，复跑 `scripts/tests/ci-platform-lanes.test.js`。
 
 ## 验收标准
@@ -179,7 +198,8 @@ job id 直接来自检查的 `detailsUrl`（`…/actions/runs/<run>/job/<job>`�
   stdout。
 - job 日志中的任何密钥都不会到达 `feedback.md` 或 step stdout，包括被剥离焊成
   连续 token 的凭据——无论控制字节是在其内部，还是在其前置词边界之前。
-- 以裸 CR 结尾的 header 行，仍会把紧随其后的失败行留在摘要里。
+- 以裸 CR 结尾的 header 行、以及任何以空白结尾的凭据值，仍会把紧随其后的失败行
+  留在摘要里。
 - 脚本缺失、rollup 不可读或 API 读取失败，绝不会让一轮失败。
 - 采集器及其导入的 helper 在切到 PR 分支之前、从可信 base 执行。
 - 两个 helper 测试列表都运行该行为套件；workflow 钉子、采集器测试与巡逻测试
