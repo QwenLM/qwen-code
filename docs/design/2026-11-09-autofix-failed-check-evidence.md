@@ -241,8 +241,9 @@ completed with exit code 1` on a noisy multi-error log), and an 8 MiB
   whitespace is a control, redacts a credential the log hid behind a literal
   `[redacted]` prefix (four shapes including the quoted one), repairs every one
   of the nine credential families a control byte split plus the round-6
-  entrances (a value carrying `#`, a welded digit-prefixed scheme, a multi-`@`
-  userinfo, a deleted `Bearer` separator, a log-supplied `[redacted]` URL value)
+  entrances (a value carrying `#`, `}` or a quote, a welded digit-prefixed
+  scheme, a multi-`@` userinfo, a URL password carrying `#`, a deleted `Bearer`
+  separator, a log-supplied `[redacted]` URL value)
   — one fixture per shape, asserting both the placeholder present and the secret
   tail absent, so deleting any rule turns this red — keeps a `##[error]` marker
   inside a BEGIN…END span instead of redacting the span (while a real PEM and a
@@ -270,8 +271,10 @@ completed with exit code 1` on a noisy multi-error log), and an 8 MiB
   control, or widening the class to eat `\n`/`\t` each turn the collector or
   patrol witness red; moving the strip back before line selection reds the
   leading-control `FAIL` case; reverting the env value's tempered token to a
-  `#`-bound class reds the terminator-character case in both suites; requiring
-  a `Bearer` separator (`\s+` instead of zero-or-more) reds the deleted-separator
+  `#`-bound class reds the terminator-character case in both suites; restoring
+  the env value's structural exclusions (`}` and quotes) reds the `}`/quote
+  pins; excluding `#` from the URL userinfo reds the URL-password-`#` pin;
+  requiring a `Bearer` separator (`\s+` instead of zero-or-more) reds the deleted-separator
   entrance; restoring the URL scheme lookbehind reds the digit-prefixed-scheme
   entrance; collapsing the URL userinfo to a single `@`-segment reds the
   multi-`@` entrance; excluding `[` `]` from the URL userinfo reds the
@@ -294,11 +297,12 @@ completed with exit code 1` on a noisy multi-error log), and an 8 MiB
   stdout.
 - No secret from a job log reaches `feedback.md` or step stdout for the weld
   shapes the suite pins: a control inside a credential, in front of its leading
-  word boundary, or inside its keyword; a value carrying `#`, `[`, `]` or `@`;
-  a log-supplied `[redacted]` prefix; a welded scheme prefix; a deleted `Bearer`
-  separator. The exceptions are the gaps listed in the Costs paragraph above
-  (a bare failure keyword welded onto a value, a zero-width or tab split, a
-  split header keyword), which this criterion does not claim to cover.
+  word boundary, or inside its keyword; a value carrying `#`, `[`, `]`, `@`,
+  `}` or a quote; a log-supplied `[redacted]` prefix; a welded scheme prefix; a
+  deleted `Bearer` separator. The exceptions are the gaps listed in the Costs
+  paragraph above (a bare failure keyword welded onto a value, a zero-width or
+  tab split, a split header keyword), which this criterion does not claim to
+  cover.
 - A NON-EMPTY whitespace-bounded credential value terminated by a bare CR
   leaves the failure line that follows it in the excerpt, and a control that
   splits the credential keyword does not consume the `##[error]` marker. An
