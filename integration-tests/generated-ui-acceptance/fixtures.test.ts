@@ -59,6 +59,11 @@ describe('money parsing', () => {
     expect(parseAmounts('¥14，227.20')).toEqual([1_422_720]);
     expect(parseAmounts('Person 1 137.84')).toEqual([100, 13_784]);
     expect(parseAmounts('137.84 (14.3%)')).toEqual([13_784]);
+    expect(parseAmounts('Team,13,91.20,156.00,14227.20')).toEqual([
+      1_300, 9_120, 15_600, 1_422_720,
+    ]);
+    expect(parseAmounts('160.81,160.82')).toEqual([16_081, 16_082]);
+    expect(parseAmounts('1,234,567.89')).toEqual([123_456_789]);
     expect(parseLastAmount('Person 3: 137.84')).toBe(13_784);
     expect(parseLastAmount('Person 1 137.84')).toBe(13_784);
     expect(parseLastAmount('Person 1: 137.84 (14.3%)')).toBe(13_784);
