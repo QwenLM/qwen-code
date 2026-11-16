@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { accessSync, constants, statSync } from 'node:fs';
 import { prepareFileWatchersForProcessExit } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
 import { runExitCleanup } from './cleanup.js';
 import { writeStderrLineSafe } from './stdioHelpers.js';
@@ -69,6 +70,10 @@ export async function relaunchApp(): Promise<void> {
   };
   if (supervisedInProcess && proc.execve) {
     try {
+      if (!statSync(process.execPath).isFile()) {
+        throw new Error('CLI launcher is not a regular file');
+      }
+      accessSync(process.execPath, constants.X_OK);
       proc.execve(process.execPath, [
         process.execPath,
         ...getRelaunchExecArgv(),

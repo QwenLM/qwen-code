@@ -229,9 +229,10 @@ describe('useWorktreeSession session ownership', () => {
   });
 
   it('keeps read failures null without dropping the subscription', async () => {
-    mocks.read.mockRejectedValueOnce(new Error('unreadable'));
     const { result } = renderHook(() => useWorktreeSession(config));
-    await act(async () => {});
+    await waitFor(() => expect(result.current).toBe(worktree));
+    mocks.read.mockRejectedValueOnce(new Error('unreadable'));
+    await act(async () => subscriptions[0].notify());
     expect(result.current).toBeNull();
     await act(async () => subscriptions[0].notify());
     expect(result.current).toBe(worktree);
