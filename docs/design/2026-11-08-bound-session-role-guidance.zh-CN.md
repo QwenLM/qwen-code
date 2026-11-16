@@ -174,5 +174,5 @@ export const DEFAULT_BOUND_ROLE_GUIDANCE: Readonly<
 
 ## 待决问题
 
-- daemon 监视生产者应当逐字复用这些字符串，还是提供平台中立的变体。推迟到该生产者实现时再定；表放在共享模块里，两种选择都仍然便宜。
+- 已解决：daemon 监视生产者经 `DEFAULT_BOUND_ROLE_GUIDANCE_BY_LANGUAGE` 逐字复用本表，并自行撰写平台中立的转换摘要。见 [Daemon PR watch：提示词语言](2026-11-15-daemon-pr-watch-drain-language.zh-CN.md)。
 - `fix` 指引是否应当点名推送需确认这一预期。暂且交给会话自己的工作流，因为那是用户偏好而非产品规则。

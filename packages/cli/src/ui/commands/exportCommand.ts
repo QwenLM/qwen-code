@@ -19,29 +19,14 @@ import {
   type ToolArtifact,
 } from '@qwen-code/qwen-code-core';
 import { toCanonicalWorkspaceArtifactPath } from '@qwen-code/qwen-code-core/utils/workspace-artifact-path.js';
-import {
-  collectSessionData,
-  normalizeSessionData,
-  toMarkdown,
-  toHtml,
-  toJson,
-  toJsonl,
-  generateExportFilename,
-  type ExportSessionData,
-} from '../utils/export/index.js';
+import { generateExportFilename } from '../utils/export/utils.js';
 import { t } from '../../i18n/index.js';
 
 type ExportFormat = {
   extension: string;
   displayName: string;
   mimeType: string;
-  // Required for the same reason as `ExportFormatDefinition.render` in
-  // serve/server/session-export.ts: HTML projects from the original records,
-  // and the remaining formatters ignore this argument.
-  format: (
-    sessionData: ExportSessionData,
-    records: readonly unknown[],
-  ) => string;
+  format: 'toMarkdown' | 'toHtml' | 'toJson' | 'toJsonl';
 };
 
 const EXPORT_DIR_OUT_OF_CWD =
@@ -318,6 +303,12 @@ async function exportSessionAction(
 
     const { conversation } = sessionData;
 
+    const {
+      collectSessionData,
+      normalizeSessionData,
+      [exportFormat.format]: format,
+    } = await import('../utils/export/index.js');
+
     // Collect and normalize export data (SSOT)
     const exportData = await collectSessionData(conversation, config);
     const normalizedData = normalizeSessionData(
@@ -326,7 +317,10 @@ async function exportSessionAction(
       config,
     );
 
-    const content = exportFormat.format(normalizedData, conversation.messages);
+    // Required for the same reason as `ExportFormatDefinition.render` in
+    // serve/server/session-export.ts: HTML projects from the original records,
+    // and the remaining formatters ignore this argument.
+    const content = format(normalizedData, conversation.messages);
 
     if (target.outputDirKind === 'custom') {
       try {
@@ -437,7 +431,7 @@ async function exportMarkdownAction(
     extension: 'md',
     displayName: 'markdown',
     mimeType: 'text/markdown; charset=utf-8',
-    format: toMarkdown,
+    format: 'toMarkdown',
   });
 }
 
@@ -452,7 +446,7 @@ async function exportHtmlAction(
     extension: 'html',
     displayName: 'HTML',
     mimeType: 'text/html; charset=utf-8',
-    format: toHtml,
+    format: 'toHtml',
   });
 }
 
@@ -467,7 +461,7 @@ async function exportJsonAction(
     extension: 'json',
     displayName: 'JSON',
     mimeType: 'application/json; charset=utf-8',
-    format: toJson,
+    format: 'toJson',
   });
 }
 
@@ -482,7 +476,7 @@ async function exportJsonlAction(
     extension: 'jsonl',
     displayName: 'JSONL',
     mimeType: 'application/jsonl; charset=utf-8',
-    format: toJsonl,
+    format: 'toJsonl',
   });
 }
 

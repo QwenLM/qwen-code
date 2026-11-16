@@ -1383,6 +1383,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const createSessionRequestRef = useRef(createSessionRequest);
   createSessionRequestRef.current = createSessionRequest;
   const [promptStatus, setPromptStatus] = useState<DaemonPromptStatus>('idle');
+  const promptStatusRef = useRef(promptStatus);
+  promptStatusRef.current = promptStatus;
   const [restoreSessionId, setRestoreSessionId] = useState<string | undefined>(
     initialRestoreSessionId,
   );
@@ -2013,6 +2015,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       const maySettleToIdle = (
         target = session ?? sessionRef.current ?? connectionRef.current,
       ) => {
+        const pendingLoad = pendingSessionLoadRef.current;
+        if (
+          pendingLoad?.reconcilePromptActivity &&
+          pendingLoad.sessionId === target?.sessionId &&
+          (pendingLoad.sessionContext?.kind !== 'workspace' ||
+            pendingLoad.sessionContext.cwd === target?.workspaceCwd)
+        ) {
+          return false;
+        }
         if (
           hasCurrentSessionActivePrompt() ||
           connectionRef.current.backgroundTurn
@@ -2677,6 +2688,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 continue;
               }
               return;
+            }
+            if (
+              attemptedLoad?.reconcilePromptActivity &&
+              getDaemonActivePrompt(nextSession) !== false
+            ) {
+              daemonActivePromptRef.current = undefined;
             }
             if (attemptedLoad?.replaySource === 'memory') {
               const episode = liveJournalRepairRef.current;
@@ -5496,6 +5513,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     () =>
       createDaemonSessionActions({
         getClient: () => workspaceClientRef.current,
+        getPromptStatus: () => promptStatusRef.current,
         store,
         sessionRef,
         activePromptsRef,

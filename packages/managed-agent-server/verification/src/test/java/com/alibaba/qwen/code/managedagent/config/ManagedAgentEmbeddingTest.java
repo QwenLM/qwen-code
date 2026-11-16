@@ -94,6 +94,34 @@ class ManagedAgentEmbeddingTest {
     }
 
     @Test
+    void dedicatedSchedulersAreNotDefaultCandidates() {
+        runner().withPropertyValues("qwen.managed-agent.datasource.url=" + url()).run(context -> {
+            assertThat(context).hasNotFailed();
+            var beanFactory = context.getBeanFactory();
+            var managed = new java.util.ArrayList<String>();
+            for (String name : context.getBeanNamesForType(
+                    org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler.class, false, false)) {
+                // Boot's own taskScheduler (TaskSchedulingAutoConfiguration) is the
+                // legitimate by-type candidate in an embedded host; every managed pool
+                // must back off so it cannot win the host's by-type TaskScheduler injection.
+                if (name.equals("taskScheduler") || !beanFactory.containsBeanDefinition(name)) {
+                    continue;
+                }
+                var definition = (org.springframework.beans.factory.support.AbstractBeanDefinition)
+                        beanFactory.getBeanDefinition(name);
+                assertThat(definition.isDefaultCandidate())
+                        .as("scheduler %s must not be a default candidate in embedded mode", name)
+                        .isFalse();
+                managed.add(name);
+            }
+            // Enumerate the pools the context actually holds rather than a fixed roster,
+            // so dropping defaultCandidate=false from any managed scheduler turns this red.
+            assertThat(managed).contains("managedAgentScheduler", "sessionWorktreeScheduler",
+                    "childRelayScheduler", "messageRelayScheduler", "messageMaterializerScheduler");
+        });
+    }
+
+    @Test
     void cleanupDebtStoreQueriesTheDedicatedDatabaseNotTheHostOne() {
         runner().withPropertyValues("qwen.managed-agent.datasource.url=" + url()).run(context -> {
             assertThat(context).hasNotFailed();

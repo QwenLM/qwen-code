@@ -928,4 +928,5 @@ export interface PendingSessionLoad {
   reject: (error: unknown) => void;
   signal?: AbortSignal;
   replaySource?: 'configured' | 'memory';
+  reconcilePromptActivity?: boolean;
 }

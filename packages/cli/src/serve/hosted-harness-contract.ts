@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto';
 import type { Application, RequestHandler } from 'express';
 import { markAccessLogError } from './server/access-log.js';
 import type { HostedHarnessCapabilities } from './types.js';
+import { HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE } from './hosted-workspace-profiles.js';
 
 export const HOSTED_HARNESS_CAPABILITY_DIGEST_ENV =
   'QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST';
@@ -16,6 +17,7 @@ export const HOSTED_LIFECYCLE_V2_PROFILES_ENV =
 const LIFECYCLE_V2_PROFILES = [
   'hosted-workspace-shell/1',
   'hosted-workspace-shell/3',
+  'hosted-workspace-shell/4',
   'hosted-workspace-mcp/1',
 ] as const;
 export const HOSTED_HARNESS_PROTOCOL_VERSION = 1 as const;
@@ -101,6 +103,7 @@ export function createHostedHarnessContract(
       'session-skills/2',
       'workspace-shell-mcp/1',
       'session-mcp-management/1',
+      'client-files/1',
       'session-extension-packages/1',
       'managed-package-preparation/1',
       'managed-runtime-skill-import/1',
@@ -110,6 +113,7 @@ export function createHostedHarnessContract(
       // is committed, so a client may bound a stream by its silence.
       'event-keepalive/1',
       'web-fetch/1',
+      HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
     ]),
   });
 }
