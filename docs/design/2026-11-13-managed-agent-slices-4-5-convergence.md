@@ -2,7 +2,7 @@
 
 [English](2026-11-13-managed-agent-slices-4-5-convergence.md) | [简体中文](2026-11-13-managed-agent-slices-4-5-convergence.zh-CN.md)
 
-- Status: **In Progress (Step 4a)**
+- Status: **In Progress (Step 4c; 4a/4b complete)**
 - Date: 2026-11-13
 - Scope: `packages/managed-agent-server/**`, `packages/web-shell/**`, `packages/cli/src/serve/**`, `integration-tests/**`, `.github/workflows/**`, `scripts/**`
 - Related: implements Slices 4 and 5 of pre-production convergence; amends [Managed Agent Server Maven modules](2026-10-29-managed-agent-maven-modules.md) in Step 5a.
@@ -51,8 +51,10 @@ After Tier-1 pre-production convergence landed (`#17044`, `#17047`, `#17058`, `#
    - Enrich `CreateSessionRequest`, `PublicSession`, `SessionCapabilities`, `PublicTaskList`, and `WorkspaceDiscoveryController` Public DTOs (`snake_case`).
    - Add 25 RESTful `/v1/agents/**` endpoints covering all WebShell-only and asymmetric capabilities (see exact mapping below), sharing identical `RuleClass`, `Capability`, `TenantContext` (`actorId()` / `requireActorId()`), and service-layer ownership checks.
    - Bump `managed-agent-public-api.openapi.json` (`1.117.0 -> 1.118.0`), register all 25 routes in `SurfaceRegistry`, regenerate `managed-surface.txt`, and update `ManagedAgentApiContractTest` + `SurfaceAdmissionAcceptanceTest`.
+   - **Done (2026-11-15/16)**: batches 1–3 (`b0c4c8fe34` / `5596d351d7` / `66054808ae`, 1.118.0→1.120.0) + batch 4 shape enrichment (`3fdf1ed142`, 1.121.0) + b0 semantic alignment (`9aa0ffe001`, 1.122.0: `latest_turn`, `recovery_blocked` synthesis, capability conjunct alignment, worktree tags).
 2. **Step 4b — Consumer Migration (`packages/web-shell`, `packages/cli`, `integration-tests`, `scripts`):**
    - Switch `generate-managed-agent-api.mjs` from `WebShell` operations to `Public` operations (`Public Sessions` / `Public Resources`), migrate `java-managed-agent-client.ts`, `managed-client-files-bridge.ts`, unit tests, Playwright fixtures, CLI serve proxy, and SSE integration helpers to `/v1/agents/**`.
+   - **Done (2026-11-16)**: b1 (`26f69b8064`, CLI proxy dual prefix + bootstrap + qualification scripts) + b2 (`b5e062331e`, Public-only generator + 106 frozen contract types + 85-method boundary adapter + 12 Playwright specs + all unit suites). The `integration-tests` SSE helpers test both server surfaces and migrate in 4c as planned. See the [4b implementation plan and record](../plans/2026-11-15-managed-webshell-consumer-migration.md).
 3. **Step 4c — Remove WebShell Surface (`packages/managed-agent-server`, `packages/cli`):**
    - Delete all 92 `/api/agent/web-shell/v1/**` controller mappings (`WebShellAgentController`, `WebShellSkillsController`, `ManagedToolDetailsController` WebShell route, and dual WebShell arms), 92 `WEBSHELL_*` `SurfaceRegistry` entries, 67 `WebShell*` records in `ApiModels`, and 145 `WebShell*` OpenAPI schemas; migrate remaining Java tests in `verification/src/test` to `/v1/agents/**`.
 4. **Step 5a — Maven Module Consolidation (14 -> 6 modules) & Ratchet Removal:**

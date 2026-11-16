@@ -2,7 +2,7 @@
 
 [English](2026-11-13-managed-agent-slices-4-5-convergence.md) | [简体中文](2026-11-13-managed-agent-slices-4-5-convergence.zh-CN.md)
 
-- 状态：**进行中（Step 4a）**
+- 状态：**进行中（Step 4c；4a/4b 已完成）**
 - 日期：2026-11-13
 - 范围：`packages/managed-agent-server/**`、`packages/web-shell/**`、`packages/cli/src/serve/**`、`integration-tests/**`、`.github/workflows/**`、`scripts/**`
 - 关联：落实投产前收敛方案中的切片 4 与切片 5；在 Step 5a 同步修订 [Managed Agent Server Maven modules](2026-10-29-managed-agent-maven-modules.zh-CN.md)。
@@ -51,8 +51,10 @@
    - 扩充 `CreateSessionRequest`、`PublicSession`、`SessionCapabilities`、`PublicTaskList` 及 `WorkspaceDiscoveryController` 的 Public DTO（`snake_case`）。
    - 新增 25 条 REST 风格 `/v1/agents/**` 接口以覆盖全部 WebShell 独有及非对称能力（见下表），保持完全一致的 `RuleClass`、`Capability`、`TenantContext`（`actorId()` / `requireActorId()`）及 Service 层水平鉴权。
    - 递增 `managed-agent-public-api.openapi.json` 版本号（`1.117.0 -> 1.118.0`），在 `SurfaceRegistry` 注册 25 条路由，重生成 `managed-surface.txt`，并更新 `ManagedAgentApiContractTest` 与 `SurfaceAdmissionAcceptanceTest`。
+   - **已完成（2026-11-15/16）**：批1–3（`b0c4c8fe34` / `5596d351d7` / `66054808ae`，1.118.0→1.120.0）+ 批4 形状补齐（`3fdf1ed142`，1.121.0）+ b0 语义对齐（`9aa0ffe001`，1.122.0：`latest_turn`、`recovery_blocked` 合成、能力合取对齐、worktree 标签）。
 2. **Step 4b —— 消费方切换（`packages/web-shell`、`packages/cli`、`integration-tests`、`scripts`）：**
    - 将 `generate-managed-agent-api.mjs` 从 `WebShell` 切到 `Public` 操作集（`Public Sessions` / `Public Resources`），把 `java-managed-agent-client.ts`、`managed-client-files-bridge.ts`、单测、Playwright 夹具、CLI 本地代理与 SSE 集成辅助脚本迁移至 `/v1/agents/**`。
+   - **已完成（2026-11-16）**：b1（`26f69b8064`，CLI 代理双前缀 + bootstrap + qualification 脚本）+ b2（`b5e062331e`，生成器 Public-only + 106 个冻结契约类型 + 85 方法边界适配 + 12 个 Playwright spec + 全部单测）。`integration-tests` 的 SSE 助手测试服务端双表面，按实施计划在 4c 迁移。详见 [4b 实施计划与记录](../plans/2026-11-15-managed-webshell-consumer-migration.zh-CN.md)。
 3. **Step 4c —— 删除 WebShell 表面（`packages/managed-agent-server`、`packages/cli`）：**
    - 删除全部 92 条 `/api/agent/web-shell/v1/**` Controller 映射（`WebShellAgentController`、`WebShellSkillsController`、`ManagedToolDetailsController` WebShell 路由及双表面 WebShell 分支）、92 个 `WEBSHELL_*` `SurfaceRegistry` 常量、`ApiModels` 中 67 个 `WebShell*` record 与 145 个 `WebShell*` OpenAPI schema，并将 `verification/src/test` 中剩余 Java 测试迁至 `/v1/agents/**`。
 4. **Step 5a —— Maven 模块合并（14 -> 6 个模块）与类大小棘轮移除：**

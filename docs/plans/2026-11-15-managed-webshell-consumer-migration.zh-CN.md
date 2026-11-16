@@ -2,7 +2,7 @@
 
 [English](2026-11-15-managed-webshell-consumer-migration.md) | [简体中文](2026-11-15-managed-webshell-consumer-migration.zh-CN.md)
 
-- 状态：**Proposed（待实施）**
+- 状态：**Implemented（2026-11-16：b0 `9aa0ffe001` / b1 `26f69b8064` / b2 `b5e062331e`）**
 - 日期：2026-11-15
 - 范围：`packages/managed-agent-server/**`（仅 b0 对齐批次）、`packages/web-shell/**`、`packages/cli/src/serve/**`、`scripts/**`
 - 关联：落实 [切片 4/5 收敛设计](../design/2026-11-13-managed-agent-slices-4-5-convergence.zh-CN.md) 的 Step 4b；前置 [批4 Public 形状补齐计划](2026-11-15-managed-public-shape-enrichment.zh-CN.md) 已完成（提交 `3fdf1ed142`，OpenAPI 1.121.0）。
@@ -361,3 +361,15 @@ PublicTurn schema 的 status enum **已声明** recovery_blocked（OAS:12128-121
 | b2   | §6 + §7 全部（生成器 Public-only + 冻结类型 + 客户端适配 + 全部 web-shell 测试/e2e） | `feat(web-shell): migrate the managed agent client to the public API`                            |
 
 每提交独立全绿、可单独成 PR；不 push、不开 PR 除非用户指示。实施完成后更新本文档状态与切片 4/5 设计文档的 Step 状态（双语同步），并更新项目记忆。
+
+## 11. 实施记录（2026-11-16）
+
+- **b0** `9aa0ffe001`：§4 全部。820/820 Java 测试 + Checkstyle 0 violations + contract-version 1.122.0。另修复批4 遗留的 `Issue13181QueryBudgetTest` 陈旧预算 pin（public 页 unbound 3→6、bound 7→13、`ma_operation` 2→3；该套件不在批4 聚焦集内，批4 未 push 故 CI 未捕获）。
+- **b1** `26f69b8064`：§5 全部。CLI vitest 235/235 + qualification mock 22/22 + typecheck/lint/Prettier。实施中发现并前置 `PUBLIC_TRAVERSAL` 守卫（拒 `%2f`/`%5c`/`%2e` 与裸点段，防上游规范化把签名路径解析进 `/internal`）。
+- **b2** `b5e062331e`：§6+§7 全部，39 文件 +10325/−4683。web-shell 单测 574 文件 16106/16106；managed smoke 34/34（chromium，12 spec）+ 第 12 spec 非 smoke 用例 2/2；适配器新单测 18/18；tsc/ESLint/Prettier 全绿；W0D fixture test-compile 通过；106 个冻结类型与旧渲染逐字一致（程序化比对，仅 Prettier 引号/leading-pipe 格式差异）。
+- **实施中的调整**：
+  - rename 确认缺 title 时客户端返回 `''`（而非回退请求标题），保住 provider trim 守卫对异常确认的拒绝语义（WebShell 时代 title 必填）；测试改为 missing+empty 双探针。
+  - 清单漏掉的第 12 个 managed e2e spec（`managed-local-files.spec.ts`，suffix dispatch 故未被 URL grep 命中）与 W0D Spring fixture 的 trusted-principal `urlPatterns`（补 `/v1/agents/*`）在 b2 一并迁移。
+  - 两个非 managed e2e 失败（`web-shell.files` / `web-shell.remote-workspace-add`）经静态归因与 b2 无关：两 spec 仅 import `mockDaemon`（未改），b2 运行时改动全在 managed 专属模块且无模块级副作用——本机预存/环境问题。
+  - mobile-webkit、Playwright 全量矩阵与真实控制面 qualification 留 CI（本机无 webkit 二进制）。
+- **仍开放**：data-agent 宿主挂载模式/代理路径需宿主侧核实（升级 `dist-managed-host` bundle 前）；4c 硬阻塞于宿主迁移（S5-2）。

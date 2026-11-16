@@ -2,7 +2,7 @@
 
 [English](2026-11-15-managed-webshell-consumer-migration.md) | [简体中文](2026-11-15-managed-webshell-consumer-migration.zh-CN.md)
 
-- Status: **Proposed (awaiting implementation)**
+- Status: **Implemented (2026-11-16: b0 `9aa0ffe001` / b1 `26f69b8064` / b2 `b5e062331e`)**
 - Date: 2026-11-15
 - Scope: `packages/managed-agent-server/**` (b0 alignment batch only), `packages/web-shell/**`, `packages/cli/src/serve/**`, `scripts/**`
 - Related: implements Step 4b of the [slices 4/5 convergence design](../design/2026-11-13-managed-agent-slices-4-5-convergence.md); the prerequisite [batch 4 Public shape enrichment plan](2026-11-15-managed-public-shape-enrichment.md) is complete (commit `3fdf1ed142`, OpenAPI 1.121.0).
@@ -361,3 +361,15 @@ Note: create's `metadata:{clientId}` is persisted by Public (WebShell discarded 
 | b2     | all of §6 + §7 (generator Public-only + frozen types + client adapters + all web-shell tests/e2e) | `feat(web-shell): migrate the managed agent client to the public API`                            |
 
 Each commit is independently green and may become its own PR; no push and no PR unless the user instructs. After implementation, update this document's status and the slices 4/5 design doc's Step status (both languages synchronized), and update project memory.
+
+## 11. Implementation record (2026-11-16)
+
+- **b0** `9aa0ffe001`: all of §4. 820/820 Java tests + Checkstyle 0 violations + contract-version 1.122.0. Also repaired the stale `Issue13181QueryBudgetTest` budget pins left by batch 4 (public page unbound 3→6, bound 7→13, `ma_operation` 2→3; that suite was outside batch 4's focused set, and batch 4 was never pushed so CI did not catch it).
+- **b1** `26f69b8064`: all of §5. CLI vitest 235/235 + qualification mock 22/22 + typecheck/lint/Prettier. Found and front-loaded the `PUBLIC_TRAVERSAL` guard during implementation (refuses `%2f`/`%5c`/`%2e` and raw dot segments so upstream normalization cannot resolve a signed path into `/internal`).
+- **b2** `b5e062331e`: all of §6+§7, 39 files +10325/−4683. web-shell unit suites 574 files 16106/16106; managed smoke 34/34 (chromium, 12 specs) + the 12th spec's non-smoke test 2/2; new adapter unit tests 18/18; tsc/ESLint/Prettier all green; W0D fixture test-compile passes; the 106 frozen types are verbatim-identical to the pre-switch render (programmatic comparison; only Prettier quote/leading-pipe formatting differs).
+- **Adjustments during implementation**:
+  - A rename confirmation without a stored title yields `''` on the client (not a fallback to the requested title), preserving the provider trim guard's refusal of anomalous confirmations (title was required in the WebShell era); the test now probes both missing and empty titles.
+  - The 12th managed e2e spec missed by the inventory (`managed-local-files.spec.ts`, suffix dispatch so the URL grep did not match it) and the W0D Spring fixture's trusted-principal `urlPatterns` (added `/v1/agents/*`) were migrated in b2 as well.
+  - Two non-managed e2e failures (`web-shell.files` / `web-shell.remote-workspace-add`) were statically attributed as unrelated to b2: both specs import only `mockDaemon` (unchanged), and every b2 runtime change lives in managed-only modules with no module-level side effects — pre-existing/environmental on this machine.
+  - mobile-webkit, the full Playwright matrix, and real-control-plane qualification stay with CI (no webkit binary locally).
+- **Still open**: the data-agent host mount mode / proxy paths need host-side verification (before bumping the `dist-managed-host` bundle); 4c is hard-blocked on the host migration (S5-2).
