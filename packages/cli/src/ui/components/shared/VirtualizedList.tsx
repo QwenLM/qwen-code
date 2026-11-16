@@ -262,8 +262,7 @@ function VirtualizedList<T>(
   // measurement cannot stand in for the viewport either: the root box sits
   // under auto-height ancestors, so its height is the content's, and feeding
   // that back would cover every row and collapse `maxScroll` to 0.
-  const containerHeight =
-    props.containerHeight ?? measuredContainerHeight;
+  const containerHeight = props.containerHeight ?? measuredContainerHeight;
   const containerWidth = measuredContainerWidth;
   // A host that budgeted zero rows constrains the height just as one that
   // budgeted twenty-two; the root must collapse with it instead of falling
