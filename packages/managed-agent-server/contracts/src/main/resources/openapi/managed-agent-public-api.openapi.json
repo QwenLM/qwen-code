@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Qwen Managed Agent Public and WebShell API",
-    "version": "1.121.0",
+    "version": "1.122.0",
     "description": "Canonical first-release contract for the public Managed Agent resources and the WebShell adapter. Implemented routes and fields describe the current matching Server, Broker, Harness and WebShell build. Partial entries have remaining implementation or contract-test work; planned entries are not current server capabilities and must be excluded from production SDKs. Turn submission and cancellation always return the durable operation identifier and its persisted admission and delivery state. Session-list cursors are bound to the normalized archive state and title query. Earlier development API shapes, checkpoints and database catalogs are unsupported; initialize fresh state for this build. Runtime feature capabilities and deployment policy still govern optional execution modes. Public conversation history reads directly from mutable message projections; persisted conversation snapshots and fixed-content paging are no longer provided. Retained removed MCP-management entries stay in the response snapshot: only non-removed entries count toward the 32-server selection capacity, so the servers array may exceed 32 while preserving tombstones."
   },
   "servers": [
@@ -8019,6 +8019,7 @@
     "/v1/agents/workspaces/{workspaceId}/worktrees/options": {
       "get": {
         "operationId": "sessionWorktreeOptions",
+        "tags": ["Public Resources"],
         "x-qwen-implementation-status": "implemented",
         "x-qwen-admission-rule": "session_worktree",
         "parameters": [
@@ -8079,6 +8080,7 @@
     "/v1/agents/workspaces/{workspaceId}/worktrees": {
       "get": {
         "operationId": "sessionWorktreeQuery",
+        "tags": ["Public Resources"],
         "x-qwen-implementation-status": "implemented",
         "x-qwen-admission-rule": "session_worktree",
         "parameters": [
@@ -8124,6 +8126,7 @@
     "/v1/agents/workspaces/{workspaceId}/worktrees/{worktreeId}": {
       "get": {
         "operationId": "sessionWorktreeInspect",
+        "tags": ["Public Resources"],
         "x-qwen-implementation-status": "implemented",
         "x-qwen-admission-rule": "session_worktree",
         "parameters": [
@@ -8177,6 +8180,7 @@
     "/v1/agents/workspaces/{workspaceId}/worktrees/{worktreeId}/cleanup": {
       "post": {
         "operationId": "sessionWorktreeCleanup",
+        "tags": ["Public Resources"],
         "x-qwen-implementation-status": "implemented",
         "x-qwen-admission-rule": "session_worktree",
         "parameters": [
@@ -11975,6 +11979,10 @@
           "lifecycle_operation": {
             "$ref": "#/components/schemas/PublicLifecycleOperation",
             "description": "Current unsettled lifecycle operation, queried in batch under Session read authorization. A failed close/delete may leave the Session closing/deleting; only explicit retry starts a new operation. Settled Sessions omit this projection."
+          },
+          "latest_turn": {
+            "$ref": "#/components/schemas/PublicTurn",
+            "description": "The latest Turn regardless of status, including settled Turns; absent when the Session has no Turn. active_turn remains limited to ACCEPTED/RUNNING/CANCELLING Turns. A RUNNING/ACCEPTED Turn whose error_code is hosted_harness_recovery_blocked reports status recovery_blocked on both projections."
           }
         }
       },
@@ -12031,25 +12039,25 @@
           "session_close": {
             "type": "boolean",
             "default": false,
-            "description": "Deployment support for close independently of archive/delete; bound files Sessions require durable worker stop support. This is not actor authorization: admission also requires Session ownership and current read access."
+            "description": "Close support including current actor authority. Workspace-bound Sessions require the recorded Session owner and current read access. Source-state and idle admission remain authoritative on the server."
           },
           "session_archive": {
             "type": "boolean",
             "default": false,
             "x-qwen-implementation-status": "implemented",
-            "description": "Optional support for this retention operation. For a Workspace-bound Session requires completed reliable-close evidence; authorization and source-state validation still apply."
+            "description": "Archive support including current actor authority. Workspace-bound Sessions require completed reliable-close evidence, the recorded Session owner and current read access. Source-state and idle admission remain authoritative on the server."
           },
           "session_unarchive": {
             "type": "boolean",
             "default": false,
             "x-qwen-implementation-status": "implemented",
-            "description": "Optional support for this retention operation. For a Workspace-bound Session requires completed reliable-close evidence; authorization and source-state validation still apply."
+            "description": "Unarchive support including current actor authority. Workspace-bound Sessions require completed reliable-close evidence, the recorded Session owner and current read access. Source-state and idle admission remain authoritative on the server."
           },
           "session_delete": {
             "type": "boolean",
             "default": false,
             "x-qwen-implementation-status": "implemented",
-            "description": "Optional support capability. ACTIVE Workspace files Sessions require L3 lifecycle protocol and reliable original Runtime stop; CLOSED/ARCHIVED Sessions use independent L2 close evidence. Current creator/read authorization and idle/source-state admission checks still apply. The aggregate session lifecycle capability is unchanged."
+            "description": "Delete support including current actor authority. ACTIVE Workspace Sessions require a supported reliable-close protocol; CLOSED/ARCHIVED Sessions use completed close evidence. Workspace-bound Sessions require the recorded Session owner and current read access. Source-state and idle admission remain authoritative on the server. The aggregate session lifecycle capability is unchanged."
           },
           "foreground_shell": {
             "type": "boolean",
@@ -12059,7 +12067,7 @@
           "context_compression": {
             "type": "boolean",
             "default": false,
-            "description": "Requires a compatible Hosted Harness and an active Workspace Session. WebShell also reflects the current caller OPERATOR or OWNER grant; admission separately checks idle state."
+            "description": "Requires a compatible Hosted Harness and an active Workspace Session. Also reflects the current caller OPERATOR or OWNER grant; admission separately checks idle state."
           },
           "child_agents": {
             "type": "boolean",
@@ -12134,7 +12142,8 @@
               "failed",
               "cancelled",
               "recovery_blocked"
-            ]
+            ],
+            "description": "recovery_blocked with hosted_harness_recovery_blocked means the Harness stopped without a safely settled Turn. The input remains active internally. Execution redispatch is parked, while bounded read-only observation of the original Harness journal may settle a later terminal result. Policy changes and lifecycle close wait for settlement; explicit cancellation remains available."
           },
           "created_at": {
             "type": "integer",

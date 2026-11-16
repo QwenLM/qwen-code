@@ -216,7 +216,8 @@ public final class ApiModels {
             @JsonProperty("plan_mode_supported") boolean planModeSupported,
             @JsonProperty("model_context") PublicModelContext modelContext,
             @JsonProperty("model_selection") PublicModelSelection modelSelection,
-            @JsonProperty("lifecycle_operation") PublicLifecycleOperation lifecycleOperation) {
+            @JsonProperty("lifecycle_operation") PublicLifecycleOperation lifecycleOperation,
+            @JsonProperty("latest_turn") PublicTurn latestTurn) {
         public PublicSession withRecovery(SessionRecovery value) {
             return new PublicSession(id, object, agentId, agentRevision,
                     agentDefinitionDigest, status, createdAt, updatedAt,
@@ -224,7 +225,7 @@ public final class ApiModels {
                     snapshotThroughSequence, capabilities, workspace,
                     compactionRevision, contextCompressionOperationId, value, worktree, memoryStoreId, ownerOnly,
                     title, environment, approvalMode, approvalRevision, initialApprovalMode,
-                    planMode, planModeSupported, modelContext, modelSelection, lifecycleOperation);
+                    planMode, planModeSupported, modelContext, modelSelection, lifecycleOperation, latestTurn);
         }
 
         public PublicSession withWorktree(SessionWorktreeStore.Descriptor value) {
@@ -237,7 +238,7 @@ public final class ApiModels {
                             value.state(), value.branch(), value.baseCommit(), value.cwdRelative(), value.operationId(),
                             value.revision(), value.errorCode()), memoryStoreId, ownerOnly,
                     title, environment, approvalMode, approvalRevision, initialApprovalMode,
-                    planMode, planModeSupported, modelContext, modelSelection, lifecycleOperation);
+                    planMode, planModeSupported, modelContext, modelSelection, lifecycleOperation, latestTurn);
         }
     }
 

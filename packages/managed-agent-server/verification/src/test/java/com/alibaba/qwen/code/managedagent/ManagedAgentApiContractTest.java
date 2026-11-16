@@ -3343,6 +3343,23 @@ class ManagedAgentApiContractTest {
                         .isEqualTo(snakeKeys(other.get("lifecycleOperation"),
                                 Map.of("operationId", "operation_id",
                                         "failureCode", "failure_code")));
+                // latest_turn mirrors the WebShell activeTurn projection
+                // (the latest Turn regardless of status, seconds on the
+                // Public wire); active_turn stays ACTIVE-only, so the
+                // settled initial Turn of this fixture omits it.
+                assertThat(session.has("active_turn")).isFalse();
+                JsonNode latest = session.get("latest_turn");
+                JsonNode webTurn = other.get("activeTurn");
+                assertThat(latest.get("id")).isEqualTo(webTurn.get("turnId"));
+                assertThat(latest.get("session_id"))
+                        .isEqualTo(webTurn.get("sessionId"));
+                assertThat(latest.get("status")).isEqualTo(webTurn.get("status"));
+                assertThat(latest.get("created_at").asLong())
+                        .isEqualTo(webTurn.get("submittedAt").asLong() / 1000);
+                assertThat(latest.get("completed_at").asLong())
+                        .isEqualTo(webTurn.get("completedAt").asLong() / 1000);
+                assertThat(latest.get("error_code"))
+                        .isEqualTo(webTurn.get("errorCode"));
                 for (var flag : Map.of("workspace_turns", "workspaceTurns",
                         "cwd_change", "cwdChange",
                         "model_change", "modelChange",

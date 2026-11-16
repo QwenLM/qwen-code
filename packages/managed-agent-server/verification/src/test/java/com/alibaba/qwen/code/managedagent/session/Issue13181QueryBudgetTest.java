@@ -364,19 +364,27 @@ class Issue13181QueryBudgetTest {
         assertThat(publicPage).hasSize(20);
         System.out.println("[issue-13181] listPublicSessions(20 rows): "
                 + fixture.ledger.summary());
-        // Page + active turns + message coverage.
-        assertThat(fixture.ledger.total()).isEqualTo(3);
-        // The batch turn read projects only the summary columns; the page
+        // Page + active turns + message coverage + the enriched projection
+        // batches (latest turns, their environment events, lifecycle
+        // operations) shared with webShellSessions. Unbound rows read no
+        // grants, execution facts or model metadata.
+        assertThat(fixture.ledger.total()).isEqualTo(6);
+        // The batch turn reads project only the summary columns; the page
         // never holds a parsed prompt graph per row.
         assertThat(fixture.ledger.count("select * from ma_turn"))
                 .isZero();
         assertThat(fixture.ledger.count("session_id, turn_id, status,"
                 + " gmt_create, completed_at, error_code"
                 + " from ma_turn")).isEqualTo(1);
-        // Every row carries its own title, its own active turn, and its own
-        // message coverage: session 7 is the one without an active turn,
-        // and the two environment sessions were covered through one more
-        // event.
+        assertThat(fixture.ledger.count("turn_record.session_id,"
+                + " turn_record.turn_id, turn_record.status,"
+                + " turn_record.gmt_create, turn_record.completed_at,"
+                + " turn_record.error_code"
+                + " from ma_turn")).isEqualTo(1);
+        // Every row carries its own title, its own active turn, its own
+        // latest turn and its own message coverage: session 7 is the one
+        // whose latest turn completed, so it has no active turn, and the
+        // two environment sessions were covered through one more event.
         for (var row : publicPage) {
             int index = plainIds.indexOf(row.id());
             assertThat(row.metadata()).containsEntry("title", "s-" + index);
@@ -386,6 +394,10 @@ class Issue13181QueryBudgetTest {
                 assertThat(row.activeTurn()).isNotNull();
                 assertThat(row.activeTurn().sessionId()).isEqualTo(row.id());
             }
+            assertThat(row.latestTurn()).isNotNull();
+            assertThat(row.latestTurn().sessionId()).isEqualTo(row.id());
+            assertThat(row.latestTurn().status()).isEqualTo(
+                    index == 7 ? "completed" : "accepted");
             assertThat(row.capabilities().actions()).isFalse();
             assertThat(row.snapshotThroughSequence())
                     .isEqualTo(index == 2 || index == 5 ? 3 : 2);
@@ -484,13 +496,16 @@ class Issue13181QueryBudgetTest {
                 + " rows): " + fixture.ledger.summary());
         // Page + active turns + covered sequences + the workspace-close
         // batch; compression adds its projection, missing-head and active-operation
-        // batches. The approval mode rides on the page's own SELECT *.
-        assertThat(fixture.ledger.total()).isEqualTo(7);
+        // batches. The enriched projection adds the same bounded batches as
+        // webShellSessions: latest turns, lifecycle operations, approval
+        // ownership, approval selections, model selections and model
+        // contexts. The approval mode rides on the page's own SELECT *.
+        assertThat(fixture.ledger.total()).isEqualTo(13);
         assertThat(fixture.ledger.count(
                 "approval_mode from ma_session"))
                 .isZero();
         assertThat(fixture.ledger.count("from ma_operation"))
-                .isEqualTo(2);
+                .isEqualTo(3);
         for (var row : boundPublic) {
             int index = boundIds.indexOf(row.id());
             assertThat(row.metadata()).containsEntry("title", "w-" + index);

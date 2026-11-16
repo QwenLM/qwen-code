@@ -1437,18 +1437,21 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         Map<String, WebShellModelContext> modelContexts = store.findModelContexts(tenantId, boundIds);
         boolean modelSelectionSupported = !store.modelOptions().isEmpty() && harness.supportsModelSelection();
         boolean renameSupported = harness.isAvailable() && harness.supportsFencedTitles();
-        // Public's compression flag keeps its own non-actor computation, so
-        // the grant and facts batches only cover the shapes the new
-        // actor-scoped flags read; a compress-only Session could widen the
-        // reads but never flip a shaped Session's own grant check.
+        boolean compressionSupported = harness.supportsContextCompression();
+        // The grant and facts batches cover exactly the shapes the
+        // actor-scoped flags read, as in webShellSessions.
         Set<String> shaped = sessions.stream().filter(session -> inputPolicy.maySubmitShape(session, worktrees.get(session.sessionId())))
                 .map(SessionRecord::sessionId)
                 .collect(java.util.stream.Collectors.toSet());
         Set<String> contextShaped = sessions.stream().filter(session -> mayChangeContextShape(session, worktrees.get(session.sessionId())))
                 .map(SessionRecord::sessionId)
                 .collect(java.util.stream.Collectors.toSet());
+        Set<String> compressShaped = sessions.stream().filter(session -> mayCompressShape(session, worktrees.get(session.sessionId())))
+                .map(SessionRecord::sessionId)
+                .collect(java.util.stream.Collectors.toSet());
         Set<String> candidateIds = new java.util.HashSet<>(shaped);
         candidateIds.addAll(contextShaped);
+        candidateIds.addAll(compressShaped);
         Set<String> grantWorkspaces = candidateIds.isEmpty() ? Set.of()
                 : sessions.stream()
                         .filter(session -> candidateIds.contains(
@@ -1468,6 +1471,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         return sessions.stream()
                 .map(session -> publicSession(session,
                         activeTurns.get(session.sessionId()),
+                        latestTurns.get(session.sessionId()),
                         coveredSequences.getOrDefault(session.sessionId(), 0L),
                         retention(session, closed), compressions.getOrDefault(session.sessionId(),
                                 new AgentStateStore.ContextCompressionState(0, null)), worktrees.get(session.sessionId()),
@@ -1480,7 +1484,9 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                         approvalSelections.get(session.sessionId()), approvalSupported
                                 && WorkspaceToolProfiles.supportsApprovalSelection(session)
                                 && (session.agentDefinitionDigest() == null || definitionApprovalSupported)
-                                && lifecycleOwners.contains(session.sessionId())))
+                                && lifecycleOwners.contains(session.sessionId()),
+                        session.workspace() == null || lifecycleOwners.contains(session.sessionId()),
+                        compressionSupported && mayCompressContext(session, grants, executable, worktrees.get(session.sessionId()))))
                 .toList();
     }
 
@@ -1508,13 +1514,14 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     }
 
     private PublicSession publicSession(SessionRecord session,
-            TurnSummary activeTurn, long snapshotCoveredSequence,
+            TurnSummary activeTurn, TurnSummary latestTurn, long snapshotCoveredSequence,
             boolean retention, AgentStateStore.ContextCompressionState compression, SessionWorktreeStore.Descriptor worktree,
             EventRecord environmentEvent, WebShellLifecycleOperation lifecycleOperation,
             boolean maySubmit, boolean mayChangeContext,
             WebShellModelContext modelContext, WebShellModelSelection modelSelection,
             boolean modelSelectionSupported, boolean renameSupported,
-            WebShellApprovalSelection approvalSelection, boolean approvalSupported) {
+            WebShellApprovalSelection approvalSelection, boolean approvalSupported,
+            boolean lifecycleOwner, boolean compressionSupported) {
         Map<String, Object> metadata = session.title() == null ? Map.of()
                 : Map.of("title", session.title());
         // Every route these capabilities gate reads through
@@ -1523,11 +1530,12 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         // 404. DELETING stays advertised: those routes still answer while
         // the delete drains.
         boolean visible = session.deletedAt() == null;
-        // The lifecycle affordances 404/409 on a tombstone exactly like the
-        // content routes, so they take the same gate — as a conjunction,
-        // never a replacement: a live Session keeps every flag it had.
-        boolean close = visible && supportsClose(session);
-        boolean keep = visible && retention;
+        // The lifecycle affordances take the same gates as webShellSession:
+        // visibility plus, for bound Sessions, the recorded lifecycle owner.
+        // Advertising them to other readers would promise buttons the
+        // admission then refuses.
+        boolean close = visible && lifecycleOwner && supportsClose(session);
+        boolean keep = visible && lifecycleOwner && retention;
         // The actor-scoped flags mirror webShellSession's conjuncts, including
         // the public-child suppression and the executable-approval gate.
         boolean publicChild = session.publicChildAgentsVersion() == 1
@@ -1565,11 +1573,12 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                         session.workspace() == null && visible,
                         visible,
                         hasActions(session), close, keep, keep,
-                        visible && supportsDelete(session, retention),
+                        visible && lifecycleOwner && supportsDelete(session, retention),
                         foregroundShell(session, worktree),
-                        visible && "ACTIVE".equals(session.status()) && session.workspace() != null
-                                && ready(worktree) && store.workspaceFilesEnabled() && compression.available() && harness.supportsContextCompression(),
-                        childAgentsCapability(session, worktree), supportsSideQueries(session), supportsSideQueries(session),
+                        visible && approvalExecutable && compressionSupported && compression.available(),
+                        childAgentsCapability(session, worktree),
+                        (session.workspace() == null || maySubmit) && supportsSideQueries(session),
+                        (session.workspace() == null || maySubmit) && supportsSideQueries(session),
                         maySubmit && approvalExecutable,
                         false,
                         visible && session.modelConfigDigest() == null && modelSelectionSupported && mayChangeContext,
@@ -1588,7 +1597,8 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                 approvalSelection != null && approvalSelection.planMode(),
                 visible && approvalSupported && mayChangeContext && harness.supportsPlanMode() && store.supportsPlanMode(session),
                 publicModelContext(modelContext), publicModelSelection(modelSelection),
-                publicLifecycleOperation(lifecycleOperation))
+                publicLifecycleOperation(lifecycleOperation),
+                latestTurn == null ? null : publicTurn(latestTurn))
                 .withWorktree(worktree);
     }
 
@@ -1844,7 +1854,9 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     private static PublicTurn publicTurn(TurnSummary turn) {
         return new PublicTurn(turn.turnId(), "agent.turn",
                 turn.sessionId(), StoreModels.inputItemId(turn.turnId()),
-                turn.status().toLowerCase(Locale.ROOT),
+                AgentStateStore.HARNESS_RECOVERY_BLOCKED.equals(turn.errorCode())
+                        && ("RUNNING".equals(turn.status()) || "ACCEPTED".equals(turn.status()))
+                        ? "recovery_blocked" : turn.status().toLowerCase(Locale.ROOT),
                 turn.createdAt() / 1000,
                 turn.completedAt() == null ? null
                         : turn.completedAt() / 1000,

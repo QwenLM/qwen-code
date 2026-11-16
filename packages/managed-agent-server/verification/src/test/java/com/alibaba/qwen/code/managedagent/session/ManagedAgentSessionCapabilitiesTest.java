@@ -12,6 +12,7 @@ import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionLineage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionPage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnSummary;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
@@ -85,9 +86,8 @@ class ManagedAgentSessionCapabilitiesTest {
             assertThat(view.capabilities().sessionDelete()).isEqualTo(owner);
             assertThat(view.capabilities().childAgents()).isEqualTo(!child);
         });
-        // The Public surface reports the same actor-scoped flags and policy
-        // fields for the same caller; its existing lifecycle flags keep their
-        // own non-actor computation.
+        // The Public surface reports the same actor-scoped flags, lifecycle
+        // gates and policy fields as WebShell for the same caller.
         var publicViews = List.of(service.getPublicSession("tenant", "actor", "session"),
                 service.listPublicSessions("tenant", "actor", null, 10).data().getFirst());
         assertThat(publicViews).allSatisfy(view -> {
@@ -95,6 +95,8 @@ class ManagedAgentSessionCapabilitiesTest {
             assertThat(view.capabilities().cwdChange()).isFalse();
             assertThat(view.capabilities().approvalModeChange()).isEqualTo(!child && owner);
             assertThat(view.planModeSupported()).isEqualTo(!child && owner);
+            assertThat(view.capabilities().sessionClose()).isEqualTo(owner);
+            assertThat(view.capabilities().sessionDelete()).isEqualTo(owner);
             assertThat(view.capabilities().childAgents()).isEqualTo(!child);
             assertThat(view.title()).isEqualTo("title");
             assertThat(view.approvalMode()).isEqualTo("default");
@@ -106,6 +108,45 @@ class ManagedAgentSessionCapabilitiesTest {
             assertThat(view.modelSelection()).isNull();
             assertThat(view.lifecycleOperation()).isNull();
         });
+    }
+
+    @Test
+    void publicTurnProjectionsSynthesizeRecoveryBlockedLikeWebShell() {
+        var store = mock(AgentStateStore.class);
+        var service = new ManagedAgentService(store, new RequestDigests(),
+                mock(HarnessCoordinator.class), mock(HarnessConnector.class), mock(JdbcManagedWorkspaceRegistry.class), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+        var session = new SessionRecord("tenant", "session", "qwen-code", "title", "ACTIVE",
+                null, null, 0, 0, 1, 1, null, 1);
+        when(store.requireSession("tenant", "session")).thenReturn(session);
+        var blocked = new TurnSummary("session", "turn", "RUNNING",
+                1_790_777_114_231L, null, AgentStateStore.HARNESS_RECOVERY_BLOCKED);
+        when(store.findActiveTurns("tenant", List.of("session")))
+                .thenReturn(Map.of("session", blocked));
+        when(store.findLatestTurns("tenant", List.of("session")))
+                .thenReturn(Map.of("session", blocked));
+
+        var publicView = service.getPublicSession("tenant", "actor", "session");
+        assertThat(publicView.activeTurn().status()).isEqualTo("recovery_blocked");
+        assertThat(publicView.latestTurn().status()).isEqualTo("recovery_blocked");
+        assertThat(publicView.latestTurn().createdAt()).isEqualTo(1_790_777_114L);
+        var webShellView = service.getWebShellSession("tenant", "actor", "session");
+        assertThat(webShellView.activeTurn().status()).isEqualTo("recovery_blocked");
+        assertThat(webShellView.activeTurn().submittedAt()).isEqualTo(1_790_777_114_231L);
+
+        // A settled Turn keeps its own status: the synthesis only applies
+        // to RUNNING/ACCEPTED, and active_turn stays ACTIVE-only.
+        var settled = new TurnSummary("session", "turn", "FAILED",
+                1_790_777_114_231L, 1_790_777_115_231L, AgentStateStore.HARNESS_RECOVERY_BLOCKED);
+        when(store.findActiveTurns("tenant", List.of("session")))
+                .thenReturn(Map.of());
+        when(store.findLatestTurns("tenant", List.of("session")))
+                .thenReturn(Map.of("session", settled));
+        var settledPublic = service.getPublicSession("tenant", "actor", "session");
+        assertThat(settledPublic.activeTurn()).isNull();
+        assertThat(settledPublic.latestTurn().status()).isEqualTo("failed");
+        assertThat(settledPublic.latestTurn().completedAt()).isEqualTo(1_790_777_115L);
+        assertThat(service.getWebShellSession("tenant", "actor", "session")
+                .activeTurn().status()).isEqualTo("failed");
     }
 
     @Test
