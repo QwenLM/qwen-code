@@ -444,6 +444,11 @@ describe('ComposerTaskChips', () => {
     });
 
     it('renders no "?" when the host does not wire explanation', () => {
+      // Single-task first: with a multi-task group the `multiple` operand
+      // short-circuits, leaving the opt-out operand itself untested.
+      render([workflow('wf-1')]);
+      expect(explainButtons()).toHaveLength(0);
+
       render([workflow('wf-1'), workflow('wf-2')]);
       expect(explainButtons()).toHaveLength(0);
 
@@ -520,6 +525,55 @@ describe('ComposerTaskChips', () => {
       expect(explains).toHaveLength(1);
       act(() => explains[0].click());
       expect(onExplainTask).toHaveBeenCalledExactlyOnceWith(remaining);
+    });
+
+    it('keeps the focused chip node across the 1↔2 task boundary', () => {
+      const onExplainTask = vi.fn();
+      const shellTask = shell('shell-1');
+      render([workflow('wf-1'), shellTask], { onExplainTask });
+      const shellChip = chips()[1];
+      act(() => shellChip.focus());
+
+      render([workflow('wf-1'), shellTask, shell('shell-2')], {
+        onExplainTask,
+      });
+      expect(shellChip.isConnected).toBe(true);
+      expect(document.activeElement).toBe(shellChip);
+
+      render([workflow('wf-1'), shellTask], { onExplainTask });
+      expect(shellChip.isConnected).toBe(true);
+      expect(document.activeElement).toBe(shellChip);
+    });
+
+    it('steps ArrowLeft from the chip "?" back to its own chip', () => {
+      const onExplainTask = vi.fn();
+      render([workflow('wf-1'), shell('shell-1')], { onExplainTask });
+      const explains = explainButtons();
+
+      act(() => explains[0].focus());
+      act(() => {
+        explains[0].dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }),
+        );
+      });
+      expect(document.activeElement).toBe(chips()[0]);
+
+      act(() => explains[1].focus());
+      act(() => {
+        explains[1].dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }),
+        );
+      });
+      expect(document.activeElement).toBe(chips()[1]);
+
+      // ArrowRight keeps the chip arithmetic: from the last "?" it wraps.
+      act(() => explains[1].focus());
+      act(() => {
+        explains[1].dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }),
+        );
+      });
+      expect(document.activeElement).toBe(chips()[0]);
     });
   });
 });

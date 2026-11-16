@@ -146,6 +146,13 @@ for (const theme of [
     await clearFocus(page);
     await captureScreenshot(page, `composer-task-explain-chips-${theme}`);
 
+    // Keyboard focus lands on the "?" with the same ring as its chip; a
+    // fill alone would be indistinguishable from hover in the light theme.
+    await chips.locator('[data-kind="shell"]').focus();
+    await page.keyboard.press('Tab');
+    await expect(chipExplain).toBeFocused();
+    await captureScreenshot(page, `composer-task-explain-focus-${theme}`);
+
     // The multi-task chip opens a list with one "?" per row.
     await chips.locator('[data-kind="agent"]').click();
     const list = page.locator('[data-testid="composer-task-list"]');
@@ -160,11 +167,15 @@ for (const theme of [
     await captureScreenshot(page, `composer-task-explain-list-${theme}`);
 
     // Asking streams the model's explanation into the btw panel; the list
-    // stays open so another task can be asked about next.
+    // stays open so another task can be asked about next. The panel echoes
+    // the short display line, never the composed fact dump.
     await list.locator('[data-testid="composer-task-explain"]').first().click();
-    await expect(page.locator('[class*="btwPanel"]')).toContainText(
-      EXPLAIN_ANSWER,
+    const panel = page.locator('[class*="btwPanel"]');
+    await expect(panel).toContainText(EXPLAIN_ANSWER);
+    await expect(panel).toContainText(
+      'Explain what this task is doing: Read README.md',
     );
+    await expect(panel).not.toContainText('Task facts:');
     await expect(list).toBeVisible();
     await captureScreenshot(page, `composer-task-explain-answer-${theme}`);
   });

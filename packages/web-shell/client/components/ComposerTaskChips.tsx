@@ -266,6 +266,21 @@ export const ComposerTaskChips = forwardRef<
     }
   };
 
+  // The chip "?" sits after its chip, so the chip's index arithmetic would
+  // step ArrowLeft past the owning chip; left goes back to that chip instead.
+  const handleChipExplainKeyDown = (
+    event: KeyboardEvent<HTMLButtonElement>,
+    kind: ComposerTaskChipKind,
+    index: number,
+  ) => {
+    if (event.key === 'ArrowLeft') {
+      event.preventDefault();
+      chipRefs.current.get(kind)?.focus({ preventScroll: true });
+      return;
+    }
+    handleChipKeyDown(event, index);
+  };
+
   const groupLabel = (group: ComposerTaskChipGroup) => {
     const [singular, plural] = LABEL_KEYS[group.kind];
     return t(group.tasks.length === 1 ? singular : plural, {
@@ -342,7 +357,6 @@ export const ComposerTaskChips = forwardRef<
           const multiple = group.tasks.length > 1;
           const chip = (
             <button
-              key={group.kind}
               ref={(node) => {
                 if (node) chipRefs.current.set(group.kind, node);
                 else chipRefs.current.delete(group.kind);
@@ -368,15 +382,19 @@ export const ComposerTaskChips = forwardRef<
               <span className={styles.chipLabel}>{groupLabel(group)}</span>
             </button>
           );
-          if (multiple || !onExplainTask) return chip;
+          // The wrapper is unconditional so the chip node keeps its identity
+          // when a group crosses the 1↔2 task boundary; remounting it would
+          // drop keyboard focus onto another chip.
           return (
             <span key={group.kind} className={styles.chipWrap}>
               {chip}
-              {explainButton(
-                group.tasks[0],
-                `${styles.explainButton} ${styles.chipExplain}`,
-                (event) => handleChipKeyDown(event, index),
-              )}
+              {!multiple &&
+                onExplainTask &&
+                explainButton(
+                  group.tasks[0],
+                  `${styles.explainButton} ${styles.chipExplain}`,
+                  (event) => handleChipExplainKeyDown(event, group.kind, index),
+                )}
             </span>
           );
         })}

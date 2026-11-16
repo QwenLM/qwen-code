@@ -14498,7 +14498,9 @@ export function App({
   ]);
 
   const runVisibleBtw = useCallback(
-    (rawQuestion: string) => {
+    // displayQuestion overrides what the panel echoes; the model still
+    // receives the full question. Typed /btw keeps echoing the user's words.
+    (rawQuestion: string, displayQuestion?: string) => {
       if (sessionWriteBlocked) return;
       const question = rawQuestion.trim();
       if (!question) {
@@ -14507,6 +14509,7 @@ export function App({
       }
       if (!requireActiveSessionForLocalCommand()) return;
 
+      const display = displayQuestion ?? question;
       const messageId = `local-btw-${nextBtwMessageIdRef.current++}`;
       const sessionId = connection.sessionId;
       const workspaceCwd = connection.workspaceCwd;
@@ -14516,7 +14519,7 @@ export function App({
       setBtwMessage({
         id: messageId,
         role: 'btw',
-        question,
+        question: display,
         answer: '',
         isPending: true,
       });
@@ -14536,7 +14539,7 @@ export function App({
             setBtwMessage({
               id: messageId,
               role: 'btw',
-              question,
+              question: display,
               answer: event.answer || (done ? t('btw.emptyAnswer') : ''),
               isPending: !done,
             });
@@ -14588,6 +14591,19 @@ export function App({
       if (
         target instanceof Element &&
         target.closest('[data-web-shell-context-popover]')
+      )
+        return;
+      // Plain Escape inside the task chips belongs to their list/focus
+      // handling; dismissing the panel here would swallow it before React
+      // sees it. Ctrl+C/Ctrl+D still cancel a pending side question there.
+      if (
+        e.key === 'Escape' &&
+        !e.ctrlKey &&
+        !e.metaKey &&
+        !e.altKey &&
+        !e.shiftKey &&
+        target instanceof Element &&
+        target.closest('[data-web-shell-composer-task-chips]')
       )
         return;
       const message = btwMessage;
@@ -18716,7 +18732,10 @@ export function App({
 
   const explainComposerTask = useCallback(
     (task: DaemonSessionTaskWithWorkflowStatus) => {
-      runVisibleBtw(buildTaskExplainQuestion(task, t));
+      runVisibleBtw(
+        buildTaskExplainQuestion(task, t),
+        t('tasks.explain.display', { label: task.label }),
+      );
     },
     [runVisibleBtw, t],
   );

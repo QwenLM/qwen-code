@@ -90,6 +90,7 @@ export function getComposerTaskChipGroups(
 // The daemon rejects side questions longer than core's BTW_MAX_INPUT_LENGTH
 // (the SDK does not export it); the composed question must fit the same cap.
 const EXPLAIN_QUESTION_MAX_LENGTH = 4096;
+const EXPLAIN_LABEL_MAX = 400;
 const EXPLAIN_DESCRIPTION_MAX = 400;
 const EXPLAIN_COMMAND_MAX = 500;
 const EXPLAIN_PROMPT_MAX = 1200;
@@ -107,13 +108,26 @@ function explainExcerpt(text: string, max: number): string {
 }
 
 function taskExplainFacts(task: DaemonSessionTaskWithWorkflowStatus): string {
-  const lines = [
-    `Kind: ${task.kind}`,
-    `Label: ${task.label}`,
+  const lines = [`Kind: ${task.kind}`];
+  // The daemon sets a shell's label to its command; the Command line below
+  // already carries that text, so an oversized label must not eat the budget
+  // twice nor crowd out the kind-specific facts.
+  if (!(task.kind === 'shell' && task.label === task.command)) {
+    lines.push(`Label: ${explainExcerpt(task.label, EXPLAIN_LABEL_MAX)}`);
+  }
+  lines.push(
     `Status: ${task.status}`,
     `Elapsed: ${formatRuntime(task.runtimeMs)}`,
-  ];
-  if (task.description) {
+  );
+  // Shells synthesize the description from the command and monitors from
+  // their display label; emit it only when it adds a distinct fact.
+  const displayLabel =
+    task.kind === 'shell'
+      ? task.command
+      : task.kind === 'monitor'
+        ? task.description
+        : task.label;
+  if (task.description && task.description !== displayLabel) {
     lines.push(
       `Description: ${explainExcerpt(task.description, EXPLAIN_DESCRIPTION_MAX)}`,
     );

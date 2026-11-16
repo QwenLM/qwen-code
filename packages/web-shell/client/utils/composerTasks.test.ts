@@ -406,21 +406,97 @@ describe('buildTaskExplainQuestion', () => {
   });
 
   it('fires the final guard one char past the facts budget', () => {
+    // The working directory is uncapped, so it alone can overflow the
+    // budget after every per-field excerpt has been applied.
     const overhead = en('tasks.explain.question', { facts: '' }).length;
     const scaffold =
-      'Kind: agent\nLabel: \nStatus: running\nElapsed: 0s\nDescription: task';
+      'Kind: shell\nLabel: task\nStatus: running\nElapsed: 1m 5s\n' +
+      'Description: task\nCommand: npm run dev\nWorking directory: ';
     const budget = 4096 - overhead;
+    const question = buildTaskExplainQuestion(
+      { ...shellTask, cwd: 'w'.repeat(budget - scaffold.length + 1) },
+      en,
+    );
+    expect(question.length).toBeLessThanOrEqual(4096);
+    expect(question.endsWith('…')).toBe(true);
+  });
+
+  it('keeps the kind facts when the label is huge', () => {
+    const question = buildTaskExplainQuestion(
+      {
+        ...shellTask,
+        label: 'L'.repeat(20_000),
+        command: 'npm run dev',
+        cwd: '/workspace',
+      },
+      en,
+    );
+    expect(question).toContain('Command: npm run dev');
+    expect(question).toContain('Working directory: /workspace');
+    expect(question).toContain('L'.repeat(400));
+    expect(question).not.toContain('L'.repeat(401));
+  });
+
+  it('emits a daemon-shaped shell command exactly once', () => {
+    // The daemon sets label and description to the command itself.
+    const question = buildTaskExplainQuestion(
+      {
+        ...shellTask,
+        label: 'npm run dev',
+        description: 'npm run dev',
+        command: 'npm run dev',
+      },
+      en,
+    );
+    expect(question.split('npm run dev').length - 1).toBe(1);
+    expect(question).not.toContain('Label:');
+    expect(question).not.toContain('Description:');
+    expect(question).toContain('Working directory: /workspace');
+  });
+
+  it('keeps the monitor description as its label without duplicating it', () => {
+    const question = buildTaskExplainQuestion(
+      {
+        ...base,
+        kind: 'monitor',
+        label: 'watch logs',
+        description: 'watch logs',
+        command: 'tail -f app.log',
+        eventCount: 3,
+        lastEventTime: 0,
+        droppedLines: 0,
+      },
+      en,
+    );
+    expect(question).toContain('Label: watch logs');
+    expect(question).not.toContain('Description:');
+    expect(question).toContain('Command: tail -f app.log');
+  });
+
+  it('skips an agent description that repeats its label', () => {
     const question = buildTaskExplainQuestion(
       {
         ...base,
         kind: 'agent',
         isBackgrounded: true,
-        label: 'L'.repeat(budget - scaffold.length + 1),
+        label: 'Review the change',
+        description: 'Review the change',
       },
       en,
     );
+    expect(question).toContain('Label: Review the change');
+    expect(question).not.toContain('Description:');
+  });
+
+  it('strands no surrogate when the final guard cuts inside an emoji', () => {
+    const question = buildTaskExplainQuestion(
+      { ...shellTask, cwd: '😀'.repeat(10_000) },
+      en,
+    );
     expect(question.length).toBeLessThanOrEqual(4096);
-    expect(question.endsWith('…')).toBe(true);
+    expect(question).not.toMatch(
+      /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/,
+    );
   });
 
   it('strands no surrogate when a field excerpt cuts inside an emoji', () => {

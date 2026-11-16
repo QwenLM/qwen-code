@@ -31,19 +31,20 @@ Non-goals:
 
 UI (all in the Web Shell client):
 
-- A single-task chip gets a "?" button beside the chip, styled as a matching pill. The chip itself keeps opening the task; the "?" only asks.
-- A multi-task chip has no "?" of its own; each row of its list gets one, after the row's open button. Tab order per row is: open, then explain. Escape on a row "?" closes the list back to its chip, exactly like the row's open button; the chip-adjacent "?" shares the chip keyboard handling (arrows between chips, Down/Escape/printable back to the composer).
+- A single-task chip gets a "?" button beside the chip, styled as a matching pill. The chip itself keeps opening the task; the "?" only asks. Every chip sits in a stable wrapper whether or not its "?" is rendered, so a group crossing the 1↔2 task boundary reconciles the chip node instead of remounting it and dropping keyboard focus onto another chip.
+- A multi-task chip has no "?" of its own; each row of its list gets one, after the row's open button. Tab order per row is: open, then explain. The open button owns the row's padding so the hover highlight and the click target are the same box. Escape on a row "?" closes the list back to its chip, exactly like the row's open button; the app-level btw dismiss shortcut bails out for plain Escape inside the chip row so it cannot swallow that Escape while an explanation panel is open, while Ctrl+C/Ctrl+D still cancel a pending side question there. The chip-adjacent "?" shares the chip keyboard handling (arrows between chips, Down/Escape/printable back to the composer), except ArrowLeft steps back to its own chip rather than past it. Both "?" variants draw the same keyboard focus ring as the chip; a fill alone would be indistinguishable from hover in the light theme.
 - The affordance is an optional component prop; hosts that do not wire it render no "?" (headerless embeds and host-provided footers are unaffected).
 
 Question composition (pure client function):
 
 - Facts come from the task snapshot the chips already read: kind, label, status, elapsed; per kind the command and working directory (shell), command and event count (monitor), agent type, prompt excerpt and the last five activities (agent), current phase, agent progress, pending approvals and the last five log lines (workflow).
+- The daemon synthesizes a shell's label and description from its command, and a monitor's label from its description. The builder therefore drops the shell `Label:` line when it equals the command (the `Command:` line carries it) and the `Description:` line whenever it repeats the kind's display label, so the same text never spends the budget twice or crowds out the kind-specific facts.
 - Fact labels stay English — they are model input, not UI text. The instruction follows the UI language (EN/ZH catalogs; other locales fall back to EN), which also steers the answer language alongside the session's output-language preference.
-- Per-field excerpt caps keep any single field from swamping the question; a final guard keeps the whole question within 4096 characters, mirroring core's `BTW_MAX_INPUT_LENGTH` (the daemon rejects longer side questions). Both cuts drop a trailing high surrogate so the JSON payload never strands a surrogate pair.
+- Per-field excerpt caps (label 400, description 400, command 500, prompt 1200, activity 160, log 200) keep any single field from swamping the question; a final guard keeps the whole question within 4096 characters, mirroring core's `BTW_MAX_INPUT_LENGTH` (the daemon rejects longer side questions). Both cuts drop a trailing high surrogate so the JSON payload never strands a surrogate pair.
 
 Answer path:
 
-- Clicking "?" composes the question and hands it to the existing visible-btw flow: the answer streams into the existing btw panel above the composer. Asking about another task aborts the previous side question, the same semantics as asking two `/btw` questions in a row. The task list stays open.
+- Clicking "?" composes the question and hands it to the existing visible-btw flow with a separate display string: the model receives the full composed prompt, while the panel echoes only a short localized line ("Explain what this task is doing: <label>"). The fact dump is model input and never paints the panel. Typed `/btw` keeps echoing the user's own words — the display override defaults to the raw question. The answer streams into the existing btw panel above the composer. Asking about another task aborts the previous side question, the same semantics as asking two `/btw` questions in a row. The task list stays open.
 
 ## Decisions and rationale
 
@@ -60,16 +61,16 @@ Answer path:
 
 ## Validation
 
-- Unit: question builder (per-kind facts, excerpt caps, 4096 budget in EN/ZH, surrogate safety, UI-language instruction); component (placement, click, keyboard, focus return, opt-out); App wiring into the btw stream.
-- E2E: the existing composer-task-chips spec updated to the two-action row contract (locators and Tab order) plus a new "?" side-question case; a visuals scenario captures chips, list, and streamed answer in light and dark with anchored assertions.
+- Unit: question builder (per-kind facts, label cap and duplicate-fact omission, excerpt caps, 4096 budget in EN/ZH, surrogate safety at both cut sites, UI-language instruction); component (placement, click, keyboard including ArrowLeft from the chip "?", focus return, chip node identity across the 1↔2 boundary, single- and multi-task opt-out); App wiring into the btw stream with the display/question split pinned.
+- E2E: the existing composer-task-chips spec updated to the two-action row contract (locators and Tab order) plus a "?" side-question case (display line, no fact dump) and an Escape case (list closes while the explanation panel survives); a visuals scenario captures chips, keyboard-focused "?", list, and streamed answer in light and dark with anchored assertions.
 - Live-model confirmation on the local daemon: a real session started real background shell tasks; clicking "?" sent the composed question (intercepted, 354 chars) and the model answered in the conversation language, naming the command, the cwd, the user's background launch request, and the earlier finished task — while the task kept running.
 
 ## Acceptance criteria
 
 - Single-task chips show one adjacent "?"; multi-task lists show one per row; no "?" appears without the host wiring.
-- Clicking "?" streams an explanation into the btw panel without opening the task, without a transcript prompt turn, and without stopping the task.
-- The composed question never exceeds the daemon's side-question cap in any shipped UI language.
-- Keyboard and focus behavior of the chip row is preserved, extended by the documented per-row Tab stops.
+- Clicking "?" streams an explanation into the btw panel without opening the task, without a transcript prompt turn, and without stopping the task. The panel shows the short display line, not the composed prompt.
+- The composed question never exceeds the daemon's side-question cap in any shipped UI language, and an oversized label or command cannot crowd out the kind-specific facts.
+- Keyboard and focus behavior of the chip row is preserved, extended by the documented per-row Tab stops: the focused chip node survives group-size changes, Escape inside the chips is not swallowed by the panel shortcut, and both "?" variants show the chip's focus ring.
 
 ## Follow-ups (deliberately deferred)
 

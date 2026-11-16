@@ -19166,6 +19166,14 @@ describe('App session callbacks', () => {
     );
     expect(container.querySelector('[class*="btwPanel"]')).not.toBeNull();
     expect(testState.latestBtwMessageProps?.answer).toBe('side answer');
+    // The panel echoes a short localized line, not the composed prompt:
+    // the model receives the facts, the user does not.
+    expect(testState.latestBtwMessageProps?.question).toBe(
+      'Explain what this task is doing: npm run build',
+    );
+    expect(testState.latestBtwMessageProps?.question).not.toContain(
+      'Task facts:',
+    );
   });
 
   it('locates a workflow chip in the transcript and opens its row', async () => {

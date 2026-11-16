@@ -230,11 +230,45 @@ test('a "?" on a task choice asks a side question for an explanation', async ({
   await list.getByTestId('composer-task-explain').first().click();
 
   // The mock daemon's stock side answer streams into the btw panel; the
-  // list stays open so another task can be asked about next.
-  await expect(page.locator('[class*="btwPanel"]')).toContainText(
-    'A side answer.',
+  // list stays open so another task can be asked about next. The panel
+  // echoes a short display line, not the composed fact dump.
+  const panel = page.locator('[class*="btwPanel"]');
+  await expect(panel).toContainText('A side answer.');
+  await expect(panel).toContainText(
+    'Explain what this task is doing: Review and fix',
   );
+  await expect(panel).not.toContainText('Task facts:');
   await expect(list).toBeVisible();
+});
+
+test('Escape on a "?" closes the list without dismissing the explanation', async ({
+  page,
+}, testInfo) => {
+  await openSession(page, testInfo, [
+    workflowTask(),
+    workflowTask({
+      id: 'workflow-docs',
+      toolUseId: undefined,
+      label: 'Update the docs',
+      status: 'paused',
+    }),
+  ]);
+
+  await page
+    .getByTestId('composer-task-chips')
+    .getByRole('button', { name: '2 workflows' })
+    .click();
+  const list = page.getByTestId('composer-task-list');
+  await list.getByTestId('composer-task-explain').first().click();
+  const panel = page.locator('[class*="btwPanel"]');
+  await expect(panel).toContainText('A side answer.');
+
+  // App's window-capture btw shortcut must leave Escape inside the chips
+  // to the chips: the list closes, the panel survives.
+  await list.getByTestId('composer-task-explain').last().focus();
+  await page.keyboard.press('Escape');
+  await expect(list).toHaveCount(0);
+  await expect(panel).toContainText('A side answer.');
 });
 
 test('an expired reveal does not reopen a collapsed workflow on sibling approval', async ({
