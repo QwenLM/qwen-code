@@ -273,7 +273,11 @@ function matchesQwenHomeSurface(normalizedPath: string): boolean {
 }
 
 function getAutoModeWritePathCandidates(filePath: string): string[] {
-  const candidates = new Set<string>([filePath]);
+  // The protected prefixes are normalized, so `$XDG_CONFIG_HOME/qwen/...` with
+  // a trailing slash in the variable (`/home/u/.config//qwen/...`) or any other
+  // redundant separator has to be matched in its normalized spelling too. The
+  // realpath below cannot do it for a file the write is about to create.
+  const candidates = new Set<string>([filePath, path.normalize(filePath)]);
 
   try {
     candidates.add(fs.realpathSync.native(filePath));

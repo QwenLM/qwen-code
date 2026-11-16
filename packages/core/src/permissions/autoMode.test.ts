@@ -825,6 +825,46 @@ describe('shouldForceAutoModeReviewForAllow', () => {
     );
   });
 
+  it('matches a redirect target with a redundant separator', () => {
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    restoringQwenHome(() =>
+      inTmpDir('qwen-double-slash-', (home) => {
+        delete process.env['QWEN_HOME'];
+        vi.stubEnv('HOME', home);
+        vi.stubEnv('USERPROFILE', home);
+        // The XDG spec allows a trailing slash, so the expanded target has
+        // `//` where the prefix has `/`.
+        vi.stubEnv('XDG_CONFIG_HOME', `${home}/.config/`);
+        Object.defineProperty(process, 'platform', { value: 'linux' });
+        try {
+          expect(Storage.getGlobalQwenDir()).toBe(
+            path.join(home, '.config', 'qwen'),
+          );
+          // None of these parent directories exist yet, so no realpath helps.
+          for (const command of [
+            'printf x > ${XDG_CONFIG_HOME}/qwen/hooks/pre-tool-use.json',
+            'echo {} > $XDG_CONFIG_HOME/qwen/settings.json',
+            `cat > ${home}/.config//qwen/skills/x/SKILL.md`,
+            `cat > ${home}//.qwen/settings.json`,
+          ]) {
+            expect(forcesReview(command)).toBe(true);
+          }
+          expect(
+            isAutoModeProtectedWritePath(
+              `${home}/.config/./qwen//commands/x.md`,
+            ),
+          ).toBe(true);
+          expect(forcesReview('echo hi > ${XDG_CONFIG_HOME}/notes.txt')).toBe(
+            false,
+          );
+        } finally {
+          Object.defineProperty(process, 'platform', platform);
+          vi.unstubAllEnvs();
+        }
+      }),
+    );
+  });
+
   it('reads a variable redirect target after quote removal, as bash does', () => {
     const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
     restoringQwenHome(() =>
