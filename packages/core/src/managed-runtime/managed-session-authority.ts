@@ -353,6 +353,13 @@ export interface ManagedSessionInputRequest {
   readonly deadline: number | null;
   readonly admissionRef: ManagedSessionDurableRef;
   readonly wakeReason: string;
+  /**
+   * The earliest instant this input may start a turn (epoch ms), or null for
+   * immediate delivery. The self-paced loop wakeup is the first producer; the
+   * wake pump defers a not-yet-due input rather than polling. Distinct from
+   * `deadline`, which is the absolute turn completion deadline.
+   */
+  readonly notBefore?: number | null;
 }
 
 export class ManagedSessionConflictError extends ManagedSessionRecordError {
@@ -933,20 +940,62 @@ export class LocalManagedSessionAuthority {
     return out;
   }
 
-  /** Persists the accepted input and the wake intent in one transaction. */
+  /**
+   * Persists the accepted input and the wake intent in one transaction.
+   * With a `replacement`, the replaced input's turn settles `cancelled`
+   * (model-free) in the SAME transaction that commits the new input — the
+   * self-paced loop wakeup's single-unfired invariant: a re-arm must never
+   * leave two unfired inputs pending, even across a crash between the
+   * settle and the arm. The caller publishes the turn-result body
+   * (`resultRef`) and owns the guard that the replaced turn never started;
+   * the fixed `turn:<turnId>` event id here refuses a turn that already
+   * settled.
+   */
   submitInput(
     command: ManagedSessionCommand,
     input: ManagedSessionInputRequest,
+    replacement?: {
+      readonly turnId: string;
+      readonly stopReason: string;
+      readonly resultRef: ManagedSessionDurableRef;
+    },
   ): Promise<ManagedSessionCommitReceipt> {
-    return this.runSerial(() =>
+    return this.runSerial(() => {
       // Read inside the lock: the committed sequence moves as other
       // transactions commit.
-      this.commit(
+      const occurredAt = this.now();
+      if (replacement === undefined) {
+        return this.commit(
+          command,
+          inputEvents(command, input, this.committed + 1, occurredAt),
+          INPUT_ACTORS,
+        );
+      }
+      const settle = {
+        v: MANAGED_SESSION_FORMAT_VERSION,
+        sequence: this.committed + 1,
+        eventId: `turn:${replacement.turnId}`,
+        sessionKey: command.sessionKey,
+        kind: 'turn.settled',
+        occurredAt,
+        payload: {
+          turnId: replacement.turnId,
+          outcome: 'cancelled',
+          stopReason: replacement.stopReason,
+          resultRef: replacement.resultRef,
+          usageRef: null,
+          pendingOwnersRef: null,
+        },
+      };
+      return this.commit(
         command,
-        inputEvents(command, input, this.committed + 1, this.now()),
-        INPUT_ACTORS,
-      ),
-    );
+        [
+          settle,
+          ...inputEvents(command, input, this.committed + 2, occurredAt),
+        ],
+        [{ class: 'authority' }, ...INPUT_ACTORS],
+      );
+    });
   }
 
   /**
@@ -1908,6 +1957,7 @@ export class LocalManagedSessionAuthority {
               .filter((event) => event.kind === 'turn.settled')
               .map((event) => event.payload['turnId']),
           );
+          const now = this.now();
           if (
             maintenance.historyCutSequence > this.committed ||
             this.events.some(
@@ -1915,7 +1965,16 @@ export class LocalManagedSessionAuthority {
                 (event.kind === 'message.committed' &&
                   event.sequence > maintenance.historyCutSequence) ||
                 (event.kind === 'input.accepted' &&
-                  !settled.has(event.payload['turnId'])),
+                  !settled.has(event.payload['turnId']) &&
+                  // A not-yet-due loop wakeup is deferred, not about to run:
+                  // it must not hold compaction for its whole delay window.
+                  // Its continuation re-reads guidance after a compaction, so
+                  // compacting beneath it is safe. A due loop input still blocks.
+                  !(
+                    event.payload['source'] === 'loop' &&
+                    typeof event.payload['notBefore'] === 'number' &&
+                    event.payload['notBefore'] > now
+                  )),
             )
           )
             throw new ManagedSessionConflictError(
@@ -3445,9 +3504,13 @@ export class LocalManagedSessionAuthority {
               event.payload['compactionId'] !== maintenance.operationId)) ||
           (event.kind === 'input.accepted' &&
             !isChildNotificationSource(source) &&
-            !['monitor', 'automation', 'channel', 'session_message'].includes(
-              String(source),
-            ))
+            ![
+              'monitor',
+              'automation',
+              'channel',
+              'session_message',
+              'loop',
+            ].includes(String(source)))
         )
           throw new ManagedSessionConflictError(
             'Session history maintenance is active.',
@@ -4480,6 +4543,14 @@ function inputEvents(
         contentRef: input.contentRef,
         deadline: input.deadline,
         admissionRef: input.admissionRef,
+        // Omit the field unless a concrete fire time is set: closed readers
+        // (the CSI native-activation proof, older parsers) require exactly
+        // the six legacy fields, so even an explicit null would break
+        // ordinary input admission with the loop feature off. An absent
+        // field and a null both mean immediate delivery to the wake pump.
+        ...(typeof input.notBefore === 'number'
+          ? { notBefore: input.notBefore }
+          : {}),
       },
     },
     {

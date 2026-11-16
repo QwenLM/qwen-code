@@ -14,6 +14,7 @@ import {
   MonitorWakeTransientReadError,
 } from './hosted-monitor-wake.js';
 import type { HostedChildAgentSession } from './hosted-child-agent-session.js';
+import { LOOP_INPUT_SOURCE } from './hosted-loop-session.js';
 import { HostedToolRecoveryRequiredError } from './hosted-workspace-tool-turn.js';
 import { HostedMcpRecoveryRequiredError } from './hosted-mcp-session.js';
 import { HostedHookRecoveryRequiredError } from './hosted-hook-session.js';
@@ -70,6 +71,16 @@ export function createMonitorWakeRunTurn(params: {
     text: string,
     abort: AbortController,
   ) => Promise<unknown>;
+  /** Commits a loop tick's expanded content once the turn delivered it, so an
+   * aborted tick cannot poison the resolver's full-vs-reminder cache. */
+  readonly markLoopDelivered?: () => void;
+  /** Fire-time sentinel expansion at delivery. Returns the text plus whether
+   * a sentinel was expanded (only then is the resolver cache committed), or
+   * null when a denied re-review settled the input (the loop ends). */
+  readonly expandLoopFire?: (
+    turnId: string,
+    text: string,
+  ) => Promise<{ text: string; expanded: boolean } | null>;
   readonly busy: () => boolean;
   /** A turn its source no longer runs (H4d-b: a stopped run's message),
    * re-read with the busy verdict right before the turn starts. */
@@ -207,11 +218,34 @@ export function createMonitorWakeRunTurn(params: {
     }
     let turnResult: { systemPayload?: Record<string, unknown> } | null;
     try {
+      // Fire-time sentinel expansion happens here, at delivery, not in the
+      // pump's pick: a busy Session must not re-classify the same tick on
+      // every retry, and a denied re-review settles the input and lets the
+      // pump advance to the next pending input instead of stranding it.
+      let turnText = turn.text;
+      let didExpand = false;
+      if (turn.source === LOOP_INPUT_SOURCE && params.expandLoopFire) {
+        const expanded = await params.expandLoopFire(turn.turnId, turn.text);
+        if (expanded === null) return 'settled';
+        turnText = expanded.text;
+        didExpand = expanded.expanded;
+      }
       turnResult = (await params.executeHostedTurn(
         turn.turnId,
-        turn.text,
+        turnText,
         abort,
       )) as { systemPayload?: Record<string, unknown> } | null;
+      // Commit the resolver cache only for a completed turn that actually
+      // expanded a sentinel: a non-sentinel loop turn must not commit an
+      // orphaned expansion left pending by an earlier held/aborted/denied
+      // fire, and a cancelled/errored turn's user record is stripped from
+      // every later turn's history — committing it would leave each later
+      // fire on a short reminder for guidance the model never received
+      // (R8-1). executeHostedTurn settles those outcomes by returning the
+      // record, not by throwing, so the guard cannot live in the catch.
+      if (didExpand && turnResult?.systemPayload?.['state'] === 'completed') {
+        params.markLoopDelivered?.();
+      }
     } catch (cause) {
       if (params.needsRecovery(cause)) {
         // Something parked mid-turn: a later settle or takeover consumes

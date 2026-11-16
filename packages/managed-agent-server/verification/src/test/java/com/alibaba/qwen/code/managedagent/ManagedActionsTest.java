@@ -6,7 +6,6 @@ import ch.qos.logback.core.read.ListAppender;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.contracts.event.JournalEventTransport;
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitTransactionRequest;
@@ -14,15 +13,16 @@ import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedActionStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentDefinitionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedActionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedAgentDefinitionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionSkills;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcSessionWorktreeStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceLifecycleStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionSkills;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
-import com.alibaba.qwen.code.managedagent.persistence.SessionWorktreeStore;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.session.ActionResponseCoordinator;
 import com.alibaba.qwen.code.managedagent.session.ManagedActionService;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -96,8 +96,8 @@ class ManagedActionsTest {
     @Autowired private MockMvc mvc;
     @Autowired private ObjectMapper json;
     @Autowired private @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc;
-    @Autowired private ManagedSessionStore journals;
-    @Autowired private ManagedActionStore actions;
+    @Autowired private JdbcManagedSessionStore journals;
+    @Autowired private JdbcManagedActionStore actions;
     @Autowired private AgentStateStore sessions;
     @Autowired private ManagedAgentStore store;
 
@@ -125,17 +125,17 @@ class ManagedActionsTest {
     static class Configuration {
         @Bean @Primary
         ManagedAgentStore actionStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, ObjectMapper mapper,
-                ManagedWorkspaceRegistry registry, @Qualifier("managedAgentClock") Clock clock,
+                JdbcManagedWorkspaceRegistry registry, @Qualifier("managedAgentClock") Clock clock,
                 com.alibaba.qwen.code.managedagent.contracts.event.CommittedEventPublisher publisher,
-                WorktreeFiles worktreeFiles, ManagedSessionSkills skills, ExtensionPackages extensions,
-                @Nullable WorkspaceLifecycleStore lifecycle, @Nullable ManagedAgentDefinitionStore definitions,
-                @Nullable SessionWorktreeStore worktrees, @Nullable JournalEventTransport transport,
-                @Lazy @Nullable ManagedExtensionRecordStore records) {
+                WorktreeFiles worktreeFiles, JdbcManagedSessionSkills skills, ExtensionPackages extensions,
+                @Nullable JdbcWorkspaceLifecycleStore lifecycle, @Nullable JdbcManagedAgentDefinitionStore definitions,
+                @Nullable JdbcSessionWorktreeStore worktrees,
+                @Lazy @Nullable JdbcManagedExtensionRecordStore records) {
             var properties = new ManagedAgentProperties();
             properties.getHarness().setWorkspaceFilesEnabled(true);
             return new ManagedAgentStore(jdbc, mapper, clock, publisher, registry,
                     properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules(), worktreeFiles,
-                    skills, extensions, lifecycle, definitions, worktrees, transport, records);
+                    skills, extensions, lifecycle, definitions, worktrees, records);
         }
     }
 
@@ -196,7 +196,7 @@ class ManagedActionsTest {
             JsonNode response = call.getArgument(3);
             assertThat(response.at("/answers/0/optionIds/0").asText()).isEqualTo("q1o1");
             journal.change("decided", response);
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         });
         JsonNode admitted = readAccepted(auth(post(path(session, journal.id) + "/responses"), tenant, "owner")
                 .header("Idempotency-Key", "question-answer").contentType(MediaType.APPLICATION_JSON).content(body));
@@ -284,7 +284,7 @@ class ManagedActionsTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"web_fetch", "read_file", "write_file", "edit", "run_shell_command",
-            "todo_write", "context_search", "context_remember", "context_get", "context_forget",
+            "todo_write", "loop_wakeup", "cron_create", "cron_list", "cron_delete", "context_search", "context_remember", "context_get", "context_forget",
             "team_create", "task_create", "task_update", "workflow",
             "request_shutdown", "exit_plan_mode", "team_plan_approval"})
     void previewsExactInputOnPublicAndWebShellListsAndDetails(String tool) throws Exception {
@@ -298,6 +298,10 @@ class ManagedActionsTest {
             case "run_shell_command" -> "{ \"command\" : \"printf 'text'\" }";
             // #15076: the task list is the only preview this profile adds.
             case "todo_write" -> "{ \"todos\" : [ { \"id\" : \"1\", \"content\" : \"audit\", \"status\" : \"pending\" } ] }";
+            case "loop_wakeup" -> "{ \"delaySeconds\" : 60, \"prompt\" : \"/loop tick\" }";
+            case "cron_create" -> "{ \"cron\" : \"*/5 * * * *\", \"prompt\" : \"/loop tick\", \"recurring\" : true }";
+            case "cron_list" -> "{}";
+            case "cron_delete" -> "{ \"id\" : \"loop:wakeup-1\" }";
             case "context_search" -> "{ \"query\" : \"preferences\" }";
             case "context_remember" -> "{ \"content\" : \"Prefer concise answers\" }";
             case "context_get" -> "{ \"memoryId\" : \"memory-1\" }";
@@ -779,7 +783,7 @@ class ManagedActionsTest {
                 call -> {
                     delivered.incrementAndGet();
                     journal.change("decided", call.getArgument(3));
-                    throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                    throw WorkspaceExecutionStore.unavailable();
                 });
         mvc.perform(
                         auth(post(path(session, journal.id) + "/responses"), tenant, "other")
@@ -928,8 +932,8 @@ class ManagedActionsTest {
         responses.put(journal.id, call -> {
             if (attempts.incrementAndGet() == 1) {
                 throw switch (failure) {
-                    case "permanent" -> com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
-                    case "retryable" -> com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailableTransient(
+                    case "permanent" -> WorkspaceExecutionStore.unavailable();
+                    case "retryable" -> WorkspaceExecutionStore.unavailableTransient(
                             new IllegalStateException("temporary authority failure"));
                     default -> new RuntimeBrokerException(409, "runtime_unavailable",
                             "Runtime authority is unavailable.", false);

@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.harness;
 
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.fasterxml.jackson.databind.JsonNode;
 
 import java.util.List;
@@ -139,6 +140,22 @@ public final class SdkHarnessBoundary implements HarnessConnector {
     }
 
     @Override
+    public boolean supportsClientFiles() {
+        return call(delegate::supportsClientFiles);
+    }
+
+    @Override
+    public boolean supportsClientFiles(SessionRecord session) {
+        return call(() -> delegate.supportsClientFiles(session));
+    }
+
+    @Override
+    public Map<String, Object> clientFilesOperation(String tenantId, String sessionId,
+            Map<String, Object> body) {
+        return call(() -> delegate.clientFilesOperation(tenantId, sessionId, body));
+    }
+
+    @Override
     public boolean supportsMcpManagement() {
         return call(delegate::supportsMcpManagement);
     }
@@ -182,6 +199,24 @@ public final class SdkHarnessBoundary implements HarnessConnector {
     }
 
     @Override
+    public boolean supportsRuntimeSkillImport() { return call(delegate::supportsRuntimeSkillImport); }
+
+    @Override
+    public Map<String, Object> runtimeSkillCandidates(String tenant, String session) {
+        return call(() -> delegate.runtimeSkillCandidates(tenant, session));
+    }
+
+    @Override
+    public Map<String, Object> runtimeSkillSnapshot(String tenant, String session, Map<String, Object> request) {
+        return call(() -> delegate.runtimeSkillSnapshot(tenant, session, request));
+    }
+
+    @Override
+    public Map<String, Object> runtimeSkillArchive(String tenant, String session, Map<String, Object> request) {
+        return call(() -> delegate.runtimeSkillArchive(tenant, session, request));
+    }
+
+    @Override
     public Map<String, Object> applyExtensions(String tenantId, String sessionId, Map<String, Object> command) {
         return call(() -> delegate.applyExtensions(tenantId, sessionId, command));
     }
@@ -204,6 +239,11 @@ public final class SdkHarnessBoundary implements HarnessConnector {
     @Override
     public boolean supportsLifecycle(String profile) {
         return call(() -> delegate.supportsLifecycle(profile));
+    }
+
+    @Override
+    public boolean supportsSavedLifecycle(String profile) {
+        return call(() -> delegate.supportsSavedLifecycle(profile));
     }
 
     @Override

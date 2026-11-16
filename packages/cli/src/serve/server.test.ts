@@ -123,6 +123,7 @@ import {
   type GoalSnapshotV2,
 } from '@qwen-code/qwen-code-core';
 import * as qwenCore from '@qwen-code/qwen-code-core';
+import { GeneratedUiStateError } from '@qwen-code/qwen-code-core/services/generated-ui-state.js';
 import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
 import {
   BridgeTimeoutError,
@@ -304,47 +305,95 @@ vi.mock('node:fs', async (importOriginal) => {
     realpathSync: wrapped,
   };
 });
+// The worktree doubles live on the modules that define them, because the
+// shared restore core (`server/session-restore.ts`) imports those deep paths
+// rather than the barrel. The barrel mock below re-exports them, so a route
+// reading through the barrel and the restore reading through the deep path
+// observe the same double. The dependency runs barrel → deep only: a deep
+// factory that imported the mocked barrel would deadlock, since the barrel's
+// own `importOriginal` reaches these modules.
+vi.mock(
+  '@qwen-code/qwen-code-core/services/gitWorktreeService.js',
+  async (importOriginal) => {
+    const original =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/services/gitWorktreeService.js')
+      >();
+    return {
+      ...original,
+      createWorktreeSessionMarkerExclusive: (...args: unknown[]) =>
+        mockWt.createMarker ? mockWt.createMarker(...args) : Promise.resolve(),
+      readWorktreeSessionMarkerStrict: (...args: unknown[]) =>
+        mockWt.readMarker
+          ? mockWt.readMarker(...args)
+          : Promise.resolve({ state: 'missing' }),
+      readWorktreeSessionMarker: (...args: unknown[]) =>
+        mockWt.readMarkerLenient
+          ? mockWt.readMarkerLenient(...args)
+          : (
+              original.readWorktreeSessionMarker as (...a: unknown[]) => unknown
+            )(...args),
+      GitWorktreeService: class MockGitWorktreeService {
+        static validateUserWorktreeSlug =
+          original.GitWorktreeService.validateUserWorktreeSlug;
+        static generateAutoSlug = original.GitWorktreeService.generateAutoSlug;
+        constructor() {
+          if (mockWt.impl) {
+            Object.assign(this, mockWt.impl());
+          }
+        }
+      },
+    };
+  },
+);
+vi.mock(
+  '@qwen-code/qwen-code-core/services/worktreeSessionService.js',
+  async (importOriginal) => {
+    const original =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/services/worktreeSessionService.js')
+      >();
+    return {
+      ...original,
+      readWorktreeSession: (...args: unknown[]) =>
+        mockWt.readSidecar
+          ? mockWt.readSidecar(...args)
+          : Promise.resolve(null),
+      readWorktreeSessionStrict: async (...args: unknown[]) => {
+        if (mockWt.readSidecarStrict) {
+          return mockWt.readSidecarStrict(...args);
+        }
+        if (!mockWt.readSidecar) {
+          return { state: 'missing' };
+        }
+        const session = await mockWt.readSidecar(...args);
+        return session ? { state: 'valid', session } : { state: 'missing' };
+      },
+      writeWorktreeSession: (...args: unknown[]) =>
+        mockWt.writeSidecar ? mockWt.writeSidecar(...args) : Promise.resolve(),
+    };
+  },
+);
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const original =
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  const gitWorktree = await import(
+    '@qwen-code/qwen-code-core/services/gitWorktreeService.js'
+  );
+  const worktreeSession = await import(
+    '@qwen-code/qwen-code-core/services/worktreeSessionService.js'
+  );
   return {
     ...original,
-    createWorktreeSessionMarkerExclusive: (...args: unknown[]) =>
-      mockWt.createMarker ? mockWt.createMarker(...args) : Promise.resolve(),
-    readWorktreeSessionMarkerStrict: (...args: unknown[]) =>
-      mockWt.readMarker
-        ? mockWt.readMarker(...args)
-        : Promise.resolve({ state: 'missing' }),
-    readWorktreeSession: (...args: unknown[]) =>
-      mockWt.readSidecar ? mockWt.readSidecar(...args) : Promise.resolve(null),
-    readWorktreeSessionMarker: (...args: unknown[]) =>
-      mockWt.readMarkerLenient
-        ? mockWt.readMarkerLenient(...args)
-        : (original.readWorktreeSessionMarker as (...a: unknown[]) => unknown)(
-            ...args,
-          ),
-    readWorktreeSessionStrict: async (...args: unknown[]) => {
-      if (mockWt.readSidecarStrict) {
-        return mockWt.readSidecarStrict(...args);
-      }
-      if (!mockWt.readSidecar) {
-        return { state: 'missing' };
-      }
-      const session = await mockWt.readSidecar(...args);
-      return session ? { state: 'valid', session } : { state: 'missing' };
-    },
-    writeWorktreeSession: (...args: unknown[]) =>
-      mockWt.writeSidecar ? mockWt.writeSidecar(...args) : Promise.resolve(),
-    GitWorktreeService: class MockGitWorktreeService {
-      static validateUserWorktreeSlug =
-        original.GitWorktreeService.validateUserWorktreeSlug;
-      static generateAutoSlug = original.GitWorktreeService.generateAutoSlug;
-      constructor() {
-        if (mockWt.impl) {
-          Object.assign(this, mockWt.impl());
-        }
-      }
-    },
+    createWorktreeSessionMarkerExclusive:
+      gitWorktree.createWorktreeSessionMarkerExclusive,
+    readWorktreeSessionMarkerStrict:
+      gitWorktree.readWorktreeSessionMarkerStrict,
+    readWorktreeSessionMarker: gitWorktree.readWorktreeSessionMarker,
+    GitWorktreeService: gitWorktree.GitWorktreeService,
+    readWorktreeSession: worktreeSession.readWorktreeSession,
+    readWorktreeSessionStrict: worktreeSession.readWorktreeSessionStrict,
+    writeWorktreeSession: worktreeSession.writeWorktreeSession,
   };
 });
 
@@ -842,6 +891,7 @@ const EXPECTED_REGISTERED_FEATURES = [
         'workspace_artifact_library',
         'workspace_artifact_library_stream',
         'session_sources',
+        'generated_ui_state',
       ];
     }
     if (feature === 'mcp_guardrail_events') {
@@ -2634,6 +2684,12 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async callMcpAppTool() {
       return { content: [] };
     },
+    async getGeneratedUiState(_sessionId, cardId) {
+      return { cardId, revision: 0, value: null };
+    },
+    async setGeneratedUiState(_sessionId, cardId, write) {
+      return { outcome: 'saved', cardId, revision: write.baseRevision + 1 };
+    },
     async upsertSessionSource(_sessionId, input) {
       return {
         revision: 1,
@@ -3767,7 +3823,8 @@ describe('createServeApp', () => {
           feature === 'session_artifact_library' ||
           feature === 'workspace_artifact_library' ||
           feature === 'workspace_artifact_library_stream' ||
-          feature === 'session_sources'
+          feature === 'session_sources' ||
+          feature === 'generated_ui_state'
         ) {
           expect(
             predicate({ sessionArtifactsPersistenceAvailable: true }),
@@ -18884,15 +18941,16 @@ describe('createServeApp', () => {
       },
     );
 
-    // The restore handler's `!res.writable` cleanup branch (kill on
-    // !attached, detach on attached) is line-for-line identical to
-    // the matching branch on `POST /session`; routing-side
-    // disconnect tests for that handler weren't added when the
-    // cleanup was originally introduced because the supertest +
-    // Node http close-event timing makes the assertion flaky in
-    // CI. The same constraint applies here. The cleanup behavior
-    // is exercised manually via the route handler closure shared
-    // between both routes in `restoreSessionHandler`.
+    // The restore's disconnect cleanup (kill on !attached, detach on
+    // attached) is line-for-line identical to the matching branch on
+    // `POST /session`; routing-side disconnect tests for it weren't
+    // added when the cleanup was originally introduced because the
+    // supertest + Node http close-event timing makes the assertion
+    // flaky in CI. The same constraint applies here. The workspace-session
+    // arms now live in `restoreSessionCore` behind its `isCancelled`
+    // predicate, and `server/session-restore.test.ts` drives that predicate
+    // directly — no HTTP disconnect needed — so both arms, the telemetry
+    // sink and the reservation release are pinned there.
 
     it('restores worktree isolation on load when sidecar exists', async () => {
       const bridge = fakeBridge();
@@ -27707,6 +27765,113 @@ describe('createServeApp', () => {
         { clientId: 'client-1' },
       );
     });
+
+    it('Generated UI state requires a bound client and a minted card id, and forwards to the session owner', async () => {
+      const bridge = fakeBridge();
+      const get = vi.spyOn(bridge, 'getGeneratedUiState');
+      const set = vi.spyOn(bridge, 'setGeneratedUiState');
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const card = 'gc_aaaaaaaaaaaaaaaaaaaaaa';
+      const url = `/session/session-A/generated-ui/state/${card}`;
+      expect((await auth(request(app).get(url))).status).toBe(403);
+      expect(
+        (await auth(request(app).put(url)).send({ baseRevision: 0, value: 1 }))
+          .status,
+      ).toBe(403);
+      const badCard = await auth(
+        request(app).get('/session/session-A/generated-ui/state/card-1'),
+      ).set('X-Qwen-Client-Id', 'client-1');
+      expect(badCard.status).toBe(400);
+      expect(badCard.body.code).toBe('invalid_card_id');
+      for (const body of [
+        { value: 1 },
+        { baseRevision: -1, value: 1 },
+        { baseRevision: 0 },
+      ]) {
+        const invalid = await auth(request(app).put(url))
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send(body);
+        expect(invalid.status).toBe(400);
+        expect(invalid.body.code).toBe('invalid_state');
+      }
+      expect(get).not.toHaveBeenCalled();
+      expect(set).not.toHaveBeenCalled();
+
+      const read = await auth(request(app).get(url)).set(
+        'X-Qwen-Client-Id',
+        'client-1',
+      );
+      expect(read.status).toBe(200);
+      expect(read.body).toEqual({ cardId: card, revision: 0, value: null });
+      expect(get).toHaveBeenCalledWith('session-A', card, {
+        clientId: 'client-1',
+      });
+      const saved = await auth(request(app).put(url))
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ baseRevision: 0, value: { items: [] } });
+      expect(saved.status).toBe(200);
+      expect(saved.body).toEqual({
+        outcome: 'saved',
+        cardId: card,
+        revision: 1,
+      });
+      expect(set).toHaveBeenCalledWith(
+        'session-A',
+        card,
+        { baseRevision: 0, value: { items: [] } },
+        { clientId: 'client-1' },
+      );
+    });
+
+    it.each([
+      [{ outcome: 'stale', revision: 2, value: 'theirs' }, 409],
+      [{ outcome: 'too_large', limitBytes: 16384 }, 413],
+    ])(
+      'Generated UI state reports a %o write with its status',
+      async (result, status) => {
+        const bridge = fakeBridge();
+        const card = 'gc_aaaaaaaaaaaaaaaaaaaaaa';
+        vi.spyOn(bridge, 'setGeneratedUiState').mockResolvedValue({
+          cardId: card,
+          ...result,
+        } as never);
+        const app = createServeApp(tokenOpts, undefined, { bridge });
+        const res = await auth(
+          request(app).put(`/session/session-A/generated-ui/state/${card}`),
+        )
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ baseRevision: 1, value: 'mine' });
+        expect(res.status).toBe(status);
+        expect(res.body).toEqual({ cardId: card, ...result });
+      },
+    );
+
+    it.each([
+      ['state_unavailable', 503],
+      ['state_card_limit', 409],
+      ['invalid_state', 400],
+    ] as const)(
+      'Generated UI state maps %s and never reports a save',
+      async (code, status) => {
+        const bridge = fakeBridge();
+        vi.spyOn(bridge, 'setGeneratedUiState').mockRejectedValue(
+          new GeneratedUiStateError(code, 'View state operation failed'),
+        );
+        const app = createServeApp(tokenOpts, undefined, { bridge });
+        const res = await auth(
+          request(app).put(
+            '/session/session-A/generated-ui/state/gc_aaaaaaaaaaaaaaaaaaaaaa',
+          ),
+        )
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ baseRevision: 0, value: 1 });
+        expect(res.status).toBe(status);
+        expect(res.body).toEqual({
+          error: 'View state operation failed',
+          code,
+        });
+      },
+    );
 
     it('POST /session/:id/artifacts requires a client id', async () => {
       const bridge = fakeBridge();

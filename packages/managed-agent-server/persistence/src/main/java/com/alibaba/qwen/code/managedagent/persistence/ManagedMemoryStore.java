@@ -35,13 +35,13 @@ public class ManagedMemoryStore implements MemoryRepository {
     private final ObjectMapper json;
     private final Clock clock;
     private final ManagedAgentSettings settings;
-    private final ManagedSessionStore sessions;
+    private final JdbcManagedSessionStore sessions;
     private final TransactionTemplate transaction;
 
     public ManagedMemoryStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
             @Qualifier("managedAgentObjectMapper") ObjectMapper json,
             @Qualifier("managedAgentClock") Clock clock, ManagedAgentSettings settings,
-            ManagedSessionStore sessions,
+            JdbcManagedSessionStore sessions,
             @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager) {
         this.jdbc = jdbc;
         this.json = json;

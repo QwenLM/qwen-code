@@ -20,17 +20,21 @@ const sleep = (ms) =>
 export function command(
   program,
   args,
-  { env = process.env, input, timeout = 30000, binary = false } = {},
+  { env = process.env, input, timeout = 30000, binary = false, signal } = {},
 ) {
   return new Promise((resolveCommand, reject) => {
     const child = spawn(program, args, {
       env,
       stdio: ['pipe', 'pipe', 'pipe'],
+      signal,
     });
     const output = [];
     let outputSize = 0;
     let stderr = '';
-    const timer = setTimeout(() => child.kill('SIGKILL'), timeout);
+    const timer =
+      timeout > 0
+        ? setTimeout(() => child.kill('SIGKILL'), timeout)
+        : undefined;
     child.stdout.on('data', (chunk) => {
       outputSize += chunk.length;
       if (outputSize > 4 * 1024 * 1024) child.kill('SIGKILL');
@@ -101,6 +105,8 @@ function validate(c) {
     !(c.ttlSeconds > 0) ||
     !Number.isFinite(c.shutdownGraceSeconds) ||
     !(c.shutdownGraceSeconds >= 0) ||
+    (c.drainTimeoutSeconds !== undefined &&
+      (!Number.isFinite(c.drainTimeoutSeconds) || c.drainTimeoutSeconds < 0)) ||
     !Number.isSafeInteger(c.minDiskBytes) ||
     c.minDiskBytes < 0 ||
     (c.stallAlertSeconds !== undefined &&
@@ -203,6 +209,20 @@ export function createManager(config, dependencies = {}) {
       remaining -= chunk;
     }
   };
+  // Draining is a shutdown-only cost, so a five-second poll per slot is
+  // cheap. Two consecutive idle observations keep a runner that is about to
+  // receive a queued job from being killed in the gap between the check and
+  // the stop.
+  const drainPollMs = 5000;
+  const containerHasWorker = async (id) => {
+    try {
+      return /\bRunner\.Worker\b/.test(await run('docker', ['top', id]));
+    } catch {
+      // An unreadable process table is not proof of an idle runner. Keep
+      // waiting and let the drain deadline decide.
+      return true;
+    }
+  };
   function parseJson(text) {
     try {
       return JSON.parse(text);
@@ -295,6 +315,29 @@ export function createManager(config, dependencies = {}) {
     ];
     if (slot !== undefined) args.push('--filter', `label=qwen.slot=${slot}`);
     return (await run('docker', args)).trim().split('\n').filter(Boolean);
+  }
+
+  // The labels are the identity anchor label recovery reads back, so
+  // provisioning and the refusal-path retry anchor must create identical
+  // networks.
+  async function createNetwork(slot, name) {
+    return (
+      await run('docker', [
+        'network',
+        'create',
+        '--driver',
+        'bridge',
+        '--opt',
+        'com.docker.network.bridge.enable_icc=false',
+        '--label',
+        `qwen.pool=${config.poolId}`,
+        '--label',
+        `qwen.slot=${slot}`,
+        '--label',
+        `qwen.instance=${name}`,
+        name,
+      ])
+    ).trim();
   }
 
   async function collectIdentities(containers, networks) {
@@ -487,84 +530,10 @@ export function createManager(config, dependencies = {}) {
         }
       }
     }
-    // A container whose storage layer is gone (dockerd restart left
-    // `RWLayer ... is unexpectedly nil`) can never yield logs or a `_diag`
-    // archive, and it may vanish from under us mid-cleanup. Detect that
-    // from stderr instead of retrying every diagnostic call each cycle.
-    const layerless = (error) =>
-      /RWLayer of container .* is unexpectedly nil/.test(error?.stderr || '');
-    const alreadyGone = (error) =>
-      /No such container/i.test(error?.stderr || '');
-    for (const id of containers) {
-      let diagnosticsPossible = true;
-      try {
-        const logs = await run('docker', ['logs', '--tail', '10000', id]);
-        await writeFile(
-          join(
-            logDir,
-            `${state?.name || `qwen-${config.poolId}-${slot}-orphan`}-${id.slice(0, 12)}.log`,
-          ),
-          logs.slice(-1024 * 1024),
-          { mode: 0o600 },
-        );
-        await pruneLogs();
-      } catch (error) {
-        if (layerless(error) || alreadyGone(error)) {
-          diagnosticsPossible = false;
-          log(
-            `slot ${slot}: container ${id.slice(0, 12)} lost its storage layer or is already gone; skipping diagnostics`,
-          );
-        } else log(`slot ${slot}: container logs unavailable`);
-      }
-      if (diagnosticsPossible) {
-        try {
-          const archive = await run(
-            'docker',
-            ['cp', `${id}:/home/node/actions-runner/_diag`, '-'],
-            { binary: true },
-          );
-          await writeFile(
-            join(
-              logDir,
-              `${state?.name || `qwen-${config.poolId}-${slot}-orphan`}-${id.slice(0, 12)}.tar`,
-            ),
-            archive,
-            { mode: 0o600 },
-          );
-          await pruneLogs();
-        } catch (error) {
-          if (layerless(error) || alreadyGone(error))
-            log(
-              `slot ${slot}: container ${id.slice(0, 12)} lost its storage layer or is already gone; skipping diagnostics`,
-            );
-          else
-            log(
-              `slot ${slot}: runner diagnostics unavailable or larger than 4 MiB`,
-            );
-        }
-      }
-      try {
-        await run('docker', ['rm', '-f', '-v', id]);
-      } catch (error) {
-        if (alreadyGone(error)) continue;
-        if (layerless(error))
-          throw new Error(
-            `container ${id.slice(0, 12)} has no storage layer; removal deferred until Docker drops the record`,
-            { cause: error },
-          );
-        throw error;
-      }
-    }
-    if ((await listContainers(slot)).length)
-      throw new Error('Container cleanup failed');
-    for (const id of networks) await run('docker', ['network', 'rm', id]);
-    if ((await listNetworks(slot)).length)
-      throw new Error('Network cleanup failed');
-    if (orphanSweepBlocked)
-      throw new Error(
-        'Orphaned resources carry no unambiguous slot identity; manual reconciliation required',
-      );
-    if (state?.name) {
+    // Reconcile the slot's GitHub registration. Both call sites below use
+    // it; each site's comment explains its placement and what a thrown
+    // refusal leaves behind to retry — see `resourceAnchoredIdentity`.
+    const reconcileRegistration = async () => {
       const all = await listRunners();
       // A recorded runnerName is exact. A label-recovered identity carries
       // only the instance name: main registered under the bare display name,
@@ -607,6 +576,18 @@ export function createManager(config, dependencies = {}) {
           'JIT response was lost; runner not found, manual reconciliation required',
         );
       for (const runner of runners) {
+        // A label-recovered identity (no recorded runnerName or runnerId) is
+        // not state-anchored: an online match may belong to a live runner
+        // outside this host's view, and a missing or unknown status must fail
+        // closed. Nothing about this identity is persisted, so the check only
+        // retries because the call below runs before the resources are
+        // removed: the leftover pile is what brings the next cycle back here.
+        // Identity checks above still see every match, so a mismatch stays
+        // blocking.
+        if (!state.runnerName && !state.runnerId && runner.status !== 'offline')
+          throw new Error(
+            `Runner ${runner.id} is not reported offline; keeping the recovered resources to retry`,
+          );
         try {
           await gh([
             '-X',
@@ -616,22 +597,148 @@ export function createManager(config, dependencies = {}) {
         } catch (error) {
           if (error.status === 404) continue;
           // GitHub rejects deletion while it still considers the runner busy.
-          // Keep the state so the next cycle retries the same identity instead
-          // of orphaning a registration that blocks its own replacement.
-          // Carry the status through the rewrap: the retry loop picks the
+          // Fail the cycle instead of dropping the identity: the retained slot
+          // state — or, for a label-recovered identity, the retained resources
+          // — comes back to this same check on the next cycle, instead of
+          // orphaning a registration that blocks its own replacement. Carry
+          // the status through the rewrap: the retry loop picks the
           // rate-limit ladder from it, and a 403/429 DELETE is exactly the
           // shape a rate-limit storm produces here.
           const rejected = new Error(
             `Runner ${runner.id} deletion was rejected${
               error.status ? ` (HTTP ${error.status})` : ''
-            }; retaining slot state to retry`,
+            }; retrying on the next cycle`,
             { cause: error },
           );
           rejected.status = error.status;
           throw rejected;
         }
       }
+    };
+    // A container whose storage layer is gone (dockerd restart left
+    // `RWLayer ... is unexpectedly nil`) can never yield logs or a `_diag`
+    // archive, and it may vanish from under us mid-cleanup. Detect that
+    // from stderr instead of retrying every diagnostic call each cycle.
+    const layerless = (error) =>
+      /RWLayer of container .* is unexpectedly nil/.test(error?.stderr || '');
+    const alreadyGone = (error) =>
+      /No such container/i.test(error?.stderr || '');
+    // Diagnostics run before any reconciliation refusal so a wedged slot
+    // still exports the one container an operator must inspect.
+    const captureDiagnostics = async (id) => {
+      try {
+        const logs = await run('docker', ['logs', '--tail', '10000', id]);
+        await writeFile(
+          join(
+            logDir,
+            `${state?.name || `qwen-${config.poolId}-${slot}-orphan`}-${id.slice(0, 12)}.log`,
+          ),
+          logs.slice(-1024 * 1024),
+          { mode: 0o600 },
+        );
+        await pruneLogs();
+      } catch (error) {
+        if (layerless(error) || alreadyGone(error)) {
+          log(
+            `slot ${slot}: container ${id.slice(0, 12)} lost its storage layer or is already gone; skipping diagnostics`,
+          );
+          return;
+        } else log(`slot ${slot}: container logs unavailable`);
+      }
+      try {
+        const archive = await run(
+          'docker',
+          ['cp', `${id}:/home/node/actions-runner/_diag`, '-'],
+          { binary: true },
+        );
+        await writeFile(
+          join(
+            logDir,
+            `${state?.name || `qwen-${config.poolId}-${slot}-orphan`}-${id.slice(0, 12)}.tar`,
+          ),
+          archive,
+          { mode: 0o600 },
+        );
+        await pruneLogs();
+      } catch (error) {
+        if (layerless(error) || alreadyGone(error))
+          log(
+            `slot ${slot}: container ${id.slice(0, 12)} lost its storage layer or is already gone; skipping diagnostics`,
+          );
+        else
+          log(
+            `slot ${slot}: runner diagnostics unavailable or larger than 4 MiB`,
+          );
+      }
+    };
+    const removeContainer = async (id) => {
+      try {
+        await run('docker', ['rm', '-f', '-v', id]);
+      } catch (error) {
+        if (alreadyGone(error)) return;
+        if (layerless(error))
+          throw new Error(
+            `container ${id.slice(0, 12)} has no storage layer; removal deferred until Docker drops the record`,
+            { cause: error },
+          );
+        throw error;
+      }
+    };
+    // A label-recovered identity lives only in the resource labels, never in a
+    // slot state file. Once the container and network are gone the next cycle
+    // finds nothing to clean up and just replenishes the slot, leaking the
+    // registration for good. Reconcile it while the resources still exist, so
+    // a refusal or a rejected deletion leaves an anchor that keeps this slot
+    // re-entering cleanup(). A state-anchored identity stays on the later
+    // call site: deleting its registration before the container is stopped
+    // would hit GitHub's "runner is busy" rejection for every watchdog kill.
+    const resourceAnchoredIdentity =
+      Boolean(state?.name) && !state.runnerName && !state.runnerId;
+    if (resourceAnchoredIdentity) {
+      for (const id of containers) await captureDiagnostics(id);
+      try {
+        await reconcileRegistration();
+      } catch (error) {
+        // No refusal keeps the CONTAINER. An online match backed by this
+        // slot's OWN leftover container would otherwise never clear: the
+        // retained container keeps heartbeating, so every cycle throws the
+        // same gate. Remove the containers and keep the labelled network
+        // as the retry anchor — the runner can now actually reach offline,
+        // and the network keeps the next cycle in cleanup(). A permanent
+        // identity refusal pins no compute either: the same error
+        // resurfaces from the network anchor until a human reconciles, and
+        // the registration is never deleted.
+        // Persist nothing: a label-recovered identity has no valid state
+        // shape (load() requires a runnerId unless uncertain), so the
+        // labelled network alone anchors the retry for both refusal kinds.
+        // Secure the anchor BEFORE removing the containers: a killed
+        // `docker create` leaves a container-only pile, and if the anchor
+        // creation failed after removal the slot would replenish and leak
+        // the registration. With this order a failed creation still leaves
+        // the containers to bring the next cycle back.
+        if (!networks.length) {
+          await createNetwork(slot, state.name);
+        }
+        for (const id of containers) await removeContainer(id);
+        if ((await listContainers(slot)).length)
+          throw new Error('Container cleanup failed');
+        throw error;
+      }
     }
+    for (const id of containers) {
+      if (!resourceAnchoredIdentity) await captureDiagnostics(id);
+      await removeContainer(id);
+    }
+    if ((await listContainers(slot)).length)
+      throw new Error('Container cleanup failed');
+    for (const id of networks) await run('docker', ['network', 'rm', id]);
+    if ((await listNetworks(slot)).length)
+      throw new Error('Network cleanup failed');
+    if (orphanSweepBlocked)
+      throw new Error(
+        'Orphaned resources carry no unambiguous slot identity; manual reconciliation required',
+      );
+    if (state?.name && !resourceAnchoredIdentity) await reconcileRegistration();
     await rm(slotPath(slot), { force: true });
     log(`slot ${slot}: cleaned`);
   }
@@ -717,23 +824,7 @@ export function createManager(config, dependencies = {}) {
       await save(slot, state);
       if (!result.encoded_jit_config)
         throw new Error('GitHub returned no JIT configuration');
-      const networkId = (
-        await run('docker', [
-          'network',
-          'create',
-          '--driver',
-          'bridge',
-          '--opt',
-          'com.docker.network.bridge.enable_icc=false',
-          '--label',
-          `qwen.pool=${config.poolId}`,
-          '--label',
-          `qwen.slot=${slot}`,
-          '--label',
-          `qwen.instance=${state.name}`,
-          state.name,
-        ])
-      ).trim();
+      const networkId = await createNetwork(slot, state.name);
       if (!networkId) throw new Error('Docker returned no network ID');
       state.networkId = networkId;
       await save(slot, state);
@@ -787,28 +878,176 @@ export function createManager(config, dependencies = {}) {
         log(
           `slot ${slot}: started runner ${state.runnerName}, id ${state.runnerId}, container ${id}`,
         );
-        const deadline = Date.now() + config.ttlSeconds * 1000;
+        let nextHealthCheck = Date.now() + config.ttlSeconds * 1000;
+        let nextDrainCheck = 0;
+        let idleSince;
+        let retireRefusalLogged;
+        let stoppedIdle = false;
+        let stoppedByExit = false;
         let exitCode;
-        const watching = run('docker', ['wait', id], {
-          timeout: (config.ttlSeconds + 10) * 1000,
-        }).then(
-          (output) => {
-            const status = output.trim();
-            exitCode =
-              /^\d+$/.test(status) && Number(status) <= 255
-                ? Number(status)
-                : null;
-            return true;
-          },
-          () => {
-            exitCode = null;
-            return true;
-          },
-        );
-        while (Date.now() < Math.min(deadline, stopAt)) {
-          if (await Promise.race([watching, wait(1000).then(() => false)]))
-            break;
+        let waitWarningLogged = false;
+        // `docker top` observes processes, not the assignment queue, so an
+        // idle probe alone cannot prove GitHub will not hand this online
+        // runner a job in the gap before the container is removed. Deleting
+        // the registration is the server-side gate: only an accepted DELETE
+        // proves the runner is no longer assignable, and only then may the
+        // container stop. Busy (422) means a job may have just been
+        // assigned; 403/429 mean the answer is unknown. So does 404: GitHub
+        // hides resources the credential cannot see, so a revoked repo
+        // access looks exactly like a registration that is gone, and the
+        // registration may still be online taking jobs. Unconfirmed answers
+        // keep the container draining and retry, and the deadline still
+        // forces the shutdown. Cleanup keeps tolerating 404 after the
+        // container is stopped — that is a retry of a resource already given
+        // up, not this gate. Returns the refusal error, or undefined when
+        // GitHub accepted the deletion.
+        const retireRegistration = async () => {
+          try {
+            await gh([
+              '-X',
+              'DELETE',
+              `/repos/${config.repo}/actions/runners/${state.runnerId}`,
+            ]);
+            return undefined;
+          } catch (error) {
+            return error;
+          }
+        };
+        const controller = new AbortController();
+        const watch = () =>
+          run('docker', ['wait', id], {
+            timeout: 0,
+            signal: controller.signal,
+          }).then(
+            (output) => {
+              const status = output.trim();
+              return /^\d+$/.test(status) && Number(status) <= 255
+                ? { code: Number(status) }
+                : {};
+            },
+            () => ({}),
+          );
+        let watching = watch();
+        try {
+          while (Date.now() < stopAt) {
+            const result = await Promise.race([
+              watching,
+              wait(1000).then(() => null),
+            ]);
+            if (result) {
+              if (result.code !== undefined) {
+                exitCode = result.code;
+                stoppedByExit = true;
+                break;
+              }
+              // A failed wait client is not proof that the container exited.
+              try {
+                const status = parseJson(
+                  await run('docker', [
+                    'inspect',
+                    '--format',
+                    '{{json .State}}',
+                    id,
+                  ]),
+                );
+                if (status.Status === 'exited' || status.Status === 'dead') {
+                  exitCode = Number.isInteger(status.ExitCode)
+                    ? status.ExitCode
+                    : null;
+                  stoppedByExit = true;
+                  break;
+                }
+              } catch {
+                try {
+                  if (!(await listContainers(slot)).includes(id)) {
+                    exitCode = null;
+                    stoppedByExit = true;
+                    break;
+                  }
+                } catch {
+                  // Docker being unavailable is not proof of container exit.
+                }
+              }
+              if (!waitWarningLogged) {
+                log(
+                  `WATCHDOG ALERT slot ${slot}: container exit unconfirmed; keeping it and retrying`,
+                );
+                waitWarningLogged = true;
+              }
+              await wait(1000);
+              watching = watch();
+            }
+            if (Date.now() >= nextHealthCheck) {
+              nextHealthCheck = Date.now() + 300000;
+              try {
+                const runner = parseJson(
+                  await gh([
+                    `/repos/${config.repo}/actions/runners/${state.runnerId}`,
+                  ]),
+                );
+                if (
+                  runner.id !== state.runnerId ||
+                  runner.name !== state.runnerName ||
+                  runner.status !== 'online'
+                )
+                  throw new Error(
+                    'runner identity or online status unconfirmed',
+                  );
+              } catch {
+                log(
+                  `WATCHDOG ALERT slot ${slot}: runner health unconfirmed; container retained for inspection`,
+                );
+              }
+            }
+            if (
+              stopping &&
+              config.drainTimeoutSeconds > 0 &&
+              Date.now() >= nextDrainCheck
+            ) {
+              nextDrainCheck = Date.now() + drainPollMs;
+              if (await containerHasWorker(id)) idleSince = undefined;
+              else if (idleSince === undefined) idleSince = Date.now();
+              else if (Date.now() - idleSince >= drainPollMs) {
+                const refusal = await retireRegistration();
+                if (!refusal) {
+                  stoppedIdle = true;
+                  log(`slot ${slot}: idle; stopping the runner for shutdown`);
+                  break;
+                }
+                // A refused retirement is not proof the slot is free: a job
+                // could have been assigned after the probe. Start the idle
+                // window over so the next decision needs a fresh two-poll
+                // observation, and keep draining until the deadline.
+                idleSince = undefined;
+                const refusalKey = refusal.status ?? 'unknown';
+                if (refusalKey !== retireRefusalLogged) {
+                  retireRefusalLogged = refusalKey;
+                  log(
+                    `slot ${slot}: runner registration not retired${
+                      refusal.status ? ` (HTTP ${refusal.status})` : ''
+                    }; keeping the container and draining`,
+                  );
+                }
+                // Do not hammer the API at the poll cadence when GitHub is
+                // already rate-limiting this credential; reuse the same
+                // backoff ladder as the rest of the manager.
+                if (refusal.status === 403 || refusal.status === 429)
+                  nextDrainCheck = Date.now() + backoffDelay(1, true);
+              }
+            }
+          }
+        } finally {
+          controller.abort();
         }
+        if (
+          stopping &&
+          config.drainTimeoutSeconds > 0 &&
+          !stoppedIdle &&
+          !stoppedByExit
+        )
+          log(
+            `slot ${slot}: drain window elapsed; stopping a runner with a job in flight`,
+          );
         if (exitCode !== undefined && exitCode !== 0) {
           earlyExit = true;
           log(
@@ -941,7 +1180,15 @@ export function createManager(config, dependencies = {}) {
   }
   function stop() {
     stopping = true;
-    stopAt = Math.min(stopAt, Date.now() + config.shutdownGraceSeconds * 1000);
+    const drainMs = (config.drainTimeoutSeconds ?? 0) * 1000;
+    if (drainMs > 0)
+      log(
+        `draining up to ${Math.round((drainMs + config.shutdownGraceSeconds * 1000) / 1000)}s for in-flight jobs`,
+      );
+    stopAt = Math.min(
+      stopAt,
+      Date.now() + drainMs + config.shutdownGraceSeconds * 1000,
+    );
   }
   return { start, stop, cycle, cleanup };
 }

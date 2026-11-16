@@ -10,6 +10,7 @@ import com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.session.ManagedUserMessagePolicy;
@@ -43,7 +44,7 @@ public class ManagedMemorySessionPrivacyTest {
     private JdbcTemplate jdbc;
     private TransactionTemplate transaction;
     private ManagedAgentStore store;
-    private ManagedWorkspaceRegistry workspaces;
+    private JdbcManagedWorkspaceRegistry workspaces;
     private ManagedAgentService service;
     private HarnessConnector harness;
     private final String tenant = "memory-privacy-" + UUID.randomUUID();
@@ -61,7 +62,7 @@ public class ManagedMemorySessionPrivacyTest {
         ManagedSchema.initialize(source);
         jdbc = new ManagedSchemaJdbcTemplate(source);
         transaction = new TransactionTemplate(new DataSourceTransactionManager(source));
-        workspaces = new ManagedWorkspaceRegistry(jdbc);
+        workspaces = new JdbcManagedWorkspaceRegistry(jdbc);
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
         store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(
@@ -207,7 +208,7 @@ public class ManagedMemorySessionPrivacyTest {
         String shared = workspaceSession("owner", "workspace-a", null);
         String privateSchedule = schedule(personal);
         String sharedSchedule = schedule(shared);
-        var ledger = new AutomationLedgerStore(jdbc);
+        var ledger = new JdbcAutomationLedgerStore(jdbc);
         var automations = new com.alibaba.qwen.code.managedagent.automation.ManagedAutomationService(
                 ledger, store, workspaces, harness, null, new RequestDigests(), new ObjectMapper(), new ManagedAgentProperties());
         assertThat(automations.get(tenant, "owner", privateSchedule).goal()).isEqualTo("private synthetic context");
@@ -244,7 +245,7 @@ public class ManagedMemorySessionPrivacyTest {
     }
 
     private byte[] actorKey(String actor) {
-        return com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenant, actor);
+        return ManagedWorkspaceRegistry.actorKey(tenant, actor);
     }
 
     private int sessionCount() {

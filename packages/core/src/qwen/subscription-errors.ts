@@ -16,6 +16,9 @@ import {
 
 const debugLogger = createDebugLogger('QWEN_SUBSCRIPTION');
 
+export const SUBSCRIPTION_SIGN_IN_REQUIRED_MESSAGE =
+  'Your login credentials are no longer valid. Run /auth to sign in again.';
+
 export function isSubscriptionSessionExpired(
   error: unknown,
 ): error is SubscriptionOAuthError {
@@ -103,7 +106,7 @@ export function subscriptionErrorMessage(
     error.code === 'invalid_token' ||
     error.status === 401
   )
-    return 'Your login credentials are no longer valid. Run /auth to sign in again.';
+    return SUBSCRIPTION_SIGN_IN_REQUIRED_MESSAGE;
   if (error.status === 429) return 'Too many requests. Please try again later.';
   if (error.stage === 'credentials' || error.stage === 'cleanup')
     return 'Could not read or save Qwen credentials. Check local file permissions and disk space.';

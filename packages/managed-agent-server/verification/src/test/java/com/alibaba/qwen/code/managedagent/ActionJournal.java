@@ -3,7 +3,7 @@ package com.alibaba.qwen.code.managedagent;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitResource;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitTransactionRequest;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedUserQuestions;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -26,7 +26,7 @@ final class ActionJournal {
     private int changes;
 
     ActionJournal(
-            ManagedSessionStore store, String tenant, String session, long created, long expiry) {
+            JdbcManagedSessionStore store, String tenant, String session, long created, long expiry) {
         this(
                 new ExtensionRecordJournal(store, tenant, "workspace-actions", session).open(),
                 created,

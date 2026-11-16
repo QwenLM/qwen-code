@@ -34,11 +34,17 @@ import styles from './TokenUsagePanel.module.css';
 import {
   SpeedSpread,
   TokenUsageTrend,
-  isLegacySpeed,
   sampleSpeed,
-  tokensPerSecond,
   type TrendSeries,
 } from './TokenUsageTrend';
+import {
+  formatCompact,
+  inputTokens,
+  outputSpeed,
+  outputTokens,
+  summarizeSessionUsage,
+  totalTokens,
+} from './tokenUsageTotals';
 
 const POLL_INTERVAL_MS = 2_000;
 /** Distinct series colors; later models share a neutral color. */
@@ -55,23 +61,6 @@ interface ModelEntry {
   metrics: DaemonSessionStatsModelMetrics;
   /** Color slot by first use, so a model keeps its color as ranks change. */
   color: string;
-}
-
-function inputTokens(tokens: DaemonSessionStatsModelMetrics['tokens']): number {
-  return tokens.prompt > 0 ? tokens.prompt : tokens.cached;
-}
-
-function totalTokens(tokens: DaemonSessionStatsModelMetrics['tokens']): number {
-  const input = inputTokens(tokens);
-  return tokens.total > 0
-    ? Math.max(tokens.total, input + tokens.candidates)
-    : input + tokens.candidates + tokens.thoughts;
-}
-
-function outputTokens(
-  tokens: DaemonSessionStatsModelMetrics['tokens'],
-): number {
-  return Math.max(0, totalTokens(tokens) - inputTokens(tokens));
 }
 
 function flattenModels(
@@ -93,18 +82,6 @@ function flattenModels(
 
 function formatCount(n: number): string {
   return n.toLocaleString('en-US');
-}
-
-/** Compact token counts: 1,390,000 → "1.39M", 199,076 → "199.1K". */
-function formatCompact(n: number): string {
-  if (n >= 999_995_000) return trimZeros((n / 1_000_000_000).toFixed(2)) + 'B';
-  if (n >= 999_950) return trimZeros((n / 1_000_000).toFixed(2)) + 'M';
-  if (n >= 1_000) return trimZeros((n / 1_000).toFixed(1)) + 'K';
-  return String(n);
-}
-
-function trimZeros(value: string): string {
-  return value.replace(/\.?0+$/, '');
 }
 
 interface RequestOutcome {
@@ -132,28 +109,6 @@ const OUTCOME_ICONS = {
   warning: TriangleAlertIcon,
   error: CircleAlertIcon,
 } as const;
-
-/**
- * Token-weighted output tokens per second over the timed requests' time from
- * sending each request to its last visible output, TTFT included. Older
- * daemons do not send that time; their sums only support their own rate over
- * the generation window.
- */
-function outputSpeed(
-  generation: DaemonSessionStatsModelMetrics['generation'],
-  legacy: boolean,
-): number | undefined {
-  if (!generation) return undefined;
-  return legacy
-    ? tokensPerSecond(
-        generation.totalThroughputOutputTokens,
-        generation.totalGenerationDurationMs,
-      )
-    : tokensPerSecond(
-        generation.totalOutputSpeedTokens ?? 0,
-        generation.totalOutputSpeedDurationMs ?? 0,
-      );
-}
 
 export function TokenUsagePanel({
   sessionActions,
@@ -275,53 +230,8 @@ function TokenUsageBody({
 }) {
   const { t } = useI18n();
   const entries = flattenModels(status.models);
-  const totals = entries.reduce(
-    (acc, e) => {
-      acc.prompt += inputTokens(e.metrics.tokens);
-      acc.cached += e.metrics.tokens.cached;
-      acc.output += outputTokens(e.metrics.tokens);
-      acc.thoughts += e.metrics.tokens.thoughts;
-      acc.total += totalTokens(e.metrics.tokens);
-      acc.requests += e.metrics.api.totalRequests;
-      acc.failed += e.metrics.api.totalErrors;
-      const g = e.metrics.generation;
-      if (g) {
-        acc.generation.timedRequests += g.timedRequests;
-        acc.generation.totalTtftMs += g.totalTtftMs;
-        acc.generation.totalGenerationDurationMs += g.totalGenerationDurationMs;
-        acc.generation.totalThroughputOutputTokens +=
-          g.totalThroughputOutputTokens;
-        acc.generation.totalTimedGenerationDurationMs +=
-          g.totalTimedGenerationDurationMs ?? 0;
-        acc.generation.totalOutputSpeedTokens += g.totalOutputSpeedTokens ?? 0;
-        acc.generation.totalOutputSpeedDurationMs +=
-          g.totalOutputSpeedDurationMs ?? 0;
-      }
-      return acc;
-    },
-    {
-      prompt: 0,
-      cached: 0,
-      output: 0,
-      thoughts: 0,
-      total: 0,
-      requests: 0,
-      failed: 0,
-      generation: {
-        timedRequests: 0,
-        totalTtftMs: 0,
-        totalGenerationDurationMs: 0,
-        totalThroughputOutputTokens: 0,
-        totalTimedGenerationDurationMs: 0,
-        totalOutputSpeedTokens: 0,
-        totalOutputSpeedDurationMs: 0,
-      },
-    },
-  );
-  // Every model comes from the same daemon, so one tells which rule applies.
-  const legacySpeed = entries.some(
-    (e) => e.metrics.generation && isLegacySpeed(e.metrics.generation),
-  );
+  const totals = summarizeSessionUsage(status);
+  const legacySpeed = totals.legacySpeed;
   const grandTotal = totals.total;
   const trendSeries: TrendSeries[] = entries
     .map((entry) => ({

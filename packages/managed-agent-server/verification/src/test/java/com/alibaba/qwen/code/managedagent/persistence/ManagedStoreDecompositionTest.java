@@ -50,7 +50,7 @@ class ManagedStoreDecompositionTest {
             assertNoSpringComponent(component);
             for (var field : component.getDeclaredFields()) {
                 assertThat(Modifier.isFinal(field.getModifiers())).as(field.toString()).isTrue();
-                assertThat(field.getType()).isNotIn(ManagedAgentStore.class, ManagedSessionStore.class);
+                assertThat(field.getType()).isNotIn(ManagedAgentStore.class, JdbcManagedSessionStore.class);
             }
             assertThat(Arrays.stream(component.getDeclaredMethods()))
                     .noneMatch(method -> method.isAnnotationPresent(Transactional.class));
@@ -95,16 +95,14 @@ class ManagedStoreDecompositionTest {
                 insertSessionCommand/11::REQUIRED:DEFAULT:false
                 insertSessionCommand/12::REQUIRED:DEFAULT:false
                 insertWorkspaceSessionCommand/1::REQUIRED:DEFAULT:false insertInternalTeamLeadSessionCommand/6::REQUIRED:DEFAULT:false findWorkspaceCreateReplay/4:-
-                replayWorkspaceSessionCommand/4::REQUIRED:DEFAULT:false insertCsiSessionCommand/7:- requireCsiRequest/2:-
+                replayWorkspaceSessionCommand/4::REQUIRED:DEFAULT:false
                 insertChildSessionCommand/8::REQUIRED:DEFAULT:false insertChildSessionCommand/9::REQUIRED:DEFAULT:false findChildWorkspaceCwd/3:-
                 insertPublicChildSessionCommand/9::REQUIRED:DEFAULT:false replayChildSessionCommand/4::REQUIRED:DEFAULT:false findChildLineage/2:-
                 workspaceSessionOptions/2::REQUIRED:DEFAULT:false supportsPlanMode/1:- hasMcpServers/1:-
                 requireMcpManagement/4::REQUIRED:DEFAULT:false requireMcpSettingsCommit/3::MANDATORY:DEFAULT:false requireExtensionManagement/5::REQUIRED:DEFAULT:false canApplyExtensions/1:-
                 requireConfigurationCommit/4::MANDATORY:DEFAULT:false insertTurnCommand/7::REQUIRED:DEFAULT:false insertTurnCommand/8::REQUIRED:DEFAULT:false
-                insertCancelCommand/6::REQUIRED:DEFAULT:false insertCancelCommand/7::REQUIRED:DEFAULT:false beginSessionRename/5::REQUIRED:DEFAULT:false
-                beginSessionRename/6::REQUIRED:DEFAULT:false completeSessionRename/6::REQUIRED:DEFAULT:false completeSessionRename/3::REQUIRED:DEFAULT:false
-                abandonSessionRename/5::REQUIRED:DEFAULT:false deliverableRenames/1::REQUIRED:DEFAULT:false claimRename/3::REQUIRED:DEFAULT:false
-                markRenameSubmitted/2:- retryRename/3::REQUIRED:DEFAULT:false beginSessionMutation/6::REQUIRED:DEFAULT:false
+                insertCancelCommand/6::REQUIRED:DEFAULT:false insertCancelCommand/7::REQUIRED:DEFAULT:false settleRenameSync/6::REQUIRED:DEFAULT:false
+                beginSessionMutation/6::REQUIRED:DEFAULT:false
                 beginSessionMutation/7::REQUIRED:DEFAULT:false completeSessionMutation/7::REQUIRED:DEFAULT:false abandonSessionMutation/4::REQUIRED:DEFAULT:false
                 beginOperation/6::REQUIRED:DEFAULT:false workspaceFilesEnabled/0:- workspaceShellEnabled/0:-
                 beginWorkspaceClose/7::REQUIRED:DEFAULT:false beginWorkspaceLifecycle/8::REQUIRED:DEFAULT:false beginWorkspaceLifecycle/9::REQUIRED:DEFAULT:false
@@ -115,7 +113,7 @@ class ManagedStoreDecompositionTest {
                 settleContextCompression/5::REQUIRED:DEFAULT:false retryContextCompressionPreparation/3::REQUIRED:DEFAULT:false awaitContextCompression/5::REQUIRED:DEFAULT:false
                 completeCwdChangeOperation/5::REQUIRED:DEFAULT:false failCwdChangeOperation/6::REQUIRED:DEFAULT:false beginTaskCancelOperation/6::REQUIRED:DEFAULT:false
                 findDeliverableTaskCancels/1:- findParkedOperations/1:- settleParkedOperation/3::REQUIRED:DEFAULT:false
-                turnInputAcceptance/3:- renameAcceptance/1:- settleParkedRename/3::REQUIRED:DEFAULT:false
+                turnInputAcceptance/3:-
                 settleTaskCancel/7::REQUIRED:DEFAULT:false hasExecutionRegistryFacts/2:- sessionsWithExecutionRegistryFacts/2:-
                 findOperation/3:- findDeliverableOperations/2:- claimOperation/5::REQUIRED:DEFAULT:false
                 completeOperation/6::REQUIRED:DEFAULT:false failOperation/6::REQUIRED:DEFAULT:false renewLifecycleOperation/6::REQUIRED:DEFAULT:false
@@ -145,9 +143,10 @@ class ManagedStoreDecompositionTest {
                 appendPublicEventIfAbsent/7::REQUIRED:DEFAULT:false appendLiveSessionEventIfAbsent/5::REQUIRED:DEFAULT:false findLastVisibleStatusBeforeDelete/2:-
                 requireSession/2:- readBinding/1:- insertSessionCommand/9::REQUIRED:DEFAULT:false
                 """);
-        assertEntries(ManagedSessionStore.class, """
+        assertEntries(JdbcManagedSessionStore.class, """
                 authorizeLifecycle/5::REQUIRED:DEFAULT:false skipContended/2:- lockBounded/1:-
                 lockBoundedResult/1:- namedRootDeadlock/1:- authorizeOrdinary/4::REQUIRED:DEFAULT:false
+                creatorActor/2:-
                 approvalSelection/4::REQUIRED:DEFAULT:false usesDataSource/1:- lockSnapshotWriter/4:-
                 lockPublicationWriter/6:- lockPublicationWriter/8:- acquireWriter/4::NOT_SUPPORTED:DEFAULT:false acquireWriter/5::NOT_SUPPORTED:DEFAULT:false
                 renewWriter/4::REQUIRED:DEFAULT:false renewWriter/5::REQUIRED:DEFAULT:false sealWriter/4::REQUIRED:DEFAULT:false
@@ -157,10 +156,9 @@ class ManagedStoreDecompositionTest {
                 commandTransaction/7::REQUIRED:READ_COMMITTED:true hasPristineInitialJournal/3::NOT_SUPPORTED:DEFAULT:true readResource/5:-
                 readSnapshotResource/5:- readOwnerResource/5:- publishAgentInstructions/4::REQUIRED:DEFAULT:false
                 publishAgentSkills/4::REQUIRED:DEFAULT:false publishInheritedExtensionResource/4::REQUIRED:DEFAULT:false publishToolResult/4::REQUIRED:DEFAULT:false
-                publishToolResult/5::REQUIRED:DEFAULT:false toolResultLimit/1:- requireCsiApplicationCredential/3:-
-                requireCsiHistoricalCredential/5:- preflightCsiTerminal/5:- commitCsiTerminal/5:-
-                validateCsiTerminalBytes/1:- lockCsiOriginal/2:- hasLiveWriter/2::REQUIRED:DEFAULT:false
-                commandKeyHash/2:- journalCorrupt/0:-
+                publishToolResult/5::REQUIRED:DEFAULT:false toolResultLimit/1:-
+                hasLiveWriter/2::REQUIRED:DEFAULT:false
+                commandKeyHash/2:- journalCorrupt/0:- journalPacks/0:-
                 """);
     }
 
@@ -181,7 +179,7 @@ class ManagedStoreDecompositionTest {
     void facadeSourcesContainNoBusinessSql() throws Exception {
         Path sources = Path.of("..", "persistence", "src", "main", "java")
                 .resolve(ManagedAgentStore.class.getPackageName().replace('.', '/'));
-        for (Class<?> facade : List.of(ManagedAgentStore.class, ManagedSessionStore.class)) {
+        for (Class<?> facade : List.of(ManagedAgentStore.class, JdbcManagedSessionStore.class)) {
             assertNoBusinessSql(Files.readString(sources.resolve(facade.getSimpleName() + ".java")));
         }
     }

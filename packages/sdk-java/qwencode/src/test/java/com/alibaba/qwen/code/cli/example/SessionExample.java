@@ -192,7 +192,10 @@ public class SessionExample {
                 @Override
                 public CLIControlResponse<? extends ControlResponsePayload> onControlRequest(Session session, CLIControlRequest<?> cliControlRequest) {
                     logger.info("Received controlRequest {}", JSON.toJSONString(cliControlRequest));
-                    return new CLIControlResponse<>();
+                    CLIControlResponse<ControlResponsePayload> response = new CLIControlResponse<>();
+                    response.createResponse().setRequestId(cliControlRequest.getRequestId()).setSubtype("error")
+                            .setError("This example does not implement control requests");
+                    return response;
                 }
 
                 @Override

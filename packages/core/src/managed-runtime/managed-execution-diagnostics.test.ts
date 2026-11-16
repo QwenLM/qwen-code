@@ -22,6 +22,10 @@ import type { ChatRecord } from '../services/chatRecordingService.js';
 import { assertManagedSessionDurableRef } from './managed-session-records.js';
 import type { ManagedSessionKey } from './managed-session-records.js';
 import { scanManagedSessionJournal } from './managed-session-storage.js';
+import {
+  recordManagedToolMeasurements,
+  parseManagedToolMeasurementEvidence,
+} from './managed-tool-measurements.js';
 
 const fixture = JSON.parse(
   await fs.readFile(
@@ -47,7 +51,13 @@ afterEach(async () => {
     await fs.rm(dir, { recursive: true, force: true });
 });
 
-async function setup(collect = true) {
+async function setup(
+  collect = true,
+  tool: { name: string; args: Record<string, unknown> } = {
+    name: 'read_file',
+    args: { file_path: 'a.txt' },
+  },
+) {
   const dir = await fs.mkdtemp(
     path.join(os.tmpdir(), 'execution-diagnostics-'),
   );
@@ -90,8 +100,7 @@ async function setup(collect = true) {
         {
           functionCall: {
             id: 'reused',
-            name: 'read_file',
-            args: { file_path: 'a.txt' },
+            ...tool,
           },
         },
       ],
@@ -101,6 +110,151 @@ async function setup(collect = true) {
 }
 
 describe('Managed execution diagnostics', () => {
+  it.each(['original', 'modified', 'unknown'] as const)(
+    'records executor evidence once across cancellation and reopen, with proposal provenance %s',
+    async (proposal) => {
+      const args = { file_path: 'a.txt', content: 'one\n' };
+      const { session, record, options } = await setup(true, {
+        name: 'write_file',
+        args,
+      });
+      await session.sink.write(record('measured'));
+      const authority = session.authority;
+      const observation =
+        getManagedExecutionDiagnostics(authority)!.observation('reused')!;
+      observation.executionCallId = 'exec-1';
+      const diagnosticsRef = await getManagedExecutionDiagnostics(
+        authority,
+      )!.publish('intent:exec-1', [observation]);
+      const ref = await session.resources.publish(
+        'managed-tool-outcome',
+        Buffer.from(JSON.stringify({ executionCallId: 'exec-1' })),
+      );
+      const inputRef =
+        proposal === 'unknown'
+          ? ref
+          : await session.resources.publish(
+              'managed-tool-input',
+              Buffer.from(
+                JSON.stringify({
+                  payloadJson: JSON.stringify({
+                    toolName: 'write_file',
+                    input: {
+                      ...args,
+                      content:
+                        proposal === 'modified' ? 'one\ntwo\n' : args.content,
+                    },
+                  }),
+                }),
+              ),
+            );
+      await authority.appendExecutionEvent(
+        {
+          operation: 'recordToolIntent',
+          commandId: 'exec-1',
+          sessionKey: options.sessionKey,
+          contentDigest: ref.digest,
+        },
+        (sequence) => ({
+          v: 1,
+          sequence,
+          eventId: 'intent:exec-1',
+          sessionKey: options.sessionKey,
+          kind: 'tool.intent',
+          occurredAt: Date.now(),
+          subject: {
+            type: 'activation',
+            scopeId: session.activation.activationId,
+            activationId: session.activation.activationId,
+            epoch: session.activation.epoch,
+          },
+          payload: {
+            executionCallId: 'exec-1',
+            batchId: 'measured',
+            ordinal: 0,
+            toolDefinitionRef: ref,
+            argsRef: inputRef,
+            outcomeSource: 'runtime',
+            diagnosticsRef,
+          },
+        }),
+        { class: 'harness', activation: session.activation },
+      );
+      const metadata = {
+        resultDigest: 'b'.repeat(64),
+        measurements: {
+          protocol: 'managed-tool-measurements/1' as const,
+          executionDurationMs: 0,
+          executionOutcome: 'success' as const,
+          file: {
+            operation: 'write' as const,
+            status: 'measured' as const,
+            modelLinesAdded: 2,
+            modelLinesRemoved: 0,
+            appliedLinesAdded: 2,
+            appliedLinesRemoved: 0,
+          },
+        },
+      };
+      await recordManagedToolMeasurements(session, 'exec-1', ref, metadata);
+      expect(
+        parseManagedToolMeasurementEvidence(
+          await session.resources.read(
+            assertManagedSessionDurableRef(
+              authority.lastEventOfKind('tool.measured')!.payload[
+                'measurementsRef'
+              ],
+              'measurement',
+            ),
+          ),
+        ).modelProposal,
+      ).toBe(proposal);
+      const sequence = authority.committedSequence;
+      await recordManagedToolMeasurements(session, 'exec-1', ref, metadata);
+      const cancelled = await session.resources.publish(
+        'managed-tool-outcome',
+        Buffer.from(
+          JSON.stringify({ executionCallId: 'exec-1', status: 'cancelled' }),
+        ),
+      );
+      await recordManagedToolMeasurements(
+        session,
+        'exec-1',
+        cancelled,
+        metadata,
+      );
+      expect(authority.committedSequence).toBe(sequence);
+      expect(authority.committedReceipt('exec-1')).toBeUndefined();
+      await expect(
+        recordManagedToolMeasurements(session, 'exec-1', ref, {
+          ...metadata,
+          resultDigest: 'c'.repeat(64),
+        }),
+      ).rejects.toThrow();
+      await session.close();
+      sessions.splice(sessions.indexOf(session), 1);
+      const restored = await openManagedSession(options);
+      sessions.push(restored);
+      await recordManagedToolMeasurements(restored, 'exec-1', ref, metadata);
+      await recordManagedToolMeasurements(
+        restored,
+        'exec-1',
+        cancelled,
+        metadata,
+      );
+      expect(
+        restored.authority
+          .eventsInSequenceRange(1, restored.authority.committedSequence)
+          .filter((event) => event.kind === 'tool.measured'),
+      ).toHaveLength(1);
+      expect(
+        restored.authority.lastEventOfKind('tool.measured')?.payload[
+          'toolOutcomeRef'
+        ],
+      ).toEqual(ref);
+      expect(restored.authority.committedReceipt('exec-1')).toBeUndefined();
+    },
+  );
   it.each([false, true])(
     'binds committed record digests to diagnostic evidence (collect=%s)',
     async (collect) => {

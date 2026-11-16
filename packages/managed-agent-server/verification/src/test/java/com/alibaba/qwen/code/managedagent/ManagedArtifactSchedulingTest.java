@@ -5,8 +5,8 @@ import com.alibaba.qwen.code.managedagent.config.ManagedArtifactConfiguration;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.event.MessageMaterializer;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.MaterializationTarget;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedArtifactReader;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedToolResultProjector;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationArtifactReader;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.support.StaticListableBeanFactory;
@@ -91,7 +91,7 @@ class ManagedArtifactSchedulingTest {
                                 fixture.results(),
                                 fixture.jdbc(),
                                 provider,
-                                new ManagedArtifactReader(provider),
+                                new ToolPublicationArtifactReader(provider),
                                 fixture.policy(),
                                 fixture.properties()));
         try {

@@ -4,8 +4,9 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitResource;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitTransactionRequest;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
@@ -53,7 +54,7 @@ class ManagedSessionMessageStoreTest {
     private static final String TENANT = "tenant-extension";
     private static final String WORKSPACE = "workspace-extension";
     private static final String REJECTED =
-            ManagedExtensionRecordStore.ERROR_REJECTED;
+            JdbcManagedExtensionRecordStore.ERROR_REJECTED;
     // Spelled out, not read from the store: the TypeScript HTTP store
     // matches this literal to treat the refusal as a rollbackable
     // non-commit, so renaming the constant must fail here.
@@ -63,10 +64,10 @@ class ManagedSessionMessageStoreTest {
                     + " no other revision carries one";
 
     @Autowired
-    private ManagedSessionStore sessionStore;
+    private JdbcManagedSessionStore sessionStore;
 
     @Autowired
-    private ManagedExtensionRecordStore records;
+    private JdbcManagedExtensionRecordStore records;
 
     @Autowired
     private ManagedAgentService agents;
@@ -280,7 +281,7 @@ class ManagedSessionMessageStoreTest {
     void privateChildMessagesCannotEnterSharedOrOtherOwnerSessions() {
         String parent = session();
         String child = session();
-        byte[] owner = com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(TENANT, "memory-owner");
+        byte[] owner = ManagedWorkspaceRegistry.actorKey(TENANT, "memory-owner");
         jdbc.update("UPDATE ma_session SET parent_session_id=?,root_session_id=?,parent_child_run_id='run-x',"
                         + " child_depth=1,owner_actor_key=?,owner_only=1 WHERE tenant_id=? AND session_id=?",
                 parent, parent, owner, TENANT, child);
@@ -289,7 +290,7 @@ class ManagedSessionMessageStoreTest {
                 "Personal Session context must remain", () -> commit(journal, "message-2:1",
                         toParent(child, parent, "planned"), null));
         jdbc.update("UPDATE ma_session SET owner_actor_key=?,owner_only=1 WHERE tenant_id=? AND session_id=?",
-                com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(TENANT, "another-owner"),
+                ManagedWorkspaceRegistry.actorKey(TENANT, "another-owner"),
                 TENANT, parent);
         assertRefused("private context into another owner's parent", child,
                 "Personal Session context must remain", () -> commit(journal, "message-2:1",

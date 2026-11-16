@@ -54,7 +54,7 @@ public class ManagedExtensionManagementService {
             }
             return empty(sessionId, false);
         }
-        boolean supported = packages.list(tenant, actor, session.workspace().getWorkspaceId()).supported()
+        boolean supported = packages.supported()
                 && harness.supportsSessionExtensions();
         JsonNode latest = records.currentMcpSettings(tenant, sessionId);
         if (!ManagedConfigInstall.isPackageConfig(latest)) {
@@ -89,7 +89,8 @@ public class ManagedExtensionManagementService {
     private JsonNode withSelfService(ObjectNode result, String tenant, String actor, SessionRecord session, boolean supported) {
         boolean enabled = supported && packages.selfServiceSupported();
         result.putObject("selfService").put("supported", enabled).put("canApply", enabled && store.canApplyExtensions(session)
-                && "ACTIVE".equals(session.status()) && packages.canPublish(tenant, actor, session.workspace().getWorkspaceId()));
+                && "ACTIVE".equals(session.status()) && packages.canPublish(tenant, actor, session.workspace().getWorkspaceId()))
+                .put("runtimeSkillImportSupported", packages.runtimeSkillImportEnabled() && harness.supportsRuntimeSkillImport());
         return result;
     }
 
@@ -113,21 +114,42 @@ public class ManagedExtensionManagementService {
             throw invalid();
         }
         String operationId = applyOperationId(tenant, actor, sessionId, key);
-        SessionRecord session = store.requireExtensionManagement(tenant, actor, sessionId, operationId, true);
-        packages.requireExecutionAccess(tenant, actor, session.workspace().getWorkspaceId());
-        if (!harness.supportsSessionExtensions()) {
-            throw unsupported();
-        }
-        for (JsonNode pin : command.get("extensions")) {
-            packages.get(tenant, actor, session.workspace().getWorkspaceId(), pin.get("extensionId").asText(),
-                    pin.get("packageRevision").asLong(), pin.get("packageDigest").asText());
-        }
+        SessionRecord session = store.requireExtensionManagement(tenant, actor, sessionId, operationId, false);
         Map<String, Object> request = new LinkedHashMap<>();
         request.put("operationId", operationId);
         request.put("actorKey", DigestUtils.sha256Hex(actor));
         request.put("expectedRevision", command.get("expectedConfigRevision").asLong());
         request.put("extensions", json.convertValue(command.get("extensions"), List.class));
+        JsonNode previous = records.currentMcpSettings(tenant, sessionId);
+        for (int step = 0; ManagedConfigInstall.isPackageConfig(previous); step++) {
+            if (operationId.equals(previous.path("operationId").asText())) {
+                if (!sameCommand(request, previous.get("command"))) {
+                    throw new ManagedAgentException(409, "idempotency_conflict", "The extension operation key was used for another request.");
+                }
+                return query(tenant, actor, sessionId, operationId);
+            }
+            if (step >= 4095 || previous.path("previousRecordRef").isNull()) {
+                break;
+            }
+            previous = read(tenant, sessionId, previous.get("previousRecordRef"));
+        }
+        session = store.requireExtensionManagement(tenant, actor, sessionId, operationId, true);
+        packages.requireExecutionAccess(tenant, actor, session.workspace().getWorkspaceId());
+        if (!harness.supportsSessionExtensions()) {
+            throw unsupported();
+        }
+        List<com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Pin> pins = json.convertValue(command.get("extensions"), json.getTypeFactory().constructCollectionType(
+                List.class, com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Pin.class));
+        packages.authorizeSelection(tenant, actor, session.workspace().getWorkspaceId(), pins);
         return invoke(() -> harness.applyExtensions(tenant, sessionId, request), sessionId, operationId);
+    }
+
+    private boolean sameCommand(Map<String, Object> request, JsonNode saved) {
+        try {
+            return json.readTree(json.writeValueAsBytes(request)).equals(saved);
+        } catch (java.io.IOException error) {
+            throw corrupt();
+        }
     }
 
     public JsonNode resume(String tenant, String actor, String sessionId, String operationId, boolean recoverPrevious) {
@@ -195,7 +217,7 @@ public class ManagedExtensionManagementService {
 
     private JsonNode read(String tenant, String sessionId, JsonNode ref) {
         var resource = records.readCommittedResource(tenant, sessionId, ref);
-        JsonNode value = com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(new String(resource.bytes(), StandardCharsets.UTF_8));
+        JsonNode value = ManagedExtensionRecordStore.parse(new String(resource.bytes(), StandardCharsets.UTF_8));
         if (value == null) {
             throw corrupt();
         }

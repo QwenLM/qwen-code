@@ -19,6 +19,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeEach, describe, it, expect, vi } from 'vitest';
 import { act, renderHook } from '@testing-library/react';
+import { LlmEventType } from '@qwen-code/qwen-code-core/core/turn.js';
+import {
+  LoopReason,
+  LoopType,
+} from '@qwen-code/qwen-code-core/telemetry/types.js';
 import {
   ToolConfirmationOutcome,
   type Config,
@@ -1778,6 +1783,29 @@ describe('useOpenTuiLiveTurn submit paths', () => {
     expect(onComplete).toHaveBeenCalledTimes(1);
   });
 
+  it('does not fire onComplete after a duplicate tool stop without a Mod session', async () => {
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    const onComplete = vi.fn();
+    act(() => result.current.submit('dream prompt', undefined, { onComplete }));
+
+    const options = live.turns[0].options as LivePromptOptions;
+    await act(async () => {
+      options.onPreparedRequest?.(undefined);
+      options.onStreamEvent?.({
+        type: LlmEventType.LoopDetected,
+        value: {
+          loopType: LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+          loopReason: LoopReason.PROVIDER_DUPLICATE_ID,
+        },
+      });
+      for (const wake of live.waiters.splice(0)) wake();
+    });
+    await vi.waitFor(() => expect(result.current.streaming).toBe(false));
+    expect(onComplete).not.toHaveBeenCalled();
+  });
+
   it('does not fire onComplete when the turn ends on an aborted signal (R6-6)', async () => {
     // Esc while a tool batch is out: the generator's abort paths (the
     // all-cancelled batch above them) end with a normal return, so the seq
@@ -2667,13 +2695,12 @@ describe('useOpenTuiLiveTurn Mod turns', () => {
     expect(mods.stopSubmittedPrompts).toHaveBeenCalledTimes(2);
   });
 
-  it('offers no turn hooks without a Mod session', () => {
+  it('offers no Mod admission or cancellation hooks without a Mod session', () => {
     const { result } = renderHook(() =>
       useOpenTuiLiveTurn({ config: {} as Config }),
     );
     act(() => result.current.submit('plain'));
     expect(options(1).onPromptAdmitted).toBeUndefined();
-    expect(options(1).onStreamEvent).toBeUndefined();
     expect(options(1).onToolsCancelled).toBeUndefined();
   });
 });

@@ -9,7 +9,8 @@ import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPol
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
-import com.alibaba.qwen.code.managedagent.persistence.HarnessPlacementStore;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcHarnessPlacementStore;
 import com.alibaba.qwen.code.managedagent.repository.HarnessPlacementStore.Placement;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import org.junit.jupiter.api.Test;
@@ -56,7 +57,7 @@ class HarnessPoolConnectorTest {
         var clientB = client("b");
         when(clientA.capabilities().getFeatures()).thenReturn(features);
         when(clientB.capabilities().getFeatures()).thenReturn(features);
-        try (var pool = new HarnessPoolConnector(settings(), mock(HarnessPlacementStore.class),
+        try (var pool = new HarnessPoolConnector(settings(), mock(JdbcHarnessPlacementStore.class),
                 () -> new HarnessDiscovery.Snapshot(List.of(a, b), true), ignored -> leaf(), null, null,
                 endpoint -> endpoint.instanceId().equals("a") ? clientA : clientB)) {
             assertThat(pool.supportsPersonalMemory()).isFalse();
@@ -66,8 +67,35 @@ class HarnessPoolConnectorTest {
     }
 
     @Test
+    void sessionAwareClientFilesDelegatesToAReachableMember() {
+        var a = endpoint("a", 4101);
+        var clientA = client("a");
+        when(clientA.capabilities().getFeatures()).thenReturn(
+                List.of("harness-pool-owner/1", "harness-instance-lifecycle/1", "client-files/1"));
+        var leafA = leaf();
+        var session = new SessionRecord("tenant", "session", "qwen-code", "title", "ACTIVE",
+                null, null, 0, 0, 1, 1, null, 1);
+        try (var pool = new HarnessPoolConnector(settings(), mock(JdbcHarnessPlacementStore.class),
+                () -> new HarnessDiscovery.Snapshot(List.of(a), true), ignored -> leafA, null, null,
+                ignored -> clientA)) {
+            // No negotiated contract yet: the feature gate refuses before any
+            // member is consulted.
+            assertThat(pool.supportsClientFiles(session)).isFalse();
+            pool.refresh();
+            // The pool answers with the reachable member's session-aware verdict
+            // (not the parameterless capability), so a foregroundOnly refusal on
+            // the member is not masked by the pool.
+            when(leafA.supportsClientFiles(session)).thenReturn(false);
+            assertThat(pool.supportsClientFiles(session)).isFalse();
+            when(leafA.supportsClientFiles(session)).thenReturn(true);
+            assertThat(pool.supportsClientFiles(session)).isTrue();
+            verify(leafA, times(2)).supportsClientFiles(session);
+        }
+    }
+
+    @Test
     void extensionCommandsKeepTheSavedOwnerAndNegotiatedCapability() {
-        var placements = mock(HarnessPlacementStore.class);
+        var placements = mock(JdbcHarnessPlacementStore.class);
         var a = endpoint("a", 4101);
         var b = endpoint("b", 4102);
         var leafA = leaf();
@@ -103,7 +131,7 @@ class HarnessPoolConnectorTest {
     @Test
     void everyVerbKeepsItsPlacementAndObservationNeverCreatesOne() {
         var settings = settings();
-        var placements = mock(HarnessPlacementStore.class);
+        var placements = mock(JdbcHarnessPlacementStore.class);
         var saved = new AtomicReference<Placement>();
         when(placements.get("tenant", "session")).thenAnswer(call -> saved.get());
         when(placements.assign(eq("tenant"), eq("session"), anyString(), anyString())).thenAnswer(call -> {
@@ -148,7 +176,7 @@ class HarnessPoolConnectorTest {
 
     @Test
     void discoveryUncertaintyPausesPlacementWhileOriginalCachedOwnerRemainsUsable() {
-        var placements = mock(HarnessPlacementStore.class);
+        var placements = mock(JdbcHarnessPlacementStore.class);
         var endpoint = endpoint("a", 4101);
         var leaf = leaf();
         var client = client("a");
@@ -172,7 +200,7 @@ class HarnessPoolConnectorTest {
     @ValueSource(strings = {"QUIESCING", "DRAINED"})
     void observedDrainMovesANeverAcquiredPlacementThroughTheStore(String state) {
         var settings = settings();
-        var placements = mock(HarnessPlacementStore.class);
+        var placements = mock(JdbcHarnessPlacementStore.class);
         var a = endpoint("a", 4101);
         var b = endpoint("b", 4102);
         var leafA = leaf();
@@ -222,7 +250,7 @@ class HarnessPoolConnectorTest {
 
     @Test
     void explicitDrainChangesPlacementEligibilityBeforeTheNextRefresh() {
-        var placements = mock(HarnessPlacementStore.class);
+        var placements = mock(JdbcHarnessPlacementStore.class);
         var a = endpoint("a", 4101);
         var b = endpoint("b", 4102);
         var leafA = leaf();
@@ -253,7 +281,7 @@ class HarnessPoolConnectorTest {
             "QUIESCING,true,harness_owner_still_live,false", "ACTIVE,false,harness_owner_still_live,false"})
     void onlyAReachableActiveLiveOwnerKeepsItsCompletionCallsDuringDrain(
             String state, boolean reachable, String code, boolean keepsOwner) {
-        var placements = mock(HarnessPlacementStore.class);
+        var placements = mock(JdbcHarnessPlacementStore.class);
         var a = endpoint("a", 4101);
         var b = endpoint("b", 4102);
         var leafA = leaf();
@@ -305,7 +333,7 @@ class HarnessPoolConnectorTest {
     @ParameterizedTest
     @CsvSource({"RELEASED,false", "QUIESCING,true", "ACTIVE,true"})
     void aDrainingOwnerWithNoSuccessorServesOnlyThePlacementsItStillHolds(String state, boolean keepsOwner) {
-        var placements = mock(HarnessPlacementStore.class);
+        var placements = mock(JdbcHarnessPlacementStore.class);
         var a = endpoint("a", 4101);
         var b = endpoint("b", 4102);
         var leafA = leaf();
@@ -360,7 +388,7 @@ class HarnessPoolConnectorTest {
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
     void aKnownUnreachableOwnerWaitsForCapacityWithoutFurtherRpcs(boolean refreshFailure) {
-        var placements = mock(HarnessPlacementStore.class);
+        var placements = mock(JdbcHarnessPlacementStore.class);
         var a = endpoint("a", 4101);
         var b = endpoint("b", 4102);
         var leafA = leaf();
@@ -412,7 +440,7 @@ class HarnessPoolConnectorTest {
 
     @Test
     void ownershipReleaseNeverReassignsOrTargetsASuccessorEpoch() {
-        var placements = mock(HarnessPlacementStore.class);
+        var placements = mock(JdbcHarnessPlacementStore.class);
         var endpoint = endpoint("a", 4101);
         var leaf = leaf();
         var client = client("a");
@@ -440,7 +468,7 @@ class HarnessPoolConnectorTest {
 
     @Test
     void releasedPlacementRequiresStoreCasBeforeSameBootReuse() {
-        var placements = mock(HarnessPlacementStore.class);
+        var placements = mock(JdbcHarnessPlacementStore.class);
         var endpoint = endpoint("a", 4101);
         var leaf = leaf();
         var client = client("a");
@@ -462,7 +490,7 @@ class HarnessPoolConnectorTest {
 
     @Test
     void lifecycleHandoffUsesCanonicalOperationInsteadOfOrdinaryPlacementAdmission() {
-        var placements = mock(HarnessPlacementStore.class);
+        var placements = mock(JdbcHarnessPlacementStore.class);
         var endpoint = endpoint("a", 4101);
         var leaf = leaf();
         var client = client("a");
@@ -487,7 +515,7 @@ class HarnessPoolConnectorTest {
 
     @Test
     void shutdownClosesAClientRegisteredAfterItsInitialClosedCheck() throws Exception {
-        var placements = mock(HarnessPlacementStore.class);
+        var placements = mock(JdbcHarnessPlacementStore.class);
         var endpoint = endpoint("a", 4101);
         var leaf = leaf();
         var entered = new CountDownLatch(1);
@@ -527,12 +555,12 @@ class HarnessPoolConnectorTest {
     void rejectsUnboundPoolAndRemotePlaintextEvenWhenLegacyOverrideIsAllowed() {
         var settings = settings();
         settings.getSessionStore().setBindingKey("");
-        assertThatThrownBy(() -> new HarnessPoolConnector(settings, mock(HarnessPlacementStore.class),
+        assertThatThrownBy(() -> new HarnessPoolConnector(settings, mock(JdbcHarnessPlacementStore.class),
                 () -> new HarnessDiscovery.Snapshot(List.of(), true), ignored -> leaf(), null, null, ignored -> client("a")))
                 .hasMessageContaining("binding key");
         settings.getSessionStore().setBindingKey("binding-key-".repeat(4));
         settings.getSessionStore().setEnabled(false);
-        assertThatThrownBy(() -> new HarnessPoolConnector(settings, mock(HarnessPlacementStore.class),
+        assertThatThrownBy(() -> new HarnessPoolConnector(settings, mock(JdbcHarnessPlacementStore.class),
                 () -> new HarnessDiscovery.Snapshot(List.of(), true), ignored -> leaf(), null, null, ignored -> client("a")))
                 .hasMessageContaining("enabled Session Store");
         assertThatThrownBy(() -> HarnessPoolConnector.validateEndpoint(

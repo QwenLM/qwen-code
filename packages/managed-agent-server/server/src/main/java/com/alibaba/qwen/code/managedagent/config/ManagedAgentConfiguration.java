@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.config;
 
 import com.alibaba.qwen.code.managedagent.ManagedAgentServerApplication;
+import com.alibaba.qwen.code.managedagent.adapters.workspace.ChildWorktreeGit;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.ComponentScan;
 import org.springframework.context.annotation.Configuration;
@@ -17,6 +18,7 @@ import org.springframework.transaction.annotation.EnableTransactionManagement;
 @EnableConfigurationProperties(ManagedAgentProperties.class)
 @EnableScheduling
 @EnableTransactionManagement(proxyTargetClass = true)
+@org.springframework.boot.autoconfigure.ImportAutoConfiguration(ExtensionArchiveStorageAutoConfiguration.class)
 @Import({
     ManagedAgentConfiguration.PersistenceImport.class,
     ExecutionConfiguration.class,
@@ -85,7 +87,7 @@ public class ManagedAgentConfiguration {
     @org.springframework.context.annotation.Bean
     public com.alibaba.qwen.code.managedagent.contracts.workspace.SessionWorktreeOperations.Factory managedWorktreeFactory() {
         return (git, timeout) -> new com.alibaba.qwen.code.managedagent.adapters.workspace.SessionWorktreeGit(
-                new com.alibaba.qwen.code.managedagent.adapters.workspace.ChildWorktreeGit(git, timeout));
+                new ChildWorktreeGit(git, timeout));
     }
     @org.springframework.context.annotation.Bean
     public com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityReader managedStorageIdentityReader() {
@@ -118,6 +120,11 @@ public class ManagedAgentConfiguration {
     public com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelDeliveryRepository managedChannelDeliveries(
             @org.springframework.beans.factory.annotation.Qualifier("managedJdbcTemplate") org.springframework.jdbc.core.JdbcTemplate jdbc) {
         return new com.alibaba.qwen.code.managedagent.persistence.JdbcChannelDeliveryRepository(jdbc);
+    }
+    @org.springframework.context.annotation.Bean
+    public com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelSegmentRepository managedChannelSegments(
+            @org.springframework.beans.factory.annotation.Qualifier("managedJdbcTemplate") org.springframework.jdbc.core.JdbcTemplate jdbc) {
+        return new com.alibaba.qwen.code.managedagent.persistence.JdbcChannelSegmentRepository(jdbc);
     }
 
     @org.springframework.context.annotation.Bean

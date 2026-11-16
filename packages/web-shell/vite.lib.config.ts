@@ -1,4 +1,5 @@
 import { pierreResources } from './pierre-build';
+import { exceljsBrowser } from './exceljs-build';
 import { defineConfig, normalizePath, type Plugin } from 'vite';
 import { resolve } from 'node:path';
 import react from '@vitejs/plugin-react';
@@ -166,6 +167,10 @@ function injectCssModules(): Plugin {
 const TRANSCRIPT_STUBS = new Map(
   [
     [
+      './client/components/messages/HookStatistics.tsx',
+      './client/components/messages/HookStatistics.transcript-stub.tsx',
+    ],
+    [
       './client/components/message-deletion-messages.ts',
       './client/components/message-deletion-messages.transcript-stub.ts',
     ],
@@ -238,6 +243,16 @@ const TRANSCRIPT_STUBS = new Map(
       './client/components/managed/managed-mcp-messages.ts',
       './client/components/managed/managed-mcp-messages.transcript-stub.ts',
     ],
+    ['./client/i18n-ru-part1.ts', './client/i18n-ru-part1.transcript-stub.ts'],
+    ['./client/i18n-ru-part2.ts', './client/i18n-ru-part2.transcript-stub.ts'],
+    ['./client/i18n-ru-part3.ts', './client/i18n-ru-part3.transcript-stub.ts'],
+    ['./client/i18n-ru-part4.ts', './client/i18n-ru-part4.transcript-stub.ts'],
+    ['./client/i18n-ru-part5.ts', './client/i18n-ru-part5.transcript-stub.ts'],
+    ['./client/i18n-ru-part6.ts', './client/i18n-ru-part6.transcript-stub.ts'],
+    [
+      './client/i18n-ru-remainder.ts',
+      './client/i18n-ru-remainder.transcript-stub.ts',
+    ],
   ].map(([module, stub]) => [
     normalizePath(resolve(__dirname, module)),
     normalizePath(resolve(__dirname, stub)),
@@ -263,11 +278,15 @@ function stubTranscriptModules(): Plugin {
 export default defineConfig(({ mode }) => ({
   plugins: [
     pierreResources(),
+    exceljsBrowser(),
     ...(mode === 'transcript' ? [stubTranscriptModules()] : []),
     react(),
     tailwindcss(),
     injectCssModules(),
   ],
+  worker: {
+    plugins: () => [exceljsBrowser()],
+  },
   resolve: {
     alias: {
       '@qwen-code/web-shell/daemon-react-sdk': resolve(
@@ -340,9 +359,7 @@ export default defineConfig(({ mode }) => ({
           'remark-cjk-friendly',
           /^remark-cjk-friendly\//,
           'remark-gfm',
-          'remark-math',
-          'rehype-katex',
-          'mermaid',
+          'hast-util-from-html-isomorphic',
           'katex',
           /^katex\/(?!dist\/katex\.min\.css$)/,
           'codemirror',

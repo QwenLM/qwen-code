@@ -197,9 +197,17 @@ describe('SystemMessage — goal status', () => {
       );
 
       expect(container.textContent).toContain(title);
-      expect(container.textContent).toContain(reason);
+      expect(container.textContent).not.toContain(reason);
       expect(container.textContent).not.toContain('Goal aborted');
       expect(container.textContent).not.toContain('目标已中止');
+
+      const toggle = container.querySelector<HTMLButtonElement>(
+        'button[aria-expanded="false"]',
+      );
+      expect(toggle).not.toBeNull();
+      act(() => toggle?.click());
+      expect(toggle?.getAttribute('aria-expanded')).toBe('true');
+      expect(container.textContent).toContain(reason);
     },
   );
 });
