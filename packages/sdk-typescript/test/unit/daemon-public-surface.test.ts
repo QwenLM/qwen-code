@@ -203,6 +203,20 @@ import type {
   DaemonUnrecognizedDiagnosticReason as DaemonEntryUnrecognizedDiagnosticReason,
 } from '../../src/daemon/index.js';
 
+it('exports hook page contracts from the root and daemon entry points', () => {
+  expectTypeOf<
+    Public.DaemonSessionTurnIndexEntry['historyPromptId']
+  >().toEqualTypeOf<string | undefined>();
+  expectTypeOf<Public.DaemonSessionTurnHooksPage>().toEqualTypeOf<DaemonPublic.DaemonSessionTurnHooksPage>();
+  expectTypeOf<Public.DaemonSessionTurnHooksPageOptions>().toEqualTypeOf<DaemonPublic.DaemonSessionTurnHooksPageOptions>();
+  expectTypeOf<
+    ReturnType<Public.DaemonClient['getSessionTurnHooksPage']>
+  >().toEqualTypeOf<Promise<Public.DaemonSessionTurnHooksPage>>();
+  expectTypeOf<
+    ReturnType<Public.WorkspaceDaemonClient['getSessionTurnHooksPage']>
+  >().toEqualTypeOf<Promise<Public.DaemonSessionTurnHooksPage>>();
+});
+
 it('exports native Skill archive contracts without widening legacy runtime sources', () => {
   expect(Public.DaemonSkillInstallError).toBe(
     DaemonPublic.DaemonSkillInstallError,
@@ -220,6 +234,43 @@ it('exports native Skill archive contracts without widening legacy runtime sourc
       { type: 'zip-file' }
     >
   >().toEqualTypeOf<{ type: 'zip-file'; path: string; sha256?: string }>();
+});
+
+describe('memory import public types', () => {
+  it('exports the complete wire contract through both entries', () => {
+    expectTypeOf<Public.DaemonMemoryImportScope>().toEqualTypeOf<DaemonPublic.DaemonMemoryImportScope>();
+    expectTypeOf<Public.DaemonMemoryImportSourceFile>().toEqualTypeOf<DaemonPublic.DaemonMemoryImportSourceFile>();
+    expectTypeOf<Public.DaemonMemoryImportSource>().toEqualTypeOf<DaemonPublic.DaemonMemoryImportSource>();
+    expectTypeOf<Public.DaemonMemoryImportSection>().toEqualTypeOf<DaemonPublic.DaemonMemoryImportSection>();
+    expectTypeOf<Public.DaemonMemoryImportEstimate>().toEqualTypeOf<DaemonPublic.DaemonMemoryImportEstimate>();
+    expectTypeOf<Public.DaemonMemoryImportPreview>().toEqualTypeOf<DaemonPublic.DaemonMemoryImportPreview>();
+    expectTypeOf<Public.DaemonMemoryImportSelection>().toEqualTypeOf<DaemonPublic.DaemonMemoryImportSelection>();
+    expectTypeOf<Public.DaemonMemoryImportRequest>().toEqualTypeOf<DaemonPublic.DaemonMemoryImportRequest>();
+    expectTypeOf<Public.DaemonMemoryImportItemResult>().toEqualTypeOf<DaemonPublic.DaemonMemoryImportItemResult>();
+    expectTypeOf<Public.DaemonMemoryImportResult>().toEqualTypeOf<DaemonPublic.DaemonMemoryImportResult>();
+    expectTypeOf<Public.DaemonMemoryImportTask>().toEqualTypeOf<DaemonPublic.DaemonMemoryImportTask>();
+    expectTypeOf<
+      Public.WorkspaceDaemonClient['previewMemoryImport']
+    >().returns.toEqualTypeOf<Promise<Public.DaemonMemoryImportPreview>>();
+    expectTypeOf<
+      Public.WorkspaceDaemonClient['submitMemoryImport']
+    >().returns.toEqualTypeOf<Promise<Public.DaemonMemoryImportTask>>();
+    expectTypeOf<
+      Public.WorkspaceDaemonClient['listMemoryImports']
+    >().returns.toEqualTypeOf<Promise<Public.DaemonMemoryImportTask[]>>();
+    expectTypeOf<
+      Public.WorkspaceDaemonClient['getMemoryImport']
+    >().returns.toEqualTypeOf<Promise<Public.DaemonMemoryImportTask>>();
+    expectTypeOf<
+      Public.WorkspaceDaemonClient['getMemoryImportSource']
+    >().returns.toEqualTypeOf<Promise<Public.DaemonMemoryImportSection>>();
+    expectTypeOf<
+      Public.WorkspaceDaemonClient['cancelMemoryImport']
+    >().returns.toEqualTypeOf<Promise<Public.DaemonMemoryImportTask>>();
+    expectTypeOf<
+      Public.WorkspaceDaemonClient['retryMemoryImport']
+    >().returns.toEqualTypeOf<Promise<Public.DaemonMemoryImportTask>>();
+  });
 });
 
 describe('resource-link public surface', () => {
@@ -659,7 +710,10 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     }>();
     expectTypeOf<DaemonSessionCatalogRequest>().toEqualTypeOf<{
       workspaces: 'all' | DaemonSessionCatalogWorkspace[];
-      options?: Omit<Public.DaemonSessionListPageOptions, 'cursor'>;
+      options?: Omit<
+        Public.DaemonSessionListPageOptions,
+        'cursor' | 'liveOnly'
+      >;
       includeGroups?: boolean;
     }>();
     expectTypeOf<DaemonSessionCatalogPage>().toEqualTypeOf<{

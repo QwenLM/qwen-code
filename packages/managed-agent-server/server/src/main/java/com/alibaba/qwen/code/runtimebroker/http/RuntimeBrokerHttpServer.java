@@ -274,11 +274,18 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                 if (!body.keySet().equals(Set.of("protocolVersion", "requestId", "harnessSessionId"))) {
                     throw new IllegalArgumentException("Invalid capabilities request");
                 }
-                complete(exchange, service.capabilities(sessionId, lifecycleAuthority(exchange)), scope -> Map.of(
-                        "protocolVersion", 1, "harnessSessionId", sessionId,
-                        "scope", Map.of("tenantId", scope.getTenantId(), "workspaceId", scope.getWorkspaceId(),
-                                "workspaceGeneration", scope.getWorkspaceGeneration(),
-                                "isolationClass", scope.getIsolationClass(), "capabilityDigest", scope.getCapabilityDigest())));
+                complete(exchange, service.capabilitiesContext(sessionId, lifecycleAuthority(exchange)), value -> {
+                    var scope = value.scope();
+                    Map<String, Object> result = new java.util.LinkedHashMap<>(Map.of(
+                            "protocolVersion", 1, "harnessSessionId", sessionId,
+                            "scope", Map.of("tenantId", scope.getTenantId(), "workspaceId", scope.getWorkspaceId(),
+                                    "workspaceGeneration", scope.getWorkspaceGeneration(),
+                                    "isolationClass", scope.getIsolationClass(), "capabilityDigest", scope.getCapabilityDigest())));
+                    if (value.workspaceContext() != null) {
+                        result.put("workspaceContext", Map.of("cwdRelative", value.workspaceContext().cwdRelative(), "contextRevision", value.workspaceContext().contextRevision()));
+                    }
+                    return result;
+                });
                 return;
             }
             if ("POST".equals(exchange.getRequestMethod())
@@ -294,7 +301,8 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                                 "workspaceGeneration", record.getRequest().getScope().getWorkspaceGeneration(),
                                 "isolationClass", record.getRequest().getScope().getIsolationClass(),
                                 "capabilityDigest", record.getRequest().getScope().getCapabilityDigest()),
-                        "runtime", Map.of("bindingId", record.getBindingId(), "generation", Long.toString(record.getGeneration()))));
+                        "runtime", Map.of("bindingId", record.getBindingId(), "generation", Long.toString(record.getGeneration()),
+                                "provisionerKind", record.getRequest().getProvisionerKind())));
                 return;
             }
             if ("POST".equals(exchange.getRequestMethod()) && "/runtimes:authorize-lifecycle".equals(relative)) {
@@ -397,12 +405,13 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                     "workspaceId", scope.getWorkspaceId(), "workspaceGeneration", scope.getWorkspaceGeneration(),
                     "isolationClass", scope.getIsolationClass(),
                     "capabilityDigest", scope.getCapabilityDigest()));
-            if (CsiFilesRetirementProfile.CAPABILITY_DIGEST.equals(scope.getCapabilityDigest())) {
+            if (CsiFilesRetirementProfile.isProfile(scope)) {
                 savedScope.put("canonicalCwd", scope.getCanonicalCwd());
             }
             response.put("scope", savedScope);
             response.put("runtime", Map.of("bindingId", record.getBindingId(),
-                    "generation", Long.toString(record.getRuntimeGeneration())));
+                    "generation", Long.toString(record.getRuntimeGeneration()),
+                    "provisionerKind", service.runtimeProvisionerKind(record)));
             return response;
         });
     }

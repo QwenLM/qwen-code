@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.OperationKind;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
@@ -53,7 +54,7 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
     }
 
     protected String cursor() {
-        return ManagedToolResultStore.parse(jdbc.queryForObject("SELECT COALESCE(result_json, '{}') FROM ma_operation"
+        return JdbcManagedToolResultStore.parse(jdbc.queryForObject("SELECT COALESCE(result_json, '{}') FROM ma_operation"
                 + " WHERE operation_kind = 'CAPTURE_GC' AND scope_key = ?", String.class, scope)).path("cursor").asText("");
     }
 
@@ -209,7 +210,7 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
     @ValueSource(strings = {"VERIFIED", "CANDIDATE", "QUARANTINED"})
     void failedPrefixAllowsCollectionOnlyWithVerifiedObjects(String objectState) {
         String failed = addOperation(OperationKind.OUTPUT_VERIFY, scope, "pub-1", session, "failed-prefix", "FAILED");
-        jdbc.update("UPDATE ma_operation SET slot_key = X'7072656669783a7374646f7574', execution_mode = 'ASYNC', is_verification_ready = TRUE,"
+        jdbc.update("UPDATE ma_operation SET slot_key = X'7072656669783a7374646f7574', is_verification_ready = TRUE,"
                 + " failure_status = 403, failure_code = 'managed_tool_publication_storage_denied' WHERE operation_key = ?", failed);
         addObject("one", "failed-prefix/exact-key", null);
         addObject("inline", null, new byte[] {8});
@@ -353,7 +354,7 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
     @Test
     void resourceHandoffRetriesWithinSecondsUntilTheSessionLedgerSettles() {
         addObject("one", "handoff/exact-key", null);
-        String resourceScope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
+        String resourceScope = ManagedSessionStore.sessionScopeKey(tenant, session);
         jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key,"
                 + " owner_revision, resource_key, tenant_id, workspace_id, session_id, resource_id,"
                 + " journal_revision, gmt_create) VALUES (?, 'JOURNAL', ?, 1, ?, ?, 'workspace-1', ?,"
@@ -483,10 +484,10 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
 
         for (String resource : List.of("target-result", "sibling-result")) {
             jdbc.update("UPDATE ma_resource SET state = 'REFERENCED', publish_command_id = 'publish' WHERE session_scope_key = ? AND resource_id = ?",
-                    com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session), resource);
+                    ManagedSessionStore.sessionScopeKey(tenant, session), resource);
         }
         for (String resource : List.of("message-1", "checkpoint-1")) {
-            String resourceScope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
+            String resourceScope = ManagedSessionStore.sessionScopeKey(tenant, session);
             jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, ?, ?, 'workspace-1', ?, ?, ?, 1, 1, ?, 'MYSQL_INLINE', ?, 'publish', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
                     ManagedSchemaKeys.key(resourceScope, resource), resourceScope, tenant, session, resource,
                     resource.equals("message-1") ? "managed-message" : "managed-checkpoint", scope, new byte[] {2});

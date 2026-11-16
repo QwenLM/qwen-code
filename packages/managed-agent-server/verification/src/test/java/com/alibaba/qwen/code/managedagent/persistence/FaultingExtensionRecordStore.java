@@ -21,11 +21,11 @@ import java.util.function.Function;
  * looks like.
  */
 public class FaultingExtensionRecordStore
-        extends ManagedExtensionRecordStore {
+        extends JdbcManagedExtensionRecordStore {
     private final StoreFaultGate gate;
 
     public FaultingExtensionRecordStore(JdbcTemplate jdbc,
-            AgentStateStore sessions, ManagedTaskEventStore taskEvents,
+            AgentStateStore sessions, JdbcManagedTaskEventStore taskEvents,
             StoreFaultGate gate) {
         super(jdbc, sessions, taskEvents);
         this.gate = gate;

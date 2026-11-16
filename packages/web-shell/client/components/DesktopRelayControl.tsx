@@ -146,7 +146,11 @@ type CopyKey = keyof (typeof COPY)['en'];
 
 function useDesktopRelayCopy(): (key: CopyKey) => string {
   const { language } = useI18n();
-  return useCallback((key: CopyKey) => COPY[language][key], [language]);
+  // The provider is typed to the shipped languages, but the runtime value is
+  // not checked: a locale without a dictionary must fall back to English
+  // instead of crashing the whole shell on the first lookup.
+  const copy = COPY[language] ?? COPY.en;
+  return useCallback((key: CopyKey) => copy[key], [copy]);
 }
 
 export interface DesktopRelayStatus {

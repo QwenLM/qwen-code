@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.contracts.persistence;
 
+import com.alibaba.qwen.code.runtimebroker.transport.ManagedCsiProtocol;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.lang3.StringUtils;
 
@@ -52,7 +53,7 @@ public record WorkspaceCsiRegistration(String tenantId, String storageId,
     }
 
     public String physicalKey() {
-        return com.alibaba.qwen.code.runtimebroker.transport.ManagedCsiProtocol.physicalKey(backendDomain, driver, volumeHandle);
+        return ManagedCsiProtocol.physicalKey(backendDomain, driver, volumeHandle);
     }
 
     @Override

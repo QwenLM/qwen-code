@@ -11,21 +11,28 @@ import type {
 } from './managed-agent-provider';
 import { MAX_MANAGED_QUESTION_ANSWER_BYTES } from './managed-question-response';
 
+export type ManagedQuestionDraft = Record<
+  string,
+  { optionIds: string[]; text: string }
+>;
+
 export function ManagedQuestionForm({
   action,
+  draft,
+  onDraftChange,
+  submitting,
   disabled = false,
   onSubmit,
 }: {
   action: ManagedAgentPendingQuestionAction;
+  draft: ManagedQuestionDraft;
+  onDraftChange(draft: ManagedQuestionDraft): void;
+  submitting: boolean;
   disabled?: boolean;
   onSubmit(response: ManagedAgentQuestionResponse): Promise<void>;
 }) {
   const { t } = useI18n();
   const id = useId();
-  const [draft, setDraft] = useState<
-    Record<string, { optionIds: string[]; text: string }>
-  >({});
-  const [submitting, setSubmitting] = useState(false);
   const inFlight = useRef(false);
   const [expired, setExpired] = useState(() => Date.now() >= action.expiresAt);
   useEffect(() => {
@@ -80,13 +87,12 @@ export function ManagedQuestionForm({
         )
           return;
         inFlight.current = true;
-        setSubmitting(true);
         try {
           await onSubmit({ kind: 'question', answers });
         } catch {
           // The Action hook owns the error; keep this exact draft for retry.
+        } finally {
           inFlight.current = false;
-          setSubmitting(false);
         }
       }}
     >
@@ -107,8 +113,8 @@ export function ManagedQuestionForm({
                   disabled={blocked}
                   checked={entry.optionIds.includes(option.id)}
                   onCheckedChange={(checked) =>
-                    setDraft((current) => ({
-                      ...current,
+                    onDraftChange({
+                      ...draft,
                       [question.id]: {
                         ...entry,
                         optionIds:
@@ -118,7 +124,7 @@ export function ManagedQuestionForm({
                                 (value) => value !== option.id,
                               ),
                       },
-                    }))
+                    })
                   }
                 />
               ) : (
@@ -155,10 +161,10 @@ export function ManagedQuestionForm({
                   aria-labelledby={legendId}
                   value={entry.optionIds[0] ?? ''}
                   onValueChange={(value) =>
-                    setDraft((current) => ({
-                      ...current,
+                    onDraftChange({
+                      ...draft,
                       [question.id]: { optionIds: [value], text: '' },
-                    }))
+                    })
                   }
                   disabled={blocked}
                 >
@@ -175,13 +181,13 @@ export function ManagedQuestionForm({
                     disabled={blocked}
                     onChange={(event) => {
                       const text = event.target.value;
-                      setDraft((current) => ({
-                        ...current,
+                      onDraftChange({
+                        ...draft,
                         [question.id]: {
                           optionIds: question.multiple ? entry.optionIds : [],
                           text,
                         },
-                      }));
+                      });
                     }}
                   />
                 </label>

@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.repository;
 
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.ResolvedBinding;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
@@ -60,7 +61,7 @@ public interface SessionWorktreeStore {
 
     public record SourceLocation(ResolvedBinding resolved, Path root, String storageIdentity) { }
 
-    public SourceLocation source(String tenant, String actor, com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection selection);
+    public SourceLocation source(String tenant, String actor, WorkspaceSelection selection);
 
     public void authorizeOptions(String tenant, String actor, String workspace);
 

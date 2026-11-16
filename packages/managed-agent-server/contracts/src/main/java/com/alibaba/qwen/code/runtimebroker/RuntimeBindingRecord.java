@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds;
+
 import java.time.Instant;
 import java.util.Objects;
 
@@ -372,7 +374,7 @@ public final class RuntimeBindingRecord {
                 || state == State.DRAINING
                 || state == State.OPERATOR_RECOVERY
                 || state == State.RECOVERY_BLOCKED
-                        && (!com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(
+                        && (!RuntimeProviderKinds.LOCAL_PROCESS.equals(
                                         request.getProvisionerKind())
                                 || lease != null
                                 || attestationGeneration > 0)

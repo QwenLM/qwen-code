@@ -11,8 +11,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.math.BigInteger;
 import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -161,11 +164,11 @@ public final class CsiFileHistoryProtocol {
         require(value.matches("(?:[0-9]{4}|[+-][0-9]{6})-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z"));
         Instant instant = Instant.parse(value);
         require(Math.abs(instant.toEpochMilli()) <= 8_640_000_000_000_000L);
-        var date = instant.atOffset(java.time.ZoneOffset.UTC);
+        var date = instant.atOffset(ZoneOffset.UTC);
         int year = date.getYear();
-        String prefix = year >= 0 && year <= 9999 ? String.format(java.util.Locale.ROOT, "%04d", year)
-                : (year < 0 ? "-" : "+") + String.format(java.util.Locale.ROOT, "%06d", Math.abs(year));
-        require(value.equals(prefix + date.format(java.time.format.DateTimeFormatter.ofPattern("-MM-dd'T'HH:mm:ss.SSS'Z'"))));
+        String prefix = year >= 0 && year <= 9999 ? String.format(Locale.ROOT, "%04d", year)
+                : (year < 0 ? "-" : "+") + String.format(Locale.ROOT, "%06d", Math.abs(year));
+        require(value.equals(prefix + date.format(DateTimeFormatter.ofPattern("-MM-dd'T'HH:mm:ss.SSS'Z'"))));
     }
 
     private static void require(boolean valid) {

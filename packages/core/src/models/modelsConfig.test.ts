@@ -2410,7 +2410,11 @@ describe('Qwen Subscription model selection', () => {
       extra_body: undefined,
       modalities: {},
     });
-    expect(changed).toHaveBeenCalledWith(AuthType.QWEN_SUBSCRIPTION, true);
+    expect(changed).toHaveBeenCalledWith(
+      AuthType.QWEN_SUBSCRIPTION,
+      true,
+      undefined,
+    );
   });
 
   it('restores the subscription selection with a placeholder token', () => {
@@ -2433,5 +2437,5 @@ describe('Qwen Subscription model selection', () => {
 
 vi.mock('../qwen/subscription-models.js', async (original) => ({
   ...(await original<typeof import('../qwen/subscription-models.js')>()),
-  readCachedSubscriptionModels: vi.fn(() => ['qwen3.8-max']),
+  readCachedSubscriptionCatalog: vi.fn(() => ({ models: ['qwen3.8-max'] })),
 }));

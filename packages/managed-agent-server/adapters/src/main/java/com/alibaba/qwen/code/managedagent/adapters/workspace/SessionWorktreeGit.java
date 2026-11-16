@@ -1,13 +1,16 @@
 package com.alibaba.qwen.code.managedagent.adapters.workspace;
 
 import com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorkspaceException;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.SessionWorktreeOperations;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore.Plan;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
@@ -15,11 +18,13 @@ import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.List;
 import java.util.Map;
+import java.util.function.BooleanSupplier;
+import java.util.function.Supplier;
 
-public final class SessionWorktreeGit implements com.alibaba.qwen.code.managedagent.contracts.workspace.SessionWorktreeOperations {
+public final class SessionWorktreeGit implements SessionWorktreeOperations {
     public static final String CONTAINER = ".qwen-managed-worktrees";
     private static final ObjectMapper JSON = new ObjectMapper()
-            .enable(com.fasterxml.jackson.databind.DeserializationFeature.USE_LONG_FOR_INTS);
+            .enable(DeserializationFeature.USE_LONG_FOR_INTS);
     private final ChildWorktreeGit git;
 
     public SessionWorktreeGit(ChildWorktreeGit git) {
@@ -116,7 +121,7 @@ public final class SessionWorktreeGit implements com.alibaba.qwen.code.managedag
                 }
                 command(repository.top(), root, "worktree", "add", "-b", plan.branch(), "--", target.toString(), plan.baseCommit());
                 requireDirectory(root.resolve(plan.cwdRelative()));
-                writeRecord(completion(plan), captureIdentity(plan, null).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                writeRecord(completion(plan), captureIdentity(plan, null).getBytes(StandardCharsets.UTF_8));
             }
             requireDirectory(root.resolve(plan.cwdRelative()));
             return verify(plan, null);
@@ -311,7 +316,7 @@ public final class SessionWorktreeGit implements com.alibaba.qwen.code.managedag
     }
 
     private String command(Path directory, Path root, String... args) {
-        return new String(git.sessionCommand(directory, root, List.of(args)), java.nio.charset.StandardCharsets.UTF_8);
+        return new String(git.sessionCommand(directory, root, List.of(args)), StandardCharsets.UTF_8);
     }
 
     public static ManagedAgentException error(String code, String message) {
@@ -322,5 +327,5 @@ public final class SessionWorktreeGit implements com.alibaba.qwen.code.managedag
     public void close() {
         git.close();
     }
-    public <T> T runWhileLive(java.util.function.BooleanSupplier live, java.util.function.Supplier<T> work) { return git.runWhileLive(live, work); }
+    public <T> T runWhileLive(BooleanSupplier live, Supplier<T> work) { return git.runWhileLive(live, work); }
 }

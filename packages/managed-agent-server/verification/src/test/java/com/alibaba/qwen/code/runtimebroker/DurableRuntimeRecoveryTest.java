@@ -1,18 +1,24 @@
 package com.alibaba.qwen.code.runtimebroker;
 
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeSessionRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
+import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 
+import javax.sql.DataSource;
+
 import java.net.URI;
-import java.time.Clock;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.time.Duration;
 import java.time.Instant;
-import java.time.ZoneId;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CountDownLatch;
@@ -20,6 +26,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -38,12 +45,10 @@ class DurableRuntimeRecoveryTest {
     @Test
     void restoredReadyBindingWaitsForReconcileAndAttestation()
             throws Exception {
-        InMemoryRuntimeBindingRepository bindings =
-                new InMemoryRuntimeBindingRepository();
-        InMemoryRuntimeSessionRepository sessions =
-                new InMemoryRuntimeSessionRepository();
-        InMemoryToolExecutionRepository executions =
-                new InMemoryToolExecutionRepository();
+        Fixture fixture = new Fixture();
+        var bindings = fixture.bindings;
+        var sessions = fixture.sessions;
+        var executions = fixture.executions;
         DurableProvisioner initial = new DurableProvisioner();
         try (RuntimeBrokerService service = service(initial,
                 new TestTransport(), bindings, sessions, executions,
@@ -88,12 +93,10 @@ class DurableRuntimeRecoveryTest {
     @Test
     void unknownObservationNeverCreatesOrReplacesAReadyResource()
             throws Exception {
-        InMemoryRuntimeBindingRepository bindings =
-                new InMemoryRuntimeBindingRepository();
-        InMemoryRuntimeSessionRepository sessions =
-                new InMemoryRuntimeSessionRepository();
-        InMemoryToolExecutionRepository executions =
-                new InMemoryToolExecutionRepository();
+        Fixture fixture = new Fixture();
+        var bindings = fixture.bindings;
+        var sessions = fixture.sessions;
+        var executions = fixture.executions;
         DurableProvisioner initial = new DurableProvisioner();
         try (RuntimeBrokerService service = service(initial,
                 new TestTransport(), bindings, sessions, executions,
@@ -132,12 +135,10 @@ class DurableRuntimeRecoveryTest {
     @Test
     void unknownObservationTimesOutAndAnewRequestCanResume()
             throws Exception {
-        InMemoryRuntimeBindingRepository bindings =
-                new InMemoryRuntimeBindingRepository();
-        InMemoryRuntimeSessionRepository sessions =
-                new InMemoryRuntimeSessionRepository();
-        InMemoryToolExecutionRepository executions =
-                new InMemoryToolExecutionRepository();
+        Fixture fixture = new Fixture();
+        var bindings = fixture.bindings;
+        var sessions = fixture.sessions;
+        var executions = fixture.executions;
         DurableProvisioner initial = new DurableProvisioner();
         try (RuntimeBrokerService service = service(initial,
                 new TestTransport(), bindings, sessions, executions,
@@ -176,12 +177,10 @@ class DurableRuntimeRecoveryTest {
     @Test
     void anInFlightReconcileIsBoundedByTheOperationDeadline()
             throws Exception {
-        InMemoryRuntimeBindingRepository bindings =
-                new InMemoryRuntimeBindingRepository();
-        InMemoryRuntimeSessionRepository sessions =
-                new InMemoryRuntimeSessionRepository();
-        InMemoryToolExecutionRepository executions =
-                new InMemoryToolExecutionRepository();
+        Fixture fixture = new Fixture();
+        var bindings = fixture.bindings;
+        var sessions = fixture.sessions;
+        var executions = fixture.executions;
         DurableProvisioner initial = new DurableProvisioner();
         try (RuntimeBrokerService service = service(initial,
                 new TestTransport(), bindings, sessions, executions,
@@ -223,12 +222,10 @@ class DurableRuntimeRecoveryTest {
     @Test
     void lateAttestationCannotOverwriteARestoredReadyBinding()
             throws Exception {
-        InMemoryRuntimeBindingRepository bindings =
-                new InMemoryRuntimeBindingRepository();
-        InMemoryRuntimeSessionRepository sessions =
-                new InMemoryRuntimeSessionRepository();
-        InMemoryToolExecutionRepository executions =
-                new InMemoryToolExecutionRepository();
+        Fixture fixture = new Fixture();
+        var bindings = fixture.bindings;
+        var sessions = fixture.sessions;
+        var executions = fixture.executions;
         DurableProvisioner initial = new DurableProvisioner();
         try (RuntimeBrokerService service = service(initial,
                 new TestTransport(), bindings, sessions, executions,
@@ -270,14 +267,14 @@ class DurableRuntimeRecoveryTest {
     @Test
     void attestationMismatchMarksTheBindingRecoveryBlocked()
             throws Exception {
-        InMemoryRuntimeBindingRepository bindings =
-                new InMemoryRuntimeBindingRepository();
+        Fixture fixture = new Fixture();
+        var bindings = fixture.bindings;
         DurableProvisioner provisioner = new DurableProvisioner();
         try (RuntimeBrokerService service = service(provisioner,
                 new TestTransport(CompletableFuture.completedFuture(null),
                         true), bindings,
-                new InMemoryRuntimeSessionRepository(),
-                new InMemoryToolExecutionRepository(), "broker-one")) {
+                fixture.sessions,
+                fixture.executions, "broker-one")) {
             assertThrows(Exception.class, () -> service.warm("harness")
                     .toCompletableFuture().get(2, TimeUnit.SECONDS));
 
@@ -291,12 +288,10 @@ class DurableRuntimeRecoveryTest {
 
     @Test
     void concurrentRestoredWarmReconcilesOnce() throws Exception {
-        InMemoryRuntimeBindingRepository bindings =
-                new InMemoryRuntimeBindingRepository();
-        InMemoryRuntimeSessionRepository sessions =
-                new InMemoryRuntimeSessionRepository();
-        InMemoryToolExecutionRepository executions =
-                new InMemoryToolExecutionRepository();
+        Fixture fixture = new Fixture();
+        var bindings = fixture.bindings;
+        var sessions = fixture.sessions;
+        var executions = fixture.executions;
         DurableProvisioner initial = new DurableProvisioner();
         try (RuntimeBrokerService service = service(initial,
                 new TestTransport(), bindings, sessions, executions,
@@ -370,12 +365,10 @@ class DurableRuntimeRecoveryTest {
     private void assertIdentityMismatchBlocksRecovery(
             Consumer<DurableProvisioner> observationMismatch,
             Consumer<TestTransport> attestationMismatch) throws Exception {
-        InMemoryRuntimeBindingRepository bindings =
-                new InMemoryRuntimeBindingRepository();
-        InMemoryRuntimeSessionRepository sessions =
-                new InMemoryRuntimeSessionRepository();
-        InMemoryToolExecutionRepository executions =
-                new InMemoryToolExecutionRepository();
+        Fixture fixture = new Fixture();
+        var bindings = fixture.bindings;
+        var sessions = fixture.sessions;
+        var executions = fixture.executions;
         DurableProvisioner initial = new DurableProvisioner();
         try (RuntimeBrokerService service = service(initial,
                 new TestTransport(), bindings, sessions, executions,
@@ -404,14 +397,14 @@ class DurableRuntimeRecoveryTest {
     @Test
     void defaultEnsureResourceFailsClosedForADurableKind() throws Exception {
         AtomicInteger bindingIds = new AtomicInteger();
-        InMemoryRuntimeBindingRepository bindings =
-                new InMemoryRuntimeBindingRepository(Clock.systemUTC(),
-                        () -> "binding-" + bindingIds.incrementAndGet());
+        Fixture fixture = new Fixture(
+                () -> "binding-" + bindingIds.incrementAndGet());
+        var bindings = fixture.bindings;
         DefaultsOnlyProvisioner provisioner = new DefaultsOnlyProvisioner();
         try (RuntimeBrokerService service = service(provisioner,
                 new BareTransport(), bindings,
-                new InMemoryRuntimeSessionRepository(),
-                new InMemoryToolExecutionRepository(), "broker-one")) {
+                fixture.sessions,
+                fixture.executions, "broker-one")) {
             Exception failure = assertThrows(Exception.class,
                     () -> service.warm("harness").toCompletableFuture()
                             .get(2, TimeUnit.SECONDS));
@@ -426,12 +419,10 @@ class DurableRuntimeRecoveryTest {
 
     @Test
     void defaultReconcileWaitsInsteadOfGuessing() throws Exception {
-        InMemoryRuntimeBindingRepository bindings =
-                new InMemoryRuntimeBindingRepository();
-        InMemoryRuntimeSessionRepository sessions =
-                new InMemoryRuntimeSessionRepository();
-        InMemoryToolExecutionRepository executions =
-                new InMemoryToolExecutionRepository();
+        Fixture fixture = new Fixture();
+        var bindings = fixture.bindings;
+        var sessions = fixture.sessions;
+        var executions = fixture.executions;
         DurableProvisioner initial = new DurableProvisioner();
         try (RuntimeBrokerService service = service(initial,
                 new TestTransport(), bindings, sessions, executions,
@@ -460,14 +451,14 @@ class DurableRuntimeRecoveryTest {
     @Test
     void defaultAttestFailsClosedForDurableProvisioning() throws Exception {
         AtomicInteger bindingIds = new AtomicInteger();
-        InMemoryRuntimeBindingRepository bindings =
-                new InMemoryRuntimeBindingRepository(Clock.systemUTC(),
-                        () -> "binding-" + bindingIds.incrementAndGet());
+        Fixture fixture = new Fixture(
+                () -> "binding-" + bindingIds.incrementAndGet());
+        var bindings = fixture.bindings;
         DurableProvisioner provisioner = new DurableProvisioner();
         try (RuntimeBrokerService service = service(provisioner,
                 new BareTransport(), bindings,
-                new InMemoryRuntimeSessionRepository(),
-                new InMemoryToolExecutionRepository(), "broker-one")) {
+                fixture.sessions,
+                fixture.executions, "broker-one")) {
             Exception failure = assertThrows(Exception.class,
                     () -> service.warm("harness").toCompletableFuture()
                             .get(2, TimeUnit.SECONDS));
@@ -482,13 +473,13 @@ class DurableRuntimeRecoveryTest {
 
     @Test
     void nonRetryableAttestationFailureBlocksRecovery() throws Exception {
-        InMemoryRuntimeBindingRepository bindings =
-                new InMemoryRuntimeBindingRepository();
+        Fixture fixture = new Fixture();
+        var bindings = fixture.bindings;
         DurableProvisioner initial = new DurableProvisioner();
         try (RuntimeBrokerService service = service(initial,
                 new TestTransport(), bindings,
-                new InMemoryRuntimeSessionRepository(),
-                new InMemoryToolExecutionRepository(), "broker-one")) {
+                fixture.sessions,
+                fixture.executions, "broker-one")) {
             service.warm("harness").toCompletableFuture()
                     .get(2, TimeUnit.SECONDS);
         }
@@ -499,8 +490,8 @@ class DurableRuntimeRecoveryTest {
                         "managed_runtime_identity_conflict", "conflict",
                         false));
         try (RuntimeBrokerService service = service(restored, transport,
-                bindings, new InMemoryRuntimeSessionRepository(),
-                new InMemoryToolExecutionRepository(), "broker-two")) {
+                bindings, fixture.sessions,
+                fixture.executions, "broker-two")) {
             assertThrows(Exception.class, () -> service.warm("harness")
                     .toCompletableFuture().get(2, TimeUnit.SECONDS));
             assertEquals(RuntimeBindingRecord.State.RECOVERY_BLOCKED,
@@ -514,12 +505,10 @@ class DurableRuntimeRecoveryTest {
 
     @Test
     void aTransientAttestationFailureDoesNotBlockRecovery() throws Exception {
-        InMemoryRuntimeBindingRepository bindings =
-                new InMemoryRuntimeBindingRepository();
-        InMemoryRuntimeSessionRepository sessions =
-                new InMemoryRuntimeSessionRepository();
-        InMemoryToolExecutionRepository executions =
-                new InMemoryToolExecutionRepository();
+        Fixture fixture = new Fixture();
+        var bindings = fixture.bindings;
+        var sessions = fixture.sessions;
+        var executions = fixture.executions;
         DurableProvisioner initial = new DurableProvisioner();
         try (RuntimeBrokerService service = service(initial,
                 new TestTransport(), bindings, sessions, executions,
@@ -566,12 +555,10 @@ class DurableRuntimeRecoveryTest {
     @Test
     void sessionsLeftAcquiringOrReleasingStillNeedStopProof()
             throws Exception {
-        InMemoryRuntimeBindingRepository bindings =
-                new InMemoryRuntimeBindingRepository();
-        InMemoryRuntimeSessionRepository sessions =
-                new InMemoryRuntimeSessionRepository();
-        InMemoryToolExecutionRepository executions =
-                new InMemoryToolExecutionRepository();
+        Fixture fixture = new Fixture();
+        var bindings = fixture.bindings;
+        var sessions = fixture.sessions;
+        var executions = fixture.executions;
         DurableProvisioner initial = new DurableProvisioner();
         try (RuntimeBrokerService service = service(initial,
                 new TestTransport(), bindings, sessions, executions,
@@ -618,12 +605,10 @@ class DurableRuntimeRecoveryTest {
     @Test
     void releaseDoesNotSettleLocallyWhileTheRuntimeIsNotProvenGone()
             throws Exception {
-        InMemoryRuntimeBindingRepository bindings =
-                new InMemoryRuntimeBindingRepository();
-        InMemoryRuntimeSessionRepository sessions =
-                new InMemoryRuntimeSessionRepository();
-        InMemoryToolExecutionRepository executions =
-                new InMemoryToolExecutionRepository();
+        Fixture fixture = new Fixture();
+        var bindings = fixture.bindings;
+        var sessions = fixture.sessions;
+        var executions = fixture.executions;
         DurableProvisioner initial = new DurableProvisioner();
         try (RuntimeBrokerService service = service(initial,
                 new TestTransport(), bindings, sessions, executions,
@@ -652,13 +637,13 @@ class DurableRuntimeRecoveryTest {
     @Test
     void conflictObservationRetainsTheLastTrustedResourceHandle()
             throws Exception {
-        InMemoryRuntimeBindingRepository bindings =
-                new InMemoryRuntimeBindingRepository();
+        Fixture fixture = new Fixture();
+        var bindings = fixture.bindings;
         DurableProvisioner initial = new DurableProvisioner();
         try (RuntimeBrokerService service = service(initial,
                 new TestTransport(), bindings,
-                new InMemoryRuntimeSessionRepository(),
-                new InMemoryToolExecutionRepository(), "broker-one")) {
+                fixture.sessions,
+                fixture.executions, "broker-one")) {
             service.warm("harness").toCompletableFuture()
                     .get(2, TimeUnit.SECONDS);
         }
@@ -670,8 +655,8 @@ class DurableRuntimeRecoveryTest {
                 Map.of("resourceId", "untrusted-replacement"));
         try (RuntimeBrokerService service = service(conflicted,
                 new TestTransport(), bindings,
-                new InMemoryRuntimeSessionRepository(),
-                new InMemoryToolExecutionRepository(), "broker-two")) {
+                fixture.sessions,
+                fixture.executions, "broker-two")) {
             assertThrows(Exception.class, () -> service.warm("harness")
                     .toCompletableFuture().get(2, TimeUnit.SECONDS));
 
@@ -685,15 +670,15 @@ class DurableRuntimeRecoveryTest {
 
     @Test
     void nonRetryableEnsureFailureDoesNotLoopForever() throws Exception {
-        InMemoryRuntimeBindingRepository bindings =
-                new InMemoryRuntimeBindingRepository();
+        Fixture fixture = new Fixture();
+        var bindings = fixture.bindings;
         DurableProvisioner provisioner = new DurableProvisioner();
         provisioner.ensureFailure = new RuntimeBrokerException(409,
                 "runtime_broker_resource_conflict", "conflict", false);
         try (RuntimeBrokerService service = service(provisioner,
                 new TestTransport(), bindings,
-                new InMemoryRuntimeSessionRepository(),
-                new InMemoryToolExecutionRepository(), "broker-one")) {
+                fixture.sessions,
+                fixture.executions, "broker-one")) {
             assertThrows(Exception.class, () -> service.warm("harness")
                     .toCompletableFuture().get(2, TimeUnit.SECONDS));
 
@@ -706,15 +691,15 @@ class DurableRuntimeRecoveryTest {
     @Test
     void retryableProvisionFailureKeepsTheEnsuredResource()
             throws Exception {
-        InMemoryRuntimeBindingRepository bindings =
-                new InMemoryRuntimeBindingRepository();
+        Fixture fixture = new Fixture();
+        var bindings = fixture.bindings;
         DurableProvisioner provisioner = new DurableProvisioner();
         provisioner.provisionFailure = new RuntimeBrokerException(503,
                 "runtime_provision_failed", "transient", true);
         try (RuntimeBrokerService service = service(provisioner,
                 new TestTransport(), bindings,
-                new InMemoryRuntimeSessionRepository(),
-                new InMemoryToolExecutionRepository(), "broker-one")) {
+                fixture.sessions,
+                fixture.executions, "broker-one")) {
             assertThrows(Exception.class, () -> service.warm("harness")
                     .toCompletableFuture().get(2, TimeUnit.SECONDS));
 
@@ -740,13 +725,13 @@ class DurableRuntimeRecoveryTest {
     @Test
     void synchronousReconcileFailureDoesNotPoisonSingleFlight()
             throws Exception {
-        InMemoryRuntimeBindingRepository bindings =
-                new InMemoryRuntimeBindingRepository();
+        Fixture fixture = new Fixture();
+        var bindings = fixture.bindings;
         DurableProvisioner initial = new DurableProvisioner();
         try (RuntimeBrokerService service = service(initial,
                 new TestTransport(), bindings,
-                new InMemoryRuntimeSessionRepository(),
-                new InMemoryToolExecutionRepository(), "broker-one")) {
+                fixture.sessions,
+                fixture.executions, "broker-one")) {
             service.warm("harness").toCompletableFuture()
                     .get(2, TimeUnit.SECONDS);
         }
@@ -756,8 +741,8 @@ class DurableRuntimeRecoveryTest {
         DurableProvisioner restored = new DurableProvisioner();
         try (RuntimeBrokerService service = service(restored,
                 new TestTransport(), failingOnce,
-                new InMemoryRuntimeSessionRepository(),
-                new InMemoryToolExecutionRepository(), "broker-two")) {
+                fixture.sessions,
+                fixture.executions, "broker-two")) {
             assertThrows(Exception.class, () -> service.warm("harness")
                     .toCompletableFuture().get(2, TimeUnit.SECONDS));
 
@@ -770,12 +755,10 @@ class DurableRuntimeRecoveryTest {
     @Test
     void startingObservationRetriesUntilTheOperationDeadline()
             throws Exception {
-        InMemoryRuntimeBindingRepository bindings =
-                new InMemoryRuntimeBindingRepository();
-        InMemoryRuntimeSessionRepository sessions =
-                new InMemoryRuntimeSessionRepository();
-        InMemoryToolExecutionRepository executions =
-                new InMemoryToolExecutionRepository();
+        Fixture fixture = new Fixture();
+        var bindings = fixture.bindings;
+        var sessions = fixture.sessions;
+        var executions = fixture.executions;
         DurableProvisioner initial = new DurableProvisioner();
         try (RuntimeBrokerService service = service(initial,
                 new TestTransport(), bindings, sessions, executions,
@@ -809,12 +792,10 @@ class DurableRuntimeRecoveryTest {
     @Test
     void retryableReconcileFailureTimesOutWithoutBlockingRecovery()
             throws Exception {
-        InMemoryRuntimeBindingRepository bindings =
-                new InMemoryRuntimeBindingRepository();
-        InMemoryRuntimeSessionRepository sessions =
-                new InMemoryRuntimeSessionRepository();
-        InMemoryToolExecutionRepository executions =
-                new InMemoryToolExecutionRepository();
+        Fixture fixture = new Fixture();
+        var bindings = fixture.bindings;
+        var sessions = fixture.sessions;
+        var executions = fixture.executions;
         DurableProvisioner initial = new DurableProvisioner();
         try (RuntimeBrokerService service = service(initial,
                 new TestTransport(), bindings, sessions, executions,
@@ -844,12 +825,10 @@ class DurableRuntimeRecoveryTest {
 
     @Test
     void nonRetryableReconcileFailureBlocksRecovery() throws Exception {
-        InMemoryRuntimeBindingRepository bindings =
-                new InMemoryRuntimeBindingRepository();
-        InMemoryRuntimeSessionRepository sessions =
-                new InMemoryRuntimeSessionRepository();
-        InMemoryToolExecutionRepository executions =
-                new InMemoryToolExecutionRepository();
+        Fixture fixture = new Fixture();
+        var bindings = fixture.bindings;
+        var sessions = fixture.sessions;
+        var executions = fixture.executions;
         DurableProvisioner initial = new DurableProvisioner();
         try (RuntimeBrokerService service = service(initial,
                 new TestTransport(), bindings, sessions, executions,
@@ -879,16 +858,16 @@ class DurableRuntimeRecoveryTest {
     void ambiguousEnsureFailurePinsTheGeneration()
             throws Exception {
         AtomicInteger bindingIds = new AtomicInteger();
-        InMemoryRuntimeBindingRepository bindings =
-                new InMemoryRuntimeBindingRepository(Clock.systemUTC(),
-                        () -> "binding-" + bindingIds.incrementAndGet());
+        Fixture fixture = new Fixture(
+                () -> "binding-" + bindingIds.incrementAndGet());
+        var bindings = fixture.bindings;
         DurableProvisioner provisioner = new DurableProvisioner();
         provisioner.ensureFailure = new RuntimeBrokerException(503,
                 "runtime_provision_failed", "transient", true);
         try (RuntimeBrokerService service = service(provisioner,
                 new TestTransport(), bindings,
-                new InMemoryRuntimeSessionRepository(),
-                new InMemoryToolExecutionRepository(), "broker-one")) {
+                fixture.sessions,
+                fixture.executions, "broker-one")) {
             assertThrows(Exception.class, () -> service.warm("harness")
                     .toCompletableFuture().get(2, TimeUnit.SECONDS));
             assertEquals(RuntimeBindingRecord.State.RECOVERY_BLOCKED,
@@ -903,15 +882,15 @@ class DurableRuntimeRecoveryTest {
 
     @Test
     void parkedProvisionIsBoundedByTheOperationDeadline() throws Exception {
-        InMemoryRuntimeBindingRepository bindings =
-                new InMemoryRuntimeBindingRepository();
+        Fixture fixture = new Fixture();
+        var bindings = fixture.bindings;
         DurableProvisioner provisioner = new DurableProvisioner();
         provisioner.ensureGate = new CompletableFuture<>();
         try (RuntimeBrokerService service = new RuntimeBrokerService(
                 ignored -> CompletableFuture.completedFuture(SCOPE),
                 provisioner, new TestTransport(), bindings,
-                new InMemoryRuntimeSessionRepository(),
-                new InMemoryToolExecutionRepository(), "broker-one",
+                fixture.sessions,
+                fixture.executions, "broker-one",
                 Duration.ofMillis(20), Duration.ofSeconds(1))) {
             Exception failure = assertThrows(Exception.class,
                     () -> service.warm("harness").toCompletableFuture()
@@ -938,12 +917,10 @@ class DurableRuntimeRecoveryTest {
 
     @Test
     void activeExecutionAloneKeepsALostGenerationPinned() throws Exception {
-        InMemoryRuntimeBindingRepository bindings =
-                new InMemoryRuntimeBindingRepository();
-        InMemoryRuntimeSessionRepository sessions =
-                new InMemoryRuntimeSessionRepository();
-        InMemoryToolExecutionRepository executions =
-                new InMemoryToolExecutionRepository();
+        Fixture fixture = new Fixture();
+        var bindings = fixture.bindings;
+        var sessions = fixture.sessions;
+        var executions = fixture.executions;
         DurableProvisioner initial = new DurableProvisioner();
         try (RuntimeBrokerService service = service(initial,
                 new TestTransport(), bindings, sessions, executions,
@@ -986,12 +963,10 @@ class DurableRuntimeRecoveryTest {
 
     @Test
     void concurrentWarmOnAnIdleLostBindingReclaimsOnce() throws Exception {
-        InMemoryRuntimeBindingRepository bindings =
-                new InMemoryRuntimeBindingRepository();
-        InMemoryRuntimeSessionRepository sessions =
-                new InMemoryRuntimeSessionRepository();
-        InMemoryToolExecutionRepository executions =
-                new InMemoryToolExecutionRepository();
+        Fixture fixture = new Fixture();
+        var bindings = fixture.bindings;
+        var sessions = fixture.sessions;
+        var executions = fixture.executions;
         DurableProvisioner initial = new DurableProvisioner();
         try (RuntimeBrokerService service = service(initial,
                 new TestTransport(), bindings, sessions, executions,
@@ -1026,12 +1001,11 @@ class DurableRuntimeRecoveryTest {
 
     @Test
     void lostBranchSurvivesAnInFlightRenewalTick() throws Exception {
+        Fixture fixture = new Fixture();
         ReclaimWatchRepository bindings = new ReclaimWatchRepository(
-                new InMemoryRuntimeBindingRepository());
-        InMemoryRuntimeSessionRepository sessions =
-                new InMemoryRuntimeSessionRepository();
-        InMemoryToolExecutionRepository executions =
-                new InMemoryToolExecutionRepository();
+                fixture.bindings);
+        var sessions = fixture.sessions;
+        var executions = fixture.executions;
         DurableProvisioner initial = new DurableProvisioner();
         try (RuntimeBrokerService service = service(initial,
                 new TestTransport(), bindings, sessions, executions,
@@ -1074,12 +1048,11 @@ class DurableRuntimeRecoveryTest {
 
     @Test
     void lostBranchRenewsBeforeItsEvidenceWrite() throws Exception {
+        Fixture fixture = new Fixture();
         ReclaimWatchRepository bindings = new ReclaimWatchRepository(
-                new InMemoryRuntimeBindingRepository());
-        InMemoryRuntimeSessionRepository sessions =
-                new InMemoryRuntimeSessionRepository();
-        InMemoryToolExecutionRepository executions =
-                new InMemoryToolExecutionRepository();
+                fixture.bindings);
+        var sessions = fixture.sessions;
+        var executions = fixture.executions;
         DurableProvisioner initial = new DurableProvisioner();
         try (RuntimeBrokerService service = service(initial,
                 new TestTransport(), bindings, sessions, executions,
@@ -1121,12 +1094,10 @@ class DurableRuntimeRecoveryTest {
 
     @Test
     void lostBranchReclaimsBeyondTheReconcileDeadline() throws Exception {
-        InMemoryRuntimeBindingRepository bindings =
-                new InMemoryRuntimeBindingRepository();
-        InMemoryRuntimeSessionRepository sessions =
-                new InMemoryRuntimeSessionRepository();
-        InMemoryToolExecutionRepository executions =
-                new InMemoryToolExecutionRepository();
+        Fixture fixture = new Fixture();
+        var bindings = fixture.bindings;
+        var sessions = fixture.sessions;
+        var executions = fixture.executions;
         DurableProvisioner initial = new DurableProvisioner();
         try (RuntimeBrokerService service = service(initial,
                 new TestTransport(), bindings, sessions, executions,
@@ -1173,12 +1144,11 @@ class DurableRuntimeRecoveryTest {
      */
     @Test
     void lostHandoffRenewsBeforeTheFirstRecoverLost() throws Exception {
+        Fixture fixture = new Fixture();
         ReclaimWatchRepository bindings = new ReclaimWatchRepository(
-                new InMemoryRuntimeBindingRepository());
-        InMemoryRuntimeSessionRepository sessions =
-                new InMemoryRuntimeSessionRepository();
-        InMemoryToolExecutionRepository executions =
-                new InMemoryToolExecutionRepository();
+                fixture.bindings);
+        var sessions = fixture.sessions;
+        var executions = fixture.executions;
         DurableProvisioner initial = new DurableProvisioner();
         try (RuntimeBrokerService service = service(initial,
                 new TestTransport(), bindings, sessions, executions,
@@ -1222,12 +1192,11 @@ class DurableRuntimeRecoveryTest {
      */
     @Test
     void adoptCasSurvivesARenewalTickInItsWindow() throws Exception {
+        Fixture fixture = new Fixture();
         ReclaimWatchRepository bindings = new ReclaimWatchRepository(
-                new InMemoryRuntimeBindingRepository());
-        InMemoryRuntimeSessionRepository sessions =
-                new InMemoryRuntimeSessionRepository();
-        InMemoryToolExecutionRepository executions =
-                new InMemoryToolExecutionRepository();
+                fixture.bindings);
+        var sessions = fixture.sessions;
+        var executions = fixture.executions;
         DurableProvisioner initial = new DurableProvisioner();
         try (RuntimeBrokerService service = service(initial,
                 new TestTransport(), bindings, sessions, executions,
@@ -1253,12 +1222,11 @@ class DurableRuntimeRecoveryTest {
 
     @Test
     void stoppedFlagRetractsATickQueuedBehindClose() throws Exception {
+        Fixture fixture = new Fixture();
         ReclaimWatchRepository bindings = new ReclaimWatchRepository(
-                new InMemoryRuntimeBindingRepository());
-        InMemoryRuntimeSessionRepository sessions =
-                new InMemoryRuntimeSessionRepository();
-        InMemoryToolExecutionRepository executions =
-                new InMemoryToolExecutionRepository();
+                fixture.bindings);
+        var sessions = fixture.sessions;
+        var executions = fixture.executions;
         DurableProvisioner provisioner = new DurableProvisioner();
         // persistResourceHandle's write holds the renewal monitor for 2.5s
         // of the 3s lease, so the tick dispatched at 1s queues on the
@@ -1284,14 +1252,10 @@ class DurableRuntimeRecoveryTest {
     @Test
     void lateEnsureResultCannotOverwriteANewOperationOwner()
             throws Exception {
-        MutableClock clock = new MutableClock();
-        InMemoryRuntimeBindingRepository bindings =
-                new InMemoryRuntimeBindingRepository(clock,
-                        () -> "binding");
-        InMemoryRuntimeSessionRepository sessions =
-                new InMemoryRuntimeSessionRepository();
-        InMemoryToolExecutionRepository executions =
-                new InMemoryToolExecutionRepository();
+        Fixture fixture = new Fixture(() -> "binding");
+        var bindings = fixture.bindings;
+        var sessions = fixture.sessions;
+        var executions = fixture.executions;
         DurableProvisioner first = new DurableProvisioner();
         first.ensureGate = new CompletableFuture<>();
         RuntimeBrokerService firstService = service(first,
@@ -1300,7 +1264,7 @@ class DurableRuntimeRecoveryTest {
         try {
             firstService.warm("harness");
             await(() -> first.ensures.get() == 1, Duration.ofSeconds(1));
-            clock.advance(Duration.ofSeconds(2));
+            expireOperationLease(fixture.source, "binding");
 
             DurableProvisioner second = new DurableProvisioner();
             try (RuntimeBrokerService secondService = service(second,
@@ -1333,12 +1297,10 @@ class DurableRuntimeRecoveryTest {
     @Test
     void lossAndStopEvidencePermitANewGeneration()
             throws Exception {
-        InMemoryRuntimeBindingRepository bindings =
-                new InMemoryRuntimeBindingRepository();
-        InMemoryRuntimeSessionRepository sessions =
-                new InMemoryRuntimeSessionRepository();
-        InMemoryToolExecutionRepository executions =
-                new InMemoryToolExecutionRepository();
+        Fixture fixture = new Fixture();
+        var bindings = fixture.bindings;
+        var sessions = fixture.sessions;
+        var executions = fixture.executions;
         DurableProvisioner initial = new DurableProvisioner();
         String initialBinding;
         try (RuntimeBrokerService service = service(initial,
@@ -1372,12 +1334,10 @@ class DurableRuntimeRecoveryTest {
     @Test
     void authoritativeLossStaysBlockedWithAnActiveRuntimeSession()
             throws Exception {
-        InMemoryRuntimeBindingRepository bindings =
-                new InMemoryRuntimeBindingRepository();
-        InMemoryRuntimeSessionRepository sessions =
-                new InMemoryRuntimeSessionRepository();
-        InMemoryToolExecutionRepository executions =
-                new InMemoryToolExecutionRepository();
+        Fixture fixture = new Fixture();
+        var bindings = fixture.bindings;
+        var sessions = fixture.sessions;
+        var executions = fixture.executions;
         DurableProvisioner initial = new DurableProvisioner();
         try (RuntimeBrokerService service = service(initial,
                 new TestTransport(), bindings, sessions, executions,
@@ -1439,9 +1399,10 @@ class DurableRuntimeRecoveryTest {
 
     @Test
     void cachedReleaseHonorsLossAndAcknowledgesCompletedRecovery() {
-        var bindings = new InMemoryRuntimeBindingRepository();
-        var sessions = new InMemoryRuntimeSessionRepository();
-        var executions = new InMemoryToolExecutionRepository();
+        Fixture fixture = new Fixture();
+        var bindings = fixture.bindings;
+        var sessions = fixture.sessions;
+        var executions = fixture.executions;
         var provisioner = new DurableProvisioner();
         var transport = new TestTransport();
         try (RuntimeBrokerService service = service(provisioner, transport, bindings, sessions, executions, "broker")) {
@@ -1472,9 +1433,10 @@ class DurableRuntimeRecoveryTest {
 
     @Test
     void aReplacedBrokerConfirmsAPreparedCancellationAfterAdoptingTheSession() {
-        var bindings = new InMemoryRuntimeBindingRepository();
-        var sessions = new InMemoryRuntimeSessionRepository();
-        var executions = new InMemoryToolExecutionRepository();
+        Fixture fixture = new Fixture();
+        var bindings = fixture.bindings;
+        var sessions = fixture.sessions;
+        var executions = fixture.executions;
         String runtime = "550e8400-e29b-41d4-a716-446655440302";
         Map<String, Object> reference = Map.of("sessionId", runtime, "promptId", "turn",
                 "callId", "call", "argsDigest", "a".repeat(64), "capabilityDigest", "b".repeat(64),
@@ -1509,9 +1471,10 @@ class DurableRuntimeRecoveryTest {
 
     @Test
     void lateReleaseReplyKeepsALostSessionPinned() {
-        var bindings = new InMemoryRuntimeBindingRepository();
-        var sessions = new InMemoryRuntimeSessionRepository();
-        var executions = new InMemoryToolExecutionRepository();
+        Fixture fixture = new Fixture();
+        var bindings = fixture.bindings;
+        var sessions = fixture.sessions;
+        var executions = fixture.executions;
         var provisioner = new DurableProvisioner();
         var transport = new TestTransport();
         transport.releaseResult = new CompletableFuture<>();
@@ -1891,7 +1854,7 @@ class DurableRuntimeRecoveryTest {
             return delegate.recoverLost(sessions, executions, expected);
         }
 
-        ReclaimWatchRepository(InMemoryRuntimeBindingRepository delegate) {
+        ReclaimWatchRepository(RuntimeBindingRepository delegate) {
             super(delegate);
         }
 
@@ -2082,26 +2045,48 @@ class DurableRuntimeRecoveryTest {
         }
     }
 
-    private static final class MutableClock extends Clock {
-        private Instant current = Instant.parse("2026-09-21T00:00:00Z");
+    /** Fresh UUID-named H2 database per fixture, mirroring the JDBC contract. */
+    private static final class Fixture {
+        final JdbcDataSource source;
+        final JdbcRuntimeBindingRepository bindings;
+        final JdbcRuntimeSessionRepository sessions;
+        final JdbcToolExecutionRepository executions;
 
-        void advance(Duration duration) {
-            current = current.plus(duration);
+        Fixture() {
+            this(null);
         }
 
-        @Override
-        public ZoneId getZone() {
-            return ZoneId.of("UTC");
+        Fixture(Supplier<String> bindingIds) {
+            source = new JdbcDataSource();
+            source.setURL("jdbc:h2:mem:durable-recovery-" + UUID.randomUUID()
+                    + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+            ManagedSchema.initialize(source);
+            AesGcmSecretProtector protector =
+                    new AesGcmSecretProtector("test", new byte[32]);
+            bindings = bindingIds == null
+                    ? new JdbcRuntimeBindingRepository(source, protector)
+                    : new JdbcRuntimeBindingRepository(source, protector,
+                            bindingIds);
+            sessions = new JdbcRuntimeSessionRepository(source);
+            executions = new JdbcToolExecutionRepository(source);
         }
+    }
 
-        @Override
-        public Clock withZone(ZoneId zone) {
-            return this;
-        }
-
-        @Override
-        public Instant instant() {
-            return current;
+    /**
+     * One-shot expiry of a binding's operation claim, the JDBC analogue of
+     * advancing a mutable clock past the lease end. The repository reads the
+     * database clock, so the deadline column is moved into the past instead.
+     */
+    private static void expireOperationLease(DataSource source,
+            String bindingId) throws Exception {
+        try (Connection connection = source.getConnection();
+                PreparedStatement statement = connection.prepareStatement(
+                        "UPDATE ma_runtime_binding SET operation_lease_until = ?"
+                                + " WHERE binding_id = ?")) {
+            statement.setLong(1,
+                    Instant.parse("2000-01-01T00:00:00Z").toEpochMilli());
+            statement.setString(2, bindingId);
+            assertEquals(1, statement.executeUpdate());
         }
     }
 }

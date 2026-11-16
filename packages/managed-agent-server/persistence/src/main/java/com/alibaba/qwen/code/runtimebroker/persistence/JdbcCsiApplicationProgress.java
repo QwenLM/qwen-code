@@ -6,14 +6,13 @@ import com.alibaba.qwen.code.runtimebroker.CsiOwnershipRevision;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 
-import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.time.Instant;
-import java.util.HexFormat;
+
+import static com.alibaba.qwen.code.runtimebroker.persistence.JdbcRepositorySupport.statement;
 
 public final class JdbcCsiApplicationProgress {
     private JdbcCsiApplicationProgress() {
@@ -98,7 +97,7 @@ public final class JdbcCsiApplicationProgress {
             throws SQLException {
         String physicalKey;
         long registrationRevision;
-        String alias = aliasKey(original.request().getScope().getTenantId(), original.request().getStorageId());
+        String alias = RuntimeAdmissionFences.storageAliasKey(original.request().getScope().getTenantId(), original.request().getStorageId());
         try (PreparedStatement statement = statement(connection,
                 "SELECT tenant_id, storage_id, physical_key, registration_revision"
                         + " FROM ma_storage WHERE alias_key = ? AND storage_kind = 'CSI' AND registration_state = 'REGISTERED' FOR UPDATE")) {
@@ -129,22 +128,6 @@ public final class JdbcCsiApplicationProgress {
                         && original.generation() == row.getLong("runtime_generation") && !row.next());
             }
         }
-    }
-
-    private static String aliasKey(String tenant, String storage) {
-        MessageDigest digest = org.apache.commons.codec.digest.DigestUtils.getSha256Digest();
-        for (String field : new String[] {"qwen-csi-alias/1", tenant, storage}) {
-            byte[] bytes = field.getBytes(StandardCharsets.UTF_8);
-            digest.update(ByteBuffer.allocate(Integer.BYTES).putInt(bytes.length).array());
-            digest.update(bytes);
-        }
-        return HexFormat.of().formatHex(digest.digest());
-    }
-
-    private static PreparedStatement statement(Connection connection, String sql) throws SQLException {
-        PreparedStatement statement = connection.prepareStatement(sql);
-        statement.setQueryTimeout(10);
-        return statement;
     }
 
     private static void require(boolean condition) {

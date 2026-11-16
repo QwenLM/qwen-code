@@ -1120,6 +1120,8 @@ function AskUserQuestionFlow(props: {
     cpLen(caretLine.before),
     fieldCap,
   );
+  const before = sanitizeTerminalText(customField.before);
+  const after = sanitizeTerminalText(customField.after);
 
   return (
     <>
@@ -1174,9 +1176,7 @@ function AskUserQuestionFlow(props: {
             <text fg={C.accent}>{'> '}</text>
             {customValue ? (
               <>
-                <text fg={C.text}>
-                  {sanitizeTerminalText(customField.before)}
-                </text>
+                {before ? <text fg={C.text}>{before}</text> : null}
                 {/* ink's software cursor: a background-filled cell at the
                     caret, which a text frame cannot show. Past the window the
                     cell has nowhere to go, exactly as in ink's fixed-width
@@ -1186,9 +1186,7 @@ function AskUserQuestionFlow(props: {
                     {sanitizeTerminalText(customField.at) || ' '}
                   </text>
                 ) : null}
-                <text fg={C.text}>
-                  {sanitizeTerminalText(customField.after)}
-                </text>
+                {after ? <text fg={C.text}>{after}</text> : null}
               </>
             ) : (
               <>

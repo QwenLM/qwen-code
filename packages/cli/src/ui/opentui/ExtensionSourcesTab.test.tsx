@@ -154,6 +154,74 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('OpenTuiExtensionSourcesTab', () => {
+  describe.each(['add', 'install-extension'] as const)(
+    '%s Ctrl+C owner',
+    (view) => {
+      async function openInput() {
+        const f = fixture();
+        await mount(f.props);
+        if (view === 'add') await press('down');
+        await press('return');
+        return f;
+      }
+      function expectSubmitted(f: ReturnType<typeof fixture>, value: string) {
+        if (view === 'add') {
+          expect(f.methods.addSource).toHaveBeenCalledExactlyOnceWith(value, {
+            cwd: '/owned/workspace',
+          });
+          expect(f.props.install).not.toHaveBeenCalled();
+        } else {
+          expect(f.props.install).toHaveBeenCalledExactlyOnceWith(
+            value,
+            'user',
+          );
+          expect(f.methods.addSource).not.toHaveBeenCalled();
+        }
+      }
+      async function control(name: string, shift = false) {
+        await act(async () => {
+          const event = { ...catalogKey(name, ''), ctrl: true, shift };
+          for (const handler of [...mocks.state.keyboard]) handler(event);
+        });
+      }
+
+      it('clears before same-read Enter and submits only the replacement', async () => {
+        const f = await openInput();
+        await paste('./old');
+        await act(async () => {
+          for (const event of [
+            { ...catalogKey('c', ''), ctrl: true },
+            catalogKey('return', ''),
+          ]) {
+            for (const handler of [...mocks.state.keyboard]) handler(event);
+          }
+        });
+        expect(f.methods.addSource).not.toHaveBeenCalled();
+        expect(f.props.install).not.toHaveBeenCalled();
+        await paste('./replacement');
+        await press('return');
+        expectSubmitted(f, './replacement');
+      });
+
+      it('undoes one clear after an empty clear without losing the accepted text', async () => {
+        const f = await openInput();
+        await paste('./owned-界😀');
+        await control('c');
+        await control('c');
+        await control('z');
+        await press('return');
+        expectSubmitted(f, './owned-界😀');
+      });
+
+      it('does not clear for shifted Ctrl+C', async () => {
+        const f = await openInput();
+        await paste('./unchanged');
+        await control('c', true);
+        await press('return');
+        expectSubmitted(f, './unchanged');
+      });
+    },
+  );
   it('adds with the explicit cwd and keeps Add selected after refresh', async () => {
     const f = fixture();
     await mount(f.props);

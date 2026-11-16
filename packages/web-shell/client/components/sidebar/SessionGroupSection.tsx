@@ -12,7 +12,10 @@ import {
   PencilIcon,
   Trash2Icon,
 } from 'lucide-react';
-import { SIDEBAR_SESSION_PREVIEW_LIMIT } from '../../constants/sessions';
+import {
+  SIDEBAR_SESSION_EXPAND_STEP,
+  SIDEBAR_SESSION_PREVIEW_LIMIT,
+} from '../../constants/sessions';
 import { useI18n } from '../../i18n';
 import styles from './WebShellSidebar.module.css';
 
@@ -49,11 +52,14 @@ export function SessionGroupSection({
   limitSessions = true,
 }: SessionGroupSectionProps) {
   const { t } = useI18n();
-  const [showAll, setShowAll] = useState(false);
+  const [visibleCount, setVisibleCount] = useState(
+    SIDEBAR_SESSION_PREVIEW_LIMIT,
+  );
   const items = Children.toArray(children);
   useEffect(() => {
-    if (!expanded) setShowAll(false);
+    if (!expanded) setVisibleCount(SIDEBAR_SESSION_PREVIEW_LIMIT);
   }, [expanded]);
+  const previewLimited = limitSessions && items.length > visibleCount;
   const colorClass = color?.startsWith('#')
     ? styles.groupColorCustom
     : color
@@ -121,20 +127,23 @@ export function SessionGroupSection({
       </div>
       {expanded && (
         <div className={styles.sessionGroupList}>
-          {!limitSessions || showAll
-            ? items
-            : items.slice(0, SIDEBAR_SESSION_PREVIEW_LIMIT)}
-          {limitSessions &&
-            !showAll &&
-            items.length > SIDEBAR_SESSION_PREVIEW_LIMIT && (
-              <button
-                type="button"
-                className={styles.showAllSessions}
-                onClick={() => setShowAll(true)}
-              >
-                {t('sidebar.showAllSessions')}
-              </button>
-            )}
+          {previewLimited ? items.slice(0, visibleCount) : items}
+          {previewLimited && (
+            <button
+              type="button"
+              className={styles.showAllSessions}
+              onClick={() =>
+                setVisibleCount((count) => count + SIDEBAR_SESSION_EXPAND_STEP)
+              }
+            >
+              {t('sidebar.showMoreSessions', {
+                count: Math.min(
+                  SIDEBAR_SESSION_EXPAND_STEP,
+                  items.length - visibleCount,
+                ),
+              })}
+            </button>
+          )}
         </div>
       )}
     </section>

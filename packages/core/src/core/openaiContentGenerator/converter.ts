@@ -55,11 +55,25 @@ const debugLogger = createDebugLogger('CONVERTER');
 const SPLIT_TOOL_MEDIA_TEXT = '(attached media from previous tool call)';
 
 /**
- * Extended usage type that supports both OpenAI standard format and alternative formats
- * Some models return cached_tokens at the top level instead of in prompt_tokens_details
+ * Extended usage type that supports both OpenAI standard format and alternative
+ * formats: some models return cached_tokens at the top level instead of in
+ * prompt_tokens_details.
+ *
+ * `cache_write_tokens` is a standard OpenAI Chat Completions field, added to
+ * the SDK's `PromptTokensDetails` in v7; this package pins v5, so the types
+ * here predate it. Moonshot documents it under `prompt_tokens_details`; it is
+ * absent from providers that only report cache reads, and stays `undefined`
+ * there. The value reaches GenAI telemetry's
+ * `gen_ai.usage.cache_creation.input_tokens` unchanged.
  */
 interface ExtendedCompletionUsage extends OpenAI.CompletionUsage {
   cached_tokens?: number;
+  // The pinned SDK declares `prompt_tokens_details` without this member; both
+  // converters read it through this interface so there is one spelling. The
+  // base member does not admit `null`, so the override must not either.
+  prompt_tokens_details?: OpenAI.CompletionUsage.PromptTokensDetails & {
+    cache_write_tokens?: number;
+  };
 }
 
 export interface ExtendedChatCompletionAssistantMessageParam
@@ -1547,6 +1561,8 @@ export function convertOpenAIResponseToLlm(
     const cachedInputTokensReported =
       typeof usage.prompt_tokens_details?.cached_tokens === 'number' ||
       typeof extendedUsage.cached_tokens === 'number';
+    const cacheWriteTokens =
+      extendedUsage.prompt_tokens_details?.cache_write_tokens;
     const providerReasoningTokens =
       usage.completion_tokens_details?.reasoning_tokens;
     let thinkingTokens = providerReasoningTokens;
@@ -1579,6 +1595,8 @@ export function convertOpenAIResponseToLlm(
     };
     setGenAiUsageProvenance(response.usageMetadata, {
       cachedInputTokensReported,
+      cacheCreationInputTokens:
+        typeof cacheWriteTokens === 'number' ? cacheWriteTokens : undefined,
     });
   }
 
@@ -2175,6 +2193,8 @@ export function convertOpenAIChunkToLlm(
     const cachedInputTokensReported =
       typeof usage.prompt_tokens_details?.cached_tokens === 'number' ||
       typeof extendedUsage.cached_tokens === 'number';
+    const cacheWriteTokens =
+      extendedUsage.prompt_tokens_details?.cache_write_tokens;
 
     const hasTokenBreakdown =
       totalTokens === 0 || promptTokens !== 0 || completionTokens !== 0;
@@ -2192,6 +2212,8 @@ export function convertOpenAIChunkToLlm(
     };
     setGenAiUsageProvenance(response.usageMetadata, {
       cachedInputTokensReported,
+      cacheCreationInputTokens:
+        typeof cacheWriteTokens === 'number' ? cacheWriteTokens : undefined,
     });
   }
 

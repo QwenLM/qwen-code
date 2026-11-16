@@ -500,7 +500,8 @@ async function deletePersistedSessionWithLease(
 export async function deleteDaemonSessions(params: {
   sessionIds: string[];
   service: SessionService;
-  bridge: Pick<AcpSessionBridge, 'closeSession' | 'deleteSessionAttachments'>;
+  bridge: Pick<AcpSessionBridge, 'closeSession' | 'deleteSessionAttachments'> &
+    Partial<Pick<AcpSessionBridge, 'getSessionSummary'>>;
   coordinator: SessionArchiveCoordinator;
   coordinatorLockHeld?: boolean;
   assertCanMutate?: () => void;
@@ -529,6 +530,22 @@ export async function deleteDaemonSessions(params: {
       coordinator.assertNotTransitioning(sessionId);
     }
   }
+  // Whether a superseded session that still names a checkout is running
+  // on this runtime's bridge. Only a genuine not-found counts as gone; any
+  // other answer, a `session_closing` refusal included, or a bridge
+  // without the query counts as live, so the checkout is kept.
+  const isSessionLive = (candidate: string): boolean => {
+    if (!bridge.getSessionSummary) return true;
+    try {
+      bridge.getSessionSummary(normalizeSessionIdForLookup(candidate));
+      return true;
+    } catch (error) {
+      return !(
+        isSessionNotFoundError(error) &&
+        (error as SessionNotFoundError).code !== 'session_closing'
+      );
+    }
+  };
   // Ownership-verified worktree cleanup (#11024): classify before the
   // record deletion (the deletion destroys the sidecar), execute only
   // after a confirmed removal, all under the worktree ownership lock so
@@ -570,7 +587,10 @@ export async function deleteDaemonSessions(params: {
     }
     const releaseCleanupLock = await acquireWorktreeCleanupLock(cleanupPlan);
     try {
-      const ownership = await verifyWorktreeCleanupOwnership(cleanupPlan);
+      const ownership = await verifyWorktreeCleanupOwnership(
+        cleanupPlan,
+        isSessionLive,
+      );
       if (!ownership.ok) {
         logWorktreeCleanupPreserve(sessionId, ownership.reason);
       }

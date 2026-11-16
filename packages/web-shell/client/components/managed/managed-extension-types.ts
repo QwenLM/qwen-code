@@ -15,6 +15,24 @@ export type ManagedExtensionSnapshot =
 export type ManagedExtensionSelection =
   components['schemas']['ManagedExtensionApplySelection'];
 
+export type ManagedExtensionImportMetadata =
+  components['schemas']['ManagedExtensionImportMetadata'];
+export type ManagedExtensionInspection =
+  components['schemas']['ManagedExtensionPackageInspection'];
+export type ManagedExtensionSettingDeclaration =
+  ManagedExtensionInspection['settings'][number];
+export type ManagedRuntimeSkillOwner =
+  components['schemas']['ManagedRuntimeSkillOwner'];
+export type ManagedRuntimeSkillCandidates =
+  components['schemas']['ManagedRuntimeSkillCandidates'];
+export type ManagedRuntimeSkillSnapshot =
+  components['schemas']['ManagedRuntimeSkillSnapshot'];
+
+export type ManagedRuntimeSkillImport = Omit<
+  ManagedRuntimeSkillSnapshot,
+  'inspection'
+>;
+
 export function isManagedExtensionPins(
   value: unknown,
 ): value is ManagedExtensionPin[] {

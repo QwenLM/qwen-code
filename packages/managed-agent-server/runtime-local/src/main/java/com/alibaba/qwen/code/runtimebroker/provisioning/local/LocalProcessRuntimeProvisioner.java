@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.HarnessOwnership;
 import com.alibaba.qwen.code.runtimebroker.JsonCodec;
+import com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeDrainReceipt;
@@ -19,6 +20,7 @@ import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.protocol.ManagedContextProtocol;
 import com.alibaba.qwen.code.runtimebroker.spi.OperatorRuntimeRecovery;
+import org.apache.commons.codec.digest.DigestUtils;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -26,7 +28,6 @@ import java.io.InputStreamReader;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
-import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.time.Instant;
@@ -246,7 +247,7 @@ public final class LocalProcessRuntimeProvisioner
     public CompletionStage<RuntimeResourceHandle> ensureResource(
             RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
             RuntimeResourceHandle knownHandle) {
-        if (CsiFilesRetirementProfile.CAPABILITY_DIGEST.equals(request.getScope().getCapabilityDigest())) {
+        if (CsiFilesRetirementProfile.isProfile(request.getScope())) {
             return CompletableFuture.failedFuture(privateProfileRefusal());
         }
         if (store != null) {
@@ -359,7 +360,7 @@ public final class LocalProcessRuntimeProvisioner
     @Override
     public CompletionStage<Void> release(RuntimeProvisionRequest request,
             RuntimeLease lease) {
-        if (CsiFilesRetirementProfile.CAPABILITY_DIGEST.equals(request.getScope().getCapabilityDigest())) {
+        if (CsiFilesRetirementProfile.isProfile(request.getScope())) {
             return CompletableFuture.failedFuture(privateProfileRefusal());
         }
         if (store == null) {
@@ -399,8 +400,8 @@ public final class LocalProcessRuntimeProvisioner
                 if (!originalBootStopped && !neverStarted && worker == null && !registration.processAbsent()) {
                     throw LocalRuntimeStore.blocked();
                 }
-                boolean extended = com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.admits(binding.getRequest().getScope().getCapabilityDigest());
-                String mode = extended ? com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.mode(binding.getRequest().getScope().getCapabilityDigest()) : null;
+                boolean extended = ManagedExtensionExecutionProfile.admits(binding.getRequest().getScope().getCapabilityDigest());
+                String mode = extended ? ManagedExtensionExecutionProfile.mode(binding.getRequest().getScope().getCapabilityDigest()) : null;
                 String proofScope = extended ? ("linux-cgroup".equals(mode) ? "process_tree" : "process_group") : null;
                 if (extended && !neverStarted && !originalBootStopped) {
                     if (binding.getLease() == null || worker == null) {
@@ -673,7 +674,7 @@ public final class LocalProcessRuntimeProvisioner
         boot.put("workspaceGeneration", scope.getWorkspaceGeneration());
         boot.put("workspaceId", scope.getWorkspaceId());
         Map<String, Object> document = request.isManagedContext()
-                ? ManagedContextProtocol.boot(request, seed, com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.admits(scope.getCapabilityDigest()) ? com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.configuration(scope.getCapabilityDigest(), managedExtensionCacheDirectory, managedExtensionCgroupRoot) : null) : boot;
+                ? ManagedContextProtocol.boot(request, seed, ManagedExtensionExecutionProfile.admits(scope.getCapabilityDigest()) ? ManagedExtensionExecutionProfile.configuration(scope.getCapabilityDigest(), managedExtensionCacheDirectory, managedExtensionCgroupRoot) : null) : boot;
         byte[] encoded = JsonCodec.encode(document);
         if (encoded.length > READY_RECORD_LIMIT) {
             throw new IllegalArgumentException("Managed Runtime boot exceeds 32 KiB.");
@@ -1007,14 +1008,7 @@ public final class LocalProcessRuntimeProvisioner
         for (Object component : key) {
             canonical.append(String.valueOf(component)).append('\0');
         }
-        try {
-            return java.util.HexFormat.of().formatHex(
-                    MessageDigest.getInstance("SHA-256")
-                            .digest(canonical.toString()
-                                    .getBytes(StandardCharsets.UTF_8)));
-        } catch (java.security.NoSuchAlgorithmException error) {
-            throw new IllegalStateException(error);
-        }
+        return DigestUtils.sha256Hex(canonical.toString().getBytes(StandardCharsets.UTF_8));
     }
 
     private void attest(RuntimeProvisionRequest request,
@@ -1105,7 +1099,7 @@ public final class LocalProcessRuntimeProvisioner
     }
 
     private static void requireLegacyProfile(RuntimeScope scope) {
-        if (CsiFilesRetirementProfile.CAPABILITY_DIGEST.equals(scope.getCapabilityDigest())) {
+        if (CsiFilesRetirementProfile.isProfile(scope)) {
             throw privateProfileRefusal();
         }
     }
