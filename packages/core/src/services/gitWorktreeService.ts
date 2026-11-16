@@ -3342,14 +3342,19 @@ export class GitWorktreeService {
   /**
    * Captures a checkout's uncommitted tracked changes as a stash commit
    * without touching its working tree or index (`git stash create`).
-   * Returns '' when there is nothing to capture. Untracked files are not
-   * included — callers copy them separately when needed.
+   * Returns '' when there is nothing to capture (a clean tree exits 0 with no
+   * output). Untracked files are not included — callers copy them separately
+   * when needed. Judged by exit status, not stderr presence: a silent non-zero
+   * exit (git 2.39.5 with a held index.lock writes nothing to either stream)
+   * must throw, not resolve as '' — otherwise the handoff would relocate the
+   * session without the worktree's tracked edits (R13-1).
    */
   async createStashSnapshot(checkoutPath: string): Promise<string> {
     const { simpleGit } = await loadSimpleGit();
-    return (
-      await simpleGit(checkoutPath).env(gitEnv()).stash(['create'])
-    ).trim();
+    const git = simpleGit(checkoutPath, {
+      errors: carryApplyErrorDetection,
+    }).env(gitEnv());
+    return (await git.stash(['create'])).trim();
   }
 
   /**

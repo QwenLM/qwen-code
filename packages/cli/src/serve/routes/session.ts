@@ -5395,7 +5395,24 @@ export function registerSessionRoutes(
                 });
                 return;
               }
-              const snapshot = await wtService.createStashSnapshot(realTarget);
+              // Captured before any mutation, so a capture failure needs no
+              // rollback. A silent `stash create` failure must refuse the
+              // handoff rather than relocate the session without the
+              // worktree's tracked edits (R13-1).
+              let snapshot: string;
+              try {
+                snapshot = await wtService.createStashSnapshot(realTarget);
+              } catch (error) {
+                res.status(409).json({
+                  error:
+                    'The worktree snapshot could not be captured from the worktree',
+                  code: 'handoff_carry_failed',
+                  detail:
+                    error instanceof Error ? error.message : String(error),
+                  sessionId: storageSessionId,
+                });
+                return;
+              }
               // Everything below mutates the local checkout, the worktree,
               // or the sidecar; a late failure (checkout hook, stash
               // conflict, busy-turn refusal at the queue tail) must restore
@@ -5745,6 +5762,17 @@ export function registerSessionRoutes(
               },
             );
             if (!created.success || !created.worktree) {
+              // An in-progress merge/rebase is a user-clearable state, not a
+              // daemon fault: surface the typed 409 here too (R13-2).
+              if (created.code === 'worktree_merge_in_progress') {
+                res.status(409).json({
+                  error:
+                    created.error ?? 'The workspace has an in-progress merge',
+                  code: 'worktree_merge_in_progress',
+                  sessionId: storageSessionId,
+                });
+                return;
+              }
               res.status(500).json({
                 error: created.error ?? 'Failed to create worktree',
                 code: 'worktree_create_failed',
@@ -6275,8 +6303,21 @@ export function registerSessionRoutes(
                 );
                 if (!worktreeResult.success || !worktreeResult.worktree) {
                   await cleanupPrepared();
+                  // An in-progress merge/rebase is a user-clearable state, not
+                  // a daemon fault: surface the typed 409 here too, and keep
+                  // the service's refusal text rather than a generic one
+                  // (R13-2).
+                  if (worktreeResult.code === 'worktree_merge_in_progress') {
+                    res.status(409).json({
+                      error:
+                        worktreeResult.error ??
+                        'The workspace has an in-progress merge',
+                      code: 'worktree_merge_in_progress',
+                    });
+                    return;
+                  }
                   res.status(500).json({
-                    error: 'Failed to create worktree',
+                    error: worktreeResult.error ?? 'Failed to create worktree',
                     code: 'worktree_create_failed',
                   });
                   return;

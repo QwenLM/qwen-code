@@ -1271,6 +1271,48 @@ describe('POST /session/:id/worktree-handoff', () => {
     expect(fixture.cdCalls).toHaveLength(0);
   });
 
+  it('maps an in-progress merge to 409 on handoff to worktree (R13-2)', async () => {
+    const fixture = makeFixture();
+    fixture.writeTranscript();
+    const spy = vi
+      .spyOn(GitWorktreeService.prototype, 'createUserWorktree')
+      .mockResolvedValueOnce({
+        success: false,
+        code: 'worktree_merge_in_progress',
+        error:
+          'The workspace has an in-progress merge or rebase (unmerged files).',
+      });
+    try {
+      const res = await request(fixture.app)
+        .post(`/session/${fixture.sessionId}/worktree-handoff`)
+        .send({ to: 'worktree' });
+
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('worktree_merge_in_progress');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('refuses handoff to local when the snapshot capture fails silently (R13-1)', async () => {
+    const fixture = makeFixture();
+    fixture.writeTranscript();
+    await fixture.createDetachedWorktree();
+    const spy = vi
+      .spyOn(GitWorktreeService.prototype, 'createStashSnapshot')
+      .mockRejectedValueOnce(new Error('git exited with code 1'));
+    try {
+      const res = await request(fixture.app)
+        .post(`/session/${fixture.sessionId}/worktree-handoff`)
+        .send({ to: 'local' });
+
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('handoff_carry_failed');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('refuses handoff to local when the recorded base is missing', async () => {
     const fixture = makeFixture();
     fixture.writeTranscript();

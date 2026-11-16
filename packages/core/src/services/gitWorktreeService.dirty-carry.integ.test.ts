@@ -868,6 +868,41 @@ describe('GitWorktreeService.createUserWorktree() — carryDirtyState', () => {
     expect(await read(path.join(repoRoot, 'tracked.txt'))).toBe('dirty\n');
   });
 
+  it('createStashSnapshot rejects a silent stash create failure (R13-1)', async () => {
+    // The handoff-direction snapshot capture must judge by exit status too:
+    // a silent non-zero `stash create` resolves as '' under default detection,
+    // which the handoff would read as a clean tree and relocate the session
+    // without the worktree's tracked edits. Same portable shim as R8-6.
+    await fs.writeFile(path.join(repoRoot, 'tracked.txt'), 'dirty\n');
+    const realGit = execFileSync('bash', ['-c', 'command -v git'], {
+      encoding: 'utf8',
+    }).trim();
+    const shimDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-git-shim-'));
+    const shim = path.join(shimDir, 'git');
+    await fs.writeFile(
+      shim,
+      `#!/bin/bash\nprev=""\nfor a in "$@"; do\n  if [ "$prev" = "stash" ] && [ "$a" = "create" ]; then exit 1; fi\n  prev="$a"\ndone\nexec ${realGit} "$@"\n`,
+    );
+    await fs.chmod(shim, 0o755);
+    const originalPath = process.env['PATH'];
+    process.env['PATH'] = `${shimDir}:${originalPath}`;
+    const service = new GitWorktreeService(repoRoot);
+    try {
+      await expect(service.createStashSnapshot(repoRoot)).rejects.toThrow(
+        'exited with code 1',
+      );
+    } finally {
+      process.env['PATH'] = originalPath;
+      await fs.rm(shimDir, { recursive: true, force: true });
+    }
+    // A genuinely clean tree still yields '' (exit 0, no output): the detector
+    // adds exit-status detection only, it does not treat empty output as failure.
+    await execFileSync('git', ['checkout', '--', 'tracked.txt'], {
+      cwd: repoRoot,
+    });
+    expect(await service.createStashSnapshot(repoRoot)).toBe('');
+  });
+
   it('refuses a carry on an unmerged index with a typed merge-in-progress code (R12-1)', async () => {
     // A real conflicted merge: `git stash create` cannot run on an unmerged
     // index. That is a state the user can clear (resolve/abort), not a daemon
