@@ -275,6 +275,7 @@ describe('Turn', () => {
       }
       expect(dispatched).not.toHaveBeenCalled();
       expect(mockSendMessageStream.mock.lastCall?.[4]).toEqual({
+        isSessionTurn: true,
         onModelRequestDispatched: dispatched,
       });
     });
@@ -293,7 +294,7 @@ describe('Turn', () => {
         },
         'prompt-id-1',
         undefined,
-        { promptId: 'stable-prompt-id' },
+        { isSessionTurn: true, promptId: 'stable-prompt-id' },
       );
 
       expect(events).toEqual([contentEvent('Hello'), contentEvent(' world')]);
@@ -325,7 +326,11 @@ describe('Turn', () => {
         }),
         'prompt-id-1',
         undefined,
-        { promptId: 'stable-prompt-id', retractDeliveredOutputOnRetry: true },
+        {
+          isSessionTurn: true,
+          promptId: 'stable-prompt-id',
+          retractDeliveredOutputOnRetry: true,
+        },
       );
     });
 
@@ -353,6 +358,7 @@ describe('Turn', () => {
       await run([textChunk('Hello')]);
 
       expect(mockSendMessageStream.mock.lastCall?.[4]).toEqual({
+        isSessionTurn: true,
         isExplicitRetry: true,
       });
     });

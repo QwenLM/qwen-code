@@ -428,6 +428,29 @@ describe('LlmChat', async () => {
     target: LlmChat = chat,
   ) => collect(await send(message, promptId, target));
 
+  /**
+   * A session-turn send (`isSessionTurn`), then collect. The availability
+   * ledger participates only for these; background sends use `sendCollect`
+   * (no flag) so the ledger excludes them.
+   */
+  const sendSessionCollect = async (
+    message: string | Part[],
+    promptId: string,
+    isExplicitRetry = false,
+  ) =>
+    collect(
+      await chat.sendMessageStream(
+        'test-model',
+        { message },
+        promptId,
+        undefined,
+        {
+          isSessionTurn: true,
+          ...(isExplicitRetry ? { isExplicitRetry: true } : {}),
+        },
+      ),
+    );
+
   /** `send`, then drain the stream. */
   const sendDrain = async (
     message: string | Part[],
@@ -8509,19 +8532,22 @@ describe('LlmChat', async () => {
       fallbackB.mockImplementation(async () => textStream('fallback-b ok'));
 
       // Request 1: primary exhausts, fallback-a exhausts, fallback-b serves.
-      const events1 = await sendCollect('test', 'prompt-availability');
+      const events1 = await sendSessionCollect('test', 'prompt-availability');
       expect(hasChunkText(events1, 'fallback-b ok')).toBe(true);
       expect(fallbackA).toHaveBeenCalledTimes(1);
       expect(fallbackB).toHaveBeenCalledTimes(1);
 
       // Request 2, same turn: fallback-a is skipped, fallback-b serves again.
-      const events2 = await sendCollect('test', 'prompt-availability');
+      const events2 = await sendSessionCollect('test', 'prompt-availability');
       expect(hasChunkText(events2, 'fallback-b ok')).toBe(true);
       expect(fallbackA).toHaveBeenCalledTimes(1);
       expect(fallbackB).toHaveBeenCalledTimes(2);
 
       // Request 3, new turn: fallback-a is re-probed once (and exhausts again).
-      const events3 = await sendCollect('test', 'prompt-availability-turn-2');
+      const events3 = await sendSessionCollect(
+        'test',
+        'prompt-availability-turn-2',
+      );
       expect(hasChunkText(events3, 'fallback-b ok')).toBe(true);
       expect(fallbackA).toHaveBeenCalledTimes(2);
       expect(fallbackB).toHaveBeenCalledTimes(3);
@@ -8554,27 +8580,20 @@ describe('LlmChat', async () => {
       fallbackB.mockImplementation(async () => textStream('fallback-b ok'));
 
       // Request 1: fallback-a exhausts and is marked unavailable for the turn.
-      const events1 = await sendCollect('test', 'prompt-retry');
+      const events1 = await sendSessionCollect('test', 'prompt-retry');
       expect(hasChunkText(events1, 'fallback-b ok')).toBe(true);
       expect(fallbackA).toHaveBeenCalledTimes(1);
       expect(fallbackB).toHaveBeenCalledTimes(1);
 
       // Request 2 reuses the prompt id but is an explicit Retry: it is a turn
       // boundary, so fallback-a is re-probed instead of staying skipped.
-      const retryStream = await chat.sendMessageStream(
-        'test-model',
-        { message: 'test' },
-        'prompt-retry',
-        undefined,
-        { isExplicitRetry: true },
-      );
-      const events2 = await collect(retryStream);
+      const events2 = await sendSessionCollect('test', 'prompt-retry', true);
       expect(hasChunkText(events2, 'fallback-b ok')).toBe(true);
       expect(fallbackA).toHaveBeenCalledTimes(2);
       expect(fallbackB).toHaveBeenCalledTimes(2);
     });
 
-    it('a forked send does not wipe the live turn consumed fallback state', async () => {
+    it('a subagent send does not wipe the live turn consumed fallback state', async () => {
       const service = new ModelAvailabilityService();
       vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
         true,
@@ -8601,17 +8620,18 @@ describe('LlmChat', async () => {
       fallbackB.mockImplementation(async () => textStream('fallback-b ok'));
 
       // Live turn 1: fallback-a exhausts and is consumed for this turn.
-      await sendCollect('test', 'turn-1');
+      await sendSessionCollect('test', 'turn-1');
       expect(fallbackA).toHaveBeenCalledTimes(1);
 
-      // A forked query shares the Config but uses a constant internal prompt id.
-      // It must not rotate the live turn's key (which would un-consume
-      // fallback-a); it keeps the gate-off behaviour and tries fallback-a itself.
-      await sendCollect('test', 'forked_query');
+      // A subagent send shares the Config (deriveConfig) but is not a session
+      // turn and uses an id no prompt-id blacklist would match. It must not
+      // rotate the live turn's key (which would un-consume fallback-a); it keeps
+      // the gate-off behaviour and tries fallback-a itself.
+      await sendCollect('test', 'session-1#agent-1#0');
       expect(fallbackA).toHaveBeenCalledTimes(2);
 
       // Back on live turn 1: fallback-a is still consumed, so it stays skipped.
-      const events3 = await sendCollect('test', 'turn-1');
+      const events3 = await sendSessionCollect('test', 'turn-1');
       expect(hasChunkText(events3, 'fallback-b ok')).toBe(true);
       expect(fallbackA).toHaveBeenCalledTimes(2);
       expect(fallbackB).toHaveBeenCalledTimes(3);
@@ -8685,26 +8705,22 @@ describe('LlmChat', async () => {
       fallbackB.mockImplementation(async () => textStream('fallback-b ok'));
 
       // Request 1: fallback-a exhausts and is consumed for the turn.
-      await sendCollect('test', 'prompt-retry-primary');
+      await sendSessionCollect('test', 'prompt-retry-primary');
       expect(fallbackA).toHaveBeenCalledTimes(1);
 
       // Request 2 is an explicit Retry that the recovered primary serves. The
       // turn boundary must still reset the ledger even though no fallback runs.
-      const retryEvents = await collect(
-        await chat.sendMessageStream(
-          'test-model',
-          { message: 'test' },
-          'prompt-retry-primary',
-          undefined,
-          { isExplicitRetry: true },
-        ),
+      const retryEvents = await sendSessionCollect(
+        'test',
+        'prompt-retry-primary',
+        true,
       );
       expect(hasChunkText(retryEvents, 'primary ok')).toBe(true);
       expect(fallbackA).toHaveBeenCalledTimes(1);
 
       // Request 3 (a continuation, not a Retry) hits a capacity error again:
       // fallback-a was re-probed by the Retry's reset, so it is attempted.
-      await sendCollect('test', 'prompt-retry-primary');
+      await sendSessionCollect('test', 'prompt-retry-primary');
       expect(fallbackA).toHaveBeenCalledTimes(2);
     });
 
@@ -8736,13 +8752,99 @@ describe('LlmChat', async () => {
       fallbackA.mockRejectedValue(capacityError);
       fallbackB.mockImplementation(async () => textStream('fallback-b ok'));
 
-      await sendCollect('test', 'prompt-gate-off');
-      await sendCollect('test', 'prompt-gate-off');
+      await sendSessionCollect('test', 'prompt-gate-off');
+      await sendSessionCollect('test', 'prompt-gate-off');
 
       // With the gate off the exhausted fallback-a is retried on request 2.
       expect(fallbackA).toHaveBeenCalledTimes(2);
       expect(fallbackB).toHaveBeenCalledTimes(2);
       expect(mockConfig.getModelAvailabilityService).not.toHaveBeenCalled();
+    });
+
+    it('skips a fallback that failed after emitting output earlier in the turn', async () => {
+      const service = new ModelAvailabilityService();
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+
+      const fallbackA = vi.fn();
+      const fallbackB = vi.fn();
+      wireFallbacks(
+        ['fallback-a', 'fallback-b'],
+        vi
+          .fn()
+          .mockImplementation(async (modelId: string) =>
+            modelId === 'fallback-a'
+              ? fallbackRoute('fallback-a', fallbackA)
+              : fallbackRoute('fallback-b', fallbackB),
+          ),
+      );
+      const capacityError = tpmCapacityError();
+      streamMock().mockRejectedValue(capacityError);
+      // fallback-a emits a chunk, then exhausts its budget on a capacity error.
+      fallbackA.mockResolvedValue(
+        streamThenThrow([textChunk('fallback-a partial')], capacityError),
+      );
+      fallbackB.mockImplementation(async () => textStream('fallback-b ok'));
+
+      // Request 1: fallback-a emits output then fails; the chain stops (no
+      // fallback-b) but the ledger must still record fallback-a as consumed.
+      await expect(
+        sendSessionCollect('test', 'prompt-output-then-fail'),
+      ).rejects.toThrow();
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+      expect(fallbackB).not.toHaveBeenCalled();
+
+      // Request 2, same turn: fallback-a is skipped, so fallback-b serves.
+      const events2 = await sendSessionCollect(
+        'test',
+        'prompt-output-then-fail',
+      );
+      expect(hasChunkText(events2, 'fallback-b ok')).toBe(true);
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+      expect(fallbackB).toHaveBeenCalledTimes(1);
+    });
+
+    it('skips by the resolved model id when resolution rewrites the entry', async () => {
+      const service = new ModelAvailabilityService();
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+
+      const fallbackA = vi.fn();
+      const fallbackB = vi.fn();
+      // The configured entry 'fallback-a' resolves to a different model id; the
+      // ledger write and the skip read must both use the resolved id.
+      wireFallbacks(
+        ['fallback-a', 'fallback-b'],
+        vi
+          .fn()
+          .mockImplementation(async (modelId: string) =>
+            modelId === 'fallback-a'
+              ? fallbackRoute('fallback-a-resolved', fallbackA)
+              : fallbackRoute('fallback-b', fallbackB),
+          ),
+      );
+      const capacityError = tpmCapacityError();
+      streamMock().mockRejectedValue(capacityError);
+      fallbackA.mockRejectedValue(capacityError);
+      fallbackB.mockImplementation(async () => textStream('fallback-b ok'));
+
+      const events1 = await sendSessionCollect('test', 'prompt-resolved-id');
+      expect(hasChunkText(events1, 'fallback-b ok')).toBe(true);
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+
+      // Same turn: the resolved id is consumed, so the entry is still skipped.
+      const events2 = await sendSessionCollect('test', 'prompt-resolved-id');
+      expect(hasChunkText(events2, 'fallback-b ok')).toBe(true);
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+      expect(fallbackB).toHaveBeenCalledTimes(2);
     });
 
     it('does not try the next fallback after a fallback emits output', async () => {

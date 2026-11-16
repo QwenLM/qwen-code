@@ -74,14 +74,18 @@ no zod / no external deps, so no zod-4 migration is needed for it:
     `resetTurn()` so a retry re-probes fallbacks the failed attempt consumed,
     even though a retry reuses the prompt id and even when the recovered primary
     serves the retry's first request.
-  - Internal background sends — `isInternalPromptId(prompt_id)`: forked queries,
-    speculation, prompt suggestions and `side-query:*` — share the session
-    `Config` but use constant prompt ids. They are excluded from the ledger
-    entirely: they neither rotate the live turn's key nor consult or mark it,
-    and keep the gate-off fallback behaviour. Without this exclusion a forked
-    send would wipe the live turn's consumed state, and two forked sends sharing
-    one constant key would skip a transiently-exhausted fallback and fail a
-    request the gate-off chain would have served.
+  - Only session-turn sends participate: `Turn` marks every send it drives with
+    `isSessionTurn`, and the ledger gate requires that flag. Background
+    operations — subagents (derived `Config`s), forked queries, speculation,
+    side queries, suggestions — call `sendMessageStream` without the flag, so
+    they neither rotate the live turn's key nor read or write its marks, and
+    keep the gate-off fallback behaviour. This is an allowlist, not a prompt-id
+    blacklist: background senders use ids (e.g. a subagent's
+    `session#agent#ordinal`) that no fixed blacklist matches, and the shared
+    `isInternalPromptId` filter must not be extended because it also gates
+    recording/telemetry. Without the exclusion a background send would wipe the
+    live turn's consumed state, and could skip a transiently-exhausted fallback
+    and fail a request the gate-off chain would have served.
 - In the fallback chain itself, only fallback models are written to and read
   from the ledger; the primary is still attempted each request and is not
   marked (marking it would be a dead write, since the chain's two same-model
@@ -90,7 +94,10 @@ no zod / no external deps, so no zod-4 migration is needed for it:
     reported unavailable (record them in the existing skip/debug path).
   - When a fallback exhausts retries on a fallback-eligible capacity error,
     call `markRetryOncePerTurn(model)` then `consumeStickyAttempt(model)` so it
-    is skipped for the remainder of the turn.
+    is skipped for the remainder of the turn. The marking happens even if the
+    fallback emitted output before failing (the chain still stops there to
+    avoid duplicating user-visible output); it stays gated on
+    `isFallbackEligible` so a post-output auth/client error is not recorded.
   - On a successful fallback response, `markHealthy(model)`.
 - Turn-key limitation: `lastTurnKey` is a single scalar on the session-scoped
   service. Internal background sends are excluded (above), so the residual case
@@ -112,14 +119,14 @@ reversible; a later PR can flip the default once nightly evidence is in.
 
 ## Key design decisions
 
-| Decision                                                 | Rationale                                                                                                                                                                                                      |
-| -------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Port the service logic (drop unused helpers), kebab-case | Pure state machine, well-tested in preview; no zod dependency so no zod-4 rework. `selectFirstAvailable`/`reset` have no caller here, so they are not ported.                                                  |
-| Session-scoped on Config                                 | Matches main's per-session Config and preview's ownership; avoids a process-global health singleton.                                                                                                           |
-| Only capacity → sticky_retry in this port                | `isFallbackEligible` already bounds the scope; terminal/quota marking would touch auth/billing, deferred.                                                                                                      |
-| Setting gate default off                                 | Behavior change to the fallback chain must be opt-in and reversible first.                                                                                                                                     |
-| Turn boundary at request entry                           | `beginTurn`/`resetTurn` run in `sendMessageStream` before any model call, so an explicit Retry the primary serves still re-probes consumed fallbacks.                                                          |
-| Exclude internal background sends                        | Forked/speculation/side-query/suggestion sends share the Config with constant prompt ids; `isInternalPromptId` keeps them out of the ledger so they neither wipe the live turn nor fail on a skipped fallback. |
+| Decision                                                 | Rationale                                                                                                                                                                                                                                                                                                               |
+| -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Port the service logic (drop unused helpers), kebab-case | Pure state machine, well-tested in preview; no zod dependency so no zod-4 rework. `selectFirstAvailable`/`reset` have no caller here, so they are not ported.                                                                                                                                                           |
+| Session-scoped on Config                                 | Matches main's per-session Config and preview's ownership; avoids a process-global health singleton.                                                                                                                                                                                                                    |
+| Only capacity → sticky_retry in this port                | `isFallbackEligible` already bounds the scope; terminal/quota marking would touch auth/billing, deferred.                                                                                                                                                                                                               |
+| Setting gate default off                                 | Behavior change to the fallback chain must be opt-in and reversible first.                                                                                                                                                                                                                                              |
+| Turn boundary at request entry                           | `beginTurn`/`resetTurn` run in `sendMessageStream` before any model call, so an explicit Retry the primary serves still re-probes consumed fallbacks.                                                                                                                                                                   |
+| Allowlist session turns (`isSessionTurn`)                | Only `Turn`-driven sends participate; background senders (subagents, forked, speculation, side-query, suggestion) leave the flag unset. An allowlist, not a prompt-id blacklist, because background ids (e.g. `session#agent#ordinal`) match no fixed blacklist and the shared internal-id filter also gates telemetry. |
 
 ## Files affected
 
@@ -127,10 +134,11 @@ reversible; a later PR can flip the default once nightly evidence is in.
 - `packages/core/src/config/config.ts` — lazy getter owning the service + the
   `modelAvailabilityTracking` parameter.
 - `packages/core/src/core/llm-chat.ts` — request-entry turn boundary plus
-  fallback-chain consultation/marking behind the gate, excluding internal
-  background sends; `isExplicitRetry` on `LlmChatSendOptions`.
+  fallback-chain consultation/marking behind the gate, allowlisting session
+  turns; `isExplicitRetry` and `isSessionTurn` on `LlmChatSendOptions`.
 - `packages/core/src/core/turn.ts` + `packages/core/src/core/client.ts` — thread
-  the explicit-Retry flag from `SendMessageType.Retry` to the send options.
+  the explicit-Retry flag from `SendMessageType.Retry` to the send options, and
+  mark every `Turn`-driven send with `isSessionTurn`.
 - `packages/cli/src/config/settingsSchema.ts` + `packages/cli/src/config/config.ts`
   — `experimental.modelAvailabilityTracking` (default false) + propagation, with
   CLI wiring tests mirroring the `unifiedAgentLoop` opt-in/opt-out/unset shape.

@@ -7450,11 +7450,18 @@ describe('Server Config (config.ts)', () => {
         ).toBe(false);
       });
 
-      it('returns one stable lazily-created service instance', () => {
+      it('returns one stable lazily-created service instance per Config', () => {
         const config = makeConfig({ modelAvailabilityTracking: true });
         const first = config.getModelAvailabilityService();
         expect(first).toBeDefined();
         expect(config.getModelAvailabilityService()).toBe(first);
+        // Per-Config ownership, not a process-global singleton: an independently
+        // constructed Config must not share the ledger.
+        expect(
+          makeConfig({
+            modelAvailabilityTracking: true,
+          }).getModelAvailabilityService(),
+        ).not.toBe(first);
       });
     });
 

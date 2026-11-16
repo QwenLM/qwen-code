@@ -805,32 +805,27 @@ export class Turn {
     try {
       // Note: This assumes `sendMessageStream` yields events like
       // { type: StreamEventType.RETRY } or { type: StreamEventType.CHUNK, value: GenerateContentResponse }
-      // Keep the no-options call shape: callers without either flag pass
-      // `undefined`, as before either option existed.
-      const sendOptions =
-        this.promptIdentity !== undefined ||
-        this.retractDeliveredOutputOnRetry === true ||
-        this.onPreparedRequest !== undefined ||
-        this.onModelRequestDispatched !== undefined ||
-        this.suppressedHookContext !== undefined ||
-        this.isExplicitRetry === true
-          ? {
-              ...(this.onPreparedRequest
-                ? { onPreparedRequest: this.onPreparedRequest }
-                : {}),
-              ...(this.onModelRequestDispatched
-                ? { onModelRequestDispatched: this.onModelRequestDispatched }
-                : {}),
-              ...(this.suppressedHookContext
-                ? { suppressedHookContext: this.suppressedHookContext }
-                : {}),
-              ...(this.promptIdentity ? { promptId: this.promptIdentity } : {}),
-              ...(this.retractDeliveredOutputOnRetry
-                ? { retractDeliveredOutputOnRetry: true }
-                : {}),
-              ...(this.isExplicitRetry ? { isExplicitRetry: true } : {}),
-            }
-          : undefined;
+      // Every Turn-driven send is a session turn: mark it so the model-
+      // availability ledger participates only for the interactive turn flow,
+      // never for background sends that share the Config (subagents, forked
+      // queries, speculation). The remaining fields stay conditional.
+      const sendOptions = {
+        isSessionTurn: true,
+        ...(this.onPreparedRequest
+          ? { onPreparedRequest: this.onPreparedRequest }
+          : {}),
+        ...(this.onModelRequestDispatched
+          ? { onModelRequestDispatched: this.onModelRequestDispatched }
+          : {}),
+        ...(this.suppressedHookContext
+          ? { suppressedHookContext: this.suppressedHookContext }
+          : {}),
+        ...(this.promptIdentity ? { promptId: this.promptIdentity } : {}),
+        ...(this.retractDeliveredOutputOnRetry
+          ? { retractDeliveredOutputOnRetry: true }
+          : {}),
+        ...(this.isExplicitRetry ? { isExplicitRetry: true } : {}),
+      };
       const responseStream = prepared
         ? await this.chat.sendPreparedMessageStream(
             prepared,

@@ -52,7 +52,6 @@ import {
 import { getErrorStatus, isAbortError } from '../utils/errors.js';
 import { unescapePath } from '../utils/paths.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { isInternalPromptId } from '../utils/internalPromptIds.js';
 import {
   containsXmlToolCalls,
   tryRecoverXmlToolCalls,
@@ -745,6 +744,15 @@ export interface LlmChatSendOptions {
    * consumed, instead of inheriting their skipped state.
    */
   isExplicitRetry?: boolean;
+  /**
+   * This send belongs to the session's interactive turn flow (a user question,
+   * an explicit Retry, or a continuation driven by `LlmClient`/`Turn`). Only
+   * such sends participate in the model-availability ledger. Background
+   * operations (subagents, forked queries, speculation, side queries,
+   * suggestions) share the session `Config` but leave this unset, so they
+   * neither rotate the live turn's key nor read or write its marks.
+   */
+  isSessionTurn?: boolean;
   /** Internal identity for the user prompt added to model history. */
   promptId?: string;
   /**
@@ -3554,14 +3562,15 @@ export class LlmChat {
     // Model health ledger (experimental, opt-in). The turn boundary runs once
     // per request here — not inside the fallback branch — so an explicit Retry
     // whose first request the primary serves still re-probes the fallbacks the
-    // failed attempt consumed. Internal background sends (forked queries,
-    // speculation, side queries, suggestions) share this Config but use constant
-    // prompt ids; they must neither rotate the live turn's key nor consult its
-    // ledger, so they are excluded and keep the gate-off fallback behaviour.
+    // failed attempt consumed. Only session-turn sends (`isSessionTurn`, set by
+    // `LlmClient`/`Turn`) participate: background operations (subagents, forked
+    // queries, speculation, side queries, suggestions) share this Config but
+    // leave the flag unset, so they neither rotate the live turn's key nor read
+    // or write its marks, and keep the gate-off fallback behaviour.
     // Optional-chain the gate: partial Config mocks omit the new accessor, and
     // an absent gate must read as "off".
     const availability =
-      !isInternalPromptId(prompt_id) &&
+      options?.isSessionTurn &&
       this.config.isModelAvailabilityTrackingEnabled?.()
         ? this.config.getModelAvailabilityService()
         : undefined;
@@ -6021,17 +6030,6 @@ export class LlmChat {
                   }
                   lastError = fallbackError;
 
-                  if (currentFallbackYieldedAnyChunk) {
-                    self.popPendingPartialAssistantTurn();
-                    debugLogger.warn(
-                      `[FALLBACK] Fallback model "${resolvedFallbackModel}" ` +
-                        `failed after emitting output. Popped the partial ` +
-                        `assistant turn and stopped the fallback chain to ` +
-                        `avoid duplicating user-visible output.`,
-                    );
-                    break;
-                  }
-
                   // Classify the fallback error to decide whether to continue
                   // to the next fallback or give up
                   const fallbackClassification = classifyRetryError(
@@ -6045,10 +6043,27 @@ export class LlmChat {
                   const canTryNextFallback = isFallbackEligible(
                     fallbackClassification,
                   );
+                  // Record the unhealthy fallback even when it emitted output
+                  // before failing: the chain stops below to avoid duplicating
+                  // output, but the model must still be skipped for the rest of
+                  // the turn. Gated on fallback-eligibility so a post-output
+                  // auth/client error is not recorded as turn-unavailable.
                   if (availability && canTryNextFallback) {
                     availability.markRetryOncePerTurn(resolvedFallbackModel);
                     availability.consumeStickyAttempt(resolvedFallbackModel);
                   }
+
+                  if (currentFallbackYieldedAnyChunk) {
+                    self.popPendingPartialAssistantTurn();
+                    debugLogger.warn(
+                      `[FALLBACK] Fallback model "${resolvedFallbackModel}" ` +
+                        `failed after emitting output. Popped the partial ` +
+                        `assistant turn and stopped the fallback chain to ` +
+                        `avoid duplicating user-visible output.`,
+                    );
+                    break;
+                  }
+
                   debugLogger.warn(
                     `[FALLBACK] Fallback model "${resolvedFallbackModel}" also ` +
                       `failed (reason: ${fallbackClassification.reason}, ` +
