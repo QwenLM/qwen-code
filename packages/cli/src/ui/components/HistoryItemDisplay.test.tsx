@@ -722,6 +722,7 @@ describe('<HistoryItemDisplay />', () => {
             terminalWidth={100}
             isPending={false}
             modSessionId="session"
+            isInViewport
           />,
         );
         // A collapsed thought shows no text, so it is not offered.
@@ -729,6 +730,7 @@ describe('<HistoryItemDisplay />', () => {
           undefined,
           'session',
           undefined,
+          true,
         );
         collapsed.unmount();
 
@@ -739,14 +741,20 @@ describe('<HistoryItemDisplay />', () => {
             isPending={false}
             modSessionId="session"
             fullDetail
+            isInViewport
           />,
         );
-        expect(modRow).toHaveBeenLastCalledWith(undefined, 'session', {
-          surface: 'terminal',
-          component: 'Thinking',
-          requestId: '7',
-          props: { text: 'Inspecting the repository' },
-        });
+        expect(modRow).toHaveBeenLastCalledWith(
+          undefined,
+          'session',
+          {
+            surface: 'terminal',
+            component: 'Thinking',
+            requestId: '7',
+            props: { text: 'Inspecting the repository' },
+          },
+          true,
+        );
         expect(lastFrame()).toContain('Rewritten thought');
         expect(lastFrame()).not.toContain('Inspecting the repository');
       } finally {
@@ -754,6 +762,36 @@ describe('<HistoryItemDisplay />', () => {
       }
     },
   );
+
+  it('does not add reply copy hints to rewritten thought Markdown', () => {
+    const modRow = vi
+      .spyOn(modRowHooks, 'useModRow')
+      .mockImplementation((_config, _session, input) =>
+        input
+          ? {
+              text: '$$\nx = 7\n$$\n\n```mermaid\nflowchart LR\n  A[First] --> B[Second]\n```',
+            }
+          : undefined,
+      );
+    try {
+      const { lastFrame } = renderWithProviders(
+        <HistoryItemDisplay
+          item={{ id: 1, type: 'gemini_thought', text: 'Inspect the math.' }}
+          terminalWidth={100}
+          isPending={false}
+          modSessionId="session"
+          fullDetail
+          isInViewport
+        />,
+      );
+      const output = lastFrame();
+      expect(output).toContain('LaTeX block');
+      expect(output).toContain('Second');
+      expect(output).not.toContain('/copy');
+    } finally {
+      modRow.mockRestore();
+    }
+  });
 
   it('does not offer a pending thought to the Mods', () => {
     const modRow = vi.spyOn(modRowHooks, 'useModRow');
@@ -765,9 +803,15 @@ describe('<HistoryItemDisplay />', () => {
           isPending
           modSessionId="session"
           fullDetail
+          isInViewport
         />,
       );
-      expect(modRow).toHaveBeenLastCalledWith(undefined, 'session', undefined);
+      expect(modRow).toHaveBeenLastCalledWith(
+        undefined,
+        'session',
+        undefined,
+        true,
+      );
     } finally {
       modRow.mockRestore();
     }

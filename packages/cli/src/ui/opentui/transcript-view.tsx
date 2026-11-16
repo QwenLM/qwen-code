@@ -270,6 +270,7 @@ function useTranscriptWindow(
   items: readonly LiveHistoryItem[],
   availableTerminalHeight: number,
   initialAnchor: 'top' | 'bottom',
+  trackThinkingVisibility: boolean,
 ) {
   const renderer = useRenderer();
   const rootRef = useRef<Renderable | null>(null);
@@ -307,6 +308,9 @@ function useTranscriptWindow(
     rows: 0,
   });
   const [revision, setRevision] = useState(0);
+  const [visibleThoughts, setVisibleThoughts] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
 
   const offsets = useMemo(() => {
     const measured = heightsRef.current;
@@ -388,10 +392,36 @@ function useTranscriptWindow(
       return !sameWindow(next, mountedRef.current);
     };
 
+    // The mounted window includes overscan. Use the laid-out rows to decide
+    // which thoughts may start a Mod render, even when scrolling leaves the
+    // mounted window unchanged.
+    const syncVisibleThoughts = (host: ScrollBoxRenderable) => {
+      if (!trackThinkingVisibility) return;
+      const top = host.viewport.y;
+      const bottom = top + (laidOutRows(host.viewport) ?? 0);
+      const next = new Set<string>();
+      if (bottom > top) {
+        for (const [key, { item, node }] of nodesRef.current) {
+          if (item.kind !== 'thinking' || !item.done) continue;
+          const height = laidOutRows(node) ?? 0;
+          if (height > 0 && node.y < bottom && node.y + height > top) {
+            next.add(key);
+          }
+        }
+      }
+      setVisibleThoughts((previous) =>
+        previous.size === next.size &&
+        [...next].every((key) => previous.has(key))
+          ? previous
+          : next,
+      );
+    };
+
     const onScroll = () => {
       const found = locate();
       if (!found) return;
       if (syncWindow(found.root, found.host)) setRevision((value) => value + 1);
+      syncVisibleThoughts(found.host);
     };
 
     const onFrame = () => {
@@ -460,6 +490,7 @@ function useTranscriptWindow(
           if (from < tail && to < tail) host.scrollTop = to;
         }
         changed = syncWindow(found.root, host) || changed;
+        syncVisibleThoughts(host);
       }
       if (changed) setRevision((value) => value + 1);
     };
@@ -469,9 +500,9 @@ function useTranscriptWindow(
       renderer.off('frame', onFrame);
       bar?.off('change', onScroll);
     };
-  }, [renderer]);
+  }, [renderer, trackThinkingVisibility]);
 
-  return { rootRef, nodesRef, win };
+  return { rootRef, nodesRef, win, visibleThoughts };
 }
 
 type ToolPresentationRow = Extract<LiveHistoryItem, { kind: 'tool' }>;
@@ -589,10 +620,11 @@ export function OpenTuiTranscriptView({
       !item.done &&
       item.id === awaitingCallId,
   );
-  const { rootRef, nodesRef, win } = useTranscriptWindow(
+  const { rootRef, nodesRef, win, visibleThoughts } = useTranscriptWindow(
     visibleItems,
     availableTerminalHeight,
     initialAnchor,
+    modRows !== undefined,
   );
   return (
     <box
@@ -629,6 +661,7 @@ export function OpenTuiTranscriptView({
                 terminalHeight={availableTerminalHeight}
                 width={availableWidth}
                 thoughtsExpanded={thoughtsExpanded}
+                thoughtVisible={visibleThoughts.has(key)}
                 showToolCallArgs={showToolCallArgs}
                 showTimestamps={showTimestamps}
                 showToolCallDetails={showToolCallDetails}
@@ -660,6 +693,7 @@ function TranscriptItem({
   terminalHeight,
   width,
   thoughtsExpanded,
+  thoughtVisible,
   showToolCallArgs,
   showTimestamps,
   showToolCallDetails,
@@ -673,6 +707,7 @@ function TranscriptItem({
   terminalHeight: number;
   width: number;
   thoughtsExpanded: boolean;
+  thoughtVisible: boolean;
   showToolCallArgs: boolean;
   showTimestamps: boolean;
   showToolCallDetails: boolean;
@@ -702,6 +737,7 @@ function TranscriptItem({
           allExpanded={thoughtsExpanded}
           mouseTracking={mouseTracking}
           modRows={modRows}
+          visible={thoughtVisible}
         />
       );
     case 'tool':
@@ -897,11 +933,13 @@ function ThinkingRow({
   allExpanded,
   mouseTracking,
   modRows,
+  visible,
 }: {
   item: LiveThinkingItem;
   allExpanded: boolean;
   mouseTracking: boolean;
   modRows?: TranscriptViewProps['modRows'];
+  visible: boolean;
 }) {
   const [clickedOpen, setClickedOpen] = useState(false);
   // ink resolves a thought as the global ctrl+O toggle or its own clicked-open
@@ -928,7 +966,12 @@ function ThinkingRow({
         : undefined,
     [modRows, item.done, item.id, expanded, text],
   );
-  const modProps = useModRow(modRows?.config, modRows?.sessionId, modInput);
+  const modProps = useModRow(
+    modRows?.config,
+    modRows?.sessionId,
+    modInput,
+    visible,
+  );
   const body = modProps?.text ?? text;
   return (
     <box

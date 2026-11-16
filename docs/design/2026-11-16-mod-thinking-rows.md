@@ -42,7 +42,7 @@ There is no `isExpanded` prop: the site is raised only for an expanded block, so
 
 ### Raised only when complete and expanded
 
-Both terminals collapse thinking by default. A row offers its block once the block is complete and while it is shown expanded, whether opened by a click or by `ctrl+o`; collapsing it withdraws the offer. The cache that keeps reply-row answers keeps these too, so a thought opened again draws its answer at once. A blank thought is not raised.
+Both terminals collapse thinking by default. A row offers its block when it is complete, expanded, and intersects the transcript viewport. Rows mounted beyond the viewport wait until they scroll into view. Collapsing or scrolling a block out of view withdraws the offer. The reply-row cache also stores thinking answers for reopening and scrolling back. A blank thought is not raised.
 
 ### Same rows machinery
 
@@ -50,13 +50,13 @@ Both terminals collapse thinking by default. A row offers its block once the blo
 
 ### Where it is offered
 
-The site is offered where reply rows are: Ink with the virtualized history (`ui.useTerminalBuffer`), where an expanded thought can be drawn again, and OpenTUI in both screen modes. Ink can split a long thought into a head block and continuation blocks, each offered on its own; OpenTUI keeps a live thought as one block.
+The site is offered where reply rows are: Ink with the virtualized history (`ui.useTerminalBuffer`), where an expanded thought can be drawn again, and OpenTUI in both screen modes. Ink can split a long thought into a head block and continuation blocks, each offered on its own; OpenTUI keeps a live thought as one block. Ink omits Mermaid and LaTeX source-copy hints from thinking because `/copy` reads assistant replies.
 
 ## Validation and acceptance
 
 Core runtime tests with the real QuickJS worker: hooks that name `Thinking` or no component hear it, and hooks that name `AssistantMessage` do not; a rewritten `text` is drawn; a tree, an added prop and a control character leave the block as it was.
 
-CLI tests: Ink offers a committed head or continuation block only while expanded and draws the rewritten text, and does not offer a pending thought; OpenTUI offers a complete, expanded thought and not a collapsed or streaming one.
+CLI tests cover committed, expanded thoughts in both terminals and verify that a mounted thought outside the viewport waits until it scrolls into view. Ink tests also cover continuation blocks and check that Mod-added math displays without a `/copy` source hint.
 
 The PTY test runs in both terminals. A model replies with thinking and text, and a Mod numbers each render. It checks that the collapsed thought is not raised and that `ctrl+o` shows the rewritten text from the first render. Collapsed and opened again, the thought still shows that first render. The stored transcript keeps the original thought.
 

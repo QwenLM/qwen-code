@@ -301,21 +301,32 @@ describe(`Reply rows in the ${renderer} terminal`, () => {
 
   it('shows the text a hook rewrote for a complete thought only once it is expanded', async () => {
     const nonce = randomUUID().slice(0, 8);
+    const renderPrompt = `Render thought ${nonce}`;
     const terminal = await start(
       {
-        // Numbers each render, so a render while collapsed or a second one
-        // after re-expanding would show.
+        // Count requests at the server even when their answer is offscreen.
         'ponder-rows': `
           let renders = 0;
-          on('ui.render', { component: 'Thinking' }, ($, e, next) =>
-            next({ ...e, props: { ...e.props, text: 'Pondered ${nonce} #' + ++renders + ': '
-              + e.props.text.toUpperCase() } }));`,
+          on('ui.render', { component: 'Thinking' }, async ($, e, next) => {
+            const result = await $.model.complete({ model: 'sonnet', prompt: '${renderPrompt}' });
+            if (!result.isAnswered) return next(e);
+            return next({ ...e, props: { ...e.props, text: 'Pondered ${nonce} #' + ++renders + ': '
+              + e.props.text.toUpperCase() } });
+          });`,
       },
       (n) => ({
         reasoning: `Plan the answer ${n} carefully.`,
         content: `Answer ${n} is ready.`,
       }),
     );
+    const renderRequests = () =>
+      server!.requests.filter(
+        ({ body }) =>
+          body['stream'] !== true &&
+          ((body['messages'] ?? []) as Message[]).some(
+            (message) => text(message.content) === renderPrompt,
+          ),
+      );
 
     await terminal.send(`Think ${nonce}`);
     const collapsed = await terminal.waitForScreen(
@@ -329,6 +340,7 @@ describe(`Reply rows in the ${renderer} terminal`, () => {
     expect(collapsed).not.toContain('Plan the answer 1');
 
     await terminal.idle(300, 20_000);
+    expect(renderRequests()).toHaveLength(0);
     terminal.pressKey('\x0f');
     const expanded = await terminal.waitForScreen(
       (screen) =>
@@ -338,6 +350,7 @@ describe(`Reply rows in the ${renderer} terminal`, () => {
     );
     expect(expanded).not.toContain('Plan the answer 1 carefully.');
     expect(expanded).toContain('Answer 1 is ready.');
+    expect(renderRequests()).toHaveLength(1);
 
     // Collapsed and expanded again, the thought draws its kept answer.
     await terminal.idle(300, 20_000);
@@ -355,6 +368,8 @@ describe(`Reply rows in the ${renderer} terminal`, () => {
       60_000,
     );
     expect(again).toContain(`Pondered ${nonce} #1:`);
+    await terminal.idle(1_000, 20_000);
+    expect(renderRequests()).toHaveLength(1);
 
     const stored = files(scratch!)
       .filter((file) => file.endsWith('.jsonl'))

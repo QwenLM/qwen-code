@@ -122,6 +122,7 @@ interface HistoryItemDisplayProps {
    * Set only where a committed item can be drawn again.
    */
   modSessionId?: string;
+  isInViewport?: boolean;
 }
 
 /**
@@ -393,6 +394,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   fullDetail = false,
   thoughtHeadId,
   modSessionId,
+  isInViewport = false,
 }) => {
   const marginTop = getHistoryItemMarginTop(item);
   const {
@@ -449,7 +451,12 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
     resolvedThoughtExpanded,
     thoughtText,
   ]);
-  const modProps = useModRow(config, modSessionId, modInput);
+  const modProps = useModRow(
+    config,
+    modSessionId,
+    modInput,
+    !isThought || isInViewport,
+  );
   const settings = useSettings();
   const showTimestamps = settings.merged.output?.showTimestamps === true;
 
