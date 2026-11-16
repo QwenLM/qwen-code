@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act } from 'react';
+import { act, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../i18n';
@@ -360,9 +360,9 @@ describe('WorkspaceSelector', () => {
 
 describe('WorkspaceSelector composer focus', () => {
   beforeEach(() => {
-    // A case that leaks a composer into the document would break the
-    // document-rung fallback (it requires exactly one editor) for every
-    // later case.
+    // A case that leaks a composer into the document means its fixture
+    // cleanup is broken and would shadow the scoped lookups of later
+    // cases; fail the case that leaked, not the next one.
     expect(
       document.querySelectorAll('[data-web-shell-composer-editor]').length,
     ).toBe(0);
@@ -541,6 +541,19 @@ describe('WorkspaceSelector composer focus', () => {
       });
     }
     expect(shadow.activeElement).toBe(composer);
+    // The shadow-aware landed check is what arms the blur stop: after a
+    // real user blur to the background, no pending step may pull the
+    // caret back. With a shadow-host-retargeted active element the check
+    // would never settle and the pull-back would return.
+    await act(async () => {
+      composer.blur();
+    });
+    for (let i = 0; i < 25; i += 1) {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      });
+    }
+    expect(shadow.activeElement).not.toBe(composer);
   });
 
   it('focuses CodeMirror content on the desktop editor', async () => {
@@ -553,11 +566,59 @@ describe('WorkspaceSelector composer focus', () => {
     expect(document.activeElement).toBe(content);
   });
 
-  it('recovers from a composer remount after the selection (production order)', async () => {
-    const element = renderInShell(
-      '<div id="shell-a" data-web-shell-composer><textarea id="composer-a" data-web-shell-composer-editor></textarea><div id="fixture-slot"></div></div>',
-    );
-    const trigger = element.querySelector('button')!;
+  it('stops the watch when a keyed parent remounts the shell after the selection', async () => {
+    // The shape React actually produces on a session switch: the keyed
+    // parent remounts the whole shell, the selector unmounts with it, and
+    // its cleanup stops the watch. A step that would otherwise fire must
+    // not reach the replacement composer after teardown — recovery across
+    // a real remount belongs to the mount site, not to a detached watch.
+    let selection = 0;
+    function RemountingShell() {
+      const [key, setKey] = useState(1);
+      return (
+        <div key={key} id={`shell-${key}`} data-web-shell-composer>
+          <textarea
+            id={`composer-${key}`}
+            data-web-shell-composer-editor
+          ></textarea>
+          <I18nProvider language="en">
+            <WorkspaceSelector
+              workspaces={[
+                {
+                  id: 'primary',
+                  cwd: '/primary',
+                  label: 'primary',
+                  primary: true,
+                  trusted: true,
+                },
+                {
+                  id: 'second',
+                  cwd: '/second',
+                  label: 'second',
+                  primary: false,
+                  trusted: true,
+                },
+              ]}
+              scratchSupported
+              existingFolderSupported
+              onSelectWorkspace={() => {
+                selection += 1;
+                setKey((current) => current + 1);
+              }}
+              onCreateScratch={vi.fn()}
+              onOpenExistingFolder={vi.fn()}
+            />
+          </I18nProvider>
+        </div>
+      );
+    }
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root?.render(<RemountingShell />);
+    });
+    const trigger = container.querySelector('button')!;
     await act(async () => {
       trigger.dispatchEvent(
         new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
@@ -566,28 +627,20 @@ describe('WorkspaceSelector composer focus', () => {
     const option = [
       ...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
     ].find((entry) => entry.textContent?.includes('second'))!;
-    // The selection switches sessions: React removes the composer AFTER
-    // the focus attempt has already run — click first, remount in a later
-    // act.
     await act(async () => {
       option.click();
     });
-    // Let the first retry land on the doomed composer, THEN remount:
-    // only the post-landing watch can still reach the replacement.
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 200));
-    });
-    await act(async () => {
-      element.querySelector('#shell-a')!.remove();
-      // Inside the test's own container so afterEach removes it.
-      container!.insertAdjacentHTML(
-        'beforeend',
-        '<div data-web-shell-composer><textarea id="composer-a2" data-web-shell-composer-editor></textarea></div>',
-      );
-    });
-    const replacement = document.querySelector('#composer-a2');
-    await waitForFocus(replacement);
-    expect(document.activeElement).toBe(replacement);
+    expect(selection).toBe(1);
+    const replacement = container.querySelector('#composer-2')!;
+    // Wait through every step the old watch could still have scheduled
+    // (3 x 150 ms plus margin).
+    for (let i = 0; i < 25; i += 1) {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      });
+    }
+    expect(document.activeElement).not.toBe(replacement);
+    expect(document.activeElement).toBe(document.body);
   });
 
   it('does not steal focus back once the user has moved it elsewhere', async () => {

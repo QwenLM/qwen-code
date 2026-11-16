@@ -88,17 +88,20 @@ function findComposerFocusTarget(scope: ParentNode): HTMLElement | null {
  *
  * The lookup is scoped to the element that owns both the trigger and its
  * composer: the composer shell (`data-web-shell-composer`, the
- * ChatEditor root) around the trigger. The document is a last resort and
- * only when exactly one composer exists in it — a document-wide
- * first-match against a page with a hidden managed-home composer (or a
- * second Web Shell) would focus the wrong instance, or a hidden one.
+ * ChatEditor root) around the trigger. The selector renders inside that
+ * same shell, so a remount of the shell unmounts the selector and its
+ * cleanup stops the watch — the watch can never outlive its shell, and a
+ * document-wide lookup is deliberately off the table (a first-match
+ * against a page with a hidden managed-home composer, or a second Web
+ * Shell, would focus the wrong instance, or a hidden one).
  *
  * The focus is taken in 150 ms steps instead of once: while the menu
  * closes its trapped focus scope still claims focus, and a selection from
- * the active session remounts the owning pane (SplitView keys panes by
+ * the active session can remount the owning pane (SplitView keys panes by
  * session and workspace) AFTER the synchronous attempt has landed,
  * detaching the shell and the focused node. Each step re-resolves the
- * target from the still-connected scope.
+ * target from the still-connected shell; a step that finds the shell
+ * disconnected stops instead.
  *
  * The watch stops when the user takes over: a `focusin` into their own
  * field (registered for the watch only, so the closing menu's own focus
@@ -145,8 +148,8 @@ function scheduleComposerFocus(trigger: HTMLElement | null): () => void {
     // Armed only after a landing: the close sequence blurs to <body>
     // while the menu tears down, and that is not the user taking over.
     // The claimed element must still be connected: a remount detaches it
-    // (see the scope chain), and its implicit blur is the remount, not a
-    // user blur.
+    // before the next step can stop the watch, and its implicit blur is
+    // the remount, not a user blur.
     if (!settled || !currentTarget || !currentTarget.isConnected) return;
     const from = event.composedPath()[0] as Element | null;
     if (!from || (from !== currentTarget && !currentTarget.contains(from)))
@@ -160,20 +163,15 @@ function scheduleComposerFocus(trigger: HTMLElement | null): () => void {
   const attempt = (): void => {
     timer = undefined;
     if (done) return;
-    // A shell that remounts drops one level: shell -> document.
-    let scope: ParentNode | null = null;
-    if (shell?.isConnected) {
-      scope = shell;
-    } else if (
-      document.querySelectorAll('[data-web-shell-composer-editor]').length === 1
-    ) {
-      scope = document;
-    }
-    if (!scope) {
+    // A remount of the shell unmounts the selector with it and runs the
+    // unmount cleanup; a step that finds the shell disconnected stops
+    // instead of falling back to a document-wide lookup (the selector can
+    // only ever see its own shell, which is the one that remounts).
+    if (!shell?.isConnected) {
       stop();
       return;
     }
-    const target = findComposerFocusTarget(scope);
+    const target = findComposerFocusTarget(shell);
     if (target) {
       currentTarget = target;
     }
