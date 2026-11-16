@@ -15,7 +15,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { delimiter, dirname, isAbsolute, join } from 'node:path';
+import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -35,23 +35,34 @@ const read = (file) => readFileSync(join(root, file), 'utf8');
 
 // The launcher runs the CLI when imported, so evaluate only its resolver,
 // with the bindings it imports.
-const launcherSource = /^function getDefaultQwenHome\(\) \{$[\s\S]*?^\}$/m.exec(
-  read('scripts/cli-entry.js'),
-)?.[0];
-const launcherResolver = launcherSource
+const launcherFunction = (name) =>
+  new RegExp(`^function ${name}\\(\\) \\{$[\\s\\S]*?^\\}$`, 'm').exec(
+    read('scripts/cli-entry.js'),
+  )?.[0];
+const launcherSources = [
+  'getHomeDir',
+  'getDefaultQwenHome',
+  'resolveQwenHome',
+].map(launcherFunction);
+const launcherResolver = launcherSources.every(Boolean)
   ? new Function(
       'existsSync',
       'homedir',
       'tmpdir',
       'join',
       'isAbsolute',
-      `${launcherSource}\nreturn getDefaultQwenHome;`,
-    )(existsSync, homedir, tmpdir, join, isAbsolute)
+      'resolve',
+      `${launcherSources.join('\n')}\nreturn resolveQwenHome;`,
+    )(existsSync, homedir, tmpdir, join, isAbsolute, resolve)
   : () => {
-      throw new Error('scripts/cli-entry.js has no getDefaultQwenHome()');
+      throw new Error('scripts/cli-entry.js lacks its global dir resolver');
     };
 
-// The /stuck skill's shell preamble, run with `uname -s` reporting Linux.
+// What `uname -s` prints where process.platform is each value.
+const UNAME = { linux: 'Linux', darwin: 'Darwin', win32: 'MINGW64_NT-10.0' };
+
+// The /stuck skill's shell preamble, run with `uname -s` reporting the
+// platform the test stubs.
 function runStuckPreamble(home, env) {
   const preamble = /\*\*Preamble[^\n]*\n\n```\n([\s\S]*?)```/.exec(
     read('packages/core/src/skills/bundled/stuck/SKILL.md'),
@@ -59,9 +70,13 @@ function runStuckPreamble(home, env) {
   expect(preamble).toBeTruthy();
   const bin = join(home, 'bin');
   mkdirSync(bin, { recursive: true });
-  writeFileSync(join(bin, 'uname'), '#!/bin/sh\necho Linux\n', {
-    mode: 0o755,
-  });
+  writeFileSync(
+    join(bin, 'uname'),
+    `#!/bin/sh\necho ${UNAME[process.platform]}\n`,
+    {
+      mode: 0o755,
+    },
+  );
   const result = spawnSync(
     'bash',
     ['-c', `${preamble}\nprintf %s "$QWEN_DIR"`],
@@ -204,4 +219,27 @@ describe.each(mirrors)('%s', (_, resolve) => {
       expect(resolve(home, env)).toBe(expected(home));
     },
   );
+
+  // Each copy has its own platform gate, so compare it on the platforms that
+  // keep ~/.qwen too: a marked XDG directory must not win there.
+  it.each(['darwin', 'win32'])('keeps ~/.qwen on %s, as core does', (value) => {
+    file(marker(xdg(home)));
+    Object.defineProperty(process, 'platform', { value });
+    expect(Storage.getGlobalQwenDir()).toBe(legacy(home));
+    expect(resolve(home, {})).toBe(legacy(home));
+  });
+
+  it.each([
+    ['~/custom-qwen', () => '~/custom-qwen'],
+    ['~\\custom-qwen', () => '~\\custom-qwen'],
+    ['an absolute path', (home) => join(home, 'custom-qwen')],
+  ])('resolves QWEN_HOME=%s as core does', (_, value) => {
+    file(marker(xdg(home)));
+    const qwenHome = value(home);
+    vi.stubEnv('QWEN_HOME', qwenHome);
+    expect(Storage.getGlobalQwenDir()).toBe(join(home, 'custom-qwen'));
+    expect(resolve(home, { QWEN_HOME: qwenHome })).toBe(
+      join(home, 'custom-qwen'),
+    );
+  });
 });
