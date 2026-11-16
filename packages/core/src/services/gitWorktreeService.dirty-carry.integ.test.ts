@@ -822,6 +822,52 @@ describe('GitWorktreeService.createUserWorktree() — carryDirtyState', () => {
     },
   );
 
+  it('createUserWorktree carry refuses a silent stash create failure (R8-6)', async () => {
+    // The silent failure class: some git builds exit `stash create` non-zero
+    // writing NOTHING to either stream (git 2.39.5 with a held index.lock).
+    // A git shim forces that mode portably — `stash create` exits 1 with empty
+    // stdout/stderr, every other command delegates to real git. simple-git's
+    // default detection resolves that as an empty "nothing to carry"; the
+    // exit-code detection must surface it so the carry is refused rather than
+    // silently dropping the tracked overlay.
+    await fs.writeFile(path.join(repoRoot, 'tracked.txt'), 'dirty\n');
+    const realGit = execFileSync('bash', ['-c', 'command -v git'], {
+      encoding: 'utf8',
+    }).trim();
+    const shimDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-git-shim-'));
+    const shim = path.join(shimDir, 'git');
+    // Scan for consecutive `stash create` args rather than $1/$2: the loader
+    // prepends `-c` config flags before the subcommand, so the subcommand is
+    // not at a fixed position.
+    await fs.writeFile(
+      shim,
+      `#!/bin/bash\nprev=""\nfor a in "$@"; do\n  if [ "$prev" = "stash" ] && [ "$a" = "create" ]; then exit 1; fi\n  prev="$a"\ndone\nexec ${realGit} "$@"\n`,
+    );
+    await fs.chmod(shim, 0o755);
+    const originalPath = process.env['PATH'];
+    process.env['PATH'] = `${shimDir}:${originalPath}`;
+    const service = new GitWorktreeService(repoRoot);
+    let created: Awaited<ReturnType<typeof service.createUserWorktree>>;
+    try {
+      created = await service.createUserWorktree('silentfail', 'main', {
+        detached: true,
+        carryDirtyState: true,
+      });
+    } finally {
+      process.env['PATH'] = originalPath;
+      await fs.rm(shimDir, { recursive: true, force: true });
+    }
+    expect(created.success).toBe(false);
+    expect(created.error).toContain('dirty state');
+    // The silent failure is an environment fault, not the user-clearable merge
+    // state, so it carries no typed 409 code.
+    expect(created.code).toBeUndefined();
+    await expect(
+      fs.lstat(service.getUserWorktreePath('silentfail')),
+    ).rejects.toThrow();
+    expect(await read(path.join(repoRoot, 'tracked.txt'))).toBe('dirty\n');
+  });
+
   it('refuses a carry on an unmerged index with a typed merge-in-progress code (R12-1)', async () => {
     // A real conflicted merge: `git stash create` cannot run on an unmerged
     // index. That is a state the user can clear (resolve/abort), not a daemon

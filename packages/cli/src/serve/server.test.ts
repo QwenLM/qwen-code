@@ -29869,8 +29869,11 @@ describe('createServeApp', () => {
     });
 
     it('records the source checkout HEAD as worktreeBase when it diverges from the repo top (R5-4)', async () => {
-      const repo = await fsp.mkdtemp(
-        path.join(os.tmpdir(), 'qwen-branch-diverge-repo-'),
+      // Canonicalize: on macOS the default TMPDIR is a symlinked path
+      // (/var -> /private/var) and the route records the realpath, so the
+      // raw mkdtemp path would not match sidecar.originalCwd (R5-4).
+      const repo = await fsp.realpath(
+        await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-branch-diverge-repo-')),
       );
       const runtimeDir = await fsp.mkdtemp(
         path.join(os.tmpdir(), 'qwen-branch-diverge-runtime-'),

@@ -52,14 +52,15 @@ function bareBranchName(symbolicRef: string): string {
 }
 
 /**
- * Error detection for the dirty-carry `stash apply` calls. simple-git's
- * default treats a non-zero exit as an error only when stderr is non-empty
- * (`exitCode && stdErr.length`); a git apply that fails with an empty
- * stderr — observed on the CI fleet's git build, where a held index lock /
- * read-only git directory made the apply exit non-zero yet resolve — would
- * otherwise leave `applyError` unset and record a carry that never landed.
- * Judge by the real process exit status so any non-zero exit surfaces,
- * regardless of which stream git reported on.
+ * Error detection for the dirty-carry `stash apply` and `stash create` calls.
+ * simple-git's default treats a non-zero exit as an error only when stderr is
+ * non-empty (`exitCode && stdErr.length`); a git command that fails with an
+ * empty stderr — observed on the CI fleet's git build, where a held index lock
+ * / read-only git directory made the apply exit non-zero yet resolve, and on
+ * git 2.39.5 where `stash create` exits 1 writing nothing to either stream —
+ * would otherwise leave the error unset and record a carry that never landed
+ * (or an empty "nothing to carry"). Judge by the real process exit status so
+ * any non-zero exit surfaces, regardless of which stream git reported on.
  */
 export const carryApplyErrorDetection: NonNullable<
   SimpleGitOptions['errors']
@@ -69,7 +70,7 @@ export const carryApplyErrorDetection: NonNullable<
   const message = Buffer.concat([...result.stdOut, ...result.stdErr])
     .toString('utf8')
     .trim();
-  return new Error(message || `git apply exited with code ${result.exitCode}`);
+  return new Error(message || `git exited with code ${result.exitCode}`);
 };
 
 /**
@@ -1490,7 +1491,19 @@ export class GitWorktreeService {
     let captureError: string | null = null;
     let unmergedIndex = false;
     try {
-      stashCommit = (await (await this.getGit()).stash(['create'])).trim();
+      // Judge `stash create` by its real exit status, not stderr presence:
+      // some git builds (e.g. 2.39.5 with a held index.lock) exit non-zero
+      // writing NOTHING to either stream, which simple-git's default
+      // detection resolves as an empty "nothing to carry" (R8-6). A dedicated
+      // instance with exit-code detection surfaces that silent failure so a
+      // carry-requesting caller refuses instead of silently dropping the
+      // tracked overlay. It still calls `.stash(['create'])`, so the mocked
+      // getGit().stash seam in the unit tests is unchanged.
+      const { simpleGit } = await loadSimpleGit();
+      const captureGit = simpleGit(this.sourceRepoPath, {
+        errors: carryApplyErrorDetection,
+      }).env(gitEnv());
+      stashCommit = (await captureGit.stash(['create'])).trim();
     } catch (error) {
       // An environment failure (held index.lock, read-only git dir) is NOT
       // "nothing to carry": record it so a carry-requesting caller refuses
