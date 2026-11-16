@@ -14,7 +14,7 @@ export function removeShellLineContinuations(command: string): string {
   let wordStart = true;
   for (let index = 0; index < command.length; index++) {
     const character = command[index]!;
-    const afterDollar = pendingDollar;
+    const afterDollar: boolean = pendingDollar;
     pendingDollar = false;
     if (character === '\\' && quote !== "'") {
       if (command[index + 1] === '\n' && quote !== "$'") {

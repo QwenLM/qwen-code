@@ -25,7 +25,6 @@ import type {
 import { sanitizeMonitorLine } from '../tools/monitor.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { humanReadableCron } from '../utils/cronDisplay.js';
-import { createDebugLogger } from '../utils/debugLogger.js';
 import { getErrorMessage } from '../utils/errors.js';
 import {
   backgroundsAnyPart,
@@ -34,8 +33,6 @@ import {
   splitCommands,
 } from '../utils/shell-utils.js';
 import type { CronJob } from './cronScheduler.js';
-
-const debugLogger = createDebugLogger('CRON_GATE');
 
 export const CRON_GATE_TIMEOUT_MS = 60_000;
 /** Delivered stdout is cut here; the head is kept and the cut is noted. */
