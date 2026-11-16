@@ -799,9 +799,9 @@ End state:
 | Loops that call `LlmChat.sendMessageStream` directly | 3                                                | 0      |
 | Loops that parse stream chunks outside `turn.ts`     | 3                                                | 0      |
 | Loops that call `finalizeToolResponses`              | 6                                                | 2      |
-| Session turn-cap formulas                            | 3                                                | 1      |
+| Session turn-cap formulas                            | 3                                                | 2      |
 
-These targets assume full migration. The keep-its-own decisions retain specialized copies: speculation keeps its speculative loop and its `finalizeToolResponses` call (`speculation.ts:607`; [PR 6b decision](2026-11-15-speculation-tool-step.md)), and the Hosted Harness keeps its journaled loop and tool step ([migration evaluation](2026-11-14-hosted-harness-loop-evaluation.md)). "Agent loop implementations" and "Loops that call `finalizeToolResponses`" therefore end at the shared implementation plus the copies these decisions retain (speculation's finalizer sits alongside the shared batch's at `agent-loop.ts:715`); the Target cells above count those copies.
+These targets assume full migration. The keep-its-own decisions retain specialized copies: speculation keeps its speculative loop and its `finalizeToolResponses` call (`speculation.ts:607`; [PR 6b decision](2026-11-15-speculation-tool-step.md)), and the Hosted Harness keeps its journaled loop and tool step ([migration evaluation](2026-11-14-hosted-harness-loop-evaluation.md)). "Agent loop implementations" and "Loops that call `finalizeToolResponses`" therefore end at the shared implementation plus the copies these decisions retain (speculation's finalizer sits alongside the shared batch's at `agent-loop.ts:715`); the Target cells above count those copies, the turn-cap row keeping the Hosted outer loop's formula alongside the reconciled one ([migration evaluation](2026-11-14-hosted-harness-loop-evaluation.md)).
 
 ## Open questions
 

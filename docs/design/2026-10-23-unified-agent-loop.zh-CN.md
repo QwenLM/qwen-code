@@ -799,9 +799,9 @@ PR 6b 是 speculation 的工具步决策（保留自有工具步）；PR 6c 是�
 | 直接调用 `LlmChat.sendMessageStream` 的 loop | 3                                         | 0    |
 | 在 `turn.ts` 之外解析流式 chunk 的 loop      | 3                                         | 0    |
 | 调用 `finalizeToolResponses` 的 loop         | 6                                         | 2    |
-| 会话轮数上限的算法                           | 3                                         | 1    |
+| 会话轮数上限的算法                           | 3                                         | 2    |
 
-这些目标假设全部入口完全迁移。保留自有的决策会留下特化副本：speculation 保留其投机循环与自己的 `finalizeToolResponses` 调用（`speculation.ts:607`；见 [PR 6b 决策](2026-11-15-speculation-tool-step.zh-CN.md)），Hosted Harness 保留其 journal 化循环与工具步（见[迁移评估](2026-11-14-hosted-harness-loop-evaluation.zh-CN.md)）。因此「agent loop 实现数」与「调用 `finalizeToolResponses` 的 loop」最终为共享实现加上这些决策保留的副本（speculation 的 finalizer 与共享批在 `agent-loop.ts:715` 的调用并存）；上表目标列已按这些副本计数。
+这些目标假设全部入口完全迁移。保留自有的决策会留下特化副本：speculation 保留其投机循环与自己的 `finalizeToolResponses` 调用（`speculation.ts:607`；见 [PR 6b 决策](2026-11-15-speculation-tool-step.zh-CN.md)），Hosted Harness 保留其 journal 化循环与工具步（见[迁移评估](2026-11-14-hosted-harness-loop-evaluation.zh-CN.md)）。因此「agent loop 实现数」与「调用 `finalizeToolResponses` 的 loop」最终为共享实现加上这些决策保留的副本（speculation 的 finalizer 与共享批在 `agent-loop.ts:715` 的调用并存）；上表目标列已按这些副本计数，其中轮数上限一行保留 Hosted 外层循环的公式与调和后的公式并存（见[迁移评估](2026-11-14-hosted-harness-loop-evaluation.zh-CN.md)）。
 
 ## 待定问题
 
