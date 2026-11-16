@@ -1098,8 +1098,9 @@ The shared ACP inbox accepts peer and controller credentials. The
 own-process credential described above is available to single-session
 terminal inboxes.
 
-After you stop a turn, new messages receive `queue-full` until you send
-another prompt. Their senders can then retry.
+After you stop a turn, messages that the gate would otherwise accept
+receive `queue-full` until you send another prompt. Inbound policy and
+rate limits still apply. Senders can retry after the next prompt.
 
 When the session closes or `/clear` switches its conversation, the host
 sends `expired` for messages still waiting in the old queue. Messages

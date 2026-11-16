@@ -221,6 +221,11 @@ that is delivered and one that waits for review. Writing
 | `priority`    | `"now"` or `"next"`; anything else reads as `"next"`. Carried for a future interrupt path; today the receiver queues both for the next turn.                                                                                  |
 | `message`     | `role` must be `"user"`; `content` a non-empty string.                                                                                                                                                                        |
 
+After `/clear`, a shared ACP inbox also recognizes the session's original
+published ID as an alias when it resolves to exactly one registered
+session. An ID that matches multiple registered sessions receives
+`misaddressed`.
+
 Unknown fields are ignored.
 
 ## 5. The delivery-status frame
