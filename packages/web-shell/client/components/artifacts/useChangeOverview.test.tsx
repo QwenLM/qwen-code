@@ -505,4 +505,54 @@ describe('useChangeOverview', () => {
     const ws = mock.workspaceByCwd.mock.results[0]!.value;
     expect(ws.workspaceGitDiff).toHaveBeenCalledWith('/work', undefined);
   });
+
+  it('retries with the base-branch window when a PR head range is unavailable', async () => {
+    // A cross-repo (or never-fetched) PR head makes <head>..HEAD unavailable;
+    // the loose commits must still surface via the base-branch window.
+    const ws = {
+      workspaceGitDiff: vi.fn().mockResolvedValue(gitDiff),
+      workspaceGitHubPullRequestFiles: vi
+        .fn()
+        .mockImplementation((number: number) =>
+          Promise.resolve(prFiles(number)),
+        ),
+      workspaceGitLog: vi
+        .fn()
+        .mockResolvedValueOnce({
+          v: 1,
+          available: false,
+          entries: [],
+          hasMore: false,
+        })
+        .mockResolvedValueOnce({
+          v: 1,
+          available: true,
+          entries: [
+            { sha: 'c9', shortSha: 'c9', subject: 'loose', parents: ['head2'] },
+          ],
+          hasMore: false,
+        }),
+      workspaceGitCommitDetail: vi.fn().mockResolvedValue({
+        v: 1,
+        available: true,
+        files: [{ path: 'loose.ts', added: 1, removed: 0, isBinary: false }],
+        filesCount: 1,
+        linesAdded: 1,
+        linesRemoved: 0,
+      }),
+    };
+    mock.workspaceByCwd.mockReturnValue(ws);
+    await renderAndSettle();
+    expect(ws.workspaceGitLog).toHaveBeenCalledTimes(2);
+    expect(ws.workspaceGitLog).toHaveBeenNthCalledWith(
+      2,
+      20,
+      0,
+      '/work/wt',
+      'origin/main..HEAD',
+      { sessionId: 's1' },
+    );
+    expect(output.units.map((unit) => unit.id)).toContain('commit:c9');
+    expect(output.loadFailed).toBe(false);
+  });
 });

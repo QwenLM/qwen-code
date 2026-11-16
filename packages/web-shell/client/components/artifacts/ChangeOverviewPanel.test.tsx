@@ -6,18 +6,25 @@ import { I18nProvider } from '../../i18n';
 import type { ChangeOverviewState } from './useChangeOverview';
 
 const mock = vi.hoisted(() => ({
-  state: {
-    gitAvailable: true,
-    loading: false,
-    units: [],
-  } as ChangeOverviewState,
+  // Partial overrides spread over a complete default below, so every fixture
+  // is a full ChangeOverviewState (the hook's sole output shape) and a renamed
+  // or added field is a type error here rather than a silently-wrong state.
+  state: {} as Partial<ChangeOverviewState>,
   refresh: vi.fn(),
   hook: vi.fn(),
 }));
 vi.mock('./useChangeOverview', () => ({
   useChangeOverview: (...args: unknown[]) => {
     mock.hook(...args);
-    return { ...mock.state, refresh: mock.refresh };
+    return {
+      gitAvailable: true,
+      loadFailed: false,
+      loading: false,
+      units: [],
+      commitsTruncated: false,
+      ...mock.state,
+      refresh: mock.refresh,
+    };
   },
 }));
 vi.mock('../../hooks/useExternalLinkOpener', () => ({

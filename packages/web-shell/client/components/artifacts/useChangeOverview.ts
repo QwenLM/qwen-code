@@ -229,12 +229,27 @@ export function useChangeOverview(
         // skip the fetch rather than fall through to an unscoped walk that
         // would re-list pre-session history.
         if (range !== null) {
-          const log = await ws
+          let log = await ws
             .workspaceGitLog(COMMIT_FALLBACK_LIMIT, 0, gitCwd, range, {
               sessionId,
             })
             .catch(() => undefined);
           if (!active) return;
+          // A PR head from another repository (or never fetched into this
+          // clone) makes <head>..HEAD unavailable even though HEAD is fine;
+          // retry once with the base-branch window so the session's loose
+          // commits still surface instead of silently disappearing.
+          if (log && log.available === false && latestPrHeadSha !== undefined) {
+            const baseRange = commitFallbackRange(undefined, baseBranch);
+            if (baseRange !== null) {
+              log = await ws
+                .workspaceGitLog(COMMIT_FALLBACK_LIMIT, 0, gitCwd, baseRange, {
+                  sessionId,
+                })
+                .catch(() => undefined);
+              if (!active) return;
+            }
+          }
           // A log the daemon reports unavailable (e.g. the range's head is not
           // in the object database) is a retryable failure, not "no loose
           // commits"; surface it instead of an empty session.

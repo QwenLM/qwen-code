@@ -27448,6 +27448,51 @@ describe('createServeApp', () => {
       expect(bridge.summaryCalls).toEqual(['s-1']);
     });
 
+    it('hydrates persisted PR bindings into the summary after a reload', async () => {
+      // Bridge entries are re-created without prs on restart/reload; the status
+      // route must hydrate the sidecar so the session's bound PRs are reported
+      // (otherwise the change overview re-lists PR-covered commits as loose).
+      const sessionId = 's-pr-hydrate';
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(
+        sessionId,
+        'active',
+      );
+      await fsp.rm(sidecarPath, { force: true });
+      await upsertSessionPr(sidecarPath, {
+        number: 7,
+        url: 'https://github.com/o/r/pull/7',
+        source: 'create',
+      });
+      const summary: BridgeSessionSummary = {
+        sessionId,
+        workspaceCwd: WS_BOUND,
+        createdAt: '2026-05-17T12:00:00.000Z',
+        clientCount: 1,
+        hasActivePrompt: false,
+      };
+      const bridge = fakeBridge({ summaryImpl: () => summary });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      try {
+        const res = await request(app)
+          .get(`/session/${sessionId}/status`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(res.status).toBe(200);
+        expect(bridge.seedSessionPrsCalls).toHaveLength(1);
+        expect(bridge.seedSessionPrsCalls[0]?.sessionId).toBe(sessionId);
+        expect(bridge.seedSessionPrsCalls[0]?.prs[0]).toMatchObject({
+          number: 7,
+          source: 'create',
+        });
+      } finally {
+        await fsp.rm(sidecarPath, { force: true });
+      }
+    });
+
     it('200 omits displayName when the live session has none', async () => {
       const summary: BridgeSessionSummary = {
         sessionId: 's-2',
