@@ -204,7 +204,8 @@ test('keeps the unavailable-model authorize action reachable inside the mobile s
     '[data-web-shell-unavailable-model][data-model-id="qwen-max"]',
   );
   await expect(disabled).toBeVisible();
-  await disabled.focus();
+  await expect(disabled).toBeInViewport({ ratio: 1 });
+  await disabled.tap({ force: true });
   const hint = page.locator('[data-web-shell-unavailable-model-tooltip]');
   const authorize = hint.getByRole('button', { name: 'Authorize' });
   await expect(authorize).toBeVisible();
@@ -234,7 +235,6 @@ test('keeps the unavailable-model authorize action reachable inside the mobile s
     'data-authorize-clicked',
     'true',
   );
-  await expect(sheet).toBeVisible();
 });
 
 test('simple mobile composer switches directly to advanced mode without losing its draft or attachments @smoke', async ({

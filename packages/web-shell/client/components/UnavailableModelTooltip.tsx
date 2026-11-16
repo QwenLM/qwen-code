@@ -188,6 +188,12 @@ export function UnavailableModelTooltip({
           }, OPEN_DELAY_MS);
         }}
         onPointerLeave={closeAfterDelay}
+        onClickCapture={() => {
+          if (!canOpen) return;
+          cancelOpen();
+          cancelClose();
+          setOpen(true);
+        }}
         onFocus={() => {
           if (!canOpen) return;
           cancelOpen();
