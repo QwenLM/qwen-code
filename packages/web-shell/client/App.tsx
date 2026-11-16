@@ -570,7 +570,10 @@ import type {
   Message,
   PermissionRequest,
 } from './adapters/types';
-import { isBackgroundSubAgentToolCall } from './adapters/toolClassification';
+import {
+  isBackgroundSubAgentToolCall,
+  isNamedSubSessionApproval,
+} from './adapters/toolClassification';
 import {
   computeTodoDetails,
   computeTodoTimeline,
@@ -15630,6 +15633,7 @@ export function App({
           !planMode &&
           approval &&
           !isExitPlanApprovalRequest(approval) &&
+          !isNamedSubSessionApproval(approval) &&
           (modeId === 'yolo' ||
             (modeId === 'auto-edit' && isEditToolPermission(approval)))
         ) {

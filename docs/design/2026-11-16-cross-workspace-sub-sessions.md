@@ -56,15 +56,18 @@ workspace id of a workspace registered with this daemon. Absent means the
 caller's workspace, which is today's behavior.
 
 `first-turn` waits for the first turn and returns its text. A cross-workspace
-`sent` call returns after dispatch. The caller gets a task notification with
-the result when the turn finishes, or a cancellation if the target runtime
+`sent` call requires chat recording in the caller and returns after dispatch.
+The caller gets a task notification with the result when the turn finishes,
+or a cancellation if the target runtime
 stops while the caller is still active. The tool result and the notification
-link to the child in the target workspace. A selector that resolves to the
-caller's own workspace uses the existing same-workspace behavior.
+link to the child in the target workspace. After confirmation, a selector
+for the caller's own workspace uses the same-runtime execution and
+completion path.
 
-Calls with a named workspace use execution confirmation. Default and auto-edit
-ask the person, auto asks the classifier, and yolo allows the call, subject to
-configured permission rules. The confirmation names the destination.
+Each call with a named workspace requires one-time human approval in the
+calling session. The confirmation shows the destination selector. Deny rules
+still apply. Existing permanent grants continue to apply to calls that omit
+the selector.
 
 ### Resolving the target
 
@@ -84,7 +87,10 @@ primary workspace's usual exemption from the trust check does not apply here,
 because this path drives one workspace from another. An unknown or untrusted
 target is refused, and the error lists the workspaces that can be named so
 the model can correct itself. After asynchronous startup, the launcher
-rechecks both runtime generations before dispatching the first prompt.
+rechecks both runtime generations and both sessions' approval revisions
+before dispatch. The target also checks its live mode when it admits the
+prompt. A mode change invalidates the pending dispatch so the caller can
+retry under the new mode.
 
 Standalone and Live callers cannot name a workspace. Their sub-sessions live
 in daemon-owned directories that have no meaning in another workspace.
@@ -108,7 +114,12 @@ change closes any unused child before dispatch.
 A cross-workspace launch counts against the target launcher's caps:
 per caller (16) and per workspace (24). Those caps exist to keep sub-sessions
 from starving the interactive sessions of the workspace that runs them, and
-here that workspace is B. The child records the caller as its parent, so the
+here that workspace is B. A completed turn releases its slot in B before
+notification delivery. A separately limits outstanding remote `sent`
+completions using its own `serve.maxConcurrentSubSessionsTotal`, and holds
+each reservation through delivery or expiry.
+
+The child records the caller as its parent, so the
 depth gate refuses it if it tries to create sub-sessions of its own. The
 completion notification's task id is the new session's id, which is unique
 because every step 1 launch creates a session.
@@ -178,8 +189,8 @@ result shows in both places.
 
 - Unit: resolution by absolute path and id, refusal of unknown and untrusted
   targets and callers, the depth gate, target-bridge dispatch, caller-bridge
-  notification delivery, live approval reads, incompatible modes, and target
-  runtime cancellation.
+  notification delivery, named-workspace confirmation despite legacy grants,
+  live approval reads, incompatible or changed modes, and target cancellation.
 - End to end: with two trusted workspaces, start a child in B from A, read B's
   `QWEN.md` in `first-turn` mode, and verify `sent` notification delivery in A.
   Open the child link from A and verify it loads B. Naming an untrusted target

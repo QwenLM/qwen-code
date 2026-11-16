@@ -172,11 +172,12 @@ export interface SubSessionLauncher {
 
 /** What a target launcher needs to know about a caller in another workspace. */
 export interface RemoteSubSessionCaller {
-  /** The caller's approval mode; the sub-session never runs looser. */
+  /** The caller's live approval mode at admission. */
   approvalMode: ApprovalMode;
   assertCurrent(): void;
   /** Hand a `sent` completion to the caller, on the caller's own bridge. */
   deliverCompletion(notification: BridgeBackgroundNotification): Promise<void>;
+  releaseCompletionSlot?: () => void;
 }
 
 /** How a launcher finds another registered workspace's launcher. */
@@ -316,15 +317,21 @@ function delegatedApprovalMode(
   return ApprovalMode.DEFAULT;
 }
 
-async function currentApprovalMode(
-  bridge: AcpSessionBridge,
-  sessionId: string,
-): Promise<ApprovalMode | undefined> {
-  const { modes } = (await bridge.getSessionContextStatus(sessionId)).state;
-  if (typeof modes !== 'object' || !modes || !('currentModeId' in modes)) {
-    return undefined;
-  }
-  return APPROVAL_MODES.find((mode) => mode === modes.currentModeId);
+async function readApprovalMode(bridge: AcpSessionBridge, sessionId: string) {
+  const assertCurrent = bridge.captureSessionApprovalModeGuard(sessionId);
+  const status = await bridge.getSessionContextStatus(sessionId);
+  assertCurrent();
+  const { modes } = status.state;
+  const modeId =
+    typeof modes === 'object' && modes && 'currentModeId' in modes
+      ? modes.currentModeId
+      : undefined;
+  return {
+    mode: APPROVAL_MODES.find((mode) => mode === modeId),
+    assertCurrent,
+    canAcceptBackgroundNotifications:
+      status.canAcceptBackgroundNotifications === true,
+  };
 }
 
 type IsolatedWorkspace = NonNullable<
@@ -920,6 +927,7 @@ export function createSubSessionLauncher(
   // Sum of `inflight`, tracked separately so the workspace-wide cap holds even
   // when a caller opens a fresh bucket per launch.
   let inflightTotal = 0;
+  let outstandingRemoteCompletions = 0;
 
   const release = (key: string): void => {
     const n = (inflight.get(key) ?? 1) - 1;
@@ -1076,25 +1084,46 @@ export function createSubSessionLauncher(
         }
       }
       rememberSpawned(sessionId);
+      let dispatchApproval:
+        | {
+            assertCanDispatch(): void;
+            expectedApprovalMode: ApprovalMode;
+          }
+        | undefined;
       if (remote) {
-        // Use live approval modes. Each workspace keeps its own permission rules.
-        const childMode = await currentApprovalMode(bridge, sessionId);
-        if (childMode === undefined) {
+        let childApproval = await readApprovalMode(bridge, sessionId);
+        if (childApproval.mode === undefined) {
           throw new Error(
             'The new session did not report its approval mode; it was not used.',
           );
         }
         remote.assertCurrent();
-        const mode = delegatedApprovalMode(remote.approvalMode, childMode);
-        if (mode !== childMode) {
+        const mode = delegatedApprovalMode(
+          remote.approvalMode,
+          childApproval.mode,
+        );
+        if (mode !== childApproval.mode) {
           const change = await bridge.setSessionApprovalMode(sessionId, mode, {
             persist: false,
           });
           if (change.mode !== mode) {
             throw new Error('The new session did not apply its approval mode.');
           }
+          childApproval = await readApprovalMode(bridge, sessionId);
+          if (childApproval.mode !== mode) {
+            throw new Error(
+              'The new session approval mode changed before dispatch.',
+            );
+          }
         }
-        remote.assertCurrent();
+        dispatchApproval = {
+          assertCanDispatch() {
+            remote.assertCurrent();
+            childApproval.assertCurrent();
+          },
+          expectedApprovalMode: mode,
+        };
+        dispatchApproval.assertCanDispatch();
       }
 
       try {
@@ -1134,7 +1163,7 @@ export function createSubSessionLauncher(
           {
             promptId,
             onPromptAdmitted,
-            ...(remote ? { assertCanDispatch: remote.assertCurrent } : {}),
+            ...dispatchApproval,
           },
         );
       }
@@ -1248,6 +1277,11 @@ export function createSubSessionLauncher(
                 targetStopped() ? 'shutdown' : 'error',
                 remote ? boundWorkspace : undefined,
               );
+            } finally {
+              if (remote) {
+                drainAc.abort();
+                releaseOnce();
+              }
             }
             if (!notification) return;
             try {
@@ -1277,6 +1311,7 @@ export function createSubSessionLauncher(
             // outer catch also fires release, using raw release would double-
             // free the slot.
             releaseOnce();
+            remote?.releaseCompletionSlot?.();
           }
         })();
         return {
@@ -1518,33 +1553,56 @@ export function createSubSessionLauncher(
     if (target.kind === 'refused') throw new Error(target.reason);
     target.assertCurrent();
     if (target.launcher === launcher) return run(local);
-    const approvalMode = await currentApprovalMode(
-      bridge,
-      info.callerSessionId,
-    );
-    if (approvalMode === undefined) {
+    const callerApproval = await readApprovalMode(bridge, info.callerSessionId);
+    if (callerApproval.mode === undefined) {
       throw new Error(
         'This session did not report its approval mode, so it cannot run ' +
           'sub-sessions in another workspace.',
       );
     }
-    return target.launcher.launchForRemoteCaller(local, {
-      approvalMode,
-      assertCurrent() {
-        assertCallerCurrent();
-        target.assertCurrent();
-      },
-      deliverCompletion: async (notification) => {
-        assertCallerCurrent();
-        await deliverSentCompletion(
-          bridge,
-          boundWorkspace,
-          info.callerSessionId,
-          notification,
-          stopAc.signal,
+    let releaseCompletionSlot: (() => void) | undefined;
+    if (local.completion === 'sent') {
+      if (!callerApproval.canAcceptBackgroundNotifications) {
+        throw new Error(
+          'Cross-workspace sent completion requires chat recording in the caller. Use first-turn to wait for the result.',
         );
-      },
-    });
+      }
+      if (outstandingRemoteCompletions >= maxConcurrentTotal) {
+        throw new Error(
+          `Too many pending cross-workspace completions in this workspace (cap ${maxConcurrentTotal}); wait for one to finish.`,
+        );
+      }
+      outstandingRemoteCompletions += 1;
+      releaseCompletionSlot = () => {
+        if (!releaseCompletionSlot) return;
+        releaseCompletionSlot = undefined;
+        outstandingRemoteCompletions -= 1;
+      };
+    }
+    try {
+      return await target.launcher.launchForRemoteCaller(local, {
+        approvalMode: callerApproval.mode,
+        assertCurrent() {
+          assertCallerCurrent();
+          target.assertCurrent();
+          callerApproval.assertCurrent();
+        },
+        deliverCompletion: async (notification) => {
+          assertCallerCurrent();
+          await deliverSentCompletion(
+            bridge,
+            boundWorkspace,
+            info.callerSessionId,
+            notification,
+            stopAc.signal,
+          );
+        },
+        ...(releaseCompletionSlot ? { releaseCompletionSlot } : {}),
+      });
+    } catch (error) {
+      releaseCompletionSlot?.();
+      throw error;
+    }
   };
 
   const launcher: SubSessionLauncher = {

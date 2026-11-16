@@ -675,6 +675,8 @@ export interface ServeSessionContextStatus {
   v: typeof STATUS_SCHEMA_VERSION;
   sessionId: string;
   workspaceCwd: string;
+  /** Whether the session can durably accept a daemon completion notification. */
+  canAcceptBackgroundNotifications?: boolean;
   recovery?: {
     kind:
       | 'clean'

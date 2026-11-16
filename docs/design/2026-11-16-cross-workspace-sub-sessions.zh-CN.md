@@ -32,15 +32,15 @@
 
 `create_sub_session` 新增可选参数 `workspace`：本 daemon 已注册 workspace 的绝对路径或 workspace id。不填时使用调用方的 workspace，即现有行为。
 
-`first-turn` 等待第一轮结束并返回文本。跨 workspace 的 `sent` 调用在派发后返回。任务结束时，调用方会收到结果通知。如果目标 runtime 停止而调用方仍然活跃，调用方会收到取消通知。工具结果和通知都提供目标 workspace 的子会话链接。指向调用方自身 workspace 的选择器使用现有的同 workspace 行为。
+`first-turn` 等待第一轮结束并返回文本。跨 workspace 的 `sent` 调用要求调用方开启聊天记录，并在派发后返回。任务结束时，调用方会收到结果通知。如果目标 runtime 停止而调用方仍然活跃，调用方会收到取消通知。工具结果和通知都提供目标 workspace 的子会话链接。确认后，指向调用方自身 workspace 的选择器沿用同 runtime 的执行和完成路径。
 
-指定 workspace 的调用使用执行确认。在既有权限规则约束下，default 和 auto-edit 询问用户，auto 交给分类器，yolo 直接放行。确认内容会写明目标 workspace。
+每次指定 workspace 的调用都要求用户在调用会话中单次确认。确认内容会显示目标选择器。拒绝规则继续生效，已有永久授权继续适用于省略选择器的调用。
 
 ### 解析目标
 
 请求依次经过工具、会话的派发器、`qwen/control/create-sub-session` ext 方法和调用方启动器。各启动器按 runtime generation 注册到 daemon。调用方的启动器检查深度、调用方信任状态，以及调用方是否属于 standalone 或 Live。目标启动器在自己的 bridge 上新建会话、发送 prompt 和等待结果，并应用自己的并发上限和回滚逻辑。完成通知通过调用方的 bridge 投递。
 
-目标从注册表的公开列表中解析。内部 runtime 和 Live conversation runtime 无法被指名。两个 workspace 都必须受信，包括主 workspace。未知或不受信的目标会被拒绝，错误信息会列出可以指名的 workspace。异步初始化完成后，启动器在派发第一条 prompt 前再次核对两边的 runtime generation。
+目标从注册表的公开列表中解析。内部 runtime 和 Live conversation runtime 无法被指名。两个 workspace 都必须受信，包括主 workspace。未知或不受信的目标会被拒绝，错误信息会列出可以指名的 workspace。启动器在派发前复核两边的 runtime generation 和会话审批版本。目标接收 prompt 时也核对实际审批模式。如果模式变更，待派发请求失效，调用方可在新模式下重试。
 
 standalone 和 Live 调用方不能指定 workspace。它们的子会话位于 daemon 自有的目录里，这些目录在另一个 workspace 中没有意义。
 
@@ -52,7 +52,9 @@ standalone 和 Live 调用方不能指定 workspace。它们的子会话位于 d
 
 ### 并发上限与血缘
 
-跨 workspace 的启动计入目标启动器的上限：每个调用方 16 个、每个 workspace 24 个。这些上限是为了防止子会话挤占所在 workspace 的交互会话，而这里那个 workspace 是 B。子会话会把调用方记录为父会话，所以如果它试图再创建子会话，会被深度限制拒绝。完成通知的 task id 是新会话的 id；第 1 步每次启动都会新建会话，所以它是唯一的。
+跨 workspace 的启动计入目标启动器的上限，每个调用方 16 个、每个 workspace 24 个。这些上限保护 B 的交互会话容量。任务结束时先释放 B 的并发槽，再投递结果。A 用自己的 `serve.maxConcurrentSubSessionsTotal` 单独限制待完成的跨 workspace `sent`，每项预留在投递完成或超时后释放。
+
+子会话记录调用方为父会话，深度限制会拒绝子会话继续创建子会话。完成通知的 task id 是新会话的 id，第 1 步每次启动都会新建会话，因此该 id 唯一。
 
 ## 第 2 步：给调用方自己建的会话发后续 prompt（提议）
 
@@ -84,5 +86,5 @@ standalone 和 Live 调用方不能指定 workspace。它们的子会话位于 d
 
 ## 验证（第 1 步）
 
-- 单元测试覆盖按绝对路径和 id 解析，拒绝未知和不受信的目标和调用方，深度限制，在目标 bridge 派发、在调用方 bridge 通知，读取实际审批模式，拒绝不兼容模式，以及目标 runtime 停止时通知取消。
+- 单元测试覆盖按绝对路径和 id 解析，拒绝未知和不受信的目标和调用方，深度限制，在目标 bridge 派发、在调用方 bridge 通知，指定 workspace 时旧授权仍需单次确认，读取实际审批模式，拒绝不兼容模式和启动期间的模式变更，以及目标 runtime 停止时通知取消。
 - 端到端验证使用两个受信 workspace。从 A 在 B 中新建子会话，通过 `first-turn` 读取 B 的 `QWEN.md`，再验证 `sent` 在 A 中收到通知。通过 A 的子会话链接打开 B。指定不受信目标应收到拒绝与可用 workspace 列表。

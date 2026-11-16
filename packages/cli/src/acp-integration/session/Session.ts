@@ -375,6 +375,7 @@ import {
   type BridgeSessionExternalRecordRequest,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
   DAEMON_ATTACHMENT_REFERENCES_META_KEY,
+  DAEMON_EXPECTED_APPROVAL_MODE_META_KEY,
   DAEMON_INPUT_ANNOTATIONS_META_KEY,
   DAEMON_PERMISSION_CANCEL_REASON_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
@@ -5973,6 +5974,20 @@ export class Session implements SessionContext {
     }
   }
 
+  #assertExpectedApprovalMode(params: PromptRequest): void {
+    const expectedMode = params._meta?.[DAEMON_EXPECTED_APPROVAL_MODE_META_KEY];
+    if (
+      expectedMode !== undefined &&
+      expectedMode !== this.config.getApprovalMode()
+    ) {
+      throw new RequestError(
+        -32000,
+        'The session approval mode changed during delegation. Retry the launch.',
+        { errorKind: 'approval_mode_changed' },
+      );
+    }
+  }
+
   async prompt(
     params: PromptRequest,
     invocationContext?: InvocationContextV1,
@@ -5989,6 +6004,7 @@ export class Session implements SessionContext {
         'Invocation context session does not match the active session',
       );
     }
+    this.#assertExpectedApprovalMode(params);
     const managedSessionBlock = this.config.getManagedSessionBlock?.();
     if (managedSessionBlock) {
       throw managedOutcomeUnknownError(managedSessionBlock);
@@ -7140,6 +7156,7 @@ export class Session implements SessionContext {
         if (pendingSend.signal.aborted) {
           return { stopReason: 'cancelled' };
         }
+        this.#assertExpectedApprovalMode(params);
         if (goalTurn?.origin !== 'runtime') this.notificationsPaused = false;
         // Increment turn counter for each user prompt
         this.turn += 1;

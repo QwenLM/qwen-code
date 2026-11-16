@@ -100,7 +100,10 @@ import {
   CHANNEL_WORKFLOW_ORIGIN_META_KEY,
 } from '@qwen-code/channel-base';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
-import { DAEMON_INPUT_ANNOTATIONS_META_KEY } from '@qwen-code/acp-bridge/bridgeTypes';
+import {
+  DAEMON_EXPECTED_APPROVAL_MODE_META_KEY,
+  DAEMON_INPUT_ANNOTATIONS_META_KEY,
+} from '@qwen-code/acp-bridge/bridgeTypes';
 import { EventBus } from '@qwen-code/acp-bridge/eventBus';
 import {
   BridgeClient,
@@ -17177,6 +17180,33 @@ describe('Session', () => {
   });
 
   describe('prompt', () => {
+    it('rejects a delegated mode mismatch after awaited prompt admission', async () => {
+      let mode = ApprovalMode.DEFAULT;
+      vi.mocked(mockConfig.getApprovalMode).mockImplementation(() => mode);
+      vi.spyOn(session, 'assertCanStartTurn')
+        .mockResolvedValueOnce(undefined)
+        .mockImplementationOnce(async () => {
+          mode = ApprovalMode.YOLO;
+        });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      const prompt = (expectedMode: ApprovalMode) =>
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+          _meta: { [DAEMON_EXPECTED_APPROVAL_MODE_META_KEY]: expectedMode },
+        });
+
+      await expect(prompt(ApprovalMode.DEFAULT)).rejects.toThrow(
+        'The session approval mode changed during delegation',
+      );
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      await expect(prompt(ApprovalMode.YOLO)).resolves.toMatchObject({
+        stopReason: 'end_turn',
+      });
+    });
+
     it('anchors approval state before recording the first real user message', async () => {
       const order: string[] = [];
       mockChatRecordingService.recordSessionApprovalMode.mockImplementation(
@@ -23181,6 +23211,131 @@ describe('Session', () => {
         spawn?.({ prompt: 'p', completion: 'first-turn', workspace: 'b-id' }),
       ).resolves.toEqual({ sessionId: 'child-id', workspaceCwd: '/repos/b' });
     });
+
+    it.each([
+      {
+        label: 'Default',
+        mode: ApprovalMode.DEFAULT,
+        asks: true,
+        launches: true,
+      },
+      {
+        label: 'Auto Edit',
+        mode: ApprovalMode.AUTO_EDIT,
+        asks: true,
+        launches: true,
+      },
+      { label: 'Auto', mode: ApprovalMode.AUTO, asks: true, launches: true },
+      { label: 'YOLO', mode: ApprovalMode.YOLO, asks: true, launches: true },
+      { label: 'Plan', mode: ApprovalMode.PLAN, asks: false, launches: false },
+      {
+        label: 'deny rule',
+        mode: ApprovalMode.YOLO,
+        deny: true,
+        asks: false,
+        launches: false,
+      },
+      {
+        label: 'unoffered persistent selection',
+        mode: ApprovalMode.AUTO,
+        persist: true,
+        asks: true,
+        launches: false,
+      },
+      {
+        label: 'omitted workspace',
+        mode: ApprovalMode.DEFAULT,
+        local: true,
+        asks: false,
+        launches: true,
+      },
+    ])(
+      'honors sub-session approval for $label',
+      async ({ mode, deny, local, persist, asks, launches }) => {
+        const workspace = '/repo-b';
+        const toolName = core.ToolNames.CREATE_SUB_SESSION;
+        const args = { prompt: 'summarize', ...(local ? {} : { workspace }) };
+        const spawn = vi.fn().mockResolvedValue({ sessionId: 'child-id' });
+        const persistRule = vi.fn();
+        const pm = new core.PermissionManager({
+          getPermissionsAllow: () => [toolName],
+          getPermissionsAsk: () => [],
+          getPermissionsDeny: () =>
+            deny ? [`${toolName}(workspace:${workspace})`] : [],
+          getApprovalMode: () => mode,
+        });
+        pm.initialize();
+        mockConfig.getCwd = vi.fn(() => '/repo-a');
+        mockConfig.getApprovalMode = vi.fn(() => mode);
+        mockConfig.getPermissionManager = vi.fn(() => pm);
+        mockConfig.getOnPersistPermissionRule = vi.fn(() => persistRule);
+        mockConfig.getSubSessionSpawner = vi.fn(() => spawn);
+        mockConfig.getDisableAllHooks = vi.fn(() => false);
+        mockConfig.getMessageBus = vi.fn().mockReturnValue({});
+        vi.spyOn(core, 'firePreToolUseHook').mockResolvedValue({
+          shouldProceed: true,
+        });
+        const permissionHook = vi
+          .spyOn(core, 'firePermissionRequestHook')
+          .mockResolvedValue({ hasDecision: true, shouldAllow: true });
+        mockToolRegistry.getTool.mockReturnValue(
+          new core.CreateSubSessionTool(mockConfig),
+        );
+        const request = vi.mocked(mockClient.requestPermission);
+        request.mockResolvedValueOnce({
+          outcome: {
+            outcome: 'selected',
+            optionId: persist
+              ? core.ToolConfirmationOutcome.ProceedAlwaysProject
+              : core.ToolConfirmationOutcome.ProceedOnce,
+          },
+        });
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  { id: 'call-sub-session', name: toolName, args },
+                ],
+              },
+            },
+          ]),
+        );
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'Delegate' }],
+        });
+
+        expect(permissionHook).toHaveBeenCalledTimes(asks ? 1 : 0);
+        expect(request).toHaveBeenCalledTimes(asks ? 1 : 0);
+        if (asks) {
+          const { options, toolCall } = request.mock.calls[0]![0];
+          expect(toolCall.rawInput).toEqual(args);
+          expect(
+            options.map((option: PermissionOption) => option.optionId),
+          ).toEqual([
+            core.ToolConfirmationOutcome.ProceedOnce,
+            core.ToolConfirmationOutcome.Cancel,
+          ]);
+        }
+        if (launches) {
+          expect(spawn).toHaveBeenCalledExactlyOnceWith({
+            ...args,
+            completion: 'first-turn',
+          });
+          if (asks) {
+            expect(request.mock.invocationCallOrder[0]).toBeLessThan(
+              spawn.mock.invocationCallOrder[0],
+            );
+          }
+        } else {
+          expect(spawn).not.toHaveBeenCalled();
+        }
+        expect(persistRule).not.toHaveBeenCalled();
+      },
+    );
 
     it('registers the create_sub_session tool on the daemon session registry', async () => {
       // The tool is daemon-only: it must exist on every session the daemon

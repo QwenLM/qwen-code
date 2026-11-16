@@ -36,7 +36,10 @@ import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type { Config } from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
-import { MAX_SUB_SESSION_PROMPT_CHARS } from './sub-session-constants.js';
+import {
+  MAX_SUB_SESSION_PROMPT_CHARS,
+  MAX_SUB_SESSION_WORKSPACE_CHARS,
+} from './sub-session-constants.js';
 import {
   isValidCronTaskRoutingId,
   MAX_CRON_TASK_ROUTING_ID_LENGTH,
@@ -51,9 +54,6 @@ export interface CreateSubSessionParams {
   name?: string;
   workspace?: string;
 }
-
-/** A workspace path or id; paths stay well under this on every platform. */
-const MAX_WORKSPACE_CHARS = 4096;
 
 const DAEMON_ONLY_MESSAGE =
   'create_sub_session is only available when running under `qwen serve` ' +
@@ -137,19 +137,24 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
     return 'ask';
   }
 
+  override requiresUserInteraction(): boolean {
+    return this.params.workspace !== undefined;
+  }
+
   override async getConfirmationDetails(
     abortSignal: AbortSignal,
   ): Promise<ToolCallConfirmationDetails> {
     if (this.params.workspace === undefined) {
       return super.getConfirmationDetails(abortSignal);
     }
-    // An explicit destination runs work in another context. The generic
-    // info confirmation would let Auto Edit approve the delegation silently.
     return {
       type: 'exec',
       title: this.getDescription(),
       command: this.params.prompt.trim(),
       rootCommand: ToolNames.CREATE_SUB_SESSION,
+      // A tool-wide rule cannot record which workspace the user approved.
+      hideAlwaysAllow: true,
+      permissionRules: [],
       onConfirm: async () => {},
     };
   }
@@ -285,8 +290,9 @@ export class CreateSubSessionTool extends BaseDeclarativeTool<
         '## Another workspace\n' +
         'Set `workspace` to run the sub-session in another workspace ' +
         "registered with this daemon, with that workspace's own instructions, " +
-        'skills and settings. Both workspaces must be trusted; an unknown ' +
-        'name is refused with the list of workspaces you can use.\n\n' +
+        'skills and settings. The user approves each call that names a ' +
+        'workspace. Both workspaces must be trusted; an unknown name is ' +
+        'refused with the list of workspaces you can use.\n\n' +
         'The sub-session runs the prompt with full tool access, starting from ' +
         'zero context — brief it completely in `prompt` (it cannot see this ' +
         'conversation).',
@@ -372,7 +378,7 @@ export class CreateSubSessionTool extends BaseDeclarativeTool<
       params.workspace !== undefined &&
       !isValidWorkspaceSelector(params.workspace)
     ) {
-      return `Parameter "workspace" must be a non-empty string of at most ${MAX_WORKSPACE_CHARS} characters without control characters.`;
+      return `Parameter "workspace" must be a non-empty string of at most ${MAX_SUB_SESSION_WORKSPACE_CHARS} characters without control characters.`;
     }
     return null;
   }
@@ -398,7 +404,7 @@ export class CreateSubSessionTool extends BaseDeclarativeTool<
 function isValidWorkspaceSelector(value: string): boolean {
   return (
     value.trim().length > 0 &&
-    value.length <= MAX_WORKSPACE_CHARS &&
+    value.length <= MAX_SUB_SESSION_WORKSPACE_CHARS &&
     // eslint-disable-next-line no-control-regex -- rejecting C0 control chars
     !/[\x00-\x1f\x7f]/.test(value)
   );

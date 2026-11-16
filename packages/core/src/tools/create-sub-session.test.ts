@@ -57,18 +57,22 @@ describe('CreateSubSessionTool', () => {
     );
   });
 
-  it('uses an execution confirmation for an explicit workspace', async () => {
+  it('requires one-shot approval only for an explicit workspace', async () => {
     const tool = new CreateSubSessionTool(makeConfig());
     const signal = new AbortController().signal;
     const remote = tool.build({ prompt: 'do X', workspace: '/repos/b' });
     const local = tool.build({ prompt: 'do X' });
 
+    expect(remote.requiresUserInteraction?.()).toBe(true);
     expect(await remote.getConfirmationDetails(signal)).toMatchObject({
       type: 'exec',
       title: '[first-turn] in /repos/b: do X',
       command: 'do X',
+      hideAlwaysAllow: true,
+      permissionRules: [],
     });
     expect(await remote.getDefaultPermission()).toBe('ask');
+    expect(local.requiresUserInteraction?.()).toBe(false);
     expect(await local.getConfirmationDetails(signal)).toMatchObject({
       type: 'info',
     });

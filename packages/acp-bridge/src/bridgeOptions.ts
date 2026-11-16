@@ -15,7 +15,10 @@ import type {
   ApprovalMode,
   DaemonBridgeTelemetryMetrics,
 } from '@qwen-code/qwen-code-core';
-import { MAX_SUB_SESSION_PROMPT_CHARS } from '@qwen-code/qwen-code-core/subSessionConstants';
+import {
+  MAX_SUB_SESSION_PROMPT_CHARS,
+  MAX_SUB_SESSION_WORKSPACE_CHARS,
+} from '@qwen-code/qwen-code-core/subSessionConstants';
 import type { SessionExecutionEngine } from '@qwen-code/qwen-code-core/services/session-execution-engine.js';
 import type { ChannelFactory } from './channel.js';
 import type { PermissionPolicy } from './permission.js';
@@ -737,16 +740,13 @@ export type ClientMcpMessageSender = (
   | ((payload: unknown, context?: ClientMcpMessageContext) => Promise<unknown>)
   | undefined;
 
-/** Ceiling on a sub-session prompt arriving over `extMethod`. The child is a
+/** Ceilings on sub-session arguments arriving over `extMethod`. The child is a
  * separate process, so this trust boundary keeps its own enforcement. */
-export { MAX_SUB_SESSION_PROMPT_CHARS };
+export { MAX_SUB_SESSION_PROMPT_CHARS, MAX_SUB_SESSION_WORKSPACE_CHARS };
 
 /** Ceiling on the sub-session display name. It is a label — the launcher
  * truncates it to 60 chars for display anyway. */
 export const MAX_SUB_SESSION_NAME_CHARS = 200;
-
-/** Ceiling on a sub-session request's `workspace` selector (a path or id). */
-export const MAX_SUB_SESSION_WORKSPACE_CHARS = 4096;
 
 /**
  * Payload the bridge forwards to {@link BridgeOptions.onCreateSubSession} when

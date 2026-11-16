@@ -2802,6 +2802,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         'qwen-code/invocation': invocation,
         'qwen-code/private-parent-capability': 'must-not-propagate',
         'qwen.daemon.modelPrompt': 'trusted model-only prompt',
+        'qwen.daemon.expectedApprovalMode': 'default',
         'qwen.daemon.promptDisplayText': 'trusted display text',
         'qwen.channel.prompt': true,
         'qwen.goalProposalApproval': true,
@@ -2818,6 +2819,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         prompt: [{ type: 'text', text: 'hello' }],
         _meta: {
           keep: true,
+          'qwen.daemon.expectedApprovalMode': 'default',
           'qwen.daemon.promptDisplayText': 'trusted display text',
           'qwen.channel.prompt': true,
           'qwen.goalProposalApproval': true,
@@ -3427,6 +3429,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         },
         'qwen-code/private-parent-capability': 'forged-capability',
         'qwen.daemon.modelPrompt': 'forged model-only prompt',
+        'qwen.daemon.expectedApprovalMode': 'plan',
         'qwen.daemon.promptDisplayText': 'forged display text',
         'qwen.daemon.submittedPrompt': 'forged submission',
       },

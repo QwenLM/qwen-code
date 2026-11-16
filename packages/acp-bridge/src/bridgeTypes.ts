@@ -1418,6 +1418,8 @@ export interface BridgeClientRequestContext {
   onPromptAdmitted?: () => void;
   /** Internal authorization check immediately before forwarding a queued prompt. */
   assertCanDispatch?: () => void;
+  /** Approval mode the trusted ACP child must still have at prompt admission. */
+  expectedApprovalMode?: ApprovalMode;
   /**
    * Internal model input that replaces the public prompt only inside the
    * trusted ACP child. The bridge still echoes and persists `PromptRequest`
@@ -1481,6 +1483,8 @@ export interface BridgeClientRequestContext {
 }
 
 export const DAEMON_MODEL_PROMPT_META_KEY = 'qwen.daemon.modelPrompt';
+export const DAEMON_EXPECTED_APPROVAL_MODE_META_KEY =
+  'qwen.daemon.expectedApprovalMode';
 export const DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY =
   'qwen.daemon.restoreAskUserQuestion';
 export const DAEMON_RESTORE_MANAGED_APPROVAL_META_KEY =
@@ -2603,6 +2607,9 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   getSessionContextStatus(
     sessionId: string,
   ): Promise<ServeSessionContextStatus>;
+
+  /** Capture a guard for a live approval-mode read used by the daemon. */
+  captureSessionApprovalModeGuard(sessionId: string): () => void;
 
   /** Read structured context-window usage for a live session. */
   getSessionContextUsageStatus(

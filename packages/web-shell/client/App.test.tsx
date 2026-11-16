@@ -12592,6 +12592,7 @@ function makePendingPermissionBlock(
       raw: Record<string, unknown>;
     }>;
     content?: unknown[];
+    rawInput?: Record<string, unknown>;
   } = {},
 ): unknown {
   const toolName = overrides.toolName ?? 'run_shell_command';
@@ -12610,6 +12611,7 @@ function makePendingPermissionBlock(
         ...(overrides.todoPlan ? { qwenTodoApproval: overrides.todoPlan } : {}),
       },
       ...(overrides.content ? { content: overrides.content } : {}),
+      ...(overrides.rawInput ? { rawInput: overrides.rawInput } : {}),
       ...(isAskUser
         ? { input: { questions: [{ question: 'Pick one', options: [] }] } }
         : {}),
@@ -37544,6 +37546,33 @@ describe('App session callbacks', () => {
     await flush();
     expect(firstHandler).not.toHaveBeenCalled();
     expect(secondHandler).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a named sub-session approval pending when switching to yolo', async () => {
+    testState.blocks = [
+      makePendingPermissionBlock({
+        toolName: 'create_sub_session',
+        kind: 'other',
+        rawInput: { workspace: '/repos/b' },
+        options: [
+          {
+            optionId: 'proceed_once',
+            label: 'Allow',
+            raw: { kind: 'allow_once' },
+          },
+        ],
+      }),
+    ];
+    renderApp();
+    await flush();
+    await act(async () => {
+      testState.latestChatEditorProps?.onSelectMode?.('yolo');
+    });
+
+    expect(mockSessionActions.setApprovalMode).toHaveBeenCalledWith('yolo', {
+      planMode: false,
+    });
+    expect(mockSessionActions.submitPermission).not.toHaveBeenCalled();
   });
 
   it.each(['default', 'auto-edit', 'auto', 'yolo'])(

@@ -84,12 +84,16 @@ function makeFakeBridge(opts?: {
   closeSessionHangs?: boolean;
   /** Accepted acknowledgements returned by successive completion deliveries. */
   notificationAcks?: boolean[];
+  beforeNotificationAck?: () => Promise<void>;
+  canAcceptBackgroundNotifications?: boolean;
   /** Persisted parent lineage for callers restored after a daemon restart. */
   restoredCallerParents?: Readonly<Record<string, string>>;
   callerSourceTypes?: Readonly<Record<string, string>>;
   /** Effective approval modes reported by the live ACP session. */
   approvalModes?: Record<string, string>;
+  defaultMode?: string;
   beforeModeChange?: () => Promise<void>;
+  beforePromptDispatch?: () => void;
 }) {
   const spawns: Array<{
     workspaceCwd: string;
@@ -97,8 +101,12 @@ function makeFakeBridge(opts?: {
     modelServiceId?: string;
     parentSessionId?: string;
   }> = [];
-  const prompts: Array<{ sessionId: string; promptId?: string; text: string }> =
-    [];
+  const prompts: Array<{
+    sessionId: string;
+    promptId?: string;
+    text: string;
+    expectedApprovalMode?: ApprovalMode;
+  }> = [];
   const names: Array<{
     sessionId: string;
     displayName?: string;
@@ -136,11 +144,33 @@ function makeFakeBridge(opts?: {
   let n = 0;
   let parentRestored = false;
   let notificationAttempt = 0;
+  const approvalModes = new Map(Object.entries(opts?.approvalModes ?? {}));
+  const approvalRevisions = new Map<string, number>();
+  const changeApprovalMode = (id: string, mode: string) => {
+    approvalModes.set(id, mode);
+    approvalRevisions.set(id, (approvalRevisions.get(id) ?? 0) + 1);
+  };
 
   const bridge = {
     getSessionContextStatus: vi.fn(async (sessionId: string) => ({
-      state: { modes: { currentModeId: opts?.approvalModes?.[sessionId] } },
+      state: {
+        modes: {
+          currentModeId: approvalModes.get(sessionId) ?? opts?.defaultMode,
+        },
+      },
+      canAcceptBackgroundNotifications:
+        opts?.canAcceptBackgroundNotifications ?? true,
     })),
+    captureSessionApprovalModeGuard: (sessionId: string) => {
+      const revision = approvalRevisions.get(sessionId);
+      return () => {
+        if (approvalRevisions.get(sessionId) !== revision) {
+          throw new Error(
+            'The session approval mode changed during delegation',
+          );
+        }
+      };
+    },
     setSessionApprovalMode: async (
       sessionId: string,
       mode: string,
@@ -150,6 +180,7 @@ function makeFakeBridge(opts?: {
       await opts?.beforeModeChange?.();
       operations.push(`mode:${sessionId}`);
       modeChanges.push({ sessionId, mode });
+      changeApprovalMode(sessionId, mode);
       return { sessionId, mode, previous: 'auto', persisted: false };
     },
     getSessionSummary: (sessionId: string) => ({
@@ -244,13 +275,23 @@ function makeFakeBridge(opts?: {
       sessionId: string,
       req: { prompt: Array<{ type: string; text?: string }> },
       _signal: unknown,
-      ctx?: { promptId?: string; onPromptAdmitted?: () => void },
+      ctx?: {
+        promptId?: string;
+        onPromptAdmitted?: () => void;
+        assertCanDispatch?: () => void;
+        expectedApprovalMode?: ApprovalMode;
+      },
     ) => {
       capturedPromptId = ctx?.promptId ?? '';
+      opts?.beforePromptDispatch?.();
+      ctx?.assertCanDispatch?.();
       prompts.push({
         sessionId,
         promptId: capturedPromptId,
         text: req.prompt.map((p) => p.text ?? '').join(''),
+        ...(ctx?.expectedApprovalMode
+          ? { expectedApprovalMode: ctx.expectedApprovalMode }
+          : {}),
       });
       if (opts?.sendPromptRejects) {
         return Promise.reject(new Error(opts.sendPromptRejects));
@@ -284,6 +325,7 @@ function makeFakeBridge(opts?: {
       if (sessionId === opts?.reapedParentSessionId && !parentRestored) {
         throw new SessionNotFoundError(sessionId);
       }
+      await opts?.beforeNotificationAck?.();
       const accepted = opts?.notificationAcks?.[notificationAttempt++] ?? true;
       if (accepted) notifications.push({ sessionId, notification });
       return { sessionId, accepted };
@@ -354,6 +396,7 @@ function makeFakeBridge(opts?: {
     parentObserverClosures,
     subscriptions,
     modeChanges,
+    changeApprovalMode,
     subscribeCalls: () => subscribeCalls,
   };
 }
@@ -2205,8 +2248,15 @@ describe('sub-sessions in another workspace', () => {
     events?: (promptId: string) => FakeEvent[];
     blockAfterEvents?: boolean;
     beforeModeChange?: () => Promise<void>;
+    beforePromptDispatch?: () => void;
+    beforeNotificationAck?: () => Promise<void>;
+    canAcceptBackgroundNotifications?: boolean;
+    sourceCap?: number;
+    targetCap?: number;
   }) {
     const a = makeFakeBridge({
+      beforeNotificationAck: opts?.beforeNotificationAck,
+      canAcceptBackgroundNotifications: opts?.canAcceptBackgroundNotifications,
       approvalModes:
         opts?.callerMode === null
           ? {}
@@ -2219,15 +2269,17 @@ describe('sub-sessions in another workspace', () => {
         : {}),
     });
     const b = makeFakeBridge({
-      approvalModes:
-        opts?.childMode === null ? {} : { 'sub-1': opts?.childMode ?? 'yolo' },
+      defaultMode:
+        opts?.childMode === null ? undefined : (opts?.childMode ?? 'yolo'),
       events: opts?.events ?? ((pid) => [chunk('from b'), turnComplete(pid)]),
       blockAfterEvents: opts?.blockAfterEvents,
       beforeModeChange: opts?.beforeModeChange,
+      beforePromptDispatch: opts?.beforePromptDispatch,
     });
     const launcherB = createSubSessionLauncher({
       getBridge: () => b.bridge,
       boundWorkspace: WS_B,
+      maxConcurrentTotal: opts?.targetCap,
     });
     let targetActive = true;
     const assertTargetCurrent = () => {
@@ -2238,6 +2290,7 @@ describe('sub-sessions in another workspace', () => {
     const launcherA = createSubSessionLauncher({
       getBridge: () => a.bridge,
       boundWorkspace: WS_A,
+      maxConcurrentTotal: opts?.sourceCap,
       isTrusted: () => opts?.callerTrusted ?? true,
       resolveWorkspace: (selector) =>
         selector === WS_B
@@ -2312,7 +2365,11 @@ describe('sub-sessions in another workspace', () => {
     expect(b.bridge.getSessionContextStatus).toHaveBeenCalledWith('sub-1');
     expect(b.modeChanges).toEqual([{ sessionId: 'sub-1', mode: 'default' }]);
     expect(b.prompts).toEqual([
-      expect.objectContaining({ sessionId: 'sub-1', text: 'read QWEN.md' }),
+      expect.objectContaining({
+        sessionId: 'sub-1',
+        text: 'read QWEN.md',
+        expectedApprovalMode: ApprovalMode.DEFAULT,
+      }),
     ]);
   });
 
@@ -2398,6 +2455,79 @@ describe('sub-sessions in another workspace', () => {
     );
     expect(b.prompts).toEqual([]);
     expect(b.closes).toEqual(['sub-1']);
+  });
+
+  it.each(['caller', 'child'] as const)(
+    'refuses dispatch when the %s approval revision changes in the queue',
+    async (changedSession) => {
+      const { a, b, launcherA } = twoWorkspaces({
+        beforePromptDispatch() {
+          if (changedSession === 'caller')
+            a.changeApprovalMode('caller', 'plan');
+          else b.changeApprovalMode('sub-1', 'yolo');
+        },
+      });
+      await expect(
+        launcherA.launch({
+          prompt: 'read QWEN.md',
+          completion: 'first-turn',
+          workspace: WS_B,
+          callerSessionId: 'caller',
+        }),
+      ).rejects.toThrow('approval mode changed during delegation');
+      expect(b.prompts).toEqual([]);
+      expect(b.closes).toEqual(['sub-1']);
+    },
+  );
+
+  it('requires recording for remote sent but permits waiting for the first turn', async () => {
+    const { b, launcherA } = twoWorkspaces({
+      canAcceptBackgroundNotifications: false,
+    });
+    const input = { prompt: 'p', workspace: WS_B, callerSessionId: 'caller' };
+    await expect(
+      launcherA.launch({ ...input, completion: 'sent' }),
+    ).rejects.toThrow('requires chat recording');
+    expect(b.spawns).toEqual([]);
+    await expect(
+      launcherA.launch({ ...input, completion: 'first-turn' }),
+    ).resolves.toMatchObject({ result: 'from b' });
+  });
+
+  it('releases target slots before delivery and bounds pending notices at the source', async () => {
+    let acknowledge!: () => void;
+    const acknowledged = new Promise<void>((resolve) => {
+      acknowledge = resolve;
+    });
+    const beforeNotificationAck = vi.fn(() => acknowledged);
+    const { a, b, launcherA } = twoWorkspaces({
+      beforeNotificationAck,
+      sourceCap: 2,
+      targetCap: 1,
+    });
+    const input = {
+      prompt: 'p',
+      workspace: WS_B,
+      callerSessionId: 'caller',
+      completion: 'sent' as const,
+    };
+    await launcherA.launch(input);
+    await vi.waitFor(() =>
+      expect(beforeNotificationAck).toHaveBeenCalledTimes(1),
+    );
+    await launcherA.launch(input);
+    await vi.waitFor(() =>
+      expect(beforeNotificationAck).toHaveBeenCalledTimes(2),
+    );
+    await expect(launcherA.launch(input)).rejects.toThrow(
+      'Too many pending cross-workspace completions',
+    );
+    expect(b.spawns).toHaveLength(2);
+    acknowledge();
+    await vi.waitFor(() => expect(a.notifications).toHaveLength(2));
+    await expect(launcherA.launch(input)).resolves.toMatchObject({
+      sessionId: 'sub-3',
+    });
   });
 
   it('runs locally when the named workspace is the caller own', async () => {

@@ -169,6 +169,7 @@ import {
   CHANNEL_WORKFLOW_ORIGIN_META_KEY,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
   DAEMON_ATTACHMENT_REFERENCES_META_KEY,
+  DAEMON_EXPECTED_APPROVAL_MODE_META_KEY,
   DAEMON_INPUT_ANNOTATIONS_META_KEY,
   DAEMON_MODEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
@@ -11564,17 +11565,7 @@ export function createSessionControlPlane(
       });
       const isQueued = entry.pendingPromptCount > 1;
       const pendingAbort = new AbortController();
-      if (signal) {
-        if (signal.aborted) {
-          pendingAbort.abort(signal.reason);
-        } else {
-          signal.addEventListener(
-            'abort',
-            () => pendingAbort.abort(signal.reason),
-            { once: true },
-          );
-        }
-      }
+      const onCallerAbort = () => pendingAbort.abort(signal?.reason);
       const channelDisplayText = getChannelPromptDisplayText(
         entry,
         context?.promptDisplayText,
@@ -11886,6 +11877,7 @@ export function createSessionControlPlane(
                       context.submittedPrompt;
                   }
                   delete meta[DAEMON_MODEL_PROMPT_META_KEY];
+                  delete meta[DAEMON_EXPECTED_APPROVAL_MODE_META_KEY];
                   delete meta[DAEMON_ATTACHMENT_REFERENCES_META_KEY];
                   // Channel classification is authenticated channel-worker
                   // metadata; the daemon prompt route validates the worker
@@ -11926,6 +11918,10 @@ export function createSessionControlPlane(
                   }
                   if (modelPrompt !== undefined) {
                     meta[DAEMON_MODEL_PROMPT_META_KEY] = modelPrompt;
+                  }
+                  if (context?.expectedApprovalMode !== undefined) {
+                    meta[DAEMON_EXPECTED_APPROVAL_MODE_META_KEY] =
+                      context.expectedApprovalMode;
                   }
                   const attachmentReferences = dispatchBlocks.filter(
                     isSessionAttachmentReference,
@@ -12233,6 +12229,7 @@ export function createSessionControlPlane(
       );
       result
         .finally(() => {
+          signal?.removeEventListener('abort', onCallerAbort);
           if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
           // Remove this prompt from the pending list and publish a
           // completed event so SSE subscribers can update their queue view.
@@ -12293,6 +12290,16 @@ export function createSessionControlPlane(
           drainQuarantinedChannelFor(entry);
         })
         .catch(() => {});
+      // Arm only after synchronous admission succeeds. The signal may have
+      // aborted in an admission callback, before the queued work can run.
+      if (signal?.aborted) {
+        onCallerAbort();
+      } else {
+        signal?.addEventListener('abort', onCallerAbort, {
+          once: true,
+          signal: pendingAbort.signal,
+        });
+      }
       return result;
     },
 
@@ -14303,6 +14310,25 @@ export function createSessionControlPlane(
         sessionId,
         SERVE_STATUS_EXT_METHODS.sessionContext,
       );
+    },
+
+    captureSessionApprovalModeGuard(sessionId) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const generation = entry.approvalModePublishGeneration;
+      const assertCurrent = () => {
+        assertLivePromptEntry(sessionId, entry);
+        if (
+          entry.approvalModeRoundtripInFlight ||
+          entry.approvalModePublishGeneration !== generation
+        ) {
+          throw new Error(
+            'The session approval mode changed during delegation. Retry the launch.',
+          );
+        }
+      };
+      assertCurrent();
+      return assertCurrent;
     },
 
     async getSessionContextUsageStatus(sessionId, opts) {

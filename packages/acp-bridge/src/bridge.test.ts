@@ -6,6 +6,7 @@
 
 import { afterEach, describe, it, expect, onTestFinished, vi } from 'vitest';
 import { randomBytes } from 'node:crypto';
+import { getEventListeners } from 'node:events';
 import { promises as fsp } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -112,6 +113,7 @@ import {
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
   DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY,
+  DAEMON_EXPECTED_APPROVAL_MODE_META_KEY,
   DAEMON_MODEL_PROMPT_META_KEY,
   WORKTREE_MCP_DEFER_META_KEY,
   LOAD_REPLAY_HIDE_INHERITED_META_KEY,
@@ -17235,6 +17237,7 @@ describe('createAcpSessionBridge', () => {
             'qwen-code/invocation': forgedInvocation,
             'qwen-code/private-parent-capability': 'forged-capability',
             [DAEMON_MODEL_PROMPT_META_KEY]: forgedModelPrompt,
+            [DAEMON_EXPECTED_APPROVAL_MODE_META_KEY]: 'yolo',
           },
         },
         undefined,
@@ -17242,6 +17245,7 @@ describe('createAcpSessionBridge', () => {
           clientId: session.clientId,
           promptId: 'server-prompt',
           modelPrompt: trustedModelPrompt,
+          expectedApprovalMode: ApprovalMode.DEFAULT,
         },
       );
 
@@ -17254,6 +17258,7 @@ describe('createAcpSessionBridge', () => {
           originatorClientId: session.clientId,
         },
         [DAEMON_MODEL_PROMPT_META_KEY]: trustedModelPrompt,
+        [DAEMON_EXPECTED_APPROVAL_MODE_META_KEY]: ApprovalMode.DEFAULT,
       });
       expect(
         handle.agent.promptCalls[0]?._meta?.['qwen-code/invocation'],
@@ -17272,13 +17277,21 @@ describe('createAcpSessionBridge', () => {
         {
           sessionId: session.sessionId,
           prompt: [{ type: 'text', text: 'spoof-only' }],
-          _meta: { [DAEMON_MODEL_PROMPT_META_KEY]: forgedModelPrompt },
+          _meta: {
+            [DAEMON_MODEL_PROMPT_META_KEY]: forgedModelPrompt,
+            [DAEMON_EXPECTED_APPROVAL_MODE_META_KEY]: 'yolo',
+          },
         },
         undefined,
         { clientId: session.clientId, promptId: 'spoof-only-prompt' },
       );
       expect(
         handle.agent.promptCalls[1]?._meta?.[DAEMON_MODEL_PROMPT_META_KEY],
+      ).toBeUndefined();
+      expect(
+        handle.agent.promptCalls[1]?._meta?.[
+          DAEMON_EXPECTED_APPROVAL_MODE_META_KEY
+        ],
       ).toBeUndefined();
 
       await bridge.shutdown();
@@ -19735,11 +19748,12 @@ describe('createAcpSessionBridge', () => {
       const { channel, agent } = makeChannel();
       const bridge = makeBridge({ channelFactory: async () => channel });
       const { sessionId } = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const caller = new AbortController();
       let active = true;
       const prompt = bridge.sendPrompt(
         sessionId,
         { sessionId, prompt: [{ type: 'text', text: 'hello' }] },
-        undefined,
+        caller.signal,
         {
           onPromptAdmitted: () => {
             active = false;
@@ -19750,8 +19764,25 @@ describe('createAcpSessionBridge', () => {
         },
       );
       await expect(prompt).rejects.toThrow('Runtime is no longer active');
+      expect(getEventListeners(caller.signal, 'abort')).toHaveLength(0);
       expect(agent.promptCalls).toEqual([]);
       await bridge.shutdown();
+    });
+
+    it('detaches the caller abort listener when the prompt completes', async () => {
+      const { channel } = makeChannel();
+      const bridge = makeBridge({ channelFactory: async () => channel });
+      onTestFinished(() => bridge.shutdown());
+      const { sessionId } = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const caller = new AbortController();
+      const prompt = bridge.sendPrompt(
+        sessionId,
+        { sessionId, prompt: [{ type: 'text', text: 'hello' }] },
+        caller.signal,
+      );
+      expect(getEventListeners(caller.signal, 'abort')).toHaveLength(1);
+      await expect(prompt).resolves.toMatchObject({ stopReason: 'end_turn' });
+      expect(getEventListeners(caller.signal, 'abort')).toHaveLength(0);
     });
 
     it('FIFO-serializes concurrent prompts on the same session', async () => {
@@ -21477,13 +21508,14 @@ describe('createAcpSessionBridge', () => {
         undefined,
         { promptId: 'prompt-running' },
       );
+      const caller = new AbortController();
       const p2 = bridge.sendPrompt(
         session.sessionId,
         {
           sessionId: session.sessionId,
           prompt: [{ type: 'text', text: 'to be removed' }],
         },
-        undefined,
+        caller.signal,
         { promptId: 'prompt-removed' },
       );
 
@@ -21518,6 +21550,7 @@ describe('createAcpSessionBridge', () => {
       try {
         const result = bridge.removePendingPrompt(session.sessionId, queuedId!);
         expect(result.removed).toBe(true);
+        expect(getEventListeners(caller.signal, 'abort')).toHaveLength(0);
         expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(1);
         await vi.waitFor(() => {
           expect(handle.agent.extMethodCalls).toContainEqual({
@@ -30613,6 +30646,77 @@ describe('createAcpSessionBridge', () => {
       expect(res.persisted).toBe(false);
       expect(res.mode).toBe('yolo');
       await bridge.shutdown();
+    });
+
+    it('invalidates a captured approval-mode guard only for the changing session', async () => {
+      let markChangeStarted!: () => void;
+      const changeStarted = new Promise<void>((resolve) => {
+        markChangeStarted = resolve;
+      });
+      let finishChange!: () => void;
+      const changeFinished = new Promise<void>((resolve) => {
+        finishChange = resolve;
+      });
+      const { channel, agent } = makeChannel({
+        extMethodImpl: async (method) => {
+          if (method !== 'qwen/control/session/approval_mode') return {};
+          markChangeStarted();
+          await changeFinished;
+          return { previous: 'default', current: 'yolo' };
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => channel,
+        persistApprovalMode: async () => {},
+      });
+      onTestFinished(() => bridge.shutdown());
+      const { sessionId } = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      const peer = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      const guard = bridge.captureSessionApprovalModeGuard(sessionId);
+      const peerGuard = bridge.captureSessionApprovalModeGuard(peer.sessionId);
+      const request = {
+        sessionId,
+        prompt: [{ type: 'text' as const, text: 'hello' }],
+      };
+      const modeChanged = 'The session approval mode changed during delegation';
+
+      const change = bridge.setSessionApprovalMode(
+        sessionId,
+        ApprovalMode.YOLO,
+        {
+          persist: true,
+        },
+      );
+      try {
+        await changeStarted;
+        expect(() => bridge.captureSessionApprovalModeGuard(sessionId)).toThrow(
+          modeChanged,
+        );
+        await expect(
+          bridge.sendPrompt(sessionId, request, undefined, {
+            assertCanDispatch: guard,
+          }),
+        ).rejects.toThrow(modeChanged);
+        expect(agent.promptCalls).toEqual([]);
+      } finally {
+        finishChange();
+      }
+
+      await expect(change).resolves.toMatchObject({ persisted: true });
+      expect(guard).toThrow(modeChanged);
+      expect(peerGuard).not.toThrow();
+      const freshGuard = bridge.captureSessionApprovalModeGuard(sessionId);
+      await expect(
+        bridge.sendPrompt(sessionId, request, undefined, {
+          assertCanDispatch: freshGuard,
+        }),
+      ).resolves.toMatchObject({ stopReason: 'end_turn' });
     });
 
     it('serializes concurrent approval-mode changes through the per-session queue (A3)', async () => {
