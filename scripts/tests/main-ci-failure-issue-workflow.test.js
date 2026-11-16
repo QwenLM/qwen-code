@@ -131,7 +131,7 @@ describe('main CI failure issue workflow', () => {
     // only on main: the gate workflows cancel their own in-progress PR runs,
     // so an unscoped `cancelled` reports a superseded run as a timeout.
     expect(workflow).toContain(
-      "contains(fromJSON('[\"failure\",\"cancelled\"]'), github.event.workflow_run.conclusion)",
+      'contains(fromJSON(\'["failure","cancelled"]\'), github.event.workflow_run.conclusion)',
     );
     expect(workflow).toContain(
       "github.event.workflow_run.head_branch == 'main'",
