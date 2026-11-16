@@ -317,14 +317,40 @@ function estimateInlineImageTokens(
  * Static forms continue on the resolution path.
  */
 function isPotentiallyAnimated(bytes: Uint8Array, mime: string): boolean {
-  if (mime === 'image/gif') {
+  // Keyed on magic bytes, not the mime label (#17321 F3): a text file
+  // labeled image/gif must not reach the GIF parser, and a PNG must be
+  // checked for APNG animation chunks regardless of the label.
+  if (isGifBytes(bytes)) {
     // GIF is always flat: counting image descriptors (0x2C) by byte scan
-    // is wrong in both directions — 0x2C appears in palette data and
-    // comments (false positive on static GIFs), while compact animated
-    // frames can have descriptors beyond the 4 KiB window (false
-    // negative). Frame counting needs a real parser, not a heuristic
+    // is wrong in both directions. Frame counting needs a real parser
     // (#17321 R1-1).
     return true;
+  }
+  if (isPngBytes(bytes)) {
+    // APNG has an acTL (animation control) chunk before IDAT — a
+    // structural marker, not a heuristic. Without it, a PNG is static
+    // and takes the resolution path (#17321 F1).
+    const limit = Math.min(bytes.length, 1024);
+    for (let i = 8; i < limit - 4; i++) {
+      if (
+        bytes[i] === 0x61 &&
+        bytes[i + 1] === 0x63 &&
+        bytes[i + 2] === 0x54 &&
+        bytes[i + 3] === 0x4c // 'acTL'
+      ) {
+        return true;
+      }
+      // Stop at IDAT — acTL must appear before the image data.
+      if (
+        bytes[i] === 0x49 &&
+        bytes[i + 1] === 0x44 &&
+        bytes[i + 2] === 0x41 &&
+        bytes[i + 3] === 0x54 // 'IDAT'
+      ) {
+        return false;
+      }
+    }
+    return false;
   }
   if (mime === 'image/webp' && bytes.length > 16) {
     // VP8X flags byte at payload offset 0: bit 1 (value 2) is ANIM —
@@ -335,7 +361,28 @@ function isPotentiallyAnimated(bytes: Uint8Array, mime: string): boolean {
     }
     return false;
   }
-  return false;
+  // Mime-level fallback for formats without magic-byte checks above.
+  return mime === 'image/gif';
+}
+
+function isGifBytes(b: Uint8Array): boolean {
+  return (
+    b.length > 6 &&
+    b[0] === 0x47 &&
+    b[1] === 0x49 &&
+    b[2] === 0x46 && // 'GIF'
+    b[3] === 0x38 // '8' (87a or 89a)
+  );
+}
+
+function isPngBytes(b: Uint8Array): boolean {
+  return (
+    b.length > 8 &&
+    b[0] === 0x89 &&
+    b[1] === 0x50 &&
+    b[2] === 0x4e &&
+    b[3] === 0x47 // PNG sig
+  );
 }
 
 export function estimateContentChars(
