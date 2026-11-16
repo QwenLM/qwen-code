@@ -2383,6 +2383,28 @@ describe('home .env with the global dir in the XDG config directory', () => {
     expect(process.env['QWEN_RUNTIME_DIR']).toBe(runtimeDir);
   });
 
+  it('pre-resolves a leftover ~/.qwen/.env before ~/.env, in the loader order', () => {
+    fs.mkdirSync(xdgDir(), { recursive: true });
+    fs.writeFileSync(path.join(xdgDir(), '.qwen-global-dir'), '');
+    const legacyDir = path.join(os.homedir(), '.qwen');
+    fs.mkdirSync(legacyDir);
+    const legacyRuntime = makeWorkspace();
+    fs.writeFileSync(
+      path.join(legacyDir, '.env'),
+      `QWEN_RUNTIME_DIR=${legacyRuntime}\nQWEN_HOME=${path.join(os.homedir(), 'legacy')}\n`,
+    );
+    fs.writeFileSync(
+      path.join(os.homedir(), '.env'),
+      `QWEN_RUNTIME_DIR=${makeWorkspace()}\n`,
+    );
+
+    preResolveHomeEnvOverrides();
+
+    expect(process.env['QWEN_RUNTIME_DIR']).toBe(legacyRuntime);
+    expect(process.env['QWEN_HOME']).toBeUndefined();
+    expect(Storage.getGlobalQwenDir()).toBe(xdgDir());
+  });
+
   it('still reads ~/.env, after the global dir .env, for settings placeholders', () => {
     fs.mkdirSync(xdgDir(), { recursive: true });
     fs.writeFileSync(path.join(xdgDir(), '.env'), 'DEMO_VAR=from-qwen-dir\n');

@@ -1813,6 +1813,25 @@ describe('serve fast path environment bootstrap', () => {
       expect(process.env['QWEN_RUNTIME_DIR']).toBe('from-home-env');
     });
 
+    it('pre-resolves a leftover ~/.qwen/.env before ~/.env, in the loader order', () => {
+      const home = useXdgHome();
+      const xdgDir = join(home, '.config', 'qwen');
+      mkdirSync(xdgDir, { recursive: true });
+      writeFileSync(join(xdgDir, '.qwen-global-dir'), '');
+      mkdirSync(join(home, '.qwen'));
+      writeFileSync(
+        join(home, '.qwen', '.env'),
+        `QWEN_RUNTIME_DIR=from-legacy-env\nQWEN_HOME=${join(home, 'legacy')}\n`,
+      );
+      writeFileSync(join(home, '.env'), 'QWEN_RUNTIME_DIR=from-home-env\n');
+
+      preResolveServeFastPathHomeEnvOverrides();
+
+      expect(process.env['QWEN_RUNTIME_DIR']).toBe('from-legacy-env');
+      expect(process.env['QWEN_HOME']).toBeUndefined();
+      expect(getGlobalQwenDirLite()).toBe(xdgDir);
+    });
+
     it('resolves settings placeholders from ~/.env', () => {
       const home = useXdgHome();
       tempWorkspace = realpathSync(

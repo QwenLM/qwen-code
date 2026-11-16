@@ -210,6 +210,10 @@ function getUserLevelEnvPaths(): Set<string> {
  * `~/.qwen/...` and `<QWEN_HOME>/...`.
  */
 let homeEnvBootstrapped = false;
+// What a leftover ~/.qwen/.env may pre-resolve: everything but QWEN_HOME.
+const NON_GLOBAL_DIR_BOOTSTRAP_KEYS = HOME_ENV_BOOTSTRAP_KEYS.filter(
+  (key) => !isGlobalDirEnvKey(key),
+);
 export function preResolveHomeEnvOverrides(): void {
   if (homeEnvBootstrapped) {
     return;
@@ -222,13 +226,19 @@ export function preResolveHomeEnvOverrides(): void {
 
   const initialQwenHome = process.env['QWEN_HOME'];
   const initialQwenDir = Storage.getGlobalQwenDir();
-  const candidates: string[] = [path.join(initialQwenDir, '.env')];
+  readHomeEnvInto(path.join(initialQwenDir, '.env'));
   if (!initialQwenHome) {
-    candidates.push(path.join(os.homedir() || os.tmpdir(), '.env'));
-  }
-
-  for (const candidate of candidates) {
-    readHomeEnvInto(candidate);
+    const homeDir = os.homedir() || os.tmpdir();
+    // The loader's order (findEnvFiles): a leftover ~/.qwen/.env on an XDG
+    // install comes before ~/.env, but it cannot set QWEN_HOME.
+    const legacyDir = path.join(homeDir, QWEN_DIR);
+    if (path.normalize(legacyDir) !== path.normalize(initialQwenDir)) {
+      readHomeEnvInto(
+        path.join(legacyDir, '.env'),
+        NON_GLOBAL_DIR_BOOTSTRAP_KEYS,
+      );
+    }
+    readHomeEnvInto(path.join(homeDir, '.env'));
   }
 
   // If QWEN_HOME was just discovered, also read <new QWEN_HOME>/.env so
@@ -242,13 +252,16 @@ export function preResolveHomeEnvOverrides(): void {
   }
 }
 
-function readHomeEnvInto(file: string): void {
+function readHomeEnvInto(
+  file: string,
+  keys: readonly string[] = HOME_ENV_BOOTSTRAP_KEYS,
+): void {
   if (!fs.existsSync(file)) {
     return;
   }
   try {
     const parsed = dotenv.parse(fs.readFileSync(file, 'utf-8'));
-    for (const key of HOME_ENV_BOOTSTRAP_KEYS) {
+    for (const key of keys) {
       if (
         (parsed[key] ||
           (keepsEmptyHomeEnvValue(key) && parsed[key] !== undefined)) &&
