@@ -30,15 +30,18 @@ export function getReplySelectionRange(body: HTMLElement): Range | null {
   const endInside = body.contains(range.endContainer);
   if (startInside && endInside) return range;
   // A triple-click (or a drag that reaches the edge of a row) places the
-  // outer boundary on the row chrome — outside the body, so the copy menu
-  // was suppressed even though the selection visibly covers the whole line.
-  // Clamp that boundary to the body edge on a clone; the live selection is
-  // never mutated. Clamping is only safe when the boundary sits on the
-  // correct side of the body, on declared chrome of the body's own message
-  // row, and does not belong to another message's body — cross-message
+  // trailing boundary on the row chrome — outside the body, so the copy
+  // menu was suppressed even though the selection visibly covers the whole
+  // line. Clamp that boundary to the body edge on a clone; the live
+  // selection is never mutated. Clamping is only safe when the boundary
+  // sits after the body, on declared chrome of the body's own message row,
+  // and does not belong to another message's body — cross-message
   // selections and content-bearing row siblings (steps/details, author
   // line) stay rejected, and a body with no resolvable row or chrome mark
-  // keeps rejecting.
+  // keeps rejecting. In the app markup row chrome always trails the body
+  // (the timestamp tip renders after its children, the assistant footer
+  // after the content), so only the trailing boundary can land on chrome;
+  // a leading boundary outside the body stays rejected.
   if (
     startInside &&
     !endInside &&
@@ -51,20 +54,6 @@ export function getReplySelectionRange(body: HTMLElement): Range | null {
     const clamped = body.ownerDocument.createRange();
     clamped.setStart(range.startContainer, range.startOffset);
     clamped.setEnd(body, body.childNodes.length);
-    return clamped.collapsed ? null : clamped;
-  }
-  if (
-    !startInside &&
-    endInside &&
-    !otherMessageBody(range.startContainer) &&
-    sameRowChrome(body, range.startContainer) &&
-    (body.compareDocumentPosition(range.startContainer) &
-      Node.DOCUMENT_POSITION_PRECEDING) !==
-      0
-  ) {
-    const clamped = body.ownerDocument.createRange();
-    clamped.setStart(body, 0);
-    clamped.setEnd(range.endContainer, range.endOffset);
     return clamped.collapsed ? null : clamped;
   }
   return null;

@@ -644,30 +644,42 @@ describe('reply selection range at row edges', () => {
     expect(window.getSelection()!.getRangeAt(0).endContainer).toBe(tip);
   });
 
-  it('clamps a leading boundary on the row chrome to the body edge', () => {
+  it('rejects a leading boundary on the row chrome (app chrome never precedes the body)', () => {
     const { body, line, tip } = rowFixture(false);
     const text = line.firstChild! as Text;
     const range = document.createRange();
     range.setStart(tip, 0);
     range.setEnd(text, 8);
     window.getSelection()!.addRange(range);
+    expect(getReplySelectionRange(body)).toBeNull();
+  });
+
+  it('clamps a triple-click in an earlier paragraph to the end of the whole message', () => {
+    const { row, tip } = rowFixture(true);
+    const body = row.querySelector('._contentBody_9f2ab')!;
+    const first = body.querySelector('p')!;
+    first.textContent = 'First paragraph';
+    const second = document.createElement('p');
+    second.textContent = 'Second paragraph';
+    body.append(second);
+    const text = first.firstChild! as Text;
+    // triple-click in the first paragraph of a two-paragraph message: the
+    // trailing boundary parks on the row chrome, as observed live
+    const range = document.createRange();
+    range.setStart(text, 0);
+    range.setEnd(tip, 1);
+    window.getSelection()!.addRange(range);
     const result = getReplySelectionRange(body);
     expect(result).not.toBeNull();
-    expect(result!.toString()).toBe('Selected');
-    // the preserved inner boundary survives the clamp
-    const preserved = document.createRange();
-    preserved.setStart(text, 8);
-    preserved.setEnd(text, 8);
-    expect(result!.compareBoundaryPoints(Range.END_TO_END, preserved)).toBe(0);
+    // the clamp runs to the end of the body, not to the end of the clicked
+    // paragraph — a single-<p> fixture cannot tell the two apart
     expect(
-      result!.compareBoundaryPoints(Range.START_TO_START, fullBodyRange(body)),
+      result!.compareBoundaryPoints(Range.END_TO_END, fullBodyRange(body)),
     ).toBe(0);
-    // the clamped range passes the menu gate on the copy path
     expect(getSelectedReplyContent(body, result!)).toEqual({
-      text: 'Selected',
-      markdown: 'Selected',
+      text: 'First paragraph\nSecond paragraph',
+      markdown: 'First paragraph\n\nSecond paragraph',
     });
-    expect(window.getSelection()!.getRangeAt(0).startContainer).toBe(tip);
   });
 
   it('returns the live range unchanged when both boundaries are inside', () => {

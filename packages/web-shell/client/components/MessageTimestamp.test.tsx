@@ -106,6 +106,26 @@ describe('MessageTimestamp', () => {
     expect(container.textContent).toContain('body');
   });
 
+  it('marks only the non-chat hover tip as selection-copy row chrome', () => {
+    const ts = new Date(2026, 5, 13, 9, 8, 7).getTime();
+    const tipRow = render(
+      <MessageTimestamp timestamp={ts}>
+        <div>body</div>
+      </MessageTimestamp>,
+    );
+    expect(
+      tipRow.querySelector(`.${styles.tip}[data-selection-copy-chrome]`),
+    ).not.toBeNull();
+    // chat (user-bubble) rows never host a selection-copy body, so the mark
+    // stays off the chat tip
+    const chatRow = render(
+      <MessageTimestamp timestamp={ts} chatMode copyText="hello">
+        <div>body</div>
+      </MessageTimestamp>,
+    );
+    expect(chatRow.querySelector('[data-selection-copy-chrome]')).toBeNull();
+  });
+
   it('renders no wrapper when timestamp is undefined', () => {
     const container = render(
       <MessageTimestamp>

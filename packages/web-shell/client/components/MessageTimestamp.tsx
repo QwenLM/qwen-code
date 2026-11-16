@@ -230,17 +230,17 @@ export function MessageTimestamp({
           className={styles.chatActions}
           data-menu-open={menuOpen || undefined}
         >
-          <span
-            className={styles.chatTip}
-            aria-hidden="true"
-            data-selection-copy-chrome
-          >
+          <span className={styles.chatTip} aria-hidden="true">
             {formatTimestamp(timestamp)}
           </span>
           {copyButton}
           {moreActions}
         </span>
       ) : (
+        // Declared row chrome for the selection clamp gate
+        // (selectionClipboard.getReplySelectionRange). Only the non-chat
+        // variant is marked: chat (user-bubble) rows never host a
+        // selection-copy body, so a mark there would be unreachable.
         <span
           className={styles.tip}
           aria-hidden="true"
