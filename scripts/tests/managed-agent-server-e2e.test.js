@@ -3426,8 +3426,10 @@ describe('managed-agent-server e2e runner', () => {
     );
     // The Session-create body carries the Web Shell's verbatim bundled import,
     // so admission's replace path runs; a creator-less caller slice would
-    // leave that code unexercised.
+    // leave that code unexercised. The description comes from the bundled
+    // SKILL.md because the byte-comparison sidecar carries only the body.
     expect(source).toMatch(/skills: \[/);
+    expect(source).toMatch(/description: bundledDescription/);
     expect(source).toMatch(/body: bundledLoopImport\.body/);
     // The body checks read the first streamed round, and the positive
     // requires the Skill tool result (role 'tool'), not the session prelude.

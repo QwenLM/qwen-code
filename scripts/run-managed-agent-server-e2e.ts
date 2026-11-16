@@ -3387,8 +3387,21 @@ try {
           path.join(contractsDir, `managed-loop-skill-${variant}.json`),
           'utf8',
         ),
-      ) as { description: string; body: string };
+      ) as { description?: string; body: string };
     const bundledLoopImport = readSidecar('bundled-body');
+    // The reference sidecar carries only the trimmed body (the byte-comparison
+    // contract isBundledLoop applies); the skill's visible description lives
+    // in the bundled SKILL.md frontmatter.
+    const bundledSkillSource = readFileSync(
+      path.join(root, 'packages/core/src/skills/bundled/loop/SKILL.md'),
+      'utf8',
+    );
+    const bundledDescription = /^description:[ \t]*(.+)$/m
+      .exec(bundledSkillSource)?.[1]
+      ?.trim();
+    if (bundledDescription === undefined || bundledDescription.length === 0) {
+      throw new Error('Bundled loop SKILL.md declares no description');
+    }
     const definitionResponse = await fetch(`${springUrl}/v1/agents`, {
       method: 'POST',
       headers: {
@@ -3425,7 +3438,7 @@ try {
         skills: [
           {
             name: 'loop',
-            description: bundledLoopImport.description,
+            description: bundledDescription,
             body: bundledLoopImport.body,
             model_invocable: true,
             user_invocable: true,
