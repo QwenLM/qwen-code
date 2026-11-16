@@ -2629,6 +2629,54 @@ describe('containerNonceErrors (R16-1 / D17-1 / D17-2)', () => {
     expect(containerNonceErrors(boundary, gateWith(), dir)).toEqual([]);
   });
 
+  // R3-3: a compliant marker line straddling a chunk boundary with >256 B of
+  // itself before the boundary must still be found. A complete line precedes it
+  // so the chunk has a newline (lastNl >= 0): the marker sits in the partial
+  // line after that newline, which must be SCANNED before the carry is capped,
+  // or the marker at its head is dropped and the round falsely refused.
+  it('accepts a marker line straddling a chunk boundary with >256 B before it', () => {
+    const dir = dirWithLog(null);
+    const lineA = 'x'.repeat(1024 * 1024 - 500 - 1) + '\n';
+    const lineB = `container-nonce: ${NONCE} ` + 'y'.repeat(599);
+    writeFileSync(join(dir, 'harness.log'), lineA + lineB + '\n');
+    expect(containerNonceErrors(boundary, gateWith(), dir)).toEqual([]);
+  });
+
+  // R4-1: exhausting the byte budget before reaching the marker gives a
+  // bound-specific refusal, not the false "no matching line" diagnosis.
+  it('gives a bound-specific refusal when the marker is beyond the byte budget', () => {
+    const dir = dirWithLog(null);
+    writeFileSync(
+      join(dir, 'harness.log'),
+      'x'.repeat(65 * 1024 * 1024) + `\ncontainer-nonce: ${NONCE}\n`,
+    );
+    expect(containerNonceErrors(boundary, gateWith(), dir).join('\n')).toMatch(
+      /hit its resource bound/,
+    );
+  });
+
+  // R4-4: directories count against the entry cap, so a planted forest of empty
+  // dirs trips the bound (bounded message) rather than walking unbounded.
+  it('counts directories against the entry cap', () => {
+    const dir = dirWithLog(null);
+    for (let i = 0; i < 20001; i++) mkdirSync(join(dir, `d${i}`));
+    expect(containerNonceErrors(boundary, gateWith(), dir).join('\n')).toMatch(
+      /hit its resource bound/,
+    );
+  });
+
+  // R4-5: only the TOP-LEVEL evidence/ subtree is exempt; a nested dir named
+  // evidence (under logs/) is still scanned, so a marker there is found.
+  it('scans a nested evidence dir that is not the top-level subtree', () => {
+    const dir = dirWithLog(null);
+    mkdirSync(join(dir, 'logs', 'evidence'), { recursive: true });
+    writeFileSync(
+      join(dir, 'logs', 'evidence', 'run.log'),
+      `container-nonce: ${NONCE}\n`,
+    );
+    expect(containerNonceErrors(boundary, gateWith(), dir)).toEqual([]);
+  });
+
   it('refuses a plaintext-only legacy record with no nonceSha256', () => {
     const dir = dirWithLog(`container-nonce: ${NONCE}\n`);
     const legacy = JSON.stringify({

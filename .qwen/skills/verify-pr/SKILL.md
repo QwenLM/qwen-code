@@ -541,10 +541,12 @@ authority to certify the round.
    not the shared mount) and stores only its **sha256** in the gate record
    (`nonceSha256`), never the plaintext. The round MUST read that
    container-local nonce and echo a line beginning `container-nonce: <nonce>`
-   into a log file under the round dir at the start of every harness run —
-   the checker (step 7's authoritative gate) matches only that prefix and
-   hashes the first whitespace-delimited token after it, so any other spelling
-   (a bare nonce, `verify nonce=<value>`, a separate nonce file) is refused. This ties the
+   into a log file under the round dir (e.g. `harness.log`) at the start of
+   every harness run — but NOT under the top-level `evidence/` subtree, which
+   holds the binary PNG artifacts and is skipped by the scan. The checker
+   (step 7's authoritative gate) matches only that prefix and hashes the first
+   whitespace-delimited token after it, so any other spelling (a bare nonce,
+   `verify nonce=<value>`, a separate nonce file) is refused. This ties the
    `mode:"container"` declaration to execution inside this container — a
    battery run on the host cannot read the container-local nonce, and the
    record's hash does not reveal it. If the battery cannot run in this

@@ -876,8 +876,9 @@ function main(argv) {
     'and the record lands in the mounted artifact directory so it survives',
     'the container. A VM boundary runs the same file from its trusted copy',
     'with its own artifact path and NO --require-isolation gate (a VM carries',
-    'no observed container marker: use mode:"vm" with the maintainer\'s',
-    'approval). The gate writes boundary-gate.json into',
+    'no observed container marker). Declare mode:"vm" with by (the maintainer),',
+    'reason, attestation (what the VM mounts), and approval (a permalink to the',
+    "maintainer's approval comment). The gate writes boundary-gate.json into",
     'the artifact directory; the checker requires that record alongside',
     'the container declaration.',
   ]);

@@ -233,14 +233,19 @@ claim to mirror the gate's full trigger:
 4. **Declaration.** The operator writes the declaration after the gate
    passes — the same operator-owned rule as the JS recipe, not the round
    itself. The gate run (`--require-isolation --artifact-dir <round-dir>`)
-   writes the `boundary-gate.json` record the checker requires alongside a
-   container declaration. It names **every** container the round uses —
-   including the seed container, the only one with outbound egress and the
-   one in which PR-authored Maven plugins execute: the seed container
-   (mirror-only egress), the offline battery container, and, when the round
-   uses a model, the proxy-connected container that runs the model turns,
-   each with its image and network policy, e.g.
-   `{"mode":"container","detail":"seed: maven:3.9.11-eclipse-temurin-21, mirror-only egress; battery: same image, --network none, offline m2; model turns: node:22-bookworm via host proxy; credential-free"}`.
+   writes the `boundary-gate.json` record in the seed container. Because the
+   offline battery runs in a _separate_ container that cannot read the seed
+   container's `$HOME/.qwen-verify-nonce`, it cannot echo a `container-nonce:`
+   line hashing to the gate record's `nonceSha256` (step 1), so the round
+   declares `mode:"waived"` with the maintainer's approval — not
+   `mode:"container"` (R4-2). The declaration carries `by` (the maintainer),
+   `reason`, and an `approval` permalink, and names **every** container the
+   round uses in `detail` — including the seed container, the only one with
+   outbound egress and the one in which PR-authored Maven plugins execute: the
+   seed container (mirror-only egress), the offline battery container, and,
+   when the round uses a model, the proxy-connected container that runs the
+   model turns, each with its image and network policy, e.g.
+   `{"mode":"waived","by":"<maintainer>","reason":"Java battery runs in a separate offline container that cannot echo the seed gate's nonce","approval":"https://github.com/<owner>/<repo>/pull/<n>#issuecomment-<id>","detail":"seed: maven:3.9.11-eclipse-temurin-21, mirror-only egress; battery: same image, --network none, offline m2; model turns: node:22-bookworm via host proxy; credential-free"}`.
    A round with no model turns names the seed and battery containers; the
    declaration is incomplete if it omits the seed.
 

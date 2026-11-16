@@ -5,7 +5,6 @@
  */
 
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import {
   chmodSync,
   cpSync,
@@ -7078,28 +7077,11 @@ describe('qwen-triage verify hardening round 2', () => {
       writeFileSync(join(proxyDir, 'proxy.pid'), '424242\n');
       writeFileSync(join(proxyDir, 'proxy.json'), '{"token":"bearer"}');
       writeFileSync(join(proxyDir, 'proxy.err'), '');
-      // R16-1: the gate record carries only the nonce HASH; the round's raw
-      // harness logs echo the container-local plaintext (a container-nonce line
-      // whose sha256 matches). The nonce accept/refuse/parity witnesses live in
-      // the checker tests (containerNonceErrors); this shimmed-node replay only
-      // pins the declaration write + checker invocation + proxy teardown.
-      const nonce = 'n0nce1234567890abcdef';
-      if (!planted && !readOnlyRound && !symlinkRound) {
-        writeFileSync(
-          join(round, 'boundary-gate.json'),
-          JSON.stringify({
-            gate: 'require-isolation',
-            passed: true,
-            observed: ['/.dockerenv'],
-            credentialFree: true,
-            nonceSha256: createHash('sha256').update(nonce).digest('hex'),
-          }),
-        );
-        writeFileSync(
-          join(round, 'harness.log'),
-          `container-nonce: ${nonce}\nPASS cell\n`,
-        );
-      }
+      // The nonce binding's accept/refuse/parity witnesses live in the checker
+      // tests (containerNonceErrors), which read a real round dir; this
+      // shimmed-node replay only pins the declaration write + checker
+      // invocation + proxy teardown, so it plants no gate record / nonce log
+      // that nothing here would read (R4-3).
       const calls = join(root, 'calls.log');
       for (const [tool, body] of [
         [

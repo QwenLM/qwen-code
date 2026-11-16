@@ -804,12 +804,19 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
       /node \/trusted-scripts\/verify-pr-prepare\.mjs --require-isolation --artifact-dir "\/work\/tmp\/pr42-verify-\d{8}-\d{6}"/,
     );
     // R3-4: the printed VM guidance must carry the same scoping as the skill —
-    // a VM runs no --require-isolation gate — so the tool's own output does not
-    // dead-end a VM operator into the container gate (R16-4).
+    // a VM runs no --require-isolation gate — and name the FULL mode:"vm" shape
+    // (by/reason/attestation/approval), so the tool's own output does not
+    // dead-end a VM operator at the gate or one step later at the declaration.
     expect(result.stdout).toContain(
       'A VM boundary runs the same file from its trusted copy',
     );
     expect(result.stdout).toContain('NO --require-isolation gate');
+    expect(result.stdout).toContain(
+      'Declare mode:"vm" with by (the maintainer),',
+    );
+    expect(result.stdout).toContain(
+      'reason, attestation (what the VM mounts), and approval',
+    );
 
     const root = realpathSync(dir);
     const contextPath = join(root, 'tmp', 'verify-context', 'pr42.json');

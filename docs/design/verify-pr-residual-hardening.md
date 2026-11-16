@@ -91,13 +91,19 @@ shapes (string-under-array, empty lists), and the legacy migration boundary
   `mode:"container"` declaration backed by a `require-isolation` record it
   requires `gate.nonceSha256` (a 64-hex string) **and** a `container-nonce:
 <value>` line in the round's logs whose value's sha256 equals it. The scan
-  walks the round dir, skips `boundary.json` / `boundary-gate.json` and
-  non-regular files (a symlink is not followed), and reads each regular file
-  WHOLE in chunks — a legitimate log whose marker sits behind earlier output is
-  still found — while bounding the AGGREGATE work: one hoisted 1 MiB scratch
-  buffer (no per-file allocation) and a 64 MiB total byte budget across the walk
-  (R1-2, R2-5). A missing/mismatched hash or absent matching line refuses the
-  container claim. The check runs UNCONDITIONALLY: the exemption is the RECORD,
+  walks the round dir, skips `boundary.json` / `boundary-gate.json`, the
+  TOP-LEVEL `evidence/` subtree (the skill's binary PNG artifacts — a nested dir
+  named evidence is still scanned, R4-5), and non-regular files (a symlink is
+  not followed). It reads each regular file WHOLE in chunks, scanning the
+  straddling partial line BEFORE capping the carry so a marker at its head is
+  never lost (R3-3) — a marker behind earlier output or across a chunk boundary
+  is still found. The AGGREGATE work is bounded: one hoisted 1 MiB scratch
+  buffer (no per-file allocation), a 64 MiB total byte budget, and a 20000
+  visited-entry cap that counts directories too (R1-2, R2-5, R4-4). The scan
+  returns whether it stopped at a bound, so exhaustion gets its own refusal
+  message distinct from "no matching line" (R4-1). A missing/mismatched hash or
+  absent matching line refuses the container claim. The check runs
+  UNCONDITIONALLY: the exemption is the RECORD,
   not a flag — `containerNonceErrors` returns `[]` for the `ci-lane` record and
   for non-container modes, so neither `--publish-lane` (R1-7) nor
   `$QWEN_VERIFY_CONTEXT` (R2-7) switches the binding off for a
@@ -175,8 +181,9 @@ VM bullet.
   A round whose battery runs in a different container than the gate cannot read
   the gate's plaintext, so — per the skill's step 5 — it declares
   `mode:"waived"` with the maintainer's approval; a gate-container attestation
-  is not a substitute. That recipe's declaration step records the constraint in
-  both languages; it is a proposal, not shipped code.
+  is not a substitute. That recipe records the constraint in step 1 (nonce
+  binding) and step 4 (the `mode:"waived"` declaration example), in both
+  languages; it is a proposal, not shipped code.
 
 ## Open questions
 

@@ -73,10 +73,14 @@ gateText, roundDir)`，由 `main` 调用（轮目录在那里可用，`checkArti
   有）。对由 `require-isolation` 记录支撑的 `mode:"container"` 声明，要求
   `gate.nonceSha256`（64 位十六进制串）**且**轮日志里有一行 `container-nonce:
 <value>`，其值的 sha256 等于它。扫描遍历轮目录，跳过 `boundary.json` /
-  `boundary-gate.json` 与非常规文件（不跟随符号链接），并分块读取每个常规文件**整体**
-  ——marker 落在更早输出之后的合法日志仍被找到——同时约束**聚合**工作量：一个复用的
-  1 MiB 暂存缓冲（无每文件分配）加整趟 64 MiB 总字节预算（R1-2、R2-5）。哈希缺失/不匹配
-  或无匹配行即拒绝容器声明。检查**无条件**执行：豁免基于**记录**而非旗标——
+  `boundary-gate.json`、**顶层** `evidence/` 子树（skill 的二进制 PNG 产物——嵌套的
+  evidence 目录仍被扫描，R4-5）与非常规文件（不跟随符号链接）。分块读取每个常规文件
+  **整体**，并在截断 carry **之前**先扫描跨块半行，使其头部的 marker 不丢失（R3-3）
+  ——落在更早输出之后或跨块边界的 marker 仍被找到。**聚合**工作量有界：一个复用的
+  1 MiB 暂存缓冲（无每文件分配）、整趟 64 MiB 总字节预算、以及把目录也计入的 20000
+  访问条目上限（R1-2、R2-5、R4-4）。扫描返回是否因界而停，故资源耗尽获得与「无匹配行」
+  不同的专属拒绝文案（R4-1）。哈希缺失/不匹配或无匹配行即拒绝容器声明。检查**无条件**
+  执行：豁免基于**记录**而非旗标——
   `containerNonceErrors` 对 `ci-lane` 记录与非 container 模式返回 `[]`，故
   `--publish-lane`（R1-7）与 `$QWEN_VERIFY_CONTEXT`（R2-7）都不能为
   `require-isolation` 容器声明关掉该绑定。
@@ -132,7 +136,8 @@ gateText, roundDir)`，由 `main` 调用（轮目录在那里可用，`checkArti
 - 单记录/单 nonce 绑定约束多容器 Java 配方（R1-10、R3-6）：checker 只读一份记录与一个
   哈希，`container-nonce:` 行必须由跑电池的容器 echo。电池跑在与门禁不同容器的轮次读不到
   门禁的明文，故按 skill 的 step 5 经维护者批准声明 `mode:"waived"`；门禁容器的佐证不能
-  替代。该配方的声明步骤已在双语中记录此约束；它是提案，非已发布代码。
+  替代。该配方在 step 1（nonce 绑定）与 step 4（`mode:"waived"` 声明示例）双语记录此约束；
+  它是提案，非已发布代码。
 
 ## 待决问题
 
