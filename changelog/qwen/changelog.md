@@ -1,3 +1,10 @@
+## CLI 1.0.0-preview.2
+
+- Add Qwen4-Max to the Qwen subscription catalog (1M context window, image and video input).
+- Show a reset countdown when Qwen subscription credits run out, and add an `/upgrade` command that opens the subscription plans page.
+- Qwen subscription requests now carry the QwenCode user agent and gateway request id for easier troubleshooting, and Qwen subscription OAuth requests honor `Retry-After` before retrying when rate limited (429).
+- Give Qoder limited-free models more accurate paid-confirmation messages based on the error code.
+
 ## CLI 1.0.0-preview.1
 
 - Fix Qwen subscription accounts being unable to use subscription models after sign-in. The model catalog now follows your sign-in state automatically, with no manual provider configuration needed.
