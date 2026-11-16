@@ -10,7 +10,11 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { getTranslator } from '../../i18n';
 import { formatElapsed } from './agents-view-logic';
-import { COLLAB_MESSAGES_EN, COLLAB_MESSAGES_ZH } from './messages';
+import {
+  COLLAB_MESSAGES_EN,
+  COLLAB_MESSAGES_RU,
+  COLLAB_MESSAGES_ZH,
+} from './messages';
 import * as transcriptStub from './messages.transcript-stub';
 
 const CLIENT_DIR = join(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -40,15 +44,18 @@ describe('collaboration messages', () => {
       ),
     ).toBe(true);
     expect(Object.keys(COLLAB_MESSAGES_ZH).sort()).toEqual([...en].sort());
+    expect(Object.keys(COLLAB_MESSAGES_RU).sort()).toEqual([...en].sort());
   });
 
   it('are replaced by a stub of the same shape in the transcript build', () => {
     expect(Object.keys(transcriptStub).sort()).toEqual([
       'COLLAB_MESSAGES_EN',
+      'COLLAB_MESSAGES_RU',
       'COLLAB_MESSAGES_ZH',
     ]);
     expect(transcriptStub.COLLAB_MESSAGES_EN).toEqual({});
     expect(transcriptStub.COLLAB_MESSAGES_ZH).toEqual({});
+    expect(transcriptStub.COLLAB_MESSAGES_RU).toEqual({});
   });
 
   it('are defined only here, not back in the main dictionary', () => {
@@ -57,5 +64,56 @@ describe('collaboration messages', () => {
     const dictionary = readFileSync(join(CLIENT_DIR, 'i18n.tsx'), 'utf8');
     expect(dictionary).not.toMatch(/^ {2}'collab\./m);
     expect(dictionary).not.toMatch(/^ {2}'agents\.description'/m);
+  });
+});
+
+describe('the join notices', () => {
+  const en = COLLAB_MESSAGES_EN['collab.runtime.notSavedHere'];
+  const zh = COLLAB_MESSAGES_ZH['collab.runtime.notSavedHere'];
+
+  it('advises a rerun only when the credential recorded the join', () => {
+    // An older daemon sends no `recorded`: absent means unknown, and the
+    // rerun it would be advised to make can be refused.
+    const cases = [
+      [undefined, '', ''],
+      ['false', '', ''],
+      [
+        'true',
+        ' Run the same join command again to save it.',
+        '再运行一次同样的加入命令即可保存。',
+      ],
+    ] as const;
+    for (const [recorded, remedyEn, remedyZh] of cases) {
+      expect(
+        typeof en === 'function' ? en({ error: 'disk full', recorded }) : en,
+      ).toBe(
+        `This computer joined, but could not save the connection, so it will not reconnect after a restart or a workspace reload: disk full.${remedyEn}`,
+      );
+      expect(
+        typeof zh === 'function' ? zh({ error: 'disk full', recorded }) : zh,
+      ).toBe(
+        `这台电脑已加入，但没能保存这次连接，重启或重新加载工作区后不会自动重连：disk full。${remedyZh}`,
+      );
+    }
+  });
+
+  it('renders the empty-error fallback without a dangling colon', () => {
+    expect(typeof en === 'function' ? en({}) : en).toBe(
+      'This computer joined, but could not save the connection, so it will not reconnect after a restart or a workspace reload.',
+    );
+  });
+
+  it('the timed-out join hint names the branches instead of promising', () => {
+    const enTimeout = COLLAB_MESSAGES_EN['collab.runtime.joinTimedOut'];
+    const zhTimeout = COLLAB_MESSAGES_ZH['collab.runtime.joinTimedOut'];
+    const enText = typeof enTimeout === 'function' ? enTimeout({}) : enTimeout;
+    const zhText = typeof zhTimeout === 'function' ? zhTimeout({}) : zhTimeout;
+    // Whether the daemon recorded the token is unknowable after a timeout:
+    // the hint must not promise the rerun goes on (a released daemon would
+    // tear the live connection down and refuse).
+    expect(enText).toContain('if the daemon recorded this join’s token');
+    expect(enText).not.toContain('picks up what this attempt did');
+    expect(zhText).toContain('若守护进程记录了本次加入的令牌');
+    expect(zhText).not.toContain('会接着这次尝试已完成的部分继续');
   });
 });

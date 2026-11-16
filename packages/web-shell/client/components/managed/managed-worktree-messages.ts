@@ -89,6 +89,53 @@ const ZH: Record<keyof typeof EN, string> = {
   backgroundBusy: '请等待后台任务结束后再清理。',
 };
 
+const RU: Record<keyof typeof EN, string> = {
+  mode: 'Файлы сессии',
+  current: 'Текущий каталог',
+  isolated: 'Независимый worktree',
+  base: 'Базовая ветка или коммит',
+  head: 'Текущий HEAD',
+  committed:
+    'Начинается с зафиксированной версии. Незафиксированные изменения остаются в текущем каталоге.',
+  checking: 'Проверка поддержки worktree…',
+  files:
+    'Выберите файлы рабочей области после готовности worktree. Существующие ссылки на файлы нужно выбрать заново.',
+  manage: 'Worktree сессий',
+  retained:
+    'Закрытие, архивация или удаление сессии сохраняет её worktree. Очистка удаляет каталог и оставляет ветку.',
+  empty: 'В этой рабочей области нет worktree сессий.',
+  inspect: 'Проверить условия очистки',
+  cleanup: 'Удалить каталог worktree',
+  confirm: 'Удалить этот каталог?',
+  confirmDescription:
+    'Сессия должна быть закрыта, а worktree — чистым. Каталог будет удалён; ветка Git сохранится.',
+  blocked: 'Очистка недоступна',
+  session: 'Сессия',
+  branch: 'Ветка',
+  baseCommit: 'Базовый коммит',
+  preparing: 'Подготовка worktree',
+  ready: 'Worktree готов',
+  failed: 'Не удалось подготовить worktree',
+  blockedState: 'Worktree требует внимания',
+  removing: 'Удаление каталога worktree',
+  removed: 'Каталог удалён; ветка сохранена',
+  reasonUnavailable: 'Эта операция worktree сейчас недоступна.',
+  workspaceBusy: 'Ожидание, пока рабочая область станет свободной.',
+  unsupported:
+    'Это развёртывание или среда выполнения не поддерживает worktree сессий.',
+  notGit: 'Выбранный каталог не находится в репозитории Git.',
+  layoutUnsupported:
+    'Репозиторий и его метаданные Git должны быть в одном авторизованном хранилище. Выберите исходный checkout.',
+  invalidRef: 'Выбранная базовая ветка или коммит недействительны.',
+  dirty:
+    'В worktree есть незафиксированные изменения, неотслеживаемые или игнорируемые файлы. Сохраните или удалите их перед очисткой.',
+  identityConflict: 'Исходный каталог worktree отсутствует или изменился.',
+  stopUnverified:
+    'Предыдущая операция Git ещё не подтверждена как остановленная.',
+  sessionActive: 'Закройте сессию перед удалением её worktree.',
+  backgroundBusy: 'Дождитесь завершения фоновых задач перед очисткой.',
+};
+
 const REASON_KEYS: Record<string, keyof typeof EN> = {
   workspace_busy: 'workspaceBusy',
   worktree_unsupported: 'unsupported',
@@ -108,7 +155,7 @@ const REASON_KEYS: Record<string, keyof typeof EN> = {
 export function useManagedWorktreeText() {
   const { language } = useI18n();
   return (key: keyof typeof EN): string =>
-    (language === 'zh-CN' ? ZH : EN)[key];
+    (language === 'zh-CN' ? ZH : language === 'ru' ? RU : EN)[key];
 }
 
 export function useManagedWorktreeReason() {

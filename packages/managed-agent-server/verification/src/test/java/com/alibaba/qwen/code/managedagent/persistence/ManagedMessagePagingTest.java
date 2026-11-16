@@ -217,14 +217,6 @@ class ManagedMessagePagingTest {
     }
 
     @Test
-    void refusesPrivateCsiSessionsWithoutBorrowingTheirJournalAsMessages() {
-        seed(2, false);
-        jdbc.update("UPDATE ma_session SET tool_profile='csi-files-retirement/1' WHERE tenant_id=? AND session_id=?",
-                "tenant", "session");
-        assertThatThrownBy(() -> read(null, 1, true)).hasMessageContaining("private CSI");
-    }
-
-    @Test
     void includesOnlyLatestControlStatesOfTheSelectedTurns() {
         seed(3, false);
         jdbc.update("INSERT INTO ma_public_event(tenant_id,session_id,sequence_id,event_id,turn_id,event_type,data_json,"

@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingReposit
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
+import org.apache.commons.codec.digest.DigestUtils;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -37,8 +38,8 @@ class RuntimeSshAcknowledgementTest {
             String payload = "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"pwd\"}}";
             var execution = fixture.service.prepareExecution("harness", "runtime", "dispatch-key",
                     Map.of("sessionId", "runtime", "promptId", "prompt", "callId", "call",
-                            "argsDigest", "sha256:" + CsiNativeActivationProof.sha256(payload.getBytes(java.nio.charset.StandardCharsets.UTF_8)),
-                            "runtimeProtocol", 3, "inputDigest", CsiNativeActivationProof.sha256(JsonCodec.encode(Map.of("command", "pwd")))),
+                            "argsDigest", "sha256:" + DigestUtils.sha256Hex(payload.getBytes(java.nio.charset.StandardCharsets.UTF_8)),
+                            "runtimeProtocol", 3, "inputDigest", DigestUtils.sha256Hex(JsonCodec.encode(Map.of("command", "pwd")))),
                     null).toCompletableFuture().join();
             fixture.service.startExecution("harness", "runtime", execution.getExecutionCallId(), payload).toCompletableFuture().join();
             assertTrue(fixture.executions.findByExecutionCallId(execution.getExecutionCallId()).isSettled());

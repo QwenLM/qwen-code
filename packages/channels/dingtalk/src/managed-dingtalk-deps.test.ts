@@ -284,6 +284,29 @@ describe('managed DingTalk webhook proxy (R6-1)', () => {
     destroySpy.mockRestore();
   });
 
+  it('destroys the proxy dispatcher on a failed send too (R12)', async () => {
+    const { EnvHttpProxyAgent } = await import('undici');
+    const destroySpy = vi
+      .spyOn(EnvHttpProxyAgent.prototype, 'destroy')
+      .mockResolvedValue(undefined);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new Error('connection dropped');
+      }),
+    );
+    const { sendWebhook } = createManagedDingtalkDeps(
+      'http://proxy.internal:8080',
+    );
+    // The leaking path is the failure path: the finally must run even when
+    // the send throws, or every failed send strands a dispatcher.
+    await expect(sendWebhook(WEBHOOK, 'hello')).rejects.toMatchObject({
+      definitive: false,
+    });
+    expect(destroySpy).toHaveBeenCalledTimes(1);
+    destroySpy.mockRestore();
+  });
+
   it('constructs the dispatcher from the default namespace, as the bundled CJS interop exposes it (R6-1)', async () => {
     // In the bundled CLI a dynamic import of the CJS undici package is
     // default-only; a named destructure binds undefined and throws before the
@@ -310,6 +333,54 @@ describe('managed DingTalk webhook proxy (R6-1)', () => {
     } finally {
       vi.doUnmock('undici');
       vi.resetModules();
+    }
+  });
+});
+
+describe('managed DingTalk webhook send budget (#17173 R12)', () => {
+  it('a stalled body is aborted at the 30s budget, not wedged forever', async () => {
+    vi.useFakeTimers();
+    try {
+      // Headers arrive, the body never does: the read must be torn down by
+      // the send budget, and the outcome is unknown (the provider may have
+      // received the message), never a hang.
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(
+          async (_url: string, init: { signal: AbortSignal }) =>
+            new Response(
+              new ReadableStream({
+                start(controller) {
+                  init.signal.addEventListener('abort', () =>
+                    controller.error(new Error('aborted')),
+                  );
+                },
+              }),
+              { status: 200, headers: { 'Content-Type': 'application/json' } },
+            ),
+        ),
+      );
+      const { sendWebhook } = createManagedDingtalkDeps();
+      let settled = false;
+      const sending = sendWebhook(WEBHOOK, 'hello').then(
+        () => {
+          settled = true;
+        },
+        (error) => {
+          settled = true;
+          throw error;
+        },
+      );
+      const assertion = expect(sending).rejects.toMatchObject({
+        definitive: false,
+      });
+      await vi.advanceTimersByTimeAsync(29_000);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await assertion;
+      expect(settled).toBe(true);
+    } finally {
+      vi.useRealTimers();
     }
   });
 });

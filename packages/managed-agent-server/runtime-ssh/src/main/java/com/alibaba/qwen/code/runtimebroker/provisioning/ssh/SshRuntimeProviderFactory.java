@@ -46,9 +46,6 @@ public final class SshRuntimeProviderFactory implements RuntimeProviderFactory, 
                 throw new IllegalStateException("SSH node requires a pinned qwenVersion");
             }
         }
-        if (!broker.getResidentWorkspaces().isEmpty()) {
-            throw new IllegalStateException("Resident Workspace and SSH nodes require separate Broker configurations");
-        }
         if (primary && (!"session".equals(broker.getBoundSessionIsolationClass())
                 || !broker.getWorkspaceMounts().isEmpty() || StringUtils.isNotBlank(broker.getWorkspaceCreationRoot())
                 || broker.isLocalDirectoryImportEnabled() || broker.isTrustedLocalRebootRecovery()
