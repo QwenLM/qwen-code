@@ -545,6 +545,36 @@ describe('ComposerTaskChips', () => {
       expect(document.activeElement).toBe(shellChip);
     });
 
+    it('keeps the aria label short for a multi-KB command label', () => {
+      const onExplainTask = vi.fn();
+      const command = 'echo ' + 'x'.repeat(4_000);
+      render([{ ...shell('shell-1'), label: command, command }], {
+        onExplainTask,
+      });
+      const aria = explainButtons()[0].getAttribute('aria-label') ?? '';
+      expect(aria.length).toBeLessThanOrEqual(150);
+      expect(aria).toContain('…');
+    });
+
+    it('renders the zh aria label and tooltip', () => {
+      const onExplainTask = vi.fn();
+      act(() => {
+        root.render(
+          <I18nProvider language="zh-CN">
+            <ComposerTaskChips
+              tasks={[shell('shell-1')]}
+              includeAgents
+              onSelectTask={vi.fn()}
+              onExplainTask={onExplainTask}
+            />
+          </I18nProvider>,
+        );
+      });
+      const explain = explainButtons()[0];
+      expect(explain.getAttribute('aria-label')).toBe('解释任务：npm run dev');
+      expect(explain.getAttribute('title')).toBe('解释这个任务在做什么');
+    });
+
     it('steps ArrowLeft from the chip "?" back to its own chip', () => {
       const onExplainTask = vi.fn();
       render([workflow('wf-1'), shell('shell-1')], { onExplainTask });

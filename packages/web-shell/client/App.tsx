@@ -175,6 +175,7 @@ import { createToolRevealStore, ToolRevealProvider } from './toolRevealContext';
 import { findMonitorTaskForTool } from './utils/monitorTasks';
 import {
   buildTaskExplainQuestion,
+  explainDisplayLabel,
   isComposerTask,
 } from './utils/composerTasks';
 import {
@@ -18734,7 +18735,7 @@ export function App({
     (task: DaemonSessionTaskWithWorkflowStatus) => {
       runVisibleBtw(
         buildTaskExplainQuestion(task, t),
-        t('tasks.explain.display', { label: task.label }),
+        t('tasks.explain.display', { label: explainDisplayLabel(task.label) }),
       );
     },
     [runVisibleBtw, t],

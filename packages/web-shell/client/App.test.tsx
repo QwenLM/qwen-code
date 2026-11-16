@@ -19176,6 +19176,64 @@ describe('App session callbacks', () => {
     );
   });
 
+  it('keeps the panel echo short when the task label is a multi-KB command', async () => {
+    const command = 'echo ' + 'x'.repeat(4_000);
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-long',
+      label: command,
+      description: command,
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command,
+      cwd: '/tmp/project',
+    };
+    renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+
+    const panelQuestion = testState.latestBtwMessageProps?.question ?? '';
+    expect(panelQuestion.length).toBeLessThanOrEqual(200);
+    expect(panelQuestion).toContain('…');
+    expect(panelQuestion).not.toContain('Task facts:');
+    // The model still receives the composed facts, not the display line.
+    const streamed = mockSessionActions.btwSessionStream.mock.calls.at(-1)?.[0];
+    expect(streamed).toContain('Task facts:');
+    expect(streamed.length).toBeGreaterThan(panelQuestion.length);
+  });
+
+  it('renders the zh display line in the panel for a zh session', async () => {
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-zh',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    renderApp({ language: 'zh-CN' });
+    await flush();
+
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(testState.latestBtwMessageProps?.question).toBe(
+      '解释这个任务在做什么：npm run build',
+    );
+  });
+
   it('locates a workflow chip in the transcript and opens its row', async () => {
     testState.messages = [
       {

@@ -22,6 +22,7 @@ import {
 import { useI18n } from '../i18n';
 import { useSharedNow } from '../hooks/useSharedNow';
 import {
+  explainDisplayLabel,
   getComposerTaskChipGroups,
   type ComposerTaskChipGroup,
   type ComposerTaskChipKind,
@@ -206,7 +207,9 @@ export const ComposerTaskChips = forwardRef<
     <button
       type="button"
       className={className}
-      aria-label={t('tasks.explain.aria', { label: taskLabel(task) })}
+      aria-label={t('tasks.explain.aria', {
+        label: explainDisplayLabel(taskLabel(task)),
+      })}
       title={t('tasks.explain.tooltip')}
       data-testid="composer-task-explain"
       onClick={() => onExplainTask?.(task)}

@@ -107,6 +107,14 @@ function explainExcerpt(text: string, max: number): string {
   return `${trimmed.slice(0, max).replace(/[\uD800-\uDBFF]$/, '')}…`;
 }
 
+// The panel echo and the aria label are UI text: a shell's label is its full
+// command, so they must stay short even when the facts carry a multi-KB one.
+const EXPLAIN_DISPLAY_LABEL_MAX = 120;
+
+export function explainDisplayLabel(label: string): string {
+  return explainExcerpt(label, EXPLAIN_DISPLAY_LABEL_MAX);
+}
+
 function taskExplainFacts(task: DaemonSessionTaskWithWorkflowStatus): string {
   const lines = [`Kind: ${task.kind}`];
   // The daemon sets a shell's label to its command; the Command line below

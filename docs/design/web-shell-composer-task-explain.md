@@ -44,7 +44,7 @@ Question composition (pure client function):
 
 Answer path:
 
-- Clicking "?" composes the question and hands it to the existing visible-btw flow with a separate display string: the model receives the full composed prompt, while the panel echoes only a short localized line ("Explain what this task is doing: <label>"). The fact dump is model input and never paints the panel. Typed `/btw` keeps echoing the user's own words — the display override defaults to the raw question. The answer streams into the existing btw panel above the composer. Asking about another task aborts the previous side question, the same semantics as asking two `/btw` questions in a row. The task list stays open.
+- Clicking "?" composes the question and hands it to the existing visible-btw flow with a separate display string: the model receives the full composed prompt, while the panel echoes only a short localized line ("Explain what this task is doing: <label>"). The display label — and the "?" aria label — are excerpted at 120 characters, so a shell whose label is a multi-KB command cannot paint the panel either. The fact dump is model input and never paints the panel. Typed `/btw` keeps echoing the user's own words — the display override defaults to the raw question. The answer streams into the existing btw panel above the composer. Asking about another task aborts the previous side question, the same semantics as asking two `/btw` questions in a row. The task list stays open.
 
 ## Decisions and rationale
 
@@ -62,7 +62,8 @@ Answer path:
 ## Validation
 
 - Unit: question builder (per-kind facts, label cap and duplicate-fact omission, excerpt caps, 4096 budget in EN/ZH, surrogate safety at both cut sites, UI-language instruction); component (placement, click, keyboard including ArrowLeft from the chip "?", focus return, chip node identity across the 1↔2 boundary, single- and multi-task opt-out); App wiring into the btw stream with the display/question split pinned.
-- E2E: the existing composer-task-chips spec updated to the two-action row contract (locators and Tab order) plus a "?" side-question case (display line, no fact dump) and an Escape case (list closes while the explanation panel survives); a visuals scenario captures chips, keyboard-focused "?", list, and streamed answer in light and dark with anchored assertions.
+- E2E: the existing composer-task-chips spec updated to the two-action row contract (locators and Tab order) plus a "?" side-question case (display line, no fact dump), an Escape case (list closes while the explanation panel survives), and gating assertions for the row hit box (`elementFromPoint` in the lit gutter resolves to the open button) and the "?" focus ring (computed style equal to the chip's own ring); a visuals scenario captures chips, keyboard-focused "?", list, and streamed answer in light and dark with anchored assertions.
+- Locale renders: the zh aria label, tooltip, and panel display line are rendered by tests (component and App), so deleting a zh key cannot silently fall back to English.
 - Live-model confirmation on the local daemon: a real session started real background shell tasks; clicking "?" sent the composed question (intercepted, 354 chars) and the model answered in the conversation language, naming the command, the cwd, the user's background launch request, and the earlier finished task — while the task kept running.
 
 ## Acceptance criteria

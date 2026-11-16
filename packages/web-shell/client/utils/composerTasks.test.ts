@@ -3,6 +3,7 @@ import type { DaemonSessionTaskWithWorkflowStatus } from '@qwen-code/sdk/daemon'
 import { getTranslator } from '../i18n';
 import {
   buildTaskExplainQuestion,
+  explainDisplayLabel,
   getComposerTaskChipGroups,
   isComposerTask,
 } from './composerTasks';
@@ -318,8 +319,9 @@ describe('buildTaskExplainQuestion', () => {
   });
 
   it('fits the daemon side-question cap in every UI language', () => {
-    // A label has no per-field cap, so it alone can overflow the budget
-    // and force the final truncation guard.
+    // Every field is excerpt-capped, so a maximal task stays within the
+    // budget through the per-field cuts alone; the ellipsis asserted below
+    // comes from those excerpts. The final guard has dedicated cases too.
     const task: DaemonSessionTaskWithWorkflowStatus = {
       ...base,
       kind: 'agent',
@@ -510,6 +512,26 @@ describe('buildTaskExplainQuestion', () => {
       en,
     );
     expect(question).not.toMatch(
+      /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/,
+    );
+  });
+});
+
+describe('explainDisplayLabel', () => {
+  it('keeps a short label verbatim', () => {
+    expect(explainDisplayLabel('npm run dev')).toBe('npm run dev');
+  });
+
+  it('caps a multi-KB command label for the panel echo', () => {
+    const label = 'echo ' + 'x'.repeat(4_000);
+    const display = explainDisplayLabel(label);
+    expect(display.length).toBeLessThanOrEqual(121);
+    expect(display.endsWith('…')).toBe(true);
+  });
+
+  it('strands no surrogate when the display cut lands inside an emoji', () => {
+    const display = explainDisplayLabel('😀'.repeat(200));
+    expect(display).not.toMatch(
       /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/,
     );
   });

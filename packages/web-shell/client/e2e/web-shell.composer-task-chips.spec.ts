@@ -271,6 +271,61 @@ test('Escape on a "?" closes the list without dismissing the explanation', async
   await expect(panel).toContainText('A side answer.');
 });
 
+test('the row highlight is the open click target and the "?" keeps the chip focus ring', async ({
+  page,
+}, testInfo) => {
+  await openSession(page, testInfo, [
+    workflowTask(),
+    workflowTask({
+      id: 'workflow-docs',
+      toolUseId: undefined,
+      label: 'Update the docs',
+      status: 'paused',
+    }),
+  ]);
+
+  const chip = page
+    .getByTestId('composer-task-chips')
+    .getByRole('button', { name: '2 workflows' });
+  await chip.click();
+  const list = page.getByTestId('composer-task-list');
+  const row = list.locator('[data-testid="composer-task-row"]').first();
+  await expect(row).toBeVisible();
+
+  // The lit left gutter must belong to the open button, not to dead row
+  // padding: a click on the highlighted area opens the task.
+  const gutterOwner = await row.evaluate((el) => {
+    const rect = el.getBoundingClientRect();
+    const hit = document.elementFromPoint(
+      rect.left + 4,
+      rect.top + rect.height / 2,
+    );
+    return hit?.closest('[data-testid="composer-task-open"]') !== null;
+  });
+  expect(gutterOwner).toBe(true);
+
+  // Keyboard focus on the row "?" draws the same ring as the chip itself.
+  // Reopen via keyboard so every focus step below has keyboard origin.
+  await page.keyboard.press('Escape');
+  await expect(chip).toBeFocused();
+  await page.keyboard.press('Enter');
+  await page.keyboard.press('Tab');
+  const explain = list.getByTestId('composer-task-explain').first();
+  await expect(explain).toBeFocused();
+  const explainRing = await page.evaluate(
+    () => getComputedStyle(document.activeElement as HTMLElement).boxShadow,
+  );
+  expect(explainRing).not.toBe('none');
+  // Escape returns focus to the chip (keyboard origin): its ring is the control.
+  await page.keyboard.press('Escape');
+  await expect(chip).toBeFocused();
+  const chipRing = await page.evaluate(() => {
+    const el = document.querySelector('[data-kind="workflow"]') as HTMLElement;
+    return getComputedStyle(el).boxShadow;
+  });
+  expect(explainRing).toBe(chipRing);
+});
+
 test('an expired reveal does not reopen a collapsed workflow on sibling approval', async ({
   page,
 }, testInfo) => {
