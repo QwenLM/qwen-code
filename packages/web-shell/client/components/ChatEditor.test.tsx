@@ -5087,6 +5087,77 @@ describe('ChatEditor model picker host content', () => {
     act(() => row(modelA.id).focus());
     expect(update.mock.lastCall?.[0].currentModelId).toBe(modelB.id);
   });
+
+  it('opens the model picker as a bottom sheet on coarse pointers', () => {
+    const media = vi.mocked(window.matchMedia).mockImplementation(
+      (query: string) =>
+        ({
+          matches:
+            query === '(hover: none) and (pointer: coarse), (max-width: 639px)',
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+        }) as unknown as MediaQueryList,
+    );
+    try {
+      const container = renderChatEditor({
+        visibleToolbarActions: ['model'],
+        currentModel: modelA.id,
+        availableModels: [modelA, modelB],
+        reasoning: { enabled: true, effort: 'high', efforts: ['low', 'high'] },
+      });
+      open(container);
+      const sheet = document.querySelector('[data-web-shell-model-sheet]')!;
+      expect(sheet).not.toBeNull();
+      expect(
+        document.querySelector('[data-web-shell-model-submenu]'),
+      ).toBeNull();
+      const sectionTrigger = sheet.querySelector<HTMLButtonElement>(
+        '[data-web-shell-model-submenu-trigger]',
+      )!;
+      act(() => sectionTrigger.click());
+      expect(
+        sheet.querySelector(`[data-model-id="${modelA.id}"]`),
+      ).not.toBeNull();
+      expect(
+        sheet.querySelector(`[data-model-id="${modelB.id}"]`),
+      ).not.toBeNull();
+
+      act(() =>
+        sheet
+          .querySelector<HTMLButtonElement>(`[data-model-id="${modelB.id}"]`)!
+          .click(),
+      );
+      expect(
+        document.querySelector('[data-web-shell-model-sheet]'),
+      ).not.toBeNull();
+      expect(
+        sheet.querySelector('[data-web-shell-model-sheet-list]'),
+      ).toBeNull();
+
+      act(() => sectionTrigger.click());
+      expect(sheet.querySelector('[data-model-id]')).not.toBeNull();
+      act(() => sectionTrigger.click());
+      expect(sheet.querySelector('[data-model-id]')).toBeNull();
+
+      act(() =>
+        sheet
+          .querySelector<HTMLButtonElement>(
+            '[data-web-shell-model-sheet-done]',
+          )!
+          .click(),
+      );
+      expect(document.querySelector('[data-web-shell-model-sheet]')).toBeNull();
+    } finally {
+      media.mockImplementation(
+        () =>
+          ({
+            matches: false,
+            addEventListener: vi.fn(),
+            removeEventListener: vi.fn(),
+          }) as unknown as MediaQueryList,
+      );
+    }
+  });
 });
 
 describe('ChatEditor slash command popovers', () => {

@@ -84,6 +84,7 @@ import { cssUrlVar } from '../utils/cssUrlVar';
 import { getShadowAwareActiveElement } from '../utils/dom';
 import { POPOVER_MIN_HEIGHT, popoverTopEdge } from '../utils/popoverRoom';
 import { isCoarsePointerDevice } from '../hooks/useIsTouchComposer';
+import { useIsLargeScreen } from '../hooks/useIsLargeScreen';
 import {
   getComposerTagIconUrl,
   isBuiltinComposerTagIconUrl,
@@ -121,6 +122,7 @@ import { WorkspaceIndicator } from './WorkspaceIndicator';
 import {
   ChevronDownIcon,
   ChevronRightIcon,
+  ChevronUpIcon,
   GitBranchIcon,
   PanelBottomCloseIcon,
   Settings2Icon,
@@ -145,6 +147,7 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from './ui/popover';
+import { Drawer, DrawerContent, DrawerTitle, DrawerTrigger } from './ui/drawer';
 import { Input } from './ui/input';
 import { Button } from './ui/button';
 import { Switch } from './ui/switch';
@@ -976,7 +979,7 @@ function ToolbarPopover({
   items: DropdownItem[];
   activeId: string;
   onOpenChange: (open: boolean) => void;
-  onSelect: (id: string) => void;
+  onSelect: (id: string, source?: 'sheet') => void;
   trigger: ReactNode;
   tooltip?: ReactNode;
   showCheck?: boolean;
@@ -997,8 +1000,15 @@ function ToolbarPopover({
   modelPicker?: WebShellModelPickerOptions;
   pickerContext?: ModelPickerContext;
 }) {
+  const { t } = useI18n();
   const [searchQuery, setSearchQuery] = useState('');
   const [submenuOpen, setSubmenuOpen] = useState(false);
+  // Touch and narrow viewports have no room beside the popover for the model
+  // list, so the whole control becomes a bottom sheet with inline sections.
+  const mobileSheet =
+    useIsLargeScreen(
+      '(hover: none) and (pointer: coarse), (max-width: 639px)',
+    ) && !modePopover;
   const [collisionBoundary, setCollisionBoundary] =
     useState<HTMLElement | null>(null);
   const selectionRef = useRef(false);
@@ -1032,6 +1042,7 @@ function ToolbarPopover({
   }, [open]);
 
   useEffect(() => {
+    if (mobileSheet) return;
     if (open && submenuOpen) {
       searchInputRef.current?.focus();
       return;
@@ -1040,7 +1051,7 @@ function ToolbarPopover({
       returningFromSubmenuRef.current = false;
       submenuTriggerRef.current?.focus();
     }
-  }, [open, submenuOpen]);
+  }, [open, submenuOpen, mobileSheet]);
 
   const hasCheckItems = hasRichItems || showCheck;
   const dropdownItems = (
@@ -1062,6 +1073,14 @@ function ToolbarPopover({
           hasCheckItems={hasCheckItems}
           onSelect={(id) => {
             selectionRef.current = true;
+            if (mobileSheet) {
+              // Keep the sheet open so reasoning controls stay reachable;
+              // only the floating model card collapses on selection.
+              setSubmenuOpen(false);
+              setSearchQuery('');
+              onSelect(id, 'sheet');
+              return;
+            }
             onSelect(id);
           }}
           itemTooltipMount={itemTooltipMount}
@@ -1121,6 +1140,80 @@ function ToolbarPopover({
       {dropdownItems}
     </>
   );
+
+  if (mobileSheet) {
+    return (
+      <Drawer
+        open={open}
+        onOpenChange={onOpenChange}
+        shouldScaleBackground={false}
+      >
+        <DrawerTrigger asChild>{trigger}</DrawerTrigger>
+        <DrawerContent
+          aria-describedby={undefined}
+          data-web-shell-model-sheet
+          className="pb-[max(1rem,env(safe-area-inset-bottom))]"
+          onClick={(event) => event.stopPropagation()}
+          onOpenAutoFocus={(event) => event.preventDefault()}
+          onCloseAutoFocus={(event) => event.preventDefault()}
+        >
+          <DrawerTitle className="sr-only">
+            {submenu?.sectionLabel ?? t('model.select')}
+          </DrawerTitle>
+          <div className="min-h-0 overflow-y-auto px-3" data-vaul-no-drag>
+            {header}
+            {!submenu && searchableItems}
+          </div>
+          {submenu && (
+            <div className="relative px-3">
+              {submenuOpen && (
+                <div
+                  data-web-shell-model-sheet-list
+                  className="absolute inset-x-3 bottom-[calc(100%+8px)] max-h-[60vh] overflow-y-auto rounded-xl border bg-popover p-2 shadow-lg"
+                  data-vaul-no-drag
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  {searchableItems}
+                </div>
+              )}
+              <button
+                type="button"
+                className={`${styles.dropdownItem} ${styles.sheetSectionRow}`}
+                data-web-shell-model-submenu-trigger
+                aria-expanded={submenuOpen}
+                aria-label={submenu.triggerAriaLabel}
+                onClick={() => {
+                  setSubmenuOpen((value) => !value);
+                  setSearchQuery('');
+                }}
+              >
+                <span>{submenu.sectionLabel}</span>
+                <span className={styles.sheetSectionValue}>
+                  <span title={submenu.triggerLabel}>
+                    {submenu.triggerLabel}
+                  </span>
+                  {submenuOpen ? (
+                    <ChevronUpIcon aria-hidden="true" />
+                  ) : (
+                    <ChevronDownIcon aria-hidden="true" />
+                  )}
+                </span>
+              </button>
+            </div>
+          )}
+          <div className="px-3 pt-2">
+            <Button
+              className="w-full"
+              data-web-shell-model-sheet-done
+              onClick={() => onOpenChange(false)}
+            >
+              {t('common.done')}
+            </Button>
+          </div>
+        </DrawerContent>
+      </Drawer>
+    );
+  }
 
   return (
     <Popover
@@ -2748,12 +2841,13 @@ export const ChatEditor = memo(
     }, [onTogglePlan, core, planControlsDisabled]);
 
     const handleModelSelect = useCallback(
-      (modelId: string) => {
+      (modelId: string, source?: 'sheet') => {
         if (modelControlsDisabled) return;
         if (modelItems.some((item) => item.id === modelId && item.disabled)) {
           return;
         }
         onSelectModel?.(modelId);
+        if (source === 'sheet') return;
         setModelDropdownOpen(false);
         core.focus();
       },
