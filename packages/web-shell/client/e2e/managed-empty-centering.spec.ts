@@ -1,5 +1,9 @@
 import { expect, test } from '@playwright/test';
-import type { JavaAgentSession } from '../components/managed/java-managed-agent-client';
+import type { components } from '../components/managed/generated/managed-agent-api';
+
+type Schemas = components['schemas'];
+
+const SESSION_ID = 'session-empty';
 
 // The empty-state rule is layout behavior: jsdom performs no layout, so the
 // component suite can only pin the `data-managed-empty` attribute. These run in
@@ -9,50 +13,72 @@ import type { JavaAgentSession } from '../components/managed/java-managed-agent-
 test('managed empty state keeps the session header at the top and reachable @smoke', async ({
   page,
 }) => {
-  const session: JavaAgentSession = {
-    sessionId: 'session-empty',
+  // Public wire: epoch seconds for the Session resource.
+  const session: Schemas['PublicSession'] = {
+    id: SESSION_ID,
+    object: 'agent.session',
     title: 'Conversation with a deliberately long title to fill the header',
-    agentId: 'agent-a',
+    agent_id: 'agent-a',
+    agent_revision: '1',
     status: 'active',
-    createdAt: 1,
-    updatedAt: 1,
-    lastSequence: 0,
+    created_at: 1790777114,
+    updated_at: 1790777114,
+    last_event_id: 0,
     capabilities: {
+      items: false,
+      snapshots: false,
+      resync: false,
       actions: false,
       artifacts: false,
       tasks: false,
-      workspaceTurns: false,
+      workspace_turns: false,
     },
   };
-  await page.route('**/api/agent/web-shell/v1/**', async (route) => {
-    const path = new URL(route.request().url()).pathname;
+  await page.route('**/v1/agents/**', async (route) => {
+    const url = new URL(route.request().url());
+    const path = url.pathname;
     const body = route.request().postDataJSON();
-    if (path.endsWith('/runtime-nodes/query'))
+    if (path === '/v1/agents/runtime-nodes')
       return route.fulfill({ json: { supported: false, data: [] } });
-    if (path.endsWith('/user-messages/query'))
+    if (path === `/v1/agents/sessions/${SESSION_ID}/user-messages`)
       return route.fulfill({ json: { paused: false, messages: [] } });
-    if (path.endsWith('/sessions/query'))
-      return route.fulfill({ json: { data: [session], hasMore: false } });
-    if (path.endsWith('/sessions/get')) return route.fulfill({ json: session });
-    if (path.endsWith('/workspaces/query'))
+    if (path === '/v1/agents/sessions')
       return route.fulfill({
         json: {
-          data: [],
-          hasMore: false,
-          capabilities: { workspaceBinding: true },
+          object: 'list',
+          data: [session],
+          has_more: false,
+          next_cursor: null,
         },
       });
-    if (path.endsWith('/transcript/query'))
+    if (path === `/v1/agents/sessions/${SESSION_ID}`)
+      return route.fulfill({ json: session });
+    if (path === '/v1/agents/workspaces')
+      return route.fulfill({
+        json: {
+          object: 'list',
+          data: [],
+          has_more: false,
+          next_cursor: null,
+          capabilities: { workspace_context: false, workspace_binding: true },
+          default_workspace: null,
+        },
+      });
+    if (path === `/v1/agents/sessions/${SESSION_ID}/transcript`)
       return route.fulfill({
         json: {
           items: [],
           events: [],
-          lastSequence: 0,
-          coveredSequence: 0,
-          hasMore: false,
+          last_sequence: 0,
+          covered_sequence: 0,
+          older_cursor: null,
+          has_more: false,
         },
       });
-    if (path.endsWith('/events/stream'))
+    if (
+      path === `/v1/agents/sessions/${SESSION_ID}/events` &&
+      url.searchParams.get('stream') === 'true'
+    )
       return route.fulfill({ contentType: 'text/event-stream', body: '' });
     return route.fulfill({ json: body ?? {} });
   });

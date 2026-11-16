@@ -1,45 +1,61 @@
 import { expect, test, type Page } from '@playwright/test';
-import type {
-  JavaAgentEvent,
-  JavaAgentSession,
-} from '../components/managed/java-managed-agent-client';
+import type { components } from '../components/managed/generated/managed-agent-api';
+
+type Schemas = components['schemas'];
+
+// Public wire: Session, Turn and Event timestamps are epoch seconds.
+const EPOCH_SECONDS = 1790777114;
 
 async function installRecovery(page: Page, running = false) {
   const errors: string[] = [];
   const writes: { path: string; body: Record<string, unknown> }[] = [];
-  const workspace = {
-    workspaceId: 'ws-a',
-    displayName: 'Recovery project',
-    canCreateSession: true,
+  const workspace: Schemas['PublicWorkspace'] = {
+    id: 'ws-a',
+    object: 'agent.workspace',
+    display_name: 'Recovery project',
+    can_create_session: true,
     state: 'active',
-    defaultCwdRelative: '.',
+    default_cwd_relative: '.',
   };
-  const summary: JavaAgentSession = {
-    sessionId: 'source',
+  const defaultWorkspace: Schemas['PublicWorkspace'] = {
+    ...workspace,
+    id: 'ws-default',
+    display_name: 'Other default',
+  };
+  const summary: Schemas['PublicSession'] = {
+    id: 'source',
+    object: 'agent.session',
     title: 'Recover original task',
-    agentId: 'agent-b',
+    agent_id: 'agent-b',
+    agent_revision: '1',
     status: 'active',
-    createdAt: 1,
-    updatedAt: 2,
-    lastSequence: 6,
-    activeTurn: {
-      sessionId: 'source',
-      turnId: 't2',
+    created_at: EPOCH_SECONDS,
+    updated_at: EPOCH_SECONDS + 6,
+    last_event_id: 6,
+    latest_turn: {
+      id: 't2',
+      object: 'agent.turn',
+      session_id: 'source',
       status: 'failed',
-      submittedAt: 2,
+      created_at: EPOCH_SECONDS + 4,
+      completed_at: EPOCH_SECONDS + 6,
     },
     workspace: {
-      workspaceId: 'ws-a',
-      cwdRelative: 'project',
-      contextRevision: 1,
+      workspace_id: 'ws-a',
+      cwd_relative: 'project',
+      context_revision: 1,
       state: 'ready',
     },
     capabilities: {
+      items: false,
+      snapshots: false,
+      resync: false,
       actions: false,
       artifacts: false,
       tasks: false,
-      workspaceTurns: true,
+      workspace_turns: true,
     },
+    // SessionRecovery is a shared camelCase body on both wires.
     recovery: {
       state: 'awaiting_evidence',
       reasonCode: 'input_unsettled',
@@ -49,120 +65,126 @@ async function installRecovery(page: Page, running = false) {
     },
   };
   if (running) {
-    summary.activeTurn!.status = 'running';
+    summary.latest_turn!.status = 'running';
+    summary.latest_turn!.completed_at = null;
     summary.recovery = undefined;
   }
-  const operation = {
-    operationId: 'cancel-original',
-    sessionId: 'source',
+  const operation: Schemas['PublicCommandOperation'] = {
+    id: 'cancel-original',
+    session_id: 'source',
     type: 'cancel',
     status: 'running',
-    admissionStage: 'java_durable',
-    deliveryState: 'leased',
+    admission_stage: 'java_durable',
+    delivery_state: 'leased',
     replayed: false,
   };
   const operationReads: Record<string, unknown>[] = [];
-  const events: JavaAgentEvent[] = [
+  const events: Schemas['PublicEvent'][] = [
     {
       sequence: 1,
-      turnId: 't1',
+      turn_id: 't1',
       type: 'turn.accepted',
       data: { input: [{ type: 'text', text: 'Inspect repository' }] },
     },
     {
       sequence: 2,
-      turnId: 't1',
+      turn_id: 't1',
       type: 'item.output_text.delta',
       data: { text: 'Confirmed inspection complete' },
     },
-    { sequence: 3, turnId: 't1', type: 'turn.completed', data: {} },
+    { sequence: 3, turn_id: 't1', type: 'turn.completed', data: {} },
     {
       sequence: 4,
-      turnId: 't2',
+      turn_id: 't2',
       type: 'turn.accepted',
       data: { input: [{ type: 'text', text: 'Apply the checked change' }] },
     },
     {
       sequence: 5,
-      turnId: 't2',
+      turn_id: 't2',
       type: 'item.output_text.delta',
       data: { text: 'PARTIAL PRIVATE ANSWER' },
     },
-    { sequence: 6, turnId: 't2', type: 'turn.failed', data: {} },
+    { sequence: 6, turn_id: 't2', type: 'turn.failed', data: {} },
   ].map((event) => ({
     ...event,
-    sessionId: 'source',
-    eventId: `event-${event.sequence}`,
-    createdAt: event.sequence,
+    schema_version: 1,
+    projection_version: 1,
+    session_id: 'source',
+    event_id: `event-${event.sequence}`,
+    created_at: EPOCH_SECONDS + event.sequence,
     terminal: ['turn.completed', 'turn.failed', 'turn.cancelled'].includes(
       event.type,
     ),
   }));
   page.on('pageerror', (error) => errors.push(error.message));
-  await page.route('**/api/agent/web-shell/v1/**', async (route) => {
-    const path = new URL(route.request().url()).pathname;
-    const body = route.request().postDataJSON();
-    if (path.endsWith('/user-messages/query'))
+  await page.route('**/v1/agents/**', async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const path = url.pathname;
+    const method = request.method();
+    const body = request.postDataJSON();
+    if (path.endsWith('/user-messages'))
       return route.fulfill({ json: { paused: false, messages: [] } });
-    if (path.endsWith('/workspace-extensions/query'))
+    if (/^\/v1\/agents\/workspaces\/[^/]+\/extensions$/.test(path))
       return route.fulfill({ json: { supported: false, extensions: [] } });
-    if (path.endsWith('/workspaces/worktrees/options'))
+    if (/^\/v1\/agents\/workspaces\/[^/]+\/worktrees\/options$/.test(path))
       return route.fulfill({
-        json: { supported: true, currentBranch: 'main', branches: ['main'] },
+        json: { supported: true, current_branch: 'main', branches: ['main'] },
       });
-    if (path.endsWith('/runtime-nodes/query'))
+    if (path === '/v1/agents/runtime-nodes')
       return route.fulfill({ json: { supported: false, data: [] } });
-    if (path.endsWith('/sessions/query'))
-      return route.fulfill({ json: { data: [summary], hasMore: false } });
-    if (path.endsWith('/sessions/get')) return route.fulfill({ json: summary });
-    if (path.endsWith('/workspaces/query'))
+    if (path === '/v1/agents/sessions' && method === 'GET')
       return route.fulfill({
         json: {
-          data: [
-            workspace,
-            {
-              ...workspace,
-              workspaceId: 'ws-default',
-              displayName: 'Other default',
-            },
-          ],
-          hasMore: false,
-          defaultWorkspace: {
-            ...workspace,
-            workspaceId: 'ws-default',
-            displayName: 'Other default',
-          },
-          capabilities: { workspaceBinding: true },
+          object: 'list',
+          data: [summary],
+          has_more: false,
+          next_cursor: null,
         },
       });
-    if (path.endsWith('/workspaces/get'))
+    if (path === '/v1/agents/sessions/source' && method === 'GET')
+      return route.fulfill({ json: summary });
+    if (path === '/v1/agents/workspaces' && method === 'GET')
       return route.fulfill({
-        json:
-          body.workspaceId === 'ws-default'
-            ? {
-                ...workspace,
-                workspaceId: 'ws-default',
-                displayName: 'Other default',
-              }
-            : workspace,
+        json: {
+          object: 'list',
+          data: [workspace, defaultWorkspace],
+          has_more: false,
+          next_cursor: null,
+          default_workspace: defaultWorkspace,
+          capabilities: { workspace_context: false, workspace_binding: true },
+        },
       });
-    if (path.endsWith('/transcript/query'))
+    if (path === '/v1/agents/workspaces/ws-default')
+      return route.fulfill({ json: defaultWorkspace });
+    if (path === '/v1/agents/workspaces/ws-a')
+      return route.fulfill({ json: workspace });
+    if (path === '/v1/agents/sessions/source/transcript')
       return route.fulfill({
         json: {
           items: [],
           events,
-          coveredSequence: 6,
-          lastSequence: 6,
-          hasMore: false,
+          covered_sequence: 6,
+          older_cursor: null,
+          last_sequence: 6,
+          has_more: false,
         },
       });
-    if (path.endsWith('/events/stream'))
+    if (
+      path === '/v1/agents/sessions/source/events' &&
+      url.searchParams.get('stream') === 'true'
+    )
       return route.fulfill({ contentType: 'text/event-stream', body: '' });
-    if (path.endsWith('/session-recovery/query'))
+    if (path === '/v1/agents/sessions/source/recovery')
       return route.fulfill({ json: summary.recovery });
-    if (path.endsWith('/turns/cancel')) {
+    if (
+      path === '/v1/agents/sessions/source/events' &&
+      method === 'POST' &&
+      body.type === 'agent.session.cancel'
+    ) {
       writes.push({ path, body });
-      summary.activeTurn!.status = 'cancelling';
+      summary.latest_turn!.status = 'cancelling';
       summary.recovery = {
         state: 'awaiting_evidence',
         reasonCode: 'input_unsettled',
@@ -173,19 +195,27 @@ async function installRecovery(page: Page, running = false) {
       return route.fulfill({
         status: 202,
         json: {
-          sessionId: 'source',
-          turnId: 't2',
-          operationId: operation.operationId,
+          session_id: 'source',
+          turn_id: 't2',
+          operation_id: operation.id,
+          admission_stage: 'java_durable',
+          delivery_state: 'pending',
           status: 'accepted',
           replayed: false,
         },
       });
     }
-    if (path.endsWith('/operations/query')) {
-      operationReads.push(body);
+    const operationRoute =
+      /^\/v1\/agents\/sessions\/([^/]+)\/operations\/([^/]+)$/.exec(path);
+    if (operationRoute) {
+      expect(method).toBe('GET');
+      operationReads.push({
+        sessionId: operationRoute[1],
+        operationId: operationRoute[2],
+      });
       return route.fulfill({ json: operation });
     }
-    if (path.endsWith('/session-recovery/recheck')) {
+    if (path === '/v1/agents/sessions/source/recovery/recheck') {
       writes.push({ path, body });
       summary.recovery = {
         state: 'ready',
@@ -196,7 +226,10 @@ async function installRecovery(page: Page, running = false) {
       };
       return route.fulfill({ status: 202, json: summary.recovery });
     }
-    if (path.endsWith('/sessions/create') || path.endsWith('/turns/submit')) {
+    if (
+      (path === '/v1/agents/sessions' && method === 'POST') ||
+      (path === '/v1/agents/sessions/source/events' && method === 'POST')
+    ) {
       writes.push({ path, body });
       return route.fulfill({
         status: 503,
@@ -238,10 +271,11 @@ test('recovery evidence controls sending even after Java failure @smoke', async 
     .fill('Verify effects before continuing');
   await expect(send).toBeEnabled();
   expect(scenario.writes).toHaveLength(1);
-  expect(scenario.writes[0].body).toEqual({
-    sessionId: 'source',
-    turnId: 't2',
-  });
+  // The recheck body keeps the camelCase turnId; the Session rides the path.
+  expect(scenario.writes[0].path).toBe(
+    '/v1/agents/sessions/source/recovery/recheck',
+  );
+  expect(scenario.writes[0].body).toEqual({ turnId: 't2' });
   expect(scenario.errors).toEqual([]);
 });
 
@@ -274,7 +308,7 @@ test('refresh tracks the original cancel operation until cancellation is confirm
   await expect(
     page.getByRole('button', { name: 'Send message', exact: true }),
   ).toBeDisabled();
-  scenario.summary.activeTurn!.status = 'cancelled';
+  scenario.summary.latest_turn!.status = 'cancelled';
   scenario.summary.recovery = {
     state: 'ready',
     reasonCode: 'ready',
@@ -323,9 +357,10 @@ test('new Session handoff is editable, preselected and never automatically sent 
   await editor.fill('Reviewed handoff; inspect effects before continuing');
   await page.getByRole('button', { name: 'Send message', exact: true }).click();
   await expect.poll(() => scenario.writes.length).toBe(1);
+  expect(scenario.writes[0].path).toBe('/v1/agents/sessions');
   expect(scenario.writes[0].body).toMatchObject({
-    agentId: 'agent-b',
-    workspace: { workspaceId: 'ws-a', cwdRelative: 'project' },
+    agent_id: 'agent-b',
+    workspace: { workspace_id: 'ws-a', cwd_relative: 'project' },
     input: [
       {
         type: 'input_text',

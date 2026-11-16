@@ -36,7 +36,8 @@ import type {
 
 export interface UseManagedLocalFilesBridgeOptions {
   sessionId: string | undefined;
-  /** The Managed WebShell API base, e.g. `/api/agent/web-shell/v1`. */
+  /** The Managed API origin base, e.g. `https://host`; the bridge appends
+   * the per-session Public client-files path. */
   baseUrl: string;
   fetch: ManagedFetch;
   /** Injected for tests; defaults to the live window. */

@@ -1,13 +1,14 @@
 import type { components } from './generated/managed-agent-api';
 import type { ManagedAgentRequestOptions } from './managed-agent-provider';
 
+import type { WebShellArtifactPage } from './java-agent-contract-types';
 type Schemas = components['schemas'];
 
 export type ManagedToolResult = Schemas['PublicToolResult'];
 export type ManagedArtifact = Schemas['PublicArtifact'];
 export type ManagedToolResultResponse = Schemas['ToolResultResponse'];
 export type ManagedArtifactResponse = Schemas['ArtifactResponse'];
-export type ManagedArtifactPage = Schemas['WebShellArtifactPage'];
+export type ManagedArtifactPage = WebShellArtifactPage;
 
 export type ManagedArtifactSave = (
   artifact: ManagedArtifact,

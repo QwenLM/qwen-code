@@ -1,14 +1,11 @@
 import { expect, test, type Page, type TestInfo } from '@playwright/test';
-import type {
-  JavaAgentEvent,
-  JavaAgentSession,
-  JavaAgentTranscript,
-} from '../components/managed/java-managed-agent-client';
 import type { components } from '../components/managed/generated/managed-agent-api';
 import {
   createWebShellDaemonScenario,
   installMockDaemon,
 } from './utils/mockDaemon';
+
+type Schemas = components['schemas'];
 
 const SESSION_ID = 'managed-progress-session';
 const LONG_ANSWER = Array.from(
@@ -16,59 +13,68 @@ const LONG_ANSWER = Array.from(
   (_, index) => `Paragraph ${index}: a previous workspace inspection.`,
 ).join('\n\n');
 
+// Public wire: Session, Turn and Event timestamps are epoch seconds.
+const epochSeconds = () => Math.floor(Date.now() / 1000);
+
 async function installManagedScenario(page: Page, testInfo: TestInfo) {
   const baseURL = String(testInfo.project.use.baseURL);
   const scenario = createWebShellDaemonScenario({ sessions: [] });
   const daemon = await installMockDaemon(page, scenario, { baseURL });
-  const events: JavaAgentEvent[] = [];
+  const events: Schemas['PublicEvent'][] = [];
   const prompts: Array<{ prompt: unknown; key?: string }> = [];
   const cancellations: unknown[] = [];
   const errors: string[] = [];
   const streamCursors: number[] = [];
   const detailRequests: Array<{ sessionId: string; itemId: string }> = [];
-  const toolDetails = new Map<
-    string,
-    components['schemas']['WebShellToolDetails']
-  >();
+  const toolDetails = new Map<string, Schemas['PublicToolDetails']>();
   page.on('pageerror', (error) => errors.push(error.message));
-  let summary: JavaAgentSession = {
-    sessionId: SESSION_ID,
+  let summary: Schemas['PublicSession'] = {
+    id: SESSION_ID,
+    object: 'agent.session',
     title: 'Managed progress regression',
-    agentId: 'qwen-code',
+    agent_id: 'qwen-code',
+    agent_revision: '1',
     status: 'active',
-    createdAt: Date.now() - 10_000,
-    updatedAt: Date.now(),
-    activeTurn: {
-      turnId: 'p1',
-      sessionId: SESSION_ID,
+    created_at: epochSeconds() - 10,
+    updated_at: epochSeconds(),
+    latest_turn: {
+      id: 'p1',
+      object: 'agent.turn',
+      session_id: SESSION_ID,
       status: 'completed',
-      submittedAt: Date.now() - 10_000,
+      created_at: epochSeconds() - 10,
+      completed_at: epochSeconds() - 9,
     },
     environment: { state: 'ready' },
-    lastSequence: 0,
+    last_event_id: 0,
     capabilities: {
+      items: false,
+      snapshots: false,
+      resync: false,
       tasks: true,
       artifacts: false,
       actions: false,
-      workspaceTurns: false,
+      workspace_turns: false,
     },
   };
   function append(type: string, data: Record<string, unknown> = {}) {
     const sequence = events.length + 1;
     events.push({
+      schema_version: 1,
+      projection_version: 1,
       sequence,
-      eventId: `event-${sequence}`,
-      createdAt: Date.now(),
-      sessionId: SESSION_ID,
-      turnId: summary.activeTurn!.turnId,
+      event_id: `event-${sequence}`,
+      created_at: epochSeconds(),
+      session_id: SESSION_ID,
+      turn_id: summary.latest_turn!.id,
       type,
       ...(type.startsWith('item.tool_')
-        ? { itemId: String(data.itemId ?? data.toolCallId) }
+        ? { item_id: String(data.itemId ?? data.toolCallId) }
         : {}),
       data,
       terminal: ['turn.completed', 'turn.cancelled'].includes(type),
     });
-    summary.lastSequence = sequence;
+    summary.last_event_id = sequence;
   }
   append('turn.accepted', {
     input: [{ type: 'text', text: 'Previous inspection' }],
@@ -76,46 +82,59 @@ async function installManagedScenario(page: Page, testInfo: TestInfo) {
   append('item.output_text.delta', { text: LONG_ANSWER });
   append('turn.completed');
 
-  await page.route('**/api/agent/web-shell/v1/**', async (route) => {
+  await page.route('**/v1/agents/**', async (route) => {
     const request = route.request();
-    expect(request.method()).toBe('POST');
+    expect(['GET', 'POST']).toContain(request.method());
     expect(request.headers()['x-qwen-tenant-id']).toBe('local-java-demo');
-    const path = new URL(request.url()).pathname.replace(
-      '/api/agent/web-shell/v1',
-      '',
-    );
+    const url = new URL(request.url());
+    const path = url.pathname.replace('/v1/agents', '');
+    const method = request.method();
     const body = request.postDataJSON();
-    if (path.endsWith('/user-messages/query'))
+    if (path === `/sessions/${SESSION_ID}/user-messages`)
       return route.fulfill({ json: { paused: false, messages: [] } });
     const respond = (json: unknown, status = 200) =>
       route.fulfill({ status, json });
-    if (path === '/sessions/query')
-      return respond({ data: [summary], hasMore: false });
-    if (path === '/sessions/get') return respond(summary);
-    if (path === '/transcript/query')
+    if (path === '/sessions' && method === 'GET')
+      return respond({
+        object: 'list',
+        data: [summary],
+        has_more: false,
+        next_cursor: null,
+      });
+    if (path === `/sessions/${SESSION_ID}`) return respond(summary);
+    if (path === `/sessions/${SESSION_ID}/transcript`)
       return respond({
         items: [],
         events,
-        coveredSequence: summary.lastSequence,
-        lastSequence: summary.lastSequence,
-        hasMore: false,
-      } satisfies JavaAgentTranscript);
-    if (path === '/tool-details/get') {
-      detailRequests.push({ sessionId: body.sessionId, itemId: body.itemId });
-      const details = toolDetails.get(body.itemId);
+        covered_sequence: summary.last_event_id,
+        older_cursor: null,
+        last_sequence: summary.last_event_id,
+        has_more: false,
+      } satisfies Schemas['PublicTranscript']);
+    const detailRoute = new RegExp(
+      `^/sessions/${SESSION_ID}/items/([^/]+)/tool-details$`,
+    ).exec(path);
+    if (detailRoute) {
+      const itemId = detailRoute[1];
+      detailRequests.push({ sessionId: SESSION_ID, itemId });
+      const details = toolDetails.get(itemId);
       if (details) return respond(details);
       return respond(
         { error: { code: 'tool_details_not_found', message: 'Unavailable' } },
         404,
       );
     }
-    if (path === '/events/stream') {
-      streamCursors.push(body.afterSequence ?? 0);
+    if (
+      path === `/sessions/${SESSION_ID}/events` &&
+      url.searchParams.get('stream') === 'true'
+    ) {
+      const after = Number(url.searchParams.get('after') ?? 0);
+      streamCursors.push(after);
       return route.fulfill({
         status: 200,
         contentType: 'text/event-stream',
         body: events
-          .filter((event) => event.sequence > (body.afterSequence ?? 0))
+          .filter((event) => event.sequence > after)
           .map(
             (event) =>
               `id: ${event.sequence}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
@@ -123,16 +142,24 @@ async function installManagedScenario(page: Page, testInfo: TestInfo) {
           .join(''),
       });
     }
-    if (path === '/turns/submit') {
-      prompts.push({ prompt: body.input, key: body.idempotencyKey });
+    if (
+      path === `/sessions/${SESSION_ID}/events` &&
+      method === 'POST' &&
+      body.type === 'agent.session.input.message'
+    ) {
+      prompts.push({
+        prompt: body.input,
+        key: request.headers()['idempotency-key'],
+      });
       summary = {
         ...summary,
-        updatedAt: Date.now(),
-        activeTurn: {
-          sessionId: SESSION_ID,
-          turnId: `p${prompts.length + 1}`,
+        updated_at: epochSeconds(),
+        latest_turn: {
+          id: `p${prompts.length + 1}`,
+          object: 'agent.turn',
+          session_id: SESSION_ID,
           status: 'running',
-          submittedAt: Date.now(),
+          created_at: epochSeconds(),
         },
       };
       append('turn.accepted', {
@@ -144,41 +171,50 @@ async function installManagedScenario(page: Page, testInfo: TestInfo) {
       append('turn.started');
       return respond(
         {
-          sessionId: SESSION_ID,
-          turnId: summary.activeTurn!.turnId,
+          session_id: SESSION_ID,
+          turn_id: summary.latest_turn!.id,
           status: 'accepted',
           replayed: false,
-          operationId: `operation-${summary.activeTurn!.turnId}`,
-          admissionStage: 'java_durable',
-          deliveryState: 'pending',
+          operation_id: `operation-${summary.latest_turn!.id}`,
+          admission_stage: 'java_durable',
+          delivery_state: 'pending',
         },
         202,
       );
     }
-    if (path === '/turns/cancel') {
-      cancellations.push({ turnId: body.turnId });
-      summary.activeTurn!.status = 'cancelling';
+    if (
+      path === `/sessions/${SESSION_ID}/events` &&
+      method === 'POST' &&
+      body.type === 'agent.session.cancel'
+    ) {
+      cancellations.push({ turnId: body.turn_id });
+      summary.latest_turn!.status = 'cancelling';
       append('turn.cancel.requested');
       return respond(
         {
-          sessionId: SESSION_ID,
-          turnId: body.turnId,
+          session_id: SESSION_ID,
+          turn_id: body.turn_id,
           status: 'accepted',
           replayed: false,
-          operationId: `operation-${summary.activeTurn!.turnId}`,
-          admissionStage: 'java_durable',
-          deliveryState: 'pending',
+          operation_id: `operation-${summary.latest_turn!.id}`,
+          admission_stage: 'java_durable',
+          delivery_state: 'pending',
         },
         202,
       );
     }
-    if (path === '/operations/query') {
+    const operationRoute = new RegExp(
+      `^/sessions/${SESSION_ID}/operations/([^/]+)$`,
+    ).exec(path);
+    if (operationRoute) {
       return respond({
-        sessionId: SESSION_ID,
-        operationId: body.operationId,
+        session_id: SESSION_ID,
+        id: operationRoute[1],
         type: 'cancel',
         status:
-          summary.activeTurn?.status === 'cancelled' ? 'completed' : 'running',
+          summary.latest_turn?.status === 'cancelled' ? 'completed' : 'running',
+        admission_stage: 'java_durable',
+        delivery_state: 'leased',
         replayed: false,
       });
     }
@@ -186,14 +222,13 @@ async function installManagedScenario(page: Page, testInfo: TestInfo) {
   });
 
   async function emit(type: string, data?: Record<string, unknown>) {
-    if (type === 'turn.completed' || type === 'turn.cancelled') {
-      summary.activeTurn!.status = type.slice('turn.'.length);
-    }
+    if (type === 'turn.completed') summary.latest_turn!.status = 'completed';
+    if (type === 'turn.cancelled') summary.latest_turn!.status = 'cancelled';
     append(type, data);
   }
   async function waitForCurrentStream() {
     await expect
-      .poll(() => streamCursors.includes(summary.lastSequence))
+      .poll(() => streamCursors.includes(summary.last_event_id))
       .toBe(true);
   }
   await page.goto(
@@ -446,20 +481,20 @@ for (const scenario of [
       input: { command: 'synthetic command' },
       output: 'legacy display text',
       truncated: false,
-      shellResult: {
+      shell_result: {
         type: 'shell_result',
         version: 1,
         text: 'saved display text',
         output: 'structured stdout',
         directory: '/workspace/project',
-        exitCode: scenario.exitCode,
+        exit_code: scenario.exitCode,
         signal: scenario.signal,
         pid: 123,
         error: scenario.outcome === 'completed' ? null : 'saved failure',
         outcome: scenario.outcome,
         notices: ['saved notice'],
         truncated: true,
-        outputFiles: ['/tmp/saved.log'],
+        output_files: ['/tmp/saved.log'],
       },
     });
     await fixture.emit('item.tool_call.updated', {
@@ -561,7 +596,7 @@ test('collapsing a Managed card cancels its pending detail read @smoke', async (
   await page.reload();
   const failedReads: string[] = [];
   page.on('requestfailed', (request) => {
-    if (new URL(request.url()).pathname.endsWith('/tool-details/get')) {
+    if (new URL(request.url()).pathname.endsWith('/tool-details')) {
       failedReads.push(request.failure()?.errorText ?? 'request failed');
     }
   });
@@ -571,7 +606,7 @@ test('collapsing a Managed card cancels its pending detail read @smoke', async (
     release = resolve;
   });
   await page.route(
-    '**/api/agent/web-shell/v1/tool-details/get',
+    '**/v1/agents/sessions/*/items/*/tool-details',
     async (route) => {
       reads += 1;
       const response = {
@@ -674,16 +709,14 @@ test('a permanently failing pending create exposes a discard path @smoke', async
   // the create fails permanently and the pending prompt would otherwise
   // wedge the whole composer on an indefinite retry.
   const attempts: string[] = [];
-  await page.route(
-    '**/api/agent/web-shell/v1/sessions/create',
-    async (route) => {
-      attempts.push(String(route.request().postDataJSON()?.idempotencyKey));
-      await route.fulfill({
-        status: 500,
-        json: { error: { code: 'create_down', message: 'permanent failure' } },
-      });
-    },
-  );
+  await page.route('**/v1/agents/sessions', async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback();
+    attempts.push(String(route.request().headers()['idempotency-key']));
+    await route.fulfill({
+      status: 500,
+      json: { error: { code: 'create_down', message: 'permanent failure' } },
+    });
+  });
 
   await page.getByRole('button', { name: 'New session', exact: true }).click();
   const composer = page

@@ -2,8 +2,8 @@ import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
 import {
   OUTPUT,
+  publicContract,
   renderManagedAgentApi,
-  webShellContract,
 } from '../../../scripts/generate-managed-agent-api.mjs';
 
 const planned = { 'x-qwen-implementation-status': 'planned' };
@@ -16,7 +16,7 @@ describe('Managed Agent API types', () => {
     ).toBe(await renderManagedAgentApi());
   });
 
-  it('generate only implemented WebShell surface', () => {
+  it('generate only the implemented Public surface', () => {
     const body = (name: string) => ({
       content: {
         'application/json': {
@@ -24,54 +24,81 @@ describe('Managed Agent API types', () => {
         },
       },
     });
-    const contract = webShellContract({
+    const contract = publicContract({
       paths: {
-        '/web/sessions/get': {
+        '/v1/agents/sessions': {
           post: {
-            tags: ['WebShell'],
+            tags: ['Public Sessions'],
             parameters: [{ name: 'draft', in: 'query', ...planned }],
-            requestBody: body('Request'),
-            responses: { '200': body('Session') },
+            requestBody: body('CreateSessionRequest'),
+            responses: { '200': body('PublicSession') },
           },
         },
-        '/web/sessions/close': {
-          post: { tags: ['WebShell'], ...planned, requestBody: body('Close') },
+        '/v1/agents/workspaces': {
+          get: {
+            tags: ['Public Resources'],
+            responses: { '200': body('PublicWorkspaceList') },
+          },
         },
-        '/v1/sessions': {
-          get: { tags: ['Public'], responses: { '200': body('Public') } },
+        '/v1/agents/sessions/{sessionId}/draft': {
+          get: {
+            tags: ['Public Sessions'],
+            ...planned,
+            responses: { '200': body('PlannedOnly') },
+          },
+        },
+        '/api/agent/web-shell/v1/sessions/get': {
+          post: {
+            tags: ['WebShell'],
+            responses: { '200': body('WebShellSession') },
+          },
         },
       },
       components: {
         schemas: {
-          Request: { properties: { sessionId: { type: 'string' } } },
-          Session: {
-            required: ['sessionId', 'capabilities'],
+          CreateSessionRequest: {
+            properties: { agent_id: { type: 'string' } },
+          },
+          PublicSession: {
+            required: ['id', 'capabilities'],
             allOf: [
-              { required: ['sessionId'] },
+              { required: ['id'] },
               { required: ['capabilities'], ...planned },
             ],
             properties: {
-              sessionId: { type: 'string' },
-              capabilities: { $ref: '#/components/schemas/Caps', ...planned },
+              id: { type: 'string' },
+              capabilities: {
+                $ref: '#/components/schemas/SessionCapabilities',
+                ...planned,
+              },
             },
           },
-          Caps: { type: 'object' },
-          Close: { type: 'object' },
-          Public: { type: 'object' },
+          SessionCapabilities: { type: 'object' },
+          PublicWorkspaceList: { type: 'object' },
+          PlannedOnly: { type: 'object' },
+          WebShellSession: { type: 'object' },
         },
       },
     });
 
-    expect(Object.keys(contract.paths)).toEqual(['/web/sessions/get']);
-    expect(contract.paths['/web/sessions/get'].post.parameters).toEqual([]);
-    expect(Object.keys(contract.components.schemas)).toEqual([
-      'Request',
-      'Session',
+    // Only implemented Public Sessions/Resources operations survive; the
+    // planned Public route and the WebShell route are both dropped.
+    expect(Object.keys(contract.paths)).toEqual([
+      '/v1/agents/sessions',
+      '/v1/agents/workspaces',
     ]);
-    expect(contract.components.schemas.Session).toEqual({
-      required: ['sessionId'],
-      allOf: [{ required: ['sessionId'] }],
-      properties: { sessionId: { type: 'string' } },
+    expect(contract.paths['/v1/agents/sessions'].post.parameters).toEqual([]);
+    // Schemas referenced only by dropped operations or planned properties
+    // are pruned as unreachable.
+    expect(Object.keys(contract.components.schemas)).toEqual([
+      'CreateSessionRequest',
+      'PublicSession',
+      'PublicWorkspaceList',
+    ]);
+    expect(contract.components.schemas.PublicSession).toEqual({
+      required: ['id'],
+      allOf: [{ required: ['id'] }],
+      properties: { id: { type: 'string' } },
     });
   });
 });

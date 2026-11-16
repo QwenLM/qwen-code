@@ -21,7 +21,7 @@ const response = (body: unknown) =>
     headers: { 'content-type': 'application/json' },
   });
 
-it('connects all management actions to authenticated, cancellable WebShell POST routes', async () => {
+it('connects all management actions to authenticated, cancellable Public REST routes', async () => {
   const fetchImpl = vi
     .fn<typeof fetch>()
     .mockImplementation(async () => response(snapshot));
@@ -45,35 +45,32 @@ it('connects all management actions to authenticated, cancellable WebShell POST 
   await provider.mcpManagement!.operation('session-a', 'operation-a', request);
   const calls = fetchImpl.mock.calls;
   expect(calls.map(([url]) => url)).toEqual([
-    'https://product.example/api/agent/web-shell/v1/session-mcp/management/query',
-    'https://product.example/api/agent/web-shell/v1/session-mcp/management/submit',
-    'https://product.example/api/agent/web-shell/v1/session-mcp/management/operations/query',
+    'https://product.example/v1/agents/sessions/session-a/mcp-management',
+    'https://product.example/v1/agents/sessions/session-a/mcp-management/commands',
+    'https://product.example/v1/agents/sessions/session-a/mcp-management/commands/operation-a',
   ]);
+  expect(calls.map(([, init]) => init?.method)).toEqual(['GET', 'POST', 'GET']);
   for (const [, init] of calls) {
-    expect(init?.method).toBe('POST');
     expect(init?.signal).toBe(abort.signal);
     expect(init?.credentials).toBe('include');
     expect(new Headers(init?.headers).get('authorization')).toBe(
       'Bearer scoped',
     );
   }
-  expect(JSON.parse(String(calls[0][1]?.body))).toEqual({
-    sessionId: 'session-a',
-    requestId: expect.any(String),
-  });
+  // Reads are GETs without a body; the command body keeps the camelCase
+  // server-pin fields, carries the key as a header, and drops the requestId
+  // trace echo (the server assigns its own X-Request-Id).
+  expect(calls[0][1]?.body).toBeUndefined();
+  expect(calls[2][1]?.body).toBeUndefined();
   expect(JSON.parse(String(calls[1][1]?.body))).toEqual({
-    sessionId: 'session-a',
     action: 'restart',
     serverId: 'docs',
     expectedRevision: 0,
-    requestId: 'original-request',
-    idempotencyKey: 'original-command',
   });
-  expect(JSON.parse(String(calls[2][1]?.body))).toEqual({
-    sessionId: 'session-a',
-    operationId: 'operation-a',
-    requestId: expect.any(String),
-  });
+  expect(new Headers(calls[1][1]?.headers).get('idempotency-key')).toBe(
+    'original-command',
+  );
+  expect(new Headers(calls[1][1]?.headers).get('x-request-id')).toBeNull();
 });
 
 it('sends exact published pins and rejects a different Session or operation identity', async () => {

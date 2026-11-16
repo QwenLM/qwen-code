@@ -24,7 +24,7 @@ function provider(withClientFiles: boolean): ManagedAgentProvider {
     clientFiles: withClientFiles
       ? {
           transport: () => ({
-            baseUrl: 'http://test/api/agent/web-shell/v1',
+            baseUrl: 'http://test',
             fetch: async () => new Response('{}', { status: 200 }),
           }),
         }
