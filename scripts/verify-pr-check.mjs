@@ -165,9 +165,11 @@ function readIfExists(path) {
 
 // A filesystem root contains every path on its volume: '/' on POSIX, a drive
 // root like 'C:\' on Windows. Both must fail closed rather than be used as a
-// discriminating trust root (R17-1, deferred Windows drive-root case).
+// discriminating trust root (R17-1, deferred Windows drive-root case). '/' is
+// also a valid root spelling on Windows (where sep is '\\'), so accept it on
+// every platform, not only where it equals sep (R6-1).
 export function isFilesystemRoot(root) {
-  return root === sep || /^[A-Za-z]:[\\/]$/.test(root);
+  return root === sep || root === '/' || /^[A-Za-z]:[\\/]$/.test(root);
 }
 
 // Root-aware containment. A filesystem root contains every path, so it must
