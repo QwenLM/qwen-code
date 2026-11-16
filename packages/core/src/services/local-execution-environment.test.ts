@@ -250,7 +250,7 @@ describe('LocalExecutionEnvironment', () => {
     const cached = await execute('cached', ToolNames.READ_FILE, {
       file_path: file,
     });
-    expect(cached.llmContent).toContain('unchanged since last read');
+    expect(cached.llmContent).toContain('Wasted call');
     await environment.invalidateReadCache([file]);
     const reread = await execute('reread', ToolNames.READ_FILE, {
       file_path: file,

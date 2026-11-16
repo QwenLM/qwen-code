@@ -449,6 +449,67 @@ describe('FileReadCache', () => {
     });
   });
 
+  describe('lastReadRange / ranged fast-path view', () => {
+    const range = { offset: 5, limit: 3 };
+
+    it('records the request range for a satisfied ranged read', () => {
+      const entry = read('/x/foo.ts', makeStats(), {
+        full: false,
+        cacheable: true,
+        range,
+      });
+      expect(entry.lastReadRange).toEqual(range);
+      expect(entry.lastReadRangeResident).toBe(true);
+    });
+
+    it('records full for an untruncated whole-file read', () => {
+      const entry = read('/x/foo.ts', makeStats());
+      expect(entry.lastReadRange).toBe('full');
+      expect(entry.lastReadRangeResident).toBe(true);
+    });
+
+    it('records no view for cap-truncated reads', () => {
+      const entry = read('/x/foo.ts', makeStats(), {
+        full: false,
+        cacheable: true,
+        truncated: true,
+        range,
+      });
+      expect(entry.lastReadRange).toBeUndefined();
+      expect(entry.lastReadRangeResident).toBe(false);
+    });
+
+    it('records no view for non-text reads', () => {
+      const entry = read('/x/foo.png', makeStats(), {
+        full: false,
+        cacheable: false,
+        range,
+      });
+      expect(entry.lastReadRange).toBeUndefined();
+      expect(entry.lastReadRangeResident).toBe(false);
+    });
+
+    it('lets the most recent read overwrite the view', () => {
+      read('/x/foo.ts', makeStats(), { full: false, cacheable: true, range });
+      const entry = read('/x/foo.ts', makeStats());
+      expect(entry.lastReadRange).toBe('full');
+    });
+
+    it('markReadEvictedFromHistory disarms the ranged view too', () => {
+      const stats = makeStats();
+      read('/x/foo.ts', stats, { full: false, cacheable: true, range });
+      expect(cache.markReadEvictedFromHistory(stats)).toBe(true);
+      expect(fresh(stats).lastReadRangeResident).toBe(false);
+    });
+
+    it('markAllReadsEvictedFromHistory disarms the ranged view too', () => {
+      const stats = makeStats();
+      read('/x/foo.ts', stats, { full: false, cacheable: true, range });
+      cache.markAllReadsEvictedFromHistory();
+      expect(fresh(stats).lastReadRangeResident).toBe(false);
+    });
+  });
+
   describe('readResidentInHistory / markReadEvictedFromHistory (issue #4239)', () => {
     it('a fresh recordRead is resident in history', () => {
       expect(read('/x/foo.ts', makeStats()).readResidentInHistory).toBe(true);

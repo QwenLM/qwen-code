@@ -34,6 +34,7 @@ import {
   FileReadOpenError,
   type FileReadSource,
 } from '../utils/file-read-source.js';
+import type { FileReadRange } from '../services/fileReadCache.js';
 import { parsePDFPageRange, PDF_MAX_PAGES_PER_READ } from '../utils/pdf.js';
 import type { Config } from '../config/config.js';
 import type { InputModalities } from '../core/contentGenerator.js';
@@ -243,23 +244,40 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     if (
       useFastPath &&
       stats &&
-      isFullRead &&
+      this.params.pages === undefined &&
       cache.getClearGeneration() === cacheGeneration
     ) {
       const status = cache.check(stats);
+      const entry = status.entry;
       if (
         status.state === 'fresh' &&
-        status.entry.lastReadAt !== undefined &&
-        status.entry.lastReadWasFull &&
-        status.entry.lastReadCacheable &&
-        // Only quote-back if that read is still in history (issue
-        // #4239: idle microcompaction flips this off when it blanks it).
-        status.entry.readResidentInHistory &&
-        (status.entry.lastWriteAt === undefined ||
-          status.entry.lastReadAt > status.entry.lastWriteAt)
+        entry.lastReadAt !== undefined &&
+        entry.lastReadCacheable &&
+        (entry.lastWriteAt === undefined ||
+          entry.lastReadAt > entry.lastWriteAt)
       ) {
-        debugLogger.debug('hit', { path: absPath });
-        return this.unchangedResult(absPath);
+        const requestRange: FileReadRange = isFullRead
+          ? 'full'
+          : {
+              offset: this.params.offset ?? 0,
+              limit: this.params.limit ?? undefined,
+            };
+        // Full reads quote the sticky whole-file view; ranged reads quote
+        // only the exact view the last read produced. Both halves require
+        // that view still in history (issue #4239: idle microcompaction
+        // disarms the resident flags when it blanks the result).
+        const hit =
+          requestRange === 'full'
+            ? entry.lastReadWasFull && entry.readResidentInHistory
+            : entry.lastReadRangeResident &&
+              entry.lastReadRange !== undefined &&
+              entry.lastReadRange !== 'full' &&
+              entry.lastReadRange.offset === requestRange.offset &&
+              entry.lastReadRange.limit === requestRange.limit;
+        if (hit) {
+          debugLogger.debug('hit', { path: absPath });
+          return this.unchangedResult(absPath);
+        }
       }
       debugLogger.debug('miss', { path: absPath, state: status.state });
     }
@@ -352,6 +370,14 @@ class ReadFileToolInvocation extends BaseToolInvocation<
       cache.recordRead(absPath, recordStats, {
         full: isFullRead && !result.isTruncated,
         cacheable,
+        truncated: result.contentLengthTruncated === true,
+        range:
+          this.params.pages === undefined
+            ? {
+                offset: this.params.offset ?? 0,
+                limit: this.params.limit ?? undefined,
+              }
+            : undefined,
       });
       this.recordedStats = recordStats;
       // Reading into a program does not prove the full text reached history.
@@ -618,12 +644,11 @@ class ReadFileToolInvocation extends BaseToolInvocation<
       makeRelative(absPath, this.config.getTargetDir()),
     );
     const llmContent =
-      `[File ${relativePath} unchanged since last read in this session — ` +
-      `the full content was provided earlier in this conversation. ` +
-      `If you cannot retrieve that prior content (e.g. after context ` +
-      `compaction) or you suspect the file was modified outside the read/edit ` +
-      `tools (shell command, MCP tool, another process), re-read with ` +
-      `explicit offset/limit to fetch current content.]`;
+      `Wasted call — file ${relativePath} unchanged since your last Read. ` +
+      `Refer to that earlier tool_result instead. If you cannot retrieve ` +
+      `that earlier result (e.g. after context compaction) or suspect the ` +
+      `file was modified outside the read/edit tools, re-read with ` +
+      `explicit offset/limit.`;
     return {
       llmContent,
       returnDisplay: `Unchanged: ${relativePath}`,

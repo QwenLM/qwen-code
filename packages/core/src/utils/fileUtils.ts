@@ -1058,6 +1058,12 @@ export interface ProcessedFileReadResult {
   originalLineCount?: number; // For text files, the total number of lines in the original file
   originalLineCountExact?: boolean; // False when a large range read stopped before EOF
   isTruncated?: boolean; // Indicates if displayed content was truncated
+  /**
+   * True iff the character/byte cap cut the produced body short of the
+   * requested view. Distinct from `isTruncated`, which is also true for
+   * an explicit offset/limit slice that the request fully satisfied.
+   */
+  contentLengthTruncated?: boolean;
   linesShown?: [number, number]; // For text files [startLine, endLine] (1-based for display)
   /**
    * The Stats taken at the start of the read pipeline, before the
@@ -1755,6 +1761,7 @@ export async function processSingleFileContent(
           llmContent,
           returnDisplay,
           isTruncated,
+          contentLengthTruncated,
           originalLineCount,
           originalLineCountExact,
           linesShown: [startLine + 1, actualEndLine],

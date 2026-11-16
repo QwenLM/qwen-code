@@ -234,9 +234,7 @@ describe('execution tool facade', () => {
     const file = await writeWorkspaceFile('file.txt', 'read me\n');
     const facade = wrap();
     await run(facade, file);
-    expect((await run(facade, file)).llmContent).toContain(
-      'unchanged since last read',
-    );
+    expect((await run(facade, file)).llmContent).toContain('Wasted call');
     config.getFileReadCache().clear();
     expect((await run(facade, file)).llmContent).toContain('read me');
   });

@@ -51,6 +51,13 @@ import { hasVerifiableInode } from '../utils/file-identity.js';
  * invariant maintained by the surrounding code.
  */
 
+/**
+ * A reproducible read view: `'full'` for the entire current content,
+ * `{ offset, limit }` for an exact line range as the request asked it
+ * (offset is the 0-based line index; `limit` undefined means open-ended).
+ */
+export type FileReadRange = 'full' | { offset: number; limit?: number };
+
 /** A single tracked file. Mutated in place by {@link FileReadCache}. */
 export interface FileReadEntry {
   /** `${stats.dev}:${stats.ino}` — the canonical identity. */
@@ -138,6 +145,31 @@ export interface FileReadEntry {
    * issue #4239 false-block this whole marker exists to avoid.
    */
   readResidentInHistory: boolean;
+  /**
+   * The view the most recent read produced, when that read yielded a
+   * reproducible text payload: `'full'` for an untruncated no-args
+   * read, `{ offset, limit }` for a ranged read whose request was
+   * fully satisfied, `undefined` when the most recent read was
+   * cap-truncated, non-text, or page-based (PDF) — views whose bytes
+   * cannot be quoted back verbatim on a later identical request.
+   *
+   * With {@link lastReadRangeResident} this gates the ranged-read half
+   * of the ReadFile fast-path: a repeat Read with the same offset/limit
+   * against an unchanged file returns the `file_unchanged` placeholder
+   * instead of re-emitting bytes the model already holds. The full-read
+   * half keeps gating on {@link lastReadWasFull} +
+   * {@link readResidentInHistory}, so this field never widens what a
+   * no-args Read may quote.
+   */
+  lastReadRange?: FileReadRange;
+  /**
+   * True iff the view recorded in {@link lastReadRange} is still
+   * quotable from conversation history. Armed whenever a view is
+   * recorded; disarmed by {@link markReadEvictedFromHistory} /
+   * {@link markAllReadsEvictedFromHistory} alongside
+   * {@link readResidentInHistory}.
+   */
+  lastReadRangeResident: boolean;
 }
 
 /** Result of {@link FileReadCache.check}. */
@@ -146,6 +178,14 @@ export type FileReadCheckResult =
   | { state: 'stale'; entry: FileReadEntry }
   | { state: 'unverifiable' }
   | { state: 'unknown' };
+
+/** What a recorded read produced; see {@link FileReadCache.recordRead}. */
+export type FileReadRecordOpts = {
+  full: boolean;
+  cacheable: boolean;
+  truncated?: boolean;
+  range?: { offset: number; limit?: number };
+};
 
 export class FileReadCache {
   private readonly byInode = new Map<string, FileReadEntry>();
@@ -197,9 +237,19 @@ export class FileReadCache {
    * saw the first 10 lines of, exactly the regression flagged in
    * the maintainer review.
    *
-   * The fast-path `file_unchanged` check still gates on the
-   * incoming request's own `isFullRead` (in `read-file.ts`), so a
-   * partial read does not get a placeholder it shouldn't.
+   * The fast-path `file_unchanged` check gates full reads on the
+   * incoming request's own `isFullRead` and ranged reads on an exact
+   * match against `lastReadRange`, so a read never receives a
+   * placeholder for a view it did not produce.
+   *
+   *  - `truncated` — the character/byte cap cut the body short of the
+   *    requested view (`contentLengthTruncated` from the read
+   *    pipeline). A cap-truncated view is never recorded as a quotable
+   *    range: the cap is a session setting, not a file property, so the
+   *    on-disk fingerprint cannot promise the same cut on a later read.
+   *  - `range`     — the request's `{ offset, limit }` on a ranged
+   *    read; recorded as {@link FileReadEntry.lastReadRange} when the
+   *    read was cacheable and not cap-truncated.
    *
    * When `stats.ino` is `0` the read is not stored and the returned
    * entry is **detached**: it describes this read for the immediate
@@ -209,7 +259,7 @@ export class FileReadCache {
   recordRead(
     absPath: string,
     stats: Stats,
-    opts: { full: boolean; cacheable: boolean },
+    opts: FileReadRecordOpts,
   ): FileReadEntry {
     if (!FileReadCache.hasVerifiableIdentity(stats)) {
       const entry = FileReadCache.createEntry(absPath, stats);
@@ -217,6 +267,8 @@ export class FileReadCache {
       entry.readResidentInHistory = opts.full;
       entry.lastReadWasFull = opts.full;
       entry.lastReadCacheable = opts.cacheable;
+      entry.lastReadRange = FileReadCache.viewOf(opts);
+      entry.lastReadRangeResident = entry.lastReadRange !== undefined;
       return entry;
     }
 
@@ -255,7 +307,15 @@ export class FileReadCache {
       entry.lastReadWasFull = opts.full;
       entry.lastReadCacheable = opts.cacheable;
     }
+    entry.lastReadRange = FileReadCache.viewOf(opts);
+    entry.lastReadRangeResident = entry.lastReadRange !== undefined;
     return entry;
+  }
+
+  /** The reproducible view this read produced, if any. */
+  private static viewOf(opts: FileReadRecordOpts): FileReadRange | undefined {
+    if (!opts.cacheable || opts.truncated) return undefined;
+    return opts.full ? 'full' : opts.range;
   }
 
   /**
@@ -353,6 +413,7 @@ export class FileReadCache {
     const entry = this.byInode.get(FileReadCache.inodeKey(stats));
     if (entry) {
       entry.readResidentInHistory = false;
+      entry.lastReadRangeResident = false;
       return true;
     }
     return false;
@@ -362,6 +423,7 @@ export class FileReadCache {
   markAllReadsEvictedFromHistory(): void {
     for (const entry of this.byInode.values()) {
       entry.readResidentInHistory = false;
+      entry.lastReadRangeResident = false;
     }
   }
 
@@ -481,6 +543,7 @@ export class FileReadCache {
       lastReadWasFull: false,
       lastReadCacheable: false,
       readResidentInHistory: false,
+      lastReadRangeResident: false,
     };
   }
 }

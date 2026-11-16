@@ -123,9 +123,7 @@ describe('FileReadCache integration: read after history rewrite', () => {
     );
 
     // THE BUG: returned content is the placeholder, NOT the real file.
-    expect(r2.llmContent as string).toContain(
-      'unchanged since last read in this session',
-    );
+    expect(r2.llmContent as string).toContain('Wasted call');
     expect(r2.llmContent as string).not.toContain('export function hello');
 
     // The model now has:
@@ -162,9 +160,7 @@ describe('FileReadCache integration: read after history rewrite', () => {
     );
 
     expect(r2.llmContent as string).toContain('export function hello');
-    expect(r2.llmContent as string).not.toContain(
-      'unchanged since last read in this session',
-    );
+    expect(r2.llmContent as string).not.toContain('Wasted call');
   });
 
   it('worst case: when microcompact removes every prior read of a file, the placeholder leaves zero recoverable bytes for the model', async () => {
@@ -215,9 +211,7 @@ describe('FileReadCache integration: read after history rewrite', () => {
       new AbortController().signal,
     );
 
-    expect(r.llmContent as string).toContain(
-      'unchanged since last read in this session',
-    );
+    expect(r.llmContent as string).toContain('Wasted call');
     // Total foo.ts content reachable to the model:
     //   history → 0 bytes
     //   fresh tool result → placeholder, 0 bytes

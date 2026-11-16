@@ -1835,15 +1835,13 @@ describe('ReadFileTool', () => {
     });
 
     describe('with FileReadCache', () => {
-      const PLACEHOLDER = /unchanged since last read in this session/;
+      const PLACEHOLDER = /unchanged since your last Read/;
 
       it('treats null pagination as a full text read for caching', async () => {
         const filePath = await put('nullable.txt', 'first\nsecond\nthird');
         const result = await read({ file_path: filePath, ...nullPagination });
         expect(result.llmContent).toBe('first\nsecond\nthird');
-        expect((await read(filePath)).llmContent).toContain(
-          'unchanged since last read',
-        );
+        expect((await read(filePath)).llmContent).toContain('Wasted call');
       });
 
       it('returns a short error when a text-only model reads a large PDF without pages', async () => {
@@ -1989,6 +1987,77 @@ describe('ReadFileTool', () => {
         expect(typeof followUp.llmContent).toBe('string');
         expect(followUp.llmContent).not.toMatch(/unchanged since/);
         expect(followUp.llmContent).toContain('e');
+      });
+
+      it('returns the placeholder on a repeat ranged Read of an unchanged file', async () => {
+        const filePath = await put(
+          'ranged-dedup.txt',
+          numberedLines(20, 'Line'),
+        );
+
+        const first = await read({ file_path: filePath, offset: 5, limit: 3 });
+        expect(first.llmContent).toContain('Line 6');
+
+        const second = await read({ file_path: filePath, offset: 5, limit: 3 });
+        expect(second.llmContent).toMatch(PLACEHOLDER);
+        expect(second.llmContent).not.toContain('Line 6');
+      });
+
+      it('serves content when the ranged request differs from the recorded view', async () => {
+        const filePath = await put(
+          'ranged-other.txt',
+          numberedLines(20, 'Line'),
+        );
+
+        await read({ file_path: filePath, offset: 5, limit: 3 });
+        const other = await read({ file_path: filePath, offset: 5, limit: 4 });
+        expect(other.llmContent).not.toMatch(PLACEHOLDER);
+        expect(other.llmContent).toContain('Line 9');
+      });
+
+      it('does not dedup a ranged Read whose first view was cap-truncated', async () => {
+        // 700 lines exceed the mock Config's 500-line cap: the produced view
+        // depends on a session setting the fingerprint cannot promise again.
+        const filePath = await put('ranged-long.txt', numberedLines(700));
+
+        await read({ file_path: filePath, offset: 0, limit: 700 });
+        const repeat = await read({
+          file_path: filePath,
+          offset: 0,
+          limit: 700,
+        });
+        expect(repeat.llmContent).not.toMatch(PLACEHOLDER);
+        expect(repeat.returnDisplay).toMatch(/Read lines .* of 700/);
+      });
+
+      it('overwrites the view per Read so a ranged Read after a full Read re-emits once before deduping again', async () => {
+        const filePath = await put(
+          'ranged-full.txt',
+          numberedLines(20, 'Line'),
+        );
+
+        await read({ file_path: filePath, offset: 5, limit: 3 });
+        await read(filePath);
+        // The full Read replaced the recorded view, so this ranged Read
+        // re-emits its slice (and re-records it) instead of quoting back.
+        const repeat = await read({ file_path: filePath, offset: 5, limit: 3 });
+        expect(repeat.llmContent).toContain('Line 6');
+        const fourth = await read({ file_path: filePath, offset: 5, limit: 3 });
+        expect(fourth.llmContent).toMatch(PLACEHOLDER);
+      });
+
+      it('re-emits bytes (no placeholder) after a ranged Read was evicted from history', async () => {
+        const filePath = await put(
+          'evicted-range.txt',
+          numberedLines(20, 'Line'),
+        );
+
+        await read({ file_path: filePath, offset: 5, limit: 3 });
+        fileReadCache.markReadEvictedFromHistory(fs.statSync(filePath));
+
+        const repeat = await read({ file_path: filePath, offset: 5, limit: 3 });
+        expect(repeat.llmContent).not.toMatch(/unchanged since/);
+        expect(repeat.llmContent).toContain('Line 6');
       });
 
       it('does not return the placeholder for binary files', async () => {
