@@ -48,7 +48,7 @@ class ChildWorkspaceStoreTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"SSH_LOCAL", "CSI"})
+    @ValueSource(strings = {"SSH_LOCAL", "EXTERNAL"})
     void refusesNonLocalStorageBeforeWritingAChildWorkspaceOrOperation(String kind) {
         alias("storage", kind);
         assertThatThrownBy(() -> store.admit("tenant", "parent", "run", binding("storage"), 1))
