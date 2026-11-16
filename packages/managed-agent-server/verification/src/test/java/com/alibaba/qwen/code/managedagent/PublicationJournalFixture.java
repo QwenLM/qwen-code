@@ -3,12 +3,10 @@ package com.alibaba.qwen.code.managedagent;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
-import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedToolResultStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiReservationStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
@@ -37,7 +35,6 @@ import java.time.Instant;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -74,7 +71,6 @@ public final class PublicationJournalFixture {
     public long revision;
     public long sequence;
     public String commitDigest;
-    public WorkspaceCsiReservationStore.Reservation csiReservation;
     /** The attested external Shell binding, when this is that placement. */
     public RuntimeBindingRecord externalBinding;
     /** The operator's storage revision; the producer must offer this one. */
@@ -92,7 +88,7 @@ public final class PublicationJournalFixture {
         sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc,
                 new JdbcManagedExtensionRecordStore(jdbc), null,
                 null, null, objects, results, null,
-                com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound(), null);
+                com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound());
         bindings = new JdbcRuntimeBindingRepository(source,
                 new AesGcmSecretProtector("key", new byte[32]),
                 () -> "binding-1");
@@ -101,19 +97,15 @@ public final class PublicationJournalFixture {
     }
 
     public static PublicationJournalFixture create(DataSource source) {
-        return create(source, null);
+        return create(source, null, null);
     }
 
-    public static PublicationJournalFixture create(DataSource source, WorkspaceCsiRegistration registration) {
-        return create(source, registration, null, null);
-    }
-
-    public static PublicationJournalFixture create(DataSource source, WorkspaceCsiRegistration registration,
+    public static PublicationJournalFixture create(DataSource source,
             com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore objects,
             JdbcManagedToolResultStore results) {
         PublicationJournalFixture fixture =
                 new PublicationJournalFixture(source, objects, results);
-        fixture.populate(source, registration, false, false);
+        fixture.populate(false, false);
         return fixture;
     }
 
@@ -121,13 +113,13 @@ public final class PublicationJournalFixture {
             com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore objects,
             JdbcManagedToolResultStore results) {
         var fixture = new PublicationJournalFixture(source, objects, results);
-        fixture.populate(source, null, false, true);
+        fixture.populate(false, true);
         return fixture;
     }
 
     public static PublicationJournalFixture createSessionIsolated(DataSource source) {
         var fixture = new PublicationJournalFixture(source);
-        fixture.populate(source, null, true, false);
+        fixture.populate(true, false);
         return fixture;
     }
 
@@ -196,32 +188,13 @@ public final class PublicationJournalFixture {
         journalEvidence("workspace-1", false);
     }
 
-    private void populate(DataSource source, WorkspaceCsiRegistration registration, boolean sessionIsolated, boolean diagnostics) {
-        boolean csi = registration != null;
-        var scope = new RuntimeScope("tenant-1", "workspace-1", csi ? "1" : "generation-1",
-                "/workspace", csi ? "sha256:" + "a".repeat(64) : "capability", csi || sessionIsolated ? "session" : "workspace");
-        var runtime = bindings.findOrCreate(csi
-                ? new RuntimeProvisionRequest(scope, "session-1", "kubernetes-workspace", registration.storageId())
-                : new RuntimeProvisionRequest(scope, sessionIsolated ? "session-1" : null));
+    private void populate(boolean sessionIsolated, boolean diagnostics) {
+        var scope = new RuntimeScope("tenant-1", "workspace-1", "generation-1",
+                "/workspace", "capability", sessionIsolated ? "session" : "workspace");
+        var runtime = bindings.findOrCreate(
+                new RuntimeProvisionRequest(scope, sessionIsolated ? "session-1" : null));
         runtime = bindings.claimOperation(runtime.getBindingId(), "owner", Duration.ofMinutes(1));
-        if (csi) {
-            var csiStore = new WorkspaceCsiReservationStore(jdbc, manager, JSON);
-            csiStore.register(registration);
-            csiReservation = csiStore.reserve(registration, bindings, runtime, UUID.randomUUID().toString());
-            var seed = runtime.getProvisionSeed();
-            var lease = new RuntimeLease(seed.getProvisionalRuntimeId(), URI.create("http://127.0.0.1:9"),
-                    seed.getToken(), seed.getLeaseId(), seed.getEpoch());
-            runtime = bindings.compareAndSet(runtime, runtime.withAttestation(lease,
-                    new RuntimeResourceHandle("kubernetes-workspace", 1, Map.of("fixture", "local-db")),
-                    Instant.now(), Instant.now()));
-            var nativeSessions = new JdbcRuntimeSessionRepository(source);
-            var acquiring = bindings.admitSession(nativeSessions, new RuntimeSessionRecord(
-                    new RuntimeSession("session-1", "runtime-1", "bootstrap", scope), "binding-1", 1,
-                    RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now()));
-            nativeSessions.compareAndSet(acquiring, acquiring.withState(RuntimeSessionRecord.State.READY, Instant.now()));
-        } else {
-            runtime = bindings.compareAndSet(runtime, runtime.withState(RuntimeBindingRecord.State.READY, null, Instant.now()));
-        }
+        runtime = bindings.compareAndSet(runtime, runtime.withState(RuntimeBindingRecord.State.READY, null, Instant.now()));
         assertThat(runtime).isNotNull();
         journalEvidence("workspace-1", diagnostics);
     }

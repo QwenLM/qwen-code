@@ -8,6 +8,10 @@ import {
   restoreSessionSources,
   type SessionSourcesRestoreState,
 } from './session-sources.js';
+import {
+  restoreGeneratedUiStates,
+  type GeneratedUiStateRestore,
+} from './generated-ui-state.js';
 
 import { Storage } from '../config/storage.js';
 import {
@@ -25,8 +29,10 @@ import type { Content, Part } from '@google/genai';
 import * as jsonl from '../utils/jsonl-utils.js';
 import type { HistoryGap } from '../utils/conversation-chain.js';
 import {
+  isGeneratedUiStateRecord,
   isTranscriptConversationRecord,
   prepareTranscriptRecords,
+  selectActiveGeneratedUiStateRecordUuids,
 } from '../utils/transcript-records.js';
 import { projectUserTranscriptForDisplay } from '../utils/transcript-records.js';
 import type {
@@ -3539,6 +3545,48 @@ export class SessionService {
     return restoreSessionSources(records, sessionId);
   }
 
+  /** The latest saved view state per Generated UI card on the active branch. */
+  async readGeneratedUiStates(
+    sessionId: string,
+  ): Promise<GeneratedUiStateRestore> {
+    if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`))
+      throw new Error('Invalid session ID');
+    const filePath = this.getSessionFilePath(sessionId, 'active');
+    try {
+      await fs.promises.stat(filePath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT')
+        return { states: new Map(), maxRevision: 0 };
+      return { unavailable: true };
+    }
+    const { records, complete } =
+      await jsonl.readLinesWithIntegrity<ChatRecord>(filePath, Infinity);
+    if (!complete) return { unavailable: true };
+    if (
+      records[0] &&
+      !(await this.sessionBelongsToCurrentProject(
+        records[0].sessionId,
+        records[0].cwd,
+      ))
+    )
+      throw new Error('Session workspace does not match');
+    const prepared = prepareTranscriptRecords(records);
+    const activeUuids = prepared.records.map((record) => record.uuid);
+    if (
+      prepared.diagnostics.some(
+        ({ code, recordId }) =>
+          code === 'history_gap' ||
+          code === 'parent_cycle' ||
+          (code === 'conflicting_parent_uuid' &&
+            recordId !== undefined &&
+            activeUuids.includes(recordId)),
+      )
+    ) {
+      return { unavailable: true };
+    }
+    return restoreGeneratedUiStates(records, activeUuids);
+  }
+
   async readRestoreProjection(
     sessionId: string,
     options: SelectiveSessionRestoreOptions,
@@ -4639,10 +4687,7 @@ export class SessionService {
     {
       let lastRetained: string | null = null;
       for (const record of preFilterRecords) {
-        if (
-          retainedUuids.has(record.uuid) &&
-          !isSessionArtifactRecord(record)
-        ) {
+        if (retainedUuids.has(record.uuid) && !isForkSideRecord(record)) {
           lastRetained = record.uuid;
         } else {
           nearestRetainedPredecessor.set(record.uuid, lastRetained);
@@ -4652,7 +4697,7 @@ export class SessionService {
     const forked: ChatRecord[] = [
       ...(sourceRecord ? [sourceRecord] : []),
       ...sourceRecords.map((record) => {
-        const isArtifactRecord = isSessionArtifactRecord(record);
+        const isSideRecord = isForkSideRecord(record);
         let systemPayload = remapSystemPayloadForFork(
           record,
           sourceSessionId,
@@ -4688,7 +4733,7 @@ export class SessionService {
               }
             : {}),
           parentUuid:
-            isArtifactRecord &&
+            isSideRecord &&
             record.parentUuid !== null &&
             retainedUuids.has(record.parentUuid)
               ? record.parentUuid
@@ -4698,7 +4743,7 @@ export class SessionService {
             messageUuid: record.uuid,
           },
         };
-        if (!isArtifactRecord) {
+        if (!isSideRecord) {
           prevUuid = record.uuid;
         }
         return next;
@@ -5407,6 +5452,14 @@ function remapSystemPayloadForFork(
   return record.systemPayload;
 }
 
+/**
+ * Side records hang beside the active tail without moving it: session
+ * artifacts and Generated UI view state. A fork keeps their attachment.
+ */
+function isForkSideRecord(record: ChatRecord): boolean {
+  return isSessionArtifactRecord(record) || isGeneratedUiStateRecord(record);
+}
+
 function includeActiveSideArtifactRecords(
   records: ChatRecord[],
   activeRecords: ChatRecord[],
@@ -5414,12 +5467,11 @@ function includeActiveSideArtifactRecords(
   const activeByUuid = new Map(
     activeRecords.map((record) => [record.uuid, record]),
   );
-  const artifactUuids = new Set(
-    selectActiveSideArtifactRecordUuids(
-      records,
-      activeRecords.map((record) => record.uuid),
-    ),
-  );
+  const activeUuids = activeRecords.map((record) => record.uuid);
+  const artifactUuids = new Set([
+    ...selectActiveSideArtifactRecordUuids(records, activeUuids),
+    ...selectActiveGeneratedUiStateRecordUuids(records, activeUuids),
+  ]);
   const selected: ChatRecord[] = [];
   for (const record of records) {
     const activeRecord = activeByUuid.get(record.uuid);
