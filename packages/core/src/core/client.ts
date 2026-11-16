@@ -223,6 +223,7 @@ import {
   createUserPromptSubmitContextPart,
   deliveredUserPromptSubmitContexts,
 } from '../hooks/user-prompt-submit-context.js';
+import { drainAsyncHookContextPart } from '../hooks/async-hook-context.js';
 import {
   TrustedUserAnswers,
   type TrustedUserAnswerQuestion,
@@ -5198,6 +5199,16 @@ export class LlmClient {
             appendedHookContext,
             appendedHookContexts,
           );
+      }
+      // Background (async) hooks may have produced output since the last
+      // turn. Drain it (get-and-clear) and deliver it to the model on this
+      // request, before the send and its auto-compaction so the threshold
+      // sees the same tail the provider will (capability ledger L11).
+      const asyncHookContextPart = drainAsyncHookContextPart(
+        this.config.getHookSystem(),
+      );
+      if (asyncHookContextPart) {
+        requestToSend = [...requestToSend, asyncHookContextPart];
       }
       if (ideContextText) {
         const firstText = requestToSend.find(
