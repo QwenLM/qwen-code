@@ -249,6 +249,42 @@ describe('AoneChannel', () => {
       ch.disconnect();
       stderr.mockRestore();
     });
+
+    it('warns on the fully permissive default; silent when restricted (R2-7)', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      // makeConfig defaults: groupPolicy open, groups {'*':{}} → senders
+      // fall back to open — the UI-created posture.
+      const ch = new TestableAoneChannel(
+        'test-aone',
+        makeConfig(),
+        makeBridge(),
+      );
+      await ch.connect();
+      expect(
+        stderr.mock.calls.some((c) =>
+          String(c[0]).includes('any commenter on a watched repository'),
+        ),
+      ).toBe(true);
+      ch.disconnect();
+      stderr.mockClear();
+      const restricted = new TestableAoneChannel(
+        'test-aone',
+        makeConfig({
+          groups: { '*': { senders: 'allowlist', allowedUsers: ['alice'] } },
+        }),
+        makeBridge(),
+      );
+      await restricted.connect();
+      expect(
+        stderr.mock.calls.some((c) =>
+          String(c[0]).includes('any commenter on a watched repository'),
+        ),
+      ).toBe(false);
+      restricted.disconnect();
+      stderr.mockRestore();
+    });
   });
 
   describe('baseline', () => {
@@ -571,6 +607,16 @@ describe('AoneChannel', () => {
       );
       await ch.connect();
       expect(ch.cursor.repos['test/repo']).toBeUndefined();
+      // R2-1: the prune must be persisted by connect ITSELF, before any
+      // poll — a later connect failure (e.g. no a1 login) must not leave
+      // the stale key on disk. A fresh instance loads the pruned state
+      // without either channel having polled.
+      const mid = new TestableAoneChannel(
+        'test-aone',
+        makeConfig({ repos: ['other/repo'] }),
+        makeBridge(),
+      );
+      expect(mid.cursor.repos['test/repo']).toBeUndefined();
       await ch.testPollOnce();
       ch.disconnect();
 
@@ -608,6 +654,57 @@ describe('AoneChannel', () => {
       expect(
         stderr.mock.calls.some((c) =>
           String(c[0]).includes('unparseable createdAt on event 1001'),
+        ),
+      ).toBe(true);
+      stderr.mockRestore();
+    });
+
+    it('an authorless event is skipped fail-closed but logged (R2-8)', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      installFakeA1({ events: pagedEvents([makeEvent({ id: 1000 })]) });
+      await channel.connect();
+      await channel.testPollOnce(); // baseline
+      installFakeA1({
+        events: pagedEvents([
+          makeEvent({ id: 1001, author: undefined, user: undefined }),
+        ]),
+      });
+      await channel.testPollOnce();
+      channel.disconnect();
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(channel.cursor.repos['test/repo']).toBe(1001);
+      expect(
+        stderr.mock.calls.some((c) =>
+          String(c[0]).includes('event 1001 has no author'),
+        ),
+      ).toBe(true);
+      stderr.mockRestore();
+    });
+
+    it('a bodyless event is skipped fail-closed but logged (R2-8)', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      installFakeA1({ events: pagedEvents([makeEvent({ id: 1000 })]) });
+      await channel.connect();
+      await channel.testPollOnce(); // baseline
+      installFakeA1({
+        events: pagedEvents([
+          makeEvent({
+            id: 1001,
+            note: { id: 5001, noteable_type: 'MergeRequest' },
+          }),
+        ]),
+      });
+      await channel.testPollOnce();
+      channel.disconnect();
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(channel.cursor.repos['test/repo']).toBe(1001);
+      expect(
+        stderr.mock.calls.some((c) =>
+          String(c[0]).includes('event 1001 has no note body'),
         ),
       ).toBe(true);
       stderr.mockRestore();
@@ -674,13 +771,25 @@ describe('AoneChannel', () => {
           return [makeEvent({ id: 2002 })];
         },
       });
-      await expect(ch.testPollOnce()).rejects.toThrow('SYSTEM_FORBIDDEN_ERROR');
+      // PARTIAL failure: the round completes normally (base keeps the
+      // configured pollInterval cadence — rethrowing would drop healthy
+      // repos onto the backoff ladder); the failure is logged per repo.
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      await expect(ch.testPollOnce()).resolves.toBeUndefined();
+      expect(
+        stderr.mock.calls.some((c) =>
+          String(c[0]).includes('poll failed for bad/repo'),
+        ),
+      ).toBe(true);
+      stderr.mockRestore();
       ch.disconnect();
-      // good/repo dispatched and persisted BEFORE bad/repo threw.
+      // good/repo dispatched and persisted despite bad/repo's failure.
       expect(ch.inboundEnvelopes).toHaveLength(1);
       expect(ch.cursor.repos['good/repo']).toBe(2002);
       // The persistence claim is about DISK: a fresh instance must load
-      // good/repo's advanced cursor despite the failed poll.
+      // good/repo's advanced cursor despite the failed repo.
       const ch2 = new TestableAoneChannel(
         'test-aone',
         makeConfig({ repos: ['good/repo', 'bad/repo'] }),
@@ -716,12 +825,37 @@ describe('AoneChannel', () => {
           return [makeEvent({ id: 2002 })];
         },
       });
-      // The poll still reports failure (base backoff), but good/repo — listed
-      // AFTER the broken one — must be polled and dispatched this round.
-      await expect(ch.testPollOnce()).rejects.toThrow('SYSTEM_FORBIDDEN_ERROR');
+      // good/repo — listed AFTER the broken one — must be polled and
+      // dispatched this round; the partial failure is logged, not rethrown.
+      await expect(ch.testPollOnce()).resolves.toBeUndefined();
       ch.disconnect();
       expect(ch.inboundEnvelopes).toHaveLength(1);
       expect(ch.cursor.repos['good/repo']).toBe(2002);
+    });
+
+    it('a TOTAL failure rethrows so the base loop backs off', async () => {
+      const err = {
+        code: 1,
+        stdout: JSON.stringify({
+          schemaVersion: 'a1.error/v1',
+          message: 'SYSTEM_FORBIDDEN_ERROR',
+        }),
+        stderr: '',
+      };
+      installFakeA1({
+        events: () => {
+          throw err;
+        },
+      });
+      const ch = new TestableAoneChannel(
+        'test-aone',
+        makeConfig({ repos: ['bad/repo', 'dead/repo'] }),
+        makeBridge(),
+      );
+      await ch.connect();
+      // Both repos fail their baseline fetch → total failure → rethrow.
+      await expect(ch.testPollOnce()).rejects.toThrow('SYSTEM_FORBIDDEN_ERROR');
+      ch.disconnect();
     });
   });
 
@@ -808,7 +942,9 @@ describe('AoneChannel', () => {
       channel.cursor.repos['test/repo'] = 1800;
       await channel.testPollOnce();
       channel.disconnect();
-      expect(channel.inboundEnvelopes).toHaveLength(150);
+      // 150 unique events, but the universal budget dispatches the oldest
+      // 100 this poll; the duplicated id 1901 must appear exactly once.
+      expect(channel.inboundEnvelopes).toHaveLength(100);
       expect(
         channel.inboundEnvelopes.filter((e) => e.messageId === '1901'),
       ).toHaveLength(1);
@@ -816,8 +952,10 @@ describe('AoneChannel', () => {
 
     it('breaks on the cursor inside a FULL page 10 (no overflow walk)', async () => {
       // 1000 events ids 5000..4001; cursor 4100 sits inside page 10
-      // (4100..4001). reachedCursor must break the loop at page 10 and
-      // dispatch all 900 — without it the overflow arm dispatches only 100.
+      // (4100..4001). reachedCursor must break the walk at page 10; the
+      // universal budget then dispatches the oldest 100 (4101..4200).
+      // Without reachedCursor the walk continues to the empty page 11 and
+      // the oldest slice becomes 4001..4100 — a different cursor.
       const all = Array.from({ length: 1000 }, (_, i) =>
         makeEvent({ id: 5000 - i }),
       );
@@ -830,8 +968,8 @@ describe('AoneChannel', () => {
         .filter((argv) => argv[0] === 'events')
         .map((argv) => Number(argv[argv.indexOf('--page') + 1]));
       expect(pages).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
-      expect(channel.inboundEnvelopes).toHaveLength(900);
-      expect(channel.cursor.repos['test/repo']).toBe(5000);
+      expect(channel.inboundEnvelopes).toHaveLength(100);
+      expect(channel.cursor.repos['test/repo']).toBe(4200);
     });
 
     it('overflow walks to the tail and dispatches the oldest bounded slice', async () => {
@@ -872,8 +1010,67 @@ describe('AoneChannel', () => {
       expect(channel.cursor.repos['test/repo']).toBe(4000);
     });
 
+    it('a midnight-crossing walk keeps ONE window for all pages (R2-9)', async () => {
+      // Page 2 is fetched after local midnight; the window must not shift
+      // between pages (per-call dates would drop the oldest day and save
+      // the cursor above unfetched events — permanent silent loss).
+      const all = Array.from({ length: 150 }, (_, i) =>
+        makeEvent({ id: 1000 - i }),
+      );
+      vi.useFakeTimers({ now: new Date('2026-11-16T23:59:50') });
+      try {
+        const calls = installFakeA1({
+          events: (_repo, page) => {
+            const slice = all.slice((page - 1) * 100, page * 100);
+            if (page === 1) {
+              // Midnight falls BETWEEN the two page fetches: a per-call
+              // window computes page 2's dates after this advance, while
+              // the once-per-poll window is already fixed.
+              vi.setSystemTime(new Date('2026-11-17T00:00:05'));
+            }
+            return slice;
+          },
+        });
+        await channel.connect();
+        channel.cursor.repos['test/repo'] = 800;
+        await channel.testPollOnce();
+        channel.disconnect();
+        const eventCalls = calls.filter((argv) => argv[0] === 'events');
+        expect(eventCalls).toHaveLength(2);
+        const win = (argv: string[]) => [
+          argv[argv.indexOf('--since') + 1],
+          argv[argv.indexOf('--until') + 1],
+        ];
+        expect(win(eventCalls[0]!)).toEqual(win(eventCalls[1]!));
+        expect(win(eventCalls[0]!)).toEqual(['2026-11-13', '2026-11-16']);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('the dispatch budget is monotonic: a 500-event backlog caps at 100', async () => {
+      const all = Array.from({ length: 500 }, (_, i) => {
+        const id = 3000 - i;
+        return makeEvent({
+          id,
+          note: {
+            id,
+            note: 'qwen: do something',
+            noteable_type: 'MergeRequest',
+          },
+        });
+      });
+      installFakeA1({ events: pagedEvents(all) });
+      await channel.connect();
+      channel.cursor.repos['test/repo'] = 2500; // everything is newer
+      await channel.testPollOnce();
+      channel.disconnect();
+      expect(channel.inboundEnvelopes).toHaveLength(100);
+      expect(channel.cursor.repos['test/repo']).toBe(2600);
+    });
+
     it('throws only beyond the platform window (100 full pages)', async () => {
-      installFakeA1({
+      const calls = installFakeA1({
         events: (_repo, page) =>
           Array.from({ length: 100 }, (_, i) =>
             makeEvent({ id: 1000000 - (page - 1) * 100 - i }),
@@ -887,6 +1084,12 @@ describe('AoneChannel', () => {
       channel.disconnect();
       expect(channel.cursor.repos['test/repo']).toBe(0);
       expect(channel.inboundEnvelopes).toHaveLength(0);
+      // Pins PLATFORM_MAX_PAGES=100 (R2-5): the walk must fetch exactly
+      // pages 1..100 before throwing; a smaller ceiling changes the length.
+      const pages = calls
+        .filter((argv) => argv[0] === 'events')
+        .map((argv) => Number(argv[argv.indexOf('--page') + 1]));
+      expect(pages).toEqual(Array.from({ length: 100 }, (_, i) => i + 1));
     });
   });
 
@@ -988,6 +1191,56 @@ describe('AoneChannel', () => {
       expect(ch.inboundEnvelopes[0]!.metadata).toBe(
         'Aone CR test/repo !30825167 (iid 1736615) | author: alice | comment: 5000',
       );
+    });
+
+    it('a whitespace-only promptTemplate also falls back (R2-2)', async () => {
+      installFakeA1({ events: pagedEvents([makeEvent({ id: 1000 })]) });
+      const ch = new TestableAoneChannel(
+        'test-aone',
+        makeConfig({ promptTemplate: '   ' }),
+        makeBridge(),
+      );
+      await ch.connect();
+      await ch.testPollOnce(); // baseline
+      installFakeA1({ events: pagedEvents([makeEvent({ id: 1001 })]) });
+      await ch.testPollOnce();
+      ch.disconnect();
+      expect(ch.inboundEnvelopes[0]!.metadata).toBe(
+        'Aone CR test/repo !30825167 (iid 1736615) | author: alice | comment: 5000',
+      );
+    });
+
+    it('the negative view cache is per-poll: a later poll retries (R2-6)', async () => {
+      installFakeA1({ events: pagedEvents([makeEvent({ id: 1000 })]) });
+      const ch = new TestableAoneChannel(
+        'test-aone',
+        makeConfig({ promptTemplate: 't=%title%' }),
+        makeBridge(),
+      );
+      await ch.connect();
+      await ch.testPollOnce(); // baseline at 1000
+      // Poll 1: view fails → negative cache, empty title.
+      const calls1 = installFakeA1({
+        events: pagedEvents([makeEvent({ id: 1001 })]),
+        view: () => {
+          throw { code: 1, stdout: '', stderr: 'transient' };
+        },
+      });
+      await ch.testPollOnce();
+      // Poll 2: view succeeds → the negative entry must be gone.
+      const calls2 = installFakeA1({
+        events: pagedEvents([makeEvent({ id: 1002 })]),
+      });
+      await ch.testPollOnce();
+      ch.disconnect();
+      expect(
+        calls1.filter((a) => a[0] === 'repo' && a[2] === 'view'),
+      ).toHaveLength(1);
+      expect(
+        calls2.filter((a) => a[0] === 'repo' && a[2] === 'view'),
+      ).toHaveLength(1);
+      expect(ch.inboundEnvelopes[0]!.metadata).toBe('t=');
+      expect(ch.inboundEnvelopes[1]!.metadata).toBe('t=Stub MR title');
     });
   });
 

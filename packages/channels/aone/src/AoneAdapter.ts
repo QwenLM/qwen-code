@@ -61,17 +61,18 @@ interface AoneCommentEvent {
 
 const PAGE_SIZE = 100;
 /**
- * Normal fetch budget. A backlog deeper than this switches to the overflow
- * walk (see pollRepo): keep paging to the tail so the cursor-side gap is
- * never crossed, then dispatch a bounded oldest slice. Throwing here instead
- * wedged the repo for as long as the backlog lasted, and the sliding window
- * then silently dropped the very gap the throw claimed to preserve.
+ * a1 caps --page at 100; a full page 100 is beyond the addressable window.
+ * The walk pages to the tail (or the cursor) so the oldest slice never
+ * crosses an unfetched gap; only this hard stop throws.
  */
-const MAX_PAGES = 10;
-/** a1 caps --page at 100; a full page 100 is beyond the addressable window. */
 const PLATFORM_MAX_PAGES = 100;
-/** Overflow polls dispatch at most this many (oldest) events; rest next poll. */
-const OVERFLOW_DISPATCH_BUDGET = PAGE_SIZE;
+/**
+ * Every poll dispatches at most this many (oldest) events; the remainder
+ * drains on later polls. Universal, not overflow-only: a 101–999 event
+ * backlog must not dispatch unbounded agent turns in one poll while a 1001
+ * backlog caps at 100 (the protection has to be monotonic).
+ */
+const DISPATCH_BUDGET = PAGE_SIZE;
 
 const DEFAULT_PROMPT_TEMPLATE =
   'Aone CR %repo% !%mr_id% (iid %mr_iid%) | author: %author% | comment: %comment_id%';
@@ -213,6 +214,18 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
         `[Channel:${this.name}] warning: groupPolicy is "${cfg.groupPolicy ?? 'disabled'}"; must be "open", "allowlist" (with the repository listed), or "pairing" (after one-time group approval) for comments to be dispatched\n`,
       );
     }
+    // The management UI seeds groupPolicy from the descriptor default
+    // (open, GitLab/GitHub parity) and cannot edit `groups`, whose senders
+    // policy then falls back to open — a UI-created channel is permissive
+    // by default. Say so loudly; the design sample shows the restriction.
+    if (
+      cfg.groupPolicy === 'open' &&
+      this.groupSendersFor({ chatId: '*' }) === 'open'
+    ) {
+      process.stderr.write(
+        `[Channel:${this.name}] warning: groupPolicy "open" with open group senders — any commenter on a watched repository can drive the agent as the a1-login account; set groups["<repo>"].senders to "allowlist" with allowedUsers to restrict (see the design doc sample)\n`,
+      );
+    }
 
     this.botAccount = (await aoneWhoamiAccount()).toLowerCase();
     this.baselineMs = Date.parse(this.cursor.baselineAt);
@@ -283,17 +296,36 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
         );
       }
     }
-    // Rethrow so the base loop records a failed poll and backs off — every
-    // repo still got its turn this round.
-    if (failures.length > 0) throw failures[0];
+    // Rethrow ONLY when every repo failed: the base loop's failure path
+    // skips the pollInterval sleep (backoff ladder only), so rethrowing on
+    // a PARTIAL failure would poll the healthy repos at the backoff cadence
+    // (~30s) instead of the configured interval — 2× the a1 calls at 60s,
+    // 120× at a one-hour interval. A partial failure is logged per repo
+    // above and the round completes normally; a total failure backs off.
+    if (failures.length === this.repos.length) throw failures[0];
   }
 
   private async pollRepo(repo: string): Promise<void> {
+    // The window is computed ONCE per poll, not per page: a walk crossing
+    // local midnight would otherwise shift --since/--until between pages,
+    // drop the oldest day (where the not-yet-reached events sit), break on
+    // the short page, and save the cursor above the unfetched events —
+    // permanent silent loss. Calendar-day subtraction, not ms: a fixed 72h
+    // offset shifts a day across DST boundaries.
+    const until = new Date();
+    const since = new Date(
+      until.getFullYear(),
+      until.getMonth(),
+      until.getDate() - EVENTS_WINDOW_DAYS,
+    );
+    const sinceStr = localDate(since);
+    const untilStr = localDate(until);
+
     const cursorId = this.cursor.repos[repo];
     if (cursorId === undefined) {
       // First observation: baseline to the newest event id, dispatch nothing
       // (GitLab first-poll drain precedent). Page 1 is newest-first.
-      const page = await this.fetchEventsPage(repo, 1);
+      const page = await this.fetchEventsPage(repo, 1, sinceStr, untilStr);
       this.cursor.repos[repo] = page.reduce((m, e) => Math.max(m, e.id), 0);
       this.saveCursor();
       return;
@@ -305,9 +337,8 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
     // dedupe by id so one comment is never dispatched twice in one poll.
     const seen = new Set<number>();
     let reachedCursor = false;
-    let overflow = false;
     for (let page = 1; ; page++) {
-      const events = await this.fetchEventsPage(repo, page);
+      const events = await this.fetchEventsPage(repo, page, sinceStr, untilStr);
       for (const event of events) {
         if (event.id <= cursorId) reachedCursor = true;
         else if (!seen.has(event.id)) {
@@ -316,7 +347,6 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
         }
       }
       if (reachedCursor || events.length < PAGE_SIZE) break;
-      if (page === MAX_PAGES) overflow = true;
       if (page === PLATFORM_MAX_PAGES) {
         // Beyond the platform's addressable window (100 pages); the cursor
         // stays put and the error is visible. Defensive: the window cannot
@@ -328,14 +358,14 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
     }
 
     fresh.sort((a, b) => a.id - b.id);
-    // Overflow: the walk reached the tail, so `fresh` is complete and the
-    // oldest slice sits right above the cursor — dispatching it advances the
-    // cursor without crossing any unfetched gap. The remainder drains on
-    // later polls (bounded agent turns per poll even under a flood).
-    const slice = overflow ? fresh.slice(0, OVERFLOW_DISPATCH_BUDGET) : fresh;
-    if (overflow && fresh.length > slice.length) {
+    // The walk reached the tail (or the cursor), so `fresh` is complete and
+    // the oldest slice sits right above the cursor — dispatching it advances
+    // the cursor without crossing any unfetched gap. The budget is universal
+    // (monotonic protection): the remainder drains on later polls.
+    const slice = fresh.slice(0, DISPATCH_BUDGET);
+    if (fresh.length > slice.length) {
       process.stderr.write(
-        `[Channel:${this.name}] backlog overflow for ${repo}: dispatching oldest ${slice.length} of ${fresh.length} events; remainder next poll\n`,
+        `[Channel:${this.name}] backlog for ${repo}: dispatching oldest ${slice.length} of ${fresh.length} events; remainder next poll\n`,
       );
     }
     for (const event of slice) {
@@ -370,16 +400,13 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
   private async fetchEventsPage(
     repo: string,
     page: number,
+    since: string,
+    until: string,
   ): Promise<AoneCommentEvent[]> {
-    // The 3-day window is the continuity bound; outages beyond it lose
-    // events (v1 limit, no digest). Calendar-day subtraction, not ms: a
-    // fixed 72h offset shifts a day across DST boundaries.
-    const until = new Date();
-    const since = new Date(
-      until.getFullYear(),
-      until.getMonth(),
-      until.getDate() - EVENTS_WINDOW_DAYS,
-    );
+    // The window strings come from pollRepo (computed once per poll — a
+    // midnight-crossing walk must not shift them between pages). The 3-day
+    // window is the continuity bound; outages beyond it lose events (v1
+    // limit, no digest).
     const raw = await runA1Json<unknown>([
       'events',
       'repo',
@@ -387,9 +414,9 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
       '--type',
       'comments',
       '--since',
-      localDate(since),
+      since,
       '--until',
-      localDate(until),
+      until,
       '--per-page',
       String(PAGE_SIZE),
       '--page',
@@ -415,14 +442,28 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
     event: AoneCommentEvent,
   ): Promise<void> {
     const author = (event.author ?? event.user?.username ?? '').toLowerCase();
-    // Loop prevention: never answer our own comments; an event without an
-    // author cannot pass sender gating meaningfully either.
-    if (!author || author === this.botAccount) return;
+    // Drift-prone fields fail LOUD (same rule as createdAt): a payload
+    // rename would otherwise mute the channel silently while the cursor
+    // advances past every event. The self-comment skip stays silent — it
+    // is normal traffic, not drift.
+    if (!author) {
+      process.stderr.write(
+        `[Channel:${this.name}] event ${event.id} has no author; skipping\n`,
+      );
+      return;
+    }
+    if (author === this.botAccount) return;
+    // Non-MR notes (issue comments) are a legitimate silent skip.
     if (event.note?.noteable_type !== 'MergeRequest') return;
     const mrId = event.mergeRequest?.id;
     if (typeof mrId !== 'number') return;
     const body = event.note?.note;
-    if (typeof body !== 'string') return;
+    if (typeof body !== 'string') {
+      process.stderr.write(
+        `[Channel:${this.name}] event ${event.id} has no note body; skipping\n`,
+      );
+      return;
+    }
     const trigger = matchTrigger(body, this.prefixes);
     if (!trigger || !trigger.text) return;
 
