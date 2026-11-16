@@ -957,6 +957,14 @@ math then literal: $x^2\$$`,
       messageType: 'info',
       content: 'Only 0 AI messages in this session.',
     });
+    // `/copy 1` is documented as equivalent to `/copy`.
+    for (const args of ['', '1']) {
+      expect(await copyCommand.action(mockContext, args)).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: 'Last AI output contains no text to copy.',
+      });
+    }
     expect(mockCopyToClipboard).not.toHaveBeenCalled();
   });
 

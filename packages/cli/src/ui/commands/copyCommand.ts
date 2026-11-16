@@ -389,8 +389,12 @@ export const copyCommand: SlashCommand = {
 
     const { messageIndex, subArgs } = parseLeadingMessageIndex(args);
 
-    // An indexed call falls through to the argument and range checks below.
-    if (messageIndex === null && aiMessages.length === 0) {
+    // `/copy 1` is the same as `/copy`; any other index falls through to the
+    // argument and range checks below.
+    if (
+      (messageIndex === null || messageIndex === 1) &&
+      aiMessages.length === 0
+    ) {
       return {
         type: 'message',
         messageType: 'info',
