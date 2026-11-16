@@ -31,18 +31,23 @@ records outside the rendered transcript remain queryable through navigation.
 The latest assistant reply of a turn has a quiet anchor icon between branching
 and sources/time. Before a reply it uses the prompt row; a turn without an
 assistant reply uses its terminal status when available.
-Hover or keyboard focus opens a noninteractive summary with totals and up to
-five recent records; clicking opens a dialog. Narrow screens use a more menu.
-Reuse the shared tooltip, dropdown and dialog primitives, portal root and theme
-tokens. Escape dismisses overlays and focus returns to the trigger.
+Hover or keyboard focus shows a compact summary of runs, blocked, unsuccessful
+and total duration; clicking opens the statistics dialog. Recent records appear
+only in the dialog. Narrow screens use a more menu. Reuse the shared tooltip,
+dropdown and dialog primitives, portal root and theme tokens. Escape dismisses
+overlays and focus returns to the trigger.
 
 The dialog shows whole-turn executions, blocked, unsuccessful (error + timeout)
-and cumulative execution time, with chronological expandable records. Status,
-event, source, duration and safe names are text, never interpreted HTML. Async
-dispatch is not completion; its dispatch duration is separate. Unknown outcomes
-and partial duration/history coverage are explicit. Empty unrecorded and
-unsupported turns do not show fabricated zeros or an entry.
-Read failures retain a retryable entry; closing the dialog refreshes its footer summary.
+and cumulative execution time in a compact grid. Chronological records use
+single-line summaries and two-column expanded details on wide screens, with a
+scroll area capped at 70vh so expanded records remain readable. The dialog reads a fresh
+snapshot when opened, without a manual refresh action or redundant status and
+duration explanations. Status, event, source, duration and safe names are text,
+never interpreted HTML. Async dispatch is not completion; its dispatch duration
+is separate. Unknown outcomes and partial history coverage are explicit. Missing
+execution durations are excluded from the total without an additional warning.
+Empty unrecorded and unsupported turns do not show fabricated zeros or an entry.
+Read failures retain a retryable entry; closing the dialog refreshes its hover summary.
 
 ## Changes and validation
 

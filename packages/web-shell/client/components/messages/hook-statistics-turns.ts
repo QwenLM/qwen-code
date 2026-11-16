@@ -36,6 +36,7 @@ export function collectHookStatisticsTurns(
       if (
         message.role === 'assistant' &&
         !message.agentMessage &&
+        !!message.content &&
         message.content.trim()
       ) {
         target = message.id;

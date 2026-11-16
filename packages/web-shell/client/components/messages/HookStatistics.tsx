@@ -112,29 +112,27 @@ function HookSummary({
 }) {
   const { t } = useI18n();
   return (
-    <div className="grid gap-2 text-xs">
-      <dl className="grid grid-cols-2 gap-x-5 gap-y-2">
-        <dt>{t('hooks.executions')}</dt>
-        <dd>{summary.totalExecutions}</dd>
-        <dt>{t('hooks.blocked')}</dt>
-        <dd>{summary.counts.blocked}</dd>
-        <dt>{t('hooks.unsuccessful')}</dt>
-        <dd>{summary.counts.error + summary.counts.timeout}</dd>
-        <dt>{t('hooks.duration')}</dt>
-        <dd>{duration(summary.durationMs)}</dd>
+    <div className="grid gap-1 text-xs">
+      <dl className="grid grid-cols-2 gap-x-3 gap-y-1 sm:grid-cols-4">
+        <div className="flex items-baseline justify-between gap-1">
+          <dt className="text-muted-foreground">{t('hooks.executions')}</dt>
+          <dd className="font-medium">{summary.totalExecutions}</dd>
+        </div>
+        <div className="flex items-baseline justify-between gap-1">
+          <dt className="text-muted-foreground">{t('hooks.blocked')}</dt>
+          <dd className="font-medium">{summary.counts.blocked}</dd>
+        </div>
+        <div className="flex items-baseline justify-between gap-1">
+          <dt className="text-muted-foreground">{t('hooks.unsuccessful')}</dt>
+          <dd className="font-medium">
+            {summary.counts.error + summary.counts.timeout}
+          </dd>
+        </div>
+        <div className="flex items-baseline justify-between gap-1">
+          <dt className="text-muted-foreground">{t('hooks.duration')}</dt>
+          <dd className="font-medium">{duration(summary.durationMs)}</dd>
+        </div>
       </dl>
-      <p className="flex flex-wrap gap-x-3 gap-y-1 text-muted-foreground">
-        {(['success', 'running', 'cancelled', 'dispatched', 'unknown'] as const)
-          .filter((status) => summary.counts[status] > 0)
-          .map((status) => (
-            <span key={status}>
-              {t(`hooks.status.${status}`)}: {summary.counts[status]}
-            </span>
-          ))}
-      </p>
-      {!summary.durationComplete && (
-        <p className="text-muted-foreground">{t('hooks.incompleteDuration')}</p>
-      )}
       {partial && <p className="text-muted-foreground">{t('hooks.partial')}</p>}
     </div>
   );
@@ -157,7 +155,6 @@ function HookStatisticsEntry({
   const [refresh, setRefresh] = useState(0);
   const [hover, setHover] = useState(false);
   const [open, setOpen] = useState(false);
-  const [recent, setRecent] = useState<HookExecutionEntry[]>();
   const trigger = useRef<HTMLButtonElement>(null);
   const moreTrigger = useRef<HTMLButtonElement>(null);
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -187,7 +184,6 @@ function HookStatisticsEntry({
           if (current) {
             setPage(value);
             setFailed(false);
-            setRecent(undefined);
           }
         })
         .catch(() => {
@@ -204,25 +200,6 @@ function HookStatisticsEntry({
       clearInterval(timer);
     };
   }, [source, promptId, refresh]);
-  useEffect(() => {
-    if (!hover || !page || !page.totalExecutions) return;
-    let current = true;
-    void source
-      .readPage(promptId, {
-        snapshot: page.snapshot,
-        start: Math.max(0, page.totalExecutions - 5),
-        limit: 5,
-      })
-      .then((value) => {
-        if (current) setRecent([...value.executions].reverse());
-      })
-      .catch(() => {
-        if (current) setRecent(undefined);
-      });
-    return () => {
-      current = false;
-    };
-  }, [hover, page, source, promptId]);
   const liveSummary = useMemo(
     () => summarizeHookExecutions(entries),
     [entries],
@@ -234,11 +211,6 @@ function HookStatisticsEntry({
       ? liveSummary
       : (page?.summary ?? liveSummary);
   if (!summary.totalExecutions && !open && !failed) return null;
-  const latest =
-    recent ??
-    [...entries]
-      .sort((a, b) => b.event.startedAt - a.event.startedAt)
-      .slice(0, 5);
   const showDialog = (mobile: boolean) => {
     setMobileOpen(mobile);
     setHover(false);
@@ -267,28 +239,24 @@ function HookStatisticsEntry({
                 <AnchorIcon className="size-4" aria-hidden="true" />
               </button>
             </TooltipTrigger>
-            <TooltipContent side="top" className="block max-w-xs p-3">
-              <p className="mb-2 font-medium">{t('hooks.title')}</p>
-              {failed && <p role="alert">{t('hooks.loadFailed')}</p>}
-              {summary.totalExecutions > 0 && (
-                <HookSummary
-                  summary={summary}
-                  partial={!page || page.coverage === 'partial'}
-                />
+            <TooltipContent side="top" className="block max-w-xs p-2">
+              <p className="font-medium">{t('hooks.title')}</p>
+              {summary.totalExecutions > 0 ? (
+                <p className="mt-1 text-muted-foreground">
+                  {t('hooks.compactSummary', {
+                    executions: summary.totalExecutions,
+                    blocked: summary.counts.blocked,
+                    unsuccessful: summary.counts.error + summary.counts.timeout,
+                    duration: duration(summary.durationMs),
+                  })}
+                </p>
+              ) : (
+                failed && (
+                  <p role="alert" className="mt-1">
+                    {t('hooks.loadFailed')}
+                  </p>
+                )
               )}
-              <ul className="mt-3 grid gap-2 border-t pt-2">
-                {latest.map((entry) => (
-                  <li key={entry.event.executionId} className="grid gap-0.5">
-                    <span className="break-words">{entry.event.name}</span>
-                    <span className="text-muted-foreground">
-                      {t(`hooks.status.${entry.status}`)} ·{' '}
-                      {entry.event.phase === 'ended'
-                        ? duration(entry.event.durationMs)
-                        : '—'}
-                    </span>
-                  </li>
-                ))}
-              </ul>
             </TooltipContent>
           </Tooltip>
         </TooltipProvider>
@@ -342,7 +310,6 @@ function HookStatisticsDialog({
   const [rows, setRows] = useState<HookExecutionEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
-  const [refresh, setRefresh] = useState(0);
   const generation = useRef(0);
   useEffect(() => {
     const current = ++generation.current;
@@ -366,7 +333,7 @@ function HookStatisticsDialog({
     return () => {
       generation.current = current + 1;
     };
-  }, [source, promptId, refresh]);
+  }, [source, promptId]);
   const loadMore = async () => {
     if (!page || page.nextStart === undefined || loading) return;
     const current = generation.current;
@@ -391,35 +358,22 @@ function HookStatisticsDialog({
     <DialogShell
       title={t('hooks.title')}
       subtitle={t('hooks.thisTurn')}
-      size="lg"
+      size="md"
       onClose={onClose}
       aria-busy={loading}
     >
-      <div className="flex min-h-0 flex-col gap-4">
+      <div className="flex min-h-0 flex-col gap-2">
         {page?.summary && (
           <HookSummary
             summary={page.summary}
             partial={page.coverage === 'partial'}
           />
         )}
-        <p className="text-xs text-muted-foreground">
-          {t('hooks.durationHelp')}
-        </p>
-        <div className="flex items-center gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={loading}
-            onClick={() => setRefresh((value) => value + 1)}
-          >
-            {t('hooks.refresh')}
-          </Button>
-          {loading && (
-            <span role="status" className="text-xs">
-              {t('hooks.loading')}
-            </span>
-          )}
-        </div>
+        {loading && (
+          <p role="status" className="text-xs text-muted-foreground">
+            {t('hooks.loading')}
+          </p>
+        )}
         {failed && (
           <p role="alert" className="text-sm text-destructive">
             {t('hooks.loadFailed')}
@@ -428,14 +382,15 @@ function HookStatisticsDialog({
         {page && !page.totalExecutions && (
           <p>{t(`hooks.coverage.${page.coverage}`)}</p>
         )}
-        <div className="min-h-0 overflow-y-auto" style={{ maxHeight: '50vh' }}>
+        <div className="max-h-[70vh] min-h-0 overflow-y-auto">
           {rows.map((entry) => (
             <HookExecutionRow key={entry.event.executionId} entry={entry} />
           ))}
           {page?.nextStart !== undefined && (
             <Button
-              className="mt-3"
+              className="mt-2"
               variant="outline"
+              size="sm"
               disabled={loading}
               onClick={() => void loadMore()}
             >
@@ -452,26 +407,26 @@ function HookExecutionRow({ entry }: { entry: HookExecutionEntry }) {
   const { t, language } = useI18n();
   const { event } = entry;
   return (
-    <Collapsible className="border-b py-2">
-      <CollapsibleTrigger className="group grid w-full grid-cols-[16px_minmax(0,1fr)_auto] items-start gap-2 rounded px-1 py-2 text-left text-xs hover:bg-accent">
+    <Collapsible className="border-b">
+      <CollapsibleTrigger className="group grid w-full grid-cols-[16px_minmax(0,1fr)_auto] items-center gap-1.5 rounded px-1 py-1.5 text-left text-xs hover:bg-accent">
         <ChevronRightIcon
           className="size-4 group-data-[state=open]:rotate-90"
           aria-hidden="true"
         />
-        <span className="grid min-w-0 gap-1 break-words">
+        <span className="flex min-w-0 flex-wrap items-baseline gap-x-2 break-words">
           <span className="font-medium">{event.name}</span>
           <span className="text-muted-foreground">
             {event.eventName} · {t(`hooks.source.${event.source}`)}
           </span>
         </span>
-        <span className="grid max-w-28 gap-1 text-right">
+        <span className="flex max-w-40 flex-wrap items-baseline justify-end gap-x-2 text-right">
           <span>{t(`hooks.status.${entry.status}`)}</span>
           <span className="text-muted-foreground">
             {event.phase === 'ended' ? duration(event.durationMs) : '—'}
           </span>
         </span>
       </CollapsibleTrigger>
-      <CollapsibleContent className="space-y-2 break-words px-7 pb-2 text-xs text-muted-foreground">
+      <CollapsibleContent className="grid gap-x-4 gap-y-1 break-words px-6 pb-2 text-xs text-muted-foreground sm:grid-cols-2">
         <p>
           {t('hooks.type')}: {event.hookType}
         </p>
@@ -493,13 +448,17 @@ function HookExecutionRow({ entry }: { entry: HookExecutionEntry }) {
           </>
         )}
         {event.phase === 'dispatched' && (
-          <p>
+          <p className="sm:col-span-2">
             {t('hooks.dispatchDuration')}: {duration(event.dispatchDurationMs)}.{' '}
             {t('hooks.dispatchHelp')}
           </p>
         )}
-        {entry.status === 'unknown' && <p>{t('hooks.unknownHelp')}</p>}
-        {entry.conflicted && <p>{t('hooks.partial')}</p>}
+        {entry.status === 'unknown' && (
+          <p className="sm:col-span-2">{t('hooks.unknownHelp')}</p>
+        )}
+        {entry.conflicted && (
+          <p className="sm:col-span-2">{t('hooks.partial')}</p>
+        )}
       </CollapsibleContent>
     </Collapsible>
   );

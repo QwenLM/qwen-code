@@ -400,7 +400,7 @@ export const MessageItem = memo(function MessageItem({
     <div data-user-selectable="true" style={{ display: 'contents' }}>
       {safeBody}
       {hookTurn && message.role !== 'assistant' && (
-        <div className="flex items-center">
+        <div className="flex items-center pb-6">
           <HookStatistics turn={hookTurn} />
         </div>
       )}

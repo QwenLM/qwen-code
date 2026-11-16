@@ -158,11 +158,25 @@ it('uses canonical identity, complete totals and frozen detail pages, escaping n
   );
   await render(source(read));
   expect(read).toHaveBeenCalledWith('history', { limit: 1 });
+  await act(async () => button('Hook statistics').focus());
+  const tooltip = portal.querySelector('[role="tooltip"]');
+  expect(tooltip?.textContent).toContain('Hook statistics');
+  expect(tooltip?.textContent).toContain(
+    '51 runs · 0 blocked · 0 failed · 5.10 s',
+  );
+  expect(tooltip?.querySelector('dl')).toBeNull();
+  expect(read).toHaveBeenCalledTimes(1);
   await click('Hook statistics');
   const dialog = portal.querySelector('[role="dialog"]')!;
   expect(dialog).not.toBeNull();
   expect(dialog.querySelector('dd')?.textContent).toBe('51');
   expect(dialog.textContent).toContain('5.10 s');
+  expect(dialog.textContent).not.toContain('Succeeded:');
+  expect(dialog.textContent).not.toContain('Parallel durations overlap');
+  expect(dialog.textContent).not.toContain(
+    'Some execution durations are unavailable.',
+  );
+  expect(dialog.textContent).not.toContain('Refresh');
   expect(dialog.querySelectorAll('[data-slot="collapsible"]')).toHaveLength(50);
   expect(dialog.textContent).toContain('<script>safe text</script>');
   expect(dialog.querySelector('script')).toBeNull();
@@ -241,9 +255,9 @@ it('keeps an initial summary failure reachable and retries through the dialog', 
     container.querySelector('[aria-label="Hook statistics"]'),
   ).not.toBeNull();
   await act(async () => button('Hook statistics').focus());
-  expect(portal.querySelector('[role="tooltip"]')?.textContent).toContain(
-    'Could not load hook records.',
-  );
+  const tooltip = portal.querySelector('[role="tooltip"]');
+  expect(tooltip?.textContent).toContain('Hook statistics');
+  expect(tooltip?.textContent).toContain('Could not load hook records.');
   expect(portal.querySelector('dl')).toBeNull();
   await click('Hook statistics');
   expect(portal.querySelector('[role="dialog"] dd')?.textContent).toBe('51');

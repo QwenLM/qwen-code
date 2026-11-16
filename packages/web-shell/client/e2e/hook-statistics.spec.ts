@@ -91,7 +91,12 @@ function summary(total: number): HookLifecycleSummary {
   };
 }
 
-async function openFixture(page: Page, baseURL: string, failNextPage = false) {
+async function openFixture(
+  page: Page,
+  baseURL: string,
+  failNextPage = false,
+  promptOnly = false,
+) {
   const hook = execution(0).event;
   const lifecycle = (phase: 'started' | 'ended', id: number): DaemonEvent => ({
     id,
@@ -121,7 +126,7 @@ async function openFixture(page: Page, baseURL: string, failNextPage = false) {
       user,
       lifecycle('started', 2),
       lifecycle('ended', 3),
-      answer,
+      ...(promptOnly ? [] : [answer]),
       turnCompleteEvent(admissionId, { id: 5, sessionId }),
     ],
   });
@@ -166,10 +171,17 @@ async function openFixture(page: Page, baseURL: string, failNextPage = false) {
   });
   await page.goto(`/session/${sessionId}?language=en`);
   await daemon.sse.waitForConnection(sessionId);
-  await daemon.sendEvent(replayCompleteEvent({ sessionId, replayedCount: 5 }));
+  await daemon.sendEvent(
+    replayCompleteEvent({ sessionId, replayedCount: promptOnly ? 4 : 5 }),
+  );
   await expect(
-    page.getByText('The reply is complete.', { exact: true }),
+    page.getByText('Inspect these hook executions.', { exact: true }),
   ).toBeVisible();
+  if (!promptOnly) {
+    await expect(
+      page.getByText('The reply is complete.', { exact: true }),
+    ).toBeVisible();
+  }
   return {
     reads,
     append: () => {
@@ -179,7 +191,7 @@ async function openFixture(page: Page, baseURL: string, failNextPage = false) {
 }
 
 for (const theme of ['light', 'dark']) {
-  test(`hook statistics hover, focus, frozen pages and retry (${theme})`, async ({
+  test(`hook statistics compact hover, focus, frozen pages and retry (${theme})`, async ({
     page,
   }, testInfo) => {
     await page.setViewportSize({ width: 1280, height: 900 });
@@ -199,10 +211,17 @@ for (const theme of ['light', 'dark']) {
     await expect(trigger).toBeVisible();
     await trigger.hover();
     const tooltip = page.getByRole('tooltip');
-    await expect(tooltip).toContainText('Executions');
-    await expect(tooltip).toContainText('55');
-    await expect(tooltip).toContainText('Named hook 55');
+    await expect(tooltip).toContainText('Hook statistics');
+    await expect(tooltip).toContainText(
+      '55 runs · 1 blocked · 1 failed · 530 ms',
+    );
+    await expect(tooltip).toBeVisible();
+    await expect(tooltip.locator('dl')).toHaveCount(0);
+    await expect(
+      tooltip.getByText('Named hook 55', { exact: true }),
+    ).toHaveCount(0);
     await page.screenshot({
+      animations: 'disabled',
       path: testInfo.outputPath(`hooks-hover-${theme}.png`),
     });
     await page.mouse.move(0, 0);
@@ -211,20 +230,53 @@ for (const theme of ['light', 'dark']) {
     await trigger.press('Enter');
     const dialog = page.getByRole('dialog', { name: 'Hook statistics' });
     await expect(dialog).toBeVisible();
-    const total = dialog
-      .locator('dt', { hasText: /^Executions$/ })
-      .locator('+ dd');
+    const total = dialog.locator('dt', { hasText: /^Runs$/ }).locator('+ dd');
     await expect(total).toHaveText('55');
+    const desktopBox = await dialog.boundingBox();
+    expect(desktopBox).not.toBeNull();
+    expect(desktopBox!.width).toBeLessThanOrEqual(560);
+    const recordsList = dialog
+      .locator('[data-slot="collapsible"]')
+      .first()
+      .locator('..');
+    expect(
+      await recordsList.evaluate(
+        (element) =>
+          parseFloat(getComputedStyle(element).maxHeight) / window.innerHeight,
+      ),
+    ).toBeCloseTo(0.7);
+    await expect(dialog).not.toContainText('Succeeded:');
+    await expect(dialog).not.toContainText('Parallel durations overlap');
+    await expect(dialog).not.toContainText(
+      'Some execution durations are unavailable.',
+    );
+    await expect(
+      dialog.getByRole('button', { name: 'Refresh', exact: true }),
+    ).toHaveCount(0);
     await expect(
       dialog.getByText('Named hook 50', { exact: true }),
     ).toBeVisible();
     await expect(
       dialog.getByText('Named hook 51', { exact: true }),
     ).toHaveCount(0);
+    await dialog.getByRole('button', { name: /Named hook 01/ }).click();
+    await expect(dialog).toContainText('Hook type: command');
+    await expect(dialog).toContainText('Started:');
+    await expect(dialog).toContainText('Ended:');
+    await expect(dialog).toContainText('Exit code: 0');
     await dialog.getByRole('button', { name: /Named hook 04/ }).click();
     await expect(dialog).toContainText('Final result is not collected.');
     await dialog.getByRole('button', { name: /Named hook 05/ }).click();
     await expect(dialog).toContainText('The terminal result was not recorded');
+    await expect(
+      dialog.getByRole('button', { name: /Named hook 04/ }),
+    ).toBeVisible();
+    await expect(
+      dialog.getByText('Final result is not collected.'),
+    ).toBeVisible();
+    await expect(
+      dialog.getByText(/The terminal result was not recorded/),
+    ).toBeVisible();
     await page.screenshot({
       path: testInfo.outputPath(`hooks-dialog-${theme}.png`),
     });
@@ -250,24 +302,51 @@ for (const theme of ['light', 'dark']) {
         (url) => url.searchParams.get('snapshot') === 'snapshot-55',
       ),
     ).toBe(true);
-    await dialog.getByRole('button', { name: 'Refresh', exact: true }).click();
+    await page.keyboard.press('Escape');
+    await expect(dialog).toBeHidden();
+    await expect(trigger).toBeFocused();
+    await trigger.hover();
+    await expect(tooltip).toContainText('Hook statistics');
+    await expect(tooltip).toContainText(
+      '56 runs · 1 blocked · 1 failed · 540 ms',
+    );
+    await expect(tooltip.locator('dl')).toHaveCount(0);
+    await trigger.click();
     await expect(total).toHaveText('56');
     await expect(
       dialog.getByText('Named hook 51', { exact: true }),
     ).toHaveCount(0);
     await page.keyboard.press('Escape');
-    await expect(dialog).toBeHidden();
-    await expect(trigger).toBeFocused();
-    await trigger.hover();
-    await expect(
-      tooltip.locator('dt', { hasText: /^Executions$/ }).locator('+ dd'),
-    ).toHaveText('56');
     await page.reload();
     await expect(trigger).toBeVisible();
     await trigger.click();
     await expect(total).toHaveText('56');
   });
 }
+
+test('prompt hook statistics stays clickable above message actions', async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await openFixture(page, String(testInfo.project.use.baseURL), false, true);
+  await page
+    .getByText('Inspect these hook executions.', { exact: true })
+    .hover();
+  const trigger = page.getByRole('button', {
+    name: 'Hook statistics',
+    exact: true,
+  });
+  await expect(trigger).toBeVisible();
+  await trigger.click();
+  const dialog = page.getByRole('dialog', { name: 'Hook statistics' });
+  await expect(dialog).toBeVisible();
+  await expect(
+    dialog.getByText('Named hook 01', { exact: true }),
+  ).toBeVisible();
+  await page.screenshot({
+    path: testInfo.outputPath('hooks-prompt-dialog.png'),
+  });
+});
 
 test('hook statistics fits 320px and restores focus to reply menu', async ({
   page,
@@ -289,6 +368,8 @@ test('hook statistics fits 320px and restores focus to reply menu', async ({
   expect(box).not.toBeNull();
   expect(box!.x).toBeGreaterThanOrEqual(0);
   expect(box!.x + box!.width).toBeLessThanOrEqual(320);
+  expect(box!.y).toBeGreaterThanOrEqual(0);
+  expect(box!.y + box!.height).toBeLessThanOrEqual(740);
   expect(
     await dialog.evaluate(
       (element) => element.scrollWidth - element.clientWidth,

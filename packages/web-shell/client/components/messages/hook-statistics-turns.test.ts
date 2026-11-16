@@ -27,6 +27,13 @@ it('moves the entry from the prompt to the latest main-agent answer', () => {
   });
 });
 
+it('ignores assistant frames without text content', () => {
+  const streaming = { ...answer, content: undefined } as unknown as Message;
+  expect([
+    ...collectHookStatisticsTurns([user, streaming], 'session').keys(),
+  ]).toEqual(['user']);
+});
+
 it('keeps terminal-only turns accessible and does not attach to background work', () => {
   const failure: Message = {
     id: 'failed',
