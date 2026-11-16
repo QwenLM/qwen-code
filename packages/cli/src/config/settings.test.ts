@@ -385,6 +385,37 @@ describe('Settings Loading and Merging', () => {
         expect(settings.merged.ui?.theme).toBe('Default');
       });
 
+      it('resolves the XDG settings path on Linux when the home directory does not exist', () => {
+        // The #16861 case with nothing under the missing home at all: on
+        // Linux the global dir is then the XDG one, and loading still works.
+        const missingHome = '/mock/home/missing';
+        vi.mocked(osActual.homedir).mockReturnValue(missingHome);
+        vi.stubEnv('XDG_CONFIG_HOME', undefined);
+        (mockFsExistsSync as Mock).mockImplementation(() => false);
+        (fs.realpathSync as Mock).mockImplementation((p: fs.PathLike) => {
+          if (p.toString() === missingHome) {
+            throw new Error(
+              `ENOENT: no such file or directory, lstat '${missingHome}'`,
+            );
+          }
+          return p.toString();
+        });
+        const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+        Object.defineProperty(process, 'platform', { value: 'linux' });
+        try {
+          const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+          expect(settings.user.path).toBe(
+            pathActual.join(missingHome, '.config', 'qwen', 'settings.json'),
+          );
+          expect(settings.user.settings).toEqual({});
+          expect(settings.workspaceSettingsActive).toBe(true);
+        } finally {
+          Object.defineProperty(process, 'platform', platform);
+          vi.unstubAllEnvs();
+        }
+      });
+
       it('should keep workspace settings empty when reloading the home directory', () => {
         const homeDir = '/mock/home/user';
         vi.mocked(osActual.homedir).mockReturnValue(homeDir);
