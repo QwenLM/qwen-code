@@ -7,8 +7,8 @@
 每个测试组都从一个全新的一次性主目录开始，这样既不会读写操作者的真实配置，也不会让一个测试组看到另一个测试组的文件。有两个测试组有意沿用“全新安装”测试组的主目录，因为它们需要该次运行写入的标记：重新创建 `~/.qwen` 的测试组和 `~/.qwen/.env` 测试组。
 
 ```bash
-# 在被测检出目录中执行一次（npm run build 之后）。PATH 上已发布的 qwen
-# 测试的是错误的代码。
+# 在被测检出目录中执行一次（npm run build && npm run bundle 之后，启动器运行的是
+# dist/cli.js）。PATH 上已发布的 qwen 测试的是错误的代码。
 REPO=$PWD
 qwen() { node "$REPO/scripts/cli-entry.js" "$@"; }
 # 每个测试组执行一次。
@@ -79,6 +79,7 @@ for var in $(compgen -e | grep -E '_API_KEY$|_AUTH_TOKEN$'); do unset "$var"; do
 - `XDG_CONFIG_HOME=$HOME/xdg`：文件出现在 `$HOME/xdg/qwen` 下。
 - `XDG_CONFIG_HOME=relative`：该值被忽略，使用 `~/.config/qwen`。
 - 把 `XDG_CONFIG_HOME=$HOME/xdg` 写入 `~/.env` 而不是环境变量：该值被忽略，使用 `~/.config/qwen`。
+- 把 `XDG_CONFIG_HOME` 设为主目录之外的绝对路径目录，`XDG_CONFIG_HOME=$(mktemp -d)`：文件出现在 `$XDG_CONFIG_HOME/qwen` 下，`HOME` 下不创建任何内容。
 - `QWEN_HOME=$HOME/custom`：无论其他目录是否存在，文件都出现在 `$HOME/custom` 下。
 
 ### macOS 和 Windows

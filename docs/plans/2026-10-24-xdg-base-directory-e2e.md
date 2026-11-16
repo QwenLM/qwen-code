@@ -7,8 +7,8 @@ This plan verifies the [design note](../design/2026-10-24-xdg-base-directory.md)
 Start every group from a fresh throwaway home, so the operator's real configuration is never read or written and no group sees another group's files. Two groups continue in the new-install group's home on purpose, because they need the marker its run wrote: the recreated `~/.qwen` group and the `~/.qwen/.env` group.
 
 ```bash
-# Once, in the checkout under test, after npm run build. A released qwen on PATH
-# would test the wrong code.
+# Once, in the checkout under test, after npm run build && npm run bundle (the
+# launcher runs dist/cli.js). A released qwen on PATH would test the wrong code.
 REPO=$PWD
 qwen() { node "$REPO/scripts/cli-entry.js" "$@"; }
 # For each group.
@@ -79,6 +79,7 @@ Each in its own fresh home, with no `~/.qwen`:
 - `XDG_CONFIG_HOME=$HOME/xdg`: files appear under `$HOME/xdg/qwen`.
 - `XDG_CONFIG_HOME=relative`: the value is ignored and `~/.config/qwen` is used.
 - `XDG_CONFIG_HOME=$HOME/xdg` written to `~/.env` instead of the environment: the value is ignored and `~/.config/qwen` is used.
+- `XDG_CONFIG_HOME` set to an absolute directory outside the home directory, `XDG_CONFIG_HOME=$(mktemp -d)`: files appear under `$XDG_CONFIG_HOME/qwen` and nothing is created under `HOME`.
 - `QWEN_HOME=$HOME/custom`: files appear under `$HOME/custom`, whatever else exists.
 
 ### macOS and Windows
