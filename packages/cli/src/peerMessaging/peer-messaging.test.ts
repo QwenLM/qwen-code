@@ -904,6 +904,25 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     expect(statusesOf(again.msgId)).toEqual(['delivered', 'expired']);
   });
 
+  it('sends an independent expiry while a previous receiver is slow', async () => {
+    const slow = await startSlowSenderInbox(800);
+    const sender = await startSenderInbox();
+    const { messaging: m } = await start(ApprovalMode.DEFAULT);
+    const slowDone = vi.fn();
+    const first = m
+      .expireQueued([{ msgId: 'slow', from: slow.socketPath }])
+      .then(slowDone);
+    try {
+      await m.expireQueued([{ msgId: 'ready', from: sender.socketPath }]);
+      expect(receipts).toContainEqual(
+        expect.objectContaining({ status: 'expired', origMsgId: 'ready' }),
+      );
+      expect(slowDone).not.toHaveBeenCalled();
+    } finally {
+      await first;
+    }
+  });
+
   it('holds a message when the receiver bypasses prompts and the sender says nothing', async () => {
     const { messaging: m, submitted } = await start(ApprovalMode.YOLO);
     await send(

@@ -55,8 +55,9 @@ host holds, because the readers below answer it from a live `Config`.
 **Every reader answers for the addressed session.** The host already
 recognizes both names a session goes by: the id it was published under,
 and the id its `Config` holds now (`/clear` and a resume replace the
-latter). One lookup turns either name into the hosted `Session`, and
-every reader uses it:
+latter). Session admission checks both IDs for active owners. The lookup
+uses either ID when it identifies one registered session and answers `misaddressed`
+when multiple registered sessions match. Every reader uses that lookup:
 
 - Whether the host owns the session (`ownsSessionId`). Only a session
   that registered for messaging counts. A session whose settings turn
@@ -65,9 +66,9 @@ every reader uses it:
   gets a judgment based on another session's mode.
 - The approval mode comes from that session's `Config`.
 - The policy is that session's own `agents.crossSessionInbound`.
-- Delivery goes to that session's queue. A session that is closing
-  takes nothing, so its sender gets `queue-full` and, on a retry after
-  the session is gone, `misaddressed`.
+- Delivery goes to that session's queue. Closing sessions and sessions
+  paused by Stop return `queue-full`. A new prompt clears the pause.
+  Once the session is gone, a retry receives `misaddressed`.
 
 **Child credentials require a single-session inbox.** A process-wide
 credential proves descent from the host. The shared ACP inbox accepts
@@ -107,8 +108,9 @@ host removes a session, it detaches the messages still in that queue and
 sends `expired`. When `/clear` switches conversations, it does the same
 for messages queued under the old conversation ID. Process shutdown
 stops intake and detaches unread messages before awaiting socket
-teardown. The per-message receipts use the shared outbound send limit
-(64) and wait for capacity when other sends occupy the slots.
+teardown. It also waits for receipts from messages requeued during
+session teardown. Receipt batches run independently within the shared
+outbound send limit (64), waiting for capacity when all slots are used.
 
 ## Files
 

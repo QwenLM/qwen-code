@@ -1098,6 +1098,9 @@ The shared ACP inbox accepts peer and controller credentials. The
 own-process credential described above is available to single-session
 terminal inboxes.
 
+After you stop a turn, new messages receive `queue-full` until you send
+another prompt. Their senders can then retry.
+
 When the session closes or `/clear` switches its conversation, the host
 sends `expired` for messages still waiting in the old queue. Messages
 appear in the transcript when a turn takes them. A message whose turn

@@ -3985,6 +3985,7 @@ class QwenAgent implements Agent {
   // teardown ran.
   private peerMessagingClosed = false;
   private peerMessagingClose: Promise<void> | undefined;
+  private readonly pendingPeerExpiries = new Set<Promise<void>>();
   /**
    * Sessions already given a record. A session is published once, but a
    * reload can hand the same id back through the same path, and two
@@ -4331,6 +4332,7 @@ class QwenAgent implements Agent {
         shutdownConfig: false,
       });
     }
+    await Promise.all(this.pendingPeerExpiries);
     const results = await Promise.allSettled(
       configs.map((config) =>
         config.shutdown({
@@ -5304,6 +5306,7 @@ class QwenAgent implements Agent {
   private peerAddressedSession(id: string | undefined): Session | undefined {
     if (id === undefined) return undefined;
     const wanted = normalizeSessionIdForLookup(id);
+    let addressed: Session | undefined;
     for (const [key, session] of this.sessions) {
       if (
         this.registeredSessions.has(key) &&
@@ -5311,10 +5314,11 @@ class QwenAgent implements Agent {
           normalizeSessionIdForLookup(session.getConfig().getSessionId()) ===
             wanted)
       ) {
-        return session;
+        if (addressed !== undefined) return undefined;
+        addressed = session;
       }
     }
-    return undefined;
+    return addressed;
   }
 
   /** Close the inbox and stop advertising it. Safe to call more than once. */
@@ -5325,12 +5329,14 @@ class QwenAgent implements Agent {
   private expireHostedPeerDeliveries(
     deliveries: readonly PeerQueuedDelivery[],
   ): void {
-    if (deliveries.length === 0) return;
-    void this.peerMessagingStart
-      ?.then((messaging) => messaging?.expireQueued(deliveries))
+    if (deliveries.length === 0 || !this.peerMessagingStart) return;
+    const expiry = this.peerMessagingStart
+      .then((messaging) => messaging?.expireQueued(deliveries))
       .catch((error: unknown) => {
         debugLogger.debug('[ACP] sending peer expiry receipts failed:', error);
       });
+    this.pendingPeerExpiries.add(expiry);
+    void expiry.then(() => this.pendingPeerExpiries.delete(expiry));
   }
 
   private async finishPeerMessagingClose(): Promise<void> {
@@ -5352,6 +5358,7 @@ class QwenAgent implements Agent {
       );
     }
     this.inboxAddress = null;
+    await Promise.all(this.pendingPeerExpiries);
   }
 
   /**
@@ -5455,6 +5462,9 @@ class QwenAgent implements Agent {
         }),
       ),
     );
+    // Turn admission can return a peer item to the queue after the inbox's
+    // first snapshot. Session disposal detaches those items as well.
+    await Promise.all(this.pendingPeerExpiries);
     await Promise.allSettled(
       [...this.pendingConfigCleanup.values()]
         .flatMap((configs) => [...configs])
@@ -5881,9 +5891,30 @@ class QwenAgent implements Agent {
     }
   }
 
+  private hasHostedSessionId(sessionId: string): boolean {
+    return (
+      this.sessions.has(sessionId) ||
+      [...this.sessions.values()].some(
+        (session) =>
+          normalizeSessionIdForLookup(session.getConfig().getSessionId()) ===
+          sessionId,
+      )
+    );
+  }
+
+  private assertHostedSessionIdAvailable(sessionId: string): void {
+    if (this.hasHostedSessionId(sessionId)) {
+      throw new RequestError(
+        ACP_ERROR_CODES.INVALID_PARAMS,
+        `Session ${sessionId} is already active.`,
+        { errorKind: 'session_id_conflict', sessionId },
+      );
+    }
+  }
+
   private reserveStartingSessionId(sessionId: string): () => void {
     if (
-      this.sessions.has(sessionId) ||
+      this.hasHostedSessionId(sessionId) ||
       this.startingSessionIds.has(sessionId)
     ) {
       throw new RequestError(
@@ -17719,24 +17750,12 @@ class QwenAgent implements Agent {
     options.signal?.throwIfAborted();
     this.assertManagedSessionAdmission(this.hostExecutionEngine);
 
-    if (this.sessions.has(sessionId)) {
-      throw new RequestError(
-        ACP_ERROR_CODES.INVALID_PARAMS,
-        `Session ${sessionId} is already active.`,
-        { errorKind: 'session_id_conflict', sessionId },
-      );
-    }
+    this.assertHostedSessionIdAvailable(sessionId);
 
     await options.prepareBeforeSessionCreate?.();
     options.signal?.throwIfAborted();
     this.assertManagedSessionAdmission(this.hostExecutionEngine);
-    if (this.sessions.has(sessionId)) {
-      throw new RequestError(
-        ACP_ERROR_CODES.INVALID_PARAMS,
-        `Session ${sessionId} is already active.`,
-        { errorKind: 'session_id_conflict', sessionId },
-      );
-    }
+    this.assertHostedSessionIdAvailable(sessionId);
     // A run the previous daemon process was running when it exited has no
     // snapshot until something claims it; claimed here, it joins the history
     // this session lists as a failed run.
@@ -17904,6 +17923,7 @@ class QwenAgent implements Agent {
           () => this.sessionWorkflowEnabledOverride === true,
         );
       }
+      this.assertHostedSessionIdAvailable(sessionId);
       this.sessions.set(sessionId, session);
       session.bindWorkflowModeUpdates?.(
         () =>

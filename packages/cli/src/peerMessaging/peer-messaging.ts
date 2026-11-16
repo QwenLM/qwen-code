@@ -296,7 +296,6 @@ export class PeerMessaging {
    * Settled with a corrective receipt at close.
    */
   private readonly outstanding: PeerUserFrame[] = [];
-  private expiryTail = Promise.resolve();
   private queuedPeerCount: (() => number) | null = null;
   private readonly heldListeners = new Set<
     (held: readonly HeldMessage[]) => void
@@ -1055,18 +1054,7 @@ export class PeerMessaging {
    * queues drain independently, so `setQueuedPeerCount` cannot say which
    * ones are left. Wait for send slots shared with other outbound frames.
    */
-  expireQueued(deliveries: readonly PeerQueuedDelivery[]): Promise<void> {
-    if (deliveries.length > 0) {
-      this.expiryTail = this.expiryTail.then(() =>
-        this.sendExpiryReceipts(deliveries),
-      );
-    }
-    return this.expiryTail;
-  }
-
-  private async sendExpiryReceipts(
-    deliveries: readonly PeerQueuedDelivery[],
-  ): Promise<void> {
+  async expireQueued(deliveries: readonly PeerQueuedDelivery[]): Promise<void> {
     for (
       let start = 0;
       start < deliveries.length;

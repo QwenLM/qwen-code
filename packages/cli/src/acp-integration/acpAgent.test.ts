@@ -4198,10 +4198,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       })
       .mockImplementationOnce(async () => innerConfigB as unknown as Config);
     vi.mocked(Session).mockImplementation(
-      (sessionId: string) =>
+      (sessionId, config) =>
         ({
           getDefaultReasoningConfig: vi.fn(),
           getId: vi.fn().mockReturnValue(sessionId),
+          getConfig: () => config,
           shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           replayHistory: vi.fn().mockResolvedValue(undefined),
@@ -5557,12 +5558,12 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     releaseFirst();
     await expect(first).resolves.toMatchObject({ sessionId });
-    vi.mocked(innerConfig.getSessionId).mockReturnValue(
-      '550e8400-e29b-41d4-a716-446655440002',
-    );
+    await setupSessionMocks('550e8400-e29b-41d4-a716-446655440002');
     await expect(
       agent.newSession({ cwd: '/tmp', mcpServers: [] }),
-    ).resolves.toBeDefined();
+    ).resolves.toMatchObject({
+      sessionId: '550e8400-e29b-41d4-a716-446655440002',
+    });
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -6616,6 +6617,54 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       await agentPromise;
     });
 
+    it('reserves the live conversation id after /clear and rejects ambiguous peer destinations', async () => {
+      const firstConfig = await setupSessionMocks('hosted-first');
+      vi.mocked(loadSettings).mockReturnValue(messagingOn());
+      const { agent, agentPromise } =
+        await bootInitializedAcpAgent(messagingOn());
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      const first = lastSessionMock!;
+      await vi.waitFor(() => expect(mockPeerMessagingStart).toHaveBeenCalled());
+
+      vi.mocked(firstConfig.getSessionId).mockReturnValue('hosted-current');
+      await expect(
+        agent.loadSession({
+          sessionId: 'hosted-current',
+          cwd: '/tmp',
+          mcpServers: [],
+        }),
+      ).rejects.toMatchObject({
+        data: { errorKind: 'session_id_conflict', sessionId: 'hosted-current' },
+      });
+
+      await setupSessionMocks('hosted-second');
+      vi.mocked(loadSettings).mockReturnValue(messagingOn());
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      const second = lastSessionMock!;
+      vi.mocked(firstConfig.getSessionId).mockReturnValue('hosted-second');
+      const options = mockPeerMessagingStart.mock.calls[0]![0] as {
+        ownsSessionId: (id: string) => boolean;
+        submit: (
+          modelText: string,
+          displayText: string,
+          delivery: { msgId: string; toSessionId: string },
+        ) => boolean;
+      };
+      expect(options.ownsSessionId('hosted-first')).toBe(true);
+      expect(options.ownsSessionId('hosted-second')).toBe(false);
+      expect(
+        options.submit('model', 'display', {
+          msgId: 'ambiguous',
+          toSessionId: 'hosted-second',
+        }),
+      ).toBe(false);
+      expect(first.enqueuePeerMessage).not.toHaveBeenCalled();
+      expect(second.enqueuePeerMessage).not.toHaveBeenCalled();
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    });
+
     it('tells the senders of messages a session never read', async () => {
       const close = vi.fn().mockResolvedValue(undefined);
       mockPeerMessagingStart.mockResolvedValue({ close });
@@ -6638,6 +6687,55 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       );
       expect(close).toHaveBeenCalledExactlyOnceWith(unread);
     });
+
+    it.each(['plain', 'managed'] as const)(
+      'waits for expiries discovered during %s session teardown',
+      async (shutdown) => {
+        let releaseExpiry!: () => void;
+        const receipt = new Promise<void>((resolve) => {
+          releaseExpiry = resolve;
+        });
+        const expireQueued = vi.fn().mockReturnValue(receipt);
+        const close = vi.fn().mockResolvedValue(undefined);
+        mockPeerMessagingStart.mockResolvedValue({ close, expireQueued });
+        await setupSessionMocks('hosted-late-unread');
+        vi.mocked(loadSettings).mockReturnValue(messagingOn());
+        const { agent, agentPromise } =
+          await bootInitializedAcpAgent(messagingOn());
+        await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+        await vi.waitFor(() =>
+          expect(mockPeerMessagingStart).toHaveBeenCalled(),
+        );
+        const unread = [{ msgId: 'requeued-during-shutdown' }];
+        vi.mocked(lastSessionMock!.takeQueuedPeerDeliveries)
+          .mockReturnValueOnce([])
+          .mockReturnValueOnce(unread);
+
+        const internals = agent as unknown as {
+          disposeSessions: () => Promise<void>;
+          finishManagedShutdown: (configs: Config[]) => Promise<void>;
+        };
+        const disposed = vi.fn();
+        const complete = (
+          shutdown === 'plain'
+            ? internals.disposeSessions()
+            : internals.finishManagedShutdown([])
+        ).then(disposed);
+        try {
+          await vi.waitFor(() =>
+            expect(expireQueued).toHaveBeenCalledExactlyOnceWith(unread),
+          );
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          expect(close).toHaveBeenCalledExactlyOnceWith([]);
+          expect(disposed).not.toHaveBeenCalled();
+        } finally {
+          releaseExpiry();
+          await complete;
+          mockConnectionState.resolve();
+          await agentPromise;
+        }
+      },
+    );
 
     it('tells the senders of messages a closed session never read', async () => {
       const expireQueued = vi.fn().mockResolvedValue(undefined);

@@ -13913,7 +13913,7 @@ export class Session implements SessionContext {
     displayText: string,
     delivery: PeerQueuedDelivery,
   ): boolean {
-    if (this.disposed || this.closing) return false;
+    if (this.disposed || this.closing || this.notificationsPaused) return false;
     if (
       this.notificationQueue.filter((item) => item.kind === 'peer').length >=
       MAX_BACKGROUND_NOTIFICATION_QUEUE

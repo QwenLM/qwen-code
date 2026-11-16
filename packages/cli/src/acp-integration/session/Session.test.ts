@@ -24050,6 +24050,34 @@ describe('Session', () => {
       ).toBe(true);
     });
 
+    it('rejects new peer messages after Stop until the next prompt', async () => {
+      const internals = session as unknown as {
+        notificationProcessing: boolean;
+      };
+      internals.notificationProcessing = true;
+      await session.cancelPendingPrompt();
+
+      expect(
+        session.enqueuePeerMessage('model', 'display', { msgId: 'paused' }),
+      ).toBe(false);
+      expect(session.takeQueuedPeerDeliveries()).toEqual([]);
+      expect(session.collectActiveWorkHolds()).toEqual([]);
+
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'resume' }],
+      });
+      expect(
+        session.enqueuePeerMessage('model', 'display', { msgId: 'resumed' }),
+      ).toBe(true);
+      await vi.waitFor(() =>
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2),
+      );
+    });
+
     it('expires queued peer deliveries from the old conversation on /clear', async () => {
       const expired = vi.fn();
       session.dispose();

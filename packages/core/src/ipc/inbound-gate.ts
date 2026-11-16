@@ -386,10 +386,8 @@ export interface InboundGateOptions {
   /**
    * False for a host with nowhere to show a held message, such as a
    * `qwen --acp` process. A message it would hold is refused instead:
-   * a `held` receipt promises a review nobody can give. Answering
-   * `refuse` from `getPolicySetting` would not do the same thing, since
-   * an explicit setting outranks controllers and the session's own
-   * processes, which this host still accepts. Defaults to true.
+   * a `held` receipt promises a review nobody can give. Only hold
+   * decisions are converted. Defaults to true.
    */
   presentsHolds?: boolean;
   /** Called whenever the held set changes, for UI. */
