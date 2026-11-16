@@ -97,10 +97,19 @@ const legacyGlobalDirCheck: WarningCheck = {
       return null;
     }
     const legacy = tildeifyPath(legacyDir);
+    // Settings can be copied; a token cannot be shared (see above), so a
+    // missing oauth_creds.json means signing in here.
+    const remedies = [
+      ...(files.includes('settings.json')
+        ? [`copy settings.json into ${tildeifyPath(xdgDir)}`]
+        : []),
+      ...(files.includes(OAUTH_FILE) ? ['run /auth to sign in here'] : []),
+    ].join(' and ');
     return (
       `${legacy} has ${files.join(' and ')} from another Qwen Code install, ` +
       `but this install uses ${tildeifyPath(xdgDir)} and does not read ` +
-      `${files.length === 1 ? 'it' : 'them'}. Run /auth to sign in here, or delete ` +
+      `${files.length === 1 ? 'it' : 'them'}. ` +
+      `${remedies.charAt(0).toUpperCase()}${remedies.slice(1)}, or delete ` +
       `${tildeifyPath(path.join(xdgDir, GLOBAL_DIR_MARKER))} to use ${legacy} instead.`
     );
   },

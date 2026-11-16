@@ -98,7 +98,7 @@ describe('getUserStartupWarnings', () => {
       expect(await notices()).toEqual([
         `${tilde('.qwen')} has settings.json and oauth_creds.json from another Qwen Code install, ` +
           `but this install uses ${tilde('.config', 'qwen')} and does not read them. ` +
-          `Run /auth to sign in here, or delete ` +
+          `Copy settings.json into ${tilde('.config', 'qwen')} and run /auth to sign in here, or delete ` +
           `${tilde('.config', 'qwen', '.qwen-global-dir')} to use ${tilde('.qwen')} instead.`,
       ]);
       expect((await fs.readdir(legacyDir())).sort()).toEqual([
@@ -115,10 +115,22 @@ describe('getUserStartupWarnings', () => {
       await write(path.join(xdgDir(), 'settings.json'));
       const [notice] = await notices();
       expect(notice).toContain(' has oauth_creds.json from another');
-      expect(notice).toContain(' does not read it. ');
+      expect(notice).toContain(' does not read it. Run /auth to sign in here,');
+      expect(notice).not.toContain('copy settings.json');
 
       await write(path.join(xdgDir(), 'oauth_creds.json'));
       expect(await notices()).toEqual([]);
+    });
+
+    it('does not offer /auth when only settings.json is missing', async () => {
+      // Signed in here, with settings.json left in ~/.qwen by an older install.
+      await write(path.join(xdgDir(), 'oauth_creds.json'));
+      const [notice] = await notices();
+      expect(notice).toContain(' has settings.json from another');
+      expect(notice).toContain(
+        ` does not read it. Copy settings.json into ${path.join('~', '.config', 'qwen')}, or delete `,
+      );
+      expect(notice).not.toContain('/auth');
     });
 
     it('says nothing while ~/.qwen is the global dir', async () => {

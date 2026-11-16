@@ -46,7 +46,7 @@ for var in $(compgen -e | grep -E '_API_KEY$|_AUTH_TOKEN$'); do unset "$var"; do
 
 ### 遗留在重新创建的 ~/.qwen 中的登录信息
 
-在一个全新的主目录中先运行一次该命令，然后执行 `mkdir ~/.qwen`，并向 `~/.qwen/settings.json` 和 `~/.qwen/oauth_creds.json` 写入 `{}`，模拟旧版本在那里登录。再次运行该命令。预期仍使用 `~/.config/qwen`，出现一条列出这两个文件、`/auth` 和 `~/.config/qwen/.qwen-global-dir` 的警告，`~/.qwen` 中的两个文件保持不变，`~/.config/qwen` 中也没有它们的副本。再向 `~/.config/qwen/settings.json` 写入 `{}` 并再次运行：预期警告只列出 `oauth_creds.json`。
+在一个全新的主目录中先运行一次该命令，然后执行 `mkdir ~/.qwen`，并向 `~/.qwen/settings.json` 和 `~/.qwen/oauth_creds.json` 写入 `{}`，模拟旧版本在那里登录。再次运行该命令。预期仍使用 `~/.config/qwen`，出现一条列出这两个文件、`/auth` 和 `~/.config/qwen/.qwen-global-dir` 的警告，`~/.qwen` 中的两个文件保持不变，`~/.config/qwen` 中也没有它们的副本。再向 `~/.config/qwen/settings.json` 写入 `{}` 并再次运行：预期警告只列出 `oauth_creds.json` 和 `/auth`。然后删除该文件，向 `~/.config/qwen/oauth_creds.json` 写入 `{}` 并再次运行：预期警告只列出 `settings.json`，且不提 `/auth`。
 
 ### 全新安装上的其他入口
 

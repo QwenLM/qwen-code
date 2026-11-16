@@ -46,7 +46,7 @@ In the new-install group's home, `mkdir ~/.qwen` and run the command again. Expe
 
 ### A sign-in left in a recreated ~/.qwen
 
-In a fresh home, run the command once, then `mkdir ~/.qwen` and write `{}` to `~/.qwen/settings.json` and `~/.qwen/oauth_creds.json`, as an older release signing in there would. Run the command again. Expect `~/.config/qwen` to stay in use, a warning that names both files, `/auth` and `~/.config/qwen/.qwen-global-dir`, and both files in `~/.qwen` unchanged, with no copy in `~/.config/qwen`. Write `{}` to `~/.config/qwen/settings.json` and run it again: expect the warning to name only `oauth_creds.json`.
+In a fresh home, run the command once, then `mkdir ~/.qwen` and write `{}` to `~/.qwen/settings.json` and `~/.qwen/oauth_creds.json`, as an older release signing in there would. Run the command again. Expect `~/.config/qwen` to stay in use, a warning that names both files, `/auth` and `~/.config/qwen/.qwen-global-dir`, and both files in `~/.qwen` unchanged, with no copy in `~/.config/qwen`. Write `{}` to `~/.config/qwen/settings.json` and run it again: expect the warning to name only `oauth_creds.json` and `/auth`. Then remove that file, write `{}` to `~/.config/qwen/oauth_creds.json` and run it again: expect the warning to name only `settings.json`, with no `/auth`.
 
 ### Other entry points on a new install
 
