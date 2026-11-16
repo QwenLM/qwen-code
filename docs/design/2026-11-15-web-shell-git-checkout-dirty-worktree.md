@@ -15,11 +15,14 @@ The workspace git checkout path (branch picker popover → SDK
 `workspaceGitCheckout` → `POST /workspace(s)/git/checkout` → core
 `gitCheckout`) runs a plain `git checkout <ref> --`. When local
 modifications or untracked files would be overwritten by the switch, git
-refuses. The route already classifies both refusal shapes as
+refuses. The route already classifies the refusal shapes as
 `409 dirty_working_tree` (the classifier matches
-`dirty|uncommitted|would be overwritten`, which covers git's "Your local
-changes … would be overwritten by checkout" and "The following untracked
-working tree files would be overwritten by checkout"), but the popover
+`dirty|uncommitted|would be overwritten|would lose untracked`, which
+covers git's "Your local changes … would be overwritten by checkout",
+"The following untracked working tree files would be overwritten by
+checkout", and the directory-collision sibling "Updating the following
+directories would lose untracked files in them" — an untracked directory
+blocking a path the target tracks as a file), but the popover
 only renders the error string in its footer — nothing actionable surfaces.
 
 The typical cause is residue from earlier work: edits left by a previous
@@ -249,8 +252,12 @@ omission:
   design guards only its destructive option for the same reason; adding
   a stash refusal here would also leave the panel offering an option
   that always fails in subdirectory workspaces.
-- **No cross-request serialization.** Concurrent git operations fail
-  loudly on git's own `index.lock`. The stash capture carries a
+- **No cross-request serialization.** Concurrent index-writing git
+  operations (checkout, stash, branch) fail loudly on git's own
+  `index.lock`; the residue `clean -fd` does not take that lock (probed),
+  so a concurrent clean races on the files themselves — the same
+  confirmed-discard exposure the concurrent-session risk covers. The
+  stash capture carries a
   per-request nonce in the entry subject (the documented label stays as
   its prefix), so a request whose own push was a no-op — because a
   concurrent request stashed the tree first — adopts nothing and reports

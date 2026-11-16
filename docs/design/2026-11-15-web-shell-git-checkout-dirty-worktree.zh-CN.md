@@ -13,11 +13,13 @@
 工作区 git checkout 路径（分支选择器弹层 → SDK `workspaceGitCheckout` →
 `POST /workspace(s)/git/checkout` → core `gitCheckout`）执行的是裸的
 `git checkout <ref> --`。当本地修改或未跟踪文件会被切换覆盖时，git 拒绝。
-路由已经把这两种拒绝形态都归类为 `409 dirty_working_tree`（分类器匹配
-`dirty|uncommitted|would be overwritten`，覆盖 git 的 "Your local changes
-… would be overwritten by checkout" 与 "The following untracked working
-tree files would be overwritten by checkout"），但弹层只是把错误字符串
-渲染在 footer 里——没有任何可操作的出口。
+路由已经把这些拒绝形态都归类为 `409 dirty_working_tree`（分类器匹配
+`dirty|uncommitted|would be overwritten|would lose untracked`，覆盖 git 的
+"Your local changes … would be overwritten by checkout"、"The following
+untracked working tree files would be overwritten by checkout"、以及
+目录碰撞的兄弟形态 "Updating the following directories would lose
+untracked files in them"——未跟踪目录挡住目标分支以文件跟踪的路径），
+但弹层只是把错误字符串渲染在 footer 里——没有任何可操作的出口。
 
 典型成因是早前工作的残留：上一个会话留下的编辑、或构建产生的新文件，
 挡住了切换到另一个分支。pull 路径已经用 stash 或放弃两种解决方式回应同
@@ -192,8 +194,10 @@ SDK 的 `workspaceGitCheckout`（legacy 与 workspace 限定两个方法）接�
   东西被销毁：条目保留并被点名，修改可恢复。pull 设计出于同样原因只守卫
   其破坏性选项；在这里拒绝 stash 还会让面板在子目录工作区里提供一个永远
   失败的选项。
-- **不做跨请求串行化。** 并发 git 操作会在 git 自己的 `index.lock` 上
-  响亮地失败。stash 捕获在条目 subject 里携带每请求 nonce（文档化的标签
+- **不做跨请求串行化。** 并发的写索引 git 操作（checkout、stash、
+  branch）会在 git 自己的 `index.lock` 上响亮地失败；残留 `clean -fd`
+  不取这把锁（已探针证实），因此并发 clean 在文件本身上竞争——与并发
+  会话风险同属已确认放弃的暴露面。stash 捕获在条目 subject 里携带每请求 nonce（文档化的标签
   保留为其前缀），因此当本请求自己的 push 是空操作——因为并发请求先把
   树 stash 了——它什么都不会认领、也不报告条目；按身份恢复绝不会 apply
   或 drop 别人的条目。pull 流程共用该 helper 与同一保证。

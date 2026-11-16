@@ -746,6 +746,12 @@ describe('gitCheckout with a dirty working tree', () => {
     expect(read(dir, 'a.txt')).toBe('feature\n');
     expect(has(dir, 'new.txt')).toBe(false);
     expectSoleStash(dir, 'qwen-code: auto-stash before checkout');
+    // The subject carries the documented label plus a per-request nonce
+    // (git prepends "On <branch>: "); the nonce is what keeps a
+    // concurrent request's entry from being adopted.
+    expect(git(dir, 'stash', 'list', '--format=%s').trim()).toMatch(
+      /qwen-code: auto-stash before checkout [0-9a-f]{8}$/,
+    );
     // The entry holds both the tracked edit and the untracked file.
     expect(git(dir, 'stash', 'show', '-p', result.stashSha!)).toContain(
       'local edit',
@@ -1548,6 +1554,36 @@ describe('gitCheckout with a dirty working tree', () => {
     expect(has(dir, 'new.txt')).toBe(false);
     expect(headSha(dir)).toBe(git(dir, 'rev-parse', 'v1.0^{commit}').trim());
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'force checkout of a tag does not certify a detached HEAD at a different commit',
+    async () => {
+      const dir = dirtyCheckoutFixture();
+      git(dir, 'tag', 'v1.0');
+      // A second commit the tag does NOT point at: an actor detaches HEAD
+      // there while our forced tag checkout fails. The detached arm's
+      // commit EQUALITY must refuse the attribution.
+      const other = commitFile(dir, 'a.txt', 'other-commit\n');
+      write(dir, { 'new.txt': 'untracked\n' });
+      const env = gitShim(hermeticEnv(), [
+        {
+          match: '"checkout -f v1.0"*',
+          script: `"$REAL" checkout ${other} --; exit 1`,
+        },
+      ]);
+
+      const failure = await checkoutFails(
+        dir,
+        'v1.0',
+        { force: true },
+        'checkout_failed',
+        env,
+      );
+
+      expect(failure.message).toContain('cannot discard and switch');
+      expect(read(dir, 'new.txt')).toBe('untracked\n');
+    },
+  );
 
   it('force checkout of HEAD reports the completed discard when a hook refuses', async () => {
     const dir = dirtyCheckoutFixture();
@@ -2767,6 +2803,14 @@ describe('gitPull with a dirty working tree', () => {
 
     await bothRefused(dir, 'operation_in_progress');
 
+    // The parameterised refusal carries the PULL action word on this
+    // arm (the checkout flows say "cannot checkout").
+    const pullFailure = await pullFails(
+      dir,
+      { stash: true },
+      'operation_in_progress',
+    );
+    expect(pullFailure.message).toContain('cannot update');
     expect(git(dir, 'rev-parse', 'MERGE_HEAD').trim()).toBe(mergeHead);
     expect(read(dir, 'a.txt')).toBe('resolved\n');
     expect(stashList(dir)).toEqual([]);

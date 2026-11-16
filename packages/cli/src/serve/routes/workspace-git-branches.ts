@@ -456,7 +456,9 @@ export function sendGitError(
     res.status(404).json({ error: 'not_a_git_repository', message });
     return;
   }
-  if (/dirty|uncommitted|would be overwritten/i.test(message)) {
+  if (
+    /dirty|uncommitted|would be overwritten|would lose untracked/i.test(message)
+  ) {
     res.status(409).json({ error: 'dirty_working_tree', message });
     return;
   }
