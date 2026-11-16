@@ -5962,6 +5962,24 @@ describe('ArtifactPanel task explanation', () => {
     ).toBeNull();
   });
 
+  it('renders and asks without a crash when the restored task has no label', () => {
+    const partial = {
+      ...task,
+      label: undefined,
+    } as unknown as DaemonSessionShellTaskStatus;
+    const onExplainTask = vi.fn();
+    const { container } = renderExplainPanel({
+      explainTask: partial,
+      onExplainTask,
+    });
+    const explain = container.querySelector<HTMLButtonElement>(
+      '[data-testid="artifact-panel-explain"]',
+    );
+    expect(explain).not.toBeNull();
+    act(() => explain?.click());
+    expect(onExplainTask).toHaveBeenCalledExactlyOnceWith(partial);
+  });
+
   it('excerpts a multi-KB label in the header aria label', () => {
     const longTask = {
       ...task,

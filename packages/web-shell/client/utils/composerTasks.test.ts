@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import type { DaemonSessionTaskWithWorkflowStatus } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonSessionShellTaskStatus,
+  DaemonSessionTaskWithWorkflowStatus,
+} from '@qwen-code/sdk/daemon';
 import { getTranslator } from '../i18n';
 import {
   buildTaskExplainQuestion,
@@ -439,6 +442,26 @@ describe('buildTaskExplainQuestion', () => {
     expect(question).not.toContain('L'.repeat(401));
   });
 
+  it('composes from a restored snapshot without label or cwd', () => {
+    // The lazy cross-session tab restoration can hydrate a shell snapshot
+    // that carries only the command (App.test.tsx's restoration fixture).
+    const question = buildTaskExplainQuestion(
+      {
+        kind: 'shell',
+        id: 'shell-1',
+        command: 'npm test',
+        status: 'running',
+        startTime: 1_000,
+        runtimeMs: 5_000,
+      } as DaemonSessionShellTaskStatus,
+      en,
+    );
+    expect(question).toContain('Command: npm test');
+    expect(question).not.toContain('Label:');
+    expect(question).not.toContain('Working directory:');
+    expect(question).not.toContain('undefined');
+  });
+
   it('emits a daemon-shaped shell command exactly once', () => {
     // The daemon sets label and description to the command itself.
     const question = buildTaskExplainQuestion(
@@ -520,6 +543,10 @@ describe('buildTaskExplainQuestion', () => {
 describe('explainDisplayLabel', () => {
   it('keeps a short label verbatim', () => {
     expect(explainDisplayLabel('npm run dev')).toBe('npm run dev');
+  });
+
+  it('tolerates a restored snapshot without a label', () => {
+    expect(explainDisplayLabel(undefined)).toBe('');
   });
 
   it('caps a multi-KB command label for the panel echo', () => {

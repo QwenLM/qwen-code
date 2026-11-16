@@ -55,7 +55,7 @@ Answer path:
 
 ## Constraints and risks
 
-- Facts are snapshot-only: no shell output tail or agent transcript is fetched. Elapsed time is the snapshot's runtime, which can lag a running task.
+- Facts are snapshot-only: no shell output tail or agent transcript is fetched. Elapsed time is the snapshot's runtime, which can lag a running task. Lazily restored cross-session tabs can hydrate a partial snapshot (no label or cwd yet); the builder omits the missing fact lines and the display/aria labels degrade to an empty label instead of crashing.
 - Explanation quality depends on the launch being present in the conversation context; a task started outside this session's history is explained from its facts alone.
 - Each click costs one side query under the btw channel's model policy (the configured fast model, otherwise the session model) and its usual stream-retry behavior. Answer length is steered by the 2-4 sentence instruction, not a special token budget; the fork inherits the main chat's generation config. Write-blocked sessions silently no-op, identical to `/btw`.
 - Trust boundary unchanged: task facts are model-authored text, and the answer renders through the same btw surface as any `/btw` answer.
