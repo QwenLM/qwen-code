@@ -60,13 +60,31 @@ class AgentStateStoreProxyTransactionTest {
         factory.setProxyTargetClass(true);
         factory.addAdvice(interceptor);
         var proxy = (AgentStateStore) factory.getProxy();
+        // Every creation arity is a boundary: the legacy actorless (9) and
+        // actor-carrying (10/11) entries plus the principal-carrying twins
+        // (10/11) added by the ownership contract, and the workspace entry.
         List<Method> entries = Arrays.stream(AgentStateStore.class.getMethods()).filter(method ->
-                method.getName().equals("insertSessionCommand") && Set.of(9, 11).contains(method.getParameterCount())
+                method.getName().equals("insertSessionCommand") && Set.of(9, 10, 11).contains(method.getParameterCount())
                 || method.getName().equals("insertWorkspaceSessionCommand") && method.getParameterCount() == 1).toList();
-        assertThat(entries).hasSize(3);
+        assertThat(entries).hasSize(6);
         for (var entry : entries) {
-            assertThat(ManagedAgentStore.class.getDeclaredMethod(entry.getName(), entry.getParameterTypes())
-                    .getAnnotation(org.springframework.transaction.annotation.Transactional.class)).isNotNull();
+            // The principal arm is declared on ManagedAgentPrincipalEntries
+            // (the #16603 decomposition superclass) with the same transaction
+            // attributes, so the lookup walks the hierarchy instead of only
+            // the facade's own declarations.
+            Method declared = null;
+            for (Class<?> type = ManagedAgentStore.class; type != null && declared == null;
+                    type = type.getSuperclass()) {
+                for (Method candidate : type.getDeclaredMethods()) {
+                    if (candidate.getName().equals(entry.getName())
+                            && Arrays.equals(candidate.getParameterTypes(), entry.getParameterTypes())) {
+                        declared = candidate;
+                        break;
+                    }
+                }
+            }
+            assertThat(declared).isNotNull();
+            assertThat(declared.getAnnotation(org.springframework.transaction.annotation.Transactional.class)).isNotNull();
             Object[] arguments =
                     Arrays.stream(entry.getParameterTypes())
                             .map(

@@ -19,6 +19,7 @@ import java.util.concurrent.TimeUnit;
 public final class ExternalHttpRuntimeClient implements ExternalRuntimeClient {
     static final String PROVISION_PATH = "provision";
     static final String OBSERVE_PATH = "observe";
+    static final String REATTACH_PATH = "reattach";
     private static final int REQUEST_LIMIT = 64 * 1024;
     private static final int RESPONSE_LIMIT = 64 * 1024;
     private final URI base;
@@ -60,6 +61,11 @@ public final class ExternalHttpRuntimeClient implements ExternalRuntimeClient {
     @Override
     public CompletionStage<Map<String, Object>> observe(Map<String, Object> request) {
         return post(OBSERVE_PATH, request);
+    }
+
+    @Override
+    public CompletionStage<Map<String, Object>> reattach(Map<String, Object> request) {
+        return post(REATTACH_PATH, request);
     }
 
     private CompletionStage<Map<String, Object>> post(String path, Map<String, Object> body) {

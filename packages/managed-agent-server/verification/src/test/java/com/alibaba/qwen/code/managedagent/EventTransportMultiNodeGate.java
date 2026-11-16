@@ -768,6 +768,12 @@ public class EventTransportMultiNodeGate {
                     URI.create("http://127.0.0.1:" + node.springPort + path))
                     .timeout(Duration.ofSeconds(20))
                     .header("X-Qwen-Tenant-Id", tenant)
+                    // Session creation and every row-bearing Session surface
+                    // refuse an actorless request since the ownership
+                    // migration; this gate's in-process stand-in supplies the
+                    // trusted actor header, so the gate authenticates the same
+                    // way the other packaged-HTTP lanes do.
+                    .header("X-Qwen-Actor-Id", "mq3-gate")
                     .header("Accept", "application/json")
                     .method(method, body == null ? HttpRequest.BodyPublishers.noBody()
                             : HttpRequest.BodyPublishers.ofString(body));
@@ -1366,6 +1372,8 @@ public class EventTransportMultiNodeGate {
             properties.put("qwen.managed-agent.session-store.workspace-id", WORKSPACE);
             properties.put("qwen.managed-agent.session-store.writer-lease-duration",
                     WRITER_LEASE);
+            properties.put("qwen.managed-agent.trusted-actor-header",
+                    "X-Qwen-Actor-Id");
             properties.put("qwen.managed-agent.harness.enabled", "true");
             properties.put("qwen.managed-agent.harness.base-url",
                     "http://127.0.0.1:" + harnessPort);

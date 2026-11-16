@@ -68,7 +68,9 @@ class ManagedAgentSessionCapabilitiesTest {
                 .thenReturn(owner ? Set.of("session") : Set.of());
         when(store.supportsPlanMode(session)).thenReturn(true);
         when(store.requireSession("tenant", "session")).thenReturn(session);
-        when(store.listSessions("tenant", "actor", null, null, 10, "all"))
+        // Public and WebShell listings keep the raw-actor page path (R7-1):
+        // the filter-admitted actor never becomes a byte-bounded principal.
+        when(store.listSessions("tenant", "actor", null, null, 10, "all", ""))
                 .thenReturn(new SessionPage(List.of(session), false));
         when(store.findChildLineage("tenant", "session"))
                 .thenReturn(child ? new SessionLineage("parent", "parent", "run", 1) : null);
@@ -111,7 +113,7 @@ class ManagedAgentSessionCapabilitiesTest {
         when(store.sessionsWithExecutionRegistryFacts(eq("tenant"), any()))
                 .thenReturn(Set.of("external", "local"));
         when(store.requireSession("tenant", "external")).thenReturn(external);
-        when(store.listSessions("tenant", "actor", null, null, 10, "all"))
+        when(store.listSessions("tenant", "actor", null, null, 10, "all", ""))
                 .thenReturn(new SessionPage(List.of(external, local), false));
         // The durable registration read refuses an unreadable or undecodable
         // record by throwing. Rendering a capability flag must not propagate
@@ -145,6 +147,8 @@ class ManagedAgentSessionCapabilitiesTest {
         when(store.requireSession("tenant", "session")).thenReturn(session);
         when(store.findLatestLifecycleOperations("tenant", List.of("session")))
                 .thenReturn(Map.of("session", operation));
+        // Single-session reads project recovery on the raw-actor path
+        // (R7-1); the principal overload serves only trusted callers.
         when(recoveries.projection(session, "actor")).thenReturn(recovery);
 
         var view = service.getWebShellSession("tenant", "actor", "session");
@@ -187,7 +191,7 @@ class ManagedAgentSessionCapabilitiesTest {
         when(store.supportsPlanMode(any()))
                 .thenAnswer(call -> WorkspaceToolProfiles.supportsApprovalSelection(call.getArgument(0)));
         when(store.requireSession("tenant", "excluded")).thenReturn(excluded);
-        when(store.listSessions("tenant", "actor", null, null, 10, "all"))
+        when(store.listSessions("tenant", "actor", null, null, 10, "all", ""))
                 .thenReturn(new SessionPage(List.of(supported, excluded), false));
 
         var views = service.listWebShellSessions("tenant", "actor", null, 10).data();
@@ -230,9 +234,7 @@ class ManagedAgentSessionCapabilitiesTest {
                 status, null, null, 0, 0, 0, 1, 1, null, 1, workspace, "default",
                 profile);
         when(store.requireSession("tenant", "session")).thenReturn(session);
-        when(store.listSessions("tenant", "actor", null, null, 10))
-                .thenReturn(new SessionPage(List.of(session), false));
-        when(store.listSessions("tenant", "actor", null, null, 10, "all"))
+        when(store.listSessions("tenant", "actor", null, null, 10, "all", ""))
                 .thenReturn(new SessionPage(List.of(session), false));
         when(store.findApprovalOwners("tenant", "actor", List.of("session")))
                 .thenReturn(Set.of("session"));

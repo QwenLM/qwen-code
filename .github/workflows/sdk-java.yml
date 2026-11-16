@@ -945,6 +945,10 @@ jobs:
           for fork in 1 2; do
             docker exec "${MYSQL_CONTAINER}-${fork}" sh -c 'MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql --user=root --execute="SET GLOBAL max_allowed_packet=134217728; SELECT @@GLOBAL.max_allowed_packet"'
           done
+          # SessionOssStorageMySqlIT takes a dedicated qwen_o4_ database from
+          # qwen.o4.mysql.url; its validator rejects createDatabaseIfNotExist,
+          # so create the database before Maven connects.
+          docker exec "${MYSQL_CONTAINER}-1" sh -c 'MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql --user=root --execute="CREATE DATABASE IF NOT EXISTS qwen_o4_ci"'
       - name: 'Set up Node.js 22 (hosted)'
         if: "${{ runner.environment == 'github-hosted' }}"
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
@@ -983,6 +987,9 @@ jobs:
           # resolve from this job's seeded copy (pinned in
           # scripts/tests/sdk-java-workflow.test.js).
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml -Dmaven.repo.local=${{ runner.temp }}/m2-repo'
+          # SessionOssStorageMySqlIT takes its own database from the O4 settings
+          # and reads the password from the environment.
+          QWEN_O4_MYSQL_PASSWORD: 'runtime-broker'
         run: |-
           set -o pipefail
           # Seed from the host-shared repo (cache-restored on hosted runners)
@@ -1027,12 +1034,17 @@ jobs:
             if [ "${mvn_status}" -eq 0 ]; then
               # Keep mysql.url for release runs that check out an older tag.
               mvn_stage='mysql integration suite'
+              # SessionOssStorageMySqlIT is a non-Hosted *MySqlIT, so the split
+              # roster expects it here; it takes its own database from the
+              # O4 settings and reads the password from the environment.
               mvn --batch-mode --no-transfer-progress -Pmysql-integration \
                 -Dmysql.integration.forks=2 \
                 -Dmysql.url="jdbc:mysql://127.0.0.1:${MYSQL_PORT_1}/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false" \
                 -Dmysql.url.1="jdbc:mysql://127.0.0.1:${MYSQL_PORT_1}/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false" \
                 -Dmysql.url.2="jdbc:mysql://127.0.0.1:${MYSQL_PORT_2}/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false" \
-                -Dmysql.user=root -Dmysql.password=runtime-broker clean verify checkstyle:check || mvn_status=$?
+                -Dmysql.user=root -Dmysql.password=runtime-broker \
+                -Dqwen.o4.mysql.url="jdbc:mysql://127.0.0.1:${MYSQL_PORT_1}/qwen_o4_ci?allowPublicKeyRetrieval=true&useSSL=false" \
+                -Dqwen.o4.mysql.user=root clean verify checkstyle:check || mvn_status=$?
             fi
           fi
           # Only the write-back mutates host-shared state, so only it takes

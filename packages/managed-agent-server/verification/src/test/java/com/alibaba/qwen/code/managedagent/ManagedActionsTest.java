@@ -1314,7 +1314,18 @@ class ManagedActionsTest {
     @Test
     void hostedSessionsAnswerThroughTheirRecordedCreator() throws Exception {
         String tenant = tenant();
-        String anonymous = hostedSession(tenant, null);
+        // Creation now requires a trusted actor; the legacy row-less state
+        // is a historical one, so the fixture drops the ownership row.
+        String anonymous = hostedSession(tenant, "creator");
+        jdbc.update("DELETE FROM ma_session_principal"
+                + " WHERE tenant_id = ? AND session_id = ?", tenant, anonymous);
+        jdbc.update("UPDATE ma_request_receipt SET actor_id = NULL"
+                + " WHERE tenant_id = ? AND session_id = ?"
+                + " AND namespace = 'SESSION_COMMAND'"
+                + " AND operation = 'CREATE_SESSION'", tenant, anonymous);
+        jdbc.update("UPDATE ma_session SET creator_actor_key = NULL,"
+                + " owner_actor_key = NULL WHERE tenant_id = ?"
+                + " AND session_id = ?", tenant, anonymous);
         ActionJournal open = action(tenant, anonymous,
                 System.currentTimeMillis(), 9007199254740991L);
         // No recorded creator: the tenant-scoped caller answers, matching
@@ -1328,20 +1339,24 @@ class ManagedActionsTest {
         String owned = hostedSession(tenant, "owner");
         ActionJournal journal = action(tenant, owned,
                 System.currentTimeMillis(), 9007199254740991L);
+        // The ownership row is the sole authority, so the action surface
+        // answers a foreign or anonymous caller exactly as the by-id read
+        // does — 404 — while the row-less arm above keeps the store's own
+        // 403 for a genuinely recorded creator.
         mvc.perform(auth(post(path(owned, journal.id) + "/responses"),
                 tenant, "other")
                         .header("Idempotency-Key", "foreign-answer")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(response("allow")))
-                .andExpect(status().isForbidden())
-                .andExpect(jsonPath("$.error.code").value("action_forbidden"));
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error.code").value("session_not_found"));
         mvc.perform(post(path(owned, journal.id) + "/responses")
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "anonymous-answer")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(response("allow")))
-                .andExpect(status().isForbidden())
-                .andExpect(jsonPath("$.error.code").value("action_forbidden"));
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error.code").value("session_not_found"));
         readAccepted(auth(post(path(owned, journal.id) + "/responses"),
                 tenant, "owner")
                         .header("Idempotency-Key", "owner-answer")
@@ -1395,13 +1410,34 @@ class ManagedActionsTest {
     private String session(String tenant) throws Exception {
         String session =
                 readAccepted(
-                                post("/v1/agents/sessions")
+                                post("/v1/agents/sessions").principal(new AuthenticatedTenantActor() {
+                                    public String tenantId() {
+                                        return tenant;
+                                    }
+
+                                    public String actorId() {
+                                        return "actor-a";
+                                    }
+
+                                    public String getName() {
+                                        return "actor-a";
+                                    }
+                                })
                                         .header(TenantContextFilter.HEADER, tenant)
                                         .header("Idempotency-Key", UUID.randomUUID().toString())
                                         .contentType(MediaType.APPLICATION_JSON)
                                         .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))
                         .path("id")
                         .asText();
+        // The fixture's recorded creator is the SQL "owner" below; drop the
+        // create-time ownership row so the action surface reads it as the
+        // historical creator-recorded state it models.
+        jdbc.update("DELETE FROM ma_session_principal"
+                + " WHERE tenant_id = ? AND session_id = ?", tenant, session);
+        jdbc.update("UPDATE ma_request_receipt SET actor_id = NULL"
+                + " WHERE tenant_id = ? AND session_id = ?"
+                + " AND namespace = 'SESSION_COMMAND'"
+                + " AND operation = 'CREATE_SESSION'", tenant, session);
         String key = UUID.randomUUID().toString();
         jdbc.update("INSERT INTO ma_request_receipt (receipt_key,namespace,tenant_key,tenant_id,scope_kind,scope_key,scope_id,"
                         + "idempotency_key,idempotency_digest,request_digest,actor_id,session_id,state,gmt_create,gmt_modified)"
@@ -1411,7 +1447,8 @@ class ManagedActionsTest {
                 com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key("owner"), "owner", key,
                 com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(key), "sha256:test",
                 "owner".getBytes(java.nio.charset.StandardCharsets.UTF_8), session, System.currentTimeMillis(), System.currentTimeMillis());
-        jdbc.update("UPDATE ma_session SET creator_actor_key=? WHERE tenant_id=? AND session_id=?",
+        jdbc.update("UPDATE ma_session SET creator_actor_key=?, owner_actor_key=NULL"
+                + " WHERE tenant_id=? AND session_id=?",
                 "owner".getBytes(java.nio.charset.StandardCharsets.UTF_8), tenant, session);
         return session;
     }

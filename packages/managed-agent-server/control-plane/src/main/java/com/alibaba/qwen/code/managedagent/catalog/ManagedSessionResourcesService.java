@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtension
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedMcpRecords;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.repository.ManagedAgentDefinitionStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
@@ -57,6 +58,12 @@ public class ManagedSessionResourcesService {
     public JsonNode get(String tenant, String actor, String sessionId) {
         SessionRecord session = sessions.requireReadableSession(tenant, actor, sessionId);
         return new Query(tenant, sessionId).get(session);
+    }
+
+    @Transactional(transactionManager = "managedAgentTransactionManager", readOnly = true, isolation = Isolation.REPEATABLE_READ)
+    public JsonNode get(SessionPrincipal principal, String sessionId) {
+        SessionRecord session = sessions.requireReadableSession(principal, sessionId);
+        return new Query(principal.tenantId(), sessionId).get(session);
     }
 
     private final class Query {

@@ -426,6 +426,9 @@ class RuntimeExternalWorkspaceDrainTest {
                     public CompletionStage<Map<String, Object>> observe(Map<String, Object> ignored) {
                         return CompletableFuture.failedFuture(new AssertionError("No observation in drain fixture"));
                     }
+                    public CompletionStage<Map<String, Object>> reattach(Map<String, Object> ignored) {
+                        return CompletableFuture.failedFuture(new AssertionError("No reattach in drain fixture"));
+                    }
                 }, registrations, "provider", Duration.ofSeconds(5));
         private final List<String> events = new ArrayList<>();
         private boolean failAck;

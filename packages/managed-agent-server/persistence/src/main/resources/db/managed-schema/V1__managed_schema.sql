@@ -96,6 +96,24 @@ CREATE INDEX idx_ma_session_retirement ON ma_session (retired_at, is_recovery_pr
 
 CREATE INDEX idx_ma_session_storage_scope ON ma_session (tenant_id, workspace_storage_id, is_resource_gc_completed, session_id);
 
+-- Ownership of a non-Workspace Session: exactly one immutable row per
+-- unbound Session, written in the Session creation transaction. The owner is
+-- the full verified principal (tenant, user and DataAgent business actor);
+-- actor_present distinguishes a present business actor from none. Legacy
+-- Sessions without this row remain invisible to ownership-enforcing paths.
+CREATE TABLE ma_session_principal (
+    tenant_id VARBINARY(512) NOT NULL,
+    session_id VARBINARY(512) NOT NULL,
+    version BIGINT NOT NULL,
+    user_id VARBINARY(1024) NOT NULL,
+    actor_present BOOLEAN NOT NULL,
+    actor_subject_id VARBINARY(1024),
+    gmt_create BIGINT UNSIGNED NOT NULL,
+    CONSTRAINT uk_ma_session_principal_business_key UNIQUE (tenant_id, session_id),
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
+    CONSTRAINT pk_ma_session_principal_id PRIMARY KEY (id)
+) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+
 CREATE TABLE ma_user_message_queue (
     tenant_id VARBINARY(512) NOT NULL COMMENT 'Tenant identity used for isolation.',
     session_id VARBINARY(512) NOT NULL COMMENT 'Managed Session identity.',
@@ -116,7 +134,7 @@ CREATE TABLE ma_user_message (
     message_id VARBINARY(144) NOT NULL COMMENT 'Stable identity of the queued user input.',
     sequence_number BIGINT UNSIGNED NOT NULL COMMENT 'FIFO position of the input within the Session.',
     revision BIGINT UNSIGNED NOT NULL COMMENT 'Input revision used to reject stale edits or withdrawals.',
-    actor_id VARBINARY(512) NOT NULL COMMENT 'Actor identity associated with this record.',
+    actor_id VARBINARY(2048) NOT NULL COMMENT 'Actor identity associated with this record.',
     input_json LONGTEXT NOT NULL COMMENT 'Serialized user input blocks.',
     state VARCHAR(32) NOT NULL COMMENT 'Input queue state, including queued, claimed, consumed, or recovery_blocked.',
     context_revision BIGINT UNSIGNED COMMENT 'Session context revision captured when the input was queued.',
@@ -135,7 +153,7 @@ CREATE TABLE ma_user_message_command (
     tenant_id VARBINARY(512) NOT NULL COMMENT 'Tenant identity used for isolation.',
     session_id VARBINARY(512) NOT NULL COMMENT 'Managed Session identity.',
     command_key CHAR(64) NOT NULL COMMENT 'Digest of actor identity and idempotency key for a queue command.',
-    actor_id VARBINARY(512) NOT NULL COMMENT 'Actor identity associated with this record.',
+    actor_id VARBINARY(2048) NOT NULL COMMENT 'Actor identity associated with this record.',
     request_digest CHAR(71) NOT NULL COMMENT 'Request digest used to reject conflicting retries.',
     result_json LONGTEXT NOT NULL COMMENT 'Serialized queue snapshot returned for this command and its retries.',
     CONSTRAINT uk_ma_user_message_command_business_key UNIQUE (tenant_id, session_id, command_key),
@@ -1129,6 +1147,7 @@ CREATE TABLE ma_tool_execution (
     INDEX idx_tool_execution_harness
         (harness_session_id, execution_call_id_hash),
     native_authorization_json LONGTEXT COMMENT 'Durable authorization evidence for a native tool operation.',
+    shared_dispatch_class VARCHAR(16),
     CONSTRAINT uk_ma_tool_execution_business_key UNIQUE (execution_call_id_hash),
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
     CONSTRAINT pk_ma_tool_execution_id PRIMARY KEY (id),

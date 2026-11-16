@@ -337,7 +337,12 @@ class WorkspaceCsiNativeActivationGateTest {
                     .map(row -> JSON.valueToTree(new TreeMap<>(row)).toString()).sorted().toList());
         }
         assertThat(rows).containsKeys("ma_delivery", "ma_session", "ma_session_head", "ma_request_receipt");
-        assertThat(rows).hasSize(47);
+        // 48 = the 47 baseline tables plus flyway_schema_history. Three entries
+        // were added to V1__managed_schema.sql on the two sides of this merge:
+        // the PR's ma_session_principal ownership row and the base's
+        // ma_client_files_binding and ma_client_files_request.
+        assertThat(rows).containsKey("ma_session_principal");
+        assertThat(rows).hasSize(48);
         return rows;
     }
 
