@@ -181,6 +181,12 @@ Qwen Code ships with a complete agent harness — multi-agent orchestration, per
 - **[Skills & Auto-Skills](https://qwenlm.github.io/qwen-code-docs/en/users/features/skills/)** — built-in skills (`/review`, `/batch`, `/bugfix`…) work out of the box; `/learn` distills docs or code into new skills, the agent can generate skills on its own _(opt-in)_, and `/curator` maintains the library.
 - **[Session management](https://qwenlm.github.io/qwen-code-docs/en/users/features/session-overview/)** — resume past conversations with [`/resume`](https://qwenlm.github.io/qwen-code-docs/en/users/features/commands/), and browse, rename, or archive sessions.
 
+### Multimodal
+
+- **[Voice input](https://qwenlm.github.io/qwen-code-docs/en/users/features/voice-input/)** — dictate prompts in the terminal or Web Shell with a configurable ASR model; the Web Shell inserts the transcript for review before sending.
+- **[Qwen Live](https://qwenlm.github.io/qwen-code-docs/en/users/features/qwen-live/)** _(experimental)_ — realtime speech-to-speech conversations in the Web Shell that answer directly or hand tasks to the agent, with optional screen sharing.
+- **[Image generation](https://qwenlm.github.io/qwen-code-docs/en/users/features/image-generation/)** — the built-in `image_gen` tool turns prompts into PNG artifacts using your configured image model.
+
 ### Extensibility and control
 
 - **[Hooks](https://qwenlm.github.io/qwen-code-docs/en/users/features/hooks/)** — run your own scripts at lifecycle events: before and after tool calls, session start and end, and more.

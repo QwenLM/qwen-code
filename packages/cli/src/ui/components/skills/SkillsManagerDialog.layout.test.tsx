@@ -357,7 +357,16 @@ describe('SkillsManagerDialog', { timeout: CEILING_MS }, () => {
       onClose,
       availableTerminalHeight: 18,
     });
-    await waitForRender(() => expect(lastFrame()).toContain('› [ ] eight'));
+    // `[x] nine` only paints after the dialog's selectedKeys effect, and a
+    // child's passive effects (MultiSelect's keypress subscription) flush
+    // before it — so this frame also guarantees the list is listening. On the
+    // bare first frame the subscription may still be pending, and a 'j' sent
+    // then is dropped for good (the selection frame that follows does not
+    // replay it).
+    await waitForRender(() => {
+      expect(lastFrame()).toContain('› [ ] eight');
+      expect(lastFrame()).toContain('[x] nine');
+    });
     act(() => stdin.write('j'));
     await waitForRender(() => expect(lastFrame()).toContain('› [x] nine'));
     act(() => stdin.write('\r'));
