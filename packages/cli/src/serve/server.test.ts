@@ -45848,15 +45848,17 @@ describe('T2.9 SSE writer idle timeout (issue #4514)', () => {
   });
 
   it('destroys the socket and frees the slot when evicting a stalled writer', async () => {
-    // A graceful res.end() on a socket whose kernel send buffer is full
-    // queues a FIN that can never be sent: the connection — and its
-    // listener slot — lingers until the peer disconnects, defeating the
-    // reaper's purpose. The eviction must forcibly destroy the socket
-    // (as the bus-eviction path does). The kernel-level linger itself is
-    // verified end-to-end (a write-spy leaves the kernel buffer empty,
-    // so it cannot reproduce a full send buffer); here we pin the
-    // destroy call and the counter release it triggers.
+    // A graceful res.end() — or even a plain socket destroy(), which the
+    // kernel turns into a graceful FIN when the send buffer holds unsent
+    // data — queues a FIN a stalled peer (zero receive window) never
+    // ACKs: the socket sits in FIN-WAIT-1 and Node still counts it
+    // against server.maxConnections. The eviction must RST the socket
+    // via resetAndDestroy(). The kernel-level linger itself is verified
+    // end-to-end (a write-spy leaves the kernel buffer empty, so it
+    // cannot reproduce a full send buffer); here we pin the RST call
+    // and the counter release it triggers.
     const http = await import('node:http');
+    const net = await import('node:net');
     type WriteCallback = (error?: Error | null) => void;
     const originalWrite = http.ServerResponse.prototype.write as unknown as (
       this: ServerResponse,
@@ -45865,7 +45867,7 @@ describe('T2.9 SSE writer idle timeout (issue #4514)', () => {
       cb?: WriteCallback,
     ) => boolean;
     const writeSpy = vi.spyOn(http.ServerResponse.prototype, 'write');
-    const destroySpy = vi.spyOn(http.ServerResponse.prototype, 'destroy');
+    const resetSpy = vi.spyOn(net.Socket.prototype, 'resetAndDestroy');
     let forcedStall = false;
     writeSpy.mockImplementation(function (
       this: ServerResponse,
@@ -45915,12 +45917,12 @@ describe('T2.9 SSE writer idle timeout (issue #4514)', () => {
       await new Promise((r) => setTimeout(r, 800));
 
       expect(forcedStall).toBe(true);
-      expect(destroySpy).toHaveBeenCalled();
+      expect(resetSpy).toHaveBeenCalled();
       expect(getActiveSseCount()).toBe(beforeActive);
       await res.body!.cancel().catch(() => undefined);
     } finally {
       writeSpy.mockRestore();
-      destroySpy.mockRestore();
+      resetSpy.mockRestore();
     }
   });
 

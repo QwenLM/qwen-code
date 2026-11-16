@@ -13,7 +13,7 @@ import {
   runWithDaemonTelemetryContext,
 } from '@qwen-code/qwen-code-core';
 import { mapDomainErrorToErrorKind } from '@qwen-code/acp-bridge';
-import type { Application } from 'express';
+import type { Application, Response } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import type { ConversationRuntimeActivityGate } from '../conversations/conversation-runtime-activity.js';
@@ -138,6 +138,32 @@ function boundedDiagnosticString(value: string): string {
 
 export function getActiveSseCount(): number {
   return activeSseCount;
+}
+
+/**
+ * Force-close an SSE response so the listener slot is actually freed.
+ * A plain res.destroy() / socket close() with unsent data in the kernel
+ * send buffer performs a GRACEFUL shutdown: the FIN queues behind the
+ * unsent bytes and a stalled peer (zero receive window) never ACKs it,
+ * leaving the socket in FIN-WAIT-1 indefinitely — Node still counts it
+ * against server.maxConnections. resetAndDestroy() sends RST instead,
+ * dropping the connection immediately (Node >= 18.3; engines >= 22).
+ */
+function forceCloseSseResponse(res: Response): void {
+  const socket = res.socket;
+  if (socket && !socket.destroyed) {
+    if (typeof socket.resetAndDestroy === 'function') {
+      socket.resetAndDestroy();
+    } else {
+      socket.destroy();
+    }
+    return;
+  }
+  try {
+    res.destroy();
+  } catch {
+    /* already destroyed */
+  }
 }
 
 interface RegisterSseEventsRoutesDeps {
@@ -427,7 +453,7 @@ export function registerSseEventsRoutes(
         } catch {
           /* socket already destroyed; reconnect still proceeds. */
         }
-        res.destroy();
+        forceCloseSseResponse(res);
       }
       return handled;
     };
@@ -959,16 +985,12 @@ export function registerSseEventsRoutes(
           if (evictionFrameSettled) {
             if (!res.writableEnded) res.end();
             const forceCloseTimer = setTimeout(() => {
-              try {
-                res.destroy();
-              } catch {
-                /* already closed */
-              }
+              forceCloseSseResponse(res);
             }, 5_000);
             forceCloseTimer.unref();
             res.once('finish', () => clearTimeout(forceCloseTimer));
           } else {
-            res.destroy();
+            forceCloseSseResponse(res);
           }
         } catch {
           /* socket already destroyed; nothing more to do. */
