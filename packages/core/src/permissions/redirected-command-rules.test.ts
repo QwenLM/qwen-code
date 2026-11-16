@@ -213,6 +213,15 @@ describe.each(['run_shell_command', 'monitor'])(
         "git > '/tmp/protected' push origin main",
         'git &>/tmp/protected push origin main',
         'git >|/tmp/protected push origin main',
+        "git push ''#x >/tmp/protected",
+        'git push ""#x >/tmp/protected',
+        "git push $''#x >/tmp/protected",
+        'git >&/tmp/protected push origin main',
+        'git 1>&/tmp/protected push origin main',
+        'git 2>&1>/tmp/protected push origin main',
+        'git 2>& 1>/tmp/protected push origin main',
+        'git >&-push origin main >/tmp/protected',
+        'git <&-push origin main >/tmp/protected',
       ].map(
         (command) =>
           [
@@ -284,6 +293,9 @@ describe.each(['run_shell_command', 'monitor'])(
 
     it.each([
       'git > /tmp/other push origin main',
+      'git >&/tmp/other push origin main',
+      "git push ''#x >/tmp/other",
+      'git push origin main # >/tmp/protected',
       'FOO=$BAR git > /tmp/other push origin main',
       'git > /tmp/protected status',
       'git < /tmp/protected push origin main',
@@ -371,6 +383,93 @@ describe.each(['run_shell_command', 'monitor'])(
           { toolName, command: 'git>"$(other-command)" push origin main' },
         ),
       ).toMatchObject({ finalPermission: 'ask' });
+    });
+
+    it.each([
+      "env bash -c 'git push > $X'",
+      "env FOO=1 bash -c 'git push > $X'",
+      "env -u FOO bash -c 'git push > $X'",
+      "env --unset FOO bash -c 'git push > $X'",
+      "nice -n 5 bash -c 'git push > $X'",
+      "nice --adjustment 5 bash -c 'git push > $X'",
+      "! env bash -c 'git push > $X'",
+      "sudo -u root bash -c 'git push > $X'",
+      "timeout -s TERM 5 bash -c 'git push > $X'",
+      "env sudo timeout 5 bash -c 'git push > $X'",
+      "echo safe # it's a comment\nenv bash -c 'git push > $X'",
+    ])(
+      'vetoes an unresolved redirect inside a prefixed wrapper: %j',
+      async (command) => {
+        expect(hasUnsupportedShellSyntax(command)).toBe(true);
+        expect(
+          await makeManager(['Bash(*)']).evaluate({ toolName, command }),
+        ).toBe('ask');
+        const suggestions = await suggestCommandRules(
+          command,
+          toolName === 'monitor' ? 'Monitor' : 'Bash',
+        );
+        expect(suggestions.permissionRules).not.toContain(
+          `${toolName === 'monitor' ? 'Monitor' : 'Bash'}(env *)`,
+        );
+        if (!command.startsWith('echo'))
+          expect(suggestions.permissionRules).toEqual([]);
+      },
+    );
+
+    it.each(['env', 'env -u FOO', 'nice -n 5', '! env'])(
+      'retains static protected and unrelated paths inside a %s wrapper',
+      async (prefix) => {
+        const manager = makeManager(['Bash(*)'], [], ['Edit(//tmp/protected)']);
+        expect(
+          await manager.evaluate({
+            toolName,
+            command: `${prefix} bash -c 'git push > /tmp/protected'`,
+          }),
+        ).toBe('deny');
+        expect(
+          await manager.evaluate({
+            toolName,
+            command: `${prefix} bash -c 'git push > /tmp/other'`,
+          }),
+        ).toBe('allow');
+      },
+    );
+
+    it.each(['env -S', 'env --unknown', 'stdbuf -oL', 'sudo -s'])(
+      'keeps unknown prefix semantics on the ask path: %s',
+      async (prefix) => {
+        const command = `${prefix} bash -c 'git status'`;
+        expect(
+          await makeManager(['Bash(*)']).evaluate({ toolName, command }),
+        ).toBe('ask');
+        expect(
+          (
+            await suggestCommandRules(
+              command,
+              toolName === 'monitor' ? 'Monitor' : 'Bash',
+            )
+          ).permissionRules,
+        ).toEqual([]);
+      },
+    );
+
+    it('does not let the alternative backslash reading hide an executable suffix', async () => {
+      expect(
+        await makeManager(['Bash(echo *)']).evaluate({
+          toolName,
+          command: "echo 'a\\' b ' #literal' ; rm /tmp/protected",
+        }),
+      ).toBe('ask');
+    });
+
+    it('retains an executable suffix when a wrapper contains a comment', async () => {
+      const manager = makeManager(['Bash(echo *)'], [], ['Bash(rm *)']);
+      const ctx = {
+        toolName,
+        command: "bash -c 'echo hi # done' ; rm -rf /tmp/x",
+      };
+      expect(await manager.evaluate(ctx)).toBe('deny');
+      expect(manager.findMatchingDenyRule(ctx)).toBe('Bash(rm *)');
     });
 
     it.each([

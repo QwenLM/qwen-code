@@ -18,8 +18,10 @@ import { isNodeError } from '../utils/errors.js';
 import {
   detectCommandSubstitution,
   getShellConfiguration,
+  stripShellCommandPrefixes,
   stripShellWrapper,
 } from '../utils/shell-utils.js';
+import { MAX_SHELL_UNWRAP_DEPTH } from '../utils/shell-command-prefixes.js';
 
 import {
   maskConstantArithmetic,
@@ -1024,20 +1026,23 @@ export interface CompoundCommandSegment {
  * See {@link splitCompoundCommand} for the string-only form and for examples;
  * this is the same split, and that function is a projection of this one.
  *
- * Scanned twice and split wherever either scan finds an operator: comments,
- * backtick bodies and heredocs are not modelled, and quotes inside them can
+ * Scanned twice and split wherever either scan finds an operator: backtick
+ * bodies and heredocs are not modelled, and quotes inside them can
  * fool bash's backslash reading where the pre-fix reading still splits.
+ * Comment removal is opt-in: reconstructed Monitor commands and non-Bash
+ * invocations must keep the conservative default.
  */
 export function splitCompoundCommandSegments(
   command: string,
+  respectComments = false,
 ): CompoundCommandSegment[] {
   // The two readings differ only at a backslash, so one scan is enough without.
   const boundaries = command.includes('\\')
     ? [
-        ...findOperatorBoundaries(command, 'bash'),
-        ...findOperatorBoundaries(command, 'escape-everywhere'),
+        ...findOperatorBoundaries(command, 'bash', respectComments),
+        ...findOperatorBoundaries(command, 'escape-everywhere', false),
       ].sort((a, b) => a.start - b.start)
-    : findOperatorBoundaries(command, 'bash');
+    : findOperatorBoundaries(command, 'bash', respectComments);
 
   const segments: CompoundCommandSegment[] = [];
   let lastSplit = 0;
@@ -1080,6 +1085,7 @@ type BackslashReading = 'bash' | 'escape-everywhere';
 function findOperatorBoundaries(
   command: string,
   reading: BackslashReading,
+  respectComments: boolean,
 ): OperatorBoundary[] {
   const boundaries: OperatorBoundary[] = [];
   let inSingle = false;
@@ -1087,6 +1093,7 @@ function findOperatorBoundaries(
   let inAnsiC = false;
   let dollarPending = false;
   let escaped = false;
+  let wordStart = true;
   // Nesting depth of `$(( … ))` / `(( … ))`. Inside arithmetic a bare `&` is
   // bitwise AND, not the async operator, so `$(( FLAGS & MASK ))` is one word.
   let arithmeticDepth = 0;
@@ -1098,6 +1105,7 @@ function findOperatorBoundaries(
 
     if (escaped) {
       escaped = false;
+      wordStart = false;
       continue;
     }
     // In bash a backslash is literal inside a plain `'…'` (so `'a\'` closes)
@@ -1113,20 +1121,39 @@ function findOperatorBoundaries(
         continue;
       }
       escaped = true;
+      wordStart = false;
+      continue;
+    }
+    // Only the Bash reading may discard comments; the alternative reading
+    // can add operator boundaries, but cannot erase executable text.
+    if (respectComments && !inSingle && !inDouble && ch === '#' && wordStart) {
+      const newline = command.indexOf('\n', i);
+      boundaries.push({
+        start: i,
+        end: newline < 0 ? command.length : newline + 1,
+        operator: newline < 0 ? '' : '\n',
+      });
+      if (newline < 0) break;
+      i = newline;
+      wordStart = true;
       continue;
     }
     if (ch === "'" && !inDouble) {
       inAnsiC = inSingle ? false : ansiCIntroducer;
       inSingle = !inSingle;
+      wordStart = false;
       continue;
     }
     if (ch === '"' && !inSingle) {
       inDouble = !inDouble;
+      wordStart = false;
       continue;
     }
     if (inSingle || inDouble) {
+      wordStart = false;
       continue;
     }
+    wordStart = /[ \t\n;&|()<>]/.test(ch);
     if (ch === '$') {
       // The second `$` of `$$` (the PID) cannot open `$'…'`.
       dollarPending = !ansiCIntroducer;
@@ -1168,6 +1195,7 @@ function findOperatorBoundaries(
         continue;
       }
       boundaries.push({ start: i, end: i + op.length, operator: op });
+      wordStart = true;
       i += op.length - 1; // -1 because the loop will i++
       break;
     }
@@ -1192,8 +1220,11 @@ function findOperatorBoundaries(
  *   "build &> log.txt"       → ["build &> log.txt"]  (redirection, not async)
  *   "x=$(( a & b ))"         → ["x=$(( a & b ))"]  (arithmetic, not async)
  */
-export function splitCompoundCommand(command: string): string[] {
-  const commands = splitCompoundCommandSegments(command).map(
+export function splitCompoundCommand(
+  command: string,
+  respectComments = false,
+): string[] {
+  const commands = splitCompoundCommandSegments(command, respectComments).map(
     (segment) => segment.command,
   );
   return commands.length > 0 ? commands : [command];
@@ -1249,11 +1280,14 @@ export function hasUnsupportedShellSyntax(command: string, depth = 0): boolean {
   const substitutionView = maskConstantArithmetic(command);
   if (detectCommandSubstitution(substitutionView)) return true;
   // Match the tracker's per-segment shell unwrapping, including its depth cap.
-  for (const segment of splitCompoundCommand(command)) {
-    const inner = stripShellWrapper(segment);
+  for (const segment of splitCompoundCommand(command, true)) {
+    const unprefixed = stripShellCommandPrefixes(segment);
+    if (unprefixed === undefined) return true;
+    const inner = stripShellWrapper(unprefixed);
     if (
-      inner !== segment &&
-      (depth >= 4 || hasUnsupportedShellSyntax(inner, depth + 1))
+      inner !== unprefixed &&
+      (depth >= MAX_SHELL_UNWRAP_DEPTH ||
+        hasUnsupportedShellSyntax(inner, depth + 1))
     ) {
       return true;
     }

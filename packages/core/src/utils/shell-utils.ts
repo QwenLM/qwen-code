@@ -18,6 +18,7 @@ import {
 } from 'node:child_process';
 import { accessSync, constants as fsConstants } from 'node:fs';
 import { resolveWorkspacePath } from './workspaceContext.js';
+import { getShellPrefixCommand } from './shell-command-prefixes.js';
 
 const SHELL_TOOL_NAMES = ['run_shell_command', 'ShellTool'];
 
@@ -973,6 +974,33 @@ function restAfterOptionTerminator(rest: string): string | null {
   }
   if (!isOptionTerminatorWord(terminator.token)) return null;
   return takeLeadingToken(terminator.rest) ? terminator.rest : null;
+}
+
+export function stripShellCommandNegation(command: string): string {
+  return command.replace(/^(?:[ \t]*![ \t]+)+/, '');
+}
+
+/** Remove transparent prefixes while retaining the shell payload's quoting. */
+export function stripShellCommandPrefixes(command: string): string | undefined {
+  const words: string[] = [];
+  const tails: string[] = [];
+  let rest = trimBashEdgeSeparators(stripShellCommandNegation(command));
+  while (true) {
+    const word = takeLeadingToken(rest);
+    if (!word) break;
+    tails.push(rest);
+    words.push(resolveShellWord(word.token));
+    rest = word.rest;
+  }
+  let start = 0;
+  while (words[start] && isEnvAssignmentToken(words[start]!)) start++;
+  for (;;) {
+    const prefix = getShellPrefixCommand(words, start);
+    if (prefix?.hasUnsupportedOption) return undefined;
+    if (prefix === undefined || prefix.commandIndex >= words.length) break;
+    start = prefix.commandIndex;
+  }
+  return tails[start]?.trimStart() ?? trimBashEdgeSeparators(command);
 }
 
 export function stripShellWrapper(command: string): string {

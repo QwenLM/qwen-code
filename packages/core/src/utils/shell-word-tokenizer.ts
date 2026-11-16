@@ -76,6 +76,21 @@ export function tokenizeShellWords(
     const afterDollar = pendingDollar;
     pendingDollar = false;
 
+    if (
+      preserveSyntax &&
+      !inSingle &&
+      !inDouble &&
+      !inAnsiC &&
+      !escaped &&
+      !wordStarted &&
+      ch === '#'
+    ) {
+      const newline = command.indexOf('\n', i);
+      if (newline < 0) break;
+      i = newline - 1;
+      continue;
+    }
+
     if (inAnsiC) {
       if (ansiCTruncated) {
         // Skip an escaped character so `\'` does not read as the close.

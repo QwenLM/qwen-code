@@ -33,7 +33,14 @@
 
 import nodePath from 'node:path';
 import os from 'node:os';
-import { stripShellWrapper } from '../utils/shell-utils.js';
+import {
+  stripShellCommandNegation,
+  stripShellWrapper,
+} from '../utils/shell-utils.js';
+import {
+  getShellPrefixCommand,
+  MAX_SHELL_UNWRAP_DEPTH,
+} from '../utils/shell-command-prefixes.js';
 import { tokenizeShellWords as tokenize } from '../utils/shell-word-tokenizer.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { splitCompoundCommandSegments } from './rule-parser.js';
@@ -1955,66 +1962,6 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Transparent prefix commands
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Flags that consume the next argument as their value, for specific prefix
- * commands.  Used by the prefix-stripping logic to correctly skip flag values
- * (e.g. `-u root` in `sudo -u root cat /etc/shadow`).
- */
-const PREFIX_COMMAND_FLAGS_WITH_VALUE = new Map<string, ReadonlySet<string>>([
-  [
-    'sudo',
-    new Set([
-      '-u',
-      '--user',
-      '-g',
-      '--group',
-      '-C',
-      '--close-from',
-      '-c',
-      '--login-class',
-      '-D',
-      '--chdir',
-      '-p',
-      '--prompt',
-      '-r',
-      '--role',
-      '-t',
-      '--type',
-      '-T',
-      '--command-timeout',
-      '-U',
-      '--other-user',
-    ]),
-  ],
-  ['timeout', new Set(['-s', '--signal', '-k', '--kill-after'])],
-]);
-
-/**
- * Commands that act as transparent wrappers around the actual command.
- * When encountered, the prefix is stripped and the analysis recurses on
- * the remaining command string.
- *
- * Examples:
- *   `sudo cat /etc/shadow`     → analyse `cat /etc/shadow`
- *   `timeout 10 wget http://…` → analyse `wget http://…`
- */
-const PREFIX_COMMANDS = new Set([
-  'sudo',
-  'doas', // OpenBSD sudo alternative
-  'env',
-  'time',
-  'nice',
-  'ionice',
-  'nohup',
-  'timeout',
-  'unbuffer',
-  'stdbuf',
-]);
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Main entry point
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -2066,41 +2013,9 @@ export function extractShellOperations(
   const ops: ShellOperation[] = [];
 
   // ── Transparent prefix commands ───────────────────────────────────────────
-  if (PREFIX_COMMANDS.has(cmdName)) {
-    const flagsWithVal = PREFIX_COMMAND_FLAGS_WITH_VALUE.get(cmdName);
-    // Find where the actual command starts (after flags, flag-values, and env
-    // variable assignments).  For example:
-    //   sudo -u root cat /file  →  startIdx skips '-u' AND 'root'
-    let startIdx = 1;
-    while (startIdx < tokens.length) {
-      const t = tokens[startIdx]!;
-      if (t.startsWith('-')) {
-        // Skip the flag itself
-        startIdx++;
-        // If this flag takes a separate value argument, skip that too
-        if (
-          flagsWithVal?.has(t) &&
-          startIdx < tokens.length &&
-          !tokens[startIdx]!.startsWith('-')
-        ) {
-          startIdx++;
-        }
-      } else if (isEnvAssignmentToken(t)) {
-        // Environment variable assignment: skip
-        startIdx++;
-      } else {
-        break;
-      }
-    }
-    // `timeout DURATION command` — the duration is a numeric positional that
-    // precedes the actual command.  Skip it.
-    if (
-      cmdName === 'timeout' &&
-      startIdx < tokens.length &&
-      /^\d/.test(tokens[startIdx]!)
-    ) {
-      startIdx++;
-    }
+  const prefix = getShellPrefixCommand(tokens);
+  if (prefix !== undefined) {
+    const startIdx = prefix.commandIndex;
     if (startIdx < tokens.length) {
       // Reconstruct the inner command and recurse
       const innerCommand = tokens.slice(startIdx).join(' ');
@@ -2130,15 +2045,6 @@ export function extractShellOperations(
 // ─────────────────────────────────────────────────────────────────────────────
 // Compound-aware extractor
 // ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Cap on recursive shell-wrapper unwrapping. A pathological command can wrap
- * itself many levels deep (`bash -lc "bash -lc \"...\""`) to obscure intent;
- * after this many unwraps we stop and analyse whatever remains as-is. Four is
- * enough for every legitimate wrapper combination observed in the wild
- * (login shells, sandbox shells, tmux send-keys).
- */
-const MAX_SHELL_UNWRAP_DEPTH = 4;
 
 /**
  * Classify a literal `cd` command and resolve its target cwd when static.
@@ -2413,7 +2319,8 @@ function walkCompoundCommand(
   let effectiveCwd = cwd;
   let cwdUnknown = initialCwdUnknown;
 
-  for (const { command: sub, terminator } of subCommands) {
+  for (const { command: rawSub, terminator } of subCommands) {
+    const sub = stripShellCommandNegation(rawSub);
     // `cd x & …` runs the `cd` in a background subshell, so it does not move
     // the cwd the following segments run in. Treating it as a foreground `cd`
     // would attribute their relative writes to the wrong directory — for

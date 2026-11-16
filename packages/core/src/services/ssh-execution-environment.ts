@@ -8,9 +8,8 @@ import path from 'node:path';
 import {
   buildShellExecWarnings,
   getCommandRoots,
-  splitCommands,
 } from '../utils/shell-utils.js';
-import { extractCommandRules } from '../utils/shellAstParser.js';
+import { suggestCommandRules } from '../permissions/command-rule-suggestions.js';
 import { detectLineEnding } from './fileSystemService.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import { createPatchSmart } from '../tools/diffOptions.js';
@@ -390,24 +389,12 @@ export class SshExecutionEnvironment implements ExecutionEnvironment {
     }
     if (toolName === ToolNames.SHELL) {
       const command = stringParam(params, 'command');
-      const rules = await Promise.all(
-        splitCommands(command).map(async (part) => {
-          try {
-            const extracted = await extractCommandRules(part);
-            return extracted.length ? extracted : [part];
-          } catch {
-            return [part];
-          }
-        }),
-      );
       return {
         type: 'exec',
         title: `Run on ${this.workspace.host}: ${String(params['directory'])}`,
         command,
         rootCommand: [...new Set(getCommandRoots(command))].join(', '),
-        permissionRules: [...new Set(rules.flat())].map(
-          (rule) => `Bash(${rule})`,
-        ),
+        ...(await suggestCommandRules(command, 'Bash')),
         warnings: [
           ...(buildShellExecWarnings(command, command) ?? []),
           'This command runs on the SSH host. If the connection is interrupted, the remote command may continue running.',

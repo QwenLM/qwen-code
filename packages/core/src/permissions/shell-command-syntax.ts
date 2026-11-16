@@ -151,22 +151,29 @@ export function staticShellCommand(
     true,
     expansions,
   );
-  const pieces: Array<ShellWord | { operator: string }> = [];
+  const pieces: Array<ShellWord | { operator: string; descriptor?: string }> =
+    [];
   for (let tokenIndex = 0; tokenIndex < tokens.length; tokenIndex++) {
     const text = tokens[tokenIndex]!;
     const bare = bares[tokenIndex]!;
-    if (text.startsWith('#') && bare[0] === '1') break;
     const hasExpansion = expansions.has(tokenIndex);
     let start = 0;
     for (let index = 0; index < text.length; index++) {
       if (bare[index] !== '1') continue;
       const character = text[index]!;
-      if (';|(){}'.includes(character)) return undefined;
+      if (';|(){}\n'.includes(character)) return undefined;
       if (character === '&' && text[index + 1] !== '>') return undefined;
       if (!'<>&'.includes(character)) continue;
       const prefix = text.slice(start, index);
       const prefixBare = bare.slice(start, index);
-      if (prefix && !(/^\d+$/.test(prefix) && /^1+$/.test(prefixBare))) {
+      const previous = pieces[pieces.length - 1];
+      const awaitingTarget =
+        previous && 'operator' in previous && !previous.operator.endsWith('&-');
+      const descriptor =
+        !awaitingTarget && /^\d+$/.test(prefix) && /^1+$/.test(prefixBare)
+          ? prefix
+          : undefined;
+      if (prefix && descriptor === undefined) {
         pieces.push({ text: prefix, bare: prefixBare, hasExpansion });
       }
       const syntax = text
@@ -174,9 +181,9 @@ export function staticShellCommand(
         .split('')
         .map((char, offset) => (bare[index + offset] === '1' ? char : '\0'))
         .join('');
-      const operator = /^(?:&>>?|>>|>\||<>|[<>]&|>|<)/.exec(syntax)?.[0];
+      const operator = /^(?:&>>?|>>|>\||<>|[<>]&-|[<>]&|>|<)/.exec(syntax)?.[0];
       if (!operator || syntax.startsWith('<<')) return undefined;
-      pieces.push({ operator });
+      pieces.push({ operator, descriptor });
       index += operator.length - 1;
       start = index + 1;
     }
@@ -193,6 +200,7 @@ export function staticShellCommand(
   for (let index = 0; index < pieces.length; index++) {
     const piece = pieces[index]!;
     if ('operator' in piece) {
+      if (piece.operator.endsWith('&-')) continue;
       const target = pieces[++index];
       if (!target || !('text' in target) || target.hasExpansion) {
         return undefined;
@@ -210,8 +218,13 @@ export function staticShellCommand(
       }
       if (piece.operator.endsWith('&')) {
         // Descriptor copies and closes do not open a file.
-        if (/^(?:\d+|-)$/.test(target.text)) continue;
-        return undefined;
+        if (/^(?:\d+-?|-)$/.test(target.text)) continue;
+        if (
+          piece.operator !== '>&' ||
+          (piece.descriptor !== undefined && piece.descriptor !== '1')
+        ) {
+          return undefined;
+        }
       }
       redirects.push({
         kind:

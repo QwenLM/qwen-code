@@ -113,6 +113,12 @@ describe('Bash permission syntax views', () => {
     'git &>/tmp/protected push origin main',
     'git >|/tmp/protected push origin main',
     'git >/tmp/prot\\ected push origin main',
+    'git >&/tmp/protected push origin main',
+    'git 1>&/tmp/protected push origin main',
+    'git 2>&1>/tmp/protected push origin main',
+    'git 2>& 1>/tmp/protected push origin main',
+    'git >&-push origin main >/tmp/protected',
+    'git <&-push origin main >/tmp/protected',
   ])('shares one word/write representation for %j', (command) => {
     expect(staticShellCommand(command)).toEqual(
       staticShellCommand('git >/tmp/protected push origin main'),
@@ -165,6 +171,78 @@ describe('Bash permission syntax views', () => {
     ).toEqual(base);
     expect(
       staticShellCommand("git >'/tmp/protected' push origin $NOTE"),
+    ).toBeUndefined();
+  });
+
+  it.each(["''#x", '""#x', "$''#x", "'#x'", '\\#x'])(
+    'retains a literal comment-looking word %s before a redirect',
+    (word) => {
+      const expected = staticShellCommand("git push '#x' >/tmp/protected");
+      expect(expected?.redirects).toHaveLength(1);
+      expect(staticShellCommand(`git push ${word} >/tmp/protected`)).toEqual(
+        expected,
+      );
+    },
+  );
+
+  it.each([
+    'env',
+    'sudo',
+    'doas',
+    'time',
+    'nice',
+    'ionice',
+    'nohup',
+    'timeout 5',
+    'unbuffer',
+    'stdbuf',
+    'env -u FOO',
+    'env --unset=FOO',
+    'nice -n 5',
+    'nice --adjustment=5',
+    '! env',
+  ])('checks unresolved targets after the shared %s prefix', (prefix) => {
+    expect(hasUnsupportedShellSyntax(`${prefix} bash -c 'git push > $X'`)).toBe(
+      true,
+    );
+    expect(hasUnsupportedShellSyntax(`${prefix} bash -c 'git status'`)).toBe(
+      false,
+    );
+  });
+
+  it('does not read a prefix option value or an ordinary argument as a shell', () => {
+    expect(hasUnsupportedShellSyntax("sudo -u bash echo 'git push > $X'")).toBe(
+      false,
+    );
+    expect(hasUnsupportedShellSyntax("echo env bash -c 'git push > $X'")).toBe(
+      false,
+    );
+    expect(hasUnsupportedShellSyntax("'!' env bash -c 'git push > $X'")).toBe(
+      false,
+    );
+    expect(hasUnsupportedShellSyntax("\\! env bash -c 'git push > $X'")).toBe(
+      false,
+    );
+  });
+
+  it.each(['env -S', 'env --unknown', 'stdbuf -oL', 'sudo -s'])(
+    'does not certify an unmodelled prefix option in %s',
+    (prefix) => {
+      expect(hasUnsupportedShellSyntax(`${prefix} bash -c 'git status'`)).toBe(
+        true,
+      );
+      expect(
+        hasUnsupportedShellSyntax(`${prefix} bash -c 'git push > $X'`),
+      ).toBe(true);
+    },
+  );
+
+  it('does not turn erroneous descriptor duplication into a file write', () => {
+    expect(
+      staticShellCommand('git 2>&/tmp/protected push origin'),
+    ).toBeUndefined();
+    expect(
+      staticShellCommand('git <&/tmp/protected push origin'),
     ).toBeUndefined();
   });
 

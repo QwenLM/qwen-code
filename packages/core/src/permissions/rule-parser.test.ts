@@ -15,6 +15,55 @@ import type { CompoundCommandSegment } from './rule-parser.js';
 // writes a file named `\r`, so the CR stays in the segment instead of being
 // dropped as a line ending. `1>|` and `2>|` name it exactly as `>|` does.
 describe('splitCompoundCommandSegments', () => {
+  it.each<[string, CompoundCommandSegment[]]>([
+    [
+      "echo safe # it's a comment\nbash -c 'git push > $X'",
+      [
+        { command: 'echo safe', terminator: '\n' },
+        { command: "bash -c 'git push > $X'", terminator: '' },
+      ],
+    ],
+    ['npm test\n# done', [{ command: 'npm test', terminator: '\n' }]],
+    [
+      'git push # && rm -rf ~/Downloads',
+      [{ command: 'git push', terminator: '' }],
+    ],
+    [
+      "git push ''#x >/tmp/protected",
+      [{ command: "git push ''#x >/tmp/protected", terminator: '' }],
+    ],
+    [
+      'echo foo\\ #bar && git status',
+      [
+        { command: 'echo foo\\ #bar', terminator: '&&' },
+        { command: 'git status', terminator: '' },
+      ],
+    ],
+    [
+      'echo "# && literal"; git status',
+      [
+        { command: 'echo "# && literal"', terminator: ';' },
+        { command: 'git status', terminator: '' },
+      ],
+    ],
+    [
+      "echo 'a\\' b ' #literal' ; rm /tmp/protected",
+      [
+        { command: "echo 'a\\' b ' #literal'", terminator: ';' },
+        { command: 'rm /tmp/protected', terminator: '' },
+      ],
+    ],
+  ])('splits only executable text in %j', (command, expected) => {
+    expect(splitCompoundCommandSegments(command, true)).toEqual(expected);
+  });
+
+  it('keeps reconstructed commands on the default conservative reading', () => {
+    expect(splitCompoundCommandSegments('echo hi # done ; rm /tmp/x')).toEqual([
+      { command: 'echo hi # done', terminator: ';' },
+      { command: 'rm /tmp/x', terminator: '' },
+    ]);
+  });
+
   it.each<[title: string, command: string, expected: CompoundCommandSegment[]]>(
     [
       [

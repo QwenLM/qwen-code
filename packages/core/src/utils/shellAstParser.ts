@@ -21,6 +21,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getLocalGitConfigRisk } from './git-config-safety.js';
 import { isShellCommandReadOnly } from './shellReadOnlyChecker.js';
+import { tokenizeShellWords } from './shell-word-tokenizer.js';
 import {
   classifyAwkCommandSafety,
   classifySedCommandSafety,
@@ -1283,6 +1284,30 @@ function getRedirectRuleArguments(
   const nestedRedirects: SyntaxNode[] = [];
   for (let index = 0; index < redirect.childCount; index++) {
     const child = redirect.child(index)!;
+    if ([';', '&', '&&', '|', '||', '|&'].includes(child.type)) return null;
+    if (child.type === 'heredoc_start') {
+      // Some Bash grammars include a following separator in the delimiter.
+      // Only quoted/escaped separators can be part of the shell word.
+      const bares: string[] = [];
+      const words = tokenizeShellWords(
+        child.text,
+        undefined,
+        undefined,
+        bares,
+        true,
+      );
+      if (
+        words.length !== 1 ||
+        words[0]!
+          .split('')
+          .some(
+            (character, offset) =>
+              bares[0]![offset] === '1' && /[;&|()<>]/.test(character),
+          )
+      ) {
+        return null;
+      }
+    }
     if (redirect.fieldNameForChild(index) === 'argument') {
       args.push(child);
     } else if (child.type.endsWith('_redirect')) {

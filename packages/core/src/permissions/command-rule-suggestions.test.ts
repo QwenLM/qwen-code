@@ -56,6 +56,104 @@ describe.each([
   ['run_shell_command', 'Bash'],
   ['monitor', 'Monitor'],
 ] as const)('%s permission suggestions', (toolName, displayName) => {
+  it.each([
+    '*',
+    '**',
+    'ls -la && *',
+    'cd build && **',
+    '* --version',
+    'ls -la && * --version',
+    'cd build && ** --help',
+  ])(
+    'does not persist a blanket grant from a glob executable: %s',
+    async (command) => {
+      const { permissionRules = [] } = await suggestCommandRules(
+        command,
+        displayName,
+      );
+      expect(permissionRules.some((rule) => /\([*\s]*\)$/.test(rule))).toBe(
+        false,
+      );
+      expect(
+        await makeManager(permissionRules).evaluate({
+          toolName,
+          command: 'rm -rf ~/Downloads',
+        }),
+      ).toBe('ask');
+    },
+  );
+
+  it.each([
+    '[ -f package.json ] && npm test',
+    'export FOO=1 && npm test',
+    'npm test && for f in *; do echo $f; done',
+    'for f in *; do echo $f; done; npm test',
+    'npm test && cat <<EOF\nrm -rf /tmp/not-a-command\nEOF',
+    'cat <<EOF\nrm -rf /tmp/not-a-command\nEOF\nnpm test',
+  ])('retains only independent supported statements in %s', async (command) => {
+    const { permissionRules = [] } = await suggestCommandRules(
+      command,
+      displayName,
+    );
+    expect(permissionRules).toEqual([`${displayName}(npm test)`]);
+    const manager = makeManager(permissionRules);
+    expect(await manager.evaluate({ toolName, command: 'npm test' })).toBe(
+      'allow',
+    );
+    expect(await manager.evaluate({ toolName, command })).not.toBe('allow');
+    expect(await manager.evaluate({ toolName, command: 'echo secret' })).toBe(
+      'ask',
+    );
+    expect(await manager.evaluate({ toolName, command: 'cat' })).toBe('ask');
+    expect(
+      await manager.evaluate({
+        toolName,
+        command: 'rm -rf /tmp/not-a-command',
+      }),
+    ).toBe('ask');
+  });
+
+  it.each([
+    ['git push origin main # && rm -rf ~/Downloads', 'git push *'],
+    ['npm test\n# done', 'npm test'],
+    ["npm test # it's done && rm -rf ~/Downloads", 'npm test'],
+  ])(
+    'does not turn comment contents into grants: %s',
+    async (command, rule) => {
+      const { permissionRules = [] } = await suggestCommandRules(
+        command,
+        displayName,
+      );
+      expect(permissionRules).toEqual([`${displayName}(${rule})`]);
+      expect(
+        await makeManager(permissionRules).evaluate({
+          toolName,
+          command: 'rm -rf ~/Downloads',
+        }),
+      ).toBe('ask');
+    },
+  );
+
+  it('does not restore a comment fragment selected by a caller', async () => {
+    expect(
+      await suggestCommandRules(
+        'git push origin main # && rm -rf ~/Downloads',
+        displayName,
+        ['rm -rf ~/Downloads'],
+      ),
+    ).toEqual({ permissionRules: [] });
+  });
+
+  it('keeps a caller-selected command when its trailing comment is removed', async () => {
+    expect(
+      await suggestCommandRules(
+        'git push origin main # && rm -rf ~/Downloads',
+        displayName,
+        ['git push origin main #'],
+      ),
+    ).toEqual({ permissionRules: [`${displayName}(git push *)`] });
+  });
+
   it.each(['cmd', 'powershell'] as const)(
     'keeps suggestions consistent with the %s matcher',
     async (shell) => {
@@ -105,6 +203,30 @@ describe.each([
     ).toEqual({ permissionRules: [`${displayName}(npm install)`] });
   });
 
+  it.each(['\n', '; ', ' # note\n'])(
+    'keeps descriptor closes attached to their original statement across %j',
+    async (separator) => {
+      const command = `npm install <&-${separator}git <&- push origin main`;
+      const { permissionRules = [] } = await suggestCommandRules(
+        command,
+        displayName,
+      );
+      expect(permissionRules).toContain(`${displayName}(npm install)`);
+      expect(permissionRules).toContain(
+        `${displayName}(git <&- push origin main)`,
+      );
+      expect(
+        await makeManager(permissionRules).evaluate({ toolName, command }),
+      ).toBe('allow');
+      expect(
+        await makeManager(permissionRules).evaluate({
+          toolName,
+          command: 'git reset --hard',
+        }),
+      ).toBe('ask');
+    },
+  );
+
   it('does not accept unrelated caller-selected fragments', async () => {
     expect(
       await suggestCommandRules('git status', displayName, ['npm install']),
@@ -117,6 +239,8 @@ describe.each([
     'git <<EOF > out 0<&3 push origin\nx\nEOF',
     'for f in item; do git <&- push origin; done',
     'npm install && git <&- <<EOF push\nx\nEOF',
+    'npm install && cat <<EOF extra\nx\nEOF',
+    'npm install && cat <<EOF\nmissing end',
     'npm install && git <&- push "unterminated',
   ])(
     'never treats control-flow or heredoc body fragments as commands: %s',

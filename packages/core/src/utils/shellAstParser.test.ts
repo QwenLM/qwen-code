@@ -828,6 +828,8 @@ describe('extractCommandRules', () => {
       ['git <<EOF > out push origin\nx\nEOF', ['git push *']],
       ['git <<EOF > out 0<&3 push origin\nx\nEOF', ['git push *']],
       ['git <<EOF push origin\nx\nEOF', ['git push *']],
+      ["git <<'EOF;' push origin\nx\nEOF;", ['git push *']],
+      ['git <<EOF\\; push origin\nx\nEOF;', ['git push *']],
       ['git > out', ['git']],
       ['git >&-', ['git']],
       ['git <&-', ['git']],
@@ -878,6 +880,17 @@ describe('extractCommandRules', () => {
       'git <<EOF push > out origin\nx\nEOF',
     ])(
       'offers no rule when a redirect contains a parse error: %j',
+      async (command) => {
+        expect(await extractCommandRules(command)).toEqual([]);
+      },
+    );
+
+    it.each([
+      'git <<EOF; rm -rf /tmp/x\nbody\nEOF',
+      'git <<EOF; rm -rf /tmp/x\nbody\nEOF;',
+      'git <<EOF ; rm -rf /tmp/x\nbody\nEOF',
+    ])(
+      'does not recover heredoc arguments across a statement boundary: %j',
       async (command) => {
         expect(await extractCommandRules(command)).toEqual([]);
       },
