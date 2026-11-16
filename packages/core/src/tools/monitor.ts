@@ -269,8 +269,9 @@ class MonitorToolInvocation extends BaseToolInvocation<
     ];
 
     const suggested = await suggestCommandRules(
-      effectiveSubCommands,
+      normalized.safetyCommand,
       'Monitor',
+      effectiveSubCommands,
     );
 
     // Flag command substitution ($(), backticks, <(), >()) so the user

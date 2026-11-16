@@ -6401,11 +6401,11 @@ describe('ShellTool', () => {
       'git 3>/tmp/protected push origin main',
       'git <> /tmp/gate status',
     ])(
-      'offers only single-use approval when a safe rule is unavailable: %s',
+      'does not offer a persistent rule when a safe rule is unavailable: %s',
       async (command) => {
         const details = await detailsOf(build(command));
         expect(details.permissionRules).toEqual([]);
-        expect(details.hideAlwaysAllow).toBe(true);
+        expect(details.hideAlwaysAllow).toBeUndefined();
       },
     );
 

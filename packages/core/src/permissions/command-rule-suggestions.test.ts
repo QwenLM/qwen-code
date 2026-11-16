@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { suggestCommandRules } from './command-rule-suggestions.js';
 import { PermissionManager } from './permission-manager.js';
 import * as shellAstParser from '../utils/shellAstParser.js';
@@ -12,7 +12,7 @@ import {
   _resetParser,
   _setParserFailedForTesting,
 } from '../utils/shellAstParser.js';
-import { splitCommands } from '../utils/shell-utils.js';
+import { getShellConfiguration } from '../utils/shell-utils.js';
 
 const makeManager = (
   allow: string[],
@@ -36,24 +36,104 @@ vi.mock('../utils/shell-utils.js', async (importOriginal) => {
     await importOriginal<typeof import('../utils/shell-utils.js')>();
   return {
     ...actual,
-    getShellConfiguration: () => ({
+    getShellConfiguration: vi.fn(() => ({
       executable: '/bin/bash',
       argsPrefix: ['-c'],
       shell: 'bash',
-    }),
+    })),
   };
+});
+
+afterEach(() => {
+  vi.mocked(getShellConfiguration).mockReturnValue({
+    executable: '/bin/bash',
+    argsPrefix: ['-c'],
+    shell: 'bash',
+  });
 });
 
 describe.each([
   ['run_shell_command', 'Bash'],
   ['monitor', 'Monitor'],
 ] as const)('%s permission suggestions', (toolName, displayName) => {
+  it.each(['cmd', 'powershell'] as const)(
+    'keeps suggestions consistent with the %s matcher',
+    async (shell) => {
+      vi.mocked(getShellConfiguration).mockReturnValue({
+        executable: shell === 'cmd' ? 'cmd.exe' : 'powershell.exe',
+        argsPrefix: shell === 'cmd' ? ['/c'] : ['-Command'],
+        shell,
+      });
+      const command = 'echo hi>out.txt';
+      const suggested = await suggestCommandRules(command, displayName);
+      expect(suggested.permissionRules?.length).toBeGreaterThan(0);
+      expect(suggested).not.toHaveProperty('hideAlwaysAllow');
+      expect(
+        await makeManager(suggested.permissionRules ?? []).evaluate({
+          toolName,
+          command,
+        }),
+      ).toBe('allow');
+    },
+  );
+
   it.each([
+    'npm install && git log $(date)',
+    'git log $(date) && npm install',
+    'npm install && git <&- show "*"',
+  ])(
+    'keeps the safe suggestions from %s without approving it',
+    async (command) => {
+      const suggested = await suggestCommandRules(command, displayName);
+      expect(suggested).toEqual({
+        permissionRules: [`${displayName}(npm install)`],
+      });
+      expect(
+        await makeManager(suggested.permissionRules ?? []).evaluate({
+          toolName,
+          command,
+        }),
+      ).not.toBe('allow');
+    },
+  );
+
+  it('preserves the caller-selected confirmation scope', async () => {
+    expect(
+      await suggestCommandRules('npm install && git status', displayName, [
+        'npm install',
+      ]),
+    ).toEqual({ permissionRules: [`${displayName}(npm install)`] });
+  });
+
+  it('does not accept unrelated caller-selected fragments', async () => {
+    expect(
+      await suggestCommandRules('git status', displayName, ['npm install']),
+    ).toEqual({ permissionRules: [] });
+  });
+
+  it.each([
+    'for f in item; do echo $f; done',
+    'cat <<EOF\nhello\nEOF',
+    'git <<EOF > out 0<&3 push origin\nx\nEOF',
+    'for f in item; do git <&- push origin; done',
+    'npm install && git <&- <<EOF push\nx\nEOF',
+    'npm install && git <&- push "unterminated',
+  ])(
+    'never treats control-flow or heredoc body fragments as commands: %s',
+    async (command) => {
+      expect(await suggestCommandRules(command, displayName)).toEqual({
+        permissionRules: [],
+      });
+    },
+  );
+
+  it.each([
+    'git > /tmp/log push origin \\\nmain',
+    'git > /tmp/log push origin "ma\\\n in"',
+    'git > /tmp/log push origin main-$((1+2))',
+    'echo "sum: $((1+2))"',
     'git > /tmp/log push origin main',
-    'git > $LOG push origin main',
     'git > ~/push.log push origin main',
-    'git > out/$X push origin main',
-    'git >>$LOG push origin main',
     'git > /tmp/log push origin 中文',
     'git > /tmp/log push origin main # comment',
     '(git push origin main) > out',
@@ -63,11 +143,8 @@ describe.each([
     'npm install && git <&- push origin main',
     '! git > /tmp/log push origin main',
   ])('reuses the rules offered for %s after reloading', async (command) => {
-    const suggested = await suggestCommandRules(
-      splitCommands(command),
-      displayName,
-    );
-    expect(suggested.hideAlwaysAllow).not.toBe(true);
+    const suggested = await suggestCommandRules(command, displayName);
+    expect(suggested).not.toHaveProperty('hideAlwaysAllow');
     const manager = makeManager(suggested.permissionRules ?? []);
     expect(await manager.evaluate({ toolName, command })).toBe('allow');
     for (const other of ['git reset --hard', 'git clean -fdx']) {
@@ -78,6 +155,9 @@ describe.each([
   });
 
   it.each([
+    'git > $LOG push origin main',
+    'git > out/$X push origin main',
+    'git >>$LOG push origin main',
     'git 3>/tmp/protected push origin main',
     'git 10>/tmp/protected push origin main',
     'git 01>/tmp/protected push origin main',
@@ -89,26 +169,20 @@ describe.each([
     'for f in *; do echo $f; done',
     'git > *.log push origin main',
     'git <&- show "*"',
-  ])(
-    'offers only single-use approval when a reusable rule is unsafe: %s',
-    async (command) => {
-      const suggested = await suggestCommandRules(
-        splitCommands(command),
-        displayName,
-      );
-      expect(suggested).toEqual({ permissionRules: [], hideAlwaysAllow: true });
-      const manager = makeManager(suggested.permissionRules ?? [], [
-        'Edit(//tmp/protected)',
-      ]);
-      expect(await manager.evaluate({ toolName, command })).not.toBe('allow');
-      expect(
-        await manager.evaluate({
-          toolName,
-          command: 'for f in /etc/passwd; do echo $f; done',
-        }),
-      ).not.toBe('allow');
-    },
-  );
+  ])('does not offer reusable rules for unsafe syntax: %s', async (command) => {
+    const suggested = await suggestCommandRules(command, displayName);
+    expect(suggested).toEqual({ permissionRules: [] });
+    const manager = makeManager(suggested.permissionRules ?? [], [
+      'Edit(//tmp/protected)',
+    ]);
+    expect(await manager.evaluate({ toolName, command })).not.toBe('allow');
+    expect(
+      await manager.evaluate({
+        toolName,
+        command: 'for f in /etc/passwd; do echo $f; done',
+      }),
+    ).not.toBe('allow');
+  });
 
   it.each([
     '3>/tmp/protected',
@@ -132,7 +206,7 @@ describe.each([
     async (suffix) => {
       const original = 'git > /tmp/log push origin main';
       const { permissionRules = [] } = await suggestCommandRules(
-        [original],
+        original,
         displayName,
       );
       const command = `${original} ${suffix}`;
@@ -173,7 +247,7 @@ describe.each([
     async (suffix) => {
       const original = 'git > /tmp/log push origin main';
       const { permissionRules = [] } = await suggestCommandRules(
-        [original],
+        original,
         displayName,
       );
       const command = `${original} ${suffix}`;
@@ -204,7 +278,7 @@ describe.each([
         '! FOO=1 git >/tmp/protected push origin main',
       ]) {
         const { permissionRules = [] } = await suggestCommandRules(
-          [command],
+          command,
           displayName,
         );
         const denied = makeManager(permissionRules, [rule]);
@@ -220,7 +294,7 @@ describe.each([
   it('retains prefix semantics for a non-wildcard npm rule', async () => {
     const command = 'npm > /tmp/log install';
     const { permissionRules = [] } = await suggestCommandRules(
-      [command],
+      command,
       displayName,
     );
     expect(permissionRules).toContain(`${displayName}(npm install)`);
@@ -239,7 +313,7 @@ describe.each([
     try {
       const command = 'npm install && tail -f /tmp/log';
       const { permissionRules = [] } = await suggestCommandRules(
-        splitCommands(command),
+        command,
         displayName,
       );
       expect(permissionRules).toEqual([
@@ -254,6 +328,24 @@ describe.each([
     }
   });
 
+  it.each([
+    'for f in item; do echo $f; done',
+    'cat <<EOF\nhello\nEOF',
+    'if true; then echo safe; fi',
+  ])(
+    'does not derive complex rules without the parser: %s',
+    async (command) => {
+      _setParserFailedForTesting();
+      try {
+        expect(await suggestCommandRules(command, displayName)).toEqual({
+          permissionRules: [],
+        });
+      } finally {
+        _resetParser();
+      }
+    },
+  );
+
   it('retains successful rules and falls back after an extraction exception', async () => {
     const extract = vi.spyOn(shellAstParser, 'extractCommandRules');
     extract
@@ -262,7 +354,7 @@ describe.each([
     try {
       const command = 'npm install && git <&- push origin main';
       const { permissionRules = [] } = await suggestCommandRules(
-        splitCommands(command),
+        command,
         displayName,
       );
       expect(permissionRules).toEqual([

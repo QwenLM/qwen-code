@@ -28,6 +28,7 @@ import {
   normalizeMonitorCommand,
 } from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { removeShellLineContinuations } from './shell-command-syntax.js';
 import {
   findDangerousAllowRules,
   isDangerousAllowRule,
@@ -99,6 +100,9 @@ const DECISION_PRIORITY: Readonly<Record<PermissionDecision, number>> = {
  * rules through it.
  */
 function splitCommandForRules(command: string, toolName: string): string[] {
+  if (getShellConfiguration().shell === 'bash') {
+    command = removeShellLineContinuations(command);
+  }
   if (
     toolName !== 'run_shell_command' ||
     getShellConfiguration().shell !== 'bash' ||

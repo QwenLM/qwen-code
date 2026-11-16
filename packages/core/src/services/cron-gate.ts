@@ -16,6 +16,7 @@
 import stripAnsi from 'strip-ansi';
 import { ApprovalMode } from '../config/approval-mode.js';
 import type { Config } from '../config/config.js';
+import { suggestCommandRules } from '../permissions/command-rule-suggestions.js';
 import { executeRuntimeShell } from '../sandbox/runtime-shell.js';
 import type {
   ShellExecutionResult,
@@ -30,8 +31,8 @@ import {
   backgroundsAnyPart,
   normalizeMonitorCommand,
   runsOnlyComments,
+  splitCommands,
 } from '../utils/shell-utils.js';
-import { extractCommandRules } from '../utils/shellAstParser.js';
 import type { CronJob } from './cronScheduler.js';
 
 const debugLogger = createDebugLogger('CRON_GATE');
@@ -175,17 +176,20 @@ export function gateCommandError(gate: unknown): string | null {
  * permission manager matches against, so a rule saved from this hint matches:
  * for `bash -c "./probe.sh"` that is `./probe.sh`, not the wrapper.
  */
-export async function suggestedGateRule(gate: string): Promise<string> {
+export async function suggestedGateRule(
+  gate: string,
+): Promise<string | undefined> {
   const command = normalizeMonitorCommand(gate).safetyCommand;
-  try {
-    const rules = await extractCommandRules(command);
-    if (rules.length > 0) {
-      return rules.map((rule) => `Monitor(${rule})`).join(', ');
-    }
-  } catch (error) {
-    debugLogger.warn('Failed to extract gate command rules:', error);
+  const { permissionRules = [] } = await suggestCommandRules(
+    command,
+    'Monitor',
+  );
+  if (permissionRules.length === 0) return undefined;
+  for (const part of splitCommands(command)) {
+    const suggested = await suggestCommandRules(part, 'Monitor');
+    if (!suggested.permissionRules?.length) return undefined;
   }
-  return `Monitor(${command})`;
+  return permissionRules.join(', ');
 }
 
 /**

@@ -18,7 +18,14 @@ import { isNodeError } from '../utils/errors.js';
 import {
   detectCommandSubstitution,
   getShellConfiguration,
+  stripShellWrapper,
 } from '../utils/shell-utils.js';
+
+import {
+  maskConstantArithmetic,
+  removeShellLineContinuations,
+  staticShellCommand,
+} from './shell-command-syntax.js';
 
 const debugLogger = createDebugLogger('PERMISSIONS');
 
@@ -1215,6 +1222,10 @@ export function matchesCommandPattern(
   pattern: string,
   command: string,
 ): boolean {
+  if (getShellConfiguration().shell === 'bash') {
+    pattern = removeShellLineContinuations(pattern);
+    command = removeShellLineContinuations(command);
+  }
   // A full-command fallback must remain usable even when shell-quote
   // reconstructs its operators differently (e.g. <&- or <>).
   if (pattern === command || pattern === trimCommandPadding(command)) {
@@ -1233,15 +1244,41 @@ function trimCommandPadding(command: string): string {
 }
 
 /** Keep persistent grants within syntax the file-operation tracker can see. */
-export function hasUnsupportedShellSyntax(command: string): boolean {
-  if (detectCommandSubstitution(command)) return true;
+export function hasUnsupportedShellSyntax(command: string, depth = 0): boolean {
+  command = removeShellLineContinuations(command);
+  const substitutionView = maskConstantArithmetic(command);
+  if (detectCommandSubstitution(substitutionView)) return true;
+  // Match the tracker's per-segment shell unwrapping, including its depth cap.
+  for (const segment of splitCompoundCommand(command)) {
+    const inner = stripShellWrapper(segment);
+    if (
+      inner !== segment &&
+      (depth >= 4 || hasUnsupportedShellSyntax(inner, depth + 1))
+    ) {
+      return true;
+    }
+  }
   let quote = '';
   // Only an empty token or a bare 1/2 can precede a supported operator.
   let token: '' | '1' | '2' | undefined = '';
+  let redirectTarget: 'pending' | 'word' | undefined;
   for (let index = 0; index < command.length; index++) {
     const character = command[index]!;
     const ansiCQuote =
       character === '$' ? /^\$(?:\\\n)*'/.exec(command.slice(index)) : null;
+    if (redirectTarget === 'pending' && !/[ \t\n]/.test(character)) {
+      redirectTarget = 'word';
+    }
+    if (
+      redirectTarget === 'word' &&
+      quote !== "'" &&
+      quote !== "$'" &&
+      ((character === '$' && !ansiCQuote) ||
+        character === '`' ||
+        (!quote && /[*?[\]{}]/.test(character)))
+    ) {
+      return true;
+    }
     if (character === '\\' && quote !== "'") {
       token = undefined;
       index++;
@@ -1249,7 +1286,9 @@ export function hasUnsupportedShellSyntax(command: string): boolean {
       quote !== "'" &&
       quote !== "$'" &&
       (character === '`' ||
-        (character === '$' && /^(?:\\\n)*\(/.test(command.slice(index + 1))) ||
+        (character === '$' &&
+          substitutionView[index] === '$' &&
+          /^(?:\\\n)*\(/.test(command.slice(index + 1))) ||
         (character === '$' &&
           /^\$\{[A-Za-z_][A-Za-z0-9_]*@P\}/.test(command.slice(index))) ||
         (!quote &&
@@ -1272,6 +1311,7 @@ export function hasUnsupportedShellSyntax(command: string): boolean {
       token = undefined;
     } else if (/[ \t\n]/.test(character)) {
       token = '';
+      if (redirectTarget === 'word') redirectTarget = undefined;
     } else if (character === '#' && token === '') {
       const newline = command.indexOf('\n', index);
       if (newline < 0) break;
@@ -1289,6 +1329,7 @@ export function hasUnsupportedShellSyntax(command: string): boolean {
       )![0];
       index += operator.length - 1;
       token = undefined;
+      redirectTarget = 'pending';
     } else {
       token =
         token === '' && (character === '1' || character === '2')
@@ -1406,63 +1447,24 @@ function normalizeRedirectSpacing(command: string, pattern = false): string {
   return result;
 }
 
-/**
- * Additional restrictive spellings for literal Bash redirects. Never use
- * these for grants: the file-operation tracker supports a narrower grammar.
- * Dynamic, escaped, here-document and compound syntax stay on the raw path.
- */
-function staticCommandSpellings(
-  command: string,
-): { withRedirections: string; withoutRedirections: string } | undefined {
-  if (!/[<>]/.test(command) || /[\\$\x60(){}#]|[^\x20-\x7e\t]/.test(command)) {
-    return undefined;
+/** Compare command words and required file effects, only for deny/ask rules. */
+function matchesStaticShellCommand(pattern: string, command: string): boolean {
+  const expected = staticShellCommand(pattern, true);
+  const actual = staticShellCommand(command);
+  if (
+    !expected ||
+    !actual ||
+    !matchesCommandText(expected.words, actual.words)
+  ) {
+    return false;
   }
-  const word = /^(?:[^ \t<>&|;"'!]+|'[^']*'|"[^"]*")+/;
-  let rest = trimCommandPadding(command);
-  while (/^![ \t]+/.test(rest)) rest = rest.replace(/^![ \t]+/, '');
-  while (true) {
-    const assignment = word.exec(rest)?.[0];
-    if (!assignment || !ENV_ASSIGNMENT_REGEX.test(assignment)) break;
-    rest = rest.slice(assignment.length).replace(/^[ \t]+/, '');
-  }
-  // Apply the same prefix handling to restrictive rules while preserving
-  // every redirect and target in their matching spelling.
-  const withRedirections = rest.replace(/'[^']*'|"[^"]*"|[ \t]+/g, (part) =>
-    /^[ \t]/.test(part) ? ' ' : part,
+  return expected.redirects.every((redirect) =>
+    actual.redirects.some(
+      (candidate) =>
+        (candidate.kind === redirect.kind || candidate.kind === 'readwrite') &&
+        matchesCommandText(redirect.target, candidate.target),
+    ),
   );
-  const words: string[] = [];
-  let redirected = false;
-  while (rest) {
-    const redirect = /^(?:\d*(?:>>|>\||[<>]&|[<>])|&>>?)/.exec(rest);
-    if (redirect) {
-      const operator = redirect[0];
-      rest = rest.slice(operator.length).replace(/^[ \t]+/, '');
-      const target = word.exec(rest)?.[0];
-      if (
-        !target ||
-        /[*?[\]~]/.test(target) ||
-        (/[<>]&$/.test(operator) && !/^(?:\d+|-)$/.test(target))
-      ) {
-        return undefined;
-      }
-      rest = rest.slice(target.length);
-      redirected = true;
-    } else {
-      const argument = word.exec(rest)?.[0];
-      if (!argument) return undefined;
-      // A quoted command word such as "VAR=1" must not become a skipped
-      // assignment when matchesCommandPattern later removes quotes.
-      if (words.length === 0 && !/^[A-Za-z0-9_./-]+$/.test(argument)) {
-        return undefined;
-      }
-      words.push(argument);
-      rest = rest.slice(argument.length);
-    }
-    rest = rest.replace(/^[ \t]+/, '');
-  }
-  return redirected && words.length > 0
-    ? { withRedirections, withoutRedirections: words.join(' ') }
-    : undefined;
 }
 
 /**
@@ -2338,18 +2340,10 @@ export function matchesRule(
             normalizeRedirectSpacing(rule.specifier, true),
             normalizeRedirectSpacing(trimCommandPadding(command)),
           );
-          const spellings = staticCommandSpellings(command);
-          if (spellings !== undefined) {
-            specifierMatched ||=
-              matchesCommandText(
-                normalizeRedirectSpacing(rule.specifier, true),
-                normalizeRedirectSpacing(spellings.withRedirections),
-              ) ||
-              matchesCommandPattern(
-                rule.specifier,
-                spellings.withoutRedirections,
-              );
-          }
+          specifierMatched ||= matchesStaticShellCommand(
+            rule.specifier,
+            command,
+          );
         }
         break;
       }

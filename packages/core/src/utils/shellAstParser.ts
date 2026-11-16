@@ -1249,8 +1249,15 @@ async function isShellCommandReadOnlyInternal(
 // Public API: extractCommandRules
 // ---------------------------------------------------------------------------
 
+interface RedirectRuleArguments {
+  arguments: SyntaxNode[];
+  nestedRedirects: SyntaxNode[];
+}
+
 /** Words after a redirection belong to its command, not to the target. */
-function getRedirectRuleArguments(redirect: SyntaxNode): SyntaxNode[] | null {
+function getRedirectRuleArguments(
+  redirect: SyntaxNode,
+): RedirectRuleArguments | null {
   if (redirect.hasError) return null;
   if (redirect.type === 'file_redirect') {
     const operator = redirect.children.find(
@@ -1261,14 +1268,19 @@ function getRedirectRuleArguments(redirect: SyntaxNode): SyntaxNode[] | null {
     // redirection consumes exactly one.
     const ownWords = ['<&-', '>&-'].includes(operator.type) ? 0 : 1;
     const destinations = redirect.childrenForFieldName('destination');
-    return destinations.length < ownWords ? null : destinations.slice(ownWords);
+    return destinations.length < ownWords
+      ? null
+      : { arguments: destinations.slice(ownWords), nestedRedirects: [] };
   }
   // A here-string's input stays in its redirect node; trailing arguments
   // are already fields on the command itself.
-  if (redirect.type === 'herestring_redirect') return [];
+  if (redirect.type === 'herestring_redirect') {
+    return { arguments: [], nestedRedirects: [] };
+  }
   if (redirect.type !== 'heredoc_redirect') return null;
 
   const args: SyntaxNode[] = [];
+  const nestedRedirects: SyntaxNode[] = [];
   for (let index = 0; index < redirect.childCount; index++) {
     const child = redirect.child(index)!;
     if (redirect.fieldNameForChild(index) === 'argument') {
@@ -1276,7 +1288,8 @@ function getRedirectRuleArguments(redirect: SyntaxNode): SyntaxNode[] | null {
     } else if (child.type.endsWith('_redirect')) {
       const nested = getRedirectRuleArguments(child);
       if (!nested) return null;
-      args.push(...nested);
+      args.push(...nested.arguments);
+      nestedRedirects.push(child, ...nested.nestedRedirects);
     } else if (
       child.isNamed &&
       !/^(?:heredoc_(?:start|body|end)|file_descriptor|comment)$/.test(
@@ -1287,7 +1300,7 @@ function getRedirectRuleArguments(redirect: SyntaxNode): SyntaxNode[] | null {
       return null;
     }
   }
-  return args;
+  return { arguments: args, nestedRedirects };
 }
 
 /**
@@ -1312,10 +1325,14 @@ function extractRuleFromCommand(
     ...redirects,
   ];
   const argNodes = getArgumentNodes(commandNode);
+  const descriptorRedirects = [...allRedirects];
   for (const redirect of allRedirects) {
     const trailing = getRedirectRuleArguments(redirect);
     if (!trailing) return null;
-    argNodes.push(...trailing);
+    argNodes.push(...trailing.arguments);
+    // Nested heredoc redirects participate in descriptor attribution, but
+    // their trailing words were already collected by the recursive walk.
+    descriptorRedirects.push(...trailing.nestedRedirects);
   }
   const argTexts = argNodes
     .filter(
@@ -1325,7 +1342,7 @@ function extractRuleFromCommand(
         !(
           arg.type === 'number' &&
           /^\d+$/.test(arg.text) &&
-          allRedirects.some(
+          descriptorRedirects.some(
             (redirect) =>
               arg.endIndex === redirect.startIndex &&
               /^[<>]/.test(redirect.text),
@@ -1415,7 +1432,8 @@ function extractRulesFromStatement(
       // Redirects on a group cannot append argv to a command inside it.
       if (
         redirects.some(
-          (redirect) => getRedirectRuleArguments(redirect)?.length !== 0,
+          (redirect) =>
+            getRedirectRuleArguments(redirect)?.arguments.length !== 0,
         )
       ) {
         return [];

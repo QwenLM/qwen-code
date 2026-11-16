@@ -494,7 +494,7 @@ describe('MonitorTool', () => {
         mockExtractCommandRules.mockResolvedValue([]);
         const details = await confirm(command);
         expect(details.permissionRules).toEqual([]);
-        expect(details.hideAlwaysAllow).toBe(true);
+        expect(details.hideAlwaysAllow).toBeUndefined();
       },
     );
 

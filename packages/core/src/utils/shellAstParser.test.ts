@@ -826,6 +826,7 @@ describe('extractCommandRules', () => {
       ['git > out push 2>&1 origin main', ['git push *']],
       ['cat <<EOF foo\nx\nEOF', ['cat *']],
       ['git <<EOF > out push origin\nx\nEOF', ['git push *']],
+      ['git <<EOF > out 0<&3 push origin\nx\nEOF', ['git push *']],
       ['git <<EOF push origin\nx\nEOF', ['git push *']],
       ['git > out', ['git']],
       ['git >&-', ['git']],
@@ -852,6 +853,24 @@ describe('extractCommandRules', () => {
       ['git 0 < /dev/null push origin main', ['git *']],
       ["git '0'< /dev/null push origin main", ['git *']],
     ])('extracts complete arguments from %j', expectRules);
+
+    it.each(['0', '3', '10'])(
+      'does not grant other git subcommands through a nested heredoc fd %s',
+      async (descriptor) => {
+        const rules = await extractCommandRules(
+          `git <<EOF > out ${descriptor}<&3 push origin\nx\nEOF`,
+        );
+        expect(rules).toEqual(['git push *']);
+        for (const rule of rules.map((value) => parseRule(`Bash(${value})`))) {
+          expect(
+            matchesRule(rule, 'run_shell_command', 'git reset --hard'),
+          ).toBe(false);
+          expect(matchesRule(rule, 'run_shell_command', 'git clean -fdx')).toBe(
+            false,
+          );
+        }
+      },
+    );
 
     it.each([
       'git <&- push origin',

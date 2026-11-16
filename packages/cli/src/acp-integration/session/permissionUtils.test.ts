@@ -16,6 +16,39 @@ import {
 
 describe('permissionUtils', () => {
   describe('toPermissionOptions', () => {
+    it.each([
+      { type: 'exec', command: 'git log $(date)', rootCommand: 'git' },
+      { type: 'info', prompt: 'Continue?' },
+      {
+        type: 'mcp',
+        serverName: 'server',
+        toolName: 'tool',
+        toolDisplayName: 'Tool',
+      },
+    ] as const)(
+      'omits persistent choices for explicit empty rules in $type',
+      (details) => {
+        const confirmation = {
+          ...details,
+          title: 'Confirm operation',
+          onConfirm: async () => undefined,
+        };
+        const options = toPermissionOptions({
+          ...confirmation,
+          permissionRules: [],
+        });
+        expect(options.map((option) => option.kind)).toEqual([
+          'allow_once',
+          'reject_once',
+        ]);
+        expect(
+          toPermissionOptions(confirmation).some(
+            (option) => option.kind === 'allow_always',
+          ),
+        ).toBe(true);
+      },
+    );
+
     it('uses permissionRules for exec always-allow labels when available', () => {
       const options = toPermissionOptions({
         type: 'exec',

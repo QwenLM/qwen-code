@@ -29,7 +29,6 @@ import {
   buildShellExecWarnings,
   getCommandRoot,
   normalizeMonitorCommand,
-  splitCommands,
 } from '../utils/shell-utils.js';
 import { suggestCommandRules } from '../permissions/command-rule-suggestions.js';
 
@@ -105,7 +104,7 @@ class CronCreateInvocation extends BaseToolInvocation<
     if (!gate) return super.getConfirmationDetails(abortSignal);
     const normalized = normalizeMonitorCommand(gate);
     const suggested = await suggestCommandRules(
-      splitCommands(normalized.safetyCommand),
+      normalized.safetyCommand,
       'Monitor',
     );
     const details: ToolExecuteConfirmationDetails = {

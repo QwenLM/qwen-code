@@ -15,11 +15,9 @@ import {
 } from '../core/permission-helpers.js';
 import { ToolConfirmationOutcome } from '../tools/tools.js';
 import { suggestCommandRules } from './command-rule-suggestions.js';
-import { splitCommands } from '../utils/shell-utils.js';
 import {
+  hasUnsupportedShellSyntax,
   matchesCommandPattern,
-  matchesRule,
-  parseRule,
 } from './rule-parser.js';
 
 const shellType = vi.hoisted(() => ({
@@ -46,13 +44,14 @@ const makeManager = (
   allow: string[] = [pushRule],
   ask: string[] = [],
   deny: string[] = [],
+  cwd = '/project',
 ) => {
   const manager = new PermissionManager({
     getPermissionsAllow: () => allow,
     getPermissionsAsk: () => ask,
     getPermissionsDeny: () => deny,
     getProjectRoot: () => '/project',
-    getCwd: () => '/project',
+    getCwd: () => cwd,
     getShellExecutionSandbox: () => true,
   });
   manager.initialize();
@@ -95,12 +94,12 @@ describe.each(['run_shell_command', 'monitor'])(
       onTestFinished(() => fs.rm(directory, { recursive: true, force: true }));
       const settingsPath = path.join(directory, 'settings.json');
       const settings = { permissions: { allow: [] as string[] } };
-      const { permissionRules: rules = [], hideAlwaysAllow } =
-        await suggestCommandRules(
-          splitCommands(command),
-          toolName === 'monitor' ? 'Monitor' : 'Bash',
-        );
-      expect(hideAlwaysAllow).not.toBe(true);
+      const suggested = await suggestCommandRules(
+        command,
+        toolName === 'monitor' ? 'Monitor' : 'Bash',
+      );
+      const rules = suggested.permissionRules ?? [];
+      expect(suggested).not.toHaveProperty('hideAlwaysAllow', true);
       expect(rules).toContain(
         `${toolName === 'monitor' ? 'Monitor' : 'Bash'}(git push *)`,
       );
@@ -174,6 +173,24 @@ describe.each(['run_shell_command', 'monitor'])(
     });
 
     it.each([
+      'git push origin main > "$(other-command)"',
+      'git push origin main 2> >(other-command)',
+      'git push origin main <<< "$(other-command)"',
+    ])(
+      'checks unsupported syntax before a matching grant: %j',
+      async (command) => {
+        expect(matchesCommandPattern('git push *', command)).toBe(true);
+        expect(hasUnsupportedShellSyntax(command)).toBe(true);
+        expect(
+          await evaluatePermissionRules(makeManager(), 'ask', {
+            toolName,
+            command,
+          }),
+        ).toEqual({ finalPermission: 'ask', pmForcedAsk: false });
+      },
+    );
+
+    it.each([
       [pushRule, 'git > /tmp/protected push origin main', ['Bash(git *)']],
       [
         'Bash(git > /tmp/protected push *)',
@@ -190,10 +207,49 @@ describe.each(['run_shell_command', 'monitor'])(
         'git >/tmp/protected push origin main',
         [pushRule],
       ],
+      ...[
+        'git 1>/tmp/protected push origin main',
+        'git 1> /tmp/protected push origin main',
+        "git > '/tmp/protected' push origin main",
+        'git &>/tmp/protected push origin main',
+        'git >|/tmp/protected push origin main',
+      ].map(
+        (command) =>
+          [
+            'Bash(git>/tmp/protected push *)',
+            command,
+            ['Bash(git *)'],
+          ] as const,
+      ),
       [
         'Bash(git>/tmp/protected push *)',
         'git>/tmp/protected push origin main',
         [],
+      ],
+      [
+        "Bash(git>'/tmp/$literal' push *)",
+        'git > /tmp/\\$literal push origin main',
+        ['Bash(git *)'],
+      ],
+      [
+        'Bash(git>/tmp/\\$literal push *)',
+        "git > '/tmp/$literal' push origin main",
+        ['Bash(git *)'],
+      ],
+      [
+        "Bash(git>'/tmp/`literal`' push *)",
+        'git > /tmp/\\`literal\\` push origin main',
+        ['Bash(git *)'],
+      ],
+      [
+        'Bash(git>/tmp/protected push *)',
+        'FOO=$BAR git > /tmp/protected push origin main',
+        ['Bash(git *)'],
+      ],
+      [
+        'Bash(git>/tmp/protected push *)',
+        'FOO="$BAR" git > /tmp/protected push origin main',
+        ['Bash(git *)'],
       ],
       [
         'Bash(git>"*" push *)',
@@ -204,11 +260,6 @@ describe.each(['run_shell_command', 'monitor'])(
         'Edit(//tmp/protected)',
         'git > /tmp/protected push origin main',
         [pushRule],
-      ],
-      [
-        'Edit(/protected)',
-        'cd /project && git > protected push origin main',
-        ['Bash(cd *)', pushRule],
       ],
     ] as const)(
       'preserves restrictive rule %s for %s',
@@ -228,6 +279,87 @@ describe.each(['run_shell_command', 'monitor'])(
           pmForcedAsk: true,
         });
         expect(asked.hasMatchingAskRule(ctx)).toBe(true);
+      },
+    );
+
+    it.each([
+      'git > /tmp/other push origin main',
+      'FOO=$BAR git > /tmp/other push origin main',
+      'git > /tmp/protected status',
+      'git < /tmp/protected push origin main',
+      'npm > /tmp/protected install',
+    ])(
+      'does not apply an unrelated redirect restriction to %j',
+      async (command) => {
+        const rule = 'Bash(git>/tmp/protected push *)';
+        const ctx = { toolName, command };
+        const denied = makeManager(['Bash(*)'], [], [rule]);
+        expect(await evaluatePermissionRules(denied, 'ask', ctx)).toEqual({
+          finalPermission: 'allow',
+          pmForcedAsk: false,
+        });
+        expect(denied.findMatchingDenyRule(ctx)).toBeUndefined();
+        const asked = makeManager(['Bash(*)'], [rule]);
+        expect(await evaluatePermissionRules(asked, 'ask', ctx)).toEqual({
+          finalPermission: 'allow',
+          pmForcedAsk: false,
+        });
+        expect(asked.hasMatchingAskRule(ctx)).toBe(false);
+      },
+    );
+
+    it.each([
+      ['git > /tmp/\\$other push origin main', 'allow'],
+      ['git > /tmp/\\$literal status', 'allow'],
+      ['git > "/tmp/$literal" push origin main', 'ask'],
+    ] as const)(
+      'distinguishes literal redirect text from %j',
+      async (command, expected) => {
+        const rule = "Bash(git>'/tmp/$literal' push *)";
+        const manager = makeManager(['Bash(git *)'], [], [rule]);
+        const ctx = { toolName, command };
+        expect(await manager.evaluate(ctx)).toBe(expected);
+        expect(manager.findMatchingDenyRule(ctx)).toBeUndefined();
+      },
+    );
+
+    it.each([
+      { name: 'configured cwd', configuredCwd: '/elsewhere', cwd: undefined },
+      {
+        name: 'explicit context cwd',
+        configuredCwd: '/project',
+        cwd: '/elsewhere',
+      },
+    ])(
+      'resolves relative redirects from $name and follows cd',
+      async ({ configuredCwd, cwd }) => {
+        const rule = 'Edit(/protected)';
+        const manager = makeManager(
+          ['Bash(cd *)', pushRule],
+          [],
+          [rule],
+          configuredCwd,
+        );
+        const ctx = {
+          toolName,
+          command: 'git > protected push origin main',
+          ...(cwd === undefined ? {} : { cwd }),
+        };
+        expect(await manager.evaluate(ctx)).toBe('ask');
+        expect(await evaluatePermissionRules(manager, 'ask', ctx)).toEqual({
+          finalPermission: 'ask',
+          pmForcedAsk: false,
+        });
+        expect(manager.findMatchingDenyRule(ctx)).toBeUndefined();
+        const changedDirectory = {
+          ...ctx,
+          command: `cd /project && ${ctx.command}`,
+        };
+        expect(await manager.evaluate(changedDirectory)).toBe('deny');
+        expect(
+          await evaluatePermissionRules(manager, 'ask', changedDirectory),
+        ).toEqual({ finalPermission: 'deny', pmForcedAsk: false });
+        expect(manager.findMatchingDenyRule(changedDirectory)).toBe(rule);
       },
     );
 
@@ -280,16 +412,36 @@ describe.each(['run_shell_command', 'monitor'])(
       ).toMatchObject({ finalPermission: 'ask' });
     });
 
-    it.each(['cmd', 'powershell'] as const)(
-      'does not apply Bash redirection normalization to %s',
+    it.each(['bash', 'cmd', 'powershell'] as const)(
+      'keeps Bash-specific permission decisions scoped to %s',
       async (shell) => {
         shellType.value = shell;
+        const command = 'git push origin $(echo main)';
+        expect(matchesCommandPattern('git push *', command)).toBe(true);
+        expect(hasUnsupportedShellSyntax(command)).toBe(true);
         expect(
           await evaluatePermissionRules(makeManager(), 'ask', {
             toolName,
-            command: 'git > /dev/null push origin main',
+            command,
           }),
-        ).toMatchObject({ finalPermission: 'ask' });
+        ).toEqual({
+          finalPermission: shell === 'bash' ? 'ask' : 'allow',
+          pmForcedAsk: false,
+        });
+        const denied = makeManager(['Bash(git *)'], [], [pushRule]);
+        const redirected = {
+          toolName,
+          command: 'git > /tmp/protected push origin main',
+        };
+        expect(
+          await evaluatePermissionRules(denied, 'ask', redirected),
+        ).toEqual({
+          finalPermission: shell === 'bash' ? 'deny' : 'allow',
+          pmForcedAsk: false,
+        });
+        expect(denied.findMatchingDenyRule(redirected)).toBe(
+          shell === 'bash' ? pushRule : undefined,
+        );
       },
     );
   },
@@ -310,12 +462,16 @@ it('keeps full-command fallback equality literal', () => {
   ).toBe(false);
 });
 
-it('does not normalize unsplit command lists', () => {
-  expect(
-    matchesRule(
-      parseRule(pushRule),
-      'run_shell_command',
-      'git > /dev/null push; other-command',
-    ),
-  ).toBe(false);
-});
+it.each(['run_shell_command', 'monitor'])(
+  'requires permission for the second command in a %s compound',
+  async (toolName) => {
+    const command = 'git push origin main; other-command';
+    expect(matchesCommandPattern('git push *', command)).toBe(true);
+    expect(
+      await evaluatePermissionRules(makeManager(), 'ask', {
+        toolName,
+        command,
+      }),
+    ).toEqual({ finalPermission: 'ask', pmForcedAsk: false });
+  },
+);
