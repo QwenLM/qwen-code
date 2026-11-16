@@ -583,25 +583,29 @@ class Query:
         if self._closed:
             return
 
-        self._closed = True
-        self._cancel_event.set()
+        async with self._start_lock:
+            if self._closed:
+                return
 
-        error = RuntimeError("Query is closed")
-        self._fail_pending_control_requests(error)
-        await self._cancel_incoming_control_requests()
+            self._closed = True
+            self._cancel_event.set()
 
-        await self._transport.close()
+            error = RuntimeError("Query is closed")
+            self._fail_pending_control_requests(error)
+            await self._cancel_incoming_control_requests()
 
-        if self._input_task is not None:
-            self._input_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await self._input_task
+            await self._transport.close()
 
-        if self._router_task is not None:
-            with contextlib.suppress(Exception):
-                await self._router_task
+            if self._input_task is not None:
+                self._input_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await self._input_task
 
-        await self._finish()
+            if self._router_task is not None:
+                with contextlib.suppress(Exception):
+                    await self._router_task
+
+            await self._finish()
 
     async def _finish(self) -> None:
         if self._terminal_event_sent:
