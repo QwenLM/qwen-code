@@ -47,6 +47,28 @@ import {
 
 let activeSseCount = 0;
 
+/**
+ * Default writer-stall budget applied when `--writer-idle-timeout-ms` is
+ * unset. The reaper only fires while a write is stuck waiting for `drain`
+ * (the consumer stopped reading and the kernel send buffer is full), so
+ * healthy idle streams — whose 15s heartbeats keep flushing — are never
+ * evicted regardless of this value. 60s bounds how long a stalled writer
+ * can pin a listener slot before it is force-evicted.
+ */
+export const DEFAULT_WRITER_IDLE_TIMEOUT_MS = 60_000;
+
+/**
+ * Resolve the effective writer-stall budget. Unset ⇒ default-on reaper;
+ * an explicit positive value wins; non-positive (direct embeds only — the
+ * CLI flag validates positive integers) disables the reaper.
+ */
+export function resolveWriterIdleBudgetMs(
+  flagValue: number | undefined,
+): number {
+  if (flagValue === undefined) return DEFAULT_WRITER_IDLE_TIMEOUT_MS;
+  return flagValue > 0 ? flagValue : 0;
+}
+
 const SSE_STREAM_ID_HEADER = 'X-Qwen-SSE-Stream-Id';
 // Keep in sync with the REST transport's response-header validator.
 const SSE_STREAM_ID_RE =
@@ -123,6 +145,13 @@ interface RegisterSseEventsRoutesDeps {
   workspaceRegistry: WorkspaceRegistry;
   daemonLog?: DaemonLogger;
   writerIdleTimeoutMs?: number;
+  /**
+   * Admission cap on concurrent SSE streams. `undefined` / non-positive
+   * means unlimited. Enforced BEFORE the subscription handshake so a
+   * saturated SSE fleet is rejected with an explicit `503` while short
+   * requests (`/health`, static assets) still reach the listener.
+   */
+  maxSseConnections?: number;
   sendBridgeError: SendBridgeError;
   virtualSubagentSessions?: VirtualSubagentSessions;
   resolveSubagentSessionRuntime: ResolveSubagentSessionRuntime;
@@ -176,12 +205,68 @@ export function registerSseEventsRoutes(
   app: Application,
   deps: RegisterSseEventsRoutesDeps,
 ): void {
-  const { workspaceRegistry, daemonLog, sendBridgeError, writerIdleTimeoutMs } =
-    deps;
+  const {
+    workspaceRegistry,
+    daemonLog,
+    sendBridgeError,
+    writerIdleTimeoutMs,
+    maxSseConnections,
+  } = deps;
 
   app.get('/session/:id/events', async (req, res) => {
     const sessionId = req.params['id'];
     const diagnosticSessionId = boundedDiagnosticString(sessionId);
+    // SSE admission cap. Long-lived streams share the listener's
+    // `server.maxConnections` quota with every short request; once the
+    // listener is full Node closes new sockets at accept time WITHOUT an
+    // HTTP response, so `/health` and the Web Shell go dark with no 503,
+    // no log line, and no metric. Rejecting here — before the subscription
+    // handshake — keeps the failure explicit (503 + Retry-After) and keeps
+    // listener headroom for short requests. `EventSource` treats 5xx as
+    // terminal and does not auto-reconnect, so a rejected client backs off
+    // instead of amplifying the load (same rationale as the per-session
+    // 429 below).
+    //
+    // The check reads the live counter without a reservation: concurrent
+    // handshakes already past this point can overshoot the cap by the
+    // number of in-flight subscriptions. That window is bounded by the
+    // handshake latency and the listener cap remains the hard backstop;
+    // the cap's job is to stop gradual accumulation from consuming the
+    // headroom, which a reservation-free check does.
+    if (
+      maxSseConnections !== undefined &&
+      maxSseConnections > 0 &&
+      activeSseCount >= maxSseConnections
+    ) {
+      const context = {
+        sessionId: diagnosticSessionId,
+        activeSseCount,
+        limit: maxSseConnections,
+      };
+      try {
+        if (daemonLog) {
+          daemonLog.warn('SSE connection limit reached', context);
+        } else {
+          writeStderrLine(
+            `qwen serve: SSE connection limit reached ` +
+              `(active=${activeSseCount}, limit=${maxSseConnections}); ` +
+              `rejecting new SSE client with 503`,
+          );
+        }
+      } catch {
+        // Diagnostics must not interfere with the rejection.
+      }
+      res.setHeader('Retry-After', '5');
+      res.status(503).json({
+        error:
+          `Daemon SSE connection limit reached (${activeSseCount}/${maxSseConnections}). ` +
+          `Retry after the Retry-After interval.`,
+        code: 'sse_connection_limit_exceeded',
+        limit: maxSseConnections,
+        active: activeSseCount,
+      });
+      return;
+    }
     const streamId = randomUUID();
     const clientId = parseSseClientId(req.headers['x-qwen-client-id']);
     const connectReason = parseSseConnectReason(req.query['connectReason']);
@@ -635,21 +720,20 @@ export function registerSseEventsRoutes(
     // waits for the previous write to settle before scheduling its own.
     type WriteOutcome = 'settled' | 'closed';
     let writeChain: Promise<void> = Promise.resolve();
-    // T2.9: epoch (ms) of the last write that fully resolved — either
-    // synchronous `res.write` returned `true`, or the async `drain`
-    // fired. The idle-timeout interval below compares
-    // `Date.now() - lastWriteAt` against the configured budget; a
-    // writer that stalls indefinitely on `drain` will never refresh
-    // this stamp, so the timer fires and forces cleanup. Initialized
-    // to "now" because cleanup runs only after the FIRST stall, and
-    // the SSE handshake itself counts as activity.
+    // Writer-stall reaper budget. Enabled BY DEFAULT (60s) — a writer
+    // stuck on `drain` pins a listener slot indefinitely otherwise, and
+    // enough stalled writers take the whole HTTP surface down at accept
+    // time (see the admission cap above). An explicit flag value wins;
+    // direct embeds may pass 0 to disable.
     //
-    // Gated on `trackWriterIdle` so the default (flag unset) avoids
-    // a per-chunk `Date.now()` on a chatty stream — SSE writers can
-    // be in the hundreds-to-thousands of frames per session.
-    const trackWriterIdle =
-      writerIdleTimeoutMs !== undefined && writerIdleTimeoutMs > 0;
-    let lastWriteAt = trackWriterIdle ? Date.now() : 0;
+    // Zero per-chunk overhead: the reaper keys on `activeDrainStartedAt`,
+    // which the backpressure branch below ALREADY stamps when
+    // `res.write()` returns false and `settleDrainMeasurement()` clears
+    // when `drain` (or close/error) fires. A healthy stream — including
+    // an idle one whose 15s heartbeats keep flushing — never enters that
+    // branch, so the timer finds no unresolved stall and does nothing.
+    // No `Date.now()` on the normal write path.
+    const writerIdleBudgetMs = resolveWriterIdleBudgetMs(writerIdleTimeoutMs);
     const settleDrainMeasurement = () => {
       if (activeDrainStartedAt === undefined) return;
       maxDrainWaitMs = Math.max(
@@ -681,17 +765,19 @@ export function registerSseEventsRoutes(
           return;
         }
         if (ok) {
-          if (trackWriterIdle) lastWriteAt = Date.now();
           resolve('settled');
           return;
         }
         backpressureCount += 1;
+        // Stall start stamp — the ONLY timestamp the idle reaper reads.
+        // If `drain` never fires (consumer stopped reading, kernel send
+        // buffer full), this stays set and the reaper evicts after the
+        // budget. Cleared by settleDrainMeasurement() on drain/close/error.
         activeDrainStartedAt = performance.now();
         const onDrain = () => {
           res.off('close', onClose);
           res.off('error', onError);
           settleDrainMeasurement();
-          if (trackWriterIdle) lastWriteAt = Date.now();
           resolve('settled');
         };
         const onClose = () => {
@@ -735,16 +821,13 @@ export function registerSseEventsRoutes(
     // notice a dead client through write-back-pressure. Comment frame is
     // ignored by EventSource.
     //
-    // The 15s heartbeat detects a TCP-dead writer
-    // via `drain` back-pressure on the comment frame itself. The
-    // `--writer-idle-timeout-ms` flag below adds the orthogonal
-    // application-level guard: if the LAST SUCCESSFUL FLUSH (any
-    // write — heartbeat, replay frame, live event) is older than the
-    // configured budget, the writer is considered stuck (NAT silently
-    // dropping flows, peer process frozen, etc.) and we force a
-    // terminal `client_evicted` frame + cleanup. The historical "Stage
-    // 2 may add an explicit application-level idle timeout" gap
-    // referenced here is now closed when the flag is set.
+    // The 15s heartbeat keeps attempting writes even on an idle stream,
+    // which is what lets the writer-stall reaper below observe a dead
+    // consumer: once the kernel send buffer fills, the heartbeat's
+    // `res.write()` returns false and the stall stamp is set. The reaper
+    // (default 60s, `--writer-idle-timeout-ms` to override) then forces a
+    // terminal `client_evicted` frame + cleanup if the stall outlives the
+    // budget.
     const heartbeatTimer = setInterval(() => {
       if (!res.writableEnded) {
         // Heartbeat writes are best-effort; failure swallowed via the
@@ -754,9 +837,9 @@ export function registerSseEventsRoutes(
     }, 15_000);
     heartbeatTimer.unref();
 
-    // T2.9: declare the idle-timer slot up-front so `cleanup` below can
-    // clear it unconditionally. The actual interval is armed only when
-    // `--writer-idle-timeout-ms` is configured.
+    // Declare the idle-timer slot up-front so `cleanup` below can clear
+    // it unconditionally. Armed whenever the stall budget is positive
+    // (the default) — see writerIdleBudgetMs above.
     let idleTimer: NodeJS.Timeout | undefined;
 
     const cleanup = () => {
@@ -765,31 +848,30 @@ export function registerSseEventsRoutes(
       abort.abort();
     };
 
-    // T2.9: arm the SSE writer idle timeout (if configured). Distinct
-    // from the heartbeat above: heartbeat = "try to ping every 15s";
-    // this = "if no write SUCCEEDED for N ms, force-evict." Values
-    // BELOW the 15s heartbeat interval WILL evict otherwise-healthy
-    // idle connections before the first heartbeat fires — they're not
-    // a no-op. Production deployments should pick a value comfortably
-    // above 15s (e.g. 30000–300000ms) so legitimate idle streams stay
-    // alive and only genuinely stuck writers are reaped; small values
-    // are useful for tests / short-lived dev sessions. The interval
-    // polls at 1/4 the budget (bounded by [250ms, 5s]) so tests
-    // using short budgets still detect promptly, while long
-    // production budgets stay cheap. Values below roughly 1000ms all
-    // use the 250ms polling floor, so eviction can lag until the next
-    // tick instead of landing at exact millisecond precision.
-    if (trackWriterIdle) {
-      // Narrowed by `trackWriterIdle`; the const assertion keeps
-      // TypeScript happy inside the closure without re-reading opts.
-      const writerIdleTimeoutMsValue = writerIdleTimeoutMs as number;
+    // Arm the writer-stall reaper. Distinct from the heartbeat above:
+    // heartbeat = "try to ping every 15s"; this = "if a write has been
+    // stuck waiting for `drain` for N ms, force-evict." The check keys
+    // on the unresolved-stall stamp (`activeDrainStartedAt`), NOT on the
+    // last successful flush, so healthy idle streams are never evicted
+    // at any budget — only genuinely stuck writers are reaped. The
+    // interval polls at 1/4 the budget (bounded by [250ms, 5s]) so tests
+    // using short budgets still detect promptly, while long production
+    // budgets stay cheap. Values below roughly 1000ms all use the 250ms
+    // polling floor, so eviction can lag until the next tick instead of
+    // landing at exact millisecond precision.
+    if (writerIdleBudgetMs > 0) {
+      const writerIdleTimeoutMsValue = writerIdleBudgetMs;
       const checkIntervalMs = Math.max(
         250,
         Math.min(5_000, Math.floor(writerIdleTimeoutMsValue / 4)),
       );
       idleTimer = setInterval(() => {
         if (res.writableEnded) return;
-        const idleForMs = Date.now() - lastWriteAt;
+        // No unresolved drain stall ⇒ the writer is healthy (idle or
+        // flushing); nothing to reap. This is the zero-overhead default
+        // path: no per-chunk timestamps are taken anywhere.
+        if (activeDrainStartedAt === undefined) return;
+        const idleForMs = performance.now() - activeDrainStartedAt;
         if (idleForMs < writerIdleTimeoutMsValue) return;
         closeReason = 'writer_idle_timeout';
         terminalEventType = 'client_evicted';

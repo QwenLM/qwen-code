@@ -203,6 +203,12 @@ interface DaemonStatusLimits {
   maxTotalSessions: number | null;
   maxPendingPromptsPerSession: number | null;
   listenerMaxConnections: number | null;
+  /**
+   * Effective admission cap for concurrent REST SSE streams
+   * (`runtime.transport.restSseActive` is the live occupancy).
+   * `null` = unlimited (listener cap disabled, or explicit opt-out).
+   */
+  maxSseConnections?: number | null;
   eventRingSize: number;
   eventRingMaxBytes: number;
   compactedReplayMaxBytes: number;
@@ -1008,6 +1014,10 @@ export async function buildDaemonStatusResponse(
       maxPendingPromptsPerSession:
         bridgeSnapshot.limits.maxPendingPromptsPerSession,
       listenerMaxConnections: listenerMaxConnections(input.opts.maxConnections),
+      maxSseConnections: sseMaxConnections(
+        input.opts.maxConnections,
+        input.opts.maxSseConnections,
+      ),
       eventRingSize: bridgeSnapshot.limits.eventRingSize,
       eventRingMaxBytes: bridgeSnapshot.limits.eventRingMaxBytes,
       compactedReplayMaxBytes: bridgeSnapshot.limits.compactedReplayMaxBytes,
@@ -1710,6 +1720,35 @@ export function listenerMaxConnections(
   if (value === undefined) return DEFAULT_LISTENER_MAX_CONNECTIONS;
   if (value === 0 || value === Infinity) return null;
   return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+/**
+ * Fraction of the listener cap reserved for long-lived REST SSE streams.
+ * The remainder is headroom for short requests (`/health`, static assets,
+ * JSON API calls) so SSE accumulation can never silently occupy every
+ * listener slot and take the whole HTTP surface down at accept time.
+ */
+export const SSE_LISTENER_CAP_FRACTION = 0.8;
+
+/**
+ * Effective admission cap for concurrent REST SSE streams. An explicit
+ * `maxSseConnections` wins (0 / Infinity = unlimited, reported as null);
+ * otherwise the cap derives from the effective listener cap. A disabled
+ * listener cap disables the SSE cap too — the operator opted out of
+ * connection bounding entirely. `null` means unlimited.
+ */
+export function sseMaxConnections(
+  listenerCap: number | undefined,
+  sseCap: number | undefined,
+): number | null {
+  if (sseCap !== undefined) {
+    if (sseCap === 0 || sseCap === Infinity) return null;
+    return Number.isFinite(sseCap) && sseCap > 0 ? Math.floor(sseCap) : null;
+  }
+  const listener = listenerMaxConnections(listenerCap);
+  if (listener === null) return null;
+  // At least one stream must be admittable even for tiny listener caps.
+  return Math.max(1, Math.floor(listener * SSE_LISTENER_CAP_FRACTION));
 }
 
 export function positiveFiniteOrNull(value: number | undefined): number | null {

@@ -45741,19 +45741,122 @@ describe('T2.9 SSE writer idle timeout (issue #4514)', () => {
     }
   });
 
-  it('evicts an idle SSE writer with a terminal client_evicted frame', async () => {
-    // Bridge yields nothing, ever — simulating an idle stream where
-    // the only writes the timer would observe are the SSE handshake
-    // (`retry: 3000`) and (eventually) the 15s heartbeat. With a
-    // 200ms idle deadline the timer must fire well before the
-    // heartbeat refreshes `lastWriteAt`. Expected terminal frame:
-    // `client_evicted` with the new `reason: 'writer_idle_timeout'`.
+  it('evicts a writer stalled on drain with a terminal client_evicted frame', async () => {
+    // The consumer stopped reading: force `res.write` to return false on
+    // the first event frame and swallow the chunk so no natural `drain`
+    // can ever fire. The unresolved-stall stamp set in the backpressure
+    // branch must trip the reaper after the budget. Expected terminal
+    // frame: `client_evicted` with `reason: 'writer_idle_timeout'`.
+    const http = await import('node:http');
+    type WriteCallback = (error?: Error | null) => void;
+    const originalWrite = http.ServerResponse.prototype.write as unknown as (
+      this: ServerResponse,
+      chunk: string | Uint8Array,
+      encodingOrCb?: BufferEncoding | WriteCallback,
+      cb?: WriteCallback,
+    ) => boolean;
+    const writeSpy = vi.spyOn(http.ServerResponse.prototype, 'write');
+    let forcedStall = false;
+    writeSpy.mockImplementation(function (
+      this: ServerResponse,
+      chunk: string | Uint8Array,
+      encodingOrCb?: BufferEncoding | WriteCallback,
+      cb?: WriteCallback,
+    ): boolean {
+      const text = typeof chunk === 'string' ? chunk : chunk.toString();
+      if (!forcedStall && text.includes('event: session_update')) {
+        // Swallow the frame AND report backpressure: the kernel buffer
+        // stays empty, so the reader below cannot provoke a natural
+        // `drain` — the stall is permanent, exactly like a frozen peer.
+        forcedStall = true;
+        return false;
+      }
+      return typeof encodingOrCb === 'function'
+        ? originalWrite.call(this, chunk, encodingOrCb)
+        : originalWrite.call(this, chunk, encodingOrCb, cb);
+    });
+    try {
+      const bridge = fakeBridge({
+        async *subscribeImpl(_sessionId, _opts) {
+          yield { id: 1, v: 1, type: 'session_update', data: { tick: 1 } };
+          await new Promise(() => {});
+        },
+      });
+      handle = await runQwenServe(
+        {
+          hostname: '127.0.0.1',
+          port: 0,
+          mode: 'http-bridge',
+          writerIdleTimeoutMs: 200,
+        },
+        { bridge },
+      );
+      const port = (handle.server.address() as { port: number }).port;
+
+      const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
+      expect(res.status).toBe(200);
+
+      // Read until we see the eviction frame OR the stream closes. The
+      // 1500ms budget is well below the 15s heartbeat so a regression
+      // that disables the idle timer would still fail loudly here.
+      const reader = res.body!.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      let evictedData: unknown;
+      const deadline = Date.now() + 1_500;
+      while (Date.now() < deadline) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let idx: number;
+        while ((idx = buf.indexOf('\n\n')) !== -1) {
+          const raw = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+          if (!raw || raw.startsWith(':') || raw.startsWith('retry:')) continue;
+          // Parse the frame; look for event: client_evicted.
+          let eventName = '';
+          let dataLine = '';
+          for (const line of raw.split('\n')) {
+            if (line.startsWith('event: ')) eventName = line.slice(7);
+            else if (line.startsWith('data: ')) dataLine = line.slice(6);
+          }
+          if (eventName === 'client_evicted') {
+            evictedData = JSON.parse(dataLine);
+            break;
+          }
+        }
+        if (evictedData !== undefined) break;
+      }
+      await reader.cancel().catch(() => undefined);
+
+      // Pin the precondition: the eviction must come from a REAL
+      // backpressure stall, not from the healthy-idle path.
+      expect(forcedStall).toBe(true);
+      expect(evictedData).toBeDefined();
+      expect(evictedData).toMatchObject({
+        v: 1,
+        type: 'client_evicted',
+        data: {
+          reason: 'writer_idle_timeout',
+          errorKind: 'writer_idle_timeout',
+          timeoutMs: 200,
+        },
+      });
+    } finally {
+      writeSpy.mockRestore();
+    }
+  });
+
+  it('does NOT evict a healthy idle stream even with a small explicit budget', async () => {
+    // Discriminating pin for the stall-based semantics: the reaper keys
+    // on an unresolved `drain` stall, NOT on the last successful flush.
+    // A healthy idle stream (event delivered, heartbeats flushing) must
+    // survive a 200ms budget — the pre-fix "no successful write for n ms"
+    // semantics evicted it here, which is exactly the footgun that made
+    // operators leave the flag off and let stalled writers accumulate.
     const bridge = fakeBridge({
-      // eslint-disable-next-line require-yield
       async *subscribeImpl(_sessionId, _opts) {
-        // Park forever; the test triggers eviction via the timer.
-        // No yield: the test asserts that the daemon's idle-timeout
-        // path fires even when the bridge produces zero frames.
+        yield { id: 1, v: 1, type: 'session_update', data: { ok: true } };
         await new Promise(() => {});
       },
     });
@@ -45770,57 +45873,48 @@ describe('T2.9 SSE writer idle timeout (issue #4514)', () => {
 
     const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
     expect(res.status).toBe(200);
-
-    // Read until we see the eviction frame OR the stream closes. The
-    // 1500ms budget is well below the 15s heartbeat so a regression
-    // that disables the idle timer would still fail loudly here.
     const reader = res.body!.getReader();
     const decoder = new TextDecoder();
     let buf = '';
-    let evictedData: unknown;
-    const deadline = Date.now() + 1_500;
+    let sawFirstEvent = false;
+    let sawEviction = false;
+    const deadline = Date.now() + 700;
     while (Date.now() < deadline) {
-      const { value, done } = await reader.read();
+      const readPromise = reader.read();
+      const wakeup = new Promise<{ value: undefined; done: false }>((r) => {
+        setTimeout(
+          () => r({ value: undefined, done: false }),
+          Math.max(0, deadline - Date.now() + 10),
+        );
+      });
+      const { value, done } = (await Promise.race([readPromise, wakeup])) as {
+        value: Uint8Array | undefined;
+        done: boolean;
+      };
       if (done) break;
+      if (value === undefined) break;
       buf += decoder.decode(value, { stream: true });
       let idx: number;
       while ((idx = buf.indexOf('\n\n')) !== -1) {
         const raw = buf.slice(0, idx);
         buf = buf.slice(idx + 2);
         if (!raw || raw.startsWith(':') || raw.startsWith('retry:')) continue;
-        // Parse the frame; look for event: client_evicted.
-        let eventName = '';
-        let dataLine = '';
         for (const line of raw.split('\n')) {
-          if (line.startsWith('event: ')) eventName = line.slice(7);
-          else if (line.startsWith('data: ')) dataLine = line.slice(6);
-        }
-        if (eventName === 'client_evicted') {
-          evictedData = JSON.parse(dataLine);
-          break;
+          if (line.startsWith('event: session_update')) sawFirstEvent = true;
+          if (line.startsWith('event: client_evicted')) sawEviction = true;
         }
       }
-      if (evictedData !== undefined) break;
     }
     await reader.cancel().catch(() => undefined);
 
-    expect(evictedData).toBeDefined();
-    expect(evictedData).toMatchObject({
-      v: 1,
-      type: 'client_evicted',
-      data: {
-        reason: 'writer_idle_timeout',
-        errorKind: 'writer_idle_timeout',
-        timeoutMs: 200,
-      },
-    });
+    expect(sawFirstEvent).toBe(true);
+    expect(sawEviction).toBe(false);
   });
 
-  it('does not evict when the writer idle timeout is unset (legacy contract)', async () => {
-    // Without `writerIdleTimeoutMs`, the existing 15s-heartbeat-only
-    // behavior must be preserved bit-for-bit. We open a stream, read
-    // a real event, then wait ~600ms — no client_evicted frame may
-    // appear in that window.
+  it('does not evict a healthy stream when the flag is unset (default reaper targets stalls only)', async () => {
+    // With the default-on reaper (60s stall budget), a healthy stream
+    // must be unaffected: we open a stream, read a real event, then wait
+    // ~600ms — no client_evicted frame may appear in that window.
     const bridge = fakeBridge({
       async *subscribeImpl(_sessionId, _opts) {
         yield { id: 1, v: 1, type: 'session_update', data: { ok: true } };
@@ -45875,13 +45969,13 @@ describe('T2.9 SSE writer idle timeout (issue #4514)', () => {
     expect(sawEviction).toBe(false);
   });
 
-  it('does NOT evict when active writes keep refreshing lastWriteAt (#4514 T2.9 wenshao review)', async () => {
-    // wenshao flagged that the existing "fires when idle" + "doesn't
-    // fire when unset" tests don't cover the case where REAL writes
-    // (event yields, not just heartbeats) refresh `lastWriteAt`
-    // inside `doWrite`. With idle timeout = 300ms and an event every
-    // 100ms, the timer should keep deferring — the connection stays
-    // alive even past several timeout cycles.
+  it('does NOT evict while real writes keep flushing without backpressure (#4514 T2.9 wenshao review)', async () => {
+    // wenshao flagged that the "fires when stalled" + "doesn't fire
+    // when unset" tests don't cover an ACTIVE stream. With a 300ms
+    // stall budget and an event every 100ms, every write flushes
+    // synchronously (no unresolved drain stall), so the reaper must
+    // keep deferring — the connection stays alive even past several
+    // budget cycles.
     const bridge = fakeBridge({
       async *subscribeImpl(_sessionId, _opts) {
         // Yield 5 events at ~100ms intervals — well below the 300ms
@@ -45912,10 +46006,9 @@ describe('T2.9 SSE writer idle timeout (issue #4514)', () => {
     const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
     expect(res.status).toBe(200);
 
-    // Read for ~700ms — long enough that an IDLE writer would have
-    // been evicted twice over (300ms timeout, polled every ~250ms),
-    // but the per-100ms event stream refreshes lastWriteAt before the
-    // check fires.
+    // Read for ~700ms — several 300ms budget cycles. Every per-100ms
+    // event write flushes synchronously, so no unresolved drain stall
+    // ever exists and the reaper must not fire.
     const reader = res.body!.getReader();
     const decoder = new TextDecoder();
     let buf = '';
@@ -49059,3 +49152,212 @@ it.each(['patch', 'delete', 'delete-workspace'] as const)(
     }
   },
 );
+
+describe('SSE listener-slot exhaustion guard (daemon stability)', () => {
+  let handle: RunHandle | undefined;
+  afterEach(async () => {
+    if (handle) {
+      await handle.close();
+      handle = undefined;
+    }
+  });
+
+  function parkedBridge() {
+    return fakeBridge({
+      // eslint-disable-next-line require-yield
+      async *subscribeImpl(_sessionId, _opts) {
+        // Park forever: the stream stays open until the client cancels,
+        // occupying one listener slot exactly like a production SSE client.
+        await new Promise(() => {});
+      },
+    });
+  }
+
+  async function openStream(port: number, sessionId: string) {
+    const res = await fetch(
+      `http://127.0.0.1:${port}/session/${sessionId}/events`,
+    );
+    expect(res.status).toBe(200);
+    return res;
+  }
+
+  it('rejects SSE overflow with 503 + Retry-After while /health stays reachable', async () => {
+    // Listener cap 10 ⇒ derived SSE cap floor(10 × 0.8) = 8. Eight parked
+    // streams saturate the SSE quota; the ninth must get an explicit 503
+    // (not a silent accept-time socket close), and short requests must
+    // still be served through the reserved listener headroom.
+    const beforeActive = getActiveSseCount();
+    handle = await runQwenServe(
+      {
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        maxConnections: 10,
+      },
+      { bridge: parkedBridge() },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+
+    const streams: Response[] = [];
+    for (let i = 0; i < 8; i++) {
+      streams.push(await openStream(port, `sess-cap-${i}`));
+    }
+    expect(getActiveSseCount()).toBe(beforeActive + 8);
+
+    const overflow = await fetch(
+      `http://127.0.0.1:${port}/session/sess-overflow/events`,
+    );
+    expect(overflow.status).toBe(503);
+    expect(overflow.headers.get('retry-after')).toBe('5');
+    const overflowBody = (await overflow.json()) as {
+      code: string;
+      limit: number;
+      active: number;
+    };
+    expect(overflowBody.code).toBe('sse_connection_limit_exceeded');
+    expect(overflowBody.limit).toBe(8);
+    expect(overflowBody.active).toBe(8);
+
+    // The whole point of the cap: the diagnostic surface stays alive
+    // while the SSE fleet is saturated.
+    const health = await fetch(`http://127.0.0.1:${port}/health`);
+    expect(health.status).toBe(200);
+    const caps = await fetch(`http://127.0.0.1:${port}/capabilities`);
+    expect(caps.status).toBe(200);
+
+    // Freeing one slot readmits the next stream.
+    await streams[0]!.body!.cancel();
+    await new Promise((r) => setTimeout(r, 150));
+    expect(getActiveSseCount()).toBe(beforeActive + 7);
+    const readmitted = await openStream(port, 'sess-readmitted');
+    await readmitted.body!.cancel();
+    for (const stream of streams.slice(1)) {
+      await stream.body!.cancel();
+    }
+  });
+
+  it('reports the derived SSE cap and live occupancy in daemon status', async () => {
+    handle = await runQwenServe(
+      { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+      { bridge: parkedBridge() },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+
+    const statusRes = await fetch(
+      `http://127.0.0.1:${port}/daemon/status?detail=full`,
+    );
+    expect(statusRes.status).toBe(200);
+    const status = (await statusRes.json()) as {
+      limits: { listenerMaxConnections: number; maxSseConnections: number };
+      runtime: { transport: { restSseActive: number } };
+    };
+    expect(status.limits.listenerMaxConnections).toBe(256);
+    expect(status.limits.maxSseConnections).toBe(204);
+    const beforeActive = status.runtime.transport.restSseActive;
+
+    const stream = await openStream(port, 'sess-status');
+    const afterRes = await fetch(
+      `http://127.0.0.1:${port}/daemon/status?detail=full`,
+    );
+    const after = (await afterRes.json()) as {
+      runtime: { transport: { restSseActive: number } };
+    };
+    expect(after.runtime.transport.restSseActive).toBe(beforeActive + 1);
+    await stream.body!.cancel();
+  });
+
+  it('honors an explicit maxSseConnections override and the disabled sentinels', async () => {
+    handle = await runQwenServe(
+      {
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        maxConnections: 10,
+        maxSseConnections: 5,
+      },
+      { bridge: parkedBridge() },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+    const status = (await (
+      await fetch(`http://127.0.0.1:${port}/daemon/status?detail=full`)
+    ).json()) as { limits: { maxSseConnections: number | null } };
+    expect(status.limits.maxSseConnections).toBe(5);
+    await handle.close();
+    handle = undefined;
+
+    // Listener cap disabled ⇒ SSE cap disabled too (operator opted out of
+    // connection bounding entirely).
+    handle = await runQwenServe(
+      {
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        maxConnections: 0,
+      },
+      { bridge: parkedBridge() },
+    );
+    const port2 = (handle.server.address() as { port: number }).port;
+    const status2 = (await (
+      await fetch(`http://127.0.0.1:${port2}/daemon/status?detail=full`)
+    ).json()) as { limits: { maxSseConnections: number | null } };
+    expect(status2.limits.maxSseConnections).toBeNull();
+  });
+
+  it('reports SSE occupancy and cap on the deep health probe', async () => {
+    const beforeActive = getActiveSseCount();
+    handle = await runQwenServe(
+      {
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        maxConnections: 10,
+      },
+      { bridge: parkedBridge() },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+    const stream = await openStream(port, 'sess-health');
+    const deep = (await (
+      await fetch(`http://127.0.0.1:${port}/health?deep=1`)
+    ).json()) as {
+      connectedClients: number;
+      connectedClientsMax: number | null;
+    };
+    expect(deep.connectedClients).toBe(beforeActive + 1);
+    expect(deep.connectedClientsMax).toBe(8);
+    await stream.body!.cancel();
+  });
+
+  it.each([-1, Number.NaN])(
+    'rejects invalid maxSseConnections (%s) at boot',
+    async (value) => {
+      await expect(
+        runQwenServe(
+          {
+            hostname: '127.0.0.1',
+            port: 0,
+            mode: 'http-bridge',
+            maxSseConnections: value,
+          },
+          { bridge: parkedBridge() },
+        ),
+      ).rejects.toThrow(/maxSseConnections/);
+    },
+  );
+
+  it('enables TCP keepalive on accepted sockets', async () => {
+    const net = await import('node:net');
+    const spy = vi.spyOn(net.Socket.prototype, 'setKeepAlive');
+    try {
+      handle = await runQwenServe(
+        { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+        { bridge: fakeBridge() },
+      );
+      const port = (handle.server.address() as { port: number }).port;
+      const res = await fetch(`http://127.0.0.1:${port}/health`);
+      expect(res.status).toBe(200);
+      expect(spy).toHaveBeenCalledWith(true, 30_000);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});

@@ -1075,6 +1075,12 @@ export interface DaemonStatusReport {
     maxTotalSessions: number | null;
     maxPendingPromptsPerSession: number | null;
     listenerMaxConnections: number | null;
+    /**
+     * Effective admission cap for concurrent REST SSE streams; the live
+     * occupancy is `runtime.transport.restSseActive`. `null` = unlimited.
+     * Additive — older daemons omit this field.
+     */
+    maxSseConnections?: number | null;
     eventRingSize: number;
     eventRingMaxBytes?: number;
     promptDeadlineMs: number | null;

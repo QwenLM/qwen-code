@@ -938,6 +938,7 @@ Response shape:
     "maxTotalSessions": 800,
     "maxPendingPromptsPerSession": 5,
     "listenerMaxConnections": 256,
+    "maxSseConnections": 204,
     "eventRingSize": 8000,
     "eventRingMaxBytes": 8388608,
     "compactedReplayMaxBytes": 4194304,
