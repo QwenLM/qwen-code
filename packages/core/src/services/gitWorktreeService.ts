@@ -2062,7 +2062,13 @@ export class GitWorktreeService {
           await this.applyDirtyState(worktree.path, dirtyState);
         } catch (error) {
           if (!(error instanceof WorktreeDirtyCarryConflictError)) throw error;
-          if (error.restoreFailed) throw error;
+          if (error.restoreFailed) {
+            // A half-applied overlay cannot be baselined as user state. Abort
+            // the setup and reap the worktrees already created rather than
+            // orphaning them by throwing past the cleanup (R11-4).
+            await this.cleanupSession(config.sessionId).catch(() => undefined);
+            throw error;
+          }
           debugLogger.warn(
             `setupWorktrees: dirty carry conflicted for ${worktree.name}; ` +
               'using committed state',
@@ -4490,17 +4496,20 @@ export class GitWorktreeService {
   /**
    * The branch the checkout sits on ('' when detached or unreadable).
    * An unreadable checkout answers '' so ownership-keyed deletes stay
-   * conservative: no branch is deleted on its behalf.
+   * conservative: no branch is deleted on its behalf. Uses the full ref so a
+   * same-named tag does not qualify the name as `heads/<name>` and break the
+   * ownership comparison against the bare slug branch (same root cause as the
+   * handoff trust-gate normalization).
    */
   private async getWorktreeBranchName(worktreePath: string): Promise<string> {
     try {
       const { simpleGit } = await loadSimpleGit();
-      const abbrev = (
+      const symbolic = (
         await simpleGit(worktreePath)
           .env(gitEnv())
-          .revparse(['--abbrev-ref', 'HEAD'])
+          .revparse(['--symbolic-full-name', 'HEAD'])
       ).trim();
-      return abbrev === 'HEAD' ? '' : abbrev;
+      return symbolic === 'HEAD' ? '' : bareBranchName(symbolic);
     } catch {
       return '';
     }

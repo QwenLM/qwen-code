@@ -474,6 +474,33 @@ describe('GitWorktreeService', () => {
       );
     });
 
+    it('setupWorktrees reaps created worktrees when the carry restore fails (R11-4)', async () => {
+      const service = new GitWorktreeService('/repo');
+      vi.spyOn(service, 'isGitRepository').mockResolvedValue(true);
+      vi.spyOn(service, 'createWorktree').mockResolvedValue({
+        success: true,
+        worktree: worktreeInfo('a'),
+      });
+      const cleanup = vi.spyOn(service, 'cleanupSession').mockResolvedValue({
+        success: true,
+        removedWorktrees: [],
+        removedBranches: [],
+        errors: [],
+      });
+      git.stash.mockResolvedValue('snapshot-sha\n');
+      git.raw.mockRejectedValue(new Error('stash apply conflict'));
+
+      await expect(
+        service.setupWorktrees({
+          sessionId: 's1',
+          sourceRepoPath: '/repo',
+          worktreeNames: ['a'],
+        }),
+      ).rejects.toThrow(/restore to committed state also failed/);
+      // The abort must reap the worktrees already created, not orphan them.
+      expect(cleanup).toHaveBeenCalledWith('s1');
+    });
+
     it('setupWorktrees should still succeed when stash create fails', async () => {
       git.stash.mockRejectedValue(new Error('stash create failed'));
 

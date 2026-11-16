@@ -463,6 +463,25 @@ describe('GitWorktreeService — detached managed worktrees', () => {
     ).toBe('precious\n');
   });
 
+  it('removeUserWorktree deletes the slug branch when a same-named tag exists', async () => {
+    // A named worktree sits on worktree-<slug>; a same-named tag would make
+    // --abbrev-ref report heads/worktree-<slug>, breaking the ownership
+    // comparison and skipping the delete. The full-ref probe keeps the bare
+    // name so the owned slug branch is still deleted.
+    const created = await service.createUserWorktree('sess-tagbranch', 'main');
+    expect(created.success).toBe(true);
+    expect(created.worktree!.branch).toBe('worktree-sess-tagbranch');
+    git(repoRoot, 'tag', 'worktree-sess-tagbranch');
+    const result = await service.removeUserWorktree('sess-tagbranch', {
+      deleteBranch: true,
+    });
+    expect(result.success).toBe(true);
+    expect(result.deletedBranch).toBe('worktree-sess-tagbranch');
+    expect(git(repoRoot, 'branch', '--list', 'worktree-sess-tagbranch')).toBe(
+      '',
+    );
+  });
+
   it('prepared finalize with branchOwned=false keeps a same-slug branch at base', async () => {
     git(repoRoot, 'branch', 'worktree-sess-fin');
     const base = git(repoRoot, 'rev-parse', 'HEAD');
