@@ -604,6 +604,25 @@ describe('ExtensionFileWatcher', () => {
     );
   });
 
+  it('bootstrap ignored predicate keeps the watch root however it is spelled', () => {
+    mockExistsSync.mockReturnValue(false);
+    const watcher = new ExtensionFileWatcher(
+      configWithExtensions([]),
+      extensionsDir,
+      createRefreshState(),
+    );
+    watcher.startWatching();
+
+    const root = path.dirname(extensionsDir);
+    const ignored = mockWatchers[1].options['ignored'] as (
+      filePath: string,
+    ) => boolean;
+    expect(ignored(root.split(path.sep).join('/'))).toBe(false);
+    expect(ignored(`${root}${path.sep}`)).toBe(false);
+    expect(ignored(extensionsDir)).toBe(false);
+    expect(ignored(path.join(root, 'settings.json'))).toBe(true);
+  });
+
   it('restarts watching after extension manager mutations settle', () => {
     const refreshState = createRefreshState();
     let mutationListener:
