@@ -2106,22 +2106,24 @@ npm run test:e2e:managed-big-output
 It streams a long answer, verifies the complete public text and stored record,
 deletes the original Harness and Runtime homes, and checks the complete answer
 in a cold replacement's model context. A short answer remains inline. This
-mode executes no tools and has no Runtime binding to reclaim, so it keeps
+mode executes no tools and does not test Runtime takeover, so it keeps
 `durable-local-process` disabled and does not require Linux.
 
 A zero-delay run checks the real-model path as shown above; a controlled
-cold-start delay additionally tests output before Runtime readiness:
+cold-start delay additionally tests serial preparation before model output:
 
 ```bash
 npm run test:e2e:managed-agent-server -- \
   --model moonshot/kimi-k3 \
-  --runtime-delay-ms 45000
+  --runtime-delay-ms 15000
 ```
 
-That run additionally requires the first model event to precede Runtime
-readiness whenever the delay reaches the 15 seconds the acceptance criterion
-names. A deterministic controlled-model proof of the same ordering is tracked
-in #12941.
+The normal and delayed cold-start runs require Runtime readiness before the first model event.
+An unsubmitted Turn waits for preparation before loading and submitting to the
+Harness, without spending admission retries while preparation remains pending.
+Keep the injected delay below the selected provider's startup deadline; the
+local-process provider currently allows 30 seconds. The preparation wait also
+uses `qwen.managed-agent.harness.load-timeout`, which defaults to 120 seconds.
 
 The real-model check extracts only the selected model provider, its referenced
 environment credential, the selected model, and the authentication policy

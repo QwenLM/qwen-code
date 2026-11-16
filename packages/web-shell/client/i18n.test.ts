@@ -211,6 +211,24 @@ describe('web-shell i18n catalog', () => {
     }
   });
 
+  it('localizes the Goals-page affordance and budget-row labels in every catalog', () => {
+    // The budget rows render these labels in all three locales; a missing
+    // zh/ru entry would silently fall back to EN mid-surface. Full-string
+    // pins, not just != EN, so a wrong translation reds too.
+    expect(getTranslator('en')('goals.viewAll')).toBe('View all goals');
+    expect(getTranslator('zh-CN')('goals.viewAll')).toBe('查看全部目标');
+    expect(getTranslator('ru')('goals.viewAll')).toBe('Все цели');
+    expect(getTranslator('en')('goals.budget.turns')).toBe('Turns');
+    expect(getTranslator('zh-CN')('goals.budget.turns')).toBe('轮数');
+    expect(getTranslator('ru')('goals.budget.turns')).toBe('Ходы');
+    expect(getTranslator('en')('goals.budget.tokens')).toBe('Tokens');
+    expect(getTranslator('zh-CN')('goals.budget.tokens')).toBe('Tokens');
+    expect(getTranslator('ru')('goals.budget.tokens')).toBe('Токены');
+    expect(getTranslator('en')('goals.budget.time')).toBe('Active time');
+    expect(getTranslator('zh-CN')('goals.budget.time')).toBe('活跃时长');
+    expect(getTranslator('ru')('goals.budget.time')).toBe('Активное время');
+  });
+
   it('keeps every scheduled-task delivery translation in both locales', () => {
     const en = getTranslator('en');
     const zh = getTranslator('zh-CN');
