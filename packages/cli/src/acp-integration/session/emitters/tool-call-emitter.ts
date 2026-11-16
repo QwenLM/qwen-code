@@ -18,6 +18,7 @@ import type {
 } from '../types.js';
 import { hasFullSessionContext } from '../types.js';
 import type {
+  SessionUpdate,
   ToolCallContent,
   ToolCallLocation,
   ToolKind,
