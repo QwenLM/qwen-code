@@ -48,7 +48,7 @@ administrator-asserted audit identity, not authentication. Commands also require
 its current Workspace `OWNER` grant. No new HTTP API, signing key or permission
 framework is introduced. Callers cannot choose a replacement Pod or endpoint.
 Kubernetes API/token/CA settings stay in deployment configuration; plans contain
-no credentials. See the [deployment guide](../../deploy/k2-resident/README.md).
+no credentials. See the [deployment guide](../../packages/sdk-java/managed-kubernetes-archive/deploy/k2-resident/README.md).
 
 ## Idle admission and durable fence
 
