@@ -38,7 +38,7 @@ macOS 原生读取器先解析 canonical 路径的 FileStore 设备，再从有�
 
 ## 受影响组件
 
-`MacOsHostIdentity` 提供卷探测和稳定锚点身份。`NativeStorageIdentityReader` 保留供旧身份校验和实时文件操作使用的数值读取。`WorkspaceStorageGuard` 识别两种登记编码，本地身份兼容和搬迁历史读取委托给已有的 `LocalStorageOwners` 辅助代码。`SessionWorktreeGit` 校验两种锚点格式，并单独暴露离线重新认定计算。runtime-local 复用现有停止协议。持久化维护 store 和 server 私有 main 负责持久离线转换。无需新增公共路由或修改 TypeScript payload。
+`MacOsHostIdentity` 提供卷探测和稳定锚点身份。`NativeStorageIdentityReader` 保留供旧身份校验和实时文件操作使用的数值读取。`WorkspaceStorageGuard` 识别两种登记编码，本地身份兼容和搬迁历史读取委托给已有的 `LocalStorageOwners` 辅助代码。`SessionWorktreeGit` 校验两种锚点格式，并单独暴露离线重新认定计算。runtime-local 复用现有停止协议。持久化维护 store 和 server 私有 main 负责持久离线转换；参考发行包将该 main 作为 `workspace-identity-reattest` 接入既有离线 admin 启动器。无需新增公共路由或修改 TypeScript payload。
 
 待完成的目录导入 receipt 重试时按照其保存身份选择编码。对未发生变化的旧 owner 新增 alias 时，复用完整匹配的数值身份，不创建竞争的 UUID owner。已完成重新认定 receipt 使用独立 phase，使文件历史校验跳过它们并继续找到最近真正的搬迁 receipt。本地 serve 启动器保留默认关闭可信重启的既有行为；私有维护命令显式启用可信原生重启观测。
 
