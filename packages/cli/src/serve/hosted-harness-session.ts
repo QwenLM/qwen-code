@@ -396,7 +396,11 @@ import { SessionTranscriptChangedError } from '@qwen-code/qwen-code-core/service
 import {
   hostedShellLaneAttachesChildAgents,
   hasHostedExternalFilesExcludedOptions,
+  hasHostedExternalContentExcludedOptions,
   HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
+  HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2,
+  isHostedWorkspaceExternalFilesProfile,
+  isHostedWorkspacePublicChildProfile,
   isHostedWorkspaceReadProfile,
   isHostedWorkspacePublicShellProfile,
   HOSTED_WORKSPACE_FILE_PROFILE_V3,
@@ -954,6 +958,7 @@ async function hostedApprovalForTurn(
       'hosted-workspace-shell/4',
       'hosted-workspace-files/3',
       HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
+      HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2,
       'hosted-workspace-files/4',
     ].includes(session.toolProfile ?? '');
   const admission = await readHostedTurnApprovalSelection(
@@ -5014,6 +5019,18 @@ export function registerHostedHarnessSessionRoutes(
         hasHostedExternalFilesExcludedOptions(body))
     )
       return error(res, 400, 'hosted_tool_profile_unavailable');
+    if (
+      requestedProfile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2 &&
+      (!contract.features?.includes(
+        HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2,
+      ) ||
+        !contract.lifecycleV2Profiles?.includes(
+          HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2,
+        ) ||
+        hasHostedExternalContentExcludedOptions(body) ||
+        body?.['publicChildAgentsVersion'] !== 1)
+    )
+      return error(res, 400, 'hosted_tool_profile_unavailable');
     let cleanupPromptId = body?.['recoveryCleanupPromptId'];
     const cancellationPromptId = body?.['cancellationPromptId'];
     if (
@@ -5114,7 +5131,7 @@ export function registerHostedHarnessSessionRoutes(
         contract.lifecycleV2Profiles?.includes('hosted-workspace-shell/4'));
     if (
       publicChildAgentsVersion === 1 &&
-      (!isHostedWorkspacePublicShellProfile(toolProfile) ||
+      (!isHostedWorkspacePublicChildProfile(toolProfile) ||
         body?.['foregroundOnly'] === true ||
         (!extensionChildProfile &&
           (body?.['mcpServers'] !== undefined ||
@@ -6275,6 +6292,8 @@ export function registerHostedHarnessSessionRoutes(
                           (toolProfile === HOSTED_WORKSPACE_FILE_PROFILE ||
                             toolProfile ===
                               HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE ||
+                            toolProfile ===
+                              HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2 ||
                             toolProfile === HOSTED_WORKSPACE_FILE_PROFILE_V3 ||
                             isHostedWorkspaceShellProfile(toolProfile)),
                       )
@@ -6340,6 +6359,24 @@ export function registerHostedHarnessSessionRoutes(
       );
       const externalFiles =
         definition?.['toolProfile'] === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE;
+      const contentFiles =
+        definition?.['toolProfile'] ===
+        HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2;
+      if (
+        contentFiles &&
+        (hasHostedExternalContentExcludedOptions(body) ||
+          hasHostedExternalContentExcludedOptions(definition) ||
+          definition?.['publicChildAgentsVersion'] !== 1 ||
+          !contract.features?.includes(
+            HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2,
+          ) ||
+          !contract.lifecycleV2Profiles?.includes(
+            HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2,
+          ))
+      ) {
+        await managed.close();
+        return error(res, 409, 'hosted_tool_profile_conflict');
+      }
       if (
         externalFiles &&
         (!contract.features?.includes(
@@ -6847,7 +6884,7 @@ export function registerHostedHarnessSessionRoutes(
         // exact current surface (their child admission is its own gate).
         // Public Shell admission suppresses the child agent tool; a private
         // Shell lane that omits the flag keeps it. Team attachment stays.
-        if (session.shell || session.backgroundLane) {
+        if (session.shell || session.backgroundLane || contentFiles) {
           if (
             hostedShellLaneAttachesChildAgents(
               true,
@@ -6955,7 +6992,7 @@ export function registerHostedHarnessSessionRoutes(
         });
       // H6b: every hosted Session owns its automation funnel — a run's
       // input needs no Runtime, and its settle reads the turn alone.
-      if (!externalFiles) {
+      if (!externalFiles && !contentFiles) {
         session.automations = new HostedAutomationSession(
           {
             authority: managed.authority,
@@ -7030,7 +7067,7 @@ export function registerHostedHarnessSessionRoutes(
         : undefined;
       // H5b: every hosted Session owns its channel funnel — a channel input
       // needs no Runtime, and its reply plans from the settled turn alone.
-      if (!externalFiles) {
+      if (!externalFiles && !contentFiles) {
         session.channels = new HostedChannelSession(
           {
             authority: managed.authority,
@@ -9029,6 +9066,7 @@ export function registerHostedHarnessSessionRoutes(
                   'hosted-workspace-files/2',
                   'hosted-workspace-files/3',
                   HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
+                  HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2,
                   'hosted-workspace-files/4',
                 ]
           ).includes(session.toolProfile ?? '') ||
@@ -9116,6 +9154,11 @@ export function registerHostedHarnessSessionRoutes(
       ? workflowLaunchSummaryText(workflowLaunch)
       : promptInput!.text;
     const attachments = (promptInput?.attachments.length ?? 0) > 0;
+    if (
+      attachments &&
+      session.toolProfile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2
+    )
+      return error(res, 400, 'hosted_input_attachments_unavailable');
     const maxBytes = attachments
       ? HOSTED_ATTACHMENT_INPUT_BYTES
       : HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes;
@@ -9658,7 +9701,7 @@ export function registerHostedHarnessSessionRoutes(
     if (
       session.foregroundOnly ||
       !session.toolProfile ||
-      session.toolProfile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE
+      isHostedWorkspaceExternalFilesProfile(session.toolProfile)
     )
       return error(res, 409, 'hosted_client_files_profile_unsupported');
     const serverId = body?.['serverId'];
@@ -9873,17 +9916,22 @@ export function registerHostedHarnessSessionRoutes(
     session: HostedSession,
     childBootstrap = false,
   ): Promise<HostedExtensionSession> {
+    const contentOnly =
+      session.toolProfile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2;
     if (
       !brokerOptions ||
       session.foregroundOnly ||
       ((session.childDepth ?? 0) !== 0 &&
         !(childBootstrap && session.publicChildExtensionAgent)) ||
-      ![
-        'hosted-workspace-shell/1',
-        HOSTED_WORKSPACE_SHELL_PROFILE_V3,
-        'hosted-workspace-shell/4',
-        HOSTED_MCP_PROFILE,
-      ].includes(session.toolProfile ?? '') ||
+      !(
+        contentOnly ||
+        [
+          'hosted-workspace-shell/1',
+          HOSTED_WORKSPACE_SHELL_PROFILE_V3,
+          'hosted-workspace-shell/4',
+          HOSTED_MCP_PROFILE,
+        ].includes(session.toolProfile ?? '')
+      ) ||
       !contract.lifecycleV2Profiles?.includes(session.toolProfile!)
     )
       throw new Error('Hosted extension management is unavailable.');
@@ -9951,6 +9999,10 @@ export function registerHostedHarnessSessionRoutes(
           }
         },
         enable: async (bundle, packages, operationId) => {
+          if (contentOnly) {
+            selectExtensionCatalog(session, bundle, packages);
+            return;
+          }
           const ownerId = hostedConfigScopedOwnerId(
             session.managed.authority.sessionHeader.sessionKey,
             bundle.configRevision,
@@ -10040,6 +10092,12 @@ export function registerHostedHarnessSessionRoutes(
           selectExtensionCatalog(session, bundle, packages);
         },
       },
+      contentOnly
+        ? (pin, operationId) => session.stores!.contentPackage(pin, operationId)
+        : undefined,
+      contentOnly
+        ? session.publicChildExtensionAgent?.effectiveConfigRef
+        : undefined,
     );
     await manager.open();
     session.extensions = manager;
@@ -13631,7 +13689,7 @@ export function registerHostedHarnessSessionRoutes(
     if (
       !session.toolProfile ||
       session.toolProfile === HOSTED_MCP_PROFILE ||
-      session.toolProfile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE ||
+      isHostedWorkspaceExternalFilesProfile(session.toolProfile) ||
       !brokerOptions
     )
       return error(res, 409, 'hosted_file_history_unavailable');

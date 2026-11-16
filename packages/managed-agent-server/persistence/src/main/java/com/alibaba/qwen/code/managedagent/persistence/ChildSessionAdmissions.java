@@ -98,6 +98,20 @@ final class ChildSessionAdmissions {
         }
         SessionRecord parent = storeRows.requireSessionForUpdate(tenantId,
                 parentSessionId);
+        if (!parentSessionId.equals(lineage.parentSessionId())) {
+            throw new ManagedAgentException(409, "child_launch_snapshot_invalid", "The child lineage conflicts with its parent");
+        }
+        if (!existing.isEmpty()) {
+            WorkspaceCommand command = existing.getFirst();
+            if (!command.requestDigest().equals(requestDigest)
+                    || jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id=? AND session_id=?"
+                            + " AND parent_session_id=? AND root_session_id=? AND parent_child_run_id=? AND child_depth=?",
+                            Integer.class, tenantId, command.sessionId(), parentSessionId, lineage.rootSessionId(),
+                            lineage.parentChildRunId(), lineage.depth()) != 1) {
+                throw new ManagedAgentException(409, "idempotency_conflict", "The idempotency key was reused with different content.");
+            }
+            return new Admission(command.sessionId(), command.turnId(), true, false);
+        }
         if (parent.workspace() == null || residentWorkspaces.find(parent.workspace()) != null || !"ACTIVE".equals(parent.status())
                 || CsiFilesRetirementProfile.isProfile(parent.toolProfile())) {
             throw new ManagedAgentException(409,
@@ -150,16 +164,6 @@ final class ChildSessionAdmissions {
         storeRows.requireLegacyMutation(tenantId, parentSessionId);
         if (!input.isEmpty() && !workspaceFilesEnabled) {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
-        }
-        if (!existing.isEmpty()) {
-            WorkspaceCommand command = existing.getFirst();
-            if (!command.requestDigest().equals(requestDigest)) {
-                throw new ManagedAgentException(409,
-                        "idempotency_conflict",
-                        "The idempotency key was reused with different content.");
-            }
-            return new Admission(command.sessionId(), command.turnId(), true,
-                    false);
         }
         // The terminal truth fence: the relay can give up on a stalled
         // creation and commit the run's terminal verdict (creation_failed
@@ -242,8 +246,20 @@ final class ChildSessionAdmissions {
         }
         if (snapshot != null) {
             byte[] owner = jdbc.queryForObject("SELECT COALESCE(owner_actor_key, creator_actor_key) FROM ma_session WHERE tenant_id=? AND session_id=?", byte[].class, tenantId, parentSessionId);
-            jdbc.update("UPDATE ma_session SET public_child_agents_version=1, owner_actor_key=?, approval_mode=?, selected_approval_mode=NULL, approval_revision=0, model_id=?, model_revision=1 WHERE tenant_id=? AND session_id=?",
-                    owner, snapshot.path("approvalMode").asText(), snapshot.path("modelId").asText(), tenantId, sessionId);
+            var policy = jdbc.queryForMap("SELECT COALESCE(selected_approval_mode, approval_mode) AS mode, approval_revision, permission_rules_json"
+                    + " FROM ma_session WHERE tenant_id=? AND session_id=? FOR UPDATE", tenantId, parentSessionId);
+            boolean content = WorkspaceToolProfiles.EXTERNAL_CONTENT.equals(parent.toolProfile());
+            Object delegatedMode = "auto".equals(policy.get("mode")) ? "default" : policy.get("mode");
+            if (content && (!snapshot.path("approvalMode").asText().equals(delegatedMode)
+                    || !(policy.get("approval_revision") instanceof Number revision)
+                    || snapshot.path("approvalRevision").asLong(-1) != revision.longValue())) {
+                throw new ManagedAgentException(409, "child_launch_snapshot_invalid", "The delegated approval policy changed");
+            }
+            Object rules = content ? policy.get("permission_rules_json") : null;
+            jdbc.update("UPDATE ma_session SET public_child_agents_version=1, owner_actor_key=?, approval_mode=?, selected_approval_mode=?,"
+                            + " approval_revision=?, permission_rules_json=?, model_id=?, model_revision=1 WHERE tenant_id=? AND session_id=?",
+                    owner, snapshot.path("approvalMode").asText(), rules == null ? null : snapshot.path("approvalMode").asText(),
+                    rules == null ? 0 : 1, rules, snapshot.path("modelId").asText(), tenantId, sessionId);
         }
         if (turnId != null) {
             sessionCommands.insertTurn(tenantId, sessionId, turnId, promptId, input,

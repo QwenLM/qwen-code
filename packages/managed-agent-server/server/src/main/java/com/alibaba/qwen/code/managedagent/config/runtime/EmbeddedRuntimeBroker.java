@@ -391,7 +391,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer,
 
     @Override
     public boolean supportsWorkspaceClose(String profile) {
-        return com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.EXTERNAL_FILES.equals(profile)
+        return com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.isExternalFiles(profile)
                 ? RuntimeProviderKinds.EXTERNAL_WORKSPACE.equals(brokerSettings.getProvisioner())
                         && externalRegistrations != null
                         && service.supportsDrainedStopKind(RuntimeProviderKinds.EXTERNAL_WORKSPACE)

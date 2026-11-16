@@ -67,6 +67,29 @@ class ManagedConfigInstallContractTest {
         }
     }
 
+    @Test
+    void contentConfigurationUsesOneAcknowledgementAndCannotAcquireProcessSettingsOrChangeFormats() throws IOException {
+        ObjectNode prepared = record(content("prepared"), 2).put("formatVersion", 2);
+        var stage = (com.fasterxml.jackson.databind.node.ArrayNode) prepared.get("stageAckRefs");
+        stage.removeAll().add(record(content("prepared"), 2).get("stageAckRefs").get(0));
+        ((ObjectNode) prepared.get("rootSnapshotRef")).put("kind", "managed-extension-root");
+        ((ObjectNode) prepared.get("bundleRef")).put("kind", "managed-extension-config-bundle");
+        ((ObjectNode) stage.get(0)).put("kind", "managed-extension-stage-ack");
+        assertDoesNotThrow(() -> ManagedConfigInstall.require(prepared));
+        ObjectNode invalid = prepared.deepCopy();
+        ((com.fasterxml.jackson.databind.node.ArrayNode) invalid.get("stageAckRefs")).add(
+                ((ObjectNode) record(content("prepared"), 2).get("stageAckRefs").get(1)).put("kind", "managed-extension-stage-ack"));
+        assertThrows(ManagedExtensionRecords.InvalidRecordException.class, () -> ManagedConfigInstall.require(invalid));
+        ObjectNode settings = prepared.deepCopy();
+        ((com.fasterxml.jackson.databind.node.ArrayNode) settings.path("command").path("extensions")).addObject()
+                .put("extensionId", "extension").put("packageRevision", 1).put("packageDigest", "a".repeat(64)).put("settingsRevision", 1);
+        assertThrows(ManagedExtensionRecords.InvalidRecordException.class, () -> ManagedConfigInstall.require(settings));
+        ObjectNode switched = prepared.deepCopy().put("phase", "committed").put("formatVersion", 1);
+        ((com.fasterxml.jackson.databind.node.ArrayNode) switched.get("stageAckRefs")).add(
+                record(content("prepared"), 2).get("stageAckRefs").get(1));
+        assertThrows(ManagedExtensionRecords.InvalidRecordException.class, () -> ManagedConfigInstall.successor(prepared, switched));
+    }
+
     static ObjectNode content(String name) throws IOException {
         for (JsonNode fixture : fixtures().required("valid")) {
             if (name.equals(fixture.path("name").asText())) {

@@ -203,6 +203,34 @@ class ManagedSessionModelConfigTest {
     }
 
     @Test
+    void publicChildKeepsInheritedDenyRulesAndReplaysBeforeChangedParentPolicyOrClose() {
+        String parent = create("public-policy-parent", null);
+        String rules = "{\"deny\":[\"write_file(secret/**)\"],\"allow\":[],\"ask\":[]}";
+        jdbc.update("UPDATE ma_session SET public_child_agents_version=1, tool_profile=?, selected_approval_mode='default',"
+                + " approval_revision=4, permission_rules_json=? WHERE tenant_id=? AND session_id=?",
+                com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.EXTERNAL_CONTENT, rules, tenant, parent);
+        var snapshot = json.createObjectNode().put("version", 1).put("sourcePromptId", "parent-prompt")
+                .put("approvalMode", "default").put("approvalRevision", 4).put("modelId", "model").put("modelRevision", 0).putNull("skillsRef");
+        snapshot.putObject("modelRoute").put("authType", "openai").put("endpointDigest", "a".repeat(64)).put("providerPin", "b".repeat(64));
+        var input = List.<Map<String, Object>>of(Map.of("type", "text", "text", "delegated input"));
+        var lineage = new SessionLineage(parent, parent, "public-policy-run", 1);
+        var admitted = new TransactionTemplate(manager).execute(status -> store.insertPublicChildSessionCommand(tenant,
+                parent, "public-policy-child", "public-policy-digest", "Child", input, "payload", lineage, snapshot));
+        assertThat(jdbc.queryForObject("SELECT permission_rules_json FROM ma_session WHERE tenant_id=? AND session_id=?",
+                String.class, tenant, admitted.sessionId())).isEqualTo(rules);
+        assertThat(jdbc.queryForObject("SELECT permission_rules_json FROM ma_turn WHERE tenant_id=? AND session_id=? AND turn_id=?",
+                String.class, tenant, admitted.sessionId(), admitted.turnId())).isEqualTo(rules);
+        jdbc.update("UPDATE ma_session SET status='CLOSING', approval_revision=5, permission_rules_json=NULL, public_child_agents_version=0"
+                + " WHERE tenant_id=? AND session_id=?", tenant, parent);
+        var replay = new TransactionTemplate(manager).execute(status -> store.insertPublicChildSessionCommand(tenant,
+                parent, "public-policy-child", "public-policy-digest", "Child", input, "payload", lineage, snapshot));
+        assertThat(replay.replayed()).isTrue();
+        assertThat(replay.sessionId()).isEqualTo(admitted.sessionId());
+        assertThat(jdbc.queryForObject("SELECT permission_rules_json FROM ma_session WHERE tenant_id=? AND session_id=?",
+                String.class, tenant, replay.sessionId())).isEqualTo(rules);
+    }
+
+    @Test
     void missingEncryptionKeyIsAConfigurationRefusal() {
         var config = config("key");
         String session = create("key-rotation", config);

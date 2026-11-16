@@ -182,10 +182,12 @@ function createTurn(
     },
     messageFitsInline,
     undefined,
-    {
-      resources: session.resources,
-      assertWritable: async () => undefined,
-    },
+    profile === 'hosted-workspace-external-files/2'
+      ? undefined
+      : {
+          resources: session.resources,
+          assertWritable: async () => undefined,
+        },
     undefined,
     {
       profile,
@@ -1635,6 +1637,78 @@ it('refuses a background agent while the Session owner holds the mount', async (
   expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
     0,
   );
+});
+
+it.each([
+  { tools: ['skill'], model: undefined, error: 'requires unavailable tools' },
+  {
+    tools: ['read_file'],
+    model: 'different',
+    error: 'inherit the parent model',
+  },
+])('refuses a content Agent before mint when it $error', async (required) => {
+  const pin = {
+    extensionId: 'review',
+    packageRevision: 1,
+    packageDigest: 'a'.repeat(64),
+  };
+  const descriptor = {
+    configRevision: 1,
+    bundleRef: await session.resources.publish(
+      'managed-extension-config-bundle',
+      Buffer.from('{}'),
+    ),
+    pin,
+    contributionsRef: await session.resources.publish(
+      'managed-extension-contributions',
+      Buffer.from('{}'),
+    ),
+    agentName: 'review:auditor',
+    toolNames: [],
+  };
+  const turn = createTurn(
+    0,
+    undefined,
+    'prompt',
+    false,
+    false,
+    true,
+    undefined,
+    'hosted-workspace-external-files/2',
+    false,
+    true,
+    () => true,
+    {
+      extensionAgents: [
+        {
+          name: descriptor.agentName,
+          tools: required.tools,
+          model: required.model,
+          descriptor,
+        },
+      ],
+      extensionConfig: {
+        revision: 1,
+        packages: [{ pin, assetRoot: 'extension://review/' }],
+      },
+    },
+  );
+  turn.setChildModelRoute('model', {
+    authType: 'openai',
+    endpointDigest: 'a'.repeat(64),
+    providerPin: 'b'.repeat(64),
+  });
+  const responses = await executeAgent(
+    turn,
+    call({
+      description: 'review',
+      prompt: 'review',
+      subagent_type: descriptor.agentName,
+    }),
+  );
+  expect(JSON.stringify(responses)).toContain(required.error);
+  expect(children.launchedChildRunsOf(sessionKey.sessionId)).toEqual([]);
+  expect(broker.fileHistory).not.toHaveBeenCalled();
 });
 
 it.each([

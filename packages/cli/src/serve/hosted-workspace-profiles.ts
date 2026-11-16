@@ -11,6 +11,8 @@
 export const HOSTED_WORKSPACE_FILE_PROFILE = 'hosted-workspace-files/1';
 export const HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE =
   'hosted-workspace-external-files/1';
+export const HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2 =
+  'hosted-workspace-external-files/2';
 export const HOSTED_WORKSPACE_SHELL_PROFILE = 'hosted-workspace-shell/1';
 export const HOSTED_WORKSPACE_FILE_PROFILE_V2 = 'hosted-workspace-files/2';
 // #15076: `files/3` adds `todo_write` to its `/2` counterpart.
@@ -38,6 +40,7 @@ export const HOSTED_WORKSPACE_READ_PROFILE = 'hosted-workspace-read/1';
 export type HostedWorkspaceToolProfile =
   | typeof HOSTED_WORKSPACE_FILE_PROFILE
   | typeof HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE
+  | typeof HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2
   | typeof HOSTED_WORKSPACE_SHELL_PROFILE
   | typeof HOSTED_WORKSPACE_FILE_PROFILE_V2
   | typeof HOSTED_WORKSPACE_FILE_PROFILE_V3
@@ -54,6 +57,7 @@ export function isHostedWorkspaceProfile(
   return (
     profile === HOSTED_WORKSPACE_FILE_PROFILE ||
     profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE ||
+    profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2 ||
     profile === HOSTED_WORKSPACE_SHELL_PROFILE ||
     profile === HOSTED_WORKSPACE_FILE_PROFILE_V2 ||
     profile === HOSTED_WORKSPACE_FILE_PROFILE_V3 ||
@@ -92,6 +96,22 @@ export function isHostedWorkspacePublicShellProfile(
   );
 }
 
+export function isHostedWorkspaceExternalFilesProfile(
+  profile: unknown,
+): boolean {
+  return (
+    profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE ||
+    profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2
+  );
+}
+
+export function isHostedWorkspacePublicChildProfile(profile: unknown): boolean {
+  return (
+    isHostedWorkspacePublicShellProfile(profile) ||
+    profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2
+  );
+}
+
 /** Public Shell admission sets suppressChildAgents. Private Shell lanes omit it. */
 export function hostedShellLaneAttachesChildAgents(
   shellLane: boolean,
@@ -121,6 +141,7 @@ export function isHostedWorkspaceGlobProfile(profile: unknown): boolean {
   return (
     isHostedWorkspaceSearchProfile(profile) ||
     profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE ||
+    profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2 ||
     profile === HOSTED_WORKSPACE_READ_PROFILE
   );
 }
@@ -148,6 +169,28 @@ export function hasHostedExternalFilesExcludedOptions(
     value?.['childWorkspaces'] === true ||
     value?.['childSnapshots'] === true ||
     (value?.['publicChildAgentsVersion'] ?? 0) !== 0 ||
+    value?.['planMode'] === true ||
+    (typeof value?.['approvalSelection'] === 'object' &&
+      value['approvalSelection'] !== null &&
+      (value['approvalSelection'] as Record<string, unknown>)['planMode'] ===
+        true)
+  );
+}
+
+export function hasHostedExternalContentExcludedOptions(
+  value: Record<string, unknown> | null | undefined,
+): boolean {
+  return (
+    [
+      'agentDefinition',
+      'hookCatalog',
+      'mcpServers',
+      'captureBytes',
+      'memoryStoreId',
+    ].some((key) => value?.[key] !== undefined) ||
+    value?.['childWorkspaces'] === true ||
+    value?.['childSnapshots'] === true ||
+    value?.['foregroundOnly'] === true ||
     value?.['planMode'] === true ||
     (typeof value?.['approvalSelection'] === 'object' &&
       value['approvalSelection'] !== null &&

@@ -11,10 +11,15 @@ import {
 
 import {
   oweHostedTurnCleanup,
+  restoreHostedTurnCleanupOwner,
   reconcileHostedTurnCleanup,
   confirmReplacedHostedTurnOwner,
   type HostedCleanupResult,
 } from './hosted-turn-cleanup.js';
+import {
+  readManagedExtensionAsset,
+  globManagedExtensionAssets,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-assets.js';
 import {
   acquireHostedQuestionRuntime,
   BLOCK_MOUNT_RETRY_GAPS_MS,
@@ -69,6 +74,7 @@ import {
 } from './hosted-workspace-tool-input.js';
 import {
   HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
+  HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2,
   HOSTED_WORKSPACE_FILE_PROFILE,
   HOSTED_WORKSPACE_SHELL_PROFILE,
   HOSTED_WORKSPACE_SHELL_PROFILE_V3,
@@ -2039,6 +2045,7 @@ interface HostedPreparedRequest {
   message: boolean;
   command: boolean;
   skill: boolean;
+  asset?: boolean;
   planExit?: boolean;
   question?: boolean;
   todo?: boolean;
@@ -2058,6 +2065,7 @@ function skipsRuntimeBroker(request: HostedPreparedRequest): boolean {
       request.planExit ||
       request.question ||
       request.skill ||
+      request.asset ||
       request.todo ||
       request.loop ||
       request.cronCreate ||
@@ -2393,6 +2401,32 @@ export class HostedWorkspaceToolTurn {
       throw new Error(
         'External files profile does not support optional lanes.',
       );
+    if (
+      extras?.profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2 &&
+      (publicationOrShell !== undefined ||
+        shell !== undefined ||
+        [
+          extras.mcp,
+          extras.hooks,
+          extras.memory,
+          extras.clientFiles,
+          extras.monitors,
+          extras.backgroundLane,
+          extras.messages,
+          extras.teams,
+          extras.commands,
+          extras.loops,
+          extras.crons,
+        ].some((lane) => lane !== undefined) ||
+        extras.publicPlanMode ||
+        extras.memberPlanMode ||
+        extras.memoryOnly ||
+        extras.childAgents?.childWorkspaces ||
+        extras.childAgents?.childSnapshots)
+    )
+      throw new Error(
+        'Content files profile does not admit process or optional execution lanes.',
+      );
     this.configuredOptions = options;
     this.memory = extras?.memory;
     this.memoryOnly = extras?.memoryOnly === true;
@@ -2485,9 +2519,41 @@ export class HostedWorkspaceToolTurn {
         ? Promise.resolve()
         : this.mcp
           ? this.mcp.ensureReady()
-          : this.broker.warm();
+          : this.profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2
+            ? this.prepareContentMember()
+            : this.broker.warm();
     // Warmup runs alongside inference; a text-only answer need not wait for it.
     void this.warmed.catch(() => undefined);
+  }
+
+  private async prepareContentMember(): Promise<void> {
+    try {
+      const saved = await restoreHostedTurnCleanupOwner(
+        this.session,
+        this.promptId,
+        this.broker,
+      );
+      if (saved === 'confirmed')
+        throw new Error('Original Runtime member was already released.');
+      if (!saved) await this.broker.warm();
+      await oweHostedTurnCleanup(this.session, this.promptId, this.broker);
+      this.cleanupOwed = true;
+      this.uncertain = true;
+      if (saved === 'owed')
+        await this.broker.acquire({
+          runtimeBindingId: this.broker.runtime!.bindingId,
+          generation: this.broker.runtime!.generation,
+        });
+      else
+        await this.broker.acquire({
+          initialBindingId: this.broker.runtime!.bindingId,
+          initialGeneration: this.broker.runtime!.generation,
+        });
+      await oweHostedTurnCleanup(this.session, this.promptId, this.broker);
+      this.uncertain = false;
+    } catch (cause) {
+      throw new HostedToolRecoveryRequiredError(cause);
+    }
   }
 
   /** Whether this Session's profile declares `glob`, which then asks no approval. */
@@ -2608,7 +2674,9 @@ export class HostedWorkspaceToolTurn {
     return (
       this.childAgents !== undefined &&
       this.childLaunchEnabled() &&
-      (this.shell !== undefined || this.backgroundLane !== undefined) &&
+      (this.shell !== undefined ||
+        this.backgroundLane !== undefined ||
+        this.profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2) &&
       this.childDepth === 0 &&
       childAgentAdmissionsEnabled()
     );
@@ -2655,6 +2723,8 @@ export class HostedWorkspaceToolTurn {
 
   async declarations(signal: AbortSignal): Promise<FunctionDeclaration[]> {
     signal.throwIfAborted();
+    if (this.profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2)
+      await waitForTurn(this.warmed, signal);
     await this.memory?.ready();
     if (this.memoryOnly) {
       this.planning =
@@ -2742,9 +2812,11 @@ export class HostedWorkspaceToolTurn {
     const cronCreate = this.declaresCronCreate();
     this.advertised = [
       ...[
-        ...(this.publication || this.shell
-          ? HOSTED_WORKSPACE_SHELL_TOOLS
-          : [...HOSTED_WORKSPACE_FILE_TOOLS, HOSTED_WEB_FETCH_TOOL]),
+        ...(this.profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2
+          ? [...HOSTED_WORKSPACE_FILE_TOOLS, HOSTED_GLOB_TOOL]
+          : this.publication || this.shell
+            ? HOSTED_WORKSPACE_SHELL_TOOLS
+            : [...HOSTED_WORKSPACE_FILE_TOOLS, HOSTED_WEB_FETCH_TOOL]),
         ...(search ? [HOSTED_GLOB_TOOL] : []),
         ...(todoTool ? [HOSTED_TODO_WRITE_TOOL] : []),
         ...(loopTool ? [HOSTED_LOOP_WAKEUP_TOOL] : []),
@@ -3102,10 +3174,11 @@ export class HostedWorkspaceToolTurn {
       this.extensionConfig.packages.some((entry) =>
         isDeepStrictEqual(entry.pin, selected.descriptor.pin),
       ) &&
-      [
-        MANAGED_EXTENSION_LINUX_CAPABILITY_DIGEST,
-        MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST,
-      ].includes(this.broker.capabilityDigest ?? '')
+      (this.profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2 ||
+        [
+          MANAGED_EXTENSION_LINUX_CAPABILITY_DIGEST,
+          MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST,
+        ].includes(this.broker.capabilityDigest ?? ''))
     );
   }
 
@@ -3203,7 +3276,10 @@ export class HostedWorkspaceToolTurn {
                 this.session.authority.sessionHeader.sessionKey,
                 originalId,
               );
-        await original.warm();
+        if (this.profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2) {
+          if (original !== this.broker)
+            throw new Error('Content file history Runtime owner changed.');
+        } else await original.warm();
         if (
           original === this.broker &&
           !this.hooks &&
@@ -3218,7 +3294,12 @@ export class HostedWorkspaceToolTurn {
         // recovery-block handback can target it — this.broker's identity
         // never held that mount.
         this.mountOwner = original;
-        await original.acquire();
+        if (this.profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2)
+          await original.acquire({
+            runtimeBindingId: original.runtime!.bindingId,
+            generation: original.runtime!.generation,
+          });
+        else await original.acquire();
         const state = await original.fileHistory({
           kind: 'raw-file-history',
           action: 'snapshot',
@@ -3359,7 +3440,12 @@ export class HostedWorkspaceToolTurn {
               this.broker.runtime
             )
               this.cleanupOwed = true;
-            await this.broker.acquire();
+            if (this.profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2)
+              await this.broker.acquire({
+                runtimeBindingId: this.broker.runtime!.bindingId,
+                generation: this.broker.runtime!.generation,
+              });
+            else await this.broker.acquire();
           }
           break;
         } catch (cause) {
@@ -3417,7 +3503,12 @@ export class HostedWorkspaceToolTurn {
         } catch (cause) {
           // A saved continuation still needs this original runtime ID.
           if (recovering || !isHostedFileHistoryRefusal(cause)) throw cause;
-          if (!this.hooks && !this.mcp) await this.broker.release();
+          if (
+            !this.hooks &&
+            !this.mcp &&
+            this.profile !== HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2
+          )
+            await this.broker.release();
           this.acquired = false;
           throw new HostedFileHistoryRefusedError(
             cause.reason ?? cause.message,
@@ -4283,11 +4374,28 @@ export class HostedWorkspaceToolTurn {
         plan.runtime !== null &&
         plan.calls.some(
           (item) =>
-            item.call.name !== 'agent' && !isHostedMemoryTool(item.call.name),
+            item.call.name !== 'agent' &&
+            !isHostedMemoryTool(item.call.name) &&
+            !(
+              this.profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2 &&
+              (item.call.name === 'skill' ||
+                saved.inputs[plan.calls.indexOf(item)]?.input[
+                  'managedExtension'
+                ] !== undefined)
+            ),
         );
       if (plan.runtime) {
         if (plan.runtime.provisionerKind) await this.warmed;
         else await waitForTurn(this.warmed, signal);
+        if (
+          this.profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2 &&
+          !isDeepStrictEqual(this.broker.runtime, {
+            bindingId: plan.runtime.bindingId,
+            generation: plan.runtime.generation,
+            workspaceGeneration: plan.runtime.workspaceGeneration,
+          })
+        )
+          throw new Error('Content continuation Runtime owner changed.');
         this.broker.runtime = {
           bindingId: plan.runtime.bindingId,
           generation: plan.runtime.generation,
@@ -4356,7 +4464,9 @@ export class HostedWorkspaceToolTurn {
         if (
           !isDeepStrictEqual(
             definition,
-            item.call.name === 'agent' && this.publicChildren
+            item.call.name === 'agent' &&
+              this.publicChildren &&
+              this.profile !== HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2
               ? HOSTED_AGENT_TOOL
               : declarations.find((tool) => tool.name === item.call.name),
           )
@@ -4402,6 +4512,9 @@ export class HostedWorkspaceToolTurn {
           message: false,
           command: false,
           skill: item.call.name === 'skill' && this.skills !== undefined,
+          asset:
+            this.profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2 &&
+            input.input['managedExtension'] !== undefined,
           planExit: this.publicPlanMode && item.call.name === 'exit_plan_mode',
           question: item.call.name === 'ask_user_question',
           memory:
@@ -4474,6 +4587,8 @@ export class HostedWorkspaceToolTurn {
             singleQuestion ||
             request.memory ||
             (commandStep && request.call.name === 'skill') ||
+            (this.profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2 &&
+              request.skill) ||
             (this.publicChildren &&
               ['agent', 'run_shell_command'].includes(request.call.name)) ||
             [
@@ -5122,6 +5237,34 @@ export class HostedWorkspaceToolTurn {
             validationError =
               'Hosted extension agent is not in the active pinned configuration.';
           } else if (
+            this.profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2 &&
+            this.extensionAgents.some(
+              (agent) =>
+                agent.name === args['subagent_type'] &&
+                agent.model &&
+                agent.model !== 'inherit' &&
+                agent.model !== this.childModelRoute?.modelId,
+            )
+          ) {
+            validationError = denied(
+              'Content child Agents must inherit the parent model.',
+            );
+          } else if (
+            this.profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2 &&
+            this.extensionAgents.some(
+              (agent) =>
+                agent.name === args['subagent_type'] &&
+                agent.tools?.some(
+                  (tool) =>
+                    !declarations.some((item) => item.name === tool) ||
+                    agent.disallowedTools?.includes(tool),
+                ),
+            )
+          ) {
+            validationError = denied(
+              'Content child Agent requires unavailable tools.',
+            );
+          } else if (
             args['isolation'] !== undefined &&
             args['isolation'] !== 'worktree' &&
             args['isolation'] !== 'snapshot'
@@ -5472,6 +5615,19 @@ export class HostedWorkspaceToolTurn {
               ? cause.message
               : 'Extension tool context was refused.';
         }
+        if (
+          this.profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2 &&
+          input['managedExtension'] !== undefined &&
+          call.name === 'read_file' &&
+          ((input['offset'] !== undefined &&
+            (!Number.isSafeInteger(input['offset']) ||
+              Number(input['offset']) < 0)) ||
+            (input['limit'] !== undefined &&
+              (!Number.isSafeInteger(input['limit']) ||
+                Number(input['limit']) < 1)))
+        )
+          validationError ??=
+            'Content asset read requires a valid offset and limit.';
         // The inline Session Store limit keeps rejecting exactly as main
         // does for the ordinary tools. A call that already carries its own
         // refusal never reads its encoding. Workflow launches and messages
@@ -5543,6 +5699,9 @@ export class HostedWorkspaceToolTurn {
           team,
           command,
           skill,
+          asset:
+            this.profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2 &&
+            input['managedExtension'] !== undefined,
           planExit,
           question: call.name === 'ask_user_question',
           todo: call.name === 'todo_write',
@@ -5657,6 +5816,7 @@ export class HostedWorkspaceToolTurn {
       requests.some(
         (request) =>
           !request.skill &&
+          !request.asset &&
           !request.todo &&
           !request.memory &&
           !request.clientFiles &&
@@ -5686,6 +5846,7 @@ export class HostedWorkspaceToolTurn {
           !request.team &&
           request.command !== true &&
           !request.skill &&
+          !request.asset &&
           !request.todo &&
           !request.memory &&
           request.clientFiles !== true &&
@@ -5880,6 +6041,7 @@ export class HostedWorkspaceToolTurn {
     };
     if (
       !restored &&
+      this.profile !== HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2 &&
       getManagedExecutionDiagnostics(this.session.authority) &&
       requests.some(
         (request) =>
@@ -6429,7 +6591,14 @@ export class HostedWorkspaceToolTurn {
         ? enforceFunctionResponseBudget(skillResponses, this.toolOutputBudget)
         : undefined;
       let memoryRecords =
-        restored && requests.some((request) => request.memory)
+        restored &&
+        requests.some(
+          (request) =>
+            request.memory ||
+            request.asset ||
+            (this.profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2 &&
+              request.skill),
+        )
           ? await this.session.sink.project()
           : undefined;
       const journaledMemory =
@@ -6466,7 +6635,12 @@ export class HostedWorkspaceToolTurn {
         }
       executing = true;
       for (const [index, request] of requests.entries()) {
-        if (request.memory) {
+        if (
+          request.memory ||
+          request.asset ||
+          (this.profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2 &&
+            request.skill)
+        ) {
           const committed = journaledMemory.find(
             (part) =>
               part.functionResponse?.id === request.call.callId &&
@@ -6488,6 +6662,30 @@ export class HostedWorkspaceToolTurn {
           responses.push(
             ...(await this.acceptChildAgent(request, model, signal, messageId)),
           );
+          continue;
+        }
+        if (request.asset) {
+          let converted: Part[];
+          try {
+            converted = await this.assetResponse(request);
+          } catch (cause) {
+            if (
+              !(cause instanceof Error) ||
+              (cause.message !==
+                'The selected package does not contain this asset.' &&
+                (cause as NodeJS.ErrnoException).code !==
+                  'ERR_ENCODING_INVALID_ENCODED_DATA')
+            )
+              throw cause;
+            converted = convertToFunctionErrorResponse(
+              request.call.name,
+              request.call.callId,
+              [],
+              cause.message,
+            );
+          }
+          await this.commit('tool_result', converted, model);
+          responses.push(...converted);
           continue;
         }
         if (request.message) {
@@ -8177,9 +8375,19 @@ export class HostedWorkspaceToolTurn {
         : this.extensionAgents.find(
             (agent) => agent.name === request.call.args['subagent_type'],
           );
-    const childModel = extensionAgent?.model
-      ? await this.childModelResolver?.(extensionAgent.model)
-      : this.childModelRoute;
+    if (
+      this.profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2 &&
+      extensionAgent?.model &&
+      extensionAgent.model !== 'inherit' &&
+      extensionAgent.model !== this.childModelRoute?.modelId
+    )
+      throw new Error('Content child Agents must inherit the parent model.');
+    const childModel =
+      this.profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2
+        ? this.childModelRoute
+        : extensionAgent?.model
+          ? await this.childModelResolver?.(extensionAgent.model)
+          : this.childModelRoute;
     if (extensionAgent?.model && !childModel)
       throw new Error('Extension agent model is unavailable.');
     // Client-files tool names are generation-scoped and vanish with the
@@ -10050,6 +10258,13 @@ export class HostedWorkspaceToolTurn {
     if (!this.extensionConfig)
       throw new Error('The command has no pinned extension configuration.');
     try {
+      if (
+        this.profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2 &&
+        /[!@]\{/u.test(command.prompt)
+      )
+        throw new HostedCommandExpansionRefusedError(
+          'Content commands do not support file or Shell preprocessing.',
+        );
       const expanded = await expandHostedExtensionCommand({
         session: this.session,
         broker: this.broker,
@@ -10138,6 +10353,82 @@ export class HostedWorkspaceToolTurn {
         );
       throw new HostedToolRecoveryRequiredError(cause);
     }
+  }
+
+  private async assetResponse(request: HostedPreparedRequest): Promise<Part[]> {
+    const context = request.input['managedExtension'] as {
+      configRevision: number;
+      pin: {
+        extensionId: string;
+        packageRevision: number;
+        packageDigest: string;
+      };
+    };
+    const selected = this.extensionConfig?.packages.find((entry) =>
+      isDeepStrictEqual(entry.pin, context.pin),
+    );
+    if (
+      context.configRevision !== this.extensionConfig?.revision ||
+      !selected?.assetsRef
+    )
+      throw new HostedToolRecoveryRequiredError(
+        'Content package asset binding changed.',
+      );
+    let result: unknown;
+    if (request.call.name === 'read_file') {
+      const read = await readManagedExtensionAsset(
+        this.session.resources,
+        selected.assetsRef,
+        String(request.input['file_path']),
+      );
+      const offset = request.input['offset'] ?? 0;
+      const limit = request.input['limit'];
+      if (
+        !Number.isSafeInteger(offset) ||
+        Number(offset) < 0 ||
+        (limit !== undefined &&
+          (!Number.isSafeInteger(limit) || Number(limit) < 1))
+      )
+        throw new Error(
+          'Content asset read requires a valid offset and limit.',
+        );
+      const lines = read.content.split('\n');
+      result = {
+        path: read.path,
+        content: lines
+          .slice(
+            Number(offset),
+            limit === undefined ? undefined : Number(offset) + Number(limit),
+          )
+          .join('\n'),
+      };
+    } else {
+      const directory = request.input['path'];
+      const pattern =
+        typeof directory === 'string' && directory !== '.'
+          ? `${directory.replace(/\/$/u, '')}/${String(request.input['pattern'])}`
+          : String(request.input['pattern']);
+      result = await globManagedExtensionAssets(
+        this.session.resources,
+        selected.assetsRef,
+        pattern,
+      );
+    }
+    const converted = convertToFunctionResponse(
+      request.call.name,
+      request.call.callId,
+      [{ text: JSON.stringify(result) }],
+    );
+    return enforceFunctionResponseBudget(
+      [
+        {
+          callId: request.call.callId,
+          toolName: request.call.name,
+          responseParts: converted,
+        },
+      ],
+      this.toolOutputBudget,
+    )[0].responseParts;
   }
 
   private async commandPermission(
@@ -10733,6 +11024,8 @@ export class HostedWorkspaceToolTurn {
   }
 
   async finish(): Promise<void> {
+    if (this.profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE_V2)
+      await this.warmed;
     if (this.uncertain)
       throw new HostedToolRecoveryRequiredError('Tool outcome is unknown.');
     if (!this.acquired && !this.retiredOwnerResults && !this.cleanupOwed)

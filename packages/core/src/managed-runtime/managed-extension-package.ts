@@ -74,13 +74,17 @@ export interface ManagedExtensionPackageView {
   readonly pin: ManagedExtensionPin;
   readonly assetRoot: string;
   readonly contributionsRef: ManagedSessionDurableRef;
+  readonly assetsRef?: ManagedSessionDurableRef;
 }
 
 export interface ManagedExtensionEffectiveBundle {
   readonly kind: 'managed-extension-config-bundle';
-  readonly formatVersion: 1;
+  readonly formatVersion: 1 | 2;
   readonly configRevision: number;
-  readonly executionMode: 'linux-cgroup' | 'developer-process-group';
+  readonly executionMode:
+    | 'linux-cgroup'
+    | 'developer-process-group'
+    | 'content-only';
   readonly mcpRevision: number;
   readonly independentMcpSelections: readonly ManagedExtensionMcpSelection[];
   readonly mcpChange?: ManagedExtensionMcpChange;
@@ -172,9 +176,13 @@ export function parseManagedExtensionEffectiveBundle(
   );
   if (
     bundle['kind'] !== 'managed-extension-config-bundle' ||
-    bundle['formatVersion'] !== 1 ||
-    !['linux-cgroup', 'developer-process-group'].includes(
-      String(bundle['executionMode']),
+    !(
+      (bundle['formatVersion'] === 1 &&
+        ['linux-cgroup', 'developer-process-group'].includes(
+          String(bundle['executionMode']),
+        )) ||
+      (bundle['formatVersion'] === 2 &&
+        bundle['executionMode'] === 'content-only')
     ) ||
     !revision(bundle['configRevision'], 0) ||
     !revision(bundle['mcpRevision'], 0) ||
@@ -182,11 +190,38 @@ export function parseManagedExtensionEffectiveBundle(
     bundle['packages'].length > MANAGED_EXTENSION_MAX_PACKAGES
   )
     invalid('effective extension configuration');
+  const contentOnly = bundle['formatVersion'] === 2;
+  if (
+    contentOnly &&
+    (bundle['mcpRevision'] !== 0 ||
+      bundle['mcpChange'] !== undefined ||
+      !Array.isArray(bundle['independentMcpSelections']) ||
+      bundle['independentMcpSelections'].length !== 0 ||
+      !Array.isArray(bundle['baseMcpServers']) ||
+      bundle['baseMcpServers'].length !== 0 ||
+      !Array.isArray(bundle['mcpServers']) ||
+      bundle['mcpServers'].length !== 0 ||
+      bundle['baseHookCatalog'] !== null ||
+      bundle['hookCatalog'] !== null)
+  )
+    invalid('content-only extension configuration');
   const packages = bundle['packages'].map(
     (value): ManagedExtensionPackageView => {
       const entry = object(value, 'package view');
-      keys(entry, ['pin', 'assetRoot', 'contributionsRef'], [], 'package view');
+      keys(
+        entry,
+        [
+          'pin',
+          'assetRoot',
+          'contributionsRef',
+          ...(contentOnly ? ['assetsRef'] : []),
+        ],
+        [],
+        'package view',
+      );
       const pin = parseManagedExtensionPin(entry['pin']);
+      if (contentOnly && pin.settingsRevision !== undefined)
+        invalid('content-only package settings');
       if (entry['assetRoot'] !== `extension://${pin.extensionId}/`)
         invalid('package asset root');
       const contributionsRef = assertManagedSessionDurableRef(
@@ -198,7 +233,24 @@ export function parseManagedExtensionEffectiveBundle(
         contributionsRef.schemaVersion !== 1
       )
         invalid('package contributions');
-      return { pin, assetRoot: entry['assetRoot'] as string, contributionsRef };
+      const assetsRef = contentOnly
+        ? assertManagedSessionDurableRef(
+            entry['assetsRef'] as ManagedSessionJsonValue,
+            'package assets',
+          )
+        : undefined;
+      if (
+        assetsRef &&
+        (assetsRef.kind !== 'managed-extension-assets' ||
+          assetsRef.schemaVersion !== 1)
+      )
+        invalid('package assets');
+      return {
+        pin,
+        assetRoot: entry['assetRoot'] as string,
+        contributionsRef,
+        ...(assetsRef ? { assetsRef } : {}),
+      };
     },
   );
   if (
@@ -208,7 +260,7 @@ export function parseManagedExtensionEffectiveBundle(
     invalid('duplicate package view');
   return {
     kind: 'managed-extension-config-bundle',
-    formatVersion: 1,
+    formatVersion: bundle['formatVersion'] as 1 | 2,
     configRevision: bundle['configRevision'] as number,
     executionMode: bundle[
       'executionMode'

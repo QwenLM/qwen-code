@@ -313,6 +313,33 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void expectedInitialBindingCannotProvisionAReplacementAfterWarmRetires() {
+        try (Fixture fixture = new Fixture(SESSION_SCOPE)) {
+            var binding = join(fixture.service.warm("harness-a"));
+            fixture.bindingRepository.compareAndSet(binding, binding.withDrainRequested(true, Instant.now()));
+            int provisions = fixture.provisioner.calls.get();
+            assertEquals("runtime_binding_changed", failure(fixture.service.acquire("harness-a", "runtime-a", "bootstrap",
+                    null, null, binding.getBindingId(), binding.getGeneration())).getCode());
+            assertEquals(provisions, fixture.provisioner.calls.get());
+            assertEquals(0, fixture.transport.acquireCalls.get());
+        }
+    }
+
+    @Test
+    void recoveryFinishesOnlyTheOriginalAcquiringMemberAfterAnAcquireResponseWasLost() {
+        try (Fixture fixture = new Fixture(SESSION_SCOPE)) {
+            var binding = join(fixture.service.warm("harness-a"));
+            fixture.sessionRepository.findOrCreate(new RuntimeSessionRecord(new RuntimeSession("harness-a", "runtime-a", "bootstrap", SESSION_SCOPE),
+                    binding.getBindingId(), binding.getGeneration(), RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now()));
+            int provisions = fixture.provisioner.calls.get();
+            var member = join(fixture.service.acquireRecovery("harness-a", "runtime-a", binding.getBindingId(), binding.getGeneration()));
+            assertEquals(RuntimeSessionRecord.State.READY, member.getState());
+            assertEquals(1, fixture.transport.acquireCalls.get());
+            assertEquals(provisions, fixture.provisioner.calls.get());
+        }
+    }
+
+    @Test
     void hookRecoveryDoesNotWaitForAnOrdinaryAcquireOfTheSameRuntimeId() throws Exception {
         try (Fixture fixture = new Fixture(SESSION_SCOPE)) {
             RuntimeSessionRecord original = join(fixture.service.acquire("harness-a", "runtime-a", "bootstrap"));

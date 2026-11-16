@@ -149,6 +149,39 @@ export async function oweHostedTurnCleanup(
   await commitCleanup(session, cleanupId, ref, 'owed');
 }
 
+export async function restoreHostedTurnCleanupOwner(
+  session: ManagedSession,
+  promptId: string,
+  broker: HostedWorkspaceBroker,
+): Promise<'owed' | 'confirmed' | undefined> {
+  const identity = cleanupIdentity(promptId, broker.runtimeSessionId);
+  const event = session.authority
+    .eventsInSequenceRange(1, session.authority.committedSequence)
+    .findLast(
+      (item) =>
+        item.kind === 'hosted.cleanup' &&
+        [identity.originalId, identity.cleanupId].includes(
+          item.payload['cleanupId'] as string,
+        ),
+    );
+  if (!event) return undefined;
+  const descriptor = await readDescriptor(
+    session,
+    event.payload['descriptorRef'],
+  );
+  if (
+    descriptor.promptId !== promptId ||
+    descriptor.runtimeSessionId !== broker.runtimeSessionId
+  )
+    throw new Error('Cleanup belongs to another Runtime owner.');
+  broker.runtime = {
+    bindingId: descriptor.bindingId,
+    generation: descriptor.generation,
+    workspaceGeneration: descriptor.workspaceGeneration,
+  };
+  return event.payload['state'] as 'owed' | 'confirmed';
+}
+
 export async function confirmReplacedHostedTurnOwner(
   session: ManagedSession,
   promptId: string,

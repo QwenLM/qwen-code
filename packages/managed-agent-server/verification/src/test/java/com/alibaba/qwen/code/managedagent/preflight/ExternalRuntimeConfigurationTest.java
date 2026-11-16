@@ -227,6 +227,30 @@ class ExternalRuntimeConfigurationTest {
     }
 
     @Test
+    void contentPackagesRequireTheExplicitSharedExternalProfileAndNeverEnableProcessExtensions() {
+        var properties = properties("external-workspace");
+        properties.getHarness().setEnabled(true);
+        properties.getSessionStore().setEnabled(true);
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        properties.getExtensions().setEnabled(true);
+        properties.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
+        var factory = new com.alibaba.qwen.code.runtimebroker.provisioning.external.ExternalRuntimeProviderFactory();
+        factory.validate(properties);
+        assertFalse(properties.isExternalWorkspaceContentConfigured());
+        properties.getHarness().setWorkspaceContentAgentsEnabled(true);
+        factory.validate(properties);
+        assertTrue(properties.isExternalWorkspaceContentConfigured());
+        properties.getHarness().setWorkspaceContentAgentsEnabled(false);
+        factory.validate(properties);
+        assertFalse(properties.isExternalWorkspaceContentConfigured());
+        properties.getManagedExtensions().setEnabled(true);
+        assertThrows(IllegalStateException.class, () -> factory.validate(properties));
+        properties.getManagedExtensions().setEnabled(false);
+        properties.getRuntimeBroker().setBoundSessionIsolationClass("session");
+        assertThrows(IllegalStateException.class, () -> factory.validate(properties));
+    }
+
+    @Test
     void anUnknownExternalKindStillFailsClosed() {
         var broker = brokerCheck(properties("external-workspace-typo"));
         assertEquals(ManagedAgentPreflight.Status.FAIL, broker.status());

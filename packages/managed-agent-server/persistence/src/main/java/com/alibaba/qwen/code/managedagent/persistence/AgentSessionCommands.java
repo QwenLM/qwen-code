@@ -121,7 +121,7 @@ final class AgentSessionCommands {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
         }
         if (session.workspace() != null) {
-            if (workspaces.isExternal(session.workspace()) || WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile())) {
+            if (workspaces.isExternal(session.workspace()) || WorkspaceToolProfiles.isExternalFiles(session.toolProfile())) {
                 sessionPolicies.requireExternalTurnAllowed(tenantId, actorId, sessionId, session, input);
             }
             if (sessionPolicies.isSshWorkspace(session.workspace())) {
@@ -778,9 +778,11 @@ final class AgentSessionCommands {
     private static final String TURN_SESSION_PROJECTION_GUARD = " CASE WHEN ((agent_id=? AND agent_definition_digest IS NULL)"
             + " OR (agent_id<>? AND agent_definition_digest IS NOT NULL))"
             + " AND workspace_id IS NOT NULL AND tool_profile IN ('hosted-workspace-files/1',"
-            + " 'hosted-workspace-shell/1','hosted-workspace-shell/3','hosted-workspace-shell/4','hosted-workspace-files/3','hosted-workspace-files/4','hosted-workspace-external-files/1')"
+            + " 'hosted-workspace-shell/1','hosted-workspace-shell/3','hosted-workspace-shell/4','hosted-workspace-files/3','hosted-workspace-files/4','hosted-workspace-external-files/1','hosted-workspace-external-files/2')"
             + " AND (tool_profile <> 'hosted-workspace-external-files/1' OR"
-            + " (agent_id = X'7177656e2d636f6465' AND agent_definition_digest IS NULL AND parent_session_id IS NULL))";
+            + " (agent_id = X'7177656e2d636f6465' AND agent_definition_digest IS NULL AND parent_session_id IS NULL))"
+            + " AND (tool_profile <> 'hosted-workspace-external-files/2' OR"
+            + " (agent_id = X'7177656e2d636f6465' AND agent_definition_digest IS NULL AND public_child_agents_version=1))";
 
     void insertTurn(String tenantId, String sessionId,
             String turnId, String promptId, List<Map<String, Object>> input,
@@ -795,7 +797,7 @@ final class AgentSessionCommands {
                         + TURN_SESSION_PROJECTION_GUARD
                         + " THEN approval_revision ELSE NULL END,"
                         + TURN_SESSION_PROJECTION_GUARD
-                        + " THEN CASE WHEN tool_profile = 'hosted-workspace-external-files/1' THEN FALSE ELSE is_plan_enabled END ELSE NULL END,"
+                        + " THEN CASE WHEN tool_profile IN ('hosted-workspace-external-files/1','hosted-workspace-external-files/2') THEN FALSE ELSE is_plan_enabled END ELSE NULL END,"
                         + TURN_SESSION_PROJECTION_GUARD
                         + " THEN permission_rules_json ELSE NULL END"
                         + " FROM ma_session WHERE tenant_id = ? AND session_id = ?",

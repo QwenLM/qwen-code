@@ -276,6 +276,29 @@ it('keeps accepting a public-child continuation on its own shell topology', asyn
   });
 });
 
+it.each(['read_file', 'skill', 'run_shell_command', 'web_fetch'])(
+  'checks a content child %s approval against its saved external v2 profile',
+  async (tool) => {
+    const fixture = nativeContinuationFixture([tool], {
+      toolProfile: 'hosted-workspace-external-files/2',
+      publicChildAgentsVersion: 1,
+    });
+    fixture.plan['publicChildModel'] = {
+      modelId: 'model-pin',
+      route: {
+        authType: 'openai',
+        endpointDigest: 'a'.repeat(64),
+        providerPin: 'b'.repeat(64),
+      },
+    };
+    if (['read_file', 'skill'].includes(tool))
+      await expect(fixture.read()).resolves.toMatchObject({
+        plan: { publicChildModel: { modelId: 'model-pin' } },
+      });
+    else await expect(fixture.read()).rejects.toThrow('Invalid Hosted native');
+  },
+);
+
 it.each(['ssh-process', 'external-workspace', 'static', '', null, true])(
   'rejects an unsupported question provider pin (%s)',
   async (provider) => {

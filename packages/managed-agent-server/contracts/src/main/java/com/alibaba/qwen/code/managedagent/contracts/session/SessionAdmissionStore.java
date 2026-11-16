@@ -214,6 +214,11 @@ public interface SessionAdmissionStore {
         throw new UnsupportedOperationException("Child Session creation is unavailable");
     }
 
+    public default Optional<Admission> findChildSessionReplay(String tenantId, String parentSessionId,
+            String idempotencyKey, String requestDigest) {
+        return Optional.empty();
+    }
+
     /** A child Session's persisted lineage, or null for a root Session. */
     public default StoreModels.SessionLineage findChildLineage(String tenantId,
             String sessionId) {

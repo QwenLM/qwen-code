@@ -63,6 +63,10 @@ public interface ManagedWorkspaceRegistry {
     /** Whether any registered EXTERNAL storage can host an external Workspace. */
     public boolean externalFilesAvailable();
 
+    public default boolean externalContentEnabled() { return false; }
+
+    public default boolean externalContentAvailable() { return false; }
+
     public boolean externalFilesAllowed(ContextBinding binding);
 
     public record WorkspaceSummary(String workspaceId, String displayName,

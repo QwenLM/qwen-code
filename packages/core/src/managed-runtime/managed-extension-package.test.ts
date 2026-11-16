@@ -19,6 +19,78 @@ const pin = {
   packageDigest: 'a'.repeat(64),
 };
 
+describe('Content-only extension bundles', () => {
+  const bundle = {
+    kind: 'managed-extension-config-bundle',
+    formatVersion: 2,
+    configRevision: 1,
+    executionMode: 'content-only',
+    mcpRevision: 0,
+    independentMcpSelections: [],
+    baseMcpServers: [],
+    baseHookCatalog: null,
+    mcpServers: [],
+    hookCatalog: null,
+    packages: [
+      {
+        pin,
+        assetRoot: 'extension://reviewer/',
+        contributionsRef: {
+          resourceId: 'contributions',
+          kind: 'managed-extension-contributions',
+          schemaVersion: 1,
+          byteLength: 2,
+          digest: 'a'.repeat(64),
+        },
+        assetsRef: {
+          resourceId: 'assets',
+          kind: 'managed-extension-assets',
+          schemaVersion: 1,
+          byteLength: 2,
+          digest: 'b'.repeat(64),
+        },
+      },
+    ],
+  };
+  it('pins asset resources and refuses to interpret content as a process configuration', () => {
+    expect(
+      parseManagedExtensionEffectiveBundle(bundle).packages[0]?.assetsRef,
+    ).toEqual(bundle.packages[0]!.assetsRef);
+    expect(() =>
+      parseManagedExtensionEffectiveBundle({ ...bundle, formatVersion: 1 }),
+    ).toThrow();
+    expect(() =>
+      parseManagedExtensionEffectiveBundle({
+        ...bundle,
+        executionMode: 'linux-cgroup',
+      }),
+    ).toThrow();
+    expect(() =>
+      parseManagedExtensionEffectiveBundle({ ...bundle, mcpRevision: 1 }),
+    ).toThrow();
+    expect(() =>
+      parseManagedExtensionEffectiveBundle({
+        ...bundle,
+        packages: [
+          { ...bundle.packages[0], pin: { ...pin, settingsRevision: 1 } },
+        ],
+      }),
+    ).toThrow();
+    expect(() =>
+      parseManagedExtensionEffectiveBundle({
+        ...bundle,
+        packages: [
+          {
+            pin,
+            assetRoot: 'extension://reviewer/',
+            contributionsRef: bundle.packages[0]!.contributionsRef,
+          },
+        ],
+      }),
+    ).toThrow();
+  });
+});
+
 describe('Managed extension pins', () => {
   it('copies and freezes the complete package and settings identity', () => {
     const input = { ...pin, settingsRevision: 3 };

@@ -311,8 +311,7 @@ public class ChildResultRelay {
             settleStopped(row, null, false, true, false, now);
             return true;
         }
-        ChildResultRelayStore.TurnLine turn = relayStore.latestTurn(
-                row.tenantId(), child);
+        ChildResultRelayStore.TurnLine turn = originalTurn(row, child);
         if (turn == null) {
             throw new RelayRetry("child Session has no Turn yet");
         }
@@ -863,9 +862,7 @@ public class ChildResultRelay {
         // The physical Runtime binding exists from the construction of the
         // child's Hosted tool turn — a child that answers end-to-end in
         // plain text holds one without ever acquiring a tool Session.
-        RuntimeBindingRecord binding = broker == null ? null
-                : broker.findLatestBindingByHarnessSession(row.tenantId(),
-                        row.childSessionId());
+        RuntimeBindingRecord binding = originalBinding(row, row.childSessionId(), false);
         if (binding == null) {
             // A binding that never appears is not always a wait: the child's
             // Session load can fail before it acquires a Runtime at all (a
@@ -881,8 +878,7 @@ public class ChildResultRelay {
             // `creation_failed` with the child's own committed evidence.
             // A live Turn (enqueued, or dispatched) is still a genuine wait:
             // only preAdmissionTerminal() may decide anything here.
-            ChildResultRelayStore.TurnLine childTurn = relayStore.latestTurn(
-                    row.tenantId(), row.childSessionId());
+            ChildResultRelayStore.TurnLine childTurn = originalTurn(row, row.childSessionId());
             if (childTurn != null && childTurn.preAdmissionTerminal()) {
                 settleThenClassifyGaveUp(row, new RelayRetry(
                         "child Turn " + childTurn.status()
@@ -919,8 +915,7 @@ public class ChildResultRelay {
                     "creation answer lost", now + LEASE_MS, now);
             return;
         }
-        ChildResultRelayStore.TurnLine turn = relayStore.latestTurn(
-                row.tenantId(), row.childSessionId());
+        ChildResultRelayStore.TurnLine turn = originalTurn(row, row.childSessionId());
         if (turn == null) {
             throw new RelayRetry("child Session has no Turn yet");
         }
@@ -1532,7 +1527,7 @@ public class ChildResultRelay {
             // hold a merge would owe leaves the row `creating`, so the
             // next scan re-enters this chain and never settles.
             ChildResultRelayStore.TurnLine last = child == null ? null
-                    : relayStore.latestTurn(row.tenantId(), child);
+                    : originalTurn(row, child);
             if (!childWorkspaceFinished(row, row.childSessionId() != null
                     && last != null && "COMPLETED".equals(last.status()))) {
                 awaitMerge(row, now);
@@ -1604,7 +1599,7 @@ public class ChildResultRelay {
         }
         if ("intent".equals(execution)) {
             ChildResultRelayStore.TurnLine childTurn = child == null ? null
-                    : relayStore.latestTurn(row.tenantId(), child);
+                    : originalTurn(row, child);
             if (childTurn != null && !childTurn.dispatched()
                     && !childTurn.preAdmissionTerminal()) {
                 // The Turn is enqueued, not failed: a live Turn with an
@@ -1617,8 +1612,7 @@ public class ChildResultRelay {
                         + " admission never landed yet");
             }
             RuntimeBindingRecord binding = child == null ? null
-                    : broker.findLatestBindingByHarnessSessionAnyState(
-                            row.tenantId(), child);
+                    : originalBinding(row, child, true);
             if ((childTurn != null && childTurn.dispatched())
                     || binding != null) {
                 // Dispatch evidence of one honest kind or the other: the
@@ -1659,6 +1653,27 @@ public class ChildResultRelay {
         }
         // running_attached or past it: the record confirms alone.
         return true;
+    }
+
+    private ChildResultRelayStore.TurnLine originalTurn(RelayRow row, String child) {
+        var bootstrap = relayStore.bootstrapAdmission(row, child);
+        return bootstrap == null ? relayStore.latestTurn(row.tenantId(), child) : bootstrap.turn();
+    }
+
+    private RuntimeBindingRecord originalBinding(RelayRow row, String child, boolean historical) {
+        if (broker == null) {
+            return null;
+        }
+        var bootstrap = relayStore.bootstrapAdmission(row, child);
+        if (bootstrap == null) {
+            return historical ? broker.findLatestBindingByHarnessSessionAnyState(row.tenantId(), child)
+                    : broker.findLatestBindingByHarnessSession(row.tenantId(), child);
+        }
+        if (bootstrap.turn().preAdmissionTerminal()) {
+            return null;
+        }
+        return broker.findBindingByRuntimeSession(row.tenantId(), child, bootstrap.promptId(),
+                !historical && !bootstrap.turn().dispatched());
     }
 
     private void attachReplay(RelayRow row, String child) {

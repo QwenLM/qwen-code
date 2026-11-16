@@ -118,10 +118,11 @@ public class ManagedAgentProperties
     }
 
     public boolean admitsPublicChildAgents() {
-        return harness.isWorkspaceChildAgentsEnabled() && harness.isWorkspaceShellEnabled()
+        return harness.isWorkspaceChildAgentsEnabled() && (isExternalWorkspaceContentConfigured()
+                || harness.isWorkspaceShellEnabled()
                 && runtimeBroker.isDurableLocalProcess()
                 && com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(runtimeBroker.getProvisioner())
-                && "session".equals(runtimeBroker.getBoundSessionIsolationClass());
+                && "session".equals(runtimeBroker.getBoundSessionIsolationClass()));
     }
 
     public void setModelCatalog(List<ModelOption> modelCatalog) {
@@ -691,6 +692,7 @@ public class ManagedAgentProperties
         private boolean workspaceFilesEnabled;
         private boolean workspaceShellEnabled;
         private boolean workspaceChildAgentsEnabled = true;
+        private boolean workspaceContentAgentsEnabled;
         private String baseUrl = "http://127.0.0.1:4170";
         private String token = "";
         private String capabilityDigest = "";

@@ -160,6 +160,11 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         return bindingRegistry.findLatestBindingByHarnessSession(tenantId, harnessSessionId, false);
     }
 
+    @Override
+    public RuntimeBindingRecord findBindingByRuntimeSession(String tenantId, String harnessSessionId, String runtimeSessionId, boolean readyOnly) {
+        return bindingRegistry.findBindingByRuntimeSession(tenantId, harnessSessionId, runtimeSessionId, readyOnly);
+    }
+
     public RuntimeBrokerService(HarnessSessionResolver sessionResolver,
             RuntimeProvisioner provisioner, RuntimeTransport transport,
             RuntimeBindingRepository bindingRepository,
@@ -571,7 +576,15 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
      */
     public CompletionStage<RuntimeSessionRecord> acquire(String harnessSessionId, String runtimeSessionId,
             String turnKind, RuntimeLifecycleAuthority authority, String mountClaimId) {
+        return acquire(harnessSessionId, runtimeSessionId, turnKind, authority, mountClaimId, null, null);
+    }
+
+    public CompletionStage<RuntimeSessionRecord> acquire(String harnessSessionId, String runtimeSessionId,
+            String turnKind, RuntimeLifecycleAuthority authority, String mountClaimId, String expectedBindingId, Long expectedGeneration) {
         requireOpen(closed);
+        if ((expectedBindingId == null) != (expectedGeneration == null) || expectedGeneration != null && expectedGeneration <= 0) {
+            throw new IllegalArgumentException("Expected Runtime binding and generation must be supplied together");
+        }
         String harnessId = BrokerValues.requirePathSafe(
                 BrokerValues.requireId(harnessSessionId, "harnessSessionId"),
                 "harnessSessionId");
@@ -586,6 +599,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                 try {
                     bindingRepository.requireHarnessAdmission(context.binding().getRequest(),
                             context.session().getScope(), harnessId, authority);
+                    requireExpectedBinding(context.binding(), expectedBindingId, expectedGeneration);
                     requireSameSession(context.session(), new RuntimeSession(harnessId,
                             runtimeId, turnKind, context.session().getScope()));
                     record = requireAcquireSessionRecord(context);
@@ -602,7 +616,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         return resolveScope(harnessId, true, authority).thenCompose(scope -> {
             RuntimeSession session = new RuntimeSession(harnessId,
                     runtimeId, turnKind, scope);
-            return acquireSession(session, mountClaimId);
+            return acquireSession(session, mountClaimId, expectedBindingId, expectedGeneration);
         });
     }
 
@@ -632,7 +646,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         RuntimeSessionRecord saved = sessionRepository.findById(original.getRequest().getScope(), runtimeSessionId);
         if (saved == null || !harnessSessionId.equals(saved.getSession().getHarnessSessionId())
                 || !bindingId.equals(saved.getBindingId()) || saved.getRuntimeGeneration() != generation
-                || saved.getState() != RuntimeSessionRecord.State.READY) {
+                || saved.getState() != RuntimeSessionRecord.State.READY && saved.getState() != RuntimeSessionRecord.State.ACQUIRING) {
             return failed(conflict("workspace_close_identity_unverified", "Original Hook Session is unavailable"));
         }
         CompletionStage<RuntimeBindingRecord> recovered = bindingRegistry.matchingLiveBinding(original) == null
@@ -642,7 +656,9 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                 throw conflict("workspace_close_identity_unverified", "Original Hook Runtime cannot be recovered");
             }
             BindingContext live = bindingRegistry.requireLiveBinding(record);
-            var context = CompletableFuture.completedFuture(new SessionContext(saved.getSession(), record, live.lease()));
+            RuntimeSession recoverySession = new RuntimeSession(harnessSessionId, runtimeSessionId,
+                    saved.getSession().getTurnKind(), saved.getSession().getScope().withLifecycleAuthority(authority));
+            var context = CompletableFuture.completedFuture(new SessionContext(recoverySession, record, live.lease()));
             var existing = bindingRegistry.registerSession(runtimeSessionId, context);
             SessionContext selected = context.join();
             if (existing != null) {
@@ -656,7 +672,21 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                 }
             }
             selected.mountClaim(mountClaimId);
-            return reclaimMount(selected, saved);
+            SessionContext recoveryContext = new SessionContext(recoverySession, record, live.lease());
+            if (saved.getState() == RuntimeSessionRecord.State.ACQUIRING) {
+                SessionContext acquiring = recoveryContext;
+                return safeStage(() -> transport.acquire(acquiring.lease(), acquiring.session())).thenCompose(ignored -> {
+                    var ready = sessionRepository.compareAndSet(saved, saved.withState(RuntimeSessionRecord.State.READY, clock.instant()));
+                    if (ready == null) {
+                        ready = sessionRepository.findById(saved.getSession().getScope(), runtimeSessionId);
+                        if (ready == null || !ready.sameIdentity(saved) || ready.getState() != RuntimeSessionRecord.State.READY) {
+                            throw conflict("runtime_session_not_acquirable", "Original Runtime member acquisition was fenced");
+                        }
+                    }
+                    return reclaimMount(acquiring, ready);
+                });
+            }
+            return reclaimMount(recoveryContext, saved);
         });
     }
 
@@ -1752,6 +1782,11 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
 
     private CompletionStage<RuntimeSessionRecord> acquireSession(
             RuntimeSession session, String mountClaimId) {
+        return acquireSession(session, mountClaimId, null, null);
+    }
+
+    private CompletionStage<RuntimeSessionRecord> acquireSession(
+            RuntimeSession session, String mountClaimId, String expectedBindingId, Long expectedGeneration) {
         String runtimeSessionId = session.getRuntimeSessionId();
         CompletableFuture<SessionContext> created =
                 new CompletableFuture<>();
@@ -1760,7 +1795,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         CompletableFuture<SessionContext> selected = existing == null
                 ? created : existing;
         if (existing == null) {
-            safeStage(() -> acquireNewSession(session)).whenComplete(
+            safeStage(() -> acquireNewSession(session, expectedBindingId, expectedGeneration)).whenComplete(
                     (context, error) -> {
                         if (error == null) {
                             created.complete(context);
@@ -1777,6 +1812,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                 bindingRepository.requireHarnessAdmission(context.binding().getRequest(), session.getScope(),
                         session.getHarnessSessionId(), session.getScope().getLifecycleAuthority());
                 requireSameSession(context.session(), session);
+                requireExpectedBinding(context.binding(), expectedBindingId, expectedGeneration);
                 record = requireAcquireSessionRecord(context);
                 context.mountClaim(mountClaimId);
             } finally {
@@ -1787,10 +1823,25 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
     }
 
     private CompletionStage<SessionContext> acquireNewSession(
-            RuntimeSession session) {
+            RuntimeSession session, String expectedBindingId, Long expectedGeneration) {
         RuntimeProvisionRequest request = provisionRequest(
                 session.getScope(), session.getHarnessSessionId());
-        return bindingProvisioning.ensureBinding(request).thenCompose(binding -> {
+        CompletionStage<BindingContext> selected;
+        if (expectedBindingId == null) {
+            selected = bindingProvisioning.ensureBinding(request);
+        } else {
+            RuntimeBindingRecord original = bindingRepository.findById(expectedBindingId);
+            requireExpectedBinding(original, expectedBindingId, expectedGeneration);
+            if (!request.equals(original.getRequest())) {
+                throw conflict("runtime_binding_changed", "The selected Runtime binding no longer matches the Session");
+            }
+            bindingRepository.requireHarnessAdmission(request, session.getScope(), session.getHarnessSessionId(), session.getScope().getLifecycleAuthority());
+            selected = bindingRegistry.matchingLiveBinding(original) == null
+                    ? bindingProvisioning.recoverBinding(expectedBindingId, expectedGeneration, true).thenApply(bindingRegistry::requireLiveBinding)
+                    : CompletableFuture.completedFuture(bindingRegistry.requireLiveBinding(original));
+        }
+        return selected.thenCompose(binding -> {
+            requireExpectedBinding(binding.record(), expectedBindingId, expectedGeneration);
             RuntimeSessionRecord candidate = new RuntimeSessionRecord(
                     session, binding.record().getBindingId(),
                     binding.record().getGeneration(),
@@ -1851,6 +1902,14 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                         return context;
                     });
         });
+    }
+
+    private static void requireExpectedBinding(RuntimeBindingRecord binding, String expectedId, Long expectedGeneration) {
+        if (expectedId != null && (binding == null || !expectedId.equals(binding.getBindingId())
+                || binding.getGeneration() != expectedGeneration || binding.getState() != RuntimeBindingRecord.State.READY
+                || binding.isDrainRequested())) {
+            throw conflict("runtime_binding_changed", "The selected Runtime binding is no longer ready");
+        }
     }
 
     /** Trusted maintenance of the saved generation; never resolves current authorization or provisions a replacement. */

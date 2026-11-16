@@ -5,14 +5,22 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { openManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
+import {
+  openManagedSession,
+  type ManagedSession,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
 import type { ManagedExtensionRuntimeControl } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-package.js';
-import { HostedExtensionSession } from './hosted-extension-session.js';
+import {
+  HostedExtensionSession,
+  validateContentPackage,
+} from './hosted-extension-session.js';
+import { prepareManagedExtensionPackage } from '@qwen-code/qwen-code-core/extension/managed-package.js';
+import { readManagedExtensionAsset } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-assets.js';
 import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
 import { MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST } from './managed-extension-profile.js';
 
@@ -22,23 +30,29 @@ afterEach(async () => {
   for (const cleanup of cleanups.splice(0)) await cleanup();
 });
 
-async function fixture() {
+async function fixture(
+  contentPackage?: ConstructorParameters<typeof HostedExtensionSession>[4],
+  resourceStore?: ManagedSession['resources'],
+) {
   const root = await mkdtemp(path.join(tmpdir(), 'managed-extension-apply-'));
   const sessionKey = {
     tenantId: 'tenant',
     workspaceId: 'workspace',
     sessionId: randomUUID(),
   };
-  const resources = LocalManagedSessionResourceStore.create({
-    runtimeBaseDir: root,
-    sessionKey,
-  });
+  const resources =
+    resourceStore ??
+    LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: root,
+      sessionKey,
+    });
   const session = await openManagedSession({
     runtimeBaseDir: root,
     cwd: root,
     transcriptPath: path.join(root, 'transcript.jsonl'),
     sessionId: sessionKey.sessionId,
     sessionKey,
+    resourceStore: resources,
     version: 'test',
     workerId: 'test',
     activationLeaseDurationMs: 60_000,
@@ -158,6 +172,7 @@ async function fixture() {
     { baseUrl: 'http://127.0.0.1:1', token: 'fixture-no-traffic' },
     { mcpRevision: 0, mcpServers: [], hookCatalog: null },
     callbacks,
+    contentPackage,
   );
   await manager.open();
   const command = (expectedRevision = 0, extensionId = 'sample') => ({
@@ -185,6 +200,164 @@ async function fixture() {
 }
 
 describe('Hosted extension Session configuration', () => {
+  it('activates immutable content and reloads without contacting a Runtime', async () => {
+    const source = await mkdtemp(
+      path.join(tmpdir(), 'managed-content-source-'),
+    );
+    cleanups.push(() => rm(source, { recursive: true, force: true }));
+    await mkdir(path.join(source, 'skills', 'inspect'), { recursive: true });
+    await writeFile(
+      path.join(source, 'qwen-extension.json'),
+      JSON.stringify({ name: 'content', version: '1.0.0' }),
+    );
+    await writeFile(
+      path.join(source, 'skills', 'inspect', 'SKILL.md'),
+      '---\nname: inspect\ndescription: Read references\n---\nRead references.txt.',
+    );
+    await writeFile(
+      path.join(source, 'references.txt'),
+      'original immutable reference',
+    );
+    await mkdir(path.join(source, 'commands'));
+    await writeFile(
+      path.join(source, 'commands', 'review.md'),
+      'Review {{args}} using ${extensionPath}/references.txt.',
+    );
+    const prepared = await prepareManagedExtensionPackage(
+      { type: 'local', source },
+      {
+        target: { platform: 'linux', arch: 'any' },
+        destination: path.join(source, 'prepared'),
+      },
+    );
+    const contentPackage = vi.fn(async () => ({
+      manifest: prepared.manifest,
+      archive: await readFile(prepared.archivePath),
+    }));
+    const context = await fixture(contentPackage);
+    const command = context.command();
+    command.extensions[0].packageDigest = prepared.packageDigest;
+    await context.manager.bootstrap(command);
+    const bundle = (await context.manager.active())!;
+    const inheritedBundleRef = context.manager.activeBundleRef!;
+    expect(bundle).toMatchObject({
+      formatVersion: 2,
+      executionMode: 'content-only',
+      configRevision: 1,
+    });
+    expect(
+      await readManagedExtensionAsset(
+        context.session.resources,
+        bundle.packages[0].assetsRef!,
+        'references.txt',
+      ),
+    ).toEqual({
+      path: 'references.txt',
+      content: 'original immutable reference',
+    });
+    expect(context.warm).not.toHaveBeenCalled();
+    expect(context.control).not.toHaveBeenCalled();
+    const unavailable = vi.fn(async () => {
+      throw new Error('Live package catalog is unavailable');
+    });
+    const child = await fixture(unavailable, context.session.resources);
+    const inherited = new HostedExtensionSession(
+      child.session,
+      { baseUrl: 'http://127.0.0.1:1', token: 'fixture-no-traffic' },
+      { mcpRevision: 0, mcpServers: [], hookCatalog: null },
+      child.callbacks,
+      unavailable,
+      inheritedBundleRef,
+    );
+    await inherited.open();
+    await inherited.bootstrap({
+      ...child.command(),
+      extensions: command.extensions,
+    });
+    expect((await inherited.active())!.packages).toEqual(bundle.packages);
+    expect(unavailable).not.toHaveBeenCalled();
+    await expect(
+      inherited.submit({ ...child.command(1), extensions: [] }),
+    ).rejects.toThrow('Content child package source changed.');
+    expect(unavailable).not.toHaveBeenCalled();
+    expect(child.warm).not.toHaveBeenCalled();
+    expect(child.control).not.toHaveBeenCalled();
+    await context.manager.bootstrap(command);
+    expect(contentPackage).toHaveBeenCalledOnce();
+    const reloaded = new HostedExtensionSession(
+      context.session,
+      { baseUrl: 'http://127.0.0.1:1', token: 'fixture-no-traffic' },
+      { mcpRevision: 0, mcpServers: [], hookCatalog: null },
+      context.callbacks,
+      contentPackage,
+    );
+    await reloaded.open();
+    expect(await reloaded.active()).toEqual(bundle);
+    expect(contentPackage).toHaveBeenCalledOnce();
+    const update = { ...context.command(1), extensions: [] };
+    context.callbacks.enable.mockRejectedValueOnce(
+      new Error('lost catalog activation'),
+    );
+    await expect(context.manager.submit(update)).rejects.toThrow(
+      'lost catalog activation',
+    );
+    await context.manager.recoverPrevious(update.operationId);
+    const restored = (await context.manager.active())!;
+    expect(restored).toMatchObject({
+      formatVersion: 2,
+      executionMode: 'content-only',
+      configRevision: 3,
+    });
+    expect(restored.packages).toEqual(bundle.packages);
+    expect(context.manager.configRevisions).toEqual([]);
+    expect(contentPackage).toHaveBeenCalledOnce();
+    expect(context.warm).not.toHaveBeenCalled();
+    expect(context.control).not.toHaveBeenCalled();
+  });
+
+  it('refuses executable content before activating a catalog', () => {
+    const plain = {
+      skills: [],
+      commands: [],
+      agents: [],
+      context: [],
+      mcpServers: {},
+      hooks: {},
+      settings: [],
+    };
+    expect(() => validateContentPackage(plain)).not.toThrow();
+    for (const prompt of ['!{pwd}', '@{reference.txt}', '!{unclosed'])
+      expect(() =>
+        validateContentPackage({
+          ...plain,
+          commands: [
+            {
+              name: 'dynamic',
+              description: 'dynamic',
+              prompt,
+              modelInvocable: true,
+            },
+          ],
+        }),
+      ).toThrow('only static');
+    expect(() =>
+      validateContentPackage({ ...plain, hooks: { Stop: [] } }),
+    ).toThrow('only static');
+    expect(() =>
+      validateContentPackage({
+        ...plain,
+        agents: [
+          {
+            name: 'unsafe',
+            description: 'unsafe',
+            systemPrompt: 'unsafe',
+            tools: ['run_shell_command'],
+          },
+        ],
+      }),
+    ).toThrow('only static');
+  });
+
   it('blocks a failed initial selection on reload until an explicit repair is active', async () => {
     const context = await fixture();
     const initial = context.command();

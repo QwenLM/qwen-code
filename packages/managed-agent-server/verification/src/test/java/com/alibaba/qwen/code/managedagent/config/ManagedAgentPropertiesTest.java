@@ -1087,6 +1087,34 @@ public class ManagedAgentPropertiesTest {
     }
 
     @Test
+    public void externalContentAgentsAreDefaultOffAndRequireSharedExternalContentOnlyConfiguration() {
+        var properties = new ManagedAgentProperties();
+        assertThat(properties.getHarness().isWorkspaceContentAgentsEnabled()).isFalse();
+        properties.getHarness().setWorkspaceContentAgentsEnabled(true);
+        properties.getHarness().setEnabled(true);
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        properties.getHarness().setApprovalMode("default");
+        properties.getSessionStore().setEnabled(true);
+        properties.getRuntimeBroker().setEnabled(true);
+        properties.getRuntimeBroker().setProvisioner("external-workspace");
+        properties.getRuntimeBroker().setTrustedLocalRebootRecovery(false);
+        properties.getRuntimeBroker().setExternalProviderUrl("http://provider.invalid");
+        properties.getRuntimeBroker().setExternalProviderToken("provider-token-for-tests");
+        properties.getRuntimeBroker().setExternalProviderId("provider");
+        properties.getRuntimeBroker().setWorkspaceCwd("/worker/workspace");
+        properties.getRuntimeBroker().setWorkspaceId("workspace");
+        properties.getExtensions().setEnabled(true);
+        properties.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
+        assertThat(properties.isExternalWorkspaceContentConfigured()).isTrue();
+        assertThat(properties.admitsPublicChildAgents()).isTrue();
+        properties.getManagedExtensions().setEnabled(true);
+        assertThat(properties.isExternalWorkspaceContentConfigured()).isFalse();
+        properties.getManagedExtensions().setEnabled(false);
+        properties.getRuntimeBroker().setBoundSessionIsolationClass("session");
+        assertThat(properties.isExternalWorkspaceContentConfigured()).isFalse();
+    }
+
+    @Test
     public void publicChildEnvironmentOverrideDisablesTheShippedDefault() throws Exception {
         String key = "qwen.managed-agent.harness.workspace-child-agents-enabled";
         String variable = "QWEN_MANAGED_AGENT_WORKSPACE_CHILD_AGENTS_ENABLED";

@@ -388,6 +388,11 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
         String mountClaimId = body.containsKey("mountClaimId")
                 ? JsonCodec.requiredString(body, "mountClaimId", "acquire request") : null;
         CompletionStage<RuntimeSessionRecord> acquisition;
+        if (body.containsKey("expectedBindingId") != body.containsKey("expectedGeneration")
+                || body.containsKey("recoveryBindingId") != body.containsKey("recoveryGeneration")
+                || body.containsKey("expectedBindingId") && body.containsKey("recoveryBindingId")) {
+            throw new IllegalArgumentException("Invalid Runtime acquisition selector");
+        }
         if (body.containsKey("recoveryBindingId")) {
             acquisition = service.acquireRecovery(harnessSessionId, runtimeSessionId,
                     JsonCodec.requiredString(body, "recoveryBindingId", "acquire request"),
@@ -395,7 +400,9 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                     lifecycleAuthority(exchange), mountClaimId);
         } else {
             acquisition = service.acquire(harnessSessionId, runtimeSessionId, turnKind,
-                    lifecycleAuthority(exchange), mountClaimId);
+                    lifecycleAuthority(exchange), mountClaimId,
+                    body.containsKey("expectedBindingId") ? JsonCodec.requiredString(body, "expectedBindingId", "acquire request") : null,
+                    body.containsKey("expectedGeneration") ? Long.parseLong(JsonCodec.requiredString(body, "expectedGeneration", "acquire request")) : null);
         }
         complete(exchange, acquisition, record -> {
             Map<String, Object> response = new LinkedHashMap<>(envelope(harnessSessionId,

@@ -146,6 +146,39 @@ class ChildResultRelayStoreTest {
     }
 
     @Test
+    void contentChildBootstrapUsesTheCreationReceiptInsteadOfTurnOrdering() {
+        String parent = boundParent();
+        String creationKey = key(parent, "content-bootstrap");
+        var admission = state.insertChildSessionCommand(TENANT, parent, creationKey,
+                "content-digest", "child", List.of(), null,
+                new StoreModels.SessionLineage(parent, parent, "content-bootstrap", 1));
+        String child = admission.sessionId();
+        jdbc.update("UPDATE ma_session SET tool_profile='hosted-workspace-external-files/2',"
+                + " public_child_agents_version=1 WHERE tenant_id=? AND session_id IN (?,?)", TENANT, parent, child);
+        String originalTurn = UUID.randomUUID().toString();
+        String originalPrompt = UUID.randomUUID().toString();
+        for (int index = 0; index < 3; index++) {
+            jdbc.update("INSERT INTO ma_turn (tenant_id,session_id,turn_id,prompt_id,input_json,payload_digest,"
+                    + "status,is_submission_attempted,gmt_create,gmt_modified) VALUES (?,?,?,?,'[]','d','COMPLETED',TRUE,?,?)",
+                    TENANT, child, index == 1 ? originalTurn : UUID.randomUUID().toString(),
+                    index == 1 ? originalPrompt : UUID.randomUUID().toString(), index + 1, index + 1);
+        }
+        jdbc.update("UPDATE ma_request_receipt SET turn_id=? WHERE tenant_id=? AND session_id=?"
+                + " AND namespace='SESSION_CREATE_ACTOR'", originalTurn, TENANT, child);
+        var row = new RelayRow(TENANT, parent, "content-bootstrap", creationKey, child,
+                "binding", "owner", 100, 0, 0, null, 0, 0);
+        var bootstrap = relayStore.bootstrapAdmission(row, child);
+        assertThat(bootstrap.promptId()).isEqualTo(originalPrompt);
+        assertThat(bootstrap.turn().turnId()).isEqualTo(originalTurn);
+        assertThat(bootstrap.turn().dispatched()).isTrue();
+        assertThat(relayStore.firstTurn(TENANT, child).turnId()).isNotEqualTo(originalTurn);
+        assertThat(relayStore.latestTurn(TENANT, child).turnId()).isNotEqualTo(originalTurn);
+        jdbc.update("UPDATE ma_session SET cwd_relative='other' WHERE tenant_id=? AND session_id=?", TENANT, child);
+        assertThatThrownBy(() -> relayStore.bootstrapAdmission(row, child))
+                .isInstanceOf(ManagedAgentException.class);
+    }
+
+    @Test
     void refusesCreationOnAClosedParent() {
         String parent = boundParent();
         jdbc.update("UPDATE ma_session SET status = 'CLOSING'"

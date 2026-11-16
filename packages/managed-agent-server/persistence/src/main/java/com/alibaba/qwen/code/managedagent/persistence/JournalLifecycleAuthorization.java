@@ -145,7 +145,10 @@ final class JournalLifecycleAuthorization {
                         : com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.FILES.equals(profile)
                         || com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.FILES_V3.equals(profile)
                         || com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.FILES_V4.equals(profile)
-                        || com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.isPublicShell(profile))) {
+                        || com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.isPublicShell(profile)
+                        || com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.EXTERNAL_CONTENT.equals(profile)
+                                && "qwen-code".equals(row.get("agent_id")) && row.get("agent_definition_digest") == null
+                                && ((Number) row.get("public_child_agents_version")).intValue() == 1)) {
             return null;
         }
         String mode = (String) row.get("selected_approval_mode");

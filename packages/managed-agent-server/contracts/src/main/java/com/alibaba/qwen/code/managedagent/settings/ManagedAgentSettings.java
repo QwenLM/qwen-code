@@ -12,6 +12,12 @@ public interface ManagedAgentSettings {
     public Harness getHarness();
     public boolean admitsPublicChildAgents();
     public boolean isExternalWorkspaceFilesConfigured();
+    public default boolean isExternalWorkspaceContentConfigured() {
+        return getHarness().isWorkspaceContentAgentsEnabled() && isExternalWorkspaceFilesConfigured()
+                && getHarness().isWorkspaceChildAgentsEnabled()
+                && "workspace".equals(getRuntimeBroker().getBoundSessionIsolationClass())
+                && getExtensions().isEnabled() && !getManagedExtensions().isEnabled();
+    }
     public Automation getAutomation();
     public Channels getChannels();
     public EventTransport getEventTransport();
@@ -43,6 +49,7 @@ public interface ManagedAgentSettings {
         public boolean isEnabled();
         public boolean isWorkspaceFilesEnabled();
         public boolean isWorkspaceChildAgentsEnabled();
+        public default boolean isWorkspaceContentAgentsEnabled() { return false; }
         public boolean isWorkspaceShellEnabled();
         public String getBaseUrl();
         public String getToken();

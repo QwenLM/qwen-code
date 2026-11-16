@@ -93,6 +93,71 @@ const TOKEN_B = 'b'.repeat(32);
 describe('HTTP Managed Session store', () => {
   const temporaryDirectories: string[] = [];
 
+  it('reads only writer-scoped pinned content archives and rejects changed bytes', async () => {
+    const server = new FakeManagedSessionStore();
+    const original = Buffer.from('a pinned package archive');
+    let archive = original;
+    const pin = {
+      extensionId: 'suite',
+      packageRevision: 1,
+      packageDigest: createHash('sha256').update(original).digest('hex'),
+    };
+    const operationId = '11111111-1111-4111-8111-111111111111';
+    const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
+      if (requestUrl(input).endsWith('/content-package:query'))
+        return jsonResponse({
+          manifest: { schemaVersion: 1 },
+          byteLength: original.length,
+        });
+      if (requestUrl(input).endsWith('/content-package:read'))
+        return new Response(archive, {
+          headers: {
+            'Content-Type': 'application/octet-stream',
+            'Cache-Control': 'no-store',
+          },
+        });
+      return server.fetch(input, init);
+    });
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://127.0.0.1:8080',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn,
+    });
+    try {
+      await expect(stores.contentPackage(pin, operationId)).rejects.toThrow();
+      await stores.journalStore.open({ sessionKey: SESSION_KEY });
+      await expect(stores.contentPackage(pin, operationId)).resolves.toEqual({
+        manifest: { schemaVersion: 1 },
+        archive: original,
+      });
+      const request = fetchFn.mock.calls.find(([input]) =>
+        requestUrl(input).endsWith('/content-package:read'),
+      )!;
+      expect(JSON.parse(String(request[1]?.body))).toEqual({
+        workspaceId: SESSION_KEY.workspaceId,
+        writerId: 'harness-a',
+        writerGeneration: 1,
+        operationId,
+        pin,
+      });
+      expect(
+        new Headers(request[1]?.headers).get('X-Qwen-Managed-Writer-Token'),
+      ).toBe(TOKEN_A);
+      expect(request[1]?.redirect).toBe('error');
+      archive = Buffer.from('an altered package bytes');
+      await expect(stores.contentPackage(pin, operationId)).rejects.toThrow(
+        /does not match/,
+      );
+      await expect(
+        stores.contentPackage({ ...pin, settingsRevision: 1 }, operationId),
+      ).rejects.toThrow(/Invalid content/);
+    } finally {
+      await stores.stopLocal();
+    }
+  });
+
   it('scopes personal memory operations to the acquired writer and never sends provider selectors', async () => {
     const server = new FakeManagedSessionStore();
     const fetchFn = vi.fn<typeof fetch>(async (input, init) =>

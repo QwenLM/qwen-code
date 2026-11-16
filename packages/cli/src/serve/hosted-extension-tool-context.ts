@@ -10,12 +10,14 @@ import {
   type ManagedExtensionPin,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-package.js';
 import { normalizeWorkspaceRelativePath } from './managed-workspace-binding.js';
+import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 
 export interface HostedExtensionToolConfig {
   readonly revision: number;
   readonly packages: ReadonlyArray<{
     readonly pin: ManagedExtensionPin;
     readonly assetRoot: string;
+    readonly assetsRef?: ManagedSessionDurableRef;
   }>;
 }
 

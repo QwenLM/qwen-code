@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedConfigInstall;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedContentConfiguration;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords.InvalidRecordException;
@@ -32,7 +33,8 @@ class ManagedMcpSettingsProjection {
     private static final Set<String> RETAINED_REFERENCE_KINDS = Set.of(
             "managed-config_install", "managed-extension-config-bundle",
             "managed-extension-contributions", "managed-extension-root",
-            "managed-extension-stage-ack", "managed-extension-enable-ack");
+            "managed-extension-stage-ack", "managed-extension-enable-ack",
+            "managed-extension-assets", "managed-extension-assets-page");
 
     private final JdbcTemplate jdbc;
     private final AgentStateStore sessions;
@@ -43,7 +45,8 @@ class ManagedMcpSettingsProjection {
     }
 
     void project(String tenantId, String workspaceId, String sessionId, JsonNode payload,
-            Function<String, StoredResource> resources, long sequence, long occurredAt, String[] lines) {
+            Function<String, StoredResource> resources, long sequence, long occurredAt, String[] lines,
+            java.util.function.Supplier<JsonNode> header) {
         JdbcManagedExtensionRecordStore.require(sessions != null, "Configuration management admission is unavailable");
         JsonNode ref = payload.get("recordRef");
         StoredResource resource = resources.apply(ref.get("resourceId").textValue());
@@ -103,7 +106,7 @@ class ManagedMcpSettingsProjection {
             // A sealed writer cannot rely on its old journal to retain the
             // recovery resources named by the active package configuration.
             retainPackageConfiguration(scope, key, revision, tenantId, workspaceId,
-                    sessionId, settings, resources, retained);
+                    sessionId, settings, resources, retained, header);
         } else {
             // Legacy MCP settings need no closure: replace the superseded
             // projection row so the key keeps exactly one row instead of
@@ -121,7 +124,7 @@ class ManagedMcpSettingsProjection {
     // per level instead of per resource and leaving the rows it already wrote untouched.
     private void retainPackageConfiguration(String scope, String key, long revision,
             String tenantId, String workspaceId, String sessionId, JsonNode settings,
-            Function<String, StoredResource> resources, Set<String> retained) {
+            Function<String, StoredResource> resources, Set<String> retained, java.util.function.Supplier<JsonNode> header) {
         List<JsonNode> level = configurationReferences(settings);
         while (!level.isEmpty()) {
             Map<String, JsonNode> candidates = new LinkedHashMap<>();
@@ -139,6 +142,9 @@ class ManagedMcpSettingsProjection {
             for (Map.Entry<String, JsonNode> candidate : candidates.entrySet()) {
                 String resourceId = candidate.getKey();
                 if (!existing.contains(resourceId)) {
+                    JdbcManagedExtensionRecordStore.require(settings.path("formatVersion").asInt() != 2
+                            && !ManagedContentConfiguration.ASSET_KINDS.contains(candidate.getValue().path("kind").asText()),
+                            "Content configuration resource is missing");
                     continue;
                 }
                 StoredResource resource = resources.apply(resourceId);
@@ -146,7 +152,28 @@ class ManagedMcpSettingsProjection {
                 JdbcManagedExtensionRecordStore.referenceProjectionResource(jdbc, scope, key, revision, tenantId, workspaceId,
                         sessionId, resourceId);
                 if (RETAINED_REFERENCE_KINDS.contains(resource.kind())) {
-                    level.addAll(packageReferences(resource.kind(), JdbcManagedExtensionRecordStore.readBody(resource)));
+                    JsonNode body = JdbcManagedExtensionRecordStore.readBody(resource);
+                    if (settings.path("formatVersion").asInt() == 2
+                            && Set.of("managed-extension-stage-ack", "managed-extension-enable-ack").contains(resource.kind())
+                            && (settings.path("stageAckRefs").findValuesAsText("resourceId").contains(resourceId)
+                                    || settings.path("enableAckRefs").findValuesAsText("resourceId").contains(resourceId))) {
+                        ManagedContentConfiguration.requireAcknowledgement(body, settings);
+                    }
+                    if (settings.path("formatVersion").asInt() == 2 && Set.of("managed-extension-config-bundle", "managed-extension-root").contains(resource.kind())) {
+                        JdbcManagedExtensionRecordStore.require(body.path("formatVersion").isIntegralNumber()
+                                && body.path("formatVersion").asInt() == 2, "Content configuration format conflicts");
+                    }
+                    if ("managed-extension-config-bundle".equals(resource.kind()) && body.path("formatVersion").asInt() == 2) {
+                        ManagedContentConfiguration.requireBundle(body, ref -> {
+                            StoredResource member = resources.apply(ref.path("resourceId").asText());
+                            JdbcManagedExtensionRecordStore.requireReference(member, ref);
+                            return member;
+                        });
+                    }
+                    if ("managed-extension-root".equals(resource.kind()) && body.path("formatVersion").asInt() == 2) {
+                        ManagedContentConfiguration.requireRoot(body, header.get());
+                    }
+                    level.addAll(packageReferences(resource.kind(), body));
                 }
             }
         }
@@ -174,13 +201,17 @@ class ManagedMcpSettingsProjection {
         if ("managed-extension-config-bundle".equals(kind)) {
             for (JsonNode entry : body.path("packages")) {
                 refs.add(entry.get("contributionsRef"));
+                refs.add(entry.get("assetsRef"));
             }
         } else if ("managed-extension-contributions".equals(kind)) {
             for (JsonNode part : body.path("parts")) {
                 refs.add(part);
             }
+        } else if (ManagedContentConfiguration.ASSET_KINDS.contains(kind)) {
+            refs.addAll(ManagedContentConfiguration.assetReferences(kind, body));
         } else {
             refs.add(body.get("rootSnapshotRef"));
+            refs.add(body.get("definitionRef"));
             refs.add(body.get("bundleRef"));
         }
         return refs;

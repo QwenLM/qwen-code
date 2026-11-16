@@ -44,6 +44,12 @@ public interface ChildResultRelayStore {
         }
     }
 
+    public record BootstrapAdmission(String childSessionId, String promptId,
+            TurnLine turn) {
+    }
+
+    public BootstrapAdmission bootstrapAdmission(RelayRow row, String childSessionId);
+
     public List<PendingChild> findPendingChildren(String workerId, int limit);
 
     public List<PendingChild> findPendingChildren(String workerId, long now,

@@ -486,6 +486,7 @@ public class ManagedNativeJournalSnapshots {
                 || kind.equals("managed-message-chunks") || kind.equals("managed-tool-result-manifest")
                 || kind.equals("managed-tool-result-page") || kind.equals("managed-action-options")
                 || ManagedHostedRecoveryRecords.KINDS.contains(kind)
+                || com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedContentConfiguration.CONTAINERS.contains(kind)
                 || ManagedExtensionRecords.DOMAINS.stream().anyMatch(domain -> kind.equals("managed-" + domain));
     }
 

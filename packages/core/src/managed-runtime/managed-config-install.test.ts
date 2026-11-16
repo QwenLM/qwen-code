@@ -85,10 +85,13 @@ afterEach(async () => {
   );
 });
 
-function ref(resourceId: string): ManagedSessionDurableRef {
+function ref(
+  resourceId: string,
+  kind = 'managed-test',
+): ManagedSessionDurableRef {
   return {
     resourceId,
-    kind: 'managed-test',
+    kind,
     schemaVersion: 1,
     byteLength: 2,
     digest: 'a'.repeat(64),
@@ -137,6 +140,45 @@ function record(
 }
 
 describe('Managed configuration install records', () => {
+  it('requires real single-party content evidence without relaxing process activation', () => {
+    const active = {
+      ...content('active'),
+      formatVersion: 2,
+      rootSnapshotRef: ref('root', 'managed-extension-root'),
+      bundleRef: ref('bundle', 'managed-extension-config-bundle'),
+      stageAckRefs: [ref('h-stage', 'managed-extension-stage-ack')],
+      enableAckRefs: [ref('h-enable', 'managed-extension-enable-ack')],
+    };
+    expect(parseManagedConfigInstallContent(active).formatVersion).toBe(2);
+    expect(() =>
+      parseManagedConfigInstallContent({ ...active, formatVersion: 1 }),
+    ).toThrow();
+    expect(() =>
+      parseManagedConfigInstallContent({ ...active, enableAckRefs: [] }),
+    ).toThrow();
+    expect(() =>
+      parseManagedConfigInstallContent({
+        ...active,
+        rootSnapshotRef: ref('wrong-kind'),
+      }),
+    ).toThrow();
+    expect(() =>
+      parseManagedConfigInstallContent({
+        ...active,
+        stageAckRefs: [
+          ref('h-stage', 'managed-extension-stage-ack'),
+          ref('fake-runtime', 'managed-extension-stage-ack'),
+        ],
+      }),
+    ).toThrow();
+    expect(() =>
+      assertManagedConfigInstallSuccessor(record(content()), {
+        ...content('prepared'),
+        formatVersion: 2,
+      }),
+    ).toThrow();
+  });
+
   it('requires both stage and enable evidence before active', () => {
     expect(parseManagedConfigInstallContent(content('active')).phase).toBe(
       'active',
