@@ -1178,7 +1178,10 @@ describe('gitCommit', () => {
       await expect(
         gitCommit(dir, 'rename component', { paths: ['foo.tsx'] }),
       ).rejects.toThrow(/a file now sits at the old path/);
-      expect(git(dir, 'log', '--format=%s').trim()).toBe('add component');
+      // `makeRepo` seeds its own commit, so the newest subject is on top.
+      expect(git(dir, 'log', '--format=%s').trim().split('\n')[0]).toBe(
+        'add component',
+      );
     },
   );
 
