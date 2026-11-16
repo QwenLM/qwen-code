@@ -4415,6 +4415,30 @@ describe('WebShellSidebar workspace removal', () => {
     expect(onSelectWorkspace).toHaveBeenCalledWith(undefined);
   });
 
+  it('removing the leftover connection workspace must not clear a different draft pick', async () => {
+    // A terminated session left the connection on the secondary workspace
+    // while the user pointed the cold draft at a different one; removing
+    // the leftover workspace must not reset the draft back to the primary
+    // (#16992 via the removal path).
+    connection.sessionId = null;
+    connection.sessionContext = { kind: 'workspace', cwd: '/tmp/other' };
+    connection.workspaceCwd = '/tmp/other';
+    const onSelectWorkspace = vi.fn();
+    renderSidebar({
+      selectedWorkspaceCwd: '/tmp/third',
+      onSelectWorkspace,
+    });
+
+    openRemoval('/tmp/other');
+
+    await act(async () => click(dialogButton('Remove workspace')));
+
+    expect(workspaceActions.removeWorkspace).toHaveBeenCalledWith('secondary', {
+      force: false,
+    });
+    expect(onSelectWorkspace).not.toHaveBeenCalled();
+  });
+
   it('shows activity and blocks force for the current session workspace', async () => {
     connection.sessionId = 'active-session';
     connection.workspaceCwd = '/tmp/other';

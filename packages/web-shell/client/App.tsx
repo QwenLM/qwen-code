@@ -44,6 +44,7 @@ import { getSourceEntries } from './components/sources/sourceEntries';
 import { openSourceEntry } from './components/panels/SourcesSection';
 import {
   isSessionWriterBlockedCode,
+  resolveDraftSessionContext,
   sessionContextKey,
 } from './daemon/session/session-context';
 import { TurnNotificationNavigationContext } from './daemon/session/turn-notification-context';
@@ -4658,8 +4659,14 @@ export function App({
     },
     [],
   );
+  // A session-less draft does not start in the leftover connection workspace
+  // of a terminated session (#16992): the connection's cwd seeds the answer
+  // only while a session is connected or the context is not a leftover
+  // workspace one.
   const legacyWorkspaceContextCwd =
-    connection.workspaceCwd ||
+    (connection.sessionId || connection.sessionContext?.kind !== 'workspace'
+      ? connection.workspaceCwd
+      : undefined) ||
     lockedWorkspaceCwd ||
     selectedWorkspaceCwd ||
     trustedPrimaryWorkspaceCwd ||
@@ -4979,12 +4986,11 @@ export function App({
     // A session-less draft does not inherit the leftover workspace context
     // of a terminated session (see ensureSessionForPrompt): it resolves to
     // the pending selection or the primary like the picker does.
-    const inheritedContext = connection.sessionContext;
-    const explicitContext =
-      pendingSessionContext ??
-      (connection.sessionId || inheritedContext?.kind !== 'workspace'
-        ? inheritedContext
-        : undefined);
+    const explicitContext = resolveDraftSessionContext(
+      pendingSessionContext,
+      connection.sessionContext,
+      connection.sessionId,
+    );
     if (explicitContext?.kind === 'workspace') {
       return explicitContext.cwd;
     }
@@ -12556,19 +12562,14 @@ export function App({
         const modeId = executionModeRef.current;
         const planMode = currentModeRef.current === 'plan';
         // A leftover workspace sessionContext of a terminated session is
-        // not inherited into a session-less draft: the draft starts in the
-        // workspace the picker displays (the pending selection, else the
-        // primary), so the displayed and the created workspace can never
-        // disagree (#16992 follow-up). Non-workspace contexts (e.g.
-        // standalone) name the draft's own mode and are inherited as
-        // before; live sessions always inherit.
-        const inheritedSessionContext = connectionRef.current.sessionContext;
-        const requestedSessionContext =
-          pendingSessionContextRef.current ??
-          (connectionRef.current.sessionId ||
-          inheritedSessionContext?.kind !== 'workspace'
-            ? inheritedSessionContext
-            : undefined);
+        // not inherited into a session-less draft (#16992): the draft
+        // starts in the workspace the picker displays, so the displayed
+        // and the created workspace can never disagree.
+        const requestedSessionContext = resolveDraftSessionContext(
+          pendingSessionContextRef.current,
+          connectionRef.current.sessionContext,
+          connectionRef.current.sessionId,
+        );
         const availableWorkspaces = workspacesRef.current;
         const primaryWorkspaceCwd = availableWorkspaces.find(
           (entry) => entry.primary && entry.trusted !== false,
@@ -16629,10 +16630,17 @@ export function App({
       } else if (lockedWorkspaceCwd) {
         nextContext = { kind: 'workspace', cwd: lockedWorkspaceCwd };
       } else if (intent.kind === 'inherit') {
+        // A cwd-less New task inherits like any other draft (#16992): the
+        // leftover connection workspace of a terminated session is not
+        // part of the answer, so a cold draft stays on the primary it
+        // displays instead of moving onto it.
         nextContext =
-          pendingSessionContextRef.current ??
-          connectionRef.current.sessionContext ??
-          (connectionRef.current.workspaceCwd
+          resolveDraftSessionContext(
+            pendingSessionContextRef.current,
+            connectionRef.current.sessionContext,
+            connectionRef.current.sessionId,
+          ) ??
+          (connectionRef.current.sessionId && connectionRef.current.workspaceCwd
             ? {
                 kind: 'workspace',
                 cwd: connectionRef.current.workspaceCwd,

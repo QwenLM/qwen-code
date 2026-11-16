@@ -3553,13 +3553,18 @@ export function WebShellSidebar({
   const reconcileRemovedWorkspace = useCallback(
     async (removed: DaemonWorkspaceCapability) => {
       if (!sidebarMountedRef.current) return;
-      // A cold draft never writes the selection (the #16992 fix), so a
-      // removed workspace it is pointed at is only visible through the
-      // connection state; reset the draft to the primary so the next
-      // prompt does not target the removed cwd.
+      // Reset the draft to the primary only when the draft targets the
+      // removed workspace: the selection itself, or — a cold draft never
+      // writes the selection (the #16992 fix) — the leftover connection
+      // when that is all the draft has. A pick to another workspace must
+      // survive: the reset rewrites pendingSessionContext and bumps the
+      // composer version, so an uninvited reset reverts the pick
+      // (#16992 via the removal path).
       if (
         selectedWorkspaceCwd === removed.cwd ||
-        (!connection.sessionId && connection.workspaceCwd === removed.cwd)
+        (selectedWorkspaceCwd === undefined &&
+          !connection.sessionId &&
+          connection.workspaceCwd === removed.cwd)
       ) {
         onSelectWorkspace?.(undefined);
       }

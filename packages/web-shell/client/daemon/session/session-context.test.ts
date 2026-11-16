@@ -15,6 +15,7 @@ import {
   isDaemonErrorExplicitlyNonRetryable,
   isStandaloneDaemonSession,
   resolveActionSessionContext,
+  resolveDraftSessionContext,
   resolveLiveSessionWorkspaceCwd,
   resolveProviderSessionContext,
   restoreSessionContextMatches,
@@ -471,5 +472,61 @@ describe('session context', () => {
         body: { code: 'working_directory_missing', retryable: true },
       }),
     ).toBe(false);
+  });
+});
+
+describe('resolveDraftSessionContext', () => {
+  it('lets the pending pick win over the connection context', () => {
+    expect(
+      resolveDraftSessionContext(
+        { kind: 'workspace', cwd: '/picked' },
+        { kind: 'workspace', cwd: '/leftover' },
+        undefined,
+      ),
+    ).toEqual({ kind: 'workspace', cwd: '/picked' });
+    expect(
+      resolveDraftSessionContext(
+        { kind: 'standalone' },
+        { kind: 'workspace', cwd: '/work' },
+        'session-1',
+      ),
+    ).toEqual({ kind: 'standalone' });
+  });
+
+  it('keeps a live session on its own context', () => {
+    expect(
+      resolveDraftSessionContext(
+        undefined,
+        { kind: 'workspace', cwd: '/work' },
+        'session-1',
+      ),
+    ).toEqual({ kind: 'workspace', cwd: '/work' });
+    expect(
+      resolveDraftSessionContext(undefined, undefined, 'session-1'),
+    ).toBeUndefined();
+  });
+
+  it('drops the leftover workspace context of a session-less draft', () => {
+    // The #16992 rule: a terminated session's workspace context is not
+    // inherited into a draft that starts elsewhere.
+    expect(
+      resolveDraftSessionContext(
+        undefined,
+        { kind: 'workspace', cwd: '/leftover' },
+        undefined,
+      ),
+    ).toBeUndefined();
+  });
+
+  it('keeps non-workspace contexts for a session-less draft', () => {
+    expect(
+      resolveDraftSessionContext(undefined, { kind: 'standalone' }, undefined),
+    ).toEqual({ kind: 'standalone' });
+    expect(
+      resolveDraftSessionContext(undefined, { kind: 'live' }, undefined),
+    ).toEqual({ kind: 'live' });
+    expect(
+      resolveDraftSessionContext(undefined, undefined, undefined),
+    ).toBeUndefined();
   });
 });

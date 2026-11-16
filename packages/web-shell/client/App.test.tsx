@@ -950,6 +950,9 @@ const {
       queuedPromptSessionHasActivePrompt: false,
       chatEditorRenderCount: 0,
       latestChatEditorProps: null as ChatEditorTestProps | null,
+      latestAgentsManagerProps: null as {
+        workspaceCwd?: string;
+      } | null,
       latestModelPicker: undefined as WebShellModelPickerOptions | undefined,
       onChatEditorLayout: null as ((props: ChatEditorTestProps) => void) | null,
       latestToastHostElevated: false,
@@ -2209,6 +2212,16 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
           },
           'plugins',
         ),
+        props.onOpenAgents &&
+          React.createElement(
+            'button',
+            {
+              'data-testid': 'open-agents',
+              type: 'button',
+              onClick: () => props.onOpenAgents?.('agents'),
+            },
+            'agents',
+          ),
         props.onOpenLive &&
           React.createElement(
             'button',
@@ -2949,7 +2962,15 @@ mockComponent(
   'ReleaseSessionDialog',
 );
 mockComponent('./components/dialogs/RewindDialog', 'RewindDialog');
-mockComponent('./components/agents/AgentsManagerPage', 'AgentsManagerPage');
+vi.doMock('./components/agents/AgentsManagerPage', async () => {
+  const React = await import('react');
+  return {
+    AgentsManagerPage: (props: { workspaceCwd?: string }) => {
+      testState.latestAgentsManagerProps = props;
+      return React.createElement('div');
+    },
+  };
+});
 mockComponent('./components/messages/MemoryMessage', 'MemoryMessage');
 vi.doMock('./components/messages/AuthMessage', async () => {
   const React = await import('react');
@@ -12885,6 +12906,7 @@ beforeEach(() => {
   testState.queuedPromptSessionHasActivePrompt = false;
   testState.chatEditorRenderCount = 0;
   testState.latestChatEditorProps = null;
+  testState.latestAgentsManagerProps = null;
   testState.latestModelPicker = undefined;
   testState.onChatEditorLayout = null;
   testState.latestToastHostElevated = false;
@@ -24597,17 +24619,150 @@ describe('App session callbacks', () => {
         },
       ],
     } as typeof mockWorkspace.capabilities;
-    renderApp();
+    // The chip mirrors daemon git-status pushes only for the workspace the
+    // draft actually starts in (activeWorkspaceCwd): a push for the leftover
+    // connection workspace must not be adopted. Reverting the draft-target
+    // branch in that memo turns this red while the create-path assertion
+    // below stays green. The push lands after mount, like a live
+    // `git_status_changed` push: the async chip poll resets the chip on
+    // mount and would otherwise hide whether the push was adopted.
+    // Keep the poll from ever resolving so only the mirror effect can paint
+    // the chip here.
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      getSessionToolCalls: mockWorkspace.client.getSessionToolCalls,
+      getSessionTurnIndexPage: mockWorkspace.client.getSessionTurnIndexPage,
+      workspaceGit: vi.fn(() => new Promise(() => {})),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+      workspaceGitHubPullRequests: vi.fn().mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/workspace',
+        available: true,
+        pullRequests: [],
+      }),
+    }));
+    const { rerender } = renderApp();
     await flush();
 
     expect(testState.latestChatEditorProps).toMatchObject({
       selectedWorkspaceCwd: undefined,
     });
+    act(() => {
+      mockConnection.gitStatus = {
+        v: 2,
+        workspaceCwd: '/work/secondary',
+        branch: 'stale-secondary',
+      };
+    });
+    rerender();
+    await flush();
+
+    expect(testState.latestChatEditorProps?.gitStatus?.branch).not.toBe(
+      'stale-secondary',
+    );
 
     act(() => {
       testState.latestChatEditorProps?.onSubmit('cold draft prompt');
     });
     await act(async () => {
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalled();
+      });
+    });
+
+    expect(mockSessionActions.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceCwd: '/tmp/project',
+        sessionContext: { kind: 'workspace', cwd: '/tmp/project' },
+      }),
+    );
+  });
+
+  it('scopes the agents panel to the workspace a cold draft starts in, not the leftover connection workspace', async () => {
+    // A terminated session left the connection on the secondary workspace
+    // with no session id; the draft starts in the primary it displays, so
+    // the workspace-scoped agents panel follows the primary too.
+    mockConnection.sessionId = undefined;
+    mockConnection.workspaceCwd = '/work/secondary';
+    mockConnection.sessionContext = {
+      kind: 'workspace',
+      cwd: '/work/secondary',
+    };
+    mockWorkspace.capabilities = {
+      features: ['agent_collaboration_v1'],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'secondary',
+          cwd: '/work/secondary',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const { container } = renderApp();
+    await flush();
+
+    // The opener only exists when collaboration is available for the
+    // workspace the draft starts in (the leftover connection workspace
+    // would fail this gate under per-workspace collaboration flags).
+    const openAgents = container.querySelector<HTMLButtonElement>(
+      '[data-testid="open-agents"]',
+    );
+    expect(openAgents).not.toBeNull();
+    await act(async () => {
+      openAgents!.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(testState.latestAgentsManagerProps?.workspaceCwd).toBe(
+      '/tmp/project',
+    );
+  });
+
+  it('keeps a cwd-less New task on the workspace a cold draft starts in', async () => {
+    // A terminated session left the connection on the secondary workspace
+    // with no session id; a cwd-less New task must not move the draft onto
+    // it — the first prompt creates the session in the primary the picker
+    // displays (#16992).
+    mockConnection.sessionId = undefined;
+    mockConnection.workspaceCwd = '/work/secondary';
+    mockConnection.sessionContext = {
+      kind: 'workspace',
+      cwd: '/work/secondary',
+    };
+    mockWorkspace.capabilities = {
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'secondary',
+          cwd: '/work/secondary',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLElement>('[data-testid="new-session"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('new task prompt');
       await vi.waitFor(() => {
         expect(mockSessionActions.createSession).toHaveBeenCalled();
       });
