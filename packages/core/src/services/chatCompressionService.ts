@@ -471,6 +471,12 @@ function collectActiveSubagents(config: Config): SubagentSnapshot[] {
  */
 const FAILED_ATTEMPT_DIGEST_MAX_ENTRIES = 8;
 const FAILED_ATTEMPT_ERROR_SNIPPET_CHARS = 160;
+// ANSI CSI sequences (ESC [ ... final byte) stripped from untrusted
+// error text before it enters the system instruction (#17322 F2).
+const ANSI_ESCAPE_PATTERN = new RegExp(
+  `${String.fromCharCode(27)}\\[[0-9;]*[a-zA-Z]`,
+  'g',
+);
 
 export function buildFailedToolAttemptDigest(
   history: Content[],
@@ -492,7 +498,15 @@ export function buildFailedToolAttemptDigest(
         error.length > FAILED_ATTEMPT_ERROR_SNIPPET_CHARS
           ? `${error.slice(0, FAILED_ATTEMPT_ERROR_SNIPPET_CHARS)}...`
           : error;
-      const entry = `- ${name}: ${snippet.replaceAll('\n', ' ')}`;
+      // Newlines and ANSI escapes from untrusted tool-error text are
+      // flattened so a hostile error message cannot forge digest lines
+      // or inject terminal controls into the system instruction
+      // (#17322 F2).
+      const flat = snippet
+        .replaceAll('\n', ' ')
+        .replaceAll('\r', ' ')
+        .replaceAll(ANSI_ESCAPE_PATTERN, '');
+      const entry = `- ${name}: ${flat}`;
       if (!entries.includes(entry)) entries.push(entry);
     }
   }
