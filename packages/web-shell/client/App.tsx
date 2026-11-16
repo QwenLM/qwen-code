@@ -570,7 +570,10 @@ import type {
   Message,
   PermissionRequest,
 } from './adapters/types';
-import { isBackgroundSubAgentToolCall } from './adapters/toolClassification';
+import {
+  isBackgroundSubAgentToolCall,
+  isNamedSubSessionApproval,
+} from './adapters/toolClassification';
 import {
   computeTodoDetails,
   computeTodoTimeline,
@@ -15632,6 +15635,7 @@ export function App({
           !planMode &&
           approval &&
           !isExitPlanApprovalRequest(approval) &&
+          !isNamedSubSessionApproval(approval) &&
           (modeId === 'yolo' ||
             (modeId === 'auto-edit' && isEditToolPermission(approval)))
         ) {
@@ -18180,6 +18184,7 @@ export function App({
               sessionId?: unknown;
               workspaceCwd?: unknown;
               sessionContext?: unknown;
+              source?: unknown;
             }
         >
       ).detail;
@@ -18221,6 +18226,13 @@ export function App({
         lockedWorkspaceCwd &&
         (sessionContext?.kind !== 'workspace' ||
           sessionContext.cwd !== lockedWorkspaceCwd)
+      )
+        return;
+      if (
+        lockedWorkspaceCwd &&
+        typeof detail === 'object' &&
+        detail?.source === 'session-link' &&
+        workspaceCwd !== lockedWorkspaceCwd
       )
         return;
       if (typeof sessionId === 'string' && sessionId.trim()) {
