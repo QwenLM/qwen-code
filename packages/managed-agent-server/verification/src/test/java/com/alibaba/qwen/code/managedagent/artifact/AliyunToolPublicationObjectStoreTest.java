@@ -17,6 +17,7 @@ import org.mockito.ArgumentCaptor;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -25,6 +26,7 @@ import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -68,14 +70,37 @@ class AliyunToolPublicationObjectStoreTest {
         var object = new OSSObject();
         object.setObjectContent(new ByteArrayInputStream(new byte[] {1, 2, 3}));
         when(client.getObject(any(GetObjectRequest.class))).thenReturn(object);
-        // A non-zero offset discriminates setRange(offset, offset + length - 1) from
-        // a zero-offset mapping; the end is inclusive.
-        try (var input = objects.openRange("exact/key", 1, 2, () -> {})) {
+        // offset 2, length 3 keeps the inclusive end (offset + length - 1 == 4) distinct
+        // from length (3), so setRange(offset, length) cannot pose as the correct mapping;
+        // the non-zero offset also excludes setRange(0, length - 1).
+        try (var input = objects.openRange("exact/key", 2, 3, () -> {})) {
             assertThat(input.readAllBytes()).containsExactly(1, 2, 3);
         }
         var request = ArgumentCaptor.forClass(GetObjectRequest.class);
         verify(client).getObject(request.capture());
-        assertThat(request.getValue().getRange()).containsExactly(1L, 2L);
+        assertThat(request.getValue().getBucketName()).isEqualTo("private-bucket");
+        assertThat(request.getValue().getKey()).isEqualTo("exact/key");
+        assertThat(request.getValue().getRange()).containsExactly(2L, 4L);
+        verify(client, never()).getBucketVersioning("private-bucket");
+    }
+
+    @Test
+    void openRangeRetriesTransientReadsAndRerunsTheGuard() throws IOException {
+        var objects = store();
+        clearInvocations(client);
+        var checks = new AtomicInteger();
+        var object = new OSSObject();
+        object.setObjectContent(new ByteArrayInputStream(new byte[] {1, 2, 3}));
+        when(client.getObject(any(GetObjectRequest.class)))
+                .thenThrow(new OSSException("fixture", "InternalError", "request", "host", "bucket", "key", "resource"))
+                .thenReturn(object);
+        try (var input = objects.openRange("exact/key", 2, 3, checks::incrementAndGet)) {
+            assertThat(input.readAllBytes()).containsExactly(1, 2, 3);
+        }
+        // Two guard runs: one before each getObject attempt. The range read retries
+        // through read(...) and, like open, never re-probes versioning.
+        assertThat(checks.get()).isEqualTo(2);
+        verify(client, times(2)).getObject(any(GetObjectRequest.class));
         verify(client, never()).getBucketVersioning("private-bucket");
     }
 
