@@ -98,6 +98,7 @@ import type {
   AgentLoopStopReason,
 } from '@qwen-code/qwen-code-core/core/agent-loop.js';
 import { findPlanModeEntryBatchBoundaryIndex } from '@qwen-code/qwen-code-core/core/plan-mode-entry-policy.js';
+import { logAgentLoopEntry } from '@qwen-code/qwen-code-core/config/agent-loop-rollout.js';
 import { startSharedLoopRound } from './shared-loop-round.js';
 import type { InteractiveToolCall } from '../../services/interactive-mod-tool-scheduler.js';
 import { createInkToolExecutor } from './ink-tool-executor.js';
@@ -3758,7 +3759,8 @@ export const useLlmStream = (
       dualOutput?.startAssistantMessage();
       try {
         if (sharedRound) {
-          const useEventBus = config.isEventBusAgentLoopEnabled?.() === true;
+          const useEventBus =
+            config.isEventBusAgentLoopEnabled?.('ink') === true;
           debugLogger.debug(
             `[processLlmStreamEvents] model round on the shared agent loop (prompt ${source.round.promptId})`,
           );
@@ -3768,6 +3770,8 @@ export const useLlmStream = (
             // The batch's tools run under the turn's signal, as the
             // scheduler's do.
             toolSignal: signal,
+            // The TUI records only the results it sends, in its own session.
+            deferRecording: true,
             useEventBus,
             onModelEvent: (event) => {
               const ended = handleStreamEvent(event);
@@ -5084,8 +5088,9 @@ export const useLlmStream = (
                   }
                 : {}),
           };
+          logAgentLoopEntry(config, 'ink');
           const sharedSource: SharedModelRound | undefined =
-            config.isUnifiedAgentLoopEnabled?.()
+            config.isUnifiedAgentLoopEnabled?.('ink')
               ? {
                   client: llmClient,
                   signal: providerSignal,

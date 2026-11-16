@@ -15973,21 +15973,10 @@ describe('createAcpSessionBridge', () => {
     const first = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
     expect(handles).toHaveLength(1);
 
-    const prompt = bridge.sendPrompt(first.sessionId, {
-      sessionId: first.sessionId,
-      prompt: [{ type: 'text', text: 'stay pending' }],
-    });
-    await vi.waitFor(() =>
-      expect(handles[0]!.agent.promptCalls).toHaveLength(1),
-    );
     const replayAttach = bridge.loadSession({
       sessionId: first.sessionId,
       workspaceCwd: WS_A,
-      // historyPageSize only takes effect in response-mode replay (#8933);
-      // without historyReplay the request silently degrades to 'stream',
-      // no transcript page is ever requested, and the waitFor below times
-      // out. This test predates that gating (logical merge conflict — both
-      // PRs were green on their own branches).
+      // Begin while idle so this read remains in flight when the transport fails.
       historyReplay: 'response',
       historyPageSize: 10,
       clientId: 'rejected-load-client',
@@ -15999,6 +15988,35 @@ describe('createAcpSessionBridge', () => {
         }),
       ),
     );
+    const prompt = bridge.sendPrompt(first.sessionId, {
+      sessionId: first.sessionId,
+      prompt: [{ type: 'text', text: 'stay pending' }],
+    });
+    await vi.waitFor(() =>
+      expect(handles[0]!.agent.promptCalls).toHaveLength(1),
+    );
+    await handles[0]!.agentConnection.sessionUpdate({
+      sessionId: first.sessionId,
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'live before transport failure' },
+      },
+    });
+    const activeAttach = await bridge.loadSession({
+      sessionId: first.sessionId,
+      workspaceCwd: WS_A,
+      historyReplay: 'response',
+      historyPageSize: 10,
+      clientId: 'active-load-client',
+    });
+    expect(JSON.stringify(activeAttach.liveJournal)).toContain(
+      'live before transport failure',
+    );
+    expect(
+      handles[0]!.agent.extMethodCalls.filter(
+        (call) => call.method === SERVE_STATUS_EXT_METHODS.sessionTranscript,
+      ),
+    ).toHaveLength(1);
     failures[0]!.resolve(
       Object.assign(new Error('bounded transport failed'), {
         code: 'ndjson_frame_too_large',
@@ -16014,6 +16032,7 @@ describe('createAcpSessionBridge', () => {
       }),
     ).rejects.toThrow(/channel is unavailable/u);
     expect(bridge.knownClientIds()).not.toContain('rejected-load-client');
+    expect(bridge.knownClientIds()).not.toContain('active-load-client');
     expect(bridge.knownClientIds()).not.toContain('rejected-resume-client');
 
     await expect(bridge.spawnOrAttach({ workspaceCwd: WS_A })).rejects.toThrow(
@@ -40539,62 +40558,69 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await bridge.shutdown();
   });
 
-  it('promotes what the ending Goal turn never drained', async () => {
-    let release: (() => void) | undefined;
-    const handle = makeChannel({
-      promptImpl: async () => {
-        await new Promise<void>((res) => {
-          release = res;
+  it.each([
+    { label: 'valid', reason: 'end_turn' },
+    { label: 'empty', reason: '' },
+    { label: 'oversized', reason: 'x'.repeat(129) },
+  ])(
+    'promotes what the ending Goal turn never drained ($label reason)',
+    async ({ reason }) => {
+      const response = deferred<PromptResponse>();
+      const handle = makeChannel({ promptImpl: () => response.promise });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      try {
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+        await handle.agentConnection.extNotification('_qwencode/start_turn', {
+          sessionId: session.sessionId,
+          source: 'goal',
         });
-        return { stopReason: 'end_turn' };
-      },
-    });
-    const bridge = makeBridge({ channelFactory: async () => handle.channel });
-    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        expect(
+          bridge.enqueueMidTurnMessage(
+            session.sessionId,
+            'never drained',
+            { clientId: session.clientId },
+            'goal-undrained',
+            { rejectIfIdle: true },
+          ),
+        ).toEqual({ accepted: true, messageId: 'goal-undrained' });
+        expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]);
+        expect(handle.agent.promptCalls).toHaveLength(0);
 
-    await handle.agentConnection.extNotification('_qwencode/start_turn', {
-      sessionId: session.sessionId,
-      source: 'goal',
-    });
-    expect(
-      bridge.enqueueMidTurnMessage(
-        session.sessionId,
-        'never drained',
-        { clientId: session.clientId },
-        'goal-undrained',
-        { rejectIfIdle: true },
-      ),
-    ).toEqual({ accepted: true, messageId: 'goal-undrained' });
+        // A Goal turn owns no prompt slot, so its end is the only signal that can
+        // settle what its last drain missed, even if the reason is malformed.
+        await handle.agentConnection.extNotification('_qwencode/end_turn', {
+          sessionId: session.sessionId,
+          reason,
+          source: 'goal',
+          promptId: `${session.sessionId}########1`,
+        });
 
-    // A Goal turn owns no prompt slot, so its end is the only signal that can
-    // settle what its last drain missed.
-    await handle.agentConnection.extNotification('_qwencode/end_turn', {
-      sessionId: session.sessionId,
-      reason: 'end_turn',
-      source: 'goal',
-      promptId: `${session.sessionId}########1`,
-    });
+        await vi.waitFor(() => {
+          expect(bridge.getPendingPrompts(session.sessionId)).toEqual([
+            expect.objectContaining({
+              promptId: 'goal-undrained',
+              text: 'never drained',
+            }),
+          ]);
+          expect(handle.agent.promptCalls).toHaveLength(1);
+        });
+        expect(
+          bridge.getMidTurnMessages(session.sessionId, {
+            clientId: session.clientId,
+          }).messages,
+        ).toEqual([]);
 
-    await vi.waitFor(() =>
-      expect(bridge.getPendingPrompts(session.sessionId)).toEqual([
-        expect.objectContaining({
-          promptId: 'goal-undrained',
-          text: 'never drained',
-        }),
-      ]),
-    );
-    expect(
-      bridge.getMidTurnMessages(session.sessionId, {
-        clientId: session.clientId,
-      }).messages,
-    ).toEqual([]);
-
-    release?.();
-    await vi.waitFor(() =>
-      expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]),
-    );
-    await bridge.shutdown();
-  });
+        response.resolve({ stopReason: 'end_turn' });
+        await vi.waitFor(() =>
+          expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]),
+        );
+      } finally {
+        response.resolve({ stopReason: 'end_turn' });
+        await bridge.shutdown();
+      }
+    },
+  );
 
   it('rejects a whitespace-only message even while busy', async () => {
     const { factory, release } = hangingPromptFactory();

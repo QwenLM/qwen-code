@@ -2972,13 +2972,12 @@ describe('Gemini Client (client.ts)', () => {
       expect(setTools).toHaveBeenCalledWith(tools);
     });
 
-    it('leaves the todo reminder to a host that runs its own tool-call guards', async () => {
+    it('adds the todo reminder to a tool-result send', async () => {
       // The prompt's first round makes its tool-result rounds the turn's own.
       await runTurn(
         SendMessageType.UserQuery,
         [{ text: 'hello' }],
         'prompt-tool-result',
-        { toolLoopGuardsByHost: true },
       );
       todoReminder('run tests');
       vi.mocked(mockConfig.takeActiveTodoReminder).mockClear();
@@ -2996,15 +2995,20 @@ describe('Gemini Client (client.ts)', () => {
         SendMessageType.ToolResult,
         [fnResponse('read_file', { ok: true })],
         'prompt-tool-result',
-        { toolLoopGuardsByHost: true },
       );
 
-      expect(mockConfig.takeActiveTodoReminder).not.toHaveBeenCalled();
+      expect(mockConfig.takeActiveTodoReminder).toHaveBeenCalledWith(
+        'prompt-tool-result',
+      );
       expect(client.consumeManagedAutoMemoryRecall).toHaveBeenCalledWith(
         'tool_result',
       );
       expect(lastRequest()).toEqual(
-        expect.arrayContaining([{ text: 'LOOP_REMINDER' }, 'MEMORY_RECALL']),
+        expect.arrayContaining([
+          { text: 'LOOP_REMINDER' },
+          '<system-reminder>unfinished todo: run tests</system-reminder>',
+          'MEMORY_RECALL',
+        ]),
       );
     });
 
@@ -9382,31 +9386,6 @@ Other open files:
       });
     });
 
-    it('leaves the tool-call guards to a host that runs its own', async () => {
-      // Past an explicit cap of 2, and an alternating pattern for the
-      // heuristics, which are on here.
-      vi.mocked(mockConfig.getMaxToolCallsPerTurn).mockReturnValue(2);
-      vi.mocked(mockConfig.isMaxToolCallsPerTurnExplicit).mockReturnValue(true);
-      vi.spyOn(client['config'], 'getSkipLoopDetection').mockReturnValue(false);
-      const calls = Array.from({ length: 10 }, (_, i) =>
-        toolCallRequest(`call-${i}`, 'read_file', { path: i % 2 ? 'a' : 'b' }),
-      );
-      mockTurnRunFn.mockReturnValueOnce(turnStream(...calls));
-      installChat();
-
-      const events = await run([{ text: 'read the files' }], 'prompt-cap', {
-        type: SendMessageType.UserQuery,
-        toolLoopGuardsByHost: true,
-      });
-
-      expect(events).not.toContainEqual(
-        expect.objectContaining({ type: LlmEventType.LoopDetected }),
-      );
-      expect(
-        events.filter((event) => event.type === LlmEventType.ToolCallRequest),
-      ).toHaveLength(10);
-    });
-
     it('always-on consecutive halt clears all pending calls (uniform with the turn cap)', async () => {
       // skipLoopDetection defaults true, so this also confirms the consecutive
       // guard halts via the always-on path on a mixed batch (distinct calls
@@ -13513,7 +13492,7 @@ Other open files:
         expect(policy.continueAt).not.toHaveBeenCalled();
       });
 
-      it("keeps a host's span and guard options in a Stop hook continuation", async () => {
+      it("keeps a host's span in a Stop hook continuation", async () => {
         installMessageBus(blockStopOnce(), 'Stop');
         notDoneChat();
         mockTurnRunFn.mockImplementation(() => textTurn('not done'));
@@ -13523,13 +13502,11 @@ Other open files:
         await run([{ text: 'Hi' }], 'prompt-stop-hook-host-options', {
           type: SendMessageType.UserQuery,
           interactionSpan,
-          toolLoopGuardsByHost: true,
         });
 
         expect(send.mock.calls[1][3]).toMatchObject({
           type: SendMessageType.Hook,
           interactionSpan,
-          toolLoopGuardsByHost: true,
         });
         expect(tel.startInteractionSpan).not.toHaveBeenCalled();
       });

@@ -46,6 +46,9 @@ import {
 import { resetLocalGitVersionCacheForTesting } from './github.js';
 import { FileTokenStorage } from '../mcp/token-storage/file-token-storage.js';
 import { SkillManager } from '../skills/skill-manager.js';
+import * as skillLoad from '../skills/skill-load.js';
+import * as subagentLoad from '../subagents/subagent-manager.js';
+import * as workflowLoad from '../agents/runtime/workflow-extension.js';
 import { getGlobalDispatcher } from 'undici';
 
 const mockGit = {
@@ -2663,6 +2666,134 @@ describe('extension tests', () => {
   });
 
   describe('loadExtension', () => {
+    it('overlaps independent resource reads and retains discovery metadata', async () => {
+      const extensionDir = writeTree(
+        addExt({ name: 'parallel-suite', addContextFile: true }),
+        {
+          'commands/review.md': 'Review the supplied example.',
+          'skills/valid/SKILL.md':
+            '---\nname: valid\ndescription: Valid skill\n---\nSkill instructions.',
+          'skills/broken/SKILL.md': 'Invalid skill manifest.',
+          'agents/helper.md':
+            '---\nname: helper\ndescription: Valid helper\n---\nAgent instructions.',
+          'agents/blocked.md':
+            '---\nname: blocked\ndescription: Blocked helper\nexecutionBackend: remote\n---\nAgent instructions.',
+          'workflows/audit.js':
+            "export const meta = { name: 'audit', description: 'Audit examples' };\nreturn 1;\n",
+        },
+      );
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const gate = deferred();
+      const completed: string[] = [];
+      const readSkills = skillLoad.loadSkillsFromDir;
+      const readAgents = subagentLoad.loadSubagentFromDir;
+      const readWorkflows = workflowLoad.loadExtensionWorkflows;
+      vi.spyOn(skillLoad, 'loadSkillsFromDir').mockImplementation(
+        async (...args) => {
+          await gate.promise;
+          return readSkills(...args);
+        },
+      );
+      vi.spyOn(subagentLoad, 'loadSubagentFromDir').mockImplementation(
+        async (...args) => {
+          const result = await readAgents(...args);
+          completed.push('agents');
+          return result;
+        },
+      );
+      vi.spyOn(workflowLoad, 'loadExtensionWorkflows').mockImplementation(
+        async (...args) => {
+          const result = await readWorkflows(...args);
+          completed.push('workflows');
+          return result;
+        },
+      );
+      const loading = createExtensionManager().loadExtension(
+        { extensionDir },
+        { throwOnError: true },
+      );
+
+      try {
+        await vi.waitFor(() =>
+          expect(completed).toEqual(
+            expect.arrayContaining(['agents', 'workflows']),
+          ),
+        );
+        gate.resolve();
+        const extension = await loading;
+
+        expect(extension?.commands).toEqual(['review']);
+        expect(extension?.contextFiles).toEqual([
+          path.join(extensionDir, 'QWEN.md'),
+        ]);
+        expect(extension?.skills?.map((skill) => skill.name)).toEqual([
+          'valid',
+        ]);
+        expect(extension?.skillsDiscoveryHasErrors).toBe(true);
+        expect(extension?.agents?.map((agent) => agent.name)).toEqual([
+          'helper',
+        ]);
+        expect(extension?.agentExecutorRefusals?.has('blocked')).toBe(true);
+        expect(extension?.workflows?.map((workflow) => workflow.name)).toEqual([
+          'parallel-suite:audit',
+        ]);
+      } finally {
+        gate.resolve();
+        await loading;
+      }
+    });
+
+    it.each([false, true])(
+      'drains resource reads before handling the first ordered error (throwOnError=%s)',
+      async (throwOnError) => {
+        const extensionDir = addExt({ name: 'failed-parallel-suite' });
+        const first = deferred();
+        const sibling = deferred();
+        const firstError = new Error('skills failed');
+        const laterError = new Error('agents failed earlier');
+        let firstRejected = false;
+        let settled = false;
+        vi.spyOn(skillLoad, 'loadSkillsFromDir').mockImplementation(
+          async () => {
+            await first.promise;
+            firstRejected = true;
+            throw firstError;
+          },
+        );
+        const agents = vi
+          .spyOn(subagentLoad, 'loadSubagentFromDir')
+          .mockRejectedValue(laterError);
+        vi.spyOn(workflowLoad, 'loadExtensionWorkflows').mockImplementation(
+          async () => {
+            await sibling.promise;
+            return [];
+          },
+        );
+        const outcome = createExtensionManager()
+          .loadExtension({ extensionDir }, { throwOnError })
+          .then(
+            (extension) => extension,
+            (error: unknown) => error,
+          );
+        void outcome.then(() => {
+          settled = true;
+        });
+
+        try {
+          await vi.waitFor(() => expect(agents).toHaveBeenCalledOnce());
+          first.resolve();
+          await vi.waitFor(() => expect(firstRejected).toBe(true));
+          expect(settled).toBe(false);
+          sibling.resolve();
+          expect(await outcome).toBe(throwOnError ? firstError : null);
+        } finally {
+          first.resolve();
+          sibling.resolve();
+          await outcome;
+        }
+      },
+    );
+
     it('uses the injected extension store root for discovery', async () => {
       const customExtensionsDir = path.join(tempHomeDir, 'custom-extensions');
       createExtension({
