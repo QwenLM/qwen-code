@@ -48,6 +48,7 @@ import type {
 import type { PermissionPolicy } from './permission.js';
 import type { BridgeExecutionEngine } from './bridgeOptions.js';
 import type {
+  DaemonSessionArtifact,
   SessionArtifactInput,
   SessionArtifactMutationResult,
   SessionArtifactsEnvelope,
@@ -847,6 +848,12 @@ export interface BridgeRestoredSession extends BridgeSession {
   state: BridgeSessionState;
   /** Artifact restore warnings surfaced during session load/resume. */
   artifactWarnings?: string[];
+  /**
+   * Restored artifact snapshot embedded in the restore response so clients can
+   * surface a session-level artifact entry before the replay renders. Omitted
+   * when the session has no artifacts.
+   */
+  artifacts?: DaemonSessionArtifact[];
   /** True when response-mode history replay aborted after emitting a prefix. */
   partial?: true;
   /** Agent-provided replay failure detail when `partial` is true. */
