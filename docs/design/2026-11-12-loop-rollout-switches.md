@@ -2,7 +2,7 @@
 
 [English](2026-11-12-loop-rollout-switches.md) | [简体中文](2026-11-12-loop-rollout-switches.zh-CN.md)
 
-- **Status**: slice 1 (nightly legs) merged as #17050; slice 2 (per-surface defaults) in implementation; slice 3 not started; slice 4 delivered by #17172.
+- **Status**: slice 1 (nightly legs) merged as #17050; slice 2 (per-surface defaults) merged as #17055, its schema-default step done with the headless default flip; slice 3 not started; slice 4 delivered by #17172.
 - **Tracker**: #17045, block B. The ladder, the rollout rules and the capability ledger belong to the unified-loop design (`2026-10-23-unified-agent-loop.md`), the event-bus design (`2026-11-11-event-bus-agent-loop.md`) and block A of #17045; this document designs only the switch mechanics and signals that block B owns.
 - **Checked at**: upstream `acc07c2eb0` (2026-11-12).
 
@@ -65,9 +65,9 @@ The Linux matrix gains a third `agent-loop` value, `kernel`, and the OpenTUI job
 
 1. the environment variable, when it addresses that surface;
 2. the explicit setting (`experimental.unifiedAgentLoop` / `experimental.eventBusAgentLoop`), when set;
-3. the surface's built-in default — `false` for every surface today; a later PR flips one surface's default and only that surface's.
+3. the surface's built-in default — `true` for headless and the Ink TUI, `false` for every other surface; each rollout PR flips one surface's default and only that surface's.
 
-**Surface identifiers.** `headless`, `acp`, `ink`, `opentui`, `agent-core`, `speculation`. They name the loop entry points, not the packages: the Ink TUI is `ink`, the OpenTUI renderer is `opentui`, subagents on AgentCore are `agent-core`.
+**Surface identifiers.** `headless`, `acp`, `ink`, `opentui`, `agent-core`, `speculation`, `hosted`. They name the loop entry points, not the packages: the Ink TUI is `ink`, the OpenTUI renderer is `opentui`, subagents on AgentCore are `agent-core`, and the Hosted Harness is `hosted` — it opens model rounds only, while its journaled tool dispatch stays in `hosted-harness-model.ts`.
 
 **Environment variable grammar.** Both `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` and `QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP` accept:
 
@@ -79,7 +79,7 @@ Tokens are trimmed; empty tokens are ignored; an unknown surface name is ignored
 
 **Getter shape.** `Config.isUnifiedAgentLoopEnabled(surface)` and `Config.isEventBusAgentLoopEnabled(surface)` take the surface identifier; every call site names its surface. AgentCore's `runtimeContext` hook passes `agent-core`. The speculation read site (#17029, merged) passes `speculation`. The kernel flag still does nothing where the shared loop is off — resolution is per-switch, and the kernel only applies inside `runAgentLoop`.
 
-**Setting becomes tri-state at runtime.** The CLI stops collapsing unset to `false` (`packages/cli/src/config/config.ts:2920` today does `?? false`); the core parameter becomes `boolean | undefined`. The merged settings already leave unset keys undefined — the loader does not materialize schema defaults (pinned at `packages/cli/src/config/settings.test.ts:4624`) — so the runtime distinguishes "not set" from "explicitly off" without any schema change. The schema entries **keep** `default: false` for now: `nextBooleanSettingValue` (`packages/cli/src/config/settingsUtils.ts:687`) writes `false` on the first toggle of an unset boolean when the schema default is undefined, which would flip today's first-toggle-enables behavior in both settings dialogs. The schema default is removed when the first surface's built-in default flips, together with a dialog treatment for the unset state; the Web Shell settings panel reads effective values, not schema defaults, and is unaffected either way.
+**Setting becomes tri-state at runtime.** The CLI stops collapsing unset to `false` (`packages/cli/src/config/config.ts:2920` today does `?? false`); the core parameter becomes `boolean | undefined`. The merged settings already leave unset keys undefined — the loader does not materialize schema defaults (pinned at `packages/cli/src/config/settings.test.ts:4624`) — so the runtime distinguishes "not set" from "explicitly off" without any schema change. The schema entries kept `default: false` until then, and `experimental.eventBusAgentLoop` still does: `nextBooleanSettingValue` (`packages/cli/src/config/settingsUtils.ts:687`) writes `false` on the first toggle of an unset boolean when the schema default is undefined, which would flip today's first-toggle-enables behavior in both settings dialogs. The schema default is removed when the first surface's built-in default flips, together with a dialog treatment for the unset state: the setting declares `unsetToggleValue: true`, so the first toggle of an unset value still writes `true` in both dialogs and in `/config`; the Web Shell settings panel reads effective values, not schema defaults, and is unaffected either way.
 
 **Parity arms forced.** In the same PR: the ACP parity's off arm sets the env var to `'0'` instead of deleting it; the TUI off arm already pins `'0'` (slice 1), and slice 2 makes `'0'` mean force-off. The headless parity keeps its explicit per-arm settings. With slice 2's force-off semantics, `'0'` pins the off arm regardless of any default; before slice 2 lands, `'0'` is inert (only `'1'` is read), so the ACP parity change is safe to land together with the mechanism.
 
@@ -114,7 +114,7 @@ All five parity CI issues were classified as test-harness races, not loop regres
 - The loop contract (`AgentLoopHost`, `runAgentLoop` options) has one owner at a time (#17045 block C); slice 2 changes the Config getters, not the contract, but the getter signature is shared with #17029 (speculation) — coordinate the landing order.
 - The force-off split with PR 17048 is order-sensitive: its `current`-leg pin must land before the first surface default flip, and its `true`/`false` spellings must stay whole-value only when rebased onto the per-surface resolver. This slice flips no default and accepts only `1`/`0` as whole values, so it is safe in either landing order.
 - The kernel leg runs the headless kernel path nightly before block K's cancellation and bounded close land; a kernel-path failure there is a signal, not a regression of the default path, and must not block the other legs (`fail-fast: false` already guarantees that).
-- The schema default stays until the first surface default flip: removing it earlier would change the settings dialogs' first-toggle behavior (`nextBooleanSettingValue`), which is out of slice 2's scope.
+- The schema default stays until the first surface default flip: removing it earlier would change the settings dialogs' first-toggle behavior (`nextBooleanSettingValue`), which is out of slice 2's scope. The headless default flip removes it together with the dialog treatment.
 - Workflow size ratchet: any `e2e.yml` growth beyond the 4096-byte allowance needs a same-PR baseline bump.
 
 ## Validation plan
@@ -137,6 +137,6 @@ Block B's six checkboxes in #17045 are ticked, each by a merged PR or a recorded
 
 ## Open questions
 
-- ~~Does the settings loader inject schema defaults into the merged settings object?~~ Resolved while preparing slice 1: it does not — the merged settings leave unset keys undefined (`packages/cli/src/config/settings.test.ts:4624` pins this for `goals.modelProposed`), so the runtime tri-state only needs the CLI to stop collapsing unset to `false`. The schema keeps `default: false` until the first surface default flips: removing it earlier would flip both settings dialogs' first toggle from enable to disable via `nextBooleanSettingValue` (`packages/cli/src/config/settingsUtils.ts:687`), so the schema-default removal is deferred to that flip, not part of the tri-state itself.
+- ~~Does the settings loader inject schema defaults into the merged settings object?~~ Resolved while preparing slice 1: it does not — the merged settings leave unset keys undefined (`packages/cli/src/config/settings.test.ts:4624` pins this for `goals.modelProposed`), so the runtime tri-state only needs the CLI to stop collapsing unset to `false`. The schema keeps `default: false` until the first surface default flips: removing it earlier would flip both settings dialogs' first toggle from enable to disable via `nextBooleanSettingValue` (`packages/cli/src/config/settingsUtils.ts:687`), so the schema-default removal is deferred to that flip, not part of the tri-state itself. The headless flip removes it and sets `unsetToggleValue: true`, which keeps the first toggle enabling.
 - ~~Should the env list grammar accept bare `0`/`1` tokens inside a list (e.g. `1,acp=0`)?~~ Decided: no — the whole-value `1`/`0` alone means "all surfaces"; a bare `1`/`0` inside a list has no surface name and is dropped. This is stated in the user-facing text and pinned by a resolution-module test.
 - ~~#17029's speculation read site: land slice 2 before or after it?~~ Resolved: #17029 merged and its read site passes `speculation`; this slice kept the required-surface signature and adapted the call site.

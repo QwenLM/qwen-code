@@ -30,6 +30,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.TerminalHoldAdmission;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.protocol.ProviderRuntimeProtocol;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBindingRegistry.BindingContext;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBindingRegistry.SessionContext;
@@ -54,7 +55,6 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
-import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -70,9 +70,11 @@ import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.i
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.isPublicationV3;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.mapFailure;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.mapStoreFailure;
+import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.newScheduler;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.prepareExecutionReference;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.referenceString;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.requireOpen;
+import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.requireDuration;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.requireSameSession;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.safeStage;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.sameReceipt;
@@ -307,6 +309,10 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
 
     public boolean supportsDrainedStop() {
         return provisioner.supportsDrainedStop();
+    }
+
+    public boolean supportsDrainedStopKind(String kind) {
+        return provisioner.supportsDrainedStopKind(kind);
     }
 
     public boolean supportsDrainedStop(RuntimeBindingRecord binding) {
@@ -1054,6 +1060,15 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                                 || isProtocolV3(record.getReference())
                                     && !"run_shell_command".equals(toolName) && !"monitor".equals(toolName)) {
                             throw invalid("runtime_payload_invalid", "Tool payload is invalid");
+                        }
+                        if (WorkspaceExecutionProfile.isExternalWorkspaceRequest(context.binding().getRequest())
+                                && (v3 || record.getReference().containsKey("runtimeProtocol")
+                                        || !Set.of("read_file", "write_file", "edit", "glob").contains(toolName))) {
+                            executionRepository.settlePrepared(record, Map.of(
+                                    "executionStatus", "not_started", "responseParts", List.of(),
+                                    "error", Map.of("type", "workspace_tool_unsupported",
+                                            "message", "External Workspace requires a file Tool v2 payload")), clock.instant());
+                            throw invalid("runtime_payload_invalid", "External Workspace requires a file Tool v2 payload");
                         }
                         if (CsiFilesRetirementProfile.isProfile(context.binding().getRequest().getScope())
                                 && (v3 || !Set.of("read_file", "write_file", "edit").contains(toolName))) {
@@ -1871,23 +1886,6 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         // alone and fences a lapsed EXECUTING or CANCEL_REQUESTED record.
         return !record.isTerminal()
                 && record.getState() != ToolExecutionRecord.State.UNKNOWN;
-    }
-
-    private static Duration requireDuration(Duration duration,
-            String name) {
-        if (duration == null || duration.isZero() || duration.isNegative()) {
-            throw new IllegalArgumentException(name + " must be positive");
-        }
-        return duration;
-    }
-
-    private static ScheduledExecutorService newScheduler() {
-        return Executors.newSingleThreadScheduledExecutor(runnable -> {
-            Thread thread = new Thread(runnable,
-                    "qwen-runtime-broker-coordination");
-            thread.setDaemon(true);
-            return thread;
-        });
     }
 
     // Renewals run their synchronous JDBC on their own pool, so a stalled

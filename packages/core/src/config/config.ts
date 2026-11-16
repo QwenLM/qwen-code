@@ -170,6 +170,7 @@ import {
   UNIFIED_SURFACE_DEFAULTS,
   EVENT_BUS_SURFACE_DEFAULTS,
   type AgentLoopSurface,
+  type AgentLoopPath,
 } from './agent-loop-rollout.js';
 import { ApprovalMode } from './approval-mode.js';
 
@@ -179,6 +180,7 @@ import { InputFormat, OutputFormat } from '../output/types.js';
 import { PromptRegistry } from '../prompts/prompt-registry.js';
 import { ResourceRegistry } from '../resources/resource-registry.js';
 import { SkillManager } from '../skills/skill-manager.js';
+import { clearCollectedSkillEntriesCache } from '../tools/skill-utils.js';
 import { maybeRunAutoSkillCurator } from '../skills/skill-curator.js';
 import {
   authoredSkillName,
@@ -4241,6 +4243,8 @@ export class Config {
   private async initializeOnce(
     options?: ConfigInitializeOptions,
   ): Promise<void> {
+    const ripgrepAbort = new AbortController();
+    let ripgrepAvailability: Promise<boolean> | undefined;
     try {
       if (this.shellExecutionSandbox)
         this.shellExecutionSandbox = await probeShellSandbox(
@@ -4263,9 +4267,28 @@ export class Config {
           : undefined,
       );
       await this.bindSessionExecutionEngine();
+      // Overlap ACP's binary health check with resource I/O in this request.
+      if (
+        this.getExperimentalZedIntegration() &&
+        this.getUseRipgrep() &&
+        this.sessionExecutionEngine !== 'managed' &&
+        !this.getExecutionEnvironment() &&
+        !this.shellExecutionSandbox &&
+        !this.getBareMode()
+      ) {
+        ripgrepAvailability = canUseRipgrep(
+          this.getUseBuiltinRipgrep(),
+          AbortSignal.any([
+            ripgrepAbort.signal,
+            this.executionShutdown.signal,
+            ...(options?.signal ? [options.signal] : []),
+          ]),
+        );
+        void ripgrepAvailability.catch(() => undefined);
+      }
       registerSessionProjectDir(this.sessionId, this.storage.getProjectDir());
       this.sessionProjectDirRegistered = true;
-      await this.initializeInternal(options);
+      await this.initializeInternal(options, ripgrepAvailability);
       this.workflowModeReady = true;
       if (this.initialWorkflowMode !== undefined) {
         const enabled = this.initialWorkflowMode;
@@ -4303,6 +4326,9 @@ export class Config {
         });
       }
       throw error;
+    } finally {
+      ripgrepAbort.abort();
+      await ripgrepAvailability?.catch(() => undefined);
     }
   }
 
@@ -4329,6 +4355,7 @@ export class Config {
 
   private async initializeInternal(
     options?: ConfigInitializeOptions,
+    ripgrepAvailability?: Promise<boolean>,
   ): Promise<void> {
     this.debugLogger.info('Config initialization started');
     await this.proxyDispatcherReady;
@@ -4898,6 +4925,7 @@ export class Config {
     this.toolRegistry = await this.createToolRegistry(
       options?.sendSdkMcpMessage,
       skipInlineMcpDiscovery ? { skipDiscovery: true } : undefined,
+      ripgrepAvailability,
     );
     options?.signal?.throwIfAborted();
     recordStartupEvent('config_initialize_tool_registry_end');
@@ -10861,6 +10889,20 @@ export class Config {
   }
 
   /**
+   * The loop path a surface runs: unified off -> legacy; otherwise the kernel
+   * only when the event-bus switch is on AND the surface's execution branch
+   * actually enters it, else shared. Speculation and the Hosted Harness never
+   * read the event-bus switch (their rounds always run on the shared loop), so
+   * both are capped at shared even with both switches on.
+   */
+  getAgentLoopPath(surface: AgentLoopSurface): AgentLoopPath {
+    if (!this.isUnifiedAgentLoopEnabled(surface)) return 'legacy';
+    if (!this.isEventBusAgentLoopEnabled(surface)) return 'shared';
+    if (surface === 'speculation' || surface === 'hosted') return 'shared';
+    return 'kernel';
+  }
+
+  /**
    * Whether persistent workspace Agents may answer @-mentions in chat
    * sessions.
    *
@@ -13260,6 +13302,9 @@ export class Config {
     provider: () => ReadonlyArray<{ name: string; description: string }>,
   ): void {
     this.modelInvocableCommandsProvider = provider;
+    if (this.skillManager) {
+      clearCollectedSkillEntriesCache(this.skillManager);
+    }
   }
 
   /**
@@ -13619,6 +13664,7 @@ export class Config {
   async createToolRegistry(
     sendSdkMcpMessage?: SendSdkMcpMessage,
     options?: { skipDiscovery?: boolean; forSubAgent?: boolean },
+    ripgrepAvailability?: Promise<boolean>,
   ): Promise<ToolRegistry> {
     const registry = new ToolRegistry(
       this,
@@ -13910,7 +13956,8 @@ export class Config {
       let errorString: undefined | string = undefined;
       recordStartupEvent('config_initialize_ripgrep_probe_start');
       try {
-        useRipgrep = await canUseRipgrep(this.getUseBuiltinRipgrep());
+        useRipgrep = await (ripgrepAvailability ??
+          canUseRipgrep(this.getUseBuiltinRipgrep()));
       } catch (error: unknown) {
         errorString = getErrorMessage(error);
       }

@@ -52,35 +52,25 @@ function clampStickyTodoVisibleItems(value: number): number {
 function extractTodosFromResultDisplay(
   resultDisplay: unknown,
 ): TodoItem[] | null {
-  if (!resultDisplay) {
-    return null;
-  }
+  if (!resultDisplay) return null;
 
-  if (typeof resultDisplay === 'object') {
-    const candidate = resultDisplay as Record<string, unknown>;
-    if (
-      candidate['type'] === 'todo_list' &&
-      Array.isArray(candidate['todos'])
-    ) {
-      if (candidate['unchanged'] === true) {
-        return null;
-      }
-      return candidate['todos'] as TodoItem[];
-    }
-  }
-
-  if (typeof resultDisplay === 'string') {
+  let candidate: unknown = resultDisplay;
+  if (typeof candidate === 'string') {
     try {
-      const parsed = JSON.parse(resultDisplay) as Record<string, unknown>;
-      if (parsed['type'] === 'todo_list' && Array.isArray(parsed['todos'])) {
-        return parsed['todos'] as TodoItem[];
-      }
+      candidate = JSON.parse(candidate);
     } catch {
       return null;
     }
   }
 
-  return null;
+  if (typeof candidate !== 'object' || candidate === null) return null;
+
+  const record = candidate as Record<string, unknown>;
+  if (record['type'] !== 'todo_list' || !Array.isArray(record['todos'])) {
+    return null;
+  }
+  if (record['unchanged'] === true) return null;
+  return record['todos'] as TodoItem[];
 }
 
 function findLatestTodoSnapshot(

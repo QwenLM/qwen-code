@@ -56,6 +56,7 @@ class SessionCreationCommandContractTest {
         assertThat(command.planModeSupported()).isFalse();
         assertThat(command.skills()).isEmpty();
         assertThat(command.publicChildrenSupported()).isFalse();
+        assertThat(command.sessionSkillsSupported()).isFalse();
         assertThat(command.modelId()).isNull();
         assertThat(command.extensionPins()).isNull();
         assertThat(command.extensionSelection()).isNull();
@@ -68,7 +69,7 @@ class SessionCreationCommandContractTest {
         var extensionSelection = new ExtensionPackages.Selection() { };
         assertThat(SessionCreationCommand.builder().extensionSelection(extensionSelection).build().extensionSelection())
                 .isSameAs(extensionSelection);
-        assertThat(SessionCreationCommand.class.getRecordComponents()).hasSize(23);
+        assertThat(SessionCreationCommand.class.getRecordComponents()).hasSize(24);
     }
 
     @Test
