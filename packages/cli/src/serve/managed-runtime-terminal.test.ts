@@ -18,7 +18,10 @@ import {
   WebTerminalRegistry,
   WEB_TERMINAL_FAILURE_EXIT_CODE,
 } from '@qwen-code/qwen-code-core/services/web-terminal-registry.js';
-import { slowHostBudgetMs } from '../test-utils/slow-test-host.js';
+import {
+  isSlowTestHost,
+  slowHostBudgetMs,
+} from '../test-utils/slow-test-host.js';
 
 const IDENTITY = { token: 'test-token', leaseId: 'lease-1', epoch: 7 };
 const WORKSPACE_CWD = process.cwd();
@@ -31,10 +34,14 @@ const WAIT_TIMEOUT_MS = slowHostBudgetMs(15_000, 45_000);
 // (a connect wait and an echo wait each), plus the refused extra attach and
 // the close wait after a release.
 const MAX_CHAIN_WINDOWS = (MAX_MANAGED_SESSION_TERMINALS + 2) * 2 + 2;
-// One extra window absorbs setup outside those waits. File-wide so vitest
-// never decides before a watchdog, whichever test owns the chain.
-const TEST_TIMEOUT_MS = WAIT_TIMEOUT_MS * (MAX_CHAIN_WINDOWS + 1);
-vi.setConfig({ testTimeout: TEST_TIMEOUT_MS });
+// One extra window absorbs setup outside those waits. The ceiling is
+// file-wide on a slow host so no test is decided by the pool ceiling before
+// one of its own watchdogs reports. The fast arm stays undefined so it
+// inherits the lane's grant (the config's 15s, macOS's 60s, or the autofix
+// gate's --testTimeout=60000) instead of outranking it.
+const TEST_CEILING = isSlowTestHost()
+  ? WAIT_TIMEOUT_MS * (MAX_CHAIN_WINDOWS + 1)
+  : undefined;
 
 // Counts the watchdog timers a test starts, so the heaviest body can prove it
 // fits inside the declared chain.
@@ -188,14 +195,19 @@ async function attachAndEcho(
   return ws;
 }
 
-describe('ManagedRuntimeTerminals', () => {
+describe('ManagedRuntimeTerminals', { timeout: TEST_CEILING }, () => {
   it('applies a per-test ceiling above the heaviest wait chain', (ctx) => {
-    // File-wide, so no test is killed by the pool ceiling before one of its
-    // own watchdogs reports.
-    expect(ctx.task.timeout).toBe(TEST_TIMEOUT_MS);
-    expect(TEST_TIMEOUT_MS).toBeGreaterThanOrEqual(
-      WAIT_TIMEOUT_MS * MAX_CHAIN_WINDOWS,
-    );
+    if (isSlowTestHost()) {
+      // On a slow host vitest must not decide before a watchdog can report.
+      expect(ctx.task.timeout).toBe(TEST_CEILING);
+      expect(TEST_CEILING).toBeGreaterThanOrEqual(
+        WAIT_TIMEOUT_MS * MAX_CHAIN_WINDOWS,
+      );
+    } else {
+      // The fast arm inherits the lane's grant; a file-owned figure here
+      // would outrank the autofix gate's --testTimeout and hide a hang.
+      expect(ctx.task.timeout).toBeLessThanOrEqual(60_000);
+    }
   });
 
   it('does not hold teardown on an upgrade the server never answers', async () => {
@@ -436,7 +448,7 @@ describe('ManagedRuntimeTerminals', () => {
   });
 });
 
-describe('ManagedRuntimeTerminals control', () => {
+describe('ManagedRuntimeTerminals control', { timeout: TEST_CEILING }, () => {
   const op = (kind: string, terminalId: string, sessionId: string) => ({
     kind,
     operationId: `terminal-attach:${terminalId}:process`,

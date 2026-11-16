@@ -776,6 +776,7 @@ describe('autofix-gate per-file ceiling floor', () => {
   const guarded = [
     'packages/cli/src/ui/auth/SubscriptionDialog.test.tsx',
     'packages/cli/src/serve/server/session-pr-refresh.test.ts',
+    'packages/cli/src/serve/managed-runtime-terminal.test.ts',
     'packages/core/src/hooks/file-changed-watcher.test.ts',
   ];
   it('keeps the tuned suites from overriding the granted testTimeout', () => {
