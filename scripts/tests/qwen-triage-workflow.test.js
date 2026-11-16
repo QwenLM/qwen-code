@@ -6954,6 +6954,19 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(verifySkill).toContain(
       'grep -Eq \'^[0-9a-f]{64}$\' ~/.cache/qwen-verify/pr<n>/pr.sha256 || { echo "prepare printed no valid context-sha256; see prepare.log" >&2; exit 1; }',
     );
+    // R5-3: clear last round's log/digest and gate on prepare's own exit status,
+    // so a failed cd/prepare cannot certify a stale snapshot.
+    expect(verifySkill).toContain(
+      'rm -f ~/.cache/qwen-verify/pr<n>/prepare.log ~/.cache/qwen-verify/pr<n>/pr.sha256',
+    );
+    expect(verifySkill).toContain(
+      '|| { cat ~/.cache/qwen-verify/pr<n>/prepare.log >&2; exit 1; }',
+    );
+    // R5-1 structural: the authoritative snapshot is written straight to a host
+    // destination outside the clone, not copied out of the PR-writable tree.
+    expect(verifySkill).toContain(
+      '--context-out ~/.cache/qwen-verify/pr<n>/pr.json',
+    );
     // Both checker overview spellings carry the binding flag.
     expect(
       verifySkill.split(

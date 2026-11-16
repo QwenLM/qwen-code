@@ -351,16 +351,22 @@ come from `<trusted-clone>`. A PR can rewrite a script in its own tree, and
 these steps run with the real key, the maintainer's `gh` access, or the
 authority to certify the round.
 
-1. **Prepare from the trusted copy with the PR clone as its cwd**, then copy
-   the full snapshot out of the tree and base-pin `.qwen`:
+1. **Prepare from the trusted copy with the PR clone as its cwd**, writing the
+   authoritative snapshot straight to a host destination outside the tree
+   (`--context-out`) and base-pinning `.qwen`:
 
    ```bash
    mkdir -p ~/.cache/qwen-verify/pr<n>
-   cd <pr-clone> && node <trusted-clone>/scripts/verify-pr-prepare.mjs <n> --repo <owner>/<repo> > ~/.cache/qwen-verify/pr<n>/prepare.log 2>&1
+   # Clear last round's log/digest and gate on prepare's own exit status, so a
+   # failed cd/prepare cannot certify a stale snapshot (R5-3).
+   rm -f ~/.cache/qwen-verify/pr<n>/prepare.log ~/.cache/qwen-verify/pr<n>/pr.sha256
+   cd <pr-clone> && node <trusted-clone>/scripts/verify-pr-prepare.mjs <n> --repo <owner>/<repo> --context-out ~/.cache/qwen-verify/pr<n>/pr.json > ~/.cache/qwen-verify/pr<n>/prepare.log 2>&1 || { cat ~/.cache/qwen-verify/pr<n>/prepare.log >&2; exit 1; }
    cat ~/.cache/qwen-verify/pr<n>/prepare.log
    # Hold the content digest host-side (outside the clone) so step 7 can bind
    # the snapshot's bytes; a path/link-count check alone cannot prove the host
-   # wrote the copy (R2-1).
+   # wrote the copy (R2-1). --context-out wrote the authoritative snapshot
+   # straight to the host destination, so it never transits the PR-writable tree
+   # (R5-1); no cp out of the clone is needed.
    sed -n 's/^  context-sha256  //p' ~/.cache/qwen-verify/pr<n>/prepare.log > ~/.cache/qwen-verify/pr<n>/pr.sha256
    # Fail here, where the cause is visible, rather than at step 7 after the
    # container has run: the digest must be the 64-hex shape the checker requires
@@ -368,7 +374,6 @@ authority to certify the round.
    grep -Eq '^[0-9a-f]{64}$' ~/.cache/qwen-verify/pr<n>/pr.sha256 || { echo "prepare printed no valid context-sha256; see prepare.log" >&2; exit 1; }
    rm -rf ~/.cache/qwen-verify/pr<n>/qwen-base
    mkdir -p ~/.cache/qwen-verify/pr<n>/qwen-base
-   cp <pr-clone>/tmp/verify-context/pr<n>.json ~/.cache/qwen-verify/pr<n>/pr.json
    rm -f ~/.cache/qwen-verify/pr<n>/review-threads.json
    if [ -f <pr-clone>/tmp/verify-context/pr<n>-review-threads.json ]; then
      cp <pr-clone>/tmp/verify-context/pr<n>-review-threads.json ~/.cache/qwen-verify/pr<n>/review-threads.json

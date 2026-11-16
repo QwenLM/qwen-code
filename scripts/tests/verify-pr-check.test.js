@@ -27,6 +27,7 @@ import {
   checkArtifacts,
   checkBoundary,
   checkMutationCoverage,
+  isFilesystemRoot,
 } from '../../scripts/verify-pr-check.mjs';
 
 const SCRIPT = fileURLToPath(
@@ -2799,5 +2800,23 @@ describe('R17-1 / R2-1 trust-boundary witnesses', () => {
     expect(res.stdout).toMatch(
       /no --context-sha256 binding; provenance rests on the path\/link checks alone/,
     );
+  });
+});
+
+// Runs on every lane (not Unix-gated): the drive-root arm must be exercised
+// even where the CLI root witnesses skip (R5-2).
+describe('isFilesystemRoot', () => {
+  it('treats a POSIX root and a Windows drive root as filesystem roots', () => {
+    expect(isFilesystemRoot('/')).toBe(true);
+    expect(isFilesystemRoot('C:\\')).toBe(true);
+    expect(isFilesystemRoot('C:/')).toBe(true);
+    expect(isFilesystemRoot('d:\\')).toBe(true);
+  });
+
+  it('does not treat a non-root path as a filesystem root', () => {
+    expect(isFilesystemRoot('/tmp')).toBe(false);
+    expect(isFilesystemRoot('C:\\Users')).toBe(false);
+    expect(isFilesystemRoot('C:')).toBe(false);
+    expect(isFilesystemRoot('')).toBe(false);
   });
 });

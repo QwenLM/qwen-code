@@ -9,6 +9,7 @@ import { createHash } from 'node:crypto';
 import {
   chmodSync,
   existsSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -850,6 +851,76 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
       /refusing to write the host snapshot through a symlink/,
     );
     expect(readFileSync(target, 'utf8')).toBe('{}');
+  });
+
+  // R5-1: a symlink one component above the leaves (the tmp/ container) is
+  // followed by mkdirSync before any leaf guard runs; it must be refused before
+  // anything is created. A tracked symlink is unmodified, so the tree gates pass.
+  it('refuses a PR-committed symlink at the tmp container', () => {
+    const { dir, base } = makeRepo();
+    const root = realpathSync(dir);
+    const target = mkdtempSync(join(tmpdir(), 'r5-attacker-'));
+    symlinkSync(target, join(root, 'tmp'));
+    execFileSync('git', ['add', '-f', 'tmp'], { cwd: dir, env: gitEnv });
+    execFileSync('git', ['commit', '--amend', '--no-edit', '-q'], {
+      cwd: dir,
+      env: gitEnv,
+    });
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: dir,
+      env: gitEnv,
+      encoding: 'utf8',
+    }).trim();
+    const env = installFakeGh(snapshotFor({ base, head }));
+    const result = runPrepare(dir, ['42', '--repo', REPO], env);
+    const redirected = existsSync(join(target, 'verify-context'));
+    rmSync(target, { recursive: true, force: true });
+    expect(result.status).toBe(3);
+    expect(result.stderr).toMatch(
+      /refusing to write the host snapshot through a symlink/,
+    );
+    expect(redirected).toBe(false);
+  });
+
+  // R5-4: a hard link at the snapshot path would make writeFileSync truncate a
+  // tracked file the round does not own; the write-side alias rule must refuse.
+  it('refuses a hard link at the snapshot path', () => {
+    const { dir, base, head } = makeRepo();
+    const env = installFakeGh(snapshotFor({ base, head }));
+    const root = realpathSync(dir);
+    const contextDir = join(root, 'tmp', 'verify-context');
+    mkdirSync(contextDir, { recursive: true });
+    const tracked = join(root, 'head.txt');
+    const before = readFileSync(tracked, 'utf8');
+    linkSync(tracked, join(contextDir, 'pr42.json'));
+    const result = runPrepare(dir, ['42', '--repo', REPO], env);
+    expect(result.status).toBe(3);
+    expect(result.stderr).toMatch(/non-single-link file/);
+    expect(readFileSync(tracked, 'utf8')).toBe(before);
+  });
+
+  // R5-1 structural fix: the authoritative snapshot goes straight to a host
+  // destination outside the clone, so it never transits the PR-writable tree.
+  it('writes the authoritative snapshot to --context-out', () => {
+    const { dir, base, head } = makeRepo();
+    const env = installFakeGh(snapshotFor({ base, head }));
+    const hostDir = mkdtempSync(join(tmpdir(), 'r5-context-out-'));
+    const hostPath = join(hostDir, 'pr42.json');
+    const result = runPrepare(
+      dir,
+      ['42', '--repo', REPO, '--context-out', hostPath],
+      env,
+    );
+    expect(result.status).toBe(0);
+    const hostSnap = JSON.parse(readFileSync(hostPath, 'utf8'));
+    expect(hostSnap.headRefOid).toBe(head);
+    expect(hostSnap.repo).toBe(REPO);
+    expect(result.stdout).toContain(`  context    ${hostPath}`);
+    const digest = createHash('sha256')
+      .update(readFileSync(hostPath))
+      .digest('hex');
+    expect(result.stdout).toContain(`  context-sha256  ${digest}`);
+    rmSync(hostDir, { recursive: true, force: true });
   });
 
   // The CI lane writes the same review state beside its metadata, and a round
