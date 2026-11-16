@@ -80,6 +80,36 @@ export async function isCommitAncestor(
   }
 }
 
+/** Three-valued ancestry, for guards where "unknown" must not pass as "no". */
+export type CommitAncestry = 'ancestor' | 'not-ancestor' | 'unanswerable';
+
+/**
+ * Like {@link isCommitAncestor} but distinguishes an answered "not an
+ * ancestor" from a probe that could not answer. `merge-base --is-ancestor`
+ * exits 0 when `ancestor` is an ancestor of `descendant`, 1 when it is not,
+ * and 128 when either object is absent/unreadable (e.g. a pruned base). A
+ * boolean collapse maps both 1 and 128 to false, which a "is it behind?"
+ * guard would misread as "not behind" and promote on an unanswerable base
+ * (R11-14). Callers that must fail closed on an unreadable object use this.
+ */
+export async function probeCommitAncestry(
+  ancestor: string,
+  descendant: string,
+  cwd: string,
+): Promise<CommitAncestry> {
+  try {
+    await execFileAsync(
+      'git',
+      [...NO_EXEC_CONFIG, 'merge-base', '--is-ancestor', ancestor, descendant],
+      { cwd, timeout: GIT_BRANCH_TIMEOUT_MS, env: gitEnv() },
+    );
+    return 'ancestor';
+  } catch (error) {
+    if ((error as { code?: number }).code === 1) return 'not-ancestor';
+    return 'unanswerable';
+  }
+}
+
 export async function getHeadCommit(cwd: string): Promise<string | undefined> {
   try {
     const { stdout } = await execFileAsync(

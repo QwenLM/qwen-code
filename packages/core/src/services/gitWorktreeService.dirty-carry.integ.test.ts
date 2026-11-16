@@ -23,6 +23,7 @@ import {
   GitWorktreeService,
   WorktreeDirtyCarryConflictError,
 } from './gitWorktreeService.js';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
@@ -670,6 +671,43 @@ describe('GitWorktreeService.createUserWorktree() — carryDirtyState', () => {
     expect(created.carriedPaths).toContain('x/y.txt');
   });
 
+  it('does not delete an unrelated file when a rename origin record looks like a deletion (R8-5)', async () => {
+    // A tracked file literally named `aD sub` is renamed; `git status -z`
+    // emits the paired origin record `aD sub`, whose characters a
+    // shape-guessing parser misreads as a deleted path `sub`. With `sub/` a
+    // directory in the source and the target base tracking `sub` as a file,
+    // the misparse would delete the target's unrelated `sub`. The paired
+    // origin record must be skipped structurally.
+    await fs.writeFile(path.join(repoRoot, 'aD sub'), 'rename-me\n');
+    git(repoRoot, 'add', 'aD sub');
+    git(repoRoot, 'commit', '-qm', 'c0', '--no-verify');
+    const service = new GitWorktreeService(repoRoot);
+    const sibling = await service.createUserWorktree('rename-src', 'main', {
+      detached: true,
+    });
+    expect(sibling.success).toBe(true);
+    const siblingPath = sibling.worktree!.path;
+    // `sub` is an untracked DIRECTORY in the source (not a tracked deletion).
+    await fs.mkdir(path.join(siblingPath, 'sub'));
+    await fs.writeFile(path.join(siblingPath, 'sub', 'inner.txt'), 'u\n');
+    git(siblingPath, 'mv', 'aD sub', 'renamed.txt');
+    // The target base tracks `sub` as a FILE.
+    await fs.writeFile(path.join(repoRoot, 'sub'), 'keep-me\n');
+    git(repoRoot, 'add', 'sub');
+    git(repoRoot, 'commit', '-qm', 'c1', '--no-verify');
+
+    const created = await service.createUserWorktree('rename-target', 'main', {
+      detached: true,
+      carryDirtyState: true,
+      dirtyStateSource: siblingPath,
+    });
+    expect(created.success).toBe(true);
+    const wt = created.worktree!.path;
+    // The unrelated tracked `sub` file must survive the carry.
+    expect(await read(path.join(wt, 'sub'))).toBe('keep-me\n');
+    expect(created.carriedPaths ?? []).not.toContain('sub');
+  });
+
   it('skips an uncopyable untracked entry without aborting the rest of the carry', async () => {
     // The target base tracks out -> outside; the capture predates the link
     // and holds untracked out/escape.txt (uncopyable: the ancestor symlink
@@ -703,49 +741,52 @@ describe('GitWorktreeService.createUserWorktree() — carryDirtyState', () => {
     expect(created.carriedPaths ?? []).not.toContain('out/escape.txt');
   });
 
-  it('createUserWorktree carry refuses when stash create fails on an unwritable object store (R8-6)', async () => {
-    // A tracked edit exists, but `git stash create` cannot write the stash
-    // commit. A held index.lock is NOT a portable injection: stash create
-    // does not lock the index (only apply/reset do), so it sailed through on
-    // the CI fleet's git. An unwritable object store blocks the create on
-    // every git build/user, while worktree add (which only reads objects)
-    // still succeeds first. An empty carry here is NOT a clean source: the
-    // carry-requested creation must refuse rather than relocate the session
-    // without the user's edits and report success with an empty overlay.
-    await fs.writeFile(path.join(repoRoot, 'README.md'), 'edited\n');
-    const gitDir = git(repoRoot, 'rev-parse', '--absolute-git-dir');
-    const objectsDir = path.join(gitDir, 'objects');
-    // Block every object-write path: the objects dir itself (new fanout
-    // mkdir) and any existing fanout/pack subdirs (new loose object / pack).
-    const setObjectsMode = async (mode: number) => {
-      await fs.chmod(objectsDir, mode).catch(() => undefined);
-      for (const entry of await fs.readdir(objectsDir).catch(() => [])) {
-        const p = path.join(objectsDir, entry);
-        if ((await fs.lstat(p).catch(() => null))?.isDirectory()) {
-          await fs.chmod(p, mode).catch(() => undefined);
+  it.skipIf(!arePermissionBitsEnforced())(
+    'createUserWorktree carry refuses when stash create fails on an unwritable object store (R8-6)',
+    async () => {
+      // A tracked edit exists, but `git stash create` cannot write the stash
+      // commit. A held index.lock is NOT a portable injection: stash create
+      // does not lock the index (only apply/reset do), so it sailed through on
+      // the CI fleet's git. An unwritable object store blocks the create on
+      // every git build/user, while worktree add (which only reads objects)
+      // still succeeds first. An empty carry here is NOT a clean source: the
+      // carry-requested creation must refuse rather than relocate the session
+      // without the user's edits and report success with an empty overlay.
+      await fs.writeFile(path.join(repoRoot, 'README.md'), 'edited\n');
+      const gitDir = git(repoRoot, 'rev-parse', '--absolute-git-dir');
+      const objectsDir = path.join(gitDir, 'objects');
+      // Block every object-write path: the objects dir itself (new fanout
+      // mkdir) and any existing fanout/pack subdirs (new loose object / pack).
+      const setObjectsMode = async (mode: number) => {
+        await fs.chmod(objectsDir, mode).catch(() => undefined);
+        for (const entry of await fs.readdir(objectsDir).catch(() => [])) {
+          const p = path.join(objectsDir, entry);
+          if ((await fs.lstat(p).catch(() => null))?.isDirectory()) {
+            await fs.chmod(p, mode).catch(() => undefined);
+          }
         }
+      };
+      await setObjectsMode(0o555);
+      const service = new GitWorktreeService(repoRoot);
+      let created: Awaited<ReturnType<typeof service.createUserWorktree>>;
+      try {
+        created = await service.createUserWorktree('objfail', 'main', {
+          detached: true,
+          carryDirtyState: true,
+        });
+      } finally {
+        await setObjectsMode(0o755);
       }
-    };
-    await setObjectsMode(0o555);
-    const service = new GitWorktreeService(repoRoot);
-    let created: Awaited<ReturnType<typeof service.createUserWorktree>>;
-    try {
-      created = await service.createUserWorktree('objfail', 'main', {
-        detached: true,
-        carryDirtyState: true,
-      });
-    } finally {
-      await setObjectsMode(0o755);
-    }
-    expect(created.success).toBe(false);
-    expect(created.error).toContain('dirty state');
-    // No checkout left behind for a refused carry.
-    await expect(
-      fs.lstat(service.getUserWorktreePath('objfail')),
-    ).rejects.toThrow();
-    // The source edit is untouched.
-    expect(await read(path.join(repoRoot, 'README.md'))).toBe('edited\n');
-  });
+      expect(created.success).toBe(false);
+      expect(created.error).toContain('dirty state');
+      // No checkout left behind for a refused carry.
+      await expect(
+        fs.lstat(service.getUserWorktreePath('objfail')),
+      ).rejects.toThrow();
+      // The source edit is untouched.
+      expect(await read(path.join(repoRoot, 'README.md'))).toBe('edited\n');
+    },
+  );
 
   it('writes the exclude rule for an in-root directory named ..cache', async () => {
     // A '..' PREFIX is not a parent segment: a service rooted under an
@@ -818,39 +859,42 @@ describe('GitWorktreeService.createUserWorktree() — carryDirtyState', () => {
     ).toBe('bulk\n');
   });
 
-  it('applyStashSnapshot fails closed when the target index is unwritable (R6-2)', async () => {
-    // A non-conflict apply failure (unwritable index) must not resolve:
-    // the handoff would otherwise report a dirty carry that never landed.
-    await fs.writeFile(path.join(repoRoot, 'f.txt'), 'one\n');
-    git(repoRoot, 'add', 'f.txt');
-    git(repoRoot, 'commit', '-qm', 'f', '--no-verify');
-    const service = new GitWorktreeService(repoRoot);
-    const target = await service.createUserWorktree('snap-lock', 'main', {
-      detached: true,
-    });
-    expect(target.success).toBe(true);
-    const targetPath = target.worktree!.path;
-    await fs.writeFile(path.join(targetPath, 'f.txt'), 'two\n');
-    const snapshot = await service.createStashSnapshot(targetPath);
-    expect(snapshot).not.toBe('');
-    git(targetPath, 'checkout', '--', 'f.txt');
-    // Deny index writes by permission rather than a held index.lock: the
-    // lock proved non-portable across the CI fleet's git builds, while a
-    // read-only git directory blocks every index-write path and bites for
-    // both non-root developers and the root-run CI lane (which drops
-    // DAC_OVERRIDE precisely so permission fixtures work).
-    const gitDir = git(targetPath, 'rev-parse', '--absolute-git-dir');
-    await fs.chmod(gitDir, 0o555);
-    try {
-      await expect(
-        service.applyStashSnapshot(targetPath, snapshot),
-      ).rejects.toThrow('failed to apply');
-      // The dirty change never landed.
-      expect(await read(path.join(targetPath, 'f.txt'))).toBe('one\n');
-    } finally {
-      await fs.chmod(gitDir, 0o755);
-    }
-  });
+  it.skipIf(!arePermissionBitsEnforced())(
+    'applyStashSnapshot fails closed when the target index is unwritable (R6-2)',
+    async () => {
+      // A non-conflict apply failure (unwritable index) must not resolve:
+      // the handoff would otherwise report a dirty carry that never landed.
+      await fs.writeFile(path.join(repoRoot, 'f.txt'), 'one\n');
+      git(repoRoot, 'add', 'f.txt');
+      git(repoRoot, 'commit', '-qm', 'f', '--no-verify');
+      const service = new GitWorktreeService(repoRoot);
+      const target = await service.createUserWorktree('snap-lock', 'main', {
+        detached: true,
+      });
+      expect(target.success).toBe(true);
+      const targetPath = target.worktree!.path;
+      await fs.writeFile(path.join(targetPath, 'f.txt'), 'two\n');
+      const snapshot = await service.createStashSnapshot(targetPath);
+      expect(snapshot).not.toBe('');
+      git(targetPath, 'checkout', '--', 'f.txt');
+      // Deny index writes by permission rather than a held index.lock: the
+      // lock proved non-portable across the CI fleet's git builds, while a
+      // read-only git directory blocks every index-write path and bites for
+      // both non-root developers and the root-run CI lane (which drops
+      // DAC_OVERRIDE precisely so permission fixtures work).
+      const gitDir = git(targetPath, 'rev-parse', '--absolute-git-dir');
+      await fs.chmod(gitDir, 0o555);
+      try {
+        await expect(
+          service.applyStashSnapshot(targetPath, snapshot),
+        ).rejects.toThrow('failed to apply');
+        // The dirty change never landed.
+        expect(await read(path.join(targetPath, 'f.txt'))).toBe('one\n');
+      } finally {
+        await fs.chmod(gitDir, 0o755);
+      }
+    },
+  );
 
   it('applyStashSnapshot refuses a conflicting apply and restores committed state (R6-2)', async () => {
     await fs.writeFile(path.join(repoRoot, 'f.txt'), 'line1\nBASE\nline3\n');

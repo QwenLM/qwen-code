@@ -14,6 +14,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -193,9 +194,17 @@ function makeFixture(
     },
     setSessionWorktree: (...args: unknown[]) => {
       setWorktreeCalls.push(args);
+      const id = args[0] as string;
+      const wt = args[1] as { path: string } | undefined;
+      const s = workspaceSessions.find((x) => x.sessionId === id);
+      if (s) s.worktree = wt ? { path: wt.path } : undefined;
     },
     clearSessionWorktree: (id: string) => {
       clearWorktreeCalls.push(id);
+      // A handed-off session becomes a local (non-worktree) occupant, which
+      // the occupancy guard must see for a concurrent second handoff (R11-1).
+      const s = workspaceSessions.find((x) => x.sessionId === id);
+      if (s) s.worktree = undefined;
     },
     setSessionResetPending: (id: string) => {
       resetPendingCalls.push(['set', id]);
@@ -646,6 +655,224 @@ describe('POST /session/:id/worktree-handoff', () => {
     expect(git(fixture.workspaceDir, 'branch', '--list', 'worktree-*')).toBe(
       '',
     );
+  });
+
+  it('refuses a recorded branch whose tip is behind the base (R10-1)', async () => {
+    const fixture = makeFixture();
+    fixture.writeTranscript();
+    writeFileSync(path.join(fixture.workspaceDir, 'second.txt'), 'second\n');
+    git(fixture.workspaceDir, 'add', 'second.txt');
+    git(fixture.workspaceDir, 'commit', '-qm', 'second', '--no-verify');
+    const base = git(fixture.workspaceDir, 'rev-parse', 'HEAD');
+    await fixture.createDetachedWorktree();
+    // Reset behind the base, then record a branch ("Create branch here"). The
+    // behind-base guard must apply to the recorded-branch shape too, not just
+    // the detached promotion.
+    git(fixture.worktreeDir, 'reset', '--hard', 'HEAD~1');
+    const branchRes = await request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-branch`)
+      .send({ name: 'feat/behind' });
+    expect(branchRes.status).toBe(200);
+
+    const res = await request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-handoff`)
+      .send({ to: 'local' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('worktree_head_behind_base');
+    expect(git(fixture.workspaceDir, 'rev-parse', 'HEAD')).toBe(base);
+    expect(git(fixture.workspaceDir, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe(
+      'main',
+    );
+  });
+
+  it('refuses when the recorded base object is unreadable (R11-14)', async () => {
+    const fixture = makeFixture();
+    fixture.writeTranscript();
+    await fixture.createDetachedWorktree();
+    const head = git(fixture.worktreeDir, 'rev-parse', 'HEAD');
+    // A syntactically valid but absent base SHA (a pruned sibling's tip): the
+    // ancestry probe cannot answer and must fail closed, not promote.
+    await writeWorktreeSession(
+      fixture.sessionService.getWorktreeSessionPath(fixture.sessionId),
+      {
+        slug: fixture.slug,
+        worktreePath: fixture.worktreeDir,
+        worktreeBranch: '',
+        originalCwd: fixture.workspaceDir,
+        workspaceCwd: fixture.workspaceDir,
+        originalBranch: 'main',
+        originalHeadCommit: head,
+        worktreeBase: '0123456789abcdef0123456789abcdef01234567',
+      },
+    );
+
+    const res = await request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-handoff`)
+      .send({ to: 'local' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('worktree_handoff_base_unavailable');
+    expect(git(fixture.workspaceDir, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe(
+      'main',
+    );
+  });
+
+  it('refuses a divergent-base handoff whose checkout would rewind local work (R11-6)', async () => {
+    const fixture = makeFixture();
+    fixture.writeTranscript();
+    await fixture.createDetachedWorktree();
+    const base = git(fixture.workspaceDir, 'rev-parse', 'HEAD');
+    // Agent commits in the worktree (a child of the base, not of the local
+    // commit below); the user then commits locally, diverging from it.
+    writeFileSync(path.join(fixture.worktreeDir, 'agent.txt'), 'agent\n');
+    git(fixture.worktreeDir, 'add', 'agent.txt');
+    git(fixture.worktreeDir, 'commit', '-qm', 'agent', '--no-verify');
+    writeFileSync(path.join(fixture.workspaceDir, 'local.txt'), 'local\n');
+    git(fixture.workspaceDir, 'add', 'local.txt');
+    git(fixture.workspaceDir, 'commit', '-qm', 'local', '--no-verify');
+    const localHead = git(fixture.workspaceDir, 'rev-parse', 'HEAD');
+    // The branch-route shape records originalHeadCommit=localHead (so the
+    // moved-ahead gate sees localHead===gateBase) and worktreeBase=base.
+    await writeWorktreeSession(
+      fixture.sessionService.getWorktreeSessionPath(fixture.sessionId),
+      {
+        slug: fixture.slug,
+        worktreePath: fixture.worktreeDir,
+        worktreeBranch: '',
+        originalCwd: fixture.workspaceDir,
+        workspaceCwd: fixture.workspaceDir,
+        originalBranch: 'main',
+        originalHeadCommit: localHead,
+        worktreeBase: base,
+      },
+    );
+
+    const res = await request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-handoff`)
+      .send({ to: 'local' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('local_head_moved');
+    expect(git(fixture.workspaceDir, 'rev-parse', 'HEAD')).toBe(localHead);
+    expect(existsSync(path.join(fixture.workspaceDir, 'local.txt'))).toBe(true);
+  });
+
+  it('carries a tracked file deleted into a directory on handoff to local (R11-10)', async () => {
+    const fixture = makeFixture();
+    fixture.writeTranscript();
+    writeFileSync(path.join(fixture.workspaceDir, 'docs'), 'tracked-doc\n');
+    git(fixture.workspaceDir, 'add', 'docs');
+    git(fixture.workspaceDir, 'commit', '-qm', 'docs', '--no-verify');
+    await fixture.createDetachedWorktree();
+    // Agent: rm docs && mkdir docs && write docs/plan.md (left untracked).
+    rmSync(path.join(fixture.worktreeDir, 'docs'));
+    mkdirSync(path.join(fixture.worktreeDir, 'docs'));
+    writeFileSync(path.join(fixture.worktreeDir, 'docs', 'plan.md'), 'plan\n');
+
+    const res = await request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-handoff`)
+      .send({ to: 'local' });
+
+    expect(res.status).toBe(200);
+    expect(
+      statSync(path.join(fixture.workspaceDir, 'docs')).isDirectory(),
+    ).toBe(true);
+    expect(
+      readFileSync(path.join(fixture.workspaceDir, 'docs', 'plan.md'), 'utf8'),
+    ).toBe('plan\n');
+  });
+
+  it('fails closed when the local checkout is not the bound workspace (R9-1)', async () => {
+    // Daemon bound to a subdirectory; a branch-route-shaped sidecar records
+    // originalCwd as the repo top. listWorkspaceSessions cannot answer for the
+    // repo top, so the occupancy guard must fail closed rather than proceed.
+    const fixture = makeFixture({ subdir: 'sub' });
+    fixture.writeTranscript();
+    await fixture.createDetachedWorktree();
+    await writeWorktreeSession(
+      fixture.sessionService.getWorktreeSessionPath(fixture.sessionId),
+      {
+        slug: fixture.slug,
+        worktreePath: fixture.worktreeDir,
+        worktreeBranch: '',
+        originalCwd: fixture.repoRoot,
+        workspaceCwd: fixture.workspaceDir,
+        originalBranch: 'main',
+        originalHeadCommit: git(fixture.repoRoot, 'rev-parse', 'HEAD'),
+      },
+    );
+
+    const res = await request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-handoff`)
+      .send({ to: 'local' });
+
+    // No occupant is even needed: the guard cannot enumerate the repo-top
+    // checkout's occupants from a subdirectory-bound daemon, so it must fail
+    // closed rather than proceed on an empty (unanswerable) session list.
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('handoff_workspace_occupied');
+    expect(git(fixture.repoRoot, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe(
+      'main',
+    );
+  });
+
+  it('serializes two concurrent handoffs into one checkout (R11-1)', async () => {
+    const fixture = makeFixture();
+    fixture.writeTranscript();
+    await fixture.createDetachedWorktree();
+    writeFileSync(path.join(fixture.worktreeDir, 'a.txt'), 'a\n');
+    git(fixture.worktreeDir, 'add', 'a.txt');
+    git(fixture.worktreeDir, 'commit', '-qm', 'a', '--no-verify');
+
+    // A second session in its OWN worktree of the same workspace (a different
+    // realTarget lock key), also handing off to local.
+    const session2 = randomUUID();
+    const slug2 = 'task2';
+    const r2 = await fixture.service.createUserWorktree(slug2, 'main', {
+      detached: true,
+    });
+    expect(r2.success).toBe(true);
+    const wt2 = r2.worktree!.path;
+    writeFileSync(path.join(wt2, 'b.txt'), 'b\n');
+    git(wt2, 'add', 'b.txt');
+    git(wt2, 'commit', '-qm', 'b', '--no-verify');
+    await createWorktreeSessionMarkerExclusive(wt2, session2);
+    await writeWorktreeSession(
+      fixture.sessionService.getWorktreeSessionPath(session2),
+      {
+        slug: slug2,
+        worktreePath: wt2,
+        worktreeBranch: '',
+        originalCwd: fixture.workspaceDir,
+        workspaceCwd: fixture.workspaceDir,
+        originalBranch: 'main',
+        originalHeadCommit: git(fixture.workspaceDir, 'rev-parse', 'HEAD'),
+      },
+    );
+    fixture.summaries.set(session2, { hasActivePrompt: false });
+    fixture.addWorkspaceSession({
+      sessionId: session2,
+      worktree: { path: wt2 },
+      clientCount: 1,
+    });
+
+    const [resA, resB] = await Promise.all([
+      request(fixture.app)
+        .post(`/session/${fixture.sessionId}/worktree-handoff`)
+        .send({ to: 'local', name: 'feat/a' }),
+      request(fixture.app)
+        .post(`/session/${session2}/worktree-handoff`)
+        .send({ to: 'local', name: 'feat/b' }),
+    ]);
+
+    // The local-checkout lock serializes them: exactly one lands, the other
+    // sees the winner now occupying the checkout and refuses.
+    expect([resA.status, resB.status].sort()).toEqual([200, 409]);
+    const refused = resA.status === 409 ? resA : resB;
+    expect(refused.body.code).toBe('handoff_workspace_occupied');
+    // Only the winner's branch was checked out; no interleaved double-move.
+    expect(fixture.cdCalls).toHaveLength(1);
   });
 
   it('refuses handoff to local while a prompt is active', async () => {

@@ -223,6 +223,7 @@ import {
   isDirtyTree,
   getHeadCommit,
   isCommitAncestor,
+  probeCommitAncestry,
   createBranch,
   checkoutRef,
   deleteBranch,
@@ -5108,6 +5109,12 @@ export function registerSessionRoutes(
             // not release a fence another operation (e.g. a refused reset)
             // is still holding.
             let barrierArmed = false;
+            // R11-1: the realTarget lock serializes the worktree being LEFT,
+            // not the local checkout being mutated. Two handoffs from
+            // different worktrees into one checkout hold different realTarget
+            // keys, so also lock the local checkout (nested) once its path is
+            // known; released in the same finally.
+            let releaseLocalOwnership: (() => void) | null = null;
             try {
               const lockedRead = await readWorktreeSessionStrict(sidecarPath);
               if (lockedRead.state !== 'valid') {
@@ -5151,6 +5158,11 @@ export function registerSessionRoutes(
               } catch {
                 throw new WorktreeResetInvalidStateError(storageSessionId);
               }
+              // Serialize on the checkout actually being mutated (R11-1), so
+              // the cleanliness/occupancy gates below and the carry/checkout
+              // cannot interleave with another handoff into the same tree.
+              releaseLocalOwnership =
+                await acquireWorktreeOwnershipOp(localCwd);
               const localService = new GitWorktreeService(localCwd);
               // An upgraded checkout may still hold the old daemon-written
               // .qwen/.gitignore; migrate it before the clean gate so the
@@ -5187,8 +5199,30 @@ export function registerSessionRoutes(
               // worktrees sharing one originalCwd hold different locks over
               // this same checkout. Worktree sessions are exempt — they run in
               // their own cwd, including the handing-off session itself.
+              // listWorkspaceSessions only answers for the BOUND workspace;
+              // asking about localCwd when it differs (a branch-route sidecar
+              // whose originalCwd is the repo top while the daemon is bound to
+              // a subdirectory) silently returns [], hiding exactly the
+              // occupants of the shared checkout (R9-1). Query the bound
+              // workspace, and fail closed when the checkout being moved is
+              // not that workspace — its occupants cannot be enumerated.
+              let boundWorkspaceReal: string;
+              try {
+                boundWorkspaceReal = fs.realpathSync(runtime.workspaceCwd);
+              } catch {
+                boundWorkspaceReal = runtime.workspaceCwd;
+              }
+              if (localCwd !== boundWorkspaceReal) {
+                res.status(409).json({
+                  error:
+                    'Cannot verify the occupants of the local checkout; handing off would move a shared checkout',
+                  code: 'handoff_workspace_occupied',
+                  sessionId: storageSessionId,
+                });
+                return;
+              }
               const occupyingSession = runtime.bridge
-                .listWorkspaceSessions(localCwd)
+                .listWorkspaceSessions(runtime.workspaceCwd)
                 .find(
                   (session) =>
                     session.sourceType !== AGENT_HOST_SESSION_SOURCE_TYPE &&
@@ -5223,9 +5257,9 @@ export function registerSessionRoutes(
               // case is re-checked below once we know whether a branch will
               // be checked out — checking out a branch would drop the user's
               // own ahead-of-base commit from the working tree.
-              let localMovedAhead = false;
+              let localHead: string | undefined;
               if (gateBase) {
-                const localHead = await getHeadCommit(localCwd);
+                localHead = await getHeadCommit(localCwd);
                 if (
                   !localHead ||
                   (localHead !== gateBase &&
@@ -5239,7 +5273,6 @@ export function registerSessionRoutes(
                   });
                   return;
                 }
-                localMovedAhead = localHead !== gateBase;
               }
               // Carry the work before moving the session: branch checkout
               // first, then the tracked dirty snapshot, then the untracked
@@ -5276,15 +5309,42 @@ export function registerSessionRoutes(
               }
               // Promotion carries the agent's work to the local checkout only
               // when the worktree HEAD moved PAST its creation base. A HEAD
-              // behind the base (the agent checked out an older commit without
-              // committing) is an ancestor of the base: promoting it would
-              // rewind the user's clean checkout, so the handoff stays
-              // snapshot-only. The detached gate above guarantees head/base
-              // are non-empty when there is no branch.
-              const headBehindBase =
-                !branch &&
-                head !== base &&
-                (await isCommitAncestor(head, base, realTarget));
+              // behind the base (an ancestor of it) would rewind the user's
+              // clean checkout. This applies to the recorded-branch shape too
+              // (no `!branch` short-circuit, R10-1), and the ancestry probe is
+              // three-valued so an unreadable/pruned base fails closed instead
+              // of being misread as "not behind" and promoted (R11-14).
+              let headBehindBase = false;
+              if (head && base && head !== base) {
+                const ancestry = await probeCommitAncestry(
+                  head,
+                  base,
+                  realTarget,
+                );
+                if (ancestry === 'unanswerable') {
+                  res.status(409).json({
+                    error:
+                      'Cannot verify the worktree HEAD against its recorded base',
+                    code: 'worktree_handoff_base_unavailable',
+                    sessionId: storageSessionId,
+                  });
+                  return;
+                }
+                headBehindBase = ancestry === 'ancestor';
+              }
+              // A recorded branch whose tip is behind the base must be checked
+              // out by the handoff, which would rewind the local checkout —
+              // refuse (R10-1). The detached shape instead stays snapshot-only
+              // below (R9-4), since its promotion is optional.
+              if (headBehindBase && branch !== '') {
+                res.status(409).json({
+                  error:
+                    'The worktree branch tip is behind the recorded handoff base',
+                  code: 'worktree_head_behind_base',
+                  sessionId: storageSessionId,
+                });
+                return;
+              }
               // A descendant local HEAD is reconcilable only when no branch
               // is checked out (the snapshot applies on top of the local
               // HEAD). Checking out a branch — recorded, or promoted at the
@@ -5307,7 +5367,16 @@ export function registerSessionRoutes(
                 });
                 return;
               }
-              if (localMovedAhead && willCheckoutBranch) {
+              // The checkout target must CONTAIN the local HEAD, else the
+              // checkout rewinds the user's work — including a divergent base
+              // where localHead === gateBase (so no moved-ahead flag fires)
+              // but the worktree tip sits on another line (R11-6). Subsumes
+              // the moved-ahead refusal; scoped to an actual branch checkout.
+              if (
+                willCheckoutBranch &&
+                (!localHead ||
+                  !(await isCommitAncestor(localHead, head, realTarget)))
+              ) {
                 res.status(409).json({
                   error:
                     'Local checkout HEAD moved past the recorded handoff base',
@@ -5461,6 +5530,13 @@ export function registerSessionRoutes(
                     return;
                   }
                 }
+                // The stash omits a tracked deletion whose path became a
+                // directory; remove the local file so the untracked carry can
+                // mkdir the directory there (R11-10, the create-direction
+                // carry already does this). The removed tracked file is
+                // restored by rollback's forceCheckoutBranch, so it is not
+                // added to copiedUntracked.
+                await wtCheckoutService.removeDeletedToDirectoryFiles(localCwd);
                 copiedUntracked =
                   await wtCheckoutService.carryUntrackedFilesTo(localCwd);
                 assertRuntimeGenerationOpen?.();
@@ -5520,6 +5596,10 @@ export function registerSessionRoutes(
             } finally {
               if (barrierArmed) {
                 runtime.bridge.clearSessionResetPending?.(storageSessionId);
+              }
+              // Release in reverse acquisition order (local nested in realTarget).
+              if (releaseLocalOwnership) {
+                releaseLocalOwnership();
               }
               releaseOwnership();
             }

@@ -1556,16 +1556,24 @@ export class GitWorktreeService {
       const { simpleGit } = await loadSimpleGit();
       raw = await simpleGit(repoTop)
         .env(gitEnv())
-        .raw(['status', '--porcelain', '-z']);
+        .raw(['--no-optional-locks', 'status', '--porcelain', '-z']);
     } catch {
       return [];
     }
+    const records = raw.split('\0');
     const removed: string[] = [];
-    for (const record of raw.split('\0')) {
-      // `XY <path>`: two status columns, a space, then the path. A rename
-      // emits a second bare-path record (no status prefix) which fails the
-      // shape check below and is skipped.
+    for (let i = 0; i < records.length; i++) {
+      const record = records[i]!;
+      // `XY <path>`: two status columns, a space, then the path.
       if (record.length < 4 || record[2] !== ' ') continue;
+      // A rename/copy record is followed by a BARE paired-origin path
+      // record (no status prefix). Skip it structurally: shape-guessing
+      // from its characters misreads an origin like `aD sub` as a deleted
+      // path `sub` and would delete an unrelated tracked file (R8-5).
+      if (record[0] === 'R' || record[0] === 'C') {
+        i++;
+        continue;
+      }
       if (record[0] !== 'D' && record[1] !== 'D') continue;
       const rel = record.slice(3);
       if (rel.length === 0) continue;
@@ -1831,30 +1839,13 @@ export class GitWorktreeService {
     // the directory at the same path. Only on a clean tracked apply: a
     // conflict restored committed state, and a fail-open caller baselines
     // that committed state (the deletion is part of the conflicted overlay).
-    const removed: string[] = [];
-    if (!carryError) {
-      for (const relPath of dirtyState.removedPaths) {
-        try {
-          const dst = path.join(worktreePath, relPath);
-          const st = await fs.lstat(dst).catch(() => null);
-          if (!st || !st.isFile()) continue;
-          const parent = path.dirname(dst);
-          if (
-            !isWithinRoot(
-              await fs.realpath(parent).catch(() => parent),
-              realTargetTop,
-            )
-          ) {
-            continue;
-          }
-          await fs.rm(dst);
-          removed.push(relPath);
-        } catch {
-          // Fail-open: a removal that cannot land leaves the file, and the
-          // untracked copy skips the entry as it would without the removal.
-        }
-      }
-    }
+    const removed = carryError
+      ? []
+      : await this.removeOverlayFilesContained(
+          worktreePath,
+          realTargetTop,
+          dirtyState.removedPaths,
+        );
     const createdUntracked: string[] = [];
     for (const relPath of dirtyState.untrackedFiles) {
       try {
@@ -1874,6 +1865,70 @@ export class GitWorktreeService {
     }
     if (carryError) throw carryError;
     return [...removed, ...createdUntracked];
+  }
+
+  /**
+   * Remove regular files at the given repo-relative paths under `targetTop`,
+   * confined to the checkout (a pre-existing directory, a symlink, or an
+   * ancestor symlink escaping the checkout is left alone). Fail-open per
+   * file; returns only the paths actually removed. Shared by the
+   * create-direction carry and the handoff's file→directory removal.
+   */
+  private async removeOverlayFilesContained(
+    targetTop: string,
+    realTargetTop: string,
+    relPaths: string[],
+  ): Promise<string[]> {
+    const removed: string[] = [];
+    for (const relPath of relPaths) {
+      try {
+        const dst = path.join(targetTop, relPath);
+        const st = await fs.lstat(dst).catch(() => null);
+        if (!st || !st.isFile()) continue;
+        const parent = path.dirname(dst);
+        if (
+          !isWithinRoot(
+            await fs.realpath(parent).catch(() => parent),
+            realTargetTop,
+          )
+        ) {
+          continue;
+        }
+        await fs.rm(dst);
+        removed.push(relPath);
+      } catch {
+        // Fail-open: a removal that cannot land leaves the file, and the
+        // untracked copy skips the entry as it would without the removal.
+      }
+    }
+    return removed;
+  }
+
+  /**
+   * Handoff (to=local) counterpart of the create-direction file→directory
+   * carry (R11-10): the stash omits a tracked deletion whose path became a
+   * directory, so without this the local checkout keeps the file and the
+   * untracked carry's mkdir hits ENOTDIR and is skipped — the agent's new
+   * file stays behind while the route answers 200. Captures the tracked
+   * files THIS checkout deleted into directories and removes the matching
+   * regular files from `targetCwd` (contained, file-only) before the
+   * untracked carry. Returns the repo-relative paths actually removed.
+   */
+  async removeDeletedToDirectoryFiles(targetCwd: string): Promise<string[]> {
+    const repoTop = await this.getRepoTopLevel().catch(() => null);
+    if (repoTop === null) return [];
+    const removedPaths = await this.listDeletedToDirectory(repoTop);
+    if (removedPaths.length === 0) return [];
+    const targetTop =
+      (await new GitWorktreeService(targetCwd)
+        .getRepoTopLevel()
+        .catch(() => null)) ?? targetCwd;
+    const realTargetTop = await fs.realpath(targetTop).catch(() => targetTop);
+    return this.removeOverlayFilesContained(
+      targetTop,
+      realTargetTop,
+      removedPaths,
+    );
   }
 
   /**
@@ -3969,6 +4024,27 @@ export class GitWorktreeService {
   }> {
     const worktreePath = this.getUserWorktreePath(slug);
     const branchName = worktreeBranchForSlug(slug);
+    // Refuse to remove a checkout that EXISTS but cannot be verified as a
+    // registered worktree of this repo (R11-18). With the `.git` link missing,
+    // git's upward discovery answers for the ENCLOSING repo: the detached
+    // probe reads false, the unmerged-commits guard is skipped, and the
+    // removal's fs.rm fallback would destroy commits only this checkout holds.
+    // The registered-worktree probe (common-dir + toplevel) returns null in
+    // that state, so fail closed. A directory already gone is a legitimate
+    // no-op the removal flow below handles (branchSkipped), not a refusal.
+    const checkoutPresent = await fs
+      .stat(worktreePath)
+      .then(() => true)
+      .catch(() => false);
+    if (
+      checkoutPresent &&
+      (await this.getRegisteredWorktreeBranch(worktreePath)) === null
+    ) {
+      return {
+        success: false,
+        error: 'Worktree checkout is unverifiable',
+      };
+    }
     const detached = await this.isDetachedWorktree(worktreePath);
     // Capture the branch the checkout actually sits on BEFORE removal.
     // A session worktree branched in place ("Create branch here") is no

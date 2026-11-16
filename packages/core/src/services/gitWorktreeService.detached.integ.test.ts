@@ -443,6 +443,26 @@ describe('GitWorktreeService — detached managed worktrees', () => {
     );
   });
 
+  it('removeUserWorktree refuses a checkout whose .git link is missing (R11-18)', async () => {
+    const worktree = await createDetached('sess-nogit');
+    await fs.writeFile(path.join(worktree.path, 'work.txt'), 'precious\n');
+    git(worktree.path, 'add', 'work.txt');
+    git(worktree.path, 'commit', '-qm', 'agent work', '--no-verify');
+    // Remove the .git link: git's upward discovery then answers for the
+    // ENCLOSING repo, which would switch off the detached/unmerged guard and
+    // let the fs.rm fallback destroy the checkout and its only-here commits.
+    // The removal must fail closed while the directory exists.
+    await fs.rm(path.join(worktree.path, '.git'));
+    const result = await service.removeUserWorktree('sess-nogit', {
+      deleteBranch: true,
+    });
+    expect(result.success).toBe(false);
+    await expect(fs.lstat(worktree.path)).resolves.toBeTruthy();
+    expect(
+      await fs.readFile(path.join(worktree.path, 'work.txt'), 'utf8'),
+    ).toBe('precious\n');
+  });
+
   it('prepared finalize with branchOwned=false keeps a same-slug branch at base', async () => {
     git(repoRoot, 'branch', 'worktree-sess-fin');
     const base = git(repoRoot, 'rev-parse', 'HEAD');
