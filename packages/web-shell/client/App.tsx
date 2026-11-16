@@ -14616,16 +14616,28 @@ export function App({
         !e.shiftKey &&
         (key === 'c' || key === 'd');
 
-      // Surfaces that own the keyboard outright yield first, using the same
+      // Surfaces that own the keyboard yield first, using the same
       // centralized markers the app-level handlers trust: an open modal
       // (dialog/alertdialog/drawer, including component-local confirms
       // portaled into the shell root), the waiting minigame, and
-      // keyboard-scoped subtrees. A key these widgets advertise is never
-      // swallowed to dismiss the explanation.
-      if (hasOpenModalSurface(portalRoot)) return;
-      if (waitingMinigameOpen) return;
-      if (target instanceof Element && target.closest('[data-keyboard-scope]'))
-        return;
+      // keyboard-scoped subtrees. These surfaces own Escape — none of them
+      // consumes Ctrl+C/Ctrl+D, so the cancel chords must still reach the
+      // pending branch below (the panel advertises them, and a drawer-hosted
+      // detail panel makes hasOpenModalSurface permanently true). The chords
+      // never steal Ctrl+C's copy role from a text surface: isEditableTarget
+      // encodes that convention.
+      const cancelChord =
+        isCtrlCancel &&
+        !(target instanceof Element && isEditableTarget(target));
+      if (!cancelChord) {
+        if (hasOpenModalSurface(portalRoot)) return;
+        if (waitingMinigameOpen) return;
+        if (
+          target instanceof Element &&
+          target.closest('[data-keyboard-scope]')
+        )
+          return;
+      }
 
       // Enter/Space activate a control — button, link, field, menu item,
       // tab, grid/tree row, and the like — and Escape inside the chip row or
@@ -21644,6 +21656,18 @@ export function App({
       // collapses the board. Don't also arm the two-press stream cancel
       // behind it, or a second Escape would stop the turn by surprise.
       if (live.waitingMinigameOpen) return;
+
+      // A keyboard-scoped surface (Tasks/Mcp status cards) owns Escape too:
+      // its own delayed window listener collapses the card, and that listener
+      // bails on defaultPrevented. Arming the two-press stream cancel here
+      // would both swallow the card's Escape and stop the turn on a second
+      // press, so yield before deciding the escape intent.
+      const escScopeTarget = e.composedPath()[0] ?? e.target;
+      if (
+        escScopeTarget instanceof Element &&
+        escScopeTarget.closest('[data-keyboard-scope]')
+      )
+        return;
 
       // Streaming takes priority over clearing text (queued prompts stay intact
       // and drain after the turn settles); see decideEscapeIntent for the rules.

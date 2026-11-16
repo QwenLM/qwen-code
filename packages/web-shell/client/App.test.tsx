@@ -19589,6 +19589,77 @@ describe('App session callbacks', () => {
     },
   );
 
+  it.each(['c', 'd'])(
+    'cancels a pending explanation with Ctrl+%s while a drawer is open',
+    async (key) => {
+      const finish = deferred<void>();
+      mockSessionActions.btwSessionStream.mockImplementationOnce(
+        async function* () {
+          await finish.promise;
+          yield {
+            v: 1,
+            type: 'done',
+            requestId: 'btw-request',
+            answer: 'too late',
+          } as const;
+        },
+      );
+      const shell: DaemonSessionShellTaskStatus = {
+        kind: 'shell',
+        id: 'shell-running',
+        label: 'npm run build',
+        description: 'npm run build',
+        status: 'running',
+        startTime: 2,
+        runtimeMs: 20,
+        command: 'npm run build',
+        cwd: '/tmp/project',
+      };
+      const { container } = renderApp();
+      await flush();
+
+      // Below 1001px the detail panel renders inside DrawerContent, so an
+      // open modal surface is permanently present while it is shown. The
+      // cancel chords must still abort the pending side query — the drawer
+      // owns Escape, not Ctrl+C/Ctrl+D.
+      const drawer = document.createElement('div');
+      drawer.setAttribute('data-slot', 'drawer-content');
+      drawer.setAttribute('data-state', 'open');
+      const drawerButton = document.createElement('button');
+      drawer.append(drawerButton);
+      container.append(drawer);
+
+      await act(async () => {
+        testState.latestTaskChipsOnExplainTask?.(shell);
+        await Promise.resolve();
+      });
+      await flush();
+      expect(testState.latestBtwMessageProps?.isPending).toBe(true);
+
+      const event = new KeyboardEvent('keydown', {
+        key,
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => {
+        drawerButton.dispatchEvent(event);
+      });
+      expect(event.defaultPrevented).toBe(true);
+      expect(document.querySelector('[class*="btwPanel"]')).toBeNull();
+      const signal = mockSessionActions.btwSessionStream.mock.calls.at(-1)?.[1]
+        ?.signal as AbortSignal | undefined;
+      expect(signal?.aborted).toBe(true);
+
+      await act(async () => {
+        finish.resolve();
+        await Promise.resolve();
+      });
+      await flush();
+      expect(document.querySelector('[class*="btwPanel"]')).toBeNull();
+    },
+  );
+
   it('dismisses a settled explanation with Escape from the composer editor', async () => {
     const shell: DaemonSessionShellTaskStatus = {
       kind: 'shell',
@@ -19890,7 +19961,8 @@ describe('App session callbacks', () => {
     expect(document.querySelector('[class*="btwPanel"]')).not.toBeNull();
   });
 
-  it('keeps a settled explanation when Escape is inside a keyboard scope', async () => {
+  it('keeps a settled explanation and does not arm cancel when Escape is inside a keyboard scope', async () => {
+    testState.streamingState = 'responding';
     const shell: DaemonSessionShellTaskStatus = {
       kind: 'shell',
       id: 'shell-running',
@@ -19925,8 +19997,12 @@ describe('App session callbacks', () => {
     act(() => {
       inner.dispatchEvent(event);
     });
+    await flush();
     expect(event.defaultPrevented).toBe(false);
     expect(document.querySelector('[class*="btwPanel"]')).not.toBeNull();
+    // The scoped surface's own delayed handler owns Escape; the app-level
+    // handler must not arm the two-press turn cancel behind the panel.
+    expect(testState.latestChatEditorProps?.cancelArmed).toBe(false);
   });
 
   it('keeps a settled explanation when Enter opens a grid row', async () => {
