@@ -121,7 +121,8 @@ push 前的守卫不 stash 任何东西。
 脱敏后的消息，与它处理 `GitPullFailure` 的方式完全一致。共享 helper
 （`refuseOperationInProgress`、`pushAutoStash`）增加一个动作词参数，
 默认保持 pull 的措辞；`restoreStash` 原样复用，因为它的提示与动作无关。
-既有的正则分类不变，仍覆盖裸 checkout。
+分类器为目录碰撞拒绝新增了 `would lose untracked` 分支；其余分支不变，
+裸 checkout 仍被覆盖。
 
 ## UI
 
@@ -297,7 +298,8 @@ SDK 的 `workspaceGitCheckout`（legacy 与 workspace 限定两个方法）接�
 
 - 因本地修改被拒的 checkout 提供 stash 与放弃两种解决方式，且都能端到端
   完成切换。
-- 裸 checkout 的调用与响应不变。
+- 裸 checkout 的调用不变；目录碰撞拒绝的响应从无分类 500 变为
+  `409 dirty_working_tree`。
 - 上文列出的每道守卫都有一个"没有它就失败"的测试。
 - 设计文档双语齐备；lint、typecheck、build 与聚焦单测通过。
 

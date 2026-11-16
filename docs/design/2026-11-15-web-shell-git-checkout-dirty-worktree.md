@@ -153,8 +153,10 @@ the route maps it to a 409 with a path-redacted message, exactly as it
 already does for `GitPullFailure`. The shared helpers
 (`refuseOperationInProgress`, `pushAutoStash`) gain an action-word
 parameter defaulting to the pull wording; `restoreStash` is reused
-unchanged because its notices are action-agnostic. The pre-existing regex
-classification is unchanged and still covers the plain checkout.
+unchanged because its notices are action-agnostic. The classifier gained
+the `would lose untracked` alternation for the directory-collision
+refusal; its other branches are unchanged and the plain checkout stays
+covered.
 
 ## UI
 
@@ -397,7 +399,9 @@ omission:
 
 - A checkout refused for local changes offers stash and discard
   resolutions, and both complete the switch end to end.
-- The plain checkout invocation and response are unchanged.
+- The plain checkout invocation is unchanged; its response for the
+  directory-collision refusal changes from an unclassified 500 to
+  `409 dirty_working_tree`.
 - Every guard listed above has a test that fails without it.
 - The design exists in both languages; lint, typecheck, build and the
   focused unit suites pass.

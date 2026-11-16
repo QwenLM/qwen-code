@@ -749,7 +749,8 @@ describe('gitCheckout with a dirty working tree', () => {
     // The subject carries the documented label plus a per-request nonce
     // (git prepends "On <branch>: "); the nonce is what keeps a
     // concurrent request's entry from being adopted.
-    expect(git(dir, 'stash', 'list', '--format=%s').trim()).toMatch(
+    const subject1 = git(dir, 'stash', 'list', '--format=%s').trim();
+    expect(subject1).toMatch(
       /qwen-code: auto-stash before checkout [0-9a-f]{8}$/,
     );
     // The entry holds both the tracked edit and the untracked file.
@@ -759,6 +760,25 @@ describe('gitCheckout with a dirty working tree', () => {
     expect(git(dir, 'show', `${result.stashSha!}^3:new.txt`)).toBe(
       'untracked\n',
     );
+    // A second request's nonce must DIFFER: a constant suffix would let
+    // the endsWith capture adopt the first request's entry. Compare the
+    // SUFFIX, not the full subject — git's "On <branch>:" prefix differs
+    // across branches and would mask a constant nonce.
+    write(dir, { 'a.txt': 'local edit 2\n' });
+    const second = await gitCheckout(
+      dir,
+      'master',
+      { stash: true },
+      hermeticEnv(),
+    );
+    const subject2 = git(dir, 'stash', 'list', '--format=%s')
+      .split('\n')[0]!
+      .trim();
+    expect(subject2).toMatch(
+      /qwen-code: auto-stash before checkout [0-9a-f]{8}$/,
+    );
+    expect(subject2.slice(-8)).not.toBe(subject1.slice(-8));
+    expect(second.stashSha).not.toBe(result.stashSha);
   });
 
   it('stash checkout on a clean tree keeps no entry', async () => {
@@ -915,12 +935,14 @@ describe('gitCheckout with a dirty working tree', () => {
     async () => {
       const dir = dirtyCheckoutFixture();
       const env = gitShim(hermeticEnv(), [
-        // A concurrent request stashes the tree (base label, no nonce)
-        // immediately before our push, making our own push a no-op.
+        // A concurrent request stashes the tree immediately before our
+        // push, making our own push a no-op. Its subject carries the
+        // production shape (label + a nonce), so the capture must reject
+        // it by nonce mismatch, not by a shape production never emits.
         {
           match: '"stash push"*',
           before:
-            '"$REAL" stash push --include-untracked -m "qwen-code: auto-stash before checkout"',
+            '"$REAL" stash push --include-untracked -m "qwen-code: auto-stash before checkout 0123abcd"',
         },
       ]);
 
@@ -2199,14 +2221,18 @@ describe('gitCheckout with a dirty working tree', () => {
       const dir = dirtyCheckoutFixture();
       write(dir, { 'new.txt': 'untracked\n' });
       installHook(dir, 'post-checkout', 'echo hook-edit > a.txt\nexit 1');
-      const counter = path.join(tmpDir('qwen-diff-hang-'), 'n');
+      const scratch = tmpDir('qwen-diff-hang-');
+      const counter = path.join(scratch, 'n');
+      const pidfile = path.join(scratch, 'hung.pid');
       const env = gitShim(hermeticEnv(), [
         // The BEFORE diff probe hangs forever; the 30s timeout must turn
         // it into a null the witness refuses to trust. The after-probe
-        // answers normally.
+        // answers normally. The hung child records its pid so the case
+        // can pin that the timeout kills the whole process group, not
+        // just the wrapper (which would orphan the sleep for 999s).
         {
           match: '"diff HEAD"*',
-          script: `n=$(cat "${counter}" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "${counter}"; if [ "$n" = 1 ]; then sleep 999; fi; exec "$REAL" "$@"`,
+          script: `n=$(cat "${counter}" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "${counter}"; if [ "$n" = 1 ]; then sleep 999 & echo $! > "${pidfile}"; wait; fi; exec "$REAL" "$@"`,
         },
       ]);
 
@@ -2221,6 +2247,21 @@ describe('gitCheckout with a dirty working tree', () => {
       expect(failure.message).toContain('cannot discard and switch');
       expect(read(dir, 'a.txt')).toBe('hook-edit\n');
       expect(read(dir, 'new.txt')).toBe('untracked\n');
+      // The shim's hung child must be dead, not orphaned: poll briefly
+      // for reaping (the kill lands at settle, before the call resolves).
+      const hungPid = Number(fs.readFileSync(pidfile, 'utf8').trim());
+      const pidGone = (pid: number) => {
+        try {
+          process.kill(pid, 0);
+          return false;
+        } catch {
+          return true;
+        }
+      };
+      for (let i = 0; i < 40 && !pidGone(hungPid); i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      expect(pidGone(hungPid)).toBe(true);
     },
     45_000,
   );
