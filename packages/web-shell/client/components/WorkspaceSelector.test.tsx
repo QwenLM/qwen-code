@@ -2,7 +2,7 @@
 
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../i18n';
 import { TOUCH_COMPOSER_QUERY } from '../hooks/useIsTouchComposer';
 import { WorkspaceSelector } from './WorkspaceSelector';
@@ -359,7 +359,16 @@ describe('WorkspaceSelector', () => {
 });
 
 describe('WorkspaceSelector composer focus', () => {
-  function renderInPanes(
+  beforeEach(() => {
+    // A case that leaks a composer into the document would break the
+    // document-rung fallback (it requires exactly one editor) for every
+    // later case.
+    expect(
+      document.querySelectorAll('[data-web-shell-composer-editor]').length,
+    ).toBe(0);
+  });
+
+  function renderInShell(
     markup: string,
     overrides: Partial<React.ComponentProps<typeof WorkspaceSelector>> = {},
   ) {
@@ -429,8 +438,8 @@ describe('WorkspaceSelector composer focus', () => {
 
   it('moves focus to the composer editor after a workspace selection', async () => {
     const onSelectWorkspace = vi.fn();
-    const element = renderInPanes(
-      '<div data-pane-session-id="fixture-pane" data-web-shell-composer><textarea data-web-shell-composer-editor></textarea><div id="fixture-slot"></div></div>',
+    const element = renderInShell(
+      '<div data-web-shell-composer><textarea data-web-shell-composer-editor></textarea><div id="fixture-slot"></div></div>',
       { onSelectWorkspace },
     );
     const composer = element.querySelector<HTMLTextAreaElement>(
@@ -457,21 +466,11 @@ describe('WorkspaceSelector composer focus', () => {
     expect(document.activeElement).toBe(composer);
   });
 
-  it('scopes the focus to the composer of the pane that made the selection', async () => {
+  it('scopes the focus to the composer shell around the trigger', async () => {
     // The competing composer comes FIRST in tree order: a document-wide
-    // first-match would pick it, so only the captured pane (or the
-    // trigger's own composer shell) can resolve the right one.
-    const element = renderInPanes(
-      '<div data-pane-session-id="pane-b" data-web-shell-composer><textarea id="composer-b" data-web-shell-composer-editor></textarea></div>' +
-        '<div data-pane-session-id="pane-a" data-web-shell-composer><textarea id="composer-a" data-web-shell-composer-editor></textarea><div id="fixture-slot"></div></div>',
-    );
-    await openAndSelect(element, 'second');
-    await waitForFocus(element.querySelector('#composer-a'));
-    expect(document.activeElement).toBe(element.querySelector('#composer-a'));
-  });
-
-  it('scopes the focus to the composer shell around the trigger when no pane is captured', async () => {
-    const element = renderInPanes(
+    // first-match would pick it, so only the trigger's own composer shell
+    // can resolve the right one.
+    const element = renderInShell(
       '<div data-web-shell-composer><textarea id="composer-first" data-web-shell-composer-editor></textarea></div>' +
         '<div data-web-shell-composer><textarea id="composer-second" data-web-shell-composer-editor></textarea><div id="fixture-slot"></div></div>',
     );
@@ -483,7 +482,9 @@ describe('WorkspaceSelector composer focus', () => {
   });
 
   it('focuses the composer when the shell is mounted in a shadow root', async () => {
+    // Registered as the container so afterEach removes the host.
     const host = document.createElement('div');
+    container = host;
     document.body.appendChild(host);
     const shadow = host.attachShadow({ mode: 'open' });
     shadow.innerHTML =
@@ -543,8 +544,8 @@ describe('WorkspaceSelector composer focus', () => {
   });
 
   it('focuses CodeMirror content on the desktop editor', async () => {
-    const element = renderInPanes(
-      '<div data-pane-session-id="fixture-pane" data-web-shell-composer><div data-web-shell-composer-editor><div class="cm-content" tabindex="-1"></div></div><div id="fixture-slot"></div></div>',
+    const element = renderInShell(
+      '<div data-web-shell-composer><div data-web-shell-composer-editor><div class="cm-content" tabindex="-1"></div></div><div id="fixture-slot"></div></div>',
     );
     await openAndSelect(element, 'second');
     const content = element.querySelector('.cm-content');
@@ -552,9 +553,9 @@ describe('WorkspaceSelector composer focus', () => {
     expect(document.activeElement).toBe(content);
   });
 
-  it('recovers from a pane remount after the selection (production order)', async () => {
-    const element = renderInPanes(
-      '<div data-pane-session-id="pane-a" data-web-shell-composer><textarea id="composer-a" data-web-shell-composer-editor></textarea><div id="fixture-slot"></div></div>',
+  it('recovers from a composer remount after the selection (production order)', async () => {
+    const element = renderInShell(
+      '<div id="shell-a" data-web-shell-composer><textarea id="composer-a" data-web-shell-composer-editor></textarea><div id="fixture-slot"></div></div>',
     );
     const trigger = element.querySelector('button')!;
     await act(async () => {
@@ -565,8 +566,9 @@ describe('WorkspaceSelector composer focus', () => {
     const option = [
       ...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
     ].find((entry) => entry.textContent?.includes('second'))!;
-    // The selection switches sessions: React removes the pane AFTER the
-    // focus attempt has already run — click first, remount in a later act.
+    // The selection switches sessions: React removes the composer AFTER
+    // the focus attempt has already run — click first, remount in a later
+    // act.
     await act(async () => {
       option.click();
     });
@@ -576,10 +578,11 @@ describe('WorkspaceSelector composer focus', () => {
       await new Promise((resolve) => setTimeout(resolve, 200));
     });
     await act(async () => {
-      element.querySelector('[data-pane-session-id="pane-a"]')!.remove();
-      document.body.insertAdjacentHTML(
+      element.querySelector('#shell-a')!.remove();
+      // Inside the test's own container so afterEach removes it.
+      container!.insertAdjacentHTML(
         'beforeend',
-        '<div data-pane-session-id="pane-a2" data-web-shell-composer><textarea id="composer-a2" data-web-shell-composer-editor></textarea></div>',
+        '<div data-web-shell-composer><textarea id="composer-a2" data-web-shell-composer-editor></textarea></div>',
       );
     });
     const replacement = document.querySelector('#composer-a2');
@@ -588,8 +591,8 @@ describe('WorkspaceSelector composer focus', () => {
   });
 
   it('does not steal focus back once the user has moved it elsewhere', async () => {
-    const element = renderInPanes(
-      '<div data-pane-session-id="fixture-pane" data-web-shell-composer><textarea data-web-shell-composer-editor></textarea><div id="fixture-slot"></div><input id="other-field" /></div>',
+    const element = renderInShell(
+      '<div data-web-shell-composer><textarea data-web-shell-composer-editor></textarea><div id="fixture-slot"></div><input id="other-field" /></div>',
     );
     const other = element.querySelector<HTMLInputElement>('#other-field')!;
     await openAndSelect(element, 'second');
@@ -604,7 +607,7 @@ describe('WorkspaceSelector composer focus', () => {
     expect(document.activeElement).toBe(other);
   });
 
-  it('skips the programmatic focus on a coarse pointer', async () => {
+  it('keeps Radix trigger restore for a keyboard selection on a coarse pointer', async () => {
     const matchMedia = vi.spyOn(window, 'matchMedia').mockImplementation(
       (query: string) =>
         ({
@@ -619,26 +622,117 @@ describe('WorkspaceSelector composer focus', () => {
         }) as MediaQueryList,
     );
     try {
-      const element = renderInPanes(
-        '<div data-pane-session-id="fixture-pane" data-web-shell-composer><textarea data-web-shell-composer-editor></textarea><div id="fixture-slot"></div></div>',
+      const element = renderInShell(
+        '<div data-web-shell-composer><textarea data-web-shell-composer-editor></textarea><div id="fixture-slot"></div></div>',
       );
       const composer = element.querySelector(
         '[data-web-shell-composer-editor]',
       )!;
-      await openAndSelect(element, 'second');
+      const trigger = element.querySelector('button')!;
+      await act(async () => {
+        trigger.dispatchEvent(
+          new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+        );
+      });
+      const option = [
+        ...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
+      ].find((entry) => entry.textContent?.includes('second'))!;
+      // Select from the keyboard: Enter on the focused item, so no
+      // pointerdown reaches the content and no pointer dismissal
+      // suppresses the restore. The selection must then leave focus on
+      // the trigger, never on <body> or the composer.
+      await act(async () => {
+        option.focus();
+        option.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+        );
+      });
       await act(async () => {
         await new Promise((resolve) => setTimeout(resolve, 500));
       });
+      expect(document.activeElement).toBe(trigger);
       expect(document.activeElement).not.toBe(composer);
     } finally {
       matchMedia.mockRestore();
     }
   });
 
+  it('cancels the pending focus watch when the menu reopens', async () => {
+    const element = renderInShell(
+      '<div data-web-shell-composer><textarea data-web-shell-composer-editor></textarea><div id="fixture-slot"></div></div>',
+    );
+    const composer = element.querySelector('[data-web-shell-composer-editor]')!;
+    await openAndSelect(element, 'second');
+    // Reopen the picker inside the retry window: a pending step would
+    // focus the composer BEHIND the open menu (a focus fight the trap
+    // then yanks back), so pin the composer itself, not the final state.
+    const trigger = element.querySelector('button')!;
+    await act(async () => {
+      trigger.dispatchEvent(
+        new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+      );
+    });
+    const pulledOut = vi.fn();
+    composer.addEventListener('focusin', pulledOut);
+    const option = [
+      ...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
+    ].find((entry) => entry.textContent?.includes('second'))!;
+    await act(async () => {
+      option.focus();
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    });
+    composer.removeEventListener('focusin', pulledOut);
+    expect(pulledOut).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(option);
+    expect(document.activeElement).not.toBe(composer);
+  });
+
+  it('stops the watch when the claimed composer is blurred to the background', async () => {
+    const element = renderInShell(
+      '<div data-web-shell-composer><textarea data-web-shell-composer-editor></textarea><div id="fixture-slot"></div></div>',
+    );
+    const composer = element.querySelector<HTMLTextAreaElement>(
+      '[data-web-shell-composer-editor]',
+    )!;
+    await openAndSelect(element, 'second');
+    // Wait for the focus to land, then drop it the way a click on an
+    // unfocusable area of the transcript does: no focusin anywhere.
+    await waitForFocus(composer);
+    await act(async () => {
+      composer.blur();
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    });
+    expect(document.activeElement).not.toBe(composer);
+  });
+
+  it('cancels the focus watch when the selector unmounts', async () => {
+    renderInShell(
+      '<div data-web-shell-composer><textarea data-web-shell-composer-editor></textarea><div id="fixture-slot"></div></div>',
+    );
+    await openAndSelect(container!, 'second');
+    const probe = vi.spyOn(document, 'querySelectorAll');
+    await act(async () => {
+      root?.unmount();
+    });
+    root = undefined;
+    probe.mockClear();
+    // Let the environment go away the way afterEach does; a surviving
+    // retry would fall through to the document rung and probe it.
+    container?.remove();
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    });
+    expect(probe).not.toHaveBeenCalled();
+  });
+
   it('moves focus to the composer after a standalone selection', async () => {
     const onSelectStandalone = vi.fn();
-    const element = renderInPanes(
-      '<div data-pane-session-id="fixture-pane" data-web-shell-composer><textarea data-web-shell-composer-editor></textarea><div id="fixture-slot"></div></div>',
+    const element = renderInShell(
+      '<div data-web-shell-composer><textarea data-web-shell-composer-editor></textarea><div id="fixture-slot"></div></div>',
       { standaloneSupported: true, onSelectStandalone },
     );
     await openAndSelect(element, 'No workspace');
