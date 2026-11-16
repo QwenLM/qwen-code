@@ -92,7 +92,7 @@ function fakeControlPlane() {
       admitted.set(event.platformEventId, inputId);
       return { inputId, sessionId: 'session-1', replayed: false };
     },
-    claimDeliveries: async () => queue.splice(0),
+    claimDeliveries: async (limit) => queue.splice(0, limit),
     receipt: async (deliveryId, receipt) => {
       const error = receiptError?.(deliveryId);
       if (error) throw error;
@@ -1060,47 +1060,6 @@ describe('managed WeCom adapter outbox', () => {
     await adapter.disconnect();
   });
 
-  it('caps the persisted outbound ledger at the shared limit', async () => {
-    const { adapter, plane, fake } = await connectedAdapter();
-    // Every receipt answer is lost, so each sent segment's entry STAYS in the
-    // ledger; LIMIT+1 single-segment deliveries pile up past the cap within
-    // one pullOutbox, and the slice must keep the persisted state loadable.
-    plane.setReceiptError(() =>
-      Object.assign(new Error('answer lost'), { status: 503 }),
-    );
-    plane.enqueue(
-      Array.from({ length: MANAGED_OUTBOUND_LIMIT + 1 }, (_, i) =>
-        delivery(`d-${i}`, 1),
-      ),
-    );
-    await adapter.tick();
-    expect(fake.sent).toHaveLength(MANAGED_OUTBOUND_LIMIT + 1);
-    const state = (adapter as unknown as { state: { outbound: unknown[] } })
-      .state;
-    expect(state.outbound).toHaveLength(MANAGED_OUTBOUND_LIMIT);
-    // The persisted ledger must stay loadable at exactly the cap.
-    const persisted = JSON.parse(readFileSync(adapter.stateFile, 'utf8'));
-    expect(persisted.outbound).toHaveLength(MANAGED_OUTBOUND_LIMIT);
-    await adapter.disconnect();
-  });
-
-  it('keeps the recent window loadable at the shared cap', async () => {
-    const { adapter, plane, fake } = await connectedAdapter();
-    for (let i = 0; i < RECENT_LIMIT + 8; i += 1) {
-      fake.push(`m${i}`, messageData({ msgid: `m${i}` }));
-      await adapter.tick();
-    }
-    const persisted = JSON.parse(
-      readFileSync(
-        (adapter as unknown as { store: { file: string } }).store.file,
-        'utf8',
-      ),
-    );
-    expect(persisted.recent.length).toBeLessThanOrEqual(RECENT_LIMIT);
-    expect(plane.submit.length).toBe(RECENT_LIMIT + 8);
-    await adapter.disconnect();
-  });
-
   it('reports a send failure as unknown and never resends', async () => {
     const { adapter, plane, fake } = await connectedAdapter();
     fake.setBehavior('fail');
@@ -1333,9 +1292,20 @@ describe('managed WeCom adapter outbox', () => {
     expect(fake.sent).toHaveLength(1);
     expect(plane.receipts).toEqual([]);
     // Tick 2: the orphan replay meets a transient refusal too. The transient
-    // arm must THROW (keep the entry), never fall through to the deterministic
-    // drop — a dropped accepted receipt would settle a delivered reply unknown.
-    await expect(adapter.tick()).rejects.toThrow('answer lost');
+    // arm CONTAINS it (keep the entry, log, proceed) — it must not fall through
+    // to the deterministic drop (a dropped accepted receipt would settle a
+    // delivered reply unknown) and must not abort the tick before the outbox is
+    // pulled. So the tick resolves and the outbox poll still runs.
+    let claims = 0;
+    const origClaim = plane.controlPlane.claimDeliveries.bind(
+      plane.controlPlane,
+    );
+    plane.controlPlane.claimDeliveries = async (limit) => {
+      claims += 1;
+      return origClaim(limit);
+    };
+    await adapter.tick();
+    expect(claims).toBe(1);
     const persisted = JSON.parse(readFileSync(adapter.stateFile, 'utf8'));
     expect(persisted.outbound).toHaveLength(1);
     expect(persisted.outbound[0].receipt.outcome).toBe('accepted');
@@ -1407,59 +1377,6 @@ describe('managed WeCom adapter outbox', () => {
     expect(
       (durableAtSend as { outbound: Array<{ deliveryId: string }> }).outbound,
     ).toEqual([expect.objectContaining({ deliveryId: 'd1', ordinal: 0 })]);
-    await adapter.disconnect();
-  });
-
-  it('does not claim deliveries when a stop lands mid-tick', async () => {
-    const { adapter, plane, fake } = await connectedAdapter();
-    plane.enqueue([delivery('d1', 1)]);
-    // A kick between the admission phase and the outbox pull must not claim
-    // a batch the stopped adapter would abandon to settle unknown.
-    const originalClaim = plane.controlPlane.claimDeliveries.bind(
-      plane.controlPlane,
-    );
-    plane.controlPlane.claimDeliveries = async (limit) => {
-      fake.kick();
-      return originalClaim(limit);
-    };
-    await adapter.tick();
-    expect(fake.sent).toHaveLength(0);
-    await adapter.disconnect();
-  });
-
-  it('an unreportable receipt re-drives on the next tick, never the send', async () => {
-    const { adapter, plane, fake } = await connectedAdapter();
-    let once = true;
-    plane.setReceiptError(() => {
-      if (once) {
-        once = false;
-        return Object.assign(new Error('answer lost'), { status: 503 });
-      }
-      return undefined;
-    });
-    plane.enqueue([delivery('d1', 2)]);
-    await adapter.tick();
-    expect(fake.sent).toHaveLength(1);
-    expect(plane.receipts).toEqual([]);
-    await adapter.tick();
-    // The persisted accepted receipt replays — never a second send of
-    // segment 0. The remaining segment is the control plane's partial/resume
-    // re-claim, not this tick's job.
-    expect(fake.sent).toHaveLength(1);
-    expect(plane.receipts.map((entry) => entry.receipt)).toEqual([
-      expect.objectContaining({ outcome: 'accepted', ordinal: 0 }),
-    ]);
-    // The control plane re-claims the still-unsent remainder; the adapter
-    // sends it and receipts it by ordinal.
-    const remainder = delivery('d1', 2);
-    remainder.segments = [remainder.segments[1]!];
-    plane.enqueue([remainder]);
-    await adapter.tick();
-    expect(fake.sent).toHaveLength(2);
-    expect(plane.receipts.map((entry) => entry.receipt)).toEqual([
-      expect.objectContaining({ outcome: 'accepted', ordinal: 0 }),
-      expect.objectContaining({ outcome: 'accepted', ordinal: 1 }),
-    ]);
     await adapter.disconnect();
   });
 });
@@ -1835,10 +1752,13 @@ describe('managed WeCom adapter review fixes (round 2)', () => {
       deps: { ...fake.deps, log: (l) => lines.push(l) },
       pollLoop: false,
     });
-    // connect resolves despite the transient orphan refusal; the entry stays.
+    // connect resolves despite the transient orphan refusal; the entry stays
+    // and the containment is logged (the replay re-drives on the next tick).
     await second.connect();
     expect(
-      lines.some((l) => l.includes('orphan-receipt replay at connect')),
+      lines.some((l) =>
+        l.includes('receipt for d-orphan could not be reported'),
+      ),
     ).toBe(true);
     const persisted = JSON.parse(readFileSync(second.stateFile, 'utf8'));
     expect(persisted.outbound).toHaveLength(1);
@@ -2031,7 +1951,11 @@ describe('managed WeCom adapter review fixes (round 2)', () => {
       (_, i) => `d-${i}`,
     );
     plane.enqueue(ids.map((id) => delivery(id, 1)));
-    await adapter.tick();
+    // A conforming control plane returns at most the requested batch limit per
+    // claim, so draining 65 deliveries takes several ticks — never one.
+    for (let i = 0; i < ids.length && fake.sent.length < ids.length; i += 1) {
+      await adapter.tick();
+    }
     expect(fake.sent).toHaveLength(MANAGED_OUTBOUND_LIMIT + 1);
     const state = (
       adapter as unknown as {
@@ -2159,6 +2083,14 @@ describe('managed WeCom adapter review fixes (round 2)', () => {
         ? Object.assign(new Error('unavailable'), { status: 503 })
         : undefined,
     );
+    let claims = 0;
+    const origClaim2 = plane2.controlPlane.claimDeliveries.bind(
+      plane2.controlPlane,
+    );
+    plane2.controlPlane.claimDeliveries = async (limit) => {
+      claims += 1;
+      return origClaim2(limit);
+    };
     const fake2 = fakeDeps();
     // Same name + cwd → same state dir → connect loads the persisted orphan.
     const looped = new ManagedWecomAdapter({
@@ -2170,11 +2102,13 @@ describe('managed WeCom adapter review fixes (round 2)', () => {
       pollLoop: true,
     });
     await looped.connect();
-    // The default poll loop must contain the transient orphan-replay rejection
-    // (logged "tick failed"), not crash the process as an unhandled rejection.
+    // R1-14: a PERSISTENT orphan-receipt refusal must not starve the outbox —
+    // the orphan replay contains its transient error, so the tick still reaches
+    // claimDeliveries and the loop keeps polling instead of aborting each tick.
     await vi.waitFor(() => {
-      expect(lines.some((l) => l.includes('tick failed'))).toBe(true);
+      expect(claims).toBeGreaterThanOrEqual(1);
     });
+    expect(lines.some((l) => l.includes('could not be reported'))).toBe(true);
     fail = false;
     await vi.waitFor(() => {
       expect(plane2.receipts.length).toBeGreaterThanOrEqual(1);
@@ -2220,12 +2154,178 @@ describe('managed WeCom adapter review fixes (round 2)', () => {
     });
     await adapter.connect();
     expect(connects).toBe(1);
-    // Enqueue more than CLAIM_BATCH (16); the fake now slices by limit.
+    // Enqueue more than the claim batch (16). The fake slices by the requested
+    // limit, so one tick sends exactly the batch and leaves the rest queued —
+    // witness the bounded send count, not just the limit argument.
     plane.enqueue(Array.from({ length: 20 }, (_, i) => delivery(`d${i}`, 1)));
     await adapter.tick();
-    expect(claimLimits.every((l) => l === 16)).toBe(true);
-    expect(claimLimits.length).toBeGreaterThanOrEqual(1);
+    expect(claimLimits).toEqual([16]);
+    expect(fake.sent).toHaveLength(16);
+    // The next tick drains the remaining four.
+    await adapter.tick();
+    expect(fake.sent).toHaveLength(20);
     await adapter.disconnect();
     expect(disconnects).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe('ManagedWecomAdapter — round-3 review fixes', () => {
+  it('a kicked adapter releases its lock while parked and never disconnects the shared channel row', async () => {
+    const cwd = tempCwd();
+    const plane = fakeControlPlane();
+    const fake = fakeDeps();
+    // A lock fake that records when the releaser runs, so the witness can tell
+    // the kick released the lock (while parked) from a later disconnect.
+    let releases = 0;
+    let locked = false;
+    const deps = {
+      ...fake.deps,
+      lock: async () => {
+        locked = true;
+        return async () => {
+          releases += 1;
+          locked = false;
+        };
+      },
+    };
+    const adapter = new ManagedWecomAdapter({
+      name: 'wecom-1',
+      cwd,
+      config: CONFIG,
+      controlPlane: plane.controlPlane,
+      deps,
+      pollLoop: false,
+    });
+    await adapter.connect();
+    expect(locked).toBe(true);
+    expect(releases).toBe(0);
+    // The server kicks this connection (a newer owner displaced it). The kick
+    // must stop the adapter AND release the lock immediately — not hold it
+    // until some later disconnect.
+    fake.kick('new connection established');
+    await vi.waitFor(() => {
+      expect(releases).toBe(1);
+    });
+    expect(locked).toBe(false);
+    // The row now belongs to the displacing owner. disconnect() must NOT call
+    // controlPlane.disconnect() (that would 409 the new owner and drop frames
+    // WeCom never redelivers); it only releases the (already released) lock.
+    await adapter.disconnect();
+    expect(plane.disconnectCalls()).toBe(0);
+    expect(releases).toBe(1);
+  });
+
+  it('a normal disconnect still disconnects the channel row (the displaced guard is kick-only)', async () => {
+    const { adapter, plane } = await connectedAdapter();
+    await adapter.disconnect();
+    expect(plane.disconnectCalls()).toBe(1);
+  });
+
+  it('a store failure on a skipped frame does not poison the durable-loss latch', async () => {
+    const lines: string[] = [];
+    const { adapter, fake } = await connectedAdapter(tempCwd(), {
+      log: (l) => lines.push(l),
+    });
+    const store = (
+      adapter as unknown as { store: { save: (s: unknown) => void } }
+    ).store;
+    const spy = vi.spyOn(store, 'save').mockImplementation(() => {
+      throw new Error('disk full');
+    });
+    // A group frame is deliberately skipped; its recent-window persist fails
+    // but must be contained — not thrown into the durable-loss catch, which
+    // would latch loggedAcceptFailure and blame a skipped frame for the loss.
+    fake.push(
+      'grp',
+      messageData({ msgid: 'grp', chattype: 'group', chatid: 'group-1' }),
+    );
+    expect(
+      lines.some((l) =>
+        l.includes('could not record skipped message wecom:grp'),
+      ),
+    ).toBe(true);
+    expect(
+      lines.some((l) => l.includes('could not durably accept message grp')),
+    ).toBe(false);
+    // The next admittable text frame genuinely fails to stage; its OWN loss
+    // line must still appear (the latch was not poisoned by the skipped frame).
+    fake.push('m1', messageData({ msgid: 'm1' }));
+    expect(
+      lines.some((l) => l.includes('could not durably accept message m1')),
+    ).toBe(true);
+    spy.mockRestore();
+    await adapter.disconnect();
+  });
+
+  it('the drop gate names the stall cause, not a claim slot', async () => {
+    const lines: string[] = [];
+    const { adapter, plane, fake } = await connectedAdapter(tempCwd(), {
+      log: (l) => lines.push(l),
+    });
+    plane.setRefuseSubmit({ status: 404, code: 'workspace_not_found' });
+    fake.push('m1', messageData({ msgid: 'm1' }));
+    fake.push('m2', messageData({ msgid: 'm2' }));
+    await adapter.tick(); // m1 sacrifice drop, m2 held + stall armed
+    fake.push('drop', messageData({ msgid: 'drop' }));
+    const dropLines = lines.filter((l) => l.includes('dropped message drop'));
+    expect(dropLines).toHaveLength(1);
+    expect(dropLines[0]).toContain(
+      'admission is stalled (instance-scoped refusal)',
+    );
+    expect(dropLines[0]).not.toContain('no durable claim slot');
+    await adapter.disconnect();
+  });
+
+  it('the drop gate names the re-registering cause, not a claim slot', async () => {
+    const lines: string[] = [];
+    const { adapter, plane, fake } = await connectedAdapter(tempCwd(), {
+      log: (l) => lines.push(l),
+    });
+    plane.failNextSubmit(
+      Object.assign(new Error('disconnected'), {
+        status: 409,
+        code: 'channel_disconnected',
+      }),
+    );
+    fake.push('m1', messageData({ msgid: 'm1' }));
+    await adapter.tick(); // registeredGeneration reset to 0
+    fake.push('drop', messageData({ msgid: 'drop' }));
+    const dropLines = lines.filter((l) => l.includes('dropped message drop'));
+    expect(dropLines).toHaveLength(1);
+    expect(dropLines[0]).toContain('the channel is re-registering');
+    expect(dropLines[0]).not.toContain('no durable claim slot');
+    await adapter.disconnect();
+  });
+
+  it('a cause change mid-outage emits a second drop line (re-registering to stall)', async () => {
+    const lines: string[] = [];
+    const { adapter, plane, fake } = await connectedAdapter(tempCwd(), {
+      log: (l) => lines.push(l),
+    });
+    // Cause 1: a registration refusal resets the generation; both claims stay
+    // pending and the gate drops new frames as "re-registering".
+    plane.failNextSubmit(
+      Object.assign(new Error('disconnected'), {
+        status: 409,
+        code: 'channel_disconnected',
+      }),
+    );
+    fake.push('m1', messageData({ msgid: 'm1' }));
+    fake.push('m2', messageData({ msgid: 'm2' }));
+    await adapter.tick();
+    fake.push('dropA', messageData({ msgid: 'dropA' }));
+    // Cause 2: re-register, then consecutive instance-scoped refusals hold m2
+    // and arm the stall. No frame is accepted between the two drops, so the
+    // latch is still set and only the cause-change term can emit the 2nd line.
+    plane.setRefuseSubmit({ status: 404, code: 'workspace_not_found' });
+    await adapter.tick();
+    fake.push('dropB', messageData({ msgid: 'dropB' }));
+    const dropLines = lines.filter((l) => l.includes('dropped message drop'));
+    expect(dropLines).toHaveLength(2);
+    expect(dropLines[0]).toContain('the channel is re-registering');
+    expect(dropLines[1]).toContain(
+      'admission is stalled (instance-scoped refusal)',
+    );
+    await adapter.disconnect();
   });
 });

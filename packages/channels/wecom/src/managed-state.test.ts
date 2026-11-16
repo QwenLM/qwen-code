@@ -14,7 +14,7 @@ import {
   chmodSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   MANAGED_WECOM_PENDING_LIMIT,
@@ -219,6 +219,60 @@ describe('validManagedWecomState', () => {
     ).toBe(false);
   });
 
+  it('rejects a pending event missing any field the re-drive reads', () => {
+    // resubmitPending re-drives the persisted event verbatim; a partial state
+    // that loads would drop the claim with a misleading line (allowlist) or
+    // submit it without chat/scope (open). Each required field must fail closed.
+    const withEvent = (event: unknown): ManagedWecomState => ({
+      ...baseState(),
+      pending: [{ eventId: 'e1', event: event as ManagedInboundEvent }],
+    });
+    const drop = (key: keyof ManagedInboundEvent) => {
+      const event = { ...inbound('e1') } as Record<string, unknown>;
+      delete event[key];
+      return withEvent(event);
+    };
+    for (const key of [
+      'senderId',
+      'chatId',
+      'threadId',
+      'accountGeneration',
+      'semanticRevision',
+      'scope',
+      'attachments',
+      'replyContext',
+    ] as const) {
+      expect(validManagedWecomState(drop(key))).toBe(false);
+    }
+    // Empty-string ids and out-of-range generations must not load either.
+    expect(
+      validManagedWecomState(withEvent({ ...inbound('e1'), senderId: '' })),
+    ).toBe(false);
+    expect(
+      validManagedWecomState(withEvent({ ...inbound('e1'), chatId: '' })),
+    ).toBe(false);
+    expect(
+      validManagedWecomState(
+        withEvent({ ...inbound('e1'), accountGeneration: 0 }),
+      ),
+    ).toBe(false);
+    expect(
+      validManagedWecomState(
+        withEvent({ ...inbound('e1'), semanticRevision: 2 }),
+      ),
+    ).toBe(false);
+    expect(
+      validManagedWecomState(
+        withEvent({ ...inbound('e1'), scope: { kind: 'other' } }),
+      ),
+    ).toBe(false);
+    expect(
+      validManagedWecomState(
+        withEvent({ ...inbound('e1'), attachments: 'none' }),
+      ),
+    ).toBe(false);
+  });
+
   it('rejects pending beyond the admission limit', () => {
     const pending = Array.from(
       { length: MANAGED_WECOM_PENDING_LIMIT + 1 },
@@ -334,24 +388,25 @@ describe('ManagedWecomStateStore', () => {
     const otherCwd = tempHome();
     const elsewhere = new ManagedWecomStateStore('bot', otherCwd, 'bot-1');
     expect(elsewhere.directory).not.toBe(a.directory);
-    // The full path prefix, not just the leaf regex.
+    // The full path prefix, not just the leaf regex. basename (not split('/'))
+    // so the leaf derivation is correct on the Windows lane too.
     expect(a.directory).toBe(
       join(
         getGlobalQwenDir(),
         'channels',
         getWorkspaceScopeDirName(cwd),
-        a.directory.split('/').pop()!,
+        basename(a.directory),
       ),
     );
   });
 
-  it('save is atomic: a write failure leaves the prior state loadable and no tmp', () => {
+  it('an early open failure leaves the prior state loadable', () => {
     const s = store();
     s.save(populatedState());
     const before = s.load();
-    // Force a real write failure: remove the directory's write bit so the
-    // temp-file open fails. An in-place write would instead truncate the
-    // prior state; the atomic temp+rename must leave it intact.
+    // Remove the directory's write bit so the temp-file open fails before any
+    // write. An in-place write would instead truncate the prior state; the
+    // atomic temp+rename must leave it intact.
     chmodSync(s.directory, 0o500);
     try {
       expect(() => s.save({ ...baseState(), generation: 9 })).toThrow(
@@ -361,6 +416,20 @@ describe('ManagedWecomStateStore', () => {
       chmodSync(s.directory, 0o700);
     }
     expect(s.load()).toEqual(before);
+  });
+
+  it('save cleans up the temp file when the rename fails after the write', () => {
+    const s = store();
+    s.save(populatedState());
+    // Replace the state file with a directory: the temp open/write/fsync all
+    // succeed, then renameSync(temp, file) fails EISDIR — a failure AFTER the
+    // temp file exists. This is the case the cleanup is named for: without the
+    // finally rmSync, each attempt leaks one <uuid>.tmp with nothing to sweep it.
+    rmSync(s.file);
+    mkdirSync(s.file);
+    expect(() => s.save({ ...baseState(), generation: 9 })).toThrow(
+      /could not be saved/,
+    );
     expect(readdirSync(s.directory).filter((f) => f.endsWith('.tmp'))).toEqual(
       [],
     );

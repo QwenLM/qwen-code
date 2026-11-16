@@ -91,6 +91,23 @@ export function validManagedWecomState(
         typeof entry.event === 'object' &&
         entry.event.platformEventId === entry.eventId &&
         typeof entry.event.text === 'string' &&
+        // The re-drive (resubmitPending) reads these fields; a partial state
+        // that loads would drop the already-accepted claim with a misleading
+        // line (allowlist) or submit it without chat/scope (open). Fail closed
+        // on any missing required field so the store refuses it for repair.
+        typeof entry.event.senderId === 'string' &&
+        entry.event.senderId.length > 0 &&
+        typeof entry.event.chatId === 'string' &&
+        entry.event.chatId.length > 0 &&
+        typeof entry.event.threadId === 'string' &&
+        entry.event.threadId.length > 0 &&
+        Number.isSafeInteger(entry.event.accountGeneration) &&
+        entry.event.accountGeneration >= 1 &&
+        entry.event.semanticRevision === 1 &&
+        !!entry.event.scope &&
+        entry.event.scope.kind === 'chat_thread' &&
+        Array.isArray(entry.event.attachments) &&
+        'replyContext' in entry.event &&
         (entry.inputId === undefined || typeof entry.inputId === 'string') &&
         // held is persisted and re-read at startup; the stall re-arm reads
         // truthiness while the lift and the probe sort require === true, so a

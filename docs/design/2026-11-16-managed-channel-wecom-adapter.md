@@ -104,12 +104,14 @@ a restart re-drives the exact persisted event, never a rebuilt one. A
 frame and logs the loss (latched, so a disk outage does not drown the log).
 This is the deliberate divergence from DingTalk's LATER arm.
 
-Two further paths discard an already-staged claim, and on a no-redelivery
-provider that loss is permanent: a full 32-entry claim table drops the incoming
-frame at the gate (a drop, not a stall — the latched diagnostic names the
-cause), and a deterministic admission refusal drops the claim and records its
-id in `recent`. A per-message verdict (400/403/409) drops on the first refusal;
-an instance-scoped refusal (`workspace_not_found` and siblings) sacrifices the
+The gate refuses an incoming frame for three causes, each named by the latched
+diagnostic: the 32-entry claim table is full, an instance stall is armed, or the
+channel is re-registering (`registeredGeneration === 0`). Such a frame was never
+staged, so this is a drop of the only copy — not the discard of a durable claim
+— and on a no-redelivery provider it is permanent. Separately, a deterministic
+admission refusal discards an already-staged claim and records its id in
+`recent`: a per-message verdict (400/403/409) drops on the first refusal; an
+instance-scoped refusal (`workspace_not_found` and siblings) sacrifices the
 first frame and holds from the second, stalling admission until the binding
 answers. A held claim is re-driven each tick; a dropped one is gone, and a
 redelivery of its id is deduped away by `recent`.

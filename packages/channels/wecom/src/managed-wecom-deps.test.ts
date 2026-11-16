@@ -387,7 +387,13 @@ describe('managed WeCom deps review fixes (round 2)', () => {
         return true;
       });
     const { stream, received, stops } = await authenticatedSetup();
-    // The real SDK emits the generic 'message' event for every type.
+    // The real SDK emits the generic 'message' event for every type, including
+    // text. A text frame must NOT trip the non-text latch: without the
+    // msgtype !== 'text' exemption the first text frame of every session would
+    // write a false "dropped" line and set the latch, hiding later real drops.
+    mockState.instance!.emit('message', textFrame());
+    expect(written.filter((l) => l.includes('non-text frame'))).toEqual([]);
+    // Now a genuine non-text frame: exactly one latched line naming the type.
     mockState.instance!.emit('message', textFrame({ msgtype: 'image' }));
     mockState.instance!.emit('message', textFrame({ msgtype: 'image' }));
     const nonText = written.filter((l) => l.includes('non-text frame'));

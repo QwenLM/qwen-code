@@ -178,6 +178,7 @@ export class ManagedWecomAdapter {
   private releaseLock?: () => Promise<void>;
   private running = false;
   private ownershipLost = false;
+  private displaced = false;
   private loop?: Promise<void>;
   private abort?: AbortController;
   private registeredGeneration?: number;
@@ -276,6 +277,7 @@ export class ManagedWecomAdapter {
       this.persist();
       this.abort = new AbortController();
       this.running = true;
+      this.displaced = false;
       this.loggedNoClaimSlot = false;
       this.lastDropCause = undefined;
       this.loggedAcceptFailure = false;
@@ -289,22 +291,24 @@ export class ManagedWecomAdapter {
           // displace the new owner in turn. Stop instead of reporting a
           // healthy start that is permanently deaf.
           this.log(`Managed WeCom stream stopped: ${reason}; adapter stopped.`);
+          this.displaced = true;
           this.stop();
+          // The kick displaced the WS connection, not the state-file lock
+          // (still ours): release it now so a restart of this entry can
+          // acquire it, instead of holding it until SIGTERM while this
+          // process will never work again. Distinct from ownershipLost,
+          // where the lock belongs to another process and is NOT released.
+          void this.release();
         },
       );
       await this.stream.connect();
       if (!this.running)
         throw new Error('Managed WeCom adapter stopped during connection.');
       await this.ensureRegistered(this.state);
-      // A stale orphan row must not keep a healthy stream from starting: a
-      // transient receipt refusal here is re-driven by the poll loop seconds
-      // later. Swallow only at this call site — reportOrphanedOutbound keeps
-      // rethrowing so the tick-level discipline (keep the entry) stands.
-      await this.reportOrphanedOutbound().catch((error) => {
-        this.log(
-          `Managed WeCom orphan-receipt replay at connect failed (${String(error)}); the poll loop re-drives it.`,
-        );
-      });
+      // Orphan-receipt replay contains its own transient refusals (it keeps
+      // the entry and lets the outbox pull run), so a stale row cannot keep a
+      // healthy stream from starting nor wedge outbound after it.
+      await this.reportOrphanedOutbound();
       // A lock compromise or a kick can land during the awaits above. Re-check
       // so connect() rejects rather than resolving a healthy-looking start for
       // a stopped, deaf adapter the CLI would then park on.
@@ -325,8 +329,13 @@ export class ManagedWecomAdapter {
     this.stop();
     await this.loop;
     // Accepted frames are already durable claims (onMessage persists before
-    // returning), so shutdown has no inbox to drain.
-    await this.controlPlane.disconnect().catch(() => undefined);
+    // returning), so shutdown has no inbox to drain. A displaced adapter no
+    // longer owns the shared channel row: disconnecting it would deregister
+    // the new owner (the server's disconnect has no generation guard), which
+    // then drops inbound frames WeCom never redelivers. Skip it when displaced.
+    if (!this.displaced) {
+      await this.controlPlane.disconnect().catch(() => undefined);
+    }
     await this.release();
   }
 
@@ -465,7 +474,17 @@ export class ManagedWecomAdapter {
     const eventId = `wecom:${item.messageId}`;
     const skip = () => {
       state.recent = [...state.recent, eventId].slice(-RECENT_LIMIT);
-      this.persist();
+      // A skipped frame was never a durable claim, so a store failure here
+      // loses nothing — contain it separately so it cannot poison the
+      // durable-loss latch (loggedAcceptFailure) reserved for real staging
+      // failures, which would then silence a genuinely lost text frame.
+      try {
+        this.persist();
+      } catch (error) {
+        this.log(
+          `Managed WeCom could not record skipped message ${eventId}: ${String(error)}; nothing was lost.`,
+        );
+      }
     };
     // The managed path serves private chats under the private-chat policy.
     // A group frame would be answered into the group for every member to
@@ -860,10 +879,11 @@ export class ManagedWecomAdapter {
           );
           return;
         }
-        // A deterministic refusal never converges on re-drive, and a held
-        // entry runs before every outbox pull: it would stall every later
-        // delivery. Drop it visibly; the lease reconciler records the
-        // delivery unknown.
+        // A transient (or status-less) refusal on ONE entry must not wedge
+        // every later delivery: reportOrphanedOutbound runs before pullOutbox,
+        // so rethrowing here would abort the tick before any reply is sent for
+        // as long as the fault lasts. Contain it like the registration-refusal
+        // arm above — keep the entry for re-drive and let the outbox pull run.
         if (
           !(
             status === 400 ||
@@ -872,8 +892,15 @@ export class ManagedWecomAdapter {
             (status === 404 && code === 'delivery_not_found')
           )
         ) {
-          throw error;
+          this.log(
+            `Managed WeCom receipt for ${entry.deliveryId} could not be reported (${String(error)}); it re-drives on the next tick.`,
+          );
+          return;
         }
+        // A deterministic refusal never converges on re-drive, and a held
+        // entry runs before every outbox pull: it would stall every later
+        // delivery. Drop it visibly; the lease reconciler records the
+        // delivery unknown.
         this.log(
           `Managed WeCom receipt for ${entry.deliveryId} was refused (${String(status)}); it is dropped.`,
         );
@@ -887,8 +914,10 @@ export class ManagedWecomAdapter {
 
   private persist(): void {
     // Once the lock is compromised the state file belongs to another process;
-    // never rewrite it, even from an in-flight tick's post-await persist.
-    if (this.ownershipLost) return;
+    // never rewrite it, even from an in-flight tick's post-await persist. A
+    // displaced adapter has likewise released its lock on the kick, so it must
+    // not write either — a restart of the entry may already own the file.
+    if (this.ownershipLost || this.displaced) return;
     if (this.state) this.store.save(this.state);
   }
 
