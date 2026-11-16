@@ -864,6 +864,10 @@ describe('evaluateAutoMode — fast-path gating', () => {
     'touch .qwen/setting{s..s}.json',
     'sort -o $OUT in.txt',
     'cp -t $D settings.json',
+    'cp -t out/x? file',
+    'mv --target-directory=out/{a,b} f',
+    'cp -t out/$D/.. file',
+    'cp -t .qwe? settings.json',
   ])('routes an expanded write to manual fallback: %s', async (command) => {
     vi.mocked(classifyAction).mockClear();
     const decision = await evaluate({

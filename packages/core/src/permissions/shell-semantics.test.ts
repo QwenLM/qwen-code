@@ -1557,6 +1557,23 @@ describe('paths a handler derives from an argument stay uncertain', () => {
   });
 
   it.each([
+    ['cp -t out/x? file', `${CWD}/out/x?/file`],
+    ['mv --target-directory=out/{a,b} f', `${CWD}/out/{a,b}/f`],
+    ['cp -t out/$D/.. file', `${CWD}/out/file`],
+    ['cp -t .qwe? settings.json', `${CWD}/.qwe?/settings.json`],
+  ])(
+    'retains target-directory uncertainty before path normalization: %s',
+    (command, filePath) => {
+      const writes = ops(command).filter(
+        (op) => op.virtualTool === 'write_file',
+      );
+      expect(writes).toEqual([
+        { virtualTool: 'write_file', filePath, pathUnknown: true },
+      ]);
+    },
+  );
+
+  it.each([
     'sort -o/tmp/safe in.txt',
     'sort -o /tmp/safe in.txt',
     'curl -o/tmp/safe https://example.com',

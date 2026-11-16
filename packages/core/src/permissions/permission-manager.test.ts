@@ -3526,6 +3526,10 @@ describe('PermissionManager — compound shell write attribution', () => {
     'touch .qwen/setting{s..s}.json',
     'sort -o $OUT in.txt',
     'cp -t $D settings.json',
+    'cp -t out/x? file',
+    'mv --target-directory=out/{a,b} f',
+    'cp -t out/$D/.. file',
+    'cp -t .qwe? settings.json',
   ])(
     'does not certify an expanded write despite a broad allow: %s',
     async (command) => {

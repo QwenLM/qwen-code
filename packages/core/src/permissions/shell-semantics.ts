@@ -438,7 +438,6 @@ interface ArgumentWord {
 }
 
 let argumentContext: readonly ArgumentWord[] = [];
-let dispatchCwd = '';
 
 /**
  * The marking of the argument characters `fragment` was taken from.
@@ -459,32 +458,6 @@ function fragmentBare(fragment: string): string | undefined {
       const slice = word.bare.slice(at, at + fragment.length);
       merged = merged === undefined ? slice : mergeBares(merged, slice);
       at = word.text.indexOf(fragment, at + 1);
-    }
-  }
-  return merged;
-}
-
-/**
- * Marks for a path a handler already resolved.
- *
- * Two spellings need more than a verbatim lookup: an attached flag value
- * (`-tout/$D`) carries a prefix the path does not, and normalization can drop
- * the characters that carried the mark (`out/$D/..` resolves to `out`). Each
- * suffix of an argument word is therefore resolved and compared by equality or
- * directory prefix. The shortest matching suffix wins, so a flag prefix does
- * not drag its own characters into the marking.
- */
-function resolvedFragmentBare(resolved: string): string | undefined {
-  let merged = fragmentBare(resolved);
-  for (const word of argumentContext) {
-    for (let at = word.text.length - 1; at >= 0; at--) {
-      const bare = word.bare.slice(at);
-      const candidate = resolvePath(word.text.slice(at), dispatchCwd, bare);
-      if (candidate !== resolved && !resolved.startsWith(`${candidate}/`)) {
-        continue;
-      }
-      merged = merged === undefined ? bare : mergeBares(merged, bare);
-      break;
     }
   }
   return merged;
@@ -528,8 +501,6 @@ function dispatchHandler(
   bares: string[],
 ): ShellOperation[] {
   const outer = argumentContext;
-  const outerCwd = dispatchCwd;
-  dispatchCwd = cwd;
   argumentContext = args.map((text, index) => ({
     text,
     bare: bares[index] ?? '',
@@ -538,7 +509,6 @@ function dispatchHandler(
     return handler(args, cwd);
   } finally {
     argumentContext = outer;
-    dispatchCwd = outerCwd;
   }
 }
 
@@ -974,32 +944,37 @@ function getFlagValue(
   return undefined;
 }
 
-function targetDirectoryPath(args: string[], cwd: string): string | undefined {
+interface TargetDirectory {
+  path: string;
+  pathUnknown: boolean;
+}
+
+function targetDirectoryPath(
+  args: string[],
+  cwd: string,
+): TargetDirectory | undefined {
   const target = getFlagValue(args, '-t', '--target-directory');
   if (!target) return undefined;
-  return resolvePath(target, cwd, fragmentBare(target));
+  const bare = fragmentBare(target);
+  return {
+    path: resolvePath(target, cwd, bare),
+    pathUnknown: isUncertainPath(target, bare),
+  };
 }
 
 function targetDirectoryWrites(
-  targetDir: string,
+  targetDir: TargetDirectory,
   sources: string[],
 ): ShellOperation[] {
   return sources.map((source) => {
     const base = nodePath.posix.basename(source.replace(/\\/g, '/'));
     const operation: ShellOperation = {
       virtualTool: 'write_file',
-      filePath: nodePath.posix.join(targetDir, base),
+      filePath: nodePath.posix.join(targetDir.path, base),
     };
-    // The destination inherits uncertainty from both halves: an expanded
-    // `-t out/$D` and a globbed source basename each make it unknowable. The
-    // resolved directory is matched back to its source word, because
-    // normalization can drop the very characters that carried the mark.
-    const dirBare = resolvedFragmentBare(targetDir);
-    if (
-      (dirBare !== undefined && dirBare.includes('2')) ||
-      isUncertainPath(targetDir, dirBare) ||
-      isUncertainPath(base, fragmentBare(base))
-    ) {
+    // Check the source word before absolute path resolution or `..`
+    // normalization can move its expansion marks to different characters.
+    if (targetDir.pathUnknown || isUncertainPath(base, fragmentBare(base))) {
       operation.pathUnknown = true;
     }
     return operation;
