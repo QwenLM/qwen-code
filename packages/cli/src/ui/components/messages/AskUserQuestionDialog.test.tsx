@@ -611,6 +611,40 @@ describe('<AskUserQuestionDialog />', () => {
 
       unmount();
     });
+
+    it('confirms a single question once when a free-text answer is submitted', async () => {
+      const onConfirm = vi.fn();
+      const details = createConfirmationDetails();
+
+      const { stdin, lastFrame, unmount } = renderWithProviders(
+        <AskUserQuestionDialog
+          confirmationDetails={details}
+          availableWidth={80}
+          onConfirm={onConfirm}
+        />,
+      );
+      await wait();
+
+      stdin.write('4');
+      await waitForFrame(() => {
+        expect(clean(lastFrame())).toContain('❯ 4.');
+      });
+      await wait();
+      await writeText(stdin, 'Teal');
+      await waitForFrame(() => {
+        expect(clean(lastFrame())).toContain('Teal');
+      });
+
+      stdin.write('\r');
+      await wait();
+
+      expect(onConfirm).toHaveBeenCalledTimes(1);
+      expect(onConfirm).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedOnce,
+        { answers: { 0: 'Teal' } },
+      );
+      unmount();
+    }, 10000);
   });
 
   describe('multi-select interaction', () => {
@@ -815,6 +849,48 @@ describe('<AskUserQuestionDialog />', () => {
         unmount();
       },
     );
+
+    it('advances one question when a free-text answer is submitted with Enter', async () => {
+      const onConfirm = vi.fn();
+      const details = createConfirmationDetails({
+        questions: [
+          createSingleQuestion({ header: 'Q1', question: 'First question?' }),
+          createSingleQuestion({ header: 'Q2', question: 'Second question?' }),
+          createSingleQuestion({ header: 'Q3', question: 'Third question?' }),
+        ],
+      });
+
+      const { stdin, lastFrame, unmount } = renderWithProviders(
+        <AskUserQuestionDialog
+          confirmationDetails={details}
+          availableWidth={80}
+          onConfirm={onConfirm}
+        />,
+      );
+      await wait();
+
+      stdin.write('4');
+      await waitForFrame(() => {
+        expect(clean(lastFrame())).toContain('❯ 4.');
+      });
+      await wait();
+      await writeText(stdin, 'Teal');
+      await waitForFrame(() => {
+        expect(clean(lastFrame())).toContain('Teal');
+      });
+
+      stdin.write('\r');
+      await waitForFrame(() => {
+        expect(clean(lastFrame())).toContain('Second question?');
+      });
+      // Both advance timers would have fired by now.
+      await wait(400);
+
+      expect(clean(lastFrame())).toContain('Second question?');
+      expect(clean(lastFrame())).not.toContain('Third question?');
+      expect(onConfirm).not.toHaveBeenCalled();
+      unmount();
+    }, 10000);
 
     // TODO(#4036): Ink 7's input throttle merges or drops consecutive arrow
     // keys when run through `ink-testing-library`. The two right-arrow presses
