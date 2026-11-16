@@ -2536,6 +2536,18 @@ describe('containerNonceErrors (R16-1 / D17-1 / D17-2)', () => {
     expect(containerNonceErrors(boundary, gateWith(), dir)).toEqual([]);
   });
 
+  // A real harness log can exceed 1 MiB; the nonce line is echoed at the
+  // start, so a size cap that skips the whole file would falsely refuse a
+  // legitimate round the shell grep accepts.
+  it('accepts a nonce line at the start of a log larger than 1 MiB', () => {
+    const dir = dirWithLog(null);
+    writeFileSync(
+      join(dir, 'big.log'),
+      `container-nonce: ${NONCE}\n` + 'x'.repeat(2 * 1024 * 1024),
+    );
+    expect(containerNonceErrors(boundary, gateWith(), dir)).toEqual([]);
+  });
+
   it('refuses a plaintext-only legacy record with no nonceSha256', () => {
     const dir = dirWithLog(`container-nonce: ${NONCE}\n`);
     const legacy = JSON.stringify({

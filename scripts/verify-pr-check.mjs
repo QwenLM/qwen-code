@@ -329,7 +329,10 @@ function gateRecordErrors(gateText, { publishLane = false } = {}) {
  * host battery that never ran inside the boundary cannot produce a match.
  */
 function nonceLogMatches(roundDir, expected) {
-  const MAX_FILE_BYTES = 1024 * 1024;
+  // A safety bound against a PR-planted huge regular file, generous enough
+  // for a real harness log (the shell grep reads whole files too); a file
+  // beyond it is skipped, which fails closed rather than stalling the check.
+  const MAX_FILE_BYTES = 16 * 1024 * 1024;
   const walk = (d) => {
     let entries;
     try {

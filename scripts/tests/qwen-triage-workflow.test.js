@@ -6857,6 +6857,8 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain('(`nonceSha256`), never the plaintext');
     expect(flat).toContain('"nonceSha256"');
     expect(flat).toContain('sha256sum');
+    // The host check runs on macOS too: the hash falls back to shasum.
+    expect(flat).toContain('shasum -a 256');
     expect(flat).toContain(
       'round logs carry no container nonce matching the gate record',
     );

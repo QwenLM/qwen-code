@@ -645,8 +645,9 @@ authority to certify the round.
      # declaration; the checker below enforces the same binding authoritatively.
      expected="$(sed -n 's/.*"nonceSha256"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$rd/boundary-gate.json" | head -1)"
      matched=0
+     # sha256sum (GNU) or shasum -a 256 (macOS): the host check runs on either.
      for val in $(grep -rhF --exclude=boundary-gate.json --exclude=boundary.json -- 'container-nonce:' "$rd" 2>/dev/null | sed 's/.*container-nonce:[[:space:]]*//' | awk '{print $1}'); do
-       if [ "$(printf '%s' "$val" | sha256sum | cut -d' ' -f1)" = "$expected" ]; then matched=1; break; fi
+       if [ "$(printf '%s' "$val" | { sha256sum 2>/dev/null || shasum -a 256; } | cut -d' ' -f1)" = "$expected" ]; then matched=1; break; fi
      done
      if [ -z "$expected" ] || [ "$matched" -ne 1 ]; then
        echo "round logs carry no container nonce matching the gate record; refusing mode:container — declare mode:waived with the maintainer's approval if the battery ran on the host" >&2; rc=1
