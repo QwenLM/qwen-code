@@ -1337,8 +1337,10 @@ describe('BranchPickerPopover checkout resolution panel', () => {
       detached: false,
       stashSha: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0',
     });
-    // The mount read answers the dirty pre-stash tree; every later read
-    // answers the clean post-switch tree.
+    // Every read up to the stash click answers the dirty pre-stash tree
+    // (the mount read AND the dirty refusal's catch refresh); only the
+    // post-switch reads answer clean.
+    workspaceGit.mockResolvedValueOnce(status({ unstaged: 2, computedAt: 2 }));
     workspaceGit.mockResolvedValueOnce(status({ unstaged: 2, computedAt: 2 }));
     workspaceGit.mockResolvedValue(status({ branch: 'dev', computedAt: 3 }));
     mountWithBranches(CHECKOUT_BRANCHES, {
@@ -1349,22 +1351,35 @@ describe('BranchPickerPopover checkout resolution panel', () => {
     // The open picker reports the pre-stash dirt before the action (the
     // behind-upstream pull hint names the uncommitted changes).
     expect(footerText()).toContain('↓1 · uncommitted changes');
-    const listingReadsBefore = workspaceGitBranches.mock.calls.length;
-    const statusReadsBefore = workspaceGit.mock.calls.length;
 
     clickButton('dev');
     await flush();
+    // The dirty refusal's catch already refreshed both halves against the
+    // still-dirty reads: the baselines sit AFTER it, so only the stash
+    // success's own refresh can satisfy them.
+    expect(footerText()).toContain('↓1 · uncommitted changes');
+    const listingReadsBefore = workspaceGitBranches.mock.calls.length;
+    const statusReadsBefore = workspaceGit.mock.calls.length;
+    // A genuinely post-switch listing (head dev, no upstream): only this
+    // fixture can produce the 'No upstream' hint, so dropping the listing
+    // response reds the test even though the request was issued.
+    workspaceGitBranches.mockResolvedValue({
+      ...CHECKOUT_BRANCHES,
+      local: [{ name: 'dev', isHead: true }],
+      head: 'dev',
+    });
+
     clickButton('Stash Changes and Switch');
     await flush();
 
-    // A stash success must re-read BOTH halves: the hints must not keep
-    // reporting uncommitted changes for a now-clean tree, and the rows
-    // must not keep the pre-switch listing.
+    // A stash success must re-read AND apply BOTH halves: the hints must
+    // not keep reporting uncommitted changes for a now-clean tree, and
+    // the rows must follow the post-switch listing.
     expect(workspaceGitBranches.mock.calls.length).toBeGreaterThan(
       listingReadsBefore,
     );
     expect(workspaceGit.mock.calls.length).toBeGreaterThan(statusReadsBefore);
-    expect(footerText()).toContain('↓1 · origin/main');
+    expect(footerText()).toContain('No upstream');
     expect(footerText()).not.toContain('uncommitted changes');
   });
 
@@ -1389,16 +1404,24 @@ describe('BranchPickerPopover checkout resolution panel', () => {
     await flush();
     const listingReadsBefore = workspaceGitBranches.mock.calls.length;
     const statusReadsBefore = workspaceGit.mock.calls.length;
+    // Only the post-switch listing can produce the 'No upstream' hint.
+    workspaceGitBranches.mockResolvedValue({
+      ...CHECKOUT_BRANCHES,
+      local: [{ name: 'dev', isHead: true }],
+      head: 'dev',
+    });
     clickButton('Stash Changes and Switch');
     await flush();
 
     // The switch completed and kept the entry: the tree moved, so the
-    // open picker must re-read both halves even though the request failed.
+    // open picker must re-read AND apply both halves even though the
+    // request failed.
     expect(footerText()).toContain('kept in stash entry a1b2c3d4e5f6');
     expect(workspaceGitBranches.mock.calls.length).toBeGreaterThan(
       listingReadsBefore,
     );
     expect(workspaceGit.mock.calls.length).toBeGreaterThan(statusReadsBefore);
+    expect(footerText()).toContain('No upstream');
   });
 
   it('closes the picker after a plain checkout succeeds', async () => {

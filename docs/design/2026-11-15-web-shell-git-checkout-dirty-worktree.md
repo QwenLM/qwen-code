@@ -300,7 +300,9 @@ omission:
   during a pre-touch refusal is not claimed as this call's switch —
   including an untracked-only tree, where the dirty→clean witness is
   unavailable; a failed before-probe certifies no switch, even when an
-  actor lands on exactly the requested target; a refusing hook that
+  actor lands on exactly the requested target; a concurrent actor moving
+  HEAD during a refused `checkout -f HEAD` keeps the edit and the residue
+  (the in-place target must not have moved at all); a refusing hook that
   rewrites a tracked file still reports the completed switch and cleans
   the residue; untracked-only dirt with a refusing hook completes via the
   identity witness; an in-place discard (current branch and `HEAD`)

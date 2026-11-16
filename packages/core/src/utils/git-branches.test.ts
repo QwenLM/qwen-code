@@ -1560,6 +1560,38 @@ describe('gitCheckout with a dirty working tree', () => {
     expect(read(dir, 'a.txt')).toBe('one\n');
   });
 
+  it.skipIf(process.platform === 'win32')(
+    'force checkout of HEAD keeps everything when a concurrent actor moved HEAD',
+    async () => {
+      const dir = dirtyCheckoutFixture();
+      // Same commit as HEAD: the actor's plain checkout succeeds, so the
+      // shim fires and the identity change is real and trusted.
+      git(dir, 'branch', 'side');
+      write(dir, { 'new.txt': 'untracked\n' });
+      const env = gitShim(hermeticEnv(), [
+        {
+          match: '"checkout -f HEAD"*',
+          script: '"$REAL" checkout side --; exit 1',
+        },
+      ]);
+
+      const failure = await checkoutFails(
+        dir,
+        'HEAD',
+        { force: true },
+        'checkout_failed',
+        env,
+      );
+
+      // `checkout HEAD` discards in place: HEAD must not have moved at
+      // all, so the actor's move is not this call's completed discard.
+      expect(failure.message).toContain('cannot discard and switch');
+      expect(currentBranch(dir)).toBe('side');
+      expect(read(dir, 'a.txt')).toBe('local edit\n');
+      expect(read(dir, 'new.txt')).toBe('untracked\n');
+    },
+  );
+
   it('force checkout of the current branch reports the completed discard when a refusing hook re-dirties a tracked file', async () => {
     const dir = dirtyCheckoutFixture();
     write(dir, { 'new.txt': 'untracked\n' });
