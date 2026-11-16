@@ -14,7 +14,13 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -24,6 +30,31 @@ import {
   WorktreeDirtyCarryConflictError,
 } from './gitWorktreeService.js';
 import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
+
+// Whether the host filesystem folds final sigma (ς, U+03C2) to sigma (σ,
+// U+03C3) as one path — true on macOS's default case-insensitive volumes, false
+// on Linux. Gates the Sigma-alias regression so it runs only where the alias is
+// real; the hard-link identity test below witnesses the same guard on every host.
+const fsFoldsFinalSigma = (() => {
+  let dir: string | undefined;
+  try {
+    dir = mkdtempSync(path.join(os.tmpdir(), 'qwen-sigma-probe-'));
+    writeFileSync(path.join(dir, '\u03c2.env'), '');
+    const a = statSync(path.join(dir, '\u03c2.env'));
+    const b = statSync(path.join(dir, '\u03c3.env'));
+    return a.dev === b.dev && a.ino === b.ino;
+  } catch {
+    return false;
+  } finally {
+    if (dir !== undefined) {
+      try {
+        rmSync(dir, { recursive: true, force: true });
+      } catch {
+        // Best effort: a leftover probe must not fail the test file.
+      }
+    }
+  }
+})();
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
@@ -1042,6 +1073,62 @@ describe('GitWorktreeService.createUserWorktree() — carryDirtyState', () => {
     ).rejects.toMatchObject({ conflict: true });
     expect(await read(path.join(repoRoot, nfc))).toBe('LOCAL_UNIQUE\n');
   });
+
+  it('applyStashSnapshot refuses a snapshot path sharing an ignored file inode (R17-1)', async () => {
+    // Filesystem-identity witness runnable on any host: b.env is a hard link to
+    // the ignored a.env (same device+inode) but is NOT itself ignored, so the
+    // string and ancestor checks miss it; only the inode comparison catches it.
+    await fs.writeFile(path.join(repoRoot, '.gitignore'), 'a.env\n');
+    git(repoRoot, 'add', '.gitignore');
+    git(repoRoot, 'commit', '-qm', 'ignore', '--no-verify');
+    await fs.writeFile(path.join(repoRoot, 'a.env'), 'LOCAL_UNIQUE\n');
+    await fs.link(path.join(repoRoot, 'a.env'), path.join(repoRoot, 'b.env'));
+    const service = new GitWorktreeService(repoRoot);
+    const src = await service.createUserWorktree('r171-src', 'main', {
+      detached: true,
+    });
+    expect(src.success).toBe(true);
+    const srcPath = src.worktree!.path;
+    await fs.writeFile(path.join(srcPath, 'b.env'), 'AGENT_TEMPLATE\n');
+    git(srcPath, 'add', '-f', 'b.env');
+    const snapshot = await service.createStashSnapshot(srcPath);
+    expect(snapshot).not.toBe('');
+    await expect(
+      service.applyStashSnapshot(repoRoot, snapshot),
+    ).rejects.toMatchObject({ conflict: true });
+    expect(await read(path.join(repoRoot, 'a.env'))).toBe('LOCAL_UNIQUE\n');
+  });
+
+  it.skipIf(!fsFoldsFinalSigma)(
+    'applyStashSnapshot refuses a final-sigma case alias (R17-1 macOS)',
+    async () => {
+      // On a case-insensitive filesystem ς.env (U+03C2) and σ.env (U+03C3) name
+      // one file; toLowerCase leaves them distinct, so the inode check must
+      // catch the alias the string comparison misses.
+      const finalSigma = '\u03c2.env';
+      const sigma = '\u03c3.env';
+      await fs.writeFile(path.join(repoRoot, '.gitignore'), '*.env\n');
+      git(repoRoot, 'add', '.gitignore');
+      git(repoRoot, 'commit', '-qm', 'ignore', '--no-verify');
+      await fs.writeFile(path.join(repoRoot, finalSigma), 'LOCAL_UNIQUE\n');
+      const service = new GitWorktreeService(repoRoot);
+      const src = await service.createUserWorktree('r171s-src', 'main', {
+        detached: true,
+      });
+      expect(src.success).toBe(true);
+      const srcPath = src.worktree!.path;
+      await fs.writeFile(path.join(srcPath, sigma), 'AGENT_TEMPLATE\n');
+      git(srcPath, 'add', '-f', sigma);
+      const snapshot = await service.createStashSnapshot(srcPath);
+      expect(snapshot).not.toBe('');
+      await expect(
+        service.applyStashSnapshot(repoRoot, snapshot),
+      ).rejects.toMatchObject({ conflict: true });
+      expect(await read(path.join(repoRoot, finalSigma))).toBe(
+        'LOCAL_UNIQUE\n',
+      );
+    },
+  );
 
   it('applyStashSnapshot applies when no ignored path collides (R12-2 control)', async () => {
     await fs.writeFile(path.join(repoRoot, '.gitignore'), 'unrelated.env\n');

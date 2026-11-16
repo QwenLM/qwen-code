@@ -3490,6 +3490,36 @@ export class GitWorktreeService {
             }
           }
         }
+        // Filesystem-identity check (R17-1): string folding (NFC + case) cannot
+        // replicate every alias a filesystem treats as one path — macOS folds
+        // final sigma `ς` to `σ`, which toLowerCase leaves distinct. Ask the
+        // target FS directly: if a snapshot path resolves to the same
+        // device+inode as an ignored file, applying would overwrite that
+        // ignored content, so refuse. This catches any FS-specific alias the
+        // string comparison misses, without maintaining a Unicode fold table.
+        const ignoredIdentity = new Map<string, string>();
+        for (const ignoredPath of ignoredPaths) {
+          const st = await fs
+            .stat(path.join(targetTop, ignoredPath))
+            .catch(() => null);
+          if (st && st.isFile()) {
+            ignoredIdentity.set(`${st.dev}:${st.ino}`, ignoredPath);
+          }
+        }
+        for (const snapshotPath of snapshotPaths) {
+          const st = await fs
+            .stat(path.join(targetTop, snapshotPath))
+            .catch(() => null);
+          if (st && st.isFile()) {
+            const hit = ignoredIdentity.get(`${st.dev}:${st.ino}`);
+            if (hit !== undefined) {
+              throw new WorktreeDirtyCarryConflictError(
+                `Stash snapshot would overwrite the ignored local file ${hit}`,
+                { conflict: true },
+              );
+            }
+          }
+        }
       }
     }
     let applyError: unknown;

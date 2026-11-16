@@ -60,6 +60,30 @@ function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
 }
 
+// Whether the host filesystem folds final sigma (ς, U+03C2) to sigma (σ,
+// U+03C3) as one path — true on macOS's default case-insensitive volumes, false
+// on Linux. Gates the Sigma-alias route regression to where the alias is real.
+const fsFoldsFinalSigma = (() => {
+  let dir: string | undefined;
+  try {
+    dir = mkdtempSync(path.join(tmpdir(), 'qwen-sigma-probe-'));
+    writeFileSync(path.join(dir, '\u03c2.env'), '');
+    const a = statSync(path.join(dir, '\u03c2.env'));
+    const b = statSync(path.join(dir, '\u03c3.env'));
+    return a.dev === b.dev && a.ino === b.ino;
+  } catch {
+    return false;
+  } finally {
+    if (dir !== undefined) {
+      try {
+        rmSync(dir, { recursive: true, force: true });
+      } catch {
+        // Best effort.
+      }
+    }
+  }
+})();
+
 function makeFixture(
   opts: { subdir?: string; symlinkWorkspace?: boolean } = {},
 ) {
@@ -1038,6 +1062,36 @@ describe('POST /session/:id/worktree-handoff', () => {
       'LOCAL_UNIQUE\n',
     );
   });
+
+  it.skipIf(!fsFoldsFinalSigma)(
+    'refuses a final-sigma case alias on a case-insensitive filesystem (R17-1)',
+    async () => {
+      const fixture = makeFixture();
+      fixture.writeTranscript();
+      const finalSigma = '\u03c2.env';
+      const sigma = '\u03c3.env';
+      writeFileSync(path.join(fixture.workspaceDir, '.gitignore'), '*.env\n');
+      git(fixture.workspaceDir, 'add', '.gitignore');
+      git(fixture.workspaceDir, 'commit', '-qm', 'ignore', '--no-verify');
+      await fixture.createDetachedWorktree();
+      writeFileSync(path.join(fixture.worktreeDir, sigma), 'AGENT_TEMPLATE\n');
+      git(fixture.worktreeDir, 'add', '-f', sigma);
+      writeFileSync(
+        path.join(fixture.workspaceDir, finalSigma),
+        'LOCAL_UNIQUE\n',
+      );
+
+      const res = await request(fixture.app)
+        .post(`/session/${fixture.sessionId}/worktree-handoff`)
+        .send({ to: 'local' });
+
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('handoff_snapshot_conflict');
+      expect(
+        readFileSync(path.join(fixture.workspaceDir, finalSigma), 'utf8'),
+      ).toBe('LOCAL_UNIQUE\n');
+    },
+  );
 
   it('fails closed when the local checkout is not the bound workspace (R9-1)', async () => {
     // Daemon bound to a subdirectory; a branch-route-shaped sidecar records
