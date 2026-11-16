@@ -13,6 +13,7 @@ import com.aliyun.oss.model.PutObjectRequest;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.ArgumentCaptor;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -60,16 +61,21 @@ class AliyunToolPublicationObjectStoreTest {
     }
 
     @Test
-    void openRangeDoesNotReprobeVersioning() throws IOException {
+    void openRangeRequestsTheExactRangeWithoutAVersioningProbe() throws IOException {
         var objects = store();
         // The constructor itself probes versioning once; only the range read is under test.
         clearInvocations(client);
         var object = new OSSObject();
         object.setObjectContent(new ByteArrayInputStream(new byte[] {1, 2, 3}));
         when(client.getObject(any(GetObjectRequest.class))).thenReturn(object);
-        try (var input = objects.openRange("exact/key", 0, 3, () -> {})) {
+        // A non-zero offset discriminates setRange(offset, offset + length - 1) from
+        // a zero-offset mapping; the end is inclusive.
+        try (var input = objects.openRange("exact/key", 1, 2, () -> {})) {
             assertThat(input.readAllBytes()).containsExactly(1, 2, 3);
         }
+        var request = ArgumentCaptor.forClass(GetObjectRequest.class);
+        verify(client).getObject(request.capture());
+        assertThat(request.getValue().getRange()).containsExactly(1L, 2L);
         verify(client, never()).getBucketVersioning("private-bucket");
     }
 
