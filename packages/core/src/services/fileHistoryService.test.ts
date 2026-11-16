@@ -610,6 +610,52 @@ describe('FileHistoryService', () => {
       ]);
     });
 
+    it('mixed absolute/relative aliases of one file never collide backup names or cross-capture', async () => {
+      // Same physical file tracked under BOTH spellings in cwd A: the
+      // absolute form first, then the relative form. Independent version
+      // counters must not overwrite each other's backups, and rewinding to
+      // the absolute-spelling snapshot must restore its own captured content.
+      const file = join(projectDir, 'alias.txt');
+      await writeFile(file, 'one');
+      await service.makeSnapshot('p1');
+      await service.trackEdit(file); // absolute spelling /proj/alias.txt
+      await writeFile(file, 'two');
+      await service.makeSnapshot('p2');
+      await service.trackEdit('alias.txt'); // relative spelling
+      await writeFile(file, 'three');
+      await service.makeSnapshot('p3');
+      const res = await service.rewind('p1');
+      expect(res.filesFailed).toEqual([]);
+      expect(await readFile(file, 'utf-8')).toBe('one');
+    });
+
+    it('rewinding a foreign-cwd snapshot through a same-named relative key is refused, not mis-restored', async () => {
+      // p2 captures alias.txt under cwd A. Hydrate in cwd B, capture the SAME
+      // relative spelling there (a different physical file), then ask to
+      // rewind to p2: the cross-directory guard must refuse instead of
+      // silently restoring A's content into B's file or B's into A's.
+      const fileA = join(projectDir, 'alias2.txt');
+      await writeFile(fileA, 'from-A');
+      await service.makeSnapshot('p1');
+      await service.trackEdit('alias2.txt');
+      await writeFile(fileA, 'edited-A');
+      await service.makeSnapshot('p2');
+      const otherDir = join(tmpdir(), 'fh-alias-b');
+      await mkdir(otherDir, { recursive: true });
+      const fileB = join(otherDir, 'alias2.txt');
+      await writeFile(fileB, 'from-B');
+      const svcB = new FileHistoryService('alias-b', true, otherDir);
+      svcB.restoreFromSnapshots(service.getSnapshots());
+      await svcB.trackEdit('alias2.txt'); // same spelling, different file
+      await writeFile(fileB, 'edited-B');
+      await svcB.makeSnapshot('p3');
+      await expect(svcB.rewind('p2')).rejects.toThrow(
+        /different working directory/,
+      );
+      expect(await readFile(fileB, 'utf-8')).toBe('edited-B');
+      expect(await readFile(fileA, 'utf-8')).toBe('edited-A');
+    });
+
     it('does not rewrite an absolute external key against the hydrating cwd', () => {
       const otherDir = join(tmpdir(), 'fh-other-root');
       const capturedExternal = join(otherDir, 'x.txt');

@@ -1004,6 +1004,13 @@ describe('boot5 history HTTP ownership with labelled readback/composer seams', (
     base.state.snapshots = [];
     base.state.files = {};
     const request: Record<string, unknown> = { identity: { sessionId: 's' } };
+    const ref = {
+      resourceId: 'r'.repeat(36),
+      kind: 'resource',
+      schemaVersion: 1,
+      byteLength: 128,
+      digest: 'sha256:' + 'd'.repeat(64),
+    } as const;
     const invocation = {
       executionCallId: 'e'.repeat(36),
       callId: 'c'.repeat(36),
@@ -1012,10 +1019,10 @@ describe('boot5 history HTTP ownership with labelled readback/composer seams', (
       partIndex: 0,
       ordinal: 0,
       requestDigest: 'sha256:' + 'd'.repeat(64),
-      inputRef: { recordRef: 'r'.repeat(128) },
-      toolDefinitionRef: { recordRef: 'r'.repeat(128) },
+      inputRef: ref,
+      toolDefinitionRef: ref,
     };
-    const preparation = {
+    const preparation: import('./managed-csi-file-history-protocol.js').CsiHistoryPreparation = {
       stage: 'intent',
       turnId: 't'.repeat(36),
       promptId: 'p-new',
