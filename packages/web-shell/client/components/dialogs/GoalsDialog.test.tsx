@@ -91,6 +91,9 @@ function findButton(label: string): HTMLButtonElement | undefined {
 function barName(testid: string): string {
   const bar = document.querySelector(`[data-testid="${testid}"]`);
   if (!bar) throw new Error(`bar not found: ${testid}`);
+  // The name must come from the referenced visible nodes, not a duplicated
+  // aria-label — a regression back to aria-label has to red this helper.
+  expect(bar.hasAttribute('aria-label')).toBe(false);
   const ids = (bar.getAttribute('aria-labelledby') ?? '')
     .split(/\s+/)
     .filter(Boolean);
@@ -335,6 +338,16 @@ describe('GoalsDialog', () => {
         .querySelector('[data-testid="goal-budget-time"]')
         ?.getAttribute('aria-valuenow'),
     ).toBe('0');
+    expect(
+      document.querySelector<HTMLElement>(
+        '[data-testid="goal-budget-turns"] > div',
+      )?.style.width,
+    ).toBe('0%');
+    expect(
+      document.querySelector<HTMLElement>(
+        '[data-testid="goal-budget-time"] > div',
+      )?.style.width,
+    ).toBe('0%');
     expect(document.querySelector('[data-testid="goal-turns"]')).toBeNull();
     expect(document.querySelector('[data-testid="goal-elapsed"]')).toBeNull();
   });
@@ -391,6 +404,9 @@ describe('GoalsDialog', () => {
         '[data-testid="goal-budget-tokens"]',
       );
       const time = document.querySelector('[data-testid="goal-budget-time"]');
+      expect(turns?.getAttribute('role')).toBe('progressbar');
+      expect(turns?.getAttribute('aria-valuemin')).toBe('0');
+      expect(turns?.getAttribute('aria-valuemax')).toBe('100');
       expect(turns?.getAttribute('aria-valuenow')).toBe('15');
       expect(tokens?.getAttribute('aria-valuenow')).toBe('25');
       expect(time?.getAttribute('aria-valuenow')).toBe('33');
@@ -519,6 +535,68 @@ describe('GoalsDialog', () => {
           .querySelector('[data-testid="goal-budget-turns"] > div')
           ?.getAttribute('data-status'),
       ).toBe('attention');
+    });
+
+    it('tones the fill running for an active goal', async () => {
+      await mount([
+        withSpend({ status: 'active', turnCount: 3, turnBudget: 20 }),
+      ]);
+
+      expect(
+        document
+          .querySelector('[data-testid="goal-budget-turns"] > div')
+          ?.getAttribute('data-status'),
+      ).toBe('running');
+    });
+
+    it('advances the active-time bar on the tick', async () => {
+      vi.useFakeTimers();
+      const goal = baseGoal({ hasActivePrompt: true });
+      goal.snapshot.goal.activeTimeMs = 60_000;
+      goal.snapshot.goal.activeTimeBudgetMs = 1_800_000;
+      goal.snapshot.goal.updatedAt = Date.now();
+      await mount([goal]);
+
+      const valueNow = () =>
+        Number(
+          document
+            .querySelector('[data-testid="goal-budget-time"]')
+            ?.getAttribute('aria-valuenow'),
+        );
+      const before = valueNow();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(120_000);
+      });
+      expect(valueNow()).toBeGreaterThan(before);
+      vi.useRealTimers();
+    });
+
+    it('keeps budget label ids unique across cards and scoped to each card', async () => {
+      const first = baseGoal();
+      first.snapshot.goal.turnCount = 1;
+      first.snapshot.goal.turnBudget = 20;
+      const second = baseGoal({ sessionId: 'sess-2', displayName: 'two' });
+      second.snapshot.goal.goalId = 'goal-2';
+      second.snapshot.goal.turnCount = 2;
+      second.snapshot.goal.turnBudget = 30;
+      await mount([first, second]);
+
+      const bars = Array.from(
+        document.querySelectorAll('[role="progressbar"]'),
+      );
+      expect(bars).toHaveLength(2);
+      const ids = bars.flatMap((bar) =>
+        (bar.getAttribute('aria-labelledby') ?? '').split(/\s+/),
+      );
+      expect(new Set(ids).size).toBe(ids.length);
+      for (const bar of bars) {
+        const card = bar.closest('[role="listitem"]')!;
+        for (const id of (bar.getAttribute('aria-labelledby') ?? '').split(
+          /\s+/,
+        )) {
+          expect(card.contains(document.getElementById(id))).toBe(true);
+        }
+      }
     });
   });
 
@@ -667,6 +745,24 @@ describe('GoalsDialog', () => {
     // Message icon + arrow icon frame the name so it reads as a jump, not a
     // label; the grey text-only shape was indistinguishable from the meta.
     expect(link!.querySelectorAll('svg')).toHaveLength(2);
+  });
+
+  it('names both jump affordances with the action and the session', async () => {
+    // The header action is icon-only, so its accessible name is the only
+    // thing a screen reader gets; the footer link must carry the same.
+    await mount([baseGoal()]);
+
+    const expected = "Open this goal's session: fix-ci";
+    expect(
+      document
+        .querySelector('[data-testid="goal-open-session"]')
+        ?.getAttribute('aria-label'),
+    ).toBe(expected);
+    expect(
+      document
+        .querySelector('[data-testid="goal-session-link"]')
+        ?.getAttribute('aria-label'),
+    ).toBe(expected);
   });
 
   it('keeps the header session action enabled while a control is in flight', async () => {

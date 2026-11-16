@@ -89,7 +89,7 @@ test('opening a goal from the card header loads its session @smoke', async ({
   page,
   baseURL,
 }) => {
-  await openGoals(page, baseURL!, multiWorkspaceOverrides);
+  const daemon = await openGoals(page, baseURL!, multiWorkspaceOverrides);
 
   const secondaryCard = page
     .locator('[role="listitem"]')
@@ -103,6 +103,19 @@ test('opening a goal from the card header loads its session @smoke', async ({
   const untintedFg = await secondaryCard
     .locator('[class*="cardTitle"]')
     .evaluate((el) => getComputedStyle(el).color);
+  // The header action's colour cue must be painted: it reads the interactive
+  // blue, distinct from the grey control icons beside it.
+  const [headerColor, editColor] = await secondaryCard.evaluate((card) => {
+    const header = card.querySelector(
+      '[data-testid="goal-open-session"]',
+    ) as HTMLElement;
+    const edit = card.querySelector(
+      'button[aria-label="Edit goal"]',
+    ) as HTMLElement;
+    return [getComputedStyle(header).color, getComputedStyle(edit).color];
+  });
+  expect(headerColor).not.toBe(editColor);
+  expect(headerColor).not.toBe(untintedFg);
   await secondaryCard.getByTestId('goal-open-session').click();
 
   // The transcript IS the goal's history: the header action must land on the
@@ -110,11 +123,23 @@ test('opening a goal from the card header loads its session @smoke', async ({
   await page.waitForURL('**/session/sess-secondary**');
   await expect(page.getByTestId('goals-page')).toHaveCount(0);
 
+  // The session must load in the GOAL's workspace runtime, not the primary:
+  // the load request carries the secondary cwd.
+  const loadRequest = daemon.requests.find(
+    (r) => r.method === 'POST' && r.path === '/session/sess-secondary/load',
+  );
+  expect((loadRequest?.body as { cwd?: string } | null)?.cwd).toBe(
+    '/e2e/secondary',
+  );
+
   // The strip's lifecycle tint must actually be painted and read the same
   // state as the card it came from: deleting the strip's [data-status]
   // colour rule falls back to plain foreground and goes red here.
   const strip = page.getByTestId('goal-status-strip');
   await expect(strip).toBeVisible();
+  // Identify which goal the strip shows — the route alone could be satisfied
+  // by an unrelated session's strip.
+  await expect(strip).toContainText('secondary goal');
   const [stripStatusColor, stripActivityColor] = await strip.evaluate(
     (root) => {
       const status = root.querySelector('[data-status]') as HTMLElement;
@@ -132,7 +157,10 @@ test('a stopped goal shows its lifecycle tone and budget progress @smoke', async
   baseURL,
 }) => {
   const base = goalSnapshot('budgeted goal', 1_000);
+  // Two workspaces → two cards, so the card-scoped reads below are exercised
+  // against a real sibling, not a lone card.
   await openGoals(page, baseURL!, {
+    capabilities: { workspaces: [PRIMARY, SECONDARY] },
     goalSnapshot: {
       ...base,
       goal: {
@@ -142,13 +170,21 @@ test('a stopped goal shows its lifecycle tone and budget progress @smoke', async
         turnBudget: 20,
       },
     },
+    goalsByWorkspace: {
+      'ws-secondary': {
+        sessionId: 'sess-sibling',
+        displayName: 'sibling session',
+        snapshot: goalSnapshot('sibling goal', 2_000),
+      },
+    },
   });
 
-  // Scope every read to the identified goal card so a second card could
+  // Scope every read to the identified goal card so the sibling card can
   // never satisfy the assertions by accident.
   const card = page
     .locator('[role="listitem"]')
     .filter({ hasText: 'budgeted goal' });
+  await expect(page.locator('[role="listitem"]')).toHaveCount(2);
   await expect(card.getByTestId('goal-status')).toHaveAttribute(
     'data-status',
     'attention',
@@ -172,42 +208,101 @@ test('a stopped goal shows its lifecycle tone and budget progress @smoke', async
   // untintedFg is the card title's plain --foreground — the colour the pill
   // falls back to when its [data-status] rule is gone, so a tinted pill must
   // differ from it (an equality-only check would survive a double deletion).
-  const [fillBg, trackBg, linkColor, metaColor, pillColor, pillBg, untintedFg] =
-    await card.evaluate((cardEl) => {
-      const track = cardEl.querySelector(
-        '[data-testid="goal-budget-turns"]',
-      ) as HTMLElement;
-      const fill = track.firstElementChild as HTMLElement;
-      const link = cardEl.querySelector(
-        '[data-testid="goal-session-link"]',
-      ) as HTMLElement;
-      const meta = cardEl.querySelector(
-        '[data-testid="goal-activity"]',
-      ) as HTMLElement;
-      const pill = cardEl.querySelector(
-        '[data-testid="goal-status"]',
-      ) as HTMLElement;
-      const title = cardEl.querySelector('[class*="cardTitle"]') as HTMLElement;
-      return [
-        getComputedStyle(fill).backgroundColor,
-        getComputedStyle(track).backgroundColor,
-        getComputedStyle(link).color,
-        getComputedStyle(meta).color,
-        getComputedStyle(pill).color,
-        getComputedStyle(pill).backgroundColor,
-        getComputedStyle(title).color,
-      ];
-    });
+  const [
+    fillBg,
+    trackBg,
+    linkColor,
+    metaColor,
+    pillColor,
+    pillBg,
+    untintedFg,
+    headerColor,
+  ] = await card.evaluate((cardEl) => {
+    const track = cardEl.querySelector(
+      '[data-testid="goal-budget-turns"]',
+    ) as HTMLElement;
+    const fill = track.firstElementChild as HTMLElement;
+    const link = cardEl.querySelector(
+      '[data-testid="goal-session-link"]',
+    ) as HTMLElement;
+    const meta = cardEl.querySelector(
+      '[data-testid="goal-activity"]',
+    ) as HTMLElement;
+    const pill = cardEl.querySelector(
+      '[data-testid="goal-status"]',
+    ) as HTMLElement;
+    const title = cardEl.querySelector('[class*="cardTitle"]') as HTMLElement;
+    const header = cardEl.querySelector(
+      '[data-testid="goal-open-session"]',
+    ) as HTMLElement;
+    return [
+      getComputedStyle(fill).backgroundColor,
+      getComputedStyle(track).backgroundColor,
+      getComputedStyle(link).color,
+      getComputedStyle(meta).color,
+      getComputedStyle(pill).color,
+      getComputedStyle(pill).backgroundColor,
+      getComputedStyle(title).color,
+      getComputedStyle(header).color,
+    ];
+  });
   expect(fillBg).not.toBe(trackBg);
   expect(fillBg).not.toBe('rgba(0, 0, 0, 0)');
   expect(linkColor).not.toBe(metaColor);
-  // The paused fill and the pill read the same attention token; deleting
-  // either [data-status] rule makes them diverge. The pill background must
-  // also differ from the plain muted track (its base colour), and the pill
-  // colour from the untinted foreground anchor.
+  // Positive witness for the link's blue: it reads the same interactive
+  // token as the header action, so deleting the blue (not just recolouring
+  // to something else) goes red.
+  expect(linkColor).toBe(headerColor);
+  expect(linkColor).not.toBe(untintedFg);
+  // The paused fill reads the PILL's attention token; deleting the pill's
+  // attention rule makes them diverge. (The strip's attention rule is pinned
+  // by the paused-goal navigation case below.) The pill background must also
+  // differ from the plain muted track, and the pill colour from the untinted
+  // foreground anchor.
   expect(fillBg).toBe(pillColor);
   expect(pillBg).not.toBe(trackBg);
   expect(pillColor).not.toBe(untintedFg);
+});
+
+test('a paused goal strip paints the attention tone @smoke', async ({
+  page,
+  baseURL,
+}) => {
+  // The running-tone case above never paints the strip in attention; this
+  // one pins the strip's attention rule itself — deleting it falls back to
+  // the plain foreground and goes red against both anchors.
+  const base = goalSnapshot('paused strip goal', 1_000);
+  await openGoals(page, baseURL!, {
+    goalSnapshot: {
+      ...base,
+      goal: { ...base.goal, status: 'paused' as const },
+    },
+  });
+
+  const card = page
+    .locator('[role="listitem"]')
+    .filter({ hasText: 'paused strip goal' });
+  const pillColor = await card
+    .getByTestId('goal-status')
+    .evaluate((el) => getComputedStyle(el).color);
+  const untintedFg = await card
+    .locator('[class*="cardTitle"]')
+    .evaluate((el) => getComputedStyle(el).color);
+  await card.getByTestId('goal-session-link').click();
+  await page.waitForURL('**/session/**', { timeout: 15000 });
+
+  const strip = page.getByTestId('goal-status-strip');
+  await expect(strip).toBeVisible();
+  await expect(strip).toContainText('paused strip goal');
+  await expect(strip.locator('[data-status]')).toHaveAttribute(
+    'data-status',
+    'attention',
+  );
+  const stripColor = await strip
+    .locator('[data-status]')
+    .evaluate((el) => getComputedStyle(el).color);
+  expect(stripColor).toBe(pillColor);
+  expect(stripColor).not.toBe(untintedFg);
 });
 
 test('the create form targets the picked workspace @smoke', async ({

@@ -177,15 +177,20 @@ cannot reach the aggregate view without the sidebar.
 - Unit: `GoalsDialog.test.tsx` (header action with and without a workspace
   tag — the tagged case uses a SECONDARY workspace goal so per-goal routing
   is observable, pill tone per lifecycle state, budget bars
-  present/absent/clamped, token-bar skip, fill tone, inline fill width,
-  single-occurrence figure witness, and a mixed-budget case pinning that
-  only the armed budget's footer cell is suppressed). The accessible-name
-  helper composes the `aria-labelledby` referenced text with spaces, the
-  way the browser computes the name. `GoalStatusStrip.test.tsx` (affordance
-  wired/absent, status tone, tone mapping). `ChatPane.test.tsx` pins the
-  split-view forward both ways: wired renders the button and fires the
-  handler once; unwired renders no button while the strip keeps its
-  controls.
+  present/absent/clamped with `role="progressbar"` and explicit
+  `aria-valuemin`/`aria-valuemax`, token-bar skip, fill tone in BOTH running
+  and attention states, inline fill width including the zero-progress `0%`,
+  the active-time bar advancing under fake timers, single-occurrence figure
+  witness, a mixed-budget case pinning that only the armed budget's footer
+  cell is suppressed, both jump affordances' accessible names, and a
+  two-card case pinning per-session label-id uniqueness and card-scoped
+  references). The accessible-name helper composes the `aria-labelledby`
+  referenced text with spaces, the way the browser computes the name, and
+  asserts `aria-label` is absent so a regression back to it reds every name
+  pin. `GoalStatusStrip.test.tsx` (affordance wired/absent, status tone,
+  tone mapping). `ChatPane.test.tsx` pins the split-view forward both ways:
+  wired renders the button and fires the handler once; unwired renders no
+  button while the strip keeps its controls.
 - `GoalsDialog.test.tsx` also pins that the header session action stays
   enabled while a control is in flight (navigation is not a control), and
   `App.test.tsx` pins the composer strip's `projectFeaturesAvailable` gate
@@ -193,20 +198,26 @@ cannot reach the aggregate view without the sidebar.
 - Mutation witnesses (byte-level restore verified): removing the footer
   suppression, wiring the suppression to the wrong budget, deleting the
   `ChatPane` forward, dropping the header jump's workspace tag, hardcoding
-  the fill width to `0%`, reverting the link to the meta grey, deleting
-  either `[data-status='attention']` colour rule (and both pill+strip rules
-  together, caught by the untinted anchor), gating the header jump on
-  `busy`, and diverging `getGoalActiveTimeLabel` each turn their pin red.
+  the fill width to `0%`, reverting the link to the meta grey, deleting the
+  PILL's `[data-status='attention']` rule (the fill reads it), deleting the
+  STRIP's `[data-status='attention']` rule (pinned by the paused-goal
+  navigation case), deleting both running rules together (caught by the
+  untinted anchor), gating the header jump on `busy`, and diverging
+  `getGoalActiveTimeLabel` each turn their pin red.
 - `npm run typecheck`, ESLint, Prettier on the touched files.
 - E2E: the existing `web-shell.goal.spec.ts` and
   `web-shell.goals-multi-workspace.spec.ts` suites must stay green (they pin
-  the control actions and card structure the new button lives beside); the
-  budget @smoke case additionally measures the fill's real pixel width
-  against its track (15% ± 1px) and reads computed colours scoped to the
-  identified goal card — fill vs track, link vs meta, fill equal to the
-  pill's attention colour, and pill/strip tints distinct from an untinted
-  `--foreground` anchor — so the tint and the link cue must actually be
-  painted, and a double rule deletion cannot survive the equality check.
+  the control actions and card structure the new button lives beside). The
+  budget @smoke case renders TWO cards (primary + secondary) so the
+  card-scoped reads face a real sibling, measures the fill's real pixel
+  width against its track (15% ± 1px), and reads computed colours — fill vs
+  track, link equal to the header action's blue (positive witness) and
+  distinct from meta and the untinted `--foreground` anchor, fill equal to
+  the pill's attention colour. The header-jump case pins the header action's
+  painted colour against the grey control icons, the strip's goal identity,
+  and the load request's `cwd` (the goal's secondary workspace runtime). A
+  dedicated paused-goal navigation case paints the strip in attention and
+  pins its colour against the pill and the untinted anchor.
 
 ## Acceptance criteria
 
