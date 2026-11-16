@@ -341,12 +341,13 @@ later snapshot read would reject.
 - Image: a scripts test pins the Dockerfile COPY set against the contracts pom
   includes so a missing asset copy reddens.
 - Skill E2E (`npm run test:e2e:managed-loop-skill`, the full-stack runner's
-  `--loop-skill` mode): a creator-bearing `files/4` definition receives the
-  cron variant at admission, the model's first streamed round carries that
-  body in the Skill tool result, `cron_list` echoes the created prompt, and
-  `cron_delete` retires the id the automation store minted with the delete
-  result stating the retirement. Observing a scheduled fire and wiring this
-  mode into CI remain out of scope.
+  `--loop-skill` mode): the Session is created with the Web Shell's verbatim
+  bundled `loop` import, so admission's replace path runs as in a real
+  creation; a creator-bearing `files/4` definition receives the cron variant,
+  the model's first streamed round carries that body in the Skill tool result,
+  `cron_list` echoes the created prompt, and `cron_delete` retires the id the
+  automation store minted with the delete result stating the retirement.
+  Observing a scheduled fire and wiring this mode into CI remain out of scope.
 
 ## Acceptance criteria
 
