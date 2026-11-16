@@ -412,6 +412,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_artifact_library',
       'workspace_artifact_library_stream',
       'session_sources',
+      'generated_ui_state',
       'slow_client_warning',
       'typed_event_schema',
       'session_set_model',

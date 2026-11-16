@@ -16,6 +16,7 @@ import {
   hashDaemonWorkspace,
   withDaemonSpan,
 } from '@qwen-code/qwen-code-core/telemetry/daemon-tracing.js';
+import { GENERATED_UI_CARD_ID_PATTERN } from '@qwen-code/qwen-code-core/services/generated-ui-state.js';
 import {
   APPROVAL_MODES,
   AGENT_WORKTREE_SLUG_PATTERN,
@@ -7841,6 +7842,105 @@ export function registerSessionRoutes(
           );
         } finally {
           res.off('close', onClose);
+        }
+      },
+      { cwdBound: 'always' },
+    ),
+  );
+
+  // Generated UI view state. Reads and writes go to the session's live owner
+  // and never fall back to another runtime; a card id outside the minted
+  // grammar is rejected before it reaches the agent.
+  const generatedUiStateRequest = (
+    req: Request,
+    res: Response,
+  ): { clientId: string; cardId: string } | undefined => {
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return undefined;
+    if (!clientId) {
+      res
+        .status(403)
+        .json({ error: 'View state requires a session-bound client id' });
+      return undefined;
+    }
+    const cardId = req.params['cardId'];
+    if (!cardId || !GENERATED_UI_CARD_ID_PATTERN.test(cardId)) {
+      res
+        .status(400)
+        .json({ error: 'Invalid card id', code: 'invalid_card_id' });
+      return undefined;
+    }
+    return { clientId, cardId };
+  };
+
+  app.get(
+    '/session/:id/generated-ui/state/:cardId',
+    withOwnerReadSession(
+      'GET /session/:id/generated-ui/state/:cardId',
+      async (req, res, sessionId, runtime) => {
+        const request = generatedUiStateRequest(req, res);
+        if (!request) return;
+        try {
+          res
+            .status(200)
+            .json(
+              await runtime.bridge.getGeneratedUiState(
+                sessionId,
+                request.cardId,
+                { clientId: request.clientId },
+              ),
+            );
+        } catch (err) {
+          sendBridgeError(res, err, {
+            route: 'GET /session/:id/generated-ui/state/:cardId',
+            sessionId,
+          });
+        }
+      },
+      { cwdBound: true },
+    ),
+  );
+
+  app.put(
+    '/session/:id/generated-ui/state/:cardId',
+    mutate({ strict: true }),
+    withOwnerMutableSession(
+      'PUT /session/:id/generated-ui/state/:cardId',
+      async (req, res, sessionId, runtime) => {
+        const request = generatedUiStateRequest(req, res);
+        if (!request) return;
+        const body = safeBody(req);
+        const baseRevision = body['baseRevision'];
+        if (
+          !Number.isSafeInteger(baseRevision) ||
+          (baseRevision as number) < 0 ||
+          !Object.hasOwn(body, 'value')
+        ) {
+          res.status(400).json({
+            error: 'Expected a non-negative baseRevision and a value',
+            code: 'invalid_state',
+          });
+          return;
+        }
+        try {
+          const result = await runtime.bridge.setGeneratedUiState(
+            sessionId,
+            request.cardId,
+            { baseRevision: baseRevision as number, value: body['value'] },
+            { clientId: request.clientId },
+          );
+          const status =
+            result.outcome === 'saved'
+              ? 200
+              : result.outcome === 'stale'
+                ? 409
+                : 413;
+          res.status(status).json(result);
+        } catch (err) {
+          sendBridgeError(res, err, {
+            route: 'PUT /session/:id/generated-ui/state/:cardId',
+            sessionId,
+          });
         }
       },
       { cwdBound: 'always' },

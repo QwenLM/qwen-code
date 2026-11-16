@@ -686,6 +686,8 @@ export type {
   DaemonSessionLspStatus,
   DaemonSessionResourcesStatus,
   DaemonMcpAppToolCall,
+  DaemonGeneratedUiState,
+  DaemonGeneratedUiStateWriteResult,
   DaemonMcpAppToolResult,
   DaemonSessionAgentTaskStatus,
   DaemonSessionMonitorTaskStatus,

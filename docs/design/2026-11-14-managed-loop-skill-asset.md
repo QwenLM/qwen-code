@@ -123,7 +123,6 @@ The loop gate is also **not visible to Java** at admission time.
 - No hot-swap of the catalog into a live Session (the receipt is immutable).
 - No Web Shell scheduling UI; no change to the creation-import UX beyond the
   variant appearing in the catalog.
-- The real `/loop` model-turn E2E remains a separate validation effort.
 
 ## Proposed solution
 
@@ -341,9 +340,13 @@ later snapshot read would reject.
   these reddens it.
 - Image: a scripts test pins the Dockerfile COPY set against the contracts pom
   includes so a missing asset copy reddens.
-- Skill E2E (deferred to the separate E2E effort): `/loop 5m …` creates the
-  definition and runs the prompt immediately; `/loop list` shows it; `/loop
-clear` retires it.
+- Skill E2E (`npm run test:e2e:managed-loop-skill`, the full-stack runner's
+  `--loop-skill` mode): a creator-bearing `files/4` definition receives the
+  cron variant at admission, the model's first streamed round carries that
+  body in the Skill tool result, `cron_list` echoes the created prompt, and
+  `cron_delete` retires the id the automation store minted with the delete
+  result stating the retirement. Observing a scheduled fire and wiring this
+  mode into CI remain out of scope.
 
 ## Acceptance criteria
 

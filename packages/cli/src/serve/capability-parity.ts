@@ -153,6 +153,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     'no Managed progressive workspace artifact query with session summaries',
   ),
   session_sources: NO_MANAGED_EQUIVALENT('no Managed session source list'),
+  generated_ui_state: NO_MANAGED_EQUIVALENT(
+    'no Managed Generated UI view state store',
+  ),
   slow_client_warning: LEGACY_ONLY(
     'SSE backpressure is a legacy transport knob',
   ),
