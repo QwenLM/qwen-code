@@ -157,8 +157,8 @@ completed with exit code 1` on a noisy multi-error log), and an 8 MiB
    (`Coo\rkie: sid=abc`) escapes both passes, so the welded value stays
    unredacted, and an empty-value header (`Cookie:` then CR) already loses the
    next line in the first pass, in base too; and the `TOKEN`/`KEY`/… rule is
-   quadratic on a long word run in base (1.1 s at 40k characters), which running
-   it twice doubles. Living in
+   quadratic on a long word run in base (about a second at 40k characters),
+   which running it twice doubles. Living in
    `skillLog`, the strip covers both the collector's excerpt and the patrol's
    rendered evidence (its only `jobLog` caller goes through `skillLog`). The
    sibling fetches themselves are unchanged: `ci-log.ts`'s `jobLog` still
@@ -243,9 +243,11 @@ completed with exit code 1` on a noisy multi-error log), and an 8 MiB
   URL userinfo class reds the welded-URL case, and deleting any one of the nine
   post-strip rules reds the per-family repair case; dropping the patrol's flag
   turns its witness red. The URL lookbehind is a cost fix, not a behavior one:
-  removing it leaves every test green and is measured instead (653 ms of the
-  2.9 s a 40k-character line cost before it, against 1.1 s for the same line in
-  base).
+  removing it leaves every test green and is measured instead — the isolated
+  rule costs 0.65–1.0 s across runs on a 40k-character line without it and 0 ms
+  with it, and the whole `skillLog` call went from about 2.9 s to about 2.4 s
+  against about 1.2 s in base. The residual factor of two is the base's own
+  quadratic `TOKEN`/`KEY`/… rule running in both passes.
 - `scripts/tests/ci-platform-lanes.test.js` re-runs because `ci.yml` changed.
 
 ## Acceptance criteria

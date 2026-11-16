@@ -245,9 +245,9 @@ function redactLog(log) {
 // ##[error] marker, and without the nested quantifier it cannot backtrack
 // quadratically over a long token. The scheme keeps a boundary as a lookbehind
 // rather than \b: without one, every position inside a long word run is a
-// candidate start and the rule turns quadratic (measured 653 ms on a 40k-char
-// line); the lookbehind admits a scheme preceded by any non-scheme character,
-// which is what a weld leaves behind.
+// candidate start and the rule turns quadratic (0.65–1.0 s across runs on a
+// 40k-char line, 0 ms with the lookbehind); the lookbehind admits a scheme
+// preceded by any non-scheme character, which is what a weld leaves behind.
 // Cookie:/Authorization: stay out: their value runs to the line end, so over
 // CR-free text they swallow the following line. A control inside the keyword
 // itself (`Coo\rkie:`) therefore escapes both passes — a gap recorded in the

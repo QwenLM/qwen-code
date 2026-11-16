@@ -123,7 +123,7 @@ job id 直接来自检查的 `detailsUrl`（`…/actions/runs/<run>/job/<job>`�
    （`Cookie: [redacted]=abc`），与未剥离的 base 一致；header 关键字内部的
    控制字符（`Coo\rkie: sid=abc`）两遍都够不到，焊接后的值因此仍未脱敏，而
    空值 header（`Cookie:` 后接 CR）在第一遍就已丢掉下一行，base 亦然；
-   `TOKEN`/`KEY`/… 规则在 base 里对长单词串就是平方复杂度（40k 字符 1.1 秒），
+   `TOKEN`/`KEY`/… 规则在 base 里对长单词串就是平方复杂度（40k 字符约一秒），
    跑两遍把它翻倍。剥离位于 `skillLog`，因此
    同时覆盖采集器摘要与巡逻渲染的证据（巡逻唯一的 `jobLog` 调用方经过
    `skillLog`）。两个兄弟抓取本身不变：`ci-log.ts` 的 `jobLog` 仍会把裸控制字符
@@ -186,8 +186,10 @@ job id 直接来自检查的 `detailsUrl`（`…/actions/runs/<run>/job/<job>`�
   `(?!\[redacted\])` guard 会让「以 CR 结尾的值」用例在两套里变红，把
   gen-delims 放回 URL userinfo 字符类会让被焊接 URL 用例变红，删掉九条剥离后
   规则中的任何一条会让逐类修复用例变红；去掉巡逻的标志会让其见证变红。URL 的
-  lookbehind 是成本修复而非行为修复：去掉它所有测试仍绿，改用计时见证（40k
-  字符行修复前耗时 2.9 秒，其中 653 毫秒来自它；同一行在 base 里是 1.1 秒）。
+  lookbehind 是成本修复而非行为修复：去掉它所有测试仍绿，改用计时见证——40k
+  字符行上，该规则单独耗时在没有它时跨多次运行是 0.65–1.0 秒、有它时是 0 毫秒；
+  整个 `skillLog` 调用从约 2.9 秒降到约 2.4 秒，而 base 约 1.2 秒。剩下的两倍
+  来自 base 自带的平方复杂度 `TOKEN`/`KEY`/… 规则在两遍里各跑一次。
 - 因为改了 `ci.yml`，复跑 `scripts/tests/ci-platform-lanes.test.js`。
 
 ## 验收标准
