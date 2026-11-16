@@ -14614,18 +14614,21 @@ export function App({
         !e.shiftKey &&
         (key === 'c' || key === 'd');
 
-      // Buttons, links and fields keep their native keyboard activation
-      // (Escape/Enter/Space on a chip "?", a row button or the panel header
-      // "?"); the dismiss shortcut belongs to the composer surface, so the
-      // editor itself is deliberately not exempted. Ctrl+C/Ctrl+D never
-      // activate a control, so they must reach the cancel path below.
+      // Enter/Space on a button, link or field activate that control, and
+      // Escape inside the chip row belongs to the row's own handlers (close
+      // the list back to its chip). Every other key — Escape anywhere else,
+      // Ctrl+C/Ctrl+D — must reach the dismiss/cancel path below, which is
+      // what the panel's key hints advertise. The composer editor is never
+      // exempted: it is the dismiss shortcut's home surface.
       if (
-        !isCtrlCancel &&
         target instanceof Element &&
         !target.closest('[data-web-shell-composer-editor]') &&
-        target.closest(
-          'button, a[href], [role="button"], input, select, textarea',
-        )
+        (((e.key === 'Enter' || e.key === ' ') &&
+          target.closest(
+            'button, a[href], [role="button"], input, select, textarea',
+          )) ||
+          (e.key === 'Escape' &&
+            target.closest('[data-web-shell-composer-task-chips]')))
       )
         return;
 

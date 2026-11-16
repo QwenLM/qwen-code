@@ -19423,16 +19423,20 @@ describe('App session callbacks', () => {
     expect(testState.latestBtwMessageProps?.isPending).toBe(false);
     testState.prompt = '';
 
-    // Escape on a button belongs to the button, not to the dismiss path.
-    const button = document.querySelector('button');
-    expect(button).not.toBeNull();
+    // Escape inside the chip row belongs to the row, not to the dismiss
+    // path — the companion operand to the editor marker below.
+    const chipRow = document.createElement('div');
+    chipRow.setAttribute('data-web-shell-composer-task-chips', '');
+    const rowButton = document.createElement('button');
+    chipRow.append(rowButton);
+    container.append(chipRow);
     const buttonEvent = new KeyboardEvent('keydown', {
       key: 'Escape',
       bubbles: true,
       cancelable: true,
     });
     act(() => {
-      button!.dispatchEvent(buttonEvent);
+      rowButton.dispatchEvent(buttonEvent);
     });
     expect(buttonEvent.defaultPrevented).toBe(false);
     expect(document.querySelector('[class*="btwPanel"]')).not.toBeNull();
@@ -19452,6 +19456,109 @@ describe('App session callbacks', () => {
       editor.dispatchEvent(editorEvent);
     });
     expect(editorEvent.defaultPrevented).toBe(true);
+    expect(document.querySelector('[class*="btwPanel"]')).toBeNull();
+  });
+
+  it('dismisses a settled explanation with Escape outside the chip row', async () => {
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+    testState.prompt = '';
+
+    // Escape inside the chip row belongs to the row's own handlers (close
+    // the list back to its chip), not to the dismiss path.
+    const chipRow = document.createElement('div');
+    chipRow.setAttribute('data-web-shell-composer-task-chips', '');
+    const rowButton = document.createElement('button');
+    chipRow.append(rowButton);
+    container.append(chipRow);
+    const rowEvent = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      rowButton.dispatchEvent(rowEvent);
+    });
+    expect(rowEvent.defaultPrevented).toBe(false);
+    expect(document.querySelector('[class*="btwPanel"]')).not.toBeNull();
+
+    // Escape on any other control — e.g. the panel header "?" that holds
+    // focus after a click — dismisses, as the panel's key hint advertises.
+    const panelButton = document.createElement('button');
+    container.append(panelButton);
+    const event = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      panelButton.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(true);
+    expect(document.querySelector('[class*="btwPanel"]')).toBeNull();
+  });
+
+  it('cancels a pending explanation with Escape on a button outside the chip row', async () => {
+    const finish = deferred<void>();
+    mockSessionActions.btwSessionStream.mockImplementationOnce(
+      async function* () {
+        await finish.promise;
+        yield {
+          v: 1,
+          type: 'done',
+          requestId: 'btw-request',
+          answer: 'too late',
+        } as const;
+      },
+    );
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestBtwMessageProps?.isPending).toBe(true);
+
+    const panelButton = document.createElement('button');
+    container.append(panelButton);
+    const event = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      panelButton.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(true);
     expect(document.querySelector('[class*="btwPanel"]')).toBeNull();
   });
 
