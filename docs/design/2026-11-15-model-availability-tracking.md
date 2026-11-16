@@ -74,12 +74,16 @@ no zod / no external deps, so no zod-4 migration is needed for it:
     `resetTurn()` so a retry re-probes fallbacks the failed attempt consumed,
     even though a retry reuses the prompt id and even when the recovered primary
     serves the retry's first request.
-  - Only session-turn sends participate: `Turn` marks every send it drives with
-    `isSessionTurn`, and the ledger gate requires that flag. Background
-    operations — subagents (derived `Config`s), forked queries, speculation,
-    side queries, suggestions — call `sendMessageStream` without the flag, so
-    they neither rotate the live turn's key nor read or write its marks, and
-    keep the gate-off fallback behaviour. This is an allowlist, not a prompt-id
+  - Only session-turn sends participate, via an `isSessionTurn` flag the ledger
+    gate requires. `Turn.run` defaults it to true for the interactive
+    `LlmClient` → `Turn` path, and the ACP session send sets it explicitly.
+    `turnModelRound` overrides it to false because every production caller is a
+    background round (the subagent shared loop and unified-loop speculation)
+    sharing the session `Config`; direct background sends (forked queries,
+    legacy speculation/subagent, side queries, suggestions) call
+    `sendMessageStream` without the flag. Background operations therefore
+    neither rotate the live turn's key nor read or write its marks, and keep
+    the gate-off fallback behaviour. This is an allowlist, not a prompt-id
     blacklist: background senders use ids (e.g. a subagent's
     `session#agent#ordinal`) that no fixed blacklist matches, and the shared
     `isInternalPromptId` filter must not be extended because it also gates

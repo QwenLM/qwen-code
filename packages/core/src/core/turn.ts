@@ -771,6 +771,14 @@ export interface TurnRunOptions {
     responseId?: string;
     usageMetadata?: GenerateContentResponseUsageMetadata;
   }) => void;
+  /**
+   * Whether this send participates in the model-availability ledger. Defaults
+   * to true for the interactive session path; `turnModelRound` sets it false
+   * because every production caller of that helper is a background round
+   * (subagent shared loop, unified-loop speculation) sharing the session
+   * Config, which must not rotate the live turn's key or read its marks.
+   */
+  isSessionTurn?: boolean;
 }
 
 export class Turn {
@@ -805,12 +813,12 @@ export class Turn {
     try {
       // Note: This assumes `sendMessageStream` yields events like
       // { type: StreamEventType.RETRY } or { type: StreamEventType.CHUNK, value: GenerateContentResponse }
-      // Every Turn-driven send is a session turn: mark it so the model-
-      // availability ledger participates only for the interactive turn flow,
-      // never for background sends that share the Config (subagents, forked
-      // queries, speculation). The remaining fields stay conditional.
+      // Mark the send for the model-availability ledger so only the interactive
+      // turn flow participates. Defaults to true; `turnModelRound` overrides it
+      // to false for background rounds that share the session Config. The
+      // remaining fields stay conditional.
       const sendOptions = {
-        isSessionTurn: true,
+        ...((runOptions?.isSessionTurn ?? true) ? { isSessionTurn: true } : {}),
         ...(this.onPreparedRequest
           ? { onPreparedRequest: this.onPreparedRequest }
           : {}),

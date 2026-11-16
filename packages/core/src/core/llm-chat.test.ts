@@ -93,6 +93,8 @@ import {
   TOOL_LOOP_SKIPPED_METADATA,
   type ChatCompressionInfo,
 } from './turn.js';
+import { turnModelRound } from './agent-loop.js';
+import { SendMessageType } from './client.js';
 import {
   ChatCompressionService,
   MAX_CONSECUTIVE_FAILURES,
@@ -8635,6 +8637,66 @@ describe('LlmChat', async () => {
       expect(hasChunkText(events3, 'fallback-b ok')).toBe(true);
       expect(fallbackA).toHaveBeenCalledTimes(2);
       expect(fallbackB).toHaveBeenCalledTimes(3);
+    });
+
+    it('a shared-loop background round does not wipe the live turn ledger', async () => {
+      const service = new ModelAvailabilityService();
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+
+      const fallbackA = vi.fn();
+      const fallbackB = vi.fn();
+      wireFallbacks(
+        ['fallback-a', 'fallback-b'],
+        vi
+          .fn()
+          .mockImplementation(async (modelId: string) =>
+            modelId === 'fallback-a'
+              ? fallbackRoute('fallback-a', fallbackA)
+              : fallbackRoute('fallback-b', fallbackB),
+          ),
+      );
+      const capacityError = tpmCapacityError();
+      // Primary: 429 on live request 1, serves the background round, 429 on
+      // live request 2.
+      streamMock()
+        .mockRejectedValueOnce(capacityError)
+        .mockResolvedValueOnce(textStream('background ok'))
+        .mockRejectedValueOnce(capacityError);
+      fallbackA.mockRejectedValue(capacityError);
+      fallbackB.mockImplementation(async () => textStream('fallback-b ok'));
+
+      // Live turn 1 consumes fallback-a.
+      await sendSessionCollect('test', 'turn-1');
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+
+      // A background round driven through turnModelRound (the subagent shared
+      // loop / unified-loop speculation shape) shares the Config but is not a
+      // session turn; it must not rotate the live turn's key.
+      const background = turnModelRound(chat, 'test-model');
+      const iterator = background.sendRound(
+        {
+          parts: [{ text: 'bg' }],
+          promptId: 'speculation',
+          options: { type: SendMessageType.UserQuery },
+        },
+        new AbortController().signal,
+      );
+      let step = await iterator.next();
+      while (!step.done) {
+        step = await iterator.next();
+      }
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+
+      // Live turn 1's next request still skips fallback-a.
+      const events2 = await sendSessionCollect('test', 'turn-1');
+      expect(hasChunkText(events2, 'fallback-b ok')).toBe(true);
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+      expect(fallbackB).toHaveBeenCalledTimes(2);
     });
 
     it('two consecutive forked sends re-probe a transiently exhausted fallback', async () => {

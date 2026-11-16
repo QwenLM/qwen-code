@@ -11430,27 +11430,26 @@ export class Session implements SessionContext {
         request,
         promptId,
         goalPermit,
-        historyPromptId !== undefined ||
-          options.onModelRequestDispatched ||
-          options.suppressedHookContext
-          ? {
-              ...(historyPromptId !== undefined
-                ? { promptId: historyPromptId }
-                : {}),
-              ...(options.onModelRequestDispatched
-                ? { onModelRequestDispatched: options.onModelRequestDispatched }
-                : {}),
-              // A compaction inside this send (LlmChat's hard-tier rescue or
-              // reactive overflow) replaces the history entry holding the
-              // block's only copy — including one this method's own rescue
-              // just appended — so LlmChat must keep the token to re-append
-              // it. Its hard-tier site skips an already-present block, which
-              // is what keeps this to one owner per send.
-              ...(options.suppressedHookContext
-                ? { suppressedHookContext: options.suppressedHookContext }
-                : {}),
-            }
-          : undefined,
+        {
+          // ACP is a genuine session-turn surface: participate in the
+          // model-availability ledger like the LlmClient/Turn path.
+          isSessionTurn: true,
+          ...(historyPromptId !== undefined
+            ? { promptId: historyPromptId }
+            : {}),
+          ...(options.onModelRequestDispatched
+            ? { onModelRequestDispatched: options.onModelRequestDispatched }
+            : {}),
+          // A compaction inside this send (LlmChat's hard-tier rescue or
+          // reactive overflow) replaces the history entry holding the
+          // block's only copy — including one this method's own rescue
+          // just appended — so LlmChat must keep the token to re-append
+          // it. Its hard-tier site skips an already-present block, which
+          // is what keeps this to one owner per send.
+          ...(options.suppressedHookContext
+            ? { suppressedHookContext: options.suppressedHookContext }
+            : {}),
+        },
       );
     } catch (error) {
       llmClient.discardManagedAutoMemoryRecallDelivery(memoryDelivery);

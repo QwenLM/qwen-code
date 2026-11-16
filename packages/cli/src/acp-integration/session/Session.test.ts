@@ -10900,7 +10900,7 @@ describe('Session', () => {
           expect.any(Object),
           expect.any(String),
           undefined,
-          { promptId },
+          { isSessionTurn: true, promptId },
         );
         expect(
           mockChatRecordingService.recordUserMessage,
@@ -11134,7 +11134,7 @@ describe('Session', () => {
       expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
       const sendOptions = vi.mocked(mockChat.sendMessageStream).mock
         .calls[0][4];
-      expect(sendOptions).toBeUndefined();
+      expect(sendOptions).toEqual({ isSessionTurn: true });
     });
 
     it('does not re-lend an id that is still live after a retry strips only a continuation', async () => {
@@ -11174,7 +11174,7 @@ describe('Session', () => {
       expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
       const sendOptions = vi.mocked(mockChat.sendMessageStream).mock
         .calls[0][4];
-      expect(sendOptions).toBeUndefined();
+      expect(sendOptions).toEqual({ isSessionTurn: true });
     });
 
     it('re-lends the newest stripped id when a retry strips two orphans', async () => {
@@ -11208,7 +11208,10 @@ describe('Session', () => {
       expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
       const sendOptions = vi.mocked(mockChat.sendMessageStream).mock
         .calls[0][4];
-      expect(sendOptions).toEqual({ promptId: 'test-session-id########7' });
+      expect(sendOptions).toEqual({
+        isSessionTurn: true,
+        promptId: 'test-session-id########7',
+      });
     });
 
     it('associates a recording-disabled fresh prompt with its admitted daemon identity', async () => {
@@ -21187,7 +21190,7 @@ describe('Session', () => {
         },
         expect.stringMatching(/^test-session-id########notification[\w-]+$/),
         undefined,
-        undefined,
+        { isSessionTurn: true },
       );
       expect(mockChatRecordingService.recordNotification).toHaveBeenCalledWith(
         [
@@ -23774,7 +23777,7 @@ describe('Session', () => {
         },
         expect.stringMatching(/^test-session-id########notification[\w-]+$/),
         undefined,
-        undefined,
+        { isSessionTurn: true },
       );
       expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
         sessionId: 'test-session-id',
@@ -24758,7 +24761,7 @@ describe('Session', () => {
         expect.any(Object),
         expect.any(String),
         undefined,
-        { promptId: 'test-session-id########1' },
+        { isSessionTurn: true, promptId: 'test-session-id########1' },
       );
       expect(mockChat.sendMessageStream).toHaveBeenNthCalledWith(
         2,
@@ -24766,7 +24769,7 @@ describe('Session', () => {
         expect.any(Object),
         expect.any(String),
         undefined,
-        undefined,
+        { isSessionTurn: true },
       );
       expect(resolveForModel).toHaveBeenCalledWith(
         'vision-agent\0https://vision.example.com/v1',
@@ -24790,7 +24793,7 @@ describe('Session', () => {
         expect.any(Object),
         expect.any(String),
         undefined,
-        { promptId: 'test-session-id########2' },
+        { isSessionTurn: true, promptId: 'test-session-id########2' },
       );
       expect(mockLlmClient.tryCompressChat).toHaveBeenCalledOnce();
     });
@@ -28789,7 +28792,7 @@ describe('Session', () => {
           },
           'test-session-id########1',
           undefined,
-          { promptId: 'test-session-id########1' },
+          { isSessionTurn: true, promptId: 'test-session-id########1' },
         );
       });
 
@@ -28909,7 +28912,7 @@ describe('Session', () => {
           },
           'test-session-id########1',
           undefined,
-          { promptId: 'test-session-id########1' },
+          { isSessionTurn: true, promptId: 'test-session-id########1' },
         );
       });
 
@@ -29245,7 +29248,7 @@ describe('Session', () => {
           expect.any(Object),
           expect.any(String),
           undefined,
-          { promptId: 'test-session-id########1' },
+          { isSessionTurn: true, promptId: 'test-session-id########1' },
         );
 
         // Second same-override send: compression throws, so the gate falls
@@ -29361,7 +29364,7 @@ describe('Session', () => {
           expect.any(Object),
           expect.any(String),
           undefined,
-          { promptId: expect.any(String) },
+          { isSessionTurn: true, promptId: expect.any(String) },
         );
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
 
@@ -40136,7 +40139,7 @@ describe('Session', () => {
           }),
           expect.any(String),
           permit,
-          undefined,
+          { isSessionTurn: true },
         );
         expect(mockGoalRuntime.markTurnDelivered).toHaveBeenCalledWith(
           'goal-runtime:turn-1',
@@ -42561,7 +42564,7 @@ describe('Session', () => {
           expect.any(Object),
           expect.any(String),
           permit,
-          undefined,
+          { isSessionTurn: true },
         );
       });
 
@@ -42678,7 +42681,7 @@ describe('Session', () => {
           expect.any(Object),
           expect.any(String),
           permit,
-          { promptId: 'test-session-id########1' },
+          { isSessionTurn: true, promptId: 'test-session-id########1' },
         );
         expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
           'hello',
@@ -42793,7 +42796,7 @@ describe('Session', () => {
           expect.any(Object),
           expect.any(String),
           userPermit,
-          { promptId: 'test-session-id########2' },
+          { isSessionTurn: true, promptId: 'test-session-id########2' },
         );
         expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(
           automaticPermit,
@@ -43045,7 +43048,7 @@ describe('Session', () => {
           expect.any(Object),
           expect.any(String),
           userPermit,
-          { promptId: 'test-session-id########2' },
+          { isSessionTurn: true, promptId: 'test-session-id########2' },
         );
         expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(userPermit);
       });

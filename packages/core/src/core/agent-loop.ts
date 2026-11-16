@@ -149,7 +149,10 @@ export function turnModelRound(
         model,
         round.parts,
         signal,
-        options,
+        // Every production caller is a background round (subagent shared loop,
+        // unified-loop speculation) sharing the session Config; it must not
+        // participate in the live turn's model-availability ledger.
+        { ...options, isSessionTurn: false },
       ),
   };
 }
