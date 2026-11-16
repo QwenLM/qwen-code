@@ -23,12 +23,9 @@
  *  - {@link OpenTuiActionConfirmation} renders a plain yes/no prompt (extension
  *    consent and friends) and resolves a boolean.
  *
- * Deliberate parity gaps (tracked as deferred review items, not silently
+ * Deliberate parity gap (tracked as a deferred review item, not silently
  * dropped): the ink "modify with editor" flow is not offered because the
- * live-turn scheduler is constructed with `getPreferredEditor: () => undefined`,
- * and ask_user_question's free-text row advances one tab where ink skips the
- * question after it — ink's TextInput subscribes to Enter a second time, so
- * matching it would reproduce a defect rather than the experience.
+ * live-turn scheduler is constructed with `getPreferredEditor: () => undefined`.
  */
 
 import {
@@ -659,13 +656,8 @@ export function OpenTuiToolConfirmation(props: OpenTuiToolConfirmationProps) {
 /**
  * ask_user_question parity port of ink's AskUserQuestionDialog: one tab per
  * question plus a review-and-Submit tab, numbered options carrying their
- * descriptions, multi-select checkboxes, and a trailing free-text row.
- *
- * One deliberate divergence. ink mounts a TextInput on the free-text row, and
- * its own Enter subscriber fires alongside the dialog's — both call
- * `selectAndAdvance`, so a typed answer on a multi-question dialog skips the
- * question after it. Every key here runs through the single handler below, so
- * Enter advances exactly one tab.
+ * descriptions, multi-select checkboxes, and a trailing free-text row. Every
+ * key runs through the single handler below, so Enter advances exactly one tab.
  */
 function AskUserQuestionFlow(props: {
   details: Extract<ToolCallConfirmationDetails, { type: 'ask_user_question' }>;

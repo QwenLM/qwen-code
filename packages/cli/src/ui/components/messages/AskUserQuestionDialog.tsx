@@ -239,10 +239,8 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
           void onConfirm(ToolConfirmationOutcome.Cancel);
           return;
         }
-        if (key.name === 'return') {
-          handleCustomInputSubmit();
-          return;
-        }
+        // Return belongs to TextInput, whose onSubmit already runs
+        // handleCustomInputSubmit; handling it here too advanced twice.
         return;
       }
 
