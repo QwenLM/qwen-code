@@ -41,7 +41,10 @@ tree files would be overwritten by checkout"），但弹层只是把错误字符
   保留（恢复它会把旧分支的修改应用到新分支上），响应为
   `409 checkout_failed`（"switched, but the checkout reported a failure"），
   消息本身点名条目（置于 git 详情之前，避免被路由的长度上限截掉），并
-  携带条目 SHA。若 git 拒绝 stash 本身（intent-to-add 条目、卡死的
+  携带条目 SHA。push 成功之后（身份探针运行期间）停放的 merge 以
+  `operation_in_progress` 拒绝，并在消息与 `stashSha` 中都点名保留的
+  条目：此时树已干净，条目是修改的唯一记录。
+  若 git 拒绝 stash 本身（intent-to-add 条目、卡死的
   index lock），则什么都没动，拒绝同样是 `409 checkout_failed`。成功时
   条目**保留**：切换分支是有意行为，把旧分支的修改恢复到新分支上不是
   "切换"的含义。响应携带 `stashSha`，弹层保持打开并显示一条点名该条目
@@ -64,10 +67,22 @@ tree files would be overwritten by checkout"），但弹层只是把错误字符
   DWIM——都不会动工作树，响应为 `409 checkout_failed`
   （"cannot discard and switch"），且未放弃任何东西。挡路的未跟踪文件由
   强制 checkout 本身覆盖。`post-checkout` hook 可能在切换完成后拒绝；
-  流程按状态而非 git 文本判定：失败后树是干净的，且 HEAD 的分支身份
-  （名字与 commit）改变、或已跟踪树由脏变净——强制切换 HEAD 已停留的
-  分支会放弃修改但不改变身份。触碰前的拒绝让树保持脏，即使并发行为者
-  在 checkout 失败期间移动了 HEAD，也绝不会被报告为已完成。完成臂清理
+  流程把完成归因到用户请求的目标，而不是只看树状态：HEAD 现在必须落在
+  本次 checkout 会落到的位置——remote-tracking ref 对应去前缀的本地
+  分支名（裸路径的重映射）、本地或 DWIM 创建的分支对应分支名本身、
+  detached 目标（tag、SHA、完整 ref 如 `refs/heads/x`——git 对它们
+  detach HEAD）对应该 ref 的 commit、`HEAD` 本身则要求完全未移动。在该归因之上，HEAD 身份（名字与 commit）改变、或已跟踪树
+  由脏变净，二者居其一——强制切换 HEAD 已停留的目标会放弃修改但不改变
+  身份。身份证据仅在前后两个探针都解析出 commit 时才被信任，探针失败
+  不能认证一次切换。因此并发行为者把 HEAD 移到别处，绝不会把触碰前的
+  拒绝变成冒认的切换（行为者恰好落到请求的目标上则与本次切换不可区分
+  ——树已在用户要求的位置）；hook 留下 `checkout -f` 不会重置的脏
+  （改写的已跟踪文件、脏子模块）也不会把身份见证到移动的已完成切换
+  降格为拒绝。同分支的放弃若被 hook 重新弄脏，则见证荡然无存（身份
+  未变、由脏变净被破坏），与触碰前的拒绝不可区分，因此保守地报告为
+  拒绝并保留残留。归因只是事后的：执行切换的权威仍是 git 自己的
+  checkout，与 git 分叉的解析最多漏报一次已完成的切换，绝不会为被
+  拒绝的切换放弃修改。完成臂清理
   残留并报告 `409 checkout_failed`
   （"switched, but the checkout reported a failure"）。clean 在切换之后
   执行，因此由目标分支的 ignore 规则决定保留什么；切换成功后 clean
@@ -79,7 +94,9 @@ tree files would be overwritten by checkout"），但弹层只是把错误字符
 状态——已解决但未提交的 merge 只存在于 `MERGE_HEAD` 里。探针紧挨着
 破坏性命令执行（在只读的完成判定探针之后，因此探针运行期间停放的状态
 仍会被拒绝），状态通过 `git rev-parse --git-path` 读取，链接 worktree
-也能正确解析——与 pull 流程使用的是同一道守卫。
+也能正确解析——与 pull 流程使用的是同一道守卫。stash 流程里此时 push
+已经发生，因此这道 push 后的拒绝会点名保留的条目（消息与 `stashSha`）；
+push 前的守卫不 stash 任何东西。
 
 裸 checkout——不带选项——执行与以往完全相同的 git 调用。响应层面的变化
 是 stash checkout 成功时可选的 `stashSha` 字段，以及 auto-stash 条目
@@ -180,36 +197,52 @@ SDK 的 `workspaceGitCheckout`（legacy 与 workspace 限定两个方法）接�
 - 失败的 `post-checkout` hook 可能在 HEAD 已移动后拒绝。stash 流程通过
   前后 HEAD 的分支身份（名字与 commit）发现已完成的切换，保留条目（绝不
   把它应用到新分支上），并报告在消息与 `stashSha` 字段中都点名条目 SHA
-  的 `checkout_failed`。force 流程额外读取已跟踪树由脏变净的
-  转变，因此强制切换 HEAD 已停留的分支（身份不变）仍被报告为已完成的
-  放弃；而触碰前的拒绝（树仍脏）即使并发行为者移动了 HEAD 也绝不会被
-  报告为已完成。
+  的 `checkout_failed`。任何 HEAD 移动都保留条目：没有破坏性步骤依赖
+  「把移动归因到本次调用」，而把条目恢复到已移动的 HEAD 上才是危险所在。
+  force 流程则把残留 clean 闸门在对请求目标的归因上（见「行为」），
+  以身份改变或已跟踪树由脏变净作为完成见证——因此强制切换 HEAD 已停留
+  的目标（身份不变）仍被报告为已完成的放弃；而并发行为者把 HEAD 移到
+  别处、或身份探针失败，绝不会把触碰前的拒绝变成冒认的切换。hook 留下
+  强制 checkout 不会重置的脏，不会降格身份见证到移动的已完成切换；
+  残留 clean 照常执行，hook 自己的改写保留（那是 hook 所为，不是用户
+  的未提交工作）。同分支的放弃被 hook 重新弄脏时保守地报告为拒绝
+  （见「行为」）。
 
 ## 验证计划
 
 - core 单元测试，使用真实临时仓库：stash 成功保留条目并报告其 SHA；
   checkout 失败恢复条目，恢复失败则保留条目并报告其 SHA；干净 apply 后
   drop 失败仍报告存活条目的 SHA；拒绝的 post-checkout hook 保留条目并
-  报告已完成的切换（stash 与 force，含目标在当前 commit、以及 HEAD 已
-  停留的分支的情形）；完成切换的消息点名条目；触碰前拒绝期间并发行为者
-  移动 HEAD 不被冒认为本次切换；完成判定探针运行期间停放的 merge 仍被
-  拒绝；自身 push 为空操作时绝不认领并发请求的带标签条目；intent-to-add
-  条目类型化 stash 拒绝；stash 让 ignored 文件留在磁盘且不进条目
-  （`--include-untracked`，绝不用 `--all`）；force 放弃已跟踪修改与未跟踪
-  文件（含目录）、按目标分支规则保留 ignored 文件、并删除仅在源分支被
-  ignore 的文件；切换后残留 clean 失败被类型化；force 对不可解析的 ref、
-  歧义 DWIM 名字、git 无法解析的 tracking ref（无已配置 remote）、
-  `checkout.guess` 关闭 DWIM、被另一 worktree 占用的分支、skip-worktree
-  冲突都在放弃前拒绝；force 接受 git 接受的 DWIM 形态（裸名、斜杠名、
-  remote-tracking ref）；子目录与进行中操作拒绝。
+  报告已完成的切换（stash 与 force，含目标在当前 commit 的情形；force
+  另含 HEAD 已停留的分支、以及 `HEAD` 本身）；干净树上的 stash checkout
+  遇 hook 拒绝报告已完成切换且不点名条目；完成切换的消息点名条目；
+  push 成功后停放的 merge 在拒绝中点名保留的条目（消息与 `stashSha`）；
+  触碰前拒绝期间并发行为者移动 HEAD 不被冒认为本次切换——含仅未跟踪
+  脏的树（此时由脏变净的见证不可用）；前置探针失败不认证任何切换，
+  即使行为者恰好落到请求的目标上；拒绝的 hook 改写已跟踪文件后仍报告
+  已完成切换并清理残留；仅未跟踪脏遇 hook 拒绝经身份见证判定完成；
+  detached 目标（tag）遇 hook 拒绝报告已完成切换，完整 ref
+  （`refs/heads/x`，detached）与 remote-tracking ref（在重映射的本地
+  分支上完成）同样如此；完成判定探针运行期间停放的 merge 仍被拒绝；自身 push 为空操作时绝不认领并发请求的
+  带标签条目；intent-to-add 条目类型化 stash 拒绝；stash 让 ignored
+  文件留在磁盘且不进条目（`--include-untracked`，绝不用 `--all`）；
+  force 放弃已跟踪修改与未跟踪文件（含目录）、按目标分支规则保留
+  ignored 文件、并删除仅在源分支被 ignore 的文件；force 带 `-f` 到达
+  remote 重映射的「本地分支已存在」臂；切换后残留 clean 失败被类型化；
+  force 对不可解析的 ref、歧义 DWIM 名字、git 无法解析的 tracking ref
+  （无已配置 remote）、`checkout.guess` 关闭 DWIM、被另一 worktree 占用
+  的分支、skip-worktree 冲突都在放弃前拒绝；force 接受 git 接受的 DWIM
+  形态（裸名、斜杠名、remote-tracking ref）；子目录与进行中操作拒绝。
 - 路由测试：选项校验（400）、类型化 409 映射、由携带绝对路径的
   linked-worktree 拒绝见证脱敏、post-checkout hook 在切换后拒绝时转发
   `stashSha`。
 - SDK 测试：请求体携带选项；超时被转发。
 - 组件测试：脏 checkout 拒绝时面板出现、分发正确的选项、确认步骤就位、
   `force_unsupported` 时保持面板、在飞 spinner、竞争动作开始时关闭面板、
-  stash 成功时保持弹层打开并立即绘制保留 stash 的警告、随列表一起重读
-  树状态、该警告（成功与恢复失败）跨重开幸存。
+  stash 成功时保持弹层打开并立即绘制保留 stash 的警告、stash 成功与
+  保留条目的失败解决之后一并重读分支列表与树状态（两半各有见证：提示
+  不再报告未提交修改、两个 RPC 计数都增长）、裸 checkout 成功即关闭
+  弹层、该警告（成功与恢复失败）跨重开幸存。
 - E2E（mock daemon，Playwright，带 `@smoke` 使 PR CI 运行）：两种解决
   方式的完整面板流程、保留条目警告立即可见且跨重开幸存、取消路径。
 

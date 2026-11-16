@@ -1251,9 +1251,10 @@ describe('gitCheckout with a dirty working tree', () => {
       const env = gitShim(hermeticEnv(), [
         // A terminal switches to a same-commit branch right before our
         // doomed checkout; the tree stays dirty, so the identity change
-        // alone must not be read as this call's completed switch.
+        // alone must not be read as this call's completed switch. The
+        // pattern must match the argv the force flow actually issues.
         {
-          match: '"checkout missing-branch"*',
+          match: '"checkout -f missing-branch"*',
           before: '"$REAL" checkout side --',
         },
       ]);
@@ -1267,6 +1268,8 @@ describe('gitCheckout with a dirty working tree', () => {
       );
 
       expect(failure.message).toContain('cannot discard and switch');
+      // Pin that the shim fired: the actor's branch is checked out.
+      expect(currentBranch(dir)).toBe('side');
       expect(read(dir, 'a.txt')).toBe('local edit\n');
       expect(read(dir, 'new.txt')).toBe('untracked\n');
     },
@@ -1282,7 +1285,7 @@ describe('gitCheckout with a dirty working tree', () => {
       commitFile(dir, 'a.txt', 'master2\n');
       git(dir, 'branch', 'feature');
       const env = gitShim(hermeticEnv(), [
-        // Park a conflicting merge during the headIdentity probe, i.e.
+        // Park a conflicting merge during the identity probe, i.e.
         // AFTER the flow started but BEFORE the destructive command.
         { match: '"rev-parse HEAD"', before: '"$REAL" merge other' },
       ]);
@@ -1374,6 +1377,318 @@ describe('gitCheckout with a dirty working tree', () => {
     expect(forceFailure.message).toContain('cannot checkout');
     // The parked merge is untouched.
     expect(fs.existsSync(path.join(dir, '.git', 'MERGE_HEAD'))).toBe(true);
+    expect(stashList(dir)).toHaveLength(0);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'force checkout keeps untracked residue when a concurrent actor moved HEAD elsewhere',
+    async () => {
+      const dir = makeRepo();
+      git(dir, 'branch', 'side');
+      // Untracked-only dirt: both status probes read empty, so the
+      // dirty->clean witness is unavailable and the identity change alone
+      // must not certify a switch git refused.
+      write(dir, { 'build/out.js': 'residue\n' });
+      const env = gitShim(hermeticEnv(), [
+        {
+          match: '"checkout -f missing-branch"*',
+          before: '"$REAL" checkout side --',
+        },
+      ]);
+
+      const failure = await checkoutFails(
+        dir,
+        'missing-branch',
+        { force: true },
+        'checkout_failed',
+        env,
+      );
+
+      expect(failure.message).toContain('cannot discard and switch');
+      expect(currentBranch(dir)).toBe('side');
+      expect(read(dir, 'build/out.js')).toBe('residue\n');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'force checkout does not claim a completed switch when the before-probe failed',
+    async () => {
+      const dir = makeRepo();
+      write(dir, { 'build/out.js': 'residue\n' });
+      const counter = path.join(tmpDir('qwen-probe-count-'), 'n');
+      const env = gitShim(hermeticEnv(), [
+        // Fail only the FIRST `rev-parse HEAD` (the before-probe); HEAD
+        // never moves, so the spurious identity difference must not
+        // certify a completed switch.
+        {
+          match: '"rev-parse HEAD"',
+          script: `n=$(cat "${counter}" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "${counter}"; if [ "$n" = 1 ]; then echo "probe failure" >&2; exit 1; fi; exec "$REAL" "$@"`,
+        },
+      ]);
+
+      const failure = await checkoutFails(
+        dir,
+        'missing-branch',
+        { force: true },
+        'checkout_failed',
+        env,
+      );
+
+      expect(failure.message).toContain('cannot discard and switch');
+      expect(currentBranch(dir)).toBe('master');
+      expect(read(dir, 'build/out.js')).toBe('residue\n');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'force checkout keeps residue when a failed probe meets an actor landing on the target',
+    async () => {
+      const dir = makeRepo();
+      git(dir, 'branch', 'feature');
+      write(dir, { 'build/out.js': 'residue\n' });
+      const counter = path.join(tmpDir('qwen-probe-count-'), 'n');
+      const env = gitShim(hermeticEnv(), [
+        {
+          match: '"rev-parse HEAD"',
+          script: `n=$(cat "${counter}" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "${counter}"; if [ "$n" = 1 ]; then echo "probe failure" >&2; exit 1; fi; exec "$REAL" "$@"`,
+        },
+        // Our checkout refuses, but an actor lands on the exact target
+        // during the window: with the before-probe failed, the identity
+        // evidence is untrustworthy and the untracked-only tree offers no
+        // dirty->clean witness, so the residue must survive.
+        {
+          match: '"checkout -f feature"*',
+          script: '"$REAL" checkout feature --; exit 1',
+        },
+      ]);
+
+      const failure = await checkoutFails(
+        dir,
+        'feature',
+        { force: true },
+        'checkout_failed',
+        env,
+      );
+
+      expect(failure.message).toContain('cannot discard and switch');
+      expect(currentBranch(dir)).toBe('feature');
+      expect(read(dir, 'build/out.js')).toBe('residue\n');
+    },
+  );
+
+  it('force checkout reports the completed switch when a refusing hook rewrites a tracked file', async () => {
+    const dir = dirtyCheckoutFixture();
+    write(dir, { 'new.txt': 'untracked\n' });
+    // The hook leaves dirt `checkout -f` never resets: the switch DID
+    // complete and DID discard, so the clean-tree requirement must not
+    // demote it to a pre-touch refusal.
+    installHook(dir, 'post-checkout', 'echo hook-edit > a.txt\nexit 1');
+
+    const failure = await checkoutFails(
+      dir,
+      'feature',
+      { force: true },
+      'checkout_failed',
+    );
+
+    expect(failure.message).toContain(
+      'switched, but the checkout reported a failure',
+    );
+    expect(currentBranch(dir)).toBe('feature');
+    expect(read(dir, 'a.txt')).toBe('hook-edit\n');
+    expect(has(dir, 'new.txt')).toBe(false);
+  });
+
+  it('force checkout reports the completed switch for untracked-only dirt when a hook refuses', async () => {
+    const dir = makeRepo();
+    git(dir, 'branch', 'feature');
+    write(dir, { 'new.txt': 'untracked\n' });
+    installHook(dir, 'post-checkout', 'exit 1');
+
+    const failure = await checkoutFails(
+      dir,
+      'feature',
+      { force: true },
+      'checkout_failed',
+    );
+
+    // wasDirty is false (untracked dirt is invisible to the status
+    // probes): the identity change is the only completion witness here.
+    expect(failure.message).toContain(
+      'switched, but the checkout reported a failure',
+    );
+    expect(currentBranch(dir)).toBe('feature');
+    expect(has(dir, 'new.txt')).toBe(false);
+  });
+
+  it('force checkout of a tag reports the completed switch when a hook refuses', async () => {
+    const dir = dirtyCheckoutFixture();
+    git(dir, 'tag', 'v1.0');
+    write(dir, { 'new.txt': 'untracked\n' });
+    installHook(dir, 'post-checkout', 'exit 1');
+
+    const failure = await checkoutFails(
+      dir,
+      'v1.0',
+      { force: true },
+      'checkout_failed',
+    );
+
+    expect(failure.message).toContain(
+      'switched, but the checkout reported a failure',
+    );
+    expect(read(dir, 'a.txt')).toBe('one\n');
+    expect(has(dir, 'new.txt')).toBe(false);
+    expect(headSha(dir)).toBe(git(dir, 'rev-parse', 'v1.0^{commit}').trim());
+  });
+
+  it('force checkout of HEAD reports the completed discard when a hook refuses', async () => {
+    const dir = dirtyCheckoutFixture();
+    installHook(dir, 'post-checkout', 'exit 1');
+
+    const failure = await checkoutFails(
+      dir,
+      'HEAD',
+      { force: true },
+      'checkout_failed',
+    );
+
+    expect(failure.message).toContain(
+      'switched, but the checkout reported a failure',
+    );
+    expect(currentBranch(dir)).toBe('master');
+    expect(read(dir, 'a.txt')).toBe('one\n');
+  });
+
+  it('force checkout of a remote-tracking ref reports the completed switch when a hook refuses', async () => {
+    const dir = makeRepo();
+    addRemote(dir, 'origin', '-u', 'origin', 'HEAD');
+    git(dir, 'checkout', '-q', '-b', 'side');
+    commitFile(dir, 'a.txt', 'side\n');
+    git(dir, 'push', '-q', '-u', 'origin', 'side');
+    git(dir, 'checkout', '-q', 'master');
+    write(dir, { 'a.txt': 'local edit\n', 'new.txt': 'untracked\n' });
+    installHook(dir, 'post-checkout', 'exit 1');
+
+    const failure = await checkoutFails(
+      dir,
+      'origin/side',
+      { force: true },
+      'checkout_failed',
+    );
+
+    // The remap lands on the local branch (here the existing one): the
+    // attribution must follow it, not look for a branch literally named
+    // origin/side.
+    expect(failure.message).toContain(
+      'switched, but the checkout reported a failure',
+    );
+    expect(currentBranch(dir)).toBe('side');
+    expect(read(dir, 'a.txt')).toBe('side\n');
+    expect(has(dir, 'new.txt')).toBe(false);
+  });
+
+  it('force checkout of a full ref reports the completed switch when a hook refuses', async () => {
+    const dir = dirtyCheckoutFixture();
+    write(dir, { 'new.txt': 'untracked\n' });
+    installHook(dir, 'post-checkout', 'exit 1');
+
+    const failure = await checkoutFails(
+      dir,
+      'refs/heads/feature',
+      { force: true },
+      'checkout_failed',
+    );
+
+    // git detaches HEAD for a full ref: the commit comparison attributes
+    // the completed switch.
+    expect(failure.message).toContain(
+      'switched, but the checkout reported a failure',
+    );
+    expect(read(dir, 'a.txt')).toBe('feature\n');
+    expect(has(dir, 'new.txt')).toBe(false);
+    expect(headSha(dir)).toBe(
+      git(dir, 'rev-parse', 'refs/heads/feature').trim(),
+    );
+  });
+
+  it('force checkout onto a remote row whose local branch exists discards the dirty tree', async () => {
+    const dir = makeRepo();
+    addRemote(dir, 'origin', '-u', 'origin', 'HEAD');
+    git(dir, 'checkout', '-q', '-b', 'side');
+    commitFile(dir, 'a.txt', 'side\n');
+    git(dir, 'push', '-q', '-u', 'origin', 'side');
+    git(dir, 'checkout', '-q', 'master');
+    write(dir, { 'a.txt': 'local edit\n' });
+
+    const result = await gitCheckout(
+      dir,
+      'origin/side',
+      { force: true },
+      hermeticEnv(),
+    );
+
+    // The hasLocal arm of the remote remap must carry -f too.
+    expect(result.branch).toBe('side');
+    expect(result.detached).toBe(false);
+    expect(read(dir, 'a.txt')).toBe('side\n');
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'a merge parked after the auto-stash names the kept entry in the refusal',
+    async () => {
+      const dir = makeRepo();
+      git(dir, 'checkout', '-q', '-b', 'other');
+      commitFile(dir, 'a.txt', 'other\n');
+      git(dir, 'checkout', '-q', 'master');
+      commitFile(dir, 'a.txt', 'master2\n');
+      write(dir, { 'a.txt': 'local edit\n' });
+      const env = gitShim(hermeticEnv(), [
+        // Park a conflicting merge during the identity probe AFTER the
+        // stash push succeeded: the refusal must name the kept entry.
+        { match: '"rev-parse HEAD"', before: '"$REAL" merge other' },
+      ]);
+
+      const failure = await checkoutFails(
+        dir,
+        'other',
+        { stash: true },
+        'operation_in_progress',
+        env,
+      );
+
+      const entrySha = git(dir, 'rev-parse', 'refs/stash').trim();
+      expect(failure.stashSha).toBe(entrySha);
+      expect(failure.message).toContain(
+        `your local changes are kept in stash entry ${entrySha}`,
+      );
+      expect(fs.existsSync(path.join(dir, '.git', 'MERGE_HEAD'))).toBe(true);
+      expect(stashList(dir)).toHaveLength(1);
+      // The parked merge is untouched (its conflict markers stay in the
+      // tree); the user's edit lives in the named entry only.
+      expect(read(dir, 'a.txt')).toContain('<<<<<<< HEAD');
+      expect(git(dir, 'stash', 'show', '-p', entrySha)).toContain('local edit');
+    },
+  );
+
+  it('a stash checkout on a clean tree reports the completed switch without naming an entry', async () => {
+    const dir = makeRepo();
+    git(dir, 'branch', 'feature');
+    installHook(dir, 'post-checkout', 'exit 1');
+
+    const failure = await checkoutFails(
+      dir,
+      'feature',
+      { stash: true },
+      'checkout_failed',
+    );
+
+    expect(failure.message).toContain(
+      'switched, but the checkout reported a failure',
+    );
+    expect(failure.message).not.toContain('stash entry');
+    expect(failure.stashSha).toBeUndefined();
+    expect(currentBranch(dir)).toBe('feature');
     expect(stashList(dir)).toHaveLength(0);
   });
 });

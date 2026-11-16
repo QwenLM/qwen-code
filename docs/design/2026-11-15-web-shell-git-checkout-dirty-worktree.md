@@ -47,7 +47,13 @@ They are the two things a user would do in a terminal, and nothing more:
   refuses **after HEAD moved**, the switch completed: the entry is kept
   (restoring it would apply the old branch's changes onto the new branch),
   and the response is `409 checkout_failed` ("switched, but the checkout
-  reported a failure") carrying the entry's SHA. If git refuses the stash
+  reported a failure") carrying the entry's SHA. The message names the
+  entry ahead of git's detail because the route bounds the client-visible
+  message length. A merge parked after the push succeeded (while the
+  identity probe runs) is refused with `operation_in_progress` naming the
+  kept entry in both the message and `stashSha`: the tree is already
+  clean, so the entry is the only record of the changes.
+  If git refuses the stash
   itself (an intent-to-add entry, a wedged index lock), nothing has been
   touched and the refusal is `409 checkout_failed` as well. On success the
   entry is **kept**: switching branches is deliberate, and restoring the
@@ -79,12 +85,30 @@ They are the two things a user would do in a terminal, and nothing more:
   ("cannot discard and switch") with nothing discarded. Untracked files
   in the way are overwritten by the forced checkout itself. A
   `post-checkout` hook can refuse after the switch completed; the flow
-  detects that by the state, not by git's text: the tree is clean after
-  the failure AND either HEAD's branch identity (name and commit) changed
-  or the tracked tree went dirty→clean — forcing the branch HEAD already
-  sits on discards without changing the identity. A pre-touch refusal
-  leaves the tree dirty and is never reported as completed, even when a
-  concurrent actor moved HEAD while the checkout failed. The completed
+  attributes the completion to the requested target, not to tree state
+  alone: HEAD must now sit where this checkout would have landed — the
+  stripped local name for a remote-tracking ref (the plain path's remap),
+  the branch itself for a local or DWIM-created name, the ref's commit
+  for a detached target (tag, SHA, or a full ref such as `refs/heads/x` —
+  git detaches HEAD for those), or exactly unmoved for `HEAD` itself.
+  On top of that attribution, either HEAD's identity (name and commit)
+  changed, or the tracked tree went dirty→clean — forcing a target HEAD
+  already sits on discards without changing the identity. Identity
+  evidence is trusted only when both probes resolved a commit, so a
+  failed probe cannot certify a switch. A concurrent actor moving HEAD
+  elsewhere therefore never turns a pre-touch refusal into a claimed
+  switch (an actor landing on exactly the requested target is
+  indistinguishable from this call's own switch — the tree is where the
+  user asked it to be); a hook leaving dirt `checkout -f` never resets (a
+  rewritten tracked file, a dirty submodule) does not demote a completed
+  switch whose move the identity witnesses. A same-branch discard the
+  hook re-dirties has no witness left (identity unchanged, dirty→clean
+  destroyed) and is indistinguishable from a pre-touch refusal, so it
+  stays conservatively refused with the residue kept. The attribution is
+  post-hoc only: git's own
+  checkout remains the authority that performs the switch, so a
+  resolution diverging from git's can under-report a completed switch
+  but never discards for a refused one. The completed
   arm cleans the residue and reports `409 checkout_failed` ("switched,
   but the checkout reported a failure"). The clean runs after the switch,
   so the target branch's ignore rules decide what is kept; a clean that
@@ -98,7 +122,10 @@ resolved-but-uncommitted merge lives only in `MERGE_HEAD`. The probe runs
 immediately before the destructive command (after the read-only
 completion probes, so a state parked while they run is still refused),
 and the states are read through `git rev-parse --git-path`, so linked
-worktrees resolve correctly — the same guard the pull flows use.
+worktrees resolve correctly — the same guard the pull flows use. In the
+stash flow the push has already happened by then, so that post-push
+refusal names the kept entry (message and `stashSha`); the pre-push
+guard stashes nothing.
 
 A plain checkout — no option — runs the exact git invocation it always
 has. The response-level changes are the optional `stashSha` field on a
@@ -234,11 +261,20 @@ omission:
   The stash flow detects the completed switch by HEAD's branch identity
   (name and commit), keeps the entry (never applies it onto the new
   branch), and reports `checkout_failed` naming the entry's SHA in both
-  the message and the `stashSha` field. The force flow additionally reads
-  the tracked-tree dirty→clean transition, so forcing the branch HEAD
-  already sits on (identity unchanged) is still reported as a completed
-  discard, while a pre-touch refusal (tree still dirty) is never reported
-  as completed even when a concurrent actor moved HEAD.
+  the message and the `stashSha` field. Any HEAD move keeps the entry:
+  no destructive step hangs on attributing the move to this call, and
+  restoring onto a moved HEAD is the hazard. The force flow gates its
+  residue clean on attribution to the requested target (see Behavior),
+  with the identity change or the tracked-tree dirty→clean transition as
+  the completion witness — so forcing a target HEAD already sits on
+  (identity unchanged) is still reported as a completed discard, while a
+  concurrent actor moving HEAD elsewhere, or a failed identity probe,
+  never turns a pre-touch refusal into a claimed switch. A hook that
+  leaves dirt the forced checkout never resets does not demote a
+  completed switch whose move the identity witnesses; the residue clean
+  still runs, and the hook's own edits stay (they are the hook's doing,
+  not the user's uncommitted work). A same-branch discard the hook
+  re-dirties stays conservatively refused (see Behavior).
 
 ## Validation plan
 
@@ -247,17 +283,29 @@ omission:
   a failed restore keeps it and reports its SHA; a failed drop after a
   clean apply still reports the surviving entry's SHA; a refusing
   post-checkout hook keeps the entry and reports the completed switch
-  (stash and force, including a target at the current commit and the
-  branch HEAD already sits on); the completed-switch message names the
-  entry; a concurrent actor's HEAD move during a pre-touch refusal is not
-  claimed as this call's switch; a merge parked while the completion
-  probes run is still refused; a concurrent request's labelled entry is
+  (stash and force, including a target at the current commit; for force
+  also the branch HEAD already sits on, and `HEAD` itself); a stash
+  checkout on a clean tree whose hook refuses reports the completed
+  switch without naming an entry; the completed-switch message names the
+  entry; a merge parked after the push succeeded names the kept entry in
+  the refusal (message and `stashSha`); a concurrent actor's HEAD move
+  during a pre-touch refusal is not claimed as this call's switch —
+  including an untracked-only tree, where the dirty→clean witness is
+  unavailable; a failed before-probe certifies no switch, even when an
+  actor lands on exactly the requested target; a refusing hook that
+  rewrites a tracked file still reports the completed switch and cleans
+  the residue; untracked-only dirt with a refusing hook completes via the
+  identity witness; a detached target (tag) whose hook refuses reports
+  the completed switch, as does a full ref (`refs/heads/x`, detached) and
+  a remote-tracking ref (completed on the remapped local branch); a merge
+  parked while the completion probes run is still refused; a concurrent request's labelled entry is
   never adopted when our own push is a no-op; an intent-to-add entry types
   the stash refusal; stash leaves ignored files on disk and out of the
   entry (`--include-untracked`, never `--all`); force discards tracked
   modifications and untracked files (including directories), keeps
   ignored files under the target branch's rules, and removes a file
-  ignored only on the source branch; a residue clean that fails after the
+  ignored only on the source branch; force reaches the remote remap's
+  existing-local-branch arm with `-f`; a residue clean that fails after the
   switch is typed; force refuses without discarding for an unresolvable
   ref, an ambiguous DWIM name, a tracking ref git cannot resolve (no
   configured remote), DWIM disabled by `checkout.guess`, a branch
@@ -273,9 +321,12 @@ omission:
   dispatches the right options, arms the confirm step, keeps the panel on
   `force_unsupported`, shows the in-flight spinner, dismisses the panel
   when a competing action starts, keeps the picker open and paints the
-  kept-stash warning immediately on a stash success, re-reads the tree
-  status with the listing, and keeps the warning (success and failed
-  restore) across a reopen.
+  kept-stash warning immediately on a stash success, re-reads the listing
+  and the tree status together after a stash success and after a failed
+  resolution that kept the entry (each half witnessed separately: the
+  hints stop reporting uncommitted changes, and both RPC counts grow),
+  closes the picker on a plain checkout success, and keeps the warning
+  (success and failed restore) across a reopen.
 - E2E (mock daemon, Playwright, `@smoke` so PR CI runs them): the full
   panel flow for both resolutions, the kept-entry warning visible
   immediately and across a reopen, and the cancel path.

@@ -1448,15 +1448,16 @@ async function refuseCheckoutOperationInProgress(
 }
 
 /**
- * Branch name and commit of HEAD as one identity string. A switch can move
- * the branch pointer without moving the commit (a ref at the current
- * commit), so the commit alone cannot tell a completed switch from a
- * pre-touch refusal.
+ * Branch name and commit of HEAD. A switch can move the branch pointer
+ * without moving the commit (a ref at the current commit), so the commit
+ * alone cannot tell a completed switch from a pre-touch refusal. An empty
+ * sha means the probe failed (or HEAD is unborn): identity comparisons
+ * must not trust it.
  */
-async function headIdentity(
+async function headState(
   cwd: string,
   env?: Readonly<Record<string, string | undefined>>,
-): Promise<string> {
+): Promise<{ branch: string; sha: string }> {
   const branch = (
     await runGit(
       cwd,
@@ -1467,7 +1468,57 @@ async function headIdentity(
   const sha = (
     await runGit(cwd, ['rev-parse', 'HEAD'], env).catch(() => '')
   ).trim();
-  return `${branch}@${sha}`;
+  return { branch, sha };
+}
+
+/**
+ * Whether HEAD now sits where `runCheckout(ref)` would have landed: the
+ * stripped local name for a remote-tracking ref (both its arms create or
+ * reuse that branch), the branch itself for a local or DWIM-created name,
+ * or the ref's commit for a detached target (tag, SHA, full ref — git
+ * detaches HEAD for those). `checkout HEAD`
+ * discards in place, so HEAD must not have moved at all. Post-hoc
+ * attribution only — git's own checkout remains the authority that
+ * performs the switch; a resolution diverging from git's can under-report
+ * a completed switch but never discards for a refused one.
+ */
+async function headAtCheckoutTarget(
+  cwd: string,
+  ref: string,
+  before: { branch: string; sha: string },
+  after: { branch: string; sha: string },
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<boolean> {
+  if (ref === 'HEAD') {
+    return (
+      after.sha !== '' &&
+      after.branch === before.branch &&
+      after.sha === before.sha
+    );
+  }
+  const isRemoteTracking = await runGit(
+    cwd,
+    ['show-ref', '--verify', '--quiet', `refs/remotes/${ref}`],
+    env,
+  )
+    .then(() => true)
+    .catch(() => false);
+  if (isRemoteTracking) {
+    const localName = ref.slice(ref.indexOf('/') + 1);
+    return after.branch !== '' && after.branch === localName;
+  }
+  if (after.branch !== '' && after.branch === ref) return true;
+  if (after.branch === '' && after.sha !== '') {
+    const target = (
+      await runGit(
+        cwd,
+        ['rev-parse', '--verify', `${ref}^{commit}`],
+        env,
+      ).catch(() => '')
+    ).trim();
+    return target !== '' && target === after.sha;
+  }
+  return false;
 }
 
 const SWITCH_COMPLETED_FAILURE =
@@ -1500,7 +1551,7 @@ async function forceCheckout(
   // The completion probes are read-only; the parked-operation guard stays
   // the LAST statement before the destructive command, so a merge parked
   // while the probes run is still refused.
-  const headBefore = await headIdentity(cwd, env);
+  const headBefore = await headState(cwd, env);
   const wasDirty =
     (
       await runGit(
@@ -1515,14 +1566,19 @@ async function forceCheckout(
     result = await runCheckout(cwd, ref, env, true);
   } catch (err) {
     // A post-checkout hook can refuse AFTER git discarded the changes and
-    // moved HEAD; tell that apart from a pre-touch refusal by the state,
-    // not by git's text. HEAD identity alone is not enough: forcing the
-    // branch HEAD already sits on (or a detached ref at the same commit)
-    // discards without changing the identity, so the dirty->clean
-    // transition is the second witness. Requiring a clean tree also keeps
-    // a pre-touch refusal (tree still dirty) out of this arm even when a
-    // concurrent actor moved HEAD while the checkout failed.
-    const headAfter = await headIdentity(cwd, env);
+    // moved HEAD. Attribute the completion to the requested target: HEAD
+    // must now sit where this checkout would have landed, so a concurrent
+    // actor moving HEAD elsewhere — or a failed identity probe — cannot
+    // certify a switch git refused, and the residue clean cannot run for
+    // it. The identity change witnesses the move; a target HEAD already
+    // sits on (same branch, same commit, HEAD itself) discards without
+    // changing the identity, so the dirty->clean transition is the second
+    // witness. Identity evidence is trusted only when both probes resolved
+    // a commit. A hook leaving dirt `checkout -f` never resets (a rewritten
+    // tracked file, a dirty submodule) must not demote a completed switch
+    // to a pre-touch refusal, so the clean-tree read gates only the
+    // same-identity witness, not the whole arm.
+    const headAfter = await headState(cwd, env);
     const nowClean =
       (
         await runGit(
@@ -1531,7 +1587,21 @@ async function forceCheckout(
           env,
         ).catch(() => '?')
       ).trim() === '';
-    if (nowClean && (wasDirty || headBefore !== headAfter)) {
+    const atTarget = await headAtCheckoutTarget(
+      cwd,
+      ref,
+      headBefore,
+      headAfter,
+      env,
+    );
+    const identityChanged =
+      headBefore.branch !== headAfter.branch ||
+      headBefore.sha !== headAfter.sha;
+    const identityTrusted = headBefore.sha !== '' && headAfter.sha !== '';
+    if (
+      atTarget &&
+      ((identityTrusted && identityChanged) || (wasDirty && nowClean))
+    ) {
       await runGit(cwd, ['clean', '-fd'], env).catch(() => undefined);
       throw new GitCheckoutFailure(
         'checkout_failed',
@@ -1571,10 +1641,25 @@ async function stashCheckout(
   } catch (err) {
     throw asCheckoutFailure(err);
   }
-  const headBefore = await headIdentity(cwd, env);
+  const headBefore = await headState(cwd, env);
   // The guard stays the last statement before the checkout: a merge parked
-  // while the identity probe runs must still be refused.
-  await refuseCheckoutOperationInProgress(cwd, env);
+  // while the identity probe runs must still be refused. The push already
+  // succeeded and the tree is clean, so the refusal must name the kept
+  // entry — it is the only record of the user's changes.
+  try {
+    await refuseCheckoutOperationInProgress(cwd, env);
+  } catch (err) {
+    if (stashed !== undefined && err instanceof GitCheckoutFailure) {
+      // Name the entry ahead of the detail: the route bounds the
+      // client-visible message.
+      throw new GitCheckoutFailure(
+        err.code,
+        `your local changes are kept in stash entry ${stashed}; ${err.message}`,
+        stashed,
+      );
+    }
+    throw err;
+  }
   let result: GitCheckoutResult;
   try {
     result = await runCheckout(cwd, ref, env);
@@ -1584,8 +1669,14 @@ async function stashCheckout(
     // entry then would apply the old branch's changes onto the branch the
     // user just switched to (and a clean apply would drop the only record
     // of them), so keep the entry and report the completed switch instead.
-    const headAfter = await headIdentity(cwd, env);
-    if (headBefore !== headAfter) {
+    // Any HEAD move keeps the entry — unlike force, no destructive step
+    // hangs on attributing the move to this call, and restoring onto a
+    // moved HEAD is the hazard.
+    const headAfter = await headState(cwd, env);
+    if (
+      headBefore.branch !== headAfter.branch ||
+      headBefore.sha !== headAfter.sha
+    ) {
       // Name the kept entry ahead of the git detail: the route bounds the
       // client-visible message, and the entry is the user's only record.
       throw new GitCheckoutFailure(

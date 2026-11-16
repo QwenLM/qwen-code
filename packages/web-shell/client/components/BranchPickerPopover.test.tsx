@@ -1330,36 +1330,93 @@ describe('BranchPickerPopover checkout resolution panel', () => {
     expect(footerText()).toContain('kept in stash entry a1b2c3d4e5f6');
   });
 
-  it('re-reads the tree status after a stash success keeps the picker open', async () => {
+  it('re-reads the listing and status after a stash success keeps the picker open', async () => {
     workspaceGitCheckout.mockRejectedValueOnce(checkoutDirtyError());
     workspaceGitCheckout.mockResolvedValueOnce({
       branch: 'dev',
       detached: false,
       stashSha: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0',
     });
-    workspaceGit.mockResolvedValue({
-      v: 2,
-      workspaceCwd: '/repo',
-      branch: 'dev',
-      staged: 0,
-      unstaged: 0,
-      untracked: 0,
-      conflicted: 0,
-      computedAt: Date.now(),
+    // The mount read answers the dirty pre-stash tree; every later read
+    // answers the clean post-switch tree.
+    workspaceGit.mockResolvedValueOnce(status({ unstaged: 2, computedAt: 2 }));
+    workspaceGit.mockResolvedValue(status({ branch: 'dev', computedAt: 3 }));
+    mountWithBranches(CHECKOUT_BRANCHES, {
+      status: status({ unstaged: 2 }),
     });
+    await flush();
+
+    // The open picker reports the pre-stash dirt before the action (the
+    // behind-upstream pull hint names the uncommitted changes).
+    expect(footerText()).toContain('↓1 · uncommitted changes');
+    const listingReadsBefore = workspaceGitBranches.mock.calls.length;
+    const statusReadsBefore = workspaceGit.mock.calls.length;
+
+    clickButton('dev');
+    await flush();
+    clickButton('Stash Changes and Switch');
+    await flush();
+
+    // A stash success must re-read BOTH halves: the hints must not keep
+    // reporting uncommitted changes for a now-clean tree, and the rows
+    // must not keep the pre-switch listing.
+    expect(workspaceGitBranches.mock.calls.length).toBeGreaterThan(
+      listingReadsBefore,
+    );
+    expect(workspaceGit.mock.calls.length).toBeGreaterThan(statusReadsBefore);
+    expect(footerText()).toContain('↓1 · origin/main');
+    expect(footerText()).not.toContain('uncommitted changes');
+  });
+
+  it('re-reads the listing and status after a failed resolution that kept the entry', async () => {
+    workspaceGitCheckout.mockRejectedValueOnce(checkoutDirtyError());
+    workspaceGitCheckout.mockRejectedValueOnce(
+      new DaemonHttpError(
+        409,
+        {
+          error: 'checkout_failed',
+          message:
+            'switched, but the checkout reported a failure; your local changes are kept in stash entry a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0',
+          stashSha: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0',
+        },
+        'POST /workspaces/:workspace/git/checkout: checkout_failed',
+      ),
+    );
     mountWithBranches(CHECKOUT_BRANCHES);
     await flush();
 
     clickButton('dev');
     await flush();
+    const listingReadsBefore = workspaceGitBranches.mock.calls.length;
     const statusReadsBefore = workspaceGit.mock.calls.length;
     clickButton('Stash Changes and Switch');
     await flush();
 
-    // The open picker's hints read the tree snapshot; a stash success must
-    // re-read it (paired with the listing), not keep reporting the
-    // pre-stash uncommitted changes for a now-clean tree.
+    // The switch completed and kept the entry: the tree moved, so the
+    // open picker must re-read both halves even though the request failed.
+    expect(footerText()).toContain('kept in stash entry a1b2c3d4e5f6');
+    expect(workspaceGitBranches.mock.calls.length).toBeGreaterThan(
+      listingReadsBefore,
+    );
     expect(workspaceGit.mock.calls.length).toBeGreaterThan(statusReadsBefore);
+  });
+
+  it('closes the picker after a plain checkout succeeds', async () => {
+    const onOpenChange = vi.fn();
+    mountWithBranches(CHECKOUT_BRANCHES, { onOpenChange });
+    await flush();
+
+    clickButton('dev');
+    await flush();
+
+    expect(workspaceGitCheckout).toHaveBeenLastCalledWith(
+      'dev',
+      undefined,
+      undefined,
+      undefined,
+      600_000,
+    );
+    expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 
   it('switches the panel back to pull wording when a pull is blocked', async () => {
