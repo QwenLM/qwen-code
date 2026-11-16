@@ -47,7 +47,7 @@ const DESCRIPTION = `Registers a session artifact so clients can show it in an a
 
 Provide exactly one locator: workspacePath, managedId, or url. Do not use the old "path" field.
 
-For workspace files, workspacePath must be relative to the current execution directory (for example "report.csv" or "reports/summary.html") or an absolute path inside the bound workspace. Do not add workspace folder prefixes such as "w/agent/", and do not use ".." to walk up from a worktree. This tool resolves the path and verifies it stays inside the workspace. A regular file is stored as one workspace-root-relative canonical workspacePath. A directory is never stored as an artifact; each recordable file inside it is recorded separately. Word, Excel, PowerPoint, and other office documents use kind "document". A successful file result includes status=available, the canonical workspacePath, and resolvedPath. A successful directory result lists the expanded files instead of "Recorded artifact". If verification fails, the tool returns an error — do not tell the user the artifact can be opened or downloaded.`;
+For workspace files, workspacePath must be relative to the current execution directory (for example "report.csv" or "reports/summary.html") or an absolute path inside the bound workspace. Do not add workspace folder prefixes such as "w/agent/", and do not use ".." to walk up from a worktree. This tool resolves the path and verifies it stays inside the workspace. Files inside directories that the Artifacts panel hides (for example ".qwen/tmp", ".git", "node_modules", or any dot-directory) are rejected, because such recordings would not be visible; copy the file to a visible workspace path and record that copy instead. A regular file is stored as one workspace-root-relative canonical workspacePath. A directory is never stored as an artifact; each recordable file inside it is recorded separately. Word, Excel, PowerPoint, and other office documents use kind "document". A successful file result includes status=available, the canonical workspacePath, and resolvedPath. A successful directory result lists the expanded files instead of "Recorded artifact". If verification fails, the tool returns an error — do not tell the user the artifact can be opened or downloaded.`;
 
 export const ARTIFACT_TITLE_MAX_LENGTH = 200;
 export const ARTIFACT_WORKSPACE_PATH_MAX_LENGTH = 500;
@@ -1060,6 +1060,15 @@ async function inspectWorkspaceCandidate(
     return locatorFailure(
       ToolErrorType.PATH_NOT_IN_WORKSPACE,
       `Failed to record artifact: "${rawPath}" could not be converted to a workspace-root-relative path.\n${WORKSPACE_PATH_HINT}`,
+    );
+  }
+  if (!st.isDirectory() && pathHasSkippedDirectoryComponent(workspacePath)) {
+    return locatorFailure(
+      ToolErrorType.INVALID_TOOL_PARAMS,
+      [
+        `Failed to record artifact: "${rawPath}" is inside a directory that is not shown in the Artifacts panel (for example ".qwen/tmp"), so the recording would not be visible to the user.`,
+        'Record the file at a visible workspace path instead (for example copy it out of ".qwen/tmp").',
+      ].join('\n'),
     );
   }
   const canonicalError = validateString(

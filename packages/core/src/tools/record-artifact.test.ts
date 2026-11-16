@@ -498,6 +498,43 @@ describe('RecordArtifactTool', () => {
     expectText(result, [], [RECORDED]);
   });
 
+  it('rejects a file inside .qwen/tmp instead of reporting success', async () => {
+    const ws = await workspace();
+    await ws.write('.qwen/tmp/shot.png', 'png');
+
+    const result = await ws.record('Screenshot', '.qwen/tmp/shot.png');
+
+    expectFailed(result, ToolErrorType.INVALID_TOOL_PARAMS);
+    expectText(result, ['not shown in the Artifacts panel'], [RECORDED]);
+  });
+
+  it('rejects files inside other skipped directories', async () => {
+    const ws = await workspace();
+    await ws.write('node_modules/pkg/index.js', 'js');
+    await ws.write('.config/report.md', 'md');
+
+    expectFailed(
+      await ws.record('Deps file', 'node_modules/pkg/index.js'),
+      ToolErrorType.INVALID_TOOL_PARAMS,
+    );
+    expectFailed(
+      await ws.record('Config report', '.config/report.md'),
+      ToolErrorType.INVALID_TOOL_PARAMS,
+    );
+  });
+
+  it('keeps accepting files in visible directories with similar names', async () => {
+    const ws = await workspace();
+    await ws.write('notes/qwen-tmp-report.md', 'md');
+
+    const result = await ws.record('Notes', 'notes/qwen-tmp-report.md');
+
+    expectFirst(result, {
+      title: 'qwen-tmp-report.md',
+      workspacePath: 'notes/qwen-tmp-report.md',
+    });
+  });
+
   it('rejects an empty directory workspacePath', async () => {
     const ws = await workspace();
     await mkdir(path.join(ws.cwd, 'reports'));
