@@ -213,15 +213,26 @@ describe('useStatsHistory', () => {
     expect(view.result.current.data).toBe(data);
   });
 
-  it('does not publish after unmount', async () => {
+  it('discards an in-flight load when the snapshot turns invalid mid-load', async () => {
     const old = deferred();
-    load.mockReturnValue(old.promise);
+    const reload = deferred();
+    load.mockReturnValueOnce(old.promise).mockReturnValueOnce(reload.promise);
     const f = fixture();
-    const view = renderHook(() => useStatsHistory(f.config, f.stats, 'all'));
-    view.unmount();
+    const view = renderHook(
+      ({ stats }) => useStatsHistory(f.config, stats, 'all'),
+      { initialProps: { stats: f.stats } },
+    );
+    view.rerender({ stats: { ...f.stats, sessionId: 'other' } });
     await act(async () => {
       old.resolve(data);
     });
+    view.rerender({ stats: f.stats });
     expect(view.result.current.data).toBeUndefined();
+    expect(view.result.current.loading).toBe(true);
+    await act(async () => {
+      reload.resolve(newer);
+    });
+    expect(view.result.current.data).toBe(newer);
+    expect(load).toHaveBeenCalledTimes(2);
   });
 });

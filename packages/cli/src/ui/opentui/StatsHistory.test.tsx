@@ -8,6 +8,7 @@
 import { act, cleanup, render } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { StatsData } from '../utils/statsDataService.js';
+import { buildHeatmapData } from '../utils/asciiCharts.js';
 import { StatsHistory, statsMonths } from './StatsHistory.js';
 import { OpenTuiStatsDialog } from './dialogs-stats-skills.js';
 import { catalogKey } from '../../test-utils/opentui-catalog.js';
@@ -348,5 +349,142 @@ describe('native historical statistics', () => {
     mock.error = 'Failed to load stats. Press r to retry.';
     view.rerender(<OpenTuiStatsDialog config={null} onClose={vi.fn()} />);
     expect(view.container.textContent).toContain('Failed to load stats');
+    view.rerender(
+      <OpenTuiStatsDialog config={null} isFocused={false} onClose={vi.fn()} />,
+    );
+    expect(view.container.textContent).not.toContain('PgUp/PgDn');
+  });
+
+  it('aligns heatmap cells under the axis labels like the ink view', () => {
+    const data = report();
+    const width = 110;
+    const view = render(
+      <StatsHistory
+        data={data}
+        tab="activity"
+        range="all"
+        monthOffset={0}
+        width={width}
+      />,
+    );
+    const heatmap = buildHeatmapData(
+      data.heatmap,
+      Math.max(1, Math.min(26, Math.floor((width - 4) / 2))),
+      0,
+    );
+    const monRow = [...view.container.querySelectorAll('span')]
+      .map((node) => node.textContent ?? '')
+      .find((text) => text.startsWith('Mon'))!;
+    expect(monRow.slice(0, 4)).toBe('Mon ');
+    expect(monRow.slice(4, 6)).toBe(heatmap.rows[0]!.cells[0]!.char);
+    expect(monRow.length).toBe(4 + 2 * heatmap.totalCols);
+  });
+
+  it('hides the Projects block on an empty report', () => {
+    const data = report();
+    data.report.projects = [];
+    const view = render(
+      <StatsHistory
+        data={data}
+        tab="activity"
+        range="all"
+        monthOffset={0}
+        width={110}
+      />,
+    );
+    const text = view.container.textContent;
+    expect(text).not.toContain('Projects');
+    expect(text).not.toContain('Project  Sessions');
+  });
+
+  it('hides the key hint and reclaims its rows while the host owns the keys', () => {
+    mock.width = 120;
+    mock.height = 40;
+    const view = render(
+      <OpenTuiStatsDialog
+        config={null}
+        onClose={vi.fn()}
+        availableTerminalHeight={35}
+      />,
+    );
+    act(() => {
+      press('tab');
+    });
+    const body = () =>
+      mock.layouts.findLast((node) => node.type === 'scrollbox')!.props;
+    expect(view.container.textContent).toContain('PgUp/PgDn');
+    expect(body()['height']).toBe(25);
+    view.rerender(
+      <OpenTuiStatsDialog
+        config={null}
+        isFocused={false}
+        onClose={vi.fn()}
+        availableTerminalHeight={35}
+      />,
+    );
+    expect(view.container.textContent).not.toContain('PgUp/PgDn');
+    expect(view.container.textContent).not.toContain('r dates');
+    expect(body()['height']).toBe(27);
+  });
+
+  it('pages the history body by its declared height and resets scroll on navigation', () => {
+    mock.width = 120;
+    mock.height = 40;
+    render(
+      <OpenTuiStatsDialog
+        config={null}
+        onClose={vi.fn()}
+        availableTerminalHeight={35}
+      />,
+    );
+    const scrollProps = mock.layouts.findLast(
+      (node) => node.type === 'scrollbox',
+    )!.props;
+    const ref = scrollProps['ref'] as (node: unknown) => void;
+    const scrollTo = vi.fn();
+    const scrollBy = vi.fn();
+    ref({ viewport: { width: 113 }, scrollTo, scrollBy });
+    act(() => {
+      press('tab');
+    });
+    expect(scrollTo).toHaveBeenCalledWith(0);
+    scrollTo.mockClear();
+    act(() => {
+      press('pagedown');
+    });
+    expect(scrollBy).toHaveBeenLastCalledWith(25);
+    act(() => {
+      press('pageup');
+    });
+    expect(scrollBy).toHaveBeenLastCalledWith(-25);
+    act(() => {
+      press('h');
+    });
+    expect(scrollTo).toHaveBeenCalledWith(0);
+    scrollTo.mockClear();
+    act(() => {
+      press('r');
+    });
+    expect(scrollTo).toHaveBeenCalledWith(0);
+  });
+
+  it('keeps the paged month while a reload is in flight', () => {
+    const view = render(<OpenTuiStatsDialog config={null} onClose={vi.fn()} />);
+    act(() => {
+      press('tab');
+      press('h');
+      press('h');
+    });
+    expect(view.container.textContent).toContain('Sep 2026');
+    mock.data = undefined;
+    mock.loading = true;
+    view.rerender(<OpenTuiStatsDialog config={null} onClose={vi.fn()} />);
+    act(() => {
+      press('h');
+    });
+    mock.data = report();
+    mock.loading = false;
+    view.rerender(<OpenTuiStatsDialog config={null} onClose={vi.fn()} />);
+    expect(view.container.textContent).toContain('Sep 2026');
   });
 });

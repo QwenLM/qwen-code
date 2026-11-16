@@ -302,6 +302,9 @@ describe('loadStatsData - new fields', () => {
   });
 
   it('keeps the four-session range and independent latency goldens exact', async () => {
+    // The fake instant is local midnight in UTC-12, where 'today' selects
+    // nothing at any fixture timestamp; pin the zone instead of moving it.
+    vi.stubEnv('TZ', 'UTC');
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-11-15T12:00:00Z'));
     try {
@@ -350,6 +353,7 @@ describe('loadStatsData - new fields', () => {
       expect(result.report.models['beta']?.totalLatencyMs).toBe(36000);
     } finally {
       vi.useRealTimers();
+      vi.unstubAllEnvs();
     }
   });
 

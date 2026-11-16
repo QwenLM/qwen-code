@@ -188,25 +188,27 @@ export function OpenTuiStatsDialog(props: {
   const headerText = compact
     ? t(TABS.find((definition) => definition.name === tab)!.label)
     : tabText;
-  const hint = compact
-    ? tab === 'session'
-      ? 'tab PgUp/PgDn esc'
-      : range === 'all' && tab === 'activity'
-        ? 'tab r ←→ PgUp/PgDn esc'
-        : 'tab r PgUp/PgDn esc'
-    : normalHint;
+  const hint = !isFocused
+    ? ''
+    : compact
+      ? tab === 'session'
+        ? 'tab PgUp/PgDn esc'
+        : range === 'all' && tab === 'activity'
+          ? 'tab r ←→ PgUp/PgDn esc'
+          : 'tab r PgUp/PgDn esc'
+      : normalHint;
   const visibleRange = compact ? getRangeLabel(range) : rangeText;
   const headerRows = wrappedRows(headerText, contentWidth);
   const rangeRows =
     tab === 'session' ? 0 : wrappedRows(visibleRange, contentWidth);
-  const hintRows = wrappedRows(hint, contentWidth);
+  const hintRows = hint ? wrappedRows(hint, contentWidth) : 0;
   const chromeRows =
     2 +
     (compact ? 0 : 2) +
     headerRows +
     1 +
     hintRows +
-    (compact ? 0 : 1) +
+    (hint && !compact ? 1 : 0) +
     rangeRows +
     (rangeRows && !compact ? 1 : 0);
   const bodyRows = Math.max(1, regionHeight - chromeRows);
@@ -245,7 +247,11 @@ export function OpenTuiStatsDialog(props: {
       setRange(next);
       return;
     }
-    if (tabRef.current === 'activity' && rangeRef.current === 'all') {
+    if (
+      tabRef.current === 'activity' &&
+      rangeRef.current === 'all' &&
+      history.data
+    ) {
       if (original.name === 'left' || original.name === 'h') {
         monthRef.current = Math.min(
           monthRef.current + 1,
@@ -525,11 +531,13 @@ export function OpenTuiStatsDialog(props: {
           </text>
         </box>
       ) : null}
-      <box marginTop={compact ? 0 : 1} height={hintRows} flexShrink={0}>
-        <text fg={C.dim} width="100%" wrapMode="word">
-          {hint}
-        </text>
-      </box>
+      {hint ? (
+        <box marginTop={compact ? 0 : 1} height={hintRows} flexShrink={0}>
+          <text fg={C.dim} width="100%" wrapMode="word">
+            {hint}
+          </text>
+        </box>
+      ) : null}
     </box>
   );
 }

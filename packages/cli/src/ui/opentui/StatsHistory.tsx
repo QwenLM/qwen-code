@@ -130,7 +130,7 @@ export function StatsHistory({
       <Line>{`    ${heatmapLabels}`}</Line>
       {heatmap.rows.map((row, index) => (
         <text key={index} fg={C.dim}>
-          {`${row.label.padEnd(3)} `}
+          {row.label}
           {row.cells.map((cell, cellIndex) => (
             <span
               key={cellIndex}
@@ -152,20 +152,24 @@ export function StatsHistory({
             >{`${chart.yLabels[index]?.padStart(6) ?? '      '}│${row.map((cell) => cell.char).join('')}`}</Line>
           ))}
           <Line>{`      └${chart.xLabels}`}</Line>
-          <Line>{`       peak ${fmtTokens(chart.peak)}`}</Line>
+          <Line>{`       ${t('peak {{value}}', { value: fmtTokens(chart.peak) })}`}</Line>
         </>
       ) : (
         <Line>{t('(no data)')}</Line>
       )}
-      <Line>{t('Projects')}</Line>
-      <Line>{`${t('Project')}  ${t('Sessions')}  ${t('Tokens')}  ${t('Duration')}`}</Line>
-      {report.projects.slice(0, 5).map((project) => (
-        <Line
-          key={project.path}
-        >{`${project.path.split('/').pop() || project.path}  ${project.sessionCount}  ${fmtTokens(project.totalTokens)}  ${fmtDurationShort(project.totalDurationMs)}`}</Line>
-      ))}
-      {report.projects.length > 5 ? (
-        <Line>{`+${report.projects.length - 5} more`}</Line>
+      {report.projects.length > 0 ? (
+        <>
+          <Line>{t('Projects')}</Line>
+          <Line>{`${t('Project')}  ${t('Sessions')}  ${t('Tokens')}  ${t('Duration')}`}</Line>
+          {report.projects.slice(0, 5).map((project) => (
+            <Line
+              key={project.path}
+            >{`${project.path.split('/').pop() || project.path}  ${project.sessionCount}  ${fmtTokens(project.totalTokens)}  ${fmtDurationShort(project.totalDurationMs)}`}</Line>
+          ))}
+          {report.projects.length > 5 ? (
+            <Line>{`+${t('{{count}} more', { count: String(report.projects.length - 5) })}`}</Line>
+          ) : null}
+        </>
       ) : null}
     </box>
   );
