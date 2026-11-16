@@ -23408,6 +23408,51 @@ describe('Session', () => {
       },
     );
 
+    it('links a follow-up completion by the task id the daemon reports', async () => {
+      (
+        session as unknown as {
+          pendingPrompt: AbortController | null;
+        }
+      ).pendingPrompt = new AbortController();
+      vi.mocked(mockClient.extMethod).mockResolvedValueOnce({
+        sessionId: 'kid',
+        taskId: 'kid:prompt-2',
+      });
+      const spawn = vi.mocked(mockConfig.setSubSessionSpawner).mock
+        .calls[0]?.[0];
+      await spawn?.({
+        prompt: 'again',
+        completion: 'sent',
+        sessionId: 'kid',
+      });
+      expect(mockClient.extMethod).toHaveBeenLastCalledWith(
+        SERVE_CONTROL_EXT_METHODS.createSubSession,
+        expect.objectContaining({ sessionId: 'kid' }),
+      );
+      await session.enqueueBackgroundNotification({
+        displayText: 'Sub-session completed.',
+        modelText: '<task-notification />',
+        taskId: 'kid:prompt-2',
+        status: 'completed',
+        kind: 'agent',
+      });
+      expect(
+        (
+          session as unknown as {
+            notificationQueue: Array<{
+              taskId: string;
+              continuesTodoStopGuardWorkChain: boolean;
+            }>;
+          }
+        ).notificationQueue,
+      ).toContainEqual(
+        expect.objectContaining({
+          taskId: 'kid:prompt-2',
+          continuesTodoStopGuardWorkChain: true,
+        }),
+      );
+    });
+
     it('registers the create_sub_session tool on the daemon session registry', async () => {
       // The tool is daemon-only: it must exist on every session the daemon
       // creates so the model can call it, and nowhere else.

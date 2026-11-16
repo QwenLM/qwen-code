@@ -60,6 +60,7 @@ export interface CreateSubSessionParams {
   model?: string;
   name?: string;
   workspace?: string;
+  sessionId?: string;
 }
 
 const DAEMON_ONLY_MESSAGE =
@@ -130,9 +131,15 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
     const cleaned = raw.replace(/[\r\n\t\x00-\x1f]/g, ' ').trim();
     const label = cleaned.length > 80 ? cleaned.slice(0, 77) + '…' : cleaned;
     const workspace = this.destination?.workspaceCwd ?? this.params.workspace;
-    return workspace
-      ? `[${mode}] in ${JSON.stringify(workspace)}: ${label}`
-      : `[${mode}] ${label}`;
+    const target = [
+      this.params.sessionId
+        ? `to ${JSON.stringify(this.params.sessionId)}`
+        : undefined,
+      workspace ? `in ${JSON.stringify(workspace)}` : undefined,
+    ]
+      .filter((part) => part !== undefined)
+      .join(' ');
+    return target ? `[${mode}] ${target}: ${label}` : `[${mode}] ${label}`;
   }
 
   /**
@@ -169,7 +176,12 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
       type: 'exec',
       title: this.getDescription(),
       command: this.params.prompt.trim(),
-      approvalText: `Workspace: ${JSON.stringify(destination.workspaceCwd)}\n\n${this.params.prompt.trim()}`,
+      approvalText:
+        `Workspace: ${JSON.stringify(destination.workspaceCwd)}\n` +
+        (this.params.sessionId
+          ? `Session: ${JSON.stringify(this.params.sessionId)}\n`
+          : '') +
+        `\n${this.params.prompt.trim()}`,
       rootCommand: ToolNames.CREATE_SUB_SESSION,
       // A tool-wide rule cannot record which workspace the user approved.
       hideAlwaysAllow: true,
@@ -249,6 +261,9 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
                 workspaceGeneration: destination?.workspaceGeneration,
               }
             : {}),
+          ...(this.params.sessionId
+            ? { sessionId: this.params.sessionId }
+            : {}),
         });
       }, signal);
 
@@ -291,32 +306,39 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
             'live-only — it will not survive a daemon restart.'
           : '';
 
+      const followUp = this.params.sessionId !== undefined;
       if (completion === 'sent') {
         // Fire-and-forget: report the id; the caller did not wait for a result.
         return {
           llmContent:
-            `Sub-session ${sessionLink} created and the prompt was ` +
-            'dispatched. It runs independently — this call did not wait for a ' +
+            `Sub-session ${sessionLink} ` +
+            (followUp
+              ? 'received the prompt. '
+              : 'created and the prompt was dispatched. ') +
+            'It runs independently — this call did not wait for a ' +
             `result.${parentWarning}`,
           returnDisplay: `${sessionLink} started`,
         };
       }
 
-      // first-turn: return the sub-session's first-turn output to the caller.
+      // first-turn: return the output of the turn this prompt started.
       const stop = res.stopReason ? ` (stopReason: ${res.stopReason})` : '';
       const body =
         res.result && res.result.length > 0
           ? res.result
-          : `Sub-session ${sessionLink} completed its first turn but ` +
-            'produced no text output.';
+          : `Sub-session ${sessionLink} completed its ` +
+            `${followUp ? 'turn' : 'first turn'} but produced no text output.`;
       return {
-        llmContent: `Sub-session ${sessionLink} first-turn result${stop}:\n\n${body}${parentWarning}`,
+        llmContent: `Sub-session ${sessionLink} ${followUp ? 'result' : 'first-turn result'}${stop}:\n\n${body}${parentWarning}`,
         returnDisplay: `${sessionLink} completed${stop}`,
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return {
-        llmContent: `Error creating sub-session: ${message}`,
+        llmContent:
+          this.params.sessionId !== undefined
+            ? `Error sending to sub-session ${this.params.sessionId}: ${message}`
+            : `Error creating sub-session: ${message}`,
         returnDisplay: message,
         error: {
           message,
@@ -351,14 +373,21 @@ export class CreateSubSessionTool extends BaseDeclarativeTool<
         'back.\n' +
         '- `sent`: returns immediately after dispatching the prompt, without ' +
         'waiting. Use for fire-and-forget launches whose output you do not ' +
-        'need inline. When the sub-session runs in another workspace, ' +
-        'you are told when it finishes, with its result.\n\n' +
+        'need inline. When the sub-session runs in another workspace, or ' +
+        'when you follow one up, you are told when it finishes, with its ' +
+        'result. That result comes back on its own, so do not ask the ' +
+        'sub-session to report back (for example with send_message).\n\n' +
         '## Another workspace\n' +
         'Set `workspace` to run the sub-session in another workspace ' +
         "registered with this daemon, with that workspace's own instructions, " +
         'skills and settings. The user approves each call that names a ' +
         'workspace. Both workspaces must be trusted; an unknown name is ' +
         'refused with the list of workspaces you can use.\n\n' +
+        '## Following up\n' +
+        'Set `sessionId` to send the prompt to a sub-session you created ' +
+        "earlier instead of creating a new one; it keeps that session's " +
+        'context. Also set `workspace` if it is in another workspace. Only ' +
+        'sub-sessions this session created can be followed up this way.\n\n' +
         'The sub-session runs the prompt with full tool access, starting from ' +
         'zero context — brief it completely in `prompt` (it cannot see this ' +
         'conversation).',
@@ -400,6 +429,13 @@ export class CreateSubSessionTool extends BaseDeclarativeTool<
               'Optional absolute path or id of another workspace registered ' +
               'with this daemon to run the sub-session in. Omit to use the ' +
               'current workspace.',
+          },
+          sessionId: {
+            type: 'string',
+            description:
+              'Optional id of a sub-session you created earlier, to send this ' +
+              'prompt to instead of creating a new one. Cannot be combined ' +
+              'with `model` or `name`.',
           },
         },
         required: ['prompt'],
@@ -446,6 +482,18 @@ export class CreateSubSessionTool extends BaseDeclarativeTool<
     ) {
       return `Parameter "workspace" must be a non-empty string of at most ${MAX_SUB_SESSION_WORKSPACE_CHARS} characters without control characters.`;
     }
+    if (
+      params.sessionId !== undefined &&
+      !isValidCronTaskRoutingId(params.sessionId)
+    ) {
+      return `Parameter "sessionId" must be a non-empty string of at most ${MAX_CRON_TASK_ROUTING_ID_LENGTH} characters without control characters.`;
+    }
+    if (
+      params.sessionId !== undefined &&
+      (params.model !== undefined || params.name !== undefined)
+    ) {
+      return 'Parameters "model" and "name" apply to a new sub-session and cannot be combined with "sessionId".';
+    }
     return null;
   }
 
@@ -463,6 +511,7 @@ export class CreateSubSessionTool extends BaseDeclarativeTool<
       completion: params.completion ?? 'first-turn',
       ...(params.model ? { model: params.model } : {}),
       ...(params.workspace ? { workspace: params.workspace } : {}),
+      ...(params.sessionId ? { sessionId: params.sessionId } : {}),
     };
   }
 }

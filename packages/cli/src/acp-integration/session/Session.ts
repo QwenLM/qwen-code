@@ -4379,6 +4379,7 @@ export class Session implements SessionContext {
                 workspaceGeneration: req.workspaceGeneration,
               }
             : {}),
+          ...(req.sessionId ? { sessionId: req.sessionId } : {}),
         });
         if (typeof resp['sessionId'] !== 'string' || !resp['sessionId']) {
           throw new Error(
@@ -4386,7 +4387,13 @@ export class Session implements SessionContext {
           );
         }
         if (req.completion === 'sent') {
-          this.relatedAgentIds.add(resp['sessionId']);
+          // The completion arrives under this id, so the Todo Stop Guard
+          // links it to the work that asked for it.
+          this.relatedAgentIds.add(
+            typeof resp['taskId'] === 'string' && resp['taskId']
+              ? resp['taskId']
+              : resp['sessionId'],
+          );
         }
         return {
           sessionId: resp['sessionId'],

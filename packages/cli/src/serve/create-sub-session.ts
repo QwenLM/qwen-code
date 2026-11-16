@@ -66,6 +66,7 @@ import {
   isReservedStandaloneSessionSourceType,
   isScheduledTaskRunSource,
 } from '@qwen-code/acp-bridge/sessionSource';
+import { normalizeSessionIdForLookup } from '../config/session-id.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import type { StandaloneSessionService } from './conversations/standalone-session-service.js';
 import type { SessionArchiveCoordinator } from './server/session-archive.js';
@@ -408,6 +409,7 @@ function buildSentCompletionNotification(
   result: string,
   stopReason: string,
   workspaceCwd?: string,
+  taskId = sessionId,
 ) {
   const status = sentCompletionStatus(stopReason);
   const boundedStopReason = truncateCodePoints(stopReason, 128);
@@ -452,7 +454,7 @@ function buildSentCompletionNotification(
   return {
     displayText: `Sub-session ${sessionLink} ${statusText}.`,
     modelText,
-    taskId: sessionId,
+    taskId,
     status,
     kind: 'agent' as const,
     // `subSessionName` strips bidi and control marks and trims, so a name that
@@ -800,6 +802,9 @@ async function awaitFirstTurn(
   lastEventId: number,
   timeoutMs: number,
   stopSignal?: AbortSignal,
+  /** Count only chunks stamped with `promptId`. Set for a session that may be
+   * running another turn when this prompt is queued behind it. */
+  requirePromptId = false,
 ): Promise<{ result: string; stopReason: string }> {
   const ac = new AbortController();
   // `ac.signal.aborted` cannot report whether the deadline passed: the `finally`
@@ -857,7 +862,8 @@ async function awaitFirstTurn(
         if (
           d?.update?.sessionUpdate === 'agent_message_chunk' &&
           typeof d.update.content?.text === 'string' &&
-          (e.promptId === undefined || e.promptId === promptId) &&
+          (e.promptId === promptId ||
+            (!requirePromptId && e.promptId === undefined)) &&
           d.update._meta?.source !== 'background_task_completed' &&
           d.update._meta?.source !== 'background_notification' &&
           d.update._meta?.source !== 'background_notification_turn_started'
@@ -1064,6 +1070,73 @@ export function createSubSessionLauncher(
     }
   };
 
+  /**
+   * Restore a sub-session the caller created in this workspace, so a
+   * follow-up prompt can be queued on it. The lineage is checked before the
+   * session is touched, from the live entry or, for one that was reaped,
+   * from its transcript: the recorded parent must be the caller, and the
+   * session must carry no source marker. Side tasks and scheduled-task runs
+   * also record the session they came from as their parent, but they carry
+   * a source, and a person or a schedule started them, not this tool.
+   */
+  const resumeOwnSubSession = async (
+    bridge: AcpSessionBridge,
+    sessionId: string,
+    callerSessionId: string,
+  ): Promise<BridgeSession> => {
+    const notOwn = new Error(
+      `Session ${sessionId} is not a sub-session this session created in ` +
+        `${boundWorkspace}. If it lives in another workspace, also pass that ` +
+        '`workspace`.',
+    );
+    if (
+      normalizeSessionIdForLookup(sessionId) ===
+      normalizeSessionIdForLookup(callerSessionId)
+    ) {
+      throw notOwn;
+    }
+    let metadata:
+      | { parentSessionId?: string; sourceType?: string; sourceId?: string }
+      | undefined;
+    try {
+      const live = bridge.getSessionSummary(sessionId);
+      metadata = {
+        ...(live.parentSessionId !== undefined
+          ? { parentSessionId: live.parentSessionId }
+          : {}),
+        ...(live.sourceType !== undefined
+          ? { sourceType: live.sourceType }
+          : {}),
+        ...(live.sourceId !== undefined ? { sourceId: live.sourceId } : {}),
+      };
+    } catch (error) {
+      if (!(error instanceof SessionNotFoundError)) throw error;
+      const read = () =>
+        new SessionService(boundWorkspace).readCreationMetadataIfReadable(
+          sessionId,
+          'active',
+        );
+      metadata = runtimeBaseDir
+        ? await Storage.runWithResolvedRuntimeBaseDir(runtimeBaseDir, read)
+        : await read();
+    }
+    if (
+      metadata?.parentSessionId === undefined ||
+      normalizeSessionIdForLookup(metadata.parentSessionId) !==
+        normalizeSessionIdForLookup(callerSessionId) ||
+      (metadata.sourceType !== undefined &&
+        metadata.sourceType !== 'default') ||
+      metadata.sourceId !== undefined
+    ) {
+      throw notOwn;
+    }
+    return bridge.resumeSession({
+      sessionId,
+      workspaceCwd: boundWorkspace,
+      ...metadata,
+    });
+  };
+
   const run = async (
     info: CreateSubSessionInfo,
     remote?: RemoteSubSessionCaller,
@@ -1103,6 +1176,21 @@ export function createSubSessionLauncher(
         throw new Error('Standalone session service is unavailable.');
       }
       assertMayDelegate(info.callerSessionId, caller.parentSessionId);
+      if (info.sessionId !== undefined && (standalone || isolatedWorkspace)) {
+        throw new Error('This session cannot follow up a sub-session.');
+      }
+    }
+    const reusing = info.sessionId !== undefined;
+    if (reusing && !remote && info.completion === 'sent') {
+      // The completion comes back as a background turn, which the caller
+      // can only take while it records its chat.
+      const callerStatus = await readApprovalMode(bridge, info.callerSessionId);
+      if (!callerStatus.canAcceptBackgroundNotifications) {
+        throw new Error(
+          'A sent follow-up needs chat recording in the caller to report ' +
+            'back. Use first-turn to wait for the result.',
+        );
+      }
     }
 
     // Per-caller concurrency key. Always a real, bridge-authenticated session
@@ -1141,14 +1229,38 @@ export function createSubSessionLauncher(
     // we roll this session back so it isn't orphaned (the slot was consumed and
     // the prompt may have been dispatched, but launch() reports failure).
     let spawnedSession: BridgeSession | undefined;
+    // A follow-up attaches a client to the session it resumes; it is released
+    // once this launch is done with the session, so follow-ups do not pile up
+    // attachments. Releasing the last one closes the session only once it has
+    // nothing left to run, as any client's goodbye would.
+    let reusedClient: { sessionId: string; clientId: string } | undefined;
+    const releaseReusedClient = (): void => {
+      const client = reusedClient;
+      reusedClient = undefined;
+      if (client === undefined) return;
+      void bridge
+        .detachClient(client.sessionId, client.clientId)
+        .catch((error: unknown) => {
+          log.debug(
+            'sub-session: follow-up detach failed',
+            client.sessionId,
+            error,
+          );
+        });
+    };
     let promptAdmitted = false;
     let promptDispatched = false;
     let promptWriteStarted = false;
     let queuedTurn: ReturnType<AcpSessionBridge['sendPrompt']> | undefined;
     let onPromptDispatched: (() => void) | undefined;
     const named = remote !== undefined || assertLocalCurrent !== undefined;
+    const guardedSent = info.completion === 'sent' && named;
+    // A new session dispatches at once, so a guarded `sent` launch waits for
+    // that. A follow-up may sit behind a running turn for as long as that
+    // turn takes; it returns once queued, and a prompt the guards refuse when
+    // its turn comes is reported as a failed completion.
     const dispatch =
-      info.completion === 'sent' && named
+      guardedSent && !reusing
         ? new Promise<void>((resolve) => {
             onPromptDispatched = () => {
               promptDispatched = true;
@@ -1167,7 +1279,18 @@ export function createSubSessionLauncher(
       let turn!: ReturnType<AcpSessionBridge['sendPrompt']>;
       let promptAdmission: Promise<void> | undefined;
       let sub: BridgeSession;
-      if (standalone) {
+      if (reusing) {
+        sub = await resumeOwnSubSession(
+          bridge,
+          info.sessionId!,
+          info.callerSessionId,
+        );
+        // The bridge keys the session by the id it resumed, which can differ
+        // in spelling from the one the caller passed.
+        if (sub.clientId !== undefined) {
+          reusedClient = { sessionId: sub.sessionId, clientId: sub.clientId };
+        }
+      } else if (standalone) {
         const created = await standaloneService!.createChildWithInitialPrompt(
           {
             sessionId: randomUUID(),
@@ -1194,7 +1317,8 @@ export function createSubSessionLauncher(
           ...(info.model ? { modelServiceId: info.model } : {}),
         });
       }
-      spawnedSession = sub;
+      // A reused session is never rolled back: it is not this launch's to close.
+      if (!reusing) spawnedSession = sub;
       const sessionId = sub.sessionId;
       // Fail closed only for scheduled-task runs; every other caller keeps
       // the bridge's best-effort contract (warn and stay on the agent's
@@ -1221,7 +1345,7 @@ export function createSubSessionLauncher(
           );
         }
       }
-      rememberSpawned(sessionId);
+      if (!reusing) rememberSpawned(sessionId);
       let dispatchApproval:
         | {
             assertCanDispatch(): void;
@@ -1232,7 +1356,7 @@ export function createSubSessionLauncher(
         let childApproval = await readApprovalMode(bridge, sessionId);
         if (childApproval.mode === undefined) {
           throw new Error(
-            'The new session did not report its approval mode; it was not used.',
+            'The sub-session did not report its approval mode; it was not used.',
           );
         }
         remote.assertCurrent();
@@ -1245,12 +1369,12 @@ export function createSubSessionLauncher(
             persist: false,
           });
           if (change.mode !== mode) {
-            throw new Error('The new session did not apply its approval mode.');
+            throw new Error('The sub-session did not apply its approval mode.');
           }
           childApproval = await readApprovalMode(bridge, sessionId);
           if (childApproval.mode !== mode) {
             throw new Error(
-              'The new session approval mode changed before dispatch.',
+              'The sub-session approval mode changed before dispatch.',
             );
           }
         }
@@ -1264,18 +1388,24 @@ export function createSubSessionLauncher(
         dispatchApproval.assertCanDispatch();
       }
 
-      try {
-        bridge.updateSessionMetadata(sessionId, {
-          // A per-run scheduled task child is titled like its manual-run
-          // sibling (see the scheduled-task route): flat, no thread glyph.
-          displayName: subSessionName(
-            info.name ?? info.prompt,
-            !isScheduledTaskRunSource(info),
-          ),
-          titleSource: 'auto',
-        });
-      } catch (err) {
-        log.debug('sub-session: updateSessionMetadata failed', sessionId, err);
+      if (!reusing) {
+        try {
+          bridge.updateSessionMetadata(sessionId, {
+            // A per-run scheduled task child is titled like its manual-run
+            // sibling (see the scheduled-task route): flat, no thread glyph.
+            displayName: subSessionName(
+              info.name ?? info.prompt,
+              !isScheduledTaskRunSource(info),
+            ),
+            titleSource: 'auto',
+          });
+        } catch (err) {
+          log.debug(
+            'sub-session: updateSessionMetadata failed',
+            sessionId,
+            err,
+          );
+        }
       }
 
       if (!standalone) {
@@ -1298,7 +1428,7 @@ export function createSubSessionLauncher(
             sessionId,
             prompt: [{ type: 'text', text: info.prompt }],
           } as Parameters<AcpSessionBridge['sendPrompt']>[1],
-          dispatchSignal ?? (remote ? stopAc.signal : undefined),
+          dispatchSignal ?? (remote || guardedSent ? stopAc.signal : undefined),
           {
             promptId,
             onPromptAdmitted,
@@ -1386,6 +1516,10 @@ export function createSubSessionLauncher(
         }
       }
 
+      // One session can report several completions to the same caller, and
+      // the caller treats a repeated task id as one it already has.
+      const completionTaskId = reusing ? `${sessionId}:${promptId}` : sessionId;
+
       if (info.completion === 'sent') {
         // Hold the concurrency slot until the sub-session's turn finishes
         // (or the daemon shuts down via stop(), or a wall-clock ceiling is
@@ -1420,6 +1554,7 @@ export function createSubSessionLauncher(
                   lastEventId,
                   sentModeDrainTimeoutMs,
                   drainSignal,
+                  reusing,
                 ),
                 turnError,
               ]);
@@ -1431,18 +1566,19 @@ export function createSubSessionLauncher(
                     `concurrency slot (the sub-session may still be running)`,
                 );
               }
-              if (notifySentCompletion || remote) {
+              if (notifySentCompletion || remote || reusing) {
                 notification = buildSentCompletionNotification(
                   sessionId,
                   subSessionName(info.name ?? info.prompt, false),
                   completion.result,
                   completion.stopReason,
                   remote ? boundWorkspace : undefined,
+                  completionTaskId,
                 );
               }
             } catch (err) {
               if (stopAc.signal.aborted && !targetStopped()) return;
-              if (!notifySentCompletion && !remote) return;
+              if (!notifySentCompletion && !remote && !reusing) return;
               const message = err instanceof Error ? err.message : String(err);
               notification = buildSentCompletionNotification(
                 sessionId,
@@ -1450,12 +1586,14 @@ export function createSubSessionLauncher(
                 message,
                 targetStopped() ? 'shutdown' : 'error',
                 remote ? boundWorkspace : undefined,
+                completionTaskId,
               );
             } finally {
               if (remote) {
                 drainAc.abort();
                 releaseOnce();
               }
+              releaseReusedClient();
             }
             if (!notification) return;
             try {
@@ -1491,6 +1629,7 @@ export function createSubSessionLauncher(
         return {
           sessionId,
           ...(remote ? { workspaceCwd: boundWorkspace } : {}),
+          ...(reusing ? { taskId: completionTaskId } : {}),
           ...(sub.parentSessionPersisted !== undefined
             ? { parentSessionPersisted: sub.parentSessionPersisted }
             : {}),
@@ -1520,6 +1659,7 @@ export function createSubSessionLauncher(
           lastEventId,
           firstTurnTimeoutMs,
           stopAc.signal,
+          reusing,
         );
         const { result, stopReason } = await Promise.race([
           firstTurn,
@@ -1536,11 +1676,13 @@ export function createSubSessionLauncher(
         };
       } finally {
         releaseOnce();
+        releaseReusedClient();
       }
     } catch (err) {
       // Spawn/admission/dispatch failure — surface it as the tool's error.
       releaseOnce();
       remote?.releaseCompletionSlot?.();
+      releaseReusedClient();
       // If the spawn succeeded but a later step failed (e.g. sendPrompt threw
       // synchronously), roll back the orphaned session so it doesn't leak a slot
       // in the bridge's session pool while this launch reports failure.
