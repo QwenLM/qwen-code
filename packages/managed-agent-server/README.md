@@ -1357,7 +1357,7 @@ persisted Runtime seeds and static Runtime credentials with AES-256-GCM. New
 writes use only the active key; reads select the exact key ID stored with the
 ciphertext. By default, local worker ownership is durable:
 the Broker registers every launch and a restarted Broker adopts the same live
-worker. This requires Linux and fails startup elsewhere; on such hosts set
+worker. This requires Linux or macOS; on other hosts set
 `QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS=false` together with
 `QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false` to keep
 worker ownership ephemeral (a restarted Broker then cannot adopt it). The state directory
@@ -1371,7 +1371,9 @@ state directory and worker command stable across Broker restarts. Shutdown and
 late lease discard detach from registered workers instead of killing them.
 `/etc/machine-id` must be nonempty and stable, and Linux must expose the PID
 and time namespaces (`/proc/self/ns/pid` and `/proc/self/ns/time`; the latter
-requires Linux 5.6 or newer with `CONFIG_TIME_NS`). An empty or malformed
+requires Linux 5.6 or newer with `CONFIG_TIME_NS`). On macOS the host identity
+is the `IOPlatformUUID` and the boot identity is `kern.bootsessionuuid`, with
+explicit `macos` namespace labels. An empty or malformed
 identity fails startup the same way as an absent one, naming both opt-out
 switches. The service
 manager must let workers survive a Broker exit: systemd's default
@@ -1390,10 +1392,10 @@ for it. Physical cleanup needs an evidence-preserving lifecycle;
 do not delete records to reclaim capacity.
 See the [adoption design](../../docs/design/2026-09-27-local-runtime-adoption.md).
 
-Trusted same-host Linux reboot recovery is also on by default. It requires
+Trusted same-host reboot recovery is also on by default on Linux and macOS. It requires
 durable local mode with the `local-process` provisioner, so a deployment that
 opts out of durable local workers or uses another provisioner must set
-`QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false`. A changed kernel boot ID on the original machine can prove
+`QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false`. A changed boot identity on the original machine (the kernel boot ID on Linux, the boot session UUID on the same macOS hardware) can prove
 that original local writers stopped; worker-only death still cannot. The
 service scans eight saved bindings every five seconds, independently of current
 Session grants, and clears only the original SQL holder after all execution
@@ -1555,7 +1557,7 @@ for record capacity and rewind semantics.
 
 ### Verified original-mount recovery (W1a)
 
-The current fresh 38-table baseline requires this physical mount guard for LOCAL tool and child Git execution in a trusted, single-host OpenJDK 21 `local-process` deployment on Linux or macOS with a persistent, unambiguous root birth time. Enable `QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED=true` and complete offline registration before admitting that work. Text-only Turns can run without registration; LOCAL tool acquisition fails with `409 workspace_unavailable` when the physical mapping is absent. Taking the next tool Turn after a Broker restart also requires `durable-local-process=true`. macOS requires `trusted-local-reboot-recovery=false` and supports same-boot adoption only. Linux whole-host restart succeeds only while the registered physical identity still matches. The shared V1 baseline stores registration, independent `mount_birth_time` and mount fence in `ma_storage` and `ma_storage_owner`. An unregistered mount is never registered from the directory found at startup.
+The current fresh 38-table baseline requires this physical mount guard for LOCAL tool and child Git execution in a trusted, single-host OpenJDK 21 `local-process` deployment on Linux or macOS with a persistent, unambiguous root birth time. Enable `QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED=true` and complete offline registration before admitting that work. Text-only Turns can run without registration; LOCAL tool acquisition fails with `409 workspace_unavailable` when the physical mapping is absent. Taking the next tool Turn after a Broker restart also requires `durable-local-process=true`. macOS supports same-boot adoption and, with trusted reboot recovery, whole-host reboot recovery on the same hardware; when a reboot changes the numeric device of a legacy registration, upgrade it with the offline `workspace-identity-reattest` maintenance flow described in the macOS storage identity section above. Linux whole-host restart succeeds only while the registered physical identity still matches. The shared V1 baseline stores registration, independent `mount_birth_time` and mount fence in `ma_storage` and `ma_storage_owner`. An unregistered mount is never registered from the directory found at startup.
 
 Marker v2 stores birth time as a canonical `Instant` string. Linux reads creation time, mtime, device and inode in one JDK `unix` attribute snapshot and rejects creation time at/before epoch or equal to mtime, which OpenJDK 21 may return when birth time is unsupported. A real Linux birth time equal to mtime is also conservatively refused; prepare the project layout or update the root's mtime offline before retrying. macOS reads native nanosecond birth time with `stat` and cross-checks its device/inode against the JDK canonical-directory snapshot, because JDK 21 truncates macOS birth time to seconds. A positive native macOS birth time is independent even when it equals mtime; fresh empty roots keep their original birth time. Mtime is not an identity field, and ordinary mtime changes do not invalidate an unchanged birth time. The marker contains an application-specific HMAC-SHA256 host ID with `Qwen-Code/verified-workspace/v2` as input. Its key is the trimmed machine-id UTF-8 bytes on Linux or the original `IOPlatformUUID` UTF-8 bytes on macOS; neither raw identity is stored in the marker.
 

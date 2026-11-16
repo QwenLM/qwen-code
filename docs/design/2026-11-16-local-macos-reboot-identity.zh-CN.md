@@ -28,7 +28,7 @@ macOS 原生读取器先解析 canonical 路径的 FileStore 设备，再从有�
 
 工具支持一个物理 owner 及其全部已完整登记的 alias。存在其他重叠 owner、清单不完整、活动 Runtime binding、执行成员、holder、上传、维护、journal writer lease 或未收敛生命周期操作时拒绝最终提升。在持久围栏保护下，retire 为每个精确原 generation 取得 claim，仅记录与保存的 seed、handle 和 lease 匹配的原生丢失与 writer-stop 证据。随后由 Broker 恢复执行既有的有界 abandonment/成员清理，再到达退休终态。工具不会通过改写 Runtime handle、seed、请求、凭据、lease、generation 或执行成员来伪造清理。
 
-工具验证 canonical 路径、host、inode 和出生时间未变，旧 worktree 锚点的 inode/创建时间未变，Git 登记精确匹配，存储/计划/完成 marker 的原字节完全一致。旧 worktree 锚点必须位于显式认定的卷。持久化 `STORAGE_MIGRATION` 操作，以 `same-path-identity-reattest/1` 请求子类型保存完整新旧清单和 marker 字节。在改文件前对现有 alias 和 owner 安装准入围栏。复用现有 schema 类型，无需重建 catalog。
+工具验证 canonical 路径、host、inode 和出生时间未变，旧 worktree 锚点的 inode/创建时间未变，Git 登记精确匹配，存储/计划/完成 marker 的原字节完全一致。旧 worktree 锚点必须位于显式认定的卷。二进制升级之后、重启之前创建的 worktree 在旧 owner 上已携带稳定锚点：plan 对照认定卷校验这些锚点，并原样保留其计划与完成记录，仅改写旧锚点。计划仍为旧格式、但完成记录已按稳定格式捕获的情形（升级后重试被中断的准备流程），升级计划锚点并保留完成记录字节。锚点指向其他卷，或稳定计划搭配旧完成记录时，拒绝。持久化 `STORAGE_MIGRATION` 操作，以 `same-path-identity-reattest/1` 请求子类型保存完整新旧清单和 marker 字节。在改文件前对现有 alias 和 owner 安装准入围栏。复用现有 schema 类型，无需重建 catalog。
 
 已提交且因 `hosted_harness_recovery_blocked` 停驻的 RUNNING Turn 可以在同路径身份修复时保留原状态，前提是全部原 Runtime 已退休，且没有 holder、执行成员或有效 journal writer。其他活动 Turn、待处理命令和生命周期操作仍阻塞提升。该例外不修改 Turn 或输入记录，也不授权重放；是否继续执行仍由普通 Harness 恢复决定。目录搬迁有不同约束，保留其既有的全部活动 Turn 拒绝规则。
 
@@ -44,7 +44,7 @@ macOS 原生读取器先解析 canonical 路径的 FileStore 设备，再从有�
 
 ## 验证与验收
 
-聚焦 Java 测试覆盖原生 UUID 解析和探测失败、数值设备号变化下稳定身份不变、不同 UUID/inode/出生时间拒绝、旧身份拒绝且不修改、每个 worktree 锚点和 Git 指针、实时数值文件身份、两个平台的可信重启证明、同 boot/跨平台拒绝以及已有逃逸 writer 保护。离线测试覆盖清单遗漏、活动 writer、字节冲突、每个 marker 边界后的重试、冲突请求 ID 和原请求/journal 不变。
+聚焦 Java 测试覆盖原生 UUID 解析和探测失败、数值设备号变化下稳定身份不变、不同 UUID/inode/出生时间拒绝、旧身份拒绝且不修改、每个 worktree 锚点和 Git 指针、实时数值文件身份、两个平台的可信重启证明、同 boot/跨平台拒绝以及已有逃逸 writer 保护。离线测试覆盖清单遗漏、活动 writer、字节冲突、每个 marker 边界后的重试、冲突请求 ID 和原请求/journal 不变。旧锚点与已稳定锚点混合的清单必须能够完成，且稳定记录逐字节原样保留，包括旧计划搭配已稳定完成记录的情形；指向其他卷的稳定锚点必须在安装任何围栏之前被拒绝。
 
 原会话验收要求：先证明旧 Runtime 已清理，完成离线重新认定，恢复查询允许新 Turn，并在同一会话、同一分支和保留修改的前提下提交并执行新 Turn。不重放已取消 Turn。此前提交超时和根因证据单独保留。Java 检查共享用户授权的 1,800 秒预算。本地不可用的真实 MySQL 8.4 和完整 Hosted/fault profile 仍为必须执行的 CI 检查；H2 不替代这些证据。
 
