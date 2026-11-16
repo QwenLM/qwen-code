@@ -454,15 +454,11 @@ final class AgentSessionAdmissions {
         SessionRecord parent = storeRows.requireSessionForUpdate(tenantId,
                 parentSessionId);
         if (parent.workspace() == null || residentWorkspaces.find(parent.workspace()) != null || !"ACTIVE".equals(parent.status())
-                || CsiFilesRetirementProfile.isProfile(parent.toolProfile())) {
+                || CsiFilesRetirementProfile.isProfile(parent.toolProfile())
+                || WorkspaceToolProfiles.EXTERNAL_FILES.equals(parent.toolProfile())) {
             throw new ManagedAgentException(409,
                     "child_parent_unavailable",
                     "The parent Session cannot admit a child.");
-        }
-        if (WorkspaceToolProfiles.EXTERNAL_FILES.equals(parent.toolProfile())) {
-            throw new ManagedAgentException(409,
-                    "child_parent_unavailable",
-                    "The external-files profile does not admit child Sessions.");
         }
         if (parent.publicChildAgentsVersion() == 1) {
             if (snapshot == null || !snapshot.path("version").isIntegralNumber() || !Set.of(1, 2).contains(snapshot.path("version").asInt()) || lineage.depth() != 1
