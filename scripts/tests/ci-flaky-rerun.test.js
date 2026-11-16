@@ -1297,6 +1297,11 @@ describe('ci flaky rerun patrol', () => {
       ['NPM_TO\rKEN=abc#realsecret99', 'NPM_TOKEN=[redacted]'],
       ['https://u\rser:p@ss@host', 'https://[redacted]@host'],
       ['Bea\rrer\rrealsecretvalue123', 'Bearer[redacted]'],
+      // Adversarial audit: a value carrying a structural terminator (} or a
+      // quote) or a URL password carrying # must not ship its tail either.
+      ['NPM_TO\rKEN=abc}realsecret99', 'NPM_TOKEN=[redacted]'],
+      ['NPM_TO\rKEN=abc"realsecret99', 'NPM_TOKEN=[redacted]'],
+      ['https://us\rer:p#ss@host', 'https://[redacted]@host'],
     ];
     for (const [input, expected] of cases) {
       const evidence = skillLog(`##[error]${input} done`);
@@ -1309,6 +1314,9 @@ describe('ci flaky rerun patrol', () => {
       ['NPM_TO\rKEN=abc#realsecret99', 'realsecret99'],
       ['https://u\rser:p@ss@host', 'p@ss'],
       ['Bea\rrer\rrealsecretvalue123', 'realsecretvalue123'],
+      ['NPM_TO\rKEN=abc}realsecret99', 'realsecret99'],
+      ['NPM_TO\rKEN=abc"realsecret99', 'realsecret99'],
+      ['https://us\rer:p#ss@host', 'p#ss'],
     ]) {
       expect(skillLog(`##[error]${input} done`), input).not.toContain(secret);
     }

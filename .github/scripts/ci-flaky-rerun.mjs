@@ -243,7 +243,10 @@ function redactLog(log) {
 //   - the URL scheme is length-bounded rather than lookbehind-bounded: a
 //     lookbehind refuses a start preceded by a digit (a welded `42https://…`),
 //     while the bound keeps the scan linear without refusing it. The userinfo
-//     is one-or-more @-segments so a password containing @ is fully redacted.
+//     is one-or-more @-segments, each a tempered token, so a password carrying
+//     @ or # is fully redacted while the marker still stops it. The env value
+//     likewise runs to whitespace only — not to a structural character like }
+//     or a quote — so a split-keyword value carrying one does not ship its tail.
 // Cookie:/Authorization: stay out: their value runs to the line end, so over
 // CR-free text they swallow the following line. A control inside the keyword
 // itself (`Coo\rkie:`) therefore escapes both passes.
@@ -271,9 +274,12 @@ function redactWeldedTokens(log) {
     .replace(/sk-(?:proj-)?[A-Za-z0-9-]{20,}/g, 'sk-[redacted]')
     .replace(/(?:AKIA|ASIA)[A-Z0-9]{16}/g, '[redacted]')
     .replace(/npm_[A-Za-z0-9]{20,}/g, '[redacted]')
-    .replace(/([a-z][a-z0-9+.-]{0,19}:\/\/)(?:[^/\s@#]+@)+/gi, '$1[redacted]@')
     .replace(
-      /(["']?)([A-Za-z_][A-Za-z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|AUTH|CREDENTIAL)[A-Za-z0-9_]*)(\1\s*[:=]\s*)["']?(?:(?!##\[error\])[^"',\s}])+["']?/gi,
+      /([a-z][a-z0-9+.-]{0,19}:\/\/)(?:(?:(?!##\[error\])[^/\s@])+@)+/gi,
+      '$1[redacted]@',
+    )
+    .replace(
+      /(["']?)([A-Za-z_][A-Za-z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|AUTH|CREDENTIAL)[A-Za-z0-9_]*)(\1\s*[:=]\s*)["']?(?:(?!##\[error\])[^\s])+["']?/gi,
       '$1$2$3[redacted]',
     );
 }
