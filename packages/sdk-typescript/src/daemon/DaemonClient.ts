@@ -5831,6 +5831,8 @@ export class DaemonClient {
         }
         return (await res.json()) as DaemonSkillToggleResult;
       },
+      undefined,
+      'rest',
     );
   }
 
@@ -5862,6 +5864,8 @@ export class DaemonClient {
         }
         return (await res.json()) as DaemonSkillBatchToggleResult;
       },
+      undefined,
+      'rest',
     );
   }
 
@@ -5885,6 +5889,7 @@ export class DaemonClient {
     return this.jsonRequest('/workspace/skills/install', 'Skill', {
       method: 'POST',
       body: request,
+      mode: 'rest',
     });
   }
 
@@ -5895,7 +5900,7 @@ export class DaemonClient {
     return this.jsonRequest(
       `/workspace/skills/${urlEncode(skillName)}?scope=${scope}`,
       'Skill',
-      { method: 'DELETE' },
+      { method: 'DELETE', mode: 'rest' },
     );
   }
 
@@ -9964,11 +9969,16 @@ export class WorkspaceDaemonClient {
     enabled: boolean,
     opts?: { clientId?: string },
   ): Promise<DaemonSkillToggleResult> {
-    return this.post(
+    return this.client.workspaceJsonRequest<DaemonSkillToggleResult>(
+      this.workspaceSelector,
       `/skills/${urlEncode(skillName)}/enable`,
       'POST /workspaces/:workspace/skills/:name/enable',
-      { enabled },
-      opts?.clientId,
+      {
+        method: 'POST',
+        body: { enabled },
+        clientId: opts?.clientId,
+        mode: 'rest',
+      },
     );
   }
 
@@ -9977,11 +9987,16 @@ export class WorkspaceDaemonClient {
     enabled: boolean,
     opts?: { clientId?: string },
   ): Promise<DaemonSkillBatchToggleResult> {
-    return this.post(
+    return this.client.workspaceJsonRequest<DaemonSkillBatchToggleResult>(
+      this.workspaceSelector,
       '/skills/enable',
       'POST /workspaces/:workspace/skills/enable',
-      { skillNames, enabled },
-      opts?.clientId,
+      {
+        method: 'POST',
+        body: { skillNames, enabled },
+        clientId: opts?.clientId,
+        mode: 'rest',
+      },
     );
   }
 

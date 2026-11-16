@@ -36,9 +36,12 @@ import type {
 import { AGENT_HOST_SESSION_SOURCE_TYPE } from '../../runtime/agent-session-source.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
+import type { ConversationRuntimeActivityGate } from '../conversations/conversation-runtime-activity.js';
 import {
   requireTrustedWorkspaceRuntime,
   resolveWorkspaceRuntimeWithLiveCompatibilityFromParam,
+  sendConversationRuntimeUnavailable,
+  sendDaemonDrainingError,
   sendGenerationClosedError,
   sendUntrustedWorkspaceResponse,
 } from '../workspace-route-runtime.js';
@@ -61,6 +64,10 @@ export interface RegisterGoalsRoutesDeps {
 
 export interface RegisterWorkspaceQualifiedGoalsRoutesDeps {
   workspaceRegistry: WorkspaceRegistry;
+  /** Required to list a live-conversation runtime: the listing must run
+   * inside the gate so a drain waits for it (and seals it with 503) instead
+   * of shutting the bridge down under an in-flight probe fan-out. */
+  conversationRuntimeActivity?: ConversationRuntimeActivityGate;
 }
 
 /**
@@ -249,15 +256,34 @@ export function registerWorkspaceQualifiedGoalsRoutes(
     );
     if (!runtime) return;
     if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
-    await respondWithGoals(res, {
-      workspaceCwd: runtime.workspaceCwd,
-      bridge: runtime.bridge,
-      ...(runtime.generationGuard
-        ? {
-            assertGenerationOpen: () => runtime.generationGuard?.assertOpen(),
-          }
-        : {}),
-      routeLabel: `GET /workspaces/${runtime.workspaceId}/goals`,
-    });
+    const listing = () =>
+      respondWithGoals(res, {
+        workspaceCwd: runtime.workspaceCwd,
+        bridge: runtime.bridge,
+        ...(runtime.generationGuard
+          ? {
+              assertGenerationOpen: () => runtime.generationGuard?.assertOpen(),
+            }
+          : {}),
+        routeLabel: `GET /workspaces/${runtime.workspaceId}/goals`,
+      });
+    if (runtime.provenance !== 'live-conversation') {
+      await listing();
+      return;
+    }
+    // Mirror the qualified scheduled-tasks surface: a Conversations listing
+    // runs inside the activity gate so sealAndWait() counts it, and a sealed
+    // gate answers the declared 503 instead of a partial probe page.
+    const gate = deps.conversationRuntimeActivity;
+    if (!gate) {
+      sendConversationRuntimeUnavailable(res);
+      return;
+    }
+    try {
+      await gate.run(listing);
+    } catch (err) {
+      if (sendDaemonDrainingError(res, err)) return;
+      throw err;
+    }
   });
 }
