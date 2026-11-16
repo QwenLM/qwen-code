@@ -44,7 +44,7 @@ export function createAlibabaThinkingCapabilities(): CustomProviderThinkingCapab
 export const BUILTIN_ALIBABA_MODELS: readonly CustomProviderModelRuntime[] = [
   {
     modelId: 'qwen3.8-max',
-    displayName: 'Qwen 3.8 Max',
+    displayName: 'Qwen3.8-Max',
     contextWindow: 1_000_000,
     maxOutputTokens: 32_000,
     capabilities: {

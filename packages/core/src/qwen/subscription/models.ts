@@ -44,14 +44,20 @@ interface SubscriptionModelSpec {
  */
 const KNOWN_MODELS: readonly SubscriptionModelSpec[] = [
   {
+    id: 'qwen4-max',
+    displayName: 'Qwen4-Max',
+    contextWindow: 1_000_000,
+    vision: true,
+  },
+  {
     id: 'qwen3.8-max',
-    displayName: 'Qwen 3.8 Max',
+    displayName: 'Qwen3.8-Max',
     contextWindow: 1_000_000,
     vision: true,
   },
   {
     id: 'qwen3.8-flash',
-    displayName: 'Qwen 3.8 Flash',
+    displayName: 'Qwen3.8-Flash',
     contextWindow: 1_000_000,
     vision: true,
   },

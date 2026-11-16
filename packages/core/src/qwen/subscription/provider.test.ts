@@ -329,3 +329,23 @@ describe('QwenSubscriptionProviderConfig', () => {
     }
   });
 });
+
+describe('qwenSubscriptionModel', () => {
+  it('maps known gateway ids to friendly display names', () => {
+    expect(qwenSubscriptionModel('qwen4-max').displayName).toBe('Qwen4-Max');
+    expect(qwenSubscriptionModel('qwen3.8-max').displayName).toBe(
+      'Qwen3.8-Max',
+    );
+    expect(qwenSubscriptionModel('unknown-model').displayName).toBe(
+      'unknown-model',
+    );
+  });
+
+  it('falls back to known metadata when the gateway omits it', () => {
+    const model = qwenSubscriptionModel('qwen4-max');
+    expect(model.capabilities.vision).toBe(true);
+    expect(model.capabilities.contextWindows).toEqual([{ tokens: 1_000_000 }]);
+    expect(model.limits.maxContextTokens).toBe(1_000_000);
+    expect(model.displayName).toBe('Qwen4-Max');
+  });
+});
