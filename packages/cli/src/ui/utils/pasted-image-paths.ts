@@ -18,11 +18,11 @@ const PASTED_IMAGE_EXTENSIONS = /\.(png|jpe?g|gif|webp|bmp)$/i;
  * own Ctrl+V handler. Recognizing those lets Cmd+V (terminal-driven) converge
  * on the same attachment UX as Ctrl+V. Mirrors Claude Code's usePasteHandler:
  * split on newlines and on spaces that precede an absolute path (spaces inside
- * a path are shell-escaped), then normalize each token. Those helpers inject
- * absolute paths, so a bare name such as `test.jpg` copied from a file manager
- * stays text.
+ * a path are shell-escaped), then normalize each token.
  *
- * @returns `imagePaths` (normalized absolute tokens with an image extension) and
+ * @returns `imagePaths` (normalized absolute tokens with an image extension;
+ *   helpers inject absolute paths, so a bare `test.jpg` copied from a file
+ *   manager stays text) and
  *   `allImages` (true only when every token is such a path), so the caller can
  *   promote a pure image-path paste without swallowing mixed text.
  */
