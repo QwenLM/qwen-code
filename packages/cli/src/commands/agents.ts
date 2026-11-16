@@ -4,13 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { commandMetadata } from './command-metadata.js';
 import type { CommandModule, Argv } from 'yargs';
 import { joinCommand } from './agents/join.js';
 import { sessionSendMcpCommand } from './agents/session-send-mcp.js';
 
 export const agentsCommand: CommandModule = {
-  command: 'agents',
-  describe: 'Session agents: join a coordinator as a runtime',
+  ...commandMetadata.agents,
   builder: (yargs: Argv) =>
     yargs
       .command(joinCommand)
