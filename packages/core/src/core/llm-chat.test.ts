@@ -15186,6 +15186,36 @@ describe('LlmChat', async () => {
       ).toBeUndefined();
     });
 
+    it.each([false, true])(
+      'records the full-compaction prefix during fast compression (attachment: %s)',
+      async (attachment) => {
+        pinFastCompressionIdleClear();
+        const compacted = await composePostCompactHistory([], 'Summary.', {
+          maxFiles: 0,
+          planModeActive: attachment,
+        });
+        const recordChatCompression = vi.fn();
+        const fastChat = newChat({
+          history: [...compacted, ...thoughtHistory()],
+          recorder: { recordChatCompression },
+        });
+        const result = fastChat.compressFast();
+        expect(result.info.compressionStatus).toBe(
+          CompressionStatus.COMPRESSED,
+        );
+        expect(recordChatCompression).toHaveBeenCalledOnce();
+        expect(recordChatCompression.mock.calls[0][0].summaryPrefixLength).toBe(
+          attachment ? 3 : 2,
+        );
+        expect(
+          recordChatCompression.mock.calls[0][0].compressedHistory.slice(
+            0,
+            compacted.length,
+          ),
+        ).toEqual(compacted);
+      },
+    );
+
     // Issue #9309: /compress-fast then /compress banners use two scales (API
     // count incl. system prompt + tools vs a history-only re-estimate), so
     // each exposes its estimated side instead of implying lost context.

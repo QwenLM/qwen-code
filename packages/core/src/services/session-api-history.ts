@@ -52,7 +52,10 @@ export function getRecordRewindId(record: ChatRecord): string | undefined {
  * turn's id but no prompt of its own.
  */
 function isPromptEntry(content: Content): boolean {
-  return !content.parts?.some((part) => part.functionResponse);
+  return (
+    content.role === 'user' &&
+    !content.parts?.some((part) => part.functionResponse)
+  );
 }
 
 /** Returns the unique matching prompt entry at or after `startIndex`, or -1. */

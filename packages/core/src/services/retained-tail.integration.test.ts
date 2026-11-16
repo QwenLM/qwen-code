@@ -393,30 +393,78 @@ describe('retained latest operation through compression', () => {
     );
   });
 
-  it('falls back when curation merges tool results with a separately owned prompt', async () => {
-    const tail = toolGroup();
-    markApiHistoryPrompt(tail[1], 'latest-prompt');
-    const followup = userText('Unrelated follow-up task.');
-    markApiHistoryPrompt(followup, 'followup-prompt');
-    const history = [...older(), ...tail, followup];
-    const { config, summarize } = setup(history);
-    const result = await new ChatCompressionService().compress(
-      new LlmChat(config, {}, history),
-      {
-        promptId: 'compress',
-        force: true,
-        config,
-        consecutiveFailures: 0,
-        originalTokenCount: 180_000,
-      },
-    );
+  it.each([false, true])(
+    'falls back when curation merges tool results with a separately owned prompt (owned model: %s)',
+    async (ownedModel) => {
+      const tail = toolGroup();
+      if (ownedModel) markApiHistoryPrompt(tail[0], 'latest-prompt');
+      markApiHistoryPrompt(tail[1], 'latest-prompt');
+      const followup = userText('Unrelated follow-up task.');
+      markApiHistoryPrompt(followup, 'followup-prompt');
+      const history = [...older(), ...tail, followup];
+      const { config, summarize } = setup(history);
+      const result = await new ChatCompressionService().compress(
+        new LlmChat(config, {}, history),
+        {
+          promptId: 'compress',
+          force: true,
+          config,
+          consecutiveFailures: 0,
+          originalTokenCount: 180_000,
+        },
+      );
 
-    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
-    expect(result.info.summaryPrefixLength).toBe(result.newHistory!.length);
-    expect(JSON.stringify(summarize.mock.calls[0][1].contents)).toContain(
-      'Unrelated follow-up task.',
-    );
-  });
+      expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      expect(result.info.summaryPrefixLength).toBe(result.newHistory!.length);
+      expect(JSON.stringify(summarize.mock.calls[0][1].contents)).toContain(
+        'Unrelated follow-up task.',
+      );
+      const envelope = {
+        sessionId: 'session',
+        timestamp: '2026-11-13T00:00:00Z',
+        cwd: '/tmp',
+        version: 'test',
+      };
+      const records: ChatRecord[] = history.map((message, index) => ({
+        ...envelope,
+        uuid: String(index),
+        parentUuid: index ? String(index - 1) : null,
+        type: message.role === 'model' ? 'assistant' : 'user',
+        message,
+        promptId: getApiHistoryPromptId(message),
+      }));
+      records.push({
+        ...envelope,
+        uuid: 'checkpoint',
+        parentUuid: records.at(-1)!.uuid,
+        type: 'system',
+        subtype: 'chat_compression',
+        systemPayload: {
+          compressedHistory: result.newHistory!,
+          summaryPrefixLength: result.info.summaryPrefixLength,
+          promptIds: result.newHistory!.map(
+            (entry) => getApiHistoryPromptId(entry) ?? null,
+          ),
+          info: result.info,
+        },
+      });
+      const { records: kept } = deleteTranscriptMessageGroups(
+        records,
+        [String(history.length - 1)],
+        {
+          ...envelope,
+          uuid: 'deleted',
+          parentUuid: null,
+          type: 'system',
+        },
+      );
+      const restored = buildApiHistoryFromConversation({ messages: kept });
+      expect(JSON.stringify(restored)).not.toContain(
+        'Unrelated follow-up task.',
+      );
+      expect(JSON.stringify(restored)).toContain(summary);
+    },
+  );
 
   it('resolves the latest owner before curation coalesces adjacent prompts', async () => {
     const history = older();
