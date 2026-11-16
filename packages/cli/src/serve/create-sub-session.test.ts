@@ -21,6 +21,10 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
 import {
+  upsertSessionPr,
+  writeSessionPrs,
+} from '@qwen-code/qwen-code-core/services/session-pr-service.js';
+import {
   sessionTitleSidecarPath,
   writeSessionTitleSidecar,
 } from '@qwen-code/qwen-code-core/services/session-title-sidecar.js';
@@ -2669,6 +2673,10 @@ describe('sub-sessions in another workspace', () => {
     'manual title sidecar',
     'unreadable title sidecar',
     'organized',
+    'PR binding',
+    'archived PR binding',
+    'unreadable PR binding',
+    'empty PR binding',
     'unreadable organization',
     'malformed organization',
     'user',
@@ -2687,6 +2695,16 @@ describe('sub-sessions in another workspace', () => {
       try {
         const service = new SessionService(WS_B, { runtimeBaseDir });
         const transcript = service.getSessionTranscriptPath(sessionId);
+        const prBindingState =
+          state === 'archived PR binding'
+            ? 'archived'
+            : state === 'PR binding' ||
+                state === 'unreadable PR binding' ||
+                state === 'empty PR binding'
+              ? 'active'
+              : undefined;
+        const hasAutoTitle =
+          state === 'auto title' || prBindingState !== undefined;
         const startupId = randomUUID();
         const startup = {
           uuid: startupId,
@@ -2714,15 +2732,13 @@ describe('sub-sessions in another workspace', () => {
           subtype: 'custom_title',
           systemPayload: {
             customTitle: 'Child name',
-            titleSource: state === 'auto title' ? 'auto' : 'manual',
+            titleSource: hasAutoTitle ? 'auto' : 'manual',
           },
         };
         const records = [
           startup,
           ...(state === 'user' ? [user] : []),
-          ...(state === 'auto title' || state === 'manual title'
-            ? [title]
-            : []),
+          ...(hasAutoTitle || state === 'manual title' ? [title] : []),
         ];
         const history =
           records.map((record) => JSON.stringify(record)).join('\n') +
@@ -2734,17 +2750,39 @@ describe('sub-sessions in another workspace', () => {
           path.dirname(transcript),
           sessionId,
         );
-        if (state === 'auto title' || state === 'manual title sidecar') {
+        if (hasAutoTitle || state === 'manual title sidecar') {
           expect(
             writeSessionTitleSidecar(
               titleSidecar,
               'Child name',
-              state === 'auto title' ? 'auto' : 'manual',
+              hasAutoTitle ? 'auto' : 'manual',
             ),
           ).toBe(true);
         }
         if (state === 'unreadable title sidecar') {
           await writeFile(titleSidecar, '{');
+        }
+        let savedPrBinding: { filePath: string; contents: string } | undefined;
+        if (prBindingState) {
+          const filePath = service.getPrSessionPathForArchiveState(
+            sessionId,
+            prBindingState,
+          );
+          if (state === 'unreadable PR binding') {
+            await writeFile(filePath, '{');
+          } else if (state === 'empty PR binding') {
+            await writeSessionPrs(filePath, []);
+          } else {
+            await upsertSessionPr(filePath, {
+              number: 23,
+              url: 'https://github.com/example/example/pull/23',
+              source: 'create',
+            });
+          }
+          savedPrBinding = {
+            filePath,
+            contents: await readFile(filePath, 'utf8'),
+          };
         }
         const preserveTitle =
           state === 'manual title sidecar' ||
@@ -2830,8 +2868,12 @@ describe('sub-sessions in another workspace', () => {
         }
 
         expect(b.kills).toEqual([]);
+        const removed =
+          state === 'startup' ||
+          state === 'auto title' ||
+          state === 'empty PR binding';
         const read = readFile(transcript, 'utf8');
-        if (state !== 'startup' && state !== 'auto title') {
+        if (!removed) {
           await expect(read).resolves.toBe(history);
           expect(b.bridge.markSessionCatalogChanged).not.toHaveBeenCalled();
         } else {
@@ -2843,7 +2885,7 @@ describe('sub-sessions in another workspace', () => {
             (await organization.readSnapshot()).sessions.get(sessionId),
           ).toEqual(previousOrganization);
         }
-        if (state === 'auto title') {
+        if (hasAutoTitle && removed) {
           await expect(readFile(titleSidecar)).rejects.toMatchObject({
             code: 'ENOENT',
           });
@@ -2852,6 +2894,14 @@ describe('sub-sessions in another workspace', () => {
           await expect(readFile(titleSidecar, 'utf8')).resolves.toBe(
             previousTitle,
           );
+        }
+        if (savedPrBinding) {
+          const binding = readFile(savedPrBinding.filePath, 'utf8');
+          if (removed) {
+            await expect(binding).rejects.toMatchObject({ code: 'ENOENT' });
+          } else {
+            await expect(binding).resolves.toBe(savedPrBinding.contents);
+          }
         }
       } finally {
         await rm(runtimeBaseDir, { force: true, recursive: true });

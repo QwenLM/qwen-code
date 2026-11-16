@@ -75,7 +75,10 @@ import {
   type RebuiltSessionArtifactSnapshot,
 } from './session-artifact-persistence.js';
 import { SessionOrganizationService } from './session-organization-service.js';
-import { moveSessionPrSidecar } from './session-pr-service.js';
+import {
+  moveSessionPrSidecar,
+  readSessionPrsDetailed,
+} from './session-pr-service.js';
 import {
   moveSessionTitleSidecar,
   readSessionTitleSidecar,
@@ -3958,6 +3961,17 @@ export class SessionService {
           (await organization.hasStoredSessionOrganization(sessionId)) !== false
         ) {
           return false;
+        }
+        for (const state of ['active', 'archived'] as const) {
+          const bindings = await readSessionPrsDetailed(
+            this.getPrSessionPathForState(sessionId, state),
+          );
+          if (
+            bindings.status === 'invalid' ||
+            (bindings.status === 'ok' && bindings.prs.length > 0)
+          ) {
+            return false;
+          }
         }
       }
       if (
