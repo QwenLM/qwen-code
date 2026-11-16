@@ -5,10 +5,7 @@
  */
 
 import {
-<<<<<<< HEAD
-=======
   chmodSync,
->>>>>>> origin/main
   mkdtempSync,
   rmSync,
   statSync,
@@ -312,8 +309,6 @@ describe('ManagedDingtalkStateStore', () => {
     expect(statSync(s.file).mode & 0o777).toBe(0o600);
     expect(statSync(s.directory).mode & 0o777).toBe(0o700);
   });
-<<<<<<< HEAD
-=======
 
   it('preserves the fs error on cause when the save fails (R1-3)', () => {
     const s = store();
@@ -335,5 +330,4 @@ describe('ManagedDingtalkStateStore', () => {
       chmodSync(s.directory, 0o700);
     }
   });
->>>>>>> origin/main
 });

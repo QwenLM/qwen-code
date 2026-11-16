@@ -167,10 +167,7 @@ export class ManagedDingtalkAdapter {
   private loggedNoClaimSlot = false;
   private loggedAcceptFailure = false;
   private loggedNoReplyTarget = false;
-<<<<<<< HEAD
-=======
   private loggedSettleFailure = false;
->>>>>>> origin/main
 
   constructor(options: ManagedDingtalkAdapterOptions) {
     this.settings = dingtalkSettings(options.config);
@@ -265,10 +262,7 @@ export class ManagedDingtalkAdapter {
       this.loggedNoClaimSlot = false;
       this.loggedAcceptFailure = false;
       this.loggedNoReplyTarget = false;
-<<<<<<< HEAD
-=======
       this.loggedSettleFailure = false;
->>>>>>> origin/main
       this.registeredGeneration = undefined;
       this.stream = this.deps.createStreamClient(
         this.settings,
@@ -356,11 +350,7 @@ export class ManagedDingtalkAdapter {
       if (!this.loggedAcceptFailure) {
         this.loggedAcceptFailure = true;
         this.log(
-<<<<<<< HEAD
-          `Managed DingTalk could not durably accept message ${messageId}: ${String(error)}; it is left unacked for redelivery.`,
-=======
           `Managed DingTalk could not durably accept message ${messageId}: ${persistErrorText(error)}; it is left unacked for redelivery.`,
->>>>>>> origin/main
         );
       }
       return false;

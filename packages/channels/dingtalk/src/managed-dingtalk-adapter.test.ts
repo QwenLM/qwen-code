@@ -2079,8 +2079,6 @@ describe('managed DingTalk settings pins (#17173 R2-11)', () => {
     ).toThrow(/pairing/);
   });
 });
-<<<<<<< HEAD
-=======
 
 describe('managed DingTalk persist-failure guards (#17173 R10)', () => {
   type StoreLike = {
@@ -2481,4 +2479,3 @@ describe('managed DingTalk persist-failure guards (#17173 R10)', () => {
     await adapter.disconnect();
   });
 });
->>>>>>> origin/main
