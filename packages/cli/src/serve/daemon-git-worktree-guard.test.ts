@@ -839,6 +839,142 @@ describe('createDaemonToolGuard', () => {
     },
   );
 
+  it.runIf(bashSemanticsLane).each([
+    [
+      'bundled -Oc',
+      () =>
+        `bash -Oc lastpipe 'true | cd ${cmdPath(outsideRepo)}; git reset --hard'`,
+    ],
+    [
+      'bundled -cO',
+      () =>
+        `bash -cO lastpipe 'true | cd ${cmdPath(outsideRepo)}; git reset --hard'`,
+    ],
+    [
+      'bundled -lcO',
+      () =>
+        `bash -lcO lastpipe 'true | cd ${cmdPath(outsideRepo)}; git reset --hard'`,
+    ],
+    [
+      'options after -c',
+      () =>
+        `bash -c -O lastpipe 'true | cd ${cmdPath(outsideRepo)}; git reset --hard'`,
+    ],
+    [
+      'payload after tracing option',
+      () => `bash -c -x 'git -C ${cmdPath(outsideRepo)} reset --hard'`,
+    ],
+    [
+      'startup script',
+      () =>
+        `BASH_ENV=/guard-startup bash -c 'true | cd ${cmdPath(outsideRepo)}; git reset --hard'`,
+    ],
+    [
+      'env startup script',
+      () =>
+        `env BASH_ENV=/guard-startup bash -c 'true | cd ${cmdPath(outsideRepo)}; git reset --hard'`,
+    ],
+    [
+      'input process substitution',
+      () => `cat < <(cd ${cmdPath(outsideRepo)}; git reset --hard)`,
+    ],
+    [
+      'output process substitution',
+      () => `cat > >(cd ${cmdPath(outsideRepo)}; git reset --hard)`,
+    ],
+    [
+      'arithmetic fallback',
+      () => `echo $((1); cd ${cmdPath(outsideRepo)}; git reset --hard)`,
+    ],
+    [
+      'ANSI-C comment',
+      () => `echo $'a\\'b # c'; git -C ${cmdPath(outsideRepo)} reset --hard`,
+    ],
+    [
+      'ANSI-C separator',
+      () => `echo $'It\\'s done'; cd ${cmdPath(outsideRepo)}\ngit reset --hard`,
+    ],
+    [
+      'comment inside substitution',
+      () =>
+        `echo "$(echo x # <<EOF)"\n)"\ngit -C ${cmdPath(outsideRepo)} reset --hard`,
+    ],
+    [
+      'legacy arithmetic substitution',
+      () =>
+        `cd ${cmdPath(outsideRepo)}\necho $[ $(cat <<EOF >/dev/null) + 1 ]\ncd ${cmdPath(effectiveCwd)}\nEOF\ngit reset --hard`,
+    ],
+    [
+      'array shift assignment',
+      () => `x[1<<2]=v\ngit -C ${cmdPath(outsideRepo)} reset --hard`,
+    ],
+    [
+      'second quoted shell heredoc',
+      () =>
+        `cat <<A; bash <<'EOF'\nx\nA\ngit -C ${cmdPath(outsideRepo)} reset --hard\nEOF`,
+    ],
+    [
+      'second unquoted shell heredoc',
+      () =>
+        `cat <<A; bash <<EOF\nx\nA\ngit -C ${cmdPath(outsideRepo)} reset --hard\nEOF`,
+    ],
+    [
+      'background AND list',
+      () =>
+        `cd ${cmdPath(outsideRepo)}\neval 'cd ${cmdPath(effectiveCwd)} && true &'\ngit reset --hard`,
+    ],
+    [
+      'background OR list',
+      () =>
+        `cd ${cmdPath(outsideRepo)}\neval 'cd ${cmdPath(effectiveCwd)} || true &'\ngit reset --hard`,
+    ],
+    [
+      'background list with foreground tail',
+      () =>
+        `cd ${cmdPath(outsideRepo)}\neval 'cd ${cmdPath(effectiveCwd)} && true & echo done'\ngit reset --hard`,
+    ],
+    [
+      'foreground eval before background tail',
+      () => `eval 'cd ${cmdPath(outsideRepo)}; true &'\ngit reset --hard`,
+    ],
+  ] as const)(
+    'keeps executable shell boundaries visible: %s',
+    async (_name, build) => {
+      await expect(
+        createDaemonToolGuard()(request(build())),
+      ).resolves.toMatchObject({
+        allowed: false,
+      });
+    },
+  );
+
+  it
+    .runIf(bashSemanticsLane)
+    .each(['${x:B}', '${x:${B}}', '${arr[B]}', '${#arr[B]}', '$[E]'])(
+    'refuses nonliteral arithmetic operands in a heredoc: %s',
+    async (value) => {
+      await expect(
+        createDaemonToolGuard()(request(`cat <<EOF\n${value}\nEOF`)),
+      ).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining('unquoted heredoc body'),
+      });
+    },
+  );
+
+  it
+    .runIf(bashSemanticsLane)
+    .each([
+      `cat <<EOF\n\${x:1:2}\n\${arr[1+2]}\n\${arr[@]}\n$[1+2]\nEOF`,
+      `bash -c -O extglob 'echo ok'`,
+      `BASH_ENV= bash -c 'echo ok'`,
+      `echo $'a\\'b # c'`,
+    ])('preserves literal shell boundary controls: %s', async (command) => {
+    await expect(createDaemonToolGuard()(request(command))).resolves.toEqual({
+      allowed: true,
+    });
+  });
+
   it.runIf(bashSemanticsLane)(
     'reads a substitution heredoc body before the enclosing line body',
     async () => {

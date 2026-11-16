@@ -18,6 +18,8 @@ import type { ShellType } from '@qwen-code/qwen-code-core';
 import {
   decodeAnsiCBytes,
   decodeAnsiCEscape,
+  findLiteralArithmeticExpansionEnd,
+  isLiteralShellArithmetic,
 } from '@qwen-code/qwen-code-core/utils/shell-utils.js';
 import {
   EXTERNAL_TOOL_GUARD_MAX_DENIAL_REASON_CHARS,
@@ -119,6 +121,8 @@ const GIT_WORK_TREE_ENV_KEYS = new Set(['GIT_INDEX_FILE', 'GIT_WORK_TREE']);
 // blob there, and `GIT_CONFIG_GLOBAL=<outside>/cfg` makes git read that
 // file — enough to point `core.hooksPath` outside.
 const GIT_UNRESOLVABLE_ENV_KEYS = new Set([
+  'BASH_ENV',
+  'ENV',
   'GIT_ALTERNATE_OBJECT_DIRECTORIES',
   'GIT_ASKPASS',
   'GIT_CONFIG',
@@ -141,7 +145,6 @@ const GIT_UNRESOLVABLE_ENV_KEYS = new Set([
 const GIT_NUMBERED_CONFIG_ENV_PATTERN = /^GIT_CONFIG_(KEY|VALUE)_\d+$/;
 
 const SHELL_WRAPPER_PROGRAMS = new Set(['bash', 'dash', 'ksh', 'sh', 'zsh']);
-const SHELL_WRAPPER_VALUE_FLAGS = new Set(['-o', '-O']);
 
 // Windows shells whose own grammar parses whatever follows them — caret and
 // `%…%`/`!…!` rewriting (cmd.exe), backticks, here-strings, `-EncodedCommand`
@@ -176,22 +179,10 @@ const POWERSHELL_ENV_MUTATION_PATTERNS = [
   /^\[Environment\]::SetEnvironmentVariable\s*\(/i,
 ];
 
-// `-c` bundled inside short flags (`bash -lc 'cmd'`) still consumes the next
-// argv entry as the payload. `-o`/`-O` take values, so either one earlier in
-// the bundle consumes the rest of it and `-c` is not present.
+// A quoted payload may be fused into a bundled `-c` option word.
 function shellBundleRequestsCommand(flag: string): boolean {
   if (!flag.startsWith('-') || flag.startsWith('--')) return false;
   return flag.slice(1).includes('c');
-}
-
-/** How many argv entries the value-taking flags before `c` consume. */
-function shellBundleValueFlagsBeforeCommand(flag: string): number {
-  let consumed = 0;
-  for (const character of flag.slice(1)) {
-    if (character === 'c') return consumed;
-    if (character === 'o' || character === 'O') consumed++;
-  }
-  return consumed;
 }
 
 const ENV_CHDIR_FLAGS = new Set(['-C', '--chdir']);
@@ -766,6 +757,7 @@ function tokenizeSegment(
       continue;
     }
     if (SUBSHELL_OPENING_OPERATORS.has(op)) {
+      redirectOperand = false;
       depth++;
       runs.push({ tokens: [], depth });
       continue;
@@ -897,6 +889,13 @@ function recordEnvAssignment(token: GuardToken, state: PrefixState): void {
     process.platform === 'win32' && getShellConfiguration().shell !== 'bash'
       ? rawKey.toUpperCase()
       : rawKey;
+  if (key === 'BASH_ENV' || key === 'ENV') {
+    const value = token.text.slice(token.text.indexOf('=') + 1);
+    if (!token.dynamic && !isAppendAssignment(token.text) && value === '')
+      return;
+    state.unresolved = true;
+    return;
+  }
   if (
     GIT_PROGRAM_ENV_KEYS.has(key) ||
     GIT_UNRESOLVABLE_ENV_KEYS.has(key) ||
@@ -1168,95 +1167,50 @@ function nextArgvIndex(run: GuardToken[], from: number): number {
   return index;
 }
 
-// `-O lastpipe` / `-o lastpipe` on the wrapper's argv arms lastpipe for the
-// payload shell; a dynamic option value could carry it unreadably.
-function shellArgvArmsLastpipe(run: GuardToken[], start: number): boolean {
-  for (let index = start + 1; index < run.length; index++) {
-    const token = run[index]!;
-    if (token.text === '-c') break;
-    if (token.text === '-O' || token.text === '-o') {
-      const valueIndex = nextArgvIndex(run, index + 1);
-      const value = run[valueIndex];
-      if (value === undefined || value.dynamic) return true;
-      if (value.text === 'lastpipe') return true;
-      index = valueIndex;
-      continue;
-    }
-    if (token.dynamic) return true;
-    if (shellBundleRequestsCommand(token.text)) break;
-  }
-  return false;
-}
-
+// `-c` selects command mode but does not end option parsing. Keep option
+// values and the payload on the same argv walk, including short-flag bundles.
 function consumeShellWrapper(
   run: GuardToken[],
   start: number,
 ): ShellWrapperScan {
-  let index = start + 1;
+  let index = nextArgvIndex(run, start + 1);
+  let commandMode = false;
+  let armsLastpipe = false;
   while (index < run.length) {
     const token = run[index]!;
-    if (token.text === '-c') {
-      const payloadToken = run[nextArgvIndex(run, index + 1)];
-      if (payloadToken === undefined) {
-        // `sh -c` with no payload executes nothing.
-        return { kind: 'static', payload: '' };
-      }
-      if (payloadToken.dynamic) return { kind: 'dynamic' };
-      return {
-        kind: 'static',
-        payload: payloadToken.text,
-        armsLastpipe: shellArgvArmsLastpipe(run, start),
-      };
+    if (token.dynamic) return { kind: 'dynamic' };
+    if (token.text === '--' || token.text === '-') {
+      index = nextArgvIndex(run, index + 1);
+      break;
     }
-    if (token.dynamic) {
-      // `bash -c$CMD`, `bash $A "$P"`: any unreadable word in a shell's argv
-      // can be the `-c` that carries the command, so the wrapper as a whole
-      // is undecidable rather than absent.
-      return { kind: 'dynamic' };
-    }
-    if (shellBundleRequestsCommand(token.text)) {
-      const remainder = token.text.slice(token.text.indexOf('c') + 1);
-      // A remainder of nothing but letters is more short options (`-cx`,
-      // `-co`), which POSIX shells parse as flags and then take the payload
-      // from a later argv entry — `-o`/`-O` among them consumes one first.
-      // Anything else is a payload fused into the token (`bash -c'cmd'`); a
-      // pure-letter remainder cannot hide a relocation either way.
-      if (remainder.length > 0 && !/^[A-Za-z]+$/.test(remainder)) {
-        return {
-          kind: 'static',
-          payload: remainder,
-          armsLastpipe: shellArgvArmsLastpipe(run, start),
-        };
-      }
-      let payloadIndex = nextArgvIndex(run, index + 1);
-      // `-o`/`-O` on either side of the `c` each consume one argv entry
-      // before the command string.
-      let toSkip =
-        shellBundleValueFlagsBeforeCommand(token.text) +
-        (remainder.match(/[oO]/g)?.length ?? 0);
-      while (toSkip-- > 0) {
-        payloadIndex = nextArgvIndex(run, payloadIndex + 1);
-      }
-      const payloadToken = run[payloadIndex];
-      if (payloadToken === undefined) {
-        return { kind: 'static', payload: '' };
-      }
-      if (payloadToken.dynamic) return { kind: 'dynamic' };
-      return {
-        kind: 'static',
-        payload: payloadToken.text,
-        armsLastpipe: shellArgvArmsLastpipe(run, start),
-      };
-    }
-    if (token.text.startsWith('+')) {
-      index++;
+    if (token.text.startsWith('--')) {
+      index = nextArgvIndex(run, index + 1);
       continue;
     }
-    if (!token.text.startsWith('-')) return { kind: 'none' };
-    if (token.text === '--') return { kind: 'none' };
-    index += SHELL_WRAPPER_VALUE_FLAGS.has(token.text) ? 2 : 1;
+    if (!token.text.startsWith('-') && !token.text.startsWith('+')) break;
+    if (shellBundleRequestsCommand(token.text)) {
+      const remainder = token.text.slice(token.text.indexOf('c') + 1);
+      if (remainder.length > 0 && !/^[A-Za-z]+$/.test(remainder)) {
+        return { kind: 'static', payload: remainder, armsLastpipe };
+      }
+    }
+    let nextIndex = nextArgvIndex(run, index + 1);
+    for (const flag of token.text.slice(1)) {
+      if (flag === 'c') commandMode = token.text.startsWith('-');
+      if (flag !== 'o' && flag !== 'O') continue;
+      const value = run[nextIndex];
+      if (value === undefined || value.dynamic) return { kind: 'dynamic' };
+      if (token.text.startsWith('-') && value.text === 'lastpipe') {
+        armsLastpipe = true;
+      }
+      nextIndex = nextArgvIndex(run, nextIndex + 1);
+    }
+    index = nextIndex;
   }
-  return { kind: 'none' };
+  if (!commandMode) return { kind: 'none' };
+  const payload = run[index];
+  if (payload?.dynamic) return { kind: 'dynamic' };
+  return { kind: 'static', payload: payload?.text ?? '', armsLastpipe };
 }
 
 type RunAnalysis =
@@ -2380,6 +2334,9 @@ interface HeredocMarker {
   readonly stripTabs: boolean;
   readonly startIndex: number;
   readonly endIndex: number;
+  // Program word feeding the heredoc; when it executes stdin the body is
+  // code, not data, and must stay visible even if the delimiter is quoted.
+  readonly receiver?: string;
 }
 
 interface HeredocScanState {
@@ -2483,12 +2440,103 @@ function skipLegacyArithmetic(
       cursor += 2;
       continue;
     }
+    // A command substitution inside `$[ … ]` carries its own heredoc; its
+    // brackets are not arithmetic nesting. Descend so a marker inside is
+    // registered, mirroring the parenthesized-arithmetic path.
+    if (line[cursor] === '$' && line[cursor + 1] === '(') {
+      const end = findSubstitutionEnd(line, cursor + 2);
+      if (end === -1) {
+        state.legacyArithmeticDepth = depth;
+        return line.length;
+      }
+      const body = line.slice(cursor + 2, end);
+      const inherited = state.pendingMarkers?.splice(0) ?? [];
+      const nested = findHeredocMarkers(body, state);
+      if (nested === null) {
+        state.pendingMarkers?.push(...inherited);
+        state.legacyArithmeticDepth = depth;
+        return line.length;
+      }
+      for (const marker of nested) {
+        state.pendingMarkers?.push({
+          ...marker,
+          startIndex: marker.startIndex + cursor + 2,
+          endIndex: marker.endIndex + cursor + 2,
+        });
+      }
+      state.pendingMarkers?.push(...inherited);
+      cursor = end + 1;
+      continue;
+    }
     if (line[cursor] === '[') depth++;
     else if (line[cursor] === ']' && --depth === 0) break;
     cursor++;
   }
   state.legacyArithmeticDepth = depth;
   return cursor;
+}
+
+// `<<` inside a subscripted assignment `arr[expr]=v` is a shift operator, not
+// a heredoc marker. Return the index of the subscript's closing `]`, or -1 if
+// the word is not such an assignment.
+function subscriptAssignmentClose(line: string, start: number): number {
+  const assignment = /^([A-Za-z_][A-Za-z0-9_]*)\[/.exec(line.slice(start));
+  if (!assignment) return -1;
+  let depth = 1;
+  let cursor = start + assignment[0].length;
+  for (; cursor < line.length; cursor++) {
+    if (line[cursor] === '\\') {
+      cursor++;
+      continue;
+    }
+    if (line[cursor] === '[') depth++;
+    else if (line[cursor] === ']' && --depth === 0) break;
+  }
+  if (depth !== 0) return -1;
+  return /^\+?=/.test(line.slice(cursor + 1)) ? cursor : -1;
+}
+
+// A shell or interpreter reading a heredoc runs the body as a script, so the
+// delimiter's quoting cannot make it inert. The daemon's POSIX text model
+// does not follow into that child, so the body must stay visible to the later
+// stages instead of being stripped as data.
+const STDIN_EXECUTING_PROGRAMS = new Set([
+  'bash',
+  'sh',
+  'dash',
+  'zsh',
+  'ksh',
+  'ash',
+  'python',
+  'python2',
+  'python3',
+  'node',
+  'perl',
+  'ruby',
+]);
+
+// The program word feeding a heredoc marker: the first word of the command
+// segment the marker belongs to, skipping leading keywords, assignments and
+// redirect operands. Returns undefined when it cannot be read statically.
+function heredocReceiver(
+  line: string,
+  markerIndex: number,
+): string | undefined {
+  let start = 0;
+  for (let i = markerIndex - 1; i >= 0; i--) {
+    const ch = line[i]!;
+    if (ch === ';' || ch === '|' || ch === '&' || ch === '\n' || ch === '(') {
+      start = i + 1;
+      break;
+    }
+  }
+  const segment = line.slice(start, markerIndex);
+  const tokens = tokenizeSegment(segment, 0);
+  if (!tokens) return undefined;
+  const run = tokens.runs[0];
+  if (!run) return undefined;
+  const program = runFromProgramWord(run.tokens)[0];
+  return program ? executableBaseName(program) : undefined;
 }
 
 function parseHeredocDelimiter(
@@ -2723,6 +2771,14 @@ function findHeredocMarkers(
       wordStart = false;
       continue;
     }
+    if (!state.single && !state.double && wordStart) {
+      const close = subscriptAssignmentClose(line, index);
+      if (close !== -1) {
+        index = close;
+        wordStart = false;
+        continue;
+      }
+    }
     if (!state.single && character === '$' && next === '(') {
       if (line[index + 2] === '(') {
         index = skipParenthesizedArithmetic(line, index, state);
@@ -2764,15 +2820,12 @@ function findHeredocMarkers(
       !state.single &&
       !state.double &&
       !state.backtick &&
-      state.substitution === 0 &&
       state.arithmeticDepth === 0 &&
       state.legacyArithmeticDepth === 0 &&
       character === '#' &&
       wordStart
     ) {
-      // The rest of the line is a comment; no later marker can start.
-      // Inside a substitution or arithmetic body a `#` is data (or a
-      // length/parameter operator), not a comment — bash keeps parsing.
+      // Command substitutions have their own ordinary shell comments.
       if (state.pendingMarkers?.length)
         found.push(...state.pendingMarkers.splice(0));
       return found;
@@ -2805,6 +2858,7 @@ function findHeredocMarkers(
         stripTabs,
         startIndex: index,
         endIndex: parsed.nextIndex,
+        receiver: heredocReceiver(line, index),
       });
       index = parsed.nextIndex - 1;
       wordStart = false;
@@ -2901,13 +2955,22 @@ function parameterExpansionMutates(inner: string): boolean {
   if (!name) return true;
   cursor += name[0].length;
   if (inner[cursor] === '[') {
-    // The subscript's own content is checked by the caller's recursive scan;
-    // here just step past it.
     const close = inner.indexOf(']', cursor + 1);
     if (close === -1) return true;
+    const subscript = inner.slice(cursor + 1, close);
+    if (
+      subscript !== '@' &&
+      subscript !== '*' &&
+      !isLiteralShellArithmetic(subscript)
+    ) {
+      return true;
+    }
     cursor = close + 1;
   }
   const rest = inner.slice(cursor);
+  if (rest.startsWith(':') && !/^:[-+=?]/.test(rest)) {
+    return !isLiteralShellArithmetic(rest.slice(1));
+  }
   return rest.startsWith('=') || rest.startsWith(':=') || rest.startsWith('@P');
 }
 
@@ -2927,31 +2990,10 @@ function expansionCanExecute(text: string): boolean {
     }
     if (character === '`') return true;
     if (character !== '$') continue;
-    if (next === '(') {
-      if (text[index + 2] !== '(') return true;
-      // Bash re-parses variable values in arithmetic, including command
-      // substitutions hidden in array subscripts. Only literal math is inert.
-      let depth = 0;
-      let cursor = index + 1;
-      while (cursor < text.length) {
-        const inner = text[cursor]!;
-        if (inner === '\\') {
-          cursor += 2;
-          continue;
-        }
-        if (inner === '(') depth++;
-        else if (inner === ')') {
-          depth--;
-          if (depth === 0) break;
-        }
-        cursor++;
-      }
-      if (depth !== 0) return true;
-      const literal = text
-        .slice(index + 3, cursor)
-        .replace(/\b0[xX][0-9a-fA-F]+\b|\b[0-9]+#[0-9A-Za-z@_]+\b/g, '0');
-      if (!/^[0-9\s()+*/%<>=!&|^~?:-]*$/.test(literal)) return true;
-      index = cursor;
+    if (next === '(' || next === '[') {
+      const end = findLiteralArithmeticExpansionEnd(text, index);
+      if (end === -1) return true;
+      index = end;
       continue;
     }
     if (next === '{') {
@@ -3026,7 +3068,13 @@ function stripHeredocBodies(command: string): HeredocStrip {
     let cursor = 0;
     for (const marker of markers) {
       if (marker.startIndex < cursor) return { kind: 'unresolved' };
-      rewritten += line.slice(cursor, marker.startIndex) + '< /dev/null';
+      // A shell/interpreter receiver executes the body as a script; keep the
+      // marker and body visible so the later stages see the commands inside.
+      if (marker.receiver && STDIN_EXECUTING_PROGRAMS.has(marker.receiver)) {
+        rewritten += line.slice(cursor, marker.endIndex);
+      } else {
+        rewritten += line.slice(cursor, marker.startIndex) + '< /dev/null';
+      }
       cursor = marker.endIndex;
     }
     out.push(rewritten + line.slice(cursor));
@@ -3081,6 +3129,9 @@ function stripHeredocBodies(command: string): HeredocStrip {
       (m) => !isInsideSubstitution(m.startIndex),
     );
     for (const marker of [...innerMarkers, ...outerMarkers]) {
+      const executesBody =
+        marker.receiver !== undefined &&
+        STDIN_EXECUTING_PROGRAMS.has(marker.receiver);
       const bodyLines: string[] = [];
       let bi = bodyStart;
       while (bi < lines.length) {
@@ -3100,7 +3151,11 @@ function stripHeredocBodies(command: string): HeredocStrip {
         bodyLines.push(body);
       }
       bodyStart = bi;
-      if (
+      if (executesBody) {
+        // The child shell runs these lines as a script; surface them so the
+        // guard's own segment scan sees the relocated git inside the body.
+        out.push(...bodyLines);
+      } else if (
         !marker.quoted &&
         expansionCanExecute(joinContinuations(bodyLines.join('\n')))
       ) {
@@ -3112,43 +3167,33 @@ function stripHeredocBodies(command: string): HeredocStrip {
   return { kind: 'ok', text: out.join('\n') };
 }
 
-// Remove `#` comments (word-start, outside quotes/substitutions) so
-// splitCommands does not cut on separators that are only comment text.
-// Mirrors the comment rule in readTopLevelSeparators.
+// Remove comments before their quotes or separators can confuse either scan.
 function stripBashComments(command: string): string {
   let result = '';
   let single = false;
   let double = false;
   let backtick = false;
   let substitution = 0;
-  let arithmeticDepth = 0;
   let wordStart = true;
   const quoteStack: Array<[boolean, boolean]> = [];
   for (let index = 0; index < command.length; index++) {
     const character = command[index]!;
     const next = command[index + 1];
-    if (arithmeticDepth > 0) {
-      result += character;
-      if (character === '(') arithmeticDepth++;
-      else if (character === ')') {
-        arithmeticDepth--;
-        if (arithmeticDepth === 0) wordStart = false;
-      }
-      continue;
-    }
-    if (
-      !single &&
-      !double &&
-      !backtick &&
-      character === '$' &&
-      next === '(' &&
-      command[index + 2] === '('
-    ) {
-      arithmeticDepth = 2;
-      result += '$((';
-      index += 2;
+    if (!single && !double && !backtick && character === '$' && next === "'") {
+      const end = skipAnsiCQuote(command, index);
+      result += command.slice(index, end);
+      index = end - 1;
       wordStart = false;
       continue;
+    }
+    if (!single && !double && !backtick && character === '$' && next === '(') {
+      const end = findLiteralArithmeticExpansionEnd(command, index);
+      if (end !== -1) {
+        result += command.slice(index, end + 1);
+        index = end;
+        wordStart = false;
+        continue;
+      }
     }
     if (!single && character === '\\' && index + 1 < command.length) {
       result += character + command[index + 1];
@@ -3169,7 +3214,7 @@ function stripBashComments(command: string): string {
       substitution++;
       result += '$(';
       index++;
-      wordStart = false;
+      wordStart = true;
       continue;
     }
     if (
@@ -3199,7 +3244,7 @@ function stripBashComments(command: string): string {
       wordStart = false;
       continue;
     }
-    if (single || double || backtick || substitution > 0) {
+    if (single || double || backtick) {
       result += character;
       wordStart = false;
       continue;
@@ -3225,7 +3270,6 @@ function readTopLevelSeparators(
   let double = false;
   let backtick = false;
   let substitution = 0;
-  let arithmeticDepth = 0;
   let wordStart = true;
   let segmentStart = 0;
   const quoteStack: Array<[boolean, boolean]> = [];
@@ -3236,26 +3280,18 @@ function readTopLevelSeparators(
   for (let index = 0; index < command.length; index++) {
     const character = command[index]!;
     const next = command[index + 1];
-    if (arithmeticDepth > 0) {
-      if (character === '(') arithmeticDepth++;
-      else if (character === ')') {
-        arithmeticDepth--;
-        if (arithmeticDepth === 0) wordStart = false;
-      }
-      continue;
-    }
-    if (
-      !single &&
-      !double &&
-      !backtick &&
-      character === '$' &&
-      next === '(' &&
-      command[index + 2] === '('
-    ) {
-      arithmeticDepth = 2;
-      index += 2;
+    if (!single && !double && !backtick && character === '$' && next === "'") {
+      index = skipAnsiCQuote(command, index) - 1;
       wordStart = false;
       continue;
+    }
+    if (!single && !double && !backtick && character === '$' && next === '(') {
+      const end = findLiteralArithmeticExpansionEnd(command, index);
+      if (end !== -1) {
+        index = end;
+        wordStart = false;
+        continue;
+      }
     }
     if (!single && character === '\\' && index + 1 < command.length) {
       index++;
@@ -3569,18 +3605,26 @@ async function evaluateCommandWithCwd(
       cwdAfter: trackedCwd,
     };
   }
+  const backgroundedSegments = new Set<number>();
+  for (const [index, separator] of separators.entries()) {
+    if (separator !== '&') continue;
+    // `&` scopes the whole AND-OR list, but not an earlier `;`-separated run.
+    for (let current = index; current >= 0; current--) {
+      backgroundedSegments.add(current);
+      const previous = separators[current - 1];
+      if (previous !== '&&' && previous !== '||') break;
+    }
+  }
   const isPipeComponent = (index: number): boolean =>
     // A PowerShell pipeline runs every stage in the one session — a `cd` on
     // either side outlives the pipe — so no segment is scoped there.
     windowsNative && shellNow === 'powershell'
       ? false
       : separatorsMatch
-        ? // Both sides of a pipe run in subshells; for `&` only the segment
-          // it follows (the backgrounded one) does — the next segment is
-          // foreground.
+        ? // Pipeline stages and complete backgrounded AND-OR lists are scoped.
           separators[index - 1] === '|' ||
           separators[index] === '|' ||
-          separators[index] === '&'
+          backgroundedSegments.has(index)
         : // Structural disagreement with `splitCommands`: scope every segment
           // rather than guess which ones ran in a subshell.
           separators.some(

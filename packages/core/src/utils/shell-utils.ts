@@ -289,6 +289,42 @@ export function escapeShellArg(arg: string, shell: ShellType): string {
   }
 }
 
+export function isLiteralShellArithmetic(expression: string): boolean {
+  const literal = expression.replace(
+    /\b0[xX][0-9a-fA-F]+\b|\b[0-9]+#[0-9A-Za-z@_]+\b/g,
+    '0',
+  );
+  return /^[0-9\s()+*/%<>=!&|^~?:-]*$/.test(literal);
+}
+
+// Invalid `$((` syntax can be a command substitution in Bash, not arithmetic.
+export function findLiteralArithmeticExpansionEnd(
+  command: string,
+  start: number,
+): number {
+  const modern = command.startsWith('$((', start);
+  if (!modern && !command.startsWith('$[', start)) return -1;
+  const bodyStart = start + (modern ? 3 : 2);
+  let depth = modern ? 2 : 1;
+  for (let index = bodyStart; index < command.length; index++) {
+    const character = command[index]!;
+    if (modern && character === '(') depth++;
+    if (character === (modern ? ')' : ']')) {
+      depth--;
+      if (depth === 0) {
+        if (modern && command[index - 1] !== ')') return -1;
+        return isLiteralShellArithmetic(
+          command.slice(bodyStart, modern ? index - 1 : index),
+        )
+          ? index
+          : -1;
+      }
+    }
+    if (!/[0-9A-Za-z@_#\s()+*/%<>=!&|^~?:-]/.test(character)) return -1;
+  }
+  return -1;
+}
+
 /**
  * Splits a shell command into a list of individual commands, respecting quotes.
  * This is used to separate chained commands (e.g., using &&, ||, ;).
@@ -301,6 +337,7 @@ export function splitCommands(command: string): string[] {
   let inSingleQuotes = false;
   let inDoubleQuotes = false;
   let inBackticks = false;
+  let inAnsiCQuotes = false;
   let substitutionDepth = 0;
   // Quote state of each enclosing level, saved on `$(` and restored on the
   // matching `)`, so a substitution body's quotes cannot leak outwards and the
@@ -308,7 +345,6 @@ export function splitCommands(command: string): string[] {
   const quoteStack: Array<{
     single: boolean;
     double: boolean;
-    arithmeticDepth: number;
   }> = [];
   let i = 0;
 
@@ -325,6 +361,30 @@ export function splitCommands(command: string): string[] {
   while (i < command.length) {
     const char = command[i];
     const nextChar = command[i + 1];
+
+    if (inAnsiCQuotes) {
+      currentCommand += char;
+      if (char === '\\' && nextChar !== undefined) {
+        currentCommand += nextChar;
+        i += 2;
+        continue;
+      }
+      if (char === "'") inAnsiCQuotes = false;
+      i++;
+      continue;
+    }
+    if (
+      !inSingleQuotes &&
+      !inDoubleQuotes &&
+      !inBackticks &&
+      char === '$' &&
+      nextChar === "'"
+    ) {
+      inAnsiCQuotes = true;
+      currentCommand += "$'";
+      i += 2;
+      continue;
+    }
 
     if (!inSingleQuotes && char === '\\' && nextChar === '\n') {
       i += 2;
@@ -350,30 +410,26 @@ export function splitCommands(command: string): string[] {
       char === '$' &&
       nextChar === '('
     ) {
+      const arithmeticEnd = findLiteralArithmeticExpansionEnd(command, i);
+      if (arithmeticEnd !== -1) {
+        currentCommand += command.slice(i, arithmeticEnd + 1);
+        i = arithmeticEnd + 1;
+        continue;
+      }
       // A substitution body is quoted independently of its surroundings, so
       // save the enclosing quote state and start the body unquoted. `"$(...)"`
       // is the common case: the double quote belongs to the outer command and
       // must not make the body's `)` look quoted.
-      const arithmetic = command[i + 2] === '(';
       quoteStack.push({
         single: inSingleQuotes,
         double: inDoubleQuotes,
-        arithmeticDepth: arithmetic ? 2 : 0,
       });
       inSingleQuotes = false;
       inDoubleQuotes = false;
       substitutionDepth++;
-      currentCommand += arithmetic ? '$((' : '$(';
-      i += arithmetic ? 3 : 2;
+      currentCommand += '$(';
+      i += 2;
       continue;
-    } else if (
-      !inBackticks &&
-      !inSingleQuotes &&
-      !inDoubleQuotes &&
-      char === '(' &&
-      (quoteStack.at(-1)?.arithmeticDepth ?? 0) > 0
-    ) {
-      quoteStack.at(-1)!.arithmeticDepth++;
     } else if (
       !inBackticks &&
       substitutionDepth > 0 &&
@@ -386,15 +442,10 @@ export function splitCommands(command: string): string[] {
       // to flip the parser into "in quote" state, which then swallowed every
       // separator to the end of the line -- so `echo $(echo ')') ; rm -rf x`
       // came back as one segment with `rm` nowhere in it.
-      const level = quoteStack.at(-1);
-      if (level !== undefined && level.arithmeticDepth > 1) {
-        level.arithmeticDepth--;
-      } else {
-        const enclosing = quoteStack.pop();
-        inSingleQuotes = enclosing?.single ?? false;
-        inDoubleQuotes = enclosing?.double ?? false;
-        substitutionDepth--;
-      }
+      const enclosing = quoteStack.pop();
+      inSingleQuotes = enclosing?.single ?? false;
+      inDoubleQuotes = enclosing?.double ?? false;
+      substitutionDepth--;
     } else if (!inBackticks && char === "'" && !inDoubleQuotes) {
       // Tracked at every depth, not just the top level: without this the
       // quotes inside a substitution body are invisible and the `)` guard
