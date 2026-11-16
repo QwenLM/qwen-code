@@ -211,13 +211,16 @@ function unbind(sessionId: string, cwd: string = ws): void {
   );
 }
 
-function observe(): Promise<{ claimed: boolean; observed: number }> {
+function observe(
+  language?: 'en' | 'zh',
+): Promise<{ claimed: boolean; observed: number }> {
   return runPrWatchObservationTick(
     allRuntimes(),
     {
       watchDir,
       locks,
       allowedHosts: new Set(['github.com']),
+      ...(language ? { language } : {}),
       log: (message) => logs.push(message),
     },
     { intervalMs: 60_000, sweepOffsets },
@@ -468,13 +471,79 @@ describe.skipIf(process.platform === 'win32')(
       expect(enqueued).toHaveLength(2);
     });
 
+    it('delivers a zh prompt end to end through the real gh child and admission', async () => {
+      await seedSession();
+      drainDeps.language = 'zh';
+      writeView(HEAD_A, { checks: 'passing' });
+      expect((await observe('zh')).observed).toBe(1);
+
+      writeView(HEAD_B, { checks: 'failing' });
+      expect((await observe('zh')).observed).toBe(1);
+      // Detection localized the summary before it was persisted.
+      expect((stored()?.pending ?? []).map((p) => p.summary)).toEqual([
+        `head 变更 ${HEAD_A} → ${HEAD_B}`,
+        'CI 失败：CI / unit',
+      ]);
+
+      expect((await drain()).delivered).toBe(2);
+      expect(admissions).toHaveLength(2);
+      for (const a of admissions) {
+        expect(a.text).toContain('由 daemon PR 状态监视检测。');
+        expect(a.text).toContain('[本会话跟进的 PR 的 GitHub 事件]');
+        expect(a.text).not.toContain('Detected by the daemon PR-state watch.');
+        // Structural markers stay English in every language.
+        expect(a.text).toContain(`Repo: ${REPO}`);
+        expect(a.text).toContain(`PR: #${PR}`);
+        expect(a.text).toContain('Event: ');
+        expect(a.text).toContain('Summary: ');
+      }
+      expect(
+        admissions.some((a) =>
+          a.text.includes(`head 变更 ${HEAD_A} → ${HEAD_B}`),
+        ),
+      ).toBe(true);
+      expect(
+        admissions.some((a) => a.text.includes('CI 失败：CI / unit')),
+      ).toBe(true);
+      // A real gh child still ran: the language changes prose, not the plumbing.
+      expect(ghCalls().length).toBeGreaterThanOrEqual(2);
+      expect(ghCalls()[0]).toContain(`pr view ${PR_URL} --json`);
+    });
+
+    it('keeps the persisted summary in its detection language when the locale changes before delivery', async () => {
+      await seedSession();
+      writeView(HEAD_A, { checks: 'passing' });
+      expect((await observe('zh')).observed).toBe(1);
+      writeView(HEAD_B, { checks: 'failing' });
+      expect((await observe('zh')).observed).toBe(1);
+
+      // The operator switches language before the drain runs. The persisted
+      // summary keeps its detection language; only the envelope follows.
+      drainDeps.language = 'en';
+      expect((await drain()).delivered).toBe(2);
+      expect(admissions).toHaveLength(2);
+      for (const a of admissions) {
+        expect(a.text).toContain('Detected by the daemon PR-state watch.');
+        expect(a.text).not.toContain('由 daemon PR 状态监视检测。');
+      }
+      expect(
+        admissions.some((a) =>
+          a.text.includes(`head 变更 ${HEAD_A} → ${HEAD_B}`),
+        ),
+      ).toBe(true);
+      expect(
+        admissions.some((a) => a.text.includes('CI 失败：CI / unit')),
+      ).toBe(true);
+    });
+
     it('fans out to real role bindings under group-suffixed keys', async () => {
       const reviewer = await seedSession({ role: 'review' });
       const fixer = await seedSession({ role: 'fix' });
-      drainDeps.actions = new Map([
-        ['review:ci_failure', 'Review %repo% #%pr%'],
-        ['fix:ci_failure', 'Fix %repo% #%pr%'],
-      ]);
+      drainDeps.actionsForEvent = () =>
+        new Map([
+          ['review:ci_failure', 'Review %repo% #%pr%'],
+          ['fix:ci_failure', 'Fix %repo% #%pr%'],
+        ]);
       writeView(HEAD_A, { checks: 'passing' });
       await observe();
       await drain();
@@ -818,7 +887,8 @@ describe.skipIf(process.platform === 'win32')(
       const longRepo = `${'a'.repeat(39)}/${'b'.repeat(60)}`;
       const longUrl = `https://github.com/${longRepo}/pull/${PR}`;
       await seedSession({ url: longUrl });
-      drainDeps.actions = new Map([['default', 'Handle %repo% #%pr%']]);
+      drainDeps.actionsForEvent = () =>
+        new Map([['default', 'Handle %repo% #%pr%']]);
       writeView(HEAD_A, { checks: 'passing', url: longUrl });
       await observe();
       await drain();

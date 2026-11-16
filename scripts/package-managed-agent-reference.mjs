@@ -72,41 +72,6 @@ export const ADMIN_COMMANDS = Object.freeze([
     'Prepare, complete or inspect a Hosted Shell lease recovery.',
   ],
   [
-    'csi-registration',
-    `${PERSISTENCE}.WorkspaceCsiRegistrationMain`,
-    'Register or inspect a reviewed CSI Workspace registration.',
-  ],
-  [
-    'csi-protection',
-    `${WORKSPACE_RUNTIME}.WorkspaceCsiProtectionMain`,
-    'Render the protection policy for a CSI registration.',
-  ],
-  [
-    'csi-session',
-    `${PERSISTENCE}.WorkspaceCsiSessionMain`,
-    'Create a reviewed CSI Session offline.',
-  ],
-  [
-    'csi-runtime',
-    `${PERSISTENCE}.WorkspaceCsiRuntimeMain`,
-    'Serve, prompt or retire one reviewed CSI Session Runtime.',
-  ],
-  [
-    'csi-retirement',
-    `${PERSISTENCE}.WorkspaceCsiRetirementMain`,
-    'Inspect or begin a CSI Workspace retirement.',
-  ],
-  [
-    'csi-worker-ack',
-    `${PERSISTENCE}.WorkspaceCsiWorkerAckMain`,
-    'Acknowledge or inspect a CSI worker publication.',
-  ],
-  [
-    'resident-retirement',
-    `${PERSISTENCE}.ResidentWorkspaceRetirementMain`,
-    'Inspect, begin or delete the pod of a resident Workspace retirement.',
-  ],
-  [
     'resolved-configuration',
     `${PREFLIGHT}.ResolvedConfiguration`,
     'Print the Runtime state directory and auth mode the configuration resolves to.',

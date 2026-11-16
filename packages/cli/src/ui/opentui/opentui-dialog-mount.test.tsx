@@ -395,6 +395,15 @@ describe('OpenTuiDialogMount routing', () => {
     },
   );
 
+  it('binds Memory actions to the actual selected Config/settings host', () => {
+    mount({ dialog: 'memory' });
+    expect(mocks.state.dialogProps['memory']).toMatchObject({
+      config: CONFIG,
+      settings: SETTINGS,
+      host: HOST,
+    });
+  });
+
   it('routes every dialog request to its own component', () => {
     expect(REQUESTS).toHaveLength(25);
     for (const [expected, request] of REQUESTS) {
