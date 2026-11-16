@@ -21,7 +21,7 @@ Goals:
 Non-goals:
 
 - Trees drawn in place of a row. A row draws its own message, with the text its hooks passed down.
-- Thinking rows and ACP hosts (later stages).
+- Thinking rows (see [Mod thinking rows](2026-11-16-mod-thinking-rows.md)) and ACP hosts (a later stage).
 - Rows in the terminal scrollback (non-virtualized Ink), which cannot be drawn again once printed.
 
 ## Compatibility contract

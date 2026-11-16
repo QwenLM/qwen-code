@@ -149,7 +149,11 @@ export function ManagedStandaloneApp({
   if (!state.provider) {
     return (
       <div role="status" style={{ padding: '2rem' }}>
-        {language === 'zh-CN' ? '正在连接…' : 'Connecting…'}
+        {language === 'zh-CN'
+          ? '正在连接…'
+          : language === 'ru'
+            ? 'Подключение…'
+            : 'Connecting…'}
       </div>
     );
   }

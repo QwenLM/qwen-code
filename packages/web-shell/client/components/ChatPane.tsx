@@ -2075,6 +2075,7 @@ export function ChatPane({
                   onPause={() => runGoalControl('pause')}
                   onResume={() => runGoalControl('resume')}
                   onClear={() => runGoalControl('clear')}
+                  onOpenGoals={onOpenGoals}
                 />
               )}
             </div>

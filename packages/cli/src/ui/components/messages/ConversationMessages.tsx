@@ -384,6 +384,7 @@ const ThinkBody: React.FC<{
           availableTerminalHeight={availableTerminalHeight}
           contentWidth={contentWidth - 2}
           textColor={theme.text.secondary}
+          showSourceCopyHints={false}
         />
       </ErrorBoundary>
     </Box>

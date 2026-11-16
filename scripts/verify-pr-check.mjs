@@ -28,8 +28,10 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  statSync,
 } from 'node:fs';
 import { basename, dirname, join, resolve, sep } from 'node:path';
+import { createHash } from 'node:crypto';
 import { isEntryPoint } from './lib/entry-point.js';
 
 export const VERDICTS = ['merge-ready', 'findings', 'blocked', 'inconclusive'];
@@ -70,7 +72,7 @@ const HEADING_TITLE_MAX = 120;
 const FOOTER =
   /^_— .+ via Qwen Code \/verify-pr \(v[^;]+; skill [0-9a-f]{12}\)_$/;
 
-const HELP = `Usage: node scripts/verify-pr-check.mjs [--context <snapshot>] [--context-root <pr-clone>] [--publish-lane] <artifact-dir>
+const HELP = `Usage: node scripts/verify-pr-check.mjs [--context <snapshot>] [--context-root <pr-clone>] [--context-sha256 <digest>] [--publish-lane] <artifact-dir>
 
 Checks a local round against the rules the CI publisher enforces:
 
@@ -121,6 +123,14 @@ trust root must come from the host, never from git state inside the tree the
 round controls. Without it, a pr<n>-verify-<ts> dir under tmp/ falls back to
 the clone root (the tmp container's parent); a plain dir is its own root.
 
+The path and link-count guards only refuse a context that is demonstrably
+round-controlled (inside the trust root, or a hard link retaining a second
+name); a single-link file outside the root is NOT proof the host wrote it.
+Pass --context-sha256 <digest> — the sha256 that verify-pr-prepare.mjs prints
+host-side when it writes the snapshot — to bind the content: the check refuses
+a --context whose bytes do not match, so a rewritten or substituted snapshot
+is rejected even when its path and link count look clean.
+
 Exit codes: 0 no errors, 1 errors found, 2 usage.
 `;
 
@@ -151,6 +161,28 @@ function readIfExists(path) {
   } catch {
     return UNREADABLE;
   }
+}
+
+// A filesystem root contains every path on its volume: '/' on POSIX, a drive
+// root like 'C:\' on Windows. Both must fail closed rather than be used as a
+// discriminating trust root (R17-1, deferred Windows drive-root case). '/' is
+// also a valid root spelling on Windows (where sep is '\\'), so accept it on
+// every platform, not only where it equals sep (R6-1).
+export function isFilesystemRoot(root) {
+  return root === sep || root === '/' || /^[A-Za-z]:[\\/]$/.test(root);
+}
+
+// Root-aware containment. A filesystem root contains every path, so it must
+// fail closed rather than compare against '//' — no real path starts with
+// '//', which silently disabled the refusal for a round dir directly under a
+// root-level tmp/ (R17-1). Both the --context refusal and the --context-root
+// containment test use this so the two stay consistent.
+function withinRoot(root, p) {
+  return (
+    isFilesystemRoot(root) ||
+    p === root ||
+    p.startsWith(root.endsWith(sep) ? root : root + sep)
+  );
 }
 
 /** OIDs are quoted at every length from 7 to 40; compare by prefix. */
@@ -942,6 +974,7 @@ function main(argv) {
   }
   let contextPath = null;
   let contextRoot = null;
+  let contextSha = null;
   let publishLane = false;
   const positional = [];
   for (let index = 0; index < argv.length; index++) {
@@ -962,6 +995,14 @@ function main(argv) {
         );
         return 2;
       }
+    } else if (arg === '--context-sha256') {
+      contextSha = argv[++index];
+      if (!contextSha || !/^[0-9a-f]{64}$/.test(contextSha)) {
+        process.stderr.write(
+          `verify-pr check: --context-sha256 requires the 64-hex digest prepare printed\n\n${HELP}`,
+        );
+        return 2;
+      }
     } else if (arg === '--publish-lane') {
       // The CI publish job's flag: honors the ci-lane gate record the job
       // writes itself. An argv claim, not an authenticated identity — a
@@ -973,6 +1014,12 @@ function main(argv) {
     } else {
       positional.push(arg);
     }
+  }
+  if (contextSha && !contextPath) {
+    process.stderr.write(
+      `verify-pr check: --context-sha256 binds a --context snapshot; pass --context too\n\n${HELP}`,
+    );
+    return 2;
   }
   const dir = positional[0];
   if (!dir || positional.length > 1) {
@@ -1000,7 +1047,17 @@ function main(argv) {
       );
       return 2;
     }
-    if (realDir !== realRoot && !realDir.startsWith(realRoot + sep)) {
+    // A root of '/' contains every path, so it cannot discriminate the
+    // PR-writable tree; it is a usage error, not a trust root (R2-2). Reject
+    // it here even without --context, where the in-context refusal below is
+    // never reached.
+    if (isFilesystemRoot(realRoot)) {
+      process.stderr.write(
+        `verify-pr check: --context-root ${contextRoot} is a filesystem root, which cannot discriminate the PR-writable tree — pass the PR clone path\n\n${HELP}`,
+      );
+      return 2;
+    }
+    if (!withinRoot(realRoot, realDir)) {
       process.stderr.write(
         `verify-pr check: --context-root ${contextRoot} does not contain the artifact directory ${dir}\n\n${HELP}`,
       );
@@ -1133,13 +1190,74 @@ function main(argv) {
           ? realpathSync(dirname(container))
           : realpathSync(dir);
     }
-    if (realContext === trustRoot || realContext.startsWith(trustRoot + sep)) {
-      process.stderr.write(
-        `verify-pr check: --context must not point inside the PR-writable worktree (${contextPath}): it cannot judge its own waiver — pass a host-held copy the round never saw\n`,
-      );
+    const insideByPath = withinRoot(trustRoot, realContext);
+    // A hard link gives a PR-writable file a second name outside the trust
+    // root; realpath cannot see the source name, but a freshly written host
+    // copy has exactly one link, so a link count above one means the context
+    // shares an inode with another name the round may control (R17-1). This
+    // needs no walk of the PR-writable tree, so an unreadable subdirectory or
+    // a source outside the artifact dir cannot hide the alias (R1-1, R1-2).
+    // Only check when the path test did not already refuse.
+    let contextIsAlias = false;
+    let contextLinks = 0;
+    if (!insideByPath) {
+      try {
+        const ctxStat = statSync(realContext);
+        if (ctxStat.isFile()) {
+          contextLinks = ctxStat.nlink;
+          contextIsAlias = ctxStat.nlink !== 1;
+        }
+      } catch {
+        // A missing/unreadable context is reported by the head-OID check below.
+      }
+    }
+    if (insideByPath || contextIsAlias) {
+      // One sentence per cause: for an alias or a '/' trust root the path is
+      // demonstrably outside the worktree, so the path-inside wording would
+      // be false and its remedy unreachable (R1-4).
+      let reason;
+      if (contextIsAlias) {
+        reason = `--context ${contextPath} is a hard link (${contextLinks} names) to a file the round can write; copy it instead of linking it, so the coordinates judging the waiver come from a host-held copy the round never saw`;
+      } else if (isFilesystemRoot(trustRoot)) {
+        // Only the derived root reaches here: an explicit filesystem-root
+        // --context-root is already a usage error at the containment gate
+        // (R2-2). The artifact dir sits directly under root-level tmp/ and no
+        // PR clone can contain it, so the remedy is to move it, not to pass
+        // --context-root (which would only trade this refusal for a containment
+        // error, R1-4).
+        reason = `--context ${contextPath} cannot be trusted: the artifact dir sits directly under a root-level tmp/, so the derived trust root is '${trustRoot}', which contains every path — move the artifact dir out of root-level tmp/ (no PR clone can contain it)`;
+      } else {
+        reason = `--context must not point inside the PR-writable worktree (${contextPath}): it cannot judge its own waiver — pass a host-held copy the round never saw`;
+      }
+      process.stderr.write(`verify-pr check: ${reason}\n`);
       return 1;
     }
     const snapshotText = readIfExists(contextPath);
+    // Content binding (R2-1): the digest prepare computed host-side is the
+    // provenance proof. A path outside the root and a single link can both be
+    // arranged by the round, but the bytes prepare wrote cannot be forged
+    // without matching this digest. Refuse on mismatch or an unverifiable read.
+    if (contextSha) {
+      if (snapshotText === null || snapshotText === UNREADABLE) {
+        process.stderr.write(
+          `verify-pr check: --context ${contextPath} is missing or unreadable; cannot verify it against --context-sha256\n`,
+        );
+        return 1;
+      }
+      const actualSha = createHash('sha256')
+        .update(snapshotText, 'utf8')
+        .digest('hex');
+      if (actualSha !== contextSha) {
+        process.stderr.write(
+          `verify-pr check: --context ${contextPath} does not match --context-sha256 (the snapshot prepare wrote); it was modified or is not the host-held copy — re-copy it from the prepare context\n`,
+        );
+        return 1;
+      }
+    } else {
+      // Disclose that provenance was never bound, rather than letting a clean
+      // path/link check read as proof the host wrote the snapshot (deferred).
+      snapshotWarning = `--context ${contextPath} has no --context-sha256 binding; provenance rests on the path/link checks alone — pass the digest prepare printed to bind the snapshot's bytes`;
+    }
     if (snapshotText !== null && snapshotText !== UNREADABLE) {
       try {
         const snapshot = JSON.parse(snapshotText);
