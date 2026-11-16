@@ -14,6 +14,7 @@ import type { ExtensionMutationEvent } from '@qwen-code/qwen-code-core/extension
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { isSubpath } from '@qwen-code/qwen-code-core/utils/paths.js';
 import { ExtensionRefreshState } from './extension-refresh-state.js';
+import { bootstrapWatchFilter } from './path-comparison.js';
 
 const debugLogger = createDebugLogger('EXTENSION_FILE_WATCHER');
 
@@ -208,17 +209,12 @@ export class ExtensionFileWatcher {
     this.closeBootstrapWatcher();
     const parentDir = path.dirname(this.extensionsDir);
     const dirBasename = path.basename(this.extensionsDir);
-    const resolvedParentDir = path.resolve(parentDir);
     const generation = this.watchGeneration;
     this.bootstrapWatcher = watchFs(parentDir, {
       ignoreInitial: true,
       followSymlinks: false,
       depth: 0,
-      // Same as the settings bootstrap watcher: chokidar hands the root back
-      // with forward slashes on Windows, so compare resolved paths.
-      ignored: (filePath: string) =>
-        path.resolve(filePath) !== resolvedParentDir &&
-        path.basename(filePath) !== dirBasename,
+      ignored: bootstrapWatchFilter(parentDir, dirBasename),
     })
       .on('all', (_event: string, changedPath: string) => {
         if (generation !== this.watchGeneration) return;

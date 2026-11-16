@@ -11,6 +11,7 @@ import { watch as watchFs, type FSWatcher } from 'chokidar';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { type LoadedSettings, SettingScope } from './settings.js';
 import { getFlattenedSchema } from './settingsUtils.js';
+import { bootstrapWatchFilter } from './path-comparison.js';
 
 const debugLogger = createDebugLogger('SETTINGS_WATCHER');
 
@@ -197,18 +198,13 @@ export class SettingsWatcher {
     const dir = path.dirname(settingsPath);
     const parentDir = path.dirname(dir);
     const dirBasename = path.basename(dir);
-    const resolvedParentDir = path.resolve(parentDir);
     const gen = this.bumpGeneration(scope);
 
     try {
       const watcher = watchFs(parentDir, {
         ignoreInitial: true,
         depth: 0,
-        // chokidar passes the root back in its own spelling (forward slashes
-        // on Windows), so compare resolved paths or the root gets ignored.
-        ignored: (filePath: string) =>
-          path.resolve(filePath) !== resolvedParentDir &&
-          path.basename(filePath) !== dirBasename,
+        ignored: bootstrapWatchFilter(parentDir, dirBasename),
       })
         .on('all', (_event: string, changedPath: string) => {
           if (this.watchGeneration.get(scope) !== gen) return;
