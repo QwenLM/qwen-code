@@ -3008,17 +3008,32 @@ try {
           : { toolCalls: [fakeToolCall('cron_list', {}, 'loop-cron-list')] };
       }
       if (/\/loop\s+clear/.test(text)) {
-        return hasToolResult('loop-cron-delete')
-          ? { content: 'LOOP_DONE' }
-          : {
-              toolCalls: [
-                fakeToolCall(
-                  'cron_delete',
-                  { id: 'loop-cron-created' },
-                  'loop-cron-delete',
-                ),
-              ],
+        if (hasToolResult('loop-cron-delete')) return { content: 'LOOP_DONE' };
+        // The automation store mints the schedule id; reuse the one the
+        // create result printed so the retire targets the live schedule
+        // instead of a fabricated id the store answers 404 for.
+        const createResultText = messages
+          .filter((message) => {
+            const entry = message as {
+              role?: string;
+              tool_call_id?: string;
             };
+            return (
+              entry.role === 'tool' && entry.tool_call_id === 'loop-cron-create'
+            );
+          })
+          .map((message) => JSON.stringify(message))
+          .join('');
+        const createdId = /asch_[0-9a-f]{32}/.exec(createResultText)?.[0];
+        return {
+          toolCalls: [
+            fakeToolCall(
+              'cron_delete',
+              { id: createdId ?? 'missing-schedule-id' },
+              'loop-cron-delete',
+            ),
+          ],
+        };
       }
       return hasToolResult('loop-cron-create')
         ? { content: 'LOOP_DONE' }
@@ -3570,6 +3585,28 @@ try {
     if (!JSON.stringify(listResult ?? {}).includes('/loop check the deploy')) {
       throw new Error(
         `cron_list did not echo the created schedule; create -> list lifecycle not witnessed. createResult=${JSON.stringify(createResult ?? {}).slice(0, 800)} listResult=${JSON.stringify(listResult ?? {}).slice(0, 800)}`,
+      );
+    }
+    // The clear leg must retire the schedule the store actually minted:
+    // cron_create prints its id, and a successful retire answers
+    // "Retired cron schedule <id>." — a 404 automation_not_found result would
+    // satisfy a mere presence check while the automation stays live.
+    const createdScheduleId = /asch_[0-9a-f]{32}/.exec(
+      JSON.stringify(createResult ?? {}),
+    )?.[0];
+    if (!createdScheduleId) {
+      throw new Error(
+        `cron_create printed no automation id; createResult=${JSON.stringify(createResult ?? {}).slice(0, 800)}`,
+      );
+    }
+    const deleteResult = toolResultFor('loop-cron-delete');
+    if (
+      !JSON.stringify(deleteResult ?? {}).includes(
+        `Retired cron schedule ${createdScheduleId}.`,
+      )
+    ) {
+      throw new Error(
+        `cron_delete did not retire ${createdScheduleId}; deleteResult=${JSON.stringify(deleteResult ?? {}).slice(0, 800)}`,
       );
     }
     resultJson = JSON.stringify(
