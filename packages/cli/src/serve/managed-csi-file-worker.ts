@@ -144,9 +144,7 @@ export function historyFits(
     ...request,
     observation: { ...projected, state: { ...projected.state, snapshots: [] } },
   });
-  const snapshotsBytes = Buffer.byteLength(
-    JSON.stringify(snapshotsForBudget),
-  );
+  const snapshotsBytes = Buffer.byteLength(JSON.stringify(snapshotsForBudget));
   // The durable prepared record additionally embeds the actual preparation
   // payload (invocations + paths are fully determined by prepare time) and
   // gains an intentRef durable ref pointing at the intent record. Budget the

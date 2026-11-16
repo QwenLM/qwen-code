@@ -167,7 +167,8 @@ public final class CsiFileHistoryProtocol {
         require(value.indexOf('\0') < 0);
         var normalized = Path.of(value).normalize();
         require(normalized.isAbsolute() && (normalized.toString().equals(value)
-                || value.endsWith("/") && (normalized.toString() + "/").equals(value)));
+                || !normalized.toString().equals("/") && value.endsWith("/")
+                && (normalized.toString() + "/").equals(value)));
     }
 
     private static void leaf(String value) {

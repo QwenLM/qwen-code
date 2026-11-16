@@ -28,6 +28,16 @@ class CsiFileHistoryProtocolTest {
             assertThrows(RuntimeException.class, () -> CsiFileHistoryProtocol.observation(value.path("observation"), owner),
                     value.path("name").textValue());
         }
+        for (var value : fixture.path("snapshotCwdCases")) {
+            var observation = fixture.path("valid").get(2).path("observation").deepCopy();
+            ((com.fasterxml.jackson.databind.node.ObjectNode) observation.path("state").path("snapshots").get(0))
+                    .put("cwd", value.path("cwd").textValue());
+            if (value.path("valid").booleanValue()) {
+                assertDoesNotThrow(() -> CsiFileHistoryProtocol.observation(observation, owner), value.path("cwd").textValue());
+            } else {
+                assertThrows(RuntimeException.class, () -> CsiFileHistoryProtocol.observation(observation, owner), value.path("cwd").textValue());
+            }
+        }
         assertThrows(RuntimeException.class, () -> CsiFileHistoryProtocol.operation(
                 Map.of("kind", "csi-file-history", "version", 1, "action", "prepare")));
         assertThrows(RuntimeException.class, () -> CsiFileHistoryProtocol.operation(

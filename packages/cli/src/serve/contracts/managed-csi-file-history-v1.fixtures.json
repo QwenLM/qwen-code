@@ -45,6 +45,19 @@
       "action": "snapshot"
     }
   },
+  "snapshotCwdCases": [
+    { "cwd": "/", "valid": true },
+    { "cwd": "//", "valid": false },
+    { "cwd": "/workspace", "valid": true },
+    { "cwd": "/workspace/", "valid": true },
+    { "cwd": "/workspace//", "valid": false },
+    { "cwd": "/workspace//sub", "valid": false },
+    { "cwd": "/workspace/.", "valid": false },
+    { "cwd": "/workspace/sub/..", "valid": false },
+    { "cwd": "/workspace/[notes]", "valid": true },
+    { "cwd": "/workspace/with spaces", "valid": true },
+    { "cwd": "/workspace/项目", "valid": true }
+  ],
   "valid": [
     {
       "name": "empty",

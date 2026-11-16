@@ -34,7 +34,10 @@ import {
 import { ManagedToolExecutor } from './managed-runtime-tool-executor.js';
 import { ManagedMonitorRegistry } from './managed-monitor-registry.js';
 import * as historyProtocol from './managed-csi-file-history-protocol.js';
-import { historyFits, type ManagedCsiFileWorkerHandle } from './managed-csi-file-worker.js';
+import {
+  historyFits,
+  type ManagedCsiFileWorkerHandle,
+} from './managed-csi-file-worker.js';
 import {
   csiHistoryPreparationFixture,
   csiFileHistoryEnvelope,
@@ -994,50 +997,125 @@ describe('boot5 history HTTP ownership with labelled readback/composer seams', (
     expect(await snapshot.json()).toHaveProperty('observation', initial);
   });
 
-  it('budgets the durable preparation payload and intentRef, not just snapshots', () => {
-    // A medium preparation (20 invocations + two max-length paths, ~22 KiB
-    // serialized) plus 60 tracked files: the snapshot section alone fits the
-    // durable budget, and the preparation payload is exactly what must push
-    // the prepared record over the 64 KiB contract — BEFORE the runtime
-    // history changes, instead of failing the durable commit after effects.
-    const base = structuredClone(observation);
-    base.state.snapshots = [];
-    base.state.files = {};
-    const request: Record<string, unknown> = { identity: { sessionId: 's' } };
-    const ref = {
-      resourceId: 'r'.repeat(36),
-      kind: 'resource',
-      schemaVersion: 1,
-      byteLength: 128,
-      digest: 'sha256:' + 'd'.repeat(64),
-    } as const;
-    const invocation = {
-      executionCallId: 'e'.repeat(36),
-      callId: 'c'.repeat(36),
-      functionCallId: 'f'.repeat(36),
-      toolName: 'write_file',
-      partIndex: 0,
-      ordinal: 0,
-      requestDigest: 'sha256:' + 'd'.repeat(64),
-      inputRef: ref,
-      toolDefinitionRef: ref,
-    };
-    const preparation: import('./managed-csi-file-history-protocol.js').CsiHistoryPreparation = {
-      stage: 'intent',
-      turnId: 't'.repeat(36),
-      promptId: 'p-new',
-      batchId: 'b'.repeat(36),
-      invocations: Array.from({ length: 20 }, () => invocation),
-      paths: Array.from({ length: 2 }, () => '/' + 'p'.repeat(4095)),
-    };
-    const before = structuredClone(base);
-    before.state.files = Object.fromEntries(
-      Array.from({ length: 60 }, (_, i) => [`f${i}.txt`, null]),
+  function capacityPreparation(invocationCount: number) {
+    const sample = csiHistoryPreparationFixture();
+    const invocations = Array.from({ length: invocationCount }, (_, index) => ({
+      ...sample.preparation.invocations[index % 3],
+      executionCallId: `unit-execution-${index}`,
+      callId: randomUUID(),
+      functionCallId: `provider-${index}`,
+      partIndex: index,
+      ordinal: index,
+    }));
+    const preparation = { ...sample.preparation, invocations };
+    // Rebuild the published intent and its digest, retaining the real input
+    // and tool-definition resources from the existing readback fixture.
+    const evidence = sample.response.evidence;
+    const resources = evidence['resources'] as Array<{
+      reference: typeof sample.intentRef;
+      bytesBase64: string;
+    }>;
+    const intent = resources.find(
+      (resource) =>
+        resource.reference.resourceId === sample.intentRef.resourceId,
+    )!;
+    const body = JSON.parse(
+      Buffer.from(intent.bytesBase64, 'base64').toString(),
     );
-    expect(
-      historyFits(request, before, 'p-new', preparation.paths, preparation),
-    ).toBe(false);
+    body.preparation = preparation;
+    const bytes = Buffer.from(JSON.stringify(body));
+    const intentRef = {
+      ...sample.intentRef,
+      byteLength: bytes.length,
+      digest: createHash('sha256').update(bytes).digest('hex'),
+    };
+    const request = nativeReadback.readCsiNativeRequest({
+      ...sample.request,
+      subject: intentRef,
+    });
+    const response = nativeReadback.readCsiNativeResponse(
+      {
+        ...sample.response,
+        evidence: {
+          ...evidence,
+          intentRef,
+          resources: resources.map((resource) =>
+            resource === intent
+              ? { reference: intentRef, bytesBase64: bytes.toString('base64') }
+              : resource,
+          ),
+          members: invocations.map((invocation) => ({
+            sessionId: sample.observation.state.ownerSessionId,
+            promptId: preparation.promptId,
+            batchId: preparation.batchId,
+            callId: invocation.callId,
+            functionCallId: invocation.functionCallId,
+            partIndex: invocation.partIndex,
+            ordinal: invocation.ordinal,
+            argsDigest: invocation.requestDigest,
+            inputRef: invocation.inputRef,
+            toolDefinitionRef: invocation.toolDefinitionRef,
+            dispatchMode: 'deferred',
+          })),
+        },
+      },
+      request,
+    );
+    // Both production parsers must accept the fixture, including sorted,
+    // unique workspace-relative paths and matching durable-resource digests.
+    const current = historyProtocol.readCsiPreparationEvidence(response);
+    const envelope = csiFileHistoryEnvelope(candidate, installed, {
+      kind: 'csi-file-history',
+      version: 1,
+      action: 'prepare',
+      preparationRef: intentRef,
+    });
+    return { ...current, envelope, response, intentRef };
+  }
+
+  it('refuses an oversized valid preparation before retained-history effects', async () => {
+    mockMountFixture();
+    const sample = capacityPreparation(60);
+    const retained = retainedHistory(csiHistoryPreparationFixture());
+    vi.spyOn(nativeReadback, 'readCurrentCsiNative')
+      .mockResolvedValueOnce(nativeFixture.valid[0].response)
+      .mockResolvedValue(sample.response);
+    await start();
+    expect((await history('bind')).status).toBe(200);
+    const response = await prepare(sample.intentRef);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toHaveProperty(
+      'code',
+      'managed_csi_history_capacity_exceeded',
+    );
+    expect(retained.historyPrepare).not.toHaveBeenCalled();
   });
+
+  it.each([3, 60])(
+    'budgets a production-valid preparation with %i invocations independently',
+    (invocationCount) => {
+      const {
+        observation: before,
+        preparation,
+        envelope,
+      } = capacityPreparation(invocationCount);
+      // With preparation excluded, both fixed inputs must fit. This positive
+      // control prevents another budget component from masking a missing
+      // preparation reservation after future projection changes.
+      expect(
+        historyFits(envelope, before, preparation.promptId, preparation.paths),
+      ).toBe(true);
+      expect(
+        historyFits(
+          envelope,
+          before,
+          preparation.promptId,
+          preparation.paths,
+          preparation,
+        ),
+      ).toBe(invocationCount === 3);
+    },
+  );
 
   it('keeps preparation input errors retryable when history and storage are unchanged', async () => {
     mockMountFixture();

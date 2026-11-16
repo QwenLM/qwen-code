@@ -36,6 +36,7 @@ const fixture = JSON.parse(
     identity: { sessionId: string };
     installedContext: Record<string, unknown>;
   };
+  snapshotCwdCases: Array<{ cwd: string; valid: boolean }>;
   valid: Array<{ name: string; observation: unknown }>;
   invalid: Array<{ name: string; observation: unknown }>;
 };
@@ -64,6 +65,26 @@ describe('shared private CSI history wire contract', () => {
       readCsiFileHistoryObservation(candidate.observation, owner),
     ).toThrow();
   });
+  it.each(fixture.snapshotCwdCases)(
+    'matches the shared cwd normalization contract for $cwd',
+    ({ cwd, valid }) => {
+      const observation = readCsiFileHistoryObservation(
+        fixture.valid.find((entry) => entry.name === 'snapshot-cwd')!
+          .observation,
+        owner,
+      );
+      observation.state.snapshots[0].cwd = cwd;
+      if (valid) {
+        expect(readCsiFileHistoryObservation(observation, owner)).toEqual(
+          observation,
+        );
+      } else {
+        expect(() =>
+          readCsiFileHistoryObservation(observation, owner),
+        ).toThrow();
+      }
+    },
+  );
   it('requires the exact original installation and the three closed operations', () => {
     const boot = parseManagedCsiFileBoot(native.boot);
     const installed = fixture.request.installedContext;
