@@ -3671,6 +3671,61 @@ describe('SessionService', () => {
       expect(srcLines.every((r) => !r.forkedFrom)).toBe(true);
     });
 
+    it('carries Generated UI view state saved on the copied branch', async () => {
+      const card = 'gc_aaaaaaaaaaaaaaaaaaaaaa';
+      const state = (revision: number, value: string) => ({
+        version: 1,
+        cardId: card,
+        revision,
+        value,
+      });
+      const file = transcriptPath(oldId);
+      fs.mkdirSync(chatsDir(), { recursive: true });
+      writeJsonl(file, [
+        msg('u1', null, 'user', 0, 'hello', {
+          provenance: 'real_user',
+          cwd,
+        }),
+        msg('abandoned', 'u1', 'assistant', 1, 'old answer', { cwd }),
+        sys('state-abandoned', 'abandoned', 'generated_ui_state', 2, {
+          ...state(1, 'abandoned'),
+        }),
+        msg('u2', 'u1', 'assistant', 3, 'hi', {
+          provenance: 'assistant_output',
+          cwd,
+        }),
+        sys('state-kept', 'u2', 'generated_ui_state', 4, state(1, 'kept')),
+      ]);
+      expect(await service.readGeneratedUiStates(oldId)).toEqual({
+        states: new Map([[card, { revision: 1, value: 'kept' }]]),
+      });
+
+      const result = await fork();
+      const written = readJsonl(result.filePath);
+      expect(written.map((record) => record['uuid'])).toEqual([
+        'u1',
+        'u2',
+        'state-kept',
+      ]);
+      expect(written[2]).toMatchObject({ parentUuid: 'u2', sessionId: newId });
+      expect(await service.readGeneratedUiStates(newId)).toEqual({
+        states: new Map([[card, { revision: 1, value: 'kept' }]]),
+      });
+
+      expect(await service.readGeneratedUiStates(nestedId)).toEqual({});
+      const actualJsonl = await vi.importActual<
+        typeof import('../utils/jsonl-utils.js')
+      >('../utils/jsonl-utils.js');
+      vi.mocked(jsonl.readLinesWithIntegrity).mockImplementation(
+        actualJsonl.readLinesWithIntegrity,
+      );
+      fs.unlinkSync(file);
+      fs.mkdirSync(file);
+      await expect(service.readGeneratedUiStates(oldId)).resolves.toEqual({
+        unavailable: true,
+      });
+    });
+
     it('copies the selected branch approval state into a fork', async () => {
       const { file, lines } = seedSession();
       lines[1]!['parentUuid'] = 'approval-yolo';

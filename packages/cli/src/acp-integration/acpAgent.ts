@@ -189,6 +189,10 @@ import {
   SessionSourceError,
 } from '@qwen-code/qwen-code-core';
 import { getApiHistoryPromptId } from '@qwen-code/qwen-code-core/services/session-api-history.js';
+import {
+  GeneratedUiStateError,
+  GeneratedUiStateService,
+} from '@qwen-code/qwen-code-core/services/generated-ui-state.js';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { isDeepStrictEqual } from 'node:util';
@@ -676,6 +680,8 @@ const BTW_CHILD_TIMEOUT_MS = 55_000;
 const MCP_OAUTH_START_TIMEOUT_MS = 30_000;
 const SESSION_DRAIN_TIMEOUT_MS = 30_000;
 const SESSION_ID_RE = /^[0-9a-fA-F-]{32,36}$/;
+const GENERATED_UI_STATE_GET_METHOD = 'qwen/session/generated-ui/state/get';
+const GENERATED_UI_STATE_SET_METHOD = 'qwen/session/generated-ui/state/set';
 // Must be less than WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS (300s) in bridge.ts.
 const WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS = 295_000;
 
@@ -10117,6 +10123,26 @@ class QwenAgent implements Agent {
       return await this.extMethodInternal(method, normalizedParams);
     } catch (error) {
       if (
+        method === GENERATED_UI_STATE_GET_METHOD ||
+        method === GENERATED_UI_STATE_SET_METHOD
+      ) {
+        if (!(error instanceof GeneratedUiStateError)) {
+          debugLogger.error(
+            '[ACP] Generated UI state ext-method error:',
+            error,
+          );
+        }
+        return {
+          stateError:
+            error instanceof GeneratedUiStateError
+              ? { code: error.code, message: error.message }
+              : {
+                  code: 'state_unavailable',
+                  message: 'View state operation failed',
+                },
+        };
+      }
+      if (
         [
           'qwen/session/sources/list',
           'qwen/session/sources/upsert',
@@ -12264,6 +12290,36 @@ class QwenAgent implements Agent {
           name,
           arguments: args as Record<string, unknown>,
         });
+      }
+      case GENERATED_UI_STATE_GET_METHOD:
+      case GENERATED_UI_STATE_SET_METHOD: {
+        if (!this.isTrustedManagedParent()) {
+          throw RequestError.invalidParams(
+            undefined,
+            'View state requires a trusted private ACP parent',
+          );
+        }
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || !sessionId) {
+          throw RequestError.invalidParams(undefined, 'Invalid sessionId');
+        }
+        const service = this.sessionOrThrow(sessionId)
+          .getConfig()
+          .getGeneratedUiStateService();
+        if (!service)
+          throw new GeneratedUiStateError(
+            'state_unavailable',
+            'View state is unavailable without chat recording',
+          );
+        if (method === GENERATED_UI_STATE_GET_METHOD)
+          return { ...(await service.get(params['cardId'])) };
+        return {
+          ...(await service.set(
+            params['cardId'],
+            params['baseRevision'],
+            params['value'],
+          )),
+        };
       }
       case 'qwen/session/sources/list':
       case 'qwen/session/sources/upsert':
@@ -16960,6 +17016,7 @@ class QwenAgent implements Agent {
     }
     if (!provisionalWorkspace && chatRecording !== false) {
       this.bindSessionSourceService(config);
+      this.bindGeneratedUiStateService(config);
     }
     // A hidden agent session the session-agents orchestrator planned. Looked
     // up before `initialize()` so the session is marked before its tools are
@@ -17099,6 +17156,28 @@ class QwenAgent implements Agent {
       void this.surfaceMcpFailuresWhenReady(config);
     }
     return config;
+  }
+
+  private bindGeneratedUiStateService(config: Config): void {
+    if (!this.isTrustedManagedParent() || !config.getChatRecordingService())
+      return;
+    config.setGeneratedUiStateServiceFactory(() => {
+      const sessionId = config.getSessionId();
+      const recording = config.getChatRecordingService();
+      const sessions = config.getSessionService();
+      return new GeneratedUiStateService({
+        load: async () => {
+          if (!recording) return { unavailable: true };
+          await recording.flush();
+          return sessions.readGeneratedUiStates(sessionId);
+        },
+        persist: async (payload) => {
+          if (!recording) throw new Error('Chat recording unavailable');
+          await recording.recordGeneratedUiState(payload);
+        },
+        branchGeneration: () => recording?.getBranchGeneration() ?? 0,
+      });
+    });
   }
 
   private bindSessionSourceService(config: Config): void {
@@ -17759,6 +17838,7 @@ class QwenAgent implements Agent {
           await config.activateProvisionalWorkspace();
           this.assertManagedSessionAdmission(this.hostExecutionEngine);
           this.bindSessionSourceService(config);
+          this.bindGeneratedUiStateService(config);
           await config.registerSessionSourceTool();
           await config.getLlmClient().setTools();
           this.setupFileSystem(config);

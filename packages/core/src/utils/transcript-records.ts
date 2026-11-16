@@ -118,6 +118,7 @@ const MANAGED_SESSION_RECORD_SUBTYPES = new Set([
 
 const NON_CONVERSATION_RECORD_SUBTYPES = new Set([
   'session_sources_snapshot',
+  'generated_ui_state',
   ...MANAGED_SESSION_RECORD_SUBTYPES,
 ]);
 
@@ -146,6 +147,7 @@ const KNOWN_RECORD_SUBTYPES = new Set([
   'omni_recall',
   'session_execution_engine',
   'session_sources_snapshot',
+  'generated_ui_state',
   'session_approval_mode',
   'session_workflow_mode',
   'branch_checkpoint',

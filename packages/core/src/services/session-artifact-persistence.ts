@@ -236,7 +236,8 @@ export function selectActiveSideArtifactRecordUuids(
       !(
         record.type === 'system' &&
         (record.subtype === 'custom_title' ||
-          record.subtype === 'session_sources_snapshot')
+          record.subtype === 'session_sources_snapshot' ||
+          record.subtype === 'generated_ui_state')
       )
     ) {
       nextBlockingUuid = record.uuid;
