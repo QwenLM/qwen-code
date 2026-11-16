@@ -265,7 +265,11 @@ export interface ChatHeaderRenderInfo {
   onOpenTokenUsage?: () => void;
   /** Opens context usage for the current session, when available. */
   onOpenContextUsage?: () => void;
-  /** Number of session artifacts, when the artifacts header item is enabled. */
+  /**
+   * Number of session artifacts. Published together with `onOpenArtifacts`
+   * only when the artifacts section can actually be opened, so a count never
+   * appears without a way to act on it.
+   */
   artifactCount?: number;
   /** Opens the environment panel's artifacts section, when available. */
   onOpenArtifacts?: () => void;

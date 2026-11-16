@@ -22808,6 +22808,22 @@ export function App({
     },
     [persistEnvironmentPanelOpen],
   );
+  // The count and the opener are derived from one gate so an embedder never
+  // receives a count it cannot act on: the built-in header additionally
+  // requires both props, but the custom renderChatHeader contract does not.
+  const artifactsHeaderEntry =
+    artifactsHeaderItemVisible &&
+    mainView === 'chat' &&
+    environmentPanelItems.includes('artifacts') &&
+    connection.sessionId
+      ? {
+          artifactCount: artifacts.length,
+          onOpenArtifacts: () => {
+            handleEnvironmentPanelOpenChange(true);
+            setArtifactsExpandSignal((value) => value + 1);
+          },
+        }
+      : {};
   const dismissEnvironmentPanel = useCallback(() => {
     preserveEnvironmentPanelOnArtifactOpenRef.current = false;
     persistEnvironmentPanelOpen(false);
@@ -24283,20 +24299,7 @@ export function App({
                                 ),
                             }
                           : {}),
-                        artifactCount:
-                          artifactsHeaderItemVisible && mainView === 'chat'
-                            ? artifacts.length
-                            : undefined,
-                        onOpenArtifacts:
-                          artifactsHeaderItemVisible &&
-                          mainView === 'chat' &&
-                          environmentPanelItems.includes('artifacts') &&
-                          connection.sessionId
-                            ? () => {
-                                handleEnvironmentPanelOpenChange(true);
-                                setArtifactsExpandSignal((value) => value + 1);
-                              }
-                            : undefined,
+                        ...artifactsHeaderEntry,
                         onOpenLocalControlSettings:
                           showMobileAccess && workspaceContextActive
                             ? handleOpenLocalControlSettings
@@ -24368,22 +24371,7 @@ export function App({
                               )
                           : undefined
                       }
-                      artifactCount={
-                        artifactsHeaderItemVisible && mainView === 'chat'
-                          ? artifacts.length
-                          : undefined
-                      }
-                      onOpenArtifacts={
-                        artifactsHeaderItemVisible &&
-                        mainView === 'chat' &&
-                        environmentPanelItems.includes('artifacts') &&
-                        connection.sessionId
-                          ? () => {
-                              handleEnvironmentPanelOpenChange(true);
-                              setArtifactsExpandSignal((value) => value + 1);
-                            }
-                          : undefined
-                      }
+                      {...artifactsHeaderEntry}
                       onOpenLocalControlSettings={
                         showMobileAccess && workspaceContextActive
                           ? handleOpenLocalControlSettings

@@ -4377,6 +4377,41 @@ describe('task activity key', () => {
     // The entry must reveal the artifact list, not just open the panel shell.
     expect(panel?.textContent).toContain('report.html');
     expect(panel?.textContent).toContain('chart.html');
+
+    // Collapse the artifacts section, close the panel, then re-click the entry:
+    // the App glue (signal bump + prop pass) must re-expand the section, since
+    // the panel keeps its local section state while hidden.
+    const sectionHeader = Array.from(
+      panel!.querySelectorAll<HTMLButtonElement>('button[aria-expanded]'),
+    ).find((button) => button.textContent?.trim() === 'Artifacts');
+    expect(sectionHeader).toBeTruthy();
+    await act(async () => {
+      sectionHeader!.click();
+    });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="environment-panel"]')?.textContent,
+    ).not.toContain('report.html');
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="chat-context-header"] button[aria-label="Toggle environment information"]',
+        )
+        ?.click();
+    });
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-artifacts-entry]')
+        ?.click();
+    });
+    await flush();
+    const reopened = container.querySelector(
+      '[data-testid="environment-panel"]:not([hidden])',
+    );
+    expect(reopened).not.toBeNull();
+    expect(reopened?.textContent).toContain('report.html');
+    expect(reopened?.textContent).toContain('chart.html');
   });
 
   it('hides the header artifacts entry when the session has no artifacts', async () => {
@@ -4441,6 +4476,41 @@ describe('task activity key', () => {
         '[data-testid="environment-panel"]:not([hidden])',
       ),
     ).not.toBeNull();
+  });
+
+  it('withholds the artifact count from a custom header when the panel has no artifacts section', async () => {
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    mockSessionActions.loadArtifacts.mockResolvedValue({
+      artifacts: [
+        {
+          id: 'report',
+          kind: 'html',
+          storage: 'workspace',
+          source: 'tool',
+          status: 'available',
+          title: 'report',
+          workspacePath: 'report.html',
+          clientRetained: false,
+          createdAt: '2026-09-07T00:00:00.000Z',
+          updatedAt: '2026-09-07T00:00:00.000Z',
+        },
+      ],
+    });
+    const renderChatHeader = vi.fn(() => null);
+    renderApp({
+      renderChatHeader,
+      environmentPanel: { items: ['environment'] },
+    });
+    await flush();
+
+    // The count and the opener share one gate: with no artifacts section in
+    // the panel there is nothing to open, so no count may be published either.
+    const info = renderChatHeader.mock.lastCall?.[0];
+    expect(info?.artifactCount).toBeUndefined();
+    expect(info?.onOpenArtifacts).toBeUndefined();
   });
 
   it('persists the environment panel open state across reloads', async () => {

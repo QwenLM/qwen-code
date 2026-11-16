@@ -8473,15 +8473,34 @@ describe('DaemonSessionProvider', () => {
     });
 
     // With no embedded snapshot the early commit must not run: no recorded
-    // connection state ever carries restoredArtifacts. (The attach update may
-    // still set the session key alongside an undefined snapshot; that is not
-    // the early commit and carries no list.)
+    // connection state ever carries restoredArtifacts.
     expect(
       frames.every((frame) => frame.connection.restoredArtifacts === undefined),
     ).toBe(true);
     expect(frames[frames.length - 1]!.blocks).toMatchObject([
       { kind: 'assistant', text: 'replayed transcript' },
     ]);
+    // Ordering, not field absence: the attach update legitimately sets the key
+    // alongside an undefined snapshot, but only AFTER the replay injects. With
+    // the guard relaxed to `true`, flushSync would commit sessionId + key for
+    // session-2 in its own synchronous render before the store is reset, i.e.
+    // a frame carrying both before the replayed transcript appears.
+    const replayIdx = frames.findIndex((frame) =>
+      frame.blocks.some(
+        (block) =>
+          block.kind === 'assistant' && block.text === 'replayed transcript',
+      ),
+    );
+    expect(replayIdx).toBeGreaterThan(-1);
+    expect(
+      frames
+        .slice(0, replayIdx)
+        .some(
+          (frame) =>
+            frame.connection.sessionId === 'session-2' &&
+            frame.connection.restoredArtifactsSessionId === 'session-2',
+        ),
+    ).toBe(false);
   });
 
   it('clears prompt state and transcript when reconnect attaches a different session', async () => {
