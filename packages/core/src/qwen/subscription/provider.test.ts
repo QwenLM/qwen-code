@@ -243,6 +243,22 @@ describe('QwenSubscriptionProviderConfig', () => {
     expect(classifyQwenSubscriptionError(exactDayError).message).toBe(
       "You've used up your weekly credits. Your credits are expected to reset in 2 days. Please try again after the reset.",
     );
+
+    const oversizedError = new ClientError('HTTP 402', {
+      statusCode: 402,
+      code: 'insufficient_quota',
+      responseBody: JSON.stringify({
+        error: {
+          code: 'insufficient_quota',
+          quota: { member_type: 'plus' },
+          padding: 'x'.repeat(70_000),
+        },
+      }),
+    });
+    expect(classifyQwenSubscriptionError(oversizedError)).toMatchObject({
+      kind: 'quota_exhausted',
+      message: undefined,
+    });
   });
 
   it('attaches QwenCode User-Agent and captures gateway request id headers on inference requests', async () => {

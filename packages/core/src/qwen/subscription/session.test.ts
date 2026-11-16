@@ -361,6 +361,82 @@ describe('QwenSubscriptionSession', () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
+  it('clamps excessive 429 Retry-After values and clears expired cooldowns on disk', async () => {
+    await writeCredentials();
+    const fetch = fetchMock()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: 'slow_down' }), {
+          status: 429,
+          headers: {
+            'Content-Type': 'application/json',
+            'Retry-After': '99999999',
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          sub: 'u1',
+          name: 'Ada',
+          email: 'ada@example.com',
+          member_type: 'plus',
+        }),
+      );
+    const session = new QwenSubscriptionSession();
+
+    await expect(session.getUserInfo()).rejects.toMatchObject({
+      status: 429,
+      stage: 'userinfo',
+    });
+    const persisted = JSON.parse(
+      await fs.readFile(getQwenSubscriptionCredentialsPath(), 'utf8'),
+    ) as { retryAfter?: { userinfo?: number } };
+    expect(persisted.retryAfter?.userinfo).toBeLessThanOrEqual(
+      Date.now() + 10 * 60_000 + 1_000,
+    );
+
+    // Expire cooldown on disk and verify subsequent success removes it.
+    persisted.retryAfter = { userinfo: Date.now() - 1_000 };
+    await fs.writeFile(
+      getQwenSubscriptionCredentialsPath(),
+      JSON.stringify(persisted),
+    );
+    await expect(session.getUserInfo()).resolves.toMatchObject({
+      sub: 'u1',
+      member_type: 'plus',
+    });
+    const cleaned = JSON.parse(
+      await fs.readFile(getQwenSubscriptionCredentialsPath(), 'utf8'),
+    ) as { retryAfter?: unknown };
+    expect(cleaned.retryAfter).toBeUndefined();
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('parses flat 402 insufficient_quota responses from /models with normalized header request id', async () => {
+    await writeCredentials();
+    fetchMock().mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          code: 'insufficient_quota',
+          quota: { member_type: 'Lite' },
+        }),
+        {
+          status: 402,
+          headers: {
+            'Content-Type': 'application/json',
+            'x-gateway-request-id': 'gw_models_402',
+          },
+        },
+      ),
+    );
+
+    await expect(new QwenSubscriptionSession().getModels()).rejects.toMatchObject({
+      code: 'insufficient_quota',
+      status: 402,
+      description:
+        "You've used up your weekly credits. You can wait or run /upgrade to get more credits. (request_id: gw_models_402)",
+    });
+  });
+
   it('falls back to the cached catalog on server errors', async () => {
     await writeCredentials({ models: ['qwen3.8-max'] });
     fetchMock().mockResolvedValueOnce(new Response(null, { status: 500 }));

@@ -38,7 +38,7 @@ import {
 import {
   formatQwenSubscriptionQuotaDisplay,
   normalizeQwenSubscriptionRequestId,
-  qwenSubscriptionQuotaDisplay,
+  parseQwenSubscriptionQuotaFromBody,
 } from './quota.js';
 import {
   QwenSubscriptionOAuthClient,
@@ -82,9 +82,9 @@ const credentialSchema = z.object({
     .optional(),
   retryAfter: z
     .object({
-      device: z.number().optional(),
-      refresh: z.number().optional(),
-      userinfo: z.number().optional(),
+      device: z.number().nonnegative().finite().optional(),
+      refresh: z.number().nonnegative().finite().optional(),
+      userinfo: z.number().nonnegative().finite().optional(),
     })
     .optional(),
 });
@@ -93,6 +93,7 @@ type Credentials = z.infer<typeof credentialSchema>;
 const CREDENTIAL_FILE_MODE = 0o600;
 const CREDENTIAL_DIR_MODE = 0o700;
 const REFRESH_LEEWAY_MS = 30_000;
+const MAX_COOLDOWN_MS = 10 * 60_000;
 const MODELS_TIMEOUT_MS = 5_000;
 const MODELS_MAX_BYTES = 1024 * 1024;
 const ERROR_MAX_BYTES = 64 * 1024;
@@ -445,16 +446,34 @@ export class QwenSubscriptionSession {
         if (Object.keys(credentials.retryAfter).length === 0) {
           delete credentials.retryAfter;
         }
+        await this.write(credentials, assertCanCommit).catch((writeError) => {
+          runLogger.warn(
+            `[qwen-subscription] failed to clear ${stage} cooldown: ${
+              writeError instanceof Error
+                ? writeError.message
+                : String(writeError)
+            }`,
+          );
+        });
       }
       return result;
     } catch (error) {
       const failure = toSubscriptionOAuthError(error, stage);
       if (failure.status === 429 && failure.retryAfterMs) {
+        const clampedMs = Math.min(failure.retryAfterMs, MAX_COOLDOWN_MS);
         credentials.retryAfter = {
           ...credentials.retryAfter,
-          [stage]: Date.now() + failure.retryAfterMs,
+          [stage]: Date.now() + clampedMs,
         };
-        await this.write(credentials, assertCanCommit).catch(() => undefined);
+        await this.write(credentials, assertCanCommit).catch((writeError) => {
+          runLogger.warn(
+            `[qwen-subscription] failed to persist ${stage} cooldown: ${
+              writeError instanceof Error
+                ? writeError.message
+                : String(writeError)
+            }`,
+          );
+        });
       }
       throw failure;
     }
@@ -741,6 +760,12 @@ async function parseModelsError(
   let code =
     response.status === 401 ? 'invalid_token' : 'models_request_failed';
   let description: string | undefined;
+  const quota = parseQwenSubscriptionQuotaFromBody(
+    response.status,
+    text,
+    headerRequestId,
+  );
+  const quotaDescription = formatQwenSubscriptionQuotaDisplay(quota);
   if (text && text.length <= ERROR_MAX_BYTES) {
     try {
       const body = JSON.parse(text) as unknown;
@@ -751,19 +776,14 @@ async function parseModelsError(
             ? (record['error'] as Record<string, unknown>)
             : undefined;
         const rawCode = nested?.['code'] ?? nested?.['type'] ?? record['error'];
-        const quota = nested
-          ? qwenSubscriptionQuotaDisplay(
-              response.status,
-              nested,
-              headerRequestId,
-            )
-          : undefined;
         const rawDescription =
-          formatQwenSubscriptionQuotaDisplay(quota) ??
+          quotaDescription ??
           nested?.['message'] ??
           record['error_description'] ??
           record['message'];
-        if (typeof rawCode === 'string' && rawCode.trim()) {
+        if (quota) {
+          code = 'insufficient_quota';
+        } else if (typeof rawCode === 'string' && rawCode.trim()) {
           code = rawCode.trim();
         }
         if (typeof rawDescription === 'string' && rawDescription.trim()) {

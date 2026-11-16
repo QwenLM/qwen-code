@@ -54,8 +54,12 @@ export function logQwenSubscriptionGatewayResponse(response: Response): void {
   const requestId = response.headers.get('x-request-id');
   const gatewayRequestId = response.headers.get('x-gateway-request-id');
   if (requestId || gatewayRequestId) {
+    const normalizedRequestId =
+      normalizeQwenSubscriptionRequestId(requestId) ?? '-';
+    const normalizedGatewayRequestId =
+      normalizeQwenSubscriptionRequestId(gatewayRequestId) ?? '-';
     runLogger.debug(
-      `[qwen-subscription] gateway response status=${response.status} requestId=${requestId ?? '-'} gatewayRequestId=${gatewayRequestId ?? '-'}`,
+      `[qwen-subscription] gateway response status=${response.status} requestId=${normalizedRequestId} gatewayRequestId=${normalizedGatewayRequestId}`,
     );
   }
 }
@@ -78,15 +82,6 @@ export class QwenSubscriptionGatewayValve extends BaseValve {
     await this.getNext()?.invoke(input, output);
     if (output.raw) {
       logQwenSubscriptionGatewayResponse(output.raw);
-      const headerRequestId = resolveQwenSubscriptionHeaderRequestId(
-        output.raw.headers,
-      );
-      if (
-        headerRequestId &&
-        !normalizeQwenSubscriptionRequestId(output.requestId)
-      ) {
-        output.requestId = headerRequestId;
-      }
     }
   }
 }

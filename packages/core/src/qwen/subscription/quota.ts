@@ -12,6 +12,7 @@ export interface QwenSubscriptionQuotaDisplay {
 }
 
 const VALID_REQUEST_ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
+const MAX_QUOTA_ERROR_BODY_BYTES = 64 * 1024;
 
 export function normalizeQwenSubscriptionRequestId(
   value: unknown,
@@ -35,6 +36,8 @@ export function readQwenSubscriptionQuotaDisplay(
       : {}),
     ...(typeof data['resetAt'] === 'number' &&
     Number.isInteger(data['resetAt']) &&
+    data['resetAt'] > 0 &&
+    data['resetAt'] < 1e11 &&
     Number.isFinite(new Date(data['resetAt'] * 1000).getTime())
       ? { resetAt: data['resetAt'] }
       : {}),
@@ -72,7 +75,13 @@ export function parseQwenSubscriptionQuotaFromBody(
   responseBody: string | undefined,
   requestId?: string,
 ): QwenSubscriptionQuotaDisplay | undefined {
-  if (status !== 402 || !responseBody) return undefined;
+  if (
+    status !== 402 ||
+    !responseBody ||
+    responseBody.length > MAX_QUOTA_ERROR_BODY_BYTES
+  ) {
+    return undefined;
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(responseBody) as unknown;
@@ -108,7 +117,8 @@ export function formatQwenSubscriptionQuotaDisplay(
 ): string | undefined {
   const quota = readQwenSubscriptionQuotaDisplay(value);
   if (!quota) return undefined;
-  const { memberType: member, resetAt } = quota;
+  const { memberType, resetAt } = quota;
+  const member = memberType?.trim().toLowerCase();
   const weekly = member === 'lite' || member === 'plus' || member === 'pro';
   const upgrade = member === 'lite' || member === 'plus';
   let reset = '';
