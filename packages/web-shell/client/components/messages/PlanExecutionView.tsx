@@ -723,7 +723,7 @@ export function PlanExecutionView({
               className={styles.nestedExecution}
               data-plan-interactive
               key={task.id}
-              style={{ paddingLeft: `${Math.min(depth, 3) * 12}px` }}
+              style={{ paddingInlineStart: `${Math.min(depth, 3) * 12}px` }}
               onClick={() => openSubagentDetails(nestedTool)}
               disabled={!onOpenSubagent}
               aria-disabled={
@@ -740,7 +740,7 @@ export function PlanExecutionView({
             <div
               className={styles.nestedExecution}
               key={task.id}
-              style={{ paddingLeft: `${Math.min(depth, 3) * 12}px` }}
+              style={{ paddingInlineStart: `${Math.min(depth, 3) * 12}px` }}
             >
               {content}
             </div>
@@ -752,7 +752,7 @@ export function PlanExecutionView({
             className={styles.nestedExecution}
             data-plan-interactive
             key={nestedTool.callId}
-            style={{ paddingLeft: `${Math.min(depth, 3) * 12}px` }}
+            style={{ paddingInlineStart: `${Math.min(depth, 3) * 12}px` }}
             onClick={() => openSubagentDetails(nestedTool)}
             disabled={!onOpenSubagent}
             aria-disabled={

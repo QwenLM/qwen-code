@@ -70,7 +70,7 @@
     var(--link-color, var(--agent-blue-500))
   );
   font: inherit;
-  text-align: left;
+  text-align: start;
   text-decoration: underline;
   white-space: normal;
   overflow-wrap: anywhere;

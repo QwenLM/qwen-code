@@ -34,7 +34,11 @@ import {
   removeDaemonTokenFromUrl,
   waitForDaemonTokenMessage,
 } from './config/daemon';
-import { normalizeLanguage, type WebShellLanguage } from './i18n';
+import {
+  languageDirection,
+  normalizeLanguage,
+  type WebShellLanguage,
+} from './i18n';
 import { WebShellThemeId, type WebShellTheme } from './themeContext';
 import { DEFAULT_BRAND_NAME, type WebShellResolvedBrand } from './brandContext';
 import { inferStandaloneBasePath } from './utils/sessionPath';
@@ -317,6 +321,11 @@ export function StandaloneApp({
       );
     }
   }, [documentTheme]);
+  useEffect(() => {
+    const root = document.documentElement;
+    root.lang = documentLanguage;
+    root.dir = languageDirection(documentLanguage);
+  }, [documentLanguage]);
   // A user's in-app choice becomes the entry's own opinion: it overrides
   // settings on later loads and is persisted for the pre-paint script.
   const handleThemeChange = useCallback((nextTheme: WebShellTheme) => {

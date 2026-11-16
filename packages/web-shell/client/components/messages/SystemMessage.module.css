@@ -60,7 +60,7 @@
   font-family: var(--font-sans, system-ui, sans-serif);
   font-size: 14px;
   line-height: 1.5;
-  text-align: left;
+  text-align: start;
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -146,7 +146,7 @@
   width: fit-content;
   align-items: center;
   margin-top: 4px;
-  margin-left: -2px;
+  margin-inline-start: -2px;
   opacity: 0;
   transition: opacity 0.12s ease;
 }

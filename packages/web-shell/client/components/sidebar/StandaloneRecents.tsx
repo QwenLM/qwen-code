@@ -542,7 +542,11 @@ export function StandaloneRecents({
                 {expanded ? (
                   <ChevronDownIcon size={14} aria-hidden="true" />
                 ) : (
-                  <ChevronRightIcon size={14} aria-hidden="true" />
+                  <ChevronRightIcon
+                    size={14}
+                    className="rtl:-scale-x-100"
+                    aria-hidden="true"
+                  />
                 )}
               </>
             ) : (

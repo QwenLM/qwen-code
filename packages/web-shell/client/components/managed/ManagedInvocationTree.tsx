@@ -137,7 +137,7 @@ function Branch({
   }, [provider, sessionId, clientId, ancestors, budget, cursor, running]);
   const items = page ? budget.admit(sessionId, page.items) : [];
   return (
-    <div className="ml-3 space-y-2 border-l pl-3">
+    <div className="ms-3 space-y-2 border-s ps-3">
       {error && <p role="alert">{t('childUnavailable')}</p>}
       {!page && !error && <p role="status">{t('loading')}</p>}
       {page?.availability === 'partial' && <p role="status">{t('partial')}</p>}

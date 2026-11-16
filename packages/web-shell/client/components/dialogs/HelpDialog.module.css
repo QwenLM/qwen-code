@@ -87,7 +87,7 @@
 .shortcutKey {
   min-width: 0;
   color: var(--agent-blue-500);
-  text-align: right;
+  text-align: end;
   overflow-wrap: anywhere;
   white-space: nowrap;
 }
@@ -129,7 +129,7 @@
   color: inherit;
   cursor: pointer;
   font: inherit;
-  text-align: left;
+  text-align: start;
 }
 
 .commandName {

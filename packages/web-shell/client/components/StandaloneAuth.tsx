@@ -160,6 +160,43 @@ const COPY: Record<WebShellLanguage, AuthCopy> = {
   // Not translated yet — same partial-catalog policy as the ru table in
   // i18n.tsx (#13391): ru reuses the EN copy.
   ru: EN_COPY,
+  ar: {
+    pairingFailed:
+      'فشل الاقتران أو انتهت صلاحية رمز QR. امسح رمز QR جديداً، أو أدخل رمز الخادم الخفي.',
+    heading: 'الاتصال بـ Qwen Code',
+    connecting: 'جارٍ الاتصال…',
+    starting: 'الخادم الخفي قيد التشغيل…',
+    unreachable: 'تعذر الوصول إلى الخادم الخفي. جارٍ إعادة المحاولة…',
+    remoteUnreachable:
+      'تعذر الوصول إلى الخادم الخفي. جارٍ إعادة المحاولة… لا يستطيع المتصفح التمييز بين فشل الشبكة أو الشهادة أو المصادر المشتركة. راجع إعداد الاتصال البعيد أدناه.',
+    notReady: 'الخادم الخفي غير جاهز بعد. جارٍ إعادة المحاولة…',
+    startFailed: 'فشل بدء تشغيل الخادم الخفي.',
+    invalidToken:
+      'الرمز غير صالح أو منتهي الصلاحية. انسخ الرمز الحالي من إعدادات الاتصال البعيد للخادم أو مخرجات البدء.',
+    enterToken:
+      'أدخل bearer token من إعدادات الاتصال البعيد للخادم أو مخرجات البدء.',
+    policyBlocked:
+      'رفض الخادم أو الوكيل الطلب (HTTP 403). تحقق من قواعد الوصول وسياسة Host وأصول الصفحات المسموح بها في إعدادات الاتصال البعيد.',
+    invalidAddress: 'عنوان الخادم الخفي غير صالح. أدخل أصل HTTP أو HTTPS.',
+    mixedContent:
+      'لا يمكن لهذه الصفحة الآمنة HTTPS الاتصال بخادم خفي بعيد عبر HTTP. استخدم عنوان HTTPS للخدمة البعيدة.',
+    addressChanged:
+      'تم إيقاف الاتصال مؤقتاً. اختر اتصال لاستخدام العنوان المُدخل.',
+    confirmTarget:
+      'تشير هذه الصفحة إلى خادم خفي لم يتصل به هذا المتصفح من قبل. اتصل فقط إذا كنت تثق به.',
+    remoteHint:
+      'يُرسل الرمز إلى العنوان المعروض أعلاه. أدخل فقط رمزاً صادراً عن ذلك الخادم الخفي.',
+    switchUnavailable:
+      'تخزين المتصفح غير متاح، لذا تعذر نقل الرمز إلى ذلك الخادم الخفي.',
+    addressLabel: 'عنوان الخادم الخفي',
+    tokenLabel: 'Bearer token (اختياري)',
+    connect: 'اتصال',
+    local: 'العودة إلى مساحات العمل المحلية',
+    remoteAddCancel: 'إلغاء إضافة مساحة العمل',
+    connectionAddCancel: 'إلغاء إضافة الاتصال',
+    retry: 'إعادة المحاولة',
+    hint: 'يمنح هذا الرمز صلاحية الوصول الكاملة للخادم الخفي. أدخله فقط في صفحة فتحتها من طرفية الخادم الخفي أو رمز QR الخاص به.',
+  },
 };
 
 /** `Retry-After` in milliseconds (delta-seconds or HTTP-date), or undefined. */
@@ -432,6 +469,8 @@ export function StandaloneAuth({
         data-web-shell-root
         data-web-shell-shadcn
         data-web-shell-gate
+        lang={language}
+        dir={language === 'ar' ? 'rtl' : 'ltr'}
         className={`flex min-h-screen items-center justify-center bg-background p-6 text-foreground ${
           theme === WebShellThemeId.Light
             ? AppStyles.themeLight
@@ -458,6 +497,8 @@ export function StandaloneAuth({
       data-web-shell-root
       data-web-shell-shadcn
       data-web-shell-gate
+      lang={language}
+      dir={language === 'ar' ? 'rtl' : 'ltr'}
       className={`flex min-h-screen items-center justify-center bg-background p-6 text-foreground ${
         theme === WebShellThemeId.Light
           ? AppStyles.themeLight

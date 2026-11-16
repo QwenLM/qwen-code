@@ -91,7 +91,8 @@
 }
 
 .footerWithExplanation {
-  margin: 16px 0 0 24px;
+  margin-block: 16px 0;
+  margin-inline: 24px 0;
   padding-top: 12px;
   border-top: 1px dashed var(--border);
 }
@@ -161,7 +162,7 @@
 
 .desc {
   margin-top: 4px;
-  padding-left: 24px;
+  padding-inline-start: 24px;
   color: var(--muted-foreground);
   font-size: 12px;
   font-weight: 400;
@@ -176,8 +177,8 @@
 }
 
 .content {
-  margin: 10px 0 0;
-  margin-left: 24px;
+  margin-block: 10px 0;
+  margin-inline: 24px 0;
   padding: 6px 10px;
   background: var(--secondary);
   border-radius: 7px;
@@ -201,8 +202,8 @@
 .code {
   display: flex;
   flex-direction: column;
-  margin: 10px 0 0;
-  margin-left: 24px;
+  margin-block: 10px 0;
+  margin-inline: 24px 0;
   padding: 8px 12px;
   background: var(--secondary);
   border-radius: 7px;
@@ -247,8 +248,9 @@
   flex-wrap: wrap;
   gap: 16px;
   min-width: 0;
-  margin: 0 0 0 auto;
-  padding-left: 0;
+  margin-block: 0;
+  margin-inline: auto 0;
+  padding-inline-start: 0;
 }
 
 .option {
@@ -329,7 +331,7 @@
   .options {
     flex: 1 0 100%;
     justify-content: flex-start;
-    margin-left: 0;
+    margin-inline-start: 0;
   }
 }
 

@@ -1,7 +1,7 @@
 .line {
   flex-shrink: 0;
-  padding: 4px 0;
-  padding-left: 2ch;
+  padding-block: 4px;
+  padding-inline: 2ch 0;
   font-size: 14px;
   color: var(--muted-foreground);
 }

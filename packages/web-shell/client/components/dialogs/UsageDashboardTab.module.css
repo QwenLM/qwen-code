@@ -313,7 +313,7 @@
 }
 
 .skillTable th {
-  text-align: left;
+  text-align: start;
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -332,7 +332,7 @@
 }
 
 .right {
-  text-align: right;
+  text-align: end;
 }
 
 /* Daily sessions bar chart */

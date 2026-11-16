@@ -11,7 +11,7 @@
 .content {
   min-height: 0;
   overflow: auto;
-  padding-right: 2px;
+  padding-inline-end: 2px;
 }
 
 .question {

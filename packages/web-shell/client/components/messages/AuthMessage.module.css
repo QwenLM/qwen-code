@@ -82,7 +82,7 @@
   color: var(--foreground);
   background: transparent;
   font: inherit;
-  text-align: left;
+  text-align: start;
   cursor: pointer;
 }
 
@@ -184,5 +184,5 @@
 
 .newBadge {
   color: var(--agent-purple-500, #c4a0ed);
-  margin-left: 6px;
+  margin-inline-start: 6px;
 }

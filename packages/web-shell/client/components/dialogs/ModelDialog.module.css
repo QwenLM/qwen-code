@@ -48,7 +48,7 @@
   color: var(--foreground);
   cursor: pointer;
   font: inherit;
-  text-align: left;
+  text-align: start;
 }
 
 .row:hover,
@@ -81,7 +81,7 @@
 .number {
   min-width: 28px;
   color: var(--muted-foreground);
-  text-align: right;
+  text-align: end;
 }
 
 .provider {

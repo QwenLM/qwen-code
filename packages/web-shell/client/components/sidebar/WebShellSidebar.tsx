@@ -968,6 +968,7 @@ function SidebarSessionSurface({
   content?: ReactNode;
   header?: ReactNode;
 }) {
+  const { isRtl } = useI18n();
   const children = (
     <>
       {header}
@@ -1121,7 +1122,7 @@ function SidebarSessionSurface({
         )}
         <PopoverContent
           ref={contentRef}
-          side="right"
+          side={isRtl ? 'left' : 'right'}
           align="start"
           sideOffset={home ? 16 : 8}
           collisionPadding={8}
@@ -1317,7 +1318,7 @@ export function WebShellSidebar({
     }
     open?.();
   };
-  const { t } = useI18n();
+  const { t, isRtl } = useI18n();
   const brand = useBrand();
   const brandName = useBrandName();
   const connection = useConnection();
@@ -5256,7 +5257,7 @@ export function WebShellSidebar({
         // Pointer capture is best-effort; window listeners still handle drag.
       }
       function getRawWidth(clientX: number) {
-        return startWidth + clientX - startX;
+        return startWidth + (isRtl ? startX - clientX : clientX - startX);
       }
       function restoreExpandedWidth() {
         const restoredWidth = clampSidebarWidth(
@@ -5352,6 +5353,7 @@ export function WebShellSidebar({
     },
     [
       collapsed,
+      isRtl,
       mobileOpen,
       onCollapsedChange,
       sidebarWidth,
@@ -5880,7 +5882,7 @@ export function WebShellSidebar({
               {tree.expanded ? (
                 <ChevronDownIcon size={12} />
               ) : (
-                <ChevronRightIcon size={12} />
+                <ChevronRightIcon size={12} className="rtl:-scale-x-100" />
               )}
             </button>
           )}
@@ -7112,9 +7114,17 @@ export function WebShellSidebar({
       }
     >
       {!navigationExpanded && !mobileOpen ? (
-        <PanelLeftOpenIcon size={16} strokeWidth={1.2} />
+        <PanelLeftOpenIcon
+          size={16}
+          strokeWidth={1.2}
+          className="rtl:-scale-x-100"
+        />
       ) : (
-        <PanelLeftCloseIcon size={16} strokeWidth={1.2} />
+        <PanelLeftCloseIcon
+          size={16}
+          strokeWidth={1.2}
+          className="rtl:-scale-x-100"
+        />
       )}
     </button>
   );
@@ -7822,7 +7832,7 @@ export function WebShellSidebar({
                         </button>
                       </PopoverTrigger>
                       <PopoverContent
-                        side="right"
+                        side={isRtl ? 'left' : 'right'}
                         align="end"
                         sideOffset={8}
                         className={styles.moreMenu}
@@ -7881,7 +7891,7 @@ export function WebShellSidebar({
             </nav>
             <PopoverContent
               role="tooltip"
-              side="right"
+              side={isRtl ? 'left' : 'right'}
               sideOffset={8}
               className="pointer-events-none w-auto bg-black px-3 py-1.5 text-xs text-white duration-0 data-open:animate-none data-closed:animate-none"
               onOpenAutoFocus={(event) => event.preventDefault()}
@@ -7974,7 +7984,7 @@ export function WebShellSidebar({
                             activityNeedsAttention(entry),
                         ) && (
                           <span
-                            className="absolute right-1 top-1 size-1.5 rounded-full bg-primary"
+                            className="absolute end-1 top-1 size-1.5 rounded-full bg-primary"
                             data-activity-attention
                           />
                         )}
@@ -8033,7 +8043,7 @@ export function WebShellSidebar({
                   </button>
                 ) : null}
                 {sessionActionControlsVisible && (
-                  <div className="ml-auto flex shrink-0 items-center gap-1">
+                  <div className="ms-auto flex shrink-0 items-center gap-1">
                     {displayMenuEnabled && hideProjectHeader && (
                       <SessionSortMenu
                         value={sessionSort}

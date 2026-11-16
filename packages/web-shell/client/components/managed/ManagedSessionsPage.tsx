@@ -334,6 +334,26 @@ const FAILURE_MESSAGES: Record<string, readonly [string, string]> = {
   ],
 };
 
+const FAILURE_AR_MESSAGES: Record<string, string> = {
+  model_payment_required:
+    'يتطلب واجهة برمجة النموذج الدفع (HTTP 402). تحقق من رصيد حساب المزوّد والفوترة قبل إعادة المحاولة.',
+  model_authentication_failed:
+    'فشلت مصادقة واجهة برمجة النموذج (HTTP 401). تحقق من بيانات اعتماد المزوّد المهيأة.',
+  model_access_denied:
+    'تم رفض الوصول إلى واجهة برمجة النموذج (HTTP 403). تحقق من حساب المزوّد وأذونات النموذج.',
+  model_request_timeout:
+    'انتهت مهلة طلب واجهة برمجة النموذج. حاول مرة أخرى لاحقاً.',
+  model_rate_limited:
+    'تم تجاوز حد المعدل لواجهة برمجة النموذج (HTTP 429). انتظر وحاول لاحقاً.',
+  model_request_rejected:
+    'رفضت واجهة برمجة النموذج الطلب. تحقق من تهيئة النموذج والإدخال.',
+  model_service_unavailable:
+    'خدمة واجهة برمجة النموذج غير متاحة. حاول مرة أخرى لاحقاً.',
+  model_request_failed:
+    'فشل طلب واجهة برمجة النموذج. افحص سجلات الخادم لهذه الجلسة قبل إعادة المحاولة.',
+  hosted_turn_failed: 'فشل الدور. افحص سجلات الخادم لهذه الجلسة لتحديد السبب.',
+};
+
 function ManagedSessionsContent({
   sessionId,
   workspaceCreationOpen,
@@ -1175,7 +1195,9 @@ function ManagedSessionsContent({
         setError(
           language === 'zh-CN'
             ? '此会话暂不支持 BTW/回顾。'
-            : 'BTW/recap is unavailable for this session.',
+            : language === 'ar'
+              ? 'الأسئلة الجانبية والملخص غير متاحين لهذه الجلسة.'
+              : 'BTW/recap is unavailable for this session.',
         );
         return;
       }
@@ -1187,7 +1209,9 @@ function ManagedSessionsContent({
         setError(
           language === 'zh-CN'
             ? 'BTW 仅支持文本问题，/recap 不接受参数。'
-            : 'BTW accepts text only; /recap accepts no arguments.',
+            : language === 'ar'
+              ? 'يقبل BTW نصاً فقط؛ ولا يقبل /recap أي وسائط.'
+              : 'BTW accepts text only; /recap accepts no arguments.',
         );
         return;
       }
@@ -1200,7 +1224,9 @@ function ManagedSessionsContent({
         setError(
           language === 'zh-CN'
             ? '此会话暂不支持 BTW/回顾生成。'
-            : 'BTW/recap generation is unavailable for this session.',
+            : language === 'ar'
+              ? 'توليد الأسئلة الجانبية/الملخص غير متاح لهذه الجلسة.'
+              : 'BTW/recap generation is unavailable for this session.',
         );
         return;
       }
@@ -1414,8 +1440,11 @@ function ManagedSessionsContent({
       summary.capabilities.inputAttachments === true && worktreeReady;
   const { request: requestTurnCancel, busy: turnCancelBusy } = turnCancel;
   const failureMessage = summary?.failure
-    ? (FAILURE_MESSAGES[summary.failure.code]?.[language === 'zh-CN' ? 1 : 0] ??
-      summary.failure.message)
+    ? ((language === 'ar'
+        ? FAILURE_AR_MESSAGES[summary.failure.code]
+        : FAILURE_MESSAGES[summary.failure.code]?.[
+            language === 'zh-CN' ? 1 : 0
+          ]) ?? summary.failure.message)
     : undefined;
   const cancel = useCallback(async () => {
     const abort = lifetime.current;
@@ -1454,7 +1483,11 @@ function ManagedSessionsContent({
             size="sm"
             onClick={() => sideQueries.show('recap')}
           >
-            {language === 'zh-CN' ? '回顾' : 'Recap'}
+            {language === 'zh-CN'
+              ? '回顾'
+              : language === 'ar'
+                ? 'ملخص'
+                : 'Recap'}
           </Button>
         )}
       </>
@@ -1894,7 +1927,7 @@ function ManagedSessionsContent({
                       ? 'secondary'
                       : 'ghost'
                   }
-                  className="h-auto min-w-0 flex-1 shrink justify-start py-2 text-left"
+                  className="h-auto min-w-0 flex-1 shrink justify-start py-2 text-start"
                   aria-current={
                     navigationActive && sessionId === session.sessionId
                       ? 'page'
@@ -2541,7 +2574,7 @@ function ManagedSessionsContent({
                         type="button"
                         variant={selected ? 'secondary' : 'outline'}
                         aria-pressed={selected}
-                        className="h-auto max-w-full flex-col items-start whitespace-normal text-left"
+                        className="h-auto max-w-full flex-col items-start whitespace-normal text-start"
                         onClick={() => approvals.select(action)}
                       >
                         <span className="text-xs text-muted-foreground">
@@ -2759,7 +2792,9 @@ function ManagedSessionsContent({
                           description:
                             language === 'zh-CN'
                               ? '私下继续追问当前会话'
-                              : 'Ask a private follow-up',
+                              : language === 'ar'
+                                ? 'طرح سؤال متابعة خاص'
+                                : 'Ask a private follow-up',
                           source: 'builtin-command',
                           displayCategory: 'system' as const,
                         },
@@ -2772,7 +2807,9 @@ function ManagedSessionsContent({
                           description:
                             language === 'zh-CN'
                               ? '回顾已完成的对话'
-                              : 'Recap the completed conversation',
+                              : language === 'ar'
+                                ? 'تلخيص المحادثة المكتملة'
+                                : 'Recap the completed conversation',
                           source: 'builtin-command',
                           displayCategory: 'system' as const,
                         },
@@ -3230,7 +3267,7 @@ function ManagedSessionsContent({
                     summary &&
                     !summary.capabilities.canSend &&
                     !alignManagedChatWithHost && (
-                      <span className="mr-auto text-sm text-muted-foreground">
+                      <span className="me-auto text-sm text-muted-foreground">
                         {t('managed.newRequired')}
                       </span>
                     )}

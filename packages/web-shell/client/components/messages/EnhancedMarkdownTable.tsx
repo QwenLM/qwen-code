@@ -1003,7 +1003,7 @@ function ValueFilterSection({
           }
         />
         <span>{t('markdownTable.filter.selectVisible')}</span>
-        <span className="ml-auto text-muted-foreground tabular-nums">
+        <span className="ms-auto text-muted-foreground tabular-nums">
           {filteredOptions.length}
         </span>
       </Label>
@@ -1022,7 +1022,7 @@ function ValueFilterSection({
               onCheckedChange={() => onToggleValue(option.value)}
             />
             <span className="min-w-0 flex-1 truncate">{option.label}</span>
-            <span className="ml-auto text-muted-foreground tabular-nums">
+            <span className="ms-auto text-muted-foreground tabular-nums">
               {option.count}
             </span>
           </Label>
@@ -1620,7 +1620,7 @@ export function EnhancedTable({
   table: EnhancedTableData;
   toolbarExtra?: ReactNode;
 }) {
-  const { language, t } = useI18n();
+  const { language, isRtl, t } = useI18n();
   const registerInteractionBlocker = useInteractionBlocker();
   const portalRoot = useWebShellPortalRoot();
   const tableId = useId();
@@ -2220,8 +2220,11 @@ export function EnhancedTable({
       );
     };
     const resizeColumn = (event: MouseEvent) => {
+      const deltaX = isRtl
+        ? resizingColumn.startX - event.clientX
+        : event.clientX - resizingColumn.startX;
       pendingResizeWidthRef.current = clampColumnWidth(
-        resizingColumn.startWidth + event.clientX - resizingColumn.startX,
+        resizingColumn.startWidth + deltaX,
       );
       if (resizeFrameRef.current) return;
       resizeFrameRef.current = requestAnimationFrame(applyPendingResize);
@@ -2248,7 +2251,7 @@ export function EnhancedTable({
       }
       pendingResizeWidthRef.current = null;
     };
-  }, [resizingColumn]);
+  }, [isRtl, resizingColumn]);
 
   useEffect(() => {
     if (detailRowKey && !visibleRows.some((row) => row.key === detailRowKey)) {
@@ -2594,9 +2597,13 @@ export function EnhancedTable({
 
     let delta = 0;
     if (event.key === 'ArrowRight') {
-      delta = KEYBOARD_COLUMN_RESIZE_STEP;
+      delta = isRtl
+        ? -KEYBOARD_COLUMN_RESIZE_STEP
+        : KEYBOARD_COLUMN_RESIZE_STEP;
     } else if (event.key === 'ArrowLeft') {
-      delta = -KEYBOARD_COLUMN_RESIZE_STEP;
+      delta = isRtl
+        ? KEYBOARD_COLUMN_RESIZE_STEP
+        : -KEYBOARD_COLUMN_RESIZE_STEP;
     }
 
     if (delta === 0) return;
@@ -3531,7 +3538,7 @@ export function EnhancedTable({
             <DialogClose asChild>
               <Button
                 variant="ghost"
-                className="absolute top-2 right-2"
+                className="absolute top-2 end-2"
                 size="icon-sm"
                 aria-label={t('markdownTable.close')}
               >

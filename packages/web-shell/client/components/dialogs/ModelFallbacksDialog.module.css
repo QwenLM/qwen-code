@@ -34,7 +34,7 @@
   background: var(--secondary);
   color: var(--foreground);
   font-size: 14px;
-  text-align: left;
+  text-align: start;
   cursor: pointer;
 }
 

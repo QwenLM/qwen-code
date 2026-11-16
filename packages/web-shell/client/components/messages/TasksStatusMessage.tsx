@@ -390,7 +390,7 @@ export function TasksStatusMessage({
   onOpenSubagent?: OpenSubagentDetails;
   onOpenMonitor?: (task: DaemonSessionMonitorTaskStatus) => void;
 }) {
-  const { t } = useI18n();
+  const { t, isRtl } = useI18n();
   const available = useDaemonAvailability() === 'available';
   const availability = useDaemonAvailabilityController();
   const documentMode = useTranscriptRenderMode() === 'document';
@@ -755,7 +755,7 @@ export function TasksStatusMessage({
         return;
       }
 
-      if (event.key === 'ArrowLeft') {
+      if (event.key === (isRtl ? 'ArrowRight' : 'ArrowLeft')) {
         event.preventDefault();
         event.stopPropagation();
         if (step === 'detail') {
@@ -1052,7 +1052,7 @@ export function TasksStatusMessage({
                     className={styles.nameCell}
                     style={
                       indentLevels > 0
-                        ? { paddingLeft: `${indentLevels * 16}px` }
+                        ? { paddingInlineStart: `${indentLevels * 16}px` }
                         : undefined
                     }
                   >

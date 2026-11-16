@@ -189,7 +189,7 @@ export function EnvironmentPanel({
   onOpenArtifact,
   onDismiss,
 }: EnvironmentPanelProps) {
-  const { t } = useI18n();
+  const { t, isRtl } = useI18n();
   const panelRef = useRef<HTMLElement | null>(null);
   const agents: readonly EnvironmentAgentTask[] =
     agentTasks ??
@@ -290,7 +290,9 @@ export function EnvironmentPanel({
             onClick={() => setEnvironmentExpanded((expanded) => !expanded)}
           >
             <span>{t('environment.title')}</span>
-            {!environmentExpanded && <ChevronRightIcon />}
+            {!environmentExpanded && (
+              <ChevronRightIcon className="rtl:-scale-x-100" />
+            )}
           </button>
           {environmentExpanded && (
             <div className={styles.sectionContent}>
@@ -327,7 +329,7 @@ export function EnvironmentPanel({
                   workspaceCwd={gitWorkspaceCwd}
                   gitCwd={gitCwd}
                   gitSessionId={gitSessionId}
-                  side="left"
+                  side={isRtl ? 'right' : 'left'}
                   status={gitStatus}
                   onOpenDiff={onOpenGitDiff}
                   onOpenCommit={onOpenGitCommit}
@@ -341,7 +343,9 @@ export function EnvironmentPanel({
                   >
                     <GitBranchIcon />
                     <span className={styles.branchName}>{activeBranch}</span>
-                    <ChevronRightIcon className={styles.rowActionIcon} />
+                    <ChevronRightIcon
+                      className={`${styles.rowActionIcon} rtl:-scale-x-100`}
+                    />
                   </button>
                 </BranchPickerPopover>
               ) : (
@@ -386,7 +390,9 @@ export function EnvironmentPanel({
               onClick={() => setAgentsExpanded((expanded) => !expanded)}
             >
               <span>{t('environment.agents')}</span>
-              {!agentsExpanded && <ChevronRightIcon />}
+              {!agentsExpanded && (
+                <ChevronRightIcon className="rtl:-scale-x-100" />
+              )}
             </button>
             {onOpenAgentWorkflow && (
               <button
@@ -459,7 +465,9 @@ export function EnvironmentPanel({
             onClick={() => setTasksExpanded((expanded) => !expanded)}
           >
             <span>{t('tasks.title')}</span>
-            {!tasksExpanded && <ChevronRightIcon />}
+            {!tasksExpanded && (
+              <ChevronRightIcon className="rtl:-scale-x-100" />
+            )}
           </button>
           {tasksExpanded && (
             <ul className={styles.tasks}>
@@ -500,7 +508,9 @@ export function EnvironmentPanel({
             onClick={() => setArtifactsExpanded((expanded) => !expanded)}
           >
             <span>{t('environment.artifacts')}</span>
-            {!artifactsExpanded && <ChevronRightIcon />}
+            {!artifactsExpanded && (
+              <ChevronRightIcon className="rtl:-scale-x-100" />
+            )}
           </button>
           {artifactsExpanded && (
             <>

@@ -40,7 +40,7 @@
   background: transparent;
   color: var(--muted-foreground);
   cursor: pointer;
-  text-align: left;
+  text-align: start;
   font: inherit;
 }
 
@@ -62,7 +62,7 @@
   gap: 7px;
   min-width: 0;
   cursor: pointer;
-  text-align: left;
+  text-align: start;
   font: inherit;
 }
 
@@ -89,7 +89,7 @@
 /* The chevron is hover-only and hugs the content, like the thinking block. */
 .chatSummaryThoughtChevronRight,
 .chatSummaryThoughtChevronDown {
-  margin-left: 7px;
+  margin-inline-start: 7px;
   width: 14px;
   height: 14px;
   position: relative;
@@ -138,7 +138,7 @@
 
 .chatSummaryThoughtTranslate {
   flex-shrink: 0;
-  margin-left: 7px;
+  margin-inline-start: 7px;
   padding: 0;
   border: none;
   border-radius: 0;
@@ -209,7 +209,7 @@
 
 .chatSummaryThoughtContent {
   margin-top: 4px;
-  padding-left: 21px;
+  padding-inline-start: 21px;
   color: var(--muted-foreground);
   font-size: 13px;
   line-height: 1.5;
@@ -255,7 +255,7 @@
   gap: 7px;
   min-width: 0;
   cursor: pointer;
-  text-align: left;
+  text-align: start;
   font: inherit;
 }
 
@@ -492,7 +492,7 @@
 }
 
 .lineElapsed {
-  margin-left: auto;
+  margin-inline-start: auto;
   font-size: 12px;
   flex-shrink: 0;
 }
@@ -509,7 +509,7 @@
   border: 0;
   background: transparent;
   font: inherit;
-  text-align: left;
+  text-align: start;
 }
 
 .lineExpandable * {
@@ -556,6 +556,12 @@
   transform: rotate(45deg);
 }
 
+:global([dir='rtl']) .chatSummaryThoughtChevronRight,
+:global([dir='rtl']) .chatChevronRight,
+:global([dir='rtl']) .lineChevronRight {
+  transform: scaleX(-1);
+}
+
 .lineExpandable:not([aria-disabled='true']):hover .lineChevronRight,
 .lineExpandable:not([aria-disabled='true']):hover .lineChevronDown,
 .lineExpandable:focus-visible .lineChevronRight,
@@ -564,7 +570,7 @@
 }
 
 .lineOutput {
-  margin-left: 16px;
+  margin-inline-start: 16px;
   font-size: 12px;
   color: var(--muted-foreground);
   white-space: pre-wrap;
@@ -706,7 +712,7 @@
 }
 
 .expandedLineOutput {
-  margin-left: 0;
+  margin-inline-start: 0;
 }
 
 .lineDetail {
@@ -768,7 +774,8 @@
 }
 
 .todoBody {
-  padding: 4px 0 2px 14px;
+  padding-block: 4px 2px;
+  padding-inline: 14px 0;
 }
 
 .expandedCardBody .todoBody {
@@ -823,12 +830,12 @@
 .shellSection > button {
   position: absolute;
   top: 0;
-  right: 0;
+  inset-inline-end: 0;
 }
 
 .shellSection summary {
   min-height: 24px;
-  padding-right: 32px;
+  padding-inline-end: 32px;
 }
 
 .shellSection summary,

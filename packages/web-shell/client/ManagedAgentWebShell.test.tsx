@@ -404,10 +404,23 @@ describe('ManagedAgentWebShell', () => {
       expect(hostChrome.classList.contains('dark')).toBe(false);
       expect(hostChrome.style.getPropertyValue('--background')).toBe('');
       expect(wrapper.lang).toBe('zh-CN');
+      expect(wrapper.dir).toBe('ltr');
       expect(wrapper.classList.contains('dark')).toBe(true);
       expect(wrapper.style.getPropertyValue('--background')).toBe(
         'oklch(0.2 0 0)',
       );
+      await act(async () =>
+        root.render(
+          <ManagedAgentWebShell
+            managedAgentProvider={provider}
+            navigationTarget={target}
+            language="ar"
+            style={{ ['--background' as string]: 'oklch(0.2 0 0)' }}
+          />,
+        ),
+      );
+      expect(wrapper.lang).toBe('ar');
+      expect(wrapper.dir).toBe('rtl');
     } finally {
       target.remove();
     }

@@ -1990,7 +1990,7 @@ const ThoughtLineHeader = memo(function ThoughtLineHeader({
           {t(isStreaming ? 'thinking.running' : 'thinking.done')}
         </span>
       </button>
-      {language === 'zh-CN' &&
+      {(language === 'zh-CN' || language === 'ar') &&
         translateContent !== undefined &&
         generateContent && (
           <ThinkingTranslateButton

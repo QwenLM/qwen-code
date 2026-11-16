@@ -796,7 +796,7 @@ it('filters by localized tool names and groups MCP calls under one option', asyn
     '[role="combobox"][aria-label="按工具类型筛选"]',
   )!;
   expect(trigger.dataset.slot).toBe('select-trigger');
-  expect(trigger.classList.contains('ml-auto')).toBe(true);
+  expect(trigger.classList.contains('ms-auto')).toBe(true);
   expect(trigger.textContent).toBe('全部工具');
   expect(view.querySelectorAll('li')).toHaveLength(5);
 
@@ -1655,7 +1655,7 @@ it('puts prompt selection before the count without All and loads only the select
     promptRow
       .querySelector('.lucide-refresh-cw')
       ?.closest('button')
-      ?.classList.contains('ml-auto'),
+      ?.classList.contains('ms-auto'),
   ).toBe(true);
   expect(client.getSessionToolCalls.mock.calls).toEqual([
     ['session', 'record-1'],

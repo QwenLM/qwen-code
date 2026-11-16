@@ -246,7 +246,7 @@ export function TurnCallPromptSelect({
                   {selected?.[0] === ordinal && (
                     <CheckIcon
                       size={14}
-                      className="ml-auto shrink-0"
+                      className="ms-auto shrink-0"
                       aria-hidden="true"
                     />
                   )}

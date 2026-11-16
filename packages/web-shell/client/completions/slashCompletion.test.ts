@@ -453,7 +453,7 @@ describe('getSlashCommandArgumentHint progressive skill hints', () => {
 });
 
 describe('getSlashCommandCompletionResult', () => {
-  it.each(['en', 'zh-CN'] as const)(
+  it.each(['en', 'zh-CN', 'ar'] as const)(
     'keeps Skill names separate from built-in syntax in %s',
     (language) => {
       for (const [name, argument] of [
@@ -502,6 +502,44 @@ describe('getSlashCommandCompletionResult', () => {
       }
     },
   );
+
+  it('localizes /language and /export subcommand trees in Arabic', () => {
+    const commands: CommandInfo[] = [
+      {
+        name: 'language',
+        description: 'تغيير لغة الواجهة',
+        source: 'builtin-command',
+      },
+      {
+        name: 'export',
+        description: 'تصدير سجل الجلسة',
+        source: 'builtin-command',
+      },
+    ];
+    const langTree = getSlashCommandCompletionResult(
+      '/language ',
+      10,
+      commands,
+      [],
+      'ar',
+      getTranslator('ar'),
+    );
+    expect(langTree?.items.map((item) => item.label)).toEqual(['ui', 'output']);
+    expect(langTree?.items[0]?.detail).toBe('تعيين لغة الواجهة');
+    expect(
+      getSlashCommandArgumentHint('/language output', commands, 'ar'),
+    ).toBe('<اللغة>');
+
+    const uiLangTree = getSlashCommandCompletionResult(
+      '/language ui ',
+      13,
+      commands,
+      [],
+      'ar',
+      getTranslator('ar'),
+    );
+    expect(uiLangTree?.items.map((item) => item.label)).toContain('ar');
+  });
 
   it('retains a Skill own argument hint without interpreting its arguments as built-ins', () => {
     const commands: CommandInfo[] = [

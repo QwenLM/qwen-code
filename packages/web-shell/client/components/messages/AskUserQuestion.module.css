@@ -65,7 +65,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-left: auto;
+  margin-inline-start: auto;
 }
 
 .collapseButton {
@@ -162,7 +162,7 @@
   flex-direction: column;
   gap: 4px;
   margin-top: 18px;
-  margin-left: 0;
+  margin-inline-start: 0;
 }
 
 .option {
@@ -181,7 +181,7 @@
   font-size: 14px;
   font-weight: 500;
   line-height: 22px;
-  text-align: left;
+  text-align: start;
   appearance: none;
 }
 
@@ -319,7 +319,7 @@
   font-size: 14px;
   font-weight: 500;
   line-height: 22px;
-  text-align: left;
+  text-align: start;
   cursor: pointer;
   appearance: none;
 }
@@ -336,7 +336,8 @@
 .shortcuts {
   flex: 0 1 auto;
   min-width: 0;
-  margin: 0 auto 0 0;
+  margin-block: 0;
+  margin-inline: 0 auto;
   overflow: hidden;
   color: var(--muted-foreground);
   font-size: 11px;

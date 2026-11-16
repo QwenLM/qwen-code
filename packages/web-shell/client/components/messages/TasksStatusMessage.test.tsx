@@ -1341,10 +1341,10 @@ describe('TasksStatusMessage nested-agent tree', () => {
     ]);
     expect(container.textContent).toContain('↳');
     const indented = container.querySelector(
-      'span[style*="padding-left"]',
+      'span[style*="padding-inline-start"]',
     ) as HTMLElement | null;
     expect(indented).not.toBeNull();
-    expect(indented!.style.paddingLeft).toBe('16px');
+    expect(indented!.style.paddingInlineStart).toBe('16px');
     expect(indented!.textContent).toContain('label-child');
   });
 

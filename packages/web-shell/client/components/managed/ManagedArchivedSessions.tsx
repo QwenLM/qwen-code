@@ -112,7 +112,7 @@ export function ManagedArchivedSessions({
             variant={
               active && sessionId === session.sessionId ? 'secondary' : 'ghost'
             }
-            className="h-auto min-w-0 flex-1 justify-start py-2 text-left"
+            className="h-auto min-w-0 flex-1 justify-start py-2 text-start"
             aria-current={
               active && sessionId === session.sessionId ? 'page' : undefined
             }

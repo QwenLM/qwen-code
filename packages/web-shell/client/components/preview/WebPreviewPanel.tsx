@@ -104,7 +104,7 @@ export function WebPreviewPanel({
           </Button>
         ))}
         {url && (
-          <Button asChild variant="ghost" size="sm" className="ml-auto">
+          <Button asChild variant="ghost" size="sm" className="ms-auto">
             <a
               href={url.href}
               target="_blank"

@@ -61,7 +61,7 @@
   width: fit-content;
   align-items: center;
   gap: 4px;
-  margin-left: -2px;
+  margin-inline-start: -2px;
   color: var(--muted-foreground);
   opacity: 0;
   transition: opacity 0.12s ease;
@@ -144,7 +144,7 @@
 .prefix {
   color: var(--agent-purple-400);
   flex-shrink: 0;
-  margin-right: 6px;
+  margin-inline-end: 6px;
   line-height: 1.2;
 }
 
@@ -183,7 +183,7 @@
 
 .thinkingBody ul,
 .thinkingBody ol {
-  padding-left: 24px;
+  padding-inline-start: 24px;
 }
 
 .thinkingBody pre {
@@ -215,13 +215,13 @@
   gap: 7px;
   min-width: 0;
   cursor: pointer;
-  text-align: left;
+  text-align: start;
   font: inherit;
 }
 
 .translateButton {
   flex-shrink: 0;
-  margin-left: 7px;
+  margin-inline-start: 7px;
   padding: 0;
   border: none;
   border-radius: 0;
@@ -294,7 +294,7 @@
 .translationActions {
   display: flex;
   gap: 6px;
-  margin-left: auto;
+  margin-inline-start: auto;
 }
 
 .translationActions button {
@@ -372,7 +372,7 @@
 
 .thinkingChevronRight,
 .thinkingChevronDown {
-  margin-left: 7px;
+  margin-inline-start: 7px;
   width: 14px;
   height: 14px;
   position: relative;
@@ -403,6 +403,10 @@
 
 .thinkingChevronRight {
   transform: none;
+}
+
+:global([dir='rtl']) .thinkingChevronRight {
+  transform: scaleX(-1);
 }
 
 .thinkingChevronRight::before {
@@ -458,12 +462,13 @@
   font-size: 12px;
   cursor: pointer;
   padding: 0 4px;
-  margin: 2px 0 0 auto;
+  margin-block: 2px 0;
+  margin-inline: auto 0;
 }
 
 .thinkingExpandedWrap .expandToggle {
   position: absolute;
-  right: 0;
+  inset-inline-end: 0;
   bottom: 2px;
   background: var(--background);
   margin: 0;

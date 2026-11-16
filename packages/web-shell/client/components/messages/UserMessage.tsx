@@ -524,6 +524,7 @@ export const UserMessage = memo(function UserMessage({
           >
             <div
               ref={contentRef}
+              dir="auto"
               className={`${styles.chatContent} ${
                 heightOverflowing && !documentMode && !expanded
                   ? styles.chatContentCollapsed

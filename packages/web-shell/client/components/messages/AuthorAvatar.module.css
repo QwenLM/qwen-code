@@ -38,7 +38,8 @@
   flex: 0 1 auto;
   align-items: center;
   gap: 4px;
-  padding: 1px 8px 1px 6px;
+  padding-block: 1px;
+  padding-inline: 6px 8px;
   border-radius: 999px;
   /* Relative to what it sits on, like the avatar: dark --muted equals --card. */
   background: color-mix(in srgb, var(--foreground) 8%, transparent);

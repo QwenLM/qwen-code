@@ -161,7 +161,7 @@ export function HotkeySetter({
         ) : null}
       </div>
       {error ? (
-        <span className="max-w-72 text-right text-xs text-destructive max-md:text-left">
+        <span className="max-w-72 text-end text-xs text-destructive max-md:text-start">
           {error}
         </span>
       ) : null}

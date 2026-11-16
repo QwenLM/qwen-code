@@ -118,7 +118,7 @@ export function SessionSortMenu({
             <DropdownMenuSubTrigger>
               <span className="flex min-w-0 flex-1 items-center gap-2">
                 <span>{t('sidebar.sortBy')}</span>
-                <span className="ml-auto min-w-0 truncate text-muted-foreground">
+                <span className="ms-auto min-w-0 truncate text-muted-foreground">
                   {sortLabel}
                 </span>
               </span>
@@ -146,7 +146,7 @@ export function SessionSortMenu({
             <span className="flex min-w-0 flex-1 items-center gap-2">
               <span>{t('sidebar.workspaceFilter')}</span>
               <span
-                className="ml-auto min-w-0 truncate text-muted-foreground"
+                className="ms-auto min-w-0 truncate text-muted-foreground"
                 title={currentWorkspaceLabel}
               >
                 {currentWorkspaceLabel}

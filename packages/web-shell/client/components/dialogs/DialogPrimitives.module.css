@@ -86,7 +86,7 @@
   color: var(--foreground);
   font-family: var(--font-mono);
   font-size: 13px;
-  text-align: left;
+  text-align: start;
   cursor: pointer;
 }
 
@@ -174,30 +174,32 @@
 
 .picker-item-detail::before {
   content: '·';
-  margin-right: 8px;
+  margin-inline-end: 8px;
   color: var(--muted-foreground);
 }
 
-/* "Current value" marker: a left accent bar + a right ✓ that read on their own
-   channel, independent of the roving `.selected` background highlight. Both are
-   absolutely positioned and vertically centered, so they stay centered whatever
-   the row height (single- or multi-line). Shared by every list dialog. */
+/* "Current value" marker: a leading accent bar + a trailing ✓ that read on
+   their own channel, independent of the roving `.selected` background
+   highlight. Both are absolutely positioned and vertically centered, so they
+   stay centered whatever the row height (single- or multi-line). Shared by
+   every list dialog. */
 .dialog-current,
 .picker-item-confirmed {
   position: relative;
-  padding-right: 28px;
+  padding-inline-end: 28px;
 }
 
 .dialog-current::before,
 .picker-item-confirmed::before {
   content: '';
   position: absolute;
-  left: 0;
+  inset-inline-start: 0;
   top: 50%;
   transform: translateY(-50%);
   height: 60%;
   width: 3px;
-  border-radius: 0 3px 3px 0;
+  border-start-end-radius: 3px;
+  border-end-end-radius: 3px;
   background: var(--agent-blue-500, #4a9eff);
 }
 
@@ -205,7 +207,7 @@
 .picker-item-confirmed::after {
   content: '✓';
   position: absolute;
-  right: 10px;
+  inset-inline-end: 10px;
   top: 50%;
   transform: translateY(-50%);
   color: var(--agent-blue-500, #4a9eff);
@@ -216,7 +218,7 @@
 
 .picker-item-badge {
   flex-shrink: 0;
-  margin-left: 8px;
+  margin-inline-start: 8px;
   font-size: 11px;
   color: var(--agent-blue-500, #4a9eff);
   opacity: 0.8;
@@ -225,7 +227,7 @@
 
 .tools-status-badge {
   flex: 0 0 auto;
-  margin-left: auto;
+  margin-inline-start: auto;
   border-radius: 4px;
   background: var(--muted);
   font-size: 12px;
@@ -309,9 +311,13 @@
   transform: rotate(90deg);
 }
 
+:global([dir='rtl']) .tools-item-chevron:not(.tools-item-chevron-expanded) {
+  transform: scaleX(-1);
+}
+
 .tools-item-detail::before {
   content: none;
-  margin-right: 0;
+  margin-inline-end: 0;
 }
 
 .mcp-status {
@@ -431,7 +437,7 @@
 }
 
 .dialog-split-list {
-  border-right: 1px solid var(--border);
+  border-inline-end: 1px solid var(--border);
 }
 
 .tools-desc-expanded {
@@ -467,7 +473,7 @@
   cursor: pointer;
   font: inherit;
   padding: 0;
-  text-align: left;
+  text-align: start;
 }
 
 .extensions-detail {

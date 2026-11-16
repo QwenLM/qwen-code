@@ -67,7 +67,7 @@
 .stopError {
   color: var(--error-color);
   font-size: 12px;
-  text-align: right;
+  text-align: end;
 }
 
 .statusTag::before {

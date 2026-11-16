@@ -67,6 +67,29 @@ const COPY = {
     notActive:
       '此账号未找到有效的 Plus 或 Pro 订阅。如果已经订阅，请确认使用的是同一个 Qwen 账号。',
   },
+  ar: {
+    device: 'تعذر طلب رابط التخويل. يُرجى محاولة تسجيل الدخول مجدداً.',
+    exchange: 'تعذر إكمال التخويل. يُرجى محاولة تسجيل الدخول مجدداً.',
+    credentials:
+      'تعذر قراءة بيانات اعتماد Qwen أو حفظها. تحقق من أذونات الملفات المحلية ومساحة القرص.',
+    refresh: 'تعذر تحديث جلسة Qwen الخاصة بك. يُرجى المحاولة مجدداً.',
+    revoke: 'تم تسجيل خروجك محلياً، لكن تعذر إبطال الجلسة البعيدة.',
+    cleanup:
+      'تعذر إزالة بيانات اعتماد Qwen المحلية. تحقق من أذونات الملفات المحلية.',
+    denied: 'تم رفض التخويل أو الوصول.',
+    rateLimited: 'طلبات كثيرة جداً. يُرجى المحاولة لاحقاً.',
+    network: 'فشل طلب الشبكة أو انتهت مهلتُه.',
+    invalidResponse: 'أرجعت الخدمة استجابة غير صالحة.',
+    expired:
+      'لم تعد بيانات تسجيل الدخول صالحة. شغّل ‎/auth لتسجيل الدخول مجدداً.',
+    timeout:
+      'انتهت مهلة المصادقة. يُرجى المحاولة مجدداً أو اختيار طريقة مصادقة مختلفة.',
+    queryFailed: 'تعذر التحقق من حالة اشتراكك. يُرجى المحاولة مجدداً.',
+    purchaseTimeout:
+      'اشتراكك ليس نشطاً بعد. إذا أتممت الدفع، انتظر لحظة ثم أعد المحاولة.',
+    notActive:
+      'لم يُعثر على اشتراك Plus أو Pro نشط لهذا الحساب. إذا كنت قد اشتركت بالفعل، تأكد من استخدام حساب Qwen نفسه.',
+  },
 };
 
 function membership(info: DaemonSubscriptionUserInfo): QwenSubscriptionState {
@@ -112,7 +135,12 @@ export function useSubscription(
   onOpenExternal: (url: string) => void | Promise<void>,
 ) {
   const { language } = useI18n();
-  const messages = COPY[language === 'zh-CN' ? 'zh-CN' : 'en'];
+  const messages =
+    language === 'zh-CN'
+      ? COPY['zh-CN']
+      : language === 'ar'
+        ? COPY.ar
+        : COPY.en;
   const copy = useRef(messages);
   copy.current = messages;
   const open = useRef(onOpenExternal);

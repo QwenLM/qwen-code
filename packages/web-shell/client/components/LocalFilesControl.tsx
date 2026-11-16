@@ -250,7 +250,7 @@ export function LocalFilesPanel({
       <div className="flex items-center gap-2">
         {busy || resolving ? <Spinner /> : null}
         <h2 className="text-sm font-medium">{t('localFiles.title')}</h2>
-        <span className="ml-auto text-xs text-muted-foreground">
+        <span className="ms-auto text-xs text-muted-foreground">
           {resolving
             ? t('localFiles.status.resolving')
             : t(STATUS_KEY[status.phase])}
@@ -265,18 +265,18 @@ export function LocalFilesPanel({
             <dt className="text-muted-foreground">
               {t('localFiles.directory')}
             </dt>
-            <dd className="ml-auto break-all font-mono">{status.rootName}</dd>
+            <dd className="ms-auto break-all font-mono">{status.rootName}</dd>
           </div>
           {status.phase === 'connected' && sessionName ? (
             <div className="flex gap-2">
               <dt className="text-muted-foreground">
                 {t('localFiles.session')}
               </dt>
-              <dd className="ml-auto break-all">{sessionName}</dd>
+              <dd className="ms-auto break-all">{sessionName}</dd>
             </div>
           ) : null}
           {status.toolCount === undefined ? null : (
-            <p className="text-right text-muted-foreground">
+            <p className="text-end text-muted-foreground">
               {t('localFiles.tools', { count: status.toolCount })}
             </p>
           )}
@@ -664,7 +664,7 @@ export function LocalFilesControl({
             <span
               aria-hidden="true"
               className={cn(
-                'absolute right-1 bottom-1 h-1.5 w-1.5 rounded-full',
+                'absolute end-1 bottom-1 h-1.5 w-1.5 rounded-full',
                 dotClass,
               )}
             />

@@ -91,6 +91,12 @@ export const OUTPUT_LANGUAGE_TABLE: readonly OutputLanguageEntry[] = [
     fullName: 'Catalan',
     nativeName: 'Català',
   },
+  {
+    code: 'ar',
+    id: 'ar-SA',
+    fullName: 'Arabic',
+    nativeName: 'العربية',
+  },
 ];
 
 /**

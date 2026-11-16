@@ -10,6 +10,7 @@ import {
 
 const zh = getTranslator('zh-CN');
 const en = getTranslator('en');
+const ar = getTranslator('ar');
 
 describe('getLocalCommands', () => {
   it('adds subscription account commands only when available', () => {
@@ -80,8 +81,26 @@ describe('localizeBuiltinDescriptions (commands)', () => {
     expect(localizeBuiltinDescriptions(commands, zh)[0].description).toBe(
       '将 GitHub 拉取请求绑定到本会话',
     );
+    expect(localizeBuiltinDescriptions(commands, ar)[0].description).toBe(
+      'ربط طلب سحب GitHub بهذه الجلسة',
+    );
     expect(localizeBuiltinDescriptions(commands, en)[0].description).toBe(
       'Bind a GitHub pull request to this session',
+    );
+  });
+
+  it('localizes local commands and upgrade/logout descriptions in Arabic', () => {
+    const byName = new Map(
+      getLocalCommands(ar, { subscriptionAvailable: true }).map((c) => [
+        c.name,
+        c,
+      ]),
+    );
+    expect(byName.get('status')?.description).toBe('عرض معلومات الإصدار');
+    expect(byName.get('help')?.description).toBe('عرض المساعدة والأوامر');
+    expect(byName.get('upgrade')?.description).toBe('افتح باقات اشتراك Qwen');
+    expect(byName.get('logout')?.description).toBe(
+      'افصل هذا الجهاز عن حساب Qwen الخاص بك',
     );
   });
 

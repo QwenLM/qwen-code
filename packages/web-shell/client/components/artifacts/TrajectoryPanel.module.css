@@ -116,7 +116,7 @@
 .virtualRow {
   position: absolute;
   top: 0;
-  left: 0;
+  inset-inline-start: 0;
   width: 100%;
   display: flex;
   align-items: stretch;
@@ -134,7 +134,7 @@
   color: var(--foreground);
   font-size: 11px;
   font-weight: 600;
-  text-align: left;
+  text-align: start;
   cursor: default;
 }
 
@@ -143,7 +143,7 @@
 }
 
 .turnSummary {
-  margin-left: auto;
+  margin-inline-start: auto;
   font-weight: 400;
   color: var(--traj-text-secondary);
   font-variant-numeric: tabular-nums;
@@ -166,7 +166,7 @@
 }
 
 .record[data-depth='1'] {
-  padding-left: 18px;
+  padding-inline-start: 18px;
 }
 
 .nestMarker {
@@ -177,6 +177,10 @@
 .selected {
   box-shadow: inset 2px 0 0 var(--primary);
   background: color-mix(in srgb, var(--primary) 10%, transparent);
+}
+
+:global([dir='rtl']) .selected {
+  box-shadow: inset -2px 0 0 var(--primary);
 }
 
 .badge {
@@ -267,7 +271,7 @@
   font-size: 10px;
 }
 .record[data-grouped='true'] {
-  padding-left: 18px;
+  padding-inline-start: 18px;
 }
 .rowMetrics {
   max-width: 35%;
@@ -286,10 +290,10 @@
   }
   .record[data-grouped='true'],
   .record[data-depth='1'] {
-    padding-left: 6px;
+    padding-inline-start: 6px;
   }
   .record[data-grouped='true'] .badge {
-    padding-left: 12px;
+    padding-inline-start: 12px;
     box-sizing: border-box;
   }
   .nestMarker {
@@ -329,7 +333,7 @@
 .virtualBoundary {
   position: absolute;
   top: 0;
-  left: 0;
+  inset-inline-start: 0;
   width: 100%;
 }
 

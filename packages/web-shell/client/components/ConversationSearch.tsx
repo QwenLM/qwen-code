@@ -490,7 +490,7 @@ export function ConversationSearch({
                     aria-selected={index === activeIndex}
                     disabled={locating}
                     aria-current={index === activeIndex ? 'true' : undefined}
-                    className={`w-full min-w-0 rounded-lg p-3 text-left text-sm whitespace-pre-wrap break-words [overflow-wrap:anywhere] hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring ${index === activeIndex ? 'bg-muted' : ''}`}
+                    className={`w-full min-w-0 rounded-lg p-3 text-start text-sm whitespace-pre-wrap break-words [overflow-wrap:anywhere] hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring ${index === activeIndex ? 'bg-muted' : ''}`}
                     ref={(node) => {
                       if (node && index === activeIndex)
                         node.scrollIntoView?.({ block: 'nearest' });

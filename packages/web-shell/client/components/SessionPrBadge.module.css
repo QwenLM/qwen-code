@@ -1,7 +1,7 @@
 .sessionPrBadge {
   flex-shrink: 0;
   align-self: center;
-  margin-left: 6px;
+  margin-inline-start: 6px;
   height: 20px;
   display: inline-flex;
   align-items: center;

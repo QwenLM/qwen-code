@@ -96,6 +96,35 @@ describe('RootErrorFallback', () => {
     expect(container.querySelector('button')?.textContent).toBe('重新加载');
   });
 
+  it('renders Arabic RTL copy when language is ar', () => {
+    const { container } = mount(
+      <RootErrorFallback
+        error={new Error('x')}
+        onRetry={() => {}}
+        language="ar"
+        retryMode="reload"
+      />,
+    );
+    const alert = container.querySelector('[role="alert"]');
+    expect(alert?.getAttribute('lang')).toBe('ar');
+    expect(alert?.getAttribute('dir')).toBe('rtl');
+    expect(alert?.textContent).toContain('حدث خطأ ما');
+    expect(container.querySelector('button')?.textContent).toBe(
+      'إعادة تحميل الصفحة',
+    );
+
+    const reset = mount(
+      <RootErrorFallback
+        error={new Error('x')}
+        onRetry={() => {}}
+        language="ar"
+      />,
+    );
+    expect(reset.container.querySelector('button')?.textContent).toBe(
+      'إعادة المحاولة',
+    );
+  });
+
   it('catches an App-level render crash instead of white-screening', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     function BrokenApp(): React.ReactElement {

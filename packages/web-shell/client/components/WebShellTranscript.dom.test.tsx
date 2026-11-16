@@ -641,6 +641,22 @@ describe('WebShellTranscript DOM integration', () => {
     ).toBeNull();
   });
 
+  it('applies dir="rtl" and lang="ar" to both root and portal root for Arabic', () => {
+    const { container, unmount } = render(
+      <WebShellTranscript blocks={[]} theme="light" language="ar" />,
+    );
+    const root = container.querySelector<HTMLElement>('[data-web-shell-root]');
+    const portal = document.body.querySelector<HTMLElement>(
+      '[data-web-shell-portal-root]',
+    );
+    expect(root?.lang).toBe('ar');
+    expect(root?.dir).toBe('rtl');
+    expect(portal?.lang).toBe('ar');
+    expect(portal?.dir).toBe('rtl');
+
+    unmount();
+  });
+
   it('falls back to the built-in Markdown renderer when customization throws', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     const { container } = render(

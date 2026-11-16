@@ -864,7 +864,7 @@ export function AgentCreatePage({
                         <span>
                           {host.label}
                           {host.status === 'offline' && (
-                            <span className="ml-2 text-xs text-muted-foreground">
+                            <span className="ms-2 text-xs text-muted-foreground">
                               {t('collab.agentStatus.offline')}
                             </span>
                           )}
@@ -1257,7 +1257,7 @@ function GenerationFieldLabel({
             type="button"
             variant="outline"
             size="sm"
-            className="ml-auto"
+            className="ms-auto"
             onClick={onCancel}
           >
             {t('common.cancel')}
@@ -1268,7 +1268,7 @@ function GenerationFieldLabel({
           type="button"
           variant="outline"
           size="sm"
-          className="ml-auto"
+          className="ms-auto"
           disabled={disabled}
           onClick={onGenerate}
         >

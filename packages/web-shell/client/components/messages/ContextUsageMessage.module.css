@@ -103,7 +103,7 @@
 }
 
 .subDetailRow {
-  padding-left: 18px;
+  padding-inline-start: 18px;
 }
 
 .symbol {
@@ -121,7 +121,7 @@
 .value {
   justify-self: end;
   color: var(--foreground);
-  text-align: right;
+  text-align: end;
 }
 
 .row > :last-child,
@@ -129,7 +129,7 @@
 .subDetailRow > :last-child {
   min-width: 0;
   justify-self: end;
-  text-align: right;
+  text-align: end;
   font-variant-numeric: tabular-nums;
 }
 
@@ -145,7 +145,7 @@
   background: none;
   color: var(--agent-blue-500);
   font: inherit;
-  text-align: left;
+  text-align: start;
   cursor: pointer;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -306,5 +306,6 @@
 
 .disclosure .detailSection {
   gap: 8px;
-  padding: 4px 0 10px 12px;
+  padding-block: 4px 10px;
+  padding-inline: 12px 0;
 }

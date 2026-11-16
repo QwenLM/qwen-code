@@ -262,7 +262,7 @@ export function ManagedTaskPanel({
             <div key={task.taskId} className="space-y-2 rounded-md border p-3">
               <Button
                 variant="ghost"
-                className="h-auto w-full justify-start whitespace-normal text-left"
+                className="h-auto w-full justify-start whitespace-normal text-start"
                 onClick={() => tasks.select(task.taskId)}
               >
                 {t(taskKindKey(task.kind))} ·{' '}

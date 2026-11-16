@@ -148,8 +148,17 @@ export function ManagedStandaloneApp({
   }
   if (!state.provider) {
     return (
-      <div role="status" style={{ padding: '2rem' }}>
-        {language === 'zh-CN' ? '正在连接…' : 'Connecting…'}
+      <div
+        role="status"
+        style={{ padding: '2rem' }}
+        lang={language}
+        dir={language === 'ar' ? 'rtl' : 'ltr'}
+      >
+        {language === 'zh-CN'
+          ? '正在连接…'
+          : language === 'ar'
+            ? 'جارٍ الاتصال…'
+            : 'Connecting…'}
       </div>
     );
   }

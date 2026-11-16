@@ -2,7 +2,7 @@
   color: var(--foreground);
   overflow: auto;
   margin-bottom: 12px;
-  margin-left: 14px;
+  margin-inline-start: 14px;
   padding: 8px 14px;
   border: 1px solid var(--border);
   border-radius: var(--radius);

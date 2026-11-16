@@ -528,7 +528,7 @@ export function WorkspacesOverviewPanel({
         },
         meta: {
           width: 170,
-          headerClassName: 'text-right',
+          headerClassName: 'text-end',
         } satisfies DataTableColumnMeta<DaemonWorkspaceCapability>,
       },
     ],
@@ -562,7 +562,7 @@ export function WorkspacesOverviewPanel({
             onClick={onClose}
             aria-label={t('workspacesOverview.back')}
           >
-            <ArrowLeftIcon />
+            <ArrowLeftIcon className="rtl:-scale-x-100" />
           </Button>
           <h1 ref={initialFocusRef} tabIndex={-1} className={styles.title}>
             {t('workspacesOverview.title')}

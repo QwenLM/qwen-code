@@ -71,7 +71,7 @@
 .search > svg {
   position: absolute;
   top: 10px;
-  left: 10px;
+  inset-inline-start: 10px;
   width: 14px;
   height: 14px;
   color: var(--muted-foreground);
@@ -80,7 +80,7 @@
 
 .search > input {
   height: 34px;
-  padding-left: 30px;
+  padding-inline-start: 30px;
 }
 
 .tree {
@@ -125,7 +125,7 @@
   color: var(--primary);
   padding: 48px 12px 12px;
   font-size: 12px;
-  text-align: right;
+  text-align: end;
 }
 
 .uploadProgress {

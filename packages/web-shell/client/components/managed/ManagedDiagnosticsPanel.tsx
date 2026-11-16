@@ -35,7 +35,7 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="flex items-baseline justify-between gap-4 border-b py-2 text-sm">
       <span className="text-muted-foreground">{label}</span>
-      <span className="break-all text-right tabular-nums">{children}</span>
+      <span className="break-all text-end tabular-nums">{children}</span>
     </div>
   );
 }

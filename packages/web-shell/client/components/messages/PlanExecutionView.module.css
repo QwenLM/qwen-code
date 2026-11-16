@@ -98,7 +98,7 @@
   flex-direction: column;
   justify-content: center;
   gap: 2px;
-  border-left: 1px solid var(--border);
+  border-inline-start: 1px solid var(--border);
 }
 
 .overviewStat span {
@@ -141,6 +141,7 @@
      and the reservation collapses regardless of the pitch. */
   --plan-edge-lanes: 0;
   --plan-edge-lane-height: 0px;
+  direction: ltr;
   position: relative;
   display: flex;
   align-items: center;
@@ -286,12 +287,16 @@
      resting, and the node's background paints under it (background-clip is
      border-box), so a resting node reads as 3px of extra left padding with
      no width difference between states. */
-  border-left: 3px solid var(--node-rule);
+  border-inline-start: 3px solid var(--node-rule);
   border-radius: 8px;
   background: var(--background);
   transition:
     border-color 160ms ease,
     box-shadow 160ms ease;
+}
+
+:global([dir='rtl']) .dagCanvas .node {
+  direction: rtl;
 }
 
 /* Only the outgoing port is drawn; an incoming edge already terminates in an
@@ -360,10 +365,10 @@
    strength and the ring echoes it, rather than introducing a second colour. */
 .node[data-selected='true'] {
   border-color: var(--node-ring);
-  /* The shorthand above expands to border-left-color too: on blocked/ready,
+  /* The shorthand above expands to border-inline-start-color too: on blocked/ready,
      whose --node-rule stays transparent, it would repaint the 3px status
      rule in the ring tone and selection would read as a status change. */
-  border-left-color: var(--node-rule);
+  border-inline-start-color: var(--node-rule);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--node-ring) 32%, transparent);
 }
 
@@ -378,7 +383,7 @@
   background: transparent;
   cursor: pointer;
   font: inherit;
-  text-align: left;
+  text-align: start;
 }
 
 @supports (selector(:has(*))) {
@@ -541,7 +546,7 @@
   color: var(--foreground);
   cursor: pointer;
   font-size: 11px;
-  text-align: left;
+  text-align: start;
   white-space: nowrap;
 }
 
@@ -581,7 +586,7 @@
   background: var(--secondary);
   cursor: pointer;
   font: inherit;
-  text-align: left;
+  text-align: start;
 }
 
 .executionHeading {
@@ -619,7 +624,7 @@
 }
 
 .executionActivity span {
-  margin-right: 4px;
+  margin-inline-end: 4px;
   color: var(--foreground);
   font-weight: 600;
 }
@@ -680,7 +685,7 @@ button.nestedExecution[aria-disabled='true'] {
   background: transparent;
   font: inherit;
   font-size: 11px;
-  text-align: left;
+  text-align: start;
 }
 
 button.nestedExecution:not(:disabled):not([aria-disabled='true']) {
@@ -752,7 +757,7 @@ button.nestedExecution:not(:disabled):focus-visible {
     }
 
     .overviewStat:nth-child(2) {
-      border-left: 0;
+      border-inline-start: 0;
     }
   }
 }

@@ -23,7 +23,12 @@ import type { ManagedAgentProvider } from './components/managed/managed-agent-pr
 import { RootErrorFallback } from './components/RootErrorFallback';
 import { WindowToastHost } from './components/ToastHost';
 import { WebShellCustomizationProvider } from './customization';
-import { I18nProvider, normalizeLanguage, type WebShellLanguage } from './i18n';
+import {
+  I18nProvider,
+  languageDirection,
+  normalizeLanguage,
+  type WebShellLanguage,
+} from './i18n';
 import { WebShellPortalRootContext } from './portalRoot';
 import {
   ThemeProvider,
@@ -90,7 +95,7 @@ export interface ManagedAgentWebShellProps
   hostSessionOnly?: boolean;
   sessionId?: string;
   onSessionChange?: (sessionId: string | undefined) => void;
-  language?: WebShellLanguage;
+  language?: WebShellLanguage | 'zh' | 'zh-cn' | 'ru-ru' | 'ar-sa';
   theme?: WebShellTheme;
   brand?: WebShellBrand;
   className?: string;
@@ -300,6 +305,7 @@ function ManagedAgentWebShellRoot(props: ManagedAgentWebShellProps) {
       const computed = getComputedStyle(root);
       slot.classList.toggle('dark', theme === WebShellThemeId.Dark);
       slot.lang = resolvedLanguage;
+      slot.dir = languageDirection(resolvedLanguage);
       const applied = slotTokenNames.get(slot) ?? new Set<string>();
       const current = new Set<string>();
       for (let index = 0; index < computed.length; index += 1) {
@@ -358,6 +364,7 @@ function ManagedAgentWebShellRoot(props: ManagedAgentWebShellProps) {
                       data-web-shell-root
                       data-web-shell-shadcn
                       lang={resolvedLanguage}
+                      dir={languageDirection(resolvedLanguage)}
                     >
                       {provider && (
                         <ManagedSessionsPage

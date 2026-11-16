@@ -16,6 +16,7 @@ export type SupportedLanguage =
   | 'pt'
   | 'fr'
   | 'ca'
+  | 'ar'
   | string;
 
 export interface LanguageDefinition {

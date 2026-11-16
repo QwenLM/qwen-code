@@ -36,6 +36,7 @@ import { RootErrorFallback } from './RootErrorFallback';
 import {
   getTranslator,
   I18nProvider,
+  languageDirection,
   normalizeLanguage,
   type WebShellLanguage,
 } from '../i18n';
@@ -61,7 +62,7 @@ export interface WebShellTranscriptProps {
   blocks: readonly DaemonTranscriptBlock[];
   renderMode?: 'readonly' | 'document';
   theme?: WebShellTheme;
-  language?: 'en' | 'zh-CN' | 'zh' | 'zh-cn' | 'ru' | 'ru-ru';
+  language?: 'en' | 'zh-CN' | 'zh' | 'zh-cn' | 'ru' | 'ru-ru' | 'ar' | 'ar-sa';
   className?: string;
   style?: CSSProperties;
   chatMaxWidth?: number;
@@ -243,6 +244,7 @@ function WebShellTranscriptContent({
       portalRoot.dataset.webShellShadcn = '';
       portalRoot.classList.toggle('dark', theme === WebShellThemeId.Dark);
       portalRoot.lang = resolvedLanguage;
+      portalRoot.dir = languageDirection(resolvedLanguage);
       for (let index = 0; index < computedStyle.length; index += 1) {
         const name = computedStyle[index];
         if (!name.startsWith('--')) continue;
@@ -266,7 +268,7 @@ function WebShellTranscriptContent({
     while (element) {
       observer.observe(element, {
         attributes: true,
-        attributeFilter: ['class', 'style', 'data-theme', 'lang'],
+        attributeFilter: ['class', 'style', 'data-theme', 'lang', 'dir'],
       });
       element = element.parentElement;
     }
@@ -305,6 +307,7 @@ function WebShellTranscriptContent({
                           documentMode ? String(documentExpanded) : undefined
                         }
                         lang={resolvedLanguage}
+                        dir={languageDirection(resolvedLanguage)}
                       >
                         <div
                           className={`${styles.content} ${styles.contentHasMessages}`}

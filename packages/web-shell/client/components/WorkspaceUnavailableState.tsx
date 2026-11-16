@@ -1,5 +1,6 @@
 import { FolderXIcon } from 'lucide-react';
 import type { ReactNode } from 'react';
+import { languageDirection, type WebShellLanguage } from '../i18n';
 import { Button } from './ui/button';
 import {
   Empty,
@@ -16,6 +17,7 @@ interface WorkspaceUnavailableStateProps {
   actionLabel?: string;
   onAction?: () => void;
   theme?: 'dark' | 'light';
+  language?: WebShellLanguage;
   icon?: ReactNode;
 }
 
@@ -25,12 +27,15 @@ export function WorkspaceUnavailableState({
   actionLabel,
   onAction,
   theme,
+  language = 'en',
   icon,
 }: WorkspaceUnavailableStateProps) {
   return (
     <div
       data-web-shell-root
       data-web-shell-shadcn
+      lang={language}
+      dir={languageDirection(language)}
       className={`flex min-h-48 w-full items-center justify-center p-4 ${theme === 'dark' ? 'dark' : ''}`}
     >
       <Empty className="border">

@@ -301,7 +301,7 @@ export function ManagedExtensionsManagerPage({
             aria-label={t('common.back')}
             onClick={onClose}
           >
-            <ArrowLeftIcon />
+            <ArrowLeftIcon className="rtl:-scale-x-100" />
           </Button>
         </div>
       </header>

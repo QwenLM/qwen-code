@@ -72,7 +72,7 @@
 }
 
 .editToggle {
-  margin-left: auto;
+  margin-inline-start: auto;
   color: var(--muted-foreground);
   font-size: 10px;
   flex-shrink: 0;

@@ -20,7 +20,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-left: auto;
+  margin-inline-start: auto;
 }
 
 .updatedAt {
@@ -197,7 +197,7 @@
 .infoHintTip {
   position: absolute;
   top: calc(100% + 6px);
-  left: 0;
+  inset-inline-start: 0;
   z-index: 30;
   width: max-content;
   max-width: 260px;
@@ -245,7 +245,7 @@
   /* Keep short values (counts, "0 / 0 / 0", "first-responder") on one line;
      the label wraps instead. Long path values opt back into wrapping via
      .pathValue, which restores a small min-content width for this flex item. */
-  text-align: right;
+  text-align: end;
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
@@ -365,7 +365,7 @@
 }
 
 .workspaceDuration {
-  margin-left: auto;
+  margin-inline-start: auto;
   color: var(--muted-foreground);
   font-size: 12px;
   font-variant-numeric: tabular-nums;

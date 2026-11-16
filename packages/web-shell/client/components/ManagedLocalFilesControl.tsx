@@ -79,7 +79,7 @@ export function ManagedLocalFilesControl({
             <span
               aria-hidden="true"
               className={cn(
-                'absolute right-1 bottom-1 h-1.5 w-1.5 rounded-full',
+                'absolute end-1 bottom-1 h-1.5 w-1.5 rounded-full',
                 dotClass,
               )}
             />

@@ -260,7 +260,7 @@ export function RecentSessions({
           {expanded ? (
             <ChevronDownIcon size={14} />
           ) : (
-            <ChevronRightIcon size={14} />
+            <ChevronRightIcon size={14} className="rtl:-scale-x-100" />
           )}
         </button>
         <div className={styles.projectsHeaderActions}>

@@ -314,7 +314,7 @@ export function SessionWorkflowInspector({
         >
           <GitBranchIcon aria-hidden="true" />
           {t('workflow.inspector.expandGraph')}
-          <ChevronRightIcon aria-hidden="true" />
+          <ChevronRightIcon className="rtl:-scale-x-100" aria-hidden="true" />
         </button>
       </section>
 
@@ -336,7 +336,10 @@ export function SessionWorkflowInspector({
                 className={styles.attentionGlyph}
               />
               <span>{todo.content}</span>
-              <ChevronRightIcon aria-hidden="true" />
+              <ChevronRightIcon
+                className="rtl:-scale-x-100"
+                aria-hidden="true"
+              />
             </button>
           ))}
         </section>

@@ -1278,7 +1278,7 @@ export function AddWorkspaceDialog({
                           >
                             {browseDirectories && (
                               <FolderOpenIcon
-                                className="mr-2 inline size-4"
+                                className="me-2 inline size-4"
                                 aria-hidden="true"
                               />
                             )}
@@ -1435,7 +1435,7 @@ export function AddWorkspaceDialog({
                                 }
                               >
                                 <FolderOpenIcon
-                                  className="mr-2 inline size-4"
+                                  className="me-2 inline size-4"
                                   aria-hidden="true"
                                 />
                                 {suggestion.name}

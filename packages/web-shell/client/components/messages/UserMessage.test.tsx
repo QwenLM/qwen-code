@@ -83,9 +83,12 @@ function findByTitle(container: HTMLElement, title: string): Element | null {
 }
 
 describe('UserMessage', () => {
-  it('renders content', () => {
-    const container = render(<UserMessage content="hello world" />);
-    expect(container.textContent).toContain('hello world');
+  it('renders content with dir="auto" for bidi isolation', () => {
+    const container = render(<UserMessage content="مرحبا world" />);
+    expect(container.textContent).toContain('مرحبا world');
+    expect(container.querySelector('[dir="auto"]')?.textContent).toContain(
+      'مرحبا world',
+    );
   });
 
   it.each(['\n', '\r\n', '\r'])(

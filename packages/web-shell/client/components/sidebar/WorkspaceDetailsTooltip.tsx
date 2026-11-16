@@ -177,7 +177,7 @@ export function WorkspaceDetailsTooltip({
   onOpenChange,
   children,
 }: WorkspaceDetailsTooltipProps) {
-  const { t } = useI18n();
+  const { t, isRtl } = useI18n();
   const [open, setOpen] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
   const openTimerRef = useRef<number | undefined>(undefined);
@@ -363,7 +363,7 @@ export function WorkspaceDetailsTooltip({
       </PopoverAnchor>
       <PopoverContent
         ref={contentRef}
-        side="right"
+        side={isRtl ? 'left' : 'right'}
         align="start"
         sideOffset={0}
         collisionBoundary={collisionBoundary ?? undefined}
@@ -447,7 +447,7 @@ export function WorkspaceDetailsTooltip({
               open={pickerOpen}
               onOpenChange={handlePickerOpenChange}
               workspaceCwd={gitActions.workspaceCwd}
-              side="right"
+              side={isRtl ? 'left' : 'right'}
               status={gitStatus}
               onBranchChanged={gitActions.onBranchChanged}
               onStatusRefreshed={gitActions.onStatusRefreshed}
@@ -470,7 +470,10 @@ export function WorkspaceDetailsTooltip({
                 }}
               >
                 {branchRowContent}
-                <ChevronRightIcon aria-hidden="true" />
+                <ChevronRightIcon
+                  className="rtl:-scale-x-100"
+                  aria-hidden="true"
+                />
               </button>
             </BranchPickerPopover>
           ) : (

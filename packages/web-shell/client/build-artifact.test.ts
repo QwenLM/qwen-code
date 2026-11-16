@@ -5,6 +5,7 @@ import postcss, { type Rule } from 'postcss';
 import { FILES_MESSAGES_EN } from './components/artifacts/files-messages';
 import { LIVE_MESSAGES_EN } from './live/messages';
 import { COLLAB_MESSAGES_EN } from './components/workspace-agents/messages';
+import { AR_INTERACTIVE_MESSAGES } from './i18n/ar-interactive';
 
 const DIST_DIR = resolve(__dirname, '../dist');
 const DIST_PATH = resolve(DIST_DIR, 'index.js');
@@ -582,6 +583,7 @@ describe('build artifact — transcript entry (#11031)', () => {
     expect(interactive).toContain('tokenUsage.inputWithCacheRate');
     expect(interactive).toContain('Failed to load token usage.');
     expect(interactive).toContain('Token 消耗加载失败。');
+    expect(interactive).toContain('نسبة التخزين المؤقت:');
   });
 
   it('carries no Live Voice strings and looks none up', () => {
@@ -614,6 +616,7 @@ describe('build artifact — transcript entry (#11031)', () => {
     expect(interactive).toContain('voice.error.noModel');
     expect(interactive).toContain('Dismiss voice message');
     expect(interactive).toContain('当前工作区未配置语音模型。');
+    expect(interactive).toContain('لم يتم تهيئة نموذج صوتي لمساحة العمل هذه.');
   });
 
   it('carries no collaboration strings and looks none up', () => {
@@ -650,6 +653,25 @@ describe('build artifact — transcript entry (#11031)', () => {
     expect(interactive).toContain('browserNotifications.approval');
     expect(interactive).toContain('Open System Settings → Notifications.');
     expect(interactive).toContain('浏览器（Chrome');
+    expect(interactive).toContain('افتح إعدادات النظام ← الإشعارات.');
+  });
+
+  it('keeps interactive-only Arabic copy out of the transcript entry', () => {
+    const transcript = readTranscriptBundle().replace(
+      /^const __qwenWebShellCss=[^\n]*\n/,
+      '',
+    );
+    const interactive = readPackageJavascript();
+    expect(Object.keys(AR_INTERACTIVE_MESSAGES).length).toBeGreaterThan(500);
+    for (const key of [
+      'subscription.entryDescription',
+      'goals.subtitle',
+    ] as const) {
+      const value = AR_INTERACTIVE_MESSAGES[key];
+      expect(typeof value).toBe('string');
+      expect(transcript).not.toContain(value as string);
+      expect(interactive).toContain(value as string);
+    }
   });
 
   it('keeps remote Workspace registration copy in the interactive entry', () => {

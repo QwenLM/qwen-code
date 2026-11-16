@@ -1096,7 +1096,9 @@ export function ArtifactPanel({
             aria-pressed="true"
             title={t('chatHeader.toggleRightPanel')}
           >
-            <PanelRightIcon className={styles.panelToggleIcon} />
+            <PanelRightIcon
+              className={`${styles.panelToggleIcon} rtl:-scale-x-100`}
+            />
           </button>
         </div>
       </div>
@@ -2524,7 +2526,7 @@ function ReviewChanges({
   ) => Promise<void>;
   onDownloadError: (error: unknown) => void;
 }) {
-  const { t } = useI18n();
+  const { t, isRtl } = useI18n();
   const [isTreeOpen, setIsTreeOpen] = useState(false);
   const [isFileListOpen, setIsFileListOpen] = useState(true);
   const [isReviewStacked, setIsReviewStacked] = useState(false);
@@ -2598,10 +2600,10 @@ function ReviewChanges({
       };
 
       const handlePointerMove = (moveEvent: PointerEvent) => {
-        pendingWidth = Math.min(
-          maxWidth,
-          Math.max(180, startWidth + (moveEvent.clientX - startX)),
-        );
+        const deltaX = isRtl
+          ? startX - moveEvent.clientX
+          : moveEvent.clientX - startX;
+        pendingWidth = Math.min(maxWidth, Math.max(180, startWidth + deltaX));
         if (animationFrame === null) {
           animationFrame = window.requestAnimationFrame(flushWidth);
         }
@@ -2629,7 +2631,7 @@ function ReviewChanges({
       window.addEventListener('pointerup', handlePointerUp);
       window.addEventListener('pointercancel', handlePointerUp);
     },
-    [],
+    [isRtl],
   );
   if (changes.length === 0) {
     return <div className={styles.empty}>No file changes to review.</div>;
@@ -3003,7 +3005,7 @@ function TreeNode({
     .filter(Boolean)
     .join(' ');
   const rowStyle = {
-    paddingLeft: 10 + depth * 18,
+    paddingInlineStart: 10 + depth * 18,
     '--tree-row-line-left': `${19 + Math.max(0, depth - 1) * 18}px`,
   } as CSSProperties;
   const childrenStyle = {
@@ -4583,7 +4585,7 @@ function LargeDocumentPreview({
       <div className="flex shrink-0 items-center gap-2 text-sm text-muted-foreground">
         <span>{t('artifact.longDocument')}</span>
         <Button
-          className="ml-auto shrink-0"
+          className="ms-auto shrink-0"
           variant="outline"
           size="sm"
           onClick={() => setRenderedContent(rendered ? null : content)}

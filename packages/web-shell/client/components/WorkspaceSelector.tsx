@@ -261,7 +261,7 @@ export function WorkspaceSelector({
                               aria-hidden="true"
                             />
                             <Globe2Icon
-                              className="absolute -right-0.5 -bottom-0.5 size-2 rounded-full bg-popover text-[var(--agent-blue-500)]"
+                              className="absolute -end-0.5 -bottom-0.5 size-2 rounded-full bg-popover text-[var(--agent-blue-500)]"
                               strokeWidth={2}
                               aria-hidden="true"
                             />

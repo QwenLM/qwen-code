@@ -3,6 +3,7 @@ import {
   MANAGED_EXTENSION_MESSAGES_ZH,
 } from './components/managed/managed-extension-messages.js';
 import {
+  MANAGED_LIFECYCLE_MESSAGES_AR,
   MANAGED_LIFECYCLE_MESSAGES_EN,
   MANAGED_LIFECYCLE_MESSAGES_ZH,
 } from './components/managed/managed-lifecycle-messages.js';
@@ -12,18 +13,22 @@ import {
   ACTIVITY_MESSAGES_ZH,
 } from './components/sidebar/activity-messages.js';
 import {
+  MESSAGE_DELETION_MESSAGES_AR,
   MESSAGE_DELETION_MESSAGES_EN,
   MESSAGE_DELETION_MESSAGES_ZH,
 } from './components/message-deletion-messages.js';
 import {
+  TRAJECTORY_EXECUTION_MESSAGES_AR,
   TRAJECTORY_EXECUTION_MESSAGES_EN,
   TRAJECTORY_EXECUTION_MESSAGES_ZH,
 } from './trajectory/execution-messages.js';
 import {
+  FILES_MESSAGES_AR,
   FILES_MESSAGES_EN,
   FILES_MESSAGES_ZH,
 } from './components/artifacts/files-messages.js';
 import {
+  TOKEN_USAGE_MESSAGES_AR,
   TOKEN_USAGE_MESSAGES_EN,
   TOKEN_USAGE_MESSAGES_ZH,
 } from './components/artifacts/token-usage-messages.js';
@@ -37,55 +42,87 @@ import {
   useMemo,
   type PropsWithChildren,
 } from 'react';
+import { Direction } from 'radix-ui';
 
 import {
+  TRAJECTORY_FILTER_MESSAGES_AR,
   TRAJECTORY_FILTER_MESSAGES_EN,
   TRAJECTORY_FILTER_MESSAGES_ZH,
 } from './trajectory/filter-messages.js';
 
 import {
+  TRAJECTORY_WINDOW_MESSAGES_AR,
   TRAJECTORY_WINDOW_MESSAGES_EN,
   TRAJECTORY_WINDOW_MESSAGES_ZH,
 } from './trajectory/window-messages.js';
 
-import { VOICE_MESSAGES_EN, VOICE_MESSAGES_ZH } from './voice/messages.js';
-import { LIVE_MESSAGES_EN, LIVE_MESSAGES_ZH } from './live/messages.js';
 import {
+  VOICE_MESSAGES_AR,
+  VOICE_MESSAGES_EN,
+  VOICE_MESSAGES_ZH,
+} from './voice/messages.js';
+import {
+  LIVE_MESSAGES_AR,
+  LIVE_MESSAGES_EN,
+  LIVE_MESSAGES_ZH,
+} from './live/messages.js';
+import {
+  MCP_APP_MESSAGES_AR,
   MCP_APP_MESSAGES_EN,
   MCP_APP_MESSAGES_ZH,
 } from './mcp-app/messages.js';
 import {
+  COLLAB_MESSAGES_AR,
   COLLAB_MESSAGES_EN,
   COLLAB_MESSAGES_ZH,
 } from './components/workspace-agents/messages.js';
 import {
+  SETTINGS_MESSAGES_AR,
   SETTINGS_MESSAGES_EN,
   SETTINGS_MESSAGES_ZH,
 } from './settings/messages.js';
 
 import {
+  MANAGED_TASK_MESSAGES_AR,
   MANAGED_TASK_MESSAGES_EN,
   MANAGED_TASK_MESSAGES_ZH,
 } from './components/managed/managed-task-messages.js';
 
 import {
+  BROWSER_NOTIFICATION_MESSAGES_AR,
   BROWSER_NOTIFICATION_MESSAGES_EN,
   BROWSER_NOTIFICATION_MESSAGES_ZH,
 } from './browser-notifications/messages.js';
 
 import {
+  WORKSPACE_REGISTRATION_MESSAGES_AR,
   WORKSPACE_REGISTRATION_MESSAGES_EN,
   WORKSPACE_REGISTRATION_MESSAGES_ZH,
 } from './components/managed/managed-workspace-messages.js';
 
 import {
+  MANAGED_MCP_MESSAGES_AR,
   MANAGED_MCP_MESSAGES_EN,
   MANAGED_MCP_MESSAGES_ZH,
 } from './components/managed/managed-mcp-messages.js';
 
-export const WEB_SHELL_LANGUAGES = ['en', 'zh-CN', 'ru'] as const;
+import { AR_INTERACTIVE_MESSAGES } from './i18n/ar-interactive.js';
+import { AR_TRANSCRIPT_MESSAGES } from './i18n/ar-transcript.js';
+import {
+  WEB_SHELL_LANGUAGES,
+  isRtlLanguage,
+  languageDirection,
+  type LanguageDirection,
+  type WebShellLanguage,
+} from './i18n/languages.js';
 
-export type WebShellLanguage = (typeof WEB_SHELL_LANGUAGES)[number];
+export {
+  WEB_SHELL_LANGUAGES,
+  isRtlLanguage,
+  languageDirection,
+  type LanguageDirection,
+  type WebShellLanguage,
+};
 
 type MessageValue =
   | string
@@ -10363,23 +10400,50 @@ const RU: Messages = {
   'terminal.notice.lost': 'Этот терминал больше недоступен.',
 };
 
+const AR: Messages = {
+  ...AR_TRANSCRIPT_MESSAGES,
+  ...AR_INTERACTIVE_MESSAGES,
+  ...BROWSER_NOTIFICATION_MESSAGES_AR,
+  ...COLLAB_MESSAGES_AR,
+  ...FILES_MESSAGES_AR,
+  ...LIVE_MESSAGES_AR,
+  ...MANAGED_LIFECYCLE_MESSAGES_AR,
+  ...MANAGED_MCP_MESSAGES_AR,
+  ...MANAGED_TASK_MESSAGES_AR,
+  ...MCP_APP_MESSAGES_AR,
+  ...MESSAGE_DELETION_MESSAGES_AR,
+  ...SETTINGS_MESSAGES_AR,
+  ...TOKEN_USAGE_MESSAGES_AR,
+  ...TRAJECTORY_EXECUTION_MESSAGES_AR,
+  ...TRAJECTORY_FILTER_MESSAGES_AR,
+  ...TRAJECTORY_WINDOW_MESSAGES_AR,
+  ...VOICE_MESSAGES_AR,
+  ...WORKSPACE_REGISTRATION_MESSAGES_AR,
+};
+
 const MESSAGES: Record<WebShellLanguage, Messages> = {
   en: EN,
   'zh-CN': ZH,
   ru: RU,
+  ar: AR,
 };
 
 const LANGUAGE_LABELS: Record<WebShellLanguage, string> = {
   en: 'English [en]',
   'zh-CN': '中文 [zh-CN]',
   ru: 'Русский [ru]',
+  ar: 'العربية [ar]',
 };
 
 const Context = createContext<{
   language: WebShellLanguage;
+  dir: LanguageDirection;
+  isRtl: boolean;
   t: (key: string, vars?: Record<string, string | number>) => string;
 }>({
   language: 'en',
+  dir: 'ltr',
+  isRtl: false,
   t: (key) => key,
 });
 
@@ -10396,6 +10460,16 @@ export function normalizeLanguage(
   // Russian speakers must not fall through to en.
   if (normalized.startsWith('ru') || normalized === 'русский') {
     return 'ru';
+  }
+  if (
+    normalized === 'ar' ||
+    normalized.startsWith('ar-') ||
+    normalized.startsWith('ar_') ||
+    normalized === 'arabic' ||
+    normalized === 'العربية' ||
+    normalized === 'عربي'
+  ) {
+    return 'ar';
   }
   return 'en';
 }
@@ -10425,6 +10499,15 @@ export function languageSettingToWebShellLanguage(
     return 'ru';
   }
   if (
+    normalized === 'ar' ||
+    normalized.startsWith('ar-') ||
+    normalized === 'arabic' ||
+    normalized === 'العربية' ||
+    normalized === 'عربي'
+  ) {
+    return 'ar';
+  }
+  if (
     normalized === 'en' ||
     normalized === 'en-us' ||
     normalized === 'english'
@@ -10452,14 +10535,23 @@ export function I18nProvider({
   language,
   children,
 }: PropsWithChildren<{ language: WebShellLanguage }>) {
+  const dir = languageDirection(language);
   const value = useMemo(() => {
     return {
       language,
+      dir,
+      isRtl: dir === 'rtl',
       t: getTranslator(language),
     };
-  }, [language]);
+  }, [dir, language]);
 
-  return <Context.Provider value={value}>{children}</Context.Provider>;
+  return (
+    <Context.Provider value={value}>
+      <Direction.DirectionProvider dir={dir}>
+        {children}
+      </Direction.DirectionProvider>
+    </Context.Provider>
+  );
 }
 
 export function useI18n() {

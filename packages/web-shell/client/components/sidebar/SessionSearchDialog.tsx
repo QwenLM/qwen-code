@@ -323,7 +323,7 @@ export function SessionSearchDialog({
               </span>
             </>
           )}
-          <span className="ml-auto flex items-center gap-1.5">
+          <span className="ms-auto flex items-center gap-1.5">
             <kbd className="rounded border border-border px-1">Esc</kbd>
             {t('common.close')}
           </span>

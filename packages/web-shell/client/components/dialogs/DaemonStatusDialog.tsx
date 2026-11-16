@@ -644,7 +644,7 @@ function DaemonStatusDialogInner({
   onAddConnection?: (daemonOrigin: string, token?: string) => boolean | void;
   connectionsOnly?: boolean;
 }) {
-  const { t, language } = useI18n();
+  const { t, language, isRtl } = useI18n();
   const workspace = useWorkspace();
   // Switching targets navigates the page, which only the standalone shell
   // owns; embedders keep a read-only view of the connection.
@@ -691,9 +691,15 @@ function DaemonStatusDialogInner({
     index: number,
   ): void => {
     let next: number;
-    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+    if (
+      e.key === (isRtl ? 'ArrowLeft' : 'ArrowRight') ||
+      e.key === 'ArrowDown'
+    ) {
       next = (index + 1) % DAEMON_TABS.length;
-    } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+    } else if (
+      e.key === (isRtl ? 'ArrowRight' : 'ArrowLeft') ||
+      e.key === 'ArrowUp'
+    ) {
       next = (index - 1 + DAEMON_TABS.length) % DAEMON_TABS.length;
     } else if (e.key === 'Home') {
       next = 0;

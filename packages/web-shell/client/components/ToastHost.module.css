@@ -1,7 +1,7 @@
 .host {
   position: absolute;
   top: 12px;
-  right: 12px;
+  inset-inline-end: 12px;
   z-index: 30;
   display: flex;
   width: min(420px, calc(100% - 24px));
@@ -35,9 +35,10 @@
   align-items: center;
   gap: 8px;
   min-height: 40px;
-  padding: 9px 8px 9px 12px;
+  padding-block: 9px;
+  padding-inline: 12px 8px;
   border: 1px solid color-mix(in srgb, var(--foreground) 14%, var(--border));
-  border-left-width: 4px;
+  border-inline-start-width: 4px;
   border-radius: var(--radius);
   background-color: var(--muted);
   color: var(--foreground);
@@ -75,17 +76,17 @@
 }
 
 .info {
-  border-left-color: var(--agent-blue-500);
+  border-inline-start-color: var(--agent-blue-500);
 }
 
 .success {
-  border-left-color: var(--success-color);
+  border-inline-start-color: var(--success-color);
 }
 
 .warning {
-  border-left-color: var(--warning-color);
+  border-inline-start-color: var(--warning-color);
 }
 
 .error {
-  border-left-color: var(--error-color);
+  border-inline-start-color: var(--error-color);
 }

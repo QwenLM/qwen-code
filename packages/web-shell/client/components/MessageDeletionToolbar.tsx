@@ -28,7 +28,7 @@ export function MessageDeletionToolbar({
       >
         {controls.active && (
           <>
-            <span className="mr-auto text-sm" role="status">
+            <span className="me-auto text-sm" role="status">
               {t('messageDelete.selected', {
                 count: String(controls.selected.size),
               })}

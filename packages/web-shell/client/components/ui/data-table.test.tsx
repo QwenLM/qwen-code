@@ -9,6 +9,7 @@ import {
 } from '@tanstack/react-table';
 import { describe, expect, it } from 'vitest';
 
+import { I18nProvider } from '../../i18n';
 import { DataTable, type DataTableColumnMeta } from './data-table';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
@@ -234,6 +235,24 @@ describe('DataTable', () => {
       const cells = container.querySelectorAll('td');
       expect(cells[2]!.className).not.toContain('sticky');
       expect(cells[2]!.style.right).toBe('');
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('mirrors fixed sticky edges to right/left in Arabic RTL mode', () => {
+    const { container, cleanup } = renderAtWidth(
+      <I18nProvider language="ar">
+        <FixedTableHarness />
+      </I18nProvider>,
+      600,
+    );
+    try {
+      const headers = container.querySelectorAll('th');
+      expect(headers[0]!.style.right).toBe('0px');
+      expect(headers[0]!.style.left).toBe('');
+      expect(headers[1]!.style.right).toBe('250px');
+      expect(headers[1]!.style.left).toBe('');
     } finally {
       cleanup();
     }

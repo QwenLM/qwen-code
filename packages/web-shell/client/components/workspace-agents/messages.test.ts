@@ -10,7 +10,11 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { getTranslator } from '../../i18n';
 import { formatElapsed } from './agents-view-logic';
-import { COLLAB_MESSAGES_EN, COLLAB_MESSAGES_ZH } from './messages';
+import {
+  COLLAB_MESSAGES_AR,
+  COLLAB_MESSAGES_EN,
+  COLLAB_MESSAGES_ZH,
+} from './messages';
 import * as transcriptStub from './messages.transcript-stub';
 
 const CLIENT_DIR = join(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -40,13 +44,16 @@ describe('collaboration messages', () => {
       ),
     ).toBe(true);
     expect(Object.keys(COLLAB_MESSAGES_ZH).sort()).toEqual([...en].sort());
+    expect(Object.keys(COLLAB_MESSAGES_AR).sort()).toEqual([...en].sort());
   });
 
   it('are replaced by a stub of the same shape in the transcript build', () => {
     expect(Object.keys(transcriptStub).sort()).toEqual([
+      'COLLAB_MESSAGES_AR',
       'COLLAB_MESSAGES_EN',
       'COLLAB_MESSAGES_ZH',
     ]);
+    expect(transcriptStub.COLLAB_MESSAGES_AR).toEqual({});
     expect(transcriptStub.COLLAB_MESSAGES_EN).toEqual({});
     expect(transcriptStub.COLLAB_MESSAGES_ZH).toEqual({});
   });

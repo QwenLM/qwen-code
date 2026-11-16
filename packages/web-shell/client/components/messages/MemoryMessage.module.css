@@ -28,7 +28,7 @@
   color: var(--muted-foreground);
   cursor: pointer;
   font: inherit;
-  text-align: left;
+  text-align: start;
 }
 
 .memoryCard:hover,

@@ -96,7 +96,7 @@ export function SessionWorkflowCockpit({
             ref={backButtonRef}
             type="button"
           >
-            <ArrowLeftIcon aria-hidden="true" />
+            <ArrowLeftIcon className="rtl:-scale-x-100" aria-hidden="true" />
             {t('workflow.chatTitle')}
           </button>
           <div>

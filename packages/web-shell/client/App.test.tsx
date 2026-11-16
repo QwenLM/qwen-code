@@ -47632,6 +47632,8 @@ describe('App session callbacks', () => {
     ['/language ui en --project', 'en', 'workspace'],
     ['/language ui --global ru', 'ru', 'user'],
     ['/language ui ru --global', 'ru', 'user'],
+    ['/language ui --project ar', 'ar', 'workspace'],
+    ['/language ui ar --global', 'ar', 'user'],
   ])(
     'accepts UI language scope flags in %s',
     async (command, language, scope) => {
@@ -53760,6 +53762,132 @@ describe('settings-derived theme and language (#11955)', () => {
     expect(mockWorkspaceActions.setUiLanguage).toHaveBeenCalledTimes(1);
     expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
     expect(onLanguageResolved).not.toHaveBeenCalled();
+  });
+});
+
+describe('Arabic RTL layout', () => {
+  it('sets dir="rtl" and lang="ar" on the shell and portal roots', async () => {
+    const { container } = renderApp({ language: 'ar' });
+    await flush();
+
+    const root = container.querySelector<HTMLElement>('[data-web-shell-root]');
+    const portal = document.body.querySelector<HTMLElement>(
+      '[data-web-shell-portal-root]',
+    );
+    expect(root?.getAttribute('lang')).toBe('ar');
+    expect(root?.getAttribute('dir')).toBe('rtl');
+    expect(portal?.getAttribute('lang')).toBe('ar');
+    expect(portal?.getAttribute('dir')).toBe('rtl');
+  });
+
+  it('opens the floating right panel drawer from the left edge in Arabic RTL mode', async () => {
+    const originalMatchMedia = window.matchMedia;
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: false,
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    });
+    try {
+      const { container } = renderApp({ language: 'ar' });
+      await flush();
+
+      act(() => {
+        container
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="تبديل اللوحة الجانبية"]',
+          )
+          ?.click();
+      });
+      await flush();
+
+      const drawerContent = document.querySelector<HTMLElement>(
+        '[data-web-shell-portal-root] [data-slot="drawer-content"]',
+      );
+      expect(drawerContent).not.toBeNull();
+      expect(drawerContent?.getAttribute('data-vaul-drawer-direction')).toBe(
+        'left',
+      );
+    } finally {
+      Object.defineProperty(window, 'matchMedia', {
+        configurable: true,
+        value: originalMatchMedia,
+      });
+    }
+  });
+
+  it('mirrors docked right-panel pointer drag resize deltas in Arabic RTL mode', async () => {
+    const originalInnerWidth = Object.getOwnPropertyDescriptor(
+      window,
+      'innerWidth',
+    );
+    Object.defineProperty(window, 'innerWidth', {
+      configurable: true,
+      value: 1400,
+    });
+    try {
+      const { container } = renderApp({ language: 'ar' });
+      await flush();
+
+      act(() => {
+        container
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="تبديل اللوحة الجانبية"]',
+          )
+          ?.click();
+      });
+      await flush();
+
+      const separator = container.querySelector<HTMLElement>(
+        '[role="separator"][aria-orientation="vertical"]',
+      );
+      expect(separator).not.toBeNull();
+      expect(separator?.getAttribute('aria-valuenow')).toBe('320');
+      if (!separator!.setPointerCapture) {
+        separator!.setPointerCapture = () => {};
+        separator!.hasPointerCapture = () => false;
+        separator!.releasePointerCapture = () => {};
+      }
+
+      act(() => {
+        separator!.dispatchEvent(
+          new MouseEvent('pointerdown', {
+            bubbles: true,
+            clientX: 300,
+          }),
+        );
+        window.dispatchEvent(
+          new MouseEvent('pointermove', { bubbles: true, clientX: 450 }),
+        );
+        window.dispatchEvent(
+          new MouseEvent('pointerup', { bubbles: true, clientX: 450 }),
+        );
+      });
+      expect(separator?.getAttribute('aria-valuenow')).toBe('470');
+
+      act(() => {
+        separator!.dispatchEvent(
+          new MouseEvent('pointerdown', {
+            bubbles: true,
+            clientX: 450,
+          }),
+        );
+        window.dispatchEvent(
+          new MouseEvent('pointermove', { bubbles: true, clientX: 350 }),
+        );
+        window.dispatchEvent(
+          new MouseEvent('pointerup', { bubbles: true, clientX: 350 }),
+        );
+      });
+      expect(separator?.getAttribute('aria-valuenow')).toBe('370');
+    } finally {
+      if (originalInnerWidth) {
+        Object.defineProperty(window, 'innerWidth', originalInnerWidth);
+      }
+    }
   });
 });
 

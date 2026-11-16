@@ -19,7 +19,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  text-align: left;
+  text-align: start;
   padding: 6px;
   font-size: 12px;
   color: var(--foreground);
@@ -48,7 +48,7 @@
 .row {
   position: absolute;
   top: 0;
-  left: 0;
+  inset-inline-start: 0;
   width: 100%;
   height: 34px;
   display: grid;
@@ -71,7 +71,7 @@
   white-space: nowrap;
 }
 .duration {
-  text-align: right;
+  text-align: end;
   font-variant-numeric: tabular-nums;
 }
 .track {

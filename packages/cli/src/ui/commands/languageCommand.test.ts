@@ -938,6 +938,24 @@ describe('languageCommand', () => {
       });
     });
 
+    const arSASubcommand = uiSubcommand?.subCommands?.find(
+      (c) => c.name === 'ar-SA',
+    );
+    it('ar-SA action should set Arabic', async () => {
+      if (!arSASubcommand?.action) {
+        throw new Error('ar-SA subcommand must have an action.');
+      }
+
+      const result = await arSASubcommand.action(mockContext, '');
+
+      expect(i18n.setLanguageAsync).toHaveBeenCalledWith('ar');
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining('UI language changed'),
+      });
+    });
+
     it('should reject extra arguments', async () => {
       if (!zhCNSubcommand?.action) {
         throw new Error('zh-CN subcommand must have an action.');

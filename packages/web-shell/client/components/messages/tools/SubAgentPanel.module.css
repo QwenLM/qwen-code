@@ -51,7 +51,7 @@
 
 .body {
   margin-top: 8px;
-  padding-left: 10px;
+  padding-inline-start: 10px;
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -106,7 +106,8 @@
 
 .expandToggle {
   display: block;
-  margin: 2px 0 0 auto;
+  margin-block: 2px 0;
+  margin-inline: auto 0;
   background: none;
   border: none;
   color: color-mix(in srgb, var(--muted-foreground) 60%, transparent);
@@ -146,7 +147,7 @@
 }
 
 .tools .panel {
-  border-left-width: 2px;
+  border-inline-start-width: 2px;
 }
 
 /* Step rail: a dot per step plus per-step segments of vertical line, so
@@ -155,13 +156,13 @@
    height is the scrollport, not the content. */
 .step {
   position: relative;
-  padding-left: 16px;
+  padding-inline-start: 16px;
 }
 
 .step::before {
   content: '';
   position: absolute;
-  left: 2px;
+  inset-inline-start: 2px;
   top: 7px;
   width: 7px;
   height: 7px;
@@ -173,7 +174,7 @@
 .step:not(:last-child)::after {
   content: '';
   position: absolute;
-  left: 5px;
+  inset-inline-start: 5px;
   top: 16px;
   bottom: -8px;
   width: 1px;
@@ -220,7 +221,7 @@
 .toolTimeRow > .toolTimeTip {
   position: absolute;
   top: 2px;
-  right: 4px;
+  inset-inline-end: 4px;
   z-index: 5;
   color: var(--muted-foreground);
   background: var(--background);

@@ -135,6 +135,22 @@ describe('language normalization', () => {
     expect(getCurrentLanguage()).toBe('pt');
     expect(t('show version info')).toBe('mostrar informações de versão');
   });
+
+  it('normalizes Arabic locale variants before loading translations', async () => {
+    const { initializeI18n, getCurrentLanguage, t } = await import(
+      './index.js'
+    );
+    const { resolveSupportedLanguage } = await import('./languages.js');
+
+    expect(resolveSupportedLanguage('ar')).toBe('ar');
+    expect(resolveSupportedLanguage('ar-SA')).toBe('ar');
+    expect(resolveSupportedLanguage('ar_EG.UTF-8')).toBe('ar');
+
+    await initializeI18n('ar_EG.UTF-8');
+
+    expect(getCurrentLanguage()).toBe('ar');
+    expect(t('show version info')).toBe('عرض معلومات الإصدار');
+  });
 });
 
 describe('supported language resolution', () => {
@@ -192,7 +208,7 @@ describe('localizeToolDisplayName', () => {
   // Both translating locales, not just zh: `t()` has no cross-locale
   // fallback, so a tool added to zh.js alone renders its raw English badge
   // in a zh-TW session, next to fully-translated siblings.
-  it.each(['zh', 'zh-TW'] as const)(
+  it.each(['zh', 'zh-TW', 'ar'] as const)(
     'has a %s translation for every core tool display name',
     async (locale) => {
       const { setLanguageAsync, localizeToolDisplayName } = await import(

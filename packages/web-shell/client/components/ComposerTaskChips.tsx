@@ -107,7 +107,7 @@ export const ComposerTaskChips = forwardRef<
   { tasks, includeAgents, onSelectTask, onReturnToInput },
   ref,
 ) {
-  const { t } = useI18n();
+  const { t, isRtl } = useI18n();
   const groups = useMemo(
     () => getComposerTaskChipGroups(tasks, { includeAgents }),
     [includeAgents, tasks],
@@ -204,7 +204,9 @@ export const ComposerTaskChips = forwardRef<
   ) => {
     if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
       event.preventDefault();
-      focusChipAt(index + (event.key === 'ArrowRight' ? 1 : -1));
+      const step =
+        event.key === 'ArrowRight' ? (isRtl ? -1 : 1) : isRtl ? 1 : -1;
+      focusChipAt(index + step);
       return;
     }
     if (event.key === 'Escape' && openGroup) {

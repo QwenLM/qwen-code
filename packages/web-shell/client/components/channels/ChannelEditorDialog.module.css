@@ -9,9 +9,9 @@
   flex: 1;
 }
 
-/* Clears the absolutely positioned dialog close button (top-2 right-2). */
+/* Clears the absolutely positioned dialog close button (top-2 end-2). */
 .fullscreenToggle {
-  margin-right: 2rem;
+  margin-inline-end: 2rem;
   flex: 0 0 auto;
 }
 
@@ -122,7 +122,7 @@
   font: inherit;
   letter-spacing: inherit;
   cursor: pointer;
-  text-align: left;
+  text-align: start;
 }
 
 .advancedChevron {
@@ -136,7 +136,7 @@
 }
 
 .advancedBadge {
-  margin-left: auto;
+  margin-inline-start: auto;
   padding: 2px 8px;
   border: 1px solid var(--border);
   border-radius: 999px;

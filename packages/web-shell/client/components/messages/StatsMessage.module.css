@@ -35,7 +35,7 @@
 .pivotTable {
   width: 100%;
   border-collapse: collapse;
-  text-align: left;
+  text-align: start;
 }
 
 .pivotTable th,
@@ -73,21 +73,21 @@
 .metricCellSub {
   width: 24ch;
   min-width: 24ch;
-  padding-left: 2ch;
+  padding-inline-start: 2ch;
   color: var(--muted-foreground);
   white-space: nowrap;
 }
 
 .modelCell {
   min-width: 20ch;
-  padding-left: 2ch;
+  padding-inline-start: 2ch;
   color: var(--foreground);
   white-space: nowrap;
 }
 
 .modelCellHeader {
   min-width: 20ch;
-  padding-left: 2ch;
+  padding-inline-start: 2ch;
   color: var(--foreground);
   font-weight: 700;
   white-space: nowrap;
@@ -113,7 +113,7 @@
   width: 100%;
   grid-template-columns: 22ch minmax(0, 1fr);
   align-items: baseline;
-  padding-left: 2ch;
+  padding-inline-start: 2ch;
 }
 
 .kvLabel {
@@ -123,7 +123,7 @@
 .kvValue {
   justify-self: end;
   color: var(--foreground);
-  text-align: right;
+  text-align: end;
   white-space: nowrap;
 }
 
@@ -163,14 +163,14 @@
   flex: 1 1 15ch;
   min-width: 10ch;
   color: var(--foreground);
-  text-align: right;
+  text-align: end;
   white-space: nowrap;
 }
 
 .tableValueCol {
   min-width: 9ch;
   color: var(--foreground);
-  text-align: right;
+  text-align: end;
   white-space: nowrap;
 }
 

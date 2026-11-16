@@ -701,7 +701,11 @@ export function TrajectoryDetail({
             aria-label={t('trajectory.detail.back')}
             title={t('trajectory.detail.back')}
           >
-            <ChevronLeftIcon size={16} aria-hidden="true" />
+            <ChevronLeftIcon
+              size={16}
+              className="rtl:-scale-x-100"
+              aria-hidden="true"
+            />
           </button>
         )}
         <h3 ref={headingRef} tabIndex={-1} title={title}>

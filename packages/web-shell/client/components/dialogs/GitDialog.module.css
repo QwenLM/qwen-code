@@ -287,7 +287,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  text-align: left;
+  text-align: start;
 }
 
 .branchSelectPopover {
@@ -339,12 +339,13 @@
 .branchSelectItem {
   display: block;
   width: 100%;
-  padding: 4px 10px 4px 16px;
+  padding-block: 4px;
+  padding-inline: 16px 10px;
   border: none;
   background: none;
   color: var(--foreground, #e0e0e0);
   font-size: 12px;
-  text-align: left;
+  text-align: start;
   cursor: pointer;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -368,7 +369,7 @@
 }
 
 .branchSelectRetry {
-  margin-left: 6px;
+  margin-inline-start: 6px;
   padding: 0;
   border: none;
   background: none;

@@ -52,7 +52,7 @@
   box-shadow: 0 4px 12px color-mix(in srgb, #000 8%, transparent);
   color: var(--foreground);
   font: inherit;
-  text-align: left;
+  text-align: start;
 }
 
 button.node {
@@ -138,7 +138,7 @@ button.node:focus-visible {
 }
 
 .duration {
-  margin-left: auto;
+  margin-inline-start: auto;
   color: var(--muted-foreground);
   font-size: 11px;
 }

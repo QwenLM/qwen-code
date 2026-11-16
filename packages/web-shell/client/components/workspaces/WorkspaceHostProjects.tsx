@@ -31,7 +31,7 @@ import { HostLabel } from './HostLabel';
 import { useDaemonAvailability } from '../../daemon/availability-context.js';
 
 const GROUP_LABEL_CLASS =
-  'flex w-full min-w-0 items-center gap-1.5 px-2 pb-1 pt-3 text-left text-[11px] font-medium text-muted-foreground';
+  'flex w-full min-w-0 items-center gap-1.5 px-2 pb-1 pt-3 text-start text-[11px] font-medium text-muted-foreground';
 
 function useCurrentHostOrigin(): string {
   const workspace = useWorkspace();
