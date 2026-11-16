@@ -880,6 +880,137 @@ describe('GitWorktreeService.createUserWorktree() — carryDirtyState', () => {
     expect(await read(targetExtra)).toBe('local\n');
   });
 
+  it('applyStashSnapshot refuses to overwrite an ignored local file (R12-2)', async () => {
+    await fs.writeFile(path.join(repoRoot, '.gitignore'), 'secret.env\n');
+    git(repoRoot, 'add', '.gitignore');
+    git(repoRoot, 'commit', '-qm', 'ignore', '--no-verify');
+    await fs.writeFile(path.join(repoRoot, 'secret.env'), 'LOCAL_UNIQUE\n');
+    const service = new GitWorktreeService(repoRoot);
+    const src = await service.createUserWorktree('r122-src', 'main', {
+      detached: true,
+    });
+    expect(src.success).toBe(true);
+    const srcPath = src.worktree!.path;
+    await fs.writeFile(path.join(srcPath, 'secret.env'), 'AGENT_TEMPLATE\n');
+    git(srcPath, 'add', '-f', 'secret.env');
+    const snapshot = await service.createStashSnapshot(srcPath);
+    expect(snapshot).not.toBe('');
+    await expect(
+      service.applyStashSnapshot(repoRoot, snapshot),
+    ).rejects.toMatchObject({ conflict: true, restoreFailed: false });
+    expect(await read(path.join(repoRoot, 'secret.env'))).toBe(
+      'LOCAL_UNIQUE\n',
+    );
+  });
+
+  it('applyStashSnapshot guards ignored files from a subdirectory checkout (R15-1)', async () => {
+    // The target checkout is repoRoot/app, but the snapshot's paths and the
+    // apply are repository-wide. The colliding ignored file sits at the repo
+    // ROOT, OUTSIDE the app/ subtree: an ls-files run from the subdir lists
+    // only that subtree (even with --full-name) and would miss it entirely.
+    // The guard must enumerate from the repo root to cover the whole repo.
+    await fs.mkdir(path.join(repoRoot, 'app'));
+    await fs.writeFile(path.join(repoRoot, 'app', 'keep.txt'), 'keep\n');
+    await fs.writeFile(path.join(repoRoot, '.gitignore'), 'secret.env\n');
+    git(repoRoot, 'add', 'app/keep.txt', '.gitignore');
+    git(repoRoot, 'commit', '-qm', 'app', '--no-verify');
+    await fs.writeFile(path.join(repoRoot, 'secret.env'), 'LOCAL_UNIQUE\n');
+    const service = new GitWorktreeService(repoRoot);
+    const src = await service.createUserWorktree('r151-src', 'main', {
+      detached: true,
+    });
+    expect(src.success).toBe(true);
+    const srcPath = src.worktree!.path;
+    await fs.writeFile(path.join(srcPath, 'secret.env'), 'AGENT_TEMPLATE\n');
+    git(srcPath, 'add', '-f', 'secret.env');
+    const snapshot = await service.createStashSnapshot(srcPath);
+    expect(snapshot).not.toBe('');
+    await expect(
+      service.applyStashSnapshot(path.join(repoRoot, 'app'), snapshot),
+    ).rejects.toMatchObject({ conflict: true });
+    expect(await read(path.join(repoRoot, 'secret.env'))).toBe(
+      'LOCAL_UNIQUE\n',
+    );
+  });
+
+  it('applyStashSnapshot refuses a file that would replace an ignored directory (R15-2)', async () => {
+    // The snapshot carries a regular file `secret`; the target holds ignored
+    // content at secret/unique.txt. Exact-path equality misses the ancestor
+    // collision; applying would replace the directory and destroy unique.txt.
+    await fs.writeFile(path.join(repoRoot, '.gitignore'), 'secret\n');
+    git(repoRoot, 'add', '.gitignore');
+    git(repoRoot, 'commit', '-qm', 'ignore secret', '--no-verify');
+    await fs.mkdir(path.join(repoRoot, 'secret'));
+    await fs.writeFile(
+      path.join(repoRoot, 'secret', 'unique.txt'),
+      'LOCAL_UNIQUE\n',
+    );
+    const service = new GitWorktreeService(repoRoot);
+    const src = await service.createUserWorktree('r152-src', 'main', {
+      detached: true,
+    });
+    expect(src.success).toBe(true);
+    const srcPath = src.worktree!.path;
+    await fs.writeFile(path.join(srcPath, 'secret'), 'AGENT_FILE\n');
+    git(srcPath, 'add', '-f', 'secret');
+    const snapshot = await service.createStashSnapshot(srcPath);
+    expect(snapshot).not.toBe('');
+    await expect(
+      service.applyStashSnapshot(repoRoot, snapshot),
+    ).rejects.toMatchObject({ conflict: true });
+    expect(await read(path.join(repoRoot, 'secret', 'unique.txt'))).toBe(
+      'LOCAL_UNIQUE\n',
+    );
+  });
+
+  it('applyStashSnapshot folds case on a case-insensitive target (R15-3)', async () => {
+    // Force core.ignorecase to exercise the case-folding path on a
+    // case-sensitive host: the snapshot carries SECRET.env while the target
+    // holds ignored secret.env — the same file on a case-insensitive FS.
+    await fs.writeFile(path.join(repoRoot, '.gitignore'), 'secret.env\n');
+    git(repoRoot, 'add', '.gitignore');
+    git(repoRoot, 'commit', '-qm', 'ignore', '--no-verify');
+    git(repoRoot, 'config', 'core.ignorecase', 'true');
+    await fs.writeFile(path.join(repoRoot, 'secret.env'), 'LOCAL_UNIQUE\n');
+    const service = new GitWorktreeService(repoRoot);
+    const src = await service.createUserWorktree('r153-src', 'main', {
+      detached: true,
+    });
+    expect(src.success).toBe(true);
+    const srcPath = src.worktree!.path;
+    await fs.writeFile(path.join(srcPath, 'SECRET.env'), 'AGENT_TEMPLATE\n');
+    git(srcPath, 'add', '-f', 'SECRET.env');
+    const snapshot = await service.createStashSnapshot(srcPath);
+    expect(snapshot).not.toBe('');
+    await expect(
+      service.applyStashSnapshot(repoRoot, snapshot),
+    ).rejects.toMatchObject({ conflict: true });
+    expect(await read(path.join(repoRoot, 'secret.env'))).toBe(
+      'LOCAL_UNIQUE\n',
+    );
+  });
+
+  it('applyStashSnapshot applies when no ignored path collides (R12-2 control)', async () => {
+    await fs.writeFile(path.join(repoRoot, '.gitignore'), 'unrelated.env\n');
+    git(repoRoot, 'add', '.gitignore');
+    git(repoRoot, 'commit', '-qm', 'ignore', '--no-verify');
+    await fs.writeFile(path.join(repoRoot, 'unrelated.env'), 'LOCAL\n');
+    const service = new GitWorktreeService(repoRoot);
+    const src = await service.createUserWorktree('r122-ok', 'main', {
+      detached: true,
+    });
+    expect(src.success).toBe(true);
+    const srcPath = src.worktree!.path;
+    await fs.writeFile(path.join(srcPath, 'tracked.txt'), 'dirty\n');
+    const snapshot = await service.createStashSnapshot(srcPath);
+    expect(snapshot).not.toBe('');
+    await expect(
+      service.applyStashSnapshot(repoRoot, snapshot),
+    ).resolves.toBeUndefined();
+    expect(await read(path.join(repoRoot, 'tracked.txt'))).toBe('dirty\n');
+    expect(await read(path.join(repoRoot, 'unrelated.env'))).toBe('LOCAL\n');
+  });
+
   it('writes the exclude rule for an in-root directory named ..cache', async () => {
     // A '..' PREFIX is not a parent segment: a service rooted under an
     // in-root '..cache' directory yields rel '..cache/sub/.qwen/worktrees',

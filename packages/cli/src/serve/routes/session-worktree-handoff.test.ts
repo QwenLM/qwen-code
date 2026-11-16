@@ -886,6 +886,104 @@ describe('POST /session/:id/worktree-handoff', () => {
     ).toBe('LOCAL_UNIQUE_SECRET\n');
   });
 
+  it('refuses a snapshot apply that would overwrite an ignored file in a subdirectory workspace (R15-1)', async () => {
+    const fixture = makeFixture({ subdir: 'app' });
+    fixture.writeTranscript();
+    writeFileSync(path.join(fixture.repoRoot, '.gitignore'), 'secret.env\n');
+    git(fixture.repoRoot, 'add', '.gitignore');
+    git(fixture.repoRoot, 'commit', '-qm', 'ignore', '--no-verify');
+    await fixture.createDetachedWorktree();
+    // The snapshot's path is repository-relative (app/secret.env) while the
+    // local checkout is the app/ subdirectory: enumerating ignored files from
+    // the subdir would miss it and let the apply overwrite the local copy.
+    writeFileSync(
+      path.join(fixture.worktreeDir, 'app', 'secret.env'),
+      'AGENT_TEMPLATE\n',
+    );
+    git(fixture.worktreeDir, 'add', '-f', 'app/secret.env');
+    writeFileSync(
+      path.join(fixture.workspaceDir, 'secret.env'),
+      'LOCAL_UNIQUE_SECRET\n',
+    );
+
+    const res = await request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-handoff`)
+      .send({ to: 'local' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('handoff_snapshot_conflict');
+    expect(
+      readFileSync(path.join(fixture.workspaceDir, 'secret.env'), 'utf8'),
+    ).toBe('LOCAL_UNIQUE_SECRET\n');
+  });
+
+  it('refuses a snapshot file that would replace an ignored directory (R15-2)', async () => {
+    const fixture = makeFixture();
+    fixture.writeTranscript();
+    writeFileSync(path.join(fixture.workspaceDir, '.gitignore'), 'secret\n');
+    git(fixture.workspaceDir, 'add', '.gitignore');
+    git(fixture.workspaceDir, 'commit', '-qm', 'ignore', '--no-verify');
+    await fixture.createDetachedWorktree();
+    // The worktree carries a regular file `secret`; the local checkout holds
+    // ignored content at secret/unique.txt. Applying would replace the
+    // directory and destroy unique.txt (exact-path equality alone misses it).
+    writeFileSync(path.join(fixture.worktreeDir, 'secret'), 'AGENT_FILE\n');
+    git(fixture.worktreeDir, 'add', '-f', 'secret');
+    mkdirSync(path.join(fixture.workspaceDir, 'secret'));
+    writeFileSync(
+      path.join(fixture.workspaceDir, 'secret', 'unique.txt'),
+      'LOCAL_UNIQUE\n',
+    );
+
+    const res = await request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-handoff`)
+      .send({ to: 'local' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('handoff_snapshot_conflict');
+    expect(
+      readFileSync(
+        path.join(fixture.workspaceDir, 'secret', 'unique.txt'),
+        'utf8',
+      ),
+    ).toBe('LOCAL_UNIQUE\n');
+  });
+
+  it('refuses a case-aliased snapshot overwrite on a case-insensitive target (R15-3)', async () => {
+    const fixture = makeFixture();
+    fixture.writeTranscript();
+    writeFileSync(
+      path.join(fixture.workspaceDir, '.gitignore'),
+      'secret.env\n',
+    );
+    git(fixture.workspaceDir, 'add', '.gitignore');
+    git(fixture.workspaceDir, 'commit', '-qm', 'ignore', '--no-verify');
+    await fixture.createDetachedWorktree();
+    writeFileSync(
+      path.join(fixture.worktreeDir, 'SECRET.env'),
+      'AGENT_TEMPLATE\n',
+    );
+    git(fixture.worktreeDir, 'add', '-f', 'SECRET.env');
+    // Force core.ignorecase to exercise the case-folding path on a
+    // case-sensitive host: SECRET.env and secret.env name one file on a
+    // case-insensitive filesystem.
+    git(fixture.repoRoot, 'config', 'core.ignorecase', 'true');
+    writeFileSync(
+      path.join(fixture.workspaceDir, 'secret.env'),
+      'LOCAL_UNIQUE_SECRET\n',
+    );
+
+    const res = await request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-handoff`)
+      .send({ to: 'local' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('handoff_snapshot_conflict');
+    expect(
+      readFileSync(path.join(fixture.workspaceDir, 'secret.env'), 'utf8'),
+    ).toBe('LOCAL_UNIQUE_SECRET\n');
+  });
+
   it('fails closed when the local checkout is not the bound workspace (R9-1)', async () => {
     // Daemon bound to a subdirectory; a branch-route-shaped sidecar records
     // originalCwd as the repo top. listWorkspaceSessions cannot answer for the

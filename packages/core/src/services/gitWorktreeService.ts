@@ -3386,15 +3386,38 @@ export class GitWorktreeService {
         { conflict: true },
       );
     }
-    const snapshotPaths = new Set(snapshotPathsRaw.split('\0').filter(Boolean));
-    if (snapshotPaths.size > 0) {
+    const snapshotPaths = snapshotPathsRaw.split('\0').filter(Boolean);
+    if (snapshotPaths.length > 0) {
+      // The snapshot's paths are repository-relative and `stash apply` writes
+      // across the WHOLE repo, but checkoutPath may be a subdirectory: an
+      // ls-files run there lists only that subtree, cwd-relative, so the two
+      // probes would use different bases and scopes and miss the collision
+      // (R15-1). Enumerate the ignored set from the repo root with --full-name
+      // so both sides share one repository-relative, repo-wide basis.
+      let targetTop: string;
+      try {
+        targetTop = (await git.raw(['rev-parse', '--show-toplevel'])).replace(
+          /\n$/,
+          '',
+        );
+        if (targetTop.length === 0) throw new Error('empty repository root');
+      } catch (error) {
+        throw new WorktreeDirtyCarryConflictError(
+          `Cannot determine the target repository root to guard ignored files: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+          { conflict: true },
+        );
+      }
+      const targetGit = simpleGit(targetTop).env(gitEnv());
       let ignoredRaw: string;
       try {
-        ignoredRaw = await git.raw([
+        ignoredRaw = await targetGit.raw([
           'ls-files',
           '--others',
           '--ignored',
           '--exclude-standard',
+          '--full-name',
           '-z',
         ]);
       } catch (error) {
@@ -3405,12 +3428,37 @@ export class GitWorktreeService {
           { conflict: true },
         );
       }
-      for (const ignoredPath of ignoredRaw.split('\0').filter(Boolean)) {
-        if (snapshotPaths.has(ignoredPath)) {
-          throw new WorktreeDirtyCarryConflictError(
-            `Stash snapshot would overwrite the ignored local file ${ignoredPath}`,
-            { conflict: true },
-          );
+      const ignoredPaths = ignoredRaw.split('\0').filter(Boolean);
+      if (ignoredPaths.length > 0) {
+        // On a case-insensitive filesystem a case-aliased snapshot path names
+        // the same file as the ignored path (R15-3); fold case when the target
+        // does so it is not missed by literal equality.
+        const ignoresCase = await this.targetIgnoresCase(targetGit);
+        const norm = (p: string) => (ignoresCase ? p.toLowerCase() : p);
+        const snapshotSet = new Set(snapshotPaths.map(norm));
+        for (const ignoredPath of ignoredPaths) {
+          const target = norm(ignoredPath);
+          if (snapshotSet.has(target)) {
+            throw new WorktreeDirtyCarryConflictError(
+              `Stash snapshot would overwrite the ignored local file ${ignoredPath}`,
+              { conflict: true },
+            );
+          }
+          // A snapshot file at an ancestor directory would replace the very
+          // directory that holds the ignored content (R15-2): exact-path
+          // equality alone misses `secret` clobbering `secret/unique.txt`.
+          let ancestor = target;
+          let sep = ancestor.lastIndexOf('/');
+          while (sep > 0) {
+            ancestor = ancestor.slice(0, sep);
+            if (snapshotSet.has(ancestor)) {
+              throw new WorktreeDirtyCarryConflictError(
+                `Stash snapshot would replace the directory holding the ignored local file ${ignoredPath}`,
+                { conflict: true },
+              );
+            }
+            sep = ancestor.lastIndexOf('/');
+          }
         }
       }
     }
@@ -3468,6 +3516,46 @@ export class GitWorktreeService {
           : 'Stash snapshot applied but the index state could not be read to confirm a clean apply',
         { conflict: false },
       );
+    }
+  }
+
+  /**
+   * Whether the target filesystem folds path case, so a case-aliased snapshot
+   * path names the same file as an ignored path (R15-3). Reads git's own
+   * `core.ignorecase` record first (true on case-insensitive filesystems such
+   * as macOS/Windows); when it is unset/false, probes the target FS directly
+   * by creating a temp file in the git dir (same filesystem, outside the
+   * working tree) and checking whether a case-variant of its name resolves to
+   * the same inode. Best-effort: a probe that cannot run answers false, which
+   * only skips case-folding on a filesystem that reports itself case-sensitive.
+   */
+  private async targetIgnoresCase(git: SimpleGit): Promise<boolean> {
+    try {
+      const configured = (
+        await git.raw(['config', '--bool', 'core.ignorecase'])
+      ).trim();
+      if (configured === 'true') return true;
+    } catch {
+      // Unset or unreadable: fall through to the filesystem probe.
+    }
+    try {
+      const gitDir = (
+        await git.raw(['rev-parse', '--absolute-git-dir'])
+      ).trim();
+      if (gitDir.length === 0) return false;
+      const stamp = `${process.pid}-${Date.now()}`;
+      const lower = path.join(gitDir, `qwen-case-probe-${stamp}-a`);
+      const upper = path.join(gitDir, `qwen-case-probe-${stamp}-A`);
+      await fs.writeFile(lower, '');
+      try {
+        const a = await fs.stat(lower);
+        const b = await fs.stat(upper).catch(() => null);
+        return b !== null && a.dev === b.dev && a.ino === b.ino;
+      } finally {
+        await fs.rm(lower, { force: true }).catch(() => undefined);
+      }
+    } catch {
+      return false;
     }
   }
 
