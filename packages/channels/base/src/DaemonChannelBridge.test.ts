@@ -2100,6 +2100,53 @@ describe('DaemonChannelBridge', () => {
     bridge.stop();
   });
 
+  it('emits discrete PreToolUse block notices as text chunks', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+    const textChunks: Array<[string, string]> = [];
+    bridge.on('textChunk', (sessionId, text) => {
+      textChunks.push([sessionId, text]);
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+    events.push({
+      id: 1,
+      v: 1,
+      type: 'session_update',
+      data: {
+        sessionId: 'session-1',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: {
+            type: 'text',
+            text: '✗ **PreToolUse blocked**: write_file - line one\nline two',
+          },
+          _meta: {
+            source: 'pre_tool_use_block',
+            qwenDiscreteMessage: true,
+          },
+        },
+      },
+    });
+
+    await vi.waitFor(() => {
+      expect(textChunks).toEqual([
+        [
+          'session-1',
+          '✗ **PreToolUse blocked**: write_file - line one\nline two',
+        ],
+      ]);
+    });
+
+    events.close();
+    bridge.stop();
+  });
+
   it('ignores a rewritten background response to avoid duplicate delivery', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);

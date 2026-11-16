@@ -1198,6 +1198,8 @@ export class DaemonChannelBridge
         }
         const text = getTextContent(update['content']);
         if (meta?.['qwenDiscreteMessage'] === true) {
+          // Discrete notices are allow-listed by source; an unlisted source
+          // is dropped here, so every new notice source must be added below.
           if (
             meta['source'] === 'background_notification_response' &&
             meta['rewritten'] !== true &&
@@ -1233,7 +1235,11 @@ export class DaemonChannelBridge
             if (text || context?.turnComplete) {
               this.emit('backgroundResponse', sessionId, text ?? '', context);
             }
-          } else if (meta['source'] === 'vision_bridge_notice' && text) {
+          } else if (
+            (meta['source'] === 'vision_bridge_notice' ||
+              meta['source'] === 'pre_tool_use_block') &&
+            text
+          ) {
             this.emit('textChunk', sessionId, text);
           }
           break;
