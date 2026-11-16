@@ -54,6 +54,7 @@ import {
   readCsiFileHistoryObservation,
   readCsiPreparationEvidence,
   type CsiFileHistoryObservation,
+  type CsiHistoryPreparation,
 } from './managed-csi-file-history-protocol.js';
 import {
   CSI_FILE_FINALIZE_PATH,
@@ -78,6 +79,7 @@ export function historyFits(
   before: CsiFileHistoryObservation,
   promptId: string,
   paths: string[],
+  preparation?: CsiHistoryPreparation,
 ): boolean {
   const projected = structuredClone(before);
   const snapshots = projected.state.snapshots;
@@ -145,9 +147,20 @@ export function historyFits(
   const snapshotsBytes = Buffer.byteLength(
     JSON.stringify(snapshotsForBudget),
   );
+  // The durable prepared record additionally embeds the actual preparation
+  // payload (invocations + paths are fully determined by prepare time) and
+  // gains an intentRef durable ref pointing at the intent record. Budget the
+  // serialized preparation with a worst-case ref so an accepted preparation
+  // cannot overflow the durable record after the runtime history changed.
+  const preparationBytes = preparation
+    ? Buffer.byteLength(
+        JSON.stringify({ ...preparation, intentRef: 'f'.repeat(256) }),
+      )
+    : 0;
   return (
     Buffer.byteLength(envelopeWithoutSnapshots) +
       2 * snapshotsBytes +
+      preparationBytes +
       1024 <=
     64 * 1024
   );
@@ -423,6 +436,7 @@ export async function startManagedCsiFileWorker(
                       current.observation,
                       current.preparation.promptId,
                       current.preparation.paths,
+                      current.preparation,
                     )
                   )
                     throw new HistoryCapacityError();

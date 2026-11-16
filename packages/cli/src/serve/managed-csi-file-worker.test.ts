@@ -994,21 +994,42 @@ describe('boot5 history HTTP ownership with labelled readback/composer seams', (
     expect(await snapshot.json()).toHaveProperty('observation', initial);
   });
 
-  it('reserves the snapshot cwd in the projected capacity for a new prompt', () => {
-    // 124 tracked files is exactly the count that fits the 64 KiB budget
-    // WITHOUT the worst-case cwd reservation (a 4096-char path adds ~4.1 KiB,
-    // i.e. ~14 reserved file shapes). With the reservation in the projection
-    // this input must be refused BEFORE any history mutation, instead of
-    // discovering the overflow after the prepare already changed history.
+  it('budgets the durable preparation payload and intentRef, not just snapshots', () => {
+    // A medium preparation (20 invocations + two max-length paths, ~22 KiB
+    // serialized) plus 60 tracked files: the snapshot section alone fits the
+    // durable budget, and the preparation payload is exactly what must push
+    // the prepared record over the 64 KiB contract — BEFORE the runtime
+    // history changes, instead of failing the durable commit after effects.
     const base = structuredClone(observation);
     base.state.snapshots = [];
     base.state.files = {};
     const request: Record<string, unknown> = { identity: { sessionId: 's' } };
+    const invocation = {
+      executionCallId: 'e'.repeat(36),
+      callId: 'c'.repeat(36),
+      functionCallId: 'f'.repeat(36),
+      toolName: 'write_file',
+      partIndex: 0,
+      ordinal: 0,
+      requestDigest: 'sha256:' + 'd'.repeat(64),
+      inputRef: { recordRef: 'r'.repeat(128) },
+      toolDefinitionRef: { recordRef: 'r'.repeat(128) },
+    };
+    const preparation = {
+      stage: 'intent',
+      turnId: 't'.repeat(36),
+      promptId: 'p-new',
+      batchId: 'b'.repeat(36),
+      invocations: Array.from({ length: 20 }, () => invocation),
+      paths: Array.from({ length: 2 }, () => '/' + 'p'.repeat(4095)),
+    };
     const before = structuredClone(base);
     before.state.files = Object.fromEntries(
-      Array.from({ length: 124 }, (_, i) => [`f${i}.txt`, null]),
+      Array.from({ length: 60 }, (_, i) => [`f${i}.txt`, null]),
     );
-    expect(historyFits(request, before, 'p-new', [])).toBe(false);
+    expect(
+      historyFits(request, before, 'p-new', preparation.paths, preparation),
+    ).toBe(false);
   });
 
   it('keeps preparation input errors retryable when history and storage are unchanged', async () => {
