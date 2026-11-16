@@ -76,6 +76,12 @@ describe('estimateWrappedRows', () => {
     expect(estimateWrappedRows('a'.repeat(50), 0)).toBe(1);
     expect(estimateWrappedRows('a'.repeat(50), -5)).toBe(1);
   });
+
+  it('charges the rows the renderer wraps at word boundaries', () => {
+    // "aa aa aa" is 8 cols and ceils to 2 rows at width 4, but Ink's
+    // wrapAnsi breaks after each word pair and draws 3.
+    expect(estimateWrappedRows('aa aa aa', 4)).toBe(3);
+  });
 });
 
 describe('estimateLineRows', () => {

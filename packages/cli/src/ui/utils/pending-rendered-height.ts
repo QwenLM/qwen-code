@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import wrapAnsi from 'wrap-ansi';
 import { getCachedStringWidth } from './textUtils.js';
 import { readInlineMathSpanAt } from './inline-math.js';
 
@@ -192,10 +193,16 @@ export function splitMarkdownTableRow(row: string): string[] {
   return cells;
 }
 
-/** Estimated terminal rows a non-table line occupies once wrapped to `width`. */
+/** Estimated terminal rows a non-table line occupies once wrapped to `width`.
+ *  Charged with the renderer's own wrapper: Ink breaks at word boundaries, so a
+ *  character-ceil under-counts a line whose words do not pack the last row
+ *  (`aa aa aa` at width 4 renders 3 rows, ceils to 2). */
 export function estimateWrappedRows(line: string, width: number): number {
   if (width <= 0) return 1;
-  return Math.max(1, Math.ceil(getCachedStringWidth(line) / width));
+  const wrapped = wrapAnsi(line, width, { trim: false, hard: true }).split(
+    '\n',
+  ).length;
+  return Math.max(wrapped, Math.ceil(getCachedStringWidth(line) / width));
 }
 
 /**
