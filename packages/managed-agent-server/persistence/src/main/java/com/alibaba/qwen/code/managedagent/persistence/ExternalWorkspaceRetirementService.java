@@ -108,7 +108,10 @@ public final class ExternalWorkspaceRetirementService {
             requireWorkspace(request, "ACTIVE");
             RuntimeBindingRecord current = jdbc.execute((ConnectionCallback<RuntimeBindingRecord>) connection ->
                     bindings.lockActiveForRetirement(connection, original));
-            require(current != null && current.getVersion() == request.expectedVersion());
+            if (current == null) {
+                throw blocked();
+            }
+            require(current.getVersion() == request.expectedVersion());
             requireOriginal(request, current);
             require(identity.equals(identity(request, current)));
             verifyProof(identity, proof);
