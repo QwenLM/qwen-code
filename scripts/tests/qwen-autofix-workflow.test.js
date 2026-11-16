@@ -12625,6 +12625,9 @@ exit 1
         expect(uploaded.error).toBeUndefined();
         if (hasPackage && build !== 'complete') {
           expect(uploaded.status, uploaded.stderr).toBe(1);
+          expect(uploaded.stdout).toContain(
+            '::error::packages/network-policy is present in the trusted base but packages/network-policy/dist/index.js is missing from its build output.',
+          );
           return;
         }
         expect(uploaded.status, uploaded.stderr).toBe(0);
@@ -12661,6 +12664,9 @@ exit 1
         expect(restored.error).toBeUndefined();
         if (omitArtifactDependency) {
           expect(restored.status, restored.stderr).toBe(1);
+          expect(restored.stdout).toContain(
+            '::error::packages/network-policy/dist/index.js is missing from the restored CLI bundle required by the trusted base.',
+          );
         } else {
           expect(restored.status, restored.stderr).toBe(0);
           expect(readFileSync(join(consumer, 'dist/cli.js'), 'utf8')).toBe(
@@ -18401,12 +18407,18 @@ exit 1
     expect(reviewVerificationRunner).toContain(
       "grep -Eq '^packages/core/(src/|index\\.ts$)'",
     );
-    expect(assertions).toHaveLength(2);
-    expect(assertions[0]).toBeGreaterThan(contractCheck);
-    expect(noOpCheck).toBeGreaterThan(assertions[0]);
+    const dependencySync = reviewVerificationRunner.indexOf(
+      'if ! sync_dependencies "${VERIFICATION_HEAD}"',
+    );
+    expect(dependencySync).toBeGreaterThan(verificationHeadCapture);
+    expect(assertions).toHaveLength(3);
+    expect(assertions[0]).toBeGreaterThan(dependencySync);
+    expect(coreRebuild).toBeGreaterThan(assertions[0]);
+    expect(assertions[1]).toBeGreaterThan(contractCheck);
+    expect(noOpCheck).toBeGreaterThan(assertions[1]);
     expect(buildCheck).toBeGreaterThan(noOpCheck);
-    expect(assertions[1]).toBeGreaterThan(buildCheck);
-    expect(verifiedHeadOutput).toBeGreaterThan(assertions[1]);
+    expect(assertions[2]).toBeGreaterThan(buildCheck);
+    expect(verifiedHeadOutput).toBeGreaterThan(assertions[2]);
     expect(pushAndReportStep).toContain(
       "VERIFIED_HEAD: '${{ steps.final_verify.outputs.verified_head }}'",
     );
@@ -21486,10 +21498,10 @@ exit 1
     // writes outcome=failed; an unwired check would read as a gate crash and be
     // retried instead of reported. Drive the extracted helper for real.
     const gate = reviewVerificationRunner;
-    // Each check runs through run_check, which tees its output to GATE_LOG and
-    // calls reject_fix on failure - so the verdict is declared AND the reason
-    // is captured for the retry.
+    // Checks capture their output and call reject_fix on failure, so the
+    // verdict is declared and the reason is captured for the retry.
     for (const check of [
+      "reject_fix 'dependency installation failed on the agent-committed fix'",
       "run_check 'core rebuild failed on the agent-committed fix'",
       "run_check_no_ab 'settings schema is stale on the agent-committed fix'",
       "run_check_no_ab 'cross-package contract verification failed'",
@@ -26800,6 +26812,8 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     // Plant a package.json beside the staged parser that would turn a
     // `.js` file into an ES module: the `.cjs` staging must not care.
     parserTypePlant = false,
+    install = {},
+    workspaceTransition = false,
   }) => {
     const dir = mkdtempSync(join(tmpdir(), 'gate-ab-'));
     try {
@@ -26830,6 +26844,65 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         'module.exports = new Proxy({}, { get: () => () => undefined });\n',
       );
       g("printf 'node_modules/\\n' > .gitignore");
+      const writeWorkspaceFile = (file, value) => {
+        const target = join(work, file);
+        mkdirSync(dirname(target), { recursive: true });
+        writeFileSync(
+          target,
+          typeof value === 'string' ? value : JSON.stringify(value),
+        );
+      };
+      const corePackage = {
+        name: '@qwen-code/qwen-code-core',
+        version: '1.0.0',
+        type: 'module',
+        main: './dist/index.js',
+        types: './dist/index.d.ts',
+        scripts: {
+          build: `node '${resolve('node_modules/typescript/lib/tsc.js').replaceAll("'", "'\\''")}' -b`,
+        },
+      };
+      const tsconfig = {
+        compilerOptions: {
+          composite: true,
+          module: 'NodeNext',
+          moduleResolution: 'NodeNext',
+          rootDir: 'src',
+          outDir: 'dist',
+        },
+      };
+      if (workspaceTransition) {
+        writeWorkspaceFile(
+          '.gitignore',
+          'node_modules/\ndist/\n*.tsbuildinfo\n',
+        );
+        writeWorkspaceFile('package.json', {
+          private: true,
+          type: 'module',
+          packageManager: JSON.parse(readFileSync('package.json', 'utf8'))
+            .packageManager,
+          workspaces: ['packages/*'],
+          dependencies: { '@qwen-code/qwen-code-core': 'workspace:*' },
+          scripts: {
+            prepare:
+              'node -e "if (!process.env.QWEN_SKIP_PREPARE) process.exit(1)"',
+          },
+        });
+        writeWorkspaceFile(
+          'pnpm-workspace.yaml',
+          'packages:\n  - packages/*\nnodeLinker: hoisted\nlinkWorkspacePackages: true\n',
+        );
+        writeWorkspaceFile('packages/core/package.json', corePackage);
+        writeWorkspaceFile('packages/core/tsconfig.json', tsconfig);
+        writeWorkspaceFile(
+          'packages/core/src/index.ts',
+          "export const schema = 'base';\n",
+        );
+        g(
+          'CI=1 corepack pnpm install --no-frozen-lockfile --ignore-scripts --prefer-offline',
+        );
+        g('npm run build --workspace packages/core');
+      }
       g('echo base > f.txt && git add . && git commit -qm base');
       g('git branch -M main && git push -q origin main');
       if (weaken && !WEAKEN_FIXTURES[weaken]) {
@@ -26844,7 +26917,48 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         g('git add . && git commit -qm seed-test && git push -q origin main');
       }
       g('git checkout -qb feature');
-      if (touchCore) {
+      if (workspaceTransition) {
+        writeWorkspaceFile('packages/network-policy/package.json', {
+          name: '@qwen-code/network-policy',
+          version: '1.0.0',
+          type: 'module',
+          main: './dist/index.js',
+          types: './dist/index.d.ts',
+        });
+        writeWorkspaceFile('packages/network-policy/tsconfig.json', tsconfig);
+        writeWorkspaceFile(
+          'packages/network-policy/src/index.ts',
+          "export const schema = 'branch';\n",
+        );
+        writeWorkspaceFile('packages/core/package.json', {
+          ...corePackage,
+          dependencies: { '@qwen-code/network-policy': 'workspace:*' },
+        });
+        writeWorkspaceFile('packages/core/tsconfig.json', {
+          ...tsconfig,
+          references: [{ path: '../network-policy' }],
+        });
+        writeWorkspaceFile(
+          'packages/core/src/index.ts',
+          "export { schema } from '@qwen-code/network-policy';\n",
+        );
+        writeWorkspaceFile(
+          'schema.mjs',
+          "import { schema } from '@qwen-code/qwen-code-core';\nif (schema !== 'branch') throw new Error('stale schema');\nconsole.log('branch schema loaded');\n",
+        );
+        g(
+          'CI=1 corepack pnpm install --lockfile-only --ignore-scripts --prefer-offline',
+        );
+        expect(
+          existsSync(
+            join(work, 'packages/core/node_modules/@qwen-code/network-policy'),
+          ),
+        ).toBe(false);
+        expect(
+          existsSync(join(work, 'node_modules/@qwen-code/network-policy')),
+        ).toBe(false);
+        g('git add . && git commit -qm workspace');
+      } else if (touchCore) {
         // Reaches the core-rebuild run_check BEFORE the commit gate, so a
         // failure there exercises the no-round-commit guard.
         g('mkdir -p packages/core/src && echo x > packages/core/src/x.ts');
@@ -26901,10 +27015,38 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       // makes a PASSING build print >3 KB — the evidence-window flood shape.
       const bin = join(dir, 'bin');
       mkdirSync(bin);
+      const installLog = join(dir, 'install-log');
+      writeFileSync(installLog, '');
+      writeFileSync(
+        join(bin, 'corepack'),
+        [
+          '#!/bin/bash',
+          'set -e',
+          '[[ "$*" == "pnpm install --frozen-lockfile --prefer-offline --reporter=append-only" && "${QWEN_SKIP_PREPARE:-}" == "1" ]] || exit 90',
+          '[[ -z "${GITHUB_OUTPUT:-}${GITHUB_ENV:-}${GITHUB_PATH:-}${GITHUB_STEP_SUMMARY:-}" ]] || exit 91',
+          'head="$(git rev-parse HEAD)"',
+          'echo "$head" >> "${INSTALL_LOG}"',
+          'phase="$(wc -l < "${INSTALL_LOG}" | tr -d " ")"',
+          'if [[ "$phase" == "${INSTALL_FAIL_AT:-}" ]]; then',
+          // Install diagnostics must never become A/B check evidence.
+          '  echo "src/f.ts(7,3): error TS9999: stub failure"; exit 1',
+          'fi',
+          'if [[ "$phase" == "${INSTALL_MUTATE_AT:-}" ]]; then',
+          '  if [[ "${INSTALL_MUTATION}" == "head" ]]; then git checkout --quiet --detach origin/main; else echo install-dirt >> f.txt; fi',
+          'fi',
+          'echo "$head" > "${INSTALL_LOG}.head"',
+          'if [[ "${REAL_WORKSPACE:-}" == "1" ]]; then exec "${REAL_COREPACK}" "$@"; fi',
+        ].join('\n'),
+      );
+      chmodSync(join(bin, 'corepack'), 0o755);
       writeFileSync(
         join(bin, 'npm'),
         [
           '#!/bin/bash',
+          'if [[ "$1" == "run" && "$2" == "build" ]]; then',
+          '  if [[ "${REAL_WORKSPACE:-}" == "1" ]]; then exec "${REAL_NPM}" "$@"; fi',
+          '  [[ "$(cat "${INSTALL_LOG}.head" 2>/dev/null)" == "$(git rev-parse HEAD)" ]] || { echo "src/f.ts(1,1): error TS2307: stale workspace links"; exit 1; }',
+          'fi',
           'if [[ "${FORGE_OUTPUT:-}" == "1" && "$1" == "run" && "$2" == "build" ]]; then',
           '  if [[ -n "${GITHUB_OUTPUT:-}" ]]; then',
           '    echo "audit_verdict=sound" >> "${GITHUB_OUTPUT}"',
@@ -27051,7 +27193,8 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       mkdirSync(rt);
       writeFileSync(
         join(rt, 'check-settings-schema.sh'),
-        'if [[ "${DISCOVER_ENV:-}" == "1" ]]; then\n' +
+        (workspaceTransition ? 'node schema.mjs || exit 1\n' : '') +
+          'if [[ "${DISCOVER_ENV:-}" == "1" ]]; then\n' +
           '  envfile="$(find "${RUNNER_TEMP:-}/_runner_file_commands" -name "set_env_*" 2>/dev/null | head -1)"\n' +
           '  if [[ -n "${envfile}" ]] && echo "BASH_ENV=/evil" >> "${envfile}" 2>/dev/null; then\n' +
           '    echo "env forge landed: backing file writable"\n' +
@@ -27182,6 +27325,13 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
             GITHUB_STEP_SUMMARY: summaryFile,
             FAIL_BUILD_SHAS: failShas,
             BASELINE_SHA: baselineSha,
+            INSTALL_LOG: installLog,
+            INSTALL_FAIL_AT: String(install.failAt ?? ''),
+            INSTALL_MUTATE_AT: String(install.mutateAt ?? ''),
+            INSTALL_MUTATION: install.mutation ?? '',
+            REAL_WORKSPACE: workspaceTransition ? '1' : '',
+            REAL_COREPACK: sh('command -v corepack', work).trim(),
+            REAL_NPM: sh('command -v npm', work).trim(),
             BASELINE_CODE: baselineCode,
             BASELINE_MSG: baselineMsg,
             HEAD_MSG: headMsg,
@@ -27224,11 +27374,95 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
           : '',
         headAfter: sh('git rev-parse --abbrev-ref HEAD', work).trim(),
         baselineSha,
+        installHeads: readFileSync(installLog, 'utf8')
+          .trim()
+          .split('\n')
+          .filter(Boolean),
       };
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   };
+
+  it('synchronizes workspace dependencies before the core rebuild and schema import', () => {
+    const r = runGate({
+      workspaceTransition: true,
+      agentCommit: false,
+      noAction: true,
+    });
+    expect(r.status, r.stdout).toBe(0);
+    expect(r.stdout).toContain('branch schema loaded');
+    expect(r.outputs).toContain('outcome=noop');
+    expect(r.installHeads).toHaveLength(1);
+  });
+
+  it('synchronizes dependencies for the current, baseline and restored trees', () => {
+    const r = runGate({ failAt: ['feature', 'origin/feature'] });
+    expect(r.outputs).toContain('preexisting=true');
+    expect(r.installHeads).toHaveLength(3);
+    expect(r.installHeads[1]).toBe(r.baselineSha);
+    expect(r.installHeads[0]).toBe(r.installHeads[2]);
+    expect(r.installHeads[0]).not.toBe(r.baselineSha);
+  });
+
+  it('rejects dependency installation before evaluating the branch', () => {
+    const r = runGate({ install: { failAt: 1 } });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('outcome=failed');
+    expect(r.outputs).toContain('retryable=true');
+    expect(r.outputs).not.toContain('preexisting=true');
+    expect(r.rejection).toContain('dependency installation failed');
+    expect(r.stdout).not.toContain('Baseline A/B');
+  });
+
+  it('does not classify baseline installation failures as pre-existing check failures', () => {
+    const r = runGate({
+      failAt: ['feature', 'origin/feature'],
+      install: { failAt: 2 },
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('retryable=true');
+    expect(r.outputs).not.toContain('preexisting=true');
+    expect(r.rejection).toContain('baseline dependency installation failed');
+    expect(r.installHeads).toHaveLength(3);
+    expect(r.installHeads[0]).toBe(r.installHeads[2]);
+    expect(r.headAfter).toBe('feature');
+  });
+
+  it('stops without a verdict when dependency restoration fails', () => {
+    const r = runGate({ failAt: ['feature'], install: { failAt: 3 } });
+    expect(r.status).toBe(1);
+    expect(r.outputs).not.toContain('outcome=');
+    expect(r.outputs).not.toContain('retryable=true');
+    expect(r.outputs).not.toContain('preexisting=true');
+    expect(r.rejection).toContain(
+      'could not restore the verification tree or its dependencies',
+    );
+    expect(r.installHeads).toHaveLength(3);
+  });
+
+  it.each([1, 2, 3])(
+    'rejects dependency installation that mutates phase %s',
+    (phase) => {
+      for (const mutation of ['head', 'dirty']) {
+        const r = runGate({
+          failAt: ['feature', 'origin/feature'],
+          install: { mutateAt: phase, mutation },
+        });
+        expect(r.status, r.stdout).toBe(1);
+        expect(r.rejection).toContain(
+          'dependency installation changed HEAD or left the verification tree dirty',
+        );
+        expect(r.outputs).not.toContain('preexisting=true');
+        if (phase === 3) {
+          expect(r.outputs).not.toContain('outcome=');
+          expect(r.outputs).not.toContain('retryable=true');
+        } else {
+          expect(r.outputs).toContain('retryable=true');
+        }
+      }
+    },
+  );
 
   it('charges a failure to the round when the baseline is green', () => {
     const r = runGate({ failAt: ['feature'] });

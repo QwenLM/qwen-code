@@ -3620,7 +3620,10 @@ jobs:
           echo "base_sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
           bundle_paths=(dist packages/core/dist)
           if [[ -f packages/network-policy/package.json ]]; then
-            test -f packages/network-policy/dist/index.js
+            test -f packages/network-policy/dist/index.js || {
+              echo '::error::packages/network-policy is present in the trusted base but packages/network-policy/dist/index.js is missing from its build output.'
+              exit 1
+            }
             bundle_paths+=(packages/network-policy/dist)
           fi
           tar -czf "${RUNNER_TEMP}/qwen-cli-dist.tar.gz" "${bundle_paths[@]}"
@@ -3995,7 +3998,10 @@ jobs:
           # crash with ERR_MODULE_NOT_FOUND.
           test -f packages/core/dist/index.js
           if [[ -f packages/network-policy/package.json ]]; then
-            test -f packages/network-policy/dist/index.js
+            test -f packages/network-policy/dist/index.js || {
+              echo '::error::packages/network-policy/dist/index.js is missing from the restored CLI bundle required by the trusted base.'
+              exit 1
+            }
           fi
 
       - name: 'Prepare Qwen Code CLI'

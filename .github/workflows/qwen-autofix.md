@@ -1357,14 +1357,30 @@ The package exists only on newer bases: build-cli checks out the trusted
 default branch, which can predate this workspace while reviewing its PR.
 Archive and check network-policy/dist only when that checkout contains
 packages/network-policy/package.json. The restore leg uses the same
-source-presence guard against the producer's base_sha. A package that
-exists must have dist/index.js; checking for a dist directory instead
-would silently accept a broken build. When required, both outputs must
-be archived and checked after restoration; without either, the generator
-crashes with ERR_MODULE_NOT_FOUND and the gate
-misreports a deterministic "settings schema is stale" rejection. The
-i18n check needs no dist: it imports translation metadata directly,
-and the CLI tsconfig maps its narrow core data import to source.
+source-presence guard against the producer's base_sha; it answers only
+whether the trusted base contains the package. A package that exists
+must have dist/index.js; checking for a dist directory instead would
+silently accept a broken build. Missing entry points produce explicit
+::error:: diagnostics identifying the base build or restored bundle.
+When required, both outputs must be archived and checked after
+restoration; without either, the generator crashes with
+ERR_MODULE_NOT_FOUND and the gate misreports a deterministic
+"settings schema is stale" rejection. The i18n check needs no dist:
+it imports translation metadata directly, and the CLI tsconfig maps
+its narrow core data import to source.
+
+The base install cannot provide dependencies introduced by the PR.
+After the PR checkout, the trusted verification gate synchronizes the
+branch's dependencies before core/schema checks, on both the first and
+repair passes. Baseline A/B also synchronizes after detaching and after
+restoring the branch. Each install uses the frozen lockfile and checks
+that HEAD and tracked/untracked source remain unchanged. QWEN_SKIP_PREPARE
+avoids rebuilding the trusted CLI; it does not disable all lifecycle
+scripts. Installation runs inside the credential-stripped gate with
+runner output/environment channels removed. Baseline install failure
+cannot prove a pre-existing check failure; failed dependency restoration
+stops the gate without a verdict. This update takes effect once it reaches
+the trusted default branch: staging never executes the PR's proposed gate.
 ```
 
 <a id="af-038"></a>

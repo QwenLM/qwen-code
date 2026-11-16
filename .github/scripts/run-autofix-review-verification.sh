@@ -387,24 +387,30 @@ baseline_also_fails() {
   # failure text out — misdirecting the repair agent, the PR comment, and
   # the next round's LAST_REJECTION block all at once.
   local ab_log="${GATE_LOG}.baseline"
+  local install_log="${GATE_LOG}.baseline-install"
   : > "${ab_log}"
-  rc=0
-  if ! strip_runner_channels "$@" >> "${ab_log}" 2>&1; then
-    rc=1
+  # Installation failure is not evidence that the check fails at baseline.
+  rc=2
+  if sync_dependencies "${baseline}" > "${install_log}" 2>&1; then
+    rc=0
+    if ! strip_runner_channels "$@" >> "${ab_log}" 2>&1; then
+      rc=1
+    fi
   fi
   git restore -- . 2>> "${GATE_LOG}" || true
-  if ! git checkout --quiet "${BRANCH}" 2>> "${GATE_LOG}"; then
-    # The tree is no longer the one under verification and nothing after
-    # this point may trust it — including the repair agent (its commit would
-    # orphan on the detached baseline). But a transient git-state failure is
+  if ! git checkout --quiet "${BRANCH}" 2>> "${GATE_LOG}" \
+    || ! sync_dependencies "${current}" >> "${GATE_LOG}" 2>&1; then
+    # The tree or its dependencies could not be restored; the repair agent
+    # must not run against baseline dependencies or a detached baseline.
+    # But a transient restoration failure is
     # NOT a verdict about the failure's origin, and a plain outcome=failed
     # is an EVALUATED rejection: the watermark advances and the item is
     # handed off for good. Leave outcome UNSET so the report's gate-crashed
     # path retries on the next scan's fresh checkout — and write the detail
     # document so the crash comment still explains itself.
-    echo "❌ could not restore the verification tree after the baseline check"
+    echo "❌ could not restore the verification tree or its dependencies after the baseline check"
     {
-      echo '**could not restore the verification tree after the baseline check**'
+      echo '**could not restore the verification tree or its dependencies after the baseline check**'
       echo
       echo '````'
       tail -c 3000 "${GATE_LOG}" 2> /dev/null
@@ -415,6 +421,12 @@ baseline_also_fails() {
       echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
     fi
     exit 1
+  fi
+  if [[ "${rc}" -eq 2 ]]; then
+    tail -c 1500 "${install_log}" >> "${GATE_LOG}" 2> /dev/null || true
+    echo "🔁 baseline dependency installation failed — comparison unavailable, charged to the round" \
+      | tee -a "${GATE_LOG}"
+    return 1
   fi
   # Every retryable exit below hands the tree to the repair agent with
   # dist/ REBUILT FROM BASELINE SOURCES (the restore checkout brings back
@@ -542,12 +554,30 @@ assert_verification_tree() {
     reject_fix 'workspace became dirty during deterministic verification'
   fi
 }
+sync_dependencies() {
+  local expected_head="${1}" actual_head dirty
+  strip_runner_channels env QWEN_SKIP_PREPARE=1 \
+    corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only || return 1
+  actual_head="$(git rev-parse HEAD)" || return 1
+  dirty="$(git status --porcelain)" || return 1
+  if [[ "${actual_head}" != "${expected_head}" || -n "${dirty}" ]]; then
+    echo '::error::dependency installation changed HEAD or left the verification tree dirty'
+    return 1
+  fi
+}
 
 if [[ -n "$(git status --porcelain)" ]]; then
   git status --short >> "${GATE_LOG}"
   reject_fix 'workspace is dirty before deterministic verification'
 fi
 VERIFICATION_HEAD="$(git rev-parse HEAD)"
+
+# The trusted-base install predates the PR checkout. Resolve its workspace
+# links and lockfile from the branch before any build or schema import.
+if ! sync_dependencies "${VERIFICATION_HEAD}" 2>&1 | tee -a "${GATE_LOG}"; then
+  reject_fix 'dependency installation failed on the agent-committed fix'
+fi
+assert_verification_tree
 
 # The schema generator resolves '@qwen-code/qwen-code-core' to core's DIST
 # entry point, which the CLI bundle restored from the TRUSTED BASE. When the
