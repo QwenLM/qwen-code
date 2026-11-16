@@ -1366,12 +1366,16 @@ describe('prefixed directory changes', () => {
   it.each([
     'A=1',
     'A="a b"',
+    'A+=1',
+    'A[0]=1',
     'command',
     'command -p',
     'command --',
     'builtin',
     'builtin --',
     'A=1 command',
+    'time',
+    'time -p',
   ])('tracks the current shell directory through %s cd', (prefix) => {
     expect(across(`${prefix} cd .qwen && printf '{}' > settings.json`)).toEqual(
       [write(REPO_SETTINGS)],
@@ -1395,6 +1399,15 @@ describe('prefixed directory changes', () => {
       ]);
     },
   );
+
+  it.each(['A=1 time cd .qwen', 'command time cd .qwen', 'time -- cd .qwen'])(
+    'does not treat a non-executed time prefix as a directory change: %s',
+    (command) => {
+      expect(across(`${command}; printf '{}' > settings.json`)).toEqual([
+        write('/repo/settings.json'),
+      ]);
+    },
+  );
 });
 
 describe('assignment syntax in directory changes', () => {
@@ -1407,14 +1420,16 @@ describe('assignment syntax in directory changes', () => {
     },
   );
 
-  it.each(['HOME=. cd', 'CDPATH=/elsewhere cd .qwen'])(
-    'does not guess a cwd affected by temporary variables: %s',
-    (command) => {
-      expect(across(`${command}; printf '{}' > .qwen/settings.json`)).toEqual([
-        uncertainWrite(REPO_SETTINGS),
-      ]);
-    },
-  );
+  it.each([
+    'HOME=. cd',
+    'HOME+=. cd',
+    'CDPATH=/elsewhere cd .qwen',
+    'CDPATH+=/elsewhere cd .qwen',
+  ])('does not guess a cwd affected by temporary variables: %s', (command) => {
+    expect(across(`${command}; printf '{}' > .qwen/settings.json`)).toEqual([
+      uncertainWrite(REPO_SETTINGS),
+    ]);
+  });
 });
 
 describe('find starting-point uncertainty', () => {

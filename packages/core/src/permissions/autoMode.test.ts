@@ -509,7 +509,7 @@ describe('shouldForceAutoModeReviewForAllow', () => {
     );
   });
 
-  it.each(['A=1', 'command', 'builtin'])(
+  it.each(['A=1', 'A+=1', 'A[0]=1', 'command', 'builtin', 'time', 'time -p'])(
     'reviews a protected write after %s cd',
     (prefix) => {
       expect(

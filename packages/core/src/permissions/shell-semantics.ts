@@ -512,15 +512,29 @@ function dispatchHandler(
   }
 }
 
+const ENV_ASSIGNMENT_PATTERN = /^([A-Za-z_][A-Za-z0-9_]*)(?:\[[^\]]*\])?\+?=/;
+
+function envAssignmentName(token: string): string | undefined {
+  return ENV_ASSIGNMENT_PATTERN.exec(token)?.[1];
+}
+
 function isEnvAssignmentToken(token: string, bare?: string): boolean {
   return (
-    /^[A-Za-z_][A-Za-z0-9_]*=/.test(token) &&
+    envAssignmentName(token) !== undefined &&
     (bare === undefined || /^1+$/.test(bare.slice(0, token.indexOf('=') + 1)))
   );
 }
 
 function stripCommandPrefixes(words: string[], bares: string[]): string[] {
   let start = 0;
+  // `time` is a reserved word only before the pipeline's assignments and
+  // command. After an assignment or `command`, the external executable runs
+  // instead and cannot change this shell's cwd.
+  if (words[start] === 'time') {
+    let next = start + 1;
+    if (words[next] === '-p') next++;
+    if (!words[next]?.startsWith('-')) start = next;
+  }
   while (words[start] && isEnvAssignmentToken(words[start]!, bares[start])) {
     start++;
   }
@@ -2535,9 +2549,9 @@ function resolveCdTargetCwd(
   }
   if (
     (words[targetIndex] === undefined &&
-      prefixes.some((prefix) => prefix.startsWith('HOME='))) ||
+      prefixes.some((prefix) => envAssignmentName(prefix) === 'HOME')) ||
     (!isShellAbsolutePath(target) &&
-      prefixes.some((prefix) => prefix.startsWith('CDPATH=')))
+      prefixes.some((prefix) => envAssignmentName(prefix) === 'CDPATH'))
   ) {
     return { kind: 'dynamic', redirects };
   }

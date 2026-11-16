@@ -3492,7 +3492,7 @@ describe('PermissionManager — compound shell write attribution', () => {
     expect(await repoPm(denySettings).evaluate(ctx)).toBe('deny');
   });
 
-  it.each(['A=1', 'command', 'builtin'])(
+  it.each(['A=1', 'A+=1', 'A[0]=1', 'command', 'builtin', 'time', 'time -p'])(
     'keeps a protected write denied after %s cd',
     async (prefix) => {
       const pm = repoPm({ permissionsAllow: ['Bash(*)'], ...denySettings });
