@@ -72,11 +72,11 @@ first committing to an answer or discarding the question.
    sentence, active voice, short sentences, one term per concept, conditions
    before actions, lists for three or more items, no metaphors or
    exclamations); keep code, commands, paths, and config keys verbatim;
-   record the saved file with the `record_artifact` tool (kind `html`,
-   `workspacePath` set to the saved file) — files under `.qwen/tmp/` are not
-   registered as session artifacts automatically, and only the explicit call
-   makes the page surface as a turn-output card; then reply with the file
-   path and a one-sentence summary.
+   record the saved file with the `record_artifact` tool (a `title`, kind
+   `html`, and `workspacePath` set to the saved file) — files under
+   `.qwen/tmp/` are not registered as session artifacts automatically, and
+   only the explicit call makes the page surface as a turn-output card; then
+   reply with the file path and a one-sentence summary.
 4. The HTML file appears as a turn output in the side-task chat — via the
    prompt's explicit `record_artifact` step, because `write_file`'s
    auto-record skips `.qwen/` — and opens in the existing right-panel HTML

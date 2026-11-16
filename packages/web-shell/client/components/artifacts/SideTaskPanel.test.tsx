@@ -792,13 +792,13 @@ it.each([
   [
     'en',
     'Files under .qwen/tmp/ are not registered as session artifacts automatically',
-    'call the record_artifact tool with kind html and workspacePath set to the saved file',
+    'call the record_artifact tool with a short title, kind html, and workspacePath set to the saved file',
     'Finally reply with the file path',
   ],
   [
     'zh-CN',
     '.qwen/tmp/ 下的文件不会自动登记为会话产物',
-    '调用 record_artifact 工具（kind 为 html，workspacePath 为已保存的文件）',
+    '调用 record_artifact 工具（title 为简短标题，kind 为 html，workspacePath 为已保存的文件）',
     '最后回复文件路径',
   ],
 ])(
