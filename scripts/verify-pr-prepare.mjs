@@ -49,7 +49,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import {
   existsSync,
   mkdirSync,
@@ -704,10 +704,14 @@ function main(argv) {
   // waiver's approval permalink against these coordinates, and gh's field
   // selector has no repo member, so it is added where the snapshot is
   // written, not to FIELDS.
-  writeFileSync(
-    contextPath,
-    `${JSON.stringify({ ...snapshot, repo: slug }, null, 2)}\n`,
-  );
+  const contextBytes = `${JSON.stringify({ ...snapshot, repo: slug }, null, 2)}\n`;
+  writeFileSync(contextPath, contextBytes);
+  // The digest binds the snapshot's content for the checker (--context-sha256):
+  // it is computed here host-side, before the round runs, so a later rewrite of
+  // the clone-side file cannot produce matching bytes (R2-1).
+  const contextSha256 = createHash('sha256')
+    .update(contextBytes, 'utf8')
+    .digest('hex');
   // Best-effort, like the lane: the round reads a missing file as "review
   // state unknown", so an earlier prepare's copy must not outlive a failed
   // fetch.
@@ -739,6 +743,7 @@ function main(argv) {
     `  head       ${context.head}`,
     '  tree       at PR head, clean — reuse this tree; verify or refresh its install/build first',
     `  context    ${contextPath}`,
+    `  context-sha256  ${contextSha256}`,
     review.state
       ? `  review     ${reviewPath} (${review.state.threads.filter((thread) => !thread.resolved).length} of ${review.state.threads.length} threads unresolved, ${review.state.changeRequests.length} change requests)`
       : `  review     not written — ${printable(review.error)}; the round lists review findings as not covered`,

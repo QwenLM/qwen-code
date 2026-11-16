@@ -351,7 +351,13 @@ authority to certify the round.
    the full snapshot out of the tree and base-pin `.qwen`:
 
    ```bash
-   cd <pr-clone> && node <trusted-clone>/scripts/verify-pr-prepare.mjs <n> --repo <owner>/<repo>
+   mkdir -p ~/.cache/qwen-verify/pr<n>
+   cd <pr-clone> && node <trusted-clone>/scripts/verify-pr-prepare.mjs <n> --repo <owner>/<repo> > ~/.cache/qwen-verify/pr<n>/prepare.log 2>&1
+   cat ~/.cache/qwen-verify/pr<n>/prepare.log
+   # Hold the content digest host-side (outside the clone) so step 7 can bind
+   # the snapshot's bytes; a path/link-count check alone cannot prove the host
+   # wrote the copy (R2-1).
+   sed -n 's/^  context-sha256  //p' ~/.cache/qwen-verify/pr<n>/prepare.log > ~/.cache/qwen-verify/pr<n>/pr.sha256
    rm -rf ~/.cache/qwen-verify/pr<n>/qwen-base
    mkdir -p ~/.cache/qwen-verify/pr<n>/qwen-base
    cp <pr-clone>/tmp/verify-context/pr<n>.json ~/.cache/qwen-verify/pr<n>/pr.json
@@ -634,8 +640,12 @@ authority to certify the round.
      # --context-root names the PR-writable tree from the host side; the
      # checker must not derive it from git state inside the tree the round
      # controls (R14-1). <pr-clone> is the clone step 3 mounted read-write.
+     # --context-sha256 binds the snapshot's bytes to the digest prepare
+     # printed host-side in step 1, so a rewritten or substituted copy is
+     # refused even when its path and link count look clean (R2-1).
      node "<trusted-clone>/scripts/verify-pr-check.mjs" \
        --context ~/.cache/qwen-verify/pr<n>/pr.json \
+       --context-sha256 "$(cat ~/.cache/qwen-verify/pr<n>/pr.sha256)" \
        --context-root "<pr-clone>" "$rd" || rc=$?
    fi
    kill "$(cat ~/.cache/qwen-verify/pr<n>/proxy.pid)" 2>/dev/null || true

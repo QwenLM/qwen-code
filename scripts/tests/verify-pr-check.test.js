@@ -5,6 +5,7 @@
  */
 
 import { execFileSync, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   accessSync,
   chmodSync,
@@ -2487,12 +2488,14 @@ describe('round-15 witnesses', () => {
   });
 });
 
-describe('R17-1 witnesses', () => {
+describe('R17-1 / R2-1 trust-boundary witnesses', () => {
   // The trust refusal must fail closed on the layouts the path-string test
   // missed, and a hard link must not let a PR-writable snapshot judge its own
   // waiver. The alias guard is the link count: a freshly written host copy has
   // exactly one name, so a second name means the round may control the file —
-  // wherever the source lives, readable or not (R1-1, R1-2).
+  // wherever the source lives, readable or not (R1-1, R1-2). The link count
+  // still does not prove the host wrote a single-link file, so the content
+  // digest prepare printed host-side binds the bytes (R2-1).
   const populate = (dir) => {
     const files = validFiles({});
     mkdirSync(join(dir, 'evidence'), { recursive: true });
@@ -2549,6 +2552,10 @@ describe('R17-1 witnesses', () => {
       const res = run(['--context', host, dir]);
       expect(res.status).toBe(1);
       expect(res.stderr).toMatch(/contains every path/);
+      // Derived-root remedy is to move the dir, not to pass --context-root
+      // (no clone can contain it) — R1-4.
+      expect(res.stderr).toMatch(/move the artifact dir/);
+      expect(res.stderr).not.toMatch(/pass the PR clone path/);
     },
   );
 
@@ -2649,7 +2656,7 @@ describe('R17-1 witnesses', () => {
   );
 
   it.skipIf(process.platform === 'win32')(
-    'a --context-root of / fails closed on every context',
+    'a --context-root of / is a usage error that names the clone remedy',
     () => {
       const dir = makeArtifactDir(validFiles({}), ['01-ab-cells.png']);
       const base = mkdtempSync(join(tmpdir(), 'verify-pr-r17d-'));
@@ -2657,8 +2664,113 @@ describe('R17-1 witnesses', () => {
       const host = join(base, 'host-snapshot.json');
       writeFileSync(host, snapshot);
       const res = run(['--context', host, '--context-root', '/', dir]);
-      expect(res.status).toBe(1);
-      expect(res.stderr).toMatch(/contains every path/);
+      expect(res.status).toBe(2);
+      expect(res.stderr).toMatch(/filesystem root/);
+      expect(res.stderr).toMatch(/pass the PR clone path/);
     },
   );
+
+  it.skipIf(process.platform === 'win32')(
+    'a --context-root of / is a usage error even without --context (R2-2)',
+    () => {
+      const dir = makeArtifactDir(validFiles({}), ['01-ab-cells.png']);
+      const res = run(['--context-root', '/', dir]);
+      expect(res.status).toBe(2);
+      expect(res.stderr).toMatch(/filesystem root/);
+    },
+  );
+
+  // R2-1: a single link does not prove the host wrote the snapshot. The round
+  // can rewrite the bytes through an in-clone alias then unlink it (link count
+  // back to 1), or write a fresh single-link file at a writable path. The
+  // content digest prepare printed host-side is what binds the provenance.
+  const sha256 = (s) => createHash('sha256').update(s, 'utf8').digest('hex');
+  const forged = JSON.stringify({
+    repo: 'QwenLM/qwen-code',
+    pr: 17185,
+    headRefOid: 'c'.repeat(40),
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses coords rewritten through an in-clone alias then unlinked (R2-1 B)',
+    () => {
+      const { base, clone, dir } = cloneLayout('verify-pr-r2-1b-');
+      const host = join(base, 'host-snapshot.json');
+      writeFileSync(host, snapshot);
+      const digest = sha256(snapshot);
+      const inDir = join(dir, 'linked-host.json');
+      linkSync(host, inDir);
+      writeFileSync(inDir, forged); // rewrites the shared inode, host included
+      unlinkSync(inDir); // link count back to 1
+      const res = run([
+        '--context',
+        host,
+        '--context-sha256',
+        digest,
+        '--context-root',
+        clone,
+        dir,
+      ]);
+      expect(res.status).toBe(1);
+      expect(res.stderr).toMatch(/does not match --context-sha256/);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a fresh single-link file written at a writable path (R2-1 E)',
+    () => {
+      const { base, clone, dir } = cloneLayout('verify-pr-r2-1e-');
+      const genuine = join(base, 'genuine.json');
+      writeFileSync(genuine, snapshot);
+      const digest = sha256(snapshot);
+      const writable = join(base, 'round-writable');
+      mkdirSync(writable, { recursive: true });
+      const planted = join(writable, 'ctx.json');
+      writeFileSync(planted, forged);
+      const res = run([
+        '--context',
+        planted,
+        '--context-sha256',
+        digest,
+        '--context-root',
+        clone,
+        dir,
+      ]);
+      expect(res.status).toBe(1);
+      expect(res.stderr).toMatch(/does not match --context-sha256/);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'accepts a genuine host copy whose bytes match the digest (R2-1 control)',
+    () => {
+      const { base, clone, dir } = cloneLayout('verify-pr-r2-1c-');
+      const host = join(base, 'host-snapshot.json');
+      writeFileSync(host, snapshot);
+      const res = run([
+        '--context',
+        host,
+        '--context-sha256',
+        sha256(snapshot),
+        '--context-root',
+        clone,
+        dir,
+      ]);
+      expect(res.status).toBe(0);
+    },
+  );
+
+  it('rejects --context-sha256 without --context as a usage error', () => {
+    const dir = makeArtifactDir(validFiles({}), ['01-ab-cells.png']);
+    const res = run(['--context-sha256', sha256(snapshot), dir]);
+    expect(res.status).toBe(2);
+    expect(res.stderr).toMatch(/--context-sha256 binds a --context snapshot/);
+  });
+
+  it('rejects a malformed --context-sha256 value', () => {
+    const dir = makeArtifactDir(validFiles({}), ['01-ab-cells.png']);
+    const res = run(['--context', 'x.json', '--context-sha256', 'nothex', dir]);
+    expect(res.status).toBe(2);
+    expect(res.stderr).toMatch(/--context-sha256 requires the 64-hex digest/);
+  });
 });

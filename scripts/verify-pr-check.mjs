@@ -31,6 +31,7 @@ import {
   statSync,
 } from 'node:fs';
 import { basename, dirname, join, resolve, sep } from 'node:path';
+import { createHash } from 'node:crypto';
 import { isEntryPoint } from './lib/entry-point.js';
 
 export const VERDICTS = ['merge-ready', 'findings', 'blocked', 'inconclusive'];
@@ -71,7 +72,7 @@ const HEADING_TITLE_MAX = 120;
 const FOOTER =
   /^_— .+ via Qwen Code \/verify-pr \(v[^;]+; skill [0-9a-f]{12}\)_$/;
 
-const HELP = `Usage: node scripts/verify-pr-check.mjs [--context <snapshot>] [--context-root <pr-clone>] [--publish-lane] <artifact-dir>
+const HELP = `Usage: node scripts/verify-pr-check.mjs [--context <snapshot>] [--context-root <pr-clone>] [--context-sha256 <digest>] [--publish-lane] <artifact-dir>
 
 Checks a local round against the rules the CI publisher enforces:
 
@@ -121,6 +122,14 @@ path, which must contain the artifact dir) to name that tree explicitly; the
 trust root must come from the host, never from git state inside the tree the
 round controls. Without it, a pr<n>-verify-<ts> dir under tmp/ falls back to
 the clone root (the tmp container's parent); a plain dir is its own root.
+
+The path and link-count guards only refuse a context that is demonstrably
+round-controlled (inside the trust root, or a hard link retaining a second
+name); a single-link file outside the root is NOT proof the host wrote it.
+Pass --context-sha256 <digest> — the sha256 that verify-pr-prepare.mjs prints
+host-side when it writes the snapshot — to bind the content: the check refuses
+a --context whose bytes do not match, so a rewritten or substituted snapshot
+is rejected even when its path and link count look clean.
 
 Exit codes: 0 no errors, 1 errors found, 2 usage.
 `;
@@ -956,6 +965,7 @@ function main(argv) {
   }
   let contextPath = null;
   let contextRoot = null;
+  let contextSha = null;
   let publishLane = false;
   const positional = [];
   for (let index = 0; index < argv.length; index++) {
@@ -976,6 +986,14 @@ function main(argv) {
         );
         return 2;
       }
+    } else if (arg === '--context-sha256') {
+      contextSha = argv[++index];
+      if (!contextSha || !/^[0-9a-f]{64}$/.test(contextSha)) {
+        process.stderr.write(
+          `verify-pr check: --context-sha256 requires the 64-hex digest prepare printed\n\n${HELP}`,
+        );
+        return 2;
+      }
     } else if (arg === '--publish-lane') {
       // The CI publish job's flag: honors the ci-lane gate record the job
       // writes itself. An argv claim, not an authenticated identity — a
@@ -987,6 +1005,12 @@ function main(argv) {
     } else {
       positional.push(arg);
     }
+  }
+  if (contextSha && !contextPath) {
+    process.stderr.write(
+      `verify-pr check: --context-sha256 binds a --context snapshot; pass --context too\n\n${HELP}`,
+    );
+    return 2;
   }
   const dir = positional[0];
   if (!dir || positional.length > 1) {
@@ -1011,6 +1035,16 @@ function main(argv) {
     } catch {
       process.stderr.write(
         `verify-pr check: --context-root ${contextRoot} must resolve to a directory\n\n${HELP}`,
+      );
+      return 2;
+    }
+    // A root of '/' contains every path, so it cannot discriminate the
+    // PR-writable tree; it is a usage error, not a trust root (R2-2). Reject
+    // it here even without --context, where the in-context refusal below is
+    // never reached.
+    if (realRoot === sep) {
+      process.stderr.write(
+        `verify-pr check: --context-root ${contextRoot} is the filesystem root, which cannot discriminate the PR-writable tree — pass the PR clone path\n\n${HELP}`,
       );
       return 2;
     }
@@ -1176,7 +1210,12 @@ function main(argv) {
       if (contextIsAlias) {
         reason = `--context ${contextPath} is a hard link (${contextLinks} names) to a file the round can write; copy it instead of linking it, so the coordinates judging the waiver come from a host-held copy the round never saw`;
       } else if (trustRoot === sep) {
-        reason = `--context ${contextPath} cannot be trusted: the trust root is '${trustRoot}', which contains every path — pass --context-root <pr-clone> naming the PR clone, or move the artifact dir out of root-level tmp/`;
+        // Only the derived root reaches here: an explicit --context-root '/'
+        // is already a usage error at the containment gate (R2-2). The
+        // artifact dir sits directly under root-level tmp/ and no PR clone can
+        // contain it, so the remedy is to move it, not to pass --context-root
+        // (which would only trade this refusal for a containment error, R1-4).
+        reason = `--context ${contextPath} cannot be trusted: the artifact dir sits directly under a root-level tmp/, so the derived trust root is '/', which contains every path — move the artifact dir out of root-level tmp/ (no PR clone can contain it)`;
       } else {
         reason = `--context must not point inside the PR-writable worktree (${contextPath}): it cannot judge its own waiver — pass a host-held copy the round never saw`;
       }
@@ -1184,6 +1223,27 @@ function main(argv) {
       return 1;
     }
     const snapshotText = readIfExists(contextPath);
+    // Content binding (R2-1): the digest prepare computed host-side is the
+    // provenance proof. A path outside the root and a single link can both be
+    // arranged by the round, but the bytes prepare wrote cannot be forged
+    // without matching this digest. Refuse on mismatch or an unverifiable read.
+    if (contextSha) {
+      if (snapshotText === null || snapshotText === UNREADABLE) {
+        process.stderr.write(
+          `verify-pr check: --context ${contextPath} is missing or unreadable; cannot verify it against --context-sha256\n`,
+        );
+        return 1;
+      }
+      const actualSha = createHash('sha256')
+        .update(snapshotText, 'utf8')
+        .digest('hex');
+      if (actualSha !== contextSha) {
+        process.stderr.write(
+          `verify-pr check: --context ${contextPath} does not match --context-sha256 (the snapshot prepare wrote); it was modified or is not the host-held copy — re-copy it from the prepare context\n`,
+        );
+        return 1;
+      }
+    }
     if (snapshotText !== null && snapshotText !== UNREADABLE) {
       try {
         const snapshot = JSON.parse(snapshotText);

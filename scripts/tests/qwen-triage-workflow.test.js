@@ -6939,7 +6939,14 @@ describe('qwen-triage verify hardening round 2', () => {
     // Whitespace flattening keeps the line-continuation backslash. The trust
     // root is host-provided (--context-root), not derived from git (R14-1).
     const checker = flat.indexOf(
-      'verify-pr-check.mjs" \\ --context ~/.cache/qwen-verify/pr<n>/pr.json \\ --context-root "<pr-clone>" "$rd"',
+      'verify-pr-check.mjs" \\ --context ~/.cache/qwen-verify/pr<n>/pr.json \\ --context-sha256 "$(cat ~/.cache/qwen-verify/pr<n>/pr.sha256)" \\ --context-root "<pr-clone>" "$rd"',
+    );
+    // The snapshot's bytes are bound to the digest prepare printed host-side;
+    // a path/link-count check alone cannot prove the host wrote the copy
+    // (R2-1). Assert on the raw skill: the sed pattern's double spaces are
+    // significant and the flattened view collapses them.
+    expect(verifySkill).toContain(
+      "sed -n 's/^  context-sha256  //p' ~/.cache/qwen-verify/pr<n>/prepare.log > ~/.cache/qwen-verify/pr<n>/pr.sha256",
     );
     expect(stop).toBeGreaterThan(-1);
     expect(symlinkGuard).toBeGreaterThan(-1);
