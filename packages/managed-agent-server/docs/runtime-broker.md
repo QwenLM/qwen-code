@@ -63,9 +63,9 @@ permission. Original authorized calls may still settle after draining.
 binding/generation across Sessions, including every execution state. Its hash
 cursor does not skip records when they settle; custom repositories default to
 refusal. Inventory is not a snapshot, a normal-stop receipt or permission to
-release storage. The durable CSI retirement coordinator remains unimplemented.
-Custom binding repositories must implement this atomic operation; the default
-refuses dispatch rather than falling back to a separate readiness read.
+release storage. Custom binding repositories must implement this atomic
+operation; the default refuses dispatch rather than falling back to a separate
+readiness read.
 Tool execution identifiers are globally unique repository keys. The embedding
 service must derive them from authenticated tenant, workspace, and session
 context because this repository interface does not carry separate scope
@@ -77,8 +77,8 @@ retired generations. The embedding owns scheduling and supplies same-connection
 reference checks for its own tables. Each sweep bounds binding checks, child
 checks and total deletions; retain its returned cursor between ticks. It preserves
 operator-recovery records, active children, physical-stop evidence requirements,
-slots and admission fences. In the managed server, publication and CSI worker ACK
-references retain their execution and its parent session and binding, including
+slots and admission fences. In the managed server, publication references
+retain their execution and its parent session and binding, including
 COLLECTED publications; unreferenced siblings may be removed.
 See [JDBC retention](../../../docs/design/runtime-broker-jdbc-retention.md)
 for eligibility and the managed-server opt-in configuration (disabled by default,
@@ -87,9 +87,9 @@ also serialize new external references with the original binding lock.
 
 Enabling retention allows eligible, unreferenced historical records to be deleted
 once they age past `max-age`; it does not guarantee deletion by that age.
-Publication and CSI worker ACK references in the managed server retain executions
-and their parent sessions and bindings regardless of age, including COLLECTED
-publications. After records are removed, callers must not reuse expired
+Publication references in the managed server retain executions and their parent
+sessions and bindings regardless of age, including COLLECTED publications.
+After records are removed, callers must not reuse expired
 Runtime Session identifiers or idempotency keys. A missing execution is not
 permission to replay it. No permanent execution-key tombstone is retained.
 
@@ -149,7 +149,7 @@ selection does not imply the Broker itself: also set
 provision seeds encrypted through it) and
 `QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false`. An explicit
 `QWEN_MANAGED_AGENT_WORKSPACE_ID` is required: the worker-side cwd cannot be
-hashed on the Broker host, so the local-process/Kubernetes derivation does not
+hashed on the Broker host, so the local-process derivation does not
 apply. The README's [Broker deployment](../README.md#broker-deployment) recipe
 lists the full export block. The provider URL must be HTTP(S) without
 credentials, query or fragment; use HTTPS for anything outside a trusted control

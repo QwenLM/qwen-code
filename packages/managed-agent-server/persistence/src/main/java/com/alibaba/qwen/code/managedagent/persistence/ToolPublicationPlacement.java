@@ -14,11 +14,10 @@ import java.sql.SQLException;
  * The first lock of a tool publication lane, and its read of the original
  * binding (design 2026-11-04-managed-publication-placement).
  *
- * <p>Placement owners lock the original binding and the Session root in both
- * orders: {@code lockBindingControl} takes the binding, then the root;
- * lifecycle verification and hosted cleanup commits take the root, then the
- * binding. A lane without placement therefore locks neither in a fixed
- * position. It locks the Session root first. Every transition out of
+ * <p>Placement owners lock the Session root before the original binding:
+ * {@code lockBindingControl}, lifecycle verification and hosted cleanup
+ * commits all take the root, then the binding. A lane without placement
+ * therefore locks the Session root first. Every transition out of
  * {@code READY} of a {@code session}-class binding holds that root, so a read
  * after it is current. A {@code workspace}-class binding has no root-holding
  * writers, so the lane shares its row after the root.
