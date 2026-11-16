@@ -2,10 +2,10 @@
 
 [English](2026-10-23-unified-agent-loop.md) | [简体中文](2026-10-23-unified-agent-loop.zh-CN.md)
 
-- **状态**：已在 #15343 中通过。headless（PR 1，#15369）、ACP（PR 2，#15509–#16190）、Ink TUI（PR 3，#16206–#16704）与 OpenTUI（PR 4，#16743–#16820）的迁移均已合入；各 surface 的默认开启按[迁移计划](#迁移计划)中的阶梯进行，headless 是第一个。PR 5（AgentCore）正在进行：5a（#16880）、5b（#17035）和 5c（#17059）已合入。其余步骤在 #17045（已关闭；遗留项由 #17284 承载）中跟踪。PR 6a（speculation 的模型轮，#17029）已合入，PR 6b 记录了 speculation 保留自有工具步的决策（#17324）。
+- **状态**：已在 #15343 中通过。headless（PR 1，#15369）、ACP（PR 2，#15509–#16190）、Ink TUI（PR 3，#16206–#16704）与 OpenTUI（PR 4，#16743–#16820）的迁移均已合入；各 surface 的默认开启按[迁移计划](#迁移计划)中的阶梯进行，headless 是第一个。PR 5（AgentCore）正在进行：5a（#16880）、5b（#17035）和 5c（#17059）已合入。其余步骤在 #17045 中跟踪；它留出的工作由后续 issue #17284 承载。PR 6a（speculation 的模型轮，#17029）已合入，PR 6b 记录了 speculation 保留自有工具步的决策（#17324）。
 - **日期**：2026-10-23，基于 upstream `779a4d5d0d`。
 - **相关**：
-  - 跟踪 issue #15327，灰度与能力台账的跟踪 issue #17045（已关闭），以及承载剩余步骤的后续 issue #17284；
+  - 跟踪 issue #15327，剩余步骤、灰度和能力台账的跟踪 issue #17045，以及承载其留出工作的后续 issue #17284；
   - [Agent loop 能力台账](2026-11-15-loop-capability-ledger.zh-CN.md) —— 1.0 loop 的每项行为与 main 的对照，以及对 main 没有的部分的决定；
   - 早先的提案 #8775，它从 AgentCore 和 headless 入手；本设计把它的目标扩展到全部七份 loop，其中 AgentCore 这一步是 PR 5；
   - 对比各 loop 时发现的缺陷：#15324、#15325、#15326；
@@ -587,7 +587,7 @@ speculation 的 `runSpeculativeLoop`（`speculation.ts`）在用户确认前，�
 
 PR 6b 是 speculation 的工具步决策（保留自有工具步）；PR 6c 是其默认开启与删除步骤。
 
-一个入口分五步迁移，由 #17045（已关闭；剩余步骤由 #17284 承载）跟踪：
+一个入口分五步迁移，由 #17045 跟踪：
 
 1. 共享模型轮和工具批，opt-in（`experimental.unifiedAgentLoop`）。
 2. 默认开启。
@@ -813,4 +813,4 @@ PR 6b 是 speculation 的工具步决策（保留自有工具步）；PR 6c 是�
 
 - 会话层调度：用同一处逻辑决定通知、cron、Goal 轮次或 teammate 消息何时启动一轮 loop。
 - Hosted Harness 评估：它写日志的调度是否可以变成符合同一 `schedule` 契约的 scheduler。已由[迁移评估](2026-11-14-hosted-harness-loop-evaluation.md)回答：journal 化派发保留，仅模型轮可迁到共享轮。
-- 剩余迁移步骤：由已关闭跟踪 issue #17045 的后续 #17284 跟踪。
+- #17045 留出的工作——整轮交给 loop、流式派发、speculation 的门控步骤与调和项、能力台账行：由其后续 issue #17284 跟踪。

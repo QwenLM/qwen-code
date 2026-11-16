@@ -2,10 +2,10 @@
 
 [English](2026-10-23-unified-agent-loop.md) | [简体中文](2026-10-23-unified-agent-loop.zh-CN.md)
 
-- **Status**: accepted in #15343. The headless (PR 1, #15369), ACP (PR 2, #15509–#16190), Ink TUI (PR 3, #16206–#16704) and OpenTUI (PR 4, #16743–#16820) migrations are merged; each surface's default flip follows the ladder in [Migration](#migration), and headless is the first. PR 5 (AgentCore) is in progress: 5a (#16880), 5b (#17035) and 5c (#17059) are merged. The remaining steps are tracked in #17045 (closed; its leftovers are carried by #17284). PR 6a (speculation's model round, #17029) is merged, and PR 6b recorded speculation's decision to keep its own tool step (#17324).
+- **Status**: accepted in #15343. The headless (PR 1, #15369), ACP (PR 2, #15509–#16190), Ink TUI (PR 3, #16206–#16704) and OpenTUI (PR 4, #16743–#16820) migrations are merged; each surface's default flip follows the ladder in [Migration](#migration), and headless is the first. PR 5 (AgentCore) is in progress: 5a (#16880), 5b (#17035) and 5c (#17059) are merged. The remaining steps are tracked in #17045; the work it leaves out is carried by its follow-up #17284. PR 6a (speculation's model round, #17029) is merged, and PR 6b recorded speculation's decision to keep its own tool step (#17324).
 - **Date**: 2026-10-23, against upstream `779a4d5d0d`.
 - **Related**:
-  - tracking issue #15327, #17045 (closed) for the rollout and the capability ledger, and its follow-up #17284 for the remaining steps;
+  - tracking issue #15327, #17045 for the remaining steps, the rollout and the capability ledger, and its follow-up #17284 for the work it leaves out;
   - [Agent loop capability ledger](2026-11-15-loop-capability-ledger.md) — each behavior of the 1.0 loop mapped to main, with the decisions on what main does not have;
   - the earlier proposal #8775, which starts with AgentCore and headless; this design extends its goal to all seven loops, and its AgentCore step is PR 5;
   - defects found while comparing the loops: #15324, #15325, #15326;
@@ -587,7 +587,7 @@ The unit suite in `speculation.test.ts` runs a text-only round, a single call, a
 
 PR 6b is speculation's tool-step decision (keep its own tool step); PR 6c is its default-on and removal step.
 
-A surface moves in five steps, tracked in #17045 (closed; the remaining steps are carried by #17284):
+A surface moves in five steps, tracked in #17045:
 
 1. Shared model round and tool batch, opt-in (`experimental.unifiedAgentLoop`).
 2. On by default.
@@ -813,4 +813,4 @@ These targets assume full migration. The keep-its-own decisions retain specializ
 
 - Session-level scheduling: one place that decides when a notification, cron job, Goal turn or teammate message starts a loop.
 - The Hosted Harness evaluation: whether its journaled dispatch becomes a scheduler behind the same `schedule` contract. Answered by the [migration evaluation](2026-11-14-hosted-harness-loop-evaluation.md): the journaled dispatch stays; only the model round can move to the shared round.
-- The remaining migration steps: tracked in #17284, the follow-up to the closed tracker #17045.
+- The work #17045 leaves out — the whole-turn handoff, streaming dispatch, speculation's gated steps and reconciliations, and the capability-ledger rows: tracked in its follow-up #17284.
