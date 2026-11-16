@@ -95,8 +95,8 @@ replay。只要列表早到，入口就能早显示。
 - daemon 会话 client 将恢复响应中的 `artifacts` 保留为 `restoredArtifacts`；
   provider 将其暴露到连接状态上。
 - 为使入口**早于**对话正文绘制，provider 在 replay 注入之前、仅当
-  `restoredArtifacts` 存在时，用 `flushSync` 将 `sessionId` + `restoredArtifacts`
-  + `restoredArtifactsSessionId` 单独提交成一次渲染。只触碰这几个字段；
+  `restoredArtifacts` 存在时，用 `flushSync` 将 `sessionId`、`restoredArtifacts`
+  与 `restoredArtifactsSessionId` 单独提交成一次渲染。只触碰这几个字段；
   `catchingUp` 及其余连接状态仍交给既有的 replay/attach 逻辑。若不强制提交，
   React 会把快照与 replay 注入批处理，入口就会与正文同帧绘制。
 - `useSessionArtifacts` 在每会话缓存为空时回退到 `connection.restoredArtifacts`，

@@ -1980,7 +1980,10 @@ describe('DaemonSessionClient', () => {
       workspaceCwd: '/work/a',
     });
     expect(ws.restoredArtifacts).toEqual(artifacts);
-    const ls = await DaemonSessionClient.loadStandalone(makeClient(true), 's-1');
+    const ls = await DaemonSessionClient.loadStandalone(
+      makeClient(true),
+      's-1',
+    );
     expect(ls.restoredArtifacts).toEqual(artifacts);
     const rs = await DaemonSessionClient.resumeStandalone(
       makeClient(true),
