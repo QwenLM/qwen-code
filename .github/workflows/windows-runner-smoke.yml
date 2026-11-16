@@ -5,7 +5,7 @@ on:
     inputs:
       preview_launch_diagnostic:
         description: 'Run focused Windows preview launcher and installer tests'
-        type: boolean
+        type: 'boolean'
         default: false
 
 permissions:

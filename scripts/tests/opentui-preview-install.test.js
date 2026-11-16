@@ -716,6 +716,19 @@ describe('Windows profile additions contract (portable map checks)', () => {
     expect(
       Object.keys(assertWindowsProfilePreserved(before, before, after)).sort(),
     ).toEqual([...windowsProfileAdditions.keys()].sort());
+    expect(
+      Object.fromEntries(
+        Object.entries(
+          assertWindowsProfilePreserved(before, before, after),
+        ).map(([entry, row]) => [entry.split(path.sep).join('/'), row.type]),
+      ),
+    ).toEqual({
+      'AppData/Local/Microsoft': 'directory',
+      'AppData/Local/Microsoft/Windows': 'directory',
+      'AppData/Local/Microsoft/Windows/PowerShell': 'directory',
+      'AppData/Local/Microsoft/Windows/PowerShell/StartupProfileData-NonInteractive':
+        'regular',
+    });
   });
 
   it.each([
