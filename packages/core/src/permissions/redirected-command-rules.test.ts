@@ -303,7 +303,7 @@ it('keeps full-command fallback equality literal', () => {
   for (const suffix of ['\r', '\v', '\f', '\u00a0']) {
     expect(matchesCommandPattern(command, command + suffix)).toBe(false);
   }
-  const escaped = 'git <&- show \"a\\\\b\"';
+  const escaped = 'git <&- show "a\\\\b"';
   expect(matchesCommandPattern(escaped, ' \t' + escaped + '\t ')).toBe(true);
   expect(
     matchesCommandPattern('git <&- show path\\', 'git <&- show path\\ '),
