@@ -22,7 +22,6 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
-  rmSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -115,10 +114,6 @@ interface Run {
   sharedRounds: number;
   /** Those of them the event-bus kernel ran. */
   kernelRounds: number;
-  /** The round markers this run's read waited for. */
-  minimumSharedRounds: number;
-  /** The kernel round markers it waited for, too. */
-  minimumKernelRounds: number;
 }
 
 const PROMPT_TIMEOUT_MS = 60_000;
@@ -152,23 +147,24 @@ function readDebugLog(runtimeDir: string): string {
 const countSharedRounds = (debugLog: string) =>
   (debugLog.match(SHARED_ROUND_LOG) ?? []).length;
 
-/** How long the debug log must stop growing before its writes have landed. */
-const DEBUG_LOG_QUIET_MS = 250;
+/**
+ * How long the debug log must stop growing before its writes have landed. A
+ * fire-and-forget append can sit queued behind other fs work well past the
+ * write itself, so the window covers that stall rather than the write alone.
+ */
+const DEBUG_LOG_QUIET_MS = 1_000;
 
 /**
  * The debug log is appended fire-and-forget, so a round's marker can still be
  * queued when the last prompt response arrives. Read it once it has stopped
- * growing and carries at least `minimumSharedRounds` round markers and
- * `minimumKernelRounds` kernel markers: under load a queued append can pause
- * longer than the quiet window, and a run missing its later rounds would be
- * compared against one that has them. Sample before the kill below, because a
- * killed process abandons its queued appends. A log that misses either floor
- * by the deadline fails the run instead of being compared short.
+ * growing; a kernel run also waits until every round its own log records has
+ * a kernel marker. Sample before the kill below, because a killed process
+ * abandons its queued appends. A log still short of its markers is returned as
+ * it is, so the round assertions fail on it after the arm dumps are written.
  */
 async function readSettledDebugLog(
   runtimeDir: string,
-  minimumSharedRounds = 0,
-  minimumKernelRounds = 0,
+  kernel = false,
 ): Promise<string> {
   const deadline = Date.now() + 5_000;
   let quietSince = Date.now();
@@ -181,26 +177,32 @@ async function readSettledDebugLog(
       quietSince = Date.now();
     } else if (
       Date.now() - quietSince >= DEBUG_LOG_QUIET_MS &&
-      countSharedRounds(log) >= minimumSharedRounds &&
-      countKernelRounds(log) >= minimumKernelRounds
+      (!kernel || countKernelRounds(log) >= countSharedRounds(log))
     ) {
       break;
     }
   }
-  const settled = countSharedRounds(log);
-  if (settled < minimumSharedRounds) {
-    throw new Error(
-      `debug log settled at ${settled}/${minimumSharedRounds} round markers after 5000ms`,
-    );
-  }
-  const settledKernel = countKernelRounds(log);
-  if (settledKernel < minimumKernelRounds) {
-    throw new Error(
-      `debug log settled at ${settledKernel}/${minimumKernelRounds} kernel round markers after 5000ms`,
-    );
-  }
   return log;
 }
+
+/** A scratch runtime dir holding one debug log, under the sweeper's prefix. */
+async function withDebugLogFixture(
+  initialLog: string,
+  body: (runtimeDir: string, logFile: string) => Promise<void>,
+): Promise<void> {
+  const runtimeDir = mkdtempSync(join(tmpdir(), ACP_HOME_PREFIX));
+  mkdirSync(join(runtimeDir, 'debug'));
+  const logFile = join(runtimeDir, 'debug', 'run.txt');
+  writeFileSync(logFile, initialLog);
+  try {
+    await body(runtimeDir, logFile);
+  } finally {
+    await removeScratchDir(runtimeDir);
+  }
+}
+
+/** One round marker of the prompt these cases log, as the session writes it. */
+const ROUND_MARKER = 'round in its own runAgentLoop call (prompt first)\n';
 
 // A Goal's id and the record ids it cites are random in each run.
 const RANDOM_ID =
@@ -372,7 +374,6 @@ const allowOnce = () => ({
       scenario: Scenario,
       shared: boolean,
       kernel = false,
-      minimumSharedRounds = 0,
     ): Promise<Run> {
       await server?.close();
       await rig?.cleanup();
@@ -573,10 +574,6 @@ const allowOnce = () => ({
       const stopReasons: unknown[] = [];
       let sessionId = '';
       let debugLog = '';
-      const sharedFloor = shared
-        ? Math.max(scenario.prompts.length, minimumSharedRounds)
-        : 0;
-      const kernelFloor = kernel ? minimumSharedRounds : 0;
       try {
         await request('initialize', {
           protocolVersion: 1,
@@ -629,14 +626,7 @@ const allowOnce = () => ({
         ) {
           await new Promise((resolve) => setTimeout(resolve, 50));
         }
-        // Every prompt's first round has logged by the time it returns, so a
-        // shared run owes at least one marker per prompt. The kernel arm owes
-        // the shared arm's count as both its rounds and its kernel runs.
-        debugLog = await readSettledDebugLog(
-          qwenHome,
-          sharedFloor,
-          kernelFloor,
-        );
+        debugLog = await readSettledDebugLog(qwenHome, kernel);
       } finally {
         agent.kill();
         await new Promise((resolve) => {
@@ -675,8 +665,6 @@ const allowOnce = () => ({
         backgroundTurnEnds,
         sharedRounds: countSharedRounds(debugLog),
         kernelRounds: countKernelRounds(debugLog),
-        minimumSharedRounds: sharedFloor,
-        minimumKernelRounds: kernelFloor,
       };
     }
 
@@ -684,11 +672,7 @@ const allowOnce = () => ({
     async function arms(scenario: Scenario) {
       const current = await run(scenario, false);
       const shared = await run(scenario, true);
-      const kernel = await run(scenario, true, true, shared.sharedRounds);
-      expect(kernel.minimumSharedRounds).toBe(
-        Math.max(scenario.prompts.length, shared.sharedRounds),
-      );
-      expect(kernel.minimumKernelRounds).toBe(shared.sharedRounds);
+      const kernel = await run(scenario, true, true);
       const dump = process.env['ACP_PARITY_DUMP'];
       if (dump) {
         const slug = scenario.name.replace(/[^a-z0-9]+/gi, '-');
@@ -1229,61 +1213,38 @@ const allowOnce = () => ({
     }, 120_000);
 
     it('waits past a quiet gap for the round markers a run owes', async () => {
-      const runtimeDir = mkdtempSync(join(tmpdir(), 'qwen-settled-log-'));
-      mkdirSync(join(runtimeDir, 'debug'));
-      const logFile = join(runtimeDir, 'debug', 'run.txt');
-      const marker = (promptId: string) =>
-        `round in its own runAgentLoop call (prompt ${promptId})\n`;
-      writeFileSync(logFile, marker('first'));
-      const settled = readSettledDebugLog(runtimeDir, 2);
-      // Longer than the quiet window: without the marker floor the helper
-      // returns while the second round's append is still queued.
-      await new Promise((resolve) => setTimeout(resolve, 500));
-      appendFileSync(logFile, marker('second'));
-      try {
+      await withDebugLogFixture(ROUND_MARKER, async (runtimeDir, logFile) => {
+        const settled = readSettledDebugLog(runtimeDir);
+        // A queued append can land this late; the 250ms window this replaced
+        // returned the log short while the second round was still in flight.
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        appendFileSync(logFile, ROUND_MARKER);
         expect(countSharedRounds(await settled)).toBe(2);
-      } finally {
-        rmSync(runtimeDir, { recursive: true, force: true });
-      }
+      });
     }, 10_000);
 
     it('waits for the kernel markers a run owes too', async () => {
-      const runtimeDir = mkdtempSync(join(tmpdir(), 'qwen-settled-log-'));
-      mkdirSync(join(runtimeDir, 'debug'));
-      const logFile = join(runtimeDir, 'debug', 'run.txt');
-      writeFileSync(
-        logFile,
-        'round in its own runAgentLoop call (prompt first)\n',
-      );
-      const settled = readSettledDebugLog(runtimeDir, 1, 1);
-      // Later than the quiet window: without the kernel floor the helper
-      // returns once the shared marker alone has gone quiet.
-      await new Promise((resolve) => setTimeout(resolve, 500));
-      appendFileSync(
-        logFile,
-        '[EVENT_BUS] runAgentLoopOnBus started run-1 (prompt first)\n',
-      );
-      try {
+      await withDebugLogFixture(ROUND_MARKER, async (runtimeDir, logFile) => {
+        const settled = readSettledDebugLog(runtimeDir, true);
+        // Past the quiet window, so only the kernel floor keeps the read
+        // waiting: the shared marker alone has already gone quiet.
+        await new Promise((resolve) => setTimeout(resolve, 1_500));
+        appendFileSync(
+          logFile,
+          '[EVENT_BUS] runAgentLoopOnBus started run-1 (prompt first)\n',
+        );
         expect(countKernelRounds(await settled)).toBe(1);
-      } finally {
-        rmSync(runtimeDir, { recursive: true, force: true });
-      }
+      });
     }, 10_000);
 
-    it('reports a log that never reaches its round floor', async () => {
-      const runtimeDir = mkdtempSync(join(tmpdir(), 'qwen-settled-log-'));
-      mkdirSync(join(runtimeDir, 'debug'));
-      writeFileSync(
-        join(runtimeDir, 'debug', 'run.txt'),
-        'round in its own runAgentLoop call (prompt first)\n',
-      );
-      try {
-        await expect(readSettledDebugLog(runtimeDir, 2)).rejects.toThrow(
-          'debug log settled at 1/2 round markers after 5000ms',
-        );
-      } finally {
-        rmSync(runtimeDir, { recursive: true, force: true });
-      }
+    it('reports a kernel log that never reaches its kernel markers', async () => {
+      await withDebugLogFixture(ROUND_MARKER, async (runtimeDir) => {
+        // No kernel marker ever lands. The read reports the shortfall at its
+        // deadline rather than throwing, so the round assertions are what fail.
+        const log = await readSettledDebugLog(runtimeDir, true);
+        expect(countSharedRounds(log)).toBe(1);
+        expect(countKernelRounds(log)).toBe(0);
+      });
     }, 20_000);
 
     it('adds no date reminder to a first prompt, as other surfaces do', async () => {
