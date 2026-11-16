@@ -14501,7 +14501,8 @@ export function App({
   const runVisibleBtw = useCallback(
     // displayQuestion overrides what the panel echoes; the model still
     // receives the full question. Typed /btw keeps echoing the user's words.
-    (rawQuestion: string, displayQuestion?: string) => {
+    // taskId marks a task explanation so the detail panel can mirror it.
+    (rawQuestion: string, displayQuestion?: string, taskId?: string) => {
       if (sessionWriteBlocked) return;
       const question = rawQuestion.trim();
       if (!question) {
@@ -14523,6 +14524,7 @@ export function App({
         question: display,
         answer: '',
         isPending: true,
+        ...(taskId ? { taskId } : {}),
       });
 
       void (async () => {
@@ -14543,6 +14545,7 @@ export function App({
               question: display,
               answer: event.answer || (done ? t('btw.emptyAnswer') : ''),
               isPending: !done,
+              ...(taskId ? { taskId } : {}),
             });
             if (done) btwAbortControllerRef.current = null;
           }
@@ -18736,10 +18739,41 @@ export function App({
       runVisibleBtw(
         buildTaskExplainQuestion(task, t),
         t('tasks.explain.display', { label: explainDisplayLabel(task.label) }),
+        task.id,
       );
     },
     [runVisibleBtw, t],
   );
+
+  // The detail panel's "?" explains the task shown in the active tab. Shell
+  // and monitor tabs carry their snapshot; a subagent tab resolves through
+  // the registry by its spawning tool call. Workflow tabs name no run.
+  const activeExplainTask = useMemo(() => {
+    const tab = artifactPanelTabs.find(
+      (item) => item.id === activeArtifactPanelTabId,
+    );
+    if (!tab) return null;
+    if (tab.kind === 'shell' || tab.kind === 'monitor') return tab.task;
+    if (tab.kind === 'subagent') {
+      return (
+        sessionTasks.find(
+          (task) =>
+            task.kind === 'agent' && task.toolUseId === tab.rootToolCallId,
+        ) ?? null
+      );
+    }
+    return null;
+  }, [artifactPanelTabs, activeArtifactPanelTabId, sessionTasks]);
+
+  const taskExplanation =
+    btwMessage?.role === 'btw' && btwMessage.taskId
+      ? {
+          taskId: btwMessage.taskId,
+          question: btwMessage.question,
+          answer: btwMessage.answer,
+          isPending: btwMessage.isPending,
+        }
+      : null;
 
   const refreshGoal = useCallback(async () => {
     const owner = sessionOwnerGuard.capture();
@@ -23277,6 +23311,9 @@ export function App({
     onNestedArtifactsChange: handlePaneArtifactsChange,
     onOpenNestedSubagent: openSubagentPanelForSession,
     agentTasks: tracedEnvironmentAgentTasks,
+    explainTask: activeExplainTask,
+    onExplainTask: explainComposerTask,
+    taskExplanation,
     agentTraceLoading: agentTraceInitialLoading,
     agentTraceError: agentTraceFailed ? t('workflow.loadFailed') : undefined,
     onOpenWorkflowAgent: openEnvironmentAgent,

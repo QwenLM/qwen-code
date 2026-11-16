@@ -19234,6 +19234,47 @@ describe('App session callbacks', () => {
     );
   });
 
+  it('mirrors the task explanation into the detail panel props', async () => {
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    renderApp();
+    await flush();
+
+    // Open the shell detail panel the way clicking its chip does.
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestArtifactPanelProps?.explainTask?.id).toBe(
+      'shell-running',
+    );
+
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+
+    const explanation = testState.latestArtifactPanelProps?.taskExplanation;
+    expect(explanation?.taskId).toBe('shell-running');
+    expect(explanation?.question).toBe(
+      'Explain what this task is doing: npm run build',
+    );
+    expect(testState.latestArtifactPanelProps?.onExplainTask).toBeTypeOf(
+      'function',
+    );
+  });
+
   it('locates a workflow chip in the transcript and opens its row', async () => {
     testState.messages = [
       {

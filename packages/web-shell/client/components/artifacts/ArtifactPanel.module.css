@@ -224,6 +224,11 @@
   margin-left: 0;
 }
 
+.explainBlock {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
 .addButton {
   border-color: transparent;
 }

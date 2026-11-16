@@ -1,5 +1,6 @@
 import type {
   DaemonEvent,
+  DaemonSessionShellTaskStatus,
   DaemonSessionWorkflowTaskStatus,
 } from '@qwen-code/sdk/daemon';
 import { test, expect, type Page, type TestInfo } from '@playwright/test';
@@ -324,6 +325,68 @@ test('the row highlight is the open click target and the "?" keeps the chip focu
     return getComputedStyle(el).boxShadow;
   });
   expect(explainRing).toBe(chipRing);
+});
+
+test('the shell detail panel offers "?" and mirrors the explanation in place', async ({
+  page,
+}, testInfo) => {
+  const shellTask: DaemonSessionShellTaskStatus = {
+    kind: 'shell',
+    id: 'shell-panel',
+    label: 'npm run dev',
+    description: 'npm run dev',
+    status: 'running',
+    startTime: Date.now() - 20_000,
+    runtimeMs: 20_000,
+    command: 'npm run dev',
+    cwd: '/workspace',
+  };
+  const events: DaemonEvent[] = [
+    userTextEvent('Run the dev server in the background.', { id: 1 }),
+    toolCallEvent(
+      'shell-call',
+      'run_shell_command',
+      { command: 'npm run dev', is_background: true },
+      { id: 2 },
+    ),
+    turnCompleteEvent('shell-panel', { id: 3 }),
+  ];
+  const scenario = createWebShellDaemonScenario({
+    workflowTasks: [shellTask],
+    events,
+  });
+  const daemon = await installMockDaemon(page, scenario, {
+    baseURL: String(testInfo.project.use.baseURL),
+  });
+  await page.goto(`/session/${scenario.sessionId}?theme=dark`);
+  await daemon.sse.waitForConnection(scenario.sessionId);
+  await daemon.sendEvent(
+    replayCompleteEvent({
+      sessionId: scenario.sessionId,
+      replayedCount: events.length,
+    }),
+  );
+
+  // The single-task shell chip opens its detail panel.
+  await page
+    .getByTestId('composer-task-chips')
+    .getByRole('button', { name: '1 shell' })
+    .click();
+  const panelExplain = page.getByTestId('artifact-panel-explain');
+  await expect(panelExplain).toBeVisible();
+  await panelExplain.click();
+
+  // The answer mirrors in place inside the panel, with the display line
+  // rather than the fact dump; the btw panel above the composer has it too.
+  const block = page.getByTestId('artifact-panel-explanation');
+  await expect(block).toContainText('A side answer.');
+  await expect(block).toContainText(
+    'Explain what this task is doing: npm run dev',
+  );
+  await expect(block).not.toContainText('Task facts:');
+  await expect(page.locator('[class*="btwPanel"]')).toContainText(
+    'A side answer.',
+  );
 });
 
 test('an expired reveal does not reopen a collapsed workflow on sibling approval', async ({
