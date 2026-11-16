@@ -1175,31 +1175,30 @@ jobs:
       - name: 'Resolve review sandbox'
         id: 'review_sandbox'
         if: "steps.context.outputs.should_run == 'true'"
+        # Absolute and step-scoped: the resolver's export is derived from this
+        # binary's stdout, and an appended $GITHUB_ENV value or a $GITHUB_PATH
+        # shadow in the runner-writable qwen-bin dir would otherwise steer it
+        # (#9527). The same pin the other sandboxed jobs use.
+        env:
+          SANDBOX_COMMAND: '/usr/bin/docker'
         shell: '/bin/bash --noprofile --norc -e -o pipefail {0}'
         run: |-
-          runtime=''
-          for candidate in /usr/bin/docker docker /usr/bin/podman podman; do
-            command -v "$candidate" > /dev/null 2>&1 || continue
-            # A daemon round trip, not presence on PATH: a client with no
-            # reachable daemon is exactly the shape that fails deep inside the
-            # first reviewed command. Same probe, same order as
-            # cli lib/sandboxed-exec.ts.
-            if "$candidate" info > /dev/null 2>&1; then runtime="$candidate"; break; fi
-          done
           policy='off'
-          if [ -z "$runtime" ]; then
-            echo "::warning::no container runtime answered 'info' on this review runner; the PR's own install/build/test run unsandboxed for this review."
-          elif ! SANDBOX_COMMAND="$runtime" node .github/scripts/resolve-sandbox-image.mjs \
+          # A daemon round trip, not presence on PATH: a client with no
+          # reachable daemon is the shape that then refuses every reviewed
+          # command deep inside the prebuild (cli lib/sandboxed-exec.ts).
+          if ! "${SANDBOX_COMMAND}" info > /dev/null 2>&1; then
+            echo "::warning::no container daemon answered '${SANDBOX_COMMAND} info' on this review runner; the PR's own install/build/test run unsandboxed for this review."
+          elif ! node .github/scripts/resolve-sandbox-image.mjs \
             "$(node -p "require('./package.json').config.sandboxImageUri")"; then
             echo "::warning::the review sandbox image is not available on this runner; the PR's own install/build/test run unsandboxed for this review."
           else
             policy='required'
           fi
-          echo "sandbox_runtime=${runtime:-none}"
           echo "sandbox_policy=$policy"
           {
             echo "### Review sandbox"
-            echo "runtime: ${runtime:-none}"
+            echo "runtime: ${SANDBOX_COMMAND}"
             echo "policy: $policy"
           } >> "$GITHUB_STEP_SUMMARY"
           echo "policy=$policy" >> "$GITHUB_OUTPUT"
@@ -1313,6 +1312,16 @@ jobs:
           # shell probes, so #9556 stays open. Mechanism: cli
           # lib/sandboxed-exec.ts; the CI row of the design.
           QWEN_REVIEW_SANDBOX: '${{ steps.review_sandbox.outputs.policy }}'
+          # The digest-bound image the resolver pulled, through its step
+          # OUTPUT: later steps can append $GITHUB_ENV, so only the expression
+          # context is unsteerable (#9527). Empty when the resolver did not
+          # run; `policy` is `off` then, so it is not read.
+          QWEN_SANDBOX_IMAGE: '${{ steps.review_sandbox.outputs.image }}'
+          # Step env outranks an appended value, and the docker CLI skips an
+          # empty one; DOCKER_CONTEXT pins the pool-shared context so neither
+          # can steer the endpoint the sandbox runs against (#9527).
+          DOCKER_HOST: ''
+          DOCKER_CONTEXT: 'default'
           TMPDIR: '${{ steps.review_scratch.outputs.dir }}'
         run: |-
           set -euo pipefail

@@ -3071,11 +3071,12 @@ describe('review execution sandbox opt-in (#9556)', () => {
     const preflight = steps[preflightIndex];
     expect(preflight.id).toBe('review_sandbox');
     expect(preflight['continue-on-error']).toBeUndefined();
-    // A daemon round trip, and the same docker-then-podman order the CLI
-    // probes. `command -v` alone would pass for a client with no daemon, which
-    // is the shape that then refuses every command.
+    // A daemon round trip, not presence on PATH: a client with no daemon is
+    // the shape that then refuses every reviewed command inside the prebuild.
     expect(preflight.run).toContain('info > /dev/null');
-    expect(preflight.run).toContain('podman');
+    // The binary is pinned in step env, like the other sandboxed jobs: the
+    // export is derived from its stdout, so a PATH shadow must not steer it.
+    expect(preflight.env.SANDBOX_COMMAND).toBe('/usr/bin/docker');
     // The image resolves through the repo's resolver, so a tag that is not on
     // GHCR is caught here instead of being reported as the PR's broken install.
     expect(preflight.run).toContain('resolve-sandbox-image.mjs');
@@ -3090,6 +3091,17 @@ describe('review execution sandbox opt-in (#9556)', () => {
     // the wrong side.
     expect(preflight.run).toMatch(/policy='off'/);
     expect(preflight.run).toMatch(/policy='required'/);
+  });
+
+  it('binds the resolved image through the step output, not $GITHUB_ENV', () => {
+    // Later steps can append $GITHUB_ENV; only the expression context is
+    // unsteerable, so the consumer must bind the resolver's OUTPUT and pin the
+    // endpoint the daemon resolves through (#9527).
+    expect(review.env.QWEN_SANDBOX_IMAGE).toBe(
+      '${{ steps.review_sandbox.outputs.image }}',
+    );
+    expect(review.env.DOCKER_HOST).toBe('');
+    expect(review.env.DOCKER_CONTEXT).toBe('default');
   });
 });
 
