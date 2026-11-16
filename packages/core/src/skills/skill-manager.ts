@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { closeFileWatcher } from '../utils/file-watcher-cleanup.js';
+import {
+  closeFileWatcher,
+  shouldPollFileWatchers,
+} from '../utils/file-watcher-cleanup.js';
 import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
 import * as path from 'path';
@@ -1338,6 +1341,7 @@ export class SkillManager {
 
       try {
         const watcher = watchFs(watchPath, {
+          usePolling: shouldPollFileWatchers(),
           ignoreInitial: true,
           ignored: watcherIgnored,
           depth: WATCHER_MAX_DEPTH,

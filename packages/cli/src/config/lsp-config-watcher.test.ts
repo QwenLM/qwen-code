@@ -33,6 +33,17 @@ const debugLoggerMock = vi.hoisted(() => ({
   warn: vi.fn(),
 }));
 
+const pollingPolicy = vi.hoisted(() => vi.fn(() => false));
+vi.mock(
+  '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js',
+  async (importOriginal) => ({
+    ...(await importOriginal<
+      typeof import('@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js')
+    >()),
+    shouldPollFileWatchers: pollingPolicy,
+  }),
+);
+
 vi.mock('chokidar', () => ({
   watch: chokidarMock.watch,
 }));
@@ -60,7 +71,23 @@ function makeTempDir(): string {
 }
 
 describe('LspConfigWatcher', () => {
+  it.each([false, true])(
+    'routes the watcher with polling=%s',
+    async (polling) => {
+      pollingPolicy.mockReturnValue(polling);
+      const dir = makeTempDir();
+      const watcher = new LspConfigWatcher(dir);
+      watcher.startWatching(vi.fn());
+      expect(chokidarMock.watch).toHaveBeenCalledWith(
+        dir,
+        expect.objectContaining({ usePolling: polling, depth: 0 }),
+      );
+      await watcher.stopWatching();
+    },
+  );
+
   afterEach(() => {
+    pollingPolicy.mockReturnValue(false);
     vi.useRealTimers();
     vi.clearAllMocks();
     chokidarMock.handlers.clear();

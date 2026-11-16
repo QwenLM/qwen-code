@@ -15,11 +15,23 @@ const mocks = vi.hoisted(() => ({
   read: vi.fn<(path: string) => Promise<WorktreeSession | null>>(),
   mkdir: vi.fn(),
   watch: vi.fn(),
+  watchFile: vi.fn(),
+  unwatchFile: vi.fn(),
+  poll: vi.fn(() => false),
 }));
 vi.mock('@qwen-code/qwen-code-core/services/worktreeSessionService.js', () => ({
   readWorktreeSession: mocks.read,
 }));
-vi.mock('node:fs', () => ({ default: { watch: mocks.watch } }));
+vi.mock('node:fs', () => ({
+  default: {
+    watch: mocks.watch,
+    watchFile: mocks.watchFile,
+    unwatchFile: mocks.unwatchFile,
+  },
+}));
+vi.mock('@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js', () => ({
+  shouldPollFileWatchers: mocks.poll,
+}));
 vi.mock('node:fs/promises', () => ({ default: { mkdir: mocks.mkdir } }));
 
 const worktree: WorktreeSession = {
@@ -40,6 +52,7 @@ describe('useWorktreeSession session ownership', () => {
   }>;
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.poll.mockReturnValue(false);
     sessionId = 'first';
     config = {
       getSessionId: () => sessionId,
@@ -134,6 +147,107 @@ describe('useWorktreeSession session ownership', () => {
     await act(async () => watchers[0].notify('change', null));
     expect(result.current).toBe(worktree);
     expect(mocks.read).toHaveBeenCalledTimes(3);
+  });
+
+  it('polls the exact path and unsubscribes only its retained listener', async () => {
+    mocks.poll.mockReturnValue(true);
+    const first = renderHook(() => useWorktreeSession(config));
+    const second = renderHook(() => useWorktreeSession(config));
+    await waitFor(() => expect(first.result.current).toBe(worktree));
+    expect(mocks.watchFile).toHaveBeenCalledTimes(2);
+    expect(mocks.watchFile).toHaveBeenCalledWith(
+      '/sessions/first.worktree.json',
+      { persistent: false, interval: 500 },
+      expect.any(Function),
+    );
+    expect(mocks.watch).not.toHaveBeenCalled();
+    expect(mocks.mkdir).not.toHaveBeenCalled();
+    const firstListener = mocks.watchFile.mock.calls[0][2];
+    const secondListener = mocks.watchFile.mock.calls[1][2];
+    first.unmount();
+    expect(mocks.unwatchFile).toHaveBeenCalledExactlyOnceWith(
+      '/sessions/first.worktree.json',
+      firstListener,
+    );
+    const before = mocks.read.mock.calls.length;
+    await act(async () => firstListener());
+    expect(mocks.read).toHaveBeenCalledTimes(before);
+    mocks.read.mockResolvedValueOnce(null);
+    await act(async () => secondListener());
+    expect(second.result.current).toBeNull();
+    second.unmount();
+    expect(mocks.unwatchFile).toHaveBeenLastCalledWith(
+      '/sessions/first.worktree.json',
+      secondListener,
+    );
+  });
+
+  it('rejects late polling reads after session replacement', async () => {
+    mocks.poll.mockReturnValue(true);
+    const oldConfig = config;
+    const { result, rerender } = renderHook(
+      ({ owner }) => useWorktreeSession(owner),
+      { initialProps: { owner: oldConfig } },
+    );
+    await waitFor(() => expect(result.current).toBe(worktree));
+    let release!: (value: WorktreeSession | null) => void;
+    mocks.read.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    const oldListener = mocks.watchFile.mock.calls[0][2];
+    act(() => oldListener());
+    const nextConfig = {
+      ...config,
+      getSessionId: () => 'second',
+      getSessionService: () => ({
+        getWorktreeSessionPath: () => '/other/second.worktree.json',
+      }),
+    } as unknown as Config;
+    let loadNew!: (value: WorktreeSession | null) => void;
+    mocks.read.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          loadNew = resolve;
+        }),
+    );
+    rerender({ owner: nextConfig });
+    expect(result.current).toBeNull();
+    expect(mocks.unwatchFile).toHaveBeenCalledWith(
+      '/sessions/first.worktree.json',
+      oldListener,
+    );
+    const next = { ...worktree, slug: 'new-owner' };
+    await act(async () => loadNew(next));
+    await act(async () => release(worktree));
+    expect(result.current).toBe(next);
+  });
+
+  it('retains polling after a read failure and recovers the current sidecar', async () => {
+    mocks.poll.mockReturnValue(true);
+    const { result } = renderHook(() => useWorktreeSession(config));
+    await waitFor(() => expect(result.current).toBe(worktree));
+    const listener = mocks.watchFile.mock.calls[0][2];
+    mocks.read.mockRejectedValueOnce(new Error('owned read failed'));
+    await act(async () => listener());
+    expect(result.current).toBeNull();
+    await act(async () => listener());
+    expect(result.current).toBe(worktree);
+    expect(mocks.watchFile).toHaveBeenCalledOnce();
+  });
+
+  it('does not poll host sidecars in a tool sandbox', async () => {
+    mocks.poll.mockReturnValue(true);
+    config.getShellExecutionSandbox = vi
+      .fn()
+      .mockReturnValue({ backend: 'bwrap' });
+    const { result } = renderHook(() => useWorktreeSession(config));
+    await act(async () => {});
+    expect(result.current).toBeNull();
+    expect(mocks.watchFile).not.toHaveBeenCalled();
+    expect(mocks.read).not.toHaveBeenCalled();
   });
 
   it('does not access host sidecars while tool sandboxing is active', async () => {

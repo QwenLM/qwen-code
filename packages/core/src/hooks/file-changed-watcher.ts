@@ -14,7 +14,10 @@ import {
   statSync,
 } from 'node:fs';
 import { watch, type FSWatcher } from 'chokidar';
-import { closeFileWatcher } from '../utils/file-watcher-cleanup.js';
+import {
+  closeFileWatcher,
+  shouldPollFileWatchers,
+} from '../utils/file-watcher-cleanup.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { FileChangeEvent } from './types.js';
 
@@ -151,6 +154,7 @@ export class FileChangedWatcher {
         ];
         if (watchRoots.length === 0) return;
         const watcher = watch(watchRoots, {
+          usePolling: shouldPollFileWatchers(),
           ignoreInitial: true,
           ignored: (candidate, stats) => {
             if (stats && !stats.isFile() && !stats.isDirectory()) return true;

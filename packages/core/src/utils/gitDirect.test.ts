@@ -14,8 +14,20 @@ import * as path from 'node:path';
 // but replace fs.watch with a spy so the shared-watcher logic is observable.
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
-  return { ...actual, default: actual, watch: vi.fn() };
+  return {
+    ...actual,
+    default: actual,
+    watch: vi.fn(),
+    watchFile: vi.fn(),
+    unwatchFile: vi.fn(),
+  };
 });
+
+const shouldPollMock = vi.hoisted(() => vi.fn(() => false));
+vi.mock('./file-watcher-cleanup.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./file-watcher-cleanup.js')>()),
+  shouldPollFileWatchers: shouldPollMock,
+}));
 
 import {
   isValidRefName,
@@ -27,6 +39,8 @@ import {
 } from './gitDirect.js';
 
 const watchMock = fs.watch as unknown as Mock;
+const watchFileMock = fs.watchFile as unknown as Mock;
+const unwatchFileMock = fs.unwatchFile as unknown as Mock;
 
 const tmpRoots: string[] = [];
 
@@ -67,6 +81,9 @@ async function makeGitdirPointer(gitDir: string): Promise<string> {
 afterEach(async () => {
   clearGitDirCache();
   watchMock.mockReset();
+  watchFileMock.mockReset();
+  unwatchFileMock.mockReset();
+  shouldPollMock.mockReturnValue(false);
   for (const dir of tmpRoots.splice(0)) {
     await fsp.rm(dir, { recursive: true, force: true });
   }
@@ -310,6 +327,90 @@ describe('resolveBranchName', () => {
 });
 
 describe('watchRepoBranch', () => {
+  it('shares polling and releases only its own listener after the last subscriber', async () => {
+    shouldPollMock.mockReturnValue(true);
+    const repo = await makeRepo();
+    const reflog = path.join(repo, '.git', 'logs', 'HEAD');
+    const bad = vi.fn(() => {
+      throw new Error('Subscriber failure');
+    });
+    const good = vi.fn();
+    const [disposeBad, disposeGood] = await Promise.all([
+      watchRepoBranch(repo, bad),
+      watchRepoBranch(repo, good),
+    ]);
+    expect(watchMock).not.toHaveBeenCalled();
+    expect(watchFileMock).toHaveBeenCalledExactlyOnceWith(
+      reflog,
+      { interval: 500, persistent: true },
+      expect.any(Function),
+    );
+    const notify = watchFileMock.mock.calls[0][2] as () => void;
+    expect(() => notify()).not.toThrow();
+    expect(bad).toHaveBeenCalledOnce();
+    expect(good).toHaveBeenCalledOnce();
+    disposeBad();
+    expect(unwatchFileMock).not.toHaveBeenCalled();
+    notify();
+    expect(good).toHaveBeenCalledTimes(2);
+    disposeGood();
+    expect(unwatchFileMock).toHaveBeenCalledExactlyOnceWith(reflog, notify);
+    const nextSubscriber = vi.fn();
+    const disposeNext = await watchRepoBranch(repo, nextSubscriber);
+    notify();
+    expect(nextSubscriber).not.toHaveBeenCalled();
+    (watchFileMock.mock.calls[1][2] as () => void)();
+    expect(nextSubscriber).toHaveBeenCalledOnce();
+    disposeNext();
+  });
+
+  it('clears polling subscriptions without delivering queued notifications', async () => {
+    shouldPollMock.mockReturnValue(true);
+    const repo = await makeRepo();
+    const subscriber = vi.fn();
+    const dispose = await watchRepoBranch(repo, subscriber);
+    const notify = watchFileMock.mock.calls[0][2] as () => void;
+    clearGitDirCache();
+    expect(unwatchFileMock).toHaveBeenCalledWith(
+      path.join(repo, '.git', 'logs', 'HEAD'),
+      notify,
+    );
+    notify();
+    expect(subscriber).not.toHaveBeenCalled();
+    dispose();
+    expect(unwatchFileMock).toHaveBeenCalledOnce();
+  });
+
+  it('does not fall back to a native watcher when polling setup fails', async () => {
+    shouldPollMock.mockReturnValue(true);
+    watchFileMock.mockImplementationOnce(() => {
+      throw new Error('Polling setup failure');
+    });
+    const repo = await makeRepo();
+    const dispose = await watchRepoBranch(repo, vi.fn());
+    expect(() => dispose()).not.toThrow();
+    expect(watchMock).not.toHaveBeenCalled();
+    const disposeNext = await watchRepoBranch(repo, vi.fn());
+    expect(watchFileMock).toHaveBeenCalledTimes(2);
+    disposeNext();
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a symlinked reflog before starting polling',
+    async () => {
+      shouldPollMock.mockReturnValue(true);
+      const repo = await makeRepo({ withReflog: false });
+      const target = path.join(await makeBareDir(), 'outside-log');
+      await fsp.writeFile(target, 'outside\n');
+      await fsp.mkdir(path.join(repo, '.git', 'logs'), { recursive: true });
+      await fsp.symlink(target, path.join(repo, '.git', 'logs', 'HEAD'));
+      const dispose = await watchRepoBranch(repo, vi.fn());
+      expect(watchFileMock).not.toHaveBeenCalled();
+      expect(watchMock).not.toHaveBeenCalled();
+      dispose();
+    },
+  );
+
   // Mock fs.watch to return an observable FSWatcher: a close() spy plus
   // captured change/error listeners we can fire from the test.
   function installWatchMock() {

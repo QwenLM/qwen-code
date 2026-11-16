@@ -7,6 +7,40 @@
 import { EventEmitter } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+describe('file watcher backend', () => {
+  it.each([
+    ['darwin', '1.4.4', true],
+    ['darwin', undefined, false],
+    ['linux', '1.4.4', false],
+    ['win32', '1.4.4', false],
+    ['linux', undefined, false],
+  ])('selects polling for %s / Bun %s: %s', async (platform, bun, expected) => {
+    const originalPlatform = process.platform;
+    const originalBun = Object.getOwnPropertyDescriptor(
+      process.versions,
+      'bun',
+    );
+    try {
+      Object.defineProperty(process, 'platform', { value: platform });
+      Object.defineProperty(process.versions, 'bun', {
+        configurable: true,
+        value: bun,
+      });
+      const { shouldPollFileWatchers } = await import(
+        './file-watcher-cleanup.js'
+      );
+      expect(shouldPollFileWatchers()).toBe(expected);
+    } finally {
+      Object.defineProperty(process, 'platform', { value: originalPlatform });
+      if (originalBun) {
+        Object.defineProperty(process.versions, 'bun', originalBun);
+      } else {
+        delete process.versions['bun'];
+      }
+    }
+  });
+});
+
 describe('file watcher cleanup', () => {
   const platform = process.platform;
 

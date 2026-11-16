@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { closeFileWatcher } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
+import {
+  closeFileWatcher,
+  shouldPollFileWatchers,
+} from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { watch as watchFs, type FSWatcher } from 'chokidar';
@@ -77,6 +80,7 @@ export class ExtensionFileWatcher {
     if (roots.length > 0) {
       this.watcher = watchFs(roots, {
         ignoreInitial: true,
+        usePolling: shouldPollFileWatchers(),
         followSymlinks: false,
         awaitWriteFinish: {
           stabilityThreshold: 200,
@@ -211,6 +215,7 @@ export class ExtensionFileWatcher {
     const generation = this.watchGeneration;
     this.bootstrapWatcher = watchFs(parentDir, {
       ignoreInitial: true,
+      usePolling: shouldPollFileWatchers(),
       followSymlinks: false,
       depth: 0,
       ignored: (filePath: string) =>

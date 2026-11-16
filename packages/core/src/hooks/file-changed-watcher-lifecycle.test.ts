@@ -36,6 +36,64 @@ describe('FileChangedWatcher lifecycle', () => {
     await watcher?.close();
   });
 
+  it.each([
+    ['darwin', true, true],
+    ['darwin', false, false],
+    ['linux', true, false],
+  ] as const)(
+    'routes %s bun=%s hook watchers to polling=%s',
+    async (platform, bun, polling) => {
+      const platformDescriptor = Object.getOwnPropertyDescriptor(
+        process,
+        'platform',
+      )!;
+      const bunDescriptor = Object.getOwnPropertyDescriptor(
+        process.versions,
+        'bun',
+      );
+      try {
+        Object.defineProperty(process, 'platform', {
+          configurable: true,
+          value: platform,
+        });
+        Object.defineProperty(process.versions, 'bun', {
+          configurable: true,
+          value: bun ? 'test' : undefined,
+        });
+        const notify = vi.fn().mockResolvedValue(undefined);
+        watcher = new FileChangedWatcher(notify);
+        const registration = watcher.setPaths([root]);
+        await vi.waitFor(() => expect(watch).toHaveBeenCalledOnce());
+        expect(watch.mock.calls[0][1]).toMatchObject({
+          usePolling: polling,
+          ignoreInitial: true,
+          followSymlinks: false,
+          awaitWriteFinish: { stabilityThreshold: 200, pollInterval: 50 },
+        });
+        nativeWatchers[0].emit('ready');
+        await registration;
+        const file = path.join(root, 'changed.md');
+        nativeWatchers[0].emit('all', 'change', file);
+        await vi.waitFor(() =>
+          expect(notify).toHaveBeenCalledWith(
+            file,
+            'change',
+            expect.any(AbortSignal),
+          ),
+        );
+        await watcher.close();
+        nativeWatchers[0].emit('all', 'change', file);
+        expect(notify).toHaveBeenCalledOnce();
+      } finally {
+        await watcher?.close();
+        Object.defineProperty(process, 'platform', platformDescriptor);
+        if (bunDescriptor)
+          Object.defineProperty(process.versions, 'bun', bunDescriptor);
+        else Reflect.deleteProperty(process.versions, 'bun');
+      }
+    },
+  );
+
   it('bounds dynamic traversal while preserving explicit paths and discovery ancestors', async () => {
     watcher = new FileChangedWatcher(vi.fn().mockResolvedValue(undefined));
     const explicitRoot = path.join(root, 'node_modules', 'selected');

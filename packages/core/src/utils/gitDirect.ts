@@ -10,6 +10,7 @@ import * as path from 'node:path';
 import { resolveGitDir } from './gitDiff.js';
 import { readFirstLineNoFollow } from './gitUtils.js';
 import { createDebugLogger } from './debugLogger.js';
+import { shouldPollFileWatchers } from './file-watcher-cleanup.js';
 
 /**
  * Direct-read git helpers: resolve the current branch / HEAD by reading the
@@ -216,12 +217,12 @@ export async function resolveBranchName(
 }
 
 interface RepoBranchWatch {
-  watcher: fs.FSWatcher;
+  watcher: Pick<fs.FSWatcher, 'close'>;
   subscribers: Set<() => void>;
 }
 
 // Keyed by resolved gitDir so that multiple subscribers on the same repository
-// share a single fs.watch.
+// share a single reflog subscription.
 const repoBranchWatches = new Map<string, RepoBranchWatch>();
 
 /** Close every shared reflog watcher and drop the entries. */
@@ -239,7 +240,7 @@ function closeAllRepoBranchWatches(): void {
 /**
  * Subscribe to branch changes for `cwd`'s repository.
  *
- * Multiple subscribers on the same git dir share one `fs.watch` on
+ * Multiple subscribers on the same git dir share one watcher on
  * `<gitDir>/logs/HEAD` (the reflog, which moves on branch switch / commit /
  * reset). The returned disposer removes this subscriber and tears the watch
  * down once the last subscriber leaves. If the repo can't be resolved or has
@@ -277,21 +278,53 @@ export async function watchRepoBranch(
     if (existing) {
       entry = existing;
     } else {
-      let watcher: fs.FSWatcher;
-      try {
-        watcher = fs.watch(logsHeadPath, (eventType: string) => {
-          if (eventType === 'change' || eventType === 'rename') {
-            repoBranchWatches.get(gitDir)?.subscribers.forEach((cb) => {
-              // Isolate subscriber failures: in this shared-watcher fan-out one
-              // throwing callback must not halt the others or crash the watch.
-              try {
-                cb();
-              } catch {
-                // ignore a subscriber's own error
-              }
-            });
+      let watcher: Pick<fs.FSWatcher, 'close'>;
+      const notifySubscribers = () => {
+        repoBranchWatches.get(gitDir)?.subscribers.forEach((cb) => {
+          try {
+            cb();
+          } catch {
+            // Isolate a subscriber's failure from the shared watcher.
           }
         });
+      };
+      try {
+        if (shouldPollFileWatchers()) {
+          const listener = () => {
+            if (repoBranchWatches.get(gitDir)?.watcher === watcher) {
+              notifySubscribers();
+            }
+          };
+          watcher = { close: () => fs.unwatchFile(logsHeadPath, listener) };
+          fs.watchFile(
+            logsHeadPath,
+            { interval: 500, persistent: true },
+            listener,
+          );
+        } else {
+          const nativeWatcher = fs.watch(logsHeadPath, (eventType: string) => {
+            if (eventType === 'change' || eventType === 'rename') {
+              notifySubscribers();
+            }
+          });
+          watcher = nativeWatcher;
+          // An unhandled native watcher error would crash the process.
+          // Tear down the watch; subscribers stop auto-refreshing.
+          nativeWatcher.on('error', (err: Error) => {
+            debug.warn(
+              `reflog watcher error for ${gitDir}; branch will no longer auto-update: ${err?.message}`,
+            );
+            const current = repoBranchWatches.get(gitDir);
+            if (current?.watcher === nativeWatcher) {
+              try {
+                nativeWatcher.close();
+              } catch {
+                // already closed
+              }
+              repoBranchWatches.delete(gitDir);
+            }
+          });
+        }
       } catch (err) {
         // fs.watch throws synchronously if logs/HEAD vanished after access()
         // (TOCTOU: git gc / reflog expire / worktree removal) or a platform
@@ -301,24 +334,6 @@ export async function watchRepoBranch(
         debug.warn(`failed to watch reflog for ${gitDir}: ${err}`);
         return () => {};
       }
-      // fs.FSWatcher is an EventEmitter: an unhandled 'error' (reflog removed
-      // by `git gc` / `reflog expire`, worktree removal, inode change, or a
-      // platform watch limit) would crash the process. Tear the watch down
-      // instead — subscribers simply stop auto-refreshing.
-      watcher.on('error', (err: Error) => {
-        debug.warn(
-          `reflog watcher error for ${gitDir}; branch will no longer auto-update: ${err?.message}`,
-        );
-        const current = repoBranchWatches.get(gitDir);
-        if (current?.watcher === watcher) {
-          try {
-            watcher.close();
-          } catch {
-            // already closed
-          }
-          repoBranchWatches.delete(gitDir);
-        }
-      });
       entry = { watcher, subscribers: new Set() };
       repoBranchWatches.set(gitDir, entry);
     }

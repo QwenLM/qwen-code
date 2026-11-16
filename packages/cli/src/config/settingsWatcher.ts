@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { closeFileWatcher } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
+import {
+  closeFileWatcher,
+  shouldPollFileWatchers,
+} from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { watch as watchFs, type FSWatcher } from 'chokidar';
@@ -158,6 +161,7 @@ export class SettingsWatcher {
     try {
       const watcher = watchFs(dir, {
         ignoreInitial: true,
+        usePolling: shouldPollFileWatchers(),
         depth: 0,
         ignored: (filePath: string, stats?: fs.Stats) => {
           if (stats && !stats.isFile() && !stats.isDirectory()) return true;
@@ -208,6 +212,7 @@ export class SettingsWatcher {
     try {
       const watcher = watchFs(parentDir, {
         ignoreInitial: true,
+        usePolling: shouldPollFileWatchers(),
         depth: 0,
         ignored: (filePath: string) =>
           filePath !== parentDir && path.basename(filePath) !== dirBasename,
