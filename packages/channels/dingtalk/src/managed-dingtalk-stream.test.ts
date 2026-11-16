@@ -14,9 +14,15 @@ const mockState = vi.hoisted(() => ({
   instance: null as unknown as { onDownStream: (data: unknown) => void },
   registered: null as null | { topic: unknown; cb: (m: unknown) => void },
   acks: [] as Array<{ id: string; payload: { status: string } }>,
+  // The options the deps wrapper passed to the SDK constructor (R12).
+  constructorOptions: null as unknown,
+  // Mirror the SDK getEndpoint() credential log when armed (R12).
+  logEndpoint: false,
   // Whether the constructed socket ever emits 'open'. The real SDK resolves
   // connect() on construction; the deps wrapper must wait for 'open' (R10-1).
   socketOpen: true,
+  // When the socket never opens, emit this event instead (R12).
+  socketFailEvent: null as null | 'error' | 'close',
   socket: null as null | {
     readyState: number;
     on: (e: string, cb: (...a: unknown[]) => void) => void;
@@ -30,7 +36,8 @@ vi.mock('dingtalk-stream-sdk-nodejs', () => {
     config = { autoReconnect: true };
     debug = false;
     socket: unknown = null;
-    constructor() {
+    constructor(options?: unknown) {
+      mockState.constructorOptions = options;
       mockState.instance = this as unknown as typeof mockState.instance;
     }
     // Simulate the SDK dispatch: it console.log()s every raw frame (ungated by
@@ -55,6 +62,16 @@ vi.mock('dingtalk-stream-sdk-nodejs', () => {
     }
     async connect(): Promise<void> {
       mockState.calls += 1;
+      if (mockState.logEndpoint) {
+        // Mirror the SDK getEndpoint(): it console.log()s the resolved config,
+        // clientSecret included, ungated by the debug flag (R12).
+        // eslint-disable-next-line no-console -- mirrors the real SDK credential log
+        console.log('getEndpoint config', {
+          clientSecret: (
+            mockState.constructorOptions as { clientSecret?: string } | null
+          )?.clientSecret,
+        });
+      }
       if (mockState.connectGate) {
         await mockState.connectGate.promise;
       }
@@ -94,6 +111,11 @@ vi.mock('dingtalk-stream-sdk-nodejs', () => {
           socket.readyState = 1;
           socket.emit('open');
         });
+      } else if (mockState.socketFailEvent) {
+        const event = mockState.socketFailEvent;
+        setImmediate(() => {
+          socket.emit(event);
+        });
       }
     }
     disconnect(): void {
@@ -130,7 +152,10 @@ beforeEach(() => {
   mockState.connectGate = null;
   mockState.registered = null;
   mockState.acks = [];
+  mockState.constructorOptions = null;
+  mockState.logEndpoint = false;
   mockState.socketOpen = true;
+  mockState.socketFailEvent = null;
   mockState.socket = null;
 });
 
@@ -325,5 +350,111 @@ describe('managed DingTalk stream reconnect lifecycle (R4-2 / R4-3)', () => {
     ).length;
     expect(reconnectLines).toBe(1);
     stream.disconnect();
+  });
+});
+
+describe('managed DingTalk stream SDK wiring pins (#17173 R12)', () => {
+  it('passes clientId, clientSecret and keepAlive to the SDK constructor', () => {
+    const { createStreamClient } = createManagedDingtalkDeps();
+    createStreamClient(SETTINGS, () => true);
+    expect(mockState.constructorOptions).toEqual({
+      clientId: 'robot-app',
+      clientSecret: 'secret',
+      keepAlive: true,
+    });
+  });
+
+  it('suppresses the SDK getEndpoint credential log during connect', async () => {
+    mockState.logEndpoint = true;
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const { createStreamClient } = createManagedDingtalkDeps();
+    const stream = createStreamClient(SETTINGS, () => true);
+    await stream.connect();
+    // The SDK logs the clientSecret inside connect; the wrapper must mute it.
+    expect(logSpy).not.toHaveBeenCalled();
+    // Suppression is scoped to the attempt: logging works again afterwards.
+    // eslint-disable-next-line no-console -- probing the restored console
+    console.log('after connect');
+    expect(logSpy).toHaveBeenCalledTimes(1);
+    stream.disconnect();
+  });
+
+  it.each(['error', 'close'] as const)(
+    'a socket %s before open rejects the first connect',
+    async (event) => {
+      // Keep setImmediate real so the mock socket's async event fires.
+      vi.useFakeTimers({
+        toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'],
+      });
+      mockState.socketOpen = false;
+      mockState.socketFailEvent = event;
+      const { createStreamClient } = createManagedDingtalkDeps();
+      const stream = createStreamClient(SETTINGS, () => true);
+      // The rejection must come from the fail event, not the 20s attempt
+      // timeout: no fake time is advanced here. The first-connect message is
+      // the redacted generic one (the internal reason never escapes).
+      await expect(stream.connect()).rejects.toThrow('connect failed');
+      stream.disconnect();
+    },
+  );
+
+  it('closes a socket that opens after the attempt timed out', async () => {
+    vi.useFakeTimers();
+    mockState.socketOpen = false;
+    const { createStreamClient } = createManagedDingtalkDeps();
+    const stream = createStreamClient(SETTINGS, () => true);
+    const connecting = stream.connect();
+    const assertion = expect(connecting).rejects.toThrow('connect failed');
+    await vi.advanceTimersByTimeAsync(21_000);
+    await assertion;
+    const disconnectsBeforeLateOpen = mockState.disconnects;
+    // The abandoned attempt's socket opens late; the wrapper must close it so
+    // no zombie keeps the heartbeat armed.
+    mockState.socket!.readyState = 1;
+    mockState.socket!.emit('open');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mockState.disconnects).toBeGreaterThan(disconnectsBeforeLateOpen);
+    stream.disconnect();
+  });
+
+  it('a successful reconnect re-arms the failure log latch', async () => {
+    vi.useFakeTimers({
+      toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'],
+    });
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const { createStreamClient } = createManagedDingtalkDeps();
+    const stream = createStreamClient(SETTINGS, () => true);
+    await stream.connect(); // success
+    mockState.behavior = 'fail';
+    await stream.connect(); // episode 1: logs once
+    mockState.behavior = 'ok';
+    await stream.connect(); // recovery must reset the latch
+    mockState.behavior = 'fail';
+    await stream.connect(); // episode 2: must log again
+    const reconnectLines = stderrSpy.mock.calls.filter((call) =>
+      String(call[0]).includes('reconnect failed'),
+    ).length;
+    expect(reconnectLines).toBe(2);
+    stream.disconnect();
+  });
+
+  it('disconnect clears an armed reconnect retry timer', async () => {
+    vi.useFakeTimers({
+      toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'],
+    });
+    const { createStreamClient } = createManagedDingtalkDeps();
+    const stream = createStreamClient(SETTINGS, () => true);
+    await stream.connect(); // success
+    mockState.behavior = 'fail';
+    await stream.connect(); // failure arms the retry
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+    stream.disconnect();
+    // The armed timer must be gone, not merely defused by the stopped flag:
+    // a lingering timer would keep the process alive after shutdown.
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(mockState.calls).toBe(2);
   });
 });
