@@ -1040,7 +1040,17 @@ describe('BranchPickerPopover checkout resolution panel', () => {
   // otherwise hit the Update Project row first.
   const CHECKOUT_BRANCHES: DaemonGitBranchesResult = {
     ...BRANCHES,
-    local: [...BRANCHES.local, { name: 'dev', isHead: false }],
+    local: [
+      ...BRANCHES.local,
+      {
+        name: 'dev',
+        isHead: false,
+        ahead: 0,
+        behind: 0,
+        commitDate: 0,
+        commitSubject: '',
+      },
+    ],
   };
 
   function checkoutDirtyError(): Error {
@@ -1343,8 +1353,10 @@ describe('BranchPickerPopover checkout resolution panel', () => {
     workspaceGit.mockResolvedValueOnce(status({ unstaged: 2, computedAt: 2 }));
     workspaceGit.mockResolvedValueOnce(status({ unstaged: 2, computedAt: 2 }));
     workspaceGit.mockResolvedValue(status({ branch: 'dev', computedAt: 3 }));
+    const onBranchChanged = vi.fn();
     mountWithBranches(CHECKOUT_BRANCHES, {
       status: status({ unstaged: 2 }),
+      onBranchChanged,
     });
     await flush();
 
@@ -1365,7 +1377,16 @@ describe('BranchPickerPopover checkout resolution panel', () => {
     // response reds the test even though the request was issued.
     workspaceGitBranches.mockResolvedValue({
       ...CHECKOUT_BRANCHES,
-      local: [{ name: 'dev', isHead: true }],
+      local: [
+        {
+          name: 'dev',
+          isHead: true,
+          ahead: 0,
+          behind: 0,
+          commitDate: 0,
+          commitSubject: '',
+        },
+      ],
       head: 'dev',
     });
 
@@ -1381,6 +1402,9 @@ describe('BranchPickerPopover checkout resolution panel', () => {
     expect(workspaceGit.mock.calls.length).toBeGreaterThan(statusReadsBefore);
     expect(footerText()).toContain('No upstream');
     expect(footerText()).not.toContain('uncommitted changes');
+    // The one success path that keeps the picker open still notifies the
+    // owner that the branch changed.
+    expect(onBranchChanged).toHaveBeenCalled();
   });
 
   it('re-reads the listing and status after a failed resolution that kept the entry', async () => {
@@ -1407,7 +1431,16 @@ describe('BranchPickerPopover checkout resolution panel', () => {
     // Only the post-switch listing can produce the 'No upstream' hint.
     workspaceGitBranches.mockResolvedValue({
       ...CHECKOUT_BRANCHES,
-      local: [{ name: 'dev', isHead: true }],
+      local: [
+        {
+          name: 'dev',
+          isHead: true,
+          ahead: 0,
+          behind: 0,
+          commitDate: 0,
+          commitSubject: '',
+        },
+      ],
       head: 'dev',
     });
     clickButton('Stash Changes and Switch');

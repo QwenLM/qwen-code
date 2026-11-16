@@ -90,9 +90,11 @@ tree files would be overwritten by checkout"），但弹层只是把错误字符
   拒绝的切换放弃修改。完成臂清理
   残留并报告 `409 checkout_failed`
   （"switched, but the checkout reported a failure"）。clean 在切换之后
-  执行，因此由目标分支的 ignore 规则决定保留什么；切换成功后 clean
+  执行，因此由目标分支的 ignore 规则决定保留什么。成功路径上 clean
   失败时为 `409 checkout_failed`
-  （"switched, but removing untracked files failed"）。
+  （"switched, but removing untracked files failed"）；hook 拒绝后的
+  完成臂里残留 clean 是尽力而为——其错误被吞掉，让 hook 拒绝保持为
+  被报告的失败，残留可能幸存。
 
 两个选项在 worktree 里停着 merge、cherry-pick、revert、rebase 或 am 时
 都会被拒绝（`409 operation_in_progress`）：破坏性命令会吸收或扰动这些
@@ -135,9 +137,10 @@ pull 面板：弹层每次重新打开时重置；任何真正执行的竞争动
 为点名条目与用户点击的 ref 的常驻警告，并**保持弹层打开**，让警告立即
 绘制——在同一次更新里关闭会隐藏「修改去了哪里」的唯一记录（pull 流程
 出于同样原因保持打开；裸 checkout 保留成功即关闭的契约）。该警告也能在
-重新打开的重置中幸存。携带 `stashSha` 的 `checkout_failed` 响应
-（auto-stash 条目存活）同样渲染为常驻警告而非可消除的错误——此时保留的
-条目是修改的唯一记录。与 pull 流程一致，失败的解决方式会不阻塞地重读
+重新打开的重置中幸存。任何携带 `stashSha` 的失败响应（auto-stash 条目
+存活——保留恢复后的 `checkout_failed`、或 push 之后停放 merge 的
+`operation_in_progress`）都同样渲染为常驻警告而非可消除的错误——此时
+保留的条目是修改的唯一记录。与 pull 流程一致，失败的解决方式会不阻塞地重读
 分支列表与状态。该提示与 pull 流程的一样存在于组件状态中：刷新页面会
 丢失它，条目仍可凭带标签的 subject 从 `git stash list` 找回。
 
@@ -228,11 +231,13 @@ SDK 的 `workspaceGitCheckout`（legacy 与 workspace 限定两个方法）接�
   脏的树（此时由脏变净的见证不可用）；前置探针失败不认证任何切换，
   即使行为者恰好落到请求的目标上；`checkout -f HEAD` 被拒期间并发
   行为者移动 HEAD 时保留编辑与残留（原地目标必须完全未移动）；
+  失败的前置 diff 探针不被信任，而两个 diff 探针都失败但 hook 留下
+  干净树时，由脏变净见证仍承载已完成的原地放弃；
   拒绝的 hook 改写已跟踪文件后仍报告
   已完成切换并清理残留；仅未跟踪脏遇 hook 拒绝经身份见证判定完成；
   原地放弃（当前分支与 `HEAD`）遇拒绝的 hook 重新弄脏已跟踪文件仍
   报告已完成放弃并清理残留；当前分支的触碰前拒绝保留编辑与残留
-  （仅凭脏树认证不了任何事）；失败的前置 diff 探针不被信任；
+  （仅凭脏树认证不了任何事）；
   detached 目标（tag）遇 hook 拒绝报告已完成切换，完整 ref
   （`refs/heads/x`，detached）与 remote-tracking ref（在重映射的本地
   分支上完成）同样如此；完成判定探针运行期间停放的 merge 仍被拒绝；自身 push 为空操作时绝不认领并发请求的
@@ -253,8 +258,9 @@ SDK 的 `workspaceGitCheckout`（legacy 与 workspace 限定两个方法）接�
   `force_unsupported` 时保持面板、在飞 spinner、竞争动作开始时关闭面板、
   stash 成功时保持弹层打开并立即绘制保留 stash 的警告、stash 成功与
   保留条目的失败解决之后一并重读分支列表与树状态（两半各有见证：提示
-  不再报告未提交修改、两个 RPC 计数都增长）、裸 checkout 成功即关闭
-  弹层、该警告（成功与恢复失败）跨重开幸存。
+  不再报告未提交修改、两个 RPC 计数都增长、行列表跟随真正的切换后
+  列表）、保持弹层打开的 stash 成功通知 `onBranchChanged`、裸 checkout
+  成功即关闭弹层、该警告（成功与恢复失败）跨重开幸存。
 - E2E（mock daemon，Playwright，带 `@smoke` 使 PR CI 运行）：两种解决
   方式的完整面板流程、保留条目警告立即可见且跨重开幸存、取消路径。
 

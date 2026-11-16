@@ -116,9 +116,11 @@ They are the two things a user would do in a terminal, and nothing more:
   but never discards for a refused one. The completed
   arm cleans the residue and reports `409 checkout_failed` ("switched,
   but the checkout reported a failure"). The clean runs after the switch,
-  so the target branch's ignore rules decide what is kept; a clean that
-  fails after a successful switch is `409 checkout_failed` ("switched,
-  but removing untracked files failed").
+  so the target branch's ignore rules decide what is kept. On the
+  success path a clean that fails is `409 checkout_failed` ("switched,
+  but removing untracked files failed"); in the completed-after-hook arm
+  the residue clean is best-effort — its error is swallowed so the hook
+  refusal stays the reported failure, and the residue may survive.
 
 Both options are refused (`409 operation_in_progress`) while a merge,
 cherry-pick, revert, rebase or am is parked in the worktree: the
@@ -174,10 +176,11 @@ user clicked, and **keeps the picker open** so the warning is painted
 immediately — closing in the same update would hide the only record of
 where the changes went (the pull flow stays open for the same reason;
 plain checkouts keep the close-on-success contract). The warning also
-survives the reopen reset. A `checkout_failed` response carrying
-`stashSha` (the auto-stash entry survives) renders the same way — a
-standing warning, not a dismissible error — because the kept entry is
-then the only record of the changes. Like the pull flow, a failed
+survives the reopen reset. Any failure response carrying `stashSha`
+(the auto-stash entry survives — a `checkout_failed` after a kept
+restore, or an `operation_in_progress` when a merge parks after the
+push) renders the same way — a standing warning, not a dismissible
+error — because the kept entry is then the only record of the changes. Like the pull flow, a failed
 resolution re-reads the listing and status without awaiting them. The
 notice lives in component state, as the pull flow's does: a reload drops
 it, and the entry remains recoverable from `git stash list` by its
@@ -309,7 +312,9 @@ omission:
   whose refusing hook re-dirties a tracked file still reports the
   completed discard and cleans the residue; a pre-touch refusal of the
   current branch keeps the edit and the residue (the dirty tree alone
-  certifies nothing); a failed before-diff probe is not trusted; a
+  certifies nothing); a failed before-diff probe is not trusted, and
+  when both diff probes fail but the hook leaves the tree clean the
+  dirty→clean witness still carries the completed in-place discard; a
   detached target (tag) whose hook refuses reports
   the completed switch, as does a full ref (`refs/heads/x`, detached) and
   a remote-tracking ref (completed on the remapped local branch); a merge
@@ -339,7 +344,9 @@ omission:
   kept-stash warning immediately on a stash success, re-reads the listing
   and the tree status together after a stash success and after a failed
   resolution that kept the entry (each half witnessed separately: the
-  hints stop reporting uncommitted changes, and both RPC counts grow),
+  hints stop reporting uncommitted changes, both RPC counts grow, and
+  the rows follow a genuinely post-switch listing), notifies
+  `onBranchChanged` on the stash success that keeps the picker open,
   closes the picker on a plain checkout success, and keeps the warning
   (success and failed restore) across a reopen.
 - E2E (mock daemon, Playwright, `@smoke` so PR CI runs them): the full

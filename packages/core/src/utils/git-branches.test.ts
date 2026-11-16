@@ -1668,6 +1668,38 @@ describe('gitCheckout with a dirty working tree', () => {
   );
 
   it.skipIf(process.platform === 'win32')(
+    'force checkout reports the completed in-place discard via the clean-tree witness when the diff probes fail',
+    async () => {
+      const dir = dirtyCheckoutFixture();
+      write(dir, { 'new.txt': 'untracked\n' });
+      installHook(dir, 'post-checkout', 'exit 1');
+      const env = gitShim(hermeticEnv(), [
+        // Both diff probes fail, but the hook leaves the tree clean: the
+        // dirty->clean witness must still carry the completed discard.
+        {
+          match: '"diff HEAD"*',
+          script: 'echo "error: diff probe failure" >&2; exit 1',
+        },
+      ]);
+
+      const failure = await checkoutFails(
+        dir,
+        'master',
+        { force: true },
+        'checkout_failed',
+        env,
+      );
+
+      expect(failure.message).toContain(
+        'switched, but the checkout reported a failure',
+      );
+      expect(currentBranch(dir)).toBe('master');
+      expect(read(dir, 'a.txt')).toBe('one\n');
+      expect(has(dir, 'new.txt')).toBe(false);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
     'force checkout of the current branch keeps everything when git refuses before touching',
     async () => {
       const dir = dirtyCheckoutFixture();
