@@ -350,28 +350,92 @@ function createOutboundGuardedConnection(
   });
 }
 
+interface PromptDispatch {
+  signal?: AbortSignal;
+  assertCanWrite(): void;
+  onWriteStarted(): void;
+  onWritten(): void;
+}
+
 const pendingPromptWrites = new WeakMap<
   object,
-  { onDispatched: () => void; reject: (error: unknown) => void }
+  PromptDispatch & { reject: (error: unknown) => void }
 >();
 
 export function forwardPrompt(
   connection: ClientSideConnection,
   request: PromptRequest,
-  onDispatched?: () => void,
+  dispatch?: PromptDispatch,
 ): Promise<PromptResponse> {
-  if (!onDispatched) return connection.prompt(request);
+  if (!dispatch) return connection.prompt(request);
+  const { signal } = dispatch;
+  if (signal?.aborted) return Promise.reject(signal.reason);
+
+  let rejectWrite!: (error: unknown) => void;
   const writeFailure = new Promise<never>((_, reject) => {
-    pendingPromptWrites.set(request, { onDispatched, reject });
+    rejectWrite = reject;
   });
-  return Promise.race([connection.prompt(request), writeFailure]).finally(() =>
-    pendingPromptWrites.delete(request),
-  );
+  const onAbort = () => rejectWrite(signal?.reason);
+  const detachAbortListener = () =>
+    signal?.removeEventListener('abort', onAbort);
+  pendingPromptWrites.set(request, {
+    ...dispatch,
+    onWritten() {
+      detachAbortListener();
+      if (!signal?.aborted) dispatch.onWritten();
+    },
+    reject: rejectWrite,
+  });
+  signal?.addEventListener('abort', onAbort, { once: true });
+  // Retain the fence until the SDK's own operation settles, even if the
+  // caller stops waiting while the request is still in the SDK's write queue.
+  const prompt = connection.prompt(request).finally(() => {
+    pendingPromptWrites.delete(request);
+  });
+  return Promise.race([prompt, writeFailure]).finally(detachAbortListener);
 }
 
+type AcpMessage =
+  Stream['readable'] extends ReadableStream<infer Message> ? Message : never;
+
 function observePromptWrites(stream: Stream): Stream {
+  const reader = stream.readable.getReader();
+  let inbound: ReadableStreamDefaultController<AcpMessage> | undefined;
   return {
-    readable: stream.readable,
+    readable: new ReadableStream<AcpMessage>(
+      {
+        start(controller) {
+          inbound = controller;
+        },
+        async pull(controller) {
+          try {
+            const read = await reader.read();
+            if (!inbound) return;
+            if (read.done) {
+              inbound = undefined;
+              controller.close();
+            } else {
+              controller.enqueue(read.value);
+            }
+          } catch (error) {
+            if (!inbound) return;
+            inbound = undefined;
+            controller.error(error);
+          } finally {
+            if (!inbound) reader.releaseLock();
+          }
+        },
+        async cancel(reason) {
+          inbound = undefined;
+          try {
+            await reader.cancel(reason);
+          } finally {
+            reader.releaseLock();
+          }
+        },
+      },
+      { highWaterMark: 0 },
+    ),
     writable: new WritableStream({
       async write(message) {
         // The ACP SDK retains the prompt request object as JSON-RPC params.
@@ -380,9 +444,27 @@ function observePromptWrites(stream: Stream): Stream {
           typeof params === 'object' && params !== null
             ? pendingPromptWrites.get(params)
             : undefined;
+        if (observer && 'id' in message) {
+          try {
+            observer.signal?.throwIfAborted();
+            observer.assertCanWrite();
+          } catch (error) {
+            observer.reject(error);
+            // Retire the SDK's pending response without sending a frame to
+            // ACP. A fulfilled response avoids an SDK rejection while it
+            // still awaits completion of its queued write.
+            inbound?.enqueue({
+              jsonrpc: '2.0',
+              id: message.id,
+              result: { stopReason: 'cancelled' },
+            });
+            return;
+          }
+        }
         try {
           const writer = stream.writable.getWriter();
           try {
+            observer?.onWriteStarted();
             await writer.write(message);
           } finally {
             writer.releaseLock();
@@ -391,7 +473,7 @@ function observePromptWrites(stream: Stream): Stream {
           observer?.reject(error);
           throw error;
         }
-        observer?.onDispatched();
+        observer?.onWritten();
       },
       close: () => stream.writable.close(),
       abort: (reason) => stream.writable.abort(reason),

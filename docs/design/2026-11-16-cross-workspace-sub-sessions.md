@@ -56,8 +56,10 @@ workspace id of a workspace registered with this daemon. Absent means the
 caller's workspace, which is today's behavior.
 
 `first-turn` waits for the first turn and returns its text. A named `sent`
-call returns once the bridge dispatches the prompt. A refusal before dispatch
-is returned directly. Cross-workspace `sent` also requires chat recording in
+call returns once the bridge writes the prompt to ACP. A refusal before
+dispatch or a 30-second dispatch timeout is returned directly. If the write
+has already begun when it times out, the tool reports that the child may have
+received the prompt. Cross-workspace `sent` also requires chat recording in
 the caller. The caller gets a task notification with the result when the turn
 finishes, or a cancellation if the target runtime stops while the caller is
 still active. The tool result and the notification
@@ -93,7 +95,7 @@ because this path drives one workspace from another. An unknown or untrusted
 target is refused, and the error lists the workspaces that can be named so
 the model can correct itself. After asynchronous startup, the launcher
 rechecks both runtime generations and both sessions' approval revisions
-before dispatch. The target also checks its live mode when it admits the
+when the prompt reaches the ACP write queue's head. The target also checks its live mode when it admits the
 prompt. A mode change invalidates the pending dispatch so the caller can
 retry under the new mode.
 

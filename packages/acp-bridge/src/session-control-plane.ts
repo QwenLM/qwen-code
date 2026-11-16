@@ -11533,6 +11533,8 @@ export function createSessionControlPlane(
       // checks `signal.aborted` only AFTER reaching the head — wasted
       // queue churn on every retry-after-abort, plus a confusing trace
       // where the prompt appears to "run" before erroring.
+      const dispatchSignal = context?.dispatchSignal;
+      dispatchSignal?.throwIfAborted();
       if (signal?.aborted) {
         throw new DOMException('Prompt aborted', 'AbortError');
       }
@@ -11732,6 +11734,7 @@ export function createSessionControlPlane(
           // Check abort BEFORE promoting state — if `removePendingPrompt`
           // already aborted this entry, skip the running transition and
           // the `pending_prompt_started` event entirely.
+          dispatchSignal?.throwIfAborted();
           if (pendingAbort.signal.aborted) {
             // A deadline that expired while this prompt was still queued
             // aborted with the typed error; surface it to the caller so
@@ -11960,6 +11963,7 @@ export function createSessionControlPlane(
                 // Resolving attachments can yield; a quarantine that began
                 // meanwhile still refuses the prompt before it is sent.
                 assertChannelAdmitsPrompts(entry);
+                dispatchSignal?.throwIfAborted();
                 context?.assertCanDispatch?.();
                 entry.events.setEventDetailMode(eventDetailMode);
                 entry.backgroundStartsSuspended = false;
@@ -12036,22 +12040,54 @@ export function createSessionControlPlane(
                   settleActivePromptState(entry, pendingEntry.promptId);
                   throw echoErr;
                 }
-                pendingEntry.dispatched = true;
                 const precedingBackgroundTurnId = entry.backgroundTurn?.turnId;
+                const onWriteStarted = context?.onPromptWriteStarted;
                 const onDispatched = context?.onPromptDispatched;
+                const guardedDispatch =
+                  context?.assertCanDispatch !== undefined ||
+                  dispatchSignal !== undefined ||
+                  onWriteStarted !== undefined ||
+                  onDispatched !== undefined;
+                const notifyDispatchObserver = (observer?: () => void) => {
+                  try {
+                    observer?.();
+                  } catch (error) {
+                    opts.onDiagnosticLine?.(
+                      `qwen serve: prompt dispatch observer failed for session=${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+                      'warn',
+                    );
+                  }
+                };
+                if (!guardedDispatch) pendingEntry.dispatched = true;
                 const promptPromise = forwardPrompt(
                   entry.connection,
                   promptRequest,
-                  onDispatched
-                    ? () => {
-                        try {
-                          onDispatched();
-                        } catch (error) {
-                          opts.onDiagnosticLine?.(
-                            `qwen serve: prompt dispatch observer failed for session=${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
-                            'warn',
-                          );
-                        }
+                  guardedDispatch
+                    ? {
+                        signal: dispatchSignal,
+                        assertCanWrite() {
+                          if (pendingAbort.signal.aborted) {
+                            throw new DOMException(
+                              'Prompt aborted',
+                              'AbortError',
+                            );
+                          }
+                          if (
+                            byId.get(sessionId) !== entry ||
+                            isClosingOrAuthorizingClose(entry)
+                          ) {
+                            throw new SessionNotFoundError(sessionId);
+                          }
+                          assertChannelAdmitsPrompts(entry);
+                          context?.assertCanDispatch?.();
+                        },
+                        onWriteStarted() {
+                          pendingEntry.dispatched = true;
+                          notifyDispatchObserver(onWriteStarted);
+                        },
+                        onWritten() {
+                          notifyDispatchObserver(onDispatched);
+                        },
                       }
                     : undefined,
                 )
@@ -12166,7 +12202,10 @@ export function createSessionControlPlane(
                     originatorClientId,
                   );
                   permissionMediator.cancelForTurnCancel(sessionId);
-                  if (byId.get(sessionId) === entry) {
+                  if (
+                    pendingEntry.dispatched &&
+                    byId.get(sessionId) === entry
+                  ) {
                     void forwardRunningPromptCancel(entry, pendingEntry, {
                       sessionId,
                       _meta: {

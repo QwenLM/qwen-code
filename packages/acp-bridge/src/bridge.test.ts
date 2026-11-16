@@ -19751,6 +19751,8 @@ describe('createAcpSessionBridge', () => {
           return bridge.shutdown();
         });
         const admitted = vi.fn();
+        const writeStarted = vi.fn();
+        const dispatchAbort = new AbortController();
         const forwarded = deferred<void>();
         const dispatched = vi.fn(() => forwarded.resolve());
 
@@ -19776,23 +19778,147 @@ describe('createAcpSessionBridge', () => {
             prompt: [{ type: 'text', text: 'admitted' }],
           },
           undefined,
-          { onPromptAdmitted: admitted, onPromptDispatched: dispatched },
+          {
+            onPromptAdmitted: admitted,
+            dispatchSignal: dispatchAbort.signal,
+            onPromptWriteStarted: writeStarted,
+            onPromptDispatched: dispatched,
+          },
         );
         expect(admitted).toHaveBeenCalledOnce();
         await writing.promise;
+        expect(writeStarted).toHaveBeenCalledOnce();
         expect(dispatched).not.toHaveBeenCalled();
 
         if (writeOutcome === 'accepts') {
           writeGate.resolve();
           await forwarded.promise;
           expect(dispatched).toHaveBeenCalledOnce();
+          expect(getEventListeners(dispatchAbort.signal, 'abort')).toEqual([]);
+          dispatchAbort.abort();
           response.resolve({ stopReason: 'end_turn' });
           await expect(turn).resolves.toMatchObject({ stopReason: 'end_turn' });
         } else {
           writeGate.reject(new Error('ACP transport write failed'));
           await expect(turn).rejects.toThrow('ACP transport write failed');
           expect(dispatched).not.toHaveBeenCalled();
+          expect(getEventListeners(dispatchAbort.signal, 'abort')).toEqual([]);
         }
+      },
+    );
+
+    it.each(['authorization change', 'dispatch cancellation'] as const)(
+      'skips a fenced ACP write on %s and releases the outbound reservation',
+      async (failure) => {
+        const { channel, agent } = makeChannel();
+        const writing = deferred<void>();
+        const releaseWrite = deferred<void>();
+        const transport = channel.stream.writable;
+        let paused = false;
+        channel.stream.writable = new WritableStream({
+          async write(message) {
+            if (
+              !paused &&
+              'method' in message &&
+              message.method === AGENT_METHODS.session_prompt
+            ) {
+              paused = true;
+              writing.resolve();
+              await releaseWrite.promise;
+            }
+            const writer = transport.getWriter();
+            try {
+              await writer.write(message);
+            } finally {
+              writer.releaseLock();
+            }
+          },
+        });
+        const reserved = vi.fn();
+        const released = vi.fn();
+        const reserveOutboundOperation = vi.fn<(args: unknown) => () => void>(
+          () => () => {},
+        );
+        channel.transportGuard = {
+          maxActiveHandlers: 8,
+          maxActiveHandlerBytes: 8192,
+          reserveOutboundOperation,
+          reservePreparedResponse: vi.fn(),
+          fail: vi.fn(),
+        };
+        const bridge = makeBridge({
+          channelFactory: async () => channel,
+          sessionScope: 'thread',
+        });
+        onTestFinished(() => {
+          releaseWrite.resolve();
+          return bridge.shutdown();
+        });
+        const { sessionId: blockerId } = await bridge.spawnOrAttach({
+          workspaceCwd: WS_A,
+          sessionScope: 'thread',
+        });
+        const { sessionId: guardedId } = await bridge.spawnOrAttach({
+          workspaceCwd: WS_A,
+          sessionScope: 'thread',
+        });
+        reserveOutboundOperation.mockImplementation((args) => {
+          const params: unknown = Array.isArray(args) ? args[0] : undefined;
+          if (
+            typeof params === 'object' &&
+            params !== null &&
+            'sessionId' in params &&
+            params.sessionId === guardedId &&
+            'prompt' in params
+          ) {
+            reserved();
+            return released;
+          }
+          return () => {};
+        });
+        const prompt = (sessionId: string) => ({
+          sessionId,
+          prompt: [{ type: 'text' as const, text: 'hello' }],
+        });
+        const blocker = bridge.sendPrompt(blockerId, prompt(blockerId));
+        await writing.promise;
+
+        let authorized = true;
+        const refusal = new Error(failure);
+        const dispatchAbort = new AbortController();
+        const writeStarted = vi.fn();
+        const guarded = bridge.sendPrompt(
+          guardedId,
+          prompt(guardedId),
+          undefined,
+          {
+            assertCanDispatch() {
+              if (!authorized) throw refusal;
+            },
+            dispatchSignal: dispatchAbort.signal,
+            onPromptWriteStarted: writeStarted,
+          },
+        );
+        const result = guarded.catch((error: unknown) => error);
+        await vi.waitFor(() => expect(reserved).toHaveBeenCalledOnce());
+        if (failure === 'dispatch cancellation') {
+          dispatchAbort.abort(refusal);
+          await expect(result).resolves.toBe(refusal);
+          expect(released).not.toHaveBeenCalled();
+        } else {
+          authorized = false;
+        }
+        releaseWrite.resolve();
+        await expect(result).resolves.toBe(refusal);
+        await blocker;
+        await vi.waitFor(() => expect(released).toHaveBeenCalledOnce());
+        expect(writeStarted).not.toHaveBeenCalled();
+        expect(agent.promptCalls.map((call) => call.sessionId)).toEqual([
+          blockerId,
+        ]);
+        await expect(
+          bridge.sendPrompt(guardedId, prompt(guardedId)),
+        ).resolves.toMatchObject({ stopReason: 'end_turn' });
       },
     );
 

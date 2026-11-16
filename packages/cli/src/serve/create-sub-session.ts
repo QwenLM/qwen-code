@@ -117,6 +117,8 @@ export const MAX_CONCURRENT_SUB_SESSIONS_TOTAL = 24;
  * the caller forever. On timeout we return whatever text accumulated so far. */
 const FIRST_TURN_TIMEOUT_MS = 5 * 60_000;
 
+const SENT_MODE_DISPATCH_TIMEOUT_MS = 30_000;
+
 /** Wall-clock ceiling for the sent-mode background drain. Generous enough for
  * long-running sub-sessions but prevents a hung turn from permanently consuming
  * a concurrency slot (the idle reaper may not fire if the sub-session is still
@@ -212,6 +214,8 @@ export interface CreateSubSessionLauncherOptions {
   /** Sent-mode background-drain ceiling; defaults to
    * {@link SENT_MODE_DRAIN_TIMEOUT_MS}. Exposed for tests. */
   sentModeDrainTimeoutMs?: number;
+  /** Named sent-mode dispatch ceiling. Exposed for tests. */
+  sentModeDispatchTimeoutMs?: number;
   /** Per-caller concurrency cap; defaults to
    * {@link MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER}. */
   maxConcurrentPerCaller?: number;
@@ -914,6 +918,8 @@ export function createSubSessionLauncher(
     isTrusted,
   } = opts;
   const firstTurnTimeoutMs = opts.firstTurnTimeoutMs ?? FIRST_TURN_TIMEOUT_MS;
+  const sentModeDispatchTimeoutMs =
+    opts.sentModeDispatchTimeoutMs ?? SENT_MODE_DISPATCH_TIMEOUT_MS;
   const sentModeDrainTimeoutMs =
     opts.sentModeDrainTimeoutMs ?? SENT_MODE_DRAIN_TIMEOUT_MS;
   const maxConcurrentPerCaller =
@@ -956,6 +962,78 @@ export function createSubSessionLauncher(
       const oldest = spawnedSessionIds.values().next().value;
       if (oldest === undefined) break;
       spawnedSessionIds.delete(oldest);
+    }
+  };
+
+  const rollbackChildSession = async (
+    bridge: AcpSessionBridge,
+    sessionId: string,
+    opts: { removeUnusedTranscript: boolean; conditionalClose: boolean },
+  ): Promise<void> => {
+    let sessionClosed = false;
+    let closeTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        bridge.closeSession(sessionId, undefined, {
+          reason: 'sub_session_rollback',
+          ...(opts.conditionalClose
+            ? { closeIfUnheld: true }
+            : { agentCloseTimeoutMs: ACTIVE_WORK_CLOSE_TIMEOUT_MS }),
+        }),
+        new Promise<never>((_, reject) => {
+          closeTimer = setTimeout(
+            () =>
+              reject(
+                new Error(
+                  `Timed out closing rolled-back sub-session ${sessionId}`,
+                ),
+              ),
+            ACTIVE_WORK_CLOSE_TIMEOUT_MS + ROLLBACK_CLOSE_WATCHDOG_SLACK_MS,
+          );
+          closeTimer.unref();
+        }),
+      ]);
+      sessionClosed = !opts.conditionalClose;
+    } catch (error) {
+      sessionClosed =
+        error instanceof SessionNotFoundError &&
+        error.code === 'session_not_found';
+      log.debug('sub-session: closeSession threw', sessionId, error);
+    } finally {
+      clearTimeout(closeTimer);
+    }
+    if (!sessionClosed && !opts.conditionalClose) {
+      try {
+        await bridge.killSession(sessionId, {
+          requireZeroAttaches: true,
+        });
+      } catch (error) {
+        log.debug('sub-session: killSession threw', sessionId, error);
+      }
+    }
+    if (!sessionClosed && opts.removeUnusedTranscript) {
+      try {
+        bridge.getSessionSummary(sessionId);
+      } catch (error) {
+        sessionClosed =
+          error instanceof SessionNotFoundError &&
+          error.code === 'session_not_found';
+      }
+    }
+    if (sessionClosed && opts.removeUnusedTranscript) {
+      try {
+        const removeTranscript = () =>
+          new SessionService(boundWorkspace).removeSession(sessionId);
+        const transcriptRemoved = runtimeBaseDir
+          ? await Storage.runWithResolvedRuntimeBaseDir(
+              runtimeBaseDir,
+              removeTranscript,
+            )
+          : await removeTranscript();
+        if (transcriptRemoved) bridge.markSessionCatalogChanged();
+      } catch (error) {
+        log.debug('sub-session: transcript cleanup failed', sessionId, error);
+      }
     }
   };
 
@@ -1038,10 +1116,12 @@ export function createSubSessionLauncher(
     let spawnedSession: BridgeSession | undefined;
     let promptAdmitted = false;
     let promptDispatched = false;
+    let promptWriteStarted = false;
+    let queuedTurn: ReturnType<AcpSessionBridge['sendPrompt']> | undefined;
     let onPromptDispatched: (() => void) | undefined;
+    const named = remote !== undefined || assertLocalCurrent !== undefined;
     const dispatch =
-      info.completion === 'sent' &&
-      (remote !== undefined || assertLocalCurrent !== undefined)
+      info.completion === 'sent' && named
         ? new Promise<void>((resolve) => {
             onPromptDispatched = () => {
               promptDispatched = true;
@@ -1049,6 +1129,10 @@ export function createSubSessionLauncher(
             };
           })
         : undefined;
+    const dispatchAbort = dispatch ? new AbortController() : undefined;
+    const dispatchSignal = dispatchAbort
+      ? AbortSignal.any([stopAc.signal, dispatchAbort.signal])
+      : undefined;
 
     try {
       const promptId = randomUUID();
@@ -1187,15 +1271,24 @@ export function createSubSessionLauncher(
             sessionId,
             prompt: [{ type: 'text', text: info.prompt }],
           } as Parameters<AcpSessionBridge['sendPrompt']>[1],
-          remote || dispatch ? stopAc.signal : undefined,
+          dispatchSignal ?? (remote ? stopAc.signal : undefined),
           {
             promptId,
             onPromptAdmitted,
             onPromptDispatched,
+            dispatchSignal,
+            ...(named
+              ? {
+                  onPromptWriteStarted: () => {
+                    promptWriteStarted = true;
+                  },
+                }
+              : {}),
             assertCanDispatch: assertLocalCurrent,
             ...dispatchApproval,
           },
         );
+        queuedTurn = turn;
       }
 
       // The result comes from the event stream (turn_error surfaces failures);
@@ -1205,10 +1298,27 @@ export function createSubSessionLauncher(
         log.debug('sub-session: sendPrompt rejected', sessionId, String(err));
       });
 
-      if (dispatch) {
-        await Promise.race([dispatch, turn]);
-        if (!promptDispatched) {
-          throw new Error('The sub-session prompt was not dispatched.');
+      if (dispatch && dispatchAbort) {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const deadline = new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            const error = new Error(
+              promptWriteStarted
+                ? `Sub-session prompt dispatch timed out. Session ${sessionId} may have received the prompt.`
+                : 'Sub-session prompt dispatch timed out.',
+            );
+            reject(error);
+            dispatchAbort.abort(error);
+          }, sentModeDispatchTimeoutMs);
+          timer.unref();
+        });
+        try {
+          await Promise.race([dispatch, turn, deadline]);
+          if (!promptDispatched) {
+            throw new Error('The sub-session prompt was not dispatched.');
+          }
+        } finally {
+          clearTimeout(timer);
         }
       }
 
@@ -1403,6 +1513,7 @@ export function createSubSessionLauncher(
     } catch (err) {
       // Spawn/admission/dispatch failure — surface it as the tool's error.
       releaseOnce();
+      remote?.releaseCompletionSlot?.();
       // If the spawn succeeded but a later step failed (e.g. sendPrompt threw
       // synchronously), roll back the orphaned session so it doesn't leak a slot
       // in the bridge's session pool while this launch reports failure.
@@ -1457,65 +1568,21 @@ export function createSubSessionLauncher(
           }
         }
       } else if (spawnedSession !== undefined && !standalone) {
-        // Cleanup failures must not replace `err`, the real launch failure.
         const sessionId = spawnedSession.sessionId;
-        let sessionClosed = false;
-        let closeTimer: ReturnType<typeof setTimeout> | undefined;
-        try {
-          await Promise.race([
-            bridge.closeSession(sessionId, undefined, {
-              reason: 'sub_session_rollback',
-              agentCloseTimeoutMs: ACTIVE_WORK_CLOSE_TIMEOUT_MS,
-            }),
-            new Promise<never>((_, reject) => {
-              closeTimer = setTimeout(
-                () =>
-                  reject(
-                    new Error(
-                      `Timed out closing rolled-back sub-session ${sessionId}`,
-                    ),
-                  ),
-                ACTIVE_WORK_CLOSE_TIMEOUT_MS + ROLLBACK_CLOSE_WATCHDOG_SLACK_MS,
-              );
-              if (typeof closeTimer.unref === 'function') closeTimer.unref();
-            }),
-          ]);
-          sessionClosed = true;
-        } catch (closeErr) {
-          log.debug('sub-session: closeSession threw', sessionId, closeErr);
-        } finally {
-          if (closeTimer !== undefined) clearTimeout(closeTimer);
-        }
-        if (!sessionClosed) {
-          // The watchdog won, so the abandoned close may never settle: force
-          // the session down before deciding its transcript's fate — the same
-          // killSession fallback the isolated rollback branch uses.
-          try {
-            sessionClosed = await bridge.killSession(sessionId, {
-              requireZeroAttaches: true,
-            });
-          } catch (killErr) {
-            log.debug('sub-session: killSession threw', sessionId, killErr);
-          }
-        }
-        if (sessionClosed && !(dispatch ? promptDispatched : promptAdmitted)) {
-          try {
-            const removeTranscript = () =>
-              new SessionService(boundWorkspace).removeSession(sessionId);
-            const transcriptRemoved = runtimeBaseDir
-              ? await Storage.runWithResolvedRuntimeBaseDir(
-                  runtimeBaseDir,
-                  removeTranscript,
-                )
-              : await removeTranscript();
-            if (transcriptRemoved) bridge.markSessionCatalogChanged();
-          } catch (cleanupError) {
-            log.debug(
-              'sub-session: transcript cleanup failed',
-              sessionId,
-              cleanupError,
-            );
-          }
+        const timedOut = dispatchAbort?.signal.aborted === true;
+        const removeUnusedTranscript = named
+          ? !promptWriteStarted && !promptDispatched
+          : !promptAdmitted;
+        const rollback = () =>
+          rollbackChildSession(bridge, sessionId, {
+            removeUnusedTranscript,
+            conditionalClose: timedOut,
+          });
+        if (!timedOut) {
+          await rollback();
+        } else if (removeUnusedTranscript && queuedTurn) {
+          // Let the cancelled turn drop its queue slot before the idle close.
+          void queuedTurn.then(rollback, rollback);
         }
       }
       writeStderrLine(

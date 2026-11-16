@@ -80,7 +80,7 @@ function makeFakeBridge(opts?: {
   /** How the orphan-cleanup `closeSession` fails, if at all. A real bridge can
    * throw synchronously (e.g. an unknown session id hits an assertion before
    * the first await), which must not clobber the launch error. */
-  closeSessionFails?: 'sync' | 'async';
+  closeSessionFails?: 'sync' | 'async' | 'not-found';
   closeSessionHangs?: boolean;
   /** Accepted acknowledgements returned by successive completion deliveries. */
   notificationAcks?: boolean[];
@@ -96,6 +96,7 @@ function makeFakeBridge(opts?: {
   beforeQueuedDispatch?: () => Promise<void>;
   beforePromptDispatch?: () => void;
 }) {
+  const closedSessions = new Set<string>();
   const spawns: Array<{
     workspaceCwd: string;
     sessionScope?: string;
@@ -184,11 +185,15 @@ function makeFakeBridge(opts?: {
       changeApprovalMode(sessionId, mode);
       return { sessionId, mode, previous: 'auto', persisted: false };
     },
-    getSessionSummary: (sessionId: string) => ({
-      sessionId,
-      parentSessionId: opts?.restoredCallerParents?.[sessionId],
-      sourceType: opts?.callerSourceTypes?.[sessionId],
-    }),
+    getSessionSummary: (sessionId: string) => {
+      if (closedSessions.has(sessionId))
+        throw new SessionNotFoundError(sessionId);
+      return {
+        sessionId,
+        parentSessionId: opts?.restoredCallerParents?.[sessionId],
+        sourceType: opts?.callerSourceTypes?.[sessionId],
+      };
+    },
     spawnOrAttach: async (req: {
       workspaceCwd: string;
       sessionScope?: 'single' | 'thread';
@@ -263,7 +268,9 @@ function makeFakeBridge(opts?: {
     killSession: async (sessionId: string) => {
       operations.push(`kill:${sessionId}`);
       kills.push(sessionId);
-      return opts?.killSessionResult ?? true;
+      const killed = opts?.killSessionResult ?? true;
+      if (killed) closedSessions.add(sessionId);
+      return killed;
     },
     // Present so a rollback mark cannot fail silently inside its swallowing
     // catch — the production bridge always implements it.
@@ -280,6 +287,8 @@ function makeFakeBridge(opts?: {
         promptId?: string;
         onPromptAdmitted?: () => void;
         onPromptDispatched?: () => void;
+        onPromptWriteStarted?: () => void;
+        dispatchSignal?: AbortSignal;
         assertCanDispatch?: () => void;
         expectedApprovalMode?: ApprovalMode;
       },
@@ -287,7 +296,9 @@ function makeFakeBridge(opts?: {
       capturedPromptId = ctx?.promptId ?? '';
       const dispatch = () => {
         opts?.beforePromptDispatch?.();
+        ctx?.dispatchSignal?.throwIfAborted();
         ctx?.assertCanDispatch?.();
+        ctx?.onPromptWriteStarted?.();
         prompts.push({
           sessionId,
           promptId: ctx?.promptId ?? '',
@@ -316,6 +327,10 @@ function makeFakeBridge(opts?: {
       }
       if (opts?.closeSessionFails === 'async') {
         return Promise.reject(new Error('closeSession rejected'));
+      }
+      closedSessions.add(sessionId);
+      if (opts?.closeSessionFails === 'not-found') {
+        throw new SessionNotFoundError(sessionId);
       }
       return Promise.resolve();
     },
@@ -2262,6 +2277,8 @@ describe('sub-sessions in another workspace', () => {
     canAcceptBackgroundNotifications?: boolean;
     sourceCap?: number;
     targetCap?: number;
+    sentModeDispatchTimeoutMs?: number;
+    closeSessionFails?: 'not-found';
   }) {
     const a = makeFakeBridge({
       beforeQueuedDispatch: opts?.beforeQueuedDispatch,
@@ -2286,11 +2303,13 @@ describe('sub-sessions in another workspace', () => {
       beforeModeChange: opts?.beforeModeChange,
       beforeQueuedDispatch: opts?.beforeQueuedDispatch,
       beforePromptDispatch: opts?.beforePromptDispatch,
+      closeSessionFails: opts?.closeSessionFails,
     });
     const launcherB = createSubSessionLauncher({
       getBridge: () => b.bridge,
       boundWorkspace: WS_B,
       maxConcurrentTotal: opts?.targetCap,
+      sentModeDispatchTimeoutMs: opts?.sentModeDispatchTimeoutMs,
     });
     let targetActive = true;
     const assertTargetCurrent = () => {
@@ -2514,6 +2533,102 @@ describe('sub-sessions in another workspace', () => {
       await expect(launcherA.launch(input)).resolves.toMatchObject({
         sessionId: 'sub-2',
       });
+    } finally {
+      removeSession.mockRestore();
+    }
+  });
+
+  it('times out before a queued sent prompt writes and releases both caps', async () => {
+    let resume!: () => void;
+    const held = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    try {
+      const { b, launcherA } = twoWorkspaces({
+        sourceCap: 1,
+        targetCap: 1,
+        sentModeDispatchTimeoutMs: 25,
+        beforeQueuedDispatch: vi
+          .fn<() => Promise<void>>()
+          .mockReturnValueOnce(held)
+          .mockResolvedValue(undefined),
+      });
+      const input = {
+        prompt: 'p',
+        completion: 'sent' as const,
+        workspace: WS_B,
+        workspaceGeneration: 'generation-b',
+        callerSessionId: 'caller',
+      };
+      await expect(launcherA.launch(input)).rejects.toThrow(
+        'dispatch timed out',
+      );
+      expect(b.prompts).toEqual([]);
+      await expect(launcherA.launch(input)).resolves.toMatchObject({
+        sessionId: 'sub-2',
+      });
+      resume();
+      await vi.waitFor(() =>
+        expect(removeSession).toHaveBeenCalledWith('sub-1'),
+      );
+      expect(b.prompts.map(({ sessionId }) => sessionId)).toEqual(['sub-2']);
+    } finally {
+      resume();
+      removeSession.mockRestore();
+    }
+  });
+
+  it('preserves the child when a timed-out write may have reached ACP', async () => {
+    const { b, launcherA } = twoWorkspaces({ sentModeDispatchTimeoutMs: 25 });
+    vi.spyOn(b.bridge, 'sendPrompt').mockImplementationOnce(
+      (_id, _request, _signal, context) => {
+        context?.onPromptAdmitted?.();
+        context?.onPromptWriteStarted?.();
+        return new Promise(() => {});
+      },
+    );
+    const removeSession = vi.spyOn(SessionService.prototype, 'removeSession');
+    try {
+      await expect(
+        launcherA.launch({
+          prompt: 'p',
+          completion: 'sent',
+          workspace: WS_B,
+          workspaceGeneration: 'generation-b',
+          callerSessionId: 'caller',
+        }),
+      ).rejects.toThrow('Session sub-1 may have received the prompt');
+      expect(b.closes).toEqual([]);
+      expect(removeSession).not.toHaveBeenCalled();
+    } finally {
+      removeSession.mockRestore();
+    }
+  });
+
+  it('removes an unused transcript when the ACP session has already exited', async () => {
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    try {
+      const { b, launcherA } = twoWorkspaces({
+        beforeQueuedDispatch: () => Promise.reject(new Error('ACP exited')),
+        closeSessionFails: 'not-found',
+      });
+      await expect(
+        launcherA.launch({
+          prompt: 'p',
+          completion: 'sent',
+          workspace: WS_B,
+          workspaceGeneration: 'generation-b',
+          callerSessionId: 'caller',
+        }),
+      ).rejects.toThrow('ACP exited');
+      expect(b.kills).toEqual([]);
+      expect(removeSession).toHaveBeenCalledWith('sub-1');
+      expect(b.bridge.markSessionCatalogChanged).toHaveBeenCalledOnce();
     } finally {
       removeSession.mockRestore();
     }

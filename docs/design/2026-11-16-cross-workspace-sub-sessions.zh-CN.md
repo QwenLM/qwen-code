@@ -32,7 +32,7 @@
 
 `create_sub_session` 新增可选参数 `workspace`：本 daemon 已注册 workspace 的绝对路径或 workspace id。不填时使用调用方的 workspace，即现有行为。
 
-`first-turn` 等待第一轮结束并返回文本。指定 workspace 的 `sent` 调用在 bridge 派发 prompt 后返回，派发前的拒绝会直接返回。跨 workspace 的 `sent` 还要求调用方开启聊天记录。任务结束时，调用方会收到结果通知。如果目标 runtime 停止而调用方仍然活跃，调用方会收到取消通知。工具结果和通知都提供目标 workspace 的子会话链接。确认后，指向调用方自身 workspace 的选择器沿用同 runtime 的执行和完成路径。
+`first-turn` 等待第一轮结束并返回文本。指定 workspace 的 `sent` 调用在 bridge 将 prompt 写入 ACP 后返回。派发前的拒绝或 30 秒派发超时会直接返回。如果超时时已开始写入，工具会提示子会话可能已收到 prompt。跨 workspace 的 `sent` 还要求调用方开启聊天记录。任务结束时，调用方会收到结果通知。如果目标 runtime 停止而调用方仍然活跃，调用方会收到取消通知。工具结果和通知都提供目标 workspace 的子会话链接。确认后，指向调用方自身 workspace 的选择器沿用同 runtime 的执行和完成路径。
 
 每次指定 workspace 的调用都要求用户在调用会话中单次确认。daemon 在确认前解析选择器，确认内容显示已注册 workspace 的路径和完整 prompt。批准绑定到当时的 runtime generation。如果启动时选择器解析到另一个 runtime，调用方须重新请求批准。拒绝规则适用于原始选择器、已注册路径和 workspace ID。已有永久授权继续适用于省略选择器的调用。
 
@@ -40,7 +40,7 @@
 
 工具在请求批准前通过 `qwen/control/resolve-sub-session-workspace` 解析目标。批准后的启动请求依次经过工具、会话的派发器、`qwen/control/create-sub-session` ext 方法和调用方启动器。各启动器按 runtime generation 注册到 daemon。调用方的启动器检查深度、调用方信任状态，以及调用方是否属于 standalone 或 Live。目标启动器在自己的 bridge 上新建会话、发送 prompt 和等待结果，并应用自己的并发上限和回滚逻辑。完成通知通过调用方的 bridge 投递。
 
-目标从注册表的公开列表中解析。内部 runtime 和 Live conversation runtime 无法被指名。两个 workspace 都必须受信，包括主 workspace。未知或不受信的目标会被拒绝，错误信息会列出可以指名的 workspace。启动器在派发前复核两边的 runtime generation 和会话审批版本。目标接收 prompt 时也核对实际审批模式。如果模式变更，待派发请求失效，调用方可在新模式下重试。
+目标从注册表的公开列表中解析。内部 runtime 和 Live conversation runtime 无法被指名。两个 workspace 都必须受信，包括主 workspace。未知或不受信的目标会被拒绝，错误信息会列出可以指名的 workspace。prompt 到达 ACP 写队列队首时，启动器复核两边的 runtime generation 和会话审批版本。目标接收 prompt 时也核对实际审批模式。如果模式变更，待派发请求失效，调用方可在新模式下重试。
 
 standalone 和 Live 调用方不能指定 workspace。它们的子会话位于 daemon 自有的目录里，这些目录在另一个 workspace 中没有意义。
 

@@ -1416,9 +1416,13 @@ export interface BridgeClientRequestContext {
    * from request input.
    */
   onPromptAdmitted?: () => void;
+  /** Internal cancellation while a guarded prompt waits for its ACP write. */
+  dispatchSignal?: AbortSignal;
+  /** Internal signal when the prompt write begins and may reach the ACP child. */
+  onPromptWriteStarted?: () => void;
   /** Internal signal after the bridge writes the queued prompt to ACP. */
   onPromptDispatched?: () => void;
-  /** Internal authorization check immediately before forwarding a queued prompt. */
+  /** Internal authorization check when dequeuing a prompt and before its ACP write. */
   assertCanDispatch?: () => void;
   /** Approval mode the trusted ACP child must still have at prompt admission. */
   expectedApprovalMode?: ApprovalMode;
