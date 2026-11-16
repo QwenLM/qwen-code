@@ -17,6 +17,7 @@ import * as tar from 'tar';
 import type { ReadEntry } from 'tar';
 import semver from 'semver';
 import type { JsRuntime } from '@qwen-code/qwen-code-core/utils/runtime-info.js';
+import { stripAnsiAndControl } from '@qwen-code/qwen-code-core/utils/textUtils.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import {
   hasStandaloneArchiveLayout,
@@ -447,12 +448,6 @@ async function extractArchive(
             .slice(0, EXTRACT_STDERR_LIMIT - stderr.length);
         }
       });
-      ps.on('close', (code) => {
-        stderr = (stderr + decoder.decode()).slice(0, EXTRACT_STDERR_LIMIT);
-        if (code === 0) {
-          resolve();
-          return;
-        }
       ps.on('close', (code) => {
         stderr = (stderr + decoder.decode()).slice(0, EXTRACT_STDERR_LIMIT);
         if (code === 0) {
