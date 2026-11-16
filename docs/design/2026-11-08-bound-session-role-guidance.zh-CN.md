@@ -2,7 +2,7 @@
 
 [English](2026-11-08-bound-session-role-guidance.md) | [简体中文](2026-11-08-bound-session-role-guidance.zh-CN.md)
 
-状态：提案（2026-11-08）。方向已由维护者确认：显式暴露绑定角色、让机器生成的监视摘要只陈述事实、并提供内置的按角色指引——同时保留基础设计的单赢家路由。基于 [GitHub Channel Events to PR-Bound Sessions](2026-11-02-github-channel-bound-session-events.md)（PR #16117）与 [GitHub Channel Bound-Session Action Templates](2026-11-04-github-channel-bound-session-action-templates.md)（PR #16258）。
+状态：已实现（#16576；2026-11-08 提案）。方向已由维护者确认：显式暴露绑定角色、让机器生成的监视摘要只陈述事实、并提供内置的按角色指引——同时保留基础设计的单赢家路由。基于 [GitHub Channel Events to PR-Bound Sessions](2026-11-02-github-channel-bound-session-events.md)（PR #16117）与 [GitHub Channel Bound-Session Action Templates](2026-11-04-github-channel-bound-session-action-templates.md)（PR #16258）。
 
 ## 问题陈述
 

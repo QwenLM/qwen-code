@@ -1,15 +1,12 @@
 package com.alibaba.qwen.code.runtimebroker.service;
 
-import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.HarnessOwnership;
-import com.alibaba.qwen.code.runtimebroker.ResidentWorkspaceProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeDrainReceipt;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.RuntimeObservation;
-import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeRecoveryEvidence;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
@@ -25,7 +22,6 @@ import com.alibaba.qwen.code.runtimebroker.service.RuntimeBindingRegistry.Sessio
 import java.time.Clock;
 import java.time.Duration;
 import java.util.List;
-import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.TimeUnit;
@@ -103,51 +99,6 @@ final class RuntimeDrainCoordinator {
         }
         return drainBindings(tenantId, harnessSessionId, null)
                 .thenCompose(ignored -> settleHarnessSessions(tenantId, harnessSessionId, null, true, null));
-    }
-
-    CompletionStage<Void> closeResidentHarnessSession(RuntimeProvisionRequest request, String harnessSessionId) {
-        requireOpen(closed);
-        if (!ResidentWorkspaceProfile.selects(request)
-                || !bindingRepository.isHarnessDraining(request.getScope().getTenantId(), harnessSessionId)) {
-            return failed(conflict("runtime_admission_closed", "Resident close requires the original Session fence"));
-        }
-        var binding = bindingRepository.findActive(request);
-        if (binding == null) {
-            return CompletableFuture.completedFuture(null);
-        }
-        if (!request.equals(binding.getRequest()) || binding.getState() != RuntimeBindingRecord.State.READY
-                || binding.isDrainRequested()) {
-            return failed(conflict("workspace_close_identity_unverified", "Original resident binding is unavailable"));
-        }
-        return closeResidentSessions(binding, harnessSessionId, null);
-    }
-
-    private CompletionStage<Void> closeResidentSessions(RuntimeBindingRecord binding, String harnessSessionId, String cursor) {
-        var batch = sessionRepository.findByBinding(binding.getBindingId(), binding.getGeneration(), cursor, 100);
-        CompletionStage<Void> work = CompletableFuture.completedFuture(null);
-        for (var record : batch) {
-            if (record.isActive()) {
-                if (!harnessSessionId.equals(record.getSession().getHarnessSessionId())) {
-                    return failed(conflict("workspace_close_execution_unsettled", "Another resident Session remains active"));
-                }
-                work = work.thenCompose(ignored -> releaseSavedSession(binding, record, null));
-            }
-        }
-        return work.thenCompose(ignored -> {
-            if (batch.size() == 100) {
-                return closeResidentSessions(binding, harnessSessionId, batch.getLast().getRuntimeSessionId());
-            }
-            var current = bindingRepository.findActive(binding.getRequest());
-            if (current == null || !current.getBindingId().equals(binding.getBindingId())
-                    || current.getGeneration() != binding.getGeneration() || current.getState() != RuntimeBindingRecord.State.READY
-                    || current.isDrainRequested() || !current.hasSameLease(binding.getLease())
-                    || !Objects.equals(current.getResourceHandle(), binding.getResourceHandle())
-                    || sessionRepository.countActiveByBinding(binding.getBindingId(), binding.getGeneration()) != 0
-                    || executionRepository.hasActiveByBinding(binding.getBindingId(), binding.getGeneration())) {
-                return failed(conflict("workspace_close_execution_unsettled", "Original resident work remains unsettled"));
-            }
-            return CompletableFuture.completedFuture(null);
-        });
     }
 
     CompletionStage<Void> drainHarnessResources(String tenantId, String harnessSessionId,
@@ -230,9 +181,6 @@ final class RuntimeDrainCoordinator {
             if (!tenantId.equals(binding.getRequest().getScope().getTenantId())
                     || !harnessSessionId.equals(binding.getRequest().getIsolationKey())) {
                 return failed(conflict("workspace_close_identity_unverified", "Saved resource scope differs"));
-            }
-            if (CsiFilesRetirementProfile.isProfile(binding.getRequest().getScope())) {
-                return failed(CsiFilesRetirementProfile.releaseUnavailable());
             }
             work = work.thenCompose(ignored -> {
                 bindingRepository.requireHarnessCleanup(binding.getRequest().getScope(), harnessSessionId, authority);
@@ -613,8 +561,7 @@ final class RuntimeDrainCoordinator {
     private CompletionStage<Void> releaseSavedSession(RuntimeBindingRecord binding, RuntimeSessionRecord record,
             BindingRenewal renewal, boolean release) {
         if (binding.getLease() == null || binding.getProvisionSeed() == null || binding.getResourceHandle() == null
-                || !(ResidentWorkspaceProfile.selects(binding.getRequest())
-                        || HarnessOwnership.sharesRuntimeSessions(binding.getRequest())
+                || !(HarnessOwnership.sharesRuntimeSessions(binding.getRequest())
                         || record.getSession().getHarnessSessionId().equals(binding.getRequest().getIsolationKey()))
                 || !binding.getRequest().getScope().equals(record.getSession().getScope())) {
             return failed(conflict("workspace_close_identity_unverified", "Saved release identity is incomplete"));
@@ -637,9 +584,8 @@ final class RuntimeDrainCoordinator {
                             }
                             // A lost shared worker settles through the loss path; one
                             // Session's close never retires the binding.
-                            if (ResidentWorkspaceProfile.selects(binding.getRequest())
-                                    || renewal == null && HarnessOwnership.sharesRuntimeSessions(binding.getRequest())) {
-                                return failed(conflict("workspace_close_identity_unverified", "Original resident worker is unavailable"));
+                            if (renewal == null && HarnessOwnership.sharesRuntimeSessions(binding.getRequest())) {
+                                return failed(conflict("workspace_close_identity_unverified", "Original shared worker is unavailable"));
                             }
                             if (renewal == null) {
                                 return drainBinding(binding);
