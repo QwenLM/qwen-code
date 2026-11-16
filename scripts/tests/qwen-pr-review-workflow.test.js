@@ -3053,6 +3053,33 @@ describe('review execution sandbox opt-in (#9556)', () => {
       }
     }
   });
+
+  it('fails the job when no runtime answers, before any reviewed command runs', () => {
+    // `required` with no runtime refuses every phase: the prebuild leaves the
+    // tree bare and every agent loses its build/test evidence while the job
+    // stays green (#10108). The preflight is what turns that into a runner
+    // failure, so it must sit ahead of the review and must not be tolerated.
+    const steps = doc.jobs['review-pr'].steps;
+    const preflightIndex = steps.findIndex(
+      (s) => s.name === 'Resolve review sandbox',
+    );
+    const reviewIndex = steps.findIndex((s) => s.name === 'Run review');
+    expect(preflightIndex).toBeGreaterThan(-1);
+    expect(preflightIndex).toBeLessThan(reviewIndex);
+    const preflight = steps[preflightIndex];
+    expect(preflight['continue-on-error']).toBeUndefined();
+    // A daemon round trip, and the same docker-then-podman order the CLI
+    // probes. `command -v` alone would pass for a client with no daemon, which
+    // is the shape that then refuses every command.
+    expect(preflight.run).toContain('info > /dev/null');
+    expect(preflight.run).toContain('podman');
+    expect(preflight.run).toContain('exit 1');
+    // The image resolves through the repo's resolver, so a tag that is not on
+    // GHCR is a runner failure here instead of a failed install reported
+    // against the PR under review.
+    expect(preflight.run).toContain('resolve-sandbox-image.mjs');
+    expect(preflight.run).toContain('sandboxImageUri');
+  });
 });
 
 describe('workflow expression length', () => {
