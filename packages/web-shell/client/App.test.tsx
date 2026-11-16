@@ -1099,6 +1099,7 @@ const {
         ) => void;
         onPendingPanesChange?: (ids: string[]) => void;
         onPaneWorkspacesChange?: (cwds: readonly string[]) => void;
+        onOpenGoals?: () => void;
         showSessionDetails?: boolean;
         includeOtherWorkspaces?: boolean;
         workspaceCwd?: string;
@@ -2541,6 +2542,7 @@ vi.doMock('./components/SplitView', async () => {
       onPanesChange?: (ids: string[]) => void;
       onPendingPanesChange?: (ids: string[]) => void;
       onPaneWorkspacesChange?: (cwds: readonly string[]) => void;
+      onOpenGoals?: () => void;
       includeOtherWorkspaces?: boolean;
       workspaceCwd?: string;
       sessionWorkflowEnabled?: boolean;
@@ -29716,6 +29718,73 @@ describe('App session callbacks', () => {
 
     expect(snapshots.at(-1)).toBeNull();
     expect(activeGoals.at(-1)).toBeNull();
+  });
+
+  it('offers the strip Goals-page affordance when project features are available', async () => {
+    mockConnection.goalState = activeGoalSnapshot();
+    const { container } = renderApp();
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="goal-status-strip"]'),
+    ).not.toBeNull();
+    const openGoals = container.querySelector<HTMLButtonElement>(
+      '[data-testid="goal-open-goals"]',
+    );
+    expect(openGoals).not.toBeNull();
+    // Rendering is not enough: the button must be bound to the real Goals
+    // navigation, not a no-op. A `() => {}` mutant survives a presence-only
+    // assertion and ships a dead button.
+    await act(async () => {
+      openGoals!.click();
+      await flush();
+    });
+    expect(
+      container.querySelector('[data-testid="goals-page"]'),
+    ).not.toBeNull();
+  });
+
+  it('hides the strip Goals-page affordance when project features are unavailable', async () => {
+    // The Goals page renders under the same gate; offering the button where
+    // the page cannot open would navigate nowhere.
+    mockWorkspace.capabilities = {
+      workspaces: [],
+    } as typeof mockWorkspace.capabilities;
+    mockConnection.goalState = activeGoalSnapshot();
+    const { container } = renderApp();
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="goal-status-strip"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="goal-open-goals"]'),
+    ).toBeNull();
+  });
+
+  it('wires the split-view panes Goals affordance to the Goals page', async () => {
+    // SplitView mounts only under project features, so every pane gets the
+    // affordance. Pin the App-to-SplitView hop end to end: deleting
+    // `onOpenGoals={openGoals}` on the SplitView element must red this case,
+    // and the forwarded callback must open the real page, not a no-op.
+    mockConnection.goalState = activeGoalSnapshot();
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+        ?.click();
+    });
+    await flush();
+    const openGoals = testState.latestSplitViewProps?.onOpenGoals;
+    expect(openGoals).toBeDefined();
+    await act(async () => {
+      openGoals!();
+      await flush();
+    });
+    expect(
+      container.querySelector('[data-testid="goals-page"]'),
+    ).not.toBeNull();
   });
 
   it('refuses /language ui while a Goal owns the session', async () => {
