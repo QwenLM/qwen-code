@@ -21,11 +21,12 @@ prompt. For a realtime spoken conversation with the agent, see
     over an OpenAI-compatible Chat Completions endpoint such as DashScope.
   - `qwen3-asr-flash-realtime`, the `fun-asr-*realtime` family, and the
     `paraformer-realtime-*` family (for example `fun-asr-realtime`,
-    `fun-asr-flash-8k-realtime`, `paraformer-realtime-v2`) — streaming
-    transcription over a DashScope-style WebSocket derived from the route's
-    `baseUrl` (`/api-ws/v1/realtime` or `/api-ws/v1/inference`). The endpoint
-    must serve these WebSocket paths; a generic OpenAI-compatible HTTP
-    gateway cannot serve them.
+    `paraformer-realtime-v2`) — streaming transcription over a DashScope-style
+    WebSocket derived from the route's `baseUrl` (`/api-ws/v1/realtime` or
+    `/api-ws/v1/inference`). The endpoint must serve these WebSocket paths; a
+    generic OpenAI-compatible HTTP gateway cannot serve them. Audio is captured
+    at 16 kHz, so 8 kHz-only models (such as `fun-asr-flash-8k-realtime`) do not
+    match the capture rate.
 - Voice dictation enabled with `general.voice.enabled: true`.
 - A [secure context](https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts):
   open the Web Shell via `localhost` / `127.0.0.1` or over HTTPS. Browsers block
