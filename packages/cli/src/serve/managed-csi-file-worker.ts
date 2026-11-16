@@ -157,11 +157,19 @@ export function historyFits(
         JSON.stringify({ ...preparation, intentRef: 'f'.repeat(256) }),
       )
     : 0;
+  // Metadata allowance, enumerated from the durable prepared record's actual
+  // composition (commitHostedCsiHistory): authority.recordEnvelope embeds the
+  // host-session cwd (independently sized, protocol-bounded at 4096 chars —
+  // NOT covered by any small fixed slack); plus uuid/timestamp/revision/
+  // operationId/previousRecordRef/schemaVersion/profile (~600 B). Reserve the
+  // worst case so admission can never pass an input whose durable commit
+  // would then exceed the 64 KiB contract after the runtime history changed.
+  const metadataBytes = 5120;
   return (
     Buffer.byteLength(envelopeWithoutSnapshots) +
       2 * snapshotsBytes +
       preparationBytes +
-      1024 <=
+      metadataBytes <=
     64 * 1024
   );
 }
