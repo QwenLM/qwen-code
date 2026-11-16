@@ -3490,33 +3490,68 @@ export class GitWorktreeService {
             }
           }
         }
-        // Filesystem-identity check (R17-1): string folding (NFC + case) cannot
-        // replicate every alias a filesystem treats as one path — macOS folds
-        // final sigma `ς` to `σ`, which toLowerCase leaves distinct. Ask the
-        // target FS directly: if a snapshot path resolves to the same
-        // device+inode as an ignored file, applying would overwrite that
-        // ignored content, so refuse. This catches any FS-specific alias the
-        // string comparison misses, without maintaining a Unicode fold table.
-        const ignoredIdentity = new Map<string, string>();
+        // Filesystem-identity check (R17-1, R18-1): string folding (NFC + case)
+        // cannot replicate every alias a filesystem treats as one path — macOS
+        // folds final sigma `ς` to `σ`, which toLowerCase leaves distinct. Ask
+        // the target FS directly via device+inode, and cover the ancestor
+        // relationships too, since an alias can sit on a parent path rather
+        // than the full path. This catches any FS-specific alias the string
+        // comparison misses, without maintaining a Unicode fold table.
+        const statTarget = (p: string) =>
+          fs.stat(path.join(targetTop, p)).catch(() => null);
+        const keyOf = (st: { dev: number; ino: number }) =>
+          `${st.dev}:${st.ino}`;
+        // Inodes of ignored regular files, and of the directories that hold
+        // ignored content (so a snapshot file resolving to such a directory is
+        // caught even when the alias is on the directory name).
+        const ignoredFileIdentity = new Map<string, string>();
+        const ignoredDirIdentity = new Set<string>();
         for (const ignoredPath of ignoredPaths) {
-          const st = await fs
-            .stat(path.join(targetTop, ignoredPath))
-            .catch(() => null);
+          const st = await statTarget(ignoredPath);
           if (st && st.isFile()) {
-            ignoredIdentity.set(`${st.dev}:${st.ino}`, ignoredPath);
+            ignoredFileIdentity.set(keyOf(st), ignoredPath);
+          }
+          for (const ancestor of ancestorsOf(ignoredPath)) {
+            const ast = await statTarget(ancestor);
+            if (ast && ast.isDirectory()) {
+              ignoredDirIdentity.add(keyOf(ast));
+            }
           }
         }
         for (const snapshotPath of snapshotPaths) {
-          const st = await fs
-            .stat(path.join(targetTop, snapshotPath))
-            .catch(() => null);
-          if (st && st.isFile()) {
-            const hit = ignoredIdentity.get(`${st.dev}:${st.ino}`);
-            if (hit !== undefined) {
+          const st = await statTarget(snapshotPath);
+          if (st) {
+            // The snapshot path itself aliases an ignored file (overwrite) or
+            // a directory holding ignored content (file replaces directory).
+            if (st.isFile()) {
+              const hit = ignoredFileIdentity.get(keyOf(st));
+              if (hit !== undefined) {
+                throw new WorktreeDirtyCarryConflictError(
+                  `Stash snapshot would overwrite the ignored local file ${hit}`,
+                  { conflict: true },
+                );
+              }
+            } else if (st.isDirectory() && ignoredDirIdentity.has(keyOf(st))) {
               throw new WorktreeDirtyCarryConflictError(
-                `Stash snapshot would overwrite the ignored local file ${hit}`,
+                `Stash snapshot would replace a directory holding ignored local content at ${snapshotPath}`,
                 { conflict: true },
               );
+            }
+          }
+          // An ancestor of the snapshot path that aliases an ignored regular
+          // file would be replaced by the directory the snapshot creates there
+          // (the full snapshot path cannot stat through a file, so check each
+          // ancestor's identity directly).
+          for (const ancestor of ancestorsOf(snapshotPath)) {
+            const ast = await statTarget(ancestor);
+            if (ast && ast.isFile()) {
+              const hit = ignoredFileIdentity.get(keyOf(ast));
+              if (hit !== undefined) {
+                throw new WorktreeDirtyCarryConflictError(
+                  `Stash snapshot would replace the ignored local file ${hit} with a directory`,
+                  { conflict: true },
+                );
+              }
             }
           }
         }

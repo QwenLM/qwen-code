@@ -1093,6 +1093,43 @@ describe('POST /session/:id/worktree-handoff', () => {
     },
   );
 
+  it.skipIf(!fsFoldsFinalSigma)(
+    'refuses a snapshot file aliasing an ignored directory (R18-1 macOS)',
+    async () => {
+      const fixture = makeFixture();
+      fixture.writeTranscript();
+      const finalSigmaDir = '\u03c2.secret';
+      const sigmaFile = '\u03c3.secret';
+      writeFileSync(
+        path.join(fixture.workspaceDir, '.gitignore'),
+        '*.secret\n',
+      );
+      git(fixture.workspaceDir, 'add', '.gitignore');
+      git(fixture.workspaceDir, 'commit', '-qm', 'ignore', '--no-verify');
+      await fixture.createDetachedWorktree();
+      writeFileSync(path.join(fixture.worktreeDir, sigmaFile), 'AGENT_FILE\n');
+      git(fixture.worktreeDir, 'add', '-f', sigmaFile);
+      mkdirSync(path.join(fixture.workspaceDir, finalSigmaDir));
+      writeFileSync(
+        path.join(fixture.workspaceDir, finalSigmaDir, 'unique.txt'),
+        'LOCAL_UNIQUE\n',
+      );
+
+      const res = await request(fixture.app)
+        .post(`/session/${fixture.sessionId}/worktree-handoff`)
+        .send({ to: 'local' });
+
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('handoff_snapshot_conflict');
+      expect(
+        readFileSync(
+          path.join(fixture.workspaceDir, finalSigmaDir, 'unique.txt'),
+          'utf8',
+        ),
+      ).toBe('LOCAL_UNIQUE\n');
+    },
+  );
+
   it('fails closed when the local checkout is not the bound workspace (R9-1)', async () => {
     // Daemon bound to a subdirectory; a branch-route-shaped sidecar records
     // originalCwd as the repo top. listWorkspaceSessions cannot answer for the

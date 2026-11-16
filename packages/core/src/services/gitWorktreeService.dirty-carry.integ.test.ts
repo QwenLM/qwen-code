@@ -1130,6 +1130,74 @@ describe('GitWorktreeService.createUserWorktree() — carryDirtyState', () => {
     },
   );
 
+  it('applyStashSnapshot refuses a snapshot directory whose ancestor aliases an ignored file (R18-1)', async () => {
+    // Reverse ancestor + identity, runnable on any host: b.secret is a hard
+    // link to the ignored file a.secret (same inode) but is not itself ignored.
+    // The snapshot adds b.secret/agent.txt; the full path cannot stat through
+    // the file, so the ancestor's inode must be compared against ignored files.
+    await fs.writeFile(path.join(repoRoot, '.gitignore'), 'a.secret\n');
+    git(repoRoot, 'add', '.gitignore');
+    git(repoRoot, 'commit', '-qm', 'ignore', '--no-verify');
+    await fs.writeFile(path.join(repoRoot, 'a.secret'), 'LOCAL_UNIQUE\n');
+    await fs.link(
+      path.join(repoRoot, 'a.secret'),
+      path.join(repoRoot, 'b.secret'),
+    );
+    const service = new GitWorktreeService(repoRoot);
+    const src = await service.createUserWorktree('r181-src', 'main', {
+      detached: true,
+    });
+    expect(src.success).toBe(true);
+    const srcPath = src.worktree!.path;
+    await fs.mkdir(path.join(srcPath, 'b.secret'));
+    await fs.writeFile(path.join(srcPath, 'b.secret', 'agent.txt'), 'agent\n');
+    git(srcPath, 'add', '-f', 'b.secret/agent.txt');
+    const snapshot = await service.createStashSnapshot(srcPath);
+    expect(snapshot).not.toBe('');
+    await expect(
+      service.applyStashSnapshot(repoRoot, snapshot),
+    ).rejects.toMatchObject({ conflict: true });
+    expect(await read(path.join(repoRoot, 'a.secret'))).toBe('LOCAL_UNIQUE\n');
+    expect((await fs.stat(path.join(repoRoot, 'a.secret'))).isFile()).toBe(
+      true,
+    );
+  });
+
+  it.skipIf(!fsFoldsFinalSigma)(
+    'applyStashSnapshot refuses a snapshot file aliasing an ignored directory (R18-1 macOS)',
+    async () => {
+      // Forward ancestor + identity: the ignored content lives in the directory
+      // ς.secret; the snapshot adds a regular file σ.secret, which on a
+      // case-insensitive filesystem resolves to that same directory inode.
+      const finalSigmaDir = '\u03c2.secret';
+      const sigmaFile = '\u03c3.secret';
+      await fs.writeFile(path.join(repoRoot, '.gitignore'), '*.secret\n');
+      git(repoRoot, 'add', '.gitignore');
+      git(repoRoot, 'commit', '-qm', 'ignore', '--no-verify');
+      await fs.mkdir(path.join(repoRoot, finalSigmaDir));
+      await fs.writeFile(
+        path.join(repoRoot, finalSigmaDir, 'unique.txt'),
+        'LOCAL_UNIQUE\n',
+      );
+      const service = new GitWorktreeService(repoRoot);
+      const src = await service.createUserWorktree('r181f-src', 'main', {
+        detached: true,
+      });
+      expect(src.success).toBe(true);
+      const srcPath = src.worktree!.path;
+      await fs.writeFile(path.join(srcPath, sigmaFile), 'AGENT_FILE\n');
+      git(srcPath, 'add', '-f', sigmaFile);
+      const snapshot = await service.createStashSnapshot(srcPath);
+      expect(snapshot).not.toBe('');
+      await expect(
+        service.applyStashSnapshot(repoRoot, snapshot),
+      ).rejects.toMatchObject({ conflict: true });
+      expect(await read(path.join(repoRoot, finalSigmaDir, 'unique.txt'))).toBe(
+        'LOCAL_UNIQUE\n',
+      );
+    },
+  );
+
   it('applyStashSnapshot applies when no ignored path collides (R12-2 control)', async () => {
     await fs.writeFile(path.join(repoRoot, '.gitignore'), 'unrelated.env\n');
     git(repoRoot, 'add', '.gitignore');
