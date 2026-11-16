@@ -724,6 +724,143 @@ describe('ManagedHookRuntime', () => {
     });
     expect(JSON.stringify(view)).not.toContain('private-');
   });
+  it('accepts display metadata and keeps it inside the worker except for prompt catalogs', async () => {
+    const metadata = {
+      description: 'Collect tool output as session artifacts',
+      statusMessage: 'Collecting artifacts',
+    };
+    const catalog = async (
+      instance: ManagedHookRuntime,
+      operationId: string,
+    ) =>
+      instance.control('runtime-session', {
+        kind: 'hook-catalog',
+        pin,
+        operationId,
+        sessionKey: key,
+      });
+    const command = runtime([
+      {
+        ...definition(),
+        config: {
+          type: HookType.Command,
+          name: 'artifact-adapter',
+          command: 'printf x',
+          ...metadata,
+        },
+      },
+    ]);
+    expect(command.resolvePinnedCatalog(pin).hooks[0]?.config).toMatchObject({
+      command: 'printf x',
+      ...metadata,
+    });
+    const commandView = await catalog(command, 'catalog-command');
+    expect(commandView.catalog?.hooks[0].config).toEqual({
+      type: 'command',
+      name: 'artifact-adapter',
+    });
+    expect(JSON.stringify(commandView)).not.toContain('Collect');
+    const http = runtime([
+      {
+        ...definition(),
+        config: {
+          type: HookType.Http,
+          name: 'artifact-adapter',
+          url: 'https://example.com/hooks/artifact',
+          ...metadata,
+        },
+      },
+    ]);
+    expect(http.resolvePinnedCatalog(pin).hooks[0]?.config).toMatchObject({
+      url: 'https://example.com/hooks/artifact',
+      ...metadata,
+    });
+    const httpView = await catalog(http, 'catalog-http');
+    expect(httpView.catalog?.hooks[0].config).toEqual({
+      type: 'http',
+      name: 'artifact-adapter',
+    });
+    expect(JSON.stringify(httpView)).not.toContain('Collect');
+    const prompt = runtime([
+      {
+        ...definition(),
+        config: {
+          type: HookType.Prompt,
+          name: 'artifact-adapter',
+          prompt: 'Review the tool output.',
+          ...metadata,
+        },
+      },
+    ]);
+    expect(prompt.resolvePinnedCatalog(pin).hooks[0]?.config).toMatchObject(
+      metadata,
+    );
+    expect(
+      (await catalog(prompt, 'catalog-prompt')).catalog?.hooks[0].config,
+    ).toEqual({
+      type: 'prompt',
+      name: 'artifact-adapter',
+      prompt: 'Review the tool output.',
+      ...metadata,
+    });
+    const fn = runtime([
+      {
+        ...definition(),
+        config: {
+          type: 'function',
+          name: 'artifact-adapter',
+          timeout: 1000,
+          ...metadata,
+        },
+        handler: {
+          handlerId: 'context',
+          handlerRevision: 1,
+          modulePath: path.join(directory, 'handler.mjs'),
+          exportName: 'registered',
+        },
+      },
+    ]);
+    expect(fn.resolvePinnedCatalog(pin).hooks[0]?.config).toMatchObject(
+      metadata,
+    );
+    const fnView = await catalog(fn, 'catalog-function');
+    expect(fnView.catalog?.hooks[0].config).toEqual({
+      type: 'function',
+      name: 'artifact-adapter',
+    });
+    expect(fnView.catalog?.hooks[0].handler).toEqual({
+      handlerId: 'context',
+      handlerRevision: 1,
+    });
+    expect(JSON.stringify(fnView)).not.toContain('Collect');
+  });
+  it('rejects non-string display metadata and unknown hook config fields', () => {
+    for (const field of ['description', 'statusMessage'] as const)
+      expect(() =>
+        runtime([
+          {
+            ...definition(),
+            config: {
+              type: HookType.Command,
+              command: 'printf x',
+              [field]: 1,
+            },
+          },
+        ]),
+      ).toThrow('managed_hook_manifest_invalid');
+    expect(() =>
+      runtime([
+        {
+          ...definition(),
+          config: {
+            type: HookType.Command,
+            command: 'printf x',
+            unexpected: 'no',
+          },
+        },
+      ]),
+    ).toThrow('managed_hook_invalid');
+  });
   it('rejects inactive, cross-workspace, cross-session, expired and wrongly scoped calls', async () => {
     const instance = runtime();
     const call = request();
