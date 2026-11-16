@@ -69,7 +69,7 @@ class WorkspaceLifecycleStoreTest {
                 new DataSourceTransactionManager(fixture.jdbc.getDataSource())));
         var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(fixture.jdbc,
                 new JdbcManagedExtensionRecordStore(fixture.jdbc), null, executionStore, fixture.store, null, null, null,
-                com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound(), null);
+                com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound());
         var journal = fixture.transactions.execute(ignored -> new ExtensionRecordJournal(store, "tenant", "workspace", fixture.session).open());
         var templates = ManagedHookRecordContractTest.fixtures().get("templates");
         var data = new ManagedSessionStoreModels.CommitResource("hook-data", "hook-data", 1, 2,
