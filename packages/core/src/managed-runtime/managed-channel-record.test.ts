@@ -75,6 +75,7 @@ describe('managed-channel-record/1 shared contract', () => {
     expect(MANAGED_SESSION_ENABLED_CHANNEL_ADAPTERS).toEqual([
       'email',
       'dingtalk',
+      'wecom',
     ]);
   });
 

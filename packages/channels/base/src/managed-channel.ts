@@ -10,10 +10,11 @@
 // control plane is provider-agnostic: the adapter name is a pattern on the
 // Java side, the reply context is adapter-opaque JSON echoed back on claim,
 // and the segment ledger / claim budget / receipt discipline are unchanged.
-// See docs/design/2026-11-13-managed-channel-dingtalk-adapter.md.
+// See docs/design/2026-11-13-managed-channel-dingtalk-adapter.md and
+// docs/design/2026-11-16-managed-channel-wecom-adapter.md.
 
 /** The adapters the managed path enables. */
-export type ManagedChannelAdapter = 'email' | 'dingtalk';
+export type ManagedChannelAdapter = 'email' | 'dingtalk' | 'wecom';
 
 /** The route policy pinned with the first binding of each route. */
 export interface ManagedChannelPolicy {
