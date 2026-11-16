@@ -254,16 +254,22 @@ thread is re-read once the turn settles.
   automatically, and the session may act on GitHub through its own tools.
 - The product-authored text of the injected prompt (the envelope, the
   built-in role guidance, the delivery provenance, and watch summaries)
-  follows the channel's UI language: it is Chinese when `general.language`
-  resolves to Chinese (`zh`, `zh-*`, `中文`), and keeps the previous English
-  wording for every other value. Structural markers (the
+  follows the prompt locale resolved from `general.language`, which is not the
+  UI language actually rendered: the public GitHub lane stays English, and
+  `auto` resolves to English here even when the UI detects another language.
+  It is Chinese when `general.language`'s trimmed, lowercased form with `_`
+  read as `-` is `zh`, starts with `zh-`, or is `chinese` or `中文`, and keeps the
+  previous English wording for every other value. The zh strings are Simplified
+  Chinese, so a `zh-TW` setting renders Simplified too. Structural markers (the
   `Type:`/`Title:`/`URL:`/`Trigger:`/`Event:`/`Author:`/`Role:` data lines, the
   `File:` and `Comment:` labels used by the comment watch, the trusted-block
   label `[Operator instruction — trusted]` and `Source:`) and platform-derived
   values (PR titles, comment bodies, check names) are never translated, and
   operator templates render verbatim in the language they were written in.
-  The language is read at channel startup; a watch summary already detected
-  keeps the language it was rendered with until it is delivered.
+  The channel reads the language at startup for the prompts it composes
+  itself. PR-state watch summaries are composed by the daemon's PR-state
+  watch, which reads the language once at daemon boot; a summary already
+  detected keeps the language it was rendered with until it is delivered.
 - Comment sender, repository and pairing gates still apply before delivery.
   When several sessions are bound to the same PR, the most recently updated
   non-archived session wins; channel-owned sessions are never candidates. With
@@ -471,8 +477,11 @@ reaches no one in that group.
 
 Comments are fetched on a periodic re-check (about every 2 minutes), and the
 first observation baselines silently — comments that predate the watch are not
-replayed. The channel issues no per-poll `pulls.get`; the comment fetch is the
-only watch call. A rate-limited or credential answer fails fast and aborts the
+replayed. After a downtime gap — or when the deliverable window exceeds the
+per-pass comment cap — the backlog arrives as a compact private digest (newest
+comments first, within the shared prompt body budget) instead of one prompt per
+comment; members that do not fit follow in further digests. The channel issues
+no per-poll `pulls.get`; the comment fetch is the only watch call. A rate-limited or credential answer fails fast and aborts the
 pass, so it never sleep-retries ahead of task recovery and notification intake. Delivery
 reuses the bound-session contract: role-aware templates (`comment` /
 `fix:comment` / `default`), stable comment-id dedupe, backpressure and
