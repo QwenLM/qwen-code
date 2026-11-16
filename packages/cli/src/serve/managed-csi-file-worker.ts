@@ -159,12 +159,14 @@ export function historyFits(
     : 0;
   // Metadata allowance, enumerated from the durable prepared record's actual
   // composition (commitHostedCsiHistory): authority.recordEnvelope embeds the
-  // host-session cwd (independently sized, protocol-bounded at 4096 chars —
-  // NOT covered by any small fixed slack); plus uuid/timestamp/revision/
-  // operationId/previousRecordRef/schemaVersion/profile (~600 B). Reserve the
-  // worst case so admission can never pass an input whose durable commit
+  // host-session cwd. Its protocol bound is 4096 CHARACTERS, and JSON string
+  // escaping expands each character to as many as 6 bytes (\uXXXX for
+  // control chars; quotes and backslashes to 2) — so the serialized cwd
+  // alone can reach ~24.6 KiB. Add uuid/timestamp/revision/operationId/
+  // previousRecordRef/schemaVersion/profile (~600 B) and reserve the full
+  // worst case, so admission can never pass an input whose durable commit
   // would then exceed the 64 KiB contract after the runtime history changed.
-  const metadataBytes = 5120;
+  const metadataBytes = 25600;
   return (
     Buffer.byteLength(envelopeWithoutSnapshots) +
       2 * snapshotsBytes +
