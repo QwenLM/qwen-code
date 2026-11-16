@@ -63,7 +63,9 @@ They are the two things a user would do in a terminal, and nothing more:
   `stashSha` rides a failure response whenever the entry's SHA is known —
   a failed apply, but also a successful restore whose listing or drop
   failed (a non-empty restore notice means the entry is still on the
-  stack). When the push succeeded but the SHA was never learned (the
+  stack), and the parked-operation refusal after the push succeeded
+  (including a raw guard-probe failure, which is typed there so the entry
+  still reaches the client). When the push succeeded but the SHA was never learned (the
   post-push listing failed), no `stashSha` is sent; the message names the
   entry by its labelled subject instead.
 - `force`: refuse when the workspace cwd is below the repository root
@@ -231,8 +233,13 @@ omission:
   mapping that does run is the plain path's existing remote-tracking
   remap in `runCheckout` (a clicked `origin/dev` resolves to the local
   `dev` when one exists, else a tracking branch is created): it is
-  shared with the plain checkout, completes before the destructive step,
-  and is the established fork-layout contract, not a new validation.
+  the established fork-layout contract, not a new validation. Under
+  `force` the tracking branch is bound with `git branch --track` BEFORE
+  the forced checkout of the new local branch — `checkout -f --track`
+  would rewrite the tree first and only then fail a tracking bind git
+  cannot set up (a stale remote-tracking ref), leaving a half-switched
+  tree; the bind fails harmlessly before anything is discarded. The
+  plain path keeps its exact historical invocation.
 - **Stash from a subdirectory is not refused, as in the pull flow.**
   `git stash push` from below the root captures repository-wide changes,
   and the switch moves the whole repository — but nothing is destroyed:
@@ -247,6 +254,17 @@ omission:
   concurrent request stashed the tree first — adopts nothing and reports
   no entry; the identity-based restore never applies or drops someone
   else's entry. The pull flow shares the helper and the same guarantee.
+- **Submodule working trees are left alone.** git's own checkout and
+  stash do not recurse into submodules without `--recurse-submodules`,
+  and neither resolution passes it: a dirty submodule survives a forced
+  switch (and can leave the tree dirty after a completed switch — the
+  completion witnesses handle that), and its changes are never stashed.
+  The residue clean never removes submodule contents.
+- **skip-worktree keeps git's own protection.** A forced checkout onto
+  another branch refuses while a skip-worktree entry is edited (the
+  pre-touch refusal witness covers it); an in-place forced checkout
+  reports git's success with the protected file untouched — git's own
+  `-f` honors skip-worktree in place, and the flow does not override it.
 - **The session-creation dirty gate and Git Mode are unchanged.** The
   "create a branch for a new session" gate in the session route and the
   agent-driven Git Mode popover keep their current behavior.
@@ -331,7 +349,17 @@ omission:
   configured remote), DWIM disabled by `checkout.guess`, a branch
   occupied by another worktree, and a skip-worktree conflict; force
   accepts the DWIM shapes git accepts (bare and slash names,
-  remote-tracking refs); the subdirectory and parked-operation refusals.
+  remote-tracking refs); a stale remote-tracking ref whose tracking bind
+  git cannot set up refuses before anything is discarded (bind-before-
+  discard); a multi-MB tracked diff still witnesses the in-place discard
+  (streamed hash, no buffer bound); the after-side halves of the trust
+  guards are witnessed (a failed after-status, after-diff, or
+  after-identity probe certifies nothing); the completed arm's swallowed
+  clean failure keeps the hook refusal as the reported failure; a no-op
+  push's parked-operation refusal names no entry; a raw guard-probe
+  failure after the push still names the kept entry; an in-place discard
+  leaves a skip-worktree edit untouched (git's own protection); the
+  subdirectory and parked-operation refusals.
 - Route tests: option validation (400s), typed 409 mapping, path
   redaction witnessed by a linked-worktree refusal carrying an absolute
   path, `stashSha` forwarding when a post-checkout hook refuses after the
@@ -347,8 +375,11 @@ omission:
   hints stop reporting uncommitted changes, both RPC counts grow, and
   the rows follow a genuinely post-switch listing), notifies
   `onBranchChanged` on the stash success that keeps the picker open,
-  closes the picker on a plain checkout success, and keeps the warning
-  (success and failed restore) across a reopen.
+  closes the picker on a plain checkout success, keeps the confirm
+  button busy with the discard spinner while its checkout is in flight,
+  re-targets the standing panel to a second refused branch, drops a
+  standing checkout panel on reopen, and keeps the warning (success and
+  failed restore) across a reopen.
 - E2E (mock daemon, Playwright, `@smoke` so PR CI runs them): the full
   panel flow for both resolutions, the kept-entry warning visible
   immediately and across a reopen, and the cancel path.

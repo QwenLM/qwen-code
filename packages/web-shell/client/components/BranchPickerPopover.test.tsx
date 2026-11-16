@@ -1160,6 +1160,116 @@ describe('BranchPickerPopover checkout resolution panel', () => {
     expect(footerText()).toContain('Checked out dev');
   });
 
+  it('keeps the confirm button busy while its discard checkout is in flight', async () => {
+    let settle:
+      | ((value: { branch: string; detached: boolean }) => void)
+      | undefined;
+    workspaceGitCheckout.mockRejectedValueOnce(checkoutDirtyError());
+    workspaceGitCheckout.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          settle = resolve;
+        }),
+    );
+    mountWithBranches(CHECKOUT_BRANCHES);
+    await flush();
+
+    clickButton('dev');
+    await flush();
+    clickButton('Discard Changes and Switch…');
+    await flush();
+    clickButton('Discard and Switch');
+    await flush();
+
+    const confirmButton = Array.from(
+      document.body.querySelectorAll('button'),
+    ).find((b) => b.textContent?.includes('Discard and Switch'));
+    expect(confirmButton).toBeTruthy();
+    expect(confirmButton?.disabled).toBe(true);
+    // The busy key is the discard one: the spinner sits on the confirm
+    // button, and the stash option is not the one in flight.
+    expect(
+      confirmButton?.querySelector('svg')?.getAttribute('class'),
+    ).toContain('spin');
+
+    await act(async () => {
+      settle?.({ branch: 'dev', detached: false });
+    });
+    await flush();
+
+    expect(workspaceGitCheckout).toHaveBeenLastCalledWith(
+      'dev',
+      undefined,
+      undefined,
+      { force: true },
+      600_000,
+    );
+  });
+
+  it('re-targets the standing panel to a second refused branch', async () => {
+    workspaceGitCheckout.mockRejectedValueOnce(checkoutDirtyError());
+    workspaceGitCheckout.mockRejectedValueOnce(checkoutDirtyError());
+    workspaceGitCheckout.mockResolvedValueOnce({
+      branch: 'staging',
+      detached: false,
+    });
+    mountWithBranches({
+      ...CHECKOUT_BRANCHES,
+      local: [
+        ...CHECKOUT_BRANCHES.local,
+        {
+          name: 'staging',
+          isHead: false,
+          ahead: 0,
+          behind: 0,
+          commitDate: 0,
+          commitSubject: '',
+        },
+      ],
+    });
+    await flush();
+
+    clickButton('dev');
+    await flush();
+    expect(footerText()).toContain('Switch blocked by uncommitted changes');
+
+    // A second refused branch re-targets the panel instead of stacking a
+    // new one or keeping the first ref.
+    clickButton('staging');
+    await flush();
+    expect(footerText()).toContain('Stash Changes and Switch');
+    clickButton('Stash Changes and Switch');
+    await flush();
+
+    expect(workspaceGitCheckout).toHaveBeenLastCalledWith(
+      'staging',
+      undefined,
+      undefined,
+      { stash: true },
+      600_000,
+    );
+  });
+
+  it('drops a standing checkout panel when the popover reopens', async () => {
+    workspaceGitCheckout.mockRejectedValueOnce(checkoutDirtyError());
+    mountWithBranches(CHECKOUT_BRANCHES);
+    await flush();
+
+    clickButton('dev');
+    await flush();
+    expect(footerText()).toContain('Switch blocked by uncommitted changes');
+
+    mount({ open: false });
+    await flush();
+    mount({ open: true });
+    await flush();
+
+    // The open reset clears the checkout discriminator too, not just the
+    // pull panel: no resolution buttons survive the reopen.
+    expect(footerText()).not.toContain('Switch blocked by uncommitted changes');
+    expect(footerText()).not.toContain('Stash Changes and Switch');
+  });
+
   it('keeps a failed checkout’s kept-stash warning across a reopen', async () => {
     workspaceGitCheckout.mockRejectedValueOnce(checkoutDirtyError());
     workspaceGitCheckout.mockRejectedValueOnce(
@@ -1372,17 +1482,23 @@ describe('BranchPickerPopover checkout resolution panel', () => {
     expect(footerText()).toContain('↓1 · uncommitted changes');
     const listingReadsBefore = workspaceGitBranches.mock.calls.length;
     const statusReadsBefore = workspaceGit.mock.calls.length;
-    // A genuinely post-switch listing (head dev, no upstream): only this
-    // fixture can produce the 'No upstream' hint, so dropping the listing
-    // response reds the test even though the request was issued.
+    // A genuinely post-switch listing (head dev, behind origin/dev): only
+    // this fixture can produce the '↓1 · origin/dev' hint, so dropping the
+    // listing response reds the test even though the request was issued.
+    // The behind-upstream head also keeps the dirty-status hint reachable:
+    // a stale dirty snapshot would read '↓1 · uncommitted changes'.
     workspaceGitBranches.mockResolvedValue({
       ...CHECKOUT_BRANCHES,
       local: [
         {
           name: 'dev',
           isHead: true,
+          upstream: 'origin/dev',
           ahead: 0,
-          behind: 0,
+          behind: 1,
+          pushTarget: 'origin/dev',
+          pushAhead: 0,
+          pushBehind: 1,
           commitDate: 0,
           commitSubject: '',
         },
@@ -1400,7 +1516,7 @@ describe('BranchPickerPopover checkout resolution panel', () => {
       listingReadsBefore,
     );
     expect(workspaceGit.mock.calls.length).toBeGreaterThan(statusReadsBefore);
-    expect(footerText()).toContain('No upstream');
+    expect(footerText()).toContain('↓1 · origin/dev');
     expect(footerText()).not.toContain('uncommitted changes');
     // The one success path that keeps the picker open still notifies the
     // owner that the branch changed.
@@ -1428,15 +1544,19 @@ describe('BranchPickerPopover checkout resolution panel', () => {
     await flush();
     const listingReadsBefore = workspaceGitBranches.mock.calls.length;
     const statusReadsBefore = workspaceGit.mock.calls.length;
-    // Only the post-switch listing can produce the 'No upstream' hint.
+    // Only the post-switch listing can produce the '↓1 · origin/dev' hint.
     workspaceGitBranches.mockResolvedValue({
       ...CHECKOUT_BRANCHES,
       local: [
         {
           name: 'dev',
           isHead: true,
+          upstream: 'origin/dev',
           ahead: 0,
-          behind: 0,
+          behind: 1,
+          pushTarget: 'origin/dev',
+          pushAhead: 0,
+          pushBehind: 1,
           commitDate: 0,
           commitSubject: '',
         },
@@ -1454,7 +1574,7 @@ describe('BranchPickerPopover checkout resolution panel', () => {
       listingReadsBefore,
     );
     expect(workspaceGit.mock.calls.length).toBeGreaterThan(statusReadsBefore);
-    expect(footerText()).toContain('No upstream');
+    expect(footerText()).toContain('↓1 · origin/dev');
   });
 
   it('closes the picker after a plain checkout succeeds', async () => {

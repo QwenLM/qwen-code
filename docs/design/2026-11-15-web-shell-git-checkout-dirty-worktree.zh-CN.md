@@ -50,7 +50,9 @@ tree files would be overwritten by checkout"），但弹层只是把错误字符
   "切换"的含义。响应携带 `stashSha`，弹层保持打开并显示一条点名该条目
   的常驻警告，修改绝不会无声失踪。只要条目 SHA 可知，`stashSha` 就随
   失败响应返回——不仅是 apply 失败，也包括恢复成功但列表读取或 drop
-  失败的情形（恢复提示非空即意味着条目仍在栈上）。若 push 成功但 SHA
+  失败的情形（恢复提示非空即意味着条目仍在栈上），以及 push 成功之后
+  停放操作的拒绝（含守卫探针的原始失败——在那里被类型化，条目仍能
+  到达客户端）。若 push 成功但 SHA
   从未获知（push 后的列表读取失败），则不发送 `stashSha`，消息以带标签
   的 subject 点名条目。
 - `force`：当工作区 cwd 位于仓库根之下时拒绝
@@ -177,8 +179,12 @@ SDK 的 `workspaceGitCheckout`（legacy 与 workspace 限定两个方法）接�
   refspec、DWIM、worktree 占用）的预检会在角落形态上与 git 分叉，可能为
   一次 git 随后拒绝的切换先放弃修改。唯一确实执行的映射是裸路径既有的
   `runCheckout` remote-tracking 重映射（点击的 `origin/dev` 在本地 `dev`
-  存在时解析到它，否则创建跟踪分支）：它与裸 checkout 共用、在破坏性
-  步骤之前完成，是既定的 fork 布局契约，不是新增校验。
+  存在时解析到它，否则创建跟踪分支）：它是既定的 fork 布局契约，不是
+  新增校验。`force` 下跟踪分支先用 `git branch --track` 绑定，再强制
+  checkout 新建的本地分支——`checkout -f --track` 会先改写工作树、之后
+  才在 git 无法建立跟踪绑定（陈旧 remote-tracking ref）时失败，留下
+  半切换的树；先绑定则在任何放弃之前无害地失败。裸路径保持其历史上的
+  精确调用。
 - **子目录发起的 stash 不被拒绝，与 pull 流程一致。** 从仓库根之下
   `git stash push` 会收走全仓库的修改，切换也移动整个仓库——但没有任何
   东西被销毁：条目保留并被点名，修改可恢复。pull 设计出于同样原因只守卫
@@ -189,6 +195,14 @@ SDK 的 `workspaceGitCheckout`（legacy 与 workspace 限定两个方法）接�
   保留为其前缀），因此当本请求自己的 push 是空操作——因为并发请求先把
   树 stash 了——它什么都不会认领、也不报告条目；按身份恢复绝不会 apply
   或 drop 别人的条目。pull 流程共用该 helper 与同一保证。
+- **子模块工作树不被触碰。** git 自己的 checkout 与 stash 不带
+  `--recurse-submodules` 就不递归进子模块，两种解决方式也都不传它：
+  脏子模块在强制切换后幸存（并可能让已完成切换后的树仍脏——完成判定
+  见证会处理），其修改也绝不会被 stash。残留 clean 从不删除子模块内容。
+- **skip-worktree 保留 git 自己的保护。** 跨分支的强制 checkout 在
+  skip-worktree 条目被编辑时拒绝（触碰前拒绝见证已覆盖）；原地强制
+  checkout 报告 git 的成功、被保护文件原样不动——git 自己的 `-f` 在
+  原地尊重 skip-worktree，流程不覆盖它。
 - **会话创建的脏树闸门与 Git Mode 不变。** session 路由里"为新会话创建
   分支"的闸门与 agent 驱动的 Git Mode 弹层保持当前行为。
 - **不做独立的放弃按钮。** 解决方式在拒绝发生的地方提供；通用的"放弃
@@ -249,7 +263,14 @@ SDK 的 `workspaceGitCheckout`（legacy 与 workspace 限定两个方法）接�
   force 对不可解析的 ref、歧义 DWIM 名字、git 无法解析的 tracking ref
   （无已配置 remote）、`checkout.guess` 关闭 DWIM、被另一 worktree 占用
   的分支、skip-worktree 冲突都在放弃前拒绝；force 接受 git 接受的 DWIM
-  形态（裸名、斜杠名、remote-tracking ref）；子目录与进行中操作拒绝。
+  形态（裸名、斜杠名、remote-tracking ref）；git 无法建立跟踪绑定的
+  陈旧 remote-tracking ref 在任何放弃之前拒绝（先绑定后放弃）；数 MB
+  的已跟踪 diff 仍见证原地放弃（流式哈希，无缓冲上限）；信任守卫的
+  后置半边各有见证（后置 status／diff／身份探针失败不认证任何事）；
+  完成臂被吞掉的 clean 失败让 hook 拒绝保持为被报告的失败；空操作
+  push 后的停放操作拒绝不点名条目；push 后守卫探针的原始失败仍点名
+  保留的条目；原地放弃不触碰 skip-worktree 编辑（git 自己的保护）；
+  子目录与进行中操作拒绝。
 - 路由测试：选项校验（400）、类型化 409 映射、由携带绝对路径的
   linked-worktree 拒绝见证脱敏、post-checkout hook 在切换后拒绝时转发
   `stashSha`。
@@ -260,7 +281,9 @@ SDK 的 `workspaceGitCheckout`（legacy 与 workspace 限定两个方法）接�
   保留条目的失败解决之后一并重读分支列表与树状态（两半各有见证：提示
   不再报告未提交修改、两个 RPC 计数都增长、行列表跟随真正的切换后
   列表）、保持弹层打开的 stash 成功通知 `onBranchChanged`、裸 checkout
-  成功即关闭弹层、该警告（成功与恢复失败）跨重开幸存。
+  成功即关闭弹层、放弃 checkout 在飞时确认按钮带放弃 spinner 保持
+  busy、站立面板重定向到第二个被拒分支、重开时丢弃站立的 checkout
+  面板、该警告（成功与恢复失败）跨重开幸存。
 - E2E（mock daemon，Playwright，带 `@smoke` 使 PR CI 运行）：两种解决
   方式的完整面板流程、保留条目警告立即可见且跨重开幸存、取消路径。
 

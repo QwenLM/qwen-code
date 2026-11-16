@@ -5,7 +5,7 @@
  */
 
 import { execFile, spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
@@ -613,10 +613,24 @@ async function runCheckout(
       .catch(() => false);
     if (hasLocal) {
       await runGit(cwd, ['checkout', ...forceFlag, localName, '--'], env);
+    } else if (force) {
+      // Bind the tracking branch BEFORE discarding: `checkout -f --track`
+      // rewrites the index and worktree to the target tree first and only
+      // then fails a tracking bind git cannot set up (a stale
+      // remote-tracking ref whose remote was removed or whose fetch
+      // refspec was narrowed), leaving a half-switched tree on the old
+      // branch. `branch --track` fails harmlessly before any checkout;
+      // the forced checkout of the new local branch then validates and
+      // discards atomically like every other forced switch. A bind that
+      // succeeds but whose checkout then refuses leaves the new branch
+      // pointing at the clicked commit — non-destructive, and the retry
+      // target.
+      await runGit(cwd, ['branch', '--track', localName, ref], env);
+      await runGit(cwd, ['checkout', '-f', localName, '--'], env);
     } else {
       // `--track` forces commit-ish interpretation of the verified
       // remote-tracking ref, so no pathspec terminator is needed.
-      await runGit(cwd, ['checkout', ...forceFlag, '--track', ref], env);
+      await runGit(cwd, ['checkout', '--track', ref], env);
     }
     const head = (
       await runGit(cwd, ['symbolic-ref', '--short', 'HEAD'], env)
@@ -1522,23 +1536,44 @@ async function headAtCheckoutTarget(
 }
 
 /**
- * Patch text of the tracked tree against HEAD, blob ids included: a hook
- * rewriting a file changes it even when the status codes stay the same.
- * null means the probe failed; a completion witness must not trust it.
+ * SHA-256 of the tracked tree's patch against HEAD, blob ids included: a
+ * hook rewriting a file changes it even when the status codes stay the
+ * same. Streamed and hashed incrementally — the patch follows the size of
+ * the workspace's edits, and buffering it would fail past maxBuffer on a
+ * multi-MB tracked change, silently disabling the completion witness
+ * exactly where it is needed. null means the probe failed (or timed out);
+ * a completion witness must not trust it.
  */
-async function trackedDiff(
+function trackedDiff(
   cwd: string,
   env?: Readonly<Record<string, string | undefined>>,
 ): Promise<string | null> {
-  try {
-    return await runGit(
-      cwd,
+  return new Promise((resolve) => {
+    const child = spawn(
+      'git',
       ['diff', 'HEAD', '--no-ext-diff', '--no-textconv', '--no-color'],
-      env,
+      { cwd, env: gitEnv(env), windowsHide: true },
     );
-  } catch {
-    return null;
-  }
+    const hash = createHash('sha256');
+    let settled = false;
+    const settle = (value: string | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.kill('SIGKILL');
+      resolve(value);
+    };
+    const timer = setTimeout(() => settle(null), GIT_TIMEOUT_MS);
+    child.stdout.on('data', (chunk: Buffer) => {
+      if (!settled) hash.update(chunk);
+    });
+    child.stderr.resume();
+    child.on('error', () => settle(null));
+    child.on('close', (code) => {
+      if (settled) return;
+      settle(code === 0 ? hash.digest('hex') : null);
+    });
+  });
 }
 
 const SWITCH_COMPLETED_FAILURE =
@@ -1678,12 +1713,18 @@ async function stashCheckout(
   try {
     await refuseCheckoutOperationInProgress(cwd, env);
   } catch (err) {
-    if (stashed !== undefined && err instanceof GitCheckoutFailure) {
+    if (stashed !== undefined) {
       // Name the entry ahead of the detail: the route bounds the
-      // client-visible message.
+      // client-visible message. A raw probe failure is typed here too —
+      // the entry exists and is the only record of the user's changes,
+      // so it must reach the client even when the guard itself failed
+      // untyped.
+      const code =
+        err instanceof GitCheckoutFailure ? err.code : 'checkout_failed';
+      const detail = err instanceof Error ? err.message : String(err);
       throw new GitCheckoutFailure(
-        err.code,
-        `your local changes are kept in stash entry ${stashed}; ${err.message}`,
+        code,
+        `your local changes are kept in stash entry ${stashed}; ${detail}`,
         stashed,
       );
     }
