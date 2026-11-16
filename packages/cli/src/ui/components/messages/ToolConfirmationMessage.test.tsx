@@ -1831,6 +1831,82 @@ describe('ToolConfirmationMessage', () => {
       expect(frame).toContain('Yes, allow once');
     });
 
+    it('announces a destination list no whole URL fits into', async () => {
+      const availableTerminalHeight = 9;
+      const { lastFrame } = render(
+        <OverflowProvider>
+          {withProviders(
+            <ToolConfirmationMessage
+              confirmationDetails={{
+                type: 'info',
+                title: 'Confirm Web Fetch',
+                prompt: 'fetch both exports below',
+                urls: [
+                  'https://example.com/api/v1/export?signature=abcdef0123456789',
+                  'https://example.com/api/v1/export?signature=fedcba9876543210',
+                ],
+                hideAlwaysAllow: true,
+                onConfirm: vi.fn(),
+              }}
+              config={mockConfig}
+              availableTerminalHeight={availableTerminalHeight}
+              contentWidth={50}
+            />,
+          )}
+          <OverflowProbe />
+        </OverflowProvider>,
+      );
+
+      await vi.waitFor(() => {
+        const frame = lastFrame() ?? '';
+        expect(frame).toMatch(/\.\.\. 2 more URLs hidden \.\.\./);
+        expect(frame).toContain('overflowing:1');
+      }, WAIT_FOR_FRAME);
+      const frame = lastFrame() ?? '';
+      // Two body rows, and neither can hold one of these destinations whole. The
+      // block still spends a row on the count instead of disappearing, so the
+      // dialog never offers approval for hosts that appear nowhere on screen.
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(
+        availableTerminalHeight + 1,
+      );
+      expect(frame).not.toContain('https://example.com/api');
+      expect(frame).toContain('Do you want to proceed?');
+      expect(frame).toContain('Yes, allow once');
+    });
+
+    it('renders every destination that fits instead of sampling them', () => {
+      const availableTerminalHeight = 11;
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={{
+            type: 'info',
+            title: 'Confirm Web Fetch',
+            prompt: longPrompt,
+            urls: ['https://e.com/0', 'https://e.com/1', 'https://e.com/2'],
+            hideAlwaysAllow: true,
+            onConfirm: vi.fn(),
+          }}
+          config={mockConfig}
+          availableTerminalHeight={availableTerminalHeight}
+          contentWidth={50}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(
+        availableTerminalHeight,
+      );
+      // Four body rows, three one-row destinations and a label: the list fits
+      // once the blank row is handed back, so charging a footer row first would
+      // have announced two destinations as hidden that were on screen.
+      expect(frame).toContain('URLs to fetch:');
+      expect(frame).toContain('https://e.com/0');
+      expect(frame).toContain('https://e.com/1');
+      expect(frame).toContain('https://e.com/2');
+      expect(frame).not.toMatch(/more URLs? hidden/);
+      expect(frame).toContain('Do you want to proceed?');
+    });
+
     it('says one URL when a single destination is hidden', () => {
       const availableTerminalHeight = 9;
       const wrappedUrl =
