@@ -550,6 +550,47 @@ describe('configCommand', () => {
       });
     });
 
+    it('masks every value in nested env and header maps', async () => {
+      const { ctx } = createMockContext({
+        mcpServers: {
+          gh: {
+            command: 'npx',
+            env: { GITHUB_TOKEN: 'ghp_liveSecret' },
+            headers: {
+              Authorization: 'Bearer sk-live-123',
+              'X-Auth-Token': 'tok_live',
+            },
+          },
+        },
+      });
+
+      expect(await configCommand.action!(ctx, 'mcpServers')).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content:
+          'mcpServers = {"gh":{"command":"npx","env":{"GITHUB_TOKEN":"ghp_****"},"headers":{"Authorization":"Bear****","X-Auth-Token":"tok_****"}}}',
+      });
+    });
+
+    it('keeps a map entry whose name looks sensitive and shows *Env variable names', async () => {
+      const { ctx } = createMockContext({
+        mcpServers: {
+          'corp-proxy': {
+            command: 'npx',
+            credentialEnv: 'MEM0_API_KEY',
+            apiKey: 'sk-demo-1234567890',
+          },
+        },
+      });
+
+      expect(await configCommand.action!(ctx, 'mcpServers')).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content:
+          'mcpServers = {"corp-proxy":{"command":"npx","credentialEnv":"MEM0_API_KEY","apiKey":"sk-d****"}}',
+      });
+    });
+
     it('masks sensitive value in write confirmation message', async () => {
       const { ctx } = createMockContext({});
       const result = await configCommand.action!(

@@ -37,6 +37,8 @@ const SENSITIVE_KEY_PATTERNS = [
 
 const SENSITIVE_URL_PATTERNS = [/baseurl/i, /base_url/i, /proxy/i];
 
+const CREDENTIAL_MAP_KEYS = new Set(['env', 'headers', 'customHeaders']);
+
 function isSensitiveKey(key: string): boolean {
   return (
     SENSITIVE_KEY_PATTERNS.some((p) => p.test(key)) ||
@@ -190,9 +192,22 @@ function coerceValue(
 function formatValue(value: unknown): string {
   if (value === undefined) return t('(not set)');
   if (typeof value === 'string') return value || t('(empty)');
-  return JSON.stringify(value, (key, nested) =>
-    key && isSensitiveKey(key) ? maskValue(nested) : nested,
-  );
+  return JSON.stringify(value, (key, nested) => {
+    // Entries of env/header maps are named by the user, so mask every value.
+    if (CREDENTIAL_MAP_KEYS.has(key)) {
+      return nested !== null && typeof nested === 'object'
+        ? Object.fromEntries(
+            Object.entries(nested).map(([k, v]) => [k, maskValue(v)]),
+          )
+        : maskValue(nested);
+    }
+    // Mask leaves only: a free-form map entry named e.g. "corp-proxy" keeps its
+    // subtree, and `*Env` keys hold a variable name rather than the secret.
+    if (nested !== null && typeof nested === 'object') return nested;
+    return key && !key.endsWith('Env') && isSensitiveKey(key)
+      ? maskValue(nested)
+      : nested;
+  });
 }
 
 function padRight(str: string, len: number): string {
