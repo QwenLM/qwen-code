@@ -1,8 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type {
-  DaemonSessionShellTaskStatus,
-  DaemonSessionTaskWithWorkflowStatus,
-} from '@qwen-code/sdk/daemon';
+import type { DaemonSessionTaskWithWorkflowStatus } from '@qwen-code/sdk/daemon';
 import { getTranslator } from '../i18n';
 import {
   buildTaskExplainQuestion,
@@ -442,24 +439,52 @@ describe('buildTaskExplainQuestion', () => {
     expect(question).not.toContain('L'.repeat(401));
   });
 
-  it('composes from a restored snapshot without label or cwd', () => {
-    // The lazy cross-session tab restoration can hydrate a shell snapshot
-    // that carries only the command (App.test.tsx's restoration fixture).
+  it('caps the command excerpt at 500 characters', () => {
     const question = buildTaskExplainQuestion(
-      {
-        kind: 'shell',
-        id: 'shell-1',
-        command: 'npm test',
-        status: 'running',
-        startTime: 1_000,
-        runtimeMs: 5_000,
-      } as DaemonSessionShellTaskStatus,
+      { ...shellTask, command: 'c'.repeat(5_000) },
       en,
     );
-    expect(question).toContain('Command: npm test');
-    expect(question).not.toContain('Label:');
-    expect(question).not.toContain('Working directory:');
-    expect(question).not.toContain('undefined');
+    expect(question).toContain('c'.repeat(500));
+    expect(question).not.toContain('c'.repeat(501));
+  });
+
+  it('caps the description excerpt at 400 characters', () => {
+    const question = buildTaskExplainQuestion(
+      { ...shellTask, description: 'd'.repeat(5_000) },
+      en,
+    );
+    expect(question).toContain('d'.repeat(400));
+    expect(question).not.toContain('d'.repeat(401));
+  });
+
+  it('caps each activity excerpt at 160 characters', () => {
+    const question = buildTaskExplainQuestion(
+      {
+        ...base,
+        kind: 'agent',
+        isBackgrounded: true,
+        recentActivities: [
+          { name: 'tool', description: 'a'.repeat(5_000), at: 0 },
+        ],
+      },
+      en,
+    );
+    // The cap applies to the combined "name: description" string.
+    const line = question
+      .split('\n')
+      .find((l) => l.startsWith('Recent activity:'));
+    expect(line).toBeDefined();
+    expect(line!.length).toBeLessThanOrEqual('Recent activity: '.length + 161);
+    expect(line).toContain('…');
+  });
+
+  it('caps each log excerpt at 200 characters', () => {
+    const question = buildTaskExplainQuestion(
+      { ...workflowTask, recentLogs: ['l'.repeat(5_000)] },
+      en,
+    );
+    expect(question).toContain('l'.repeat(200));
+    expect(question).not.toContain('l'.repeat(201));
   });
 
   it('emits a daemon-shaped shell command exactly once', () => {
@@ -543,10 +568,6 @@ describe('buildTaskExplainQuestion', () => {
 describe('explainDisplayLabel', () => {
   it('keeps a short label verbatim', () => {
     expect(explainDisplayLabel('npm run dev')).toBe('npm run dev');
-  });
-
-  it('tolerates a restored snapshot without a label', () => {
-    expect(explainDisplayLabel(undefined)).toBe('');
   });
 
   it('caps a multi-KB command label for the panel echo', () => {

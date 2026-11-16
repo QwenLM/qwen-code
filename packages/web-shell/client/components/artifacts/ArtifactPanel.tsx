@@ -529,6 +529,7 @@ interface ArtifactPanelProps {
   onExplainTask?: (task: DaemonSessionTaskWithWorkflowStatus) => void;
   /** A pending/settled task explanation to mirror in place (taskId-matched). */
   taskExplanation?: {
+    messageId: string;
     taskId: string;
     question: string;
     answer: string;
@@ -1140,9 +1141,11 @@ export function ArtifactPanel({
             data-testid="artifact-panel-explanation"
           >
             <BtwMessage
+              key={taskExplanation.messageId}
               question={taskExplanation.question}
               answer={taskExplanation.answer}
               isPending={taskExplanation.isPending}
+              hidePrefix
             />
           </div>
         )}

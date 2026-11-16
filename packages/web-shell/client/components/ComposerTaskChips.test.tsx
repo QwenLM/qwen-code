@@ -575,6 +575,25 @@ describe('ComposerTaskChips', () => {
       expect(explain.getAttribute('title')).toBe('解释这个任务在做什么');
     });
 
+    it('reclaims focus to the owning chip when its "?" unmounts on group growth', () => {
+      const onExplainTask = vi.fn();
+      const shellTask = shell('shell-1');
+      render([workflow('wf-1'), shellTask], { onExplainTask });
+      const shellExplain = explainButtons()[1];
+      act(() => shellExplain.focus());
+
+      render([workflow('wf-1'), shellTask, shell('shell-2')], {
+        onExplainTask,
+      });
+
+      expect(shellExplain.isConnected).toBe(false);
+      const shellChip = chips().find((chip) =>
+        chip.textContent?.includes('shells'),
+      );
+      expect(shellChip).toBeDefined();
+      expect(document.activeElement).toBe(shellChip);
+    });
+
     it('steps ArrowLeft from the chip "?" back to its own chip', () => {
       const onExplainTask = vi.fn();
       render([workflow('wf-1'), shell('shell-1')], { onExplainTask });

@@ -159,8 +159,15 @@ export const ComposerTaskChips = forwardRef<
     if (!focused || focused.element.isConnected) return;
     focusedElementRef.current = null;
     if (!isFocusUnclaimed(focused.root)) return;
+    // A chip "?" unmounts when its group grows; reclaim focus to the owning
+    // group's chip, not to whichever group happens to sort first.
+    const focusedKind =
+      focused.element.getAttribute('data-explain-kind') ??
+      focused.element.getAttribute('data-kind');
     const chip =
       (openKind && chipRefs.current.get(openKind)) ||
+      (focusedKind &&
+        chipRefs.current.get(focusedKind as ComposerTaskChipKind)) ||
       chipRefs.current.get(groups[0]?.kind);
     if (chip) chip.focus({ preventScroll: true });
     else onReturnToInput?.();
@@ -203,6 +210,7 @@ export const ComposerTaskChips = forwardRef<
     task: DaemonSessionTaskWithWorkflowStatus,
     className: string,
     onKeyDown: (event: KeyboardEvent<HTMLButtonElement>) => void,
+    explainKind?: ComposerTaskChipKind,
   ) => (
     <button
       type="button"
@@ -212,6 +220,7 @@ export const ComposerTaskChips = forwardRef<
       })}
       title={t('tasks.explain.tooltip')}
       data-testid="composer-task-explain"
+      data-explain-kind={explainKind}
       onClick={() => onExplainTask?.(task)}
       onKeyDown={onKeyDown}
     >
@@ -345,7 +354,11 @@ export const ComposerTaskChips = forwardRef<
                 <TaskElapsed task={task} now={now} />
               </button>
               {onExplainTask &&
-                explainButton(task, styles.explainButton, handleListKeyDown)}
+                explainButton(
+                  task,
+                  `${styles.explainButton} ${styles.rowExplain}`,
+                  handleListKeyDown,
+                )}
             </div>
           ))}
         </div>
@@ -397,6 +410,7 @@ export const ComposerTaskChips = forwardRef<
                   group.tasks[0],
                   `${styles.explainButton} ${styles.chipExplain}`,
                   (event) => handleChipExplainKeyDown(event, group.kind, index),
+                  group.kind,
                 )}
             </span>
           );

@@ -8168,12 +8168,13 @@ describe('task activity key', () => {
     const shell: DaemonSessionShellTaskStatus = {
       kind: 'shell',
       id: 'shell-1',
+      label: 'npm test',
+      description: 'npm test',
       command: 'npm test',
+      cwd: '/tmp/project',
       status: 'running',
       startTime: 1_000,
       runtimeMs: 5_000,
-      output: '',
-      exitCode: null,
     };
     mockWorkspace.client.sessionTasks.mockResolvedValue({
       v: 1,
@@ -19272,6 +19273,74 @@ describe('App session callbacks', () => {
     );
     expect(testState.latestArtifactPanelProps?.onExplainTask).toBeTypeOf(
       'function',
+    );
+  });
+
+  it('keeps a settled explanation when Enter activates a button', async () => {
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    renderApp();
+    await flush();
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestBtwMessageProps?.answer).toBe('side answer');
+
+    // The window-capture dismiss shortcut must not swallow keyboard
+    // activation of buttons while a settled explanation is showing. The
+    // composer must be empty: with text, Enter is not a dismissal at all
+    // and the pin would be vacuous.
+    testState.prompt = '';
+    const button = document.querySelector('button');
+    expect(button).not.toBeNull();
+    const event = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      button!.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(false);
+    expect(document.querySelector('[class*="btwPanel"]')).not.toBeNull();
+  });
+
+  it('resolves the panel explain task for an agent tab opened without toolUseId', async () => {
+    const agent: DaemonSessionAgentTaskStatus = {
+      kind: 'agent',
+      id: 'agent-no-tool',
+      label: 'Research',
+      description: 'Research',
+      status: 'running',
+      startTime: 1,
+      runtimeMs: 10,
+      isBackgrounded: true,
+      subagentType: 'general-purpose',
+    };
+    testState.backgroundTasks = [agent];
+    renderApp();
+    await flush();
+
+    // The chip open path registers the tab under toolUseId ?? id.
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(agent);
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(testState.latestArtifactPanelProps?.explainTask?.id).toBe(
+      'agent-no-tool',
     );
   });
 

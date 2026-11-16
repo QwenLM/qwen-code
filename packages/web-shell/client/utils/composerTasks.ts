@@ -109,20 +109,18 @@ function explainExcerpt(text: string, max: number): string {
 
 // The panel echo and the aria label are UI text: a shell's label is its full
 // command, so they must stay short even when the facts carry a multi-KB one.
-// Lazily restored task tabs can carry a snapshot without a label yet.
 const EXPLAIN_DISPLAY_LABEL_MAX = 120;
 
-export function explainDisplayLabel(label: string | undefined): string {
-  return explainExcerpt(label ?? '', EXPLAIN_DISPLAY_LABEL_MAX);
+export function explainDisplayLabel(label: string): string {
+  return explainExcerpt(label, EXPLAIN_DISPLAY_LABEL_MAX);
 }
 
 function taskExplainFacts(task: DaemonSessionTaskWithWorkflowStatus): string {
   const lines = [`Kind: ${task.kind}`];
   // The daemon sets a shell's label to its command; the Command line below
   // already carries that text, so an oversized label must not eat the budget
-  // twice nor crowd out the kind-specific facts. A restored snapshot may
-  // carry no label at all — omit the line rather than crash on it.
-  if (task.label && !(task.kind === 'shell' && task.label === task.command)) {
+  // twice nor crowd out the kind-specific facts.
+  if (!(task.kind === 'shell' && task.label === task.command)) {
     lines.push(`Label: ${explainExcerpt(task.label, EXPLAIN_LABEL_MAX)}`);
   }
   lines.push(
@@ -147,7 +145,7 @@ function taskExplainFacts(task: DaemonSessionTaskWithWorkflowStatus): string {
       lines.push(
         `Command: ${explainExcerpt(task.command, EXPLAIN_COMMAND_MAX)}`,
       );
-      if (task.cwd) lines.push(`Working directory: ${task.cwd}`);
+      lines.push(`Working directory: ${task.cwd}`);
       break;
     case 'monitor':
       lines.push(

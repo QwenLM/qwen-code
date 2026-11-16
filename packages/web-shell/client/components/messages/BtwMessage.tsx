@@ -7,12 +7,15 @@ interface BtwMessageProps {
   question: string;
   answer: string;
   isPending: boolean;
+  /** Task explanations are button-triggered, not a typed /btw command. */
+  hidePrefix?: boolean;
 }
 
 export const BtwMessage = memo(function BtwMessage({
   question,
   answer,
   isPending,
+  hidePrefix = false,
 }: BtwMessageProps) {
   const { t } = useI18n();
   const contentRef = useRef<HTMLDivElement>(null);
@@ -46,7 +49,7 @@ export const BtwMessage = memo(function BtwMessage({
         }}
       >
         <div className={styles.question}>
-          <span className={styles.prefix}>/btw </span>
+          {!hidePrefix && <span className={styles.prefix}>/btw </span>}
           <span>{question}</span>
         </div>
         <div ref={answerRef} className={styles.answer}>

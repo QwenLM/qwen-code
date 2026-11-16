@@ -5861,46 +5861,55 @@ describe('ArtifactPanel task explanation', () => {
     cwd: '/work/project',
   };
 
-  function renderExplainPanel(props: {
+  type ExplainPanelProps = {
     explainTask?: DaemonSessionShellTaskStatus | null;
     onExplainTask?: (task: DaemonSessionShellTaskStatus) => void;
     taskExplanation?: {
+      messageId: string;
       taskId: string;
       question: string;
       answer: string;
       isPending: boolean;
     } | null;
-  }) {
+  };
+
+  function renderExplainPanel(props: ExplainPanelProps) {
     const container = document.createElement('div');
     document.body.appendChild(container);
     const root = createRoot(container);
     mounted.push({ root, container });
     mockActions.getTaskRuntime.mockImplementation(() => new Promise(() => {}));
+    const element = (p: ExplainPanelProps) => (
+      <I18nProvider language="en">
+        <ArtifactPanel
+          artifacts={[]}
+          tabs={[
+            { id: 'shell:shell-1', kind: 'shell', title: task.command, task },
+          ]}
+          activeTabId="shell:shell-1"
+          reviewChanges={[]}
+          selectedReviewPath={null}
+          onSelectTab={() => {}}
+          onCloseTab={() => {}}
+          onOpenFilePreview={() => {}}
+          onClose={() => {}}
+          explainTask={p.explainTask === undefined ? task : p.explainTask}
+          onExplainTask={p.onExplainTask}
+          taskExplanation={p.taskExplanation}
+        />
+      </I18nProvider>
+    );
     act(() => {
-      root.render(
-        <I18nProvider language="en">
-          <ArtifactPanel
-            artifacts={[]}
-            tabs={[
-              { id: 'shell:shell-1', kind: 'shell', title: task.command, task },
-            ]}
-            activeTabId="shell:shell-1"
-            reviewChanges={[]}
-            selectedReviewPath={null}
-            onSelectTab={() => {}}
-            onCloseTab={() => {}}
-            onOpenFilePreview={() => {}}
-            onClose={() => {}}
-            explainTask={
-              props.explainTask === undefined ? task : props.explainTask
-            }
-            onExplainTask={props.onExplainTask}
-            taskExplanation={props.taskExplanation}
-          />
-        </I18nProvider>,
-      );
+      root.render(element(props));
     });
-    return { container, root };
+    return {
+      container,
+      root,
+      rerender: (p: ExplainPanelProps) =>
+        act(() => {
+          root.render(element(p));
+        }),
+    };
   }
 
   it('offers a header "?" that asks about the active task', () => {
@@ -5931,6 +5940,7 @@ describe('ArtifactPanel task explanation', () => {
     const { container } = renderExplainPanel({
       onExplainTask: vi.fn(),
       taskExplanation: {
+        messageId: 'm1',
         taskId: 'shell-1',
         question: 'Explain what this task is doing: npm run dev',
         answer: 'It runs the dev server.',
@@ -5945,12 +5955,15 @@ describe('ArtifactPanel task explanation', () => {
       'Explain what this task is doing: npm run dev',
     );
     expect(block?.textContent).toContain('It runs the dev server.');
+    // A button-triggered explanation is not a typed /btw command.
+    expect(block?.textContent).not.toContain('/btw');
   });
 
   it('does not mirror an explanation for another task', () => {
     const { container } = renderExplainPanel({
       onExplainTask: vi.fn(),
       taskExplanation: {
+        messageId: 'm1',
         taskId: 'other-task',
         question: 'Explain what this task is doing: other',
         answer: 'About another task.',
@@ -5962,22 +5975,28 @@ describe('ArtifactPanel task explanation', () => {
     ).toBeNull();
   });
 
-  it('renders and asks without a crash when the restored task has no label', () => {
-    const partial = {
-      ...task,
-      label: undefined,
-    } as unknown as DaemonSessionShellTaskStatus;
-    const onExplainTask = vi.fn();
-    const { container } = renderExplainPanel({
-      explainTask: partial,
-      onExplainTask,
+  it('remounts the mirrored answer when a new ask replaces the old one', () => {
+    const explanation = (messageId: string) => ({
+      messageId,
+      taskId: 'shell-1',
+      question: 'Explain what this task is doing: npm run dev',
+      answer: 'It runs the dev server.',
+      isPending: false,
     });
-    const explain = container.querySelector<HTMLButtonElement>(
-      '[data-testid="artifact-panel-explain"]',
-    );
-    expect(explain).not.toBeNull();
-    act(() => explain?.click());
-    expect(onExplainTask).toHaveBeenCalledExactlyOnceWith(partial);
+    const { container, rerender } = renderExplainPanel({
+      onExplainTask: vi.fn(),
+      taskExplanation: explanation('m1'),
+    });
+    const contentSelector =
+      '[data-testid="artifact-panel-explanation"] [data-web-shell-btw-content]';
+    const first = container.querySelector(contentSelector);
+    expect(first).not.toBeNull();
+
+    rerender({ onExplainTask: vi.fn(), taskExplanation: explanation('m2') });
+
+    const second = container.querySelector(contentSelector);
+    expect(second).not.toBeNull();
+    expect(second).not.toBe(first);
   });
 
   it('excerpts a multi-KB label in the header aria label', () => {

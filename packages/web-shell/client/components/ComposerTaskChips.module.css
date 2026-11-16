@@ -103,19 +103,20 @@
   min-height: 30px;
   box-sizing: border-box;
   align-items: center;
-  gap: 4px;
+  gap: 0;
   padding: 0;
   border-radius: 8px;
 }
 
-.listRow:hover,
+/* Every painted point of the row belongs to one of its two buttons: the
+   open button owns the row padding and its hover fill, the stretched "?"
+   covers the full row height, and the row keeps the accent only as the
+   ancestor focus cue. No handler-less strip is left lit. */
+.listRowMain:hover,
 .listRow:focus-within {
   background: var(--accent);
 }
 
-/* The open button owns the row's padding so the hover highlight and the
-   click target are the same box; the row keeps the accent as the ancestor
-   focus cue for both buttons. */
 .listRowMain {
   display: flex;
   min-width: 0;
@@ -170,6 +171,12 @@
 .explainButton svg {
   width: 14px;
   height: 14px;
+}
+
+.rowExplain {
+  align-self: stretch;
+  width: 30px;
+  height: auto;
 }
 
 .chipWrap {

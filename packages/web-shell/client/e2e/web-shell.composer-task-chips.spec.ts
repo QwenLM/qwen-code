@@ -293,17 +293,37 @@ test('the row highlight is the open click target and the "?" keeps the chip focu
   const row = list.locator('[data-testid="composer-task-row"]').first();
   await expect(row).toBeVisible();
 
-  // The lit left gutter must belong to the open button, not to dead row
-  // padding: a click on the highlighted area opens the task.
-  const gutterOwner = await row.evaluate((el) => {
+  // Every painted point of the row must belong to one of its two buttons:
+  // the left gutter and the column left of the "?" to the open button, the
+  // strips above/below the "?" to the "?" itself. A null hit (point outside
+  // the viewport, unpainted row) is a failure, not a pass.
+  const owners = await row.evaluate((el) => {
     const rect = el.getBoundingClientRect();
-    const hit = document.elementFromPoint(
-      rect.left + 4,
-      rect.top + rect.height / 2,
-    );
-    return hit?.closest('[data-testid="composer-task-open"]') !== null;
+    const explainEl = el.querySelector(
+      '[data-testid="composer-task-explain"]',
+    ) as HTMLElement;
+    const er = explainEl.getBoundingClientRect();
+    const sample = (x: number, y: number) => {
+      const hit = document.elementFromPoint(x, y);
+      if (!(hit instanceof Element)) return 'none';
+      if (hit.closest('[data-testid="composer-task-open"]')) return 'open';
+      if (hit.closest('[data-testid="composer-task-explain"]'))
+        return 'explain';
+      return 'row';
+    };
+    return {
+      gutter: sample(rect.left + 4, rect.top + rect.height / 2),
+      gapColumn: sample(er.left - 2, rect.top + rect.height / 2),
+      aboveExplain: sample(er.left + er.width / 2, rect.top + 1),
+      belowExplain: sample(er.left + er.width / 2, rect.bottom - 1),
+    };
   });
-  expect(gutterOwner).toBe(true);
+  expect(owners).toEqual({
+    gutter: 'open',
+    gapColumn: 'open',
+    aboveExplain: 'explain',
+    belowExplain: 'explain',
+  });
 
   // Keyboard focus on the row "?" draws the same ring as the chip itself.
   // Reopen via keyboard so every focus step below has keyboard origin.
@@ -378,14 +398,18 @@ test('the shell detail panel offers "?" and mirrors the explanation in place', a
 
   // The answer mirrors in place inside the panel, with the display line
   // rather than the fact dump; the btw panel above the composer has it too.
+  // A button-triggered explanation is not a typed /btw command: neither
+  // copy may carry the slash-command prefix.
   const block = page.getByTestId('artifact-panel-explanation');
   await expect(block).toContainText('A side answer.');
-  await expect(block).toContainText(
-    'Explain what this task is doing: npm run dev',
-  );
   await expect(block).not.toContainText('Task facts:');
-  await expect(page.locator('[class*="btwPanel"]')).toContainText(
-    'A side answer.',
+  await expect(block.locator('[class*="question"]')).toHaveText(
+    /^Explain what this task is doing: npm run dev/,
+  );
+  const composerPanel = page.locator('[class*="btwPanel"]');
+  await expect(composerPanel).toContainText('A side answer.');
+  await expect(composerPanel.locator('[class*="question"]')).toHaveText(
+    /^Explain what this task is doing: npm run dev/,
   );
 });
 

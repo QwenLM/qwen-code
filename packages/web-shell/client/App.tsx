@@ -14597,17 +14597,16 @@ export function App({
         target.closest('[data-web-shell-context-popover]')
       )
         return;
-      // Plain Escape inside the task chips belongs to their list/focus
-      // handling; dismissing the panel here would swallow it before React
-      // sees it. Ctrl+C/Ctrl+D still cancel a pending side question there.
+      // Buttons, links and fields keep their native keyboard activation
+      // (Escape/Enter/Space on a chip "?", a row button or the panel header
+      // "?"); the dismiss shortcut belongs to the composer surface, so the
+      // editor itself is deliberately not exempted.
       if (
-        e.key === 'Escape' &&
-        !e.ctrlKey &&
-        !e.metaKey &&
-        !e.altKey &&
-        !e.shiftKey &&
         target instanceof Element &&
-        target.closest('[data-web-shell-composer-task-chips]')
+        !target.closest('[data-web-shell-composer-editor]') &&
+        target.closest(
+          'button, a[href], [role="button"], input, select, textarea',
+        )
       )
         return;
       const message = btwMessage;
@@ -18755,10 +18754,14 @@ export function App({
     if (!tab) return null;
     if (tab.kind === 'shell' || tab.kind === 'monitor') return tab.task;
     if (tab.kind === 'subagent') {
+      // The open path registers the tab under toolUseId ?? id
+      // (agentTaskAsToolCall), so accept both id domains here.
       return (
         sessionTasks.find(
           (task) =>
-            task.kind === 'agent' && task.toolUseId === tab.rootToolCallId,
+            task.kind === 'agent' &&
+            (task.toolUseId === tab.rootToolCallId ||
+              task.id === tab.rootToolCallId),
         ) ?? null
       );
     }
@@ -18768,6 +18771,7 @@ export function App({
   const taskExplanation =
     btwMessage?.role === 'btw' && btwMessage.taskId
       ? {
+          messageId: btwMessage.id,
           taskId: btwMessage.taskId,
           question: btwMessage.question,
           answer: btwMessage.answer,
@@ -25769,6 +25773,7 @@ export function App({
                                     question={btwMessage.question}
                                     answer={btwMessage.answer}
                                     isPending={btwMessage.isPending}
+                                    hidePrefix={Boolean(btwMessage.taskId)}
                                   />
                                 </div>
                               ) : null;
