@@ -2262,7 +2262,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'changeOverview.refresh': 'Refresh',
   'changeOverview.openPr': 'Open PR',
   'changeOverview.description': 'Changed files and scale, by delivery unit.',
-  'changeOverview.hiddenFiles': (v) => `…and ${plural(v?.count, 'file')} more`,
+  'changeOverview.hiddenFiles': (v) => `…and ${plural(v?.count, 'more file')}`,
   'changeOverview.hiddenCommits': '…and more commits',
   'codeReview.authoritativeVerdict': 'Authoritative verdict',
   'codeReview.targetEffort': (v) =>

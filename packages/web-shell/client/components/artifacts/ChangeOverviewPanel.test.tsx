@@ -191,7 +191,7 @@ describe('ChangeOverviewPanel', () => {
     };
     renderPanel();
     expect(container.textContent).toContain('60 files');
-    expect(container.textContent).toContain('…and 10 files more');
+    expect(container.textContent).toContain('…and 10 more files');
   });
 
   it('shows the hidden-commits note when the commit window is truncated', () => {
@@ -255,7 +255,7 @@ describe('ChangeOverviewPanel', () => {
     renderPanel();
     expect(container.textContent).toContain('501 files');
     expect(container.textContent).not.toContain('No changes in this scope');
-    expect(container.textContent).toContain('…and 501 files more');
+    expect(container.textContent).toContain('…and 501 more files');
   });
 
   it('omits the count, totals and badge for an unavailable PR', () => {

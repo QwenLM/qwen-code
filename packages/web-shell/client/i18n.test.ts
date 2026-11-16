@@ -260,10 +260,10 @@ describe('web-shell i18n catalog', () => {
     expect(en('changeOverview.files', { count: 1 })).toBe('1 file');
     expect(en('changeOverview.files', { count: 2 })).toBe('2 files');
     expect(en('changeOverview.hiddenFiles', { count: 1 })).toBe(
-      '…and 1 file more',
+      '…and 1 more file',
     );
     expect(en('changeOverview.hiddenFiles', { count: 3 })).toBe(
-      '…and 3 files more',
+      '…and 3 more files',
     );
   });
 
