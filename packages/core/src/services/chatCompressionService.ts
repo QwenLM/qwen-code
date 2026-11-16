@@ -1433,14 +1433,39 @@ export class ChatCompressionService {
     // the budget. The proper signal is `finish_reason === 'length'` (OpenAI) /
     // `MAX_TOKENS` (Gemini), but `runSideQuery` doesn't surface it today.
     // Plumb it through and tighten this guard when that's available.
+    //
+    // Reasoning is spent from the same output budget. A provider that
+    // reports it apart from the output count (Gemini) would otherwise show a
+    // budget with room left after spending it on thinking, so it is counted,
+    // once: where the output count already holds it, it is not added again.
+    // This check and the room check below read the same count (#15936 R8-2,
+    // R11-2).
+    const reportedOutputTokenCount =
+      compressionUsageMetadata?.candidatesTokenCount;
+    const outputSpentTokenCount =
+      typeof reportedOutputTokenCount === 'number' &&
+      typeof compressionInputTokenCount === 'number'
+        ? outputTokenCount(
+            {
+              input: compressionInputTokenCount,
+              output: reportedOutputTokenCount,
+              thoughts: Math.max(
+                0,
+                compressionUsageMetadata?.thoughtsTokenCount ?? 0,
+              ),
+              total: compressionUsageMetadata?.totalTokenCount ?? 0,
+            },
+            compactionAuthType,
+          )
+        : compressionOutputTokenCount;
     const truncationThreshold = outputCountIsEstimated
       ? COMPACT_MAX_OUTPUT_TOKENS
       : coldOutputBudget;
     if (
       !usedCacheSharing &&
       !isSummaryEmpty &&
-      typeof compressionOutputTokenCount === 'number' &&
-      compressionOutputTokenCount >= truncationThreshold
+      typeof outputSpentTokenCount === 'number' &&
+      outputSpentTokenCount >= truncationThreshold
     ) {
       config
         .getDebugLogger()
@@ -1485,30 +1510,9 @@ export class ChatCompressionService {
     //   ~1.5x actual tokens, so below ~2/3 of the ceiling the estimate can
     //   never reach the fixed threshold. That path also drops a summary
     //   without a closed snapshot.
-    //   Reasoning is spent from the same output budget. A provider that
-    //   reports it apart from the output count (Gemini) would otherwise show
-    //   room after spending the budget on thinking, so the room check counts
-    //   it, once: where the output count already holds it, it is not added
-    //   again (#15936 R8-2).
+    //   The room check reads the output count the threshold above read,
+    //   reasoning included (#15936 R8-2).
     // - A summary that ends inside a tag was cut, whatever the usage says.
-    const reportedOutputTokenCount =
-      compressionUsageMetadata?.candidatesTokenCount;
-    const outputSpentTokenCount =
-      typeof reportedOutputTokenCount === 'number' &&
-      typeof compressionInputTokenCount === 'number'
-        ? outputTokenCount(
-            {
-              input: compressionInputTokenCount,
-              output: reportedOutputTokenCount,
-              thoughts: Math.max(
-                0,
-                compressionUsageMetadata?.thoughtsTokenCount ?? 0,
-              ),
-              total: compressionUsageMetadata?.totalTokenCount ?? 0,
-            },
-            compactionAuthType,
-          )
-        : compressionOutputTokenCount;
     const usageShowsRoom =
       !outputCountIsEstimated &&
       typeof compressionInputTokenCount === 'number' &&

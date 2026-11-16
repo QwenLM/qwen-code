@@ -4040,6 +4040,72 @@ describe('issue #7960: compression side-query output budget vs small windows', (
         CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
       );
     });
+
+    describe('in the output-budget check (#15936 R11-2)', () => {
+      const CLOSED =
+        '<state_snapshot><overall_goal>port the parser</overall_goal></state_snapshot>';
+      const REASONING = 5_000;
+
+      it.each([
+        ['an unclosed snapshot', UNCLOSED],
+        ['a closed snapshot', CLOSED],
+      ])(
+        'drops %s when output and reasoning reported apart spend the budget',
+        async (_label, text) => {
+          // The server counts the prompt below the local estimate, so the
+          // window shows room; only the budget shows the cut.
+          withAuthType(AuthType.USE_GEMINI);
+          mockVllmBackend(WINDOW, false, {
+            text,
+            usage: (promptTokens) => ({
+              promptTokenCount: Math.floor(promptTokens * 0.9),
+              candidatesTokenCount: capturedMaxOutputTokens! - REASONING,
+              thoughtsTokenCount: REASONING,
+            }),
+          });
+
+          const result = await compressChars(182_000, 45_000);
+
+          expectNoNewHistory(
+            result,
+            CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
+          );
+        },
+      );
+
+      it('keeps a closed snapshot when output and reasoning stop one token short of the budget', async () => {
+        withAuthType(AuthType.USE_GEMINI);
+        mockVllmBackend(WINDOW, false, {
+          text: CLOSED,
+          usage: (promptTokens) => ({
+            promptTokenCount: Math.floor(promptTokens * 0.9),
+            candidatesTokenCount: capturedMaxOutputTokens! - REASONING - 1,
+            thoughtsTokenCount: REASONING,
+          }),
+        });
+
+        const result = await compressChars(182_000, 45_000);
+
+        expectCompressed(result);
+      });
+
+      it('does not add reasoning the output count already holds', async () => {
+        // Adding it again would put this output over the budget on paper.
+        withAuthType(AuthType.USE_OPENAI);
+        mockVllmBackend(WINDOW, false, {
+          text: CLOSED,
+          usage: (promptTokens) => ({
+            promptTokenCount: Math.floor(promptTokens * 0.9),
+            candidatesTokenCount: capturedMaxOutputTokens! - 1,
+            thoughtsTokenCount: REASONING,
+          }),
+        });
+
+        const result = await compressChars(182_000, 45_000);
+
+        expectCompressed(result);
+      });
+    });
   });
 
   it('keeps a complete summary that quotes the compression directive', async () => {
