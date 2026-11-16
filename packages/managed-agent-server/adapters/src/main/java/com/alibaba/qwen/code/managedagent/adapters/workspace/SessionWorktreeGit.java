@@ -296,17 +296,33 @@ public final class SessionWorktreeGit implements SessionWorktreeOperations {
                 throw new IOException("Original Git registration changed");
             }
             Path target = Path.of(plan.root()).resolve(plan.worktreeRoot());
-            requireLegacyAnchor(target, saved.path("target").asText(), volumeUuid);
-            requireLegacyAnchor(target.resolve(".git"), saved.path("gitfile").asText(), volumeUuid);
-            requireLegacyAnchor(Path.of(saved.path("gitdir").asText()), saved.path("gitdirIdentity").asText(), volumeUuid);
+            // A PREPARING checkout interrupted across the upgrade keeps its legacy
+            // plan but already captured a stable completion; verify those anchors
+            // in place instead of requiring the legacy shape.
+            requireAttestedAnchor(target, saved.path("target").asText(), volumeUuid);
+            requireAttestedAnchor(target.resolve(".git"), saved.path("gitfile").asText(), volumeUuid);
+            requireAttestedAnchor(Path.of(saved.path("gitdir").asText()), saved.path("gitdirIdentity").asText(), volumeUuid);
             var upgraded = JSON.valueToTree(plan);
             ((com.fasterxml.jackson.databind.node.ObjectNode) upgraded)
                     .put("rootIdentity", identity(Path.of(plan.root())))
                     .put("commonIdentity", identity(Path.of(plan.commonDirectory())));
-            return Map.of("plan", JSON.writeValueAsString(upgraded), "identity", actual);
+            boolean stableCompletion = saved.path("target").asText().startsWith("macos-volume/1:")
+                    && saved.path("gitfile").asText().startsWith("macos-volume/1:")
+                    && saved.path("gitdirIdentity").asText().startsWith("macos-volume/1:");
+            return Map.of("plan", JSON.writeValueAsString(upgraded), "identity", stableCompletion ? savedIdentity : actual);
         } catch (IOException exception) {
             throw error("worktree_identity_conflict", "The original worktree cannot be re-attested.");
         }
+    }
+
+    private static void requireAttestedAnchor(Path path, String saved, String volumeUuid) {
+        if (saved.startsWith("macos-volume/1:")) {
+            if (!saved.startsWith("macos-volume/1:" + volumeUuid + ":") || !saved.equals(identity(path))) {
+                throw error("worktree_identity_conflict", "An original inode, creation time or attested volume changed.");
+            }
+            return;
+        }
+        requireLegacyAnchor(path, saved, volumeUuid);
     }
 
     private static void requireLegacyAnchor(Path path, String saved, String volumeUuid) {

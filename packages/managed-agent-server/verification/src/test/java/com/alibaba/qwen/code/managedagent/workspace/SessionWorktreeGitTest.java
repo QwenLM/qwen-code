@@ -80,6 +80,30 @@ class SessionWorktreeGitTest {
         assertThat(git.cleanupBlocker(next, upgraded.get("identity"))).isEqualTo("worktree_dirty");
     }
 
+    @org.junit.jupiter.api.condition.EnabledOnOs(org.junit.jupiter.api.condition.OS.MAC)
+    @Test
+    void reattestUpgradesALegacyPlanOverAnAlreadyStableCompletion() throws Exception {
+        Plan initial = plan("project", null);
+        String stable = git.prepare(initial);
+        String volume = com.alibaba.qwen.code.runtimebroker.host.MacOsHostIdentity.volumeUuid(root);
+        var mapper = new ObjectMapper();
+        var legacyPlan = (com.fasterxml.jackson.databind.node.ObjectNode) mapper.valueToTree(initial);
+        legacyPlan.put("rootIdentity", legacyIdentity(root)).put("commonIdentity", legacyIdentity(Path.of(initial.commonDirectory())));
+        Plan mixed = mapper.treeToValue(legacyPlan, Plan.class);
+        Path container = root.resolve(SessionWorktreeGit.CONTAINER);
+        Files.writeString(container.resolve(mixed.worktreeId() + ".json"), mapper.writeValueAsString(mixed));
+        assertThatThrownBy(() -> SessionWorktreeGit.reattest(mixed, stable, "a".repeat(32)))
+                .isInstanceOf(ManagedAgentException.class);
+        var upgraded = SessionWorktreeGit.reattest(mixed, stable, volume);
+        assertThat(upgraded.get("identity")).isEqualTo(stable);
+        Plan next = mapper.readValue(upgraded.get("plan"), Plan.class);
+        assertThat(next.rootIdentity()).startsWith("macos-volume/1:" + volume);
+        assertThat(next.commonIdentity()).startsWith("macos-volume/1:" + volume);
+        assertThat(next.storageIdentity()).isEqualTo(mixed.storageIdentity());
+        Files.writeString(container.resolve(mixed.worktreeId() + ".json"), upgraded.get("plan"));
+        assertThat(SessionWorktreeGit.verify(next, upgraded.get("identity"))).isEqualTo(stable);
+    }
+
     private static String legacyIdentity(Path path) throws Exception {
         var attributes = Files.readAttributes(path, java.nio.file.attribute.BasicFileAttributes.class);
         return attributes.fileKey() + ":" + attributes.creationTime();

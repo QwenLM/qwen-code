@@ -106,15 +106,30 @@ public final class WorkspaceIdentityReattestationStore {
                     && plan.storageId().equals(checkout.path("storage_id").asText())
                     && plan.worktreeId().equals(checkout.path("worktree_id").asText())
                     && plan.root().equals(current.root()) && hasAlias(inventory, plan.tenantId(), plan.storageId()), "worktree_scope_conflict");
-            var next = worktrees.reattest(plan, checkout.path("identity_json").asText(), current.device());
-            ((ObjectNode) checkout).put("new_plan_json", next.get("plan")).put("new_identity_json", next.get("identity"));
+            String savedIdentity = checkout.path("identity_json").asText();
+            String newPlan;
+            String newIdentity;
+            if (plan.rootIdentity().startsWith("macos-volume/1:")) {
+                // Worktrees created between the upgrade and the reboot already carry
+                // stable anchors on the legacy owner: verify them against the attested
+                // volume and carry their records forward unchanged.
+                requireStableAnchors(plan, savedIdentity, current.device());
+                worktrees.verify(plan, savedIdentity);
+                newPlan = checkout.path("plan_json").asText();
+                newIdentity = savedIdentity;
+            } else {
+                var next = worktrees.reattest(plan, savedIdentity, current.device());
+                newPlan = next.get("plan");
+                newIdentity = next.get("identity");
+            }
+            ((ObjectNode) checkout).put("new_plan_json", newPlan).put("new_identity_json", newIdentity);
             Path container = Path.of(plan.root()).resolve(".qwen-managed-worktrees");
             Path planFile = container.resolve(plan.worktreeId() + ".json");
             Path readyFile = container.resolve(plan.worktreeId() + ".ready");
             check(JSON.readTree(read(planFile)).equals(JSON.valueToTree(plan))
-                    && JSON.readTree(read(readyFile)).equals(JSON.readTree(checkout.path("identity_json").asText())), "marker_conflict");
-            changes.add(change(planFile, read(planFile), next.get("plan").getBytes(java.nio.charset.StandardCharsets.UTF_8)));
-            changes.add(change(readyFile, read(readyFile), next.get("identity").getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+                    && JSON.readTree(read(readyFile)).equals(JSON.readTree(savedIdentity)), "marker_conflict");
+            changes.add(change(planFile, read(planFile), newPlan.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+            changes.add(change(readyFile, read(readyFile), newIdentity.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
         }
         request.put("inventoryDigest", WorkspaceEvidenceResources.digest(JSON.writeValueAsBytes(inventory)));
         return request;
@@ -402,6 +417,15 @@ public final class WorkspaceIdentityReattestationStore {
         check("READY".equals(checkout.path("state").asText())
                 || "BLOCKED".equals(checkout.path("state").asText()) && "worktree_identity_conflict".equals(checkout.path("failure_code").asText()), "worktree_unsettled");
         check(checkout.path("identity_json").isTextual(), "worktree_unsettled");
+    }
+
+    private static void requireStableAnchors(Plan plan, String savedIdentity, String volumeUuid) throws IOException {
+        String prefix = "macos-volume/1:" + volumeUuid + ":";
+        JsonNode saved = JSON.readTree(savedIdentity);
+        check(plan.rootIdentity().startsWith(prefix) && plan.commonIdentity().startsWith(prefix)
+                && saved.path("target").asText().startsWith(prefix)
+                && saved.path("gitfile").asText().startsWith(prefix)
+                && saved.path("gitdirIdentity").asText().startsWith(prefix), "worktree_identity_conflict");
     }
 
     private static void requireStable(JsonNode request, JsonNode owner, Identity current) {

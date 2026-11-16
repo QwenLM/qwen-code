@@ -5,6 +5,8 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeB
 import com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityReader;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityReader.Identity;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore.Plan;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.DeserializationFeature;
@@ -23,12 +25,17 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.Base64;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class WorkspaceIdentityReattestationStoreTest {
     private static final ObjectMapper JSON = new ObjectMapper().enable(DeserializationFeature.USE_LONG_FOR_INTS);
@@ -38,6 +45,7 @@ class WorkspaceIdentityReattestationStoreTest {
     private JdbcTemplate jdbc;
     private WorkspaceStorageGuard guard;
     private WorkspaceIdentityReattestationStore store;
+    private WorktreeFiles worktrees;
     private AtomicReference<Identity> observed;
     private AtomicReference<Identity> numeric;
     private Identity legacy;
@@ -65,7 +73,8 @@ class WorkspaceIdentityReattestationStoreTest {
         guard = new WorkspaceStorageGuard(jdbc, manager, settings, reader);
         guard.register("tenant", "storage", UUID.randomUUID().toString());
         observed.set(new Identity(root.toString(), "host", VOLUME, "123", legacy.birthTime()));
-        store = new WorkspaceIdentityReattestationStore(jdbc, manager, guard, reader, mock(WorktreeFiles.class));
+        worktrees = mock(WorktreeFiles.class);
+        store = new WorkspaceIdentityReattestationStore(jdbc, manager, guard, reader, worktrees);
         input = JSON.createObjectNode().put("type", WorkspaceIdentityReattestationStore.TYPE)
                 .put("operationId", UUID.randomUUID().toString()).put("tenantId", "tenant").put("storageId", "storage")
                 .put("physicalKey", LocalStorageOwners.physicalKey(legacy)).put("hostId", "host").put("volumeUuid", VOLUME);
@@ -184,5 +193,107 @@ class WorkspaceIdentityReattestationStoreTest {
         store.complete(plan);
         assertThat(jdbc.queryForObject("SELECT status FROM ma_turn", String.class)).isEqualTo("RUNNING");
         assertThat(jdbc.queryForObject("SELECT error_code FROM ma_turn", String.class)).isEqualTo("hosted_harness_recovery_blocked");
+    }
+
+    @Test
+    void mixedAnchorInventoryUpgradesLegacyWorktreesAndCarriesStableOnesUnchanged() throws Exception {
+        String prefix = "macos-volume/1:" + VOLUME + ":";
+        String legacyRoot = "(dev=1000003,ino=123):2026-01-01T00:00:00Z";
+        String legacyCommon = "(dev=1000003,ino=124):2026-01-01T00:00:00Z";
+        String stableRoot = prefix + "123:2026-01-01T00:00:00Z";
+        String stableCommon = prefix + "124:2026-01-01T00:00:00Z";
+        String legacyCompletion = completion("(dev=1000003,ino=201):2026-01-01T00:00:00Z",
+                "(dev=1000003,ino=202):2026-01-01T00:00:00Z", "(dev=1000003,ino=203):2026-01-01T00:00:00Z");
+        String stableCompletion = completion(prefix + "201:2026-01-01T00:00:00Z",
+                prefix + "202:2026-01-01T00:00:00Z", prefix + "203:2026-01-01T00:00:00Z");
+        Plan legacyCheckout = seedCheckout("session-legacy", legacyRoot, legacyCommon, legacyCompletion);
+        Plan stableCheckout = seedCheckout("session-stable", stableRoot, stableCommon, stableCompletion);
+        Plan mixedCheckout = seedCheckout("session-mixed", legacyRoot, legacyCommon, stableCompletion);
+        when(worktrees.reattest(any(), any(), any())).thenAnswer(invocation -> {
+            Plan plan = invocation.getArgument(0);
+            String saved = invocation.getArgument(1);
+            if (!plan.rootIdentity().startsWith("(dev=")) {
+                throw new ManagedAgentException(409, "worktree_identity_conflict", "Offline re-attestation requires a legacy anchor.");
+            }
+            ObjectNode upgraded = (ObjectNode) JSON.valueToTree(plan);
+            upgraded.put("rootIdentity", stableRoot).put("commonIdentity", stableCommon);
+            String identity = JSON.readTree(saved).path("target").asText().startsWith("macos-volume/1:") ? saved : stableCompletion;
+            return Map.of("plan", JSON.writeValueAsString(upgraded), "identity", identity);
+        });
+        JsonNode plan = store.plan(input);
+        verify(worktrees, times(2)).reattest(any(), any(), any());
+        verify(worktrees, times(1)).verify(any(), any());
+        JsonNode rows = plan.path("inventory").path("worktrees");
+        JsonNode stableRow = row(rows, stableCheckout.worktreeId());
+        assertThat(stableRow.path("new_plan_json").asText()).isEqualTo(JSON.writeValueAsString(stableCheckout));
+        assertThat(stableRow.path("new_identity_json").asText()).isEqualTo(stableCompletion);
+        JsonNode mixedRow = row(rows, mixedCheckout.worktreeId());
+        assertThat(mixedRow.path("new_identity_json").asText()).isEqualTo(stableCompletion);
+        assertThat(JSON.readTree(mixedRow.path("new_plan_json").asText()).path("rootIdentity").asText()).isEqualTo(stableRoot);
+        for (JsonNode file : plan.path("inventory").path("files")) {
+            if (file.path("path").asText().contains(stableCheckout.worktreeId())) {
+                assertThat(file.path("before").asText()).isEqualTo(file.path("after").asText());
+            }
+        }
+        store.begin(plan);
+        store.complete(plan);
+        String nextKey = plan.path("inventory").path("newPhysicalKey").asText();
+        assertThat(jdbc.queryForObject("SELECT plan_json FROM ma_session_worktree WHERE session_id = ?", String.class, "session-stable"))
+                .isEqualTo(JSON.writeValueAsString(stableCheckout));
+        assertThat(jdbc.queryForObject("SELECT identity_json FROM ma_session_worktree WHERE session_id = ?", String.class, "session-stable"))
+                .isEqualTo(stableCompletion);
+        assertThat(jdbc.queryForList("SELECT session_id FROM ma_session_worktree WHERE physical_key = ? AND state = 'READY' AND revision = 2",
+                String.class, nextKey)).containsExactlyInAnyOrder("session-legacy", "session-stable", "session-mixed");
+    }
+
+    @Test
+    void stableAnchorsOutsideTheAttestedVolumeOrGenerationAreRefusedWithoutFence() throws Exception {
+        String foreign = "macos-volume/1:" + "a".repeat(32) + ":";
+        String stableRoot = "macos-volume/1:" + VOLUME + ":123:2026-01-01T00:00:00Z";
+        String stableCommon = "macos-volume/1:" + VOLUME + ":124:2026-01-01T00:00:00Z";
+        seedCheckout("session-foreign", foreign + "123:2026-01-01T00:00:00Z", foreign + "124:2026-01-01T00:00:00Z",
+                completion(foreign + "201:2026-01-01T00:00:00Z", foreign + "202:2026-01-01T00:00:00Z", foreign + "203:2026-01-01T00:00:00Z"));
+        assertThatThrownBy(() -> store.plan(input)).hasMessageContaining("worktree_identity_conflict");
+        jdbc.update("DELETE FROM ma_session_worktree");
+        seedCheckout("session-mixed-generation", stableRoot, stableCommon,
+                completion("(dev=1000003,ino=201):2026-01-01T00:00:00Z", "(dev=1000003,ino=202):2026-01-01T00:00:00Z",
+                        "(dev=1000003,ino=203):2026-01-01T00:00:00Z"));
+        assertThatThrownBy(() -> store.plan(input)).hasMessageContaining("worktree_identity_conflict");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE fence_operation_id IS NOT NULL", Long.class)).isZero();
+    }
+
+    private Plan seedCheckout(String sessionId, String rootIdentity, String commonIdentity, String identityJson) throws Exception {
+        String worktreeId = UUID.randomUUID().toString().replace("-", "");
+        String directory = ".qwen-managed-worktrees/" + worktreeId;
+        Plan plan = new Plan("tenant", "workspace", 1, "storage", "project", "config", 1, root.toString(),
+                rootIdentity, "project", ".", root.resolve("project/.git").toString(), commonIdentity,
+                null, "a".repeat(40), worktreeId, directory, directory, "worktree-managed-" + worktreeId);
+        String planJson = JSON.writeValueAsString(plan);
+        String operationId = "worktree-op-" + worktreeId;
+        new WorkspaceOperations(jdbc, "tenant").create(WorkspaceOperations.Kind.SESSION_WORKTREE, operationId,
+                WorkspaceOperations.values("storage_id", "storage", "session_id", sessionId, "state", "READY"));
+        jdbc.update("INSERT INTO ma_session_worktree (tenant_id, session_id, workspace_id, storage_id, physical_key,"
+                + " worktree_id, owner_actor_key, state, revision, plan_json, identity_json, operation_id, failure_code,"
+                + " gmt_create, gmt_modified) VALUES ('tenant', ?, 'workspace', 'storage', ?, ?, 'actor', 'READY', 1, ?, ?, ?, NULL, 1, 1)",
+                sessionId, input.path("physicalKey").asText(), worktreeId, planJson, identityJson, operationId);
+        Path container = Files.createDirectories(root.resolve(".qwen-managed-worktrees"));
+        Files.writeString(container.resolve(worktreeId + ".json"), planJson);
+        Files.writeString(container.resolve(worktreeId + ".ready"), identityJson);
+        return plan;
+    }
+
+    private String completion(String target, String gitfile, String gitdirIdentity) {
+        return JSON.createObjectNode().put("target", target).put("gitfile", gitfile)
+                .put("gitdir", root.resolve(".git/worktrees/checkout").toString())
+                .put("gitdirIdentity", gitdirIdentity).toString();
+    }
+
+    private static JsonNode row(JsonNode rows, String worktreeId) {
+        for (JsonNode row : rows) {
+            if (worktreeId.equals(row.path("worktree_id").asText())) {
+                return row;
+            }
+        }
+        throw new AssertionError("Missing worktree row " + worktreeId);
     }
 }
