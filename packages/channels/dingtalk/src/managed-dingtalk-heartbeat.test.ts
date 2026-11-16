@@ -128,7 +128,7 @@ describe('managed DingTalk heartbeat timer cleanup (#17173 R5)', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it('disconnect retires the heartbeat of the current socket', async () => {
+  it('the retire re-arms on every reconnect, not just the first socket', async () => {
     const { createStreamClient } = createManagedDingtalkDeps();
     const stream = createStreamClient(SETTINGS, () => true);
     const connecting = stream.connect();
@@ -136,9 +136,32 @@ describe('managed DingTalk heartbeat timer cleanup (#17173 R5)', () => {
     latestSocket().open();
     await connecting;
     expect(vi.getTimerCount()).toBe(1);
+
+    // First drop: socket B replaces socket A.
+    latestSocket().emit('close');
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(0);
+    const socketB = latestSocket();
+    socketB.open();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(vi.getTimerCount()).toBe(1);
+
+    // Second drop: socket C replaces socket B. An arm-once retire (armed only
+    // on the first socket) leaks B's interval into C here — the count would
+    // be 2, and the leaked interval would survive disconnect.
+    socketB.emit('close');
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(0);
+    const socketC = latestSocket();
+    socketC.open();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(vi.getTimerCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(socketC.ping).toHaveBeenCalledTimes(1);
+    expect(socketC.terminate).not.toHaveBeenCalled();
+
     stream.disconnect();
     expect(vi.getTimerCount()).toBe(0);
-    // No reconnect after a user disconnect.
     await vi.advanceTimersByTimeAsync(5_000);
     expect(vi.getTimerCount()).toBe(0);
   });
