@@ -18,6 +18,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.RuntimeObservation;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
+import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimePublicationGrant;
 import com.alibaba.qwen.code.runtimebroker.RuntimePublicationVerifier;
@@ -30,6 +31,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.TerminalHoldAdmission;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.VerifiedDispatchPayload;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.protocol.ProviderRuntimeProtocol;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBindingRegistry.BindingContext;
@@ -350,6 +352,22 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
     public CompletionStage<RuntimeBindingRecord> warm(
             String harnessSessionId) {
         return warm(harnessSessionId, null);
+    }
+
+    /** 只读查询可信会话对应的当前 Workspace 绑定，不分配也不预热运行时。 */
+    public CompletionStage<RuntimeBindingRecord> findBindingForHarnessSession(
+            String tenantId, String harnessSessionId) {
+        requireOpen(closed);
+        String harnessId = BrokerValues.requireId(
+                harnessSessionId, "harnessSessionId");
+        return resolveScope(harnessId, false, null).thenApply(scope -> {
+            if (!scope.getTenantId().equals(tenantId)) {
+                throw conflict("runtime_session_conflict",
+                        "Harness Session belongs to another tenant");
+            }
+            return bindingRepository.findLatestForRequest(
+                    provisionRequest(scope, harnessId));
+        });
     }
 
     public CompletionStage<RuntimeScope> capabilities(
@@ -1061,6 +1079,12 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                                     && !"run_shell_command".equals(toolName) && !"monitor".equals(toolName)) {
                             throw invalid("runtime_payload_invalid", "Tool payload is invalid");
                         }
+                        // The digest was just computed and compared to the
+                        // receipt and the payload parsed and shape-checked
+                        // above; classify from those locals instead of
+                        // hashing and parsing the same bytes a second time.
+                        VerifiedDispatchPayload verifiedPayload =
+                                VerifiedDispatchPayload.of(digest, toolName);
                         if (WorkspaceExecutionProfile.isExternalWorkspaceRequest(context.binding().getRequest())
                                 && (v3 || record.getReference().containsKey("runtimeProtocol")
                                         || !Set.of("read_file", "write_file", "edit", "glob").contains(toolName))) {
@@ -1127,7 +1151,8 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                                             if (family != null) {
                                                 admitBackgroundProcess(context, current, family);
                                             }
-                                            executionDispatcher.beginDispatch(context, current, payload, grant);
+                                            executionDispatcher.beginDispatch(context, current, payload,
+                                                    grant, verifiedPayload);
                                             ToolExecutionRecord latest = executionRepository
                                                     .findByExecutionCallId(executionId);
                                             return latest == null ? current : latest;
@@ -1137,7 +1162,8 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                                     });
                         }
                         if (shouldDriveDispatch(record)) {
-                            executionDispatcher.beginDispatch(context, record, payload);
+                            executionDispatcher.beginDispatch(context, record, payload,
+                                    null, verifiedPayload);
                         }
                         ToolExecutionRecord latest = executionRepository.findByExecutionCallId(executionId);
                         return CompletableFuture.completedFuture(latest == null ? record : latest);
@@ -1830,6 +1856,99 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
     /** Trusted maintenance of the saved generation; never resolves current authorization or provisions a replacement. */
     public CompletionStage<RuntimeBindingRecord> recoverBinding(String bindingId, long expectedGeneration) {
         return bindingProvisioning.recoverBinding(bindingId, expectedGeneration, false);
+    }
+
+    /** 已核原 endpoint 的宿主专用入口；快照版本过期或工具未决时不得进入恢复。 */
+    public CompletionStage<RuntimeBindingRecord> recoverExternalWorkspaceBinding(
+            String bindingId, long expectedGeneration, long expectedVersion) {
+        if (expectedVersion < 0) {
+            return failed(conflict("runtime_broker_recovery_blocked",
+                    "Invalid recovery snapshot"));
+        }
+        return bindingProvisioning.recoverBinding(
+                bindingId, expectedGeneration, false, expectedVersion);
+    }
+
+    private boolean blockRecovery(RuntimeBindingRecord claimed) {
+        return bindingRepository.compareAndSet(claimed, claimed.withState(
+                RuntimeBindingRecord.State.RECOVERY_BLOCKED,
+                claimed.getLease(), clock.instant())) != null;
+    }
+
+    /**
+     * Blocks recovery and answers whether the binding is now blocked. The
+     * deadline and the failure handler hold the same claim, so the one that
+     * writes second finds the block already there. A write or read that
+     * fails answers false, and the failure is kept on {@code cause}.
+     */
+    private boolean blockRecoveryQuietly(RuntimeBindingRecord claimed,
+            Throwable cause) {
+        try {
+            if (blockRecovery(claimed)) {
+                return true;
+            }
+            RuntimeBindingRecord latest = bindingRepository.findById(
+                    claimed.getBindingId());
+            return latest != null && latest.getState()
+                    == RuntimeBindingRecord.State.RECOVERY_BLOCKED;
+        } catch (RuntimeException failure) {
+            cause.addSuppressed(failure);
+            return false;
+        }
+    }
+
+    private void blockRecovery(String bindingId, long operationGeneration) {
+        RuntimeBindingRecord latest = bindingRepository.findById(bindingId);
+        if (latest != null && ownsOperation(latest, operationGeneration)
+                && latest.getState() == RuntimeBindingRecord.State.READY) {
+            blockRecovery(latest);
+        }
+    }
+
+    private boolean ownsOperation(RuntimeBindingRecord record,
+            long operationGeneration) {
+        return brokerOwnerId.equals(record.getOperationOwner())
+                && record.getOperationGeneration() == operationGeneration;
+    }
+
+    private long operationDeadlineNanos() {
+        long leaseNanos = operationLeaseDuration.toNanos();
+        return leaseNanos > Long.MAX_VALUE / 4
+                ? Long.MAX_VALUE : leaseNanos * 4;
+    }
+
+    private long operationDeadlineMillis() {
+        return Math.max(1, operationDeadlineNanos() / 1_000_000);
+    }
+
+    private record DurableProvision(RuntimeLease lease,
+            RuntimeResourceHandle handle) {
+    }
+
+    private record ReconcileStep(Kind kind, RuntimeObservation observation,
+            RuntimeBrokerException error) {
+        private enum Kind {
+            RETRY,
+            LOST,
+            BLOCKED,
+            READY
+        }
+
+        static ReconcileStep retry() {
+            return new ReconcileStep(Kind.RETRY, null, null);
+        }
+
+        static ReconcileStep lost(RuntimeObservation observation) {
+            return new ReconcileStep(Kind.LOST, observation, null);
+        }
+
+        static ReconcileStep blocked(RuntimeBrokerException error) {
+            return new ReconcileStep(Kind.BLOCKED, null, error);
+        }
+
+        static ReconcileStep ready(RuntimeObservation observation) {
+            return new ReconcileStep(Kind.READY, observation, null);
+        }
     }
 
     private RuntimeSessionRecord requireAcquireSessionRecord(SessionContext context) {

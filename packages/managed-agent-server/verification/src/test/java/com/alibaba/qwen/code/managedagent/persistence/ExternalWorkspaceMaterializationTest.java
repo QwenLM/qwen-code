@@ -14,6 +14,7 @@ import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection
 import com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.model.TenantContext;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.workspace.WorkspaceDiscoveryService;
@@ -576,6 +577,51 @@ class ExternalWorkspaceMaterializationTest {
     }
 
     @Test
+    void ephemeralWorkspaceUsesTheSameRegistrationEligibilityAsExternal() {
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        properties.getHarness().setEnabled(true);
+        properties.getSessionStore().setEnabled(true);
+        properties.getRuntimeBroker().setEnabled(true);
+        properties.getRuntimeBroker().setTrustedLocalRebootRecovery(false);
+        properties.getRuntimeBroker().setExternalProviderUrl("http://provider.invalid");
+        properties.getRuntimeBroker().setProvisioner("external-workspace");
+        properties.getRuntimeBroker().setExternalProviderToken("provider-token-for-tests");
+        properties.getRuntimeBroker().setExternalProviderId("provider");
+        properties.getRuntimeBroker().setWorkspaceCwd("/worker/workspace");
+        properties.getRuntimeBroker().setWorkspaceId("workspace");
+        var harness = mock(HarnessConnector.class);
+        when(harness.supportsLifecycle("hosted-workspace-external-files/1")).thenReturn(true);
+        var warmer = mock(com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer.class);
+        when(warmer.supportsWorkspaceClose("hosted-workspace-external-files/1")).thenReturn(true);
+        try (var context = new org.springframework.context.annotation.AnnotationConfigApplicationContext()) {
+            context.registerBean(ManagedAgentProperties.class, () -> properties);
+            context.registerBean(ExternalStorageRegistrationStore.class, () -> registrations);
+            context.registerBean(HarnessConnector.class, () -> harness);
+            context.registerBean(com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer.class, () -> warmer);
+            context.registerBean(ManagedWorkspaceRegistry.class, () -> registry);
+            context.refresh();
+            new ExternalWorkspaceRegistrationService(registrations, store).ensureEphemeralRegistered(
+                    "tenant", "owner", "ephemeral",
+                    new EphemeralWorkspaceRegistration(
+                            properties.getRuntimeBroker().getExternalProviderId(),
+                            "ephemeral-workspace", "/worker/ephemeral", 1),
+                    "Ephemeral");
+
+            assertThat(registry.findReadable("tenant", "owner", "ephemeral-workspace").canCreateSession())
+                    .isTrue();
+            assertThat(registry.findReadable("tenant", "owner", List.of("ephemeral-workspace"))
+                    .get("ephemeral-workspace").canCreateSession()).isTrue();
+
+            jdbc.update("UPDATE ma_storage SET registration_json = 'not-json' WHERE storage_id = ?",
+                    "ephemeral-workspace".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            assertThat(registry.findReadable("tenant", "owner", "ephemeral-workspace").canCreateSession())
+                    .isFalse();
+            assertThat(registry.findReadable("tenant", "owner", List.of("ephemeral-workspace"))
+                    .get("ephemeral-workspace").canCreateSession()).isFalse();
+        }
+    }
+
+    @Test
     void closedBoundedRequestRejectsUnknownDuplicateTrailingAndInvalidOwner() throws Exception {
         String valid = body("workspace", "Name", "owner", "key", null);
         for (String invalid : List.of(valid.replace("\"owner\"", "\"\""),
@@ -624,6 +670,13 @@ class ExternalWorkspaceMaterializationTest {
         for (String drifted : List.of("\"registrationRevision\":\"1\"", "\"registrationRevision\":1.0")) {
             jdbc.update("UPDATE ma_storage SET registration_json = ?",
                     registration.replace("\"registrationRevision\":1", drifted));
+            conflict(() -> store.materialize("tenant", "workspace", "Name", "owner", "key"), "external_workspace_conflict");
+        }
+        jdbc.update("UPDATE ma_storage SET registration_json = ?", registration);
+        // An unreadable stored registration is a permanent ownership refusal
+        // (409), not a malformed-request 400 from the decode exception.
+        for (String malformed : List.of("not-json", "{\"kind\":\"ephemeral\"}")) {
+            jdbc.update("UPDATE ma_storage SET registration_json = ?", malformed);
             conflict(() -> store.materialize("tenant", "workspace", "Name", "owner", "key"), "external_workspace_conflict");
         }
         jdbc.update("UPDATE ma_storage SET registration_json = ?", registration);
