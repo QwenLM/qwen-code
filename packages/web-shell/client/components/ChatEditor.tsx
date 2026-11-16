@@ -1015,6 +1015,7 @@ function ToolbarPopover({
   const handoffRef = useRef(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const submenuTriggerRef = useRef<HTMLButtonElement>(null);
+  const sheetListRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const returningFromSubmenuRef = useRef(false);
   const scopeKey = JSON.stringify([
@@ -1042,7 +1043,16 @@ function ToolbarPopover({
   }, [open]);
 
   useEffect(() => {
-    if (mobileSheet) return;
+    if (mobileSheet) {
+      // Focus the card rather than its search input so touch expansion does
+      // not open the software keyboard; Tab still starts inside the list.
+      if (open && submenuOpen) sheetListRef.current?.focus();
+      if (open && returningFromSubmenuRef.current) {
+        returningFromSubmenuRef.current = false;
+        submenuTriggerRef.current?.focus();
+      }
+      return;
+    }
     if (open && submenuOpen) {
       searchInputRef.current?.focus();
       return;
@@ -1076,6 +1086,7 @@ function ToolbarPopover({
             if (mobileSheet) {
               // Keep the sheet open so reasoning controls stay reachable;
               // only the floating model card collapses on selection.
+              returningFromSubmenuRef.current = true;
               setSubmenuOpen(false);
               setSearchQuery('');
               onSelect(id, 'sheet');
@@ -1148,14 +1159,19 @@ function ToolbarPopover({
         onOpenChange={onOpenChange}
         shouldScaleBackground={false}
       >
-        <DrawerTrigger asChild>{trigger}</DrawerTrigger>
+        <DrawerTrigger ref={triggerRef} asChild>
+          {trigger}
+        </DrawerTrigger>
         <DrawerContent
           aria-describedby={undefined}
           data-web-shell-model-sheet
           className="pb-[max(1rem,env(safe-area-inset-bottom))]"
           onClick={(event) => event.stopPropagation()}
           onOpenAutoFocus={(event) => event.preventDefault()}
-          onCloseAutoFocus={(event) => event.preventDefault()}
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            triggerRef.current?.focus();
+          }}
           onEscapeKeyDown={(event) => {
             if (isHostOverlayEvent(event)) event.preventDefault();
           }}
@@ -1179,18 +1195,9 @@ function ToolbarPopover({
           </div>
           {submenu && (
             <div className="relative px-3">
-              {submenuOpen && (
-                <div
-                  data-web-shell-model-sheet-list
-                  className="absolute inset-x-3 bottom-[calc(100%+8px)] max-h-[60vh] overflow-y-auto rounded-xl border bg-popover p-2 shadow-lg"
-                  data-vaul-no-drag
-                  onClick={(event) => event.stopPropagation()}
-                >
-                  {searchableItems}
-                </div>
-              )}
               <button
                 type="button"
+                ref={submenuTriggerRef}
                 className={`${styles.dropdownItem} ${styles.sheetSectionRow}`}
                 data-web-shell-model-submenu-trigger
                 aria-expanded={submenuOpen}
@@ -1212,6 +1219,18 @@ function ToolbarPopover({
                   )}
                 </span>
               </button>
+              {submenuOpen && (
+                <div
+                  ref={sheetListRef}
+                  tabIndex={-1}
+                  data-web-shell-model-sheet-list
+                  className="absolute inset-x-3 bottom-[calc(100%+8px)] max-h-[60vh] overflow-y-auto rounded-xl border bg-popover p-2 shadow-lg outline-none"
+                  data-vaul-no-drag
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  {searchableItems}
+                </div>
+              )}
             </div>
           )}
           <div className="px-3 pt-2">

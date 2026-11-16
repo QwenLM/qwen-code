@@ -40,7 +40,9 @@ export function useModelPickerOverlays(open: boolean) {
     element.dataset.webShellModelPickerOverlays = '';
     element.style.display = 'contents';
     // Modal surfaces (the bottom sheet) disable pointer events outside their
-    // content; host overlays live beside it and must stay interactive.
+    // content; host overlays live beside it and must stay interactive. Their
+    // keyboard and assistive-technology focus remains trapped in the sheet;
+    // full support is intentionally left to a follow-up.
     element.style.pointerEvents = 'auto';
     const events = new WeakSet<Event>();
     overlayEvents.set(element, events);

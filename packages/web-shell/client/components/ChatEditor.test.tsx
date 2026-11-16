@@ -5088,7 +5088,7 @@ describe('ChatEditor model picker host content', () => {
     expect(update.mock.lastCall?.[0].currentModelId).toBe(modelB.id);
   });
 
-  it('opens the model picker as a bottom sheet on coarse pointers', () => {
+  it('opens the model picker as a bottom sheet on coarse pointers', async () => {
     const media = vi.mocked(window.matchMedia).mockImplementation(
       (query: string) =>
         ({
@@ -5099,10 +5099,12 @@ describe('ChatEditor model picker host content', () => {
         }) as unknown as MediaQueryList,
     );
     try {
+      const onSelectModel = vi.fn();
       const container = renderChatEditor({
         visibleToolbarActions: ['model'],
         currentModel: modelA.id,
         availableModels: [modelA, modelB],
+        onSelectModel,
         reasoning: { enabled: true, effort: 'high', efforts: ['low', 'high'] },
       });
       open(container);
@@ -5115,6 +5117,14 @@ describe('ChatEditor model picker host content', () => {
         '[data-web-shell-model-submenu-trigger]',
       )!;
       act(() => sectionTrigger.click());
+      const list = sheet.querySelector<HTMLElement>(
+        '[data-web-shell-model-sheet-list]',
+      )!;
+      expect(list.contains(document.activeElement)).toBe(true);
+      expect(
+        sectionTrigger.compareDocumentPosition(list) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
       expect(
         sheet.querySelector(`[data-model-id="${modelA.id}"]`),
       ).not.toBeNull();
@@ -5127,6 +5137,8 @@ describe('ChatEditor model picker host content', () => {
           .querySelector<HTMLButtonElement>(`[data-model-id="${modelB.id}"]`)!
           .click(),
       );
+      expect(onSelectModel).toHaveBeenCalledWith(modelB.id);
+      expect(document.activeElement).toBe(sectionTrigger);
       expect(
         document.querySelector('[data-web-shell-model-sheet]'),
       ).not.toBeNull();
@@ -5139,14 +5151,18 @@ describe('ChatEditor model picker host content', () => {
       act(() => sectionTrigger.click());
       expect(sheet.querySelector('[data-model-id]')).toBeNull();
 
-      act(() =>
+      await act(async () => {
         sheet
           .querySelector<HTMLButtonElement>(
             '[data-web-shell-model-sheet-done]',
           )!
-          .click(),
-      );
+          .click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
       expect(document.querySelector('[data-web-shell-model-sheet]')).toBeNull();
+      expect(document.activeElement).toBe(
+        document.querySelector('[data-web-shell-model-button]'),
+      );
     } finally {
       media.mockImplementation(
         () =>
@@ -5193,9 +5209,12 @@ describe('ChatEditor model picker host content', () => {
           )!
           .click(),
       );
-      const overlayButton = document.querySelector<HTMLButtonElement>(
-        '[data-web-shell-model-picker-overlays] button',
+      const overlayRoot = document.querySelector<HTMLElement>(
+        '[data-web-shell-model-picker-overlays]',
       )!;
+      expect(overlayRoot.style.pointerEvents).toBe('auto');
+      const overlayButton =
+        overlayRoot.querySelector<HTMLButtonElement>('button')!;
       expect(overlayButton).not.toBeNull();
 
       const escapeEvent = new KeyboardEvent('keydown', {

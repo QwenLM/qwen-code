@@ -1895,6 +1895,7 @@
   gap: 4px;
   color: var(--muted-foreground);
   text-align: right;
+  white-space: normal;
   overflow-wrap: anywhere;
 }
 
