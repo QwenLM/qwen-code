@@ -115,6 +115,10 @@ interface Run {
   sharedRounds: number;
   /** Those of them the event-bus kernel ran. */
   kernelRounds: number;
+  /** The round markers this run's read waited for. */
+  minimumSharedRounds: number;
+  /** The kernel round markers it waited for, too. */
+  minimumKernelRounds: number;
 }
 
 const PROMPT_TIMEOUT_MS = 60_000;
@@ -154,14 +158,17 @@ const DEBUG_LOG_QUIET_MS = 250;
 /**
  * The debug log is appended fire-and-forget, so a round's marker can still be
  * queued when the last prompt response arrives. Read it once it has stopped
- * growing and carries at least `minimumSharedRounds` markers: under load a
- * queued append can pause longer than the quiet window, and a run missing its
- * later rounds would be compared against one that has them. Sample before the
- * kill below, because a killed process abandons its queued appends.
+ * growing and carries at least `minimumSharedRounds` round markers and
+ * `minimumKernelRounds` kernel markers: under load a queued append can pause
+ * longer than the quiet window, and a run missing its later rounds would be
+ * compared against one that has them. Sample before the kill below, because a
+ * killed process abandons its queued appends. A log that misses either floor
+ * by the deadline fails the run instead of being compared short.
  */
 async function readSettledDebugLog(
   runtimeDir: string,
   minimumSharedRounds = 0,
+  minimumKernelRounds = 0,
 ): Promise<string> {
   const deadline = Date.now() + 5_000;
   let quietSince = Date.now();
@@ -174,10 +181,23 @@ async function readSettledDebugLog(
       quietSince = Date.now();
     } else if (
       Date.now() - quietSince >= DEBUG_LOG_QUIET_MS &&
-      countSharedRounds(log) >= minimumSharedRounds
+      countSharedRounds(log) >= minimumSharedRounds &&
+      countKernelRounds(log) >= minimumKernelRounds
     ) {
       break;
     }
+  }
+  const settled = countSharedRounds(log);
+  if (settled < minimumSharedRounds) {
+    throw new Error(
+      `debug log settled at ${settled}/${minimumSharedRounds} round markers after 5000ms`,
+    );
+  }
+  const settledKernel = countKernelRounds(log);
+  if (settledKernel < minimumKernelRounds) {
+    throw new Error(
+      `debug log settled at ${settledKernel}/${minimumKernelRounds} kernel round markers after 5000ms`,
+    );
   }
   return log;
 }
@@ -553,6 +573,10 @@ const allowOnce = () => ({
       const stopReasons: unknown[] = [];
       let sessionId = '';
       let debugLog = '';
+      const sharedFloor = shared
+        ? Math.max(scenario.prompts.length, minimumSharedRounds)
+        : 0;
+      const kernelFloor = kernel ? minimumSharedRounds : 0;
       try {
         await request('initialize', {
           protocolVersion: 1,
@@ -605,12 +629,13 @@ const allowOnce = () => ({
         ) {
           await new Promise((resolve) => setTimeout(resolve, 50));
         }
-        // Every prompt's first round has logged by the time it returns; a
-        // shared run owes at least one marker per prompt, and the kernel arm
-        // also has the shared arm's count to reach.
+        // Every prompt's first round has logged by the time it returns, so a
+        // shared run owes at least one marker per prompt. The kernel arm owes
+        // the shared arm's count as both its rounds and its kernel runs.
         debugLog = await readSettledDebugLog(
           qwenHome,
-          shared ? Math.max(scenario.prompts.length, minimumSharedRounds) : 0,
+          sharedFloor,
+          kernelFloor,
         );
       } finally {
         agent.kill();
@@ -650,6 +675,8 @@ const allowOnce = () => ({
         backgroundTurnEnds,
         sharedRounds: countSharedRounds(debugLog),
         kernelRounds: countKernelRounds(debugLog),
+        minimumSharedRounds: sharedFloor,
+        minimumKernelRounds: kernelFloor,
       };
     }
 
@@ -658,6 +685,10 @@ const allowOnce = () => ({
       const current = await run(scenario, false);
       const shared = await run(scenario, true);
       const kernel = await run(scenario, true, true, shared.sharedRounds);
+      expect(kernel.minimumSharedRounds).toBe(
+        Math.max(scenario.prompts.length, shared.sharedRounds),
+      );
+      expect(kernel.minimumKernelRounds).toBe(shared.sharedRounds);
       const dump = process.env['ACP_PARITY_DUMP'];
       if (dump) {
         const slug = scenario.name.replace(/[^a-z0-9]+/gi, '-');
@@ -1215,6 +1246,45 @@ const allowOnce = () => ({
         rmSync(runtimeDir, { recursive: true, force: true });
       }
     }, 10_000);
+
+    it('waits for the kernel markers a run owes too', async () => {
+      const runtimeDir = mkdtempSync(join(tmpdir(), 'qwen-settled-log-'));
+      mkdirSync(join(runtimeDir, 'debug'));
+      const logFile = join(runtimeDir, 'debug', 'run.txt');
+      writeFileSync(
+        logFile,
+        'round in its own runAgentLoop call (prompt first)\n',
+      );
+      const settled = readSettledDebugLog(runtimeDir, 1, 1);
+      // Later than the quiet window: without the kernel floor the helper
+      // returns once the shared marker alone has gone quiet.
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      appendFileSync(
+        logFile,
+        '[EVENT_BUS] runAgentLoopOnBus started run-1 (prompt first)\n',
+      );
+      try {
+        expect(countKernelRounds(await settled)).toBe(1);
+      } finally {
+        rmSync(runtimeDir, { recursive: true, force: true });
+      }
+    }, 10_000);
+
+    it('reports a log that never reaches its round floor', async () => {
+      const runtimeDir = mkdtempSync(join(tmpdir(), 'qwen-settled-log-'));
+      mkdirSync(join(runtimeDir, 'debug'));
+      writeFileSync(
+        join(runtimeDir, 'debug', 'run.txt'),
+        'round in its own runAgentLoop call (prompt first)\n',
+      );
+      try {
+        await expect(readSettledDebugLog(runtimeDir, 2)).rejects.toThrow(
+          'debug log settled at 1/2 round markers after 5000ms',
+        );
+      } finally {
+        rmSync(runtimeDir, { recursive: true, force: true });
+      }
+    }, 20_000);
 
     it('adds no date reminder to a first prompt, as other surfaces do', async () => {
       // The startup context already carries today's date; the client adds a
