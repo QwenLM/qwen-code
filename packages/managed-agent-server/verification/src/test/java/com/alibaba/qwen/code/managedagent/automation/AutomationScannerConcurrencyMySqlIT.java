@@ -2,8 +2,8 @@ package com.alibaba.qwen.code.managedagent.automation;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
-import com.alibaba.qwen.code.managedagent.persistence.AutomationLedgerStore;
 import com.alibaba.qwen.code.managedagent.persistence.IsolatedManagedSchemaMySqlTestDatabase;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcAutomationLedgerStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore.OccurrenceRow;
 import com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore.ScheduleRow;
@@ -41,14 +41,14 @@ class AutomationScannerConcurrencyMySqlIT {
 
     private IsolatedManagedSchemaMySqlTestDatabase database;
     private JdbcTemplate jdbc;
-    private AutomationLedgerStore store;
+    private JdbcAutomationLedgerStore store;
 
     @BeforeEach
     void setUp() {
         database = new IsolatedManagedSchemaMySqlTestDatabase();
         ManagedSchema.initialize(database.source());
         jdbc = new ManagedSchemaJdbcTemplate(database.source());
-        store = new AutomationLedgerStore(jdbc);
+        store = new JdbcAutomationLedgerStore(jdbc);
         jdbc.update("INSERT INTO ma_session (tenant_id, session_id,"
                         + " agent_id, gmt_create, gmt_modified)"
                         + " VALUES (?, ?, 'agent', 0, 0)",
@@ -122,17 +122,17 @@ class AutomationScannerConcurrencyMySqlIT {
         String key = "schedule:2026-06-01T10:01:00Z";
         store.recordOccurrence(OccurrenceRow.decision(row, key,
                 T0 + 60_000L, AutomationScanner.TRIGGER_MANUAL,
-                AutomationLedgerStore.OUTCOME_FIRING, null, live, takenAt),
+                JdbcAutomationLedgerStore.OUTCOME_FIRING, null, live, takenAt),
                 "owner-live");
         assertThat(store.settleOccurrence(TENANT, "schedule-stale", key,
-                AutomationLedgerStore.OUTCOME_FIRED, null, "owner-stale",
+                JdbcAutomationLedgerStore.OUTCOME_FIRED, null, "owner-stale",
                 stale, takenAt)).isFalse();
         assertThat(store.settleOccurrence(TENANT, "schedule-stale", key,
-                AutomationLedgerStore.OUTCOME_FIRED, null, "owner-live",
+                JdbcAutomationLedgerStore.OUTCOME_FIRED, null, "owner-live",
                 live, takenAt)).isTrue();
         assertThat(store.findOccurrence(TENANT, "schedule-stale", key)
                 .orElseThrow().outcome())
-                .isEqualTo(AutomationLedgerStore.OUTCOME_FIRED);
+                .isEqualTo(JdbcAutomationLedgerStore.OUTCOME_FIRED);
     }
 
     @Test
@@ -177,7 +177,7 @@ class AutomationScannerConcurrencyMySqlIT {
         }
         assertThat(store.findOccurrence(TENANT, "schedule-shared",
                 "schedule:2026-06-01T10:01:00Z").orElseThrow().outcome())
-                .isEqualTo(AutomationLedgerStore.OUTCOME_FIRED);
+                .isEqualTo(JdbcAutomationLedgerStore.OUTCOME_FIRED);
         assertThat(connector.fires.get()).isEqualTo(1);
     }
 

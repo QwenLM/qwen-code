@@ -3,6 +3,8 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ManagedArtifactPolicy;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.EventIdentity;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedToolResultStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedToolResultStore.Artifact;
 import com.alibaba.qwen.code.managedagent.repository.ManagedToolResultStore.Claim;
 import com.alibaba.qwen.code.managedagent.repository.ManagedToolResultStore.Projection;
@@ -39,15 +41,15 @@ public class ManagedToolResultProjector {
                     + "|(?:\\x1B[P^_X]|[\\x90\\x98\\x9E\\x9F])[^\\x1B\\x9C]*(?:\\x1B\\\\|\\x9C|$)"
                     + "|\\x1B[ -/]*[0-~]");
     private static final Pattern CONTROLS = Pattern.compile("[\\p{Cc}&&[^\\n\\t]]");
-    private final ManagedToolResultStore store;
+    private final JdbcManagedToolResultStore store;
     private final JdbcTemplate jdbc;
     private final ObjectProvider<ToolPublicationDataStore> publications;
-    private final ManagedArtifactReader reader;
+    private final ToolPublicationArtifactReader reader;
     private final ManagedArtifactPolicy policy;
     private final ManagedAgentSettings properties;
 
-    public ManagedToolResultProjector(ManagedToolResultStore store, @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
-            ObjectProvider<ToolPublicationDataStore> publications, ManagedArtifactReader reader,
+    public ManagedToolResultProjector(JdbcManagedToolResultStore store, @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
+            ObjectProvider<ToolPublicationDataStore> publications, ToolPublicationArtifactReader reader,
             ManagedArtifactPolicy policy, ManagedAgentSettings properties) {
         this.store = store;
         this.jdbc = jdbc;
@@ -134,7 +136,7 @@ public class ManagedToolResultProjector {
                         && source.outcomeRef().path("schemaVersion").asInt(-1) == 1, "Receipt references are invalid");
         var publication = candidates.getFirst();
         String publicationId = (String) publication.get("publication_id");
-        JsonNode binding = ManagedToolResultStore.parse((String) publication.get("binding_json"));
+        JsonNode binding = JdbcManagedToolResultStore.parse((String) publication.get("binding_json"));
         require(ToolPublicationContract.bindingDigest(binding).equals(publication.get("binding_digest"))
                         && binding.path("sessionKey").equals(source.sessionKey())
                         && source.executionCallId().equals(binding.path("executionCallId").asText())
@@ -221,7 +223,7 @@ public class ManagedToolResultProjector {
                 require("sealed".equals(stream.path("state").asText())
                                 && List.of("stdout", "stderr").contains(streamId)
                                 && streamId.equals(stream.path("role").asText()), "Unsupported public stream");
-                String id = com.alibaba.qwen.code.managedagent.repository.ManagedToolResultStore.identity("artifact", "1", source.id(),
+                String id = ManagedToolResultStore.identity("artifact", "1", source.id(),
                         manifestRef.path("digest").asText(), streamId, policyVersion);
                 ObjectNode descriptor = JSON.createObjectNode().put("object", "agent.artifact")
                         .put("id", id).put("session_id", source.sessionId())
@@ -303,7 +305,7 @@ public class ManagedToolResultProjector {
                         + " FROM ma_resource WHERE session_scope_key = ? AND resource_id = ?"
                         + " AND tenant_id = ? AND workspace_id = ? AND session_id = ? AND deletion_operation_key IS NULL",
                 (schemaRow, schemaIndex) -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(schemaRow),
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(source.tenantId(), source.sessionId()), source.outcomeRef().path("resourceId").asText(),
+                ManagedSessionStore.sessionScopeKey(source.tenantId(), source.sessionId()), source.outcomeRef().path("resourceId").asText(),
                 source.tenantId(), source.workspaceId(), source.sessionId());
         require(rows.size() == 1, "Not-started outcome is missing");
         var row = rows.getFirst();
@@ -349,6 +351,6 @@ public class ManagedToolResultProjector {
     }
 
     private static void require(boolean valid, String message) {
-        ManagedToolResultStore.require(valid, message);
+        JdbcManagedToolResultStore.require(valid, message);
     }
 }

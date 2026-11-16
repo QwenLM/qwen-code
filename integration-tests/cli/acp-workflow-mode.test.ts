@@ -14,7 +14,11 @@ import {
   type SessionNotification,
 } from '@agentclientprotocol/sdk';
 import { describe, expect, it, vi } from 'vitest';
-import { TestRig, fakeServerHostOptions } from '../test-helper.js';
+import {
+  TestRig,
+  fakeServerHostOptions,
+  sharedLoopRoundCount,
+} from '../test-helper.js';
 import { startFakeOpenAIServer } from '../fake-openai-server.js';
 
 describe.each([false, true])(
@@ -52,7 +56,10 @@ describe.each([false, true])(
           QWEN_HOME: join(rig.testDir!, 'home'),
           QWEN_RUNTIME_DIR: join(rig.testDir!, 'runtime'),
           QWEN_CODE_DISABLE_WORKFLOWS: '0',
-          QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP: '0',
+          // Arm-dependent: an unconditional '0' would force the shared arm
+          // onto the legacy loop now that the env override beats the setting.
+          QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP: shared ? '1' : '0',
+          QWEN_DEBUG_LOG_FILE: '1',
           QWEN_CODE_DISABLE_CRON: '1',
           OPENAI_API_KEY: 'fake-key',
           OPENAI_BASE_URL: server.baseUrl,
@@ -188,6 +195,11 @@ describe.each([false, true])(
             (text) => !text.includes("The user's message includes the"),
           ),
         ).toBe(true);
+        // The arm label must be real: the shared arm runs the shared loop,
+        // the legacy arm never calls runModelRound.
+        expect(sharedLoopRoundCount(join(rig.testDir!, 'runtime')) > 0).toBe(
+          shared,
+        );
       } finally {
         rig.createFile(
           'provider-requests.json',

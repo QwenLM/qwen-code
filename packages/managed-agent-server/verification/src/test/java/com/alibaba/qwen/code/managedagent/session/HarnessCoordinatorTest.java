@@ -26,8 +26,10 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.DispatchTarget;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.HarnessEvent;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
-import com.alibaba.qwen.code.managedagent.persistence.SessionWorktreeStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcSessionWorktreeStore;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.host.MacOsIdentityProbeTimeoutException;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -36,6 +38,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.InOrder;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -44,6 +47,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -266,8 +270,50 @@ class HarnessCoordinatorTest {
         verify(harness, never()).createOrLoad(anyString(), anyString(), anyBoolean());
     }
 
-    private static SessionWorktreeStore.Descriptor worktree(String state) {
-        return new SessionWorktreeStore.Descriptor("worktree", "session", "workspace", state,
+    @Test
+    void identityProbeTimeoutDoesNotFailTheEnvironment() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessCoordinator coordinator = new HarnessCoordinator(store,
+                mock(HarnessConnector.class), new HarnessEventProjector(),
+                mock(RuntimeWarmer.class), directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        Throwable timeout = new CompletionException(
+                new MacOsIdentityProbeTimeoutException(
+                        "macOS native identity probe timed out"));
+        try {
+            coordinator.runtimeWarmResult(boundSessionRecord(),
+                    turn("tenant", "session", "turn",
+                            "11111111-1111-4111-8111-111111111111", null, 0),
+                    timeout);
+        } finally {
+            coordinator.close();
+        }
+        verify(store, never()).appendPublicEventIfAbsent(anyString(), anyString(),
+                anyString(), eq("environment.failed"), any(), anyBoolean(), anyString());
+    }
+
+    @Test
+    void identityMismatchFailsTheEnvironment() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessCoordinator coordinator = new HarnessCoordinator(store,
+                mock(HarnessConnector.class), new HarnessEventProjector(),
+                mock(RuntimeWarmer.class), directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        try {
+            coordinator.runtimeWarmResult(boundSessionRecord(),
+                    turn("tenant", "session", "turn",
+                            "11111111-1111-4111-8111-111111111111", null, 0),
+                    new IOException("macOS storage identity changed or is unavailable"));
+        } finally {
+            coordinator.close();
+        }
+        verify(store).appendPublicEventIfAbsent(eq("tenant"), eq("session"), eq("turn"),
+                eq("environment.failed"), eq(Map.of("code", "runtime_warm_failed")),
+                eq(false), eq("runtime:failed:turn"));
+    }
+
+    private static JdbcSessionWorktreeStore.Descriptor worktree(String state) {
+        return new JdbcSessionWorktreeStore.Descriptor("worktree", "session", "workspace", state,
                 "qwen/session", "a".repeat(40), ".qwen-managed-worktrees/worktree", "operation", 1, null);
     }
 
@@ -441,7 +487,7 @@ class HarnessCoordinatorTest {
     }
 
     // Before submission, the only RuntimeBrokerException that reaches the
-    // coordinator is com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable() (409,
+    // coordinator is WorkspaceExecutionStore.unavailable() (409,
     // workspace_unavailable, not retryable), raised by the connector's
     // authorization in createOrLoad. Broker lease contention (workspace_busy)
     // is raised inside the Broker's tool-execution transport and is consumed
@@ -449,7 +495,7 @@ class HarnessCoordinatorTest {
     @ParameterizedTest
     @ValueSource(ints = {0, 5})
     void failsOnWorkspaceAuthorizationRefusalBeforeSubmission(int retryCount) {
-        RuntimeBrokerException refusal = com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+        RuntimeBrokerException refusal = WorkspaceExecutionStore.unavailable();
         AgentStateStore store = dispatchWithCreateOrLoadFailure(refusal,
                 false, retryCount,
                 boundSessionRecord());
@@ -543,7 +589,7 @@ class HarnessCoordinatorTest {
     @Test
     void retriesWorkspaceAuthorizationRefusalAfterARecordedSubmission() {
         AgentStateStore store = dispatchWithCreateOrLoadFailure(
-                com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable(), true, 5,
+                WorkspaceExecutionStore.unavailable(), true, 5,
                 boundSessionRecord());
         verify(store).scheduleTurnRetry(eq("tenant"), eq("session"),
                 eq("turn"), anyString(), anyLong(), eq(false));
@@ -4178,7 +4224,7 @@ class HarnessCoordinatorTest {
                 .thenReturn(new Attachment("boot-new", null, null, null));
         when(harness.submit(eq(tenantId), eq(sessionId), eq(promptId), any(),
                 anyString())).thenThrow(
-                        workspaceRefusal ? com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable()
+                        workspaceRefusal ? WorkspaceExecutionStore.unavailable()
                                 : new IllegalStateException("response lost"));
         when(runtimeWarmer.isEnabled()).thenReturn(false);
 

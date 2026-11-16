@@ -109,6 +109,7 @@ describe('installWebShellShadowStyles', () => {
       expect(replaceSync).toHaveBeenCalledWith(packageStyle.textContent);
       expect(sheets).toHaveLength(1);
       releaseFirst();
+      releaseFirst();
       expect(sheets).toHaveLength(1);
       releaseSecond();
       expect(sheets).toHaveLength(0);

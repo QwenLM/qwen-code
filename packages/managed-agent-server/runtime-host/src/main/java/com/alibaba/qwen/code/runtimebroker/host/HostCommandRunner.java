@@ -30,7 +30,7 @@ public final class HostCommandRunner {
                         } catch (IOException failure) {
                             throw unavailable(failure);
                         }
-                    });
+                    }, task -> Thread.ofVirtual().start(task));
             CompletableFuture<Void> writer = CompletableFuture.runAsync(() -> {
                 try (var stdin = started.getOutputStream()) {
                     stdin.write(input);

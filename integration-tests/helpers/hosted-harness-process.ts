@@ -49,6 +49,7 @@ export class HostedHarnessProcess {
       startupTimeout?: number;
       args?: string[];
       extraArgs?: string[];
+      env?: Record<string, string>;
     } = {},
   ) {
     await access(HOSTED_CLI).catch(() => {
@@ -123,6 +124,7 @@ export class HostedHarnessProcess {
             QWEN_MODEL: 'hosted-fixture',
             QWEN_SANDBOX: 'false',
             NO_COLOR: '1',
+            ...options.env,
           },
         },
       );

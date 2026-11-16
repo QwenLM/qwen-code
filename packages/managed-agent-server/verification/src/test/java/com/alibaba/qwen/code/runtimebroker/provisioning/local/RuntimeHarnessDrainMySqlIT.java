@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker.provisioning.local;
 
 import com.alibaba.qwen.code.runtimebroker.DriverManagerDataSource;
-import com.alibaba.qwen.code.runtimebroker.managedschema.JdbcRuntimeBrokerSchema;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import org.junit.jupiter.api.AfterEach;
 
 import java.sql.DriverManager;
@@ -40,7 +40,7 @@ class RuntimeHarnessDrainMySqlIT extends RuntimeHarnessDrainTest {
             statement.execute("CREATE DATABASE " + schema);
         }
         var source = new DriverManagerDataSource(url.replaceFirst("/[^/?]+(?=\\?|$)", "/" + schema), user, password);
-        JdbcRuntimeBrokerSchema.initialize(source);
+        ManagedSchema.initialize(source);
         return new Database(source, url, schema, user, password);
     }
 

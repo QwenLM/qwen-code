@@ -240,6 +240,9 @@ describe('useSlashCommandProcessor', () => {
   const mockOpenOutputStyleDialog = vi.fn();
   const mockOpenHelpDialog = vi.fn();
   const mockOpenRewindSelector = vi.fn();
+  const mockHandleBranch = vi
+    .fn<SlashCommandProcessorActions['handleBranch']>()
+    .mockResolvedValue(undefined);
   const mockSetQuittingMessages = vi.fn();
   const mockClearPendingState = vi.fn();
 
@@ -266,7 +269,7 @@ describe('useSlashCommandProcessor', () => {
     openHelpDialog: mockOpenHelpDialog,
     openResumeDialog: vi.fn(),
     handleResume: vi.fn(),
-    handleBranch: vi.fn().mockResolvedValue(undefined),
+    handleBranch: mockHandleBranch,
     openDeleteDialog: vi.fn(),
     openDiffDialog: vi.fn(),
     quit: mockSetQuittingMessages,
@@ -333,7 +336,6 @@ describe('useSlashCommandProcessor', () => {
         mockLoadHistory,
         vi.fn(), // refreshStatic
         vi.fn(), // toggleVimEnabled
-        false, // isProcessing
         setIsProcessing,
         isIdleRef,
         vi.fn(), // setMemoryFileCount
@@ -477,19 +479,67 @@ describe('useSlashCommandProcessor', () => {
     },
   );
 
+  // Columns: label, name, kind, supplies an owning submission, that
+  // submission is still current, idle the action reads.
   it.each([
-    ['direct builtin restore', 'restore', CommandKind.BUILT_IN, false, false],
-    ['owned builtin restore', 'restore', CommandKind.BUILT_IN, true, true],
-    ['direct builtin logout', 'logout', CommandKind.BUILT_IN, false, false],
-    ['owned builtin logout', 'logout', CommandKind.BUILT_IN, true, true],
-    ['same-name logout file command', 'logout', CommandKind.FILE, true, false],
-    ['same-name file command', 'restore', CommandKind.FILE, true, false],
-    ['unrelated builtin', 'other', CommandKind.BUILT_IN, true, false],
+    [
+      'direct builtin restore',
+      'restore',
+      CommandKind.BUILT_IN,
+      false,
+      true,
+      false,
+    ],
+    [
+      'owned builtin restore',
+      'restore',
+      CommandKind.BUILT_IN,
+      true,
+      true,
+      true,
+    ],
+    [
+      'direct builtin logout',
+      'logout',
+      CommandKind.BUILT_IN,
+      false,
+      true,
+      false,
+    ],
+    ['owned builtin logout', 'logout', CommandKind.BUILT_IN, true, true, true],
+    [
+      'direct builtin branch',
+      'branch',
+      CommandKind.BUILT_IN,
+      false,
+      true,
+      false,
+    ],
+    ['owned builtin branch', 'branch', CommandKind.BUILT_IN, true, true, true],
+    ['owned builtin cd', 'cd', CommandKind.BUILT_IN, true, true, true],
+    ['owned builtin fork', 'fork', CommandKind.BUILT_IN, true, true, true],
+    [
+      'owned builtin, submission no longer current',
+      'branch',
+      CommandKind.BUILT_IN,
+      true,
+      false,
+      false,
+    ],
+    [
+      'same-name logout file command',
+      'logout',
+      CommandKind.FILE,
+      true,
+      true,
+      false,
+    ],
+    ['same-name file command', 'restore', CommandKind.FILE, true, true, false],
   ] as const)(
-    'scopes the restore/logout submission idle exception: %s',
-    async (_label, name, kind, suppliesOwner, expectedIdle) => {
+    'gives built-ins the idle state of their own submission: %s',
+    async (_label, name, kind, suppliesOwner, current, expectedIdle) => {
       const observedIdle = vi.fn();
-      const isCurrentSubmission = vi.fn(() => true);
+      const isCurrentSubmission = vi.fn(() => current);
       const command = createTestCommand(
         {
           name,
@@ -529,8 +579,11 @@ describe('useSlashCommandProcessor', () => {
         }
       });
       expect(observedIdle).toHaveBeenCalledExactlyOnceWith(expectedIdle);
-      if (expectedIdle) expect(isCurrentSubmission).toHaveBeenCalled();
-      else expect(isCurrentSubmission).not.toHaveBeenCalled();
+      if (suppliesOwner && kind === CommandKind.BUILT_IN) {
+        expect(isCurrentSubmission).toHaveBeenCalled();
+      } else {
+        expect(isCurrentSubmission).not.toHaveBeenCalled();
+      }
     },
   );
 
@@ -572,7 +625,6 @@ describe('useSlashCommandProcessor', () => {
             mockLoadHistory,
             vi.fn(),
             vi.fn(),
-            false,
             vi.fn(),
             { current: true },
             vi.fn(),
@@ -1324,6 +1376,177 @@ describe('useSlashCommandProcessor', () => {
       expect(mockSetIsProcessing).toHaveBeenCalledTimes(2);
     });
 
+    it.each([false, true])(
+      'aborts the submitted command after a direct shortcut (new pending item: %s)',
+      async (shortcutHasPendingItem) => {
+        const submittedItem = {
+          type: MessageType.INFO,
+          text: 'Consulting advisor...',
+        } as const;
+        const shortcutItem = {
+          type: MessageType.INFO,
+          text: 'Shortcut pending',
+        } as const;
+        let commandSignal: AbortSignal | undefined;
+        const advisor = createTestCommand({
+          name: 'advisor',
+          action: (context) => {
+            commandSignal = context.abortSignal;
+            context.ui.setPendingItem(submittedItem);
+            return new Promise<void>(() => {});
+          },
+        });
+        const mcp = createTestCommand({
+          name: 'mcp',
+          action: (context) => {
+            if (shortcutHasPendingItem) context.ui.setPendingItem(shortcutItem);
+          },
+        });
+        const result = setupProcessorHook([advisor, mcp]);
+        await waitFor(() =>
+          expect(result.current.slashCommands).toHaveLength(2),
+        );
+        const controller = new AbortController();
+        let dispatch!: ReturnType<typeof result.current.handleSlashCommand>;
+        act(() => {
+          dispatch = result.current.handleSlashCommand(
+            '/advisor review',
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            () => true,
+            controller.signal,
+          );
+        });
+        await waitFor(() =>
+          expect(result.current.pendingHistoryItems).toContainEqual(
+            submittedItem,
+          ),
+        );
+        await act(async () => {
+          await result.current.handleSlashCommand('/mcp desc');
+        });
+        expect(commandSignal?.aborted).toBe(false);
+        await act(async () => {
+          controller.abort();
+          await dispatch;
+        });
+        expect(commandSignal?.aborted).toBe(true);
+        expect(result.current.pendingHistoryItems).toEqual(
+          shortcutHasPendingItem ? [shortcutItem] : [],
+        );
+      },
+    );
+
+    it('allows /quit without releasing a non-cancellable action outside a commit', async () => {
+      let finish!: () => void;
+      const held = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      const action = vi.fn(() => held);
+      const processing = vi.fn();
+      const result = setupProcessorHook(
+        [
+          createTestCommand({ name: 'slow', canCancel: false, action }),
+          quitCommand,
+        ],
+        [],
+        [],
+        processing,
+      );
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(2));
+      let pending!: ReturnType<typeof result.current.handleSlashCommand>;
+      try {
+        act(() => {
+          pending = result.current.handleSlashCommand('/slow');
+        });
+        await waitFor(() => expect(action).toHaveBeenCalledOnce());
+        await act(async () => {
+          await result.current.handleSlashCommand('/quit');
+        });
+        expect(mockSetQuittingMessages).toHaveBeenCalledOnce();
+        expect(result.current.isCommandCancellationBlocked()).toBe(true);
+        expect(processing).not.toHaveBeenCalledWith(false);
+      } finally {
+        await act(async () => {
+          finish();
+          await pending;
+        });
+      }
+    });
+
+    it('keeps /branch processing after cancellation until the session switch settles', async () => {
+      let finishSwap!: () => void;
+      mockHandleBranch.mockReturnValueOnce(
+        new Promise<void>((resolve) => {
+          finishSwap = resolve;
+        }),
+      );
+      const processing = vi.fn();
+      const branch = createTestCommand({
+        name: 'branch',
+        action: () => ({ type: 'dialog', dialog: 'branch', name: 'wip' }),
+      });
+      const mcpAction = vi.fn();
+      const mcp = createTestCommand({ name: 'mcp', action: mcpAction });
+      const controller = new AbortController();
+      const result = setupProcessorHook(
+        [branch, mcp],
+        [],
+        [],
+        processing,
+        mockSettings,
+        undefined,
+        { current: false },
+      );
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(2));
+      let dispatch:
+        | ReturnType<typeof result.current.handleSlashCommand>
+        | undefined;
+      try {
+        act(() => {
+          dispatch = result.current.handleSlashCommand(
+            '/branch',
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            () => true,
+            controller.signal,
+          );
+        });
+        await waitFor(() =>
+          expect(mockHandleBranch).toHaveBeenCalledExactlyOnceWith('wip'),
+        );
+        await act(async () => {
+          await result.current.handleSlashCommand('/mcp desc');
+          await result.current.handleSlashCommand('/quit');
+        });
+        expect(mcpAction).not.toHaveBeenCalled();
+        expect(mockSetQuittingMessages).not.toHaveBeenCalled();
+        act(() => {
+          result.current.cancelSlashCommand();
+          controller.abort();
+        });
+        expect(processing).not.toHaveBeenCalledWith(false);
+        expect(result.current.isCommandCancellationBlocked()).toBe(true);
+        expect(result.current.commandCancellationBlocked).toBe(true);
+      } finally {
+        await act(async () => {
+          finishSwap();
+          await dispatch;
+        });
+      }
+      expect(processing).toHaveBeenLastCalledWith(false);
+      expect(result.current.isCommandCancellationBlocked()).toBe(false);
+      expect(result.current.commandCancellationBlocked).toBe(false);
+      await act(async () => {
+        await result.current.handleSlashCommand('/mcp desc');
+      });
+      expect(mcpAction).toHaveBeenCalledOnce();
+    });
+
     it.each(['/clear', '/reset', '/new'])(
       '%s stays processing through Mod shutdown and chat reset after Esc',
       async (input) => {
@@ -1428,57 +1651,71 @@ describe('useSlashCommandProcessor', () => {
       );
     });
 
-    it('skips clear when cancelled before Mod readiness, without releasing a newer command', async () => {
-      let finishStartup = () => {};
-      const ready = new Promise<void>((resolve) => {
-        finishStartup = resolve;
-      });
-      const action = vi.fn();
-      const owner = vi
-        .spyOn(interactiveMods, 'getInteractiveModSession')
-        .mockReturnValue({
-          ready,
-          loadCommands: vi.fn().mockResolvedValue([]),
-        } as unknown as interactiveMods.InteractiveModSession);
-      const processing = vi.fn();
-      const result = setupProcessorHook(
-        [
-          { ...clearCommand, action },
-          createTestCommand({
-            name: 'slow',
-            action: () => new Promise(() => {}),
-          }),
-        ],
-        [],
-        [],
-        processing,
-      );
-      try {
-        await waitFor(() =>
-          expect(result.current.slashCommands).toHaveLength(2),
+    it.each(['command', 'submission'] as const)(
+      'skips clear after %s cancellation before Mod readiness without releasing a newer command',
+      async (source) => {
+        let finishStartup = () => {};
+        const ready = new Promise<void>((resolve) => {
+          finishStartup = resolve;
+        });
+        const action = vi.fn();
+        const owner = vi
+          .spyOn(interactiveMods, 'getInteractiveModSession')
+          .mockReturnValue({
+            ready,
+            loadCommands: vi.fn().mockResolvedValue([]),
+          } as unknown as interactiveMods.InteractiveModSession);
+        const processing = vi.fn();
+        const controller = new AbortController();
+        const result = setupProcessorHook(
+          [
+            { ...clearCommand, action },
+            createTestCommand({
+              name: 'slow',
+              action: () => new Promise(() => {}),
+            }),
+          ],
+          [],
+          [],
+          processing,
         );
-        let cancelled: ReturnType<typeof result.current.handleSlashCommand>;
-        let newer: ReturnType<typeof result.current.handleSlashCommand>;
-        await act(async () => {
-          cancelled = result.current.handleSlashCommand('/clear');
-          result.current.cancelSlashCommand();
-          newer = result.current.handleSlashCommand('/slow');
-          processing.mockClear();
+        try {
+          await waitFor(() =>
+            expect(result.current.slashCommands).toHaveLength(2),
+          );
+          let cancelled: ReturnType<typeof result.current.handleSlashCommand>;
+          let newer: ReturnType<typeof result.current.handleSlashCommand>;
+          await act(async () => {
+            cancelled = result.current.handleSlashCommand(
+              '/clear',
+              undefined,
+              undefined,
+              undefined,
+              undefined,
+              () => true,
+              controller.signal,
+            );
+            if (source === 'submission') controller.abort();
+            else result.current.cancelSlashCommand();
+            expect(processing).toHaveBeenLastCalledWith(false);
+            newer = result.current.handleSlashCommand('/slow');
+            processing.mockClear();
+            finishStartup();
+            await cancelled;
+          });
+          expect(action).not.toHaveBeenCalled();
+          expect(processing).not.toHaveBeenCalledWith(false);
+          await act(async () => {
+            result.current.cancelSlashCommand();
+            await newer;
+          });
+          expect(processing).toHaveBeenLastCalledWith(false);
+        } finally {
           finishStartup();
-          await cancelled;
-        });
-        expect(action).not.toHaveBeenCalled();
-        expect(processing).not.toHaveBeenCalledWith(false);
-        await act(async () => {
-          result.current.cancelSlashCommand();
-          await newer;
-        });
-        expect(processing).toHaveBeenLastCalledWith(false);
-      } finally {
-        finishStartup();
-        owner.mockRestore();
-      }
-    });
+          owner.mockRestore();
+        }
+      },
+    );
 
     it('releases a failed clear and lets the next command cancel normally', async () => {
       const processing = vi.fn();
@@ -2009,8 +2246,9 @@ describe('useSlashCommandProcessor', () => {
       });
     });
 
-    it('awaits direct resume session switching before returning handled', async () => {
+    it('keeps direct resume processing until the session switch settles', async () => {
       const actions = createMockActions();
+      const processing = vi.fn();
       let resolveResume: (() => void) | undefined;
       actions.handleResume = vi.fn(
         () =>
@@ -2027,7 +2265,11 @@ describe('useSlashCommandProcessor', () => {
           sessionId: 'session-123',
         }),
       });
-      mockBuiltinLoadCommands.mockResolvedValue(Object.freeze([resumeCommand]));
+      const mcpAction = vi.fn();
+      const mcp = createTestCommand({ name: 'mcp', action: mcpAction });
+      mockBuiltinLoadCommands.mockResolvedValue(
+        Object.freeze([resumeCommand, mcp]),
+      );
 
       const { result } = renderHook(() =>
         useSlashCommandProcessor(
@@ -2039,8 +2281,7 @@ describe('useSlashCommandProcessor', () => {
           mockLoadHistory,
           vi.fn(),
           vi.fn(),
-          false,
-          vi.fn(),
+          processing,
           { current: true },
           vi.fn(),
           actions,
@@ -2051,25 +2292,38 @@ describe('useSlashCommandProcessor', () => {
         ),
       );
 
-      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
-
-      let settled = false;
-      const promise = result.current
-        .handleSlashCommand('/resume-direct')
-        .then(() => {
-          settled = true;
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(2));
+      let dispatch!: ReturnType<typeof result.current.handleSlashCommand>;
+      try {
+        act(() => {
+          dispatch = result.current.handleSlashCommand('/resume-direct');
         });
-
-      await waitFor(() => {
-        expect(actions.handleResume).toHaveBeenCalledWith('session-123');
-      });
-      expect(settled).toBe(false);
-
-      resolveResume?.();
+        await waitFor(() => {
+          expect(actions.handleResume).toHaveBeenCalledExactlyOnceWith(
+            'session-123',
+          );
+        });
+        act(() => {
+          expect(result.current.cancelSlashCommand()).toBe(false);
+        });
+        expect(result.current.isCommandCommitting()).toBe(true);
+        expect(processing).toHaveBeenCalledExactlyOnceWith(true);
+        await act(async () => {
+          await result.current.handleSlashCommand('/mcp');
+        });
+        expect(mcpAction).not.toHaveBeenCalled();
+      } finally {
+        await act(async () => {
+          resolveResume?.();
+          await dispatch;
+        });
+      }
+      expect(result.current.isCommandCommitting()).toBe(false);
+      expect(processing).toHaveBeenLastCalledWith(false);
       await act(async () => {
-        await promise;
+        await result.current.handleSlashCommand('/mcp');
       });
-      expect(settled).toBe(true);
+      expect(mcpAction).toHaveBeenCalledOnce();
     });
 
     it('shows info feedback for collapse-on-resume command', async () => {
@@ -2159,7 +2413,6 @@ describe('useSlashCommandProcessor', () => {
           mockLoadHistory,
           vi.fn(),
           vi.fn(),
-          false,
           vi.fn(),
           { current: true },
           vi.fn(),
@@ -2710,7 +2963,6 @@ describe('useSlashCommandProcessor', () => {
           mockLoadHistory,
           vi.fn(),
           vi.fn(),
-          false,
           vi.fn(),
           { current: true },
           vi.fn(),
@@ -2810,6 +3062,40 @@ describe('useSlashCommandProcessor', () => {
       expect(result.current.shellConfirmationRequest).toBeNull();
       // Verify the action was only called the initial time.
       expect(mockCommandAction).toHaveBeenCalledTimes(1);
+    });
+
+    it('dismisses a shell confirmation when the submission is aborted', async () => {
+      const result = setupProcessorHook([shellCommand]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+      const controller = new AbortController();
+      let dispatch!: ReturnType<typeof result.current.handleSlashCommand>;
+      act(() => {
+        dispatch = result.current.handleSlashCommand(
+          '/shellcmd',
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          () => true,
+          controller.signal,
+        );
+      });
+      await waitFor(() =>
+        expect(result.current.shellConfirmationRequest).not.toBeNull(),
+      );
+      const staleConfirm = result.current.shellConfirmationRequest!.onConfirm;
+
+      await act(async () => {
+        controller.abort();
+        await dispatch;
+        staleConfirm(ToolConfirmationOutcome.ProceedAlways, ['rm -rf /']);
+      });
+
+      expect(result.current.shellConfirmationRequest).toBeNull();
+      expect(mockCommandAction).toHaveBeenCalledOnce();
+      expect(
+        result.current.commandContext.session.sessionShellAllowlist.size,
+      ).toBe(0);
     });
 
     it('should re-run command with one-time allowlist on "Proceed Once"', async () => {
@@ -3207,7 +3493,6 @@ describe('useSlashCommandProcessor', () => {
           mockLoadHistory,
           vi.fn(), // refreshStatic
           vi.fn(), // toggleVimEnabled
-          false, // isProcessing
           vi.fn(), // setIsProcessing
           { current: true }, // isIdleRef
           vi.fn(), // setMemoryFileCount
@@ -3400,7 +3685,6 @@ describe('useSlashCommandProcessor', () => {
             mockLoadHistory,
             vi.fn(),
             vi.fn(),
-            false,
             vi.fn(),
             { current: true },
             vi.fn(),
@@ -3467,7 +3751,6 @@ describe('useSlashCommandProcessor', () => {
             mockLoadHistory,
             vi.fn(),
             vi.fn(),
-            false,
             vi.fn(),
             { current: true },
             vi.fn(),
@@ -3538,7 +3821,6 @@ describe('useSlashCommandProcessor', () => {
               mockLoadHistory,
               vi.fn(),
               vi.fn(),
-              false,
               vi.fn(),
               { current: true },
               vi.fn(),
@@ -3598,7 +3880,6 @@ describe('useSlashCommandProcessor', () => {
             mockLoadHistory,
             vi.fn(),
             vi.fn(),
-            false,
             vi.fn(),
             { current: true },
             vi.fn(),

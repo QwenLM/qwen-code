@@ -300,7 +300,7 @@ afterEach(() => {
   vi.clearAllMocks();
   workspaceGitPull.mockReset();
   workspaceGitCheckout.mockReset();
-  workspaceGitCheckout.mockResolvedValue(undefined);
+  workspaceGitCheckout.mockResolvedValue({ branch: 'main', detached: false });
   workspaceGitPush.mockReset();
   workspaceGitPush.mockResolvedValue({ success: true, output: '' });
   workspaceGitRemotes.mockReset();
@@ -316,6 +316,7 @@ workspaceGit.mockRejectedValue(new Error('no status'));
 // first test in the file (or any `-t` filtered run starting inside the
 // remotes block) would otherwise face a bare `vi.fn()` resolving undefined.
 workspaceGitRemotes.mockResolvedValue(defaultRemotesResult());
+workspaceGitCheckout.mockResolvedValue({ branch: 'main', detached: false });
 
 function mountWithBranches(
   branchesResult: DaemonGitBranchesResult = BRANCHES,
@@ -392,6 +393,8 @@ describe('BranchPickerPopover actions', () => {
       'main',
       '/repo/.qwen/worktrees/test',
       'session-1',
+      undefined,
+      600_000,
     );
   });
 
@@ -830,7 +833,13 @@ describe('BranchPickerPopover actions', () => {
     clickButton('dev');
     await flush();
 
-    expect(workspaceGitCheckout).toHaveBeenCalledWith('dev', undefined);
+    expect(workspaceGitCheckout).toHaveBeenCalledWith(
+      'dev',
+      undefined,
+      undefined,
+      undefined,
+      600_000,
+    );
     expect(footerText()).not.toContain('Stash Changes and Update');
     expect(footerText()).toContain('checkout refused: local changes');
   });
@@ -1022,6 +1031,645 @@ describe('BranchPickerPopover actions', () => {
 
     expect(document.body.textContent).toContain('Invalid branch name');
     expect(workspaceGitCreateBranch).not.toHaveBeenCalled();
+  });
+});
+
+describe('BranchPickerPopover checkout resolution panel', () => {
+  // 'dev' is unambiguous for clickButton's substring match: the head
+  // branch's upstream hint ('origin/main') contains 'main', which would
+  // otherwise hit the Update Project row first.
+  const CHECKOUT_BRANCHES: DaemonGitBranchesResult = {
+    ...BRANCHES,
+    local: [
+      ...BRANCHES.local,
+      {
+        name: 'dev',
+        isHead: false,
+        ahead: 0,
+        behind: 0,
+        commitDate: 0,
+        commitSubject: '',
+      },
+    ],
+  };
+
+  function checkoutDirtyError(): Error {
+    return new DaemonHttpError(
+      409,
+      {
+        error: 'dirty_working_tree',
+        message: 'would be overwritten by checkout',
+      },
+      'POST /workspaces/:workspace/git/checkout: dirty_working_tree',
+    );
+  }
+
+  it('offers stash and discard when the checkout hits a dirty tree', async () => {
+    workspaceGitCheckout.mockRejectedValueOnce(checkoutDirtyError());
+    workspaceGitCheckout.mockResolvedValueOnce({
+      branch: 'dev',
+      detached: false,
+    });
+    mountWithBranches(CHECKOUT_BRANCHES);
+    await flush();
+
+    clickButton('dev');
+    await flush();
+
+    expect(footerText()).toContain('Switch blocked by uncommitted changes');
+    clickButton('Stash Changes and Switch');
+    await flush();
+
+    expect(workspaceGitCheckout).toHaveBeenLastCalledWith(
+      'dev',
+      undefined,
+      undefined,
+      { stash: true },
+      600_000,
+    );
+    expect(footerText()).not.toContain('Stash Changes and Switch');
+    expect(footerText()).toContain('Checked out dev');
+  });
+
+  it('requires confirmation before discarding changes for a checkout', async () => {
+    workspaceGitCheckout.mockRejectedValueOnce(checkoutDirtyError());
+    workspaceGitCheckout.mockResolvedValueOnce({
+      branch: 'dev',
+      detached: false,
+    });
+    mountWithBranches(CHECKOUT_BRANCHES);
+    await flush();
+
+    clickButton('dev');
+    await flush();
+    clickButton('Discard Changes and Switch');
+    await flush();
+
+    // The first click only reveals the confirmation; no destructive call yet.
+    expect(workspaceGitCheckout).toHaveBeenCalledTimes(1);
+    expect(footerText()).toContain('This cannot be undone');
+
+    clickButton('Discard and Switch');
+    await flush();
+
+    expect(workspaceGitCheckout).toHaveBeenLastCalledWith(
+      'dev',
+      undefined,
+      undefined,
+      { force: true },
+      600_000,
+    );
+  });
+
+  it('keeps the panel mounted while its stash checkout is in flight', async () => {
+    let settle:
+      | ((value: { branch: string; detached: boolean }) => void)
+      | undefined;
+    workspaceGitCheckout.mockRejectedValueOnce(checkoutDirtyError());
+    workspaceGitCheckout.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          settle = resolve;
+        }),
+    );
+    mountWithBranches(CHECKOUT_BRANCHES);
+    await flush();
+
+    clickButton('dev');
+    await flush();
+    clickButton('Stash Changes and Switch');
+    await flush();
+
+    const stashButton = Array.from(
+      document.body.querySelectorAll('button'),
+    ).find((b) => b.textContent?.includes('Stash Changes and Switch'));
+    expect(stashButton).toBeTruthy();
+    expect(stashButton?.disabled).toBe(true);
+    // The spinner must sit on the clicked button: the busy key is the
+    // checkout one, not the pull one.
+    expect(stashButton?.querySelector('svg')?.getAttribute('class')).toContain(
+      'spin',
+    );
+
+    await act(async () => {
+      settle?.({ branch: 'dev', detached: false });
+    });
+    await flush();
+
+    expect(footerText()).not.toContain('Stash Changes and Switch');
+    expect(footerText()).toContain('Checked out dev');
+  });
+
+  it('keeps the confirm button busy while its discard checkout is in flight', async () => {
+    let settle:
+      | ((value: { branch: string; detached: boolean }) => void)
+      | undefined;
+    workspaceGitCheckout.mockRejectedValueOnce(checkoutDirtyError());
+    workspaceGitCheckout.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          settle = resolve;
+        }),
+    );
+    mountWithBranches(CHECKOUT_BRANCHES);
+    await flush();
+
+    clickButton('dev');
+    await flush();
+    clickButton('Discard Changes and Switch…');
+    await flush();
+    clickButton('Discard and Switch');
+    await flush();
+
+    const confirmButton = Array.from(
+      document.body.querySelectorAll('button'),
+    ).find((b) => b.textContent?.includes('Discard and Switch'));
+    expect(confirmButton).toBeTruthy();
+    expect(confirmButton?.disabled).toBe(true);
+    // The busy key is the discard one: the spinner sits on the confirm
+    // button, and the stash option is not the one in flight.
+    expect(
+      confirmButton?.querySelector('svg')?.getAttribute('class'),
+    ).toContain('spin');
+
+    await act(async () => {
+      settle?.({ branch: 'dev', detached: false });
+    });
+    await flush();
+
+    expect(workspaceGitCheckout).toHaveBeenLastCalledWith(
+      'dev',
+      undefined,
+      undefined,
+      { force: true },
+      600_000,
+    );
+  });
+
+  it('re-targets the standing panel to a second refused branch', async () => {
+    workspaceGitCheckout.mockRejectedValueOnce(checkoutDirtyError());
+    workspaceGitCheckout.mockRejectedValueOnce(checkoutDirtyError());
+    workspaceGitCheckout.mockResolvedValueOnce({
+      branch: 'staging',
+      detached: false,
+    });
+    mountWithBranches({
+      ...CHECKOUT_BRANCHES,
+      local: [
+        ...CHECKOUT_BRANCHES.local,
+        {
+          name: 'staging',
+          isHead: false,
+          ahead: 0,
+          behind: 0,
+          commitDate: 0,
+          commitSubject: '',
+        },
+      ],
+    });
+    await flush();
+
+    clickButton('dev');
+    await flush();
+    expect(footerText()).toContain('Switch blocked by uncommitted changes');
+
+    // A second refused branch re-targets the panel instead of stacking a
+    // new one or keeping the first ref.
+    clickButton('staging');
+    await flush();
+    expect(footerText()).toContain('Stash Changes and Switch');
+    clickButton('Stash Changes and Switch');
+    await flush();
+
+    expect(workspaceGitCheckout).toHaveBeenLastCalledWith(
+      'staging',
+      undefined,
+      undefined,
+      { stash: true },
+      600_000,
+    );
+  });
+
+  it('drops a standing checkout panel when the popover reopens', async () => {
+    workspaceGitCheckout.mockRejectedValueOnce(checkoutDirtyError());
+    mountWithBranches(CHECKOUT_BRANCHES);
+    await flush();
+
+    clickButton('dev');
+    await flush();
+    expect(footerText()).toContain('Switch blocked by uncommitted changes');
+
+    mount({ open: false });
+    await flush();
+    mount({ open: true });
+    await flush();
+
+    // The open reset drops the standing checkout panel: no resolution
+    // buttons survive the reopen. (The whole reset block is load-bearing;
+    // the individual discriminator setter is redundantly safe behind
+    // setPullBlocked(false), so this pins the observable contract.)
+    expect(footerText()).not.toContain('Switch blocked by uncommitted changes');
+    expect(footerText()).not.toContain('Stash Changes and Switch');
+  });
+
+  it('keeps a failed checkout’s kept-stash warning across a reopen', async () => {
+    workspaceGitCheckout.mockRejectedValueOnce(checkoutDirtyError());
+    workspaceGitCheckout.mockRejectedValueOnce(
+      new DaemonHttpError(
+        409,
+        {
+          error: 'checkout_failed',
+          message:
+            'checkout failed and your local changes could not be restored automatically; they are kept in stash entry a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0',
+          stashSha: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0',
+        },
+        'POST /workspaces/:workspace/git/checkout: checkout_failed',
+      ),
+    );
+    mountWithBranches(CHECKOUT_BRANCHES);
+    await flush();
+
+    clickButton('dev');
+    await flush();
+    clickButton('Stash Changes and Switch');
+    await flush();
+
+    // The kept entry is the only record of the changes: a standing
+    // warning, not a dismissible error.
+    expect(footerText()).toContain('kept in stash entry a1b2c3d4e5f6');
+
+    mount({ open: false });
+    await flush();
+    mount({ open: true });
+    await flush();
+
+    expect(footerText()).toContain('kept in stash entry a1b2c3d4e5f6');
+  });
+
+  it('dismisses the checkout panel when a plain pull starts', async () => {
+    let settle:
+      | ((value: { success: boolean; output: string }) => void)
+      | undefined;
+    workspaceGitCheckout.mockRejectedValueOnce(checkoutDirtyError());
+    workspaceGitPull.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          settle = resolve;
+        }),
+    );
+    mountWithBranches(CHECKOUT_BRANCHES);
+    await flush();
+
+    clickButton('dev');
+    await flush();
+    expect(footerText()).toContain('Stash Changes and Switch');
+
+    clickButton('Update Project');
+    await flush();
+
+    // While the pull is in flight the footer must not keep offering the
+    // checkout resolutions.
+    expect(footerText()).not.toContain('Stash Changes and Switch');
+    expect(footerText()).not.toContain('Switch blocked by uncommitted changes');
+
+    await act(async () => {
+      settle?.({ success: true, output: 'updated' });
+    });
+    await flush();
+  });
+
+  it('binds the checkout resolution to the owning session', async () => {
+    workspaceGitCheckout.mockRejectedValueOnce(checkoutDirtyError());
+    workspaceGitCheckout.mockResolvedValueOnce({
+      branch: 'dev',
+      detached: false,
+    });
+    mountWithBranches(CHECKOUT_BRANCHES, {
+      gitCwd: '/repo/.qwen/worktrees/test',
+      gitSessionId: 'session-1',
+    });
+    await flush();
+
+    clickButton('dev');
+    await flush();
+    clickButton('Stash Changes and Switch');
+    await flush();
+
+    expect(workspaceGitCheckout).toHaveBeenLastCalledWith(
+      'dev',
+      '/repo/.qwen/worktrees/test',
+      'session-1',
+      { stash: true },
+      600_000,
+    );
+  });
+
+  it('keeps the panel with the daemon detail when discard is unsupported', async () => {
+    workspaceGitCheckout.mockRejectedValueOnce(checkoutDirtyError());
+    workspaceGitCheckout.mockRejectedValueOnce(
+      new DaemonHttpError(
+        409,
+        {
+          error: 'force_unsupported',
+          message: 'cannot discard changes: the workspace is a subdirectory',
+        },
+        'POST /workspaces/:workspace/git/checkout: force_unsupported',
+      ),
+    );
+    mountWithBranches(CHECKOUT_BRANCHES);
+    await flush();
+
+    clickButton('dev');
+    await flush();
+    clickButton('Discard Changes and Switch');
+    await flush();
+    clickButton('Discard and Switch');
+    await flush();
+
+    expect(footerText()).toContain(
+      'cannot discard changes: the workspace is a subdirectory',
+    );
+    // Stashing is still viable, so the panel stays with that option only.
+    expect(footerText()).toContain('Stash Changes and Switch');
+    expect(footerText()).not.toContain('Discard Changes and Switch');
+  });
+
+  it('shows the daemon message when the forced checkout is refused', async () => {
+    workspaceGitCheckout.mockRejectedValueOnce(checkoutDirtyError());
+    workspaceGitCheckout.mockRejectedValueOnce(
+      new DaemonHttpError(
+        409,
+        {
+          error: 'checkout_failed',
+          message: 'cannot discard and switch: fatal: invalid reference',
+        },
+        'POST /workspaces/:workspace/git/checkout: checkout_failed',
+      ),
+    );
+    mountWithBranches(CHECKOUT_BRANCHES);
+    await flush();
+
+    clickButton('dev');
+    await flush();
+    clickButton('Discard Changes and Switch');
+    await flush();
+    clickButton('Discard and Switch');
+    await flush();
+
+    expect(footerText()).toContain('cannot discard and switch');
+    expect(footerText()).not.toContain('Stash Changes and Switch');
+  });
+
+  it('paints the kept-stash warning immediately and keeps it across a reopen', async () => {
+    workspaceGitCheckout.mockRejectedValueOnce(checkoutDirtyError());
+    // A detached result (tag/SHA checkout): the warning must name the ref
+    // the user clicked, not the resolved HEAD.
+    workspaceGitCheckout.mockResolvedValueOnce({
+      branch: '3f2a1b9',
+      detached: true,
+      stashSha: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0',
+    });
+    const onOpenChange = vi.fn();
+    mountWithBranches(CHECKOUT_BRANCHES, { onOpenChange });
+    await flush();
+
+    clickButton('dev');
+    await flush();
+    clickButton('Stash Changes and Switch');
+    await flush();
+
+    // The picker stays open on a stash success: closing in the same update
+    // would hide the only record of where the changes went.
+    expect(onOpenChange).not.toHaveBeenCalledWith(false);
+    expect(footerText()).toContain('Switched to dev');
+    expect(footerText()).toContain('kept in stash entry a1b2c3d4e5f6');
+
+    mount({ open: false });
+    await flush();
+    mount({ open: true });
+    await flush();
+
+    expect(footerText()).toContain('kept in stash entry a1b2c3d4e5f6');
+  });
+
+  it('re-reads the listing and status after a stash success keeps the picker open', async () => {
+    workspaceGitCheckout.mockRejectedValueOnce(checkoutDirtyError());
+    workspaceGitCheckout.mockResolvedValueOnce({
+      branch: 'dev',
+      detached: false,
+      stashSha: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0',
+    });
+    // Every read up to the stash click answers the dirty pre-stash tree
+    // (the mount read AND the dirty refusal's catch refresh); only the
+    // post-switch reads answer clean.
+    workspaceGit.mockResolvedValueOnce(status({ unstaged: 2, computedAt: 2 }));
+    workspaceGit.mockResolvedValueOnce(status({ unstaged: 2, computedAt: 2 }));
+    workspaceGit.mockResolvedValue(status({ branch: 'dev', computedAt: 3 }));
+    const onBranchChanged = vi.fn();
+    mountWithBranches(CHECKOUT_BRANCHES, {
+      status: status({ unstaged: 2 }),
+      onBranchChanged,
+    });
+    await flush();
+
+    // The open picker reports the pre-stash dirt before the action (the
+    // behind-upstream pull hint names the uncommitted changes).
+    expect(footerText()).toContain('↓1 · uncommitted changes');
+
+    clickButton('dev');
+    await flush();
+    // The dirty refusal's catch already refreshed both halves against the
+    // still-dirty reads: the baselines sit AFTER it, so only the stash
+    // success's own refresh can satisfy them.
+    expect(footerText()).toContain('↓1 · uncommitted changes');
+    const listingReadsBefore = workspaceGitBranches.mock.calls.length;
+    const statusReadsBefore = workspaceGit.mock.calls.length;
+    // A genuinely post-switch listing (head dev, behind origin/dev): only
+    // this fixture can produce the '↓1 · origin/dev' hint, so dropping the
+    // listing response reds the test even though the request was issued.
+    // The behind-upstream head also keeps the dirty-status hint reachable:
+    // a stale dirty snapshot would read '↓1 · uncommitted changes'.
+    workspaceGitBranches.mockResolvedValue({
+      ...CHECKOUT_BRANCHES,
+      local: [
+        {
+          name: 'dev',
+          isHead: true,
+          upstream: 'origin/dev',
+          ahead: 0,
+          behind: 1,
+          pushTarget: 'origin/dev',
+          pushAhead: 0,
+          pushBehind: 1,
+          commitDate: 0,
+          commitSubject: '',
+        },
+      ],
+      head: 'dev',
+    });
+
+    clickButton('Stash Changes and Switch');
+    await flush();
+
+    // A stash success must re-read AND apply BOTH halves: the hints must
+    // not keep reporting uncommitted changes for a now-clean tree, and
+    // the rows must follow the post-switch listing.
+    expect(workspaceGitBranches.mock.calls.length).toBeGreaterThan(
+      listingReadsBefore,
+    );
+    expect(workspaceGit.mock.calls.length).toBeGreaterThan(statusReadsBefore);
+    expect(footerText()).toContain('↓1 · origin/dev');
+    expect(footerText()).not.toContain('uncommitted changes');
+    // The one success path that keeps the picker open still notifies the
+    // owner that the branch changed.
+    expect(onBranchChanged).toHaveBeenCalled();
+  });
+
+  it('re-reads the listing and status after a failed resolution that kept the entry', async () => {
+    workspaceGitCheckout.mockRejectedValueOnce(checkoutDirtyError());
+    workspaceGitCheckout.mockRejectedValueOnce(
+      new DaemonHttpError(
+        409,
+        {
+          error: 'checkout_failed',
+          message:
+            'switched, but the checkout reported a failure; your local changes are kept in stash entry a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0',
+          stashSha: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0',
+        },
+        'POST /workspaces/:workspace/git/checkout: checkout_failed',
+      ),
+    );
+    // The mount read answers dirty; the failure-path refresh answers the
+    // clean post-switch tree, so the hint transition witnesses that the
+    // refreshed STATUS was applied, not just requested.
+    workspaceGit.mockResolvedValueOnce(status({ unstaged: 2, computedAt: 2 }));
+    workspaceGit.mockResolvedValue(status({ branch: 'dev', computedAt: 3 }));
+    mountWithBranches(CHECKOUT_BRANCHES, {
+      status: status({ unstaged: 2 }),
+    });
+    await flush();
+
+    clickButton('dev');
+    await flush();
+    const listingReadsBefore = workspaceGitBranches.mock.calls.length;
+    const statusReadsBefore = workspaceGit.mock.calls.length;
+    // Only the post-switch listing can produce the '↓1 · origin/dev' hint.
+    workspaceGitBranches.mockResolvedValue({
+      ...CHECKOUT_BRANCHES,
+      local: [
+        {
+          name: 'dev',
+          isHead: true,
+          upstream: 'origin/dev',
+          ahead: 0,
+          behind: 1,
+          pushTarget: 'origin/dev',
+          pushAhead: 0,
+          pushBehind: 1,
+          commitDate: 0,
+          commitSubject: '',
+        },
+      ],
+      head: 'dev',
+    });
+    clickButton('Stash Changes and Switch');
+    await flush();
+
+    // The switch completed and kept the entry: the tree moved, so the
+    // open picker must re-read AND apply both halves even though the
+    // request failed.
+    expect(footerText()).toContain('kept in stash entry a1b2c3d4e5f6');
+    expect(workspaceGitBranches.mock.calls.length).toBeGreaterThan(
+      listingReadsBefore,
+    );
+    expect(workspaceGit.mock.calls.length).toBeGreaterThan(statusReadsBefore);
+    expect(footerText()).toContain('↓1 · origin/dev');
+    expect(footerText()).not.toContain('uncommitted changes');
+  });
+
+  it('drops a checkout failure without a kept entry on reopen', async () => {
+    workspaceGitCheckout.mockRejectedValueOnce(checkoutDirtyError());
+    workspaceGitCheckout.mockRejectedValueOnce(
+      new DaemonHttpError(
+        409,
+        {
+          error: 'checkout_failed',
+          message: 'cannot discard and switch: fatal: invalid reference',
+        },
+        'POST /workspaces/:workspace/git/checkout: checkout_failed',
+      ),
+    );
+    mountWithBranches(CHECKOUT_BRANCHES);
+    await flush();
+
+    clickButton('dev');
+    await flush();
+    clickButton('Discard Changes and Switch…');
+    await flush();
+    clickButton('Discard and Switch');
+    await flush();
+    expect(footerText()).toContain('cannot discard and switch');
+
+    mount({ open: false });
+    await flush();
+    mount({ open: true });
+    await flush();
+
+    // The error side of the kept-stash split: a failure WITHOUT stashSha
+    // is a dismissible error, not a sticky warning — it must not survive
+    // the reopen (only the kept-entry warning does).
+    expect(footerText()).not.toContain('cannot discard and switch');
+  });
+
+  it('closes the picker after a plain checkout succeeds', async () => {
+    const onOpenChange = vi.fn();
+    mountWithBranches(CHECKOUT_BRANCHES, { onOpenChange });
+    await flush();
+
+    clickButton('dev');
+    await flush();
+
+    expect(workspaceGitCheckout).toHaveBeenLastCalledWith(
+      'dev',
+      undefined,
+      undefined,
+      undefined,
+      600_000,
+    );
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it('switches the panel back to pull wording when a pull is blocked', async () => {
+    workspaceGitCheckout.mockRejectedValueOnce(checkoutDirtyError());
+    workspaceGitPull.mockRejectedValueOnce(dirtyTreeError());
+    mountWithBranches(CHECKOUT_BRANCHES);
+    await flush();
+
+    clickButton('dev');
+    await flush();
+    expect(footerText()).toContain('Switch blocked by uncommitted changes');
+
+    clickButton('Update Project');
+    await flush();
+
+    expect(footerText()).toContain('Update blocked by uncommitted changes');
+    expect(footerText()).toContain('Stash Changes and Update');
+    expect(footerText()).not.toContain('Stash Changes and Switch');
+  });
+
+  it('dismisses the checkout panel via Cancel without another checkout', async () => {
+    workspaceGitCheckout.mockRejectedValueOnce(checkoutDirtyError());
+    mountWithBranches(CHECKOUT_BRANCHES);
+    await flush();
+
+    clickButton('dev');
+    await flush();
+    clickButton('Cancel');
+    await flush();
+
+    expect(workspaceGitCheckout).toHaveBeenCalledTimes(1);
+    expect(footerText()).not.toContain('Stash Changes and Switch');
+    expect(footerText()).not.toContain('Switch blocked by uncommitted changes');
   });
 });
 
