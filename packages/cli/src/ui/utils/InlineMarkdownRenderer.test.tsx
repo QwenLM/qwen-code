@@ -7,7 +7,11 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import stripAnsi from 'strip-ansi';
 import { renderWithProviders } from '../../test-utils/render.js';
-import { getPlainTextLength, RenderInline } from './InlineMarkdownRenderer.js';
+import {
+  getInlinePlainText,
+  getPlainTextLength,
+  RenderInline,
+} from './InlineMarkdownRenderer.js';
 import { HYPERLINK_ENV_KEYS } from './osc8.js';
 
 describe('<RenderInline />', () => {
@@ -40,6 +44,15 @@ describe('<RenderInline />', () => {
       value: savedPlatform,
     });
   });
+
+  function enableHyperlinks() {
+    Object.defineProperty(process.stdout, 'isTTY', {
+      configurable: true,
+      value: true,
+    });
+    process.env['TERM_PROGRAM'] = 'iTerm.app';
+    process.env['TERM_PROGRAM_VERSION'] = '3.5.0';
+  }
 
   it('leaves shell-style dollar variables untouched by default', () => {
     const { lastFrame } = renderWithProviders(
@@ -150,15 +163,6 @@ math then literal: $x^2\$$`;
   });
 
   describe('markdown link OSC 8 wrapping', () => {
-    function enableHyperlinks() {
-      Object.defineProperty(process.stdout, 'isTTY', {
-        configurable: true,
-        value: true,
-      });
-      process.env['TERM_PROGRAM'] = 'iTerm.app';
-      process.env['TERM_PROGRAM_VERSION'] = '3.5.0';
-    }
-
     it('wraps a safe http(s) link and shows only the label (no `(url)` suffix)', () => {
       enableHyperlinks();
       const url = 'https://very.long.example.com/path/to/thing?with=params';
@@ -503,6 +507,94 @@ math then literal: $x^2\$$`;
       // Exactly one occurrence of the legacy form, with the URL fully present.
       expect(out).toContain(`docs`);
       expect(out).toContain(`(${url})`);
+    });
+  });
+
+  describe('getInlinePlainText()', () => {
+    it('counts markup inside a link label at its rendered width', () => {
+      // The renderer never recurses into a label, so the `**` bytes it draws
+      // have to survive into the measured text.
+      const source = '[**xxxxxxxxxxxxxxxxxxx**](https://e.co)';
+      expect(getInlinePlainText(source)).toBe(
+        '**xxxxxxxxxxxxxxxxxxx** (https://e.co)',
+      );
+      expect(getPlainTextLength(source)).toBe(
+        '**xxxxxxxxxxxxxxxxxxx** (https://e.co)'.length,
+      );
+    });
+
+    it('keeps label markup counted when OSC 8 is active', () => {
+      enableHyperlinks();
+      expect(getInlinePlainText('[**buy now**](https://e.co)')).toBe(
+        '**buy now**',
+      );
+    });
+
+    it('counts the `(url)` suffix kept for a deceptive label', () => {
+      enableHyperlinks();
+      expect(getInlinePlainText('[google.com](https://attacker.com/x)')).toBe(
+        'google.com (https://attacker.com/x)',
+      );
+    });
+
+    it('counts the URL bytes an empty label falls back to', () => {
+      enableHyperlinks();
+      expect(getInlinePlainText('go [](https://e.co/x) home')).toBe(
+        'go https://e.co/x home',
+      );
+    });
+
+    it('counts the space an empty legacy label leaves behind', () => {
+      // Legacy rendering emits the empty label plus the ` (url)` separator.
+      expect(getInlinePlainText('go [](https://e.co/x) home')).toBe(
+        'go  (https://e.co/x) home',
+      );
+    });
+
+    it('counts emphasis markers inside a code span', () => {
+      // RenderInline draws code-span contents literally, markers and all.
+      expect(getInlinePlainText('code `a **b** _c_` end')).toBe(
+        'code a **b** _c_ end',
+      );
+    });
+
+    it('honors the renderer guards that leave emphasis verbatim', () => {
+      expect(getInlinePlainText('foo_bar_baz')).toBe('foo_bar_baz');
+      expect(getInlinePlainText('foo*bar*baz')).toBe('foo*bar*baz');
+      expect(getInlinePlainText('a *italic* and _em_ b')).toBe(
+        'a italic and em b',
+      );
+      expect(getInlinePlainText('**bold** ~~gone~~ <u>under</u>')).toBe(
+        'bold gone under',
+      );
+    });
+
+    it('counts a bare URL by its own visible bytes', () => {
+      expect(getInlinePlainText('see https://example.com.')).toBe(
+        'see https://example.com.',
+      );
+    });
+
+    it('keeps trailing punctuation counted when OSC 8 trims the target', () => {
+      enableHyperlinks();
+      expect(getInlinePlainText('see https://example.com.')).toBe(
+        'see https://example.com.',
+      );
+    });
+
+    it('measures what RenderInline draws', () => {
+      const source = 'see [**a**](x.y) now';
+      const { lastFrame } = renderWithProviders(<RenderInline text={source} />);
+      // Ink soft-wraps the frame at the test terminal width, so compare
+      // whitespace-collapsed against the measured bytes.
+      expect(stripAnsi(lastFrame() ?? '').replace(/\s+/g, ' ')).toContain(
+        getInlinePlainText(source),
+      );
+    });
+
+    it('measures the visible text at its display width', () => {
+      expect(getInlinePlainText('**中文**')).toBe('中文');
+      expect(getPlainTextLength('**中文**')).toBe(4);
     });
   });
 });

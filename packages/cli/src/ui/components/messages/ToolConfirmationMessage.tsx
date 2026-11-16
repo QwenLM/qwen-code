@@ -11,15 +11,12 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { Box, Text } from 'ink';
 import wrapAnsi from 'wrap-ansi';
+import stringWidth from 'string-width';
 import { DiffRenderer } from './DiffRenderer.js';
-import { RenderInline } from '../../utils/InlineMarkdownRenderer.js';
 import {
-  MD_LINK_CAPTURE,
-  MD_LINK_PATTERN,
-  labelMayDeceive,
-  shouldWrapMarkdownLink,
-  supportsHyperlinks,
-} from '../../utils/osc8.js';
+  RenderInline,
+  getInlinePlainText,
+} from '../../utils/InlineMarkdownRenderer.js';
 import { MarkdownDisplay } from '../../utils/MarkdownDisplay.js';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type {
@@ -53,57 +50,48 @@ const COMPACT_BODY_MAX_LINES = 5;
 // content pays for it up front or the clip lands outside the cap unannounced.
 const MARKER_ROW = 1;
 
-const MD_LINK_GLOBAL_PATTERN = new RegExp(MD_LINK_PATTERN, 'g');
-
-/**
- * The text RenderInline will actually put on screen. Sizing and announcing a
- * clipped prose body from the Markdown source instead counts the markup the
- * renderer strips, which drops prose that fits and invents hidden rows for
- * prose that never overflowed. Only constructs the renderer always strips are
- * removed, so a mis-measure errs long; the cap itself is enforced by the box,
- * never by this number.
- */
-function visibleInlineProse(text: string) {
-  const canHyperlink = supportsHyperlinks();
-  const links = text.replace(MD_LINK_GLOBAL_PATTERN, (link) => {
-    const parts = link.match(MD_LINK_CAPTURE);
-    if (!parts) return link;
-    const label = parts[1] ?? '';
-    const url = parts[2] ?? '';
-    if (
-      !shouldWrapMarkdownLink(url, canHyperlink) ||
-      labelMayDeceive(label, url)
-    ) {
-      return `${label} (${url})`;
-    }
-    return label || url;
-  });
-  return links
-    .replace(/\*\*(.+?)\*\*/g, '$1')
-    .replace(/~~(.+?)~~/g, '$1')
-    .replace(/<u>(.+?)<\/u>/g, '$1')
-    .replace(/`([^`]+)`/g, '$1');
-}
-
 /**
  * Marker for content this component clipped by hand rather than through
  * MaxSizedBox. Registering the overflow is what makes the global
  * "Press ctrl-s to show more lines" hint appear, so a clipped destination
  * list or inline-Markdown body is always revealable, not just announced.
+ *
+ * Pinned like every row MaxSizedBox renders: an ancestor cap compresses an
+ * unpinned row onto its neighbour instead of clipping a tail, so a notice that
+ * can shrink turns the clipped region into overlapping text.
  */
-const OverflowNotice: React.FC<{ message: string }> = ({ message }) => {
+const OverflowNotice: React.FC<{
+  message: string;
+  color?: string;
+  tail?: string;
+  /**
+   * Width the row is truncated at. A row that still fits hides nothing, so
+   * passing the width keeps the reveal affordance honest: it is registered only
+   * when the truncation actually cut characters off.
+   */
+  width?: number;
+}> = ({ message, color = theme.text.secondary, tail, width }) => {
   const id = useId();
   const actions = useOverflowActions();
+  const clipped =
+    width === undefined || stringWidth(`${message}${tail ?? ''}`) > width;
   useEffect(() => {
-    if (!actions) return;
+    if (!actions || !clipped) return;
     actions.addOverflowingId(id);
     return () => actions.removeOverflowingId(id);
-  }, [actions, id]);
+  }, [actions, id, clipped]);
 
   return (
-    <Text color={theme.text.secondary} wrap="truncate">
-      {message}
-    </Text>
+    <Box flexShrink={0}>
+      <Text color={color} wrap="truncate">
+        {message}
+      </Text>
+      {tail ? (
+        <Box flexShrink={0}>
+          <Text color={theme.text.secondary}>{` ${tail}`}</Text>
+        </Box>
+      ) : null}
+    </Box>
   );
 };
 
@@ -278,8 +266,10 @@ export const ToolConfirmationMessage: React.FC<
   let bodyBudget: number | undefined;
 
   function compactClamp(height: number | undefined) {
-    return compactMode
-      ? Math.min(height ?? COMPACT_BODY_MAX_LINES, COMPACT_BODY_MAX_LINES)
+    // An undefined grant is full-detail mode, not a reveal-only one: clamping
+    // it to the compact ceiling would hide body rows no shortcut can restore.
+    return compactMode && height !== undefined
+      ? Math.min(height, COMPACT_BODY_MAX_LINES)
       : height;
   }
 
@@ -334,13 +324,37 @@ export const ToolConfirmationMessage: React.FC<
     ? wrappedRows(`⚠ ${autoModeFallback.message}`, warningContentWidth) + 1
     : 0;
 
-  function warningsHeight(warnings: string[]): number {
-    if (warnings.length === 0) return 0;
-    const wrappedRowCount = warnings.reduce(
+  function warningRows(warnings: string[]): number {
+    return warnings.reduce(
       (sum, warning) => sum + wrappedRows(`⚠ ${warning}`, warningContentWidth),
       0,
     );
-    return wrappedRowCount + 1;
+  }
+
+  // The warning box renders with its own margin row, so its footprint is the
+  // wrapped rows plus that row.
+  function warningsHeight(warnings: string[]): number {
+    return warnings.length === 0 ? 0 : warningRows(warnings) + 1;
+  }
+
+  // Inside one capped column the warnings box and the branch's own body
+  // element (the diff, the command) split `bodyHeight` rows. A warning renders
+  // as one pinned, truncated row, so the box needs `warnings.length` rows to
+  // show them all, and once it has to cut it renders exactly the ceiling it is
+  // given — which makes that ceiling the charge against the other side. The
+  // other side always keeps a row: with two it lays its element out through a
+  // box, with one it renders the notice that counts what it dropped.
+  function splitWarningBudget(bodyHeight: number, warnings: string[]) {
+    const want = warnings.length;
+    // The blank row between the two sides is affordable only while both still
+    // get a row once it is charged.
+    const gap = bodyHeight >= want + MARKER_ROW + MARKER_ROW ? 1 : 0;
+    const maxHeight = Math.min(
+      want,
+      Math.max(bodyHeight - MARKER_ROW - gap, MARKER_ROW),
+      bodyHeight,
+    );
+    return { maxHeight, gap, rows: maxHeight };
   }
 
   if (confirmationDetails.type === 'edit') {
@@ -405,21 +419,10 @@ export const ToolConfirmationMessage: React.FC<
     let warningMarginBottom = warnings.length > 0 ? 1 : 0;
     let diffHeight = bodyHeight;
     if (constrainWarnings && bodyHeight !== undefined) {
-      const desiredWarningHeight = Math.max(
-        warnings.length,
-        MINIMUM_MAX_HEIGHT,
-      );
-      warningMarginBottom =
-        bodyHeight >= desiredWarningHeight + MINIMUM_MAX_HEIGHT + 1 ? 1 : 0;
-      warningMaxHeight = Math.min(
-        desiredWarningHeight,
-        Math.max(
-          bodyHeight - MINIMUM_MAX_HEIGHT - warningMarginBottom,
-          MINIMUM_MAX_HEIGHT,
-        ),
-        bodyHeight,
-      );
-      diffHeight = bodyHeight - warningMaxHeight - warningMarginBottom;
+      const warningSplit = splitWarningBudget(bodyHeight, warnings);
+      warningMarginBottom = warningSplit.gap;
+      warningMaxHeight = warningSplit.maxHeight;
+      diffHeight = bodyHeight - warningSplit.rows - warningSplit.gap;
     } else if (diffHeight !== undefined) {
       diffHeight = Math.max(diffHeight - warningsHeight(warnings), 1);
     }
@@ -434,9 +437,7 @@ export const ToolConfirmationMessage: React.FC<
           settings={settings}
         />
       ) : diffHeight === 1 ? (
-        <Text color={theme.text.secondary} wrap="truncate">
-          ... diff hidden ...
-        </Text>
+        <OverflowNotice message={t('... diff hidden ...')} />
       ) : null;
 
     bodyContent = (
@@ -448,10 +449,23 @@ export const ToolConfirmationMessage: React.FC<
             marginLeft={1}
             marginBottom={warningMarginBottom}
           >
-            {constrainWarnings && warningMaxHeight === 1 ? (
-              <Text color={theme.status.warning} wrap="truncate">
-                ⚠ {warnings.at(-1)?.replace(/\r\n?|\n/g, ' ↵ ')}
-              </Text>
+            {constrainWarnings &&
+            warningMaxHeight === 1 &&
+            warnings.length > 1 ? (
+              // A box cannot go below its two-row floor, so a one-row ask with
+              // several warnings would render two and overflow the column; the
+              // count rides a pinned row that truncation cannot squeeze off.
+              // Earlier warnings describe the mode, the last names the exact
+              // action, so it is the row that survives.
+              <OverflowNotice
+                color={theme.status.warning}
+                message={`⚠ ${warnings.at(-1)?.replace(/\r\n?|\n/g, ' ↵ ')}`}
+                tail={
+                  warnings.length > 1
+                    ? `+${warnings.length - 1} warning(s) hidden`
+                    : undefined
+                }
+              />
             ) : constrainWarnings ? (
               <MaxSizedBox
                 maxHeight={warningMaxHeight}
@@ -520,38 +534,44 @@ export const ToolConfirmationMessage: React.FC<
     });
 
     // Warnings render as a sibling Box *below* the MaxSizedBox-capped
-    // command body, with marginTop={1}. They sit outside the MaxSizedBox
-    // cap, so we have to reserve their footprint up-front; otherwise the
-    // overall exec block can exceed availableTerminalHeight /
-    // COMPACT_BODY_MAX_LINES on small terminals and push the options
-    // list off-screen.
-    //
-    // Each warning may wrap across multiple visual rows on a narrow
-    // terminal. Account for the warning container's effective content width
-    // and use the same wrapping semantics as Ink's Text renderer.
+    // command body, with marginTop={1}, so their footprint is charged against
+    // the same budget instead of landing outside the cap. Each warning is
+    // truncated to one row inside the box, and the box adds a counted footer
+    // row when it clips.
     const warnings = executionProps.warnings ?? [];
     const warningsCount = warnings.length;
-    const reservedWarningsHeight = warningsHeight(warnings);
 
+    // The command body is sized from the whole grant the surrounding chrome
+    // leaves, and the compact ceiling applies to that grant, so a compact exec
+    // still gets a full five command rows. The vertical chrome — the outer
+    // padding, the body margin, the question and the option list — is already
+    // charged inside availableBodyContentHeight(), and the command box's own
+    // padding is horizontal, so no vertical reservation is owed here: taking one
+    // made the cap two rows taller than the grant, which is how uncapped
+    // warnings escaped it.
     bodyBudget = compactClamp(availableBodyContentHeight());
-    let bodyContentHeight = bodyBudget;
-    if (bodyContentHeight !== undefined) {
-      bodyContentHeight -= 2; // Account for padding;
+
+    const warningsConstrained =
+      warningsCount > 0 &&
+      bodyBudget !== undefined &&
+      warningsHeight(warnings) + MINIMUM_MAX_HEIGHT > bodyBudget;
+    let warningMarginTop = warningsCount > 0 ? 1 : 0;
+    let warningMaxHeight: number | undefined;
+    let commandHeight = bodyBudget;
+    if (warningsConstrained && bodyBudget !== undefined) {
+      const warningSplit = splitWarningBudget(bodyBudget, warnings);
+      warningMarginTop = warningSplit.gap;
+      warningMaxHeight = warningSplit.maxHeight;
+      commandHeight = bodyBudget - warningSplit.rows - warningSplit.gap;
+    } else if (commandHeight !== undefined) {
+      commandHeight = Math.max(commandHeight - warningsHeight(warnings), 1);
     }
-    // Subtract the warnings footprint last so it applies in both the
-    // normal-height and compact-cap paths. Floor at 1 so a long warning
-    // list never zeroes out the command body.
-    if (bodyContentHeight !== undefined && reservedWarningsHeight > 0) {
-      bodyContentHeight = Math.max(
-        bodyContentHeight - reservedWarningsHeight,
-        1,
-      );
-    }
-    bodyContent = (
-      <Box flexDirection="column">
+
+    const renderedCommand =
+      commandHeight === undefined || commandHeight >= MINIMUM_MAX_HEIGHT ? (
         <Box paddingX={1} marginLeft={1}>
           <MaxSizedBox
-            maxHeight={bodyContentHeight}
+            maxHeight={commandHeight}
             maxWidth={Math.max(contentWidth, 1)}
             overflowDirection="bottom"
           >
@@ -560,13 +580,66 @@ export const ToolConfirmationMessage: React.FC<
             </Box>
           </MaxSizedBox>
         </Box>
+      ) : commandHeight === 1 ? (
+        // The box cannot honour a one-row ask, so a pinned truncated row keeps
+        // a cue that the command continues and registers it for the reveal only
+        // when the truncation really did cut the command off.
+        <Box paddingX={1} marginLeft={1}>
+          <OverflowNotice
+            color={theme.text.link}
+            width={warningContentWidth}
+            message={executionProps.command.replace(/\r\n?|\n/g, ' ↵ ')}
+          />
+        </Box>
+      ) : null;
+
+    bodyContent = (
+      <Box flexDirection="column">
+        {renderedCommand}
         {warningsCount > 0 ? (
-          <Box flexDirection="column" paddingX={1} marginLeft={1} marginTop={1}>
-            {warnings.map((warning, idx) => (
-              <Text key={idx} color={theme.status.warning}>
-                ⚠ {warning}
-              </Text>
-            ))}
+          <Box
+            flexDirection="column"
+            paddingX={1}
+            marginLeft={1}
+            marginTop={warningMarginTop}
+          >
+            {warningsConstrained &&
+            warningMaxHeight === 1 &&
+            warningsCount > 1 ? (
+              // The box floor is two rows, so a one-row ask with several
+              // warnings gets a pinned row instead. The last warning names the
+              // exact action; the earlier ones only describe the mode, so it
+              // keeps that row.
+              <OverflowNotice
+                color={theme.status.warning}
+                message={`⚠ ${warnings.at(-1)?.replace(/\r\n?|\n/g, ' ↵ ')}`}
+                tail={
+                  warningsCount > 1
+                    ? `+${warningsCount - 1} warning(s) hidden`
+                    : undefined
+                }
+              />
+            ) : warningsConstrained ? (
+              <MaxSizedBox
+                maxHeight={warningMaxHeight}
+                maxWidth={warningContentWidth}
+                overflowDirection="bottom"
+              >
+                {warnings.map((warning, idx) => (
+                  <Box key={idx}>
+                    <Text color={theme.status.warning} wrap="truncate">
+                      ⚠ {warning.replace(/\r\n?|\n/g, ' ↵ ')}
+                    </Text>
+                  </Box>
+                ))}
+              </MaxSizedBox>
+            ) : (
+              warnings.map((warning, idx) => (
+                <Text key={idx} color={theme.status.warning}>
+                  ⚠ {warning}
+                </Text>
+              ))
+            )}
           </Box>
         ) : null}
       </Box>
@@ -655,11 +728,7 @@ export const ToolConfirmationMessage: React.FC<
             not the hint above it. Registering the overflow is what makes
             ctrl-s, which lifts the budget and restores the whole plan, offer
             itself. */}
-        {planDropped && (
-          <Box flexShrink={0}>
-            <OverflowNotice message={t('... plan hidden ...')} />
-          </Box>
-        )}
+        {planDropped && <OverflowNotice message={t('... plan hidden ...')} />}
       </Box>
     );
   } else if (confirmationDetails.type === 'info') {
@@ -741,32 +810,41 @@ export const ToolConfirmationMessage: React.FC<
         urlLimit = urlList.length;
         urlRows = totalUrlRows;
       } else {
+        const budget = bodyBudget;
         // The destinations are what the user is being asked to authorise, so
-        // they are costed before the prose that only describes the request.
-        // The block's own chrome is what gets handed back when the budget is
-        // tight: a label with no destination under it answers nothing, so the
-        // blank row goes before the label and the label before the first host.
-        // The footer is only charged once something is actually hidden, and the
-        // whole block disappears only when not even one whole host fits — at
-        // that point a fragment of a URL tells the user less than the prose.
-        for (const chrome of [
-          URL_MARGIN_ROW + URL_LABEL_ROW,
-          URL_LABEL_ROW,
-          0,
-        ]) {
-          if (chrome + totalUrlRows <= bodyBudget) {
-            urlFixedRows = chrome;
-            urlLimit = urlList.length;
-            urlRows = totalUrlRows;
-            break;
+        // they are costed before the prose that only describes the request. The
+        // block's own chrome is what gets handed back when the budget is tight,
+        // roomiest tier first: the blank row and label stay while at least one
+        // destination still fits under them, and are dropped only when keeping
+        // them would leave the list with nothing under it.
+        const urlTiers = [URL_MARGIN_ROW + URL_LABEL_ROW, URL_LABEL_ROW, 0];
+        // If every destination fits at some tier, the roomiest such tier is the
+        // one to take: a tighter tier that also fits would hide a destination
+        // behind a footer row the budget did not need.
+        const fullChrome = urlTiers.find(
+          (chrome) => chrome + totalUrlRows <= budget,
+        );
+        if (fullChrome !== undefined) {
+          urlFixedRows = fullChrome;
+          urlLimit = urlList.length;
+          urlRows = totalUrlRows;
+        } else {
+          for (const chrome of urlTiers) {
+            const taken = takeWholeUrls(budget - chrome - MARKER_ROW);
+            if (taken.count > 0) {
+              urlFixedRows = chrome;
+              urlLimit = taken.count;
+              urlRows = taken.rows;
+              // Some destination is always hidden here: if none were, a tier
+              // would have held the whole list above.
+              urlFooterRows = MARKER_ROW;
+              break;
+            }
           }
-          const taken = takeWholeUrls(bodyBudget - chrome - MARKER_ROW);
-          if (taken.count > 0) {
-            urlFixedRows = chrome;
-            urlLimit = taken.count;
-            urlRows = taken.rows;
-            urlFooterRows = taken.count < urlList.length ? MARKER_ROW : 0;
-            break;
+          if (urlLimit === 0) {
+            // No whole destination fits beside the footer row. The count still
+            // gets a row, so a dropped destination list is never silent.
+            urlFooterRows = MARKER_ROW;
           }
         }
       }
@@ -778,46 +856,46 @@ export const ToolConfirmationMessage: React.FC<
         : wrappedRows(
             infoProps.renderPromptAsPlainText
               ? infoProps.prompt
-              : visibleInlineProse(infoProps.prompt),
+              : getInlinePlainText(infoProps.prompt),
             warningContentWidth,
           );
     let proseBudget =
       bodyBudget === undefined
         ? undefined
         : Math.max(bodyBudget - urlFixedRows - urlRows - urlFooterRows, 0);
-    // MaxSizedBox spends a row on its own footer, so it cannot show a line in a
-    // one-row budget; the pinned inline box can. A prose block that already
-    // fits renders no footer, so the floor never applies to it.
-    const proseFloor = infoProps.renderPromptAsPlainText
-      ? MINIMUM_MAX_HEIGHT
-      : 1;
-    const proseSkipped =
+    const proseOverflows = proseBudget !== undefined && proseRows > proseBudget;
+    // Every clip spends a row on its announcement, so a budget below that row
+    // leaves nothing of the prose on screen. The block is then dropped whole and
+    // announced the way the plan body is, instead of claiming a tail clip over
+    // an empty region. A block that already fits pays nothing, so the floor
+    // never applies to it.
+    const proseDropped =
+      proseOverflows &&
       proseBudget !== undefined &&
-      proseRows > proseBudget &&
-      proseBudget < proseFloor;
+      proseBudget < MINIMUM_MAX_HEIGHT;
     let hiddenProseRows = 0;
     if (
-      !proseSkipped &&
+      !proseDropped &&
+      proseOverflows &&
       proseBudget !== undefined &&
-      proseRows > proseBudget &&
       !infoProps.renderPromptAsPlainText
     ) {
       // Ink clips the pinned inline-Markdown box, so what disappeared is
       // measured from the text it renders instead of being counted by the
       // clipper.
-      hiddenProseRows = proseRows - Math.max(proseBudget - MARKER_ROW, 0);
-      proseBudget = Math.max(proseBudget - MARKER_ROW, 0);
-    } else if (proseSkipped && (proseBudget ?? 0) >= MARKER_ROW) {
-      // The prose is dropped whole rather than clipped, and the row it vacates
-      // pays for the announcement. When not even that row is left, the
-      // destinations keep it: they are what is being authorised.
-      hiddenProseRows = proseRows;
+      hiddenProseRows = proseRows - (proseBudget - MARKER_ROW);
+      proseBudget = proseBudget - MARKER_ROW;
     }
+    // The prose is dropped whole rather than clipped, and the row it vacates
+    // pays for the announcement. When not even that row is left, the
+    // destinations keep it: they are what is being authorised.
+    const proseHiddenWhole =
+      proseDropped && proseBudget !== undefined && proseBudget >= MARKER_ROW;
 
     bodyContent = (
       <Box flexDirection="column" paddingX={1} marginLeft={1}>
         {infoProps.renderPromptAsPlainText ? (
-          proseSkipped ? null : (
+          proseDropped ? null : (
             <MaxSizedBox
               maxHeight={proseBudget}
               maxWidth={warningContentWidth}
@@ -832,7 +910,7 @@ export const ToolConfirmationMessage: React.FC<
               ))}
             </MaxSizedBox>
           )
-        ) : proseSkipped ? null : (
+        ) : proseDropped ? null : (
           <Box flexShrink={0} maxHeight={proseBudget} overflow="hidden">
             <Text color={theme.text.link}>
               <RenderInline
@@ -842,6 +920,9 @@ export const ToolConfirmationMessage: React.FC<
             </Text>
           </Box>
         )}
+        {proseHiddenWhole && (
+          <OverflowNotice message={t('... prompt hidden ...')} />
+        )}
         {hiddenProseRows > 0 && (
           <OverflowNotice
             message={`... last ${hiddenProseRows} line${
@@ -849,13 +930,21 @@ export const ToolConfirmationMessage: React.FC<
             } hidden ...`}
           />
         )}
-        {urlLimit > 0 && (
+        {(urlLimit > 0 || hiddenUrlCount > 0) && (
           <Box
             flexDirection="column"
-            marginTop={urlFixedRows > URL_LABEL_ROW ? URL_MARGIN_ROW : 0}
+            marginTop={
+              urlLimit > 0 && urlFixedRows > URL_LABEL_ROW ? URL_MARGIN_ROW : 0
+            }
           >
-            {urlFixedRows >= URL_LABEL_ROW && (
-              <Text color={theme.text.primary}>{t('URLs to fetch:')}</Text>
+            {urlLimit > 0 && urlFixedRows >= URL_LABEL_ROW && (
+              // Pinned and truncated: the label is charged one row, so it may
+              // not wrap or compress into the rows below it.
+              <Box flexShrink={0}>
+                <Text color={theme.text.primary} wrap="truncate">
+                  {t('URLs to fetch:')}
+                </Text>
+              </Box>
             )}
             {urlList.slice(0, urlLimit).map((url, index) => (
               <Box key={`${url}-${index}`} flexShrink={0}>
@@ -940,12 +1029,13 @@ export const ToolConfirmationMessage: React.FC<
           // MaxSizedBox floors its ceiling at MINIMUM_MAX_HEIGHT and spends one
           // of those rows on its footer, so under a one-row budget it renders
           // more than the cap and the outer clip takes the footer away. Pin the
-          // row that names the tool being authorised instead.
-          <Box flexShrink={0} maxHeight={bodyBudget} overflow="hidden">
-            <Text color={theme.text.link} wrap="wrap">
-              {t('Tool: {{tool}}', { tool: mcpProps.toolName })}
-            </Text>
-          </Box>
+          // row that names the tool being authorised instead, truncated so the
+          // row shows a cue, and registered so ctrl-s offers the whole name.
+          <OverflowNotice
+            color={theme.text.link}
+            width={warningContentWidth}
+            message={t('Tool: {{tool}}', { tool: mcpProps.toolName })}
+          />
         ) : (
           <MaxSizedBox
             maxHeight={bodyBudget}

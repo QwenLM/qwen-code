@@ -43,7 +43,11 @@ destinations are invisible.
 ## Goals and scope
 
 - The question line and the options are always on screen, for every
-  confirmation type, at any terminal height.
+  confirmation type whose body this component sizes, at any terminal height
+  that can hold the question and the options. Two arms sit outside that
+  claim: `ask_user_question` returns its own dialog before any budget is
+  taken, and the body grant floors at one row, so a height shorter than the
+  chrome plus that row yields a frame taller than the grant.
 - A body is sized from one budget, computed once, and that same number is the
   ceiling of the outer cap.
 - Any truncation shows a contiguous prefix and says how much is hidden.
@@ -80,16 +84,22 @@ exactly once: reserved in the per-type budgets that subtract
 ### The compact cap belongs to the shared budget
 
 `COMPACT_BODY_MAX_LINES` is applied through one helper that every type branch
-and the outer cap call, so a compact confirmation cannot receive a larger
-ceiling from one path than another.
+calls as it takes its budget, so no branch can receive a larger ceiling than
+another. The outer cap does not clamp again: its ceiling is
+`bodyBudget + autoModeFallbackHeight`, and `bodyBudget` is already the clamped
+number, so the wrapper only adds the banner the branches never accounted for.
+An undefined grant is left alone — no height means full-detail mode, and
+clamping it would hide rows no shortcut can bring back.
 
 ### Truncation is contiguous and counted
 
 Content that is cut must be pinned first. Ink rows with `flexShrink: 0` keep
 their natural height, so the cap cuts the tail instead of compressing a
 scatter of rows. `MaxSizedBox` already does exactly this for its own rows and
-renders the `... last N lines hidden ...` footer; anything routed through it
-inherits both properties.
+renders the `... last N lines hidden ...` footer, and anything routed through
+it inherits both — but only for a box told to cut at the bottom, which every
+box here sets explicitly; the default hides the head and prints
+`... first N line(s) hidden ...`.
 
 Rows that `MaxSizedBox` cannot host stay pinned Ink rows and render their own
 counted footer:
@@ -107,8 +117,12 @@ counted footer:
 Inside the `info` branch, the destination block is costed before the prose
 prompt is sized:
 
-- When the budget can hold every destination plus the minimum usable prose
-  block, all destinations render and the prose gets the remainder.
+- Every destination renders when it fits: the test is the destinations plus
+  their own chrome against the budget, not the prose floor, so the block is
+  capped only when they do not all fit. The roomiest chrome tier that fits is
+  the one taken — a tighter tier that also fits would hide a destination
+  behind a footer row the budget did not need. The prose then gets the
+  remainder.
 - Otherwise the destination block is capped: one row for the `URLs to fetch:`
   header, one for the hidden-count footer, and the remaining rows are filled
   greedily with whole URLs so no destination is shown half-cut. The header is
@@ -116,14 +130,14 @@ prompt is sized:
   then nothing: a header above an empty list answers nothing, while a host is
   the thing being authorized. The footer survives to the last row because the
   count is the only signal that the list is longer than what is on screen. The
-  prose keeps
-  one row for its own hidden-count footer so its loss is still announced, and
-  its block is skipped when the remainder is too small to hold a line it would
-  have clipped anyway — `MINIMUM_MAX_HEIGHT` (2) for the plain-text prompt,
-  because its `MaxSizedBox` spends a row on that footer, and 1 for the pinned
-  inline-Markdown box, which can render a single row. Prose that already fits
-  is never skipped for a floor reason: it renders no footer, so the floor does
-  not apply to it. When not even the footer row is left, the destinations keep
+  prose keeps one row for its own hidden-count footer so its loss is still
+  announced, and its block is skipped when the remainder is too small to hold a
+  line it would have clipped anyway: below `MINIMUM_MAX_HEIGHT` (2) there is no
+  room for content plus the row a clip spends announcing itself, whichever
+  renderer the prose uses. Prose that already fits is never skipped on that
+  floor: it renders no footer, so the floor does not apply to it. A block
+  dropped whole hands its rows to a `... prompt hidden ...` notice while at
+  least one row is free; when not even that row is left, the destinations keep
   it and the prose goes unannounced: a prose footer would push the destination
   footer past the cap, and Ink would cut off the one that matters instead.
 
@@ -131,16 +145,35 @@ The trade-off is deliberate: at a body budget of roughly five rows or fewer,
 the destinations outrank the explanation, and the prose may be gone. The
 user still sees which hosts are being authorized and can reveal the rest.
 
+### Which side keeps a row when they cannot all fit
+
+The orderings below were chosen deliberately and are what the code does:
+
+- Inside the fetch-style body, destinations outrank the prose that only
+  describes the request; inside the warning list, the last warning outranks
+  the earlier ones, because a mode warning describes the request while the
+  warning naming the exact action is the one that changes it.
+- Where a warnings box and the branch's own body element (the diff, the
+  command) share one capped grant, the box needs one row per warning to show
+  them all; once it has to cut, the ceiling it is given _is_ its charge,
+  because it renders exactly that many rows. The other side never loses its
+  last row to the split: with two rows it lays out through a box, with one
+  row it renders the notice that counts what it dropped. At a grant so small
+  that only one side can have a row, the warning keeps it and the command
+  goes.
+- The destination block's chrome is what gets handed back under pressure —
+  blank separator, then label — and the counted footer is the last thing
+  standing, because the count is the only signal that the list continues.
+
 ### Reading the whole body
 
-The reveal already exists and is generic: `ctrl-s`
+The reveal already exists and is shared rather than per-type: `ctrl-s`
 (`Command.SHOW_MORE_LINES`) clears `constrainHeight`, which makes every height
 budget in this component `undefined`, and `MainContent.tsx` drops its own
 pending-region clamp once streaming has settled to a static confirmation, so
 the full body renders into the terminal scrollback and stays interactive
-(#6809). Key dispatch is a broadcast that ignores return values, so the
-shortcut reaches the global handler even while the confirmation owns the
-keyboard.
+(#6809). The shortcut reaches the global handler even while the confirmation
+owns the keyboard.
 
 What was missing is discoverability: the `Press ctrl-s to show more lines`
 hint only appears when something has registered an overflow, and the bodies
@@ -149,6 +182,16 @@ component performs itself registers an overflow id for as long as it is on
 screen, which turns the hint on at the moment it is useful. Each truncating
 body also says what it hid, so the affordance is discoverable even in the frame
 where the content disappears.
+
+The shortcut is not unconditional, and the hint does not know that. The global
+handler clears `constrainHeight`, which lifts every budget here, only while the
+prompt buffer is empty; with a draft typed, the same key is the input's stash
+binding — it moves the draft out and leaves the cap bound. Key dispatch is a
+broadcast that ignores return values, so both handlers fire and the rows stay
+hidden. Making the reveal win while a confirmation owns the keyboard would mean
+out-prioritising an intentional feature, so this change documents the empty
+buffer as a precondition of the reveal instead of claiming the shortcut is
+generic; the hint itself is left as the shared one.
 
 The exception is a plan body that survives the budget and is cut inside
 `MarkdownDisplay`: that component draws its own in-place cue and registers no
@@ -167,6 +210,9 @@ outright.
 - A truncation must never be announced by a marker alone at a one-row budget:
   the marker is a row, so the capped content and the marker have to be costed
   together.
+- A `MaxSizedBox` cuts its tail only when told to: `overflowDirection` must be
+  `"bottom"`, because the default hides the head and prints
+  `... first N line(s) hidden ...`.
 - The outer cap is a layout guard, not a formatter. It cannot announce what it
   clipped, because it never measures layout — every body that can overflow must
   announce its own truncation, and the guard only bounds the damage.
@@ -183,6 +229,11 @@ outright.
   that always passes a height keeps every cap binding and keeps the hint on; it
   just cannot reveal. Nothing in this change depends on the reveal for safety —
   the question and options are visible with or without it.
+- The hint can light at a moment the reveal will not work, because a non-empty
+  prompt buffer makes `ctrl-s` stash the draft instead. Deferred: letting the
+  confirmation lift the cap itself while it owns the keyboard would
+  out-prioritise that intentional stash binding, which is a wider change than
+  this PR.
 - Registering overflow from a confirmation adds ids to the shared overflow
   state that the shell's own clamp also feeds. Both are id-scoped, so they
   coexist; the hint is the only consumer.
@@ -208,8 +259,9 @@ outright.
   - a plan body with room: the plan rows and the `o open full plan in editor`
     row occupy separate rows, and at a two-row budget the dropped plan is
     announced, which is also what lights the reveal shortcut;
-  - a long MCP identity at a one-row budget: the identity box keeps its own
-    height cap instead of letting its rows share one line;
+  - a long MCP identity at a one-row budget: the two identity rows give way to
+    one pinned truncated row, because the sizing box cannot answer a one-row
+    ask and would otherwise render past the cap;
   - a plain-text prompt squeezed out by its own footer: the dropped prose is
     announced; and at a budget where the last row is contested, the destination
     footer keeps it and the prose footer is omitted rather than clipping the
@@ -236,7 +288,8 @@ outright.
 
 ## Acceptance criteria
 
-- No confirmation can push its question line or options below the fold.
+- No confirmation whose body this component sizes can push its question line
+  or options below the fold, at any terminal height that can hold them.
 - For each confirmation type, the body ceiling equals the single budget that
   type branch computed, plus the measured auto-mode banner height.
 - Every clipped body shows a contiguous prefix and states how much is hidden;

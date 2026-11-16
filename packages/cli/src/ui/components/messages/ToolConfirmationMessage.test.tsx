@@ -474,9 +474,8 @@ describe('ToolConfirmationMessage', () => {
 
     const frame = lastFrame() ?? '';
     // MaxSizedBox emits this footer when it clamps; its presence proves
-    // the reservation actually narrowed the body cap below the command
-    // height. Without `bodyContentHeight -= warningsHeight`, the cap is
-    // loose and the footer doesn't appear.
+    // the warnings actually took rows away from the command body. Without
+    // that reservation the grant is looser and the footer does not appear.
     expect(frame).toMatch(/lines hidden/);
     // Warning + all three compactMode options must still be on-screen.
     expect(frame).toContain('command substitution');
@@ -1282,9 +1281,11 @@ describe('ToolConfirmationMessage', () => {
       );
 
       const frame = lastFrame() ?? '';
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(10);
       expect(frame).toContain('previously blocked');
       expect(frame).toContain('line-1');
-      expect(frame).toContain('last 2 lines hidden');
+      expect(frame).toContain('line-4');
+      expect(frame).not.toContain('hidden');
       expect(frame).toContain('Yes, allow once');
       expect(frame).toContain('No');
       expect(frame).not.toContain('Switch to Default Mode');
@@ -1487,9 +1488,15 @@ describe('ToolConfirmationMessage', () => {
       expect(frame).toContain('URLs to fetch:');
       const shownUrls = frame.match(/https:\/\/e\.com\/\d+/g) ?? [];
       expect(shownUrls.length).toBeGreaterThan(0);
-      expect(shownUrls[0]).toBe('https://e.com/0');
-      expect(frame).not.toContain('https://e.com/29');
-      expect(frame).toMatch(/\.\.\. \d+ more URLs hidden \.\.\./);
+      // The whole shown list has to be the prefix, not just its first entry: a
+      // compressed sample (/0, /7, /14) keeps the head and the absent tail yet
+      // reads as a list the user can extrapolate.
+      expect(shownUrls).toEqual(shownUrls.map((_, i) => `https://e.com/${i}`));
+      // And the marker counts exactly what that prefix left out.
+      const hiddenUrls = Number(
+        frame.match(/\.\.\. (\d+) more URLs hidden \.\.\./)?.[1],
+      );
+      expect(hiddenUrls).toBe(30 - shownUrls.length);
     });
 
     it('keeps the destinations when a long prose prompt competes with them', () => {
@@ -1523,34 +1530,45 @@ describe('ToolConfirmationMessage', () => {
       expect(frame).toContain('Yes, allow once');
     });
 
-    it('announces a plain-text prompt dropped to make room for destinations', () => {
+    it('announces a plain-text prompt dropped to make room for destinations', async () => {
       const availableTerminalHeight = 11;
-      const { lastFrame } = renderWithProviders(
-        <ToolConfirmationMessage
-          confirmationDetails={{
-            type: 'info',
-            title: 'Confirm Web Fetch',
-            prompt: longPrompt,
-            renderPromptAsPlainText: true,
-            urls: ['https://example.com/deep/target'],
-            hideAlwaysAllow: true,
-            onConfirm: vi.fn(),
-          }}
-          config={mockConfig}
-          availableTerminalHeight={availableTerminalHeight}
-          contentWidth={50}
-        />,
+      const { lastFrame } = render(
+        <OverflowProvider>
+          {withProviders(
+            <ToolConfirmationMessage
+              confirmationDetails={{
+                type: 'info',
+                title: 'Confirm Web Fetch',
+                prompt: longPrompt,
+                renderPromptAsPlainText: true,
+                urls: ['https://example.com/deep/target'],
+                hideAlwaysAllow: true,
+                onConfirm: vi.fn(),
+              }}
+              config={mockConfig}
+              availableTerminalHeight={availableTerminalHeight}
+              contentWidth={50}
+            />,
+          )}
+          <OverflowProbe />
+        </OverflowProvider>,
       );
 
+      await vi.waitFor(() => {
+        expect(lastFrame() ?? '').toContain('overflowing:1');
+      }, WAIT_FOR_FRAME);
       const frame = lastFrame() ?? '';
+      // The probe prints a row of its own, so the dialog keeps one row of slack.
       expect(frame.split(EOL).length).toBeLessThanOrEqual(
-        availableTerminalHeight,
+        availableTerminalHeight + 1,
       );
       // A one-row prose budget cannot hold a MaxSizedBox plus its footer, so the
-      // prose is dropped whole. It must still be announced: silently vanishing
-      // text is what made the first fix hard to trust.
+      // prose is dropped whole. The announcement says a whole prompt went, not
+      // that some of its rows did, and it registers the reveal that gets it
+      // back: silently vanishing text is what made the first fix hard to trust.
       expect(frame).not.toContain('finding 1');
-      expect(frame).toMatch(/last \d+ lines hidden/);
+      expect(frame).toMatch(/\.\.\. prompt hidden \.\.\./);
+      expect(frame).not.toMatch(/last \d+ lines hidden/);
       expect(frame).toContain('URLs to fetch:');
       expect(frame).toContain('https://example.com/deep/target');
       expect(frame).toContain('Do you want to proceed?');
@@ -1581,11 +1599,27 @@ describe('ToolConfirmationMessage', () => {
       );
       // No prose row survives here, and a marker for the prose would have cost
       // the destinations their own marker — the extra row pushed it past the cap
-      // and Ink cut it off, hiding the count that matters most.
+      // and Ink cut it off, hiding the count that matters most. The positive
+      // witness is where the destinations' count sits: it owns the body's last
+      // row, with only the margin between it and the question.
       expect(frame).not.toContain('finding 1');
       expect(frame).not.toMatch(/last \d+ lines hidden/);
+      const lines = frame.split(EOL);
+      const urlMarkerRow = lines.findIndex((line) =>
+        /more URLs hidden/.test(line),
+      );
+      const questionRow = lines.findIndex((line) =>
+        line.includes('Do you want to proceed?'),
+      );
+      expect(urlMarkerRow).toBeGreaterThan(-1);
+      expect(questionRow).toBeGreaterThan(urlMarkerRow);
+      expect(
+        lines
+          .slice(urlMarkerRow + 1, questionRow)
+          .join('')
+          .trim(),
+      ).toBe('');
       expect(frame).toContain('https://e.com/0');
-      expect(frame).toMatch(/\.\.\. \d+ more URLs hidden \.\.\./);
       expect(frame).toContain('Do you want to proceed?');
     });
 
@@ -1806,6 +1840,40 @@ describe('ToolConfirmationMessage', () => {
       expect(lastFrame()).toContain('https://example.com/deep/target');
     });
 
+    it('grants the whole body when no terminal height was given', async () => {
+      const { lastFrame } = render(
+        <OverflowProvider>
+          {withProviders(
+            <ToolConfirmationMessage
+              confirmationDetails={{
+                type: 'info',
+                title: 'Confirm',
+                prompt: longPrompt,
+                hideAlwaysAllow: true,
+                onConfirm: vi.fn(),
+              }}
+              config={mockConfig}
+              contentWidth={50}
+              compactMode={true}
+            />,
+          )}
+          <OverflowProbe />
+        </OverflowProvider>,
+      );
+
+      await vi.waitFor(() => {
+        expect(lastFrame() ?? '').toContain('overflowing:0');
+      }, WAIT_FOR_FRAME);
+      const frame = lastFrame() ?? '';
+      // Compact mode caps the body at five rows so an inline subagent approval
+      // cannot fill the screen. That ceiling only makes sense next to a granted
+      // height, which ctrl-s reveals more of; with no height granted there is
+      // nothing to reveal back, so the body keeps every row it has.
+      expect(frame).toContain('finding 40');
+      expect(frame).not.toMatch(/hidden/);
+      expect(frame).toContain('Yes, allow once');
+    });
+
     it('caps long MCP server and tool labels', () => {
       const availableTerminalHeight = 12;
       const { lastFrame } = renderWithProviders(
@@ -1837,38 +1905,55 @@ describe('ToolConfirmationMessage', () => {
       expect(frame).toContain('No, suggest changes (esc)');
     });
 
-    it('keeps one MCP identity row when the body budget is a single row', () => {
-      const availableTerminalHeight = 5;
-      const { lastFrame } = renderWithProviders(
-        <ToolConfirmationMessage
-          confirmationDetails={{
-            type: 'mcp',
-            title: 'Confirm MCP tool',
-            serverName: 'srv',
-            toolName: 'tool-a',
-            toolDisplayName: 'a very long tool display name',
-            hideAlwaysAllow: true,
-            onConfirm: vi.fn(),
-          }}
-          config={mockConfig}
-          availableTerminalHeight={availableTerminalHeight}
-          contentWidth={50}
-          compactMode={true}
-        />,
+    it('keeps one MCP identity row when the body budget is a single row', async () => {
+      // Compact chrome is one question row plus two option rows, so a
+      // four-row terminal leaves the body exactly one row: the budget under
+      // which the sizing box cannot answer the ask at all.
+      const availableTerminalHeight = 4;
+      const { lastFrame } = render(
+        <OverflowProvider>
+          {withProviders(
+            <ToolConfirmationMessage
+              confirmationDetails={{
+                type: 'mcp',
+                title: 'Confirm MCP tool',
+                serverName: 'srv',
+                toolName: 'tool-'.repeat(20),
+                toolDisplayName: 'a very long tool display name',
+                hideAlwaysAllow: true,
+                onConfirm: vi.fn(),
+              }}
+              config={mockConfig}
+              availableTerminalHeight={availableTerminalHeight}
+              contentWidth={50}
+              compactMode={true}
+            />,
+          )}
+          <OverflowProbe />
+        </OverflowProvider>,
       );
 
+      await vi.waitFor(() => {
+        expect(lastFrame() ?? '').toContain('overflowing:1');
+      }, WAIT_FOR_FRAME);
       const frame = lastFrame() ?? '';
+      // The probe prints a row of its own, so the dialog keeps one row of slack.
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(
+        availableTerminalHeight + 1,
+      );
       // The body budget floors at one row, but the sizing box used for the two
       // identity rows floors its own ceiling at two and spends one of them on a
       // footer, so it cannot answer a one-row budget with one row. At that point
       // the identity rows are replaced by a pinned single row instead of letting
       // the box render past the cap and take the options with it.
-      expect(frame.split(EOL).length).toBeLessThanOrEqual(
-        availableTerminalHeight,
-      );
       expect(frame).toContain('Tool: tool-');
+      expect(frame).not.toContain('MCP Server:');
+      // The row is truncated, so it shows that a longer name exists, and it
+      // registers the overflow that makes ctrl-s offer the whole name.
+      expect(frame).toContain('…');
       expect(frame).not.toMatch(/last \d+ lines hidden/);
       expect(frame).toContain('Yes, allow once');
+      expect(frame).toContain('No');
     });
 
     it('keeps the auto-mode banner, the command and every option in one budget', () => {
@@ -1931,6 +2016,15 @@ describe('ToolConfirmationMessage', () => {
       expect(frame.split(EOL).length).toBeLessThanOrEqual(
         availableTerminalHeight,
       );
+      // Here the grant is exactly the compact ceiling, so this pins the boundary:
+      // three chrome rows plus a five-row body, four prose rows and the row that
+      // counts the rest. A body clipped down to nothing would still pass a
+      // frame-size check, so the surviving rows are asserted too; the ceiling
+      // itself, where the grant is larger, is pinned by the tall-terminal case.
+      expect(frame).toContain('finding 1');
+      expect(frame).toContain('finding 2');
+      expect(frame).not.toContain('finding 3');
+      expect(frame).toContain('... last 75 lines hidden ...');
       expect(frame).toContain('Do you want to proceed?');
       expect(frame).toContain('Yes, allow once');
       expect(frame).toContain('No');
@@ -1955,11 +2049,15 @@ describe('ToolConfirmationMessage', () => {
 
       const frame = lastFrame() ?? '';
       // The compact ceiling is a ceiling, not a floor: spare terminal height
-      // must not let an inline subagent approval grow to the whole screen.
-      expect(frame.split(EOL).length).toBeLessThanOrEqual(10);
+      // must not let an inline subagent approval grow to the whole screen. Three
+      // chrome rows plus the five-row body, and the frame is measured against
+      // that, so a ceiling that grew by two rows would red here.
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(8);
       expect(frame).toContain('finding 1');
+      expect(frame).toContain('finding 2');
+      expect(frame).not.toContain('finding 3');
       expect(frame).not.toContain('finding 40');
-      expect(frame).toMatch(/last \d+ lines hidden/);
+      expect(frame).toContain('... last 75 lines hidden ...');
       expect(frame).toContain('Yes, allow once');
     });
 
@@ -2045,6 +2143,9 @@ describe('ToolConfirmationMessage', () => {
         .split(EOL)
         .filter((line) => line.trim() === 'o open full plan in editor');
       expect(hintRows).toHaveLength(1);
+      // The hint is a way out, not a substitute: this budget leaves rows for
+      // plan text, so the plan itself has to be on screen beside it.
+      expect(frame).toContain('finding 1');
       expect(frame).toContain('Allow entry into Plan Mode?');
     });
 
