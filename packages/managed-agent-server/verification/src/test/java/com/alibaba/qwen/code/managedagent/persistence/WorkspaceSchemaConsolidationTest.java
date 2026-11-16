@@ -1,13 +1,9 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
-import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -56,22 +52,6 @@ class WorkspaceSchemaConsolidationTest {
         if (mysqlAdmin != null && mysqlDatabase != null) {
             new ManagedSchemaJdbcTemplate(mysqlAdmin).execute("DROP DATABASE " + mysqlDatabase);
         }
-    }
-
-    @Test
-    void aliasesAcrossTenantsShareOnlyThePhysicalOwner() {
-        var store = new WorkspaceCsiReservationStore(jdbc, manager, new ObjectMapper());
-        var first = registration("tenant", "storage", "same-volume");
-        var second = registration("other-tenant", "other-storage", "same-volume");
-        store.register(first);
-        store.register(second);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage", Integer.class)).isEqualTo(2);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner", Integer.class)).isEqualTo(1);
-        assertThat(store.inspect(first).phase()).isEqualTo("RELEASED");
-        assertThat(store.inspect(second).phase()).isEqualTo("RELEASED");
-        assertThatThrownBy(() -> store.register(registration("tenant", "storage", "changed-volume")))
-                .isInstanceOf(RuntimeException.class);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner", Integer.class)).isEqualTo(1);
     }
 
     @Test
@@ -197,36 +177,6 @@ class WorkspaceSchemaConsolidationTest {
     }
 
     @Test
-    void privateRecoveryInventoryExcludesPublicOnlyBodiesAtScale() throws Exception {
-        String scope = ManagedSessionStore.sessionScopeKey("tenant", "session");
-        byte[] body = "{}".getBytes(StandardCharsets.UTF_8);
-        java.util.List<Object[]> resources = new java.util.ArrayList<>();
-        java.util.List<Object[]> roots = new java.util.ArrayList<>();
-        for (int index = 0; index < 4098; index++) {
-            String id = index == 0 ? "checkpoint" : "public-body-" + index;
-            String resource = WorkspaceOperations.hash(scope, id);
-            resources.add(new Object[] {resource, scope, id.getBytes(StandardCharsets.UTF_8),
-                    index == 0 ? "managed-checkpoint" : "managed-message-parts", WorkspaceEvidenceResources.digest(body), body});
-            roots.add(new Object[] {scope, index == 0 ? "JOURNAL" : "MESSAGE", WorkspaceOperations.hash("owner", id), resource,
-                    index == 0 ? 1L : null, id.getBytes(StandardCharsets.UTF_8)});
-        }
-        jdbc.batchUpdate("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, ?, 'tenant', 'root', 'session', ?, ?, 1, 2, ?, 'MYSQL_INLINE', ?, 'fixture', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")", resources);
-        jdbc.batchUpdate("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key, tenant_id, workspace_id, session_id, journal_revision, resource_id, gmt_create) VALUES (?, ?, ?, 1, ?, 'tenant', 'root', 'session', ?, ?, " + ManagedSchemaTime.SQL_NOW + ")", roots);
-        var catalog = new WorkspaceCsiCheckpointSnapshotStore(jdbc.getDataSource(),
-                new com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository(jdbc.getDataSource(),
-                        new com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector("test", new byte[32])), new ObjectMapper());
-        var key = new ObjectMapper().createObjectNode().put("tenantId", "tenant").put("workspaceId", "root").put("sessionId", "session");
-        try (var connection = jdbc.getDataSource().getConnection()) {
-            connection.setTransactionIsolation(java.sql.Connection.TRANSACTION_REPEATABLE_READ);
-            connection.setAutoCommit(false);
-            var inventory = catalog.resources(connection, key, scope, 1);
-            assertThat(inventory.size()).isOne();
-            assertThat(inventory.get(0).path("ref").path("resourceId").asText()).isEqualTo("checkpoint");
-            connection.rollback();
-        }
-    }
-
-    @Test
     void aDeleteIntentBlocksNewProofReferencesAndReads() {
         String owner = WorkspaceOperations.hash("proof-owner");
         byte[] bytes = "proof".getBytes(StandardCharsets.UTF_8);
@@ -271,10 +221,5 @@ class WorkspaceSchemaConsolidationTest {
         jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id, display_name,"
                 + " config_ref, policy_ref, state) VALUES (?, ?, 1, 'storage', 'Root', ?, ?, 'ACTIVE')",
                 "tenant", id, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
-    }
-
-    private static WorkspaceCsiRegistration registration(String tenant, String storage, String handle) {
-        return new WorkspaceCsiRegistration(tenant, storage, "cluster", "namespace", "pvc", "pvc-uid",
-                "pv", "pv-uid", "driver", handle, "backend", "disk", "/workspace", 1);
     }
 }

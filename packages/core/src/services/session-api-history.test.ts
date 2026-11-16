@@ -35,7 +35,10 @@ import {
   InMemoryImagePayloadStore,
   replaceImagePayloadsInPlace,
 } from './image-payload-references.js';
-import { getStartupContextLength } from '../core/environmentContext.js';
+import {
+  getStartupContextLength,
+  RETAINED_COMPACTION_TAIL_REMINDER,
+} from '../core/environmentContext.js';
 import { AUTO_MEMORY_SNAPSHOT_METADATA } from '../memory/request-context.js';
 import {
   countApiUserPrompts,
@@ -1422,9 +1425,37 @@ describe('prompt resolution across tool-loop continuations', () => {
     const toolLap = continuation();
     markApiHistoryPrompt(userPrompt, 'session########1');
     markApiHistoryPrompt(toolLap, 'session########1');
-    const history = [userPrompt, toolLap];
+    const modelReply: Content = { role: 'model', parts: [{ text: 'reply' }] };
+    markApiHistoryPrompt(modelReply, 'session########1');
+    const history = [userPrompt, modelReply, toolLap];
 
     expect(findApiHistoryPromptIndex(history, 'session########1')).toBe(0);
+  });
+
+  it('refuses a retained model owner as a rewind prompt after compaction', async () => {
+    const history = await composePostCompactHistory(
+      [],
+      '<state_snapshot>Earlier work.</state_snapshot>',
+    );
+    history.push(
+      { role: 'user', parts: [{ text: RETAINED_COMPACTION_TAIL_REMINDER }] },
+      {
+        role: 'model',
+        parts: [
+          { functionCall: { id: 'call-1', name: 'read_file', args: {} } },
+        ],
+      },
+      continuation(),
+    );
+    markApiHistoryPrompt(history[3]!, 'session########1');
+    const prefix = getStartupContextLength(history, {
+      includeCompressed: true,
+    });
+    expect(prefix).toBe(3);
+    expect(findApiHistoryPromptIndex(history, 'session########1', prefix)).toBe(
+      -1,
+    );
+    expect(getApiHistoryPromptId(history[3]!)).toBe('session########1');
   });
 
   it('still refuses two prompt entries sharing one id', () => {

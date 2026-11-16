@@ -35,7 +35,7 @@ public final class VerificationFixtures {
         return new ManagedAgentStore(jdbc, json, clock, publisher, workspaces, properties, harnessRules,
                 new com.alibaba.qwen.code.managedagent.adapters.workspace.LocalWorktreeFiles(),
                 new JdbcManagedSessionSkills(jdbc, json, new com.alibaba.qwen.code.managedagent.model.RequestDigests(), null),
-                null, lifecycle, definitions, null, null, null);
+                null, lifecycle, definitions, null, null);
     }
 
     public static JdbcManagedSessionStore managedSessionStore(org.springframework.jdbc.core.JdbcTemplate jdbc) {
@@ -50,13 +50,13 @@ public final class VerificationFixtures {
     public static JdbcManagedSessionStore managedSessionStore(org.springframework.jdbc.core.JdbcTemplate jdbc,
             com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy credentials) {
         return managedSessionStore(jdbc, new JdbcManagedExtensionRecordStore(jdbc), null,
-                null, null, null, null, null, credentials, null);
+                null, null, null, null, null, credentials);
     }
 
     public static JdbcManagedSessionStore managedSessionStore(org.springframework.jdbc.core.JdbcTemplate jdbc,
             JdbcManagedExtensionRecordStore records, JdbcManagedActionStore actions) {
         return managedSessionStore(jdbc, records, actions, null, null, null, null, null,
-                com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound(), null);
+                com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound());
     }
 
     public static JdbcManagedSessionStore managedSessionStore(org.springframework.jdbc.core.JdbcTemplate jdbc,
@@ -66,12 +66,11 @@ public final class VerificationFixtures {
             com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore objects,
             JdbcManagedToolResultStore results,
             com.alibaba.qwen.code.managedagent.contracts.event.JournalEventTransport transport,
-            com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy credentials,
-            com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository bindings) {
+            com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy credentials) {
         return new JdbcManagedSessionStore(jdbc, records, actions,
                 new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules(),
                 new com.alibaba.qwen.code.managedagent.config.ManagedSessionReaderVersion(),
-                execution, sessions, objects, results, transport, credentials, bindings);
+                execution, sessions, objects, results, transport, credentials, null);
     }
 
     public static java.util.List<Object> agentStoreOwners(Object store, String name) {

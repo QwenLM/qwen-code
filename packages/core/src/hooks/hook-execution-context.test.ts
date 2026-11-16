@@ -32,7 +32,7 @@ import {
 
 vi.mock('../telemetry/loggers.js', () => ({ logHookCall: vi.fn() }));
 
-async function runtime() {
+async function runtime(sequential = false) {
   let sessionId = 'session';
   const events: Array<{ label: string; input: HookInput }> = [];
   const progress: HookProgress[] = [];
@@ -42,6 +42,7 @@ async function runtime() {
   );
   const hook = (label: string): HookDefinition[] => [
     {
+      sequential,
       hooks: [
         {
           type: HookType.Function,
@@ -85,12 +86,13 @@ async function runtime() {
       `registration:${agentId}`,
       { owner: { sessionId, agentId }, isSourceTrusted },
     );
-  const fire = () =>
+  const fire = (signal?: AbortSignal) =>
     system.firePreToolUseEvent(
       'read_file',
       {},
       'tool-id',
       PermissionMode.Default,
+      signal,
     );
   return {
     config,
@@ -106,6 +108,62 @@ async function runtime() {
 }
 
 describe('hook execution ownership through real registry and runners', () => {
+  it.each([false, true])(
+    'does not count an already cancelled batch (sequential=%s)',
+    async (sequential) => {
+      const r = await runtime(sequential);
+      const recordUiTelemetryEvent = vi.fn();
+      r.config.getChatRecordingService = () =>
+        ({ recordUiTelemetryEvent }) as unknown as ReturnType<
+          Config['getChatRecordingService']
+        >;
+      const owner = {
+        ...captureHookExecutionOwner(r.config)!,
+        historyPromptId: 'turn',
+      };
+      await runWithHookExecutionOwner(owner, () => r.fire(AbortSignal.abort()));
+      expect(r.events).toEqual([]);
+      expect(recordUiTelemetryEvent).not.toHaveBeenCalled();
+      expect(
+        r.progress.every((event) => event.hookLifecycle === undefined),
+      ).toBe(true);
+    },
+  );
+  it('pairs safe lifecycle records under immutable history turn ownership', async () => {
+    const r = await runtime();
+    const recordUiTelemetryEvent = vi.fn();
+    r.config.getChatRecordingService = () =>
+      ({ recordUiTelemetryEvent }) as unknown as ReturnType<
+        Config['getChatRecordingService']
+      >;
+    const owner = {
+      ...captureHookExecutionOwner(r.config)!,
+      historyPromptId: 'original-history-turn',
+    };
+    await runWithHookExecutionOwner(owner, r.fire);
+    const events = r.progress.map((event) => event.hookLifecycle);
+    expect(events).toHaveLength(2);
+    expect(events[0]).toMatchObject({
+      phase: 'started',
+      sessionId: 'session',
+      promptId: 'original-history-turn',
+      source: 'user',
+      name: 'function #1',
+    });
+    expect(events[1]).toMatchObject({
+      phase: 'ended',
+      executionId: events[0]?.executionId,
+      promptId: 'original-history-turn',
+      outcome: 'success',
+    });
+    expect(recordUiTelemetryEvent).toHaveBeenCalledTimes(2);
+    await runWithHookExecutionOwner({ ...owner, agentId: 'A' }, r.fire);
+    expect(
+      r.progress.slice(2).every((event) => event.hookLifecycle === undefined),
+    ).toBe(true);
+    expect(recordUiTelemetryEvent).toHaveBeenCalledTimes(2);
+  });
+
   it('keeps concurrent and nested owners separate and restores the parent', async () => {
     const r = await runtime();
     for (const id of ['A', 'B', 'C']) r.register(id);

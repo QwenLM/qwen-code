@@ -3,12 +3,10 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
-import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.HarnessOwnership;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeRetention;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
@@ -20,30 +18,14 @@ public final class ManagedRuntimeRetentionGuard implements JdbcRuntimeRetention.
     @Override
     public boolean bindingReferenced(Connection connection, RuntimeBindingRecord binding)
             throws SQLException {
-        var request = binding.getRequest();
-        // A shared binding has no isolation key; private-CSI Sessions never place on one.
-        return CsiFilesRetirementProfile.isProfile(request.getScope())
-                || request.getIsolationKey() != null
-                        && exists(
-                                connection,
-                                "SELECT 1 FROM ma_session WHERE tenant_id = ? AND session_id = ?"
-                                    + " AND is_csi_guard = TRUE LIMIT 1 FOR UPDATE",
-                                identity(request.getScope().getTenantId()),
-                                identity(request.getIsolationKey()))
-                || exists(
-                        connection,
-                        "SELECT 1 FROM ma_storage_owner"
-                                + " WHERE storage_kind = 'CSI' AND binding_id = ? AND runtime_generation = ? LIMIT 1",
-                        identity(binding.getBindingId()),
-                        binding.getGeneration())
-                || exists(
+        return exists(
                         connection,
                         "SELECT 1 FROM ma_runtime_session WHERE binding_id = ? AND runtime_generation = ?"
                                 + " AND execution_storage_key IS NOT NULL LIMIT 1",
                         identity(binding.getBindingId()), binding.getGeneration())
                 || exists(
                         connection,
-                        "SELECT 1 FROM ma_operation WHERE operation_kind IN ('CSI_RETIREMENT', 'WORKSPACE_RETIREMENT') AND"
+                        "SELECT 1 FROM ma_operation WHERE operation_kind = 'WORKSPACE_RETIREMENT' AND"
                             + " target_kind = 'RUNTIME_BINDING' AND target_id = ? AND"
                             + " target_revision = ? LIMIT 1",
                         identity(binding.getBindingId()),
@@ -73,15 +55,15 @@ public final class ManagedRuntimeRetentionGuard implements JdbcRuntimeRetention.
         if (request.getIsolationKey() != null) {
             return exists(connection, "SELECT 1 FROM ma_session_head h WHERE h.tenant_key = ?"
                             + " AND h.harness_key = ? AND h.tenant_id = ? AND h.session_id = ?"
-                            + stale + " LIMIT 1", JdbcRuntimeBindingRepository.harnessDrainKey(
+                            + stale + " LIMIT 1", RuntimeAdmissionFences.harnessDrainKey(
                                     request.getScope().getTenantId()),
-                    JdbcRuntimeBindingRepository.harnessDrainKey(request.getIsolationKey()),
+                    RuntimeAdmissionFences.harnessDrainKey(request.getIsolationKey()),
                     identity(request.getScope().getTenantId()), identity(request.getIsolationKey()));
         }
         return exists(connection, "SELECT 1 FROM ma_runtime_session s JOIN ma_session_head h"
                         + " ON h.tenant_key = ? AND h.tenant_id = s.tenant_id AND h.session_id = s.harness_session_id"
                         + " WHERE s.binding_id = ? AND s.runtime_generation = ?" + stale + " LIMIT 1",
-                JdbcRuntimeBindingRepository.harnessDrainKey(request.getScope().getTenantId()),
+                RuntimeAdmissionFences.harnessDrainKey(request.getScope().getTenantId()),
                 identity(binding.getBindingId()), binding.getGeneration());
     }
 
@@ -194,23 +176,9 @@ public final class ManagedRuntimeRetentionGuard implements JdbcRuntimeRetention.
         String key =
                 ToolPublicationContract.sha256(executionCallId.getBytes(StandardCharsets.UTF_8));
         return exists(
-                        connection,
-                        "SELECT 1 FROM ma_tool_execution WHERE execution_call_id_hash = ? AND"
-                            + " execution_call_id = ? AND native_authorization_json IS NOT NULL"
-                            + " LIMIT 1 FOR UPDATE",
-                        ManagedSchemaKeys.key(executionCallId),
-                        identity(executionCallId))
-                || exists(
-                        connection,
-                        "SELECT 1 FROM ma_output_capture WHERE execution_key = ? LIMIT 1",
-                        key)
-                || exists(
-                        connection,
-                        "SELECT 1 FROM ma_operation_work w JOIN ma_operation o"
-                                + " ON o.operation_key = w.operation_key"
-                                + " WHERE w.work_kind = 'CSI_WORKER_ACK' AND w.target_key = ?"
-                                + " AND o.operation_kind = 'CSI_RETIREMENT' LIMIT 1",
-                        key);
+                connection,
+                "SELECT 1 FROM ma_output_capture WHERE execution_key = ? LIMIT 1",
+                key);
     }
 
     private static byte[] identity(String value) {

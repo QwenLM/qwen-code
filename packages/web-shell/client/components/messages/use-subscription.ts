@@ -67,6 +67,29 @@ const COPY = {
     notActive:
       '此账号未找到有效的 Plus 或 Pro 订阅。如果已经订阅，请确认使用的是同一个 Qwen 账号。',
   },
+  ru: {
+    device: 'Не удалось запросить ссылку авторизации. Попробуйте войти снова.',
+    exchange: 'Не удалось завершить авторизацию. Попробуйте войти снова.',
+    credentials:
+      'Не удалось прочитать или сохранить учётные данные Qwen. Проверьте права доступа к локальным файлам и свободное место на диске.',
+    refresh: 'Не удалось обновить сессию Qwen. Попробуйте ещё раз.',
+    revoke: 'Вы вышли локально, но удалённую сессию отозвать не удалось.',
+    cleanup:
+      'Не удалось удалить локальные учётные данные Qwen. Проверьте права доступа к локальным файлам.',
+    denied: 'Авторизация или доступ отклонены.',
+    rateLimited: 'Слишком много запросов. Попробуйте позже.',
+    network: 'Сетевой запрос не удался или истёк по времени.',
+    invalidResponse: 'Сервис вернул недействительный ответ.',
+    expired:
+      'Ваши учётные данные для входа больше недействительны. Выполните /auth, чтобы войти снова.',
+    timeout:
+      'Время аутентификации истекло. Попробуйте снова или выберите другой способ аутентификации.',
+    queryFailed: 'Не удалось проверить статус подписки. Попробуйте ещё раз.',
+    purchaseTimeout:
+      'Подписка ещё не активна. Если оплата уже прошла, подождите немного и повторите попытку.',
+    notActive:
+      'Для этой учётной записи не найдена активная подписка Plus или Pro. Если вы уже подписались, убедитесь, что использовали тот же аккаунт Qwen.',
+  },
 };
 
 function membership(info: DaemonSubscriptionUserInfo): QwenSubscriptionState {
@@ -112,7 +135,8 @@ export function useSubscription(
   onOpenExternal: (url: string) => void | Promise<void>,
 ) {
   const { language } = useI18n();
-  const messages = COPY[language === 'zh-CN' ? 'zh-CN' : 'en'];
+  const messages: (typeof COPY)['en'] =
+    COPY[language === 'zh-CN' ? 'zh-CN' : language === 'ru' ? 'ru' : 'en'];
   const copy = useRef(messages);
   copy.current = messages;
   const open = useRef(onOpenExternal);

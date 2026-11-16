@@ -239,20 +239,27 @@ The facts below are from this repository at `488845a4a81`.
    list/cancel.** `loop_wakeup` is declared by new revisions of the
    write-capable profiles, following the `files/3` precedent that added
    `todo_write`. A profile revision is a persisted vocabulary, so each
-   slice ships its own: the
-   [fixed-interval sibling](2026-11-10-managed-loop-schedule.md) pins the
-   next revisions for its cron trio, and this slice takes the revisions
-   after them (numbering assigned at landing, in landing order);
-   whichever slice lands first declares `cron_list`/`cron_delete`, and
-   this slice extends them to the union — `cron_list` adds the pending
+   slice ships its own, and the first-landed slice declares the lower
+   revision: this slice landed first with `hosted-workspace-shell/3`, and
+   the [fixed-interval sibling](2026-11-10-managed-loop-schedule.md) takes
+   the next revision for its cron trio when it lands (numbering assigned
+   at landing, in landing order); whichever slice lands first declares
+   `cron_list`/`cron_delete`, and this slice extends them to the union —
+   `cron_list` adds the pending
    unfired loop input (id, fire time, prompt), `cron_delete` routes
    `loop:<wakeupId>` to the cancel of decision 7. There is no `loop_list`
    or `loop_cancel`: the local tools already cover both kinds, and the
    skill's `allowedTools` stay unchanged. The read profile never
    declares `loop_wakeup`. A deployment gate,
-   `qwen.managed-agent.loop.enabled` (environment
-   `QWEN_MANAGED_AGENT_LOOP_ENABLED`), defaults to false until the
+   `qwen.managed-agent.loop.enabled`, defaults to false until the
    acceptance evidence lands, mirroring the automation opt-in history.
+   It is a process-scoped Harness contract, not a control-plane settings
+   key: the deployment enables it by setting
+   `QWEN_MANAGED_AGENT_LOOP_ENABLED=true` in the Harness environment.
+   The gate alone does not select the tool surface: the session must also
+   run on the `hosted-workspace-shell/3` profile, which the Harness
+   advertises through `QWEN_HOSTED_LIFECYCLE_V2_PROFILES` (the profile
+   list must include `hosted-workspace-shell/3`).
    The gate gates arming only: with it off, `loop_wakeup` is refused,
    but an already-armed wakeup survives — the pump delivers journal
    inputs regardless of tool declarations — and `cron_list`/`cron_delete`
@@ -327,7 +334,8 @@ The facts below are from this repository at `488845a4a81`.
   surface and the gate; the stale `scheduled_task_gate` entry is
   corrected separately (the managed automation gate shipped on
   2026-10-22).
-- The deployment settings schema: `qwen.managed-agent.loop.enabled`.
+- The deployment gate (a process-scoped Harness environment contract, not
+  a control-plane settings key): `QWEN_MANAGED_AGENT_LOOP_ENABLED`.
 
 ## Validation plan
 
@@ -421,10 +429,14 @@ The facts below are from this repository at `488845a4a81`.
    there — a model-driven cancel-then-arm restarts the 24 h budget only
    from an ordinary turn. Name the rule, and which reading it replaces,
    before implementation.
-2. **Profile revision numbers.** The `loop_wakeup` revisions follow the
-   [fixed-interval sibling](2026-11-10-managed-loop-schedule.md)'s cron
-   trio revisions, in landing order; confirm the assigned numbers
-   against the control plane's profile admission when the slice lands.
+2. **Profile revision numbers.** Landing first, this slice takes
+   `hosted-workspace-shell/3`, skipping the `shell/2` retired by the
+   unified Shell lifecycle (#15330); the
+   [fixed-interval sibling](2026-11-10-managed-loop-schedule.md) swaps to
+   the later revision per its landing-order note. The control plane's
+   canonical Shell admission recognizes `shell/3` as a public Shell on
+   lifecycle protocol 2 (`WorkspaceToolProfiles.isPublicShell`), landed
+   with this slice; the retired `shell/2` stays refused.
 3. **Gate default timeline.** False until the acceptance evidence lands,
    then true by default like `qwen.managed-agent.automation.enabled`;
    confirm the enablement order with the deployment owners.

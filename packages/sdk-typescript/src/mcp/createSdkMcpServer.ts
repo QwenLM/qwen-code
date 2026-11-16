@@ -87,6 +87,7 @@ export function createSdkMcpServer(
   const server = new McpServer(
     { name, version },
     {
+      maxToolInputElements: 100_000,
       capabilities: {
         tools: tools ? {} : undefined,
       },

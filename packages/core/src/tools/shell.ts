@@ -4220,9 +4220,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
     ) {
       // Registration runs ahead of attribution:
       // `attachCommitAttribution` returns early on the
-      // `gitCoAuthor.commit` toggle, but the amend exemption must not
-      // depend on it, and an attribution failure must not cost the
-      // registration. Registration stays fail-closed: it still
+      // `gitCoAuthor.commit` toggle, but the registry must not depend on
+      // it, and an attribution failure must not cost the registration.
+      // Registration stays fail-closed: it still
       // requires a `commit:` reflog verb plus HEAD movement against
       // the captured preHead.
       await this.trackSessionCommit(cwd, preHead);
@@ -5792,8 +5792,14 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
   /**
    * Record HEAD in the session registry (`permissions/destructive-commands.ts`)
-   * when a `git commit` put it there, so a later `git commit --amend` of it is
-   * exempt from the Auto-mode destructive-command block.
+   * when a `git commit` put it there.
+   *
+   * The registry used to exempt a later `git commit --amend` from the AUTO
+   * destructive-command block. Since #13570 every amend asks for approval and
+   * nothing reads it for that decision, but the attribution it records is still
+   * what the Co-authored-by trailer and the git notes are written against, so a
+   * wrong registration is still a real defect. The registry stays a published
+   * export; removing it and this wiring is a separate change.
    *
    * The criterion is "the newest HEAD reflog entry is a `commit` verb, and
    * HEAD moved". Exit code is too strict (`git commit -m x && npm test` can
@@ -5803,20 +5809,19 @@ export class ShellToolInvocation extends BaseToolInvocation<
    * non-zero — and because `gitCommitContext` does not treat
    * `pull`/`checkout`/`merge` as cwd-shifting and the call site has no
    * exit-code gate, that chain really does reach here. A movement-only test
-   * would register a human's SHA, trading the deterministic Layer-0 block for
-   * the classifier.
+   * would register a human's SHA as the agent's own.
    *
    * Where the reflog cannot answer at all (`core.logAllRefUpdates` off, reflog
-   * expired, git missing) nothing registers and the amend stays blocked, so
-   * that branch costs a blocked amend and never a lifted one.
+   * expired, git missing) nothing registers, so that branch costs a missing
+   * attribution and never a wrong one.
    *
    * The reflog read does *not* establish that this command's own `git commit`
    * created HEAD, and no local read can: `preHead` is taken before the spawn
    * and the reflog after the whole command, so a commit another process lands
    * in the same repository inside that window is the newest `commit:` entry
-   * and registers instead — degrading the next amend's deterministic Layer-0
-   * block to the L5.3 classifier, and costing the agent its own exemption,
-   * since the foreign entry is the newest one. Binding an entry to this child
+   * and registers instead — attributing a foreign commit to the agent and
+   * costing it its own attribution, since the foreign entry is the newest one.
+   * Binding an entry to this child
    * needs a signal not derivable from reflog shape, and the cheap candidate is
    * unsound: a chain-level `GIT_REFLOG_ACTION` stamp rewrites the action of
    * every reflog-writing git call in the single `/bin/bash -c` child, so a
@@ -5826,7 +5831,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
    * No multi-commit guard, unlike {@link attachCommitAttribution}, which has
    * to *partition* per-file contribution and so bails. In `commit a &&
    * commit b` HEAD is `b`, created by this command, so registering it is
-   * sound and `a` stays blocked.
+   * sound and `a` stays unregistered.
    *
    * `requirePredecessor` is the promoted path's lineage guard and is
    * deliberately not applied to the foreground one. There, the window
@@ -5863,10 +5868,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
       requirePredecessor !== undefined &&
       head.predecessor !== requirePredecessor
     ) {
-      // Same visibility contract as the `head === null` branch below: the
-      // only other output of this path is a block reason asserting the
-      // commit was not the agent's, so say which side of the lineage
-      // check failed.
+      // Same visibility contract as the `head === null` branch below: say
+      // which side of the lineage check failed.
       const predecessorLabel =
         requirePredecessor === null
           ? '(unborn)'
@@ -5885,14 +5888,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
     if (head !== null && head.createdByCommit && head.sha !== preHead) {
       registerSessionCommit(head.sha);
     } else if (head === null) {
-      // Failing closed is the intent; failing closed *invisibly* is not. The
-      // only other output of this path is a block reason asserting the
-      // commit was not the agent's, and nothing else separates "the reflog
-      // could not answer" (reflogs off, expired, probe timed out) from a
-      // genuine attribution failure. Same shape as the attribution refusal
-      // in `attachCommitAttribution`.
+      // Failing closed is the intent; failing closed *invisibly* is not.
+      // Nothing else separates "the reflog could not answer" (reflogs off,
+      // expired, probe timed out) from a genuine attribution failure. Same
+      // shape as the attribution refusal in `attachCommitAttribution`.
       debugLogger.warn(
-        `Session commit not registered in ${cwd}: the HEAD reflog could not answer, so a later amend stays blocked.`,
+        `Session commit not registered in ${cwd}: the HEAD reflog could not answer, so this commit is not attributed to the session.`,
       );
     }
   }
