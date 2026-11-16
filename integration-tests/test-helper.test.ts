@@ -4,10 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { TestRig } from './test-helper.js';
+import { listDebugLogFiles, readDebugLogs, TestRig } from './test-helper.js';
 
 function isProcessAlive(pid: number): boolean {
   try {
@@ -29,6 +29,38 @@ describe('TestRig', () => {
     }
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
+  });
+
+  it('shares recursive debug files without the latest alias', async () => {
+    const rig = new TestRig();
+    await rig.setup('shared debug enumeration');
+    const runtime = join(rig.testDir!, 'runtime');
+    const nested = join(runtime, 'debug', 'nested');
+    const file = join(nested, 'session.log');
+    try {
+      mkdirSync(nested, { recursive: true });
+      writeFileSync(file, 'kept bytes\n');
+      writeFileSync(join(runtime, 'debug', 'latest'), 'duplicate alias');
+      expect(listDebugLogFiles(runtime)).toEqual([file]);
+      expect(readDebugLogs(runtime)).toBe('kept bytes\n');
+    } finally {
+      await rig.cleanup();
+    }
+  });
+
+  it('preserves empty text for missing and empty debug directories', async () => {
+    const rig = new TestRig();
+    await rig.setup('empty debug enumeration');
+    const runtime = join(rig.testDir!, 'runtime');
+    try {
+      expect(listDebugLogFiles(runtime)).toEqual([]);
+      expect(readDebugLogs(runtime)).toBe('');
+      mkdirSync(join(runtime, 'debug'), { recursive: true });
+      expect(listDebugLogFiles(runtime)).toEqual([]);
+      expect(readDebugLogs(runtime)).toBe('');
+    } finally {
+      await rig.cleanup();
+    }
   });
 
   it('pins getDefaultTimeout to the CI-first environment table', () => {

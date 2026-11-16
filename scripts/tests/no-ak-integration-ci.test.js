@@ -793,7 +793,24 @@ describe('no-AK integration CI wiring', () => {
         (arm) => `${prefix}a-retry-that-fails-again.${arm}.json`,
       ),
     ]);
-    expect(upload).toContain("if-no-files-found: 'ignore'");
+    const paritySource = readFileSync(
+      path.join(ROOT, 'integration-tests/cli/acp-agent-loop-parity.test.ts'),
+      'utf8',
+    );
+    const slugExpressions = Array.from(
+      paritySource.matchAll(/const slug = (.+);/g),
+      ([, expression]) => expression,
+    );
+    expect(slugExpressions).toEqual([
+      "scenario.name.replace(/[^a-z0-9]+/gi, '-')",
+      "scenario.name.replace(/[^a-z0-9]+/gi, '-')",
+    ]);
+    const scenarioSlugs = Array.from(
+      paritySource.matchAll(/name: '([^']+)'/g),
+      ([, name]) => name.replace(/[^a-z0-9]+/gi, '-'),
+    );
+    expect(scenarioSlugs).toContain(paths[0].slice(prefix.length, -1));
+    expect(upload).toContain("if-no-files-found: 'warn'");
     expect(upload).toContain('retention-days: 7');
     expect(upload).not.toContain('QWEN_HOME');
     expect(upload).not.toContain('**');

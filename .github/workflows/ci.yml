@@ -3411,7 +3411,7 @@ jobs:
             ${{ runner.temp }}/qwen-acp-parity-${{ github.run_id }}-${{ github.run_attempt }}-shard-${{ matrix.shard }}/a-retry-that-fails-again.current.json
             ${{ runner.temp }}/qwen-acp-parity-${{ github.run_id }}-${{ github.run_attempt }}-shard-${{ matrix.shard }}/a-retry-that-fails-again.shared.json
             ${{ runner.temp }}/qwen-acp-parity-${{ github.run_id }}-${{ github.run_attempt }}-shard-${{ matrix.shard }}/a-retry-that-fails-again.kernel.json
-          if-no-files-found: 'ignore'
+          if-no-files-found: 'warn'
           retention-days: 7
 
       - name: 'Clean ACP retry parity evidence'

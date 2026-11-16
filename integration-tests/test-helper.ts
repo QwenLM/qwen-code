@@ -1121,18 +1121,20 @@ export async function runForcedToolCallScenario(options: {
 export const SHARED_LOOP_ROUND_MARKER =
   /runModelRound on the shared agent loop/g;
 
-/**
- * Concatenates a runtime dir's debug logs, marker-agnostic. Skips `latest`,
- * which points at the session's own log. Shared by every arm-identity and
- * debug-marker probe so the scan exists once.
- */
-export function readDebugLogs(runtimeDir: string): string {
+/** Regular fixture debug files, excluding the session's `latest` alias. */
+export function listDebugLogFiles(runtimeDir: string): string[] {
   const debugDir = join(runtimeDir, 'debug');
-  if (!fs.existsSync(debugDir)) return '';
+  if (!fs.existsSync(debugDir)) return [];
   return fs
     .readdirSync(debugDir, { recursive: true, withFileTypes: true })
     .filter((entry) => entry.isFile() && entry.name !== 'latest')
-    .map((entry) => readFileSync(join(entry.parentPath, entry.name), 'utf8'))
+    .map((entry) => join(entry.parentPath, entry.name));
+}
+
+/** Concatenates debug bytes as utf8 without changing file enumeration order. */
+export function readDebugLogs(runtimeDir: string): string {
+  return listDebugLogFiles(runtimeDir)
+    .map((file) => readFileSync(file, 'utf8'))
     .join('');
 }
 

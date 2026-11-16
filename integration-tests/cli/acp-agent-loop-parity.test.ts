@@ -31,6 +31,7 @@ import {
   CONTAINER_SANDBOX_NO_PROXY,
   fakeServerHostOptions,
   IS_CONTAINER_SANDBOX,
+  listDebugLogFiles,
   readDebugLogs,
   TestRig,
 } from '../test-helper.js';
@@ -443,19 +444,14 @@ const allowOnce = () => ({
       const snapshotDebug = (phase: string) => {
         if (!dump) return;
         try {
-          const debugDir = join(qwenHome, 'debug');
-          const entries = existsSync(debugDir)
-            ? readdirSync(debugDir, { recursive: true, withFileTypes: true })
-            : [];
-          const files = entries
-            .filter((entry) => entry.isFile() && entry.name !== 'latest')
-            .map((entry) => {
-              const file = join(entry.parentPath, entry.name);
-              return {
-                file,
-                bytesBase64: readFileSync(file).toString('base64'),
-              };
-            });
+          const paths = listDebugLogFiles(qwenHome);
+          if (paths.length === 0) {
+            evidenceErrors.push(`${phase}: no debug files found`);
+          }
+          const files = paths.map((file) => ({
+            file,
+            bytesBase64: readFileSync(file).toString('base64'),
+          }));
           saveEvidence(`${phase}.json`, {
             observerPid: process.pid,
             agentPid: agent.pid,
@@ -584,80 +580,7 @@ const allowOnce = () => ({
       const stopReasons: unknown[] = [];
       let sessionId = '';
       let debugLog = '';
-      try {
-        await request('initialize', {
-          protocolVersion: 1,
-          clientCapabilities: {
-            fs: { readTextFile: true, writeTextFile: true },
-          },
-          ...(scenario.trustedParent && {
-            _meta: {
-              'qwen-code/private-parent-capability': PARENT_CAPABILITY,
-            },
-          }),
-        });
-        await request('authenticate', { methodId: 'openai' });
-        ({ sessionId } = (await request('session/new', {
-          cwd: dir,
-          mcpServers: [],
-        })) as { sessionId: string });
-        for (const [promptIndex, text] of scenario.prompts.entries()) {
-          let settled = false;
-          const cancelFile = scenario.cancelOnFile;
-          if (cancelFile) {
-            void (async () => {
-              while (!settled && !existsSync(join(dir, cancelFile))) {
-                await new Promise((resolve) => setTimeout(resolve, 50));
-              }
-              if (!settled)
-                send({ method: 'session/cancel', params: { sessionId } });
-            })();
-          }
-          try {
-            const result = (await request('session/prompt', {
-              sessionId,
-              prompt: [{ type: 'text', text }],
-              ...(scenario.promptMeta?.[promptIndex] && {
-                _meta: scenario.promptMeta[promptIndex],
-              }),
-            })) as JsonObject;
-            stopReasons.push(result['stopReason']);
-          } catch (error) {
-            stopReasons.push({ error: (error as Error).message });
-          } finally {
-            settled = true;
-          }
-        }
-        const goalDeadline = Date.now() + PROMPT_TIMEOUT_MS;
-        while (
-          (goalTurnEnds.length < (scenario.goalTurns ?? 0) ||
-            backgroundTurnEnds.length < (scenario.backgroundTurns ?? 0)) &&
-          Date.now() < goalDeadline
-        ) {
-          await new Promise((resolve) => setTimeout(resolve, 50));
-        }
-        // Every round has logged its marker; let those writes land first.
-        debugLog = await readSettledDebugLog(qwenHome);
-      } finally {
-        snapshotDebug('pre-kill');
-        agent.kill();
-        await new Promise((resolve) => {
-          if (agent.exitCode !== null || agent.signalCode) resolve(undefined);
-          else agent.once('exit', resolve);
-        });
-        snapshotDebug('post-exit');
-        // Keep the runtime state for post-mortem whenever TestRig.cleanup()
-        // keeps the test directory, which it decides by truthiness.
-        if (!process.env['KEEP_OUTPUT']) {
-          await removeScratchDir(qwenHome);
-        }
-      }
-      // The scratch runtime keeps the session runtime's `tmp/<hash>` and
-      // `usage/` out of the workspace. Comparing against the pre-run listing
-      // avoids copying TestRig's seeded names, and a leak fails here directly
-      // rather than only when the request equality loses a race.
-      expect(readdirSync(join(dir, '.qwen-home')).sort()).toEqual(homeBefore);
-      const result: Run = {
+      const collectResult = (server: FakeOpenAIServer): Run => ({
         requests: modelRequests(server, dir),
         dateReminders: streamingMessages(server).filter((messages) =>
           messages.some(
@@ -678,10 +601,100 @@ const allowOnce = () => ({
         backgroundTurnEnds,
         sharedRounds: (debugLog.match(SHARED_ROUND_LOG) ?? []).length,
         kernelRounds: countKernelRounds(debugLog),
-      };
-      saveEvidence('result.json', result);
-      saveEvidence('observer-status.json', { errors: evidenceErrors });
-      return result;
+      });
+      let result: Run | undefined;
+      let complete = false;
+      try {
+        try {
+          await request('initialize', {
+            protocolVersion: 1,
+            clientCapabilities: {
+              fs: { readTextFile: true, writeTextFile: true },
+            },
+            ...(scenario.trustedParent && {
+              _meta: {
+                'qwen-code/private-parent-capability': PARENT_CAPABILITY,
+              },
+            }),
+          });
+          await request('authenticate', { methodId: 'openai' });
+          ({ sessionId } = (await request('session/new', {
+            cwd: dir,
+            mcpServers: [],
+          })) as { sessionId: string });
+          for (const [promptIndex, text] of scenario.prompts.entries()) {
+            let settled = false;
+            const cancelFile = scenario.cancelOnFile;
+            if (cancelFile) {
+              void (async () => {
+                while (!settled && !existsSync(join(dir, cancelFile))) {
+                  await new Promise((resolve) => setTimeout(resolve, 50));
+                }
+                if (!settled)
+                  send({ method: 'session/cancel', params: { sessionId } });
+              })();
+            }
+            try {
+              const result = (await request('session/prompt', {
+                sessionId,
+                prompt: [{ type: 'text', text }],
+                ...(scenario.promptMeta?.[promptIndex] && {
+                  _meta: scenario.promptMeta[promptIndex],
+                }),
+              })) as JsonObject;
+              stopReasons.push(result['stopReason']);
+            } catch (error) {
+              stopReasons.push({ error: (error as Error).message });
+            } finally {
+              settled = true;
+            }
+          }
+          const goalDeadline = Date.now() + PROMPT_TIMEOUT_MS;
+          while (
+            (goalTurnEnds.length < (scenario.goalTurns ?? 0) ||
+              backgroundTurnEnds.length < (scenario.backgroundTurns ?? 0)) &&
+            Date.now() < goalDeadline
+          ) {
+            await new Promise((resolve) => setTimeout(resolve, 50));
+          }
+          // Every round has logged its marker; let those writes land first.
+          debugLog = await readSettledDebugLog(qwenHome);
+        } finally {
+          snapshotDebug('pre-kill');
+          agent.kill();
+          await new Promise((resolve) => {
+            if (agent.exitCode !== null || agent.signalCode) resolve(undefined);
+            else agent.once('exit', resolve);
+          });
+          snapshotDebug('post-exit');
+          // Keep the runtime state for post-mortem whenever TestRig.cleanup()
+          // keeps the test directory, which it decides by truthiness.
+          if (!process.env['KEEP_OUTPUT']) {
+            await removeScratchDir(qwenHome);
+          }
+        }
+        // The scratch runtime keeps the session runtime's `tmp/<hash>` and
+        // `usage/` out of the workspace. Comparing against the pre-run listing
+        // avoids copying TestRig's seeded names, and a leak fails here directly
+        // rather than only when the request equality loses a race.
+        expect(readdirSync(join(dir, '.qwen-home')).sort()).toEqual(homeBefore);
+        result = collectResult(server);
+        complete = true;
+        return result;
+      } finally {
+        if (dump) {
+          try {
+            saveEvidence('result.json', result ?? collectResult(server));
+          } catch (error) {
+            evidenceErrors.push(`result.json: ${String(error)}`);
+          }
+          saveEvidence('observer-status.json', {
+            errors: evidenceErrors,
+            complete,
+            phase: complete ? 'complete' : 'partial',
+          });
+        }
+      }
     }
 
     /** The current loop, the shared loop, and the shared loop on the kernel. */
