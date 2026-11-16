@@ -14175,6 +14175,9 @@ export class Session implements SessionContext {
       this.#landUndrainedPeerNotifications([item]);
       return;
     }
+    const backgroundQueue = this.notificationQueue.filter(
+      (queued) => queued.kind !== 'peer',
+    );
     while (this.notificationQueue.length >= MAX_BACKGROUND_NOTIFICATION_QUEUE) {
       // While the todo-stop guard defers unrelated automatic turns, a queued
       // notification that continues the current work chain is the one thing
