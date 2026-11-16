@@ -5,9 +5,12 @@
 
 Status: proposal. Date: 2026-11-16. Revised 2026-11-16 after review: the
 ChatPane chat column is now in scope, the contract separates admission from
-outcome establishment, and several current-state claims were corrected.
-Nothing in this document is implemented yet; the current state below
-describes the code as of the proposal date.
+outcome establishment, and several current-state claims were corrected. A
+second revision tightens the contract (observable operation state,
+correlation identity, compile-time capability-mapping guards) and corrects
+the daemon-import exception scope and the guard lane. Nothing in this
+document is implemented yet; the current state below describes the code as
+of the proposal date.
 
 ## Problem
 
@@ -173,13 +176,47 @@ type Outcome = 'established' | 'unsettled' | 'failed';
 
 interface IntentResult {
   readonly admission: Admission;
-  readonly outcome: Outcome;
+  // Absent when admission is rejected; see the valid result pairs below.
+  readonly outcome?: Outcome;
+  // Correlation identity: which session/turn/attempt/request this is about.
+  readonly target: {
+    sessionId: string;
+    turnId?: string;
+    attemptId?: string;
+    requestId?: string;
+  };
+}
+
+type OperationState =
+  | 'pending'
+  | 'running'
+  | 'established'
+  | 'unsettled'
+  | 'failed';
+
+interface ChatOperation {
+  readonly id: string;
+  readonly kind:
+    | 'submit'
+    | 'cancel'
+    | 'approval'
+    | 'question'
+    | 'compression'
+    | 'lifecycle'
+    | 'mcp';
+  readonly state: OperationState;
+  readonly target: IntentResult['target'];
 }
 
 interface SessionChatController {
+  // Identity only; the surface never branches on it (decision 2).
   readonly kind: 'daemon' | 'managed';
   readonly sessionId: string;
   readonly storageKey: string;
+
+  // In-flight intents, observable across refresh; `phase: 'cancelling'` is
+  // derived from an unestablished cancel operation (one read path).
+  readonly operations: readonly ChatOperation[];
 
   // Transcript: the shared Message model, already projected incrementally.
   readonly messages: readonly Message[];
@@ -210,32 +247,49 @@ interface SessionChatController {
 }
 ```
 
-Long-running managed operations (compression, lifecycle, cancel, MCP
-commands) surface as a generic operation state
-(`pending | running | established | unsettled | failed`) so the surface
-renders one progress vocabulary for both backends. The contract carries one
-invariant: **admission is not establishment.**
+Long-running intents (submit, cancel, approval, compression, lifecycle, MCP
+commands) are observable contract state: `operations` carries one
+`ChatOperation` per in-flight intent with the generic state above, so the
+surface renders one progress vocabulary for both backends and can restore
+"sent / awaiting outcome" after a refresh. `phase: 'cancelling'` is derived
+from an unestablished cancel operation, not from a resolved `cancel()`
+promise. The contract carries one invariant: **admission is not
+establishment.**
 
 - A resolved promise or a transport-level acceptance never by itself
   produces `established`; the adapter must hold authoritative evidence
   (turn end, settlement receipt, a decision applied to the still-current
   request/revision).
-- `unsettled` is a first-class state: accepted but no witness yet, including
-  after a timeout or a refresh. It renders as "sent / awaiting outcome", is
-  not `failed`, and offers no retry that bypasses the adapter.
+- `unsettled` is a first-class state: admitted (or admission unknown) but no
+  witness yet, including after a timeout or a refresh. It renders as "sent /
+  awaiting outcome", is not `failed`, and offers no retry that bypasses the
+  adapter.
 - A superseded approval renders as superseded, not applied; an approval
   leaves pending only when the backend confirms the decision applies to the
   still-current request.
 - Capability flags gate whether a control exists; the status shown after it
   follows outcome evidence, never the flag.
 
+Valid result pairs: a `rejected` admission carries no outcome; `established`
+and `failed` require an `accepted` admission; `unsettled` accompanies an
+`accepted` or `unknown` admission (the timeout case: possibly in effect, no
+witness). A superseded approval is a pending-item state
+(`PendingApproval.status`), not an intent outcome. A region renders only when
+its sub-controller is present; `ChatCapabilities` flags are derived from the
+same facts and gate auxiliary controls — presence is the single authority.
+
 `ChatCapabilities` mirrors the existing capability style of
 `ManagedAgentSessionSummary.capabilities` and daemon capabilities: the
 surface gates every optional region on a flag, never on `kind`. Each adapter
 owns the mapping from its backend's capability shape (the daemon feature
-list; the managed optional booleans) to `ChatCapabilities`, and slice 1 pins
-each mapping with a table-driven test so an omitted entry cannot silently
-hide a supported region.
+list; the managed optional booleans) to `ChatCapabilities`. Omission must be
+a compile error, not a shared blind spot between a hand-written map and a
+hand-written table: the managed map is typed against
+`keyof ManagedAgentSessionSummary['capabilities']` with a key-set assertion
+off a `Required<>` fixture (which also decides the tri-state
+`terminal?: boolean | null`), and the daemon map is pinned against a
+checked-in snapshot of the canonical feature tags, so a tag added by a later
+release fails the snapshot instead of silently hiding a region.
 
 ### ChatSurface component
 
@@ -297,19 +351,21 @@ page.
    managed semantics into the shared surface and force the daemon adapter to
    fake them. The generic admission/outcome vocabulary is the only async
    language the surface sees.
-5. **Parity follows backend facts.** Managed gains the status stack and
-   usage display where its events and diagnostics already provide the facts
-   (for example `modelContext` token observations). Regions without backend
-   facts stay hidden rather than filled with invented data.
+5. **Parity follows backend facts.** Managed gains the shared status stack
+   and usage-stats strip where its events and diagnostics provide the facts
+   (the usage-stats fact source is `diagnostics.getStatistics`); the context
+   ring already renders `modelContext` token observations today and is not a
+   new gain. Regions without backend facts stay hidden rather than filled
+   with invented data.
 6. **Admission is not establishment.** A backend-neutral UI state is not
    automatically a backend-neutral proof that an action took effect: a
    generic `completed` label can be truthful about the local API call and
    false about the user's operational state. The two-stage result keeps the
    truth conditions of user-facing states in the shared contract without
-   leaking protocol fields, and it is a slice-1 contract rule with negative
-   tests, not an adapter implementation detail. Decision 4 is unchanged:
-   receipts, revisions, and recovery barriers stay inside the managed
-   adapter.
+   leaking protocol fields, and it is a slice-1 contract rule, not an
+   adapter implementation detail; each adapter's negative tests land with
+   that adapter (slices 2 and 3). Decision 4 is unchanged: receipts,
+   revisions, and recovery barriers stay inside the managed adapter.
 
 ## Migration slices
 
@@ -317,22 +373,29 @@ This document is a standalone proposal; implementation slices land
 separately. Each slice is an independently shippable PR with its own tests.
 
 1. **Contract and characterization pins.** Add `chat-core` with the contract
-   types, the capability model, and the per-adapter capability mapping
-   tests; add DOM-level characterization tests pinning the current behavior
-   of all three chat columns (composer submit, approval answering, status
-   display, draft restore). Add one negative test per adapter proving
-   transport success alone never produces `established`: a delayed turn
-   outcome, an unsettled cancel, and a superseded approval. No behavior
-   change.
+   types, the capability model, and the capability-mapping guards (typed
+   managed map, `Required<>` key-set fixture, daemon tag snapshot); add
+   DOM-level characterization tests pinning the current behavior of all
+   three chat columns (composer submit, approval answering, status display,
+   draft restore); pin the admission/outcome truth table as pure-function
+   tests. The per-adapter negative tests proving transport success alone
+   never produces `established` — covering a delayed turn outcome, an
+   unsettled cancel, and a superseded approval — land with each adapter in
+   slices 2 and 3, not here. No behavior change.
 2. **Extract ChatSurface, daemon main column switches.** Move the main chat
    column out of `App.tsx` into `ChatSurface` plus the daemon adapter,
    creating the composer status stack component from the inline JSX. The
-   visual before/after preview must show no unexplained daemon-side
-   difference. Managed and `ChatPane` are untouched.
+   shared transcript/approval/composer components that `ChatSurface` renders
+   (`MessageList`, `ToolApproval`, `ChatEditor`) are decoupled from daemon
+   value imports here, before the kernel may import them, and the daemon
+   adapter's negative tests land with it. The visual before/after preview
+   must show no unexplained daemon-side difference. Managed and `ChatPane`
+   are untouched.
 3. **Managed switches, duplicated orchestration deleted.** Add the managed
-   adapter; the managed chat column renders `ChatSurface`; delete the
-   replaced transcript/composer/approval/status orchestration from
-   `ManagedSessionsPage.tsx`. Managed-only panels become slots.
+   adapter with its negative tests; the managed chat column renders
+   `ChatSurface`; delete the replaced transcript/composer/approval/status
+   orchestration from `ManagedSessionsPage.tsx`. Managed-only panels become
+   slots.
 4. **ChatPane converges.** Split view and side task render `ChatSurface`
    through the daemon adapter; pane chrome (title, maximize/close, header
    actions) stays as slots; `ChatPane`'s duplicated submit, cancel,
@@ -341,13 +404,16 @@ separately. Each slice is an independently shippable PR with its own tests.
    usage/compression display on both sides wherever backend facts exist.
    Conversation search and goal display remain gated pending the open
    questions below.
-6. **Boundary enforcement and cleanup.** First remove the named pre-existing
-   daemon value-import exceptions from the managed source graph (a
-   provider-agnostic workspace accessor for the shared composer; the
-   extensions page import), then add a build/import guard proving
-   `chat-core` and the managed-only bundle never import daemon code (in the
-   style of the existing `build-artifact.test.ts` checks); remove dead
-   orchestration and stale imports.
+6. **Boundary enforcement and cleanup.** First clear the remaining
+   managed-only value-import graph of daemon imports — the examples in the
+   constraints are illustrative, not an exhaustive budget, and the census is
+   re-run here — then add two guards: a source-level import-specifier check
+   proving `chat-core`'s own modules never import daemon code (in the style
+   of the existing `build-artifact.test.ts` checks, which read `dist/`), and
+   an artifact grep of `dist-managed-host/index.js` in the
+   `web-shell-managed-host.yml` lane, because the default `build` does not
+   emit the managed-only bundle and that lane runs no tests today. Remove
+   dead orchestration and stale imports.
 
 During slices 2–5, new chat features land only in `chat-core` once the
 affected region has moved, so the migration does not race feature work.
@@ -357,14 +423,17 @@ affected region has moved, so the migration does not race feature work.
 - `chat-core`'s own modules import neither `daemon/**` nor
   `@qwen-code/sdk/daemon`; the adapters live outside the kernel. The
   managed-only entry keeps working without a daemon runtime. Today its
-  source graph still reaches daemon value imports transitively:
+  source graph still reaches daemon value imports transitively through many
+  shared modules; these examples are illustrative, not an exhaustive list:
   `ChatEditor.tsx` value-imports `useOptionalWorkspace` from
   `daemon-react-sdk` (which re-exports `daemon/index.ts`, which
-  value-exports from `@qwen-code/sdk/daemon`), and
-  `ManagedExtensionsManagerPage.tsx` imports `daemon-react-sdk` directly.
-  These named exceptions are removed in slice 6 before the guard lands;
-  until then the no-daemon-import constraint applies to `chat-core`'s own
-  modules, not to the whole managed source graph.
+  value-exports from `@qwen-code/sdk/daemon`), and shared message components
+  such as `SystemMessage.tsx` import `@qwen-code/sdk/daemon` directly. The
+  shared transcript/approval/composer edges are decoupled in slice 2 because
+  `ChatSurface` renders them; slice 6 clears the whole remaining graph, not
+  a named subset, before the guards land. Until then the no-daemon-import
+  constraint applies to `chat-core`'s own modules, not to the whole managed
+  source graph.
 - No changes to daemon routes, Java routes, or the OpenAPI contract.
 - Provider storage keys, session ID namespaces, and tenant/actor headers are
   untouched; managed errors never fall back to the daemon backend.
@@ -383,7 +452,7 @@ affected region has moved, so the migration does not race feature work.
 | Extracting from a ~27k-line `App.tsx` and converging `ChatPane` regress daemon behavior | Characterization pins for all three columns in slice 1; visual before/after gate in slice 2; small slices, daemon-first |
 | Contract drifts toward one backend's shape                                              | Every slice reviews both adapters against the contract; capability flags instead of `kind` branches                     |
 | Managed async semantics leak into the surface                                           | Generic admission/outcome vocabulary; raw operations never cross the contract                                           |
-| Transport success displayed as an established outcome                                   | Slice-1 negative tests per adapter; `unsettled` is first-class and survives refresh                                     |
+| Transport success displayed as an established outcome                                   | Per-adapter negative tests landing with each adapter; `unsettled` is first-class and survives refresh                   |
 | Performance regression from re-projection or lost memoization                           | Controller consumes the incremental projector; memo boundaries pinned by tests                                          |
 | Feature work races the migration                                                        | Freeze rule: moved regions accept new features only through `chat-core`                                                 |
 
@@ -392,8 +461,11 @@ affected region has moved, so the migration does not race feature work.
 - Unit tests collocated with each moved module; the existing daemon and
   managed suites (`App.test.tsx`, `ManagedSessionsPage.test.tsx`, the
   `use-managed-*` tests, `ManagedAgentWebShell.test.tsx`) stay green, and
-  the slice-1 negative tests prove transport success alone never produces
-  `established` in either adapter.
+  the per-adapter negative tests (landing with each adapter) prove transport
+  success alone never produces `established`.
+  `managed-draft-retry.spec.ts` already covers an unsettled submit across
+  reload; the new coverage adds the cancel path and an explicit
+  distinct-from-`failed` assertion.
 - Browser-level verification of both session kinds through the local dev
   server against a real daemon and the managed boot path: submit, approval,
   cancel, draft restore, refresh/deep-link restore, and panel slots, in the
@@ -418,9 +490,10 @@ affected region has moved, so the migration does not race feature work.
    from `ManagedSessionsPage.tsx` and `ChatPane.tsx` (transcript, composer
    wiring, approval flow, status display), with backend-specific panels
    retained as slots.
-3. `chat-core`'s own modules contain no daemon imports and the named
-   pre-existing transitive exceptions are removed, proven by an automated
-   guard; the managed-only entry keeps working without a daemon.
+3. `chat-core`'s own modules contain no daemon imports and the managed-only
+   source graph is cleared of daemon value imports, proven by a source-level
+   check plus an artifact grep in the managed-host lane; the managed-only
+   entry keeps working without a daemon.
 4. Existing daemon and managed unit suites and the managed Playwright specs
    pass; the visual preview shows no unexplained daemon-side change.
 5. Managed sessions show the shared status stack and usage display wherever
