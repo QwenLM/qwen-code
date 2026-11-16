@@ -665,7 +665,7 @@ export function OpenTuiExtensionSourcesTab({
             {drawn(t('Resize terminal to enter a source.'))}
           </text>
         ) : (
-          <box flexDirection="row">
+          <box id="screen-reader-input-line" flexDirection="row">
             <text fg={C.accent}>{'> '}</text>
             {before ? <text fg={C.text}>{before}</text> : null}
             {isActive ? (

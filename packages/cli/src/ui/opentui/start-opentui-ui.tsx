@@ -25,6 +25,7 @@ import {
   createElement,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -87,6 +88,12 @@ import {
 } from '../types.js';
 import { useUpdateNoticeFlush } from './use-update-notice-flush.js';
 import { applyOpenTuiTheme } from './theme.js';
+import {
+  ScreenReaderOutputWriter,
+  resolveScreenReaderPolicy,
+  screenReaderRendererOptions,
+} from './a11y-screen-reader.js';
+import { ScreenReaderPresentation } from './screen-reader-presentation.js';
 import { getActiveOpenTuiTheme } from './theme-parity.js';
 import { useLogger } from '../hooks/useLogger.js';
 import { useVim, type VimBuffer } from '../hooks/vim.js';
@@ -143,6 +150,7 @@ interface OpenTuiEntryAppProps {
   capturedText: string;
   /** Boot-computed auth auto-open request (U-6); null when none. */
   initialDialog: OpenTuiDialogRequest | null;
+  screenReaderPresentation?: ScreenReaderPresentation;
 }
 
 function OpenTuiEntryApp({
@@ -154,6 +162,7 @@ function OpenTuiEntryApp({
   extensionRefreshState,
   capturedText,
   initialDialog,
+  screenReaderPresentation,
 }: OpenTuiEntryAppProps) {
   const { width, height } = useTerminalDimensions();
   const { toggleVimEnabled } = useVimModeActions();
@@ -406,10 +415,11 @@ function OpenTuiEntryApp({
   );
   const renderMain = useCallback(
     (shell?: { owner: ForegroundShellOwner | null; focused: boolean }) => (
-      <box flexDirection="column">
+      <box id="screen-reader-history" flexDirection="column">
         {/* The transcript box carries two columns of margin on each side, so
             its content budget is 4 short of the terminal width. */}
         <OpenTuiTranscriptView
+          screenReader={Boolean(screenReaderPresentation)}
           items={live.items}
           modRows={modRows}
           availableWidth={Math.max(0, width - 4)}
@@ -435,6 +445,7 @@ function OpenTuiEntryApp({
       thoughtsExpanded,
       settings,
       modRows,
+      screenReaderPresentation,
     ],
   );
 
@@ -469,6 +480,17 @@ function OpenTuiEntryApp({
   const [quittingItems, setQuittingItems] = useState<
     readonly LiveHistoryItem[] | null
   >(null);
+  const screenReaderOwner = useMemo(
+    () => [config, transcriptSessionId],
+    [config, transcriptSessionId],
+  );
+  useLayoutEffect(() => {
+    screenReaderPresentation?.setHistory(
+      screenReaderOwner,
+      quittingItems ?? live.items,
+    );
+  }, [screenReaderPresentation, screenReaderOwner, live.items, quittingItems]);
+
   const quitRequested = useRef(false);
   const handleQuit = useCallback(
     (messages: readonly HistoryItem[]) => {
@@ -500,8 +522,9 @@ function OpenTuiEntryApp({
 
   if (quittingItems !== null) {
     return (
-      <box flexDirection="column">
+      <box id="screen-reader-history" flexDirection="column">
         <OpenTuiTranscriptView
+          screenReader={Boolean(screenReaderPresentation)}
           items={quittingItems}
           availableWidth={Math.max(0, width - 4)}
           availableTerminalHeight={height}
@@ -512,6 +535,7 @@ function OpenTuiEntryApp({
 
   return (
     <OpenTuiApp
+      screenReader={Boolean(screenReaderPresentation)}
       config={config}
       settings={settings}
       logger={logger}
@@ -589,6 +613,7 @@ export async function startOpenTuiUI(
     debugLogger.warn('Shell AST parser warm-up failed:', err);
   });
 
+  const screenReader = config.getScreenReader();
   let renderer: CliRenderer;
   try {
     renderer = await createCliRenderer({
@@ -606,7 +631,18 @@ export async function startOpenTuiUI(
       ],
       // ink's ui.mouseTracking gate: off means no SGR mouse mode, so the
       // terminal keeps native right-click menus and OSC 8 link clicks.
-      useMouse: settings.merged.ui?.mouseTracking !== false,
+      useMouse: !screenReader && settings.merged.ui?.mouseTracking !== false,
+      ...(screenReader
+        ? {
+            ...screenReaderRendererOptions(
+              resolveScreenReaderPolicy({ screenReader }),
+            ),
+            bufferedOutput: 'memory' as const,
+            externalOutputMode: 'passthrough' as const,
+            consoleMode: 'disabled' as const,
+            clearOnShutdown: false,
+          }
+        : {}),
     });
   } catch (err) {
     debugLogger.error('OpenTUI renderer initialization failed:', err);
@@ -625,6 +661,17 @@ export async function startOpenTuiUI(
   // to ink instead of crashing the process (B2).
   const root = createRoot(renderer);
   let runtime: OpenTuiRuntime | null = null;
+  const presentation = screenReader
+    ? new ScreenReaderPresentation(
+        new ScreenReaderOutputWriter((text) => {
+          process.stdout.write(text);
+        }),
+      )
+    : undefined;
+  const detachScreenReader = presentation?.observeFrames(
+    renderer,
+    () => renderer.root,
+  );
   try {
     // Start the one shared initialization flight before anything can load
     // commands or submit; the turn path and the registry loader both await
@@ -632,6 +679,7 @@ export async function startOpenTuiUI(
     const initialization = ensureConfigInitialized(config);
     const version = await getCliVersion();
     if (
+      !screenReader &&
       !settings.merged.ui?.hideWindowTitle &&
       settings.merged.ui?.showStatusInTitle !== false
     ) {
@@ -685,6 +733,7 @@ export async function startOpenTuiUI(
               extensionRefreshState={options.extensionRefreshState}
               capturedText={capturedText}
               initialDialog={initialDialog}
+              screenReaderPresentation={presentation}
             />
           </VimModeProvider>
         ),
@@ -701,6 +750,7 @@ export async function startOpenTuiUI(
 
     registerCleanup(async () => {
       runtime!.dualOutputBridge?.finalizeAssistantMessage();
+      detachScreenReader?.();
       root.unmount();
       renderer.destroy();
       await runtime!.shutdown();
@@ -768,6 +818,7 @@ export async function startOpenTuiUI(
     );
     try {
       runtime?.dualOutputBridge?.finalizeAssistantMessage();
+      detachScreenReader?.();
       root.unmount();
       renderer.destroy();
       if (runtime) await runtime.shutdown();

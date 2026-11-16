@@ -231,6 +231,11 @@ export function HelpOverlay(props: {
               return (
                 <box key={tabId} marginLeft={1}>
                   <text
+                    id={
+                      active
+                        ? 'screen-reader-selected-tab'
+                        : 'screen-reader-unselected-tab'
+                    }
                     fg={active ? '#000000' : C.text}
                     bg={active ? C.accent : undefined}
                   >

@@ -68,6 +68,10 @@ const mocks = vi.hoisted(() => {
             ...(key === undefined ? null : { key }),
             ...(bg === undefined ? null : { 'data-bg': bg }),
             ...(fg === undefined ? null : { 'data-fg': fg }),
+            ...((config as { id?: string }).id ===
+            'screen-reader-protected-input'
+              ? { 'data-screen-reader-protected': true }
+              : null),
             ...(flexShrink === undefined
               ? null
               : { 'data-flex-shrink': flexShrink }),
@@ -333,6 +337,9 @@ async function runCustomProviderFlow(): Promise<{
   await press('return'); // API: Chat Completions → baseUrl input
   await typeText('https://api.example.com/v1');
   await press('return'); // baseUrl → apiKey
+  expect(
+    document.querySelector('[data-screen-reader-protected]'),
+  ).not.toBeNull();
   await typeText('sk-test');
   await press('return'); // apiKey → models
   await typeText('model-1, model-2');

@@ -312,6 +312,11 @@ function RadioList({
         return (
           <box
             key={item.key}
+            id={
+              selected
+                ? 'screen-reader-selected-auth'
+                : 'screen-reader-unselected-auth'
+            }
             flexDirection="column"
             marginTop={windowIndex === 0 ? 0 : 1}
           >
@@ -393,7 +398,9 @@ function InputLine({
   placeholder,
   active,
   marginTop = 1,
+  secret = false,
 }: {
+  secret?: boolean;
   value: string;
   caret: number;
   placeholder?: string;
@@ -401,7 +408,11 @@ function InputLine({
   marginTop?: number;
 }) {
   return (
-    <box flexDirection="row" marginTop={marginTop}>
+    <box
+      id={secret ? 'screen-reader-protected-input' : 'screen-reader-input-line'}
+      flexDirection="row"
+      marginTop={marginTop}
+    >
       <text fg={C.accent}>{'> '}</text>
       <FieldText
         value={value}
@@ -686,6 +697,7 @@ function ApiKeyStep({
         </box>
       )}
       <InputLine
+        secret
         value={flow.state.apiKey}
         caret={caret}
         placeholder={provider.apiKeyPlaceholder ?? 'sk-...'}
@@ -1162,7 +1174,12 @@ function AdvancedConfigStep({ flow }: { flow: ProviderSetupFlow }) {
           >{`${cursor(5)} ${checkmark(modalityPdf)} PDF`}</text>
         </box>
       )}
-      <box flexDirection="row" marginTop={1} paddingLeft={2}>
+      <box
+        id="screen-reader-input-line"
+        flexDirection="row"
+        marginTop={1}
+        paddingLeft={2}
+      >
         <text
           fg={rowFg(ctxIdx)}
         >{`${cursor(ctxIdx)} ${t('Context window')}: `}</text>

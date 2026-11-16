@@ -279,6 +279,7 @@ function buildConfig(authType: 'qwen-oauth' | 'none' = 'qwen-oauth'): Config {
   return {
     getSessionId: () => 'test-session-id',
     getResumedSessionData: () => undefined,
+    getScreenReader: () => false,
     getTargetDir: () => '/tmp/project',
     getApprovalMode: () => 'default',
     isInteractive: () => false,
@@ -322,6 +323,8 @@ describe('startOpenTuiUI fallback contract', () => {
     mocks.state.transcript = [];
     mocks.state.replayOrder = [];
     mocks.state.renderer.destroy.mockClear();
+    mocks.state.renderer.on.mockClear();
+    mocks.state.renderer.off.mockClear();
     mocks.state.root.unmount.mockClear();
     mocks.state.root.render.mockClear();
     mocks.state.runtime.shutdown.mockClear();
@@ -1087,6 +1090,49 @@ describe('startOpenTuiUI fallback contract', () => {
     expect(mocks.state.stderrLines).toHaveLength(0);
     expect(mocks.state.cleanups.length).toBeGreaterThanOrEqual(3);
     expect(config.trackSessionRegistration).toHaveBeenCalled();
+  });
+
+  it('connects the resolved screen-reader flag to the Native memory lane and removes its frame subscription', async () => {
+    const config = buildConfig();
+    config.getScreenReader = () => true;
+    expect(
+      await startOpenTuiUI(
+        config,
+        settings,
+        [],
+        '/tmp/project',
+        {} as InitializationResult,
+      ),
+    ).toBe(true);
+    expect(createCliRenderer).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        bufferedOutput: 'memory',
+        screenMode: 'main-screen',
+        externalOutputMode: 'passthrough',
+        useMouse: false,
+        consoleMode: 'disabled',
+        clearOnShutdown: false,
+      }),
+    );
+    const subscription = mocks.state.renderer.on.mock.calls.find(
+      ([name]) => name === 'frame',
+    );
+    expect(subscription).toBeDefined();
+    const provider = mocks.state.root.render.mock.calls.at(
+      -1,
+    )![0] as ReactElement<{
+      children: ReactElement<{
+        children: ReactElement<{ screenReaderPresentation?: unknown }>;
+      }>;
+    }>;
+    expect(
+      provider.props.children.props.children.props.screenReaderPresentation,
+    ).toBeDefined();
+    for (const cleanup of mocks.state.cleanups) await cleanup();
+    expect(mocks.state.renderer.off).toHaveBeenCalledWith(
+      'frame',
+      subscription![1],
+    );
   });
 
   it('leaves SIGINT confirmation to the application and destroys during exit cleanup', async () => {

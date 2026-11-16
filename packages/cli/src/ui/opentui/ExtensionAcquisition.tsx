@@ -367,7 +367,14 @@ export function ExtensionSettingInput({
           )
         }
       />
-      <box flexDirection="row">
+      <box
+        id={
+          permission.setting.sensitive
+            ? 'screen-reader-protected-input'
+            : 'screen-reader-input-line'
+        }
+        flexDirection="row"
+      >
         <text fg={C.accent}>{'> '}</text>
         {before ? <text fg={C.text}>{before}</text> : null}
         <text bg={C.accent}>{sanitizeTerminalText(spans.at) || ' '}</text>

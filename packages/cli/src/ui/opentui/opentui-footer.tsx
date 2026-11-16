@@ -120,6 +120,7 @@ export interface OpenTuiLoadingIndicatorProps {
    * what the setting removes — only its text.
    */
   showPhrase?: boolean;
+  screenReader?: boolean;
 }
 
 /** Spinner + witty phrase + elapsed time + token estimate, above the composer. */
@@ -129,6 +130,7 @@ export function OpenTuiLoadingIndicator({
   streamingCharsRef,
   isReceivingContent = false,
   showPhrase = true,
+  screenReader = false,
 }: OpenTuiLoadingIndicatorProps) {
   const { width } = useTerminalDimensions();
   // The shared cycler resolves the phrase list for all nine locales and owns
@@ -144,6 +146,12 @@ export function OpenTuiLoadingIndicator({
     streamingCharsRef && streaming ? 100 : null,
   );
   if (!streaming && !waiting) return null;
+  if (screenReader)
+    return (
+      <text>
+        {waiting ? 'Waiting for confirmation' : 'Working. Escape to cancel.'}
+      </text>
+    );
 
   const isNarrow = isNarrowWidth(width);
   const outputTokens = Math.round(animatedChars / 4);
@@ -187,6 +195,7 @@ export function OpenTuiLoadingIndicator({
 }
 
 export interface OpenTuiFooterProps {
+  screenReader?: boolean;
   config: Config;
   settings: LoadedSettings;
   statusLine: ReturnType<typeof useStatusLineState>;
@@ -205,6 +214,7 @@ export interface OpenTuiFooterProps {
 
 /** The status line (ink `Footer` parity). */
 export function OpenTuiFooter({
+  screenReader = false,
   config,
   settings,
   statusLine,
@@ -315,6 +325,27 @@ export function OpenTuiFooter({
   // its status line off while the warning is up, so the warning reads directly
   // under the composer with nothing above it. The queued-message segment sits
   // beside the warning rather than inside the hint it replaces, so it stays.
+  if (screenReader) {
+    return (
+      <text>
+        {exitHint ??
+          [
+            sandboxLabel,
+            activeWorktree && !settings.merged.ui?.hideBuiltinWorktreeIndicator
+              ? `Worktree: ${activeWorktree.branch} (${activeWorktree.slug})`
+              : '',
+            workflowMode?.requested
+              ? workflowMode.effective
+                ? 'Workflow mode: on'
+                : 'Workflow mode: on (unavailable)'
+              : '',
+            hintParts.map((part) => part.text).join(''),
+          ]
+            .filter(Boolean)
+            .join('\n')}
+      </text>
+    );
+  }
   if (exitHint) {
     const warningLine = [exitHint, queuedHint]
       .filter((segment): segment is string => segment !== null)

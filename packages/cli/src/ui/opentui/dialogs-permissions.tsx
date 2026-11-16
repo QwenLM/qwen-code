@@ -99,7 +99,7 @@ function PermissionInput({
     ? sanitizeTerminalLine(spans.after)
     : truncateToWidth(placeholder, Math.max(0, width - 1));
   return (
-    <box flexDirection="row">
+    <box id="screen-reader-input-line" flexDirection="row">
       {before ? <text fg={C.text}>{before}</text> : null}
       <text bg={C.accent}>{sanitizeTerminalLine(spans.at) || ' '}</text>
       {after ? <text fg={value ? C.text : C.dim}>{after}</text> : null}
@@ -1045,6 +1045,11 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
         {tabs.map((tab, i) => (
           <box key={tab.id} marginRight={2}>
             <text
+              id={
+                i === activeTabIndex
+                  ? 'screen-reader-selected-tab'
+                  : 'screen-reader-unselected-tab'
+              }
               fg={i === activeTabIndex ? '#000000' : C.dim}
               bg={i === activeTabIndex ? C.accent : undefined}
               attributes={i === activeTabIndex ? 1 : undefined}

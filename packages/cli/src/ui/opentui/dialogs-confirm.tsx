@@ -1035,6 +1035,11 @@ function AskUserQuestionFlow(props: {
         return (
           <text
             key={idx}
+            id={
+              active
+                ? 'screen-reader-selected-question-tab'
+                : 'screen-reader-unselected-question-tab'
+            }
             fg={active ? C.accent : C.dim}
             attributes={active ? 1 : 0}
           >
@@ -1045,6 +1050,11 @@ function AskUserQuestionFlow(props: {
         );
       })}
       <text
+        id={
+          isSubmitTab
+            ? 'screen-reader-selected-submit-tab'
+            : 'screen-reader-unselected-submit-tab'
+        }
         fg={isSubmitTab ? C.accent : C.dim}
         attributes={isSubmitTab ? 1 : 0}
       >
@@ -1080,12 +1090,22 @@ function AskUserQuestionFlow(props: {
         </box>
         <box flexDirection="column">
           <text
+            id={
+              selected === 0
+                ? 'screen-reader-selected-submit'
+                : 'screen-reader-unselected-submit'
+            }
             fg={selected === 0 ? C.accent : C.text}
             attributes={selected === 0 ? 1 : 0}
           >
             {(selected === 0 ? '❯ ' : '  ') + `1. ${t('Submit answers')}`}
           </text>
           <text
+            id={
+              selected === 1
+                ? 'screen-reader-selected-cancel'
+                : 'screen-reader-unselected-cancel'
+            }
             fg={selected === 1 ? C.accent : C.text}
             attributes={selected === 1 ? 1 : 0}
           >
@@ -1144,7 +1164,15 @@ function AskUserQuestionFlow(props: {
           const isAnswered = !isMultiSelect && picked[tab] === option.label;
           const highlighted = isSelected || isAnswered || isChecked;
           return (
-            <box key={idx} flexDirection="column">
+            <box
+              key={idx}
+              id={
+                isSelected
+                  ? 'screen-reader-selected-answer'
+                  : 'screen-reader-unselected-answer'
+              }
+              flexDirection="column"
+            >
               <text
                 fg={highlighted ? C.accent : C.text}
                 attributes={highlighted ? 1 : 0}
@@ -1169,7 +1197,7 @@ function AskUserQuestionFlow(props: {
           );
         })}
         {isCustomRow ? (
-          <box flexDirection="row">
+          <box id="screen-reader-input-line" flexDirection="row">
             <text fg={C.accent} attributes={1}>
               {'❯ ' + customMark + customLabel}
             </text>

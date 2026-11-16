@@ -171,6 +171,11 @@ export function DialogTabBar(props: {
         return (
           <box key={tab.id} marginRight={2}>
             <text
+              id={
+                active
+                  ? 'screen-reader-selected-tab'
+                  : 'screen-reader-unselected-tab'
+              }
               fg={active ? '#000000' : C.dim}
               bg={active ? C.accent : undefined}
               attributes={active ? 1 : undefined}
@@ -637,6 +642,11 @@ export function DialogSelect<TItem extends DialogListItem<unknown>>(
         return (
           <box
             key={item.key}
+            id={
+              isSelected
+                ? 'screen-reader-selected-option'
+                : 'screen-reader-unselected-option'
+            }
             flexDirection="row"
             onMouseOver={() => {
               if (!item.disabled) onHover?.(itemIndex);

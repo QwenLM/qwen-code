@@ -821,3 +821,10 @@ describe('OpenTuiFooter', () => {
     expect(container.textContent).toContain('my-session');
   });
 });
+
+it('exposes a stable working state without animating elapsed time in screen-reader mode', () => {
+  const view = render(<OpenTuiLoadingIndicator screenReader streaming />);
+  expect(view.container.textContent).toBe('Working. Escape to cancel.');
+  view.rerender(<OpenTuiLoadingIndicator screenReader streaming waiting />);
+  expect(view.container.textContent).toBe('Waiting for confirmation');
+});

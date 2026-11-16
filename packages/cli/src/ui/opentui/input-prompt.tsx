@@ -247,6 +247,7 @@ const newDraft = (): Draft => ({
 });
 
 export interface InputPromptProps {
+  screenReader?: boolean;
   onSubmit: (
     text: string,
     imagePaths?: readonly string[],
@@ -2235,6 +2236,11 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
           {attachments.map((a, index) => (
             <text
               key={a.id}
+              id={
+                index === selectedAttachment
+                  ? 'screen-reader-selected-attachment'
+                  : 'screen-reader-unselected-attachment'
+              }
               fg={index === selectedAttachment ? C.accent : C.purple}
             >{`${index === selectedAttachment ? '>' : '📎'} ${a.filename}`}</text>
           ))}
@@ -2245,7 +2251,9 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         interimText={voiceInput.interimText}
         audioLevel={voiceInput.audioLevel}
       />
-      <text fg={borderColor}>{topBorderLine}</text>
+      <text fg={borderColor}>
+        {props.screenReader ? renderedLabel : topBorderLine}
+      </text>
       <box
         flexDirection="row"
         border={['bottom']}
@@ -2267,6 +2275,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       >
         <text fg={chrome.color ?? C.accent}>{chrome.prefix} </text>
         <textarea
+          id="screen-reader-prompt"
           ref={(el) => {
             editorRef.current = el as TextareaRenderable | null;
           }}
@@ -2318,6 +2327,11 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
                 return (
                   <box key={cat} marginLeft={i === 0 ? 0 : 1}>
                     <text
+                      id={
+                        active
+                          ? 'screen-reader-selected-category'
+                          : 'screen-reader-unselected-category'
+                      }
                       fg={active ? C.hover : C.dim}
                       bg={active ? C.accent : undefined}
                     >
@@ -2348,6 +2362,11 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
               return (
                 <box
                   key={`${suggestion.value}-${originalIndex}`}
+                  id={
+                    isActive
+                      ? 'screen-reader-selected-suggestion'
+                      : 'screen-reader-unselected-suggestion'
+                  }
                   flexDirection="row"
                 >
                   <box width={2} flexShrink={0}>

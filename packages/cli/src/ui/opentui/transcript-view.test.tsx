@@ -50,6 +50,11 @@ const mocks = vi.hoisted(() => {
         for (const name of ['fg', 'bg', 'borderColor', 'attributes']) {
           if (source[name] !== undefined) dom[`data-${name}`] = source[name];
         }
+        if (
+          typeof source['id'] === 'string' &&
+          source['id'].startsWith('screen-reader-item-')
+        )
+          dom['data-id'] = source['id'];
         if (source['flexDirection'] !== undefined) {
           dom['data-direction'] = source['flexDirection'];
         }
@@ -2632,4 +2637,24 @@ describe('canonical compact group boundaries', () => {
       view.unmount();
     }
   });
+});
+
+it('keeps every semantic history owner mounted in screen-reader mode beyond the graphical viewport', () => {
+  const items: LiveHistoryItem[] = Array.from({ length: 60 }, (_, index) => ({
+    kind: 'user',
+    id: `reader-${index}`,
+    text: `Readable item ${index}`,
+  }));
+  const view = render(
+    <OpenTuiTranscriptView
+      screenReader
+      items={items}
+      availableTerminalHeight={18}
+    />,
+  );
+  expect(view.container.textContent).toContain('Readable item 0');
+  expect(view.container.textContent).toContain('Readable item 59');
+  expect(
+    view.container.querySelectorAll('[data-id^="screen-reader-item-"]'),
+  ).toHaveLength(60);
 });

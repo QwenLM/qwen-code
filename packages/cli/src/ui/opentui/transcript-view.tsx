@@ -118,6 +118,7 @@ function goalColor(color: GoalCardColor): string {
 }
 
 export interface TranscriptViewProps {
+  screenReader?: boolean;
   items: readonly LiveHistoryItem[];
   /** Width budget for ANSI grids / wrapping (defaults to a safe 80). */
   availableWidth?: number;
@@ -625,6 +626,7 @@ function projectCompactToolGroups(
 }
 
 export function OpenTuiTranscriptView({
+  screenReader = false,
   items,
   availableWidth = 80,
   availableTerminalHeight = 24,
@@ -641,16 +643,27 @@ export function OpenTuiTranscriptView({
 }: TranscriptViewProps) {
   const visibleItems = useMemo(
     () =>
-      projectCompactToolGroups(
-        items.filter(
-          (item) =>
-            !item.canonicalOnly && isHistoryItemVisibleAfterRestore(item),
-        ),
-        thoughtsExpanded,
-        showToolCallArgs,
-        showToolCallDetails,
-      ),
-    [items, thoughtsExpanded, showToolCallArgs, showToolCallDetails],
+      screenReader
+        ? items.filter(
+            (item) =>
+              !item.canonicalOnly && isHistoryItemVisibleAfterRestore(item),
+          )
+        : projectCompactToolGroups(
+            items.filter(
+              (item) =>
+                !item.canonicalOnly && isHistoryItemVisibleAfterRestore(item),
+            ),
+            thoughtsExpanded,
+            showToolCallArgs,
+            showToolCallDetails,
+          ),
+    [
+      items,
+      thoughtsExpanded,
+      showToolCallArgs,
+      showToolCallDetails,
+      screenReader,
+    ],
   );
   const maxRows = maxHistoryItemRows(availableTerminalHeight);
   const awaitingItem = visibleItems.findLast(
@@ -675,12 +688,16 @@ export function OpenTuiTranscriptView({
         rootRef.current = el as Renderable | null;
       }}
     >
-      <box height={win.topPad} flexShrink={0} />
-      {visibleItems.slice(win.start, win.end).map((item) => {
+      <box height={screenReader ? 0 : win.topPad} flexShrink={0} />
+      {(screenReader
+        ? visibleItems
+        : visibleItems.slice(win.start, win.end)
+      ).map((item) => {
         const key = itemKey(item);
         return (
           <box
             key={key}
+            id={screenReader ? `screen-reader-item-${key}` : undefined}
             flexDirection="column"
             marginTop={itemMarginTop(item.kind)}
             ref={(el) => {
@@ -722,7 +739,7 @@ export function OpenTuiTranscriptView({
           </box>
         );
       })}
-      <box height={win.bottomPad} flexShrink={0} />
+      <box height={screenReader ? 0 : win.bottomPad} flexShrink={0} />
     </box>
   );
 }

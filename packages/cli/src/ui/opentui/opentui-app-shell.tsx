@@ -161,6 +161,7 @@ import {
 const debugLogger = createDebugLogger('OPEN_TUI_APP');
 
 export interface OpenTuiAppProps {
+  screenReader?: boolean;
   config: Config;
   settings: LoadedSettings;
   logger: Logger | null;
@@ -1822,6 +1823,17 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             column and squeezes the composer's three border rows into one row
             painted three times. */}
         <box
+          id={
+            dialog ||
+            activeModal ||
+            activeToolCall ||
+            (mcpApproval.isMcpApprovalDialogOpen &&
+              mcpApproval.currentMcpApproval) ||
+            (hooksApproval.isProjectHooksApprovalDialogOpen &&
+              hooksApproval.pendingProjectHooks)
+              ? 'screen-reader-dialog'
+              : 'screen-reader-composer'
+          }
           flexDirection="column"
           flexShrink={0}
           ref={(el) => {
@@ -1862,6 +1874,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
                 own bottom padding and the waiting row. */}
               <box marginTop={1}>
                 <OpenTuiLoadingIndicator
+                  screenReader={props.screenReader}
                   streaming={Boolean(streaming)}
                   waiting
                   showPhrase={showLoadingPhrases}
@@ -1956,6 +1969,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           ) : (
             <box key="composer" flexDirection="column" marginTop={1}>
               <OpenTuiLoadingIndicator
+                screenReader={props.screenReader}
                 streaming={Boolean(streaming) && !shellFocused}
                 streamingCharsRef={streamingCharsRef}
                 isReceivingContent={isReceivingContent}
@@ -1967,6 +1981,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
                 maxRows={modBandMaxRows(terminalHeight)}
               />
               <OpenTuiInputPrompt
+                screenReader={props.screenReader}
                 placeholder={
                   subscriptionActive
                     ? '  ' + t('Type your request, or /usage')
@@ -2040,6 +2055,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             !hooksApproval.isProjectHooksApprovalDialogOpen &&
             !showSuggestions) ? (
             <OpenTuiFooter
+              screenReader={props.screenReader}
               config={config}
               settings={settings}
               statusLine={statusLine}
