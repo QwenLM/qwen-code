@@ -10,6 +10,7 @@ import {
   runWithHookExecutionOwner,
 } from '../hooks/hook-execution-context.js';
 import type { SessionSourceService } from '../services/session-sources.js';
+import type { GeneratedUiStateService } from '../services/generated-ui-state.js';
 import type { RequestLifecycleEvent } from '../telemetry/request-lifecycle.js';
 import { getInvocationContext } from '../utils/invocation-context.js';
 
@@ -170,6 +171,7 @@ import {
   UNIFIED_SURFACE_DEFAULTS,
   EVENT_BUS_SURFACE_DEFAULTS,
   type AgentLoopSurface,
+  type AgentLoopPath,
 } from './agent-loop-rollout.js';
 import { ApprovalMode } from './approval-mode.js';
 
@@ -6813,6 +6815,7 @@ export class Config {
     this.workflowModePublishedState = undefined;
     this.refreshWorkflowMode();
     this.sessionSourceService = this.sessionSourceServiceFactory?.();
+    this.generatedUiStateService = this.generatedUiStateServiceFactory?.();
     this.initializeGoalRuntime(this.sessionData?.conversation.messages);
     // The file-read cache is session-scoped: its `file_unchanged`
     // placeholder relies on the model having seen the prior full read
@@ -10888,6 +10891,20 @@ export class Config {
   }
 
   /**
+   * The loop path a surface runs: unified off -> legacy; otherwise the kernel
+   * only when the event-bus switch is on AND the surface's execution branch
+   * actually enters it, else shared. Speculation and the Hosted Harness never
+   * read the event-bus switch (their rounds always run on the shared loop), so
+   * both are capped at shared even with both switches on.
+   */
+  getAgentLoopPath(surface: AgentLoopSurface): AgentLoopPath {
+    if (!this.isUnifiedAgentLoopEnabled(surface)) return 'legacy';
+    if (!this.isEventBusAgentLoopEnabled(surface)) return 'shared';
+    if (surface === 'speculation' || surface === 'hosted') return 'shared';
+    return 'kernel';
+  }
+
+  /**
    * Whether persistent workspace Agents may answer @-mentions in chat
    * sessions.
    *
@@ -10928,6 +10945,22 @@ export class Config {
   getSessionSourceService(): SessionSourceService | undefined {
     return Object.hasOwn(this, 'sessionSourceService')
       ? this.sessionSourceService
+      : undefined;
+  }
+
+  private generatedUiStateService?: GeneratedUiStateService;
+  private generatedUiStateServiceFactory?: () => GeneratedUiStateService;
+
+  setGeneratedUiStateServiceFactory(
+    factory: () => GeneratedUiStateService,
+  ): void {
+    this.generatedUiStateServiceFactory = factory;
+    this.generatedUiStateService = factory();
+  }
+
+  getGeneratedUiStateService(): GeneratedUiStateService | undefined {
+    return Object.hasOwn(this, 'generatedUiStateService')
+      ? this.generatedUiStateService
       : undefined;
   }
 

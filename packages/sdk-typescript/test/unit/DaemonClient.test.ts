@@ -2573,6 +2573,128 @@ describe('DaemonClient', () => {
       );
     });
 
+    it('sends checkout resolution options in the body on both routes', async () => {
+      const ok = {
+        branch: 'feat/thing',
+        detached: false,
+        stashSha: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0',
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, ok));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.workspaceGitCheckout('feat/thing', { stash: true }),
+      ).resolves.toEqual(ok);
+      await client
+        .workspaceByCwd('/work/secondary')
+        .workspaceGitCheckout('feat/thing', '/work/secondary', 'session-a', {
+          force: true,
+        });
+
+      expect(String(calls[0]!.url)).toBe(
+        'http://daemon/workspace/git/checkout',
+      );
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        ref: 'feat/thing',
+        stash: true,
+      });
+      expect(String(calls[1]!.url)).toBe(
+        'http://daemon/workspaces/%2Fwork%2Fsecondary/git/checkout?cwd=%2Fwork%2Fsecondary&sessionId=session-a',
+      );
+      expect(JSON.parse(calls[1]!.body!)).toEqual({
+        ref: 'feat/thing',
+        force: true,
+      });
+    });
+
+    it('lets workspaceGitCheckout outsize the client default fetch timeout', async () => {
+      let resolveResponse: ((value: Response) => void) | undefined;
+      const slowFetch = vi.fn(
+        (_input: RequestInfo | URL, init?: { signal?: AbortSignal | null }) =>
+          new Promise<Response>((resolve, reject) => {
+            resolveResponse = resolve;
+            init?.signal?.addEventListener('abort', () => {
+              reject(
+                init.signal!.reason ??
+                  new DOMException('aborted', 'AbortError'),
+              );
+            });
+          }),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch: slowFetch as unknown as typeof globalThis.fetch,
+        fetchTimeoutMs: 1,
+      });
+
+      const inflight = client.workspaceGitCheckout(
+        'feat/thing',
+        { stash: true },
+        1_000,
+      );
+      setTimeout(() => {
+        resolveResponse?.(
+          jsonResponse(200, { branch: 'feat/thing', detached: false }),
+        );
+      }, 5);
+
+      await expect(inflight).resolves.toEqual({
+        branch: 'feat/thing',
+        detached: false,
+      });
+      const call = slowFetch.mock.calls[0]!;
+      expect(JSON.parse(String((call[1] as RequestInit).body))).toEqual({
+        ref: 'feat/thing',
+        stash: true,
+      });
+    });
+
+    it('forwards the per-call checkout timeout on the workspace-qualified route', async () => {
+      let resolveResponse: ((value: Response) => void) | undefined;
+      const slowFetch = vi.fn(
+        (_input: RequestInfo | URL, init?: { signal?: AbortSignal | null }) =>
+          new Promise<Response>((resolve, reject) => {
+            resolveResponse = resolve;
+            init?.signal?.addEventListener('abort', () => {
+              reject(
+                init.signal!.reason ??
+                  new DOMException('aborted', 'AbortError'),
+              );
+            });
+          }),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch: slowFetch as unknown as typeof globalThis.fetch,
+        fetchTimeoutMs: 1,
+      });
+      const cwd = '/work/secondary/packages/app';
+
+      const inflight = client
+        .workspaceByCwd('/work/secondary')
+        .workspaceGitCheckout(
+          'feat/thing',
+          cwd,
+          undefined,
+          { force: true },
+          1_000,
+        );
+      setTimeout(() => {
+        resolveResponse?.(
+          jsonResponse(200, { branch: 'feat/thing', detached: false }),
+        );
+      }, 5);
+
+      await expect(inflight).resolves.toEqual({
+        branch: 'feat/thing',
+        detached: false,
+      });
+      const call = slowFetch.mock.calls[0]!;
+      expect(String(call[0])).toBe(
+        `http://daemon/workspaces/%2Fwork%2Fsecondary/git/checkout?cwd=${encodeURIComponent(cwd)}`,
+      );
+    });
+
     it('lets ACP preheat wait longer than the client default timeout', async () => {
       let resolveResponse: ((value: Response) => void) | undefined;
       const slowFetch = vi.fn(
