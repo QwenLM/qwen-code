@@ -1012,6 +1012,7 @@ const {
         question: string;
         answer: string;
         isPending: boolean;
+        hidePrefix?: boolean;
       } | null,
       latestAddWorkspaceDialogProps: null as AddWorkspaceDialogTestProps | null,
       latestSessionOverviewProps: null as {
@@ -19342,6 +19343,253 @@ describe('App session callbacks', () => {
     expect(testState.latestArtifactPanelProps?.explainTask?.id).toBe(
       'agent-no-tool',
     );
+  });
+
+  it.each(['c', 'd'])(
+    'cancels a pending explanation with Ctrl+%s while a button holds focus',
+    async (key) => {
+      const finish = deferred<void>();
+      mockSessionActions.btwSessionStream.mockImplementationOnce(
+        async function* () {
+          await finish.promise;
+          yield {
+            v: 1,
+            type: 'done',
+            requestId: 'btw-request',
+            answer: 'too late',
+          } as const;
+        },
+      );
+      const shell: DaemonSessionShellTaskStatus = {
+        kind: 'shell',
+        id: 'shell-running',
+        label: 'npm run build',
+        description: 'npm run build',
+        status: 'running',
+        startTime: 2,
+        runtimeMs: 20,
+        command: 'npm run build',
+        cwd: '/tmp/project',
+      };
+      renderApp();
+      await flush();
+      await act(async () => {
+        testState.latestTaskChipsOnExplainTask?.(shell);
+        await Promise.resolve();
+      });
+      await flush();
+      expect(testState.latestBtwMessageProps?.isPending).toBe(true);
+
+      // Clicking the "?" leaves focus on the button; the cancel chords
+      // never activate a control, so they must reach the dismiss path.
+      const button = document.querySelector('button');
+      expect(button).not.toBeNull();
+      const event = new KeyboardEvent('keydown', {
+        key,
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => {
+        button!.dispatchEvent(event);
+      });
+      expect(event.defaultPrevented).toBe(true);
+      expect(document.querySelector('[class*="btwPanel"]')).toBeNull();
+      const signal = mockSessionActions.btwSessionStream.mock.calls.at(-1)?.[1]
+        ?.signal as AbortSignal | undefined;
+      expect(signal?.aborted).toBe(true);
+    },
+  );
+
+  it('dismisses a settled explanation with Escape from the composer editor', async () => {
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+    testState.prompt = '';
+
+    // Escape on a button belongs to the button, not to the dismiss path.
+    const button = document.querySelector('button');
+    expect(button).not.toBeNull();
+    const buttonEvent = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      button!.dispatchEvent(buttonEvent);
+    });
+    expect(buttonEvent.defaultPrevented).toBe(false);
+    expect(document.querySelector('[class*="btwPanel"]')).not.toBeNull();
+
+    // On mobile the editor is a textarea carrying the composer marker, so
+    // it matches both the marker exemption and the textarea selector; the
+    // marker must win and Escape must still dismiss the settled answer.
+    const editor = document.createElement('textarea');
+    editor.setAttribute('data-web-shell-composer-editor', '');
+    container.append(editor);
+    const editorEvent = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      editor.dispatchEvent(editorEvent);
+    });
+    expect(editorEvent.defaultPrevented).toBe(true);
+    expect(document.querySelector('[class*="btwPanel"]')).toBeNull();
+  });
+
+  it('resolves the panel explain task for an agent tab opened with toolUseId', async () => {
+    const agent: DaemonSessionAgentTaskStatus = {
+      kind: 'agent',
+      id: 'agent-with-tool',
+      toolUseId: 'agent-call',
+      label: 'Research',
+      description: 'Research',
+      status: 'running',
+      startTime: 1,
+      runtimeMs: 10,
+      isBackgrounded: true,
+      subagentType: 'general-purpose',
+    };
+    testState.backgroundTasks = [agent];
+    renderApp();
+    await flush();
+
+    // Real background agents carry a toolUseId; the open path registers
+    // the tab under it, so the first operand is the production path.
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(agent);
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(testState.latestArtifactPanelProps?.explainTask?.id).toBe(
+      'agent-with-tool',
+    );
+  });
+
+  it('resolves the panel explain task for a monitor tab', async () => {
+    const monitor: DaemonSessionMonitorTaskStatus = {
+      kind: 'monitor',
+      id: 'monitor-1',
+      label: 'monitor-label',
+      description: 'watch server log',
+      status: 'running',
+      startTime: 1_000,
+      runtimeMs: 5_000,
+      command: 'tail -f server.log',
+      eventCount: 3,
+      lastEventTime: 5_000,
+      droppedLines: 0,
+    };
+    testState.backgroundTasks = [monitor];
+    renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(monitor);
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(testState.latestArtifactPanelProps?.explainTask?.id).toBe(
+      'monitor-1',
+    );
+  });
+
+  it('offers no panel explain task for a workflow tab', async () => {
+    mockConnection.capabilities.features = [
+      'session_agents',
+      'session_agent_trace',
+    ];
+    mockWorkspace.client.sessionAgentTrace.mockResolvedValue({
+      v: 1,
+      sessionId: 'session-1',
+      nodes: [],
+      rootAgentIds: [],
+      warnings: [],
+    });
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'workflow:session-1',
+          tabs: [
+            {
+              id: 'workflow:session-1',
+              kind: 'workflow',
+              title: 'Workflow',
+              sessionId: 'session-1',
+            },
+          ],
+        },
+      }),
+    );
+    renderApp();
+    await flush();
+    await flush();
+
+    // Workflow tabs name no run; the resolver's tail returns null. The
+    // panel must actually be showing the workflow tab, or the null would
+    // be satisfied by an absent panel instead of the resolver.
+    expect(testState.latestArtifactPanelProps).not.toBeNull();
+    expect(testState.latestArtifactPanelProps?.explainTask ?? null).toBeNull();
+  });
+
+  it('keeps the /btw prefix and never mirrors a typed side question', async () => {
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    const { container } = renderApp();
+    await flush();
+    // An explainable tab is active, so a derivation that mirrored every
+    // btw answer would produce a mirror here — the typed answer must not.
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestArtifactPanelProps?.explainTask?.id).toBe(
+      'shell-running',
+    );
+
+    testState.prompt = '/btw explain the current implementation';
+    await clickSubmit(container);
+    await flush();
+
+    expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+    // A typed /btw echoes the user's own command: the prefix stays, and
+    // without a taskId the answer must not mirror into the detail panel.
+    expect(testState.latestBtwMessageProps?.hidePrefix).toBe(false);
+    expect(
+      testState.latestArtifactPanelProps?.taskExplanation ?? null,
+    ).toBeNull();
   });
 
   it('locates a workflow chip in the transcript and opens its row', async () => {

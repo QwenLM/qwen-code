@@ -49,9 +49,13 @@ finishes.
   on a chip "?" returns to its own chip; ArrowRight keeps moving between
   chips. With a settled explanation showing, Enter/Space on any chip or
   panel button activates that button instead of dismissing the panel.
+  While an explanation is still answering, Ctrl+C or Ctrl+D cancels it
+  even when focus sits on a chip, row or panel button. The detail-panel
+  mirror shows the answer without the `/btw ` prefix and without the
+  composer panel's key-hint footer.
 - If a group grows from one task to two while its chip "?" is focused,
   focus lands on that group's chip (now showing the plural count), not
-  on another group.
+  on another group — even when a different group's list is open.
 - In a headerless embed (no environment panel), background agents get no
   chip; shells, monitors, and workflows do.
 - A host that supplies its own footer gets no chip row; its footer keeps

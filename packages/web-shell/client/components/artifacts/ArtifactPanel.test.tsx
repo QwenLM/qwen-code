@@ -5937,7 +5937,7 @@ describe('ArtifactPanel task explanation', () => {
   });
 
   it('mirrors the explanation in place when it matches the active task', () => {
-    const { container } = renderExplainPanel({
+    const { container, rerender } = renderExplainPanel({
       onExplainTask: vi.fn(),
       taskExplanation: {
         messageId: 'm1',
@@ -5957,6 +5957,25 @@ describe('ArtifactPanel task explanation', () => {
     expect(block?.textContent).toContain('It runs the dev server.');
     // A button-triggered explanation is not a typed /btw command.
     expect(block?.textContent).not.toContain('/btw');
+    // The mirror has no focusable surface of its own, so the composer
+    // panel's key hints would advertise keys that act on whatever control
+    // holds focus (Enter on the header "?" re-asks the question).
+    expect(block?.textContent).not.toContain('Press Space');
+
+    rerender({
+      onExplainTask: vi.fn(),
+      taskExplanation: {
+        messageId: 'm2',
+        taskId: 'shell-1',
+        question: 'Explain what this task is doing: npm run dev',
+        answer: '',
+        isPending: true,
+      },
+    });
+    const pendingBlock = container.querySelector(
+      '[data-testid="artifact-panel-explanation"]',
+    );
+    expect(pendingBlock?.textContent).not.toContain('Ctrl+C');
   });
 
   it('does not mirror an explanation for another task', () => {

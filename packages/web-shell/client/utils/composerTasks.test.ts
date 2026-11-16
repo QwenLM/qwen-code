@@ -342,7 +342,9 @@ describe('buildTaskExplainQuestion', () => {
         ...base,
         kind: 'agent',
         isBackgrounded: true,
-        label: '😀'.repeat(10_000),
+        // The leading 'x' forces the 400-char cut inside a pair; a pure
+        // emoji string would cut on a pair boundary and skip the guard.
+        label: 'x' + '😀'.repeat(10_000),
       },
       en,
     );
@@ -539,14 +541,15 @@ describe('buildTaskExplainQuestion', () => {
   });
 
   it('strands no surrogate when the final guard cuts inside an emoji', () => {
-    const question = buildTaskExplainQuestion(
-      { ...shellTask, cwd: '😀'.repeat(10_000) },
-      en,
-    );
-    expect(question.length).toBeLessThanOrEqual(4096);
-    expect(question).not.toMatch(
-      /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/,
-    );
+    // Both parities: the cut offset depends on the template length, so one
+    // variant always lands inside a pair even if the template changes.
+    for (const cwd of ['😀'.repeat(10_000), 'w' + '😀'.repeat(10_000)]) {
+      const question = buildTaskExplainQuestion({ ...shellTask, cwd }, en);
+      expect(question.length).toBeLessThanOrEqual(4096);
+      expect(question).not.toMatch(
+        /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/,
+      );
+    }
   });
 
   it('strands no surrogate when a field excerpt cuts inside an emoji', () => {
@@ -578,7 +581,9 @@ describe('explainDisplayLabel', () => {
   });
 
   it('strands no surrogate when the display cut lands inside an emoji', () => {
-    const display = explainDisplayLabel('😀'.repeat(200));
+    // The leading 'x' forces the 120-char cut inside a pair; a pure emoji
+    // string would cut on a pair boundary and skip the guard.
+    const display = explainDisplayLabel('x' + '😀'.repeat(200));
     expect(display).not.toMatch(
       /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/,
     );

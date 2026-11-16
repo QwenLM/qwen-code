@@ -14597,18 +14597,6 @@ export function App({
         target.closest('[data-web-shell-context-popover]')
       )
         return;
-      // Buttons, links and fields keep their native keyboard activation
-      // (Escape/Enter/Space on a chip "?", a row button or the panel header
-      // "?"); the dismiss shortcut belongs to the composer surface, so the
-      // editor itself is deliberately not exempted.
-      if (
-        target instanceof Element &&
-        !target.closest('[data-web-shell-composer-editor]') &&
-        target.closest(
-          'button, a[href], [role="button"], input, select, textarea',
-        )
-      )
-        return;
       const message = btwMessage;
       if (!message || message.role !== 'btw') return;
 
@@ -14625,6 +14613,21 @@ export function App({
         !e.altKey &&
         !e.shiftKey &&
         (key === 'c' || key === 'd');
+
+      // Buttons, links and fields keep their native keyboard activation
+      // (Escape/Enter/Space on a chip "?", a row button or the panel header
+      // "?"); the dismiss shortcut belongs to the composer surface, so the
+      // editor itself is deliberately not exempted. Ctrl+C/Ctrl+D never
+      // activate a control, so they must reach the cancel path below.
+      if (
+        !isCtrlCancel &&
+        target instanceof Element &&
+        !target.closest('[data-web-shell-composer-editor]') &&
+        target.closest(
+          'button, a[href], [role="button"], input, select, textarea',
+        )
+      )
+        return;
 
       if (message.isPending) {
         if (!isPlainEscape && !isCtrlCancel) return;

@@ -594,6 +594,39 @@ describe('ComposerTaskChips', () => {
       expect(document.activeElement).toBe(shellChip);
     });
 
+    it("reclaims focus to the owning chip when a different group's list is open", () => {
+      const onExplainTask = vi.fn();
+      const shellTask = shell('shell-1');
+      render([workflow('wf-1'), workflow('wf-2'), shellTask], {
+        onExplainTask,
+      });
+      // Open the workflow list, then stand on the shell chip's "?" — the
+      // list stays open because focus remains inside the chip row root.
+      act(() => chips()[0].click());
+      const shellExplain = explainButtons().find(
+        (button) => button.getAttribute('data-explain-kind') === 'shell',
+      );
+      expect(shellExplain).toBeDefined();
+      act(() => shellExplain!.focus());
+      expect(
+        container.querySelector('[data-testid="composer-task-list"]'),
+      ).not.toBeNull();
+
+      render(
+        [workflow('wf-1'), workflow('wf-2'), shellTask, shell('shell-2')],
+        {
+          onExplainTask,
+        },
+      );
+
+      expect(shellExplain!.isConnected).toBe(false);
+      const shellChip = chips().find((chip) =>
+        chip.textContent?.includes('shells'),
+      );
+      expect(shellChip).toBeDefined();
+      expect(document.activeElement).toBe(shellChip);
+    });
+
     it('steps ArrowLeft from the chip "?" back to its own chip', () => {
       const onExplainTask = vi.fn();
       render([workflow('wf-1'), shell('shell-1')], { onExplainTask });

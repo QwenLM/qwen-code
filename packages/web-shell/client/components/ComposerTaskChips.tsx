@@ -160,14 +160,16 @@ export const ComposerTaskChips = forwardRef<
     focusedElementRef.current = null;
     if (!isFocusUnclaimed(focused.root)) return;
     // A chip "?" unmounts when its group grows; reclaim focus to the owning
-    // group's chip, not to whichever group happens to sort first.
+    // group's chip, not to whichever group happens to sort first — and not
+    // to a different group whose list happens to be open. Row "?" buttons
+    // carry no kind attribute, so openKind stays as their fallback.
     const focusedKind =
       focused.element.getAttribute('data-explain-kind') ??
       focused.element.getAttribute('data-kind');
     const chip =
-      (openKind && chipRefs.current.get(openKind)) ||
       (focusedKind &&
         chipRefs.current.get(focusedKind as ComposerTaskChipKind)) ||
+      (openKind && chipRefs.current.get(openKind)) ||
       chipRefs.current.get(groups[0]?.kind);
     if (chip) chip.focus({ preventScroll: true });
     else onReturnToInput?.();

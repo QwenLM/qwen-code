@@ -1146,6 +1146,7 @@ export function ArtifactPanel({
               answer={taskExplanation.answer}
               isPending={taskExplanation.isPending}
               hidePrefix
+              hideShortcuts
             />
           </div>
         )}
