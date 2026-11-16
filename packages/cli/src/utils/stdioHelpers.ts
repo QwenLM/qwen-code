@@ -97,6 +97,24 @@ export const clearScreen = (): void => {
   console.clear();
 };
 
+const onBrokenStdout = (err: NodeJS.ErrnoException): void => {
+  if (err.code === 'EPIPE') process.stdout.destroy();
+};
+
+const onBrokenStderr = (err: NodeJS.ErrnoException): void => {
+  if (err.code === 'EPIPE') process.stderr.destroy();
+};
+
+/**
+ * Ignore asynchronous broken-pipe (`EPIPE`) `'error'` events on `process.stderr`
+ * for the rest of this process. Safe to call repeatedly.
+ */
+export const ignoreBrokenStderr = (): void => {
+  if (!process.stderr.listeners('error').includes(onBrokenStderr)) {
+    process.stderr.on('error', onBrokenStderr);
+  }
+};
+
 /**
  * Ignore a broken output pipe (`qwen … | head`, a daemon's closed redirect)
  * for the rest of this process.
@@ -113,10 +131,8 @@ export const clearScreen = (): void => {
  * once and the process then exits, so nothing detaches them.
  */
 export const ignoreBrokenPipe = (): void => {
-  process.stdout.on('error', (err: NodeJS.ErrnoException): void => {
-    if (err.code === 'EPIPE') process.stdout.destroy();
-  });
-  process.stderr.on('error', (err: NodeJS.ErrnoException): void => {
-    if (err.code === 'EPIPE') process.stderr.destroy();
-  });
+  if (!process.stdout.listeners('error').includes(onBrokenStdout)) {
+    process.stdout.on('error', onBrokenStdout);
+  }
+  ignoreBrokenStderr();
 };

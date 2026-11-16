@@ -6,6 +6,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  ignoreBrokenStderr,
   writeStderrLine,
   writeStderrLineSafe,
   writeStdoutLineSafe,
@@ -70,5 +71,39 @@ describe('writeStdoutLineSafe', () => {
     });
 
     expect(() => writeStdoutLineSafe('boom')).not.toThrow();
+  });
+});
+
+describe('ignoreBrokenStderr', () => {
+  it('destroys stderr once on async EPIPE and ignores repeat calls', () => {
+    const beforeListeners = new Set(process.stderr.listeners('error'));
+    const destroySpy = vi
+      .spyOn(process.stderr, 'destroy')
+      .mockReturnValue(process.stderr);
+
+    try {
+      ignoreBrokenStderr();
+      ignoreBrokenStderr();
+
+      const addedListeners = process.stderr
+        .listeners('error')
+        .filter((listener) => !beforeListeners.has(listener));
+      expect(addedListeners).toHaveLength(1);
+
+      process.stderr.emit(
+        'error',
+        Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }),
+      );
+      expect(destroySpy).toHaveBeenCalledTimes(1);
+    } finally {
+      for (const listener of process.stderr.listeners('error')) {
+        if (!beforeListeners.has(listener)) {
+          process.stderr.removeListener(
+            'error',
+            listener as (...args: unknown[]) => void,
+          );
+        }
+      }
+    }
   });
 });

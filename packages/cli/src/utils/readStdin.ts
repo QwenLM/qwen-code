@@ -4,23 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { writeStderrLineSafe } from './stdioHelpers.js';
-
-const epipeGuardedStreams = new WeakSet<NodeJS.WriteStream>();
+import { ignoreBrokenStderr, writeStderrLineSafe } from './stdioHelpers.js';
 
 function writeStderrWarningSafe(message: string): void {
-  const stderr = process.stderr as NodeJS.WriteStream | undefined;
-  if (!stderr) {
-    return;
-  }
-  if (typeof stderr.on === 'function' && !epipeGuardedStreams.has(stderr)) {
-    epipeGuardedStreams.add(stderr);
-    stderr.on('error', (err: NodeJS.ErrnoException): void => {
-      if (err.code === 'EPIPE' && typeof stderr.destroy === 'function') {
-        stderr.destroy();
-      }
-    });
-  }
+  ignoreBrokenStderr();
   writeStderrLineSafe(message);
 }
 

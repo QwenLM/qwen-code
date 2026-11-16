@@ -149,7 +149,7 @@ describe('readStdin', () => {
         throw epipe();
       })
       .mockImplementationOnce(() => {
-        process.stderr.emit('error', epipe());
+        queueMicrotask(() => process.stderr.emit('error', epipe()));
         return false;
       });
     (process.stderr as { write: unknown }).write = stderrSpy;
@@ -163,6 +163,7 @@ describe('readStdin', () => {
       vi.advanceTimersByTime(500);
       await expect(asyncPromise).resolves.toBe('');
 
+      expect(destroySpy).toHaveBeenCalledTimes(1);
       expect(stderrSpy).toHaveBeenCalledTimes(2);
     } finally {
       (process.stderr as { write: typeof originalWrite }).write = originalWrite;
