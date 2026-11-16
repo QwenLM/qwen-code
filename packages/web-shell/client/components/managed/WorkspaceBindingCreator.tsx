@@ -5,7 +5,13 @@ import {
 import { useManagedFileReferences } from './use-managed-file-references';
 import { useManagedSkills } from './use-managed-skills';
 import type { ComposerSubmitMetadata } from '../../hooks/useComposerCore';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import shellStyles from '../../App.module.css';
 import { useI18n } from '../../i18n';
 import { useManagedRecoveryText } from './managed-recovery-messages';
@@ -18,7 +24,15 @@ import { ManagedWorktreePopover } from './ManagedWorktreePopover';
 import { ChatEditor } from '../ChatEditor';
 import type { WorkspaceSelectorOption } from '../WorkspaceSelector';
 import { HostLabel } from '../workspaces/HostLabel';
-import { WelcomeHeader } from '../WelcomeHeader';
+import { WelcomeHeader, type WelcomeHeaderProps } from '../WelcomeHeader';
+import {
+  getComposerPlaceholderKey,
+  getComposerPlaceholderState,
+} from '../../utils/composerInputState';
+import {
+  useWebShellCustomization,
+  type ComposerFooterRenderer,
+} from '../../customization';
 import { AddWorkspaceDialog } from '../dialogs/AddWorkspaceDialog';
 import { WorkspaceExecutionSelect } from '../workspaces/WorkspaceExecutionSelect';
 import type {
@@ -225,6 +239,10 @@ export function WorkspaceBindingCreator({
   creationSkills,
   handoff,
   onOpenHandoffSource,
+  renderWelcomeHeader,
+  renderWelcomeFooter,
+  renderComposerFooter,
+  alignManagedChatWithHost = false,
 }: {
   provider: ManagedAgentProvider;
   workspaceCreationOpen?: boolean;
@@ -243,8 +261,31 @@ export function WorkspaceBindingCreator({
   creationSkills?: ManagedCreationSkillsSource;
   handoff?: import('./managed-recovery-handoff').ManagedRecoveryHandoff;
   onOpenHandoffSource?: () => void;
+  /**
+   * Host welcome renderer for the creation surface, passed through from the
+   * managed page so the first screen a user reaches does not keep the built-in
+   * brand header while the session view shows the host's.
+   */
+  renderWelcomeHeader?: (props: WelcomeHeaderProps) => ReactNode;
+  /**
+   * Pairs with `renderWelcomeHeader` on this surface, like the managed session
+   * empty state and App both keep: a host that supplies both slots gets both.
+   */
+  renderWelcomeFooter?: (props: WelcomeHeaderProps) => ReactNode;
+  /**
+   * Host composer footer for the creation surface, passed through from the
+   * managed page like the welcome slots so the first screen does not drop the
+   * footer the session view shows.
+   */
+  renderComposerFooter?: ComposerFooterRenderer;
+  /**
+   * Mirrors the managed composer: aligned hosts get the ordinary placeholder,
+   * not the managed-only prompt copy.
+   */
+  alignManagedChatWithHost?: boolean;
 }) {
   const { t } = useI18n();
+  const { composerPlaceholders } = useWebShellCustomization();
   const recoveryText = useManagedRecoveryText();
   const worktreeText = useManagedWorktreeText();
   const worktreeReason = useManagedWorktreeReason();
@@ -384,6 +425,10 @@ export function WorkspaceBindingCreator({
   const [supported, setSupported] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(true);
+  // True only while a creation request is in flight. Neither `busy` (also set
+  // by the pending-restore window) nor `workspaceCreating` (the add-workspace
+  // flow) describes this, and the screen has no queue to report through.
+  const [creatingSession, setCreatingSession] = useState(false);
   const [pendingRestoreFailed, setPendingRestoreFailed] = useState(false);
   const [revision, setRevision] = useState(0);
   const [error, setError] = useState<string>();
@@ -701,6 +746,26 @@ export function WorkspaceBindingCreator({
     : supportsApprovalModeSelection
       ? currentOptions?.approvalMode
       : undefined;
+  const composerFooterModel =
+    pending?.modelId ?? pending?.agentId ?? selectedModel;
+  // Background list/options/@-file fetches stay soft: hard-disabling the
+  // editor during them would drop keystrokes (createOrRead does not gate on
+  // these flags). Only the creation request itself is "processing" work for
+  // the host override map — this screen has no turn and no queue.
+  const composerPreparing =
+    busy || loading || optionsLoading || fileReferences.busy;
+  const composerBlocked =
+    !interactive ||
+    // The prepare window and the creation request itself both set `busy`, and
+    // `createOrRead` early-returns on it: without this the composer accepts a
+    // prompt it will silently drop (and clear once the session is created).
+    busy ||
+    workspaceSelectionBlocked ||
+    workspaceCreating ||
+    Boolean(pending) ||
+    !approvalReady ||
+    !worktreeReady ||
+    worktreePopoverOpen;
 
   async function loadMore() {
     const abort = lifetime.current;
@@ -867,7 +932,13 @@ export function WorkspaceBindingCreator({
     setBusy(true);
     setError(undefined);
     setPathError(undefined);
+    // Both the creation request and a read-back-only retry (a pending attempt
+    // that already carries a sessionId) are "processing" for this screen: the
+    // latch has to wrap the whole block, not just the createSession branch.
+    let creating = false;
     try {
+      creating = true;
+      setCreatingSession(true);
       if (!attempt.sessionId) {
         const request = {
           agentId: attempt.agentId,
@@ -981,6 +1052,7 @@ export function WorkspaceBindingCreator({
         setError(message(failure));
       }
     } finally {
+      if (creating) setCreatingSession(false);
       if (!abort.signal.aborted) setBusy(false);
     }
   }
@@ -1719,12 +1791,24 @@ export function WorkspaceBindingCreator({
       {directInput && (
         <div className={shellStyles.chatPane} data-managed-standard-chat>
           <div className={shellStyles.content}>
-            <WelcomeHeader
-              version=""
-              cwd=""
-              currentModel={agentId}
-              currentMode=""
-            />
+            {(() => {
+              const welcomeProps = {
+                version: '',
+                cwd: cwdRelative,
+                currentModel: composerFooterModel,
+                currentMode: displayedApprovalMode ?? '',
+              };
+              return (
+                <>
+                  {renderWelcomeHeader ? (
+                    renderWelcomeHeader(welcomeProps)
+                  ) : (
+                    <WelcomeHeader {...welcomeProps} />
+                  )}
+                  {renderWelcomeFooter?.(welcomeProps)}
+                </>
+              );
+            })()}
           </div>
           <div className={shellStyles.footer}>
             {fileReferences.error && <p role="alert">{fileReferences.error}</p>}
@@ -1780,9 +1864,7 @@ export function WorkspaceBindingCreator({
               showChatWidthToggle={false}
               contextChipPlacement="below"
               gitContextControl={worktreeControl}
-              currentModel={
-                pending?.modelId ?? pending?.agentId ?? selectedModel
-              }
+              currentModel={composerFooterModel}
               modelControlsDisabled={
                 busy || workspaceCreating || Boolean(pending)
               }
@@ -1957,16 +2039,7 @@ export function WorkspaceBindingCreator({
                   : undefined
               }
               composerInputVersion={0}
-              disabled={
-                !interactive ||
-                busy ||
-                workspaceSelectionBlocked ||
-                workspaceCreating ||
-                Boolean(pending) ||
-                !approvalReady ||
-                !worktreeReady ||
-                worktreePopoverOpen
-              }
+              disabled={composerBlocked}
               dialogOpen={
                 !interactive ||
                 workspaceDialogOpen ||
@@ -1976,15 +2049,45 @@ export function WorkspaceBindingCreator({
                 worktreesOpen ||
                 worktreePopoverOpen
               }
-              isPreparing={
-                busy || fileReferences.busy || loading || optionsLoading
+              isPreparing={composerPreparing}
+              placeholderText={
+                alignManagedChatWithHost
+                  ? // The host override map wins per state, otherwise the
+                    // ordinary composer's localized default — both halves
+                    // read the same classifier App applies.
+                    composerPlaceholders?.[
+                      getComposerPlaceholderState({
+                        isPreparingPrompt: creatingSession,
+                        isStreaming: false,
+                      })
+                    ]?.trim() ||
+                    t(
+                      getComposerPlaceholderKey({
+                        isPreparingPrompt: creatingSession,
+                        isStreaming: false,
+                      }),
+                    )
+                  : t('managed.prompt')
               }
-              placeholderText={t('managed.prompt')}
               onSubmit={(text, images, files, commit, metadata) => {
                 void createOrRead(text, commit, images, files, metadata);
                 return false;
               }}
             />
+            {(() => {
+              const Footer = renderComposerFooter;
+              return Footer ? (
+                <Footer
+                  disabled={composerBlocked}
+                  // The creation screen never runs a turn: only the creation
+                  // request itself is running work, not the restore window
+                  // (`busy`) and not the add-workspace flow.
+                  isRunning={creatingSession}
+                  currentMode={displayedApprovalMode ?? ''}
+                  currentModel={composerFooterModel}
+                />
+              ) : null;
+            })()}
             {worktreeStatus}
           </div>
         </div>

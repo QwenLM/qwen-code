@@ -48,6 +48,7 @@ import {
   TURN_RESULT_TEXT_MAX_CHARS,
   TrustGateError,
   SessionSourceError,
+  GeneratedUiStateError,
   validateSessionSourceInput,
   canonicalSessionPrUrl,
   isSessionPrRole,
@@ -166,6 +167,7 @@ import {
   type ActiveWorkSnapshotV1,
   CHANNEL_PROMPT_META_KEY,
   CHANNEL_OUTPUT_MODE_META_KEY,
+  CHANNEL_WORKFLOW_ORIGIN_META_KEY,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
   DAEMON_ATTACHMENT_REFERENCES_META_KEY,
   DAEMON_INPUT_ANNOTATIONS_META_KEY,
@@ -285,6 +287,7 @@ import { defaultSpawnChannelFactory } from './spawnChannel.js';
 import { writeStderrLine } from './internal/stderrLine.js';
 import {
   BridgeClient,
+  hasAvailableWorkflowApprovalClient,
   KNOWN_APPROVAL_MODES,
   type BridgeClientDeferredArtifactBatch,
 } from './bridgeClient.js';
@@ -956,6 +959,7 @@ interface SessionEntry {
    * it as trusted originator metadata if it appears in this set.
    */
   clientIds: Map<string, number>;
+  suspendedWorkflowApprovalRefs?: Map<string, Set<symbol>>;
   /**
    * Admitted id for the prompt currently running on this session. ACP enforces
    * one active prompt per session, and this bridge FIFO-serializes prompts, so
@@ -1656,7 +1660,7 @@ export function extractErrorCode(err: unknown): string | undefined {
  * history goes to the model conversation, not the persisted transcript
  * the refresh pages) and latest-wins state metadata
  * (`available_commands_update`, `current_mode_update`, and
- * `session_info_update`).
+ * `session_info_update`), plus Hook lifecycle diagnostics.
  */
 const REFRESH_APPEND_BOOKKEEPING_EVENT_TYPES = new Set([
   'pending_prompt_added',
@@ -1708,7 +1712,7 @@ const REFRESH_APPEND_BOOKKEEPING_EVENT_TYPES = new Set([
  * history instead of the transcript the refresh pages) and the
  * latest-wins state snapshots (`available_commands_update` from a
  * skills/settings refresh, the legacy dual-emit `current_mode_update`, and
- * title metadata in `session_info_update`).
+ * title metadata in `session_info_update`), plus Hook lifecycle diagnostics.
  */
 function isIdleBookkeepingSessionUpdate(event: BridgeEvent): boolean {
   if (event.type !== 'session_update') return false;
@@ -1729,7 +1733,11 @@ function isIdleBookkeepingSessionUpdate(event: BridgeEvent): boolean {
   }
   const meta = updateRecord['_meta'];
   if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return false;
-  return (meta as Record<string, unknown>)['source'] === 'user-shell';
+  const metaRecord = meta as Record<string, unknown>;
+  return (
+    metaRecord['source'] === 'user-shell' ||
+    metaRecord['hookLifecycle'] !== undefined
+  );
 }
 
 /**
@@ -4777,12 +4785,26 @@ export function createSessionControlPlane(
     return clientId;
   };
 
+  const cancelUnavailableWorkflowApprovals = (
+    entry: SessionEntry,
+    clientId: string,
+  ): void => {
+    if (!hasAvailableWorkflowApprovalClient(entry, clientId)) {
+      permissionMediator.cancelDesignatedWorkflowApprovalsForClient(
+        entry.sessionId,
+        clientId,
+      );
+    }
+  };
+
   const unregisterClient = (entry: SessionEntry, clientId?: string): void => {
     if (clientId === undefined) return;
     const count = entry.clientIds.get(clientId);
     if (count === undefined) return;
     if (count <= 1) {
       entry.clientIds.delete(clientId);
+      entry.suspendedWorkflowApprovalRefs?.delete(clientId);
+      cancelUnavailableWorkflowApprovals(entry, clientId);
       entry.attachments.cancelClientUploads(clientId);
       for (const call of entry.mcpAppCalls?.values() ?? []) {
         if (call.clientId === clientId) call.cancel();
@@ -4796,6 +4818,7 @@ export function createSessionControlPlane(
       entry.clientLastSeenAt.delete(clientId);
     } else {
       entry.clientIds.set(clientId, count - 1);
+      cancelUnavailableWorkflowApprovals(entry, clientId);
     }
   };
 
@@ -6423,32 +6446,7 @@ export function createSessionControlPlane(
     }
   }
 
-  /**
-   * Resolve every pending request belonging to one session as cancelled.
-   *
-   * **Scope contract (per ACP spec / live-collab default):**
-   * Permissions are issued by the agent inline DURING an active
-   * prompt — `requestPermission` returns a Promise the agent awaits
-   * before continuing. Per the bridge's per-session FIFO + ACP's
-   * "one active prompt per session" guarantee, ALL outstanding
-   * permissions at any moment belong to the **currently active
-   * prompt**. So "cancel all pending permissions for this session"
-   * is equivalent to "cancel the active prompt's permissions" — and
-   * that's exactly what ACP requires when a prompt is cancelled
-   * ("cancelling a prompt MUST resolve outstanding requestPermission
-   * calls with outcome.cancelled").
-   *
-   * **Multi-client live-collab caveat:** under `sessionScope: 'single'`
-   * Client B may have been about to vote on A's pending permission
-   * via SSE — when A disconnects mid-prompt, B's vote (if it arrives
-   * after the abort) gets `404`. This is the right behavior: A's
-   * prompt is being cancelled, so the permission belongs to a turn
-   * that no longer matters. From B's side they see
-   * `permission_resolved` with `outcome: cancelled` on the SSE
-   * stream, then the prompt's `cancelled` stop reason. Voting on a
-   * cancelled-prompt's permission was never going to drive the
-   * agent forward anyway.
-   */
+  // Session teardown also cancels work that outlives an individual turn.
   const cancelPendingForSession = (sessionId: string) => {
     // Mediator first (it cancels each pending,
     // emits `permission_resolved`, writes audit, settles the
@@ -7103,6 +7101,32 @@ export function createSessionControlPlane(
       throw new SessionSourceError(
         result.sourceError.code,
         result.sourceError.message,
+      );
+    }
+    return result;
+  };
+
+  const requestGeneratedUiState = async <T>(
+    sessionId: string,
+    method: string,
+    params: Record<string, unknown>,
+    clientId: string,
+  ): Promise<T> => {
+    const entry = byId.get(sessionId);
+    if (!entry) throw new SessionNotFoundError(sessionId);
+    if (!resolveTrustedClientId(entry, clientId))
+      throw new Error('A session-bound client id is required');
+    if (entry.closing) throw new SessionNotFoundError(sessionId);
+    assertSessionResetNotPending(sessionId);
+    const result = await requestSessionStatus<
+      T & {
+        stateError?: { code: GeneratedUiStateError['code']; message: string };
+      }
+    >(sessionId, method, params);
+    if (result.stateError) {
+      throw new GeneratedUiStateError(
+        result.stateError.code,
+        result.stateError.message,
       );
     }
     return result;
@@ -8236,6 +8260,7 @@ export function createSessionControlPlane(
     historyPageSize: number,
     liveReplayMode: 'full' | 'summary',
   ): Promise<ReturnType<typeof replayFieldsFor>> {
+    // Active turns need the live journal; persisted pages cannot replace it.
     // A pending permission/question lives only in the in-memory journal — it
     // is never persisted to the chat transcript — and the turns that park on
     // one without an RPC prompt (Goal and background-notification turns)
@@ -8244,9 +8269,6 @@ export function createSessionControlPlane(
     // would strand the interaction: the session summary still advertises it
     // (input-needed badge) while the re-opening client receives nothing to
     // answer.
-    if (entry.pendingInteractions.size > 0) {
-      return replayFieldsFor(entry, 'load', liveReplayMode);
-    }
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         const lastEventId = entry.events.lastEventId;
@@ -8257,6 +8279,16 @@ export function createSessionControlPlane(
         let cursor: string | undefined;
         let page: BridgeSessionTranscriptPage;
         do {
+          // Check before every read, including empty-page traversal and a
+          // retry after activity started while the previous read was pending.
+          if (
+            entry.promptActive ||
+            entry.goalTurnActive === true ||
+            entry.backgroundTurn ||
+            entry.pendingInteractions.size > 0
+          ) {
+            return replayFieldsFor(entry, 'load', liveReplayMode);
+          }
           page = await requestSessionTranscriptPage({
             sessionId: entry.sessionId,
             ...(cursor ? { cursor } : { direction: 'backward' }),
@@ -8289,6 +8321,7 @@ export function createSessionControlPlane(
         if (
           byId.get(entry.sessionId) === entry &&
           !entry.promptActive &&
+          !entry.goalTurnActive &&
           !entry.backgroundTurn &&
           entry.events.epoch === eventEpoch &&
           entry.events.lastEventId === lastEventId &&
@@ -8336,7 +8369,8 @@ export function createSessionControlPlane(
               if (!isRecord(meta)) continue;
               if (
                 !isRecord(meta['executionLifecycle']) &&
-                !isRecord(meta['toolLifecycle'])
+                !isRecord(meta['toolLifecycle']) &&
+                !isRecord(meta['hookLifecycle'])
               )
                 continue;
               lifecycleReplay.push({
@@ -8347,6 +8381,9 @@ export function createSessionControlPlane(
                   _meta: {
                     ...(isRecord(meta['executionLifecycle'])
                       ? { executionLifecycle: meta['executionLifecycle'] }
+                      : {}),
+                    ...(isRecord(meta['hookLifecycle'])
+                      ? { hookLifecycle: meta['hookLifecycle'] }
                       : {}),
                     ...(isRecord(meta['toolLifecycle'])
                       ? { toolLifecycle: meta['toolLifecycle'] }
@@ -8746,6 +8783,10 @@ export function createSessionControlPlane(
         await rollbackAttachRegistration(existing, clientId);
         throw error;
       }
+      // Warm attach (page reload / second tab on a live session) gets the
+      // same early artifact snapshot as a fresh restore, so the header entry
+      // does not wait for the gated fetch on the most common re-open path.
+      const existingArtifacts = await existing.artifacts.listRestored();
       return {
         sessionId: existing.sessionId,
         workspaceCwd: existing.workspaceCwd,
@@ -8763,6 +8804,9 @@ export function createSessionControlPlane(
         // Late attachers get the same ACP state the original restore
         // caller saw; spawn-only sessions don't carry a state payload.
         state: existing.restoreState ?? {},
+        ...(existingArtifacts.length > 0
+          ? { artifacts: existingArtifacts }
+          : {}),
         hasRunningBackgroundTasks: existing.hasRunningBackgroundTasks,
         hasActivePrompt:
           existing.promptActive ||
@@ -9514,6 +9558,9 @@ export function createSessionControlPlane(
             options,
           );
         }
+        // A restore that raced another registration attaches to the live
+        // entry; carry the same early artifact snapshot as a fresh restore.
+        const racedArtifacts = await racedEntry.artifacts.listRestored();
         return {
           sessionId: racedEntry.sessionId,
           workspaceCwd: racedEntry.workspaceCwd,
@@ -9533,6 +9580,7 @@ export function createSessionControlPlane(
             ? { sourceId: racedEntry.sourceId }
             : {}),
           state: racedEntry.restoreState ?? {},
+          ...(racedArtifacts.length > 0 ? { artifacts: racedArtifacts } : {}),
           hasRunningBackgroundTasks: racedEntry.hasRunningBackgroundTasks,
           hasActivePrompt:
             restorePromptAdmitted ||
@@ -9699,6 +9747,7 @@ export function createSessionControlPlane(
           options,
         );
       }
+      const restoredArtifacts = await entry.artifacts.listRestored();
       // Explicit `session/load` / `session/resume` is "give me THIS
       // id"; it must NOT become the implicit attach target for
       // subsequent omitted-id `POST /session` callers under `single`
@@ -9719,6 +9768,9 @@ export function createSessionControlPlane(
         state: entry.restoreState ?? {},
         ...(deferArtifactWorkspace || artifactRestoreWarnings.length > 0
           ? { artifactWarnings: artifactRestoreWarnings }
+          : {}),
+        ...(restoredArtifacts.length > 0
+          ? { artifacts: restoredArtifacts }
           : {}),
         hasRunningBackgroundTasks: entry.hasRunningBackgroundTasks,
         hasActivePrompt:
@@ -11670,7 +11722,7 @@ export function createSessionControlPlane(
           settleActivePromptState(entry, pendingEntry.promptId);
           // Unlock the dispatch race / FIFO first, then abort so the
           // existing onAbort path (prompt_cancelled UI signal +
-          // cancelPendingForSession + best-effort connection.cancel) runs.
+          // prompt approval cancellation + best-effort connection.cancel) runs.
           deadlineReject?.(deadlineErr);
           pendingAbort.abort(deadlineErr);
         };
@@ -11883,6 +11935,7 @@ export function createSessionControlPlane(
                   // `channelPrompt` context flag below.
                   delete meta[CHANNEL_PROMPT_META_KEY];
                   delete meta[CHANNEL_OUTPUT_MODE_META_KEY];
+                  delete meta[CHANNEL_WORKFLOW_ORIGIN_META_KEY];
                   delete meta['qwen.goalProposalApproval'];
                   if (
                     originatorClientId !== undefined &&
@@ -11927,6 +11980,10 @@ export function createSessionControlPlane(
                     meta[CHANNEL_PROMPT_META_KEY] = true;
                     if (channelOutputMode === 'per_task') {
                       meta[CHANNEL_OUTPUT_MODE_META_KEY] = channelOutputMode;
+                    }
+                    if (context.channelWorkflowOrigin) {
+                      meta[CHANNEL_WORKFLOW_ORIGIN_META_KEY] =
+                        context.channelWorkflowOrigin;
                     }
                   }
                   meta[INVOCATION_CONTEXT_META_KEY] =
@@ -12108,7 +12165,7 @@ export function createSessionControlPlane(
                         // already ends the turn visibly; a phantom
                         // forward-failure line and prompt_cancelled broadcast
                         // would misreport it.
-                        cancelPendingForSession(sessionId);
+                        permissionMediator.cancelForTurnCancel(sessionId);
                         return;
                       }
                       writeStderrLine(
@@ -12121,7 +12178,7 @@ export function createSessionControlPlane(
                         originatorClientId,
                         'forward_failed',
                       );
-                      cancelPendingForSession(sessionId);
+                      permissionMediator.cancelForTurnCancel(sessionId);
                     },
                   )
                   .catch(() => {});
@@ -12137,7 +12194,7 @@ export function createSessionControlPlane(
                     pendingEntry.promptId,
                     originatorClientId,
                   );
-                  cancelPendingForSession(sessionId);
+                  permissionMediator.cancelForTurnCancel(sessionId);
                   if (byId.get(sessionId) === entry) {
                     void forwardRunningPromptCancel(entry, pendingEntry, {
                       sessionId,
@@ -12332,7 +12389,7 @@ export function createSessionControlPlane(
       // requestPermission calls with outcome.cancelled. Do this *before*
       // forwarding the notification so the agent's wind-down sees the
       // resolutions.
-      cancelPendingForSession(sessionId);
+      permissionMediator.cancelForTurnCancel(sessionId);
       // Cancel intentionally bypasses the prompt queue: it's a notification
       // that the agent uses to wind down the *currently active* prompt, not
       // something to wait behind queued work.
@@ -14339,6 +14396,24 @@ export function createSessionControlPlane(
       return requestSessionStatus<ServeSessionLspStatus>(
         sessionId,
         SERVE_STATUS_EXT_METHODS.sessionLspStatus,
+      );
+    },
+
+    async getGeneratedUiState(sessionId, cardId, context) {
+      return requestGeneratedUiState(
+        sessionId,
+        'qwen/session/generated-ui/state/get',
+        { cardId },
+        context.clientId,
+      );
+    },
+
+    async setGeneratedUiState(sessionId, cardId, write, context) {
+      return requestGeneratedUiState(
+        sessionId,
+        'qwen/session/generated-ui/state/set',
+        { cardId, baseRevision: write.baseRevision, value: write.value },
+        context.clientId,
       );
     },
 
@@ -17180,6 +17255,24 @@ export function createSessionControlPlane(
         }
       }
       return true;
+    },
+
+    suspendClientWorkflowApprovals(sessionId, clientId) {
+      if (permissionMediator.policy !== 'designated') return undefined;
+      const entry = byId.get(sessionId);
+      if (!entry?.clientIds.has(clientId)) return undefined;
+      const clients = (entry.suspendedWorkflowApprovalRefs ??= new Map());
+      let refs = clients.get(clientId);
+      if (!refs) {
+        refs = new Set();
+        clients.set(clientId, refs);
+      }
+      const token = Symbol();
+      refs.add(token);
+      cancelUnavailableWorkflowApprovals(entry, clientId);
+      return () => {
+        if (refs.delete(token) && refs.size === 0) clients.delete(clientId);
+      };
     },
 
     async detachClient(sessionId, clientId) {

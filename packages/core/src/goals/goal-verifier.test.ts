@@ -434,33 +434,33 @@ describe('createGoalVerifier', () => {
     }
   });
 
-  it('lets the first of two markers decide', async () => {
-    // Pins the non-greedy capture: a greedy match would span both markers,
-    // make the captured "token" invalid, and drop the preference.
-    const dir = await mkdtemp(join(tmpdir(), 'goal-verifier-lang-'));
-    const langFile = join(dir, 'output-language.md');
-    try {
-      await writeFile(
-        langFile,
-        [
-          '<!-- qwen-code:llm-output-language: Russian -->',
-          '<!-- qwen-code:llm-output-language: English -->',
-        ].join('\n') + '\n',
-        'utf8',
-      );
-      const { config, sent } = configFor(ACCEPT);
-      vi.mocked(config.getOutputLanguageFilePath).mockReturnValue(langFile);
-      await createGoalVerifier(config)(input());
-      expect(sent().request.systemInstruction).toContain(
-        'preferred-output-language: Russian',
-      );
-      expect(sent().request.systemInstruction).not.toContain(
-        'preferred-output-language: English',
-      );
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
-  });
+  it.each(['', '<!-- qwen-code:llm-output-language: example\ncontinued -->\n'])(
+    'lets the first well-formed marker decide after %j',
+    async (prefix) => {
+      const dir = await mkdtemp(join(tmpdir(), 'goal-verifier-lang-'));
+      const langFile = join(dir, 'output-language.md');
+      try {
+        await writeFile(
+          langFile,
+          prefix +
+            '<!-- qwen-code:llm-output-language: Russian -->\n' +
+            '<!-- qwen-code:llm-output-language: English -->\n',
+          'utf8',
+        );
+        const { config, sent } = configFor(ACCEPT);
+        vi.mocked(config.getOutputLanguageFilePath).mockReturnValue(langFile);
+        await createGoalVerifier(config)(input());
+        expect(sent().request.systemInstruction).toContain(
+          'preferred-output-language: Russian',
+        );
+        expect(sent().request.systemInstruction).not.toContain(
+          'preferred-output-language: English',
+        );
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('includes blocked policy only for blocked proposals', async () => {
     const { config, sent } = configFor(

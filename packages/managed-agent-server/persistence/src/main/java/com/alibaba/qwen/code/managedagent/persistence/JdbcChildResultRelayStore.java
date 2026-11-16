@@ -98,10 +98,15 @@ public class JdbcChildResultRelayStore
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
 
+    private JdbcJournalPacks packs;
+
     public JdbcChildResultRelayStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc) {
         this.jdbc = jdbc;
         this.transactions = new TransactionTemplate(new DataSourceTransactionManager(jdbc.getDataSource()));
     }
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    void setJournalPacks(JdbcJournalPacks packs) { this.packs = packs; }
 
     public List<PendingChild> findPendingChildren(String workerId, int limit) {
         return findPendingChildren(workerId, System.currentTimeMillis(),
@@ -111,8 +116,7 @@ public class JdbcChildResultRelayStore
     /** The owed-work page for one worker: either arm, not terminal, not
      * parked ahead, never leased to another worker — the scanning worker's
      * own claim stays visible, so the heartbeat can fire on time. */
-    public List<PendingChild> findPendingChildren(String workerId, long now,
-            int limit) {
+    public List<PendingChild> findPendingChildren(String workerId, long now, int limit) {
         return jdbc.query(PENDING_SQL, (result, row) -> new PendingChild(
                 result.getString("tenant_id"), result.getString("session_id"),
                 result.getString("record_id"), result.getLong("revision"),
@@ -125,8 +129,7 @@ public class JdbcChildResultRelayStore
      * claimed its ledger row: the discovery page's own captured value can
      * be wholesale older than a settlement committed between the page
      * and the claim — retirement authorization always reads it here. */
-    public String deliveryState(String tenantId, String parentSessionId,
-            String childRunId) {
+    public String deliveryState(String tenantId, String parentSessionId, String childRunId) {
         List<String> rows = jdbc.query(
                 "SELECT delivery_state FROM ma_session_record"
                         + " WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ?"
@@ -143,8 +146,7 @@ public class JdbcChildResultRelayStore
      * updates that same record row first, so the two commits serialize.
      * The lookup names the record's unique business key; matching only the
      * session scope would make MySQL lock every row the scan touches. */
-    private String lockedDeliveryState(String tenantId,
-            String parentSessionId, String childRunId) {
+    private String lockedDeliveryState(String tenantId, String parentSessionId, String childRunId) {
         List<String> rows = jdbc.query(
                 "SELECT delivery_state FROM ma_session_record"
                         + " WHERE session_scope_key = ? AND record_key = ?"
@@ -165,8 +167,7 @@ public class JdbcChildResultRelayStore
      * dispatch_started → running_attached` only). A null answer means no
      * committed record row at all; a row whose body cannot prove its
      * line owes the caller a bounded retry, never a guessed verdict. */
-    public String executionState(String tenantId, String parentSessionId,
-            String childRunId) {
+    public String executionState(String tenantId, String parentSessionId, String childRunId) {
         List<String> rows = jdbc.query(
                 "SELECT record_resource_id FROM"
                         + " ma_session_record"
@@ -182,7 +183,7 @@ public class JdbcChildResultRelayStore
         try {
             execution = text == null ? null
                     : MAPPER.readTree(text).path("run").path("execution");
-        } catch (Exception error) {
+        } catch (java.io.IOException error) {
             throw new IllegalStateException("Child run " + childRunId
                     + "'s committed record is unreadable", error);
         }
@@ -198,8 +199,7 @@ public class JdbcChildResultRelayStore
 
     /** The committed stop state of one child run, or null when no record
      * row exists; an unreadable body owes the caller a bounded retry. */
-    public StopState stopState(String tenantId, String parentSessionId,
-            String childRunId) {
+    public StopState stopState(String tenantId, String parentSessionId, String childRunId) {
         // A primary-key read: the relay walks this on every heartbeat.
         List<String> rows = jdbc.query(
                 "SELECT record_resource_id FROM"
@@ -220,7 +220,7 @@ public class JdbcChildResultRelayStore
         JsonNode body;
         try {
             body = text == null ? null : MAPPER.readTree(text);
-        } catch (Exception error) {
+        } catch (java.io.IOException error) {
             throw new IllegalStateException("Child run " + childRunId
                     + "'s committed record is unreadable", error);
         }
@@ -241,8 +241,7 @@ public class JdbcChildResultRelayStore
      * ended appends nothing, so a natural end that raced ahead of the stop
      * is never read as the stop's outcome.
      */
-    public boolean turnCancelRequested(String tenantId, String sessionId,
-            String turnId) {
+    public boolean turnCancelRequested(String tenantId, String sessionId, String turnId) {
         return !jdbc.query("SELECT sequence_id FROM ma_public_event"
                         + " WHERE tenant_id = ? AND session_id = ?"
                         + " AND stream_kind = 'SESSION' AND stream_id = X'' AND event_type = 'turn.cancel.requested'"
@@ -329,8 +328,7 @@ public class JdbcChildResultRelayStore
      * can refuse it over a message opened after this read. An unreadable
      * body cannot prove which edge it is on and owes a retry.
      */
-    public EdgeMessages edgeMessages(String tenantId, String parentSessionId,
-            String childRunId, String childSessionId) {
+    public EdgeMessages edgeMessages(String tenantId, String parentSessionId, String childRunId, String childSessionId) {
         int undelivered = 0;
         int toChild = 0;
         List<String> received = new ArrayList<>();
@@ -444,8 +442,7 @@ public class JdbcChildResultRelayStore
 
     /** The joined text of the newest assistant message one journal Turn
      * committed, or null while it committed none. */
-    public String journalTurnText(String tenantId, String sessionId,
-            String turnId) {
+    public String journalTurnText(String tenantId, String sessionId, String turnId) {
         List<JsonNode> refs = new ArrayList<>();
         forEachJournalEvent(tenantId, sessionId, event -> {
             if ("message.committed".equals(event.path("kind").asText())
@@ -487,8 +484,7 @@ public class JdbcChildResultRelayStore
     }
 
     /** The latest committed body of one child run, or null without one. */
-    public JsonNode childRunBody(String tenantId, String parentSessionId,
-            String childRunId) {
+    public JsonNode childRunBody(String tenantId, String parentSessionId, String childRunId) {
         List<String> rows = jdbc.query(
                 "SELECT record_resource_id FROM"
                         + " ma_session_record"
@@ -500,8 +496,7 @@ public class JdbcChildResultRelayStore
                 : readTree(readResource(tenantId, parentSessionId, rows.getFirst()));
     }
 
-    private void forEachJournalEvent(String tenantId, String sessionId,
-            java.util.function.Consumer<JsonNode> visitor) {
+    private void forEachJournalEvent(String tenantId, String sessionId, java.util.function.Consumer<JsonNode> visitor) {
         List<Long> heads = jdbc.query("SELECT compacted_through_revision"
                         + " FROM ma_session_head WHERE head_kind = 'MANAGED_SESSION'"
                         + " AND tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ?",
@@ -510,11 +505,22 @@ public class JdbcChildResultRelayStore
             throw new IllegalStateException("Session " + sessionId
                     + "'s journal is compacted");
         }
-        for (byte[] bytes : jdbc.query("SELECT record_bytes FROM"
-                        + " ma_session_journal_tx"
+        for (byte[] bytes : jdbc.query("SELECT record_bytes, journal_revision, record_digest,"
+                        + " byte_length FROM ma_session_journal_tx"
                         + " WHERE tenant_id = ? AND session_id = ?"
                         + " ORDER BY journal_revision",
-                (result, row) -> result.getBytes(1), tenantId, sessionId)) {
+                (result, row) -> {
+                    byte[] value = result.getBytes(1);
+                    if (value == null && packs != null) {
+                        value = packs.resolveBytes(tenantId, sessionId, result.getLong(2),
+                                result.getString(3), result.getLong(4));
+                    }
+                    return value;
+                }, tenantId, sessionId)) {
+            if (bytes == null) {
+                throw new IllegalStateException("Session " + sessionId
+                        + "'s journal is unreadable");
+            }
             for (String line : new String(bytes, StandardCharsets.UTF_8)
                     .split("\n")) {
                 JsonNode record = line.isBlank() ? null : readTree(line);
@@ -575,8 +581,7 @@ public class JdbcChildResultRelayStore
      * discovery page, the cascade acts on both child Session kinds
      * (`child_agent` and `workflow`, #13803).
      */
-    public List<LiveScope> findLiveScopes(String tenantId,
-            String parentSessionId) {
+    public List<LiveScope> findLiveScopes(String tenantId, String parentSessionId) {
         return jdbc.query(
                 "SELECT record_id, record_resource_id"
                         + " FROM ma_session_record"
@@ -593,8 +598,7 @@ public class JdbcChildResultRelayStore
     }
 
     /** Whether a Session currently holds the acceptance of one child run. */
-    public boolean hasAcceptance(String tenantId, String sessionId,
-            String childRunId) {
+    public boolean hasAcceptance(String tenantId, String sessionId, String childRunId) {
         return !jdbc.query(
                 "SELECT record_key FROM ma_session_record"
                         + " WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ?"
@@ -624,8 +628,7 @@ public class JdbcChildResultRelayStore
         return turnLine(tenantId, sessionId, "ASC");
     }
 
-    private TurnLine turnLine(String tenantId, String sessionId,
-            String order) {
+    private TurnLine turnLine(String tenantId, String sessionId, String order) {
         List<TurnLine> rows = jdbc.query(
                 "SELECT turn_id, status, completed_at, error_code,"
                         + " is_submission_attempted, harness_event_epoch"
@@ -645,8 +648,7 @@ public class JdbcChildResultRelayStore
 
     /** The terminal result content: the completed Turn's newest assistant
      * message's joined text, or null while none exists. */
-    public String terminalResultText(String tenantId, String sessionId,
-            String turnId) {
+    public String terminalResultText(String tenantId, String sessionId, String turnId) {
         List<String> messages = jdbc.query(
                 "SELECT i.parts_json, i.body_resource_key, r.inline_bytes, r.kind, r.schema_version, r.byte_length, r.sha256,"
                         + " r.state, r.deletion_operation_key FROM ma_message i LEFT JOIN ma_resource r"
@@ -702,8 +704,7 @@ public class JdbcChildResultRelayStore
         return ManagedSchemaKeys.operationKey(OperationKind.valueOf(kind), scope(tenant, parent), ManagedSchemaKeys.key(run), run);
     }
 
-    public RelayRow claim(String tenantId, String parentSessionId, String childRunId, String creationKey,
-            String owner, long leaseUntil, long now) {
+    public RelayRow claim(String tenantId, String parentSessionId, String childRunId, String creationKey, String owner, long leaseUntil, long now) {
         String request = MAPPER.createObjectNode().put("version", 1).put("creationKey", creationKey).toString();
         jdbc.update("INSERT IGNORE INTO ma_operation (operation_key, session_scope_key, scope_key, operation_kind, operation_id,"
                         + " tenant_id, session_id, target_kind, target_key, request_digest, request_json, state, phase,"
@@ -759,8 +760,7 @@ public class JdbcChildResultRelayStore
      * parent body and the ledger lack the id still identifies the child
      * here — the disproving evidence for `not_started_proven`.
      */
-    public String findLineageChild(String tenantId, String parentSessionId,
-            String childRunId) {
+    public String findLineageChild(String tenantId, String parentSessionId, String childRunId) {
         List<String> rows = jdbc.query("SELECT session_id FROM"
                         + " ma_session WHERE tenant_id = ?"
                         + " AND parent_session_id = ?"
@@ -770,8 +770,7 @@ public class JdbcChildResultRelayStore
         return rows.isEmpty() ? null : rows.getFirst();
     }
 
-    public void advance(RelayRow row, String owner, String state, String childSessionId, long nextRetryAt,
-            String lastError, long leaseUntil, long now) {
+    public void advance(RelayRow row, String owner, String state, String childSessionId, long nextRetryAt, String lastError, long leaseUntil, long now) {
         if (!Set.of("creating", "binding", "watching", "delivering", "close_debt").contains(state)) {
             throw new IllegalArgumentException("Unknown child operation state " + state);
         }
@@ -792,8 +791,7 @@ public class JdbcChildResultRelayStore
      * both the walk and its delivery row, exactly as when the close is admitted at once (#14165
      * FG10d found the debt arm writing {@code done}/{@code delivered} for such a run).
      */
-    public void retainCloseDebt(RelayRow row, String owner, String classification, String childSessionId,
-            long nextRetryAt, String lastError, long leaseUntil, long now) {
+    public void retainCloseDebt(RelayRow row, String owner, String classification, String childSessionId, long nextRetryAt, String lastError, long leaseUntil, long now) {
         if (!Set.of("done", "unknown").contains(classification)) {
             throw new IllegalArgumentException("Unknown close-debt classification " + classification);
         }
@@ -853,8 +851,7 @@ public class JdbcChildResultRelayStore
      * so it amends the mirror in its own transaction; a row not written
      * yet is left to its classification, which reads the record's state.
      */
-    public void markConsumed(String tenantId, String parentSessionId,
-            String childRunId, long now) {
+    public void markConsumed(String tenantId, String parentSessionId, String childRunId, long now) {
         jdbc.update("UPDATE ma_delivery SET consumption_state = 'consumed',"
                         + " gmt_modified = ? WHERE delivery_kind = 'CHILD_RESULT'"
                         + " AND tenant_id = ? AND source_scope_key = ?"

@@ -32,7 +32,14 @@ import { RestSseTransport } from './RestSseTransport.js';
 import { DaemonCapabilityMissingError } from './types.js';
 import type {
   DaemonAgentMutationResult,
+  DaemonMemoryImportPreview,
+  DaemonMemoryImportRequest,
+  DaemonMemoryImportSection,
+  DaemonMemoryImportSource,
+  DaemonMemoryImportTask,
   DaemonMcpAppToolCall,
+  DaemonGeneratedUiState,
+  DaemonGeneratedUiStateWriteResult,
   DaemonMcpAppToolResult,
   DaemonAuthProviderId,
   DaemonAuthProviderCatalog,
@@ -79,6 +86,8 @@ import type {
   DaemonSessionTranscriptPageOptions,
   DaemonSessionTurnIndexPage,
   DaemonSessionTurnIndexPageOptions,
+  DaemonSessionTurnHooksPageOptions,
+  DaemonSessionTurnHooksPage,
   SideTaskSessionRequest,
   DaemonSubagentSessionResolution,
   DaemonSessionGroup,
@@ -207,6 +216,8 @@ import type {
   DaemonChannelPairingApprovalResult,
   DaemonChannelPairingApprovalsSnapshot,
   DaemonChannelPairingRequestsSnapshot,
+  DaemonChannelQrLoginStartResult,
+  DaemonChannelQrLoginView,
   DaemonChannelPairingRevocationRequest,
   DaemonChannelPairingRevocationResult,
   DaemonChannelEventsQuery,
@@ -1202,7 +1213,12 @@ export class DaemonClient {
         );
       }
     }
-    return new DaemonHttpError(res.status, body, `${label}: ${detail}`);
+    return new DaemonHttpError(
+      res.status,
+      body,
+      `${label}: ${detail}`,
+      res.headers.get('Retry-After') ?? undefined,
+    );
   }
 
   private async jsonRequest<T>(
@@ -3872,6 +3888,18 @@ export class DaemonClient {
     );
   }
 
+  async getSessionTurnHooksPage(
+    sessionId: string,
+    promptId: string,
+    opts: DaemonSessionTurnHooksPageOptions = {},
+  ): Promise<DaemonSessionTurnHooksPage> {
+    return this.jsonRequest<DaemonSessionTurnHooksPage>(
+      `/session/${urlEncode(sessionId)}/turns/${urlEncode(promptId)}/hooks${turnIndexPageSuffix(opts)}`,
+      'GET /session/:id/turns/:promptId/hooks',
+      { clientId: opts.clientId, mode: 'rest' },
+    );
+  }
+
   async getSessionTurnIndexPage(
     sessionId: string,
     opts: DaemonSessionTurnIndexPageOptions = {},
@@ -5725,6 +5753,8 @@ export class DaemonClient {
         }
         return (await res.json()) as DaemonSkillToggleResult;
       },
+      undefined,
+      'rest',
     );
   }
 
@@ -5756,6 +5786,8 @@ export class DaemonClient {
         }
         return (await res.json()) as DaemonSkillBatchToggleResult;
       },
+      undefined,
+      'rest',
     );
   }
 
@@ -5779,6 +5811,7 @@ export class DaemonClient {
     return this.jsonRequest('/workspace/skills/install', 'Skill', {
       method: 'POST',
       body: request,
+      mode: 'rest',
     });
   }
 
@@ -5789,7 +5822,7 @@ export class DaemonClient {
     return this.jsonRequest(
       `/workspace/skills/${urlEncode(skillName)}?scope=${scope}`,
       'Skill',
-      { method: 'DELETE' },
+      { method: 'DELETE', mode: 'rest' },
     );
   }
 
@@ -6648,6 +6681,49 @@ export class DaemonClient {
       {
         method: 'DELETE',
         body: request,
+        clientId: opts?.clientId,
+        timeoutMs: opts?.timeoutMs ?? CHANNEL_CONTROL_DEFAULT_TIMEOUT_MS,
+        mode: 'rest',
+      },
+    );
+  }
+
+  startWorkspaceChannelQrLogin(
+    name: string,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelQrLoginStartResult> {
+    return this.jsonRequest<DaemonChannelQrLoginStartResult>(
+      `/workspace/channels/${urlEncode(name)}/qr-login`,
+      'POST /workspace/channels/:name/qr-login',
+      {
+        method: 'POST',
+        clientId: opts?.clientId,
+        timeoutMs: opts?.timeoutMs ?? CHANNEL_CONTROL_DEFAULT_TIMEOUT_MS,
+        mode: 'rest',
+      },
+    );
+  }
+
+  workspaceChannelQrLogin(
+    loginId: string,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelQrLoginView> {
+    return this.jsonRequest<DaemonChannelQrLoginView>(
+      `/workspace/channel-qr-logins/${urlEncode(loginId)}`,
+      'GET /workspace/channel-qr-logins/:loginId',
+      { clientId: opts?.clientId, timeoutMs: opts?.timeoutMs, mode: 'rest' },
+    );
+  }
+
+  cancelWorkspaceChannelQrLogin(
+    loginId: string,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelQrLoginView> {
+    return this.jsonRequest<DaemonChannelQrLoginView>(
+      `/workspace/channel-qr-logins/${urlEncode(loginId)}`,
+      'DELETE /workspace/channel-qr-logins/:loginId',
+      {
+        method: 'DELETE',
         clientId: opts?.clientId,
         timeoutMs: opts?.timeoutMs ?? CHANNEL_CONTROL_DEFAULT_TIMEOUT_MS,
         mode: 'rest',
@@ -7883,6 +7959,58 @@ export class DaemonClient {
     );
   }
 
+  getGeneratedUiState(
+    sessionId: string,
+    cardId: string,
+    clientId: string,
+  ): Promise<DaemonGeneratedUiState> {
+    return this.jsonRequest(
+      `/session/${urlEncode(sessionId)}/generated-ui/state/${urlEncode(cardId)}`,
+      'GET /session/:id/generated-ui/state/:cardId',
+      { clientId, mode: 'rest' },
+    );
+  }
+
+  /** Stale and oversized writes resolve with their outcome; other failures throw. */
+  async setGeneratedUiState(
+    sessionId: string,
+    cardId: string,
+    write: { baseRevision: number; value: unknown },
+    clientId: string,
+  ): Promise<DaemonGeneratedUiStateWriteResult> {
+    const label = 'PUT /session/:id/generated-ui/state/:cardId';
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/generated-ui/state/${urlEncode(cardId)}`,
+      {
+        method: 'PUT',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify(write),
+      },
+      async (res) => {
+        // 409 also covers the card limit, which is an error without an outcome.
+        if (res.status !== 409 && res.status !== 413 && !res.ok)
+          throw await this.failOnError(res, label);
+        const body = (await res.json()) as {
+          outcome?: unknown;
+          error?: unknown;
+        };
+        if (
+          body.outcome === 'saved' ||
+          body.outcome === 'stale' ||
+          body.outcome === 'too_large'
+        )
+          return body as DaemonGeneratedUiStateWriteResult;
+        throw new DaemonHttpError(
+          res.status,
+          body,
+          `${label}: ${typeof body.error === 'string' ? body.error : `HTTP ${res.status}`}`,
+        );
+      },
+      undefined,
+      'rest',
+    );
+  }
+
   listSessionSources(
     sessionId: string,
     clientId?: string,
@@ -8392,6 +8520,42 @@ export class WorkspaceDaemonClient {
       `/channels/${urlEncode(name)}/pairing-approvals`,
       'DELETE /workspaces/:workspace/channels/:name/pairing-approvals',
       { method: 'DELETE', body: request },
+      opts,
+    );
+  }
+
+  startWorkspaceChannelQrLogin(
+    name: string,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelQrLoginStartResult> {
+    return this.channelRequest<DaemonChannelQrLoginStartResult>(
+      `/channels/${urlEncode(name)}/qr-login`,
+      'POST /workspaces/:workspace/channels/:name/qr-login',
+      { method: 'POST', body: undefined },
+      opts,
+    );
+  }
+
+  workspaceChannelQrLogin(
+    loginId: string,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelQrLoginView> {
+    return this.channelRequest<DaemonChannelQrLoginView>(
+      `/channel-qr-logins/${urlEncode(loginId)}`,
+      'GET /workspaces/:workspace/channel-qr-logins/:loginId',
+      undefined,
+      opts,
+    );
+  }
+
+  cancelWorkspaceChannelQrLogin(
+    loginId: string,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelQrLoginView> {
+    return this.channelRequest<DaemonChannelQrLoginView>(
+      `/channel-qr-logins/${urlEncode(loginId)}`,
+      'DELETE /workspaces/:workspace/channel-qr-logins/:loginId',
+      { method: 'DELETE', body: undefined },
       opts,
     );
   }
@@ -9039,6 +9203,78 @@ export class WorkspaceDaemonClient {
     return this.get('/memory', 'GET /workspaces/:workspace/memory');
   }
 
+  previewMemoryImport(
+    source: DaemonMemoryImportSource,
+    clientId?: string,
+  ): Promise<DaemonMemoryImportPreview> {
+    return this.memoryImportRequest('/preview', 'POST', source, clientId);
+  }
+
+  /** A successful submission is a durable receipt, not a completed import. */
+  submitMemoryImport(
+    request: DaemonMemoryImportRequest,
+    clientId?: string,
+  ): Promise<DaemonMemoryImportTask> {
+    return this.memoryImportRequest('/batches', 'POST', request, clientId);
+  }
+
+  listMemoryImports(): Promise<DaemonMemoryImportTask[]> {
+    return this.memoryImportRequest('/batches', 'GET');
+  }
+
+  getMemoryImport(batchId: string): Promise<DaemonMemoryImportTask> {
+    return this.memoryImportRequest(`/batches/${urlEncode(batchId)}`, 'GET');
+  }
+
+  getMemoryImportSource(
+    batchId: string,
+    sectionId: string,
+  ): Promise<DaemonMemoryImportSection> {
+    return this.memoryImportRequest(
+      `/batches/${urlEncode(batchId)}/sources/${urlEncode(sectionId)}`,
+      'GET',
+    );
+  }
+
+  cancelMemoryImport(
+    batchId: string,
+    clientId?: string,
+  ): Promise<DaemonMemoryImportTask> {
+    return this.memoryImportRequest(
+      `/batches/${urlEncode(batchId)}/cancel`,
+      'POST',
+      undefined,
+      clientId,
+    );
+  }
+
+  retryMemoryImport(
+    batchId: string,
+    clientId?: string,
+  ): Promise<DaemonMemoryImportTask> {
+    return this.memoryImportRequest(
+      `/batches/${urlEncode(batchId)}/retry`,
+      'POST',
+      undefined,
+      clientId,
+    );
+  }
+
+  private async memoryImportRequest<T>(
+    path: string,
+    method: 'GET' | 'POST',
+    body?: unknown,
+    clientId?: string,
+  ): Promise<T> {
+    await this.client.requireCapability('memory_import_v1');
+    return this.client.workspaceJsonRequest<T>(
+      this.workspaceSelector,
+      `/memory/import${path}`,
+      `${method} /workspaces/:workspace/memory/import${path}`,
+      { method, body, clientId, mode: 'rest' },
+    );
+  }
+
   remove(options?: {
     force?: boolean;
     timeoutMs?: number;
@@ -9260,6 +9496,19 @@ export class WorkspaceDaemonClient {
       `/session/${urlEncode(sessionId)}/tool-calls?${query.toString()}`,
       'GET /workspaces/:workspace/session/:id/tool-calls',
       { mode: 'rest' },
+    );
+  }
+
+  getSessionTurnHooksPage(
+    sessionId: string,
+    promptId: string,
+    opts: DaemonSessionTurnHooksPageOptions = {},
+  ): Promise<DaemonSessionTurnHooksPage> {
+    return this.client.workspaceJsonRequest<DaemonSessionTurnHooksPage>(
+      this.workspaceSelector,
+      `/session/${urlEncode(sessionId)}/turns/${urlEncode(promptId)}/hooks${turnIndexPageSuffix(opts)}`,
+      'GET /workspaces/:workspace/session/:id/turns/:promptId/hooks',
+      { clientId: opts.clientId, mode: 'rest' },
     );
   }
 
@@ -9694,11 +9943,16 @@ export class WorkspaceDaemonClient {
     enabled: boolean,
     opts?: { clientId?: string },
   ): Promise<DaemonSkillToggleResult> {
-    return this.post(
+    return this.client.workspaceJsonRequest<DaemonSkillToggleResult>(
+      this.workspaceSelector,
       `/skills/${urlEncode(skillName)}/enable`,
       'POST /workspaces/:workspace/skills/:name/enable',
-      { enabled },
-      opts?.clientId,
+      {
+        method: 'POST',
+        body: { enabled },
+        clientId: opts?.clientId,
+        mode: 'rest',
+      },
     );
   }
 
@@ -9707,11 +9961,16 @@ export class WorkspaceDaemonClient {
     enabled: boolean,
     opts?: { clientId?: string },
   ): Promise<DaemonSkillBatchToggleResult> {
-    return this.post(
+    return this.client.workspaceJsonRequest<DaemonSkillBatchToggleResult>(
+      this.workspaceSelector,
       '/skills/enable',
       'POST /workspaces/:workspace/skills/enable',
-      { skillNames, enabled },
-      opts?.clientId,
+      {
+        method: 'POST',
+        body: { skillNames, enabled },
+        clientId: opts?.clientId,
+        mode: 'rest',
+      },
     );
   }
 

@@ -22,12 +22,14 @@ import { t } from '../i18n/index.js';
  * @param config The application config.
  * @param authType The selected auth type.
  * @param subscriptionFallbackModel A saved user model eligible for startup fallback.
+ * @param allowUnlistedSubscriptionModel Whether to defer model availability to the inference gateway.
  * @returns An error message if authentication fails, otherwise null.
  */
 export async function performInitialAuth(
   config: Config,
   authType: AuthType | undefined,
   subscriptionFallbackModel?: string,
+  allowUnlistedSubscriptionModel?: boolean,
 ): Promise<string | null> {
   if (!authType) {
     return null;
@@ -39,7 +41,12 @@ export async function performInitialAuth(
     return null;
 
   try {
-    await config.refreshAuth(authType, true, subscriptionFallbackModel);
+    await config.refreshAuth(
+      authType,
+      true,
+      subscriptionFallbackModel,
+      allowUnlistedSubscriptionModel,
+    );
     // The console.log is intentionally left out here.
     // We can add a dedicated startup message later if needed.
 

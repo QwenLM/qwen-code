@@ -19,10 +19,10 @@ import com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore;
-import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
+import com.alibaba.qwen.code.runtimebroker.ManagedCheckpointHistory;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.core.JsonFactory;
 import com.fasterxml.jackson.core.StreamReadConstraints;
@@ -130,6 +130,12 @@ public class JdbcManagedExtensionRecordStore
     private final ManagedModelDiagnosticProjection modelDiagnostics;
     private final ManagedActivityDiagnosticProjection activityDiagnostics;
     private final ManagedMcpSettingsProjection mcpSettingsProjection;
+    private JdbcJournalPacks packs;
+
+    @Autowired(required = false)
+    void setJournalPacks(JdbcJournalPacks packs) { this.packs = packs; }
+
+    JdbcJournalPacks journalPacks() { return packs; }
 
     @Autowired
     public JdbcManagedExtensionRecordStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
@@ -215,7 +221,7 @@ public class JdbcManagedExtensionRecordStore
     public String diagnosticCommittedSequence(String tenantId, String sessionId) {
         return jdbc.queryForList("SELECT committed_sequence FROM ma_session_head WHERE tenant_key = ? AND harness_key = ?"
                 + " AND tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'", Long.class,
-                JdbcRuntimeBindingRepository.harnessDrainKey(tenantId), JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                RuntimeAdmissionFences.harnessDrainKey(tenantId), RuntimeAdmissionFences.harnessDrainKey(sessionId),
                 tenantId, sessionId).stream()
                 .findFirst().map(Object::toString).orElse(null);
     }
@@ -311,21 +317,36 @@ public class JdbcManagedExtensionRecordStore
 
     StoredResource readResource(String tenantId, String sessionId,
             String resourceId) {
-        StoredResource resource = jdbc.query(
-                                "SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ? AND resource_id = ? AND state = 'REFERENCED' AND storage_kind = 'MYSQL_INLINE' AND object_key IS NULL AND object_version_id IS NULL AND encryption_key_id IS NULL",
-                (result, row) -> new StoredResource(
-                        result.getString("resource_id"),
-                        result.getString("kind"), result.getInt("schema_version"),
-                        result.getLong("byte_length"), result.getString("sha256"),
-                        result.getBytes("inline_bytes")),
+        // Agent configuration and inherited extension packages are published once and stay
+        // PUBLISHED for the Session's whole life: JournalResourceWrites.publishAgentResource
+        // writes that state and no writer ever promotes those kinds to REFERENCED. The
+        // transaction reader already treats PUBLISHED as their committed terminal state
+        // (JournalStoreRows.storedResource / verifyStoredResource), so this record reader must
+        // answer the same question the same way -- it asks that reader's own predicate,
+        // JournalStoreRows.settledPublishedConfiguration, instead of restating the kind
+        // whitelist and its per-kind byte bounds in SQL where the two copies could drift.
+        // Every other kind still has to be REFERENCED.
+        // The capture guards mirror that reader too: a deletion intent is refused outright, and a
+        // non-NULL capture_state is refused unless it is VERIFIED. VERIFIED must stay readable --
+        // ToolPublicationAdmissionStore.referenceCapturedResource promotes a captured receipt to
+        // REFERENCED and MYSQL_INLINE without clearing it, while quarantine later sets QUARANTINED
+        // on that same row and both readers refuse it.
+        JournalStoreRows.ResourceRow resource = jdbc.query(
+                                "SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ? AND resource_id = ? AND (state = 'REFERENCED' OR state = 'PUBLISHED') AND storage_kind = 'MYSQL_INLINE' AND object_key IS NULL AND object_version_id IS NULL AND encryption_key_id IS NULL AND (capture_state IS NULL OR capture_state = 'VERIFIED') AND deletion_operation_key IS NULL",
+                (result, row) -> JournalStoreRows.resourceRow(result),
                 ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
-                tenantId, sessionId, resourceId).stream().findFirst()
+                tenantId, sessionId, resourceId).stream()
+                .filter(candidate -> "REFERENCED".equals(candidate.state())
+                        || JournalStoreRows.settledPublishedConfiguration(candidate))
+                .findFirst()
                 .orElseThrow(() -> rejected("Missing committed MCP resource."));
         require(resource.bytes() != null
                 && resource.bytes().length == resource.byteLength()
                 && sha256(resource.bytes()).equals(resource.digest()),
                 "The committed MCP resource is corrupt.");
-        return resource;
+        return new StoredResource(resource.resourceId(), resource.kind(),
+                resource.schemaVersion(), resource.byteLength(),
+                resource.digest(), resource.bytes());
     }
 
     /**
@@ -376,7 +397,7 @@ public class JdbcManagedExtensionRecordStore
                 recordBytes,
                 resources,
                 committedAt,
-                CsiNativeActivationProof.records(recordBytes));
+                ManagedCheckpointHistory.records(recordBytes));
     }
 
     private ApplyResult apply(

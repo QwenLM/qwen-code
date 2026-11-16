@@ -16,6 +16,7 @@ import {
   type SetStateAction,
 } from 'react';
 import { type DOMElement, measureElement } from 'ink';
+import { prepareFileWatchersForProcessExit } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
 import { App } from './App.js';
 import { AppContext } from './contexts/AppContext.js';
 import { UIStateContext, type UIState } from './contexts/UIStateContext.js';
@@ -268,6 +269,7 @@ import { useHooksDialog } from './hooks/useHooksDialog.js';
 import { useStatsDialog } from './hooks/useStatsDialog.js';
 import { useMemoryDialog } from './hooks/useMemoryDialog.js';
 import { useAttentionNotifications } from './hooks/useAttentionNotifications.js';
+import { getPendingBackgroundApprovals } from './components/background-view/BackgroundTasksPill.js';
 import { buildTerminalNotification } from './hooks/useTerminalNotification.js';
 import { useContextualTips } from './hooks/useContextualTips.js';
 import { getTipHistory } from '../services/tips/index.js';
@@ -298,8 +300,8 @@ import {
   MAIN_CONTENT_HEIGHT_RESERVATION,
   STATIC_EXTRA_HEIGHT,
 } from './utils/layoutUtils.js';
+import { CTRL_EXIT_PROMPT_DURATION_MS } from './utils/platformConstants.js';
 
-const CTRL_EXIT_PROMPT_DURATION_MS = 1000;
 // Startup gate for the goal runtime: under session-writer lease contention
 // getGoalRuntimeReady() can stay pending forever; bound it so the command
 // registry still loads and the TUI stays usable (see waitForGoalRuntime).
@@ -871,7 +873,7 @@ export const AppContainer = (props: AppContainerProps) => {
     () => props.extensionRefreshState ?? new ExtensionRefreshState(),
     [props.extensionRefreshState],
   );
-  const historyManager = useHistory();
+  const historyManager = useHistory(config.getSessionId());
   const addHistoryItem = historyManager.addItem;
   useEffect(
     () =>
@@ -1106,8 +1108,8 @@ export const AppContainer = (props: AppContainerProps) => {
   // exactly that).
   const { loadHistory: rawLoadHistory } = historyManager;
   const loadHistoryWithLatchReconciliation = useCallback(
-    (newHistory: HistoryItem[]) => {
-      rawLoadHistory(newHistory);
+    (newHistory: HistoryItem[], ...owner: [sessionId?: string]) => {
+      rawLoadHistory(newHistory, ...owner);
       contextFilesAnnouncedRef.current = newHistory.some(
         isContextFilesAnnouncement,
       );
@@ -1258,7 +1260,7 @@ export const AppContainer = (props: AppContainerProps) => {
           collapseOnResume,
           collapsePreviewCount,
         );
-        loadHistoryWithLatchReconciliation(historyItems);
+        loadHistoryWithLatchReconciliation(historyItems, config.getSessionId());
 
         // Seed past identities already claimed by the resumed transcript.
         seedPromptCount(
@@ -1270,9 +1272,16 @@ export const AppContainer = (props: AppContainerProps) => {
       }
 
       // Restore the transcript before Mod diagnostics, without making input
-      // or Mod startup wait for asynchronous session recovery.
+      // or Mod startup wait for asynchronous session recovery. Reply and
+      // thinking rows are offered only where the viewport can draw a committed
+      // row again; the terminal scrollback cannot.
       void getInteractiveModSession(config)
-        ?.initialize(['AbovePrompt'], { prompts: true, runsPrompts: true })
+        ?.initialize(
+          useTerminalBuffer
+            ? ['AbovePrompt', 'AssistantMessage', 'Thinking']
+            : ['AbovePrompt'],
+          { prompts: true, runsPrompts: true },
+        )
         .catch(() => {});
 
       if (resumedSessionData) {
@@ -2263,6 +2272,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openEffortDialog,
       openOutputStyleDialog,
       quit: (messages: HistoryItem[]) => {
+        prepareFileWatchersForProcessExit();
         try {
           cancelOngoingRequestRef.current();
         } catch (error) {
@@ -4866,6 +4876,10 @@ export const AppContainer = (props: AppContainerProps) => {
       )
     : currentLoadingPhrase;
 
+  const backgroundApprovals = useMemo(
+    () => getPendingBackgroundApprovals(bgTaskEntries),
+    [bgTaskEntries],
+  );
   useAttentionNotifications({
     isFocused,
     streamingState,
@@ -4874,6 +4888,7 @@ export const AppContainer = (props: AppContainerProps) => {
     config,
     terminal,
     pendingToolCalls,
+    backgroundApprovals,
   });
 
   // Program status (OSC 7501) for terminal tabs and agent inboxes
@@ -4991,7 +5006,7 @@ export const AppContainer = (props: AppContainerProps) => {
         setPressedOnce(true);
         timerRef.current = setTimeout(() => {
           setPressedOnce(false);
-        }, 500);
+        }, CTRL_EXIT_PROMPT_DURATION_MS);
         return;
       }
 

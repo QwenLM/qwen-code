@@ -14,6 +14,7 @@ import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.SingleConnectionDataSource;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.io.InputStream;
 import java.sql.Connection;
 import java.util.ArrayList;
 import java.util.List;
@@ -86,6 +87,16 @@ class ManagedSchemaPublicationLoadMySqlIT {
                 jdbc.update("UPDATE ma_operation SET session_scope_key = ?, publication_id = ? WHERE operation_key = ?",
                         sessionScope, publication, operationKey);
                 ToolPublicationObjectStore unusedObjects = new ToolPublicationObjectStore() {
+                    @Override
+                    public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                        guard.run();
+                        try (InputStream full = open(key)) {
+                            byte[] bytes = full.readAllBytes();
+                            return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                        } catch (java.io.IOException error) {
+                            throw new IllegalStateException(error);
+                        }
+                    }
                     @Override public void putIfAbsent(String key, byte[] bytes) { throw new AssertionError("No object write is expected"); }
                     @Override public java.io.InputStream open(String key) { throw new AssertionError("No object read is expected"); }
                     @Override public void validateConfiguration() { }

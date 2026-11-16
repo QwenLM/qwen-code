@@ -51,6 +51,7 @@ import {
   fetchCurrentBranchPullRequest,
   fetchGitHubPullRequests,
   fetchGitHubPullRequestView,
+  fetchPullRequestByReference,
   fetchRemoteWebUrl,
   normalizeRemoteToWebUrl,
   parseGhPrList,
@@ -1407,6 +1408,187 @@ describe('fetchCurrentBranchPullRequest', () => {
       status: 'error',
     });
     expect(mockExecFile).not.toHaveBeenCalled();
+  });
+});
+
+describe('fetchPullRequestByReference', () => {
+  const tmp = useTmpDir('github-prs-by-ref-');
+
+  it('resolves a bare number through gh pr view', async () => {
+    mockGhSuccess(
+      {
+        number: 77,
+        url: 'https://github.com/o/r/pull/77',
+        state: 'OPEN',
+      },
+      ['pr', 'view', '77', '--json', 'number,url,state'],
+    );
+
+    expect(await fetchPullRequestByReference(tmp.repo(), '77')).toEqual({
+      status: 'pr',
+      number: 77,
+      url: 'https://github.com/o/r/pull/77',
+      state: 'open',
+    });
+  });
+
+  it('walks up to the repository root when cwd is a subdirectory', async () => {
+    const repo = tmp.repo();
+    const subdir = path.join(repo, 'packages', 'sub');
+    fs.mkdirSync(subdir, { recursive: true });
+    mockGhSuccess({
+      number: 77,
+      url: 'https://github.com/o/r/pull/77',
+      state: 'OPEN',
+    });
+    await fetchPullRequestByReference(subdir, '77');
+    expect(mockExecFile).toHaveBeenCalledTimes(1);
+    // findGitRoot must walk the subdirectory up to the repo root, not spawn
+    // gh in the subdirectory itself.
+    const opts = mockExecFile.mock.calls[0][2] as { cwd: string };
+    expect(opts.cwd).toBe(repo);
+  });
+
+  it('passes a URL reference through unchanged', async () => {
+    const url = 'https://github.example.com/o/r/pull/5';
+    mockGhSuccess({ number: 5, url, state: 'MERGED' }, [
+      'pr',
+      'view',
+      url,
+      '--json',
+      'number,url,state',
+    ]);
+
+    expect(await fetchPullRequestByReference(tmp.repo(), url)).toEqual({
+      status: 'pr',
+      number: 5,
+      url,
+      state: 'merged',
+    });
+  });
+
+  it('classifies a gh lookup failure as failed', async () => {
+    mockExecError('could not resolve to a PullRequest');
+    expect(await fetchPullRequestByReference(tmp.repo(), '999999999')).toEqual({
+      status: 'error',
+      reason: 'failed',
+    });
+  });
+
+  it('classifies a missing gh binary as unavailable', async () => {
+    mockExecError('spawn gh ENOENT', { code: 'ENOENT' });
+    expect(await fetchPullRequestByReference(tmp.repo(), '77')).toEqual({
+      status: 'error',
+      reason: 'unavailable',
+    });
+  });
+
+  it('classifies a killed gh child as timeout', async () => {
+    mockExecError('timed out', { killed: true });
+    expect(await fetchPullRequestByReference(tmp.repo(), '77')).toEqual({
+      status: 'error',
+      reason: 'timeout',
+    });
+  });
+
+  it('classifies a missing working directory as failed without spawning gh', async () => {
+    // A missing cwd spawns the same ENOENT as a missing binary; the
+    // pre-check keeps 'unavailable' meaning "gh is not installed".
+    mockGhSuccess({
+      number: 77,
+      url: 'https://github.com/o/r/pull/77',
+      state: 'OPEN',
+    });
+    // Outside any repository so findGitRoot cannot resolve the missing cwd
+    // up to an existing parent repo.
+    const missing = path.join(os.tmpdir(), 'github-prs-by-ref-missing-cwd');
+    expect(await fetchPullRequestByReference(missing, '77')).toEqual({
+      status: 'error',
+      reason: 'failed',
+    });
+    expect(mockExecFile).not.toHaveBeenCalled();
+  });
+
+  it('refuses a deleted cwd inside a surviving repository instead of binding the ancestor repo', async () => {
+    // findGitRoot only inspects ancestors' .git, so a deleted cwd under a
+    // surviving repo resolves up to that repo. The pre-check must run on the
+    // caller-named cwd BEFORE that resolution, or a bare number binds the
+    // ancestor repo's PR (a checkout the session never referenced) and
+    // returns success. Reordering the check back after findGitRoot reds this.
+    const repo = tmp.repo();
+    const gone = path.join(repo, 'vendor', 'libfoo');
+    mockGhSuccess({
+      number: 77,
+      url: 'https://github.com/ancestor/repo/pull/77',
+      state: 'OPEN',
+    });
+    expect(await fetchPullRequestByReference(gone, '77')).toEqual({
+      status: 'error',
+      reason: 'failed',
+    });
+    expect(mockExecFile).not.toHaveBeenCalled();
+  });
+
+  it('refuses a file cwd inside a surviving repository (the deleted-cwd sibling)', async () => {
+    // Same root cause one spelling over: a cwd that exists but is a regular
+    // file under a surviving repo. findGitRoot still resolves the ancestor,
+    // so the pre-check must reject the caller-named path itself. The killing
+    // mutant is reverting the pre-check's subject to the resolved root
+    // (viewWorkingDirectoryProblem(runDir)); a mere reorder that keeps cwd as
+    // the subject survives.
+    const repo = tmp.repo();
+    const filePath = path.join(repo, 'not-a-dir');
+    fs.writeFileSync(filePath, 'x');
+    mockGhSuccess({
+      number: 77,
+      url: 'https://github.com/ancestor/repo/pull/77',
+      state: 'OPEN',
+    });
+    expect(await fetchPullRequestByReference(filePath, '77')).toEqual({
+      status: 'error',
+      reason: 'failed',
+    });
+    expect(mockExecFile).not.toHaveBeenCalled();
+  });
+
+  it('fails closed on an unrecognizable state', async () => {
+    mockGhSuccess({
+      number: 77,
+      url: 'https://github.com/o/r/pull/77',
+      state: 'SOMETHING_NEW',
+    });
+    expect(await fetchPullRequestByReference(tmp.repo(), '77')).toEqual({
+      status: 'error',
+      reason: 'failed',
+    });
+  });
+
+  it('fails closed on unparseable output', async () => {
+    mockStdout('not json');
+    expect(await fetchPullRequestByReference(tmp.repo(), '77')).toEqual({
+      status: 'error',
+      reason: 'failed',
+    });
+  });
+
+  it('still spawns gh outside a git repository (a URL names its own repo)', async () => {
+    mockGhSuccess({
+      number: 5,
+      url: 'https://github.com/o/r/pull/5',
+      state: 'CLOSED',
+    });
+    expect(
+      await fetchPullRequestByReference(
+        tmp.dir,
+        'https://github.com/o/r/pull/5',
+      ),
+    ).toEqual({
+      status: 'pr',
+      number: 5,
+      url: 'https://github.com/o/r/pull/5',
+      state: 'closed',
+    });
+    expect(mockExecFile.mock.calls[0]?.[2]).toMatchObject({ cwd: tmp.dir });
   });
 });
 

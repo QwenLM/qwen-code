@@ -1324,7 +1324,13 @@ describe('BridgeClient — mode promotion fallback', () => {
       const client = new BridgeClient(
         (() => entry) as never,
         vi.fn(),
-        { request: vi.fn(), cancelForPrompt: vi.fn(), vote: vi.fn() },
+        {
+          request: vi.fn(),
+          cancelForPrompt: vi.fn(),
+          cancelWorkflowApproval: vi.fn(),
+          policy: 'first-responder',
+          vote: vi.fn(),
+        },
         0,
         Infinity,
       );
@@ -5478,7 +5484,13 @@ describe('background execution ownership', () => {
       const client = new BridgeClient(
         (() => entry) as never,
         vi.fn(),
-        { request: vi.fn(), cancelForPrompt: vi.fn(), vote: vi.fn() },
+        {
+          request: vi.fn(),
+          cancelForPrompt: vi.fn(),
+          cancelWorkflowApproval: vi.fn(),
+          policy: 'first-responder',
+          vote: vi.fn(),
+        },
         0,
         Infinity,
       );
@@ -5552,6 +5564,22 @@ describe('background execution ownership', () => {
     );
     expect(prepared.frames[0]).toMatchObject({ promptId: 'notification-1' });
     expect(prepared.frames[0].originatorClientId).toBeUndefined();
+    const deferredTool = client.prepareSessionUpdateFrames(
+      {
+        sessionId: 'session',
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'old-tool',
+          status: 'completed',
+          _meta: { promptId: 'old-user', originatorClientId: 'old-client' },
+        },
+      },
+      entry as never,
+    );
+    expect(deferredTool.frames[0]).toMatchObject({
+      promptId: 'old-user',
+      originatorClientId: 'old-client',
+    });
     const completed = client.prepareSessionUpdateFrames(
       {
         sessionId: 'session',
@@ -5996,7 +6024,13 @@ describe('persisted last user prompt metadata', () => {
     const args: ConstructorParameters<typeof BridgeClient> = [
       (id) => (id === sessionId ? entry : undefined),
       () => undefined,
-      { request: vi.fn(), cancelForPrompt: vi.fn(), vote: vi.fn() },
+      {
+        request: vi.fn(),
+        cancelForPrompt: vi.fn(),
+        cancelWorkflowApproval: vi.fn(),
+        policy: 'first-responder',
+        vote: vi.fn(),
+      },
       0,
       Infinity,
     ];

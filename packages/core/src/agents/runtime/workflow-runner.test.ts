@@ -1073,8 +1073,12 @@ describe('WorkflowRunner', () => {
   it.each([
     [true, true, false, true],
     [true, false, false, false],
-    [true, true, true, false],
+    // An ACP session (Web Shell, IDE clients) reports non-interactive, and
+    // still resumes in the background: it delivers completion too.
+    [true, false, true, true],
+    [true, true, true, true],
     [false, true, false, false],
+    [false, false, true, false],
   ])(
     'records resumeInBackground for background=%s interactive=%s zed=%s',
     async (background, interactive, zed, expected) => {
@@ -1082,6 +1086,8 @@ describe('WorkflowRunner', () => {
       Object.assign(config, {
         isInteractive: () => interactive,
         getExperimentalZedIntegration: () => zed,
+        isWorkflowsEnabled: () => true,
+        isTrustedFolder: () => true,
       });
 
       const handle = await runSettled(config, {
@@ -1138,6 +1144,58 @@ describe('WorkflowRunner', () => {
       await start.catch(() => undefined);
     }
   });
+
+  it.each([true, false])(
+    'lets cancelBackgroundRuns stop a starting run only when it is backgrounded (background=%s)',
+    async (runInBackground) => {
+      const { config, registry } = await storedConfig();
+      let finishLoad:
+        | ((saved: {
+            name: string;
+            script: string;
+            scriptPath: string;
+          }) => void)
+        | undefined;
+      resolveSavedWorkflowScriptMock.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishLoad = resolve;
+          }),
+      );
+      const start = startRun(config, {
+        scriptPath: '/tmp/review.js',
+        runInBackground,
+        dispatch: unused,
+      });
+      const saved = {
+        name: 'review',
+        script: 'return "done"',
+        scriptPath: '/tmp/review.js',
+      };
+
+      try {
+        await vi.waitFor(() =>
+          expect(resolveSavedWorkflowScriptMock).toHaveBeenCalledOnce(),
+        );
+        expect(registry.cancelBackgroundRuns(Date.now())).toHaveLength(
+          runInBackground ? 1 : 0,
+        );
+        finishLoad?.(saved);
+        if (runInBackground) {
+          await expect(start).rejects.toBeInstanceOf(
+            WorkflowStartCancelledError,
+          );
+          expect(registry.list()).toEqual([]);
+        } else {
+          await expect(start).resolves.toBeDefined();
+        }
+      } finally {
+        finishLoad?.(saved);
+        await start.catch(() => undefined);
+        registry.abortAll();
+      }
+    },
+  );
 
   it('rejects a direct resume while history mutation owns the run', async () => {
     const { config, registry } = configWithRegistry();

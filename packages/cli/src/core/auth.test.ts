@@ -74,22 +74,25 @@ describe('performInitialAuth', () => {
       'api_key',
       true,
       undefined,
+      undefined,
     );
     expect(mockLogAuth).toHaveBeenCalledTimes(1);
   });
 
-  it('passes the eligible subscription fallback to initial auth', async () => {
+  it('passes the subscription startup model options to initial auth', async () => {
     await expect(
       performInitialAuth(
         mockConfig as never,
         AuthType.QWEN_SUBSCRIPTION,
         'qwen3.8-max',
+        true,
       ),
     ).resolves.toBeNull();
     expect(mockConfig.refreshAuth).toHaveBeenCalledExactlyOnceWith(
       AuthType.QWEN_SUBSCRIPTION,
       true,
       'qwen3.8-max',
+      true,
     );
   });
 

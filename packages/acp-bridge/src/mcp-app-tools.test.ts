@@ -119,6 +119,58 @@ describe('MCP App call ownership', () => {
       await bridge.shutdown();
     }
   });
+
+  it('resolves an App permission as cancelled when the session turn is cancelled', async () => {
+    let callId = '';
+    let sessionId = '';
+    let finish!: (value: Record<string, unknown>) => void;
+    const handle = makeChannel({
+      extMethodImpl: async (method, params) => {
+        if (method === 'qwen/session/mcp-app/call') {
+          callId = String(params['callId']);
+          sessionId = String(params['sessionId']);
+          return new Promise((resolve) => {
+            finish = resolve;
+          });
+        }
+        return {};
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    try {
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const pending = bridge.callMcpAppTool(
+        session.sessionId,
+        input,
+        new AbortController().signal,
+        { clientId: session.clientId! },
+      );
+      await vi.waitFor(() => expect(callId).not.toBe(''));
+      const permission = handle.agentConnection.requestPermission({
+        sessionId,
+        toolCall: { toolCallId: callId, title: 'App token' },
+        options: [
+          { optionId: 'allow', name: 'Allow once', kind: 'allow_once' },
+        ],
+        _meta: { mcpAppCallId: callId },
+      });
+      await vi.waitFor(() => expect(bridge.pendingPermissionCount).toBe(1));
+
+      await bridge.cancelSession(sessionId);
+
+      await expect(permission).resolves.toMatchObject({
+        outcome: { outcome: 'cancelled' },
+      });
+      expect(bridge.pendingPermissionCount).toBe(0);
+      expect(bridge.getSessionSummary(sessionId).pendingInteractionCount).toBe(
+        0,
+      );
+      finish({ content: [] });
+      await pending;
+    } finally {
+      await bridge.shutdown();
+    }
+  });
 });
 
 const options = [
