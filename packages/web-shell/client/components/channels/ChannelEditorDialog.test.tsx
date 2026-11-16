@@ -559,6 +559,135 @@ describe('ChannelEditorDialog', () => {
   it.each([
     {
       language: 'en' as const,
+      title: 'Configure Generic Webhook',
+      name: 'Instance name',
+      url: 'Webhook URL',
+      token: 'Bearer token',
+      advanced: 'Advanced settings',
+      private: 'Allow local and private endpoints',
+      hint: 'Localhost refers to the Qwen Code daemon host or container.',
+      save: 'Save',
+      hidden: ['Access control', 'Conversation management', 'Pairing'],
+    },
+    {
+      language: 'zh-CN' as const,
+      title: '配置通用 Webhook',
+      name: '实例名称',
+      url: 'Webhook 地址',
+      token: 'Bearer 令牌',
+      advanced: '高级设置',
+      private: '允许本地和私网端点',
+      hint: 'localhost 指 Qwen Code daemon 所在的主机或容器。',
+      save: '保存',
+      hidden: ['访问控制', '会话管理', '配对'],
+    },
+  ])(
+    'edits a generic endpoint with advanced network intent in $language',
+    async (copy) => {
+      const descriptor: DaemonChannelTypeDescriptor = {
+        type: 'generic-webhook',
+        displayName: 'Generic Webhook',
+        manageable: true,
+        outboundOnly: true,
+        fields: [
+          {
+            key: 'webhookUrl',
+            label: 'Endpoint (descriptor)',
+            kind: 'secret',
+            required: true,
+            envResolvable: true,
+          },
+          {
+            key: 'bearerToken',
+            label: 'Token (descriptor)',
+            kind: 'secret',
+            envResolvable: true,
+          },
+          {
+            key: 'allowPrivateNetwork',
+            label: 'Network (descriptor)',
+            kind: 'boolean',
+            default: 'false',
+          },
+        ],
+      };
+      const onSave = vi.fn().mockResolvedValue(undefined);
+      await renderDialog({ descriptor, language: copy.language, onSave });
+      expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
+        copy.title,
+      );
+      expect(inputByLabel(copy.url)?.type).toBe('password');
+      expect(inputByLabel(copy.token)?.type).toBe('password');
+      expect(fieldByLabel(copy.private)).toBeNull();
+      await expandAdvancedSettings(copy.advanced);
+      const network = fieldByLabel(copy.private)!;
+      expect(network.getAttribute('aria-checked')).toBe('false');
+      expect(document.body.textContent).toContain(copy.hint);
+      expect(document.body.textContent).not.toContain('(descriptor)');
+      for (const hidden of copy.hidden) {
+        expect(
+          document.querySelector('[role="dialog"]')?.textContent,
+        ).not.toContain(hidden);
+      }
+      await act(async () => {
+        setInputValue(inputByLabel(copy.name)!, 'receiver');
+        setInputValue(inputByLabel(copy.url)!, '$GENERIC_WEBHOOK_URL');
+        setInputValue(inputByLabel(copy.token)!, '$GENERIC_WEBHOOK_TOKEN');
+        network.click();
+      });
+      const save = Array.from(document.querySelectorAll('button')).find(
+        (button) => button.textContent?.trim() === copy.save,
+      )!;
+      await act(async () => save.click());
+      expect(onSave).toHaveBeenCalledWith('receiver', {
+        expectedRevision: 'revision-1',
+        config: { type: 'generic-webhook', allowPrivateNetwork: true },
+        secrets: {
+          webhookUrl: { operation: 'replace', value: '$GENERIC_WEBHOOK_URL' },
+          bearerToken: {
+            operation: 'replace',
+            value: '$GENERIC_WEBHOOK_TOKEN',
+          },
+        },
+      });
+
+      onSave.mockClear();
+      await renderDialog({
+        descriptor,
+        language: copy.language,
+        onSave,
+        instance: {
+          name: 'receiver',
+          config: { type: 'generic-webhook', allowPrivateNetwork: true },
+          secrets: {
+            webhookUrl: { present: true, source: 'environment' },
+            bearerToken: { present: true, source: 'environment' },
+          },
+          startsWithServe: false,
+          runtime: { state: 'stopped' },
+        },
+      });
+      expect(inputByLabel(copy.url)).toBeNull();
+      expect(inputByLabel(copy.token)).toBeNull();
+      expect(fieldByLabel(copy.private)?.getAttribute('aria-checked')).toBe(
+        'true',
+      );
+      await act(async () => fieldByLabel(copy.private)!.click());
+      await act(async () => save.click());
+      expect(onSave).toHaveBeenCalledWith('receiver', {
+        expectedRevision: 'revision-1',
+        config: { type: 'generic-webhook', allowPrivateNetwork: false },
+        secrets: {
+          webhookUrl: { operation: 'preserve' },
+          bearerToken: { operation: 'preserve' },
+        },
+      });
+    },
+  );
+
+  it.each([
+    {
+      language: 'en' as const,
       nameLabel: 'Instance name',
       urlLabel: 'Webhook URL',
       secretLabel: 'Signing secret',

@@ -46,6 +46,7 @@ const webhookType: DaemonChannelTypeDescriptor = {
 const instances = {
   'webhook-bot': { config: { type: 'dingtalk-webhook' } },
   'app-bot': { config: { type: 'dingtalk' } },
+  receiver: { config: { type: 'generic-webhook' } },
 };
 const configuredDelivery: DaemonChannelDelivery = {
   kind: 'channel',
@@ -85,10 +86,11 @@ describe('ScheduledTaskDeliveryFields configured destinations', () => {
   async function render(
     delivery: DaemonChannelDelivery | null,
     overrides: Partial<ComponentProps<typeof ScheduledTaskDeliveryFields>> = {},
+    language: 'en' | 'zh-CN' = 'en',
   ) {
     await act(async () => {
       root.render(
-        <I18nProvider language="en">
+        <I18nProvider language={language}>
           <ScheduledTaskDeliveryFields
             delivery={delivery}
             onChange={onChange}
@@ -166,6 +168,63 @@ describe('ScheduledTaskDeliveryFields configured destinations', () => {
     selectChannel('');
     expect(onChange).toHaveBeenLastCalledWith(null);
   });
+
+  it.each([
+    {
+      language: 'en' as const,
+      hint: 'Messages are sent to the endpoint configured for this Channel.',
+      endpoint: 'Endpoint',
+      group: 'Chat',
+    },
+    {
+      language: 'zh-CN' as const,
+      hint: '消息会发送到此频道配置的端点。',
+      endpoint: '端点',
+      group: '群聊',
+    },
+  ])(
+    'uses endpoint wording for generic delivery in $language',
+    async (copy) => {
+      catalog.push({
+        ...webhookType,
+        type: 'generic-webhook',
+        displayName: 'Generic Webhook',
+        defaultDeliveryTarget: {
+          ...configuredTarget,
+          label: 'Configured endpoint',
+        },
+      });
+      const delivery: DaemonChannelDelivery = {
+        kind: 'channel',
+        target: { channelName: 'receiver', type: 'chat', id: 'default' },
+      };
+      await render(null, {}, copy.language);
+      selectChannel('receiver');
+      expect(onChange).toHaveBeenLastCalledWith(delivery);
+      onChange.mockClear();
+      await render(delivery, {}, copy.language);
+      expect(container.textContent).toContain(copy.hint);
+      expect(container.textContent).not.toContain(copy.group);
+      expect(container.querySelector('#scheduled-task-delivery-id')).toBeNull();
+      expect(actions.listChannelObservedContacts).not.toHaveBeenCalled();
+      expect(onChange).not.toHaveBeenCalled();
+
+      await render(
+        { ...delivery, target: { ...delivery.target, id: 'saved-id' } },
+        {},
+        copy.language,
+      );
+      expect(container.textContent).toContain(
+        `receiver · ${copy.endpoint} · saved-id`,
+      );
+      expect(container.textContent).not.toContain(copy.group);
+      expect(
+        container.querySelector<HTMLInputElement>('#scheduled-task-delivery-id')
+          ?.value,
+      ).toBe('saved-id');
+      expect(onChange).not.toHaveBeenCalled();
+    },
+  );
 
   it.each(['toString', 'valueOf', 'hasOwnProperty', 'isPrototypeOf'])(
     'preserves the saved %s channel while discovery is pending or it is missing',

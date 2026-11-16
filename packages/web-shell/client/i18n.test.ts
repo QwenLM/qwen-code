@@ -120,6 +120,8 @@ const SCHEDULED_TASK_DELIVERY_KEYS = [
   'chat',
   'cardPrefix',
   'configuredGroupHint',
+  'configuredEndpointHint',
+  'endpoint',
   'configuredHint',
   'useConfiguredDestination',
   'differentConfiguredDestination',
@@ -140,6 +142,14 @@ const OUTBOUND_CHANNEL_KEYS = [
   'editor.field.webhook.webhookUrl.description',
   'editor.field.webhook.signingSecret',
   'editor.field.webhook.signingSecret.description',
+  'platform.name.generic-webhook',
+  'editor.field.genericWebhook.webhookUrl',
+  'editor.field.genericWebhook.webhookUrl.description',
+  'editor.field.genericWebhook.bearerToken',
+  'editor.field.genericWebhook.bearerToken.description',
+  'editor.field.genericWebhook.allowPrivateNetwork',
+  'editor.field.genericWebhook.allowPrivateNetwork.description',
+  'editor.field.genericWebhook.networkDescription',
 ].map((suffix) => `channels.${suffix}`);
 
 describe('web-shell i18n catalog', () => {
