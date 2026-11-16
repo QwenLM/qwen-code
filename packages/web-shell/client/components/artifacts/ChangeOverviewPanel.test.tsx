@@ -194,6 +194,30 @@ describe('ChangeOverviewPanel', () => {
     expect(container.textContent).toContain('…and 10 files more');
   });
 
+  it('shows the hidden-commits note when the commit window is truncated', () => {
+    mock.state = {
+      gitAvailable: true,
+      loadFailed: false,
+      loading: false,
+      commitsTruncated: true,
+      units,
+    };
+    renderPanel();
+    expect(container.textContent).toContain('…and more commits');
+  });
+
+  it('omits the hidden-commits note when the commit window is complete', () => {
+    mock.state = {
+      gitAvailable: true,
+      loadFailed: false,
+      loading: false,
+      commitsTruncated: false,
+      units,
+    };
+    renderPanel();
+    expect(container.textContent).not.toContain('…and more commits');
+  });
+
   it('shows a retryable load-failed message on a transient fetch failure', () => {
     mock.state = {
       gitAvailable: true,

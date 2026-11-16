@@ -119,6 +119,7 @@ describe('useChangeOverview', () => {
     ]);
     const pr2 = output.units.find((unit) => unit.id === 'pr:2');
     expect(pr2).toMatchObject({ kind: 'pr', state: 'ready', additions: 5 });
+    expect(output.commitsTruncated).toBe(false);
   });
 
   it('uses the session worktree cwd for git queries', async () => {
@@ -330,5 +331,86 @@ describe('useChangeOverview', () => {
       .filter((unit) => unit.kind === 'pr')
       .map((unit) => unit.id);
     expect(prIds).toEqual(['pr:1', 'pr:3']);
+  });
+
+  it('still shows the commit fallback when the files capability is absent', async () => {
+    // Bound PRs come from the session sidecar, which is not gated by the files
+    // capability; with no PR unit produced there is no head to duplicate, so
+    // the loose commits must not be suppressed.
+    mock.features = [];
+    await renderAndSettle();
+    const ws = mock.workspaceByCwd.mock.results[0]!.value;
+    expect(ws.workspaceGitHubPullRequestFiles).not.toHaveBeenCalled();
+    expect(output.units.map((unit) => unit.kind)).toContain('commit');
+  });
+
+  it('surfaces commit-window truncation from log.hasMore', async () => {
+    const entries = Array.from({ length: 20 }, (_, i) => ({
+      sha: `c${i}`,
+      shortSha: `c${i}`,
+      subject: `loose ${i}`,
+      parents: ['head2'],
+    }));
+    const ws = {
+      workspaceGitDiff: vi.fn().mockResolvedValue(gitDiff),
+      workspaceGitHubPullRequestFiles: vi
+        .fn()
+        .mockImplementation((number: number) =>
+          Promise.resolve(prFiles(number)),
+        ),
+      workspaceGitLog: vi.fn().mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/work',
+        available: true,
+        entries,
+        hasMore: true,
+      }),
+      workspaceGitCommitDetail: vi.fn().mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/work',
+        available: true,
+        files: [{ path: 'loose.ts', added: 1, removed: 0, isBinary: false }],
+        filesCount: 1,
+        linesAdded: 1,
+        linesRemoved: 0,
+      }),
+    };
+    mock.workspaceByCwd.mockReturnValue(ws);
+    await renderAndSettle();
+    expect(output.commitsTruncated).toBe(true);
+  });
+
+  it('maps the uncommitted unit as a whole, including a capped hiddenCount', async () => {
+    const ws = {
+      workspaceGitDiff: vi.fn().mockResolvedValue({
+        ...gitDiff,
+        files: [{ path: 'a.ts', added: 7, removed: 3, isBinary: false }],
+        filesCount: 60,
+        linesAdded: 70,
+        linesRemoved: 30,
+        hiddenCount: 59,
+      }),
+      workspaceGitHubPullRequestFiles: vi
+        .fn()
+        .mockRejectedValue(new Error('n/a')),
+      workspaceGitLog: vi
+        .fn()
+        .mockResolvedValue({ entries: [], hasMore: false }),
+      workspaceGitCommitDetail: vi.fn(),
+    };
+    mock.workspaceByCwd.mockReturnValue(ws);
+    await renderAndSettle();
+    const uncommitted = output.units.find(
+      (unit) => unit.kind === 'uncommitted',
+    );
+    expect(uncommitted).toEqual({
+      kind: 'uncommitted',
+      id: 'uncommitted',
+      files: [{ path: 'a.ts', additions: 7, deletions: 3, isBinary: false }],
+      additions: 70,
+      deletions: 30,
+      filesCount: 60,
+      hiddenCount: 59,
+    });
   });
 });

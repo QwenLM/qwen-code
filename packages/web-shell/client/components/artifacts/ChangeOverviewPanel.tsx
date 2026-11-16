@@ -41,8 +41,14 @@ export function ChangeOverviewPanel({
 }) {
   const { t } = useI18n();
   const openExternalLink = useExternalLinkOpener();
-  const { gitAvailable, loadFailed, loading, units, refresh } =
-    useChangeOverview(workspaceCwd, sessionId);
+  const {
+    gitAvailable,
+    loadFailed,
+    loading,
+    units,
+    commitsTruncated,
+    refresh,
+  } = useChangeOverview(workspaceCwd, sessionId);
   const [selectedId, setSelectedId] = useState<string>('uncommitted');
 
   const selected = useMemo(
@@ -102,6 +108,12 @@ export function ChangeOverviewPanel({
               </button>
             );
           })}
+        </div>
+      )}
+
+      {gitAvailable && commitsTruncated && (
+        <div className={styles.commitsNote}>
+          {t('changeOverview.hiddenCommits')}
         </div>
       )}
 

@@ -24,6 +24,8 @@ export interface ChangeOverviewState {
   loadFailed: boolean;
   loading: boolean;
   units: ChangeOverviewUnit[];
+  /** True when the commit-fallback window is capped and older commits exist. */
+  commitsTruncated: boolean;
 }
 
 /**
@@ -47,6 +49,7 @@ export function useChangeOverview(
     loadFailed: false,
     loading: true,
     units: [],
+    commitsTruncated: false,
   });
 
   useEffect(() => {
@@ -76,6 +79,7 @@ export function useChangeOverview(
               loadFailed: true,
               loading: false,
               units: [],
+              commitsTruncated: false,
             });
           }
           return;
@@ -102,6 +106,7 @@ export function useChangeOverview(
           loadFailed: true,
           loading: false,
           units: [],
+          commitsTruncated: false,
         });
         return;
       }
@@ -111,6 +116,7 @@ export function useChangeOverview(
           loadFailed: false,
           loading: false,
           units: [],
+          commitsTruncated: false,
         });
         return;
       }
@@ -135,8 +141,12 @@ export function useChangeOverview(
       // PR units: fetch each bound PR's file list. A failure (gh missing, old
       // daemon without the route) leaves the unit visible but 'unavailable'.
       let latestPrHeadSha: string | undefined;
+      let prResults: Array<{
+        headSha: string | undefined;
+        unit: ChangeOverviewUnit;
+      }> = [];
       if (prFilesSupported && boundPrs.length > 0) {
-        const prResults = await Promise.all(
+        prResults = await Promise.all(
           boundPrs.map(async (pr) => {
             const base = {
               kind: 'pr' as const,
@@ -204,12 +214,15 @@ export function useChangeOverview(
       }
 
       // Commit fallback: the loose window after the latest bound PR head (or
-      // since the base branch when there is no PR). When bound PRs exist but no
-      // head resolved, suppress the fallback entirely — an unbounded window
-      // would list history the PRs already cover, and duplicated units are
-      // worse than none.
+      // since the base branch when there is no PR). Gate on the PR units
+      // actually produced, not on whether bound PRs exist: with the files
+      // capability absent no PR unit carries a head, so the fallback must still
+      // run. When PR units were produced but no head resolved, suppress the
+      // fallback entirely — an unbounded window would list history the PRs
+      // already cover, and duplicated units are worse than none.
       const showFallback =
-        boundPrs.length === 0 || latestPrHeadSha !== undefined;
+        prResults.length === 0 || latestPrHeadSha !== undefined;
+      let commitsTruncated = false;
       if (showFallback) {
         const range = commitFallbackRange(latestPrHeadSha, baseBranch);
         const log = await ws
@@ -218,6 +231,9 @@ export function useChangeOverview(
           })
           .catch(() => undefined);
         if (!active) return;
+        // The log window is capped; surface that older commits exist rather
+        // than silently truncating the delivery scale.
+        commitsTruncated = log?.hasMore === true;
         // Drop merge commits before the detail fan-out so they neither spend
         // detail round-trips nor displace real loose commits in the window.
         const entries: DaemonGitLogEntry[] = (log?.entries ?? []).filter(
@@ -243,6 +259,7 @@ export function useChangeOverview(
         loadFailed: false,
         loading: false,
         units,
+        commitsTruncated,
       });
     })().catch(() => {
       if (active) {
@@ -251,6 +268,7 @@ export function useChangeOverview(
           loadFailed: true,
           loading: false,
           units: [],
+          commitsTruncated: false,
         });
       }
     });

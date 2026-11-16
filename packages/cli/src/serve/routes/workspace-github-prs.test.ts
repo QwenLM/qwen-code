@@ -52,13 +52,18 @@ function runtime(
   workspaceId: string,
   workspaceCwd: string,
   trusted: boolean,
+  effectiveEnv?: Record<string, string | undefined>,
 ): WorkspaceRuntime {
   return {
     workspaceId,
     workspaceCwd,
     primary: workspaceId === 'primary',
     trusted,
-    env: { mode: 'parent-process', overlayKeys: [] },
+    env: {
+      mode: 'parent-process',
+      overlayKeys: [],
+      ...(effectiveEnv !== undefined ? { effectiveEnv } : {}),
+    },
     bridge: { publishWorkspaceEvent: vi.fn() } as unknown as AcpSessionBridge,
   } as unknown as WorkspaceRuntime;
 }
@@ -603,6 +608,110 @@ describe('workspace GitHub PR routes', () => {
       undefined,
       'other/repo',
     );
+  });
+
+  it('rejects a repeated repo query key with 400 before calling gh', async () => {
+    // Express's simple parser turns a repeated key into an array; dropping it
+    // silently would answer with a same-numbered local PR instead.
+    const app = mount();
+    const response = await request(app).get(
+      '/workspaces/primary/github/prs/42/files?repo=a%2Fb&repo=c%2Fd',
+    );
+    expect(response.status).toBe(400);
+    expect(response.body.errorKind).toBe('parse_error');
+    expect(fetchGitHubPullRequestFilesMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects an empty repo query value with 400 before calling gh', async () => {
+    const app = mount();
+    const response = await request(app).get(
+      '/workspaces/primary/github/prs/42/files?repo=',
+    );
+    expect(response.status).toBe(400);
+    expect(response.body.errorKind).toBe('parse_error');
+    expect(fetchGitHubPullRequestFilesMock).not.toHaveBeenCalled();
+  });
+
+  it('maps a malformed repo slug to 400, not a gh failure', async () => {
+    // A slug the core validator refuses (three path segments) is a caller
+    // error, not a gh failure. (`../..` is NOT such a case: '.' is in the slug
+    // charset, so it is valid-format and resolves via gh like any other repo.)
+    fetchGitHubPullRequestFilesMock.mockResolvedValue({
+      kind: 'failed',
+      message: 'invalid pull request repository',
+      gitRoot: '/work/main',
+    });
+    const app = mount();
+    const response = await request(app).get(
+      '/workspaces/primary/github/prs/42/files?repo=owner%2Frepo%2Fextra',
+    );
+    expect(response.status).toBe(400);
+    expect(response.body.errorKind).toBe('parse_error');
+    expect(fetchGitHubPullRequestFilesMock).toHaveBeenCalledWith(
+      '/work/main',
+      42,
+      undefined,
+      'owner/repo/extra',
+    );
+  });
+
+  it('forwards the workspace effectiveEnv to the PR files helper', async () => {
+    // A workspace whose GH_TOKEN comes from its overlay must run gh under that
+    // identity, not the daemon host's; pin the env argument is the overlay.
+    fetchGitHubPullRequestFilesMock.mockResolvedValue({
+      kind: 'ok',
+      files: {
+        files: [],
+        hiddenCount: 0,
+        additions: 0,
+        deletions: 0,
+        headSha: '',
+        baseRefName: 'main',
+      },
+    });
+    const overlay = { GH_TOKEN: 'workspace-token' };
+    const app = express();
+    registerWorkspaceQualifiedGitHubPrsRoutes(app, {
+      workspaceRegistry: registry([
+        runtime('primary', '/work/main', true, overlay),
+      ]),
+      sendBridgeError,
+      mutate: passthroughMutate,
+    });
+
+    const response = await request(app).get(
+      '/workspaces/primary/github/prs/42/files',
+    );
+
+    expect(response.status).toBe(200);
+    expect(fetchGitHubPullRequestFilesMock).toHaveBeenCalledWith(
+      '/work/main',
+      42,
+      overlay,
+      undefined,
+    );
+  });
+
+  it('redacts the resolved fallback binary with spaces for PR files', async () => {
+    // A whitespace-bounded sweep cannot own `/Users/John Smith/...`; only the
+    // producer's exact binary value redacts it whole out of the 502 body.
+    const binary = '/Users/John Smith/.local/bin/gh';
+    fetchGitHubPullRequestFilesMock.mockResolvedValue({
+      kind: 'failed',
+      message: `spawn ${binary} EACCES`,
+      gitRoot: '/work/main',
+      binary,
+    });
+    const app = mount();
+
+    const response = await request(app).get(
+      '/workspaces/primary/github/prs/42/files',
+    );
+
+    expect(response.status).toBe(502);
+    expect(response.body.error).toBe('spawn <path> EACCES');
+    expect(response.body.error).not.toContain('Smith');
+    expect(response.body.error).not.toContain('.local');
   });
 
   it('coalesces concurrent same-PR files requests into one gh call', async () => {

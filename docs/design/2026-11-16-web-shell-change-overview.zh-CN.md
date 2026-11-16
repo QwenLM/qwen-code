@@ -68,8 +68,8 @@ Shell 在三处展示变更信息，但都无法回答「按我交付的方式�
 `fetchGitHubPullRequestFiles(cwd, number, env?, repo?)`，底层用
 `gh pr view <number> --json files,additions,deletions,headRefOid,baseRefName,changedFiles`
 （绑定 PR 属于其他仓库时另加 `--repo owner/repo`）。
-返回与现有 PR 助手一致的可辨识结果（`ok` / `cli_unavailable` / `failed`），并给出
-解析且设上限的文件列表：
+返回与现有 PR 助手一致的可辨识结果（`ok` / `not_a_repo` / `cli_unavailable` /
+`failed`），并给出解析且设上限的文件列表：
 
 - `files: { path, additions, deletions }[]`（设上限，附 `hiddenCount`），
 - `additions`、`deletions` 汇总，
@@ -130,7 +130,7 @@ PR 方法保持一致。
 
 - 非 git 工作区：任何工作区都提供该页，面板显示「不是 git 仓库」。入口刻意不
   依赖 branch chip 的 git 状态——那只在 chip（或环境面板）可见时才抓取。
-- `gh` 不可用 / PR 文件拉取失败：PR 单元仍显示（number、title、链接），并给出
+- `gh` 不可用 / PR 文件拉取失败：PR 单元仍显示（number、链接），并给出
   「文件列表不可用」状态，绝不出现空白面板。
 - git diff 瞬时拉取失败（超时 / 5xx）：独立的「无法加载」可重试状态，不误标为
   「不是 git 仓库」。

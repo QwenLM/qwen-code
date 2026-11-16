@@ -2263,6 +2263,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'changeOverview.openPr': 'Open PR',
   'changeOverview.description': 'Changed files and scale, by delivery unit.',
   'changeOverview.hiddenFiles': (v) => `…and ${plural(v?.count, 'file')} more`,
+  'changeOverview.hiddenCommits': '…and more commits',
   'codeReview.authoritativeVerdict': 'Authoritative verdict',
   'codeReview.targetEffort': (v) =>
     `Target: ${v?.target ?? ''} · Effort: ${v?.effort ?? ''}`,
@@ -7461,6 +7462,7 @@ const ZH: Messages = {
   'changeOverview.openPr': '打开 PR',
   'changeOverview.description': '按交付单元查看变更文件与规模。',
   'changeOverview.hiddenFiles': (v) => `…另有 ${v?.count ?? 0} 个文件`,
+  'changeOverview.hiddenCommits': '…还有更多提交',
   'codeReview.authoritativeVerdict': '权威裁决',
   'codeReview.targetEffort': (v) =>
     `目标：${v?.target ?? ''} · 强度：${v?.effort ?? ''}`,

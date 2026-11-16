@@ -8983,7 +8983,9 @@ export class WorkspaceDaemonClient {
     const params = new URLSearchParams();
     if (cwd != null) params.set('cwd', cwd);
     if (sessionId != null) params.set('sessionId', sessionId);
-    if (repo != null) params.set('repo', repo);
+    // An empty repo means "not supplied" (resolve locally); omit it so the
+    // route never sees a supplied-but-empty value it must reject.
+    if (repo != null && repo !== '') params.set('repo', repo);
     const query = params.toString();
     const suffix = `/github/prs/${number}/files${query ? `?${query}` : ''}`;
     return this.client.workspaceJsonRequest<DaemonGitHubPullRequestFiles>(

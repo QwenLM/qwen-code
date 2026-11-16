@@ -1162,6 +1162,71 @@ describe('fetchGitHubPullRequestFiles', () => {
     const result = await fetchGitHubPullRequestFiles(repo, 7);
     expect(result).toMatchObject({ kind: 'failed', gitRoot: repo });
   });
+
+  it('runs gh at the git root with the scrubbed workspace env', async () => {
+    const repo = tmp.repo();
+    const seen: {
+      cwd?: string;
+      env?: Record<string, string | undefined>;
+    } = {};
+    mockExec((cb, _args, opts) => {
+      const options = opts as {
+        cwd?: string;
+        env?: Record<string, string | undefined>;
+      };
+      seen.cwd = options.cwd;
+      seen.env = options.env;
+      cb(
+        null,
+        JSON.stringify({
+          files: [],
+          additions: 0,
+          deletions: 0,
+          changedFiles: 0,
+        }),
+        '',
+      );
+    });
+
+    await fetchGitHubPullRequestFiles(repo, 7, {
+      GH_TOKEN: 'workspace-token',
+      GH_REPO: 'other/repo',
+    });
+
+    expect(seen.cwd).toBe(repo);
+    expect(seen.env).toBeDefined();
+    expect(seen.env?.['GH_TOKEN']).toBe('workspace-token');
+    // ghEnv strips repository selectors: only --repo names the repository.
+    expect(seen.env).not.toHaveProperty('GH_REPO');
+  });
+
+  it('reports the fallback binary on a files spawn failure', async () => {
+    const repo = tmp.repo();
+    const home = path.join(tmp.dir, 'home');
+    const binary = fakeGh(path.join(home, '.local', 'bin'));
+    mockExecError('spawn EACCES', { code: 'EACCES' });
+
+    const result = await fetchGitHubPullRequestFiles(repo, 7, {
+      PATH: '/nonexistent',
+      HOME: home,
+    });
+
+    expect(result).toMatchObject({ kind: 'failed', binary });
+  });
+
+  it('fails on output it cannot parse without naming the binary', async () => {
+    // A fallback binary is in play, so only the parse path can omit it.
+    const repo = tmp.repo();
+    const home = path.join(tmp.dir, 'home');
+    fakeGh(path.join(home, '.local', 'bin'));
+    mockStdout('not json');
+    const result = await fetchGitHubPullRequestFiles(repo, 7, {
+      PATH: '/nonexistent',
+      HOME: home,
+    });
+    expect(result).toMatchObject({ kind: 'failed', gitRoot: repo });
+    expect(result).not.toHaveProperty('binary');
+  });
 });
 
 describe('createGitHubPullRequest', () => {

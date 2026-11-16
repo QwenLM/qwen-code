@@ -78,7 +78,8 @@ Add `fetchGitHubPullRequestFiles(cwd, number, env?, repo?)` in
 `gh pr view <number> --json files,additions,deletions,headRefOid,baseRefName,changedFiles`
 (plus `--repo owner/repo` when the bound PR lives in another repository).
 It returns a discriminated result mirroring the existing PR helpers
-(`ok` / `cli_unavailable` / `failed`), with a parsed, capped file list:
+(`ok` / `not_a_repo` / `cli_unavailable` / `failed`), with a parsed, capped file
+list:
 
 - `files: { path, additions, deletions }[]` (capped, with a `hiddenCount`),
 - `additions`, `deletions` totals,
@@ -151,7 +152,7 @@ Degradation:
   branch chip's git status, which is only fetched while that chip (or the
   environment panel) is visible.
 - `gh` unavailable / PR files fetch fails: the PR unit still appears (number,
-  title, link) with a "file list unavailable" state, never a blank panel.
+  link) with a "file list unavailable" state, never a blank panel.
 - Transient git-diff fetch failure (timeout / 5xx): a distinct retryable
   "couldn't load" state, not mislabelled as "not a git repository".
 - Bound PRs present but no head SHA resolves: the commit fallback is suppressed

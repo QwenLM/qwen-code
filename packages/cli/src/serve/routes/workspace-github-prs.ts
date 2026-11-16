@@ -252,12 +252,24 @@ export function registerWorkspaceQualifiedGitHubPrsRoutes(
       if (cwd === undefined) return;
 
       // Optional owner/repo of the bound PR when it lives in a different
-      // repository than the session checkout; the core helper validates the
-      // slug before it reaches `gh --repo`.
-      const repo =
-        typeof req.query['repo'] === 'string' && req.query['repo'] !== ''
-          ? req.query['repo']
-          : undefined;
+      // repository than the session checkout. Distinguish absent (resolve the
+      // number in the session's repo) from supplied-but-unusable: a repeated
+      // key parses to an array and an empty value is not a slug, so reject both
+      // rather than silently dropping them and answering with a same-numbered
+      // local PR. The core helper validates the slug before `gh --repo`.
+      const rawRepo = req.query['repo'];
+      let repo: string | undefined;
+      if (rawRepo !== undefined) {
+        if (typeof rawRepo !== 'string' || rawRepo === '') {
+          res.status(400).json({
+            errorKind: 'parse_error',
+            error: 'repo must be a non-empty owner/repo slug',
+            status: 400,
+          });
+          return;
+        }
+        repo = rawRepo;
+      }
 
       applyReadHeaders(res);
       try {
@@ -298,6 +310,16 @@ export function registerWorkspaceQualifiedGitHubPrsRoutes(
             });
             return;
           case 'failed': {
+            // A malformed slug is a caller error, not a gh failure: the core
+            // helper refuses it before any process starts.
+            if (result.message === 'invalid pull request repository') {
+              res.status(400).json({
+                errorKind: 'parse_error',
+                error: 'repo must be a valid owner/repo slug',
+                status: 400,
+              });
+              return;
+            }
             debugLogger.debug('GitHub PR files failed', {
               workspaceCwd: runtime.workspaceCwd,
               gitRoot: result.gitRoot,
