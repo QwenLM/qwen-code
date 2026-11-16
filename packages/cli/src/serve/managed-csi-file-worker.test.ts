@@ -34,7 +34,7 @@ import {
 import { ManagedToolExecutor } from './managed-runtime-tool-executor.js';
 import { ManagedMonitorRegistry } from './managed-monitor-registry.js';
 import * as historyProtocol from './managed-csi-file-history-protocol.js';
-import type { ManagedCsiFileWorkerHandle } from './managed-csi-file-worker.js';
+import { historyFits, type ManagedCsiFileWorkerHandle } from './managed-csi-file-worker.js';
 import {
   csiHistoryPreparationFixture,
   csiFileHistoryEnvelope,
@@ -992,6 +992,23 @@ describe('boot5 history HTTP ownership with labelled readback/composer seams', (
     const snapshot = await history('snapshot');
     expect(snapshot.status).toBe(200);
     expect(await snapshot.json()).toHaveProperty('observation', initial);
+  });
+
+  it('reserves the snapshot cwd in the projected capacity for a new prompt', () => {
+    // 124 tracked files is exactly the count that fits the 64 KiB budget
+    // WITHOUT the worst-case cwd reservation (a 4096-char path adds ~4.1 KiB,
+    // i.e. ~14 reserved file shapes). With the reservation in the projection
+    // this input must be refused BEFORE any history mutation, instead of
+    // discovering the overflow after the prepare already changed history.
+    const base = structuredClone(observation);
+    base.state.snapshots = [];
+    base.state.files = {};
+    const request: Record<string, unknown> = { identity: { sessionId: 's' } };
+    const before = structuredClone(base);
+    before.state.files = Object.fromEntries(
+      Array.from({ length: 124 }, (_, i) => [`f${i}.txt`, null]),
+    );
+    expect(historyFits(request, before, 'p-new', [])).toBe(false);
   });
 
   it('keeps preparation input errors retryable when history and storage are unchanged', async () => {

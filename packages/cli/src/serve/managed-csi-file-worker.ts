@@ -73,7 +73,7 @@ const CONFIG = `sha256:${createHash('sha256')
 
 class HistoryCapacityError extends Error {}
 
-function historyFits(
+export function historyFits(
   request: Record<string, unknown>,
   before: CsiFileHistoryObservation,
   promptId: string,
@@ -95,6 +95,10 @@ function historyFits(
       promptId,
       timestamp: '9999-12-31T23:59:59.999Z',
       trackedFileBackups: {},
+      // Reserve the worst-case wire shape for the snapshot cwd: the runtime
+      // records it on every new snapshot (see fileHistoryService.makeSnapshot)
+      // and the protocol bounds it at 4096 chars, same as absolutePath.
+      cwd: `/${'f'.repeat(4095)}`,
     });
   const snapshot = snapshots.at(-1)!;
   snapshot.trackedFileBackups = Object.assign(
