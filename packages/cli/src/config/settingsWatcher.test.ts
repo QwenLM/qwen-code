@@ -6,6 +6,7 @@
 
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
+import * as path from 'node:path';
 import { SettingsWatcher } from './settingsWatcher.js';
 import {
   SettingScope,
@@ -873,6 +874,27 @@ describe('SettingsWatcher', () => {
       // Unrelated top-level entries are ignored.
       expect(ignored!('/home/user/Documents')).toBe(true);
       expect(ignored!('/home/user/.bashrc')).toBe(true);
+
+      w.stopWatching();
+    });
+
+    it('bootstrap ignored predicate keeps the watch root however it is spelled', () => {
+      const root = path.resolve('/home/user');
+      const workspaceOnly = makeLoadedSettings({
+        workspaceSettingsActive: false,
+        user: { path: path.join(root, '.qwen', 'settings.json') },
+      });
+      const w = new SettingsWatcher(workspaceOnly);
+      mockExistsSync.mockReturnValue(false);
+
+      w.startWatching();
+
+      const { ignored } = lastWatchOptions();
+      // chokidar hands the root back in its own form: forward slashes on
+      // Windows, or with a trailing separator.
+      expect(ignored!(root.split(path.sep).join('/'))).toBe(false);
+      expect(ignored!(`${root}${path.sep}`)).toBe(false);
+      expect(ignored!(path.join(root, 'Documents'))).toBe(true);
 
       w.stopWatching();
     });
