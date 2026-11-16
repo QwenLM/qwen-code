@@ -132,6 +132,22 @@ unselectable.
 Browser acceptance with fictional models and prices, a light theme, and a Shadow
 DOM portal root.
 
+### Bottom sheet presentation
+
+On devices matching `(hover: none) and (pointer: coarse)`, and in viewports
+narrower than 640px, the composer model picker uses a modal bottom sheet instead
+of the desktop nested popovers. Reasoning controls stay in the sheet. The Model
+row opens the model list as a floating card immediately above that row;
+selecting a model collapses only the card so reasoning controls remain
+available. Done closes the sheet and restores focus to the model trigger.
+
+Host overlays remain interactive by pointer while the sheet is open, and their
+pointer interactions do not dismiss it. The modal focus scope and `aria-hidden`
+handling currently prevent keyboard and assistive-technology focus from entering
+those overlays. Consequently, the host-overlay focus and Escape behavior below
+applies to the desktop popover; sheet overlays are pointer-only until a
+follow-up adds complete keyboard and assistive-technology support.
+
 ## Host overlays
 
 Each picker owns an overlay region under the existing themed portal root.

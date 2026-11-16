@@ -83,7 +83,10 @@ import { computePrependSkillTransaction } from './composer/prependSkillInvocatio
 import { cssUrlVar } from '../utils/cssUrlVar';
 import { getShadowAwareActiveElement } from '../utils/dom';
 import { POPOVER_MIN_HEIGHT, popoverTopEdge } from '../utils/popoverRoom';
-import { isCoarsePointerDevice } from '../hooks/useIsTouchComposer';
+import {
+  isCoarsePointerDevice,
+  MODEL_SHEET_QUERY,
+} from '../hooks/useIsTouchComposer';
 import { useIsLargeScreen } from '../hooks/useIsLargeScreen';
 import {
   getComposerTagIconUrl,
@@ -1005,16 +1008,14 @@ function ToolbarPopover({
   const [submenuOpen, setSubmenuOpen] = useState(false);
   // Touch and narrow viewports have no room beside the popover for the model
   // list, so the whole control becomes a bottom sheet with inline sections.
-  const mobileSheet =
-    useIsLargeScreen(
-      '(hover: none) and (pointer: coarse), (max-width: 639px)',
-    ) && !modePopover;
+  const mobileSheet = useIsLargeScreen(MODEL_SHEET_QUERY) && !modePopover;
   const [collisionBoundary, setCollisionBoundary] =
     useState<HTMLElement | null>(null);
   const selectionRef = useRef(false);
   const handoffRef = useRef(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const submenuTriggerRef = useRef<HTMLButtonElement>(null);
+  const sheetBodyRef = useRef<HTMLDivElement>(null);
   const sheetListRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const returningFromSubmenuRef = useRef(false);
@@ -1044,12 +1045,20 @@ function ToolbarPopover({
 
   useEffect(() => {
     if (mobileSheet) {
-      // Focus the card rather than its search input so touch expansion does
-      // not open the software keyboard; Tab still starts inside the list.
-      if (open && submenuOpen) sheetListRef.current?.focus();
-      if (open && returningFromSubmenuRef.current) {
+      // Focus non-input containers so touch interaction never opens the
+      // software keyboard, while keyboard and screen-reader focus stays in
+      // the dialog and enters the expanded list.
+      if (open && submenuOpen) {
+        sheetListRef.current?.focus();
+      } else if (open && returningFromSubmenuRef.current) {
         returningFromSubmenuRef.current = false;
         submenuTriggerRef.current?.focus();
+      } else if (open) {
+        // The Drawer portal mounts after this effect on the initial opening.
+        // If no submenu state changed, focus its body once that mount commits.
+        queueMicrotask(() => {
+          if (!submenuOpen) sheetBodyRef.current?.focus();
+        });
       }
       return;
     }
@@ -1189,7 +1198,12 @@ function ToolbarPopover({
           <DrawerTitle className="sr-only">
             {submenu?.sectionLabel ?? t('model.select')}
           </DrawerTitle>
-          <div className="min-h-0 overflow-y-auto px-3" data-vaul-no-drag>
+          <div
+            ref={sheetBodyRef}
+            tabIndex={-1}
+            className="min-h-0 overflow-y-auto px-3 outline-none"
+            data-vaul-no-drag
+          >
             {header}
             {!submenu && searchableItems}
           </div>
@@ -1203,6 +1217,7 @@ function ToolbarPopover({
                 aria-expanded={submenuOpen}
                 aria-label={submenu.triggerAriaLabel}
                 onClick={() => {
+                  if (submenuOpen) returningFromSubmenuRef.current = true;
                   setSubmenuOpen((value) => !value);
                   setSearchQuery('');
                 }}

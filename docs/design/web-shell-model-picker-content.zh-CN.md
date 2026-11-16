@@ -110,6 +110,18 @@ Web Shell 尊重 `event.defaultPrevented`。禁用模型仍然不能选择。
 
 浏览器验收使用虚构模型及价格、浅色主题和 Shadow DOM portal root。
 
+### 底部 Sheet 呈现
+
+在匹配 `(hover: none) and (pointer: coarse)` 的设备上，以及宽度小于 640px 的视口中，
+输入框模型选择器使用模态底部 Sheet，替代桌面端嵌套 Popover。思考参数控件保留在 Sheet
+中。Model 行将模型列表打开为紧贴该行上方的悬浮卡片；选择模型只收起卡片，因此仍可
+继续调整思考参数。点击「完成」关闭 Sheet，并将焦点还给模型触发按钮。
+
+Sheet 打开时，宿主浮层仍可通过指针交互，且指针交互不会关闭 Sheet。目前的模态焦点
+范围和 `aria-hidden` 处理会阻止键盘及辅助技术焦点进入这些浮层。因此，下文关于宿主
+浮层焦点和 Escape 的约定适用于桌面 Popover；Sheet 中的宿主浮层暂时仅支持指针，完整
+键盘和辅助技术支持留待后续实现。
+
 ## 宿主浮层
 
 每个选择器在现有带主题的 portal root 下拥有自己的浮层区域。每次内容挂载获得该区域

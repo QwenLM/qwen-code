@@ -21,6 +21,7 @@ import type {
   SlashMenuState,
 } from '../hooks/useComposerCore';
 import type { AtMentionWorkspaceActions } from '../hooks/useAtMentionSources';
+import { MODEL_SHEET_QUERY } from '../hooks/useIsTouchComposer';
 import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
 import type {
   WebShellUnavailableModel,
@@ -5092,8 +5093,7 @@ describe('ChatEditor model picker host content', () => {
     const media = vi.mocked(window.matchMedia).mockImplementation(
       (query: string) =>
         ({
-          matches:
-            query === '(hover: none) and (pointer: coarse), (max-width: 639px)',
+          matches: query === MODEL_SHEET_QUERY,
           addEventListener: vi.fn(),
           removeEventListener: vi.fn(),
         }) as unknown as MediaQueryList,
@@ -5110,6 +5110,11 @@ describe('ChatEditor model picker host content', () => {
       open(container);
       const sheet = document.querySelector('[data-web-shell-model-sheet]')!;
       expect(sheet).not.toBeNull();
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(sheet.contains(document.activeElement)).toBe(true);
+      expect(document.activeElement).not.toBe(sheet.querySelector('input'));
       expect(
         document.querySelector('[data-web-shell-model-submenu]'),
       ).toBeNull();
@@ -5132,6 +5137,21 @@ describe('ChatEditor model picker host content', () => {
         sheet.querySelector(`[data-model-id="${modelB.id}"]`),
       ).not.toBeNull();
 
+      const search = sheet.querySelector<HTMLInputElement>(
+        'input[type="search"]',
+      )!;
+      act(() => {
+        Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype,
+          'value',
+        )!.set!.call(search, 'anthropic');
+        search.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      expect(sheet.querySelector(`[data-model-id="${modelA.id}"]`)).toBeNull();
+      expect(
+        sheet.querySelector(`[data-model-id="${modelB.id}"]`),
+      ).not.toBeNull();
+
       act(() =>
         sheet
           .querySelector<HTMLButtonElement>(`[data-model-id="${modelB.id}"]`)!
@@ -5147,7 +5167,38 @@ describe('ChatEditor model picker host content', () => {
       ).toBeNull();
 
       act(() => sectionTrigger.click());
-      expect(sheet.querySelector('[data-model-id]')).not.toBeNull();
+      expect(
+        sheet.querySelector<HTMLInputElement>('input[type="search"]')!.value,
+      ).toBe('');
+      expect(
+        sheet.querySelector(`[data-model-id="${modelA.id}"]`),
+      ).not.toBeNull();
+      expect(
+        sheet.querySelector(`[data-model-id="${modelB.id}"]`),
+      ).not.toBeNull();
+      act(() => {
+        const search = sheet.querySelector<HTMLInputElement>(
+          'input[type="search"]',
+        )!;
+        Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype,
+          'value',
+        )!.set!.call(search, 'anthropic');
+        search.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      act(() => sectionTrigger.click());
+      expect(sheet.querySelector('[data-model-id]')).toBeNull();
+      expect(document.activeElement).toBe(sectionTrigger);
+      act(() => sectionTrigger.click());
+      expect(
+        sheet.querySelector<HTMLInputElement>('input[type="search"]')!.value,
+      ).toBe('');
+      expect(
+        sheet.querySelector(`[data-model-id="${modelA.id}"]`),
+      ).not.toBeNull();
+      expect(
+        sheet.querySelector(`[data-model-id="${modelB.id}"]`),
+      ).not.toBeNull();
       act(() => sectionTrigger.click());
       expect(sheet.querySelector('[data-model-id]')).toBeNull();
 
@@ -5160,9 +5211,11 @@ describe('ChatEditor model picker host content', () => {
         await new Promise((resolve) => setTimeout(resolve, 0));
       });
       expect(document.querySelector('[data-web-shell-model-sheet]')).toBeNull();
-      expect(document.activeElement).toBe(
-        document.querySelector('[data-web-shell-model-button]'),
-      );
+      await vi.waitFor(() => {
+        expect(document.activeElement).toBe(
+          document.querySelector('[data-web-shell-model-button]'),
+        );
+      });
     } finally {
       media.mockImplementation(
         () =>
@@ -5179,8 +5232,7 @@ describe('ChatEditor model picker host content', () => {
     const media = vi.mocked(window.matchMedia).mockImplementation(
       (query: string) =>
         ({
-          matches:
-            query === '(hover: none) and (pointer: coarse), (max-width: 639px)',
+          matches: query === MODEL_SHEET_QUERY,
           addEventListener: vi.fn(),
           removeEventListener: vi.fn(),
         }) as unknown as MediaQueryList,

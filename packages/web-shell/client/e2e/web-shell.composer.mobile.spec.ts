@@ -141,6 +141,21 @@ test('simple mobile add drawer keeps advanced controls in advanced mode @smoke',
   await model.tap();
   const picker = page.locator('[data-web-shell-model-sheet]');
   await expect(picker).toBeVisible();
+  await expect
+    .poll(() =>
+      picker.evaluate((element) => element.contains(document.activeElement)),
+    )
+    .toBe(true);
+  await expect(picker.locator('input[type="search"]')).not.toBeFocused();
+  const modelLabel = picker
+    .locator('[data-model-id] [class*="dropdownItemLabel"]')
+    .first();
+  await expect(modelLabel).toHaveCSS('white-space', 'normal');
+  const labelWidth = await modelLabel.evaluate((element) => ({
+    client: element.clientWidth,
+    scroll: element.scrollWidth,
+  }));
+  expect(labelWidth.scroll).toBeLessThanOrEqual(labelWidth.client + 1);
   await picker
     .getByRole('button', { name: 'Qwen Test Alt', exact: true })
     .tap();
@@ -148,6 +163,7 @@ test('simple mobile add drawer keeps advanced controls in advanced mode @smoke',
   await expect(picker).toBeVisible();
   await picker.getByRole('button', { name: 'Done', exact: true }).tap();
   await expect(picker).toBeHidden();
+  await expect(model).toBeFocused();
   await composer.getByTestId('composer-add-menu-trigger').tap();
   await expect(drawer).toBeVisible();
   const rows = drawer.locator('[data-vaul-no-drag] button');
