@@ -3,35 +3,46 @@
 [English](2026-11-16-unified-chat-surface.md) |
 [简体中文](2026-11-16-unified-chat-surface.zh-CN.md)
 
-Status: proposal. Date: 2026-11-16. Nothing in this document is implemented
-yet; the current state below describes the code as of the proposal date.
+Status: proposal. Date: 2026-11-16. Revised 2026-11-16 after review: the
+ChatPane chat column is now in scope, the contract separates admission from
+outcome establishment, and several current-state claims were corrected.
+Nothing in this document is implemented yet; the current state below
+describes the code as of the proposal date.
 
 ## Problem
 
-Web Shell renders two kinds of sessions — normal daemon sessions and Java
-Managed Agent sessions — through two separate chat orchestrations inside
-`packages/web-shell`. The transcript rendering, editor, and UI primitives are
-already shared, but everything above them (page layout, composer wiring,
-approval flow, status display, session operations) is implemented twice: once
-inline in `App.tsx` for daemon sessions, and once in `ManagedSessionsPage.tsx`
-plus the `components/managed/**` hooks for managed sessions.
+Web Shell renders chat through three separate orchestrations inside
+`packages/web-shell`: the main daemon chat column inline in `App.tsx`, a
+second daemon chat column in `components/ChatPane.tsx` (the split-view and
+side-task panes), and the managed chat column in `ManagedSessionsPage.tsx`
+plus the `components/managed/**` hooks. The transcript rendering, editor,
+and UI primitives are already shared, but everything above them (page
+layout, composer wiring, approval flow, status display, session operations)
+is implemented once per column.
 
 The consequences are visible today:
 
-- Feature drift. The daemon chat surface imports `ComposerStatusStack`,
-  `ComposerUsageStats`, `ConversationSearch`, and `GoalStatusStrip`;
-  `ManagedSessionsPage.tsx` imports none of them and shows its own
-  `ManagedSessionProgress` instead. A managed session and a daemon session in
-  the same shell look and behave differently.
-- Double implementation cost. Draft persistence, approval answering, model
-  selection, approval-mode selection, context compression, rename, export,
-  cancel, and lifecycle each have a daemon implementation and a parallel
-  `use-managed-*` implementation. Every new chat feature must be built twice,
-  and the second copy is routinely forgotten.
-- No reuse path. The daemon chat surface is not a component; it is inline in
-  a ~27k-line `App.tsx`. Other products that embed Web Shell (for example the
-  VS Code companion, which ESLint already forces to render through
-  `@qwen-code/web-shell`) cannot reuse it either.
+- Feature drift. The daemon side renders a composer status stack (inline
+  JSX in both `App.tsx` and `ChatPane.tsx`, styled by
+  `ComposerStatusStack.module.css`), usage statistics
+  (`ComposerUsageStats`), conversation search (`ConversationSearch`), and a
+  goal strip (`GoalStatusStrip`); the managed chat surface has no equivalent
+  of any of them and shows its own `ManagedSessionProgress` instead. Even
+  the two daemon columns duplicate the status-stack JSX. A managed session
+  and a daemon session in the same shell look and behave differently.
+- Multiple implementation cost. Draft persistence, approval answering,
+  model selection, approval-mode selection, context compression, rename,
+  export, cancel, and lifecycle each have a daemon implementation and a
+  parallel `use-managed-*` implementation, and the split-view column keeps
+  its own copy of submit, cancel, approval, and status wiring. Every new
+  chat feature must be built once per column, and a copy is routinely
+  forgotten.
+- No reuse path. The main daemon chat column is not a component; it is
+  inline in a ~27k-line `App.tsx`. `ChatPane.tsx` is a component, but it is
+  daemon-shaped and carries its own copy of the orchestration. Products
+  that embed the whole shell — the VS Code companion already renders
+  `WebShellWithProviders` — still cannot reuse a chat column alone across
+  backends.
 
 ## Current state
 
@@ -40,13 +51,13 @@ approximate production-code counts at the proposal date, excluding tests.
 
 ### Already shared (one implementation)
 
-| Layer                                      | Files                                                                                                                                                                                           | Consumers       |
-| ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------- |
-| Transcript rendering                       | `components/MessageList.tsx` (~6.4k lines), `components/messages/**` (~28k lines)                                                                                                               | both paths      |
-| Message model                              | `adapters/types.ts` (`Message`, `ACPToolCall`)                                                                                                                                                  | both projectors |
-| Composer                                   | `components/ChatEditor.tsx`, `hooks/useComposerCore.ts`                                                                                                                                         | both paths      |
-| UI primitives, theme, i18n, portal scoping | `components/ui/**`, `themeContext.ts`, `i18n.tsx`, `portalRoot.ts`                                                                                                                              | both paths      |
-| Shell chrome and workspace navigation      | `App.tsx` outer shell; unified navigation per [managed-daemon-web-shell](2026-10-21-managed-daemon-web-shell.md) and [unified-workspace-navigation](2026-10-21-unified-workspace-navigation.md) | both paths      |
+| Layer                                      | Files                                                                                                                                                                                           | Consumers                                               |
+| ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| Transcript rendering                       | `components/MessageList.tsx` (~6.4k lines), `components/messages/**` (~31.6k lines); `ChatPane` reaches `MessageList` through `components/TranscriptViewport.tsx`                               | all three columns                                       |
+| Message model                              | `adapters/types.ts` (`Message`, `ACPToolCall`)                                                                                                                                                  | both projectors                                         |
+| Composer                                   | `components/ChatEditor.tsx`, `hooks/useComposerCore.ts`                                                                                                                                         | all three columns                                       |
+| UI primitives, theme, i18n, portal scoping | `components/ui/**`, `themeContext.ts`, `i18n.tsx`, `portalRoot.ts`                                                                                                                              | all three columns (ChatPane partly via shared children) |
+| Shell chrome and workspace navigation      | `App.tsx` outer shell; unified navigation per [managed-daemon-web-shell](2026-10-21-managed-daemon-web-shell.md) and [unified-workspace-navigation](2026-10-21-unified-workspace-navigation.md) | both session kinds                                      |
 
 Both paths already project their backend events into the same `Message`
 model: the daemon path through `adapters/transcriptToMessages.ts` and
@@ -56,22 +67,33 @@ through `createManagedMessageProjector` in
 incremental by design
 ([managed-incremental-message-projection](managed-incremental-message-projection.md)).
 
-### Forked (two implementations)
+### Forked (one implementation per column)
 
-| Concern             | Daemon path                                                                      | Managed path                                                                                                                                       |
-| ------------------- | -------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Chat orchestration  | inline in `App.tsx` (~27k lines total)                                           | `components/managed/ManagedSessionsPage.tsx` (~3.4k lines)                                                                                         |
-| Session state       | `daemon/session/DaemonSessionProvider.tsx` (~7.1k lines) and `daemon/session/**` | `components/managed/use-managed-session.ts` and the `use-managed-*` hooks                                                                          |
-| Backend contract    | `DaemonSessionClient` from `@qwen-code/sdk/daemon`                               | `ManagedAgentProvider` (`components/managed/managed-agent-provider.ts`, ~910 lines of interface) over `/api/agent/web-shell/v1/**`                 |
-| Status display      | `ComposerStatusStack`, `ComposerUsageStats`, `GoalStatusStrip`                   | `ManagedSessionProgress`                                                                                                                           |
-| Conversation search | `ConversationSearch`                                                             | absent                                                                                                                                             |
-| Panels              | daemon terminal, artifacts, local files, git mode, voice, Live                   | `ManagedTerminalPanel`, `ManagedToolResultPanel`, `ManagedTaskPanel`, `ManagedDiagnosticsPanel`, `ManagedRecoveryPanel`, `ManagedChildSessionView` |
+| Concern                       | Daemon path                                                                                                                                                 | Managed path                                                                                                                                       |
+| ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Main chat orchestration       | inline in `App.tsx` (~27k lines total)                                                                                                                      | `components/managed/ManagedSessionsPage.tsx` (~3.4k lines)                                                                                         |
+| Split-view / side-task column | `components/ChatPane.tsx` (~2.2k lines), rendered by `components/SplitView.tsx` and `components/artifacts/SideTaskPanel.tsx`; `App.tsx` renders `SplitView` | absent — managed sessions do not open in split view or side tasks                                                                                  |
+| Session state                 | `daemon/session/DaemonSessionProvider.tsx` (~7.1k lines) and `daemon/session/**`                                                                            | `components/managed/use-managed-session.ts` and the `use-managed-*` hooks                                                                          |
+| Backend contract              | `DaemonSessionClient` from `@qwen-code/sdk/daemon`                                                                                                          | `ManagedAgentProvider` (`components/managed/managed-agent-provider.ts`, ~910 lines of interface) over `/api/agent/web-shell/v1/**`                 |
+| Status display                | inline composer-status JSX in `App.tsx` and `ChatPane.tsx` (shared `ComposerStatusStack.module.css`), `ComposerUsageStats`, `GoalStatusStrip`               | `ManagedSessionProgress`                                                                                                                           |
+| Conversation search           | `ConversationSearch` (main column)                                                                                                                          | absent                                                                                                                                             |
+| Panels                        | daemon terminal, artifacts, local files, git mode, voice, Live                                                                                              | `ManagedTerminalPanel`, `ManagedToolResultPanel`, `ManagedTaskPanel`, `ManagedDiagnosticsPanel`, `ManagedRecoveryPanel`, `ManagedChildSessionView` |
+
+`ChatPane.tsx` independently wires `TranscriptViewport`, `ToolApproval`,
+`AskUserQuestion`, `GoalStatusStrip`, and `ChatEditor`, owns submit and
+cancel, and renders its own inline composer-status block. It is the closest
+existing thing to the proposed `ChatSurface`, but its props are daemon-shaped
+(daemon session summary, workspace cwd) and it duplicates the main column's
+orchestration; this design makes it an explicit migration target instead of
+leaving a third copy behind. There is no `ComposerStatusStack` component
+today — only the CSS module; the status stack is inline JSX in both daemon
+columns, and slice 2 creates the component.
 
 The managed-only entry `ManagedAgentWebShell.tsx` (booted by
 `ManagedStandaloneApp.tsx` through `/managed/boot`) mounts
 `ManagedSessionsPage` without any daemon context. The full shell mounts the
 same page for managed sessions while daemon sessions render through the
-inline `App.tsx` surface.
+inline `App.tsx` surface and the `ChatPane` columns.
 
 ### Standing decisions this design must respect
 
@@ -88,14 +110,14 @@ inline `App.tsx` surface.
 
 ## Goals
 
-1. One chat surface component renders both daemon and managed sessions, so
-   layout, composer behavior, approval flow, and status display are identical
-   by construction.
+1. One chat surface component renders every chat column — daemon main,
+   split view, side task, and managed — so layout, composer behavior,
+   approval flow, and status display are identical by construction.
 2. A new chat feature is implemented once, against a backend-neutral
-   contract, and reaches both session kinds wherever the backend supports it.
+   contract, and reaches every column wherever the backend supports it.
 3. The duplicated orchestration listed above is deleted, not wrapped.
 4. The managed-only entry keeps working without a daemon and without
-   importing daemon code.
+   importing daemon code into the shared kernel.
 
 ## Non-goals
 
@@ -107,39 +129,53 @@ inline `App.tsx` surface.
 - Daemon-only surfaces (voice, Live sessions, desktop relay, channels, git
   mode, local files) are not ported to managed sessions; they become
   capability-gated slots of the shared surface.
-- Workspace navigation, creation dialogs, and the shell chrome are already
-  unified and are not reworked here.
+- Workspace navigation, creation dialogs, the shell chrome, and the
+  split-view pane chrome (title, maximize/close, header actions) are not
+  reworked here; they stay with their hosts.
 
 ## Proposed solution
 
 Introduce a backend-neutral chat kernel in a new directory
 `packages/web-shell/client/chat-core/` (final name settled in slice 1
-review), consisting of a view-model contract, one surface component, and two
-adapters:
+review). `chat-core` holds only the contract types and the surface
+component; the two adapters live outside it, next to their providers
+(daemon adapter under `daemon/`, managed adapter under
+`components/managed/`), which is what makes the kernel's import ban
+satisfiable:
 
 ```text
-App.tsx (shell, navigation, settings)          ManagedAgentWebShell (managed-only)
-        │                                              │
-        ▼                                              ▼
-  ChatSurface  ◄──────────── one component ────────────►
+App.tsx (main column, shell)     SplitView / SideTaskPanel     ManagedAgentWebShell
+        │                              │                              │
+        ▼                              ▼                              ▼
+  ChatSurface  ◄──────────────── one component ──────────────────────►
         ▲
-        │ SessionChatController (view model)
+        │ SessionChatController (view model, types in chat-core)
    ┌────┴─────────────────────┐
    │                          │
 daemon adapter            managed adapter
-(DaemonSessionProvider    (use-managed-session +
- state, ACP updates)       use-managed-* hooks,
-                           Java operations)
+(under daemon/, wraps     (under components/managed/,
+ DaemonSessionProvider)    wraps use-managed-* hooks)
 ```
 
 ### SessionChatController contract
 
 The controller is a view model, not a protocol client. It exposes observable
 state and intent-level operations; idempotency keys, expected revisions,
-receipts, and operation polling stay inside the managed adapter. Illustrative
-shape (final field names settled in slice 1):
+receipts, and operation polling stay inside the managed adapter. Every
+intent reports two separate results: admission (was the request accepted,
+and for which session/turn/attempt) and outcome (what authoritative witness
+shows the intended effect is established). Illustrative shape (final field
+names settled in slice 1):
 
 ```ts
+type Admission = 'accepted' | 'rejected' | 'unknown';
+type Outcome = 'established' | 'unsettled' | 'failed';
+
+interface IntentResult {
+  readonly admission: Admission;
+  readonly outcome: Outcome;
+}
+
 interface SessionChatController {
   readonly kind: 'daemon' | 'managed';
   readonly sessionId: string;
@@ -150,17 +186,17 @@ interface SessionChatController {
   readonly transcriptState: 'loading' | 'ready' | 'error';
   loadOlder?(): Promise<void>;
 
-  // Turn lifecycle.
+  // Turn lifecycle. `cancelling` persists until settlement evidence arrives.
   readonly phase: ChatPhase; // idle | submitting | running | cancelling | failed
-  submit(input: ComposerSubmit): Promise<SubmitOutcome>;
-  cancel(): Promise<CancelOutcome>;
+  submit(input: ComposerSubmit): Promise<IntentResult>;
+  cancel(): Promise<IntentResult>;
 
   // Approvals and questions, normalized to the shared ToolApproval /
   // ManagedQuestionForm inputs.
   readonly pendingApprovals: readonly PendingApproval[];
   readonly pendingQuestions: readonly PendingQuestion[];
-  respondApproval(id: string, optionId: string): Promise<void>;
-  respondQuestion(id: string, answers: QuestionAnswer[]): Promise<void>;
+  respondApproval(id: string, optionId: string): Promise<IntentResult>;
+  respondQuestion(id: string, answers: QuestionAnswer[]): Promise<IntentResult>;
 
   // Capability-gated sub-controllers; absent when the backend lacks support.
   readonly modelSelection?: ModelSelectionController;
@@ -174,39 +210,65 @@ interface SessionChatController {
 }
 ```
 
+Long-running managed operations (compression, lifecycle, cancel, MCP
+commands) surface as a generic operation state
+(`pending | running | established | unsettled | failed`) so the surface
+renders one progress vocabulary for both backends. The contract carries one
+invariant: **admission is not establishment.**
+
+- A resolved promise or a transport-level acceptance never by itself
+  produces `established`; the adapter must hold authoritative evidence
+  (turn end, settlement receipt, a decision applied to the still-current
+  request/revision).
+- `unsettled` is a first-class state: accepted but no witness yet, including
+  after a timeout or a refresh. It renders as "sent / awaiting outcome", is
+  not `failed`, and offers no retry that bypasses the adapter.
+- A superseded approval renders as superseded, not applied; an approval
+  leaves pending only when the backend confirms the decision applies to the
+  still-current request.
+- Capability flags gate whether a control exists; the status shown after it
+  follows outcome evidence, never the flag.
+
 `ChatCapabilities` mirrors the existing capability style of
 `ManagedAgentSessionSummary.capabilities` and daemon capabilities: the
-surface gates every optional region on a flag, never on `kind`. Async managed
-operations (compression, lifecycle, cancel, MCP commands) surface as a
-generic operation state (`pending | running | completed | failed`) so the
-surface renders one progress vocabulary for both backends.
+surface gates every optional region on a flag, never on `kind`. Each adapter
+owns the mapping from its backend's capability shape (the daemon feature
+list; the managed optional booleans) to `ChatCapabilities`, and slice 1 pins
+each mapping with a table-driven test so an omitted entry cannot silently
+hide a supported region.
 
 ### ChatSurface component
 
 `ChatSurface` owns the chat column only: header (`ChatContextHeader` plus a
 header-actions slot), `MessageList` wiring, approval and question rendering,
-the composer (`ChatEditor` plus `ComposerStatusStack` and usage stats driven
-by `statusFacts`), and a panel slot region. It takes the controller and slot
-renderers as props and imports nothing from `daemon/**`,
-`components/managed/**`, or `@qwen-code/sdk/daemon`. Backend-specific panels
-(daemon artifacts, managed diagnostics/tasks/recovery/terminal) are passed in
-as slots by the owning page.
+the composer (`ChatEditor` plus a composer status stack component that
+slice 2 extracts from the inline JSX currently duplicated in `App.tsx` and
+`ChatPane.tsx`, plus usage stats driven by `statusFacts`), and a panel slot
+region. It takes the controller and slot renderers as props and imports
+nothing from `daemon/**`, `components/managed/**`, or
+`@qwen-code/sdk/daemon`. Backend-specific panels (daemon artifacts, managed
+diagnostics/tasks/recovery/terminal) are passed in as slots by the owning
+page.
 
 ### Adapters
 
 - `createDaemonChatController` wraps the existing `DaemonSessionProvider`
-  state and actions. It maps ACP-driven state onto the contract; immediate
-  daemon results map to completed operation states.
+  state and actions. It maps ACP-driven state onto the contract and marks
+  an outcome `established` only when daemon evidence settles it (turn end,
+  applied permission response); a resolved call alone is admission.
 - `createManagedChatController` wraps `use-managed-session` and the existing
   `use-managed-*` hooks. The hooks keep their current responsibilities
   (receipts, revisions, recovery barriers, pending-command storage); the
-  adapter only normalizes their outputs. The incremental projector stays the
-  single source of `messages`; the controller never re-projects.
+  adapter only normalizes their outputs into admission and outcome. The
+  incremental projector stays the single source of `messages`; the
+  controller never re-projects.
 
 ### Page wiring after migration
 
-- `App.tsx` renders `ChatSurface` with the daemon adapter for daemon
-  sessions, keeping navigation, settings, and daemon-only panels.
+- `App.tsx` renders `ChatSurface` with the daemon adapter for the main
+  column, keeping navigation, settings, and daemon-only panels.
+- `SplitView` and `SideTaskPanel` render `ChatSurface` through the converged
+  `ChatPane` chrome; pane chrome stays with the hosts.
 - `ManagedSessionsPage.tsx` shrinks to session navigation plus the managed
   adapter and managed-only panel slots; its chat column becomes
   `ChatSurface`. The managed-only entry keeps its current layout and boot.
@@ -224,55 +286,85 @@ as slots by the owning page.
    asks which backend it serves. Missing backend support hides a region;
    it never triggers a fallback to the other provider, matching the standing
    no-fallback rule.
-3. **Daemon-first extraction.** The daemon surface moves into `ChatSurface`
-   first, with a visual before/after gate, because it is the larger and
-   riskier extraction. Managed switches second, onto an already-proven
-   component, and its duplicated orchestration is deleted in the same slice
-   that replaces it.
+3. **Daemon-first extraction.** The main daemon column moves into
+   `ChatSurface` first, with a visual before/after gate, because it is the
+   larger and riskier extraction. Managed switches second, onto an
+   already-proven component; `ChatPane` converges third, so split view and
+   side task do not keep a third orchestration. Each switch deletes the
+   duplicated orchestration in the same slice that replaces it.
 4. **Operations stay encapsulated.** Exposing raw Java operations
    (idempotency keys, revisions, receipts) through the contract would leak
    managed semantics into the shared surface and force the daemon adapter to
-   fake them. The generic operation state is the only async vocabulary the
-   surface sees.
+   fake them. The generic admission/outcome vocabulary is the only async
+   language the surface sees.
 5. **Parity follows backend facts.** Managed gains the status stack and
    usage display where its events and diagnostics already provide the facts
    (for example `modelContext` token observations). Regions without backend
    facts stay hidden rather than filled with invented data.
+6. **Admission is not establishment.** A backend-neutral UI state is not
+   automatically a backend-neutral proof that an action took effect: a
+   generic `completed` label can be truthful about the local API call and
+   false about the user's operational state. The two-stage result keeps the
+   truth conditions of user-facing states in the shared contract without
+   leaking protocol fields, and it is a slice-1 contract rule with negative
+   tests, not an adapter implementation detail. Decision 4 is unchanged:
+   receipts, revisions, and recovery barriers stay inside the managed
+   adapter.
 
 ## Migration slices
 
-Each slice is an independently shippable PR with its own tests. Per
-repository convention the design document lands together with the first
-implementation slice.
+This document is a standalone proposal; implementation slices land
+separately. Each slice is an independently shippable PR with its own tests.
 
 1. **Contract and characterization pins.** Add `chat-core` with the contract
-   types and capability model; add DOM-level characterization tests pinning
-   the current behavior of both chat surfaces (composer submit, approval
-   answering, status display, draft restore). No behavior change.
-2. **Extract ChatSurface, daemon switches.** Move the chat column out of
-   `App.tsx` into `ChatSurface` plus the daemon adapter. The visual
-   before/after preview must show no unexplained daemon-side difference.
-   Managed is untouched.
+   types, the capability model, and the per-adapter capability mapping
+   tests; add DOM-level characterization tests pinning the current behavior
+   of all three chat columns (composer submit, approval answering, status
+   display, draft restore). Add one negative test per adapter proving
+   transport success alone never produces `established`: a delayed turn
+   outcome, an unsettled cancel, and a superseded approval. No behavior
+   change.
+2. **Extract ChatSurface, daemon main column switches.** Move the main chat
+   column out of `App.tsx` into `ChatSurface` plus the daemon adapter,
+   creating the composer status stack component from the inline JSX. The
+   visual before/after preview must show no unexplained daemon-side
+   difference. Managed and `ChatPane` are untouched.
 3. **Managed switches, duplicated orchestration deleted.** Add the managed
    adapter; the managed chat column renders `ChatSurface`; delete the
    replaced transcript/composer/approval/status orchestration from
    `ManagedSessionsPage.tsx`. Managed-only panels become slots.
-4. **Capability-gated parity.** Unify status stack, usage stats, and context
+4. **ChatPane converges.** Split view and side task render `ChatSurface`
+   through the daemon adapter; pane chrome (title, maximize/close, header
+   actions) stays as slots; `ChatPane`'s duplicated submit, cancel,
+   approval, and status orchestration is deleted.
+5. **Capability-gated parity.** Unify status stack, usage stats, and context
    usage/compression display on both sides wherever backend facts exist.
    Conversation search and goal display remain gated pending the open
    questions below.
-5. **Boundary enforcement and cleanup.** Add a build/import guard proving
+6. **Boundary enforcement and cleanup.** First remove the named pre-existing
+   daemon value-import exceptions from the managed source graph (a
+   provider-agnostic workspace accessor for the shared composer; the
+   extensions page import), then add a build/import guard proving
    `chat-core` and the managed-only bundle never import daemon code (in the
    style of the existing `build-artifact.test.ts` checks); remove dead
-   managed orchestration and stale imports.
+   orchestration and stale imports.
 
-During slices 2–4, new chat features land only in `chat-core` once the
+During slices 2–5, new chat features land only in `chat-core` once the
 affected region has moved, so the migration does not race feature work.
 
 ## Constraints
 
-- The managed-only entry (`ManagedAgentWebShell`) must not gain any daemon
-  import; `chat-core` imports neither `daemon/**` nor `@qwen-code/sdk/daemon`.
+- `chat-core`'s own modules import neither `daemon/**` nor
+  `@qwen-code/sdk/daemon`; the adapters live outside the kernel. The
+  managed-only entry keeps working without a daemon runtime. Today its
+  source graph still reaches daemon value imports transitively:
+  `ChatEditor.tsx` value-imports `useOptionalWorkspace` from
+  `daemon-react-sdk` (which re-exports `daemon/index.ts`, which
+  value-exports from `@qwen-code/sdk/daemon`), and
+  `ManagedExtensionsManagerPage.tsx` imports `daemon-react-sdk` directly.
+  These named exceptions are removed in slice 6 before the guard lands;
+  until then the no-daemon-import constraint applies to `chat-core`'s own
+  modules, not to the whole managed source graph.
 - No changes to daemon routes, Java routes, or the OpenAPI contract.
 - Provider storage keys, session ID namespaces, and tenant/actor headers are
   untouched; managed errors never fall back to the daemon backend.
@@ -286,46 +378,57 @@ affected region has moved, so the migration does not race feature work.
 
 ## Risks and mitigations
 
-| Risk                                                            | Mitigation                                                                                          |
-| --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| Extracting from a ~27k-line `App.tsx` regresses daemon behavior | Characterization pins in slice 1; visual before/after gate in slice 2; small slices, daemon-first   |
-| Contract drifts toward one backend's shape                      | Every slice reviews both adapters against the contract; capability flags instead of `kind` branches |
-| Managed async semantics leak into the surface                   | Generic operation state; raw operations never cross the contract                                    |
-| Performance regression from re-projection or lost memoization   | Controller consumes the incremental projector; memo boundaries pinned by tests                      |
-| Feature work races the migration                                | Freeze rule: moved regions accept new features only through `chat-core`                             |
-| Managed-only bundle accidentally gains daemon code              | Import/build guard in slice 5, checked in CI                                                        |
+| Risk                                                                                    | Mitigation                                                                                                              |
+| --------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| Extracting from a ~27k-line `App.tsx` and converging `ChatPane` regress daemon behavior | Characterization pins for all three columns in slice 1; visual before/after gate in slice 2; small slices, daemon-first |
+| Contract drifts toward one backend's shape                                              | Every slice reviews both adapters against the contract; capability flags instead of `kind` branches                     |
+| Managed async semantics leak into the surface                                           | Generic admission/outcome vocabulary; raw operations never cross the contract                                           |
+| Transport success displayed as an established outcome                                   | Slice-1 negative tests per adapter; `unsettled` is first-class and survives refresh                                     |
+| Performance regression from re-projection or lost memoization                           | Controller consumes the incremental projector; memo boundaries pinned by tests                                          |
+| Feature work races the migration                                                        | Freeze rule: moved regions accept new features only through `chat-core`                                                 |
 
 ## Validation plan
 
 - Unit tests collocated with each moved module; the existing daemon and
   managed suites (`App.test.tsx`, `ManagedSessionsPage.test.tsx`, the
-  `use-managed-*` tests, `ManagedAgentWebShell.test.tsx`) stay green.
+  `use-managed-*` tests, `ManagedAgentWebShell.test.tsx`) stay green, and
+  the slice-1 negative tests prove transport success alone never produces
+  `established` in either adapter.
 - Browser-level verification of both session kinds through the local dev
   server against a real daemon and the managed boot path: submit, approval,
-  cancel, draft restore, refresh/deep-link restore, and panel slots, with
-  assertions on the DOM rather than screenshots alone.
+  cancel, draft restore, refresh/deep-link restore, and panel slots, in the
+  main column and in split view / side task, with assertions on the DOM
+  rather than screenshots alone.
 - The existing managed Playwright specs (`managed-usability`,
   `managed-context-compression`, `managed-recovery`, `managed-draft-retry`,
   and siblings) run against the migrated surface.
 - The web-shell visual preview CI provides before/after evidence for every
-  slice; daemon-side diffs must be empty or explained.
+  slice; daemon-side diffs, including split view and side task, must be
+  empty or explained.
 - Gates: package `typecheck`, `tsc -p tsconfig.lib.json` (the stricter CI
   build gate), package `build`, root `build` and `bundle`, targeted lint and
   format checks.
 
 ## Acceptance criteria
 
-1. Daemon and managed chat columns render through the same `ChatSurface`
-   component; the import graph shows one surface, two adapters.
+1. Every chat column — daemon main, split view, side task, and managed —
+   renders through the same `ChatSurface` component; the import graph shows
+   one surface, two adapters.
 2. The forked orchestrations listed in the current-state table are deleted
-   from `ManagedSessionsPage.tsx` (transcript, composer wiring, approval
-   flow, status display), with managed-only panels retained as slots.
-3. The managed-only entry and bundle contain no daemon imports, proven by
-   an automated guard.
+   from `ManagedSessionsPage.tsx` and `ChatPane.tsx` (transcript, composer
+   wiring, approval flow, status display), with backend-specific panels
+   retained as slots.
+3. `chat-core`'s own modules contain no daemon imports and the named
+   pre-existing transitive exceptions are removed, proven by an automated
+   guard; the managed-only entry keeps working without a daemon.
 4. Existing daemon and managed unit suites and the managed Playwright specs
    pass; the visual preview shows no unexplained daemon-side change.
 5. Managed sessions show the shared status stack and usage display wherever
    backend facts exist, with absent regions capability-gated.
+6. The admission-is-not-establishment invariant holds: per-adapter negative
+   tests prove transport success alone never produces `established`;
+   `unsettled` renders distinctly from `failed` and survives refresh;
+   superseded approvals render as superseded, not applied.
 
 ## Open questions
 
