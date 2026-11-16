@@ -763,10 +763,18 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
    */
   private findMissingMcpServers(skill: SkillConfig): string[] | undefined {
     if (!skill.mcpServers || skill.mcpServers.length === 0) return undefined;
-    const registered = new Set(
+    // getMcpServers() is the admission-filtered view — a server that is
+    // configured but excluded (mcp.excluded) is absent from it, so a
+    // skill depending on an excluded server would never warn. The
+    // unfiltered settings map catches that case (#17323 F1).
+    const configured = new Set(
       Object.keys(this.config.getMcpServers?.() ?? {}),
     );
-    const missing = skill.mcpServers.filter((name) => !registered.has(name));
+    const excluded = new Set(this.config.getExcludedMcpServers?.() ?? []);
+    const missing = skill.mcpServers.filter((name) => {
+      if (!configured.has(name)) return true; // not in config at all
+      return excluded.has(name); // configured but excluded — still unusable
+    });
     return missing.length > 0 ? missing : undefined;
   }
 
