@@ -38,10 +38,116 @@ const call = (callId: string) => ({
   value: { callId, name: 'read_file', args: {} },
 });
 
+it('bounds early consumer close while the provider is still cleaning up', async () => {
+  vi.useFakeTimers();
+  try {
+    let finishCleanup!: () => void;
+    const cleanup = new Promise<void>((resolve) => (finishCleanup = resolve));
+    const parent = new AbortController();
+    let providerSignal: AbortSignal | undefined;
+    const client = {
+      async *sendMessageStream(_parts: unknown, signal: AbortSignal) {
+        providerSignal = signal;
+        try {
+          yield { type: 'content', value: 'a' };
+        } finally {
+          await cleanup;
+        }
+      },
+    } as unknown as LlmClient;
+    const shared = sharedModelRound(client, round, parent.signal, {
+      config,
+      duplicates: { handled: new Map(), responded: new Set() },
+      useEventBus: true,
+      beforeBatch: () => {},
+    });
+    const events = shared.events[Symbol.asyncIterator]();
+    await events.next();
+    const closed = vi.fn();
+    void events.return?.().then(closed);
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(closed).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(closed).toHaveBeenCalledWith({ done: true, value: undefined });
+    expect(providerSignal?.aborted).toBe(true);
+    expect(parent.signal.aborted).toBe(false);
+    expect(shared.result()).toBeUndefined();
+    finishCleanup();
+    await vi.advanceTimersByTimeAsync(0);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it('arms cancellation even when iterator return is queued behind next', async () => {
+  vi.useFakeTimers();
+  try {
+    let release!: () => void;
+    const waiting = new Promise<void>((resolve) => (release = resolve));
+    const client = {
+      async *sendMessageStream() {
+        await waiting;
+        yield { type: 'content', value: 'late' };
+      },
+    } as unknown as LlmClient;
+    const shared = sharedModelRound(
+      client,
+      round,
+      new AbortController().signal,
+      {
+        config,
+        duplicates: { handled: new Map(), responded: new Set() },
+        useEventBus: true,
+        beforeBatch: () => {},
+      },
+    );
+    const events = shared.events[Symbol.asyncIterator]();
+    const next = events.next();
+    await vi.advanceTimersByTimeAsync(0);
+    const closed = vi.fn();
+    void events.return?.().then(closed);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(closed).toHaveBeenCalledWith({ done: true, value: undefined });
+    await expect(next).resolves.toEqual({ done: true, value: undefined });
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(shared.result()).toBeUndefined();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it('releases an offered event when close follows the parent abort deadline', async () => {
+  vi.useFakeTimers();
+  try {
+    const parent = new AbortController();
+    const { client, progress } = fakeClient([{ type: 'content', value: 'a' }]);
+    const shared = sharedModelRound(client, round, parent.signal, {
+      config,
+      duplicates: { handled: new Map(), responded: new Set() },
+      useEventBus: true,
+      beforeBatch: () => {},
+    });
+    await shared.events[Symbol.asyncIterator]().next();
+    parent.abort();
+    await vi.advanceTimersByTimeAsync(10_000);
+    await shared.close();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(progress).toEqual({ pulled: 1, closed: true });
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 /** A client whose one stream yields `events`, noting how far it got. */
 function fakeClient(events: Array<Record<string, unknown> | Error>) {
   const progress = { pulled: 0, closed: false };
-  const sendMessageStream = vi.fn(async function* () {
+  const sendMessageStream = vi.fn(async function* (
+    _parts: unknown,
+    _signal: AbortSignal,
+    _promptId: string,
+    _options: unknown,
+  ) {
     try {
       for (const event of events) {
         progress.pulled++;
@@ -133,7 +239,7 @@ describe.each([false, true])('sharedModelRound (kernel=%s)', (kernel) => {
     for await (const event of shared.events) seen.push(event);
     expect(sendMessageStream).toHaveBeenCalledExactlyOnceWith(
       round.parts,
-      signal,
+      kernel ? expect.any(AbortSignal) : signal,
       'p1',
       round.options,
     );
@@ -201,7 +307,7 @@ describe.each([false, true])('sharedModelRound (kernel=%s)', (kernel) => {
   });
 
   it("rethrows the client's error", async () => {
-    const { client } = fakeClient([
+    const { client, sendMessageStream } = fakeClient([
       { type: 'content', value: 'a' },
       new Error('provider failed'),
     ]);
@@ -214,19 +320,22 @@ describe.each([false, true])('sharedModelRound (kernel=%s)', (kernel) => {
     ).rejects.toThrow('provider failed');
     expect(seen).toEqual(['content']);
     expect(shared.result()).toBeUndefined();
+    expect(sendMessageStream.mock.calls[0][1].aborted).toBe(false);
   });
 
   it("runs the round's batch on the executor the turn hands it, in one loop call", async () => {
     const loop = vi.mocked(runAgentLoop);
     loop.mockClear();
     const { client } = fakeClient([call('c1')]);
-    const shared = open(client);
+    const signal = new AbortController().signal;
+    const shared = open(client, signal);
     for await (const _ of shared.events) {
       // drain
     }
     const executor = okExecutor();
     const batch = await shared.runBatch(executor);
     expect(executor.run).toHaveBeenCalledOnce();
+    expect(executor.run.mock.calls[0][1]).toBe(signal);
     expect(batch.stop).toBeUndefined();
     expect(batch.responses?.map(({ callId }) => callId)).toEqual(['c1']);
     expect(loop).toHaveBeenCalledOnce();
