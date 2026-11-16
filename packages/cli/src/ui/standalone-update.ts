@@ -453,7 +453,16 @@ async function extractArchive(
           resolve();
           return;
         }
-        const detail = stderr.replace(/[\uD800-\uDBFF]$/, '').trim();
+      ps.on('close', (code) => {
+        stderr = (stderr + decoder.decode()).slice(0, EXTRACT_STDERR_LIMIT);
+        if (code === 0) {
+          resolve();
+          return;
+        }
+        const detail = stripAnsiAndControl(stderr.replace(/\s+/g, ' '))
+          .replace(/\p{Cf}/gu, '')
+          .trim()
+          .replace(/[\uD800-\uDBFF]$/, '');
         reject(
           new Error(
             `Expand-Archive exited with code ${code}${detail ? `: ${detail}` : ''}`,

@@ -62,7 +62,7 @@ Windows standalone updates use Windows PowerShell 5.1 (`powershell.exe`) to extr
 
 The updater clears the inherited module path for the extraction subprocess so Windows PowerShell can resolve its compatible module. This does not change your terminal's environment or system-wide execution policy. Extraction errors stop the update and include available PowerShell error details, decoded as UTF-8 and limited in length. An extraction failure leaves the existing installation in place.
 
-If an older version reports only `Expand-Archive exited with code 1` when updating from PowerShell 7, retry `qwen update` from Windows PowerShell 5.1. Alternatively, rerun the Windows standalone installer from the [Quickstart](../quickstart) in a Windows PowerShell 5.1 window. If extraction still fails, include the full update error and your Windows, Qwen Code, and PowerShell versions in a bug report; the exit code alone does not identify the cause.
+If an older version reports only `Expand-Archive exited with code 1` when updating from PowerShell 7, retry `qwen update` from Windows PowerShell 5.1. Alternatively, rerun the Windows standalone installer from the [Quickstart](../quickstart) in a Windows PowerShell 5.1 window. If extraction still fails, include the full update error (redact your user name and any local paths first) and your Windows, Qwen Code, and PowerShell versions in a bug report; the exit code alone does not identify the cause.
 
 ## Attachment upload returns HTTP 413 behind a reverse proxy
 
