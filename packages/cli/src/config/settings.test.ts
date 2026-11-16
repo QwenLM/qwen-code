@@ -242,6 +242,7 @@ describe('Settings Loading and Merging', () => {
     );
     const regular = {
       isFile: () => true,
+      isSymbolicLink: () => false,
       nlink: 1,
       dev: 1,
       ino: 1,
