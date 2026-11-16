@@ -736,24 +736,12 @@ export async function runChecklist(
 
   if (!hasPersistedItems) {
     checks.add(
-      'save-acknowledged',
-      'case 2 / R4',
-      'not-applicable',
-      'nothing was persisted, so there is no save to acknowledge',
-    );
-    checks.add(
       'isolated-across-sessions',
       'case 2 / R4',
       'not-applicable',
       'nothing was persisted, so isolation cannot be distinguished from loss',
     );
   } else {
-    checks.add(
-      'save-acknowledged',
-      'case 2 / R4',
-      'not-applicable',
-      'the host has no save acknowledgement to observe yet; the stage that adds view state defines one',
-    );
     await checks.guard('isolated-across-sessions', 'case 2 / R4', async () => {
       await env.startSession(prompt);
       const other = await env.waitForCard(0);

@@ -273,7 +273,7 @@ final class ManagedActivityDiagnosticProjection {
             // Publication already verified the external object; do not fetch it under the Session fence.
             return null;
         }
-        return com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.toolOutcomeBody(ref, referenced -> {
+        return com.alibaba.qwen.code.runtimebroker.ManagedCheckpointHistory.toolOutcomeBody(ref, referenced -> {
             StoredResource part = resources.apply(referenced.path("resourceId").asText());
             requireReference(part, referenced);
             return part.bytes();
@@ -434,7 +434,7 @@ final class ManagedActivityDiagnosticProjection {
             boolean complete = true;
             long observed = transaction.events() == 0 ? completedSequence : transaction.first() - 1;
             int observedCount = 0;
-            for (JsonNode record : com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.records(raw)) {
+            for (JsonNode record : com.alibaba.qwen.code.runtimebroker.ManagedCheckpointHistory.records(raw)) {
                 JsonNode event = record.path("managedSession");
                 if (!"managed_session_event_v1".equals(record.path("subtype").asText())) {
                     continue;
