@@ -78,11 +78,11 @@ Goals 页列出每个已加载会话的目标，但要查看一个目标，只�
 
 ## 验证计划
 
-- 单测：`GoalsDialog.test.tsx`（带/不带工作区标签的头部操作、各生命周期状态的胶囊色调、预算条的有无/截断、token 条跳过、填充条色调、填充条内联宽度、数值只出现一次的见证）与 `GoalStatusStrip.test.tsx`（入口接线/缺席、状态色调、色调映射）。`ChatPane.test.tsx` 双向钉住分屏透传：接线时渲染按钮且点击触发一次；未接线时不渲染按钮而 strip 保留控制。
+- 单测：`GoalsDialog.test.tsx`（带/不带工作区标签的头部操作——带标签用例改用次工作区目标使按目标路由可观测、各生命周期状态的胶囊色调、预算条的有无/截断、token 条跳过、填充条色调、填充条内联宽度、数值只出现一次的见证、以及混合预算用例钉住只抑制已设定预算的页脚格）。可访问名 helper 按浏览器计算方式以空格拼接 aria-labelledby 引用文本。`GoalStatusStrip.test.tsx`（入口接线/缺席、状态色调、色调映射）。`ChatPane.test.tsx` 双向钉住分屏透传：接线时渲染按钮且点击触发一次；未接线时不渲染按钮而 strip 保留控制。
 - `GoalsDialog.test.tsx` 还钉住控制请求在途时头部会话跳转仍可用（导航不是控制）；`App.test.tsx` 双向钉住主输入框 strip 的 `projectFeaturesAvailable` 门（有项目特性时入口在、无时缺席）。
-- 变异见证（字节级还原已核验）：去掉页脚抑制、删除 `ChatPane` 透传、把填充宽度硬编码为 `0%`、把链接改回 meta 灰、删除任一 `[data-status='attention']` 颜色规则、给头部跳转加 busy 门禁、让 `getGoalActiveTimeLabel` 输出分叉，各自使其钉子变红。
+- 变异见证（字节级还原已核验）：去掉页脚抑制、把抑制接错预算、删除 `ChatPane` 透传、丢掉头部跳转的工作区标签、把填充宽度硬编码为 `0%`、把链接改回 meta 灰、删除任一 `[data-status='attention']` 颜色规则（含胶囊+strip 双删，由未着色锚点捕获）、给头部跳转加 busy 门禁、让 `getGoalActiveTimeLabel` 输出分叉，各自使其钉子变红。
 - 对改动文件跑 `npm run typecheck`、ESLint、Prettier。
-- E2E：现有 `web-shell.goal.spec.ts` 与 `web-shell.goals-multi-workspace.spec.ts` 套件必须保持全绿（它们钉住了新按钮旁边的控制操作与卡片结构）；预算 @smoke 用例还在真实浏览器测量填充条相对轨道的像素宽度（15% ± 1px）并读取计算颜色——填充对轨道、链接对 meta、填充等于胶囊的 attention 色——色调与链接线索必须真的被绘制。
+- E2E：现有 `web-shell.goal.spec.ts` 与 `web-shell.goals-multi-workspace.spec.ts` 套件必须保持全绿（它们钉住了新按钮旁边的控制操作与卡片结构）；预算 @smoke 用例还在真实浏览器测量填充条相对轨道的像素宽度（15% ± 1px），并把计算颜色读取收敛到识别出的目标卡片——填充对轨道、链接对 meta、填充等于胶囊的 attention 色、胶囊/strip 色调区别于未着色 `--foreground` 锚点——色调与链接线索必须真的被绘制，双删规则不能使等价断言存活。
 
 ## 验收标准
 

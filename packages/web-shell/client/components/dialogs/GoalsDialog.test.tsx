@@ -84,9 +84,10 @@ function findButton(label: string): HTMLButtonElement | undefined {
   );
 }
 
-/** Compose a budget progressbar's accessible name from the visible nodes its
- * aria-labelledby references — the name must be the rendered label + figure
- * themselves, not a duplicated aria-label string. */
+/** Compose a budget progressbar's accessible name the way the browser does:
+ * aria-labelledby concatenates the referenced nodes' text with spaces. The
+ * name must be the rendered label + figure themselves, not a duplicated
+ * aria-label string. */
 function barName(testid: string): string {
   const bar = document.querySelector(`[data-testid="${testid}"]`);
   if (!bar) throw new Error(`bar not found: ${testid}`);
@@ -96,7 +97,7 @@ function barName(testid: string): string {
   expect(ids).toHaveLength(2);
   return ids
     .map((id) => document.getElementById(id)?.textContent ?? '')
-    .join(': ');
+    .join(' ');
 }
 
 /** Set the condition textarea the way React's onChange expects. */
@@ -296,8 +297,8 @@ describe('GoalsDialog', () => {
     ]);
     // Armed budgets state their figures once, in the progress row; the
     // matching footer cells are suppressed so the card never repeats them.
-    expect(barName('goal-budget-turns')).toBe('Turns: 3 / 20 turns');
-    expect(barName('goal-budget-time')).toBe('Active time: 12m 3s / 30m 0s');
+    expect(barName('goal-budget-turns')).toBe('Turns 3 / 20 turns');
+    expect(barName('goal-budget-time')).toBe('Active time 12m 3s / 30m 0s');
     expect(document.querySelector('[data-testid="goal-turns"]')).toBeNull();
     expect(document.querySelector('[data-testid="goal-elapsed"]')).toBeNull();
   });
@@ -341,7 +342,7 @@ describe('GoalsDialog', () => {
   it('shows spend against the budget once a turn has billed', async () => {
     await mount([withSpend({ tokensUsed: 1_234, tokenBudget: 30_000_000 })]);
 
-    expect(barName('goal-budget-tokens')).toBe('Tokens: 1.2k / 30.0M tokens');
+    expect(barName('goal-budget-tokens')).toBe('Tokens 1.2k / 30.0M tokens');
     expect(document.querySelector('[data-testid="goal-tokens"]')).toBeNull();
   });
 
@@ -393,9 +394,9 @@ describe('GoalsDialog', () => {
       expect(turns?.getAttribute('aria-valuenow')).toBe('15');
       expect(tokens?.getAttribute('aria-valuenow')).toBe('25');
       expect(time?.getAttribute('aria-valuenow')).toBe('33');
-      expect(barName('goal-budget-turns')).toBe('Turns: 3 / 20 turns');
-      expect(barName('goal-budget-tokens')).toBe('Tokens: 5.0M / 20.0M tokens');
-      expect(barName('goal-budget-time')).toBe('Active time: 10m 0s / 30m 0s');
+      expect(barName('goal-budget-turns')).toBe('Turns 3 / 20 turns');
+      expect(barName('goal-budget-tokens')).toBe('Tokens 5.0M / 20.0M tokens');
+      expect(barName('goal-budget-time')).toBe('Active time 10m 0s / 30m 0s');
       // The inline width is the visual readout; aria alone would stay green
       // with every bar rendered empty or full. jsdom does no layout, so pin
       // the inline style, not a computed pixel width.
@@ -418,9 +419,11 @@ describe('GoalsDialog', () => {
 
     it("states an armed budget's figures exactly once on the card", async () => {
       // Removing the footer suppression must turn this red: the row and the
-      // footer would both print the same localised figure. The row must also
-      // exist and carry the figure itself — otherwise "row deleted, footer
-      // took over" would keep the count at one and pass vacuously.
+      // footer would both print the same localised figure. The footer-absence
+      // assertion already catches "row deleted, footer took over"; the row
+      // existence + row-carries-figure assertions additionally catch the
+      // figure relocating outside the row (e.g. into the card header) or the
+      // row rendering empty while the figure moves elsewhere.
       await mount([withSpend({ turnCount: 3, turnBudget: 20 })]);
 
       const card = document.querySelector('[role="listitem"]')!;
@@ -432,6 +435,38 @@ describe('GoalsDialog', () => {
         (card.textContent ?? '').split('3 / 20 turns').length - 1;
       expect(occurrences).toBe(1);
       expect(document.querySelector('[data-testid="goal-turns"]')).toBeNull();
+    });
+
+    it('suppresses only the armed budgets footer cells, not the rest', async () => {
+      // The extremes (all armed / none armed) cannot witness a suppression
+      // predicate wired to the wrong budget: a mixed goal must hide exactly
+      // the turns cell and keep the unarmed tokens and time figures.
+      await mount([
+        withSpend({
+          status: 'paused',
+          turnCount: 3,
+          turnBudget: 20,
+          tokensUsed: 1_234,
+          activeTimeMs: 723_000,
+        }),
+      ]);
+
+      expect(
+        document.querySelector('[data-testid="goal-budget-turns"]'),
+      ).not.toBeNull();
+      expect(document.querySelector('[data-testid="goal-turns"]')).toBeNull();
+      expect(
+        document.querySelector('[data-testid="goal-budget-tokens"]'),
+      ).toBeNull();
+      expect(
+        document.querySelector('[data-testid="goal-tokens"]')?.textContent,
+      ).toBe('1.2k tokens');
+      expect(
+        document.querySelector('[data-testid="goal-budget-time"]'),
+      ).toBeNull();
+      expect(
+        document.querySelector('[data-testid="goal-elapsed"]')?.textContent,
+      ).toBe('12m 3s');
     });
 
     it('renders no bars when no budget is armed', async () => {
@@ -678,16 +713,19 @@ describe('GoalsDialog', () => {
         { id: 'ws-1', cwd: '/w-primary', primary: true, trusted: true },
         { id: 'ws-2', cwd: '/w-secondary', primary: false, trusted: true },
       ],
+      // The goal lives in the SECONDARY workspace: a primary-tagged goal
+      // cannot witness per-goal routing, since the primary cwd is also the
+      // default the handler would fall back to.
       listGoalsByWorkspace: {
-        '': { goals: [baseGoal()], droppedCount: 0 },
-        'ws-2': { goals: [], droppedCount: 0 },
+        '': { goals: [], droppedCount: 0 },
+        'ws-2': { goals: [baseGoal()], droppedCount: 0 },
       },
       onOpenSession,
     });
 
     click(document.querySelector('[data-testid="goal-open-session"]'));
 
-    expect(onOpenSession).toHaveBeenCalledWith('sess-1', '/w-primary');
+    expect(onOpenSession).toHaveBeenCalledWith('sess-1', '/w-secondary');
   });
 
   it('tones the status pill by lifecycle state', async () => {
