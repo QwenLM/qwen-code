@@ -5,6 +5,7 @@
  */
 
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   chmodSync,
   cpSync,
@@ -6835,6 +6836,12 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain(
       'The VM path runs **no `--require-isolation` gate**',
     );
+    // R16-4 (residual): the preflight VM sentence is scoped to exclude the
+    // gate, so it cannot push a VM operator to run the container gate the
+    // VM bullet says it skips.
+    expect(flat).toContain(
+      'a VM boundary runs the same file from the trusted checkout **without the `--require-isolation` gate** instead',
+    );
     expect(flat).toContain(
       'The VM round still runs under a **scratch `HOME`**',
     );
@@ -6843,6 +6850,16 @@ describe('qwen-triage verify hardening round 2', () => {
     );
     // A container declaration is backed by a gate record.
     expect(flat).toContain('backed by `boundary-gate.json`');
+    // R16-1 (residual): the record carries only the nonce hash, never the
+    // plaintext; step 5 says so and step 7 hash-compares a container-nonce
+    // log line against it (no plaintext is read from the PR-writable record).
+    expect(flat).toContain('stores only its **sha256** in the gate record');
+    expect(flat).toContain('(`nonceSha256`), never the plaintext');
+    expect(flat).toContain('"nonceSha256"');
+    expect(flat).toContain('sha256sum');
+    expect(flat).toContain(
+      'round logs carry no container nonce matching the gate record',
+    );
     // The record and the lane flag corroborate an operator; they are not
     // proof against a round that forges them. The honest wording is the
     // contract — an overclaim ("cannot be minted", "never for a local
@@ -7065,8 +7082,9 @@ describe('qwen-triage verify hardening round 2', () => {
       writeFileSync(join(proxyDir, 'proxy.pid'), '424242\n');
       writeFileSync(join(proxyDir, 'proxy.json'), '{"token":"bearer"}');
       writeFileSync(join(proxyDir, 'proxy.err'), '');
-      // R16-1: the gate record carries a per-round nonce; the round's raw
-      // harness logs must echo it for step 7 to declare mode:"container".
+      // R16-1: the gate record carries only the nonce HASH; the round's raw
+      // harness logs must echo the container-local plaintext (a container-nonce
+      // line whose sha256 matches) for step 7 to declare mode:"container".
       // noNonce leaves the logs without it (the gate still passed).
       const nonce = 'n0nce1234567890abcdef';
       if (!planted && !readOnlyRound && !symlinkRound) {
@@ -7077,7 +7095,7 @@ describe('qwen-triage verify hardening round 2', () => {
             passed: true,
             observed: ['/.dockerenv'],
             credentialFree: true,
-            nonce,
+            nonceSha256: createHash('sha256').update(nonce).digest('hex'),
           }),
         );
         writeFileSync(

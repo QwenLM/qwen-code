@@ -32,6 +32,7 @@ import {
   localFilterOverrides,
   parseArgs,
   parseRepo,
+  requireBoundary,
   reviewState,
   validateContext,
 } from '../../scripts/verify-pr-prepare.mjs';
@@ -1083,8 +1084,10 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
         observed: ['/.dockerenv'],
         signals: ['/.dockerenv'],
         credentialFree: true,
+        nonceSha256: createHash('sha256').update('nonce').digest('hex'),
       }),
     );
+    writeFileSync(join(artifacts, 'harness.log'), 'container-nonce: nonce\n');
     const writeReport = (oid) =>
       writeFileSync(join(artifacts, 'report.md'), `merge-ready · ${oid}\n`);
     const check = () =>
@@ -1208,6 +1211,18 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
         credentialFree: true,
       });
       expect(typeof record.at).toBe('string');
+      // R16-1: the record carries only the nonce hash, never the plaintext,
+      // and the hash matches the container-local file the battery echoes
+      // from. A host battery cannot recover the plaintext from the record.
+      expect(record.nonce).toBeUndefined();
+      expect(record.nonceSha256).toMatch(/^[0-9a-f]{64}$/);
+      const containerNonce = readFileSync(
+        join(env.HOME, '.qwen-verify-nonce'),
+        'utf8',
+      ).trim();
+      expect(record.nonceSha256).toBe(
+        createHash('sha256').update(containerNonce).digest('hex'),
+      );
 
       // A failed gate writes no record: the checker must not see a pass.
       const art2 = makeTmpDir();
@@ -1224,6 +1239,36 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
       expect(noDir.status).toBe(0);
     },
   );
+
+  // Ungated producer witness: the gate-pass path above is ambient-gated on an
+  // observed container marker, but requireBoundary's detectors take seams, so
+  // a fake /.dockerenv exercises the record write on a bare host. R16-1: the
+  // record carries only the nonce hash, never the plaintext, and the hash
+  // matches the container-local file the battery echoes from.
+  it('writes a hash-only nonce record bound to the container-local plaintext', () => {
+    const art = makeTmpDir();
+    const home = makeTmpDir();
+    const rc = requireBoundary(art, {
+      env: { QWEN_VERIFY_CREDENTIAL_FREE: '1' },
+      exists: (p) => p === '/.dockerenv',
+      home,
+    });
+    expect(rc).toBe(0);
+    const record = JSON.parse(
+      readFileSync(join(art, 'boundary-gate.json'), 'utf8'),
+    );
+    expect(record.nonce).toBeUndefined();
+    expect(record.nonceSha256).toMatch(/^[0-9a-f]{64}$/);
+    const plaintext = readFileSync(
+      join(home, '.qwen-verify-nonce'),
+      'utf8',
+    ).trim();
+    expect(record.nonceSha256).toBe(
+      createHash('sha256').update(plaintext).digest('hex'),
+    );
+    // The plaintext never rides the record: a host battery cannot copy it out.
+    expect(JSON.stringify(record)).not.toContain(plaintext);
+  });
 
   // R10-20: a self-chosen container= string is a declaration, not an observed
   // boundary. On a bare host it must not mint a passing gate record.

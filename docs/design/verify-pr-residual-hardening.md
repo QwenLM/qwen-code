@@ -81,16 +81,28 @@ does not).
   instead of the plaintext `nonce`. The plaintext is written only to the
   container-local `$HOME/.qwen-verify-nonce`. A host battery cannot recover the
   plaintext from the hash, so it cannot produce a matching log line.
-- `verify-pr-check.mjs` becomes the authoritative enforcement point: for a
-  `mode:"container"` declaration it requires `gate.nonceSha256` (a 64-hex string)
-  **and** a `container-nonce: <value>` line in the round's logs whose value's
-  sha256 equals it. The scan walks the round dir, skips `boundary.json` /
-  `boundary-gate.json` and non-regular files, and bounds each file read. A
+- `verify-pr-check.mjs` adds the authoritative machine-owned enforcement:
+  `containerNonceErrors(boundaryText, gateText, roundDir)`, run from `runCheck`
+  (the round dir is available there, not in `checkArtifacts`). For a
+  `mode:"container"` declaration backed by a `require-isolation` record it
+  requires `gate.nonceSha256` (a 64-hex string) **and** a `container-nonce:
+<value>` line in the round's logs whose value's sha256 equals it. The scan
+  walks the round dir, skips `boundary.json` / `boundary-gate.json` and
+  non-regular files (a symlink is not followed), and bounds each file read. A
   missing/mismatched hash or absent matching line refuses the container claim.
-- The step-7 shell nonce grep is removed (the checker now enforces it); step-5
-  and the boundary-gate prose state that the record carries the hash, never the
-  plaintext, and that the battery echoes a `container-nonce:` line read from the
-  container-local file.
+  The `ci-lane` record and the CI entry path are exempt.
+- The step-7 shell pre-refusal is **kept** but made hash-based: it extracts
+  `nonceSha256` from the record and refuses before minting the declaration
+  unless a `container-nonce:` log line's sha256 matches it (the existing
+  behavioral replay witnesses this pre-checker refusal with a shimmed node).
+  The checker is the second, authoritative layer. Step-5 and the boundary-gate
+  prose state that the record carries the hash, never the plaintext, and that
+  the battery echoes a `container-nonce:` line read from the container-local
+  file.
+- `requireBoundary` gains an optional `{env, exists, home}` seam (its detectors
+  already accepted one) and is exported, so an ungated unit witness exercises
+  the hash-only record write on a bare host; the gate-pass path is otherwise
+  ambient-gated on an observed container marker.
 - D17-2: the refusal message states plainly that `mode:"waived"` requires the
   maintainer's approval — it is not a free bypass.
 
@@ -108,16 +120,22 @@ VM bullet.
 ## Files affected
 
 - `scripts/verify-pr-watch-state.mjs` — split key sets; tighten the shape guard.
-- `scripts/verify-pr-prepare.mjs` — record `nonceSha256`, drop plaintext `nonce`.
-- `scripts/verify-pr-check.mjs` — nonce-hash + log-line corroboration for container.
-- `.qwen/skills/verify-pr/SKILL.md` — step-5/step-7 nonce prose, VM sentence.
+- `scripts/verify-pr-prepare.mjs` — record `nonceSha256`, drop plaintext `nonce`;
+  export `requireBoundary` with an `{env, exists, home}` seam.
+- `scripts/verify-pr-check.mjs` — `containerNonceErrors` + log scan, run from
+  `runCheck` for container declarations.
+- `.qwen/skills/verify-pr/SKILL.md` — step-5 nonce prose, step-7 hash-based
+  pre-refusal, VM sentence scoping.
 - `scripts/tests/verify-pr-watch-state.test.js` — identity-only fail-closed +
   per-bearing-key acceptance + migration-boundary witnesses.
-- `scripts/tests/verify-pr-prepare.test.js` — record carries hash, no plaintext;
-  hash matches the container-local file.
-- `scripts/tests/verify-pr-check.test.js` — matching line accepts; missing /
-  mismatched hash or line refuses.
-- `scripts/tests/qwen-triage-workflow.test.js` — step-5/step-7 raw-skill pins.
+- `scripts/tests/verify-pr-prepare.test.js` — gated record assertion plus an
+  ungated hash-only record witness via the seam.
+- `scripts/tests/verify-pr-check.test.js` — `containerNonceErrors` witnesses
+  (matching line accepts; missing / mismatched hash or line refuses; symlink not
+  followed; ci-lane / non-container exempt) + a CLI refusal witness; the
+  container fixtures carry `nonceSha256` and a matching log line.
+- `scripts/tests/qwen-triage-workflow.test.js` — step-5/step-7 flat pins, the VM
+  scoping pin, and the replay gate record switched to `nonceSha256`.
 
 ## Scope boundaries
 
@@ -125,11 +143,15 @@ VM bullet.
   #17371; not touched here.
 - The core `--context` trust boundary and sha256 content binding (#17375) are
   unchanged.
-- No new script or CLI surface; the nonce check moves from shell into the existing
-  checker, not into a new entry point.
+- No new script or CLI entry point; the checker gains a dir-dependent nonce check
+  and the shell keeps its pre-refusal (now hash-based). `requireBoundary` is
+  exported only as a testability seam, consistent with the already-exported
+  detectors.
 
 ## Open questions
 
-- None blocking. The nonce enforcement location (checker vs shell) is decided in
-  favour of the checker for testable, witnessable enforcement; the shell recipe
-  keeps only the `container-nonce:` echo instruction.
+- None blocking. Nonce enforcement is layered: the step-7 shell refuses before
+  minting the declaration (witnessed by the behavioral replay), and the checker
+  enforces the same binding authoritatively (witnessed by node unit tests). The
+  record carries only the hash, so neither layer reads a plaintext oracle from
+  the PR-writable record.

@@ -895,7 +895,10 @@ function main(argv) {
  * operator who skipped the gate — the incident's shape — not against PR
  * code that forges it; the CI publisher writes its own lane record.)
  */
-function requireBoundary(artifactDir = null) {
+export function requireBoundary(
+  artifactDir = null,
+  { env = process.env, exists = existsSync, home = homedir() } = {},
+) {
   const recordPath = artifactDir
     ? join(artifactDir, 'boundary-gate.json')
     : null;
@@ -910,9 +913,9 @@ function requireBoundary(artifactDir = null) {
       // Best-effort; the refusal exit is the contract.
     }
   };
-  const isolation = detectIsolation();
-  const credentials = detectCredentialSignals();
-  const attested = process.env[CREDENTIAL_FREE_ATTESTATION] === '1';
+  const isolation = detectIsolation(env, exists);
+  const credentials = detectCredentialSignals(env, exists, home);
+  const attested = env[CREDENTIAL_FREE_ATTESTATION] === '1';
 
   // A refusal from OUTSIDE any boundary does not contradict a record minted
   // INSIDE one: a host-side sanity re-run must not destroy the in-container
@@ -963,14 +966,15 @@ function requireBoundary(artifactDir = null) {
   }
   if (artifactDir) {
     // A per-round nonce ties the declaration to execution inside THIS
-    // container (R16-1). It is written to a container-local path (the
-    // process home, NOT the shared artifact mount) so the round must read
-    // it from inside the container and echo it into its raw harness logs;
-    // step 7 refuses mode:"container" unless the logs carry it. The nonce
-    // also rides the gate record so the host check can read it after the
-    // container stops. Like the record itself, this corroborates an
-    // operator who ran the round in the container — it is not proof
-    // against a round that forges both.
+    // container (R16-1). The plaintext is written to a container-local path
+    // (the process home, NOT the shared artifact mount) so the round must
+    // read it from inside the container and echo it into its raw harness
+    // logs; the checker refuses mode:"container" unless a log line's sha256
+    // matches the record. Only the HASH rides the gate record: a host
+    // battery cannot recover the plaintext from the hash, so it cannot copy
+    // it out of the PR-writable record into a forged log line. Like the
+    // record itself, this corroborates an operator who ran the round in the
+    // container — it is not proof against a round that forges both.
     const nonce = randomBytes(16).toString('hex');
     const record = {
       gate: 'require-isolation',
@@ -981,13 +985,14 @@ function requireBoundary(artifactDir = null) {
       // the checker requires one to back a container claim.
       observed: isolation.observed,
       credentialFree: true,
-      nonce,
+      nonceSha256: createHash('sha256').update(nonce).digest('hex'),
     };
     try {
-      writeFileSync(join(homedir(), '.qwen-verify-nonce'), `${nonce}\n`);
+      writeFileSync(join(home, '.qwen-verify-nonce'), `${nonce}\n`);
     } catch {
-      // Best-effort: the record still carries the nonce; a home that
-      // cannot be written does not fail the gate.
+      // Best-effort: a home that cannot be written does not fail the gate;
+      // the battery then cannot echo the nonce and the checker refuses the
+      // container claim, which is the safe direction.
     }
     const tmp = `${recordPath}.${process.pid}.tmp`;
     // A filesystem failure here is the documented exit-3 path, not an

@@ -320,6 +320,106 @@ function gateRecordErrors(gateText, { publishLane = false } = {}) {
   return [];
 }
 
+/**
+ * Whether a round log carries a `container-nonce: <value>` line whose value's
+ * sha256 equals the gate record's hash (R16-1). Walks the round dir, skipping
+ * the declaration and gate record themselves and any non-regular file (a
+ * symlink is not followed), and bounds each file read so a huge or special
+ * file cannot stall the check. The plaintext lives only container-local, so a
+ * host battery that never ran inside the boundary cannot produce a match.
+ */
+function nonceLogMatches(roundDir, expected) {
+  const MAX_FILE_BYTES = 1024 * 1024;
+  const walk = (d) => {
+    let entries;
+    try {
+      entries = readdirSync(d, { withFileTypes: true });
+    } catch {
+      return false;
+    }
+    for (const entry of entries) {
+      const p = join(d, entry.name);
+      if (entry.isDirectory()) {
+        if (walk(p)) return true;
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      if (
+        entry.name === 'boundary.json' ||
+        entry.name === 'boundary-gate.json'
+      ) {
+        continue;
+      }
+      let text;
+      try {
+        if (statSync(p).size > MAX_FILE_BYTES) continue;
+        text = readFileSync(p, 'utf8');
+      } catch {
+        continue;
+      }
+      for (const line of text.split('\n')) {
+        const match = /container-nonce:[ \t]*(\S+)/.exec(line);
+        if (
+          match &&
+          createHash('sha256').update(match[1]).digest('hex') === expected
+        ) {
+          return true;
+        }
+      }
+    }
+    return false;
+  };
+  return walk(roundDir);
+}
+
+/**
+ * The container nonce corroboration (R16-1 / D17-1 / D17-2). The gate record
+ * carries only the nonce hash, never the plaintext, and a mode:"container"
+ * declaration is refused unless a round log line hashes to it. Runs against
+ * the round dir (the checker is the authoritative enforcement point, not the
+ * shell recipe). A missing/invalid gate is left to gateRecordErrors; the
+ * ci-lane record the publish job writes is exempt.
+ */
+export function containerNonceErrors(boundaryText, gateText, roundDir) {
+  let boundary;
+  try {
+    boundary = JSON.parse(boundaryText);
+  } catch {
+    return [];
+  }
+  if (
+    !boundary ||
+    typeof boundary !== 'object' ||
+    boundary.mode !== 'container'
+  ) {
+    return [];
+  }
+  let gate;
+  try {
+    gate = JSON.parse(gateText);
+  } catch {
+    return [];
+  }
+  if (
+    !gate ||
+    typeof gate !== 'object' ||
+    gate.gate !== 'require-isolation' ||
+    gate.passed !== true
+  ) {
+    return [];
+  }
+  const expected = gate.nonceSha256;
+  if (typeof expected !== 'string' || !/^[0-9a-f]{64}$/.test(expected)) {
+    return [
+      'boundary-gate.json records no nonceSha256 (the 64-hex sha256 of the container-local nonce): a mode:"container" declaration must be tied to a nonce the battery echoed from inside the boundary, not a plaintext copied from the PR-writable record',
+    ];
+  }
+  if (roundDir && nonceLogMatches(roundDir, expected)) return [];
+  return [
+    'round logs carry no container-nonce line whose sha256 matches boundary-gate.json nonceSha256: refusing mode:"container" — the battery must echo the container-local nonce ($HOME/.qwen-verify-nonce) into its logs; if the battery ran on the host, declare mode:"waived" with the maintainer\'s approval (a waiver is not a free bypass)',
+  ];
+}
+
 // A waiver's approval must be a permalink a reader can open, not free text:
 // the maintainer's approval comment on the PR or an issue. The capture
 // groups let the checker compare the target against the round's own
@@ -1311,16 +1411,25 @@ function main(argv) {
   // The CI entry path is defined by $QWEN_VERIFY_CONTEXT; there the publish
   // job owns the declaration, so an absent boundary.json is a warning for
   // the round's own pre-finish self-check, not an error it cannot clear.
+  const publisherOwnsBoundary = !!process.env.QWEN_VERIFY_CONTEXT;
   const result = checkArtifacts({
     files,
     evidence,
     expectedHead,
-    publisherOwnsBoundary: !!process.env.QWEN_VERIFY_CONTEXT,
+    publisherOwnsBoundary,
     publishLane,
     coordinates,
     evidenceUnreadable,
     unreadableKeys,
   });
+  // The container nonce corroboration (R16-1) needs the round dir to scan the
+  // battery's logs, so it lives here rather than in checkArtifacts. The CI
+  // publish lane writes its own ci-lane record and is exempt.
+  if (!publisherOwnsBoundary && !publishLane) {
+    result.errors.push(
+      ...containerNonceErrors(files.boundary, files.boundaryGate, dir),
+    );
+  }
   result.errors.unshift(...unreadableErrors);
   if (snapshotWarning) result.warnings.unshift(snapshotWarning);
   const lines = [`verify-pr check: ${dir}`];

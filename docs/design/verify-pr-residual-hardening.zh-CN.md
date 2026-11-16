@@ -67,14 +67,21 @@ VM 路径**不跑** `--require-isolation` 门禁。这句未限定的话可能�
 - `requireBoundary` 在记录里存 `nonceSha256`（明文的 sha256）而非明文 `nonce`。明文
   只写到容器本地 `$HOME/.qwen-verify-nonce`。宿主电池无法从哈希还原明文，因此产不出
   匹配的日志行。
-- `verify-pr-check.mjs` 成为权威强制点：对 `mode:"container"` 声明，要求
+- `verify-pr-check.mjs` 新增权威的机器强制层：`containerNonceErrors(boundaryText,
+gateText, roundDir)`，由 `runCheck` 调用（轮目录在那里可用，`checkArtifacts` 没
+  有）。对由 `require-isolation` 记录支撑的 `mode:"container"` 声明，要求
   `gate.nonceSha256`（64 位十六进制串）**且**轮日志里有一行 `container-nonce:
 <value>`，其值的 sha256 等于它。扫描遍历轮目录，跳过 `boundary.json` /
-  `boundary-gate.json` 与非常规文件，并对每个文件读取设上限。哈希缺失/不匹配或无匹配
-  行即拒绝容器声明。
-- 移除 step-7 的 shell nonce grep（改由 checker 强制）；step-5 与 boundary-gate 正文
-  说明记录携带哈希、绝不携带明文，电池须*echo* 一行从容器本地文件读出的
-  `container-nonce:`。
+  `boundary-gate.json` 与非常规文件（不跟随符号链接），并对每个文件读取设上限。哈希
+  缺失/不匹配或无匹配行即拒绝容器声明。`ci-lane` 记录与 CI 入口路径豁免。
+- step-7 的 shell 预拒绝**保留**但改为基于哈希：从记录取 `nonceSha256`，除非某
+  `container-nonce:` 日志行的 sha256 与之匹配，否则在铸声明前拒绝（既有行为级 replay
+  用 shim 掉的 node 见证这一先于 checker 的拒绝）。checker 是第二道权威层。step-5 与
+  boundary-gate 正文说明记录携带哈希、绝不携带明文，电池须 echo 一行从容器本地文件
+  读出的 `container-nonce:`。
+- `requireBoundary` 加可选 `{env, exists, home}` 接缝（其检测器本就接受）并导出，使
+  一个无门控单测见证能在裸宿主上演练只含哈希的记录写入；gate-pass 路径否则受 observed
+  容器标记环境门控。
 - D17-2：拒绝文案明确 `mode:"waived"` 需要维护者批准——不是免费绕过。
 
 这在关闭宿主抄录路径的同时保持已承认的边界诚实：同时伪造记录哈希与匹配日志行的轮仍
@@ -88,23 +95,31 @@ VM 路径**不跑** `--require-isolation` 门禁。这句未限定的话可能�
 ## 涉及文件
 
 - `scripts/verify-pr-watch-state.mjs` —— 拆分键集合；收紧形状守卫。
-- `scripts/verify-pr-prepare.mjs` —— 记录 `nonceSha256`，去掉明文 `nonce`。
-- `scripts/verify-pr-check.mjs` —— 容器声明的 nonce 哈希 + 日志行佐证。
-- `.qwen/skills/verify-pr/SKILL.md` —— step-5/step-7 nonce 正文、VM 句。
+- `scripts/verify-pr-prepare.mjs` —— 记录 `nonceSha256`，去掉明文 `nonce`；导出
+  `requireBoundary` 并加 `{env, exists, home}` 接缝。
+- `scripts/verify-pr-check.mjs` —— `containerNonceErrors` + 日志扫描，由 `runCheck`
+  对容器声明调用。
+- `.qwen/skills/verify-pr/SKILL.md` —— step-5 nonce 正文、step-7 基于哈希的预拒绝、
+  VM 句限定。
 - `scripts/tests/verify-pr-watch-state.test.js` —— 纯身份 fail-closed + 逐承载键
   接纳 + 迁移边界见证。
-- `scripts/tests/verify-pr-prepare.test.js` —— 记录携带哈希、无明文；哈希与容器本地
-  文件一致。
-- `scripts/tests/verify-pr-check.test.js` —— 匹配行接纳；哈希/行缺失或不匹配拒绝。
-- `scripts/tests/qwen-triage-workflow.test.js` —— step-5/step-7 原始 skill 钉。
+- `scripts/tests/verify-pr-prepare.test.js` —— 门控记录断言 + 经接缝的无门控只含哈希
+  记录见证。
+- `scripts/tests/verify-pr-check.test.js` —— `containerNonceErrors` 见证（匹配行接纳；
+  哈希/行缺失或不匹配拒绝；不跟随 symlink；ci-lane/非容器豁免）+ CLI 拒绝见证；容器
+  夹具携带 `nonceSha256` 与匹配日志行。
+- `scripts/tests/qwen-triage-workflow.test.js` —— step-5/step-7 flat 钉、VM 限定钉、
+  replay gate 记录改 `nonceSha256`。
 
 ## 范围边界
 
 - 簇 D（R17-2 活性）、E（R8 长尾）、F（D17-4…14）仍由 #17371 跟踪；本改动不触碰。
 - 核心 `--context` 信任边界与 sha256 内容绑定（#17375）不变。
-- 不新增脚本或 CLI 面；nonce 检查从 shell 移入既有 checker，而非新入口。
+- 不新增脚本或 CLI 入口；checker 加一个依赖目录的 nonce 检查，shell 保留其预拒绝
+  （现基于哈希）。`requireBoundary` 仅作可测试性接缝导出，与已导出的检测器一致。
 
 ## 待决问题
 
-- 无阻塞项。nonce 强制位置（checker vs shell）已决定取 checker，以获得可测试、可见证
-  的强制；shell 配方仅保留 `container-nonce:` echo 指示。
+- 无阻塞项。nonce 强制分层：step-7 shell 在铸声明前拒绝（由行为级 replay 见证），
+  checker 权威地强制同一绑定（由 node 单测见证）。记录只含哈希，故两层都不从 PR 可写
+  记录读取明文判据。
