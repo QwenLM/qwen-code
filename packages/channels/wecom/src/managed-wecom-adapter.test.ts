@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -2326,6 +2326,158 @@ describe('ManagedWecomAdapter — round-3 review fixes', () => {
     expect(dropLines[1]).toContain(
       'admission is stalled (instance-scoped refusal)',
     );
+    await adapter.disconnect();
+  });
+});
+
+describe('ManagedWecomAdapter — round-4 review fixes', () => {
+  it('a lock-compromised adapter does not deregister the shared channel row', async () => {
+    const plane = fakeControlPlane();
+    const fake = fakeDeps();
+    // Capture the compromise callback the adapter hands to the lock dep.
+    let compromise!: () => void;
+    const deps = {
+      ...fake.deps,
+      lock: async (_directory: string, onCompromised: () => void) => {
+        compromise = onCompromised;
+        return async () => {};
+      },
+    };
+    const adapter = new ManagedWecomAdapter({
+      name: 'wecom-1',
+      cwd: tempCwd(),
+      config: CONFIG,
+      controlPlane: plane.controlPlane,
+      deps,
+      pollLoop: false,
+    });
+    await adapter.connect();
+    // Another process reaped the stale lock and now owns the row. This process
+    // must not deregister it on shutdown (the server's disconnect has no
+    // generation guard); the lock belongs to the new owner and is not released.
+    compromise();
+    await adapter.disconnect();
+    expect(plane.disconnectCalls()).toBe(0);
+  });
+
+  it('a displaced adapter does not rewrite the state file the new owner holds', async () => {
+    const plane = fakeControlPlane();
+    const fake = fakeDeps();
+    // Gate sendMessage so a tick parks mid-send, after the pre-send persist.
+    let releaseSend!: () => void;
+    const sendGate = new Promise<void>((resolve) => (releaseSend = resolve));
+    let sendStarted!: () => void;
+    const started = new Promise<void>((resolve) => (sendStarted = resolve));
+    const deps = {
+      ...fake.deps,
+      sendMessage: async (chatId: string, text: string) => {
+        fake.sent.push({ chatId, text });
+        sendStarted();
+        await sendGate;
+      },
+    };
+    const adapter = new ManagedWecomAdapter({
+      name: 'wecom-1',
+      cwd: tempCwd(),
+      config: CONFIG,
+      controlPlane: plane.controlPlane,
+      deps,
+      pollLoop: false,
+    });
+    await adapter.connect();
+    plane.enqueue([delivery('d1', 1)]);
+    const tickPromise = adapter.tick();
+    await started; // parked in sendMessage; the pre-send entry is on disk
+    // The kick displaces this adapter and releases the lock; a restart (the
+    // new owner) can now legitimately write the state file.
+    fake.kick();
+    await new Promise((resolve) => setImmediate(resolve));
+    const sentinel = Buffer.from('new-owner-state-sentinel');
+    writeFileSync(adapter.stateFile, sentinel);
+    // The in-flight send returns and tries its post-send persist; the displaced
+    // guard must suppress it so the new owner's bytes survive.
+    releaseSend();
+    await tickPromise;
+    expect(readFileSync(adapter.stateFile)).toEqual(sentinel);
+  });
+
+  it('a transient orphan-receipt refusal on one entry does not starve the next', async () => {
+    const { adapter, plane } = await connectedAdapter();
+    const priv = adapter as unknown as {
+      state: { outbound: unknown[] };
+      store: { save: (s: unknown) => void };
+    };
+    priv.state.outbound = [
+      { deliveryId: 'd1', ordinal: 0, messageId: 'm1' },
+      { deliveryId: 'd2', ordinal: 0, messageId: 'm2' },
+    ];
+    priv.store.save(priv.state);
+    // Only d1's receipt is persistently refused; d2's must still be reported.
+    plane.setReceiptError((deliveryId) =>
+      deliveryId === 'd1'
+        ? Object.assign(new Error('unavailable'), { status: 503 })
+        : undefined,
+    );
+    await adapter.tick();
+    expect(plane.receipts.map((entry) => entry.deliveryId)).toEqual(['d2']);
+    const persisted = JSON.parse(readFileSync(adapter.stateFile, 'utf8'));
+    expect(
+      persisted.outbound.map(
+        (entry: { deliveryId: string }) => entry.deliveryId,
+      ),
+    ).toEqual(['d1']);
+    await adapter.disconnect();
+  });
+
+  it('a 400 orphan-receipt refusal is a deterministic drop, not a transient keep', async () => {
+    const { adapter, plane } = await connectedAdapter();
+    const priv = adapter as unknown as {
+      state: { outbound: unknown[] };
+      store: { save: (s: unknown) => void };
+    };
+    priv.state.outbound = [{ deliveryId: 'd1', ordinal: 0, messageId: 'm1' }];
+    priv.store.save(priv.state);
+    plane.setReceiptError(() =>
+      Object.assign(new Error('bad request'), { status: 400 }),
+    );
+    await adapter.tick();
+    // 400 is in the deterministic-drop set: the entry is dropped, not kept for
+    // re-drive (a transient keep would leave it persisted).
+    const persisted = JSON.parse(readFileSync(adapter.stateFile, 'utf8'));
+    expect(persisted.outbound).toEqual([]);
+    await adapter.disconnect();
+  });
+
+  it('the poll loop contains a generic tick error and keeps polling', async () => {
+    const lines: string[] = [];
+    const plane = fakeControlPlane();
+    const fake = fakeDeps();
+    let calls = 0;
+    const origClaim = plane.controlPlane.claimDeliveries.bind(
+      plane.controlPlane,
+    );
+    plane.controlPlane.claimDeliveries = async (limit) => {
+      calls += 1;
+      if (calls === 1) throw new Error('claim blew up');
+      return origClaim(limit);
+    };
+    const adapter = new ManagedWecomAdapter({
+      name: 'wecom-1',
+      cwd: tempCwd(),
+      config: { ...CONFIG, pollInterval: 250 },
+      controlPlane: plane.controlPlane,
+      deps: { ...fake.deps, log: (l) => lines.push(l) },
+      pollLoop: true,
+    });
+    await adapter.connect();
+    // The generic (non-registration) tick error is contained and logged, not
+    // rethrown out of the loop (which would stop it via the outer finally).
+    await vi.waitFor(() => {
+      expect(lines.some((l) => l.includes('tick failed'))).toBe(true);
+    });
+    await vi.waitFor(() => {
+      expect(calls).toBeGreaterThanOrEqual(2);
+    });
     await adapter.disconnect();
   });
 });

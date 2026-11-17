@@ -106,8 +106,22 @@ export function validManagedWecomState(
         entry.event.semanticRevision === 1 &&
         !!entry.event.scope &&
         entry.event.scope.kind === 'chat_thread' &&
+        // The nested carriers are load-bearing too: resubmitPending submits the
+        // whole event (the base contract fixes scope.senderId to null) and
+        // send() addresses the reply through replyContext.chatId. Presence-only
+        // checks would load a hand-repaired state whose claim is then refused
+        // (scope) or whose reply settles rejected with no chatId (replyContext).
+        entry.event.scope.senderId === null &&
+        typeof entry.event.scope.chatId === 'string' &&
+        entry.event.scope.chatId.length > 0 &&
+        typeof entry.event.scope.threadId === 'string' &&
+        entry.event.scope.threadId.length > 0 &&
         Array.isArray(entry.event.attachments) &&
-        'replyContext' in entry.event &&
+        !!entry.event.replyContext &&
+        typeof entry.event.replyContext === 'object' &&
+        typeof (entry.event.replyContext as { chatId?: unknown }).chatId ===
+          'string' &&
+        (entry.event.replyContext as { chatId: string }).chatId.length > 0 &&
         (entry.inputId === undefined || typeof entry.inputId === 'string') &&
         // held is persisted and re-read at startup; the stall re-arm reads
         // truthiness while the lift and the probe sort require === true, so a

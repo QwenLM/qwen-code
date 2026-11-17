@@ -329,11 +329,14 @@ export class ManagedWecomAdapter {
     this.stop();
     await this.loop;
     // Accepted frames are already durable claims (onMessage persists before
-    // returning), so shutdown has no inbox to drain. A displaced adapter no
-    // longer owns the shared channel row: disconnecting it would deregister
-    // the new owner (the server's disconnect has no generation guard), which
-    // then drops inbound frames WeCom never redelivers. Skip it when displaced.
-    if (!this.displaced) {
+    // returning), so shutdown has no inbox to drain. Neither a displaced nor a
+    // lock-compromised adapter still owns the shared channel row: disconnecting
+    // it would deregister the new owner (the server's disconnect has no
+    // generation guard), which then drops inbound frames WeCom never
+    // redelivers. Skip the row disconnect on both "no longer the owner" paths.
+    // The lock difference stays: a kick released our lock above, but on
+    // compromise the lock belongs to another process and release() is a no-op.
+    if (!this.displaced && !this.ownershipLost) {
       await this.controlPlane.disconnect().catch(() => undefined);
     }
     await this.release();
@@ -882,8 +885,11 @@ export class ManagedWecomAdapter {
         // A transient (or status-less) refusal on ONE entry must not wedge
         // every later delivery: reportOrphanedOutbound runs before pullOutbox,
         // so rethrowing here would abort the tick before any reply is sent for
-        // as long as the fault lasts. Contain it like the registration-refusal
-        // arm above — keep the entry for re-drive and let the outbox pull run.
+        // as long as the fault lasts. Contain it PER ENTRY — keep this entry
+        // for re-drive and carry on to the next, so a fault scoped to one row
+        // never starves the receipts behind it. (Unlike the registration arm's
+        // `return`: while unregistered every later receipt would be refused
+        // identically, so stopping there is right; a transient row fault is not.)
         if (
           !(
             status === 400 ||
@@ -895,7 +901,7 @@ export class ManagedWecomAdapter {
           this.log(
             `Managed WeCom receipt for ${entry.deliveryId} could not be reported (${String(error)}); it re-drives on the next tick.`,
           );
-          return;
+          continue;
         }
         // A deterministic refusal never converges on re-drive, and a held
         // entry runs before every outbox pull: it would stall every later

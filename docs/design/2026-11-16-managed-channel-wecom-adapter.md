@@ -196,10 +196,16 @@ The production deps wrap the SDK client:
   missed-pong detection drive the reconnect.
 - A server kick (`event.disconnected_event`, a new connection displaced this
   one) is fatal: reconnecting would displace the new owner in turn. The deps
-  notify the adapter through an `onStopped` callback; the adapter logs and
-  stops, the same shape as the ownership-loss stop. The state lock already
-  serializes managed instances of one configured entry (name + botId) per
-  workspace scope; a kick means another process or machine owns the bot now.
+  notify the adapter through an `onStopped` callback; the adapter logs, marks
+  itself `displaced`, stops, and releases the state lock while parked — the kick
+  displaced the WebSocket, not the lock (still ours), so a restart of this entry
+  can acquire it instead of waiting for SIGTERM. A displaced adapter also skips
+  the shared channel row's `disconnect()` on shutdown: the server's disconnect
+  has no generation guard, so deregistering would 409 the new owner and drop
+  inbound frames WeCom never redelivers. This is deliberately not the
+  ownership-loss shape — on compromise the lock belongs to another process and
+  is not released, and persisting is suppressed (though the row disconnect is
+  skipped on that path too, for the same reason).
 - Only `message.text` is forwarded to the adapter. Non-text frames (image,
   voice, file, video, mixed) are dropped with a latched diagnostic naming the
   frame type; media and mixed-text support is a follow-up, not part of this

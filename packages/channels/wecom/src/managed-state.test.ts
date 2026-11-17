@@ -271,6 +271,69 @@ describe('validManagedWecomState', () => {
         withEvent({ ...inbound('e1'), attachments: 'none' }),
       ),
     ).toBe(false);
+    // The nested carriers are load-bearing: a presence-only scope/replyContext
+    // check would load a hand-repaired state whose claim is refused (scope) or
+    // whose reply settles rejected with no chatId (replyContext).
+    expect(
+      validManagedWecomState(
+        withEvent({ ...inbound('e1'), scope: { kind: 'chat_thread' } }),
+      ),
+    ).toBe(false);
+    expect(
+      validManagedWecomState(
+        withEvent({
+          ...inbound('e1'),
+          scope: {
+            kind: 'chat_thread',
+            senderId: null,
+            chatId: '',
+            threadId: 'c',
+          },
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      validManagedWecomState(
+        withEvent({
+          ...inbound('e1'),
+          scope: {
+            kind: 'chat_thread',
+            senderId: null,
+            chatId: 'c',
+            threadId: '',
+          },
+        }),
+      ),
+    ).toBe(false);
+    // The base contract fixes scope.senderId to literally null.
+    expect(
+      validManagedWecomState(
+        withEvent({
+          ...inbound('e1'),
+          scope: {
+            kind: 'chat_thread',
+            senderId: 's',
+            chatId: 'c',
+            threadId: 'c',
+          },
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      validManagedWecomState(withEvent({ ...inbound('e1'), replyContext: {} })),
+    ).toBe(false);
+    expect(
+      validManagedWecomState(
+        withEvent({ ...inbound('e1'), replyContext: null }),
+      ),
+    ).toBe(false);
+    expect(
+      validManagedWecomState(
+        withEvent({ ...inbound('e1'), replyContext: { chatId: '' } }),
+      ),
+    ).toBe(false);
+    // No over-rejection: the intact carriers the adapter actually writes load.
+    expect(validManagedWecomState(withEvent(inbound('e1')))).toBe(true);
   });
 
   it('rejects pending beyond the admission limit', () => {
