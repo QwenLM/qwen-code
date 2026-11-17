@@ -3511,6 +3511,14 @@ describe('managed-agent-server e2e runner', () => {
     expect(source.match(/if \(blockAnswer !== undefined\) \{/g)).toHaveLength(
       2,
     );
+    // Both statement pins are blind to a sibling fallback written *after* the
+    // gate (`if (blockAnswer === undefined) return …allow…`): the counts stay
+    // two while the fire fake mis-answers side queries again. Inventory the
+    // ingredients instead — the block allow is constructed only inside the
+    // helper, and each arm references the decision variable exactly three
+    // times (declaration, gate, answer).
+    expect(source.match(/shouldBlock:\s*false/g)).toHaveLength(1);
+    expect(source.match(/\bblockAnswer\b/g)).toHaveLength(6);
     // The create -> list lifecycle claim: cron_list must echo the created
     // prompt; a mere tool result must not pass.
     expect(source).toMatch(/includes\('\/loop check the deploy'\)/);

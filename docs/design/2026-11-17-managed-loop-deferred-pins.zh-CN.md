@@ -33,8 +33,8 @@
 | `packages/core/src/skills/bundled/loop/managed-loop-skill.test.ts`                              | profile 单一来源；Parsing 库存钉；哨兵 allow-list 可执行测试                  |
 | `packages/core/src/skills/bundled/loop/SKILL.md`                                                | Nd 表行 + 月界 caveat                                                         |
 | `packages/core/src/managed-runtime/contracts/managed-loop-skill-{cron,union,bundled-body}.json` | 重生                                                                          |
-| `scripts/run-managed-agent-server-e2e.ts`                                                       | classifierBlockAnswer helper；两个 fake 都用它                                |
-| `scripts/tests/managed-agent-server-e2e.test.js`                                                | fake createdId 钉；分类器可执行测试                                           |
+| `scripts/run-managed-agent-server-e2e.ts`                                                       | classifierBlockAnswer + mintedScheduleId helper；两个 fake 都用它们           |
+| `scripts/tests/managed-agent-server-e2e.test.js`                                                | fake createdId 钉；分类器 + minted-id 可执行测试；answer/标识符库存钉         |
 
 ## 范围边界
 
@@ -42,9 +42,9 @@
 
 ## 验收标准
 
-- core parity 套件绿（30 测试），含库存、allow-list、调用点、sidecar 集合与 caveat 钉及重生 sidecar 逐字节 parity。
-- scripts 元套件绿（181 测试），含 fake createdId 钉与可执行分类器收窄。
-- 变异见证：additive-fallback 分类器变异使非 block 方向红；deny-list 哨兵回退使新哨兵方向红；伪造 fake createdId 使其钉红；删除 Parsing 规则使库存钉红。各字节级还原复绿。
+- core parity 套件绿（32 测试），含库存、allow-list、调用点、sidecar 集合、Java 服务集合与 caveat 钉及重生 sidecar 逐字节 parity。
+- scripts 元套件绿（182 测试），含 fake createdId 钉、可执行分类器收窄与可执行 minted-id 提取。
+- 变异见证：additive-fallback 分类器变异使非 block 方向红；deny-list 哨兵回退使新哨兵方向红；伪造 fake createdId 使其钉红；删除 Parsing 规则使库存钉红；调用点之后的 sibling fallback 使 answer 字面量库存钉红。各字节级还原复绿。
 - 真实打包栈 `--loop-skill` 与 `--loop-fire` 臂以重生 sidecar 绿（jar 重建）。
 
 ## Round-1 评审精化
@@ -66,6 +66,14 @@
 - **可执行 minted-id helper（R2-2）。** fake 侧提取合并为顶层纯函数 `mintedScheduleId(messages, createCallId)`（返回 `undefined`，绝不编造 id），两臂共用并在元测试对敌意历史执行；仅源码拼写计数会漏掉伪造 `?? 'asch_' + '0'.repeat(32)` fallback 且挡住合并。调用点与显式失败 `?? 'missing-schedule-id'` fallback 上钉。
 - **classifier 门钉（R2-3）。** 对 `if (blockAnswer !== undefined) {`（两臂）计数钉，堵住「门改宽」（`if (blockProperties !== undefined)` + `blockAnswer ?? {…}`）——该拼写在赋值计数仍为 2 时复活误答。
 - **替换单元钉（R2-4）。** managed Nd 修复的 `sub()` 替换串上钉（`midnight UTC on days 1, 1+N, … of each month`、`not.toContain('every N days')`）加示例间隔，使回退替换串并重生不能在全绿下重新教「every N days」。
+
+## 验证报告跟进
+
+独立 `/verify-pr` 轮在首个精化 head 上报了两条发现与一条 nit，三者均在此关闭：
+
+- **N ≤ 31 多算一档（low）。** 与第二轮评审抓到的 critical 同一缺陷；由上文 N ≤ 30 修正关闭。
+- **调用点之后的 sibling fallback（覆盖缺口）。** 语句锚定计数钉看不到写在门*之后*的 fallback（`if (blockAnswer === undefined) return …allow…`）：两个计数仍为 2，而 fire fake 重新误答侧查询，只在打包臂可见。改用两条「数成分而非数语句」的库存钉关闭——block allow 字面量 `shouldBlock: false` 只在 `classifierBlockAnswer` 内构造（计数 1），每臂恰好引用 `blockAnswer` 三次：声明 / 门 / answer（计数 6）。三路见证：报告点名的门后 sibling 与 usage 行 `?? { shouldBlock: false }` fallback 各使字面量库存红；经 helper 重新推导 allow（不新增字面量）的 sibling 只使标识符库存红，故两条钉都不空转。helper 前置注释不再拼写该字面量，使库存计数无歧义。
+- **parity 计数陈旧（nit）。** PR 正文与上文验收标准改为当前套件规模（core 32、scripts 元 182）与最新真实栈 occurrence key。
 
 ## 开放问题
 

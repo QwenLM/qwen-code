@@ -2710,7 +2710,7 @@ function assertScheduledFireWitness(
 // The classifier side-query answer for a respond_in_schema tool's properties,
 // or undefined when the schema is not the block schema. Other structured side
 // queries (title, tool-use summary, next speaker) also emit respond_in_schema;
-// answering them with {shouldBlock:false} is schema-invalid and would silently
+// answering them with a block allow is schema-invalid and would silently
 // mis-answer a real feature, so a non-block schema must yield undefined — never
 // a fallback allow. Kept a top-level pure declaration so the meta-test can
 // execute it against both block and non-block schemas (an additive fallback

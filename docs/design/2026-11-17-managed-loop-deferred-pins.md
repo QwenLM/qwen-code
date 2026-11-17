@@ -33,8 +33,8 @@ The merged managed `/loop` slices carry review findings that were recorded as de
 | `packages/core/src/skills/bundled/loop/managed-loop-skill.test.ts`                              | profile single-source; Parsing inventory pin; sentinel allow-list executable test         |
 | `packages/core/src/skills/bundled/loop/SKILL.md`                                                | Nd table row + month-boundary caveat                                                      |
 | `packages/core/src/managed-runtime/contracts/managed-loop-skill-{cron,union,bundled-body}.json` | regenerated                                                                               |
-| `scripts/run-managed-agent-server-e2e.ts`                                                       | classifierBlockAnswer helper; both fakes use it                                           |
-| `scripts/tests/managed-agent-server-e2e.test.js`                                                | fake createdId pins; classifier executable test                                           |
+| `scripts/run-managed-agent-server-e2e.ts`                                                       | classifierBlockAnswer + mintedScheduleId helpers; both fakes use them                     |
+| `scripts/tests/managed-agent-server-e2e.test.js`                                                | fake createdId pins; classifier + minted-id executable tests; answer/identifier inventory |
 
 ## Scope boundaries
 
@@ -42,9 +42,9 @@ Only the six named deferred items. The remaining ~64 deferred entries (doc stale
 
 ## Acceptance criteria
 
-- Core parity suite green (30 tests), including the inventory, allow-list, call-site, sidecar-set and caveat pins and the regenerated-sidecar byte-for-byte parity.
-- Scripts meta suites green (181 tests), including the fake createdId pins and the executable classifier narrowing.
-- Mutation witnesses: the additive-fallback classifier mutation reddens the non-block directions; the deny-list sentinel revert reddens the new-sentinel direction; a fabricated fake createdId reddens its pin; a deleted Parsing rule reddens the inventory pin. Each restored byte-equal returns green.
+- Core parity suite green (32 tests), including the inventory, allow-list, call-site, sidecar-set, Java served-set and caveat pins and the regenerated-sidecar byte-for-byte parity.
+- Scripts meta suites green (182 tests), including the fake createdId pins, the executable classifier narrowing and the executable minted-id extraction.
+- Mutation witnesses: the additive-fallback classifier mutation reddens the non-block directions; the deny-list sentinel revert reddens the new-sentinel direction; a fabricated fake createdId reddens its pin; a deleted Parsing rule reddens the inventory pin; a post-gate sibling fallback reddens the answer-literal inventory. Each restored byte-equal returns green.
 - Real packaged-stack `--loop-skill` and `--loop-fire` arms green with the regenerated sidecars (jar rebuilt).
 
 ## Round-1 review refinements
@@ -66,6 +66,14 @@ The second round caught a fix-induced critical and four second-order gaps (each 
 - **Executable minted-id helper (R2-2).** The fake-side extraction is consolidated into a top-level pure `mintedScheduleId(messages, createCallId)` (returns `undefined`, never an invented id), used by both arms and executed in the meta-test against hostile histories; a source-spelling count alone missed a forged `?? 'asch_' + '0'.repeat(32)` fallback and blocked the consolidation. The call sites and the loud-failure `?? 'missing-schedule-id'` fallback are pinned.
 - **Classifier gate pin (R2-3).** A count pin on `if (blockAnswer !== undefined) {` (both arms) closes the gate-widening spelling (`if (blockProperties !== undefined)` + `blockAnswer ?? {…}`) that restored the mis-answer with the assignment count still two.
 - **Substituted-cell pin (R2-4).** The managed Nd fix's `sub()` replacement is pinned (`midnight UTC on days 1, 1+N, … of each month`, `not.toContain('every N days')`) plus the worked-example gaps, so reverting the replacement string and regenerating cannot teach "every N days" again with every gate green.
+
+## Verification-report follow-up
+
+The independent `/verify-pr` round on the first refined head reported two findings and a nit; all three are closed here:
+
+- **N ≤ 31 off by one (low).** The same defect the second review round caught as a critical; fixed by the N ≤ 30 correction above.
+- **Post-gate sibling fallback (coverage gap).** The statement-anchored count pins are blind to a fallback written _after_ the gate (`if (blockAnswer === undefined) return …allow…`): both counts stay two while the fire fake mis-answers side queries again, visible only in the packaged arm. Closed by two inventory pins that count ingredients rather than statements — the block allow literal `shouldBlock: false` is constructed only inside `classifierBlockAnswer` (count 1), and each arm references `blockAnswer` exactly three times, declaration / gate / answer (count 6). Witnessed three ways: the reported post-gate sibling and a usage-line `?? { shouldBlock: false }` fallback each redden the literal inventory; a sibling that re-derives the allow through the helper (no new literal) reddens only the identifier inventory, so neither pin is dead. The helper's leading comment no longer spells the literal, keeping the inventory count unambiguous.
+- **Stale parity counts (nit).** The PR description and the acceptance criteria above now carry the current suite sizes (core 32, scripts meta 182) and the latest real-stack occurrence key.
 
 ## Open questions
 
