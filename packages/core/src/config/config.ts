@@ -10,6 +10,7 @@ import {
   runWithHookExecutionOwner,
 } from '../hooks/hook-execution-context.js';
 import type { SessionSourceService } from '../services/session-sources.js';
+import type { GeneratedUiStateService } from '../services/generated-ui-state.js';
 import type { RequestLifecycleEvent } from '../telemetry/request-lifecycle.js';
 import { getInvocationContext } from '../utils/invocation-context.js';
 
@@ -2494,12 +2495,31 @@ export interface SubSessionSpawnRequest {
   model?: string;
   /** Optional display name for the sub-session in the session list. */
   name?: string;
+  /** Registered workspace (absolute path or id) to run the sub-session in;
+   * absent means the caller's workspace. */
+  workspace?: string;
+  workspaceGeneration?: string;
+  /** A sub-session this caller created earlier, to send the prompt to
+   * instead of creating one. It lives in `workspace`. */
+  sessionId?: string;
 }
+
+export interface SubSessionWorkspaceBinding {
+  workspaceId: string;
+  workspaceCwd: string;
+  workspaceGeneration: string;
+}
+
+export type SubSessionWorkspaceResolver = (
+  workspace: string,
+) => Promise<SubSessionWorkspaceBinding>;
 
 /** Result returned to the `create_sub_session` tool. `result` (the sub-session's
  * first-turn output) is present only for `completion: 'first-turn'`. */
 export interface SubSessionSpawnResult {
   sessionId: string;
+  /** Canonical destination for a cross-workspace session link. */
+  workspaceCwd?: string;
   result?: string;
   stopReason?: string;
   /** Whether the parent lineage was durably persisted to the sub-session's
@@ -6814,6 +6834,7 @@ export class Config {
     this.workflowModePublishedState = undefined;
     this.refreshWorkflowMode();
     this.sessionSourceService = this.sessionSourceServiceFactory?.();
+    this.generatedUiStateService = this.generatedUiStateServiceFactory?.();
     this.initializeGoalRuntime(this.sessionData?.conversation.messages);
     // The file-read cache is session-scoped: its `file_unchanged`
     // placeholder relies on the model having seen the prior full read
@@ -10946,6 +10967,22 @@ export class Config {
       : undefined;
   }
 
+  private generatedUiStateService?: GeneratedUiStateService;
+  private generatedUiStateServiceFactory?: () => GeneratedUiStateService;
+
+  setGeneratedUiStateServiceFactory(
+    factory: () => GeneratedUiStateService,
+  ): void {
+    this.generatedUiStateServiceFactory = factory;
+    this.generatedUiStateService = factory();
+  }
+
+  getGeneratedUiStateService(): GeneratedUiStateService | undefined {
+    return Object.hasOwn(this, 'generatedUiStateService')
+      ? this.generatedUiStateService
+      : undefined;
+  }
+
   isRecordArtifactEnabled(): boolean {
     if (!this.artifactRecordingSupported) return false;
     if (process.env['QWEN_CODE_DISABLE_ARTIFACT'] === '1') return false;
@@ -14406,6 +14443,7 @@ export class Config {
   }
 
   private subSessionSpawner?: SubSessionSpawner;
+  private subSessionWorkspaceResolver?: SubSessionWorkspaceResolver;
 
   private currentSessionScheduledTaskCreator?: CurrentSessionScheduledTaskCreator;
 
@@ -14415,8 +14453,16 @@ export class Config {
    * `extMethod`); left unset in interactive TUI / headless, where the tool is
    * therefore never registered. `undefined` clears it on session teardown.
    */
-  setSubSessionSpawner(spawner: SubSessionSpawner | undefined): void {
+  setSubSessionSpawner(
+    spawner: SubSessionSpawner | undefined,
+    resolveWorkspace?: SubSessionWorkspaceResolver,
+  ): void {
     this.subSessionSpawner = spawner;
+    this.subSessionWorkspaceResolver = resolveWorkspace;
+  }
+
+  getSubSessionWorkspaceResolver(): SubSessionWorkspaceResolver | undefined {
+    return this.subSessionWorkspaceResolver;
   }
 
   /** The injected sub-session spawner, or undefined outside daemon mode. */

@@ -438,10 +438,10 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
     '启用持久化的工作区 Agent 在共享任务线程上协作（实验性）。与 Agent Team 相互独立：两个开关互不隐含。启用只表示允许协作；把 Agent 开放给外部调用方、信任某个连接、注册 host 仍各自需要显式配置。也可通过 QWEN_CODE_ENABLE_AGENT_COLLABORATION=1 环境变量启用。',
   'settings.label.experimental.unifiedAgentLoop': '统一 Agent Loop',
   'settings.description.experimental.unifiedAgentLoop':
-    '让会话运行在共享的 agent loop 上。未设置时，每个入口使用自己的默认值：headless 会话（`-p` 与 stream-json）和 Ink TUI 运行在共享 loop 上，ACP 会话（Zed、VS Code、Web Shell、channel）、OpenTUI、子代理和 Hosted Harness 仍用各自的 loop（在这些入口上属实验性）。设为 `true` 时它们都运行在共享 loop 上（Hosted Harness 的模型轮运行在它上面，同时保留其 journal 化工具派发），设为 `false` 时它们都用各自的 loop，headless 和 Ink TUI 也是。QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP 环境变量按入口覆盖此设置：`1` 开启所有入口，`0` 关闭所有入口，逗号分隔的列表（如 `headless,acp=0`）强制指定入口（headless、acp、ink、opentui、agent-core、speculation、hosted）。裸 `1`/`0` 只作为整值识别，不在列表内生效；列表未点名的入口回退到此设置。项目级 `.env` 或 `settings.env` 无法设置该变量。',
+    '让会话运行在共享的 agent loop 上。未设置时，每个入口使用自己的默认值：headless 会话（`-p` 与 stream-json）、Ink TUI 和子代理运行在共享 loop 上，ACP 会话（Zed、VS Code、Web Shell、channel）、OpenTUI 和 Hosted Harness 仍用各自的 loop（在这些入口上属实验性）。设为 `true` 时它们都运行在共享 loop 上（Hosted Harness 的模型轮运行在它上面，同时保留其 journal 化工具派发），设为 `false` 时它们都用各自的 loop，headless、Ink TUI 和子代理也是。QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP 环境变量按入口覆盖此设置：`1` 开启所有入口，`0` 关闭所有入口，逗号分隔的列表（如 `headless,acp=0`）强制指定入口（headless、acp、ink、opentui、agent-core、speculation、hosted）。裸 `1`/`0` 只作为整值识别，不在列表内生效；列表未点名的入口回退到此设置。项目级 `.env` 或 `settings.env` 无法设置该变量。',
   'settings.label.experimental.eventBusAgentLoop': '事件总线 Agent Loop',
   'settings.description.experimental.eventBusAgentLoop':
-    '让共享 agent loop 运行在事件总线架构上（实验性）。对运行在共享 agent loop 上的入口生效：默认是 headless 会话（`-p` 与 stream-json）和 Ink TUI，开启 experimental.unifiedAgentLoop 时还有 ACP 会话（Zed、VS Code、Web Shell、channel）、OpenTUI 和子代理；其他 surface 保留现有的 loop 内部实现。QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP 环境变量覆盖此设置：`1` 开启，`0` 关闭，逗号分隔的列表（如 `headless=0`）强制指定入口（headless、acp、ink、opentui、agent-core；`speculation` 为保留名）。今天只有这些已接线的入口生效；裸 `1`/`0` 只作为整值识别，不在列表内生效，列表未点名的入口回退到此设置。项目级 `.env` 或 `settings.env` 无法设置该变量。',
+    '让共享 agent loop 运行在事件总线架构上（实验性）。对运行在共享 agent loop 上的入口生效：默认是 headless 会话（`-p` 与 stream-json）、Ink TUI 和子代理，开启 experimental.unifiedAgentLoop 时还有 ACP 会话（Zed、VS Code、Web Shell、channel）和 OpenTUI；其他 surface 保留现有的 loop 内部实现。QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP 环境变量覆盖此设置：`1` 开启，`0` 关闭，逗号分隔的列表（如 `headless=0`）强制指定入口（headless、acp、ink、opentui、agent-core；`speculation` 为保留名）。今天只有这些已接线的入口生效；裸 `1`/`0` 只作为整值识别，不在列表内生效，列表未点名的入口回退到此设置。项目级 `.env` 或 `settings.env` 无法设置该变量。',
   'settings.label.experimental.artifact': '启用 Artifacts',
   'settings.description.experimental.artifact':
     '启用 artifact 工具，默认开启。在交互式非 SDK 会话中，模型可以把自包含 HTML 页面发布为交互式 Artifact 并在浏览器中打开；非 SDK 的 daemon 会话可使用仅记录元数据的 record_artifact 工具。设为 false 或用 QWEN_CODE_DISABLE_ARTIFACT=1 可同时禁用两者。',
@@ -462,6 +462,9 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.label.agents.arena.preserveArtifacts': '保留 Arena 产物',
   'settings.description.agents.arena.preserveArtifacts':
     '启用后，Arena worktree 和会话状态文件会在会话结束或主智能体退出后保留。',
+  'settings.label.worktree.defaultForNewSessions': '新会话默认使用 Worktree',
+  'settings.description.worktree.defaultForNewSessions':
+    '开启（默认）时，受信任 Git workspace 中的新 Web Shell 会话默认进入隔离 worktree：composer 缺省为 Worktree 模式，首条消息发送时创建 worktree。设为 false 则缺省使用当前分支。仅影响 Web Shell composer 的缺省值；显式模式选择与 daemon API 不变。',
 };
 
 export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {

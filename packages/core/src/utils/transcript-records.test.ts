@@ -492,6 +492,7 @@ describe('validateTranscriptRecord', () => {
     session_artifact_event: true,
     session_artifact_snapshot: true,
     session_sources_snapshot: true,
+    generated_ui_state: true,
     branch_checkpoint: true,
     goal_state: true,
     goal_runtime: true,
