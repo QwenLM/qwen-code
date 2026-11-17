@@ -12,9 +12,9 @@
 // re-check) must receive a fresh answer, so caching stays caller-side.
 //
 // Deliberately NOT GitIgnoreParser (gitIgnoreParser.ts): that in-process
-// matcher reads the ignore files itself and misses sources a linked
-// worktree or a global excludesFile would supply, so its verdict can
-// diverge from git's in either direction — a guard needs git's own answer.
+// matcher reads the ignore files itself and misses sources a global
+// excludesFile would supply, so its verdict can diverge from git's in either
+// direction — a guard needs git's own answer.
 
 import { execFileSync } from 'node:child_process';
 import { NO_EXEC_CONFIG } from './gitUtils.js';

@@ -131,10 +131,15 @@ function getNoFollowFlag(): number | undefined {
  * Synchronous variant of {@link openNoFollow}. Returns a raw fd; the caller
  * owns closing it.
  */
-export function openSyncNoFollow(filePath: string): number {
+export function openSyncNoFollow(
+  filePath: string,
+  { nonBlocking = false }: { nonBlocking?: boolean } = {},
+): number {
   // Optional chain so strict vitest mocks of node:fs that omit `constants`
   // degrade to plain O_RDONLY (= 0) instead of throwing at call time.
-  const baseFlags = fs.constants?.O_RDONLY ?? 0;
+  const baseFlags =
+    (fs.constants?.O_RDONLY ?? 0) |
+    (nonBlocking ? (fs.constants?.O_NONBLOCK ?? 0) : 0);
   const noFollowFlag = getNoFollowFlag();
   if (typeof noFollowFlag === 'number') {
     return fs.openSync(filePath, baseFlags | noFollowFlag);

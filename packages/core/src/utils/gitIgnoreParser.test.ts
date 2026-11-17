@@ -71,6 +71,78 @@ node_modules/
       expect(parser.isIgnored(path.join('src', 'file.tmp'))).toBe(true);
       expect(parser.isIgnored('src/file.js')).toBe(false);
     });
+
+    // Windows does not preserve a trailing space in a directory name.
+    it.skipIf(process.platform === 'win32')(
+      'preserves trailing spaces in a gitfile directory target',
+      async () => {
+        const gitDir = path.join(projectRoot, 'metadata ');
+        await fs.rm(path.join(projectRoot, '.git'), { recursive: true });
+        await fs.mkdir(path.join(gitDir, 'info'), { recursive: true });
+        await fs.writeFile(
+          path.join(projectRoot, '.git'),
+          `gitdir: ${gitDir}\n`,
+        );
+        await fs.writeFile(path.join(gitDir, 'info', 'exclude'), '*.tmp\n');
+
+        expect(parser.isIgnored('sample.tmp')).toBe(true);
+        expect(parser.isIgnored('sample.txt')).toBe(false);
+      },
+    );
+
+    it.each(['relative', 'absolute'])(
+      'loads excludes through a %s gitfile pointer',
+      async (pointerKind) => {
+        const gitDir = path.join(projectRoot, 'metadata');
+        await fs.rm(path.join(projectRoot, '.git'), { recursive: true });
+        await fs.mkdir(path.join(gitDir, 'info'), { recursive: true });
+        await fs.writeFile(
+          path.join(projectRoot, '.git'),
+          `gitdir: ${pointerKind === 'relative' ? 'metadata' : gitDir}\n`,
+        );
+        await fs.writeFile(
+          path.join(gitDir, 'info', 'exclude'),
+          '/root.tmp\n*.cache\n!keep.cache\n',
+        );
+        await createTestFile('.gitignore', '!visible.cache\n');
+
+        expect(parser.isIgnored('root.tmp')).toBe(true);
+        expect(parser.isIgnored('nested/root.tmp')).toBe(false);
+        expect(parser.isIgnored('nested/build.cache')).toBe(true);
+        expect(parser.isIgnored('nested/keep.cache')).toBe(false);
+        expect(parser.isIgnored('visible.cache')).toBe(false);
+      },
+    );
+
+    it.each(['relative', 'absolute'])(
+      'loads linked-worktree excludes through a %s commondir pointer',
+      async (pointerKind) => {
+        const commonDir = path.join(projectRoot, 'shared-metadata');
+        const gitDir = path.join(commonDir, 'worktrees', 'linked');
+        await fs.rm(path.join(projectRoot, '.git'), { recursive: true });
+        await fs.mkdir(gitDir, { recursive: true });
+        await fs.mkdir(path.join(commonDir, 'info'));
+        await fs.writeFile(
+          path.join(projectRoot, '.git'),
+          `gitdir: ${gitDir}\n`,
+        );
+        await fs.writeFile(
+          path.join(gitDir, 'commondir'),
+          `${pointerKind === 'relative' ? '../..' : commonDir}\n`,
+        );
+        await fs.writeFile(
+          path.join(commonDir, 'info', 'exclude'),
+          '/root.tmp\n*.cache\n!keep.cache\n',
+        );
+        await createTestFile('.gitignore', '!visible.cache\n');
+
+        expect(parser.isIgnored('root.tmp')).toBe(true);
+        expect(parser.isIgnored('nested/root.tmp')).toBe(false);
+        expect(parser.isIgnored('nested/build.cache')).toBe(true);
+        expect(parser.isIgnored('nested/keep.cache')).toBe(false);
+        expect(parser.isIgnored('visible.cache')).toBe(false);
+      },
+    );
   });
 
   describe('isIgnored path handling', () => {

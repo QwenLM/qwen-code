@@ -8,6 +8,29 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import ignore from 'ignore';
 import { isPathWithinRoot } from './workspaceContext.js';
+import { openSyncNoFollow } from './no-follow-open.js';
+
+function readGitPointer(filePath: string): string | undefined {
+  let fd: number | undefined;
+  try {
+    fd = openSyncNoFollow(filePath, { nonBlocking: true });
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.size > 8192) return undefined;
+    const buffer = Buffer.alloc(stat.size);
+    const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, 0);
+    return buffer.toString('utf8', 0, bytesRead).replace(/[\r\n]+$/, '');
+  } catch {
+    return undefined;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // Ignore a close failure after reading optional metadata.
+      }
+    }
+  }
+}
 
 export interface GitIgnoreFilter {
   isIgnored(filePath: string): boolean;
@@ -24,21 +47,18 @@ export class GitIgnoreParser implements GitIgnoreFilter {
     this.projectRoot = path.resolve(projectRoot);
   }
 
-  private loadPatternsForFile(patternsFilePath: string): string[] {
+  private loadPatternsForFile(
+    patternsFilePath: string,
+    relativeBaseDir = path.dirname(
+      path.relative(this.projectRoot, patternsFilePath),
+    ),
+  ): string[] {
     let content: string;
     try {
       content = fs.readFileSync(patternsFilePath, 'utf-8');
     } catch (_error) {
       return [];
     }
-
-    const isExcludeFile = patternsFilePath.endsWith(
-      path.join('.git', 'info', 'exclude'),
-    );
-
-    const relativeBaseDir = isExcludeFile
-      ? '.'
-      : path.dirname(path.relative(this.projectRoot, patternsFilePath));
 
     // Git strips a trailing CR, so that CRLF files work, and nothing else.
     // Leading whitespace is part of the pattern, and trailing whitespace is
@@ -118,6 +138,25 @@ export class GitIgnoreParser implements GitIgnoreFilter {
       .filter((p) => p !== '');
   }
 
+  private getExcludeFilePath(): string | undefined {
+    let gitDir = path.join(this.projectRoot, '.git');
+    try {
+      if (!fs.statSync(gitDir).isDirectory()) {
+        const pointer = readGitPointer(gitDir);
+        if (!pointer?.startsWith('gitdir: ')) return undefined;
+        gitDir = path.resolve(
+          this.projectRoot,
+          pointer.slice('gitdir: '.length),
+        );
+      }
+      const commonDir = readGitPointer(path.join(gitDir, 'commondir'))?.trim();
+      if (commonDir) gitDir = path.resolve(gitDir, commonDir);
+      return path.join(gitDir, 'info', 'exclude');
+    } catch {
+      return undefined;
+    }
+  }
+
   isIgnored(filePath: string): boolean {
     if (!filePath || typeof filePath !== 'string') {
       return false;
@@ -176,16 +215,11 @@ export class GitIgnoreParser implements GitIgnoreFilter {
     // Always ignore .git directory
     ig.add('.git');
 
-    // Load global patterns from .git/info/exclude on first use
+    // Linked worktrees share info/exclude in the common Git directory.
     if (this.globalPatterns === undefined) {
-      const excludeFile = path.join(
-        this.projectRoot,
-        '.git',
-        'info',
-        'exclude',
-      );
-      this.globalPatterns = fs.existsSync(excludeFile)
-        ? this.loadPatternsForFile(excludeFile)
+      const excludeFile = this.getExcludeFilePath();
+      this.globalPatterns = excludeFile
+        ? this.loadPatternsForFile(excludeFile, '.')
         : [];
     }
     ig.add(this.globalPatterns);
