@@ -252,6 +252,9 @@ export interface DaemonBtwMessage extends DaemonMessageMeta {
   question: string;
   answer: string;
   isPending: boolean;
+  /** Set when the question explains a background task, so the task's detail
+   * panel can mirror the answer in place. Absent for typed /btw. */
+  taskId?: string;
 }
 
 export interface DaemonInsightProgressMessage extends DaemonMessageMeta {

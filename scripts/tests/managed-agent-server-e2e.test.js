@@ -3343,7 +3343,7 @@ describe('managed-agent-server e2e runner', () => {
     // payload is printed eagerly. The freeze arm's wake record reads as a
     // pass line on stdout too, so it defers the same way — no eager
     // console.log of a JSON payload remains inside the try at all.
-    expect(source.match(/resultJson = JSON\.stringify\(/g)).toHaveLength(6);
+    expect(source.match(/resultJson = JSON\.stringify\(/g)).toHaveLength(7);
     // Native approvals share one summary; the rewritten-command arm has its
     // own receipt/stage summary instead of forging native execution fields.
     expect(
@@ -3515,6 +3515,166 @@ describe('managed-agent-server e2e runner', () => {
     );
     expect(source).not.toMatch(/\.includes\(callId\)/);
     expect(source).not.toMatch(/serialized\.includes\('loop-cron-/);
+  });
+
+  // The loop-fire arm attests a real scheduled fire: the scanner's fired
+  // ledger row and the wake turn's model round must name one occurrence. A
+  // manual trigger, a skipped slot, a framing that names a different
+  // occurrence or schedule, a create round that already carries the framing,
+  // or a clear leg that never retires the minted automation would each forge
+  // a pass.
+  it('pins the loop-fire arm scheduled-trigger, occurrence-tie, and retirement contracts', () => {
+    const source = read('scripts/run-managed-agent-server-e2e.ts');
+    // The mode exists, is exclusive, and is named in the usage line.
+    expect(source).toMatch(/argument === '--loop-fire'/);
+    expect(source).toMatch(/loopSkill,\s*loopFire,\s*\]\.filter\(Boolean\)/);
+    expect(source).toMatch(/\|--loop-fire\]/);
+    // The default real-model scenario must stay off for the fire arm: the
+    // fire scenario is its own earlier branch, and dropping !loopFire here
+    // would run the default scenario under --loop-fire (R1-2).
+    expect(source).toMatch(/\} else if \(!loopSkill && !loopFire\) \{/);
+    // The fire arm shares the files/4 profile but alone sets the 1s scan
+    // delay; the cadence stays the cron minimum (no clock shortcut). The
+    // profile pin names the assignment itself — the bare ternary matches
+    // four other sites and would not see the profile entry dropped (R1-3).
+    expect(source).toMatch(
+      /loopSkill \|\| loopFire\s*\?\s*\{\s*QWEN_MANAGED_AGENT_DEFINITION_TOOL_PROFILES:\s*'hosted-workspace-files\/4'/,
+    );
+    expect(source).toMatch(
+      /\.\.\.\(loopFire\s*\?\s*\{ QWEN_MANAGED_AGENT_AUTOMATION_SCAN_DELAY: '1s' \}/,
+    );
+    expect(source).toMatch(/cron: '\*\/1 \* \* \* \*'/);
+    expect(source).toMatch(
+      /const loopFirePrompt = 'LOOP-FIRE-PROMPT check the deploy';/,
+    );
+    expect(source).toMatch(
+      /const loopFireWakeResponse = 'LOOP_FIRE_OBSERVED';/,
+    );
+    // The fake model answers the framing round terminally and the scenario
+    // finds it by the framing header; the scheduled-trigger discrimination
+    // lives in the guard alone, so a relayed trigger drift reddens the guard
+    // while the wake turn still runs. Create/clear cron calls match by
+    // structured call id.
+    expect(source).toMatch(
+      /if \(text\.includes\('Scheduled automation:'\)\) \{/,
+    );
+    expect(source).toMatch(
+      /latestUserText\(request\)\.includes\('Scheduled automation:'\)/,
+    );
+    expect(source).toMatch(/return \{ content: loopFireWakeResponse \};/);
+    expect(source).toMatch(/'loop-fire-create'/);
+    expect(source).toMatch(/'loop-fire-delete'/);
+    // The scenario sends the /loop 1m input and no caller skills, extracts
+    // the minted id structurally, and waits for the fire with the
+    // minute-boundary budget.
+    expect(source).toMatch(/text: `\/loop 1m \$\{loopFirePrompt\}`/);
+    expect(source).toMatch(/const fireScheduleId = \/asch_\[0-9a-f\]\{32\}\//);
+    // The wake is witnessed on the runs route, not the public turn event
+    // stream: a harness-driven wake turn does not ride that stream, and the
+    // run mirror's completed state settles from the turn's own committed
+    // result. The poll carries the minute-boundary budget.
+    expect(source).toMatch(/await waitUntil\(\s*'Scheduled fire ledger row',/);
+    expect(source).toMatch(/150_000,\s*harness,\s*\);/);
+    // The client turns (create, clear) settle as exactly one turn.completed
+    // each; the clear leg queues from the create cursor because the wake turn
+    // added no public events.
+    expect(source).toMatch(
+      /\['create', fireCreated\],\s*\['clear', fireCleared\],/,
+    );
+    expect(source).toMatch(
+      /sendFireInput\(\s*'\/loop clear',\s*fireCreated\.lastSequence,?\s*\)/,
+    );
+    // The negative is race-free: create rounds are selected by their latest
+    // user text (the /loop input), which the wake round's framing never is.
+    expect(source).toMatch(
+      /latestUserText\(request\)\.includes\('\/loop 1m'\)/,
+    );
+    expect(source).toMatch(
+      /A create-turn round already carried the automation framing/,
+    );
+    expect(source).toMatch(/The fire's prompt never reached the model/);
+    // The ledger witness polls the public runs route for a scheduled, fired,
+    // completed occurrence, then the guard ties it to the wake framing.
+    expect(source).toMatch(/v1\/agent-automations\/\$\{fireScheduleId\}\/runs/);
+    expect(source).toMatch(
+      /row\['trigger'\] === 'scheduled' &&\s*row\['outcome'\] === 'fired' &&\s*row\['state'\] === 'completed'/,
+    );
+    expect(source).toMatch(/function assertScheduledFireWitness\(/);
+    expect(source).toMatch(
+      /assertScheduledFireWitness\(\s*fireRuns,\s*wakeFraming,\s*fireScheduleId,?\s*\)/,
+    );
+    expect(source).toMatch(/No scheduled occurrence settled fired/);
+    expect(source).toMatch(/ledger and model round are not the same fire/);
+    expect(source).toMatch(/it is not the fire's turn/);
+    // The clear leg retires the minted id and the result must state it.
+    expect(source).toMatch(/Retired cron schedule \$\{fireScheduleId\}\./);
+    expect(source).toMatch(/mode: 'loop-fire'/);
+    expect(source).toMatch(/fireTrigger: firedRun\?\.\['trigger'\]/);
+    // Execute the guard: a severed guard (false &&, or a never-called
+    // closure) leaves the text pins green but these assertions red.
+    const { assertScheduledFireWitness } = load(
+      ['assertScheduledFireWitness'],
+      'assertScheduledFireWitness',
+    )();
+    const scheduleId = `asch_${'a'.repeat(32)}`;
+    const occurrenceKey = '2026-11-17T00:00:00Z';
+    const framing = [
+      'Scheduled automation: LOOP-FIRE-PROMPT check the deploy',
+      `Automation ID: ${scheduleId}`,
+      `Occurrence: ${occurrenceKey}`,
+      'Trigger: scheduled',
+    ].join('\n');
+    const firedRow = {
+      trigger: 'scheduled',
+      outcome: 'fired',
+      occurrence_key: occurrenceKey,
+    };
+    expect(assertScheduledFireWitness([firedRow], framing, scheduleId)).toEqual(
+      { occurrenceKey },
+    );
+    expect(() => assertScheduledFireWitness([], framing, scheduleId)).toThrow(
+      /No scheduled occurrence settled fired/,
+    );
+    expect(() =>
+      assertScheduledFireWitness(
+        [{ ...firedRow, outcome: 'skipped' }],
+        framing,
+        scheduleId,
+      ),
+    ).toThrow(/No scheduled occurrence settled fired/);
+    expect(() =>
+      assertScheduledFireWitness(
+        [{ ...firedRow, trigger: 'manual' }],
+        framing,
+        scheduleId,
+      ),
+    ).toThrow(/No scheduled occurrence settled fired/);
+    expect(() =>
+      assertScheduledFireWitness(
+        [firedRow],
+        framing.replace(occurrenceKey, 'another-slot'),
+        scheduleId,
+      ),
+    ).toThrow(/not the same fire/);
+    expect(() =>
+      assertScheduledFireWitness(
+        [firedRow],
+        framing.replace(scheduleId, `asch_${'b'.repeat(32)}`),
+        scheduleId,
+      ),
+    ).toThrow(/not the fire's turn/);
+    // The trigger clause has its own direction: the minted-id case above
+    // throws through the Automation ID disjunct with the same message, so
+    // without this case deleting !wakeText.includes('Trigger: scheduled')
+    // would leave every direction green (R1-1). The framing spells the line
+    // verbatim as `Trigger: ${trigger}`.
+    expect(() =>
+      assertScheduledFireWitness(
+        [firedRow],
+        framing.replace('Trigger: scheduled', 'Trigger: manual'),
+        scheduleId,
+      ),
+    ).toThrow(/not the fire's turn/);
   });
 
   // A timed-out spawn sets error and leaves status null with empty stderr,
