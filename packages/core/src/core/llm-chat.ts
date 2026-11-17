@@ -753,6 +753,14 @@ export interface LlmChatSendOptions {
    * neither rotate the live turn's key nor read or write its marks.
    */
   isSessionTurn?: boolean;
+  /**
+   * Stable turn key for the model-availability ledger, for surfaces whose
+   * per-send `prompt_id` is a continuation rewrite of the turn's identity
+   * (ACP mid-turn automatic-continuation suffixes). Defaults to the send's
+   * `prompt_id`. Only the ledger key is normalized; `prompt_id` keeps its
+   * load-bearing prompt identity.
+   */
+  ledgerTurnKey?: string;
   /** Internal identity for the user prompt added to model history. */
   promptId?: string;
   /**
@@ -3586,7 +3594,7 @@ export class LlmChat {
         ? this.config.getModelAvailabilityService()
         : undefined;
     if (availability) {
-      availability.beginTurn(prompt_id);
+      availability.beginTurn(options?.ledgerTurnKey ?? prompt_id);
       if (options?.isExplicitRetry) {
         availability.resetTurn();
       }

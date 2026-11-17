@@ -8969,17 +8969,63 @@ describe('LlmChat', async () => {
         service,
       );
 
+      // Two configured entries alias the SAME resolved model; a third is
+      // healthy. Keying the ledger by the configured id would let the second
+      // alias re-probe the exhausted resolved model on the next request, while
+      // resolved-id keying skips both aliases. (Within request 1 the second
+      // alias is caught by the same-model guard, so the discrimination is the
+      // second request, where it is reached with the primary still current.)
+      const aliasA = vi.fn();
+      const aliasB = vi.fn();
+      const healthy = vi.fn();
+      wireFallbacks(
+        ['alias-a', 'alias-b', 'fallback-c'],
+        vi.fn().mockImplementation(async (modelId: string) => {
+          if (modelId === 'alias-a') return fallbackRoute('model-x', aliasA);
+          if (modelId === 'alias-b') return fallbackRoute('model-x', aliasB);
+          return fallbackRoute('fallback-c', healthy);
+        }),
+      );
+      const capacityError = tpmCapacityError();
+      streamMock().mockRejectedValue(capacityError);
+      aliasA.mockRejectedValue(capacityError);
+      aliasB.mockRejectedValue(capacityError);
+      healthy.mockImplementation(async () => textStream('fallback-c ok'));
+
+      // Request 1: alias-a exhausts model-x; alias-b is the same resolved model
+      // (same-model guard); fallback-c serves.
+      const events1 = await sendSessionCollect('test', 'prompt-resolved-id');
+      expect(hasChunkText(events1, 'fallback-c ok')).toBe(true);
+      expect(aliasA).toHaveBeenCalledTimes(1);
+      expect(aliasB).toHaveBeenCalledTimes(0);
+
+      // Request 2, same turn: model-x is consumed under its RESOLVED id, so
+      // both aliases skip it. Configured-id keying would re-probe via alias-b.
+      const events2 = await sendSessionCollect('test', 'prompt-resolved-id');
+      expect(hasChunkText(events2, 'fallback-c ok')).toBe(true);
+      expect(aliasA).toHaveBeenCalledTimes(1);
+      expect(aliasB).toHaveBeenCalledTimes(0);
+      expect(healthy).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps the ledger turn key stable across a continuation prompt-id rewrite', async () => {
+      const service = new ModelAvailabilityService();
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+
       const fallbackA = vi.fn();
       const fallbackB = vi.fn();
-      // The configured entry 'fallback-a' resolves to a different model id; the
-      // ledger write and the skip read must both use the resolved id.
       wireFallbacks(
         ['fallback-a', 'fallback-b'],
         vi
           .fn()
           .mockImplementation(async (modelId: string) =>
             modelId === 'fallback-a'
-              ? fallbackRoute('fallback-a-resolved', fallbackA)
+              ? fallbackRoute('fallback-a', fallbackA)
               : fallbackRoute('fallback-b', fallbackB),
           ),
       );
@@ -8988,12 +9034,22 @@ describe('LlmChat', async () => {
       fallbackA.mockRejectedValue(capacityError);
       fallbackB.mockImplementation(async () => textStream('fallback-b ok'));
 
-      const events1 = await sendSessionCollect('test', 'prompt-resolved-id');
-      expect(hasChunkText(events1, 'fallback-b ok')).toBe(true);
+      // Request 1 under the turn's base prompt id consumes fallback-a.
+      await sendSessionCollect('test', 'turn-base');
       expect(fallbackA).toHaveBeenCalledTimes(1);
 
-      // Same turn: the resolved id is consumed, so the entry is still skipped.
-      const events2 = await sendSessionCollect('test', 'prompt-resolved-id');
+      // A mid-turn continuation rewrites the prompt id but passes the base
+      // ledger key, so it must not reset the turn's consumed marks. Without
+      // ledgerTurnKey the suffixed id would rotate the key and re-probe.
+      const events2 = await collect(
+        await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'turn-base_todo_stop_guard_1',
+          undefined,
+          { isSessionTurn: true, ledgerTurnKey: 'turn-base' },
+        ),
+      );
       expect(hasChunkText(events2, 'fallback-b ok')).toBe(true);
       expect(fallbackA).toHaveBeenCalledTimes(1);
       expect(fallbackB).toHaveBeenCalledTimes(2);

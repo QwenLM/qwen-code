@@ -11422,6 +11422,15 @@ export class Session implements SessionContext {
       },
     };
     const goalPermit = goalTurnContext.getStore();
+    // Mid-turn automatic continuations rewrite the prompt id with a
+    // guard/stop-hook/background-result/mid-turn suffix; the ledger must keep
+    // the turn's base key so a continuation does not reset the turn's consumed
+    // marks. Only the ledger key is normalized — promptId keeps its prompt
+    // identity.
+    const ledgerTurnKey = promptId.replace(
+      /_(todo_stop_guard|stop_hook|background_result|mid_turn)_\d+$/,
+      '',
+    );
     let sourceStream: AsyncGenerator<StreamEvent>;
     try {
       const historyPromptId = options.historyPromptId ?? options.promptId;
@@ -11434,6 +11443,7 @@ export class Session implements SessionContext {
           // ACP is a genuine session-turn surface: participate in the
           // model-availability ledger like the LlmClient/Turn path.
           isSessionTurn: true,
+          ...(ledgerTurnKey !== promptId ? { ledgerTurnKey } : {}),
           ...(historyPromptId !== undefined
             ? { promptId: historyPromptId }
             : {}),

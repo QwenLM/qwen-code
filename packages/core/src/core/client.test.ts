@@ -12863,6 +12863,28 @@ Other open files:
         }
       });
 
+      it('excludes a concurrent side query and its unflagged continuation', async () => {
+        retryChat({
+          stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
+        });
+        mockTurnRunFn.mockImplementation(() => textTurn('response'));
+
+        // The flagged first send claims the side interaction's prompt id.
+        await run([{ text: 'side' }], 'session########7', {
+          type: SendMessageType.UserQuery,
+          isConcurrentSideQuery: true,
+        });
+        expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(false);
+
+        // The tool-result continuation is resubmitted without the flag under
+        // the same prompt id; the registry must still exclude it, or it would
+        // rotate the live turn's ledger key.
+        await run([{ text: 'tool result' }], 'session########7', {
+          type: SendMessageType.ToolResult,
+        });
+        expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(false);
+      });
+
       it('restores stripped retry entries when only a concurrent send pushes', async () => {
         const orphanedPrompt: Content = userText('retry me');
         const mockChat = retryChat({

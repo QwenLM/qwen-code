@@ -353,13 +353,39 @@ describe('Turn', () => {
         undefined,
         undefined,
         true,
+        false,
+      );
+      await run([textChunk('Hello')]);
+
+      // Distinct values pin the slot mapping: swapping the two adjacent
+      // boolean declarations would emit { isSessionTurn: true } instead.
+      expect(mockSendMessageStream.mock.lastCall?.[4]).toEqual({
+        isExplicitRetry: true,
+      });
+
+      turn = new Turn(
+        {
+          sendMessageStream: mockSendMessageStream,
+          getHistory: mockGetHistory,
+          getHistoryLength: mockGetHistoryLength,
+          getHistoryTailShallow: mockGetHistoryTailShallow,
+          maybeIncludeSchemaDepthContext: mockMaybeIncludeSchemaDepthContext,
+        } as unknown as LlmChat,
+        'prompt-id-1',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
         true,
       );
       await run([textChunk('Hello')]);
 
       expect(mockSendMessageStream.mock.lastCall?.[4]).toEqual({
         isSessionTurn: true,
-        isExplicitRetry: true,
       });
     });
 
