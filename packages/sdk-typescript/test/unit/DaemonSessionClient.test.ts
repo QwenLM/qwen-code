@@ -3844,6 +3844,94 @@ describe('DaemonSessionClient', () => {
     }
   });
 
+  it.each([
+    ['return', false],
+    ['return', true],
+    ['throw', false],
+    ['throw', true],
+  ] as const)(
+    'keeps the subscription guard when an unowned iterator calls %s (rejected: %s)',
+    async (cleanup, rejectFirst) => {
+      const { fetch, calls } = recordingFetch(() =>
+        sseResponse(
+          'data: {"id":1,"v":1,"type":"session_update","data":{}}\n\n',
+        ),
+      );
+      const session = new DaemonSessionClient({
+        client: new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+        session: {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: true,
+        },
+      });
+      const owner = session.events();
+      const unused = session.events();
+      const contender = session.events();
+      try {
+        await expect(owner.next()).resolves.toMatchObject({ done: false });
+        if (rejectFirst) {
+          await expect(unused.next()).rejects.toThrow('subscription active');
+        }
+        if (cleanup === 'throw') {
+          const error = new Error('consumer stopped');
+          await expect(unused.throw(error)).rejects.toBe(error);
+        } else {
+          await expect(unused.return(undefined)).resolves.toMatchObject({
+            done: true,
+          });
+        }
+        await expect(contender.next()).rejects.toThrow('subscription active');
+        await expect(unused.next()).resolves.toMatchObject({ done: true });
+        expect(calls).toHaveLength(1);
+      } finally {
+        await owner.return(undefined);
+        await unused.return(undefined);
+        await contender.return(undefined);
+      }
+      const retry = session.events();
+      try {
+        await expect(retry.next()).resolves.toMatchObject({ done: false });
+        expect(calls).toHaveLength(2);
+      } finally {
+        await retry.return(undefined);
+      }
+    },
+  );
+
+  it('keeps a successor subscription active after delayed or repeated cleanup', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      sseResponse('data: {"id":1,"v":1,"type":"session_update","data":{}}\n\n'),
+    );
+    const session = new DaemonSessionClient({
+      client: new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+      },
+    });
+    const owner = session.events();
+    const rejected = session.events();
+    const successor = session.events();
+    const contender = session.events();
+    try {
+      await owner.next();
+      await expect(rejected.next()).rejects.toThrow('subscription active');
+      await owner.return(undefined);
+      await expect(successor.next()).resolves.toMatchObject({ done: false });
+      await owner.return(undefined);
+      await rejected.return(undefined);
+      await expect(contender.next()).rejects.toThrow('subscription active');
+      expect(calls).toHaveLength(2);
+    } finally {
+      await owner.return(undefined);
+      await rejected.return(undefined);
+      await successor.return(undefined);
+      await contender.return(undefined);
+    }
+  });
+
   it('allows callers to seed, override, and disable replay state', async () => {
     const { fetch, calls } = recordingFetch(() => sseResponse(''));
     const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });

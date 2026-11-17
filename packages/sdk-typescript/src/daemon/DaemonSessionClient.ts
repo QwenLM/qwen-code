@@ -1515,7 +1515,9 @@ export class DaemonSessionClient {
     const release = () => {
       if (released) return;
       released = true;
-      this.subscriptionActive = false;
+      if (started) {
+        this.subscriptionActive = false;
+      }
     };
     const acquire = () => {
       if (started) return;
