@@ -583,19 +583,21 @@ of the 54 cells the box leaves, and no row reaches the terminal's last column.
 ink ellipsizes all three at the same width; that window is recorded below, and
 matching it would mean clipping text this row has room for.
 
-Two divergences are deliberate, and they are of different kinds. The first is a
-defect ink has and this port does not. ink answers a typed free-text entry twice
+Two divergences were recorded, and they are of different kinds. The first was a
+defect ink had and this port did not. ink answered a typed free-text entry twice
 for one keystroke — the dialog's own key handler and the input widget it mounts both
-subscribe, and the key layer broadcasts to every subscriber with no notion of
-focus — and each answer advances a tab, so the question after the one being
-answered is skipped without ever being drawn. This was not reasoned from source
+subscribed, and the key layer broadcasts to every subscriber with no notion of
+focus — and each answer advanced a tab, so the question after the one being
+answered was skipped without ever being drawn. This was not reasoned from source
 alone. The ink leg of the acceptance run timed out waiting for a question that
 never appeared, and its own review tab then listed that question as
-unanswered. Here one keystroke advances one tab. Matching ink would reproduce a
-defect rather than the experience, and fixing ink would move the reference the
-whole sweep is measured against, so the divergence is recorded instead. The
-scenario was rearranged to exercise the free-text row on the last question,
-where the tab index clamps and both legs arrive at the review tab together.
+unanswered. At the time, matching ink would have reproduced a defect rather than
+the experience, so the divergence was recorded and the scenario was rearranged to
+exercise the free-text row on the last question, where the tab index clamps and
+both legs arrive at the review tab together. ink has since been fixed (#17444):
+the input widget's submit is the only owner of Enter on that row, so one
+keystroke advances one tab on both legs, and the scenario no longer needs to sit
+on the last question.
 
 The second divergence is one this port loses. The option rows are drawn by hand
 rather than by the shared select widget, and the widget's pointer wiring did not
@@ -1343,11 +1345,11 @@ Nothing is left for the cancel to see there: a live timer always belongs to the 
 cursor is still on, since the only moves are the swap's own and the two arrows, and both
 arrows cancel first. The lock is therefore the armed timer alone — the ref that also held
 which tab the swap belonged to modelled a distinction no path could observe, and it went
-with the dead cancel. This is one of the places where the port deliberately does not match
-ink; the same 150 ms pause, the same clamping at the last tab, and the same
-tick-before-swap are kept. ink's behaviour is recorded as a defect of its own rather than
-reproduced, and the double-fire the acceptance matrix had already watched on ink's leg is
-the same defect seen from outside.
+with the dead cancel. The same 150 ms pause, the same clamping at the last tab, and the
+same tick-before-swap are kept. ink used to lack the lock and was recorded as having a
+defect of its own rather than reproduced; the double-fire the acceptance matrix had
+already watched on ink's leg was the same defect seen from outside. ink now has the same
+lock and the same arrow cancel (#17444).
 
 The arrow is pinned by a mutation of its own: a right arrow that lands during a pending
 pause keeps the question it moved to, and removing that cancel fails this test alone. The
