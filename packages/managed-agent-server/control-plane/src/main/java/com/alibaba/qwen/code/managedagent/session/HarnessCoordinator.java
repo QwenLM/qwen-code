@@ -1687,19 +1687,6 @@ public class HarnessCoordinator {
                     "Hosted Harness remained unavailable before Turn"
                             + " admission.", error);
         }
-        // A Session whose Workspace runtime is still provisioning is a
-        // bounded wait, not a failed execution attempt: the runtime comes
-        // active under its own provisioning channel, so charging the wait
-        // against the pre-admission budget would fail the Turn at ~37s even
-        // though nothing is wrong (issue #17380). Route it to the same
-        // budget-exempt outage deferral as a disabled Harness — deferOutage
-        // still bounds the run and ends it with the actionable
-        // `workspace_unavailable` code once provisioning never settles.
-        if (!submissionAttempted && isWorkspaceProvisioningWait(error)) {
-            return deferOutage(turn, "workspace_unavailable",
-                    "Hosted Workspace runtime remained in provisioning before"
-                            + " Turn admission.", error);
-        }
         // The budget counts consecutive failures without journaled
         // progress: the fenced cursor updates reset that counter (the pacing
         // counter retry_count is never reset — the backoff must keep growing
@@ -1852,28 +1839,6 @@ public class HarnessCoordinator {
 
     private static boolean isHarnessDisabled(RuntimeException error) {
         return error instanceof HarnessDisabledException;
-    }
-
-    // The daemon refuses a load while the Session's Workspace runtime is
-    // still provisioning. Current builds answer 503
-    // `workspace_runtime_unavailable`; older builds answered 409
-    // `workspace_unavailable`. Both name the same reversible wait, so the
-    // coordinator tolerates either wire code and holds the Turn across the
-    // provisioning window regardless of which daemon build is deployed
-    // (issue #17380). The refusal is matched on the HarnessHttpFailure wire
-    // shape only — never on a bare message — so a genuinely broken workspace
-    // (a different failure that merely mentions the workspace) still meets
-    // the budget and fails with its own code.
-    private static boolean isWorkspaceProvisioningWait(
-            RuntimeException error) {
-        if (!(error instanceof HarnessHttpFailure http)) {
-            return false;
-        }
-        return http.getStatusCode() == 503
-                        && "workspace_runtime_unavailable"
-                                .equals(http.getErrorCode())
-                || http.getStatusCode() == 409
-                        && "workspace_unavailable".equals(http.getErrorCode());
     }
 
     static boolean isPoolWait(RuntimeException error) {

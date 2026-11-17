@@ -802,69 +802,6 @@ class HarnessCoordinatorTest {
                 anyString(), anyString(), anyString(), anyString());
     }
 
-    // Issue #17380: a load refused because the Session's Workspace runtime
-    // is still provisioning is a bounded wait, not a failed execution
-    // attempt. Before submission it defers like any other outage instead of
-    // charging the pre-admission budget, so a Turn whose sandbox simply
-    // needs longer than the ~37s budget is not killed with the generic
-    // hosted_harness_unavailable. Both wire shapes are pinned: the current
-    // 503 `workspace_runtime_unavailable` and the legacy 409
-    // `workspace_unavailable`, so the coordinator tolerates either daemon
-    // build in a mixed deployment.
-    @ParameterizedTest
-    @CsvSource({"503,workspace_runtime_unavailable",
-            "409,workspace_unavailable"})
-    void defersWhileTheWorkspaceIsStillProvisioning(int status, String code) {
-        HarnessHttpFailure provisioning = new HarnessHttpFailure(
-                "Workspace runtime is not active.", null, status,
-                "", java.util.Map.of("code", code));
-        AgentStateStore store = dispatchWithCreateOrLoadFailure(provisioning,
-                false, 0, boundSessionRecord());
-        verify(store).deferTurnRetry(eq("tenant"), eq("session"),
-                eq("turn"), anyString(), anyLong());
-        verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
-                anyString(), anyString(), anyLong(), anyBoolean());
-        verify(store, never()).failTurn(anyString(), anyString(), anyString(),
-                anyString(), anyString(), anyString());
-    }
-
-    // The provisioning deferral is still bounded: a workspace that never
-    // becomes active ends the Turn with the actionable
-    // `workspace_unavailable` code once the outage budget is spent, rather
-    // than holding it ACCEPTED forever or masking it as a Harness outage.
-    @ParameterizedTest
-    @CsvSource({"503,workspace_runtime_unavailable",
-            "409,workspace_unavailable"})
-    void failsWithWorkspaceUnavailableAfterTheProvisioningBudgetIsExhausted(
-            int status, String code) {
-        HarnessHttpFailure provisioning = new HarnessHttpFailure(
-                "Workspace runtime is not active.", null, status,
-                "", java.util.Map.of("code", code));
-        AgentStateStore store = dispatchWithCreateOrLoadFailure(provisioning,
-                false, 5, boundSessionRecord());
-        verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
-                anyString(), eq("workspace_unavailable"), anyString());
-        verify(store, never()).deferTurnRetry(anyString(), anyString(),
-                anyString(), anyString(), anyLong());
-        verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
-                anyString(), anyString(), anyLong(), anyBoolean());
-    }
-
-    // The exemption is scoped to before submission: once a submission is
-    // recorded the Turn may have been admitted, so the same refusal must
-    // not silently re-enter the outage lane — it stays on the ordinary
-    // post-admission budget like any other failure.
-    @Test
-    void meetsTheBudgetOnWorkspaceProvisioningAfterARecordedSubmission() {
-        HarnessHttpFailure provisioning = new HarnessHttpFailure(
-                "Workspace runtime is not active.", null, 503, "",
-                java.util.Map.of("code", "workspace_runtime_unavailable"));
-        AgentStateStore store = dispatchWithCreateOrLoadFailure(provisioning,
-                true, 5, boundSessionRecord());
-        verify(store, never()).deferTurnRetry(anyString(), anyString(),
-                anyString(), anyString(), anyLong());
-    }
-
     @Test
     void recordsTheLoadRefusalCodeWhenRetriesRunOut() {
         HarnessSessionRefusedFailure refusal = mock(
