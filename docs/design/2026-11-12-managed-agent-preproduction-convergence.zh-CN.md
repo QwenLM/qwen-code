@@ -2,7 +2,7 @@
 
 [English](2026-11-12-managed-agent-preproduction-convergence.md) | [简体中文](2026-11-12-managed-agent-preproduction-convergence.zh-CN.md)
 
-- 状态：**提案** —— 待 maintainer 评审。已 rebase 到当前 main（tier-1 收敛合并后）：#17058（OSS 读路径去探针、object-storage 解耦、K1 删除、切片1 的 defaultCandidate 修复、统一池 strict mode）、#17064（单可执行 jar——取代下文「保留 classifier jar」的旧框定；运维工具以 admin 子命令形式保留）、#17047（pack-aware 读取方）、#17044（棘轮裁剪）。切片1 修复已经 #17058 落地，其嵌入回归断言在此保留；切片2（dead-tag 发布修复删除）在本 PR 实现（待评审）；切片3 已放弃（见下）；余切片 4–8。
+- 状态：**提案** —— 切片 1 与切片 2 已合入（#17058、#17064、#17139），另已完成 `verification/pom.xml` Failsafe profile 去重及 #17139 评审跟进项；切片 3 与切片 8 按原框定放弃（见下）；余切片 4–7。注：#17415 随后已将 Kubernetes runtime 与 resident CSI 后端冷归档至 `packages/sdk-java/managed-kubernetes-archive/`。
 - 日期：2026-11-12
 - 范围：`packages/managed-agent-server/**`、其打包/发布脚本、web-shell 生成客户端，以及 Java SDK 表面。
 - 关联：修订 [Managed Agent Server Maven modules](2026-10-29-managed-agent-maven-modules.md) 的模块矩阵；在 PR #17044 的 verification 棘轮裁剪基础上推进（其设计文档 `2026-11-12-managed-verification-ratchet-trim.md` 随该 PR 落地）。
@@ -20,18 +20,18 @@
 
 没有历史包袱后，正确的框架从「克制」切换为「重新设计收敛」：若干此前被判为承重的结构可以移除，而单一 V1 schema 基线正处于最便宜的编辑窗口。本文记录可移除项、必须存活项，以及一份让每步都可独立验证的分片计划。
 
-## 现状（基于当前 main 核实）
+## 现状（于 #17139 合并点 `d3d28bd449`、#17415 之前核实）
 
-以下数字来自全仓扫描；受 tier-1 合并（#17058 / #17064 / #17075）影响的数字已对合并树重测。
+以下数字来自针对 `d3d28bd449`（tier-1 合并 #17044 / #17047 / #17058 / #17064 / #17075 之后、#17415 冷归档 Kubernetes / resident CSI 后端之前）的全仓重测扫描。
 
 - **接口。** 136 个生产接口名（97 个顶层文件）；仅 9 个有多于一个生产实现。全部 41 个 `*Store`/`*Repository` 接口恰好只有一个生产 JDBC 实现（35 个直接实现，6 个经 `ManagedSessionStore` 角色接口继承）。生产中不存在 `InMemory*Repository`。`ToolPublicationObjectStore` 是真 SPI（8 个测试 fake，被 5 个子系统复用）。
-- **Settings 镜像。** `ManagedAgentSettings`（20 个接口，252 行）加 `SshSettings`（3 个）= 23 个对 `ManagedAgentProperties`（1,076 行，21 个嵌套类）的只读镜像。62 个生产文件 import `ManagedAgentSettings`。`configuration-descriptions.json` 生成配置参考文档；`release-managed-agent-reference.yml` 以 `generate-managed-agent-configuration-reference.mjs --check` 作为两份已提交页面的漂移门禁。
+- **Settings 镜像。** `ManagedAgentSettings`（20 个接口，261 行）加 `SshSettings`（3 个）= 23 个对 `ManagedAgentProperties`（1,136 行，21 个嵌套类）的只读镜像。62 个生产文件 import `ManagedAgentSettings`。`configuration-descriptions.json` 生成配置参考文档；`release-managed-agent-reference.yml` 以 `generate-managed-agent-configuration-reference.mjs --check` 作为两份已提交页面的漂移门禁。
 - **结构性根源。** `ModuleArchitectureTest` 强制 `control-plane`/`persistence`/`runtime-*` 只依赖自身加 `contracts`；`ClassSizeRatchetTest` 强制拆分 `persistence`/`runtime-broker` 中 ≥800 行的类（全局上限 2,549，单调不升）。拆类后碎片需要跨模块可见，就制造出一个新的 `contracts` 接口。镜像是这两个门禁的产物，而非纪律问题。
 - **API 表面。** `SurfaceRegistry` 在 Public、WebShell 与内部表面上共枚举 234 个路由常量。两套公共表面是能力分工，而非同构镜像：Public 偏读/管理（`PUBLIC_TURN_GET/LIST/EVENTS`、workspace list/get），WebShell 承载交互写侧。至少 24 个 WebShell 能力名没有 Public 对应（`TURN_SUBMIT`、`TURN_CANCEL`、`SESSION_APPROVAL`、`SESSION_MODEL_CHANGE`、`WORKSPACE_CREATE/REGISTER/FILES_*`、`TRANSCRIPT`、`EVENT_STREAM`……）。web-shell UI 消费生成客户端（`packages/web-shell/scripts/generate-managed-agent-api.mjs`）；Java SDK 暴露 Public 操作；README 在 `/v1/agents` 上文档化业务宿主流。
 - **HTTP。** `RuntimeBrokerHttpServer`（1,063 行）是第三端口上的手写 JDK `HttpServer`；`csi-retirement:worker-authority` 同时注册在它和 Tomcat internal connector 上。
 - **preflight。** 5 个文件共 4,393 行生产代码，加 6 个文件共 5,513 行测试（合计约 9,900 行），只服务 `--check`：`ServerEnvironment`（1,095，:229 处 `StackWalker` 格式嗅探）、`ManagedAgentPreflight`（2,486，:794 处 `YamlWalk` 注释 AST）、`HarnessBrokerUrl`（410，与 `packages/cli/src/serve/managed-runtime-broker-url.fixtures.json` 共享的 WHATWG 子集）、`ServiceAccount`（194，用户态 `namei`）。
-- **打包。** 仅剩单个 `exec` repackage（#17064 删除了 6 个 classifier fat-JAR execution；运维工具以 admin 子命令形式保留）。maintenance 家族 13 个类 / 1,402 行，被 `scripts/package-managed-agent-reference.mjs`、e2e 测试与 README 引用。
-- **棘轮。** `verification/pom.xml` 831 行、17 个 profile、约 435 行近乎重复的 Failsafe XML。v0.26.5 pom 钉死（`scripts/patches/managed-runtime-v0.26.5-verification.patch` 及其元测试）已被 dead-tag 发布修复清理删除，故 profile 去重不再被钉死阻塞。`ManagedSchemaCatalog`（630 行；`managedschema` 包共 1,198 行）在启动时用对缩进敏感的正则重解析规范 DDL。
+- **打包。** 仅剩单个 `exec` repackage（#17064 删除了 6 个 classifier fat-JAR execution；运维工具以 admin 子命令形式保留）。maintenance 家族为 14 个类 / 1,553 行（后经 #17415 缩减为 6 个类 / 647 行），被 `scripts/package-managed-agent-reference.mjs`、e2e 测试与 README 引用。
+- **棘轮。** `verification/pom.xml` 原为 831 行、17 个 profile、约 435 行近乎重复的 Failsafe XML；将共享的 Failsafe 版本与 `integration-test`/`verify` 执行绑定移入 `pluginManagement` 后为 700 行（保持同样 17 个 profile）。`ManagedSchemaCatalog`（630 行；5 个文件的 `managedschema` 包共 1,185 行，#17415 后为 1,177 行）在启动时用对缩进敏感的正则重解析规范 DDL。
 - **是注册 provider，而非死代码。** 全部 5 个 `runtime-*` 模块都经 `META-INF/services` 注册 `RuntimeProviderFactory`，因此它们是 ServiceLoader 动态发现的 provider，而非静态接线的 bean。`runtime-kubernetes`（kind `kubernetes-workspace`）是 resident-workspace / CSI provisioner（`KubernetesRuntimeProviderFactory`），积极开发、承重；`runtime-external` 注册 `ExternalRuntimeProviderFactory`（`external-scratch` 功能完整，`external-workspace` 刻意 fail-closed）。早先的 K1 scratch provisioner（`KubernetesRuntimeProvisioner`）与 `JdbcRuntimeBrokerSchema` 别名确属死/冗余，已删除（#17058、#17075）。移除剩余 provider 是能力决策，而非清理。
 
 ## 目标
@@ -97,9 +97,9 @@ Public 已被 Java SDK、OpenAPI 契约与 README 业务流锚定。反之留 We
 
 ### 切片 2 —— 发布修复删除（需 D3）；打包重新归类
 
-- **已完成 —— 旧 tag 发布修复删除。** 删除全部 3 个修复补丁（`v0.26.3-tests`、`v0.26.5-javadoc`、`v0.26.5-verification`）、两个条件 workflow 修复步骤（`RELEASE_TAG == v0.26.3 / v0.26.5`）及 `managed-runtime-release.test.js` 中对应元测试（−396 行）。它们仅在重发死 tag 时运行，删除不影响未来发布。此举放弃 v0.26.3 managed-runtime 回填（锁定决策 D3）；`managed-runtime-0263-test-repair` runbook 相应退役。禁止关闭 Javadoc 门禁的全流程守卫保留为独立测试。验证：发布元测试 48/49（唯一失败是临时 fixture 中 `semver` 解析的既有环境问题，与本改无关），Prettier + ESLint 绿。
-- **推迟 —— profile 去重。** 删除 pom 钉死元测试已解锁 17 个 verification profile 共享 Failsafe XML 的去重，但那触及 CI lane 定义，留作独立的谨慎改动。
-- **重新归类 —— 运维工具不是死代码。** 12 个离线操作员入口（recovery、migration、CSI 操作、lease recovery）被 `package-managed-agent-reference.mjs` 编目、被 `managed-agent-server-e2e.test.js` 与 `integration-tests/helpers/hosted-operator-recovery-driver.ts` 真实调用、并在 README 文档化。这些工具能力予以保留；#17064 已把它们的打包收敛为单一 exec jar 经 admin 子命令分发（删除冗余的 classifier fat JAR），工具本身不变。
+- **已完成 —— 旧 tag 发布修复删除。** 删除全部 3 个修复补丁（`v0.26.3-tests`、`v0.26.5-javadoc`、`v0.26.5-verification`）、两个条件 workflow 修复步骤（`RELEASE_TAG == v0.26.3 / v0.26.5`）及 `managed-runtime-release.test.js` 中对应元测试（workflow、补丁与元测试合计 −396 行）。它们仅在重发死 tag 时运行，删除不影响未来发布。此举放弃 v0.26.3 与 v0.26.5 managed-runtime 回填（锁定决策 D3）；`managed-runtime-0263-test-repair` runbook 相应退役。禁止关闭 Javadoc 门禁（含 `failOnError`/`failOnWarnings` 与 `continue-on-error`）的全流程守卫保留为独立测试。
+- **已完成 —— Failsafe profile 去重。** 将共享的 Failsafe 插件版本与 `integration-test`/`verify` 执行绑定移入 `pluginManagement`，在 15 个使用 Failsafe 的 profile 上消除约 131 行重复 XML，同时保持各 profile 的用例选择、超时与 Surefire 行为不变。
+- **重新归类 —— 运维工具不是死代码。** 离线操作员入口（recovery、migration、storage registration）被 `package-managed-agent-reference.mjs` 编目、被 `managed-agent-server-e2e.test.js` 与 `integration-tests/helpers/hosted-operator-recovery-driver.ts` 真实调用、并在 README 文档化。这些工具能力予以保留；#17064 已把它们的打包收敛为单一 `exec` jar 经 `admin` 子命令分发（删除 6 个冗余的 classifier fat JAR）。
 
 ### 切片 3 —— HTTP 统一：按原框定不可行（放弃）
 
@@ -171,9 +171,9 @@ v2/v3/v4 三代不是冗余演进层，各服务一个不同的活跃子系统�
 ## 验证计划
 
 - 每切片：受影响消费者的聚焦测试加上述命名门禁；记录命令、被测状态与结果。
-- 跨语言切片（4、8）：根 build/typecheck 与受影响消费者测试；CI 保留完整跨语言门禁。
-- SQL/恢复切片（3、7）：预算内本地真实 MySQL 证据；完整 `mysql-integration` / Hosted / fault profile 归 CI。
-- 在所需 CI 门关于被接受修订通过前，验收为待定；分别报告本地通过、失败、跳过与 CI 缺口。
+- 跨语言切片（4）：根 build/typecheck 与受影响消费者测试；CI 保留完整跨语言门禁。
+- SQL/恢复切片（7）：预算内本地真实 MySQL 证据；完整 `mysql-integration` / Hosted / fault profile 归 CI。
+- 在所需 CI 门禁于被接受修订通过前，验收为待定；分别报告本地通过、失败、跳过与 CI 缺口。
 
 ## 验收标准
 
