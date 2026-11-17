@@ -179,6 +179,9 @@ function migratedValue(key: ShellStateKey, value: string): string | null {
   try {
     const hosts: unknown = JSON.parse(value);
     if (!Array.isArray(hosts)) return null;
+    // An empty catalog is a deletion the user made on purpose, not a mirror
+    // with nothing to contribute: it must be re-pushed like any other value.
+    if (hosts.length === 0) return value;
     const kept = hosts.filter(
       (host) =>
         !(
@@ -228,7 +231,11 @@ export function writeShellState(key: ShellStateKey, value: string): void {
       try {
         window.localStorage.setItem(mirrorBaseKey(key), value);
       } catch {
-        // Without storage the mirror cannot be adopted on a later launch.
+        // Without storage the mirror cannot be adopted on a later launch. When
+        // the mirror is still this write's own copy there is no newer value to
+        // preserve, and a stale base left in place would let a later launch
+        // adopt the mirror and re-push superseded data.
+        if (readLocal(key) === value) removeLocal(key);
       }
     })
     .catch(() => {

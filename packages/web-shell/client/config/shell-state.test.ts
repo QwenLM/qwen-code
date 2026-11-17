@@ -122,6 +122,31 @@ describe('desktop shell state', () => {
     );
   });
 
+  it('re-pushes a workspace-host mirror whose catalog was emptied on purpose', async () => {
+    const native = '[{"origin":"https://a.example","workspaces":[]}]';
+    const invoke = vi.fn(
+      async (command: string, args?: Record<string, unknown>) => {
+        if (command !== 'shell_state_read') return undefined;
+        return args?.['key'] === 'qwen-workspace-hosts' ? native : null;
+      },
+    );
+    installDesktop(invoke);
+    // The deletion never landed natively and the catalog has not moved past
+    // the base the mirror records, so `'[]'` is a deliberate empty catalog —
+    // not a mirror left with nothing to migrate.
+    seedMirror('qwen-workspace-hosts', '[]', 'earlier-launch', native);
+
+    const { hydrateShellState, readShellState } = await import('./shell-state');
+    await hydrateShellState();
+
+    expect(readShellState('qwen-workspace-hosts')).toBe('[]');
+    expect(invoke).toHaveBeenCalledWith('shell_state_write', {
+      key: 'qwen-workspace-hosts',
+      value: '[]',
+      nonce: 'launch-nonce',
+    });
+  });
+
   it('drops a mirror that already matches the native copy', async () => {
     const invoke = vi.fn(
       async (command: string, args?: Record<string, unknown>) => {
@@ -434,6 +459,61 @@ describe('desktop shell state', () => {
       value: full,
       nonce: 'launch-two',
     });
+  });
+
+  it('drops the mirror when its base record cannot be advanced', async () => {
+    const invoke = vi.fn(async (): Promise<unknown> => null);
+    installDesktop(invoke);
+
+    const { hydrateShellState, writeShellState } = await import(
+      './shell-state'
+    );
+    await hydrateShellState();
+
+    // The base record is the only storage write that fails — a full quota —
+    // so this write itself still lands in the mirror.
+    const storage = window.localStorage;
+    const spy = vi.spyOn(window, 'localStorage', 'get').mockReturnValue({
+      get length() {
+        return storage.length;
+      },
+      clear: () => storage.clear(),
+      getItem: (key: string) => storage.getItem(key),
+      key: (index: number) => storage.key(index),
+      removeItem: (key: string) => storage.removeItem(key),
+      setItem: (key: string, value: string) => {
+        if (key === 'qwen-shell-mirror-base:qwen-remote-connections') {
+          throw new Error('quota exceeded');
+        }
+        storage.setItem(key, value);
+      },
+    });
+    try {
+      writeShellState('qwen-remote-connections', '["https://new.example"]');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    } finally {
+      spy.mockRestore();
+    }
+
+    // The write landed, so the mirror has no newer value left to protect: a
+    // stale base would make it look like a rejected write on a later launch
+    // and re-push data native has since superseded.
+    expect(invoke).toHaveBeenCalledWith('shell_state_write', {
+      key: 'qwen-remote-connections',
+      value: '["https://new.example"]',
+      nonce: 'launch-nonce',
+    });
+    expect(window.localStorage.getItem('qwen-remote-connections')).toBeNull();
+    expect(
+      window.localStorage.getItem(
+        'qwen-shell-mirror-launch:qwen-remote-connections',
+      ),
+    ).toBeNull();
+    expect(
+      window.localStorage.getItem(
+        'qwen-shell-mirror-base:qwen-remote-connections',
+      ),
+    ).toBeNull();
   });
 
   it('drops a mirror whose landed write native has since moved past', async () => {
