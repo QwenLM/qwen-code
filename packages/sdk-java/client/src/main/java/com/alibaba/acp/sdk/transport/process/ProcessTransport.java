@@ -7,6 +7,7 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
 import java.lang.ProcessBuilder.Redirect;
+import java.nio.charset.StandardCharsets;
 import java.util.Optional;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
@@ -91,9 +92,12 @@ public class ProcessTransport implements Transport {
                 .directory(new File(cwd));
 
         process = processBuilder.start();
-        processInput = new BufferedWriter(new OutputStreamWriter(process.getOutputStream()));
-        processOutput = new BufferedReader(new InputStreamReader(process.getInputStream()));
-        processError = new BufferedReader(new InputStreamReader(process.getErrorStream()));
+        processInput = new BufferedWriter(new OutputStreamWriter(
+                process.getOutputStream(), StandardCharsets.UTF_8));
+        processOutput = new BufferedReader(new InputStreamReader(
+                process.getInputStream(), StandardCharsets.UTF_8));
+        processError = new BufferedReader(new InputStreamReader(
+                process.getErrorStream(), StandardCharsets.UTF_8));
         startErrorReading();
     }
 
