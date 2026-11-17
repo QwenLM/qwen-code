@@ -35955,10 +35955,11 @@ describe('createAcpSessionBridge', () => {
           bridge.getSessionSummary(session.sessionId).prs?.map((p) => p.number),
         ).toEqual([2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
         // …until the route reconciles the entry to the persisted list.
-        const reconciled = persisted.map(({ number, url, state }) => ({
+        const reconciled = persisted.map(({ number, url, state, source }) => ({
           number,
           url,
           ...(state ? { state } : {}),
+          ...(source ? { source } : {}),
         }));
         expect(bridge.getSessionSummary(session.sessionId).prs).not.toEqual(
           reconciled,

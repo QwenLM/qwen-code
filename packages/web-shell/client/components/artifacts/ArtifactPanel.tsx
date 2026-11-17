@@ -30,6 +30,7 @@ import {
   Code2Icon,
   EyeIcon,
   ExpandIcon,
+  FileDiffIcon,
   GaugeIcon,
   GlobeIcon,
   FolderIcon as FilesIcon,
@@ -142,6 +143,7 @@ import { WebPreviewPanel } from '../preview/WebPreviewPanel';
 import { SavedWebPreview } from '../preview/SavedWebPreview';
 import type { WebPreviewState } from '../preview/web-preview';
 import { TokenUsagePanel } from './TokenUsagePanel';
+import { ChangeOverviewPanel } from './ChangeOverviewPanel';
 import { TrajectoryPanel } from './TrajectoryPanel';
 import type { TrajectoryPageLoader } from '../../trajectory/useTrajectoryWindow';
 import type { ContextUsageControls } from '../../hooks/useContextUsageControls';
@@ -383,6 +385,14 @@ export type ArtifactPanelTab =
     }
   | {
       id: string;
+      kind: 'change_overview';
+      title: string;
+      workspaceCwd: string;
+      workspaceId?: string;
+      sessionId?: string;
+    }
+  | {
+      id: string;
       kind: 'workflow';
       title: string;
       sessionId?: string;
@@ -401,7 +411,9 @@ export type ArtifactPanelTab =
 
 type WorkspaceScopedArtifactPanelTab = Extract<
   ArtifactPanelTab,
-  { kind: 'review' | 'file' | 'artifact' | 'scheduled_task' }
+  {
+    kind: 'review' | 'file' | 'artifact' | 'scheduled_task' | 'change_overview';
+  }
 >;
 
 function isWorkspaceScopedTab(
@@ -411,7 +423,8 @@ function isWorkspaceScopedTab(
     tab.kind === 'review' ||
     tab.kind === 'file' ||
     tab.kind === 'artifact' ||
-    tab.kind === 'scheduled_task'
+    tab.kind === 'scheduled_task' ||
+    tab.kind === 'change_overview'
   );
 }
 
@@ -438,6 +451,7 @@ export interface SideTaskListItem {
 const DEFAULT_RIGHT_PANEL_ITEMS: readonly WebShellRightPanelItem[] = [
   'review',
   'sideTask',
+  'changeOverview',
 ];
 
 interface ArtifactPanelProps {
@@ -472,6 +486,9 @@ interface ArtifactPanelProps {
   ) => void;
   latestReviewAvailable?: boolean;
   onOpenLatestReview?: () => void;
+  /** Open the delivery-unit change overview tab (git workspaces only). */
+  changeOverviewAvailable?: boolean;
+  onOpenChangeOverview?: () => void;
   /** Open an interactive terminal tab in this panel (shown as an empty-state action). */
   onOpenTerminal?: () => void;
   /** Open this session's trajectory tab (shown as an empty-state action). */
@@ -695,6 +712,8 @@ export function ArtifactPanel({
   onOpenMemoryFile,
   latestReviewAvailable = false,
   onOpenLatestReview,
+  changeOverviewAvailable = false,
+  onOpenChangeOverview,
   onOpenTerminal,
   onOpenTrajectory,
   trajectoryTabId,
@@ -825,6 +844,11 @@ export function ArtifactPanel({
         tab.workspaceCwd === workspaceCwd &&
         tab.workspaceId === filesOwner?.id,
     );
+  const showChangeOverviewMenuItem =
+    items.includes('changeOverview') &&
+    changeOverviewAvailable &&
+    Boolean(onOpenChangeOverview) &&
+    !tabs.some((tab) => tab.id === 'change_overview');
   const showAddMenu =
     Boolean(activeTab) &&
     (showFilesMenuItem ||
@@ -832,7 +856,8 @@ export function ArtifactPanel({
       showSideTaskMenuItems ||
       showTerminalMenuItem ||
       showWebPreviewMenuItem ||
-      showTrajectoryMenuItem);
+      showTrajectoryMenuItem ||
+      showChangeOverviewMenuItem);
   const activeWorkspaceIdentity =
     activeTab && isWorkspaceScopedTab(activeTab)
       ? {
@@ -968,6 +993,11 @@ export function ArtifactPanel({
                         className={styles.tabIconSvg}
                         strokeWidth={1.6}
                       />
+                    ) : tab.kind === 'change_overview' ? (
+                      <FileDiffIcon
+                        className={styles.tabIconSvg}
+                        strokeWidth={1.6}
+                      />
                     ) : (
                       <TabScheduledTaskIcon />
                     )}
@@ -1043,9 +1073,20 @@ export function ArtifactPanel({
                     </span>
                   </DropdownMenuItem>
                 )}
-                {showReviewMenuItem && showSideTaskMenuItems && (
-                  <DropdownMenuSeparator />
+                {showChangeOverviewMenuItem && (
+                  <DropdownMenuItem onSelect={onOpenChangeOverview}>
+                    <FileDiffIcon
+                      className={styles.sideTaskNewIcon}
+                      strokeWidth={1.6}
+                      aria-hidden="true"
+                    />
+                    <span className={styles.sideTaskListTitle}>
+                      {t('changeOverview.title')}
+                    </span>
+                  </DropdownMenuItem>
                 )}
+                {(showReviewMenuItem || showChangeOverviewMenuItem) &&
+                  showSideTaskMenuItems && <DropdownMenuSeparator />}
                 {showSideTaskMenuItems && (
                   <DropdownMenuItem
                     disabled={sideTasksLoading}
@@ -1291,6 +1332,28 @@ export function ArtifactPanel({
                 </span>
                 <span className={styles.emptyActionHint}>
                   {t('turnOutputs.reviewLatest')}
+                </span>
+                <ChevronRightIcon
+                  className={styles.emptyActionChevron}
+                  strokeWidth={1.6}
+                  aria-hidden="true"
+                />
+              </button>
+            )}
+            {showChangeOverviewMenuItem && (
+              <button
+                type="button"
+                className={styles.emptyAction}
+                onClick={onOpenChangeOverview}
+              >
+                <span className={styles.emptyActionIcon} aria-hidden="true">
+                  <FileDiffIcon strokeWidth={1.6} />
+                </span>
+                <span className={styles.emptyActionTitle}>
+                  {t('changeOverview.title')}
+                </span>
+                <span className={styles.emptyActionHint}>
+                  {t('changeOverview.description')}
                 </span>
                 <ChevronRightIcon
                   className={styles.emptyActionChevron}
@@ -1785,6 +1848,12 @@ export function ArtifactPanel({
           <TokenUsagePanel
             key={activeTab.id}
             sessionActions={activeTab.sessionActions}
+            sessionId={activeTab.sessionId}
+          />
+        ) : activeTab.kind === 'change_overview' ? (
+          <ChangeOverviewPanel
+            key={activeTab.id}
+            workspaceCwd={activeTab.workspaceCwd}
             sessionId={activeTab.sessionId}
           />
         ) : activeTab.kind === 'turn_calls' ? (

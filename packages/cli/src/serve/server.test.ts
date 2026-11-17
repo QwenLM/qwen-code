@@ -798,6 +798,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_init',
   'workspace_github_setup',
   'workspace_github_prs',
+  'workspace_github_pr_files',
   'workspace_git_worktrees',
   'workspace_git_check_ignore',
   'workspace_mcp_restart',
@@ -918,6 +919,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_init' &&
       f !== 'workspace_github_setup' &&
       f !== 'workspace_github_prs' &&
+      f !== 'workspace_github_pr_files' &&
       f !== 'workspace_git_worktrees' &&
       f !== 'workspace_git_check_ignore' &&
       f !== 'workspace_permissions' &&
@@ -971,6 +973,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_init',
   'workspace_github_setup',
   'workspace_github_prs',
+  'workspace_github_pr_files',
   'workspace_git_worktrees',
   'workspace_git_check_ignore',
   'workspace_mcp_restart',
@@ -27454,6 +27457,114 @@ describe('createServeApp', () => {
       expect(bridge.summaryCalls).toEqual(['s-1']);
     });
 
+    it('hydrates persisted PR bindings into the summary after a reload', async () => {
+      // Bridge entries are re-created without prs on restart/reload; the status
+      // route must hydrate the sidecar BEFORE reading the summary so the
+      // session's bound PRs are reported (otherwise the change overview
+      // re-lists PR-covered commits as loose). The fake models the real
+      // bridge: seed applies to the returned summary and no-ops when bindings
+      // already exist, so moving the seed below the summary read turns this
+      // red — a recorder-only fake could not detect that ordering.
+      const sessionId = 's-pr-hydrate';
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(
+        sessionId,
+        'active',
+      );
+      await fsp.rm(sidecarPath, { force: true });
+      await upsertSessionPr(sidecarPath, {
+        number: 7,
+        url: 'https://github.com/o/r/pull/7',
+        source: 'create',
+      });
+      const liveSummary: BridgeSessionSummary = {
+        sessionId,
+        workspaceCwd: WS_BOUND,
+        createdAt: '2026-05-17T12:00:00.000Z',
+        clientCount: 1,
+        hasActivePrompt: false,
+      };
+      const bridge = fakeBridge({ summaryImpl: () => liveSummary });
+      const recordSeed = bridge.seedSessionPrs.bind(bridge);
+      bridge.seedSessionPrs = (id, prs) => {
+        recordSeed(id, prs);
+        if (id === sessionId && !liveSummary.prs?.length) {
+          liveSummary.prs = prs;
+        }
+      };
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      try {
+        const res = await request(app)
+          .get(`/session/${sessionId}/status`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(res.status).toBe(200);
+        expect(bridge.seedSessionPrsCalls).toHaveLength(1);
+        expect(bridge.seedSessionPrsCalls[0]?.sessionId).toBe(sessionId);
+        expect(bridge.seedSessionPrsCalls[0]?.prs[0]).toMatchObject({
+          number: 7,
+          source: 'create',
+        });
+        expect(res.body.prs).toMatchObject([{ number: 7, source: 'create' }]);
+      } finally {
+        await fsp.rm(sidecarPath, { force: true });
+      }
+    });
+
+    it('does not clobber live PR bindings when hydrating the summary', async () => {
+      // A live entry that already carries bindings must keep them: the real
+      // bridge's seed is a no-op then, so the sidecar (which may lag the live
+      // membership) must not overwrite what the response reports.
+      const sessionId = 's-pr-hydrate-live';
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(
+        sessionId,
+        'active',
+      );
+      await fsp.rm(sidecarPath, { force: true });
+      await upsertSessionPr(sidecarPath, {
+        number: 7,
+        url: 'https://github.com/o/r/pull/7',
+        source: 'create',
+      });
+      const livePrs = [
+        { number: 9, url: 'https://github.com/o/r/pull/9', source: 'create' },
+      ];
+      const liveSummary: BridgeSessionSummary = {
+        sessionId,
+        workspaceCwd: WS_BOUND,
+        createdAt: '2026-05-17T12:00:00.000Z',
+        clientCount: 1,
+        hasActivePrompt: false,
+        prs: livePrs,
+      };
+      const bridge = fakeBridge({ summaryImpl: () => liveSummary });
+      const recordSeed = bridge.seedSessionPrs.bind(bridge);
+      bridge.seedSessionPrs = (id, prs) => {
+        recordSeed(id, prs);
+        if (id === sessionId && !liveSummary.prs?.length) {
+          liveSummary.prs = prs;
+        }
+      };
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      try {
+        const res = await request(app)
+          .get(`/session/${sessionId}/status`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(res.status).toBe(200);
+        expect(res.body.prs).toMatchObject([{ number: 9, source: 'create' }]);
+      } finally {
+        await fsp.rm(sidecarPath, { force: true });
+      }
+    });
+
     it('200 omits displayName when the live session has none', async () => {
       const summary: BridgeSessionSummary = {
         sessionId: 's-2',
@@ -37187,7 +37298,7 @@ describe('createServeApp', () => {
       ).send({ pr });
       expect(res.status).toBe(200);
       expect(res.body.sessionId).toBe('550e8400-e29b-41d4-a716-446655440321');
-      expect(res.body.prs).toEqual([pr]);
+      expect(res.body.prs).toEqual([{ ...pr, source: 'create' }]);
       expect(bridge.updateMetadataCalls).toHaveLength(1);
       expect(bridge.updateMetadataCalls[0]?.metadata).toEqual({
         displayName: undefined,
@@ -37223,7 +37334,9 @@ describe('createServeApp', () => {
           ),
         ).send({ pr: { ...pr, role: 'fix' } });
         expect(set.status).toBe(200);
-        expect(set.body.prs).toEqual([{ ...pr, role: 'fix' }]);
+        expect(set.body.prs).toEqual([
+          { ...pr, role: 'fix', source: 'create' },
+        ]);
         expect((await readSessionPrs(sidecarPath))?.[0]?.role).toBe('fix');
 
         // An omitted role preserves the known one (a state refresh or
@@ -37235,7 +37348,7 @@ describe('createServeApp', () => {
         ).send({ pr: { ...pr, state: 'open' } });
         expect(preserve.status).toBe(200);
         expect(preserve.body.prs).toEqual([
-          { ...pr, state: 'open', role: 'fix' },
+          { ...pr, state: 'open', role: 'fix', source: 'create' },
         ]);
 
         // null is the explicit clear; the bridge never sees the null (the
@@ -37246,7 +37359,9 @@ describe('createServeApp', () => {
           ),
         ).send({ pr: { ...pr, role: null } });
         expect(clear.status).toBe(200);
-        expect(clear.body.prs).toEqual([{ ...pr, state: 'open' }]);
+        expect(clear.body.prs).toEqual([
+          { ...pr, state: 'open', source: 'create' },
+        ]);
         expect((await readSessionPrs(sidecarPath))?.[0]?.role).toBeUndefined();
         for (const call of bridge.updateMetadataCalls) {
           expect(
@@ -37528,7 +37643,7 @@ describe('createServeApp', () => {
         ),
       ).send({ pr });
       expect(res.status).toBe(200);
-      expect(res.body.prs).toEqual([pr]);
+      expect(res.body.prs).toEqual([{ ...pr, source: 'create' }]);
       expect(secondaryBridge.updateMetadataCalls).toEqual([
         {
           sessionId: '550e8400-e29b-41d4-a716-446655440321',
@@ -37664,7 +37779,7 @@ describe('createServeApp', () => {
           ),
         ).send({ pr });
         expect(res.status).toBe(200);
-        expect(res.body.prs).toEqual([pr]);
+        expect(res.body.prs).toEqual([{ ...pr, source: 'create' }]);
         // The binding lands at the located (archived) state only — no
         // orphan in the active chats dir that an unarchive would later
         // conflict with.
@@ -37736,7 +37851,7 @@ describe('createServeApp', () => {
           ),
         ).send({ pr });
         expect(res.status).toBe(200);
-        expect(res.body.prs).toEqual([pr]);
+        expect(res.body.prs).toEqual([{ ...pr, source: 'create' }]);
         const sidecar = await readSessionPrs(
           service.getPrSessionPathForArchiveState(
             '550e8400-e29b-41d4-a716-446655440321',
@@ -38053,7 +38168,11 @@ describe('createServeApp', () => {
         expect(retry.status).toBe(200);
         expect(retry.body.displayName).toBe('Doomed rename');
         expect(retry.body.prs).toEqual([
-          { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+          {
+            number: 9517,
+            url: 'https://github.com/o/r/pull/9517',
+            source: 'create',
+          },
         ]);
         expect(await fsp.readFile(filePath, 'utf8')).toContain('Doomed rename');
         expect(
