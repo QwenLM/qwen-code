@@ -132,48 +132,45 @@ export async function buildExtensionMentionContext(
     return { text: contextText, remainingBudget };
   }
 
-  const fileReads = await Promise.allSettled(
-    extension.contextFiles.map(async (contextFilePath) => {
-      let realPath: string;
-      let realExtPath: string;
-      try {
-        realPath = await fs.realpath(contextFilePath);
-        realExtPath = await fs.realpath(extension.path);
-      } catch {
-        options.onDebugMessage?.(
-          `Skipping unreadable context file: ${contextFilePath}`,
-        );
-        return null;
-      }
-      if (!isSubpath(realExtPath, realPath)) {
-        options.onDebugMessage?.(
-          `Skipping context file outside extension directory: ${contextFilePath}`,
-        );
-        return null;
-      }
-      return fs.readFile(realPath, {
-        encoding: 'utf-8',
-        signal: options.signal,
-      });
-    }),
-  );
-
-  for (let i = 0; i < fileReads.length; i++) {
-    const outcome = fileReads[i];
-    if (outcome.status === 'rejected') {
-      options.onDebugMessage?.(
-        `Failed to read extension context file ${extension.contextFiles[i]}: ${getErrorMessage(outcome.reason)}`,
-      );
-      continue;
-    }
-    const content = outcome.value;
-    if (!content || !content.trim()) continue;
+  for (const contextFilePath of extension.contextFiles) {
     if (remainingBudget <= 0) {
       options.onDebugMessage?.(
         'Extension context budget exhausted, skipping remaining files.',
       );
       break;
     }
+
+    let realPath: string;
+    let realExtPath: string;
+    try {
+      realPath = await fs.realpath(contextFilePath);
+      realExtPath = await fs.realpath(extension.path);
+    } catch {
+      options.onDebugMessage?.(
+        `Skipping unreadable context file: ${contextFilePath}`,
+      );
+      continue;
+    }
+    if (!isSubpath(realExtPath, realPath)) {
+      options.onDebugMessage?.(
+        `Skipping context file outside extension directory: ${contextFilePath}`,
+      );
+      continue;
+    }
+
+    let content: string;
+    try {
+      content = await fs.readFile(realPath, {
+        encoding: 'utf-8',
+        signal: options.signal,
+      });
+    } catch (error) {
+      options.onDebugMessage?.(
+        `Failed to read extension context file ${contextFilePath}: ${getErrorMessage(error)}`,
+      );
+      continue;
+    }
+    if (!content || !content.trim()) continue;
     const cap = Math.min(EXTENSION_CONTEXT_FILE_CAP, remainingBudget);
     const cappedContent =
       content.length > cap
