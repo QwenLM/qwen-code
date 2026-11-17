@@ -546,18 +546,28 @@ describe('managed DingTalk webhook per-chunk send budget (#17173 R10)', () => {
 });
 
 describe('managed DingTalk webhook sends are never truncated (#17529 R2-1)', () => {
-  // A 48 KiB heading-dense segment splits into 24 chunks. At these latencies
-  // the batch runs 24s to 696s — the last two reach or cross the control
-  // plane's 600s claim lease. Every one must still deliver all 24 chunks: a
-  // claim that outlives its lease is reconciled to unknown, but a late receipt
-  // moves unknown → partial → delivered, so the ledger converges while the
-  // tail keeps arriving. Refusing the tail strands the delivery at unknown
-  // forever (the reconciler only re-picks planned/sending/partial, and an
-  // unknown outcome writes no segment receipt), and an explicit resend
-  // re-plans every unreceipted segment, duplicating what the user has.
-  it.each([1_000, 15_000, 20_000, 24_500, 25_000, 29_000])(
-    'a 24-chunk segment at %i ms per chunk delivers every chunk, even past the lease',
-    async (latency) => {
+  // A 48 KiB heading-dense segment splits into 24 chunks — the most any of 33
+  // swept shapes produced at the segment bound. Each chunk must answer inside
+  // its own 30s budget or that budget aborts it, so a completing send is under
+  // 24 × 30s = 720s and an aggregate ceiling at or above 720s could never fire
+  // on a reachable segment. The rows below span that whole band, up to 29999ms
+  // per chunk, so any ceiling that could fire is inside the witness.
+  //
+  // Every row must deliver all 24 chunks. A send that outlives the claim lease
+  // is reconciled to unknown, but a late receipt moves unknown → partial →
+  // delivered, so the ledger converges while the tail keeps arriving; refusing
+  // the tail strands it instead (#17529 has the trace).
+  it.each([
+    { latency: 1_000, total: 24, relation: 'inside' },
+    { latency: 15_000, total: 360, relation: 'inside' },
+    { latency: 20_000, total: 480, relation: 'inside' },
+    { latency: 24_500, total: 588, relation: 'inside' },
+    { latency: 25_000, total: 600, relation: 'at' },
+    { latency: 29_000, total: 696, relation: 'past' },
+    { latency: 29_999, total: 719.976, relation: 'past' },
+  ])(
+    'a 24-chunk segment at $latency ms per chunk ($total s, $relation the 600s lease) delivers all 24',
+    async ({ latency }) => {
       vi.useFakeTimers();
       try {
         let text = '';
@@ -566,13 +576,23 @@ describe('managed DingTalk webhook sends are never truncated (#17529 R2-1)', () 
         }
         const chunks = splitChunks(text);
         expect(chunks.length).toBe(24);
-        // Each chunk answers inside its own 30s budget, so no per-chunk timer
-        // fires either: only an aggregate ceiling could cut this batch.
-        expect(latency).toBeLessThan(30_000);
-        const fetchMock = vi.fn(async () => {
-          await new Promise((resolve) => setTimeout(resolve, latency));
-          return jsonResponse({ errcode: 0 });
-        });
+        // A real fetch rejects on abort. This mock must too, or a ceiling
+        // re-added as a shared AbortController would truncate the tail on the
+        // wire while the mock still resolved — and lowering the per-chunk
+        // budget below a row's latency would go unnoticed as well.
+        const fetchMock = vi.fn(
+          (_url: string, init: { signal: AbortSignal }) =>
+            new Promise<Response>((resolve, reject) => {
+              const timer = setTimeout(
+                () => resolve(jsonResponse({ errcode: 0 })),
+                latency,
+              );
+              init.signal.addEventListener('abort', () => {
+                clearTimeout(timer);
+                reject(new Error('aborted'));
+              });
+            }),
+        );
         vi.stubGlobal('fetch', fetchMock);
         const { sendWebhook } = createManagedDingtalkDeps();
         let failure: unknown;
