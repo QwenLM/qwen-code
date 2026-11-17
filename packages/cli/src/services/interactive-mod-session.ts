@@ -123,9 +123,7 @@ export class InteractiveModSession implements ICommandLoader {
           sessionId,
         ),
     })!;
-    this.unregisterCleanup = registerCleanup(() => {
-      return this.close();
-    });
+    this.unregisterCleanup = registerCleanup(() => this.close());
   }
 
   /**

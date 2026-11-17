@@ -305,13 +305,17 @@ describe('cleanup', () => {
         await cleanup;
 
         const nextFn = vi.fn();
+        const lastFn = vi.fn();
         registerCleanup(nextFn);
+        registerCleanup(lastFn);
         finishCleanup();
         await vi.advanceTimersByTimeAsync(0);
         expect(nextFn).not.toHaveBeenCalled();
+        expect(lastFn).not.toHaveBeenCalled();
 
         await runExitCleanup();
         expect(nextFn).toHaveBeenCalledOnce();
+        expect(lastFn).toHaveBeenCalledOnce();
       } finally {
         vi.useRealTimers();
       }
