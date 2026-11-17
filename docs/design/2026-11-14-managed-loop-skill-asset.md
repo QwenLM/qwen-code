@@ -352,7 +352,8 @@ later snapshot read would reject.
   result, `cron_list` echoes the created prompt, and `cron_delete` retires the id
   the automation store minted with the delete result stating the retirement. The
   arm runs as a step of the full-tier `hosted-failover-e2e` CI job; observing a
-  scheduled fire remains out of scope.
+  scheduled fire remains out of scope here and is covered by the follow-up
+  [scheduled-fire observation E2E](2026-11-17-managed-loop-fire-e2e.md).
 
 ## Acceptance criteria
 
