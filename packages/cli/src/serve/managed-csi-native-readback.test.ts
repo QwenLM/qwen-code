@@ -25,6 +25,39 @@ import {
 } from './managed-csi-native-readback.js';
 
 describe('private CSI native readback', () => {
+  const checkpointSizeCases: Array<{ byteLength: number; valid: boolean }> =
+    fixtures.checkpointSizeCases;
+  it.each(checkpointSizeCases)(
+    'bounds the grant checkpoint at $byteLength bytes',
+    ({ byteLength, valid }) => {
+      const sample = fixtures.valid.find(
+        (candidate: { name: string }) => candidate.name === 'execute',
+      );
+      const response = structuredClone(sample.response);
+      response.evidence.grant.checkpointRef.byteLength = byteLength;
+      const read = () =>
+        readCsiNativeResponse(response, readCsiNativeRequest(sample.request));
+      if (valid) expect(read()).toEqual(response);
+      else expect(read).toThrow();
+    },
+  );
+
+  it.each([65536, 65537])(
+    'keeps an ordinary prepare reference bounded at %s bytes',
+    (byteLength) => {
+      const sample = fixtures.valid.find(
+        (candidate: { name: string }) => candidate.name === 'prepare',
+      );
+      const request = structuredClone(sample.request);
+      request.subject.byteLength = byteLength;
+      if (byteLength === 65536) {
+        expect(readCsiNativeRequest(request)).toEqual(request);
+      } else {
+        expect(() => readCsiNativeRequest(request)).toThrow();
+      }
+    },
+  );
+
   for (const value of fixtures.valid) {
     it(`accepts the shared ${value.name} response and original opaque bytes`, () => {
       const request = readCsiNativeRequest(value.request);

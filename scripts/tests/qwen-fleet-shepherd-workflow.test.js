@@ -497,18 +497,24 @@ exit 1`;
         const gh = join(dir, 'gh');
         writeFileSync(gh, `#!/bin/bash\n${ghScript}\n`);
         chmodSync(gh, 0o755);
-        writeFileSync('/tmp/scan-runs.json', JSON.stringify(runs));
+        writeFileSync(join(dir, 'scan-runs.json'), JSON.stringify(runs));
         const out = execFileSync(
           'bash',
           [
             '-c',
-            `${busyWalk.replace(/\n {10}/g, '\n')}\nprintf '%s|%s' "$BUSY_OK" "$SHEP_BUSY"`,
+            `${busyWalk
+              .replace(/\n {10}/g, '\n')
+              .replace(
+                '/tmp/scan-runs.json',
+                '"$SCAN_RUNS_FILE"',
+              )}\nprintf '%s|%s' "$BUSY_OK" "$SHEP_BUSY"`,
           ],
           {
             env: {
               ...process.env,
               PATH: `${dir}:${process.env.PATH}`,
               SCAN_RUNS_OK: 'true',
+              SCAN_RUNS_FILE: join(dir, 'scan-runs.json'),
               ACTIONS_TOKEN: 'x',
               REPO: 'QwenLM/qwen-code',
             },
@@ -518,7 +524,6 @@ exit 1`;
         return out.split('\n').at(-1);
       } finally {
         rmSync(dir, { recursive: true, force: true });
-        rmSync('/tmp/scan-runs.json', { force: true });
       }
     };
     const live = [{ databaseId: 101, status: 'in_progress' }];
@@ -1247,6 +1252,32 @@ exit 1`;
     expect(
       computeResume({ comments: [cmd('2026-08-06T00:00:00Z', 'wenshao')] }).ts,
     ).toBe('2026-08-06T00:00:00Z');
+    // …and the parameterized forms route accepts count too (R4-3): without
+    // these two arms a `for N` / `from N` command between the maintainer's
+    // comment and the ack leaves the shepherd blind, and it auto-releases a
+    // PR that was just re-engaged.
+    expect(
+      computeResume({
+        comments: [
+          cmd('2026-08-06T00:00:00Z', 'wenshao', '@qwen-code /takeover for 2'),
+        ],
+      }).ts,
+    ).toBe('2026-08-06T00:00:00Z');
+    expect(
+      computeResume({
+        comments: [
+          cmd('2026-08-06T00:00:00Z', 'wenshao', '@qwen-code /takeover from 4'),
+        ],
+      }).ts,
+    ).toBe('2026-08-06T00:00:00Z');
+    // A near-miss is not a command: the number is part of the grammar.
+    expect(
+      computeResume({
+        comments: [
+          cmd('2026-08-06T00:00:00Z', 'wenshao', '@qwen-code /takeover for'),
+        ],
+      }).ts,
+    ).toBe('');
     // …but a stranger's command does not (R4-14)…
     expect(
       computeResume({

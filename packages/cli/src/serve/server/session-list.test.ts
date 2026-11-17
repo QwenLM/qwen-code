@@ -13,11 +13,16 @@ import {
   GROUP_COLOR_OPTIONS,
 } from '@qwen-code/qwen-code-core/services/session-organization-service.js';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
+import { SESSION_TRANSCRIPT_MAX_INDEX_BYTES } from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
+import { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
 import type {
   AcpSessionBridge,
   BridgeSessionSummary,
 } from '../acp-session-bridge.js';
-import { listWorkspaceSessionsForResponse } from './session-list.js';
+import {
+  InvalidCursorError,
+  listWorkspaceSessionsForResponse,
+} from './session-list.js';
 
 describe('merged session catalog pagination', () => {
   let directory: string;
@@ -46,10 +51,15 @@ describe('merged session catalog pagination', () => {
     };
   }
 
-  async function persist(session: BridgeSessionSummary): Promise<void> {
+  async function persist(
+    session: BridgeSessionSummary,
+    promptTime = session.createdAt,
+    archived = false,
+  ): Promise<void> {
     const chats = path.join(
       new Storage(workspaceCwd, runtimeBaseDir).getProjectDir(),
       'chats',
+      ...(archived ? ['archive'] : []),
     );
     await fs.mkdir(chats, { recursive: true });
     const file = path.join(chats, `${session.sessionId}.jsonl`);
@@ -59,7 +69,7 @@ describe('merged session catalog pagination', () => {
         uuid: `${session.sessionId}-user`,
         parentUuid: null,
         sessionId: session.sessionId,
-        timestamp: session.createdAt,
+        timestamp: promptTime,
         type: 'user',
         message: { role: 'user', parts: [{ text: 'stored prompt' }] },
         cwd: workspaceCwd,
@@ -76,6 +86,249 @@ describe('merged session catalog pagination', () => {
       bridge: { listWorkspaceSessions: list } as unknown as AcpSessionBridge,
     };
   }
+
+  it.each([undefined, 'organized'] as const)(
+    'sorts the complete set by question time before paging (%s)',
+    async (view) => {
+      for (let index = 0; index < 4; index++) await persist(summary(index));
+      const { bridge } = bridgeFor([
+        { ...summary(0), updatedAt: summary(20).createdAt },
+      ]);
+      const options = {
+        size: 2,
+        sortBy: 'lastUserPromptAt' as const,
+        ...(view ? { view } : {}),
+      };
+      const first = await listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        options,
+        { runtimeBaseDir, paginateMerged: true },
+      );
+      expect(first.sessions.map((row) => row.sessionId)).toEqual([
+        summary(3).sessionId,
+        summary(2).sessionId,
+      ]);
+      const next = await listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        { ...options, cursor: first.nextCursor },
+        { runtimeBaseDir, paginateMerged: true },
+      );
+      expect(next.sessions.map((row) => row.sessionId)).toEqual([
+        summary(1).sessionId,
+        summary(0).sessionId,
+      ]);
+      await expect(
+        listWorkspaceSessionsForResponse(
+          bridge,
+          workspaceCwd,
+          {
+            ...options,
+            sortBy: 'updatedAt',
+            cursor: first.nextCursor,
+          },
+          { runtimeBaseDir, paginateMerged: true },
+        ),
+      ).rejects.toThrow();
+    },
+  );
+
+  it('sorts archived sessions by their archived question time, not activity', async () => {
+    const sessions = [summary(0), summary(1), summary(2)];
+    await persist(sessions[0]!, '2026-01-01T00:02:00.000Z', true);
+    await persist(sessions[1]!, '2026-01-01T00:03:00.000Z', true);
+    await persist(sessions[2]!, '2026-01-01T00:01:00.000Z', true);
+    const { bridge } = bridgeFor([]);
+    const page = await listWorkspaceSessionsForResponse(
+      bridge,
+      workspaceCwd,
+      {
+        size: 10,
+        sortBy: 'lastUserPromptAt' as const,
+        archiveState: 'archived' as const,
+      },
+      { runtimeBaseDir },
+    );
+    expect(page.sessions.map((row) => row.sessionId)).toEqual([
+      sessions[1]!.sessionId,
+      sessions[0]!.sessionId,
+      sessions[2]!.sessionId,
+    ]);
+    expect(page.sessions.map((row) => row.lastUserPromptAt)).toEqual([
+      '2026-01-01T00:03:00.000Z',
+      '2026-01-01T00:02:00.000Z',
+      '2026-01-01T00:01:00.000Z',
+    ]);
+  });
+
+  it('places unknown question times last with stable ties and preserves organized pins', async () => {
+    const { bridge } = bridgeFor([summary(0), summary(1), summary(2)]);
+    vi.spyOn(
+      SessionService.prototype,
+      'getLastUserPromptAt',
+    ).mockImplementation(async (id) =>
+      id === summary(0).sessionId ? undefined : summary(1).createdAt,
+    );
+    const options = { size: 10, sortBy: 'lastUserPromptAt' as const };
+    const page = await listWorkspaceSessionsForResponse(
+      bridge,
+      workspaceCwd,
+      options,
+      { runtimeBaseDir },
+    );
+    expect(page.sessions.map((row) => row.sessionId)).toEqual([
+      summary(1).sessionId,
+      summary(2).sessionId,
+      summary(0).sessionId,
+    ]);
+    await Storage.runWithResolvedRuntimeBaseDir(runtimeBaseDir, () =>
+      new SessionOrganizationService(workspaceCwd).updateSessionOrganization(
+        summary(0).sessionId,
+        { isPinned: true },
+      ),
+    );
+    const pinned = await listWorkspaceSessionsForResponse(
+      bridge,
+      workspaceCwd,
+      { ...options, view: 'organized' },
+      { runtimeBaseDir },
+    );
+    expect(pinned.sessions[0]?.sessionId).toBe(summary(0).sessionId);
+  });
+
+  it('enriches only returned rows with the recorded user time, independent of live activity', async () => {
+    await persist(summary(0));
+    await persist(summary(1));
+    const { bridge } = bridgeFor([
+      { ...summary(0), updatedAt: summary(10).createdAt },
+    ]);
+    const read = vi.spyOn(SessionService.prototype, 'getLastUserPromptAt');
+    const page = await listWorkspaceSessionsForResponse(
+      bridge,
+      workspaceCwd,
+      { size: 1 },
+      { runtimeBaseDir, paginateMerged: true },
+    );
+    expect(page.sessions).toHaveLength(1);
+    expect(page.sessions[0]?.sessionId).toBe(summary(0).sessionId);
+    expect(page.sessions[0]?.lastUserPromptAt).toBe(summary(0).createdAt);
+    expect(page.sessions[0]?.updatedAt).toBe(summary(10).createdAt);
+    expect(read.mock.calls).toEqual([[summary(0).sessionId, 'active']]);
+  });
+
+  it('rejects a cross-sort cursor before reading any transcript', async () => {
+    const { bridge } = bridgeFor([summary(0), summary(1), summary(2)]);
+    const first = await listWorkspaceSessionsForResponse(
+      bridge,
+      workspaceCwd,
+      { size: 1 },
+      { runtimeBaseDir, paginateMerged: true },
+    );
+    expect(first.nextCursor).toBeDefined();
+    const read = vi.spyOn(SessionService.prototype, 'getLastUserPromptAt');
+    await expect(
+      listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        { size: 1, sortBy: 'lastUserPromptAt', cursor: first.nextCursor },
+        { runtimeBaseDir, paginateMerged: true },
+      ),
+    ).rejects.toThrow(InvalidCursorError);
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it('keeps the whole page when one transcript cannot be read', async () => {
+    const { bridge } = bridgeFor([summary(0), summary(1)]);
+    vi.spyOn(
+      SessionService.prototype,
+      'getLastUserPromptAt',
+    ).mockImplementation(async (id) => {
+      if (id === summary(0).sessionId)
+        throw new Error('transcript replaced during read');
+      return summary(1).createdAt;
+    });
+    const page = await listWorkspaceSessionsForResponse(
+      bridge,
+      workspaceCwd,
+      { size: 2 },
+      { runtimeBaseDir, paginateMerged: true },
+    );
+    expect(page.sessions.map((row) => row.sessionId).sort()).toEqual([
+      summary(0).sessionId,
+      summary(1).sessionId,
+    ]);
+    const rows = new Map(
+      page.sessions.map((row) => [row.sessionId, row.lastUserPromptAt]),
+    );
+    expect(rows.get(summary(0).sessionId)).toBeUndefined();
+    expect(rows.get(summary(1).sessionId)).toBe(summary(1).createdAt);
+  });
+
+  it('keeps an oversized historical row visible without inventing its question time', async () => {
+    const item = summary(0);
+    await persist(item);
+    const file = path.join(
+      new Storage(workspaceCwd, runtimeBaseDir).getProjectDir(),
+      'chats',
+      `${item.sessionId}.jsonl`,
+    );
+    const assistants = Array.from(
+      { length: 12 },
+      (_, index) =>
+        JSON.stringify({
+          uuid: `assistant-${index}`,
+          parentUuid: index
+            ? `assistant-${index - 1}`
+            : `${item.sessionId}-user`,
+          sessionId: item.sessionId,
+          timestamp: item.createdAt,
+          type: 'assistant',
+          message: { role: 'model', parts: [{ text: 'output' }] },
+          cwd: workspaceCwd,
+        }) + '\n',
+    ).join('');
+    await fs.appendFile(file, assistants);
+    await fs.truncate(file, SESSION_TRANSCRIPT_MAX_INDEX_BYTES + 1);
+    const { bridge } = bridgeFor([]);
+    const page = await listWorkspaceSessionsForResponse(
+      bridge,
+      workspaceCwd,
+      { size: 1 },
+      { runtimeBaseDir, paginateMerged: true },
+    );
+    expect(page.sessions.map((row) => row.sessionId)).toEqual([item.sessionId]);
+    expect(page.sessions[0]?.lastUserPromptAt).toBeUndefined();
+  });
+
+  it('bounds timestamp reads to two and aborts the waiter without starting later rows', async () => {
+    const { bridge } = bridgeFor([
+      summary(1),
+      summary(2),
+      summary(3),
+      summary(4),
+    ]);
+    const pending: Array<(value: string | undefined) => void> = [];
+    const read = vi
+      .spyOn(SessionService.prototype, 'getLastUserPromptAt')
+      .mockImplementation(
+        () => new Promise((resolve) => pending.push(resolve)),
+      );
+    const controller = new AbortController();
+    const request = listWorkspaceSessionsForResponse(
+      bridge,
+      workspaceCwd,
+      { size: 4 },
+      { runtimeBaseDir, paginateMerged: true, signal: controller.signal },
+    );
+    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+    const reason = new Error('test stopped');
+    controller.abort(reason);
+    await expect(request).rejects.toBe(reason);
+    pending.forEach((resolve) => resolve(undefined));
+    await Promise.resolve();
+    expect(read).toHaveBeenCalledTimes(2);
+  });
 
   it('paginates persisted and live-only rows without dropping or duplicating merged rows', async () => {
     await persist(summary(0));
@@ -187,6 +440,69 @@ describe('merged session catalog pagination', () => {
     );
     expect(second.sessions).toEqual([]);
     expect(second.nextCursor).toBeUndefined();
+  });
+
+  it('keeps a live-only row reachable on later organized pages under question sort', async () => {
+    for (let index = 0; index < 4; index++) await persist(summary(index));
+    const { bridge } = bridgeFor([
+      { ...summary(9), updatedAt: summary(20).createdAt },
+    ]);
+    const options = {
+      size: 2,
+      view: 'organized' as const,
+      group: 'all',
+      sortBy: 'lastUserPromptAt' as const,
+    };
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    for (let page = 0; page < 3; page++) {
+      const result = await listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        { ...options, cursor },
+        { runtimeBaseDir },
+      );
+      seen.push(...result.sessions.map((row) => row.sessionId));
+      cursor = result.nextCursor;
+      if (cursor === undefined) break;
+    }
+    expect(seen).toEqual(
+      [3, 2, 1, 0, 9].map((index) => summary(index).sessionId),
+    );
+  });
+
+  it('binds a metadata page cursor to the question ordering', async () => {
+    // Prompt order (0,1,2,3) is the reverse of the file mtimes (3,2,1,0), so
+    // a cursor keyed by activity time sends page 2 back to page 1.
+    for (let index = 0; index < 4; index++) {
+      await persist(
+        summary(index),
+        new Date(Date.UTC(2026, 0, 1, 0, 9 - index)).toISOString(),
+      );
+    }
+    const { bridge } = bridgeFor([]);
+    const options = { size: 2, sortBy: 'lastUserPromptAt' as const };
+    const first = await listWorkspaceSessionsForResponse(
+      bridge,
+      workspaceCwd,
+      options,
+      { runtimeBaseDir },
+    );
+    expect(first.sessions.map((row) => row.sessionId)).toEqual([
+      summary(0).sessionId,
+      summary(1).sessionId,
+    ]);
+    expect(first.nextCursor).toEqual(expect.any(String));
+    const second = await listWorkspaceSessionsForResponse(
+      bridge,
+      workspaceCwd,
+      { ...options, cursor: first.nextCursor },
+      { runtimeBaseDir },
+    );
+    expect(second.sessions.map((row) => row.sessionId)).toEqual([
+      summary(2).sessionId,
+      summary(3).sessionId,
+    ]);
   });
 
   it('rejects an unfiltered legacy cursor as a metadata cursor', async () => {
@@ -420,5 +736,79 @@ describe('merged session catalog pagination', () => {
       [2, 1, 0].map((index) => summary(index).sessionId),
     );
     expect(result.nextCursor).toBeUndefined();
+  });
+
+  describe('PR sidecar read failures (R2-3)', () => {
+    async function writePrSidecar(
+      session: BridgeSessionSummary,
+      content: string,
+    ): Promise<void> {
+      const chats = path.join(
+        new Storage(workspaceCwd, runtimeBaseDir).getProjectDir(),
+        'chats',
+      );
+      await fs.mkdir(chats, { recursive: true });
+      await fs.writeFile(
+        path.join(chats, `${session.sessionId}.pr.json`),
+        content,
+      );
+    }
+
+    // Both corruption forms must read as UNKNOWN bindings: broken JSON and
+    // a shape-check failure. A well-formed empty list is NOT corruption —
+    // it is an authoritative clear and must keep reading as prs: [].
+    it.each(['{not json', '{"prs":[{"number":1}]}'])(
+      'leaves prs unset for a corrupt persisted PR sidecar instead of an authoritative clear: %s',
+      async (content) => {
+        const corrupt = summary(0);
+        const cleared = summary(1);
+        const unbound = summary(2);
+        await Promise.all([
+          persist(corrupt),
+          persist(cleared),
+          persist(unbound),
+        ]);
+        await writePrSidecar(corrupt, content);
+        await writePrSidecar(cleared, JSON.stringify({ prs: [] }));
+        const { bridge } = bridgeFor([]);
+
+        const result = await listWorkspaceSessionsForResponse(
+          bridge,
+          workspaceCwd,
+          {},
+          { runtimeBaseDir },
+        );
+
+        const byId = new Map(
+          result.sessions.map((session) => [session.sessionId, session]),
+        );
+        // A corrupt sidecar must not emit an authoritative tombstone
+        // (prs: []): that would read as an unbind — nor drop the row.
+        expect(byId.has(corrupt.sessionId)).toBe(true);
+        expect(byId.get(corrupt.sessionId)?.prs).toBeUndefined();
+        expect(byId.get(cleared.sessionId)?.prs).toEqual([]);
+        expect(byId.get(unbound.sessionId)?.prs).toBeUndefined();
+      },
+    );
+
+    it.each(['{not json', '{"prs":[{"number":1}]}'])(
+      'leaves prs unset for a corrupt PR sidecar on a live-only session: %s',
+      async (content) => {
+        const live = summary(7);
+        await writePrSidecar(live, content);
+        const { bridge } = bridgeFor([live]);
+
+        const result = await listWorkspaceSessionsForResponse(
+          bridge,
+          workspaceCwd,
+          {},
+          { runtimeBaseDir },
+        );
+
+        expect(result.sessions).toHaveLength(1);
+        expect(result.sessions[0]?.sessionId).toBe(live.sessionId);
+        expect(result.sessions[0]?.prs).toBeUndefined();
+      },
+    );
   });
 });

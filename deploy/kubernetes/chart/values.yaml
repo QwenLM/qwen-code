@@ -1,0 +1,66 @@
+server:
+  image: ''
+  resources:
+    requests:
+      cpu: '250m'
+      memory: '512Mi'
+    limits:
+      memory: '2Gi'
+
+harness:
+  image: ''
+  resources:
+    requests:
+      cpu: '250m'
+      memory: '512Mi'
+    limits:
+      memory: '2Gi'
+
+runtime:
+  enabled: false
+  # Required when enabled: the exact trusted Kubernetes Node name.
+  nodeName: ''
+  storage:
+    workspaceSize: '10Gi'
+    stateSize: '1Gi'
+    className: ''
+
+web:
+  enabled: false
+  # Empty reuses harness.image; it must include --managed-web-config.
+  image: ''
+  tenantId: ''
+  actorId: ''
+  allowOrigins: []
+  resources:
+    requests:
+      cpu: '100m'
+      memory: '128Mi'
+    limits:
+      memory: '512Mi'
+
+model:
+  id: ''
+  baseUrl: ''
+  # Only used when creating the managed Secret; prefer --set-file.
+  apiKey: ''
+
+credentials:
+  # See the README for required keys. Empty means generate and retain a Secret.
+  existingSecret: ''
+
+mysql:
+  image: 'mysql:8.4'
+  storage:
+    size: '10Gi'
+    # Empty uses the cluster's default StorageClass.
+    className: ''
+  resources:
+    requests:
+      cpu: '250m'
+      memory: '512Mi'
+    limits:
+      memory: '2Gi'
+
+imagePullPolicy: 'IfNotPresent'
+imagePullSecrets: []

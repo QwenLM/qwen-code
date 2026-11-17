@@ -188,16 +188,18 @@ const LANGUAGE_ID_TO_EXTENSIONS: Record<string, string[]> = {
 };
 
 /**
- * Diagnostics-local aliases for language IDs that do not name their
- * extension (`rust` serves `.rs`, `yaml` serves `.yml`): the `?? [id]`
- * fallback would otherwise guess the ID as the extension and an ownership
- * check misreads the server. Kept OUT of LANGUAGE_ID_TO_EXTENSIONS, which
- * also feeds the warmup-file chooser — these rows exist only for veto
- * decisions. A row must still carry its own ID when that ID is in
- * DIAGNOSTIC_LANGUAGE_IDS: the row shadows the `?? [id]` fallback, so
- * dropping the ID would leave the server with nothing attributable.
+ * Diagnostics-local aliases and additional served extensions. Kept OUT of
+ * LANGUAGE_ID_TO_EXTENSIONS, which also feeds the warmup-file chooser — these
+ * rows exist only for ownership and veto decisions and are unioned with the
+ * base mapping below.
  */
 const DIAGNOSTIC_LANGUAGE_ALIASES: Record<string, string[]> = {
+  typescript: ['mts', 'cts'],
+  javascript: ['mjs', 'cjs'],
+  javascriptreact: ['js', 'mjs', 'cjs'],
+  python: ['pyi'],
+  c: ['c', 'h'],
+  cpp: ['cpp', 'h', 'hpp', 'cc', 'cxx', 'cu'],
   rust: ['rs', 'rust'],
   yaml: ['yml', 'yaml'],
   markdown: ['md', 'markdown'],
@@ -209,8 +211,8 @@ const DIAGNOSTIC_LANGUAGE_ALIASES: Record<string, string[]> = {
   perl: ['pl', 'pm'],
   terraform: ['tf'],
   fortran: ['f', 'for', 'f90', 'f95'],
-  'objective-c': ['m', 'mm'],
-  objectivec: ['m', 'mm'],
+  'objective-c': ['m', 'mm', 'h'],
+  objectivec: ['m', 'mm', 'h'],
   shellscript: ['sh', 'bash'],
   protobuf: ['proto'],
   xml: ['xml'],
@@ -219,12 +221,24 @@ const DIAGNOSTIC_LANGUAGE_ALIASES: Record<string, string[]> = {
   lua: ['lua'],
   r: ['r'],
   dart: ['dart'],
-  swift: ['swift'],
+  swift: ['swift', 'h'],
   scala: ['scala', 'sc'],
   groovy: ['groovy', 'gvy'],
   clojure: ['clj', 'cljs'],
   zig: ['zig'],
 };
+
+function diagnosticExtensionsForLanguageId(id: string): string[] | undefined {
+  const base = Object.hasOwn(LANGUAGE_ID_TO_EXTENSIONS, id)
+    ? LANGUAGE_ID_TO_EXTENSIONS[id]
+    : undefined;
+  const aliases = Object.hasOwn(DIAGNOSTIC_LANGUAGE_ALIASES, id)
+    ? DIAGNOSTIC_LANGUAGE_ALIASES[id]
+    : undefined;
+  return base === undefined && aliases === undefined
+    ? undefined
+    : [...(base ?? []), ...(aliases ?? [])];
+}
 
 /**
  * Extensions positively attributable to a language through the mapping above.
@@ -239,10 +253,11 @@ const KNOWN_DIAGNOSTIC_EXTENSIONS: ReadonlySet<string> = new Set(
  * Language IDs the table above omits because the ID already names the
  * language, so `?? [id]` is not a guess for them: `cpp` serves `.cpp`, `go`
  * serves `.go`. A `.lsp.json` key in this set declares a real language, which
- * is what makes a veto decision possible; a key that is a server name
- * (`pyright`, `remote-lsp`) is in neither set and still proves nothing. The
- * table itself must not be widened to carry these: the set derived from it
- * also gates which queried files get a relevance decision at all.
+ * is what makes a veto decision possible even when the configured server has
+ * the same name. An unknown ID that equals the server name still proves
+ * nothing, nor does a malformed ID containing whitespace. The table itself
+ * must not be widened to carry more IDs: the set derived from it also gates
+ * which queried files get a relevance decision at all.
  */
 const DIAGNOSTIC_LANGUAGE_IDS: ReadonlySet<string> = new Set([
   'c',
@@ -261,13 +276,10 @@ const DIAGNOSTIC_LANGUAGE_IDS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Every extension the diagnostics tables can place: the mapping above, the
- * alias rows, and the identity-mapped language IDs. An extension outside this
- * set (`h`, `mts`, `ps1`, an extensionless file) cannot be attributed to any
- * language at all, so neither an answer about it can be required to be
- * positively owned nor a server excused for it — those files are undecidable
- * and fall back to the relevance ledger, as they did before ownership became a
- * requirement. Only a placeable extension can carry either decision.
+ * Every extension the diagnostics tables can place. An extension outside this
+ * set can still be attributed through an explicit `extensionToLanguage` key;
+ * only an extension in neither route is undecidable and falls back to the
+ * relevance ledger.
  */
 const ATTRIBUTABLE_DIAGNOSTIC_EXTENSIONS: ReadonlySet<string> = new Set([
   ...KNOWN_DIAGNOSTIC_EXTENSIONS,
@@ -290,7 +302,7 @@ const JS_TS_FAMILY_LANGUAGE_IDS = [
   'javascriptreact',
 ];
 const JS_TS_FAMILY_EXTENSIONS = JS_TS_FAMILY_LANGUAGE_IDS.flatMap(
-  (id) => LANGUAGE_ID_TO_EXTENSIONS[id] ?? [],
+  (id) => diagnosticExtensionsForLanguageId(id) ?? [],
 );
 
 /**
@@ -545,9 +557,13 @@ export class NativeLspService {
     const admitted: LspServerConfig[] = [];
     const skipped: LspSkippedServer[] = [];
     for (const config of configs) {
-      if (!workspaceTrusted && config.trustRequired) {
+      if (
+        (!workspaceTrusted && config.trustRequired) ||
+        (config.source === 'workspace' &&
+          !this.config.isExplicitlyTrustedFolder())
+      ) {
         debugLogger.warn(
-          `LSP server ${config.name} requires trusted workspace, skipping`,
+          `LSP server ${config.name} requires trusted workspace, skipping. Workspace .lsp.json requires explicit trust: enable security.folderTrust.enabled in user settings and trust this folder, or grant IDE workspace trust.`,
         );
         skipped.push({ name: config.name, reason: 'server_trust_required' });
         continue;
@@ -774,10 +790,10 @@ export class NativeLspService {
   }
 
   /**
-   * Ready handles for a diagnostics query. Rejects outright when nothing is
-   * ready — no matching server, a server that failed or never started, a
-   * server still starting up — because an empty ready set would otherwise be
-   * reported as a clean result. For a document query (`uri` given) the
+   * Ready handles for a query. Rejects outright when nothing is ready — no
+   * matching server, a server that failed or never started, a server still
+   * starting up — because an empty ready set would otherwise be reported as
+   * a clean (empty) result. For a document query (`uri` given) the
    * rejection names only servers the queried file does not provably exclude;
    * when every configured server is irrelevant for the file the rejection
    * says so instead of blaming a server that could never own it. Servers
@@ -788,7 +804,8 @@ export class NativeLspService {
    * for the not-ready case: `replayOpenDocuments` skips handles missing from
    * its map rather than rejecting.
    */
-  private getDiagnosticHandles(
+  private requireReadyHandles(
+    operation: string,
     serverName?: string,
     uri?: string,
   ): Array<[string, LspServerHandle & { connection: LspConnectionInterface }]> {
@@ -801,16 +818,19 @@ export class NativeLspService {
     );
     const extension = uri ? this.diagnosticFileExtension(uri) : undefined;
     const skipped = configured
-      .filter(([, handle]) => !this.serverDeclaredIrrelevant(handle, extension))
+      .filter(
+        ([, handle]) =>
+          !this.serverDeclaredIrrelevant(handle, extension, serverName),
+      )
       .map(([name, handle]) => describeLspServerState(name, handle));
     if (skipped.length > 0) {
       throw new Error(
-        `No LSP server is ready to provide diagnostics (${boundedRejectionDetail(skipped)})`,
+        `No LSP server is ready to provide ${operation} (${boundedRejectionDetail(skipped)})`,
       );
     }
     if (uri && configured.length > 0) {
       throw new Error(
-        'No LSP server is ready to provide diagnostics (no configured server covers the queried file)',
+        `No LSP server is ready to provide ${operation} (no configured server covers the queried file)`,
       );
     }
     throw new Error(
@@ -836,7 +856,7 @@ export class NativeLspService {
     return this.getReadyHandles(serverName).filter(
       ([name, handle]) =>
         !asked.some(([askedName]) => askedName === name) &&
-        !this.serverDeclaredIrrelevant(handle, extension),
+        !this.serverDeclaredIrrelevant(handle, extension, serverName),
     );
   }
 
@@ -870,31 +890,7 @@ export class NativeLspService {
    * veto a healthy sibling's answer for that file.
    */
   private declaredDiagnosticExtensions(handle: LspServerHandle): Set<string> {
-    const owned = new Set(this.getWorkspaceSymbolExtensions(handle));
-    // The mapping's VALUES are language ids: a partial user mapping (only
-    // `.tsx` for a `typescript` server) must not hide the declared
-    // language's other extensions.
-    const languageIds = [...handle.config.languages];
-    const extMapping = handle.config.extensionToLanguage;
-    if (extMapping) {
-      for (const value of Object.values(extMapping)) languageIds.push(value);
-    }
-    for (const language of languageIds) {
-      // `.lsp.json` keys reach `languages` unnormalized, while every extension
-      // this set is compared against is lowercase.
-      const id = language.toLowerCase();
-      if (JS_FAMILY_WIDENING_LANGUAGE_IDS.includes(id)) {
-        for (const ext of JS_TS_FAMILY_EXTENSIONS) {
-          owned.add(ext);
-        }
-        continue;
-      }
-      for (const ext of DIAGNOSTIC_LANGUAGE_ALIASES[id] ??
-        LANGUAGE_ID_TO_EXTENSIONS[id] ?? [id]) {
-        owned.add(ext);
-      }
-    }
-    return owned;
+    return this.declaredOwnerExtensions(handle, true);
   }
 
   /**
@@ -910,7 +906,13 @@ export class NativeLspService {
     handle: LspServerHandle,
     widenTypescriptFamily = false,
   ): Set<string> {
-    const owned = new Set(this.getWorkspaceSymbolExtensions(handle));
+    const owned = new Set(
+      Object.keys(handle.config.extensionToLanguage ?? {})
+        .map((extension) =>
+          extension.startsWith('.') ? extension.slice(1) : extension,
+        )
+        .filter((extension) => extension.length > 0),
+    );
     const ids = [...handle.config.languages];
     const extMapping = handle.config.extensionToLanguage;
     if (extMapping) {
@@ -927,21 +929,46 @@ export class NativeLspService {
         }
         continue;
       }
-      for (const ext of DIAGNOSTIC_LANGUAGE_ALIASES[id] ??
-        LANGUAGE_ID_TO_EXTENSIONS[id] ?? [id]) {
+      const mappedExtensions = diagnosticExtensionsForLanguageId(id);
+      for (const ext of mappedExtensions ??
+        (id.length > 0 &&
+        !/\s/u.test(id) &&
+        (ATTRIBUTABLE_DIAGNOSTIC_EXTENSIONS.has(id) ||
+          id !== handle.config.name.toLowerCase())
+          ? [id]
+          : [])) {
         owned.add(ext);
       }
     }
     return owned;
   }
 
+  private isAttributableDiagnosticExtension(
+    extension: string,
+    serverName?: string,
+  ): boolean {
+    return (
+      ATTRIBUTABLE_DIAGNOSTIC_EXTENSIONS.has(extension) ||
+      Array.from(this.serverManager.getHandles()).some(([name, handle]) => {
+        if (serverName && name !== serverName) return false;
+        const mapping = handle.config.extensionToLanguage;
+        return (
+          mapping !== undefined &&
+          (Object.hasOwn(mapping, extension) ||
+            Object.hasOwn(mapping, '.' + extension))
+        );
+      })
+    );
+  }
+
   /**
    * Whether the queried file's extension positively proves this server
    * cannot own the file. Fails closed on every uncertainty: an undefined
    * extension (extensionless or unparseable file), an extension no diagnostics
-   * table can place (`h`, `mts`, …), or a server whose declared set holds no
-   * attributable extension can prove nothing, so the veto stands. Only a
-   * positively attributable extension the server does not declare excuses it —
+   * table or explicit mapping can place, or a server that declares nothing at
+   * all can prove nothing, so the veto stands. Only an attributable extension
+   * that the server's own declarations and explicit mappings do not cover
+   * excuses it —
    * `python`'s `py` vs a queried `.ts` is the canonical case, and `go`'s
    * identity-mapped `.go` is the one that keeps a downed python server from
    * vetoing a clean gopls answer.
@@ -949,27 +976,26 @@ export class NativeLspService {
   private serverDeclaredIrrelevant(
     handle: LspServerHandle,
     extension: string | undefined,
+    serverName?: string,
   ): boolean {
     if (
       extension === undefined ||
-      !ATTRIBUTABLE_DIAGNOSTIC_EXTENSIONS.has(extension)
+      !this.isAttributableDiagnosticExtension(extension, serverName)
     ) {
       return false;
     }
     const owned = this.declaredDiagnosticExtensions(handle);
-    // `.lsp.json` keys reach `languages` unvalidated, so a key that is a
-    // server name (`pyright`, `remote-lsp`) seeds `owned` with the guess
-    // `[id]`. A set made only of such guesses proves nothing about the
-    // queried file — reading it as proof both excuses a downed server from
-    // the veto and strips a ready one of its backing. An ID that names a
-    // real language (`cpp`, `go`) is not such a guess, even though the
-    // mapping table omits it, and neither is an alias row's extension
-    // (`kt`, `yml`, `hs`): the row is a real language fact the mapping and
-    // the ID list both omit, which is why all three sources answer here.
-    const attributed = [...owned].some((ext) =>
-      ATTRIBUTABLE_DIAGNOSTIC_EXTENSIONS.has(ext),
+    // Only explicit mappings and recognized languages contribute ownership;
+    // an unrecognized server-name key still proves nothing about this file.
+    const mapping = handle.config.extensionToLanguage;
+    const hasAttributableOwnership = [...owned].some(
+      (ownedExtension) =>
+        ATTRIBUTABLE_DIAGNOSTIC_EXTENSIONS.has(ownedExtension) ||
+        (mapping !== undefined &&
+          (Object.hasOwn(mapping, ownedExtension) ||
+            Object.hasOwn(mapping, `.${ownedExtension}`))),
     );
-    return attributed && !owned.has(extension);
+    return hasAttributableOwnership && !owned.has(extension);
   }
 
   /**
@@ -1000,7 +1026,7 @@ export class NativeLspService {
         ([name, handle]) =>
           (!serverName || name === serverName) &&
           !queried.some(([queriedName]) => queriedName === name) &&
-          !this.serverDeclaredIrrelevant(handle, extension),
+          !this.serverDeclaredIrrelevant(handle, extension, serverName),
       )
       .map(([name, handle]) =>
         handle.status === 'READY' && handle.connection !== undefined
@@ -1356,7 +1382,9 @@ export class NativeLspService {
     // Fall back to deriving extensions from language identifiers
     if (extensions.size === 0) {
       for (const language of handle.config.languages) {
-        const mapped = LANGUAGE_ID_TO_EXTENSIONS[language];
+        const mapped = Object.hasOwn(LANGUAGE_ID_TO_EXTENSIONS, language)
+          ? LANGUAGE_ID_TO_EXTENSIONS[language]
+          : undefined;
         if (mapped) {
           for (const ext of mapped) {
             extensions.add(ext);
@@ -1446,12 +1474,9 @@ export class NativeLspService {
   ): Promise<LspSymbolInformation[]> {
     const results: LspSymbolInformation[] = [];
 
-    for (const [serverName, handle] of Array.from(
-      this.serverManager.getHandles(),
+    for (const [serverName, handle] of this.requireReadyHandles(
+      'workspace symbols',
     )) {
-      if (handle.status !== 'READY' || !handle.connection) {
-        continue;
-      }
       try {
         await this.warmupAndTrack(serverName, handle);
         const warmedUp = this.serverManager.isTypescriptServer(handle)
@@ -1514,7 +1539,11 @@ export class NativeLspService {
     serverName?: string,
     limit = 50,
   ): Promise<LspDefinition[]> {
-    const handles = this.getReadyHandles(serverName);
+    const handles = this.requireReadyHandles(
+      'definitions',
+      serverName,
+      location.uri,
+    );
     const requestParams = {
       textDocument: { uri: location.uri },
       position: location.range.start,
@@ -1583,7 +1612,11 @@ export class NativeLspService {
     includeDeclaration = false,
     limit = 200,
   ): Promise<LspReference[]> {
-    const handles = this.getReadyHandles(serverName);
+    const handles = this.requireReadyHandles(
+      'references',
+      serverName,
+      location.uri,
+    );
     const requestParams = {
       textDocument: { uri: location.uri },
       position: location.range.start,
@@ -1649,7 +1682,7 @@ export class NativeLspService {
     location: LspLocation,
     serverName?: string,
   ): Promise<LspHoverResult | null> {
-    const handles = this.getReadyHandles(serverName);
+    const handles = this.requireReadyHandles('hover', serverName, location.uri);
     const requestParams = {
       textDocument: { uri: location.uri },
       position: location.range.start,
@@ -1700,7 +1733,11 @@ export class NativeLspService {
     serverName?: string,
     limit = 200,
   ): Promise<LspSymbolInformation[]> {
-    const handles = this.getReadyHandles(serverName);
+    const handles = this.requireReadyHandles(
+      'document symbols',
+      serverName,
+      uri,
+    );
     const requestParams = { textDocument: { uri } };
 
     for (const [name, handle] of handles) {
@@ -1780,7 +1817,11 @@ export class NativeLspService {
     serverName?: string,
     limit = 50,
   ): Promise<LspDefinition[]> {
-    const handles = this.getReadyHandles(serverName);
+    const handles = this.requireReadyHandles(
+      'implementations',
+      serverName,
+      location.uri,
+    );
     const requestParams = {
       textDocument: { uri: location.uri },
       position: location.range.start,
@@ -1980,7 +2021,11 @@ export class NativeLspService {
     serverName?: string,
     limit = 50,
   ): Promise<LspCallHierarchyItem[]> {
-    const handles = this.getReadyHandles(serverName);
+    const handles = this.requireReadyHandles(
+      'call hierarchy',
+      serverName,
+      location.uri,
+    );
     const requestParams = {
       textDocument: { uri: location.uri },
       position: location.range.start,
@@ -2215,19 +2260,8 @@ export class NativeLspService {
     uri: string,
     serverName?: string,
   ): Promise<LspDiagnostic[]> {
-    const handles = this.getDiagnosticHandles(serverName, uri);
+    const handles = this.requireReadyHandles('diagnostics', serverName, uri);
     const extension = this.diagnosticFileExtension(uri);
-    // Ownership is only decidable for an extension the tables can place. For
-    // anything else (`h`, `mts`, an extensionless file) the answer is backed by
-    // relevance alone, because no declaration can be shown to cover the file
-    // and a refusal on that basis would reject a configuration that works. A
-    // non-`file:` URI (`jdt://…`) lands here too: `synchronizeDocument` returns
-    // early for it, so the server was never sent a `didOpen`, and refusing the
-    // pass-through would fail servers that answer for their own virtual
-    // documents; the design doc records that residue.
-    const attributable =
-      extension !== undefined &&
-      ATTRIBUTABLE_DIAGNOSTIC_EXTENSIONS.has(extension);
     const allDiagnostics: LspDiagnostic[] = [];
     const failures: Array<{
       name: string;
@@ -2245,9 +2279,12 @@ export class NativeLspService {
       handle: LspServerHandle;
     }> = [];
     // Queried servers that answered with a usable report, including an
+    // authoritative empty one, before ownership relevance is considered.
+    let answeredAny = 0;
+    // Queried servers that answered with a usable report, including an
     // authoritative empty one, and that `serverDeclaredIrrelevant` does not
-    // exclude. This is the fallback backing for an extension the tables cannot
-    // place, where no declaration can be required to prove ownership.
+    // exclude. This backs an extension neither the tables nor an explicit
+    // mapping can place, where no declaration can prove ownership.
     let answeredRelevant = 0;
     // Of those, the answers that positively own an attributable queried
     // extension. TypeScript answers widen directionally to the JS/TS family;
@@ -2311,14 +2348,18 @@ export class NativeLspService {
                 handle,
                 error: new Error('server returned only unusable diagnostics'),
               });
-            } else if (!this.serverDeclaredIrrelevant(handle, extension)) {
-              answeredRelevant++;
+            } else {
+              answeredAny++;
               if (
-                extension !== undefined &&
-                attributable &&
-                this.declaredOwnerExtensions(handle, true).has(extension)
+                !this.serverDeclaredIrrelevant(handle, extension, serverName)
               ) {
-                answeredOwner++;
+                answeredRelevant++;
+                if (
+                  extension !== undefined &&
+                  this.declaredOwnerExtensions(handle, true).has(extension)
+                ) {
+                  answeredOwner++;
+                }
               }
             }
           } else {
@@ -2360,13 +2401,23 @@ export class NativeLspService {
     }
 
     if (allDiagnostics.length === 0) {
+      // Explicit owners can appear while a pull is in flight. Use the same
+      // live configuration as relevance, without discarding their answers
+      // merely because the extension was unknown when the query began.
+      // Unmapped unknown extensions, extensionless files and virtual URIs
+      // still use relevance alone; requiring an unprovable owner would break
+      // the existing pass-through documented in the diagnostic design.
+      const attributable =
+        extension !== undefined &&
+        this.isAttributableDiagnosticExtension(extension);
       // A server the queried file provably excludes cannot veto the answer —
       // its failure says nothing about this file — and neither can a server
       // that answered `-32601`, which never implemented the pull in the first
       // place (and so is already out of `failures`). A failure or unusable
       // answer from a server that could own the file must still veto.
       const relevantFailures = failures.filter(
-        ({ handle }) => !this.serverDeclaredIrrelevant(handle, extension),
+        ({ handle }) =>
+          !this.serverDeclaredIrrelevant(handle, extension, serverName),
       );
       const unreachable = this.unreachableDiagnosticServers(
         queried,
@@ -2401,7 +2452,7 @@ export class NativeLspService {
         throw blame.length > 0
           ? nothingRetrievedForDiagnostics(blame, unreachable)
           : new Error(
-              answeredRelevant > 0
+              answeredAny > 0
                 ? 'No LSP diagnostics could be retrieved (a server answered but its answer could not be attributed to the queried file)'
                 : 'No LSP diagnostics could be retrieved (no configured server covers the queried file)',
             );
@@ -2421,7 +2472,7 @@ export class NativeLspService {
     serverName?: string,
     limit = 100,
   ): Promise<LspFileDiagnostics[]> {
-    const handles = this.getDiagnosticHandles(serverName);
+    const handles = this.requireReadyHandles('diagnostics', serverName);
     const results: LspFileDiagnostics[] = [];
     const failures: Array<{ name: string; error: unknown }> = [];
     const unsupported: Array<{ name: string; error: unknown }> = [];
@@ -2621,7 +2672,7 @@ export class NativeLspService {
     serverName?: string,
     limit = 20,
   ): Promise<LspCodeAction[]> {
-    const handles = this.getReadyHandles(serverName);
+    const handles = this.requireReadyHandles('code actions', serverName, uri);
 
     for (const [name, handle] of handles) {
       try {

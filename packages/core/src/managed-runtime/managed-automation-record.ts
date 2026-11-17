@@ -28,7 +28,7 @@ import {
 // (docs/design/2026-10-04-managed-automation.md, decisions 1, 2, 6 and 7).
 // The shared fixtures in contracts/managed-automation-record-v1.fixtures.json
 // pin both bodies, and ManagedExtensionRecords in
-// packages/sdk-java/managed-agent-server replays the same cases.
+// packages/managed-agent-server replays the same cases.
 
 export const SCHEDULE_KIND = 'schedule';
 export const AUTOMATION_RUN_KIND = 'automation_run';
@@ -79,6 +79,14 @@ export interface Schedule {
   /** The newest missed occurrences bounded catch-up fires; else null. */
   readonly catchUpLimit: number | null;
   readonly enabled: boolean;
+  /**
+   * The shell command the Runtime runs at each fire before any run is
+   * claimed: silence skips the fire, output wakes the target Session with
+   * the output attached, a failure is recorded and counted. Null for a
+   * definition that fires every slot. See
+   * docs/design/2026-10-22-managed-automation-gate.md.
+   */
+  readonly gate: string | null;
   readonly run: ExtensionRun;
 }
 
@@ -98,6 +106,12 @@ export interface AutomationRun {
   readonly sessionMode: ScheduleSessionMode;
   /** The frozen target of a persistent run; else null (decision 6). */
   readonly targetSessionId: string | null;
+  /**
+   * The published output of the gate probe that admitted this run, which
+   * the dispatch reads so a replay never probes again; null for a run of a
+   * definition without a gate. Fixed from the claim on.
+   */
+  readonly gateOutputRef: ManagedSessionDurableRef | null;
   readonly run: ExtensionRun;
 }
 
@@ -108,6 +122,7 @@ const SCHEDULE_KEYS = [
   'definitionDigest',
   'definitionRevision',
   'enabled',
+  'gate',
   'goal',
   'kind',
   'overlap',
@@ -124,6 +139,7 @@ const SCHEDULE_FIXED_KEYS = ['kind', 'ownerScopeId', 'scheduleId'] as const;
 const AUTOMATION_RUN_KEYS = [
   'automationRunId',
   'definitionRevision',
+  'gateOutputRef',
   'kind',
   'occurrenceKey',
   'run',
@@ -135,12 +151,16 @@ const AUTOMATION_RUN_KEYS = [
 const AUTOMATION_RUN_FIXED_KEYS = [
   'automationRunId',
   'definitionRevision',
+  'gateOutputRef',
   'kind',
   'occurrenceKey',
   'scheduleId',
   'sessionMode',
   'targetSessionId',
 ] as const;
+
+/** The longest gate command a definition may carry, in UTF-8 bytes. */
+export const SCHEDULE_GATE_MAX_BYTES = 2048;
 const TERMINAL_RUN_STATES: readonly ExtensionRunState[] = [
   'settled',
   'failed',
@@ -187,6 +207,11 @@ function id(value: ManagedSessionJsonValue, label: string): string {
 
 function text(value: ManagedSessionJsonValue, label: string): string {
   return boundedString(value, label, MANAGED_SESSION_LIMITS.maxTextBytes);
+}
+
+/** A gate command: bounded text under its own, tighter cap. */
+function gate(value: ManagedSessionJsonValue): string {
+  return boundedString(value, 'gate', SCHEDULE_GATE_MAX_BYTES);
 }
 
 function count(
@@ -393,6 +418,7 @@ export function parseScheduleRecord(value: unknown): Schedule {
     catchUp,
     catchUpLimit,
     enabled: boolean(body.enabled, 'enabled'),
+    gate: nullable(body.gate, gate),
     run,
   });
 }
@@ -514,6 +540,9 @@ export function parseAutomationRunRecord(value: unknown): AutomationRun {
     occurrenceKey: occurrenceKey(body.occurrenceKey),
     sessionMode,
     targetSessionId,
+    gateOutputRef: nullable(body.gateOutputRef, (each) =>
+      ref(each, 'gateOutputRef'),
+    ),
     run,
   });
 }

@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { ruPlural } from '../../utils/plural.js';
+
 /**
  * Agent collaboration strings (the Agents page, agents' live runs in a chat
  * session, the @ picker's agent entries). Kept out of the main dictionary like Live
@@ -251,6 +253,17 @@ export const COLLAB_MESSAGES_EN: Record<string, CollabMessage> = {
     'That is not a join link. It looks like https://host:4170/join/<workspace>.',
   'collab.runtime.joinConnected': (v) =>
     `This computer joined ${v?.server} as a runtime.`,
+  'collab.runtime.notSavedHere': (v) =>
+    `This computer joined, but could not save the connection, so it will not reconnect after a restart or a workspace reload${v?.error ? `: ${v.error}` : ''}.${v?.recorded === 'true' ? ' Run the same join command again to save it.' : ''}`,
+  'collab.runtime.notSavedThere': (v) =>
+    `That computer connected, but could not save the connection, so it will not reconnect after a restart or a workspace reload${v?.error ? `: ${v.error}` : '.'}`,
+  'collab.runtime.joinTimedOut': (v) =>
+    `No answer from this computer’s daemon${v?.error ? ` (${v.error})` : ''}. It may still be joining: check on the coordinator. If it did not join, try the same join again: if the daemon recorded this join’s token, it goes on with it; a token it refuses needs a new one.`,
+  'collab.runtime.joinFailed': (v) => `This computer’s join: ${v?.error ?? ''}`,
+  'collab.runtime.connectingHint':
+    'Connecting a runtime… Actions that leave this page wait until it finishes.',
+  'collab.runtime.joinNeedsHttp':
+    'This join link uses plain HTTP. Tick “Allow plain HTTP” if this network is trusted, or use an HTTPS link.',
   'collab.runtime.joinCli': 'Or from a terminal on this computer:',
 };
 
@@ -474,5 +487,266 @@ export const COLLAB_MESSAGES_ZH: Record<string, CollabMessage> = {
     '这不是加入链接，格式应为 https://host:4170/join/<workspace>。',
   'collab.runtime.joinConnected': (v) =>
     `这台电脑已作为 Runtime 加入 ${v?.server}。`,
+  'collab.runtime.notSavedHere': (v) =>
+    `这台电脑已加入，但没能保存这次连接，重启或重新加载工作区后不会自动重连${v?.error ? `：${v.error}` : ''}。${v?.recorded === 'true' ? '再运行一次同样的加入命令即可保存。' : ''}`,
+  'collab.runtime.notSavedThere': (v) =>
+    `那台电脑已连接，但没能保存这次连接，重启或重新加载工作区后不会自动重连${v?.error ? `：${v.error}` : '。'}`,
+  'collab.runtime.joinTimedOut': (v) =>
+    `这台电脑的守护进程没有应答${v?.error ? `（${v.error}）` : ''}，它可能仍在加入：请先在协调方确认。如果没有加入，再试一次同样的加入：若守护进程记录了本次加入的令牌，重跑会沿用这次尝试已完成的部分继续；若令牌被拒绝，则需要新的令牌。`,
+  'collab.runtime.joinFailed': (v) => `这台电脑的加入请求：${v?.error ?? ''}`,
+  'collab.runtime.connectingHint':
+    '正在连接 Runtime…会离开本页的操作要等它完成。',
+  'collab.runtime.joinNeedsHttp':
+    '这个加入链接使用 HTTP 明文。如果网络可信，请勾选“允许 HTTP 明文”；否则请使用 HTTPS 链接。',
   'collab.runtime.joinCli': '也可以在这台电脑的终端里运行：',
+};
+
+export const COLLAB_MESSAGES_RU: Record<string, CollabMessage> = {
+  'agents.description':
+    'Управляйте повторно используемыми определениями агентов для задач, Agent Teams и @-упоминаний в чате.',
+  'collab.elapsed.seconds': (v) => `${v?.count ?? 0} с`,
+  'collab.elapsed.minutes': (v) =>
+    `${v?.minutes ?? 0} мин ${v?.seconds ?? 0} с`,
+  'collab.run.queued': (v) =>
+    `${v?.agent} в очереди и начнёт, когда освободится`,
+  'collab.run.queuedBehind': (v) =>
+    `${v?.agent} в очереди, впереди ${v?.count}`,
+  'collab.run.stopping': (v) => `Остановка ${v?.agent}…`,
+  'collab.run.stalled': (v) =>
+    `${v?.agent} не показывает прогресса уже ${v?.elapsed}. Возможно, застрял.`,
+  'collab.run.stop': 'Остановить',
+  'collab.run.retry': 'Повторить',
+  'collab.run.retrying': 'Повтор…',
+  'collab.run.dismiss': 'Скрыть',
+  'collab.run.pendingRecord':
+    'Этот ответ появится в чате, когда текущий ответ завершится.',
+  'collab.session.working': (v) => `${v?.agent} работает…`,
+  'collab.session.thinking': (v) => `${v?.agent} думает…`,
+  'collab.session.awaitingApproval': (v) =>
+    `${v?.agent} ждёт вашего подтверждения`,
+  'collab.session.offline': (v) => `Runtime ${v?.agent} не в сети`,
+  'collab.session.cancelled': (v) => `${v?.agent} остановлен`,
+  'collab.session.stopAll': 'Остановить всех агентов',
+  'collab.squad.new': 'Новый отряд',
+  'collab.squad.empty': 'Отрядов пока нет.',
+  'collab.squad.name': 'Имя',
+  'collab.squad.nameHint': 'Вызывается как @name в чатах',
+  'collab.squad.calledAs': (v) => `Вызывается как @${v?.name} в чатах`,
+  'collab.squad.description': 'Описание (необязательно)',
+  'collab.squad.instructions': 'Инструкции лидеру (необязательно)',
+  'collab.squad.leader': 'Лидер',
+  'collab.squad.leads': 'ведёт',
+  'collab.squad.leaderPick': 'Выберите лидера',
+  'collab.squad.members': 'Участники',
+  'collab.squad.role': 'Роль (необязательно)',
+  'collab.squad.save': 'Сохранить отряд',
+  'collab.squad.edit': 'Изменить',
+  'collab.squad.retire': 'Вывести',
+  'collab.squad.retireConfirm': (v) =>
+    `Вывести отряд «${v?.name}»? История сохранится, новую работу он не берёт.`,
+  'collab.squad.retired': 'Выведен',
+  'collab.squad.needsLeader': 'Нужен новый лидер',
+  'collab.squad.leaderPaused': 'Лидер на паузе',
+  'collab.squad.summary': (v) =>
+    `Лидер ${v?.leader} · ${v?.count} ${ruPlural(v?.count, 'участник', 'участника', 'участников')}`,
+  'collab.squad.engagement': (v) => `Отряд ${v?.squad}`,
+  'collab.squad.memberWorking': 'работает',
+  'collab.squad.memberReplied': 'ответил',
+  'collab.squad.leaderDeciding': 'решает',
+  'collab.mention.squad': 'Отряд',
+  'collab.mention.noSession':
+    'Не удалось начать сессию для этого сообщения. Попробуйте снова.',
+  'collab.runtime.addTitle': 'Добавить runtime',
+  'collab.runtime.addDescription':
+    'Пусть другой компьютер запускает агентов Qwen Code для этой рабочей области.',
+  'collab.runtime.replaceTitle': (v) => `Заменить ${v?.name}`,
+  'collab.runtime.replaceDescription': (v) =>
+    `Замените ${v?.name} новым хостом с помощью одноразовой команды присоединения.`,
+  'collab.runtime.replaceEffects':
+    'После регистрации нового хоста старые учётные данные отзываются, а привязки агентов переносятся на новый хост. Выполняющиеся или отменяемые задачи на старом хосте завершаются ошибкой; результаты, уже доходящие до финализации, сохраняются.',
+  'collab.runtime.replaceRecovery': (v) =>
+    `Возобновление замены ${v?.name} (${v?.id}). Истечение ссылки не отменяет ожидающую замену и не откатывает перенесённые привязки. Если команда истечёт, создайте здесь новую и выполните её на машине-замене.`,
+  'collab.runtime.refreshReplacement': 'Обновить команду замены',
+  'collab.runtime.methodCommand': 'Выполнить одну команду там',
+  'collab.runtime.methodExisting': 'У меня есть адрес и токен',
+  'collab.runtime.address':
+    'Адрес этого компьютера, как его видит другой компьютер',
+  'collab.runtime.addressHint':
+    'Другой компьютер подключается к этому адресу, поэтому он должен быть доступен оттуда.',
+  'collab.runtime.loopbackHint':
+    'localhost работает только на этом компьютере. Используйте сетевой адрес (например http://192.168.1.8:4170), чтобы другой компьютер мог достучаться.',
+  'collab.runtime.generate': 'Создать команду присоединения',
+  'collab.runtime.runThis':
+    'На другом компьютере выполните это в папке проекта:',
+  'collab.runtime.noQwen': 'Qwen Code там не установлен? Подойдёт и это:',
+  'collab.runtime.copy': 'Копировать',
+  'collab.runtime.copied': 'Скопировано',
+  'collab.runtime.expires': (v) =>
+    `Ссылка одноразовая и истекает через ${v?.minutes ?? 0} мин.`,
+  'collab.runtime.httpHint':
+    'Используется обычный HTTP, поэтому применяйте только в доверенной сети.',
+  'collab.runtime.waiting': 'Ожидание подключения…',
+  'collab.runtime.waitingFor': (v) =>
+    `Уже ${v?.seconds ?? 0} с. Обновится само, когда подключится.`,
+  'collab.runtime.closeKeepLink': 'Закрыть (ссылка продолжит работать)',
+  'collab.runtime.connected': (v) => `${v?.name} подключён`,
+  'collab.runtime.replaced': (v) => `${v?.oldName} заменён на ${v?.name}`,
+  'collab.runtime.replaceCompleted':
+    'Старые учётные данные отозваны, привязки агентов перенесены. Старые активные запуски завершены; результаты, уже доходящие до финализации, сохранены.',
+  'collab.runtime.offers': (v) => `Предлагает ${v?.programs}`,
+  'collab.runtime.done': 'Готово',
+  'collab.runtime.createAgentOn': (v) => `Создать агента на ${v?.name}`,
+  'collab.runtime.remoteUrl': 'Его адрес Qwen Code',
+  'collab.runtime.remoteToken': 'Его токен доступа',
+  'collab.runtime.remoteCwd': 'Папка проекта на том компьютере',
+  'collab.runtime.program': 'Программа',
+  'collab.runtime.allowHttp':
+    'Разрешить обычный HTTP (только доверенные сети; токен и задачи не шифруются)',
+  'collab.runtime.connect': 'Подключить',
+  'collab.share.title': (v) => `Поделиться ${v?.name}`,
+  'collab.share.description':
+    'Любой, у кого есть токен, может отправлять этому агенту работу по A2A. Она выполняется там, куда агент сейчас назначен, в рабочей области этого runtime, с текущими инструкциями и инструментами. Позднейшие изменения — включая перенос между этим компьютером и присоединённым runtime — действуют и для уже выданных доступов.',
+  'collab.share.copy': 'Копировать',
+  'collab.share.copied': 'Скопировано',
+  'collab.share.done': 'Готово',
+  'collab.share.create': 'Создать ссылку',
+  'collab.share.endpoint': 'Эндпоинт A2A',
+  'collab.share.token': 'Токен',
+  'collab.share.try': 'Попробовать',
+  'collab.share.once':
+    'Токен показывается только сейчас; отозвать его можно здесь в любой момент.',
+  'collab.share.onceUntil': (v) =>
+    `Токен показывается только сейчас. Истекает ${v?.date}; отозвать его можно здесь в любой момент.`,
+  'collab.share.loopback':
+    'Этот адрес работает только на этом компьютере. Откройте Web Shell через адрес, доступный вызывающей стороне, затем создайте доступ.',
+  'collab.share.active': (v) => `Активные доступы (${v?.count ?? 0})`,
+  'collab.share.until': (v) => `до ${v?.date}`,
+  'collab.share.revoke': 'Отозвать',
+  'collab.agent.share': 'Поделиться',
+  'collab.tabs.agents': 'Агенты',
+  'collab.tabs.squads': 'Отряды',
+  'collab.tabs.runtime': 'Runtime',
+  'collab.tabs.agentsHint':
+    'Агенты — товарищи, которых вы создаёте. Каждый работает на runtime с одной программой. @ агента в любом разговоре, чтобы привлечь его; он может привлечь других.',
+  'collab.tabs.runtimeHint':
+    'Runtime — компьютеры, на которых работают агенты: этот и те, что присоединились по ссылке.',
+  'collab.tabs.squadsHint':
+    'Отряд — лидер и агенты, которым он передаёт работу. @ отряд в любом чате, и лидер распределит работу и отчитается.',
+  'collab.agent.new': 'Новый агент',
+  'collab.agent.roles': 'Шаблоны ролей',
+  'collab.agent.mentionIt': 'Упомянуть в чате',
+  'collab.agent.more': (v) => `Другие действия для ${v?.name}`,
+  'collab.agent.configure': 'Настроить',
+  'collab.agent.pause': 'Пауза',
+  'collab.agent.resume': 'Продолжить',
+  'collab.agent.retire': 'Вывести',
+  'collab.agent.retireConfirm': (v) =>
+    `Вывести ${v?.name}? Он больше не берёт работу. Сообщения остаются, имя резервируется, чтобы никто не мог писать от его лица.`,
+  'collab.agent.joins': (v) => `Вступает в команду для ${v?.project}.`,
+  'collab.agent.nameHelp':
+    'Показывается в разговорах. Упомяните через @name, чтобы привлечь.',
+  'collab.agent.role': 'Начать с роли',
+  'collab.agent.roleNone': 'Без роли',
+  'collab.agent.roleHint':
+    'Роль из .qwen/agents задаёт базовые инструкции и инструменты; написанное ниже дополняет их.',
+  'collab.agent.instructions': 'Рабочие инструкции (необязательно)',
+  'collab.agent.instructionsHint':
+    'За что отвечает и как должен возвращать результаты.',
+  'collab.agent.description':
+    'Когда другие агенты должны его привлекать? (необязательно)',
+  'collab.agent.concurrency': 'Разговоров одновременно',
+  'collab.agent.concurrencyInvalid':
+    'Число одновременных разговоров должно быть от 1 до 8.',
+  'collab.agent.runsOn': 'Работает на',
+  'collab.agent.thisComputer': 'Этот компьютер',
+  'collab.agent.cwdUnknown': 'Папка ещё не сообщена',
+  'collab.agent.hostPersona':
+    'Удалённые агенты используют модель runtime и ваши инструкции здесь. Локальные переопределения роли и модели недоступны.',
+  'collab.agent.runsOnHint':
+    'Присоединённый runtime работает в своей папке, показанной под его именем. Файлы отсюда туда не копируются.',
+  'collab.agent.programLocal': 'Работает только на присоединённом runtime',
+  'collab.agent.programMissing': 'Не найдено на этом runtime',
+  'collab.error.dispatchAfterSave': (v) =>
+    `Изменение сохранено, но фоновая обработка не удалась: ${v?.error}`,
+  'collab.agent.afterCreate':
+    'Он начнёт работать, когда вы упомянете его в разговоре.',
+  'collab.noWorkspace': 'Откройте рабочую область, чтобы работать с агентами.',
+  'collab.agent.empty':
+    'Агентов пока нет. Создайте одного, затем @ его в любом разговоре.',
+  'collab.runtime.localNote':
+    'Этот компьютер. Его агенты работают в этой рабочей области с Qwen Code.',
+  'collab.runtime.remoteNote':
+    'Другой компьютер, присоединившийся к этой рабочей области. Назначенные ему агенты работают там.',
+  'collab.runtime.programs': 'Программы',
+  'collab.runtime.empty': 'Runtime пока нет.',
+  'collab.runtime.emptyHint':
+    'Добавьте runtime, чтобы другой компьютер запускал агентов, затем создайте агента на нём.',
+  'collab.runtime.badAddress': 'Введите адрес вида http://192.168.1.8:4170.',
+  'collab.run.failed': (v) => `${v?.agent} остановился с ошибкой`,
+  'collab.run.steps': (v) => `Шаги ${v?.agent}`,
+  'collab.mention.provider': 'Агенты',
+  'collab.mention.newAgent': 'Новый агент…',
+  'collab.mention.noAttachments':
+    'Вложения пока нельзя отправить агенту. Начните с текста.',
+  'collab.agentStatus.idle': 'Ожидание',
+  'collab.agentStatus.working': 'Работает',
+  'collab.agentStatus.offline': 'Runtime не в сети',
+  'collab.agentStatus.error': 'Требует внимания',
+  'collab.agentStatus.paused': 'На паузе',
+  'collab.agentStatus.retired': 'Выведен',
+  'collab.sharedThreads': 'Совместная работа агентов',
+  'collab.approval.title': (v) => `${v?.agent} хочет запустить инструмент`,
+  'collab.agent.waiting': (v) => `${v?.count} в ожидании`,
+  'collab.form.cancel': 'Отмена',
+  'collab.config.description': 'Роль',
+  'collab.config.descriptionHint':
+    'Например: проверять код и сообщать о проблемах лидеру',
+  'collab.config.instructions': 'Инструкции',
+  'collab.config.instructionsHint':
+    'Как работать и что сдавать. Инструкции не расширяют доступ к инструментам.',
+  'collab.config.agentType': 'Шаблон роли',
+  'collab.config.workspaceDefault': 'По умолчанию рабочей области',
+  'collab.config.model': 'Модель',
+  'collab.config.maxRuns': 'Разговоров одновременно',
+  'collab.config.note':
+    'Оставьте поле пустым, чтобы использовать значение шаблона роли по умолчанию.',
+  'collab.config.save': 'Сохранить',
+  'collab.agentStatus.online': 'В сети',
+  'collab.config.runtimes': 'Работает на',
+  'collab.config.runtimesHint':
+    'Если машина не выбрана, его запускает этот компьютер.',
+  'collab.runtime.folder': 'Рабочая папка',
+  'collab.runtime.agents': 'Агенты',
+  'collab.runtime.running': 'Выполняется',
+  'collab.runtime.queued': 'В очереди',
+  'collab.runtime.technical': 'Технические сведения',
+  'collab.runtime.id': (v) => `ID runtime: ${v?.id}`,
+  'collab.runtime.sessions': (v) => `Сессии: ${v?.count}`,
+  'collab.runtime.lastSeen': (v) => `Последний heartbeat: ${v?.time}`,
+  'collab.runtime.replace': 'Заменить Host',
+  'collab.runtime.remove': 'Удалить',
+  'collab.runtime.removeConfirm': (v) =>
+    `Удалить «${v?.name}»? Агенты, назначенные только ему, перейдут на этот компьютер, а его активные запуски остановятся.`,
+  'collab.runtime.methodJoin': 'Присоединиться к координатору',
+  'collab.runtime.joinDescription':
+    'Сделайте этот компьютер runtime другого Qwen Code: вставьте ссылку присоединения и токен, показанные там в Runtime › Добавить runtime.',
+  'collab.runtime.joinLink': 'Ссылка присоединения',
+  'collab.runtime.joinToken': 'Токен присоединения',
+  'collab.runtime.joinBadLink':
+    'Это не ссылка присоединения. Она выглядит как https://host:4170/join/<workspace>.',
+  'collab.runtime.joinConnected': (v) =>
+    `Этот компьютер присоединился к ${v?.server} как Runtime.`,
+  'collab.runtime.notSavedHere': (v) =>
+    `Этот компьютер присоединился, но не смог сохранить соединение, поэтому не переподключится после перезапуска или перезагрузки рабочей области${v?.error ? `: ${v.error}` : '.'}`,
+  'collab.runtime.notSavedThere': (v) =>
+    `Тот компьютер подключился, но не смог сохранить соединение, поэтому не переподключится после перезапуска или перезагрузки рабочей области${v?.error ? `: ${v.error}` : '.'}`,
+  'collab.runtime.joinTimedOut': (v) =>
+    `Нет ответа от демона этого компьютера${v?.error ? ` (${v.error})` : ''}. Он всё ещё может присоединяться: сначала проверьте на координаторе, с новым токеном присоединения, если он не присоединился.`,
+  'collab.runtime.joinFailed': (v) =>
+    `Присоединение этого компьютера: ${v?.error ?? ''}`,
+  'collab.runtime.connectingHint':
+    'Подключение runtime… Действия, которые покидают эту страницу, ждут завершения.',
+  'collab.runtime.joinNeedsHttp':
+    'Эта ссылка присоединения использует обычный HTTP. Отметьте «Разрешить обычный HTTP», если сеть доверенная, или используйте ссылку HTTPS.',
+  'collab.runtime.joinCli': 'Или из терминала на этом компьютере:',
 };

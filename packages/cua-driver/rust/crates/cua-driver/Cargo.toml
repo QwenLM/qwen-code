@@ -17,6 +17,7 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 cua-driver-core = { path = "../cua-driver-core" }
+cua-driver-contract = { path = "../cua-driver-contract" }
 cua-driver-sdk = { path = "../cua-driver-sdk" }
 cursor-overlay = { path = "../cursor-overlay" }
 pip-preview = { path = "../pip-preview" }
@@ -57,12 +58,6 @@ platform-linux = { path = "../platform-linux" }
 
 [features]
 default = []
-# GNOME/KDE portal input ships in ordinary Linux releases; PipeWire capture
-# remains a separate modern-desktop feature. The combined name stays as a
-# compatibility alias for Nix and downstream builds.
-portal-input = ["platform-linux/portal-input"]
-portal-capture = ["platform-linux/portal-capture"]
-portal-libei = ["platform-linux/portal-libei"]
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
 # Embed the Windows manifest for DPI awareness (fixes coordinate mismatches
@@ -73,7 +68,6 @@ embed-resource = "2"
 # Shared integration-test harness (MCP/CLI transports, child reaping, paths,
 # response accessors). Dev-only — never linked into the shipped driver.
 cua-driver-testkit = { path = "../cua-driver-testkit" }
-cua-driver-contract = { path = "../cua-driver-contract" }
 tokio = { workspace = true, features = ["full"] }
 image = { workspace = true }
 base64 = { workspace = true }

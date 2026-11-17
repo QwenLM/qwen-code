@@ -116,6 +116,7 @@ function createTrustedManager(): LspServerManager {
   return new LspServerManager(
     {
       isTrustedFolder: vi.fn().mockReturnValue(true),
+      isExplicitlyTrustedFolder: vi.fn().mockReturnValue(true),
     } as unknown as CoreConfig,
     {} as WorkspaceContext,
     {} as FileDiscoveryService,
@@ -726,6 +727,39 @@ describe('LspServerManager', () => {
     );
   });
 
+  it('blocks workspace command probes until explicitly trusted, without blocking extension configs', async () => {
+    const config = {
+      isTrustedFolder: () => true,
+      isExplicitlyTrustedFolder: vi.fn().mockReturnValue(false),
+    };
+    const manager = new LspServerManager(
+      config as unknown as CoreConfig,
+      {} as WorkspaceContext,
+      {} as FileDiscoveryService,
+      { requireTrustedWorkspace: false, workspaceRoot: '/workspace' },
+    );
+    const probe = openGates(manager);
+    const connection = createMockConnection();
+    stubConnection(manager, { connection, process: createMockProcess() });
+    manager.setServerConfigs([{ ...serverConfig, source: 'workspace' }]);
+
+    await manager.startAll();
+    expect(probe).not.toHaveBeenCalled();
+    expect(manager.getHandles().get('clangd')?.status).toBe('FAILED');
+
+    config.isExplicitlyTrustedFolder.mockReturnValue(true);
+    await manager.startAll();
+    expect(probe).toHaveBeenCalled();
+    await manager.stopAll();
+
+    probe.mockClear();
+    config.isExplicitlyTrustedFolder.mockReturnValue(false);
+    manager.setServerConfigs([{ ...serverConfig, source: 'extension' }]);
+    await manager.startAll();
+    expect(probe).toHaveBeenCalled();
+    await manager.stopAll();
+  });
+
   it('does not probe command existence for unsafe command paths', async () => {
     const manager = createTrustedManager();
     spyPrivate(manager, 'checkWorkspaceTrust').mockResolvedValue(true);
@@ -979,6 +1013,9 @@ describe('LspServerManager', () => {
       NODE_OPTIONS: '--require /tmp/hook.js',
       node_options: '--require /tmp/lowercase-hook.js',
       Ld_PreLoad: '/tmp/preload.so',
+      BASH_ENV: '/tmp/bash-env.sh',
+      ENV: '/tmp/env.sh',
+      npm_config_node_options: '--require /tmp/npm-hook.js',
       SAFE_VALUE: '1',
     });
 
@@ -986,6 +1023,9 @@ describe('LspServerManager', () => {
     expect(env['NODE_OPTIONS']).toBe(process.env['NODE_OPTIONS']);
     expect(env['node_options']).toBeUndefined();
     expect(env['Ld_PreLoad']).toBeUndefined();
+    expect(env['BASH_ENV']).toBeUndefined();
+    expect(env['ENV']).toBeUndefined();
+    expect(env['npm_config_node_options']).toBeUndefined();
     expect(env['SAFE_VALUE']).toBe('1');
   });
 

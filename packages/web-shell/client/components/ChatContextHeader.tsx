@@ -4,6 +4,7 @@ import {
   GaugeIcon,
   LayoutListIcon,
   LayersIcon,
+  PackageIcon,
   PanelRightIcon,
 } from 'lucide-react';
 import { useI18n } from '../i18n';
@@ -42,10 +43,16 @@ interface ChatContextHeaderProps {
   rightPanelAvailable: boolean;
   onToggleEnvironment: () => void;
   onToggleRightPanel: () => void;
+  /** Opens the current workspace file tree; informational when omitted. */
+  onOpenFiles?: () => void;
   /** Opens the session token-usage panel; hidden when omitted. */
   onOpenTokenUsage?: () => void;
   /** Opens the session context panel; hidden when omitted. */
   onOpenContextUsage?: () => void;
+  /** Session artifact count; the artifact entry shows when greater than 0. */
+  artifactCount?: number;
+  /** Opens the environment panel's artifacts section; hidden when omitted. */
+  onOpenArtifacts?: () => void;
   /** Shows the Local Control QR entry; hidden when omitted. */
   onOpenLocalControlSettings?: () => void;
 }
@@ -63,35 +70,40 @@ export function ChatContextHeader({
   rightPanelAvailable,
   onToggleEnvironment,
   onToggleRightPanel,
+  onOpenFiles,
   onOpenTokenUsage,
   onOpenContextUsage,
+  artifactCount,
+  onOpenArtifacts,
   onOpenLocalControlSettings,
 }: ChatContextHeaderProps) {
   const { t } = useI18n();
   const workspaceLabel = workspaceName ?? t('sidebar.noWorkspace');
+  const WorkspaceIcon = onOpenFiles ? 'button' : 'span';
+  const workspaceAriaLabel = workspaceName
+    ? t('workspace.paneLabel', { name: workspaceName })
+    : workspaceLabel;
 
   return (
     <header className={styles.header} data-testid="chat-context-header">
       {!hideWorkspaceIcon && (
-        // role="img" so the icon is announced as its aria-label; a bare span
-        // (generic role) does not surface one reliably. The same folder glyph
-        // serves both states — the icon cannot name the workspace, or say that
-        // there is none, so hovering it does.
         <TooltipProvider delayDuration={300}>
           <Tooltip>
             <TooltipTrigger asChild>
-              <span
-                role="img"
+              <WorkspaceIcon
+                type={onOpenFiles ? 'button' : undefined}
+                role={onOpenFiles ? undefined : 'img'}
+                onClick={onOpenFiles}
                 className={styles.workspaceIcon}
                 data-testid="chat-header-workspace"
                 aria-label={
-                  workspaceName
-                    ? t('workspace.paneLabel', { name: workspaceName })
-                    : workspaceLabel
+                  onOpenFiles
+                    ? `${t('files.description')}: ${workspaceAriaLabel}`
+                    : workspaceAriaLabel
                 }
               >
                 <FolderClosedIcon />
-              </span>
+              </WorkspaceIcon>
             </TooltipTrigger>
             <TooltipContent side="bottom">
               <span className={styles.workspaceTooltip}>
@@ -173,6 +185,21 @@ export function ChatContextHeader({
             onClick={onToggleRightPanel}
           >
             <PanelRightIcon />
+          </button>
+        )}
+        {onOpenArtifacts && artifactCount != null && artifactCount > 0 && (
+          <button
+            type="button"
+            className={`${styles.action} ${styles.artifactAction}`}
+            data-web-shell-artifacts-entry
+            aria-label={t('chatHeader.openArtifacts', { count: artifactCount })}
+            title={t('chatHeader.openArtifacts', { count: artifactCount })}
+            onClick={onOpenArtifacts}
+          >
+            <PackageIcon />
+            <span className={styles.artifactCount} aria-hidden="true">
+              {artifactCount}
+            </span>
           </button>
         )}
       </div>

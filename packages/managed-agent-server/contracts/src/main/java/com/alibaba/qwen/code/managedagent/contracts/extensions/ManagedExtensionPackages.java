@@ -1,0 +1,104 @@
+package com.alibaba.qwen.code.managedagent.contracts.extensions;
+
+import com.fasterxml.jackson.annotation.JsonAnySetter;
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.databind.JsonNode;
+
+import java.util.List;
+import java.util.Map;
+
+public final class ManagedExtensionPackages {
+    public static final long MAX_ARCHIVE_BYTES = 100L * 1024 * 1024;
+    public static final int MAX_MANIFEST_BYTES = 64 * 1024;
+    public static final int MAX_SETTINGS_BYTES = 8 * 1024;
+    public static final List<String> COMPONENTS =
+            List.of("skills", "commands", "agents", "context", "mcp", "hooks", "settings");
+
+    private ManagedExtensionPackages() { }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record Pin(String extensionId, long packageRevision, String packageDigest,
+            Long settingsRevision) {
+        @JsonAnySetter
+        public void rejectUnknown(String name, JsonNode value) {
+            throw new IllegalArgumentException("Unknown extension pin field");
+        }
+    }
+
+    public record Target(String platform, String arch) {
+        @JsonAnySetter
+        public void rejectUnknown(String name, JsonNode value) {
+            throw new IllegalArgumentException("Unknown extension target field");
+        }
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record Manifest(int schemaVersion, int compilerVersion, String name, String version,
+            Target target, List<String> components, String sourceType, String sourceRevision) {
+        public Manifest(int schemaVersion, int compilerVersion, String name, String version,
+                Target target, List<String> components) {
+            this(schemaVersion, compilerVersion, name, version, target, components, null, null);
+        }
+
+        @JsonAnySetter
+        public void rejectUnknown(String name, JsonNode value) {
+            throw new IllegalArgumentException("Unknown extension manifest field");
+        }
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record Package(Pin pin, Manifest manifest, long byteLength, SourceOrigin source) {
+        public Package(Pin pin, Manifest manifest, long byteLength) { this(pin, manifest, byteLength, null); }
+    }
+
+    public record SourceOrigin(ManagedExtensionSource.Reference reference, String sourceDigest, String requestDigest) { }
+
+    public record SourceImport(ManagedExtensionSource.Reference reference, Target target) {
+        @JsonAnySetter
+        public void rejectUnknown(String name, JsonNode value) {
+            throw new IllegalArgumentException("Unknown extension source import field");
+        }
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record SourceImportResult(String operationId, String state, ManagedExtensionSource.Reference reference,
+            Operation operation, SourceOrigin source, Pin pin) {
+        public SourceImportResult(Operation operation, SourceOrigin source, Pin pin) {
+            this(operation.operationId(), operation.state(), source.reference(), operation, source,
+                    "settled".equals(operation.state()) ? pin : null);
+        }
+    }
+
+    public record SelfService(boolean supported, boolean canPublish) { }
+
+    public record Catalog(boolean supported, List<Package> extensions, SelfService selfService) {
+        public Catalog(boolean supported, List<Package> extensions) { this(supported, extensions, new SelfService(false, false)); }
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record ImportMetadata(String sourceKind, Target target, String sourceDigest, int compilerVersion, String packageName) {
+        @JsonAnySetter
+        public void rejectUnknown(String name, JsonNode value) {
+            throw new IllegalArgumentException("Unknown extension import field");
+        }
+    }
+
+    public record Settings(long settingsRevision, List<String> configuredKeys) {
+    }
+
+    public record SettingsCommand(long expectedRevision, Map<String, String> values) {
+        @Override
+        public String toString() {
+            return "SettingsCommand[expectedRevision=" + expectedRevision + ", values=redacted]";
+        }
+
+        @JsonAnySetter
+        public void rejectUnknown(String name, JsonNode value) {
+            throw new IllegalArgumentException("Unknown extension settings field");
+        }
+    }
+
+    public record Operation(String operationId, String extensionId, String kind,
+            String state, long revision, String packageDigest) {
+    }
+}

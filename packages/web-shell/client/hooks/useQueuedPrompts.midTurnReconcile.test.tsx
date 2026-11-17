@@ -112,6 +112,7 @@ interface HarnessOptions {
   clientId?: string;
   canMutateMidTurn?: boolean;
   canQueryMidTurn?: boolean;
+  canQueryPendingPrompts?: boolean;
   canInjectMidTurnMedia?: boolean;
   streamingState?: DaemonStreamingState;
   sessionHasActivePrompt?: boolean;
@@ -170,6 +171,7 @@ function createHarness(language?: 'en' | 'zh-CN') {
       clientId: opts.clientId ?? CLIENT_ID,
       canMutateMidTurn: opts.canMutateMidTurn ?? true,
       canQueryMidTurn: opts.canQueryMidTurn ?? true,
+      canQueryPendingPrompts: opts.canQueryPendingPrompts ?? true,
       canInjectMidTurnMedia: opts.canInjectMidTurnMedia ?? true,
       workspaceFileActions: stableWorkspaceFileActions as never,
       streamingState: opts.streamingState ?? 'responding',
@@ -293,6 +295,26 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       }
     },
   );
+
+  it('keeps mid-turn injection independent of native queue support', async () => {
+    const harness = createHarness();
+    try {
+      await harness.render({
+        canQueryPendingPrompts: false,
+        canQueryMidTurn: true,
+        canMutateMidTurn: true,
+        sessionHasActivePrompt: true,
+      });
+      await act(async () => {
+        harness.result().enqueuePrompt('steer the active turn');
+      });
+      expect(sdkMock.actions.enqueueMidTurnMessage).toHaveBeenCalledOnce();
+      expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
+      expect(sdkMock.actions.getPendingPrompts).not.toHaveBeenCalled();
+    } finally {
+      await harness.dispose();
+    }
+  });
 
   it('admits a message typed during a turn without asking to send it now', async () => {
     const harness = createHarness();

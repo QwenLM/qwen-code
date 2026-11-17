@@ -2,6 +2,8 @@
 
 [English](2026-10-08-managed-session-rename-delivery.md)
 
+状态：已被 [2026-11-12-managed-rename-single-authority](2026-11-12-managed-rename-single-authority.zh-CN.md) 取代。手动改名现在在单个 SQL 事务内同步结算，以单一显示权威为准；本文描述的投递 saga（认领/租约、重投、停放对账）已删除。
+
 ## 问题与范围
 
 同一幂等键的一份请求可能失败，而另一份仍在 Harness 内执行。公共回执被退休后，新改名可以继续，但旧远端写入可能最后才完成。SQL 完成检查无法撤销这个私有写入。远端已接受、HTTP 回包丢失还会造成相反的缺口：私有标题已持久化，公共标题仍未更新。本次 #13163 后续修复同时覆盖绑定与未绑定 Workspace 的 Session，以及远程或本地 Harness journal 存储。
@@ -29,6 +31,8 @@
 Workspace 迁移的 tenant/storage 空闲门禁也统计所有未完成标题投递，包括公共命令为 FAILED 或投递租约已过期的情况。恢复仍可能写入标题时，不能安装迁移 fence。
 
 标题投递尚未结清时，关闭、归档、删除及 cwd 变更拒绝准入。公共命令为 FAILED 仍可能对应已被远端接受的写入，因此必须先结清投递，再封存或移动 Session。新改名可以替换该投递。已完成生命周期回执仍可重放。
+
+D7-2 更新：提交后没有得到应答的投递，#14069 把它挂成 `UNKNOWN` 且不再发送；现在它挂成 `recovery_blocked` 并让公共回执退役，因此不再拒绝后续改名或生命周期变更。operation 对账器按 Session journal 结算它：Harness 对该 revision 的提交使它完成并展示标题；已删除 Session 的完整 journal 中没有这次提交时，它失败。详见 [operation 对账](2026-10-17-managed-operation-reconciliation.zh-CN.md) 的决定 8。Workspace 迁移仍会等待它。
 
 两个存储不是同一事务：投递待处理或依赖不可用期间，标题可能暂时不同。恢复保证最新受理尝试最终一致。Harness 永久不可用时属于外部阻塞；服务保留投递，不声称完成。受理后遇到协议拒绝，不能证明较早的尝试从未写入。发送后发生的协议异常，包括无效回包字段，仍属于不确定结果，继续恢复，不以重试次数上限丢弃。
 

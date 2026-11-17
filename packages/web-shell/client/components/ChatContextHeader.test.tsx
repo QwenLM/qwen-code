@@ -3,7 +3,7 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { I18nProvider } from '../i18n';
+import { I18nProvider, type WebShellLanguage } from '../i18n';
 import { ChatContextHeader } from './ChatContextHeader';
 
 // The QR entry reads the workspace connection from context.
@@ -36,13 +36,14 @@ afterEach(() => {
 
 function mount(
   props: Partial<Parameters<typeof ChatContextHeader>[0]> = {},
+  language: WebShellLanguage = 'en',
 ): HTMLDivElement {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
   act(() => {
     root!.render(
-      <I18nProvider language="en">
+      <I18nProvider language={language}>
         <ChatContextHeader
           content="Session title"
           environmentOpen={false}
@@ -236,9 +237,93 @@ describe('ChatContextHeader', () => {
     expect(document.querySelector('[role="tooltip"]')?.textContent).toBe(text);
   });
 
-  it('keeps the workspace icon out of the clickable actions', () => {
+  it('opens workspace files from a button while retaining the tooltip', () => {
+    vi.useFakeTimers();
+    const onOpenFiles = vi.fn();
+    const view = mount({
+      workspaceName: 'api',
+      workspacePath: '/work/api',
+      onOpenFiles,
+    });
+    const button = view.querySelector<HTMLButtonElement>(
+      'button[data-testid="chat-header-workspace"]',
+    )!;
+    expect(button.type).toBe('button');
+    expect(button.getAttribute('aria-label')).toBe(
+      'Browse workspace files: Workspace: api',
+    );
+    act(() => {
+      button.dispatchEvent(new Event('pointermove', { bubbles: true }));
+      vi.advanceTimersByTime(300);
+    });
+    expect(document.querySelector('[role="tooltip"]')?.textContent).toBe(
+      'api/work/api',
+    );
+    act(() => button.click());
+    expect(onOpenFiles).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the workspace icon informational when files are unavailable', () => {
     const view = mount({ workspaceName: 'api', workspacePath: '/work/api' });
 
     expect(view.querySelectorAll('button')).toHaveLength(1);
+    expect(
+      view.querySelector('[data-testid="chat-header-workspace"]')?.tagName,
+    ).toBe('SPAN');
+  });
+
+  it('shows the artifacts entry with its count and opens the panel on click', () => {
+    const onOpenArtifacts = vi.fn();
+    const view = mount({ artifactCount: 3, onOpenArtifacts });
+    const entry = view.querySelector<HTMLButtonElement>(
+      '[data-web-shell-artifacts-entry]',
+    );
+
+    expect(entry).not.toBeNull();
+    expect(entry!.getAttribute('aria-label')).toBe('Open artifacts (3)');
+    expect(entry!.textContent).toContain('3');
+    act(() => entry!.click());
+    expect(onOpenArtifacts).toHaveBeenCalledOnce();
+  });
+
+  it('hides the artifacts entry when the count is zero', () => {
+    const view = mount({ artifactCount: 0, onOpenArtifacts: vi.fn() });
+    expect(view.querySelector('[data-web-shell-artifacts-entry]')).toBeNull();
+  });
+
+  it('hides the artifacts entry when the count is omitted', () => {
+    const view = mount({ onOpenArtifacts: vi.fn() });
+    expect(view.querySelector('[data-web-shell-artifacts-entry]')).toBeNull();
+  });
+
+  it('hides the artifacts entry when no open callback is provided', () => {
+    const view = mount({ artifactCount: 3 });
+    expect(view.querySelector('[data-web-shell-artifacts-entry]')).toBeNull();
+  });
+
+  it('localizes the artifacts entry label', () => {
+    const view = mount({ artifactCount: 3, onOpenArtifacts: vi.fn() }, 'zh-CN');
+    expect(
+      view
+        .querySelector('[data-web-shell-artifacts-entry]')
+        ?.getAttribute('aria-label'),
+    ).toBe('打开产物（3）');
+  });
+
+  it('places the artifacts entry after the right-panel action', () => {
+    const view = mount({
+      rightPanelAvailable: true,
+      artifactCount: 2,
+      onOpenArtifacts: vi.fn(),
+    });
+    const actions = Array.from(
+      view.querySelectorAll<HTMLButtonElement>('button'),
+    );
+
+    expect(actions.map((button) => button.getAttribute('aria-label'))).toEqual([
+      'Toggle environment information',
+      'Toggle right panel',
+      'Open artifacts (2)',
+    ]);
   });
 });

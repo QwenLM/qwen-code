@@ -245,6 +245,12 @@ describe('managed file history protocol', () => {
         { ...snapshot, trackedFileBackups: { '../outside': backup } },
       ],
     },
+    {
+      ...binding,
+      snapshots: [
+        { ...snapshot, trackedFileBackups: { '..\\outside': backup } },
+      ],
+    },
   ])('rejects malformed bindings before filesystem use', (input) => {
     expect(() => parseManagedToolFileHistoryBinding(input)).toThrow();
   });

@@ -5,10 +5,106 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { makeBridge, makeChannel, WS_A } from './internal/testUtils.js';
+import type { AcpChannel } from './channel.js';
+import { raceChannelUnavailable } from './channel-transport.js';
+import {
+  collectedAfterGc,
+  makeBridge,
+  makeChannel,
+  nativeRaceRetainsValues,
+  WS_A,
+} from './internal/testUtils.js';
 import { BridgeChannelClosedError, BridgeTimeoutError } from './status.js';
 
+// Runs a few operations in a frame of its own, so nothing but the returned
+// WeakRef points at the first result once it returns. The first operation is
+// the one that builds the channel's memoised signal.
+async function finishOperations(channel: AcpChannel): Promise<WeakRef<object>> {
+  let first: WeakRef<object> | undefined;
+  for (let call = 0; call < 3; call++) {
+    const result = { call };
+    expect(
+      await raceChannelUnavailable(
+        channel,
+        Promise.resolve(result),
+        'during test',
+      ),
+    ).toBe(result);
+    first ??= new WeakRef(result);
+  }
+  return first!;
+}
+
 describe('channel transport', () => {
+  it('races every operation against a single reaction on channel.exited', async () => {
+    const handle = makeChannel();
+    const exited: AcpChannel['exited'] = new Promise(() => {});
+    const then = exited.then.bind(exited);
+    let reactions = 0;
+    exited.then = ((...args: Parameters<typeof then>) => {
+      reactions += 1;
+      return then(...args);
+    }) as typeof exited.then;
+    const channel: AcpChannel = { ...handle.channel, exited };
+    try {
+      for (const value of [1, 2, 3]) {
+        await expect(
+          raceChannelUnavailable(
+            channel,
+            Promise.resolve(value),
+            'during test',
+          ),
+        ).resolves.toBe(value);
+      }
+      expect(reactions).toBe(1);
+    } finally {
+      await handle.channel.kill();
+    }
+  });
+
+  it('leaves each settled operation collectable while the channel stays open', async ({
+    skip,
+  }) => {
+    skip(
+      !(await nativeRaceRetainsValues()),
+      'native Promise.race does not retain finished values on this runtime',
+    );
+    const handle = makeChannel();
+    try {
+      const finished = await finishOperations(handle.channel);
+      expect(await collectedAfterGc(finished)).toBe(true);
+    } finally {
+      await handle.channel.kill();
+    }
+  });
+
+  it('labels each closed-channel rejection with its own operation', async () => {
+    const handle = makeChannel();
+    handle.crash();
+    const pending = () => new Promise<never>(() => {});
+    try {
+      const load = raceChannelUnavailable(
+        handle.channel,
+        pending(),
+        'during session/load',
+      );
+      const cleanup = raceChannelUnavailable(
+        handle.channel,
+        pending(),
+        'during branchSession cleanup',
+      );
+      await expect(load).rejects.toBeInstanceOf(BridgeChannelClosedError);
+      await expect(load).rejects.toMatchObject({
+        context: 'during session/load',
+      });
+      await expect(cleanup).rejects.toMatchObject({
+        context: 'during branchSession cleanup',
+      });
+    } finally {
+      await handle.channel.kill();
+    }
+  });
+
   it('forces a hanging teardown at the configured deadline and retains its failure', async () => {
     vi.useFakeTimers();
     const handle = makeChannel();

@@ -10,6 +10,7 @@ import express from 'express';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import {
   MAX_UPLOAD_BYTES,
+  FsError,
   hasSuspiciousPathPattern,
   isContentHash,
   isFsError,
@@ -233,7 +234,30 @@ async function handlePostFileWrite(
     route: ROUTE,
   });
   try {
-    const resolved = await fs.resolve(queryPath, 'write');
+    let resolved: ResolvedPath;
+    if (mode === 'create') {
+      const basename = path.basename(queryPath);
+      if (
+        queryPath.includes('\0') ||
+        queryPath.endsWith('/') ||
+        queryPath.endsWith(path.sep) ||
+        basename === '.' ||
+        basename === '..'
+      ) {
+        throw new FsError('parse_error', '`path` must name a file');
+      }
+      if (!factory.sshWorkspace && hasSuspiciousPathPattern(queryPath)) {
+        throw new FsError(
+          'path_outside_workspace',
+          'path contains a suspicious pattern',
+        );
+      }
+      // Resolve only the parent so no-clobber checks see the requested leaf.
+      const parent = await fs.resolve(path.dirname(queryPath), 'list');
+      resolved = path.join(parent, basename) as ResolvedPath;
+    } else {
+      resolved = await fs.resolve(queryPath, 'write');
+    }
     const out = await fs.writeTextAtomic(resolved, content, {
       mode,
       ...(expectedHash ? { expectedHash } : {}),
@@ -317,6 +341,41 @@ async function handlePostFileEdit(
   }
 }
 
+async function handlePostFileDelete(
+  req: Request,
+  res: Response,
+  deps: RegisterDeps,
+): Promise<void> {
+  const ROUTE = 'POST /workspaces/:workspace/file/delete';
+  // Deletion must use the resolved runtime, never the primary fallback.
+  const factory = getWorkspaceRouteContext(req)!.runtime.routeFileSystemFactory;
+  const filePath = requireBodyString(deps.safeBody(req), 'path', res, ROUTE);
+  if (filePath === null) return;
+  const clientId = deps.parseClientId(req, res);
+  if (clientId === null) return;
+  const originatorClientId = resolveOriginatorClientId(
+    clientId,
+    deps,
+    res,
+    req,
+  );
+  if (originatorClientId === null) return;
+  const fs = factory.forRequest({ originatorClientId, route: ROUTE });
+  try {
+    if (!fs.deleteFile)
+      throw new FsError(
+        'parse_error',
+        'File deletion is unavailable for this workspace',
+        { status: 422 },
+      );
+    const deleted = await fs.deleteFile(filePath);
+    applyReadHeaders(res);
+    res.json({ kind: 'file_delete', path: workspaceRelative(req, deleted) });
+  } catch (err) {
+    sendFsError(res, err, ROUTE);
+  }
+}
+
 export function registerWorkspaceFileWriteRoutes(
   app: Application,
   deps: RegisterDeps,
@@ -348,6 +407,30 @@ export function registerWorkspaceQualifiedFileWriteRoutes(
     return true;
   };
   app.post(
+    '/workspaces/:workspace/file/delete',
+    deps.mutate({ strict: true }),
+    (req, res) => {
+      if (!resolve(req, res)) return;
+      void handlePostFileDelete(req, res, deps);
+    },
+  );
+  app.post(
+    '/workspaces/:workspace/directory/delete',
+    deps.mutate({ strict: true }),
+    (req, res) => {
+      if (!resolve(req, res)) return;
+      void handlePostDirectoryDelete(req, res, deps);
+    },
+  );
+  app.post(
+    '/workspaces/:workspace/directory/create',
+    deps.mutate({ strict: true }),
+    (req, res) => {
+      if (!resolve(req, res)) return;
+      void handlePostDirectoryCreate(req, res, deps);
+    },
+  );
+  app.post(
     '/workspaces/:workspace/file/write',
     deps.mutate({ strict: true }),
     (req, res) => {
@@ -363,6 +446,103 @@ export function registerWorkspaceQualifiedFileWriteRoutes(
       void handlePostFileEdit(req, res, deps);
     },
   );
+}
+
+async function handlePostDirectoryDelete(
+  req: Request,
+  res: Response,
+  deps: RegisterDeps,
+): Promise<void> {
+  const ROUTE = 'POST /workspaces/:workspace/directory/delete';
+  const directoryPath = requireBodyString(
+    deps.safeBody(req),
+    'path',
+    res,
+    ROUTE,
+  );
+  if (directoryPath === null) return;
+  const clientId = deps.parseClientId(req, res);
+  if (clientId === null) return;
+  const originatorClientId = resolveOriginatorClientId(
+    clientId,
+    deps,
+    res,
+    req,
+  );
+  if (originatorClientId === null) return;
+  try {
+    const context = getWorkspaceRouteContext(req);
+    if (!context)
+      throw new FsError(
+        'internal_error',
+        'Directory deletion requires a workspace owner',
+      );
+    const factory = context.runtime.routeFileSystemFactory;
+    const fs = factory.sshWorkspace
+      ? undefined
+      : factory.forRequest({ originatorClientId, route: ROUTE });
+    if (!fs?.deleteDirectory) {
+      throw new FsError('parse_error', 'Directory deletion is not supported', {
+        status: 422,
+      });
+    }
+    const deleted = await fs.deleteDirectory(directoryPath);
+    applyReadHeaders(res);
+    res.json({
+      kind: 'directory_delete',
+      path: workspaceRelative(req, deleted),
+    });
+  } catch (error) {
+    sendFsError(res, error, ROUTE);
+  }
+}
+
+async function handlePostDirectoryCreate(
+  req: Request,
+  res: Response,
+  deps: RegisterDeps,
+): Promise<void> {
+  const ROUTE = 'POST /workspaces/:workspace/directory/create';
+  const queryPath = requireBodyString(deps.safeBody(req), 'path', res, ROUTE);
+  if (queryPath === null) return;
+  const clientId = deps.parseClientId(req, res);
+  if (clientId === null) return;
+  const originatorClientId = resolveOriginatorClientId(
+    clientId,
+    deps,
+    res,
+    req,
+  );
+  if (originatorClientId === null) return;
+  try {
+    const context = getWorkspaceRouteContext(req);
+    if (!context) {
+      throw new FsError(
+        'internal_error',
+        'Directory creation requires a workspace owner',
+      );
+    }
+    const factory = context.runtime.routeFileSystemFactory;
+    if (factory.sshWorkspace) {
+      throw new FsError('parse_error', 'Directory creation is not supported', {
+        status: 422,
+      });
+    }
+    const fs = factory.forRequest({ originatorClientId, route: ROUTE });
+    if (!fs.createDirectory) {
+      throw new FsError('parse_error', 'Directory creation is not supported', {
+        status: 422,
+      });
+    }
+    const created = await fs.createDirectory(queryPath);
+    applyReadHeaders(res);
+    res.status(201).json({
+      kind: 'directory_create',
+      path: workspaceRelative(req, created),
+    });
+  } catch (error) {
+    sendFsError(res, error, ROUTE);
+  }
 }
 
 // ---------------------------------------------------------------------------

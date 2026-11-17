@@ -229,7 +229,7 @@ Tool v3 是在 Tool v2 基础上增加 token、捕获请求和带版本的结果
 
 schema 固定每种记录的结构以及它能清晰表达的规则,包括角色的范围规则和内容描述所蕴含的状态。它无法表达 UTF-8 字节上限、NFC、形式良好的 UTF-16、流 ID 唯一、列表求和、依赖另一字段的上限,以及两个字段或两条记录之间的比较;TypeScript 测试列出 schema 与模块意见不一的每个用例。用例和每个摘要由一个独立于两种语言的实现生成。
 
-- **TypeScript。** `packages/core/src/managed-runtime/managed-tool-result.ts` 校验 manifest、页、页位置、修订和结果信封,并包含一个重放发布序列的参考分段账本。在 O1b 之前没有代码导入它;O1b 会把这个账本保留为其分段存储接口的内存实现,就像 Broker 在 JDBC 仓库之外保留内存仓库一样。
+- **TypeScript。** `packages/core/src/managed-runtime/managed-tool-result.ts` 校验 manifest、页、页位置、修订和结果信封,并包含一个重放发布序列的参考分段账本。在 O1b 之前没有代码导入它;O1b 会把这个账本保留为其分段存储接口的内存实现。
 - **准入。** 一个 CLI 测试按每个 boot 版本的路由集合,把规范的 v3 请求经已发布的路由闸门发给会记录调用的处理器,检查每个都以空 404 回应,且没有处理器运行。它与 Java 测试一样从 core 的源码目录读取 fixtures,使这份文件保持唯一副本。
 - **Java。** `runtime-broker` 中的一致性测试固定 token、kind、上限、路由、封闭键集合和错误表,并根据 fixture 字节重新计算每个分段、封存与前缀摘要。
 
@@ -238,7 +238,7 @@ schema 固定每种记录的结构以及它能清晰表达的规则,包括角色
 - `packages/core/src/managed-runtime/contracts/managed-tool-result-v1.schema.json` 和 `.fixtures.json`(新增)。
 - `packages/core/src/managed-runtime/managed-tool-result.ts` 及其测试(新增)。
 - `packages/cli/src/serve/managed-tool-result-admission.test.ts`(新增)。
-- `packages/sdk-java/runtime-broker` 中的 `ManagedToolResultConformanceTest`(新增),以及该模块的 `README.md` 和 `QWEN.md`。
+- `packages/managed-agent-server` 中的 `ManagedToolResultConformanceTest`(新增),以及该模块的 `README.md` 和 `QWEN.md`。
 - 本设计文档的两种语言版本(新增),以及 Tool v2 契约文档:其中关于产物交付通道的说明现在指向本文。
 
 worker、路由清单、存储、provisioner、transport 和 CI workflow 均不变。

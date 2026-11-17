@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { ruPlural } from '../utils/plural.js';
+
 type FilterMessage =
   | string
   | ((vars?: Record<string, string | number>) => string);
@@ -29,9 +31,12 @@ export const TRAJECTORY_FILTER_MESSAGES_EN: Record<string, FilterMessage> = {
   'trajectory.filter.status.running': 'In progress',
   'trajectory.filter.status.unknown': 'Unknown',
   'trajectory.filter.count': (v) =>
-    `${v?.count ?? 0} matching ${recordNoun(v?.count)}`,
+    `${v?.count ?? 0} ${Number(v?.count ?? 0) === 1 ? 'match' : 'matches'}`,
   'trajectory.filter.position': (v) =>
-    `Result ${v?.position ?? 0} / ${v?.count ?? 0}`,
+    `${v?.position ?? 0} of ${v?.count ?? 0}`,
+  'trajectory.filter.button': 'Filter',
+  'trajectory.filter.active': (v) => `${v?.count ?? 0} active`,
+  'trajectory.filter.clearSearch': 'Clear search',
   'trajectory.filter.previous': 'Previous',
   'trajectory.filter.next': 'Next',
   'trajectory.filter.clear': 'Clear filters',
@@ -58,8 +63,10 @@ export const TRAJECTORY_FILTER_MESSAGES_ZH: Record<string, FilterMessage> = {
   'trajectory.filter.status.running': '进行中',
   'trajectory.filter.status.unknown': '未知',
   'trajectory.filter.count': (v) => `匹配 ${v?.count ?? 0} 条`,
-  'trajectory.filter.position': (v) =>
-    `第 ${v?.position ?? 0} / ${v?.count ?? 0} 条`,
+  'trajectory.filter.position': (v) => `${v?.position ?? 0} / ${v?.count ?? 0}`,
+  'trajectory.filter.button': '筛选',
+  'trajectory.filter.active': (v) => `${v?.count ?? 0} 项生效`,
+  'trajectory.filter.clearSearch': '清除搜索',
   'trajectory.filter.previous': '上一条',
   'trajectory.filter.next': '下一条',
   'trajectory.filter.clear': '清除筛选',
@@ -67,4 +74,36 @@ export const TRAJECTORY_FILTER_MESSAGES_ZH: Record<string, FilterMessage> = {
   'trajectory.filter.truncated': (v) =>
     `部分已记录正文未纳入搜索（${v?.count ?? 0} 条记录）。`,
   'trajectory.filter.hidden': '此记录不符合当前筛选。',
+};
+
+export const TRAJECTORY_FILTER_MESSAGES_RU: Record<string, FilterMessage> = {
+  'trajectory.filter.search': 'Поиск по загруженным записям…',
+  'trajectory.filter.type': 'Тип записи',
+  'trajectory.filter.type.all': 'Все типы',
+  'trajectory.filter.type.request': 'Запросы',
+  'trajectory.filter.type.tool': 'Инструменты',
+  'trajectory.filter.type.user': 'Ввод пользователя',
+  'trajectory.filter.type.message': 'Сообщения',
+  'trajectory.filter.type.other': 'Другое',
+  'trajectory.filter.status': 'Статус выполнения',
+  'trajectory.filter.status.all': 'Все статусы',
+  'trajectory.filter.status.success': 'Успех',
+  'trajectory.filter.status.error': 'Ошибка',
+  'trajectory.filter.status.cancelled': 'Отменено',
+  'trajectory.filter.status.running': 'В процессе',
+  'trajectory.filter.status.unknown': 'Неизвестно',
+  'trajectory.filter.count': (v) =>
+    `${v?.count ?? 0} ${ruPlural(v?.count, 'совпадение', 'совпадения', 'совпадений')}`,
+  'trajectory.filter.position': (v) =>
+    `${v?.position ?? 0} из ${v?.count ?? 0}`,
+  'trajectory.filter.button': 'Фильтр',
+  'trajectory.filter.active': (v) => `${v?.count ?? 0} активных`,
+  'trajectory.filter.clearSearch': 'Очистить поиск',
+  'trajectory.filter.previous': 'Предыдущая',
+  'trajectory.filter.next': 'Следующая',
+  'trajectory.filter.clear': 'Сбросить фильтры',
+  'trajectory.filter.empty': 'В текущей области поиска нет совпадений.',
+  'trajectory.filter.truncated': (v) =>
+    `Часть записанного текста исключена из поиска (${v?.count ?? 0} ${ruPlural(v?.count, 'запись', 'записи', 'записей')}).`,
+  'trajectory.filter.hidden': 'Эта запись не соответствует текущим фильтрам.',
 };

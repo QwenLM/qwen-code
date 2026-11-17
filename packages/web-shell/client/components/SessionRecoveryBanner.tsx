@@ -55,12 +55,21 @@ export function SessionRecoveryBanner({
 
   const continueSession = async () => {
     if (pendingRef.current) return;
+    const confirmCancellation = recovery?.cancellationConfirmationId;
+    if (confirmCancellation) {
+      // Re-check identity after the blocking dialog; only when one was shown.
+      const confirmationOwner = ownerGuard.capture({ includeRecovery: true });
+      if (!window.confirm(t('session.recovery.confirmCancellation'))) return;
+      if (!confirmationOwner.isCurrent()) return;
+    }
     const owner = ownerGuard.capture();
     pendingRef.current = owner;
     setPending(true);
     setFailedOwner(null);
     try {
-      await actions.continueSession();
+      await actions.continueSession(
+        confirmCancellation ? { confirmCancellation } : undefined,
+      );
     } catch (error) {
       if (isDaemonTurnError(error)) return;
       if (owner.isCurrent()) {
@@ -84,6 +93,9 @@ export function SessionRecoveryBanner({
         {recovery && recovery.kind !== 'clean' && (
           <p>{t(`session.recovery.${recovery.kind}`)}</p>
         )}
+        {recovery?.cancellationConfirmationId && (
+          <p>{t('session.recovery.unknownCancellation')}</p>
+        )}
         {failed && <p role="alert">{t('session.recovery.failed')}</p>}
       </div>
       {recovery?.canContinue && (
@@ -97,7 +109,9 @@ export function SessionRecoveryBanner({
           {t(
             pending
               ? 'session.recovery.continuing'
-              : 'session.recovery.continue',
+              : recovery.cancellationConfirmationId
+                ? 'session.recovery.confirmContinue'
+                : 'session.recovery.continue',
           )}
         </Button>
       )}

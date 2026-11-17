@@ -39,6 +39,28 @@ async function flushFrame() {
   });
 }
 
+describe('TabsTrigger focus refs', () => {
+  it('forwards the ref to the selected trigger for initial keyboard focus', () => {
+    const ref = React.createRef<HTMLButtonElement>();
+    const { container } = renderTabs(
+      <Tabs defaultValue="skills">
+        <TabsList>
+          <TabsTrigger value="extensions">Extensions</TabsTrigger>
+          <TabsTrigger ref={ref} value="skills">
+            Skills
+          </TabsTrigger>
+        </TabsList>
+      </Tabs>,
+    );
+
+    const selected = container.querySelector('[aria-selected="true"]');
+    expect(ref.current).toBe(selected);
+    act(() => ref.current?.focus());
+    expect(document.activeElement).toBe(selected);
+    expect(selected?.getAttribute('aria-selected')).toBe('true');
+  });
+});
+
 describe('TabsList sliding indicator', () => {
   it('renders the indicator over the active trigger in the default variant', () => {
     const { container } = renderTabs(

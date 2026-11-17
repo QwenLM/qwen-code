@@ -90,7 +90,7 @@ locally as described in the existing Hosted fixture. From the repository root:
 
 ```bash
 npm run build && npm run bundle
-mvn -f packages/sdk-java/managed-agent-server/pom.xml -Phosted-workspace-tools \
+mvn -f packages/managed-agent-server/pom.xml -Phosted-workspace-tools \
   '-Dit.test=HostedWorkspaceToolTurnIT#recordsLatencyWithDelayedRuntimeProvisioning' \
   -Dnode.executable="$(command -v node)" verify checkstyle:check
 ```

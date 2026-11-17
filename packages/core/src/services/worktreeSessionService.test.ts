@@ -589,6 +589,281 @@ describe('isSessionRuntimeActive', () => {
     }
   });
 
+  /**
+   * Run the runtime-status pid probe against a fake `/proc/<pid>/stat`.
+   *
+   * A zombie cannot be produced for real inside a Node test process: libuv
+   * reaps its own children on SIGCHLD, so a spawned child that exits without
+   * being waited on goes `R` and then disappears (ENOENT) within
+   * milliseconds instead of parking in `Z`. `Z` is only observable through
+   * the `/proc` line the probe reads, so that line is served from a fake —
+   * the same technique as `withFakeProc` in `process-liveness.test.ts`. The
+   * platform is forced to Linux so the parser is exercised on every CI
+   * runner rather than only the Linux one.
+   *
+   * `state` is field 3 of `/proc/<pid>/stat`; `killImpl`, when given,
+   * replaces `process.kill` so the errno branches are reachable.
+   */
+  async function probeWithFakeProc(
+    pid: number,
+    state: string,
+    killImpl?: () => never,
+    procStart: string | null = null,
+    tokenUnreadable = false,
+    recordPidNs: number | null | undefined = undefined,
+    localNsIno: number | null = 100,
+  ) {
+    const repoRoot = path.join(tmpDir, `repo-${state}-${pid}`);
+    await fs.mkdir(repoRoot, { recursive: true });
+
+    vi.resetModules();
+    vi.doMock('node:fs', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('node:fs')>();
+      const statPath = `/proc/${pid}/stat`;
+      const bootIdPath = '/proc/sys/kernel/random/boot_id';
+      // Fields 4..22, so the state token sits at field 3 right after the
+      // parenthesised `comm`. The parser anchors on the last ')'.
+      // prettier-ignore
+      const fields = [
+        '1', '2', '3', '4', '-1', '4194304', '100', '0', '200',
+        '0', '10', '20', '30', '40', '20', '0', '1', '0', '1000',
+      ];
+      const statLine = `4242 (node) ${state} ${fields.join(' ')} 1000 2000 3000\n`;
+      const readFileSync = ((p: unknown, ...rest: unknown[]) => {
+        if (tokenUnreadable && String(p) === statPath) {
+          throw Object.assign(new Error('permission denied'), {
+            code: 'EACCES',
+          });
+        }
+        if (String(p) === statPath) return statLine;
+        if (String(p) === bootIdPath) return 'deadbeef\n';
+        return (
+          actual.readFileSync as (a: unknown, ...r: unknown[]) => unknown
+        )(p, ...rest);
+      }) as typeof actual.readFileSync;
+      // readPidNamespaceId stats /proc/self/ns/pid; pin the local namespace so
+      // the cross-namespace guard is deterministic on every CI platform.
+      const statSync = ((p: unknown, ...rest: unknown[]) => {
+        if (String(p) === '/proc/self/ns/pid') {
+          if (localNsIno === null) {
+            throw Object.assign(new Error('no such file'), { code: 'ENOENT' });
+          }
+          return { ino: localNsIno };
+        }
+        return (actual.statSync as (a: unknown, ...r: unknown[]) => unknown)(
+          p,
+          ...rest,
+        );
+      }) as typeof actual.statSync;
+      return { ...actual, readFileSync, statSync };
+    });
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
+    if (killImpl) {
+      vi.spyOn(process, 'kill').mockImplementation(killImpl);
+    }
+    onTestFinished(() => {
+      vi.doUnmock('node:fs');
+      vi.resetModules();
+      vi.restoreAllMocks();
+    });
+
+    // The service must come from the same fresh module graph as the mocked
+    // `node:fs`, and so must `Storage`: its runtime base dir is per-class
+    // static state that the statically imported copy does not share.
+    const { Storage: ScopedStorage } = await import('../config/storage.js');
+    const service = await import('./worktreeSessionService.js');
+    ScopedStorage.setRuntimeBaseDir(path.join(tmpDir, 'runtime'));
+    onTestFinished(() => ScopedStorage.setRuntimeBaseDir(null));
+
+    // The writer needs the same module graph for the same reason: the
+    // statically imported copy stats the real `/proc/self/ns/pid`, so on a
+    // Linux runner it would record the runner's own namespace while the mocked
+    // reader sees `localNsIno`, making every record look foreign.
+    const { writeRuntimeStatus: writeScopedRuntimeStatus } = await import(
+      '../utils/runtimeStatus.js'
+    );
+
+    await writeScopedRuntimeStatus(
+      new ScopedStorage(repoRoot).getRuntimeStatusPath('owner-session'),
+      {
+        sessionId: 'owner-session',
+        workDir: repoRoot,
+        pid,
+        procStart,
+        pidNs: recordPidNs,
+      },
+    );
+
+    return {
+      liveness: () =>
+        service.getSessionRuntimeLiveness('owner-session', repoRoot),
+      isActive: () => service.isSessionRuntimeActive('owner-session', repoRoot),
+    };
+  }
+
+  it('reports a defunct (zombie) pid as inactive instead of active', async () => {
+    // `process.kill(pid, 0)` succeeds for a zombie — the pid still occupies a
+    // process-table slot — so the recorded pid has to be a live one for the
+    // probe to reach the state check at all. This is the shape reported in
+    // #14288: a 48-day-old `[node] <defunct>` child under a still-live parent
+    // read back as a live session.
+    const probe = await probeWithFakeProc(process.pid, 'Z');
+
+    await expect(probe.liveness()).resolves.toBe('inactive');
+    await expect(probe.isActive()).resolves.toBe(false);
+  });
+
+  it('still reports a running pid as active', async () => {
+    // Guards the harness itself: the same fake `/proc`, one field different.
+    const probe = await probeWithFakeProc(process.pid, 'S');
+
+    await expect(probe.liveness()).resolves.toBe('active');
+    await expect(probe.isActive()).resolves.toBe(true);
+  });
+
+  it('reports a recycled pid as inactive when proc_start differs', async () => {
+    // Same boot prefix, different start ticks: a same-boot PID reuse. Using a
+    // different boot here would let a ticks-only comparison pass too, so the
+    // boot-id segment of the token must be pinned by a separate case below.
+    const probe = await probeWithFakeProc(
+      process.pid,
+      'S',
+      undefined,
+      'deadbeef:9999',
+    );
+
+    await expect(probe.liveness()).resolves.toBe('inactive');
+    await expect(probe.isActive()).resolves.toBe(false);
+  });
+
+  it('reports a cross-boot pid as inactive when the boot prefix differs', async () => {
+    const probe = await probeWithFakeProc(
+      process.pid,
+      'S',
+      undefined,
+      'previous-boot:1000',
+    );
+
+    await expect(probe.liveness()).resolves.toBe('inactive');
+    await expect(probe.isActive()).resolves.toBe(false);
+  });
+
+  it('still reports a running pid active when proc_start matches', async () => {
+    const probe = await probeWithFakeProc(
+      process.pid,
+      'S',
+      undefined,
+      'deadbeef:1000',
+    );
+
+    await expect(probe.liveness()).resolves.toBe('active');
+    await expect(probe.isActive()).resolves.toBe(true);
+  });
+
+  it('treats a record from a different PID namespace as unknown, not dead', async () => {
+    // The recorded token would match if compared, but the record was written
+    // in namespace 200 while the reader lives in 100: its PID names a different
+    // process here, so the guard must short-circuit to the safe 'unknown'
+    // (active) instead of judging the foreign session dead (#16128 review).
+    const probe = await probeWithFakeProc(
+      process.pid,
+      'S',
+      undefined,
+      'deadbeef:1000',
+      false,
+      200,
+      100,
+    );
+
+    await expect(probe.liveness()).resolves.toBe('unknown');
+    await expect(probe.isActive()).resolves.toBe(true);
+  });
+
+  it('treats a namespaced record as unknown when the local namespace is unreadable', async () => {
+    const probe = await probeWithFakeProc(
+      process.pid,
+      'S',
+      undefined,
+      'deadbeef:1000',
+      false,
+      200,
+      null,
+    );
+
+    await expect(probe.liveness()).resolves.toBe('unknown');
+    await expect(probe.isActive()).resolves.toBe(true);
+  });
+
+  it('still judges a same-namespace recycled pid as inactive', async () => {
+    const probe = await probeWithFakeProc(
+      process.pid,
+      'S',
+      undefined,
+      'deadbeef:9999',
+      false,
+      100,
+      100,
+    );
+
+    await expect(probe.liveness()).resolves.toBe('inactive');
+    await expect(probe.isActive()).resolves.toBe(false);
+  });
+
+  it('falls back to proc_start for a legacy record without pid_ns', async () => {
+    const probe = await probeWithFakeProc(
+      process.pid,
+      'S',
+      undefined,
+      'deadbeef:9999',
+      false,
+      null,
+      100,
+    );
+
+    await expect(probe.liveness()).resolves.toBe('inactive');
+    await expect(probe.isActive()).resolves.toBe(false);
+  });
+
+  it('degrades to plain liveness when the identity token is unreadable', async () => {
+    // A record written with a real token can be read back where `/proc` is no
+    // longer readable (hidepid=2, EIO). Only a readable mismatch proves reuse,
+    // so this must stay active instead of declaring a live session dead.
+    const probe = await probeWithFakeProc(
+      process.pid,
+      'S',
+      undefined,
+      'deadbeef:1000',
+      true,
+    );
+
+    await expect(probe.liveness()).resolves.toBe('active');
+    await expect(probe.isActive()).resolves.toBe(true);
+  });
+
+  it('reports a defunct pid owned by another user as inactive', async () => {
+    // The kernel permission-checks signal 0 regardless of the target's state,
+    // so a cross-user zombie reaches the EPERM branch too.
+    const probe = await probeWithFakeProc(2147483647, 'Z', () => {
+      throw Object.assign(new Error('operation not permitted'), {
+        code: 'EPERM',
+      });
+    });
+
+    await expect(probe.liveness()).resolves.toBe('inactive');
+  });
+
+  it('keeps an unexpected errno unknown rather than reporting the session dead', async () => {
+    // `unknown` must not collapse into `dead`. That is the direction which
+    // declares a live session inactive, so the tri-state answer has to
+    // survive the zombie check.
+    const probe = await probeWithFakeProc(2147483647, 'S', () => {
+      throw Object.assign(new Error('input/output error'), { code: 'EIO' });
+    });
+
+    await expect(probe.liveness()).resolves.toBe('unknown');
+    await expect(probe.isActive()).resolves.toBe(true);
+  });
+
   it('does not trust repo-contained dead runtime status as proof of inactivity', async () => {
     const repoRoot = path.join(tmpDir, 'repo');
     const fakeRuntimeBase = path.join(repoRoot, 'src');

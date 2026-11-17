@@ -19,15 +19,16 @@
  * Every OpenTUI exit path (Ctrl+C/Ctrl+D double press, /quit, render-error
  * bailout) must go through `exitSession()`, which signals the client to stop
  * spawning background work, drains the shared cleanup chain first and only then
- * exits — with signal-style exit codes (130/143) for interrupt-like exits
- * instead of a bare 0.
+ * exits with the caller’s code. Confirmed keyboard exits and /quit use 0;
+ * actual OS-signal exits retain signal-style codes (130/143).
  */
 
 import type { Config } from '@qwen-code/qwen-code-core';
+import { prepareFileWatchersForProcessExit } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
 import { runExitCleanup } from '../../utils/cleanup.js';
 import { exitCleanly } from '../../utils/processUtils.js';
 
-/** Exit code for interrupt-style exits (Ctrl+C / Ctrl+D double press). */
+/** Exit code for actual SIGINT-style termination, not confirmed keyboard exit. */
 export const EXIT_CODE_INTERRUPT = 130;
 /** Exit code for termination-style exits (SIGTERM semantics). */
 export const EXIT_CODE_TERMINATED = 143;
@@ -43,7 +44,8 @@ export function isExitInProgress(): boolean {
  * Tell the client to stop spawning background work, drain the registered
  * exit-cleanup chain, then `process.exit(code)`.
  *
- * `requestShutdown()` first: it sets the client's shutdown flag and cancels the
+ * Prepare file watchers before any shutdown work can close them synchronously.
+ * `requestShutdown()` then sets the client's shutdown flag and cancels the
  * pending memory prefetch, so extract / dream / skill-review work cannot be
  * spawned *during* the drain — which is what makes the process able to exit.
  * ink signals it on its quit path only; every exit here means "this process is
@@ -63,6 +65,7 @@ export async function exitSession(
     return new Promise<never>(() => {});
   }
   exitInProgress = true;
+  prepareFileWatchersForProcessExit();
   config.getLlmClient()?.requestShutdown();
   try {
     await runExitCleanup();

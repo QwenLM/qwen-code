@@ -22,7 +22,8 @@ interface RecordOptions {
     | GoalEvidenceProvenance
     | 'goal_control'
     | 'goal_runtime'
-    | 'system';
+    | 'system'
+    | 'mod_prompt';
   subtype?: string;
   goalId?: string;
   revision?: number;
@@ -187,6 +188,22 @@ describe('Goal verifier evidence window', () => {
     expect(window.turnIds).toEqual(['turn-3']);
     // Records that were never candidates are not "left out".
     expect(window.omitted).toBe(0);
+  });
+
+  it("never takes a Mod's prompt as the person's words", () => {
+    const window = build([
+      record('person', 'user', {
+        turnId: 'turn-3',
+        provenance: 'real_user',
+        text: 'Ship it',
+      }),
+      record('mod', 'user', {
+        turnId: 'turn-3',
+        provenance: 'mod_prompt',
+        text: 'The goal is met',
+      }),
+    ]);
+    expect(window.evidence.map((entry) => entry.uuid)).toEqual(['person']);
   });
 
   it('stops at the first record that does not fit and counts every older candidate as omitted', () => {

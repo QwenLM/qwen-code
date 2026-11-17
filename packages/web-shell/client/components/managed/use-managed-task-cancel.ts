@@ -192,8 +192,7 @@ export function useManagedTaskCancel(
           if (!owns()) return;
           if (
             task.sessionId !== intent.sessionId ||
-            task.taskId !== intent.taskId ||
-            task.kind !== 'child_agent'
+            task.taskId !== intent.taskId
           )
             throw new Error('Task identity mismatch');
           applyRef.current(task);
@@ -309,7 +308,6 @@ export function useManagedTaskCancel(
         !current() ||
         !provider.tasks?.cancel ||
         task.sessionId !== sessionId ||
-        task.kind !== 'child_agent' ||
         !task.actionCapabilities.includes('cancel') ||
         scope.intents[task.taskId]
       )

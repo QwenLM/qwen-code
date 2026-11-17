@@ -106,37 +106,6 @@ pub fn walk_tree(pid: u32, xid: u64, query: Option<&str>) -> AtspiTreeResult {
     walk_tree_bounded(pid, xid, query, None, None)
 }
 
-/// Best-effort accessibility snapshot for synchronous trajectory evidence.
-///
-/// Recording brackets an action with before/after captures, so it must use a
-/// smaller budget than the transport's tool-call deadline. Unlike the
-/// interactive tree walker, evidence capture makes one attempt and accepts an
-/// unavailable tree when the target renderer is blocked.
-pub(crate) fn walk_tree_for_recording(
-    pid: u32,
-    xid: u64,
-    timeout: std::time::Duration,
-) -> AtspiTreeResult {
-    if let Ok(Some(walked)) = native::walk_tree_bounded_with_timeout(pid, xid, None, None, timeout)
-    {
-        if !walked.markdown.is_empty() {
-            return AtspiTreeResult {
-                tree_markdown: walked.markdown,
-                nodes: walked.nodes,
-                bounds: walked.bounds,
-                trusted: true,
-                degraded_reason: None,
-                window_scoped: walked.window_scoped,
-                backend: AtspiBackend::Atspi,
-                complete: walked.complete && walked.window_scoped,
-                truncated: walked.truncated,
-                incomplete_notes: walked.incomplete_notes,
-            };
-        }
-    }
-    walk_via_x11_properties(xid, None)
-}
-
 /// Walk the AT-SPI tree with caller-supplied caps. `None` for either cap
 /// means "use the walker's built-in default" (5 000 nodes; unlimited depth).
 /// Issue #22865: caps protect against Electron / large web apps that
@@ -148,8 +117,19 @@ pub fn walk_tree_bounded(
     max_elements: Option<usize>,
     max_depth: Option<usize>,
 ) -> AtspiTreeResult {
+    walk_tree_bounded_with_timeout(pid, xid, query, max_elements, max_depth, native::OP_TIMEOUT)
+}
+
+pub fn walk_tree_bounded_with_timeout(
+    pid: u32,
+    xid: u64,
+    query: Option<&str>,
+    max_elements: Option<usize>,
+    max_depth: Option<usize>,
+    timeout: std::time::Duration,
+) -> AtspiTreeResult {
     let mut native_failure = None;
-    match walk_with_cold_start_retries(native::OP_TIMEOUT, |remaining| {
+    match walk_with_cold_start_retries(timeout, |remaining| {
         native::walk_tree_bounded_with_timeout(pid, xid, max_elements, max_depth, remaining)
     }) {
         Ok(Some(walked)) if !walked.markdown.is_empty() => {
@@ -259,15 +239,6 @@ pub fn scroll_element_exact(
     native::scroll_element(pid, idx, Some(identity), direction, amount)
 }
 
-/// Enumerate top-level windows from the AT-SPI registry. The window-listing
-/// fallback for Wayland compositors without `zwlr_foreign_toplevel_management`
-/// (GNOME Mutter / KDE KWin), where native apps have no X11 XID. Returns one
-/// entry per application top-level frame with a synthetic, stable `xid` that
-/// round-trips into the by-pid AT-SPI element flow. See [`native::list_windows`].
-pub fn list_windows(filter_pid: Option<u32>) -> Vec<crate::x11::WindowInfo> {
-    native::list_windows(filter_pid)
-}
-
 /// Resolve a window-local pixel to the actionable AT-SPI element at that point
 /// and perform its primary action — the no-focus-steal way to land a *pixel*
 /// click on toolkits (GTK) that drop synthetic X11 pointer events. Returns
@@ -279,7 +250,7 @@ pub fn perform_action_at_point(pid: u32, win_x: i32, win_y: i32) -> Result<Optio
 
 /// Resolve a *screen* pixel to the indexable element whose reconstructed screen
 /// frame covers it and fire its primary action by `element_index` — the
-/// vision/pixel click that lands on Wayland (no pointer injection) and on GTK4
+/// vision/pixel click using AT-SPI rather than pointer injection on GTK4
 /// generally (no `CoordType::Screen`, which reports (0,0)). See
 /// [`native::perform_action_at_screen_point`].
 pub fn perform_action_at_screen_point(

@@ -16,7 +16,7 @@ import {
   isSupportedArchiveUrl,
   parseGitHubRepoForReleases,
 } from './github.js';
-import { isScopedNpmPackage } from './npm.js';
+import { isNpmPackage } from './npm.js';
 import { redactUrlCredentials } from './redaction.js';
 import { clientForUrl } from './http-client.js';
 import { resolveNetworkTarget } from './network-policy.js';
@@ -308,6 +308,20 @@ async function readLocalMarketplaceConfig(
   }
 }
 
+export async function resolveExistingLocalExtensionSource(
+  source: string,
+  cwd?: string,
+): Promise<string> {
+  if (cwd === undefined) return source;
+  const candidate = path.resolve(cwd, source);
+  try {
+    await stat(candidate);
+    return candidate;
+  } catch {
+    return source;
+  }
+}
+
 /**
  * Loads a Claude-format marketplace config (`.claude-plugin/marketplace.json`)
  * from any supported source string, without installing anything. Used by the
@@ -324,20 +338,22 @@ async function readLocalMarketplaceConfig(
 export async function loadMarketplaceConfigFromSource(
   source: string,
   networkPolicy?: ExtensionInstallMetadata['networkPolicy'],
+  cwd?: string,
 ): Promise<ClaudeMarketplaceConfig | null> {
   const trimmed = source.trim();
+  const localSource = cwd === undefined ? trimmed : path.resolve(cwd, trimmed);
   const lowerTrimmed = trimmed.toLowerCase();
 
   // Priority 1: local path (directory with .claude-plugin/marketplace.json,
   // or a direct marketplace.json file).
   try {
-    const stats = await stat(trimmed);
+    const stats = await stat(localSource);
     if (stats.isDirectory()) {
-      return await readLocalMarketplaceConfig(trimmed);
+      return await readLocalMarketplaceConfig(localSource);
     }
     if (stats.isFile()) {
       try {
-        const content = await fs.promises.readFile(trimmed, 'utf-8');
+        const content = await fs.promises.readFile(localSource, 'utf-8');
         return JSON.parse(content) as ClaudeMarketplaceConfig;
       } catch {
         return null;
@@ -422,10 +438,13 @@ export async function parseInstallSource(
   source: string,
   options: {
     networkPolicy?: ExtensionInstallMetadata['networkPolicy'];
+    cwd?: string;
   } = {},
 ): Promise<ExtensionInstallMetadata> {
   // Step 1: Parse source into repo and optional pluginName
   const { repo, pluginName } = parseSourceAndPluginName(source);
+  const localRepo =
+    options.cwd === undefined ? repo : path.resolve(options.cwd, repo);
 
   let installMetadata: ExtensionInstallMetadata;
   let repoSource = repo;
@@ -435,7 +454,7 @@ export async function parseInstallSource(
   // Priority 1: Check if it's a local path that exists
   let isLocalPath = false;
   try {
-    await stat(repo);
+    await stat(localRepo);
     isLocalPath = true;
   } catch {
     // Not a local path or doesn't exist, continue with other checks
@@ -444,13 +463,13 @@ export async function parseInstallSource(
   if (isLocalPath) {
     // Local path exists
     installMetadata = {
-      source: repo,
+      source: localRepo,
       type: 'local',
       pluginName,
     };
 
     // Try to read marketplace config from local path
-    marketplaceConfig = await readLocalMarketplaceConfig(repo);
+    marketplaceConfig = await readLocalMarketplaceConfig(localRepo);
   } else if (isSupportedArchiveUrl(repo)) {
     installMetadata = {
       source: repoSource,
@@ -497,8 +516,8 @@ export async function parseInstallSource(
     } catch {
       // Not a valid GitHub URL or failed to fetch, continue without marketplace config
     }
-  } else if (isScopedNpmPackage(repo)) {
-    // Priority 3: Scoped npm package (@scope/name, optionally @version)
+  } else if (isNpmPackage(repo)) {
+    // Priority 3: npm package (name or @scope/name, optionally @version)
     installMetadata = {
       source: repo,
       type: 'npm',

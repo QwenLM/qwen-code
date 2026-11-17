@@ -1220,20 +1220,32 @@ describe('endpoint identity', () => {
 });
 
 describe('checkReadiness', () => {
-  it('probes the Batch route and shows what a run would freeze', async () => {
+  it.each(['max_tokens', 'max_completion_tokens', 'max_new_tokens'])(
+    'probes the Batch route and shows the frozen %s output budget',
+    async (budgetKey) => {
+      const h = (harness = setup());
+      const probe = vi.fn(async () => undefined);
+      h.deps.api = { ...h.api, probe };
+      h.deps.ep = {
+        ...h.deps.ep,
+        generationConfig: { samplingParams: { [budgetKey]: 2048 } },
+      };
+      await checkReadiness(h.deps);
+      expect(probe).toHaveBeenCalledWith(h.deps.ep);
+      const text = h.out.join('\n');
+      expect(text).toMatch(/ready: fake accepts Batch requests/);
+      expect(text).toMatch(
+        /thinking: provider default, max output 2048 tokens/,
+      );
+      expect(text).toMatch(/no unit prices/);
+    },
+  );
+
+  it('reports the provider default when no output budget is configured', async () => {
     const h = (harness = setup());
-    const probe = vi.fn(async () => undefined);
-    h.deps.api = { ...h.api, probe };
-    h.deps.ep = {
-      ...h.deps.ep,
-      generationConfig: { samplingParams: { max_tokens: 2048 } },
-    };
+    h.deps.api = { ...h.api, probe: vi.fn(async () => undefined) };
     await checkReadiness(h.deps);
-    expect(probe).toHaveBeenCalledWith(h.deps.ep);
-    const text = h.out.join('\n');
-    expect(text).toMatch(/ready: fake accepts Batch requests/);
-    expect(text).toMatch(/thinking: provider default, max output 2048 tokens/);
-    expect(text).toMatch(/no unit prices/);
+    expect(h.out.join('\n')).toContain('max output provider default');
   });
 
   it('fails before any preparation when the route is unusable', async () => {

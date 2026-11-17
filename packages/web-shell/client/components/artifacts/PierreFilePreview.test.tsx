@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   virtualizerCleanUp: vi.fn(),
 }));
 vi.mock('@pierre/diffs', () => ({
+  getFiletypeFromFileName: () => 'typescript',
   DIFFS_TAG_NAME: 'diffs-container',
   Virtualizer: class {
     setup() {}
@@ -129,7 +130,7 @@ it('recreates changed files with the current shell theme and pins the character 
     await act(async () => root.render(render('first.ts', 'small')));
     expect(mocks.render).toHaveBeenLastCalledWith(
       expect.objectContaining({
-        file: expect.objectContaining({ name: 'first.ts', lang: undefined }),
+        file: expect.objectContaining({ name: 'first.ts', lang: 'typescript' }),
       }),
     );
     await act(async () =>
@@ -156,7 +157,7 @@ it('recreates changed files with the current shell theme and pins the character 
         file: expect.objectContaining({
           name: 'second.ts',
           contents: 'changed',
-          lang: undefined,
+          lang: 'typescript',
         }),
       }),
     );

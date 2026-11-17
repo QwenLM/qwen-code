@@ -234,9 +234,7 @@ function mergeModelIds(
   customModelIdsText: string,
   selectedRecommendationKeys: string[],
 ): string[] {
-  // Checked recommendations lead: models[0] becomes the active model on
-  // first-time setup, and checked ids are catalog-served while free-form ids
-  // can include defaults the account's catalog does not serve.
+  // Checked recommendations lead: models[0] becomes the active model on first setup.
   return uniqueModelIds([
     ...selectedRecommendationKeys,
     ...normalizeModelIds(customModelIdsText),
@@ -321,7 +319,16 @@ function ModelIdsStep({
       getRecommendedSelections(selectedModelIds, modelOptions, builtInModelIds),
   );
   const [customModelIdsText, setCustomModelIdsText] = useState(() =>
-    getCustomModelIdsText(selectedModelIds, selectedRecommendationKeys),
+    getCustomModelIdsText(
+      recommendationSource === 'provider'
+        ? selectedModelIds.filter(
+            (id) =>
+              !builtInModelIds.includes(id) ||
+              flow.state.explicitModelIds.includes(id),
+          )
+        : selectedModelIds,
+      selectedRecommendationKeys,
+    ),
   );
   const [modelSearchQuery, setModelSearchQuery] = useState('');
   const filteredModelOptions = useMemo(() => {

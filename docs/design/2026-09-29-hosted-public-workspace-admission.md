@@ -105,7 +105,7 @@ reliable Workspace close. Cwd operations remain gated for bound Sessions.
 | Existing Broker/worker              | Reuse production routing and fencing                                                 | Selected Runtime and persisted Workspace |
 | Contract and README                 | Document the narrow creation capability and remaining gates                          | Public REST and WebShell adapter         |
 
-Production behavior changes under `packages/sdk-java/managed-agent-server`, in
+Production behavior changes under `packages/managed-agent-server`, in
 the private Hosted DTOs in `packages/sdk-java/qwencode`, in the CLI Hosted Session routes (`packages/cli`), and in the WebShell
 managed Sessions page and its providers (`packages/web-shell`); it covers the
 initial Workspace Read/Write/Edit Turn and the creator's later-Turn submit,

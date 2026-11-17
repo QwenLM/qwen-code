@@ -350,13 +350,57 @@ export const workflowsCommand: SlashCommand = {
     return t('List workflow runs or cooperatively pause/resume a live run');
   },
   get argumentHint() {
-    return t('[runId | p <runId>]');
+    return t('[mode [status|on|off] | runId | p <runId>]');
   },
   kind: CommandKind.BUILT_IN,
   // Same triple-mode coverage as `/tasks`: the dialog is richer in
   // interactive mode but headless / acp consumers need the text dump
   // as their only inspection path.
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+  subCommands: [
+    {
+      name: 'mode',
+      description: 'Show or change this session’s Workflow guidance mode',
+      kind: CommandKind.BUILT_IN,
+      supportedModes: ['interactive', 'non_interactive', 'acp'],
+      canRunDuringStreaming: true,
+      action: async (context, args) => {
+        const config = context.services.config;
+        if (!config?.isWorkflowModeSupported()) {
+          return {
+            type: 'message',
+            messageType: 'error',
+            content: 'Workflow mode is unavailable for this session owner.',
+          };
+        }
+        const value = args.trim() || 'status';
+        if (!['status', 'on', 'off'].includes(value)) {
+          return {
+            type: 'message',
+            messageType: 'error',
+            content: 'Usage: /workflows mode [status|on|off]',
+          };
+        }
+        try {
+          const state =
+            value === 'status'
+              ? config.getWorkflowMode()
+              : await config.setWorkflowMode(value === 'on');
+          return {
+            type: 'message',
+            messageType: 'info',
+            content: `Workflow mode: ${state.requested ? 'on' : 'off'}${state.requested && !state.effective ? ' (unavailable)' : ''}${state.reason ? ` — ${state.reason}` : ''}`,
+          };
+        } catch (error) {
+          return {
+            type: 'message',
+            messageType: 'error',
+            content: error instanceof Error ? error.message : String(error),
+          };
+        }
+      },
+    },
+  ],
   action: async (context, args) => {
     const { config } = context.services;
     if (!config) {
@@ -364,6 +408,14 @@ export const workflowsCommand: SlashCommand = {
         type: 'message' as const,
         messageType: 'error' as const,
         content: 'Config not available.',
+      };
+    }
+    if (!config.isWorkflowsEnabled()) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content:
+          'Workflows are disabled. Use /workflows mode status or off to manage the saved mode.',
       };
     }
     const registry = config.getWorkflowRunRegistry();

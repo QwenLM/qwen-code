@@ -432,14 +432,53 @@ fn is_coord_independent_action(elem: &IUIAutomationElement) -> bool {
     )
 }
 
-pub fn try_invoke_in_window_at_point(hwnd: isize, sx: i32, sy: i32) -> bool {
-    run_uia_with_deadline_cancelable(
+fn point_pattern_available<T>(
+    result: windows::core::Result<T>,
+) -> Result<bool, PointInvokeOutcome> {
+    match result {
+        Ok(_) => Ok(true),
+        // GetCurrentPattern returns a null interface for an unsupported pattern;
+        // windows-rs 0.58 represents that successful null result as Error::empty().
+        Err(error)
+            if error.code().is_ok()
+                || error.code() == windows::Win32::Foundation::E_NOINTERFACE
+                || error.code().0 as u32
+                    == windows::Win32::UI::Accessibility::UIA_E_NOTSUPPORTED =>
+        {
+            Ok(false)
+        }
+        Err(_) => Err(PointInvokeOutcome::Unavailable),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PointInvokeOutcome {
+    Invoked,
+    Miss,
+    Busy,
+    Timeout,
+    Unavailable,
+    Unconfirmed,
+}
+
+impl PointInvokeOutcome {
+    fn from_worker(result: Result<Self, UiaDeadlineError>) -> Self {
+        match result {
+            Ok(outcome) => outcome,
+            Err(UiaDeadlineError::Busy) => Self::Busy,
+            Err(UiaDeadlineError::Timeout) => Self::Timeout,
+            Err(UiaDeadlineError::Unavailable) => Self::Unconfirmed,
+        }
+    }
+}
+
+pub(crate) fn try_invoke_in_window_at_point(hwnd: isize, sx: i32, sy: i32) -> PointInvokeOutcome {
+    PointInvokeOutcome::from_worker(run_uia_with_deadline_cancelable(
         "window hit-test invoke",
         SUBTREE_OP_TIMEOUT,
-        "PostMessage click delivery",
+        "an unknown-effect error without another input attempt",
         move |cancelled| try_invoke_in_window_at_point_unbounded(hwnd, sx, sy, &cancelled),
-    )
-    .unwrap_or(false)
+    ))
 }
 
 fn try_invoke_in_window_at_point_unbounded(
@@ -447,48 +486,52 @@ fn try_invoke_in_window_at_point_unbounded(
     sx: i32,
     sy: i32,
     cancelled: &AtomicBool,
-) -> bool {
+) -> PointInvokeOutcome {
+    use PointInvokeOutcome::{Invoked, Miss, Timeout, Unavailable, Unconfirmed};
     // Keep this first so COM interfaces drop before CoUninitialize.
     let _com = ComInit::new();
     if hwnd == 0 {
-        return false;
+        return Unavailable;
     }
     let uia = match get_uia() {
         Some(u) => u,
-        None => return false,
+        None => return Unavailable,
     };
     unsafe {
         let root = match uia.ElementFromHandle(HWND(hwnd as *mut _)) {
             Ok(r) => r,
             Err(e) => {
                 tracing::debug!(target: "click", "ElementFromHandle(0x{hwnd:x}) failed: {e}");
-                return false;
+                return Unavailable;
             }
         };
         let cond = match uia.CreateTrueCondition() {
             Ok(c) => c,
             Err(e) => {
                 tracing::debug!(target: "click", "CreateTrueCondition failed: {e}");
-                return false;
+                return Unavailable;
             }
         };
         let arr = match root.FindAll(TreeScope_Subtree, &cond) {
             Ok(a) => a,
             Err(e) => {
                 tracing::debug!(target: "click", "FindAll(Subtree) on 0x{hwnd:x} failed: {e}");
-                return false;
+                return Unavailable;
             }
         };
-        let n = arr.Length().unwrap_or(0);
+        let n = match arr.Length() {
+            Ok(n) => n,
+            Err(_) => return Unavailable,
+        };
         let mut best: Option<(IUIAutomationElement, i64)> = None;
         for i in 0..n {
             let elem = match arr.GetElement(i) {
                 Ok(e) => e,
-                Err(_) => continue,
+                Err(_) => return Unavailable,
             };
             let rect = match elem.CurrentBoundingRectangle() {
                 Ok(r) => r,
-                Err(_) => continue,
+                Err(_) => return Unavailable,
             };
             if sx < rect.left || sx > rect.right || sy < rect.top || sy > rect.bottom {
                 continue;
@@ -498,10 +541,18 @@ fn try_invoke_in_window_at_point_unbounded(
             // Invoke does nothing on them, only Expand opens the submenu.
             // (See FreeCAD finding 2026-05-21: clicking File menu via Invoke
             // returned ✅ but the menu never opened.)
-            let has_invoke = elem.GetCurrentPattern(UIA_InvokePatternId).is_ok();
-            let has_expand = elem
-                .GetCurrentPattern(windows::Win32::UI::Accessibility::UIA_ExpandCollapsePatternId)
-                .is_ok();
+            let has_invoke =
+                match point_pattern_available(elem.GetCurrentPattern(UIA_InvokePatternId)) {
+                    Ok(available) => available,
+                    Err(outcome) => return outcome,
+                };
+            let has_expand =
+                match point_pattern_available(elem.GetCurrentPattern(
+                    windows::Win32::UI::Accessibility::UIA_ExpandCollapsePatternId,
+                )) {
+                    Ok(available) => available,
+                    Err(outcome) => return outcome,
+                };
             if !has_invoke && !has_expand {
                 continue;
             }
@@ -537,12 +588,12 @@ fn try_invoke_in_window_at_point_unbounded(
                     target: "click",
                     "no Invoke/ExpandCollapse descendant of 0x{hwnd:x} contains screen ({sx},{sy}) (scanned {n} elems)"
                 );
-                return false;
+                return Miss;
             }
         };
         if cancelled.load(Ordering::Acquire) {
             tracing::debug!(target: "click", "UIA hit-test invoke cancelled before activation");
-            return false;
+            return Timeout;
         }
         // Pattern preference for menu items: when both Invoke AND
         // ExpandCollapse are advertised, the element is almost always a
@@ -550,22 +601,25 @@ fn try_invoke_in_window_at_point_unbounded(
         // submenu" — Invoke would be a no-op. Prefer ExpandCollapse.Expand
         // in that case. Pure-Invoke leaves (buttons, links, etc.) go
         // through Invoke as before.
-        let winner_has_expand = winner
-            .GetCurrentPattern(windows::Win32::UI::Accessibility::UIA_ExpandCollapsePatternId)
-            .is_ok();
-        let winner_has_invoke = winner.GetCurrentPattern(UIA_InvokePatternId).is_ok();
+        let winner_has_expand = match point_pattern_available(
+            winner
+                .GetCurrentPattern(windows::Win32::UI::Accessibility::UIA_ExpandCollapsePatternId),
+        ) {
+            Ok(available) => available,
+            Err(outcome) => return outcome,
+        };
         if cancelled.load(Ordering::Acquire) {
-            return false;
+            return Timeout;
         }
         // UWP foreground-steal bypass: gate the entire activation block on
         // `is_xaml_host_hwnd(hwnd)`. For non-XAML hosts the closure is a
         // straight passthrough.
         crate::uia::fg_bypass::run_with_uwp_bypass(hwnd, || {
             if cancelled.load(Ordering::Acquire) {
-                return false;
+                return Timeout;
             }
-            if winner_has_expand && winner_has_invoke {
-                // Try Expand first, fall back to Invoke if Expand fails.
+            if winner_has_expand {
+                // A failed activation may already have taken effect. Do not replay it.
                 if let Ok(pat) = winner.GetCurrentPattern(
                     windows::Win32::UI::Accessibility::UIA_ExpandCollapsePatternId,
                 ) {
@@ -573,45 +627,29 @@ fn try_invoke_in_window_at_point_unbounded(
                         .cast::<windows::Win32::UI::Accessibility::IUIAutomationExpandCollapsePattern>()
                     {
                         if cancelled.load(Ordering::Acquire) {
-                            return false;
+                            return Timeout;
                         }
-                        if ec.Expand().is_ok() {
-                            return true;
-                        }
+                        return if ec.Expand().is_ok() { Invoked } else { Unconfirmed };
                     }
                 }
-                // Expand failed — fall through to Invoke as best-effort.
-            } else if winner_has_expand && !winner_has_invoke {
-                if let Ok(pat) = winner.GetCurrentPattern(
-                    windows::Win32::UI::Accessibility::UIA_ExpandCollapsePatternId,
-                ) {
-                    if let Ok(ec) = pat
-                        .cast::<windows::Win32::UI::Accessibility::IUIAutomationExpandCollapsePattern>()
-                    {
-                        if cancelled.load(Ordering::Acquire) {
-                            return false;
-                        }
-                        return ec.Expand().is_ok();
-                    }
-                }
-                return false;
+                return Unavailable;
             }
             let pattern = match winner.GetCurrentPattern(UIA_InvokePatternId) {
                 Ok(p) => p,
-                Err(_) => return false,
+                Err(_) => return Unavailable,
             };
             let inv: IUIAutomationInvokePattern = match pattern.cast() {
                 Ok(i) => i,
-                Err(_) => return false,
+                Err(_) => return Unavailable,
             };
             if cancelled.load(Ordering::Acquire) {
-                return false;
+                return Timeout;
             }
             match inv.Invoke() {
-                Ok(()) => true,
+                Ok(()) => Invoked,
                 Err(e) => {
                     tracing::debug!(target: "click", "UIA Invoke (windowed) at ({sx},{sy}) failed: {e}");
-                    false
+                    Unconfirmed
                 }
             }
         })
@@ -1110,6 +1148,14 @@ mod tests {
         let mut win32 = dwm;
         win32.left -= 8;
         assert_eq!(select_window_rect(false, Some(dwm), Some(win32)), Some(dwm));
+    }
+
+    #[test]
+    fn a_worker_without_a_result_cannot_prove_input_was_not_sent() {
+        assert_eq!(
+            PointInvokeOutcome::from_worker(Err(UiaDeadlineError::Unavailable)),
+            PointInvokeOutcome::Unconfirmed,
+        );
     }
 
     #[test]

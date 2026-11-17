@@ -207,6 +207,10 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   cron_delete: 'cron_delete',
   CronDelete: 'cron_delete',
 
+  // /autofix-pr helper tool
+  autofix_pr: 'autofix_pr',
+  AutofixPr: 'autofix_pr',
+
   // Loop wakeup tool
   loop_wakeup: 'loop_wakeup',
   LoopWakeup: 'loop_wakeup',
@@ -564,6 +568,25 @@ export function parseRule(raw: string): PermissionRule {
 }
 
 /**
+ * Report a rule that parsed but will never match.
+ *
+ * Every consumer drops `invalid` rules, so a malformed `deny` or `ask` entry
+ * protects nothing: the control the operator believes exists is absent. The
+ * asymmetry is what makes this worth a terminal warning — a malformed `allow`
+ * rule merely fails closed. `debugLogger.warn` reaches a file that is off in
+ * default runs, so the same reason `tools.eager` reports its unusable entries
+ * applies here.
+ */
+export function warnDroppedPermissionRule(raw: string, kind?: string): void {
+  // eslint-disable-next-line no-console -- operator-facing breadcrumb; the debug log file is off in default runs, where a dropped rule would otherwise be invisible
+  console.warn(
+    `[permissions] ignoring malformed ${kind ? `${kind} ` : ''}rule ` +
+      `(unbalanced parentheses): ${raw} — it matches nothing, so it ` +
+      `protects nothing. Balance the parentheses to make it take effect.`,
+  );
+}
+
+/**
  * Parse an array of raw rule strings into PermissionRule objects,
  * silently skipping any empty entries.
  */
@@ -576,6 +599,7 @@ export function parseRules(raws: string[]): PermissionRule[] {
         debugLogger.warn(
           `Ignoring malformed rule (unbalanced parentheses): ${r.raw}`,
         );
+        warnDroppedPermissionRule(r.raw);
       }
       return r;
     });
@@ -963,7 +987,10 @@ function isAsyncOperator(command: string, index: number): boolean {
  * shape and is still dropped as a line ending.
  */
 const CR_IS_WHOLE_REDIRECT_TARGET =
-  /(^|[ \t])(?:<<-?|1>>|1>|>>|>|2>>|2>|&>>|&>|<)\r$/;
+  // `>|` / `N>|` before the bare `>` alternatives: `cat >|\r\necho hi` names the
+  // file `\r` exactly as `>` does, and missing it dropped the target while
+  // leaving `>|` behind as a positional, which became a pseudo-operation.
+  /(^|[ \t])(?:<<-?|[12]?>\||1>>|1>|>>|>|2>>|2>|&>>|&>|<)\r$/;
 
 /**
  * One segment of a compound command, together with the operator that ended it.
@@ -1115,6 +1142,18 @@ function findOperatorBoundaries(
       // other spellings belong to a redirection or to arithmetic, and stay in
       // the segment.
       if (op === '&' && (arithmeticDepth > 0 || !isAsyncOperator(command, i))) {
+        continue;
+      }
+      // `>|` is the clobber override, not a pipe: bash runs
+      // `echo '{}' >| .qwen/settings.json` as ONE command that writes the
+      // file. Splitting it here handed the permission path two segments and
+      // neither carried the write, so a protected-path write went unseen.
+      // An escaped `\>` is a literal argument, so the `|` after it still pipes.
+      if (
+        (op === '|' || op === '|&') &&
+        command[i - 1] === '>' &&
+        precedingBackslashCount(command, i - 1) % 2 === 0
+      ) {
         continue;
       }
       boundaries.push({ start: i, end: i + op.length, operator: op });

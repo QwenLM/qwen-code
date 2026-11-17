@@ -139,6 +139,10 @@ export function extractOpenAiRequestAttributes(request: object): Attributes {
     ownValue(record, 'presence_penalty'),
   );
   assignStopSequences(attributes, ownValue(record, 'stop'), true);
+  const reasoningEffort = ownValue(record, 'reasoning_effort');
+  if (typeof reasoningEffort === 'string' && reasoningEffort.length > 0) {
+    attributes['gen_ai.request.reasoning.level'] = reasoningEffort;
+  }
   return attributes;
 }
 

@@ -7,9 +7,14 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
+import * as crypto from 'node:crypto';
+import * as os from 'node:os';
+import { execFileSync } from 'node:child_process';
 import { FileTokenStorage } from './file-token-storage.js';
 import type { OAuthCredentials } from './types.js';
 import { atomicWriteFile } from '../../utils/atomicFileWrite.js';
+
+vi.mock('node:child_process', () => ({ execFileSync: vi.fn() }));
 
 vi.mock('node:fs', () => ({
   promises: {
@@ -399,4 +404,250 @@ describe('FileTokenStorage', () => {
       expect(atomicWriteFile).not.toHaveBeenCalled();
     });
   });
+});
+
+describe('FileTokenStorage runtime identity compatibility', () => {
+  const bunDescriptor = Object.getOwnPropertyDescriptor(
+    process.versions,
+    'bun',
+  );
+  const platformDescriptor = Object.getOwnPropertyDescriptor(
+    process,
+    'platform',
+  )!;
+  const canonicalUsername = 'actual-os-user';
+  const hostname = 'test-host';
+  const secretFile = path.join(qwenDir, 'extension-secrets-v1.json');
+  const credentials = bearer({
+    serverName: 'original',
+    accessToken: 'original-token',
+  });
+  const oauthData = { original: credentials };
+  const secretData = {
+    'test-storage': { ORIGINAL: 'original-secret' },
+    other: { KEEP: 'other-secret' },
+  };
+  const osUser = (username: string) => ({
+    username,
+    uid: 1001,
+    gid: 1001,
+    shell: '/bin/sh',
+    homedir: '/home/test',
+  });
+  const keyFor = (username: string) =>
+    crypto.scryptSync(
+      'qwen-code-oauth',
+      `${hostname}-${username}-qwen-code`,
+      32,
+    );
+  const seal = (username: string, data: object) => {
+    const iv = Buffer.alloc(16, 7);
+    const cipher = crypto.createCipheriv('aes-256-gcm', keyFor(username), iv);
+    const bytes = Buffer.concat([
+      cipher.update(JSON.stringify(data)),
+      cipher.final(),
+    ]);
+    return `${iv.toString('hex')}:${cipher.getAuthTag().toString('hex')}:${bytes.toString('hex')}`;
+  };
+  const open = (username: string, sealed: string) => {
+    const [iv, tag, bytes] = sealed.split(':');
+    const decipher = crypto.createDecipheriv(
+      'aes-256-gcm',
+      keyFor(username),
+      Buffer.from(iv, 'hex'),
+    );
+    decipher.setAuthTag(Buffer.from(tag, 'hex'));
+    return JSON.parse(
+      Buffer.concat([
+        decipher.update(Buffer.from(bytes, 'hex')),
+        decipher.final(),
+      ]).toString(),
+    );
+  };
+  const runtime = (bun: boolean) => {
+    Object.defineProperty(process, 'platform', {
+      configurable: true,
+      value: 'linux',
+    });
+    if (bun)
+      Object.defineProperty(process.versions, 'bun', {
+        configurable: true,
+        value: '1.4.4',
+      });
+    else Reflect.deleteProperty(process.versions, 'bun');
+  };
+  beforeEach(() => {
+    vi.clearAllMocks();
+    runtime(true);
+    vi.stubEnv('USER', 'legacy-env-user');
+    vi.mocked(os.userInfo).mockReturnValue(osUser('legacy-env-user'));
+    vi.mocked(execFileSync).mockReturnValue(`${canonicalUsername}\n`);
+    vi.mocked(atomicWriteFile).mockResolvedValue(undefined);
+    vi.mocked(fs.mkdir).mockResolvedValue(undefined);
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    if (bunDescriptor)
+      Object.defineProperty(process.versions, 'bun', bunDescriptor);
+    else Reflect.deleteProperty(process.versions, 'bun');
+    Object.defineProperty(process, 'platform', platformDescriptor);
+    vi.mocked(os.userInfo).mockReturnValue(osUser('test-user'));
+    vi.clearAllMocks();
+  });
+
+  it.each(['OAuth', 'secret'] as const)(
+    'Bun POSIX reads canonical OS identity %s despite USER spoofing',
+    async (consumer) => {
+      vi.mocked(fs.readFile).mockResolvedValue(
+        seal(canonicalUsername, consumer === 'OAuth' ? oauthData : secretData),
+      );
+      const storage = new FileTokenStorage('test-storage');
+      if (consumer === 'OAuth')
+        await expect(storage.getCredentials('original')).resolves.toEqual(
+          credentials,
+        );
+      else
+        await expect(storage.getSecret('ORIGINAL')).resolves.toBe(
+          'original-secret',
+        );
+      expect(execFileSync).toHaveBeenCalledWith(
+        '/usr/bin/id',
+        ['-un'],
+        expect.objectContaining({ encoding: 'utf8', timeout: 1000 }),
+      );
+      expect(atomicWriteFile).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['OAuth', 'secret'] as const)(
+    'Node keeps OS userInfo identity for %s without external lookup',
+    async (consumer) => {
+      runtime(false);
+      vi.mocked(os.userInfo).mockReturnValue(osUser(canonicalUsername));
+      vi.mocked(execFileSync).mockImplementation(() => {
+        throw new Error('must not run');
+      });
+      vi.mocked(fs.readFile).mockResolvedValue(
+        seal(canonicalUsername, consumer === 'OAuth' ? oauthData : secretData),
+      );
+      const storage = new FileTokenStorage('test-storage');
+      if (consumer === 'OAuth')
+        await expect(storage.getCredentials('original')).resolves.toEqual(
+          credentials,
+        );
+      else
+        await expect(storage.getSecret('ORIGINAL')).resolves.toBe(
+          'original-secret',
+        );
+      expect(execFileSync).not.toHaveBeenCalled();
+      expect(atomicWriteFile).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ['OAuth', 'legacy-env-user', true],
+    ['OAuth', 'unknown', true],
+    ['secret', 'legacy-env-user', true],
+    ['secret', 'unknown', true],
+    ['OAuth', 'legacy-env-user', false],
+    ['OAuth', 'unknown', false],
+    ['secret', 'legacy-env-user', false],
+    ['secret', 'unknown', false],
+    ['OAuth', '', true],
+    ['OAuth', '', false],
+    ['secret', '', true],
+    ['secret', '', false],
+  ] as const)(
+    'authenticates legacy %s file from %s with Bun=%s and preserves all data on canonical write',
+    async (consumer, legacyUsername, bun) => {
+      runtime(bun);
+      if (legacyUsername === '') vi.stubEnv('USER', '');
+      if (!bun)
+        vi.mocked(os.userInfo).mockReturnValue(osUser(canonicalUsername));
+      const original = seal(
+        legacyUsername,
+        consumer === 'OAuth' ? oauthData : secretData,
+      );
+      vi.mocked(fs.readFile).mockResolvedValue(original);
+      const storage = new FileTokenStorage('test-storage');
+      if (consumer === 'OAuth')
+        await expect(storage.getCredentials('original')).resolves.toEqual(
+          credentials,
+        );
+      else
+        await expect(storage.getSecret('ORIGINAL')).resolves.toBe(
+          'original-secret',
+        );
+      expect(atomicWriteFile).not.toHaveBeenCalled();
+      if (consumer === 'OAuth')
+        await storage.setCredentials(
+          bearer({ serverName: 'added', accessToken: 'added-token' }),
+        );
+      else await storage.setSecret('ADDED', 'added-secret');
+      expect(atomicWriteFile).toHaveBeenCalledTimes(1);
+      const [file, sealed, options] = vi.mocked(atomicWriteFile).mock.calls[0];
+      expect(file).toBe(consumer === 'OAuth' ? tokenFile : secretFile);
+      expect(options).toEqual(WRITE_OPTIONS);
+      const decoded = open(canonicalUsername, sealed as string);
+      if (consumer === 'OAuth') {
+        expect(decoded.original).toEqual(credentials);
+        expect(decoded.added.token.accessToken).toBe('added-token');
+        expect(Object.keys(decoded).sort()).toEqual(['added', 'original']);
+      } else {
+        expect(decoded).toEqual({
+          'test-storage': {
+            ORIGINAL: 'original-secret',
+            ADDED: 'added-secret',
+          },
+          other: { KEEP: 'other-secret' },
+        });
+      }
+      expect(() => open(legacyUsername, sealed as string)).toThrow();
+    },
+  );
+
+  it.each(['OAuth', 'secret'] as const)(
+    'never replaces unauthenticated %s data with an empty store',
+    async (consumer) => {
+      const original = seal(
+        'unrelated-user',
+        consumer === 'OAuth' ? oauthData : secretData,
+      );
+      vi.mocked(fs.readFile).mockResolvedValue(original);
+      const storage = new FileTokenStorage('test-storage');
+      if (consumer === 'OAuth') {
+        await expect(storage.getCredentials('original')).rejects.toThrow();
+        await expect(
+          storage.setCredentials(
+            bearer({ serverName: 'added', accessToken: 'new' }),
+          ),
+        ).rejects.toThrow();
+      } else {
+        await expect(storage.getSecret('ORIGINAL')).rejects.toThrow();
+        await expect(storage.setSecret('ADDED', 'new')).rejects.toThrow();
+      }
+      expect(atomicWriteFile).not.toHaveBeenCalled();
+      expect(fs.unlink).not.toHaveBeenCalled();
+      expect(fs.mkdir).not.toHaveBeenCalled();
+    },
+  );
+
+  it('fails closed when the real POSIX account lookup fails', () => {
+    vi.mocked(execFileSync).mockImplementation(() => {
+      throw new Error('lookup failed');
+    });
+    expect(() => new FileTokenStorage('test-storage')).toThrow();
+    expect(fs.readFile).not.toHaveBeenCalled();
+    expect(atomicWriteFile).not.toHaveBeenCalled();
+  });
+
+  it.each(['', '\n', 'bad\nname\n', 'bad\rname\n', 'bad\0name\n'])(
+    'rejects invalid POSIX account lookup output %j before touching files',
+    (output) => {
+      vi.mocked(execFileSync).mockReturnValue(output);
+      expect(() => new FileTokenStorage('test-storage')).toThrow();
+      expect(fs.readFile).not.toHaveBeenCalled();
+      expect(atomicWriteFile).not.toHaveBeenCalled();
+    },
+  );
 });

@@ -28,7 +28,10 @@ export function useManagedTasks(
   sessionId: string | undefined,
   open: boolean,
 ) {
-  const owner = useMemo(() => ({ provider, sessionId }), [provider, sessionId]);
+  const owner = useMemo(
+    () => ({ provider, clientId, sessionId }),
+    [provider, clientId, sessionId],
+  );
   const [state, setState] = useState<{
     owner: typeof owner;
     cursors: Array<string | undefined>;
@@ -127,11 +130,7 @@ export function useManagedTasks(
           );
         if (selectedId && current()) {
           const task = await api!.get(sessionId!, selectedId, request);
-          if (
-            task.sessionId !== sessionId ||
-            task.taskId !== selectedId ||
-            task.kind !== 'child_agent'
-          )
+          if (task.sessionId !== sessionId || task.taskId !== selectedId)
             throw new Error('Task identity mismatch');
           if (current())
             setState((value) =>
@@ -246,9 +245,7 @@ export function useManagedTasks(
     },
     apply: (task: ManagedTask) => {
       setState((value) =>
-        value.owner !== owner ||
-        task.sessionId !== sessionId ||
-        task.kind !== 'child_agent'
+        value.owner !== owner || task.sessionId !== sessionId
           ? value
           : {
               ...value,

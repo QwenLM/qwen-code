@@ -49,7 +49,9 @@ env:
 jobs:
   prepare:
     name: 'Prepare Live Host release'
-    runs-on: 'ubuntu-latest'
+    # PR runs stay hosted; only release dispatches use the persistent pool.
+    # Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && github.event_name != ''pull_request'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 10
     outputs:
       tag: '${{ steps.version.outputs.tag }}'

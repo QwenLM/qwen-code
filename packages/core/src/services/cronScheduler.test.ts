@@ -2033,6 +2033,34 @@ describe('CronScheduler', () => {
       await waitForEmptyDisk();
     });
 
+    it('stamps an aged-out final fire with its own minute, not the task record', async () => {
+      const before = Date.now();
+      const fired = await loadStarted([
+        hourly('aged-stamp', 'aged recurring', hoursAgo(8 * 24), {
+          lastFiredAt: hoursAgo(48),
+        }),
+        // Never fired at all: without a stamp the consumer falls back to its
+        // own clock at delivery, which a buffered fire makes arbitrarily
+        // late.
+        hourly('aged-never', 'never fired', hoursAgo(8 * 24), {
+          lastFiredAt: null,
+        }),
+      ]);
+      const minuteOf = (ms: number) => ms - (ms % 60_000);
+
+      expect(fired.map((j) => j.prompt)).toEqual([
+        'aged recurring',
+        'never fired',
+      ]);
+      // CronFire.lastFiredAt is "the minute this fire was stamped for",
+      // assigned before onFire — so neither the previous fire's stamp nor
+      // undefined may reach the consumer.
+      for (const job of fired) {
+        expect(job.lastFiredAt!).toBeGreaterThanOrEqual(minuteOf(before));
+        expect(job.lastFiredAt!).toBeLessThanOrEqual(minuteOf(Date.now()));
+      }
+    });
+
     it('re-detects a dropped catch-up fire on re-enable', async () => {
       const createdAt = hoursAgo(3);
       // enableDurable buffers the catch-up (no onFire yet); stop() drops it.

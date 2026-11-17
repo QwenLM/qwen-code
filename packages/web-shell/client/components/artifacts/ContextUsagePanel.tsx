@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { RefreshCwIcon } from 'lucide-react';
 import type {
+  DaemonContextMemoryDetail,
   DaemonSessionActions,
   DaemonSessionContextUsageStatus,
 } from '@qwen-code/web-shell/daemon-react-sdk';
@@ -22,10 +23,15 @@ export function ContextUsagePanel({
   sessionActions,
   sessionId,
   controls,
+  onOpenMemoryFile,
 }: {
   sessionActions?: DaemonSessionActions;
   sessionId: string;
   controls?: Omit<ContextUsageControls, 'captureOwner'>;
+  onOpenMemoryFile?: (
+    file: DaemonContextMemoryDetail,
+    workspaceCwd: string,
+  ) => void;
 }) {
   const { t } = useI18n();
   const [status, setStatus] = useState<DaemonSessionContextUsageStatus | null>(
@@ -201,7 +207,22 @@ export function ContextUsagePanel({
           {t('common.loading')}
         </div>
       ) : status ? (
-        <ContextUsageMessage status={status} compact />
+        <ContextUsageMessage
+          status={status}
+          compact
+          onOpenMemoryFile={
+            onOpenMemoryFile
+              ? (file) =>
+                  // Resolve the owner from the stable admission root, not the
+                  // live cwd: a worktree/relocated session's cwd is under the
+                  // registered root and would not match it exactly.
+                  onOpenMemoryFile(
+                    file,
+                    status.workspaceRoot ?? status.workspaceCwd,
+                  )
+              : undefined
+          }
+        />
       ) : (
         <div className={styles.state}>{t('contextUsage.unavailable')}</div>
       )}

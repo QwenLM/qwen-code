@@ -71,6 +71,27 @@ describe('FileReadCache', () => {
     expect(cache.getClearGeneration()).toBe(generation + 1);
   });
 
+  it('keeps recovered-write baseline state across inode replacement until a text Read', () => {
+    const original = makeStats();
+    read('/x/file', original);
+    const replaced = makeStats({ ino: 101, mtimeMs: 2_000_000 });
+    cache.recordWrite('/x/file', replaced, { readBaselineNeedsRefresh: true });
+    expect(fresh(replaced).readBaselineNeedsRefresh).toBe(true);
+    expect(fresh(replaced).readResidentInHistory).toBe(false);
+    expect(fresh(replaced).lastReadWasFull).toBe(false);
+    cache.recordWrite('/x/file', replaced);
+    expect(fresh(replaced).readBaselineNeedsRefresh).toBe(true);
+    read('/x/file', replaced, { full: false, cacheable: false });
+    expect(fresh(replaced).readBaselineNeedsRefresh).toBe(true);
+    read('/x/file', replaced, { full: false, cacheable: true });
+    expect(fresh(replaced).readBaselineNeedsRefresh).toBe(false);
+    expect(fresh(replaced).lastReadWasFull).toBe(false);
+    expect(fresh(replaced).readResidentInHistory).toBe(false);
+    read('/x/file', replaced);
+    expect(fresh(replaced).lastReadWasFull).toBe(true);
+    expect(fresh(replaced).readResidentInHistory).toBe(true);
+  });
+
   describe('inodeKey', () => {
     it('combines dev and ino into a stable string', () => {
       expect(FileReadCache.inodeKey(makeStats({ dev: 7, ino: 99 }))).toBe(
@@ -472,6 +493,22 @@ describe('FileReadCache', () => {
       expect(entry.lastReadAt).toBeDefined();
       expect(entry.lastReadWasFull).toBe(true);
       expect(entry.lastReadCacheable).toBe(true);
+    });
+
+    it('disarms unknown truncated reads without revoking rights', () => {
+      const stats = makeStats();
+      const otherStats = makeStats({ ino: 101 });
+      const entry = read('/x/foo.ts', stats);
+      const other = read('/x/other.ts', otherStats);
+      const generation = cache.getClearGeneration();
+      cache.markAllReadsEvictedFromHistory();
+      expect(fresh(stats)).toBe(entry);
+      expect(entry.readResidentInHistory).toBe(false);
+      expect(entry.lastReadAt).toBeDefined();
+      expect(entry.lastReadWasFull).toBe(true);
+      expect(entry.lastReadCacheable).toBe(true);
+      expect(other.readResidentInHistory).toBe(false);
+      expect(cache.getClearGeneration()).toBe(generation);
     });
 
     it('returns false (caller must fall back to clear) when there is no entry for the stats', () => {

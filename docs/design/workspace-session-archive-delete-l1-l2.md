@@ -313,11 +313,11 @@ including the prerequisite integration.
 | `.../api/WebShellAgentController.java`, `ApiModels.java`                                                  | Unarchive adapter and optional capability fields                 | Optional delete fields                                                    |
 | `.../service/SessionLifecycleCoordinator.java`                                                            | No archive dispatch                                              | Skip resource cleanup only for the admitted L2 path                       |
 | `.../store/ManagedSessionStore.java`, `ToolPublicationRetentionStore.java`, `ManagedToolResultStore.java` | No retention change                                              | Reconcile writer lock order; reuse retirement; verify projection ordering |
-| `packages/sdk-java/managed-agent-server/src/main/resources/openapi/managed-agent-public-api.openapi.json` | Routes, replay semantics, authorization and capabilities         | State restrictions, retirement and tombstone behavior                     |
+| `packages/managed-agent-server/src/main/resources/openapi/managed-agent-public-api.openapi.json`          | Routes, replay semantics, authorization and capabilities         | State restrictions, retirement and tombstone behavior                     |
 | `packages/web-shell/client/components/managed/generated/managed-agent-api.ts`                             | Regenerate optional fields and unarchive route types             | Regenerate delete capability                                              |
 
 The `...` Java prefix above is
-`packages/sdk-java/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent`.
+`packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent`.
 Focused tests belong beside the existing lifecycle, operation-store, API,
 retention and Hosted/MySQL tests. Audit all new capability read sites and every
 adapter/service/store caller; do not leave declared flags or options unpopulated.

@@ -4,9 +4,18 @@ import styles from './DiffView.module.css';
 
 interface DiffViewProps {
   diff: string;
+  /**
+   * The surrounding region scrolls instead of the line list (floating
+   * approval card): the list fills that region with its full height instead
+   * of capping itself at 400px with a nested scrollbar.
+   */
+  fillScrollRegion?: boolean;
 }
 
-export const DiffView = memo(function DiffView({ diff }: DiffViewProps) {
+export const DiffView = memo(function DiffView({
+  diff,
+  fillScrollRegion = false,
+}: DiffViewProps) {
   if (!diff) return null;
 
   const { lines, additions, deletions } = parseUnifiedDiff(diff);
@@ -17,7 +26,15 @@ export const DiffView = memo(function DiffView({ diff }: DiffViewProps) {
         {additions > 0 && <span className={styles.statAdd}>+{additions}</span>}
         {deletions > 0 && <span className={styles.statDel}>-{deletions}</span>}
       </div>
-      <div className={styles.lines} tabIndex={0} aria-label="File diff">
+      <div
+        className={
+          fillScrollRegion
+            ? `${styles.lines} ${styles.linesFill}`
+            : styles.lines
+        }
+        tabIndex={0}
+        aria-label="File diff"
+      >
         {lines.map((line, i) => (
           <div
             key={i}

@@ -4,9 +4,9 @@
 
 Status: Steps 1 and 2 are implemented (D1-D9). Step 3's bounded native-file
 approval and main-model slices are implemented (#13777). Its packaged gates,
-the model-round arm and the Q2 binding-half arm are steps of the Hosted MySQL
-CI job (D11), which had not run them when they were added. The broader
-acceptance matrix remains open, as recorded in the [Step 3 design](2026-10-09-hosted-g3-step3-recovery.md). Issue tracker: #12952 (Stage G). Code references are to
+the model-round arm and the Q2 binding-half arm run in the `hosted-failover-e2e`
+CI job (D11); the Hosted MySQL job they were first added to had not run them.
+The broader acceptance matrix remains open, as recorded in the [Step 3 design](2026-10-09-hosted-g3-step3-recovery.md). Issue tracker: #12952 (Stage G). Code references are to
 `main` @ `728c13de21` unless a decision notes a later refinement. This
 design answers Q2 and Q3 of #12952 following the proposal in its comments,
 and corrects one mechanism description from that proposal (see "Current
@@ -235,6 +235,42 @@ meantime the route answers the plain attach for BOTH load shapes,
 because a Turn written turn_settled completed and must never be stamped
 a terminal failure — the daemon's own projection writes the terminal
 record once the plain attach is admitted).
+
+An eighth reason, `public_child_recovery_unsupported` (#17260), names a
+Session whose own durable shape the Harness cannot open at all: a
+public-child Session persisted under the shell topology now served by a
+Harness without public child agents, or a saved approval continuation
+whose public-child profile no longer matches the active topology.
+Unlike the journal-state declines no settlement route can pay on this
+Harness, so the coordinator abandons the recovery on the first drive —
+cancellation included — settling the Turn FAILED as
+`managed_runtime_recovery_blocked` without the reconcile/park detour,
+which removes it from both recovery sweeps permanently. The recorded
+message follows what was established: a Session with a bound harness boot
+reports the abandoned park, while a boot-less Session — driven through
+`createOrLoad`, where nothing was parked and nothing was replayed — reports
+the Turn settled without dispatch.
+
+The verdict reaches the coordinator by two routes. The connector raises it
+locally from its capability probe, and the daemon answers the same typed
+decline on the wire when the saved continuation's own profile is what
+mismatches — a shape the probe never sees. Every connector entry point that
+drives a load therefore maps the `hosted_turn_recovery_declined` body code
+onto the typed exception, the plain open/load route included. The mapping
+keys on the code, never the 409 status alone: a bare 409 still means "the
+Harness already holds the Session" for the attachment fallbacks.
+
+Like `checkpoint_blocked`, this reason fires only on positive durable
+evidence: the connector's admission-shaped capability probe folds an
+unreachable daemon (and a pooled placement) into "unsupported", which is
+safe for refusing new launches but would terminally fail Turns on a
+transient outage. The decline therefore requires a completed capabilities
+read that proves the feature absent; an unreadable capability surface
+keeps the ordinary transient refusal. After the fenced terminal write,
+the cached-attachment discard is best-effort: its failure is logged and
+never holds the terminal back, because the terminal row already keeps
+every sweep from re-offering the Turn and the next process drops the
+cache anyway.
 
 `checkpoint_blocked` fires only on durable verdicts (`opaque_state`,
 `invalid_state`, `identity_mismatch`). A transient Managed Session Store
@@ -475,7 +511,7 @@ Spring, Broker and durable Worker keep serving the same
 `runtime_session_id`, and the live Broker re-dispatches on the
 generation it already owns (exactly `'0'` or `'1'` — never `'1'`-only,
 never unbounded). Every lane that runs these arms is Linux
-(`hosted-harness-mysql` is ubuntu-only), so darwin stays an unverified
+(`hosted-failover-e2e` is ubuntu-only), so darwin stays an unverified
 expectation, not a decision gate waiting on a first run that cannot
 happen.
 
@@ -504,6 +540,22 @@ happen.
   mark retries on its own path regardless of the code — the budget never
   consulted those Turns (that is `transientFailure`'s contract, not a
   lease exemption).
+  A generation change (`HostedHarnessGenerationException`) on a bound
+  Session is the other exempt wait, before and after admission: a single
+  change is bounded by the prior generation's lease. A Harness that restarts
+  between every attempt keeps throwing it, though, so the exemption lapses
+  once the Turn has gone four budgets without journaled progress
+  (`consecutive_failures` reaching 4 × `max-pre-admission-retries` or
+  4 × `max-post-admission-retries`). The Turn then fails as a spent budget
+  would, `hosted_harness_unavailable` or
+  `hosted_harness_unavailable_after_admission`, rather than retrying forever
+  indistinguishable from a healthy retry (#13182 follow-up, R3-6). The cap
+  counts every attempt of the run, whatever wait filled it: no counter tells
+  the wait families apart, so a Turn that waited out a predecessor's
+  lease-bounded 409 or an approval for four budgets fails on the first
+  generation change that follows, while those other waits stay uncapped as
+  long as they are the current failure. A zero budget is floored to one, so
+  even then a single change still re-attaches (the cap is four attempts).
 - **D9b, request timeout vs takeover load.** `HostedHarnessClient.loadSession`
   uses a dedicated `load-timeout` (default 120 s, env-overridable like the
   other knobs) only when the request carries a recovery flag
@@ -548,8 +600,9 @@ idempotency and the parked-input refusal as specified in D4 above.
 ### D11 — Residual gates: Step 3 in CI, the model-round arm and Q2's binding half
 
 Three runner additions close the gates the slices above left manual or
-unproven. All three are steps of `hosted-harness-mysql`; they run against
-the packaged stack and use the existing fake model.
+unproven. All three were added as steps of `hosted-harness-mysql` and now
+run in the `hosted-failover-e2e` job (see the end of this decision); they run
+against the packaged stack and use the existing fake model.
 
 1. **Step 3 packaged gates in CI.** The Allow, Deny, Cancel, expiry and
    continuation-closeout gates from the Step 3 design ran only by hand,
@@ -637,16 +690,32 @@ writer-lease heartbeats are outside the snapshot because the live writer
 keeps moving those columns. A deployment with two live control planes
 remains unsupported (see Boundaries).
 
-The seven new steps are capped at 10 minutes each, so the step ceilings sum
-to 275 (45 + 16×10 + 20 + 50) and the job ceiling moves from 220 to 290
-minutes.
+The seven new steps were capped at 10 minutes each, so the step ceilings
+then summed to 275 (45 + 16×10 + 20 + 50) and the job ceiling moved from 220
+to 290 minutes; the end of this decision gives the current ceilings.
 
 Since #14205 the job runs daily or on demand, never on a pull request. The
-new steps come after `Verify Hosted Java, Spring and MySQL processes` and the
-earlier failover steps, and none of them has an `if:`, so they run only when
-every earlier step passes. When these gates were added the Verify step was
-failing on `main`, so no CI run had executed them; their evidence at that
-point came from running the same `package.json` scripts outside CI.
+new steps came after `Verify Hosted Java, Spring and MySQL processes` and the
+earlier failover steps, and none of the failover steps had an `if:`, so they
+ran only when every earlier step passed. The Verify step was failing on
+`main` then, and it kept failing on a different test in each of the next
+four runs, so no CI run executed the gates; their evidence came from running
+the same `package.json` scripts outside CI.
+
+All fifteen failover steps therefore moved into their own job,
+`hosted-failover-e2e` (`Hosted failover E2E / Java 21`). The arms need only
+the bundled CLI, the server jar and a runner-private `mysqld`, not the Hosted
+MySQL job's MySQL service or cgroup root, so the new job builds the CLI,
+installs the SDK, packages the server with `-DskipTests` and installs the
+MySQL binaries itself, with no `needs:` on the Hosted MySQL job; like that
+job, it is skipped only on the `fast` tier of `managed-agent-gate.yml`. A
+failing integration test there no longer skips an arm. Each arm runs when
+the MySQL binaries install succeeded and the run was not cancelled, so an
+earlier arm's failure does not skip the later ones either, and a failing arm
+still fails the job. The runner-only `QWEN_E2E_REGISTER_STORAGE=1` and the Step 3
+evidence upload moved with them. The Hosted MySQL job's step ceilings now
+sum to 170 (90 + 10 + 20 + 50) under a 185-minute job ceiling; the new job's
+fifteen arms sum to 150 under 165.
 
 ## Changes and ownership
 
@@ -725,8 +794,8 @@ E2E (runner arms, all against the packaged stack):
    `--session-failover`. That slice moved the job ceiling from 60 to 120
    minutes over step ceilings that summed to 104 (12 + 8×10 + 12, the
    workspace-output gates added their own step), leaving headroom for the
-   uncapped setup steps. Later gates raised it again; D11 states the current
-   ceiling, 290 minutes over step ceilings that sum to 275.
+   uncapped setup steps. Later gates raised it again, and the arms now run
+   in `hosted-failover-e2e`; D11 states the current ceilings of both jobs.
 5. D11 Step 3 gates: one CI step each for Allow, Deny, Cancel, expiry and
    continuation closeout.
 6. D11 model-round arm: the assertions listed in D11. With both control-plane

@@ -23,6 +23,22 @@ const yml = parse(readFileSync('.github/workflows/codeql.yml', 'utf8'));
 describe('CodeQL workflow failure reporting', () => {
   const report = yml.jobs.report_failure;
 
+  it('scans both Maven source trees without widening into the mobile Gradle tree', () => {
+    const java = yml.jobs.codeql.strategy.matrix.include.filter(
+      (entry) => entry.language === 'java',
+    );
+    expect(java.map((entry) => entry.sourceroot)).toEqual([
+      'packages/sdk-java',
+      'packages/managed-agent-server',
+    ]);
+    const analysis = yml.jobs.codeql.steps.find((step) =>
+      String(step.uses ?? '').startsWith('github/codeql-action/analyze@'),
+    );
+    expect(java[0].category).toBeUndefined();
+    expect(java[1].category).toBe('managed-agent-server');
+    expect(analysis.with.category).toBe('${{ matrix.category }}');
+  });
+
   it('reports a scheduled scan that was cancelled, not only one that failed', () => {
     // A `timeout-minutes` overrun reports `cancelled`: `failure()` alone
     // missed 57 of 59 dead nightlies (#13249).

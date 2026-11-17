@@ -105,28 +105,18 @@ fn setup_not_ready_message(descriptor: &BrowserSetupDescriptor) -> String {
 }
 
 fn with_target_foreground<T>(
-    pid: u32,
+    _pid: u32,
     window_id: u64,
     body: impl FnOnce() -> anyhow::Result<T>,
 ) -> anyhow::Result<T> {
-    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-        if let Some(window) =
-            crate::wayland::sway_ipc::window_for_id(window_id).filter(|window| window.pid == pid)
-        {
-            crate::wayland::sway_ipc::with_focused_container(window.id, body)
-        } else {
-            crate::wayland::shell_helper::with_focused_window(pid, window_id, body)
-        }
-    } else {
+    {
         crate::input::with_x11_foreground(window_id, 80, body)
     }
 }
 
 fn close_tab(pid: u32, window_id: u64) -> anyhow::Result<()> {
     with_target_foreground(pid, window_id, || {
-        if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-            crate::wayland::hotkey(window_id, &["ctrl".to_owned(), "w".to_owned()])
-        } else {
+        {
             crate::input::send_key_xtest("w", &["ctrl"])
         }
     })
@@ -191,25 +181,19 @@ fn trusted_setup_navigation(
     window_id: u64,
     descriptor: &BrowserSetupDescriptor,
 ) -> anyhow::Result<()> {
-    let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
-
     // A fresh tab, so the setup page never displaces a page the user was on.
     // `ctrl+l` then focuses the address field. Both are single letters, so
     // neither depends on the keyboard layout the way punctuation does.
     let focus_omnibox = || -> anyhow::Result<()> {
         with_target_foreground(pid, window_id, || {
-            if wayland {
-                crate::wayland::hotkey_focused(&["ctrl".to_owned(), "l".to_owned()])
-            } else {
+            {
                 crate::input::send_key_xtest("l", &["ctrl"])
             }
         })
     };
 
     with_target_foreground(pid, window_id, || {
-        if wayland {
-            crate::wayland::hotkey_focused(&["ctrl".to_owned(), "t".to_owned()])
-        } else {
+        {
             crate::input::send_key_xtest("t", &["ctrl"])
         }
     })?;
@@ -252,15 +236,9 @@ fn trusted_setup_navigation(
         .write_text(descriptor.setup_url.to_owned())
         .map_err(|error| anyhow::anyhow!("could not stage the fixed setup URL: {error}"))?;
     let paste = with_target_foreground(pid, window_id, || {
-        if wayland {
-            crate::wayland::hotkey_focused(&["ctrl".to_owned(), "a".to_owned()])?;
-            std::thread::sleep(Duration::from_millis(60));
-            crate::wayland::hotkey_focused(&["ctrl".to_owned(), "v".to_owned()])
-        } else {
-            crate::input::send_key_xtest("a", &["ctrl"])?;
-            std::thread::sleep(Duration::from_millis(60));
-            crate::input::send_key_xtest("v", &["ctrl"])
-        }
+        crate::input::send_key_xtest("a", &["ctrl"])?;
+        std::thread::sleep(Duration::from_millis(60));
+        crate::input::send_key_xtest("v", &["ctrl"])
     });
     // The user's clipboard is theirs; put it back whether or not the paste took.
     std::thread::sleep(Duration::from_millis(120));
@@ -272,9 +250,7 @@ fn trusted_setup_navigation(
     // Commit. Enter is the one synthesized keystroke left, and it carries no
     // layout dependency.
     with_target_foreground(pid, window_id, || {
-        if wayland {
-            crate::wayland::hotkey_focused(&["enter".to_owned()])
-        } else {
+        {
             crate::input::send_key_xtest("enter", &[])
         }
     })?;
@@ -604,9 +580,7 @@ pub fn enable(
                         let center_y = y
                             .checked_add(i32::try_from(height / 2)?)
                             .ok_or_else(|| anyhow::anyhow!("checkbox center y overflowed"))?;
-                        if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-                            crate::wayland::click_desktop(center_x, center_y, 1, 1)?;
-                        } else {
+                        {
                             crate::input::send_click_xtest_desktop(center_x, center_y, 1, 1)?;
                         }
                         Ok(true)

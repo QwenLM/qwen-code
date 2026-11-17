@@ -45,6 +45,38 @@ describe('useHistoryManager', () => {
     expect(result.current.history).toEqual([]);
   });
 
+  it('keeps the owner of the displayed transcript until it is replaced', () => {
+    const { result, rerender } = renderHook(
+      (sessionId: string) => useHistory(sessionId),
+      { initialProps: 'old' },
+    );
+    act(() => {
+      result.current.loadHistory([{ id: 1, type: 'gemini', text: 'Old' }]);
+    });
+    rerender('incoming');
+    expect(result.current.sessionId).toBe('old');
+    expect(result.current.history).toEqual([
+      { id: 1, type: 'gemini', text: 'Old' },
+    ]);
+
+    act(() => result.current.clearItems());
+    expect(result.current.sessionId).toBe('old');
+    act(() => {
+      result.current.loadHistory(
+        [{ id: 1, type: 'gemini', text: 'Resumed' }],
+        'resumed',
+      );
+    });
+    expect(result.current.sessionId).toBe('resumed');
+    expect(result.current.history).toEqual([
+      { id: 1, type: 'gemini', text: 'Resumed' },
+    ]);
+
+    act(() => result.current.clearItems('cleared'));
+    expect(result.current.sessionId).toBe('cleared');
+    expect(result.current.history).toEqual([]);
+  });
+
   it('should add an item to history with a unique ID', () => {
     const { result } = renderHook(() => useHistory());
     const timestamp = Date.now();
@@ -332,6 +364,26 @@ describe('useHistoryManager', () => {
     expect(result.current.history[0].text).toBe('Duplicate message');
     expect(result.current.history[1].text).toBe('Gemini response');
     expect(result.current.history[2].text).toBe('Another user message');
+  });
+
+  it('keeps distinct paste bodies behind identical consecutive placeholders', () => {
+    const { result } = renderHook(() => useHistory());
+    const placeholder = '[Pasted Content 1200 chars]';
+    const first = 'PASTE_ALPHA '.padEnd(1200, 'a');
+    const second = 'PASTE_BETA '.padEnd(1200, 'b');
+    act(() => {
+      for (const recallText of [first, second, second]) {
+        result.current.addItem(
+          { type: 'user', text: placeholder, recallText },
+          Date.now(),
+        );
+      }
+    });
+    expect(result.current.history).toHaveLength(2);
+    expect(result.current.history).toEqual([
+      expect.objectContaining({ text: placeholder, recallText: first }),
+      expect.objectContaining({ text: placeholder, recallText: second }),
+    ]);
   });
 
   it('should add duplicate user messages if they are not consecutive', () => {

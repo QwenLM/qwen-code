@@ -89,3 +89,43 @@ test('reports cache-prune failure instead of a successful service exit', () => {
   assert.match(result.stderr, /Docker build cache cleanup failed/);
   assert.match(result.calls, /^image prune --all --force/m);
 });
+
+test('reaps the qwen-review- containers the review sandbox creates', () => {
+  // The CLI names its reviewed-command containers `qwen-review-*`
+  // (packages/cli/src/commands/review/lib/sandboxed-exec.ts, containerName),
+  // and they carry no sandbox label because the published image has none. The
+  // `qwen-code-` filter alone therefore misses every one of them, and a
+  // container leaked by a killed job outlives the 24h gate for good.
+  const result = run();
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.calls, /^ps --all --quiet --filter name=qwen-review-$/m);
+});
+
+test('installs a one-day /tmp retention policy', () => {
+  // Measured 2026-10-31: CI hosts generate ~120-260k temp files/day, and a
+  // 7d steady state exceeds the ~1M-inode tmpfs ceiling — that is the hz
+  // fleet incident. The installer's conf must pin 1d; a revert ships the
+  // incident again with every test green.
+  const conf = readFileSync(
+    new URL('./qwen-ci-tmp.conf', import.meta.url),
+    'utf8',
+  );
+  assert.match(conf, /^D \/tmp 1777 root root 1d$/m);
+  assert.doesNotMatch(conf, /^D \/tmp 1777 root root 7d$/m);
+});
+
+test('the daily service enforces the /tmp retention itself', () => {
+  // The distro's systemd-tmpfiles-clean.timer can be masked (hardened
+  // images) and reports "static" on stock Ubuntu — unverifiable via
+  // is-enabled — so the retention policy needs an enforcement agent the
+  // qwen stack owns. Dropping the ExecStartPost regrows the 2026-10-31
+  // incident class with every doc and test green.
+  const service = readFileSync(
+    new URL('./qwen-docker-cleanup.service', import.meta.url),
+    'utf8',
+  );
+  assert.match(
+    service,
+    /^ExecStartPost=\/usr\/bin\/systemd-tmpfiles --clean --prefix=\/tmp$/m,
+  );
+});

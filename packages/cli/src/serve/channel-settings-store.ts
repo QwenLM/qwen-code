@@ -16,6 +16,7 @@ import {
   UNSAFE_OBJECT_KEYS,
 } from '../commands/channel/channel-registry.js';
 import {
+  effectiveSessionScope,
   multiSessionCompatibilityError,
   parseMessageRoutingConfig,
   parseSessionRotationConfig,
@@ -137,6 +138,7 @@ function assertSharedField(
   key: string,
   value: unknown,
   previous?: unknown,
+  channelType?: unknown,
 ): boolean {
   if (key === 'messageRoutes' || key === 'defaultMessageRoute') {
     return true;
@@ -206,9 +208,32 @@ function assertSharedField(
       if (UNSAFE_OBJECT_KEYS.has(groupId) || !isRecord(groupConfig)) {
         throw invalidConfig(`Channel field "${key}.${groupId}" is invalid.`);
       }
-      const previousGroup = isRecord(previousGroups[groupId])
+      let previousGroup = isRecord(previousGroups[groupId])
         ? previousGroups[groupId]
-        : {};
+        : undefined;
+      // Only the GitHub and GitLab adapters fold group-key case
+      // (normalizeGroupId); the other platforms treat case-variant keys as
+      // distinct groups, so the fallback must not borrow tolerance across them.
+      const foldsGroupKeyCase =
+        channelType === 'github' || channelType === 'gitlab';
+      if (previousGroup === undefined && foldsGroupKeyCase) {
+        // A repository-only editor normalizes group-key case on save, so the
+        // entry may arrive under a different spelling than it was stored.
+        // Follow it across the case rewrite so the unchanged-value tolerance
+        // below is not lost, mirroring GroupGate's exact-then-normalized
+        // lookup. The exact spelling above always wins.
+        const normalizedId = groupId.toLowerCase();
+        for (const [storedId, storedConfig] of Object.entries(previousGroups)) {
+          if (
+            storedId.toLowerCase() === normalizedId &&
+            isRecord(storedConfig)
+          ) {
+            previousGroup = storedConfig;
+            break;
+          }
+        }
+      }
+      const previousGroupRecord = previousGroup ?? {};
       for (const [nestedKey, nestedValue] of Object.entries(groupConfig)) {
         const known = [
           'requireMention',
@@ -237,8 +262,8 @@ function assertSharedField(
           !valid &&
           !(
             nestedKey !== 'senders' &&
-            Object.hasOwn(previousGroup, nestedKey) &&
-            isDeepStrictEqual(previousGroup[nestedKey], nestedValue) &&
+            Object.hasOwn(previousGroupRecord, nestedKey) &&
+            isDeepStrictEqual(previousGroupRecord[nestedKey], nestedValue) &&
             !containsUnsafeObjectKey(nestedValue)
           )
         ) {
@@ -251,7 +276,7 @@ function assertSharedField(
             `${key}.${groupId}`,
             nestedKey,
             nestedValue,
-            previousGroup,
+            previousGroupRecord,
           );
         }
       }
@@ -353,11 +378,23 @@ function assertDescriptorValue(
     (field.kind === 'number' &&
       typeof value === 'number' &&
       Number.isFinite(value) &&
-      (field.exclusiveMinimum === undefined ||
-        value > field.exclusiveMinimum)) ||
+      (((field.exclusiveMinimum === undefined ||
+        value > field.exclusiveMinimum) &&
+        (field.minimum === undefined || value >= field.minimum) &&
+        (field.maximum === undefined || value <= field.maximum)) ||
+        // A newly declared bound must not strand an unrelated edit: the editor
+        // re-sends the stored number verbatim, and the runtime already tolerates
+        // it (a non-positive poll interval falls back to the default). Only the
+        // range is forgiven — a wrong type is still rejected, unchanged or not.
+        isDeepStrictEqual(previous, value))) ||
     (field.kind === 'enum' &&
       typeof value === 'string' &&
-      field.options?.some((option) => option.value === value) === true) ||
+      (field.options?.some((option) => option.value === value) === true ||
+        // Same forgiveness as the number branch above: a channel that narrows
+        // its own option list must not strand an unrelated edit. The editor
+        // re-sends the stored value verbatim and the runtime already tolerates
+        // it. Only the option set is forgiven — a non-string still fails.
+        isDeepStrictEqual(previous, value))) ||
     (field.kind === 'string-list' &&
       Array.isArray(value) &&
       value.every((item) => typeof item === 'string')) ||
@@ -431,6 +468,7 @@ function assertManagedConfig(
         key,
         value,
         Object.hasOwn(previous, key) ? previous[key] : undefined,
+        config['type'],
       )
     ) {
       continue;
@@ -669,15 +707,14 @@ export class WorkspaceChannelSettingsStore {
         name,
         nextConfig['sessionRotation'],
       ),
-      sessionScope:
-        (nextConfig['sessionScope'] as
-          | 'user'
-          | 'thread'
-          | 'chat_thread'
-          | 'single'
-          | undefined) ??
-        plugin.defaultSessionScope ??
-        'user',
+      // Same resolution the parser uses, so an existing multiSession channel
+      // with no stored scope is not re-scoped to the plugin default and
+      // rejected on every save.
+      sessionScope: effectiveSessionScope(
+        nextConfig,
+        nextConfig['multiSession'] === true,
+        plugin,
+      ),
       groupHistoryLimit: nextConfig['groupHistoryLimit'],
       groups: isRecord(nextConfig['groups']) ? nextConfig['groups'] : {},
       webhooks: nextConfig['webhooks'],

@@ -80,7 +80,7 @@ const expandNowCommand: SlashCommand = {
       '../utils/resumeHistoryUtils.js'
     );
     const updated = expandCollapsedHistory(history);
-    loadHistory(updated);
+    loadHistory(updated, 'expand');
     refreshStatic();
     // No return — the loadHistory/refreshStatic calls handle the UI update
   },

@@ -1,0 +1,240 @@
+import React, { useEffect, useMemo, useState } from 'react';
+import ReactDOM from 'react-dom/client';
+import '../styles/globals.css';
+import '../styles/standalone.css';
+import { I18nProvider, type WebShellLanguage } from '../i18n';
+import {
+  WaitingMinigame,
+  WaitingMinigameButton,
+} from '../components/WaitingMinigame';
+import {
+  buildWaitingActivity,
+  type WaitingActivityDay,
+  type WaitingActivityMessage,
+} from '../utils/waitingActivity';
+import { readWaitingGamesEnabled } from '../utils/waitingGamesConfig';
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+function makeActivity(seed: number): WaitingActivityDay[] {
+  const now = Date.now();
+  const messages: WaitingActivityMessage[] = [];
+  for (let daysAgo = 0; daysAgo < 300; daysAgo++) {
+    if ((daysAgo + seed) % 5 !== 0) continue;
+    const timestamp = now - daysAgo * DAY_MS;
+    messages.push({ id: `harness-user-${daysAgo}`, role: 'user', timestamp });
+    messages.push({
+      id: `harness-assistant-${daysAgo}`,
+      role: 'assistant',
+      timestamp: timestamp + 60_000,
+    });
+  }
+  return buildWaitingActivity(messages, { now });
+}
+
+const TOKENS = {
+  input: 48_200,
+  output: 12_600,
+  cached: 31_400,
+  context: 61_000,
+  contextLimit: 131_072,
+};
+
+function Harness() {
+  const [open, setOpen] = useState(true);
+  const [dark, setDark] = useState(true);
+  const [language, setLanguage] = useState<WebShellLanguage>('en');
+  const [seed, setSeed] = useState(1);
+  const [withTokens, setWithTokens] = useState(true);
+  const [entryDelayMs, setEntryDelayMs] = useState(0);
+  const [gamesEnabled, setGamesEnabled] = useState(() =>
+    readWaitingGamesEnabled(),
+  );
+  const [located, setLocated] = useState('');
+  const [nextGame, setNextGame] = useState<'random' | 'tetris' | 'snake'>(
+    'random',
+  );
+  const activity = useMemo(() => makeActivity(seed), [seed]);
+  const tokenUsage = withTokens ? TOKENS : { input: 0, output: 0, cached: 0 };
+  const toggleTheme = () => setDark((value) => !value);
+
+  // 只在点击游戏入口时替换第一次随机数，保证开局堆和后续逻辑仍是随机的
+  useEffect(() => {
+    if (nextGame === 'random') return;
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (
+        !(target instanceof Element) ||
+        !target.closest('[data-component="waiting-minigame-start"]')
+      ) {
+        return;
+      }
+      const original = Math.random;
+      let used = false;
+      Math.random = () => {
+        if (used) return original();
+        used = true;
+        Math.random = original;
+        return nextGame === 'tetris' ? 0 : 0.999_999;
+      };
+    };
+    document.addEventListener('pointerdown', onPointerDown, true);
+    return () =>
+      document.removeEventListener('pointerdown', onPointerDown, true);
+  }, [nextGame]);
+
+  return (
+    <I18nProvider language={language}>
+      <div
+        style={{
+          minHeight: '100dvh',
+          background: dark ? '#0d0d0d' : '#ffffff',
+          color: dark ? '#fafafa' : '#0a0a0b',
+          fontFamily: 'Inter, sans-serif',
+        }}
+      >
+        <header
+          style={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            alignItems: 'center',
+            gap: 8,
+            padding: '10px 16px',
+            borderBottom: `1px solid ${dark ? '#2a2a2a' : '#e5e7eb'}`,
+            fontSize: 12,
+          }}
+        >
+          <strong>Waiting minigame harness</strong>
+          <button type="button" onClick={toggleTheme}>
+            {dark ? 'Light theme' : 'Dark theme'}
+          </button>
+          <button
+            type="button"
+            onClick={() =>
+              setLanguage((value) => (value === 'en' ? 'zh-CN' : 'en'))
+            }
+          >
+            {language === 'en' ? '中文' : 'English'}
+          </button>
+          <button type="button" onClick={() => setSeed((value) => value + 3)}>
+            Random activity
+          </button>
+          <button
+            type="button"
+            onClick={() => setWithTokens((value) => !value)}
+          >
+            {withTokens ? 'Hide token data' : 'Show token data'}
+          </button>
+          <button
+            type="button"
+            onClick={() =>
+              setEntryDelayMs((value) => (value === 0 ? 5_000 : 0))
+            }
+          >
+            {entryDelayMs === 0 ? 'Game entry: instant' : 'Game entry: 5s'}
+          </button>
+          <button
+            type="button"
+            onClick={() => setGamesEnabled((value) => !value)}
+          >
+            Games: {gamesEnabled ? 'on' : 'off'}
+          </button>
+          <span>Next game:</span>
+          {(['random', 'tetris', 'snake'] as const).map((kind) => (
+            <button
+              key={kind}
+              type="button"
+              aria-pressed={nextGame === kind}
+              onClick={() => setNextGame(kind)}
+            >
+              {kind}
+            </button>
+          ))}
+          <button
+            type="button"
+            onClick={() => {
+              setOpen(false);
+              window.setTimeout(() => setOpen(true), 30);
+            }}
+          >
+            Reopen at activity
+          </button>
+          <span style={{ marginLeft: 'auto', opacity: 0.6 }}>
+            {located || 'Fake task · local preview'}
+          </span>
+        </header>
+        <main
+          data-web-shell-root
+          data-web-shell-shadcn
+          className={dark ? 'dark' : undefined}
+          style={{
+            minHeight: 'calc(100dvh - 43px)',
+            display: 'flex',
+            flexDirection: 'column',
+            justifyContent: 'flex-end',
+            gap: 10,
+            width: 'min(860px, calc(100% - 48px))',
+            margin: '0 auto',
+            padding: '24px 0 28px',
+            background: 'var(--background)',
+            color: 'var(--foreground)',
+          }}
+        >
+          <div style={{ flex: 1 }} />
+          {open && (
+            <WaitingMinigame
+              open={open}
+              onClose={() => setOpen(false)}
+              activity={activity}
+              tokenUsage={tokenUsage}
+              entryDelayMs={entryDelayMs}
+              gamesEnabled={gamesEnabled}
+              onSelectActivity={setLocated}
+            />
+          )}
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              minHeight: 24,
+              color: 'var(--muted-foreground)',
+              fontSize: 14,
+            }}
+          >
+            <span aria-hidden="true">⠋</span>
+            <span>Waiting for a reply</span>
+            <span style={{ fontSize: 13 }}>
+              (12s · ↓ 3 tokens · esc to cancel)
+            </span>
+            <span style={{ marginLeft: 'auto' }}>
+              <WaitingMinigameButton
+                open={open}
+                onToggle={() => setOpen((value) => !value)}
+              />
+            </span>
+          </div>
+          <div
+            style={{
+              height: 132,
+              padding: '14px 16px',
+              border: '1px solid var(--border)',
+              borderRadius: 12,
+              background: 'var(--card)',
+              color: 'var(--muted-foreground)',
+              fontSize: 14,
+            }}
+          >
+            Processing. New messages will be queued.
+          </div>
+        </main>
+      </div>
+    </I18nProvider>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')!).render(
+  <React.StrictMode>
+    <Harness />
+  </React.StrictMode>,
+);

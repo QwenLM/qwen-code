@@ -119,10 +119,13 @@ describe('commitCommand', () => {
     // attributable back to the raw command in the tool's cwd
     // (`findAttributableCommitSegment` in packages/core/src/tools/shell.ts):
     // a backslash-continued command, a `bash -c` wrapper, `git -C` or an
-    // absolute `cd` reaches the executor unrewritten.
+    // absolute `cd` that leaves the cwd reaches the executor unrewritten.
     expect(text).toMatch(/single-line command in the current directory/i);
     expect(text).toMatch(/backslash-continued/i);
     expect(text).toContain('git -C');
+    expect(text).toMatch(
+      /absolute `cd` outside the shell's current directory/i,
+    );
     expect(text).toMatch(/bash -c/);
     // The list must not read as exhaustive-and-sufficient.
     expect(text).not.toMatch(/ALL of these hold/);

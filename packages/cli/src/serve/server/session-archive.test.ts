@@ -37,6 +37,7 @@ import {
   SessionConflictError,
   SessionNotArchivedError,
   SessionNotFoundError,
+  SessionBusyError,
 } from '../acp-session-bridge.js';
 import {
   archiveDaemonSessions,
@@ -495,6 +496,60 @@ describe('archiveDaemonSessions', () => {
     expect(
       fs.existsSync(sessionPath(workspaceDir, sessionId, 'archived')),
     ).toBe(true);
+  });
+
+  it('keeps a busy session active when idle is required', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440102';
+    writeSessionFile(workspaceDir, sessionId, 'active');
+    const service = new SessionService(workspaceDir);
+    const closeSession = vi
+      .fn()
+      .mockRejectedValue(new SessionBusyError(sessionId));
+
+    const result = await archiveDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      bridge: { closeSession },
+      coordinator: new SessionArchiveCoordinator(),
+      requireIdle: true,
+    });
+
+    expect(result.archived).toEqual([]);
+    expect(result.errors).toEqual([
+      { sessionId, error: expect.any(SessionBusyError) },
+    ]);
+    expect(closeSession).toHaveBeenCalledWith(sessionId, undefined, {
+      requireAgentClose: true,
+      requireIdle: true,
+    });
+    expect(fs.existsSync(sessionPath(workspaceDir, sessionId, 'active'))).toBe(
+      true,
+    );
+  });
+
+  it('keeps a closing session active instead of bypassing the idle guard', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440103';
+    writeSessionFile(workspaceDir, sessionId, 'active');
+    const service = new SessionService(workspaceDir);
+    const closingError = new SessionNotFoundError(
+      sessionId,
+      'The session is already closing',
+      'session_closing',
+    );
+
+    const result = await archiveDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      bridge: { closeSession: vi.fn().mockRejectedValue(closingError) },
+      coordinator: new SessionArchiveCoordinator(),
+      requireIdle: true,
+    });
+
+    expect(result.archived).toEqual([]);
+    expect(result.errors).toEqual([{ sessionId, error: closingError }]);
+    expect(fs.existsSync(sessionPath(workspaceDir, sessionId, 'active'))).toBe(
+      true,
+    );
   });
 
   it('archives a sealed Managed session through the sealed-writer fallback', async () => {
@@ -2121,9 +2176,13 @@ describe('deleteDaemonSessions worktree cleanup', () => {
     vi.restoreAllMocks();
   });
 
-  const cleanupBridge = () => ({
+  const cleanupBridge = (liveSessionIds: string[] = []) => ({
     closeSession: vi.fn().mockResolvedValue(undefined),
     deleteSessionAttachments: vi.fn().mockResolvedValue(undefined),
+    getSessionSummary: vi.fn((id: string) => {
+      if (liveSessionIds.includes(id)) return {} as never;
+      throw new SessionNotFoundError(id);
+    }),
   });
 
   function setupWorktreeSession(
@@ -2344,14 +2403,397 @@ describe('deleteDaemonSessions worktree cleanup', () => {
     expect(branchExists(workspaceDir, `worktree-${slug}`)).toBe(false);
   });
 
+  it('cleans a replacement whose checkout went through two resets', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-4466554400a4';
+    const middleId = '550e8400-e29b-41d4-a716-4466554400a5';
+    const firstId = '550e8400-e29b-41d4-a716-4466554400a6';
+    // Two worktree resets, first → middle → this session. Each reset
+    // rewrites only the pair it transfers between, so the first session's
+    // tombstone still names the middle one.
+    const { service, slug, worktreePath } = setupWorktreeSession(sessionId, {
+      sidecarOverrides: { supersedes: middleId },
+    });
+    const own = JSON.parse(
+      fs.readFileSync(service.getWorktreeSessionPath(sessionId), 'utf8'),
+    ) as Record<string, unknown>;
+    delete own['supersedes'];
+    fs.writeFileSync(
+      service.getWorktreeSessionPath(middleId),
+      JSON.stringify({ ...own, supersedes: firstId, supersededBy: sessionId }),
+    );
+    fs.writeFileSync(
+      service.getWorktreeSessionPath(firstId),
+      JSON.stringify({ ...own, supersededBy: middleId }),
+    );
+
+    const result = await deleteDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      bridge: cleanupBridge(),
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(result.removed).toEqual([sessionId]);
+    expect(warnings()).not.toContain('checkout shared with');
+    expect(fs.existsSync(worktreePath)).toBe(false);
+    expect(branchExists(workspaceDir, `worktree-${slug}`)).toBe(false);
+  });
+
+  it.each([
+    { shape: 'three resets', deleteMiddle: false, resets: 3 },
+    { shape: 'a deleted middle session', deleteMiddle: true, resets: 2 },
+  ])(
+    'cleans a replacement next to the tombstones of $shape',
+    async ({ deleteMiddle, resets }) => {
+      // Session ids in reset order; the last one is the current owner.
+      const ids = [
+        '550e8400-e29b-41d4-a716-4466554400a7',
+        '550e8400-e29b-41d4-a716-4466554400a8',
+        '550e8400-e29b-41d4-a716-4466554400a9',
+        '550e8400-e29b-41d4-a716-4466554400aa',
+      ].slice(0, resets + 1);
+      const sessionId = ids[resets];
+      const { service, slug, worktreePath } = setupWorktreeSession(sessionId, {
+        sidecarOverrides: { supersedes: ids[resets - 1] },
+      });
+      const own = JSON.parse(
+        fs.readFileSync(service.getWorktreeSessionPath(sessionId), 'utf8'),
+      ) as Record<string, unknown>;
+      delete own['supersedes'];
+      for (let i = 0; i < resets; i++) {
+        if (deleteMiddle && i === 1) continue;
+        fs.writeFileSync(
+          service.getWorktreeSessionPath(ids[i]),
+          JSON.stringify({
+            ...own,
+            ...(i > 0 ? { supersedes: ids[i - 1] } : {}),
+            supersededBy: ids[i + 1],
+          }),
+        );
+      }
+
+      const result = await deleteDaemonSessions({
+        sessionIds: [sessionId],
+        service,
+        bridge: cleanupBridge(),
+        coordinator: new SessionArchiveCoordinator(),
+      });
+
+      expect(result.removed).toEqual([sessionId]);
+      expect(warnings()).not.toContain('checkout shared with');
+      expect(fs.existsSync(worktreePath)).toBe(false);
+      expect(branchExists(workspaceDir, `worktree-${slug}`)).toBe(false);
+    },
+  );
+
+  // Two resets, first -> middle -> this session: the middle session is the
+  // direct predecessor, the first one an older tombstone.
+  function setupTwoResetChain(
+    ids: { sessionId: string; middleId: string; firstId: string },
+    options: { upperCaseFirst?: boolean } = {},
+  ) {
+    const setup = setupWorktreeSession(ids.sessionId, {
+      sidecarOverrides: { supersedes: ids.middleId },
+    });
+    const own = JSON.parse(
+      fs.readFileSync(
+        setup.service.getWorktreeSessionPath(ids.sessionId),
+        'utf8',
+      ),
+    ) as Record<string, unknown>;
+    delete own['supersedes'];
+    const firstPath = setup.service.getWorktreeSessionPath(ids.firstId);
+    fs.writeFileSync(
+      options.upperCaseFirst
+        ? path.join(
+            path.dirname(firstPath),
+            `${ids.firstId.toUpperCase()}.worktree.json`,
+          )
+        : firstPath,
+      JSON.stringify({ ...own, supersededBy: ids.middleId }),
+    );
+    fs.writeFileSync(
+      setup.service.getWorktreeSessionPath(ids.middleId),
+      JSON.stringify({
+        ...own,
+        supersedes: ids.firstId,
+        supersededBy: ids.sessionId,
+      }),
+    );
+    return setup;
+  }
+
+  type LivenessBridge = {
+    getSessionSummary?: ReturnType<typeof vi.fn>;
+  };
+  it.each<{ answer: string; bridge: (firstId: string) => LivenessBridge }>([
+    {
+      answer: 'reports it',
+      bridge: (firstId) => ({
+        getSessionSummary: vi.fn((id: string) => {
+          if (id === firstId) return {} as never;
+          throw new SessionNotFoundError(id);
+        }),
+      }),
+    },
+    {
+      answer: 'says it is closing',
+      bridge: () => ({
+        getSessionSummary: vi.fn((id: string) => {
+          throw new SessionNotFoundError(
+            id,
+            'The session is already closing',
+            'session_closing',
+          );
+        }),
+      }),
+    },
+    {
+      answer: 'fails unexpectedly',
+      bridge: () => ({
+        getSessionSummary: vi.fn(() => {
+          throw new Error('bridge unavailable');
+        }),
+      }),
+    },
+    {
+      answer: 'cannot be asked',
+      bridge: () => ({ getSessionSummary: undefined }),
+    },
+  ])(
+    'keeps a checkout next to an older tombstone whose session the bridge $answer',
+    async ({ bridge }) => {
+      const ids = {
+        sessionId: '550e8400-e29b-41d4-a716-4466554400ad',
+        middleId: '550e8400-e29b-41d4-a716-4466554400ae',
+        firstId: '550e8400-e29b-41d4-a716-4466554400af',
+      };
+      const { service, worktreePath } = setupTwoResetChain(ids);
+
+      // A reset whose sever did not finish leaves the superseded session
+      // running; only a genuine not-found shows it is gone.
+      const result = await deleteDaemonSessions({
+        sessionIds: [ids.sessionId],
+        service,
+        bridge: { ...cleanupBridge(), ...bridge(ids.firstId) },
+        coordinator: new SessionArchiveCoordinator(),
+      });
+
+      expect(result.removed).toEqual([ids.sessionId]);
+      expect(fs.existsSync(worktreePath)).toBe(true);
+      expect(warnings()).toMatch(/superseded session \S+ is still live/);
+    },
+  );
+
+  it('finds an older tombstone live whatever the case of its sidecar name', async () => {
+    const ids = {
+      sessionId: '550e8400-e29b-41d4-a716-44665544a0d0',
+      middleId: '550e8400-e29b-41d4-a716-44665544a0d1',
+      firstId: '550e8400-e29b-41d4-a716-44665544a0d5',
+    };
+    const { service, worktreePath } = setupTwoResetChain(ids, {
+      upperCaseFirst: true,
+    });
+
+    const result = await deleteDaemonSessions({
+      sessionIds: [ids.sessionId],
+      service,
+      bridge: cleanupBridge([ids.firstId]),
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(result.removed).toEqual([ids.sessionId]);
+    expect(fs.existsSync(worktreePath)).toBe(true);
+    expect(warnings()).toContain('is still live');
+  });
+
+  it('keeps a checkout while its direct predecessor is live behind older tombstones', async () => {
+    const ids = {
+      sessionId: '550e8400-e29b-41d4-a716-44665544a0d6',
+      middleId: '550e8400-e29b-41d4-a716-44665544a0d7',
+      firstId: '550e8400-e29b-41d4-a716-44665544a0d8',
+    };
+    const { service, worktreePath } = setupTwoResetChain(ids);
+
+    // The second reset's sever did not finish: the middle session still
+    // runs, possibly in the checkout.
+    const result = await deleteDaemonSessions({
+      sessionIds: [ids.sessionId],
+      service,
+      bridge: cleanupBridge([ids.middleId]),
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(result.removed).toEqual([ids.sessionId]);
+    expect(fs.existsSync(worktreePath)).toBe(true);
+    expect(warnings()).toContain(
+      `superseded session ${ids.middleId} is still live`,
+    );
+  });
+
+  it('still cleans next to a live direct predecessor after one reset', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-44665544a0d9';
+    const oldId = '550e8400-e29b-41d4-a716-44665544a0da';
+    const { service, slug, worktreePath } = setupWorktreeSession(sessionId, {
+      sidecarOverrides: { supersedes: oldId },
+    });
+    const own = JSON.parse(
+      fs.readFileSync(service.getWorktreeSessionPath(sessionId), 'utf8'),
+    ) as Record<string, unknown>;
+    delete own['supersedes'];
+    fs.writeFileSync(
+      service.getWorktreeSessionPath(oldId),
+      JSON.stringify({ ...own, supersededBy: sessionId }),
+    );
+
+    // The bridge may have reopened the predecessor at the workspace root
+    // (keepalive, ACP load); the one-reset rule discounts it regardless.
+    const result = await deleteDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      bridge: cleanupBridge([oldId]),
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(result.removed).toEqual([sessionId]);
+    expect(warnings()).not.toContain('still live');
+    expect(fs.existsSync(worktreePath)).toBe(false);
+    expect(branchExists(workspaceDir, `worktree-${slug}`)).toBe(false);
+  });
+
+  it.each([
+    { state: 'is still live', live: true },
+    { state: 'is gone', live: false },
+  ])(
+    'judges an archived replacement by an active tombstone that $state',
+    async ({ live }) => {
+      const sessionId = '550e8400-e29b-41d4-a716-44665544a0db';
+      const middleId = '550e8400-e29b-41d4-a716-44665544a0dc';
+      const firstId = '550e8400-e29b-41d4-a716-44665544a0dd';
+      const activeId = '550e8400-e29b-41d4-a716-44665544a0de';
+      const slug = `task-${sessionId.slice(-4)}`;
+      const worktreePath = gitAddWorktree(workspaceDir, slug);
+      writeSessionFile(workspaceDir, sessionId, 'archived');
+      const service = new SessionService(workspaceDir);
+      const base = {
+        slug,
+        worktreePath,
+        worktreeBranch: `worktree-${slug}`,
+        originalCwd: workspaceDir,
+        workspaceCwd: workspaceDir,
+        originalBranch: 'main',
+        originalHeadCommit: 'abc123',
+      };
+      const archived = (id: string) =>
+        service.getWorktreeSessionPathForArchiveState(id, 'archived');
+      fs.mkdirSync(path.dirname(archived(sessionId)), { recursive: true });
+      // Three resets: active -> first -> middle -> this session. All but
+      // the first session are archived along with this one; the first one
+      // still runs where its reset's sever did not finish.
+      fs.writeFileSync(
+        archived(sessionId),
+        JSON.stringify({ ...base, supersedes: middleId }),
+      );
+      fs.writeFileSync(
+        archived(middleId),
+        JSON.stringify({
+          ...base,
+          supersedes: firstId,
+          supersededBy: sessionId,
+        }),
+      );
+      fs.writeFileSync(
+        archived(firstId),
+        JSON.stringify({
+          ...base,
+          supersedes: activeId,
+          supersededBy: middleId,
+        }),
+      );
+      fs.writeFileSync(
+        service.getWorktreeSessionPath(activeId),
+        JSON.stringify({ ...base, supersededBy: firstId }),
+      );
+      writeWorktreeMarker(worktreePath, sessionId);
+
+      const result = await deleteDaemonSessions({
+        sessionIds: [sessionId],
+        service,
+        bridge: cleanupBridge(live ? [activeId] : []),
+        coordinator: new SessionArchiveCoordinator(),
+      });
+
+      expect(result.removed).toEqual([sessionId]);
+      expect(fs.existsSync(worktreePath)).toBe(live);
+      if (live) {
+        expect(warnings()).toContain(
+          `session ${activeId} naming the checkout is still live`,
+        );
+      }
+    },
+  );
+
+  it('keeps a checkout a session shares next to a tombstone', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-44665544a0d2';
+    const oldId = '550e8400-e29b-41d4-a716-44665544a0d3';
+    const sharerId = '550e8400-e29b-41d4-a716-44665544a0d4';
+    const { service, worktreePath } = setupWorktreeSession(sessionId, {
+      sidecarOverrides: { supersedes: oldId },
+    });
+    const own = JSON.parse(
+      fs.readFileSync(service.getWorktreeSessionPath(sessionId), 'utf8'),
+    ) as Record<string, unknown>;
+    delete own['supersedes'];
+    // Discounting the tombstone must not end the scan: the other sibling
+    // names the checkout without `supersededBy`.
+    fs.writeFileSync(
+      service.getWorktreeSessionPath(oldId),
+      JSON.stringify({ ...own, supersededBy: sessionId }),
+    );
+    fs.writeFileSync(
+      service.getWorktreeSessionPath(sharerId),
+      JSON.stringify(own),
+    );
+
+    const result = await deleteDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      bridge: cleanupBridge(),
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(result.removed).toEqual([sessionId]);
+    expect(fs.existsSync(worktreePath)).toBe(true);
+    expect(warnings()).toContain('checkout shared with');
+  });
+
+  it('keeps a checkout next to an unreadable sibling sidecar', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-4466554400ab';
+    const otherId = '550e8400-e29b-41d4-a716-4466554400ac';
+    const { service, worktreePath } = setupWorktreeSession(sessionId);
+    // A sibling that cannot be read might name the same checkout.
+    fs.writeFileSync(service.getWorktreeSessionPath(otherId), '{"slug":');
+
+    const result = await deleteDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      bridge: cleanupBridge(),
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(result.removed).toEqual([sessionId]);
+    expect(fs.existsSync(worktreePath)).toBe(true);
+    expect(warnings()).toContain('unreadable sibling sidecar');
+  });
+
   it('keeps a replacement whose checkout a live third session names', async () => {
     const sessionId = '550e8400-e29b-41d4-a716-4466554400a2';
     const otherId = '550e8400-e29b-41d4-a716-4466554400a3';
     const { service, worktreePath } = setupWorktreeSession(sessionId, {
       sidecarOverrides: { supersedes: 'some-predecessor' },
     });
-    // A sibling naming the same checkout without being this session's
-    // superseded predecessor is genuine sharing, not a tombstone.
+    // A sibling naming the same checkout without carrying `supersededBy`
+    // is genuine sharing, not a tombstone.
     fs.copyFileSync(
       service.getWorktreeSessionPath(sessionId),
       service.getWorktreeSessionPath(otherId),

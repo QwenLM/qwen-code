@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { parseAuthProviderInstallRequest } from './auth-provider-helpers.js';
+import {
+  buildAuthProviderCatalog,
+  parseAuthProviderInstallRequest,
+} from './auth-provider-helpers.js';
 
 const request = {
   providerId: 'custom-openai-compatible',
@@ -93,4 +96,44 @@ describe('advanced form replacement', () => {
       });
     },
   );
+});
+
+describe('buildAuthProviderCatalog', () => {
+  it('lists QwenCloud first and pins every group membership', () => {
+    const catalog = buildAuthProviderCatalog('/tmp/workspace');
+    expect(catalog.workspaceCwd).toBe('/tmp/workspace');
+    expect(catalog.groups[0]).toMatchObject({
+      id: 'qwencloud',
+      label: 'QwenCloud',
+      providerIds: ['qwencloud-token-plan', 'qwencloud-standard'],
+    });
+    expect(catalog.groups.map((group) => group.id)).toEqual([
+      'qwencloud',
+      'alibaba',
+      'third-party',
+      'custom',
+    ]);
+    expect(catalog.groups[1]).toMatchObject({
+      id: 'alibaba',
+      providerIds: ['coding-plan', 'token-plan', 'alibabaStandard'],
+    });
+    expect(catalog.groups[2]).toMatchObject({
+      id: 'third-party',
+      providerIds: [
+        'deepseek',
+        'grok',
+        'minimax',
+        'zai',
+        'moonshot',
+        'idealab',
+        'modelscope',
+        'openrouter',
+        'requesty',
+      ],
+    });
+    expect(catalog.groups[3]).toMatchObject({
+      id: 'custom',
+      providerIds: ['custom-openai-compatible'],
+    });
+  });
 });

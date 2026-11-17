@@ -152,6 +152,47 @@ it('authenticates MCP controls, executes tools through the ordinary ledger and h
     contextRevision: '1',
   };
   const contextDigest = computeManagedContextDigest(binding);
+  const inventoryPath = `${MANAGED_MCP_ROUTE}/definitions`;
+  const inventory = await post(inventoryPath, {
+    protocolVersion: 1,
+    tenantId: key.tenantId,
+    workspaceId: key.workspaceId,
+  });
+  expect(inventory.status).toBe(200);
+  expect(await inventory.json()).toEqual({
+    protocolVersion: 1,
+    servers: [
+      {
+        serverId: 'fixture',
+        serverRevision: 1,
+        definitionDigest: 'a'.repeat(64),
+        transport: 'streamable-http',
+      },
+    ],
+  });
+  expect(effects).toBe(0);
+  expect(
+    (
+      await post(inventoryPath, {
+        protocolVersion: 1,
+        tenantId: 'foreign',
+        workspaceId: key.workspaceId,
+      })
+    ).status,
+  ).toBe(409);
+  const unauthenticated = await fetch(
+    new URL(inventoryPath, worker.ready.url),
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        protocolVersion: 1,
+        tenantId: key.tenantId,
+        workspaceId: key.workspaceId,
+      }),
+    },
+  );
+  expect(unauthenticated.status).toBe(401);
   const context = await post('/internal/managed-runtime/v3/context', {
     protocolVersion: 3,
     managedContext: 'managed-context/1',

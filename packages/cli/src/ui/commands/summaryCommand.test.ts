@@ -12,6 +12,8 @@ import { summaryCommand } from './summaryCommand.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import type { CommandContext } from './types.js';
 import { runSideQuery } from '@qwen-code/qwen-code-core';
+import type { Content } from '@google/genai';
+import { getAutoMemorySnapshot } from '@qwen-code/qwen-code-core/memory/request-context.js';
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actual =
@@ -101,6 +103,51 @@ describe('summaryCommand custom export path', () => {
       expect(stat.mode & 0o777).toBe(0o700);
     }
   });
+
+  it.each(['CURRENT_CATALOG', ''])(
+    'projects retained snapshots before appending the current catalog %j',
+    async (catalog) => {
+      const context = makeContext(projectRoot);
+      const config = context.services.config!;
+      const history: Content[] = [
+        {
+          role: 'user',
+          parts: [
+            { text: 'real prompt' },
+            getAutoMemorySnapshot([], 'OLD_CATALOG')!,
+          ],
+        },
+        { role: 'model', parts: [{ text: 'answer' }] },
+        {
+          role: 'user',
+          parts: [getAutoMemorySnapshot([], 'CURRENT_CATALOG')!],
+        },
+      ];
+      const original = structuredClone(history);
+      vi.spyOn(
+        config.getLlmClient().getChat(),
+        'getHistoryShallow',
+      ).mockReturnValue(history);
+      vi.spyOn(config, 'getAutoMemoryContext').mockReturnValue(catalog);
+      await summaryCommand.action?.(context, '');
+      expect(runSideQuery).toHaveBeenCalledOnce();
+      const contents = vi.mocked(runSideQuery).mock.calls[0][1].contents;
+      const texts = contents.flatMap(
+        (entry) => entry.parts?.map((part) => part.text) ?? [],
+      );
+      expect(texts).toContain('real prompt');
+      expect(texts.filter((text) => text === 'CURRENT_CATALOG')).toHaveLength(
+        catalog ? 1 : 0,
+      );
+      expect(JSON.stringify(contents)).not.toContain('OLD_CATALOG');
+      expect(JSON.stringify(contents)).not.toContain(
+        'qwen-code:memory-catalog-snapshot',
+      );
+      if (!catalog)
+        expect(JSON.stringify(contents)).not.toContain('CURRENT_CATALOG');
+      expect(history).toEqual(original);
+    },
+  );
 
   it('appends the memory catalog after the summary prompt', async () => {
     const context = makeContext(projectRoot);

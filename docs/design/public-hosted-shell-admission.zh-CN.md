@@ -40,7 +40,7 @@ AgentDefinition identity 与 `suppressChildAgents`。
 
 PR #13674 同时用保留的 `hosted-workspace-team-lead/1` profile 和可信 Java 空创建
 入口，区分已有内部 TeamLead 环境。公开创建与 AgentDefinition 不能选择这个身份，
-幂等重放也不能跨越该边界。上述公开 Shell 规则仍只适用于 Shell/1 和 /2。
+幂等重放也不能跨越该边界。上述公开 Shell 规则仍只适用于统一后的 Shell/1。
 在可信创建的内部 Session 上，按权限提交输入、回答 Actions 和 protocol-0 关闭
 保留内部策略；开放公开前台 Shell 不会开放团队工具。持久化边界与待完成的
 Linux/MySQL 进程验收见[内部准入设计](2026-10-11-internal-team-lead-admission.zh-CN.md)。
@@ -66,8 +66,7 @@ files、actor、路径及 context revision 准入；Shell 开关不代表整个 
 
 返回缓存 attachment 或发出 create/load/recovery 请求前，Connector 检查持久化
 Shell profile 的审批模式为 `default` 或 `auto-edit`。无效模式不得静默成为 YOLO。
-Harness 确认值仍须匹配存储值。已有 files 的 YOLO 行为不变。助手同时识别既有
-Shell /2 记录，但公开创建只生成 /1。
+Harness 确认值仍须匹配存储值。已有 files 的 YOLO 行为不变。尚未上线的 Shell /2 标识已移除；公开创建仅生成统一后的 /1。
 
 恢复复用当前 G3：普通 owner 重新 attachment 保持 requested 审批，持久化
 allow/deny 继续有效。恢复可在 `model_start` 或 `shell_in_flight` 按既有原因拒绝；
@@ -87,13 +86,7 @@ Session 的 creator-keyed 执行事实仍成立。关闭 Shell 准入时它仍�
 形状可执行的调用者发起，与新创建授权分开。其独立缓存 attachment 路径执行同一
 持久化 Shell 审批校验。旧客户端由事务内门禁保护。
 
-Shell 的 close、archive、unarchive、delete 能力均为 false。新的公开生命周期请求，
-包括 protocol-0 关闭，在创建 operation 或 command 前拒绝，包含人工构造的
-CLOSED/ARCHIVED Shell 记录。内部 child 关闭走 8 参 `beginWorkspaceLifecycle`，
-不受这道 Shell 拒绝约束。公开 Shell 父会话仍然不能关闭。既有命令重放保留原结果。
-非 Shell 生命周期声明与 L2 行为不变，不据此证明
-files/2 的 L3 支持。Turn 取消与 Session 生命周期分开，保留其授权、attachment 和
-恢复守卫。
+统一后的 Shell profile 使用现有生命周期 v2，默认声明该能力。显式设置 `QWEN_HOSTED_LIFECYCLE_V2_PROFILES` 会替换完整列表；空值禁用 v2。公开关闭和活跃会话删除还要求原 Worker 可靠停止支持、Session owner 和当前可读权限。关闭完成后才能归档/取消归档，取消归档恢复为 CLOSED。存在前台工作或未决审批时返回 `turn_active`：取消原 Turn 并等待实际结算后再次请求关闭。后台 Shell、Monitor 和子会话复用现有排空与级联。执行、输出或停止证明缺失时保持恢复阻塞。Turn 取消与 Session 生命周期继续保留各自的授权及恢复守卫，详见[当前生命周期设计](2026-10-23-managed-shell-lifecycle.zh-CN.md)。
 
 ## 分层改动
 

@@ -12,6 +12,8 @@ import {
   classifyRetryError,
   isFallbackEligible,
   isRetryableUpstreamError,
+  RETRY_DIAGNOSTIC_REASONS,
+  toRetryDiagnostics,
   type RetryErrorClassificationContext,
   type RetryErrorDiagnosis,
 } from './retryErrorClassification.js';
@@ -79,6 +81,12 @@ const NETWORK_400 = {
   diagnosis: 'retryable',
   statusCode: 400,
   reason: 'network-error',
+};
+const EMPTY_BODY_400 = {
+  kind: 'http',
+  diagnosis: 'retryable',
+  statusCode: 400,
+  reason: 'empty-body-4xx',
 };
 const TRANSPORT_RESET = {
   kind: 'transport',
@@ -318,6 +326,96 @@ describe('classifyRetryError', () => {
     );
     expectVerdict(err, NETWORK_400);
     expect(classifyRetryError(err).transportCode).toBeUndefined();
+  });
+
+  it('classifies a 400 with an empty provider body as retryable', () => {
+    // "400 status code (no body)": the upstream answered a well-formed request
+    // with a 4xx whose body the client could not read, so there is no provider
+    // error body. The SDK surfaces this marker on the error itself, and it is
+    // transient/spurious — re-sending the identical request succeeds on the
+    // next try — so classify it retryable for the bounded auto-retry ladder.
+    const err = Object.assign(new Error('400 status code (no body)'), {
+      status: 400,
+    });
+    expectVerdict(err, EMPTY_BODY_400);
+    expect(classifyRetryError(err).reason).toBe('empty-body-4xx');
+    expect(classifyRetryError(err).transportCode).toBeUndefined();
+  });
+
+  it('classifies a 400 empty-body marker found in a nested cause as retryable', () => {
+    // A gateway 4xx can wrap the SDK's "no body" marker one level down in its
+    // cause chain; the detector walks the same depth as the network-error
+    // detection, so a nested marker still classifies as retryable.
+    const err = Object.assign(new Error('request failed'), {
+      status: 400,
+      cause: new Error('400 status code (no body)'),
+    });
+    expectVerdict(err, EMPTY_BODY_400);
+    expect(classifyRetryError(err).reason).toBe('empty-body-4xx');
+  });
+
+  it('classifies an SDK-shaped bodyless 400 with a stamped request id as retryable', () => {
+    // The OpenAI SDK stamps `x-request-id` onto bodyless errors, which sets
+    // `providerMessage` to the marker text itself rather than a real provider
+    // body. Such an error must still retry (the gateway re-sent a well-formed
+    // request into an empty body); a genuine provider code keeps it fail-fast.
+    const withRequestId = Object.assign(
+      new Error('400 status code (no body)'),
+      {
+        status: 400,
+        requestID: 'req-stamped',
+      },
+    );
+    expectVerdict(withRequestId, EMPTY_BODY_400);
+    expect(classifyRetryError(withRequestId).reason).toBe('empty-body-4xx');
+
+    const withRequestIdAndCode = {
+      status: 400,
+      code: 'invalid_request_error',
+      requestID: 'req-stamped',
+      message: 'bad request (no body)',
+    };
+    expectVerdict(withRequestIdAndCode, {
+      kind: 'http',
+      diagnosis: 'fail-fast',
+      reason: 'client-error',
+      statusCode: 400,
+    });
+  });
+
+  it('keeps a 4xx with provider fields retryable-free even if it carries the no-body marker', () => {
+    // A genuine client error carries provider fields; the empty-body marker is
+    // only diagnostic when there is no provider code/type/message.
+    const body = {
+      status: 400,
+      code: 'invalid_request_error',
+      message: 'bad request (no body)',
+    };
+    expectVerdict(body, CLIENT_400);
+  });
+
+  it('keeps a bare-400 empty-body message fail-fast without the marker', () => {
+    // Only the "status code (no body)" marker qualifies; a bare 400 with an
+    // unrelated empty message must not trigger bounded retries.
+    expectVerdict(
+      Object.assign(new Error('empty response for request body'), {
+        status: 400,
+      }),
+      CLIENT_400,
+    );
+  });
+
+  it('does not retry a 400 empty-body marker carried as a provider error body', () => {
+    // If the marker appears in a provider-level `error.message` of a genuine
+    // client error, the provider fields make it fail-fast, not retryable.
+    const body = {
+      status: 400,
+      error: {
+        type: 'invalid_request_error',
+        message: '400 status code (no body)',
+      },
+    };
+    expectVerdict(body, CLIENT_400);
   });
 
   it('marks auth errors as fail-fast', () => {
@@ -907,5 +1005,110 @@ describe('isFallbackEligible', () => {
     expect(classification).toMatchObject({ kind: 'provider', ...UPSTREAM });
     expect(classification.statusCode).toBeUndefined();
     expect(isFallbackEligible(classification)).toBe(false);
+  });
+});
+
+describe('toRetryDiagnostics', () => {
+  it('keeps only the allowlisted scalar fields', () => {
+    expect(
+      toRetryDiagnostics({
+        kind: 'http',
+        diagnosis: 'retryable',
+        reason: 'server-error',
+        statusCode: 503,
+        providerCode: 'arbitrary-upstream-code',
+        providerMessage: 'provider text with user content',
+        requestId: 'req-123',
+      }),
+    ).toEqual({
+      kind: 'http',
+      reason: 'server-error',
+      statusCode: 503,
+    });
+  });
+
+  it('omits optional fields instead of printing undefined', () => {
+    expect(
+      toRetryDiagnostics({
+        kind: 'transport',
+        diagnosis: 'retryable',
+        reason: 'transport-error',
+      }),
+    ).toEqual({ kind: 'transport', reason: 'transport-error' });
+  });
+
+  it('carries a vetted transport code and status code when present', () => {
+    expect(
+      toRetryDiagnostics(
+        classifyRetryError(
+          Object.assign(new TypeError('terminated'), {
+            cause: Object.assign(new Error('other side closed'), {
+              code: 'UND_ERR_SOCKET',
+            }),
+          }),
+        ),
+      ),
+    ).toEqual({
+      kind: 'transport',
+      reason: 'transport-error',
+      transportCode: 'UND_ERR_SOCKET',
+    });
+  });
+
+  it('degrades an interpolated or provider-controlled reason to unclassified', () => {
+    const maliciousReason = 'transport-error\nFAKE_UPSTREAM_TOKEN=sentinel';
+    expect(RETRY_DIAGNOSTIC_REASONS.has(maliciousReason)).toBe(false);
+    const result = toRetryDiagnostics({
+      kind: 'transport',
+      diagnosis: 'retryable',
+      reason: maliciousReason,
+    });
+    expect(result.reason).toBe('unclassified');
+    expect(JSON.stringify(result)).not.toContain('FAKE_UPSTREAM_TOKEN');
+  });
+
+  it('drops an unvetted transportCode instead of printing it', () => {
+    const result = toRetryDiagnostics({
+      kind: 'transport',
+      diagnosis: 'retryable',
+      reason: 'transport-error',
+      transportCode: 'ECONNRESET\nFAKE_UPSTREAM_TOKEN=sentinel',
+    });
+    expect(result.transportCode).toBeUndefined();
+    expect(JSON.stringify(result)).not.toContain('FAKE_UPSTREAM_TOKEN');
+  });
+
+  it('drops status codes that are not real HTTP statuses', () => {
+    for (const statusCode of [0, 42, 99, 999, 12.5, Number.NaN]) {
+      const result = toRetryDiagnostics({
+        kind: 'http',
+        diagnosis: 'retryable',
+        reason: 'http-status',
+        statusCode,
+      });
+      expect(result.statusCode).toBeUndefined();
+    }
+  });
+
+  it('degrades an unrecognized kind without leaking it', () => {
+    expect(
+      toRetryDiagnostics({
+        kind: 'FAKE_UPSTREAM_KIND' as never,
+        diagnosis: 'retryable',
+        reason: 'transport-error',
+      }).kind,
+    ).toBe('unknown');
+  });
+
+  it('carries the registered empty-body-4xx reason through diagnostics', () => {
+    expect(RETRY_DIAGNOSTIC_REASONS.has('empty-body-4xx')).toBe(true);
+    expect(
+      toRetryDiagnostics({
+        kind: 'http',
+        diagnosis: 'retryable',
+        reason: 'empty-body-4xx',
+        statusCode: 400,
+      }).reason,
+    ).toBe('empty-body-4xx');
   });
 });

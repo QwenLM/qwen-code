@@ -1,18 +1,18 @@
-# Local launch templates for `qwen serve` (v0.16-alpha)
+# Local launch templates for `qwen serve`
 
-Reference templates for running `qwen serve` as a long-lived background process on a developer workstation. Pairs with the [v0.16-alpha known limits](./qwen-serve.md#v016-alpha-known-limits) — local-only, single-user, BYO bearer token. Containerized / multi-host / TLS-fronted deployments defer to v0.16.x.
+Reference templates for running `qwen serve` as a long-lived background process on a developer workstation. For ordinary local background use, start with the built-in `qwen daemon start` lifecycle commands in the [main guide](./qwen-serve.md#inspect-and-control-a-local-daemon). Use these templates when you need service-manager supervision, startup after reboot, or a custom logging setup. Review the [deployment and security notes](./qwen-serve.md#deployment-and-security-notes) before exposing the listener beyond loopback.
 
-> **Audience**: dogfooding developers who want the daemon up across reboots, with logs going somewhere durable, and a clean `restart-on-failure` story. If you only need the daemon for the duration of a single shell session, plain `qwen serve` (foreground, Ctrl-C to stop) is fine.
+> **Audience**: developers who want the daemon up across reboots, with logs going somewhere durable, and a clean `restart-on-failure` story. If you only need the daemon for the duration of a single shell session, plain `qwen serve` (foreground, Ctrl-C to stop) is fine; if you only need a detached local process, `qwen daemon start` is simpler.
 
 ## Generate a bearer token (once)
 
 ```bash
-openssl rand -hex 32 > ~/.qwen-serve-token  # user-managed, NOT a built-in path
+openssl rand -hex 32 > ~/.qwen-serve-token  # example user-managed path
 chmod 600 ~/.qwen-serve-token
 export QWEN_SERVER_TOKEN="$(cat ~/.qwen-serve-token)"
 ```
 
-The path / filename is yours to choose; v0.16-alpha does not auto-generate or auto-locate a token file (deferred to v0.16.x). See the [Authentication](./qwen-serve.md#authentication) section of the user guide for the canonical BYO setup.
+The path and filename above are examples for these service-manager templates, not a built-in location that Qwen Code discovers automatically. Daemons started through `qwen daemon start` can instead opt into the built-in `--save-token` sidecar and `qwen daemon token` command; see [Inspect and control a local daemon](./qwen-serve.md#inspect-and-control-a-local-daemon). The systemd and launchd templates below still pass the token explicitly because they invoke `qwen serve` directly. See [Authentication](./qwen-serve.md#authentication) for the token-selection rules.
 
 > **Scope this `export` to the current shell session only.** Don't add it to `~/.bashrc` / `~/.zshrc` — a profile-level export exposes the bearer token to every process spawned from that shell (IDE subprocesses, browser debuggers, `npm` scripts from unrelated projects). For long-running setups, use the systemd `EnvironmentFile=` / launchd `EnvironmentVariables` mechanisms below — both scope the token to just the daemon process.
 
@@ -254,13 +254,12 @@ Service-manager restart semantics differ across the templates:
 
 Within a **single daemon process lifetime**, client disconnects recover via SSE `Last-Event-ID` resume per the [Durability model](./qwen-serve.md#durability-model) section of the user guide — the replay ring is in-memory.
 
-A daemon **restart** drops all in-memory sessions; clients reconnect and start fresh. Cross-restart durability of session content (prompts, tool calls, conversation history) is **NOT** in v0.16-alpha.
+A daemon **restart** interrupts every in-flight live session and clears the in-memory replay ring. Persisted session content remains on disk and can be loaded against the new daemon process, subject to the same workspace binding rules. See [Loading and resuming a persisted session](./qwen-serve.md#loading-and-resuming-a-persisted-session) for the available recovery routes.
 
-## Out of scope (defers to v0.16.x or later)
+## Scope and related deployment guidance
 
-- **Containerized deployment** — Dockerfile, docker-compose, Kubernetes manifests, nginx + TLS reverse proxy, multi-instance token isolation. Defers to v0.16.x once an enterprise pilot is committed; the doc would otherwise rot from no-one-validating.
-- **Cross-host federation / multi-daemon coordination on one host** — one daemon can host multiple registered workspace runtimes, but daemons do not coordinate. Instance-path token keying + stale-token cleanup defer to v0.16.x.
-- **General daemon token storage** — Local Control uses revocable daemon-owned pairing tokens, but long-lived runtime token storage remains BYO-token. Persistent token-store infrastructure defers to v0.16.x.
+- **Containers and reverse proxies** — this page only provides local service-manager templates. For listener, browser-origin, and certificate requirements, see [Remote Web Shell and phone access](./qwen-serve.md#remote-web-shell-and-phone-access) and [HTTPS / TLS](./qwen-serve.md#https--tls-for-mobile--cross-device-access). Multi-tenant deployments require an external orchestrator with separate daemons for independent security principals.
+- **Cross-host federation / multi-daemon coordination** — one daemon can host multiple registered workspace runtimes, but daemons do not coordinate session state with each other.
 - **Windows native service** (`nssm`, Service Control Manager wrapper) — for now use [WSL2](https://learn.microsoft.com/en-us/windows/wsl/) and follow the systemd section above.
 
-See the [v0.16-alpha known limits](./qwen-serve.md#v016-alpha-known-limits) callout in the main user guide for the full deferred-features list, and [#4175](https://github.com/QwenLM/qwen-code/issues/4175) for the v0.16-alpha rollout tracking issue.
+See the [deployment and security notes](./qwen-serve.md#deployment-and-security-notes) and [Authentication](./qwen-serve.md#authentication) in the main user guide for the current security model and token options.

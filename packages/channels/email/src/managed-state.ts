@@ -10,9 +10,16 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
+import {
+  MANAGED_OUTBOUND_LIMIT,
+  validManagedReceipt,
+} from '@qwen-code/channel-base';
+import type { ManagedReceipt } from '@qwen-code/channel-base';
 import type { EmailSettings } from './config.js';
 import { EmailStateStore, isMessageId, validState } from './state.js';
 import type { ReplyRoute } from './state.js';
+
+export type { ManagedReceipt };
 
 // H5b/H5c: the managed email adapter's own locked state. It keeps what the
 // Legacy state keeps for the same reasons — the mailbox generation, the
@@ -25,17 +32,13 @@ export interface ManagedPendingEvent {
   uid: number;
   eventId: string;
   inputId?: string;
+  /**
+   * Set while the instance-scoped stall holds this claim: the stall
+   * flag is in-memory, so the marker is what re-arms it after a
+   * restart, and the claim itself never drops while it is set.
+   */
+  held?: boolean;
 }
-
-/** The outcome one segment's send proved, persisted before its receipt. */
-export type ManagedReceipt =
-  | {
-      outcome: 'accepted';
-      ordinal: number;
-      providerMessageId: string;
-      acceptedAt: number;
-    }
-  | { outcome: 'unknown' | 'rejected' };
 
 export interface ManagedOutboundSegment {
   deliveryId: string;
@@ -54,6 +57,20 @@ export interface ManagedEmailState {
   uidValidity: string;
   generation: number;
   lastUid: number;
+  /**
+   * Consecutive instance-scoped refusal verdicts. Every determinant of
+   * each comes from the channel instance row, not the message, so a
+   * streak indicts the instance's workspace binding, not the mail: the
+   * first still drops as the poison message it may be (R3-1), and past
+   * the limit the claim is held and the poll stalls instead of
+   * destroying every inbound message behind one routine log line
+   * (R5-1). Persisted so a restart resumes the episode instead of
+   * paying the first-occurrence sacrifice again (R10-1): only the held
+   * claim's own fresh admission proves the binding answers again and
+   * resets it, and a mailbox epoch change clears it with the rest of
+   * the old generation's claims.
+   */
+  instanceRefusals?: number;
   pending: ManagedPendingEvent[];
   outbound: ManagedOutboundSegment[];
   recent: string[];
@@ -66,24 +83,6 @@ const isUid = (value: unknown): value is number =>
   Number.isSafeInteger(value) &&
   Number(value) > 0 &&
   Number(value) <= 0xffffffff;
-
-function validManagedReceipt(value: unknown): boolean {
-  if (value === undefined) return true;
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  const receipt = value as Partial<ManagedReceipt>;
-  if (receipt.outcome === 'unknown' || receipt.outcome === 'rejected')
-    return Object.keys(receipt).length === 1;
-  return (
-    receipt.outcome === 'accepted' &&
-    Number.isSafeInteger(receipt.ordinal) &&
-    (receipt.ordinal as number) >= 0 &&
-    typeof receipt.providerMessageId === 'string' &&
-    receipt.providerMessageId.length > 0 &&
-    receipt.providerMessageId.length <= 512 &&
-    Number.isSafeInteger(receipt.acceptedAt) &&
-    (receipt.acceptedAt as number) >= 0
-  );
-}
 
 export function validManagedState(value: unknown): value is ManagedEmailState {
   if (!value || typeof value !== 'object') return false;
@@ -103,6 +102,9 @@ export function validManagedState(value: unknown): value is ManagedEmailState {
     state.version === 1 &&
     Number.isSafeInteger(state.generation) &&
     state.generation >= 1 &&
+    (state.instanceRefusals === undefined ||
+      (Number.isSafeInteger(state.instanceRefusals) &&
+        state.instanceRefusals >= 0)) &&
     validState(legacyShape) &&
     Array.isArray(state.pending) &&
     state.pending.length <= MANAGED_PENDING_LIMIT &&
@@ -116,7 +118,7 @@ export function validManagedState(value: unknown): value is ManagedEmailState {
         (entry.inputId === undefined || typeof entry.inputId === 'string'),
     ) &&
     Array.isArray(state.outbound) &&
-    state.outbound.length <= 64 &&
+    state.outbound.length <= MANAGED_OUTBOUND_LIMIT &&
     state.outbound.every(
       (entry) =>
         entry &&

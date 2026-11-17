@@ -6,7 +6,7 @@ Run the packaged CLI, real worker, Runtime Broker, Spring store and maintenance 
 
 ```sh
 mvn --batch-mode --no-transfer-progress \
-  -f packages/sdk-java/managed-agent-server/pom.xml \
+  -f packages/managed-agent-server/pom.xml \
   '-Dtest=HostedWorkspaceToolTurnIT#operatorRecoveryReleasesOnlyTheOriginalQuiescentShellOnMySql' \
   -Dnode.executable="$(command -v node)" \
   -Dqwen.cli.entry="$PWD/dist/cli.js" \

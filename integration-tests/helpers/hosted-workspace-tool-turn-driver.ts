@@ -17,6 +17,7 @@ import {
 } from '../fake-openai-server.js';
 import { HostedHarnessProcess, waitUntil } from './hosted-harness-process.js';
 import { relayUpstream } from './hosted-relay-headers.js';
+import { quotePosix } from './hosted-shell-quote.js';
 
 const config = JSON.parse(await readFile(process.argv[2], 'utf8')) as {
   tenantId: string;
@@ -244,31 +245,40 @@ const modelReply: FakeOpenAIHandler = ({ body }) => {
   // the lead's team tools with them, since H4e-b3a their shutdown
   // request, and since #13803 (K4) the Workflow tool — its own kind
   // reader gates the advertisement, so a child Session still hides it.
-  assert.deepEqual(tools.map((tool) => tool.function.name).sort(), [
-    ...(shellProfile ? ['agent'] : []),
-    'edit',
-    ...(shellProfile ? ['monitor'] : []),
-    'read_file',
-    ...(shellProfile
-      ? [
-          'request_shutdown',
-          'run_shell_command',
-          'send_message',
-          'task_create',
-          'task_list',
-          'task_update',
-          'team_create',
-          'team_delete',
-          'workflow',
-        ]
-      : []),
-    'write_file',
-  ]);
+  assert.deepEqual(
+    tools.map((tool) => tool.function.name).sort(),
+    [
+      ...(shellProfile ? ['agent'] : []),
+      'ask_user_question',
+      'edit',
+      'glob',
+      'read_file',
+      ...(shellProfile
+        ? [
+            'request_shutdown',
+            'run_shell_command',
+            'send_message',
+            'task_create',
+            'task_list',
+            'task_update',
+            'team_create',
+            'team_delete',
+            'todo_write',
+            'workflow',
+          ]
+        : []),
+      'web_fetch',
+      'write_file',
+    ].sort(),
+  );
   const messages = body['messages'] as Array<{
     role: string;
     content: unknown;
     tool_call_id?: string;
-    tool_calls?: Array<{ id: string }>;
+    tool_calls?: Array<{
+      id: string;
+      function: { name: string; arguments: string };
+    }>;
   }>;
   const lastPrompt = messages.findLastIndex(
     (message) =>
@@ -294,14 +304,12 @@ const modelReply: FakeOpenAIHandler = ({ body }) => {
         : current === 'SHELL_CANCEL'
           ? "require('fs').appendFileSync('shell-once.txt','x'); setInterval(()=>process.stdout.write('running\\n'),20);"
           : "require('fs').appendFileSync('shell-once.txt','x'); (async()=>{await new Promise(r=>process.stdout.write(process.cwd()+'\\n',r)); const b=Buffer.alloc(1024*1024,0x91); for(let i=0;i<100;i++) await new Promise(r=>process.stdout.write(b,r)); await new Promise(r=>process.stdout.write('stdout-tail\\0',r)); process.stderr.write('stderr-tail\\0');})().catch(e=>{console.error(e);process.exitCode=1});";
-      const quote = (text: string) =>
-        "'" + text.replaceAll("'", "'\"'\"'") + "'";
       return {
         toolCalls: [
           fakeToolCall(
             'run_shell_command',
             {
-              command: `${quote(process.execPath)} -e ${quote(producer)}`,
+              command: `${quotePosix(process.execPath)} -e ${quotePosix(producer)}`,
               timeout: 180000,
             },
             callId,
@@ -405,10 +413,19 @@ const modelReply: FakeOpenAIHandler = ({ body }) => {
     );
     assert.match(JSON.stringify(receipts[0].content), /Successfully created/);
     assert.match(JSON.stringify(receipts[1].content), /before/);
-    assert.match(
-      JSON.stringify(receipts[2].content),
-      /has been updated.*after/s,
-    );
+    assert.match(JSON.stringify(receipts[2].content), /has been updated\./);
+    const editCalls = messages
+      .slice(lastPrompt + 1)
+      .filter((message) => message.role === 'assistant')
+      .flatMap((message) => message.tool_calls ?? [])
+      .filter((call) => call.id === 'edit-proof');
+    assert.equal(editCalls.length, 1);
+    assert.equal(editCalls[0].function.name, 'edit');
+    assert.deepEqual(JSON.parse(editCalls[0].function.arguments), {
+      file_path: 'proof.txt',
+      old_string: 'before',
+      new_string: 'after',
+    });
     return { content: 'TOOLS_DONE', reasoning: 'PRIVATE_REASONING_MARKER' };
   }
   if (current === 'INVALID_FILE_PATH') {

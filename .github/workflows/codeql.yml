@@ -22,7 +22,7 @@ concurrency:
 
 jobs:
   codeql:
-    name: 'CodeQL (${{ matrix.language }})'
+    name: 'CodeQL (${{ matrix.name || matrix.language }})'
     runs-on: 'ubuntu-latest'
     strategy:
       fail-fast: false
@@ -33,7 +33,12 @@ jobs:
           - language: 'java'
             timeout: 15
             sourceroot: 'packages/sdk-java'
-    # One job per language, each with its own measured cap: a shared job let
+          - language: 'java'
+            name: 'managed-agent-server'
+            category: 'managed-agent-server'
+            timeout: 15
+            sourceroot: 'packages/managed-agent-server'
+    # One job per source tree, each with its own measured cap: a shared job let
     # the JavaScript leg's overrun kill the Java analysis with it. The
     # JavaScript leg took 44m12s on the 2026-10-02 dispatch (run 37019120152)
     # after the old shared 30-minute cap had cancelled the nightly on
@@ -53,7 +58,7 @@ jobs:
           # snapshots, so a real build here would duplicate sdk-java.yml's
           # install dance. build-mode none extracts from source instead
           # (javascript is interpreted and never builds either way). The java
-          # leg scans only the Maven modules: the Gradle tree under
+          # legs scan only the Maven modules: the Gradle tree under
           # packages/mobile-shell needs a real build, its Kotlin sources are
           # out of scope, and its Gradle JDK recommendation must not set the
           # API model for the Java 21 Maven modules.
@@ -62,6 +67,8 @@ jobs:
 
       - name: 'Perform CodeQL Analysis'
         uses: 'github/codeql-action/analyze@df559355d593797519d70b90fc8edd5db049e7a2' # ratchet:github/codeql-action/analyze@v3
+        with:
+          category: '${{ matrix.category }}'
 
   # The scan is schedule-only and never a required check, so a dead nightly is
   # otherwise silent (#13249). `always()` because an overrun leg reports

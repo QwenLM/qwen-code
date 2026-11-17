@@ -113,7 +113,7 @@ fn def() -> &'static ToolDef {
                     "maximum": 200,
                     "description": "Milliseconds between characters in the CGEvent fallback path. Default 30. Ignored when the AX path succeeds."
                 },
-                "app_context": { "type": "boolean", "description": "App-bound input uses key events at the current insertion point." },
+                "app_context": { "type": "boolean", "description": "App-bound input inserts at the current caret with verified AX when supported. Terminals and ASCII control characters use key events." },
                 "scope": { "type": "string", "enum": ["window", "desktop"], "default": "window", "description": "Use desktop with no pid/window_id to type into the frontmost application." },
                 "delivery_mode": {
                     "type": "string",
@@ -227,12 +227,14 @@ impl Tool for TypeTextTool {
             Ok(r) => r,
             Err(e) => return e,
         };
+        let element_cache = crate::ax::cache::BoundElementCache::from_resolved(&resolved);
         let (element_index, window_id) = match resolved {
             cua_driver_core::element_token::ResolvedElement::None => (None, window_id_arg),
             cua_driver_core::element_token::ResolvedElement::Element {
                 window_id: wid,
                 element_index: idx,
                 via_token: _,
+                ..
             } => (Some(idx), wid),
         };
         let delay_ms = args.u64_or("delay_ms", 30);
@@ -267,7 +269,7 @@ impl Tool for TypeTextTool {
         // the blocking type below dereferences it (use-after-free → daemon
         // crash). The guard lives to method end, past type_text_blocking.
         let element_guard = if let (Some(idx), Some(wid)) = (element_index, window_id) {
-            match self.state.element_cache.get_element_retained(pid, wid, idx) {
+            match element_cache.get_element_retained(pid, wid, idx) {
                 Some(e) => Some((e, idx)),
                 None => {
                     return ToolResult::error(format!(
@@ -380,8 +382,8 @@ impl Tool for TypeTextTool {
         // AX value-set is silently dropped — see crate::terminal docs.
         // Skip the AX path entirely so the caller never sees the
         // "success but nothing typed" symptom.
-        let synthesize_only = crate::terminal::is_terminal_pid(pid)
-            || args.get("app_context").and_then(Value::as_bool) == Some(true);
+        let app_context = args.get("app_context").and_then(Value::as_bool) == Some(true);
+        let synthesize_only = crate::terminal::is_terminal_pid(pid);
 
         let blocking_policy = keyboard_policy.clone();
         let result = focus_guard::with_focus_suppressed(
@@ -390,6 +392,16 @@ impl Tool for TypeTextTool {
             "type_text.AXSelectedText",
             || async move {
                 tokio::task::spawn_blocking(move || {
+                    if app_context && !delivery_mode.is_foreground() {
+                        return type_app_text(
+                            pid,
+                            window_id.expect("app window"),
+                            &text_clone,
+                            delay_ms,
+                            synthesize_only,
+                            &blocking_policy,
+                        );
+                    }
                     type_text_blocking(
                         pid,
                         &text_clone,
@@ -1054,7 +1066,14 @@ fn cgevent_type_verified(
         if let Some(wid) = window_id {
             crate::input::skylight::prepare_background_keyboard(pid, wid)?;
         }
-        crate::input::keyboard::type_text_with_delay(pid, text, delay_ms)?;
+        let recipient = unsafe {
+            crate::ax::exact_target::keyboard_recipient_pid(
+                pid,
+                window_id,
+                element_ptr_and_idx.map(|(ptr, _)| ptr),
+            )
+        }?;
+        crate::input::keyboard::type_text_with_delay(recipient, text, delay_ms)?;
     }
 
     // CGEvent posting is asynchronous with respect to the renderer. In
@@ -1094,6 +1113,12 @@ fn await_typed_delivery(
     }
 }
 
+fn app_text_allows_ax(text: &str, synthesize_only: bool) -> bool {
+    !synthesize_only
+        && (!text.is_ascii()
+            || (!text.is_empty() && text.bytes().all(|byte| (b' '..=b'~').contains(&byte))))
+}
+
 /// Best-effort-background ladder for `type_text`.
 ///
 /// - `delivery_mode == Background` (default): AX insert → read-back. Only an
@@ -1105,6 +1130,114 @@ fn await_typed_delivery(
 /// Returns `(detail, path, verified)`. `verified` is `true` only when a
 /// read-back positively confirmed the text; `false` means the agent must
 /// confirm the result from a fresh observation before deciding what to do next.
+fn type_app_text(
+    pid: i32,
+    window: u32,
+    text: &str,
+    delay_ms: u64,
+    synthesize_only: bool,
+    policy: &BackgroundKeyboardPolicy,
+) -> anyhow::Result<TypeTextDelivery> {
+    struct Release(AXUIElementRef);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            unsafe {
+                CFRelease(self.0 as _);
+            }
+        }
+    }
+    let target = unsafe { crate::ax::exact_target::focused_element_in_window(pid, window) }
+        .ok_or_else(|| {
+            anyhow::anyhow!("no_focused_text_input: no text input is focused in this window")
+        })?;
+    let _release = Release(target);
+    let role = unsafe { copy_string_attr(target, "AXRole") }.unwrap_or_default();
+    if !matches!(
+        role.as_str(),
+        "AXTextField" | "AXTextArea" | "AXSearchField" | "AXComboBox"
+    ) {
+        anyhow::bail!("no_focused_text_input: focused role {role} is not a text input");
+    }
+    let before = unsafe { copy_string_attr(target, "AXValue") };
+    let settable = app_text_allows_ax(text, synthesize_only)
+        && !(text.is_ascii() && matches!(policy, BackgroundKeyboardPolicy::SemanticOnly(_)))
+        && unsafe { crate::ax::bindings::is_attribute_settable(target, "AXSelectedText") };
+    let range = settable
+        .then(|| unsafe { super::select_text::read_range(target) })
+        .flatten();
+    let use_keys =
+        synthesize_only || (text.is_ascii() && (!settable || before.is_none() || range.is_none()));
+    let (path, verified) = if use_keys {
+        if let BackgroundKeyboardPolicy::SemanticOnly(refusal) = policy {
+            return Ok(TypeTextDelivery::Refused(refusal.clone()));
+        }
+        if let Some(refusal) = synthesis_preflight(
+            TextDeliveryRoute::UnicodeSynthesis,
+            text.chars().count(),
+            delay_ms,
+        ) {
+            return Ok(TypeTextDelivery::SynthesisRefused {
+                path: PATH_KEY_EVENTS,
+                refusal,
+                ax_attempt: AxAttempt::NotAttempted,
+            });
+        }
+        crate::input::skylight::prepare_background_keyboard(pid, window)?;
+        let recipient = unsafe {
+            crate::ax::exact_target::keyboard_recipient_pid(
+                pid,
+                Some(window),
+                Some(target as usize),
+            )
+        }?;
+        crate::input::keyboard::type_text_with_delay(recipient, text, delay_ms)?;
+        (PATH_KEY_EVENTS, false)
+    } else {
+        if !settable {
+            anyhow::bail!("not_settable: focused input cannot accept a Unicode insertion through accessibility");
+        }
+        let before = before.ok_or_else(|| {
+            anyhow::anyhow!(
+                "not_settable: focused input value cannot be read for Unicode verification"
+            )
+        })?;
+        let (location, length) = range.ok_or_else(|| {
+            anyhow::anyhow!("no_focused_text_input: the text caret cannot be read")
+        })?;
+        let mut expected = before.encode_utf16().collect::<Vec<_>>();
+        let end = location
+            .checked_add(length)
+            .filter(|end| *end <= expected.len())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no_focused_text_input: the text caret is outside the current value"
+                )
+            })?;
+        expected.splice(location..end, text.encode_utf16());
+        let expected = String::from_utf16(&expected)?;
+        let status = unsafe { set_string_attr(target, "AXSelectedText", text) };
+        if status != kAXErrorSuccess {
+            anyhow::bail!("write_not_applied: Unicode insertion returned AX error {status}; observe before retrying");
+        }
+        let after = unsafe { copy_string_attr(target, "AXValue") };
+        if after.as_deref() != Some(expected.as_str()) {
+            anyhow::bail!("write_not_applied: Unicode insertion did not match value readback; observe before retrying");
+        }
+        if unsafe { crate::document_edit::ensure_marked_after_ax_write(pid, target, false) }
+            == crate::document_edit::DocumentEdited::NotMarked
+        {
+            anyhow::bail!("write_not_applied: text readback matched but the document could not register the edit for saving; observe before retrying");
+        }
+        (PATH_AX, true)
+    };
+    Ok(TypeTextDelivery::Typed(TypeTextOutcome {
+        detail: " at the current text caret".into(),
+        path,
+        verified,
+        delivered_chars: verified.then_some(text.chars().count()),
+    }))
+}
+
 fn type_text_blocking(
     pid: i32,
     text: &str,
@@ -1364,6 +1497,21 @@ fn type_text_blocking(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn app_text_allows_ax_for_literal_text_without_terminal_synthesis() {
+        assert!(app_text_allows_ax("a path/file.txt", false));
+        assert!(app_text_allows_ax("λ", false));
+        assert!(!app_text_allows_ax("ascii", true));
+        assert!(!app_text_allows_ax("λ", true));
+    }
+
+    #[test]
+    fn app_text_keeps_empty_and_ascii_controls_on_the_key_path() {
+        for text in ["", "\n", "\r\n", "a\tb", "\u{7f}", "\0"] {
+            assert!(!app_text_allows_ax(text, false), "{text:?}");
+        }
+    }
 
     #[test]
     fn background_synthesis_revalidates_the_window_before_posting() {

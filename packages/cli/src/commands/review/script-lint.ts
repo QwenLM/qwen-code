@@ -86,13 +86,15 @@ export interface ScriptLintReport {
    */
   errored: Array<{ path: string; tool: LintTool; reason: string }>;
   /**
-   * Files a checker **deliberately declines** to lint (not absent, not crashed) —
-   * today only actionlint, whose embedded-shell source mapping is not yet parsed.
-   * Distinct from `skipped` precisely because the verdict must treat it
-   * differently: a deferred checker is a known tool limitation, disclosed but NOT
-   * capping — actionlint is installed on ~15% of PRs (every workflow change), and
-   * capping all of them on a checker we choose not to run would make them
-   * un-Approvable forever, which "install the tool" cannot fix.
+   * The part of a file a checker **deliberately declines** to lint (not absent,
+   * not crashed) — today only actionlint's embedded `run:` shell, whose source
+   * mapping is not yet parsed. The workflow-LEVEL checks (syntax, expression
+   * context availability, action refs) DO run and gate like any lint finding;
+   * a workflow file therefore appears in `checked` AND here. Distinct from
+   * `skipped` precisely because the verdict must treat it differently: the
+   * deferred part is a known tool limitation, disclosed but NOT capping —
+   * capping every workflow PR on the shell portion we choose not to run would
+   * make them un-Approvable forever, which "install the tool" cannot fix.
    *
    * `reasonZh` is the same reason for the review body's Chinese half — the
    * deferral is the one lint outcome rendered inside a translated sentence,
@@ -132,6 +134,9 @@ interface ScriptLintArgs {
   plan: string;
   worktree: string;
   out?: string;
+  /** Override the plan's captured diff — the re-anchor protocol's refresh
+   *  channel: ranges and freshness hash bind to THIS diff instead. */
+  diff?: string;
 }
 
 interface PlanFile {
@@ -343,6 +348,51 @@ function emptyHadolintConfig(): string | undefined {
   return hadolintEmptyConfigPath;
 }
 
+/**
+ * A private actionlint config file holding `baseContent` — or `undefined` when
+ * one could not be created. Passed via `-config-file` (see below), it replaces
+ * actionlint's auto-discovery of the reviewed repo's `.github/actionlint.yaml`.
+ *
+ * The TRUST BOUNDARY is the merge base, not the PR head (PR #16001 review,
+ * rounds 1–2): the head's config is PR-controlled — a planted
+ * `paths: {"**": {ignore: [".*"]}}` there suppresses every diagnostic (measured
+ * on 1.7.12) — while the BASE config is maintainer-merged compatibility
+ * knowledge (this repo's declares its ECS runner labels, the `concurrency.queue`
+ * schema lag, and the `$/` self-repository action reference; dropping it turned
+ * correct release-workflow changes into bogus `[lint]` Criticals). So
+ * `runScriptLint` reads the config blob from the merge-base tree and hands it
+ * here; a repo with no base config gets the explicit empty config `{}`.
+ *
+ * Same two path properties as the hadolint config, same reasons: UNPREDICTABLE
+ * (mkdtemp, not a fixed tmpdir name a symlink race could plant) and ONE WE
+ * CONTROL (the content is copied into our own file, never passed as the repo's
+ * path; a predictable fallback the attacker can write is a suppression vector,
+ * so there is NO fallback — the caller fails actionlint closed). The cache is
+ * keyed by CONTENT: one process may lint several repos (tests do), and each
+ * base config deserves its own file.
+ */
+const actionlintConfigPaths = new Map<string, string>();
+function neutralActionlintConfig(baseContent = '{}\n'): string | undefined {
+  const cached = actionlintConfigPaths.get(baseContent);
+  if (cached !== undefined) return cached;
+  try {
+    const d = mkdtempSync(join(tmpdir(), 'qwen-review-actionlint-'));
+    process.on('exit', () => {
+      try {
+        rmSync(d, { recursive: true, force: true });
+      } catch {
+        /* best-effort */
+      }
+    });
+    const p = join(d, 'actionlint.yaml');
+    writeFileSync(p, baseContent);
+    actionlintConfigPaths.set(baseContent, p);
+    return p;
+  } catch {
+    return undefined; // no controllable config → caller must fail actionlint closed
+  }
+}
+
 /** The outcome of pointing a linter at one file. */
 export type ToolRun =
   | { kind: 'ok'; stdout: string }
@@ -353,8 +403,19 @@ export type ToolRun =
  * How `runScriptLint` invokes a linter. Injectable so a test can feed canned
  * output for all three tools — and exercise the fail-closed paths — without the
  * binaries installed; the default is the real `spawnSync`-backed runner.
+ * `actionlintBaseConfig` is the merge-base `.github/actionlint.yaml` content
+ * (actionlint only; undefined for the other tools and for a repo with no base
+ * config) — the trusted compatibility knowledge the private config preserves.
+ * `worktreeRoot` is the review worktree the linter must run INSIDE: actionlint
+ * resolves the config's `paths:` entries against its cwd, so a session-cwd
+ * spawn leaves every path-scoped exception inert (PR #16001 review, round 4).
  */
-export type ToolRunner = (tool: LintTool, absPath: string) => ToolRun;
+export type ToolRunner = (
+  tool: LintTool,
+  absPath: string,
+  actionlintBaseConfig?: string,
+  worktreeRoot?: string,
+) => ToolRun;
 
 /**
  * The argv and environment for invoking one linter — the config-isolation layer,
@@ -373,6 +434,17 @@ export type ToolRunner = (tool: LintTool, absPath: string) => ToolRun;
  *   `--config <private neutral file>`, which overrides both the cwd and XDG configs.
  *   Set only for a hadolint run, and only when a private config exists; `runTool`
  *   fails hadolint closed when it does not (so it never runs unisolated).
+ * - actionlint: auto-loads `.github/actionlint.yaml` from the reviewed repository,
+ *   where a PR-added `paths: {"**": {ignore: [".*"]}}` suppresses EVERY diagnostic
+ *   (measured on 1.7.12; PR #16001 review). Isolation is `-config-file <private
+ *   file>`, which overrides the auto-discovery; `runTool` fails actionlint closed
+ *   when no private config exists. The file's content is the MERGE-BASE config
+ *   (`actionlintBaseConfig`) — maintainer-merged compatibility knowledge (runner
+ *   labels, schema-lag ignores) the PR cannot edit — or `{}` when the base has
+ *   none; the HEAD config is never read. The two `-ignore` patterns ride ON TOP
+ *   of that config, exactly as the repo's scripts/lint.js runs them: custom
+ *   self-hosted runner labels and the `environment.deployment` schema lag,
+ *   reviewer-controlled constants covering repos whose base declares no config.
  *
  * Also carries `timeoutMs`: the wall-clock bound `runTool` puts on the spawn, kept
  * here so the bound is one asserted value rather than a literal buried in the spawn.
@@ -380,11 +452,46 @@ export type ToolRunner = (tool: LintTool, absPath: string) => ToolRun;
 export function buildToolInvocation(
   tool: LintTool,
   absPath: string,
+  actionlintBaseConfig?: string,
 ): { argv: string[]; env: NodeJS.ProcessEnv; timeoutMs: number } {
-  const cfg = tool === 'hadolint' ? emptyHadolintConfig() : undefined;
+  const cfg =
+    tool === 'hadolint'
+      ? emptyHadolintConfig()
+      : tool === 'actionlint'
+        ? neutralActionlintConfig(actionlintBaseConfig)
+        : undefined;
   const argv: Record<LintTool, string[]> = {
     shellcheck: ['--norc', '--format=json1', '--severity=style', absPath],
-    actionlint: ['-format', '{{json .}}', '-no-color', absPath],
+    // `-shellcheck=` / `-pyflakes=` disable the embedded-language integrations
+    // (the same form the repo's own scripts/lint.js runs): their findings are
+    // the deferred portion, so whether they appear must not depend on which
+    // binaries happen to sit on the reviewer's PATH. The workflow-level checks
+    // — syntax, expression context availability, action refs — run regardless.
+    // When `cfg` is absent this bare form is unreachable — `runTool` has already
+    // failed the actionlint run closed rather than lint without isolation.
+    actionlint: cfg
+      ? [
+          '-config-file',
+          cfg,
+          '-shellcheck=',
+          '-pyflakes=',
+          '-ignore',
+          'label ".+" is unknown',
+          '-ignore',
+          'unexpected key "deployment" for "environment" section',
+          '-format',
+          '{{json .}}',
+          '-no-color',
+          absPath,
+        ]
+      : [
+          '-shellcheck=',
+          '-pyflakes=',
+          '-format',
+          '{{json .}}',
+          '-no-color',
+          absPath,
+        ],
     // `--config <neutral>` is the ONLY channel that isolates hadolint (env is
     // ignored). When `cfg` is absent this bare form is unreachable — `runTool` has
     // already failed the hadolint run closed rather than lint without isolation.
@@ -418,7 +525,12 @@ export function buildToolInvocation(
  * (`ETIMEDOUT`) and `r.signal` (`SIGTERM`); `r.error` is checked first, so a timeout
  * is reported through the error branch below — still fail-closed either way.
  */
-function runTool(tool: LintTool, absPath: string): ToolRun {
+function runTool(
+  tool: LintTool,
+  absPath: string,
+  actionlintBaseConfig?: string,
+  worktreeRoot?: string,
+): ToolRun {
   // Isolation is `--config <private neutral file>`; if we could not create that file,
   // running hadolint would honour a PR-added (or planted) `.hadolint.yaml` in the cwd
   // and let it suppress findings. Fail the hadolint run CLOSED rather than lint
@@ -429,13 +541,33 @@ function runTool(tool: LintTool, absPath: string): ToolRun {
       reason: 'hadolint config isolation unavailable — failing closed',
     };
   }
-  const { argv, env, timeoutMs } = buildToolInvocation(tool, absPath);
+  // Same stance for actionlint: without the private config it would auto-load
+  // the reviewed repo's HEAD `.github/actionlint.yaml`, and a PR-added
+  // ignore-all rule there suppresses every diagnostic (PR #16001 review).
+  if (tool === 'actionlint' && !neutralActionlintConfig(actionlintBaseConfig)) {
+    return {
+      kind: 'error',
+      reason: 'actionlint config isolation unavailable — failing closed',
+    };
+  }
+  const { argv, env, timeoutMs } = buildToolInvocation(
+    tool,
+    absPath,
+    actionlintBaseConfig,
+  );
+  // Run INSIDE the review worktree: actionlint matches the config's `paths:`
+  // entries against the linted file's path relative to its cwd, so a
+  // session-cwd spawn leaves every path-scoped base exception inert while the
+  // global keys still work — the exact split that hid this (PR #16001 review,
+  // round 4). PWD rides along because Go's os.Getwd trusts a matching PWD,
+  // which matters when the worktree path is symlinked (macOS temp dirs).
   const r = spawnSync(tool, argv, {
+    ...(worktreeRoot ? { cwd: worktreeRoot } : {}),
     encoding: 'utf8',
     maxBuffer: 32 * 1024 * 1024,
     timeout: timeoutMs,
     stdio: ['ignore', 'pipe', 'pipe'],
-    env,
+    env: worktreeRoot ? { ...env, PWD: worktreeRoot } : env,
   });
   const err = r.error as NodeJS.ErrnoException | undefined;
   if (err?.code === 'ENOENT') return { kind: 'missing' };
@@ -525,11 +657,60 @@ function parseFindings(tool: LintTool, raw: string): LintFinding[] | null {
       })
       .filter((x): x is LintFinding => x !== null);
   }
-  // actionlint never reaches here — a workflow is recorded as skipped upstream
-  // (its embedded-shell source mapping is not yet parsed). Fail closed if it ever
-  // does, rather than inventing severities/lines we cannot trust.
+  // actionlint `-format '{{json .}}'` prints ONE JSON array of error objects
+  // (measured on 1.7.12: `[]` on a clean file, one entry per diagnostic
+  // otherwise), each `{message, filepath, line, column, kind, snippet,
+  // end_column}`. `kind` is the diagnostic class — `expression`, `syntax-check`,
+  // `action`, … and `shellcheck`/`pyflakes` for the embedded-language
+  // integrations (disabled in buildToolInvocation; the split in runScriptLint
+  // keeps them deferred if a version ever emits them anyway). actionlint has no
+  // severity scale — every diagnostic it reports is a real workflow defect, so
+  // the level is `error`. Unlike the two filters above, a malformed entry fails
+  // the WHOLE parse (null): silently dropping one diagnostic could drop the
+  // blocker that makes a workflow unloadable.
+  if (tool === 'actionlint') {
+    if (!Array.isArray(json)) return null;
+    const out: LintFinding[] = [];
+    for (const c of json) {
+      const o = c as {
+        line?: unknown;
+        kind?: unknown;
+        message?: unknown;
+      };
+      const l = Number(o?.line);
+      if (
+        !o ||
+        typeof o !== 'object' ||
+        !Number.isInteger(l) ||
+        l < 1 ||
+        typeof o.kind !== 'string' ||
+        !o.kind
+      ) {
+        return null;
+      }
+      out.push({
+        line: l,
+        code: o.kind,
+        level: 'error',
+        message: String(o.message ?? ''),
+        inDiff: false,
+      });
+    }
+    return out;
+  }
   return null;
 }
+
+/**
+ * actionlint diagnostic kinds produced by the embedded-language integrations —
+ * the deferred portion of a workflow lint. Their diagnostics anchor at the
+ * `run:` key and flatten the embedded linter's severity, so they stay disclosed
+ * rather than gated; every OTHER kind is a workflow-level check (syntax,
+ * expression context availability, action refs, …) and gates like any lint
+ * finding. The integrations are disabled at invocation, so this set is a
+ * backstop against version skew, not the primary split.
+ */
+const ACTIONLINT_EMBEDDED_KINDS = new Set(['shellcheck', 'pyflakes']);
 
 /** A hash of the captured diff — the identity of *what was reviewed*. `undefined`
  *  when the diff cannot be read; the gate treats an absent hash on either side as
@@ -548,7 +729,11 @@ export function runScriptLint(
   args: ScriptLintArgs,
   runner: ToolRunner = runTool,
 ): ScriptLintReport {
-  let plan: { files?: PlanFile[]; diffPathAbsolute?: unknown };
+  let plan: {
+    files?: PlanFile[];
+    diffPathAbsolute?: unknown;
+    mergeBaseSha?: unknown;
+  };
   try {
     plan = JSON.parse(readFileSync(args.plan, 'utf8'));
   } catch (err) {
@@ -557,17 +742,66 @@ export function runScriptLint(
     );
   }
   const files = Array.isArray(plan.files) ? plan.files : [];
-  // Read the captured diff EXACTLY ONCE and derive BOTH the added-line ranges and
+  // The actionlint config trust boundary is the MERGE BASE (PR #16001 review,
+  // round 3): the base `.github/actionlint.yaml` is maintainer-merged
+  // compatibility knowledge (runner labels, schema-lag ignores); the HEAD copy
+  // is PR-controlled and never read. Resolved lazily — a shell-only diff owes
+  // no git call — and cached for the run. The sha shape guard is the option
+  // injection fence: `git show <rev>:<path>` takes the rev as a bare argument,
+  // and only a hex object id can reach it. Any failure (no base config, no
+  // merge base, git error) degrades to the empty config `{}` — the strict
+  // direction: compatibility ignores may be lost (disclosed findings the
+  // maintainer can rule), suppressions may not be gained.
+  let actionlintBaseConfig: string | undefined;
+  let actionlintBaseResolved = false;
+  const resolveActionlintBaseConfig = (): string | undefined => {
+    if (actionlintBaseResolved) return actionlintBaseConfig;
+    actionlintBaseResolved = true;
+    const base = plan.mergeBaseSha;
+    if (typeof base !== 'string' || !/^[0-9a-f]{7,64}$/.test(base)) {
+      return undefined;
+    }
+    const r = spawnSync(
+      'git',
+      ['-C', args.worktree, 'show', `${base}:.github/actionlint.yaml`],
+      { encoding: 'utf8', timeout: 30_000, maxBuffer: 1024 * 1024 },
+    );
+    if (r.status === 0 && typeof r.stdout === 'string' && r.stdout !== '') {
+      actionlintBaseConfig = r.stdout;
+    }
+    return actionlintBaseConfig;
+  };
+  // The diff the report binds to: the plan's captured diff, unless `--diff`
+  // overrides it. The override is the re-anchor protocol's refresh channel
+  // (PR #16001 review): the head moved, the plan and its coverage evidence stay
+  // fenced at the old head, and the lint must nonetheless be recomputed against
+  // the NEW head's diff — ranges and freshness hash alike — so the gate can tell
+  // a lint blocker the delta fixed from one that still stands.
+  const diffPath =
+    typeof args.diff === 'string' && args.diff !== ''
+      ? args.diff
+      : plan.diffPathAbsolute;
+  // Read the diff EXACTLY ONCE and derive BOTH the added-line ranges and
   // the freshness hash from that one immutable buffer. Reading it twice (ranges
   // before the linters run, hash after) opens a TOCTOU window: a concurrent
   // recapture could classify findings against snapshot A while the report carries
   // snapshot B's hash, and `compose-review` would accept it as fresh.
   let addedRanges = new Map<string, Array<[number, number]>>();
   let diffHash: string | undefined;
+  // Whether the diff PARSED — distinct from whether it added any lines. An
+  // EMPTY diff (zero bytes, or deletions only) parses to zero added ranges and
+  // is a successful parse: nothing was added, so no finding is in-diff. The
+  // re-anchor refresh hits this when the new head reverts the PR's last change
+  // and `git diff base newHead` is exactly empty; treating that as a parse
+  // failure fell back to the OLD plan's context-inclusive hunks and promoted
+  // pre-existing findings into blockers the gate then accepted as fresh
+  // (PR #16001 review, round 3, reproduced with real commits). Only a genuine
+  // parse failure earns the over-inclusive fallback.
+  let diffParsed = false;
   let diffBuf: Buffer | undefined;
-  if (typeof plan.diffPathAbsolute === 'string') {
+  if (typeof diffPath === 'string') {
     try {
-      diffBuf = readFileSync(plan.diffPathAbsolute);
+      diffBuf = readFileSync(diffPath);
     } catch {
       diffBuf = undefined; // unreadable → no hash → the gate fails closed
     }
@@ -576,6 +810,7 @@ export function runScriptLint(
     try {
       addedRanges = addedRangesFromDiff(diffBuf.toString('utf8'));
       diffHash = createHash('sha256').update(diffBuf).digest('hex');
+      diffParsed = true;
     } catch {
       // Diff read but UNPARSEABLE — we have no ground truth for `inDiff`. Leave
       // `diffHash` undefined so the gate rejects the report as unverifiable (fail
@@ -635,7 +870,7 @@ export function runScriptLint(
         // Reason does NOT lead with the path — the gate prefixes `${path}:` when
         // it discloses, and leading with it here would print the path twice.
         // Nor does it end with "not linted": the body renders every reason
-        // under a header that already says so ("Not reviewed:" / "Not
+        // under a header that already says so ("Not reviewed:" / "Not fully
         // linted:"), and a tail here posted the phrase twice in one sentence.
         skipped.push({
           path,
@@ -648,29 +883,16 @@ export function runScriptLint(
     const tool = toolFor(path, first.text);
     if (!tool) continue;
 
-    // Actionlint lints a workflow's embedded shell, but its JSON anchors each
-    // diagnostic at the `run:` key line (not the changed shell line) and flattens
-    // ShellCheck's severity — so a style nit reads as an `error` and a real finding
-    // reads as pre-existing. Until that source-mapping is parsed and verified a
-    // workflow is **deferred**: disclosed, but NOT capping the verdict (it is a
-    // tool limitation, not a finding, and actionlint touches ~15% of PRs — capping
-    // every one of them would make workflow changes un-Approvable). shellcheck
-    // still covers standalone `.sh`.
-    if (tool === 'actionlint') {
-      deferred.push({
-        path,
-        tool,
-        reason: 'actionlint embedded-shell source mapping is not yet supported',
-        reasonZh: 'actionlint 对 workflow 内嵌 shell 的源映射尚未支持',
-      });
-      continue;
-    }
-
     if (missing.has(tool)) {
       skipped.push({ path, tool, reason: `${tool} is not installed` });
       continue;
     }
-    const res = runner(tool, abs);
+    const res = runner(
+      tool,
+      abs,
+      tool === 'actionlint' ? resolveActionlintBaseConfig() : undefined,
+      wt,
+    );
     if (res.kind === 'missing') {
       missing.add(tool);
       skipped.push({ path, tool, reason: `${tool} is not installed` });
@@ -697,14 +919,37 @@ export function runScriptLint(
     // does not mention yields `[]` (nothing added → nothing blocks) — NOT the plan's
     // context-inclusive hunks, which would false-positive a pre-existing finding on a
     // context line into a blocker. The context-inclusive `hunksOf` fallback is used
-    // ONLY when no diff was parsed at all (`addedRanges` empty), a report the gate
-    // then rejects as stale anyway.
-    const ranges =
-      addedRanges.get(path) ?? (addedRanges.size > 0 ? [] : hunksOf(f));
+    // ONLY when the diff could not be parsed (`diffParsed` false) — an EMPTY parsed
+    // diff is a successful parse with nothing added, not a parse failure — and that
+    // report carries no diffHash, so the gate rejects it as stale anyway.
+    const ranges = addedRanges.get(path) ?? (diffParsed ? [] : hunksOf(f));
     const findings = parsed.map((x) => ({
       ...x,
       inDiff: inAnyHunk(x.line, ranges),
     }));
+    if (tool === 'actionlint') {
+      // Workflow-level diagnostics gate like any lint finding; the embedded
+      // `run:` shell stays deferred (its source mapping is not parsed). The
+      // deferral is disclosed for EVERY workflow that ran — the embedded
+      // integrations are disabled at invocation, so the shell portion is never
+      // linted, whether or not the backstop split finds any.
+      checked.push({
+        path,
+        tool,
+        findings: findings.filter(
+          (x) => !ACTIONLINT_EMBEDDED_KINDS.has(x.code),
+        ),
+      });
+      deferred.push({
+        path,
+        tool,
+        reason:
+          'actionlint ran workflow-level checks; embedded run: shell deferred (source mapping not yet supported)',
+        reasonZh:
+          'actionlint 已运行 workflow 级检查；内嵌 run: shell 延迟处理（源映射尚未支持）',
+      });
+      continue;
+    }
     checked.push({ path, tool, findings });
   }
 
@@ -789,6 +1034,11 @@ export const scriptLintCommand: CommandModule = {
         type: 'string',
         demandOption: true,
         describe: 'Path to the checkout whose files are linted',
+      })
+      .option('diff', {
+        type: 'string',
+        describe:
+          "Override the plan's captured diff (re-anchor refresh): ranges and the report's freshness hash bind to this diff instead",
       })
       .option('out', {
         type: 'string',

@@ -1,7 +1,26 @@
 // @vitest-environment jsdom
 import { act } from 'react';
+import { DaemonUnavailableError } from '../daemon/availability';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+const availabilityMock = vi.hoisted(() => ({
+  enabled: false,
+  available: true,
+  controller: {
+    getGeneration: () => 0,
+    assertAvailable: vi.fn(() => {
+      if (!availabilityMock.available) throw new DaemonUnavailableError();
+    }),
+    reportFailure: vi.fn(() => {
+      availabilityMock.available = false;
+    }),
+  },
+}));
+vi.mock('../daemon/availability-context', () => ({
+  useDaemonAvailabilityController: () =>
+    availabilityMock.enabled ? availabilityMock.controller : undefined,
+}));
+
 import {
   useFileUpload,
   type FileUploadClient,
@@ -59,6 +78,9 @@ beforeEach(() => {
   document.body.appendChild(container);
   root = createRoot(container);
   latest = undefined;
+  availabilityMock.enabled = false;
+  availabilityMock.available = true;
+  vi.clearAllMocks();
   probeRenderCount = 0;
 });
 
@@ -1008,5 +1030,31 @@ describe('useFileUpload', () => {
     expect(client.uploadWorkspaceFile).toHaveBeenCalledTimes(1);
     expect(latest!.uploads).toHaveLength(0);
     expect(onUploaded).not.toHaveBeenCalled();
+  });
+  it('blocks the remaining upload queue after transport failure and does not replay it on recovery', async () => {
+    availabilityMock.enabled = true;
+    const error = new Error('uploadWorkspaceFile: network request failed');
+    const client = { uploadWorkspaceFile: vi.fn().mockRejectedValue(error) };
+    render({ client, maxBytes: MAX, targetKey: 'ws:/a' });
+    await act(async () => {
+      latest!.uploadFiles([makeFile('a.txt'), makeFile('b.txt')], '.');
+    });
+    expect(client.uploadWorkspaceFile).toHaveBeenCalledTimes(1);
+    expect(availabilityMock.controller.reportFailure).toHaveBeenCalledWith(
+      error,
+      expect.any(AbortSignal),
+      0,
+    );
+    expect(latest!.uploads.map((item) => item.status)).toEqual([
+      'error',
+      'error',
+    ]);
+    expect(latest!.uploads[1]).toMatchObject({
+      errorCode: 'noDaemon',
+      error: undefined,
+    });
+    availabilityMock.available = true;
+    render({ client, maxBytes: MAX, targetKey: 'ws:/a' });
+    expect(client.uploadWorkspaceFile).toHaveBeenCalledTimes(1);
   });
 });

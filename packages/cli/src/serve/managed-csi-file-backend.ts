@@ -63,6 +63,15 @@ export interface ManagedCsiBackupPin {
   readonly mode: number;
 }
 
+export interface ManagedCsiWorkingPin {
+  readonly path: string;
+  readonly device: string;
+  readonly inode: string;
+  readonly byteLength: number;
+  readonly digest: string;
+  readonly mode: number;
+}
+
 interface Attempt {
   readonly name: string;
   handle?: FileHandle;
@@ -175,6 +184,74 @@ export class ManagedCsiFileBackend
         retainedBackups,
       };
     });
+  }
+
+  async retirementInventory(paths: readonly string[]) {
+    if (
+      this.#pending.size ||
+      this.#closed ||
+      this.#failure ||
+      paths.length > 4096
+    )
+      throw new Error('CSI retirement requires an idle, available backend.');
+    const files: Array<{ path: string; pin: ManagedCsiWorkingPin | null }> = [];
+    for (const file of [...paths].sort()) {
+      const pin = await this.withWorkingFile(
+        path.join(this.directory, file),
+        async (source) =>
+          source
+            ? {
+                path: file,
+                device: String(source.stats.dev),
+                inode: String(source.stats.ino),
+                byteLength: source.stats.size,
+                digest: `sha256:${await digestFileReadSource(source)}`,
+                mode: source.stats.mode & 0o7777,
+              }
+            : null,
+      );
+      files.push({ path: file, pin });
+    }
+    const retained = await this.observeRetained();
+    const directories = this.#directories.map((entry, index) => ({
+      name: index === 0 ? 'prefix' : 'owner',
+      fd: entry.handle.fd,
+      device: entry.stats.dev.toString(),
+      inode: entry.stats.ino.toString(),
+    }));
+    const backups = [...this.#attempts.values()]
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map((attempt) => {
+        if (!attempt.handle || !attempt.stats || !attempt.pin)
+          throw new Error(UNAVAILABLE);
+        return {
+          name: attempt.name,
+          fd: attempt.handle.fd,
+          device: attempt.stats.dev.toString(),
+          inode: attempt.stats.ino.toString(),
+        };
+      });
+    if (
+      directories.length !== 2 ||
+      [...directories, ...backups].some((entry) => entry.fd < 0)
+    )
+      throw new Error(UNAVAILABLE);
+    return { retained, directories, backups, files };
+  }
+
+  retirementCloseInspection() {
+    return {
+      ...this.getDrainInspection(),
+      openDescriptors: [
+        ...this.#directoryHandles,
+        ...[...this.#attempts.values()].flatMap((attempt) =>
+          attempt.handle ? [attempt.handle] : [],
+        ),
+      ]
+        .filter((handle) => handle.fd >= 0)
+        .map((handle) => handle.fd)
+        .sort((a, b) => a - b),
+    };
   }
 
   close(): Promise<void> {

@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { convertToFunctionResponse } from '../core/coreToolScheduler.js';
+import { finalizeToolResponses } from './tool-response-finalizer.js';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -120,6 +122,7 @@ describe('WebFetchTool', () => {
       trackToolResultBytes: vi.fn(),
       storage: {
         getToolResultsDir: () => toolResultsDir,
+        getProjectTempDir: () => toolResultsDir,
       },
     } as unknown as Config;
   });
@@ -159,6 +162,136 @@ describe('WebFetchTool', () => {
     const result = await run(url, prompt);
     return { result, sent };
   }
+
+  describe('managed execution', () => {
+    const managedRun = (url = 'https://example.com/docs') =>
+      new WebFetchTool(mockConfig, 'managed')
+        .build({ url, prompt: 'Summarize', format: 'markdown' })
+        .execute(new AbortController().signal);
+
+    it('returns normalized text without a side query, cache or host files', async () => {
+      const fetch = stubFetch({
+        body: Buffer.from('<h1>Docs</h1><p>Details</p>'),
+      });
+      await run('https://example.com/docs');
+      const localFetches = fetch.mock.calls.length;
+      mockGetBaseLlmClient.mockClear();
+      const result = await managedRun();
+      await managedRun();
+      expect(result.llmContent).toContain('Docs\n====');
+      expect(result.llmContent).toContain('Details');
+      expect(result.llmContent).toContain('Status: 200');
+      expect(result.error).toBeUndefined();
+      expect(fetch).toHaveBeenCalledTimes(localFetches + 2);
+      expect(fetch).toHaveBeenLastCalledWith(
+        'https://example.com/docs',
+        expect.objectContaining({
+          networkPolicy: 'public',
+          headers: expect.objectContaining({
+            Accept: 'text/markdown, */*;q=0.1',
+          }),
+        }),
+      );
+      expect(mockGetBaseLlmClient).not.toHaveBeenCalled();
+      expect(fs.readdirSync(toolResultsDir)).toEqual([]);
+    });
+
+    it.each(['http://example.com', 'https://user:secret@example.com'])(
+      'refuses %s before fetching',
+      async (url) => {
+        const fetch = stubFetch();
+        expect(() =>
+          new WebFetchTool(mockConfig, 'managed').build({
+            url,
+            prompt: 'Summarize',
+          }),
+        ).toThrow();
+        expect(fetch).not.toHaveBeenCalled();
+      },
+    );
+
+    it('refuses binary downloads without writing a file', async () => {
+      stubFetch(PDF);
+      const result = await managedRun();
+      expect(result.error?.message).toContain('text content only');
+      expect(fs.readdirSync(toolResultsDir)).toEqual([]);
+      expect(mockExtractPDFText).not.toHaveBeenCalled();
+      expect(mockGetBaseLlmClient).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      { kind: 'Unicode', content: '文档😀'.repeat(20_000) },
+      { kind: 'escaped', content: '\u0001"\\'.repeat(20_000) },
+    ])(
+      'bounds $kind output without spilling large pages',
+      async ({ content }) => {
+        stubFetch({ contentType: 'text/plain', body: Buffer.from(content) });
+        const result = await managedRun();
+        expect(result.error).toBeUndefined();
+        expect(result.llmContent).toContain(content.slice(0, 30));
+        expect(result.llmContent).toContain('Content truncated');
+        expect(
+          Buffer.byteLength(JSON.stringify(result.llmContent)),
+        ).toBeLessThanOrEqual(16 * 1024);
+        expect(fs.readdirSync(toolResultsDir)).toEqual([]);
+      },
+    );
+
+    it('does not downgrade after a TLS failure', async () => {
+      const fetch = vi
+        .spyOn(fetchUtils, 'fetchWithPolicy')
+        .mockRejectedValue(
+          new fetchUtils.FetchError('TLS failed', 'ECONNREFUSED'),
+        );
+      expect((await managedRun()).error).toBeDefined();
+      expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps a redirect destination visible even with a large original URL', async () => {
+      const url = `https://example.com/?q=${'x'.repeat(50_000)}`;
+      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue({
+        kind: 'cross-host-redirect',
+        originalUrl: url,
+        redirectUrl: 'https://other.example/docs',
+        status: 302,
+      });
+      const result = await managedRun(url);
+      expect(result.llmContent).toContain('https://other.example/docs');
+      expect(
+        Buffer.byteLength(JSON.stringify(result.llmContent)),
+      ).toBeLessThanOrEqual(16 * 1024);
+    });
+
+    it('bounds failure text and error metadata within the durable result budget', async () => {
+      const url = `https://example.com/?q=${'x'.repeat(33_500)}`;
+      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockRejectedValue(
+        new Error('Connection failed'),
+      );
+      const result = await managedRun(url);
+      expect(result.error).toBeDefined();
+      expect(result.llmContent).toContain('Content truncated');
+      expect(
+        Buffer.byteLength(JSON.stringify(result.llmContent)),
+      ).toBeLessThanOrEqual(16 * 1024);
+      expect(
+        Buffer.byteLength(JSON.stringify(result.error!.message)),
+      ).toBeLessThanOrEqual(16 * 1024);
+      expect(
+        Buffer.byteLength(
+          JSON.stringify({
+            executionCallId: 'call',
+            functionResponse: {
+              response: {
+                error: result.llmContent,
+                runtimeError: result.error,
+                executionStatus: 'error',
+              },
+            },
+          }),
+        ),
+      ).toBeLessThan(64 * 1024);
+    });
+  });
 
   describe('execute', () => {
     it('should throw validation error when url parameter is missing', async () => {
@@ -352,14 +485,88 @@ describe('WebFetchTool', () => {
         para.repeat(Math.ceil(110_000 / (para.length - 7))) +
         '<p>NEEDLE-AT-END</p></body></html>';
 
-      const { sent } = await runCapturing(
+      const { sent, result } = await runCapturing(
         { body: Buffer.from(html) },
         PROCESSED_USAGE_UNSET,
         'https://example.com/large',
       );
 
-      expect(sent).toContain('[Content truncated: showing first 100,000 of');
+      expect(sent).toContain(
+        'Tool output was too large and has been truncated',
+      );
+      expect(sent).toContain('Total characters:');
+      expect(sent).toContain('offset (zero-based line) and limit (line count)');
       expect(sent).not.toContain('NEEDLE-AT-END');
+      // The producer shortened this page, so it must declare its pre-reduction
+      // size; without it the execution event falls back to raw == processed and
+      // reports truncated: false for a page that was cut.
+      expect(result.rawOutputSize?.chars).toBeGreaterThan(100_000);
+    });
+
+    it.each([false, true])(
+      'advertises the artifact for the text actually cut (processing failure: %s)',
+      async (processingFailure) => {
+        const body = 'word '.repeat(30_000);
+        const summary = 'summary '.repeat(1000);
+        stubFetch({ contentType: 'text/plain', body: Buffer.from(body) });
+        if (processingFailure)
+          mockGenerateContent.mockRejectedValue(new Error('API error'));
+        else mockGenerateContent.mockResolvedValue({ text: summary });
+        const result = await run('https://example.com/large');
+        if (processingFailure) {
+          expect(result.persistedOutputFiles).toHaveLength(1);
+          expect(fs.readFileSync(result.persistedOutputFiles![0], 'utf8')).toBe(
+            body,
+          );
+        } else {
+          expect(result.persistedOutputFiles).toBeUndefined();
+        }
+        const [finalized] = await finalizeToolResponses(
+          { ...mockConfig, getToolOutputBatchBudget: () => 500 } as Config,
+          [
+            {
+              callId: 'web',
+              toolName: 'web_fetch',
+              responseParts: convertToFunctionResponse(
+                'web_fetch',
+                'web',
+                result.llmContent,
+                result,
+              ),
+            },
+          ],
+        );
+        const artifact = finalized.persistedOutputFiles![0];
+        const saved = fs.readFileSync(artifact, 'utf8');
+        expect(saved).toBe(processingFailure ? body : result.llmContent);
+        if (!processingFailure) expect(saved).toContain(summary.trim());
+        const output = finalized.responseParts[0].functionResponse!.response![
+          'output'
+        ] as string;
+        expect(output).toContain(artifact);
+        expect(output.length).toBeLessThanOrEqual(500);
+      },
+    );
+
+    it('keeps default result budgets without shrinking side-query input', async () => {
+      stubFetch({
+        contentType: 'text/markdown',
+        body: Buffer.from('# Docs\n' + 'word '.repeat(30000)),
+        finalUrl: 'https://example.com/big',
+      });
+      mockGenerateContent.mockRejectedValue(new Error('API error'));
+      const tool = new WebFetchTool(mockConfig);
+      const result = await tool
+        .build({ url: 'https://example.com/big', prompt: 'summarize' })
+        .execute(new AbortController().signal);
+      expect(tool.maxOutputChars).toBeUndefined();
+      expect((result.llmContent as string).length).toBeGreaterThan(90000);
+      expect(JSON.stringify(mockGenerateContent.mock.calls[0][0])).toContain(
+        'word',
+      );
+      expect(mockConfig.trackToolResultBytes).toHaveBeenCalledWith(
+        expect.any(Number),
+      );
     });
 
     it('should keep content past 100k of raw HTML when the text itself fits', async () => {
@@ -594,14 +801,12 @@ describe('WebFetchTool', () => {
     it('should not return a late side-query success after the user aborts', async () => {
       // The final stream chunk can already be queued when the user aborts:
       // the side query then resolves successfully despite the abort.
-      const { result } = await runAnswering((_options, controller) => {
-        controller.abort();
-        return Promise.resolve({ text: 'Late success' });
-      });
-
-      expect(result.error?.type).toBe(ToolErrorType.WEB_FETCH_FALLBACK_FAILED);
-      expect(result.llmContent).not.toContain('Late success');
-      expect(result.llmContent).not.toContain('Test content');
+      await expect(
+        runAnswering((_options, controller) => {
+          controller.abort();
+          return Promise.resolve({ text: 'Late success' });
+        }),
+      ).rejects.toMatchObject({ name: 'AbortError' });
     });
 
     it.each([
@@ -629,28 +834,24 @@ describe('WebFetchTool', () => {
       },
     );
 
-    it('should return a proper error result when aborted with a non-Error reason', async () => {
+    it('should propagate cancellation with a non-Error reason', async () => {
       // Session.ts aborts with a plain string reason; throwIfAborted rethrows
       // it as-is, so the error path must not assume an Error instance.
-      const { result } = await runAnswering((_options, controller) => {
-        controller.abort('qwen:user-cancel');
-        return Promise.resolve({ text: 'Late success' });
-      });
-
-      expect(result.error?.type).toBe(ToolErrorType.WEB_FETCH_FALLBACK_FAILED);
-      expect(result.llmContent).toContain('qwen:user-cancel');
-      expect(result.llmContent).not.toContain('undefined');
-      expect(result.llmContent).not.toContain('Late success');
+      await expect(
+        runAnswering((_options, controller) => {
+          controller.abort('qwen:user-cancel');
+          return Promise.resolve({ text: 'Late success' });
+        }),
+      ).rejects.toBe('qwen:user-cancel');
     });
 
     it('should propagate a user abort instead of fabricating a raw-content result', async () => {
-      const { result } = await runAnswering((_options, controller) => {
-        controller.abort();
-        return Promise.reject(new Error('Request was aborted.'));
-      });
-
-      expect(result.error?.type).toBe(ToolErrorType.WEB_FETCH_FALLBACK_FAILED);
-      expect(result.llmContent).not.toContain('Test content');
+      await expect(
+        runAnswering((_options, controller) => {
+          controller.abort();
+          return Promise.reject(new Error('Request was aborted.'));
+        }),
+      ).rejects.toThrow('Request was aborted.');
     });
   });
 
@@ -770,6 +971,48 @@ describe('WebFetchTool', () => {
         expect.stringMatching(/\.pdf$/),
         { signal: controller.signal },
       );
+    });
+
+    it('removes and refunds a PDF cancelled during text extraction', async () => {
+      stubFetch(PDF);
+      const controller = new AbortController();
+      const reason = new DOMException('cancelled', 'AbortError');
+      mockExtractPDFText.mockImplementationOnce(async () => {
+        controller.abort(reason);
+        throw reason;
+      });
+      await expect(
+        run('https://example.com/doc.pdf', 'read it', {
+          signal: controller.signal,
+        }),
+      ).rejects.toBe(reason);
+      expect(vi.mocked(mockConfig.trackToolResultBytes).mock.calls).toEqual([
+        [pdfBytes.length],
+        [-pdfBytes.length],
+      ]);
+      expect(fs.readdirSync(toolResultsDir)).toEqual([]);
+      expect(mockGenerateContent).not.toHaveBeenCalled();
+    });
+
+    it('retains the disk charge if cancellation cleanup cannot delete the PDF', async () => {
+      stubFetch(PDF);
+      const controller = new AbortController();
+      const reason = new DOMException('cancelled', 'AbortError');
+      mockExtractPDFText.mockImplementationOnce(async (file: string) => {
+        fs.unlinkSync(file);
+        fs.mkdirSync(file);
+        controller.abort(reason);
+        throw reason;
+      });
+      await expect(
+        run('https://example.com/doc.pdf', 'read it', {
+          signal: controller.signal,
+        }),
+      ).rejects.toBe(reason);
+      expect(vi.mocked(mockConfig.trackToolResultBytes).mock.calls).toEqual([
+        [pdfBytes.length],
+      ]);
+      expect(fs.readdirSync(toolResultsDir)).toHaveLength(1);
     });
 
     it('should persist PDFs, extract their text, and summarize it', async () => {
@@ -985,6 +1228,51 @@ describe('WebFetchTool', () => {
       });
 
       const result = await run('https://example.com/readme.md');
+
+      expect(mockGenerateContent).toHaveBeenCalled();
+      expect(result.llmContent).toContain('Summary');
+    });
+
+    it('should not pass through a preapproved page the producer already truncated', async () => {
+      // The size check cannot stand in for "nothing was reduced": truncation
+      // lands its stub just under the cap, so gating on length alone hands the
+      // side query's job to a cut-off stub and never answers `params.prompt`.
+      stubSummary({
+        contentType: 'text/markdown',
+        body: Buffer.from('# Docs\n' + 'word '.repeat(30_000)),
+        finalUrl: 'https://docs.python.org/3/library/json.md',
+      });
+
+      const result = await run('https://docs.python.org/3/library/json.md');
+
+      expect(mockGenerateContent).toHaveBeenCalled();
+      expect(result.llmContent).toContain('Summary');
+    });
+
+    it('should not pass through a preapproved page whose spill write failed', async () => {
+      // A failed spill returns a bounded preview with NO outputFile, so gating
+      // the passthrough on the spill path still lets a cut-off stub stand in
+      // for the side query's answer.
+      const blocker = path.join(toolResultsDir, 'blocker');
+      fs.writeFileSync(blocker, 'not a directory');
+      const configWithBrokenSpill = {
+        ...mockConfig,
+        storage: {
+          getToolResultsDir: () => toolResultsDir,
+          getProjectTempDir: () => path.join(blocker, 'temp'),
+        },
+      } as unknown as Config;
+      stubSummary({
+        contentType: 'text/markdown',
+        body: Buffer.from('# Docs\n' + 'word '.repeat(30_000)),
+        finalUrl: 'https://docs.python.org/3/library/json.md',
+      });
+
+      const result = await run(
+        'https://docs.python.org/3/library/json.md',
+        'summarize',
+        { config: configWithBrokenSpill },
+      );
 
       expect(mockGenerateContent).toHaveBeenCalled();
       expect(result.llmContent).toContain('Summary');

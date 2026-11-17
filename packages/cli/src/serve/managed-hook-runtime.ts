@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { managedExtensionEnvironment } from './managed-extension-environment.js';
 import { createHash } from 'node:crypto';
 import { createAbortController } from '@qwen-code/qwen-code-core/utils/abortController.js';
 import { readFileSync } from 'node:fs';
@@ -40,6 +41,8 @@ import {
   type RegisteredHandlerRef,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-protocol.js';
 import type { ManagedSessionKey } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import type { ManagedExtensionProcessOwners } from './managed-extension-process.js';
+import { executeManagedExtensionCommandHook } from './managed-extension-hook.js';
 
 export interface ManagedHookDefinition
   extends Omit<ManagedHookDescriptor, 'config' | 'handler' | 'plannerKey'> {
@@ -50,6 +53,8 @@ export interface ManagedHookDefinition
     | {
         readonly type: 'function';
         readonly name?: string;
+        readonly description?: string;
+        readonly statusMessage?: string;
         readonly timeout: number;
       };
   readonly handler?: RegisteredHandlerRef & {
@@ -412,13 +417,26 @@ function parseManifest(value: unknown): ManagedHookManifest {
         (hook['matcher'] !== undefined &&
           typeof hook['matcher'] !== 'string') ||
         (config['name'] !== undefined && typeof config['name'] !== 'string') ||
+        (config['description'] !== undefined &&
+          typeof config['description'] !== 'string') ||
+        (config['statusMessage'] !== undefined &&
+          typeof config['statusMessage'] !== 'string') ||
         (config['timeout'] !== undefined &&
           (!positive(config['timeout']) || Number(config['timeout']) > 600_000))
       )
         throw new ManagedHookError('managed_hook_manifest_invalid');
       ids.add(hook['hookId'] as string);
       if (config['type'] === 'command') {
-        closed(config, ['type', 'name', 'command', 'timeout', 'env', 'shell']);
+        closed(config, [
+          'type',
+          'name',
+          'description',
+          'statusMessage',
+          'command',
+          'timeout',
+          'env',
+          'shell',
+        ]);
         if (
           typeof config['command'] !== 'string' ||
           !config['command'] ||
@@ -431,6 +449,9 @@ function parseManifest(value: unknown): ManagedHookManifest {
         closed(config, [
           'type',
           'name',
+          'description',
+          'statusMessage',
+          'if',
           'url',
           'headers',
           'allowedEnvVars',
@@ -441,6 +462,7 @@ function parseManifest(value: unknown): ManagedHookManifest {
           !['http:', 'https:'].includes(url.protocol) ||
           url.username ||
           url.password ||
+          (config['if'] !== undefined && typeof config['if'] !== 'string') ||
           (config['allowedEnvVars'] !== undefined &&
             (!Array.isArray(config['allowedEnvVars']) ||
               !config['allowedEnvVars'].every(
@@ -449,7 +471,15 @@ function parseManifest(value: unknown): ManagedHookManifest {
         )
           throw new ManagedHookError('managed_hook_manifest_invalid');
       } else if (config['type'] === 'prompt') {
-        closed(config, ['type', 'name', 'prompt', 'model', 'timeout']);
+        closed(config, [
+          'type',
+          'name',
+          'description',
+          'statusMessage',
+          'prompt',
+          'model',
+          'timeout',
+        ]);
         if (
           typeof config['prompt'] !== 'string' ||
           !config['prompt'] ||
@@ -457,7 +487,13 @@ function parseManifest(value: unknown): ManagedHookManifest {
         )
           throw new ManagedHookError('managed_hook_manifest_invalid');
       } else if (config['type'] === 'function') {
-        closed(config, ['type', 'name', 'timeout']);
+        closed(config, [
+          'type',
+          'name',
+          'description',
+          'statusMessage',
+          'timeout',
+        ]);
         const handler = object(hook['handler']);
         closed(handler, [
           'handlerId',
@@ -513,6 +549,7 @@ interface Operation {
 
 export class ManagedHookRuntime {
   private readonly manifest: ManagedHookManifest;
+  private readonly sessionManifests = new Map<string, ManagedHookManifest>();
   private readonly operations = new Map<string, Operation>();
   private readonly gates = new ManagedOperationGrantGate();
   private readonly shutdown = createAbortController();
@@ -531,8 +568,46 @@ export class ManagedHookRuntime {
       runtimeSessionId: string,
     ) => Promise<string | undefined>,
     manifest: ManagedHookManifest,
+    private readonly extensionProcesses?: ManagedExtensionProcessOwners,
   ) {
     this.manifest = parseManifest(manifest);
+  }
+
+  resolvePinnedCatalog(
+    pin: ManagedHookCatalogPin,
+  ): ManagedHookManifest['catalogs'][number] {
+    const available = [
+      ...this.manifest.catalogs,
+      ...[...this.sessionManifests.values()].flatMap(
+        (manifest) => manifest.catalogs,
+      ),
+    ];
+    const found = available.find(
+      (entry) =>
+        entry.catalogId === pin.catalogId &&
+        entry.catalogRevision === pin.catalogRevision &&
+        entry.definitionDigest === pin.definitionDigest,
+    );
+    if (!found) throw new ManagedHookError('managed_hook_catalog_unavailable');
+    return structuredClone(found);
+  }
+
+  installSessionManifest(
+    runtimeSessionId: string,
+    manifest: ManagedHookManifest,
+  ): void {
+    const parsed = parseManifest(manifest);
+    if (this.hasExtensionHolds(runtimeSessionId))
+      throw new ManagedHookError('managed_hook_session_busy');
+    if (
+      parsed.catalogs.some(
+        (entry) =>
+          entry.tenantId !== this.workspace.tenantId ||
+          entry.workspaceId !== this.workspace.workspaceId,
+      )
+    )
+      throw new ManagedHookError('managed_hook_scope_conflict');
+    this.sessionManifests.set(runtimeSessionId, parsed);
   }
 
   sealAdmission(): void {
@@ -593,7 +668,9 @@ export class ManagedHookRuntime {
       return structuredClone(existing.view);
     }
     const { pin: expected } = control;
-    const catalog = this.manifest.catalogs.find(
+    const catalog = (
+      this.sessionManifests.get(control.sessionKey.sessionId) ?? this.manifest
+    ).catalogs.find(
       (entry) =>
         entry.tenantId === control.sessionKey.tenantId &&
         entry.workspaceId === control.sessionKey.workspaceId &&
@@ -842,6 +919,26 @@ export class ManagedHookRuntime {
     ];
   }
 
+  hasUnsettledExtensionOperations(): boolean {
+    return (
+      this.pendingStarts > 0 ||
+      [...this.operations.values()].some(
+        (entry) =>
+          entry.view.state !== 'settled' ||
+          entry.moduleEvaluationPending === true,
+      )
+    );
+  }
+
+  hasExtensionHolds(sessionId: string): boolean {
+    return [...this.operations.values()].some(
+      (entry) =>
+        entry.sessionKey.sessionId === sessionId &&
+        (entry.view.state !== 'settled' ||
+          entry.moduleEvaluationPending === true),
+    );
+  }
+
   hasHolds(runtimeSessionId: string): boolean {
     return [...this.operations.values()].some(
       (entry) =>
@@ -981,53 +1078,71 @@ export class ManagedHookRuntime {
           : undefined,
       );
       dispatched = true;
-      const result = await runner.executeHook(
-        config,
-        definition.eventName,
-        {
-          ...control.input,
-          cwd: directory,
-          session_id: control.sessionKey.sessionId,
-        },
-        {
-          signal: entry.controller.signal,
-          ...(Array.isArray(
-            (control.input as unknown as Record<string, unknown>)['messages'],
-          )
-            ? {
-                messages: (
-                  control.input as unknown as {
-                    messages: Array<Record<string, unknown>>;
-                  }
-                ).messages,
-              }
-            : {}),
-          ...('tool_use_id' in control.input &&
-          typeof control.input.tool_use_id === 'string'
-            ? { toolUseID: control.input.tool_use_id }
-            : {}),
-        },
-        config.type === HookType.Command
-          ? {
-              waitForProcessTree: true,
-              cgroupRoot: process.env['QWEN_MANAGED_HOOK_CGROUP_ROOT'],
-              environment: {
-                PATH: process.env['PATH'] ?? '',
-                HOME: directory,
-                USERPROFILE: directory,
-                ...(process.env['SystemRoot']
-                  ? { SYSTEMROOT: process.env['SystemRoot'] }
+      const result =
+        config.type === HookType.Command && this.extensionProcesses
+          ? await executeManagedExtensionCommandHook(
+              runner,
+              this.extensionProcesses,
+              control.sessionKey.sessionId,
+              control.pin.catalogRevision,
+              config,
+              {
+                ...control.input,
+                cwd: directory,
+                session_id: control.sessionKey.sessionId,
+              },
+              entry.controller.signal,
+              managedExtensionEnvironment(process.env, directory),
+            )
+          : await runner.executeHook(
+              config,
+              definition.eventName,
+              {
+                ...control.input,
+                cwd: directory,
+                session_id: control.sessionKey.sessionId,
+              },
+              {
+                signal: entry.controller.signal,
+                ...(Array.isArray(
+                  (control.input as unknown as Record<string, unknown>)[
+                    'messages'
+                  ],
+                )
+                  ? {
+                      messages: (
+                        control.input as unknown as {
+                          messages: Array<Record<string, unknown>>;
+                        }
+                      ).messages,
+                    }
+                  : {}),
+                ...('tool_use_id' in control.input &&
+                typeof control.input.tool_use_id === 'string'
+                  ? { toolUseID: control.input.tool_use_id }
                   : {}),
               },
-            }
-          : config.type === HookType.Http
-            ? {
-                trackHttpRequest: true,
-                // Preserve the response as completion proof after user cancel.
-                httpRequestSignal: this.shutdown.signal,
-              }
-            : undefined,
-      );
+              config.type === HookType.Command
+                ? {
+                    waitForProcessTree: true,
+                    cgroupRoot: process.env['QWEN_MANAGED_HOOK_CGROUP_ROOT'],
+                    environment: {
+                      PATH: process.env['PATH'] ?? '',
+                      HOME: directory,
+                      USERPROFILE: directory,
+                      ...(process.env['SystemRoot']
+                        ? { SYSTEMROOT: process.env['SystemRoot'] }
+                        : {}),
+                    },
+                  }
+                : config.type === HookType.Http
+                  ? {
+                      trackHttpRequest: true,
+                      // Preserve the response as completion proof after user cancel.
+                      httpRequestSignal: this.shutdown.signal,
+                    }
+                  : undefined,
+            );
       if (result.error instanceof HookCommandIsolationUnavailableError) {
         entry.view = {
           operationId: control.operationId,
@@ -1056,7 +1171,12 @@ export class ManagedHookRuntime {
       }
       const uncertain =
         (config.type === HookType.Command &&
-          result.processTreeDrained !== true) ||
+          result.processTreeDrained !== true &&
+          !(
+            this.extensionProcesses?.mode === 'developer-process-group' &&
+            result.processReceipt?.scope === 'process_group' &&
+            result.processReceipt.state === 'stopped'
+          )) ||
         (config.type === HookType.Function && !functionSettled) ||
         (config.type === HookType.Http &&
           (!result.httpRequestState ||

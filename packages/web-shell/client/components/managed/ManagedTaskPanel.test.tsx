@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../i18n';
 import { ManagedTaskPanel } from './ManagedTaskPanel';
 import { task, taskEvent } from './managed-task.test-fixtures';
+import type { ManagedTask } from './managed-agent-provider';
 import type { useManagedTasks } from './use-managed-tasks';
 import type { useManagedTaskCancel } from './use-managed-task-cancel';
 import type { ManagedToolResultReader } from './managed-tool-result-types';
@@ -17,12 +18,16 @@ describe('ManagedTaskPanel', () => {
   let cancel: ReturnType<typeof useManagedTaskCancel>;
   let onClose: ReturnType<typeof vi.fn>;
   let restore: ReturnType<typeof vi.fn>;
+  let onOpenChild: ReturnType<typeof vi.fn>;
+  let waitingSessions: ReadonlySet<string>;
   beforeEach(() => {
     container = document.createElement('div');
     document.body.append(container);
     root = createRoot(container);
     onClose = vi.fn();
     restore = vi.fn();
+    onOpenChild = vi.fn();
+    waitingSessions = new Set();
     tasks = {
       page: { data: [task], hasMore: false },
       events: [],
@@ -71,6 +76,8 @@ describe('ManagedTaskPanel', () => {
             onClose={onClose}
             restoreFocus={restore}
             reader={reader}
+            waitingSessions={waitingSessions}
+            onOpenChild={onOpenChild}
           />
         </I18nProvider>,
       ),
@@ -84,18 +91,80 @@ describe('ManagedTaskPanel', () => {
     return found!;
   }
 
-  it('filters mixed task kinds and keeps navigation on an empty filtered page', async () => {
+  it('keeps a stop request separate from termination and uses the full active child count', async () => {
+    const child = {
+      ...task,
+      childSessionId: 'child-1',
+      approvalMode: 'auto-edit' as const,
+      stopRequested: true,
+    };
+    tasks.page = { data: [child], hasMore: true, activeChildCount: 4 };
+    tasks.task = child;
+    tasks.selectedId = child.taskId;
+    waitingSessions = new Set(['child-1']);
+    await render();
+    expect(container.textContent).toContain('Active child Agents: 4');
+    expect(container.textContent).toContain('Awaiting approval');
+    expect(container.textContent).toContain(
+      'Stop requested. Waiting for the task to end.',
+    );
+    expect(container.textContent).toContain('Approval mode: auto-edit');
+    expect(container.textContent).toContain('Running');
+    expect(container.textContent).not.toContain('Cancelled');
+    expect(
+      [...container.querySelectorAll('button')].some(
+        (item) => item.textContent === 'Request cancellation',
+      ),
+    ).toBe(false);
+    await act(async () => button('View child Session').click());
+    expect(onOpenChild).toHaveBeenCalledWith('child-1');
+  });
+
+  it('lists every task kind with its label and offers cancel only where the task advertises it', async () => {
     tasks.page = {
-      data: [{ ...task, kind: 'automation_run', taskId: 'other-kind' }],
+      data: [
+        {
+          ...task,
+          kind: 'automation_run',
+          taskId: 'task_automation',
+          actionCapabilities: [],
+        },
+        { ...task, kind: 'background_shell', taskId: 'task_shell' },
+        {
+          ...task,
+          kind: 'future_kind' as ManagedTask['kind'],
+          taskId: 'task_future',
+          actionCapabilities: [],
+        },
+      ],
       hasMore: true,
       nextCursor: 'next',
     };
     await render();
-    expect(container.textContent).toContain('No child Agents on this page');
-    expect(container.textContent).not.toContain('other-kind');
+    expect(container.textContent).toContain('Automation run · automati');
+    expect(container.textContent).toContain('Background Shell · shell');
+    expect(container.textContent).toContain('Task · future');
+    expect(
+      [...document.querySelectorAll('button')].filter(
+        (item) => item.textContent === 'Request cancellation',
+      ),
+    ).toHaveLength(1);
+    await act(async () => button('Request cancellation').click());
+    await act(async () => button('Confirm cancellation').click());
+    expect(cancel.submit).toHaveBeenCalledWith(
+      expect.objectContaining({ taskId: 'task_shell' }),
+    );
     await act(async () => button('Next page').click());
     expect(tasks.next).toHaveBeenCalledOnce();
     expect(button('Previous page').disabled).toBe(true);
+  });
+
+  it('keeps navigation on an empty page', async () => {
+    tasks.page = { data: [], hasMore: true, nextCursor: 'next' };
+    await render();
+    expect(container.textContent).toContain('No tasks on this page');
+    await act(async () => button('Next page').click());
+    expect(tasks.next).toHaveBeenCalledOnce();
   });
 
   it('requires inline confirmation and keeps accepted cancellation distinct from task settlement', async () => {

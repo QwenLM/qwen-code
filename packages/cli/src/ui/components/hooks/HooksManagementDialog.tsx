@@ -347,7 +347,13 @@ export function HooksManagementDialog({
                 config: hookConfig,
                 source: HooksConfigSource.Project,
                 sourceDisplay: sourceDisplayMap[HooksConfigSource.Project],
-                enabled: true,
+                // Match the execution accessor: pending/rejected withholds;
+                // otherwise the block runs exactly when getProjectHooks()
+                // serves it (approved, or explicitly trusted, or headless).
+                enabled:
+                  !config.isProjectHooksPendingApproval() &&
+                  config.getProjectHooks() !== undefined,
+                rejected: config.isProjectHooksRejected(),
               },
               groupByMatcher,
             );

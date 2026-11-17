@@ -33,8 +33,12 @@ vi.mock('../utils/debugLogger.js', () => ({
 
 import {
   FileHistoryService,
+  serializeSnapshot,
+  deserializeSnapshots,
   type FileHistorySnapshot,
 } from './fileHistoryService.js';
+
+import { removeFileHistorySnapshots } from '../utils/file-history-snapshots.js';
 
 const V1_BACKUP = expect.objectContaining({
   backupFileName: expect.any(String),
@@ -692,6 +696,57 @@ describe('FileHistoryService', () => {
 
     it('returns undefined when the prompt has no snapshot', async () => {
       expect(await service.getTurnDiff('missing')).toBeUndefined();
+    });
+
+    it('preserves original diff endpoints across deletion, restart, new turns and rewind', async () => {
+      const file = await trackAndEdit('a.txt', 'zero\n', 'A\n');
+      const created = at('created-in-b.txt');
+      await service.trackEdit(created);
+      await writeFile(created, 'created in deleted B');
+      await writeFile(file, 'B\n');
+      await service.makeSnapshot('p3');
+      await writeFile(file, 'C\n');
+      const original = await service.getTurnDiff('p1');
+      expect(original?.files).toHaveLength(1);
+      expect(original?.files[0]?.hunks.flatMap((hunk) => hunk.lines)).toContain(
+        '+A',
+      );
+      service.restoreFromSnapshots(
+        removeFileHistorySnapshots(service.getSnapshots(), new Set(['p2'])),
+      );
+      expect(service.getSnapshots().map((item) => item.promptId)).toEqual([
+        'p1',
+        'p3',
+      ]);
+      expect(await service.getTurnDiff('p1')).toEqual(original);
+      const persisted = service.getSnapshots().map(serializeSnapshot);
+      service.restoreFromSnapshots(deserializeSnapshots(persisted));
+      expect(await service.getTurnDiff('p1')).toEqual(original);
+      service.restoreFromSnapshots(
+        removeFileHistorySnapshots(service.getSnapshots(), new Set(['p3'])),
+      );
+      const restoredOnlyA = new FileHistoryService(
+        'test-session',
+        true,
+        projectDir,
+      );
+      restoredOnlyA.restoreFromSnapshots(
+        deserializeSnapshots(service.getSnapshots().map(serializeSnapshot)),
+      );
+      await restoredOnlyA.rewind('p1');
+      expect(existsSync(created)).toBe(false);
+      await writeFile(created, 'created again');
+      await restoredOnlyA.rewind('p1');
+      expect(existsSync(created)).toBe(false);
+      await writeFile(created, 'created again');
+      await writeFile(file, 'new turn\n');
+      await service.makeSnapshot('p4');
+      await service.trackEdit(created);
+      expect(await service.getTurnDiff('p1')).toEqual(original);
+      await service.rewind('p1');
+      expect(await readFile(file, 'utf8')).toBe('zero\n');
+      expect(existsSync(created)).toBe(false);
+      expect(await service.getTurnDiff('p1')).toEqual(original);
     });
 
     it('diffs a turn against the next snapshot', async () => {
