@@ -328,11 +328,14 @@ async function expectNoExtraErrors(page: Page) {
     page.getByRole('region', { name: /Session recovery|会话恢复/ }),
   ).toHaveCount(0);
   await expect(page.getByRole('alert')).toHaveCount(0);
-  await expect(
-    page.getByRole('button', {
-      name: /^(Retry the same request|Discard this request|重试同一请求|丢弃本次请求)$/,
-    }),
-  ).toHaveCount(0);
+  // No standalone failure/retry box beside the composer. Discard is allowed
+  // inside the message stream, where it resolves the failed request.
+  const stream = page.locator('[data-web-shell-message-list]');
+  const requestAction =
+    /^(Retry the same request|Discard this request|重试同一请求|丢弃本次请求)$/;
+  expect(await page.getByRole('button', { name: requestAction }).count()).toBe(
+    await stream.getByRole('button', { name: requestAction }).count(),
+  );
   await expect(
     page.getByRole('status').filter({
       hasText: /The previous message was not confirmed|上一条消息未确认/,

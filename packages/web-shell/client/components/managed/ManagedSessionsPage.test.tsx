@@ -119,6 +119,7 @@ vi.mock('../MessageList', () => ({
     welcomeHeader,
     showRetryHint,
     onRetryClick,
+    tailContent,
   }: {
     messages: ComponentProps<
       (typeof import('../MessageList'))['MessageList']
@@ -130,12 +131,14 @@ vi.mock('../MessageList', () => ({
     welcomeHeader?: ReactNode;
     showRetryHint?: boolean;
     onRetryClick?: () => void;
+    tailContent?: ReactNode;
   }) => {
     mocks.messageListProps = { messages, showRetryHint, onRetryClick };
     mocks.loadToolDetails = useContext(ToolDetailsContext);
     return (
       <>
         {welcomeHeader}
+        {tailContent}
         <button onClick={() => onToolResultOpen?.('item-1')}>
           Open tool output
         </button>
@@ -5907,13 +5910,18 @@ describe('ManagedSessionsPage', () => {
     await input('Do the work');
     await click('Send');
     expect(messageErrorTexts()).toContain('Network failed');
+    // Retry lives in the message, not in a box beside the composer; Discard
+    // stays reachable because a permanent failure cannot be retried away.
     expect(
       [...container.querySelectorAll('button')].filter(
-        (button) =>
-          button.textContent === 'Discard this request' ||
-          button.textContent === 'Retry the same request',
+        (button) => button.textContent === 'Retry the same request',
       ),
     ).toHaveLength(0);
+    expect(
+      [...container.querySelectorAll('button')].some(
+        (button) => button.textContent === 'Discard this request',
+      ),
+    ).toBe(true);
     expect(container.querySelector('textarea')?.disabled).toBe(true);
     await retryMessage();
     const [first, retry] = mocks.client.createSession.mock.calls;
@@ -6058,6 +6066,225 @@ describe('ManagedSessionsPage', () => {
       JSON.stringify(record),
     );
   }
+
+  async function focusAndClickDiscard() {
+    const discard = [...container.querySelectorAll('button')].find(
+      (item) => item.textContent === 'Discard this request',
+    );
+    expect(discard).toBeDefined();
+    discard!.focus();
+    await act(async () => {
+      discard!.click();
+      await flush();
+    });
+  }
+
+  it('discards a permanently failing pending prompt and restores the draft', async () => {
+    mocks.client.createSession.mockRejectedValue(
+      new TypeError('Network failed'),
+    );
+    await render();
+    await input('Do the work');
+    await click('Send');
+    expect(messageErrorTexts()).toContain('Network failed');
+    const textarea = () => container.querySelector('textarea');
+    expect(textarea()?.disabled).toBe(true);
+
+    // Retry alone cannot resolve a permanent failure: without this escape the
+    // composer stays wedged and the only copy of the draft is unreachable.
+    await focusAndClickDiscard();
+    expect(messageErrorTexts()).toEqual([]);
+    expect(textarea()?.disabled).toBe(false);
+    expect(textarea()?.value).toBe('Do the work');
+    expect(mocks.client.createSession).toHaveBeenCalledTimes(1);
+    // A create that committed server-side before the unconfirmed failure
+    // re-surfaces in the session list.
+    expect(mocks.client.listSessions).toHaveBeenCalledTimes(2);
+    expect(document.activeElement).toBe(textarea());
+
+    // The persisted record is gone too: a real remount does not return it.
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await render();
+    expect(messageErrorTexts()).toEqual([]);
+  });
+
+  it('sends the edited draft under a fresh idempotency key after a discard', async () => {
+    mocks.client.createSession.mockRejectedValueOnce(
+      new TypeError('Network failed'),
+    );
+    await render();
+    await input('Do the work');
+    await click('Send');
+    const originalKey =
+      mocks.client.createSession.mock.calls[0]?.[1].idempotencyKey;
+
+    await click('Discard this request');
+    await input('Do the other work');
+    await click('Send');
+
+    expect(mocks.client.createSession).toHaveBeenCalledTimes(2);
+    expect(mocks.client.createSession.mock.calls[1]?.[0]).toEqual({
+      text: 'Do the other work',
+    });
+    expect(
+      mocks.client.createSession.mock.calls[1]?.[1].idempotencyKey,
+    ).not.toBe(originalKey);
+  });
+
+  it('restores the draft from storage when a remounted pending prompt is discarded', async () => {
+    mocks.client.createSession.mockRejectedValueOnce(
+      new TypeError('Network failed'),
+    );
+    await render();
+    await input('Keep this prompt');
+    await click('Send');
+
+    // A real remount empties the text state: the composer is fed from the
+    // persisted pending record alone.
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await render();
+    expect(container.querySelector('textarea')?.value).toBe('Keep this prompt');
+
+    await click('Discard this request');
+    expect(container.querySelector('textarea')?.value).toBe('Keep this prompt');
+    expect(container.querySelector('textarea')?.disabled).toBe(false);
+    expect(messageErrorTexts()).toEqual([]);
+  });
+
+  it('moves focus to the session list when a discard leaves the composer disabled', async () => {
+    mocks.client.getSession.mockImplementation(async (id: string) =>
+      summary(id, { capabilities: { canSend: false, canCancel: false } }),
+    );
+    seedPending({
+      idempotencyKey: 'key-1',
+      text: 'Session draft',
+      sessionId: 's1',
+    });
+    await render('s1');
+    expect(container.querySelector('textarea')?.disabled).toBe(true);
+
+    await focusAndClickDiscard();
+
+    expect(document.activeElement).not.toBe(document.body);
+    expect(document.activeElement).toBe(container.querySelector('nav'));
+  });
+
+  it('moves focus to the composer once a discard’s loading window ends', async () => {
+    let releaseSummary!: (value: ManagedAgentSessionSummary) => void;
+    mocks.client.getSession.mockImplementationOnce(
+      () =>
+        new Promise<ManagedAgentSessionSummary>((resolve) => {
+          releaseSummary = resolve;
+        }),
+    );
+    seedPending({
+      idempotencyKey: 'key-1',
+      text: 'Restore me',
+      sessionId: 's1',
+    });
+    await render('s1');
+    expect(container.querySelector('textarea')?.disabled).toBe(true);
+
+    await focusAndClickDiscard();
+    expect(document.activeElement).toBe(container.querySelector('nav'));
+
+    await act(async () => {
+      releaseSummary(summary('s1'));
+      await flush();
+    });
+    expect(container.querySelector('textarea')?.value).toBe('Restore me');
+    expect(document.activeElement).toBe(container.querySelector('textarea'));
+  });
+
+  it('announces the discard where the composer cannot take focus', async () => {
+    mocks.client.getSession.mockImplementation(async (id: string) =>
+      summary(id, { capabilities: { canSend: false, canCancel: false } }),
+    );
+    seedPending({
+      idempotencyKey: 'key-1',
+      text: 'Session draft',
+      sessionId: 's1',
+    });
+    await render('s1');
+
+    await focusAndClickDiscard();
+
+    // The action unmounted with the click; the persistent visually hidden
+    // status region still announces the outcome.
+    expect(
+      Array.from(
+        container.querySelectorAll('[role="status"], [aria-live]'),
+      ).map((node) => node.textContent),
+    ).toContain('Request discarded. The draft is back in the composer.');
+  });
+
+  it('offers discard on the binding creation page that renders no transcript', async () => {
+    const bindingProvider = {
+      ...provider,
+      workspaceBinding: {
+        agentId: 'agent-a',
+        list: vi.fn().mockResolvedValue({ data: [], supported: true }),
+        get: vi.fn(),
+        createEmpty: vi.fn(),
+      },
+    } as unknown as ManagedAgentProvider;
+    seedPending({ idempotencyKey: 'key-1', text: 'Bind this draft' });
+    await render(undefined, 'en', bindingProvider);
+    // The workspace-binding creator replaces the composer form entirely.
+    expect(container.querySelector('textarea')).toBeNull();
+
+    await focusAndClickDiscard();
+
+    expect(document.activeElement).not.toBe(document.body);
+    expect(document.activeElement).toBe(container.querySelector('nav'));
+  });
+
+  it('reports an export failure for another Session without blaming this conversation', async () => {
+    mocks.client.listSessions.mockResolvedValue({
+      sessions: [summary('s1'), summary('s2')],
+    });
+    provider = {
+      ...provider,
+      exportSnapshot: vi
+        .fn()
+        .mockRejectedValue(new Error('invalid_export_snapshot')),
+    };
+    await render('s1');
+    const slot = document.createElement('aside');
+    document.body.appendChild(slot);
+    try {
+      await render('s1', 'en', provider, slot);
+      const triggers = slot.querySelectorAll<HTMLButtonElement>(
+        'button[aria-haspopup="menu"]',
+      );
+      expect(triggers.length).toBeGreaterThan(1);
+      await act(async () => {
+        triggers[1]!.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+        );
+      });
+      const exportItem = [
+        ...document.querySelectorAll('[role="menuitem"]'),
+      ].find((item) =>
+        item.textContent?.includes('Export HTML'),
+      ) as HTMLElement;
+      expect(exportItem).toBeDefined();
+      await act(async () => {
+        exportItem.click();
+        await flush();
+      });
+      // The sidebar can export any Session: the refusal must be visible while
+      // viewing s1, and must not read as a failed turn in s1's transcript.
+      expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+        'no longer available',
+      );
+      expect(messageErrorTexts()).toEqual([]);
+    } finally {
+      slot.remove();
+    }
+  });
 
   it('preserves another session draft when opening the owner of a restored pending prompt', async () => {
     mocks.client.listSessions.mockResolvedValue({

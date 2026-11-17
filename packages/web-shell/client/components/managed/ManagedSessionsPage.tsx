@@ -629,8 +629,11 @@ function ManagedSessionsContent({
       : undefined;
   const requestError = raisedError?.pageLevel ? undefined : error;
   // A request failure is a conversation message; anything else keeps the
-  // page-level alert instead of posing as a failed turn in this Session.
-  const pageError = interactive && raisedError?.pageLevel ? error : undefined;
+  // page-level alert instead of posing as a failed turn in this Session. A
+  // page failure has no owning conversation — exporting another Session from
+  // the sidebar must still report it here.
+  const pageError =
+    interactive && raisedError?.pageLevel ? raisedError.message : undefined;
   const [discarded, setDiscarded] = useState(false);
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
@@ -863,15 +866,18 @@ function ManagedSessionsContent({
         )
       : undefined;
   const messages = useMemo<Message[]>(() => {
+    // Only the unconfirmed request itself can be retried. A transcript read
+    // failure or a recovery verdict describes a different condition, and
+    // resubmitting would not resolve either.
+    const requestFailure =
+      requestError ??
+      (pendingHere && !busy ? t('managed.uncertain') : undefined);
     const failures = [
       ...new Set(
         [
           detail.stoppedReason,
           detail.error,
-          requestError,
-          pendingHere && !busy && !requestError
-            ? t('managed.uncertain')
-            : undefined,
+          requestFailure,
           failureMessage,
           recoveryError,
         ].filter((message): message is string => Boolean(message)),
@@ -893,7 +899,7 @@ function ManagedSessionsContent({
             id: `managed-error:${sessionId ?? 'new'}:${content}`,
             role: 'system',
             variant: 'error',
-            retryable: Boolean(pendingHere) && content !== recoveryError,
+            retryable: content === requestFailure,
             content,
             timestamp: Date.now(),
           }),
@@ -1037,6 +1043,16 @@ function ManagedSessionsContent({
   // MessageItem compares this prop by identity, so an inline arrow would
   // re-render every visible message row on each page render.
   const retryMessage = useCallback(() => void submitRef.current(), []);
+  // An unconfirmed send disables the composer, so retry alone would strand the
+  // only copy of the draft. Discard sits with the failure it resolves. The ref
+  // keeps this identity stable for the message-list memo.
+  const discardMessage = useCallback(() => discardPendingRef.current(), []);
+  const discardAction =
+    pendingHere && !busy ? (
+      <Button variant="ghost" size="sm" onClick={discardMessage}>
+        {t('managed.discard')}
+      </Button>
+    ) : undefined;
 
   useEffect(() => {
     if (
@@ -2123,7 +2139,7 @@ function ManagedSessionsContent({
       data-web-shell-focus-region
       className={`flex h-full min-h-0 flex-col ${home ? '' : 'gap-3'}`}
     >
-      {/* The uncertain-request row unmounts on the Discard click itself, so
+      {/* The uncertain-request action unmounts on the Discard click itself, so
           a persistent region announces the outcome wherever focus lands. */}
       <p role="status" className="sr-only">
         {discarded ? t('managed.discarded') : ''}
@@ -2436,38 +2452,43 @@ function ManagedSessionsContent({
           )}
           {provider.workspaceBinding &&
             (!sessionId || workspaceCreationOpen) && (
-              <WorkspaceBindingCreator
-                key={!sessionId ? 'new' : 'workspace'}
-                provider={provider}
-                workspaceCreationOpen={workspaceCreationOpen}
-                onWorkspaceCreationOpenChange={onWorkspaceCreationOpenChange}
-                onOpenLocalWorkspace={onOpenLocalWorkspace}
-                daemonWorkspaces={daemonWorkspaces}
-                onSelectDaemonWorkspace={onSelectDaemonWorkspace}
-                creationOnly={Boolean(sessionId)}
-                clientId={clientId}
-                workspaceId={workspaceId}
-                onSelectWorkspace={
-                  !sessionId
-                    ? (onSessionWorkspaceChange ?? onSelectWorkspace)
-                    : undefined
-                }
-                interactive={interactive}
-                creationSkills={creationSkills}
-                onWorkspaceCreated={(id) => {
-                  setWorkspaceRevision((current) => current + 1);
-                  onWorkspaceCreated?.(id);
-                }}
-                onCreated={(createdId, createdWorkspaceId) => {
-                  setListRevision((current) => current + 1);
-                  onSelectSession(createdId, createdWorkspaceId);
-                }}
-                onAbandoned={() => setListRevision((current) => current + 1)}
-                renderWelcomeHeader={renderWelcomeHeader}
-                renderWelcomeFooter={renderWelcomeFooter}
-                renderComposerFooter={CustomComposerFooter}
-                alignManagedChatWithHost={alignManagedChatWithHost}
-              />
+              <>
+                {/* The binding creator replaces the transcript, so the
+                    conversation's discard slot is not rendered here. */}
+                {!sessionId && discardAction}
+                <WorkspaceBindingCreator
+                  key={!sessionId ? 'new' : 'workspace'}
+                  provider={provider}
+                  workspaceCreationOpen={workspaceCreationOpen}
+                  onWorkspaceCreationOpenChange={onWorkspaceCreationOpenChange}
+                  onOpenLocalWorkspace={onOpenLocalWorkspace}
+                  daemonWorkspaces={daemonWorkspaces}
+                  onSelectDaemonWorkspace={onSelectDaemonWorkspace}
+                  creationOnly={Boolean(sessionId)}
+                  clientId={clientId}
+                  workspaceId={workspaceId}
+                  onSelectWorkspace={
+                    !sessionId
+                      ? (onSessionWorkspaceChange ?? onSelectWorkspace)
+                      : undefined
+                  }
+                  interactive={interactive}
+                  creationSkills={creationSkills}
+                  onWorkspaceCreated={(id) => {
+                    setWorkspaceRevision((current) => current + 1);
+                    onWorkspaceCreated?.(id);
+                  }}
+                  onCreated={(createdId, createdWorkspaceId) => {
+                    setListRevision((current) => current + 1);
+                    onSelectSession(createdId, createdWorkspaceId);
+                  }}
+                  onAbandoned={() => setListRevision((current) => current + 1)}
+                  renderWelcomeHeader={renderWelcomeHeader}
+                  renderWelcomeFooter={renderWelcomeFooter}
+                  renderComposerFooter={CustomComposerFooter}
+                  alignManagedChatWithHost={alignManagedChatWithHost}
+                />
+              </>
             )}
           {latestSuccessfulTodos !== undefined &&
             latestSuccessfulTodos.length > 0 && (
@@ -2496,6 +2517,8 @@ function ManagedSessionsContent({
                     Boolean(pendingHere) && !busy && !compression.blocked
                   }
                   onRetryClick={retryMessage}
+                  tailContent={discardAction}
+                  tailKey="managed-pending-discard"
                   onToolResultOpen={
                     summary?.capabilities.artifacts && provider.toolResults
                       ? openResult
