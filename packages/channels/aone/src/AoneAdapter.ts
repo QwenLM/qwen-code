@@ -226,14 +226,13 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
     // default — warn about the repos that are ACTUALLY open, not the
     // wildcard entry alone (a per-repo allowlist with no "*" entry is
     // restricted and must not warn).
-    const openRepos = this.repos.filter(
-      (repo) => this.groupSendersFor({ chatId: repo }) === 'open',
-    );
-    // The dead posture: under allowlist, "*" is a default config, NOT a
-    // wildcard allow (GroupGate.check), so a watch list with no per-repo
-    // groups entry rejects every event as not_allowlisted while the cursor
-    // advances. The entry check mirrors ChannelBase.groupConfigFor
-    // (private): exact key, then normalized-match.
+    //
+    // Reachability first: under allowlist, GroupGate.check rejects a repo
+    // with no groups entry (not_allowlisted) BEFORE the sender gate runs,
+    // so such a repo's sender policy is never reached — it is dead, not
+    // open, and must be excluded from the permissive warning. The entry
+    // check mirrors ChannelBase.groupConfigFor (private): exact key, then
+    // normalized-match.
     const groups = this.config.groups ?? {};
     const hasGroupsEntry = (repo: string) => {
       if (Object.hasOwn(groups, repo)) return true;
@@ -242,22 +241,40 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
         (key) => this.normalizeGroupId(key) === normalized,
       );
     };
+    const allowlistDeadRepos =
+      cfg.groupPolicy === 'allowlist'
+        ? this.repos.filter((repo) => !hasGroupsEntry(repo))
+        : [];
+    const openRepos = this.repos.filter(
+      (repo) =>
+        this.groupSendersFor({ chatId: repo }) === 'open' &&
+        !allowlistDeadRepos.includes(repo),
+    );
     const deadAllowlist =
       cfg.groupPolicy === 'allowlist' &&
-      !this.repos.some((repo) => hasGroupsEntry(repo));
+      allowlistDeadRepos.length === this.repos.length;
     if (deadAllowlist) {
+      // Every watched repo is dead: nothing dispatches at all.
       process.stderr.write(
         `[Channel:${this.name}] warning: groupPolicy "allowlist" but no watched repository has a groups entry — every event will be rejected as not_allowlisted (the "*" entry is a default, not a wildcard, under allowlist)\n`,
       );
-    } else if (
+    } else if (allowlistDeadRepos.length > 0) {
+      // Mixed: some repos reachable, some dead. Name the dead ones — their
+      // triggers silently drop, and the permissive warning below must not
+      // claim they are open.
+      process.stderr.write(
+        `[Channel:${this.name}] warning: no groups entry for ${allowlistDeadRepos.join(', ')} under groupPolicy "allowlist" — events on those repositories will be rejected as not_allowlisted (the "*" entry is a default, not a wildcard, under allowlist)\n`,
+      );
+    }
+    if (
       (cfg.groupPolicy === 'open' || cfg.groupPolicy === 'allowlist') &&
       openRepos.length > 0
     ) {
-      // Permissive posture: open senders on a watched repo — under
-      // groupPolicy open directly, or under allowlist via a membership
-      // entry whose senders fall back to an open "*" default. Suppressed
-      // for the dead posture (nothing dispatches there, so "any commenter
-      // can drive the agent" would be noise).
+      // Permissive posture: open senders on a reachable watched repo —
+      // under groupPolicy open directly, or under allowlist via a
+      // membership entry whose senders fall back to an open "*" default.
+      // openRepos already excludes allowlist-dead repos, so the all-dead
+      // posture never reaches here (nothing dispatches there).
       process.stderr.write(
         `[Channel:${this.name}] warning: open group senders on ${openRepos.join(', ')} — any commenter on those repositories can drive the agent as the a1-login account; set groups["<repo>"].senders to "allowlist" with allowedUsers to restrict (see the design doc sample)\n`,
       );

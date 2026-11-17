@@ -149,12 +149,17 @@ hosts (it is what the local E2E harness used), not the recommended default.
   github/gitlab), so a membership entry's senders fall back to the
   channel-wide `*` policy. A UI-created channel is therefore permissive
   only while the operator leaves Group senders at its default.
-  `connect()` warns about the watched repos that are ACTUALLY open (a
-  per-repo allowlist with no `*` entry is restricted and does not warn),
-  and separately warns about the dead posture: `groupPolicy: allowlist`
-  with no watched-repo `groups` entry rejects every event as
-  `not_allowlisted`, because under allowlist `*` is a default config, not
-  a wildcard allow. The sample below shows the per-repository tightening
+  `connect()` warns about the watched repos that are ACTUALLY open — open
+  senders AND reachable: under `groupPolicy: allowlist` the group gate
+  rejects a repo with no `groups` entry as `not_allowlisted` BEFORE the
+  sender gate runs, so such a repo is dead, not open, and is excluded from
+  the permissive warning (a per-repo allowlist with no `*` entry is
+  likewise restricted and does not warn). It separately diagnoses the dead
+  repos: when EVERY watched repo lacks an entry it warns that nothing
+  dispatches; when only SOME lack entries (a mixed watch list) it names
+  those repos so the operator knows their triggers silently drop while the
+  reachable repos still warn normally. Under allowlist `*` is a default
+  config, not a wildcard allow. The sample below shows the per-repository tightening
   a hand-written config must do. `sessionScope` defaults to `chat_thread`
   (one session per repo+MR thread). No `token` field — a1 authenticates
   through its own login on the channel host.
@@ -348,15 +353,21 @@ connect where a rule exists (GitHub `validateRepoFilterConfig` pattern).
   rethrows); negative view cache incl. per-poll scope (two-poll retry);
   empty AND whitespace template fallback; createdAt/author/body drift
   diagnostics incl. author TYPE drift (no public error comment);
-  permissive-config warning scoped to actually-open repos + dead-posture
-  allowlist warning; durable repo_failed journal record on partial
-  failure; aged-out cursor jump diagnostic (dormant repo silent);
-  descriptor groupPolicy default; repo-path lowercasing. Mutation-
-  witnessed: dedup, per-repo isolation, overflow walk, cursor-reached
-  break, prune save, whitespace fallback, partial-failure cadence,
-  universal budget, platform ceiling, per-poll cache clear, permissive
-  warning, drift diagnostics, midnight window, aging diagnostic, author
-  type guard, durable failure record, warning scope, dead-posture warning.
+  permissive-config warning scoped to actually-open AND reachable repos
+  (allowlist-dead repos excluded) + all-dead and mixed dead-repo
+  diagnostics + case-normalized groups entry; senderName/chatId fallback
+  on sibling-field type drift; empty-string author skip; durable
+  repo_failed journal record on partial failure (error bounded to 200
+  code points, single line — enforced by the journal write path); aged-out
+  cursor jump diagnostic (dormant repo silent); descriptor groupPolicy
+  default; repo-path lowercasing. Mutation-witnessed: dedup, per-repo
+  isolation, overflow walk, cursor-reached break, prune save, whitespace
+  fallback, partial-failure cadence, universal budget, platform ceiling,
+  per-poll cache clear, permissive warning, drift diagnostics, midnight
+  window, aging diagnostic, author type guard, durable failure record,
+  warning scope, dead-posture warning, reachability exclusion, mixed
+  dead-repo naming, warning repo naming, case-normalized entry,
+  senderName fallback, chatId fallback, empty-author guard.
 - Live read-only smoke: real `a1 events repo middleware/tddl5` fetch+parse,
   no dispatch, no writes (env-gated).
 - Full-loop E2E with a stubbed `a1` on PATH (canned whoami/events; comment

@@ -320,6 +320,11 @@ describe('AoneChannel', () => {
           ),
         ),
       ).toBe(true);
+      // The all-dead posture must NOT also report the repos as open: nothing
+      // dispatches there, so "any commenter can drive the agent" is false.
+      expect(
+        stderr.mock.calls.some((c) => String(c[0]).includes('any commenter')),
+      ).toBe(false);
       ch.disconnect();
       stderr.mockRestore();
     });
@@ -337,9 +342,12 @@ describe('AoneChannel', () => {
         makeBridge(),
       );
       await ch.connect();
-      expect(
-        stderr.mock.calls.some((c) => String(c[0]).includes('any commenter')),
-      ).toBe(true);
+      const permissive = stderr.mock.calls
+        .map((c) => String(c[0]))
+        .find((l) => l.includes('any commenter'));
+      expect(permissive).toBeDefined();
+      // The warning must NAME the open repo, not be generic.
+      expect(permissive).toContain('test/repo');
       expect(
         stderr.mock.calls.some((c) =>
           String(c[0]).includes(
@@ -347,6 +355,95 @@ describe('AoneChannel', () => {
           ),
         ),
       ).toBe(false);
+      ch.disconnect();
+      stderr.mockRestore();
+    });
+
+    it('mixed allowlist: an entry-less repo is dead, not reported open (verify-r3 F1)', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const ch = new TestableAoneChannel(
+        'test-aone',
+        makeConfig({
+          groupPolicy: 'allowlist',
+          repos: ['test/a', 'test/b'],
+          groups: {
+            'test/a': { senders: 'allowlist', allowedUsers: ['alice'] },
+          },
+        }),
+        makeBridge(),
+      );
+      await ch.connect();
+      const lines = stderr.mock.calls.map((c) => String(c[0]));
+      // test/b has no groups entry: the allowlist gate rejects it BEFORE the
+      // sender gate, so its open-by-default senders are never reached. It
+      // must not be reported as open.
+      expect(lines.some((l) => l.includes('any commenter'))).toBe(false);
+      // The mixed dead-repo diagnostic names test/b instead.
+      expect(lines.some((l) => l.includes('no groups entry for test/b'))).toBe(
+        true,
+      );
+      // Not the all-dead wording — test/a is reachable.
+      expect(
+        lines.some((l) =>
+          l.includes('no watched repository has a groups entry'),
+        ),
+      ).toBe(false);
+      ch.disconnect();
+      stderr.mockRestore();
+    });
+
+    it('mixed allowlist names the dead repo and only the reachable open repo', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const ch = new TestableAoneChannel(
+        'test-aone',
+        makeConfig({
+          groupPolicy: 'allowlist',
+          repos: ['test/a', 'test/b', 'test/c'],
+          groups: {
+            'test/a': { senders: 'open' },
+            'test/b': { senders: 'allowlist', allowedUsers: ['alice'] },
+          },
+        }),
+        makeBridge(),
+      );
+      await ch.connect();
+      const lines = stderr.mock.calls.map((c) => String(c[0]));
+      const permissive = lines.find((l) => l.includes('any commenter'));
+      expect(permissive).toBeDefined();
+      expect(permissive).toContain('test/a');
+      expect(permissive).not.toContain('test/b');
+      expect(permissive).not.toContain('test/c');
+      expect(lines.some((l) => l.includes('no groups entry for test/c'))).toBe(
+        true,
+      );
+      ch.disconnect();
+      stderr.mockRestore();
+    });
+
+    it('a case-normalized groups entry counts as reachable (no dead warning)', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const ch = new TestableAoneChannel(
+        'test-aone',
+        makeConfig({
+          groupPolicy: 'allowlist',
+          groups: {
+            'Test/Repo': { senders: 'allowlist', allowedUsers: ['alice'] },
+          },
+        }),
+        makeBridge(),
+      );
+      await ch.connect();
+      const lines = stderr.mock.calls.map((c) => String(c[0]));
+      // normalizeGroupId folds 'Test/Repo' onto the watched 'test/repo', so
+      // the entry is found and the repo is neither dead nor open.
+      expect(lines.some((l) => l.includes('not_allowlisted'))).toBe(false);
+      expect(lines.some((l) => l.includes('any commenter'))).toBe(false);
       ch.disconnect();
       stderr.mockRestore();
     });
@@ -484,6 +581,47 @@ describe('AoneChannel', () => {
       expect(env.metadata).toBe(
         'Aone CR test/repo !30825167 (iid 1736615) | author: alice | comment: 5000',
       );
+    });
+
+    it('senderName falls back to the author when user.name is not a string', async () => {
+      installFakeA1({ events: pagedEvents([makeEvent({ id: 1001 })]) });
+      await channel.connect();
+      await channel.testPollOnce(); // baseline
+      installFakeA1({
+        events: pagedEvents([
+          makeEvent({
+            id: 1002,
+            author: 'Alice',
+            user: { name: 12345, username: 'alice' },
+          }),
+        ]),
+      });
+      await channel.testPollOnce();
+      channel.disconnect();
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      const env = channel.inboundEnvelopes[0]!;
+      expect(env.senderId).toBe('alice');
+      // user.name is numeric drift → fall back to the author string,
+      // preserving its original case (not the lowercased senderId).
+      expect(env.senderName).toBe('Alice');
+    });
+
+    it('chatId falls back to the watched repo when path_with_namespace drifts', async () => {
+      installFakeA1({ events: pagedEvents([makeEvent({ id: 1001 })]) });
+      await channel.connect();
+      await channel.testPollOnce(); // baseline
+      installFakeA1({
+        events: pagedEvents([
+          makeEvent({
+            id: 1002,
+            projectDetail: { path_with_namespace: 999 },
+          }),
+        ]),
+      });
+      await channel.testPollOnce();
+      channel.disconnect();
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(channel.inboundEnvelopes[0]!.chatId).toBe('test/repo');
     });
 
     it('dispatches new events in ascending id order', async () => {
@@ -801,6 +939,33 @@ describe('AoneChannel', () => {
       ).toBe(true);
       stderr.mockRestore();
     });
+
+    it('an empty-string author is skipped fail-closed but logged', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      installFakeA1({ events: pagedEvents([makeEvent({ id: 1000 })]) });
+      await channel.connect();
+      await channel.testPollOnce(); // baseline
+      const calls = installFakeA1({
+        events: pagedEvents([
+          makeEvent({ id: 1001, author: '', user: undefined }),
+        ]),
+      });
+      await channel.testPollOnce();
+      channel.disconnect();
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(channel.cursor.repos['test/repo']).toBe(1001);
+      expect(
+        calls.filter((a) => a[0] === 'repo' && a[3] === 'create'),
+      ).toHaveLength(0);
+      expect(
+        stderr.mock.calls.some((c) =>
+          String(c[0]).includes('event 1001 has no author'),
+        ),
+      ).toBe(true);
+      stderr.mockRestore();
+    });
   });
 
   describe('failure isolation', () => {
@@ -1001,6 +1166,61 @@ describe('AoneChannel', () => {
       expect(failure).toBeDefined();
       expect(failure.type).toBe('poll');
       expect(String(failure.error)).toContain('SYSTEM_FORBIDDEN_ERROR');
+    });
+
+    it('the repo_failed journal error stays bounded and single-line', async () => {
+      const longMessage = 'FORBIDDEN ' + 'x'.repeat(500);
+      installFakeA1({
+        events: (repo) =>
+          repo === 'good/repo' ? [makeEvent({ id: 2001 })] : [],
+      });
+      const ch = new TestableAoneChannel(
+        'test-aone',
+        makeConfig({ repos: ['good/repo', 'bad/repo'] }),
+        makeBridge(),
+      );
+      await ch.connect();
+      await ch.testPollOnce(); // baseline both
+      installFakeA1({
+        events: (repo) => {
+          if (repo === 'bad/repo') {
+            throw {
+              code: 1,
+              stdout: JSON.stringify({
+                schemaVersion: 'a1.error/v1',
+                message: longMessage,
+              }),
+              stderr: '',
+            };
+          }
+          return [makeEvent({ id: 2002 })];
+        },
+      });
+      await ch.testPollOnce();
+      ch.disconnect();
+      const files = readdirSync(join(tempDir, 'channels'), {
+        recursive: true,
+      }) as string[];
+      const journal = files.find((f) =>
+        String(f).endsWith('-channel-events.jsonl'),
+      );
+      const records = readFileSync(
+        join(tempDir, 'channels', String(journal)),
+        'utf8',
+      )
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l));
+      const failure = records.find(
+        (r) => r.outcome === 'repo_failed' && r.repository === 'bad/repo',
+      );
+      expect(failure).toBeDefined();
+      // The status page reads this field verbatim: a 510-char cause must not
+      // balloon the row. The journal write normalizes to 200 code points and
+      // the adapter sanitizes too (defense in depth).
+      expect(String(failure.error).length).toBeLessThanOrEqual(200);
+      expect(String(failure.error)).not.toContain('\n');
+      expect(String(failure.error)).toContain('FORBIDDEN');
     });
   });
 

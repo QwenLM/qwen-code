@@ -135,10 +135,14 @@ packages/channels/aone/
   覆盖**（那种行只存在于 repository-only 类型 github/gitlab），所以
   成员条目的 senders 回退到 channel 级的 `*` 策略。所以 UI 创建的
   channel 只在操作者不动 Group senders 缺省值时才是宽松的。`connect()` 对**实际
-  open** 的监听仓库告警（逐仓库 allowlist 而无 `*` 条目是收紧的，不
-  告警），并单独告警死姿态：`groupPolicy: allowlist` 而监听仓库都没有
-  `groups` 条目时，每个事件都会被拒为 `not_allowlisted`——因为
-  allowlist 下 `*` 是缺省配置，不是通配准入。下方示例给出手写配置
+  open** 的监听仓库告警——open 发送者**且可达**：`groupPolicy: allowlist`
+  下，group 门会在 sender 门之前把没有 `groups` 条目的仓库拒为
+  `not_allowlisted`，所以这种仓库是死的、不是 open，会被排除出宽松
+  告警（逐仓库 allowlist 而无 `*` 条目同样是收紧的，不告警）。它单独
+  诊断死仓库：当**每个**监听仓库都没有条目时告警什么都不派发；当只有
+  **部分**没有条目（混合监听列表）时点名那些仓库，让操作者知道它们的
+  触发会被静默丢弃，而可达仓库仍正常告警。allowlist 下 `*` 是缺省
+  配置，不是通配准入。下方示例给出手写配置
   必须做的逐仓库收紧。`sessionScope` 缺省 `chat_thread`（每仓库+MR
   线程一个会话）。无 `token` 字段——a1 用 channel 主机上自己的登录态
   认证。
@@ -295,13 +299,17 @@ descriptor 与 connect 间共享（GitHub `validateRepoFilterConfig` 模式）�
   后继续、跨仓库磁盘持久化、坏仓库在前不饿死后续、部分失败保持间隔
   节奏、全部失败重抛）；view 负缓存含逐轮作用域（两轮重试）；空串与
   纯空白模板回落；createdAt/作者/正文漂移诊断（含作者**类型**漂移，
-  不发公开错误评论）；宽松告警限定实际 open 的仓库 + allowlist 死姿态
-  告警；部分失败的持久 repo_failed 台账记录；游标老化跳跃诊断（休眠
-  仓库静默）；descriptor groupPolicy 缺省；仓库路径小写化。变异见证：
-  去重、逐仓库隔离、溢出走尾、游标命中即停、剪枝保存、空白回落、部分
-  失败节奏、通用预算、平台上限、逐轮缓存清空、宽松告警、漂移诊断、
-  午夜窗口、老化诊断、作者类型守卫、持久失败记录、告警范围、死姿态
-  告警。
+  不发公开错误评论）；宽松告警限定实际 open **且可达**的仓库（排除
+  allowlist 死仓库）+ 全死与混合死仓库诊断 + 大小写归一化的 groups
+  条目；兄弟字段类型漂移时的 senderName/chatId 回落；空串作者跳过；
+  部分失败的持久 repo_failed 台账记录（error 截断到 200 码点、单行
+  ——由台账写路径强制）；游标老化跳跃诊断（休眠仓库静默）；
+  descriptor groupPolicy 缺省；仓库路径小写化。变异见证：去重、逐仓库
+  隔离、溢出走尾、游标命中即停、剪枝保存、空白回落、部分失败节奏、
+  通用预算、平台上限、逐轮缓存清空、宽松告警、漂移诊断、午夜窗口、
+  老化诊断、作者类型守卫、持久失败记录、告警范围、死姿态告警、可达性
+  排除、混合死仓库点名、告警仓库点名、大小写归一化条目、senderName
+  回落、chatId 回落、空串作者守卫。
 - 线上只读冒烟：真实 `a1 events repo middleware/tddl5` 拉取+解析，
   不派发、不写（环境变量门控）。
 - 全链路 E2E（PATH 上打桩 a1： canned whoami/events；comment create
