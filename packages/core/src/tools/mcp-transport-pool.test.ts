@@ -24,6 +24,12 @@ import { ResourceRegistry } from '../resources/resource-registry.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { MCPServerStatus, updateMCPServerStatus } from './mcp-client.js';
+import {
+  getMCPServerStatus,
+  isMCPConnectionTeardownIntent,
+  isMCPServerTeardownIntent,
+  removeMCPServerStatus,
+} from './mcp-status.js';
 import { WorkspaceMcpBudget } from './mcp-workspace-budget.js';
 import { listDescendantPids, sigtermPids } from './pid-descendants.js';
 import {
@@ -1042,6 +1048,31 @@ describe('McpTransportPool', () => {
       expect(message).toContain('descendantsSignaled=1');
       expect(message).toContain('pidSweepError=none');
       expect(message).toContain('orphan-process pressure');
+    });
+
+    it('does not certify the silent-drop cleanup as a deliberate teardown (issue #12160)', async () => {
+      // The pool's reactive sweep closes the transport after an unsolicited
+      // drop. `McpClient.disconnect()` used to record teardown intent for
+      // every caller, which told the abort repair hanging off the very same
+      // transition that the owner had stopped this server — so the repair
+      // declined on exactly the drop #12160 reports, and the surviving
+      // session never got the server back.
+      const { mocked } = await acquireOne();
+      // Remote transports expose no pid, so the sweep reaches
+      // `client.disconnect()` with no preceding await — the same shape the
+      // real HTTP/streamable path has.
+      const connection = (mocked as unknown as object) ?? {};
+
+      sdkOnError(mocked, new Error('EPIPE: connection lost'));
+
+      await vi.waitFor(() => {
+        expect(getMCPServerStatus('srv')).toBe(MCPServerStatus.DISCONNECTED);
+      });
+      // The sweep's disconnect must leave both markers clear: the
+      // name-keyed one and the per-connection one the repair actually reads.
+      expect(isMCPServerTeardownIntent('srv')).toBe(false);
+      expect(isMCPConnectionTeardownIntent(connection, 0)).toBe(false);
+      removeMCPServerStatus('srv');
     });
   });
 

@@ -866,21 +866,29 @@ export class McpClient {
    * shut down propagation from any in-flight `connect()` / `discover()`
    * whose catch will fire after the transport has been torn down.
    */
-  async disconnect(): Promise<void> {
+  async disconnect(opts: { deliberate?: boolean } = {}): Promise<void> {
+    // Default true: `disconnect()` is the owner's own stop. The one caller
+    // that closes a transport nobody could have kept alive — the pool's
+    // cleanup after an unsolicited drop — passes `false`, because certifying
+    // intent there would tell the abort repair standing next to it that the
+    // lost connection was on purpose (issue #12160).
+    const deliberate = opts.deliberate ?? true;
     // Set the local status BEFORE flipping `isDisconnecting`. A concurrent
     // `discover()` reading `this.status` would otherwise see the stale
     // CONNECTED value and try to register tools that we're about to drop.
     this.status = MCPServerStatus.DISCONNECTED;
-    // Record the intent BEFORE the registry notifies listeners: a cancelled
-    // invocation's abort-repair listener fires synchronously inside the
-    // `updateMCPServerStatus` call below and must be able to tell this
-    // deliberate teardown from abort damage (issue #12160).
-    markMCPServerTeardownIntent(this.serverName);
-    // Name-keyed intent is shared by every connection registered under this
-    // name, and a sibling that reconnects clears it. Record this transport's
-    // stop on the connection itself so an invocation holding it still knows
-    // the owner asked for this teardown.
-    markMCPConnectionTeardownIntent(this.client);
+    if (deliberate) {
+      // Record the intent BEFORE the registry notifies listeners: a cancelled
+      // invocation's abort-repair listener fires synchronously inside the
+      // `updateMCPServerStatus` call below and must be able to tell this
+      // deliberate teardown from abort damage (issue #12160).
+      markMCPServerTeardownIntent(this.serverName);
+      // Name-keyed intent is shared by every connection registered under this
+      // name, and a sibling that reconnects clears it. Record this transport's
+      // stop on the connection itself so an invocation holding it still knows
+      // the owner asked for this teardown.
+      markMCPConnectionTeardownIntent(this.client);
+    }
     // Record the per-connection truth too: this write skips `updateStatus()`,
     // but an abort repair holding this client reads the connection, not the
     // name-keyed registry, so it would otherwise keep a stale CONNECTED.

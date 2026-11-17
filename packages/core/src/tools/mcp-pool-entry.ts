@@ -887,7 +887,13 @@ export class PoolEntry {
       );
     }
     try {
-      await this.client.disconnect();
+      // `silent_drop` is the one sweep nobody asked for: the transport was
+      // already dead when it ran, so the closing it performs must not be
+      // certified as the owner's intent — the abort repair may be the very
+      // party that needs to revive this server (issue #12160).
+      await this.client.disconnect({
+        deliberate: reason !== 'silent_drop',
+      });
     } catch (err) {
       // Disconnect failure is rare (usually a transport bug worth
       // surfacing) and gets a structured error log here. No
