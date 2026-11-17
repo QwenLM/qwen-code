@@ -55,6 +55,12 @@ interface EnvironmentPanelProps {
   onRetryAttachments?: () => void;
   artifacts?: readonly DaemonSessionArtifact[];
   artifactsLoading?: boolean;
+  /**
+   * Monotonic counter bumped by the header artifact entry. Each change forces
+   * the artifacts section open, so clicking the entry reveals the list even
+   * when the user had collapsed the section (the panel hides, not unmounts).
+   */
+  artifactsExpandSignal?: number;
   items?: readonly WebShellEnvironmentPanelItem[];
   onOpenGitDiff?: () => void;
   onOpenGitCommit?: () => void;
@@ -174,6 +180,7 @@ export function EnvironmentPanel({
   onRetryAttachments,
   artifacts,
   artifactsLoading = false,
+  artifactsExpandSignal,
   items = DEFAULT_ENVIRONMENT_PANEL_ITEMS,
   onOpenGitDiff,
   onOpenGitCommit,
@@ -206,6 +213,10 @@ export function EnvironmentPanel({
   const [branchPickerOpen, setBranchPickerOpen] = useState(false);
   const [sourceDialogOpen, setSourceDialogOpen] = useState(false);
   const activeBranch = branch ?? gitStatus?.branch;
+
+  useEffect(() => {
+    if (artifactsExpandSignal) setArtifactsExpanded(true);
+  }, [artifactsExpandSignal]);
 
   useEffect(() => {
     if (hidden || !environmentExpanded || !gitWorkspaceCwd || !activeBranch) {

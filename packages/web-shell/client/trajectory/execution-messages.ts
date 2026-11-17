@@ -65,3 +65,32 @@ export const TRAJECTORY_EXECUTION_MESSAGES_ZH: Record<
   'trajectory.executions.status.interrupted': '已中断',
   'trajectory.executions.status.not_started': '未执行',
 };
+
+export const TRAJECTORY_EXECUTION_MESSAGES_RU: Record<
+  string,
+  ExecutionMessage
+> = {
+  'trajectory.executions.title': 'Недавние выполнения',
+  'trajectory.executions.outside': (v) =>
+    `${v?.count ?? 0} выполнений вне исторических строк`,
+  'trajectory.executions.omitted': (v) =>
+    `${v?.count ?? 0} входных записей опущено из‑за лимита отображения`,
+  'trajectory.executions.clock': 'Часовое время',
+  'trajectory.executions.elapsed': (v) => `Прошло около ${v?.duration ?? ''}`,
+  'trajectory.executions.uncertain': 'Длительность недоступна',
+  'trajectory.executions.metadata':
+    'Только метаданные жизненного цикла; аргументы и вывод не предоставлены.',
+  'trajectory.executions.locate': 'Найти историческую запись',
+  'trajectory.executions.unlinked':
+    'Историческое содержимое в этом окне не связано; при необходимости обновите историю.',
+  'trajectory.executions.outcome': 'Итоговый результат',
+  'trajectory.executions.executionStatus': 'Статус выполнения',
+  'trajectory.executions.status.running': 'Выполняется',
+  'trajectory.executions.status.unknown': 'Неизвестно',
+  'trajectory.executions.status.conflict': 'Конфликт записи',
+  'trajectory.executions.status.success': 'Успешно',
+  'trajectory.executions.status.error': 'Ошибка',
+  'trajectory.executions.status.cancelled': 'Отменено',
+  'trajectory.executions.status.interrupted': 'Прервано',
+  'trajectory.executions.status.not_started': 'Не выполнено',
+};

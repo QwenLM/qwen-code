@@ -149,6 +149,13 @@ export interface WebShellDaemonScenario {
   /** Response for `GET /workspaces/:cwd/git/branches`. */
   gitBranches?: unknown;
   /**
+   * When true, a plain `POST .../git/checkout` (no stash/force in the body)
+   * answers 409 dirty_working_tree; the stash resolution answers 200 with a
+   * kept stash entry, the force resolution answers 200. Exercises the
+   * branch picker's checkout resolution panel.
+   */
+  gitCheckoutDirty?: boolean;
+  /**
    * Remotes served by `GET /workspaces/:cwd/git/remotes`. The add/remove
    * routes mutate this array in place so later reads see earlier writes.
    */
@@ -517,6 +524,7 @@ export function createWebShellDaemonScenario(
     gitStatus: overrides.gitStatus,
     gitHubPrs: overrides.gitHubPrs,
     gitBranches: overrides.gitBranches,
+    gitCheckoutDirty: overrides.gitCheckoutDirty,
     gitRemotes: overrides.gitRemotes,
     gitDiff: overrides.gitDiff,
     gitLog: overrides.gitLog,
@@ -2056,7 +2064,32 @@ async function handleDaemonRoute(
     const action = path.replace(/\/$/, '').split('/').pop();
     if (action === 'commit') {
       await json(route, { sha: 'abc1234', subject: 'test commit' });
-    } else if (action === 'checkout' || action === 'branch') {
+    } else if (action === 'checkout') {
+      const checkoutBody = (body ?? {}) as Record<string, unknown>;
+      if (
+        scenario.gitCheckoutDirty &&
+        checkoutBody['stash'] !== true &&
+        checkoutBody['force'] !== true
+      ) {
+        await json(
+          route,
+          {
+            error: 'dirty_working_tree',
+            message:
+              'error: Your local changes to the following files would be overwritten by checkout:\n\ta.txt\nPlease commit your changes or stash them before you switch branches.\nAborting',
+          },
+          409,
+        );
+        return;
+      }
+      await json(route, {
+        branch: 'feat/demo',
+        detached: false,
+        ...(checkoutBody['stash'] === true
+          ? { stashSha: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0' }
+          : {}),
+      });
+    } else if (action === 'branch') {
       await json(route, { branch: 'feat/demo', detached: false });
     } else {
       await json(route, { success: true, output: '' });

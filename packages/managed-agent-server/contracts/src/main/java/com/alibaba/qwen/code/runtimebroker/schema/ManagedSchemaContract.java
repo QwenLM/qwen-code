@@ -79,7 +79,6 @@ public final class ManagedSchemaContract {
         WORKSPACE_OPERATOR_RECOVERY,
         WORKSPACE_RECOVERY,
         STORAGE_MIGRATION,
-        CSI_RETIREMENT,
         WORKSPACE_RETIREMENT,
         WORKSPACE_UPLOAD,
         CHANNEL_INGRESS,
@@ -115,10 +114,7 @@ public final class ManagedSchemaContract {
         RESOURCE,
         EXECUTION_ACK,
         RUNTIME_BINDING,
-        CSI_WORKER_ACK,
-        RECOVERY_EVIDENCE,
-        POD_DELETE_ATTEMPT,
-        POD_FINALIZER_ATTEMPT
+        RECOVERY_EVIDENCE
     }
 
     public enum ResourceOwnerKind {

@@ -12,8 +12,16 @@ import {
   type DaemonGoal,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { DaemonWorkspaceCapability } from '@qwen-code/sdk/daemon';
-import { Pause, Pencil, Play, Trash2 } from 'lucide-react';
+import {
+  ArrowUpRight,
+  MessageSquareText,
+  Pause,
+  Pencil,
+  Play,
+  Trash2,
+} from 'lucide-react';
 import { useI18n } from '../../i18n';
+import { formatContextTokens } from '../../utils/formatTokenCount';
 import {
   disambiguateWorkspaceLabels,
   workspaceLabel,
@@ -23,6 +31,7 @@ import {
   getGoalActiveTimeLabel,
   getGoalActiveTimeMs,
   getGoalTokenLabel,
+  goalStatusTone,
 } from '../GoalStatusStrip';
 import { WorkspacePill } from '../WorkspacePill';
 import styles from './GoalsDialog.module.css';
@@ -36,6 +45,15 @@ import styles from './GoalsDialog.module.css';
 const RELOAD_INTERVAL_MS = 10_000;
 /** The elapsed-time column ticks independently of the refetch. */
 const TICK_INTERVAL_MS = 1000;
+
+interface GoalBudgetBar {
+  key: 'turns' | 'tokens' | 'time';
+  label: string;
+  valueText: string;
+  /** Raw used/budget; the rendered bar clamps to [0, 1] so a spent budget
+   * reads as full, not overflow. */
+  ratio: number;
+}
 
 interface GoalsDialogProps {
   /** Create a canonical Goal in a brand-new session and switch to it.
@@ -630,6 +648,53 @@ export function GoalsDialog({
           const canResume = canResumeGoal(goal);
           const tokenLabel = getGoalTokenLabel(goal, t);
           const activeTimeMs = getGoalActiveTimeMs(item.snapshot, now);
+          const tone = goalStatusTone(goal.status);
+          // Only armed budgets get a bar: an unbounded goal has no ceiling to
+          // show progress against. A token budget without a usage figure
+          // (older daemon) is skipped too — a bar with no fill would claim
+          // zero spend the snapshot cannot actually attest. The row is the
+          // single home for an armed budget's figures: the matching footer
+          // cell is suppressed below, and the text reuses the same localised
+          // templates the footer used so a catalogue change moves both.
+          const budgets: GoalBudgetBar[] = [];
+          if (goal.turnBudget !== undefined) {
+            budgets.push({
+              key: 'turns',
+              label: t('goals.budget.turns'),
+              valueText: t('goal.turnsOfBudget', {
+                count: goal.turnCount,
+                budget: goal.turnBudget,
+              }),
+              ratio: goal.turnBudget > 0 ? goal.turnCount / goal.turnBudget : 1,
+            });
+          }
+          if (goal.tokenBudget !== undefined && goal.tokensUsed !== undefined) {
+            budgets.push({
+              key: 'tokens',
+              label: t('goals.budget.tokens'),
+              valueText: t('goal.tokensOfBudget', {
+                used: formatContextTokens(goal.tokensUsed),
+                budget: formatContextTokens(goal.tokenBudget),
+              }),
+              ratio:
+                goal.tokenBudget > 0 ? goal.tokensUsed / goal.tokenBudget : 1,
+            });
+          }
+          if (goal.activeTimeBudgetMs !== undefined) {
+            budgets.push({
+              key: 'time',
+              label: t('goals.budget.time'),
+              // Same helper the strip and the unbudgeted footer cell use, so
+              // a change to the active-time wording moves every surface.
+              valueText: getGoalActiveTimeLabel(goal, activeTimeMs, t),
+              ratio:
+                goal.activeTimeBudgetMs > 0
+                  ? activeTimeMs / goal.activeTimeBudgetMs
+                  : 1,
+            });
+          }
+          const hasBudgetBar = (key: GoalBudgetBar['key']) =>
+            budgets.some((budget) => budget.key === key);
           return (
             <div key={item.sessionId} className={styles.card} role="listitem">
               <div className={styles.cardHeader}>
@@ -641,6 +706,22 @@ export function GoalsDialog({
                   {goal.objective}
                 </div>
                 <div className={styles.cardMenu}>
+                  {/* The transcript IS the goal's history, so opening the
+                      session is the primary way to inspect a goal — give it
+                      a constant header affordance, not only the footer link.
+                      Navigation, not a control: never gated on `busy`. */}
+                  <button
+                    type="button"
+                    className={`${styles.iconAction} ${styles.sessionAction}`}
+                    onClick={() =>
+                      onOpenSession(item.sessionId, item.workspaceCwd)
+                    }
+                    title={t('goals.openSessionHint')}
+                    aria-label={`${t('goals.openSessionHint')}: ${item.displayName || item.sessionId}`}
+                    data-testid="goal-open-session"
+                  >
+                    <MessageSquareText size={15} aria-hidden="true" />
+                  </button>
                   {canEdit && (
                     <button
                       type="button"
@@ -699,6 +780,46 @@ export function GoalsDialog({
                 </div>
               )}
 
+              {budgets.length > 0 && (
+                <div className={styles.budgets}>
+                  {budgets.map((budget) => {
+                    const percent = Math.round(
+                      Math.min(1, Math.max(0, budget.ratio)) * 100,
+                    );
+                    // The progressbar's name is the visible label + figure
+                    // themselves (aria-labelledby), not a second copy of them
+                    // in aria-label. Ids are per-session so cards never collide.
+                    const labelId = `${item.sessionId}-budget-${budget.key}-label`;
+                    const valueId = `${item.sessionId}-budget-${budget.key}-value`;
+                    return (
+                      <div key={budget.key} className={styles.budgetRow}>
+                        <span className={styles.budgetLabel} id={labelId}>
+                          {budget.label}
+                        </span>
+                        <div
+                          className={styles.budgetTrack}
+                          role="progressbar"
+                          aria-valuemin={0}
+                          aria-valuemax={100}
+                          aria-valuenow={percent}
+                          aria-labelledby={`${labelId} ${valueId}`}
+                          data-testid={`goal-budget-${budget.key}`}
+                        >
+                          <div
+                            className={styles.budgetFill}
+                            data-status={tone}
+                            style={{ width: `${percent}%` }}
+                          />
+                        </div>
+                        <span className={styles.budgetValue} id={valueId}>
+                          {budget.valueText}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
               <div className={styles.cardFooter}>
                 {isMultiWorkspace && item.workspaceCwd && (
                   <span data-testid="goal-workspace">
@@ -708,30 +829,33 @@ export function GoalsDialog({
                     />
                   </span>
                 )}
-                <span className={styles.statusPill}>
+                <span
+                  className={styles.statusPill}
+                  data-status={tone}
+                  data-testid="goal-status"
+                >
                   {t(`goal.status.${goal.status}`)}
                 </span>
                 <span className={styles.meta} data-testid="goal-activity">
                   {t(`goal.activity.${item.snapshot.activity}`)}
                 </span>
-                <span className={styles.meta} data-testid="goal-turns">
-                  {goal.turnCount > 0
-                    ? goal.turnBudget === undefined
+                {/* An armed budget's figures live in its progress row above;
+                    repeating them here would state the same fact twice. */}
+                {!hasBudgetBar('turns') && (
+                  <span className={styles.meta} data-testid="goal-turns">
+                    {goal.turnCount > 0
                       ? t(goal.turnCount === 1 ? 'goal.turn' : 'goal.turns', {
                           count: goal.turnCount,
                         })
-                      : t('goal.turnsOfBudget', {
-                          count: goal.turnCount,
-                          budget: goal.turnBudget,
-                        })
-                    : t('goals.notYetEvaluated')}
-                </span>
-                {tokenLabel ? (
+                      : t('goals.notYetEvaluated')}
+                  </span>
+                )}
+                {tokenLabel && !hasBudgetBar('tokens') ? (
                   <span className={styles.meta} data-testid="goal-tokens">
                     {tokenLabel}
                   </span>
                 ) : null}
-                {activeTimeMs > 0 && (
+                {activeTimeMs > 0 && !hasBudgetBar('time') && (
                   <span className={styles.meta} data-testid="goal-elapsed">
                     {getGoalActiveTimeLabel(goal, activeTimeMs, t)}
                   </span>
@@ -748,8 +872,13 @@ export function GoalsDialog({
                   // the target — the target stays in the accessible name so it
                   // still contains the visible label (WCAG 2.5.3).
                   aria-label={`${t('goals.openSessionHint')}: ${item.displayName || item.sessionId}`}
+                  data-testid="goal-session-link"
                 >
-                  {item.displayName || item.sessionId}
+                  <MessageSquareText size={13} aria-hidden="true" />
+                  <span className={styles.sessionLinkText}>
+                    {item.displayName || item.sessionId}
+                  </span>
+                  <ArrowUpRight size={12} aria-hidden="true" />
                 </button>
               </div>
             </div>

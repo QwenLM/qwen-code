@@ -71,7 +71,10 @@ import { GoalStatusMessage } from './messages/GoalStatusMessage.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
 import { useModRow } from '../hooks/use-mod-row.js';
-import type { ModAssistantMessageInput } from '@qwen-code/qwen-code-core/mods/render-tree.js';
+import type {
+  ModAssistantMessageInput,
+  ModThinkingInput,
+} from '@qwen-code/qwen-code-core/mods/render-tree.js';
 import { useVirtualViewport } from '../contexts/VirtualViewportContext.js';
 import { useThoughtExpanded } from '../contexts/ThoughtExpandedContext.js';
 import { useToolDetailsExpanded } from '../contexts/ToolDetailsExpandedContext.js';
@@ -122,6 +125,7 @@ interface HistoryItemDisplayProps {
    * Set only where a committed item can be drawn again.
    */
   modSessionId?: string;
+  isInViewport?: boolean;
 }
 
 /**
@@ -511,27 +515,9 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   fullDetail = false,
   thoughtHeadId,
   modSessionId,
+  isInViewport = false,
 }) => {
   const marginTop = getHistoryItemMarginTop(item);
-  // A committed reply block is offered to the Mods, which may rewrite the
-  // text it shows; the stored item keeps its own.
-  const config = useContext(ConfigContext);
-  const modInput = useMemo<ModAssistantMessageInput | undefined>(
-    () =>
-      modSessionId !== undefined &&
-      !isPending &&
-      (item.type === 'gemini' || item.type === 'gemini_content')
-        ? {
-            surface: 'terminal',
-            component: 'AssistantMessage',
-            requestId: String(item.id),
-            props: { text: item.text, isFirstOfReply: item.type === 'gemini' },
-          }
-        : undefined,
-    [modSessionId, isPending, item],
-  );
-  const modProps = useModRow(config, modSessionId, modInput);
-
   const {
     allExpanded,
     expandedHeadIds,
@@ -552,6 +538,46 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
     fullDetail ||
     (thoughtExpanded ??
       (allExpanded || expandedHeadIds.has(thoughtGroupHeadId)));
+  // A committed reply block, or an expanded block of thinking, is offered to
+  // the Mods, which may rewrite the text it shows; the stored item keeps its
+  // own.
+  const config = useContext(ConfigContext);
+  const isThought =
+    item.type === 'gemini_thought' || item.type === 'gemini_thought_content';
+  const thoughtText = isThought ? item.text.trimEnd() : '';
+  const modInput = useMemo<
+    ModAssistantMessageInput | ModThinkingInput | undefined
+  >(() => {
+    if (modSessionId === undefined || isPending) return undefined;
+    if (item.type === 'gemini' || item.type === 'gemini_content')
+      return {
+        surface: 'terminal',
+        component: 'AssistantMessage',
+        requestId: String(item.id),
+        props: { text: item.text, isFirstOfReply: item.type === 'gemini' },
+      };
+    if (isThought && resolvedThoughtExpanded && thoughtText.trim())
+      return {
+        surface: 'terminal',
+        component: 'Thinking',
+        requestId: String(item.id),
+        props: { text: thoughtText },
+      };
+    return undefined;
+  }, [
+    modSessionId,
+    isPending,
+    item,
+    isThought,
+    resolvedThoughtExpanded,
+    thoughtText,
+  ]);
+  const modProps = useModRow(
+    config,
+    modSessionId,
+    modInput,
+    !isThought || isInViewport,
+  );
   const settings = useSettings();
   const showTimestamps = settings.merged.output?.showTimestamps === true;
 
@@ -562,11 +588,14 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   const itemForDisplay = useMemo(
     () =>
       escapeAnsiCtrlCodes(
-        modProps && (item.type === 'gemini' || item.type === 'gemini_content')
+        modProps &&
+          (item.type === 'gemini' ||
+            item.type === 'gemini_content' ||
+            isThought)
           ? { ...item, text: modProps.text }
           : item,
       ),
-    [item, modProps],
+    [item, modProps, isThought],
   );
   const contentWidth = terminalWidth - 4;
   const boxWidth = mainAreaWidth || contentWidth;
