@@ -85,7 +85,7 @@ never reads the watch state — so retry prepare against it and complete at the
 original round, with no release (round 7); releasing first would leave the head
 unregistered between the release and a restart, re-opening the silent drop if
 the round is killed in that window. A round that _died_ is recovered by
-`--release --head <H> [--round <r>] --repo <owner>/<repo>` **and then start the
+`--release --head <H> --round <r> --repo <owner>/<repo>` **and then start the
 head again** (`--start --head <H> --round <r+1> --repo <owner>/<repo>`) and retry
 prepare. A release alone is not a recovery: `releaseRound` files only a
 `releasedHeads` push-order hint — explicitly not a deferral, and printed by no
@@ -99,22 +99,25 @@ head's retry counter, and the counter's cap is the terminal not-covered state,
 so two transient prepare failures would retire a head no round ever examined
 (R1-5). The restarted round's number (`<r+1>`) becomes this round's number, and
 `--complete` must repeat that value (R3-2). The recovery has a non-transient
-terminal case: if prepare refuses because the PR has moved past the delivered
-head (prepare re-resolves `headRefOid` from a live `gh pr view` and refuses a
-tree whose HEAD is not that head), the delivered head can never prepare —
-`--release` it (with the marker's `--round`) and do **not** restart it. In the
-watch prompt the newer head is delivered by the next fire (the gate cursor
-tracks the live head, `next.headSha = pr.headRefOid`), or is already in the
-deferred list the release prints, which you then start — the started newer head
-is its own round, and `--complete` repeats its head and round, not the released
-head's (round 7); in the ordinary moved-head case no fire ran between
-registration and prepare, so the newer head was never deferred and the next fire
-delivers it (R4-1 round 5 restores this two-branch form). In the manual path there is no fire, so re-resolve the newer
-head (`gh pr view … --json headRefOid`) and `--start` it; the restarted round is
-now `<newer>` at `<next>`, and `--complete` repeats those values, not the
-original `<H>` and `<r>` (round 6). Do not `git checkout` the newer head under
-the old marker, which would file the newer head's evidence under the delivered
-head's verdict (R1-1 round 3, R4-1). The prepare paragraph's wrong-HEAD checkout
+terminal case: if prepare refuses because the head it names is not the head
+this round registered — moved forward or force-pushed; prepare re-resolves
+`headRefOid` from a live `gh pr view`, tests exact equality and states no
+ordering — the registered head can never prepare: `--release` it (with the
+marker's `--round`) and do **not** restart it (R9-1 round 10 extends this from
+"moved past / newer" to any differing head, so a force-push back to an ancestor
+reaches the branch too). In the watch prompt the live head is delivered by the
+next fire (the gate cursor tracks the live head, `next.headSha = pr.headRefOid`),
+or is already in the deferred list the release prints, which you then start —
+the started head is its own round, and `--complete` repeats its head and round,
+not the released head's (round 7); in the ordinary moved-head case no fire ran
+between registration and prepare, so the live head was never deferred and the
+next fire delivers it (R4-1 round 5 restores this two-branch form). In the manual
+path there is no fire, so re-resolve the live head (`gh pr view … --json
+headRefOid`) and `--start` it; the restarted round is now `<live>` at `<next>`,
+and `--complete` repeats those values, not the original `<H>` and `<r>` (round
+6). Do not `git checkout` the named head under the old marker, which would file
+the named head's evidence under the delivered head's verdict (R1-1 round 3,
+R4-1). The prepare paragraph's wrong-HEAD checkout
 remedy keys off identity, not recency (R5-1 round 8): if this round registered a
 head, the plain checkout is the remedy only when the named head **is** that
 head; a head that differs (moved or force-pushed — prepare tests exact equality
@@ -169,7 +172,15 @@ existing dead-round recovery (`--release` for a round that died after
   wording so reverting to "newer than" reds it, adds the reset's re-register step,
   and witnesses the prior-arm dir precedence and that a completion files the live
   head with whatever directory it is given (the checkout remedy is the only
-  guard).
+  guard). Round 10 carries the identity criterion into the watch and manual
+  moved-head branches themselves (the watch prompt reads only the gate JSON, so
+  the prepare-paragraph rule alone never reached them): the branch now fires on
+  any head differing from the registered one — forward or force-pushed — the
+  delivered head is the "live head" (`<live>`), the per-section moved-head pins
+  move with the rewording, the this-round recovery release forms pass `--round`
+  (no longer optional), the reset notes it also drops deferred heads, and the
+  registration-order pins guard the `--start` command's position, not just the
+  heading.
 - `scripts/tests/verify-pr-watch-state.test.js`: new witnesses driven through
   the **CLI** (`run(root, …)`, exercising the helper code this PR changes — the
   `parseArgs` requirement, `completeRound`'s return field, and `main`'s

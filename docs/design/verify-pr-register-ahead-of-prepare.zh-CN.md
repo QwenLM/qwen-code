@@ -68,7 +68,7 @@ watch prompt 与手动复验步骤均改为：
 *瞬时*失败（轮次仍在运行）时标记完好——prepare 从不读 watch 状态——故直接对完好
 标记重试 prepare 并按原轮次完成，无需 release（第 7 轮）；先 release 会使 head 在
 release 与重启之间失去记录，若在该窗口被杀则重新打开静默丢弃。*已死*的轮次用
-`--release --head <H> [--round <r>] --repo <owner>/<repo>` **并随后重新启动该
+`--release --head <H> --round <r> --repo <owner>/<repo>` **并随后重新启动该
 head**（`--start --head <H> --round <r+1> --repo <owner>/<repo>`）再重试 prepare。
 单独 release 不是恢复：`releaseRound` 只写 `releasedHeads` 推序提示——明确不是
 deferral，且无任何动词打印它——故 head 失去记录，而探针游标已越过它，不会再有
@@ -78,18 +78,19 @@ deferral，且无任何动词打印它——故 head 失去记录，而探针游
 inconclusive 是唯一增加 head 重试计数的判定，而计数上限即终态（not-covered），
 故两次瞬时 prepare 失败会让一个从未跑过轮次的 head 被退役（R1-5）。重启后的轮次
 编号（`<r+1>`）即为本轮编号，`--complete` 须重复该值（R3-2）。恢复有非瞬时终止
-分支：若 prepare 因 PR 已越过所投递 head 而拒绝（prepare 从实时 `gh pr view` 重取
-`headRefOid`，并拒绝 HEAD 不等于该 head 的树），所投递 head 永远无法 prepare——
-`--release` 它（带标记的 `--round`）且**不要**重启。watch prompt 中更新 head 由
-下一次触发投递（gate 游标跟实时 head，`next.headSha = pr.headRefOid`），或已在
-release 打印的 deferred 列表中、由你启动——所启动的更新 head 自成一轮，
-`--complete` 重复它的 head 与轮次，而非被释放 head 的（第 7 轮）；常规 moved-head
-情形注册与 prepare 之间没有触发运行，故更新 head 从未被 defer、由下一次触发投递
-（R4-1 第 5 轮恢复此两分支写法）。手动路径没有触发，故自行重新解析更新 head（`gh pr view … --json
-headRefOid`）并 `--start` 它；重启后的轮次现为 `<newer>` 于 `<next>`，`--complete`
-重复这两个值，而非原来的 `<H>` 与 `<r>`（第 6 轮）。不要在旧标记下 `git checkout`
-更新的 head，否则会把更新 head 的证据记到所投递 head 的判定名下（R1-1 第 3 轮、
-R4-1）。prepare 段的错 HEAD checkout 补救以同一性（而非新旧）为判据（R5-1 第 8
+分支：若 prepare 因点名的 head 不是本轮注册的 head 而拒绝——前移或 force-push；
+prepare 从实时 `gh pr view` 重取 `headRefOid`、精确相等判定、不含顺序信息——注册的
+head 永远无法 prepare：`--release` 它（带标记的 `--round`）且**不要**重启（R9-1
+第 10 轮把此分支从「越过/更新」扩到任何不同的 head，故强推回祖先也能落到该分支）。
+watch prompt 中实时 head 由下一次触发投递（gate 游标跟实时 head，
+`next.headSha = pr.headRefOid`），或已在 release 打印的 deferred 列表中、由你启动
+——所启动的 head 自成一轮，`--complete` 重复它的 head 与轮次，而非被释放 head 的
+（第 7 轮）；常规 moved-head 情形注册与 prepare 之间没有触发运行，故实时 head 从未
+被 defer、由下一次触发投递（R4-1 第 5 轮恢复此两分支写法）。手动路径没有触发，故
+自行重新解析实时 head（`gh pr view … --json headRefOid`）并 `--start` 它；重启后的
+轮次现为 `<live>` 于 `<next>`，`--complete` 重复这两个值，而非原来的 `<H>` 与 `<r>`
+（第 6 轮）。不要在旧标记下 `git checkout` 点名的 head，否则会把点名 head 的证据记到
+所投递 head 的判定名下（R1-1 第 3 轮、R4-1）。prepare 段的错 HEAD checkout 补救以同一性（而非新旧）为判据（R5-1 第 8
 轮）：若本轮注册了 head，仅当 prepare 点名的 head **就是**该 head 时普通 checkout
 才是补救；点名的 head 不同（移动或 force-push——prepare 是精确相等判定、不含顺序
 信息）即 moved-head 情形（释放本轮标记；绝不在其下 checkout 点名 head）。未注册任何
@@ -122,7 +123,12 @@ release 形式都像兄弟恢复形式一样带 `[--round <r>]`。完成形式�
   （重排解析链即变红）。第 8 轮把补救细化为同一性判据（仅当点名 head 就是本轮注册
   head 才普通 checkout；不同即 moved-head；全新轮次读状态在飞条目、对活标记让该轮
   作答），钉住该措辞使改回「比…更新」变红，补重置的重注册步骤，并见证 prior 臂目录
-  优先级、以及完成会按所给目录登记活 head（checkout 补救是唯一防线）。
+  优先级、以及完成会按所给目录登记活 head（checkout 补救是唯一防线）。第 10 轮把同一性
+  判据带进 watch 与手动 moved-head 分支本身（watch prompt 只读闸门 JSON，prepare 段
+  规则单独到不了它们）：分支现对任何不同于注册 head 的点名 head 触发——前移或
+  force-push；所投递 head 称「实时 head」（`<live>`），逐节 moved-head 钉随措辞迁移，
+  本轮恢复的 release 形式传 `--round`（不再可选），重置写明也丢 deferred heads，
+  注册顺序钉改钉 `--start` 命令的位置、而非仅标题。
 - `scripts/tests/verify-pr-watch-state.test.js`：新见证走 **CLI**（`run(root, …)`，
   演练本 PR 改动的助手代码——`parseArgs` 要求、`completeRound` 返回字段、`main`
   告警）——`--start` 不带 `--artifact-dir` 注册在飞且目录 `null`（恢复强制要求

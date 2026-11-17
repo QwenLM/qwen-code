@@ -6647,14 +6647,14 @@ describe('qwen-triage verify hardening round 2', () => {
       'a release alone leaves the head unregistered',
     );
     expect(manualSlice).toContain(
-      'Do not `git checkout` the newer head under the old marker',
+      'Do not `git checkout` the named head under the old marker',
     );
     // R1-1: the prepare-failure recovery must carry the full --release form
     // with --repo (a recorded repo refuses an omitted --repo, so a shortened
     // copy would strand the marker — reintroducing R17-2). Removing --repo
     // from the sentence reds this whole-form pin.
     expect(manualSlice).toContain(
-      'If prepare fails after `--start`, recover with `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <H> [--round <r>] --repo <owner>/<repo>`',
+      'If prepare fails after `--start`, recover with `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <H> --round <r> --repo <owner>/<repo>`',
     );
     // R1-1 (round 2): the manual recovery also pairs release with a restart.
     expect(manualSlice).toContain(
@@ -6676,20 +6676,20 @@ describe('qwen-triage verify hardening round 2', () => {
     // R1-1 (round 3) + R4-1: the manual moved-head terminal case (<H> variant)
     // re-resolves and starts the newer head itself — there is no watch fire.
     expect(manualSlice).toContain(
-      'If prepare refuses because the PR has moved past the delivered head (its message names a newer PR head), that head can never prepare: `--release --head <H> [--round <r>] --repo <owner>/<repo>` it and do not restart it',
+      'If prepare refuses because the head it names is not the head this round registered — moved forward or force-pushed; prepare tests exact equality and states no ordering — the registered head can never prepare: `--release --head <H> --round <r> --repo <owner>/<repo>` it and do not restart it',
     );
     expect(manualSlice).toContain(
-      'There is no watch fire here to deliver the newer head, so re-resolve it yourself',
+      'There is no watch fire here to deliver the live head, so re-resolve it yourself',
     );
     expect(manualSlice).toContain(
-      '`--start --head <newer> --round <next> --repo <owner>/<repo>` and run prepare',
+      '`--start --head <live> --round <next> --repo <owner>/<repo>` and run prepare',
     );
     // Deferred (round 6): after the moved-head restart the completion
-    // placeholders re-bind to <newer>/<next> — the completion form below still
+    // placeholders re-bind to <live>/<next> — the completion form below still
     // prints <H>/<r>, so without this clause a restarted round would complete
     // under the original head and round and be refused (exit 3).
     expect(manualSlice).toContain(
-      'The restarted round is now `<newer>` at `<next>` — repeat those values in `--complete`, not the original `<H>` and `<r>`',
+      'The restarted round is now `<live>` at `<next>` — repeat those values in `--complete`, not the original `<H>` and `<r>`',
     );
     // R1-2: a positional pin — registration precedes prepare in this section
     // (an order-insensitive toContain would stay green if --start moved back
@@ -6699,6 +6699,12 @@ describe('qwen-triage verify hardening round 2', () => {
         'Register the round in the shared watch state **ahead of prepare**',
       ),
     ).toBeLessThan(flat.indexOf('Then run prepare; it creates'));
+    // Deferred (round 10): the heading pin above is not enough — guard the
+    // --start COMMAND's position too, so moving the command below prepare (while
+    // the heading stays above) reds this per-section assertion.
+    expect(manualSlice.indexOf('--start --head <H>')).toBeLessThan(
+      manualSlice.indexOf('Then run prepare; it creates'),
+    );
     expect(flat).toContain(
       'Exit 3 means the file already records `H` as verified or in flight',
     );
@@ -6855,7 +6861,7 @@ describe('qwen-triage verify hardening round 2', () => {
     // --release form with --repo (the <headSha> variant; the manual section
     // uses <H>). Removing --repo reds this whole-form pin.
     expect(flat).toContain(
-      'If prepare fails after `--start`, recover with `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <headSha> [--round <r>] --repo <owner>/<repo>`',
+      'If prepare fails after `--start`, recover with `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <headSha> --round <r> --repo <owner>/<repo>`',
     );
     // R1-1 (round 2): the recovery pairs the release with a restart — a
     // release alone files only a push-order hint and leaves the head
@@ -6880,7 +6886,7 @@ describe('qwen-triage verify hardening round 2', () => {
       "The restarted round's number (`<r+1>`) becomes this round's number — repeat that value in `--complete`",
     );
     expect(promptSlice).toContain(
-      'Do not `git checkout` the newer head under the old marker',
+      'Do not `git checkout` the named head under the old marker',
     );
     // R3-1: the inconclusive-recovery prohibition (watch em-dash variant).
     expect(promptSlice).toContain(
@@ -6890,16 +6896,16 @@ describe('qwen-triage verify hardening round 2', () => {
     // without restart; the newer head arrives by the next fire (the gate
     // cursor tracks the live head) or is already deferred, which you start.
     expect(promptSlice).toContain(
-      'If prepare refuses because the PR has moved past the delivered head (its message names a newer PR head), that head can never prepare: `--release --head <headSha> [--round <r>] --repo <owner>/<repo>` it and do not restart it',
+      'If prepare refuses because the head it names is not the head this round registered — moved forward or force-pushed; prepare tests exact equality and states no ordering — the registered head can never prepare: `--release --head <headSha> --round <r> --repo <owner>/<repo>` it and do not restart it',
     );
     expect(promptSlice).toContain(
-      'the newer head is delivered by the next fire (the gate cursor tracks the live head), or is already in the deferred list the release prints, which you then start',
+      'the live head is delivered by the next fire (the gate cursor tracks the live head), or is already in the deferred list the release prints, which you then start',
     );
     // Deferred (round 7): the watch moved-head branch rebinds the completion to
-    // the started newer head's own round (the manual twin carries the same
-    // clause); a literal completion under the released head would exit 3.
+    // the started head's own round (the manual twin carries the same clause); a
+    // literal completion under the released head would exit 3.
     expect(promptSlice).toContain(
-      "The started newer head is its own round — repeat its head and round in `--complete`, not the released head's",
+      "The started head is its own round — repeat its head and round in `--complete`, not the released head's",
     );
     // Deferred (round 7): registering ahead records --repo before prepare can
     // validate it; a mistyped slug poisons the state, and the contract documents
@@ -6913,8 +6919,13 @@ describe('qwen-triage verify hardening round 2', () => {
     // Deferred (round 8): the reset drops the delivered head's only delivery
     // record, so the contract must say to re-register it (the cursor already
     // advanced; no fire delivers it again).
+    // Deferred (round 10): the delete also drops deferred heads no fire will
+    // re-deliver, and the re-register covers them too — not just dedup history.
     expect(promptSlice).toContain(
-      'and then re-register the delivered head with the correct slug (`--start`)',
+      "this drops the PR's dedup history and any deferred heads, which no fire will re-deliver",
+    );
+    expect(promptSlice).toContain(
+      'and then re-register the delivered head — and any deferred head you still want covered — with the correct slug (`--start`)',
     );
     // R2-1: the watch prompt's exit-3 dead-marker bullet carries the full
     // --release form with --repo (anchored on the watch-only continuation, so
@@ -6935,6 +6946,11 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(
       flat.indexOf('Register the round **first, ahead of prepare** (R17-2)'),
     ).toBeLessThan(flat.indexOf('Then run prepare (trusted host metadata)'));
+    // Deferred (round 10): guard the --start COMMAND's position too, so moving
+    // the command below prepare (while the heading stays above) reds this.
+    expect(promptSlice.indexOf('--start --head <headSha>')).toBeLessThan(
+      promptSlice.indexOf('Then run prepare (trusted host metadata)'),
+    );
     // The completion and release forms carry --repo too: the guard
     // refuses a registered round's completion without it (D9-1).
     expect(flat).toContain(
