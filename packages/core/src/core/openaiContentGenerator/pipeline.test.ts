@@ -972,6 +972,28 @@ describe('ContentGenerationPipeline', () => {
       });
     });
 
+    it('clamps an explicit user max_tokens to the non-thinking cap when thinking is off', async () => {
+      // samplingParams merge into the base request before the reasoning
+      // shaping, so the clamp bounds an explicit user ceiling too — it only
+      // shrinks the value, never raises it.
+      const apiCall = await executeWith(
+        {
+          baseUrl: DASHSCOPE_URL,
+          model: 'qwen4-max',
+          authType: AuthType.QWEN_OAUTH,
+          samplingParams: { max_tokens: 200000 },
+          reasoning: false,
+        },
+        userRequest('qwen4-max'),
+        'prompt-id',
+        DashScopeOpenAICompatibleProvider,
+      );
+      expectFields(apiCall, {
+        reasoning_effort: 'none',
+        max_tokens: 131072,
+      });
+    });
+
     it('never ships the max tier to a generic OpenAI-compatible endpoint end to end', async () => {
       // The same persisted-tier failure through the real default provider.
       const apiCall = await executeWith(

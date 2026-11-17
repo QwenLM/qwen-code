@@ -845,10 +845,10 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
   }
 
   /**
-   * Resolve the cache breakpoint marker for a wire model. qwen4-max accepts an
-   * explicit cache TTL; `cacheRetention:'1h'` requests the extended tier
-   * (`ttl:'1h'`, 2x input write cost), while the default omits `ttl` (the 5m
-   * spec default). Other models keep the plain ephemeral marker.
+   * Resolve the cache breakpoint marker for a wire model. The qwen4 generation
+   * accepts an explicit cache TTL; `cacheRetention:'1h'` requests the extended
+   * tier (`ttl:'1h'`, 2x input write cost), while the default omits `ttl` (the
+   * 5m spec default). Other models keep the plain ephemeral marker.
    */
   private resolveCacheControl(
     model: string | undefined,
