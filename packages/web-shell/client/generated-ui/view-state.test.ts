@@ -97,6 +97,34 @@ describe('one card’s saved state', () => {
     expect(h.statuses).toEqual(['saving', 'saved']);
   });
 
+  it('sends a change back to the saved value made while a write is in flight', async () => {
+    const h = harness({ revision: 1, value: 'start' });
+    await h.coordinator.load();
+    h.coordinator.save('changed');
+    h.coordinator.save('start');
+    h.writes[0]!.reply.resolve({ outcome: 'saved', cardId: CARD, revision: 2 });
+    await vi.waitFor(() => expect(h.writes).toHaveLength(2));
+    expect(h.writes[1]!.write).toEqual({ baseRevision: 2, value: 'start' });
+    await h.saved(1, 3);
+    h.coordinator.save('changed');
+    h.coordinator.save('other');
+    h.coordinator.save('changed');
+    await h.saved(2, 4);
+    expect(h.writes).toHaveLength(3);
+  });
+
+  it('clears a too-large report when the value returns to what is saved', async () => {
+    const h = harness();
+    await h.coordinator.load();
+    h.coordinator.save(1);
+    h.coordinator.save('x'.repeat(16 * 1024));
+    await h.saved(0, 1);
+    expect(h.statuses.at(-1)).toBe('too_large');
+    h.coordinator.save(1);
+    expect(h.statuses.at(-1)).toBe('saved');
+    expect(h.writes).toHaveLength(1);
+  });
+
   it('stops saving after a stale write', async () => {
     const h = harness();
     await h.coordinator.load();

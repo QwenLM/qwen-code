@@ -197,8 +197,8 @@ changes stay only in the page.
 **Reopen and reset.** Reopening a card that was released restores its saved
 state. The host's "Reopen and reset" action first clears the saved state: it
 reads the current revision, saves `null` against it, and then mounts the card
-again. If clearing fails, the card stays as it is and the bar reports the
-failure.
+again. If clearing fails, the card is not mounted again, this mount stops
+saving, and the bar reports the failure.
 
 ## Limits
 

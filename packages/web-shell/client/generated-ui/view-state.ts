@@ -55,7 +55,8 @@ export class ViewStateCoordinator {
   private revision?: number;
   private saved?: string;
   private pending?: string;
-  private writing = false;
+  // The value of the write in flight; `saved` changes only when it lands.
+  private inFlight?: string;
   private stale = false;
   // The latest value the card set was too large and was not sent.
   private tooLarge = false;
@@ -86,11 +87,16 @@ export class ViewStateCoordinator {
   save(value: unknown): void {
     if (this.revision === undefined || this.stale) return;
     const json = JSON.stringify(value ?? null);
-    if (json === (this.pending ?? this.saved)) return;
     this.tooLarge = new TextEncoder().encode(json).byteLength > MAX_STATE_BYTES;
+    this.pending = undefined;
     if (this.tooLarge) {
-      this.pending = undefined;
-      if (!this.writing) this.report('too_large');
+      if (this.inFlight === undefined) this.report('too_large');
+      return;
+    }
+    // Compare with what the store will hold once the write in flight lands,
+    // so changing a value back during a write is still sent.
+    if (json === (this.inFlight ?? this.saved)) {
+      if (this.inFlight === undefined && this.last) this.report('saved');
       return;
     }
     this.pending = json;
@@ -124,10 +130,10 @@ export class ViewStateCoordinator {
   }
 
   private pump(): void {
-    if (this.writing || this.pending === undefined) return;
+    if (this.inFlight !== undefined || this.pending === undefined) return;
     const json = this.pending;
     this.pending = undefined;
-    this.writing = true;
+    this.inFlight = json;
     this.report('saving');
     let status: ViewStateStatus = 'failed';
     let request: Promise<DaemonGeneratedUiStateWriteResult>;
@@ -155,7 +161,7 @@ export class ViewStateCoordinator {
         () => {},
       )
       .finally(() => {
-        this.writing = false;
+        this.inFlight = undefined;
         if (writes.get(this.key) === write) writes.delete(this.key);
         if (this.pending !== undefined) this.pump();
         else this.report(this.tooLarge ? 'too_large' : status);
