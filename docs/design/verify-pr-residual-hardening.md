@@ -64,26 +64,34 @@ the container gate (R16-4).
 
 The shape guard is **derived from what the migration ladder actually consumes**,
 so the guard's acceptance and the ladder's consumption cannot drift (R2-1). A
-body is admitted only when `inFlightEntries`, `verifiedEntries`, `deferredEntries`
+body is admitted when `inFlightEntries`, `verifiedEntries`, `deferredEntries`
 or `releasedEntries` yields an entry, or `seqCounter` is an integer, or
-`retiredSeqs` is a non-empty object. When no bearing entry is consumable the body
-fails closed like corrupt JSON instead of being admitted and erased; an identity
-key plus a misspelled head marker is likewise refused (R16-2). Independently of
-that disjunction, a `*Heads` key that is PRESENT but holds a non-array value (a
-bare string `inFlightHeads:"<hex>"`) is refused even when an integer `seqCounter`
-admits the file — the ladder cannot consume that marker and `--start` would
-otherwise erase it, breaking the one-round-per-PR serialisation (R6-1). An empty
-list is the legitimate resting shape and stays admitted via `seqCounter`.
-`inFlightEntries` consumes a bare `inFlightHead` (a non-empty string) even
-alongside the resting empty `inFlightHeads: []`, as well as a string `inFlight`,
-so the marker blocks a second round and survives the refused start (R1-1, R2-1).
-Every state the helper writes goes through `deriveView`, which emits the lists as
-arrays plus an integer `seqCounter` (and the derived `inFlight:false` /
-`inFlightHead:null` resting view), so a legitimate file is never refused.
-Witnesses pin the consumable shapes, the refused non-consumable shapes
-(string-under-array with and without a bearing `seqCounter`, empty lists with no
-bearing entry), the resting-file acceptance, and the legacy migration boundary
-(`inFlight:true`, an empty string, or an object alone does not migrate).
+`retiredSeqs` is a non-empty object. A legacy resting body that predates the
+list/seqCounter format — only identity keys and the pre-list single-marker head
+keys (`inFlight`/`inFlightHead`/`verifiedHead`/`previousHead`), all holding
+resting values (null/empty/false) — is admitted as no-state: the ladder consumes
+it as resting, so refusing it would strand a PR whose state holds no dedup
+history at all (R7-1). The resting clause is scoped to the legacy single-marker
+keys: a body carrying a `*Heads` LIST key (even empty) is the new format, which
+always writes `seqCounter`, so an empty list with no bearing entry stays refused.
+Any other body with no consumable bearing entry fails closed like corrupt JSON;
+an identity key plus a misspelled (UNKNOWN) head marker is likewise refused
+(R16-2). Independently of that disjunction, a `*Heads` key that is PRESENT but
+holds a non-array value (a bare string `inFlightHeads:"<hex>"`) is refused even
+when an integer `seqCounter` admits the file — the ladder cannot consume that
+marker and `--start` would otherwise erase it, breaking the one-round-per-PR
+serialisation (R6-1). `inFlightEntries` consumes a bare `inFlightHead` (a
+non-empty string) even alongside the resting empty `inFlightHeads: []`, as well
+as a string `inFlight`, so the marker blocks a second round and survives the
+refused start (R1-1, R2-1). Every state the helper writes goes through
+`deriveView`, which emits the lists as arrays plus an integer `seqCounter` (and
+the derived `inFlight:false` / `inFlightHead:null` resting view), so a legitimate
+file is never refused. Witnesses pin the consumable shapes, the legacy
+resting-body admission, the refused non-consumable shapes (string-under-array
+with and without a bearing `seqCounter`, empty lists with no bearing entry, an
+unknown head spelling), and the legacy migration boundary (a non-empty string
+head migrates and blocks; `inFlight:true` or an object alone is refused; an empty
+string is resting — admitted but never migrates to block a head).
 
 ### B — store only the nonce hash in the record; enforce corroboration in the checker
 
@@ -161,9 +169,11 @@ parseArgs refuses (R3-4).
 
 ## Files affected
 
-- `scripts/verify-pr-watch-state.mjs` — ladder-derived shape guard; a present
-  non-array `*Heads` key is refused independently of the bearing disjunction
-  (R6-1); `inFlightEntries` consumes a bare legacy marker alongside an empty list.
+- `scripts/verify-pr-watch-state.mjs` — ladder-derived shape guard; a legacy
+  resting body (identity + pre-list single-marker keys, all resting values) is
+  admitted as no-state (R7-1); a present non-array `*Heads` key is refused
+  independently of the bearing disjunction (R6-1); `inFlightEntries` consumes a
+  bare legacy marker alongside an empty list.
 - `scripts/verify-pr-prepare.mjs` — record `nonceSha256`, drop plaintext `nonce`;
   fatal nonce-file write (exit 3) invalidating a stale record; lazy defensive
   `$HOME` resolution with an exit-3 refusal on an unresolvable/empty home
@@ -175,7 +185,10 @@ parseArgs refuses (R3-4).
   match removed (checker sole matcher), VM sentence scoping (R3-4).
 - `scripts/tests/verify-pr-watch-state.test.js` — consumable / non-consumable
   shape witnesses, identity-only fail-closed, migration-boundary witnesses,
-  non-array `*Heads`-with-`seqCounter` refusal + resting-file acceptance (R6-1).
+  non-array `*Heads`-with-`seqCounter` refusal + resting-file acceptance (R6-1),
+  legacy resting-body admission with the unknown-key and bearing-less-list
+  refusals intact (R7-1; the empty-legacy-head fixture no longer injects
+  `seqCounter:0`).
 - `scripts/tests/verify-pr-prepare.test.js` — gated record assertion, ungated
   hash-only record witness via the seam, stale-record invalidation witness,
   unresolvable/empty-home refusal witness (R5-1), corrected VM guidance pin

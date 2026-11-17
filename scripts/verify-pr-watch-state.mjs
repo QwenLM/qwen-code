@@ -154,7 +154,47 @@ export function readState(stateRoot, prNumber) {
     (parsed.retiredSeqs != null &&
       typeof parsed.retiredSeqs === 'object' &&
       Object.keys(parsed.retiredSeqs).length > 0);
-  if (Object.keys(parsed).length > 0 && !bearingPresent) {
+  // A legacy resting body predates the list/seqCounter format: it carries only
+  // identity keys and the pre-list single-marker head keys, all holding resting
+  // values (null/empty/false). The ladder consumes it as resting (every
+  // *Entries returns []), so refusing it would strand a PR whose state file
+  // holds no dedup history at all — --start/--complete/--release could never
+  // run again (R7-1). Admit it as no-state. The clause is scoped to the legacy
+  // single-marker keys: a body carrying a *Heads LIST key (even empty) is the
+  // new format, which always writes seqCounter, so an empty list with no
+  // bearing entry stays refused. An UNKNOWN key (a misspelled head marker) is
+  // neither identity nor legacy-head, so the R16-2 refusal still fires for an
+  // identity key plus an unknown spelling.
+  const IDENTITY_KEYS = new Set([
+    'pr',
+    'repo',
+    'round',
+    'artifactDir',
+    'startedAt',
+    'completedAt',
+    'verdict',
+    'commentId',
+  ]);
+  const LEGACY_HEAD_KEYS = new Set([
+    'inFlightHead',
+    'inFlight',
+    'verifiedHead',
+    'previousHead',
+  ]);
+  const restingValue = (value) =>
+    value === null ||
+    value === false ||
+    value === '' ||
+    (Array.isArray(value) && value.length === 0) ||
+    (typeof value === 'object' &&
+      value !== null &&
+      Object.keys(value).length === 0);
+  const restingView = Object.entries(parsed).every(
+    ([key, value]) =>
+      IDENTITY_KEYS.has(key) ||
+      (LEGACY_HEAD_KEYS.has(key) && restingValue(value)),
+  );
+  if (Object.keys(parsed).length > 0 && !bearingPresent && !restingView) {
     throw new Error(
       `state file ${path} carries no state-bearing entry the migration ladder can consume (a *Heads key must hold an array of {head} entries; inFlight/inFlightHead a non-empty string head); inspect it before removing — removal discards the verified/deferred dedup history`,
     );

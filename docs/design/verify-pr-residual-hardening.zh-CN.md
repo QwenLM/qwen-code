@@ -53,19 +53,24 @@ VM 路径**不跑** `--require-isolation` 门禁。这句未限定的话可能�
 ### A —— 要求承载状态键（fail closed）
 
 形状守卫**从迁移梯实际消费的内容推导**，使守卫的接纳与梯的消费不可能分叉（R2-1）。
-正文仅在 `inFlightEntries`、`verifiedEntries`、`deferredEntries`、`releasedEntries`
-之一产出条目，或 `seqCounter` 为整数，或 `retiredSeqs` 为非空对象时才被接纳。当无可消费
-的承载条目时，正文像损坏 JSON 一样 fail closed，而非被接纳后抹掉；「身份键 + 拼错的 head
+正文在 `inFlightEntries`、`verifiedEntries`、`deferredEntries`、`releasedEntries`
+之一产出条目，或 `seqCounter` 为整数，或 `retiredSeqs` 为非空对象时被接纳。早于
+列表/seqCounter 格式的遗留 resting 正文——只含身份键与前列单标记 head 键
+（`inFlight`/`inFlightHead`/`verifiedHead`/`previousHead`），且全持 resting 值
+（null/空/false）——按无状态接纳：梯把它消费为 resting，拒绝它会让一个状态不含任何去重
+历史的 PR 再也无法开轮（R7-1）。resting 分支限定于遗留单标记键：携带 `*Heads` **列表**键
+（即使为空）的正文是新格式，而新格式总写 `seqCounter`，故无承载条目的空列表仍被拒。
+其余无可消费承载条目的正文像损坏 JSON 一样 fail closed；「身份键 + 拼错（**未知**）的 head
 标记」同样被拒（R16-2）。独立于该析取式，一个**存在**但持非数组值的 `*Heads` 键（裸字符串
 `inFlightHeads:"<hex>"`）即使整数 `seqCounter` 已接纳该文件也被拒——梯无法消费该标记，
-`--start` 否则会抹掉它，破坏「同一 PR 只跑一轮」的串行化（R6-1）。空列表是合法的 resting
-形状，经 `seqCounter` 仍被接纳。`inFlightEntries` 即使在*resting* 的空 `inFlightHeads: []`
-旁也消费裸 `inFlightHead`（非空字符串）以及字符串 `inFlight`，故标记阻挡第二轮并在被拒的
-start 后存活（R1-1、R2-1）。助手写出的每个状态都经 `deriveView`，产出数组列表加整数
-`seqCounter`（以及派生的 `inFlight:false` / `inFlightHead:null` resting 视图），故合法文件
-绝不会被拒。见证钉住可消费形状、被拒的不可消费形状（带与不带承载 `seqCounter` 的数组键下
-字符串、无承载条目的空列表）、resting 文件的接纳，与遗留迁移边界（`inFlight:true`、空串或
-单独对象不迁移）。
+`--start` 否则会抹掉它，破坏「同一 PR 只跑一轮」的串行化（R6-1）。`inFlightEntries` 即使在
+_resting_ 的空 `inFlightHeads: []` 旁也消费裸 `inFlightHead`（非空字符串）以及字符串
+`inFlight`，故标记阻挡第二轮并在被拒的 start 后存活（R1-1、R2-1）。助手写出的每个状态都经
+`deriveView`，产出数组列表加整数 `seqCounter`（以及派生的 `inFlight:false` /
+`inFlightHead:null` resting 视图），故合法文件绝不会被拒。见证钉住可消费形状、遗留 resting
+正文的接纳、被拒的不可消费形状（带与不带承载 `seqCounter` 的数组键下字符串、无承载条目的
+空列表、未知 head 拼写），与遗留迁移边界（非空字符串 head 迁移并阻挡；`inFlight:true` 或
+单独对象被拒；空串是 resting——被接纳但绝不迁移去阻挡某个 head）。
 
 ### B —— 记录只存 nonce 哈希；佐证由 checker 强制
 
@@ -121,7 +126,8 @@ bullet above」，与 VM 条目一致。attestation 注解点名操作者已确�
 
 ## 涉及文件
 
-- `scripts/verify-pr-watch-state.mjs` —— 梯推导形状守卫；存在但持非数组值的 `*Heads`
+- `scripts/verify-pr-watch-state.mjs` —— 梯推导形状守卫；遗留 resting 正文（身份键 +
+  前列单标记键，全 resting 值）按无状态接纳（R7-1）；存在但持非数组值的 `*Heads`
   键独立于承载析取式被拒（R6-1）；`inFlightEntries` 在空列表旁也消费裸遗留标记。
 - `scripts/verify-pr-prepare.mjs` —— 记录 `nonceSha256`，去掉明文 `nonce`；致命 nonce
   写入（exit 3）使陈旧记录失效；`$HOME` 惰性防御解析，不可解析/空 home 以 exit-3 拒绝
@@ -133,7 +139,8 @@ bullet above」，与 VM 条目一致。attestation 注解点名操作者已确�
   （checker 唯一匹配器）、VM 句限定（R3-4）。
 - `scripts/tests/verify-pr-watch-state.test.js` —— 可消费/不可消费形状见证、纯身份
   fail-closed、迁移边界见证、带 `seqCounter` 的非数组 `*Heads` 拒绝 + resting 文件接纳
-  （R6-1）。
+  （R6-1）、遗留 resting 正文接纳且未知键与无承载列表拒绝保持（R7-1；空遗留 head
+  夹具不再注入 `seqCounter:0`）。
 - `scripts/tests/verify-pr-prepare.test.js` —— 门控记录断言、经接缝的无门控只含哈希
   记录见证、陈旧记录失效见证、不可解析/空 home 拒绝见证（R5-1）、修正后的 VM 指引钉
   （R3-4）。

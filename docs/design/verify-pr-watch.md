@@ -145,9 +145,16 @@ probe stays a CLI command and the trigger stays a gated scheduled task.
   Independently, a `*Heads` key that is present but holds a non-array value is
   refused even when an integer `seqCounter` admits the file, so the marker is
   not erased on the next `--start` (R6-1); an empty list is the legitimate
-  resting shape and stays admitted via `seqCounter`. An identity key plus a
-  misspelled head marker is likewise not read as "no state". A bare `inFlightHead` is consumed even alongside the
-  resting empty `inFlightHeads: []`, blocking a second round on that head. The
+  resting shape and stays admitted via `seqCounter`. A legacy resting body
+  that predates the list/seqCounter format — only identity keys and the
+  pre-list single-marker head keys, all holding null/empty/false — is admitted
+  as no-state, since the ladder consumes it as resting and refusing it would
+  strand a PR whose state holds no dedup history (R7-1); the clause is scoped
+  to the legacy single-marker keys, so an empty `*Heads` list with no bearing
+  entry stays refused. An identity key plus a misspelled (unknown) head marker
+  is likewise not read as "no state". A bare `inFlightHead` is consumed even
+  alongside the resting empty `inFlightHeads: []`, blocking a second round on
+  that head. The
   refusal message names the condition (no state-bearing entry the ladder can
   consume) and warns to inspect before removing, since removal discards the
   verified/deferred dedup history. The lists themselves
