@@ -87,7 +87,7 @@ async function fixture(root) {
       'select 1;',
     'packages/managed-agent-server/src/main/java/db/migration/V9__latest.java':
       'class Latest {}',
-    'packages/cli/src/serve/capabilities.ts':
+    'packages/sdk-typescript/src/daemon/capabilities.ts':
       "export const SERVE_PROTOCOL_VERSION = 'v1' as const;\n",
     'packages/cli/src/serve/managed-runtime-broker-client.ts':
       'export const MANAGED_RUNTIME_BROKER_PROTOCOL_VERSION = 2 as const;\n',

@@ -414,7 +414,7 @@ export async function createReferenceDistribution({
     throw new Error(`${CONTRACT_DOCUMENT} ${publicApi.error}.`);
   }
   const capabilities = await readFile(
-    path.join(root, 'packages/cli/src/serve/capabilities.ts'),
+    path.join(root, 'packages/sdk-typescript/src/daemon/capabilities.ts'),
     'utf8',
   );
   const brokerClient = await readFile(
