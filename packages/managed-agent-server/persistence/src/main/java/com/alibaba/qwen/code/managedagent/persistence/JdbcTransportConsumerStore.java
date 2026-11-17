@@ -116,7 +116,6 @@ public class JdbcTransportConsumerStore
      */
     public boolean claimWake(String tenantId, String sessionId,
             long sequence) {
-        ManagedLegacySessionGuard.requireLegacyMutation(jdbc, tenantId, sessionId);
         return jdbc.update(
                         "UPDATE ma_event_stream SET wake_covered_sequence = ? WHERE tenant_id = ?"
                             + " AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = X''"

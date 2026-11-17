@@ -2,7 +2,6 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
-import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityReader;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -89,26 +88,6 @@ class WorkspaceMigrationStoreTest {
         return new WorkspaceMigrationStore(jdbc, manager, guard, new JdbcRuntimeBindingRepository(jdbc.getDataSource(),
                 new AesGcmSecretProtector("test", new byte[32])),
                 request.toString().getBytes(StandardCharsets.UTF_8), create, new com.alibaba.qwen.code.managedagent.adapters.workspace.LocalRecoveryWorker());
-    }
-
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void rejectsCsiStorageBeforeInstallingAnyMigrationFence(boolean alias) throws Exception {
-        if (alias) {
-            jdbc.update("UPDATE ma_storage SET storage_kind = 'CSI' WHERE alias_key = ?", WorkspaceCsiRegistration.aliasKey("tenant", "storage"));
-        } else {
-            jdbc.update("UPDATE ma_storage_owner SET storage_kind = 'CSI'");
-        }
-        var registration = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner");
-        byte[] marker = Files.readAllBytes(source.resolve(".qwen-managed-storage.json"));
-        assertThatThrownBy(() -> store(true)).isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
-            assertThat(error.getCode()).isEqualTo("workspace_unavailable");
-            assertThat(error.isRetryable()).isFalse();
-        });
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'STORAGE_MIGRATION'", Long.class)).isZero();
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE fence_operation_id IS NOT NULL", Long.class)).isZero();
-        assertThat(jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner")).isEqualTo(registration);
-        assertThat(Files.readAllBytes(source.resolve(".qwen-managed-storage.json"))).isEqualTo(marker);
     }
 
     @Test

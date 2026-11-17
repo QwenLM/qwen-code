@@ -6,7 +6,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createManagedDingtalkDeps } from './managed-dingtalk-deps.js';
-import { DINGTALK_MAX_CHUNK_LENGTH } from './markdown.js';
+import { DINGTALK_MAX_CHUNK_LENGTH, splitChunks } from './markdown.js';
 
 const WEBHOOK = 'https://oapi.dingtalk.com/robot/sendBySession?session=abc';
 
@@ -284,6 +284,29 @@ describe('managed DingTalk webhook proxy (R6-1)', () => {
     destroySpy.mockRestore();
   });
 
+  it('destroys the proxy dispatcher on a failed send too (R12)', async () => {
+    const { EnvHttpProxyAgent } = await import('undici');
+    const destroySpy = vi
+      .spyOn(EnvHttpProxyAgent.prototype, 'destroy')
+      .mockResolvedValue(undefined);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new Error('connection dropped');
+      }),
+    );
+    const { sendWebhook } = createManagedDingtalkDeps(
+      'http://proxy.internal:8080',
+    );
+    // The leaking path is the failure path: the finally must run even when
+    // the send throws, or every failed send strands a dispatcher.
+    await expect(sendWebhook(WEBHOOK, 'hello')).rejects.toMatchObject({
+      definitive: false,
+    });
+    expect(destroySpy).toHaveBeenCalledTimes(1);
+    destroySpy.mockRestore();
+  });
+
   it('constructs the dispatcher from the default namespace, as the bundled CJS interop exposes it (R6-1)', async () => {
     // In the bundled CLI a dynamic import of the CJS undici package is
     // default-only; a named destructure binds undefined and throws before the
@@ -310,6 +333,214 @@ describe('managed DingTalk webhook proxy (R6-1)', () => {
     } finally {
       vi.doUnmock('undici');
       vi.resetModules();
+    }
+  });
+});
+
+describe('managed DingTalk webhook send budget (#17173 R12)', () => {
+  it('a stalled body is aborted at the 30s budget, not wedged forever', async () => {
+    vi.useFakeTimers();
+    try {
+      // Headers arrive, the body never does: the read must be torn down by
+      // the send budget, and the outcome is unknown (the provider may have
+      // received the message), never a hang.
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(
+          async (_url: string, init: { signal: AbortSignal }) =>
+            new Response(
+              new ReadableStream({
+                start(controller) {
+                  init.signal.addEventListener('abort', () =>
+                    controller.error(new Error('aborted')),
+                  );
+                },
+              }),
+              { status: 200, headers: { 'Content-Type': 'application/json' } },
+            ),
+        ),
+      );
+      const { sendWebhook } = createManagedDingtalkDeps();
+      let settled = false;
+      const sending = sendWebhook(WEBHOOK, 'hello').then(
+        () => {
+          settled = true;
+        },
+        (error) => {
+          settled = true;
+          throw error;
+        },
+      );
+      const assertion = expect(sending).rejects.toMatchObject({
+        definitive: false,
+      });
+      await vi.advanceTimersByTimeAsync(29_000);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await assertion;
+      expect(settled).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('the budget is armed before the fetch, so a stalled header wait aborts too', async () => {
+    vi.useFakeTimers();
+    try {
+      // No response at all: the budget must already be armed when fetch is
+      // called. Arming it only around the body read would hang here.
+      const fetchMock = vi.fn(
+        (_url: string, init: { signal: AbortSignal }) =>
+          new Promise<Response>((_resolve, reject) => {
+            init.signal.addEventListener('abort', () =>
+              reject(new Error('aborted')),
+            );
+          }),
+      );
+      vi.stubGlobal('fetch', fetchMock);
+      const { sendWebhook } = createManagedDingtalkDeps();
+      let settled = false;
+      const sending = sendWebhook(WEBHOOK, 'hello').then(
+        () => {
+          settled = true;
+        },
+        (error) => {
+          settled = true;
+          throw error;
+        },
+      );
+      const assertion = expect(sending).rejects.toMatchObject({
+        definitive: false,
+      });
+      await vi.advanceTimersByTimeAsync(29_000);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await assertion;
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('managed DingTalk webhook per-chunk send budget (#17173 R10)', () => {
+  // Headers arrive, the body never does: only the chunk's own budget can tear
+  // this read down.
+  const stalledBody = (signal: AbortSignal): Response =>
+    new Response(
+      new ReadableStream({
+        start(controller) {
+          signal.addEventListener('abort', () =>
+            controller.error(new Error('aborted')),
+          );
+        },
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    );
+
+  it("a slow first chunk does not spend the second chunk's budget", async () => {
+    vi.useFakeTimers();
+    try {
+      let call = 0;
+      const fetchMock = vi.fn(
+        async (_url: string, init: { signal: AbortSignal }) => {
+          call += 1;
+          if (call > 1) return stalledBody(init.signal);
+          // Slow but progressing: the first chunk's body lands at 25s.
+          return new Response(
+            new ReadableStream({
+              start(controller) {
+                setTimeout(() => {
+                  controller.enqueue(
+                    new TextEncoder().encode(JSON.stringify({ errcode: 0 })),
+                  );
+                  controller.close();
+                }, 25_000);
+              },
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        },
+      );
+      vi.stubGlobal('fetch', fetchMock);
+      const { sendWebhook } = createManagedDingtalkDeps();
+      let settled = false;
+      const sending = sendWebhook(WEBHOOK, 'x'.repeat(4_000)).then(
+        () => {
+          settled = true;
+        },
+        (error) => {
+          settled = true;
+          throw error;
+        },
+      );
+      const assertion = expect(sending).rejects.toMatchObject({
+        definitive: false,
+        message: expect.stringContaining('body read timed out'),
+      });
+      await vi.advanceTimersByTimeAsync(25_000);
+      expect(fetchMock).toHaveBeenCalledTimes(2); // chunk 1 delivered, chunk 2 sent
+      expect(settled).toBe(false);
+      // One shared budget would abort here, 5s into the second chunk, and
+      // settle the tail unknown while the provider was still answering.
+      await vi.advanceTimersByTimeAsync(29_000);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1_000); // 55s: chunk 2's own 30s budget
+      await assertion;
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a slow-but-progressing multi-chunk send completes past the shared 30s wall', async () => {
+    vi.useFakeTimers();
+    try {
+      const text = 'x'.repeat(8_000);
+      const chunks = splitChunks(text);
+      expect(chunks.length).toBeGreaterThanOrEqual(3);
+      // A real fetch rejects on abort; a mock that ignored the signal would
+      // let a shared budget pass this witness unnoticed.
+      const fetchMock = vi.fn(
+        (_url: string, init: { signal: AbortSignal }) =>
+          new Promise<Response>((resolve, reject) => {
+            const timer = setTimeout(
+              () => resolve(jsonResponse({ errcode: 0 })),
+              20_000,
+            );
+            init.signal.addEventListener('abort', () => {
+              clearTimeout(timer);
+              reject(new Error('aborted'));
+            });
+          }),
+      );
+      vi.stubGlobal('fetch', fetchMock);
+      const { sendWebhook } = createManagedDingtalkDeps();
+      let settled = false;
+      let failure: unknown;
+      const sending = sendWebhook(WEBHOOK, text).then(
+        () => {
+          settled = true;
+        },
+        (error) => {
+          settled = true;
+          failure = error;
+        },
+      );
+      await vi.advanceTimersByTimeAsync(30_000);
+      // The old shared wall: a batch that is still progressing must not be
+      // aborted here, and the tail chunks must still be sent.
+      expect(settled).toBe(false);
+      expect(fetchMock.mock.calls.length).toBeLessThan(chunks.length);
+      await vi.advanceTimersByTimeAsync(chunks.length * 20_000 - 30_000);
+      await sending;
+      expect(failure).toBeUndefined();
+      expect(fetchMock).toHaveBeenCalledTimes(chunks.length);
+      // Every chunk's budget timer is cleared when that chunk settles; the
+      // last one would still be pending here if the clear were dropped.
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
     }
   });
 });

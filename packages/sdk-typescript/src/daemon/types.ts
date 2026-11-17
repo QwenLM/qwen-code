@@ -350,6 +350,8 @@ export interface DaemonWorkspaceGitStatus {
   branch: string | null;
   /** v2: HEAD is detached (branch holds the short SHA). */
   detached?: boolean;
+  /** v2: false for an unborn HEAD (no commits yet). */
+  hasHead?: boolean;
   /** v2: number of staged entries. */
   staged?: number;
   /** v2: number of unstaged (modified) entries. */
@@ -598,10 +600,19 @@ export interface DaemonGitWorktreeRemoveResult {
   directoryRemains?: true;
 }
 
-/** Response from `POST /workspaces/:workspace/git/checkout`. */
+/** Response from `POST /workspaces/:workspace/git/checkout` (2xx body). */
 export interface DaemonGitCheckoutResult {
   branch: string;
   detached: boolean;
+  /**
+   * SHA of the auto-stash entry kept by a successful `stash` checkout.
+   * The entry holds the pre-switch changes; restore it manually with
+   * `git stash apply` when wanted. A 409 failure whose entry survives
+   * with a known SHA (a failed restore, or a parked-operation refusal
+   * after the push) carries the same field in its ERROR body
+   * (`{ error, message, stashSha }`), not in this interface.
+   */
+  stashSha?: string;
 }
 
 /** Response from `POST /workspaces/:workspace/git/push`. */
@@ -709,6 +720,36 @@ export interface DaemonGitHubPullRequestList {
   /** `false` when the workspace is not a git repository. */
   available: boolean;
   pullRequests: DaemonGitHubPullRequest[];
+}
+
+/** One changed file within a pull request's file list. */
+export interface DaemonGitHubPullRequestFile {
+  path: string;
+  additions: number;
+  deletions: number;
+}
+
+/** Response from `GET /workspaces/:workspace/github/prs/:number/files`. */
+export interface DaemonGitHubPullRequestFiles {
+  v: 1;
+  workspaceCwd: string;
+  /** `false` when the workspace is not a git repository. */
+  available: boolean;
+  files: DaemonGitHubPullRequestFile[];
+  /** Rows dropped because the per-file list is capped. */
+  hiddenCount: number;
+  /** PR-wide totals (cover hidden rows too). */
+  additions: number;
+  deletions: number;
+  /** The PR head commit (`headRefOid`), for scoping commit fallback. */
+  headSha: string;
+  /**
+   * Whether `headSha` is an ancestor of the checkout's HEAD. Only an
+   * ancestor head is a trustworthy commit-fallback boundary; a merged or
+   * rewritten PR's head is not. Absent on daemons that predate the probe —
+   * treat as false.
+   */
+  headIsAncestor?: boolean;
 }
 
 /** Response from `POST /workspaces/:workspace/github/prs/create`. */
@@ -1067,6 +1108,12 @@ export interface DaemonStatusReport {
     maxTotalSessions: number | null;
     maxPendingPromptsPerSession: number | null;
     listenerMaxConnections: number | null;
+    /**
+     * Effective admission cap for concurrent REST SSE streams; the live
+     * occupancy is `runtime.transport.restSseActive`. `null` = unlimited.
+     * Additive — older daemons omit this field.
+     */
+    maxSseConnections?: number | null;
     eventRingSize: number;
     eventRingMaxBytes?: number;
     promptDeadlineMs: number | null;
@@ -1403,7 +1450,22 @@ export interface DaemonStatusReport {
 export interface DaemonWorktreeInfo {
   slug: string;
   path: string;
+  /** Empty string while the worktree is detached (no branch ref). */
   branch: string;
+}
+
+/** Result of `POST /session/:id/worktree-branch` ("Create branch here"). */
+export interface DaemonWorktreeBranchResult {
+  sessionId: string;
+  worktree: DaemonWorktreeInfo;
+}
+
+/** Result of `POST /session/:id/worktree-handoff` ("Hand off"). */
+export interface DaemonWorktreeHandoffResult {
+  sessionId: string;
+  /** Null after handing off to the local checkout. */
+  worktree: DaemonWorktreeInfo | null;
+  currentCwd: string;
 }
 
 /** Branch metadata returned when a session is created with a new branch. */
@@ -1418,6 +1480,12 @@ export interface DaemonSessionPrInfo {
   url: string;
   /** Snapshot of the PR's state at last bind/refresh; optional. */
   state?: 'open' | 'merged' | 'closed';
+  /**
+   * Binding provenance: `create`/`worktree` are the session's own delivery
+   * units; `review` is a PR merely mentioned in a review/verify command and is
+   * not this session's work. Absent on bindings persisted before provenance.
+   */
+  source?: 'create' | 'worktree' | 'review';
   /**
    * Issues the PR closes (its GitHub closing references), derived by the
    * daemon's refresh sweep; absent until the first sweep after binding.
@@ -1584,6 +1652,13 @@ export interface DaemonSessionState {
 export interface DaemonRestoredSession extends DaemonSession {
   state: DaemonSessionState;
   artifactWarnings?: string[];
+  /**
+   * Restored artifact snapshot embedded by newer daemons so clients can surface
+   * a session-level artifact entry before the replay renders. Absent on older
+   * daemons and on sessions with no artifacts; clients fall back to
+   * `GET /session/:id/artifacts`.
+   */
+  artifacts?: DaemonSessionArtifact[];
   /** True when persisted replay could only be reconstructed partially. */
   partial?: true;
   /** Diagnostic for a partial persisted replay. */
@@ -1763,6 +1838,9 @@ export interface DaemonSessionSummary {
   sourceId?: string;
   clientCount?: number;
   hasActivePrompt?: boolean;
+  /** Prompts admitted but not yet finished (running + queued); flips at
+   * admission, before the active flag. Absent on older daemons. */
+  pendingPromptCount?: number;
   /** Per-session active-work observation from the owning runtime. */
   activeWorkState?: 'active' | 'idle' | 'unknown' | 'unsupported';
   backgroundTurn?: DaemonBackgroundTurn;
@@ -2358,8 +2436,8 @@ export const DAEMON_ERROR_KINDS = [
   // A prompt exceeded the daemon-configured wallclock cap (or the
   // request's own `deadlineMs`, capped at the server flag).
   'prompt_deadline_exceeded',
-  // An SSE writer's last successful flush was older than the daemon's
-  // writer-idle deadline.
+  // An SSE writer's write was stuck waiting for `drain` — the consumer
+  // stopped reading — past the daemon's writer-stall budget.
   'writer_idle_timeout',
   // The model response stream ended before a complete turn could be read.
   'model_stream_interrupted',
@@ -6338,6 +6416,22 @@ export interface ExtensionRefreshResponse {
   refreshed: number;
   failed: number;
 }
+
+/** One Generated UI card's saved view state; revision 0 means never saved. */
+export interface DaemonGeneratedUiState {
+  cardId: string;
+  revision: number;
+  value: unknown;
+}
+
+/**
+ * Outcome of saving view state. `stale` carries the current revision and value
+ * when another view saved first; `too_large` reports the size limit in bytes.
+ */
+export type DaemonGeneratedUiStateWriteResult =
+  | { outcome: 'saved'; cardId: string; revision: number }
+  | { outcome: 'stale'; cardId: string; revision: number; value: unknown }
+  | { outcome: 'too_large'; cardId: string; limitBytes: number };
 
 export interface DaemonMcpAppToolCall {
   serverName: string;

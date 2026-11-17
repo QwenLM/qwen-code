@@ -53,3 +53,29 @@ export const WORKSPACE_REGISTRATION_MESSAGES_ZH: Record<string, string> = {
   'managed.remoteWorkspaceUnconfirmed':
     '登记结果尚未确认，请继续确认已保存的请求。',
 };
+
+export const WORKSPACE_REGISTRATION_MESSAGES_RU: Record<string, string> = {
+  'managed.remoteWorkspaceAdd': 'Добавить Workspace',
+  'managed.remoteWorkspaceDescription':
+    'Выберите машину и существующий каталог, чтобы добавить его в список Workspace.',
+  'managed.remoteWorkspaceMachine': 'Машина',
+  'managed.remoteWorkspaceChooseMachine': 'Выберите машину',
+  'managed.remoteWorkspaceDirectory': 'Каталог на этой машине',
+  'managed.remoteWorkspaceName': 'Имя Workspace',
+  'managed.remoteWorkspaceCheck': 'Проверить каталог',
+  'managed.remoteWorkspaceRegister': 'Зарегистрировать Workspace',
+  'managed.remoteWorkspaceConfirm': 'Продолжить подтверждение регистрации',
+  'managed.remoteWorkspaceStartAnother': 'Начать другую регистрацию',
+  'managed.remoteWorkspaceClose': 'Закрыть',
+  'managed.remoteWorkspaceWorking': 'Подтверждение Workspace…',
+  'managed.remoteWorkspacePermission':
+    'У вашей учётной записи нет прав на эту машину или Workspace.',
+  'managed.remoteWorkspaceInvalidDirectory':
+    'Каталог недоступен. Проверьте машину и каталог, затем повторите.',
+  'managed.remoteWorkspaceFailed':
+    'Регистрация не удалась. Проверьте машину и каталог перед повторной попыткой.',
+  'managed.remoteWorkspaceBlocked':
+    'Машина ещё не подтвердила эту регистрацию. Она завершится или освободит каталог сама, как только машина ответит; если блокировка сохраняется, нужна проверка администратора. Можно очистить этот черновик браузера и зарегистрировать другой каталог.',
+  'managed.remoteWorkspaceUnconfirmed':
+    'Регистрация не подтверждена. Продолжите подтверждение сохранённого запроса.',
+};

@@ -2,7 +2,7 @@
 
 [English](2026-11-09-bound-event-prompt-language.md) | [简体中文](2026-11-09-bound-event-prompt-language.zh-CN.md)
 
-状态：已实现（#16773；2026-11-09 提案）。下文按当时的设计描述。此后有两处变化：daemon drain 的语言仍未穿线（决策 7），且 PR B（#17214）移除了 channel 的状态检测，因此下文点名的 watch 摘要现在属于 daemon。
+状态：已实现（#16773；2026-11-09 提案）。下文按当时的设计描述。此后有两处变化：daemon drain 的语言现已穿线（决策 7），且 PR B（#17214）移除了 channel 的状态检测，因此下文点名的 watch 摘要现在属于 daemon。
 
 ## 问题陈述
 
@@ -20,14 +20,14 @@
 
 ## 现状
 
-| 表面                                                                        | 位置                                                                                                                                                         | 今天的语言                        |
-| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------- |
-| 信封措辞（头部、告示、工作流句、截断标记）                                  | `packages/channels/base/src/bound-session-prompt.ts`，`buildBoundEventPrompt`                                                                                | 已本地化（`BOUND_ENVELOPE_COPY`） |
-| 内置角色指引                                                                | 同文件，`DEFAULT_BOUND_ROLE_GUIDANCE_BY_LANGUAGE`                                                                                                            | 已本地化（按角色）                |
-| 来源说明、指令来源、聚合评论头部                                            | `packages/channels/github/src/GithubAdapter.ts`，`buildBoundSessionPrompt`                                                                                   | 已本地化（`BOUND_DELIVERY_COPY`） |
-| watch 摘要（`head_change`、`ci_failure`、`merge_conflict`、`state_change`） | `packages/cli/src/serve/server/pr-watch-observation.ts`（四处 `summary:` 字面量）；由 `pr-watch-drain.ts` 的 `buildDrainPrompt` 渲染                         | 硬编码英文                        |
-| daemon drain 提示词                                                         | `packages/cli/src/serve/server/pr-watch-drain.ts`，`buildDrainPrompt`                                                                                        | 硬编码英文；语言尚未穿线          |
-| locale 接线                                                                 | `packages/cli/src/commands/channel/daemon-worker.ts` 与 `start.ts` → `resolveChannelLocale(settings.merged.general?.language)` → `ChannelBaseOptions.locale` | `GithubAdapter` 已消费            |
+| 表面                                                                        | 位置                                                                                                                                                                                                                                                                               | 今天的语言                                       |
+| --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
+| 信封措辞（头部、告示、工作流句、截断标记）                                  | `packages/channels/base/src/bound-session-prompt.ts`，`buildBoundEventPrompt`                                                                                                                                                                                                      | 已本地化（`BOUND_ENVELOPE_COPY`）                |
+| 内置角色指引                                                                | 同文件，`DEFAULT_BOUND_ROLE_GUIDANCE_BY_LANGUAGE`                                                                                                                                                                                                                                  | 已本地化（按角色）                               |
+| 来源说明、指令来源、聚合评论头部                                            | `packages/channels/github/src/GithubAdapter.ts`，`buildBoundSessionPrompt`                                                                                                                                                                                                         | 已本地化（`BOUND_DELIVERY_COPY`）                |
+| watch 摘要（`head_change`、`ci_failure`、`merge_conflict`、`state_change`） | `packages/cli/src/serve/server/pr-watch-observation.ts`（`PR_WATCH_SUMMARY_COPY`）；持久化后由 `pr-watch-drain.ts` 的 `buildDrainPrompt` 原样透传                                                                                                                                  | 检测时本地化；持久化摘要保留其语言               |
+| daemon drain 提示词                                                         | `packages/cli/src/serve/server/pr-watch-drain.ts`，`buildDrainPrompt`                                                                                                                                                                                                              | 已本地化；`language` 由 watch 与 drain deps 穿线 |
+| locale 接线                                                                 | `packages/cli/src/utils/channel-locale.ts`，`resolveChannelLocale`；channel：`daemon-worker.ts`／`start.ts` 读 `settings.merged.general?.language` → `ChannelBaseOptions.locale`；daemon：`run-qwen-serve.ts` 启动读 `bootSettings?.general?.language` → `prWatchSources.language` | `GithubAdapter` 与两个 PR-watch 接缝均已消费     |
 
 既有契约（`2026-11-02-github-channel-bound-session-events.md`、
 `2026-11-04-github-channel-bound-session-action-templates.md`、
@@ -82,7 +82,7 @@ channel 不再检测 PR 状态，因此除 channel 的评论车道外，daemon �
 - **不做运行时语言切换**：locale 在 channel worker 启动时读取，与既有
   权限文案 locale 完全一致。修改 `general.language` 在下次 channel 启动
   时生效。watch 摘要在检测时渲染并持久化在 pending 信封里，因此 pending
-  事件保持其检测时的语言。已接受的聚合评论／comment-watch 任务在恢复
+  摘要保持其检测时的语言。已接受的聚合评论／comment-watch 任务在恢复
   时同样保留生成时的 `boundText`；不会在新 locale 下再对不可信正文
   推导标记归属。
 
@@ -198,10 +198,11 @@ channel 撰写的字符串：
 6. **zh 标签保持在剥壳窗口内。** zh 头部内容约 21 码点加平台名，zh 截断
    标记比英文更短；两者都 ≤ 64 码点，因此 `sanitizePromptText` 剥它们的
    副本与剥英文标签完全一致。副本测试扩展到 zh 信封。
-7. **daemon 生产方的语言不接线。** 给 `PrWatchDrainDeps` 加一个没有
-   生产调用方设置的 language 字段会是死开关。drain 保持英文缺省。启用增量
-   此后已落地（#17032）但未穿语言——`PrWatchDrainDeps` 仍未声明 language
-   字段——因此这项穿线仍欠着，而不是已排到别处。共享构造器已经支持。
+7. **daemon 生产方的语言在 #16773 中未接线。** 给 `PrWatchDrainDeps` 加一个
+   没有生产调用方设置的 language 字段会是死开关。drain 当时保持英文缺省。启用
+   增量已落地（#17032）但未穿语言；[Daemon PR watch：提示词语言](2026-11-15-daemon-pr-watch-drain-language.zh-CN.md)
+   此后已把它穿上，因此 drain 跟随 `general.language`，而 pending 条目的持久化
+   摘要保留其检测时的语言。
 
 ## 受影响文件
 
@@ -273,7 +274,8 @@ channel 撰写的字符串：
 - 下一个补充哪种语言，以及届时 locale 联合是否要超出 `'en' | 'zh'`
   （channel `locale` 类型与 `resolveChannelLocale` 将一起扩展）。按运维
   指示延后：先中文，其他语言后续按需。
-- daemon watch 生产方启用时，应逐字复用共享 zh 字符串还是提供平台中立
-  变体（与角色指引设计相同的开放问题）。
+- 已由 [Daemon PR watch：提示词语言](2026-11-15-daemon-pr-watch-drain-language.zh-CN.md)
+  回答：daemon 逐字复用共享的 zh 信封与角色指引，并自行撰写按语言、平台中立的
+  转换摘要与来源说明行（`PR_WATCH_SUMMARY_COPY`、`DRAIN_PROVENANCE`）。
 - 字段标签是否应本地化。刻意排除在范围外；未来改动需要结构化元数据
   表示，而不是重新解析已渲染的行。
