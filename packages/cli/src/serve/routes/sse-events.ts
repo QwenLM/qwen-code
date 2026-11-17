@@ -5,6 +5,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import type { Socket } from 'node:net';
 import { performance } from 'node:perf_hooks';
 import {
   addDaemonRequestAttribute,
@@ -148,19 +149,45 @@ export function getActiveSseCount(): number {
  * leaving the socket in FIN-WAIT-1 indefinitely — Node still counts it
  * against server.maxConnections. resetAndDestroy() sends RST instead,
  * dropping the connection immediately (Node >= 18.3; engines >= 22).
+ *
+ * TLS caveat: TLSSocket inherits resetAndDestroy from net.Socket, but its
+ * TLSWrap handle rejects the call with ERR_INVALID_HANDLE_TYPE WITHOUT
+ * closing anything. The RST must be sent on the underlying TCP socket
+ * (TLSSocket._parent); a final destroy() fallback guarantees the close
+ * is at least attempted if both reset paths fail.
  */
 function forceCloseSseResponse(res: Response): void {
   const socket = res.socket;
-  if (socket && !socket.destroyed) {
-    if (typeof socket.resetAndDestroy === 'function') {
-      socket.resetAndDestroy();
-    } else {
-      socket.destroy();
+  if (!socket || socket.destroyed) {
+    try {
+      res.destroy();
+    } catch {
+      /* already destroyed */
     }
     return;
   }
   try {
-    res.destroy();
+    socket.resetAndDestroy();
+    return;
+  } catch {
+    // Expected on TLSSocket (ERR_INVALID_HANDLE_TYPE); fall through to
+    // the underlying TCP socket below.
+  }
+  const parent = (socket as unknown as { _parent?: Socket })._parent;
+  try {
+    if (
+      parent &&
+      !parent.destroyed &&
+      typeof parent.resetAndDestroy === 'function'
+    ) {
+      parent.resetAndDestroy();
+      return;
+    }
+  } catch {
+    /* fall through to the graceful destroy fallback */
+  }
+  try {
+    socket.destroy();
   } catch {
     /* already destroyed */
   }

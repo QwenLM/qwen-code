@@ -8,6 +8,7 @@ import { existsSync, realpathSync, promises as fsp } from 'node:fs';
 import { EventEmitter } from 'node:events';
 import { execFile } from 'node:child_process';
 import { createServer, type ServerResponse } from 'node:http';
+import https from 'node:https';
 import type { AddressInfo } from 'node:net';
 import * as os from 'node:os';
 import {
@@ -243,6 +244,8 @@ import {
 } from './live/types.js';
 import { WorkspaceVoiceCoordinator } from './voice/workspace-voice-coordinator.js';
 import { getActiveSseCount } from './routes/sse-events.js';
+import { EventBus } from '@qwen-code/acp-bridge/eventBus';
+import { TEST_TLS_CERT, TEST_TLS_KEY } from './test-tls-cert.js';
 import { SessionArchiveCoordinator } from './server/session-archive.js';
 import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
 import { ProcessRegistry } from '@qwen-code/acp-bridge/processRegistry';
@@ -49437,6 +49440,194 @@ describe('SSE listener-slot exhaustion guard (daemon stability)', () => {
       expect(spy).toHaveBeenCalledWith(true, 30_000);
     } finally {
       spy.mockRestore();
+    }
+  });
+});
+
+describe('HTTPS SSE eviction force-close (TLS regression)', () => {
+  // TLSSocket inherits net.Socket.resetAndDestroy, but its TLSWrap handle
+  // rejects the call with ERR_INVALID_HANDLE_TYPE WITHOUT closing anything.
+  // A force-close helper that only tries resetAndDestroy() therefore leaks
+  // the TLS connection (and its listener/SSE slot) on every eviction path.
+  // These regressions drive REAL HTTPS servers with paused clients and
+  // assert the socket closes and both connection counts return to baseline.
+  let handle: RunHandle | undefined;
+  let tlsDir: string | undefined;
+  afterEach(async () => {
+    if (handle) {
+      await handle.close();
+      handle = undefined;
+    }
+    if (tlsDir) {
+      await fsp.rm(tlsDir, { recursive: true, force: true });
+      tlsDir = undefined;
+    }
+  });
+
+  async function startTlsServe(
+    opts: Partial<ServeOptions>,
+    bridge: ReturnType<typeof fakeBridge>,
+  ) {
+    tlsDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'qws-tls-sse-'));
+    const tlsCert = path.join(tlsDir, 'cert.pem');
+    const tlsKey = path.join(tlsDir, 'key.pem');
+    await fsp.writeFile(tlsCert, TEST_TLS_CERT);
+    await fsp.writeFile(tlsKey, TEST_TLS_KEY);
+    handle = await runQwenServe(
+      {
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        tlsCert,
+        tlsKey,
+        ...opts,
+      },
+      { bridge },
+    );
+    return (handle.server.address() as { port: number }).port;
+  }
+
+  function openPausedHttpsStream(port: number, path_: string) {
+    // Resolves with the first close/abort/error signal the client sees;
+    // 'timeout' means the server never closed the connection.
+    return new Promise<string>((resolve) => {
+      const req = https.request(
+        {
+          hostname: '127.0.0.1',
+          port,
+          path: path_,
+          rejectUnauthorized: false,
+          agent: false,
+        },
+        (res) => {
+          if (res.statusCode !== 200) {
+            resolve(`status:${res.statusCode}`);
+            res.resume();
+            return;
+          }
+          res.pause();
+          res.on('close', () => resolve('res-close'));
+          res.on('aborted', () => resolve('res-aborted'));
+          res.on('error', (e) => resolve(`res-error:${e.code}`));
+        },
+      );
+      req.on('error', (e) => resolve(`req-error:${e.code}`));
+      req.end();
+      setTimeout(() => resolve('timeout'), 2500).unref();
+    });
+  }
+
+  async function serverConnectionCount(): Promise<number> {
+    return new Promise((resolve) => {
+      handle!.server.getConnections((_err, count) => resolve(count));
+    });
+  }
+
+  async function expectCountsReleased(beforeActive: number): Promise<void> {
+    // The client sees the RST before the server-side TLSSocket 'close'
+    // propagates to finalize(), so poll for convergence instead of
+    // asserting synchronously. A leaked slot never converges and the
+    // final expectations fail with the actual counts.
+    const deadline = Date.now() + 1500;
+    while (Date.now() < deadline) {
+      if (
+        getActiveSseCount() === beforeActive &&
+        (await serverConnectionCount()) === 0
+      ) {
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(getActiveSseCount()).toBe(beforeActive);
+    expect(await serverConnectionCount()).toBe(0);
+  }
+
+  it('writer-timeout eviction closes the TLS socket and frees the slot', async () => {
+    // Full-send-buffer simulation: after the first stalled write, every
+    // later write (including the reaper's terminal frame) reports
+    // backpressure, so eviction takes the immediate force-close branch —
+    // the exact path that threw ERR_INVALID_HANDLE_TYPE on TLSSocket.
+    const http = await import('node:http');
+    type WriteCallback = (error?: Error | null) => void;
+    const originalWrite = http.ServerResponse.prototype.write as unknown as (
+      this: ServerResponse,
+      chunk: string | Uint8Array,
+      encodingOrCb?: BufferEncoding | WriteCallback,
+      cb?: WriteCallback,
+    ) => boolean;
+    const writeSpy = vi.spyOn(http.ServerResponse.prototype, 'write');
+    let forcedStall = false;
+    writeSpy.mockImplementation(function (
+      this: ServerResponse,
+      chunk: string | Uint8Array,
+      encodingOrCb?: BufferEncoding | WriteCallback,
+      cb?: WriteCallback,
+    ): boolean {
+      const text = typeof chunk === 'string' ? chunk : chunk.toString();
+      if (!forcedStall && text.includes('event: session_update')) {
+        forcedStall = true;
+        return false;
+      }
+      if (forcedStall) return false;
+      return typeof encodingOrCb === 'function'
+        ? originalWrite.call(this, chunk, encodingOrCb)
+        : originalWrite.call(this, chunk, encodingOrCb, cb);
+    });
+    try {
+      const beforeActive = getActiveSseCount();
+      const bridge = fakeBridge({
+        async *subscribeImpl(_sessionId, _opts) {
+          yield { id: 1, v: 1, type: 'session_update', data: { tick: 1 } };
+          await new Promise(() => {});
+        },
+      });
+      const port = await startTlsServe({ writerIdleTimeoutMs: 200 }, bridge);
+      const outcome = await openPausedHttpsStream(
+        port,
+        '/session/sess-A/events',
+      );
+      expect(forcedStall).toBe(true);
+      expect(outcome).not.toBe('timeout');
+      expect(outcome).not.toMatch(/^status:/);
+      await expectCountsReleased(beforeActive);
+    } finally {
+      writeSpy.mockRestore();
+    }
+  });
+
+  it('EventBus overflow eviction closes the TLS socket and frees the slot', async () => {
+    // Real EventBus, real queue overflow: a paused HTTPS client with
+    // maxQueued=16 while 1MiB frames are published. The overflow
+    // diagnostic drives the route's client_evicted + force-close path.
+    const bus = new EventBus();
+    const bridge = fakeBridge();
+    (bridge as unknown as { subscribeEvents: unknown }).subscribeEvents = (
+      _sessionId: string,
+      opts: Parameters<EventBus['subscribe']>[0],
+    ) => bus.subscribe(opts);
+    try {
+      const beforeActive = getActiveSseCount();
+      const port = await startTlsServe({}, bridge);
+      const outcomePromise = openPausedHttpsStream(
+        port,
+        '/session/sess-A/events?maxQueued=16',
+      );
+      // Wait for the subscription to attach before publishing.
+      const attachDeadline = Date.now() + 2000;
+      while (bus.subscriberCount === 0 && Date.now() < attachDeadline) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      expect(bus.subscriberCount).toBe(1);
+      const payload = 'x'.repeat(1024 * 1024);
+      for (let i = 0; i < 40; i++) {
+        bus.publish({ type: 'session_update', data: { i, payload } });
+      }
+      const outcome = await outcomePromise;
+      expect(outcome).not.toBe('timeout');
+      expect(outcome).not.toMatch(/^status:/);
+      await expectCountsReleased(beforeActive);
+    } finally {
+      bus.close();
     }
   });
 });
