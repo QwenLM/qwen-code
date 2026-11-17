@@ -96,6 +96,13 @@ const MODEL_CONFIGURATIONS: Readonly<
       defaultEffort: 'xhigh',
     },
   },
+  'qwen4-max': {
+    reasoning: {
+      thinking: true,
+      efforts: ['low', 'high', 'xhigh'],
+      defaultEffort: 'high',
+    },
+  },
 };
 
 export const REASONING_EFFORT_DEFAULT = 'default';
@@ -328,9 +335,23 @@ export function getModelConfiguration(
       : modelId
         ? (MODEL_CONFIGURATIONS[modelId] ??
           (isTieredEffortQwenPrefix(modelId)
-            ? MODEL_CONFIGURATIONS['qwen3.8-max']
+            ? tieredQwenManifest(modelId)
             : undefined))
         : undefined;
+}
+
+/**
+ * Prefix fallback for tiered Qwen ids without an exact manifest row (dated
+ * snapshots, `-latest` aliases). The qwen4 generation takes the qwen4-max
+ * ladder (low/high/xhigh, default high); the invitation-only latest-series
+ * previews keep the stable qwen3.8-max ladder they inherit from.
+ */
+function tieredQwenManifest(
+  modelId: string,
+): { readonly reasoning?: ModelReasoningConfiguration } | undefined {
+  return modelId.toLowerCase().startsWith('qwen4')
+    ? MODEL_CONFIGURATIONS['qwen4-max']
+    : MODEL_CONFIGURATIONS['qwen3.8-max'];
 }
 
 /**

@@ -78,6 +78,7 @@ describe('qwencloudStandardProvider', () => {
   it('seeds the platform model catalog', () => {
     expect(getDefaultModelIds(qwencloudStandardProvider)).toEqual([
       'qwen3.8-max',
+      'qwen4-max',
       'qwen3.7-plus',
       'qwen3.8-flash',
       'deepseek-v4-pro-0813',
@@ -90,6 +91,15 @@ describe('qwencloudStandardProvider', () => {
         (model) => model.id === 'qwen3.7-plus',
       )?.modalities,
     ).toEqual({ image: true, video: true });
+    const qwen4 = qwencloudStandardProvider.models?.find(
+      (model) => model.id === 'qwen4-max',
+    );
+    expect(qwen4?.capabilities?.reasoning).toMatchObject({
+      efforts: ['low', 'high', 'xhigh'],
+      defaultEffort: 'high',
+      disableField: 'reasoning_effort',
+    });
+    expect(qwen4?.modalities).toEqual({ image: true, video: true });
   });
 
   it('accepts pay-as-you-go key prefixes and rejects Token Plan keys', () => {

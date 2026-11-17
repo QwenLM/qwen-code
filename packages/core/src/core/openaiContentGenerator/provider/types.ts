@@ -11,7 +11,7 @@ export type OpenAIRequestContextOverrides = {
 // Extended types to support cache_control for DashScope
 export interface ChatCompletionContentPartTextWithCache
   extends OpenAI.Chat.ChatCompletionContentPartText {
-  cache_control?: { type: 'ephemeral' };
+  cache_control?: { type: 'ephemeral'; ttl?: '5m' | '1h' };
 }
 
 export type ChatCompletionContentPartWithCache =

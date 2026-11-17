@@ -704,6 +704,7 @@ export function llmPreparedProviderPin(
     'thinkingMandatory',
     'extra_body',
     'modalities',
+    'imageDetail',
     'schemaCompliance',
     'contextWindowSize',
     'splitToolMedia',

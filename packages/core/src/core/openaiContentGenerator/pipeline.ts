@@ -1661,13 +1661,43 @@ export class ContentGenerationPipeline {
         effectiveReasoning.effort &&
         typed['thinking_budget'] === undefined
       ) {
-        typed['thinking_budget'] = {
-          low: 4096,
-          medium: 16384,
-          high: 32768,
-          xhigh: 32768,
-          max: 32768,
-        }[effectiveReasoning.effort];
+        // qwen4-max's thinking_budget ladder differs from qwen3.8: the server
+        // maps 1-4096->low, 4097-131072->high, 131073-262144->xhigh. Gate on
+        // the wire model so qwen3.8 subscription models keep their shipped
+        // budget table.
+        typed['thinking_budget'] = model.startsWith('qwen4')
+          ? {
+              low: 4096,
+              medium: 131072,
+              high: 131072,
+              xhigh: 262144,
+              max: 262144,
+            }[effectiveReasoning.effort]
+          : {
+              low: 4096,
+              medium: 16384,
+              high: 32768,
+              xhigh: 32768,
+              max: 32768,
+            }[effectiveReasoning.effort];
+      }
+    }
+
+    // qwen4-max caps non-thinking output at 131,072 tokens (thinking mode
+    // allows 262,144). The auto budget is sized for thinking mode and exempt
+    // from the flat output ceiling, so once thinking is disabled a short-prompt
+    // request would otherwise ship max_tokens=262,144 and exceed the
+    // non-thinking range (400). Clamp it here, where the disable shape is
+    // final (the provider's own cap runs before this reasoning shaping).
+    if (
+      isDashScope &&
+      model.startsWith('qwen4') &&
+      (typed['reasoning_effort'] === 'none' ||
+        typed['enable_thinking'] === false)
+    ) {
+      const maxTokens = providerRequest.max_tokens;
+      if (typeof maxTokens === 'number' && maxTokens > 131_072) {
+        providerRequest.max_tokens = 131_072;
       }
     }
 
@@ -2098,6 +2128,7 @@ export class ContentGenerationPipeline {
     return {
       model: effectiveModel,
       modalities: this.contentGeneratorConfig.modalities ?? {},
+      imageDetail: this.contentGeneratorConfig.imageDetail,
       startTime: Date.now(),
       splitToolMedia:
         providerOverrides.splitToolMedia ??

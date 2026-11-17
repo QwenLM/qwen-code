@@ -65,6 +65,7 @@ export type ModelGenerationConfig = Pick<
   | 'thinkingMandatory'
   | 'contextWindowSize'
   | 'modalities'
+  | 'imageDetail'
   | 'splitToolMedia'
   | 'toolResultContentFormat'
 >;

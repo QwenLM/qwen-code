@@ -57,6 +57,10 @@ const MODALITY_PATTERNS: Array<[RegExp, InputModalities]> = [
   [/^qwen3\.8-plus/, { image: true, video: true }],
   [/^qwen3\.8-max$/, { image: true, video: true }],
   [/^qwen3\.8-max/, { image: true }],
+  // qwen4-max is native multimodal (text/image/video input). Named ahead of
+  // the text-only /^qwen/ fallback so a served id without catalog metadata
+  // still accepts media.
+  [/^qwen4-max/, { image: true, video: true }],
   [/^coder-model$/, { image: true, video: true }],
 
   // Qwen VL (vision-language) models: image + video

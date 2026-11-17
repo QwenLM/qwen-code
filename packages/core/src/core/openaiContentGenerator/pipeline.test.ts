@@ -931,6 +931,47 @@ describe('ContentGenerationPipeline', () => {
       },
     );
 
+    it('clamps qwen4 non-thinking output to the 131072 range', async () => {
+      // The auto budget is sized for thinking mode (262144, ceiling-exempt).
+      // With thinking disabled the non-thinking cap is 131072, so a short
+      // prompt must not ship the thinking-sized max_tokens (400 range error).
+      const apiCall = await executeWith(
+        {
+          baseUrl: DASHSCOPE_URL,
+          model: 'qwen4-max',
+          authType: AuthType.QWEN_OAUTH,
+          samplingParams: undefined,
+          reasoning: false,
+        },
+        userRequest('qwen4-max'),
+        'prompt-id',
+        DashScopeOpenAICompatibleProvider,
+      );
+      expectFields(apiCall, {
+        reasoning_effort: 'none',
+        max_tokens: 131072,
+      });
+    });
+
+    it('keeps the qwen4 thinking-mode output budget above the non-thinking cap', async () => {
+      const apiCall = await executeWith(
+        {
+          baseUrl: DASHSCOPE_URL,
+          model: 'qwen4-max',
+          authType: AuthType.QWEN_OAUTH,
+          samplingParams: undefined,
+          reasoning: { effort: 'high' },
+        },
+        userRequest('qwen4-max', { thinkingConfig: { includeThoughts: true } }),
+        'prompt-id',
+        DashScopeOpenAICompatibleProvider,
+      );
+      expectFields(apiCall, {
+        reasoning_effort: 'high',
+        max_tokens: 262144,
+      });
+    });
+
     it('never ships the max tier to a generic OpenAI-compatible endpoint end to end', async () => {
       // The same persisted-tier failure through the real default provider.
       const apiCall = await executeWith(
@@ -2120,6 +2161,47 @@ describe('ContentGenerationPipeline', () => {
         reasoning_effort: 'none',
         thinking_budget: undefined,
         enable_thinking: undefined,
+      });
+    });
+
+    it('maps qwen4 subscription effort to the qwen4 thinking_budget ladder', async () => {
+      const wire = await executeWithCapability(
+        {
+          thinking: true,
+          efforts: ['low', 'high', 'xhigh'],
+          defaultEffort: 'high',
+          disableField: 'reasoning_effort',
+        },
+        {
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          reasoning: { effort: 'xhigh' },
+        },
+        'qwen4-max',
+      );
+      expectFields(wire, {
+        enable_thinking: true,
+        thinking_budget: 262144,
+        reasoning_effort: undefined,
+      });
+    });
+
+    it('keeps the qwen3.8 subscription budget table for qwen3.8-max', async () => {
+      const wire = await executeWithCapability(
+        {
+          thinking: true,
+          efforts: ['low', 'medium', 'xhigh'],
+          defaultEffort: 'xhigh',
+          disableField: 'reasoning_effort',
+        },
+        {
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          reasoning: { effort: 'xhigh' },
+        },
+        'qwen3.8-max',
+      );
+      expectFields(wire, {
+        enable_thinking: true,
+        thinking_budget: 32768,
       });
     });
 

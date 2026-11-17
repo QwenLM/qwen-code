@@ -335,7 +335,10 @@ export function invalidateModelCatalog(): void {
 }
 
 /** DashScope's pdf carve-out binds the model, so it binds both spellings. */
-const PDF_CARVE_OUT_IDS = new Set(versionSpellings('qwen3.8-max'));
+const PDF_CARVE_OUT_IDS = new Set([
+  ...versionSpellings('qwen3.8-max'),
+  ...versionSpellings('qwen4-max'),
+]);
 
 /**
  * `model` must already be normalized (`normalize()` in tokenLimits.ts) so

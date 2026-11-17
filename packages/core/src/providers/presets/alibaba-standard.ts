@@ -157,6 +157,19 @@ export const alibabaStandardProvider: ProviderConfig = {
       modalities: { image: true },
     },
     {
+      id: 'qwen4-max',
+      contextWindowSize: 1000000,
+      capabilities: {
+        reasoning: {
+          thinking: true,
+          efforts: ['low', 'high', 'xhigh'],
+          defaultEffort: 'high',
+          disableField: 'reasoning_effort',
+        },
+      },
+      modalities: { image: true, video: true },
+    },
+    {
       id: 'qwen3.8-max',
       contextWindowSize: 1000000,
       capabilities: {

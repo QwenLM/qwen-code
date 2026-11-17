@@ -58,6 +58,19 @@ const TOKEN_PLAN_MODELS: ModelSpec[] = [
     enableThinking: true,
   },
   {
+    id: 'qwen4-max',
+    capabilities: {
+      reasoning: {
+        thinking: true,
+        efforts: ['low', 'high', 'xhigh'],
+        defaultEffort: 'high',
+        disableField: 'reasoning_effort',
+      },
+    },
+    contextWindowSize: 1000000,
+    modalities: { image: true, video: true },
+  },
+  {
     id: 'qwen3.8-max',
     capabilities: {
       reasoning: {

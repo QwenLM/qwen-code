@@ -549,6 +549,21 @@ describe('tokenLimit with output type', () => {
       expect(tokenLimit('qwen3-max', 'output')).toBe(32768);
       expect(tokenLimit('qwen3-max-2026-01-23', 'output')).toBe(32768);
     });
+
+    it('should size qwen4 output for thinking + answer (262,144)', () => {
+      expect(tokenLimit('qwen4-max', 'output')).toBe(262144);
+      expect(tokenLimit('qwen4-max-2026-10-01', 'output')).toBe(262144);
+      expect(tokenLimit('qwen4.5-max', 'output')).toBe(262144);
+      expect(hasExplicitOutputLimit('qwen4-max')).toBe(true);
+    });
+
+    it('should exempt qwen4 from the flat auto output ceiling', () => {
+      // max_tokens caps CoT + answer together, so the 64K auto ceiling would
+      // be consumed by thinking alone.
+      expect(defaultOutputCeiling('qwen4-max')).toBe(262144);
+      // qwen3.8-max keeps the flat auto ceiling (its max_tokens excludes CoT).
+      expect(defaultOutputCeiling('qwen3.8-max')).toBe(64000);
+    });
   });
 
   describe('other output limits', () => {

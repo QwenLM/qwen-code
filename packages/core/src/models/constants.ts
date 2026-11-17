@@ -51,6 +51,7 @@ export const MODEL_GENERATION_CONFIG_FIELDS = [
   'extra_body',
   'thinkingMandatory',
   'modalities',
+  'imageDetail',
   'splitToolMedia',
   'toolResultContentFormat',
 ] as const satisfies ReadonlyArray<keyof ContentGeneratorConfig>;

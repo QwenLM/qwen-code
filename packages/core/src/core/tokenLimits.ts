@@ -236,6 +236,14 @@ export function normalize(model: string): string {
  */
 const CLAUDE_OPUS_EXTENDED = /^claude-opus-(?:4-(?:6|7|8)|5)/;
 
+/**
+ * qwen4 generation: `max_tokens` caps thinking + answer together (262,144 in
+ * thinking mode), so the flat 64K auto ceiling would be consumed by thinking
+ * alone. Exempt the family from OUTPUT_TOKEN_CEILING like CLAUDE_OPUS_EXTENDED;
+ * clampOutputTokensToWindow still bounds every request by window room.
+ */
+const QWEN4_OUTPUT_EXTENDED = /^qwen4/;
+
 /** Ordered regex patterns: most specific -> most general (first match wins). */
 const PATTERNS: Array<[RegExp, TokenCount]> = [
   // -------------------
@@ -346,6 +354,7 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^claude-/, LIMITS['64k']], // Claude fallback: 64K
 
   // Alibaba / Qwen
+  [QWEN4_OUTPUT_EXTENDED, LIMITS['256k']], // qwen4: max_tokens caps CoT + answer (262,144 thinking)
   [/^qwen3\.\d/, LIMITS['64k']],
   [/^coder-model$/, LIMITS['64k']],
   [/^qwen/, LIMITS['32k']], // Qwen fallback (VL, turbo, plus, etc.): 32K
@@ -466,7 +475,11 @@ export function tokenLimit(
  */
 export function defaultOutputCeiling(model: Model): TokenCount {
   const outputLimit = tokenLimit(model, 'output');
-  if (CLAUDE_OPUS_EXTENDED.test(normalize(model))) {
+  const normalized = normalize(model);
+  if (
+    CLAUDE_OPUS_EXTENDED.test(normalized) ||
+    QWEN4_OUTPUT_EXTENDED.test(normalized)
+  ) {
     return outputLimit;
   }
   return Math.min(outputLimit, OUTPUT_TOKEN_CEILING);

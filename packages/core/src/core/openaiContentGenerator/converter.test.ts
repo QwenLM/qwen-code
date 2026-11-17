@@ -49,7 +49,7 @@ type Message = OpenAI.Chat.ChatCompletionMessageParam;
 type WirePart = {
   type: string;
   text?: string;
-  image_url?: { url: string };
+  image_url?: { url: string; detail?: string };
   input_audio?: { data: string; format: string };
   video_url?: { url: string };
   file?: { filename: string; file_data: string };
@@ -3926,6 +3926,33 @@ describe('OpenAIContentConverter', () => {
       expect(messages[1].role).toBe('user');
       expect(messages[2].role).toBe('assistant');
     });
+  });
+});
+
+describe('image detail', () => {
+  const imagePart = (ctx: RequestContext) => {
+    const messages = OpenAIContentConverter.convertLlmRequestToOpenAI(
+      req(content('user', inline('image/png', 'aGVsbG8='))),
+      ctx,
+    );
+    return partOf(wireParts(byRole(messages, 'user')[0]), 'image_url');
+  };
+
+  it('injects detail when imageDetail is set', () => {
+    expect(
+      imagePart({ ...baseRequestContext(), imageDetail: 'low' })?.image_url
+        ?.detail,
+    ).toBe('low');
+    expect(
+      imagePart({ ...baseRequestContext(), imageDetail: 'high' })?.image_url
+        ?.detail,
+    ).toBe('high');
+  });
+
+  it('omits detail by default (server decides)', () => {
+    expect(imagePart(baseRequestContext())?.image_url).not.toHaveProperty(
+      'detail',
+    );
   });
 });
 

@@ -40,6 +40,19 @@ export const QWENCLOUD_MODELS: ModelSpec[] = [
     modalities: { image: true, video: true },
   },
   {
+    id: 'qwen4-max',
+    contextWindowSize: 1000000,
+    capabilities: {
+      reasoning: {
+        thinking: true,
+        efforts: ['low', 'high', 'xhigh'],
+        defaultEffort: 'high',
+        disableField: 'reasoning_effort',
+      },
+    },
+    modalities: { image: true, video: true },
+  },
+  {
     id: 'qwen3.7-plus',
     contextWindowSize: 1000000,
     enableThinking: true,
