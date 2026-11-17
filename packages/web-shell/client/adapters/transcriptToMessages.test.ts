@@ -565,6 +565,41 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
   });
 
+  it('lifts the sending session out of the input annotations', () => {
+    const reference = {
+      type: 'reference' as const,
+      start: 0,
+      end: 5,
+      text: '@file',
+      reference: { id: 'file', serialized: '@file' },
+    };
+    const source = {
+      type: 'source',
+      sessionId: 'caller',
+      workspaceCwd: '/work/a',
+      title: 'Caller',
+    };
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('user-1', 'user', '@file look', 1, false, {
+        meta: { inputAnnotations: [source, reference] },
+      }),
+      textBlock('user-2', 'user', 'plain', 2, false, {
+        meta: { inputAnnotations: [source] },
+      }),
+      textBlock('user-3', 'user', 'malformed', 3, false, {
+        meta: { inputAnnotations: [{ type: 'source', sessionId: 7 }] },
+      }),
+    ]);
+
+    expect(messages[0]).toMatchObject({
+      sentFrom: source,
+      inputAnnotations: [reference],
+    });
+    expect(messages[1]).toMatchObject({ sentFrom: source });
+    expect(messages[1]).not.toHaveProperty('inputAnnotations');
+    expect(messages[2]).not.toHaveProperty('sentFrom');
+  });
+
   it('renders live background task notifications as system messages', () => {
     const messages = transcriptBlocksToDaemonMessages([
       textBlock(

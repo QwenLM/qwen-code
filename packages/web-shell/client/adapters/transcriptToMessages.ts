@@ -14,6 +14,7 @@ import {
 } from '@qwen-code/sdk/daemon';
 import type {
   DaemonInputAnnotation,
+  DaemonInputSourceAnnotation,
   DaemonLoopStop,
   QwenAgentMessageMeta,
   DaemonTranscriptBlock,
@@ -102,6 +103,18 @@ function agentMessageOfBlock(
     kind: block.kind === 'assistant' ? 'agent_message' : 'agent_mention',
     author: { agentId: '', name },
   };
+}
+
+/** The session a message was sent from, among a user block's annotations. */
+function isInputSourceAnnotation(
+  value: unknown,
+): value is DaemonInputSourceAnnotation {
+  const record = getRecord(value);
+  return (
+    record?.['type'] === 'source' &&
+    typeof record['sessionId'] === 'string' &&
+    typeof record['workspaceCwd'] === 'string'
+  );
 }
 
 function collectBackgroundTaskUpdates(
@@ -707,9 +720,17 @@ export function transcriptBlocksToDaemonMessages(
           (textBlock as ExtendedDaemonTextTranscriptBlock).meta,
         );
         const source = getString(meta, 'source');
-        const inputAnnotations = Array.isArray(meta?.inputAnnotations)
-          ? (meta.inputAnnotations as DaemonInputAnnotation[])
-          : undefined;
+        // The daemon's `source` entry rides along with the reference chips
+        // but covers no text, so it becomes a field of its own.
+        const rawAnnotations: unknown[] = Array.isArray(meta?.inputAnnotations)
+          ? meta.inputAnnotations
+          : [];
+        const sentFrom = rawAnnotations.find(isInputSourceAnnotation);
+        const referenceAnnotations = rawAnnotations.filter(
+          (annotation) => !isInputSourceAnnotation(annotation),
+        ) as DaemonInputAnnotation[];
+        const inputAnnotations =
+          referenceAnnotations.length > 0 ? referenceAnnotations : undefined;
         const images = textBlock.images?.map((img) => ({
           data: img.data,
           mimeType: img.mimeType || 'image/*',
@@ -747,6 +768,7 @@ export function transcriptBlocksToDaemonMessages(
           sourceBlockIds: [block.id],
           ...(source ? { source } : {}),
           ...(inputAnnotations ? { inputAnnotations } : {}),
+          ...(sentFrom ? { sentFrom } : {}),
           ...(agentMessage ? { agentMessage } : {}),
           ...(agentMessage?.author
             ? {

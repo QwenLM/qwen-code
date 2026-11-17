@@ -1713,6 +1713,33 @@ describe('sub-session launcher', () => {
     launcher.stop();
   });
 
+  it('stops marking a send as waiting once the permission is resolved', async () => {
+    const fake = makeFakeBridge({
+      events: () => [
+        { v: 1, type: 'permission_request', data: { requestId: 'p1' } },
+        { v: 1, type: 'permission_request', data: { requestId: 'p2' } },
+        { v: 1, type: 'permission_resolved', data: { requestId: 'p1' } },
+        { v: 1, type: 'permission_resolved', data: { requestId: 'p2' } },
+      ],
+      blockAfterEvents: true,
+    });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+    });
+    await launcher.launchForPerson({
+      callerSessionId: 'parent-1',
+      prompt: 'research it',
+    });
+    // Started, waiting, and not waiting only after the second resolution.
+    await vi.waitFor(() => expect(fake.workspaceEvents).toHaveLength(3));
+    expect(launcher.listOutgoing('parent-1')[0]).toMatchObject({
+      status: 'running',
+      waitingForInput: false,
+    });
+    launcher.stop();
+  });
+
   it('marks a listed send as waiting while its target has a pending permission', async () => {
     const fake = makeFakeBridge({
       events: () => [

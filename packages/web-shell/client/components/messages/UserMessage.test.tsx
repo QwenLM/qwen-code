@@ -88,16 +88,12 @@ describe('UserMessage', () => {
       <I18nProvider language="en">
         <UserMessage
           content="look at this"
-          inputAnnotations={
-            [
-              {
-                type: 'source',
-                sessionId: 'caller',
-                workspaceCwd: '/work/projA',
-                title: 'Caller',
-              },
-            ] as never
-          }
+          sentFrom={{
+            type: 'source',
+            sessionId: 'caller',
+            workspaceCwd: '/work/projA',
+            title: 'Caller',
+          }}
         />
       </I18nProvider>,
     );
@@ -123,19 +119,6 @@ describe('UserMessage', () => {
     expect(
       container.querySelector('[data-web-shell-user-sent-from]'),
     ).toBeNull();
-  });
-
-  it('ignores a malformed source annotation', () => {
-    const container = render(
-      <UserMessage
-        content="plain"
-        inputAnnotations={[{ type: 'source', sessionId: 7 }, null] as never}
-      />,
-    );
-    expect(
-      container.querySelector('[data-web-shell-user-sent-from]'),
-    ).toBeNull();
-    expect(container.textContent).toContain('plain');
   });
 
   it('renders content', () => {

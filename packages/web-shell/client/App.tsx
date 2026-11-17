@@ -19289,7 +19289,10 @@ export function App({
       }));
       if (!trimmed && !images?.length && !files?.length) return false;
       const inputAnnotations = mapRestoredInputAnnotationsAfterTextChange(
-        original.meta?.inputAnnotations ?? [],
+        // Only reference chips follow the text; who sent it does not.
+        (original.meta?.inputAnnotations ?? []).filter(
+          (annotation) => annotation?.type === 'reference',
+        ),
         original.text,
         trimmed,
       );
