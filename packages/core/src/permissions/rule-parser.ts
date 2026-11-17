@@ -1082,7 +1082,7 @@ function findOperatorBoundaries(
   // Nesting depth of `$(( … ))` / `(( … ))`. Inside arithmetic a bare `&` is
   // bitwise AND, not the async operator, so `$(( FLAGS & MASK ))` is one word.
   let arithmeticDepth = 0;
-  let patternDepth = 0;
+  let wordParenDepth = 0;
 
   for (let i = 0; i < command.length; i++) {
     const ch = command[i]!;
@@ -1128,10 +1128,19 @@ function findOperatorBoundaries(
 
     if (
       includeGroups &&
-      (patternDepth > 0 || (ch === '(' && /[?*+@!]/.test(command[i - 1] ?? '')))
+      wordParenDepth === 0 &&
+      ch === '#' &&
+      (i === 0 || /[ \t\n;&|()]/.test(command[i - 1]!))
     ) {
-      if (ch === '(') patternDepth++;
-      else if (ch === ')') patternDepth--;
+      const newline = command.indexOf('\n', i);
+      if (newline === -1) break;
+      i = newline - 1;
+      continue;
+    }
+
+    if (includeGroups && wordParenDepth > 0) {
+      if (ch === '(') wordParenDepth++;
+      else if (ch === ')') wordParenDepth--;
       continue;
     }
 
@@ -1144,6 +1153,18 @@ function findOperatorBoundaries(
       arithmeticDepth--;
       i++;
       continue;
+    }
+
+    if (includeGroups && arithmeticDepth === 0 && ch === '(') {
+      if (/[?*+@!$<>=]/.test(command[i - 1] ?? '')) {
+        wordParenDepth = 1;
+        continue;
+      }
+      const emptyParameters = /^\([ \t]*\)/.exec(command.slice(i));
+      if (emptyParameters) {
+        i += emptyParameters[0].length - 1;
+        continue;
+      }
     }
 
     if (

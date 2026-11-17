@@ -203,7 +203,7 @@ function tokenize(
     while (ch === '$' && command.startsWith('\\\n', quoteAt)) quoteAt += 2;
     if (!(ch === '$' && command[quoteAt] === "'")) flushAnsiC();
     if (ch === "'" || ch === '"' || ch === '\\') {
-      if (!current.includes('/')) prefixQuoted = true;
+      if (!current.includes('/') && !current.includes('[')) prefixQuoted = true;
       wordStarted = true;
     }
     if (escaped) {
@@ -226,14 +226,16 @@ function tokenize(
       while (command[next] === '\\' && command[next + 1] === '\n') next += 2;
       if (command[next] === "'") {
         wordStarted = true;
-        if (!current.includes('/')) prefixQuoted = true;
+        if (!current.includes('/') && !current.includes('['))
+          prefixQuoted = true;
         inAnsiC = true;
         i = next;
         continue;
       }
       if (command[next] === '"') {
         wordStarted = true;
-        if (!current.includes('/')) prefixQuoted = true;
+        if (!current.includes('/') && !current.includes('['))
+          prefixQuoted = true;
         inDouble = true;
         i = next;
         continue;
@@ -250,7 +252,11 @@ function tokenize(
     }
     if (!inSingle && !inDouble && (ch === ' ' || ch === '\t')) {
       if (wordStarted) {
-        if (prefixQuoted && (current.startsWith('~') || current === 'time')) {
+        if (
+          prefixQuoted &&
+          (current.startsWith('~') ||
+            ['time', 'case', '-p', '--'].includes(current))
+        ) {
           bare = '0' + bare.slice(1);
         }
         if (current) {
@@ -280,7 +286,10 @@ function tokenize(
     i += literal.length - 1;
   }
   flushAnsiC();
-  if (prefixQuoted && (current.startsWith('~') || current === 'time')) {
+  if (
+    prefixQuoted &&
+    (current.startsWith('~') || ['time', 'case', '-p', '--'].includes(current))
+  ) {
     bare = '0' + bare.slice(1);
   }
   if (current) pushToken(tokens, current, bare, fdRedirects, fdCloses, bares);
@@ -423,6 +432,15 @@ function isUncertainPath(word: string, bare?: string): boolean {
   if (bare?.includes('2') || hasUnpairedSurrogate(word)) return true;
   // Outer expansion happens before the payload's own quotes are parsed.
   for (const expansion of wrapperExpansions) {
+    const fragmentAt = expansion.indexOf(word);
+    if (
+      fragmentAt >= 0 &&
+      (word.includes('$') || word.includes('`')) &&
+      (!/^\$[A-Za-z_][A-Za-z0-9_]*$/.test(word) ||
+        !/[A-Za-z0-9_]/.test(expansion[fragmentAt + word.length] ?? ''))
+    ) {
+      return true;
+    }
     for (
       let at = word.indexOf(expansion);
       at >= 0;
@@ -539,9 +557,17 @@ function envAssignmentName(token: string): string | undefined {
 }
 
 function isEnvAssignmentToken(token: string, bare?: string): boolean {
+  const assignment = ENV_ASSIGNMENT_PATTERN.exec(token);
+  if (!assignment) return false;
+  if (bare === undefined) return true;
+  const nameEnd = assignment[1]!.length;
+  const subscriptEnd = token.indexOf(']', nameEnd);
+  const suffixStart = token[nameEnd] === '[' ? subscriptEnd + 1 : nameEnd;
   return (
-    envAssignmentName(token) !== undefined &&
-    (bare === undefined || /^1+$/.test(bare.slice(0, token.indexOf('=') + 1)))
+    /^1+$/.test(bare.slice(0, nameEnd)) &&
+    /^1+$/.test(bare.slice(suffixStart, assignment[0].length)) &&
+    (token[nameEnd] !== '[' ||
+      (bare[nameEnd] === '1' && bare[subscriptEnd] === '1'))
   );
 }
 
@@ -550,14 +576,16 @@ function stripCommandPrefixes(words: string[], bares: string[]): string[] {
   // `time` is a reserved word only before the pipeline's assignments and
   // command. After an assignment or `command`, the external executable runs
   // instead and cannot change this shell's cwd.
-  if (words[start] === 'time' && bares[start] === '1111') {
+  while (words[start] === 'time' && bares[start] === '1111') {
     let next = start + 1;
-    if (words[next] === '-p') next++;
-    if (words[next] === '--') {
+    if (words[next] === '-p' && bares[next] === '11') next++;
+    if (words[next] === '--' && bares[next] === '11') {
       next++;
       start = next;
     } else if (!words[next]?.startsWith('-')) {
       start = next;
+    } else {
+      break;
     }
   }
   while (words[start] && isEnvAssignmentToken(words[start]!, bares[start])) {
@@ -947,9 +975,9 @@ function getPositionalArgs(
         flag.startsWith('-') &&
         !flag.startsWith('--') &&
         flag.length === 2 &&
-        hasCombinedShortFlag(arg, flag.slice(1))
+        hasCombinedShortFlag(arg, flag.slice(1), flagsWithValue)
       ) {
-        skipNext = true;
+        skipNext = arg.indexOf(flag.slice(1), 1) === arg.length - 1;
         break;
       }
     }
@@ -964,6 +992,7 @@ function getFlagValue(
   args: string[],
   shortName: string,
   longName: string,
+  flagsWithValue?: ReadonlySet<string>,
 ): string | undefined {
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
@@ -976,11 +1005,22 @@ function getFlagValue(
     if (isAttachedShortFlagValue(arg, shortName)) {
       return arg.slice(shortName.length).replace(/^=/, '');
     }
-    if (hasCombinedShortFlag(arg, shortName.slice(1))) {
+    if (hasCombinedShortFlag(arg, shortName.slice(1), flagsWithValue)) {
       const cluster = arg.slice(1);
       const flagIndex = cluster.indexOf(shortName.slice(1));
       const attached = cluster.slice(flagIndex + 1);
       return attached ? attached.replace(/^=/, '') : args[i + 1];
+    }
+    for (const flag of flagsWithValue ?? []) {
+      if (
+        arg === flag ||
+        (flag.length === 2 &&
+          hasCombinedShortFlag(arg, flag.slice(1), flagsWithValue) &&
+          arg.indexOf(flag.slice(1), 1) === arg.length - 1)
+      ) {
+        i++;
+        break;
+      }
     }
   }
   return undefined;
@@ -994,8 +1034,9 @@ interface TargetDirectory {
 function targetDirectoryPath(
   args: string[],
   cwd: string,
+  flagsWithValue: ReadonlySet<string>,
 ): TargetDirectory | undefined {
-  const target = getFlagValue(args, '-t', '--target-directory');
+  const target = getFlagValue(args, '-t', '--target-directory', flagsWithValue);
   if (!target) return undefined;
   const bare = fragmentBare(target);
   return {
@@ -1034,10 +1075,17 @@ function writeOpForFlag(
   return pathOperation('write_file', target, cwd);
 }
 
-function hasCombinedShortFlag(arg: string, flag: string): boolean {
-  return (
-    arg.startsWith('-') && !arg.startsWith('--') && arg.slice(1).includes(flag)
-  );
+function hasCombinedShortFlag(
+  arg: string,
+  flag: string,
+  flagsWithValue?: ReadonlySet<string>,
+): boolean {
+  if (!arg.startsWith('-') || arg.startsWith('--')) return false;
+  for (let i = 1; i < arg.length; i++) {
+    if (arg[i] === flag) return true;
+    if (flagsWithValue?.has(`-${arg[i]}`)) return false;
+  }
+  return false;
 }
 
 function isAttachedShortFlagValue(arg: string, flag: string): boolean {
@@ -1778,20 +1826,14 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
       .map((p) => pathOperation('write_file', p, cwd)),
 
   cp: (args, cwd) => {
-    const targetDir = targetDirectoryPath(args, cwd);
     const flagsWithValue = new Set([
       '-S',
       '--suffix',
       '-t',
       '--target-directory',
-      '--backup',
-      '--no-target-directory',
       '--sparse',
-      '--reflink',
-      '-Z',
-      '--context',
-      '--copy-contents',
     ]);
+    const targetDir = targetDirectoryPath(args, cwd, flagsWithValue);
     const positional = getPositionalArgs(args, flagsWithValue).filter(
       looksLikePath,
     );
@@ -1814,16 +1856,13 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
   },
 
   mv: (args, cwd) => {
-    const targetDir = targetDirectoryPath(args, cwd);
     const flagsWithValue = new Set([
       '-S',
       '--suffix',
       '-t',
       '--target-directory',
-      '--backup',
-      '-Z',
-      '--context',
     ]);
+    const targetDir = targetDirectoryPath(args, cwd, flagsWithValue);
     const positional = getPositionalArgs(args, flagsWithValue).filter(
       looksLikePath,
     );
@@ -1844,7 +1883,6 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
   },
 
   install: (args, cwd) => {
-    const targetDir = targetDirectoryPath(args, cwd);
     const flagsWithValue = new Set([
       '-m',
       '--mode',
@@ -1856,13 +1894,8 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
       '--suffix',
       '-t',
       '--target-directory',
-      '-T',
-      '--no-target-directory',
-      '-Z',
-      '--context',
-      '-C',
-      '--compare',
     ]);
+    const targetDir = targetDirectoryPath(args, cwd, flagsWithValue);
     const positional = getPositionalArgs(args, flagsWithValue).filter(
       looksLikePath,
     );
@@ -1929,11 +1962,16 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
 
   ln: (args, cwd) => {
     // ln [-s] TARGET LINKNAME — the link being created is a write operation
-    const targetDir = targetDirectoryPath(args, cwd);
-    const positional = getPositionalArgs(
-      args,
-      new Set(['-S', '--suffix', '-t', '--target-directory', '-b', '--backup']),
-    ).filter(looksLikePath);
+    const flagsWithValue = new Set([
+      '-S',
+      '--suffix',
+      '-t',
+      '--target-directory',
+    ]);
+    const targetDir = targetDirectoryPath(args, cwd, flagsWithValue);
+    const positional = getPositionalArgs(args, flagsWithValue).filter(
+      looksLikePath,
+    );
     if (targetDir && positional.length > 0) {
       return [
         ...positional.map((p) => pathOperation('read_file', p, cwd)),
@@ -2550,14 +2588,24 @@ function resolveCdTargetCwd(
   const redirects = extractRedirects(words, cwd, fdRedirects, fdCloses, bares);
   const timeOptionTerminator =
     words[0] === 'time' &&
-    (words[1] === '--' || (words[1] === '-p' && words[2] === '--'));
+    bares[0] === '1111' &&
+    ((words[1] === '--' && bares[1] === '11') ||
+      (words[1] === '-p' &&
+        bares[1] === '11' &&
+        words[2] === '--' &&
+        bares[2] === '11'));
   const prefixes = stripCommandPrefixes(words, bares);
 
   if (words[0] === 'popd') return { kind: 'dynamic', redirects };
   if (words[0] !== 'cd' && words[0] !== 'pushd') return { kind: 'not-cd' };
-  // Bash 3.2 rejects `time --`, while newer Bash accepts it. Do not certify
-  // either a changed or unchanged cwd when the active shell is not known here.
-  if (timeOptionTerminator) return { kind: 'dynamic', redirects };
+  // Repeated `time` and `time --` differ between Bash 3.2 and newer Bash.
+  // Neither resulting cwd is certain without knowing the active shell.
+  if (
+    timeOptionTerminator ||
+    prefixes.filter((prefix) => prefix === 'time').length > 1
+  ) {
+    return { kind: 'dynamic', redirects };
+  }
 
   if (words[0] === 'pushd') {
     if (words.length === 1) return { kind: 'dynamic', redirects };
@@ -2808,13 +2856,25 @@ function walkCompoundCommand(
     if (terminator === '(' || terminator === '{') {
       groups.push(i);
     } else if (terminator === ')' || terminator === '}') {
-      const start = groups.pop();
-      if (start !== undefined) groupEnds.set(start, i);
+      const start = groups[groups.length - 1];
+      const opener =
+        start === undefined ? undefined : subCommands[start]!.terminator;
+      if (
+        start !== undefined &&
+        ((opener === '(' && terminator === ')') ||
+          (opener === '{' && terminator === '}'))
+      ) {
+        groups.pop();
+        groupEnds.set(start, i);
+      }
     }
   }
 
   const visitSimple = (sub: string, scope: CwdScope) => {
     if (!sub) return;
+    const marks: string[] = [];
+    const words = tokenize(sub, undefined, undefined, marks);
+    if (words[0] === 'case' && marks[0] === '1111') scope.unknown = true;
     const cdTarget = resolveCdTargetCwd(sub, scope.cwd, scope.unknown);
     if (cdTarget.kind !== 'not-cd') {
       const redirects = toRedirectOperations(cdTarget.redirects);
@@ -2907,9 +2967,25 @@ function walkCompoundCommand(
       const segment = subCommands[i]!;
       const terminator = subCommands[last]!.terminator;
       const pipedOut = terminator === '|' || terminator === '|&';
+      const header = segment.command.replace(/[ \t]*\([ \t]*\)$/, '');
+      const headerMarks: string[] = [];
+      const headerWords = tokenize(header, undefined, undefined, headerMarks);
+      const functionDefinition =
+        groupEnds.has(i) &&
+        ((header !== segment.command &&
+          headerWords.length === 1 &&
+          !!headerWords[0]) ||
+          (headerWords[0] === 'function' &&
+            headerMarks[0] === '11111111' &&
+            headerWords.length === 2));
       const isolated =
-        segment.terminator === '(' || pipedIn || pipedOut || terminator === '&';
+        functionDefinition ||
+        segment.terminator === '(' ||
+        pipedIn ||
+        pipedOut ||
+        terminator === '&';
       const current = isolated ? { ...listScope } : listScope;
+      if (functionDefinition) current.unknown = true;
       visitSimple(segment.command, current);
       const close = groupEnds.get(i);
       if (close !== undefined) {

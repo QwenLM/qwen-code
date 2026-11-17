@@ -813,13 +813,16 @@ function shellWordQuoteRemoval(
 ): { text: string; hasExpansion: boolean } | null {
   let out = '';
   let hasExpansion = false;
+  const expandedAt: number[] = [];
   const recordExpansion = (at: number) => {
     hasExpansion = true;
-    const expansion =
-      /^(?:\$(?:[A-Za-z_][A-Za-z0-9_]*|[0-9@*#?$!-]|\{|\()|`)/.exec(
+    if (
+      /^(?:\$(?:[A-Za-z_][A-Za-z0-9_]*|[0-9@*#?$!-]|\{|\()|`)/.test(
         token.slice(at),
-      )?.[0];
-    if (expansion) expandedWords?.add(expansion);
+      )
+    ) {
+      expandedAt.push(out.length);
+    }
   };
   let i = 0;
   const n = token.length;
@@ -916,6 +919,27 @@ function shellWordQuoteRemoval(
     const literal = String.fromCodePoint(token.codePointAt(i)!);
     out = concatAnsiCText(out, literal);
     i += literal.length;
+  }
+  if (expandedWords && expandedAt.length > 0) {
+    let offset = 0;
+    let expansion = 0;
+    while (offset < out.length && expansion < expandedAt.length) {
+      const next = takeLeadingToken(out.slice(offset));
+      if (!next) {
+        expandedWords.add(out.slice(offset));
+        break;
+      }
+      const start = out.indexOf(next.token, offset);
+      const end = start + next.token.length;
+      if (expandedAt[expansion]! < end) {
+        expandedWords.add(
+          shellWordQuoteRemoval(next.token)?.text ?? next.token,
+        );
+        while (expansion < expandedAt.length && expandedAt[expansion]! < end)
+          expansion++;
+      }
+      offset = end;
+    }
   }
   return { text: out, hasExpansion };
 }

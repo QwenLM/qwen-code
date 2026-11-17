@@ -3487,6 +3487,51 @@ describe('PermissionManager — compound shell write attribution', () => {
     { virtualTool: 'write_file', filePath },
   ];
 
+  it.each([
+    'tee >(cat) .qwen/settings.json',
+    'tee $(printf source) .qwen/settings.json',
+    'cp -S.tmp a .qwen/settings.json',
+    'cp -St a .qwen/settings.json',
+    'f() { cd .qwen; }; printf x > .qwen/settings.json',
+    'function f { cd .qwen; }; printf x > .qwen/settings.json',
+    "A[0'']=1 cd .qwen; printf x > settings.json",
+    'A["0"]=1 cd .qwen; printf x > settings.json',
+    'A[$I]=1 cd .qwen; printf x > settings.json',
+  ])(
+    'keeps protected writes visible through shell syntax: %s',
+    async (command) => {
+      const pm = repoPm({ permissionsAllow: ['Bash(*)'], ...denySettings });
+      expect(await pm.evaluate(sh(command, '/repo'))).toBe('deny');
+    },
+  );
+
+  it.each(["'-p'", String.raw`\-p`, "-''p", "'--'"])(
+    'denies the unchanged-cwd write after time %s',
+    async (option) => {
+      const pm = repoPm({
+        permissionsAllow: ['Bash(*)'],
+        permissionsDeny: ['Write(//repo/settings.json)'],
+      });
+      expect(
+        await pm.evaluate(
+          sh(`time ${option} cd .qwen; printf x > settings.json`, '/repo'),
+        ),
+      ).toBe('deny');
+    },
+  );
+
+  it('asks for a quote-spliced outer expansion despite broad allow rules', async () => {
+    const pm = repoPm({
+      permissionsAllow: ['Bash(*)', 'Write(*)'],
+      ...denySettings,
+    });
+    expect(
+      await pm.evaluate(
+        sh(String.raw`bash -c "printf x > '$D'settings.json"`, '/repo'),
+      ),
+    ).toBe('ask');
+  });
+
   it('deny rule matches a write after `cd` into a subdir', async () => {
     const ctx = sh("cd .qwen && echo '{}' > settings.json", '/repo');
     expect(await repoPm(denySettings).evaluate(ctx)).toBe('deny');
