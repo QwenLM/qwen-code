@@ -344,7 +344,7 @@ describe('qwen serve — capabilities envelope', () => {
     expect(caps.v).toBe(1);
     expect(caps.mode).toBe('http-bridge');
     // Order must match `SERVE_CAPABILITY_REGISTRY` in
-    // `packages/cli/src/serve/capabilities.ts` and the unit-level
+    // `packages/sdk-typescript/src/daemon/capabilities.ts` and the unit-level
     // baseline features in `packages/cli/src/serve/server.test.ts`.
     //
     // Conditional tags absent under this suite's spawn flags (no
@@ -553,6 +553,8 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_session_metadata',
       'session_worktree_persistence_v1',
       'session_worktree_reset_v1',
+      'session_worktree_branch_v1',
+      'session_worktree_handoff_v1',
       'voice_transcribe',
       'web_terminal',
     ]);

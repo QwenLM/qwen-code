@@ -160,6 +160,17 @@ export function buildUnifiedDiff(oldText: string, newText: string): string {
 
   const n = oldLines.length;
   const m = newLines.length;
+  // A trailing LF can be removed from CRLF while the final CR remains in
+  // both line arrays. Detect that case before the large-diff fallback.
+  if (
+    oldText.endsWith('\n') !== newText.endsWith('\n') &&
+    n === m &&
+    oldLines.every((line, index) => line === newLines[index])
+  ) {
+    return newText.endsWith('\n')
+      ? DIFF_TRAILING_NEWLINE_ADDED_MARKER
+      : DIFF_TRAILING_NEWLINE_REMOVED_MARKER;
+  }
   const involvesCr = oldText.includes('\r') || newText.includes('\r');
 
   const crlfUniform =
@@ -185,7 +196,6 @@ export function buildUnifiedDiff(oldText: string, newText: string): string {
   }
 
   const result: string[] = [];
-  let changed = false;
   let i = n,
     j = m;
   while (i > 0 || j > 0) {
@@ -195,29 +205,11 @@ export function buildUnifiedDiff(oldText: string, newText: string): string {
       j--;
     } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
       result.push(`+${newLines[j - 1]}`);
-      changed = true;
       j--;
     } else {
       result.push(`-${oldLines[i - 1]}`);
-      changed = true;
       i--;
     }
-  }
-
-  // `splitLines` drops the final terminator from both sides and keeps a bare
-  // `\r` as content, so two texts can differ and still yield identical line
-  // arrays: `'a\r\n'` and `'a\r'` both split to `['a\r']` (the `\n` was a
-  // terminator, the `\r` was not). The LCS then has nothing to mark and emits a
-  // context-only patch, which the card reads as "nothing changed" for an edit
-  // that does change the file — the same false certification the identical-pair
-  // gate above prevents, reached through the CR side instead of the LF side.
-  // Line rows cannot express this difference, so answer it the way the bounded
-  // builder does: with a terminator notice, which is a header rather than a row
-  // and therefore never claims the bodies were compared.
-  if (!changed && oldText !== newText) {
-    return newText.endsWith('\n')
-      ? DIFF_TRAILING_NEWLINE_ADDED_MARKER
-      : DIFF_TRAILING_NEWLINE_REMOVED_MARKER;
   }
 
   const rows = result.reverse().join('\n');
@@ -229,7 +221,9 @@ export function buildContextBoundedDiff(
   newText: string,
 ): string {
   const omitted = DIFF_OMITTED_MARKER;
-  if (oldText.length + newText.length > 100_000) return omitted;
+  // Allow a small edit in a large file while bounding the input scanned and
+  // split on the UI thread. The LCS and rendered output have separate limits.
+  if (oldText.length + newText.length > 1_000_000) return omitted;
   if (oldText === newText) return '';
   if (
     oldText.length > 0 &&
@@ -326,6 +320,7 @@ export function buildContextBoundedDiff(
       newLine++;
       cursor++;
     }
+    if (result.length + 1 + range.end - range.start > 1_000) return omitted;
     const hunk = rows.slice(range.start, range.end);
     const oldCount = hunk.filter((row) => !row.startsWith('+')).length;
     const newCount = hunk.filter((row) => !row.startsWith('-')).length;
@@ -333,7 +328,7 @@ export function buildContextBoundedDiff(
       `@@ -${oldCount ? oldLine : oldLine - 1},${oldCount} +${newCount ? newLine : newLine - 1},${newCount} @@`,
       ...hunk,
     );
-    if (result.length > 1_000 || result.join('\n').length > 100_000) {
+    if (result.join('\n').length > 100_000) {
       return omitted;
     }
     oldLine += oldCount;
@@ -469,7 +464,7 @@ export function diffPreviewText(
   const input = maxLength === undefined ? diff : diff.slice(0, maxLength);
   const { lines, crlfUniform } = parseUnifiedDiff(input);
   if (lines.length === 1 && lines[0].type === 'header') {
-    return localizeDiffNotice(diff, t);
+    return escapeDiffRow(localizeDiffNotice(diff, t)).slice(0, maxLength);
   }
   return lines
     .filter(

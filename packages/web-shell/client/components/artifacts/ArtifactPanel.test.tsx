@@ -6443,3 +6443,192 @@ describe('ArtifactPanel binary document previews', () => {
     expect(download?.download).toBe('Report.PDF');
   });
 });
+
+describe('ArtifactPanel task explanation', () => {
+  const task: DaemonSessionShellTaskStatus = {
+    kind: 'shell',
+    id: 'shell-1',
+    label: 'npm run dev',
+    description: 'npm run dev',
+    status: 'running',
+    startTime: 1_000,
+    runtimeMs: 5_000,
+    command: 'npm run dev',
+    cwd: '/work/project',
+  };
+
+  type ExplainPanelProps = {
+    explainTask?: DaemonSessionShellTaskStatus | null;
+    onExplainTask?: (task: DaemonSessionShellTaskStatus) => void;
+    taskExplanation?: {
+      messageId: string;
+      taskId: string;
+      question: string;
+      answer: string;
+      isPending: boolean;
+    } | null;
+  };
+
+  function renderExplainPanel(props: ExplainPanelProps) {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    mockActions.getTaskRuntime.mockImplementation(() => new Promise(() => {}));
+    const element = (p: ExplainPanelProps) => (
+      <I18nProvider language="en">
+        <ArtifactPanel
+          artifacts={[]}
+          tabs={[
+            { id: 'shell:shell-1', kind: 'shell', title: task.command, task },
+          ]}
+          activeTabId="shell:shell-1"
+          reviewChanges={[]}
+          selectedReviewPath={null}
+          onSelectTab={() => {}}
+          onCloseTab={() => {}}
+          onOpenFilePreview={() => {}}
+          onClose={() => {}}
+          explainTask={p.explainTask === undefined ? task : p.explainTask}
+          onExplainTask={p.onExplainTask}
+          taskExplanation={p.taskExplanation}
+        />
+      </I18nProvider>
+    );
+    act(() => {
+      root.render(element(props));
+    });
+    return {
+      container,
+      root,
+      rerender: (p: ExplainPanelProps) =>
+        act(() => {
+          root.render(element(p));
+        }),
+    };
+  }
+
+  it('offers a header "?" that asks about the active task', () => {
+    const onExplainTask = vi.fn();
+    const { container } = renderExplainPanel({ onExplainTask });
+    const explain = container.querySelector<HTMLButtonElement>(
+      '[data-testid="artifact-panel-explain"]',
+    );
+    expect(explain).not.toBeNull();
+    expect(explain?.getAttribute('aria-label')).toBe(
+      'Explain task: npm run dev',
+    );
+    act(() => explain?.click());
+    expect(onExplainTask).toHaveBeenCalledExactlyOnceWith(task);
+  });
+
+  it('renders no "?" without an explainable task', () => {
+    const { container } = renderExplainPanel({
+      explainTask: null,
+      onExplainTask: vi.fn(),
+    });
+    expect(
+      container.querySelector('[data-testid="artifact-panel-explain"]'),
+    ).toBeNull();
+  });
+
+  it('mirrors the explanation in place when it matches the active task', () => {
+    const { container, rerender } = renderExplainPanel({
+      onExplainTask: vi.fn(),
+      taskExplanation: {
+        messageId: 'm1',
+        taskId: 'shell-1',
+        question: 'Explain what this task is doing: npm run dev',
+        answer: 'It runs the dev server.',
+        isPending: false,
+      },
+    });
+    const block = container.querySelector(
+      '[data-testid="artifact-panel-explanation"]',
+    );
+    expect(block).not.toBeNull();
+    expect(block?.textContent).toContain(
+      'Explain what this task is doing: npm run dev',
+    );
+    expect(block?.textContent).toContain('It runs the dev server.');
+    // A button-triggered explanation is not a typed /btw command.
+    expect(block?.textContent).not.toContain('/btw');
+    // The mirror has no focusable surface of its own, so the composer
+    // panel's key hints would advertise keys that act on whatever control
+    // holds focus (Enter on the header "?" re-asks the question).
+    expect(block?.textContent).not.toContain('Press Space');
+
+    rerender({
+      onExplainTask: vi.fn(),
+      taskExplanation: {
+        messageId: 'm2',
+        taskId: 'shell-1',
+        question: 'Explain what this task is doing: npm run dev',
+        answer: '',
+        isPending: true,
+      },
+    });
+    const pendingBlock = container.querySelector(
+      '[data-testid="artifact-panel-explanation"]',
+    );
+    expect(pendingBlock?.textContent).not.toContain('Ctrl+C');
+  });
+
+  it('does not mirror an explanation for another task', () => {
+    const { container } = renderExplainPanel({
+      onExplainTask: vi.fn(),
+      taskExplanation: {
+        messageId: 'm1',
+        taskId: 'other-task',
+        question: 'Explain what this task is doing: other',
+        answer: 'About another task.',
+        isPending: false,
+      },
+    });
+    expect(
+      container.querySelector('[data-testid="artifact-panel-explanation"]'),
+    ).toBeNull();
+  });
+
+  it('remounts the mirrored answer when a new ask replaces the old one', () => {
+    const explanation = (messageId: string) => ({
+      messageId,
+      taskId: 'shell-1',
+      question: 'Explain what this task is doing: npm run dev',
+      answer: 'It runs the dev server.',
+      isPending: false,
+    });
+    const { container, rerender } = renderExplainPanel({
+      onExplainTask: vi.fn(),
+      taskExplanation: explanation('m1'),
+    });
+    const contentSelector =
+      '[data-testid="artifact-panel-explanation"] [data-web-shell-btw-content]';
+    const first = container.querySelector(contentSelector);
+    expect(first).not.toBeNull();
+
+    rerender({ onExplainTask: vi.fn(), taskExplanation: explanation('m2') });
+
+    const second = container.querySelector(contentSelector);
+    expect(second).not.toBeNull();
+    expect(second).not.toBe(first);
+  });
+
+  it('excerpts a multi-KB label in the header aria label', () => {
+    const longTask = {
+      ...task,
+      label: 'echo ' + 'x'.repeat(4_000),
+      command: 'echo ' + 'x'.repeat(4_000),
+    };
+    const { container } = renderExplainPanel({
+      explainTask: longTask,
+      onExplainTask: vi.fn(),
+    });
+    const aria =
+      container
+        .querySelector('[data-testid="artifact-panel-explain"]')
+        ?.getAttribute('aria-label') ?? '';
+    expect(aria.length).toBeLessThanOrEqual(150);
+    expect(aria).toContain('…');
+  });
+});

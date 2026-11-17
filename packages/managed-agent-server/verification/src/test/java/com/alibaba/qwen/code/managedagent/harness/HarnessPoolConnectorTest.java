@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.daemon.HostedHarnessClient;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessAttachmentLostFailure;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
@@ -43,6 +44,41 @@ import static org.mockito.Mockito.when;
 
 class HarnessPoolConnectorTest {
     private static final String DIGEST = "sha256:" + "a".repeat(64);
+
+    @Test
+    void vanishedAdmissionReselectsPlacementAndPassesAFreshRecoveryCall() {
+        var placements = mock(JdbcHarnessPlacementStore.class);
+        var a = endpoint("a", 4101);
+        var b = endpoint("b", 4102);
+        var leafA = leaf();
+        var leafB = leaf();
+        var clientA = client("a");
+        var clientB = client("b");
+        var first = new Placement("tenant", "session", "workspace", "a", clientA.capabilities().getBootId(), 1, "ACTIVE");
+        var fresh = new Placement("tenant", "session", "workspace", "b", clientB.capabilities().getBootId(), 2, "ACTIVE");
+        var current = new AtomicReference<>(first);
+        when(placements.get("tenant", "session")).thenAnswer(call -> current.get());
+        var body = Map.<String, Object>of("kind", "submit_input");
+        when(leafA.runChannelOperation("tenant", "session", body)).thenAnswer(call -> {
+            current.set(fresh);
+            throw new HarnessAttachmentLostFailure(null);
+        });
+        when(leafB.runChannelOperation("tenant", "session", body)).thenReturn(Map.of("accepted", true));
+        try (var pool = new HarnessPoolConnector(settings(), placements,
+                () -> new HarnessDiscovery.Snapshot(List.of(a, b), true),
+                endpoint -> endpoint.instanceId().equals("a") ? leafA : leafB, null, null,
+                endpoint -> endpoint.instanceId().equals("a") ? clientA : clientB)) {
+            pool.refresh();
+            assertThat(pool.runChannelOperation("tenant", "session", body)).containsEntry("accepted", true);
+            var routed = ArgumentCaptor.forClass(QwenHostedHarnessConnector.PoolCall.class);
+            verify(leafB).withPlacement(routed.capture(), any());
+            assertThat(routed.getValue().placement().getPlacementEpoch()).isEqualTo(2);
+            assertThat(routed.getValue().placement().getInstanceId()).isEqualTo("b");
+            assertThat(routed.getValue().recoveringAdmission()).isTrue();
+            verify(leafA).runChannelOperation("tenant", "session", body);
+            verify(leafB).runChannelOperation("tenant", "session", body);
+        }
+    }
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})

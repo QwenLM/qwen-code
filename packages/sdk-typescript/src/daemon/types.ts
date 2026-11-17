@@ -350,6 +350,8 @@ export interface DaemonWorkspaceGitStatus {
   branch: string | null;
   /** v2: HEAD is detached (branch holds the short SHA). */
   detached?: boolean;
+  /** v2: false for an unborn HEAD (no commits yet). */
+  hasHead?: boolean;
   /** v2: number of staged entries. */
   staged?: number;
   /** v2: number of unstaged (modified) entries. */
@@ -1106,6 +1108,12 @@ export interface DaemonStatusReport {
     maxTotalSessions: number | null;
     maxPendingPromptsPerSession: number | null;
     listenerMaxConnections: number | null;
+    /**
+     * Effective admission cap for concurrent REST SSE streams; the live
+     * occupancy is `runtime.transport.restSseActive`. `null` = unlimited.
+     * Additive — older daemons omit this field.
+     */
+    maxSseConnections?: number | null;
     eventRingSize: number;
     eventRingMaxBytes?: number;
     promptDeadlineMs: number | null;
@@ -1442,7 +1450,22 @@ export interface DaemonStatusReport {
 export interface DaemonWorktreeInfo {
   slug: string;
   path: string;
+  /** Empty string while the worktree is detached (no branch ref). */
   branch: string;
+}
+
+/** Result of `POST /session/:id/worktree-branch` ("Create branch here"). */
+export interface DaemonWorktreeBranchResult {
+  sessionId: string;
+  worktree: DaemonWorktreeInfo;
+}
+
+/** Result of `POST /session/:id/worktree-handoff` ("Hand off"). */
+export interface DaemonWorktreeHandoffResult {
+  sessionId: string;
+  /** Null after handing off to the local checkout. */
+  worktree: DaemonWorktreeInfo | null;
+  currentCwd: string;
 }
 
 /** Branch metadata returned when a session is created with a new branch. */
@@ -1815,6 +1838,9 @@ export interface DaemonSessionSummary {
   sourceId?: string;
   clientCount?: number;
   hasActivePrompt?: boolean;
+  /** Prompts admitted but not yet finished (running + queued); flips at
+   * admission, before the active flag. Absent on older daemons. */
+  pendingPromptCount?: number;
   /** Per-session active-work observation from the owning runtime. */
   activeWorkState?: 'active' | 'idle' | 'unknown' | 'unsupported';
   backgroundTurn?: DaemonBackgroundTurn;
@@ -2410,8 +2436,8 @@ export const DAEMON_ERROR_KINDS = [
   // A prompt exceeded the daemon-configured wallclock cap (or the
   // request's own `deadlineMs`, capped at the server flag).
   'prompt_deadline_exceeded',
-  // An SSE writer's last successful flush was older than the daemon's
-  // writer-idle deadline.
+  // An SSE writer's write was stuck waiting for `drain` — the consumer
+  // stopped reading — past the daemon's writer-stall budget.
   'writer_idle_timeout',
   // The model response stream ended before a complete turn could be read.
   'model_stream_interrupted',

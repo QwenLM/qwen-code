@@ -647,6 +647,8 @@ export type {
   DaemonGeneratedUiStatus,
   DaemonSessionArchiveState,
   DaemonWorktreeInfo,
+  DaemonWorktreeBranchResult,
+  DaemonWorktreeHandoffResult,
   DaemonBranchInfo,
   DaemonSessionIssueInfo,
   DaemonSessionPrInfo,
@@ -1024,3 +1026,15 @@ export type {
   ToolLifecycleEntry,
   ToolLifecycleState,
 } from './ui/tool-lifecycle.js';
+
+export {
+  SERVE_CAPABILITY_REGISTRY,
+  SERVE_PROTOCOL_VERSION,
+  SUPPORTED_SERVE_PROTOCOL_VERSIONS,
+} from './capabilities.js';
+export type {
+  ServeCapabilityDescriptor,
+  ServeFeature,
+  ServeProtocolVersion,
+  ServeProtocolVersions,
+} from './capabilities.js';

@@ -6,6 +6,7 @@ import type {
   DaemonSessionMonitorTaskStatus,
   DaemonSessionShellTaskStatus,
   DaemonSessionTaskStatus,
+  DaemonSessionTaskWithWorkflowStatus,
 } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall, TodoItem } from '../../adapters/types';
 import type { WebShellRightPanelItem } from '../../customization';
@@ -25,6 +26,7 @@ import {
   ArchiveIcon,
   ArchiveRestoreIcon,
   ChevronRightIcon,
+  CircleHelpIcon,
   CirclePlusIcon,
   Code2Icon,
   EyeIcon,
@@ -78,6 +80,8 @@ import { normalizeTextMediaType } from '../../utils/imageIngestion';
 import { DialogShell } from '../dialogs/DialogShell';
 import { FileTypeIcon } from '../FileTypeIcon';
 import { isSafeHref, Markdown } from '../messages/Markdown';
+import { BtwMessage } from '../messages/BtwMessage';
+import { explainDisplayLabel } from '../../utils/composerTasks';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -544,6 +548,17 @@ interface ArtifactPanelProps {
     workspaceCwd?: string,
   ) => void;
   agentTasks?: readonly EnvironmentAgentTask[];
+  /** The background task shown in the active tab, when it can be explained. */
+  explainTask?: DaemonSessionTaskWithWorkflowStatus | null;
+  onExplainTask?: (task: DaemonSessionTaskWithWorkflowStatus) => void;
+  /** A pending/settled task explanation to mirror in place (taskId-matched). */
+  taskExplanation?: {
+    messageId: string;
+    taskId: string;
+    question: string;
+    answer: string;
+    isPending: boolean;
+  } | null;
   agentTraceLoading?: boolean;
   agentTraceError?: string;
   onOpenWorkflowAgent?: (task: EnvironmentAgentTask) => void;
@@ -731,6 +746,9 @@ export function ArtifactPanel({
   onNestedArtifactsChange,
   onOpenNestedSubagent,
   agentTasks = [],
+  explainTask,
+  onExplainTask,
+  taskExplanation,
   agentTraceLoading = false,
   agentTraceError,
   onOpenWorkflowAgent,
@@ -1016,6 +1034,20 @@ export function ArtifactPanel({
           </div>
         )}
         <div className={styles.headerActions}>
+          {explainTask && onExplainTask && (
+            <button
+              type="button"
+              className={styles.iconButton}
+              aria-label={t('tasks.explain.aria', {
+                label: explainDisplayLabel(explainTask.label),
+              })}
+              title={t('tasks.explain.tooltip')}
+              data-testid="artifact-panel-explain"
+              onClick={() => onExplainTask(explainTask)}
+            >
+              <CircleHelpIcon className={styles.toolbarIcon} aria-hidden />
+            </button>
+          )}
           {showAddMenu && (
             <DropdownMenu modal={false}>
               <DropdownMenuTrigger asChild>
@@ -1149,6 +1181,23 @@ export function ArtifactPanel({
         </div>
       </div>
       {(fullscreen || variant === 'drawer') && <DaemonConnectionBanner />}
+      {taskExplanation &&
+        explainTask &&
+        taskExplanation.taskId === explainTask.id && (
+          <div
+            className={styles.explainBlock}
+            data-testid="artifact-panel-explanation"
+          >
+            <BtwMessage
+              key={taskExplanation.messageId}
+              question={taskExplanation.question}
+              answer={taskExplanation.answer}
+              isPending={taskExplanation.isPending}
+              hidePrefix
+              hideShortcuts
+            />
+          </div>
+        )}
       <div
         className={`${styles.body} ${
           activeTab?.kind === 'side_task' || activeTab?.kind === 'files'

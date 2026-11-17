@@ -47,18 +47,40 @@ describe('buildContextBoundedDiff', () => {
 
   it('omits raw payloads over the character budget before trimming', () => {
     const oldLines = Array.from(
-      { length: 40_000 },
+      { length: 80_000 },
       (_, i) => `payload_line_${i}`,
     );
     const newLines = [...oldLines];
-    newLines[20_000] = 'changed';
+    newLines[40_000] = 'changed';
     const oldText = oldLines.join('\n');
     const newText = newLines.join('\n');
-    expect(oldText.length + newText.length).toBeGreaterThan(100_000);
+    expect(oldText.length + newText.length).toBeGreaterThan(1_000_000);
 
     const diff = buildContextBoundedDiff(oldText, newText);
     expect(localizeDiffNotice(diff, stubT)).toBe('[approval.diffOmitted]');
     expect(parseUnifiedDiff(diff).lines).toMatchObject([{ type: 'header' }]);
+  });
+
+  it('renders a small hunk in a file whose input exceeds the output budget', () => {
+    const lines = Array.from(
+      { length: 779 },
+      (_, i) => `line ${i}: ${'x'.repeat(90)}`,
+    );
+    const before = lines.join('\n');
+    lines[389] = 'updated line 390';
+    const after = lines.join('\n');
+
+    expect(before.length + after.length).toBeGreaterThan(100_000);
+    const parsed = parseUnifiedDiff(buildContextBoundedDiff(before, after));
+    expect(parsed).toMatchObject({ additions: 1, deletions: 1 });
+    expect(parsed.lines).toHaveLength(9);
+    expect(parsed.lines[0].content).toBe('@@ -387,7 +387,7 @@');
+  });
+
+  it('omits a very long one-sided change before expanding a hunk', () => {
+    const added = 'x\n'.repeat(150_000);
+    expect(buildContextBoundedDiff('', added)).toBe(DIFF_OMITTED_MARKER);
+    expect(buildContextBoundedDiff(added, '')).toBe(DIFF_OMITTED_MARKER);
   });
 
   it('omits rendered output over the character budget with few rows', () => {
@@ -595,6 +617,19 @@ describe('raw patches are never certified from their own rows', () => {
   });
 });
 
+describe('large terminator-only diffs', () => {
+  it('reports a terminal LF removal and restoration above the LCS limit', () => {
+    const before = 'row\r\n'.repeat(600);
+    const after = before.slice(0, -1);
+    expect(buildUnifiedDiff(before, after)).toBe(
+      DIFF_TRAILING_NEWLINE_REMOVED_MARKER,
+    );
+    expect(buildUnifiedDiff(after, before)).toBe(
+      DIFF_TRAILING_NEWLINE_ADDED_MARKER,
+    );
+  });
+});
+
 describe('diffPreviewText', () => {
   it.each(
     [DIFF_CRLF_UNIFORM_MARKER, DIFF_CRLF_MIXED_MARKER].flatMap((marker) =>
@@ -614,6 +649,21 @@ describe('diffPreviewText', () => {
     expect(diffPreviewText(DIFF_TRAILING_NEWLINE_REMOVED_MARKER, stubT)).toBe(
       '[approval.trailingNewlineRemoved]',
     );
+  });
+
+  it('escapes a standalone header and respects its copy limit', () => {
+    const header = 'diff --git a/path\u200b b/path';
+    expect(diffPreviewText(header, stubT)).toBe(
+      'diff --git a/path\\u200b b/path',
+    );
+    expect(diffPreviewText('diff --git a/a\u202egpj b/a\u202egpj', stubT)).toBe(
+      'diff --git a/a\\u202egpj b/a\\u202egpj',
+    );
+    expect(diffPreviewText('@@ -1,1 +1,1 @@\n-a\n+b\n', stubT, 10)).toBe(
+      '@@ -1,1 +1',
+    );
+    expect(diffPreviewText(header, stubT, 12)).toBe('diff --git a');
+    expect(diffPreviewText(header, stubT, 20)).toBe('diff --git a/path\\u2');
   });
 
   it('drops the verdict row and the CR the pane hides', () => {
