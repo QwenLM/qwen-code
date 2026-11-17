@@ -12,7 +12,7 @@ Read、Write 和 Edit。Session 关闭会结算并撤销原上下文，下一个
 可选的显式空闲退役由 #14765 实现，使用方式见下文。本配置不需要 Go 工具链、
 定制 containerd/shim、节点 collector 或冷启动安装。
 
-[2026-10-24 范围决定](../../docs/design/2026-10-23-csi-evidence-source.zh-CN.md)明确完整 CSI 审计不再是首版前置条件。Session 交接保留原 Pod/PVC，仅删除 Pod 的空闲退役保留存储归属。下文的显式 S2/S3 回收与保留数据交接实现需要独立原生验收。
+[2026-10-24 范围决定](../../../../../docs/design/2026-10-23-csi-evidence-source.zh-CN.md)明确完整 CSI 审计不再是首版前置条件。Session 交接保留原 Pod/PVC，仅删除 Pod 的空闲退役保留存储归属。下文的显式 S2/S3 回收与保留数据交接实现需要独立原生验收。
 
 ## 可信平台与支持的存储
 
@@ -131,13 +131,13 @@ Kubernetes API 核验原资源，再记录带原 UID/resourceVersion 前置条�
 同版本重放仍只返回保留尝试，不访问 Kubernetes；使用 `inspect` 读取该回执。
 最多八次的上限只允许在原 Pod 仍通过全部核验时显式发起尝试。
 
-完整退役设计见[English](../../docs/design/2026-10-20-k2-physical-retirement-progress.md)
-与[简体中文](../../docs/design/2026-10-20-k2-physical-retirement-progress.zh-CN.md)。
+完整退役设计见[English](../../../../../docs/design/2026-10-20-k2-physical-retirement-progress.md)
+与[简体中文](../../../../../docs/design/2026-10-20-k2-physical-retirement-progress.zh-CN.md)。
 原生 ACK 退役资格验证继续待完成。
 
 ## 显式回收与同租户数据交接
 
-[S2/S3 设计](../../docs/design/2026-10-27-resident-workspace-reclamation.zh-CN.md) 增加健康正常清理路径。原生 ACK 验收仍待完成，不能由命令存在或先前 S1 运行推断通过。保留现有单控制面信任边界，使用专用 runtime namespace/PVC。准入/RBAC 必须保证只有该 Managed provisioner 能创建使用此 PVC 的 Pod；维护和交接期间不得有外部控制器、其他 Pod 创建者、PV 物理别名或管理员存储操作。现有资源保护不约束 Pod 创建的独占性。
+[S2/S3 设计](../../../../../docs/design/2026-10-27-resident-workspace-reclamation.zh-CN.md) 增加健康正常清理路径。原生 ACK 验收仍待完成，不能由命令存在或先前 S1 运行推断通过。保留现有单控制面信任边界，使用专用 runtime namespace/PVC。准入/RBAC 必须保证只有该 Managed provisioner 能创建使用此 PVC 的 Pod；维护和交接期间不得有外部控制器、其他 Pod 创建者、PV 物理别名或管理员存储操作。现有资源保护不约束 Pod 创建的独占性。
 
 维护凭据额外需要 runtime namespace 的 Pod `list`/`patch`、`kube-node-lease` 中 Node Lease 的 `get`，以及集群 PV/VolumeAttachment `list`。不修改节点、attachment、PVC 或 PV。不要向 worker 和公开调用者授予这些权限。
 
@@ -178,4 +178,4 @@ Kubernetes API 核验原资源，再记录带原 UID/resourceVersion 前置条�
 
 Session 关闭后常驻资源继续产生正常的 Pod、节点和存储费用。此模板不授权云上
 安装、付费资源创建或手工物理销毁；这些动作使用另外批准的部署或维护方案。
-失败和验收边界见[设计](../../docs/design/2026-10-14-k2-resident-workspace.zh-CN.md)。
+失败和验收边界见[设计](../../../../../docs/design/2026-10-14-k2-resident-workspace.zh-CN.md)。

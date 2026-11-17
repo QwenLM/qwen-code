@@ -15,7 +15,7 @@ proposal #14761. Optional explicit idle retirement is implemented in #14765 and
 described below. This configuration needs no Go toolchain, custom containerd/shim,
 node collector or cold-bootstrap installation.
 
-The [2026-10-24 scope decision](../../docs/design/2026-10-23-csi-evidence-source.md) confirms that complete CSI auditing is not a first-release prerequisite. Session handoff retains the original Pod/PVC; deletion-only idle retirement retains storage ownership. The explicit S2/S3 reclamation and retained-data handoff implementation below requires separate native qualification.
+The [2026-10-24 scope decision](../../../../../docs/design/2026-10-23-csi-evidence-source.md) confirms that complete CSI auditing is not a first-release prerequisite. Session handoff retains the original Pod/PVC; deletion-only idle retirement retains storage ownership. The explicit S2/S3 reclamation and retained-data handoff implementation below requires separate native qualification.
 
 ## Trusted platform and supported storage
 
@@ -155,13 +155,13 @@ returns the retained attempt without contacting Kubernetes; use `inspect` to
 read that receipt. The eight-attempt cap only permits explicit attempts while
 the original Pod still passes every verification check.
 
-See the complete retirement design in [English](../../docs/design/2026-10-20-k2-physical-retirement-progress.md)
-and [简体中文](../../docs/design/2026-10-20-k2-physical-retirement-progress.zh-CN.md).
+See the complete retirement design in [English](../../../../../docs/design/2026-10-20-k2-physical-retirement-progress.md)
+and [简体中文](../../../../../docs/design/2026-10-20-k2-physical-retirement-progress.zh-CN.md).
 Native ACK retirement qualification remains pending.
 
 ## Explicit reclamation and same-tenant data handoff
 
-The [S2/S3 design](../../docs/design/2026-10-27-resident-workspace-reclamation.md) adds a healthy normal cleanup path. Native ACK qualification is pending; do not infer it from the existence of these commands or from the earlier S1 run. Keep the current single-control-plane trust boundary and use a dedicated runtime namespace/PVC. Admission/RBAC must leave only this Managed provisioner able to create Pods using the PVC, with no external controller, Pod creator, PV alias, or administrative storage operation during maintenance and handoff. The existing resource protection does not enforce Pod-creation exclusivity.
+The [S2/S3 design](../../../../../docs/design/2026-10-27-resident-workspace-reclamation.md) adds a healthy normal cleanup path. Native ACK qualification is pending; do not infer it from the existence of these commands or from the earlier S1 run. Keep the current single-control-plane trust boundary and use a dedicated runtime namespace/PVC. Admission/RBAC must leave only this Managed provisioner able to create Pods using the PVC, with no external controller, Pod creator, PV alias, or administrative storage operation during maintenance and handoff. The existing resource protection does not enforce Pod-creation exclusivity.
 
 The maintenance credential additionally needs Pod `list` and `patch` in the runtime namespace, Node Lease `get` in `kube-node-lease`, and cluster PV/VolumeAttachment `list`. It never patches a node, attachment, PVC or PV. Keep these privileges away from the worker and public caller.
 
@@ -212,5 +212,5 @@ Resident resources continue to incur normal Pod/node/storage costs after
 Session close. No live cloud installation, paid resource creation or manual
 physical teardown is authorized by this template. Use a separately approved
 deployment/maintenance plan for those actions. See the
-[design](../../docs/design/2026-10-14-k2-resident-workspace.md) for the failure and
+[design](../../../../../docs/design/2026-10-14-k2-resident-workspace.md) for the failure and
 acceptance boundaries.

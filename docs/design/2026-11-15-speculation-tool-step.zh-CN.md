@@ -5,7 +5,7 @@
 - **状态**：为 #17045 的「Speculation PR 6b」块记录决策：speculation 保留自有工具步与自有投机循环；仅其模型轮运行在共享 loop 上（PR 6a，#17029）。本切片不改代码、不引入开关。
 - **日期**：2026-11-15。行号引用已在 `main` `b098616f2fb5` 上核实。
 - **行为来源**：`packages/core/src/followup/speculation.ts`（849 行）。
-- **相关**：[统一代理循环](2026-10-23-unified-agent-loop.zh-CN.md)（#15327）；[Event-bus 代理循环](2026-11-11-event-bus-agent-loop.zh-CN.md)；[Speculation 引擎设计](prompt-suggestion/speculation-design.md)（下文复述的工具门、路径重写与 boundary 处理）；跟踪 issue #17045（已关闭；遗留项有待 follow-up #17284 承载）；Hosted Harness 评估（[2026-11-14](2026-11-14-hosted-harness-loop-evaluation.zh-CN.md)）是 Hosted 工具步「保留自有」的同类决策。
+- **相关**：[统一代理循环](2026-10-23-unified-agent-loop.zh-CN.md)（#15327）；[Event-bus 代理循环](2026-11-11-event-bus-agent-loop.zh-CN.md)；[Speculation 引擎设计](prompt-suggestion/speculation-design.md)（下文复述的工具门、路径重写与 boundary 处理）；跟踪 issue #17045（遗留项由 follow-up #17284 承载）；Hosted Harness 评估（[2026-11-14](2026-11-14-hosted-harness-loop-evaluation.zh-CN.md)）是 Hosted 工具步「保留自有」的同类决策。
 
 ## 问题
 
@@ -31,13 +31,13 @@ Speculation 在后台以只读工具与 copy-on-write overlay 写跑在用户之
 
 模型轮按 PR 6a 已落地的方式留在共享 loop（`runSpeculationModelRound`，由 `isUnifiedAgentLoopEnabled('speculation')` 门控）；工具门、直接执行、overlay 写与 boundary 处理不变。
 
-**最终状态说明。** 永久保留 speculation 自有循环与 finalizer，意味着父设计「1 个 agent loop 实现」「1 个 `finalizeToolResponses` 调用者」的最终状态目标并非字面可达：speculation 的调用（`speculation.ts:607`）与共享批的调用（`agent-loop.ts:715`）并存。这两个目标按共享实现加上保留自有决策所留副本计数，[统一代理循环](2026-10-23-unified-agent-loop.zh-CN.md)的最终状态表现已注明；确切数字由 follow-up #17284 调和。
+**最终状态说明。** 永久保留 speculation 自有循环与 finalizer，意味着父设计最初的最终状态目标「1 个 agent loop 实现」「1 个 `finalizeToolResponses` 调用者」并非字面可达：speculation 的调用（`speculation.ts:607`）与共享批的调用（`agent-loop.ts:715`）并存。这两个目标按共享实现加上保留自有决策所留副本计数，[统一代理循环](2026-10-23-unified-agent-loop.zh-CN.md)的最终状态表现已注明——其目标列已按这些副本计数。
 
-**编号说明。** 跟踪 issue #17045 的「PR 6b」即本工具步决策。它取代了较早的[统一代理循环](2026-10-23-unified-agent-loop.zh-CN.md)迁移表中「6b」的编号含义（该表原指 speculation 的默认开启与删除步骤）；该表现已链接本决策，并把默认开启/删除保留为独立条目。表中的「6c」是本文对这些默认开启/删除步骤的自有标签；在 #17045 中它们曾是 6a/6b 之后的无编号「默认开启」与「删除旧路径」checkbox，故「6c」没有单独的 tracker 条目。tracker 的「内核默认开启（如果 PR 6b 把它的运行放到了 `runAgentLoop` 上）」框在本决策下是 moot（speculation 保留自有运行，内核从不运行其轮次）；该框以及 11-18 日期行「PR 6b 合入，连同 speculation 的集成场景」——本记录的单元 parity 门禁决定取代了它——都欠 follow-up #17284 的一次调和（#17284 收集 #17045 的遗留项；#17045 已关闭，completed）。#17284 尚未列出这些 speculation 项，须显式加入其中而非只留在 prose，否则 6c 门控与部分批次覆盖会被丢弃。默认开启与遗留删除仍是有待 #17284 承载的门控步骤，不属于本决策。
+**编号说明。** 跟踪 issue #17045 的「PR 6b」即本工具步决策。它取代了较早的[统一代理循环](2026-10-23-unified-agent-loop.zh-CN.md)迁移表中「6b」的编号含义（该表原指 speculation 的默认开启与删除步骤）；该表现已链接本决策，并把默认开启/删除保留为独立条目。表中的「6c」是本文对这些默认开启/删除步骤的自有标签；在 #17045 中它们是 6a/6b 之后的无编号「默认开启」与「删除旧路径」checkbox，故「6c」没有单独的 tracker 条目。tracker 的「内核默认开启（如果 PR 6b 把它的运行放到了 `runAgentLoop` 上）」框在本决策下是 moot（speculation 保留自有运行，内核从不运行其轮次）；该框以及 11-18 日期行「PR 6b 合入，连同 speculation 的集成场景」——本记录的单元 parity 门禁决定取代了它——都欠 follow-up #17284 的一次调和（#17284 收集 #17045 的遗留项）。这些项现已列入 #17284 的 speculation 章节，6c 门控与其余调和项以清单条目承载，而非只留在 prose。默认开启与遗留删除仍是有待 #17284 承载的门控步骤，不属于本决策。
 
 ## 集成门禁决策
 
-今天没有集成测试运行 speculation。**记录决策：speculation 的单元 parity 套件即其门禁。** 该套件已对比共享轮 off/on（`speculation.test.ts` 的「speculation model round on the shared agent loop」与「speculation shared-round event semantics」），含一个分支标记钉住共享轮仅在开关开启时运行。确定性的端到端投机轮不是可行的集成门禁：speculation 是后台、依赖时序的优化，其 accept/boundary 结果取决于运行中途到达的用户输入。把关共享轮迁移的是单元 parity 套件，而非集成场景。off/on 对比覆盖的是共享模型轮。boundary 交回是 speculation 自有且不变的工具步：现有 boundary 测试只在 raw-chunk 臂上覆盖它的零执行 bail，而部分批次交回（第 3 项）——包括它与共享轮 parts 的组合——在两臂都没有测试。该部分批次覆盖是应在 6c 默认翻转前补齐的项（该路径经 opt-in 设置已可达），而非本决策引入的缺口。
+今天没有集成测试运行 speculation。**记录决策：speculation 的单元 parity 套件即其门禁。** 该套件已对比共享轮 off/on（`speculation.test.ts` 的「speculation model round on the shared agent loop」与「speculation shared-round event semantics」），含一个分支标记钉住共享轮仅在开关开启时运行。确定性的端到端投机轮不是可行的集成门禁：speculation 是后台、依赖时序的优化，其 accept/boundary 结果取决于运行中途到达的用户输入。把关共享轮迁移的是单元 parity 套件，而非集成场景。off/on 对比覆盖的是共享模型轮。boundary 交回是 speculation 自有且不变的工具步：现有 boundary 测试在 raw-chunk 臂上覆盖它的零执行 bail，而部分批次交回（第 3 项）——包括它与共享轮 parts 的组合——现已在两臂都有测试（#17399），多调用 parity 场景也钉住了绝对执行计数。该部分批次覆盖已补齐（#17399）；它是预存缺口，而非本决策引入的。
 
 本决定把关的是共享轮迁移（PR 6a），而非 PR 6c 的默认翻转。父设计的集成条目（「该运行在其准备默认开启时加入」）与其默认变更判据——五步模型的 step 2，其完整条件清单见[统一代理循环](2026-10-23-unified-agent-loop.zh-CN.md)，此处不复述——对 6c 仍然有效。由于确定性端到端投机轮因上述时序原因不可行，6c 作者必须调和这一要求：点名一个满足该规则的 nightly 集成信号，或在 follow-up #17284 记录「单元 parity 套件对默认翻转亦足够」。本记录把这个问题留给 6c，而不预先替代它。
 

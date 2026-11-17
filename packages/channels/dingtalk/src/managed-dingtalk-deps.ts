@@ -45,6 +45,7 @@ function createStreamClient(
     debug: boolean;
     onDownStream: (data: unknown) => void;
     connect: () => Promise<void>;
+    heartbeatIntervallId?: ReturnType<typeof setInterval>;
     socket?: {
       readyState: number;
       on: (event: string, cb: (...args: unknown[]) => void) => void;
@@ -52,6 +53,16 @@ function createStreamClient(
     };
   };
   internals.debug = false;
+  // The SDK creates a heartbeat interval on every socket open but never
+  // clears it on close, and the next open overwrites the only stored handle —
+  // the old interval keeps pinging the replacement socket. Retire it on close,
+  // before the SDK's autoReconnect opens the next one (#17173 R5).
+  const retireHeartbeat = () => {
+    if (internals.heartbeatIntervallId !== undefined) {
+      clearInterval(internals.heartbeatIntervallId);
+      internals.heartbeatIntervallId = undefined;
+    }
+  };
   client.registerCallbackListener(TOPIC_ROBOT, (msg: DWClientDownStream) => {
     // A frame without a routing messageId cannot be acked or admitted; drop it
     // instead of letting client.send throw through the socket handler.
@@ -136,7 +147,12 @@ function createStreamClient(
         reject(new Error('DingTalk stream connect timed out.'));
       }, CONNECT_TIMEOUT_MS);
       withConnectLoggingSuppressed(sdkConnect)
-        .then(() => waitForSocketOpen())
+        .then(() => {
+          // Each attempt constructs a fresh socket; arm the heartbeat retire
+          // on its close so a reconnect never inherits the old interval.
+          internals.socket?.on('close', retireHeartbeat);
+          return waitForSocketOpen();
+        })
         .then(
           () => {
             clearTimeout(timer);
@@ -236,8 +252,6 @@ async function sendWebhook(
   ) {
     throw webhookFailure('DingTalk webhook URL rejected.', true);
   }
-  const abort = new AbortController();
-  const timer = setTimeout(() => abort.abort(), WEBHOOK_TIMEOUT_MS);
   // In a proxy-only egress the reply must still leave: route this send through
   // the resolved proxy with a per-send dispatcher (the Legacy sender's shape),
   // destroyed afterwards so it never leaks. Only the webhook send is proxied —
@@ -257,11 +271,14 @@ async function sendWebhook(
     }
     // DingTalk caps one text message at DINGTALK_MAX_CHUNK_LENGTH units, while
     // a ledger segment can be larger; split and send the chunks in order. One
-    // receipt still covers the whole ledger segment. The budget stays armed
-    // across every chunk's header AND body read, so a stalled body cannot
-    // outlive it.
+    // receipt still covers the whole ledger segment. Each chunk gets its own
+    // budget, armed across that chunk's header AND body read: a shared budget
+    // would let the earlier chunks spend it and abort a slow-but-progressing
+    // send mid-batch, settling the tail unknown (#17173 R10).
     let delivered = 0;
     for (const chunk of splitChunks(text)) {
+      const abort = new AbortController();
+      const timer = setTimeout(() => abort.abort(), WEBHOOK_TIMEOUT_MS);
       try {
         await postTextChunk(webhook, chunk, abort.signal, dispatcher);
         delivered += 1;
@@ -275,10 +292,11 @@ async function sendWebhook(
           (error as DingtalkWebhookFailure).definitive = false;
         }
         throw error;
+      } finally {
+        clearTimeout(timer);
       }
     }
   } finally {
-    clearTimeout(timer);
     await dispatcher?.destroy().catch(() => undefined);
   }
 }

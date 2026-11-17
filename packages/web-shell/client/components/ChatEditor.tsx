@@ -286,6 +286,10 @@ interface ChatEditorProps {
   onOpenWorktrees?: () => void;
   /** Opens the commit history graph. */
   onOpenLog?: () => void;
+  /** "Create branch here" for the session's detached managed worktree. */
+  onCreateWorktreeBranch?: (name: string) => Promise<void>;
+  /** "Hand off" between the session's worktree and the local checkout. */
+  onHandoff?: (to: 'local' | 'worktree') => Promise<void>;
   /** Workspace name shown in the pane composer's `workspace` toolbar chip. */
   workspaceName?: string;
   /** Full workspace cwd, used as the chip's tooltip. */
@@ -1376,7 +1380,11 @@ function ModelReasoningControls({
             <button
               key={effort}
               type="button"
-              className={styles.reasoningEffortRow}
+              className={`${styles.reasoningEffortRow}${
+                reasoning.effort === effort
+                  ? ` ${styles.reasoningEffortRowActive}`
+                  : ''
+              }`}
               aria-pressed={reasoning.effort === effort}
               data-web-shell-effort={effort}
               disabled={!reasoning.enabled || busy || !onSelect}
@@ -1760,6 +1768,8 @@ export const ChatEditor = memo(
       onOpenCommit,
       onOpenWorktrees,
       onOpenLog,
+      onCreateWorktreeBranch,
+      onHandoff,
       workspaceName,
       workspaceTitle,
       workspaceColor,
@@ -3046,6 +3056,8 @@ export const ChatEditor = memo(
             onOpenCommit={onOpenCommit}
             onOpenWorktrees={onOpenWorktrees}
             onOpenLog={onOpenLog}
+            onCreateWorktreeBranch={onCreateWorktreeBranch}
+            onHandoff={onHandoff}
           >
             <button
               type="button"

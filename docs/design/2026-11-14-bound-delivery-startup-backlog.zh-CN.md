@@ -2,7 +2,7 @@
 
 [English](2026-11-14-bound-delivery-startup-backlog.md) | [简体中文](2026-11-14-bound-delivery-startup-backlog.zh-CN.md)
 
-状态：proposed（2026-11-14）。扩展[绑定 PR 评论监视](2026-11-08-bound-pr-comment-watch.zh-CN.md)；摘要路径之外，评论 lane 的逐条投递契约不变。PR **状态** watch 自[operator 拥有的 watch 迁移](2026-11-14-daemon-pr-watch-config-migration.zh-CN.md)起归 daemon 所有，不在本设计范围内。
+状态：已实现（#17199；2026-11-14 提案）。下文按该增量当时的设计描述。扩展[绑定 PR 评论监视](2026-11-08-bound-pr-comment-watch.zh-CN.md)；摘要路径之外，评论 lane 的逐条投递契约不变。PR **状态** watch 自[operator 拥有的 watch 迁移](2026-11-14-daemon-pr-watch-config-migration.zh-CN.md)起归 daemon 所有，不在本设计范围内。
 
 ## 问题陈述
 

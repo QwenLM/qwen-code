@@ -1163,11 +1163,229 @@ describe('readState', () => {
       JSON.stringify({ something: 'else' }),
     ]) {
       writeFileSync(statePath(root, 1), body);
-      expect(() => readState(root, 1)).toThrow(/no recognised state key/);
+      expect(() => readState(root, 1)).toThrow(/no state-bearing entry/);
     }
     // A legacy string inFlight head is still migratable.
     writeFileSync(statePath(root, 1), JSON.stringify({ inFlight: HEAD }));
     expect(() => readState(root, 1)).not.toThrow();
+  });
+
+  // R2-1: the guard is derived from what the migration ladder actually
+  // consumes, so the two cannot drift. A bearing key whose value the ladder
+  // rejects (a string under an array key) is refused, not admitted-and-erased;
+  // a legacy marker alongside the resting empty list still blocks and survives.
+  it('derives the shape guard from the migration ladder consumption', () => {
+    const root = makeRoot();
+    mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
+    // A string under an array key is not consumable -> refused (cases A/C).
+    for (const body of [
+      JSON.stringify({ pr: 1, inFlightHeads: HEAD }),
+      JSON.stringify({ pr: 1, verifiedHeads: HEAD }),
+    ]) {
+      writeFileSync(statePath(root, 1), body);
+      expect(() => readState(root, 1)).toThrow(/no state-bearing entry/);
+    }
+    // A bare inFlightHead alongside the resting empty list (case B) blocks a
+    // second round on that head and the marker survives the refused start.
+    writeFileSync(
+      statePath(root, 1),
+      JSON.stringify({ pr: 1, inFlightHeads: [], inFlightHead: HEAD }),
+    );
+    expect(() => readState(root, 1)).not.toThrow();
+    expect(
+      startRound(root, { pr: 1, head: HEAD, round: 12, artifactDir: 'r12' })
+        .duplicate,
+    ).toBe('in-flight');
+    expect(readState(root, 1).inFlightHead).toBe(HEAD);
+  });
+
+  // R6-1: a present *Heads key holding a non-array value is refused even when
+  // an integer seqCounter (which every written file carries) admits the file
+  // via the bearing disjunction — otherwise --start reads the unusable marker
+  // as empty and erases it, breaking the one-round-per-PR serialisation.
+  it('refuses a non-array *Heads value even alongside a bearing seqCounter', () => {
+    const root = makeRoot();
+    mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
+    for (const key of [
+      'inFlightHeads',
+      'verifiedHeads',
+      'deferredHeads',
+      'releasedHeads',
+    ]) {
+      writeFileSync(
+        statePath(root, 1),
+        JSON.stringify({ pr: 1, repo: 'o/r', [key]: HEAD, seqCounter: 7 }),
+      );
+      expect(() => readState(root, 1)).toThrow(
+        new RegExp(`${key} value the migration ladder cannot consume`),
+      );
+      // The refused start leaves the marker untouched (no rewrite from empty).
+      expect(() =>
+        startRound(root, { pr: 1, head: HEAD, round: 13, artifactDir: 'r13' }),
+      ).toThrow(new RegExp(`${key} value the migration ladder cannot consume`));
+      expect(JSON.parse(readFileSync(statePath(root, 1), 'utf8'))[key]).toBe(
+        HEAD,
+      );
+    }
+    // A legitimate resting file (empty arrays + integer seqCounter + the
+    // derived inFlight:false / inFlightHead:null view) is still admitted.
+    writeFileSync(
+      statePath(root, 1),
+      JSON.stringify({
+        pr: 1,
+        repo: 'o/r',
+        inFlightHeads: [],
+        verifiedHeads: [],
+        deferredHeads: [],
+        releasedHeads: [],
+        seqCounter: 7,
+        retiredSeqs: {},
+        inFlight: false,
+        inFlightHead: null,
+        verifiedHead: null,
+        previousHead: null,
+      }),
+    );
+    expect(() => readState(root, 1)).not.toThrow();
+    // A bare legacy marker alongside the resting empty list AND a seqCounter
+    // still blocks a second round and survives the refused start.
+    writeFileSync(
+      statePath(root, 1),
+      JSON.stringify({
+        pr: 1,
+        inFlightHeads: [],
+        inFlightHead: HEAD,
+        seqCounter: 7,
+      }),
+    );
+    expect(
+      startRound(root, { pr: 1, head: HEAD, round: 14, artifactDir: 'r14' })
+        .duplicate,
+    ).toBe('in-flight');
+    expect(readState(root, 1).inFlightHead).toBe(HEAD);
+  });
+
+  // R16-2 (residual): an identity key alone must not satisfy the guard. One
+  // identity key plus a misspelled head marker reads as "no state" under the
+  // old STATE_KEYS set and lets --start erase the operator's intended marker.
+  it('refuses an identity-only body even alongside an unknown head spelling', () => {
+    const root = makeRoot();
+    mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
+    // The exact reported shape: pr + startedAt + a misspelled inFlightHead.
+    writeFileSync(
+      statePath(root, 1),
+      JSON.stringify({
+        pr: 1,
+        startedAt: '2026-11-16T00:00:00.000Z',
+        inflightHead: HEAD,
+      }),
+    );
+    expect(() => readState(root, 1)).toThrow(/no state-bearing entry/);
+    // Each identity key on its own (plus an unknown key) is still refused.
+    for (const key of [
+      'pr',
+      'repo',
+      'round',
+      'artifactDir',
+      'startedAt',
+      'completedAt',
+      'verdict',
+      'commentId',
+    ]) {
+      writeFileSync(
+        statePath(root, 1),
+        JSON.stringify({ [key]: 'x', weirdHead: HEAD }),
+      );
+      expect(() => readState(root, 1)).toThrow(/no state-bearing entry/);
+    }
+  });
+
+  // A body the migration ladder can consume is admitted; an empty list with
+  // no legacy marker and no seqCounter is not consumable and is refused.
+  it('admits a body the migration ladder can consume', () => {
+    const root = makeRoot();
+    mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
+    const bearing = [
+      { inFlightHeads: [{ head: HEAD }] },
+      { verifiedHeads: [{ head: HEAD }] },
+      { deferredHeads: [{ head: HEAD }] },
+      { releasedHeads: [{ head: HEAD }] },
+      { inFlightHead: HEAD },
+      { inFlight: HEAD },
+      { verifiedHead: HEAD },
+      { previousHead: HEAD },
+      { seqCounter: 3 },
+      { retiredSeqs: { [HEAD]: { seq: 1, retries: 0 } } },
+    ];
+    for (const shape of bearing) {
+      writeFileSync(statePath(root, 1), JSON.stringify({ pr: 1, ...shape }));
+      expect(() => readState(root, 1)).not.toThrow();
+    }
+    // Empty lists alone (no marker, no seqCounter) are not consumable.
+    writeFileSync(
+      statePath(root, 1),
+      JSON.stringify({ pr: 1, inFlightHeads: [], verifiedHeads: [] }),
+    );
+    expect(() => readState(root, 1)).toThrow(/no state-bearing entry/);
+    // A legitimate written state always reads back.
+    const root2 = makeRoot();
+    startRound(root2, { pr: 1, head: HEAD, round: 11, artifactDir: 'r11' });
+    expect(() => readState(root2, 1)).not.toThrow();
+  });
+
+  // D17-3: the widened legacy migration is bounded. A non-empty string
+  // inFlight/inFlightHead migrates and blocks; the old boolean flag or an
+  // object alone is not a migratable marker and fails closed. An empty string
+  // is a resting marker (no head, no dedup history): R7-1 admits it as
+  // no-state, but it still must not migrate to block every head.
+  it('bounds the legacy inFlight migration to a non-empty string head', () => {
+    const root = makeRoot();
+    mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
+    for (const body of [
+      JSON.stringify({ pr: 1, inFlight: true }),
+      JSON.stringify({ pr: 1, inFlight: { head: HEAD } }),
+    ]) {
+      writeFileSync(statePath(root, 1), body);
+      expect(() => readState(root, 1)).toThrow(/no state-bearing entry/);
+    }
+    // An empty-string inFlight is resting (R7-1): admitted as no-state, but it
+    // carries no head, so it neither migrates nor blocks a new round.
+    writeFileSync(statePath(root, 1), JSON.stringify({ pr: 1, inFlight: '' }));
+    expect(() => readState(root, 1)).not.toThrow();
+    expect(
+      startRound(root, { pr: 1, head: HEAD, round: 10, artifactDir: 'r10' })
+        .duplicate,
+    ).toBeUndefined();
+    // A string inFlight head migrates and blocks a second round on that head.
+    writeFileSync(
+      statePath(root, 1),
+      JSON.stringify({ pr: 1, inFlight: HEAD }),
+    );
+    expect(
+      startRound(root, { pr: 1, head: HEAD, round: 11, artifactDir: 'r11' })
+        .duplicate,
+    ).toBe('in-flight');
+    // R1-1: a bare inFlightHead (no inFlight companion) is state-bearing, so
+    // the ladder must consume it too — the marker blocks a second round on
+    // that head and survives the refused start, not read as empty and erased.
+    writeFileSync(
+      statePath(root, 1),
+      JSON.stringify({ pr: 1, inFlightHead: HEAD }),
+    );
+    expect(
+      startRound(root, { pr: 1, head: HEAD, round: 12, artifactDir: 'r12' })
+        .duplicate,
+    ).toBe('in-flight');
+    expect(readState(root, 1).inFlightHead).toBe(HEAD);
+    // The pre-list shape with both keys still migrates and blocks.
+    writeFileSync(
+      statePath(root, 1),
+      JSON.stringify({ pr: 1, inFlight: true, inFlightHead: HEAD }),
+    );
+    expect(
+      startRound(root, { pr: 1, head: HEAD, round: 13, artifactDir: 'r13' })
+        .duplicate,
+    ).toBe('in-flight');
   });
 
   it('--start refuses an unknown-key body exit 1 and leaves it byte-identical', () => {
@@ -1177,7 +1395,7 @@ describe('readState', () => {
     writeFileSync(statePath(root, 16866), body);
     const res = run(root, [...START, '--artifact-dir', 'r11']);
     expect(res.status).toBe(1);
-    expect(res.stderr).toMatch(/no recognised state key/);
+    expect(res.stderr).toMatch(/no state-bearing entry/);
     expect(readFileSync(statePath(root, 16866), 'utf8')).toBe(body);
   });
 });
@@ -1193,7 +1411,8 @@ describe('duplicateHead', () => {
     expect(duplicateHead({ inFlight: true, inFlightHead: HEAD }, HEAD)).toBe(
       'in-flight',
     );
-    expect(duplicateHead({ inFlightHead: HEAD }, HEAD)).toBeNull();
+    // R1-1: a bare inFlightHead is a migratable in-flight marker, not empty.
+    expect(duplicateHead({ inFlightHead: HEAD }, HEAD)).toBe('in-flight');
     expect(duplicateHead(null, HEAD)).toBeNull();
     expect(duplicateHead({ verifiedHead: PREV }, HEAD)).toBeNull();
     // One round per PR: any in-flight entry blocks a different head too.
@@ -1214,14 +1433,71 @@ describe('duplicateHead', () => {
     expect(duplicateHead({ verifiedHeads: [{ head: '' }] }, HEAD)).toBeNull();
     const root = makeRoot();
     mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
+    // R7-1: a legacy resting body (no list/seqCounter) is admitted by the
+    // resting-view clause on its own — no seqCounter is injected to mask the
+    // guard. The empty legacy heads still must not dedup every head.
     writeFileSync(
       statePath(root, 1),
-      JSON.stringify({ pr: 1, verifiedHead: '', previousHead: '' }),
+      JSON.stringify({
+        pr: 1,
+        verifiedHead: '',
+        previousHead: '',
+      }),
     );
     expect(
       startRound(root, { pr: 1, head: HEAD, round: 11, artifactDir: 'r11' })
         .duplicate,
     ).toBeUndefined();
+  });
+
+  // R7-1: the resting-view clause admits a legacy resting body the ladder
+  // consumes as resting, without loosening the R16-2 unknown-key refusal or
+  // the bearing-less empty-list refusal. Removing the clause must red the
+  // legacy-resting admissions below.
+  it('admits a legacy resting body but still refuses unknown keys and bearing-less lists', () => {
+    const root = makeRoot();
+    mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
+    // The pre-list resting view (no lists, no seqCounter) reads back and a
+    // round can start, complete and release against it.
+    const restingBodies = [
+      { pr: 1, verifiedHead: '', previousHead: '' },
+      {
+        pr: 1,
+        inFlight: false,
+        inFlightHead: null,
+        verifiedHead: null,
+        previousHead: null,
+      },
+    ];
+    for (const body of restingBodies) {
+      writeFileSync(statePath(root, 1), JSON.stringify(body));
+      expect(() => readState(root, 1)).not.toThrow();
+      expect(
+        startRound(root, { pr: 1, head: HEAD, round: 11, artifactDir: 'r11' })
+          .duplicate,
+      ).toBeUndefined();
+    }
+    // R16-2 intact: an identity key plus an UNKNOWN head spelling is refused.
+    writeFileSync(
+      statePath(root, 1),
+      JSON.stringify({ pr: 1, weirdHead: HEAD }),
+    );
+    expect(() => readState(root, 1)).toThrow(/no state-bearing entry/);
+    // A *Heads LIST key (even empty) with no bearing entry is the new format
+    // missing seqCounter — still refused, not admitted as resting.
+    writeFileSync(
+      statePath(root, 1),
+      JSON.stringify({ pr: 1, inFlightHeads: [], verifiedHeads: [] }),
+    );
+    expect(() => readState(root, 1)).toThrow(/no state-bearing entry/);
+    // R6-1 intact: a non-array list key alongside a bearing seqCounter refuses.
+    writeFileSync(
+      statePath(root, 1),
+      JSON.stringify({ pr: 1, inFlightHeads: HEAD, seqCounter: 7 }),
+    );
+    expect(() => readState(root, 1)).toThrow(
+      /inFlightHeads value the migration ladder cannot consume/,
+    );
   });
 });
 

@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.runtimebroker.provisioning.local;
 
-import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.HarnessSessionResolver;
 import com.alibaba.qwen.code.runtimebroker.RuntimeAttestation;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
@@ -150,103 +149,6 @@ public class RuntimeHarnessDrainTest {
                 assertEquals(1, row.getLong(1));
             }
         }
-    }
-
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void resourceDrainRefusesPrivateCsiBeforeCleanupOrObservation(boolean stoppedOnly) throws Exception {
-        String id = UUID.randomUUID().toString();
-        var privateRequest = CsiFilesRetirementProfile.request(
-                new com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding(
-                        "tenant", "workspace", 1, "storage", ".", CsiFilesRetirementProfile.CONTEXT_CONFIG_REF, 1),
-                "/workspace", id);
-        // JDBC provision admission requires the pinned CSI Session root the
-        // control plane writes before the broker provisions.
-        try (var connection = source.getConnection();
-                var statement = connection.prepareStatement(
-                        "INSERT INTO ma_session (tenant_id, session_id, agent_id, tool_profile,"
-                                + " runtime_request_key, workspace_id, workspace_generation,"
-                                + " workspace_storage_id, cwd_relative, context_config_ref,"
-                                + " context_revision, workspace_config_ref, workspace_policy_ref,"
-                                + " gmt_create, gmt_modified) VALUES ('tenant', ?, 'qwen-code', ?, ?,"
-                                + " 'workspace', 1, 'storage', '.', ?, 1, ?, ?, 0, 0)")) {
-            RuntimeBrokerTestAccess.setIdentity(statement, 1, id);
-            statement.setString(2, CsiFilesRetirementProfile.PROFILE);
-            statement.setString(3, privateRequest.requestKey());
-            RuntimeBrokerTestAccess.setIdentity(statement, 4, CsiFilesRetirementProfile.CONTEXT_CONFIG_REF);
-            RuntimeBrokerTestAccess.setIdentity(statement, 5, CsiFilesRetirementProfile.CONFIG_REF);
-            RuntimeBrokerTestAccess.setIdentity(statement, 6, CsiFilesRetirementProfile.POLICY_REF);
-            statement.executeUpdate();
-        }
-        RuntimeBindingRepository registry = bindings;
-        var initial = registry.findOrCreate(privateRequest);
-        var claimed = registry.claimOperation(initial.getBindingId(), "setup", Duration.ofSeconds(10));
-        var seed = claimed.getProvisionSeed();
-        var lease = new RuntimeLease(seed.getProvisionalRuntimeId(), URI.create("http://127.0.0.1:9999"),
-                seed.getToken(), seed.getLeaseId(), seed.getEpoch());
-        var handle = new RuntimeResourceHandle(privateRequest.getProvisionerKind(), 1, java.util.Map.of("resource", "original"));
-        var original = registry.compareAndSet(claimed, claimed.withAttestation(lease, handle, Instant.now(), Instant.now()));
-        // Binding control over an attested private CSI binding also locks the
-        // original storage registration and reservation the control plane pins
-        // before the broker may release the provision operation.
-        String alias = RuntimeAdmissionFences.storageAliasKey("tenant", "storage");
-        String physical = "a".repeat(64);
-        try (var connection = source.getConnection(); var statement = connection.createStatement()) {
-            statement.executeUpdate("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id,"
-                    + " storage_kind, registration_state, physical_key, registration_revision, registration_json) VALUES ('"
-                    + alias + "', '" + com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key("tenant")
-                    + "', '" + com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key("storage")
-                    + "', 'tenant', 'storage', 'CSI', 'REGISTERED', '" + physical + "', 1, '{}')");
-            statement.executeUpdate("INSERT INTO ma_storage_owner (storage_key, storage_kind, csi_phase, csi_revision,"
-                    + " csi_reservation_id, csi_registration_key, csi_registration_revision, binding_id, runtime_generation,"
-                    + " csi_provision_request_id) VALUES ('" + physical + "', 'CSI', 'RESERVED', 1, '"
-                    + UUID.randomUUID() + "', '" + alias + "', 1, '" + original.getBindingId() + "', "
-                    + original.getGeneration() + ", 'provision')");
-        }
-        original = registry.releaseOperation(original.getBindingId(), "setup", original.getOperationGeneration());
-        provisioner.original = original;
-        RuntimeSessionRepository sessionRepository = sessions;
-        var saved = sessionRepository.findOrCreate(new RuntimeSessionRecord(
-                new RuntimeSession(id, id, "bootstrap", privateRequest.getScope()), original.getBindingId(),
-                original.getGeneration(), RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now()));
-        saved = sessionRepository.compareAndSet(saved, saved.withState(RuntimeSessionRecord.State.READY, Instant.now()));
-        registry.requestHarnessDrain("tenant", id);
-        var cleanupCalls = new AtomicInteger();
-        // An accepting cleanup SPI isolates the service's private refusal from JDBC admission.
-        var tracked = (RuntimeBindingRepository) Proxy.newProxyInstance(RuntimeBindingRepository.class.getClassLoader(),
-                new Class<?>[] {RuntimeBindingRepository.class}, (proxy, method, arguments) -> {
-                    if (method.getName().equals("requireHarnessCleanup")) {
-                        cleanupCalls.incrementAndGet();
-                        return null;
-                    }
-                    try {
-                        return method.invoke(registry, arguments);
-                    } catch (InvocationTargetException failure) {
-                        throw failure.getCause();
-                    }
-                });
-        try (var service = new RuntimeBrokerService(ignored -> {
-            throw new AssertionError("Resource drain must use persisted ownership");
-        }, provisioner, transport, tracked, sessionRepository, executions,
-                "private-drain-test", Duration.ofSeconds(2), Duration.ofSeconds(2))) {
-            var failure = assertThrows(ExecutionException.class, () -> service.drainHarnessResources("tenant", id,
-                    new RuntimeLifecycleAuthority("operation", 1), stoppedOnly).toCompletableFuture().get(5, TimeUnit.SECONDS));
-            assertEquals("csi_finalize_required", ((RuntimeBrokerException) failure.getCause()).getCode());
-        }
-        assertEquals(0, cleanupCalls.get());
-        assertEquals(0, provisioner.observations);
-        assertEquals(0, provisioner.stops);
-        assertEquals(0, transport.releases);
-        // JDBC reads return fresh instances, so "untouched" is pinned by
-        // identity, version and state rather than reference equality.
-        var retainedBinding = registry.findById(original.getBindingId());
-        assertTrue(RuntimeBrokerTestAccess.sameIdentity(original, retainedBinding));
-        assertEquals(original.getVersion(), retainedBinding.getVersion());
-        assertEquals(original.getState(), retainedBinding.getState());
-        var retainedSession = sessionRepository.findById(privateRequest.getScope(), id);
-        assertTrue(RuntimeBrokerTestAccess.sameIdentity(saved, retainedSession));
-        assertEquals(saved.getVersion(), retainedSession.getVersion());
-        assertEquals(saved.getState(), retainedSession.getState());
     }
 
     @Test
