@@ -47,10 +47,10 @@ describe('GetContextRemainingTool', () => {
     const text = result.llmContent as string;
     expect(text).toContain('Context window: 128000 tokens');
     expect(text).toContain('Used: 64000 tokens');
-    expect(text).toContain('Remaining: 64000 tokens');
+    expect(text).toContain('Remaining window headroom: 64000 tokens');
     // The real ladder: min(0.85*128K, 128K-20K-13K) = 95,000 — the
     // absolute cap branch wins on every common window size.
-    expect(text).toContain('near 95000 tokens');
+    expect(text).toContain('Auto-compaction level: 95000 tokens');
     // API-reported counts carry no estimate marker.
     expect(text).not.toContain('estimated');
   });
@@ -90,7 +90,7 @@ describe('GetContextRemainingTool', () => {
       {} as never,
       new AbortController().signal,
     );
-    expect(result.llmContent).toContain('near 64000 tokens');
+    expect(result.llmContent).toContain('Auto-compaction level: 64000 tokens');
   });
 
   it('degrades to an error message without an active chat', async () => {

@@ -50,23 +50,39 @@ class GetContextRemainingInvocation extends BaseToolInvocation<
     const remaining = Math.max(0, snapshot.contextWindowTokens - used);
     // The real send-path ladder, not a flat percentage: auto is
     // min(pct * window, (window - SUMMARY_RESERVE) - AUTOCOMPACT_BUFFER),
-    // and the pct is user-overridable (context.autoCompactThreshold).
-    const autoCompactAt = Math.max(
-      0,
-      computeThresholds(
-        snapshot.contextWindowTokens,
-        this.config.getAutoCompactThreshold?.(),
-      ).auto,
+    // and the pct is user-overridable. Rounded so the model never sees a
+    // fractional token count (#17320 R4-4).
+    const autoCompactAt = Math.round(
+      Math.max(
+        0,
+        computeThresholds(
+          snapshot.contextWindowTokens,
+          this.config.getAutoCompactThreshold?.(),
+        ).auto,
+      ),
     );
+    const headroomToAuto = Math.max(0, autoCompactAt - used);
     const estimateNote = snapshot.promptTokensIsEstimated
       ? ' (estimated until the model reports real counts)'
       : '';
-    const message = [
+    const lines = [
       `Context window: ${snapshot.contextWindowTokens} tokens`,
       `Used: ${used} tokens${used === 0 ? ' (no measurement yet — this is a fresh session or the first request is in flight)' : estimateNote}`,
-      `Remaining: ${remaining} tokens`,
-      `Auto-compaction fires near ${autoCompactAt} tokens used; if a large task is coming and remaining context is tight, wrap up current work first so auto-compaction's summary captures what matters.`,
-    ].join('\n');
+      `Remaining window headroom: ${remaining} tokens (against the window; ${headroomToAuto} until auto-compaction)`,
+      `Auto-compaction level: ${autoCompactAt} tokens`,
+    ];
+    // The session-token limit may be tighter than the window (#17320 R4-1).
+    const sessionLimit = this.config.getSessionTokenLimit?.();
+    if (sessionLimit !== undefined && sessionLimit > 0) {
+      lines.push(
+        `Session token limit: ${sessionLimit} tokens — the enforced bound, not the window`,
+      );
+    }
+    // The token ladder is not the only trigger (#17320 R4-5).
+    lines.push(
+      'Auto-compaction fires when Used approaches the level above; accumulated tool screenshots can also trigger it earlier. If a large task is coming and headroom is tight, wrap up current work first so auto-compaction\u2019s summary captures what matters.',
+    );
+    const message = lines.join('\n');
     return { llmContent: message, returnDisplay: message };
   }
 }
@@ -85,8 +101,8 @@ export class GetContextRemainingTool extends BaseDeclarativeTool<
         'Use before starting a large sub-task (a long file read, a big refactor, ' +
         'many tool results) to decide whether to wrap up, start a sub-task, or proceed. Returns the window size, tokens used (flagged as an ' +
         'estimate until the model reports real counts), tokens remaining, and ' +
-        'the level where auto-compaction will trigger. Read-only and costs no ' +
-        'tokens beyond this declaration.',
+        'the level where auto-compaction will trigger, and the session-token ' +
+        'limit when one is configured.',
       Kind.Read,
       {
         type: 'object',
