@@ -4,6 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { AUTONOMOUS_SENTINEL_DYNAMIC } from './autonomous-loop.js';
+import { LOOP_SENTINEL_DYNAMIC } from './loop-tick-resolver.js';
+
 /**
  * Derives the Managed `/loop` skill (description + body) from the bundled local
  * SKILL.md. The Managed variant differs from the local skill in three ways:
@@ -422,13 +425,16 @@ export function buildManagedLoopSkill(
 }
 
 /** The only sentinels a Managed body may teach: the wakeup-expanded -dynamic
- * forms. An allow-list, not a deny-list of known non-expanding forms, so a
- * newly added sentinel ships red instead of slipping through. Cron fires
- * expand no sentinel at all. Kept a top-level pure declaration so the parity
- * test can execute it against a hostile body. */
+ * forms, taken from the runtime constants that actually expand them so "what
+ * expands" has a single source — a runtime rename reddens the parity build
+ * here rather than silently whitelisting a token nothing expands. An
+ * allow-list, not a deny-list of known non-expanding forms, so a newly added
+ * sentinel ships red instead of slipping through. Cron fires expand no
+ * sentinel at all. Kept a top-level pure declaration so the parity test can
+ * execute it against a hostile body. */
 const EXPANDING_SENTINELS: ReadonlySet<string> = new Set([
-  '<<loop.md-dynamic>>',
-  '<<autonomous-loop-dynamic>>',
+  LOOP_SENTINEL_DYNAMIC,
+  AUTONOMOUS_SENTINEL_DYNAMIC,
 ]);
 
 export function assertSentinelsExpanded(

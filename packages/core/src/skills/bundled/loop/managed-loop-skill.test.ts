@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -336,6 +336,38 @@ describe('managed loop skill parity', () => {
     ]);
   });
 
+  it('the committed sidecar set equals the declared profile set', () => {
+    // The producer derives its targets from MANAGED_LOOP_PROFILES; this pins
+    // the other direction — a profile removed without deleting its sidecar
+    // (still copied to the Java classpath and served) reddens here. The
+    // bundled-body reference is not a profile and is excluded.
+    const committed = readdirSync(contractsDir)
+      .filter(
+        (name) =>
+          name.startsWith('managed-loop-skill-') &&
+          name.endsWith('.json') &&
+          name !== 'managed-loop-skill-bundled-body.json',
+      )
+      .sort();
+    const declared = MANAGED_LOOP_PROFILES.map(
+      (profile) => `managed-loop-skill-${profile}.json`,
+    ).sort();
+    expect(committed).toEqual(declared);
+  });
+
+  it('the Nd month-boundary caveat survives into the cron and union bodies', () => {
+    // The caveat flows verbatim from SKILL.md (no substitution), so deleting
+    // or rewording it would otherwise regenerate green. Pin the corrected
+    // semantics: a day-of-month step, at most N days across the boundary, and
+    // the N ≤ 31 bound above which the step degenerates to the 1st.
+    for (const profile of ['cron', 'union'] as const) {
+      const text = asset(profile).body;
+      expect(text).toContain('day-of-month step, not a rolling N-day cadence');
+      expect(text).toContain('at most N days');
+      expect(text).toContain('Keep N ≤ 31');
+    }
+  });
+
   it('the sentinel guard is an allow-list, so a new sentinel ships red', () => {
     // Only the two wakeup-expanded -dynamic forms may appear in a union or
     // wakeup body; cron may carry none. A deny-list of known non-expanding
@@ -364,5 +396,23 @@ describe('managed loop skill parity', () => {
     expect(() =>
       assertSentinelsExpanded('teaches <<loop.md-dynamic>>', 'cron'),
     ).toThrow(/non-expanding sentinel/);
+  });
+
+  it('the sentinel guard runs on the assembled body at its call site', () => {
+    // The isolated-helper test above would still pass if a later edit inlined
+    // a deny-list back into buildManagedLoopSkill and left the export unused.
+    // Inject a brand-new sentinel into the Input section (carried verbatim
+    // into every profile body) and require the real build to reject it, so the
+    // call site itself is load-bearing.
+    const mutated = body.replace(
+      '## Input',
+      '## Input\n\nArm <<brand-new-sentinel>>.',
+    );
+    expect(mutated).not.toBe(body);
+    for (const profile of MANAGED_LOOP_PROFILES) {
+      expect(() =>
+        buildManagedLoopSkill(profile, mutated, description),
+      ).toThrow(/non-expanding sentinel: <<brand-new-sentinel>>/);
+    }
   });
 });

@@ -42,10 +42,20 @@ Only the six named deferred items. The remaining ~64 deferred entries (doc stale
 
 ## Acceptance criteria
 
-- Core parity suite green (27 tests), including the new inventory and allow-list tests and the regenerated-sidecar byte-for-byte parity.
+- Core parity suite green (30 tests), including the inventory, allow-list, call-site, sidecar-set and caveat pins and the regenerated-sidecar byte-for-byte parity.
 - Scripts meta suites green (181 tests), including the fake createdId pins and the executable classifier narrowing.
 - Mutation witnesses: the additive-fallback classifier mutation reddens the non-block directions; the deny-list sentinel revert reddens the new-sentinel direction; a fabricated fake createdId reddens its pin; a deleted Parsing rule reddens the inventory pin. Each restored byte-equal returns green.
 - Real packaged-stack `--loop-skill` and `--loop-fire` arms green with the regenerated sidecars (jar rebuilt).
+
+## Round-1 review refinements
+
+The first review round hardened the six fixes against second-order drift (each witnessed by a mutation that reddens the new assertion and restores green):
+
+- **Caveat accuracy + pin (R1-1).** The month-boundary gap is _at most_ N days (exactly N when the month length is a multiple of N), not strictly shorter; the caveat now says "at most N days and often shorter" and states the N ≤ 31 bound above which the step degenerates to the 1st of each month. A parity pin requires the corrected phrases in the cron and union bodies, so deleting or rewording the caveat reddens.
+- **Producer single-source (R1-2).** The regenerator now derives its targets from `MANAGED_LOOP_PROFILES` (filename `managed-loop-skill-<profile>.json`), and a parity assertion requires the committed sidecar set (excluding `bundled-body`) to equal the declared profile set — a stray or orphaned sidecar reddens.
+- **Guard sources the runtime constants (R1-3).** `EXPANDING_SENTINELS` is built from `LOOP_SENTINEL_DYNAMIC` / `AUTONOMOUS_SENTINEL_DYNAMIC` (the constants the wakeup fire actually expands), so a runtime rename reddens the parity build instead of silently whitelisting a token nothing expands. The body templates and SKILL.md prose keep the literals; the guard fail-closes on any drift from the constants.
+- **Call-site pin (R1-4).** A build-level test injects a brand-new sentinel into the Input section (carried verbatim into every profile) and requires `buildManagedLoopSkill` to reject it, so inlining a deny-list back into the build while keeping the export reddens.
+- **Statement-anchored count pins (R1-5, R1-6).** The classifier and fake-createdId call-site pins count both arms (`toHaveLength(2)`), anchored to the full statement (trailing `;` / `?.[0];`) so an additive `?? { shouldBlock: false }` fallback or a fabricated id in either arm breaks the match; each arm's own create-call filter (`loop-cron-create` / `loop-fire-create`) is pinned separately.
 
 ## Open questions
 

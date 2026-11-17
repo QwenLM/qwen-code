@@ -3494,9 +3494,16 @@ describe('managed-agent-server e2e runner', () => {
     // the fake calls; the helper is exercised below against block and non-block
     // schemas so an additive fallback that re-creates the mis-answer reddens.
     expect(source).toMatch(/'shouldBlock' in blockProperties/);
-    expect(source).toMatch(
-      /const blockAnswer = classifierBlockAnswer\(blockProperties\)/,
-    );
+    // Both fakes (skill and fire) must call the helper; a toMatch would be
+    // satisfied by one intact copy while the other arm reintroduces the
+    // mis-answer. Count both call sites, anchored to the full statement (the
+    // trailing semicolon), so an additive `?? { shouldBlock: false }` fallback
+    // appended to either arm breaks the match and reddens.
+    expect(
+      source.match(
+        /const blockAnswer = classifierBlockAnswer\(blockProperties\);/g,
+      ),
+    ).toHaveLength(2);
     // The create -> list lifecycle claim: cron_list must echo the created
     // prompt; a mere tool result must not pass.
     expect(source).toMatch(/includes\('\/loop check the deploy'\)/);
@@ -3513,11 +3520,19 @@ describe('managed-agent-server e2e runner', () => {
     // of the delete fixture's own 'loop-cron-created' argument. The
     // assertion-side createdScheduleId pin above does not cover this fake-side
     // extraction; pin it so a broken fake extraction reddens the fast suite.
-    expect(source).toMatch(
-      /const createdId = \/asch_\[0-9a-f\]\{32\}\/\.exec\(createResultText\)/,
-    );
+    // Both arms (skill and fire) carry the extraction; count both so mutating
+    // either arm's delete fixture reddens, and pin each arm's own create-call
+    // filter (the ids differ: loop-cron-create vs loop-fire-create).
+    expect(
+      source.match(
+        /const createdId = \/asch_\[0-9a-f\]\{32\}\/\.exec\(createResultText\)\?\.\[0\];/g,
+      ),
+    ).toHaveLength(2);
     expect(source).toMatch(
       /entry\.role === 'tool' && entry\.tool_call_id === 'loop-cron-create'/,
+    );
+    expect(source).toMatch(
+      /entry\.role === 'tool' && entry\.tool_call_id === 'loop-fire-create'/,
     );
     // The reported count is the witnessed calls, not the cumulative flattened
     // tool-message length (every chat-completions body repeats prior results).
