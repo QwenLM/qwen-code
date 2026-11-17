@@ -49,6 +49,12 @@ const CONTEXT_LENGTH_PATTERNS = [
   // llama.cpp: "request (279935 tokens) exceeds the available context size
   // (262144 tokens), try increasing it" (#13415).
   /\bexceeds the available context size\b/i,
+  // Ollama: "the prompt is longer than the context length currently
+  // available to the model; shorten the prompt, ..." when a chat prompt does
+  // not fit `num_ctx`, and "the input length exceeds the context length" from
+  // its runner. Neither names a token count.
+  /\bprompt is longer than the context length\b/i,
+  /\binput length exceeds the context length\b/i,
 ];
 
 function parseInteger(value: string): number {
