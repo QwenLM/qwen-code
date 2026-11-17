@@ -161,6 +161,10 @@ import {
   type ThoughtExpandedValue,
 } from './contexts/ThoughtExpandedContext.js';
 import {
+  useToolDetailsExpanded,
+  type ToolDetailsExpandedValue,
+} from './contexts/ToolDetailsExpandedContext.js';
+import {
   type HistoryItem,
   type HistoryItemWithoutId,
   MessageType,
@@ -218,11 +222,13 @@ let capturedUIState: UIState;
 let capturedUIActions: UIActions;
 let capturedRenderMode: RenderMode;
 let capturedThoughtExpanded: ThoughtExpandedValue;
+let capturedToolDetails: ToolDetailsExpandedValue;
 function TestContextConsumer() {
   capturedUIState = useContext(UIStateContext)!;
   capturedUIActions = useContext(UIActionsContext)!;
   capturedRenderMode = useRenderMode().renderMode;
   capturedThoughtExpanded = useThoughtExpanded();
+  capturedToolDetails = useToolDetailsExpanded();
   return <Box ref={capturedUIState.mainControlsRef} />;
 }
 
@@ -518,6 +524,7 @@ describe('AppContainer State Management', () => {
     capturedUIActions = null!;
     capturedRenderMode = 'render';
     capturedThoughtExpanded = null!;
+    capturedToolDetails = null!;
     mockClearPendingState = vi.fn();
 
     // **Provide a default return value for EVERY mocked hook.**
@@ -1261,6 +1268,35 @@ describe('AppContainer State Management', () => {
       vi.unstubAllEnvs();
       restoreCiEnv();
     }
+  });
+
+  it('toggles a tool batch open and closed in the persistent context', async () => {
+    vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+    vi.spyOn(mockConfig, 'getLlmClient').mockReturnValue(undefined!);
+    let view: ReturnType<typeof render>;
+    await act(async () => {
+      view = render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+    });
+    expect(view!.frames.join('\n')).not.toMatch(/Error|Cannot|undefined/);
+    await act(async () => {
+      capturedToolDetails.toggleBatch('batch-round-trip');
+    });
+    expect(capturedToolDetails.expandedBatchIds.has('batch-round-trip')).toBe(
+      true,
+    );
+    await act(async () => {
+      capturedToolDetails.toggleBatch('batch-round-trip');
+    });
+    expect(capturedToolDetails.expandedBatchIds.has('batch-round-trip')).toBe(
+      false,
+    );
   });
 
   const rewindUserItem = (

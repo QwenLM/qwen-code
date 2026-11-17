@@ -72,7 +72,7 @@ const mouseEvent = (name: MouseEvent['name'], col: number): MouseEvent => ({
   button: 'left',
 });
 
-function renderCollapsedTool(viewport = true) {
+function renderCollapsedTool(viewport = true, tools = [tool]) {
   vi.mocked(useMouseEvents).mockClear();
   vi.mocked(measureElementPosition).mockReturnValue({
     x: 0,
@@ -85,7 +85,7 @@ function renderCollapsedTool(viewport = true) {
     <VirtualViewportContext.Provider value={viewport}>
       <Box width={100}>
         <CollapsibleToolGroupMessage
-          toolCalls={[tool]}
+          toolCalls={tools}
           groupId={1}
           contentWidth={96}
           isPending={false}
@@ -101,6 +101,79 @@ function renderCollapsedTool(viewport = true) {
 }
 
 describe('<CollapsibleToolGroupMessage />', () => {
+  it('opens successful commands as compact call rows with full output still reachable', () => {
+    const calls = [1, 2].map((index) => ({
+      ...tool,
+      callId: `shell-${index}`,
+      name: 'Shell',
+      description: `printf command_${index}`,
+      resultDisplay: `RAW_SHELL_OUTPUT_${index}`,
+    }));
+    const { handler, lastFrame } = renderCollapsedTool(true, calls);
+    act(() => {
+      handler?.(mouseEvent('left-press', 5));
+      handler?.(mouseEvent('left-release', 5));
+    });
+    expect(lastFrame()).toContain('Ran printf command_1');
+    expect(lastFrame()).toContain('Ran printf command_2');
+    expect(lastFrame()).toContain('ctrl+o for details');
+    expect(lastFrame()).not.toContain('RAW_SHELL_OUTPUT');
+
+    const [expandedHandler] = vi.mocked(useMouseEvents).mock.calls.at(-1)!;
+    act(() => {
+      expandedHandler({ ...mouseEvent('left-press', 5), row: 2 });
+      expandedHandler({ ...mouseEvent('left-release', 5), row: 2 });
+    });
+    expect(lastFrame()).toContain('click to collapse');
+
+    const detailed = renderWithProviders(
+      <CollapsibleToolGroupMessage
+        toolCalls={calls}
+        groupId={1}
+        contentWidth={96}
+        fullDetail
+      />,
+      { settings: collapsedSettings, config: {} as Config },
+    );
+    expect(detailed.lastFrame()).toContain('RAW_SHELL_OUTPUT_1');
+    expect(detailed.lastFrame()).toContain('RAW_SHELL_OUTPUT_2');
+  });
+
+  it.each([ToolCallStatus.Error, ToolCallStatus.Canceled])(
+    'keeps %s output visible outside the compact directory',
+    (status) => {
+      const { lastFrame } = renderWithProviders(
+        <CollapsibleToolGroupMessage
+          toolCalls={[{ ...tool, status }]}
+          groupId={1}
+          contentWidth={96}
+        />,
+        { settings: collapsedSettings, config: {} as Config },
+      );
+      expect(lastFrame()).toContain('very long result');
+      expect(lastFrame()).not.toContain('click to expand');
+    },
+  );
+
+  it('keeps its summary clickable so a second click collapses the body', () => {
+    const { handler, lastFrame } = renderCollapsedTool();
+    act(() => {
+      handler?.(mouseEvent('left-press', 5));
+      handler?.(mouseEvent('left-release', 5));
+    });
+    expect(lastFrame()).toContain('click to collapse');
+    const [expandedHandler, options] = vi
+      .mocked(useMouseEvents)
+      .mock.calls.at(-1)!;
+    expect(options.isActive).toBe(true);
+    act(() => {
+      expandedHandler(mouseEvent('left-press', 5));
+      expandedHandler(mouseEvent('left-release', 5));
+    });
+    expect(lastFrame()).toContain('click to expand');
+    expect(lastFrame()).not.toContain('very long result');
+  });
+
   it('renders the underlying hidden-details row', () => {
     const { lastFrame } = renderWithProviders(
       <ToolGroupMessage
@@ -150,11 +223,11 @@ describe('<CollapsibleToolGroupMessage />', () => {
       height: 1,
     });
     vi.mocked(layoutRowForEvent).mockImplementation((_node, row) => row - 1);
-    const expandBatch = vi.fn();
+    const toggleBatch = vi.fn();
     vi.mocked(useMouseEvents).mockClear();
     const pending = renderWithProviders(
       <ToolDetailsExpandedProvider
-        value={{ expandedBatchIds: new Set<string>(), expandBatch }}
+        value={{ expandedBatchIds: new Set<string>(), toggleBatch }}
       >
         <VirtualViewportContext.Provider value={true}>
           <HistoryItemDisplay
@@ -178,7 +251,7 @@ describe('<CollapsibleToolGroupMessage />', () => {
       handler?.(mouseEvent('left-release', 5));
     });
 
-    expect(expandBatch).toHaveBeenCalledWith('tool-batch-test-1');
+    expect(toggleBatch).toHaveBeenCalledWith('tool-batch-test-1');
     pending.unmount();
     vi.mocked(useMouseEvents).mockClear();
 
@@ -186,7 +259,7 @@ describe('<CollapsibleToolGroupMessage />', () => {
       <ToolDetailsExpandedProvider
         value={{
           expandedBatchIds: new Set(['tool-batch-test-1']),
-          expandBatch,
+          toggleBatch,
         }}
       >
         <VirtualViewportContext.Provider value={true}>
@@ -207,7 +280,7 @@ describe('<CollapsibleToolGroupMessage />', () => {
 
     expect(committed.lastFrame()).toContain('very long result');
     expect(vi.mocked(useMouseEvents).mock.calls.at(-1)?.[1]).toMatchObject({
-      isActive: false,
+      isActive: true,
     });
   });
 
@@ -222,6 +295,31 @@ describe('<CollapsibleToolGroupMessage />', () => {
 
     expect(lastFrame()).not.toContain('veryLongSource');
     expect(lastFrame()).not.toContain('very long result');
+  });
+
+  it('does not collapse an expanded header when a selection survives release', () => {
+    const { handler, lastFrame, stdout } = renderCollapsedTool();
+    act(() => {
+      handler?.(mouseEvent('left-press', 5));
+      handler?.(mouseEvent('left-release', 5));
+    });
+    const controller = getFrameController(
+      stdout as unknown as NodeJS.WriteStream,
+    )!;
+    const expandedHandler = vi.mocked(useMouseEvents).mock.calls.at(-1)![0];
+    act(() => {
+      expandedHandler(mouseEvent('left-press', 5));
+      controller.setSelection({ sx: 4, sy: 0, ex: 12, ey: 0 });
+      expandedHandler(mouseEvent('left-release', 5));
+    });
+    expect(lastFrame()).toContain('very long result');
+    act(() => {
+      controller.setSelection(null);
+      expandedHandler(mouseEvent('left-press', 5));
+      expandedHandler(mouseEvent('left-release', 5));
+    });
+    expect(lastFrame()).not.toContain('very long result');
+    expect(lastFrame()).toContain('click to expand');
   });
 
   it.each([

@@ -158,3 +158,18 @@ export const CompactToolGroupDisplay: React.FC<
     </Box>
   );
 };
+
+export const CompactToolCallList: React.FC<CompactToolGroupDisplayProps> = ({
+  toolCalls,
+  contentWidth,
+}) => (
+  <Box flexDirection="column" width={contentWidth}>
+    {toolCalls.map((tool) => (
+      <CompactToolGroupDisplay
+        key={tool.callId}
+        toolCalls={[tool]}
+        contentWidth={contentWidth}
+      />
+    ))}
+  </Box>
+);

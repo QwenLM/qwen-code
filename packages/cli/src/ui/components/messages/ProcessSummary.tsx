@@ -25,13 +25,13 @@ export function ProcessSummary({
   width,
   expanded,
   interactive,
-  onExpand,
+  onToggle,
 }: {
   item: ProcessHistoryItem;
   width: number;
   expanded: boolean;
   interactive: boolean;
-  onExpand: () => void;
+  onToggle: () => void;
 }) {
   const ref = useRef<DOMElement>(null);
   const press = useRef<{ col: number; row: number } | null>(null);
@@ -39,7 +39,7 @@ export function ProcessSummary({
   const { stdout } = useStdout();
   const mouseEnabled = useMouseTrackingEnabled();
   const { menu } = useContextMenu();
-  const clickable = interactive && mouseEnabled && menu === null && !expanded;
+  const clickable = interactive && mouseEnabled && menu === null;
   useMouseEvents(
     (event) => {
       if (!ref.current) return;
@@ -63,7 +63,7 @@ export function ProcessSummary({
           press.current.row === event.row &&
           !getFrameController(stdout)?.getSelection()
         ) {
-          onExpand();
+          onToggle();
         }
         press.current = null;
       }
@@ -81,7 +81,7 @@ export function ProcessSummary({
   return (
     <Box ref={ref} marginX={2} marginTop={1} width={width} height={1}>
       <Text color={theme.text.secondary} wrap="truncate-end">
-        {expanded ? '· ' : '› '}
+        {expanded ? '⌄ ' : '› '}
         {buildToolSummary(tools, false)}
         {durationMs > 0 && (
           <Text dimColor>
@@ -90,12 +90,19 @@ export function ProcessSummary({
             {formatDuration(durationMs, { hideTrailingZeros: true })}
           </Text>
         )}
-        {!expanded && (
-          <Text dimColor>
-            {' · '}
-            {t(clickable ? 'click to expand' : 'ctrl+o to expand')}
-          </Text>
-        )}
+        <Text dimColor>
+          {' · '}
+          {t(
+            clickable
+              ? expanded
+                ? 'click to collapse'
+                : 'click to expand'
+              : expanded
+                ? 'ctrl+o for details'
+                : 'ctrl+o to expand',
+          )}
+          {expanded && clickable && <> · {t('ctrl+o for details')}</>}
+        </Text>
       </Text>
     </Box>
   );

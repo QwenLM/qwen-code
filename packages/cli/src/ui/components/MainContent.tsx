@@ -60,6 +60,25 @@ import { measureElementPosition } from '../utils/measure-element-position.js';
 // usage.
 const MAX_GEMINI_MESSAGE_LINES = 65536;
 
+function isProcessExpanded(
+  item: ProcessHistoryItem,
+  expandedBatchIds: ReadonlySet<string>,
+  expandedHeadIds: ReadonlySet<number>,
+): boolean {
+  return (
+    expandedBatchIds.has(`process:${item.id}`) ||
+    item.members.some(
+      (member) =>
+        ((member.type === 'gemini_thought' ||
+          member.type === 'gemini_thought_content') &&
+          expandedHeadIds.has(member.thoughtGroupId ?? member.id)) ||
+        (member.type === 'tool_group' &&
+          member.batchId !== undefined &&
+          expandedBatchIds.has(member.batchId)),
+    )
+  );
+}
+
 function createEmptySourceCopyOffsets(): MarkdownSourceCopyIndexOffsets {
   return {
     codeBlockLanguageCounts: new Map<string, number>(),
@@ -149,8 +168,12 @@ export const MainContent = ({
   const { version } = useAppContext();
   const uiState = useUIState();
   const transcriptSessionId = uiState.historyManager.sessionId;
-  const { allExpanded: fullDetail, expandedHeadIds } = useThoughtExpanded();
-  const { expandedBatchIds, expandBatch } = useToolDetailsExpanded();
+  const {
+    allExpanded: fullDetail,
+    expandedHeadIds,
+    toggle: toggleThought,
+  } = useThoughtExpanded();
+  const { expandedBatchIds, toggleBatch } = useToolDetailsExpanded();
   const streamingState = uiState.streamingState;
   const showScrollbar = uiState.showScrollbar ?? true;
   const {
@@ -384,19 +407,8 @@ export const MainContent = ({
           HistoryItem | ProcessHistoryItem
         >((item) => {
           if (item.type !== 'process') return [item];
-          if (expandedBatchIds.has(`process:${item.id}`)) {
-            return [item, ...item.members];
-          }
-          return item.members.some(
-            (member) =>
-              ((member.type === 'gemini_thought' ||
-                member.type === 'gemini_thought_content') &&
-                expandedHeadIds.has(member.thoughtGroupId ?? member.id)) ||
-              (member.type === 'tool_group' &&
-                member.batchId !== undefined &&
-                expandedBatchIds.has(member.batchId)),
-          )
-            ? item.members
+          return isProcessExpanded(item, expandedBatchIds, expandedHeadIds)
+            ? [item, ...item.members]
             : [item];
         });
     return [VP_BANNER_ITEM, ...projected];
@@ -411,21 +423,23 @@ export const MainContent = ({
     () =>
       new Set<HistoryItem>(
         allVirtualItems.flatMap((item) =>
-          item.type === 'process' && expandedBatchIds.has(`process:${item.id}`)
+          item.type === 'process' &&
+          isProcessExpanded(item, expandedBatchIds, expandedHeadIds)
             ? item.members
             : [],
         ),
       ),
-    [allVirtualItems, expandedBatchIds],
+    [allVirtualItems, expandedBatchIds, expandedHeadIds],
   );
   const getVirtualKey = useCallback(
     (item: VpItem) =>
       `${virtualKeyExtractor(item)}${
-        item.type === 'process' && expandedBatchIds.has(`process:${item.id}`)
+        item.type === 'process' &&
+        isProcessExpanded(item, expandedBatchIds, expandedHeadIds)
           ? '-expanded'
           : ''
       }`,
-    [expandedBatchIds],
+    [expandedBatchIds, expandedHeadIds],
   );
 
   // Source-copy index offsets propagation. The legacy <Static> path threads
@@ -525,14 +539,44 @@ export const MainContent = ({
       }
       if (item.type === 'process') {
         const expansionKey = `process:${item.id}`;
-        const expanded = expandedBatchIds.has(expansionKey);
+        const expanded = isProcessExpanded(
+          item,
+          expandedBatchIds,
+          expandedHeadIds,
+        );
         return (
           <ProcessSummary
             item={item}
             width={Math.max(1, terminalWidth - 4)}
             expanded={expanded}
             interactive={!uiState.dialogsVisible}
-            onExpand={() => expandBatch(expansionKey)}
+            onToggle={() => {
+              if (!expanded) {
+                toggleBatch(expansionKey);
+                return;
+              }
+              const batches = new Set([expansionKey]);
+              const thoughts = new Set<number>();
+              for (const member of item.members) {
+                if (
+                  member.type === 'tool_group' &&
+                  member.batchId !== undefined
+                ) {
+                  batches.add(member.batchId);
+                } else if (
+                  member.type === 'gemini_thought' ||
+                  member.type === 'gemini_thought_content'
+                ) {
+                  thoughts.add(member.thoughtGroupId ?? member.id);
+                }
+              }
+              for (const id of batches) {
+                if (expandedBatchIds.has(id)) toggleBatch(id);
+              }
+              for (const id of thoughts) {
+                if (expandedHeadIds.has(id)) toggleThought(id);
+              }
+            }}
           />
         );
       }
@@ -577,7 +621,8 @@ export const MainContent = ({
           commands={uiState.slashCommands}
           sourceCopyIndexOffsets={sourceCopyIndexOffsets}
           thoughtHeadId={thoughtHeadIdByItemRef.current.get(item)}
-          fullDetail={fullDetail || expandedMembers.has(item)}
+          fullDetail={fullDetail}
+          isProcessMember={expandedMembers.has(item)}
           modSessionId={transcriptSessionId}
           isInViewport={isInViewport}
         />
@@ -593,7 +638,9 @@ export const MainContent = ({
       fullDetail,
       expandedMembers,
       expandedBatchIds,
-      expandBatch,
+      toggleBatch,
+      expandedHeadIds,
+      toggleThought,
       uiState.dialogsVisible,
       pendingAvailableTerminalHeight,
       uiState.constrainHeight,

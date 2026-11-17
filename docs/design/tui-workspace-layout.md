@@ -47,14 +47,27 @@ Errors, cancellations, live tools, approvals, images, specialized tool results,
 and other status records remain visible and split a run. Original entries,
 IDs, and source-copy indices remain authoritative. The summary is a single
 muted count line with subdued thought duration and one expansion hint. Global
-full-detail mode restores the original sequence; mouse expansion restores the
-group's entries without changing stored history.
+full-detail mode restores the original sequence. Mouse expansion keeps a
+clickable summary with a collapse hint and reveals a compact directory of
+commands and file paths. Complete thoughts and raw tool results remain
+available through Ctrl+O. Neither interaction changes stored history.
 
-Manually expanded process groups keep their summary and restore each original
-member as a separate virtual list row. Members retain their canonical references
-and source-copy offsets, and each receives its own measured visibility state.
-This preserves the Thinking Mods gate: expanded thoughts outside the viewport
-must not start a render extension merely because their summary is visible.
+Manually expanded process groups keep their summary and each original member
+as an independent virtual list row. Safe tool calls use compact semantic rows;
+completed thoughts do not repeat collapsed headers beneath the aggregate
+duration. Opening a process does not force every member into full-detail mode.
+Explicitly expanded thoughts remain visible, and Ctrl+O restores the complete
+original sequence and outputs. Members retain canonical references, copy
+offsets, and their own measured visibility. An expanded thought outside the
+viewport must not start a Thinking Mod merely because its summary is visible.
+
+Individual tool batches also retain their summary when opened. Safe successful
+read/search/list/shell calls show a compact per-call directory, with Ctrl+O
+advertised for raw output; specialized and interactive results retain their
+existing renderer. Clicking the summary again closes it. A process opened by
+an explicit child expansion keeps its parent summary; closing that parent
+clears its child expansion keys and thought heads. Mouse release after a drag
+never toggles a header. Native scrollback keeps its keyboard-only fallback.
 
 ## Affected areas and constraints
 

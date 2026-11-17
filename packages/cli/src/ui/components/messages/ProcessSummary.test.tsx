@@ -56,6 +56,25 @@ const event = (name: MouseEvent['name'], col = 4, row = 2): MouseEvent => ({
 });
 
 describe('ProcessSummary', () => {
+  it('retains an interactive collapse header while expanded', () => {
+    const onToggle = vi.fn();
+    const { lastFrame } = render(
+      <ProcessSummary
+        item={item}
+        width={76}
+        expanded
+        interactive
+        onToggle={onToggle}
+      />,
+    );
+    const [mouse, options] = vi.mocked(useMouseEvents).mock.calls.at(-1)!;
+    expect(options.isActive).toBe(true);
+    expect(lastFrame()).toContain('click to collapse');
+    mouse(event('left-press'));
+    mouse(event('left-release'));
+    expect(onToggle).toHaveBeenCalledOnce();
+  });
+
   it('uses one muted summary row with a single duration and hint', () => {
     const { lastFrame } = render(
       <ProcessSummary
@@ -63,7 +82,7 @@ describe('ProcessSummary', () => {
         width={76}
         expanded={false}
         interactive
-        onExpand={vi.fn()}
+        onToggle={vi.fn()}
       />,
     );
     const output = lastFrame() ?? '';
@@ -81,7 +100,7 @@ describe('ProcessSummary', () => {
         width={20}
         expanded={false}
         interactive
-        onExpand={vi.fn()}
+        onToggle={vi.fn()}
       />,
     );
     const lines = (lastFrame() ?? '').split('\n');
@@ -90,23 +109,23 @@ describe('ProcessSummary', () => {
   });
 
   it('expands only on a matching press/release and goes inactive behind dialogs', () => {
-    const onExpand = vi.fn();
+    const onToggle = vi.fn();
     const props = {
       item,
       width: 60,
       expanded: false,
       interactive: true,
-      onExpand,
+      onToggle,
     };
     const { rerender } = render(<ProcessSummary {...props} />);
     const mouse = vi.mocked(useMouseEvents).mock.calls.at(-1)![0];
     mouse(event('left-press'));
     mouse(event('move', 5));
     mouse(event('left-release'));
-    expect(onExpand).not.toHaveBeenCalled();
+    expect(onToggle).not.toHaveBeenCalled();
     mouse(event('left-press'));
     mouse(event('left-release'));
-    expect(onExpand).toHaveBeenCalledOnce();
+    expect(onToggle).toHaveBeenCalledOnce();
     rerender(<ProcessSummary {...props} interactive={false} />);
     expect(vi.mocked(useMouseEvents).mock.calls.at(-1)![1].isActive).toBe(
       false,
@@ -114,20 +133,23 @@ describe('ProcessSummary', () => {
   });
 
   it.each([
-    { sx: 3, sy: 1, ex: 12, ey: 1 },
-    { sx: 3, sy: 1, ex: 3, ey: 1 },
-    { sx: 2, sy: 1, ex: 60, ey: 1 },
+    { expanded: false, selection: { sx: 3, sy: 1, ex: 12, ey: 1 } },
+    { expanded: true, selection: { sx: 3, sy: 1, ex: 12, ey: 1 } },
+    { expanded: false, selection: { sx: 3, sy: 1, ex: 3, ey: 1 } },
+    { expanded: true, selection: { sx: 3, sy: 1, ex: 3, ey: 1 } },
+    { expanded: false, selection: { sx: 2, sy: 1, ex: 60, ey: 1 } },
+    { expanded: true, selection: { sx: 2, sy: 1, ex: 60, ey: 1 } },
   ])(
-    'does not expand on a matching release with renderer selection %j',
-    (selection) => {
-      const onExpand = vi.fn();
+    'does not toggle on a matching release with renderer selection %j',
+    ({ expanded, selection }) => {
+      const onToggle = vi.fn();
       const { stdout } = render(
         <ProcessSummary
           item={item}
           width={60}
-          expanded={false}
+          expanded={expanded}
           interactive
-          onExpand={onExpand}
+          onToggle={onToggle}
         />,
       );
       const mouse = vi.mocked(useMouseEvents).mock.calls.at(-1)![0];
@@ -139,12 +161,12 @@ describe('ProcessSummary', () => {
       controller.setSelection(selection);
       expect(controller.getSelection()).toEqual(selection);
       mouse(event('left-release'));
-      expect(onExpand).not.toHaveBeenCalled();
+      expect(onToggle).not.toHaveBeenCalled();
 
       controller.setSelection(null);
       mouse(event('left-press'));
       mouse(event('left-release'));
-      expect(onExpand).toHaveBeenCalledOnce();
+      expect(onToggle).toHaveBeenCalledOnce();
     },
   );
 });

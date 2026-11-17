@@ -75,6 +75,11 @@ describe('virtual process projection', () => {
     fullDetail = false,
     expandedHeadIds = new Set<number>(),
     items = history,
+    toolDetails = {
+      expandedBatchIds: new Set(expanded ? ['process:1'] : []),
+      toggleBatch: vi.fn(),
+    },
+    toggleThought = vi.fn(),
   ) =>
     render(
       <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
@@ -86,15 +91,10 @@ describe('virtual process projection', () => {
               value={{
                 allExpanded: fullDetail,
                 expandedHeadIds,
-                toggle: vi.fn(),
+                toggle: toggleThought,
               }}
             >
-              <ToolDetailsExpandedProvider
-                value={{
-                  expandedBatchIds: new Set(expanded ? ['process:1'] : []),
-                  expandBatch: vi.fn(),
-                }}
-              >
+              <ToolDetailsExpandedProvider value={toolDetails}>
                 <MainContent />
               </ToolDetailsExpandedProvider>
             </ThoughtExpandedProvider>
@@ -115,19 +115,64 @@ describe('virtual process projection', () => {
     ).toEqual([4]);
   });
 
-  it('restores all original members with full tool results after click expansion', () => {
+  it('restores compact independent members without forcing full detail', () => {
     historyItemDisplayPropsSpy.mockClear();
     processSummarySpy.mockClear();
     display(true);
     const calls = historyItemDisplayPropsSpy.mock.calls.map(([props]) => props);
     expect(calls.map((props) => props.item.id)).toEqual([1, 2, 3, 4]);
-    expect(calls.slice(0, 3).every((props) => props.fullDetail)).toBe(true);
+    expect(calls.every((props) => props.fullDetail === false)).toBe(true);
+    expect(calls.slice(0, 3).every((props) => props.isProcessMember)).toBe(
+      true,
+    );
+    expect(calls[3].isProcessMember).toBe(false);
     expect(calls[3].fullDetail).toBe(false);
     expect(processSummarySpy.mock.calls.at(-1)?.[0].expanded).toBe(true);
     const data = scrollableListPropsSpy.mock.calls.at(-1)?.[0].data;
     expect(data[1].type).toBe('process');
     expect(data.slice(2)).toEqual(history);
     calls.forEach((props, index) => expect(props.item).toBe(history[index]));
+  });
+
+  it('keeps the parent summary when a child batch was expanded', () => {
+    processSummarySpy.mockClear();
+    display(false, false, new Set(), history, {
+      expandedBatchIds: new Set(['batch-3']),
+      toggleBatch: vi.fn(),
+    });
+    expect(processSummarySpy.mock.calls.at(-1)?.[0].expanded).toBe(true);
+    const data = scrollableListPropsSpy.mock.calls.at(-1)?.[0].data;
+    expect(data[1].type).toBe('process');
+    expect(data.slice(2)).toEqual(history);
+  });
+
+  it('collapses its own state and every expanded child only once', () => {
+    const toggleBatch = vi.fn();
+    const toggleThought = vi.fn();
+    const items: UIState['history'] = [
+      history[0],
+      {
+        id: 5,
+        type: 'gemini_thought_content',
+        thoughtGroupId: -1,
+        text: 'continued reasoning',
+      },
+      ...history.slice(1),
+    ];
+    display(
+      true,
+      false,
+      new Set([-1]),
+      items,
+      {
+        expandedBatchIds: new Set(['process:1', 'batch-3']),
+        toggleBatch,
+      },
+      toggleThought,
+    );
+    processSummarySpy.mock.calls.at(-1)?.[0].onToggle();
+    expect(toggleBatch.mock.calls).toEqual([['process:1'], ['batch-3']]);
+    expect(toggleThought.mock.calls).toEqual([[-1]]);
   });
 
   it('keeps source copy indexes on the original expanded process members', () => {
@@ -196,32 +241,40 @@ describe('virtual process projection', () => {
       ));
       view = render(
         withProviders(
-          <AppContext.Provider
-            value={{ version: '1.2.3', startupWarnings: [] }}
+          <ThoughtExpandedProvider
+            value={{
+              allExpanded: false,
+              expandedHeadIds: new Set([-1]),
+              toggle: vi.fn(),
+            }}
           >
-            <UIActionsContext.Provider value={createUIActions()}>
-              <UIStateContext.Provider
-                value={createUIState({
-                  history: [thought, ...history.slice(1)],
-                  historyManager: {
-                    sessionId: 'process-session',
-                  } as UIState['historyManager'],
-                  useTerminalBuffer: true,
-                  availableTerminalHeight: 5,
-                  showScrollbar: false,
-                })}
-              >
-                <ToolDetailsExpandedProvider
-                  value={{
-                    expandedBatchIds: new Set(['process:1']),
-                    expandBatch: vi.fn(),
-                  }}
+            <AppContext.Provider
+              value={{ version: '1.2.3', startupWarnings: [] }}
+            >
+              <UIActionsContext.Provider value={createUIActions()}>
+                <UIStateContext.Provider
+                  value={createUIState({
+                    history: [thought, ...history.slice(1)],
+                    historyManager: {
+                      sessionId: 'process-session',
+                    } as UIState['historyManager'],
+                    useTerminalBuffer: true,
+                    availableTerminalHeight: 5,
+                    showScrollbar: false,
+                  })}
                 >
-                  <MainContent scrollActionsRef={scrollActionsRef} />
-                </ToolDetailsExpandedProvider>
-              </UIStateContext.Provider>
-            </UIActionsContext.Provider>
-          </AppContext.Provider>,
+                  <ToolDetailsExpandedProvider
+                    value={{
+                      expandedBatchIds: new Set(['process:1']),
+                      toggleBatch: vi.fn(),
+                    }}
+                  >
+                    <MainContent scrollActionsRef={scrollActionsRef} />
+                  </ToolDetailsExpandedProvider>
+                </UIStateContext.Provider>
+              </UIActionsContext.Provider>
+            </AppContext.Provider>
+          </ThoughtExpandedProvider>,
           { config: {} as Config },
         ),
       );
@@ -270,7 +323,7 @@ describe('virtual process projection', () => {
     historyItemDisplayPropsSpy.mockClear();
     processSummarySpy.mockClear();
     display(false, false, new Set([-1]));
-    expect(processSummarySpy).not.toHaveBeenCalled();
+    expect(processSummarySpy.mock.calls.at(-1)?.[0].expanded).toBe(true);
     expect(
       historyItemDisplayPropsSpy.mock.calls.map(([props]) => props.item.id),
     ).toEqual([1, 2, 3, 4]);
