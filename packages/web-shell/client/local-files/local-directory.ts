@@ -409,8 +409,12 @@ export class LocalDirectory {
     const encoded = new TextEncoder().encode(content);
     // TextEncoder silently replaces unpaired surrogates with U+FFFD: the file
     // would receive different bytes than requested while the tool reports a
-    // successful write. Reject exactly what the read side refuses to decode.
-    if (new TextDecoder('utf-8', { fatal: true }).decode(encoded) !== content) {
+    // successful write. Keep a leading BOM when comparing the round-trip text.
+    if (
+      new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(
+        encoded,
+      ) !== content
+    ) {
       throw new LocalDirectoryError(
         'invalid_path',
         `${path} content contains unpaired surrogates; it cannot be written as UTF-8 text.`,

@@ -385,6 +385,32 @@ describe('LocalDirectory.write', () => {
     expect(root.files.get('README.md')?.file.content).toBe('# bye\n');
   });
 
+  it.each(['\uFEFFhello\n', '\uFEFF'])(
+    'writes a leading BOM without treating it as an unpaired surrogate (%j)',
+    async (content) => {
+      const root = tree();
+      const result = await new LocalDirectory(root).write('README.md', content);
+      expect(result).toEqual({
+        path: 'README.md',
+        bytes: new TextEncoder().encode(content).length,
+        created: false,
+      });
+      expect(root.files.get('README.md')?.file.content).toBe(content);
+    },
+  );
+
+  it('counts a leading BOM against the write limit before changing a file', async () => {
+    const root = tree();
+    const dir = new LocalDirectory(root, {
+      ...DEFAULT_LOCAL_DIRECTORY_LIMITS,
+      maxWriteBytes: 4,
+    });
+    await expect(dir.write('README.md', '\uFEFFé')).rejects.toMatchObject({
+      code: 'too_large',
+    });
+    expect(root.files.get('README.md')?.file.content).toBe('# hello\nworld\n');
+  });
+
   it('maps writing a directory to not_a_file', async () => {
     await expect(
       new LocalDirectory(tree()).write('src', 'x'),
