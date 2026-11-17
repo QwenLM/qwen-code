@@ -759,7 +759,7 @@ describe('no-AK integration CI wiring', () => {
     const gate = getWorkflowStep(job, 'Run required no-AK integration gate');
     expect(gate).toContain("id: 'no_ak_gate'");
     expect(gate).toContain(
-      'qwen-acp-parity-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-shard-${{ matrix.shard }}',
+      'parity_evidence="${RUNNER_TEMP}/qwen-acp-parity-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-shard-${{ matrix.shard }}"',
     );
     expect(gate).toContain('mkdir -p "$parity_evidence"');
     expect(gate).toContain(
@@ -797,6 +797,10 @@ describe('no-AK integration CI wiring', () => {
       path.join(ROOT, 'integration-tests/cli/acp-agent-loop-parity.test.ts'),
       'utf8',
     );
+    expect(paritySource).toContain(
+      'const directory = join(dump, slug, `${arm}-${agent.pid}`);',
+    );
+    expect(paritySource).toContain('join(dump, `${slug}.${arm}.json`)');
     const slugExpressions = Array.from(
       paritySource.matchAll(/const slug = (.+);/g),
       ([, expression]) => expression,
@@ -805,8 +809,12 @@ describe('no-AK integration CI wiring', () => {
       "scenario.name.replace(/[^a-z0-9]+/gi, '-')",
       "scenario.name.replace(/[^a-z0-9]+/gi, '-')",
     ]);
+    const scenarioSource = paritySource.slice(
+      paritySource.indexOf('const scenarios: Scenario[] = ['),
+      paritySource.indexOf('it.each(scenarios.map('),
+    );
     const scenarioSlugs = Array.from(
-      paritySource.matchAll(/name: '([^']+)'/g),
+      scenarioSource.matchAll(/^ {8}name: '([^']+)'/gm),
       ([, name]) => name.replace(/[^a-z0-9]+/gi, '-'),
     );
     expect(scenarioSlugs).toContain(paths[0].slice(prefix.length, -1));
