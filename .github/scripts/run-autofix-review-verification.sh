@@ -609,6 +609,17 @@ if git diff --name-only "origin/main...${BRANCH}" \
     npm run build --workspace packages/core
 fi
 
+# An older branch can keep the newer base's ignored core dist after checkout.
+# Inspect the artifact after any branch rebuild: a leftover dependency dist
+# alone does not mean core still imports it.
+if [[ ! -f packages/network-policy/package.json && -d packages/core/dist ]] &&
+  grep -rEq --include='*.js' "from ['\"]@qwen-code/network-policy['\"]" packages/core/dist; then
+  if git cat-file -e "origin/${BRANCH}:packages/network-policy/package.json" 2> /dev/null; then
+    reject_fix 'packages/network-policy/package.json required by the core build was removed by the agent-committed fix'
+  fi
+  reject_fix 'core build and branch workspace are incompatible: the core build imports @qwen-code/network-policy but this branch lacks its package.json; update the branch from main before retrying' 'false' 'false'
+fi
+
 # Load clamps for every vitest this gate launches.
 #
 # The gate runs through an env -i allowlist that (deliberately) drops

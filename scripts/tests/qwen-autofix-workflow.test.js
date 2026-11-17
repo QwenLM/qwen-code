@@ -26814,6 +26814,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     parserTypePlant = false,
     install = {},
     workspaceTransition = false,
+    coreArtifact = null,
   }) => {
     const dir = mkdtempSync(join(tmpdir(), 'gate-ab-'));
     try {
@@ -26903,6 +26904,38 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         );
         g('npm run build --workspace packages/core');
       }
+      if (coreArtifact) {
+        writeWorkspaceFile('.gitignore', 'node_modules/\ndist/\n');
+        writeWorkspaceFile('packages/core/package.json', corePackage);
+        const legacyCore = "export const schema = 'artifact';\n";
+        writeWorkspaceFile('packages/core/src/network-policy.js', legacyCore);
+        writeWorkspaceFile(
+          'packages/core/dist/index.js',
+          "export { schema } from './src/utils/network-policy.js';\n",
+        );
+        writeWorkspaceFile(
+          'packages/core/dist/src/utils/network-policy.js',
+          coreArtifact.requiresPackage
+            ? `export { schema } from ${coreArtifact.quote ?? "'"}@qwen-code/network-policy${coreArtifact.quote ?? "'"};\n`
+            : legacyCore,
+        );
+        // An ignored package dist may survive checkout even when core no
+        // longer imports it. Its presence alone must not block that branch.
+        writeWorkspaceFile('packages/network-policy/dist/index.js', legacyCore);
+        if (coreArtifact.branchHasPackage) {
+          writeWorkspaceFile('packages/network-policy/package.json', {
+            name: '@qwen-code/network-policy',
+            type: 'module',
+            main: './dist/index.js',
+          });
+        }
+        const links = join(work, 'packages/core/node_modules/@qwen-code');
+        mkdirSync(links, { recursive: true });
+        symlinkSync(
+          join(work, 'packages/network-policy'),
+          join(links, 'network-policy'),
+        );
+      }
       g('echo base > f.txt && git add . && git commit -qm base');
       g('git branch -M main && git push -q origin main');
       if (weaken && !WEAKEN_FIXTURES[weaken]) {
@@ -26973,13 +27006,28 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         g('echo branch > f.txt && git commit -qam branch');
       }
       g('git push -q origin feature');
+      if (coreArtifact && !coreArtifact.branchHasPackage) {
+        // Future main has the workspace; the pre-round branch does not.
+        // Classifying against main would incorrectly blame the round.
+        g('git checkout -q main');
+        writeWorkspaceFile('packages/network-policy/package.json', {
+          name: '@qwen-code/network-policy',
+          type: 'module',
+          main: './dist/index.js',
+        });
+        g('git add . && git commit -qm main-workspace');
+        g('git push -q origin main && git checkout -q feature');
+      }
       if (fx && fx.mainMoves) {
         g('git checkout -q main');
         for (const cmd of fx.mainMoves) g(cmd);
         g('git push -q origin main && git checkout -q feature');
       }
       if (agentCommit) {
-        if (addWorkspace) {
+        if (coreArtifact?.removeManifest) {
+          g('git rm -q packages/network-policy/package.json');
+          g('git commit -qm remove-network-policy');
+        } else if (addWorkspace) {
           // The round ADDS a workspace — it does not exist at the baseline.
           g('mkdir -p packages/newpkg');
           g(
@@ -27060,6 +27108,10 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
           '#!/bin/bash',
           'if [[ "$1" == "run" && "$2" == "build" ]]; then',
           '  if [[ "${REAL_WORKSPACE:-}" == "1" ]]; then exec "${REAL_NPM}" "$@"; fi',
+          '  if [[ "${CORE_ARTIFACT_REBUILD:-}" == "1" && "$*" == "run build --workspace packages/core" ]]; then',
+          '    cp packages/core/src/network-policy.js packages/core/dist/src/utils/network-policy.js',
+          '    echo "core artifact rebuilt from branch sources"',
+          '  fi',
           '  [[ "$(cat "${INSTALL_LOG}.head" 2>/dev/null)" == "$(git rev-parse HEAD)" ]] || { echo "src/f.ts(1,1): error TS2307: stale workspace links"; exit 1; }',
           'fi',
           'if [[ "${FORGE_OUTPUT:-}" == "1" && "$1" == "run" && "$2" == "build" ]]; then',
@@ -27209,6 +27261,9 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       writeFileSync(
         join(rt, 'check-settings-schema.sh'),
         (workspaceTransition ? 'node schema.mjs || exit 1\n' : '') +
+          (coreArtifact
+            ? `echo 'artifact schema started'\nnode --input-type=module -e "import('./packages/core/dist/index.js').then(({schema}) => { if (schema !== 'artifact') throw new Error('wrong artifact schema'); console.log('artifact schema loaded'); })" || exit 1\n`
+            : '') +
           'if [[ "${DISCOVER_ENV:-}" == "1" ]]; then\n' +
           '  envfile="$(find "${RUNNER_TEMP:-}/_runner_file_commands" -name "set_env_*" 2>/dev/null | head -1)"\n' +
           '  if [[ -n "${envfile}" ]] && echo "BASH_ENV=/evil" >> "${envfile}" 2>/dev/null; then\n' +
@@ -27348,6 +27403,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
             INSTALL_MUTATE_AT: String(install.mutateAt ?? ''),
             INSTALL_MUTATION: install.mutation ?? '',
             REAL_WORKSPACE: workspaceTransition ? '1' : '',
+            CORE_ARTIFACT_REBUILD: coreArtifact?.rebuild ? '1' : '',
             REAL_COREPACK: sh('command -v corepack', work).trim(),
             REAL_NPM: sh('command -v npm', work).trim(),
             BASELINE_CODE: baselineCode,
@@ -27391,6 +27447,8 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
           ? readFileSync(join(workdir, 'gate-advisories.md'), 'utf8')
           : '',
         headAfter: sh('git rev-parse --abbrev-ref HEAD', work).trim(),
+        headShaAfter: shaOf('HEAD'),
+        treeAfter: sh('git status --porcelain', work).trim(),
         baselineSha,
         currentSha,
         installHeads: readFileSync(installLog, 'utf8')
@@ -27421,6 +27479,94 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(r.stdout).toContain('branch schema loaded');
     expect(r.outputs).toContain('outcome=noop');
     expect(r.installHeads).toHaveLength(1);
+  });
+
+  it.each([
+    ['no-action round', "'", false],
+    ['agent-committed round', '"', true],
+  ])(
+    'does not charge an incompatible core artifact to a legacy branch (%s)',
+    (_, quote, agentCommit) => {
+      const r = runGate({
+        coreArtifact: { requiresPackage: true, branchHasPackage: false, quote },
+        agentCommit,
+        noAction: !agentCommit,
+      });
+      expect(r.status, r.stdout).toBe(1);
+      expect(r.outputs).toContain('outcome=failed');
+      expect(r.outputs).not.toContain('retryable=true');
+      expect(r.outputs).not.toContain('preexisting=true');
+      expect(r.rejection).toContain(
+        'core build and branch workspace are incompatible',
+      );
+      expect(r.rejection).toContain(
+        'update the branch from main before retrying',
+      );
+      expect(r.rejection).not.toContain('settings schema is stale');
+      expect(r.stdout).not.toContain('artifact schema started');
+      expect(r.installHeads).toEqual([r.currentSha]);
+      expect(r.headShaAfter).toBe(r.currentSha);
+      expect(r.treeAfter).toBe('');
+    },
+  );
+
+  it.each([
+    ['legacy artifact with leftover package dist', false, false],
+    ['current artifact with the required workspace', true, true],
+  ])(
+    'accepts a compatible core artifact: %s',
+    (_, requiresPackage, branchHasPackage) => {
+      const r = runGate({
+        coreArtifact: { requiresPackage, branchHasPackage },
+        agentCommit: false,
+        noAction: true,
+      });
+      expect(r.status, r.stdout).toBe(0);
+      expect(r.outputs).toContain('outcome=noop');
+      expect(r.stdout).toContain('artifact schema loaded');
+      expect(r.headShaAfter).toBe(r.currentSha);
+      expect(r.treeAfter).toBe('');
+    },
+  );
+
+  it('checks the core artifact after a branch source rebuild', () => {
+    const r = runGate({
+      coreArtifact: {
+        requiresPackage: true,
+        branchHasPackage: false,
+        rebuild: true,
+      },
+      touchCore: true,
+      agentCommit: false,
+      noAction: true,
+    });
+    expect(r.status, r.stdout).toBe(0);
+    expect(r.outputs).toContain('outcome=noop');
+    expect(r.stdout).toContain('core artifact rebuilt from branch sources');
+    expect(r.stdout).toContain('artifact schema loaded');
+    expect(r.headShaAfter).toBe(r.currentSha);
+    expect(r.treeAfter).toBe('');
+  });
+
+  it('keeps a round-deleted core artifact dependency repairable', () => {
+    const r = runGate({
+      coreArtifact: {
+        requiresPackage: true,
+        branchHasPackage: true,
+        removeManifest: true,
+      },
+    });
+    expect(r.status, r.stdout).toBe(1);
+    expect(r.outputs).toContain('outcome=failed');
+    expect(r.outputs).toContain('retryable=true');
+    expect(r.outputs).not.toContain('preexisting=true');
+    expect(r.rejection).toContain(
+      'packages/network-policy/package.json required by the core build was removed by the agent-committed fix',
+    );
+    expect(r.rejection).not.toContain('settings schema is stale');
+    expect(r.stdout).not.toContain('artifact schema started');
+    expect(r.headShaAfter).toBe(r.currentSha);
+    expect(r.treeAfter).toBe('');
   });
 
   it('synchronizes dependencies for the current, baseline and restored trees', () => {
