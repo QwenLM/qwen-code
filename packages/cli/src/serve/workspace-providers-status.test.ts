@@ -420,25 +420,24 @@ describe('createWorkspaceProvidersStatusProvider', () => {
 
     const result = await provider(workspace, false);
     const models = result.providers.flatMap((entry) => entry.models);
-    for (const name of [
-      'Qwen4 A',
-      'Qwen4 B',
-      'Invite A',
-      'Invite B',
-      'Stable A',
-      'Stable B',
-    ]) {
+    // qwen4* routes take the qwen4 generation ladder (low/high/xhigh); the
+    // invitation-only previews and the stable family keep the qwen3.8-max
+    // ladder (low/medium/xhigh).
+    const expectedLadders: Record<string, string[]> = {
+      'Qwen4 A': ['none', 'low', 'high', 'xhigh'],
+      'Qwen4 B': ['none', 'low', 'high', 'xhigh'],
+      'Invite A': ['none', 'low', 'medium', 'xhigh'],
+      'Invite B': ['none', 'low', 'medium', 'xhigh'],
+      'Stable A': ['none', 'low', 'medium', 'xhigh'],
+      'Stable B': ['none', 'low', 'medium', 'xhigh'],
+    };
+    for (const [name, ladder] of Object.entries(expectedLadders)) {
       const entry = models.find((model) => model.name === name);
       expect(entry?.modelId).toMatch(/^qwen-route:v1:/);
       expect(entry?.configOptions).toMatchObject([
         {
           currentValue: 'low',
-          options: [
-            { value: 'none' },
-            { value: 'low' },
-            { value: 'medium' },
-            { value: 'xhigh' },
-          ],
+          options: ladder.map((value) => ({ value })),
         },
       ]);
     }

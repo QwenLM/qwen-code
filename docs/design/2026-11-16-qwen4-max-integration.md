@@ -177,6 +177,23 @@ ttl:'1h' }`; otherwise omit `ttl` (the 5m default). Generalize the setting's
 - **Gate subscription budget changes on the qwen4 prefix.** The subscription
   gateway's qwen3.8 budget contract is shipped behavior; only qwen4 models take
   the new ladder.
+- **Apply the ladder, output budget, and subscription budget to the whole
+  `qwen4` prefix, not just `qwen4-max`.** The generation shares the §3.1
+  contract forward — the 1M window and the tiered wire gate already gate on
+  the prefix (#15987) — so a future `qwen4.x` release needs no further code
+  change. This intentionally changes behavior for existing `qwen4*` custom
+  routes (e.g. `qwen4-plus`): they previously inherited the qwen3.8-max ladder
+  and the 32K output fallback, and now take the qwen4 ladder
+  (`low/high/xhigh`, default `high`) and the thinking-sized 262,144 budget.
+  The qwen3.8 family and the invitation-only latest-series previews keep their
+  shipped behavior, and the models.dev catalog still overrides the regex rows
+  once it publishes a qwen4 entry with different limits.
+- **Clamp the non-thinking budget on the final wire shape, not the endpoint.**
+  The subscription gateway (`api.qwen.ai`) is not DashScope-detected, yet its
+  disable path ships `enable_thinking:false` through the same pipeline
+  shaping; gating the clamp on `isDashScope` would leave exactly that channel
+  unclamped. Generic OpenAI-compatible hosts disable via
+  `chat_template_kwargs` instead, so the shape gate keeps the clamp off there.
 
 ## Constraints
 
@@ -192,7 +209,10 @@ ttl:'1h' }`; otherwise omit `ttl` (the 5m default). Generalize the setting's
 - A models.dev catalog entry for `qwen4` overrides the regex window/output rows
   (catalog wins); the curated output row still caps explicit requests.
 - The output-ceiling exemption interacts with truncation escalation
-  (`ESCALATED_MAX_TOKENS`); covered by tests.
+  (`ESCALATED_MAX_TOKENS`): a qwen4 request's initial budget (262,144,
+  window-clamped) is always at least the escalated cap (at most 64K), so
+  `shouldEscalateMaxOutputTokens` never fires for the family and no
+  escalation path is exercised.
 
 ## Validation plan
 
@@ -219,6 +239,11 @@ ttl:'1h' }`; otherwise omit `ttl` (the 5m default). Generalize the setting's
    nothing.
 6. qwen3.8-max behavior (ladder, default `xhigh`, subscription budget table) is
    unchanged.
+7. Existing `qwen4*` routes project the generation ladder
+   (`none/low/high/xhigh`) in the workspace provider controls, while
+   invitation-only previews and the stable family keep the qwen3.8-max ladder;
+   a subscription non-thinking request ships `enable_thinking:false` with
+   `max_tokens` clamped to 131,072.
 
 ## Open questions / follow-ups
 

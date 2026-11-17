@@ -34,7 +34,10 @@ import type { PipelineConfig, RequestContext } from './types.js';
 import { redactProxyError } from '../../utils/runtimeFetchOptions.js';
 import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
 import { createChildAbortController } from '../../utils/abortController.js';
-import { reconcileMaxTokens } from '../tokenLimits.js';
+import {
+  QWEN4_NON_THINKING_OUTPUT_CAP,
+  reconcileMaxTokens,
+} from '../tokenLimits.js';
 import { markToolCallArgumentsIncomplete } from '../incomplete-tool-call-args.js';
 import {
   getGptReasoningCapabilities,
@@ -1683,21 +1686,27 @@ export class ContentGenerationPipeline {
       }
     }
 
-    // qwen4-max caps non-thinking output at 131,072 tokens (thinking mode
-    // allows 262,144). The auto budget is sized for thinking mode and exempt
-    // from the flat output ceiling, so once thinking is disabled a short-prompt
-    // request would otherwise ship max_tokens=262,144 and exceed the
-    // non-thinking range (400). Clamp it here, where the disable shape is
-    // final (the provider's own cap runs before this reasoning shaping).
+    // qwen4 caps non-thinking output at 131,072 tokens (thinking mode allows
+    // 262,144). The auto budget is sized for thinking mode and exempt from the
+    // flat output ceiling, so once thinking is disabled a short-prompt request
+    // would otherwise ship max_tokens=262,144 and exceed the non-thinking
+    // range (400). Clamp it here, where the disable shape is final (the
+    // provider's own cap runs before this reasoning shaping). Gate on the
+    // final wire shape, not the endpoint: the subscription gateway is not
+    // DashScope-detected yet ships enable_thinking:false through this same
+    // path, and generic hosts disable via chat_template_kwargs instead, so
+    // the clamp stays off there.
     if (
-      isDashScope &&
       model.startsWith('qwen4') &&
       (typed['reasoning_effort'] === 'none' ||
         typed['enable_thinking'] === false)
     ) {
       const maxTokens = providerRequest.max_tokens;
-      if (typeof maxTokens === 'number' && maxTokens > 131_072) {
-        providerRequest.max_tokens = 131_072;
+      if (
+        typeof maxTokens === 'number' &&
+        maxTokens > QWEN4_NON_THINKING_OUTPUT_CAP
+      ) {
+        providerRequest.max_tokens = QWEN4_NON_THINKING_OUTPUT_CAP;
       }
     }
 

@@ -161,6 +161,18 @@ ttl:'1h' }`；否则省略 `ttl`（5m 默认）。泛化该设置的文档，使
   `clampReasoningEffort` 处理遗留选择。
 - **订阅预算变更门控在 qwen4 前缀。** 订阅网关的 qwen3.8 预算契约是已发布
   行为；仅 qwen4 模型采用新档位。
+- **档位、输出预算与订阅预算作用于整个 `qwen4` 前缀，而非仅 `qwen4-max`。**
+  该世代向前共享 §3.1 契约——1M 窗口与 tiered 线协议门已按该前缀门控
+  （#15987）——故未来 `qwen4.x` 发布无需再改码。这有意改变了既有 `qwen4*`
+  自定义路由（如 `qwen4-plus`）的行为：它们此前继承 qwen3.8-max 档位与 32K
+  输出回退，现在采用 qwen4 档位（`low/high/xhigh`、默认 `high`）与思考模式
+  sized 的 262,144 预算。qwen3.8 家族与邀请制 latest-series 预览保持已发布
+  行为；models.dev 一旦发布限额不同的 qwen4 条目，catalog 仍覆盖正则行。
+- **非思考预算夹制按最终线协议形状门控，而非端点。** 订阅网关
+  （`api.qwen.ai`）不被识别为 DashScope，但其关闭路径同样经该 pipeline
+  shaping 发出 `enable_thinking:false`；把夹制门控在 `isDashScope` 会让恰恰
+  这条通道漏夹。通用 OpenAI-compatible 主机经 `chat_template_kwargs` 关闭，
+  形状门控使夹制在其上不触发。
 
 ## 约束
 
@@ -175,7 +187,9 @@ ttl:'1h' }`；否则省略 `ttl`（5m 默认）。泛化该设置的文档，使
   必要但不充分。
 - models.dev 的 `qwen4` catalog 条目会覆盖正则窗口/输出行（catalog 优先）；
   curated 输出行仍约束显式请求。
-- 输出上限豁免与截断升级（`ESCALATED_MAX_TOKENS`）交互；由测试覆盖。
+- 输出上限豁免与截断升级（`ESCALATED_MAX_TOKENS`）交互：qwen4 请求的初始预算
+  （262,144，经窗口夹制）恒不小于升级后的上限（至多 64K），故
+  `shouldEscalateMaxOutputTokens` 对该家族永不触发，升级路径不被演练。
 
 ## 验证计划
 
@@ -196,6 +210,9 @@ ttl:'1h' }`；否则省略 `ttl`（5m 默认）。泛化该设置的文档，使
 4. `cacheRetention:'1h'` 在 qwen4 缓存断点标记 `ttl:'1h'`；默认省略 `ttl`。
 5. `imageDetail:'low'` 向图像 part 注入 `detail:'low'`；默认不注入。
 6. qwen3.8-max 行为（档位、默认 `xhigh`、订阅预算表）不变。
+7. 既有 `qwen4*` 路由在 workspace provider 控件中投影世代档位
+   （`none/low/high/xhigh`），邀请制预览与 stable 家族保持 qwen3.8-max 档位；
+   订阅非思考请求发出 `enable_thinking:false` 且 `max_tokens` 夹到 131,072。
 
 ## 待解问题 / 后续工作
 

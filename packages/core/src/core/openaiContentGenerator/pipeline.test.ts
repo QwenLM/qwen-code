@@ -2205,6 +2205,30 @@ describe('ContentGenerationPipeline', () => {
       });
     });
 
+    it('clamps qwen4 subscription non-thinking output to the 131072 range', async () => {
+      // The subscription gateway is not DashScope-detected, yet its disable
+      // shape (enable_thinking:false) ships through the same pipeline path.
+      // The real provider sizes the thinking-mode auto budget (262144); the
+      // clamp must still bound it to the non-thinking cap or the gateway
+      // rejects the max_tokens range (400).
+      const apiCall = await executeWith(
+        {
+          baseUrl: 'https://api.qwen.ai/compatible-mode/v1',
+          model: 'qwen4-max',
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          samplingParams: undefined,
+          reasoning: false,
+        },
+        userRequest('qwen4-max'),
+        'prompt-id',
+        DefaultOpenAICompatibleProvider,
+      );
+      expectFields(apiCall, {
+        enable_thinking: false,
+        max_tokens: 131072,
+      });
+    });
+
     it.each(
       [
         'deepseek-v4-pro',

@@ -244,6 +244,13 @@ const CLAUDE_OPUS_EXTENDED = /^claude-opus-(?:4-(?:6|7|8)|5)/;
  */
 const QWEN4_OUTPUT_EXTENDED = /^qwen4/;
 
+/**
+ * qwen4 non-thinking output cap: with thinking disabled the gateway rejects
+ * max_tokens above 131,072 (400 range error), while thinking mode allows the
+ * full 262,144. The pipeline clamps the final disable shape to this value.
+ */
+export const QWEN4_NON_THINKING_OUTPUT_CAP: TokenCount = 131_072;
+
 /** Ordered regex patterns: most specific -> most general (first match wins). */
 const PATTERNS: Array<[RegExp, TokenCount]> = [
   // -------------------

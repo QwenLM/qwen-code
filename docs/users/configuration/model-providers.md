@@ -1079,13 +1079,17 @@ ladder and defaults:
   The automatic output request is sized for that total rather than the flat 64K
   ceiling, still bounded by the context window; with thinking disabled it is
   clamped to the 131,072 non-thinking cap.
-- **Media:** image and video input are accepted. `generationConfig.imageDetail`
-  (`low` / `high` / `auto`) stamps the OpenAI `detail` field on each image part;
-  unset leaves the server default (`high`, ~16K image tokens). Set `low` to trade
-  resolution for tokens (~2.5K).
-- **Cache TTL:** `generationConfig.cacheRetention: '1h'` stamps `ttl: '1h'` on
-  the qwen4 cache breakpoints (2x input write cost); the default omits `ttl`
-  (the 5-minute spec default).
+- **Media:** image and video input are accepted. On the DashScope-based
+  channels (ModelStudio Standard, Token Plan, QwenCloud Standard),
+  `generationConfig.imageDetail` (`low` / `high` / `auto`) stamps the OpenAI
+  `detail` field on each image part; unset leaves the server default (`high`,
+  ~16K image tokens). Set `low` to trade resolution for tokens (~2.5K). The
+  Qwen Subscription channel does not forward this setting.
+- **Cache TTL:** on the DashScope-based channels,
+  `generationConfig.cacheRetention: '1h'` stamps `ttl: '1h'` on the qwen4
+  cache breakpoints (2x input write cost); the default omits `ttl` (the
+  5-minute spec default). The Qwen Subscription provider injects no
+  `cache_control` breakpoints, so this setting has no effect there.
 - **Subscription wire shape:** the Qwen Subscription gateway maps the selected
   effort to `thinking_budget` (`low → 4096`, `high → 131072`, `xhigh → 262144`)
   plus `enable_thinking`, instead of a top-level `reasoning_effort`.
