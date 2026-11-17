@@ -164,4 +164,60 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
 
     expect(fs.existsSync(worktreePath)).toBe(false);
   });
+
+  async function carriedPlan(
+    slug: string,
+    recordOverlay: boolean,
+  ): Promise<WorktreeCleanupPlan> {
+    // A dirty source: a tracked edit plus an untracked file, both carried
+    // into a detached session worktree. The overlay is the checkout's only
+    // content (no commit was added inside it).
+    fs.writeFileSync(path.join(repoRoot, 'carry.txt'), 'carried-untracked\n');
+    fs.appendFileSync(path.join(repoRoot, '.gitignore'), 'extra-rule\n');
+    const service = new GitWorktreeService(repoRoot);
+    const result = await service.createUserWorktree(slug, 'main', {
+      detached: true,
+      carryDirtyState: true,
+    });
+    expect(result.success).toBe(true);
+    const carriedPaths = result.carriedPaths!;
+    expect(carriedPaths.length).toBeGreaterThan(0);
+    const worktreePath = fs.realpathSync(result.worktree!.path);
+    const sessionId = `session-${slug}`;
+    await writeWorktreeSessionMarker(worktreePath, sessionId);
+    const sidecar: WorktreeSession = {
+      slug,
+      worktreePath,
+      worktreeBranch: '',
+      originalCwd: repoRoot,
+      originalBranch: 'main',
+      originalHeadCommit: '',
+      ...(recordOverlay ? { carriedPaths } : {}),
+    };
+    return {
+      sessionId,
+      sidecar,
+      sidecarPath: path.join(repoParent, `${sessionId}.worktree.json`),
+      lockKey: worktreePath,
+    };
+  }
+
+  it('collects a carried-only checkout when the sidecar records the overlay (R9-6)', async () => {
+    const plan = await carriedPlan('carried-collect', true);
+
+    await executeWorktreeCleanup(plan);
+
+    expect(fs.existsSync(plan.lockKey)).toBe(false);
+  });
+
+  it('preserves a carried-only checkout when the sidecar records no overlay (R9-6 legacy S8)', async () => {
+    // The pre-fix shape: a legacy sidecar names no carriedPaths, so the
+    // carried copy reads as the session's own work and the checkout is
+    // stranded. Back-compat — absent overlay keeps the old behavior.
+    const plan = await carriedPlan('carried-legacy', false);
+
+    await executeWorktreeCleanup(plan);
+
+    expect(fs.existsSync(plan.lockKey)).toBe(true);
+  });
 });

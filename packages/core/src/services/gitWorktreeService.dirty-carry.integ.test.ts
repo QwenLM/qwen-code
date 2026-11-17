@@ -28,6 +28,7 @@ import {
   CARRIED_PATHS_MAX_BYTES,
   GitWorktreeService,
   WorktreeDirtyCarryConflictError,
+  worktreeHasWork,
 } from './gitWorktreeService.js';
 import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 
@@ -1741,4 +1742,88 @@ describe('GitWorktreeService.createUserWorktree() — carryDirtyState', () => {
       }
     },
   );
+});
+
+describe('worktreeHasWork — carried overlay exemption (R9-6)', () => {
+  vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
+
+  let repoParent: string;
+  let repoRoot: string;
+
+  beforeEach(async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-wt-r96-'));
+    repoParent = await fs.realpath(dir);
+    repoRoot = path.join(repoParent, 'repo');
+    await fs.mkdir(repoRoot);
+    await initRepo(repoRoot);
+  });
+
+  afterEach(async () => {
+    await fs.rm(repoParent, { recursive: true, force: true });
+  });
+
+  async function createCarried(slug: string) {
+    const service = new GitWorktreeService(repoRoot);
+    const result = await service.createUserWorktree(slug, 'main', {
+      carryDirtyState: true,
+    });
+    expect(result.success).toBe(true);
+    return { worktree: result.worktree!, carriedPaths: result.carriedPaths! };
+  }
+
+  it('a carried-only checkout reads clean with the exemption, dirty without', async () => {
+    await makeDirty(repoRoot);
+    const { worktree, carriedPaths } = await createCarried('r96-clean');
+    expect(carriedPaths.length).toBeGreaterThan(0);
+    // Without the recorded overlay the carried copy counts as work (the
+    // pre-fix reaper behavior that stranded the checkout).
+    await expect(worktreeHasWork(worktree.path)).resolves.toBe(true);
+    // With it, every entry is the carried overlay (or the waived marker).
+    await expect(worktreeHasWork(worktree.path, carriedPaths)).resolves.toBe(
+      false,
+    );
+  });
+
+  it('a late untracked file outside the overlay still preserves', async () => {
+    await makeDirty(repoRoot);
+    const { worktree, carriedPaths } = await createCarried('r96-late');
+    await fs.writeFile(path.join(worktree.path, 'late-work.txt'), 'mine\n');
+    await expect(worktreeHasWork(worktree.path, carriedPaths)).resolves.toBe(
+      true,
+    );
+  });
+
+  it('a late-arriving ignored file still preserves', async () => {
+    await makeDirty(repoRoot);
+    const { worktree, carriedPaths } = await createCarried('r96-ignored');
+    await fs.writeFile(path.join(worktree.path, '.gitignore'), '*.secret\n');
+    await fs.writeFile(path.join(worktree.path, 'late.secret'), 'hidden\n');
+    // .gitignore itself is non-carried untracked work; the ignored file is
+    // caught by the ls-files --others probe even though status omits it.
+    await expect(worktreeHasWork(worktree.path, carriedPaths)).resolves.toBe(
+      true,
+    );
+  });
+
+  it('absent carriedPaths keeps the legacy behavior (overlay counts as work)', async () => {
+    await makeDirty(repoRoot);
+    const { worktree } = await createCarried('r96-legacy');
+    // A legacy sidecar records no overlay: passing nothing (or an empty list)
+    // must behave exactly like the pre-fix predicate.
+    await expect(worktreeHasWork(worktree.path)).resolves.toBe(true);
+    await expect(worktreeHasWork(worktree.path, [])).resolves.toBe(true);
+  });
+
+  it('exempts exact carried paths, not a directory prefix', async () => {
+    // Carry a file inside a subdirectory, then add a sibling the session
+    // created: the sibling is not in the overlay and must preserve.
+    await fs.mkdir(path.join(repoRoot, 'sub'));
+    await fs.writeFile(path.join(repoRoot, 'sub', 'a.txt'), 'carried\n');
+    const { worktree, carriedPaths } = await createCarried('r96-prefix');
+    expect(carriedPaths).toContain('sub/a.txt');
+    await fs.writeFile(path.join(worktree.path, 'sub', 'b.txt'), 'sibling\n');
+    await expect(worktreeHasWork(worktree.path, carriedPaths)).resolves.toBe(
+      true,
+    );
+  });
 });

@@ -434,7 +434,11 @@ export async function executeWorktreeCleanup(
     logWorktreeCleanupPreserve(sessionId, 'marker changed after delete');
     return;
   }
-  if (await worktreeHasWork(plan.lockKey)) {
+  // Exempt the recorded carried overlay so a checkout whose only content is
+  // the carried copy is collected rather than preserved forever (R9-6).
+  // Absent carriedPaths (legacy sidecars, no-carry creations) keeps the gate
+  // behaving exactly as before.
+  if (await worktreeHasWork(plan.lockKey, sidecar.carriedPaths)) {
     logWorktreeCleanupPreserve(sessionId, 'checkout has uncommitted work');
     return;
   }

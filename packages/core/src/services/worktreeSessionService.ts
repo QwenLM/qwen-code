@@ -93,6 +93,17 @@ export interface WorktreeSession {
    * session's `supersededBy` to classify an interrupted transfer.
    */
   supersedes?: string;
+  /**
+   * The exact dirty-overlay paths carried into this worktree at creation
+   * (`createUserWorktree` with `carryDirtyState`): tracked edits plus the
+   * untracked files copied from the source checkout. The orphan reaper's
+   * has-work gate exempts exactly these paths so a checkout whose only
+   * content is the carried copy is collected rather than preserved forever
+   * (R9-6). Absent for sidecars written before the field existed and for
+   * worktrees created without carry — readers treat absent as "no recorded
+   * overlay" and the gate behaves as if no exemption were passed.
+   */
+  carriedPaths?: string[];
 }
 
 export type StrictWorktreeSession =
@@ -123,7 +134,10 @@ function isValidWorktreeSession(value: unknown): value is WorktreeSession {
       typeof v['worktreeBase'] === 'string') &&
     (v['supersededBy'] === undefined ||
       typeof v['supersededBy'] === 'string') &&
-    (v['supersedes'] === undefined || typeof v['supersedes'] === 'string')
+    (v['supersedes'] === undefined || typeof v['supersedes'] === 'string') &&
+    (v['carriedPaths'] === undefined ||
+      (Array.isArray(v['carriedPaths']) &&
+        v['carriedPaths'].every((p) => typeof p === 'string')))
   );
 }
 

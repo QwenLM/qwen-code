@@ -3144,6 +3144,7 @@ export function registerSessionRoutes(
       | undefined;
     let worktreeBaseBranch: string | undefined;
     let worktreeBaseCommit: string | undefined;
+    let worktreeCarriedPaths: string[] | undefined;
     let worktreeDurablyAttached = false;
     let spawnCompleted = false;
 
@@ -3440,6 +3441,7 @@ export function registerSessionRoutes(
           path: wtResult.worktree.path,
           branch: wtResult.worktree.branch,
         };
+        worktreeCarriedPaths = wtResult.carriedPaths;
         // Worktree sessions must be independent — never coalesce onto an
         // existing single-scope session that lives in the main checkout.
         sessionScope = 'thread';
@@ -3784,6 +3786,9 @@ export function registerSessionRoutes(
               originalBranch: worktreeBaseBranch ?? '',
               originalHeadCommit: worktreeBaseCommit ?? '',
               worktreeBase: worktreeBaseCommit,
+              // Record the carried overlay so the orphan reaper can exempt it
+              // (R9-6). Absent when the creation carried nothing.
+              carriedPaths: worktreeCarriedPaths,
             },
           );
           assertRuntimeGenerationOpen?.();
@@ -5849,6 +5854,9 @@ export function registerSessionRoutes(
                 originalBranch: currentBranch ?? '',
                 originalHeadCommit: baseCommit,
                 worktreeBase: baseCommit,
+                // Record the carried overlay so the orphan reaper can exempt
+                // it (R9-6). Absent when the handoff carried nothing.
+                carriedPaths: created.carriedPaths,
               });
               assertRuntimeGenerationOpen?.();
               const changed = await runtime.bridge.changeSessionCwd(
@@ -6427,6 +6435,9 @@ export function registerSessionRoutes(
                   // living in a sibling managed worktree). The promotion
                   // test, exit_worktree and the orphan reaper read this.
                   worktreeBase: base.headCommit,
+                  // Record the carried overlay so the orphan reaper can exempt
+                  // it (R9-6); the journal already carries it for cleanup.
+                  carriedPaths: worktreeResult.carriedPaths,
                 });
                 journal = await updateBranchWorktreeJournal(
                   journalPath,

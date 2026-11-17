@@ -414,6 +414,38 @@ describe('writeWorktreeSession', () => {
     await writeJson({ ...sample, worktreeBase: 42 });
     await expectStrictInvalid();
   });
+
+  it('round-trips the carriedPaths overlay field (R9-6)', async () => {
+    const withOverlay: WorktreeSession = {
+      ...sample,
+      carriedPaths: ['README.md', 'sub/a.txt'],
+    };
+    await writeWorktreeSession(filePath, withOverlay);
+    await expect(strictRead()).resolves.toEqual({
+      state: 'valid',
+      session: withOverlay,
+    });
+  });
+
+  it('accepts a sidecar without carriedPaths (legacy back-compat, R9-6)', async () => {
+    await writeWorktreeSession(filePath, sample);
+    const read = await strictRead();
+    expect(read.state).toBe('valid');
+    if (read.state === 'valid') {
+      expect(read.session.carriedPaths).toBeUndefined();
+    }
+  });
+
+  it('rejects a sidecar with a wrong-typed carriedPaths (R9-6)', async () => {
+    await writeJson({ ...sample, carriedPaths: 'README.md' });
+    await expectStrictInvalid();
+
+    await writeJson({ ...sample, carriedPaths: 42 });
+    await expectStrictInvalid();
+
+    await writeJson({ ...sample, carriedPaths: ['README.md', 7] });
+    await expectStrictInvalid();
+  });
 });
 
 describe('createWorktreeSession', () => {

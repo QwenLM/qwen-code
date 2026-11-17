@@ -188,7 +188,16 @@ export const DISPOSABLE_IGNORED_ROOTS: ReadonlySet<string> = new Set([
  * and a clean enclosing repo would read as "no work", authorizing the
  * destructive sinks this predicate gates.
  */
-export async function worktreeHasWork(worktreePath: string): Promise<boolean> {
+export async function worktreeHasWork(
+  worktreePath: string,
+  carriedPaths?: readonly string[],
+): Promise<boolean> {
+  // With a recorded carried overlay, exempt exactly those paths so a
+  // checkout whose only content is the carried copy reads clean (R9-6).
+  // Absent/empty keeps the probe below byte-for-byte unchanged.
+  if (carriedPaths && carriedPaths.length > 0) {
+    return hasNonCarriedWork(worktreePath, new Set(carriedPaths));
+  }
   try {
     await fs.access(path.join(worktreePath, '.git'));
     const { stdout, stderr } = await runGitCapture(worktreePath, [
@@ -241,6 +250,105 @@ export async function worktreeHasWork(worktreePath: string): Promise<boolean> {
   } catch (error) {
     debugLogger.debug(
       `worktreeHasWork: status probe at ${worktreePath} failed, treating as work: ${error}`,
+    );
+    return true;
+  }
+}
+
+/**
+ * Carried-aware variant of {@link worktreeHasWork}: a checkout whose only
+ * content is the recorded carried overlay reads clean, while any non-carried
+ * work still preserves it (R9-6). Mirrors the prepared-worktree gate's
+ * exact-path exemption (`exempt.has(p)`) and its two-probe form: file-level
+ * raw `status -z` (untracked directories not collapsed, non-ASCII paths not
+ * C-quoted) plus `ls-files --others -z`, which lists ignored files too, so a
+ * late-arriving ignored file the status probe misses still preserves the
+ * checkout. The reaper's session-marker / disposable-output / symlink waivers
+ * apply on top of the carried exemption. Fail-closed like the base predicate:
+ * any read error or stderr output counts as work.
+ */
+async function hasNonCarriedWork(
+  worktreePath: string,
+  exempt: ReadonlySet<string>,
+): Promise<boolean> {
+  try {
+    await fs.access(path.join(worktreePath, '.git'));
+    const { stdout, stderr } = await runGitCapture(worktreePath, [
+      ...NO_EXEC_CONFIG,
+      '--no-optional-locks',
+      'status',
+      '--porcelain',
+      '--untracked-files=all',
+      '-z',
+    ]);
+    if (stderr.trim().length > 0) {
+      debugLogger.debug(
+        `worktreeHasWork: carried status probe at ${worktreePath} reported on stderr, treating as work: ${stderr.trim()}`,
+      );
+      return true;
+    }
+    for (const record of stdout.split('\0')) {
+      if (record.length === 0) continue;
+      const status = record.slice(0, 2);
+      const entry = record.slice(3);
+      // The carry applies the stash without --index, so the overlay never
+      // contains rename/copy records; one means the index was touched inside
+      // the worktree. Refuse.
+      if (status[0] === 'R' || status[0] === 'C') return true;
+      let waived: string | null = null;
+      if (exempt.has(entry)) {
+        waived = 'carried-overlay';
+      } else if (
+        (status === '!!' || status === '??') &&
+        entry === WORKTREE_SESSION_FILE
+      ) {
+        waived = 'session-marker';
+      } else if (status === '!!' && isDisposableIgnoredEntry(entry)) {
+        waived = 'disposable-output';
+      } else if (
+        (status === '!!' || status === '??') &&
+        (await isSymlinkEntry(worktreePath, entry))
+      ) {
+        waived = 'symlink';
+      }
+      if (waived === null) return true;
+      debugLogger.debug(
+        `worktreeHasWork: waiving ${status} ${entry} (${waived}) at ${worktreePath}`,
+      );
+    }
+    // status (without --ignored) does not list ignored files; ls-files
+    // --others does, file-level. Any non-carried, non-waived other — including
+    // a late-arriving ignored file — preserves the checkout.
+    const others = await runGitCapture(worktreePath, [
+      ...NO_EXEC_CONFIG,
+      '--no-optional-locks',
+      'ls-files',
+      '--others',
+      '-z',
+    ]);
+    if (others.stderr.trim().length > 0) {
+      debugLogger.debug(
+        `worktreeHasWork: carried ls-files probe at ${worktreePath} reported on stderr, treating as work: ${others.stderr.trim()}`,
+      );
+      return true;
+    }
+    for (const entry of others.stdout.split('\0')) {
+      if (entry.length === 0) continue;
+      if (
+        exempt.has(entry) ||
+        entry === WORKTREE_SESSION_FILE ||
+        WORKTREE_SESSION_TMP_PATTERN.test(entry) ||
+        isDisposableIgnoredEntry(entry) ||
+        (await isSymlinkEntry(worktreePath, entry))
+      ) {
+        continue;
+      }
+      return true;
+    }
+    return false;
+  } catch (error) {
+    debugLogger.debug(
+      `worktreeHasWork: carried probe at ${worktreePath} failed, treating as work: ${error}`,
     );
     return true;
   }
