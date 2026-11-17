@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -26,6 +26,7 @@ describe('command-migration-tool', () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await fs.rm(tempDir, { recursive: true, force: true });
   });
 
@@ -206,6 +207,65 @@ description = "false"`;
       expect(result.failedFiles[0].file).toBe('existing.toml');
       expect(result.failedFiles[0].error).toContain('already exists');
     });
+
+    it('preserves a Markdown document created after the existence check', async () => {
+      const tomlPath = path.join(tempDir, 'existing.toml');
+      const markdownPath = path.join(tempDir, 'existing.md');
+      const tomlContent = 'prompt = "Original command"';
+      await fs.writeFile(tomlPath, tomlContent);
+      const access = fs.access;
+      vi.spyOn(fs, 'access').mockImplementation(async (filePath, mode) => {
+        try {
+          return await access(filePath, mode);
+        } catch (error) {
+          if (filePath === markdownPath) {
+            await fs.writeFile(markdownPath, 'Newer user draft');
+          }
+          throw error;
+        }
+      });
+
+      const result = await migrateTomlCommands({ commandDir: tempDir });
+
+      expect(result.success).toBe(false);
+      expect(result.convertedFiles).toEqual([]);
+      expect(result.failedFiles).toHaveLength(1);
+      expect(result.failedFiles[0].file).toBe('existing.toml');
+      expect(await fs.readFile(markdownPath, 'utf8')).toBe('Newer user draft');
+      expect(await fs.readFile(tomlPath, 'utf8')).toBe(tomlContent);
+      await expect(fs.access(`${tomlPath}.backup`)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    });
+
+    // File symlink creation requires extra privileges on Windows.
+    it.skipIf(process.platform === 'win32')(
+      'refuses a dangling Markdown symlink without creating its target',
+      async () => {
+        const tomlPath = path.join(tempDir, 'linked.toml');
+        const markdownPath = path.join(tempDir, 'linked.md');
+        const symlinkTarget = path.join(tempDir, 'unrelated.txt');
+        const tomlContent = 'prompt = "Original command"';
+        await fs.writeFile(tomlPath, tomlContent);
+        await fs.symlink(symlinkTarget, markdownPath);
+
+        const result = await migrateTomlCommands({
+          commandDir: tempDir,
+          createBackup: false,
+          deleteOriginal: true,
+        });
+
+        expect(result.success).toBe(false);
+        expect(result.convertedFiles).toEqual([]);
+        expect(result.failedFiles).toHaveLength(1);
+        expect(result.failedFiles[0].file).toBe('linked.toml');
+        await expect(fs.access(symlinkTarget)).rejects.toMatchObject({
+          code: 'ENOENT',
+        });
+        expect(await fs.readlink(markdownPath)).toBe(symlinkTarget);
+        expect(await fs.readFile(tomlPath, 'utf8')).toBe(tomlContent);
+      },
+    );
 
     it('should handle migration without backup', async () => {
       await fs.writeFile(
