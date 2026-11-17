@@ -1379,6 +1379,13 @@ describe('ManagedSessionsPage', () => {
     ['ru', 'model_payment_required', 'HTTP 402', 'баланс'],
     ['zh-CN', 'model_authentication_failed', 'HTTP 401', '鉴权'],
     ['zh-TW', 'model_authentication_failed', 'HTTP 401', '鑑權'],
+    ['zh-TW', 'model_access_denied', 'HTTP 403', '拒絕訪問'],
+    ['zh-TW', 'model_request_timeout', '模型介面', '請求超時'],
+    ['zh-TW', 'model_rate_limited', 'HTTP 429', '觸發限流'],
+    ['zh-TW', 'model_request_rejected', '模型介面', '拒絕了請求'],
+    ['zh-TW', 'model_service_unavailable', '模型介面', '服務暫不可用'],
+    ['zh-TW', 'model_request_failed', '模型介面', '檢查服務日誌'],
+    ['zh-TW', 'hosted_turn_failed', '本輪執行失敗', '定位具體原因'],
   ] as const)(
     '%s: explains a %s failure without submitting another prompt',
     async (language, code, status, guidance) => {

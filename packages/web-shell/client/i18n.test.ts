@@ -755,6 +755,11 @@ describe('web-shell ru locale', () => {
   });
 });
 
+// Curated, not a whole Simplified block: 析/表/置/系/存 and friends are shared
+// with Traditional, so a naive range would red on correct zh-TW copy.
+const SIMPLIFIED_ONLY_GLYPHS =
+  /[这会说时门问为从图对总报无数认让过还进运选项页态码编辑删确认复载链试变]/;
+
 describe('web-shell zh-TW locale', () => {
   it('uses Taiwan Traditional Chinese instead of the Simplified catalog', () => {
     const tw = getTranslator('zh-TW');
@@ -778,19 +783,42 @@ describe('web-shell zh-TW locale', () => {
       for (const forbidden of ['服务器', '软件', '设置', '为了']) {
         expect(`${key}: ${text}`).not.toContain(forbidden);
       }
+      expect(`${key}: ${text}`).not.toMatch(SIMPLIFIED_ONLY_GLYPHS);
     }
   });
 
-  it('translates the three surfaces that would otherwise stay English', () => {
+  it('translates the surfaces that would otherwise stay English', () => {
     const tw = getTranslator('zh-TW');
     const en = getTranslator('en');
     for (const key of [
       'sidebar.gitCloneJobGone',
       'channels.editor.field.github.prCommentWatch',
       'channels.editor.field.github.prCommentWatch.description',
+      'sidebar.liveVoicePending',
+      'memory.lastDream',
+      'memory.savedIn',
     ]) {
-      expect(tw(key)).not.toBe(en(key));
+      expect(tw(key, { path: '/w' })).not.toBe(en(key, { path: '/w' }));
     }
+    expect(tw('sidebar.liveVoicePending')).toBe('語音通話');
+    expect(tw('memory.savedIn', { path: '/w' })).toBe('已儲存於 /w');
+  });
+
+  it('names the column axis 欄, the row axis 行 and the machine 電腦', () => {
+    const tw = getTranslator('zh-TW');
+    expect(tw('markdownTable.freezeFirstColumn')).toBe('凍結首欄');
+    expect(tw('markdownTable.unfreezeFirstColumn')).toBe('取消凍結首欄');
+    expect(tw('markdownTable.hideColumn')).toBe('隱藏欄');
+    expect(tw('markdownTable.showHiddenColumns', { count: 2 })).toBe(
+      '顯示 2 個隱藏欄',
+    );
+    expect(tw('markdownTable.column', { index: 3 })).toBe('第 3 欄');
+    expect(tw('markdownTable.resizeColumn', { column: 'A' })).toBe(
+      '調整 A 欄寬',
+    );
+    expect(tw('markdownTable.rows', { count: 10 })).toBe('共10行');
+    expect(tw('workspaceHost.thisComputer')).toBe('這臺電腦');
+    expect(tw('daemon.connection.saved')).toBe('已連線的電腦');
   });
 
   it('reports only the table truncation that happened', () => {
@@ -806,13 +834,13 @@ describe('web-shell zh-TW locale', () => {
     );
     expect(
       tw('echartsChart.tableNotice', { ...shape, omittedColumns: 2 }),
-    ).toBe('顯示 3/3 列');
+    ).toBe('顯示 3/3 欄');
     expect(
       tw('echartsChart.tableNotice', {
         ...shape,
         omittedRows: 5,
         omittedColumns: 2,
       }),
-    ).toBe('顯示 5/10 行，3/3 列');
+    ).toBe('顯示 5/10 行，3/3 欄');
   });
 });

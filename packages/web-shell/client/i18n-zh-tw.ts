@@ -1319,10 +1319,10 @@ export const ZH_TW: Record<string, MessageValue> = {
     const omittedRows = Number(v?.omittedRows ?? 0);
     const omittedColumns = Number(v?.omittedColumns ?? 0);
     if (omittedRows > 0 && omittedColumns > 0) {
-      return `顯示 ${v?.visibleRows ?? 0}/${v?.totalRows ?? 0} 行，${v?.visibleColumns ?? 0}/${v?.totalColumns ?? 0} 列`;
+      return `顯示 ${v?.visibleRows ?? 0}/${v?.totalRows ?? 0} 行，${v?.visibleColumns ?? 0}/${v?.totalColumns ?? 0} 欄`;
     }
     if (omittedColumns > 0) {
-      return `顯示 ${v?.visibleColumns ?? 0}/${v?.totalColumns ?? 0} 列`;
+      return `顯示 ${v?.visibleColumns ?? 0}/${v?.totalColumns ?? 0} 欄`;
     }
     return `顯示 ${v?.visibleRows ?? 0}/${v?.totalRows ?? 0} 行`;
   },
@@ -1346,7 +1346,7 @@ export const ZH_TW: Record<string, MessageValue> = {
   'echartsChart.idPath': 'ID 路徑',
   'echartsChart.subtreeTotal': '子樹合計（派生）',
   'markdownTable.blank': '(空白)',
-  'markdownTable.column': (v) => `第 ${v?.index ?? ''} 列`,
+  'markdownTable.column': (v) => `第 ${v?.index ?? ''} 欄`,
   'markdownTable.rows': (v) => `共${v?.count ?? 0}行`,
   'markdownTable.rowsFiltered': (v) => `${v?.visible ?? 0}/${v?.total ?? 0} 行`,
   'markdownTable.hint': '點選表頭排序，點選 ▾ 開啟篩選。',
@@ -1363,15 +1363,15 @@ export const ZH_TW: Record<string, MessageValue> = {
   'markdownTable.copyTsvHint': '複製文字，可貼上到 Excel 等表格應用',
   'markdownTable.copyVisible': '複製',
   'markdownTable.copyMarkdown': '複製 Markdown',
-  'markdownTable.customColumns': '自定義列',
-  'markdownTable.customColumns.tableSection': '顯示在表格列的資訊',
+  'markdownTable.customColumns': '自定義欄位',
+  'markdownTable.customColumns.tableSection': '顯示在表格欄位的資訊',
   'markdownTable.customColumns.detailSection': '顯示在摺疊面板的資訊',
-  'markdownTable.customColumns.toggleAllTable': '切換全部表格列',
+  'markdownTable.customColumns.toggleAllTable': '切換全部表格欄位',
   'markdownTable.customColumns.toggleAllDetails': '切換全部摺疊面板欄位',
   'markdownTable.customColumns.reset': '重置',
   'markdownTable.customColumns.noDetails': '未選擇摺疊面板欄位',
-  'markdownTable.freezeFirstColumn': '凍結首列',
-  'markdownTable.unfreezeFirstColumn': '取消凍結首列',
+  'markdownTable.freezeFirstColumn': '凍結首欄',
+  'markdownTable.unfreezeFirstColumn': '取消凍結首欄',
   'markdownTable.densityLabel': '表格密度',
   'markdownTable.densityCurrent': (v) => `${v?.density ?? ''}密度`,
   'markdownTable.density': (v) => `密度：${v?.density ?? ''}`,
@@ -1381,10 +1381,10 @@ export const ZH_TW: Record<string, MessageValue> = {
   'markdownTable.expandLongText': '展開文字',
   'markdownTable.collapseLongText': '收起文字',
   'markdownTable.emptyValue': '(空白)',
-  'markdownTable.hideColumn': '隱藏列',
-  'markdownTable.showHiddenColumns': (v) => `顯示 ${v?.count ?? 0} 個隱藏列`,
+  'markdownTable.hideColumn': '隱藏欄',
+  'markdownTable.showHiddenColumns': (v) => `顯示 ${v?.count ?? 0} 個隱藏欄`,
   'markdownTable.moveColumn': (v) => `移動 ${v?.column ?? ''}`,
-  'markdownTable.resizeColumn': (v) => `調整 ${v?.column ?? ''} 列寬`,
+  'markdownTable.resizeColumn': (v) => `調整 ${v?.column ?? ''} 欄寬`,
   'markdownTable.rowDetails': '詳情',
   'markdownTable.rowDetailsAria': (v) => `檢視第 ${v?.index ?? ''} 行詳情`,
   'markdownTable.closeRowDetailsAria': (v) => `收起第 ${v?.index ?? ''} 行詳情`,
@@ -1477,7 +1477,7 @@ export const ZH_TW: Record<string, MessageValue> = {
   'daemon.connection.token': 'Bearer token（可選）',
   'daemon.connection.connect': '連線',
   'daemon.connection.add': '新增連線',
-  'daemon.connection.saved': '已連線的計算機',
+  'daemon.connection.saved': '已連線的電腦',
   'daemon.connection.forget': (v) => `移除 ${v?.address}`,
   'workspaceHost.local': '本地',
   'workspaceHost.remote': '遠端',
@@ -2314,7 +2314,7 @@ export const ZH_TW: Record<string, MessageValue> = {
   'sidebar.sessionSource.channels': '頻道',
   'sidebar.channelType.other': '其他頻道',
   'sidebar.live': 'Live',
-  'sidebar.liveVoicePending': 'Voice chat',
+  'sidebar.liveVoicePending': '語音通話',
   'sidebar.project': '工作區',
   'sidebar.pinnedSessions': '置頂',
   'sidebar.sessionSort': '會話排序',
@@ -2401,20 +2401,20 @@ export const ZH_TW: Record<string, MessageValue> = {
   'sidebar.gitCloneRegisterRetry': (vars) =>
     `已克隆到 ${vars?.path}，點選提交完成註冊。`,
   'workspaceHost.source': '目錄來源',
-  'workspaceHost.thisComputer': '這臺計算機',
+  'workspaceHost.thisComputer': '這臺電腦',
   'workspaceHost.folderOn': (vars) => `${vars?.address} 上的目錄`,
-  'workspaceHost.folderOnThisComputer': '這臺計算機上的目錄',
+  'workspaceHost.folderOnThisComputer': '這臺電腦上的目錄',
   'workspaceHost.browseHint': '請從下方選擇目錄，或輸入絕對路徑。',
   'workspaceHost.parent': '上一級',
   'workspaceHost.addFolder': '新增此資料夾',
   'workspaceHost.noFolders': '此目錄下沒有子目錄。',
   'workspaceHost.folderListError':
-    '無法讀取該計算機上的目錄，請檢查路徑或連線狀態。',
+    '無法讀取該電腦上的目錄，請檢查路徑或連線狀態。',
   'workspaceHost.navigationUnavailable':
     '瀏覽器儲存不可用，無法安全繼續新增遠端目錄。',
-  'workspaceHost.unsupported': '這臺計算機不支援新增工作區。',
-  'workspaceHost.loadingFolders': '正在從這臺計算機載入目錄…',
-  'workspaceHost.connectionError': '無法從這臺計算機載入工作區能力。',
+  'workspaceHost.unsupported': '這臺電腦不支援新增工作區。',
+  'workspaceHost.loadingFolders': '正在從這臺電腦載入目錄…',
+  'workspaceHost.connectionError': '無法從這臺電腦載入工作區能力。',
   'workspaceDirectories.title': '工作區目錄',
   'workspaceDirectories.description':
     '除工作區根目錄外，工具還可以讀寫這些目錄。新建會話會繼承該列表。',
@@ -3408,7 +3408,7 @@ export const ZH_TW: Record<string, MessageValue> = {
     '全域性 memory 位於當前 workspace 之外，當前 daemon 檔案讀取介面不能開啟它的內容。',
   'memory.loading': '正在載入 memory...',
   'memory.loadingFile': '正在載入 memory 檔案...',
-  'memory.lastDream': '5 hours ago',
+  'memory.lastDream': '5 小時前',
   'memory.menu': 'Memory',
   'memory.never': '從未',
   'memory.noFiles': '未找到 memory 檔案。',
@@ -3421,7 +3421,7 @@ export const ZH_TW: Record<string, MessageValue> = {
   'memory.refresh.desc': '重新載入 memory 檔案資訊',
   'memory.refreshed': 'Memory 已重新整理。',
   'memory.save': '儲存 Memory',
-  'memory.savedIn': (v) => `Saved in ${v?.path ?? ''}`,
+  'memory.savedIn': (v) => `已儲存於 ${v?.path ?? ''}`,
   'memory.saved': (v) =>
     `${v?.scope ?? 'Memory'} 已儲存：${v?.bytes ?? 0} 位元組 -> ${v?.path ?? ''}`,
   'memory.saving': '儲存中...',
@@ -5727,7 +5727,7 @@ export const ZH_TW: Record<string, MessageValue> = {
   'collab.runtime.notSavedThere': (v) =>
     `那臺電腦已連線，但沒能儲存這次連線，重啟或重新載入工作區後不會自動重連${v?.error ? `：${v.error}` : '。'}`,
   'collab.runtime.joinTimedOut': (v) =>
-    `這臺電腦的守護程序沒有應答${v?.error ? `（${v.error}）` : ''}，它可能仍在加入：請先在協調方確認；如果沒有加入，再用新的加入令牌重試。`,
+    `這臺電腦的守護程序沒有應答${v?.error ? `（${v.error}）` : ''}，它可能仍在加入：請先在協調方確認。如果沒有加入，請再執行一次同樣的加入：若守護程序已記錄本次加入的令牌，會沿用該令牌繼續；被拒絕的令牌則需要一個新的。`,
   'collab.runtime.joinFailed': (v) => `這臺電腦的加入請求：${v?.error ?? ''}`,
   'collab.runtime.connectingHint':
     '正在連線 Runtime…會離開本頁的操作要等它完成。',

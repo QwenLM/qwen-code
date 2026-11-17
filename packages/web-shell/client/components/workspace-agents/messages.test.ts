@@ -122,5 +122,11 @@ describe('the join notices', () => {
     expect(enText).not.toContain('picks up what this attempt did');
     expect(zhText).toContain('若守护进程记录了本次加入的令牌');
     expect(zhText).not.toContain('会接着这次尝试已完成的部分继续');
+    const twText = tw('collab.runtime.joinTimedOut', {});
+    expect(twText).toContain('若守護程序已記錄本次加入的令牌');
+    expect(twText).toContain('沿用');
+    expect(tw('collab.runtime.joinTimedOut', { error: 'boom' })).toContain(
+      '（boom）',
+    );
   });
 });

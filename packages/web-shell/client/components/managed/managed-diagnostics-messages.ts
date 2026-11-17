@@ -262,7 +262,7 @@ const messages = {
   systemPrompt: [
     'System prompt',
     '系统提示',
-    '系統提示',
+    '系統提示詞',
     'Системная подсказка',
   ],
   builtinTools: [
@@ -424,7 +424,7 @@ const messages = {
     '配置及已儲存的發現結果不代表伺服器當前線上。',
     'Конфигурация и сохранённое обнаружение не доказывают, что сервер сейчас подключён.',
   ],
-  prompts: ['Prompts', '提示模板', '提示模板', 'Подсказки'],
+  prompts: ['Prompts', '提示模板', '提示詞', 'Подсказки'],
   discoveryFailed: [
     'Discovery failed',
     '发现失败',
