@@ -905,6 +905,38 @@ describe('merged session catalog pagination', () => {
       },
     );
 
+    it('keeps the list page resolving when a sidecar read throws (EISDIR)', async () => {
+      const cold = summary(0);
+      const healthy = summary(1);
+      await persist(cold);
+      await persist(healthy);
+      const chats = path.join(
+        new Storage(workspaceCwd, runtimeBaseDir).getProjectDir(),
+        'chats',
+      );
+      // A directory at the sidecar path makes the async reader throw
+      // EISDIR (not ENOENT); the enricher's catch must contain it so one
+      // unreadable sidecar cannot reject the whole page.
+      await fs.mkdir(path.join(chats, `${cold.sessionId}.artifacts.json`), {
+        recursive: true,
+      });
+      await writeArtifactSummarySidecar(healthy, sidecarBody(4));
+      const { bridge } = bridgeFor([]);
+
+      const result = await listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        { view: 'organized' },
+        { runtimeBaseDir },
+      );
+
+      const byId = new Map(
+        result.sessions.map((session) => [session.sessionId, session]),
+      );
+      expect(byId.get(cold.sessionId)?.artifactCount).toBeUndefined();
+      expect(byId.get(healthy.sessionId)?.artifactCount).toBe(4);
+    });
+
     it('lets the live count supersede a stale sidecar count', async () => {
       const session = summary(0);
       await persist(session);
@@ -992,10 +1024,13 @@ describe('merged session catalog pagination', () => {
     it('rejects when the signal aborts mid-scan, after the first sidecar read', async () => {
       const first = summary(0);
       const second = summary(1);
+      const third = summary(2);
       await persist(first);
       await persist(second);
+      await persist(third);
       await writeArtifactSummarySidecar(first, sidecarBody(3));
       await writeArtifactSummarySidecar(second, sidecarBody(4));
+      await writeArtifactSummarySidecar(third, sidecarBody(5));
       const { bridge } = bridgeFor([]);
       abortHarness.controller = new AbortController();
       abortHarness.reads = 0;
@@ -1008,10 +1043,14 @@ describe('merged session catalog pagination', () => {
           { runtimeBaseDir, signal: abortHarness.controller.signal },
         ),
       ).rejects.toMatchObject({ name: 'AbortError' });
+      // The third session discriminates the per-iteration abort checks
+      // from the post-enrichment one: without the loop-top/catch checks
+      // the swallowed abort lets the scan read a third sidecar before
+      // the later check rejects.
       expect(abortHarness.reads).toBe(2);
 
       // A scan interrupted mid-way must not cache a snapshot: the next
-      // request re-scans (two more sidecar reads). A synchronous scan
+      // request re-scans (three more sidecar reads). A synchronous scan
       // never calls the async reader, so it never observes the abort,
       // completes the page, and serves the retry from the cache.
       const retry = await listWorkspaceSessionsForResponse(
@@ -1020,10 +1059,10 @@ describe('merged session catalog pagination', () => {
         { view: 'organized' },
         { runtimeBaseDir },
       );
-      expect(abortHarness.reads).toBe(4);
+      expect(abortHarness.reads).toBe(5);
       expect(
         retry.sessions.map((session) => session.artifactCount).sort(),
-      ).toEqual([3, 4]);
+      ).toEqual([3, 4, 5]);
       abortHarness.controller = undefined;
     });
   });
