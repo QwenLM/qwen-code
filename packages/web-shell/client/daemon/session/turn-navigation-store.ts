@@ -97,17 +97,6 @@ export interface DaemonProvisionalTurn {
   blockId?: string;
 }
 
-/** The index entries of the loaded pages, keyed by turn ordinal. */
-export function indexedTurnEntries(
-  state: Pick<DaemonTurnNavigationSnapshot, 'indexPages'>,
-): Map<number, DaemonSessionTurnIndexEntry> {
-  return new Map(
-    [...state.indexPages.values()].flatMap((page) =>
-      page.turns.map((entry) => [entry.ordinal, entry] as const),
-    ),
-  );
-}
-
 /**
  * The prompt label of a turn: its index entry when a loaded page has one,
  * else its provisional turn. Provisional turns are addressed as
@@ -2110,9 +2099,10 @@ function publicIndexPage(page: InternalIndexPage): DaemonTurnIndexPage {
   return Object.freeze(value);
 }
 
-function indexedEntries(
-  pages: ReadonlyMap<number, InternalIndexPage>,
-): Map<number, DaemonSessionTurnIndexEntry> {
+/** The index entries of the loaded pages, keyed by turn ordinal. */
+export function indexedEntries<
+  Page extends { turns: readonly DaemonSessionTurnIndexEntry[] },
+>(pages: ReadonlyMap<number, Page>): Map<number, DaemonSessionTurnIndexEntry> {
   const entries = new Map<number, DaemonSessionTurnIndexEntry>();
   for (const page of pages.values()) {
     for (const turn of page.turns) entries.set(turn.ordinal, turn);

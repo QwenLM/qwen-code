@@ -9,6 +9,7 @@ const observed = vi.hoisted(() => ({
   navigation: undefined as unknown,
   railVisible: false,
   loading: false,
+  error: undefined as string | undefined,
   railFollow: undefined as { current: number } | undefined,
   rows: [] as Array<{
     id: string;
@@ -34,6 +35,8 @@ vi.mock('../hooks/useTranscriptViewport', () => ({
     messages,
     historical: false,
     loading: observed.loading,
+    error: observed.error,
+    retry: vi.fn(),
     viewKey: 'live',
     toolSources: new Map(),
     pin: vi.fn(),
@@ -118,6 +121,7 @@ beforeEach(() => {
   observed.navigation = navigation();
   observed.railVisible = false;
   observed.loading = false;
+  observed.error = undefined;
   observed.railFollow = undefined;
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
   vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
@@ -249,18 +253,36 @@ describe('TranscriptViewport pinned prompt', () => {
     expect(pinnedText()).toBeUndefined();
   });
 
-  it('moves below the history loading banner', () => {
-    observed.rows = [{ id: 'output-1a', top: -10, bottom: 300 }];
-    renderViewport();
-    const overlay = () =>
-      container!.querySelector('[data-pinned-turn-prompt]')?.parentElement;
-    expect(overlay()?.className).not.toMatch(/pinnedPromptBelowBanner/);
-    act(() => root?.unmount());
-    root = undefined;
-    observed.loading = true;
-    renderViewport();
+  it.each([
+    ['loading', () => (observed.loading = true), '[role="status"]'],
+    ['error', () => (observed.error = 'failed'), '[role="alert"]'],
+  ] as const)(
+    'stacks below the history %s banner',
+    (_name, showBanner, bannerSelector) => {
+      observed.rows = [{ id: 'output-1a', top: -10, bottom: 300 }];
+      showBanner();
+      renderViewport();
+      expect(pinnedText()).toBe('Second prompt');
+      const stack = container!.querySelector('[data-transcript-top-stack]');
+      const banner = container!.querySelector(bannerSelector)?.parentElement;
+      const overlay = container!.querySelector(
+        '[data-pinned-turn-prompt]',
+      )?.parentElement;
+      // In flow in one column, the second child starts below the first.
+      expect([...stack!.children]).toEqual([banner, overlay]);
+    },
+  );
+
+  it('keeps a shell command row in the turn before it', () => {
+    const shell = {
+      ...message('shell-1'),
+      role: 'user_shell',
+    } as Message;
+    observed.rows = [{ id: 'output-1c', top: -10, bottom: 300 }];
+    renderViewport({
+      messages: [...messages, shell, message('output-1c')],
+    });
     expect(pinnedText()).toBe('Second prompt');
-    expect(overlay()?.className).toMatch(/pinnedPromptBelowBanner/);
   });
 
   it('agrees with the turn the rail highlights', () => {

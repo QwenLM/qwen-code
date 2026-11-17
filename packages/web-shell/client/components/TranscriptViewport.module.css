@@ -34,24 +34,33 @@
   display: flex;
 }
 
-.pinnedPrompt {
+/*
+ * The history banner and the pinned prompt use the same top-centre slot. They
+ * are stacked in one column, so the prompt starts below the banner at each
+ * banner height. No z-index here: the children keep their own layers.
+ */
+.topStack {
   position: absolute;
   top: 8px;
-  left: 50%;
+  right: 0;
+  left: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  pointer-events: none;
+}
+
+.pinnedPrompt {
   z-index: 3;
   display: flex;
+  flex-shrink: 0;
   justify-content: flex-end;
   width: min(
     100% - 40px,
     var(--chat-content-width, var(--chat-regular-content-width, 1000px))
   );
   pointer-events: none;
-  transform: translateX(-50%);
-}
-
-/* Clear of the history loading and error banner, which uses the same slot. */
-.pinnedPromptBelowBanner {
-  top: 40px;
 }
 
 .pinnedPromptText {

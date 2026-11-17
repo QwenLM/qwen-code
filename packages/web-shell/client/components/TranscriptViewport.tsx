@@ -29,7 +29,7 @@ import { useI18n } from '../i18n';
 import { TurnCallsProvider, useOpenTurnCalls } from '../turnCallsContext';
 import { SESSION_TIMELINE_MIN_VISIBLE_ENTRIES } from '../constants/sessions';
 import {
-  indexedTurnEntries,
+  indexedEntries,
   turnLabelForOrdinal,
 } from '../daemon/session/turn-navigation-store';
 
@@ -238,8 +238,9 @@ export const TranscriptViewport = forwardRef<
       let mapped: number | undefined;
       for (const id of ids) mapped = blockOrdinal.get(id) ?? mapped;
       if (mapped !== undefined) ordinal = mapped;
-      else if (message.role === 'user' || message.role === 'user_shell')
-        ordinal = null;
+      // A `!command` row is not a turn in the index, so it stays in the
+      // turn before it, as on the rail.
+      else if (message.role === 'user') ordinal = null;
       if (ordinal !== undefined) for (const id of ids) map.set(id, ordinal);
     }
     return map;
@@ -470,7 +471,7 @@ export const TranscriptViewport = forwardRef<
         ? undefined
         : turnLabelForOrdinal(
             viewport.navigation,
-            indexedTurnEntries(viewport.navigation),
+            indexedEntries(viewport.navigation.indexPages),
             pinnedTurn,
           ),
     [pinnedTurn, viewport.navigation],
@@ -606,28 +607,6 @@ export const TranscriptViewport = forwardRef<
         }}
       >
         <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
-          {(loading || viewport.error) && (
-            <div className="absolute left-1/2 top-2 z-10 -translate-x-1/2 rounded-lg border bg-background px-3 py-1 text-xs text-muted-foreground">
-              {loading && (
-                <span role="status">{t('history.loadingEarlier')}</span>
-              )}
-              {viewport.error && (
-                <span role="alert">
-                  {t('history.viewError')}{' '}
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => {
-                      anchor.current = capture();
-                      viewport.retry(refreshAnchor);
-                    }}
-                  >
-                    {t('history.retry')}
-                  </Button>
-                </span>
-              )}
-            </div>
-          )}
           <TurnCallsProvider
             onOpen={openTurnCalls ? openViewportTurnCalls : undefined}
           >
@@ -687,22 +666,44 @@ export const TranscriptViewport = forwardRef<
                 : {})}
             />
           </TurnCallsProvider>
-          {pinnedLabel && (
-            // Not aria-hidden: when the prompt row has left the mounted
-            // window, this is the only copy of the prompt in the DOM.
-            <div
-              className={
-                loading || viewport.error
-                  ? `${styles.pinnedPrompt} ${styles.pinnedPromptBelowBanner}`
-                  : styles.pinnedPrompt
-              }
-            >
-              <div
-                className={styles.pinnedPromptText}
-                data-pinned-turn-prompt={pinnedTurn}
-              >
-                {pinnedLabel}
-              </div>
+          {(loading || viewport.error || pinnedLabel) && (
+            // One column, so the pinned prompt always starts below the
+            // history banner, whatever height the banner wraps to.
+            <div className={styles.topStack} data-transcript-top-stack>
+              {(loading || viewport.error) && (
+                <div className="pointer-events-auto z-10 max-w-[50%] rounded-lg border bg-background px-3 py-1 text-xs text-muted-foreground">
+                  {loading && (
+                    <span role="status">{t('history.loadingEarlier')}</span>
+                  )}
+                  {viewport.error && (
+                    <span role="alert">
+                      {t('history.viewError')}{' '}
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => {
+                          anchor.current = capture();
+                          viewport.retry(refreshAnchor);
+                        }}
+                      >
+                        {t('history.retry')}
+                      </Button>
+                    </span>
+                  )}
+                </div>
+              )}
+              {pinnedLabel && (
+                // Not aria-hidden: when the prompt row has left the mounted
+                // window, this is the only copy of the prompt in the DOM.
+                <div className={styles.pinnedPrompt}>
+                  <div
+                    className={styles.pinnedPromptText}
+                    data-pinned-turn-prompt={pinnedTurn}
+                  >
+                    {pinnedLabel}
+                  </div>
+                </div>
+              )}
             </div>
           )}
           {deletion && !historical && (

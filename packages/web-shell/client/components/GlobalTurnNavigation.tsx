@@ -12,7 +12,7 @@ import {
   type ReactNode,
 } from 'react';
 import {
-  indexedTurnEntries,
+  indexedEntries,
   turnLabelForOrdinal,
   type DaemonTurnNavigationSnapshot,
   type DaemonTurnNavigationStore,
@@ -79,7 +79,7 @@ export function GlobalTurnNavigation({
     count,
     start + Math.ceil(height / ROW_HEIGHT) + 2 * OVERSCAN,
   );
-  const entries = indexedTurnEntries(state);
+  const entries = indexedEntries(state.indexPages);
 
   useLayoutEffect(() => {
     const element = viewport.current;
