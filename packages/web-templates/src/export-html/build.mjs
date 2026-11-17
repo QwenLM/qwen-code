@@ -102,12 +102,17 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_184_500;
 // with the forbidden-input guard passing, leaving 3,469 bytes below this cap.
 // The local-files usability copy (#17198: change-directory/reconnect notices,
 // the insecure-context tunnel instruction with its local-port branch, and the
-// deferred-change notice, across two locales) measured 2,136,115 bytes on
-// head 6286c8cb11 in CI. Adding Arabic transcript strings (ar-transcript.ts,
-// with interactive-only Arabic copy stubbed via ar-interactive.transcript-stub.ts)
-// and RTL direction wiring across exported transcript views measures
-// 2,183,235 bytes (+47,120 bytes). The warning sits 1,265 above that
-// measurement and the ceiling 2,765 above it.
+// deferred-change notice, across two locales) measures 2,136,115 bytes on
+// head 6286c8cb11 in CI, 115 above the previous 2,136,000 ceiling.
+// The composer task-explain side question (#17398: the explain display line,
+// the "?" aria label and tooltip, and the panel copy, across two locales, plus
+// the transcript-reachable explain wiring) adds 904 bytes: main d41eda5123
+// measures 2,137,893 (107 below the previous 2,138,000 ceiling) and head
+// d5f6a103a6 measures 2,138,797 in CI, 797 above it.
+// Adding Arabic transcript strings (ar-transcript.ts, with interactive-only
+// Arabic copy stubbed via ar-interactive.transcript-stub.ts) and RTL direction
+// wiring across exported transcript views measures 2,183,235 bytes on the
+// pre-merge head (+47,120 over the 2,136,115 it was measured against).
 const MAX_DOCUMENT_RUNTIME_BYTES = 2_186_000;
 
 // Modules that must not be reachable from the document entry, checked against

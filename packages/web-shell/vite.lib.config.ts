@@ -167,6 +167,10 @@ function injectCssModules(): Plugin {
 const TRANSCRIPT_STUBS = new Map(
   [
     [
+      './client/components/messages/HookStatistics.tsx',
+      './client/components/messages/HookStatistics.transcript-stub.tsx',
+    ],
+    [
       './client/components/message-deletion-messages.ts',
       './client/components/message-deletion-messages.transcript-stub.ts',
     ],

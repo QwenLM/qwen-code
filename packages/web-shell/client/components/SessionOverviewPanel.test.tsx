@@ -1457,6 +1457,22 @@ describe('SessionOverviewPanel', () => {
     expect(rows()[1]?.querySelector('[data-web-shell-session-git]')).toBeNull();
   });
 
+  it('falls back to the worktree slug when the branch is empty', () => {
+    // A detached managed worktree reports branch:''; the slug must display
+    // explicitly (an absent branch would not distinguish || from ??).
+    sessionsState.sessions = [
+      session('s1', {
+        displayName: 'One',
+        worktree: { slug: 'detached-slug', path: '/wt/one', branch: '' },
+      }),
+    ];
+    render();
+    const titleCell = titleTrigger(rows()[0]!).closest('td');
+    expect(
+      titleCell?.querySelector('[data-web-shell-session-git]')?.textContent,
+    ).toBe('detached-slug');
+  });
+
   it('does not open the session when a PR badge is clicked', async () => {
     sessionsState.sessions = [
       session('s1', {

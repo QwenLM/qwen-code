@@ -44,6 +44,7 @@ import { ErrorBoundary } from '../ErrorBoundary';
 import { EnhancedMarkdownTable } from './EnhancedMarkdownTable';
 import { FootnoteSection, FootnoteSup } from './FootnoteCard';
 import { rehypeFootnoteCards } from './rehype-footnote-cards';
+import { openSessionLink } from './session-link';
 import {
   DEFAULT_WEB_SHELL_MARKDOWN_CHART,
   WebShellMarkdownChartProvider,
@@ -944,7 +945,7 @@ function MarkdownLink({
     if (renderMode !== 'interactive') {
       return <span className={styles.link}>{children}</span>;
     }
-    const sessionId = href.trim().replace(QWEN_SESSION_SCHEME, '');
+    const target = href.trim().replace(QWEN_SESSION_SCHEME, '');
     return (
       <a
         href="#"
@@ -953,9 +954,7 @@ function MarkdownLink({
         onClick={(e) => {
           e.preventDefault();
           e.stopPropagation();
-          window.dispatchEvent(
-            new CustomEvent('qwen:open-session', { detail: sessionId }),
-          );
+          openSessionLink(target);
         }}
       >
         {children}

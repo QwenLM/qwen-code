@@ -5,6 +5,7 @@
  */
 
 import {
+  chmodSync,
   mkdtempSync,
   rmSync,
   statSync,
@@ -307,5 +308,26 @@ describe('ManagedDingtalkStateStore', () => {
     // sets them explicitly, independent of the process umask.
     expect(statSync(s.file).mode & 0o777).toBe(0o600);
     expect(statSync(s.directory).mode & 0o777).toBe(0o700);
+  });
+
+  it('preserves the fs error on cause when the save fails (R1-3)', () => {
+    const s = store();
+    s.save(populatedState());
+    // A read-only directory makes the temp-file open fail with EACCES; the
+    // wrapper must carry it on cause so the adapter logs can distinguish
+    // ENOSPC / EACCES / read-only mount.
+    chmodSync(s.directory, 0o500);
+    try {
+      let thrown: unknown;
+      try {
+        s.save(populatedState());
+      } catch (error) {
+        thrown = error;
+      }
+      expect((thrown as Error).message).toMatch(/could not be saved/);
+      expect((thrown as Error).cause).toMatchObject({ code: 'EACCES' });
+    } finally {
+      chmodSync(s.directory, 0o700);
+    }
   });
 });

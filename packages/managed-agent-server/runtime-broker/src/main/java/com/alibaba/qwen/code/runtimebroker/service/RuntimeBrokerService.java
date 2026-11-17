@@ -422,6 +422,16 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
             RuntimeBindingRecord original;
             if (expectedBindingId != null) {
                 original = bindingRepository.findById(expectedBindingId);
+            } else if ("workspace".equals(scope.getIsolationClass())) {
+                // A shared binding has no isolation key to scan by; its slot is
+                // keyed by the full placement request. Like the session scan, an
+                // identity-free probe only resolves a READY, undrained owner and
+                // never provisions one.
+                RuntimeBindingRecord active = bindingRepository.findActive(provisionRequest(scope, harnessId));
+                if (active == null || active.getState() != RuntimeBindingRecord.State.READY || active.isDrainRequested()) {
+                    throw conflict("managed_extension_owner_unavailable", "The original extension Runtime is unavailable or ambiguous.");
+                }
+                original = active;
             } else {
                 RuntimeBindingRecord found = null;
                 String after = null;
@@ -446,9 +456,11 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                 }
                 original = found;
             }
+            boolean shared = original != null && HarnessOwnership.sharesRuntimeSessions(original.getRequest());
             if (original == null || expectedGeneration != null && original.getGeneration() != expectedGeneration
                     || !original.getRequest().getScope().equals(scope)
-                    || !harnessId.equals(original.getRequest().getIsolationKey())
+                    || !shared && (!harnessId.equals(original.getRequest().getIsolationKey())
+                            || !"session".equals(original.getRequest().getScope().getIsolationClass()))
                     || original.getLease() == null
                     || original.getState() != RuntimeBindingRecord.State.READY
                     && !(recovery && original.getState() == RuntimeBindingRecord.State.DRAINING)

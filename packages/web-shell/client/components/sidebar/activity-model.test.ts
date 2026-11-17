@@ -149,6 +149,36 @@ describe('activity model', () => {
     ).toBe(true);
   });
 
+  it('can include child sessions without relaxing other eligibility rules', () => {
+    expect(
+      isActivityEligible(
+        entry('child', { parentSessionId: 'parent' }),
+        defaults,
+        true,
+      ),
+    ).toBe(true);
+    expect(
+      isActivityEligible(
+        entry('scheduled-child', {
+          parentSessionId: 'parent',
+          sourceType: 'scheduled_task',
+        }),
+        defaults,
+        true,
+      ),
+    ).toBe(false);
+    expect(
+      isActivityEligible(
+        entry('voice-child', {
+          parentSessionId: 'parent',
+          sourceId: 'realtime_voice:call',
+        }),
+        defaults,
+        true,
+      ),
+    ).toBe(false);
+  });
+
   it('uses seven calendar days only for recent and deduplicates sections', () => {
     const cutoff = new Date(2026, 9, 25).getTime();
     const entries = [

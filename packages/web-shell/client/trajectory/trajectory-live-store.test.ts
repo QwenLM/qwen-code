@@ -6,6 +6,124 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { DaemonEvent } from '@qwen-code/sdk/daemon';
 import { createTrajectoryLiveStore } from './trajectory-live-store';
+import type { HookLifecycleEvent } from '@qwen-code/sdk/daemon';
+
+const hookBase = {
+  v: 1 as const,
+  kind: 'hook' as const,
+  executionId: 'hook',
+  runtimeId: 'runtime',
+  sessionId: 'session',
+  promptId: 'history',
+  agentId: null,
+  eventName: 'UserPromptSubmit',
+  hookType: 'command' as const,
+  source: 'user' as const,
+  name: 'Safe hook',
+  startedAt: 10,
+};
+function hookEvent(
+  hook: HookLifecycleEvent,
+  id: number,
+  promptId = 'admission',
+): DaemonEvent {
+  return {
+    v: 1,
+    type: 'session_update',
+    id,
+    promptId,
+    data: {
+      sessionId: 'session',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: { hookLifecycle: hook },
+      },
+    },
+  };
+}
+
+it('pairs hooks under canonical history identities and ignores late terminal admission aliases', () => {
+  const { store, owner } = setup();
+  store.ingest(owner, complete, 'a');
+  store.ingest(owner, hookEvent({ ...hookBase, phase: 'started' }, 1), 'a');
+  expect(store.getSnapshot().hookPromptIds.get('admission')).toBe('history');
+  expect([...store.getSnapshot().hooks.entries.values()][0]?.status).toBe(
+    'running',
+  );
+  const end = hookEvent(
+    {
+      ...hookBase,
+      phase: 'ended',
+      endedAt: 20,
+      durationMs: 10,
+      outcome: 'success',
+    },
+    2,
+    'another-turn',
+  );
+  store.ingest(owner, end, 'a');
+  store.ingest(owner, end, 'a');
+  expect(store.getSnapshot().hooks.entries.size).toBe(1);
+  expect([...store.getSnapshot().hooks.entries.values()][0]?.status).toBe(
+    'success',
+  );
+  expect(store.getSnapshot().hookPromptIds.has('another-turn')).toBe(false);
+});
+
+it('restores unknown hook starts, retains dispatched meaning, and clears another session', () => {
+  const start = hookEvent({ ...hookBase, phase: 'started' }, 1);
+  const { store, owner } = setup([start]);
+  expect([...store.getSnapshot().hooks.entries.values()][0]?.status).toBe(
+    'unknown',
+  );
+  store.ingest(owner, complete, 'a');
+  store.ingest(
+    owner,
+    hookEvent(
+      {
+        ...hookBase,
+        phase: 'dispatched',
+        dispatchedAt: 20,
+        dispatchDurationMs: 10,
+      },
+      2,
+    ),
+    'a',
+  );
+  expect([...store.getSnapshot().hooks.entries.values()][0]?.status).toBe(
+    'dispatched',
+  );
+  store.begin({}, { ...input, sessionId: 'other', events: [] });
+  store.ingest(owner, start, 'a');
+  expect(store.getSnapshot().hooks.entries.size).toBe(0);
+  expect(store.getSnapshot().hookPromptIds.size).toBe(0);
+});
+
+it('marks disconnected hooks unknown and replays over 1000 executions without duplicate counts', () => {
+  const { store, owner } = setup();
+  store.ingest(owner, complete, 'a');
+  store.ingest(owner, hookEvent({ ...hookBase, phase: 'started' }, 1), 'a');
+  store.invalidate(owner, 'stream_closed');
+  expect([...store.getSnapshot().hooks.entries.values()][0]?.status).toBe(
+    'unknown',
+  );
+  const events = Array.from({ length: 1001 }, (_, index) =>
+    hookEvent(
+      {
+        ...hookBase,
+        executionId: String(index),
+        phase: 'ended',
+        endedAt: 20,
+        durationMs: 10,
+        outcome: 'success',
+      },
+      index,
+    ),
+  );
+  store.begin({}, { ...input, events: [...events, ...events] });
+  expect(store.getSnapshot().hooks.entries.size).toBe(1001);
+});
 
 function lifecycle(
   kind: 'request' | 'tool',
