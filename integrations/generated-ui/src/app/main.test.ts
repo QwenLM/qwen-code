@@ -855,7 +855,11 @@ describe('saved view state', () => {
       value: '',
       checked: false,
     });
-    expect(document.getElementById('local-notice')!.hidden).toBe(false);
+    const localNotice = document.getElementById('local-notice')!;
+    expect(localNotice.hidden).toBe(false);
+    expect(localNotice.textContent).toBe(
+      'Refreshing the page discards unsaved changes.',
+    );
     presentation.stateHost!.save('{"items":[1,2]}');
     // The host reports what is kept, so the page-local notice is withdrawn.
     expect(document.getElementById('local-notice')!.hidden).toBe(true);

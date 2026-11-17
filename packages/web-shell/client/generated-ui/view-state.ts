@@ -67,8 +67,8 @@ export class ViewStateCoordinator {
   // The value of the write in flight; `saved` changes only when it lands.
   private inFlight?: string;
   private stale = false;
-  // The latest value the card set was too large and was not sent.
-  private tooLarge = false;
+  // An older write can still finish after the latest save was refused.
+  private latestSaveFailure?: 'failed' | 'too_large';
   private last?: ViewStateStatus;
   private readonly key: string;
 
@@ -101,12 +101,23 @@ export class ViewStateCoordinator {
 
   save(value: unknown): void {
     if (this.revision === undefined || this.stale) return;
-    const set = this.store.captureWrite?.() ?? this.store.set.bind(this.store);
+    let set: ViewStateStore['set'];
+    try {
+      set = this.store.captureWrite?.() ?? this.store.set.bind(this.store);
+    } catch (error) {
+      this.latestSaveFailure = 'failed';
+      this.report('failed');
+      throw error;
+    }
     const json = JSON.stringify(value ?? null);
-    this.tooLarge = new TextEncoder().encode(json).byteLength > MAX_STATE_BYTES;
+    this.latestSaveFailure =
+      new TextEncoder().encode(json).byteLength > MAX_STATE_BYTES
+        ? 'too_large'
+        : undefined;
     this.pending = undefined;
-    if (this.tooLarge) {
-      if (this.inFlight === undefined) this.report('too_large');
+    if (this.inFlight !== undefined) this.report('saving');
+    if (this.latestSaveFailure) {
+      if (this.inFlight === undefined) this.report(this.latestSaveFailure);
       return;
     }
     // Compare with what the store will hold once the write in flight lands,
@@ -150,7 +161,7 @@ export class ViewStateCoordinator {
     const { json, set } = this.pending;
     this.pending = undefined;
     this.inFlight = json;
-    this.report('saving');
+    if (this.latestSaveFailure !== 'failed') this.report('saving');
     let status: ViewStateStatus = 'failed';
     let request: Promise<DaemonGeneratedUiStateWriteResult>;
     try {
@@ -183,7 +194,10 @@ export class ViewStateCoordinator {
         this.inFlight = undefined;
         if (writes.get(this.key) === write) writes.delete(this.key);
         if (this.pending !== undefined) this.pump();
-        else this.report(this.tooLarge ? 'too_large' : status);
+        else
+          this.report(
+            status === 'stale' ? status : (this.latestSaveFailure ?? status),
+          );
       });
     writes.set(this.key, write);
   }

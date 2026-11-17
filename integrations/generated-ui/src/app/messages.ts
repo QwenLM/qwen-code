@@ -26,8 +26,7 @@ const EN = {
   'notice.outdated': 'The displayed update may still use earlier parameters.',
   'notice.queue':
     'Some interactions were not processed because the queue was full. Wait for the update, then repeat the intended action.',
-  'notice.local':
-    'Changes stay in this page. Refreshing the page restarts from the initial values.',
+  'notice.local': 'Refreshing the page discards unsaved changes.',
   'continue.label': 'Continue analysis with current parameters',
   'continue.again': 'Review again after checking the session',
   'continue.fix': 'Ask the assistant to fix this view',
@@ -79,7 +78,7 @@ const ZH_CN: Record<MessageKey, string> = {
   'notice.superseded': '已跳过一次较早的更新，保留了你较新的输入。',
   'notice.outdated': '当前显示的结果可能仍基于之前的参数。',
   'notice.queue': '队列已满，部分操作未被处理。请等待更新完成后重新操作。',
-  'notice.local': '修改只保存在当前页面，刷新页面后会恢复初始参数。',
+  'notice.local': '刷新页面会丢弃尚未保存的修改。',
   'continue.label': '用当前参数继续分析',
   'continue.again': '确认会话状态后重新审阅',
   'continue.fix': '请助手修复此视图',

@@ -732,12 +732,11 @@ export function McpAppRuntime({
                 )}
                 onClick={() => {
                   const viewState = viewStateRef.current;
-                  if (!viewState) return retained.reset();
                   // Reset also clears what the card saved; if that fails,
                   // the card stays as it is and the bar says so.
-                  void viewState.clear().then((cleared) => {
-                    if (cleared) retained.reset();
-                  });
+                  retained.reset(
+                    viewState ? () => viewState.clear() : undefined,
+                  );
                 }}
               >
                 {t('mcpApp.generatedUi.reset')}
@@ -755,7 +754,7 @@ export function McpAppRuntime({
                 variant="ghost"
                 size="sm"
                 title={t('mcpApp.generatedUi.reopenNotice')}
-                onClick={retained.reset}
+                onClick={() => retained.reset()}
               >
                 {t('mcpApp.generatedUi.reset')}
               </Button>

@@ -63,7 +63,7 @@ export interface GeneratedUiInstance {
     reopened: boolean;
     getSignal(): AbortSignal;
     isVisible(): boolean;
-    reset(): void;
+    reset(clear?: () => Promise<boolean>): void;
   };
 }
 
@@ -293,7 +293,7 @@ export class GeneratedUiInstanceStore {
         runtime: undefined!,
       };
       const instance = entry;
-      let viewStateRead = false;
+      let viewStateReadFrame: number | undefined;
       entry.tools = {
         sessionId: entry.sessionId,
         callTool: async (request, signal) => {
@@ -318,8 +318,9 @@ export class GeneratedUiInstanceStore {
                 get: async (cardId) => {
                   // The App reads only once at startup. Retry with a new frame
                   // if that read happened while the card had no active lease.
-                  if (this.current(instance)) viewStateRead = true;
-                  else if (!viewStateRead) instance.reloadOnGrant = true;
+                  if (this.current(instance)) viewStateReadFrame = instance.id;
+                  else if (viewStateReadFrame !== instance.id)
+                    instance.reloadOnGrant = true;
                   return this.viewState(instance).get(cardId);
                 },
                 set: async (cardId, write) =>
@@ -376,8 +377,21 @@ export class GeneratedUiInstanceStore {
             ? instance.lease!.controller.signal
             : this.revoked,
         isVisible: () => this.current(instance),
-        reset: () => {
-          if (this.current(instance)) instance.lease!.reset();
+        reset: (clear) => {
+          const lease = instance.lease;
+          if (!this.current(instance, lease)) return;
+          if (!clear) return lease.reset();
+          const id = instance.id;
+          void clear().then((cleared) => {
+            if (
+              !cleared ||
+              this.records.get(instance.key)?.entry !== instance ||
+              instance.id !== id
+            )
+              return;
+            if (this.current(instance)) instance.lease!.reset();
+            else instance.reloadOnGrant = true;
+          });
         },
       };
       record = { scopeId: entry.scopeId, sessionId: entry.sessionId, entry };

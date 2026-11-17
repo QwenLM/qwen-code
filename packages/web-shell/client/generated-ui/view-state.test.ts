@@ -161,6 +161,45 @@ describe('one card’s saved state', () => {
     expect(h.writes[1]!.write).toEqual({ baseRevision: 0, value: 2 });
   });
 
+  it('reports a refused save after a previous value was saved', async () => {
+    const h = harness();
+    await h.coordinator.load();
+    h.coordinator.save(1);
+    await h.saved(0, 1);
+    h.store.captureWrite = () => {
+      throw new Error('inactive');
+    };
+    expect(() => h.coordinator.save(2)).toThrow('inactive');
+    expect(h.writes).toHaveLength(1);
+    expect(h.statuses.at(-1)).toBe('failed');
+
+    h.store.captureWrite = undefined;
+    h.coordinator.save(2);
+    expect(h.writes[1]!.write).toEqual({ baseRevision: 1, value: 2 });
+    await h.saved(1, 2);
+    expect(h.statuses.at(-1)).toBe('saved');
+  });
+
+  it('reports that a stale revision stops saving even after a later save refusal', async () => {
+    const h = harness();
+    await h.coordinator.load();
+    h.coordinator.save(1);
+    h.store.captureWrite = () => {
+      throw new Error('inactive');
+    };
+    expect(() => h.coordinator.save(2)).toThrow('inactive');
+    h.writes[0]!.reply.resolve({
+      outcome: 'stale',
+      cardId: CARD,
+      revision: 2,
+      value: 'theirs',
+    });
+    await vi.waitFor(() => expect(h.statuses.at(-1)).toBe('stale'));
+    h.store.captureWrite = undefined;
+    h.coordinator.save(3);
+    expect(h.writes).toHaveLength(1);
+  });
+
   it('does not report a revert as saved after a write loses its response', async () => {
     const h = harness({ revision: 1, value: 'start' });
     await h.coordinator.load();
