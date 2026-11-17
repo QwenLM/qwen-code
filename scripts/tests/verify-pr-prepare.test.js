@@ -804,19 +804,25 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
       /node \/trusted-scripts\/verify-pr-prepare\.mjs --require-isolation --artifact-dir "\/work\/tmp\/pr42-verify-\d{8}-\d{6}"/,
     );
     // R3-4: the printed VM guidance must carry the same scoping as the skill —
-    // a VM runs no --require-isolation gate — and name the FULL mode:"vm" shape
-    // (by/reason/attestation/approval), so the tool's own output does not
-    // dead-end a VM operator at the gate or one step later at the declaration.
+    // a VM runs no --require-isolation gate, so there is no in-boundary gate
+    // command and no boundary-gate.json (naming an --artifact-dir invocation
+    // without the gate would dead-end the operator at parseArgs' exit 2) — and
+    // name the FULL mode:"vm" shape with the attestation gloss the checker
+    // requires (what the operator confirmed: nothing mounted, no host
+    // credentials), never the inverted "what the VM mounts".
     expect(result.stdout).toContain(
-      'A VM boundary runs the same file from its trusted copy',
+      'A VM boundary takes the same trusted copy',
     );
     expect(result.stdout).toContain('NO --require-isolation gate');
+    expect(result.stdout).toContain('no boundary-gate.json for a VM');
     expect(result.stdout).toContain(
-      'Declare mode:"vm" with by (the maintainer),',
+      'Declare mode:"vm" per the VM bullet above with by (the maintainer),',
     );
     expect(result.stdout).toContain(
-      'reason, attestation (what the VM mounts), and approval',
+      'attestation (what the operator confirmed: nothing mounted,',
     );
+    expect(result.stdout).toContain('no host credentials), and approval');
+    expect(result.stdout).not.toContain('what the VM mounts');
 
     const root = realpathSync(dir);
     const contextPath = join(root, 'tmp', 'verify-context', 'pr42.json');
@@ -1303,6 +1309,38 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     });
     expect(rc).toBe(3);
     expect(existsSync(join(art, 'boundary-gate.json'))).toBe(false);
+  });
+
+  // R5-1: an unresolvable $HOME must reach the gate's exit-3 refusal, not
+  // escape as an uncaught throw (exit 1) that leaves a stale pass record
+  // behind; an empty home must not write the nonce into the PR-writable CWD.
+  // home:null models os.homedir() throwing (no passwd entry for the UID +
+  // unset HOME); home:'' models HOME set but empty (join('', …) is relative).
+  it('fails the gate on an unresolvable or empty $HOME without a stray nonce', () => {
+    const cwd = process.cwd();
+    const sandbox = makeTmpDir();
+    process.chdir(sandbox);
+    try {
+      for (const home of [null, '']) {
+        const art = makeTmpDir();
+        writeFileSync(
+          join(art, 'boundary-gate.json'),
+          JSON.stringify({ gate: 'require-isolation', passed: true }),
+        );
+        const rc = requireBoundary(art, {
+          env: { QWEN_VERIFY_CREDENTIAL_FREE: '1' },
+          exists: (p) => p === '/.dockerenv',
+          home,
+        });
+        expect(rc).toBe(3);
+        // The stale pass record is invalidated, not left for the checker.
+        expect(existsSync(join(art, 'boundary-gate.json'))).toBe(false);
+        // No plaintext landed in the process CWD (the PR-writable mount).
+        expect(existsSync(join(sandbox, '.qwen-verify-nonce'))).toBe(false);
+      }
+    } finally {
+      process.chdir(cwd);
+    }
   });
 
   // R10-20: a self-chosen container= string is a declaration, not an observed

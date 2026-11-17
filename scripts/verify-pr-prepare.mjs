@@ -195,8 +195,13 @@ export function detectCredentialSignals(
   for (const name of CREDENTIAL_ENV) {
     if (env[name]) signals.push(name);
   }
-  for (const [relative, label] of CREDENTIAL_PATHS) {
-    if (exists(join(home, relative))) signals.push(label);
+  // An unresolvable home (null/empty) has no credential paths to scan; the
+  // gate fails on it at the nonce write below. join(home, …) on a non-string
+  // would throw, and on '' would scan the PR-writable CWD instead (R5-1).
+  if (typeof home === 'string' && home !== '') {
+    for (const [relative, label] of CREDENTIAL_PATHS) {
+      if (exists(join(home, relative))) signals.push(label);
+    }
   }
   return signals;
 }
@@ -874,11 +879,13 @@ function main(argv) {
     'The path is the in-container one: the gate runs from the read-only',
     "/trusted-scripts mount, never the PR head's own copy of the script,",
     'and the record lands in the mounted artifact directory so it survives',
-    'the container. A VM boundary runs the same file from its trusted copy',
-    'with its own artifact path and NO --require-isolation gate (a VM carries',
-    'no observed container marker). Declare mode:"vm" with by (the maintainer),',
-    'reason, attestation (what the VM mounts), and approval (a permalink to the',
-    "maintainer's approval comment). The gate writes boundary-gate.json into",
+    'the container. A VM boundary takes the same trusted copy but runs',
+    'NO --require-isolation gate (a VM carries no observed container marker):',
+    'there is no in-boundary gate command and no boundary-gate.json for a VM.',
+    'Declare mode:"vm" per the VM bullet above with by (the maintainer),',
+    'reason, attestation (what the operator confirmed: nothing mounted,',
+    "no host credentials), and approval (a permalink to the maintainer's",
+    'approval comment). The container gate writes boundary-gate.json into',
     'the artifact directory; the checker requires that record alongside',
     'the container declaration.',
   ]);
@@ -898,10 +905,23 @@ function main(argv) {
  * operator who skipped the gate — the incident's shape — not against PR
  * code that forges it; the CI publisher writes its own lane record.)
  */
-export function requireBoundary(
-  artifactDir = null,
-  { env = process.env, exists = existsSync, home = homedir() } = {},
-) {
+export function requireBoundary(artifactDir = null, options = {}) {
+  const env = options.env ?? process.env;
+  const exists = options.exists ?? existsSync;
+  // Resolve home lazily and defensively: os.homedir() throws SystemError when
+  // the UID has no passwd entry and HOME is unset (the arbitrary-UID container
+  // shape --user <uid>:<gid> invites), and returns '' when HOME is set but
+  // empty. Evaluating it in a default parameter let the throw escape as exit 1
+  // before invalidateRecord could run, leaving a stale pass record behind;
+  // both shapes must reach the gate's exit-3 refusal below (R5-1).
+  let home = options.home;
+  if (home === undefined) {
+    try {
+      home = homedir();
+    } catch {
+      home = null;
+    }
+  }
   const recordPath = artifactDir
     ? join(artifactDir, 'boundary-gate.json')
     : null;
@@ -990,6 +1010,18 @@ export function requireBoundary(
       credentialFree: true,
       nonceSha256: createHash('sha256').update(nonce).digest('hex'),
     };
+    // An unresolvable $HOME (no passwd entry for this UID with HOME unset, or
+    // HOME set but empty) cannot host the container-local plaintext:
+    // join('', …) would write it into the PR-writable CWD instead, and a
+    // homedir() throw would escape as exit 1. Refuse with exit 3 and
+    // invalidate any stale record before the pass line (R5-1).
+    if (typeof home !== 'string' || home === '') {
+      invalidateRecord();
+      return fail(
+        3,
+        'could not resolve a container-local $HOME (no passwd entry for this UID and HOME unset or empty): the nonce plaintext cannot be written outside the PR-writable mount, so the round cannot declare mode:"container"',
+      );
+    }
     // The plaintext must exist somewhere the battery can read it, or the
     // record's hash binds a nonce nobody can echo and the round is silently
     // uncertifiable after the whole battery ran (R1-4). Fail the gate now,

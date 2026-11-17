@@ -1199,6 +1199,72 @@ describe('readState', () => {
     expect(readState(root, 1).inFlightHead).toBe(HEAD);
   });
 
+  // R6-1: a present *Heads key holding a non-array value is refused even when
+  // an integer seqCounter (which every written file carries) admits the file
+  // via the bearing disjunction — otherwise --start reads the unusable marker
+  // as empty and erases it, breaking the one-round-per-PR serialisation.
+  it('refuses a non-array *Heads value even alongside a bearing seqCounter', () => {
+    const root = makeRoot();
+    mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
+    for (const key of [
+      'inFlightHeads',
+      'verifiedHeads',
+      'deferredHeads',
+      'releasedHeads',
+    ]) {
+      writeFileSync(
+        statePath(root, 1),
+        JSON.stringify({ pr: 1, repo: 'o/r', [key]: HEAD, seqCounter: 7 }),
+      );
+      expect(() => readState(root, 1)).toThrow(
+        new RegExp(`${key} value the migration ladder cannot consume`),
+      );
+      // The refused start leaves the marker untouched (no rewrite from empty).
+      expect(() =>
+        startRound(root, { pr: 1, head: HEAD, round: 13, artifactDir: 'r13' }),
+      ).toThrow(new RegExp(`${key} value the migration ladder cannot consume`));
+      expect(JSON.parse(readFileSync(statePath(root, 1), 'utf8'))[key]).toBe(
+        HEAD,
+      );
+    }
+    // A legitimate resting file (empty arrays + integer seqCounter + the
+    // derived inFlight:false / inFlightHead:null view) is still admitted.
+    writeFileSync(
+      statePath(root, 1),
+      JSON.stringify({
+        pr: 1,
+        repo: 'o/r',
+        inFlightHeads: [],
+        verifiedHeads: [],
+        deferredHeads: [],
+        releasedHeads: [],
+        seqCounter: 7,
+        retiredSeqs: {},
+        inFlight: false,
+        inFlightHead: null,
+        verifiedHead: null,
+        previousHead: null,
+      }),
+    );
+    expect(() => readState(root, 1)).not.toThrow();
+    // A bare legacy marker alongside the resting empty list AND a seqCounter
+    // still blocks a second round and survives the refused start.
+    writeFileSync(
+      statePath(root, 1),
+      JSON.stringify({
+        pr: 1,
+        inFlightHeads: [],
+        inFlightHead: HEAD,
+        seqCounter: 7,
+      }),
+    );
+    expect(
+      startRound(root, { pr: 1, head: HEAD, round: 14, artifactDir: 'r14' })
+        .duplicate,
+    ).toBe('in-flight');
+    expect(readState(root, 1).inFlightHead).toBe(HEAD);
+  });
+
   // R16-2 (residual): an identity key alone must not satisfy the guard. One
   // identity key plus a misspelled head marker reads as "no state" under the
   // old STATE_KEYS set and lets --start erase the operator's intended marker.

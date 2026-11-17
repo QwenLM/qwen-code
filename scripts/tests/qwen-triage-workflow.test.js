@@ -6835,11 +6835,15 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain(
       'The VM path runs **no `--require-isolation` gate**',
     );
-    // R16-4 (residual): the preflight VM sentence is scoped to exclude the
-    // gate, so it cannot push a VM operator to run the container gate the
-    // VM bullet says it skips.
+    // R16-4 / R3-4: the preflight VM sentence is scoped to exclude the gate
+    // and names no in-boundary gate command / boundary-gate.json, so it cannot
+    // push a VM operator to run the container gate (or an --artifact-dir
+    // invocation parseArgs refuses) the VM bullet says it skips.
     expect(flat).toContain(
-      'a VM boundary runs the same file from the trusted checkout **without the `--require-isolation` gate** instead',
+      'a VM boundary takes the same trusted copy but runs **no `--require-isolation` gate**',
+    );
+    expect(flat).toContain(
+      'there is no in-boundary gate command and no `boundary-gate.json` to produce — declare `mode:"vm"` per the VM bullet above',
     );
     expect(flat).toContain(
       'The VM round still runs under a **scratch `HOME`**',
@@ -6856,6 +6860,14 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain('stores only its **sha256** in the gate record');
     expect(flat).toContain('(`nonceSha256`), never the plaintext');
     expect(flat).toContain('the SINGLE authoritative implementation');
+    // R6 (deferred): step 5's container-nonce spelling and the checker's
+    // matcher literal are pinned together, so rewording either side cannot
+    // silently refuse every compliant round.
+    expect(flat).toContain('echo a line beginning `container-nonce: <nonce>`');
+    expect(flat).toContain('matches only that prefix');
+    expect(readFileSync('scripts/verify-pr-check.mjs', 'utf8')).toContain(
+      '/container-nonce:[ \\t]*(\\S+)/',
+    );
     // The record and the lane flag corroborate an operator; they are not
     // proof against a round that forges them. The honest wording is the
     // contract — an overclaim ("cannot be minted", "never for a local

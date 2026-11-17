@@ -277,10 +277,11 @@ The boundary check belongs inside: run the trusted copy of the preflight with
 there — a pass writes the `boundary-gate.json` record the checker requires
 beside the declaration — and treat exit 4 as "this is not a boundary". The
 Docker recipe below mounts that copy at
-`/trusted-scripts/verify-pr-prepare.mjs`; a VM boundary runs the same file
-from the trusted checkout **without the `--require-isolation` gate** instead
-(the VM path runs no gate; see the VM bullet above). A container
-marker alone does not pass: the CLI's own Docker/Podman launcher mounts
+`/trusted-scripts/verify-pr-prepare.mjs`; a VM boundary takes the same trusted
+copy but runs **no `--require-isolation` gate** (a VM carries no observed
+container marker), so there is no in-boundary gate command and no
+`boundary-gate.json` to produce — declare `mode:"vm"` per the VM bullet above.
+A container marker alone does not pass: the CLI's own Docker/Podman launcher mounts
 `~/.config/gcloud`, the ADC file and every model API key it can see, so the
 check also requires `QWEN_VERIFY_CREDENTIAL_FREE=1` — set it only after
 confirming the boundary mounts nothing — and refuses when a known credential

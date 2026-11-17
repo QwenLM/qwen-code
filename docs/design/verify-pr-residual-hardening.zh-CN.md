@@ -54,14 +54,18 @@ VM 路径**不跑** `--require-isolation` 门禁。这句未限定的话可能�
 
 形状守卫**从迁移梯实际消费的内容推导**，使守卫的接纳与梯的消费不可能分叉（R2-1）。
 正文仅在 `inFlightEntries`、`verifiedEntries`、`deferredEntries`、`releasedEntries`
-之一产出条目，或 `seqCounter` 为整数，或 `retiredSeqs` 为非空对象时才被接纳。梯拒绝
-其值的键——数组键下的字符串（`inFlightHeads:"<hex>"`）、无遗留标记的空列表——不计入，
-于是像损坏 JSON 一样 fail closed，而非被接纳后抹掉；「身份键 + 拼错的 head 标记」同样
-被拒（R16-2）。`inFlightEntries` 即使在*resting* 的空 `inFlightHeads: []` 旁也消费裸
-`inFlightHead`（非空字符串）以及字符串 `inFlight`，故标记阻挡第二轮并在被拒的 start
-后存活（R1-1、R2-1）。助手写出的每个状态都经 `deriveView`，产出数组列表加整数
-`seqCounter`，故合法文件绝不会被拒。见证钉住可消费形状、被拒的不可消费形状（数组键下
-字符串、空列表）与遗留迁移边界（`inFlight:true`、空串或单独对象不迁移）。
+之一产出条目，或 `seqCounter` 为整数，或 `retiredSeqs` 为非空对象时才被接纳。当无可消费
+的承载条目时，正文像损坏 JSON 一样 fail closed，而非被接纳后抹掉；「身份键 + 拼错的 head
+标记」同样被拒（R16-2）。独立于该析取式，一个**存在**但持非数组值的 `*Heads` 键（裸字符串
+`inFlightHeads:"<hex>"`）即使整数 `seqCounter` 已接纳该文件也被拒——梯无法消费该标记，
+`--start` 否则会抹掉它，破坏「同一 PR 只跑一轮」的串行化（R6-1）。空列表是合法的 resting
+形状，经 `seqCounter` 仍被接纳。`inFlightEntries` 即使在*resting* 的空 `inFlightHeads: []`
+旁也消费裸 `inFlightHead`（非空字符串）以及字符串 `inFlight`，故标记阻挡第二轮并在被拒的
+start 后存活（R1-1、R2-1）。助手写出的每个状态都经 `deriveView`，产出数组列表加整数
+`seqCounter`（以及派生的 `inFlight:false` / `inFlightHead:null` resting 视图），故合法文件
+绝不会被拒。见证钉住可消费形状、被拒的不可消费形状（带与不带承载 `seqCounter` 的数组键下
+字符串、无承载条目的空列表）、resting 文件的接纳，与遗留迁移边界（`inFlight:true`、空串或
+单独对象不迁移）。
 
 ### B —— 记录只存 nonce 哈希；佐证由 checker 强制
 
@@ -86,7 +90,10 @@ gateText, roundDir)`，由 `main` 调用（轮目录在那里可用，`checkArti
   `require-isolation` 容器声明关掉该绑定。
 - 容器本地 nonce 写入是门禁的一部分：`$HOME` 不可写或缺失时，门禁在通过行之前以
   exit 3 失败并使任何陈旧通过记录失效，而不是静默写下一个明文无处存在的记录、让该轮
-  直到电池跑完才无法认证（R1-4、R2-4）。
+  直到电池跑完才无法认证（R1-4、R2-4）。`$HOME` 惰性且防御性地解析：`os.homedir()`
+  抛出（该 UID 无 passwd 条目且 HOME 未设置）或返回 `''`（HOME 已设置但为空）都到达
+  同一 exit-3 拒绝——绝不是跳过失效的未捕获抛出（exit 1），也绝不是把明文写进 PR 可写
+  CWD 的相对 `join('', …)` 写入（R5-1）。
 - step-7 的 shell **不再重复实现 nonce 匹配**：checker 是**唯一**权威匹配器，消除
   shell↔checker 分叉（R1-2、R2-6）以及在 PR 投放的长行上卡死的第二匹配器（R1-3）。
   shell 仍写声明并调用 checker，由 checker 拒绝宿主电池；nonce 接纳/拒绝/对齐见证移至
@@ -97,38 +104,54 @@ gateText, roundDir)`，由 `main` 调用（轮目录在那里可用，`checkArti
   容器标记环境门控。
 - D17-2：拒绝文案明确 `mode:"waived"` 需要维护者批准——不是免费绕过。
 
-这在关闭宿主抄录路径的同时保持已承认的边界诚实：同时伪造记录哈希与匹配日志行的轮仍
-在范围外（记录佐证的是跳过门禁的操作者，而非同时伪造两者的 PR 代码）。
+这在为 `require-isolation` 记录关闭宿主抄录路径的同时保持已承认的边界诚实：同时伪造
+该记录 nonce 哈希与匹配日志行的轮仍在范围外（记录佐证的是跳过门禁的操作者，而非同时
+伪造两者的 PR 代码）。CI 发布作业自己的 `ci-lane` 记录是另一条受信任车道：仅在
+`--publish-lane` / CI 入口路径下被采纳，豁免 nonce 绑定（发布作业在它拥有的车道内写它），
+故「同时伪造两者」的门槛点名的是 `require-isolation` 容器路径，而非该车道（R5 延后）。
 
 ### C —— 限定 VM 句
 
-把 preflight 句改写为「a VM boundary runs the same file from the trusted checkout
-**without the `--require-isolation` gate** instead」，与 VM 条目一致。
+把 preflight 句——在 skill 与 prepare 打印的指引中均——改写为「a VM boundary takes the
+same trusted copy but runs **no `--require-isolation` gate** … there is no in-boundary
+gate command and no `boundary-gate.json` to produce — declare `mode:"vm"` per the VM
+bullet above」，与 VM 条目一致。attestation 注解点名操作者已确认的内容（无挂载、无宿主
+凭据），绝非反义的「what the VM mounts」；任何文案都不处方不带门禁的 `--artifact-dir`
+调用——parseArgs 拒绝它（R3-4）。
 
 ## 涉及文件
 
-- `scripts/verify-pr-watch-state.mjs` —— 梯推导形状守卫；`inFlightEntries` 在空列表
-  旁也消费裸遗留标记。
+- `scripts/verify-pr-watch-state.mjs` —— 梯推导形状守卫；存在但持非数组值的 `*Heads`
+  键独立于承载析取式被拒（R6-1）；`inFlightEntries` 在空列表旁也消费裸遗留标记。
 - `scripts/verify-pr-prepare.mjs` —— 记录 `nonceSha256`，去掉明文 `nonce`；致命 nonce
-  写入（exit 3）使陈旧记录失效；导出 `requireBoundary` 并加 `{env, exists, home}` 接缝。
+  写入（exit 3）使陈旧记录失效；`$HOME` 惰性防御解析，不可解析/空 home 以 exit-3 拒绝
+  （R5-1）；VM 指引注解与调用修正（R3-4）；导出 `requireBoundary` 并加
+  `{env, exists, home}` 接缝。
 - `scripts/verify-pr-check.mjs` —— `containerNonceErrors` + 整文件聚合界日志扫描，由
   `main` 无条件调用。
 - `.qwen/skills/verify-pr/SKILL.md` —— step-5 nonce 正文、step-7 shell nonce 匹配移除
-  （checker 唯一匹配器）、VM 句限定。
+  （checker 唯一匹配器）、VM 句限定（R3-4）。
 - `scripts/tests/verify-pr-watch-state.test.js` —— 可消费/不可消费形状见证、纯身份
-  fail-closed、迁移边界见证。
+  fail-closed、迁移边界见证、带 `seqCounter` 的非数组 `*Heads` 拒绝 + resting 文件接纳
+  （R6-1）。
 - `scripts/tests/verify-pr-prepare.test.js` —— 门控记录断言、经接缝的无门控只含哈希
-  记录见证、陈旧记录失效见证。
+  记录见证、陈旧记录失效见证、不可解析/空 home 拒绝见证（R5-1）、修正后的 VM 指引钉
+  （R3-4）。
 - `scripts/tests/verify-pr-check.test.js` —— `containerNonceErrors` 见证（匹配行接纳；
   哈希/行缺失或不匹配拒绝；不跟随 symlink；ci-lane/非容器豁免；整文件与跨块读取；
-  行语义对齐）+ CLI 拒绝见证（`--publish-lane`、`$QWEN_VERIFY_CONTEXT`）；容器夹具携带
-  `nonceSha256` 与日志行。
+  行语义对齐；目录与文件条目上限见证，R5-3）+ CLI 拒绝见证（`--publish-lane`、
+  `$QWEN_VERIFY_CONTEXT`）；容器夹具携带 `nonceSha256` 与日志行。
 - `scripts/tests/qwen-triage-workflow.test.js` —— step-5 flat 钉、VM 限定钉、checker
-  唯一匹配器钉；shim-node replay 保留声明/teardown 见证（nonce 见证移至 checker 测试）。
+  唯一匹配器钉、step-5↔checker nonce 拼写钉（R6 延后）；shim-node replay 保留
+  声明/teardown 见证（nonce 见证移至 checker 测试）。
 
 ## 范围边界
 
 - 簇 D（R17-2 活性）、E（R8 长尾）、F（D17-4…14）仍由 #17371 跟踪；本改动不触碰。
+  Java 配方全文统一为单一 waived 模型的协调 sweep（R5-2：step 1 的 Node 理由、step 4
+  的开头、校验计划、验收标准，以及避开 waived 矛盾告警的报告 `**Boundary.**` 行措辞）
+  是该提案文档中 bot 已延后的 Suggestion，记录于 #17371 而非本轮落地（PR 已过五轮
+  收敛姿态）。
 - 核心 `--context` 信任边界与 sha256 内容绑定（#17375）不变。
 - 不新增脚本或 CLI 入口；checker 加一个依赖目录的 nonce 检查并成为**唯一**匹配器——
   step-7 shell 不再重复实现（#17185 的铸声明前 shell 拒绝由权威 checker 拒绝取代，后者

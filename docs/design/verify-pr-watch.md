@@ -138,11 +138,15 @@ probe stays a CLI command and the trigger stays a gated scheduled task.
   refused (exit 1), never silently rewritten from empty lists; the refusal
   covers unparseable JSON, a non-object, an array, and a well-formed object
   the migration ladder cannot consume — the guard is derived from what the
-  ladder actually consumes, so a `*Heads` key holding a bare string, or an
-  empty list with no legacy marker, fails closed rather than being admitted
-  and erased (a legacy `inFlight`/`inFlightHead` counts only as a non-empty
-  string head). An identity key plus a misspelled head marker is likewise not
-  read as "no state". A bare `inFlightHead` is consumed even alongside the
+  ladder actually consumes. When no bearing entry is consumable, a `*Heads`
+  key holding a bare string or an empty list with no legacy marker fails
+  closed rather than being admitted and erased (a legacy
+  `inFlight`/`inFlightHead` counts only as a non-empty string head).
+  Independently, a `*Heads` key that is present but holds a non-array value is
+  refused even when an integer `seqCounter` admits the file, so the marker is
+  not erased on the next `--start` (R6-1); an empty list is the legitimate
+  resting shape and stays admitted via `seqCounter`. An identity key plus a
+  misspelled head marker is likewise not read as "no state". A bare `inFlightHead` is consumed even alongside the
   resting empty `inFlightHeads: []`, blocking a second round on that head. The
   refusal message names the condition (no state-bearing entry the ladder can
   consume) and warns to inspect before removing, since removal discards the

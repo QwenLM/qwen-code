@@ -159,6 +159,25 @@ export function readState(stateRoot, prNumber) {
       `state file ${path} carries no state-bearing entry the migration ladder can consume (a *Heads key must hold an array of {head} entries; inFlight/inFlightHead a non-empty string head); inspect it before removing — removal discards the verified/deferred dedup history`,
     );
   }
+  // A *Heads key that is PRESENT but holds a non-array value is a marker the
+  // ladder cannot consume and would silently erase on the next --start, even
+  // when another bearing key (an integer seqCounter, which every written file
+  // carries) admits the file above. Refuse it independently so the guard's
+  // "fails closed rather than admitted and erased" claim holds for every
+  // written shape, not only the identity-only one (R6-1). The list keys are
+  // always arrays in a written state; an empty array is the legitimate resting
+  // shape and stays admitted via seqCounter.
+  const unusableListKey = [
+    'inFlightHeads',
+    'verifiedHeads',
+    'deferredHeads',
+    'releasedHeads',
+  ].find((key) => parsed[key] !== undefined && !Array.isArray(parsed[key]));
+  if (unusableListKey) {
+    throw new Error(
+      `state file ${path} carries a ${unusableListKey} value the migration ladder cannot consume (a *Heads key must hold an array of {head} entries, not a bare string or other non-array); inspect it before removing — removal discards the verified/deferred dedup history`,
+    );
+  }
   return parsed;
 }
 

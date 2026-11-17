@@ -2665,6 +2665,18 @@ describe('containerNonceErrors (R16-1 / D17-1 / D17-2)', () => {
     );
   });
 
+  // R5-3: regular files count against the entry cap too — the byte budget
+  // cannot bound zero-byte logs, so the file branch's visited++ is the only
+  // bound left. Deleting it must red this: the walk would otherwise traverse
+  // an unbounded number of empty files before answering (a hang, not a refusal).
+  it('counts files against the entry cap', () => {
+    const dir = dirWithLog(null);
+    for (let i = 0; i < 20001; i++) writeFileSync(join(dir, `f${i}`), '');
+    expect(containerNonceErrors(boundary, gateWith(), dir).join('\n')).toMatch(
+      /hit its resource bound/,
+    );
+  });
+
   // R4-5: only the TOP-LEVEL evidence/ subtree is exempt; a nested dir named
   // evidence (under logs/) is still scanned, so a marker there is found.
   it('scans a nested evidence dir that is not the top-level subtree', () => {

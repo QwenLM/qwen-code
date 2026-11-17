@@ -66,17 +66,23 @@ The shape guard is **derived from what the migration ladder actually consumes**,
 so the guard's acceptance and the ladder's consumption cannot drift (R2-1). A
 body is admitted only when `inFlightEntries`, `verifiedEntries`, `deferredEntries`
 or `releasedEntries` yields an entry, or `seqCounter` is an integer, or
-`retiredSeqs` is a non-empty object. A key whose value the ladder rejects — a
-string under an array key (`inFlightHeads:"<hex>"`), an empty list with no legacy
-marker — does not count, so it fails closed like corrupt JSON instead of being
-admitted and erased; an identity key plus a misspelled head marker is likewise
-refused (R16-2). `inFlightEntries` consumes a bare `inFlightHead` (a non-empty
-string) even alongside the resting empty `inFlightHeads: []`, as well as a string
-`inFlight`, so the marker blocks a second round and survives the refused start
-(R1-1, R2-1). Every state the helper writes goes through `deriveView`, which
-emits the lists as arrays plus an integer `seqCounter`, so a legitimate file is
-never refused. Witnesses pin the consumable shapes, the refused non-consumable
-shapes (string-under-array, empty lists), and the legacy migration boundary
+`retiredSeqs` is a non-empty object. When no bearing entry is consumable the body
+fails closed like corrupt JSON instead of being admitted and erased; an identity
+key plus a misspelled head marker is likewise refused (R16-2). Independently of
+that disjunction, a `*Heads` key that is PRESENT but holds a non-array value (a
+bare string `inFlightHeads:"<hex>"`) is refused even when an integer `seqCounter`
+admits the file — the ladder cannot consume that marker and `--start` would
+otherwise erase it, breaking the one-round-per-PR serialisation (R6-1). An empty
+list is the legitimate resting shape and stays admitted via `seqCounter`.
+`inFlightEntries` consumes a bare `inFlightHead` (a non-empty string) even
+alongside the resting empty `inFlightHeads: []`, as well as a string `inFlight`,
+so the marker blocks a second round and survives the refused start (R1-1, R2-1).
+Every state the helper writes goes through `deriveView`, which emits the lists as
+arrays plus an integer `seqCounter` (and the derived `inFlight:false` /
+`inFlightHead:null` resting view), so a legitimate file is never refused.
+Witnesses pin the consumable shapes, the refused non-consumable shapes
+(string-under-array with and without a bearing `seqCounter`, empty lists with no
+bearing entry), the resting-file acceptance, and the legacy migration boundary
 (`inFlight:true`, an empty string, or an object alone does not migrate).
 
 ### B — store only the nonce hash in the record; enforce corroboration in the checker
@@ -112,7 +118,11 @@ shapes (string-under-array, empty lists), and the legacy migration boundary
   `$HOME` fails the gate (exit 3) before the pass line and invalidates any stale
   pass record, rather than silently writing a record whose plaintext exists
   nowhere and leaving the round uncertifiable only after the battery ran
-  (R1-4, R2-4).
+  (R1-4, R2-4). `$HOME` is resolved lazily and defensively: `os.homedir()`
+  throwing (no passwd entry for the UID with HOME unset) or returning `''` (HOME
+  set but empty) both reach the same exit-3 refusal — never an uncaught throw
+  (exit 1) that skips invalidation, and never a relative `join('', …)` write that
+  lands the plaintext in the PR-writable CWD (R5-1).
 - The step-7 shell **no longer re-implements the nonce match**: the checker is
   the SINGLE authoritative matcher, removing the shell↔checker parity drift
   (R1-2, R2-6) and the second matcher that stalled on a PR-planted long line
@@ -129,45 +139,67 @@ shapes (string-under-array, empty lists), and the legacy migration boundary
 - D17-2: the refusal message states plainly that `mode:"waived"` requires the
   maintainer's approval — it is not a free bypass.
 
-This closes the host-copy path while keeping the conceded boundary honest: a
-round that forges both the record hash and a matching log line is still out of
-scope (the record corroborates an operator who skipped the gate, not PR code that
-forges both).
+This closes the host-copy path for the `require-isolation` record while keeping
+the conceded boundary honest: a round that forges both that record's nonce hash
+and a matching log line is still out of scope (the record corroborates an
+operator who skipped the gate, not PR code that forges both). The CI publish
+job's own `ci-lane` record is a separate trusted lane: honored only under
+`--publish-lane` / the CI entry path, it is exempt from the nonce binding (the
+publish job writes it inside the lane it owns), so the "forge both" bar names
+the `require-isolation` container path, not that lane (R5 deferred).
 
 ### C — scope the VM sentence
 
-Rewrite the preflight sentence to "a VM boundary runs the same file from the
-trusted checkout **without the `--require-isolation` gate** instead", matching the
-VM bullet.
+Rewrite the preflight sentence — in both the skill and prepare's printed
+guidance — to "a VM boundary takes the same trusted copy but runs **no
+`--require-isolation` gate** … there is no in-boundary gate command and no
+`boundary-gate.json` to produce — declare `mode:"vm"` per the VM bullet above",
+matching the VM bullet. The attestation gloss names what the operator confirmed
+(nothing mounted, no host credentials), never the inverted "what the VM mounts",
+and no wording prescribes an `--artifact-dir` invocation without the gate, which
+parseArgs refuses (R3-4).
 
 ## Files affected
 
-- `scripts/verify-pr-watch-state.mjs` — ladder-derived shape guard;
-  `inFlightEntries` consumes a bare legacy marker alongside an empty list.
+- `scripts/verify-pr-watch-state.mjs` — ladder-derived shape guard; a present
+  non-array `*Heads` key is refused independently of the bearing disjunction
+  (R6-1); `inFlightEntries` consumes a bare legacy marker alongside an empty list.
 - `scripts/verify-pr-prepare.mjs` — record `nonceSha256`, drop plaintext `nonce`;
-  fatal nonce-file write (exit 3) invalidating a stale record; export
+  fatal nonce-file write (exit 3) invalidating a stale record; lazy defensive
+  `$HOME` resolution with an exit-3 refusal on an unresolvable/empty home
+  (R5-1); corrected VM guidance gloss and invocation (R3-4); export
   `requireBoundary` with an `{env, exists, home}` seam.
 - `scripts/verify-pr-check.mjs` — `containerNonceErrors` + whole-file
   aggregate-bounded log scan, run unconditionally from `main`.
 - `.qwen/skills/verify-pr/SKILL.md` — step-5 nonce prose, step-7 shell nonce
-  match removed (checker sole matcher), VM sentence scoping.
+  match removed (checker sole matcher), VM sentence scoping (R3-4).
 - `scripts/tests/verify-pr-watch-state.test.js` — consumable / non-consumable
-  shape witnesses, identity-only fail-closed, migration-boundary witnesses.
+  shape witnesses, identity-only fail-closed, migration-boundary witnesses,
+  non-array `*Heads`-with-`seqCounter` refusal + resting-file acceptance (R6-1).
 - `scripts/tests/verify-pr-prepare.test.js` — gated record assertion, ungated
-  hash-only record witness via the seam, stale-record invalidation witness.
+  hash-only record witness via the seam, stale-record invalidation witness,
+  unresolvable/empty-home refusal witness (R5-1), corrected VM guidance pin
+  (R3-4).
 - `scripts/tests/verify-pr-check.test.js` — `containerNonceErrors` witnesses
   (matching line accepts; missing / mismatched hash or line refuses; symlink not
   followed; ci-lane / non-container exempt; whole-file & cross-chunk reads;
-  line-semantics parity) + CLI refusal witnesses (`--publish-lane`,
-  `$QWEN_VERIFY_CONTEXT`); container fixtures carry `nonceSha256` + a log line.
+  line-semantics parity; directory AND file entry-cap witnesses, R5-3) + CLI
+  refusal witnesses (`--publish-lane`, `$QWEN_VERIFY_CONTEXT`); container
+  fixtures carry `nonceSha256` + a log line.
 - `scripts/tests/qwen-triage-workflow.test.js` — step-5 flat pins, the VM
-  scoping pin, the checker-sole-matcher pin; the shimmed-node replay keeps the
-  declaration/teardown witness (nonce witnesses moved to the checker tests).
+  scoping pin, the checker-sole-matcher pin, the step-5↔checker nonce-spelling
+  pin (R6 deferred); the shimmed-node replay keeps the declaration/teardown
+  witness (nonce witnesses moved to the checker tests).
 
 ## Scope boundaries
 
 - Clusters D (R17-2 liveness), E (R8 long tail), F (D17-4…14) stay tracked in
-  #17371; not touched here.
+  #17371; not touched here. The Java recipe's whole-document coherence sweep to
+  a single waived model (R5-2: step 1's Node rationale, step 4's lead-in, the
+  Validation plan, the Acceptance criteria, and the report `**Boundary.**` line
+  wording that avoids the waived-contradiction warning) is a bot-deferred
+  Suggestion in that proposal doc, recorded under #17371 rather than landed in
+  this round (the PR is past the five-round convergence posture).
 - The core `--context` trust boundary and sha256 content binding (#17375) are
   unchanged.
 - No new script or CLI entry point; the checker gains a dir-dependent nonce check
