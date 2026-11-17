@@ -1644,23 +1644,16 @@ describe('Session', () => {
           });
         }
         // The exit burst coalesces into ONE queued roster item (#15659
-        // R1-4) on the timer-bounded flush (R2-3), so the queue holds the
-        // reports plus that item, capped at the queue maximum; only the
-        // overflow beyond it lands early.
+        // R1-4) on the timer-bounded flush (R2-3); peer items do not consume
+        // overflow admission slots (#17436), so every report plus the merged
+        // roster entry stays in the queue as a hold.
         await new Promise((resolve) => setTimeout(resolve, 80));
-        const queued = Math.min(
-          reportCount + 1,
-          MAX_BACKGROUND_NOTIFICATION_QUEUE,
-        );
         expect(
           session
             .collectActiveWorkHolds()
             .filter((hold) => hold.category === 'notification'),
-        ).toHaveLength(queued);
-        expect(
-          mockChatRecordingService.recordNotification,
-        ).toHaveBeenCalledTimes(reportCount + 1 - queued);
-        session.flushPendingPeerNotifications();
+        ).toHaveLength(reportCount + 1);
+        await session.flushPendingPeerNotifications();
         session.dispose();
         const landed = vi.mocked(mockChatRecordingService.recordNotification)
           .mock.calls;
