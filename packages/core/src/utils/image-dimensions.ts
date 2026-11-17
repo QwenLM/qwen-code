@@ -144,6 +144,11 @@ function webpDimensions(
   return undefined;
 }
 
+// Upper bound on any plausible image dimension — corrupted or hostile
+// headers can produce absurd values that would dominate the context
+// estimate (#17321 R4-1).
+const MAX_PLAUSIBLE_DIMENSION = 100_000;
+
 function positive(
   width: number,
   height: number,
@@ -151,7 +156,9 @@ function positive(
   return Number.isFinite(width) &&
     Number.isFinite(height) &&
     width > 0 &&
-    height > 0
+    height > 0 &&
+    width <= MAX_PLAUSIBLE_DIMENSION &&
+    height <= MAX_PLAUSIBLE_DIMENSION
     ? { width, height }
     : undefined;
 }
