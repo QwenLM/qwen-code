@@ -113,6 +113,24 @@ describe('Generated UI view state through the daemon', () => {
         baseRevision: number,
         value: unknown,
       ) => call('PUT', state(target), { baseRevision, value }, target.clientId);
+      const waitForPrompt = async (response: Response) => {
+        const { promptId } = await json(response, 202);
+        await expect
+          .poll(
+            async () =>
+              json(
+                await call(
+                  'GET',
+                  `/session/${session.sessionId}/turns/${promptId}`,
+                  undefined,
+                  session.clientId,
+                ),
+                200,
+              ),
+            { timeout: 30_000 },
+          )
+          .toMatchObject({ state: 'completed' });
+      };
 
       // A card saves while the model is still answering.
       const firstPrompt = promptOf(session, 'first prompt');
@@ -123,8 +141,7 @@ describe('Generated UI view state through the daemon', () => {
         await json(await put(session, 0, { items: ['Agenda'] }), 200),
       ).toEqual({ outcome: 'saved', cardId: CARD, revision: 1 });
       release();
-      const first = await firstPrompt;
-      expect(first.status, await first.text()).toBeLessThan(300);
+      await waitForPrompt(await firstPrompt);
 
       // An artifact registered after a save still lists after reload.
       await json(
@@ -189,8 +206,7 @@ describe('Generated UI view state through the daemon', () => {
         200,
       );
       expect(JSON.stringify(artifacts)).toContain('https://example.com/notes');
-      const second = await promptOf(session, 'second prompt');
-      expect(second.status, await second.text()).toBeLessThan(300);
+      await waitForPrompt(await promptOf(session, 'second prompt'));
       await reload();
       expect(
         await json(

@@ -180,7 +180,7 @@ const pushAndReportStep = `${pushAndReportStepYaml}\n${pushAndReportScript}`;
 const workflowWithScripts = `${workflow}\n${pushAndReportScript}`;
 const prepareStep =
   workflow.match(
-    /- name: 'Prepare branch and feedback'[\s\S]*?(?=\n[ ]{6}- name: 'Post autofix status comment')/,
+    /- name: 'Prepare branch and feedback'[\s\S]*?(?=\n[ ]{6}- name: ')/,
   )?.[0] ?? '';
 const reportDryRunFailureSteps =
   workflow.match(
@@ -242,7 +242,7 @@ const finalizeVerificationStep =
   )?.[0] ?? '';
 const prepareBranchAndFeedbackStep =
   workflow.match(
-    /- name: 'Prepare branch and feedback'[\s\S]*?(?=\n[ ]{6}- name: 'Post autofix status comment')/,
+    /- name: 'Prepare branch and feedback'[\s\S]*?(?=\n[ ]{6}- name: ')/,
   )?.[0] ?? '';
 // Whitespace-tolerant shape of a normalized ic.json fetch: re-indenting or
 // re-wrapping the block must not break the presence/order pins using it.
@@ -622,12 +622,12 @@ describe('qwen-autofix workflow', () => {
     // discards itself — no agent run, no marker, no comment.
     expect(prepareBranchAndFeedbackStep).toContain('LIVE_EVAL_WM');
     expect(prepareBranchAndFeedbackStep).toContain('stale duplicate target');
-    // Addressing, the first verification, the final verdict, and both status
-    // comment steps discard stale targets. The repair is gated by the first
-    // verdict, so it cannot start for a stale target.
+    // Branch installation, addressing, the first verification, the final
+    // verdict, and both status comment steps discard stale targets. The repair
+    // is gated by the first verdict, so it cannot start for a stale target.
     expect(
       workflow.split("steps.prepare.outputs.stale != 'true'").length - 1,
-    ).toBe(5);
+    ).toBe(6);
     expect(reviewScanJob).toContain(
       'capture("^review-address \\\\((?<pr>[0-9]+),")',
     );
@@ -9453,12 +9453,13 @@ exit 1
     );
     // The full census of the workflow's sites: prepare's feedback echo, the
     // two dump loops, the repair merge-warning head, the issue-lane gate's
-    // two failure notes, and the upsert re-emit loop. An exact count so a
-    // dropped or weakened KNOWN site fails here instead of in a future
-    // round; a NEW echo site is NOT auto-detected — it must be added to
+    // two failure notes, the branch-install transcript, and the upsert
+    // re-emit loop. An exact count makes a dropped or weakened KNOWN site
+    // fail here instead of in a future round; a NEW echo site is NOT
+    // auto-detected — it must be added to
     // this census deliberately, using the canonical two-expression sed
     // (both single-syntax spellings are banned below).
-    expect(workflow.match(bothSyntaxes) ?? []).toHaveLength(7);
+    expect(workflow.match(bothSyntaxes) ?? []).toHaveLength(8);
     // The issue lane's gate echoes the agent's failure notes.
     expect(issueAutofixJob).toMatch(
       /sed -e 's\/::\/;;\/g' -e 's\/##\\\[\/##［\/g' "\$\{WORKDIR\}\/failure\.md"/,
@@ -12372,6 +12373,14 @@ exit 1
     expect(workflow).not.toContain('run_shell_command(npm publish)');
     expect(workflow).not.toContain('run_shell_command(npm exec)');
     expect(workflow).not.toContain('run_shell_command(npm run bundle)');
+    for (const step of [
+      triageAndAddressStep,
+      repairDeterministicRejectionStep,
+    ]) {
+      expect(step).not.toMatch(
+        /run_shell_command\((?:corepack )?(?:pnpm|npm|yarn)(?: install| ci|\))/,
+      );
+    }
     expect(assessCandidatesStep).not.toContain('run_shell_command(npx vitest)');
     expect(workflowAndSkill).toContain(
       'Run required verification commands before committing',
@@ -12415,6 +12424,316 @@ exit 1
       expect(step).toContain('sleep $((attempt * 15))');
       expect(step).toContain('npm run build');
       expect(step).toContain('npm run bundle');
+    }
+  });
+
+  it('installs branch dependencies after checkout and before any agent or heartbeat', () => {
+    const job = parse(workflow).jobs['review-address'];
+    const steps = job.steps;
+    const indexOf = (name) => steps.findIndex((step) => step.name === name);
+    const install = steps.find(
+      (step) => step.name === 'Install branch dependencies',
+    );
+    expect(install).toBeDefined();
+    expect(install.id).toBe('branch_dependencies');
+    expect(install.if).toBe("${{ steps.prepare.outputs.stale != 'true' }}");
+    expect(install['continue-on-error']).toBeUndefined();
+    expect(install['timeout-minutes']).toBe(10);
+    const ordered = [
+      'Install dependencies',
+      'Stage trusted test-surface instrument',
+      'Restore CLI bundle',
+      'Prepare branch and feedback',
+      'Install branch dependencies',
+      'Post autofix status comment',
+      'Triage and address',
+    ].map(indexOf);
+    expect(ordered.every((index) => index >= 0)).toBe(true);
+    expect(ordered).toEqual([...ordered].sort((a, b) => a - b));
+    expect(indexOf('Install branch dependencies')).toBe(
+      indexOf('Prepare branch and feedback') + 1,
+    );
+    expect(prepareStep).not.toContain('pnpm install');
+    for (const name of [
+      'Install dependencies',
+      'Install branch dependencies',
+    ]) {
+      const step = steps.find((candidate) => candidate.name === name);
+      expect(step.run).toContain('for attempt in 1 2 3; do');
+      expect(step.run).toContain(
+        'corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only',
+      );
+      expect(step.run).toContain('sleep $((attempt * 15))');
+      expect(step.run).not.toContain('npm run build');
+      expect(step.run).not.toContain('npm run bundle');
+      expect(step.run).not.toContain('--ignore-scripts');
+    }
+    // Conflicts still need the branch install: the agent must retain its
+    // existing conflict-resolution/handoff path, even for a conflicted PR.
+    expect(install.if).not.toContain('conflict');
+    expect(
+      steps.find((step) => step.name === 'Triage and address').env.CONFLICT,
+    ).toBe('${{ steps.prepare.outputs.conflict }}');
+    expect(steps.find((step) => step.name === 'Verification gate').if).toBe(
+      "${{ always() && steps.prepare.outputs.stale != 'true' && steps.branch_dependencies.outcome == 'success' }}",
+    );
+    expect(reviewAddressReportStep).toContain(
+      "BRANCH_DEPENDENCIES_OUTCOME: '${{ steps.branch_dependencies.outcome }}'",
+    );
+    for (const name of ['Post autofix status comment', 'Triage and address']) {
+      expect(steps.find((step) => step.name === name).if).not.toContain(
+        'always()',
+      );
+    }
+    for (const step of [
+      install,
+      steps.find((step) => step.name === 'Post autofix status comment'),
+    ]) {
+      for (const key of [
+        'BASH_ENV',
+        'SHELLOPTS',
+        'LD_PRELOAD',
+        'LD_AUDIT',
+        'LD_LIBRARY_PATH',
+      ]) {
+        expect(step.env[key], `${step.name}: ${key}`).toBe('');
+      }
+    }
+    expect(install.env.TRUSTED_PATH).toBe(
+      '${{ steps.stage.outputs.trusted_path }}',
+    );
+    expect(install.env.HOME).toBe('${{ steps.stage.outputs.trusted_home }}');
+    expect(install.env.RUNNER_TEMP).toBe('${{ runner.temp }}');
+    expect(install.env.WORKDIR).toBe(
+      '/tmp/autofix-review-${{ matrix.target.pr }}',
+    );
+    expect(install.env.CHECKED_OUT_HEAD).toBe(
+      '${{ steps.prepare.outputs.checked_out_head }}',
+    );
+    expect(JSON.stringify(install.env)).not.toContain('secrets.');
+  });
+
+  it.each([
+    {
+      name: 'immediate success',
+      failures: 0,
+      attempts: 1,
+      delays: [],
+      status: 0,
+    },
+    {
+      name: 'one transient failure',
+      failures: 1,
+      attempts: 2,
+      delays: ['15'],
+      status: 0,
+    },
+    {
+      name: 'two transient failures',
+      failures: 2,
+      attempts: 3,
+      delays: ['15', '30'],
+      status: 0,
+    },
+    {
+      name: 'exhausted failures',
+      failures: 3,
+      attempts: 3,
+      delays: ['15', '30'],
+      status: 1,
+    },
+    {
+      name: 'successful install dirties tracked files',
+      failures: 0,
+      mutation: 'dirty',
+      attempts: 1,
+      delays: [],
+      status: 1,
+    },
+    {
+      name: 'failed install dirties tracked files',
+      failures: 1,
+      mutation: 'dirty',
+      attempts: 1,
+      delays: [],
+      status: 1,
+    },
+    {
+      name: 'successful install changes HEAD',
+      failures: 0,
+      mutation: 'commit',
+      attempts: 1,
+      delays: [],
+      status: 1,
+    },
+    {
+      name: 'failed install changes HEAD',
+      failures: 1,
+      mutation: 'commit',
+      attempts: 1,
+      delays: [],
+      status: 1,
+    },
+  ])('runs the branch install with a clean environment: $name', (scenario) => {
+    const step = parse(workflow).jobs['review-address'].steps.find(
+      (candidate) => candidate.name === 'Install branch dependencies',
+    );
+    expect(step).toBeDefined();
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-branch-install-'));
+    const repo = join(dir, 'repo');
+    const bin = join(dir, 'bin');
+    const runner = join(dir, 'runner');
+    const workdir = join(dir, 'work');
+    const home = join(dir, 'home');
+    const commands = join(runner, '_runner_file_commands');
+    const records = join(dir, 'attempts.json');
+    const sleeps = join(dir, 'sleeps.txt');
+    const channels = [
+      'GITHUB_ENV',
+      'GITHUB_OUTPUT',
+      'GITHUB_PATH',
+      'GITHUB_STEP_SUMMARY',
+    ];
+    const stripped = [
+      ...channels,
+      'GITHUB_TOKEN',
+      'GH_TOKEN',
+      'OPENAI_API_KEY',
+      'RUNNER_TEMP',
+      'WORKDIR',
+      'UNEXPECTED_INSTALL_CANARY',
+    ];
+    for (const path of [repo, bin, commands, workdir, home])
+      mkdirSync(path, { recursive: true });
+    const channelEnv = Object.fromEntries(
+      channels.map((name) => [name, join(commands, name)]),
+    );
+    for (const path of Object.values(channelEnv)) writeFileSync(path, '');
+    const git = (...args) =>
+      execFileSync('git', args, {
+        cwd: repo,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }).trim();
+    try {
+      git('init', '-q');
+      git('config', 'user.name', 'fixture');
+      git('config', 'user.email', 'fixture@example.test');
+      git('config', 'core.hooksPath', '/dev/null');
+      writeFileSync(join(repo, 'tracked.txt'), 'before\n');
+      git('add', 'tracked.txt');
+      git('commit', '-qm', 'before install');
+      const head = git('rev-parse', 'HEAD');
+      writeFileSync(
+        join(bin, 'corepack'),
+        [
+          `#!${process.execPath}`,
+          "const fs = require('node:fs');",
+          "const { execFileSync } = require('node:child_process');",
+          `const recordsPath = ${JSON.stringify(records)};`,
+          'const attempts = fs.existsSync(recordsPath) ? JSON.parse(fs.readFileSync(recordsPath, "utf8")) : [];',
+          `const stripped = ${JSON.stringify(stripped)};`,
+          `const files = ${JSON.stringify(Object.values(channelEnv))};`,
+          'attempts.push({ args: process.argv.slice(2), skipPrepare: process.env.QWEN_SKIP_PREPARE, ci: process.env.CI, home: process.env.HOME, leaked: stripped.filter((key) => key in process.env), modes: files.map((path) => fs.statSync(path).mode & 0o222) });',
+          'fs.writeFileSync(recordsPath, JSON.stringify(attempts));',
+          'console.log("::notice::branch lifecycle output");',
+          'console.log("prefix ##[add-matcher]branch.json");',
+          ...(scenario.mutation
+            ? [
+                'fs.writeFileSync("tracked.txt", "changed by lifecycle\\n");',
+                ...(scenario.mutation === 'commit'
+                  ? [
+                      'execFileSync("git", ["commit", "-qam", "lifecycle mutation"]);',
+                    ]
+                  : []),
+              ]
+            : []),
+          `process.exit(attempts.length <= ${scenario.failures} ? 7 : 0);`,
+        ].join('\n'),
+      );
+      writeFileSync(
+        join(bin, 'sleep'),
+        [
+          `#!${process.execPath}`,
+          `require('node:fs').appendFileSync(${JSON.stringify(sleeps)}, process.argv[2] + '\\n');`,
+        ].join('\n'),
+      );
+      chmodSync(join(bin, 'corepack'), 0o755);
+      chmodSync(join(bin, 'sleep'), 0o755);
+      const result = spawnSync(
+        'bash',
+        ['--norc', '-e', '-o', 'pipefail', '-c', step.run],
+        {
+          cwd: repo,
+          env: {
+            ...process.env,
+            ...channelEnv,
+            ...Object.fromEntries(
+              Object.entries(step.env).filter(
+                ([, value]) => !value.includes('${{'),
+              ),
+            ),
+            TRUSTED_PATH: `${bin}:${process.env.PATH}`,
+            HOME: home,
+            RUNNER_TEMP: runner,
+            WORKDIR: workdir,
+            CHECKED_OUT_HEAD: head,
+            GITHUB_TOKEN: 'fixture-github-secret',
+            GH_TOKEN: 'fixture-gh-secret',
+            OPENAI_API_KEY: 'fixture-model-secret',
+            UNEXPECTED_INSTALL_CANARY: 'must-not-reach-lifecycle',
+          },
+          encoding: 'utf8',
+          timeout: subprocessTimeoutMs,
+        },
+      );
+      expect(result.error).toBeUndefined();
+      expect(result.status, result.stdout + result.stderr).toBe(
+        scenario.status,
+      );
+      const attempts = JSON.parse(readFileSync(records, 'utf8'));
+      expect(attempts).toHaveLength(scenario.attempts);
+      for (const attempt of attempts) {
+        expect(attempt).toEqual({
+          args: [
+            'pnpm',
+            'install',
+            '--frozen-lockfile',
+            '--prefer-offline',
+            '--reporter=append-only',
+          ],
+          skipPrepare: '1',
+          ci: 'true',
+          home,
+          leaked: [],
+          modes: channels.map(() => 0),
+        });
+      }
+      expect(
+        existsSync(sleeps)
+          ? readFileSync(sleeps, 'utf8').trim().split('\n')
+          : [],
+      ).toEqual(scenario.delays);
+      expect(result.stdout).toContain(';;notice;;branch lifecycle output');
+      expect(result.stdout).toContain('prefix ##［add-matcher]branch.json');
+      expect(result.stdout).not.toContain('::notice::');
+      expect(result.stdout).not.toContain('##[add-matcher]');
+      const log = readFileSync(
+        join(workdir, 'branch-dependencies.log'),
+        'utf8',
+      );
+      expect(log).toContain('::notice::branch lifecycle output');
+      expect(log).toContain('prefix ##[add-matcher]branch.json');
+      if (scenario.mutation) {
+        expect(log).toContain(
+          'dependency installation changed HEAD or left the branch tree dirty',
+        );
+      } else {
+        expect(git('rev-parse', 'HEAD')).toBe(head);
+        expect(git('status', '--porcelain')).toBe('');
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 
@@ -16373,12 +16692,12 @@ exit 1
       const launchIdx = argStart;
       expect(execIdx).toBeGreaterThan(launchIdx);
     }
-    // Five clean children: the two deferred-findings upserts, the two
-    // verification-gate launches (the gate runs after the agent step's
-    // branch code, so its bash must inherit nothing at all), and the
-    // finalize step's PAT-touching body (R9-1: BASH_FUNC imports close
+    // Six clean children: the branch install, the two deferred-findings
+    // upserts, the two verification-gate launches (the gate runs after the
+    // agent step's branch code, so its bash must inherit nothing at all),
+    // and the finalize step's PAT-touching body (R9-1: BASH_FUNC imports close
     // only inside an env -i child).
-    expect(workflowWithScripts.split('/usr/bin/env -i \\').length - 1).toBe(5);
+    expect(workflowWithScripts.split('/usr/bin/env -i \\').length - 1).toBe(6);
     // R5-6: the failure-path child is near-verbatim of run_deferred_upsert's
     // child — tie their shared security scaffold together so drift in one is
     // caught. Compare the allow-list + prelude (everything up to where the
@@ -18240,7 +18559,7 @@ exit 1
     const reviewVerificationGateStep = verificationGateSteps[1];
 
     expect(reviewVerificationGateStep).toContain(
-      "if: |-\n          ${{ always() && steps.prepare.outputs.stale != 'true' }}",
+      "if: |-\n          ${{ always() && steps.prepare.outputs.stale != 'true' && steps.branch_dependencies.outcome == 'success' }}",
     );
     expect(reviewVerificationGateStep).toContain(
       'bash --norc "${RUNNER_TEMP}/run-autofix-review-verification.sh"',
@@ -20681,6 +21000,28 @@ exit 1
     const noOutput = run({ OUTCOME: '', DETAIL_FILE: '' });
     expect(noOutput.split('|')[0]).toBe(SENTINEL);
     expect(noOutput).toContain('crashed before it could evaluate the feedback');
+
+    // Dependency installation failed before the agent ran: preserve feedback
+    // for retry and name the setup failure rather than claiming a gate error.
+    const branchInstallFailed = run({
+      OUTCOME: '',
+      DETAIL_FILE: '',
+      BRANCH_DEPENDENCIES_OUTCOME: 'failure',
+    });
+    expect(branchInstallFailed.split('|')[0]).toBe(SENTINEL);
+    expect(branchInstallFailed).toContain(
+      'could not install the branch dependencies before starting the agent',
+    );
+    expect(branchInstallFailed).toContain('it will retry on the next scan');
+    expect(branchInstallFailed).not.toContain('verification-gate error');
+    expect(
+      run({
+        OUTCOME: '',
+        DETAIL_FILE: '',
+        BRANCH_DEPENDENCIES_OUTCOME: 'failure',
+        ROUND: '4',
+      }),
+    ).toContain('check the Install branch dependencies logs, then re-arm');
 
     // A TIMEOUT evaluated nothing → retry (sentinel), not an evaluated advance
     // that would strand the unaddressed feedback. Even with OUTCOME=failed set
@@ -23283,6 +23624,13 @@ exit 1
     const reportRowMin = Number(designDoc.match(/\n {2}report +(\d+)\n/)?.[1]);
     expect(Number.isFinite(setupRowMin)).toBe(true);
     expect(Number.isFinite(reportRowMin)).toBe(true);
+    const branchInstall = parse(workflow).jobs['review-address'].steps.find(
+      (step) => step.name === 'Install branch dependencies',
+    );
+    // The new install backstop consumes setup reserve, not another uncounted
+    // ten minutes after the four long steps have used the job budget.
+    expect(setupRowMin).toBe(7 + branchInstall['timeout-minutes']);
+    expect(setupRowMin + reportRowMin).toBeLessThanOrEqual(25);
     const longStepSumHosted = longSteps.reduce(
       (a, b) => a + stepCapsOf(b).hosted,
       0,

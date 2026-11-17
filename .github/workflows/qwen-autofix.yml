@@ -5063,6 +5063,66 @@ jobs:
           # prefixes like every other untrusted echo.
           cat "${WORKDIR}/feedback.md" | sed -e 's/::/;;/g' -e 's/##\[/##［/g'
 
+      - name: 'Install branch dependencies'
+        id: 'branch_dependencies'
+        if: |-
+          ${{ steps.prepare.outputs.stale != 'true' }}
+        timeout-minutes: 10
+        env:
+          BASH_ENV: ''
+          SHELLOPTS: ''
+          LD_PRELOAD: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
+          TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
+          HOME: '${{ steps.stage.outputs.trusted_home }}'
+          RUNNER_TEMP: '${{ runner.temp }}'
+          WORKDIR: '/tmp/autofix-review-${{ matrix.target.pr }}'
+          CHECKED_OUT_HEAD: '${{ steps.prepare.outputs.checked_out_head }}'
+        run: |-
+          set -euo pipefail
+          export PATH="${TRUSTED_PATH}"
+          # The base install supplies the trusted tools; this install supplies
+          # the checked-out branch's workspace links before the agent builds.
+          # Run before the PAT-bearing status heartbeat starts, without runner
+          # file-command channels or credentials in the lifecycle environment.
+          for command_file in "${RUNNER_TEMP}/_runner_file_commands"/*; do
+            if [[ -f "${command_file}" ]]; then
+              chmod a-w "${command_file}" 2> /dev/null || true
+            fi
+          done
+          install_rc=0
+          /usr/bin/env -i \
+            PATH="${TRUSTED_PATH}" HOME="${HOME}" CI=true QWEN_SKIP_PREPARE=1 \
+            CHECKED_OUT_HEAD="${CHECKED_OUT_HEAD}" \
+            bash --norc <<'INSTALL' > "${WORKDIR}/branch-dependencies.log" 2>&1 || install_rc=$?
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            attempt_rc=0
+            corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only || attempt_rc=$?
+            actual_head="$(git rev-parse HEAD)"
+            dirty="$(git status --porcelain)"
+            # Failed lifecycle scripts can mutate the tree too. Do not retry
+            # until the checkout is verified, or hide a mutation with a retry.
+            if [[ "${actual_head}" != "${CHECKED_OUT_HEAD}" || -n "${dirty}" ]]; then
+              printf '%s\n' "${dirty}"
+              echo 'dependency installation changed HEAD or left the branch tree dirty'
+              exit 1
+            fi
+            if [[ "${attempt_rc}" -eq 0 ]]; then
+              exit 0
+            fi
+            if [[ "${attempt}" == '3' ]]; then
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
+          INSTALL
+          # Keep the original transcript on disk, neutralizing workflow command
+          # syntax only when displaying branch-controlled lifecycle output.
+          sed -e 's/::/;;/g' -e 's/##\[/##［/g' "${WORKDIR}/branch-dependencies.log"
+          exit "${install_rc}"
+
       # Announce the round so long agent work is distinguishable from a stall.
       # Full rationale → qwen-autofix.md#af-124
       - name: 'Post autofix status comment'
@@ -5070,6 +5130,11 @@ jobs:
         if: |-
           ${{ steps.prepare.outputs.stale != 'true' && needs.route.outputs.dry_run != 'true' }}
         env:
+          BASH_ENV: ''
+          SHELLOPTS: ''
+          LD_PRELOAD: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           EFFECTIVE_ROUND: '${{ steps.prepare.outputs.effective_round }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
@@ -5317,7 +5382,7 @@ jobs:
       - name: 'Verification gate'
         id: 'verify'
         if: |-
-          ${{ always() && steps.prepare.outputs.stale != 'true' }}
+          ${{ always() && steps.prepare.outputs.stale != 'true' && steps.branch_dependencies.outcome == 'success' }}
         continue-on-error: true
         # Unbounded until now, and the largest consumer in the job (22m48s
         # measured on #8211). Left unbounded it eats the job timeout, and a
@@ -5915,6 +5980,7 @@ jobs:
           # 'success'/'failure' when Prepare itself ran. Distinguishes a
           # transient pre-agent crash (retry) from a genuine agent crash.
           PREPARE_OUTCOME: '${{ steps.prepare.outcome }}'
+          BRANCH_DEPENDENCIES_OUTCOME: '${{ steps.branch_dependencies.outcome }}'
           STALE: '${{ steps.prepare.outputs.stale }}'
           EFFECTIVE_ROUND: '${{ steps.prepare.outputs.effective_round }}'
           MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
@@ -6075,7 +6141,12 @@ jobs:
                 # gate crash each name the operator fix, while a bare no-output
                 # crash points at a human.
                 # Full rationale → qwen-autofix.md#af-139
-                if [[ -n "${API_ERROR_DETAIL}" ]]; then
+                if [[ "${BRANCH_DEPENDENCIES_OUTCOME:-}" == 'failure' ]]; then
+                  CAUSE="could not install the branch dependencies before starting the agent"
+                  CAUSE_ZH="在启动 agent 之前未能安装分支依赖"
+                  LAST_FIX="a maintainer should check the Install branch dependencies logs, then re-arm"
+                  LAST_FIX_ZH="维护者应查看 Install branch dependencies 日志，然后重新武装"
+                elif [[ -n "${API_ERROR_DETAIL}" ]]; then
                   CAUSE="could not reach the model — ${API_ERROR_DETAIL}"
                   CAUSE_ZH="无法连接模型 —— ${API_ERROR_DETAIL}"
                   LAST_FIX="a maintainer should check the autofix model key/access, then re-arm"

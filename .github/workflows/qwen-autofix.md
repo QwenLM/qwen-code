@@ -1677,16 +1677,18 @@ Measured on run 30646547838:
   push + report + finalize                     3-4s
 
 Setup runs in EARLIER steps, so it never competes with the agent
-for this cap. Worst-case budget:
+for this cap. The post-checkout branch install has a 10-minute
+backstop, added to the measured setup allowance below so a hung
+install leaves time for the failure report. Worst-case budget:
 
-  setup                    7
+  setup                   17
   Triage and address     130  (120 budget + 10 margin)
   Verification gate       60  (2.6x the measured 22m48s)
   Repair                  70  (60 budget + the same 10 margin)
   Repair verification     60
   report                   3
   -------------------------------
-  worst case             330  => job timeout 345, and the job runs
+  worst case             340  => job timeout 345, and the job runs
                                  on ubuntu-latest, whose own ceiling
                                  is 360.
 
@@ -1699,14 +1701,14 @@ expression — the runs-on self-hosted predicate repeated VERBATIM
 465 when it holds, 345 otherwise; a meta-test pins the two copies
 equal so they cannot drift.
 
-  setup                    7
+  setup                   17
   Triage and address     250  (240 budget + 10 margin)
   Verification gate       60
   Repair                  70
   Repair verification     60
   report                   3
   -------------------------------
-  worst case (self-hosted) 450  => job timeout 465
+  worst case (self-hosted) 460  => job timeout 465
 ```
 
 <a id="af-051"></a>

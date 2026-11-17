@@ -3243,19 +3243,24 @@ describe('package scripts', () => {
   it('skips autofix install-time prepare without disabling dependency scripts', () => {
     const workflow = readWorkflow('.github/workflows/qwen-autofix.yml');
 
-    // review-address restores the shared build-cli bundle instead of
-    // compiling, so its install step is npm ci only; the other two jobs
+    // review-address restores the shared build-cli bundle, installs its
+    // trusted base, then synchronizes the checked-out branch; the other jobs
     // still build from sources. Husky hooks are re-armed after the
     // prepare-skip only where git commits happen (build-cli never commits).
     for (const [jobName, stepName, armsHooks] of [
       ['issue-autofix', 'Install dependencies and build', true],
       ['build-cli', 'Install dependencies and build', false],
       ['review-address', 'Install dependencies', true],
+      ['review-address', 'Install branch dependencies', false],
     ]) {
       const job = getWorkflowJob(workflow, jobName);
       const installStep = getWorkflowStep(job, stepName);
 
-      expect(installStep).toContain("QWEN_SKIP_PREPARE: '1'");
+      expect(installStep).toContain(
+        stepName === 'Install branch dependencies'
+          ? 'QWEN_SKIP_PREPARE=1'
+          : "QWEN_SKIP_PREPARE: '1'",
+      );
       expect(installStep).toContain(
         'corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only',
       );
