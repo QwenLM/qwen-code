@@ -10,6 +10,7 @@ import {
   buildSessionHistoryFromConversation,
   detectTurnInterruption,
   effectiveHistoryEnd,
+  isBareTextPart,
   SessionService,
   TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
   type ChatRecord,
@@ -462,6 +463,10 @@ function isCompressionResetRecord(record: ChatRecord): boolean {
  * loses the user entry while this mirror returns false, so the completion guard
  * vetoes and that command's promptId stays `unknown` — a MISSING terminal, the
  * failure this module is allowed to have, never a wrong one.
+ *
+ * The input-part SHAPE is shared, though: `isBareTextPart` is the
+ * accumulator's own test, which also accepts the typed-prompt mark. A copied
+ * key count would drift the first time core relaxes it.
  */
 function isLocalSlashCommandResult(
   record: ChatRecord,
@@ -483,8 +488,7 @@ function isLocalSlashCommandResult(
     previous.message?.role === 'user' &&
     parts?.length === 1 &&
     first !== undefined &&
-    typeof first.text === 'string' &&
-    Object.keys(first).length === 1 &&
+    isBareTextPart(first) &&
     first.text === payload.rawCommand
   );
 }
