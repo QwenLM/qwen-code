@@ -1527,6 +1527,37 @@ describe('OpenTuiTranscriptView scroll host', () => {
     }
   });
 
+  it('announces the visible span rather than the mounted overscan window', () => {
+    const view = mountHosted({
+      rows: Array.from({ length: session.length }, () => 2),
+      screenReader: true,
+    });
+    try {
+      view.frame();
+      view.jump(3000);
+      view.frame();
+      const visible = view
+        .visibleLines()
+        .map((line) => /TURN_(\d+)/.exec(line))
+        .filter((match): match is RegExpExecArray => match !== null)
+        .map((match) => Number(match[1]));
+      expect(visible.length).toBeGreaterThan(0);
+      expect(view.container.textContent).toContain('History items');
+      expect(
+        view.container.querySelector('[data-id="screen-reader-history-window"]')
+          ?.textContent,
+      ).toBe(
+        `History items ${visible[0] + 1}-${visible.at(-1)! + 1} of ${session.length}`,
+      );
+      expect(visible.length).toBeLessThan(
+        view.container.querySelectorAll('[data-id^="screen-reader-item-"]')
+          .length,
+      );
+    } finally {
+      view.unmount();
+    }
+  });
+
   function mountHosted(opts: {
     /** Rows each turn's box is laid out at. `0` means laid out empty: Yoga
      *  computes 0 while the reported height is clamped to 1. */

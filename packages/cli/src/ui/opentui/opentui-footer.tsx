@@ -148,7 +148,7 @@ export function OpenTuiLoadingIndicator({
   if (!streaming && !waiting) return null;
   if (screenReader)
     return (
-      <text>
+      <text id="screen-reader-loading">
         {waiting
           ? t('Waiting for confirmation')
           : t('Working. Escape to cancel.')}
@@ -347,7 +347,7 @@ export function OpenTuiFooter({
           [
             'worktree',
             activeWorktree && !settings.merged.ui?.hideBuiltinWorktreeIndicator
-              ? `Worktree: ${activeWorktree.branch} (${activeWorktree.slug})`
+              ? `Worktree: ${activeWorktree.branch || 'detached HEAD'} (${activeWorktree.slug})`
               : '',
           ],
           [
@@ -371,7 +371,11 @@ export function OpenTuiFooter({
     return (
       <box flexDirection="column">
         {segments.map(([key, text]) =>
-          text ? <text key={key}>{text}</text> : null,
+          text ? (
+            <text key={key} id={`screen-reader-footer-${key}`}>
+              {text}
+            </text>
+          ) : null,
         )}
       </box>
     );

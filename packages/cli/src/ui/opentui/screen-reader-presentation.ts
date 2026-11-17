@@ -16,7 +16,7 @@ import {
 import type { ScreenReaderOutputWriter } from './a11y-screen-reader.js';
 import { markdownToPlainText } from './a11y-plain-text.js';
 import { cpLen } from '../utils/textUtils.js';
-import { t } from '../../i18n/index.js';
+import { getCurrentLanguage, t } from '../../i18n/index.js';
 
 const HISTORY_ROLE_LABELS = new Set([
   'user',
@@ -196,6 +196,22 @@ export function readScreenReaderControls(node: Renderable): string {
     .join('\n');
 }
 
+/**
+ * A settled row's own id survives the remount a dialog or a parked tool call
+ * causes, so an unchanged value is not appended again. Only the footer and
+ * loading ids qualify: each names exactly one row. Keying on any other id
+ * would either lose the de-selection suppression below (a selection id names
+ * the cursor's state, not the row) or collapse rows that share one state id
+ * (every modality toggle in the same state carries the same auth toggle id).
+ */
+function controlKey(owner: Renderable): Renderable | string {
+  const id = owner.id;
+  return id &&
+    (id.startsWith('screen-reader-footer-') || id === 'screen-reader-loading')
+    ? id
+    : owner;
+}
+
 interface HistoryOwnerItem {
   kind: string;
   id: string;
@@ -211,24 +227,26 @@ function historyKey(item: HistoryOwnerItem): string {
 export class ScreenReaderPresentation {
   private owner: object | undefined;
   private history = new Map<string, string>();
-  private controls = new Map<Renderable, string>();
+  private controls = new Map<Renderable | string, string>();
   private dialogOpen = false;
   private historyWindow = '';
   private items: readonly HistoryOwnerItem[] = [];
+  private language: string | undefined;
 
   constructor(private readonly writer: ScreenReaderOutputWriter) {}
 
   setHistory(owner: object, items: readonly HistoryOwnerItem[]): void {
-    const hadHistory = this.history.size > 0;
     if (this.owner !== owner) {
       this.owner = owner;
       this.history.clear();
       this.controls.clear();
       this.dialogOpen = false;
       this.historyWindow = '';
-    }
-    if (!items.length && hadHistory)
+    } else if (!items.length && this.history.size > 0) {
+      // Only the session the reader is still on can be cleared: opening a
+      // different, empty session says nothing about the one just left.
       this.writer.appendStatic(t('Conversation cleared.'));
+    }
     if (!items.length) this.historyWindow = '';
     this.items = items;
     const current = new Set(items.map((item) => historyKey(item)));
@@ -236,7 +254,7 @@ export class ScreenReaderPresentation {
       if (!current.has(key)) this.history.delete(key);
   }
 
-  private publishHistory(root: Renderable): void {
+  private publishHistory(root: Renderable, silent: boolean): void {
     if (!this.items.length) return;
     const historyRoot = root.findDescendantById('screen-reader-history');
     if (!historyRoot) return;
@@ -246,7 +264,7 @@ export class ScreenReaderPresentation {
     const rangeText = range ? readScreenReaderControls(range) : '';
     if (rangeText && rangeText !== this.historyWindow) {
       this.historyWindow = rangeText;
-      this.writer.appendStatic(rangeText);
+      if (!silent) this.writer.appendStatic(rangeText);
     }
     const nodes = new Map<string, Renderable>();
     const collect = (node: Renderable): void => {
@@ -277,10 +295,16 @@ export class ScreenReaderPresentation {
       const previous = this.history.get(key) ?? '';
       if (text === previous) continue;
       this.history.set(key, text);
-      this.writer.appendStatic(
-        previous ? t('Revision {{value}}', { value: text }) : text,
-      );
+      if (!silent)
+        this.writer.appendStatic(
+          previous ? t('Revision {{value}}', { value: text }) : text,
+        );
     }
+  }
+
+  /** Erases the dynamic block once no frame can repaint it. */
+  dispose(): void {
+    this.writer.clearDynamic();
   }
 
   observeFrames(
@@ -293,8 +317,14 @@ export class ScreenReaderPresentation {
     let active = true;
     const onFrame = () => {
       if (!active) return;
+      // Every stored string is localized, so a live language switch recomposes
+      // all of them at once. The frame that sees it reseeds the dedupe state
+      // instead of replaying the conversation into the append-only scrollback.
+      const language = getCurrentLanguage();
+      const silent = this.language !== undefined && language !== this.language;
+      this.language = language;
       const root = controls();
-      if (root) this.publishHistory(root);
+      if (root) this.publishHistory(root, silent);
       const dialogOpen = Boolean(
         root?.findDescendantById('screen-reader-dialog'),
       );
@@ -308,10 +338,11 @@ export class ScreenReaderPresentation {
         );
       }
       this.dialogOpen = dialogOpen;
-      const current = new Map<Renderable, string>();
+      const current = new Map<Renderable | string, string>();
       const live: string[] = [];
       for (const row of root ? controlRows(root) : []) {
-        current.set(row.owner, row.text);
+        const key = controlKey(row.owner);
+        current.set(key, row.text);
         // An editable value is ink's dynamic block: it replaces its own lines
         // in place, so a keystroke never appends another copy of the whole
         // field to the permanent scrollback.
@@ -322,8 +353,9 @@ export class ScreenReaderPresentation {
           live.push(row.text);
           continue;
         }
-        const previous = this.controls.get(row.owner);
+        const previous = this.controls.get(key);
         if (
+          !silent &&
           row.text !== previous &&
           previous !== t('Selected {{value}}', { value: row.text })
         )

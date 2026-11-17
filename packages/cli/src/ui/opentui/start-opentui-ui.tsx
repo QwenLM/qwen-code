@@ -779,6 +779,7 @@ export async function startOpenTuiUI(
     registerCleanup(async () => {
       runtime!.dualOutputBridge?.finalizeAssistantMessage();
       detachScreenReader?.();
+      presentation?.dispose();
       root.unmount();
       renderer.destroy();
       await runtime!.shutdown();
@@ -847,6 +848,7 @@ export async function startOpenTuiUI(
     try {
       runtime?.dualOutputBridge?.finalizeAssistantMessage();
       detachScreenReader?.();
+      presentation?.dispose();
       root.unmount();
       renderer.destroy();
       if (runtime) await runtime.shutdown();

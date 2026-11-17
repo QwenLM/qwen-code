@@ -232,7 +232,9 @@ function sameWindow(a: TranscriptWindow, b: TranscriptWindow): boolean {
     a.start === b.start &&
     a.end === b.end &&
     a.topPad === b.topPad &&
-    a.bottomPad === b.bottomPad
+    a.bottomPad === b.bottomPad &&
+    a.visibleStart === b.visibleStart &&
+    a.visibleEnd === b.visibleEnd
   );
 }
 
@@ -313,6 +315,8 @@ function useTranscriptWindow(
     end: 0,
     topPad: 0,
     bottomPad: 0,
+    visibleStart: 0,
+    visibleEnd: 0,
   });
   /** `rows: 0` means no scroll host has reported a viewport yet, so the height
    *  prop is the fallback — read every render, which keeps a host-less pane
@@ -741,8 +745,8 @@ export function OpenTuiTranscriptView({
         <>
           <text id="screen-reader-history-window">
             {t('History items {{start}}-{{end}} of {{total}}', {
-              start: String(win.start + 1),
-              end: String(win.end),
+              start: String(win.visibleStart + 1),
+              end: String(win.visibleEnd),
               total: String(visibleItems.length),
             })}
           </text>

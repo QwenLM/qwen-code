@@ -51,6 +51,7 @@ import { clampDialogHeight } from '../utils/layoutUtils.js';
 
 import {
   clipToWidth,
+  cpLen,
   getCachedStringWidth,
   sanitizeTerminalLine,
   truncateToWidth,
@@ -1078,6 +1079,7 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
         <text fg={C.text}>{activeTab.description}</text>
       </box>
       <box
+        id="screen-reader-input-line"
         borderStyle="rounded"
         borderColor={C.dim}
         paddingX={1}
@@ -1089,9 +1091,16 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
         {searchQuery ? (
           // A query longer than the box would wrap it onto a second content
           // row the chrome budget does not pay for.
-          <text fg={C.text}>{truncateToWidth(searchQuery, 54)}</text>
+          <text
+            id={`screen-reader-caret-active-${cpLen(searchQuery)}`}
+            fg={C.text}
+          >
+            {truncateToWidth(searchQuery, 54)}
+          </text>
         ) : (
-          <text fg={C.dim}>{t('Search…')}</text>
+          <text id="screen-reader-caret-active-0" fg={C.dim}>
+            {t('Search…')}
+          </text>
         )}
       </box>
       <box height={1} />

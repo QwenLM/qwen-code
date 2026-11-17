@@ -50,6 +50,10 @@ export interface TranscriptWindow {
   topPad: number;
   /** Rows of spacer standing in for items from `end` on. */
   bottomPad: number;
+  /** First item whose rows intersect the viewport, without the overscan. */
+  visibleStart: number;
+  /** One past the last item whose rows intersect the viewport. */
+  visibleEnd: number;
 }
 
 /** Item row offsets: `offsets[i]` is the first row of item `i`. */
@@ -82,7 +86,15 @@ export function computeTranscriptWindow(opts: {
   viewportRows: number;
 }): TranscriptWindow {
   const { itemCount, offsets } = opts;
-  if (itemCount <= 0) return { start: 0, end: 0, topPad: 0, bottomPad: 0 };
+  if (itemCount <= 0)
+    return {
+      start: 0,
+      end: 0,
+      topPad: 0,
+      bottomPad: 0,
+      visibleStart: 0,
+      visibleEnd: 0,
+    };
   const viewportRows = Math.max(1, opts.viewportRows);
   const total = offsets[itemCount] ?? 0;
 
@@ -107,10 +119,20 @@ export function computeTranscriptWindow(opts: {
     end = start + MAX_MOUNTED_ITEMS;
   }
 
+  const visibleStart = lastOffsetAtMost(offsets, scrollTop);
+  const visibleReach = scrollTop + viewportRows;
+  let visibleEnd = lastOffsetAtMost(offsets, visibleReach);
+  if (visibleEnd < itemCount && offsets[visibleEnd] < visibleReach)
+    visibleEnd += 1;
+
   return {
     start,
     end,
     topPad: offsets[start] ?? 0,
     bottomPad: Math.max(0, total - (offsets[end] ?? 0)),
+    visibleStart,
+    // Nothing outside the mounted slice is on screen, whatever the row
+    // arithmetic says a viewport taller than the mount cap would show.
+    visibleEnd: Math.min(visibleEnd, end),
   };
 }

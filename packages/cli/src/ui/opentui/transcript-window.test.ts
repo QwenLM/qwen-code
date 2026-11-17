@@ -51,12 +51,26 @@ describe('computeTranscriptWindow', () => {
         scrollTop: 0,
         viewportRows: 24,
       }),
-    ).toEqual({ start: 0, end: 0, topPad: 0, bottomPad: 0 });
+    ).toEqual({
+      start: 0,
+      end: 0,
+      topPad: 0,
+      bottomPad: 0,
+      visibleStart: 0,
+      visibleEnd: 0,
+    });
   });
 
   it('mounts everything when the transcript fits the viewport', () => {
     const { win } = windowFor(6, 0, 40);
-    expect(win).toEqual({ start: 0, end: 6, topPad: 0, bottomPad: 0 });
+    expect(win).toEqual({
+      start: 0,
+      end: 6,
+      topPad: 0,
+      bottomPad: 0,
+      visibleStart: 0,
+      visibleEnd: 6,
+    });
   });
 
   it('clamps an out-of-range scroll position to the bottom', () => {
@@ -126,6 +140,8 @@ describe('computeTranscriptWindow', () => {
       end: 2876,
       topPad: 2476,
       bottomPad: 2124,
+      visibleStart: 2500,
+      visibleEnd: 2876,
     });
 
     const atTop = computeTranscriptWindow({
@@ -134,7 +150,26 @@ describe('computeTranscriptWindow', () => {
       scrollTop: 0,
       viewportRows: 500,
     });
-    expect(atTop).toEqual({ start: 0, end: 400, topPad: 0, bottomPad: 4600 });
+    expect(atTop).toEqual({
+      start: 0,
+      end: 400,
+      topPad: 0,
+      bottomPad: 4600,
+      visibleStart: 0,
+      visibleEnd: 400,
+    });
+  });
+
+  it('reports the visible span without the overscan the mount carries', () => {
+    const offsets = itemOffsets(Array.from({ length: 2000 }, () => 3));
+    const win = computeTranscriptWindow({
+      itemCount: 2000,
+      offsets,
+      scrollTop: 3000,
+      viewportRows: 24,
+    });
+    expect([win.start, win.end]).toEqual([992, 1016]);
+    expect([win.visibleStart, win.visibleEnd]).toEqual([1000, 1008]);
   });
 
   it('never binds the cap for a viewport of realistic height', () => {

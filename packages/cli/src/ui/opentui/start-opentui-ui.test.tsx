@@ -310,11 +310,13 @@ import * as sessionSwitch from './session-switch.js';
 import { startOpenTuiUI } from './start-opentui-ui.js';
 import {
   createCliRenderer,
+  EditBufferRenderable,
   Renderable,
   TextBufferRenderable,
 } from '@opentui/core';
 import { foldLiveEvent } from './live-session-model.js';
 import { stripAnsi } from './a11y-plain-text.js';
+import { eraseLines } from './a11y-screen-reader.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import type { InitializationResult } from '../../core/initializer.js';
@@ -1411,6 +1413,54 @@ describe('startOpenTuiUI fallback contract', () => {
       'frame',
       subscription![1],
     );
+  });
+
+  it('erases the screen-reader draft block during exit cleanup', async () => {
+    const config = buildConfig();
+    config.getScreenReader = () => true;
+    const prompt = Object.assign(
+      Object.create(EditBufferRenderable.prototype),
+      {
+        id: 'screen-reader-prompt',
+        visible: true,
+        isDestroyed: false,
+        focused: true,
+        plainText: 'half a draft',
+        cursorOffset: 12,
+        children: [],
+        getTextRange: () => 'half a draft',
+      },
+    ) as Renderable;
+    mocks.state.renderer.root = Object.assign(
+      Object.create(Renderable.prototype),
+      { id: 'root', visible: true, isDestroyed: false, children: [prompt] },
+    ) as Renderable;
+    const write = vi
+      .spyOn(process.stdout, 'write')
+      .mockImplementation(() => true);
+    try {
+      expect(
+        await startOpenTuiUI(
+          config,
+          settings,
+          [],
+          '/tmp/project',
+          {} as InitializationResult,
+        ),
+      ).toBe(true);
+      const frame = mocks.state.renderer.on.mock.calls.find(
+        ([name]) => name === 'frame',
+      )![1] as () => void;
+      const written = () =>
+        write.mock.calls.map(([chunk]) => String(chunk)).join('');
+      frame();
+      expect(written()).toContain('Focused Prompt: half a draft\nCursor: 12');
+      write.mockClear();
+      for (const cleanup of mocks.state.cleanups) await cleanup();
+      expect(written()).toContain(eraseLines(2));
+    } finally {
+      write.mockRestore();
+    }
   });
 
   it('leaves SIGINT confirmation to the application and destroys during exit cleanup', async () => {

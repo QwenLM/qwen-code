@@ -884,4 +884,106 @@ describe('screen-reader semantic presentation', () => {
     expect(output.match(/Shift\+Up\/Down/g)).toHaveLength(1);
     expect(output.match(/History items/g)).toHaveLength(3);
   });
+
+  it('keeps an unchanged settled control across a remount of its renderable', () => {
+    let output = '';
+    const events = new EventEmitter();
+    const footer = () => {
+      const model = text('model-x');
+      model.id = 'screen-reader-footer-status-0';
+      const worktree = text('Worktree: main (issue-123)');
+      worktree.id = 'screen-reader-footer-worktree';
+      const loading = text('Working. Escape to cancel.');
+      loading.id = 'screen-reader-loading';
+      return box([model, worktree, loading]);
+    };
+    let root = footer();
+    const presentation = new ScreenReaderPresentation(
+      new ScreenReaderOutputWriter((chunk) => {
+        output += chunk;
+      }),
+    );
+    presentation.observeFrames(events, () => root);
+    events.emit('frame');
+    const first = output;
+    expect(first.match(/model-x/g)).toHaveLength(1);
+    root = footer();
+    events.emit('frame');
+    expect(output).toBe(first);
+  });
+
+  it('keeps rows that share a state id distinct across frames', () => {
+    let output = '';
+    const events = new EventEmitter();
+    const toggle = (label: string) => {
+      const row = text(label);
+      row.id = 'screen-reader-auth-toggle-unfocused-off';
+      return row;
+    };
+    const root = box([toggle('Image'), toggle('Video'), toggle('Audio')]);
+    const presentation = new ScreenReaderPresentation(
+      new ScreenReaderOutputWriter((chunk) => {
+        output += chunk;
+      }),
+    );
+    presentation.observeFrames(events, () => root);
+    events.emit('frame');
+    events.emit('frame');
+    expect(output.match(/Toggle off: Image/g)).toHaveLength(1);
+    expect(output.match(/Toggle off: Video/g)).toHaveLength(1);
+    expect(output.match(/Toggle off: Audio/g)).toHaveLength(1);
+  });
+
+  it('does not announce a clear when a different empty session opens', () => {
+    let output = '';
+    const events = new EventEmitter();
+    const row = box([text('Hello from session A')]);
+    row.id = 'screen-reader-item-assistant:reply';
+    const history = box([row]);
+    history.id = 'screen-reader-history';
+    const presentation = new ScreenReaderPresentation(
+      new ScreenReaderOutputWriter((chunk) => {
+        output += chunk;
+      }),
+    );
+    presentation.setHistory({}, [{ kind: 'assistant', id: 'reply' }]);
+    presentation.observeFrames(events, () => box([history]));
+    events.emit('frame');
+    expect(output).toBe('assistant: Hello from session A\n');
+    presentation.setHistory({}, []);
+    expect(output).toBe('assistant: Hello from session A\n');
+  });
+
+  it('reseeds silently instead of replaying the conversation on a language switch', async () => {
+    let output = '';
+    const events = new EventEmitter();
+    const row = box([text('Hello world')]);
+    row.id = 'screen-reader-item-user:greeting';
+    const history = box([row]);
+    history.id = 'screen-reader-history';
+    const loading = text('Working. Escape to cancel.');
+    loading.id = 'screen-reader-loading';
+    const presentation = new ScreenReaderPresentation(
+      new ScreenReaderOutputWriter((chunk) => {
+        output += chunk;
+      }),
+    );
+    presentation.setHistory({}, [{ kind: 'user', id: 'greeting' }]);
+    presentation.observeFrames(events, () => box([history, loading]));
+    events.emit('frame');
+    const english = output;
+    expect(english).toBe('user: Hello world\nWorking. Escape to cancel.\n');
+    await setLanguageAsync('de');
+    try {
+      Object.assign(loading, {
+        plainText: 'Wird ausgeführt. Escape zum Abbrechen.',
+      });
+      events.emit('frame');
+      expect(output).toBe(english);
+      events.emit('frame');
+      expect(output).toBe(english);
+    } finally {
+      await setLanguageAsync('en');
+    }
+  });
 });

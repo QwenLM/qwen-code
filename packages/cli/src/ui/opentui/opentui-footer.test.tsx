@@ -45,7 +45,7 @@ const mocks = vi.hoisted(() => {
         // are surfaced as data-* for assertions to pin.
         const dom: Record<string, unknown> = key === undefined ? {} : { key };
         const source = (config ?? {}) as Record<string, unknown>;
-        for (const name of ['fg', 'bg', 'borderColor', 'attributes']) {
+        for (const name of ['fg', 'bg', 'borderColor', 'attributes', 'id']) {
           if (source[name] !== undefined) dom[`data-${name}`] = source[name];
         }
         return React.createElement(
@@ -948,6 +948,38 @@ describe('OpenTuiFooter', () => {
     ]);
   });
 
+  it('tags screen-reader footer rows with stable ids and speaks a detached worktree', () => {
+    const { container } = render(
+      <Footer
+        config={fakeConfig()}
+        streaming={false}
+        screenReader
+        activeWorktree={{
+          slug: 'issue-123',
+          branch: '',
+          path: '/worktree',
+          originalCwd: '/repo',
+          originalBranch: 'main',
+          originalHeadCommit: 'abc',
+        }}
+        statusLine={{
+          lines: ['model-x'],
+          useThemeColors: false,
+          respectUserColors: false,
+          hideContextIndicator: true,
+        }}
+      />,
+    );
+    expect(
+      container.querySelector('[data-id="screen-reader-footer-worktree"]')
+        ?.textContent,
+    ).toBe('Worktree: detached HEAD (issue-123)');
+    expect(
+      container.querySelector('[data-id="screen-reader-footer-status-0"]')
+        ?.textContent,
+    ).toBe('model-x');
+  });
+
   it('renders the user-selected session-id preset supplied by the shared state', () => {
     const { container } = render(
       <Footer
@@ -968,6 +1000,10 @@ describe('OpenTuiFooter', () => {
 it('exposes a stable working state without animating elapsed time in screen-reader mode', () => {
   const view = render(<OpenTuiLoadingIndicator screenReader streaming />);
   expect(view.container.textContent).toBe('Working. Escape to cancel.');
+  expect(
+    view.container.querySelector('[data-id="screen-reader-loading"]')
+      ?.textContent,
+  ).toBe('Working. Escape to cancel.');
   view.rerender(<OpenTuiLoadingIndicator screenReader streaming waiting />);
   expect(view.container.textContent).toBe('Waiting for confirmation');
 });
