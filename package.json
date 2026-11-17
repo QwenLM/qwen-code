@@ -16,6 +16,7 @@
     "packages/channels/dingtalk",
     "packages/channels/wecom",
     "packages/channels/feishu",
+    "packages/channels/generic-webhook",
     "packages/channels/qqbot",
     "packages/channels/github",
     "packages/channels/dws",
