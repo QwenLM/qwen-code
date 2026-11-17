@@ -147,13 +147,18 @@ clicked, using the list data the sidebar already holds.
 - `toSessionSummary` includes `artifactCount` when non-zero. Live entries are
   authoritative for their count, so the merge drops a stale sidecar-derived
   count when the live summary omits it (count zero).
-- `listWorkspaceSessions` skips entries whose artifact restore is still
-  pending (`pendingRestoreIds`): `session/load` registers the entry before it
-  awaits `artifacts.restore()`, and the empty store inside that window would
-  omit the count and make the merge drop the sidecar-enriched count. The row
-  is left to the persisted summary until the restore settles.
+- While an entry's artifact restore is still pending (`pendingRestoreIds`),
+  `toSessionSummary` sets `artifactCountPending: true` and omits the count:
+  `session/load` registers the entry before it awaits `artifacts.restore()`,
+  and the empty store inside that window would otherwise make the merge drop
+  the sidecar-enriched count. The row STAYS visible — the accessor's contract
+  is "all live sessions", consumed by occupancy gates and live-state — and
+  `mergeLiveSessionSummary` keeps the sidecar count for a pending row. The
+  marker is a wire field on both mirrors; an absent count with the marker is
+  unknown, not zero.
 - `BridgeSessionSummary` and `DaemonSessionSummary` gain optional
-  `artifactCount?: number` (wire mirrors, kept synchronized).
+  `artifactCount?: number` and `artifactCountPending?: boolean` (wire
+  mirrors, kept synchronized).
 - `session-list.ts` gains `enrichArtifactSummaries`, called beside
   `enrichPrSidecars` at all three enrichment sites. It awaits an async
   sidecar read per session — like the sibling enrichers, so a mid-scan abort
@@ -196,7 +201,15 @@ clicked, using the list data the sidebar already holds.
   live public count (including ephemeral artifacts), matching what the header
   shows while the session is live. Ephemeral artifacts die with the daemon
   lifetime, so the count correctly drops to the restorable count when the
-  session goes cold.
+  session goes cold. The seed and the library-removal write count the set a
+  cold open actually restores: legacy local-published html artifacts without
+  a preview snapshot are dropped on restore and excluded from the derived
+  count (`isRestorablePersistedArtifact`, keyed off the preview snapshot id
+  so real published snapshots stay counted).
+- **Public via the core barrel.** The sidecar helpers are exported from
+  `packages/core/src/index.ts` because the session-list consumer reads them
+  through its existing barrel import (a legacy-allowlisted file). They are a
+  public API commitment: signature changes must honour downstream consumers.
 - **The count rides the existing persist chain.** Adding the total to the
   event payload (additive, optional) keeps the wire surface unchanged — no
   new ext method kind, no new failure domain. The store is the only component
@@ -222,6 +235,7 @@ clicked, using the list data the sidebar already holds.
 ## Files affected
 
 - `packages/core/src/services/session-artifact-summary-sidecar.ts` (new).
+- `packages/core/src/index.ts` (barrel export of the sidecar module).
 - `packages/core/src/services/session-artifact-persistence.ts` (payload field,
   normalization, fork strip, shared journal-authority warning predicate).
 - `packages/core/src/services/chatRecordingService.ts` (sidecar writes).
@@ -273,17 +287,24 @@ clicked, using the list data the sidebar already holds.
 - Unit: sidecar read/write validation (sync and async readers, including the
   async throw contract: ENOENT → undefined, other I/O errors rethrown, abort
   → AbortError); event payload count preservation and fork strip;
-  recording-service sidecar writes (event with/without count, snapshot); load
-  seed and its authority gate (history gap, record-level damage warnings,
-  tolerated per-artifact skips); library removal update (remaining-count
-  arithmetic, single and batch); archive/delete/conflict handling;
-  working-directory relocation; store `count()`; `toSessionSummary`
-  include/omit; the pending-restore exclusion in `listWorkspaceSessions`;
-  enrichment on all list paths, including a mid-scan abort (per-iteration
-  checks, interrupted scan not cached) and a throwing read contained per
-  session; merge drops stale count; optimistic hint keying and clear; hook
-  hint validity (cache/snapshot retirement, cross-session keying); header
-  count fallback; sidebar threading.
+  recording-service sidecar writes (event with/without count, snapshot,
+  write-after-append order on both paths, legacy count-less events preserve
+  an existing sidecar); load seed and its authority gate (history gap,
+  record-level damage warnings including change-level drops, tolerated
+  per-artifact skips), in both active and archived states, from event and
+  snapshot (fork) records, counting the cold-restorable set (legacy
+  local-published html excluded, real preview snapshots kept); library
+  removal update (restorable-survivor arithmetic, single and batch);
+  archive/delete/conflict handling; working-directory relocation; store
+  `count()` including the decrement after a removal; `toSessionSummary`
+  include/omit and the pending-restore marker (`artifactCountPending` keeps
+  the row visible and the merge keeps the sidecar count); the ACP boundary
+  carries the stamped count to the recorder; enrichment on all list paths,
+  including a mid-scan abort (per-iteration checks, interrupted scan not
+  cached) and a throwing read contained per session; merge drops stale
+  count; optimistic hint keying, clear, and retirement on a failed load;
+  hook hint validity (cache/snapshot retirement, cross-session keying);
+  header count fallback; sidebar threading.
 - Mutation witnesses: revert each load-bearing guard (keying, retirement,
   merge drop, fork strip, seed) and show the paired test reds.
 - E2E (real daemon + headless Chromium, network timing as load-bearing

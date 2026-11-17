@@ -153,8 +153,10 @@ Relevant baseline behavior (before this change):
 
 - **Embed the list, not just a count.** The list is small (a few KB) and already
   restored in memory; carrying it lets the artifact cache be seeded so the panel
-  opened from the button is populated immediately — a cache scope B later
-  reused for the click-time count.
+  opened from the button is populated immediately. Scope B later reused this
+  header entry and added a sidecar-derived count for the window before the load
+  response — the scope-A cache is empty at click time by construction, and once
+  the list lands the header still prefers it.
 - **No workspace status refresh on the load path.** The cheap accessor avoids
   stat/hash work so `/load` is not slowed. Status accuracy is restored by the
   existing gated fetch shortly after.

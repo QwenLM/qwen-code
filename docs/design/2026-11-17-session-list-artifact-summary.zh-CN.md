@@ -122,12 +122,15 @@
 - `toSessionSummary` 在非零时携带 `artifactCount`。live entry 对其数量是
   权威的，因此 live 摘要省略（数量为零）时，合并要丢弃 sidecar 派生的陈旧
   数量。
-- `listWorkspaceSessions` 跳过 artifact 恢复仍在进行的条目
-  （`pendingRestoreIds`）：`session/load` 在 await `artifacts.restore()`
-  之前就注册条目，该窗口内空 store 会省略数量、使合并丢弃 sidecar 增强的
-  数量。恢复落定前，该行交给持久化摘要。
+- 条目的 artifact 恢复仍在进行（`pendingRestoreIds`）时，`toSessionSummary`
+  置 `artifactCountPending: true` 并省略数量：`session/load` 在 await
+  `artifacts.restore()` 之前就注册条目，该窗口内空 store 否则会使合并丢弃
+  sidecar 增强的数量。该行保持可见——访问器契约是「所有在线会话」，占用闸门
+  与在线状态都消费它——`mergeLiveSessionSummary` 对 pending 行保留 sidecar
+  计数。标记是两个镜像上的 wire 字段；带标记的缺省计数是未知，不是零。
 - `BridgeSessionSummary` 与 `DaemonSessionSummary` 增加可选
-  `artifactCount?: number`（wire 镜像，保持同步）。
+  `artifactCount?: number` 与 `artifactCountPending?: boolean`（wire
+  镜像，保持同步）。
 - `session-list.ts` 增加 `enrichArtifactSummaries`，在三处增强点与
   `enrichPrSidecars` 并列调用。逐会话 await 异步 sidecar 读取——与兄弟
   增强器一致，使扫描中途的 abort 可被观察，且大扫描（至
@@ -161,7 +164,13 @@
 - **磁盘存可恢复数量，内存存 live 数量。** sidecar 存可恢复数量——冷打开
   会恢复出来的那些。live 摘要存 live 公开数量（含 ephemeral），与会话 live
   时头部显示的一致。ephemeral 产物随 daemon 生命周期消亡，因此会话变冷时
-  数量正确回落到可恢复数量。
+  数量正确回落到可恢复数量。播种与库删除写入按冷打开实际恢复的集合计数：
+  无预览快照的旧本地 published html 产物在恢复时被丢弃，不计入派生数量
+  （`isRestorablePersistedArtifact`，以预览快照 id 为准，真正的 published
+  快照仍计入）。
+- **经 core barrel 公开。** sidecar 助手从 `packages/core/src/index.ts`
+  导出，因为 session-list 消费方经其既有 barrel 导入读取（历史豁免清单
+  文件）。这是公开 API 承诺：签名变更必须顾及下游消费方。
 - **数量搭乘既有持久化链。** 把总数加进 event payload（增量、可选）保持
   wire 面不变——没有新 ext method kind，没有新故障域。store 是唯一始终知道
   精确数量的组件；在 handler 里从变更增量推导，对 legacy 与 fork 会话需要
@@ -181,6 +190,7 @@
 ## 涉及文件
 
 - `packages/core/src/services/session-artifact-summary-sidecar.ts`（新增）。
+- `packages/core/src/index.ts`（sidecar 模块的 barrel 导出）。
 - `packages/core/src/services/session-artifact-persistence.ts`（payload
   字段、规范化、fork 剥离、共享的 journal 权威性警告判定）。
 - `packages/core/src/services/chatRecordingService.ts`（sidecar 写入）。
@@ -225,13 +235,17 @@
 - 单测：sidecar 读写校验（同步与异步读取器，含异步抛错契约：ENOENT →
   undefined、其他 I/O 错误重抛、abort → AbortError）；event payload 数量
   保留与 fork 剥离；recording-service sidecar 写入（带/不带数量的 event、
-  snapshot）；load 播种及其权威性门（历史链缺口、记录级损坏警告、被容忍的
-  单产物级跳过）；库删除更新（剩余数量算术，单个与批量）；
-  archive/delete/冲突处理；工作目录搬迁；store `count()`；
-  `toSessionSummary` 携带/省略；`listWorkspaceSessions` 的恢复中排除；
-  全部列表路径的增强（含扫描中途 abort 的逐次检查与被中断扫描不进缓存、
-  单会话抛错读取被包容）；合并丢弃陈旧数量；乐观 hint 键控与清空；hook
-  hint 有效性（缓存/快照退役、跨会话键控）；头部数量回退；侧栏传递。
+  snapshot，两条路径的先 journal 后 sidecar 顺序，无计数旧事件保留已有
+  sidecar）；load 播种及其权威性门（历史链缺口、含变更级丢弃的记录级损坏
+  警告、被容忍的单产物级跳过），active 与 archived 两态、event 与 snapshot
+  （fork）记录、按冷启动可恢复集合计数（旧本地 published html 排除、真正
+  预览快照保留）；库删除更新（可恢复幸存者算术，单个与批量）；
+  archive/delete/冲突处理；工作目录搬迁；store `count()` 含删除后递减；
+  `toSessionSummary` 携带/省略与恢复中标记（`artifactCountPending` 保持行
+  可见、合并保留 sidecar 计数）；ACP 边界把盖章数量带到 recorder；全部
+  列表路径的增强（含扫描中途 abort 的逐次检查与被中断扫描不进缓存、单会话
+  抛错读取被包容）；合并丢弃陈旧数量；乐观 hint 键控、清空与加载失败退役；
+  hook hint 有效性（缓存/快照退役、跨会话键控）；头部数量回退；侧栏传递。
 - 变异见证：回退每个承重守卫（键控、退役、合并丢弃、fork 剥离、播种），
   展示配对测试变红。
 - E2E（真实 daemon + 无头 Chromium，网络时序为承重证据）：冷打开带
