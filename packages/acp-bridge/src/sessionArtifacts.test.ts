@@ -350,6 +350,83 @@ describe('SessionArtifactStore', () => {
     }
   });
 
+  it('count() returns the live public count synchronously, including ephemeral artifacts', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's-live-count',
+      workspaceCwd: workspace,
+    });
+    expect(store.count()).toBe(0);
+    await store.upsertMany([
+      {
+        title: 'Restorable',
+        kind: 'link',
+        storage: 'external_url',
+        url: 'https://example.com/restorable',
+        retention: 'restorable',
+      },
+      {
+        title: 'Ephemeral',
+        kind: 'link',
+        storage: 'external_url',
+        url: 'https://example.com/ephemeral',
+        retention: 'ephemeral',
+      },
+    ]);
+    expect(store.count()).toBe(2);
+    expect(store.count()).toBe((await store.list()).artifacts.length);
+  });
+
+  it('stamps the restorable count on durable event payloads, excluding ephemeral artifacts', async () => {
+    const events: SessionArtifactEventRecordPayload[] = [];
+    const store = new SessionArtifactStore({
+      sessionId: 's-event-count',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          events.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    await store.upsertMany([
+      {
+        title: 'A',
+        kind: 'link',
+        storage: 'external_url',
+        url: 'https://example.com/count-a',
+        retention: 'restorable',
+      },
+      {
+        title: 'B',
+        kind: 'link',
+        storage: 'external_url',
+        url: 'https://example.com/count-b',
+        retention: 'restorable',
+      },
+    ]);
+    expect(events.at(-1)?.artifactCount).toBe(2);
+
+    // Ephemeral-only changes are not durable: no new event is recorded, and
+    // the restorable count stays put even though the live count grows.
+    await store.upsertMany([
+      {
+        title: 'E',
+        kind: 'link',
+        storage: 'external_url',
+        url: 'https://example.com/count-e',
+        retention: 'ephemeral',
+      },
+    ]);
+    expect(events).toHaveLength(1);
+    expect(store.count()).toBe(3);
+
+    const restorable = (await store.list()).artifacts.find(
+      (artifact) => artifact.title === 'A',
+    );
+    await store.remove(restorable!.id);
+    expect(events.at(-1)?.artifactCount).toBe(1);
+  });
+
   it('lists, removes, and idempotently ignores missing artifact deletes', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's1',

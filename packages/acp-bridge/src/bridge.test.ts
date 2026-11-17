@@ -7381,6 +7381,46 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('carries the live artifact count in the session summary, omitting zero', async () => {
+    const handle = makeChannel({
+      extMethodImpl: (method) => {
+        expect(method).toBe('qwen/control/session/artifacts/persist');
+        return {};
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    expect(
+      bridge.getSessionSummary(session.sessionId).artifactCount,
+    ).toBeUndefined();
+
+    await bridge.addSessionArtifact(
+      session.sessionId,
+      { title: 'Durable', url: 'https://example.com/summary-durable' },
+      { clientId: session.clientId },
+    );
+    await bridge.addSessionArtifact(
+      session.sessionId,
+      {
+        title: 'Ephemeral',
+        url: 'https://example.com/summary-ephemeral',
+        retention: 'ephemeral',
+      },
+      { clientId: session.clientId },
+    );
+
+    // The live summary count is the public list length (ephemeral included),
+    // matching what the header entry shows while the session is live.
+    expect(bridge.getSessionSummary(session.sessionId).artifactCount).toBe(2);
+    expect(
+      bridge
+        .listWorkspaceSessions(WS_A)
+        .find((s) => s.sessionId === session.sessionId)?.artifactCount,
+    ).toBe(2);
+
+    await bridge.shutdown();
+  });
+
   it('clears durable artifacts but keeps live ephemerals when rewind returns an empty artifact snapshot', async () => {
     const persistedSnapshots: unknown[] = [];
     const handle = makeChannel({

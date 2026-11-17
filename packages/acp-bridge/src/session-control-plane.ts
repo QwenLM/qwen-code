@@ -4549,6 +4549,7 @@ export function createSessionControlPlane(
         isWaitingForPermission = true;
       }
     }
+    const artifactCount = entry.artifacts.count();
     return {
       sessionId: entry.sessionId,
       workspaceCwd: entry.workspaceCwd,
@@ -4576,6 +4577,7 @@ export function createSessionControlPlane(
       ...(entry.worktree ? { worktree: entry.worktree } : {}),
       ...(entry.branch ? { branch: entry.branch } : {}),
       ...(entry.prs && entry.prs.length > 0 ? { prs: entry.prs } : {}),
+      ...(artifactCount > 0 ? { artifactCount } : {}),
     };
   };
   // Pending + resolved permission state lives in

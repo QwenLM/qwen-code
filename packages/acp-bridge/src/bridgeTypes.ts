@@ -1291,6 +1291,13 @@ export interface BridgeSessionSummary {
    * session can produce several PRs (stacked or follow-up work).
    */
   prs?: SessionPrInfo[];
+  /**
+   * Session artifact count, present when non-zero. Live entries carry the
+   * live public count; persisted summaries are enriched best-effort from the
+   * artifact summary sidecar with the restorable count. Absent means unknown
+   * (no sidecar / older daemon), not zero.
+   */
+  artifactCount?: number;
 }
 
 /** Original event-bus cursor captured when a prompt id was first admitted. */

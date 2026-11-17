@@ -357,6 +357,13 @@ export class SessionArtifactStore {
     return this.enqueue(async () => this.snapshotPublicArtifacts());
   }
 
+  // Synchronous live public artifact count for session summaries. Reads the
+  // committed map size without enqueueing or refreshing workspace status, so
+  // the synchronous summary projection can call it on the list path.
+  count(): number {
+    return this.artifacts.size;
+  }
+
   async get(artifactId: string): Promise<DaemonSessionArtifact | undefined> {
     return this.enqueue(async () => {
       const artifact = this.artifacts.get(artifactId);
@@ -1375,6 +1382,10 @@ export class SessionArtifactStore {
     }
 
     const sequence = this.persistenceSeq + 1;
+    let restorableCount = 0;
+    for (const artifact of this.artifacts.values()) {
+      if (isRestorableArtifact(artifact)) restorableCount++;
+    }
     const payload: SessionArtifactEventRecordPayload = {
       v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
       sessionId: this.sessionId,
@@ -1383,6 +1394,7 @@ export class SessionArtifactStore {
       changes: durableChanges.map((change) =>
         toPersistedChange(change, recordedAt),
       ),
+      artifactCount: restorableCount,
     };
 
     try {
@@ -1458,11 +1470,7 @@ export class SessionArtifactStore {
     sequence: number,
   ): SessionArtifactSnapshotRecordPayload {
     const artifacts = Array.from(this.artifacts.values())
-      .filter(
-        (artifact) =>
-          artifact.retention !== 'ephemeral' &&
-          !isNonSnapshotPublishedFileUrl(artifact),
-      )
+      .filter(isRestorableArtifact)
       .sort((a, b) => a.insertSeq - b.insertSeq)
       .map((artifact) => toPersistedArtifact(artifact, recordedAt));
     const stickyEphemeralIds = Array.from(this.stickyEphemeralIds).filter(
@@ -3061,6 +3069,16 @@ function isNonSnapshotPublishedFileUrl(
   artifact: Partial<PersistedSessionArtifact>,
 ): boolean {
   return artifact.storage === 'published' && isNonSnapshotFileLocator(artifact);
+}
+
+// The restorable set: what a cold open rebuilds from the journal. Shared by
+// the snapshot payload and the event payload's summary count so the sidecar
+// count always matches what restore will produce.
+function isRestorableArtifact(artifact: StoredArtifact): boolean {
+  return (
+    artifact.retention !== 'ephemeral' &&
+    !isNonSnapshotPublishedFileUrl(artifact)
+  );
 }
 
 function artifactIdMatchesIdentity(
