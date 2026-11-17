@@ -1330,10 +1330,11 @@ into these dialogs — every burst case here rests on the unit suites.
 ## Decision 34 — a manual tab move calls off the swap already scheduled
 
 The question dialog answers a question, pauses 150 ms so the tick on the row just
-answered is visible, then swaps to the next one. ink schedules that swap and never
-calls it off: neither a second answer inside the pause nor a left or right arrow of
-the user's own clears the timer, so two swaps can run and the question between them
-is never drawn. The port inherited that, and the review round caught it on the
+answered is visible, then swaps to the next one. ink scheduled that swap and never
+called it off: neither a second answer inside the pause nor a left or right arrow of
+the user's own cleared the timer, so two swaps could run and the question between them
+was never drawn. ink has since gained the same lock and arrow cancel (#17444). The
+port inherited the old behaviour, and the review round caught it on the
 arrow case — the user had navigated to a question and the dialog took it away again
 a tenth of a second later.
 
@@ -1343,7 +1344,8 @@ supersede the swap the first one scheduled; a later round put a lock in front of
 path instead, which drops an answer landing inside the pause outright (Decision 37).
 Nothing is left for the cancel to see there: a live timer always belongs to the tab the
 cursor is still on, since the only moves are the swap's own and the two arrows, and both
-arrows cancel first. The lock is therefore the armed timer alone — the ref that also held
+arrows cancel first. On the free-text row ←/→ belong to the text cursor: they move no tab
+and leave a pending swap alone, on both renderers. The lock is therefore the armed timer alone — the ref that also held
 which tab the swap belonged to modelled a distinction no path could observe, and it went
 with the dead cancel. The same 150 ms pause, the same clamping at the last tab, and the
 same tick-before-swap are kept. ink used to lack the lock and was recorded as having a
@@ -2912,16 +2914,16 @@ What was verified, and how far the verification reaches:
   shown, in the session log too. Reachable on this renderer: the dispatcher
   builds fast, voice and vision dialog requests. Fixing it means carrying a row
   type out of the selection helper instead of a message string.
-- ink answers a typed free-text entry in its question dialog twice for one
-  keystroke, because the dialog's key handler and the input widget it mounts
-  both subscribe and the key layer has no focus stack to arbitrate between
-  them. Each answer advances a tab, so on a multi-question dialog the question
-  after the one being answered is skipped without ever being drawn, and the
-  review tab reports it as unanswered. This was observed on a real run, not
-  inferred. Decision 21 does not follow it, and fixing it in ink is out of
-  scope for a sweep that measures itself against ink's behaviour as it stands;
-  it is recorded here so the divergence between the two renderers is not
-  re-reported as a porting gap.
+- Closed: ink answered a typed free-text entry in its question dialog twice for
+  one keystroke, because the dialog's key handler and the input widget it
+  mounts both subscribed and the key layer has no focus stack to arbitrate
+  between them. Each answer advanced a tab, so on a multi-question dialog the
+  question after the one being answered was skipped without ever being drawn,
+  and the review tab reported it as unanswered. This was observed on a real
+  run, not inferred. Decision 21 did not follow it. ink was fixed in #17444:
+  the input widget's submit is the only owner of Enter on that row, and a
+  second answer inside the pause is dropped as it is here, so the two
+  renderers no longer diverge on it.
 - The stale-read class is closed for cursors and open for everything beside
   them. Decision 41 put the numeric cursors behind a ref mirror — the shared
   select hook and its exposed ref, the composer's completion rows, and each
