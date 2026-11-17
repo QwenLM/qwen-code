@@ -70,6 +70,8 @@ import {
   type HookInput,
 } from '../hooks/types.js';
 import { HookSystem } from '../hooks/hookSystem.js';
+import { AsyncHookRegistry } from '../hooks/asyncHookRegistry.js';
+import { ASYNC_HOOK_CONTEXT_OPEN } from '../hooks/async-hook-context.js';
 import {
   getHookExecutionOwner,
   runWithHookExecutionOwner,
@@ -1456,6 +1458,62 @@ describe('Gemini Client (client.ts)', () => {
       expect(hookSystem.fireSessionStartEvent).toHaveBeenCalledTimes(2);
       expectSessionStart(hookSystem, SessionStartSource.Startup, { nth: 1 });
       expectSessionStart(hookSystem, SessionStartSource.Resume, { nth: 2 });
+    });
+  });
+
+  describe('async hook output delivery (L11)', () => {
+    beforeEach(() => {
+      mockTurnRunFn.mockImplementation(() => textTurn('ok'));
+    });
+
+    /** Complete a background hook whose additionalContext is pending. */
+    const installAsyncOutput = (additionalContext: string) => {
+      const registry = new AsyncHookRegistry();
+      registry.register({
+        hookId: 'bg-1',
+        hookName: 'Background Hook',
+        hookEvent: HookEventName.PostToolUse,
+        sessionId: 'session-1',
+        startTime: Date.now(),
+        timeout: 60000,
+        stdout: JSON.stringify({
+          hookSpecificOutput: { additionalContext },
+        }),
+        stderr: '',
+      });
+      registry.complete('bg-1');
+      vi.mocked(mockConfig.getHookSystem).mockReturnValue({
+        getPendingAsyncOutput: () => registry.getPendingOutput(),
+      } as unknown as ReturnType<Config['getHookSystem']>);
+    };
+
+    it('delivers pending async output in the outgoing request', async () => {
+      installAsyncOutput('async delivered context');
+      await run([{ text: 'hello' }], 'prompt-async', {
+        type: SendMessageType.UserQuery,
+      });
+      const text = getLastTurnRequestText();
+      expect(text).toContain('async delivered context');
+      expect(text).toContain(ASYNC_HOOK_CONTEXT_OPEN);
+    });
+
+    it('drains once: a second turn delivers nothing', async () => {
+      installAsyncOutput('once only');
+      await run([{ text: 'first' }], 'prompt-async-1', {
+        type: SendMessageType.UserQuery,
+      });
+      expect(getLastTurnRequestText()).toContain('once only');
+      await run([{ text: 'second' }], 'prompt-async-2', {
+        type: SendMessageType.UserQuery,
+      });
+      expect(getLastTurnRequestText()).not.toContain('once only');
+    });
+
+    it('delivers nothing when no async output is pending', async () => {
+      await run([{ text: 'hello' }], 'prompt-async-none', {
+        type: SendMessageType.UserQuery,
+      });
+      expect(getLastTurnRequestText()).not.toContain(ASYNC_HOOK_CONTEXT_OPEN);
     });
   });
 

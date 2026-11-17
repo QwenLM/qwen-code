@@ -223,7 +223,10 @@ import {
   createUserPromptSubmitContextPart,
   deliveredUserPromptSubmitContexts,
 } from '../hooks/user-prompt-submit-context.js';
-import { drainAsyncHookContextPart } from '../hooks/async-hook-context.js';
+import {
+  appendAsyncHookContextPart,
+  drainAsyncHookContextPart,
+} from '../hooks/async-hook-context.js';
 import {
   TrustedUserAnswers,
   type TrustedUserAnswerQuestion,
@@ -5203,12 +5206,20 @@ export class LlmClient {
       // Background (async) hooks may have produced output since the last
       // turn. Drain it (get-and-clear) and deliver it to the model on this
       // request, before the send and its auto-compaction so the threshold
-      // sees the same tail the provider will (capability ledger L11).
+      // sees the same tail the provider will (capability ledger L11). Splice
+      // it ahead of the trailing UserPromptSubmit receipt so that block stays
+      // last for the resume/projection/title strips that recognize it only in
+      // last position. getHookSystem is read defensively: a config double
+      // without it (or a hook system without pending output) delivers nothing.
       const asyncHookContextPart = drainAsyncHookContextPart(
-        this.config.getHookSystem(),
+        this.config.getHookSystem?.(),
       );
       if (asyncHookContextPart) {
-        requestToSend = [...requestToSend, asyncHookContextPart];
+        requestToSend = appendAsyncHookContextPart(
+          requestToSend,
+          asyncHookContextPart,
+          Boolean(appendedHookContext),
+        );
       }
       if (ideContextText) {
         const firstText = requestToSend.find(

@@ -14,10 +14,11 @@
 
 在组装外出请求时 drain 待交付的异步输出，并作为一个带标签的上下文 part 追加，使其在下一轮请求送达模型。
 
-- **交付点**：`LlmClient.sendMessageStream` 的 `requestToSend` 组装处——在 UserPromptSubmit hook 上下文回执之后、IDE 上下文合并与 system-reminders 前置之前。它位于 Goal 准入与 hook 窗口结算块之下游（不触碰它们的任何契约），并在 send 及其 chat 内自动压缩之上游，因此压缩阈值看到的尾部与 provider 将看到的一致——契合 1.0「压缩前 drain」的意图。它覆盖到达该组装处的每种轮次类型。
+- **交付点**：`LlmClient.sendMessageStream` 的 `requestToSend` 组装处——在 UserPromptSubmit hook 上下文回执之后、IDE 上下文合并与 system-reminders 前置之前。它位于 Goal 准入与 hook 窗口结算块之下游（不触碰它们的任何契约），并在 send 及其 chat 内自动压缩之上游，因此压缩阈值看到的尾部与 provider 将看到的一致——契合 1.0「压缩前 drain」的意图。它覆盖到达该组装处的每种轮次类型。`getHookSystem` 以防御方式读取（`getHookSystem?.()`，helper 内 `getPendingAsyncOutput?.()`），因此缺少该方法的 config 或 hook-system 替身降级为「无可交付」而非抛错。
+- **放置保持同步回执末位**：当 UserPromptSubmit 上下文回执是末位 part 时，异步 part 被插到它*之前*（`appendAsyncHookContextPart`），而非追加到它之后。回执契约的 resume 半侧（`restoreUserPromptSubmitContextReceipt`）、遗留转录投影剥离与 session-title 剥离都只在末位识别同步块；异步 part 尾随它会在共现轮次（同一请求里同步上下文 + 异步输出）静默破坏它们，丢失同步块的 resume 溯源并在 resume 后二次注入其上下文。无末位同步回执时异步 part 直接追加。
 - **交付内容**：`contexts`（逐字 additional context）与 `messages`（标注为 `[type] hookName: message`）都交付，合并为一个块。`<`/`>` 被转义，使 hook 输出无法伪造闭合标签，镜像同步 UserPromptSubmit 上下文。
 - **保留标签**：`<qwen:async-hook-context>…</qwen:async-hook-context>`，定义在新的自包含模块 `hooks/async-hook-context.ts`。
-- **取走即清空，无需去重**：drain 会清空 registry，故一个块恰好交付一次。同步 UserPromptSubmit 上下文持久存在于历史，因此需要回执 symbol、历史去重与 resume 重新盖章；异步块不需要那套机制——它被 drain 一次，随后作为普通已交付上下文 part 存在于历史。
+- **取走即清空，无需去重**：drain 会清空 registry，故一个块被*选中交付*一次。同步 UserPromptSubmit 上下文持久存在于历史，因此需要回执 symbol、历史去重与 resume 重新盖章；异步块不需要那套机制。两个边界是刻意的：(1)「选中一次」不等于「被模型轮次接纳」——drain 之后失败的 send（loop detection、goal 中断、429/retry）会消费该块却不交付，即「已消费未送达」窗口；把 drain 紧贴 send 之前可最小化它而不改变证据类别。(2) 该块只追加到**进程内请求历史**：转录记录由追加前的 `request` 构建，故该块不被持久化，resume 的会话（`--continue`）不携带它。异步标签的 resume 溯源是已记录的 follow-up，而非相对基线（基线根本不交付）的回归。
 
 ## 范围
 
@@ -26,4 +27,4 @@
 
 ## 验证
 
-`hooks/async-hook-context.test.ts` 驱动真实 `AsyncHookRegistry`：已完成 hook 的 `additionalContext` 与 `systemMessage` 在带标签 part 中交付，第二次 drain 不交付任何东西（取走即清空），空白输出不产生 part，且 hook 输出无法伪造闭合标签。变异见证：使 drain 不交付任何东西，恰使三条交付用例转红（6 绿）；去掉转义，恰使两条转义用例转红（7 绿）；两个变异均按字节还原。改动文件 `prettier`/`eslint` 干净；改动文件通过类型检查（以 CI 的 frozen-lockfile 构建为权威）。
+`hooks/async-hook-context.test.ts` 驱动真实 `AsyncHookRegistry`：已完成 hook 的 `additionalContext` 与 `systemMessage` 在带标签 part 中交付，第二次 drain 不交付任何东西（取走即清空），空白上下文与纯空白消息不产生 part，缺少 drain 方法的 hook-system 替身降级为 null，且 hook 输出无法伪造闭合标签。`appendAsyncHookContextPart` 测试了「插到末位回执之前」的放置；共现测试 resume 一个克隆条目（symbol 被丢弃），断言异步 part 插在同步块之前时 `restoreUserPromptSubmitContextReceipt` 重新盖章同步块——而异步 part 尾随它时则不会（即放置所避免的 bug）。`client.test.ts` 新增调用点见证：一个真实 `sendMessageStream` 轮次配合 registry 支撑的 `getHookSystem`，把该块交付进外出请求、跨两轮只 drain 一次、无待交付输出时不交付。变异见证（均按字节还原）：使 drain 不交付任何东西使交付用例转红；去转义使转义用例转红；去掉消息空白守卫使空白用例转红；把 splice 塌缩为纯追加使放置与共现用例转红；删除 `client.ts` 调用点使调用点交付用例转红。改动文件 `prettier`/`eslint` 干净；改动文件通过类型检查（以 CI 的 frozen-lockfile 构建为权威）。

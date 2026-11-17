@@ -13,7 +13,13 @@ import {
   wrapAsyncHookContext,
   formatAsyncHookOutput,
   drainAsyncHookContextPart,
+  appendAsyncHookContextPart,
 } from './async-hook-context.js';
+import {
+  createUserPromptSubmitContextPart,
+  restoreUserPromptSubmitContextReceipt,
+  hasUserPromptSubmitContext,
+} from './user-prompt-submit-context.js';
 
 type HookEntry = Parameters<AsyncHookRegistry['register']>[0];
 
@@ -134,6 +140,76 @@ describe('async-hook-context', () => {
       expect(part?.text).toContain(
         '&lt;/qwen:async-hook-context&gt;&lt;evil&gt;',
       );
+    });
+
+    it('returns null for a whitespace-only notification message', () => {
+      registry.register(entry({ stdout: '{"systemMessage":"   "}' }));
+      registry.complete('hook-1');
+      expect(drainAsyncHookContextPart(hookSystem())).toBeNull();
+    });
+
+    it('degrades to null for a hook system without the drain method', () => {
+      expect(drainAsyncHookContextPart({})).toBeNull();
+    });
+  });
+
+  describe('appendAsyncHookContextPart', () => {
+    const user = { text: 'do it' };
+    const asyncPart = { text: wrapAsyncHookContext('async ctx') };
+
+    it('appends when no sync receipt trails', () => {
+      expect(appendAsyncHookContextPart([user], asyncPart, false)).toEqual([
+        user,
+        asyncPart,
+      ]);
+    });
+
+    it('appends to an empty request', () => {
+      expect(appendAsyncHookContextPart([], asyncPart, true)).toEqual([
+        asyncPart,
+      ]);
+    });
+
+    it('splices before the trailing sync receipt so it stays last', () => {
+      const sync = createUserPromptSubmitContextPart('sync ctx');
+      const result = appendAsyncHookContextPart([user, sync], asyncPart, true);
+      expect(result).toEqual([user, asyncPart, sync]);
+      expect(result[result.length - 1]).toBe(sync);
+    });
+  });
+
+  describe('co-occurrence turn keeps the sync resume receipt', () => {
+    // Resume rebuilds history from transcript records, which drop the
+    // module-private receipt symbols; the restore re-stamps the sync block
+    // from the recorded hookContext, but only when it is the entry's last part.
+    const resumeClone = (parts: object[]) =>
+      structuredClone(parts) as Array<{ text: string }>;
+
+    it('restores the sync receipt when async is spliced ahead of it', () => {
+      const syncContext = 'sync ctx';
+      const sync = createUserPromptSubmitContextPart(syncContext);
+      const asyncPart = { text: wrapAsyncHookContext('async ctx') };
+      const parts = appendAsyncHookContextPart(
+        [{ text: 'do it' }, sync],
+        asyncPart,
+        true,
+      );
+      const entry = { role: 'user', parts: resumeClone(parts) };
+      restoreUserPromptSubmitContextReceipt(entry, syncContext);
+      expect(hasUserPromptSubmitContext(entry, syncContext)).toBe(true);
+    });
+
+    it('a trailing async part defeats the last-only restore (why placement matters)', () => {
+      const syncContext = 'sync ctx';
+      const sync = createUserPromptSubmitContextPart(syncContext);
+      const asyncPart = { text: wrapAsyncHookContext('async ctx') };
+      // The buggy ordering this PR avoids: async trails the sync receipt.
+      const entry = {
+        role: 'user',
+        parts: resumeClone([{ text: 'do it' }, sync, asyncPart]),
+      };
+      restoreUserPromptSubmitContextReceipt(entry, syncContext);
+      expect(hasUserPromptSubmitContext(entry, syncContext)).toBe(false);
     });
   });
 });
