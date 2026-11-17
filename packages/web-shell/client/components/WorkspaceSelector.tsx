@@ -29,6 +29,7 @@ import {
   TooltipTrigger,
 } from './ui/tooltip';
 import { HostLabel } from './workspaces/HostLabel';
+import { getShadowAwareActiveElement } from '../utils/dom';
 import { matchesWorkspaceQuery } from '../utils/workspaceFilter';
 
 export interface WorkspaceSelectorOption {
@@ -266,8 +267,14 @@ export function WorkspaceSelector({
           // Radix focuses the hovered row on pointermove; while the filter
           // owns focus that would pull typing out of the field. Keep the
           // pointer event local so the row is not focused instead.
+          // document.activeElement retargets to the shadow host in the
+          // portalled (shadow root) mode, so resolve from the input's own
+          // root.
           onPointerMoveCapture={(event) => {
-            if (document.activeElement === filterInputRef.current) {
+            if (
+              getShadowAwareActiveElement(filterInputRef.current) ===
+              filterInputRef.current
+            ) {
               event.stopPropagation();
             }
           }}

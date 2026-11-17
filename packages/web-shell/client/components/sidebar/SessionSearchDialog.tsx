@@ -70,9 +70,17 @@ export function SessionSearchDialog({
   const trimmed = query.trim();
   // Name mode (#17142): a query that matches at least one workspace name
   // narrows the results to that workspace's sessions; a query that matches no
-  // name (a plain session search) leaves the results untouched.
+  // name (a plain session search) leaves the results untouched. The gate is
+  // restricted to the workspaces useSessionSearch actually fetches — the
+  // same trusted/qualified/primary scoping — so a name hit on an out-of-
+  // pipeline workspace cannot delete rows the search did find.
+  const searchableWorkspaces = options.workspaces.filter(
+    (workspace) =>
+      workspace.trusted !== false &&
+      (options.qualified || workspace.cwd === options.primaryWorkspaceCwd),
+  );
   const nameMatchedWorkspaces = trimmed
-    ? options.workspaces.filter((workspace) =>
+    ? searchableWorkspaces.filter((workspace) =>
         matchesWorkspaceQuery([workspaceLabel(workspace)], trimmed),
       )
     : [];

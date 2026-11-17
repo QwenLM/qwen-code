@@ -4,6 +4,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../i18n';
+import { WebShellPortalRootContext } from '../portalRoot';
 import { WorkspaceSelector } from './WorkspaceSelector';
 
 let root: Root | undefined;
@@ -788,6 +789,74 @@ describe('WorkspaceSelector', () => {
       primary.dispatchEvent(move);
     });
     expect(document.activeElement).toBe(filter);
+  });
+
+  it('keeps filter focus for a portalled menu when the root is a shadow root', async () => {
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const shadow = host.attachShadow({ mode: 'open' });
+    const portal = document.createElement('div');
+    shadow.appendChild(portal);
+    const mount = document.createElement('div');
+    shadow.appendChild(mount);
+    const shadowTreeRoot = createRoot(mount);
+    act(() => {
+      shadowTreeRoot.render(
+        <I18nProvider language="en">
+          <WebShellPortalRootContext.Provider value={portal}>
+            <WorkspaceSelector
+              workspaces={[
+                {
+                  id: 'primary',
+                  cwd: '/primary',
+                  label: 'primary',
+                  primary: true,
+                  trusted: true,
+                },
+              ]}
+              scratchSupported
+              existingFolderSupported
+              onSelectWorkspace={vi.fn()}
+              onCreateScratch={vi.fn()}
+              onOpenExistingFolder={vi.fn()}
+            />
+          </WebShellPortalRootContext.Provider>
+        </I18nProvider>,
+      );
+    });
+    try {
+      const trigger = mount.querySelector('button')!;
+      await act(async () => {
+        trigger.dispatchEvent(
+          new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+        );
+      });
+      // The menu content lands in the portal root inside the shadow tree.
+      const filter = portal.querySelector<HTMLInputElement>(
+        '[data-web-shell-ws-filter] input',
+      )!;
+      act(() => {
+        filter.focus();
+      });
+      expect(shadow.activeElement).toBe(filter);
+      const primary = [
+        ...portal.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
+      ].find((entry) => entry.textContent?.includes('primary'))!;
+      const move = new MouseEvent('pointermove', {
+        bubbles: true,
+        cancelable: true,
+      });
+      Object.defineProperty(move, 'pointerType', { value: 'mouse' });
+      act(() => {
+        primary.dispatchEvent(move);
+      });
+      // document.activeElement retargets to the shadow host, so the guard
+      // must resolve from the input's own root.
+      expect(shadow.activeElement).toBe(filter);
+    } finally {
+      await act(async () => shadowTreeRoot.unmount());
+      host.remove();
+    }
   });
 
   it('filters remote workspaces by their host', async () => {

@@ -299,6 +299,41 @@ it('matches unnamed workspaces by basename and drops workspace-less rows in name
   expect(rows[0].textContent).toContain('Legacy chat');
 });
 
+it('does not enter name mode on a workspace the search does not fetch', async () => {
+  search.entries = [
+    {
+      session: { sessionId: 'a1', displayName: 'Alpha chat' },
+      workspaceCwd: '/a',
+    },
+  ];
+  await render({
+    workspaces: [
+      { cwd: '/a', displayName: 'Alpha' },
+      { cwd: '/locked', displayName: 'Locked', trusted: false },
+      { cwd: '/beta', displayName: 'Beta' },
+    ],
+    qualified: false,
+    primaryWorkspaceCwd: '/a',
+  });
+  // An untrusted workspace is never in the fetch set...
+  await type('locked');
+  let rows = Array.from(
+    portal.querySelectorAll<HTMLElement>('[role="option"]'),
+  );
+  expect(rows).toHaveLength(1);
+  expect(rows[0].textContent).toContain('Alpha chat');
+  // ...nor is a secondary workspace on a daemon without qualified search.
+  await type('beta');
+  rows = Array.from(portal.querySelectorAll<HTMLElement>('[role="option"]'));
+  expect(rows).toHaveLength(1);
+  expect(rows[0].textContent).toContain('Alpha chat');
+  // A workspace the search does fetch still narrows.
+  await type('alpha');
+  rows = Array.from(portal.querySelectorAll<HTMLElement>('[role="option"]'));
+  expect(rows).toHaveLength(1);
+  expect(rows[0].textContent).toContain('Alpha chat');
+});
+
 it('confirms the narrowed row, not the filtered-out one', async () => {
   await render();
   await type('beta');
