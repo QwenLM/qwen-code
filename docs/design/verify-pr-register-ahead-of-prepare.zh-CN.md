@@ -82,10 +82,14 @@ inconclusive 是唯一增加 head 重试计数的判定，而计数上限即终�
 release 打印的 deferred 列表中、由你启动；常规 moved-head 情形注册与 prepare
 之间没有触发运行，故更新 head 从未被 defer、由下一次触发投递（R4-1 第 5 轮恢复
 此两分支写法）。手动路径没有触发，故自行重新解析更新 head（`gh pr view … --json
-headRefOid`）并 `--start` 它。不要在旧标记下 `git checkout` 更新的 head，否则会
-把更新 head 的证据记到所投递 head 的判定名下（R1-1 第 3 轮、R4-1）——prepare 段
-的错 HEAD checkout 补救带同一例外（R5-1）。两个 moved-head release 形式都像兄弟
-恢复形式一样带 `[--round <r>]`。完成形式的 `--artifact-dir` 可选：重放完成省略它
+headRefOid`）并 `--start` 它；重启后的轮次现为 `<newer>` 于 `<next>`，`--complete`
+重复这两个值，而非原来的 `<H>` 与 `<r>`（第 6 轮）。不要在旧标记下 `git checkout`
+更新的 head，否则会把更新 head 的证据记到所投递 head 的判定名下（R1-1 第 3 轮、
+R4-1）。prepare 段的错 HEAD checkout 补救区分已注册 head 的三种状态（R5-1 第 6
+轮）：**已验证** head 保持普通 `git checkout`（其判定已登记）；**仍在飞**的轮次
+自行作答（不要释放活标记、也不要在其下 checkout）；**已死**轮次的标记被释放、
+更新 head 被启动，且不在旧标记下 checkout 更新 head。两个 moved-head release
+形式都像兄弟恢复形式一样带 `[--round <r>]`。完成形式的 `--artifact-dir` 可选：重放完成省略它
 以继承该 head 已记录的目录，而非覆盖。死标记条目的 `--round` 是
 阻塞标记的轮次，从状态文件的在飞条目读出并传入（读状态允许，只有手写 JSON 被
 禁止）：省略 `--round` 会跳过比对，重试的 release 会删掉同 head 较新轮次的活
@@ -99,7 +103,10 @@ headRefOid`）并 `--start` 它。不要在旧标记下 `git checkout` 更新的
   断言注册句先于每节的 `Then run prepare` 句（watch 用 `<headSha>`、手动用
   `<H>`）；prepare 失败恢复钉断言完整 `--release` 形式带 `--repo` **及重启子句**
   （`--start … --round <r+1>`；删任一变红）；watch prompt 的 exit-3 死标记条目
-  钉住完整 `--release … --repo` 形式（R2-1）。
+  钉住完整 `--release … --repo` 形式（R2-1）。第 6 轮加按节切片的钉，使共享句在
+  一节的副本不为另一节作不在场证明：无 `--artifact-dir` 不变量与重放省略子句各钉
+  在本节切片上，三态错 HEAD 例外（R5-1）与 moved-head 完成重绑定被钉住，通用入口
+  条目钉到 prepare 块（注册是 watch/复验程序），边界节则限定注册先于 prepare。
 - `scripts/tests/verify-pr-watch-state.test.js`：新见证走 **CLI**（`run(root, …)`，
   演练本 PR 改动的助手代码——`parseArgs` 要求、`completeRound` 返回字段、`main`
   告警）——`--start` 不带 `--artifact-dir` 注册在飞且目录 `null`（恢复强制要求
@@ -149,5 +156,5 @@ headRefOid`）并 `--start` 它。不要在旧标记下 `git checkout` 更新的
   的持久快照，故本改动前安装的 watch 仍按 prepare→register 旧顺序，直到任务重建
   ——而 `--start --artifact-dir` 仍被接受，无机制强制重建。watch 只在 head move 时
   醒来，故*最后一个* head 上被杀的轮仍等待新 move，或手动
-  `--release --head <H> --repo <owner>/<repo>` **后再重启**（`--start … --round
-<r+1>`）——单独 release 会让 head 失去记录。
+  `--release --head <H> [--round <r>] --repo <owner>/<repo>` **后再重启**
+  （`--start … --round <r+1>`）——单独 release 会让 head 失去记录。

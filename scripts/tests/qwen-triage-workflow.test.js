@@ -6679,6 +6679,13 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(manualSlice).toContain(
       '`--start --head <newer> --round <next> --repo <owner>/<repo>` and run prepare',
     );
+    // Deferred (round 6): after the moved-head restart the completion
+    // placeholders re-bind to <newer>/<next> — the completion form below still
+    // prints <H>/<r>, so without this clause a restarted round would complete
+    // under the original head and round and be refused (exit 3).
+    expect(manualSlice).toContain(
+      'The restarted round is now `<newer>` at `<next>` — repeat those values in `--complete`, not the original `<H>` and `<r>`',
+    );
     // R1-2: a positional pin — registration precedes prepare in this section
     // (an order-insensitive toContain would stay green if --start moved back
     // below prepare).
@@ -6706,8 +6713,12 @@ describe('qwen-triage verify hardening round 2', () => {
       'the same write-before-start rule the watch prompt follows',
     );
     // R17-2: the directory prepare printed is recorded at --complete.
-    expect(flat).toContain(
+    expect(manualSlice).toContain(
       'verify-pr-watch-state.mjs <n> --complete --head <H> --round <r> --verdict <word> [--artifact-dir <dir>] [--comment-id <id>] --repo <owner>/<repo>',
+    );
+    // Deferred (round 6): the replay-omission clause is pinned in this section.
+    expect(manualSlice).toContain(
+      'omit it on a replayed completion to inherit the directory already recorded for `H`',
     );
     // Registration is a step of its own ahead of the round, not an
     // afterthought behind it.
@@ -6785,28 +6796,47 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain(
       'verify-pr-watch-state.mjs <n> --start --head <headSha> --round <r> --repo <owner>/<repo>',
     );
+    // Deferred (round 6): the no-artifact-dir invariant is a shared sentence
+    // (the manual section carries it too) — pin the prompt's own copy so the
+    // manual copy is not its alibi. A positive form pin alone would stay green
+    // if --artifact-dir crept back into the watch registration prose.
+    expect(promptSlice).toContain(
+      'no `--artifact-dir`, because prepare has not printed the directory yet',
+    );
     expect(flat).toContain(
       'Register the round **first, ahead of prepare** (R17-2)',
     );
     expect(flat).toContain(
       'a round killed in the prepare window leaves a recoverable in-flight marker rather than a silently dropped head',
     );
-    // R4-3: the two earlier "prepare first" sentences are qualified so they no
-    // longer contradict register-ahead-of-prepare; reverting either to the
-    // unqualified form reds these pins.
+    // R4-3 / deferred (round 6): the general "Start here" maintainer entry
+    // describes the prepare block (registration is a watch/re-verification
+    // procedure, not claimed for every maintainer round); the boundary
+    // section qualifies that the watch-state registration precedes prepare.
+    // Reverting the boundary sentence to the unqualified form reds these pins.
     expect(flat).toContain(
-      'registering the round in the watch state ahead of prepare (R17-2), then running the full step-1 prepare block',
+      'Maintainer round on a workstation** — `/verify-pr <n>`, running the full step-1 prepare block',
     );
     expect(flat).toContain(
       'Run the full step-1 prepare block on the host before any work inside the boundary — the watch-state registration precedes it (R17-2)',
     );
     expect(flat).not.toContain('before anything else');
-    // R5-1: the prepare paragraph's wrong-HEAD checkout remedy is qualified so
-    // it does not contradict the "do not checkout the newer head under the old
-    // marker" prohibition — a registered head's marker must be released, not
-    // checked out under. Deleting the qualification reds this pin.
+    // R5-1 (round 6): the wrong-HEAD checkout remedy distinguishes the three
+    // states of a registered head — verified keeps the plain checkout, a live
+    // in-flight round answers (no releasing a live marker), a gone round's
+    // marker is released and the newer head started. Reverting to the
+    // single-state exception reds these pins.
     expect(flat).toContain(
-      'a wrong HEAD names the `git checkout` to run — except when the tree sits at a head a watch round has registered: then release that marker and start the newer head, and do not check it out under the old marker',
+      'a wrong HEAD names the `git checkout` to run — but when the tree sits at a head a watch round has registered, distinguish its state',
+    );
+    expect(flat).toContain(
+      'a **verified** head keeps the plain `git checkout` (its verdict is already filed)',
+    );
+    expect(flat).toContain(
+      'if its round is **still in flight**, let that round answer — do not release a live marker or check out under it',
+    );
+    expect(flat).toContain(
+      'if that round is **gone**, release its marker (`--release --head <head> [--round <r>] --repo <owner>/<repo>`) and start the newer head, and do not check it out under the old marker',
     );
     // R1-1: the watch prompt's prepare-failure recovery carries the full
     // --release form with --repo (the <headSha> variant; the manual section
@@ -6869,6 +6899,11 @@ describe('qwen-triage verify hardening round 2', () => {
     // refuses a registered round's completion without it (D9-1).
     expect(flat).toContain(
       'verify-pr-watch-state.mjs <n> --complete --head <headSha> --round <r> --verdict <word> [--artifact-dir <dir>] [--comment-id <id>] --repo <owner>/<repo>',
+    );
+    // Deferred (round 6): the replay-omission clause is pinned in this section
+    // (the manual twin uses `H`, so it cannot satisfy this prompt-only form).
+    expect(promptSlice).toContain(
+      'omit it on a replayed completion to inherit the directory already recorded for the head rather than overwriting it',
     );
     // The duty, not just the command string: deleting the consequence
     // sentence while keeping the command must go red too.

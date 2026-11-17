@@ -23,8 +23,7 @@ Two entry paths share the contract below.
   before running the checker, and the checker treats an absent declaration
   as a warning while `$QWEN_VERIFY_CONTEXT` is set — so the round's own
   pre-finish self-check never fails on a file only the later job writes.
-- **Maintainer round on a workstation** — `/verify-pr <n>`, registering the
-  round in the watch state ahead of prepare (R17-2), then running the full
+- **Maintainer round on a workstation** — `/verify-pr <n>`, running the full
   step-1 prepare block (the trusted copy
   `cd <pr-clone> && node <trusted-clone>/scripts/verify-pr-prepare.mjs <n> --repo <owner>/<repo>`
   redirected to `prepare.log`, plus the `sed` that captures the snapshot digest
@@ -268,10 +267,15 @@ command redirected to `prepare.log`, plus the `sed` that captures the snapshot
 digest into `pr.sha256` (step 7 binds the snapshot's bytes to it). It fetches the metadata snapshot, resolves and verifies
 both OIDs against this clone, refuses a tree that is not a clean, fully
 materialised checkout of the PR head (a wrong HEAD names the `git checkout`
-to run — except when the tree sits at a head a watch round has registered:
-then release that marker and start the newer head, and do not check it out
-under the old marker, which would file the newer head's evidence under the
-registered head's verdict; uncommitted changes name the entries and a stash
+to run — but when the tree sits at a head a watch round has registered,
+distinguish its state: a **verified** head keeps the plain `git checkout` (its
+verdict is already filed); if its round is **still in flight**, let that round
+answer — do not release a live marker or check out under it; if that round is
+**gone**, release its marker
+(`--release --head <head> [--round <r>] --repo <owner>/<repo>`) and start the
+newer head, and do not check it out under the old marker, which would file the
+newer head's evidence under the registered head's verdict; uncommitted changes
+name the entries and a stash
 form that clears them; index flags that hide tracked state — a sparse checkout's
 skip-worktree, assume-unchanged — are refused too; the script never stashes
 for you),
@@ -1006,7 +1010,9 @@ inconclusive` instead: it increments the retry counter whose cap is the
    not restart it. There is no watch fire here to deliver the newer head, so re-resolve it
    yourself (`gh pr view <n> --repo <owner>/<repo> --json headRefOid`), then
    `--start --head <newer> --round <next> --repo <owner>/<repo>` and run prepare
-   for it. Do not `git checkout` the newer head under the old marker.
+   for it. The restarted round is now `<newer>` at `<next>` — repeat those
+   values in `--complete`, not the original `<H>` and `<r>`.
+   Do not `git checkout` the newer head under the old marker.
    Exit 3 means the file already records `H` as verified or in flight, or
    another head's round is in flight (one round per PR): let that round
    answer instead of starting a duplicate. A cross-head refusal records `H`
