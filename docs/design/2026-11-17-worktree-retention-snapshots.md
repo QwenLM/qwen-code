@@ -23,32 +23,62 @@ P6 lands as five units on the #17237 branch; each is independently testable.
 
 ### U1 — Snapshot capture/restore service (core)
 
-A `WorktreeSnapshotService` (core) that captures a worktree to a self-contained
-archive and restores it:
+A snapshot service (`worktree-snapshot-service.ts`, core) that captures a
+worktree to a self-contained archive and restores it:
 
-- **Capture** `captureSnapshot(worktreePath, header) -> snapshotPath`: a
-  `tar.gz` of the worktree tree excluding the regenerable set
-  (`DISPOSABLE_IGNORED_ROOTS` — `node_modules`, build output — the same set
-  `worktreeHasWork` waives) and the `.git` file/dir and the session marker.
-  Uses the `tar` dependency already in core. The archive stores paths relative
-  to the worktree root. A JSON header rides alongside (or as the first archive
-  entry): base commit (`worktreeBase`), HEAD commit, branch if any, dirty-state
-  summary (tracked/untracked counts), session id, timestamp, schema version.
-- **Restore** `restoreSnapshot(snapshotPath, targetWorktreePath)`: extract the
-  archive over a freshly recreated worktree (detached at the recorded HEAD, or
-  on the recorded branch). Restore is faithful to commits + dirty tracked +
-  untracked content; it does not restore `node_modules` (regenerable).
-- **Format stability**: the header carries a schema version; a reader refuses
-  an unknown version rather than mis-restoring. Capture is atomic (stage to a
-  temp file, rename) so a crash mid-capture never leaves a half-written archive
-  that a later restore would trust.
+- **Capture** `captureWorktreeSnapshot({worktreePath, snapshotDir, meta})`: a
+  `tar.gz` of the worktree tree plus a JSON header beside it. The exclusion
+  matches the has-work gate's _ignored-only_ geometry: a path under a
+  regenerable directory name (`DISPOSABLE_IGNORED_ROOTS` — `node_modules`,
+  `dist`, `coverage`) is excluded only when git reports it ignored
+  (`ls-files --others --ignored --exclude-standard -z`), so a tracked or
+  non-ignored file under those names is work and is archived (verify finding
+  F3). The `.git` file/dir and the session marker are always excluded. Uses the
+  `tar` dependency already in core; paths are relative to the worktree root.
+  The header (`buildWorktreeSnapshotMeta`) records base commit (`worktreeBase`),
+  HEAD commit, branch, dirty-state summary (tracked/untracked counts **and the
+  list of deleted tracked paths**, including rename sources), session id,
+  timestamp, schema version.
+- **Restore** `restoreWorktreeSnapshot(snapshotPath, targetWorktreePath, meta)`:
+  restore over a freshly recreated worktree (detached at the recorded HEAD, or
+  on the recorded branch) without losing any archived content (verify finding
+  F2), in three steps: (1) clear a conflicting HEAD target for each archived
+  non-directory entry — node-tar replaces a file with a directory but not a
+  directory with a file, so a dir→file replacement would otherwise silently drop
+  the archived file; (2) re-apply the _pure_ deletions (paths absent from the
+  archive) before extraction, so a deleted tracked file is not resurrected from
+  HEAD — a deleted path the session recreated (present in the archive) is left
+  for extraction to restore, and a deleted path that became a directory holds
+  archived content and is left alone; (3) extract with `strict`, so a residual
+  conflict fails loudly rather than silently dropping content. Restore is
+  faithful to commits + dirty tracked + untracked content and to deletions; it
+  does not restore ignored regenerable output, and it does not preserve index
+  state (staged vs unstaged) — the contract is that no file content is lost.
+  Paths are validated as safe relative paths, confined under the target root,
+  and `.git`/the session marker are refused as deletion targets. A deleted path
+  that is not valid UTF-8 makes `buildWorktreeSnapshotMeta` reject the capture
+  (the caller preserves) rather than record a deletion that cannot be re-applied
+  by name.
+- **Format stability**: the header carries a schema version (currently 2); a
+  reader refuses an unknown version rather than mis-restoring. Version 1 (no
+  recorded deletions) is refused because it cannot faithfully restore a
+  deletion. Capture is atomic (stage to a temp file, rename) so a crash
+  mid-capture never leaves a half-written archive a later restore would trust.
+- **Repository pinning + hardening**: capture and meta build first require the
+  worktree's own `.git` (`fs.access`), so git cannot answer about an enclosing
+  repository when the link is gone (verify finding F4); both run their git
+  probes with `NO_EXEC_CONFIG` and `--no-optional-locks`, so a repository-configured
+  `core.fsmonitor` hook is not executed (verify finding F5).
 - Fail-closed: a capture error rejects (the caller must not delete the worktree
   without a durable snapshot); a restore error rejects without partial state
   where feasible.
 
-Tests: snapshot content + exclusions (no `node_modules`/`.git`/marker), restore
-fidelity (committed + dirty tracked + untracked round-trip), atomic capture,
-unknown-version refusal, capture-error rejection.
+Tests: snapshot content + ignored-only exclusions (tracked/non-ignored files
+under `dist/` archived; ignored `node_modules` excluded; ignored non-disposable
+work archived), restore fidelity (committed + dirty + untracked round-trip;
+unstaged/staged deletion and rename source re-applied over a recreated HEAD),
+atomic capture, unknown- and version-1 refusal, traversal-path refusal,
+missing-`.git` capture rejection (no archive), and a `core.fsmonitor` exec canary.
 
 ### U2 — `worktree.maxRetained` setting
 
@@ -108,8 +138,9 @@ Implementation notes (investigated):
 ### U5 — Restore affordance on reopen
 
 Reopening a chat whose worktree was deleted offers restore: a route recreates
-the worktree (detached at the recorded HEAD or on the recorded branch), extracts
-the snapshot (U1), flips the sidecar back. Web Shell surfaces the affordance
+the worktree (detached at the recorded HEAD or on the recorded branch), calls
+`restoreWorktreeSnapshot` (U1) to extract the archive and re-apply the recorded
+deletions, then flips the sidecar back. Web Shell surfaces the affordance
 (chat header / session overview). i18n.
 
 ## Acceptance (P6 overall)
@@ -117,7 +148,9 @@ the snapshot (U1), flips the sidecar back. Web Shell surfaces the affordance
 - Archiving a chat deletes its worktree after snapshotting; reopening offers
   restore; the sweep keeps the most recent 15 (default).
 - A dirty managed session worktree is deleted after snapshot (no permanent
-  preserve); the snapshot restores commits + dirty + untracked faithfully.
+  preserve); the snapshot restores commits + dirty + untracked content and
+  tracked deletions faithfully. A session change to a carried path is
+  snapshotted, never deleted bare (R9-6 content-aware gate).
 - Tool/agent worktrees keep the existing refusal semantics.
 - Active/pinned worktrees are protected; `0` disables count-based deletion.
 

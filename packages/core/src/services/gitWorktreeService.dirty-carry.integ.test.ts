@@ -1768,44 +1768,47 @@ describe('worktreeHasWork — carried overlay exemption (R9-6)', () => {
       carryDirtyState: true,
     });
     expect(result.success).toBe(true);
-    return { worktree: result.worktree!, carriedPaths: result.carriedPaths! };
+    return {
+      worktree: result.worktree!,
+      carriedEntries: result.carriedEntries!,
+    };
   }
 
-  it('a carried-only checkout reads clean with the exemption, dirty without', async () => {
+  it('a pristine carried-only checkout reads clean with the exemption, dirty without', async () => {
     await makeDirty(repoRoot);
-    const { worktree, carriedPaths } = await createCarried('r96-clean');
-    expect(carriedPaths.length).toBeGreaterThan(0);
+    const { worktree, carriedEntries } = await createCarried('r96-clean');
+    expect(carriedEntries.length).toBeGreaterThan(0);
     // Without the recorded overlay the carried copy counts as work (the
     // pre-fix reaper behavior that stranded the checkout).
     await expect(worktreeHasWork(worktree.path)).resolves.toBe(true);
-    // With it, every entry is the carried overlay (or the waived marker).
-    await expect(worktreeHasWork(worktree.path, carriedPaths)).resolves.toBe(
+    // With it, every entry still matches its carry-time identity.
+    await expect(worktreeHasWork(worktree.path, carriedEntries)).resolves.toBe(
       false,
     );
   });
 
   it('a late untracked file outside the overlay still preserves', async () => {
     await makeDirty(repoRoot);
-    const { worktree, carriedPaths } = await createCarried('r96-late');
+    const { worktree, carriedEntries } = await createCarried('r96-late');
     await fs.writeFile(path.join(worktree.path, 'late-work.txt'), 'mine\n');
-    await expect(worktreeHasWork(worktree.path, carriedPaths)).resolves.toBe(
+    await expect(worktreeHasWork(worktree.path, carriedEntries)).resolves.toBe(
       true,
     );
   });
 
   it('a late-arriving ignored file still preserves', async () => {
     await makeDirty(repoRoot);
-    const { worktree, carriedPaths } = await createCarried('r96-ignored');
+    const { worktree, carriedEntries } = await createCarried('r96-ignored');
     await fs.writeFile(path.join(worktree.path, '.gitignore'), '*.secret\n');
     await fs.writeFile(path.join(worktree.path, 'late.secret'), 'hidden\n');
     // .gitignore itself is non-carried untracked work; the ignored file is
     // caught by the ls-files --others probe even though status omits it.
-    await expect(worktreeHasWork(worktree.path, carriedPaths)).resolves.toBe(
+    await expect(worktreeHasWork(worktree.path, carriedEntries)).resolves.toBe(
       true,
     );
   });
 
-  it('absent carriedPaths keeps the legacy behavior (overlay counts as work)', async () => {
+  it('absent carriedEntries keeps the legacy behavior (overlay counts as work)', async () => {
     await makeDirty(repoRoot);
     const { worktree } = await createCarried('r96-legacy');
     // A legacy sidecar records no overlay: passing nothing (or an empty list)
@@ -1819,10 +1822,115 @@ describe('worktreeHasWork — carried overlay exemption (R9-6)', () => {
     // created: the sibling is not in the overlay and must preserve.
     await fs.mkdir(path.join(repoRoot, 'sub'));
     await fs.writeFile(path.join(repoRoot, 'sub', 'a.txt'), 'carried\n');
-    const { worktree, carriedPaths } = await createCarried('r96-prefix');
-    expect(carriedPaths).toContain('sub/a.txt');
+    const { worktree, carriedEntries } = await createCarried('r96-prefix');
+    expect(carriedEntries.map((e) => e.path)).toContain('sub/a.txt');
     await fs.writeFile(path.join(worktree.path, 'sub', 'b.txt'), 'sibling\n');
-    await expect(worktreeHasWork(worktree.path, carriedPaths)).resolves.toBe(
+    await expect(worktreeHasWork(worktree.path, carriedEntries)).resolves.toBe(
+      true,
+    );
+  });
+
+  // F1: a session change to a carried path is new work the source checkout
+  // does not hold, so the gate must read it as work (the reaper snapshots it)
+  // rather than waive it by path equality alone.
+  it('staging a carried tracked edit reads as work', async () => {
+    await makeDirty(repoRoot);
+    const { worktree, carriedEntries } = await createCarried('r96-stage');
+    git(worktree.path, 'add', 'README.md');
+    await expect(worktreeHasWork(worktree.path, carriedEntries)).resolves.toBe(
+      true,
+    );
+  });
+
+  it('deleting a carried tracked file reads as work', async () => {
+    await makeDirty(repoRoot);
+    const { worktree, carriedEntries } = await createCarried('r96-delete');
+    await fs.rm(path.join(worktree.path, 'README.md'));
+    await expect(worktreeHasWork(worktree.path, carriedEntries)).resolves.toBe(
+      true,
+    );
+  });
+
+  it('a further unstaged edit of a carried tracked file reads as work', async () => {
+    await makeDirty(repoRoot);
+    const { worktree, carriedEntries } = await createCarried('r96-reedit');
+    await fs.writeFile(path.join(worktree.path, 'README.md'), 'later-edit\n');
+    await expect(worktreeHasWork(worktree.path, carriedEntries)).resolves.toBe(
+      true,
+    );
+  });
+
+  it('a further edit of a carried untracked file reads as work', async () => {
+    await makeDirty(repoRoot);
+    const { worktree, carriedEntries } = await createCarried('r96-untracked');
+    await fs.writeFile(
+      path.join(worktree.path, 'untracked.txt'),
+      'later-untracked\n',
+    );
+    await expect(worktreeHasWork(worktree.path, carriedEntries)).resolves.toBe(
+      true,
+    );
+  });
+
+  it.skipIf(!arePermissionBitsEnforced())(
+    'a mode-only change of a carried file reads as work',
+    async () => {
+      await makeDirty(repoRoot);
+      const { worktree, carriedEntries } = await createCarried('r96-mode');
+      await fs.chmod(path.join(worktree.path, 'README.md'), 0o755);
+      await expect(
+        worktreeHasWork(worktree.path, carriedEntries),
+      ).resolves.toBe(true);
+    },
+  );
+
+  it('a session edit hidden under assume-unchanged reads as work (F6)', async () => {
+    await makeDirty(repoRoot);
+    const { worktree, carriedEntries } = await createCarried('r96-assume');
+    git(worktree.path, 'update-index', '--assume-unchanged', 'README.md');
+    await fs.writeFile(path.join(worktree.path, 'README.md'), 'hidden-edit\n');
+    // git status omits the edit under the hidden bit; the gate must still
+    // refuse rather than read clean and delete the work bare.
+    await expect(worktreeHasWork(worktree.path, carriedEntries)).resolves.toBe(
+      true,
+    );
+  });
+
+  it('a session edit hidden under skip-worktree reads as work (F6)', async () => {
+    await makeDirty(repoRoot);
+    const { worktree, carriedEntries } = await createCarried('r96-skip');
+    git(worktree.path, 'update-index', '--skip-worktree', 'README.md');
+    await fs.writeFile(path.join(worktree.path, 'README.md'), 'hidden-edit\n');
+    await expect(worktreeHasWork(worktree.path, carriedEntries)).resolves.toBe(
+      true,
+    );
+  });
+
+  it('a pristine carried deletion reads clean; restoring or staging it is work', async () => {
+    // Source deletes a tracked file (unstaged); the carry reproduces the
+    // deletion and records a null-hash identity.
+    await fs.rm(path.join(repoRoot, 'tracked.txt'));
+    const { worktree, carriedEntries } = await createCarried('r96-carrydel');
+    expect(carriedEntries).toContainEqual({
+      path: 'tracked.txt',
+      hash: null,
+      executable: false,
+    });
+    await expect(worktreeHasWork(worktree.path, carriedEntries)).resolves.toBe(
+      false,
+    );
+    // Restoring the deleted file is new work.
+    await fs.writeFile(path.join(worktree.path, 'tracked.txt'), 'back\n');
+    await expect(worktreeHasWork(worktree.path, carriedEntries)).resolves.toBe(
+      true,
+    );
+  });
+
+  it('staging a carried deletion reads as work', async () => {
+    await fs.rm(path.join(repoRoot, 'tracked.txt'));
+    const { worktree, carriedEntries } = await createCarried('r96-stagedel');
+    git(worktree.path, 'add', 'tracked.txt');
+    await expect(worktreeHasWork(worktree.path, carriedEntries)).resolves.toBe(
       true,
     );
   });

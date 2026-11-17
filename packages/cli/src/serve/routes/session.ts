@@ -3144,7 +3144,7 @@ export function registerSessionRoutes(
       | undefined;
     let worktreeBaseBranch: string | undefined;
     let worktreeBaseCommit: string | undefined;
-    let worktreeCarriedPaths: string[] | undefined;
+    let worktreeCarriedEntries: WorktreeSession['carriedEntries'];
     let worktreeDurablyAttached = false;
     let spawnCompleted = false;
 
@@ -3441,7 +3441,7 @@ export function registerSessionRoutes(
           path: wtResult.worktree.path,
           branch: wtResult.worktree.branch,
         };
-        worktreeCarriedPaths = wtResult.carriedPaths;
+        worktreeCarriedEntries = wtResult.carriedEntries;
         // Worktree sessions must be independent — never coalesce onto an
         // existing single-scope session that lives in the main checkout.
         sessionScope = 'thread';
@@ -3788,7 +3788,7 @@ export function registerSessionRoutes(
               worktreeBase: worktreeBaseCommit,
               // Record the carried overlay so the orphan reaper can exempt it
               // (R9-6). Absent when the creation carried nothing.
-              carriedPaths: worktreeCarriedPaths,
+              carriedEntries: worktreeCarriedEntries,
             },
           );
           assertRuntimeGenerationOpen?.();
@@ -5856,7 +5856,7 @@ export function registerSessionRoutes(
                 worktreeBase: baseCommit,
                 // Record the carried overlay so the orphan reaper can exempt
                 // it (R9-6). Absent when the handoff carried nothing.
-                carriedPaths: created.carriedPaths,
+                carriedEntries: created.carriedEntries,
               });
               assertRuntimeGenerationOpen?.();
               const changed = await runtime.bridge.changeSessionCwd(
@@ -6436,8 +6436,9 @@ export function registerSessionRoutes(
                   // test, exit_worktree and the orphan reaper read this.
                   worktreeBase: base.headCommit,
                   // Record the carried overlay so the orphan reaper can exempt
-                  // it (R9-6); the journal already carries it for cleanup.
-                  carriedPaths: worktreeResult.carriedPaths,
+                  // it (R9-6); the journal already carries the paths for the
+                  // prepared cleanup.
+                  carriedEntries: worktreeResult.carriedEntries,
                 });
                 journal = await updateBranchWorktreeJournal(
                   journalPath,

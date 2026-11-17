@@ -20,7 +20,7 @@ import { isNodeError } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { fileExists, isWithinRoot } from '../utils/fileUtils.js';
 import { NO_EXEC_CONFIG } from '../utils/gitUtils.js';
-import { runGitCapture } from '../utils/git-branches.js';
+import { runGit, runGitCapture } from '../utils/git-branches.js';
 import { loadSimpleGit } from '../utils/load-simple-git.js';
 import { gitEnv, gitRemoteEnv } from '../utils/git-branches.js';
 import { initRepositoryWithMainBranch } from './gitInit.js';
@@ -152,6 +152,118 @@ export const DISPOSABLE_IGNORED_ROOTS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * One path of the dirty overlay a creation carried, with the content
+ * identity it had at carry time (R9-6). The managed-session has-work gate
+ * waives a carried path only while its current state still matches this
+ * identity: a session that stages, deletes, or further edits a carried file
+ * has produced new work the source checkout does not hold, so the gate must
+ * read it as work and the reaper must snapshot it. Path equality alone
+ * cannot tell the original carried copy from a later edit to the same path.
+ *
+ * `hash === null` records a carried deletion (the carry removed the path);
+ * any other state of that path is new work. `executable` is the carried
+ * file's exec bit, so a mode-only change is new work too. Non-regular
+ * carried entries (symlinks, directories) are not recorded — the gate then
+ * treats them as work, the conservative direction.
+ */
+export interface CarriedEntry {
+  path: string;
+  hash: string | null;
+  executable: boolean;
+}
+
+/**
+ * Compute carry-time content identities for the overlay paths inside a
+ * worktree: absent paths become carried deletions, regular files are hashed
+ * with `git hash-object` (batched to bound argv) and carry their exec bit.
+ * Non-regular entries are omitted so the gate treats them as work. Rejects
+ * on a read/hash failure — a caller that cannot describe the overlay must
+ * not record an exemption it cannot later verify.
+ */
+export async function computeCarriedIdentities(
+  worktreePath: string,
+  paths: readonly string[],
+): Promise<CarriedEntry[]> {
+  const entries: CarriedEntry[] = [];
+  const present: Array<{ path: string; executable: boolean }> = [];
+  for (const rel of paths) {
+    let stat;
+    try {
+      stat = await fs.lstat(path.join(worktreePath, rel));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        entries.push({ path: rel, hash: null, executable: false });
+        continue;
+      }
+      throw error;
+    }
+    if (stat.isFile()) {
+      present.push({ path: rel, executable: (stat.mode & 0o111) !== 0 });
+    }
+  }
+  const BATCH = 200;
+  for (let i = 0; i < present.length; i += BATCH) {
+    const batch = present.slice(i, i + BATCH);
+    const out = await runGit(worktreePath, [
+      ...NO_EXEC_CONFIG,
+      'hash-object',
+      '--',
+      ...batch.map((e) => e.path),
+    ]);
+    const hashes = out.split('\n').filter((line) => line.length > 0);
+    if (hashes.length !== batch.length) {
+      throw new Error(
+        `computeCarriedIdentities: hash-object returned ${hashes.length} hashes for ${batch.length} paths`,
+      );
+    }
+    for (let j = 0; j < batch.length; j++) {
+      entries.push({
+        path: batch[j].path,
+        hash: hashes[j],
+        executable: batch[j].executable,
+      });
+    }
+  }
+  return entries;
+}
+
+/**
+ * Whether the index hides any path's worktree changes from `git status` via
+ * an assume-unchanged (lowercase tag) or skip-worktree (`S`) bit. Such a bit
+ * lets a session edit read clean, so a predicate gating a destructive sink
+ * must refuse it. Pins the worktree's own `.git` (no upward discovery) and
+ * is fail-closed: any read error or stderr output counts as hidden.
+ */
+async function hasHiddenIndexBit(worktreePath: string): Promise<boolean> {
+  try {
+    await fs.access(path.join(worktreePath, '.git'));
+    const { stdout, stderr } = await runGitCapture(worktreePath, [
+      ...NO_EXEC_CONFIG,
+      '--no-optional-locks',
+      'ls-files',
+      '-v',
+      '-z',
+    ]);
+    if (stderr.trim().length > 0) {
+      debugLogger.debug(
+        `worktreeHasWork: ls-files -v probe at ${worktreePath} reported on stderr, treating as work: ${stderr.trim()}`,
+      );
+      return true;
+    }
+    for (const entry of stdout.split('\0')) {
+      if (entry.length === 0) continue;
+      if (/^(?:S|[a-z])/.test(entry)) return true;
+    }
+    return false;
+  } catch (error) {
+    debugLogger.debug(
+      `worktreeHasWork: ls-files -v probe at ${worktreePath} failed, treating as work: ${error}`,
+    );
+    return true;
+  }
+}
+
+/**
  * The one "is there work here?" predicate for every path that destroys a
  * worktree checkout: the CLI startup sweep (`cleanupStaleAgentWorktrees`)
  * and the daemon's orphan reaper both gate `removeUserWorktree` on this,
@@ -190,13 +302,23 @@ export const DISPOSABLE_IGNORED_ROOTS: ReadonlySet<string> = new Set([
  */
 export async function worktreeHasWork(
   worktreePath: string,
-  carriedPaths?: readonly string[],
+  carriedEntries?: readonly CarriedEntry[],
 ): Promise<boolean> {
-  // With a recorded carried overlay, exempt exactly those paths so a
-  // checkout whose only content is the carried copy reads clean (R9-6).
-  // Absent/empty keeps the probe below byte-for-byte unchanged.
-  if (carriedPaths && carriedPaths.length > 0) {
-    return hasNonCarriedWork(worktreePath, new Set(carriedPaths));
+  // A hidden index bit (assume-unchanged / skip-worktree) hides a path's
+  // worktree changes from `git status`, so a session edit under such a bit
+  // would read clean and be deleted bare. Refuse on any hidden bit before
+  // either probe — carried or not — mirroring the prepared-worktree gate's
+  // `ls-files -v` check. Fail-closed: a probe error counts as work.
+  if (await hasHiddenIndexBit(worktreePath)) return true;
+  // With a recorded carried overlay, exempt exactly those paths whose
+  // current state still matches the carry-time identity, so a checkout
+  // whose only content is the pristine carried copy reads clean (R9-6).
+  // Absent/empty keeps the status probe below unchanged.
+  if (carriedEntries && carriedEntries.length > 0) {
+    return hasNonCarriedWork(
+      worktreePath,
+      new Map(carriedEntries.map((e) => [e.path, e])),
+    );
   }
   try {
     await fs.access(path.join(worktreePath, '.git'));
@@ -256,23 +378,61 @@ export async function worktreeHasWork(
 }
 
 /**
+ * Whether a carried path's current state still matches its carry-time
+ * identity, so waiving it loses no work. A carried deletion must still be
+ * an unstaged deletion of an absent path; carried content must still be an
+ * unstaged tracked edit (` M`) or untracked file (`??`) with the same blob
+ * hash and exec bit. Any other status — staged (`M `, `A `, `D `), a
+ * deletion of carried content, a symlink replacement — or any content/mode
+ * drift is new work the source checkout does not hold. `current` is absent
+ * when the path is now non-regular (symlink/dir), which never matches.
+ */
+function carriedEntryMatches(
+  stored: CarriedEntry,
+  current: CarriedEntry | undefined,
+  status: string,
+): boolean {
+  if (stored.hash === null) {
+    return status === ' D' && current !== undefined && current.hash === null;
+  }
+  if (status !== ' M' && status !== '??') return false;
+  return (
+    current !== undefined &&
+    current.hash === stored.hash &&
+    current.executable === stored.executable
+  );
+}
+
+/**
  * Carried-aware variant of {@link worktreeHasWork}: a checkout whose only
- * content is the recorded carried overlay reads clean, while any non-carried
- * work still preserves it (R9-6). Mirrors the prepared-worktree gate's
- * exact-path exemption (`exempt.has(p)`) and its two-probe form: file-level
- * raw `status -z` (untracked directories not collapsed, non-ASCII paths not
- * C-quoted) plus `ls-files --others -z`, which lists ignored files too, so a
- * late-arriving ignored file the status probe misses still preserves the
- * checkout. The reaper's session-marker / disposable-output / symlink waivers
- * apply on top of the carried exemption. Fail-closed like the base predicate:
- * any read error or stderr output counts as work.
+ * content is the pristine recorded carried overlay reads clean, while any
+ * non-carried work — and any session change to a carried path — still
+ * preserves it (R9-6). Two-probe form: file-level raw `status -z` (untracked
+ * directories not collapsed, non-ASCII paths not C-quoted) plus
+ * `ls-files --others -z`, which lists ignored files too, so a late-arriving
+ * ignored file the status probe misses still preserves the checkout. The
+ * carried waiver is content-aware: a carried path is exempt only while its
+ * current state matches the carry-time identity ({@link carriedEntryMatches}),
+ * because path equality alone cannot distinguish the original carried copy
+ * from a later edit, stage, or delete of the same path. The reaper's
+ * session-marker / disposable-output / symlink waivers apply on top of the
+ * carried exemption for non-carried entries. Fail-closed like the base
+ * predicate: any read error or stderr output counts as work.
  */
 async function hasNonCarriedWork(
   worktreePath: string,
-  exempt: ReadonlySet<string>,
+  carried: ReadonlyMap<string, CarriedEntry>,
 ): Promise<boolean> {
   try {
     await fs.access(path.join(worktreePath, '.git'));
+    // Snapshot the carried paths' current identities once, so a further
+    // edit / stage / delete of a carried path reads as work rather than
+    // being waived by path equality alone.
+    const current = new Map(
+      (await computeCarriedIdentities(worktreePath, [...carried.keys()])).map(
+        (e) => [e.path, e],
+      ),
+    );
     const { stdout, stderr } = await runGitCapture(worktreePath, [
       ...NO_EXEC_CONFIG,
       '--no-optional-locks',
@@ -295,8 +455,12 @@ async function hasNonCarriedWork(
       // contains rename/copy records; one means the index was touched inside
       // the worktree. Refuse.
       if (status[0] === 'R' || status[0] === 'C') return true;
+      const stored = carried.get(entry);
       let waived: string | null = null;
-      if (exempt.has(entry)) {
+      if (stored !== undefined) {
+        if (!carriedEntryMatches(stored, current.get(entry), status)) {
+          return true;
+        }
         waived = 'carried-overlay';
       } else if (
         (status === '!!' || status === '??') &&
@@ -318,7 +482,8 @@ async function hasNonCarriedWork(
     }
     // status (without --ignored) does not list ignored files; ls-files
     // --others does, file-level. Any non-carried, non-waived other — including
-    // a late-arriving ignored file — preserves the checkout.
+    // a late-arriving ignored file — preserves the checkout. A carried other
+    // is untracked here, so it must still match its carried content identity.
     const others = await runGitCapture(worktreePath, [
       ...NO_EXEC_CONFIG,
       '--no-optional-locks',
@@ -334,8 +499,14 @@ async function hasNonCarriedWork(
     }
     for (const entry of others.stdout.split('\0')) {
       if (entry.length === 0) continue;
+      const stored = carried.get(entry);
+      if (stored !== undefined) {
+        if (!carriedEntryMatches(stored, current.get(entry), '??')) {
+          return true;
+        }
+        continue;
+      }
       if (
-        exempt.has(entry) ||
         entry === WORKTREE_SESSION_FILE ||
         WORKTREE_SESSION_TMP_PATTERN.test(entry) ||
         isDisposableIgnoredEntry(entry) ||
@@ -365,7 +536,7 @@ async function hasNonCarriedWork(
  * (`!! packages/app/node_modules/x/`), whose last segment is not in the set,
  * so such a tree still counts as work and the checkout is preserved.
  */
-function isDisposableIgnoredEntry(entry: string): boolean {
+export function isDisposableIgnoredEntry(entry: string): boolean {
   const segments = entry.replace(/\/$/, '').split('/');
   if (DISPOSABLE_IGNORED_ROOTS.has(segments[0] ?? '')) return true;
   return (
@@ -1210,6 +1381,16 @@ export interface CreateWorktreeResult {
    * rollback exempts exactly these from its cleanliness gate.
    */
   carriedPaths?: string[];
+  /**
+   * The same overlay with carry-time content identities, for the
+   * managed-session sidecar. The orphan reaper's gate waives a carried path
+   * only while its current state still matches its identity, so a session
+   * that stages, deletes, or further edits a carried file is snapshotted
+   * rather than deleted (R9-6). Absent when the carry applied nothing or its
+   * identities could not be computed — the gate then treats the overlay as
+   * work, the conservative direction.
+   */
+  carriedEntries?: CarriedEntry[];
 }
 
 export interface WorktreeSetupResult {
@@ -3295,6 +3476,7 @@ export class GitWorktreeService {
       }
 
       let carriedPaths: string[] | undefined;
+      let carriedEntries: CarriedEntry[] | undefined;
       if (options?.carryDirtyState === true) {
         const captureService =
           options.dirtyStateSource !== undefined &&
@@ -3372,6 +3554,20 @@ export class GitWorktreeService {
           // A skipped untracked entry (pre-existing destination or escaping
           // ancestor symlink) is not part of the overlay the rollback exempts.
           carriedPaths = [...dirtyState.trackedFiles, ...createdUntracked];
+          // Content identities for the managed-session gate. A failure here
+          // leaves carriedEntries absent (the gate then treats the overlay as
+          // work and snapshots it) without affecting the prepared rollback,
+          // which exempts by path in its never-attached context.
+          carriedEntries = await computeCarriedIdentities(
+            worktreePath,
+            carriedPaths,
+          ).catch((error) => {
+            debugLogger.warn(
+              `createUserWorktree: carried identity computation failed for ${slug}; ` +
+                `the reaper will snapshot the overlay: ${error}`,
+            );
+            return undefined;
+          });
         }
       }
 
@@ -3383,7 +3579,7 @@ export class GitWorktreeService {
         isActive: true,
         createdAt: Date.now(),
       };
-      return { success: true, worktree, carriedPaths };
+      return { success: true, worktree, carriedPaths, carriedEntries };
     } catch (error) {
       const message = `Failed to create worktree "${slug}": ${error instanceof Error ? error.message : 'Unknown error'}`;
       debugLogger.warn(`createUserWorktree: ${message}`);

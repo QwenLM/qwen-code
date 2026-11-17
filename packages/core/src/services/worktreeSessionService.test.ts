@@ -415,10 +415,14 @@ describe('writeWorktreeSession', () => {
     await expectStrictInvalid();
   });
 
-  it('round-trips the carriedPaths overlay field (R9-6)', async () => {
+  it('round-trips the carriedEntries overlay field (R9-6)', async () => {
     const withOverlay: WorktreeSession = {
       ...sample,
-      carriedPaths: ['README.md', 'sub/a.txt'],
+      carriedEntries: [
+        { path: 'README.md', hash: 'a'.repeat(40), executable: false },
+        { path: 'sub/a.txt', hash: null, executable: false },
+        { path: 'run.sh', hash: 'b'.repeat(40), executable: true },
+      ],
     };
     await writeWorktreeSession(filePath, withOverlay);
     await expect(strictRead()).resolves.toEqual({
@@ -427,24 +431,54 @@ describe('writeWorktreeSession', () => {
     });
   });
 
-  it('accepts a sidecar without carriedPaths (legacy back-compat, R9-6)', async () => {
+  it('accepts a sidecar without carriedEntries (legacy back-compat, R9-6)', async () => {
     await writeWorktreeSession(filePath, sample);
     const read = await strictRead();
     expect(read.state).toBe('valid');
     if (read.state === 'valid') {
-      expect(read.session.carriedPaths).toBeUndefined();
+      expect(read.session.carriedEntries).toBeUndefined();
     }
   });
 
-  it('rejects a sidecar with a wrong-typed carriedPaths (R9-6)', async () => {
-    await writeJson({ ...sample, carriedPaths: 'README.md' });
+  it('rejects a sidecar with a wrong-typed carriedEntries (R9-6)', async () => {
+    await writeJson({ ...sample, carriedEntries: 'README.md' });
     await expectStrictInvalid();
 
-    await writeJson({ ...sample, carriedPaths: 42 });
+    await writeJson({ ...sample, carriedEntries: 42 });
     await expectStrictInvalid();
 
-    await writeJson({ ...sample, carriedPaths: ['README.md', 7] });
+    await writeJson({ ...sample, carriedEntries: ['README.md', 7] });
     await expectStrictInvalid();
+
+    await writeJson({
+      ...sample,
+      carriedEntries: [{ path: 'README.md', hash: 7, executable: false }],
+    });
+    await expectStrictInvalid();
+
+    await writeJson({
+      ...sample,
+      carriedEntries: [{ path: 'README.md', hash: null }],
+    });
+    await expectStrictInvalid();
+  });
+
+  it('drops an oversized carriedEntries so the sidecar stays readable (R9-6)', async () => {
+    const entries = Array.from({ length: 800 }, (_, i) => ({
+      path: `some/long/path/file-${i}.txt`,
+      hash: 'a'.repeat(40),
+      executable: false,
+    }));
+    const big: WorktreeSession = { ...sample, carriedEntries: entries };
+    await writeWorktreeSession(filePath, big);
+    const read = await strictRead();
+    expect(read.state).toBe('valid');
+    if (read.state === 'valid') {
+      // The exemption metadata is dropped (the reaper snapshots the work),
+      // but the binding itself stays readable rather than orphaned.
+      expect(read.session.carriedEntries).toBeUndefined();
+      expect(read.session.slug).toBe(sample.slug);
+    }
   });
 });
 

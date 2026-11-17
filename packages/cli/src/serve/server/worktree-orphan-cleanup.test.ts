@@ -20,6 +20,8 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   GitWorktreeService,
+  readWorktreeSnapshotMeta,
+  restoreWorktreeSnapshot,
   writeWorktreeSessionMarker,
   type WorktreeSession,
 } from '@qwen-code/qwen-code-core';
@@ -188,8 +190,8 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
       carryDirtyState: true,
     });
     expect(result.success).toBe(true);
-    const carriedPaths = result.carriedPaths!;
-    expect(carriedPaths.length).toBeGreaterThan(0);
+    const carriedEntries = result.carriedEntries!;
+    expect(carriedEntries.length).toBeGreaterThan(0);
     const worktreePath = fs.realpathSync(result.worktree!.path);
     const sessionId = `session-${slug}`;
     await writeWorktreeSessionMarker(worktreePath, sessionId);
@@ -200,7 +202,7 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
       originalCwd: repoRoot,
       originalBranch: 'main',
       originalHeadCommit: '',
-      ...(recordOverlay ? { carriedPaths } : {}),
+      ...(recordOverlay ? { carriedEntries } : {}),
     };
     return {
       sessionId,
@@ -216,6 +218,17 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
     await executeWorktreeCleanup(plan);
 
     expect(fs.existsSync(plan.lockKey)).toBe(false);
+    // A pristine carried overlay is collected WITHOUT a snapshot — the source
+    // checkout still holds it. Dropping the gate's carriedEntries argument
+    // would read the overlay as work and write an archive instead.
+    expect(
+      fs.existsSync(
+        path.join(
+          repoParent,
+          'session-carried-collect.worktree-snapshot.tar.gz',
+        ),
+      ),
+    ).toBe(false);
   });
 
   it('snapshots then deletes a carried-only checkout with no recorded overlay (R9-6 legacy + P6 U3)', async () => {
@@ -250,5 +263,57 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
 
     expect(fs.existsSync(plan.lockKey)).toBe(true);
     expect(fs.existsSync(path.join(plan.lockKey, 'work.txt'))).toBe(true);
+    // The preserve must come from the capture refusal itself, not from a
+    // later removal failure: no archive may have been written.
+    expect(
+      fs.existsSync(
+        path.join(repoParent, 'session-snapfail.worktree-snapshot.tar.gz'),
+      ),
+    ).toBe(false);
+  });
+
+  it('snapshots a no-carry checkout whose edit is hidden under assume-unchanged (F6 default path)', async () => {
+    const plan = await planFor('hidden-nocarry');
+    // A tracked file edited under a hidden index bit: git status omits it, so
+    // the base predicate (no carriedEntries) must still refuse via ls-files -v
+    // rather than read clean and delete the work bare.
+    fs.writeFileSync(path.join(plan.lockKey, '.gitignore'), 'hidden-edit\n');
+    git(plan.lockKey, 'update-index', '--assume-unchanged', '.gitignore');
+
+    await executeWorktreeCleanup(plan);
+
+    expect(fs.existsSync(plan.lockKey)).toBe(false);
+    expect(
+      fs.existsSync(
+        path.join(
+          repoParent,
+          'session-hidden-nocarry.worktree-snapshot.tar.gz',
+        ),
+      ),
+    ).toBe(true);
+  });
+
+  it('snapshots a session edit to a carried path instead of deleting it bare (F1)', async () => {
+    const plan = await carriedPlan('carried-reedit', true);
+    // The session keeps editing a carried untracked file: new work the
+    // source checkout does not hold. The gate must read it as work, so the
+    // reaper snapshots before deleting and the edit survives in the archive.
+    fs.writeFileSync(path.join(plan.lockKey, 'carry.txt'), 'session-edit\n');
+
+    await executeWorktreeCleanup(plan);
+
+    expect(fs.existsSync(plan.lockKey)).toBe(false);
+    const snapBase = path.join(
+      repoParent,
+      'session-carried-reedit.worktree-snapshot',
+    );
+    expect(fs.existsSync(`${snapBase}.tar.gz`)).toBe(true);
+    const restored = path.join(repoParent, 'restored-reedit');
+    git(repoRoot, 'worktree', 'add', '--detach', restored, 'HEAD');
+    const meta = await readWorktreeSnapshotMeta(`${snapBase}.json`);
+    await restoreWorktreeSnapshot(`${snapBase}.tar.gz`, restored, meta);
+    expect(fs.readFileSync(path.join(restored, 'carry.txt'), 'utf8')).toBe(
+      'session-edit\n',
+    );
   });
 });

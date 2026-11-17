@@ -20,24 +20,41 @@ P6 在 #17237 分支上分五个单元落地；每个可独立测试。
 
 ### U1 — 快照捕获/恢复服务（core）
 
-`WorktreeSnapshotService`（core）把 worktree 捕获为自包含归档并恢复：
+快照服务（`worktree-snapshot-service.ts`，core）把 worktree 捕获为自包含归档并恢复：
 
-- **捕获** `captureSnapshot(worktreePath, header) -> snapshotPath`：worktree 树的
-  `tar.gz`，排除可再生集合（`DISPOSABLE_IGNORED_ROOTS`——`node_modules`、构建产物——
-  与 `worktreeHasWork` 豁免的同一集合）及 `.git` 文件/目录与会话 marker。用 core 已有
-  的 `tar` 依赖。归档以相对 worktree 根的路径存储。JSON 头随旁（或作为首个归档条目）：
-  base commit（`worktreeBase`）、HEAD commit、分支（如有）、dirty 摘要（tracked/untracked
-  计数）、会话 id、时间戳、schema 版本。
-- **恢复** `restoreSnapshot(snapshotPath, targetWorktreePath)`：把归档解压到新重建的
-  worktree（detached 于记录的 HEAD，或在记录的分支上）。恢复忠于 commit + dirty tracked
-  - untracked 内容；不恢复 `node_modules`（可再生）。
-- **格式稳定**：头带 schema 版本；读取方拒绝未知版本而非错误恢复。捕获原子（暂存临时
-  文件再 rename），使捕获中途崩溃绝不留下半写归档供后续恢复信任。
+- **捕获** `captureWorktreeSnapshot({worktreePath, snapshotDir, meta})`：worktree 树的
+  `tar.gz` 加随旁 JSON 头。排除与 has-work 门的*仅 ignored* 几何对齐：可再生目录名
+  （`DISPOSABLE_IGNORED_ROOTS`——`node_modules`、`dist`、`coverage`）下的路径仅当 git
+  报告 ignored（`ls-files --others --ignored --exclude-standard -z`）时才排除，因此
+  这些名字下的 tracked 或非 ignored 文件是工作并被归档（验证发现 F3）。`.git` 文件/目录
+  与会话 marker 始终排除。用 core 已有的 `tar` 依赖；路径相对 worktree 根。头
+  （`buildWorktreeSnapshotMeta`）记录 base commit（`worktreeBase`）、HEAD commit、分支、
+  dirty 摘要（tracked/untracked 计数**及删除的 tracked 路径列表**，含 rename 源）、
+  会话 id、时间戳、schema 版本。
+- **恢复** `restoreWorktreeSnapshot(snapshotPath, targetWorktreePath, meta)`：在新重建的
+  worktree（detached 于记录的 HEAD，或在记录的分支上）上恢复，不丢失任何归档内容（验证
+  发现 F2），分三步：(1) 为每个归档非目录条目清除冲突的 HEAD 目标——node-tar 能用目录替换
+  文件但不能用文件替换目录，故 dir→file 替换否则会静默丢弃归档文件；(2) 在解包前重新施加
+  *纯*删除（归档中缺席的路径），使被删 tracked 文件不从 HEAD 复活——会话删除后又重建的
+  路径（归档中存在）留给解包恢复，删除后变成目录的路径持有归档内容，同样不动；
+  (3) 以 `strict` 解包，使残留冲突显式失败而非静默丢内容。恢复忠于 commit + dirty
+  tracked + untracked 内容及删除；不恢复 ignored 可再生产物，也不保留索引状态（暂存与
+  未暂存）——契约是不丢失任何文件内容。路径校验为安全相对路径、约束在目标根内，且拒绝把
+  `.git`/会话 marker 作为删除目标。非有效 UTF-8 的删除路径使 `buildWorktreeSnapshotMeta`
+  拒绝捕获（调用方保留），而非记录一个无法按名重新施加的删除。
+- **格式稳定**：头带 schema 版本（当前 2）；读取方拒绝未知版本而非错误恢复。版本 1
+  （无记录的删除）被拒绝，因为它无法忠实恢复删除。捕获原子（暂存临时文件再 rename），
+  使捕获中途崩溃绝不留下半写归档供后续恢复信任。
+- **仓库钉住 + 加固**：捕获与元数据构建首先要求 worktree 自身的 `.git`（`fs.access`），
+  使链接丢失时 git 不会回答外层仓库（验证发现 F4）；两者的 git 探针都带 `NO_EXEC_CONFIG`
+  与 `--no-optional-locks`，使仓库配置的 `core.fsmonitor` hook 不被执行（验证发现 F5）。
 - Fail-closed：捕获错误拒绝（调用方未获持久快照不得删除 worktree）；恢复错误拒绝，
   尽可能不留部分状态。
 
-测试：快照内容+排除（无 node_modules/.git/marker）、恢复保真（committed+dirty tracked+
-untracked 往返）、原子捕获、未知版本拒绝、捕获错误拒绝。
+测试：快照内容+仅 ignored 排除（dist/ 下 tracked/非 ignored 文件被归档；ignored
+node_modules 被排除；ignored 非 disposable 工作被归档）、恢复保真（committed+dirty+
+untracked 往返；未暂存/暂存删除与 rename 源在重建 HEAD 上重新施加）、原子捕获、未知与
+版本 1 拒绝、遍历路径拒绝、缺 `.git` 捕获拒绝（无归档）、`core.fsmonitor` 执行 canary。
 
 ### U2 — `worktree.maxRetained` 设置
 
@@ -80,12 +97,14 @@ worktree** 解除 `worktreeHasWork` 拒绝；工具/agent worktree 保留现有�
 ### U5 — 重开恢复入口
 
 重开 worktree 已删除的 chat 提供恢复：路由重建 worktree（detached 于记录 HEAD 或记录
-分支）、解压快照（U1）、翻回 sidecar。Web Shell 呈现入口（chat 头/会话概览）。i18n。
+分支）、调 `restoreWorktreeSnapshot`（U1）解压归档并重新施加记录的删除、翻回 sidecar。
+Web Shell 呈现入口（chat 头/会话概览）。i18n。
 
 ## 验收（P6 整体）
 
 - 归档 chat 在快照后删除其 worktree；重开提供恢复；清扫保留最近 15（缺省）。
-- dirty 托管会话 worktree 在快照后删除（不再永久保留）；快照保真恢复 commit+dirty+untracked。
+- dirty 托管会话 worktree 在快照后删除（不再永久保留）；快照保真恢复 commit+dirty+
+  untracked 内容及 tracked 删除。对搬运路径的会话改动被快照，绝不裸删（R9-6 内容感知门）。
 - 工具/agent worktree 保留现有拒绝语义。
 - 活跃/置顶 worktree 受保护；`0` 关闭按数量删除。
 

@@ -34,78 +34,119 @@ The leak is fail-safe (a checkout preserved rather than deleted), which is why
 
 ## Decision
 
-Record the carried overlay in the sidecar and let the has-work gate exempt it,
-mirroring the prepared-worktree gate's exact-path exemption.
+Record the carried overlay in the sidecar **with its carry-time content
+identities**, and let the has-work gate waive a carried path only while its
+current state still matches that identity. A path-only exemption (the prepared
+gate's geometry) is unsafe for an _attached_ session worktree: the session keeps
+working after creation, so a further edit, stage, or delete of a carried path is
+new work the source checkout does not hold, and path equality alone cannot tell
+it from the original carried copy. This was measured as a data-loss path by the
+independent `/verify-pr` round on #17533 (finding F1) and is the reason the
+sidecar records identities, not just paths.
+
+The prepared-worktree gate (`removePreparedUserWorktree`) keeps its path-only
+exemption unchanged: a prepared worktree is never attached, and its
+`atBase`/`checkoutMatches` gates prove no session work happened, so the same
+geometry is safe there. `createUserWorktree` therefore returns both
+`carriedPaths: string[]` (for the preparation journal / prepared gate) and
+`carriedEntries: CarriedEntry[]` (for the session sidecar / managed gate).
 
 ### D1 — Sidecar field
 
-Add an optional `carriedPaths?: string[]` to `WorktreeSession`. Optional for
-back-compat: sidecars written before the field existed (and worktrees created
-without `carryDirtyState`) simply omit it, and readers treat absent as "no
-recorded overlay" — the has-work gate then behaves exactly as today. The
-runtime shape check (`isValidWorktreeSession`) accepts the field only when it
-is an array of strings; a wrong-typed value corrupts the sidecar like any other
-field. The existing 64 KiB sidecar cap already bounds the record; the creation
-paths that carry bound the overlay with `maxCarriedPathsBytes`
-(`CARRIED_PATHS_MAX_BYTES`) so the journal and the sidecar stay readable.
+Add an optional `carriedEntries?: CarriedEntry[]` to `WorktreeSession`, where
+`CarriedEntry = { path: string; hash: string | null; executable: boolean }`.
+`hash` is the `git hash-object` blob hash of the carried content; `hash === null`
+records a carried deletion (the carry removed the path); `executable` is the
+carried file's exec bit so a mode-only change is detectable. Non-regular carried
+entries (symlinks, directories) are not recorded — the gate then treats them as
+work, the conservative direction.
+
+Optional for back-compat: sidecars written before the field existed (and
+worktrees created without `carryDirtyState`) omit it, and readers treat absent as
+"no recorded overlay" — the has-work gate then behaves exactly as today. The
+runtime shape check (`isValidWorktreeSession`) accepts the field only when every
+entry has a string `path`, a `string | null` `hash`, and a boolean `executable`;
+a wrong-typed value corrupts the sidecar like any other field. The 64 KiB sidecar
+read cap bounds the record: because the identities enlarge the overlay, a writer
+(`fitSidecarToReadCap`) drops `carriedEntries` when the serialized record would
+exceed the cap, so the binding stays readable instead of being orphaned — the
+reaper then treats the overlay as work and snapshots it (the safe direction); the
+carry itself is untouched. The journal-backed creation path still bounds the
+overlay with `maxCarriedPathsBytes` (`CARRIED_PATHS_MAX_BYTES`).
 
 ### D2 — Writers persist the overlay
 
 Every creation path that calls `createUserWorktree` with `carryDirtyState`
-records the returned `carriedPaths` in the sidecar it writes:
+records the returned `carriedEntries` in the sidecar it writes:
 
 - `POST /session` (daemon default worktree),
 - the branch-worktree route (`POST /session/:id/branch` with `worktree`),
+- the handoff (`to=worktree`),
 - `EnterWorktreeTool`.
 
-Relocation writes (handoff, reset) preserve an existing `carriedPaths` rather
-than dropping it: the overlay still describes the checkout's carried content
-until the session commits or cleans it. A writer that creates without carry
-records nothing (absent), not an empty array, so "absent" and "carried nothing"
-stay distinguishable from "carried these paths".
+`createUserWorktree` computes the identities right after the carry applies
+(`computeCarriedIdentities`: absent paths become null-hash deletions, regular
+files are hashed in batches). A computation failure leaves `carriedEntries`
+absent — the gate then treats the overlay as work and snapshots it — without
+affecting `carriedPaths`, which the prepared rollback still uses. Relocation
+writes (handoff, reset) preserve an existing `carriedEntries` rather than dropping
+it. A writer that creates without carry records nothing (absent), not an empty
+array.
 
-### D3 — The has-work gate exempts the recorded overlay
+### D3 — The has-work gate waives only pristine carried content
 
 `worktreeHasWork` gains an optional second argument
-`carriedPaths?: readonly string[]`. When it is absent or empty the predicate is
-byte-for-byte the current behavior (the core retention sweep and canary callers
-pass nothing). When present, the probe switches to file-level raw output
-(`status --porcelain --untracked-files=all -z`, the same form the prepared gate
-uses so untracked directories are not collapsed and non-ASCII paths are not
-C-quoted) and waives an entry whose path is exactly in the carried set, in
-addition to the existing session-marker / disposable-output / symlink waivers.
-Any entry outside the carried set — a late-arriving ignored file, a nested
-marker-like name, a tracked edit the session made after creation — still counts
-as work and preserves the checkout. Rename/copy records refuse (the carry
-applies the stash without `--index`, so the overlay never contains them; one
-means the index was touched inside the worktree).
+`carriedEntries?: readonly CarriedEntry[]`. Before either probe, the shared
+predicate refuses any hidden index bit (`hasHiddenIndexBit`, `ls-files -v`), so
+the default no-carry path (core retention sweep, legacy sidecars, no-carry
+creations) is protected too — a session edit hidden under assume-unchanged /
+skip-worktree reads as work, not clean. When `carriedEntries` is present, the
+probe switches to file-level raw output (`status --porcelain --untracked-files=all -z`
+plus `ls-files --others -z`) and computes the carried paths' _current_ identities
+once. A carried entry is waived only when `carriedEntryMatches` holds:
 
-The exemption is exact-path, not prefix: a carried file `a/b.txt` does not waive
-an unrelated `a/c.txt`, and a directory the session populated beyond the carried
-files still reads as work. This matches the prepared gate's `exempt.has(p)`
-geometry and keeps the waiver narrow.
+- carried content (`hash !== null`): status is exactly ` M` (unstaged tracked
+  edit) or `??` (untracked), the path is a regular file, and its current blob
+  hash and exec bit equal the carried ones;
+- carried deletion (`hash === null`): status is exactly ` D` (unstaged deletion)
+  and the path is still absent.
+
+Any other state of a carried path — staged (`M `, `A `, `D `), a deletion of
+carried content, a restored carried deletion, a symlink replacement, or any
+content/mode drift — is new work and preserves the checkout (the reaper snapshots
+it). Rename/copy records refuse outright. Non-carried entries keep the existing
+session-marker / disposable-output / symlink waivers. The exemption is exact-path,
+not prefix. The content comparison hashes raw working-tree bytes (`git hash-object`
+without `--path`, with a `--` separator so a dash-leading path is not parsed as an
+option) at both carry and cleanup, so it is self-consistent and independent of
+`core.autocrlf`/filters.
 
 ### D4 — The reaper passes the sidecar's overlay
 
 `executeWorktreeCleanup` calls
-`worktreeHasWork(plan.lockKey, sidecar.carriedPaths)`. A carried-only checkout
-now reads clean and is collected; a checkout with genuine session work is still
-preserved. The core retention sweep (`worktreeCleanup.ts`) is left unchanged in
-this deliverable — it does not have the session sidecar in scope today; wiring
-it is part of P6 (D7), which reads the sidecar for snapshot-then-delete.
+`worktreeHasWork(plan.lockKey, sidecar.carriedEntries)`. A pristine carried-only
+checkout reads clean and is collected without a snapshot; a checkout with genuine
+session work — including a session change to a carried path — reads as work and is
+snapshotted then deleted (P6 U3). The core retention sweep (`worktreeCleanup.ts`)
+is unchanged in this deliverable.
 
 ## Acceptance
 
-- A session worktree whose only content is the carried overlay is collected by
-  the orphan reaper after the session is deleted (regression reproducing S8:
-  before the fix `DELETE` leaves the checkout; after, the checkout is removed).
-- A checkout with any non-carried work (a tracked edit after creation, a
-  late-arriving ignored file, a populated directory beyond the carried files)
-  is still preserved.
+- A session worktree whose only content is the pristine carried overlay is
+  collected by the orphan reaper after the session is deleted (regression
+  reproducing S8).
+- A session change to a carried path is snapshotted, not deleted bare: staging a
+  carried edit, deleting a carried file, a further unstaged edit of a carried
+  tracked or untracked file, and a mode-only change each read as work (F1 cells).
+- A pristine carried deletion reads clean; restoring or staging it reads as work.
+- A session edit hidden under assume-unchanged or skip-worktree reads as work.
+- A checkout with any non-carried work (a late-arriving ignored file, a populated
+  directory beyond the carried files) is still preserved.
 - Sidecars without the field behave exactly as today (back-compat).
-- A wrong-typed `carriedPaths` corrupts the sidecar (shape check).
-- Mutation witnesses: dropping the reaper's `carriedPaths` argument, and
-  widening the exemption to a prefix match, each kill a committed case.
+- A wrong-typed `carriedEntries` corrupts the sidecar (shape check).
+- Mutation witnesses: dropping the reaper's `carriedEntries` argument, widening
+  the exemption to a prefix match, and dropping the content-identity comparison
+  each kill a committed case.
 
 ## Out of scope (later #17237 phases)
 

@@ -436,11 +436,13 @@ export async function executeWorktreeCleanup(
     logWorktreeCleanupPreserve(sessionId, 'marker changed after delete');
     return;
   }
-  // Exempt the recorded carried overlay so a checkout whose only content is
-  // the carried copy is collected rather than preserved forever (R9-6).
-  // Absent carriedPaths (legacy sidecars, no-carry creations) keeps the gate
-  // behaving exactly as before.
-  if (await worktreeHasWork(plan.lockKey, sidecar.carriedPaths)) {
+  // Exempt the recorded carried overlay only while its content still matches
+  // the carry-time identities, so a checkout whose only content is the
+  // pristine carried copy is collected rather than preserved forever, while
+  // a session change to a carried path reads as work and is snapshotted
+  // (R9-6). Absent carriedEntries (legacy sidecars, no-carry creations) keeps
+  // the gate behaving exactly as before.
+  if (await worktreeHasWork(plan.lockKey, sidecar.carriedEntries)) {
     // P6 U3: a managed session worktree with genuine work is snapshotted then
     // deleted instead of preserved forever — the archive preserves the work
     // and reopening the chat offers restore (D7). A capture failure falls

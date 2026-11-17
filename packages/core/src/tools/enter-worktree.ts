@@ -205,7 +205,7 @@ class EnterWorktreeInvocation extends BaseToolInvocation<
           originalHeadCommit,
           // Absent today (enter_worktree creates without carry); recorded for
           // the reaper's exemption if carry is ever enabled here (R9-6).
-          carriedPaths: result.carriedPaths,
+          carriedEntries: result.carriedEntries,
         },
       );
     } catch (error) {

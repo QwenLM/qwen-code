@@ -22,8 +22,12 @@ import {
 import {
   readWorktreeSessionMarker,
   writeWorktreeSessionMarker,
+  type CarriedEntry,
 } from './gitWorktreeService.js';
 import { stripAnsiAndControl } from '../utils/textUtils.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('WORKTREE_SESSION_SERVICE');
 
 const RUNTIME_STATUS_SCAN_MAX_DIRS = 5000;
 const WORKTREE_SESSION_SIDECAR_MAX_BYTES = 64 * 1024;
@@ -94,16 +98,18 @@ export interface WorktreeSession {
    */
   supersedes?: string;
   /**
-   * The exact dirty-overlay paths carried into this worktree at creation
-   * (`createUserWorktree` with `carryDirtyState`): tracked edits plus the
-   * untracked files copied from the source checkout. The orphan reaper's
-   * has-work gate exempts exactly these paths so a checkout whose only
-   * content is the carried copy is collected rather than preserved forever
-   * (R9-6). Absent for sidecars written before the field existed and for
-   * worktrees created without carry — readers treat absent as "no recorded
-   * overlay" and the gate behaves as if no exemption were passed.
+   * The dirty overlay carried into this worktree at creation
+   * (`createUserWorktree` with `carryDirtyState`), each path with its
+   * carry-time content identity. The orphan reaper's has-work gate waives a
+   * carried path only while its current state still matches that identity,
+   * so a checkout whose only content is the pristine carried copy is
+   * collected rather than preserved forever, while a session that stages,
+   * deletes, or further edits a carried file is snapshotted (R9-6). Absent
+   * for sidecars written before the field existed and for worktrees created
+   * without carry — readers treat absent as "no recorded overlay" and the
+   * gate behaves as if no exemption were passed.
    */
-  carriedPaths?: string[];
+  carriedEntries?: CarriedEntry[];
 }
 
 export type StrictWorktreeSession =
@@ -135,10 +141,45 @@ function isValidWorktreeSession(value: unknown): value is WorktreeSession {
     (v['supersededBy'] === undefined ||
       typeof v['supersededBy'] === 'string') &&
     (v['supersedes'] === undefined || typeof v['supersedes'] === 'string') &&
-    (v['carriedPaths'] === undefined ||
-      (Array.isArray(v['carriedPaths']) &&
-        v['carriedPaths'].every((p) => typeof p === 'string')))
+    (v['carriedEntries'] === undefined ||
+      (Array.isArray(v['carriedEntries']) &&
+        v['carriedEntries'].every(isValidCarriedEntry)))
   );
+}
+
+function isValidCarriedEntry(value: unknown): value is CarriedEntry {
+  if (value === null || typeof value !== 'object') return false;
+  const e = value as Record<string, unknown>;
+  return (
+    typeof e['path'] === 'string' &&
+    (e['hash'] === null || typeof e['hash'] === 'string') &&
+    typeof e['executable'] === 'boolean'
+  );
+}
+
+/**
+ * Keep a sidecar within the read cap. A large carried overlay (paths plus
+ * content identities) can serialize past {@link WORKTREE_SESSION_SIDECAR_MAX_BYTES};
+ * the reader would then refuse the whole record, orphaning the worktree
+ * binding (the reaper could never scan it again). Drop the exemption metadata
+ * in that case — the reaper then treats the overlay as work and snapshots it,
+ * the safe direction — rather than write a record no reader can parse. The
+ * carry itself (the files in the worktree) is untouched.
+ */
+function fitSidecarToReadCap(session: WorktreeSession): WorktreeSession {
+  if (session.carriedEntries === undefined) return session;
+  const bytes = Buffer.byteLength(
+    `${JSON.stringify(session, null, 2)}\n`,
+    'utf8',
+  );
+  if (bytes <= WORKTREE_SESSION_SIDECAR_MAX_BYTES) return session;
+  debugLogger.warn(
+    `worktree sidecar carriedEntries too large (${bytes} bytes > ` +
+      `${WORKTREE_SESSION_SIDECAR_MAX_BYTES}); dropping the overlay exemption ` +
+      `(the reaper will snapshot the work)`,
+  );
+  const { carriedEntries: _drop, ...rest } = session;
+  return rest;
 }
 
 /**
@@ -379,7 +420,7 @@ export async function writeWorktreeSession(
 ): Promise<void> {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   // atomicWriteJSON pretty-prints with 2-space indent by default.
-  await atomicWriteJSON(filePath, session);
+  await atomicWriteJSON(filePath, fitSidecarToReadCap(session));
 }
 
 async function fsyncParentDirectory(filePath: string): Promise<void> {
@@ -425,7 +466,10 @@ export async function createWorktreeSession(
     ) {
       throw new Error('Worktree session sidecar must be a regular file');
     }
-    await handle.writeFile(`${JSON.stringify(session, null, 2)}\n`, 'utf8');
+    await handle.writeFile(
+      `${JSON.stringify(fitSidecarToReadCap(session), null, 2)}\n`,
+      'utf8',
+    );
     await handle.sync();
     const pathStat = await fs.lstat(stagedPath);
     if (
