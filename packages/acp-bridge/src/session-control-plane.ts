@@ -4580,6 +4580,16 @@ export function createSessionControlPlane(
       ...(entry.branch ? { branch: entry.branch } : {}),
       ...(entry.prs && entry.prs.length > 0 ? { prs: entry.prs } : {}),
       ...(artifactCount > 0 ? { artifactCount } : {}),
+      // session/load registers the entry before it awaits
+      // artifacts.restore(); inside that window the store is empty and
+      // the count is omitted. Carry the ambiguity explicitly so the list
+      // merge keeps the sidecar-enriched count instead of reading the
+      // omission as zero — while live-state, occupancy and live-only
+      // consumers still see the session (the accessor's contract is
+      // "all live sessions", not "all settled sessions").
+      ...(channelInfoForEntry(entry)?.pendingRestoreIds.has(entry.sessionId)
+        ? { artifactCountPending: true }
+        : {}),
     };
   };
   // Pending + resolved permission state lives in
@@ -13946,18 +13956,6 @@ export function createSessionControlPlane(
       const out: BridgeSessionSummary[] = [];
       for (const entry of byId.values()) {
         if (entry.workspaceCwd === key) {
-          // session/load registers the entry before it awaits
-          // artifacts.restore(), so inside that window the store is empty
-          // and the summary would omit artifactCount — which the list
-          // merge reads as zero and uses to drop the sidecar-enriched
-          // count. Leave the row to the persisted summary until the
-          // restore settles (same exclusion the conditional-close path
-          // applies).
-          if (
-            channelInfoForEntry(entry)?.pendingRestoreIds.has(entry.sessionId)
-          ) {
-            continue;
-          }
           out.push(toSessionSummary(entry));
         }
       }

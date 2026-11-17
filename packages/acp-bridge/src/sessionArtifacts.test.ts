@@ -356,7 +356,7 @@ describe('SessionArtifactStore', () => {
       workspaceCwd: workspace,
     });
     expect(store.count()).toBe(0);
-    await store.upsertMany([
+    const created = await store.upsertMany([
       {
         title: 'Restorable',
         kind: 'link',
@@ -373,6 +373,12 @@ describe('SessionArtifactStore', () => {
       },
     ]);
     expect(store.count()).toBe(2);
+    expect(store.count()).toBe((await store.list()).artifacts.length);
+    // A monotonically growing counter would pass the additions above; the
+    // removal pins count() to the live map size, which is what the header
+    // renders.
+    await store.remove(created.changes[0]!.artifactId);
+    expect(store.count()).toBe(1);
     expect(store.count()).toBe((await store.list()).artifacts.length);
   });
 

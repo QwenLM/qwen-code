@@ -7422,7 +7422,7 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
-  it('leaves a restoring session out of the workspace list until its artifact restore settles', async () => {
+  it('keeps a restoring session visible with its artifact count withheld until the restore settles', async () => {
     const sessionId = 'restore-window-summary';
     const artifactUrl = 'https://example.com/restore-window';
     const artifactId = stableSessionArtifactId(sessionId, `url:${artifactUrl}`);
@@ -7431,12 +7431,18 @@ describe('createAcpSessionBridge', () => {
       releaseRestore = resolve;
     });
     const originalRestore = SessionArtifactStore.prototype.restore;
-    vi.spyOn(SessionArtifactStore.prototype, 'restore').mockImplementation(
-      async function (this: SessionArtifactStore, ...args) {
+    const restoreSpy = vi
+      .spyOn(SessionArtifactStore.prototype, 'restore')
+      .mockImplementation(async function (this: SessionArtifactStore, ...args) {
         await restoreGate;
         return originalRestore.apply(this, args);
-      },
-    );
+      });
+    // Release the gate and restore the prototype even when an assertion
+    // fails — otherwise one red case hangs every later restore in the file.
+    onTestFinished(() => {
+      releaseRestore();
+      restoreSpy.mockRestore();
+    });
     const bridge = makeBridge({
       channelFactory: async () =>
         makeChannel({
@@ -7474,21 +7480,26 @@ describe('createAcpSessionBridge', () => {
     await vi.waitFor(() => {
       expect(() => bridge.getSessionSummary(sessionId)).not.toThrow();
     });
-    // Inside that window the live summary would omit artifactCount (zero
-    // artifacts), which the list merge reads as zero and uses to drop the
-    // sidecar-enriched count — so the row must be left to the persisted
-    // summary until the restore settles.
-    expect(
-      bridge.listWorkspaceSessions(WS_A).find((s) => s.sessionId === sessionId),
-    ).toBeUndefined();
+    // Inside that window the row must STAY visible (the accessor's contract
+    // is "all live sessions" — occupancy gates and live-state consume it),
+    // with the count withheld and the ambiguity carried explicitly so the
+    // list merge keeps the sidecar-enriched count instead of reading the
+    // omission as zero.
+    const pendingRow = bridge
+      .listWorkspaceSessions(WS_A)
+      .find((s) => s.sessionId === sessionId);
+    expect(pendingRow).toBeDefined();
+    expect(pendingRow?.artifactCount).toBeUndefined();
+    expect(pendingRow?.artifactCountPending).toBe(true);
 
     releaseRestore();
     const loaded = await loadPromise;
     expect(loaded.artifacts).toMatchObject([{ id: artifactId }]);
-    expect(
-      bridge.listWorkspaceSessions(WS_A).find((s) => s.sessionId === sessionId)
-        ?.artifactCount,
-    ).toBe(1);
+    const settledRow = bridge
+      .listWorkspaceSessions(WS_A)
+      .find((s) => s.sessionId === sessionId);
+    expect(settledRow?.artifactCount).toBe(1);
+    expect(settledRow?.artifactCountPending).toBeUndefined();
 
     await bridge.shutdown();
   });
