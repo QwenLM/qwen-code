@@ -19274,6 +19274,52 @@ describe('createServeApp', () => {
       }
     });
 
+    it('restores the worktree base commit from originalHeadCommit for a legacy sidecar', async () => {
+      // A released daemon's sidecar has originalHeadCommit (required) and no
+      // worktreeBase (optional). The sibling above sets both, so dropping the
+      // `|| sidecar.originalHeadCommit` fallback would leave it green. This
+      // sidecar omits worktreeBase, so the restore must fall back to
+      // originalHeadCommit or a pre-upgrade session reverts to the mutable
+      // <baseBranch>..HEAD window.
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.realpath = (p) => p;
+      mockWt.readMarker = () =>
+        Promise.resolve({ state: 'valid', sessionId: 'wt-session' });
+      mockWt.readSidecar = () =>
+        Promise.resolve({
+          slug: 'my-task',
+          worktreePath: `${WS_BOUND}/.qwen/worktrees/my-task`,
+          worktreeBranch: 'worktree-my-task',
+          originalCwd: WS_BOUND,
+          workspaceCwd: WS_BOUND,
+          originalBranch: 'main',
+          originalHeadCommit: 'legacyhead',
+        });
+
+      try {
+        const res = await request(app)
+          .post('/session/wt-session/load')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ cwd: WS_BOUND });
+
+        expect(res.status).toBe(200);
+        expect(res.body.worktree).toMatchObject({
+          baseCommit: 'legacyhead',
+          baseBranch: 'main',
+        });
+      } finally {
+        mockWt.readSidecar = undefined;
+        mockWt.readMarker = undefined;
+        mockWt.readMarkerLenient = undefined;
+        mockWt.realpath = undefined;
+      }
+    });
+
     it('restores worktree isolation for a case-normalized session id', async () => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440150';
       const storageSessionId = sessionId.toUpperCase();

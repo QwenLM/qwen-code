@@ -245,6 +245,12 @@ export function useChangeOverview(
       // rather than failing the whole walk, so the present exclusions — bound PR
       // heads above all — still apply. A remote named other than origin/upstream
       // is a known residual: its integrated commits may re-list as loose work.
+      // Only the remote-tracking refs are excluded, never the local base name:
+      // the local branch is what absorbs the session's own work (a local merge
+      // of the session branch into it), so `--not <local>` would empty the
+      // window and report no committed work. The remote-tracking ref reaches
+      // the integrated upstream commits without covering the session's own
+      // (still unpushed) commits; the recorded start commit bounds the window.
       const baseBranchExclusions =
         baseBranch && baseBranch !== 'HEAD' && isSafeSingleRef(baseBranch)
           ? [
@@ -252,11 +258,7 @@ export function useChangeOverview(
                 baseBranch.startsWith('origin/') ||
                 baseBranch.startsWith('upstream/')
                   ? [baseBranch]
-                  : [
-                      baseBranch,
-                      `origin/${baseBranch}`,
-                      `upstream/${baseBranch}`,
-                    ],
+                  : [`origin/${baseBranch}`, `upstream/${baseBranch}`],
               ),
             ].filter(isSafeSingleRef)
           : [];

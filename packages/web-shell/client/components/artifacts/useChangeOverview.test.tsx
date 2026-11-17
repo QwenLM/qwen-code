@@ -218,9 +218,10 @@ describe('useChangeOverview', () => {
 
   it('excludes the remote-tracking ref of a local base branch (integration advances origin/main, not main)', async () => {
     // The recorded baseBranch is the LOCAL name (main); integrating upstream
-    // only advances a remote-tracking ref. Excluding main alone subtracts
-    // nothing, so the remote-tracking refs under both documented remotes
-    // (origin for a standard clone, upstream for a fork) join the exclusion set.
+    // only advances a remote-tracking ref. The remote-tracking refs under both
+    // documented remotes (origin for a standard clone, upstream for a fork)
+    // join the exclusion set — but NOT the local name itself, which would
+    // subtract the session's own commits once local main absorbs them (R4-1).
     mock.sessionStatus.mockResolvedValue({
       prs: [{ number: 1, url: 'https://github.com/o/r/pull/1' }],
       branch: { name: 'feat/x', baseBranch: 'main', baseCommit: 'base0' },
@@ -234,7 +235,7 @@ describe('useChangeOverview', () => {
       'base0..HEAD',
       {
         sessionId: 's1',
-        excludeRefs: ['head1', 'main', 'origin/main', 'upstream/main'],
+        excludeRefs: ['head1', 'origin/main', 'upstream/main'],
       },
     );
   });
@@ -264,9 +265,29 @@ describe('useChangeOverview', () => {
       'base0..HEAD',
       {
         sessionId: 's1',
-        excludeRefs: ['head1', 'main', 'origin/main', 'upstream/main'],
+        excludeRefs: ['head1', 'origin/main', 'upstream/main'],
       },
     );
+  });
+
+  it('never excludes the local base name, which absorbs the session commits (R4-1)', async () => {
+    // Once local main absorbs the session's work (a local merge of the session
+    // branch), `--not main` covers the session's own commits and empties the
+    // window — the panel would report no committed work. Only the remote-
+    // tracking refs (which lag the unpushed session commits) may be excluded.
+    mock.sessionStatus.mockResolvedValue({
+      prs: [{ number: 1, url: 'https://github.com/o/r/pull/1' }],
+      branch: { name: 'feat/x', baseBranch: 'main', baseCommit: 'base0' },
+    });
+    await renderAndSettle();
+    const ws = mock.workspaceByCwd.mock.results[0]!.value;
+    const call = ws.workspaceGitLog.mock.calls.find(
+      (c: unknown[]) => c[3] === 'base0..HEAD',
+    );
+    expect(call).toBeDefined();
+    const excludeRefs = (call![4] as { excludeRefs?: string[] }).excludeRefs;
+    expect(excludeRefs).not.toContain('main');
+    expect(excludeRefs).toContain('origin/main');
   });
 
   it('excludes commits reachable from every bound PR head when supported', async () => {

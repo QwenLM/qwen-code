@@ -891,4 +891,63 @@ describe('worktree sidecar enrichment (R3-1)', () => {
       baseBranch: 'main',
     });
   });
+
+  it('falls back to originalHeadCommit for a legacy sidecar with no worktreeBase', async () => {
+    // Every released daemon writes originalHeadCommit (required) and no
+    // worktreeBase (optional). The sibling above sets both, so it cannot see
+    // the legacy fallback arm: dropping `|| sidecar.originalHeadCommit` from
+    // the enrichment would leave it green. This sidecar omits worktreeBase
+    // entirely, so baseCommit must come from originalHeadCommit.
+    const sessionId = '00000000-0000-4000-8000-000000000002';
+    const chats = path.join(
+      new Storage(workspaceCwd, runtimeBaseDir).getProjectDir(),
+      'chats',
+    );
+    await fs.mkdir(chats, { recursive: true });
+    await fs.writeFile(
+      path.join(chats, `${sessionId}.jsonl`),
+      `${JSON.stringify({
+        uuid: `${sessionId}-user`,
+        parentUuid: null,
+        sessionId,
+        timestamp: new Date(Date.UTC(2026, 0, 1)).toISOString(),
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'stored prompt' }] },
+        cwd: workspaceCwd,
+      })}\n`,
+    );
+    const worktreeDir = path.join(
+      workspaceCwd,
+      '.qwen',
+      'worktrees',
+      'legacy-task',
+    );
+    await fs.mkdir(worktreeDir, { recursive: true });
+    await createWorktreeSessionMarkerExclusive(worktreeDir, sessionId);
+    await writeWorktreeSession(path.join(chats, `${sessionId}.worktree.json`), {
+      slug: 'legacy-task',
+      worktreePath: worktreeDir,
+      worktreeBranch: 'worktree-legacy-task',
+      originalCwd: workspaceCwd,
+      workspaceCwd,
+      originalBranch: 'main',
+      originalHeadCommit: 'legacy-sha',
+    });
+    const bridge = {
+      listWorkspaceSessions: vi.fn(() => []),
+    } as unknown as AcpSessionBridge;
+
+    const result = await listWorkspaceSessionsForResponse(
+      bridge,
+      workspaceCwd,
+      {},
+      { runtimeBaseDir },
+    );
+
+    const row = result.sessions.find((s) => s.sessionId === sessionId);
+    expect(row?.worktree).toMatchObject({
+      baseCommit: 'legacy-sha',
+      baseBranch: 'main',
+    });
+  });
 });
