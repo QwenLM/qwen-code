@@ -13,6 +13,9 @@ import {
   type SessionModelRecordPayload,
   type SessionRestoreProjection,
 } from '@qwen-code/qwen-code-core';
+import { selectSubscriptionModel } from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
+import { RequestError } from '@agentclientprotocol/sdk';
+import { pickAuthMethodsForAuthRequired } from './authMethods.js';
 
 const debugLogger = createDebugLogger('SESSION_MODEL');
 const AUTH_TYPES = new Set<string>(Object.values(AuthType));
@@ -201,6 +204,7 @@ export async function restoreSessionModelThenAuthenticate(
   config: Config,
   projection: SessionRestoreProjection | undefined,
   authenticate: () => Promise<void>,
+  subscriptionFallbackModel?: string,
 ): Promise<void> {
   const originalAuth = liveAuthType(config);
   const originalModel = config.getModel();
@@ -226,7 +230,7 @@ export async function restoreSessionModelThenAuthenticate(
     if (!originalAuth || !originalModel) {
       throw error;
     }
-    const rollbackModelId =
+    let rollbackModelId =
       originalRuntimeSnapshot?.authType === originalAuth &&
       originalRuntimeSnapshot.modelId ===
         stripRuntimeSnapshotPrefix(originalModel)
@@ -235,6 +239,27 @@ export async function restoreSessionModelThenAuthenticate(
             stripRuntimeSnapshotPrefix(originalModel),
           )
         : originalModel;
+    if (
+      originalAuth === AuthType.QWEN_SUBSCRIPTION &&
+      subscriptionFallbackModel
+    ) {
+      try {
+        const { models } = await config.refreshSubscriptionModels();
+        rollbackModelId = selectSubscriptionModel(
+          models,
+          models.includes(originalModel)
+            ? originalModel
+            : subscriptionFallbackModel,
+        );
+      } catch (cause) {
+        const authError = RequestError.authRequired(
+          { authMethods: pickAuthMethodsForAuthRequired(originalAuth) },
+          'Authentication failed: ' + (cause as Error).message,
+        );
+        authError.cause = cause;
+        throw authError;
+      }
+    }
     try {
       await config.switchModel(
         originalAuth as AuthType,

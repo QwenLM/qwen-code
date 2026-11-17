@@ -2,9 +2,9 @@ package com.alibaba.qwen.code.managedagent.workspace.runtime;
 
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionQueryStore;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorkspaceProvider;
-import com.alibaba.qwen.code.managedagent.contracts.workspace.ResidentWorkspaceCatalog;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.managedagent.workspace.SshWorkspaceService;
 import com.alibaba.qwen.code.runtimebroker.HarnessSessionResolver;
@@ -29,8 +29,6 @@ public final class ManagedRuntimeCoordinator implements RuntimeWarmer {
     private final SessionQueryStore store;
     private final WorkspaceRuntimeResolver workspaces;
     private final ChildWorkspaceProvider childWorkspaces;
-    private final ResidentWorkspaceCatalog residents;
-    private final boolean resident;
     private final SshWorkspaceService ssh;
     private final RuntimeProvisioner primaryProvisioner;
     private final RuntimeBindingRepository extensionBindings;
@@ -38,22 +36,22 @@ public final class ManagedRuntimeCoordinator implements RuntimeWarmer {
     private final java.util.Set<String> retired = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private static final java.util.Set<String> LIFECYCLE_FENCED = java.util.Set.of("CLOSING", "CLOSED", "ARCHIVING", "ARCHIVED", "DELETING", "DELETED");
     public ManagedRuntimeCoordinator(RuntimeBrokerOperations service, SessionQueryStore store, WorkspaceRuntimeResolver workspaces,
-            ChildWorkspaceProvider childWorkspaces, ResidentWorkspaceCatalog residents, boolean resident,
+            ChildWorkspaceProvider childWorkspaces,
             SshWorkspaceService ssh, RuntimeProvisioner primaryProvisioner, RuntimeBindingRepository extensionBindings,
             WorkspacePhysicalTransport extensionTransport) {
         this.service = service;
         this.store = store;
         this.workspaces = workspaces;
         this.childWorkspaces = childWorkspaces;
-        this.residents = residents;
-        this.resident = resident;
         this.ssh = ssh;
         this.primaryProvisioner = primaryProvisioner;
         this.extensionBindings = extensionBindings;
         this.extensionTransport = extensionTransport;
     }
+
     public static HarnessSessionResolver resolver(SessionQueryStore store, WorkspaceRuntimeResolver workspaces,
-            ManagedAgentSettings properties, String workspaceId, String workspaceCwd) {
+            ManagedAgentSettings properties, String workspaceId, String workspaceCwd,
+            com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore workspaceExecutionStore) {
         var broker = properties.getRuntimeBroker();
         return new HarnessSessionResolver() {
             @Override
@@ -115,6 +113,9 @@ public final class ManagedRuntimeCoordinator implements RuntimeWarmer {
                 }
                 if (session.workspace() != null) {
                     if (workspaces != null) {
+                        if (admission && authority == null) {
+                            workspaceExecutionStore.requireExternalExecution(session.workspace());
+                        }
                         return CompletableFuture.completedFuture(workspaces.resolve(sessionId, authority).scope());
                     }
                     return CompletableFuture.failedFuture(
@@ -126,7 +127,7 @@ public final class ManagedRuntimeCoordinator implements RuntimeWarmer {
                 if (com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS
                         .equals(broker.getProvisioner())) {
                     return CompletableFuture.failedFuture(
-                            com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable());
+                            WorkspaceExecutionStore.unavailable());
                 }
                 // The durable row is the admission fence for closing/closed,
                 // archived and deleted Sessions: unlike the in-process
@@ -171,22 +172,27 @@ public final class ManagedRuntimeCoordinator implements RuntimeWarmer {
                             : ((Number) pin.get("settingsRevision")).longValue());
                     try {
                         var resolved = packages.resolvePin(tenant, binding.getRequest().getScope().getWorkspaceId(), parsed);
-                        var manifest = resolved.descriptor().manifest();
-                        java.util.Map<String, Object> metadata = new java.util.LinkedHashMap<>(java.util.Map.of(
-                                "schemaVersion", manifest.schemaVersion(), "compilerVersion", manifest.compilerVersion(),
-                                "name", manifest.name(), "version", manifest.version(),
-                                "target", java.util.Map.of("platform", manifest.target().platform(), "arch", manifest.target().arch()),
-                                "components", manifest.components()));
-                        if (manifest.sourceType() != null) {
-                            metadata.put("sourceType", manifest.sourceType());
-                            metadata.put("sourceRevision", manifest.sourceRevision());
+                        try {
+                            var manifest = resolved.descriptor().manifest();
+                            java.util.Map<String, Object> metadata = new java.util.LinkedHashMap<>(java.util.Map.of(
+                                    "schemaVersion", manifest.schemaVersion(), "compilerVersion", manifest.compilerVersion(),
+                                    "name", manifest.name(), "version", manifest.version(),
+                                    "target", java.util.Map.of("platform", manifest.target().platform(), "arch", manifest.target().arch()),
+                                    "components", manifest.components()));
+                            if (manifest.sourceType() != null) {
+                                metadata.put("sourceType", manifest.sourceType());
+                                metadata.put("sourceRevision", manifest.sourceRevision());
+                            }
+                            manifests.put(parsed.extensionId(), metadata);
+                            return installExtensionPackage(tenant, sessionId, binding, parsed.packageDigest(), resolved.archive())
+                                    .whenComplete((ignored, error) -> resolved.close()).thenApply(ignored -> {
+                                        settings.put(parsed.extensionId(), resolved.settings());
+                                        return settings;
+                                    });
+                        } catch (RuntimeException error) {
+                            resolved.close();
+                            throw error;
                         }
-                        manifests.put(parsed.extensionId(), metadata);
-                        return installExtensionPackage(tenant, sessionId, binding, parsed.packageDigest(), resolved.archive())
-                                .thenApply(ignored -> {
-                                    settings.put(parsed.extensionId(), resolved.settings());
-                                    return settings;
-                                });
                     } catch (IOException error) {
                         return CompletableFuture.failedFuture(error);
                     }
@@ -216,7 +222,7 @@ public final class ManagedRuntimeCoordinator implements RuntimeWarmer {
                 || !session.workspace().getWorkspaceId().equals(binding.getRequest().getScope().getWorkspaceId())
                 || !"session".equals(binding.getRequest().getScope().getIsolationClass())
                 || !sessionId.equals(binding.getRequest().getIsolationKey())) {
-            return CompletableFuture.failedFuture(com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable());
+            return CompletableFuture.failedFuture(WorkspaceExecutionStore.unavailable());
         }
         return extensionTransport.installExtensionPackage(binding, digest, archive).thenApply(result -> {
             var current = extensionBindings.findById(expected.getBindingId());
@@ -225,7 +231,7 @@ public final class ManagedRuntimeCoordinator implements RuntimeWarmer {
                     || !java.util.Objects.equals(current.getProvisionSeed(), binding.getProvisionSeed())
                     || current.getState() != com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord.State.READY
                     || current.isDrainRequested() || !sameExtensionLease(current.getLease(), binding.getLease())) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             return result;
         });
@@ -262,7 +268,7 @@ public final class ManagedRuntimeCoordinator implements RuntimeWarmer {
 
     @Override
     public boolean supportsWorkspaceClose() {
-        return service.supportsDrainedStop() || resident;
+        return service.supportsDrainedStop();
     }
 
     @Override
@@ -270,14 +276,11 @@ public final class ManagedRuntimeCoordinator implements RuntimeWarmer {
         if (com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS.equals(primaryProvisioner.kind())) {
             return supportsWorkspaceClose(binding);
         }
-        return residents.find(binding) == null;
+        return true;
     }
 
     @Override
     public boolean supportsWorkspaceClose(com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding binding) {
-        if (resident && residents.find(binding) != null) {
-            return true;
-        }
         if (binding != null && ssh != null && ssh.runtimeStorage(binding) != null) {
             ssh.node(ssh.runtimeStorage(binding).nodeId());
             return true;
@@ -293,13 +296,6 @@ public final class ManagedRuntimeCoordinator implements RuntimeWarmer {
 
     @Override
     public CompletionStage<Void> closeWorkspace(String tenantId, String sessionId) {
-        var session = store.findSessionById(sessionId).orElse(null);
-        if (resident) {
-            if (session == null || !tenantId.equals(session.tenantId()) || residents.find(session.workspace()) == null) {
-                return CompletableFuture.failedFuture(com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable());
-            }
-            return service.closeResidentHarnessSession(residents.request(session.workspace()), sessionId);
-        }
         return service.drainHarnessSession(tenantId, sessionId);
     }
 
@@ -330,7 +326,7 @@ public final class ManagedRuntimeCoordinator implements RuntimeWarmer {
     public void verifyWorkspaceCwdTarget(ContextBinding binding,
             String targetCwdRelative) {
         if (workspaces == null) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         workspaces.verifyInstallable(binding, targetCwdRelative);
     }

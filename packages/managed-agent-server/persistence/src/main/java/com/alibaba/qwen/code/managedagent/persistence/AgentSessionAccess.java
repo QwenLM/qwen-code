@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
 
@@ -10,8 +11,8 @@ final class AgentSessionAccess {
     }
 
     static WorkspaceAccess requireContextCompressionRead(SessionRecord session, String actorId,
-            ManagedWorkspaceRegistry workspaces) {
-        com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.requireSessionVisibility(
+            JdbcManagedWorkspaceRegistry workspaces) {
+        ManagedWorkspaceRegistry.requireSessionVisibility(
                 session, actorId, workspaces);
         ContextBinding binding = session.workspace();
         if (binding == null) {
@@ -25,8 +26,8 @@ final class AgentSessionAccess {
         return access;
     }
 
-    static void requireWorkspaceCreator(SessionRecord session, String actorId, ManagedWorkspaceRegistry workspaces) {
-        com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.requireSessionVisibility(
+    static void requireWorkspaceCreator(SessionRecord session, String actorId, JdbcManagedWorkspaceRegistry workspaces) {
+        ManagedWorkspaceRegistry.requireSessionVisibility(
                 session, actorId, workspaces);
         if (!workspaces.canRead(session.tenantId(), actorId, session.workspace().getWorkspaceId())) {
             throw new ManagedAgentException(

@@ -91,8 +91,8 @@ proxy 的 TypeScript fault driver、每用例一个「故障确实点火」的�
   by member board tools and the control plane's relay」
   （`packages/core/src/managed-runtime/managed-session-records.ts:141-146`）。
   `MANAGED_SESSION_ENABLED_CHANNEL_ADAPTERS` 为
-  `Object.freeze(['email'])`（`:265-267`），此处不假设存在第二个
-  provider；`MANAGED_SESSION_CHILD_CONTINUATIONS_ENABLED` 为 `true`
+  `Object.freeze(['email', 'dingtalk'])`（第二个 provider 于 H5d 加入；
+  本故障门禁设计仍按单一 provider 假设）；`MANAGED_SESSION_CHILD_CONTINUATIONS_ENABLED` 为 `true`
   （`:241`），所以续接是一次被 relay 的 run 的合法形态。
 - 今天存在的域级故障覆盖只有 channel（FG7）加 `monitor_run`/后台
   Shell（FG8）。五个 hosted 故障门禁套件中 `session_command` /

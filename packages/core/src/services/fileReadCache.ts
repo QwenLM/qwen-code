@@ -120,6 +120,12 @@ export interface FileReadEntry {
    */
   lastReadCacheable: boolean;
   /**
+   * A recovered Edit preserved external bytes the model has not Read. The
+   * disk fingerprint is current, but Edit must keep using its recovery
+   * guards and WriteFile must wait for a successful text Read (partial is OK).
+   */
+  readBaselineNeedsRefresh: boolean;
+  /**
    * True iff the read/write that the fast-path would point at is still
    * quotable from conversation history — i.e. it has NOT been blanked
    * by idle microcompaction.
@@ -225,9 +231,11 @@ export class FileReadCache {
     const sameFingerprint =
       existing !== undefined &&
       existing.mtimeMs === stats.mtimeMs &&
-      existing.sizeBytes === stats.size;
+      existing.sizeBytes === stats.size &&
+      !existing.readBaselineNeedsRefresh;
     const entry = this.upsert(absPath, stats);
     entry.lastReadAt = Date.now();
+    if (opts.cacheable) entry.readBaselineNeedsRefresh = false;
     if (opts.full) {
       // Only a full read re-arms: a partial read leaves a mere slice
       // in history while sticky `lastReadWasFull` stays true, so
@@ -266,12 +274,15 @@ export class FileReadCache {
    * see its own write as a "stale" external change.
    *
    * Read metadata is **always** refreshed alongside the write, not
-   * just for brand-new entries: the model authored the current content
-   * produced by the mutating tool, so for prior-read enforcement purposes
-   * it has now "seen" the bytes that tool wrote. Plain text writers use
+   * just for brand-new entries. Ordinary writes author current content and
+   * therefore count as having seen it; recovered writes retain the separate
+   * read-baseline restriction below. Plain text writers use
    * the default `cacheable: true`; structured writers such as notebook cell
    * editors can set `cacheable: false` so regular Edit / WriteFile still
-   * reject the file as a non-text payload.
+   * reject the file as a non-text payload. Recovered edits must explicitly
+   * pass readBaselineNeedsRefresh, including after atomic inode replacement:
+   * the new entry cannot inherit the old inode's baseline state. Only a
+   * successful text recordRead clears that state on an existing entry.
    *
    * As with {@link recordRead}, an `ino === 0` write returns a
    * **detached** entry that was never added to the map.
@@ -279,7 +290,7 @@ export class FileReadCache {
   recordWrite(
     absPath: string,
     stats: Stats,
-    opts: { cacheable?: boolean } = {},
+    opts: { cacheable?: boolean; readBaselineNeedsRefresh?: true } = {},
   ): FileReadEntry {
     const entry = FileReadCache.hasVerifiableIdentity(stats)
       ? this.upsert(absPath, stats)
@@ -287,11 +298,13 @@ export class FileReadCache {
     const now = Date.now();
     entry.lastWriteAt = now;
     entry.lastReadAt = now;
-    entry.lastReadWasFull = true;
+    entry.readBaselineNeedsRefresh =
+      opts.readBaselineNeedsRefresh ?? entry.readBaselineNeedsRefresh;
+    entry.lastReadWasFull = !entry.readBaselineNeedsRefresh;
     entry.lastReadCacheable = opts.cacheable ?? true;
-    // The model authored the current bytes and that result is in
-    // history, so the fast-path may serve a placeholder again.
-    entry.readResidentInHistory = true;
+    // A recovery preserves unread external bytes; only ordinary writes can
+    // make the complete result quotable from history.
+    entry.readResidentInHistory = !entry.readBaselineNeedsRefresh;
     return entry;
   }
 
@@ -305,8 +318,9 @@ export class FileReadCache {
    *  - `stale`   — entry exists but mtime or size differs. The file has
    *    been changed by something outside our control (or by us, before
    *    this stats call was taken).
-   *  - `fresh`   — entry exists and mtime + size match. Safe to assume
-   *    the bytes are what we last saw.
+   *  - `fresh`   — entry exists and mtime + size match the last recorded
+   *    operation. A recovered write may still require Read-baseline refresh;
+   *    fingerprint freshness alone does not authorize a full overwrite.
    *
    * Note: mtime + size is a best-effort fingerprint, not a hash. A file
    * rewritten with identical mtime *and* identical size will read as
@@ -480,6 +494,7 @@ export class FileReadCache {
       sizeBytes: stats.size,
       lastReadWasFull: false,
       lastReadCacheable: false,
+      readBaselineNeedsRefresh: false,
       readResidentInHistory: false,
     };
   }

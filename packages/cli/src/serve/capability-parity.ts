@@ -153,6 +153,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     'no Managed progressive workspace artifact query with session summaries',
   ),
   session_sources: NO_MANAGED_EQUIVALENT('no Managed session source list'),
+  generated_ui_state: NO_MANAGED_EQUIVALENT(
+    'no Managed Generated UI view state store',
+  ),
   slow_client_warning: LEGACY_ONLY(
     'SSE backpressure is a legacy transport knob',
   ),
@@ -236,13 +239,16 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   },
   scheduled_task_session_reuse: {
     standing: 'managed',
-    evidence: 'surface:AUTOMATION_RUN',
+    evidence:
+      'surface:AUTOMATION_RUN,surface:STORE_AUTOMATION_CREATE,surface:STORE_AUTOMATION_LIST,surface:STORE_AUTOMATION_RETIRE',
   },
-  // Managed automations carry no `gate`: a definition has a cron, a prompt
-  // and catch-up limits, so a quiet watch still spends a turn there.
-  scheduled_task_gate: NO_MANAGED_EQUIVALENT(
-    'no scheduled-task gate in Managed automations',
-  ),
+  // Fixed-interval /loop: cron_create passes a gate through to the
+  // definition, probed before each firing by the same gateCommandError the
+  // daemon's scheduled-task gate uses, so a quiet watch spends no turn.
+  scheduled_task_gate: {
+    standing: 'managed',
+    evidence: 'tool:cron_create',
+  },
   autofix_pr_watches: NO_MANAGED_EQUIVALENT(
     'no /autofix-pr watch in a Managed workspace',
   ),
@@ -394,6 +400,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     'no Managed GitHub setup route',
   ),
   workspace_github_prs: NO_MANAGED_EQUIVALENT('no Managed GitHub PRs route'),
+  workspace_github_pr_files: NO_MANAGED_EQUIVALENT(
+    'no Managed GitHub PR files route',
+  ),
   workspace_git_worktrees: NO_MANAGED_EQUIVALENT(
     'no Managed worktree management route',
   ),
@@ -566,6 +575,8 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     'no Managed worktrees',
   ),
   session_worktree_reset_v1: NO_MANAGED_EQUIVALENT('no Managed worktrees'),
+  session_worktree_branch_v1: NO_MANAGED_EQUIVALENT('no Managed worktrees'),
+  session_worktree_handoff_v1: NO_MANAGED_EQUIVALENT('no Managed worktrees'),
   workspace_qualified_acp: LEGACY_ONLY('no ACP in Managed'),
   client_mcp_over_ws: NO_MANAGED_EQUIVALENT(
     'no client-hosted MCP over the Managed transport',
@@ -575,7 +586,14 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   voice_transcribe: NO_MANAGED_EQUIVALENT('no Managed voice route'),
   realtime_voice: NO_MANAGED_EQUIVALENT('no Managed voice route'),
   realtime_voice_web: NO_MANAGED_EQUIVALENT('no Managed voice route'),
-  web_terminal: NO_MANAGED_EQUIVALENT('no Managed web terminal'),
+  // The Managed terminal is a WebSocket upgrade; its admission ticket is
+  // minted over the labelled terminal-ticket route, with the design as
+  // secondary evidence.
+  web_terminal: {
+    standing: 'managed',
+    evidence:
+      'surface:SESSION_TERMINAL_TICKET,docs:docs/design/2026-11-10-managed-web-terminal.md',
+  },
 };
 
 export interface CapabilityParityMatrix {
@@ -627,6 +645,10 @@ export const MANAGED_ONLY_NOT_A_GAP = new Set([
   'RUNTIME_NODE_LIST',
   // Loopback operator registration has no client capability.
   'EXTERNAL_STORAGE_REGISTER',
+  'EXTERNAL_WORKSPACE_MATERIALIZE',
+  // Internal relay MCP leg the Hosted Harness connects back to, behind the
+  // relay credential, never a client capability.
+  'INTERNAL_CLIENT_FILES_MCP',
   // Internal writer and publication routes: between the control plane and its
   // own stores, behind writer credentials, never a client capability.
   'PUB_ADMISSION_PREPARE',
@@ -650,7 +672,11 @@ export const MANAGED_ONLY_NOT_A_GAP = new Set([
   'STORE_LIFECYCLE_AUTHORIZE',
   'STORE_RECOVERY_BLOCK',
   'STORE_RESOURCE_GET',
+  'STORE_RESOURCE_ALLOCATE',
+  'STORE_RESOURCE_UPLOAD',
+  'STORE_RESOURCE_FINALIZE',
   'STORE_RESTORE',
+  'STORE_SIDE_QUERY',
   'STORE_SNAPSHOT_GET',
   'STORE_SNAPSHOT_PAGES',
   'STORE_SNAPSHOT_PUBLISH',
@@ -677,6 +703,11 @@ export const MANAGED_ONLY_NOT_A_GAP = new Set([
  * Personal MemoryStore create/list differs from Workspace memory-file CRUD.
  */
 export const MANAGED_ONLY_REPORTED: readonly string[] = [
+  'CLIENT_FILES_REGISTER',
+  'CLIENT_FILES_RESPOND',
+  'CLIENT_FILES_STATUS',
+  'CLIENT_FILES_STREAM',
+  'CLIENT_FILES_UNREGISTER',
   'EXTENSION_ARCHIVE',
   'EXTENSION_CONFIG_APPLY',
   'EXTENSION_CONFIG_GET',
@@ -689,12 +720,19 @@ export const MANAGED_ONLY_REPORTED: readonly string[] = [
   'EXTENSION_SETTINGS_SET',
   'MEMORY_STORE_CREATE',
   'MEMORY_STORE_LIST',
+  'RUNTIME_SKILL_IMPORT',
   'SESSION_ACTIVITY',
   'SESSION_ACTIVITY_STATS',
   'SESSION_CONTEXT_COMPRESSION',
   'SESSION_RECOVERY_QUERY',
   'SESSION_RECOVERY_RECHECK',
   'SESSION_WORKTREE',
+  'SIDE_QUERY_CANCEL',
+  'SIDE_QUERY_CONTEXT',
+  'SIDE_QUERY_CREATE',
+  'SIDE_QUERY_GET',
+  'SIDE_QUERY_LIST',
+  'SIDE_QUERY_STREAM',
 ];
 
 /**

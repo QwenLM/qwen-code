@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import org.apache.commons.codec.digest.DigestUtils;
@@ -14,7 +15,7 @@ final class WorkspaceEvidenceResources {
 
     static String publish(JdbcTemplate jdbc, String tenant, String workspace, String session,
             String ownerKey, byte[] bytes) {
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         String digest = digest(bytes);
         String resourceId = "workspace-proof:" + ownerKey + ":" + digest;
         String resourceKey = WorkspaceOperations.hash(scope, resourceId);

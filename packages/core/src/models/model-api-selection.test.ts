@@ -374,6 +374,7 @@ describe('model API selection', () => {
       expect(onModelChange).toHaveBeenLastCalledWith(
         AuthType.USE_OPENAI_RESPONSES,
         true,
+        undefined,
       );
       await config.switchModel(AuthType.USE_OPENAI, 'shared', { baseUrl });
       expect(config.getGenerationConfig().apiKey).toBe('injected-key');

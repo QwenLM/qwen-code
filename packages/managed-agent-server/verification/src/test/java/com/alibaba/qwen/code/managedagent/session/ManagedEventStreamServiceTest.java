@@ -8,7 +8,7 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellEvent;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.EventRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ReplayWindow;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -43,7 +43,7 @@ class ManagedEventStreamServiceTest {
     void rejectsNegativeReconciliationCursorBeforeReadingEvents() {
         AgentStateStore store = mock(AgentStateStore.class);
         ManagedAgentService agentService = new ManagedAgentService(store,
-                null, null, null, mock(ManagedWorkspaceRegistry.class), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+                null, null, null, mock(JdbcManagedWorkspaceRegistry.class), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         assertThatThrownBy(() -> agentService.streamEvents(SESSION, -1))
                 .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
                     assertThat(error.getStatus()).isEqualTo(400);
@@ -58,7 +58,7 @@ class ManagedEventStreamServiceTest {
     void revocationStopsBeforeNextEvent(boolean webShell, boolean reconcile)
             throws Exception {
         AgentStateStore store = mock(AgentStateStore.class);
-        ManagedWorkspaceRegistry registry = mock(ManagedWorkspaceRegistry.class);
+        JdbcManagedWorkspaceRegistry registry = mock(JdbcManagedWorkspaceRegistry.class);
         ManagedAgentService agentService = new ManagedAgentService(store,
                 null, null, null, registry, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         SessionRecord session = new SessionRecord("tenant", "session", "qwen-code",
@@ -129,7 +129,7 @@ class ManagedEventStreamServiceTest {
     void readGrantIsRecheckedOnAWindow(boolean webShell, boolean reconcile)
             throws Exception {
         AgentStateStore store = mock(AgentStateStore.class);
-        ManagedWorkspaceRegistry registry = mock(ManagedWorkspaceRegistry.class);
+        JdbcManagedWorkspaceRegistry registry = mock(JdbcManagedWorkspaceRegistry.class);
         ManagedAgentService agentService = new ManagedAgentService(store,
                 null, null, null, registry, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         SessionRecord session = new SessionRecord("tenant", "session", "qwen-code",
@@ -207,7 +207,7 @@ class ManagedEventStreamServiceTest {
     void revocationTakesEffectWhenTheWindowExpires(boolean webShell)
             throws Exception {
         AgentStateStore store = mock(AgentStateStore.class);
-        ManagedWorkspaceRegistry registry = mock(ManagedWorkspaceRegistry.class);
+        JdbcManagedWorkspaceRegistry registry = mock(JdbcManagedWorkspaceRegistry.class);
         ManagedAgentService agentService = new ManagedAgentService(store,
                 null, null, null, registry, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         SessionRecord session = new SessionRecord("tenant", "session", "qwen-code",
@@ -290,7 +290,7 @@ class ManagedEventStreamServiceTest {
     void idleStreamClosesAfterRevocationAtTheNextWake(boolean webShell)
             throws Exception {
         AgentStateStore store = mock(AgentStateStore.class);
-        ManagedWorkspaceRegistry registry = mock(ManagedWorkspaceRegistry.class);
+        JdbcManagedWorkspaceRegistry registry = mock(JdbcManagedWorkspaceRegistry.class);
         ManagedAgentService agentService = new ManagedAgentService(store,
                 null, null, null, registry, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         SessionRecord session = new SessionRecord("tenant", "session", "qwen-code",
@@ -369,7 +369,7 @@ class ManagedEventStreamServiceTest {
     @Test
     void readGrantRecheckReanchorsAfterEachSuccess() throws Exception {
         AgentStateStore store = mock(AgentStateStore.class);
-        ManagedWorkspaceRegistry registry = mock(ManagedWorkspaceRegistry.class);
+        JdbcManagedWorkspaceRegistry registry = mock(JdbcManagedWorkspaceRegistry.class);
         ManagedAgentService agentService = new ManagedAgentService(store,
                 null, null, null, registry, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         SessionRecord session = new SessionRecord("tenant", "session", "qwen-code",
@@ -444,7 +444,7 @@ class ManagedEventStreamServiceTest {
     @Test
     void readGrantRechecksOnTheDefaultWindow() throws Exception {
         AgentStateStore store = mock(AgentStateStore.class);
-        ManagedWorkspaceRegistry registry = mock(ManagedWorkspaceRegistry.class);
+        JdbcManagedWorkspaceRegistry registry = mock(JdbcManagedWorkspaceRegistry.class);
         ManagedAgentService agentService = new ManagedAgentService(store,
                 null, null, null, registry, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         SessionRecord session = new SessionRecord("tenant", "session", "qwen-code",
@@ -512,7 +512,7 @@ class ManagedEventStreamServiceTest {
             boolean reconcile) throws Exception {
         AgentStateStore store = mock(AgentStateStore.class);
         ManagedAgentService agentService = new ManagedAgentService(store,
-                null, null, null, mock(ManagedWorkspaceRegistry.class), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+                null, null, null, mock(JdbcManagedWorkspaceRegistry.class), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         when(store.requireSession("tenant", "session")).thenReturn(SESSION);
         List<EventRecord> records = List.of(
                 new EventRecord("tenant", "session", 1, "event-1", null,

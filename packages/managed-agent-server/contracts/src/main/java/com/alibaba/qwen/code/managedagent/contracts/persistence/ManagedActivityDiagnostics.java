@@ -68,6 +68,18 @@ public final class ManagedActivityDiagnostics {
         return DigestUtils.sha256Hex(digest.toString().getBytes(StandardCharsets.UTF_8));
     }
 
+    public static boolean matchesCommit(List<JsonNode> events, String operation, String commandId, String digest) {
+        for (JsonNode event : events) {
+            if ("tool.measured".equals(event.path("kind").asText())) {
+                return events.size() == 1 && "recordToolMeasurements".equals(operation)
+                        && event.path("payload").path("executionCallId").asText().equals(commandId)
+                        && ManagedToolMeasurements.commitDigest(event.path("payload")).equals(digest);
+            }
+        }
+        return events.stream().noneMatch(event -> event.path("payload").has("diagnosticsRef"))
+                || carrierDigest(events).equals(digest);
+    }
+
     public static void requireEvidence(JsonNode body) {
         closed(body, Set.of("schemaVersion", "reducerVersion", "epochId", "startEventId", "sourceEventId",
                 "observations", "coverageReasons", "omittedObservationCount"), "execution diagnostics");
@@ -184,6 +196,9 @@ public final class ManagedActivityDiagnostics {
                 next.set(field, resource);
                 continue;
             }
+            if ("execution".equals(field) && before.path("_measurementOutcomeKnown").asBoolean()) {
+                continue;
+            }
             if ("execution".equals(field) && List.of("success", "error", "cancelled").contains(before.path(field).asText())
                     && !before.path(field).equals(value) && !executorAuthority) {
                 next.put("conflictingEvidence", true);
@@ -232,8 +247,27 @@ public final class ManagedActivityDiagnostics {
             contribution(summary, before, -1);
         }
         contribution(summary, after, 1);
+        measurementContribution(summary, before, -1);
+        measurementContribution(summary, after, 1);
+        for (String field : List.of("tools", "files")) {
+            ManagedToolMeasurements.availability((ObjectNode) summary.path(field));
+        }
+        for (String operation : List.of("read", "write", "edit")) {
+            ManagedToolMeasurements.availability((ObjectNode) summary.path("fileOperations").path(operation));
+        }
         if (after.path("conflictingEvidence").asBoolean()) {
             gap(summary, "conflicting_evidence");
+        }
+    }
+
+    private static void measurementContribution(ObjectNode summary, JsonNode fact, int delta) {
+        if (fact == null) {
+            return;
+        }
+        ManagedToolMeasurements.contribute((ObjectNode) summary.path("tools"), fact, delta);
+        if (!fact.path("file").isNull()) {
+            ManagedToolMeasurements.contribute((ObjectNode) summary.path("files"), fact, delta);
+            ManagedToolMeasurements.contribute((ObjectNode) summary.path("fileOperations").path(fact.path("file").path("operation").asText()), fact, delta);
         }
     }
 

@@ -862,6 +862,11 @@ describe('splitCompoundCommand', () => {
       'cat >\r\necho hi',
       ['cat >\r', 'echo hi'],
     ],
+    [
+      'a CR target behind the clobber operator',
+      'cat >|\r\necho hi',
+      ['cat >|\r', 'echo hi'],
+    ],
   ])('splits on a newline with %s', async (_label, command, parts) => {
     expect(split(command)).toEqual(parts);
   });
@@ -957,6 +962,37 @@ describe('splitCompoundCommandSegments', () => {
     expect(segments("cd 'a\\' && echo {} > settings.json")).toEqual([
       { command: "cd 'a\\'", terminator: '&&' },
       { command: 'echo {} > settings.json', terminator: '' },
+    ]);
+  });
+
+  // `>|` is the clobber override, not a pipe: bash runs it as one command
+  // that writes the file. Splitting at its `|` dropped the write.
+  it('keeps a clobber redirect inside its command', async () => {
+    expect(segments("echo '{}' >| .qwen/settings.json")).toEqual([
+      { command: "echo '{}' >| .qwen/settings.json", terminator: '' },
+    ]);
+    expect(segments("echo '{}' >|.qwen/settings.json")).toEqual([
+      { command: "echo '{}' >|.qwen/settings.json", terminator: '' },
+    ]);
+    expect(segments('echo hi >| out.txt && cat out.txt')).toEqual([
+      { command: 'echo hi >| out.txt', terminator: '&&' },
+      { command: 'cat out.txt', terminator: '' },
+    ]);
+  });
+
+  it('still splits a real pipe after a clobber redirect', async () => {
+    expect(segments('echo hi >| out.txt | cat')).toEqual([
+      { command: 'echo hi >| out.txt', terminator: '|' },
+      { command: 'cat', terminator: '' },
+    ]);
+  });
+
+  // An escaped `\>` is a literal argument (bash prints `hi >`), so the `|`
+  // after it really is a pipe.
+  it('still splits the pipe after an escaped `>`', async () => {
+    expect(segments('echo hi \\>| cat')).toEqual([
+      { command: 'echo hi \\>', terminator: '|' },
+      { command: 'cat', terminator: '' },
     ]);
   });
 });
@@ -2003,6 +2039,18 @@ describe('PermissionManager', () => {
       expect(splitCompoundCommand(command)).toEqual([command]);
       pm = makeShellPm('bash', { permissionsAllow: ['Bash(git *)'] });
       expect(await pm.evaluate(sh(command))).toBe('allow');
+    });
+
+    // R7-9: an unresolvable -c payload may be the option terminator, so a
+    // wrapper wildcard must not auto-allow the unreadable spelling while
+    // the readable twin asks.
+    it('does not auto-allow an unresolvable wrapper payload via a wildcard', async () => {
+      pm = makeShellPm('bash', { permissionsAllow: ['Bash(bash -c *)'] });
+      expect(await pm.evaluate(mon('bash -c $CMD'))).toBe('ask');
+      expect(await pm.evaluate(mon("sh -c $(printf -- --) 'echo run'"))).toBe(
+        'ask',
+      );
+      expect(await pm.evaluate(mon("bash -c 'echo hi'"))).toBe('allow');
     });
 
     // The comment fast path is sound only when the scanned string is what the
@@ -3444,6 +3492,32 @@ describe('PermissionManager — compound shell write attribution', () => {
     expect(await repoPm(denySettings).evaluate(ctx)).toBe('deny');
   });
 
+  // B1: a `|` inside the redirect operator is a filename character. Before the
+  // syntax mask included `|`, `>"|/../".qwen/settings.json` was read as the `>|`
+  // clobber and the reported target lost its leading `|`, so `|/../X`
+  // normalised to `X` and this deny never matched while the same write was
+  // denied on base.
+  it('deny rule matches a write hidden behind a quoted clobber operator', async () => {
+    const ctx = sh('echo \'{}\' >"|/../".qwen/settings.json', '/repo');
+    expect(await repoPm(denySettings).evaluate(ctx)).toBe('deny');
+  });
+
+  // The same filename rule with the other spellings: a single-quoted or escaped
+  // `|`, and a quoted word ending in `>` running straight into the redirect
+  // (`'>'>"|/../"…`), where the operator match must use the masked spelling so
+  // a literal `|` cannot be read as the clobber.
+  it.each<[title: string, command: string]>([
+    ['single-quoted', "echo '{}' >'|/../'.qwen/settings.json"],
+    ['escaped', "echo '{}' >\\|/../.qwen/settings.json"],
+    ['quoted word before', "echo '{}' '>'>\"|/../\".qwen/settings.json"],
+  ])(
+    'a %s pipe is not a clobber: the protected write is denied',
+    async (_title, command) => {
+      const pm = repoPm({ permissionsAllow: ['Bash(*)'], ...denySettings });
+      expect(await pm.evaluate(sh(command, '/repo'))).toBe('deny');
+    },
+  );
+
   it('deny rule matches a redirect on the `cd` segment itself', async () => {
     const ctx = sh('cd .qwen > .qwen/settings.json', '/repo');
     expect(await repoPm(denySettings).evaluate(ctx)).toBe('deny');
@@ -3479,6 +3553,23 @@ describe('PermissionManager — compound shell write attribution', () => {
     ['df -hT / 2>&1', 'allow'],
     ['df -hT / >&2', 'allow'],
     ['printf TXT > other.txt', 'allow'],
+    // `>|` is the clobber override: the same write as `>`. The `|` used to
+    // split it into two segments, neither of which carried the write, so
+    // `Bash(*)` allowed a protected-path write with no rule seeing it.
+    ['printf TXT >| protected.txt', 'deny'],
+    ['printf TXT >|protected.txt', 'deny'],
+    ['printf TXT 1>| protected.txt', 'deny'],
+    ['printf TXT 2>|protected.txt', 'deny'],
+    ['printf TXT >| other.txt', 'allow'],
+    ['printf "TXT >| protected.txt"', 'allow'],
+    // A quoted or escaped `|` ends the word, so the `>` glued to it is a real
+    // redirect. bash writes the file, and the analysis has to report the same
+    // write or the deny below never fires.
+    ['echo hi "|">protected.txt', 'deny'],
+    ["echo hi '|'>protected.txt", 'deny'],
+    ['echo hi \\|>protected.txt', 'deny'],
+    ['echo hi "|" >protected.txt', 'deny'],
+    ['echo hi >"|"', 'allow'],
   ])('Bash(*) allow + file deny: %s → %s', async (command, expected) => {
     const pm = repoPm({
       permissionsAllow: ['Bash(*)'],

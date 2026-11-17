@@ -1,8 +1,9 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.persistence.ChildResultRelayStore;
-import com.alibaba.qwen.code.managedagent.persistence.SessionMessageRelayStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcChildResultRelayStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcSessionMessageRelayStore;
 import com.alibaba.qwen.code.managedagent.repository.ChildResultRelayStore.JournalTurns;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.SessionMessageRelayStore.MessageRow;
 import com.alibaba.qwen.code.managedagent.repository.SessionMessageRelayStore.PendingMessage;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
@@ -37,10 +38,10 @@ class SessionMessageRelayStoreTest {
     private static final AtomicLong IDS = new AtomicLong();
 
     @Autowired
-    private SessionMessageRelayStore store;
+    private JdbcSessionMessageRelayStore store;
 
     @Autowired
-    private ChildResultRelayStore records;
+    private JdbcChildResultRelayStore records;
 
     @Autowired
     @Qualifier("managedJdbcTemplate")
@@ -72,7 +73,7 @@ class SessionMessageRelayStoreTest {
                         + " first_sequence)"
                         + " VALUES (?, ?, ?, 'workspace', ?, ?, ?,"
                         + " 'h', 1, ?, 'session', ?, ?, ?)",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(TENANT, sessionId),
+                ManagedSessionStore.sessionScopeKey(TENANT, sessionId),
                 com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection.recordKey(sessionId, domain, recordId), TENANT, sessionId, domain,
                 recordId, resource, state, sequence, sequence);
     }
@@ -89,7 +90,7 @@ class SessionMessageRelayStoreTest {
     }
 
     private void session(String sessionId, String status) {
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
+        String scope = ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
         jdbc.update("INSERT INTO ma_session (tenant_id, session_id, tenant_key, session_key, session_scope_key, agent_id, status,"
                         + " gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, 'qwen-code', ?, 0, 0)"
                         + " ON DUPLICATE KEY UPDATE status = VALUES(status)", TENANT, sessionId,
@@ -98,7 +99,7 @@ class SessionMessageRelayStoreTest {
     }
 
     private void resource(String sessionId, String resourceId, byte[] bytes) {
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
+        String scope = ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
         jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, ?, ?, 'workspace', ?, ?, 'managed-message', 1, ?, ?, 'MYSQL_INLINE', ?, 'command', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
                 com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(scope, resourceId), scope,
                 TENANT, sessionId, resourceId, bytes.length, "a".repeat(64), bytes);
@@ -313,11 +314,11 @@ class SessionMessageRelayStoreTest {
         String bound = "UPDATE ma_delivery SET attempt_count = ?"
                 + " WHERE source_session_id = ? AND delivery_id = ?";
         byte[] accepting = "msg_y_accepting".getBytes(StandardCharsets.UTF_8);
-        jdbc.update(bound, SessionMessageRelayStore.MAX_ATTEMPTS - 1, sender,
+        jdbc.update(bound, JdbcSessionMessageRelayStore.MAX_ATTEMPTS - 1, sender,
                 accepting);
         assertThat(olderOwed(sender, "msg_b_planned"))
                 .contains("msg_y_accepting");
-        jdbc.update(bound, SessionMessageRelayStore.MAX_ATTEMPTS, sender,
+        jdbc.update(bound, JdbcSessionMessageRelayStore.MAX_ATTEMPTS, sender,
                 accepting);
         assertThat(olderOwed(sender, "msg_b_planned"))
                 .containsExactly("msg_w_unknown");
@@ -333,7 +334,7 @@ class SessionMessageRelayStoreTest {
         message(sender, "msg_a_second", "planned", outbound("to_child", "r"));
         jdbc.update("UPDATE ma_session_record SET gmt_create = 5"
                 + " WHERE session_scope_key = ?",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(TENANT, sender));
+                ManagedSessionStore.sessionScopeKey(TENANT, sender));
         assertThat(store.findPendingMessages("owner-a", 1_000, 50).stream()
                 .filter(entry -> entry.senderSessionId().equals(sender))
                 .map(PendingMessage::messageId))
@@ -376,7 +377,7 @@ class SessionMessageRelayStoreTest {
         MessageRow stale = store.find(TENANT, sender, "msg_race");
         assertThat(store.claim(TENANT, sender, "msg_race", "owner-a",
                 70_000, 40_000)).isNotNull();
-        SessionMessageRelayStore staleReader = new SessionMessageRelayStore(
+        JdbcSessionMessageRelayStore staleReader = new JdbcSessionMessageRelayStore(
                 jdbc) {
             @Override
             public MessageRow find(String tenantId, String senderSessionId,
@@ -405,7 +406,7 @@ class SessionMessageRelayStoreTest {
                         + " gmt_modified) VALUES (?, ?, 'qwen-code', 'ACTIVE',"
                         + " 0, 0)", TENANT, parent);
         assertThat(store.lineage(TENANT, child)).isEqualTo(
-                new SessionMessageRelayStore.Lineage(parent, "run-1"));
+                new JdbcSessionMessageRelayStore.Lineage(parent, "run-1"));
         assertThat(store.lineage(TENANT, parent)).isNull();
     }
 
@@ -415,7 +416,7 @@ class SessionMessageRelayStoreTest {
         String child = UUID.randomUUID().toString();
         session(child, "ACTIVE");
         assertThat(records.edgeMessages(TENANT, parent, "run-1", child))
-                .isEqualTo(new ChildResultRelayStore.EdgeMessages(0, 0,
+                .isEqualTo(new JdbcChildResultRelayStore.EdgeMessages(0, 0,
                         List.of()));
         message(parent, "msg_a", "planned", outbound("to_child", "run-1"));
         message(parent, "msg_b", "accepting", outbound("to_child", "run-2"));
@@ -429,7 +430,7 @@ class SessionMessageRelayStoreTest {
         message(child, "msg_e", "accepting", outbound("to_parent", "run-1"));
         // The received one names its input, for the journal cross-check.
         assertThat(records.edgeMessages(TENANT, parent, "run-1", child))
-                .isEqualTo(new ChildResultRelayStore.EdgeMessages(2, 3,
+                .isEqualTo(new JdbcChildResultRelayStore.EdgeMessages(2, 3,
                         List.of("msg_c:message")));
         assertThat(records.childOwesHandover(TENANT, child)).isTrue();
         // An entry the message relay gave up on holds nothing, even when
@@ -438,11 +439,11 @@ class SessionMessageRelayStoreTest {
         store.claim(TENANT, child, "msg_e", "owner-a", 31_000, 1_000);
         jdbc.update("UPDATE ma_delivery SET attempt_count"
                 + " = ? WHERE source_session_id = ? AND delivery_id = X'6d73675f65'",
-                SessionMessageRelayStore.MAX_ATTEMPTS - 1, child);
+                JdbcSessionMessageRelayStore.MAX_ATTEMPTS - 1, child);
         assertThat(records.childOwesHandover(TENANT, child)).isTrue();
         jdbc.update("UPDATE ma_delivery SET attempt_count"
                 + " = ? WHERE source_session_id = ? AND delivery_id = X'6d73675f65'",
-                SessionMessageRelayStore.MAX_ATTEMPTS, child);
+                JdbcSessionMessageRelayStore.MAX_ATTEMPTS, child);
         assertThat(records.childOwesHandover(TENANT, child)).isFalse();
         assertThat(records.edgeMessages(TENANT, parent, "run-1", child)
                 .undelivered()).isEqualTo(1);
@@ -476,7 +477,7 @@ class SessionMessageRelayStoreTest {
                         + " VALUES (?, ?, ?, 'workspace', ?,"
                         + " 'session_message', 'msg_x', 'h', 1, 'missing',"
                         + " 'session', 'planned', 1)",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(TENANT, parent),
+                ManagedSessionStore.sessionScopeKey(TENANT, parent),
                 com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection.recordKey(parent, "session_message", "msg_x"), TENANT, parent);
         assertThatThrownBy(() -> records.edgeMessages(TENANT, parent,
                 "run-1", UUID.randomUUID().toString()))
@@ -531,7 +532,7 @@ class SessionMessageRelayStoreTest {
         assertThat(records.journalTurns(TENANT, child).lastActivityAt())
                 .isEqualTo(50);
         assertThat(idle.lastSettled()).isEqualTo(
-                new ChildResultRelayStore.SettledTurn("msg_1:message",
+                new JdbcChildResultRelayStore.SettledTurn("msg_1:message",
                         "completed", "session_message", 20));
         assertThat(records.journalTurnText(TENANT, child, "msg_1:message"))
                 .isEqualTo("updated");

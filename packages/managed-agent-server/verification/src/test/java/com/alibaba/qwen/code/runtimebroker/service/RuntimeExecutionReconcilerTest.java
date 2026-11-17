@@ -9,9 +9,10 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBindingRegistry.SessionContext;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -21,8 +22,11 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -38,10 +42,47 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
 class RuntimeExecutionReconcilerTest {
+    @Test
+    @Timeout(5)
+    void droppedMeasurementRetryAfterSchedulerShutdownStillCompletesWithinTheOperationBudget() {
+        var scheduler = mock(ScheduledExecutorService.class);
+        var registry = mock(RuntimeBindingRegistry.class);
+        var state = mock(RuntimeExecutionState.class);
+        var executions = mock(ToolExecutionRepository.class);
+        var transport = mock(RuntimeTransport.class);
+        var original = mock(ToolExecutionRecord.class);
+        var context = mock(SessionContext.class);
+        var session = mock(RuntimeSession.class);
+        var lease = mock(RuntimeLease.class);
+        var closed = new AtomicBoolean();
+        Clock clock = Clock.systemUTC();
+        when(original.isSettled()).thenReturn(true);
+        when(original.getReference()).thenReturn(Map.of("resultProtocol", 4));
+        when(original.getResult()).thenReturn(Map.of("executionStatus", "success"));
+        when(original.getExecutionCallId()).thenReturn("execution");
+        when(original.getHarnessSessionId()).thenReturn("harness");
+        when(original.getRuntimeSessionId()).thenReturn("runtime");
+        when(registry.requireReadySession("harness", "runtime")).thenReturn(CompletableFuture.completedFuture(context));
+        when(state.requireExecution(context, "execution")).thenReturn(original);
+        when(context.session()).thenReturn(session);
+        when(context.lease()).thenReturn(lease);
+        when(transport.statusV4(eq(lease), eq(session), any(), eq(0L)))
+                .thenReturn(CompletableFuture.completedFuture(Map.of("state", "executing", "lastSequence", 1L)));
+        var reconciler = new RuntimeExecutionReconciler(registry, state, executions,
+                mock(RuntimeProvisioner.class), transport, null, Duration.ofMillis(100), clock, scheduler,
+                closed, new ExecutionObservationCooldown(clock, scheduler));
+        var waiting = reconciler.measuredResult(original, 0).toCompletableFuture();
+        closed.set(true);
+        reconciler.cancelPendingOperations();
+        scheduler.shutdownNow();
+        var failure = assertThrows(ExecutionException.class, () -> waiting.get(2, TimeUnit.SECONDS));
+        assertTrue(failure.getCause() instanceof TimeoutException);
+    }
+
     @ParameterizedTest
-    @ValueSource(booleans = {false, true})
+    @CsvSource({"false,false", "false,true", "true,false", "true,true"})
     @Timeout(15)
-    void anObserverDuringCooldownStampJoinsTheLookupInsteadOfCallingTheWorkerAgain(boolean failed) throws Exception {
+    void anObserverDuringCooldownStampJoinsTheLookupInsteadOfCallingTheWorkerAgain(boolean failed, boolean measured) throws Exception {
         var scheduler = Executors.newSingleThreadScheduledExecutor();
         var entered = new CountDownLatch(1);
         var release = new CountDownLatch(1);
@@ -68,7 +109,7 @@ class RuntimeExecutionReconcilerTest {
         when(unknown.getState()).thenReturn(ToolExecutionRecord.State.UNKNOWN);
         when(unknown.getBindingId()).thenReturn("binding");
         when(unknown.getRuntimeGeneration()).thenReturn(7L);
-        when(unknown.getReference()).thenReturn(Map.of("callId", "call"));
+        when(unknown.getReference()).thenReturn(measured ? Map.of("callId", "call", "resultProtocol", 4) : Map.of("callId", "call"));
         when(state.requireOwnedExecution("harness", "runtime", "execution")).thenReturn(unknown);
         when(executions.findByExecutionCallId("execution")).thenReturn(unknown);
         when(registry.session("runtime")).thenReturn(CompletableFuture.completedFuture(context));
@@ -82,12 +123,19 @@ class RuntimeExecutionReconcilerTest {
         when(provisioner.isUsable(lease)).thenReturn(true);
         var answer = new CompletableFuture<Map<String, Object>>();
         var lookups = new AtomicInteger();
-        when(transport.status(eq(lease), eq(session), any(), eq(0L))).thenAnswer(call -> {
-            lookups.incrementAndGet();
-            return answer;
-        });
+        if (measured) {
+            when(transport.statusV4(eq(lease), eq(session), any(), eq(0L))).thenAnswer(call -> {
+                lookups.incrementAndGet();
+                return answer;
+            });
+        } else {
+            when(transport.status(eq(lease), eq(session), any(), eq(0L))).thenAnswer(call -> {
+                lookups.incrementAndGet();
+                return answer;
+            });
+        }
         var reconciler = new RuntimeExecutionReconciler(registry, state, executions, provisioner, transport,
-                null, Duration.ofSeconds(10), clock, closed, cooldown);
+                null, Duration.ofSeconds(10), clock, scheduler, closed, cooldown);
         Thread completer = null;
         try {
             var first = reconciler.observeExecution("harness", "runtime", "execution").toCompletableFuture();
@@ -95,7 +143,7 @@ class RuntimeExecutionReconcilerTest {
                 if (failed) {
                     answer.completeExceptionally(new IllegalStateException("worker unavailable"));
                 } else {
-                    answer.complete(Map.of("state", "executing"));
+                    answer.complete(measured ? Map.of("state", "executing", "lastSequence", 1L) : Map.of("state", "executing"));
                 }
             });
             assertTrue(entered.await(5, TimeUnit.SECONDS), "lookup never reached cooldown stamp");

@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedAgentDefinitionStore;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -61,7 +62,7 @@ class ManagedAgentDefinitionTest {
     private JdbcTemplate jdbc;
 
     @Autowired
-    private com.alibaba.qwen.code.managedagent.persistence.ManagedAgentDefinitionStore definitions;
+    private JdbcManagedAgentDefinitionStore definitions;
 
     @Autowired
     @Qualifier("managedAgentTransactionManager")

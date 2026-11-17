@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.junit.jupiter.api.AfterEach;
@@ -32,7 +33,7 @@ public class ManagedSchemaSessionMySqlIT extends ManagedSchemaSessionStoreTest {
     }
 
     @Test
-    void tenfoldHistoryKeepsDueClaimsAndMessageBodyReadsBounded() {
+    void tenfoldHistoryKeepsMessageBodyReadsBounded() {
         var session =
                 jdbc.queryForMap(
                         "SELECT tenant_id, session_id FROM ma_session WHERE session_kind ="
@@ -41,7 +42,6 @@ public class ManagedSchemaSessionMySqlIT extends ManagedSchemaSessionStoreTest {
         String id = (String) session.get("session_id");
         tx.executeWithoutResult(
                 status -> {
-                    store.beginSessionRename(tenant, "load-rename", "digest", id, "renamed");
                     store.appendPublicEventIfAbsent(
                             tenant,
                             id,
@@ -60,20 +60,12 @@ public class ManagedSchemaSessionMySqlIT extends ManagedSchemaSessionStoreTest {
                         tenant,
                         id);
         seedHistory(tenant, id, 0, 1000);
-        String due =
-                "SELECT tenant_id, session_id, operation_id FROM ma_operation WHERE operation_kind"
-                    + " = 'RENAME' AND delivery_state = 'PENDING' AND state = 'PENDING' AND"
-                    + " available_at <= ? ORDER BY available_at LIMIT 100";
         String body =
                 "SELECT inline_bytes, byte_length, sha256 FROM ma_resource WHERE resource_key = ?"
                         + " AND state = 'REFERENCED' AND deletion_operation_key IS NULL";
-        var claims = scanned(due, Long.MAX_VALUE);
-        assertThat(claims.scannedRows()).isPositive();
         var reads = scanned(body, resource);
         seedHistory(tenant, id, 1000, 10_000);
-        assertThat(scanned(due, Long.MAX_VALUE).scannedRows()).isEqualTo(claims.scannedRows());
         assertThat(scanned(body, resource).scannedRows()).isEqualTo(reads.scannedRows());
-        assertThat(store.deliverableRenames(Long.MAX_VALUE)).hasSize(1);
         assertThat(tx.execute(status -> store.findMessagePage(tenant, id, null, 10, false)).items()).hasSize(1);
         var recent = tx.execute(status -> store.findMessagePage(tenant, id, null, 1, true));
         assertThat(recent.items()).hasSize(1);
@@ -93,7 +85,7 @@ public class ManagedSchemaSessionMySqlIT extends ManagedSchemaSessionStoreTest {
     }
 
     private void seedHistory(String tenant, String session, int first, int last) {
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         List<Object[]> operations = new ArrayList<>();
         List<Object[]> resources = new ArrayList<>();
         byte[] bytes = "history".getBytes(StandardCharsets.UTF_8);

@@ -4,6 +4,7 @@ import {
 } from './components/managed/managed-extension-messages.js';
 import {
   MANAGED_LIFECYCLE_MESSAGES_EN,
+  MANAGED_LIFECYCLE_MESSAGES_RU,
   MANAGED_LIFECYCLE_MESSAGES_ZH,
 } from './components/managed/managed-lifecycle-messages.js';
 import { plural } from './utils/plural.js';
@@ -13,18 +14,22 @@ import {
 } from './components/sidebar/activity-messages.js';
 import {
   MESSAGE_DELETION_MESSAGES_EN,
+  MESSAGE_DELETION_MESSAGES_RU,
   MESSAGE_DELETION_MESSAGES_ZH,
 } from './components/message-deletion-messages.js';
 import {
   TRAJECTORY_EXECUTION_MESSAGES_EN,
+  TRAJECTORY_EXECUTION_MESSAGES_RU,
   TRAJECTORY_EXECUTION_MESSAGES_ZH,
 } from './trajectory/execution-messages.js';
 import {
   FILES_MESSAGES_EN,
+  FILES_MESSAGES_RU,
   FILES_MESSAGES_ZH,
 } from './components/artifacts/files-messages.js';
 import {
   TOKEN_USAGE_MESSAGES_EN,
+  TOKEN_USAGE_MESSAGES_RU,
   TOKEN_USAGE_MESSAGES_ZH,
 } from './components/artifacts/token-usage-messages.js';
 import {
@@ -40,48 +45,75 @@ import {
 
 import {
   TRAJECTORY_FILTER_MESSAGES_EN,
+  TRAJECTORY_FILTER_MESSAGES_RU,
   TRAJECTORY_FILTER_MESSAGES_ZH,
 } from './trajectory/filter-messages.js';
 
 import {
   TRAJECTORY_WINDOW_MESSAGES_EN,
+  TRAJECTORY_WINDOW_MESSAGES_RU,
   TRAJECTORY_WINDOW_MESSAGES_ZH,
 } from './trajectory/window-messages.js';
 
-import { VOICE_MESSAGES_EN, VOICE_MESSAGES_ZH } from './voice/messages.js';
-import { LIVE_MESSAGES_EN, LIVE_MESSAGES_ZH } from './live/messages.js';
+import {
+  VOICE_MESSAGES_EN,
+  VOICE_MESSAGES_RU,
+  VOICE_MESSAGES_ZH,
+} from './voice/messages.js';
+import {
+  LIVE_MESSAGES_EN,
+  LIVE_MESSAGES_RU,
+  LIVE_MESSAGES_ZH,
+} from './live/messages.js';
 import {
   MCP_APP_MESSAGES_EN,
+  MCP_APP_MESSAGES_RU,
   MCP_APP_MESSAGES_ZH,
 } from './mcp-app/messages.js';
 import {
   COLLAB_MESSAGES_EN,
+  COLLAB_MESSAGES_RU,
   COLLAB_MESSAGES_ZH,
 } from './components/workspace-agents/messages.js';
 import {
   SETTINGS_MESSAGES_EN,
+  SETTINGS_MESSAGES_RU,
   SETTINGS_MESSAGES_ZH,
 } from './settings/messages.js';
 
 import {
   MANAGED_TASK_MESSAGES_EN,
+  MANAGED_TASK_MESSAGES_RU,
   MANAGED_TASK_MESSAGES_ZH,
 } from './components/managed/managed-task-messages.js';
 
 import {
   BROWSER_NOTIFICATION_MESSAGES_EN,
+  BROWSER_NOTIFICATION_MESSAGES_RU,
   BROWSER_NOTIFICATION_MESSAGES_ZH,
 } from './browser-notifications/messages.js';
 
 import {
   WORKSPACE_REGISTRATION_MESSAGES_EN,
+  WORKSPACE_REGISTRATION_MESSAGES_RU,
   WORKSPACE_REGISTRATION_MESSAGES_ZH,
 } from './components/managed/managed-workspace-messages.js';
 
 import {
   MANAGED_MCP_MESSAGES_EN,
+  MANAGED_MCP_MESSAGES_RU,
   MANAGED_MCP_MESSAGES_ZH,
 } from './components/managed/managed-mcp-messages.js';
+// The Russian catalog is split so `--mode transcript` can stub these
+// modules (see vite.lib.config.ts). Exported HTML would otherwise ship a
+// third full UI dictionary to every reader.
+import { RU_PART1 } from './i18n-ru-part1.js';
+import { RU_PART2 } from './i18n-ru-part2.js';
+import { RU_PART3 } from './i18n-ru-part3.js';
+import { RU_PART4 } from './i18n-ru-part4.js';
+import { RU_PART5 } from './i18n-ru-part5.js';
+import { RU_PART6 } from './i18n-ru-part6.js';
+import { RU_REMAINDER } from './i18n-ru-remainder.js';
 
 export const WEB_SHELL_LANGUAGES = ['en', 'zh-CN', 'ru'] as const;
 
@@ -92,26 +124,6 @@ type MessageValue =
   | ((vars?: Record<string, string | number>) => string);
 
 type Messages = Record<string, MessageValue>;
-
-/**
- * Russian plural pick: 1 → `one`, 2–4 → `few`, otherwise → `many`, with the
- * 11–14 exception per decade (ход/ходов, токен/токенов, цель/целей).
- */
-function ruPlural(
-  count: string | number | undefined,
-  one: string,
-  few: string,
-  many: string,
-): string {
-  const value = typeof count === 'number' ? count : Number(count ?? 0);
-  const safe = Number.isFinite(value) ? value : 0;
-  const last = safe % 10;
-  const lastTwo = safe % 100;
-  if (lastTwo >= 11 && lastTwo <= 14) return many;
-  if (last === 1) return one;
-  if (last >= 2 && last <= 4) return few;
-  return many;
-}
 
 const EN: Messages = {
   "You've used up your weekly credits.{{reset}} You can wait or run /upgrade to get more credits.":
@@ -516,19 +528,14 @@ const EN: Messages = {
   'managed.model.optionsError': 'Could not load available models.',
   'managed.model.reload': 'Reload models',
   'managed.model.nextTurn':
-    'Change the model while idle. Your next message uses the selected model; conversation history is kept.',
+    'Your next message uses the selected model. An already running task keeps its model; conversation history is kept.',
   'managed.model.changing': 'Changing model…',
-  'managed.model.unconfirmed':
-    'The model change is not confirmed. Continue confirming the original request.',
-  'managed.model.confirm': 'Continue confirming',
   'managed.model.busy':
-    'Finish the active task, approval or unconfirmed request before changing model.',
-  'managed.model.storage':
-    'Browser session storage is unavailable. The model change cannot start safely.',
+    'Model changes are temporarily unavailable for this session. Try again shortly.',
   'managed.model.conflict':
     'The model has changed. Review the current selection and try again.',
   'managed.model.failed':
-    'The model change was refused. Review the available models and try again.',
+    'Could not change the model. Check the current selection and try again.',
   'managed.approvalOptionsLoading': 'Loading approval modes…',
   'managed.approvalOptionsLoadFailed': 'Could not load approval modes.',
   'managed.approvalOptionsInvalid':
@@ -618,8 +625,14 @@ const EN: Messages = {
   'branchPicker.action.checkoutRef': 'Checkout Tag or Revision…',
   'branchPicker.action.viewChanges': 'View Changes',
   'branchPicker.action.worktrees': 'Worktrees…',
+  'branchPicker.action.createBranchHere': 'Create branch here',
+  'branchPicker.action.handoffToLocal': 'Hand off to local',
+  'branchPicker.action.moveToWorktree': 'Move to worktree',
+  'branchPicker.moveToWorktreeHint':
+    'Your local checkout keeps its uncommitted changes; handing back later requires a clean local checkout.',
   'branchPicker.action.history': 'History',
   'branchPicker.newBranchPlaceholder': 'Branch name',
+  'branchPicker.createBranchPlaceholder': 'New branch name',
   'branchPicker.invalidBranchName':
     'Invalid branch name — avoid spaces, ~, ^, :, ? * and leading -',
   'branchPicker.checkoutRefPlaceholder': 'Tag name or commit SHA',
@@ -639,6 +652,12 @@ const EN: Messages = {
   'branchPicker.pullDiscardGo': 'Discard and Update',
   'branchPicker.pullStashConflict': (v) =>
     `Updated, but restoring your stashed changes failed. They are kept in stash entry ${String(v?.sha ?? '').slice(0, 12) || '(see git stash list)'} — resolve any conflict markers, then restore it manually.`,
+  'branchPicker.checkoutBlocked': 'Switch blocked by uncommitted changes',
+  'branchPicker.checkoutStash': 'Stash Changes and Switch',
+  'branchPicker.checkoutDiscard': 'Discard Changes and Switch…',
+  'branchPicker.checkoutDiscardGo': 'Discard and Switch',
+  'branchPicker.checkoutStashKept': (v) =>
+    `Switched to ${v?.branch ?? ''}. Your local changes are kept in stash entry ${String(v?.sha ?? '').slice(0, 12) || '(see git stash list)'} — restore them with git stash apply when wanted.`,
   'branchPicker.cancel': 'Cancel',
   'branchPicker.hint.upToDate': 'Up to date',
   'branchPicker.hint.noUpstream': 'No upstream',
@@ -840,6 +859,17 @@ const EN: Messages = {
   'githubPrs.checksFailing': 'Checks failing',
   'githubPrs.checksPending': 'Checks pending',
   'githubPrs.open': (v) => `Open pull request #${v?.number ?? ''} on GitHub`,
+  'sessionsOverview.bindPr': 'Bind PR',
+  'sessionsOverview.bindPrPlaceholder': 'PR number or URL',
+  'sessionsOverview.bindPrSubmit': 'Bind',
+  'sessionsOverview.bindPrInvalid': 'Enter a PR number or a full PR URL.',
+  'sessionsOverview.bindPrNotInList': (v) =>
+    `PR #${v?.number ?? ''} is not in the open PR list. Paste its full URL instead.`,
+  'sessionsOverview.bindPrListFailed':
+    'Could not load the PR list. Paste the full PR URL instead.',
+  'sessionsOverview.bindPrFailed': 'Bind PR failed',
+  'sessionsOverview.bindPrUnavailable':
+    'This workspace is not a git repository, so PR numbers cannot be looked up. Paste the full PR URL instead.',
   'workspace.paneLabel': (v) => `Workspace: ${v?.name ?? ''}`,
   'about.auth': 'Auth',
   'about.baseUrl': 'Base URL',
@@ -1184,6 +1214,50 @@ const EN: Messages = {
   'approval.option.allowAlwaysTool': 'Always allow for this tool',
   'assistant.branch': 'New chat from here',
   'assistant.copyContent': 'Copy content',
+  'hooks.title': 'Hook statistics',
+  'hooks.thisTurn': 'This turn · main agent',
+  'hooks.executions': 'Runs',
+  'hooks.blocked': 'Blocked',
+  'hooks.unsuccessful': 'Failed',
+  'hooks.duration': 'Total time',
+  'hooks.compactSummary': (v) =>
+    `${v?.executions ?? 0} runs · ${v?.blocked ?? 0} blocked · ${v?.unsuccessful ?? 0} failed · ${v?.duration ?? '—'}`,
+  'hooks.partial': 'Partial records. Totals cover recorded executions only.',
+  'hooks.more': 'More reply actions',
+  'hooks.loading': 'Loading hooks…',
+  'hooks.loadFailed': 'Could not load hook records.',
+  'hooks.retry': 'Retry',
+  'hooks.loadMore': 'Load 50 more',
+  'hooks.type': 'Hook type',
+  'hooks.started': 'Started',
+  'hooks.ended': 'Ended',
+  'hooks.exitCode': 'Exit code',
+  'hooks.dispatchDuration': 'Dispatch duration',
+  'hooks.dispatchHelp':
+    'Dispatched to background. Final result is not collected.',
+  'hooks.unknownHelp':
+    'The terminal result was not recorded or the connection was interrupted.',
+  'hooks.status.running': 'Running',
+  'hooks.status.unknown': 'Outcome unavailable',
+  'hooks.status.dispatched': 'Dispatched to background',
+  'hooks.status.success': 'Succeeded',
+  'hooks.status.blocked': 'Blocked',
+  'hooks.status.error': 'Failed',
+  'hooks.status.timeout': 'Timed out',
+  'hooks.status.cancelled': 'Cancelled',
+  'hooks.source.system': 'System',
+  'hooks.source.user': 'User',
+  'hooks.source.project': 'Project',
+  'hooks.source.extensions': 'Extension',
+  'hooks.source.session': 'Session',
+  'hooks.source.unknown': 'Unknown source',
+  'hooks.coverage.recorded': 'No hook executions recorded.',
+  'hooks.coverage.unrecorded':
+    'Hook executions were not recorded for this turn.',
+  'hooks.coverage.unsupported':
+    'Hook statistics are not supported for this runtime.',
+  'hooks.coverage.partial':
+    'No executions are available in the retained records.',
   'assistant.selectionCopy': 'Copy selection',
   'assistant.copyPlainText': 'Copy plain text',
   'assistant.copyMarkdown': 'Copy Markdown',
@@ -1437,6 +1511,18 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'echartsChart.showData': 'Show data',
   'echartsChart.chart': 'Chart',
   'echartsChart.data': 'Data',
+  'echartsChart.nodes': 'Nodes',
+  'echartsChart.links': 'Links',
+  'echartsChart.name': 'Name',
+  'echartsChart.category': 'Category',
+  'echartsChart.id': 'ID',
+  'echartsChart.source': 'Source',
+  'echartsChart.target': 'Target',
+  'echartsChart.value': 'Value',
+  'echartsChart.depth': 'Depth',
+  'echartsChart.path': 'Path',
+  'echartsChart.idPath': 'ID path',
+  'echartsChart.subtreeTotal': 'Subtree total (derived)',
   'markdownTable.blank': '(blank)',
   'markdownTable.column': (v) => `Column ${v?.index ?? ''}`,
   'markdownTable.rows': (v) => {
@@ -1453,6 +1539,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'markdownTable.selection.selected': 'Selected',
   'markdownTable.selection.nonEmpty': 'Non-empty',
   'markdownTable.selection.numeric': 'Numeric',
+  'markdownTable.selection.statistics': 'Numeric selection statistics',
   'markdownTable.selection.sum': 'Sum',
   'markdownTable.selection.average': 'Average',
   'markdownTable.selection.min': 'Min',
@@ -2127,6 +2214,14 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'scheduledTasks.group.nameRequired': 'Enter a name for the new group.',
   'scheduledTasks.routing.loading': 'Loading models and groups…',
   'scheduledTasks.delivery.channel': 'Delivery Channel',
+  'scheduledTasks.delivery.configuredGroupHint':
+    'Messages are sent to the group configured for this Channel.',
+  'scheduledTasks.delivery.configuredHint':
+    'Messages are sent to the destination configured for this Channel.',
+  'scheduledTasks.delivery.useConfiguredDestination':
+    'Use configured destination',
+  'scheduledTasks.delivery.differentConfiguredDestination':
+    'This saved destination differs from the Channel’s configured destination.',
   'scheduledTasks.delivery.off': 'Delivery off',
   'scheduledTasks.delivery.hint':
     'Send the final response of a successful scheduled run to this destination. Delivery depends on the Channel and does not guarantee receipt.',
@@ -2218,6 +2313,25 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   // the code-review result view (`codeReview.*`) took over the word.
   'turnOutputs.review': 'Changes',
   'turnOutputs.reviewLatest': 'View recent file changes',
+  'changeOverview.title': 'Change overview',
+  'changeOverview.uncommitted': 'Uncommitted',
+  'changeOverview.loading': 'Loading changes…',
+  'changeOverview.notGit': 'This workspace is not a git repository.',
+  'changeOverview.loadFailed':
+    'Couldn’t load the change overview. Use refresh to retry.',
+  'changeOverview.empty': 'No changes in this scope.',
+  'changeOverview.files': (v) => plural(v?.count, 'file'),
+  'changeOverview.prUnavailable':
+    'File list unavailable: couldn’t load it. Use refresh to retry.',
+  'changeOverview.prUnavailableCli':
+    'File list unavailable: the GitHub CLI (gh) is not installed on the daemon host.',
+  'changeOverview.prUnavailableRoute':
+    'File list unavailable: this daemon predates the PR file-list route.',
+  'changeOverview.refresh': 'Refresh',
+  'changeOverview.openPr': 'Open PR',
+  'changeOverview.description': 'Changed files and scale, by delivery unit.',
+  'changeOverview.hiddenFiles': (v) => `…and ${plural(v?.count, 'more file')}`,
+  'changeOverview.hiddenCommits': '…and more commits',
   'codeReview.authoritativeVerdict': 'Authoritative verdict',
   'codeReview.targetEffort': (v) =>
     `Target: ${v?.target ?? ''} · Effort: ${v?.effort ?? ''}`,
@@ -2291,6 +2405,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'terminal.notice.error': (v) => `Error: ${v?.message ?? ''}`,
   'terminal.notice.unknownError': 'Unknown error',
   'terminal.notice.reconnecting': 'Connection lost — reconnecting…',
+  'terminal.notice.lost': 'This terminal is no longer available.',
   'terminal.notice.protocolMismatch':
     'Terminal protocol changed; restart the daemon and reload this page.',
   'localFiles.title': 'Local files',
@@ -2316,18 +2431,36 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'localFiles.status.resolving': 'Resolving…',
   'localFiles.needsSessionHint':
     'Start a session first. The bridge binds to exactly one session, so no other session can reach your files.',
-  'localFiles.blocker.insecureContext':
-    'This page is not a secure context, so the browser will not grant local file access. Serve the Web Shell over https, or forward the daemon port with SSH and open http://localhost:<port>.',
+  'localFiles.blocker.insecureContext': (v) =>
+    v?.localPort !== undefined
+      ? `This page is not a secure context, so the browser will not grant local file access. Serve the Web Shell over https, or run the copied SSH tunnel command and open http://localhost:${v.localPort}.`
+      : 'This page is not a secure context, so the browser will not grant local file access. Serve the Web Shell over https, or forward the daemon port with SSH and open http://localhost:<port>.',
   'localFiles.blocker.crossOriginFrame':
     'Local file access is blocked inside a cross-origin frame. Open the Web Shell in its own browser tab to connect a directory.',
   'localFiles.blocker.unsupportedBrowser':
     'This browser has no File System Access API. Use Chrome or Edge to connect a local directory.',
   'localFiles.blocker.workspaceIneligible':
-    "This conversation's workspace cannot host a local directory (untrusted or live workspace).",
+    "This conversation's workspace cannot host a local directory (untrusted or live workspace). Use a session in a trusted, regular workspace instead.",
   'localFiles.blocker.workspaceResolving':
     'Which workspace this conversation belongs to is not known yet.',
   'localFiles.blocker.unsupportedDaemon':
     'This daemon does not advertise the client filesystem bridge (client_mcp_over_ws). Start the daemon with QWEN_SERVE_CLIENT_MCP_OVER_WS=1 to enable local files.',
+  'localFiles.changeDirectory': 'Change directory…',
+  'localFiles.session': 'Session',
+  'localFiles.newSession': 'New session',
+  'localFiles.retry': 'Retry',
+  'localFiles.copyStartupCommand': 'Copy startup command',
+  'localFiles.copyTunnelCommand': 'Copy SSH tunnel command',
+  'localFiles.copied': 'Command copied',
+  'localFiles.copyFailed': 'Could not copy the command',
+  'localFiles.changeDirectoryFailed':
+    'Could not change the directory. The current directory is still connected.',
+  'localFiles.changeDirectoryDeferred':
+    'Directory change saved. It takes effect once the workspace finishes resolving; until then the current directory stays connected.',
+  'localFiles.gestureToast': (v) =>
+    v?.name
+      ? `Local directory "${v.name}" needs to be reconnected. Open Local files to grant access again.`
+      : 'Local files need to be reconnected. Open Local files to grant access again.',
   ...FILES_MESSAGES_EN,
   ...ACTIVITY_MESSAGES_EN,
   'rightPanel.add': 'Add panel',
@@ -2387,13 +2520,26 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'sidebar.project': 'Workspaces',
   'sidebar.pinnedSessions': 'Pinned',
   'sidebar.sessionSort': 'Sort sessions',
+  'sidebar.sessionDisplay': 'Display options',
+  'sidebar.groupBy': 'Group by',
+  'sidebar.groupWorkspace': 'Workspace',
+  'sidebar.groupActivityDate': 'Activity date',
+  'sidebar.groupThisWeek': 'This week',
+  'sidebar.groupLast30Days': 'Last 30 days',
+  'sidebar.groupOlder': 'Older',
+  'sidebar.recentConversations': 'Recent conversations',
+  'sidebar.sortBy': 'Sort by',
   'sidebar.sortActivity': 'Recent activity',
   'sidebar.sortQuestion': 'Last question',
+  'sidebar.workspaceFilter': 'Workspace',
+  'sidebar.filterAll': 'All',
+  'sidebar.restoreDefaults': 'Restore defaults',
   'sidebar.recentSessions': 'Recent',
   'sidebar.standalonePinUnavailable':
     'Pinning no-workspace sessions is not supported yet.',
   'sidebar.workspaceSelectLabel': 'Workspace',
   'sidebar.noWorkspace': 'No workspace',
+  'sidebar.liveSessions': 'Live sessions',
   'sidebar.noWorkspaceSessions': 'No-workspace sessions',
   'sidebar.copySessionId': 'Copy session ID',
   'sidebar.copySessionIdFailed': 'Failed to copy session ID',
@@ -2611,11 +2757,21 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'sidebar.collapse': 'Collapse',
   'sidebar.expand': 'Expand',
   'sidebar.showAllSessions': 'Show all',
+  'sidebar.showMoreSessions': (v) => `Show ${v?.['count'] ?? 0} more`,
   'sidebar.subSessions': (v) => plural(v?.['count'], 'sub-session'),
   'sidebar.collapseProject': 'Collapse workspace',
   'sidebar.expandProject': 'Expand workspace',
   'sidebar.search': 'Search sessions',
   'sidebar.searchPlaceholder': 'Search sessions',
+  'sidebar.searchResults': 'Sessions',
+  'sidebar.searchLoading': 'Searching sessions…',
+  'sidebar.searchEmpty': 'No sessions found',
+  'sidebar.searchEmptyHint':
+    'Try a different title or a phrase from a conversation.',
+  'sidebar.searchRecentEmpty': 'Your recent sessions will appear here.',
+  'sidebar.searchPartialFailure': 'Some sessions could not be searched.',
+  'sidebar.searchNavigate': 'Navigate',
+  'sidebar.searchOpen': 'Open',
   'sidebar.rename': 'Rename',
   'sidebar.export': 'Export conversation record',
   'sidebar.exportFailed': 'Failed to export session',
@@ -2972,6 +3128,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'local.effort': 'Set reasoning effort for capable models',
   'local.export': 'Export the current session history to a file',
   'local.forget': 'Remove matching entries from managed auto-memory',
+  'local.pr': 'Bind a GitHub pull request to this session',
   'local.hooks': 'Manage Qwen Code hooks',
   'local.importConfig': 'Import MCP servers from Claude configs',
   'local.init': 'Analyze the project and create a QWEN.md file',
@@ -3459,6 +3616,8 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'goal.failed': 'Goal could not be achieved',
   'goal.judge': 'Judge',
   'goal.label': 'Goal',
+  'goal.expandDetails': 'Expand details',
+  'goal.collapseDetails': 'Collapse details',
   'goal.lastCheck': 'Last check',
   'goal.notYetMet': 'not yet met',
   'goal.set': 'Goal set',
@@ -3491,6 +3650,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'goals.empty': 'No active goals. Set one with /goal <condition>.',
   'goals.refresh': 'Refresh',
   'goals.new': 'New goal',
+  'goals.workspace': 'Workspace',
   'goals.newHint':
     'The goal starts in a new session and runs until its condition holds. For an enforced turn or time ceiling, run /config model.goalMaxTurns=20 or /config model.goalMaxActiveMinutes=30 in the chat; it applies after the daemon restarts, to Goals created afterwards.',
   'goals.condition': 'Condition',
@@ -3509,12 +3669,20 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'goals.idle': 'Waiting',
   'goals.dropped': (v) =>
     `${v?.count ?? 0} session${Number(v?.count) === 1 ? '' : 's'} could not be reached — any goals they are running are missing from this list.`,
+  'goals.workspacesSkipped': (v) =>
+    `${v?.count ?? 0} workspace${Number(v?.count) === 1 ? '' : 's'} not shown (untrusted or remote).`,
   'goals.notYetEvaluated': 'not yet evaluated',
   'goals.openSessionHint': "Open this goal's session",
+  'goals.viewAll': 'View all goals',
+  'goals.budget.turns': 'Turns',
+  'goals.budget.tokens': 'Tokens',
+  'goals.budget.time': 'Active time',
   'goals.error.emptyCondition': 'Enter a condition for the goal.',
   'goals.error.clearKeyword': (v) =>
     `"${v?.word ?? ''}" clears a goal rather than setting one. Describe the condition to work toward.`,
   'goals.error.createFailed': 'Failed to start the goal',
+  'goals.error.workspaceUnavailable':
+    'The selected workspace is unavailable or untrusted.',
   'goals.error.saveFailed': 'Failed to save the goal',
   'goals.error.goalUnavailable': 'The goal is no longer available.',
   'goals.error.requiresObjective': (v) =>
@@ -3548,7 +3716,8 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'memory.contentEmpty': 'Memory content is empty.',
   'memory.file': 'Memory file',
   'memory.fileOpen': 'Memory file opened.',
-  'memory.fileTruncated': 'Memory file opened. Content is truncated.',
+  'memory.fileTruncated':
+    'The complete memory file text is unavailable. Editing is disabled.',
   'memory.files': 'Memory Files',
   'memory.footer': 'Enter to confirm · Esc to cancel',
   'memory.footer.back': 'Esc to go back',
@@ -4072,8 +4241,6 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'trajectory.overview.lane.subagents': 'Subagent requests',
   'status.contextUsed': (v) => `${v?.pct ?? '0.0'}% context used`,
   'status.disconnected': 'Disconnected',
-  'status.modeHint': '(shift + tab or click to switch)',
-  'status.shortcuts': '? for shortcuts',
   'stream.cancel': 'esc to cancel',
   'stream.cancelArmed': 'Press Esc again to stop',
   'stream.tokens': (v) => `${v?.count ?? 0} tokens`,
@@ -4216,6 +4383,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'chat.scrollToBottom': 'Scroll to bottom',
   'chatHeader.toggleEnvironment': 'Toggle environment information',
   'chatHeader.toggleRightPanel': 'Toggle right panel',
+  'chatHeader.openArtifacts': (v) => `Open artifacts (${v?.count ?? 0})`,
   'environment.title': 'Environment',
   'environment.changes': 'Changes',
   'environment.changeCount': (v) => `${v?.count ?? 0} changed`,
@@ -4383,10 +4551,6 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'tasks.action.confirmHint': 'This will end the blocking turn.',
   'tasks.pill.agent': (v) => `${v?.count ?? 0} local agent`,
   'tasks.pill.agents': (v) => `${v?.count ?? 0} local agents`,
-  'tasks.pill.agentPaused': (v) => `${v?.count ?? 0} local agent paused`,
-  'tasks.pill.agentsPaused': (v) => `${v?.count ?? 0} local agents paused`,
-  'tasks.pill.done': (v) => `${v?.count ?? 0} task done`,
-  'tasks.pill.doneMany': (v) => `${v?.count ?? 0} tasks done`,
   'tasks.pill.monitor': (v) => `${v?.count ?? 0} monitor`,
   'tasks.pill.monitors': (v) => `${v?.count ?? 0} monitors`,
   'tasks.pill.shell': (v) => `${v?.count ?? 0} shell`,
@@ -4650,6 +4814,29 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'channels.platform.available': 'Available',
   'channels.platform.configure': 'Configure',
   'channels.platform.add': 'Add connection',
+  'channels.platform.name.dingtalk': 'DingTalk',
+  'channels.platform.name.feishu': 'Feishu',
+  'channels.platform.name.wecom': 'WeCom',
+  'channels.method.title': (v) =>
+    `Choose a ${v?.platform ?? 'Channel'} connection`,
+  'channels.method.description': (v) =>
+    `Choose how this Channel connects to ${v?.platform ?? 'the platform'}.`,
+  'channels.method.applicationBot': 'Application bot',
+  'channels.method.applicationBot.description':
+    'Receive messages and reply using an application bot.',
+  'channels.method.intelligentBot': 'Intelligent bot',
+  'channels.method.intelligentBot.description':
+    'Receive messages and reply using an intelligent bot.',
+  'channels.method.webhook': 'Webhook (send only)',
+  'channels.method.webhook.description':
+    'Send notifications to the group configured by a custom bot webhook.',
+  'channels.status.readyToSend': 'Ready to send',
+  'channels.statusDescription.readyToSend':
+    'Ready locally. Remote credentials are checked when sending.',
+  'channels.statusDescription.notReadyToSend':
+    'Not ready to send notifications.',
+  'channels.statusDescription.outbound':
+    'Sends notifications to the configured destination.',
   'channels.platform.configureNamed': (v) =>
     `Configure ${v?.platform ?? 'Channel'}`,
   'channels.status.stopped': 'Stopped',
@@ -4676,7 +4863,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'channels.loadError.title': 'Channels could not be loaded',
   'channels.empty.title': 'No supported channels configured',
   'channels.empty.description':
-    'Configure DingTalk, WeCom, Feishu, GitHub, or GitLab to receive messages in this workspace.',
+    'Configure WeChat, DingTalk, WeCom, Feishu, GitHub, GitLab, or Email to receive messages in this workspace.',
   'channels.runtimeError': 'Channel runtime error',
   'channels.action.back': 'Back',
   'channels.action.refresh': 'Refresh',
@@ -4735,8 +4922,60 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'channels.editor.field.sessionScope.option.chat_thread':
     'Per chat and thread',
   'channels.editor.field.sessionScope.option.single': 'One shared session',
+  'channels.qrLogin.title': 'Bind by QR code',
+  'channels.qrLogin.description':
+    'Scan with the QQ mobile app to bind a bot. The secret stays on this machine.',
+  'channels.qrLogin.start': 'Scan to bind',
+  'channels.qrLogin.refresh': 'New code',
+  'channels.qrLogin.waiting': 'Preparing the QR code…',
+  'channels.qrLogin.scanHint': 'Open QQ on your phone and scan this code.',
+  'channels.qrLogin.imageAlt': 'QQ bot binding QR code',
+  'channels.qrLogin.bound':
+    'Bot bound. The channel now uses the new credentials.',
+  'channels.qrLogin.failed': 'Binding failed',
+  'channels.qrLogin.expired': 'The code expired. Request a new one.',
+  'channels.qrLogin.cancelled': 'Binding cancelled.',
+  'channels.qrLogin.error': 'Could not complete the QR binding.',
   'channels.editor.field.dingtalk.clientId': 'Client ID (AppKey)',
   'channels.editor.field.dingtalk.clientSecret': 'Client Secret (AppSecret)',
+  'channels.editor.field.webhook.webhookUrl': 'Webhook URL',
+  'channels.editor.field.webhook.webhookUrl.description':
+    'The secret webhook address of your custom bot.',
+  'channels.editor.field.webhook.signingSecret': 'Signing secret',
+  'channels.editor.field.webhook.signingSecret.description':
+    'Required if signature verification is enabled for the custom bot.',
+  'channels.editor.field.weixin.groupPolicy': 'Group policy',
+  'channels.editor.field.weixin.groupPolicy.description':
+    'WeChat iLink Bot only supports direct messages, so groups stay disabled.',
+  'channels.editor.field.weixin.groupPolicy.option.disabled': 'Disabled',
+  'channels.editor.field.weixin.allowedUsers': 'Pre-approved users (optional)',
+  'channels.editor.field.weixin.allowedUsers.description':
+    'Leave empty and approve people under "Pending requests" below instead — an approval is remembered. Fill this only to pre-approve someone whose platform user ID you already have (looks like oAbCd…@im.wechat). A WeChat name or handle does not match here and is silently ignored.',
+  'channels.weixin.title': 'WeChat account',
+  'channels.weixin.description':
+    'Log in by scanning a QR code with WeChat. This account is shared by every WeChat channel on this daemon.',
+  'channels.weixin.loggedIn': 'Logged in',
+  'channels.weixin.loggedOut': 'Not logged in',
+  'channels.weixin.login': 'Log in with QR code',
+  'channels.weixin.relogin': 'Log in again',
+  'channels.weixin.logout': 'Log out',
+  'channels.weixin.refresh': 'Refresh QR code',
+  'channels.weixin.waiting': 'Scan the QR code with WeChat.',
+  'channels.weixin.preparing': 'Preparing a new QR code…',
+  'channels.weixin.scanned': 'Scanned. Confirm on your phone.',
+  'channels.weixin.ready': 'WeChat connected.',
+  'channels.weixin.expired': 'QR code expired. Refresh to try again.',
+  'channels.weixin.error': 'WeChat login failed. Try again.',
+  'channels.weixin.credentialsError':
+    'WeChat connected, but the daemon could not save the credential. Check that its home directory is writable, then try again.',
+  'channels.weixin.unsupported':
+    'This daemon does not support WeChat login. Update the daemon, or run "qwen channel configure-weixin" on the host.',
+  'channels.weixin.restartHint':
+    'Channels that are already running keep the previous account until they are restarted.',
+  'channels.weixin.userId': (v) => `User ID: ${v?.id ?? ''}`,
+  'channels.weixin.savedAt': (v) => `Logged in at ${v?.time ?? ''}`,
+  'channels.weixin.qrAlt': 'WeChat login QR code',
+  'channels.weixin.openUrl': 'Open the login URL',
   'channels.editor.field.wecom.botId': 'Bot ID',
   'channels.editor.field.wecom.secret': 'Bot Secret',
   'channels.editor.field.wecom.wsUrl': 'WebSocket URL',
@@ -4751,6 +4990,10 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'channels.editor.field.github.allowedRepos.description':
     'Comma-separated repository full names, for example owner/repo.',
   'channels.editor.field.github.allowedRepos.placeholder': 'owner/repo',
+  'channels.editor.field.gitlab.allowedRepos': 'Allowed projects',
+  'channels.editor.field.gitlab.allowedRepos.description':
+    'Comma-separated project paths, for example group/subgroup/project.',
+  'channels.editor.field.gitlab.allowedRepos.placeholder': 'group/project',
   'channels.editor.field.github.useLocalGh':
     'Use local GitHub CLI authentication',
   'channels.editor.field.github.useLocalGh.description':
@@ -4760,7 +5003,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     'GitHub Enterprise API root (e.g. https://ghe.example.com/api/v3). Leave empty for github.com',
   'channels.editor.field.github.pollInterval': 'Poll Interval (ms)',
   'channels.editor.field.github.pollInterval.description':
-    'How often to check GitHub for new notifications. Leave empty for 60000 (one minute).',
+    "How often to check GitHub for new notifications. Leave empty for 60000 (one minute). A steady-state poll is raised to the endpoint's X-Poll-Interval when that is larger, which paces the PR watch too, so a smaller value will not make detection faster; at the default the header is also 60s.",
   'channels.editor.field.github.repositorySettings': 'Per-repository settings',
   'channels.editor.field.github.repositorySettings.description':
     'Each allowlisted repository inherits the channel-wide settings below until you override it here.',
@@ -4784,6 +5027,10 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     'GitHub logins allowed to start tasks in this repository. Empty means nobody.',
   'channels.editor.field.github.repositorySpeakers.inherited':
     'GitHub logins allowed in this repository. Leave empty to use the channel-wide list.',
+  'channels.editor.field.gitlab.repositorySpeakers.description':
+    'GitLab usernames allowed to start tasks in this project. Empty means nobody.',
+  'channels.editor.field.gitlab.repositorySpeakers.inherited':
+    'GitLab usernames allowed in this project. Leave empty to use the channel-wide list.',
   'channels.editor.field.github.retainedRepositorySettings.title':
     'Repository settings still apply',
   'channels.editor.field.github.retainedRepositorySettings.description': (v) =>
@@ -4845,12 +5092,18 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     'Deliver To PR-Bound Sessions',
   'channels.editor.field.github.deliverToBoundSessions.description':
     'Deliver events for PRs bound to a live session into that session as a prompt, instead of a channel-owned session. Requires a daemon-managed channel.',
+  'channels.editor.field.github.requireBoundWatch':
+    'Require Active Watch For Review/Verify Sessions',
+  'channels.editor.field.github.requireBoundWatch.description':
+    'Only deliver events to review/verify bound sessions while they hold an active watch on that PR (an /autofix-pr watch or /verify-pr --watch). One-shot /review and /verify-pr sessions stay bound but receive nothing; events with no eligible session retire privately instead of a public reply. Requires Deliver To PR-Bound Sessions. Unknown watch state (detection failure) keeps delivering.',
+  'channels.editor.field.github.requireBoundWatch.disabledHint':
+    'Enable "Deliver To PR-Bound Sessions" above to require an active watch.',
   'channels.editor.field.github.prCommentWatch': 'PR Comment Watch',
   'channels.editor.field.github.prCommentWatch.description':
     'Poll same-account conversation and inline review comments on bound PRs and deliver each new one to every bound session that did not post it. Enabled by default; turn off to disable. Requires Deliver To PR-Bound Sessions.',
   'channels.editor.field.github.prWatchEvents': 'PR Watch Events',
   'channels.editor.field.github.prWatchEvents.description':
-    'Optional. State transitions to watch for bound PRs (requires Deliver To PR-Bound Sessions). Leave empty to disable.',
+    'Deprecated. The daemon now detects PR-state transitions: configure serve.sessionPrWatch in the daemon settings. For one minor release the key is accepted and read as a per-host alias for PRs on this channel’s web host while that setting is unset and Deliver To PR-Bound Sessions is on.',
   'channels.editor.field.github.prWatchEvents.disabledHint':
     'Enable "Deliver To PR-Bound Sessions" above to select watch events.',
   'channels.editor.field.github.prWatchEvents.option.ci_failure':
@@ -4861,15 +5114,6 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     'head_change — the PR’s head commit changes',
   'channels.editor.field.github.prWatchEvents.option.state_change':
     'state_change — the PR is merged or closed',
-  'channels.editor.field.github.prWatchLimit': 'PR Watch Limit',
-  'channels.editor.field.github.prWatchLimit.description':
-    'Maximum open bound PRs watched per poll. Open PRs keep the full budget; merged/closed bindings drain in an additional slice (20% of the limit, at least one) outside it, so they never crowd out open PRs. Each watched PR costs about one API request per poll — at the 60s default, a 5000/hour token budget admits ~80 watched PRs (~69 open while a terminal backlog drains at the 1.2x fan-out); over budget, every watch pass aborts on rate limits. Raise the poll interval when raising this. Requires Deliver To PR-Bound Sessions and PR Watch Events. Leave empty for the default (30).',
-  'channels.editor.field.github.prWatchLimit.disabledHint':
-    'Enable "Deliver To PR-Bound Sessions" above to set the watch limit.',
-  'channels.editor.field.github.prWatchBudgetReserve':
-    'PR Watch Budget Reserve',
-  'channels.editor.field.github.prWatchBudgetReserve.description':
-    'REST requests held back for the interactive notification lane. When the last known remaining budget is at or below this, the PR state watch is skipped for that poll — and stopped mid-pass if a pass spends down to it — so a human mention is not starved by background polling; detection resumes once the budget recovers or its window resets. The default (200) is ~4% of a 5000/hour token budget. Set 0 to disable the gate. Requires Deliver To PR-Bound Sessions and PR Watch Events. Leave empty for the default.',
   'channels.editor.field.github.boundSessionActions': 'Bound Session Actions',
   'channels.editor.field.github.boundSessionActions.description':
     'Optional. Instruction templates delivered to PR-bound sessions. Pick an event key below; a role prefix (review:, verify:, fix:) targets that binding role only. Requires Deliver To PR-Bound Sessions. Each role with a matching key gets its own delivery; roles without one skip the event. Variables: %repo%, %pr%, %url%, %title%, %event%, %sender%, %role%; %% for a literal %. Leave empty for the default generic prompt.',
@@ -4925,6 +5169,36 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     'Unmergeable — MR becomes unmergeable (conflicts)',
   'channels.editor.field.gitlab.action_prompt_template.option.merge_train_removed':
     'Merge Train Removed — MR removed from merge train',
+  'channels.editor.field.email.address': 'Mailbox Address',
+  'channels.editor.field.email.imapHost': 'IMAP Host',
+  'channels.editor.field.email.imapUser': 'IMAP Username',
+  'channels.editor.field.email.imapPassword': 'IMAP Password',
+  'channels.editor.field.email.smtpHost': 'SMTP Host',
+  'channels.editor.field.email.smtpUser': 'SMTP Username',
+  'channels.editor.field.email.smtpPassword': 'SMTP Password',
+  'channels.editor.field.email.folder': 'IMAP Folder',
+  'channels.editor.field.email.imapPort': 'IMAP Port',
+  'channels.editor.field.email.smtpPort': 'SMTP Port',
+  'channels.editor.field.email.imapSecure': 'IMAP Implicit TLS',
+  'channels.editor.field.email.imapSecure.description':
+    'When disabled, STARTTLS is mandatory.',
+  'channels.editor.field.email.smtpSecure': 'SMTP Implicit TLS',
+  'channels.editor.field.email.smtpSecure.description':
+    'When disabled, STARTTLS is mandatory.',
+  'channels.editor.field.email.proactiveRecipients': 'Proactive Recipients',
+  'channels.editor.field.email.proactiveRecipients.description':
+    'Explicit bare addresses. Empty disables proactive email.',
+  'channels.editor.field.email.pollInterval': 'Poll Interval (ms)',
+  'channels.editor.field.email.maxMessageBytes': 'Message Size Limit (bytes)',
+  'channels.editor.field.email.maxAttachmentBytes':
+    'Attachment Size Limit (bytes)',
+  'channels.editor.field.email.maxTextLength': 'Text Character Limit',
+  'channels.editor.field.email.allowedUsers': 'Allowed email addresses',
+  'channels.editor.field.email.allowedUsers.description':
+    'Comma-separated bare mailbox addresses that can start private conversations.',
+  'channels.editor.field.email.operators': 'Session operator addresses',
+  'channels.editor.field.email.operators.description':
+    'Comma-separated bare mailbox addresses that may approve tool use and run /cancel, /clear or /loop in shared sessions.',
   'channels.editor.secret.environment': 'Stored in environment',
   'channels.editor.secret.stored': 'Stored securely',
   'channels.editor.secret.preserve': 'Keep',
@@ -5072,23 +5346,34 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     'Enter a group ID other than __proto__, constructor, or prototype.',
   'channels.editor.validation.invalidRepoId':
     'Enter each repository as owner/repo.',
+  'channels.editor.validation.invalidProjectPath':
+    'Enter each project as a path, for example group/subgroup/project.',
   'channels.editor.validation.conflictingRepoAliases':
     'This channel lists one repository twice with different settings, spelled differently (for example Owner/repo and owner/repo). Remove one of the entries from settings.json before saving.',
+  'channels.editor.validation.conflictingProjectAliases':
+    'This channel lists one project twice with different settings, spelled differently (for example Group/Project and group/project). Remove one of the entries from settings.json before saving.',
   'channels.editor.validation.invalidGroupEntry': (v) =>
     `This channel stores a group entry that is not an object: ${v?.repositories ?? ''}. The daemon refuses every save while it is there, and the form has no row for it. Fix or remove that entry in settings.json, then reload the channel.`,
   'channels.editor.validation.invalidOption':
     "Remove values that aren't in the allowed list.",
-  'channels.editor.validation.requiresBoundDelivery':
-    'Enable "Deliver To PR-Bound Sessions" to save the selected watch events.',
+  'channels.editor.validation.requiresBoundDeliveryForWatchGate':
+    'Enable "Deliver To PR-Bound Sessions" to require an active watch.',
   'channels.editor.validation.repoFilterRequired':
     'List at least one repository, or set Repository Filter to Off.',
   'channels.editor.validation.number': 'Enter a valid number.',
-  'channels.editor.validation.outOfRange': (v) =>
-    v?.min !== undefined && v?.max !== undefined
-      ? `Enter a number greater than ${v.min} and at most ${v.max}.`
-      : v?.max !== undefined
-        ? `Enter a number at most ${v.max}.`
-        : `Enter a number greater than ${v?.min ?? 0}.`,
+  'channels.editor.validation.outOfRange': (v) => {
+    const lower =
+      v?.minInclusive !== undefined
+        ? `at least ${v.minInclusive}`
+        : v?.min !== undefined
+          ? `greater than ${v.min}`
+          : undefined;
+    if (lower !== undefined && v?.max !== undefined) {
+      return `Enter a number ${lower} and at most ${v.max}.`;
+    }
+    if (v?.max !== undefined) return `Enter a number at most ${v.max}.`;
+    return `Enter a number ${lower ?? 'greater than 0'}.`;
+  },
   'channels.editor.validation.policy': 'Choose an access policy.',
   'channels.editor.saveError': 'Changes were not saved',
   'channels.editor.reloadLatest': 'Reload latest',
@@ -5135,6 +5420,15 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
 };
 
 /**
+ * Every local-files message key, derived from the EN catalog so the
+ * locale-parity test covers new keys automatically instead of drifting
+ * behind a hardcoded subset.
+ */
+export const LOCAL_FILES_MESSAGE_KEYS = Object.keys(EN).filter((key) =>
+  key.startsWith('localFiles.'),
+);
+
+/**
  * zh-CN descriptions for the GitHub boundSessionActions keys. The 20 base
  * event descriptions are written once; the 60 role-qualified spellings
  * reuse them (the picker group header names the role). English needs no
@@ -5142,8 +5436,22 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
  * descriptions. The role list mirrors PR_BINDING_ROLES in
  * @qwen-code/channel-base, which the client cannot import.
  */
+function githubBoundActionOptionDescriptions(
+  base: Record<string, string>,
+): Record<string, string> {
+  const prefix = 'channels.editor.field.github.boundSessionActions';
+  const entries: Record<string, string> = {};
+  for (const [key, description] of Object.entries(base)) {
+    entries[`${prefix}.optionDescription.${key}`] = description;
+    for (const role of ['review', 'verify', 'fix']) {
+      entries[`${prefix}.optionDescription.${role}:${key}`] = description;
+    }
+  }
+  return entries;
+}
+
 function githubBoundActionOptionDescriptionsZh(): Record<string, string> {
-  const base: Record<string, string> = {
+  return githubBoundActionOptionDescriptions({
     default: '没有更具体键的事件使用的回退模板',
     'watch:ci_failure': 'head 提交上的 CI 检查变红',
     'watch:merge_conflict': 'PR 出现合并冲突',
@@ -5164,16 +5472,7 @@ function githubBoundActionOptionDescriptionsZh(): Record<string, string> {
     invitation: '你收到协作邀请',
     member_feature_requested: '成员功能请求通知',
     security_advisory_credit: '你在安全公告中被署名致谢',
-  };
-  const prefix = 'channels.editor.field.github.boundSessionActions';
-  const entries: Record<string, string> = {};
-  for (const [key, description] of Object.entries(base)) {
-    entries[`${prefix}.optionDescription.${key}`] = description;
-    for (const role of ['review', 'verify', 'fix']) {
-      entries[`${prefix}.optionDescription.${role}:${key}`] = description;
-    }
-  }
-  return entries;
+  });
 }
 
 const ZH: Messages = {
@@ -5546,15 +5845,11 @@ const ZH: Messages = {
   'managed.model.optionsError': '加载可用模型失败。',
   'managed.model.reload': '重新加载模型',
   'managed.model.nextTurn':
-    '空闲时可切换模型；下一条消息使用所选模型，对话历史保留。',
+    '下一条消息使用所选模型；已经运行的任务保持原模型，对话历史保留。',
   'managed.model.changing': '正在切换模型…',
-  'managed.model.unconfirmed': '模型切换尚未确认，请继续确认原请求。',
-  'managed.model.confirm': '继续确认',
-  'managed.model.busy':
-    '请先完成正在执行的任务、审批或未确认请求，再切换模型。',
-  'managed.model.storage': '浏览器会话存储不可用，无法安全发起模型切换。',
+  'managed.model.busy': '当前会话暂时无法切换模型，请稍后重试。',
   'managed.model.conflict': '当前模型已变化，请检查选择后重试。',
-  'managed.model.failed': '模型切换被拒绝，请检查可用模型后重试。',
+  'managed.model.failed': '模型切换失败，请检查当前模型后重试。',
   'managed.approvalOptionsLoading': '正在加载审批策略…',
   'managed.approvalOptionsLoadFailed': '加载审批策略失败。',
   'managed.approvalOptionsInvalid': '服务返回了不支持的审批策略。',
@@ -5638,8 +5933,14 @@ const ZH: Messages = {
   'branchPicker.action.checkoutRef': '检出标签或修订…',
   'branchPicker.action.viewChanges': '查看变更',
   'branchPicker.action.worktrees': '管理 Worktree…',
+  'branchPicker.action.createBranchHere': '在此创建分支',
+  'branchPicker.action.handoffToLocal': '移交到本地检出',
+  'branchPicker.action.moveToWorktree': '移入 worktree',
+  'branchPicker.moveToWorktreeHint':
+    '本地检出会保留其未提交改动；之后移交回本地需要本地检出干净。',
   'branchPicker.action.history': '提交历史',
   'branchPicker.newBranchPlaceholder': '分支名称',
+  'branchPicker.createBranchPlaceholder': '新分支名称',
   'branchPicker.invalidBranchName':
     '无效的分支名称 — 避免空格、~、^、:、? * 以及以 - 开头',
   'branchPicker.checkoutRefPlaceholder': '标签名或提交 SHA',
@@ -5659,6 +5960,12 @@ const ZH: Messages = {
   'branchPicker.pullDiscardGo': '放弃并更新',
   'branchPicker.pullStashConflict': (v) =>
     `更新成功，但恢复 Stash 中的修改失败。修改仍保留在 Stash 条目 ${String(v?.sha ?? '').slice(0, 12) || '（见 git stash list）'} 中 —— 请先解决冲突标记，再手动恢复。`,
+  'branchPicker.checkoutBlocked': '存在未提交的修改，无法切换分支',
+  'branchPicker.checkoutStash': 'Stash 修改并切换',
+  'branchPicker.checkoutDiscard': '放弃修改并切换…',
+  'branchPicker.checkoutDiscardGo': '放弃并切换',
+  'branchPicker.checkoutStashKept': (v) =>
+    `已切换到 ${v?.branch ?? ''}。本地修改保留在 Stash 条目 ${String(v?.sha ?? '').slice(0, 12) || '（见 git stash list）'} 中 —— 需要时可用 git stash apply 恢复。`,
   'branchPicker.cancel': '取消',
   'branchPicker.hint.upToDate': '已是最新',
   'branchPicker.hint.noUpstream': '无上游分支',
@@ -5846,6 +6153,16 @@ const ZH: Messages = {
   'githubPrs.checksFailing': '检查失败',
   'githubPrs.checksPending': '检查进行中',
   'githubPrs.open': (v) => `在 GitHub 上打开拉取请求 #${v?.number ?? ''}`,
+  'sessionsOverview.bindPr': '绑定 PR',
+  'sessionsOverview.bindPrPlaceholder': 'PR 编号或 URL',
+  'sessionsOverview.bindPrSubmit': '绑定',
+  'sessionsOverview.bindPrInvalid': '请输入 PR 编号或完整 PR URL。',
+  'sessionsOverview.bindPrNotInList': (v) =>
+    `PR #${v?.number ?? ''} 不在开放 PR 列表中。请改用其完整 URL。`,
+  'sessionsOverview.bindPrListFailed': '无法加载 PR 列表。请改用完整 PR URL。',
+  'sessionsOverview.bindPrFailed': '绑定 PR 失败',
+  'sessionsOverview.bindPrUnavailable':
+    '当前工作区不是 git 仓库，无法按编号查询 PR。请改用完整 PR URL。',
   'workspace.paneLabel': (v) => `工作区：${v?.name ?? ''}`,
   // Tool display names (chat-stream badge labels). Keyed by `toolName.<wire>`;
   // a wire name with no entry here falls back to the English display name via
@@ -6257,6 +6574,45 @@ const ZH: Messages = {
   'approval.option.allowAlwaysTool': '对此工具始终允许',
   'assistant.branch': '从此处新建对话',
   'assistant.copyContent': '复制内容',
+  'hooks.title': '钩子统计',
+  'hooks.thisTurn': '本轮对话 · 主 Agent',
+  'hooks.executions': '执行',
+  'hooks.blocked': '阻止',
+  'hooks.unsuccessful': '失败',
+  'hooks.duration': '总耗时',
+  'hooks.compactSummary': (v) =>
+    `${v?.executions ?? 0} 次执行 · ${v?.blocked ?? 0} 阻止 · ${v?.unsuccessful ?? 0} 失败 · ${v?.duration ?? '—'}`,
+  'hooks.partial': '记录不完整，总计仅覆盖已记录的执行。',
+  'hooks.more': '更多回复操作',
+  'hooks.loading': '正在加载钩子…',
+  'hooks.loadFailed': '无法加载钩子记录。',
+  'hooks.retry': '重试',
+  'hooks.loadMore': '再加载 50 条',
+  'hooks.type': '钩子类型',
+  'hooks.started': '开始时间',
+  'hooks.ended': '结束时间',
+  'hooks.exitCode': '退出码',
+  'hooks.dispatchDuration': '派发耗时',
+  'hooks.dispatchHelp': '已转后台，未采集最终结果。',
+  'hooks.unknownHelp': '未记录最终结果，或连接已中断。',
+  'hooks.status.running': '运行中',
+  'hooks.status.unknown': '结果未知',
+  'hooks.status.dispatched': '已转后台',
+  'hooks.status.success': '成功',
+  'hooks.status.blocked': '已阻止',
+  'hooks.status.error': '失败',
+  'hooks.status.timeout': '超时',
+  'hooks.status.cancelled': '已取消',
+  'hooks.source.system': '系统',
+  'hooks.source.user': '用户',
+  'hooks.source.project': '项目',
+  'hooks.source.extensions': '扩展',
+  'hooks.source.session': '会话',
+  'hooks.source.unknown': '未知来源',
+  'hooks.coverage.recorded': '未记录钩子执行。',
+  'hooks.coverage.unrecorded': '本轮未采集钩子执行记录。',
+  'hooks.coverage.unsupported': '此运行时不支持钩子统计。',
+  'hooks.coverage.partial': '保留的记录中没有可用执行。',
   'assistant.selectionCopy': '复制所选内容',
   'assistant.copyPlainText': '复制纯文本',
   'assistant.copyMarkdown': '复制 Markdown',
@@ -6487,6 +6843,18 @@ const ZH: Messages = {
   'echartsChart.showData': '显示数据',
   'echartsChart.chart': '图表',
   'echartsChart.data': '数据',
+  'echartsChart.nodes': '节点',
+  'echartsChart.links': '连线',
+  'echartsChart.name': '名称',
+  'echartsChart.category': '分类',
+  'echartsChart.id': 'ID',
+  'echartsChart.source': '起点',
+  'echartsChart.target': '终点',
+  'echartsChart.value': '数值',
+  'echartsChart.depth': '深度',
+  'echartsChart.path': '路径',
+  'echartsChart.idPath': 'ID 路径',
+  'echartsChart.subtreeTotal': '子树合计（派生）',
   'markdownTable.blank': '(空白)',
   'markdownTable.column': (v) => `第 ${v?.index ?? ''} 列`,
   'markdownTable.rows': (v) => `共${v?.count ?? 0}行`,
@@ -6496,6 +6864,7 @@ const ZH: Messages = {
   'markdownTable.selection.selected': '已选',
   'markdownTable.selection.nonEmpty': '非空',
   'markdownTable.selection.numeric': '数值',
+  'markdownTable.selection.statistics': '数值选区统计',
   'markdownTable.selection.sum': '求和',
   'markdownTable.selection.average': '平均',
   'markdownTable.selection.min': '最小',
@@ -7121,6 +7490,11 @@ const ZH: Messages = {
   'scheduledTasks.group.nameRequired': '请输入新分组名称。',
   'scheduledTasks.routing.loading': '正在加载模型和分组…',
   'scheduledTasks.delivery.channel': '投递频道',
+  'scheduledTasks.delivery.configuredGroupHint': '消息会发送到此频道配置的群。',
+  'scheduledTasks.delivery.configuredHint': '消息会发送到此频道配置的目标。',
+  'scheduledTasks.delivery.useConfiguredDestination': '使用已配置的目标',
+  'scheduledTasks.delivery.differentConfiguredDestination':
+    '已保存的目标与此频道配置的目标不同。',
   'scheduledTasks.delivery.off': '不投递',
   'scheduledTasks.delivery.hint':
     '将成功完成的定时任务的最终回复发送到此目标。投递依赖频道，不保证送达。',
@@ -7208,6 +7582,23 @@ const ZH: Messages = {
   // 代码审查结果视图使用 `codeReview.*`，请勿“修正”此不一致。
   'turnOutputs.review': '文件更改',
   'turnOutputs.reviewLatest': '查看最近文件修改',
+  'changeOverview.title': '变更总览',
+  'changeOverview.uncommitted': '未提交',
+  'changeOverview.loading': '正在加载变更…',
+  'changeOverview.notGit': '当前工作区不是 git 仓库。',
+  'changeOverview.loadFailed': '无法加载变更总览，请点刷新重试。',
+  'changeOverview.empty': '该范围暂无变更。',
+  'changeOverview.files': (v) => `${v?.count ?? 0} 个文件`,
+  'changeOverview.prUnavailable': '文件列表不可用：加载失败，请点刷新重试。',
+  'changeOverview.prUnavailableCli':
+    '文件列表不可用：daemon 主机未安装 GitHub CLI（gh）。',
+  'changeOverview.prUnavailableRoute':
+    '文件列表不可用：该 daemon 版本早于 PR 文件列表路由。',
+  'changeOverview.refresh': '刷新',
+  'changeOverview.openPr': '打开 PR',
+  'changeOverview.description': '按交付单元查看变更文件与规模。',
+  'changeOverview.hiddenFiles': (v) => `…另有 ${v?.count ?? 0} 个文件`,
+  'changeOverview.hiddenCommits': '…还有更多提交',
   'codeReview.authoritativeVerdict': '权威裁决',
   'codeReview.targetEffort': (v) =>
     `目标：${v?.target ?? ''} · 强度：${v?.effort ?? ''}`,
@@ -7276,6 +7667,7 @@ const ZH: Messages = {
   'terminal.notice.error': (v) => `错误：${v?.message ?? ''}`,
   'terminal.notice.unknownError': '未知错误',
   'terminal.notice.reconnecting': '连接已断开，正在重连…',
+  'terminal.notice.lost': '此终端已不可用。',
   'terminal.notice.protocolMismatch':
     '终端协议已更新，请重启 daemon 并刷新页面。',
   'localFiles.title': '本地文件',
@@ -7301,17 +7693,34 @@ const ZH: Messages = {
   'localFiles.status.resolving': '解析中…',
   'localFiles.needsSessionHint':
     '请先创建一个会话。桥只绑定一个会话，因此其他会话无法访问你的文件。',
-  'localFiles.blocker.insecureContext':
-    '当前页面不是安全上下文，浏览器不会授予本地文件访问权。请通过 https 访问 Web Shell，或用 SSH 转发 daemon 端口后打开 http://localhost:<port>。',
+  'localFiles.blocker.insecureContext': (v) =>
+    v?.localPort !== undefined
+      ? `当前页面不是安全上下文，浏览器不会授予本地文件访问权。请通过 https 访问 Web Shell，或运行所复制的 SSH 隧道命令后打开 http://localhost:${v.localPort}。`
+      : '当前页面不是安全上下文，浏览器不会授予本地文件访问权。请通过 https 访问 Web Shell，或用 SSH 转发 daemon 端口后打开 http://localhost:<port>。',
   'localFiles.blocker.crossOriginFrame':
     '跨源 iframe 中本地文件访问被禁用。请在独立的浏览器标签页中打开 Web Shell 再连接目录。',
   'localFiles.blocker.unsupportedBrowser':
     '当前浏览器没有 File System Access API。请使用 Chrome 或 Edge 连接本地目录。',
   'localFiles.blocker.workspaceIneligible':
-    '该会话的工作区不能托管本地目录（不受信任或 live 工作区）。',
+    '该会话的工作区不能托管本地目录（不受信任或 live 工作区）。请改用受信任的普通工作区中的会话。',
   'localFiles.blocker.workspaceResolving': '尚不能确定该会话所属的工作区。',
   'localFiles.blocker.unsupportedDaemon':
     '该 daemon 未启用客户端文件桥（client_mcp_over_ws）。以 QWEN_SERVE_CLIENT_MCP_OVER_WS=1 启动 daemon 即可启用本地文件。',
+  'localFiles.changeDirectory': '更换目录…',
+  'localFiles.session': '会话',
+  'localFiles.newSession': '新建会话',
+  'localFiles.retry': '重试',
+  'localFiles.copyStartupCommand': '复制启动命令',
+  'localFiles.copyTunnelCommand': '复制 SSH 隧道命令',
+  'localFiles.copied': '命令已复制',
+  'localFiles.copyFailed': '复制命令失败',
+  'localFiles.changeDirectoryFailed': '无法更换目录。当前目录仍保持连接。',
+  'localFiles.changeDirectoryDeferred':
+    '目录变更已保存，将在工作区解析完成后生效；在此之前当前目录仍保持连接。',
+  'localFiles.gestureToast': (v) =>
+    v?.name
+      ? `本地目录「${v.name}」需要重新连接。打开「本地文件」即可重新授权。`
+      : '本地文件需要重新连接。打开「本地文件」即可重新授权。',
   ...FILES_MESSAGES_ZH,
   ...ACTIVITY_MESSAGES_ZH,
   'rightPanel.add': '添加页签',
@@ -7366,12 +7775,25 @@ const ZH: Messages = {
   'sidebar.project': '工作区',
   'sidebar.pinnedSessions': '置顶',
   'sidebar.sessionSort': '会话排序',
+  'sidebar.sessionDisplay': '显示选项',
+  'sidebar.groupBy': '分组方式',
+  'sidebar.groupWorkspace': '工作区',
+  'sidebar.groupActivityDate': '活动日期',
+  'sidebar.groupThisWeek': '本周',
+  'sidebar.groupLast30Days': '最近 30 天',
+  'sidebar.groupOlder': '更早',
+  'sidebar.recentConversations': '最近对话',
+  'sidebar.sortBy': '排序方式',
   'sidebar.sortActivity': '最近活动',
   'sidebar.sortQuestion': '最后提问时间',
+  'sidebar.workspaceFilter': '工作区',
+  'sidebar.filterAll': '全部',
+  'sidebar.restoreDefaults': '恢复默认',
   'sidebar.recentSessions': '最近',
   'sidebar.standalonePinUnavailable': '暂不支持置顶无工作区会话。',
   'sidebar.workspaceSelectLabel': '工作区',
   'sidebar.noWorkspace': '无工作区',
+  'sidebar.liveSessions': 'Live 会话',
   'sidebar.noWorkspaceSessions': '无工作区会话',
   'sidebar.copySessionId': '复制会话 ID',
   'sidebar.copySessionIdFailed': '复制会话 ID 失败',
@@ -7565,11 +7987,20 @@ const ZH: Messages = {
   'sidebar.collapse': '收起',
   'sidebar.expand': '展开',
   'sidebar.showAllSessions': '展开显示',
+  'sidebar.showMoreSessions': (v) => `再显示 ${v?.['count'] ?? 0} 个`,
   'sidebar.subSessions': (v) => `${v?.['count'] ?? 0} 个子会话`,
   'sidebar.collapseProject': '收起工作区',
   'sidebar.expandProject': '展开工作区',
   'sidebar.search': '搜索会话',
   'sidebar.searchPlaceholder': '搜索会话',
+  'sidebar.searchResults': '会话',
+  'sidebar.searchLoading': '正在搜索会话…',
+  'sidebar.searchEmpty': '未找到相关会话',
+  'sidebar.searchEmptyHint': '试试其他标题或会话中的文字。',
+  'sidebar.searchRecentEmpty': '最近的会话会显示在这里。',
+  'sidebar.searchPartialFailure': '部分会话暂时无法搜索。',
+  'sidebar.searchNavigate': '选择',
+  'sidebar.searchOpen': '打开',
   'sidebar.rename': '重命名',
   'sidebar.export': '导出对话记录',
   'sidebar.exportFailed': '导出会话失败',
@@ -7895,6 +8326,7 @@ const ZH: Messages = {
   'local.effort': '设置推理模型的思考强度',
   'local.export': '将当前会话历史导出到文件',
   'local.forget': '从托管的自动记忆中移除匹配的条目',
+  'local.pr': '将 GitHub 拉取请求绑定到本会话',
   'local.hooks': '管理 Qwen Code 钩子',
   'local.importConfig': '从 Claude 配置导入 MCP 服务器',
   'local.init': '分析项目并创建 QWEN.md 文件',
@@ -8339,6 +8771,8 @@ const ZH: Messages = {
   'goal.failed': '目标未能达成',
   'goal.judge': '判断',
   'goal.label': '目标',
+  'goal.expandDetails': '展开详情',
+  'goal.collapseDetails': '收起详情',
   'goal.lastCheck': '上次检查',
   'goal.notYetMet': '尚未满足',
   'goal.set': '目标已设置',
@@ -8370,6 +8804,7 @@ const ZH: Messages = {
   'goals.empty': '没有进行中的目标。用 /goal <条件> 设置一个。',
   'goals.refresh': '刷新',
   'goals.new': '新建目标',
+  'goals.workspace': '工作区',
   'goals.newHint':
     '目标会在一个新会话中启动，并持续运行直到条件满足。如需强制的轮数或时长上限，请在对话中运行 /config model.goalMaxTurns=20 或 /config model.goalMaxActiveMinutes=30，daemon 重启后生效，且只对之后新建的 Goal 生效。',
   'goals.condition': '条件',
@@ -8388,12 +8823,19 @@ const ZH: Messages = {
   'goals.idle': '等待中',
   'goals.dropped': (v) =>
     `有 ${v?.count ?? 0} 个会话无法访问——它们正在运行的目标未显示在此列表中。`,
+  'goals.workspacesSkipped': (v) =>
+    `有 ${v?.count ?? 0} 个工作区未显示（不受信任或远程）。`,
   'goals.notYetEvaluated': '尚未判定',
   'goals.openSessionHint': '打开该目标所在的会话',
+  'goals.viewAll': '查看全部目标',
+  'goals.budget.turns': '轮数',
+  'goals.budget.tokens': 'Tokens',
+  'goals.budget.time': '活跃时长',
   'goals.error.emptyCondition': '请输入目标条件。',
   'goals.error.clearKeyword': (v) =>
     `“${v?.word ?? ''}”是清除目标的指令，不是一个条件。请描述要达成的条件。`,
   'goals.error.createFailed': '启动目标失败',
+  'goals.error.workspaceUnavailable': '所选工作区不可用或不受信任。',
   'goals.error.saveFailed': '保存目标失败',
   'goals.error.goalUnavailable': '该目标已不可用。',
   'goals.error.requiresObjective': (v) =>
@@ -8421,7 +8863,7 @@ const ZH: Messages = {
   'memory.contentEmpty': 'Memory 内容为空。',
   'memory.file': 'Memory 文件',
   'memory.fileOpen': 'Memory 文件已打开。',
-  'memory.fileTruncated': 'Memory 文件已打开，内容已截断。',
+  'memory.fileTruncated': '无法获取完整的 Memory 文件内容，已禁用编辑。',
   'memory.files': 'Memory 文件',
   'memory.footer': 'Enter 确认 · Esc 取消',
   'memory.footer.back': 'Esc 返回',
@@ -8903,8 +9345,6 @@ const ZH: Messages = {
   'trajectory.overview.lane.subagents': '子代理请求',
   'status.contextUsed': (v) => `上下文已用 ${v?.pct ?? '0.0'}%`,
   'status.disconnected': '断开连接',
-  'status.modeHint': '(shift + tab 或点击切换)',
-  'status.shortcuts': '? 查看快捷键',
   'stream.cancel': 'esc 取消',
   'stream.cancelArmed': '再按一次 Esc 停止',
   'waitingGame.title': 'Juust Relax',
@@ -9044,6 +9484,7 @@ const ZH: Messages = {
   'chat.scrollToBottom': '回到底部',
   'chatHeader.toggleEnvironment': '切换环境信息',
   'chatHeader.toggleRightPanel': '切换右侧扩展区',
+  'chatHeader.openArtifacts': (v) => `打开产物（${v?.count ?? 0}）`,
   'environment.title': '环境信息',
   'environment.changes': '变更',
   'environment.changeCount': (v) => `${v?.count ?? 0} 项变更`,
@@ -9188,10 +9629,6 @@ const ZH: Messages = {
   'tasks.action.confirmHint': '这会终结当前阻塞轮次。',
   'tasks.pill.agent': (v) => `${v?.count ?? 0} 个本地智能体`,
   'tasks.pill.agents': (v) => `${v?.count ?? 0} 个本地智能体`,
-  'tasks.pill.agentPaused': (v) => `${v?.count ?? 0} 个本地智能体已暂停`,
-  'tasks.pill.agentsPaused': (v) => `${v?.count ?? 0} 个本地智能体已暂停`,
-  'tasks.pill.done': (v) => `${v?.count ?? 0} 个任务完成`,
-  'tasks.pill.doneMany': (v) => `${v?.count ?? 0} 个任务完成`,
   'tasks.pill.monitor': (v) => `${v?.count ?? 0} 个监控`,
   'tasks.pill.monitors': (v) => `${v?.count ?? 0} 个监控`,
   'tasks.pill.shell': (v) => `${v?.count ?? 0} 个 shell`,
@@ -9442,6 +9879,26 @@ const ZH: Messages = {
   'channels.platform.available': '已开放',
   'channels.platform.configure': '配置',
   'channels.platform.add': '添加连接',
+  'channels.platform.name.dingtalk': '钉钉',
+  'channels.platform.name.feishu': '飞书',
+  'channels.platform.name.wecom': '企业微信',
+  'channels.method.title': (v) => `选择${v?.platform ?? '此频道'}的连接方式`,
+  'channels.method.description': (v) =>
+    `选择此频道连接${v?.platform ?? '平台'}的方式。`,
+  'channels.method.applicationBot': '应用机器人',
+  'channels.method.applicationBot.description':
+    '通过应用机器人接收消息并回复。',
+  'channels.method.intelligentBot': '智能机器人',
+  'channels.method.intelligentBot.description':
+    '通过智能机器人接收消息并回复。',
+  'channels.method.webhook': 'Webhook（仅发送）',
+  'channels.method.webhook.description':
+    '通过自定义机器人 Webhook，向配置的群发送通知。',
+  'channels.status.readyToSend': '可发送',
+  'channels.statusDescription.readyToSend':
+    '本地已就绪，远程凭证会在发送时验证。',
+  'channels.statusDescription.notReadyToSend': '尚未就绪，暂时无法发送通知。',
+  'channels.statusDescription.outbound': '向配置的目标发送通知。',
   'channels.platform.configureNamed': (v) => `配置${v?.platform ?? '频道'}`,
   'channels.status.stopped': '已停止',
   'channels.status.starting': '启动中',
@@ -9463,7 +9920,7 @@ const ZH: Messages = {
   'channels.loadError.title': '无法加载频道',
   'channels.empty.title': '尚未配置支持的频道',
   'channels.empty.description':
-    '配置钉钉、企业微信、飞书、GitHub 或 GitLab，让当前工作区接收消息。',
+    '配置微信、钉钉、企业微信、飞书、GitHub、GitLab 或 Email，让当前工作区接收消息。',
   'channels.runtimeError': '频道运行时错误',
   'channels.action.back': '返回',
   'channels.action.refresh': '刷新',
@@ -9518,9 +9975,60 @@ const ZH: Messages = {
   'channels.editor.field.sessionScope.option.thread': '按话题',
   'channels.editor.field.sessionScope.option.chat_thread': '按对话和话题',
   'channels.editor.field.sessionScope.option.single': '整个频道共享',
+  'channels.qrLogin.title': '扫码绑定',
+  'channels.qrLogin.description':
+    '用手机 QQ 扫码绑定机器人。密钥只保留在本机。',
+  'channels.qrLogin.start': '扫码绑定',
+  'channels.qrLogin.refresh': '换一张码',
+  'channels.qrLogin.waiting': '正在生成二维码…',
+  'channels.qrLogin.scanHint': '在手机上打开 QQ 扫描此二维码。',
+  'channels.qrLogin.imageAlt': 'QQ 机器人绑定二维码',
+  'channels.qrLogin.bound': '已绑定机器人,渠道将使用新凭据。',
+  'channels.qrLogin.failed': '绑定失败',
+  'channels.qrLogin.expired': '二维码已过期,请重新获取。',
+  'channels.qrLogin.cancelled': '已取消绑定。',
+  'channels.qrLogin.error': '无法完成扫码绑定。',
   'channels.editor.field.dingtalk.clientId': 'Client ID（原 AppKey）',
+  'channels.editor.field.webhook.webhookUrl': 'Webhook 地址',
+  'channels.editor.field.webhook.webhookUrl.description':
+    '自定义机器人的私密 Webhook 地址。',
+  'channels.editor.field.webhook.signingSecret': '加签密钥',
+  'channels.editor.field.webhook.signingSecret.description':
+    '自定义机器人启用加签验证时需填写。',
   'channels.editor.field.dingtalk.clientSecret':
     'Client Secret（原 AppSecret）',
+  'channels.editor.field.weixin.groupPolicy': '群聊策略',
+  'channels.editor.field.weixin.groupPolicy.description':
+    '微信 iLink Bot 只支持私聊，因此群聊始终禁用。',
+  'channels.editor.field.weixin.groupPolicy.option.disabled': '禁用',
+  'channels.editor.field.weixin.allowedUsers': '预先放行的用户（可留空）',
+  'channels.editor.field.weixin.allowedUsers.description':
+    '建议留空，改在下方「待处理的配对请求」里批准用户——批准一次就会记住。只有在你已经拿到对方的平台用户 ID（形如 oAbCd…@im.wechat）时才填这里。填微信号或昵称不会生效，且不会有任何报错。',
+  'channels.weixin.title': '微信账号',
+  'channels.weixin.description':
+    '使用微信扫码登录。该账号由此 daemon 上的所有微信 channel 共享。',
+  'channels.weixin.loggedIn': '已登录',
+  'channels.weixin.loggedOut': '未登录',
+  'channels.weixin.login': '扫码登录',
+  'channels.weixin.relogin': '重新登录',
+  'channels.weixin.logout': '退出登录',
+  'channels.weixin.refresh': '刷新二维码',
+  'channels.weixin.waiting': '请用微信扫描二维码。',
+  'channels.weixin.preparing': '正在生成新的二维码…',
+  'channels.weixin.scanned': '已扫描，请在手机上确认。',
+  'channels.weixin.ready': '微信已连接。',
+  'channels.weixin.expired': '二维码已过期，请刷新重试。',
+  'channels.weixin.error': '微信登录失败，请重试。',
+  'channels.weixin.credentialsError':
+    '微信已连接，但 daemon 无法保存凭据。请确认其 home 目录可写后重试。',
+  'channels.weixin.unsupported':
+    '当前 daemon 不支持微信登录。请升级 daemon，或在主机上运行「qwen channel configure-weixin」。',
+  'channels.weixin.restartHint':
+    '已在运行的 channel 仍使用旧账号，需重启后才会切换到新账号。',
+  'channels.weixin.userId': (v) => `用户 ID：${v?.id ?? ''}`,
+  'channels.weixin.savedAt': (v) => `登录时间：${v?.time ?? ''}`,
+  'channels.weixin.qrAlt': '微信登录二维码',
+  'channels.weixin.openUrl': '打开登录链接',
   'channels.editor.field.wecom.botId': 'Bot ID',
   'channels.editor.field.wecom.secret': 'Bot Secret',
   'channels.editor.field.wecom.wsUrl': 'WebSocket URL',
@@ -9535,6 +10043,10 @@ const ZH: Messages = {
   'channels.editor.field.github.allowedRepos.description':
     '逗号分隔的仓库全名，例如 owner/repo。',
   'channels.editor.field.github.allowedRepos.placeholder': 'owner/repo',
+  'channels.editor.field.gitlab.allowedRepos': '允许的项目',
+  'channels.editor.field.gitlab.allowedRepos.description':
+    '逗号分隔的项目路径，例如 group/subgroup/project。',
+  'channels.editor.field.gitlab.allowedRepos.placeholder': 'group/project',
   'channels.editor.field.github.useLocalGh': '使用本地 GitHub CLI 认证',
   'channels.editor.field.github.useLocalGh.description':
     '未配置令牌时，显式复用 daemon 主机上账户级的 gh 登录',
@@ -9543,7 +10055,7 @@ const ZH: Messages = {
     'GitHub Enterprise API 根地址（如 https://ghe.example.com/api/v3），github.com 留空',
   'channels.editor.field.github.pollInterval': '轮询间隔（毫秒）',
   'channels.editor.field.github.pollInterval.description':
-    '多久向 GitHub 查一次新通知。留空为 60000（一分钟）。',
+    '多久向 GitHub 查一次新通知。留空为 60000（一分钟）。稳态轮询会被抬到端点的 X-Poll-Interval（当它更大时），这也会同时压住 PR 监视的节奏，因此调小本值并不会让检测更快；默认值下该头也是 60 秒。',
   'channels.editor.field.github.repositorySettings': '按仓库设置',
   'channels.editor.field.github.repositorySettings.description':
     '每个已允许的仓库都继承下面的渠道级设置，直到你在这里覆盖它。',
@@ -9566,6 +10078,10 @@ const ZH: Messages = {
     '可以在该仓库发起任务的 GitHub 登录名。留空表示没有人。',
   'channels.editor.field.github.repositorySpeakers.inherited':
     '可以在该仓库发言的 GitHub 登录名。留空则使用渠道级列表。',
+  'channels.editor.field.gitlab.repositorySpeakers.description':
+    '可以在该项目发起任务的 GitLab 用户名。留空表示没有人。',
+  'channels.editor.field.gitlab.repositorySpeakers.inherited':
+    '可以在该项目发言的 GitLab 用户名。留空则使用渠道级列表。',
   'channels.editor.field.github.retainedRepositorySettings.title':
     '按仓库设置仍然生效',
   'channels.editor.field.github.retainedRepositorySettings.description': (v) =>
@@ -9625,9 +10141,14 @@ const ZH: Messages = {
   'channels.editor.field.github.deliverToBoundSessions': '投递到 PR 绑定会话',
   'channels.editor.field.github.deliverToBoundSessions.description':
     '将已绑定到活跃会话的 PR 事件以 prompt 形式投递进该会话，而不是频道自有会话。需要 daemon 托管的频道。',
+  'channels.editor.field.github.requireBoundWatch': '评审/验证会话须有活跃监视',
+  'channels.editor.field.github.requireBoundWatch.description':
+    '仅当 review/verify 绑定会话对该 PR 持有活跃监视（/autofix-pr 监视或 /verify-pr --watch）时才投递事件。一次性的 /review 与 /verify-pr 会话保持绑定但不接收任何事件；没有合格会话的事件私下退役，不做公开回复。需开启「投递到 PR 绑定会话」。监视状态未知（检测失败）时照常投递。',
+  'channels.editor.field.github.requireBoundWatch.disabledHint':
+    '开启上方「投递到 PR 绑定会话」后即可要求活跃监视。',
   'channels.editor.field.github.prWatchEvents': 'PR 状态监视事件',
   'channels.editor.field.github.prWatchEvents.description':
-    '可选。为绑定 PR 监视的状态转换（需开启"投递到 PR 绑定会话"）。留空则禁用。',
+    '已弃用。PR 状态跃迁现由 daemon 检测：请在 daemon 设置里配置 serve.sessionPrWatch。为兼容保留一个 minor 版本：当该设置未配置且已开启"投递到 PR 绑定会话"时，本键按 host 作为别名，用于本渠道 web host 上的 PR。',
   'channels.editor.field.github.prWatchEvents.disabledHint':
     '开启上方「投递到 PR 绑定会话」后即可选择监视事件。',
   'channels.editor.field.github.prWatchEvents.option.ci_failure':
@@ -9638,14 +10159,6 @@ const ZH: Messages = {
     'head_change — PR 的 head 提交变更',
   'channels.editor.field.github.prWatchEvents.option.state_change':
     'state_change — PR 被合并或关闭',
-  'channels.editor.field.github.prWatchLimit': 'PR 监视上限',
-  'channels.editor.field.github.prWatchLimit.description':
-    '每轮轮询最多监视的 open 绑定 PR 数。open PR 独占全部预算；已合并/关闭的绑定在预算之外的一块额外名额（上限的 20%，至少一个）中排出，因此绝不会挤占 open PR。每个被监视的 PR 每轮约消耗一次 API 请求——按默认 60 秒间隔，5000 次/小时的 token 预算约容纳 80 个被监视 PR（终态积压按 1.2 倍扇出排出时约 69 个 open）；超出预算会让每轮监视都因限流中止。提高本值时请同时提高轮询间隔。需开启"投递到 PR 绑定会话"并配置监视事件。留空则使用默认值（30）。',
-  'channels.editor.field.github.prWatchLimit.disabledHint':
-    '开启上方「投递到 PR 绑定会话」后即可设置监视上限。',
-  'channels.editor.field.github.prWatchBudgetReserve': 'PR 监视预算预留',
-  'channels.editor.field.github.prWatchBudgetReserve.description':
-    '为交互式通知车道留回的 REST 请求数。当上次已知剩余预算处于或低于此值时，本轮跳过 PR 状态监视（若某轮 pass 花到该值则中途停止），以免后台轮询饿死人工 mention；预算回升或其窗口重置后检测恢复。默认值（200）约为 5000 次/小时 token 预算的 4%。设为 0 可禁用该门。需开启"投递到 PR 绑定会话"并配置监视事件。留空则使用默认值。',
   'channels.editor.field.github.boundSessionActions': '绑定会话动作模板',
   'channels.editor.field.github.boundSessionActions.description':
     '可选。投递给 PR 绑定会话的 operator 指令模板。在下方选择事件键；加角色前缀（review:、verify:、fix:）可只定向该绑定角色。需开启"投递到 PR 绑定会话"。有匹配键的角色各自投递，没有匹配键的角色跳过该事件。变量：%repo%、%pr%、%url%、%title%、%event%、%sender%、%role%；%% 表示字面 %。留空则使用默认通用 prompt。',
@@ -9698,6 +10211,35 @@ const ZH: Messages = {
     '不可合并 — MR 变为不可合并（冲突）',
   'channels.editor.field.gitlab.action_prompt_template.option.merge_train_removed':
     '合并队列移除 — MR 从合并队列中移除',
+  'channels.editor.field.email.address': '邮箱地址',
+  'channels.editor.field.email.imapHost': 'IMAP 服务器',
+  'channels.editor.field.email.imapUser': 'IMAP 用户名',
+  'channels.editor.field.email.imapPassword': 'IMAP 密码',
+  'channels.editor.field.email.smtpHost': 'SMTP 服务器',
+  'channels.editor.field.email.smtpUser': 'SMTP 用户名',
+  'channels.editor.field.email.smtpPassword': 'SMTP 密码',
+  'channels.editor.field.email.folder': 'IMAP 文件夹',
+  'channels.editor.field.email.imapPort': 'IMAP 端口',
+  'channels.editor.field.email.smtpPort': 'SMTP 端口',
+  'channels.editor.field.email.imapSecure': 'IMAP 隐式 TLS',
+  'channels.editor.field.email.imapSecure.description':
+    '关闭后必须使用 STARTTLS。',
+  'channels.editor.field.email.smtpSecure': 'SMTP 隐式 TLS',
+  'channels.editor.field.email.smtpSecure.description':
+    '关闭后必须使用 STARTTLS。',
+  'channels.editor.field.email.proactiveRecipients': '主动投递收件人',
+  'channels.editor.field.email.proactiveRecipients.description':
+    '需填写精确的裸邮箱地址。留空则禁用主动投递邮件。',
+  'channels.editor.field.email.pollInterval': '轮询间隔（毫秒）',
+  'channels.editor.field.email.maxMessageBytes': '邮件大小上限（字节）',
+  'channels.editor.field.email.maxAttachmentBytes': '附件大小上限（字节）',
+  'channels.editor.field.email.maxTextLength': '文本字符数上限',
+  'channels.editor.field.email.allowedUsers': '允许的邮箱地址',
+  'channels.editor.field.email.allowedUsers.description':
+    '逗号分隔的裸邮箱地址，可发起私聊会话。',
+  'channels.editor.field.email.operators': '会话操作者邮箱地址',
+  'channels.editor.field.email.operators.description':
+    '逗号分隔的裸邮箱地址，可在共享会话中批准工具调用并运行 /cancel、/clear 或 /loop。',
   'channels.editor.secret.environment': '已保存在环境变量中',
   'channels.editor.secret.stored': '已安全保存',
   'channels.editor.secret.preserve': '保留',
@@ -9836,22 +10378,33 @@ const ZH: Messages = {
   'channels.editor.validation.invalidGroupId':
     '群聊 ID 不能是 __proto__、constructor 或 prototype。',
   'channels.editor.validation.invalidRepoId': '仓库需写成 owner/repo 形式。',
+  'channels.editor.validation.invalidProjectPath':
+    '项目需写成路径形式，例如 group/subgroup/project。',
   'channels.editor.validation.conflictingRepoAliases':
     '该渠道把同一个仓库以不同大小写写了两次且设置不同（例如 Owner/repo 与 owner/repo）。请先在 settings.json 里删掉其中一条再保存。',
+  'channels.editor.validation.conflictingProjectAliases':
+    '该渠道把同一个项目以不同大小写写了两次且设置不同（例如 Group/Project 与 group/project）。请先在 settings.json 里删掉其中一条再保存。',
   'channels.editor.validation.invalidGroupEntry': (v) =>
     `该渠道把以下群组条目存成了非对象：${v?.repositories ?? ''}。只要它还在，daemon 就会拒绝每次保存，而表单里没有对应的行。请在 settings.json 里修正或删除该条目，然后重新加载渠道。`,
   'channels.editor.validation.invalidOption': '请移除不在允许列表中的值。',
-  'channels.editor.validation.requiresBoundDelivery':
-    '需开启「投递到 PR 绑定会话」才能保存所选的监视事件。',
+  'channels.editor.validation.requiresBoundDeliveryForWatchGate':
+    '需开启「投递到 PR 绑定会话」才能要求活跃监视。',
   'channels.editor.validation.repoFilterRequired':
     '请至少列出一个仓库，或把「按仓库过滤」设为关闭。',
   'channels.editor.validation.number': '请输入有效数字。',
-  'channels.editor.validation.outOfRange': (v) =>
-    v?.min !== undefined && v?.max !== undefined
-      ? `请输入大于 ${v.min} 且不超过 ${v.max} 的数字。`
-      : v?.max !== undefined
-        ? `请输入不超过 ${v.max} 的数字。`
-        : `请输入大于 ${v?.min ?? 0} 的数字。`,
+  'channels.editor.validation.outOfRange': (v) => {
+    const lower =
+      v?.minInclusive !== undefined
+        ? `不小于 ${v.minInclusive}`
+        : v?.min !== undefined
+          ? `大于 ${v.min}`
+          : undefined;
+    if (lower !== undefined && v?.max !== undefined) {
+      return `请输入${lower} 且不超过 ${v.max} 的数字。`;
+    }
+    if (v?.max !== undefined) return `请输入不超过 ${v.max} 的数字。`;
+    return `请输入${lower ?? '大于 0'} 的数字。`;
+  },
   'channels.editor.validation.policy': '请选择准入策略。',
   'channels.editor.saveError': '未能保存更改',
   'channels.editor.reloadLatest': '加载最新配置',
@@ -9894,96 +10447,31 @@ const ZH: Messages = {
   ...TRAJECTORY_WINDOW_MESSAGES_ZH,
 };
 
-/**
- * Russian catalog — intentionally partial: it covers the Goal card and the
- * Goals dialog (#13391). `getTranslator` falls back to EN for every other
- * key (`messages[key] ?? EN[key] ?? key`), which is the behaviour this locale
- * has been running with since it was first introduced as an installer patch.
- */
 const RU: Messages = {
-  'goal.aborted': 'Цель прервана',
-  'goal.blocked': 'Цель заблокирована',
-  'goal.usageLimited': 'Лимит использования цели',
-  'goal.paused': 'Цель на паузе',
-  'goal.achieved': 'Цель достигнута',
-  'goal.check': 'Проверка цели',
-  'goal.cleared': 'Цель снята',
-  'goal.failed': 'Цель не достигнута',
-  'goal.judge': 'Оценка',
-  'goal.label': 'Цель',
-  'goal.lastCheck': 'Последняя проверка',
-  'goal.notYetMet': 'условие не выполнено',
-  'goal.set': 'Цель задана',
-  'goal.statusActive': '/goal активен',
-  'goal.status.active': 'В работе',
-  'goal.status.paused': 'Пауза',
-  'goal.status.blocked': 'Заблокирована',
-  'goal.status.usage_limited': 'Лимит исчерпан',
-  'goal.status.complete': 'Выполнена',
-  'goal.activity.idle': 'Ожидание',
-  'goal.activity.running': 'Работает',
-  'goal.activity.verifying': 'Проверка',
-  'goal.edit': 'Изменить цель',
-  'goal.pause': 'Поставить на паузу',
-  'goal.resume': 'Продолжить',
-  'goal.turn': (v) =>
-    `${v?.count ?? 0} ${ruPlural(v?.count, 'ход', 'хода', 'ходов')}`,
-  'goal.turnLabel': (v) => `ход ${v?.count ?? 0}`,
-  'goal.turns': (v) =>
-    `${v?.count ?? 0} ${ruPlural(v?.count, 'ход', 'хода', 'ходов')}`,
-  'goal.turnsOfBudget': (v) =>
-    `${v?.count ?? 0} / ${v?.budget ?? 0} ${ruPlural(v?.budget, 'ход', 'хода', 'ходов')}`,
-  'goal.activeOfBudget': (v) => `${v?.used ?? ''} / ${v?.budget ?? ''}`,
-  'goal.tokens': (v) =>
-    `${v?.used ?? 0} ${ruPlural(v?.used, 'токен', 'токена', 'токенов')}`,
-  'goal.tokensOfBudget': (v) =>
-    `${v?.used ?? 0} / ${v?.budget ?? 0} ${ruPlural(v?.budget, 'токен', 'токена', 'токенов')}`,
-  'goals.title': 'Цели',
-  'goals.subtitle':
-    'Цель удерживает сессию в работе, пока условие не выполнено. Здесь видны только загруженные сейчас сессии — цель двигается, пока её сессия работает.',
-  'goals.loading': 'Загрузка целей…',
-  'goals.count': (v) =>
-    `${v?.count ?? 0} ${ruPlural(v?.count, 'активная цель', 'активные цели', 'активных целей')}`,
-  'goals.empty': 'Нет активных целей. Задайте: /goal <условие>.',
-  'goals.refresh': 'Обновить',
-  'goals.new': 'Новая цель',
-  'goals.newHint':
-    'Цель запускается в новой сессии и работает, пока условие не выполняется. Жёсткий лимит по числу ходов или времени задаётся в чате: /config model.goalMaxTurns=20 или /config model.goalMaxActiveMinutes=30 (применяется после перезапуска демона, к целям, созданным позже).',
-  'goals.condition': 'Условие',
-  'goals.conditionPlaceholder':
-    'напр. `npm test` завершается с кодом 0 и `npm run lint` без предупреждений (вставить вывод); не менять тестовые файлы; как указание модели — остановиться как blocked после 20 ходов',
-  'goals.cancel': 'Отмена',
-  'goals.create': 'Задать цель',
-  'goals.creating': 'Запуск…',
-  'goals.saving': 'Сохранение…',
-  'goals.save': 'Сохранить',
-  'goals.edit': 'Изменить цель',
-  'goals.objective': 'Целевое условие',
-  'goals.clear': 'Снять цель',
-  'goals.clearConfirm': (v) => `Снять цель "${v?.condition ?? ''}"?`,
-  'goals.running': 'Работает',
-  'goals.idle': 'Ожидание',
-  'goals.dropped': (v) =>
-    `не удалось связаться с ${v?.count ?? 0} ${ruPlural(v?.count, 'сессией', 'сессиями', 'сессиями')} — цели, которые они выполняли, отсутствуют в этом списке.`,
-  'goals.notYetEvaluated': 'ещё не оценено',
-  'goals.openSessionHint': 'Открыть сессию этой цели',
-  'goals.error.emptyCondition': 'Введите условие для цели.',
-  'goals.error.clearKeyword': (v) =>
-    `"${v?.word ?? ''}" снимает цель, а не задаёт её. Опишите условие, к которому нужно работать.`,
-  'goals.error.createFailed': 'Не удалось запустить цель',
-  'goals.error.saveFailed': 'Не удалось сохранить цель',
-  'goals.error.goalUnavailable': 'Цель больше недоступна.',
-  'goals.error.requiresObjective': (v) =>
-    `/goal ${v?.keyword ?? 'set'} требует целевого условия.`,
-  'goals.error.invalidCommand': 'Некорректная команда /goal',
-  'goals.error.goalsUnavailable': 'Панель целей недоступна в этом интерфейсе.',
-  'goals.error.attachmentsUnsupported': 'Уберите вложения перед /goal.',
-  'goals.error.editFailed': 'Не удалось изменить цель',
-  'goals.error.pauseFailed': 'Не удалось поставить цель на паузу',
-  'goals.error.resumeFailed': 'Не удалось продолжить цель',
-  'goals.error.clearFailed': 'Не удалось снять цель',
-  'goals.error.controlBusy':
-    'Другое управление целью ещё выполняется. Повторите, когда оно завершится.',
+  ...EN,
+  ...RU_PART1,
+  ...RU_PART2,
+  ...RU_PART3,
+  ...RU_PART4,
+  ...RU_PART5,
+  ...RU_PART6,
+  ...RU_REMAINDER,
+  ...FILES_MESSAGES_RU,
+  ...TOKEN_USAGE_MESSAGES_RU,
+  ...MESSAGE_DELETION_MESSAGES_RU,
+  ...BROWSER_NOTIFICATION_MESSAGES_RU,
+  ...MCP_APP_MESSAGES_RU,
+  ...VOICE_MESSAGES_RU,
+  ...LIVE_MESSAGES_RU,
+  ...COLLAB_MESSAGES_RU,
+  ...SETTINGS_MESSAGES_RU,
+  ...MANAGED_TASK_MESSAGES_RU,
+  ...MANAGED_LIFECYCLE_MESSAGES_RU,
+  ...WORKSPACE_REGISTRATION_MESSAGES_RU,
+  ...MANAGED_MCP_MESSAGES_RU,
+  ...TRAJECTORY_EXECUTION_MESSAGES_RU,
+  ...TRAJECTORY_FILTER_MESSAGES_RU,
+  ...TRAJECTORY_WINDOW_MESSAGES_RU,
 };
 
 const MESSAGES: Record<WebShellLanguage, Messages> = {
@@ -10015,8 +10503,8 @@ export function normalizeLanguage(
     return 'zh-CN';
   }
   // Prefix match: ru, region-qualified ru (ru-RU, ru-UA, ru-KZ, …) and the
-  // underscore form all resolve to the partial ru catalog — region-qualified
-  // Russian speakers must not fall through to en.
+  // underscore form all resolve to ru — region-qualified Russian speakers
+  // must not fall through to en.
   if (normalized.startsWith('ru') || normalized === 'русский') {
     return 'ru';
   }
@@ -10043,7 +10531,7 @@ export function languageSettingToWebShellLanguage(
     return 'zh-CN';
   }
   // Same prefix match as normalizeLanguage: region-qualified settings
-  // (ru-UA, …) map to the partial ru catalog instead of an unknown setting.
+  // (ru-UA, …) map to ru instead of an unknown setting.
   if (normalized.startsWith('ru') || normalized === 'русский') {
     return 'ru';
   }

@@ -39,6 +39,7 @@ import {
   managedRequestId,
 } from './managed-session-storage';
 import { ManagedExtensionInstaller } from './ManagedExtensionInstaller';
+import { ManagedRuntimeSkillsImporter } from './ManagedRuntimeSkillsImporter';
 
 export interface ManagedExtensionsManagerPageProps {
   provider: ManagedAgentProvider;
@@ -162,7 +163,8 @@ export function ManagedExtensionsManagerPage({
           if (
             saved.key &&
             isManagedExtensionPins(saved.selection?.extensions) &&
-            Number.isSafeInteger(saved.selection.expectedConfigRevision)
+            Number.isSafeInteger(saved.selection.expectedConfigRevision) &&
+            true
           )
             setPending(saved);
           else sessionStorage.removeItem(storageKey);
@@ -349,6 +351,17 @@ export function ManagedExtensionsManagerPage({
               onChanged={() => void run(async () => {})}
               onInstalled={() => setEditing(undefined)}
               onExitEdit={() => setEditing(undefined)}
+            />
+          )}
+          {catalog && snapshot && (
+            <ManagedRuntimeSkillsImporter
+              key={`runtime:${management.storageScope ?? clientId}:${workspaceId}:${sessionId}`}
+              provider={provider}
+              workspaceId={workspaceId}
+              sessionId={sessionId}
+              catalog={catalog}
+              snapshot={snapshot}
+              onChanged={() => void run(async () => {})}
             />
           )}
           {view !== 'skills' && (

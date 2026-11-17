@@ -337,7 +337,7 @@ export interface TeamAutoMemorySection {
  * per-type `<scope>` routing (which only knows user vs project) so the model
  * knows when a memory belongs in the shared tier — and never to put secrets
  * there. The full prompt carries it; the main session's resident prompt
- * carries a short form and the bundled `auto-memory` reference this one.
+ * carries a short form.
  */
 export const TEAM_SCOPE_SECTION: readonly string[] = [
   '## Saving to team memory',
@@ -355,7 +355,7 @@ export const TEAM_SCOPE_SECTION: readonly string[] = [
 
 /**
  * Metadata and shape rules for one memory file, shared by both tier layouts of
- * the full prompt and by the bundled `auto-memory` reference.
+ * the full prompt.
  */
 export const MEMORY_WRITING_RULES: readonly string[] = [
   '- Keep the name, description, type, category, keywords, and usage_scenarios fields in memory files up-to-date with the complete content',
@@ -545,15 +545,13 @@ export function buildManagedAutoMemoryPrompt(
 
 /**
  * The main session's auto-memory policy: what a session needs to save and use
- * memories correctly without loading anything. The full type guidance, its
- * examples, the metadata rules and the persistence section live in the bundled
- * `auto-memory` reference, which `referenceSection` names (or, where no skill
- * can be loaded, the caller builds the full prompt instead).
+ * memories correctly. The full type guidance, its examples, the metadata rules
+ * and the persistence section stay with the background agents' prompts.
  *
  * The main model writes memories on the few turns where the user asks it to
  * remember or forget something; the background extractor writes the rest with
- * the full prompt. So the full guidance is needed on those turns only, while
- * this section is sent on every request of every session.
+ * the full prompt. This section is sent on every request of every session, so
+ * it carries only what those few turns need.
  *
  * Always multi-tier: the main session always offers the user directory, and
  * the indexes always travel as request-tail catalog data.
@@ -562,7 +560,6 @@ export function buildResidentAutoMemoryPrompt(
   memoryDir: string,
   userSection: UserAutoMemorySection,
   teamSection: TeamAutoMemorySection | undefined,
-  referenceSection: string,
 ): string {
   const tierLines = buildAutoMemoryTierLines(
     memoryDir,
@@ -616,7 +613,6 @@ export function buildResidentAutoMemoryPrompt(
     '- Read memory when it seems relevant or the user refers to earlier work, and always when they ask you to check, recall, or remember.',
     '- If the user says to *ignore* or *not use* memory, act as if MEMORY.md were empty: do not apply, cite, or mention what it holds.',
     '- A memory records what was true when it was written. Before relying on it, and before recommending a file, function, or flag it names, check the current state; when they conflict, trust what you see now and update or remove the memory.',
-    ...(referenceSection ? ['', referenceSection] : []),
   ];
   return lines.join('\n');
 }

@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { ownershipLockKeyForWorktreeForTesting as restoreKey } from '../routes/session.js';
+import { ownershipLockKeyForWorktreeForTesting as restoreKey } from './session-restore.js';
 import { canonicalPathForTesting as cleanupKey } from './worktree-orphan-cleanup.js';
 
 // The rule stated in `server/worktree-ownership-op.ts`: every caller derives

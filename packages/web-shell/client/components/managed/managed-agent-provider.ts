@@ -8,6 +8,10 @@ import type {
   ManagedExtensionSelection,
   ManagedExtensionImportMetadata,
   ManagedExtensionInspection,
+  ManagedRuntimeSkillCandidates,
+  ManagedRuntimeSkillSnapshot,
+  ManagedRuntimeSkillImport,
+  ManagedRuntimeSkillOwner,
 } from './managed-extension-types';
 import type { components } from './generated/managed-agent-api';
 import type {
@@ -71,6 +75,20 @@ export type ManagedWorkspaceFileUploadRequest = ManagedWorkspaceFileLocator & {
   expectedScopeRevision: string;
   uploadId: string;
 };
+
+export interface ManagedAgentTerminalTicket {
+  ticket: string;
+  expiresInSeconds: number;
+}
+
+export interface ManagedAgentTerminalProvider {
+  ticket(
+    sessionId: string,
+    terminalId: string,
+    options: ManagedAgentRequestOptions,
+  ): Promise<ManagedAgentTerminalTicket>;
+  webSocketUrl(sessionId: string, terminalId: string): string;
+}
 
 export function isManagedApprovalMode(
   value: unknown,
@@ -265,6 +283,10 @@ export interface ManagedAgentSessionSummary {
     contextCompression?: boolean;
     approvalModeChange?: boolean;
     inputAttachments?: boolean;
+    btw?: boolean;
+    recap?: boolean;
+    terminal?: boolean | null;
+    clientFiles?: boolean;
   };
   failure?: { code: string; message: string };
   recovery?: ManagedSessionRecovery;
@@ -407,6 +429,7 @@ export interface ManagedAgentQuestionResponse {
 export type ManagedAgentActionResponse = string | ManagedAgentQuestionResponse;
 
 export interface ManagedAgentProvider {
+  readonly sideQueries?: import('./managed-side-query-types').ManagedSideQueriesProvider;
   readonly diagnostics?: ManagedDiagnosticsProvider;
   readonly userMessages?: {
     query(
@@ -477,6 +500,17 @@ export interface ManagedAgentProvider {
       options: ManagedAgentRequestOptions,
     ): Promise<ManagedSessionMcp>;
   };
+  /**
+   * The authenticated transport for the client filesystem bridge. The browser
+   * entry is gated on the deployment's client-files capability; this transport
+   * is the pipe the bridge drives once the entry is shown.
+   */
+  readonly clientFiles?: {
+    transport(): {
+      baseUrl: string;
+      fetch: import('../../local-files/managed-client-files-bridge.js').ManagedFetch;
+    };
+  };
   readonly extensions?: {
     readonly storageScope?: string;
     list(
@@ -504,6 +538,25 @@ export interface ManagedAgentProvider {
       source: Blob,
       options: ManagedAgentRequestOptions,
     ): Promise<ManagedExtensionInspection>;
+    runtimeSkillCandidates?(
+      sessionId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedRuntimeSkillCandidates>;
+    runtimeSkillSnapshot?(
+      sessionId: string,
+      input: {
+        owner: ManagedRuntimeSkillOwner;
+        path: string;
+        digest: string;
+        target: ManagedExtensionImportMetadata['target'];
+      },
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedRuntimeSkillSnapshot>;
+    importRuntimeSkill?(
+      sessionId: string,
+      input: ManagedRuntimeSkillImport & { extensionId?: string },
+      options: ManagedAgentCommandOptions,
+    ): Promise<ManagedExtensionPackageOperation>;
     inspect?(
       workspaceId: string,
       pin: ManagedExtensionPin,
@@ -589,6 +642,7 @@ export interface ManagedAgentProvider {
     ): Promise<void>;
   };
   readonly toolResults?: ManagedToolResultReader;
+  readonly terminal?: ManagedAgentTerminalProvider;
   readonly toolDetails?: {
     get(
       sessionId: string,

@@ -5,10 +5,11 @@ import com.alibaba.qwen.code.managedagent.adapters.workspace.SessionWorktreeGit;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore.Plan;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.host.WorkspaceFileProcess;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.junit.jupiter.api.AfterEach;
@@ -70,7 +71,7 @@ class WorkspaceStorageReadScopeMySqlIT extends WorkspaceFileStoreTest {
     @Timeout(30)
     void readsDoNotWaitForAnotherStorageReader(String route, String storageRow, String lockMode) throws Exception {
         var binding = files.readScope("tenant", "actor", new WorkspaceFileStore.Locator(null, workspace, ".")).binding();
-        String alias = JdbcRuntimeBindingRepository.storageAliasKey("tenant", binding.getStorageId());
+        String alias = RuntimeAdmissionFences.storageAliasKey("tenant", binding.getStorageId());
         String physical = jdbc.queryForObject("SELECT physical_key FROM ma_storage WHERE alias_key = ?", String.class, alias);
         Path root = Path.of(guard.fileRoot(binding).get("root"));
         String cwd = ".qwen-managed-worktrees/owned/src";
@@ -82,7 +83,7 @@ class WorkspaceStorageReadScopeMySqlIT extends WorkspaceFileStoreTest {
                         + " SELECT tenant_id, 'session', 'agent', 0, 0, workspace_id, workspace_generation, storage_id,"
                         + " ?, ?, 7, config_ref, policy_ref, ? FROM ma_workspace WHERE tenant_id = ? AND workspace_id = ?",
                 cwd, binding.getContextConfigRef(),
-                com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey("tenant", "actor"),
+                ManagedWorkspaceRegistry.actorKey("tenant", "actor"),
                 "tenant", workspace);
         try (var holder = database.source().getConnection(); var pool = Executors.newSingleThreadExecutor()) {
             holder.setAutoCommit(false);
@@ -120,7 +121,7 @@ class WorkspaceStorageReadScopeMySqlIT extends WorkspaceFileStoreTest {
         "query, state, workspace_unavailable", "read, state, workspace_unavailable",
         "query, directory, worktree_identity_conflict", "read, directory, worktree_identity_conflict"})
     void sessionWorktreePostcheckRejectsChangesDuringIo(String route, String change, String expected) throws Exception {
-        var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new SessionWorktreeStore(jdbc, registry, guard));
+        var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcSessionWorktreeStore(jdbc, registry, guard));
         var location = store.source("tenant", "actor", new WorkspaceSelection(workspace, "src"));
         Plan plan = plan(location);
         var binding = location.resolved().binding();
@@ -130,7 +131,7 @@ class WorkspaceStorageReadScopeMySqlIT extends WorkspaceFileStoreTest {
                         + " SELECT tenant_id, 'session', 'agent', 0, 0, workspace_id, workspace_generation, storage_id,"
                         + " ?, ?, 7, config_ref, policy_ref, ? FROM ma_workspace WHERE workspace_id = ?",
                 plan.cwdRelative(), binding.getContextConfigRef(),
-                com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey("tenant", "actor"), workspace);
+                ManagedWorkspaceRegistry.actorKey("tenant", "actor"), workspace);
         new TransactionTemplate(new DataSourceTransactionManager(database.source())).executeWithoutResult(status ->
                 store.admit("tenant", "actor", "session", plan, location.resolved()));
         try (var git = new SessionWorktreeGit(new ChildWorktreeGit("git", Duration.ofSeconds(10)))) {
@@ -180,7 +181,7 @@ class WorkspaceStorageReadScopeMySqlIT extends WorkspaceFileStoreTest {
                 }
                 return root;
             }).when(observed).verifiedRootForRead(any());
-            assertThatThrownBy(() -> new SessionWorktreeStore(jdbc, registry, observed)
+            assertThatThrownBy(() -> new JdbcSessionWorktreeStore(jdbc, registry, observed)
                     .source("tenant", "actor", new WorkspaceSelection(workspace, ".")))
                     .satisfies(error -> assertThat(code(error)).isEqualTo(expected));
             assertThat(changed).isTrue();
@@ -191,7 +192,7 @@ class WorkspaceStorageReadScopeMySqlIT extends WorkspaceFileStoreTest {
     @CsvSource({"upload, alias", "upload, owner", "worktree, alias", "worktree, owner"})
     @Timeout(30)
     void durableAdmissionWaitsForStorageMutationAndRejectsItsCommittedState(String route, String storageRow) throws Exception {
-        var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new SessionWorktreeStore(jdbc, registry, guard));
+        var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcSessionWorktreeStore(jdbc, registry, guard));
         var location = store.source("tenant", "actor", new WorkspaceSelection(workspace, "src"));
         Plan plan = plan(location);
         var uploads = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceFileUploadStore(
@@ -240,7 +241,7 @@ class WorkspaceStorageReadScopeMySqlIT extends WorkspaceFileStoreTest {
         }
     }
 
-    private Plan plan(SessionWorktreeStore.SourceLocation location) throws Exception {
+    private Plan plan(JdbcSessionWorktreeStore.SourceLocation location) throws Exception {
         var binding = location.resolved().binding();
         Path repository = location.root().resolve(binding.getCwdRelative());
         git(repository, "init", "-b", "main");
@@ -307,16 +308,16 @@ class WorkspaceStorageReadScopeMySqlIT extends WorkspaceFileStoreTest {
 
     private void readRoute(String route, Path root, String cwd, Map<String, Object> identity) {
         if ("source".equals(route)) {
-            var source = new SessionWorktreeStore(jdbc, registry, guard)
+            var source = new JdbcSessionWorktreeStore(jdbc, registry, guard)
                     .source("tenant", "actor", new WorkspaceSelection(workspace, "."));
             assertThat(source.resolved().binding().getWorkspaceId()).isEqualTo(workspace);
             assertThat(source.root()).isEqualTo(root);
             return;
         }
         var locator = new WorkspaceFileStore.Locator("session", null, null);
-        try (var worktrees = mockStatic(SessionWorktreeStore.class); var process = mockStatic(WorkspaceFileProcess.class)) {
-            worktrees.when(() -> SessionWorktreeStore.descriptor(any(WorktreeFiles.class), eq(jdbc), eq("tenant"), eq("session")))
-                    .thenReturn(new SessionWorktreeStore.Descriptor("owned", "session", workspace, "ready", "branch",
+        try (var worktrees = mockStatic(JdbcSessionWorktreeStore.class); var process = mockStatic(WorkspaceFileProcess.class)) {
+            worktrees.when(() -> JdbcSessionWorktreeStore.descriptor(any(WorktreeFiles.class), eq(jdbc), eq("tenant"), eq("session")))
+                    .thenReturn(new JdbcSessionWorktreeStore.Descriptor("owned", "session", workspace, "ready", "branch",
                             "a".repeat(40), cwd, "op", 2, null));
             process.when(() -> WorkspaceFileProcess.read(anyString(), anyString(), any())).thenAnswer(call -> {
                 assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();

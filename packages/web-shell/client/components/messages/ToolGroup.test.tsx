@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { DaemonToolTranscriptBlock } from '@qwen-code/sdk/daemon';
-import type { ACPToolCall } from '../../adapters/types';
+import type { ACPToolCall, PermissionRequest } from '../../adapters/types';
 import type { DaemonSessionWorkflowTaskStatus } from '@qwen-code/sdk/daemon';
 import type { SessionContentGenerator } from './AssistantMessage';
 import {
@@ -24,6 +24,10 @@ import {
 import { SubagentDetailsProvider } from '../../subagentDetailsContext';
 import { MonitorDetailsProvider } from '../../monitorDetailsContext';
 import { WorkflowDetailsProvider } from '../../workflowDetailsContext';
+import {
+  createToolRevealStore,
+  ToolRevealProvider,
+} from '../../toolRevealContext';
 import { McpAppHostContext } from '../../mcpAppHostContext';
 import { buildUnifiedDiff } from '../../utils/unifiedDiff';
 import {
@@ -794,7 +798,10 @@ describe('tool group summary logic', () => {
 });
 
 describe('tool output session links', () => {
-  function renderSessionLinkTool(readonly: boolean): HTMLElement {
+  function renderSessionLinkTool(
+    readonly: boolean,
+    target = 'child-session',
+  ): HTMLElement {
     const container = document.createElement('div');
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -802,7 +809,7 @@ describe('tool output session links', () => {
       <ToolLine
         tool={makeTool({
           toolName: 'custom_tool',
-          rawOutput: '[child](qwen-session://child-session)',
+          rawOutput: `[child](qwen-session://${target})`,
         })}
         forceExpanded
       />
@@ -824,10 +831,21 @@ describe('tool output session links', () => {
     return container;
   }
 
-  it('keeps interactive tool session links clickable by default', () => {
-    const handler = vi.fn();
+  it.each([
+    { target: 'child-session', detail: 'child-session' },
+    {
+      target: 'child-session?workspace=C%3A%5Crepos%5Cproject+%28copy%29',
+      detail: {
+        sessionId: 'child-session',
+        workspaceCwd: 'C:\\repos\\project (copy)',
+        source: 'session-link',
+      },
+    },
+  ])('opens the tool result link to $target', ({ target, detail }) => {
+    const seen: unknown[] = [];
+    const handler = (event: Event) => seen.push((event as CustomEvent).detail);
     window.addEventListener('qwen:open-session', handler);
-    const container = renderSessionLinkTool(false);
+    const container = renderSessionLinkTool(false, target);
     const link = container.querySelector('a[role="button"]');
     expect(link?.textContent).toBe('child');
     act(() => {
@@ -835,8 +853,8 @@ describe('tool output session links', () => {
         new MouseEvent('click', { bubbles: true, cancelable: true }),
       );
     });
-    expect(handler).toHaveBeenCalledOnce();
     window.removeEventListener('qwen:open-session', handler);
+    expect(seen).toEqual([detail]);
   });
 
   it('renders tool session links as inert text in readonly mode', () => {
@@ -1030,6 +1048,234 @@ describe('tool row rendering', () => {
     expect(content.hasAttribute('inert')).toBe(false);
     expect(container.querySelector('[data-workflow-summary]')).not.toBeNull();
     expect(container.textContent).toContain('Architecture Agent');
+  });
+
+  describe('reveal requests from the composer task chips', () => {
+    const workflowTask = (
+      toolUseId: string,
+    ): DaemonSessionWorkflowTaskStatus => ({
+      kind: 'workflow',
+      id: 'wf_reveal',
+      label: 'Reveal run',
+      description: 'Reveal run',
+      status: 'running',
+      startTime: 1_000,
+      runtimeMs: 200,
+      isBackgrounded: true,
+      toolUseId,
+      currentPhase: 'Inspect',
+      phaseVisits: [],
+      dispatches: [
+        {
+          id: 'dispatch-reveal',
+          phaseVisitId: 'phase-inspect',
+          label: 'Reveal Agent',
+          prompt: 'Inspect',
+          status: 'running',
+          dependsOn: [],
+          queuedAt: 1_020,
+          startedAt: 1_030,
+        },
+      ],
+      agentsDispatched: 1,
+      agentsCompleted: 0,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      recentLogs: [],
+      pendingApprovalCount: 0,
+    });
+
+    function renderGroup(tools: ACPToolCall[], toolUseId: string) {
+      const store = createToolRevealStore();
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      const render = (nextTools = tools, pendingApproval?: PermissionRequest) =>
+        act(() => {
+          root.render(
+            <I18nProvider language="en">
+              <ToolRevealProvider store={store}>
+                <WorkflowDetailsProvider tasks={[workflowTask(toolUseId)]}>
+                  <ToolGroup
+                    tools={nextTools}
+                    pendingApproval={pendingApproval}
+                  />
+                </WorkflowDetailsProvider>
+              </ToolRevealProvider>
+            </I18nProvider>,
+          );
+        });
+      render();
+      mounted.push({ root, container });
+      return { container, store, render };
+    }
+
+    it('unfolds a collapsed workflow group when its call is requested', () => {
+      // Background launch: the tool call itself finished, the run goes on.
+      const tool = makeTool({
+        callId: 'wf-call',
+        toolName: 'workflow',
+        status: 'completed',
+      });
+      const { container, store } = renderGroup([tool], 'wf-call');
+      const summary = container.querySelector('button') as HTMLButtonElement;
+      expect(summary.getAttribute('aria-expanded')).toBe('false');
+
+      act(() => store.request('other-call'));
+      expect(summary.getAttribute('aria-expanded')).toBe('false');
+
+      act(() => store.request('wf-call'));
+      expect(summary.getAttribute('aria-expanded')).toBe('true');
+      expect(container.textContent).toContain('Reveal Agent');
+    });
+
+    it('opens a request that arrived before the group mounted', () => {
+      const store = createToolRevealStore();
+      store.request('wf-call');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <ToolRevealProvider store={store}>
+              <WorkflowDetailsProvider tasks={[workflowTask('wf-call')]}>
+                <ToolGroup
+                  tools={[
+                    makeTool({
+                      callId: 'wf-call',
+                      toolName: 'workflow',
+                      status: 'completed',
+                    }),
+                  ]}
+                />
+              </WorkflowDetailsProvider>
+            </ToolRevealProvider>
+          </I18nProvider>,
+        );
+      });
+      mounted.push({ root, container });
+
+      expect(
+        container.querySelector('button')?.getAttribute('aria-expanded'),
+      ).toBe('true');
+      expect(container.textContent).toContain('Reveal Agent');
+    });
+
+    it('opens the requested row inside a multi-tool group', () => {
+      const { container, store } = renderGroup(
+        [
+          makeTool({ callId: 'shell-call', toolName: 'Shell' }),
+          makeTool({
+            callId: 'wf-call',
+            toolName: 'workflow',
+            status: 'completed',
+          }),
+        ],
+        'wf-call',
+      );
+      expect(container.textContent).not.toContain('Reveal Agent');
+
+      act(() => store.request('wf-call'));
+
+      expect(
+        container.querySelector('button')?.getAttribute('aria-expanded'),
+      ).toBe('true');
+      expect(container.textContent).toContain('Reveal Agent');
+    });
+
+    it('keeps the revealed workflow open when its group gains tools', () => {
+      vi.useFakeTimers();
+      const workflow = makeTool({
+        callId: 'wf-call',
+        toolName: 'workflow',
+        status: 'completed',
+      });
+      const { container, store, render } = renderGroup([workflow], 'wf-call');
+      try {
+        act(() => store.request('wf-call'));
+        expect(container.textContent).toContain('Reveal Agent');
+        act(() => vi.advanceTimersByTime(1_500));
+
+        render([
+          workflow,
+          makeTool({ callId: 'shell-call', toolName: 'Shell' }),
+        ]);
+
+        expect(
+          container.querySelector('[data-workflow-summary]'),
+        ).not.toBeNull();
+        expect(container.textContent).toContain('Reveal Agent');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it.each([
+      [500, true],
+      [1_500, false],
+    ])(
+      'only replays an approval remount within the reveal grace (%i ms)',
+      (delay, reopened) => {
+        vi.useFakeTimers();
+        try {
+          const tools = [
+            makeTool({ callId: 'shell-call', toolName: 'Shell' }),
+            makeTool({ callId: 'wf-call', toolName: 'workflow' }),
+          ];
+          const { container, store, render } = renderGroup(tools, 'wf-call');
+          act(() => store.request('wf-call'));
+          const row = container.querySelector<HTMLElement>(
+            '[data-transcript-tool-call-id="wf-call"] [role="button"]',
+          )!;
+          act(() => row.click());
+          expect(container.querySelector('[data-workflow-summary]')).toBeNull();
+
+          act(() => vi.advanceTimersByTime(delay));
+          render(tools, {
+            id: 'shell-approval',
+            toolCallId: 'shell-call',
+            content: [],
+            options: [],
+          });
+
+          expect(
+            container.querySelector('[data-workflow-summary]') !== null,
+          ).toBe(reopened);
+          if (!reopened) {
+            act(() => store.request('wf-call'));
+            expect(
+              container.querySelector('[data-workflow-summary]'),
+            ).not.toBeNull();
+          }
+        } finally {
+          vi.useRealTimers();
+        }
+      },
+    );
+
+    it('keeps a manually collapsed workflow closed until it is requested again', () => {
+      const tools = [
+        makeTool({ callId: 'shell-call', toolName: 'Shell' }),
+        makeTool({ callId: 'wf-call', toolName: 'workflow' }),
+      ];
+      const { container, store, render } = renderGroup(tools, 'wf-call');
+      act(() => store.request('wf-call'));
+      const row = container.querySelector<HTMLElement>(
+        '[data-transcript-tool-call-id="wf-call"] [role="button"]',
+      )!;
+      act(() => row.click());
+      expect(container.querySelector('[data-workflow-summary]')).toBeNull();
+
+      render([
+        ...tools,
+        makeTool({ callId: 'next-shell-call', toolName: 'Shell' }),
+      ]);
+      expect(container.querySelector('[data-workflow-summary]')).toBeNull();
+
+      act(() => store.request('wf-call'));
+      expect(container.querySelector('[data-workflow-summary]')).not.toBeNull();
+    });
   });
 
   it.each([
@@ -1333,6 +1579,32 @@ describe('tool row rendering', () => {
     act(() => shell.click());
     expect(shell.getAttribute('aria-expanded')).toBe('true');
     expect(container.querySelector('[class*="expandedCard"]')).not.toBeNull();
+  });
+
+  it('resets a manually expanded row when its tool identity changes', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const render = (callId: string) => {
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <ToolLine tool={makeTool({ callId })} summaryOnly />
+          </I18nProvider>,
+        );
+      });
+    };
+    mounted.push({ root, container });
+
+    render('first-call');
+    act(() => container.querySelector<HTMLElement>('[role="button"]')!.click());
+    expect(container.querySelector('[class*="expandedCard"]')).not.toBeNull();
+
+    render('next-call');
+    expect(container.querySelector('[class*="expandedCard"]')).toBeNull();
+    expect(
+      container.querySelector('[role="button"]')?.getAttribute('aria-expanded'),
+    ).toBe('false');
   });
 
   it.each(['glob', 'todo_write'])(
@@ -3193,46 +3465,52 @@ describe('pending edit approval rows', () => {
       ],
     });
 
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const render = (hostOwnsEditDiffPreview: boolean) => {
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <WebShellCustomizationProvider value={{ hostOwnsEditDiffPreview }}>
+              <ToolLine
+                tool={tool}
+                approval={{
+                  id: 'perm-write',
+                  toolCallId: tool.callId,
+                  toolName: 'write',
+                  hasDiffPreview: true,
+                  content: [],
+                  options: [],
+                }}
+              />
+            </WebShellCustomizationProvider>
+          </I18nProvider>,
+        );
+      });
+    };
+    mounted.push({ root, container });
+
+    render(false);
+    act(() => container.querySelector<HTMLElement>('[role="button"]')!.click());
+    expect(container.querySelector('[aria-expanded="false"]')).not.toBeNull();
+
     // While the host shows the diff natively the row is deliberately locked:
     // `write` is an edit alias, so the native editor owns the interaction.
-    const hostOwned = renderToolLine(
-      tool,
-      {
-        approval: {
-          id: 'perm-write',
-          toolCallId: tool.callId,
-          toolName: 'write',
-          hasDiffPreview: true,
-          content: [],
-          options: [],
-        },
-      },
-      { hostOwnsEditDiffPreview: true },
-    );
-    expect(hostOwned.querySelector('[class*="lineExpandable"]')).toBeNull();
+    render(true);
+    expect(container.querySelector('[class*="lineExpandable"]')).toBeNull();
 
     // Handing the preview back has to unlock *and* auto-expand it, or the user
     // is left with an approval whose content is nowhere on screen. The expanded
     // renderer already handles the bare name, so only shouldAutoExpand has to
     // agree with isEditToolName about it.
-    const handedBack = renderToolLine(tool, {
-      approval: {
-        id: 'perm-write',
-        toolCallId: tool.callId,
-        toolName: 'write',
-        hasDiffPreview: true,
-        content: [],
-        options: [],
-      },
-    });
-    expect(
-      handedBack.querySelector('[class*="lineExpandable"]'),
-    ).not.toBeNull();
-    expect(handedBack.querySelector('[aria-expanded="true"]')).not.toBeNull();
+    render(false);
+    expect(container.querySelector('[class*="lineExpandable"]')).not.toBeNull();
+    expect(container.querySelector('[aria-expanded="true"]')).not.toBeNull();
     // ...and the edit itself is lookable again — the whole point of the
     // hand-back (#10557). Without content in the fixture the expanded card is
     // empty and the two assertions above pass with nothing on screen.
-    expect(handedBack.textContent).toContain('handed back content');
+    expect(container.textContent).toContain('handed back content');
   });
 });
 

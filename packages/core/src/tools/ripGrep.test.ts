@@ -29,6 +29,7 @@ import { FileReadCache } from '../services/fileReadCache.js';
 import { logRipgrepRuntimeRecovery } from '../telemetry/loggers.js';
 import type { ToolResult } from './tools.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
+import { ToolErrorType } from './tool-error.js';
 
 // Mock ripgrepUtils
 vi.mock('../utils/ripgrepUtils.js', () => ({
@@ -360,10 +361,15 @@ describe('RipGrepTool', () => {
       );
     });
 
-    it('should surface an error for invalid regex pattern', () => {
-      expect(grepTool.validateToolParams({ pattern: '[[' })).toContain(
-        'Invalid regular expression pattern: [[',
-      );
+    it.each(['(?i)hello', '(?m)^hello$', '(?-i)TODO'])(
+      'should allow ripgrep to validate native pattern %s',
+      (pattern) => {
+        expect(grepTool.validateToolParams({ pattern })).toBeNull();
+      },
+    );
+
+    it('should defer regex syntax validation to ripgrep', () => {
+      expect(grepTool.validateToolParams({ pattern: '[[' })).toBeNull();
     });
 
     it('should return error if path does not exist', () => {
@@ -782,11 +788,27 @@ describe('RipGrepTool', () => {
       expect(result.returnDisplay).toBe('No matches found');
     });
 
-    it('should throw validation error for invalid regex pattern', async () => {
-      expect(() => grepTool.build({ pattern: '[[' })).toThrow(
-        'Invalid regular expression pattern: [[',
-      );
-    });
+    it.each(['[[', '(?=hello)'])(
+      'should report ripgrep syntax errors for %s instead of no matches',
+      async (pattern) => {
+        const error = new Error('regex parse error: invalid regex syntax');
+        rgReturns('', { error });
+
+        const result = await search({ pattern });
+
+        expectLlm(result, [error.message], ['No matches found']);
+        expect(result.returnDisplay).toBe(`Error: ${error.message}`);
+        expect(result.error).toEqual({
+          message: error.message,
+          type: ToolErrorType.GREP_EXECUTION_ERROR,
+        });
+        expect(rg).toHaveBeenCalledWith(
+          expect.arrayContaining(['--regexp', pattern]),
+          abortSignal,
+          true,
+        );
+      },
+    );
 
     it('should handle regex special characters correctly', async () => {
       // 'foo.*bar' matches 'const foo = "bar";'
@@ -838,6 +860,10 @@ describe('RipGrepTool', () => {
         llmContent:
           'Error during grep search operation: ripgrep binary not found.',
         returnDisplay: 'Error: ripgrep binary not found.',
+        error: {
+          message: 'ripgrep binary not found.',
+          type: ToolErrorType.GREP_EXECUTION_ERROR,
+        },
       });
     });
 
@@ -1190,6 +1216,26 @@ describe('RipGrepTool', () => {
   // The ripgrep mock returns what a real run would, so these check how the
   // tool reports matches rather than rg's own regex and glob handling.
   describe('regex pattern validation', () => {
+    it.each([
+      ['(?i)hello', 'hello'],
+      ['(?m)^hello$', 'hello'],
+      ['(?-i)TODO', 'TODO'],
+    ])(
+      'should pass native pattern %s unchanged to ripgrep',
+      async (pattern, match) => {
+        const result = await searchWith(hit('fileA.txt', 1, match), {
+          pattern,
+        });
+
+        expect(result.returnDisplay).toBe('Found 1 match');
+        expect(rg).toHaveBeenCalledWith(
+          expect.arrayContaining(['--ignore-case', '--regexp', pattern]),
+          abortSignal,
+          true,
+        );
+      },
+    );
+
     it('should handle complex regex patterns', async () => {
       await write(
         'code.js',

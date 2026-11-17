@@ -297,7 +297,7 @@ export function useBranchCommand(
         await getInteractiveModSession(config)?.syncSession('resume');
         clearPendingState?.();
         historyManager.clearItems();
-        historyManager.loadHistory(uiHistoryItems);
+        historyManager.loadHistory(uiHistoryItems, newSessionId);
         resetBackgroundStateForSessionSwitch(config);
 
         // 9. Apply the already-persisted title to the prompt bar.

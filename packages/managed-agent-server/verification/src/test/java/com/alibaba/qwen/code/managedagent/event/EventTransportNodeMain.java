@@ -9,7 +9,7 @@ import com.alibaba.qwen.code.managedagent.contracts.event.ManagedEventEnvelope;
 import com.alibaba.qwen.code.managedagent.contracts.event.ManagedEventEnvelopes;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.EventRecord;
-import com.alibaba.qwen.code.managedagent.persistence.TransportConsumerStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcTransportConsumerStore;
 import com.alibaba.qwen.code.managedagent.session.OwnerSubscriptions;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -178,7 +178,7 @@ public final class EventTransportNodeMain {
                     && !(bean instanceof HookedWakes)) {
                 original.close();
                 OwnerSubscriptions owners = beans.getBean(OwnerSubscriptions.class);
-                return new HookedWakes(beans.getBean(TransportConsumerStore.class),
+                return new HookedWakes(beans.getBean(JdbcTransportConsumerStore.class),
                         beans.getBean(HarnessConnector.class), owners::subscribe, faults);
             }
             if (bean instanceof LiteTopicEventTransport original) {
@@ -200,7 +200,7 @@ public final class EventTransportNodeMain {
         private final java.util.Set<String> halting =
                 java.util.concurrent.ConcurrentHashMap.newKeySet();
 
-        public HookedWakes(TransportConsumerStore store, HarnessConnector harness,
+        public HookedWakes(JdbcTransportConsumerStore store, HarnessConnector harness,
                 java.util.function.Consumer<String> activated, Faults faults) {
             super(store, harness, activated);
             this.faults = faults;

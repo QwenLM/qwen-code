@@ -9,6 +9,7 @@ import path from 'node:path';
 import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames } from './tool-names.js';
+import { ToolErrorType } from './tool-error.js';
 import {
   resolveAndValidatePath,
   formatDisplayPath,
@@ -506,6 +507,10 @@ class GrepToolInvocation extends BaseToolInvocation<
       return {
         llmContent: `Error during grep search operation: ${errorMessage}`,
         returnDisplay: `Error: ${errorMessage}`,
+        error: {
+          message: errorMessage,
+          type: ToolErrorType.GREP_EXECUTION_ERROR,
+        },
       };
     }
   }
@@ -796,13 +801,6 @@ export class RipGrepTool extends BaseDeclarativeTool<
       (!Number.isInteger(params.limit) || params.limit <= 0)
     ) {
       return 'limit must be a positive integer';
-    }
-
-    // Validate pattern is a valid regex
-    try {
-      new RegExp(params.pattern);
-    } catch (error) {
-      return `Invalid regular expression pattern: ${params.pattern}. Error: ${getErrorMessage(error)}`;
     }
 
     // Only validate path if one is provided

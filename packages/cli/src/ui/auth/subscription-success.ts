@@ -19,13 +19,13 @@ export function subscriptionSuccessMessage(
         info.member_type.charAt(0).toUpperCase() +
         info.member_type.slice(1).toLowerCase(),
     })}`,
-    `  ${t('Model: {{model}}. Run /upgrade to upgrade your plan, /usage to view usage, or /model to switch models.', { model })}`,
+    `  ${t('Model: {{model}}. Run /upgrade to upgrade your plan, /usage to view usage, /model to switch models, or /effort to change reasoning effort.', { model })}`,
     ...(authorizationUrl
       ? [
           `  ${t("If the browser didn't open, visit:")}`,
           `  ${authorizationUrl}`,
         ]
       : []),
-    `  ${t('Common commands: /usage   /upgrade   /model   /status   /logout')}`,
+    `  ${t('Common commands: /usage   /upgrade   /model   /effort   /status   /logout')}`,
   ].join('\n');
 }

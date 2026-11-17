@@ -10,7 +10,72 @@ type Stats = components['schemas']['ManagedDiagnosticActivityStats'];
 type Page = components['schemas']['ManagedDiagnosticActivityPage'];
 type Metrics = components['schemas']['ManagedActivityMetrics'];
 
-function Counts({ value }: { value: Metrics }) {
+function durationMean(total: string, samples: string): string {
+  const count = BigInt(samples);
+  if (count === 0n) return '—';
+  const tenths = (BigInt(total) * 10n) / count;
+  return `${tenths / 10n}.${tenths % 10n} ms`;
+}
+
+function MeasurementTotals({
+  value,
+  requested,
+}: {
+  value?: Metrics['measurements'];
+  requested: number;
+}) {
+  const t = useManagedDiagnosticsText();
+  return (
+    <div className="col-span-full space-y-2 border-t pt-2">
+      <p className="text-muted-foreground">{t('measurementMeaning')}</p>
+      <p>
+        {t('measurementCoverage')} ·{' '}
+        {value
+          ? `${t(value.availability === 'partial' ? 'partialState' : value.availability)} (${value.recorded}/${requested})`
+          : t('not_recorded')}
+      </p>
+      <p>
+        {t('executionDuration')} ·{' '}
+        {value && value.executionDurationSamples !== '0'
+          ? `${value.executionDurationMs} ms / ${value.executionDurationSamples} ${t('samples')}`
+          : t('unmeasured')}
+      </p>
+      {value && value.executionDurationSamples !== '0' && (
+        <p>
+          {t('meanDuration')} ·{' '}
+          {durationMean(
+            value.executionDurationMs,
+            value.executionDurationSamples,
+          )}
+        </p>
+      )}
+      {value && value.fileSamples !== '0' && (
+        <>
+          <p>
+            {t('modelLines')} ·{' '}
+            {value.modelDiffSamples !== '0'
+              ? `+${value.modelLinesAdded} / −${value.modelLinesRemoved} (${value.modelDiffSamples} ${t('samples')})`
+              : t('unmeasured')}
+          </p>
+          <p>
+            {t('appliedLines')} ·{' '}
+            {value.appliedDiffSamples !== '0'
+              ? `+${value.appliedLinesAdded} / −${value.appliedLinesRemoved} (${value.appliedDiffSamples} ${t('samples')})`
+              : t('unmeasured')}
+          </p>
+        </>
+      )}
+    </div>
+  );
+}
+
+function Counts({
+  value,
+  showMeasurements = false,
+}: {
+  value: Metrics;
+  showMeasurements?: boolean;
+}) {
   const t = useManagedDiagnosticsText();
   return (
     <dl className="grid grid-cols-2 gap-2 text-sm sm:grid-cols-3">
@@ -43,6 +108,12 @@ function Counts({ value }: { value: Metrics }) {
           <dd>{value.execution[key].toLocaleString()}</dd>
         </div>
       ))}
+      {showMeasurements && (
+        <MeasurementTotals
+          value={value.measurements}
+          requested={value.requested}
+        />
+      )}
     </dl>
   );
 }
@@ -200,7 +271,14 @@ export function ManagedActivityView({
             {reasonText(reason)}
           </p>
         ))}
-      {metrics && kind !== 'skills' && <Counts value={metrics} />}
+      {metrics && kind !== 'skills' && (
+        <Counts value={metrics} showMeasurements />
+      )}
+      {kind !== 'skills' && statistics?.measurementStartSequence && (
+        <p className="text-sm text-muted-foreground">
+          {t('measurementStart')} · {statistics.measurementStartSequence}
+        </p>
+      )}
       {kind === 'files' && statistics && (
         <div className="space-y-2">
           {(['read', 'write', 'edit'] as const).map((operation) => (
@@ -209,7 +287,10 @@ export function ManagedActivityView({
                 {t(operation)} ·{' '}
                 {statistics.fileOperations[operation].requested}
               </summary>
-              <Counts value={statistics.fileOperations[operation]} />
+              <Counts
+                value={statistics.fileOperations[operation]}
+                showMeasurements
+              />
             </details>
           ))}
         </div>
@@ -297,6 +378,45 @@ export function ManagedActivityView({
             <dd>
               {t(item.capture === 'partial' ? 'partialState' : item.capture)}
             </dd>
+            {kind !== 'skills' && (
+              <>
+                <dt>{t('measurementCoverage')}</dt>
+                <dd>
+                  {item.measurements
+                    ? t(
+                        item.measurements.availability === 'partial'
+                          ? 'partialState'
+                          : item.measurements.availability,
+                      )
+                    : t('not_recorded')}
+                </dd>
+                <dt>{t('executionDuration')}</dt>
+                <dd>
+                  {item.measurements?.executionDurationMs != null
+                    ? `${item.measurements.executionDurationMs} ms`
+                    : t('unmeasured')}
+                </dd>
+                {item.measurements?.file &&
+                  item.measurements.file.operation !== 'read' && (
+                    <>
+                      <dt>{t('fileChanges')}</dt>
+                      <dd>{t(item.measurements.file.status)}</dd>
+                      <dt>{t('modelLines')}</dt>
+                      <dd>
+                        {item.measurements.file.modelLinesAdded != null
+                          ? `+${item.measurements.file.modelLinesAdded} / −${item.measurements.file.modelLinesRemoved}`
+                          : t('unmeasured')}
+                      </dd>
+                      <dt>{t('appliedLines')}</dt>
+                      <dd>
+                        {item.measurements.file.appliedLinesAdded != null
+                          ? `+${item.measurements.file.appliedLinesAdded} / −${item.measurements.file.appliedLinesRemoved}`
+                          : t('unmeasured')}
+                      </dd>
+                    </>
+                  )}
+              </>
+            )}
             {item.skill && (
               <>
                 <dt>{t(item.skill.resourceKind)}</dt>

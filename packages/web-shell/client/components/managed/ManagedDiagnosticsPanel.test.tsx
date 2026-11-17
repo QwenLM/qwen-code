@@ -261,6 +261,60 @@ describe('ManagedDiagnosticsPanel', () => {
     expect(document.body.textContent).toContain('assistant-1');
   });
 
+  it('shows measured zero, independent model/applied lines and a sample-based duration mean', async () => {
+    const statistics = structuredClone(activityStatistics);
+    statistics.statistics!.tools.requested = 4;
+    statistics.statistics!.tools.measurements = {
+      availability: 'partial',
+      recorded: '2',
+      unsupported: '0',
+      partial: '0',
+      executionDurationMs: '6',
+      executionDurationSamples: '2',
+      fileSamples: '2',
+      modelDiffSamples: '1',
+      appliedDiffSamples: '1',
+      modelLinesAdded: '3',
+      modelLinesRemoved: '1',
+      appliedLinesAdded: '0',
+      appliedLinesRemoved: '0',
+    };
+    statistics.statistics!.measurementStartSequence = '9';
+    vi.mocked(provider.getActivityStatistics!).mockResolvedValue(statistics);
+    const page = structuredClone(activityPage);
+    page.items[0].delivery = 'unavailable';
+    page.items[0].measurements = {
+      availability: 'available',
+      sourceSequence: '9',
+      executionDurationMs: '0',
+      file: {
+        operation: 'edit',
+        status: 'unchanged',
+        modelLinesAdded: '3',
+        modelLinesRemoved: '1',
+        appliedLinesAdded: '0',
+        appliedLinesRemoved: '0',
+      },
+    };
+    vi.mocked(provider.listActivity!).mockResolvedValue(page);
+    await render();
+    await selectTab('Statistics');
+    await act(async () =>
+      [...document.querySelectorAll('button')]
+        .find((button) => button.textContent === 'Tools')!
+        .click(),
+    );
+    const text = document.body.textContent!;
+    expect(text).toContain('3.0 ms');
+    expect(text).not.toContain('1.5 ms');
+    expect(text).toContain('0 ms');
+    expect(text).toContain('+3 / −1');
+    expect(text).toContain('+0 / −0');
+    expect(text).toContain('Unchanged');
+    expect(text).toContain('First measurement sequence');
+    expect(text).toContain('DeliveryUnavailable');
+  });
+
   it.each(['statistics-session', 'page-session', 'page-kind'])(
     'rejects mismatched activity identity: %s',
     async (mismatch) => {

@@ -8,10 +8,10 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelContext;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
@@ -47,8 +47,8 @@ class ManagedModelContextTest {
     private final ObjectMapper json = new ObjectMapper();
     private final AtomicInteger statements = new AtomicInteger();
     private ManagedSchemaJdbcTemplate jdbc;
-    private ManagedSessionStore sessions;
-    private ManagedExtensionRecordStore records;
+    private JdbcManagedSessionStore sessions;
+    private JdbcManagedExtensionRecordStore records;
     private TransactionTemplate transactions;
 
     @BeforeEach
@@ -74,7 +74,7 @@ class ManagedModelContextTest {
             }
         };
         jdbc = new ManagedSchemaJdbcTemplate(counted);
-        records = new ManagedExtensionRecordStore(jdbc);
+        records = new JdbcManagedExtensionRecordStore(jdbc);
         sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc, records);
         transactions = new TransactionTemplate(new DataSourceTransactionManager(counted));
     }
@@ -254,7 +254,7 @@ class ManagedModelContextTest {
                 .put("promptTokenCount", 900).put("contextWindowSize", 2_000));
         commit(journal, request(journal, "first", body, USAGE_KIND, "output_committed", 1_000));
 
-        var saved = new ManagedExtensionRecordStore(jdbc).findModelContexts(TENANT, List.of("main"));
+        var saved = new JdbcManagedExtensionRecordStore(jdbc).findModelContexts(TENANT, List.of("main"));
         assertThat(saved).containsEntry("main", new WebShellModelContext("actual-model", 120L, 1_000L, 1_000));
         assertThat(json.valueToTree(saved.get("main")).toString())
                 .doesNotContain("budget", "secretHandle", "totalTokenCount", "models", "route");
@@ -436,7 +436,7 @@ class ManagedModelContextTest {
         commit(journal, request(journal, "summary", usage("actual-model", 12, 100), USAGE_KIND,
                 "output_committed", 1_000));
         var properties = new ManagedAgentProperties();
-        var registry = new ManagedWorkspaceRegistry(jdbc);
+        var registry = new JdbcManagedWorkspaceRegistry(jdbc);
         var state = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         var service = new ManagedAgentService(state, new RequestDigests(), mock(HarnessCoordinator.class),
                 mock(HarnessConnector.class), registry, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
@@ -455,7 +455,7 @@ class ManagedModelContextTest {
     void compactionCommitsItsIndependentRevisionAndInvalidatesUsageExactlyOnce() {
         var journal = open(TENANT, "compaction", true);
         var state = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {},
-                new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+                new JdbcManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         assertThat(state.contextCompressionState(TENANT, "compaction").compactionRevision()).isZero();
         commit(journal, request(journal, "before", usage("before", 80, 100), USAGE_KIND,
                 "output_committed", 1_000));
@@ -503,7 +503,7 @@ class ManagedModelContextTest {
                 "output_committed", 2_000));
         jdbc.update("DELETE FROM ma_session_record WHERE domain = 'hosted_context_compaction'");
         var state = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {},
-                new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+                new JdbcManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         assertThat(state.contextCompressionState(TENANT, "old-compaction").compactionRevision())
                 .isEqualTo(compaction.firstSequence());
         assertThat(context("old-compaction").modelId()).isEqualTo("newer");
@@ -524,7 +524,7 @@ class ManagedModelContextTest {
             }
             return null;
         }).when(guard).requireContextCompressionCommit(TENANT, "manual", "op_manual");
-        records = new ManagedExtensionRecordStore(jdbc, guard);
+        records = new JdbcManagedExtensionRecordStore(jdbc, guard);
         sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc, records);
         var journal = open(TENANT, "manual", true);
         byte[] bytes = "{}".getBytes(StandardCharsets.UTF_8);

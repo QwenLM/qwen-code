@@ -44,6 +44,15 @@ export async function recordGrepResultFileReads(
           if (!stats.isFile()) {
             return;
           }
+          const status = cache.check(stats);
+          if (
+            (status.state === 'fresh' || status.state === 'stale') &&
+            status.entry.readBaselineNeedsRefresh
+          ) {
+            // Search snippets do not refresh the explicit Read baseline
+            // required after recovery, even though ordinary Grep grants read credit.
+            return;
+          }
           cache.recordRead(filePath, stats, {
             full: false,
             cacheable: isGrepResultCacheable(filePath),

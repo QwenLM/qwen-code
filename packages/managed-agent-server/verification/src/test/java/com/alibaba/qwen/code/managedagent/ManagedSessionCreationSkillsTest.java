@@ -6,8 +6,8 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.extensions.ManagedExtensionPackageService;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionSkills;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionSkills;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
@@ -23,6 +23,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.bean.override.convention.TestBean;
 import org.springframework.test.web.servlet.MockMvc;
 
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.List;
@@ -49,7 +50,8 @@ class ManagedSessionCreationSkillsTest {
     @Autowired private JdbcTemplate jdbc;
     @Autowired private ObjectMapper json;
     @Autowired private ManagedAgentStore store;
-    @Autowired private ManagedSessionSkills snapshots;
+    @Autowired private JdbcManagedSessionSkills snapshots;
+    @Autowired private com.alibaba.qwen.code.managedagent.persistence.JdbcChildWorkspaceStore childWorkspaces;
     @Autowired private ManagedAgentProperties properties;
     @Autowired private ManagedExtensionPackageService extensionPackages;
     @Qualifier("managedAgentTransactionManager")
@@ -91,6 +93,54 @@ class ManagedSessionCreationSkillsTest {
                 + " display_name, config_ref, policy_ref, state) VALUES (?, 'ws', 1, 'storage', 'Test', 'config', 'policy', 'ACTIVE')", tenant);
         jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, 'ws', ?, 'OPERATOR')",
                 tenant, "actor".getBytes(StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void sourceImportFreezesAdmissionAndReplaysCreationAfterRevocation() throws Exception {
+        enableBuiltinShell();
+        properties.getExtensions().setEnabled(true);
+        properties.getExtensions().setSelfServiceEnabled(true);
+        properties.getExtensions().setArtifactDirectory(archiveDirectory.toString());
+        properties.getExtensions().setAllowedActors(List.of("actor"));
+        var source = mock(com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionSource.class);
+        org.mockito.Mockito.when(source.id()).thenReturn("business");
+        org.mockito.Mockito.when(source.resolve(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any())).thenAnswer(call -> {
+            assertThat(org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
+            return new com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionSource.Resolved(call.getArgument(1), "private/archive", null);
+        });
+        org.mockito.Mockito.when(source.open(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any()))
+                .thenAnswer(call -> new java.io.ByteArrayInputStream("skill ZIP".getBytes(StandardCharsets.UTF_8)));
+        var preparation = mock(HarnessConnector.class);
+        org.mockito.Mockito.when(preparation.supportsPackagePreparation()).thenReturn(true);
+        byte[] archive = "compiled bytes".getBytes(StandardCharsets.UTF_8);
+        var manifest = new ManagedExtensionPackages.Manifest(1, 1, "source-skill", "1", new ManagedExtensionPackages.Target("linux", "any"), List.of("skills"));
+        org.mockito.Mockito.when(preparation.preparePackage(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any()))
+                .thenAnswer(call -> new HarnessConnector.PreparedPackage(Map.of("manifest", manifest,
+                        "packageDigest", org.apache.commons.codec.digest.DigestUtils.sha256Hex(archive)), new java.io.ByteArrayInputStream(archive)));
+        extensionPackages.configureSources(List.of(source));
+        extensionPackages.configurePreparation(preparation);
+        try {
+            var command = new ManagedExtensionPackages.SourceImport(
+                    new com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionSource.Reference("business", "skill", "skill_1", "1"), manifest.target());
+            var response = mvc.perform(post("/v1/agents/workspaces/ws/extensions/source-imports").principal(actor("actor"))
+                            .header(TenantContextFilter.HEADER, tenant).header("Idempotency-Key", "source-import")
+                            .contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsBytes(command)))
+                    .andExpect(status().isOk()).andExpect(jsonPath("$.state").value("settled")).andReturn();
+            var pin = json.readTree(response.getResponse().getContentAsString()).required("pin");
+            var body = request("qwen-code", List.of());
+            body.putArray("extensionPins").add(pin);
+            String session = create(body, "source-session", true).required("sessionId").asText();
+            org.mockito.Mockito.doThrow(new com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionSource.Failure(
+                    com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionSource.Failure.Reason.NOT_FOUND, null))
+                    .when(source).resolve(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
+            assertThat(create(body, "source-session", true).required("sessionId").asText()).isEqualTo(session);
+            submit(body, "new-source-session", true).andExpect(status().isNotFound());
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id=?", Long.class, tenant)).isEqualTo(1);
+        } finally {
+            extensionPackages.configureSources(List.of());
+            extensionPackages.configurePreparation(harness);
+            properties.getExtensions().setSelfServiceEnabled(false);
+        }
     }
 
     @Test
@@ -284,7 +334,9 @@ class ManagedSessionCreationSkillsTest {
         jdbc.update("UPDATE ma_request_receipt SET result_json = REPLACE(result_json, 'ORIGINAL_INSTRUCTIONS', 'TAMPERED')"
                 + " WHERE tenant_id = ? AND session_id = ?", tenant, session);
         assertThatThrownBy(() -> snapshots.effective(store.requireSession(tenant, session)))
-                .hasMessageContaining("snapshot is invalid");
+                .hasMessageContaining("snapshot is invalid")
+                .extracting(error -> ((com.alibaba.qwen.code.managedagent.exception.ManagedAgentException) error).getCode())
+                .isEqualTo("session_skills_conflict");
     }
 
     @Test
@@ -334,6 +386,305 @@ class ManagedSessionCreationSkillsTest {
         submit(request(agent.get("id").asText(), List.of(duplicate)), "duplicate", false)
                 .andExpect(status().isConflict());
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id = ?", Long.class, tenant)).isEqualTo(1);
+    }
+
+    @Test
+    void injectsTheManagedLoopSkillByProfileEvenWithNoCallerSkills() throws Exception {
+        Object target = org.springframework.test.util.AopTestUtils.getUltimateTargetObject(store);
+        Object previousProfiles = com.alibaba.qwen.code.managedagent.VerificationFixtures.agentStoreField(target, "definitionToolProfiles");
+        com.alibaba.qwen.code.managedagent.VerificationFixtures.setAgentStoreField(target, "definitionToolProfiles",
+                List.of("hosted-workspace-files/1", "hosted-workspace-files/4"));
+        try {
+            // A cron-only profile (files/4) with an empty caller catalog still
+            // receives the server loop skill.
+            String cronAgent = defineProfile("hosted-workspace-files/4", "cron-loop-agent", List.of());
+            String cronSession = create(request(cronAgent, List.of()), "cron-loop", false).get("id").asText();
+            var cronCatalog = snapshots.effective(store.requireSession(tenant, cronSession));
+            assertThat(cronCatalog).hasSize(1);
+            assertThat(cronCatalog.getFirst().get("name")).isEqualTo("loop");
+            assertThat((String) cronCatalog.getFirst().get("body"))
+                    .contains("CronCreate").doesNotContain("LoopWakeup");
+            // Replay reproduces the same session and the same injected catalog.
+            assertThat(create(request(cronAgent, List.of()), "cron-loop", false).get("id").asText())
+                    .isEqualTo(cronSession);
+            assertThat(snapshots.effective(store.requireSession(tenant, cronSession))).isEqualTo(cronCatalog);
+            // A profile with no loop creator receives no loop skill.
+            String filesAgent = defineProfile("hosted-workspace-files/1", "files-no-loop", List.of());
+            String filesSession = create(request(filesAgent, List.of()), "files-no-loop", false).get("id").asText();
+            assertThat(snapshots.effective(store.requireSession(tenant, filesSession))).isEmpty();
+            // The Web Shell imports the bundled "loop" verbatim; the authoritative
+            // server variant replaces it rather than refusing the creation.
+            var localLoop = Map.<String, Object>of("name", "loop", "description", "Local", "body", bundledLoopBody());
+            String overrideSession = create(request(cronAgent, List.of(localLoop)), "override-loop", false).get("id").asText();
+            var overrideCatalog = snapshots.effective(store.requireSession(tenant, overrideSession));
+            assertThat(overrideCatalog).hasSize(1);
+            assertThat(overrideCatalog.getFirst().get("name")).isEqualTo("loop");
+            assertThat((String) overrideCatalog.getFirst().get("body")).contains("CronCreate").doesNotContain("LOCAL");
+            // A pinned definition with stored skills plus an empty caller catalog
+            // keeps its own skills alongside the injected loop (no shadowing).
+            var storedSkill = Map.<String, Object>of("name", "default", "description", "Default", "body", "DEFAULT");
+            String defAgent = defineProfile("hosted-workspace-files/4", "def-with-skills", List.of(storedSkill));
+            String defSession = create(request(defAgent, List.of()), "def-skills-loop", false).get("id").asText();
+            var defCatalog = snapshots.effective(store.requireSession(tenant, defSession));
+            assertThat(defCatalog).extracting(s -> s.get("name")).containsExactlyInAnyOrder("default", "loop");
+            // Without the negotiated Session Skills capability the server injects
+            // nothing and writes no row, keeping the creation-time behavior.
+            sessionSkillsSupported = false;
+            String gatedSession = create(request(cronAgent, List.of()), "gated-loop", false).get("id").asText();
+            assertThat(snapshots.snapshot(tenant, gatedSession)).isNull();
+            sessionSkillsSupported = true;
+        } finally {
+            sessionSkillsSupported = true;
+            com.alibaba.qwen.code.managedagent.VerificationFixtures.setAgentStoreField(target, "definitionToolProfiles", previousProfiles);
+        }
+    }
+
+    @Test
+    void injectionStripsCallerImportedLoopOnCreatorLessProfiles() throws Exception {
+        Object target = org.springframework.test.util.AopTestUtils.getUltimateTargetObject(store);
+        Object previousProfiles = com.alibaba.qwen.code.managedagent.VerificationFixtures.agentStoreField(target, "definitionToolProfiles");
+        com.alibaba.qwen.code.managedagent.VerificationFixtures.setAgentStoreField(target, "definitionToolProfiles",
+                List.of("hosted-workspace-files/1", "hosted-workspace-files/4"));
+        try {
+            // A creator-less profile strips a caller-imported bundled loop so it
+            // never publishes a body naming tools the profile lacks.
+            String filesAgent = defineProfile("hosted-workspace-files/1", "strip-agent", List.of());
+            var localLoop = Map.<String, Object>of("name", "loop", "description", "Local", "body", bundledLoopBody());
+            String stripSession = create(request(filesAgent, List.of(localLoop)), "strip-loop", false).get("id").asText();
+            assertThat(snapshots.effective(store.requireSession(tenant, stripSession))).isEmpty();
+        } finally {
+            com.alibaba.qwen.code.managedagent.VerificationFixtures.setAgentStoreField(target, "definitionToolProfiles", previousProfiles);
+        }
+    }
+
+    @Test
+    void aUserAuthoredCallerLoopIsPreservedNotReplacedOrDropped() throws Exception {
+        Object target = org.springframework.test.util.AopTestUtils.getUltimateTargetObject(store);
+        Object previousProfiles = com.alibaba.qwen.code.managedagent.VerificationFixtures.agentStoreField(target, "definitionToolProfiles");
+        com.alibaba.qwen.code.managedagent.VerificationFixtures.setAgentStoreField(target, "definitionToolProfiles",
+                List.of("hosted-workspace-files/1", "hosted-workspace-files/4"));
+        try {
+            // A caller loop whose body is not the bundled import is user-authored:
+            // it is preserved on a creator-bearing profile (no server variant) and
+            // on a creator-less profile (only the bundled import would be dropped).
+            var userLoop = Map.<String, Object>of("name", "loop", "description", "Mine", "body", "MY_CUSTOM_LOOP_BODY");
+            String cronAgent = defineProfile("hosted-workspace-files/4", "user-loop-cron", List.of());
+            String cronSession = create(request(cronAgent, List.of(userLoop)), "user-loop-cron", false).get("id").asText();
+            var cronCatalog = snapshots.snapshot(tenant, cronSession);
+            assertThat(cronCatalog).extracting(s -> s.get("name")).containsExactly("loop");
+            assertThat(loopBody(cronCatalog)).isEqualTo("MY_CUSTOM_LOOP_BODY");
+            String filesAgent = defineProfile("hosted-workspace-files/1", "user-loop-files", List.of());
+            String filesSession = create(request(filesAgent, List.of(userLoop)), "user-loop-files", false).get("id").asText();
+            var filesCatalog = snapshots.snapshot(tenant, filesSession);
+            assertThat(filesCatalog).extracting(s -> s.get("name")).containsExactly("loop");
+            assertThat(loopBody(filesCatalog)).isEqualTo("MY_CUSTOM_LOOP_BODY");
+        } finally {
+            com.alibaba.qwen.code.managedagent.VerificationFixtures.setAgentStoreField(target, "definitionToolProfiles", previousProfiles);
+        }
+    }
+
+    @Test
+    void aDefinitionAuthoredLoopSkillSurvivesAdmission() throws Exception {
+        Object target = org.springframework.test.util.AopTestUtils.getUltimateTargetObject(store);
+        Object previousProfiles = com.alibaba.qwen.code.managedagent.VerificationFixtures.agentStoreField(target, "definitionToolProfiles");
+        com.alibaba.qwen.code.managedagent.VerificationFixtures.setAgentStoreField(target, "definitionToolProfiles",
+                List.of("hosted-workspace-files/1", "hosted-workspace-files/4"));
+        try {
+            // A definition-authored loop is the author's artifact: the server neither
+            // drops it on a creator-less profile nor replaces it on a creator-bearing one.
+            // A caller skill forces a persisted row, so the assertion reads the saved
+            // catalog (snapshot), not the definition fallback (effective).
+            var defLoop = Map.<String, Object>of("name", "loop", "description", "Definition loop", "body", "DEFINITION_LOOP_BODY");
+            var callerSkill = Map.<String, Object>of("name", "review", "description", "Caller", "body", "CALLER_BODY");
+            String filesAgent = defineProfile("hosted-workspace-files/1", "def-loop-files", List.of(defLoop));
+            String filesSession = create(request(filesAgent, List.of(callerSkill)), "def-loop-files", false).get("id").asText();
+            var filesCatalog = snapshots.snapshot(tenant, filesSession);
+            assertThat(filesCatalog).extracting(s -> s.get("name")).containsExactlyInAnyOrder("loop", "review");
+            assertThat(loopBody(filesCatalog)).isEqualTo("DEFINITION_LOOP_BODY");
+            String cronAgent = defineProfile("hosted-workspace-files/4", "def-loop-cron", List.of(defLoop));
+            String cronSession = create(request(cronAgent, List.of(callerSkill)), "def-loop-cron", false).get("id").asText();
+            var cronCatalog = snapshots.snapshot(tenant, cronSession);
+            assertThat(cronCatalog).extracting(s -> s.get("name")).containsExactlyInAnyOrder("loop", "review");
+            assertThat(loopBody(cronCatalog)).isEqualTo("DEFINITION_LOOP_BODY");
+        } finally {
+            com.alibaba.qwen.code.managedagent.VerificationFixtures.setAgentStoreField(target, "definitionToolProfiles", previousProfiles);
+        }
+    }
+
+    @Test
+    void overCapacityCreationDropsTheBundledLoopAndStillSucceeds() throws Exception {
+        Object target = org.springframework.test.util.AopTestUtils.getUltimateTargetObject(store);
+        Object previousProfiles = com.alibaba.qwen.code.managedagent.VerificationFixtures.agentStoreField(target, "definitionToolProfiles");
+        com.alibaba.qwen.code.managedagent.VerificationFixtures.setAgentStoreField(target, "definitionToolProfiles",
+                List.of("hosted-workspace-files/4"));
+        try {
+            // A definition skill plus a full caller catalog (255 + the bundled loop)
+            // puts the merged catalog over the entry cap once the variant is added.
+            // The creation must still succeed: the bundled import is dropped rather
+            // than restored, leaving a within-cap catalog the admission accepts.
+            var defSkill = Map.<String, Object>of("name", "default", "description", "Default", "body", "DEFAULT");
+            String agent = defineProfile("hosted-workspace-files/4", "over-cap-agent", List.of(defSkill));
+            var caller = new java.util.ArrayList<Map<String, Object>>();
+            for (int i = 0; i < 255; i++) {
+                caller.add(Map.of("name", "s" + i, "description", "d", "body", "b"));
+            }
+            caller.add(Map.<String, Object>of("name", "loop", "description", "Local", "body", bundledLoopBody()));
+            String session = create(request(agent, caller), "over-cap", false).get("id").asText();
+            var catalog = snapshots.snapshot(tenant, session);
+            assertThat(catalog).hasSize(256);
+            assertThat(catalog).extracting(s -> s.get("name")).doesNotContain("loop");
+        } finally {
+            com.alibaba.qwen.code.managedagent.VerificationFixtures.setAgentStoreField(target, "definitionToolProfiles", previousProfiles);
+        }
+    }
+
+    private static String loopBody(List<Map<String, Object>> catalog) {
+        return (String) catalog.stream().filter(s -> "loop".equals(s.get("name")))
+                .findFirst().orElseThrow().get("body");
+    }
+
+    /** The verbatim bundled loop body the Web Shell imports (the only caller loop
+     * the server may replace); read from the committed reference sidecar. */
+    private static String bundledLoopBody() throws Exception {
+        try (InputStream stream = ManagedSessionCreationSkillsTest.class
+                .getResourceAsStream("/contracts/managed-loop-skill-bundled-body.json")) {
+            assertThat(stream).isNotNull();
+            return (String) new ObjectMapper()
+                    .readValue(new String(stream.readAllBytes(), StandardCharsets.UTF_8), Map.class)
+                    .get("body");
+        }
+    }
+
+    @Test
+    void aSnapshotChildReselectsTheLoopByItsOwnProfile() throws Exception {
+        Object target = org.springframework.test.util.AopTestUtils.getUltimateTargetObject(store);
+        Object previousProfiles = com.alibaba.qwen.code.managedagent.VerificationFixtures.agentStoreField(target, "definitionToolProfiles");
+        com.alibaba.qwen.code.managedagent.VerificationFixtures.setAgentStoreField(target, "definitionToolProfiles",
+                List.of("hosted-workspace-files/4"));
+        try {
+            // A creator-bearing parent with a caller skill persists the server loop.
+            String agent = defineProfile("hosted-workspace-files/4", "snap-parent-agent", List.of());
+            var callerSkill = Map.<String, Object>of("name", "review", "description", "d", "body", "CALLER");
+            String parent = create(request(agent, List.of(callerSkill)), "snap-parent", false).get("id").asText();
+            assertThat(snapshots.snapshot(tenant, parent)).extracting(s -> s.get("name")).contains("loop");
+            String childCwd = ".qwen-child-workspaces/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+            readySnapshotChildWorkspace(parent, "run-snap", childCwd);
+            var lineage = new com.alibaba.qwen.code.managedagent.model.StoreModels.SessionLineage(parent, parent, "run-snap", 1);
+            var child = store.insertChildSessionCommand(tenant, parent, UUID.randomUUID().toString(),
+                    "snap-child-digest", "audit", List.of(), null, lineage, childCwd);
+            assertThat(store.requireSession(tenant, child.sessionId()).toolProfile()).isEqualTo("hosted-workspace-read/1");
+            // The READ child drops the server loop; the caller skill inherits.
+            assertThat(snapshots.snapshot(tenant, child.sessionId()))
+                    .extracting(s -> s.get("name")).containsExactly("review");
+
+            // A loop-only parent (empty caller) resolves to no child row at all.
+            String loopAgent = defineProfile("hosted-workspace-files/4", "snap-loopy-agent", List.of());
+            String loopParent = create(request(loopAgent, List.of()), "snap-loopy-parent", false).get("id").asText();
+            assertThat(snapshots.snapshot(tenant, loopParent)).extracting(s -> s.get("name")).containsExactly("loop");
+            String childCwd2 = ".qwen-child-workspaces/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+            readySnapshotChildWorkspace(loopParent, "run-snap-2", childCwd2);
+            var child2 = store.insertChildSessionCommand(tenant, loopParent, UUID.randomUUID().toString(),
+                    "snap-child-digest-2", "audit", List.of(), null,
+                    new com.alibaba.qwen.code.managedagent.model.StoreModels.SessionLineage(loopParent, loopParent, "run-snap-2", 1), childCwd2);
+            assertThat(snapshots.snapshot(tenant, child2.sessionId())).isNull();
+
+            // A parent definition that OWNS a loop: the READ child inherits that
+            // definition-authored loop (parentDefinitionHasLoop=true), unlike the
+            // server variant above which the READ child drops. Forcing the flag to
+            // false loses the definition loop here and reddens this case.
+            var defLoop = Map.<String, Object>of("name", "loop", "description", "def", "body", "DEFINITION_LOOP_BODY");
+            String defLoopAgent = defineProfile("hosted-workspace-files/4", "snap-defloop-agent", List.of(defLoop));
+            String defLoopParent = create(request(defLoopAgent, List.of(callerSkill)), "snap-defloop-parent", false).get("id").asText();
+            assertThat(snapshots.snapshot(tenant, defLoopParent))
+                    .extracting(s -> s.get("name")).containsExactlyInAnyOrder("loop", "review");
+            String childCwd3 = ".qwen-child-workspaces/cccccccccccccccccccccccccccccccc";
+            readySnapshotChildWorkspace(defLoopParent, "run-snap-3", childCwd3);
+            var child3 = store.insertChildSessionCommand(tenant, defLoopParent, UUID.randomUUID().toString(),
+                    "snap-child-digest-3", "audit", List.of(), null,
+                    new com.alibaba.qwen.code.managedagent.model.StoreModels.SessionLineage(defLoopParent, defLoopParent, "run-snap-3", 1), childCwd3);
+            var child3Catalog = snapshots.snapshot(tenant, child3.sessionId());
+            assertThat(child3Catalog).extracting(s -> s.get("name")).containsExactlyInAnyOrder("loop", "review");
+            assertThat(loopBody(child3Catalog)).isEqualTo("DEFINITION_LOOP_BODY");
+
+            // R7-1: a parent whose only loop is a user-authored caller skill (the
+            // definition owns none) must pass that loop into the READ snapshot
+            // child, not delete it by name.
+            var userLoop = Map.<String, Object>of("name", "loop", "description", "mine", "body", "MY_CUSTOM_LOOP_BODY");
+            String userLoopAgent = defineProfile("hosted-workspace-files/4", "snap-userloop-agent", List.of());
+            String userLoopParent = create(request(userLoopAgent, List.of(userLoop)), "snap-userloop-parent", false).get("id").asText();
+            assertThat(loopBody(snapshots.snapshot(tenant, userLoopParent))).isEqualTo("MY_CUSTOM_LOOP_BODY");
+            String childCwd4 = ".qwen-child-workspaces/dddddddddddddddddddddddddddddddd";
+            readySnapshotChildWorkspace(userLoopParent, "run-snap-4", childCwd4);
+            var child4 = store.insertChildSessionCommand(tenant, userLoopParent, UUID.randomUUID().toString(),
+                    "snap-child-digest-4", "audit", List.of(), null,
+                    new com.alibaba.qwen.code.managedagent.model.StoreModels.SessionLineage(userLoopParent, userLoopParent, "run-snap-4", 1), childCwd4);
+            var child4Catalog = snapshots.snapshot(tenant, child4.sessionId());
+            assertThat(child4Catalog).extracting(s -> s.get("name")).containsExactly("loop");
+            assertThat(loopBody(child4Catalog)).isEqualTo("MY_CUSTOM_LOOP_BODY");
+        } finally {
+            com.alibaba.qwen.code.managedagent.VerificationFixtures.setAgentStoreField(target, "definitionToolProfiles", previousProfiles);
+        }
+    }
+
+    @Test
+    void serverLoopProvenanceMarkerRoundTripsThroughTheSnapshot() throws Exception {
+        Object target = org.springframework.test.util.AopTestUtils.getUltimateTargetObject(store);
+        Object previousProfiles = com.alibaba.qwen.code.managedagent.VerificationFixtures.agentStoreField(target, "definitionToolProfiles");
+        com.alibaba.qwen.code.managedagent.VerificationFixtures.setAgentStoreField(target, "definitionToolProfiles",
+                List.of("hosted-workspace-files/4"));
+        try {
+            // R3-1: an injected server variant records the provenance marker in the
+            // snapshot; a user-authored caller loop does not. The READ child drops the
+            // former by marker (even if its body were superseded) and keeps the latter.
+            String agent = defineProfile("hosted-workspace-files/4", "marker-agent", List.of());
+            String injectedParent = create(request(agent, List.of()), "marker-injected", false).get("id").asText();
+            assertThat(snapshots.serverLoopInjected(tenant, injectedParent)).isTrue();
+            var userLoop = Map.<String, Object>of("name", "loop", "description", "mine", "body", "MY_CUSTOM_LOOP_BODY");
+            String userAgent = defineProfile("hosted-workspace-files/4", "marker-user-agent", List.of());
+            String userParent = create(request(userAgent, List.of(userLoop)), "marker-user", false).get("id").asText();
+            assertThat(snapshots.serverLoopInjected(tenant, userParent)).isFalse();
+            // READ child of the injected parent: the server loop is dropped by marker.
+            String cwdA = ".qwen-child-workspaces/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+            readySnapshotChildWorkspace(injectedParent, "run-marker-a", cwdA);
+            var childA = store.insertChildSessionCommand(tenant, injectedParent, UUID.randomUUID().toString(),
+                    "marker-child-a", "audit", List.of(), null,
+                    new com.alibaba.qwen.code.managedagent.model.StoreModels.SessionLineage(injectedParent, injectedParent, "run-marker-a", 1), cwdA);
+            assertThat(snapshots.snapshot(tenant, childA.sessionId())).isNull();
+            // READ child of the user-loop parent: the user loop is kept.
+            String cwdB = ".qwen-child-workspaces/ffffffffffffffffffffffffffffffff";
+            readySnapshotChildWorkspace(userParent, "run-marker-b", cwdB);
+            var childB = store.insertChildSessionCommand(tenant, userParent, UUID.randomUUID().toString(),
+                    "marker-child-b", "audit", List.of(), null,
+                    new com.alibaba.qwen.code.managedagent.model.StoreModels.SessionLineage(userParent, userParent, "run-marker-b", 1), cwdB);
+            assertThat(loopBody(snapshots.snapshot(tenant, childB.sessionId()))).isEqualTo("MY_CUSTOM_LOOP_BODY");
+        } finally {
+            com.alibaba.qwen.code.managedagent.VerificationFixtures.setAgentStoreField(target, "definitionToolProfiles", previousProfiles);
+        }
+    }
+
+    private void readySnapshotChildWorkspace(String parent, String run, String childCwd) {
+        var parentBinding = store.requireSession(tenant, parent).workspace();
+        childWorkspaces.admit(tenant, parent, run, parentBinding,
+                com.alibaba.qwen.code.managedagent.persistence.JdbcChildWorkspaceStore.SNAPSHOT, System.currentTimeMillis());
+        jdbc.update("UPDATE ma_workspace SET child_state = 'ready', child_cwd_relative = ?"
+                        + " WHERE tenant_id = ? AND parent_session_id = ? AND child_run_id = ? AND workspace_kind = 'CHILD_GIT'",
+                childCwd, tenant, parent, run);
+    }
+
+    private String defineProfile(String profile, String key, List<Map<String, Object>> skills) throws Exception {
+        var definition = json.createObjectNode();
+        definition.putObject("model");
+        definition.put("instructions", "");
+        definition.putArray("tools").addObject().put("type", "hosted_profile").put("profile", profile);
+        definition.putObject("permission_policy");
+        if (!skills.isEmpty()) {
+            definition.set("skills", json.valueToTree(skills));
+        }
+        var created = mvc.perform(post("/v1/agents").principal(actor("actor"))
+                        .header(TenantContextFilter.HEADER, tenant).header("Idempotency-Key", key)
+                        .contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsBytes(definition)))
+                .andExpect(status().isAccepted()).andReturn();
+        return json.readTree(created.getResponse().getContentAsString()).get("id").asText();
     }
 
     @Test

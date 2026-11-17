@@ -382,10 +382,12 @@ export function getReasoningEffortsForConfig(
   config: Config,
 ): readonly ReasoningEffort[] {
   const modelId = config.getModel?.();
-  // One tier rule for `/effort` and a workflow agent's per-call effort: this
-  // site keeps its own capability lookup and delegates only the rule.
+  // One tier rule for `/effort` and a workflow agent's per-call effort, but the
+  // lookup must include the built-in tables like the model dialog's controls
+  // do: skipping them offered the whole ladder for models whose tiers are
+  // already known, and persisted a tier the wire then re-tiered (#17411).
   return reasoningEffortsForCapability(
-    getConfiguredModelReasoning(config, modelId, false),
+    getConfiguredModelReasoning(config, modelId),
   );
 }
 
