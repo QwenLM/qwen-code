@@ -89,7 +89,11 @@ export class GitIgnoreParser implements GitIgnoreFilter {
           // `relativeBaseDir` comes from path.relative and is the only piece
           // that can hold a platform separator, so it is the only piece that
           // is normalised.
-          const baseDir = relativeBaseDir.replace(/\\/g, '/');
+          // The containing directory is a literal path, not part of the user's
+          // pattern: `[lang]` must match that directory rather than one letter.
+          const baseDir = relativeBaseDir
+            .replace(/\\/g, '/')
+            .replace(/([[\]])/g, '\\$1');
           // If no slash and not anchored in file, it matches files in any
           // subdirectory.
           const anyDepth =

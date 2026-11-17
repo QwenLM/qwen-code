@@ -213,6 +213,49 @@ src/*.tmp
     });
   });
 
+  describe('literal nested ignore directory names', () => {
+    it.each(['[lang]', 'literal[ab]', 'routes/[lang]/nested[ab]'])(
+      'applies patterns beneath the literal directory %s',
+      async (directory) => {
+        await createTestFile(
+          `${directory}/.gitignore`,
+          '*.log\n!important.log\n/root-only.txt\n',
+        );
+        expect(parser.isIgnored(`${directory}/ignored.log`)).toBe(true);
+        expect(parser.isIgnored(`${directory}/child/deep.log`)).toBe(true);
+        expect(parser.isIgnored(`${directory}/important.log`)).toBe(false);
+        expect(parser.isIgnored(`${directory}/root-only.txt`)).toBe(true);
+        expect(parser.isIgnored(`${directory}/child/root-only.txt`)).toBe(
+          false,
+        );
+      },
+    );
+
+    it('lets nested negation override a root rule in a bracket directory', async () => {
+      await createTestFile('.gitignore', '*.log\n');
+      await createTestFile('[lang]/.gitignore', '!important.log\n');
+      expect(parser.isIgnored('[lang]/important.log')).toBe(false);
+      expect(parser.isIgnored('[lang]/ignored.log')).toBe(true);
+    });
+
+    it('keeps ordinary nested pattern wildcards active', async () => {
+      await createTestFile('routes/.gitignore', 'build-*/\n');
+      expect(parser.isIgnored('routes/build-output/file.js')).toBe(true);
+      expect(parser.isIgnored('routes/child/build-output/file.js')).toBe(true);
+      expect(parser.isIgnored('routes/source/file.js')).toBe(false);
+    });
+
+    it.skipIf(process.platform === 'win32')(
+      'preserves matching below a literal question-mark directory',
+      async () => {
+        await createTestFile('what?/.gitignore', '*.log\n!important.log\n');
+        expect(parser.isIgnored('what?/ignored.log')).toBe(true);
+        expect(parser.isIgnored('what?/child/deep.log')).toBe(true);
+        expect(parser.isIgnored('what?/important.log')).toBe(false);
+      },
+    );
+  });
+
   // In gitignore syntax `/` is always the separator and `\` is an escape
   // character, so a pattern's backslashes are content, not path separators.
   // Every expectation here was read off `git check-ignore` in a real
