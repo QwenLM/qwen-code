@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.session;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
@@ -27,7 +28,21 @@ public class ManagedSessionActivityService {
     }
 
     public JsonNode statistics(String tenant, String actor, String session) {
-        sessions.requireReadableSession(tenant, actor, session);
+        return statistics(tenant, actor, null, session);
+    }
+
+    public JsonNode statistics(SessionPrincipal principal, String session) {
+        return statistics(principal.tenantId(), principal.userId(),
+                principal, session);
+    }
+
+    private JsonNode statistics(String tenant, String actor,
+            SessionPrincipal principal, String session) {
+        if (principal == null) {
+            sessions.requireReadableSession(tenant, actor, session);
+        } else {
+            sessions.requireReadableSession(principal, session);
+        }
         JsonNode statistics = records.findActivityStatistics(tenant, session);
         ObjectNode result = envelope(tenant, session, statistics);
         if (statistics == null || !"ready".equals(statistics.path("readiness").asText())) {
@@ -52,7 +67,23 @@ public class ManagedSessionActivityService {
     }
 
     public JsonNode list(String tenant, String actor, String session, String kind, String cursor, int limit) {
-        sessions.requireReadableSession(tenant, actor, session);
+        return list(tenant, actor, null, session, kind, cursor, limit);
+    }
+
+    public JsonNode list(SessionPrincipal principal, String session,
+            String kind, String cursor, int limit) {
+        return list(principal.tenantId(), principal.userId(), principal,
+                session, kind, cursor, limit);
+    }
+
+    private JsonNode list(String tenant, String actor,
+            SessionPrincipal principal, String session, String kind,
+            String cursor, int limit) {
+        if (principal == null) {
+            sessions.requireReadableSession(tenant, actor, session);
+        } else {
+            sessions.requireReadableSession(principal, session);
+        }
         String domain = switch (kind) {
             case "tools" -> ManagedActivityDiagnostics.TOOLS;
             case "files" -> ManagedActivityDiagnostics.FILES;
