@@ -174,10 +174,11 @@ to run.
 workspace, and needs chat recording in the caller to do so, as a `sent`
 launch into another workspace does. A `sent` launch that creates a session waits
 until its prompt is dispatched. A follow-up returns once the prompt is
-queued. Its 30-minute deadline covers both queueing and execution. Expiry
-in the queue prevents execution. The guards still run when the turn comes,
-and a prompt they refuse is reported as a failed completion. A follow-up's
-background task id is
+queued. The launcher waits up to 30 minutes for the result. Expiry before
+the ACP write prevents dispatch. Once the write starts, the timeout ends
+the result wait and later prompts still wait for that ACP request to settle.
+The guards still run when the turn comes, and a prompt they refuse is
+reported as a failed completion. A follow-up's background task id is
 `<sessionId>:<promptId>`, not the session id: a caller receives several
 completions from one session, and the receiving session treats a repeated
 task id as a notification it already has. The launcher returns that id, and

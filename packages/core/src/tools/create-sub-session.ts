@@ -235,11 +235,9 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
 
     const completion = this.params.completion ?? 'first-turn';
     const prompt = this.params.prompt.trim();
+    const followUp = this.params.sessionId !== undefined;
 
-    // Set only once the spawn actually starts, which tells the two cancellation
-    // outcomes apart: a turn cancelled before `execute` ran leaves nothing
-    // behind, while one cancelled mid-flight may have created a sub-session.
-    let spawnStarted = false;
+    let requestStarted = false;
 
     try {
       const res = await raceCancellation(() => {
@@ -249,7 +247,7 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
           throw new Error('A named workspace requires one-time approval.');
         }
         if (destination) this.assertWorkspaceAllowed(destination);
-        spawnStarted = true;
+        requestStarted = true;
         return spawner({
           prompt,
           completion,
@@ -268,16 +266,17 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
       }, signal);
 
       if (res === CANCELLED) {
-        // Return the caller's turn to it immediately. A sub-session that DID
-        // start is NOT cancelled — `sendPrompt` has no abort seam — so it keeps
-        // running and keeps its concurrency slot until its own turn drains.
-        // Freeing the slot here would let the caller over-admit against a
-        // sub-session that is still consuming a bridge session and model quota.
-        const message = spawnStarted
-          ? 'create_sub_session was cancelled. A sub-session may already have ' +
-            'been created; it runs independently and is not cancelled.'
-          : 'create_sub_session was cancelled before it started. No ' +
-            'sub-session was created.';
+        // Cancellation here stops the caller's wait. The daemon owns any
+        // admitted prompt and its concurrency slot.
+        const message = followUp
+          ? requestStarted
+            ? 'create_sub_session was cancelled. The follow-up prompt may already be queued and can still run.'
+            : 'create_sub_session was cancelled before sending the follow-up.'
+          : requestStarted
+            ? 'create_sub_session was cancelled. A sub-session may already have ' +
+              'been created; it runs independently and is not cancelled.'
+            : 'create_sub_session was cancelled before it started. No ' +
+              'sub-session was created.';
         return {
           llmContent: message,
           returnDisplay: 'Cancelled',
@@ -306,18 +305,17 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
             'live-only — it will not survive a daemon restart.'
           : '';
 
-      const followUp = this.params.sessionId !== undefined;
       if (completion === 'sent') {
         // Fire-and-forget: report the id; the caller did not wait for a result.
         return {
           llmContent:
             `Sub-session ${sessionLink} ` +
             (followUp
-              ? 'received the prompt. '
+              ? 'accepted the prompt into its queue. '
               : 'created and the prompt was dispatched. ') +
             'It runs independently — this call did not wait for a ' +
             `result.${parentWarning}`,
-          returnDisplay: `${sessionLink} started`,
+          returnDisplay: `${sessionLink} ${followUp ? 'queued' : 'started'}`,
         };
       }
 
@@ -361,19 +359,16 @@ export class CreateSubSessionTool extends BaseDeclarativeTool<
     super(
       CreateSubSessionTool.Name,
       ToolDisplayNames.CREATE_SUB_SESSION,
-      'Spawn a fresh, independent sub-session (its own clean context and ' +
-        'transcript) and run a prompt in it. Use to fan work out into a ' +
-        'separate session — e.g. a self-contained sub-task you want isolated ' +
-        'from this conversation.\n\n' +
+      'Run a prompt in a separate sub-session. Omit `sessionId` to create ' +
+        'a fresh session with its own context and transcript. Give a new ' +
+        'sub-session a self-contained prompt.\n\n' +
         'ONLY available when running under `qwen serve` (daemon mode); it is ' +
         'not declared at all in plain interactive or headless sessions.\n\n' +
         '## Completion modes\n' +
-        "- `first-turn` (default): waits for the sub-session's first turn to " +
-        'finish and returns its result to you. Use when you need the answer ' +
-        'back.\n' +
-        '- `sent`: returns immediately after dispatching the prompt, without ' +
-        'waiting. Use for fire-and-forget launches whose output you do not ' +
-        'need inline. When the sub-session runs in another workspace, or ' +
+        '- `first-turn` (default): waits for the turn started by this prompt ' +
+        'and returns its result.\n' +
+        '- `sent`: returns without waiting for the result. A follow-up ' +
+        'returns once queued. When the sub-session runs in another workspace, or ' +
         'when you follow one up, you are told when it finishes, with its ' +
         'result. That result comes back on its own, so do not ask the ' +
         'sub-session to report back (for example with send_message).\n\n' +
@@ -387,10 +382,7 @@ export class CreateSubSessionTool extends BaseDeclarativeTool<
         'Set `sessionId` to send the prompt to a sub-session you created ' +
         "earlier instead of creating a new one; it keeps that session's " +
         'context. Also set `workspace` if it is in another workspace. Only ' +
-        'sub-sessions this session created can be followed up this way.\n\n' +
-        'The sub-session runs the prompt with full tool access, starting from ' +
-        'zero context — brief it completely in `prompt` (it cannot see this ' +
-        'conversation).',
+        'sub-sessions this session created can be followed up this way.',
       Kind.Other,
       {
         type: 'object',
@@ -398,17 +390,16 @@ export class CreateSubSessionTool extends BaseDeclarativeTool<
           prompt: {
             type: 'string',
             description:
-              'The full, self-contained prompt to run in the new sub-session. ' +
-              'It starts with no context from this conversation, so include ' +
-              'everything it needs.',
+              'The prompt to run. Give a new sub-session all the context ' +
+              "it needs. A follow-up can use the target session's prior turns.",
           },
           completion: {
             type: 'string',
             enum: ['sent', 'first-turn'],
             description:
-              "'first-turn' (default) waits for the sub-session's first turn " +
-              "and returns its result. 'sent' returns immediately after the " +
-              'prompt is dispatched (fire-and-forget).',
+              "'first-turn' (default) waits for this prompt's turn and " +
+              "returns its result. 'sent' submits the prompt and returns " +
+              'without waiting for the result.',
           },
           model: {
             type: 'string',

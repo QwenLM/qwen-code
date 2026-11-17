@@ -11725,6 +11725,12 @@ export function createSessionControlPlane(
         deadlineTimer = setTimeout(onDeadline, deadlineMs);
         deadlineTimer.unref();
       }
+      // Continuation claims and Guard release both use the queued abort state.
+      const onQueuedDispatchAbort = () => {
+        if (pendingEntry.state === 'queued') {
+          pendingAbort.abort(dispatchSignal?.reason);
+        }
+      };
       if (isQueued) {
         pendingAbort.signal.addEventListener(
           'abort',
@@ -11755,6 +11761,10 @@ export function createSessionControlPlane(
           },
           { once: true },
         );
+        dispatchSignal?.addEventListener('abort', onQueuedDispatchAbort, {
+          once: true,
+        });
+        if (dispatchSignal?.aborted) onQueuedDispatchAbort();
         entry.events.publish({
           type: 'pending_prompt_added',
           promptId: pendingEntry.promptId,
@@ -12333,6 +12343,7 @@ export function createSessionControlPlane(
       result
         .finally(() => {
           signal?.removeEventListener('abort', onCallerAbort);
+          dispatchSignal?.removeEventListener('abort', onQueuedDispatchAbort);
           if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
           // Remove this prompt from the pending list and publish a
           // completed event so SSE subscribers can update their queue view.

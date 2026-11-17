@@ -340,7 +340,6 @@ function makeFakeBridge(opts?: {
         assertCanDispatch?: () => void;
         expectedApprovalMode?: ApprovalMode;
         approvalModeBeforeStart?: ApprovalMode;
-        deadlineMs?: number;
       },
     ) => {
       capturedPromptId = ctx?.promptId ?? '';
@@ -368,22 +367,9 @@ function makeFakeBridge(opts?: {
         return new Promise(() => {});
       };
       if (!opts?.sendPromptRejects) ctx?.onPromptAdmitted?.();
-      if (!opts?.beforeQueuedDispatch) return dispatch();
-      const queue = opts.beforeQueuedDispatch();
-      if (ctx?.deadlineMs === undefined) return queue.then(dispatch);
-      return new Promise((resolve, reject) => {
-        let expired = false;
-        const timer = setTimeout(() => {
-          expired = true;
-          reject(new Error('Prompt deadline exceeded'));
-        }, ctx.deadlineMs);
-        void queue
-          .then(() => {
-            clearTimeout(timer);
-            if (!expired) resolve(dispatch());
-          })
-          .catch(reject);
-      });
+      return opts?.beforeQueuedDispatch
+        ? opts.beforeQueuedDispatch().then(dispatch)
+        : dispatch();
     },
     closeSession: (sessionId: string) => {
       closes.push(sessionId);
@@ -3776,6 +3762,38 @@ describe('following up a sub-session', () => {
     releaseQueue();
     await queue;
     expect(fake.prompts).toEqual([]);
+  });
+
+  it('sent: timing out after the ACP write starts leaves the prompt in the FIFO', async () => {
+    const fake = makeFakeBridge({
+      restoredCallerParents: { kid: 'caller' },
+      resumable: ['kid'],
+      blockAfterEvents: true,
+    });
+    const sendPrompt = vi
+      .spyOn(fake.bridge, 'sendPrompt')
+      .mockImplementationOnce((_sessionId, _request, _signal, context) => {
+        context?.onPromptAdmitted?.();
+        context?.onPromptWriteStarted?.();
+        return new Promise(() => {});
+      });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+      getArchiveCoordinator,
+      sentModeDrainTimeoutMs: 10,
+    });
+
+    const result = await followUp(launcher, 'sent');
+    await vi.waitFor(() => expect(fake.notifications).toHaveLength(1));
+    expect(fake.notifications[0]?.notification).toMatchObject({
+      taskId: result.taskId,
+      status: 'failed',
+    });
+    const [, , signal, context] = sendPrompt.mock.calls[0]!;
+    expect(context?.deadlineMs).toBeUndefined();
+    expect(context?.dispatchSignal?.aborted).toBe(false);
+    expect(signal?.aborted).not.toBe(true);
   });
 
   it('never closes a reused session when the launch fails', async () => {

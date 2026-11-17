@@ -805,9 +805,11 @@ async function awaitFirstTurn(
   lastEventId: number,
   timeoutMs: number,
   stopSignal?: AbortSignal,
-  /** Count only chunks stamped with `promptId`. Set for a session that may be
-   * running another turn when this prompt is queued behind it. */
-  requirePromptId = false,
+  options?: {
+    /** Count only chunks stamped with this prompt's ID. */
+    requirePromptId?: boolean;
+    onTimeout?: () => void;
+  },
 ): Promise<{ result: string; stopReason: string }> {
   const ac = new AbortController();
   // `ac.signal.aborted` cannot report whether the deadline passed: the `finally`
@@ -818,6 +820,7 @@ async function awaitFirstTurn(
   let timedOut = false;
   const timer = setTimeout(() => {
     timedOut = true;
+    options?.onTimeout?.();
     ac.abort();
   }, timeoutMs);
   if (typeof timer.unref === 'function') timer.unref();
@@ -866,7 +869,7 @@ async function awaitFirstTurn(
           d?.update?.sessionUpdate === 'agent_message_chunk' &&
           typeof d.update.content?.text === 'string' &&
           (e.promptId === promptId ||
-            (!requirePromptId && e.promptId === undefined)) &&
+            (!options?.requirePromptId && e.promptId === undefined)) &&
           d.update._meta?.source !== 'background_task_completed' &&
           d.update._meta?.source !== 'background_notification' &&
           d.update._meta?.source !== 'background_notification_turn_started'
@@ -1259,6 +1262,8 @@ export function createSubSessionLauncher(
     let onPromptDispatched: (() => void) | undefined;
     const named = remote !== undefined || assertLocalCurrent !== undefined;
     const guardedSent = info.completion === 'sent' && named;
+    const followUpDispatchAbort =
+      reusing && info.completion === 'sent' ? new AbortController() : undefined;
     // A new session dispatches at once, so a guarded `sent` launch waits for
     // that. A follow-up may sit behind a running turn for as long as that
     // turn takes; it returns once queued, and a prompt the guards refuse when
@@ -1439,11 +1444,8 @@ export function createSubSessionLauncher(
             promptId,
             onPromptAdmitted,
             onPromptDispatched,
-            dispatchSignal,
-            ...(reusing && info.completion === 'sent'
-              ? { deadlineMs: sentModeDrainTimeoutMs }
-              : {}),
-            ...(named
+            dispatchSignal: followUpDispatchAbort?.signal ?? dispatchSignal,
+            ...(named || followUpDispatchAbort
               ? {
                   onPromptWriteStarted: () => {
                     promptWriteStarted = true;
@@ -1581,7 +1583,21 @@ export function createSubSessionLauncher(
                   lastEventId,
                   sentModeDrainTimeoutMs,
                   drainSignal,
-                  reusing,
+                  {
+                    requirePromptId: reusing,
+                    onTimeout() {
+                      // Once the ACP write starts, the prompt may reach the
+                      // child. Keep FIFO ownership until its RPC settles.
+                      if (!promptWriteStarted) {
+                        followUpDispatchAbort?.abort(
+                          new DOMException(
+                            'Sub-session follow-up dispatch timed out.',
+                            'TimeoutError',
+                          ),
+                        );
+                      }
+                    },
+                  },
                 ),
                 turnError,
               ]);
@@ -1686,7 +1702,7 @@ export function createSubSessionLauncher(
           lastEventId,
           firstTurnTimeoutMs,
           stopAc.signal,
-          reusing,
+          { requirePromptId: reusing },
         );
         const { result, stopReason } = await Promise.race([
           firstTurn,

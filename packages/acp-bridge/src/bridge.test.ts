@@ -21734,6 +21734,63 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('releases the Guard wait owner when queued dispatch expires', async () => {
+      let releaseFirst!: () => void;
+      const firstDone = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+      const handle = makeChannel({
+        promptImpl: async () => {
+          await firstDone;
+          return { stopReason: 'end_turn' };
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const { sessionId } = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const first = bridge.sendPrompt(
+        sessionId,
+        { sessionId, prompt: [{ type: 'text', text: 'first' }] },
+        undefined,
+        { promptId: 'running' },
+      );
+      await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+
+      const dispatch = new AbortController();
+      const second = bridge.sendPrompt(
+        sessionId,
+        { sessionId, prompt: [{ type: 'text', text: 'second' }] },
+        undefined,
+        { promptId: 'queued', dispatchSignal: dispatch.signal },
+      );
+      const claim = () =>
+        handle.agentConnection.extMethod(
+          TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
+          { sessionId, promptId: 'running' },
+        );
+      await expect(claim()).resolves.toEqual({
+        claimed: false,
+        hasQueuedPrompt: true,
+      });
+
+      const timeout = new DOMException('Dispatch timed out', 'TimeoutError');
+      dispatch.abort(timeout);
+      await vi.waitFor(() => {
+        expect(handle.agent.extMethodCalls).toContainEqual({
+          method: TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
+          params: { sessionId, promptId: 'running' },
+        });
+      });
+      await expect(claim()).resolves.toEqual({
+        claimed: true,
+        hasQueuedPrompt: false,
+      });
+      releaseFirst();
+      await expect(first).resolves.toEqual({ stopReason: 'end_turn' });
+      await expect(second).rejects.toBe(timeout);
+      expect(handle.agent.promptCalls).toHaveLength(1);
+      await bridge.shutdown();
+    });
+
     it('removePendingPrompt aborts a queued prompt and removes it from the list', async () => {
       let resolveFirst: (() => void) | undefined;
       const firstDone = new Promise<void>((r) => {

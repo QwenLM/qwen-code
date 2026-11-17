@@ -159,7 +159,8 @@ describe('CreateSubSessionTool', () => {
     const sent = await tool
       .build({ prompt: 'p', sessionId: 'kid', completion: 'sent' })
       .execute(new AbortController().signal);
-    expect(sent.llmContent).toContain('received the prompt');
+    expect(sent.llmContent).toContain('accepted the prompt into its queue');
+    expect(sent.returnDisplay).toMatch(/ queued$/);
     expect(() => tool.build({ prompt: 'p', sessionId: 'a\nb' })).toThrow(
       /sessionId/,
     );
@@ -369,6 +370,22 @@ describe('CreateSubSessionTool', () => {
     // Nothing was created, so the message must not hedge.
     expect(res.llmContent).toMatch(/no sub-session was created/i);
     expect(res.llmContent).not.toMatch(/may already have been created/i);
+  });
+
+  it('reports that a cancelled follow-up may already be queued', async () => {
+    const spawner: SubSessionSpawner = () => new Promise(() => {});
+    const ac = new AbortController();
+    const result = new CreateSubSessionTool(makeConfig(spawner))
+      .build({ prompt: 'x', sessionId: 'kid' })
+      .execute(ac.signal);
+    ac.abort();
+
+    await expect(result).resolves.toMatchObject({
+      llmContent: expect.stringContaining(
+        'follow-up prompt may already be queued',
+      ),
+      interruptedBeforeCompletion: true,
+    });
   });
 
   it('does not report cancellation when the spawn wins the race', async () => {
