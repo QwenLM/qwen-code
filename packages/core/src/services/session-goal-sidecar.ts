@@ -54,7 +54,11 @@ export function isValidSessionGoalSidecar(
     (GOAL_STATUSES as readonly string[]).includes(v['status']) &&
     typeof v['objective'] === 'string' &&
     typeof v['updatedAt'] === 'number' &&
-    Number.isFinite(v['updatedAt'])
+    Number.isFinite(v['updatedAt']) &&
+    // Keep updatedAt within the range Date can represent: the catalog
+    // projection renders it via new Date(updatedAt).toISOString(), which
+    // throws a RangeError outside ±8.64e15 ms.
+    Math.abs(v['updatedAt']) <= 8.64e15
   );
 }
 

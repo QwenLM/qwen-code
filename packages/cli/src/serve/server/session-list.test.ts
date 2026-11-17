@@ -22,6 +22,7 @@ import type {
 import {
   InvalidCursorError,
   listWorkspaceSessionsForResponse,
+  searchWorkspaceSessionsForResponse,
 } from './session-list.js';
 
 describe('merged session catalog pagination', () => {
@@ -920,6 +921,54 @@ describe('merged session catalog pagination', () => {
 
       expect(result.sessions[0]?.goal?.objective).toBe('ship it');
       expect(result.sessions[0]?.clientCount).toBe(2);
+    });
+
+    it('projects the goal sidecar in the organized view', async () => {
+      // The organized view scans persisted summaries through a different
+      // enrich call site than the default list; it must carry the goal too.
+      const session = summary(0);
+      await persist(session);
+      await writeGoalSidecar(session, JSON.stringify(projection));
+      const { bridge } = bridgeFor([]);
+
+      const result = await listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        { view: 'organized', group: 'all' },
+        { runtimeBaseDir },
+      );
+
+      const row = result.sessions.find(
+        (item) => item.sessionId === session.sessionId,
+      );
+      expect(row?.goal).toEqual({
+        status: 'paused',
+        objective: 'ship it',
+        updatedAt: new Date(1_700_000_000_000).toISOString(),
+      });
+    });
+
+    it('projects the goal sidecar onto search results', async () => {
+      const session = summary(0);
+      await persist(session);
+      await writeGoalSidecar(session, JSON.stringify(projection));
+
+      const result = await searchWorkspaceSessionsForResponse(
+        workspaceCwd,
+        'stored',
+        {},
+        { runtimeBaseDir },
+      );
+
+      const hit = result.results.find(
+        (item) => item.session.sessionId === session.sessionId,
+      );
+      expect(hit).toBeDefined();
+      expect(hit?.session.goal).toEqual({
+        status: 'paused',
+        objective: 'ship it',
+        updatedAt: new Date(1_700_000_000_000).toISOString(),
+      });
     });
   });
 });

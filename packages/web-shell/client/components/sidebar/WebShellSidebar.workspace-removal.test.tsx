@@ -8270,6 +8270,41 @@ describe('WebShellSidebar goal markers', () => {
     expect(onLoadSession).toHaveBeenCalledWith('goal-session', '/tmp/project');
   });
 
+  it('reserves the actions width for a goal-only row without a PR badge', async () => {
+    active.sessions.push(
+      goalSession({
+        status: 'active',
+        objective: 'ship it',
+        updatedAt: '2026-11-17T00:00:00.000Z',
+      }),
+      {
+        sessionId: 'plain-session',
+        workspaceCwd: '/tmp/project',
+        displayName: 'Plain session',
+      },
+    );
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+
+    const goalRow = rowFor('Goal session')!;
+    // No PR badge is rendered, so the reservation must come from the goal
+    // marker alone (reserveActionsWidth's `|| hasGoalMarker` arm).
+    expect(goalRow.querySelector('[class*="sessionPrBadge"]')).toBeNull();
+    expect(
+      goalRow.querySelector('[data-testid="session-goal-marker"]'),
+    ).not.toBeNull();
+    expect(
+      goalRow.querySelector('[class*="sessionMetaSlotReserved"]'),
+    ).not.toBeNull();
+
+    // A goal-less, PR-less row reserves nothing.
+    expect(
+      rowFor('Plain session')!.querySelector(
+        '[class*="sessionMetaSlotReserved"]',
+      ),
+    ).toBeNull();
+  });
+
   it('paints the attention tone for a paused goal', async () => {
     active.sessions.push(
       goalSession({

@@ -58,7 +58,10 @@ import { CompressionStatus } from '../core/turn.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import { moveSessionPrSidecar } from './session-pr-service.js';
-import { moveSessionGoalSidecar } from './session-goal-sidecar.js';
+import {
+  deleteSessionGoalSidecar,
+  moveSessionGoalSidecar,
+} from './session-goal-sidecar.js';
 import { SessionWriterLostError } from './session-writer-lease.js';
 import {
   content,
@@ -91,6 +94,7 @@ vi.mock('./session-pr-service.js', async (importOriginal) => ({
 vi.mock('./session-goal-sidecar.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./session-goal-sidecar.js')>()),
   moveSessionGoalSidecar: vi.fn(() => Promise.resolve()),
+  deleteSessionGoalSidecar: vi.fn(() => Promise.resolve()),
 }));
 
 type Line = Record<string, unknown>;
@@ -2065,6 +2069,46 @@ describe('SessionService', () => {
         ),
       ).toBe(true);
     },
+    reconcilesGoalSidecarOnConflict: async (kind: MoveKind) => {
+      const toArchive = kind === 'archive';
+      const keptGoal = toArchive
+        ? `/chats/archive/${sessionIdA}.goal.json`
+        : `/chats/${sessionIdA}.goal.json`;
+      const droppedGoal = toArchive
+        ? `/chats/${sessionIdA}.goal.json`
+        : `/chats/archive/${sessionIdA}.goal.json`;
+
+      // Kept projection present: the dropped lineage is deleted, never
+      // renamed over the survivor (which would show the deleted transcript's
+      // Goal).
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+      vi.mocked(moveSessionGoalSidecar).mockClear();
+      vi.mocked(deleteSessionGoalSidecar).mockClear();
+      existsFor(keptGoal);
+
+      const keptResult = await mirror(kind).run({ resolveConflicts: true });
+
+      expect(keptResult.resolvedConflicts).toEqual([sessionIdA]);
+      expect(deleteSessionGoalSidecar).toHaveBeenCalledWith(
+        expect.stringContaining(droppedGoal),
+      );
+      expect(moveSessionGoalSidecar).not.toHaveBeenCalled();
+
+      // Kept projection absent: the dropped projection moves into its place.
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+      vi.mocked(moveSessionGoalSidecar).mockClear();
+      vi.mocked(deleteSessionGoalSidecar).mockClear();
+      existsSyncSpy.mockReturnValue(false);
+
+      const absentResult = await mirror(kind).run({ resolveConflicts: true });
+
+      expect(absentResult.resolvedConflicts).toEqual([sessionIdA]);
+      expect(moveSessionGoalSidecar).toHaveBeenCalledWith(
+        expect.stringContaining(droppedGoal),
+        expect.stringContaining(keptGoal),
+      );
+      expect(deleteSessionGoalSidecar).not.toHaveBeenCalled();
+    },
     movesKnownLocation: async (kind: MoveKind) => {
       const m = seeded(kind);
 
@@ -2275,6 +2319,9 @@ describe('SessionService', () => {
     it('should warn but still archive when the goal sidecar move fails', () =>
       mirrored.warnsOnGoalSidecarFailure('archive'));
 
+    it('should let the kept goal sidecar win on an archive conflict', () =>
+      mirrored.reconcilesGoalSidecarOnConflict('archive'));
+
     const bothPrSidecarsExist = () => {
       archive.seed();
       existsFor(
@@ -2483,6 +2530,9 @@ describe('SessionService', () => {
 
     it('should warn but still unarchive when the goal sidecar move fails', () =>
       mirrored.warnsOnGoalSidecarFailure('unarchive'));
+
+    it('should let the kept goal sidecar win on an unarchive conflict', () =>
+      mirrored.reconcilesGoalSidecarOnConflict('unarchive'));
 
     it('should unarchive known archived sessions', () =>
       mirrored.movesKnownLocation('unarchive'));

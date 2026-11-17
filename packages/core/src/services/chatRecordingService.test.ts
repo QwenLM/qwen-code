@@ -1313,6 +1313,39 @@ describe('ChatRecordingService', () => {
         expect(record.uuid).toBe('goal-record');
         expect(emitSessionGoalChanged).not.toHaveBeenCalled();
       });
+
+      it('does not touch the projection when the journal append fails', async () => {
+        // The projection refresh runs only after the strict append resolves;
+        // a failed append must leave the sidecar and the catalog clock alone.
+        vi.mocked(jsonl.writeLine).mockRejectedValueOnce(
+          new Error('disk full'),
+        );
+
+        await expect(
+          svc.recordGoalState('goal-record', goalPayload),
+        ).rejects.toThrow('disk full');
+        await settle();
+
+        expect(writeSessionGoalSidecar).not.toHaveBeenCalled();
+        expect(deleteSessionGoalSidecar).not.toHaveBeenCalled();
+        expect(emitSessionGoalChanged).not.toHaveBeenCalled();
+      });
+
+      it('skips the projection for managed logs', async () => {
+        // Managed logs own their metadata; the guard must short-circuit
+        // before any sidecar mutation or catalog mark.
+        const managed = new ChatRecordingService(mockConfig, undefined, true);
+        managed.bindManagedSink({
+          logSize: () => 0,
+        } as unknown as Parameters<ChatRecordingService['bindManagedSink']>[0]);
+
+        managed.refreshGoalProjection(goalPayload.snapshot.goal);
+        await settle();
+
+        expect(writeSessionGoalSidecar).not.toHaveBeenCalled();
+        expect(deleteSessionGoalSidecar).not.toHaveBeenCalled();
+        expect(emitSessionGoalChanged).not.toHaveBeenCalled();
+      });
     });
 
     it('restores the persisted cursor when a queued append fails', async () => {

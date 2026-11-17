@@ -19,8 +19,6 @@ interface SessionGoalMarkerProps {
    * indicator.
    */
   onOpen?: () => void;
-  /** Override inside roving-tabindex listbox rows (picker dialogs). */
-  tabIndex?: number;
 }
 
 /**
@@ -29,11 +27,7 @@ interface SessionGoalMarkerProps {
  * glance. Completed goals render nothing — both Goals listings filter
  * `complete`, and the sidebar follows the same policy.
  */
-export function SessionGoalMarker({
-  goal,
-  onOpen,
-  tabIndex,
-}: SessionGoalMarkerProps) {
+export function SessionGoalMarker({ goal, onOpen }: SessionGoalMarkerProps) {
   const { t } = useI18n();
   if (goal.status === 'complete') return null;
   const label = t('sidebar.sessionGoal', {
@@ -55,6 +49,7 @@ export function SessionGoalMarker({
         className={styles.goalMarker}
         data-testid="session-goal-marker"
         data-status={goalStatusTone(goal.status)}
+        role="img"
         aria-label={label}
         title={label}
       >
@@ -70,7 +65,6 @@ export function SessionGoalMarker({
       data-status={goalStatusTone(goal.status)}
       aria-label={label}
       title={label}
-      {...(tabIndex !== undefined ? { tabIndex } : {})}
       onClick={(event) => {
         event.stopPropagation();
         onOpen();

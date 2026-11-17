@@ -4158,6 +4158,36 @@ describe('Session', () => {
     expect(unsubscribe).toHaveBeenCalledOnce();
   });
 
+  it('emits a goal-changed catalog notification when the goal callback fires', async () => {
+    // The child's journal hook persists the goal sidecar; the registered
+    // callback must carry the catalog-clock mark so version-watching
+    // clients refetch the sidebar marker.
+    let goalChanged: ((sessionId: string) => void) | undefined;
+    vi.mocked(
+      mockConfig.getSessionService().setSessionGoalChangedCallback,
+    ).mockImplementation((callback) => {
+      goalChanged = callback;
+    });
+    session.dispose();
+    session = new Session(
+      'test-session-id',
+      mockConfig,
+      mockClient,
+      mockSettings,
+    );
+    expect(goalChanged).toBeDefined();
+
+    vi.mocked(mockClient.extNotification).mockClear();
+    goalChanged!('goal-session-id');
+    await Promise.resolve();
+
+    expect(mockClient.extNotification).toHaveBeenCalledWith(
+      'qwen/notify/session/goal-changed',
+      { v: 1, sessionId: 'goal-session-id' },
+    );
+    session.dispose();
+  });
+
   it('registers the dedicated Live screen tool and routes it over extMethod', async () => {
     const directory = path.join(os.tmpdir(), 'qwen-live-appshot');
     await fs.mkdir(directory, { recursive: true, mode: 0o700 });

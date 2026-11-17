@@ -17,13 +17,15 @@ span.goalMarker {
   cursor: default;
 }
 
-.goalMarker:hover,
-.goalMarker:focus-visible {
+/* Only the interactive button variant highlights on hover/focus; the
+   archived-row span is a pure indicator and must not look clickable. */
+button.goalMarker:hover,
+button.goalMarker:focus-visible {
   outline: none;
   background: var(--muted);
 }
 
-.goalMarker:focus-visible {
+button.goalMarker:focus-visible {
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 45%, transparent);
 }
 

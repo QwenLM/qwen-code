@@ -10,11 +10,13 @@ Goals 页（#17230、#17291、#17349）展示每个已加载会话的目标，�
 
 ## 现状
 
-- 目标运行时以会话为作用域，归各 `qwen --acp` 子进程所有；serve 进程不持有可变副本（`packages/cli/src/serve/routes/goals.ts:8-27`）。`GET /goals` 对每个**存活**会话扇出一个 `sessionGoalGet` IPC 探针（并发受限），既有成本又看不见未加载会话。
-- 目标状态以 `goal_state` 系统记录持久化在会话转录中。唯一日志写入点是 `ChatRecordingService.recordGoalState`（`packages/core/src/services/chatRecordingService.ts:2698`）；恢复时从新到旧扫描记录（`goals/goal-persistence.ts`）。今天没有独立的目标文件。
-- 会话目录（`POST /sessions/catalog` → `packages/cli/src/serve/server/session-list.ts`）已经从磁盘读取每会话 sidecar 文件并合并进摘要：PR 绑定（`<chatsDir>/<sessionId>.pr.json`，读取于 `session-list.ts:528-534`）、worktree 信息、标题 sidecar。路径助手在 `SessionService`（`packages/core/src/services/sessionService.ts:1043-1056`），含归档态变体与归档/恢复/删除时的 sidecar 搬移/删除。
-- 存活 sidecar 更新无需轮询即可传播：子进程自己写 PR sidecar，触发 `emitSessionPrBound`（`sessionService.ts:1207-1230`），ACP 会话发送 `qwen/notify/session/pr-binding`（`packages/cli/src/acp-integration/session/Session.ts:13797-13810`），bridge 校验后标记目录时钟（`packages/acp-bridge/src/bridgeClient.ts:2973`），监视版本的客户端随之重取目录。
-- 摘要 wire 类型携带 `prs?: DaemonSessionPrInfo[]`（`packages/sdk-typescript/src/daemon/types.ts:1753`，`DaemonSessionSummary`）；侧栏在两种布局变体的会话标题旁渲染 `SessionPrBadge`（`WebShellSidebar.tsx:5462, 5541, 5956`）。
+引用以符号名而非行号标注——行号随 `main` 漂移，符号名可在所指文件中解析。
+
+- 目标运行时以会话为作用域，归各 `qwen --acp` 子进程所有；serve 进程不持有可变副本（`packages/cli/src/serve/routes/goals.ts`）。`GET /goals` 对每个**存活**会话扇出一个 `sessionGoalGet` IPC 探针（并发受限），既有成本又看不见未加载会话。
+- 目标状态以 `goal_state` 系统记录持久化在会话转录中。唯一日志写入点是 `ChatRecordingService.recordGoalState`（`packages/core/src/services/chatRecordingService.ts`）；恢复时从新到旧扫描记录（`goals/goal-persistence.ts`）。今天没有独立的目标文件。
+- 会话目录（`POST /sessions/catalog` → `packages/cli/src/serve/server/session-list.ts`）已经从磁盘读取每会话 sidecar 文件并合并进摘要：PR 绑定（`<chatsDir>/<sessionId>.pr.json`，由 `enrichPrSidecars` 读取）、worktree 信息（`enrichWorktreeSidecars`）、标题 sidecar。路径助手在 `SessionService`（`packages/core/src/services/sessionService.ts`，`getPrSessionPathForState` / `getPrSessionPathForArchiveState` 及归档态变体）；PR sidecar 在四个生命周期站点搬移/删除：`removePrSidecars`（删除会话，两个归档态）、`moveArchiveSidecars`（通用归档/恢复搬移）、以及 `archiveSessions` / `unarchiveSessions` 的归档冲突与恢复冲突分支（各为被丢弃谱系调用 `moveSessionPrSidecar`）。
+- 存活 sidecar 更新无需轮询即可传播：子进程自己写 PR sidecar，触发 `SessionService.emitSessionPrBound`（经 `setSessionPrBoundCallback` 注册），ACP 会话从 `Session.#registerBackgroundNotificationCallbacks` 发送 `qwen/notify/session/pr-binding`（`packages/cli/src/acp-integration/session/Session.ts`），bridge 校验后标记目录时钟（`packages/acp-bridge/src/bridgeClient.ts` 的 `pr-binding` ext 通知处理器），监视版本的客户端随之重取目录。
+- 摘要 wire 类型携带 `prs?: DaemonSessionPrInfo[]`（`packages/sdk-typescript/src/daemon/types.ts`，`DaemonSessionSummary`）；侧栏在两种布局变体的会话标题旁渲染 `SessionPrBadge`（`WebShellSidebar.tsx` 的归档行与活跃行渲染分支）。
 - 客户端已有 #17349 的 `goalStatusTone` 与共享执行状态色板（`GoalStatusStrip.tsx`），以及全应用 Goals 图标 `Target`。
 
 ## 目标
@@ -36,7 +38,7 @@ Goals 页（#17230、#17291、#17349）展示每个已加载会话的目标，�
 ### Core：目标 sidecar 投影
 
 - 新增 `session-goal-sidecar.ts`，与 `session-pr-service.ts` 并列：小 JSON 投影 `{ v: 1, goalId, status, objective, updatedAt }`，原子写、容忍 ENOENT 的读（「无目标」）、归档搬移助手——镜像 PR sidecar 服务的形态。
-- `SessionService` 新增 `getGoalSessionPathForArchiveState`，返回 `<chatsDir>/<sessionId>.goal.json`；归档/恢复/删除路径在已处理 PR sidecar 的同一位置搬移/删除它（`sessionService.ts:1859, 2048-2049, 4117-4118`）。
+- `SessionService` 新增 `getGoalSessionPathForState` / `getGoalSessionPathForArchiveState`，返回 `<chatsDir>/<sessionId>.goal.json`；目标 sidecar 在与 PR sidecar 相同的四个生命周期站点搬移/删除：`removeGoalSidecars`（删除会话，两个归档态）、`moveArchiveSidecars` 中的目标搬移（通用归档/恢复搬移）、以及 `archiveSessions` / `unarchiveSessions` 的归档冲突与恢复冲突分支。两个冲突分支做调和而非盲搬：`reconcileGoalSidecarOnConflict` 保留存活转录的投影（存活方有 sidecar 时删除被丢弃谱系的 sidecar，仅当存活方没有时才搬入），镜像 `reconcileTitleSidecarOnConflict`，使被删除谱系无法覆盖存活方的标记。
 - `ChatRecordingService.recordGoalState` 在严格日志追加成功后写投影：载荷快照有目标 → upsert sidecar；`snapshot.goal === null`（清除）→ 删除。写入尽力而为：sidecar 失败只记日志，绝不让日志失败——转录仍是权威记录，标记滞后或缺失与 PR 徽章已接受的降级模式相同。
 - 恢复本身不写任何东西（运行时的不变量）；改由 `Config.initializeGoalRuntime` 在 `goalRuntimeReady` 落定后经 recorder 的公开方法 `refreshGoalProjection` 刷新一次投影。本特性之前记入日志的会话在下次加载时即获得标记，无需等待下一次状态转换。
 - `SessionService` 新增 `emitSessionGoalChanged` / `setSessionGoalChangedCallback`，镜像 PR 绑定回调对；`Config.relocateWorkingDirectory` 与携带 PR 绑定回调一样把该回调带到替换后的服务实例。
@@ -63,7 +65,7 @@ Goals 页（#17230、#17291、#17349）展示每个已加载会话的目标，�
 ## 设计决策
 
 - **sidecar 投影，而非探针。** PR 绑定特性已验证该模式：每会话 sidecar + 目录读取 + 时钟标记通知。它覆盖未加载/已归档会话（Goals 列表做不到），每次目录取数每会话只多读一个小文件，零 IPC。按目录调用重解析转录因成本被否；仅存活的 serve 缓存被否，因为未加载会话里暂停的目标正是标记必须呈现的场景。
-- **日志钩子，而非运行时多处钩子。** `recordGoalState` 是所有状态转换（创建、编辑、暂停、继续、清除、用量受限结算）必经的唯一写入点。一处钩子覆盖全部路径；在 reducer 各调用方分散写入会漂移。
+- **日志钩子，而非运行时多处钩子。** `recordGoalState` 是所有状态转换（创建、编辑、暂停、继续、清除、用量受限结算，以及每轮 `turn_finished` 重发布）必经的唯一写入点。一处钩子覆盖全部路径；在 reducer 各调用方分散写入会漂移。
 - **转录保持权威。** sidecar 在严格追加之后写，绝不反向门禁。恢复仍读记录；sidecar 只服务列表。追加与 sidecar 写之间崩溃会留下滞后标记，由下次转换或加载修复——与 PR 徽章的一致性契约相同。
 - **变更按路径进程内序列化。** 运行时会自动结算界限，转换可能快于磁盘写入；两个盲覆盖竞争可能让较旧的投影最后落盘。按路径的 promise 队列保证写/删有序（失败的变更不阻塞后续）。无需跨进程锁：给定会话的 sidecar 只由该会话子进程写；daemon 的归档搬移有所有权围栏，被搁浅的投影由下次转换/加载修复。
 - **通知携带时钟标记，而非数据。** 镜像 pr-binding 保持单一传播机制与单一校验面；目录读取仍是投影值的唯一来源。
@@ -88,7 +90,7 @@ Goals 页（#17230、#17291、#17349）展示每个已加载会话的目标，�
 
 - 跨包改动（core / acp-bridge / cli / sdk-typescript / web-shell）。维护者作者；涉及的 core 路径是记录/服务层，不是目标 reducer 或控制语义。
 - 本特性之前记入日志的遗留会话，在下次加载或转换前不显示标记（恢复时写）。已记录的缺口，不做批量回填任务。
-- sidecar 写为每次目标转换增加一次小文件写；转换是人类尺度（设/暂停/继续/清除），不是每轮。
+- sidecar 写不限于人类尺度的转换。目标活跃时，运行时在每轮结束重发布快照（cause `turn_finished`，刷新 `turnCount` / `activeTimeMs` / `tokensUsed`），每次重发布都经过 `recordGoalState`。因此活跃目标会话每轮重写一次 sidecar 并标记一次目录时钟——每轮每活跃目标会话一次小 fsync 写加一次目录重取，此外还有设/暂停/继续/清除转换。这与转录本就做的每轮日志相同；投影只增加一次文件写与一次时钟标记，不新增日志记录。暂停/阻塞的目标不跑轮，故无每轮成本。
 - 卡死的子进程不会拖住目录：读取纯磁盘，通知尽力而为。
 
 ## 验证计划

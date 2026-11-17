@@ -85,7 +85,10 @@ import {
   moveSessionPrSidecar,
   readSessionPrsDetailed,
 } from './session-pr-service.js';
-import { moveSessionGoalSidecar } from './session-goal-sidecar.js';
+import {
+  deleteSessionGoalSidecar,
+  moveSessionGoalSidecar,
+} from './session-goal-sidecar.js';
 import {
   moveSessionTitleSidecar,
   readSessionTitleSidecar,
@@ -2072,6 +2075,24 @@ export class SessionService {
       removeSessionTitleSidecar(dropped);
     } else {
       moveSessionTitleSidecar(dropped, kept);
+    }
+  }
+
+  // The kept transcript's Goal wins: a blind rename of the dropped lineage's
+  // projection over the survivor would show the deleted transcript's status.
+  // Mirrors reconcileTitleSidecarOnConflict; presence (not validity) decides,
+  // so a corrupt kept sidecar still wins and repairs from its own transcript.
+  private async reconcileGoalSidecarOnConflict(
+    sessionId: string,
+    keptState: SessionArchiveState,
+    droppedState: SessionArchiveState,
+  ): Promise<void> {
+    const kept = this.getGoalSessionPathForState(sessionId, keptState);
+    const dropped = this.getGoalSessionPathForState(sessionId, droppedState);
+    if (fs.existsSync(kept)) {
+      await deleteSessionGoalSidecar(dropped);
+    } else {
+      await moveSessionGoalSidecar(dropped, kept);
     }
   }
 
@@ -4296,14 +4317,15 @@ export class SessionService {
           }
           try {
             options.assertCleanupOwned?.();
-            await moveSessionGoalSidecar(
-              this.getGoalSessionPathForState(sessionId, 'active'),
-              this.getGoalSessionPathForState(sessionId, 'archived'),
+            await this.reconcileGoalSidecarOnConflict(
+              sessionId,
+              'archived',
+              'active',
             );
           } catch (sidecarError) {
             options.assertCleanupOwned?.();
             this.warn(
-              `archiveSessions: failed to move active goal sidecar for ${sessionId}: ${sidecarError}`,
+              `archiveSessions: failed to reconcile active goal sidecar for ${sessionId}: ${sidecarError}`,
             );
           }
           options.assertCleanupOwned?.();
@@ -4470,14 +4492,15 @@ export class SessionService {
           }
           try {
             options.assertCleanupOwned?.();
-            await moveSessionGoalSidecar(
-              this.getGoalSessionPathForState(sessionId, 'archived'),
-              this.getGoalSessionPathForState(sessionId, 'active'),
+            await this.reconcileGoalSidecarOnConflict(
+              sessionId,
+              'active',
+              'archived',
             );
           } catch (sidecarError) {
             options.assertCleanupOwned?.();
             this.warn(
-              `unarchiveSessions: failed to move archived goal sidecar for ${sessionId}: ${sidecarError}`,
+              `unarchiveSessions: failed to reconcile archived goal sidecar for ${sessionId}: ${sidecarError}`,
             );
           }
           options.assertCleanupOwned?.();

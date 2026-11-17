@@ -18,37 +18,49 @@ invisible everywhere except the Goals page's live-only listing.
 
 ## Current state
 
+Citations name symbols rather than line numbers, which drift as `main`
+moves; each is resolvable in the file named.
+
 - The canonical Goal runtime is session-scoped, owned by each `qwen --acp`
   child; the serve process holds no mutable copy
-  (`packages/cli/src/serve/routes/goals.ts:8-27`). `GET /goals` fans out one
+  (`packages/cli/src/serve/routes/goals.ts`). `GET /goals` fans out one
   `sessionGoalGet` IPC probe per LIVE session (concurrency-capped), so it is
   both costly and blind to unloaded sessions.
 - Goal state persists as `goal_state` system records in the session
   transcript. The single journal write point is
   `ChatRecordingService.recordGoalState`
-  (`packages/core/src/services/chatRecordingService.ts:2698`); recovery
+  (`packages/core/src/services/chatRecordingService.ts`); recovery
   scans records newest-first (`goals/goal-persistence.ts`). There is no
   standalone goal file today.
 - The session catalog (`POST /sessions/catalog` →
   `packages/cli/src/serve/server/session-list.ts`) already reads
   per-session sidecar files from disk and merges them into the summary:
-  PR bindings (`<chatsDir>/<sessionId>.pr.json`, read at
-  `session-list.ts:528-534`), worktree info, and the title sidecar. Path
-  helpers live on `SessionService`
-  (`packages/core/src/services/sessionService.ts:1043-1056`), including
-  archive-state variants and sidecar move/delete on archive/restore/remove.
+  PR bindings (`<chatsDir>/<sessionId>.pr.json`, read by
+  `enrichPrSidecars`), worktree info (`enrichWorktreeSidecars`), and the
+  title sidecar. Path helpers live on `SessionService`
+  (`packages/core/src/services/sessionService.ts`,
+  `getPrSessionPathForState` / `getPrSessionPathForArchiveState` and the
+  archive-state variants), and the PR sidecar is moved/deleted at four
+  lifecycle sites: `removePrSidecars` (session removal, both archive
+  states), `moveArchiveSidecars` (the generic archive/unarchive move), and
+  the archive-conflict and unarchive-conflict branches of
+  `archiveSessions` / `unarchiveSessions` (each calls
+  `moveSessionPrSidecar` for the dropped lineage).
 - Live sidecar updates propagate without polling: the child writes the PR
-  sidecar itself, fires `emitSessionPrBound`
-  (`sessionService.ts:1207-1230`), the ACP session sends
-  `qwen/notify/session/pr-binding`
-  (`packages/cli/src/acp-integration/session/Session.ts:13797-13810`), the
-  bridge validates it and marks the catalog clock
-  (`packages/acp-bridge/src/bridgeClient.ts:2973`), and version-watching
-  clients refetch the catalog.
+  sidecar itself, fires `SessionService.emitSessionPrBound` (registered via
+  `setSessionPrBoundCallback`), the ACP session sends
+  `qwen/notify/session/pr-binding` from
+  `Session.#registerBackgroundNotificationCallbacks`
+  (`packages/cli/src/acp-integration/session/Session.ts`), the bridge
+  validates it and marks the catalog clock
+  (`packages/acp-bridge/src/bridgeClient.ts`, the `pr-binding`
+  ext-notification handler), and version-watching clients refetch the
+  catalog.
 - The summary wire type carries `prs?: DaemonSessionPrInfo[]`
-  (`packages/sdk-typescript/src/daemon/types.ts:1753`, `DaemonSessionSummary`);
+  (`packages/sdk-typescript/src/daemon/types.ts`, `DaemonSessionSummary`);
   the sidebar renders `SessionPrBadge` beside the session title in both
-  layout variants (`WebShellSidebar.tsx:5462, 5541, 5956`).
+  layout variants (`WebShellSidebar.tsx`, the archived-row and active-row
+  render branches).
 - The client already has `goalStatusTone` and the shared execution-status
   palette from #17349 (`GoalStatusStrip.tsx`), plus the `Target` icon as the
   app-wide Goals glyph.
@@ -80,10 +92,19 @@ invisible everywhere except the Goals page's live-only listing.
   JSON projection `{ v: 1, goalId, status, objective, updatedAt }`, atomic
   write, ENOENT-tolerant read ("no goal"), and a move helper for archive
   transitions — mirroring the PR sidecar service's shape.
-- `SessionService` gains `getGoalSessionPathForArchiveState` returning
-  `<chatsDir>/<sessionId>.goal.json`, and the archive/restore/remove paths
-  move/delete it exactly where they already handle the PR sidecar
-  (`sessionService.ts:1859, 2048-2049, 4117-4118`).
+- `SessionService` gains `getGoalSessionPathForState` /
+  `getGoalSessionPathForArchiveState` returning
+  `<chatsDir>/<sessionId>.goal.json`, and the goal sidecar is moved/deleted
+  at the same four lifecycle sites as the PR sidecar: `removeGoalSidecars`
+  (session removal, both archive states), the goal move in
+  `moveArchiveSidecars` (the generic archive/unarchive move), and the
+  archive-conflict and unarchive-conflict branches of `archiveSessions` /
+  `unarchiveSessions`. The two conflict branches reconcile rather than
+  blind-move: `reconcileGoalSidecarOnConflict` keeps the surviving
+  transcript's projection (delete the dropped lineage's sidecar when the
+  survivor has one, move it into place only when the survivor has none),
+  mirroring `reconcileTitleSidecarOnConflict` so a deleted lineage cannot
+  overwrite the survivor's marker.
 - `ChatRecordingService.recordGoalState` writes the projection after the
   strict journal append succeeds: payload snapshot has a goal → upsert the
   sidecar; `snapshot.goal === null` (clear) → delete it. The write is
@@ -152,8 +173,9 @@ invisible everywhere except the Goals page's live-only listing.
   unloaded session is exactly the case the marker must surface.
 - **Journal hook, not runtime hooks.** `recordGoalState` is the single
   place every transition already passes through (create, edit, pause,
-  resume, clear, usage-limited settle). One hook there covers all paths;
-  sprinkling writes across the reducer's callers would drift.
+  resume, clear, usage-limited settle, and the per-turn `turn_finished`
+  republish). One hook there covers all paths; sprinkling writes across
+  the reducer's callers would drift.
 - **Transcript stays canonical.** The sidecar is written after the strict
   append and never gates it. Recovery still reads records; the sidecar
   only serves the list. A crash between append and sidecar write leaves a
@@ -214,8 +236,17 @@ invisible everywhere except the Goals page's live-only listing.
 - Legacy sessions journaled before this feature show no marker until
   their next load or transition (restore-time write). Documented gap, no
   bulk backfill job.
-- Sidecar writes add one small file write per goal transition; transitions
-  are human-scale (set/pause/resume/clear), not per-turn.
+- Sidecar writes are not limited to human-scale transitions. While a goal
+  is active the runtime republishes its snapshot at every turn finish
+  (cause `turn_finished`, refreshing `turnCount` / `activeTimeMs` /
+  `tokensUsed`), and each republish passes through `recordGoalState`. So
+  an active-goal session rewrites its sidecar and marks the catalog clock
+  once per turn — one small fsync'd write plus one catalog refetch per
+  turn per active-goal session, on top of the set/pause/resume/clear
+  transitions. This is the same per-turn journaling the transcript already
+  does; the projection adds a file write and a clock mark, not a new
+  journal record. Paused/blocked goals do not turn, so they incur no
+  per-turn cost.
 - A wedged child cannot stall the catalog: reads are disk-only, and the
   notification is best-effort.
 

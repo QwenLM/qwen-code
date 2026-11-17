@@ -130,6 +130,30 @@ describe('session-goal-sidecar', () => {
     expect(isValidSessionGoalSidecar(projection)).toBe(true);
   });
 
+  it('shape check rejects updatedAt outside the Date range', () => {
+    // The catalog renders updatedAt via new Date(...).toISOString(), which
+    // throws beyond ±8.64e15 ms; the boundary itself is still representable.
+    expect(
+      isValidSessionGoalSidecar({ ...projection, updatedAt: 8.64e15 }),
+    ).toBe(true);
+    expect(
+      isValidSessionGoalSidecar({ ...projection, updatedAt: 8.64e15 + 1 }),
+    ).toBe(false);
+    expect(
+      isValidSessionGoalSidecar({ ...projection, updatedAt: -8.64e15 - 1 }),
+    ).toBe(false);
+  });
+
+  it('reads an out-of-range updatedAt as null', async () => {
+    const file = path.join(dir, 's1.goal.json');
+    await fs.writeFile(
+      file,
+      JSON.stringify({ ...projection, updatedAt: 8.64e15 + 1 }),
+      'utf-8',
+    );
+    expect(await readSessionGoalSidecar(file)).toBeNull();
+  });
+
   it('delete removes the projection and tolerates absence', async () => {
     const file = path.join(dir, 's1.goal.json');
     await writeSessionGoalSidecar(file, projection);
@@ -176,6 +200,38 @@ describe('session-goal-sidecar', () => {
     ]);
 
     expect(await readSessionGoalSidecar(file)).toEqual(newest);
+  });
+
+  it('a queued delete lands after a slower pending write (clear wins)', async () => {
+    // A goal cleared while a slower projection write is still queued must
+    // stay cleared: moving the delete off the queue would let the pending
+    // write rename its projection back into place after the unlink.
+    const file = path.join(dir, 's1.goal.json');
+    writeControl.delays = [40];
+    const write = writeSessionGoalSidecar(file, projection);
+    const clear = deleteSessionGoalSidecar(file);
+
+    await Promise.all([write, clear]);
+
+    expect(await readSessionGoalSidecar(file)).toBeNull();
+  });
+
+  it('a queued write lands after a pending delete (re-create wins)', async () => {
+    const file = path.join(dir, 's1.goal.json');
+    await writeSessionGoalSidecar(file, projection);
+    writeControl.delays = [40];
+    const clear = deleteSessionGoalSidecar(file);
+    const write = writeSessionGoalSidecar(file, {
+      ...projection,
+      status: 'paused',
+    });
+
+    await Promise.all([clear, write]);
+
+    expect(await readSessionGoalSidecar(file)).toEqual({
+      ...projection,
+      status: 'paused',
+    });
   });
 
   it('a failed mutation does not block later mutations', async () => {

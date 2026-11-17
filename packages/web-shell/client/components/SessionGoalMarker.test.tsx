@@ -89,6 +89,9 @@ describe('SessionGoalMarker', () => {
   it('is a pure indicator without onOpen (archived rows)', () => {
     render();
     expect(marker()?.tagName).toBe('SPAN');
+    // A bare span with aria-label is role=generic and the name is not
+    // exposed; role=img makes the indicator's label reachable.
+    expect(marker()?.getAttribute('role')).toBe('img');
   });
 
   it('opens the session on click without bubbling to the row', () => {
@@ -115,5 +118,41 @@ describe('SessionGoalMarker', () => {
 
     expect(onOpen).toHaveBeenCalledOnce();
     expect(rowClick).not.toHaveBeenCalled();
+  });
+
+  it('stops Enter from bubbling to the row but lets other keys through', () => {
+    const onOpen = vi.fn();
+    const rowKeyDown = vi.fn();
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <div onKeyDown={rowKeyDown}>
+            <SessionGoalMarker goal={goal()} onOpen={onOpen} />
+          </div>
+        </I18nProvider>,
+      );
+    });
+
+    act(() => {
+      marker()!.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    expect(rowKeyDown).not.toHaveBeenCalled();
+
+    act(() => {
+      marker()!.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: ' ',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    expect(rowKeyDown).toHaveBeenCalledOnce();
   });
 });

@@ -42,12 +42,12 @@ const goalSessions = [
   session('plain-session', 'Plain Session'),
 ];
 
-async function openSidebar(page: Page, baseURL: string) {
-  await installMockDaemon(
-    page,
-    createWebShellDaemonScenario({ sessions: goalSessions }),
-    { baseURL },
-  );
+async function openSidebar(
+  page: Page,
+  baseURL: string,
+  scenario = createWebShellDaemonScenario({ sessions: goalSessions }),
+) {
+  await installMockDaemon(page, scenario, { baseURL });
   await page.goto('/?language=en-US&instanceId=host&instanceType=dsw');
   // Expand the workspace section if it is collapsed.
   const workspaceButton = page
@@ -62,6 +62,7 @@ async function openSidebar(page: Page, baseURL: string) {
     .locator('[class*="sessionRow"]')
     .filter({ hasText: 'Paused Goal Session' })
     .waitFor({ timeout: 30000 });
+  return scenario;
 }
 
 const row = (page: Page, name: string) =>
@@ -72,6 +73,18 @@ test('sidebar shows lifecycle-tinted goal markers from the catalog @smoke', asyn
   baseURL,
 }) => {
   await openSidebar(page, baseURL!);
+
+  // Pin the fixture rows and the marker count so a missing row or marker
+  // cannot make the colour lookups below vacuously pass.
+  for (const name of [
+    'E2E Harness Session',
+    'Paused Goal Session',
+    'Complete Goal Session',
+    'Plain Session',
+  ]) {
+    await expect(row(page, name)).toHaveCount(1);
+  }
+  await expect(page.getByTestId('session-goal-marker')).toHaveCount(2);
 
   const activeMarker = row(page, 'E2E Harness Session').getByTestId(
     'session-goal-marker',
@@ -100,6 +113,8 @@ test('sidebar shows lifecycle-tinted goal markers from the catalog @smoke', asyn
     ];
   });
   expect(activeColor).not.toBeNull();
+  expect(pausedColor).not.toBeNull();
+  expect(titleColor).not.toBeNull();
   expect(activeColor).not.toBe(pausedColor);
   expect(activeColor).not.toBe(titleColor);
   expect(pausedColor).not.toBe(titleColor);
@@ -132,4 +147,62 @@ test('clicking a goal marker opens its session @smoke', async ({
   await page.waitForURL('**/session/paused-goal-session**', {
     timeout: 30000,
   });
+});
+
+test('a goal-changed catalog bump repaints the marker without a reload @smoke', async ({
+  page,
+  baseURL,
+}) => {
+  // Live-state polling drives the catalog clock: a goal transition writes
+  // the sidecar in the child and bumps the catalog version, and the
+  // polling client must refetch and repaint the marker on its own.
+  const scenario = createWebShellDaemonScenario({
+    sessions: goalSessions,
+    capabilities: {
+      sessionLiveStatePollIntervalMs: 250,
+      features: [
+        'session_events',
+        'permission_vote',
+        'session_permission_vote',
+        'session_scope_override',
+        'session_source_metadata',
+        'session_btw_stream',
+        'workspace_settings',
+        'workspace_voice',
+        'workspace_session_live_state',
+      ],
+    },
+  });
+  await openSidebar(page, baseURL!, scenario);
+
+  const activeMarker = row(page, 'E2E Harness Session').getByTestId(
+    'session-goal-marker',
+  );
+  await expect(activeMarker).toHaveAttribute('data-status', 'running', {
+    timeout: 30000,
+  });
+
+  // The child's journal hook persisted a paused projection and bumped the
+  // catalog clock (the effect of the goal-changed notification). Mutate the
+  // scenario the mock routes read by reference; no manual refresh follows.
+  const target = scenario.sessions.find(
+    (item) => item.sessionId === 'web-shell-e2e-session',
+  )!;
+  target.goal = {
+    status: 'paused',
+    objective: 'keep the loop running',
+    updatedAt: '2026-11-17T00:01:00.000Z',
+  };
+  scenario.sessionCatalogVersion = {
+    ...scenario.sessionCatalogVersion,
+    revision: scenario.sessionCatalogVersion.revision + 1,
+  };
+
+  await expect(activeMarker).toHaveAttribute('data-status', 'attention', {
+    timeout: 30000,
+  });
+  await expect(activeMarker).toHaveAttribute(
+    'aria-label',
+    'Goal: Paused — keep the loop running',
+  );
 });
