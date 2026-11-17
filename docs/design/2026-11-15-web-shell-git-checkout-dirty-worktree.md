@@ -129,11 +129,17 @@ They are the two things a user would do in a terminal, and nothing more:
   the residue clean is best-effort — its error is swallowed so the hook
   refusal stays the reported failure, and the residue may survive.
 
-Ignored residue inside a blocking untracked directory is not preserved:
-git itself discards ignored files in the way during the switch, under
-both resolutions (probed), exactly as in the file-collision shape. The
-stash entry holds the tracked edits and the non-ignored untracked files;
-"your changes are kept" does not cover ignored build output.
+Residue inside a blocking untracked directory that the current branch
+already ignores is not preserved: git itself discards ignored files in
+the way during the switch, under both resolutions (probed), exactly as
+in the file-collision shape. Whether residue is ignored is decided at
+stash time by the current branch's rules, not the target's: residue the
+current branch does not ignore is plain untracked, so the stash entry
+captures it and it survives the switch, recoverable from the entry the
+response names (the force resolution still discards it — untracked
+files in the way are overwritten by the forced checkout itself). "Your
+changes are kept" covers what the entry holds; only files ignored at
+stash time fall outside it.
 
 Both options are refused (`409 operation_in_progress`) while a merge,
 cherry-pick, revert, rebase or am is parked in the worktree: the
