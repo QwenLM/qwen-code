@@ -1540,6 +1540,11 @@ describe('Gemini Client (client.ts)', () => {
     });
 
     it('delivers async output after the functionResponse parts on a ToolResult turn', async () => {
+      // The owning turn claims the exploration-budget prompt id; its ToolResult
+      // continuation (same prompt id) is the owner that may drain the block.
+      await run([{ text: 'main' }], 'prompt-async-tr', {
+        type: SendMessageType.UserQuery,
+      });
       installAsyncOutput('async tool result');
       const toolResult = fnResponse('read_file', { ok: true }, 'call-1');
       await run([toolResult], 'prompt-async-tr', {
@@ -1597,6 +1602,60 @@ describe('Gemini Client (client.ts)', () => {
         string | Part
       >;
       expect(hasAsyncBlock(recorded)).toBe(false);
+    });
+
+    it('leaves the pending block for the owning turn across a /btw side query and its unflagged continuation', async () => {
+      const hasAsyncBlock = (parts: Array<string | Part>) =>
+        parts.some(
+          (part) =>
+            typeof part === 'object' &&
+            part !== null &&
+            'text' in part &&
+            typeof part.text === 'string' &&
+            part.text.includes(ASYNC_HOOK_CONTEXT_OPEN),
+        );
+      // The main turn P claims the exploration-budget prompt id.
+      await run([{ text: 'main task' }], 'prompt-owner', {
+        type: SendMessageType.UserQuery,
+      });
+      installAsyncOutput('owned hook output');
+      // The /btw side query's first send is flagged: it must not drain the block.
+      await run([{ text: '/btw unrelated question' }], 'prompt-side', {
+        type: SendMessageType.UserQuery,
+        isConcurrentSideQuery: true,
+      });
+      expect(
+        hasAsyncBlock(mockTurnRunFn.mock.lastCall?.[1] as Array<string | Part>),
+      ).toBe(false);
+      // The side turn's tool-result continuation arrives WITHOUT the flag; the
+      // prompt id, not the flag, keeps it from consuming the owner's block.
+      await run(
+        [fnResponse('read_file', { ok: true }, 'call-side')],
+        'prompt-side',
+        { type: SendMessageType.ToolResult },
+      );
+      expect(
+        hasAsyncBlock(mockTurnRunFn.mock.lastCall?.[1] as Array<string | Part>),
+      ).toBe(false);
+      // The owning turn's own continuation still receives the block exactly once.
+      await run(
+        [fnResponse('read_file', { ok: true }, 'call-owner')],
+        'prompt-owner',
+        { type: SendMessageType.ToolResult },
+      );
+      const ownerParts = mockTurnRunFn.mock.lastCall?.[1] as Array<
+        string | Part
+      >;
+      expect(hasAsyncBlock(ownerParts)).toBe(true);
+      const asyncPart = ownerParts.find(
+        (part) =>
+          typeof part === 'object' &&
+          part !== null &&
+          'text' in part &&
+          typeof part.text === 'string' &&
+          part.text.includes(ASYNC_HOOK_CONTEXT_OPEN),
+      ) as Part;
+      expect(asyncPart.text).toContain('owned hook output');
     });
   });
 

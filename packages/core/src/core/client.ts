@@ -5211,9 +5211,18 @@ export class LlmClient {
       // last for the resume/projection/title strips that recognize it only in
       // last position. getHookSystem is read defensively: a config double
       // without it (or a hook system without pending output) delivers nothing.
-      const asyncHookContextPart = drainAsyncHookContextPart(
-        this.config.getHookSystem?.(),
-      );
+      // A concurrent `/btw` side query must not consume the running turn's
+      // pending block: its first send carries isConcurrentSideQuery, but its
+      // tool-result continuation arrives unflagged, so ownership rides on the
+      // exploration-budget prompt id — the same convention the budget and loop
+      // guards use above. A non-owner send leaves the block for the owning
+      // turn's next send instead of draining it into the wrong conversation.
+      const skipAsyncHookDrain =
+        options?.isConcurrentSideQuery === true ||
+        (messageType === SendMessageType.ToolResult && !ownsExplorationBudget);
+      const asyncHookContextPart = skipAsyncHookDrain
+        ? null
+        : drainAsyncHookContextPart(this.config.getHookSystem?.());
       if (asyncHookContextPart) {
         requestToSend = appendAsyncHookContextPart(
           requestToSend,
