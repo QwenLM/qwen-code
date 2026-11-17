@@ -147,8 +147,8 @@ final class AgentSessionAdmissions {
     /**
      * Ownership-enforcing creation of an unbound Session, with or without a
      * model configuration. The ownership row lands in the same transaction
-     * as the Session, receipt and creation event; a missing principal fails
-     * closed rather than creating an unowned Session.
+     * as the Session, receipt and creation event. A null principal is the
+     * legacy actorless arm and yields a row-less tenant-wide Session.
      */
     Admission insertSessionCommand(String tenantId,
             SessionPrincipal principal, String operation,
