@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-
 from qwen_code_sdk.transport import (
     _PROCESS_STREAM_LIMIT,
     ProcessTransport,
