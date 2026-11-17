@@ -41,12 +41,17 @@ interface FileOperationStats {
   writtenFilePaths: Set<string>;
 }
 
+interface ToolCallArgsEntry {
+  args: Record<string, unknown>;
+  consumed: boolean;
+}
+
 /**
  * Tool call arguments index for matching tool_result records.
  */
 interface ToolCallArgsIndex {
-  byId: Map<string, Record<string, unknown>>;
-  byName: Map<string, Array<Record<string, unknown>>>;
+  byId: Map<string, ToolCallArgsEntry>;
+  byName: Map<string, ToolCallArgsEntry[]>;
 }
 
 /**
@@ -92,8 +97,8 @@ function normalizeFunctionCallArgs(
  * Builds an index of assistant tool calls for later tool_result arg resolution.
  */
 function buildToolCallArgsIndex(records: ChatRecord[]): ToolCallArgsIndex {
-  const byId = new Map<string, Record<string, unknown>>();
-  const byName = new Map<string, Array<Record<string, unknown>>>();
+  const byId = new Map<string, ToolCallArgsEntry>();
+  const byName = new Map<string, ToolCallArgsEntry[]>();
 
   for (const record of records) {
     if (record.type !== 'assistant' || !record.message?.parts) continue;
@@ -107,13 +112,14 @@ function buildToolCallArgsIndex(records: ChatRecord[]): ToolCallArgsIndex {
       const toolName = part.functionCall.name;
       const callId =
         typeof part.functionCall.id === 'string' ? part.functionCall.id : null;
+      const entry = { args: normalizedArgs, consumed: false };
 
       if (callId) {
-        byId.set(callId, normalizedArgs);
+        byId.set(callId, entry);
       }
 
       const queue = byName.get(toolName) ?? [];
-      queue.push(normalizedArgs);
+      queue.push(entry);
       byName.set(toolName, queue);
     }
   }
@@ -146,19 +152,22 @@ function calculateFileStats(records: ChatRecord[]): FileOperationStats {
 
     const toolName = extractToolNameFromRecord(record);
     const callId = getExplicitToolResultCallId(record);
-    const argsFromId =
+    const entryFromId =
       callId && argsIndex.byId.has(callId)
         ? argsIndex.byId.get(callId)
         : undefined;
-    let args = argsFromId;
-    if (!args && toolName) {
+    let entry = entryFromId;
+    if (!entry && toolName) {
       const queue = argsIndex.byName.get(toolName);
       if (queue && queue.length > 0) {
-        const cursor = byNameCursor.get(toolName) ?? 0;
-        args = queue[cursor];
+        let cursor = byNameCursor.get(toolName) ?? 0;
+        while (queue[cursor]?.consumed) cursor += 1;
+        entry = queue[cursor];
         byNameCursor.set(toolName, cursor + 1);
       }
     }
+    if (entry) entry.consumed = true;
+    const args = entry?.args;
     const { resultDisplay } = record.toolCallResult;
 
     // Track file locations from resultDisplay

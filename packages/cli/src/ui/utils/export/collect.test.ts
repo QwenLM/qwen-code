@@ -12,11 +12,136 @@ import type {
   GoalRecord,
   GoalStateCause,
 } from '@qwen-code/qwen-code-core';
-import { collectSessionData } from './collect.js';
+import { collectSessionData, collectSessionMetadata } from './collect.js';
 import { toJson } from './formatters/json.js';
 import { toJsonl } from './formatters/jsonl.js';
 import { toMarkdown } from './formatters/markdown.js';
 import type { ExportConfig } from './types.js';
+
+describe('collectSessionMetadata argument matching', () => {
+  const base = {
+    sessionId: 'session-files',
+    timestamp: '2026-01-01T00:00:00.000Z',
+    cwd: '',
+    version: 'test',
+  };
+  const paths = [0, 1, 2].map(
+    (index) => `/workspace/project-${index}/same.txt`,
+  );
+
+  function toolCalls(): ChatRecord {
+    return {
+      ...base,
+      uuid: 'calls',
+      parentUuid: null,
+      type: 'assistant',
+      message: {
+        role: 'model',
+        parts: paths.map((filePath, index) => ({
+          functionCall: {
+            id: `call-${index}`,
+            name: 'write_file',
+            args: { file_path: filePath },
+          },
+        })),
+      },
+    };
+  }
+
+  function result(
+    index: number,
+    idLocation?: 'callId' | 'responseId',
+  ): ChatRecord {
+    return {
+      ...base,
+      uuid: `result-${index}`,
+      parentUuid: 'calls',
+      type: 'tool_result',
+      message: {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'write_file',
+              response: { output: 'written' },
+              ...(idLocation === 'responseId' ? { id: `call-${index}` } : {}),
+            },
+          },
+        ],
+      },
+      toolCallResult: {
+        ...(idLocation === 'callId' ? { callId: `call-${index}` } : {}),
+        resultDisplay: {
+          fileName: 'same.txt',
+          fileDiff: '@@ -0,0 +1 @@\n+hello',
+          originalContent: null,
+          newContent: 'hello',
+        },
+      },
+    };
+  }
+
+  async function collect(results: ChatRecord[]) {
+    return collectSessionMetadata(
+      {
+        sessionId: base.sessionId,
+        startTime: base.timestamp,
+        messages: [toolCalls(), ...results],
+      },
+      {},
+    );
+  }
+
+  it.each(['callId', 'responseId'] as const)(
+    'does not reuse arguments matched by %s for later legacy results',
+    async (idLocation) => {
+      const metadata = await collect([
+        result(0, idLocation),
+        result(1),
+        result(2),
+      ]);
+
+      expect(metadata.uniqueFiles).toEqual(paths);
+      expect(metadata.filesWritten).toBe(3);
+    },
+  );
+
+  it('keeps earlier unmatched calls available after an out-of-order ID match', async () => {
+    const metadata = await collect([result(1, 'callId'), result(0)]);
+
+    expect(metadata.uniqueFiles).toEqual([paths[1], paths[0]]);
+    expect(metadata.filesWritten).toBe(2);
+  });
+
+  it('skips an already matched entry when the legacy cursor reaches it', async () => {
+    const metadata = await collect([
+      result(1, 'responseId'),
+      result(0),
+      result(2),
+    ]);
+
+    expect(metadata.uniqueFiles).toEqual([paths[1], paths[0], paths[2]]);
+    expect(metadata.filesWritten).toBe(3);
+  });
+
+  it('preserves name-order matching for entirely legacy results', async () => {
+    const metadata = await collect([result(0), result(1), result(2)]);
+
+    expect(metadata.uniqueFiles).toEqual(paths);
+    expect(metadata.filesWritten).toBe(3);
+  });
+
+  it('preserves explicitly identified results arriving out of order', async () => {
+    const metadata = await collect([
+      result(2, 'callId'),
+      result(0, 'responseId'),
+      result(1, 'callId'),
+    ]);
+
+    expect(metadata.uniqueFiles).toEqual([paths[2], paths[0], paths[1]]);
+    expect(metadata.filesWritten).toBe(3);
+  });
+});
 
 describe('collectSessionData', () => {
   const config = {
