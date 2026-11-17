@@ -3504,6 +3504,13 @@ describe('managed-agent-server e2e runner', () => {
         /const blockAnswer = classifierBlockAnswer\(blockProperties\);/g,
       ),
     ).toHaveLength(2);
+    // The gate that decides whether a non-block side query is answered must
+    // stay `blockAnswer !== undefined` in both arms; widening it to
+    // `blockProperties !== undefined` and passing `blockAnswer ?? {…}` would
+    // restore the mis-answer with the assignment count still two.
+    expect(source.match(/if \(blockAnswer !== undefined\) \{/g)).toHaveLength(
+      2,
+    );
     // The create -> list lifecycle claim: cron_list must echo the created
     // prompt; a mere tool result must not pass.
     expect(source).toMatch(/includes\('\/loop check the deploy'\)/);
@@ -3515,24 +3522,20 @@ describe('managed-agent-server e2e runner', () => {
     );
     expect(source).toMatch(/Retired cron schedule \$\{createdScheduleId\}\./);
     expect(source).toMatch(/cron_create printed no automation id/);
-    // The fake model's delete fixture extracts the minted id from the create
-    // tool result by structured call id — not a fabricated id, not a substring
-    // of the delete fixture's own 'loop-cron-created' argument. The
-    // assertion-side createdScheduleId pin above does not cover this fake-side
-    // extraction; pin it so a broken fake extraction reddens the fast suite.
-    // Both arms (skill and fire) carry the extraction; count both so mutating
-    // either arm's delete fixture reddens, and pin each arm's own create-call
-    // filter (the ids differ: loop-cron-create vs loop-fire-create).
-    expect(
-      source.match(
-        /const createdId = \/asch_\[0-9a-f\]\{32\}\/\.exec\(createResultText\)\?\.\[0\];/g,
-      ),
-    ).toHaveLength(2);
+    // The fake model's delete fixture extracts the minted id through the
+    // executable mintedScheduleId helper (tested below against hostile
+    // histories), each arm with its own create-call id. Pin both call sites
+    // and the loud-failure fallback so neither arm can fabricate an id the
+    // store never minted; a source-spelling count alone would miss a forged
+    // `?? 'asch_' + '0'.repeat(32)` fallback.
     expect(source).toMatch(
-      /entry\.role === 'tool' && entry\.tool_call_id === 'loop-cron-create'/,
+      /const createdId = mintedScheduleId\(messages, 'loop-cron-create'\);/,
     );
     expect(source).toMatch(
-      /entry\.role === 'tool' && entry\.tool_call_id === 'loop-fire-create'/,
+      /const createdId = mintedScheduleId\(messages, 'loop-fire-create'\);/,
+    );
+    expect(source.match(/createdId \?\? 'missing-schedule-id'/g)).toHaveLength(
+      2,
     );
     // The reported count is the witnessed calls, not the cumulative flattened
     // tool-message length (every chat-completions body repeats prior results).
@@ -3586,6 +3589,58 @@ describe('managed-agent-server e2e runner', () => {
     ).toBeUndefined();
     expect(classifierBlockAnswer(undefined)).toBeUndefined();
     expect(classifierBlockAnswer({})).toBeUndefined();
+  });
+
+  // The fake-side minted-id extraction is executed, not counted as source
+  // spelling: dropping the structured call-id filter or replacing the
+  // extraction with a fabricated literal reddens these directions, while a
+  // behaviour-preserving consolidation into the helper stays green.
+  it('executes the minted-id extraction against hostile histories', () => {
+    const { mintedScheduleId } = load(
+      ['mintedScheduleId'],
+      'mintedScheduleId',
+    )();
+    const id = `asch_${'a'.repeat(32)}`;
+    const createResult = {
+      role: 'tool',
+      tool_call_id: 'loop-cron-create',
+      content: `Created schedule ${id}.`,
+    };
+    expect(mintedScheduleId([createResult], 'loop-cron-create')).toBe(id);
+    expect(
+      mintedScheduleId(
+        [{ ...createResult, tool_call_id: 'loop-fire-create' }],
+        'loop-fire-create',
+      ),
+    ).toBe(id);
+    // No matching result yields undefined — never an invented id, so the
+    // fixture keeps failing loud with `?? 'missing-schedule-id'`.
+    expect(mintedScheduleId([], 'loop-cron-create')).toBeUndefined();
+    // The wrong call id does not match (the delete fixture's own
+    // 'loop-cron-created' argument must not be mistaken for the create result).
+    expect(
+      mintedScheduleId([createResult], 'loop-fire-create'),
+    ).toBeUndefined();
+    expect(
+      mintedScheduleId(
+        [{ role: 'tool', tool_call_id: 'loop-cron-created', content: id }],
+        'loop-cron-create',
+      ),
+    ).toBeUndefined();
+    // A non-tool role carrying the call id is not a tool result.
+    expect(
+      mintedScheduleId(
+        [{ role: 'user', tool_call_id: 'loop-cron-create', content: id }],
+        'loop-cron-create',
+      ),
+    ).toBeUndefined();
+    // A matching result without a minted id yields undefined.
+    expect(
+      mintedScheduleId(
+        [{ role: 'tool', tool_call_id: 'loop-cron-create', content: 'no id' }],
+        'loop-cron-create',
+      ),
+    ).toBeUndefined();
   });
 
   // The loop-fire arm attests a real scheduled fire: the scanner's fired

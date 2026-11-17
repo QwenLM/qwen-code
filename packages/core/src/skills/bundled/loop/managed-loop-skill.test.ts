@@ -355,16 +355,54 @@ describe('managed loop skill parity', () => {
     expect(committed).toEqual(declared);
   });
 
+  it('the Java sidecar map serves exactly the declared profile set', () => {
+    // The set actually served is the hand-kept sidecars() map in
+    // ManagedLoopSkill.java, not the TypeScript tuple. A profile added to
+    // MANAGED_LOOP_PROFILES (and generated) but missing from the Java map
+    // would silently serve no /loop skill on that profile. Pin the Java key
+    // set to the declared profiles; the provenance-only "bundled" key is
+    // allowed (it backs the bundled-import comparison, not a tool profile).
+    const javaSource = readFileSync(
+      join(
+        here,
+        '../../../../../managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/ManagedLoopSkill.java',
+      ),
+      'utf8',
+    );
+    const javaKeys = [...javaSource.matchAll(/"(\w+)",\s*readSidecar\(/g)]
+      .map((match) => match[1])
+      .filter((key) => key !== 'bundled')
+      .sort();
+    expect(javaKeys).toEqual([...MANAGED_LOOP_PROFILES].sort());
+  });
+
   it('the Nd month-boundary caveat survives into the cron and union bodies', () => {
     // The caveat flows verbatim from SKILL.md (no substitution), so deleting
     // or rewording it would otherwise regenerate green. Pin the corrected
     // semantics: a day-of-month step, at most N days across the boundary, and
-    // the N ≤ 31 bound above which the step degenerates to the 1st.
+    // the N ≤ 30 bound (a step of 31 already collects only day 1, since 1+31
+    // is past the day-of-field maximum).
     for (const profile of ['cron', 'union'] as const) {
       const text = asset(profile).body;
       expect(text).toContain('day-of-month step, not a rolling N-day cadence');
       expect(text).toContain('at most N days');
-      expect(text).toContain('Keep N ≤ 31');
+      expect(text).toContain('Keep N ≤ 30');
+      // The worked examples pin the boundary arithmetic so a wrong gap
+      // number cannot ship green.
+      expect(text).toContain('a 2-day gap');
+      expect(text).toContain('a 1-day gap');
+    }
+  });
+
+  it('the managed Nd table cell keeps the corrected substitution', () => {
+    // The managed-side half of the Nd fix is the sub() that rewrites the
+    // table row; reverting its replacement string and regenerating would
+    // otherwise teach "every N days" again with every gate green. Pin the
+    // substituted cell and forbid the pre-fix wording.
+    for (const profile of ['cron', 'union'] as const) {
+      const text = asset(profile).body;
+      expect(text).toContain('midnight UTC on days 1, 1+N, … of each month');
+      expect(text).not.toContain('every N days');
     }
   });
 

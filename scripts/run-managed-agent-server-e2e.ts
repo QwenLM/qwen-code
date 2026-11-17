@@ -2729,6 +2729,26 @@ function classifierBlockAnswer(
   return answer;
 }
 
+// The minted schedule id printed by the create tool result, matched by
+// structured call id (not a substring of the delete fixture's own argument),
+// or undefined when no matching result exists. Returning undefined — never an
+// invented id — keeps the fixture failing loud with `?? 'missing-schedule-id'`
+// instead of retiring a schedule the store never minted. Kept a top-level pure
+// declaration so the meta-test can execute it against hostile histories.
+function mintedScheduleId(
+  messages: unknown[],
+  createCallId: string,
+): string | undefined {
+  const createResultText = messages
+    .filter((message) => {
+      const entry = message as { role?: string; tool_call_id?: string };
+      return entry.role === 'tool' && entry.tool_call_id === createCallId;
+    })
+    .map((message) => JSON.stringify(message))
+    .join('');
+  return /asch_[0-9a-f]{32}/.exec(createResultText)?.[0];
+}
+
 const failoverFirstMarker = 'MANAGED_SESSION_FAILOVER_FIRST_TURN';
 const failoverSecondMarker = 'MANAGED_SESSION_FAILOVER_SECOND_TURN';
 const bigOutputSource = 'abcdefghijklmnopqrstu长😀'.repeat(
@@ -3105,19 +3125,7 @@ try {
         // The automation store mints the schedule id; reuse the one the
         // create result printed so the retire targets the live schedule
         // instead of a fabricated id the store answers 404 for.
-        const createResultText = messages
-          .filter((message) => {
-            const entry = message as {
-              role?: string;
-              tool_call_id?: string;
-            };
-            return (
-              entry.role === 'tool' && entry.tool_call_id === 'loop-cron-create'
-            );
-          })
-          .map((message) => JSON.stringify(message))
-          .join('');
-        const createdId = /asch_[0-9a-f]{32}/.exec(createResultText)?.[0];
+        const createdId = mintedScheduleId(messages, 'loop-cron-create');
         return {
           toolCalls: [
             fakeToolCall(
@@ -3209,19 +3217,7 @@ try {
         if (hasToolResult('loop-fire-delete')) {
           return { content: 'LOOP_FIRE_DONE' };
         }
-        const createResultText = messages
-          .filter((message) => {
-            const entry = message as {
-              role?: string;
-              tool_call_id?: string;
-            };
-            return (
-              entry.role === 'tool' && entry.tool_call_id === 'loop-fire-create'
-            );
-          })
-          .map((message) => JSON.stringify(message))
-          .join('');
-        const createdId = /asch_[0-9a-f]{32}/.exec(createResultText)?.[0];
+        const createdId = mintedScheduleId(messages, 'loop-fire-create');
         return {
           toolCalls: [
             fakeToolCall(

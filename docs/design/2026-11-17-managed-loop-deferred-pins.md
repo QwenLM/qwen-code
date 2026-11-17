@@ -51,11 +51,21 @@ Only the six named deferred items. The remaining ~64 deferred entries (doc stale
 
 The first review round hardened the six fixes against second-order drift (each witnessed by a mutation that reddens the new assertion and restores green):
 
-- **Caveat accuracy + pin (R1-1).** The month-boundary gap is _at most_ N days (exactly N when the month length is a multiple of N), not strictly shorter; the caveat now says "at most N days and often shorter" and states the N ≤ 31 bound above which the step degenerates to the 1st of each month. A parity pin requires the corrected phrases in the cron and union bodies, so deleting or rewording the caveat reddens.
+- **Caveat accuracy + pin (R1-1).** The month-boundary gap is _at most_ N days (exactly N when the month length is a multiple of N), not strictly shorter; the caveat now says "at most N days and often shorter" and states the N ≤ 30 bound (a step of 31 already collects only day 1, since 1+31 is past the day-of-month field maximum). A parity pin requires the corrected phrases in the cron and union bodies, so deleting or rewording the caveat reddens.
 - **Producer single-source (R1-2).** The regenerator now derives its targets from `MANAGED_LOOP_PROFILES` (filename `managed-loop-skill-<profile>.json`), and a parity assertion requires the committed sidecar set (excluding `bundled-body`) to equal the declared profile set — a stray or orphaned sidecar reddens.
 - **Guard sources the runtime constants (R1-3).** `EXPANDING_SENTINELS` is built from `LOOP_SENTINEL_DYNAMIC` / `AUTONOMOUS_SENTINEL_DYNAMIC` (the constants the wakeup fire actually expands), so a runtime rename reddens the parity build instead of silently whitelisting a token nothing expands. The body templates and SKILL.md prose keep the literals; the guard fail-closes on any drift from the constants.
 - **Call-site pin (R1-4).** A build-level test injects a brand-new sentinel into the Input section (carried verbatim into every profile) and requires `buildManagedLoopSkill` to reject it, so inlining a deny-list back into the build while keeping the export reddens.
 - **Statement-anchored count pins (R1-5, R1-6).** The classifier and fake-createdId call-site pins count both arms (`toHaveLength(2)`), anchored to the full statement (trailing `;` / `?.[0];`) so an additive `?? { shouldBlock: false }` fallback or a fabricated id in either arm breaks the match; each arm's own create-call filter (`loop-cron-create` / `loop-fire-create`) is pinned separately.
+
+## Round-2 review refinements
+
+The second round caught a fix-induced critical and four second-order gaps (each witnessed):
+
+- **N ≤ 30, not N ≤ 31 (round-2 critical).** `0 0 */31 * *` already matches only day 1 (the step starts at day 1 and 1+31 is past the field maximum), so N = 31 is the degeneration itself, not the last safe value; the last step matching more than one day is `*/30` (`{1,31}`). The caveat, the parity pin and both design docs now state N ≤ 30; reverting to N ≤ 31 reddens the pin.
+- **Java served-set pin (R2-1).** The profile single-source now crosses the TypeScript boundary: a parity assertion reads `ManagedLoopSkill.java`'s `sidecars()` keys and requires them (minus the provenance-only `bundled` key) to equal `MANAGED_LOOP_PROFILES`, so a profile added to the tuple but missing from the Java map — which would silently serve no `/loop` skill — reddens.
+- **Executable minted-id helper (R2-2).** The fake-side extraction is consolidated into a top-level pure `mintedScheduleId(messages, createCallId)` (returns `undefined`, never an invented id), used by both arms and executed in the meta-test against hostile histories; a source-spelling count alone missed a forged `?? 'asch_' + '0'.repeat(32)` fallback and blocked the consolidation. The call sites and the loud-failure `?? 'missing-schedule-id'` fallback are pinned.
+- **Classifier gate pin (R2-3).** A count pin on `if (blockAnswer !== undefined) {` (both arms) closes the gate-widening spelling (`if (blockProperties !== undefined)` + `blockAnswer ?? {…}`) that restored the mis-answer with the assignment count still two.
+- **Substituted-cell pin (R2-4).** The managed Nd fix's `sub()` replacement is pinned (`midnight UTC on days 1, 1+N, … of each month`, `not.toContain('every N days')`) plus the worked-example gaps, so reverting the replacement string and regenerating cannot teach "every N days" again with every gate green.
 
 ## Open questions
 
