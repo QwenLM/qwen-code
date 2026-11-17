@@ -2871,6 +2871,19 @@ top-level session). Agents launched by the top-level session omit
 `parentAgentId` and `parentName`; clients should treat all three fields as
 optional and fall back to a flat list when they are absent.
 
+With `?includeSubSessions=true` (capability `session_sub_session_send`), the
+response also carries `subSessions`: the `sent` launches the daemon reports
+back to this session, from `POST /session/:id/sub-sessions` or from the
+model's `create_sub_session`. Each is `{ kind: "session", id, sessionId,
+workspaceCwd, label, status, startTime, endTime?, runtimeMs, byPerson }`,
+where `id` is the completion's task id, `sessionId` and `workspaceCwd` name
+the target, and `status` is `running` until the target's turn settles as
+`completed`, `failed`, or `cancelled`. The daemon keeps them in memory, at
+most 20 per session, so a restart forgets them. When one starts or settles it
+publishes `sub_session_task_changed` with `{ sessionId }` (the caller) on
+every session in the caller's workspace; clients filter by `sessionId` and
+re-read this route.
+
 ### `GET /session/:id/tasks/:taskId/runtime`
 
 On-demand detail for one shell task. `GET /session/:id/tasks` carries lifecycle
@@ -4154,6 +4167,8 @@ curl -X POST http://127.0.0.1:4170/session/$SID/sub-sessions \
 - `targetSessionId`: an existing session to send to instead of starting a new one. Pass `workspace` too when it lives in another workspace.
 
 The response carries `sessionId`, `workspaceCwd` when the session runs in another workspace, and `taskId` when the completion's task id is not the session id (a follow-up). Errors: `400` (`invalid_sub_session_prompt`, `invalid_sub_session_workspace`, `invalid_sub_session_target`), `409 sub_session_send_refused` with the launcher's reason (an untrusted or unknown workspace, an unknown session, `:id` itself as the target, a cap, or a caller that does not record its chat), `501 sub_session_send_unavailable` for a session whose runtime cannot start sub-sessions, and the usual owner-route errors (standalone sessions are refused).
+
+While the target runs, the send is listed in `GET /session/:id/tasks?includeSubSessions=true`.
 
 ### `DELETE /session/:id`
 

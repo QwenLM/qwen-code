@@ -7884,15 +7884,39 @@ export function registerSessionRoutes(
     withOwnerReadSession(
       'GET /session/:id/tasks',
       async (req, res, sessionId, runtime) => {
-        res.status(200).json(
-          await runtime.bridge.getSessionTasksStatus(sessionId, {
-            // Same fail-closed shape as the workflow control surfaces:
-            // opting in here leaks strictly more than the redacted
-            // supported-commands surface on an untrusted workspace.
-            includeWorkflows:
-              runtime.trusted && req.query['includeWorkflows'] === 'true',
-          }),
-        );
+        const status = await runtime.bridge.getSessionTasksStatus(sessionId, {
+          // Same fail-closed shape as the workflow control surfaces:
+          // opting in here leaks strictly more than the redacted
+          // supported-commands surface on an untrusted workspace.
+          includeWorkflows:
+            runtime.trusted && req.query['includeWorkflows'] === 'true',
+        });
+        if (req.query['includeSubSessions'] !== 'true') {
+          res.status(200).json(status);
+          return;
+        }
+        // The daemon, not the child, reports these launches back, so it
+        // lists them here beside the child's own tasks.
+        const launcher = (
+          req.app.locals as {
+            subSessionLauncherFor?: (
+              runtime: WorkspaceRuntime,
+            ) => SubSessionLauncher | undefined;
+          }
+        ).subSessionLauncherFor?.(runtime);
+        res.status(200).json({
+          ...status,
+          subSessions: (launcher?.listOutgoing(sessionId) ?? []).map(
+            (task) => ({
+              kind: 'session',
+              ...task,
+              runtimeMs: Math.max(
+                0,
+                (task.endTime ?? status.now) - task.startTime,
+              ),
+            }),
+          ),
+        });
       },
     ),
   );

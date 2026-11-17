@@ -6968,8 +6968,16 @@ function bumpSessionEventSignals(
     | undefined;
   let init = 0;
   let auth = 0;
+  const subSessionTasks = new Map<string, number>();
 
   for (const event of events) {
+    if (event.type === 'session.sub_session_task.changed') {
+      subSessionTasks.set(
+        event.sessionId,
+        (subSessionTasks.get(event.sessionId) ?? 0) + 1,
+      );
+      continue;
+    }
     if (event.type === 'session.source.changed') {
       if (includeArtifactEvents) sources += 1;
       continue;
@@ -7045,7 +7053,8 @@ function bumpSessionEventSignals(
       init +
       auth ===
       0 &&
-    skillMutations.length === 0
+    skillMutations.length === 0 &&
+    subSessionTasks.size === 0
   )
     return;
 
@@ -7069,9 +7078,15 @@ function bumpSessionEventSignals(
         init +
         auth ===
         0 &&
-      newSkillMutations.length === 0
+      newSkillMutations.length === 0 &&
+      subSessionTasks.size === 0
     ) {
       return current;
+    }
+    const subSessionTaskVersions = { ...current.subSessionTaskVersions };
+    for (const [sessionId, count] of subSessionTasks) {
+      subSessionTaskVersions[sessionId] =
+        (subSessionTaskVersions[sessionId] ?? 0) + count;
     }
     return {
       memoryVersion: current.memoryVersion + memory,
@@ -7099,6 +7114,9 @@ function bumpSessionEventSignals(
           ? { skillMutationsByCwd: current.skillMutationsByCwd }
           : {}),
       ...(lastExtensionChange ? { lastExtensionChange } : {}),
+      ...(Object.keys(subSessionTaskVersions).length > 0
+        ? { subSessionTaskVersions }
+        : {}),
       initVersion: current.initVersion + init,
       authVersion: current.authVersion + auth,
     };

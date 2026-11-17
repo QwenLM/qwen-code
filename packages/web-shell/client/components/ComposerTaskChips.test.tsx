@@ -2,7 +2,11 @@
 import { act, createRef } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { DaemonSessionTaskWithWorkflowStatus } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonSessionSubSessionTaskStatus,
+  DaemonSessionTaskWithWorkflowStatus,
+} from '@qwen-code/sdk/daemon';
+import type { ComposerChipTask } from '../utils/composerTasks';
 import { I18nProvider } from '../i18n';
 import {
   ComposerTaskChips,
@@ -55,6 +59,23 @@ function shell(
   };
 }
 
+function sent(
+  id: string,
+  status: DaemonSessionSubSessionTaskStatus['status'] = 'running',
+): DaemonSessionSubSessionTaskStatus {
+  return {
+    kind: 'session',
+    id,
+    sessionId: id,
+    workspaceCwd: '/work/b',
+    label: `look at ${id}`,
+    status,
+    startTime: 1_000,
+    runtimeMs: 2_000,
+    byPerson: true,
+  };
+}
+
 describe('ComposerTaskChips', () => {
   let container: HTMLDivElement;
   let root: Root;
@@ -75,7 +96,7 @@ describe('ComposerTaskChips', () => {
   });
 
   function render(
-    tasks: DaemonSessionTaskWithWorkflowStatus[],
+    tasks: ComposerChipTask[],
     props: Partial<Parameters<typeof ComposerTaskChips>[0]> = {},
     ref = createRef<ComposerTaskChipsHandle>(),
   ) {
@@ -123,6 +144,22 @@ describe('ComposerTaskChips', () => {
       '2 workflows',
       '1 shell',
     ]);
+  });
+
+  it('shows a message sent to another session while it runs there', () => {
+    const { onSelectTask } = render([
+      shell('shell-1'),
+      sent('kid-1'),
+      sent('kid-2', 'completed'),
+    ]);
+    expect(chips().map((chip) => chip.textContent)).toEqual([
+      '1 other session',
+      '1 shell',
+    ]);
+    act(() => chips()[0]!.click());
+    expect(onSelectTask).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'session', sessionId: 'kid-1' }),
+    );
   });
 
   it('keeps a pausing or paused workflow as unfinished work', () => {

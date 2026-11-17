@@ -4331,9 +4331,10 @@ export class DaemonClient {
   async sessionTasks(
     sessionId: string,
     clientId?: string,
+    opts: { includeSubSessions?: boolean } = {},
   ): Promise<DaemonSessionTasksStatus> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${urlEncode(sessionId)}/tasks`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/tasks${opts.includeSubSessions ? '?includeSubSessions=true' : ''}`,
       { headers: this.headers({}, clientId) },
       async (res) => {
         if (!res.ok) {

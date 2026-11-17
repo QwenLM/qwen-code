@@ -1715,24 +1715,11 @@ describe('ChatPane', () => {
     );
   });
 
-  it('sends to another session with the pane as the caller', () => {
-    const onSendToSession = vi.fn();
-    connectionState.capabilities = { features: [] };
-    render({ onSendToSession, workspaceCwd: '/pane-ws' });
-    expect(latestChatEditorProps.onSendToSession).toBeUndefined();
-    act(() => root!.unmount());
-    root = null;
-    container?.remove();
-
-    connectionState.capabilities = { features: ['session_sub_session_send'] };
-    connectionState.clientId = 'pane-client';
-    render({ onSendToSession, workspaceCwd: '/pane-ws' });
-    latestChatEditorProps.onSendToSession();
-    expect(onSendToSession).toHaveBeenCalledWith({
-      sessionId: 'sess-1',
-      workspaceCwd: '/pane-ws',
-      clientId: 'pane-client',
-    });
+  it('read-only shows the session and its approvals without a composer', () => {
+    pendingPermission = { id: 'perm-1', toolName: 'write_file', rawInput: {} };
+    render({ readOnly: true });
+    expect(latestChatEditorProps).toBeUndefined();
+    expect(testid('pane-approval')).not.toBeNull();
   });
 
   it('opens a pane monitor in the shared right panel', async () => {

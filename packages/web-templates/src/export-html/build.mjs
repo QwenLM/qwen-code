@@ -105,11 +105,11 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_140_000;
 // deferred-change notice, across two locales) measures 2,136,115 bytes on
 // head 6286c8cb11 in CI, 115 above the previous 2,136,000 ceiling. The warning
 // sits 885 above that measurement and the ceiling 1,885 above it.
-// The "Send to another session" menu item and dialog copy (fourteen keys
-// across two locales) add 1,538: 2,137,893 against 2,139,431 locally on main
-// 039ed577fb without and with the change, 1,431 above the previous ceiling
-// in that local build. The warning sits 569 above the local measurement and
-// the ceiling 1,569 above it.
+// The `/send` command, its composer chip and session tab copy (ten keys
+// across two locales) add 1,283: 2,137,893 against 2,139,176 locally on main
+// 039ed577fb without and with the change, 1,176 above the previous ceiling
+// in that local build. The warning sits 824 above the local measurement and
+// the ceiling 1,824 above it.
 const MAX_DOCUMENT_RUNTIME_BYTES = 2_141_000;
 
 // Modules that must not be reachable from the document entry, checked against

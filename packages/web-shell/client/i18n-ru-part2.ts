@@ -290,24 +290,17 @@ export const RU_PART2: Record<
   'composerAdd.btw.label': 'Задать побочный вопрос',
   'composerAdd.btw.description': 'Не прерывать основную задачу',
   'composerAdd.btw.textOnly': 'Сначала уберите вложения',
-  'composerAdd.sendToSession.label': 'Отправить в другой сеанс',
-  'composerAdd.sendToSession.description':
-    'Любое рабочее пространство; ответ вернётся сюда',
-  'sendToSession.title': 'Отправить в другой сеанс',
-  'sendToSession.subtitle':
-    'Сеанс откроется рядом с этим. Когда его ход закончится, этот сеанс получит результат.',
-  'sendToSession.workspace': 'Рабочее пространство',
-  'sendToSession.currentWorkspace': (v) =>
-    `${v?.name ?? ''} (это рабочее пространство)`,
-  'sendToSession.target': 'Сеанс',
-  'sendToSession.newSession': 'Новый сеанс',
-  'sendToSession.message': 'Сообщение',
-  'sendToSession.messagePlaceholder': 'Что должен сделать этот сеанс?',
-  'sendToSession.cancel': 'Отмена',
-  'sendToSession.send': 'Отправить',
-  'sendToSession.sending': 'Отправка…',
-  'sendToSession.sent':
-    'Отправлено. Откройте сеанс на боковой панели, чтобы увидеть ответ.',
+  'local.send': 'Отправить сообщение в другой сеанс',
+  'send.noAttachments':
+    '/send принимает только текст; сначала уберите вложения',
+  'send.missingMessage':
+    'Добавьте сообщение после параметров: /send [--workspace <имя>] [--session-id <id>] <сообщение>',
+  'send.missingValue': (v) => `Для ${v?.option ?? ''} нужно значение`,
+  'send.duplicateOption': (v) => `${v?.option ?? ''} указан дважды`,
+  'sessionPanel.open': 'Открыть сеанс',
+  'send.option.workspace':
+    'Рабочее пространство для отправки (по умолчанию текущее)',
+  'send.option.sessionId': 'Сеанс для отправки (по умолчанию новый)',
   'at.category.mcpResources': 'Ресурсы MCP',
   'at.category.mcpResources.description': 'Ссылаться на ресурсы сервера MCP',
   'at.menu': 'Меню ссылок',

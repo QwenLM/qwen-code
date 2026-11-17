@@ -53,10 +53,8 @@ import { getSubagentDetailsUnavailableReason } from './messages/toolFormatting';
 import { useWebShellCustomization } from '../customization';
 import {
   SESSION_MONITOR_TOOL_CORRELATION_FEATURE,
-  SESSION_SUB_SESSION_SEND_FEATURE,
   SESSION_TRANSCRIPT_PAGINATION_FEATURE,
 } from '../constants/sessions';
-import type { SendToSessionCaller } from './dialogs/SendToSessionDialog';
 import { useAnimationFrameTranscriptSnapshot } from '../hooks/useAnimationFrameTranscriptBlocks';
 import { useMessagesFromBlocks } from '../hooks/useMessages';
 import { useSessionArtifacts } from '../hooks/useSessionArtifacts';
@@ -249,8 +247,6 @@ export interface ChatPaneProps {
   onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
   /** Host slash-command callback shared with the main chat composer. */
   onSlashCommand?: WebShellSlashCommandHandler;
-  /** Opens "send to another session" with this pane's session as caller. */
-  onSendToSession?: (caller: SendToSessionCaller) => void;
   modelManagement?: WebShellModelManagementOptions;
   unavailableModels?: readonly WebShellUnavailableModel[];
   mountUnavailableModelTooltip?: WebShellUnavailableModelTooltipMount;
@@ -274,6 +270,8 @@ export interface ChatPaneProps {
   messageTurnOutputs?: readonly TurnOutputKind[];
   /** Render inside a parent surface that already provides its own frame. */
   embedded?: boolean;
+  /** Show the session without a composer; approvals still render. */
+  readOnly?: boolean;
   onFirstPromptAdmitted?: (text: string) => void;
   /** Whether this pane owns Session Catalog turn-completion reconciliation. */
   reportCatalogTurnCompletion?: boolean;
@@ -308,7 +306,6 @@ export function ChatPane({
   onError,
   onImageIngestionNotice,
   onSlashCommand,
-  onSendToSession,
   modelManagement,
   unavailableModels,
   mountUnavailableModelTooltip,
@@ -321,6 +318,7 @@ export function ChatPane({
   onOpenContextUsage,
   messageTurnOutputs,
   embedded = false,
+  readOnly = false,
   onFirstPromptAdmitted,
   reportCatalogTurnCompletion = true,
   hidden = false,
@@ -351,33 +349,6 @@ export function ChatPane({
   const availableApprovalModes = useApprovalModes(
     paneSettingsCwd,
     allowedApprovalModes,
-  );
-  const paneSessionId = connection.sessionId;
-  const paneClientId = connection.clientId;
-  const sendToSessionAvailable =
-    connection.capabilities?.features.includes(
-      SESSION_SUB_SESSION_SEND_FEATURE,
-    ) === true;
-  const openSendToSession = useMemo(
-    () =>
-      onSendToSession &&
-      paneSessionId &&
-      paneSettingsCwd &&
-      sendToSessionAvailable
-        ? () =>
-            onSendToSession({
-              sessionId: paneSessionId,
-              workspaceCwd: paneSettingsCwd,
-              ...(paneClientId ? { clientId: paneClientId } : {}),
-            })
-        : undefined,
-    [
-      onSendToSession,
-      paneClientId,
-      paneSessionId,
-      paneSettingsCwd,
-      sendToSessionAvailable,
-    ],
   );
   const capacityRecovery = useCapacityRecovery(
     workspace.client,
@@ -2138,80 +2109,81 @@ export function ChatPane({
               approvalActive || admissionPayloadLocked || sessionHasActivePrompt
             }
           />
-          <ChatEditor
-            ref={editorRef}
-            onSubmit={handleSubmit}
-            onCancel={handleCancel}
-            isRunning={isResponding || sessionHasActivePrompt}
-            commands={commands}
-            skills={skills}
-            queuedMessages={queuedTexts}
-            onPopQueuedMessages={editLastQueuedPrompt}
-            onClearQueuedMessages={clearQueuedPrompts}
-            visibleToolbarActions={paneToolbarActions}
-            tokenCount={
-              contextUsageAvailable ? (connection.tokenCount ?? 0) : 0
-            }
-            contextWindow={
-              contextUsageAvailable ? (connection.contextWindow ?? 0) : 0
-            }
-            onShowContextUsage={
-              contextUsageAvailable ? handleShowContextUsage : undefined
-            }
-            contextUsageControls={
-              onOpenContextUsage ? contextUsageControls : undefined
-            }
-            onOpenContextUsage={
-              contextUsageAvailable && onOpenContextUsage
-                ? handleOpenContextUsage
-                : undefined
-            }
-            workspaceName={showWorkspaceChip ? workspaceLabel : undefined}
-            workspaceTitle={paneWorkspaceCwd}
-            workspaceColor={workspaceAccent}
-            currentMode={executionMode}
-            availableModes={availableApprovalModes}
-            onCycleMode={handleCycleMode}
-            modeControlsDisabled={modeControlsBusy}
-            planMode={planMode}
-            onTogglePlan={handleTogglePlan}
-            onSendToSession={openSendToSession}
-            sessionWorkflowEnabled={sessionWorkflowEnabled}
-            currentModel={connection.currentModel ?? ''}
-            modelRefresh={modelRefresh}
-            availableModels={availableModels}
-            modelPickerScope={modelPickerScope}
-            unavailableModels={unavailableModels}
-            mountUnavailableModelTooltip={mountUnavailableModelTooltip}
-            onSelectMode={handleSelectMode}
-            onSelectModel={handleSelectModel}
-            workflowMode={connection.workflowMode}
-            workflowModeStatus={
-              connection.loadingTranscript ||
-              connection.catchingUp ||
-              connection.status !== 'connected'
-                ? 'syncing'
-                : (connection.workflowModeStatus ?? 'unknown')
-            }
-            workflowModePending={connection.workflowModePending}
-            onWorkflowModeChange={handleWorkflowModeChange}
-            reasoning={connection.reasoning}
-            onSelectReasoningEffort={handleSelectReasoningEffort}
-            dialogOpen={approvalActive}
-            disabled={approvalActive || admissionPayloadLocked}
-            voiceTarget={hidden ? undefined : voiceTarget}
-            voiceStatusRevision={voiceStatusRevision}
-            followupState={followupState}
-            onAcceptFollowup={onAcceptFollowup}
-            onDismissFollowup={onDismissFollowup}
-            onImageIngestionNotice={onImageIngestionNotice}
-            sessionId={connection.sessionId}
-            onImagePreview={handleImagePreview}
-            onAttachmentPreview={handleAttachmentPreview}
-            atWorkspaceCwd={paneWorkspaceCwd}
-            placeholderText={t('splitView.composerPlaceholder')}
-          />
-          {CustomComposerFooter && (
+          {!readOnly && (
+            <ChatEditor
+              ref={editorRef}
+              onSubmit={handleSubmit}
+              onCancel={handleCancel}
+              isRunning={isResponding || sessionHasActivePrompt}
+              commands={commands}
+              skills={skills}
+              queuedMessages={queuedTexts}
+              onPopQueuedMessages={editLastQueuedPrompt}
+              onClearQueuedMessages={clearQueuedPrompts}
+              visibleToolbarActions={paneToolbarActions}
+              tokenCount={
+                contextUsageAvailable ? (connection.tokenCount ?? 0) : 0
+              }
+              contextWindow={
+                contextUsageAvailable ? (connection.contextWindow ?? 0) : 0
+              }
+              onShowContextUsage={
+                contextUsageAvailable ? handleShowContextUsage : undefined
+              }
+              contextUsageControls={
+                onOpenContextUsage ? contextUsageControls : undefined
+              }
+              onOpenContextUsage={
+                contextUsageAvailable && onOpenContextUsage
+                  ? handleOpenContextUsage
+                  : undefined
+              }
+              workspaceName={showWorkspaceChip ? workspaceLabel : undefined}
+              workspaceTitle={paneWorkspaceCwd}
+              workspaceColor={workspaceAccent}
+              currentMode={executionMode}
+              availableModes={availableApprovalModes}
+              onCycleMode={handleCycleMode}
+              modeControlsDisabled={modeControlsBusy}
+              planMode={planMode}
+              onTogglePlan={handleTogglePlan}
+              sessionWorkflowEnabled={sessionWorkflowEnabled}
+              currentModel={connection.currentModel ?? ''}
+              modelRefresh={modelRefresh}
+              availableModels={availableModels}
+              modelPickerScope={modelPickerScope}
+              unavailableModels={unavailableModels}
+              mountUnavailableModelTooltip={mountUnavailableModelTooltip}
+              onSelectMode={handleSelectMode}
+              onSelectModel={handleSelectModel}
+              workflowMode={connection.workflowMode}
+              workflowModeStatus={
+                connection.loadingTranscript ||
+                connection.catchingUp ||
+                connection.status !== 'connected'
+                  ? 'syncing'
+                  : (connection.workflowModeStatus ?? 'unknown')
+              }
+              workflowModePending={connection.workflowModePending}
+              onWorkflowModeChange={handleWorkflowModeChange}
+              reasoning={connection.reasoning}
+              onSelectReasoningEffort={handleSelectReasoningEffort}
+              dialogOpen={approvalActive}
+              disabled={approvalActive || admissionPayloadLocked}
+              voiceTarget={hidden ? undefined : voiceTarget}
+              voiceStatusRevision={voiceStatusRevision}
+              followupState={followupState}
+              onAcceptFollowup={onAcceptFollowup}
+              onDismissFollowup={onDismissFollowup}
+              onImageIngestionNotice={onImageIngestionNotice}
+              sessionId={connection.sessionId}
+              onImagePreview={handleImagePreview}
+              onAttachmentPreview={handleAttachmentPreview}
+              atWorkspaceCwd={paneWorkspaceCwd}
+              placeholderText={t('splitView.composerPlaceholder')}
+            />
+          )}
+          {!readOnly && CustomComposerFooter && (
             <CustomComposerFooter
               disabled={approvalActive || admissionPayloadLocked}
               isRunning={isResponding || sessionHasActivePrompt}

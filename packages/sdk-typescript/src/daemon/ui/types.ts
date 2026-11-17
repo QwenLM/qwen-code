@@ -42,6 +42,7 @@ export type DaemonUiEventType =
   | 'session.metadata.changed'
   | 'session.artifact.changed'
   | 'session.source.changed'
+  | 'session.sub_session_task.changed'
   | 'session.approval_mode.changed'
   | 'session.available_commands'
   | 'session.state_resync_required'
@@ -560,6 +561,13 @@ export interface DaemonUiSessionArtifactChangedEvent extends DaemonUiEventBase {
   change: DaemonSessionArtifactChange;
 }
 
+/** A launch reported back to `sessionId` started or settled. */
+export interface DaemonUiSessionSubSessionTaskChangedEvent
+  extends DaemonUiEventBase {
+  type: 'session.sub_session_task.changed';
+  sessionId: string;
+}
+
 export interface DaemonUiSessionApprovalModeChangedEvent
   extends DaemonUiEventBase {
   type: 'session.approval_mode.changed';
@@ -860,6 +868,7 @@ export type DaemonUiEvent =
   // Session-meta events
   | DaemonUiSessionMetadataChangedEvent
   | DaemonUiSessionArtifactChangedEvent
+  | DaemonUiSessionSubSessionTaskChangedEvent
   | DaemonUiSessionSourceChangedEvent
   | DaemonUiSessionApprovalModeChangedEvent
   | DaemonUiSessionAvailableCommandsEvent

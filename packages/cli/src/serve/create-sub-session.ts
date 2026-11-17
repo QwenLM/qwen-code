@@ -185,6 +185,11 @@ export interface SubSessionLauncher {
   launchForPerson(
     request: PersonSubSessionRequest,
   ): Promise<CreateSubSessionResult>;
+  /**
+   * The `sent` launches this session made that the daemon reports back to
+   * it, newest last. Kept in memory, a bounded number per caller.
+   */
+  listOutgoing(callerSessionId: string): OutgoingSubSessionTask[];
   /** Stop accepting new sub-sessions (daemon shutdown). Idempotent. */
   stop(reason?: 'workspace_stopped'): void;
 }
@@ -197,6 +202,40 @@ export interface PersonSubSessionRequest {
   sessionId?: string;
 }
 
+/** A `sent` launch whose result the daemon reports back to its caller. */
+export interface OutgoingSubSessionTask {
+  /** The completion's task id: the session id, or `<session>:<prompt>`. */
+  id: string;
+  sessionId: string;
+  workspaceCwd: string;
+  label: string;
+  status: OutgoingSubSessionStatus;
+  startTime: number;
+  endTime?: number;
+  /** A person sent it from the caller's page, not the caller's model. */
+  byPerson: boolean;
+}
+
+export type OutgoingSubSessionStatus =
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+
+/** Records a reported launch on the caller's launcher. */
+interface OutgoingReport {
+  started(
+    task: Pick<
+      OutgoingSubSessionTask,
+      'id' | 'sessionId' | 'workspaceCwd' | 'label' | 'byPerson'
+    >,
+  ): void;
+  settled(status: Exclude<OutgoingSubSessionStatus, 'running'>): void;
+}
+
+/** Outgoing records kept per caller; the oldest settled ones go first. */
+export const MAX_OUTGOING_PER_CALLER = 20;
+
 /** What a target launcher needs to know about a caller in another workspace. */
 export interface RemoteSubSessionCaller {
   /** The caller's live approval mode at admission. */
@@ -207,6 +246,8 @@ export interface RemoteSubSessionCaller {
   /** Hand a `sent` completion to the caller, on the caller's own bridge. */
   deliverCompletion(notification: BridgeBackgroundNotification): Promise<void>;
   releaseCompletionSlot?: () => void;
+  /** Records the launch on the caller's launcher. */
+  report?: OutgoingReport;
 }
 
 /** How a launcher finds another registered workspace's launcher. */
@@ -426,6 +467,9 @@ function truncateCodePoints(value: string, max: number): string {
   return `${codePoints.slice(0, Math.max(0, max - 1)).join('')}…`;
 }
 
+/** How much of a person's `/send` message the caller's notification repeats. */
+const MAX_PERSON_MESSAGE_CHARS = 2_000;
+
 function buildSentCompletionNotification(
   sessionId: string,
   label: string,
@@ -433,8 +477,11 @@ function buildSentCompletionNotification(
   stopReason: string,
   workspaceCwd?: string,
   taskId = sessionId,
-  /** The user sent the prompt from this session's page, not the model. */
-  byPerson = false,
+  /**
+   * The message the user sent from this session's page with `/send`. The
+   * caller's model never saw it, so the notification carries it.
+   */
+  personMessage?: string,
 ) {
   const status = sentCompletionStatus(stopReason);
   const boundedStopReason = truncateCodePoints(stopReason, 128);
@@ -458,8 +505,9 @@ function buildSentCompletionNotification(
     '<task-notification>',
     `<task-id>${escapeXml(modelSessionId)}</task-id>`,
     `<status>${status}</status>`,
-    byPerson
-      ? `<summary>The user sent a message from this session to another session (&quot;${escapeXml(modelLabel)}&quot;); it ${escapeXml(statusText)}.</summary>`
+    personMessage !== undefined
+      ? `<summary>The user sent the message below to another session with /send on this session's page. /send does not add the message to this conversation, so it does not appear above. That session's turn ${escapeXml(statusText)}; its reply is the result.</summary>` +
+        `<message>${escapeXml(truncateCodePoints(personMessage, MAX_PERSON_MESSAGE_CHARS))}</message>`
       : `<summary>Sub-session &quot;${escapeXml(modelLabel)}&quot; ${escapeXml(statusText)}.</summary>`,
     `<session-link>${escapeXml(sessionUrl)}</session-link>`,
     '<result>',
@@ -1180,6 +1228,7 @@ export function createSubSessionLauncher(
     assertLocalCurrent?: () => void,
     /** A person sent this from the caller's page (local launches). */
     byPersonLocal = false,
+    localReport?: OutgoingReport,
   ): Promise<CreateSubSessionResult> => {
     // The caller's tool never saw a person's launch, so the daemon reports
     // its completion even for a new session in this workspace.
@@ -1596,6 +1645,19 @@ export function createSubSessionLauncher(
       const completionTaskId = reusing ? `${sessionId}:${promptId}` : sessionId;
 
       if (info.completion === 'sent') {
+        const report =
+          notifySentCompletion || remote || reusing || byPerson
+            ? (remote?.report ?? localReport)
+            : undefined;
+        let settledStatus: Exclude<OutgoingSubSessionStatus, 'running'> =
+          'cancelled';
+        report?.started({
+          id: completionTaskId,
+          sessionId,
+          workspaceCwd: boundWorkspace,
+          label: subSessionName(info.name ?? info.prompt, false),
+          byPerson,
+        });
         // Hold the concurrency slot until the sub-session's turn finishes
         // (or the daemon shuts down via stop(), or a wall-clock ceiling is
         // reached). Without this the cap is a no-op for sent mode — the
@@ -1655,6 +1717,7 @@ export function createSubSessionLauncher(
                     `concurrency slot (the sub-session may still be running)`,
                 );
               }
+              settledStatus = sentCompletionStatus(completion.stopReason);
               if (notifySentCompletion || remote || reusing || byPerson) {
                 notification = buildSentCompletionNotification(
                   sessionId,
@@ -1663,11 +1726,12 @@ export function createSubSessionLauncher(
                   completion.stopReason,
                   remote ? boundWorkspace : undefined,
                   completionTaskId,
-                  byPerson,
+                  byPerson ? info.prompt : undefined,
                 );
               }
             } catch (err) {
               if (stopAc.signal.aborted && !targetStopped()) return;
+              settledStatus = targetStopped() ? 'cancelled' : 'failed';
               if (!notifySentCompletion && !remote && !reusing && !byPerson) {
                 return;
               }
@@ -1679,7 +1743,7 @@ export function createSubSessionLauncher(
                 targetStopped() ? 'shutdown' : 'error',
                 remote ? boundWorkspace : undefined,
                 completionTaskId,
-                byPerson,
+                byPerson ? info.prompt : undefined,
               );
             } finally {
               if (remote) {
@@ -1717,6 +1781,7 @@ export function createSubSessionLauncher(
             // free the slot.
             releaseOnce();
             remote?.releaseCompletionSlot?.();
+            report?.settled(settledStatus);
           }
         })();
         return {
@@ -1933,13 +1998,49 @@ export function createSubSessionLauncher(
     };
   };
 
+  // Reported `sent` launches per caller, for the caller's task list.
+  const outgoing = new Map<string, OutgoingSubSessionTask[]>();
+  const outgoingChanged = (callerSessionId: string) => {
+    getBridge()?.publishWorkspaceEvent({
+      type: 'sub_session_task_changed',
+      data: { sessionId: callerSessionId },
+    });
+  };
+  const outgoingReport = (callerSessionId: string): OutgoingReport => {
+    const key = normalizeSessionIdForLookup(callerSessionId);
+    let record: OutgoingSubSessionTask | undefined;
+    return {
+      started(task) {
+        record = { ...task, status: 'running', startTime: Date.now() };
+        const list = [...(outgoing.get(key) ?? []), record];
+        while (list.length > MAX_OUTGOING_PER_CALLER) {
+          const settled = list.findIndex((entry) => entry.status !== 'running');
+          list.splice(settled === -1 ? 0 : settled, 1);
+        }
+        outgoing.set(key, list);
+        outgoingChanged(callerSessionId);
+      },
+      settled(status) {
+        if (!record || record.status !== 'running') return;
+        record.status = status;
+        record.endTime = Date.now();
+        outgoingChanged(callerSessionId);
+      },
+    };
+  };
+  const listOutgoing = (callerSessionId: string) =>
+    (outgoing.get(normalizeSessionIdForLookup(callerSessionId)) ?? []).map(
+      (task) => ({ ...task }),
+    );
+
   const launchAs = async (
     info: CreateSubSessionInfo,
     byPerson: boolean,
   ): Promise<CreateSubSessionResult> => {
     const { workspace, workspaceGeneration, ...local } = info;
+    const report = outgoingReport(info.callerSessionId);
     if (workspace === undefined)
-      return run(local, undefined, undefined, byPerson);
+      return run(local, undefined, undefined, byPerson, report);
     const { bridge, target, assertCallerCurrent } = getNamedTarget(
       info.callerSessionId,
       workspace,
@@ -1956,7 +2057,7 @@ export function createSubSessionLauncher(
       target.assertCurrent();
     };
     if (target.launcher === launcher) {
-      return run(local, undefined, assertTargetCurrent, byPerson);
+      return run(local, undefined, assertTargetCurrent, byPerson, report);
     }
     const callerApproval = await readApprovalMode(bridge, info.callerSessionId);
     if (callerApproval.mode === undefined) {
@@ -2004,6 +2105,7 @@ export function createSubSessionLauncher(
           );
         },
         ...(releaseCompletionSlot ? { releaseCompletionSlot } : {}),
+        report,
       });
     } catch (error) {
       releaseCompletionSlot?.();
@@ -2038,6 +2140,7 @@ export function createSubSessionLauncher(
   const launcher: SubSessionLauncher = {
     launch,
     launchForPerson,
+    listOutgoing,
     resolveDestination,
     launchForRemoteCaller: (info, caller) => run(info, caller),
     stop: (reason) => {

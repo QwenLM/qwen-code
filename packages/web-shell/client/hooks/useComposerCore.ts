@@ -61,6 +61,7 @@ import {
   getMissingSlashPrefixCompletion,
   getSlashCommandCompletionResult,
   type SkillInfo,
+  type SlashArgumentCompleter,
   type SlashCommandCompletionResult,
 } from '../completions/slashCompletion';
 import {
@@ -1212,6 +1213,8 @@ export interface UseComposerCoreOptions {
   commands: CommandInfo[];
   skills?: SkillInfo[];
   allowEmptySlashMenu?: boolean;
+  /** Completes arguments the static subcommand trees cannot (`/send`). */
+  slashArgumentCompleter?: SlashArgumentCompleter;
   slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
   autoSubmitSlashCommands?: boolean;
   queuedMessages?: string[];
@@ -1648,6 +1651,7 @@ export function useComposerCore(
     commands,
     skills = [],
     allowEmptySlashMenu = false,
+    slashArgumentCompleter,
     slashCommandCategoryOrder,
     autoSubmitSlashCommands = false,
     queuedMessages = [],
@@ -1806,6 +1810,8 @@ export function useComposerCore(
   commandsRef.current = commands;
   const allowEmptySlashMenuRef = useRef(allowEmptySlashMenu);
   allowEmptySlashMenuRef.current = allowEmptySlashMenu;
+  const slashArgumentCompleterRef = useRef(slashArgumentCompleter);
+  slashArgumentCompleterRef.current = slashArgumentCompleter;
   const skillsRef = useRef(skills);
   skillsRef.current = skills;
   const slashCommandCategoryOrderRef = useRef(slashCommandCategoryOrder);
@@ -2944,6 +2950,7 @@ export function useComposerCore(
       tRef.current,
       slashCommandCategoryOrderRef.current ?? DEFAULT_COMMAND_CATEGORY_ORDER,
       allowEmptySlashMenuRef.current,
+      slashArgumentCompleterRef.current,
     );
     if (!result) return false;
     setSlashMenu({
@@ -2996,6 +3003,7 @@ export function useComposerCore(
         (key) => tRef.current(key),
         slashCommandCategoryOrderRef.current ?? DEFAULT_COMMAND_CATEGORY_ORDER,
         allowEmptySlashMenuRef.current,
+        slashArgumentCompleterRef.current,
       );
       if (!relativeResult) {
         setSlashMenu(null);
@@ -3017,6 +3025,15 @@ export function useComposerCore(
     },
     [closeAtMenu, setSlashMenu],
   );
+
+  // New argument data (a workspace's sessions arrived): recompute the menu
+  // for a command being typed.
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view || !slashArgumentCompleter) return;
+    const line = view.state.doc.lineAt(view.state.selection.main.head);
+    if (line.text.startsWith('/')) refreshSlashMenuForView(view);
+  }, [refreshSlashMenuForView, slashArgumentCompleter]);
 
   const closeSlashMenu = useCallback(() => {
     setSlashMenu(null);

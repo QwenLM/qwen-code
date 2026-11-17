@@ -447,6 +447,18 @@ export function normalizeDaemonEvent(
     case 'artifact_changed':
       return normalizeArtifactChanged(event, base);
 
+    case 'sub_session_task_changed': {
+      const sessionId = getString(event.data, 'sessionId');
+      if (!sessionId) {
+        return fallbackDebug(
+          event,
+          base,
+          'malformed sub_session_task_changed payload',
+        );
+      }
+      return [{ ...base, type: 'session.sub_session_task.changed', sessionId }];
+    }
+
     // ── Auth device-flow events (RFC 8628) ─────────────────
     case 'auth_device_flow_started':
       return normalizeAuthDeviceFlowStarted(event, base);

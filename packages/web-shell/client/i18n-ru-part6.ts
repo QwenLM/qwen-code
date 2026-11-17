@@ -92,6 +92,10 @@ export const RU_PART6: Record<
     `${v?.count ?? 0} ${ruPlural(v?.count, 'локальный агент', 'локальных агента', 'локальных агентов')}`,
   'tasks.pill.agents': (v) =>
     `${v?.count ?? 0} ${ruPlural(v?.count, 'локальный агент', 'локальных агента', 'локальных агентов')}`,
+  'tasks.pill.session': (v) =>
+    `${v?.count ?? 0} ${ruPlural(v?.count, 'другой сеанс', 'других сеанса', 'других сеансов')}`,
+  'tasks.pill.sessions': (v) =>
+    `${v?.count ?? 0} ${ruPlural(v?.count, 'другой сеанс', 'других сеанса', 'других сеансов')}`,
   'tasks.pill.monitor': (v) =>
     `${v?.count ?? 0} ${ruPlural(v?.count, 'монитор', 'монитора', 'мониторов')}`,
   'tasks.pill.monitors': (v) =>

@@ -45,7 +45,7 @@ The work lands in three changes, each usable on its own.
    `workspace`. This change.
 2. **Follow-ups to a session the caller created.** `create_sub_session`
    takes a `sessionId`.
-3. **Web Shell.** A "Send to session" action on a session page.
+3. **Web Shell.** A `/send` command on a session page.
 
 ## Step 1: a new session in another workspace
 
@@ -198,17 +198,18 @@ A person can do from a session page what the model does with the tool:
 start a sub-session in a chosen workspace, or send to a session already
 there, and read the reply.
 
-**Where.** The composer's "+" menu gains "Send to another session", in the
-main chat and in each split pane; the pane's session is then the caller,
-since a send opens the split view and the next one comes from a pane. It opens
-a dialog with three fields: a workspace (trusted registered workspaces,
-including the current one), a target ("New session", or any other
-active session in that workspace, listed from its session catalog), and the
-message. The item is shown only when
-the daemon advertises `session_sub_session_send` and the open session runs
-in a registered workspace. When the daemon refuses a send (an untrusted
-workspace, an unknown session, a cap), the dialog shows its reason and keeps
-the message.
+**Where.** A slash command in the composer:
+`/send [--workspace <name|path|id>] [--session-id <id>] <message>`. Without
+`--workspace` it targets the current workspace; without `--session-id` it
+starts a new session there. Options come first and everything after them is
+the message, newlines included; a value with spaces can be quoted. Completion
+offers the option names, the trusted registered workspaces, and the active
+sessions of the chosen workspace by name (it inserts the id), leaving out the
+caller. The command is listed only when the daemon advertises
+`session_sub_session_send` and the open session runs in a registered
+workspace. A refusal (an untrusted or unknown workspace, an unknown session, a
+cap) shows the daemon's reason and puts the command back in the composer.
+Attachments are refused: the message is text.
 
 **The route.** Sending calls `POST /session/:id/sub-sessions` with
 `{ prompt, workspace?, targetSessionId? }`; `:id` is the open session, which
@@ -238,14 +239,33 @@ Only the route can ask for these; they are not fields the ACP child can send,
 so a model cannot claim them. The tool keeps its rules, including for a
 session a person created or sent to.
 
-**After sending.** Web Shell refreshes the target workspace's session list and
-opens the target in a split pane, where the turn streams. When split view is
-not available (a narrow screen or the pane limit), it shows a notice
-instead, and the session is in the sidebar. When the turn finishes, the
-caller receives the completion notification and its model answers in a turn
-of its own, as for a `sent` launch from the tool. The caller's model never
-saw this task start, so the notification's summary says the user sent the
-message.
+**After sending.** The page does not move. While the target runs the turn,
+a "1 other session" chip shows above the composer, beside the chips for
+background agents and shells. Clicking it opens the target in a right-panel
+tab, live and read-only, with a button to open the session itself. The tab
+still shows the target's tool approvals and questions: the target keeps its
+own mode, and in an ask mode it may wait on one with nobody else watching.
+When the turn finishes the chip goes away, and the caller receives the
+completion notification and answers in a turn of its own, as for a `sent`
+launch from the tool. The caller's model never saw this task start: `/send` leaves nothing in
+the caller's conversation, and without that a model reads the result as
+unverified content that claims to come from it. So the notification says the
+user sent the message with `/send`, that `/send` does not add it to the
+conversation, and repeats the message (up to 2,000 characters).
+
+**The chip's data.** The daemon, not the caller's child, reports these
+launches back, so the child's task list does not know them. The caller's
+launcher keeps a record of every `sent` launch it reports back to a caller,
+a person's send and the model's cross-workspace or follow-up `sent` launches
+alike, from the launch until the target's turn settles (completed, failed, or
+cancelled when the daemon stops). `GET /session/:id/tasks?includeSubSessions=true`
+adds them as `subSessions` beside the child's tasks. When a record starts or
+settles, the daemon publishes `sub_session_task_changed` with the caller's id
+on the caller's workspace, and Web Shell re-reads the list; a slow poll backs
+the event up while one runs. So a send made through the API, or by the model,
+shows a chip too. Records live in daemon memory, at most 20 per caller with
+the oldest settled ones dropped first; a daemon restart forgets them, as it
+loses a pending notification.
 
 ## Files
 
@@ -266,11 +286,12 @@ message.
   workspace and give launchers the resolver; expose the launcher lookup to
   the routes.
 - `packages/cli/src/serve/routes/session.ts`, `capabilities.ts`: the
-  `POST /session/:id/sub-sessions` route and its capability tag.
-- `packages/sdk-typescript/src/daemon/`: the client method.
-- `packages/web-shell/client/`: the "+" menu item (main chat and split panes),
-  the dialog, and opening the
-  target in a split pane.
+  `POST /session/:id/sub-sessions` route, its capability tag, and the
+  `includeSubSessions` view of `GET /session/:id/tasks`.
+- `packages/sdk-typescript/src/daemon/`: the client method, the
+  `subSessions` task type, and the `sub_session_task_changed` event.
+- `packages/web-shell/client/`: the `/send` command and its completion, the
+  composer chip, and the read-only session tab in the right panel.
 - User docs for the tool.
 
 ## Out of scope
@@ -318,13 +339,15 @@ message.
 - Step 3, unit: the route's validation, owner check and capability tag; a
   person's launch keeps the target's mode where the tool's would be clamped
   or refused, reaches a session the caller did not create while the tool is
-  refused, works from a sub-session, and refuses the caller itself; the
-  dialog lists the workspaces it is given and the other sessions there, and
-  sends the right body; a refusal is shown in the dialog; the "+" menu shows
-  the item when it is wired; a split pane offers it only with the capability
-  and sends as its own session.
-- Step 3, end to end: from a Web Shell session in A, send to a new session in
-  B and see it open in a split pane with the reply; send to a session in B
-  that A did not create and see its lineage unchanged; send again to a target
-  already open in the split, and from a split pane; see a completion turn in
-  the caller each time.
+  refused, works from a sub-session, and refuses the caller itself; reported
+  launches are listed on the caller's launcher until they settle, cancelled
+  when the daemon stops, bounded per caller, and left out for a launch the
+  tool reports itself; the tasks route adds them only when asked; `/send`
+  parsing and completion; the chip for a running send; a read-only pane keeps
+  approvals and drops the composer.
+- Step 3, end to end: from a Web Shell session in A, `/send` to a new session
+  in B: the page stays, a chip shows while B works, clicking it opens B's
+  reply in the right panel, and A answers the completion in its own turn;
+  `/send` to a session in B that A did not create and see its lineage
+  unchanged; send to a target in an ask mode and approve its tool call from
+  the tab; a send made through the API shows a chip in an open page.

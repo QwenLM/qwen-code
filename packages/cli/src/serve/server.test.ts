@@ -31204,6 +31204,80 @@ describe('createServeApp', () => {
     });
   });
 
+  describe('GET /session/:id/tasks?includeSubSessions=true', () => {
+    const appWithOutgoing = (
+      listOutgoing: SubSessionLauncher['listOutgoing'],
+    ) => {
+      const app = createServeApp(baseOpts, undefined, {
+        bridge: fakeBridge({
+          sessionTasksImpl: async (sessionId) => ({
+            v: 1,
+            sessionId,
+            now: 5_000,
+            tasks: [],
+          }),
+        }),
+      });
+      (
+        app.locals as {
+          subSessionLauncherFor?: () => Partial<SubSessionLauncher> | undefined;
+        }
+      ).subSessionLauncherFor = () => ({ listOutgoing });
+      return app;
+    };
+    const get = (app: ReturnType<typeof createServeApp>, query = '') =>
+      request(app)
+        .get(`/session/session-A/tasks${query}`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+    it('lists the sends the daemon reports back beside the child tasks', async () => {
+      const listOutgoing = vi.fn(() => [
+        {
+          id: 'kid',
+          sessionId: 'kid',
+          workspaceCwd: '/work/b',
+          label: 'look',
+          status: 'running' as const,
+          startTime: 1_000,
+          byPerson: true,
+        },
+        {
+          id: 'kid:p2',
+          sessionId: 'kid',
+          workspaceCwd: '/work/b',
+          label: 'again',
+          status: 'completed' as const,
+          startTime: 2_000,
+          endTime: 2_500,
+          byPerson: false,
+        },
+      ]);
+      const res = await get(
+        appWithOutgoing(listOutgoing),
+        '?includeSubSessions=true',
+      );
+      expect(res.status).toBe(200);
+      expect(listOutgoing).toHaveBeenCalledWith('session-A');
+      expect(res.body.tasks).toEqual([]);
+      expect(res.body.subSessions).toEqual([
+        expect.objectContaining({
+          kind: 'session',
+          id: 'kid',
+          runtimeMs: 4_000,
+        }),
+        expect.objectContaining({ id: 'kid:p2', runtimeMs: 500 }),
+      ]);
+    });
+
+    it('leaves them out unless asked', async () => {
+      const listOutgoing = vi.fn(() => []);
+      const res = await get(appWithOutgoing(listOutgoing));
+      expect(res.status).toBe(200);
+      expect(res.body).not.toHaveProperty('subSessions');
+      expect(listOutgoing).not.toHaveBeenCalled();
+    });
+  });
+
   describe('POST /session/:id/sub-sessions', () => {
     const appWithLauncher = (
       launchForPerson: SubSessionLauncher['launchForPerson'] | undefined,

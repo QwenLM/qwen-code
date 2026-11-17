@@ -130,6 +130,7 @@ export type {
   // Session-meta events
   DaemonUiSessionMetadataChangedEvent,
   DaemonUiSessionSourceChangedEvent,
+  DaemonUiSessionSubSessionTaskChangedEvent,
   DaemonUiSessionApprovalModeChangedEvent,
   DaemonUiSessionAvailableCommandsEvent,
   DaemonUiStateResyncRequiredEvent,

@@ -1424,26 +1424,3 @@ describe('AddMenu BTW entry', () => {
     expect(onSelect).toHaveBeenCalledOnce();
   });
 });
-
-describe('AddMenu send-to-session entry', () => {
-  it('is absent unless the host offers it', async () => {
-    renderWith(baseProps());
-    await openMenu();
-    expect(menuItem('composer-add-menu-send-to-session')).toBeNull();
-  });
-
-  it.each(['en', 'zh-CN'] as const)(
-    'opens the dialog in %s',
-    async (language) => {
-      const t = getTranslator(language);
-      const onSelect = vi.fn();
-      renderWith(baseProps({ sendToSession: { onSelect } }), language);
-      await openMenu();
-      const item = menuItem('composer-add-menu-send-to-session')!;
-      expect(item.textContent).toContain(t('composerAdd.sendToSession.label'));
-      await act(async () => item.click());
-      await settle();
-      expect(onSelect).toHaveBeenCalledOnce();
-    },
-  );
-});

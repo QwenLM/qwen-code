@@ -48,6 +48,7 @@ const {
   createSubSessionWorkspaceIndex,
   MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER,
   MAX_CONCURRENT_SUB_SESSIONS_TOTAL,
+  MAX_OUTGOING_PER_CALLER,
   MAX_TRACKED_SPAWNED_SESSIONS,
 } = await import('./create-sub-session.js');
 
@@ -165,6 +166,7 @@ function makeFakeBridge(opts?: {
     };
   }> = [];
   const parentObserverClosures: string[] = [];
+  const workspaceEvents: Array<{ type: string; data?: unknown }> = [];
   const modeChanges: Array<{ sessionId: string; mode: string }> = [];
   const subscriptions: Array<{
     sessionId: string;
@@ -183,6 +185,9 @@ function makeFakeBridge(opts?: {
   };
 
   const bridge = {
+    publishWorkspaceEvent: (event: { type: string; data?: unknown }) => {
+      workspaceEvents.push(event);
+    },
     getSessionContextStatus: vi.fn(async (sessionId: string) => ({
       state: {
         modes: {
@@ -469,6 +474,7 @@ function makeFakeBridge(opts?: {
     operations,
     notifications,
     parentObserverClosures,
+    workspaceEvents,
     subscriptions,
     modeChanges,
     changeApprovalMode,
@@ -1634,7 +1640,110 @@ describe('sub-session launcher', () => {
       notification: { taskId: launched.sessionId, status: 'completed' },
     });
     expect(fake.notifications[0]!.notification.modelText).toContain(
-      'The user sent a message from this session to another session (&quot;research it&quot;); it completed.',
+      "The user sent the message below to another session with /send on this session's page.",
+    );
+    expect(fake.notifications[0]!.notification.modelText).toContain(
+      "That session's turn completed; its reply is the result.</summary><message>research it</message>",
+    );
+    launcher.stop();
+  });
+
+  it("lists a reported send as the caller's task until its turn settles", async () => {
+    const fake = makeFakeBridge({
+      events: (pid) => [chunk('done'), turnComplete(pid)],
+    });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+    });
+    const launched = await launcher.launchForPerson({
+      callerSessionId: 'parent-1',
+      prompt: 'research it',
+    });
+    expect(launcher.listOutgoing('parent-1')).toEqual([
+      expect.objectContaining({
+        id: launched.sessionId,
+        sessionId: launched.sessionId,
+        workspaceCwd: WS,
+        label: 'research it',
+        byPerson: true,
+      }),
+    ]);
+    await vi.waitFor(() =>
+      expect(launcher.listOutgoing('parent-1')[0]).toMatchObject({
+        status: 'completed',
+        endTime: expect.any(Number),
+      }),
+    );
+    expect(fake.workspaceEvents).toEqual([
+      { type: 'sub_session_task_changed', data: { sessionId: 'parent-1' } },
+      { type: 'sub_session_task_changed', data: { sessionId: 'parent-1' } },
+    ]);
+    expect(launcher.listOutgoing('someone-else')).toEqual([]);
+    launcher.stop();
+  });
+
+  it('settles a listed send as cancelled when the daemon stops', async () => {
+    const fake = makeFakeBridge({
+      events: () => [chunk('working')],
+      blockAfterEvents: true,
+    });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+    });
+    await launcher.launchForPerson({
+      callerSessionId: 'parent-1',
+      prompt: 'research it',
+    });
+    expect(launcher.listOutgoing('parent-1')[0]!.status).toBe('running');
+    launcher.stop();
+    await vi.waitFor(() =>
+      expect(launcher.listOutgoing('parent-1')[0]!.status).toBe('cancelled'),
+    );
+  });
+
+  it("does not list a launch the caller's tool reports itself", async () => {
+    const fake = makeFakeBridge({
+      events: (pid) => [chunk('done'), turnComplete(pid)],
+    });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+    });
+    await launcher.launch({
+      prompt: 'research it',
+      completion: 'sent',
+      callerSessionId: 'parent-1',
+    });
+    expect(launcher.listOutgoing('parent-1')).toEqual([]);
+    expect(fake.workspaceEvents).toEqual([]);
+    launcher.stop();
+  });
+
+  it('keeps the newest sends per caller, dropping settled ones first', async () => {
+    const fake = makeFakeBridge({
+      events: (pid) => [chunk('done'), turnComplete(pid)],
+    });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+    });
+    const ids: string[] = [];
+    for (let i = 0; i <= MAX_OUTGOING_PER_CALLER; i += 1) {
+      const launched = await launcher.launchForPerson({
+        callerSessionId: 'parent-1',
+        prompt: `task ${i}`,
+      });
+      ids.push(launched.sessionId);
+      await vi.waitFor(() =>
+        expect(launcher.listOutgoing('parent-1').at(-1)!.status).toBe(
+          'completed',
+        ),
+      );
+    }
+    expect(launcher.listOutgoing('parent-1').map((task) => task.id)).toEqual(
+      ids.slice(1),
     );
     launcher.stop();
   });
@@ -2487,6 +2596,23 @@ describe('sub-sessions in another workspace', () => {
       sessionId: 'caller',
       notification: { taskId: 'sub-1', status: 'completed' },
     });
+  });
+
+  it("lists a send to another workspace on the caller's launcher", async () => {
+    const { a, launcherA, launcherB } = twoWorkspaces();
+    await launcherA.launchForPerson({
+      callerSessionId: 'caller',
+      prompt: 'p',
+      workspace: WS_B,
+    });
+    expect(launcherA.listOutgoing('caller')).toEqual([
+      expect.objectContaining({ id: 'sub-1', workspaceCwd: WS_B }),
+    ]);
+    expect(launcherB.listOutgoing('caller')).toEqual([]);
+    await vi.waitFor(() =>
+      expect(launcherA.listOutgoing('caller')[0]!.status).toBe('completed'),
+    );
+    expect(a.workspaceEvents).toHaveLength(2);
   });
 
   it("refuses a person's send to a workspace the index does not name", async () => {
@@ -4012,7 +4138,7 @@ describe('following up a sub-session', () => {
     expect(sent).toMatchObject({ sessionId: 'kid', workspaceCwd: WS_B });
     await vi.waitFor(() => expect(a.notifications).toHaveLength(1));
     expect(a.notifications[0]!.notification.modelText).toContain(
-      'The user sent a message from this session to another session',
+      'with /send on this session',
     );
     expect(b.prompts).toEqual([
       expect.objectContaining({

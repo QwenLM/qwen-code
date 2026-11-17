@@ -37,6 +37,7 @@ import {
   WrenchIcon,
   ListTreeIcon,
   MessageCirclePlusIcon,
+  MessagesSquareIcon,
   PanelRightIcon,
   PlusIcon,
   ShrinkIcon,
@@ -126,6 +127,7 @@ import { SubagentDetail } from './SubagentDetail';
 import { AgentWorkflow } from './AgentWorkflow';
 import type { EnvironmentAgentTask } from '../panels/EnvironmentPanel';
 import { SideTaskPanel } from './SideTaskPanel';
+import { SessionPanel } from './SessionPanel';
 import type { WebShellModelManagementOptions } from '../../modelManagement';
 import type {
   WebShellUnavailableModel,
@@ -344,6 +346,14 @@ export type ArtifactPanelTab =
       initialPrompt?: string;
     }
   | {
+      /** Another session, shown read-only: where a `/send` message runs. */
+      id: string;
+      kind: 'session';
+      title: string;
+      sessionId: string;
+      workspaceCwd: string;
+    }
+  | {
       id: string;
       kind: 'terminal';
       title: string;
@@ -514,6 +524,8 @@ interface ArtifactPanelProps {
     sideTasks: readonly SideTaskListItem[],
   ) => void | Promise<void>;
   onSideTaskMenuOpen?: () => void;
+  /** Leave the panel for a session shown in a `session` tab. */
+  onOpenSession?: (sessionId: string, workspaceCwd: string) => void;
   onCreateSideTaskSession?: (
     tabId: string,
     parentSessionId: string,
@@ -716,6 +728,7 @@ export function ArtifactPanel({
   onArchiveSideTasks,
   onUnarchiveSideTasks,
   onSideTaskMenuOpen,
+  onOpenSession,
   onCreateSideTaskSession,
   onSideTaskCreated,
   onSideTaskTitleChange,
@@ -940,6 +953,11 @@ export function ArtifactPanel({
                       />
                     ) : getArtifactPanelTabKind(tab) === 'side_task' ? (
                       <MessageCirclePlusIcon
+                        className={styles.tabIconSvg}
+                        strokeWidth={1.6}
+                      />
+                    ) : tab.kind === 'session' ? (
+                      <MessagesSquareIcon
                         className={styles.tabIconSvg}
                         strokeWidth={1.6}
                       />
@@ -1729,6 +1747,19 @@ export function ArtifactPanel({
             key={activeTab.id}
             task={activeTab.task}
             actions={activeTab.sessionActions}
+          />
+        ) : activeTab.kind === 'session' ? (
+          <SessionPanel
+            key={activeTab.id}
+            tabId={activeTab.id}
+            sessionId={activeTab.sessionId}
+            workspaceCwd={activeTab.workspaceCwd}
+            title={activeTab.title}
+            onOpenSession={onOpenSession}
+            onRightPanelOpen={onNestedRightPanelOpen}
+            onArtifactsChange={onNestedArtifactsChange}
+            onError={onError}
+            onImageIngestionNotice={onImageIngestionNotice}
           />
         ) : activeTab.kind === 'side_task' ? (
           <SideTaskPanel

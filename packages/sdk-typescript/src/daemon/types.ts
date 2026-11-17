@@ -3919,6 +3919,29 @@ export interface DaemonSessionTasksStatus {
   sessionId: string;
   now: number;
   tasks: DaemonSessionTaskStatus[];
+  /** Present when requested with `includeSubSessions`. */
+  subSessions?: DaemonSessionSubSessionTaskStatus[];
+}
+
+/**
+ * A `sent` launch whose result the daemon reports back to this session:
+ * a person's send from its page, or the model's `create_sub_session`.
+ * Kept in daemon memory, so a daemon restart forgets it.
+ */
+export interface DaemonSessionSubSessionTaskStatus {
+  kind: 'session';
+  /** The completion's task id. */
+  id: string;
+  /** The session the message went to. */
+  sessionId: string;
+  workspaceCwd: string;
+  label: string;
+  status: 'running' | 'completed' | 'failed' | 'cancelled';
+  startTime: number;
+  endTime?: number;
+  runtimeMs: number;
+  /** A person sent it from the session page, not the session's model. */
+  byPerson: boolean;
 }
 
 /**

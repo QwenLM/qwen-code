@@ -9,11 +9,11 @@ import {
   type KeyboardEvent,
   type ReactNode,
 } from 'react';
-import type { DaemonSessionTaskWithWorkflowStatus } from '@qwen-code/sdk/daemon';
 import {
   BotIcon,
   CirclePauseIcon,
   LoaderCircleIcon,
+  MessagesSquareIcon,
   SquareActivityIcon,
   SquareTerminalIcon,
   WorkflowIcon,
@@ -22,6 +22,7 @@ import { useI18n } from '../i18n';
 import { useSharedNow } from '../hooks/useSharedNow';
 import {
   getComposerTaskChipGroups,
+  type ComposerChipTask,
   type ComposerTaskChipGroup,
   type ComposerTaskChipKind,
 } from '../utils/composerTasks';
@@ -35,11 +36,11 @@ export interface ComposerTaskChipsHandle {
 }
 
 export interface ComposerTaskChipsProps {
-  tasks: readonly DaemonSessionTaskWithWorkflowStatus[];
+  tasks: readonly ComposerChipTask[];
   /** Whether background agents get a chip (hosts without agent surfaces opt out). */
   includeAgents: boolean;
   /** Open the task: locate a workflow in the transcript, open a shell's output, … */
-  onSelectTask: (task: DaemonSessionTaskWithWorkflowStatus) => void;
+  onSelectTask: (task: ComposerChipTask) => void;
   /** Hand focus back to the composer, optionally with a typed character. */
   onReturnToInput?: (text?: string) => void;
 }
@@ -47,6 +48,7 @@ export interface ComposerTaskChipsProps {
 const LABEL_KEYS: Record<ComposerTaskChipKind, [string, string]> = {
   workflow: ['tasks.pill.workflow', 'tasks.pill.workflows'],
   agent: ['tasks.pill.agent', 'tasks.pill.agents'],
+  session: ['tasks.pill.session', 'tasks.pill.sessions'],
   shell: ['tasks.pill.shell', 'tasks.pill.shells'],
   monitor: ['tasks.pill.monitor', 'tasks.pill.monitors'],
 };
@@ -57,6 +59,8 @@ function kindIcon(kind: ComposerTaskChipKind): ReactNode {
       return <WorkflowIcon aria-hidden="true" />;
     case 'agent':
       return <BotIcon aria-hidden="true" />;
+    case 'session':
+      return <MessagesSquareIcon aria-hidden="true" />;
     case 'shell':
       return <SquareTerminalIcon aria-hidden="true" />;
     case 'monitor':
@@ -64,29 +68,24 @@ function kindIcon(kind: ComposerTaskChipKind): ReactNode {
   }
 }
 
-function taskLabel(task: DaemonSessionTaskWithWorkflowStatus): string {
+function taskLabel(task: ComposerChipTask): string {
   switch (task.kind) {
     case 'shell':
       return task.command;
     case 'monitor':
       return task.description;
     case 'agent':
+    case 'session':
     case 'workflow':
       return task.label;
   }
 }
 
-function isMoving(task: DaemonSessionTaskWithWorkflowStatus): boolean {
+function isMoving(task: ComposerChipTask): boolean {
   return task.status === 'running' || task.status === 'pausing';
 }
 
-function TaskElapsed({
-  task,
-  now,
-}: {
-  task: DaemonSessionTaskWithWorkflowStatus;
-  now: number;
-}) {
+function TaskElapsed({ task, now }: { task: ComposerChipTask; now: number }) {
   // A paused task's clock stopped; the snapshot's runtime is the honest number.
   const ms = isMoving(task)
     ? Math.max(task.runtimeMs, now - task.startTime)
@@ -179,7 +178,7 @@ export const ComposerTaskChips = forwardRef<
 
   if (groups.length === 0) return null;
 
-  const selectTask = (task: DaemonSessionTaskWithWorkflowStatus) => {
+  const selectTask = (task: ComposerChipTask) => {
     chipRefs.current.get(task.kind)?.focus({ preventScroll: true });
     setOpenKind(null);
     onSelectTask(task);

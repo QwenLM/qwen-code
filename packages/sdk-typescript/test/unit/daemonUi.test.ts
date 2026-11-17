@@ -31,6 +31,22 @@ import type {
 } from '../../src/daemon/ui/index.js';
 
 describe('daemon UI normalizer and transcript reducer', () => {
+  it('names the caller whose sent sub-session task changed', () => {
+    expect(
+      normalizeDaemonEvent({
+        id: 7,
+        v: 1,
+        type: 'sub_session_task_changed',
+        data: { sessionId: 'caller-1' },
+      }),
+    ).toEqual([
+      expect.objectContaining({
+        type: 'session.sub_session_task.changed',
+        sessionId: 'caller-1',
+      }),
+    ]);
+  });
+
   it('treats config option updates as state metadata rather than chat or progress', () => {
     expect(
       normalizeDaemonEvent({

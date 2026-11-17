@@ -6193,6 +6193,27 @@ describe('DaemonClient', () => {
         targetSessionId: 'kid',
       });
     });
+
+    it('asks the tasks route for the sends it reports back', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          v: 1,
+          sessionId: 'main-1',
+          now: 1,
+          tasks: [],
+          subSessions: [],
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client.sessionTasks('main-1', undefined, {
+        includeSubSessions: true,
+      });
+
+      expect(calls[0]?.url).toBe(
+        'http://daemon/session/main-1/tasks?includeSubSessions=true',
+      );
+    });
   });
 
   describe('cancel', () => {
