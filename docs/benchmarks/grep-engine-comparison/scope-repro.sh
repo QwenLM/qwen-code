@@ -90,3 +90,7 @@ echo 'fixed main fallback: the corpus drops symlinks, so they never become an op
 echo 'pre-fix behaviour, symlink as a plain grep operand:'
 grep -l -E -e needle -- symlink.txt || echo '  (no match)'
 echo '  ^ listing symlink.txt here means grep read src.txt through the link'
+echo 'the pre-fix recursive arm does NOT follow (BSD grep 2.6.0-FreeBSD, measured):'
+grep -r -l -E -e needle -- symlink.txt || echo '  (no match: -r does not follow an explicit symlink operand)'
+echo 'the pre-fix JavaScript arm DID follow: globStream yields the link and'
+echo 'readFile dereferences it. The corpus filter closes both.'

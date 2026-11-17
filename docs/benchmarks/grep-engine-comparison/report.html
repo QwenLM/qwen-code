@@ -641,10 +641,19 @@
         <p>
           <strong>本 PR 修复后的回退链落在哪一侧</strong>：符号链接与 submodule
           gitlink 都被 <code>lstat</code> 过滤掉，语料里根本不会出现它们，因此与
-          git grep 的"整个条目跳过"一致，也不会跟随目标。修复前更糟——grep
-          对显式操作数会解引用符号链接（rg
-          在同样位置也一样），把搜索根之外文件的内容当作仓库内匹配返回，
-          既破坏与策略 1 的等价，也绕过只校验搜索根的权限边界。
+          git grep
+          的“整个条目跳过”一致，也不会跟随目标。<strong>修复前</strong>：scoped
+          argv 把符号链接当显式操作数交给 grep，而 grep 会解引用显式操作数（rg
+          在同样位置也一样），于是把搜索根之外文件的内容
+          当作仓库内匹配返回，既破坏与策略 1
+          的等价，也绕过只校验搜索根的权限边界。实测本机 BSD grep
+          2.6.0-FreeBSD：<code>grep -- link</code> 跟随并命中目标内容，而
+          <code>grep -r .</code>、<code>grep -R .</code> 与
+          <code>grep -r -- link</code>
+          都不跟随——所以修复前的递归臂并不泄漏，泄漏只出现在新的显式操作数形式
+          上。<strong>同时被关掉的一条既有泄漏</strong>：修复前 JS 回退对
+          globStream 产出的符号链接直接 <code>readFile</code>
+          会跟随目标，语料过滤后该条目不再进入循环。
         </p>
         <p>
           <strong>一处修好 fixture 后才暴露的反向差异</strong>：语料取自
