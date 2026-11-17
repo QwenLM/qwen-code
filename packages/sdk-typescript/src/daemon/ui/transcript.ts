@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  parseQwenAgentMessageMeta,
+  QWEN_AGENT_MESSAGE_META_KEY,
+} from '../session-agents.js';
 import type {
   DaemonPromptCancelledTranscriptBlock,
   DaemonResourceLink,
@@ -2270,10 +2274,13 @@ export function isDaemonRewindUserBlock(
   block: DaemonTranscriptBlock | undefined,
 ): boolean {
   if (block?.kind !== 'user') return false;
-  const source = block.meta?.['source'];
+  const meta = block.meta;
+  const source = meta?.['source'];
   return (
     source !== 'background_notification' &&
-    source !== 'mid_turn_message_injected'
+    source !== 'mid_turn_message_injected' &&
+    parseQwenAgentMessageMeta(meta?.[QWEN_AGENT_MESSAGE_META_KEY])?.sentTo ===
+      undefined
   );
 }
 

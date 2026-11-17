@@ -780,7 +780,7 @@ export function ChatPane({
         ? t('settings.models.addDisabled')
         : undefined,
     connected: connection.status === 'connected',
-    writeBlocked: connection.runtimeStopped,
+    writeBlocked: readOnly || connection.runtimeStopped,
     runtimeStopped: connection.runtimeStopped,
     sessionId: connection.sessionId,
     workspaceCwd: connection.workspaceCwd,
@@ -814,7 +814,9 @@ export function ChatPane({
     if (!isResponding) return undefined;
     for (let i = messages.length - 1; i >= 0; i--) {
       const message = messages[i];
-      if (message?.role === 'user') return message.timestamp;
+      if (message?.role === 'user' && !message.agentMessage?.sentTo) {
+        return message.timestamp;
+      }
     }
     return undefined;
   }, [
@@ -1724,7 +1726,7 @@ export function ChatPane({
     [embedded, showWorkspaceChip, planControlVisible],
   );
   const headerActions =
-    connection.sessionId && renderHeaderActions
+    !readOnly && connection.sessionId && renderHeaderActions
       ? renderHeaderActions({
           sessionId: connection.sessionId,
           workspaceCwd: paneWorkspaceCwd || undefined,
@@ -1747,6 +1749,8 @@ export function ChatPane({
   const workspaceAccentClass = workspaceAccent
     ? accentStyles[workspaceAccent]
     : undefined;
+  const showComposerStatus =
+    !readOnly && (queuedPrompts.length > 0 || liveGoalSnapshot?.goal);
 
   return (
     <section
@@ -1764,7 +1768,7 @@ export function ChatPane({
         hydrated={hydrated}
         refresh={refresh}
       />
-      {goalEditOpen && connection.goalState?.goal && (
+      {!readOnly && goalEditOpen && connection.goalState?.goal && (
         <GoalEditDialog
           objective={connection.goalState.goal.objective}
           saving={goalControlBusy}
@@ -2002,7 +2006,7 @@ export function ChatPane({
             />
           </div>
         )}
-        {capacityRecovery.intent && (
+        {!readOnly && capacityRecovery.intent && (
           <CapacityRecoveryDialog
             intent={capacityRecovery.intent}
             onClose={capacityRecovery.dismiss}
@@ -2017,21 +2021,23 @@ export function ChatPane({
                   ? t('capacityChoice.persistenceUnconfirmed')
                   : ''}
               </span>
-              <button
-                type="button"
-                onClick={() => {
-                  if (connection.sessionId)
-                    void actions
-                      .loadSession(connection.sessionId, {
-                        sessionContext: connection.sessionContext,
-                      })
-                      .catch((error: unknown) =>
-                        reportError(error, 'Failed to resume session'),
-                      );
-                }}
-              >
-                {t('capacityChoice.resume')}
-              </button>
+              {!readOnly && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (connection.sessionId)
+                      void actions
+                        .loadSession(connection.sessionId, {
+                          sessionContext: connection.sessionContext,
+                        })
+                        .catch((error: unknown) =>
+                          reportError(error, 'Failed to resume session'),
+                        );
+                  }}
+                >
+                  {t('capacityChoice.resume')}
+                </button>
+              )}
             </div>
           )}
           {/* Panes keep the composer status compact: spinner + elapsed time +
@@ -2049,7 +2055,7 @@ export function ChatPane({
               connection.backgroundTurn?.kind
             }
           />
-          {(queuedPrompts.length > 0 || liveGoalSnapshot?.goal) && (
+          {showComposerStatus && (
             <div
               className={composerStatusStyles.root}
               data-testid="composer-status-stack"
@@ -2092,7 +2098,7 @@ export function ChatPane({
               data-testid="pane-prompt-admission-unknown"
             >
               <span>{t('queue.admissionUnknown')}</span>
-              {unknownPromptAdmission.payloadAvailable && (
+              {!readOnly && unknownPromptAdmission.payloadAvailable && (
                 <span className={styles.admissionUnknownActions}>
                   <button type="button" onClick={continueEditingUnknownPrompt}>
                     {t('queue.continueEditing')}
@@ -2106,7 +2112,10 @@ export function ChatPane({
           )}
           <SessionRecoveryBanner
             blocked={
-              approvalActive || admissionPayloadLocked || sessionHasActivePrompt
+              readOnly ||
+              approvalActive ||
+              admissionPayloadLocked ||
+              sessionHasActivePrompt
             }
           />
           {!readOnly && (

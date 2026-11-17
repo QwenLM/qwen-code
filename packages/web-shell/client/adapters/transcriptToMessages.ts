@@ -13,8 +13,6 @@ import {
   QWEN_AGENT_MESSAGE_META_KEY,
 } from '@qwen-code/sdk/daemon';
 import type {
-  DaemonInputAnnotation,
-  DaemonInputSourceAnnotation,
   DaemonLoopStop,
   QwenAgentMessageMeta,
   DaemonTranscriptBlock,
@@ -58,7 +56,6 @@ type DaemonPermissionTranscriptBlock = Extract<
 type ExtendedDaemonTextTranscriptBlock = DaemonTextTranscriptBlock & {
   meta?: {
     source?: unknown;
-    inputAnnotations?: unknown;
   };
 };
 
@@ -105,31 +102,6 @@ function agentMessageOfBlock(
   };
 }
 
-/** The session a message was sent from, among a user block's annotations. */
-function isInputSourceAnnotation(
-  value: unknown,
-): value is DaemonInputSourceAnnotation {
-  const record = getRecord(value);
-  return (
-    record?.['type'] === 'source' &&
-    typeof record['sessionId'] === 'string' &&
-    typeof record['workspaceCwd'] === 'string'
-  );
-}
-
-/** The session a `sent` completion links to: `[…](qwen-session://<id>?workspace=<cwd>)`. */
-function parseReplyingSession(
-  text: string,
-): { sessionId: string; workspaceCwd?: string } | undefined {
-  const match = /\]\(qwen-session:\/\/([^)?\s]+)(?:\?([^)\s]*))?\)/.exec(text);
-  if (!match?.[1]) return undefined;
-  const workspaceCwd = new URLSearchParams(match[2] ?? '').get('workspace');
-  return {
-    sessionId: decodeURIComponent(match[1]),
-    ...(workspaceCwd ? { workspaceCwd } : {}),
-  };
-}
-
 function collectBackgroundTaskUpdates(
   blocks: readonly DaemonTranscriptBlock[],
 ) {
@@ -150,13 +122,7 @@ function collectBackgroundTaskUpdates(
     );
     const taskId = getString(task, 'taskId');
     if (task && taskId && (completed || source === 'background_notification')) {
-      // A reply from another session links to it (`qwen-session://`), and
-      // the turn it starts is that session talking to this one.
-      const fromSession =
-        (completed && 'text' in block && typeof block.text === 'string'
-          ? parseReplyingSession(block.text)
-          : undefined) ?? latestTasks.get(taskId)?.['fromSession'];
-      latestTasks.set(taskId, fromSession ? { ...task, fromSession } : task);
+      latestTasks.set(taskId, task);
       if (!completed) lastConsumedTaskIndex.set(taskId, index);
       const toolUseId = getString(task, 'toolUseId');
       const status = getString(task, 'status');
@@ -182,10 +148,21 @@ function collectBackgroundTaskUpdates(
     if (
       !turn ||
       completed ||
-      ('parentToolCallId' in block && block.parentToolCallId) ||
-      tasksByExecution.has(turn.turnId)
+      ('parentToolCallId' in block && block.parentToolCallId)
     )
       continue;
+    if (tasksByExecution.has(turn.turnId)) {
+      // A paginated transcript can keep the turn and its notification after
+      // the earlier completion block has scrolled out of the window.
+      if (
+        source === 'background_notification' &&
+        taskId === turn.taskId &&
+        task?.['fromSession']
+      ) {
+        tasksByExecution.set(turn.turnId, task);
+      }
+      continue;
+    }
     lastConsumedTaskIndex.set(turn.taskId, index);
     automaticTaskIds.add(turn.taskId);
     const result = latestTasks.get(turn.taskId);
@@ -739,17 +716,8 @@ export function transcriptBlocksToDaemonMessages(
           (textBlock as ExtendedDaemonTextTranscriptBlock).meta,
         );
         const source = getString(meta, 'source');
-        // The daemon's `source` entry rides along with the reference chips
-        // but covers no text, so it becomes a field of its own.
-        const rawAnnotations: unknown[] = Array.isArray(meta?.inputAnnotations)
-          ? meta.inputAnnotations
-          : [];
-        const sentFrom = rawAnnotations.find(isInputSourceAnnotation);
-        const referenceAnnotations = rawAnnotations.filter(
-          (annotation) => !isInputSourceAnnotation(annotation),
-        ) as DaemonInputAnnotation[];
-        const inputAnnotations =
-          referenceAnnotations.length > 0 ? referenceAnnotations : undefined;
+        const sentFrom = textBlock.meta?.sourceAnnotation;
+        const inputAnnotations = textBlock.meta?.inputAnnotations;
         const images = textBlock.images?.map((img) => ({
           data: img.data,
           mimeType: img.mimeType || 'image/*',
@@ -786,7 +754,7 @@ export function transcriptBlocksToDaemonMessages(
           timestamp: blockTime,
           sourceBlockIds: [block.id],
           ...(source ? { source } : {}),
-          ...(inputAnnotations ? { inputAnnotations } : {}),
+          ...(inputAnnotations?.length ? { inputAnnotations } : {}),
           ...(sentFrom ? { sentFrom } : {}),
           ...(agentMessage ? { agentMessage } : {}),
           ...(agentMessage?.author

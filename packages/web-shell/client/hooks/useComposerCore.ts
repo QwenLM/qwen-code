@@ -2805,6 +2805,7 @@ export function useComposerCore(
   const autoTriggerRef = useRef<{ text: string; from: number } | null>(null);
   const [slashMenu, setSlashMenuState] = useState<SlashMenuState | null>(null);
   const slashMenuRef = useRef<SlashMenuState | null>(null);
+  const dismissedSlashMenuRef = useRef<EditorState['doc'] | null>(null);
 
   // True while the user is paging through input history with the arrow keys
   // and has not typed since. Unlike history.isNavigating() (which stays set
@@ -2953,6 +2954,7 @@ export function useComposerCore(
       slashArgumentCompleterRef.current,
     );
     if (!result) return false;
+    dismissedSlashMenuRef.current = null;
     setSlashMenu({
       ...result,
       selectedIndex: 0,
@@ -3030,12 +3032,21 @@ export function useComposerCore(
   // for a command being typed.
   useEffect(() => {
     const view = viewRef.current;
-    if (!view || !slashArgumentCompleter) return;
-    const line = view.state.doc.lineAt(view.state.selection.main.head);
-    if (line.text.startsWith('/')) refreshSlashMenuForView(view);
+    if (
+      !view?.hasFocus ||
+      !slashArgumentCompleter ||
+      dismissedSlashMenuRef.current === view.state.doc
+    )
+      return;
+    const { head } = view.state.selection.main;
+    const line = view.state.doc.lineAt(head);
+    if (slashArgumentCompleter(line.text.slice(0, head - line.from))) {
+      refreshSlashMenuForView(view);
+    }
   }, [refreshSlashMenuForView, slashArgumentCompleter]);
 
   const closeSlashMenu = useCallback(() => {
+    dismissedSlashMenuRef.current = viewRef.current?.state.doc ?? null;
     setSlashMenu(null);
   }, [setSlashMenu]);
 

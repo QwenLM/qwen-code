@@ -174,7 +174,8 @@ to run.
 workspace, and needs chat recording in the caller to do so, as a `sent`
 launch into another workspace does. A `sent` launch that creates a session waits
 until its prompt is dispatched. A follow-up returns once the prompt is
-queued. The launcher waits up to 30 minutes for the result. Expiry before
+queued. The launcher waits up to 30 minutes for the result and pauses its
+timer while the target needs approval or an answer. Expiry before
 the ACP write prevents dispatch and publishes the failed turn status.
 Once the write starts, the timeout ends the result wait and later prompts
 still wait for that ACP request to settle. The guards still run when the
@@ -268,21 +269,20 @@ folds its steps, so the source of what the caller says stays visible.
 
 The message row is written through the daemon's external-record call
 (`appendExternalRecord`), which Agent Collaboration uses for a message from
-another party: it writes a durable record, shows it live, and queues its
-model text for the caller's next turn, so the model sees what the person
-asked before it sees the answer. It is an `agent_mention` record with a new
-`sentTo` field (the target's id, workspace and title), keyed by the
-completion's task id so a repeat writes nothing. It does not start a turn.
+another party: it writes a durable record and shows it live. The automatic
+reply turn receives the record's bounded model text alongside the reply,
+so the model can see what the person asked. The `agent_mention` record has a
+`sentTo` field with the target's id, workspace and title. The completion's
+task id keys the record so a repeat writes nothing. It does not start a turn.
 
 The reply is the completion notification a `sent` launch of the tool
 delivers, with three changes for a person's send. Its summary says the user
 sent the message with `/send` and asks the model to tell the user what the
-target replied; it repeats the message (up to 2,000 characters) in case the
-record is not in context. It leaves out the session link the tool's
-notification carries, which the model otherwise showed the person verbatim.
-Its label is "<workspace> · <session>", and its display text links the target
-without the thread glyph and with its workspace, which is how Web Shell tells
-the turn is another session talking and which session the card opens.
+target replied; it also repeats the first 2,000 characters of the message.
+It leaves out the tool notification's session link so the model won't repeat
+it verbatim.
+Its label is "<workspace> · <session>". Structured `fromSession` metadata
+identifies the target and its workspace for the Web Shell card.
 
 The first design started no turn and showed the target's reply as a message
 in the caller; the person wanted the caller to take in the reply and tell
@@ -311,14 +311,16 @@ alike, from the launch until the target's turn settles (completed, failed, or
 cancelled when the daemon stops). `GET /session/:id/tasks?includeSubSessions=true`
 adds them as `subSessions` beside the child's tasks. A record names the target
 by its title when a person sent to an existing session, and carries
-`waitingForInput`, which the launcher sets from the target's permission
-request and resolution events while it follows the turn. When a record
+`waitingForInput`, which the launcher initializes from the target's pending
+requests and updates as it follows the turn. Waiting on a permission or
+question pauses the 30-minute observation budget. When a record
 starts, settles, or starts or stops waiting, the daemon publishes `sub_session_task_changed` with the caller's id
 on the caller's workspace, and Web Shell re-reads the list; a slow poll backs
 the event up while one runs. So a send made through the API, or by the model,
 shows a chip too. Records live in daemon memory, at most 20 per caller with
-the oldest settled ones dropped first; a daemon restart forgets them, as it
-loses a pending notification.
+the oldest settled ones dropped first. When 20 sends are active, the daemon
+refuses another send until a slot opens. A daemon restart forgets the records
+and any pending notification.
 
 ## Files
 

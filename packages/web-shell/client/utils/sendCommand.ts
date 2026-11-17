@@ -34,7 +34,11 @@ function readValue(
   return match ? { value: match[0], end: start + match[0].length } : undefined;
 }
 
-export function parseSendCommand(args: string): SendCommandParse {
+function readSendOptions(args: string): {
+  values: Partial<Record<SendOption, string>>;
+  pos: number;
+  error?: Extract<SendCommandParse, { ok: false }>;
+} {
   const values: Partial<Record<SendOption, string>> = {};
   let pos = 0;
   for (;;) {
@@ -47,7 +51,11 @@ export function parseSendCommand(args: string): SendCommandParse {
     );
     if (!option) break;
     if (values[option] !== undefined) {
-      return { ok: false, error: 'duplicate-option', option };
+      return {
+        values,
+        pos,
+        error: { ok: false, error: 'duplicate-option', option },
+      };
     }
     pos += option.length;
     if (args[pos] === '=') {
@@ -57,11 +65,25 @@ export function parseSendCommand(args: string): SendCommandParse {
     }
     const read = readValue(args, pos);
     if (!read || !read.value.trim()) {
-      return { ok: false, error: 'missing-value', option };
+      return {
+        values,
+        pos,
+        error: { ok: false, error: 'missing-value', option },
+      };
     }
     values[option] = read.value.trim();
     pos = read.end;
   }
+  return { values, pos };
+}
+
+export function getSendWorkspace(args: string): string | undefined {
+  return readSendOptions(args).values['--workspace'];
+}
+
+export function parseSendCommand(args: string): SendCommandParse {
+  const { values, pos, error } = readSendOptions(args);
+  if (error) return error;
   const message = args.slice(pos).trim();
   if (!message) return { ok: false, error: 'missing-message' };
   return {

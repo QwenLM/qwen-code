@@ -2878,11 +2878,13 @@ back to this session, from `POST /session/:id/sub-sessions` or from the
 model's `create_sub_session`. Each is `{ kind: "session", id, sessionId,
 workspaceCwd, label, status, startTime, endTime?, runtimeMs, byPerson,
 waitingForInput }`, where `id` is the completion's task id, `sessionId` and
-`workspaceCwd` name the target, `status` is `running` until the target's turn
-settles as `completed`, `failed`, or `cancelled`, and `waitingForInput` is
-true while the target has a pending permission request or question. The
-daemon keeps them in memory, at most 20 per session, so a restart forgets
-them. When one starts, settles, or starts or stops waiting it publishes `sub_session_task_changed` with `{ sessionId }` (the caller) on
+`workspaceCwd` name the target, and `status` changes from `running` to
+`completed`, `failed`, or `cancelled`. A 30-minute observation timeout
+produces `failed` and pauses while `waitingForInput` indicates a pending
+permission request or question in the target. The daemon keeps at most 20
+records per caller in memory and refuses another send while all 20 slots are
+active. A restart forgets them. When one starts, settles, or starts or stops
+waiting the daemon publishes `sub_session_task_changed` with `{ sessionId }` (the caller) on
 every session in the caller's workspace; clients filter by `sessionId` and
 re-read this route.
 
@@ -4172,7 +4174,7 @@ The response carries `sessionId`, `workspaceCwd` when the session runs in anothe
 
 While the target runs, the send is listed in `GET /session/:id/tasks?includeSubSessions=true`.
 
-The message is written to `:id`'s conversation as an `agent_mention` record whose `_meta.qwenAgentMessage.sentTo` is `{ sessionId, workspaceCwd, title? }` (the target), without starting a turn. When the target's turn settles, `:id` receives the completion notification and runs a turn in which its model tells the person what the target replied; the notification's label is `<workspace> · <title>`, and its display text links `qwen-session://<target>?workspace=<cwd>`. The prompt the target receives carries `{ type: "source", sessionId, workspaceCwd, title? }` (the caller) among `_meta.inputAnnotations` on its `user_message_chunk`, live and on replay; the model's `create_sub_session` launches carry it too.
+The message is written to `:id`'s conversation as an `agent_mention` record whose `_meta.qwenAgentMessage.sentTo` is `{ sessionId, workspaceCwd, title? }` (the target), without starting a turn. When the target's turn settles, `:id` receives the completion notification and runs a turn in which its model tells the person what the target replied; the notification's label is `<workspace> · <title>`, and `backgroundTask.fromSession` identifies `{ sessionId, workspaceCwd }` for the target. The prompt the target receives carries `{ type: "source", sessionId, workspaceCwd, title? }` (the caller) among `_meta.inputAnnotations` on its `user_message_chunk`, live and on replay; the model's `create_sub_session` launches carry it too. The TypeScript SDK exposes the sender on normalized delta metadata as `sourceAnnotation` and keeps `inputAnnotations` for reference annotations.
 
 ### `DELETE /session/:id`
 

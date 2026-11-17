@@ -1353,6 +1353,8 @@ const EN: Messages = {
   'composerAdd.btw.textOnly': 'Remove attachments first',
   'local.send': 'Send a message to another session',
   'send.noAttachments': '/send takes text only; remove the attachments first',
+  'send.workspaceLocked':
+    'This view can only send to and open sessions in its workspace.',
   'send.missingMessage':
     'Add the message after the options: /send [--workspace <name>] [--session-id <id>] <message>',
   'send.missingValue': (v) => `${v?.option ?? ''} needs a value`,
@@ -6723,6 +6725,7 @@ const ZH: Messages = {
   'composerAdd.btw.textOnly': '请先移除附件',
   'local.send': '发送消息到另一个会话',
   'send.noAttachments': '/send 只能发送文字，请先移除附件',
+  'send.workspaceLocked': '此视图只能向当前工作区发送消息并打开其中的会话。',
   'send.missingMessage':
     '请在选项后写上消息：/send [--workspace <名称>] [--session-id <id>] <消息>',
   'send.missingValue': (v) => `${v?.option ?? ''} 缺少值`,

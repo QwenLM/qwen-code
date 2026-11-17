@@ -293,6 +293,8 @@ export const RU_PART2: Record<
   'local.send': 'Отправить сообщение в другой сеанс',
   'send.noAttachments':
     '/send принимает только текст; сначала уберите вложения',
+  'send.workspaceLocked':
+    'Здесь можно отправлять сообщения и открывать сеансы только в текущем рабочем пространстве.',
   'send.missingMessage':
     'Добавьте сообщение после параметров: /send [--workspace <имя>] [--session-id <id>] <сообщение>',
   'send.missingValue': (v) => `Для ${v?.option ?? ''} нужно значение`,

@@ -18,6 +18,7 @@ import {
   estimateDaemonTranscriptBlockBytes,
   extractTranscriptTiming,
   getOutputText,
+  isDaemonRewindUserBlock,
   isDaemonUiSensitiveKey,
   normalizeDaemonEvent,
   reduceDaemonTranscriptEvents,
@@ -624,6 +625,77 @@ describe('daemon UI normalizer and transcript reducer', () => {
       kind: 'user',
       meta: { inputAnnotations },
     });
+  });
+
+  it('separates sender metadata from the SDK reference annotations', () => {
+    const reference = {
+      type: 'reference',
+      start: 0,
+      end: 7,
+      text: '@file/a',
+      reference: { id: 'file:@file/a' },
+    };
+    const source = {
+      type: 'source',
+      sessionId: 'caller',
+      workspaceCwd: '/work/a',
+      title: 'Caller',
+    };
+    const events = normalizeDaemonEvent({
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: '@file/a' },
+          _meta: {
+            inputAnnotations: [
+              { type: 'source', sessionId: 3 },
+              reference,
+              source,
+            ],
+          },
+        },
+      },
+    });
+
+    const [message] = events;
+    if (message?.type !== 'user.text.delta')
+      throw new Error('Missing user message');
+    expect(
+      message.meta?.inputAnnotations?.map((item) => item.reference.id),
+    ).toEqual(['file:@file/a']);
+    expect(message.meta?.sourceAnnotation).toEqual(source);
+    expect(
+      reduceDaemonTranscriptEvents(createDaemonTranscriptState(), events)
+        .blocks[0],
+    ).toMatchObject({
+      meta: { inputAnnotations: [reference], sourceAnnotation: source },
+    });
+  });
+
+  it('excludes outgoing send records from rewindable user turns', () => {
+    const state = reduceDaemonTranscriptEvents(createDaemonTranscriptState(), [
+      { type: 'user.text.delta', text: 'A prompt', promptId: 'real-prompt' },
+      {
+        type: 'user.text.delta',
+        text: 'An outgoing message',
+        segmentId: 'mention:outgoing',
+        meta: {
+          source: 'agent_mention',
+          qwenDiscreteMessage: true,
+          qwenAgentMessage: {
+            kind: 'agent_mention',
+            sentTo: { sessionId: 'target', workspaceCwd: '/work/b' },
+          },
+        },
+      },
+    ]);
+
+    expect(state.blocks).toHaveLength(2);
+    expect(state.blocks.filter(isDaemonRewindUserBlock)).toMatchObject([
+      { kind: 'user', promptId: 'real-prompt' },
+    ]);
   });
 
   it('preserves assistant message metadata on transcript blocks', () => {

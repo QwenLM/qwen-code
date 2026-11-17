@@ -158,8 +158,8 @@ export type DaemonInputAnnotation = DaemonInputReferenceAnnotation;
 
 /**
  * The session that sent this message from another session (`/send`, or a
- * sub-session launch). The daemon stamps it among `inputAnnotations`; it
- * covers no text range, so it is not a {@link DaemonInputAnnotation}.
+ * sub-session launch). Normalization separates it from the wire's
+ * `inputAnnotations` because it covers no text range.
  */
 export interface DaemonInputSourceAnnotation {
   type: 'source';
@@ -171,6 +171,7 @@ export interface DaemonInputSourceAnnotation {
 export interface DaemonTextDeltaMeta extends Record<string, unknown> {
   qwenDiscreteMessage?: boolean;
   inputAnnotations?: DaemonInputAnnotation[];
+  sourceAnnotation?: DaemonInputSourceAnnotation;
 }
 
 export interface DaemonUiUserImageEvent extends DaemonUiEventBase {

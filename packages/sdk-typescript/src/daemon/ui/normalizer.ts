@@ -15,6 +15,7 @@ import { DAEMON_ERROR_KINDS, parseDaemonBackgroundTurn } from '../types.js';
 import { asKnownDaemonEvent, isSettingsChangedData } from '../events.js';
 import type {
   DaemonAgentIdentity,
+  DaemonInputSourceAnnotation,
   DaemonLoopStop,
   DaemonUiEvent,
   DaemonUiPermissionOption,
@@ -1242,6 +1243,30 @@ function extractUpdateMeta(
   const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
   if (!meta) return undefined;
   const { qwenTranscript: _qwenTranscript, ...displayMeta } = meta;
+  const annotations = displayMeta['inputAnnotations'];
+  if (Array.isArray(annotations)) {
+    const references = annotations.filter((annotation: unknown) => {
+      if (!isRecord(annotation) || annotation['type'] !== 'source') return true;
+      const sessionId = getString(annotation, 'sessionId');
+      const workspaceCwd = getString(annotation, 'workspaceCwd');
+      const title = getString(annotation, 'title');
+      if (sessionId && workspaceCwd && !displayMeta['sourceAnnotation']) {
+        const source: DaemonInputSourceAnnotation = {
+          type: 'source',
+          sessionId,
+          workspaceCwd,
+          ...(title !== undefined ? { title } : {}),
+        };
+        displayMeta['sourceAnnotation'] = source;
+      }
+      return false;
+    });
+    if (references.length === 0 && annotations.length > 0) {
+      delete displayMeta['inputAnnotations'];
+    } else if (references.length !== annotations.length) {
+      displayMeta['inputAnnotations'] = references;
+    }
+  }
   return Object.keys(displayMeta).length > 0 ? displayMeta : undefined;
 }
 

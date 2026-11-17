@@ -482,6 +482,7 @@ import { useBackgroundTasks } from './hooks/useBackgroundTasks';
 import { useSubSessionTasks } from './hooks/useSubSessionTasks';
 import { extractErrorDetail } from './utils/errorDetail';
 import {
+  getSendWorkspace,
   parseSendCommand,
   resolveSendWorkspace,
   type SendCommand,
@@ -6862,6 +6863,10 @@ export function App({
         'sessionId' | 'workspaceCwd' | 'label'
       >,
     ) => {
+      if (lockedWorkspaceCwd && task.workspaceCwd !== lockedWorkspaceCwd) {
+        pushToast('error', t('send.workspaceLocked'));
+        return;
+      }
       const tab: ArtifactPanelTab = {
         id: `session:${task.sessionId}`,
         kind: 'session',
@@ -6878,7 +6883,7 @@ export function App({
       );
       setArtifactPanelOpen(true);
     },
-    [getDefaultReviewPanelWidth],
+    [getDefaultReviewPanelWidth, lockedWorkspaceCwd, pushToast, t],
   );
   const openImagePanel = useCallback(
     (src: string, alt?: string, source?: ImageTabSource) => {
@@ -9297,13 +9302,14 @@ export function App({
       ) === true,
     subSessionTasksRefresh,
   );
-  const composerChipTasks = useMemo<ComposerChipTask[]>(
-    () =>
-      subSessionTasks.length > 0
-        ? [...sessionTasks, ...subSessionTasks]
-        : sessionTasks,
-    [sessionTasks, subSessionTasks],
-  );
+  const composerChipTasks = useMemo<ComposerChipTask[]>(() => {
+    const visible = lockedWorkspaceCwd
+      ? subSessionTasks.filter(
+          (task) => task.workspaceCwd === lockedWorkspaceCwd,
+        )
+      : subSessionTasks;
+    return visible.length > 0 ? [...sessionTasks, ...visible] : sessionTasks;
+  }, [lockedWorkspaceCwd, sessionTasks, subSessionTasks]);
   const [sessionAgentInventory, setSessionAgentInventory] = useState<{
     sessionKey: string;
     tasks: DaemonSessionAgentTaskStatus[];
@@ -11903,42 +11909,46 @@ export function App({
         : undefined,
     [sendCompletionCwd],
   );
-  const { sessions: sendCompletionSessions } = useSessionCatalogQuery(
+  const { page: sendCompletionPage } = useSessionCatalogQuery(
     workspace.client,
     sendSessionsQuery,
     { autoLoad: true },
   );
+  const sendCompletionSessions = sendCompletionPage?.sessions;
   const sendArgumentCompleter = useMemo(() => {
     const callerCwd = connection.workspaceCwd;
     if (!sendCommandAvailable || !callerCwd) return undefined;
-    const names = new Map<string, number>();
-    for (const entry of sendWorkspaces) {
-      const name = workspaceLabel(entry).toLowerCase();
-      names.set(name, (names.get(name) ?? 0) + 1);
-    }
+    const visible = lockedWorkspaceCwd
+      ? sendWorkspaces.filter((entry) => entry.cwd === lockedWorkspaceCwd)
+      : sendWorkspaces;
     const workspaces = disambiguateWorkspaceLabels(
-      sendWorkspaces.map((entry) => ({
+      visible.map((entry) => ({
         cwd: entry.cwd,
         label: workspaceLabel(entry),
       })),
     ).map((entry, index) => {
-      const name = workspaceLabel(sendWorkspaces[index]!);
+      const workspace = visible[index]!;
+      const name = workspaceLabel(workspace);
       return {
         cwd: entry.cwd,
         label: entry.label,
         detail: entry.cwd,
-        // A name the command resolves on its own; otherwise the path.
-        value: names.get(name.toLowerCase()) === 1 ? name : entry.cwd,
+        value:
+          !/["']/.test(name) &&
+          resolveSendWorkspace(sendWorkspaces, name) === entry.cwd
+            ? name
+            : workspace.id,
       };
     });
     const callerSessionId = connection.sessionId;
     return createSendArgumentCompleter({
       workspaces,
       currentWorkspaceCwd: callerCwd,
+      resolveWorkspace: (value) => resolveSendWorkspace(sendWorkspaces, value),
       sessionsFor: (cwd) =>
         cwd === sendCompletionCwd
           ? sendCompletionSessions
-              .filter((session) => session.sessionId !== callerSessionId)
+              ?.filter((session) => session.sessionId !== callerSessionId)
               .map((session) => ({
                 value: session.sessionId,
                 label:
@@ -11956,6 +11966,7 @@ export function App({
   }, [
     connection.sessionId,
     connection.workspaceCwd,
+    lockedWorkspaceCwd,
     sendCommandAvailable,
     sendCompletionCwd,
     sendCompletionSessions,
@@ -11966,68 +11977,102 @@ export function App({
     (text: string) => {
       let next: string | undefined;
       if (sendCommandAvailable && /^\/send\s/.test(text)) {
-        const firstLine = text.split('\n', 1)[0]!;
-        const named = /\s--workspace(?:=|\s+)("[^"]*"|'[^']*'|\S+)/.exec(
-          firstLine,
-        )?.[1];
+        const named = getSendWorkspace(text.slice('/send'.length));
         const cwd = named
-          ? resolveSendWorkspace(
-              sendWorkspaces,
-              named.replace(/^["']|["']$/g, ''),
-            )
+          ? resolveSendWorkspace(sendWorkspaces, named)
           : connection.workspaceCwd;
         // Only a workspace it knows; a half-typed name lists nothing.
         next =
-          cwd === connection.workspaceCwd ||
-          sendWorkspaces.some((entry) => entry.cwd === cwd)
+          (!lockedWorkspaceCwd || cwd === lockedWorkspaceCwd) &&
+          (cwd === connection.workspaceCwd ||
+            sendWorkspaces.some((entry) => entry.cwd === cwd))
             ? (cwd ?? undefined)
             : undefined;
       }
       setSendCompletionCwd((current) => (current === next ? current : next));
     },
-    [connection.workspaceCwd, sendCommandAvailable, sendWorkspaces],
+    [
+      connection.workspaceCwd,
+      lockedWorkspaceCwd,
+      sendCommandAvailable,
+      sendWorkspaces,
+    ],
   );
+  const sendsInFlight = useRef(new Set<string>());
   const runSendCommand = useCallback(
-    async (command: SendCommand, text: string) => {
+    async (
+      command: SendCommand,
+      commitAccepted?: ComposerSubmitCommit,
+      isCurrentDraft?: ComposerSubmitMetadata['isCurrentDraft'],
+    ) => {
       const callerSessionId = connection.sessionId;
       const callerCwd = connection.workspaceCwd;
       if (!callerSessionId || !callerCwd) return;
       const workspaceCwd =
         command.workspace === undefined
-          ? undefined
+          ? callerCwd
           : resolveSendWorkspace(sendWorkspaces, command.workspace);
+      if (lockedWorkspaceCwd && workspaceCwd !== lockedWorkspaceCwd) {
+        pushToast('error', t('send.workspaceLocked'));
+        return;
+      }
+      const owner = sessionOwnerGuard.capture();
+      const key = JSON.stringify([callerCwd, callerSessionId]);
+      if (sendsInFlight.current.has(key)) return;
+      sendsInFlight.current.add(key);
       try {
+        if (onSubmitBefore) {
+          await onSubmitBefore({
+            sessionId: callerSessionId,
+            prompt: command.message,
+          });
+          const currentLock = lockedWorkspaceCwdRef.current;
+          if (
+            !appMountedRef.current ||
+            !owner.isCurrent() ||
+            sessionWriteBlockedRef.current ||
+            isCurrentDraft?.() === false ||
+            (currentLock && workspaceCwd !== currentLock)
+          )
+            return;
+        }
         const result = await workspace.client.sendToSubSession(
           callerSessionId,
           {
             prompt: command.message,
-            ...(workspaceCwd !== undefined && workspaceCwd !== callerCwd
-              ? { workspace: workspaceCwd }
-              : {}),
+            ...(workspaceCwd !== callerCwd ? { workspace: workspaceCwd } : {}),
             ...(command.sessionId
               ? { targetSessionId: command.sessionId }
               : {}),
           },
           connection.clientId,
         );
+        commitAccepted?.();
         sessionCatalogController.sessionCreated(
           result.workspaceCwd ?? callerCwd,
           result.sessionId,
         );
-        setSubSessionTasksRefresh((value) => value + 1);
+        if (owner.isCurrent()) {
+          setSubSessionTasksRefresh((value) => value + 1);
+        }
       } catch (error) {
-        const editor = editorRef.current;
-        if (editor && !editor.hasInput()) editor.setText(text);
-        pushToast('error', extractErrorDetail(error));
+        if (appMountedRef.current)
+          pushToast('error', extractErrorDetail(error));
+      } finally {
+        sendsInFlight.current.delete(key);
       }
     },
     [
       connection.clientId,
       connection.sessionId,
       connection.workspaceCwd,
+      lockedWorkspaceCwd,
+      onSubmitBefore,
       pushToast,
       sendWorkspaces,
       sessionCatalogController,
+      sessionOwnerGuard,
+      t,
       workspace.client,
     ],
   );
@@ -20892,8 +20937,12 @@ export function App({
               );
               return false;
             }
-            void runSendCommand(parsed, text);
-            return true;
+            void runSendCommand(
+              parsed,
+              commitComposerAccepted,
+              metadata?.isCurrentDraft,
+            );
+            return false;
           }
           if (cmd === 'btw') {
             const rawQuestion = text.slice(match[0].length).trim();
@@ -23162,6 +23211,24 @@ export function App({
       openPanel('agents');
     },
   });
+  const submitAgentChat = agentChatEntry.submit;
+  const submitComposerInput = useCallback(
+    (...args: Parameters<typeof handleEditorSubmit>) => {
+      if (
+        !collaborationAvailable ||
+        (sendCommandAvailable && /^\/send(?:\s|$)/i.test(args[0]))
+      ) {
+        return handleEditorSubmit(...args);
+      }
+      return submitAgentChat(...args);
+    },
+    [
+      collaborationAvailable,
+      handleEditorSubmit,
+      sendCommandAvailable,
+      submitAgentChat,
+    ],
+  );
   const sessionAgentTail = useMemo(
     () =>
       sessionAgentRuns.runs.length > 0 ||
@@ -23780,7 +23847,12 @@ export function App({
   const artifactPanelSharedProps = {
     onSelectTurnCallsPrompt: openTurnCalls,
     artifacts: artifactPanelArtifacts,
-    tabs: artifactPanelTabs,
+    tabs: lockedWorkspaceCwd
+      ? artifactPanelTabs.filter(
+          (tab) =>
+            tab.kind !== 'session' || tab.workspaceCwd === lockedWorkspaceCwd,
+        )
+      : artifactPanelTabs,
     contextUsageControls,
     activeTabId: activeArtifactPanelTabId,
     reviewChanges,
@@ -26869,11 +26941,7 @@ export function App({
                             liveVoiceSlot ?? liveVoicePageSlot
                           }
                           compactOverlays={compactComposerOverlays}
-                          onSubmit={
-                            collaborationAvailable
-                              ? agentChatEntry.submit
-                              : handleEditorSubmit
-                          }
+                          onSubmit={submitComposerInput}
                           onInputTextChange={handleComposerTextChange}
                           slashArgumentCompleter={sendArgumentCompleter}
                           onAttachmentsChange={

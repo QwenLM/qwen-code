@@ -565,7 +565,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
   });
 
-  it('lifts the sending session out of the input annotations', () => {
+  it('shows the normalized sending session beside reference annotations', () => {
     const reference = {
       type: 'reference' as const,
       start: 0,
@@ -574,20 +574,17 @@ describe('transcriptBlocksToDaemonMessages', () => {
       reference: { id: 'file', serialized: '@file' },
     };
     const source = {
-      type: 'source',
+      type: 'source' as const,
       sessionId: 'caller',
       workspaceCwd: '/work/a',
       title: 'Caller',
     };
     const messages = transcriptBlocksToDaemonMessages([
       textBlock('user-1', 'user', '@file look', 1, false, {
-        meta: { inputAnnotations: [source, reference] },
+        meta: { sourceAnnotation: source, inputAnnotations: [reference] },
       }),
       textBlock('user-2', 'user', 'plain', 2, false, {
-        meta: { inputAnnotations: [source] },
-      }),
-      textBlock('user-3', 'user', 'malformed', 3, false, {
-        meta: { inputAnnotations: [{ type: 'source', sessionId: 7 }] },
+        meta: { sourceAnnotation: source },
       }),
     ]);
 
@@ -597,7 +594,6 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
     expect(messages[1]).toMatchObject({ sentFrom: source });
     expect(messages[1]).not.toHaveProperty('inputAnnotations');
-    expect(messages[2]).not.toHaveProperty('sentFrom');
   });
 
   it('renders live background task notifications as system messages', () => {
@@ -5873,32 +5869,56 @@ describe('background execution identity', () => {
       });
     },
   );
-  it.each([
-    [
-      'Session [kid](qwen-session://kid?workspace=%2Fw%2Fb) replied (completed).',
-      { sessionId: 'kid', workspaceCwd: '/w/b' },
-    ],
-    ['Background agent "worker" completed.', undefined],
-  ])(
-    'marks the turn a completion %j starts as from a session: %j',
-    (text, fromSession) => {
-      const task = { taskId: 'task-1', kind: 'agent', status: 'completed' };
+  it.each(['completion', 'notification', 'none'])(
+    'reads the replying session from %s metadata',
+    (source) => {
+      const fromSession = { sessionId: 'kid', workspaceCwd: '/w/b' };
+      const task = {
+        taskId: 'task-1',
+        kind: source === 'none' ? 'shell' : 'agent',
+        status: 'completed',
+        ...(source === 'none' ? {} : { fromSession }),
+      };
+      const turn = { ...backgroundTurn, toolUseId: undefined };
       const messages = transcriptBlocksToDaemonMessages([
-        textBlock('completed', 'assistant', text, 5, false, {
-          meta: {
-            source: 'background_task_completed',
-            qwenDiscreteMessage: true,
-            backgroundTask: task,
-          },
-        }),
+        ...(source !== 'notification'
+          ? [
+              textBlock(
+                'completed',
+                'assistant',
+                'Task mentioned [a session](qwen-session://other%id).',
+                5,
+                false,
+                {
+                  meta: {
+                    source: 'background_task_completed',
+                    qwenDiscreteMessage: true,
+                    backgroundTask: task,
+                  },
+                },
+              ),
+            ]
+          : []),
         textBlock('start', 'assistant', 'Continue', 10, false, {
           meta: {
             source: 'background_notification_turn_started',
-            backgroundTurn: { ...backgroundTurn, toolUseId: undefined },
+            backgroundTurn: turn,
           },
         }),
+        ...(source === 'notification'
+          ? [
+              textBlock('notice', 'assistant', 'Task notified', 11, false, {
+                meta: {
+                  source: 'background_notification',
+                  qwenDiscreteMessage: true,
+                  backgroundTurn: turn,
+                  backgroundTask: task,
+                },
+              }),
+            ]
+          : []),
         textBlock('answer', 'assistant', 'It said MARIGOLD.', 12, false, {
-          backgroundTurn,
+          backgroundTurn: turn,
         }),
       ]);
       const marker = messages.find(
@@ -5907,7 +5927,7 @@ describe('background execution identity', () => {
       expect(
         (marker?.data as { backgroundTask?: { fromSession?: unknown } })
           ?.backgroundTask?.fromSession,
-      ).toEqual(fromSession);
+      ).toEqual(source === 'none' ? undefined : fromSession);
     },
   );
   it.each([false, true])(

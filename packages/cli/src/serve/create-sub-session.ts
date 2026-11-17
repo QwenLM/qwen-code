@@ -129,7 +129,7 @@ const FIRST_TURN_TIMEOUT_MS = 5 * 60_000;
 
 const SENT_MODE_DISPATCH_TIMEOUT_MS = 30_000;
 
-/** Wall-clock ceiling for the sent-mode background drain. Generous enough for
+/** Active-time ceiling for the sent-mode background drain. Generous enough for
  * long-running sub-sessions but prevents a hung turn from permanently consuming
  * a concurrency slot (the idle reaper may not fire if the sub-session is still
  * "actively" running from the daemon's perspective). */
@@ -231,13 +231,14 @@ export type OutgoingSubSessionStatus =
 
 /** Records a reported launch on the caller's launcher. */
 interface OutgoingReport {
-  /** `message`: what a person sent, recorded in the caller's conversation. */
+  readonly signal: AbortSignal;
+  reserve(): () => void;
   started(
     task: Pick<
       OutgoingSubSessionTask,
       'id' | 'sessionId' | 'workspaceCwd' | 'label' | 'byPerson'
     >,
-    message?: string,
+    sentRecord?: BridgeSessionExternalRecordRequest,
   ): void;
   waiting(waitingForInput: boolean): void;
   settled(status: Exclude<OutgoingSubSessionStatus, 'running'>): void;
@@ -266,7 +267,7 @@ function sentMessageRecord(
     recordKey: `send:${target.id}`,
     modelText: `${open}${body.text}${close}`,
     payload: {
-      displayText: truncateCodePoints(message, MAX_SENT_MESSAGE_TEXT_CHARS),
+      displayText: truncateUtf16(message, MAX_SENT_MESSAGE_TEXT_CHARS),
       mentionedAgentIds: [],
       sentTo: {
         sessionId: target.sessionId,
@@ -549,6 +550,14 @@ function truncateCodePoints(value: string, max: number): string {
   return `${codePoints.slice(0, Math.max(0, max - 1)).join('')}…`;
 }
 
+function truncateUtf16(value: string, max: number): string {
+  if (value.length <= max) return value;
+  let cut = max - 1;
+  const boundary = value.charCodeAt(cut - 1);
+  if (boundary >= 0xd800 && boundary <= 0xdbff) cut -= 1;
+  return `${value.slice(0, cut)}…`;
+}
+
 /** How much of a person's `/send` message the reply's notification repeats. */
 const MAX_PERSON_MESSAGE_CHARS = 2_000;
 
@@ -564,7 +573,9 @@ function buildSentCompletionNotification(
    * in which the caller's model tells the person what the target said.
    */
   personMessage?: string,
-) {
+  fromSession?: BridgeBackgroundNotification['fromSession'],
+  sentMessageContext?: string,
+): BridgeBackgroundNotification {
   const status = sentCompletionStatus(stopReason);
   const boundedStopReason = truncateCodePoints(stopReason, 128);
   const statusText =
@@ -585,7 +596,7 @@ function buildSentCompletionNotification(
   const safeResult =
     result.trim() || `No text output (stopReason: ${stopReason}).`;
   const modelSessionId = truncateCodePoints(sessionId, 256);
-  const modelLabel = truncateCodePoints(label, 256);
+  const modelLabel = truncateUtf16(label, 256);
   const modelTextPrefix = [
     '<task-notification>',
     `<task-id>${escapeXml(modelSessionId)}</task-id>`,
@@ -623,6 +634,8 @@ function buildSentCompletionNotification(
     taskId,
     status,
     kind: 'agent' as const,
+    ...(fromSession !== undefined ? { fromSession } : {}),
+    ...(sentMessageContext !== undefined ? { sentMessageContext } : {}),
     // `subSessionName` strips bidi and control marks and trims, so a name that
     // was only those characters leaves an empty label -- which the receiving
     // gate rejects as invalid params. The acceptance wait treats that as
@@ -974,6 +987,7 @@ async function awaitFirstTurn(
     onTimeout?: () => void;
     /** Called when the session starts or stops waiting on a permission. */
     onWaitingChange?: (waiting: boolean) => void;
+    pendingPermissionIds?: readonly string[];
   },
 ): Promise<{ result: string; stopReason: string }> {
   const ac = new AbortController();
@@ -983,12 +997,18 @@ async function awaitFirstTurn(
   // firing separately, or a stream that closes early (bridge teardown, WS drop)
   // is misreported as a 5-minute wall-clock timeout.
   let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    options?.onTimeout?.();
-    ac.abort();
-  }, timeoutMs);
-  if (typeof timer.unref === 'function') timer.unref();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let remaining = timeoutMs;
+  let startedAt = 0;
+  const armTimeout = () => {
+    startedAt = Date.now();
+    timer = setTimeout(() => {
+      timedOut = true;
+      options?.onTimeout?.();
+      ac.abort();
+    }, remaining);
+    timer.unref();
+  };
   // Compose: the subscription ends on timeout OR daemon shutdown, whichever
   // fires first. Without this, stop() cannot interrupt a first-turn await and
   // shutdown hangs for up to timeoutMs (5 min default).
@@ -1017,14 +1037,23 @@ async function awaitFirstTurn(
     }
   };
 
-  const pendingPermissions = new Set<string>();
+  const pendingPermissions = new Set(options?.pendingPermissionIds);
+  if (pendingPermissions.size > 0) options?.onWaitingChange?.(true);
+  else armTimeout();
   const trackPermission = (requestId: unknown, pending: boolean): void => {
     if (!options?.onWaitingChange || typeof requestId !== 'string') return;
     const before = pendingPermissions.size > 0;
     if (pending) pendingPermissions.add(requestId);
     else pendingPermissions.delete(requestId);
     const after = pendingPermissions.size > 0;
-    if (before !== after) options.onWaitingChange(after);
+    if (before === after) return;
+    if (after) {
+      clearTimeout(timer);
+      remaining = Math.max(0, remaining - (Date.now() - startedAt));
+    } else {
+      armTimeout();
+    }
+    options.onWaitingChange(after);
   };
 
   try {
@@ -1390,6 +1419,11 @@ export function createSubSessionLauncher(
         ? undefined
         : normalizeSessionIdForLookup(info.sessionId);
     const reusing = followUpSessionId !== undefined;
+    const report =
+      info.completion === 'sent' &&
+      (notifySentCompletion || remote || reusing || byPerson)
+        ? (remote?.report ?? localReport)
+        : undefined;
     if ((reusing || byPerson) && !remote && info.completion === 'sent') {
       // The completion comes back as a background turn, which the caller
       // can only take while it records its chat.
@@ -1421,6 +1455,7 @@ export function createSubSessionLauncher(
           `(cap ${maxConcurrentTotal}); wait for one to finish.`,
       );
     }
+    const releaseOutgoing = report?.reserve();
     inflight.set(key, current + 1);
     inflightTotal += 1;
     // Per-acquire idempotent release: prevents double-free when an error
@@ -1433,6 +1468,7 @@ export function createSubSessionLauncher(
       if (released) return;
       released = true;
       release(key);
+      releaseOutgoing?.();
     };
     // Set after a successful spawnOrAttach; if a later step fails the launch
     // we roll this session back so it isn't orphaned (the slot was consumed and
@@ -1486,6 +1522,7 @@ export function createSubSessionLauncher(
 
     const promptId = randomUUID();
     let lastEventId!: number;
+    let pendingPermissionIds: readonly string[] | undefined;
     let turn!: ReturnType<AcpSessionBridge['sendPrompt']>;
     let promptAdmission: Promise<void> | undefined;
     const prepareAndQueue = async (): Promise<BridgeSession> => {
@@ -1631,6 +1668,10 @@ export function createSubSessionLauncher(
           throw new Error('The target workspace stopped before dispatch.');
         }
         lastEventId = bridge.getSessionLastEventId(sessionId);
+        if (report) {
+          pendingPermissionIds =
+            bridge.getSessionPendingPermissionIds(sessionId);
+        }
         let markPromptAdmitted!: () => void;
         promptAdmission = new Promise<void>((resolve) => {
           markPromptAdmitted = resolve;
@@ -1767,10 +1808,6 @@ export function createSubSessionLauncher(
       const completionTaskId = reusing ? `${sessionId}:${promptId}` : sessionId;
 
       if (info.completion === 'sent') {
-        const report =
-          notifySentCompletion || remote || reusing || byPerson
-            ? (remote?.report ?? localReport)
-            : undefined;
         let settledStatus: Exclude<OutgoingSubSessionStatus, 'running'> =
           'cancelled';
         // A person sending to an existing session knows it by its title.
@@ -1786,16 +1823,12 @@ export function createSubSessionLauncher(
           : label;
         const linkWorkspace = remote || byPerson ? boundWorkspace : undefined;
         const personMessage = byPerson ? info.prompt : undefined;
-        report?.started(
-          {
-            id: completionTaskId,
-            sessionId,
-            workspaceCwd: boundWorkspace,
-            label,
-            byPerson,
-          },
-          byPerson ? info.prompt : undefined,
-        );
+        const fromSession = { sessionId, workspaceCwd: boundWorkspace };
+        const task = { id: completionTaskId, ...fromSession, label, byPerson };
+        const sentRecord = byPerson
+          ? sentMessageRecord(task, info.prompt)
+          : undefined;
+        report?.started(task, sentRecord);
         // Hold the concurrency slot until the sub-session's turn finishes
         // (or the daemon shuts down via stop(), or a wall-clock ceiling is
         // reached). Without this the cap is a no-op for sent mode — the
@@ -1803,7 +1836,11 @@ export function createSubSessionLauncher(
         // before the sub-session has done any work, letting a looping
         // isolated task exhaust the daemon's session pool.
         const drainAc = new AbortController();
-        const drainSignal = AbortSignal.any([stopAc.signal, drainAc.signal]);
+        const drainSignal = AbortSignal.any([
+          stopAc.signal,
+          drainAc.signal,
+          ...(remote && report ? [report.signal] : []),
+        ]);
         const targetStopped = () =>
           remote !== undefined && stopAc.signal.reason === 'workspace_stopped';
         void (async () => {
@@ -1834,6 +1871,7 @@ export function createSubSessionLauncher(
                     ...(report
                       ? {
                           onWaitingChange: (waiting) => report.waiting(waiting),
+                          pendingPermissionIds,
                         }
                       : {}),
                     onTimeout() {
@@ -1852,7 +1890,11 @@ export function createSubSessionLauncher(
                 ),
                 turnError,
               ]);
-              if (stopAc.signal.aborted && !targetStopped()) return;
+              if (
+                (stopAc.signal.aborted && !targetStopped()) ||
+                (remote && report?.signal.aborted)
+              )
+                return;
               if (completion.stopReason === 'timeout') {
                 writeStderrLine(
                   `qwen serve: sub-session ${sessionId} drain timed out after ` +
@@ -1870,10 +1912,16 @@ export function createSubSessionLauncher(
                   linkWorkspace,
                   completionTaskId,
                   personMessage,
+                  fromSession,
+                  sentRecord?.modelText,
                 );
               }
             } catch (err) {
-              if (stopAc.signal.aborted && !targetStopped()) return;
+              if (
+                (stopAc.signal.aborted && !targetStopped()) ||
+                (remote && report?.signal.aborted)
+              )
+                return;
               settledStatus = targetStopped() ? 'cancelled' : 'failed';
               if (!notify) return;
               const message = err instanceof Error ? err.message : String(err);
@@ -1885,8 +1933,11 @@ export function createSubSessionLauncher(
                 linkWorkspace,
                 completionTaskId,
                 personMessage,
+                fromSession,
+                sentRecord?.modelText,
               );
             } finally {
+              report?.settled(settledStatus);
               if (remote) {
                 drainAc.abort();
                 releaseOnce();
@@ -1922,7 +1973,6 @@ export function createSubSessionLauncher(
             // free the slot.
             releaseOnce();
             remote?.releaseCompletionSlot?.();
-            report?.settled(settledStatus);
           }
         })();
         return {
@@ -2141,6 +2191,7 @@ export function createSubSessionLauncher(
 
   // Reported `sent` launches per caller, for the caller's task list.
   const outgoing = new Map<string, OutgoingSubSessionTask[]>();
+  const activeOutgoing = new Map<string, number>();
   const outgoingChanged = (callerSessionId: string) => {
     getBridge()?.publishWorkspaceEvent({
       type: 'sub_session_task_changed',
@@ -2151,13 +2202,25 @@ export function createSubSessionLauncher(
     const key = normalizeSessionIdForLookup(callerSessionId);
     let record: OutgoingSubSessionTask | undefined;
     return {
-      started(task, message) {
-        if (message !== undefined) {
+      signal: stopAc.signal,
+      reserve() {
+        const count = activeOutgoing.get(key) ?? 0;
+        if (count >= MAX_OUTGOING_PER_CALLER) {
+          throw new Error(
+            `Too many outgoing sub-sessions for this session (cap ${MAX_OUTGOING_PER_CALLER}); wait for one to finish.`,
+          );
+        }
+        activeOutgoing.set(key, count + 1);
+        return () => {
+          const active = activeOutgoing.get(key)!;
+          if (active === 1) activeOutgoing.delete(key);
+          else activeOutgoing.set(key, active - 1);
+        };
+      },
+      started(task, sentRecord) {
+        if (sentRecord !== undefined) {
           getBridge()
-            ?.appendExternalRecord(
-              callerSessionId,
-              sentMessageRecord(task, message),
-            )
+            ?.appendExternalRecord(callerSessionId, sentRecord)
             .catch((error: unknown) => {
               writeStderrLine(
                 `qwen serve: could not record a /send message in session ${callerSessionId}: ${error instanceof Error ? error.message : String(error)}`,
@@ -2171,9 +2234,9 @@ export function createSubSessionLauncher(
           waitingForInput: false,
         };
         const list = [...(outgoing.get(key) ?? []), record];
-        while (list.length > MAX_OUTGOING_PER_CALLER) {
+        if (list.length > MAX_OUTGOING_PER_CALLER) {
           const settled = list.findIndex((entry) => entry.status !== 'running');
-          list.splice(settled === -1 ? 0 : settled, 1);
+          if (settled !== -1) list.splice(settled, 1);
         }
         outgoing.set(key, list);
         outgoingChanged(callerSessionId);

@@ -8864,6 +8864,7 @@ describe('createAcpSessionBridge', () => {
     'session_metadata_updated',
     'session_cwd_changed',
     'artifact_changed',
+    'sub_session_task_changed',
     'settings_changed',
     'extensions_changed',
     'mcp_server_changed',
@@ -9078,6 +9079,7 @@ describe('createAcpSessionBridge', () => {
         bookkeepingType === 'agent_changed' ||
         bookkeepingType === 'git_status_changed' ||
         bookkeepingType === 'git_branch_changed' ||
+        bookkeepingType === 'sub_session_task_changed' ||
         bookkeepingType === 'github_setup_completed'
       ) {
         // The workspace service, git watcher, memory / agent CRUD, and the

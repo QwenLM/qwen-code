@@ -18,6 +18,7 @@ export interface SendCompletionSources {
   workspaces: ReadonlyArray<SendCompletionChoice & { cwd: string }>;
   /** The workspace `/send` targets without `--workspace`. */
   currentWorkspaceCwd: string;
+  resolveWorkspace(value: string): string;
   /** `--session-id` choices for a workspace, or `undefined` until loaded. */
   sessionsFor(
     workspaceCwd: string,
@@ -80,13 +81,8 @@ export function createSendArgumentCompleter(
       const cwd =
         named === undefined
           ? sources.currentWorkspaceCwd
-          : sources.workspaces.find(
-              (workspace) =>
-                workspace.value === named ||
-                workspace.cwd === named ||
-                workspace.label.toLowerCase() === named.toLowerCase(),
-            )?.cwd;
-      choices = cwd === undefined ? undefined : sources.sessionsFor(cwd);
+          : sources.resolveWorkspace(named);
+      choices = sources.sessionsFor(cwd);
     } else {
       if (typed && !typed.startsWith('-')) return null;
       choices = SEND_COMMAND_OPTIONS.filter((option) => !used.has(option)).map(

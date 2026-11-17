@@ -9,6 +9,10 @@ const complete = createSendArgumentCompleter({
     { value: '/work/my repo', label: 'repo', cwd: '/work/my repo' },
   ],
   currentWorkspaceCwd: '/work/web',
+  resolveWorkspace: (value) =>
+    ['backend', 'backend-id'].includes(value.toLowerCase())
+      ? '/work/backend'
+      : value,
   sessionsFor: (cwd) =>
     cwd === '/work/backend'
       ? [
@@ -52,6 +56,9 @@ describe('send argument completion', () => {
     expect(applies('/send --workspace Backend --session-id ')).toEqual([
       '/send --workspace Backend --session-id kid-1 ',
       '/send --workspace Backend --session-id kid-2 ',
+    ]);
+    expect(applies('/send --workspace backend-id --session-id fix')).toEqual([
+      '/send --workspace backend-id --session-id kid-2 ',
     ]);
     expect(applies('/send --workspace backend --session-id fix')).toEqual([
       '/send --workspace backend --session-id kid-2 ',

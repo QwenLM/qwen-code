@@ -79,6 +79,7 @@ const turnError = (promptId: string, message: string): FakeEvent => ({
 function makeFakeBridge(opts?: {
   events?: (promptId: string) => FakeEvent[];
   blockAfterEvents?: boolean;
+  pendingPermissionIds?: readonly string[];
   sendPromptRejects?: string;
   modelApplied?: boolean;
   /** Simulate a persisted parent that the idle reaper removed before the
@@ -268,6 +269,7 @@ function makeFakeBridge(opts?: {
       return metadata;
     },
     getSessionLastEventId: () => 0,
+    getSessionPendingPermissionIds: () => opts?.pendingPermissionIds ?? [],
     getSessionEventEpoch: () => 'fake-epoch',
     resumeSession: async (req: {
       sessionId: string;
@@ -1681,6 +1683,10 @@ describe('sub-session launcher', () => {
         kind: 'agent',
         label: 'ws · research <it>',
         displayText: `Session [${launched.sessionId.slice(0, 8)}](qwen-session://${launched.sessionId}?workspace=%2Ftmp%2Fws) replied (completed).`,
+        fromSession: { sessionId: launched.sessionId, workspaceCwd: WS },
+        sentMessageContext: expect.stringContaining(
+          'research &lt;it&gt;</sent-message>',
+        ),
       },
     });
     const modelText = fake.notifications[0]!.notification.modelText;
@@ -1766,6 +1772,73 @@ describe('sub-session launcher', () => {
         waitingForInput: false,
       }),
     );
+  });
+
+  it('keeps a send queued behind an existing approval visible past the drain timeout', async () => {
+    const fake = makeFakeBridge({
+      pendingPermissionIds: ['already-pending'],
+      blockAfterEvents: true,
+      resumable: ['target'],
+    });
+    const archiveCoordinator = new SessionArchiveCoordinator();
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+      getArchiveCoordinator: () => archiveCoordinator,
+      sentModeDrainTimeoutMs: 10,
+    });
+    await launcher.launchForPerson({
+      callerSessionId: 'parent-1',
+      sessionId: 'target',
+      prompt: 'follow up',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(launcher.listOutgoing('parent-1')[0]).toMatchObject({
+      status: 'running',
+      waitingForInput: true,
+    });
+    expect(fake.notifications).toEqual([]);
+    launcher.stop();
+  });
+
+  it('rejects sends beyond the visible task limit before launching the target', async () => {
+    const fake = makeFakeBridge({ blockAfterEvents: true });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+      maxConcurrentPerCaller: MAX_OUTGOING_PER_CALLER + 1,
+      maxConcurrentTotal: MAX_OUTGOING_PER_CALLER + 1,
+    });
+    const request = { callerSessionId: 'parent-1', prompt: 'work' };
+    const launches = await Promise.all(
+      Array.from({ length: MAX_OUTGOING_PER_CALLER }, () =>
+        launcher.launchForPerson(request),
+      ),
+    );
+    await expect(launcher.launchForPerson(request)).rejects.toThrow(
+      'Too many outgoing sub-sessions',
+    );
+    expect(fake.spawns).toHaveLength(MAX_OUTGOING_PER_CALLER);
+    expect(launcher.listOutgoing('parent-1').map(({ id }) => id)).toEqual(
+      launches.map(({ sessionId }) => sessionId),
+    );
+    launcher.stop();
+  });
+
+  it('bounds a Unicode send record in UTF-16 without splitting characters', async () => {
+    const fake = makeFakeBridge({ blockAfterEvents: true });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+    });
+    const character = '🙂';
+    const prompt = character.repeat(40_000);
+    await launcher.launchForPerson({ callerSessionId: 'parent-1', prompt });
+    expect(fake.prompts[0]?.text).toBe(prompt);
+    expect(fake.externalRecords[0]?.request).toMatchObject({
+      payload: { displayText: `${character.repeat(29_999)}…` },
+    });
+    launcher.stop();
   });
 
   it("lists a reported send as the caller's task until its turn settles", async () => {

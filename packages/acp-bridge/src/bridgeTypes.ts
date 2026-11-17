@@ -2004,6 +2004,8 @@ export interface BridgeBackgroundNotification {
   kind: 'agent';
   toolUseId?: string;
   label?: string;
+  fromSession?: { sessionId: string; workspaceCwd: string };
+  sentMessageContext?: string;
 }
 
 export type RuntimeMcpServerAddResult =
@@ -2336,6 +2338,8 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    * start SSE replay so no events are missed.
    */
   getSessionLastEventId(sessionId: string): number;
+
+  getSessionPendingPermissionIds(sessionId: string): readonly string[];
 
   /**
    * Return the epoch token of this session's event bus. Regenerated on

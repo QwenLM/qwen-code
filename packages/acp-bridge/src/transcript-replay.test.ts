@@ -202,6 +202,7 @@ describe('createTranscriptReplayMachine', () => {
       taskId: 'Explore-1',
       kind: 'agent',
       status: 'completed',
+      fromSession: { sessionId: 'other-session', workspaceCwd: '/tmp/other' },
     };
     const item = {
       ...record('completed-1', 'system', {
