@@ -736,6 +736,36 @@ describe('ci.yml pick_runner canonical-repo guard', () => {
         `inputs line must carry ${fragment}: ${prOut.inputsLine}`,
       );
     }
+    // R2-1 (follow-up): the canonical blocks above pin only the healthy
+    // polarity — a hardcoded canonical echo stays green. A fork run must
+    // pin the false side, so the inputs line is checked in the state the
+    // line exists to diagnose.
+    const forkOut = runPickRunnerOutputs({
+      ecsDisabled: false,
+      sameRepo: false,
+      assoc: 'NONE',
+      eventName: 'pull_request',
+      fleet: 'arm64',
+      repoName: FORK,
+    });
+    assert.ok(
+      forkOut.inputsLine,
+      'no routing-inputs line in pick_runner output',
+    );
+    for (const fragment of [
+      'REPO_NAME=alice/qwen-code',
+      'canonical_repo=false',
+      'SAME_REPO=false',
+      'AUTHOR_ASSOCIATION=NONE',
+      'trusted_author=false',
+      'EVENT_NAME=pull_request',
+      'ECS_DISABLED= LINUX_RUNNER_FLEET=arm64',
+    ]) {
+      assert.ok(
+        forkOut.inputsLine.includes(fragment),
+        `inputs line must carry ${fragment}: ${forkOut.inputsLine}`,
+      );
+    }
     for (const prefix of [
       'Selected Linux runner: ',
       'Selected lint runner: ',
