@@ -11,6 +11,7 @@ import com.alibaba.qwen.code.daemon.HarnessSessionStatus;
 import com.alibaba.qwen.code.daemon.HostedHarnessCapabilities;
 import com.alibaba.qwen.code.daemon.HostedHarnessClient;
 import com.alibaba.qwen.code.daemon.HostedHarnessGenerationException;
+import com.alibaba.qwen.code.daemon.HostedHarnessPlacement;
 import com.alibaba.qwen.code.daemon.LoadHarnessSession;
 import com.alibaba.qwen.code.daemon.MutationOutcomeUnknownException;
 import com.alibaba.qwen.code.daemon.PromptReceipt;
@@ -49,17 +50,20 @@ import org.mockito.ArgumentCaptor;
 import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.test.util.ReflectionTestUtils;
 
+import java.net.URI;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Consumer;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
@@ -4506,6 +4510,74 @@ class QwenHostedHarnessConnectorTest {
         connector.rename("tenant-a", SESSION_ID, "initial");
 
         assertThatThrownBy(() -> connector.runChannelOperation("tenant-a", SESSION_ID, body)).isSameAs(unknown);
+    }
+
+    // The SDK client retires attachments on its own heartbeat; the pool
+    // client must carry the connector's notice handler, and a notice for
+    // the published reference evicts it together with its recovery marker.
+    @Test
+    @SuppressWarnings("unchecked")
+    void poolClientRetirementNoticeEvictsTheRetiredReferenceAndMarker() {
+        var client = harnessClient();
+        var connector = connector(client);
+        var endpoint = new HarnessDiscovery.Endpoint(
+                "instance-a", URI.create("http://127.0.0.1:4101"), true);
+        connector.configurePool(endpoint, client, null, null);
+        ArgumentCaptor<Consumer<HarnessSessionRef>> captor =
+                ArgumentCaptor.forClass(Consumer.class);
+        verify(client).onAttachmentRetirement(captor.capture());
+        var fresh = mock(HarnessSessionRef.class);
+        when(fresh.getHarnessBootId()).thenReturn(BOOT_ID);
+        when(fresh.getRuntimeRecovery()).thenReturn(mock(HarnessRuntimeRecovery.class));
+        when(client.loadSession(any())).thenReturn(fresh);
+        var call = new QwenHostedHarnessConnector.PoolCall("tenant-a", SESSION_ID,
+                new HostedHarnessPlacement("instance-a", BOOT_ID, 2), "w".repeat(32), false);
+        Object key = connector.withPlacement(call, () -> {
+            connector.createOrLoad("tenant-a", SESSION_ID, true, true);
+            return ReflectionTestUtils.invokeMethod(connector, "attachmentKey", "tenant-a", SESSION_ID);
+        });
+        Map<Object, HarnessSessionRef> refs =
+                (Map<Object, HarnessSessionRef>) ReflectionTestUtils.getField(connector, "attachments");
+        Set<Object> markers = (Set<Object>) ReflectionTestUtils.getField(connector, "pendingRecovery");
+        assertThat(refs.get(key)).isSameAs(fresh);
+        assertThat(markers).contains(key);
+
+        captor.getValue().accept(fresh);
+
+        assertThat(refs).isEmpty();
+        assertThat(markers).isEmpty();
+    }
+
+    // A notice can arrive after a newer reference replaced the retired one:
+    // only the exact reference retires, in both caches, and the newer
+    // attachment keeps its recovery marker.
+    @Test
+    @SuppressWarnings("unchecked")
+    void retirementNoticeForAStaleReferenceKeepsTheNewerAttachmentAndMarker() {
+        var client = harnessClient();
+        var connector = connector(client);
+        var stale = mock(HarnessSessionRef.class);
+        var fresh = mock(HarnessSessionRef.class);
+        Object key = ReflectionTestUtils.invokeMethod(connector, "attachmentKey", "tenant-a", SESSION_ID);
+        Map<Object, HarnessSessionRef> ordinary =
+                (Map<Object, HarnessSessionRef>) ReflectionTestUtils.getField(connector, "attachments");
+        Map<Object, HarnessSessionRef> management =
+                (Map<Object, HarnessSessionRef>) ReflectionTestUtils.getField(connector, "mcpManagementAttachments");
+        Set<Object> markers = (Set<Object>) ReflectionTestUtils.getField(connector, "pendingRecovery");
+        ordinary.put(key, fresh);
+        management.put(key, stale);
+        markers.add(key);
+
+        ReflectionTestUtils.invokeMethod(connector, "retireNotifiedAttachment", stale);
+
+        assertThat(ordinary.get(key)).isSameAs(fresh);
+        assertThat(markers).contains(key);
+        assertThat(management).isEmpty();
+
+        ReflectionTestUtils.invokeMethod(connector, "retireNotifiedAttachment", fresh);
+
+        assertThat(ordinary).isEmpty();
+        assertThat(markers).isEmpty();
     }
 
     private static HostedHarnessClient harnessClient() {
