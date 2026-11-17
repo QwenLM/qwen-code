@@ -94,11 +94,12 @@ export class AutoReconnectTransport implements DaemonTransport {
   ): Promise<Response> {
     if (this._disposed) throw new DaemonTransportClosedError();
 
+    const transport = this.inner;
     try {
-      return await this.inner.fetch(url, init, opts);
+      return await transport.fetch(url, init, opts);
     } catch (err) {
       if (err instanceof DaemonTransportClosedError && !this._disposed) {
-        await this.reconnect();
+        await this.reconnect(transport);
         if (this._disposed) throw new DaemonTransportClosedError();
         return this.inner.fetch(url, init, opts);
       }
@@ -112,11 +113,12 @@ export class AutoReconnectTransport implements DaemonTransport {
   ): AsyncGenerator<DaemonEvent> {
     if (this._disposed) throw new DaemonTransportClosedError();
 
+    const transport = this.inner;
     try {
-      yield* this.inner.subscribeEvents(sessionId, opts);
+      yield* transport.subscribeEvents(sessionId, opts);
     } catch (err) {
       if (err instanceof DaemonTransportClosedError && !this._disposed) {
-        await this.reconnect();
+        await this.reconnect(transport);
         if (this._disposed) throw new DaemonTransportClosedError();
         yield* this.inner.subscribeEvents(sessionId, opts);
       } else {
@@ -133,10 +135,11 @@ export class AutoReconnectTransport implements DaemonTransport {
 
   // -- Internal ----------------------------------------------------------
 
-  private async reconnect(): Promise<void> {
+  private async reconnect(failedTransport: DaemonTransport): Promise<void> {
     // Mutex: if a reconnect is already in progress, wait for it
     // instead of starting a concurrent attempt (reconnect storm).
     if (this.reconnecting) return this.reconnecting;
+    if (this.inner !== failedTransport) return;
     this.reconnecting = this._doReconnect().finally(() => {
       this.reconnecting = undefined;
     });
