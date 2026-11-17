@@ -4,9 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   ManagedChannelControlPlane,
@@ -16,8 +22,12 @@ import type {
 import {
   ManagedGithubAdapter,
   githubSettings,
+  type GithubCiObservation,
   type GithubComment,
   type GithubNotification,
+  type GithubPrWatchBinding,
+  type GithubPrWatchControlPlane,
+  type GithubPullObservation,
   type GithubSendFailure,
   type ManagedGithubAdapterDeps,
   type ManagedGithubClient,
@@ -169,7 +179,25 @@ function fakeDeps(
     markReadError: undefined as Error | undefined,
     sendBehavior: 'ok' as 'ok' | 'definitive' | 'transient',
     pollFloor: 0,
+    pull: {
+      headSha: 'sha-a',
+      mergeable: true,
+      mergeableState: 'clean',
+      state: 'open',
+    } as GithubPullObservation,
+    pullFor: undefined as
+      | ((prNumber: number) => GithubPullObservation)
+      | undefined,
+    getPullRequestError: undefined as Error | undefined,
+    pullErrorFor: undefined as
+      | ((prNumber: number) => Error | undefined)
+      | undefined,
+    ci: { aggregate: 'passing', failedChecks: [] } as GithubCiObservation,
+    getCiStatusError: undefined as Error | undefined,
   };
+  const pullsSeen: Array<{ owner: string; repo: string; prNumber: number }> =
+    [];
+  const ciSeen: Array<{ owner: string; repo: string; headSha: string }> = [];
   const posted: Array<{
     owner: string;
     repo: string;
@@ -215,6 +243,20 @@ function fakeDeps(
       posted.push({ owner, repo, issueNumber, body });
       return { id: 9000 + posted.length };
     },
+    getPullRequest: async (owner, repo, prNumber) => {
+      journal.push('getPullRequest');
+      pullsSeen.push({ owner, repo, prNumber });
+      const perPrError = knobs.pullErrorFor?.(prNumber);
+      if (perPrError) throw perPrError;
+      if (knobs.getPullRequestError) throw knobs.getPullRequestError;
+      return knobs.pullFor ? knobs.pullFor(prNumber) : knobs.pull;
+    },
+    getCiStatus: async (owner, repo, headSha) => {
+      journal.push('getCiStatus');
+      ciSeen.push({ owner, repo, headSha });
+      if (knobs.getCiStatusError) throw knobs.getCiStatusError;
+      return knobs.ci;
+    },
     pollIntervalFloorMs: () => knobs.pollFloor,
     disconnect: () => {},
   };
@@ -242,8 +284,117 @@ function fakeDeps(
     posted,
     markedRead,
     sinceSeen,
+    pullsSeen,
+    ciSeen,
     compromise: () => compromised!(),
   };
+}
+
+function fakePrWatchPlane(journal: string[]) {
+  const injected: Array<{
+    owner: string;
+    repo: string;
+    prNumber: number;
+    transition: string;
+    headSha: string;
+    evidence: string;
+  }> = [];
+  // The state file's content at each inject call: pins that the durable
+  // pending entry was persisted BEFORE the injection side effect.
+  const injectSnapshots: Array<{ pendingKeys: string[]; fired: string[] }> = [];
+  let bindings: GithubPrWatchBinding[] = [];
+  let injectError: (Error & { status?: number; code?: string }) | undefined;
+  let listError: (Error & { status?: number; code?: string }) | undefined;
+  let onInject: (() => void) | undefined;
+  let stateFile: string | undefined;
+  const plane: GithubPrWatchControlPlane = {
+    listPrWatchBindings: async () => {
+      journal.push('listPrWatchBindings');
+      if (listError) throw listError;
+      return bindings;
+    },
+    injectPrEvent: async (event) => {
+      journal.push(`inject:${event.transition}`);
+      if (stateFile) {
+        const state = JSON.parse(readFileSync(stateFile, 'utf8')) as {
+          watch?: {
+            prs: Record<
+              string,
+              { pending?: Array<{ key: string }>; fired?: string[] }
+            >;
+          };
+        };
+        const entries = Object.values(state.watch?.prs ?? {});
+        injectSnapshots.push({
+          pendingKeys: entries.flatMap((e) =>
+            (e.pending ?? []).map((p) => p.key),
+          ),
+          fired: entries.flatMap((e) => e.fired ?? []),
+        });
+      }
+      if (injectError) throw injectError;
+      onInject?.();
+      injected.push(event);
+    },
+  };
+  return {
+    plane,
+    injected,
+    injectSnapshots,
+    setBindings: (value: GithubPrWatchBinding[]) => {
+      bindings = value;
+    },
+    setInjectError: (
+      value: (Error & { status?: number; code?: string }) | undefined,
+    ) => {
+      injectError = value;
+    },
+    setListError: (
+      value: (Error & { status?: number; code?: string }) | undefined,
+    ) => {
+      listError = value;
+    },
+    setOnInject: (fn: (() => void) | undefined) => {
+      onInject = fn;
+    },
+    watchStateFile: (file: string) => {
+      stateFile = file;
+    },
+  };
+}
+
+function binding(
+  overrides: Partial<GithubPrWatchBinding> = {},
+): GithubPrWatchBinding {
+  return {
+    owner: 'Owner',
+    repo: 'Repo',
+    prNumber: 9,
+    sessionId: 'session-1',
+    events: ['ci_failure', 'merge_conflict', 'head_change'],
+    ...overrides,
+  };
+}
+
+async function watchAdapter(
+  cwd = tempCwd(),
+  hooks: { log?: (line: string) => void } = {},
+) {
+  const journal: string[] = [];
+  const plane = fakeControlPlane(journal);
+  const fake = fakeDeps(journal, hooks);
+  const watch = fakePrWatchPlane(journal);
+  const adapter = new ManagedGithubAdapter({
+    name: 'gh-1',
+    cwd,
+    config: CONFIG,
+    controlPlane: plane.controlPlane,
+    deps: { ...fake.deps, prWatchControlPlane: watch.plane },
+    pollLoop: false,
+  });
+  await adapter.connect();
+  watch.watchStateFile(adapter.stateFile);
+  return { adapter, plane, fake, watch, journal };
 }
 
 function delivery(
@@ -2134,6 +2285,531 @@ describe('managed GitHub adapter round-4 hardening', () => {
     expect(plane.receipts).toEqual([
       { deliveryId: 'd-1', receipt: { outcome: 'rejected' } },
     ]);
+    await adapter.disconnect();
+  });
+});
+
+describe('managed GitHub adapter PR watch', () => {
+  const PR_KEY = 'owner/repo#9';
+
+  it('baselines the first observation silently, even already red and dirty', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding()]);
+    fake.knobs.ci = { aggregate: 'failing', failedChecks: ['build'] };
+    fake.knobs.pull = {
+      headSha: 'sha-a',
+      mergeable: false,
+      mergeableState: 'dirty',
+      state: 'open',
+    };
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(0);
+    const entry = readState(adapter).watch!.prs[PR_KEY]!;
+    expect(entry).toMatchObject({
+      headSha: 'sha-a',
+      ci: 'failing',
+      mergeableState: 'dirty',
+    });
+    expect(entry.pending ?? []).toHaveLength(0);
+    // Staying red/dirty is not a transition: the second observation agrees.
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(0);
+    await adapter.disconnect();
+  });
+
+  it('fires ci_failure once per head and names the failed checks', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding()]);
+    await adapter.tick(); // baseline: passing
+    fake.knobs.ci = { aggregate: 'failing', failedChecks: ['build', 'test'] };
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(1);
+    expect(watch.injected[0]).toMatchObject({
+      owner: 'Owner',
+      repo: 'Repo',
+      prNumber: 9,
+      transition: 'ci_failure',
+      headSha: 'sha-a',
+    });
+    expect(watch.injected[0]!.evidence).toContain('CI failed on head sha-a');
+    expect(watch.injected[0]!.evidence).toContain('build, test');
+    const entry = readState(adapter).watch!.prs[PR_KEY]!;
+    expect(entry.ciFiredSha).toBe('sha-a');
+    expect(entry.fired).toHaveLength(1);
+    expect(entry.pending ?? []).toHaveLength(0);
+    // A flapping aggregate must not re-fire on the same head; the fired pin
+    // even skips the CI read (no event can result).
+    const ciReads = fake.ciSeen.length;
+    fake.knobs.ci = { aggregate: 'passing', failedChecks: [] };
+    await adapter.tick();
+    fake.knobs.ci = { aggregate: 'failing', failedChecks: ['build'] };
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(1);
+    expect(fake.ciSeen.length).toBe(ciReads);
+    await adapter.disconnect();
+  });
+
+  it('fires ci_failure when a pending aggregate settles red on the same head', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding()]);
+    fake.knobs.ci = { aggregate: 'pending', failedChecks: [] };
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(0);
+    fake.knobs.ci = { aggregate: 'failing', failedChecks: [] };
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(1);
+    expect(watch.injected[0]!.transition).toBe('ci_failure');
+    await adapter.disconnect();
+  });
+
+  it('resets the CI comparison on a head change and fires head_change', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding()]);
+    await adapter.tick();
+    fake.knobs.ci = { aggregate: 'failing', failedChecks: [] };
+    await adapter.tick(); // ci_failure on sha-a
+    fake.knobs.pull = { ...fake.knobs.pull, headSha: 'sha-b' };
+    await adapter.tick();
+    const transitions = watch.injected.map((e) => e.transition);
+    expect(transitions).toEqual(['ci_failure', 'head_change', 'ci_failure']);
+    expect(watch.injected[1]!.evidence).toContain('from sha-a to sha-b');
+    expect(watch.injected[2]!.headSha).toBe('sha-b');
+    expect(readState(adapter).watch!.prs[PR_KEY]!.ciFiredSha).toBe('sha-b');
+    await adapter.disconnect();
+  });
+
+  it('does not re-fire ci_failure on a force-push back to a fired head', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding()]);
+    await adapter.tick();
+    fake.knobs.ci = { aggregate: 'failing', failedChecks: [] };
+    await adapter.tick(); // ci_failure sha-a
+    fake.knobs.pull = { ...fake.knobs.pull, headSha: 'sha-b' };
+    await adapter.tick(); // head_change + ci_failure sha-b
+    fake.knobs.pull = { ...fake.knobs.pull, headSha: 'sha-a' };
+    await adapter.tick(); // head_change back; ci_failure sha-a deduped by ring
+    const ciFires = watch.injected.filter((e) => e.transition === 'ci_failure');
+    expect(ciFires.map((e) => e.headSha)).toEqual(['sha-a', 'sha-b']);
+    expect(
+      watch.injected.filter((e) => e.transition === 'head_change'),
+    ).toHaveLength(2);
+    await adapter.disconnect();
+  });
+
+  it('edge-triggers merge_conflict: dirty → clean → dirty fires again', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding()]);
+    await adapter.tick(); // baseline clean
+    const dirty = {
+      headSha: 'sha-a',
+      mergeable: false,
+      mergeableState: 'dirty',
+      state: 'open',
+    };
+    fake.knobs.pull = dirty;
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(1);
+    expect(watch.injected[0]!.transition).toBe('merge_conflict');
+    await adapter.tick(); // still dirty: no re-fire
+    expect(watch.injected).toHaveLength(1);
+    fake.knobs.pull = { ...dirty, mergeable: true, mergeableState: 'clean' };
+    await adapter.tick();
+    fake.knobs.pull = dirty;
+    await adapter.tick();
+    const conflicts = watch.injected.filter(
+      (e) => e.transition === 'merge_conflict',
+    );
+    expect(conflicts).toHaveLength(2);
+    await adapter.disconnect();
+  });
+
+  it('never overwrites mergeability with a computing (null) observation', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding()]);
+    await adapter.tick(); // baseline clean
+    fake.knobs.pull = {
+      headSha: 'sha-a',
+      mergeable: null,
+      mergeableState: undefined,
+      state: 'open',
+    };
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(0);
+    expect(readState(adapter).watch!.prs[PR_KEY]!.mergeableState).toBe('clean');
+    fake.knobs.pull = {
+      headSha: 'sha-a',
+      mergeable: false,
+      mergeableState: 'dirty',
+      state: 'open',
+    };
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(1);
+    expect(watch.injected[0]!.transition).toBe('merge_conflict');
+    await adapter.disconnect();
+  });
+
+  it('fires merge_conflict from a never-known mergeability (undefined → dirty)', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding()]);
+    fake.knobs.pull = {
+      headSha: 'sha-a',
+      mergeable: null,
+      mergeableState: undefined,
+      state: 'open',
+    };
+    await adapter.tick(); // first observation: UNKNOWN, silent
+    fake.knobs.pull = {
+      headSha: 'sha-a',
+      mergeable: false,
+      mergeableState: 'dirty',
+      state: 'open',
+    };
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(1);
+    expect(watch.injected[0]!.transition).toBe('merge_conflict');
+    await adapter.disconnect();
+  });
+
+  it('persists the pending entry BEFORE the injection side effect', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding()]);
+    await adapter.tick();
+    fake.knobs.ci = { aggregate: 'failing', failedChecks: [] };
+    await adapter.tick();
+    expect(watch.injectSnapshots).toHaveLength(1);
+    // At inject time the durable queue already holds the event and the fired
+    // ring does not: a crash here replays the pending entry, never a loss.
+    expect(watch.injectSnapshots[0]!.pendingKeys).toEqual([
+      expect.stringContaining('prw:ci_failure:Owner/Repo#9:sha-a:'),
+    ]);
+    expect(watch.injectSnapshots[0]!.fired).toEqual([]);
+    await adapter.disconnect();
+  });
+
+  it('keeps pending on a transient injection failure and re-drives it', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding()]);
+    await adapter.tick();
+    fake.knobs.ci = { aggregate: 'failing', failedChecks: [] };
+    watch.setInjectError(new Error('connection lost'));
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(0);
+    const entry = readState(adapter).watch!.prs[PR_KEY]!;
+    expect(entry.pending).toHaveLength(1);
+    expect(entry.fired ?? []).toHaveLength(0);
+    watch.setInjectError(undefined);
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(1);
+    const settled = readState(adapter).watch!.prs[PR_KEY]!;
+    expect(settled.pending ?? []).toHaveLength(0);
+    expect(settled.fired).toEqual([entry.pending![0]!.key]);
+    await adapter.disconnect();
+  });
+
+  it('re-drives durable pending after a restart', async () => {
+    const cwd = tempCwd();
+    const first = await watchAdapter(cwd);
+    first.watch.setBindings([binding()]);
+    await first.adapter.tick();
+    first.fake.knobs.ci = { aggregate: 'failing', failedChecks: [] };
+    first.watch.setInjectError(new Error('connection lost'));
+    await first.adapter.tick();
+    const pendingKey = readState(first.adapter).watch!.prs[PR_KEY]!.pending![0]!
+      .key;
+    await first.adapter.disconnect();
+
+    const second = await watchAdapter(cwd);
+    second.watch.setBindings([binding()]);
+    await second.adapter.tick();
+    expect(second.watch.injected).toHaveLength(1);
+    expect(second.watch.injectSnapshots[0]!.pendingKeys).toContain(pendingKey);
+    expect(
+      readState(second.adapter).watch!.prs[PR_KEY]!.pending ?? [],
+    ).toHaveLength(0);
+    await second.adapter.disconnect();
+  });
+
+  it('drops an event the control plane deterministically refuses', async () => {
+    const lines: string[] = [];
+    const { adapter, fake, watch } = await watchAdapter(tempCwd(), {
+      log: (line) => lines.push(line),
+    });
+    watch.setBindings([binding()]);
+    await adapter.tick();
+    fake.knobs.ci = { aggregate: 'failing', failedChecks: [] };
+    watch.setInjectError(
+      Object.assign(new Error('gone'), { status: 404, code: 'binding_gone' }),
+    );
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(0);
+    expect(readState(adapter).watch!.prs[PR_KEY]!.pending ?? []).toHaveLength(
+      0,
+    );
+    expect(lines.some((l) => /refused \(404\).*drops/.test(l))).toBe(true);
+    // The drop is durable: a later tick neither re-injects nor re-detects.
+    watch.setInjectError(undefined);
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(0);
+    await adapter.disconnect();
+  });
+
+  it('is private-only: watch transitions never post a public comment', async () => {
+    const { adapter, plane, fake, watch, journal } = await watchAdapter();
+    watch.setBindings([binding()]);
+    await adapter.tick();
+    fake.knobs.ci = { aggregate: 'failing', failedChecks: [] };
+    fake.knobs.pull = {
+      headSha: 'sha-b',
+      mergeable: false,
+      mergeableState: 'dirty',
+      state: 'open',
+    };
+    await adapter.tick(); // ci_failure + head_change + merge_conflict
+    expect(watch.injected).toHaveLength(3);
+    expect(fake.posted).toHaveLength(0);
+    expect(journal).not.toContain('postComment');
+    expect(plane.submit).toHaveLength(0);
+    await adapter.disconnect();
+  });
+
+  it('honors the binding event filter and skips an unsubscribed CI read', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding({ events: ['head_change'] })]);
+    await adapter.tick();
+    fake.knobs.ci = { aggregate: 'failing', failedChecks: [] };
+    fake.knobs.pull = {
+      headSha: 'sha-a',
+      mergeable: false,
+      mergeableState: 'dirty',
+      state: 'open',
+    };
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(0);
+    expect(fake.ciSeen).toHaveLength(0);
+    fake.knobs.pull = { ...fake.knobs.pull, headSha: 'sha-b' };
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(1);
+    expect(watch.injected[0]!.transition).toBe('head_change');
+    await adapter.disconnect();
+  });
+
+  it('ignores bindings with no recognized event and malformed bindings', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([
+      binding({ events: ['state_change'] }), // deferred beyond slice 1
+      binding({ prNumber: 10, events: [] }),
+      binding({ prNumber: 11, owner: '' }),
+      binding({ prNumber: 12, events: 'ci_failure' as unknown as string[] }),
+    ]);
+    await adapter.tick();
+    expect(fake.pullsSeen).toHaveLength(0);
+    expect(watch.injected).toHaveLength(0);
+    await adapter.disconnect();
+  });
+
+  it('caps the watched PRs per pass and surfaces the exclusion', async () => {
+    const lines: string[] = [];
+    const { adapter, fake, watch } = await watchAdapter(tempCwd(), {
+      log: (line) => lines.push(line),
+    });
+    watch.setBindings(
+      Array.from({ length: 31 }, (_, i) => binding({ prNumber: i + 1 })),
+    );
+    await adapter.tick();
+    expect(fake.pullsSeen).toHaveLength(30);
+    expect(lines.some((l) => /cap exceeded: watching 30\/31/.test(l))).toBe(
+      true,
+    );
+    await adapter.disconnect();
+  });
+
+  it('aborts the pass on a shared rate limit, isolates a permission 403', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding(), binding({ prNumber: 10 })]);
+    fake.knobs.getPullRequestError = Object.assign(new Error('rate limited'), {
+      status: 403,
+      response: { headers: { 'x-ratelimit-remaining': '0' } },
+    });
+    await adapter.tick();
+    expect(fake.pullsSeen).toHaveLength(1);
+    // A bare permission 403 (quota left) is per-PR: the rest still watch.
+    fake.knobs.getPullRequestError = Object.assign(new Error('forbidden'), {
+      status: 403,
+      response: { headers: { 'x-ratelimit-remaining': '4999' } },
+    });
+    await adapter.tick();
+    expect(fake.pullsSeen).toHaveLength(3);
+    await adapter.disconnect();
+  });
+
+  it('isolates a permanently unreadable PR and keeps watching the rest', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding(), binding({ prNumber: 10 })]);
+    fake.knobs.pullErrorFor = (prNumber) =>
+      prNumber === 9
+        ? Object.assign(new Error('gone'), { status: 404 })
+        : undefined;
+    await adapter.tick();
+    expect(fake.pullsSeen).toHaveLength(2);
+    expect(readState(adapter).watch!.prs[PR_KEY]).toBeUndefined();
+    expect(readState(adapter).watch!.prs['owner/repo#10']).toBeDefined();
+    await adapter.disconnect();
+  });
+
+  it('does not suppress merge_conflict when the CI endpoint fails', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding()]);
+    fake.knobs.getCiStatusError = new Error('checks endpoint down');
+    await adapter.tick();
+    fake.knobs.pull = {
+      headSha: 'sha-a',
+      mergeable: false,
+      mergeableState: 'dirty',
+      state: 'open',
+    };
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(1);
+    expect(watch.injected[0]!.transition).toBe('merge_conflict');
+    await adapter.disconnect();
+  });
+
+  it('stays inert without a PR-watch control plane', async () => {
+    const { adapter, fake, journal } = await connectedAdapter();
+    await adapter.tick();
+    expect(fake.pullsSeen).toHaveLength(0);
+    expect(journal).not.toContain('getPullRequest');
+    expect(journal).not.toContain('listPrWatchBindings');
+    await adapter.disconnect();
+  });
+
+  it('prunes unbound entries once their pending drained, never before', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding()]);
+    await adapter.tick();
+    fake.knobs.ci = { aggregate: 'failing', failedChecks: [] };
+    watch.setInjectError(new Error('connection lost'));
+    await adapter.tick(); // pending held by the transient failure
+    watch.setBindings([]);
+    await adapter.tick(); // unbound, but the in-flight event keeps its entry
+    expect(readState(adapter).watch!.prs[PR_KEY]!.pending).toHaveLength(1);
+    watch.setInjectError(undefined);
+    await adapter.tick(); // drains, then prunes
+    expect(readState(adapter).watch!.prs[PR_KEY]).toBeUndefined();
+    expect(watch.injected).toHaveLength(1);
+    await adapter.disconnect();
+  });
+
+  it('rolls back a detection whose baseline save failed', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding()]);
+    await adapter.tick(); // baseline on disk
+    fake.knobs.ci = { aggregate: 'failing', failedChecks: [] };
+    const dir = dirname(adapter.stateFile);
+    chmodSync(dir, 0o500);
+    try {
+      // The detection queues ci_failure but its save fails: the claim must
+      // roll back, or the end-of-pass drain would inject an event whose
+      // pending record never reached disk (a crash would lose the fired
+      // history and re-fire the head).
+      await adapter.tick();
+    } finally {
+      chmodSync(dir, 0o700);
+    }
+    expect(watch.injected).toHaveLength(0);
+    const held = readState(adapter).watch!.prs[PR_KEY]!;
+    expect(held.pending ?? []).toHaveLength(0);
+    expect(held.ci).toBe('passing');
+    // The next tick re-observes, re-derives the transition and injects it.
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(1);
+    expect(watch.injected[0]!.transition).toBe('ci_failure');
+    await adapter.disconnect();
+  });
+
+  it('rolls back a fired recording whose save failed and re-drives it', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding()]);
+    await adapter.tick();
+    const dir = dirname(adapter.stateFile);
+    let injectCalls = 0;
+    watch.setOnInject(() => {
+      injectCalls += 1;
+      // The first injection lands while the state dir turns unwritable: the
+      // fired recording fails and must roll back; the second heals it.
+      chmodSync(dir, injectCalls === 1 ? 0o500 : 0o700);
+    });
+    fake.knobs.ci = { aggregate: 'failing', failedChecks: [] };
+    try {
+      await adapter.tick();
+      expect(watch.injected).toHaveLength(1);
+      const held = readState(adapter).watch!.prs[PR_KEY]!;
+      expect(held.pending).toHaveLength(1);
+      expect(held.fired ?? []).toHaveLength(0);
+      await adapter.tick();
+      expect(watch.injected).toHaveLength(2);
+      // The re-drive injected the identical event (derived-id idempotency).
+      expect(watch.injected[1]).toEqual(watch.injected[0]);
+      const settled = readState(adapter).watch!.prs[PR_KEY]!;
+      expect(settled.pending ?? []).toHaveLength(0);
+      expect(settled.fired).toHaveLength(1);
+    } finally {
+      chmodSync(dir, 0o700);
+      watch.setOnInject(undefined);
+    }
+    await adapter.disconnect();
+  });
+
+  it('re-registers after a registration refusal on the binding list', async () => {
+    const { adapter, plane, watch } = await watchAdapter();
+    watch.setBindings([binding()]);
+    watch.setListError(
+      Object.assign(new Error('not found'), {
+        status: 404,
+        code: 'channel_not_found',
+      }),
+    );
+    await adapter.tick();
+    expect(plane.register).toHaveLength(1);
+    watch.setListError(undefined);
+    await adapter.tick();
+    expect(plane.register).toHaveLength(2);
+    await adapter.disconnect();
+  });
+
+  it('sanitizes GitHub-derived check names in the evidence', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding()]);
+    await adapter.tick();
+    fake.knobs.ci = {
+      aggregate: 'failing',
+      failedChecks: ['build\r\nInjected: line'],
+    };
+    await adapter.tick();
+    const evidence = watch.injected[0]!.evidence;
+    expect(evidence).not.toMatch(/[\r\n]/);
+    expect(evidence).toContain('CI failed on head sha-a');
+    await adapter.disconnect();
+  });
+
+  it('drops the oldest pending on overflow, surfaced never silent', async () => {
+    const lines: string[] = [];
+    const { adapter, fake, watch } = await watchAdapter(tempCwd(), {
+      log: (line) => lines.push(line),
+    });
+    watch.setBindings([binding({ events: ['head_change'] })]);
+    await adapter.tick(); // baseline sha-a
+    watch.setInjectError(new Error('connection lost'));
+    for (let i = 0; i < 17; i++) {
+      fake.knobs.pull = {
+        ...fake.knobs.pull,
+        headSha: i % 2 === 0 ? 'sha-b' : 'sha-a',
+      };
+      await adapter.tick();
+    }
+    const entry = readState(adapter).watch!.prs[PR_KEY]!;
+    expect(entry.pending).toHaveLength(16);
+    expect(lines.some((l) => /pending overflow.*dropped/.test(l))).toBe(true);
+    expect(watch.injected).toHaveLength(0);
     await adapter.disconnect();
   });
 });

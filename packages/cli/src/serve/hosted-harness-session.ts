@@ -329,11 +329,16 @@ import {
   HostedChannelSession,
 } from './hosted-channel-session.js';
 import {
+  parsePrWatchSubmitInput,
+  submitPrEventInput,
+} from './hosted-pr-watch-session.js';
+import {
   CHANNEL_INPUT_SOURCE,
   MANAGED_CHANNEL_LIMITS,
   assertChannelPolicy,
   assertChannelRouteScope,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-channel-operations.js';
+import { PR_EVENT_INPUT_SOURCE } from '@qwen-code/qwen-code-core/managed-runtime/managed-pr-watch-operations.js';
 import type { ChannelDelivery } from '@qwen-code/qwen-code-core/managed-runtime/managed-channel-record.js';
 import {
   HostedMonitorWakeScheduler,
@@ -1579,7 +1584,8 @@ function isWakeInputSource(source: string): boolean {
     source === AUTOMATION_INPUT_SOURCE ||
     isChildNotificationSource(source) ||
     source === SESSION_MESSAGE_INPUT_SOURCE ||
-    source === LOOP_INPUT_SOURCE
+    source === LOOP_INPUT_SOURCE ||
+    source === PR_EVENT_INPUT_SOURCE
   );
 }
 
@@ -11715,12 +11721,14 @@ export function registerHostedHarnessSessionRoutes(
   app.post('/session/:id/channels/operations', async (req, res) => {
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
-    if (!session.channels)
-      return error(res, 409, 'hosted_channels_unavailable');
     if (session.mcpClosing) return error(res, 409, 'hosted_session_closing');
     const body = object(req.body);
     const operationId = body?.['operationId'];
     const kind = body?.['kind'];
+    // A PR-watch injection targets the bound Session, which need not be a
+    // channel Session; every other channel operation requires the funnel.
+    if (!session.channels && kind !== 'submit_pr_event_input')
+      return error(res, 409, 'hosted_channels_unavailable');
     const reconciliation =
       typeof operationId === 'string' &&
       kind === 'settle_delivery' &&
@@ -11732,7 +11740,9 @@ export function registerHostedHarnessSessionRoutes(
     ) {
       return error(res, 400, 'invalid_channel_operation');
     }
-    const channels = session.channels;
+    // Non-null for every kind except submit_pr_event_input (guarded above);
+    // that case commits through session.managed and never reads this funnel.
+    const channels = session.channels!;
     const summary = (delivery: ChannelDelivery) => ({
       deliveryId: delivery.deliveryId,
       routeId: delivery.routeId,
@@ -11747,7 +11757,8 @@ export function registerHostedHarnessSessionRoutes(
       })),
     });
     const deliveryId = body?.['deliveryId'];
-    const needsDelivery = kind !== 'submit_input';
+    const needsDelivery =
+      kind !== 'submit_input' && kind !== 'submit_pr_event_input';
     if (
       needsDelivery &&
       (typeof deliveryId !== 'string' ||
@@ -11764,6 +11775,19 @@ export function registerHostedHarnessSessionRoutes(
           if (parsed === undefined)
             return error(res, 400, 'invalid_channel_operation');
           result = { ...(await channels.submitInput(parsed)) };
+          break;
+        }
+        case 'submit_pr_event_input': {
+          const parsed = parsePrWatchSubmitInput(body);
+          if (parsed === undefined)
+            return error(res, 400, 'invalid_channel_operation');
+          result = {
+            ...(await submitPrEventInput(
+              session.managed,
+              session.managed.authority.sessionHeader.sessionKey,
+              parsed,
+            )),
+          };
           break;
         }
         case 'claim_delivery': {

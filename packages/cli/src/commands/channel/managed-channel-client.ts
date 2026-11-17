@@ -128,6 +128,67 @@ export class HttpManagedChannelControlPlane
     );
   }
 
+  /**
+   * PR-watch binding list (github-local GithubPrWatchControlPlane surface). The
+   * shared client carries it because pr-watch rides the same trusted channel
+   * adapter prefix; email/DingTalk never call it.
+   */
+  async listPrWatchBindings(): Promise<
+    Array<{
+      owner: string;
+      repo: string;
+      prNumber: number;
+      sessionId: string;
+      events: string[];
+    }>
+  > {
+    const answer = await this.call('POST', '/pr-watch:list', {});
+    const bindings = Array.isArray(answer['bindings'])
+      ? (answer['bindings'] as Array<Record<string, unknown>>)
+      : [];
+    return bindings.map((binding) => ({
+      owner: String(binding['owner']),
+      repo: String(binding['repo']),
+      prNumber: Number(binding['prNumber']),
+      sessionId: String(binding['sessionId']),
+      events: Array.isArray(binding['events'])
+        ? (binding['events'] as unknown[]).map(String)
+        : [],
+    }));
+  }
+
+  /**
+   * Inject one watched-PR transition into the binding's Session (private-only).
+   * The adapter supplies the transition evidence; the model-facing prompt text
+   * is composed here because the inject contract requires it. The control plane
+   * forces the target Session from the binding and derives the idempotent input
+   * id (episode included).
+   */
+  async injectPrEvent(event: {
+    owner: string;
+    repo: string;
+    prNumber: number;
+    transition: string;
+    headSha: string;
+    evidence: string;
+    episode: number;
+  }): Promise<void> {
+    const text =
+      `The watched pull request ${event.owner}/${event.repo}#${event.prNumber} ` +
+      `reported a ${event.transition} transition on head ${event.headSha}. ` +
+      'Inspect the pull request and decide whether action is needed.';
+    await this.call('POST', '/pr-watch:inject', {
+      owner: event.owner,
+      repo: event.repo,
+      prNumber: event.prNumber,
+      transition: event.transition,
+      headSha: event.headSha,
+      episode: event.episode,
+      evidence: event.evidence,
+      text,
+    });
+  }
+
   private async call(
     method: 'PUT' | 'POST',
     path: string,

@@ -491,4 +491,245 @@ describe('managed GitHub deps against a fake GitHub endpoint', () => {
     const second = await deps.lock(dir, () => {});
     await second();
   });
+
+  it('reads the PR baseline and maps a computing mergeability to undefined', async () => {
+    const { client, github } = await clientFor(() => ({
+      status: 200,
+      body: {
+        head: { sha: 'sha-a' },
+        mergeable: true,
+        mergeable_state: 'clean',
+        state: 'open',
+      },
+    }));
+    expect(await client.getPullRequest('Owner', 'Repo', 9)).toEqual({
+      headSha: 'sha-a',
+      mergeable: true,
+      mergeableState: 'clean',
+      state: 'open',
+    });
+    expect(github.requests[0]!.url).toContain('/repos/Owner/Repo/pulls/9');
+
+    const computing = await clientFor(() => ({
+      status: 200,
+      body: {
+        head: { sha: 'sha-a' },
+        mergeable: null,
+        mergeable_state: 'unknown',
+        state: 'open',
+      },
+    }));
+    expect(
+      await computing.client.getPullRequest('Owner', 'Repo', 9),
+    ).toMatchObject({ mergeable: null, mergeableState: undefined });
+
+    // Empty strings normalize to absent: the state validator refuses an
+    // empty baseline field, so the writer must never persist one.
+    const empty = await clientFor(() => ({
+      status: 200,
+      body: {
+        head: { sha: '' },
+        mergeable: false,
+        mergeable_state: '',
+        state: 'open',
+      },
+    }));
+    expect(await empty.client.getPullRequest('Owner', 'Repo', 9)).toMatchObject(
+      { headSha: undefined, mergeableState: undefined },
+    );
+  });
+
+  it('aggregates a failing check run and skips the decided combined status', async () => {
+    const { client, github } = await clientFor((_method, url) => {
+      if (url.includes('/check-runs')) {
+        return {
+          status: 200,
+          body: {
+            total_count: 2,
+            check_runs: [
+              { name: 'build', status: 'completed', conclusion: 'failure' },
+              { name: 'lint', status: 'completed', conclusion: 'success' },
+            ],
+          },
+        };
+      }
+      return { status: 200, body: { state: 'success', total_count: 1 } };
+    });
+    expect(await client.getCiStatus('Owner', 'Repo', 'sha-a')).toEqual({
+      aggregate: 'failing',
+      failedChecks: ['build'],
+    });
+    // A failure decides the aggregate: the combined status is never fetched.
+    expect(github.requests.map((r) => r.url)).toEqual([
+      expect.stringContaining('/repos/Owner/Repo/commits/sha-a/check-runs'),
+    ]);
+  });
+
+  it('counts cancelled and stale runs as failing (the daemon CI definition)', async () => {
+    for (const conclusion of ['cancelled', 'stale', 'startup_failure']) {
+      const { client } = await clientFor((_method, url) => {
+        if (url.includes('/check-runs')) {
+          return {
+            status: 200,
+            body: {
+              total_count: 1,
+              check_runs: [{ name: 'run', status: 'completed', conclusion }],
+            },
+          };
+        }
+        return { status: 200, body: { state: 'success', total_count: 0 } };
+      });
+      expect(
+        (await client.getCiStatus('Owner', 'Repo', 'sha-a')).aggregate,
+      ).toBe('failing');
+    }
+  });
+
+  it('aggregates pending, passing and none across checks and combined status', async () => {
+    const cases: Array<{
+      label: string;
+      runs: Array<{ status: string; conclusion?: string | null }>;
+      combined: { state: string; total_count: number };
+      aggregate: string;
+    }> = [
+      {
+        label: 'in-flight run',
+        runs: [{ status: 'in_progress' }],
+        combined: { state: 'success', total_count: 0 },
+        aggregate: 'pending',
+      },
+      {
+        label: 'completed without conclusion',
+        runs: [{ status: 'completed', conclusion: null }],
+        combined: { state: 'success', total_count: 0 },
+        aggregate: 'pending',
+      },
+      {
+        label: 'green checks',
+        runs: [{ status: 'completed', conclusion: 'success' }],
+        combined: { state: 'success', total_count: 0 },
+        aggregate: 'passing',
+      },
+      {
+        label: 'neutral and skipped count as passing',
+        runs: [
+          { status: 'completed', conclusion: 'neutral' },
+          { status: 'completed', conclusion: 'skipped' },
+        ],
+        combined: { state: 'success', total_count: 0 },
+        aggregate: 'passing',
+      },
+      {
+        label: 'no CI at all',
+        runs: [],
+        combined: { state: 'pending', total_count: 0 },
+        aggregate: 'none',
+      },
+      {
+        label: 'combined failure decides over green checks',
+        runs: [{ status: 'completed', conclusion: 'success' }],
+        combined: { state: 'failure', total_count: 2 },
+        aggregate: 'failing',
+      },
+      {
+        label: 'combined error decides over green checks',
+        runs: [{ status: 'completed', conclusion: 'success' }],
+        combined: { state: 'error', total_count: 1 },
+        aggregate: 'failing',
+      },
+      {
+        label: 'combined pending keeps the head pending',
+        runs: [{ status: 'completed', conclusion: 'success' }],
+        combined: { state: 'pending', total_count: 1 },
+        aggregate: 'pending',
+      },
+      {
+        label: 'combined success passes a check-less head',
+        runs: [],
+        combined: { state: 'success', total_count: 1 },
+        aggregate: 'passing',
+      },
+    ];
+    for (const { label, runs, combined, aggregate } of cases) {
+      const { client } = await clientFor((_method, url) => {
+        if (url.includes('/check-runs')) {
+          return {
+            status: 200,
+            body: { total_count: runs.length, check_runs: runs },
+          };
+        }
+        return { status: 200, body: combined };
+      });
+      expect(
+        (await client.getCiStatus('Owner', 'Repo', 'sha-a')).aggregate,
+        label,
+      ).toBe(aggregate);
+    }
+  });
+
+  it('stops paging checks once a failure decides the aggregate', async () => {
+    const { client, github } = await clientFor((_method, url) => {
+      const page = new URL(url, 'http://x').searchParams.get('page') ?? '1';
+      if (url.includes('/check-runs') && page === '1') {
+        return {
+          status: 200,
+          headers: {
+            link: `<${github.baseUrl}/repos/Owner/Repo/commits/sha-a/check-runs?page=2>; rel="next"`,
+          },
+          body: {
+            total_count: 200,
+            check_runs: [
+              { name: 'build', status: 'completed', conclusion: 'failure' },
+            ],
+          },
+        };
+      }
+      return {
+        status: 200,
+        body: { total_count: 0, check_runs: [] },
+      };
+    });
+    expect((await client.getCiStatus('Owner', 'Repo', 'sha-a')).aggregate).toBe(
+      'failing',
+    );
+    expect(
+      github.requests.filter((r) => r.url.includes('page=2')),
+    ).toHaveLength(0);
+  });
+
+  it('caps the reported failed-check names and their length', async () => {
+    const { client } = await clientFor((_method, url) => {
+      if (url.includes('/check-runs')) {
+        return {
+          status: 200,
+          body: {
+            total_count: 7,
+            check_runs: Array.from({ length: 7 }, (_, i) => ({
+              name: i === 0 ? 'x'.repeat(300) : `check-${i}`,
+              status: 'completed',
+              conclusion: 'failure',
+            })),
+          },
+        };
+      }
+      return { status: 200, body: { state: 'success', total_count: 0 } };
+    });
+    const { failedChecks } = await client.getCiStatus('Owner', 'Repo', 'sha-a');
+    expect(failedChecks).toHaveLength(5);
+    expect(failedChecks[0]).toHaveLength(200);
+  });
+
+  it('rides the poll-floor hook on a rate-limited PR read', async () => {
+    const { client } = await clientFor(() => ({
+      status: 403,
+      headers: { 'x-ratelimit-remaining': '0', 'retry-after': '30' },
+      body: { message: 'rate limited' },
+    }));
+    const failure = await client
+      .getPullRequest('Owner', 'Repo', 9)
+      .catch((error) => error);
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as { status?: number }).status).toBe(403);
+    expect(client.pollIntervalFloorMs()).toBeGreaterThanOrEqual(29_000);
+  });
 });

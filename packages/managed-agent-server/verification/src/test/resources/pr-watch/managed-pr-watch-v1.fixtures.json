@@ -1,0 +1,430 @@
+{
+  "comment": "TS/Java parity fixture for the PR-watch identity derivation (episode revision). Generated from packages/core/src/managed-runtime/managed-pr-watch-operations.ts (the authoritative TS contract): inputId joins episode LAST, after headSha; bindingId carries no episode. The Java mirror (PrWatchOperations) must derive byte-identical ids and refuse the same invalid identities with the same messages. Owned by the Java control-plane slice; the TS test may read this same file.",
+  "source": "pr_event",
+  "transitions": [
+    "ci_failure",
+    "merge_conflict",
+    "head_change"
+  ],
+  "cases": [
+    {
+      "id": "identity-0",
+      "identity": {
+        "tenantId": "tenant-1",
+        "channelInstanceId": "github-1",
+        "owner": "octocat",
+        "repo": "hello-world",
+        "prNumber": 42,
+        "transition": "ci_failure",
+        "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "episode": 1
+      },
+      "inputId": "prw-0bd8302aa8c17e97ae35d3e1b73cb53709c7008c43140679169564827911b8bf:input",
+      "bindingId": "prb-3c945e29582656d6742fca09ec66940a08284b15343cb2c200c155e74210db17"
+    },
+    {
+      "id": "identity-1",
+      "identity": {
+        "tenantId": "tenant-1",
+        "channelInstanceId": "github-1",
+        "owner": "octocat",
+        "repo": "hello-world",
+        "prNumber": 42,
+        "transition": "merge_conflict",
+        "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "episode": 1
+      },
+      "inputId": "prw-74f2f7a1937e9be0281581929dfc5e6302afb65009c525bebc40e1d33e12c920:input",
+      "bindingId": "prb-3c945e29582656d6742fca09ec66940a08284b15343cb2c200c155e74210db17"
+    },
+    {
+      "id": "identity-2",
+      "identity": {
+        "tenantId": "tenant-1",
+        "channelInstanceId": "github-1",
+        "owner": "octocat",
+        "repo": "hello-world",
+        "prNumber": 42,
+        "transition": "head_change",
+        "headSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "episode": 1
+      },
+      "inputId": "prw-c6e907dd26568277e02a2a7391d683f8227e467bcc6ce1a56cd0346ff8544f08:input",
+      "bindingId": "prb-3c945e29582656d6742fca09ec66940a08284b15343cb2c200c155e74210db17"
+    },
+    {
+      "id": "identity-3",
+      "identity": {
+        "tenantId": "tenant-1",
+        "channelInstanceId": "github-1",
+        "owner": "octocat",
+        "repo": "hello-world",
+        "prNumber": 42,
+        "transition": "head_change",
+        "headSha": "cccccccccccccccccccccccccccccccccccccccc",
+        "episode": 2
+      },
+      "inputId": "prw-e56b9e6cb57e7c81e5881295e389cb6e9487b07e37e3fa3d4603fefaa954cd2f:input",
+      "bindingId": "prb-3c945e29582656d6742fca09ec66940a08284b15343cb2c200c155e74210db17"
+    },
+    {
+      "id": "identity-4",
+      "identity": {
+        "tenantId": "tenant-1",
+        "channelInstanceId": "github-1",
+        "owner": "octocat",
+        "repo": "hello-world",
+        "prNumber": 42,
+        "transition": "merge_conflict",
+        "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "episode": 2
+      },
+      "inputId": "prw-6884b300874c6551b6e843db8aa0c759407b8002f7a3bf97c178fd4c846cce83:input",
+      "bindingId": "prb-3c945e29582656d6742fca09ec66940a08284b15343cb2c200c155e74210db17"
+    },
+    {
+      "id": "identity-5",
+      "identity": {
+        "tenantId": "tenant-1",
+        "channelInstanceId": "github-1",
+        "owner": "octocat",
+        "repo": "hello-world",
+        "prNumber": 42,
+        "transition": "head_change",
+        "headSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "episode": 3
+      },
+      "inputId": "prw-e08787820e3ada94b8bfd7afcd1953e439deb8da69eff9126762637b968db914:input",
+      "bindingId": "prb-3c945e29582656d6742fca09ec66940a08284b15343cb2c200c155e74210db17"
+    },
+    {
+      "id": "identity-6",
+      "identity": {
+        "tenantId": "租户-中文",
+        "channelInstanceId": "github-实例",
+        "owner": "所有者",
+        "repo": "仓库-测试",
+        "prNumber": 7,
+        "transition": "ci_failure",
+        "headSha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        "episode": 1
+      },
+      "inputId": "prw-dcb75d69c5830d84478685070e4585fdcf04aa4c7c95a373fda06bb39178bd23:input",
+      "bindingId": "prb-c8399251f10d53597f5029939239c9693e204d3e7158af23c5db8b69d63711f2"
+    },
+    {
+      "id": "identity-7",
+      "identity": {
+        "tenantId": "t",
+        "channelInstanceId": "c",
+        "owner": "o",
+        "repo": "r",
+        "prNumber": 1,
+        "transition": "merge_conflict",
+        "headSha": "0000000000000000000000000000000000000000",
+        "episode": 1
+      },
+      "inputId": "prw-a1548f099f74f863f10e76251638d6eed5482209d3289968fe9ff5ad8828143c:input",
+      "bindingId": "prb-aaeccd81a73a7206a6338523aac2e5220f6bbdced8dac435739eb3b1412ac07e"
+    },
+    {
+      "id": "identity-8",
+      "identity": {
+        "tenantId": "t",
+        "channelInstanceId": "c",
+        "owner": "o",
+        "repo": "r",
+        "prNumber": 9007199254740991,
+        "transition": "head_change",
+        "headSha": "ffffffffffffffffffffffffffffffffffffffff",
+        "episode": 9007199254740991
+      },
+      "inputId": "prw-c009cdfa50cd6266dbc323078f8724ae4018f7d052fd3eff84d9fb0547751bd1:input",
+      "bindingId": "prb-86e1f7ed1598bb55ba31b7c557d866bb429f36afb74ce64891083abb9b7bed57"
+    },
+    {
+      "id": "identity-9",
+      "identity": {
+        "tenantId": "tenant-2",
+        "channelInstanceId": "github-1",
+        "owner": "octocat",
+        "repo": "hello-world",
+        "prNumber": 42,
+        "transition": "ci_failure",
+        "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "episode": 1
+      },
+      "inputId": "prw-610056bc0ff8e49439b7fb7404ca3a67e32a94a208101e5b58e34a2882df9821:input",
+      "bindingId": "prb-fbfb8ca4c2fec8afc4d4c30646a3fa5e14f2233728e77a9fd2e01b2f98ee2ded"
+    },
+    {
+      "id": "identity-10",
+      "identity": {
+        "tenantId": "tenant-1",
+        "channelInstanceId": "github-2",
+        "owner": "octocat",
+        "repo": "hello-world",
+        "prNumber": 42,
+        "transition": "ci_failure",
+        "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "episode": 1
+      },
+      "inputId": "prw-05b86aeb46dfcd7b19cade969f4acaa9ec2dc12fcdbd4cff09956cd1fa912d98:input",
+      "bindingId": "prb-66c3e0fb8ad5a098c7528683b2baac10fffb3a1fd104655b966c5b2de68883ab"
+    },
+    {
+      "id": "identity-11",
+      "identity": {
+        "tenantId": "tenant-1",
+        "channelInstanceId": "github-1",
+        "owner": "octocat",
+        "repo": "hello-world",
+        "prNumber": 43,
+        "transition": "ci_failure",
+        "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "episode": 1
+      },
+      "inputId": "prw-61514ad6cb0c4e74114013adfc17f814663848f03ae20b9a30398cd908559fe0:input",
+      "bindingId": "prb-c363e2e335d8555dc823e71a841c5b7eb10972d46c282cec119e9aed7f05f808"
+    },
+    {
+      "id": "identity-12",
+      "identity": {
+        "tenantId": "tenant-1",
+        "channelInstanceId": "github-1",
+        "owner": "Octocat",
+        "repo": "hello-world",
+        "prNumber": 42,
+        "transition": "ci_failure",
+        "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "episode": 1
+      },
+      "inputId": "prw-febd6b76389181365a55e7774a52a084fa01befb17df7e1b130c650a9b709551:input",
+      "bindingId": "prb-8466d6ff49d01e00268068aff5f520dcdc46af88ee85fd762be25f05639bf1d7"
+    },
+    {
+      "id": "identity-13",
+      "identity": {
+        "tenantId": "tenant-1",
+        "channelInstanceId": "github-1",
+        "owner": "octocat",
+        "repo": "hello-world-2",
+        "prNumber": 42,
+        "transition": "ci_failure",
+        "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "episode": 1
+      },
+      "inputId": "prw-0df42a0f84ab17761d0bc540806a76f67fc406a709432ef85ba9ad1ada4af647:input",
+      "bindingId": "prb-aad136349ae0f37f98abbb4957958d5e923ee337a2ed3a2782dc4be49f931bb2"
+    }
+  ],
+  "refusals": [
+    {
+      "id": "empty-tenant",
+      "identity": {
+        "tenantId": "",
+        "channelInstanceId": "github-1",
+        "owner": "octocat",
+        "repo": "hello-world",
+        "prNumber": 42,
+        "transition": "ci_failure",
+        "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "episode": 1
+      },
+      "message": "tenantId must be non-empty and hold no NUL."
+    },
+    {
+      "id": "nul-tenant",
+      "identity": {
+        "tenantId": "a\u0000b",
+        "channelInstanceId": "github-1",
+        "owner": "octocat",
+        "repo": "hello-world",
+        "prNumber": 42,
+        "transition": "ci_failure",
+        "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "episode": 1
+      },
+      "message": "tenantId must be non-empty and hold no NUL."
+    },
+    {
+      "id": "nul-owner",
+      "identity": {
+        "tenantId": "tenant-1",
+        "channelInstanceId": "github-1",
+        "owner": "a\u0000b",
+        "repo": "hello-world",
+        "prNumber": 42,
+        "transition": "ci_failure",
+        "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "episode": 1
+      },
+      "message": "owner must be non-empty and hold no NUL."
+    },
+    {
+      "id": "empty-repo",
+      "identity": {
+        "tenantId": "tenant-1",
+        "channelInstanceId": "github-1",
+        "owner": "octocat",
+        "repo": "",
+        "prNumber": 42,
+        "transition": "ci_failure",
+        "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "episode": 1
+      },
+      "message": "repo must be non-empty and hold no NUL."
+    },
+    {
+      "id": "nul-head-sha",
+      "identity": {
+        "tenantId": "tenant-1",
+        "channelInstanceId": "github-1",
+        "owner": "octocat",
+        "repo": "hello-world",
+        "prNumber": 42,
+        "transition": "ci_failure",
+        "headSha": "a\u0000b",
+        "episode": 1
+      },
+      "message": "headSha must be non-empty and hold no NUL."
+    },
+    {
+      "id": "empty-transition",
+      "identity": {
+        "tenantId": "tenant-1",
+        "channelInstanceId": "github-1",
+        "owner": "octocat",
+        "repo": "hello-world",
+        "prNumber": 42,
+        "transition": "",
+        "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "episode": 1
+      },
+      "message": "transition must be non-empty and hold no NUL."
+    },
+    {
+      "id": "zero-pr",
+      "identity": {
+        "tenantId": "tenant-1",
+        "channelInstanceId": "github-1",
+        "owner": "octocat",
+        "repo": "hello-world",
+        "prNumber": 0,
+        "transition": "ci_failure",
+        "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "episode": 1
+      },
+      "message": "prNumber must be a positive safe integer."
+    },
+    {
+      "id": "negative-pr",
+      "identity": {
+        "tenantId": "tenant-1",
+        "channelInstanceId": "github-1",
+        "owner": "octocat",
+        "repo": "hello-world",
+        "prNumber": -1,
+        "transition": "ci_failure",
+        "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "episode": 1
+      },
+      "message": "prNumber must be a positive safe integer."
+    },
+    {
+      "id": "fractional-pr",
+      "identity": {
+        "tenantId": "tenant-1",
+        "channelInstanceId": "github-1",
+        "owner": "octocat",
+        "repo": "hello-world",
+        "prNumber": 1.5,
+        "transition": "ci_failure",
+        "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "episode": 1
+      },
+      "message": "prNumber must be a positive safe integer."
+    },
+    {
+      "id": "unsafe-pr",
+      "identity": {
+        "tenantId": "tenant-1",
+        "channelInstanceId": "github-1",
+        "owner": "octocat",
+        "repo": "hello-world",
+        "prNumber": 9007199254740992,
+        "transition": "ci_failure",
+        "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "episode": 1
+      },
+      "message": "prNumber must be a positive safe integer."
+    },
+    {
+      "id": "zero-episode",
+      "identity": {
+        "tenantId": "tenant-1",
+        "channelInstanceId": "github-1",
+        "owner": "octocat",
+        "repo": "hello-world",
+        "prNumber": 42,
+        "transition": "ci_failure",
+        "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "episode": 0
+      },
+      "message": "episode must be a positive safe integer."
+    },
+    {
+      "id": "negative-episode",
+      "identity": {
+        "tenantId": "tenant-1",
+        "channelInstanceId": "github-1",
+        "owner": "octocat",
+        "repo": "hello-world",
+        "prNumber": 42,
+        "transition": "ci_failure",
+        "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "episode": -1
+      },
+      "message": "episode must be a positive safe integer."
+    },
+    {
+      "id": "fractional-episode",
+      "identity": {
+        "tenantId": "tenant-1",
+        "channelInstanceId": "github-1",
+        "owner": "octocat",
+        "repo": "hello-world",
+        "prNumber": 42,
+        "transition": "ci_failure",
+        "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "episode": 1.5
+      },
+      "message": "episode must be a positive safe integer."
+    },
+    {
+      "id": "unsafe-episode",
+      "identity": {
+        "tenantId": "tenant-1",
+        "channelInstanceId": "github-1",
+        "owner": "octocat",
+        "repo": "hello-world",
+        "prNumber": 42,
+        "transition": "ci_failure",
+        "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "episode": 9007199254740992
+      },
+      "message": "episode must be a positive safe integer."
+    },
+    {
+      "id": "binding-zero-pr",
+      "identity": {
+        "tenantId": "tenant-1",
+        "channelInstanceId": "github-1",
+        "owner": "octocat",
+        "repo": "hello-world",
+        "prNumber": 0
+      },
+      "message": "prNumber must be a positive safe integer."
+    }
+  ]
+}
