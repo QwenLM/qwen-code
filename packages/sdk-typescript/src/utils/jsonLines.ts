@@ -1,4 +1,4 @@
-import { SdkLogger } from './logger.js';
+import { SdkLogger, type ScopedLogger } from './logger.js';
 
 export function serializeJsonLine(message: unknown): string {
   try {
@@ -13,8 +13,8 @@ export function serializeJsonLine(message: unknown): string {
 export function parseJsonLineSafe(
   line: string,
   context = 'JsonLines',
+  logger: ScopedLogger = SdkLogger.createLogger(context),
 ): unknown | null {
-  const logger = SdkLogger.createLogger(context);
   try {
     return JSON.parse(line);
   } catch (error) {
@@ -39,14 +39,14 @@ export function isValidMessage(message: unknown): boolean {
 export async function* parseJsonLinesStream(
   lines: AsyncIterable<string>,
   context = 'JsonLines',
+  logger: ScopedLogger = SdkLogger.createLogger(context),
 ): AsyncGenerator<unknown, void, unknown> {
-  const logger = SdkLogger.createLogger(context);
   for await (const line of lines) {
     if (line.trim().length === 0) {
       continue;
     }
 
-    const message = parseJsonLineSafe(line, context);
+    const message = parseJsonLineSafe(line, context, logger);
 
     if (message === null) {
       continue;

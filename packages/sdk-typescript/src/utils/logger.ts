@@ -29,12 +29,12 @@ export class SdkLogger {
     this.effectiveLevel = this.determineLogLevel();
   }
 
-  private static determineLogLevel(): LogLevel {
-    if (this.config.logLevel) {
-      return this.config.logLevel;
+  private static determineLogLevel(config = this.config): LogLevel {
+    if (config.logLevel) {
+      return config.logLevel;
     }
 
-    if (this.config.debug) {
+    if (config.debug) {
       return 'debug';
     }
 
@@ -54,8 +54,8 @@ export class SdkLogger {
     return ['debug', 'info', 'warn', 'error'].includes(level);
   }
 
-  private static shouldLog(level: LogLevel): boolean {
-    return LOG_LEVEL_PRIORITY[level] >= LOG_LEVEL_PRIORITY[this.effectiveLevel];
+  private static shouldLog(level: LogLevel, effectiveLevel: LogLevel): boolean {
+    return LOG_LEVEL_PRIORITY[level] >= LOG_LEVEL_PRIORITY[effectiveLevel];
   }
 
   private static formatTimestamp(): string {
@@ -106,15 +106,17 @@ export class SdkLogger {
     scope: string,
     message: string,
     args: unknown[],
+    config = this.config,
+    effectiveLevel = this.effectiveLevel,
   ): void {
-    if (!this.shouldLog(level)) {
+    if (!this.shouldLog(level, effectiveLevel)) {
       return;
     }
 
     const formattedMessage = this.formatMessage(level, scope, message, args);
 
-    if (this.config.stderr) {
-      this.config.stderr(formattedMessage);
+    if (config.stderr) {
+      config.stderr(formattedMessage);
     } else {
       if (level === 'warn' || level === 'error') {
         process.stderr.write(formattedMessage + '\n');
@@ -124,19 +126,30 @@ export class SdkLogger {
     }
   }
 
-  static createLogger(scope: string): ScopedLogger {
+  static createLogger(scope: string, config?: LoggerConfig): ScopedLogger {
+    const scopedConfig =
+      config === undefined
+        ? undefined
+        : {
+            debug: config.debug ?? this.config.debug,
+            stderr: config.stderr ?? this.config.stderr,
+            logLevel: config.logLevel ?? this.config.logLevel,
+          };
+    const effectiveLevel = scopedConfig
+      ? this.determineLogLevel(scopedConfig)
+      : undefined;
     return {
       debug: (message: string, ...args: unknown[]) => {
-        this.log('debug', scope, message, args);
+        this.log('debug', scope, message, args, scopedConfig, effectiveLevel);
       },
       info: (message: string, ...args: unknown[]) => {
-        this.log('info', scope, message, args);
+        this.log('info', scope, message, args, scopedConfig, effectiveLevel);
       },
       warn: (message: string, ...args: unknown[]) => {
-        this.log('warn', scope, message, args);
+        this.log('warn', scope, message, args, scopedConfig, effectiveLevel);
       },
       error: (message: string, ...args: unknown[]) => {
-        this.log('error', scope, message, args);
+        this.log('error', scope, message, args, scopedConfig, effectiveLevel);
       },
     };
   }

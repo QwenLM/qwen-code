@@ -19,8 +19,6 @@ import { validateSessionId } from '../utils/validation.js';
 
 export type { QueryOptions };
 
-const logger = SdkLogger.createLogger('createQuery');
-
 export function query({
   prompt,
   options = {},
@@ -39,6 +37,7 @@ export function query({
   options?: QueryOptions;
 }): Query {
   const spawnInfo = validateOptions(options);
+  const logger = SdkLogger.createLogger('createQuery', options);
 
   const isSingleTurn = typeof prompt === 'string';
 

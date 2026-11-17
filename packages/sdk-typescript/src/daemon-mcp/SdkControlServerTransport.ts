@@ -9,13 +9,14 @@
  */
 
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
-import { SdkLogger } from '../utils/logger.js';
+import { SdkLogger, type LoggerConfig } from '../utils/logger.js';
 
 export type SendToQueryCallback = (message: JSONRPCMessage) => Promise<void>;
 
 export interface SdkControlServerTransportOptions {
   sendToQuery: SendToQueryCallback;
   serverName: string;
+  loggerConfig?: LoggerConfig;
 }
 
 export class SdkControlServerTransport {
@@ -33,6 +34,7 @@ export class SdkControlServerTransport {
     this.serverName = options.serverName;
     this.logger = SdkLogger.createLogger(
       `SdkControlServerTransport:${options.serverName}`,
+      options.loggerConfig,
     );
   }
 

@@ -13,6 +13,7 @@ import { EventEmitter } from 'node:events';
 import * as childProcess from 'node:child_process';
 import * as cliPath from '../../src/utils/cliPath.js';
 import * as jsonLines from '../../src/utils/jsonLines.js';
+import { SdkLogger } from '../../src/utils/logger.js';
 
 // Mock modules
 vi.mock('node:child_process');
@@ -121,6 +122,87 @@ describe('ProcessTransport', () => {
   });
 
   describe('Construction and Initialization', () => {
+    it('keeps child stderr capture opt-in when global logging defaults exist', () => {
+      const stderr = vi.fn();
+      SdkLogger.configure({ stderr, debug: true });
+      mockPrepareSpawnInfo.mockReturnValue({
+        command: 'qwen',
+        args: [],
+        type: 'native',
+        originalInput: 'qwen',
+      });
+      mockSpawn.mockReturnValue(mockChildProcess);
+      try {
+        new ProcessTransport({ pathToQwenExecutable: 'qwen' });
+        expect(stderr).toHaveBeenCalledWith(
+          expect.stringContaining('CLI process started successfully'),
+        );
+        expect(mockSpawn).toHaveBeenLastCalledWith(
+          'qwen',
+          expect.any(Array),
+          expect.objectContaining({ stdio: ['pipe', 'pipe', 'ignore'] }),
+        );
+      } finally {
+        mockChildProcess.exitCode = 0;
+        mockChildProcess.emit('close', 0, null);
+        SdkLogger.configure({});
+      }
+    });
+
+    it.each([true, false])(
+      'keeps concurrent child diagnostics with their own callback (second debug: %s)',
+      (secondDebug) => {
+        mockPrepareSpawnInfo.mockReturnValue({
+          command: 'qwen',
+          args: [],
+          type: 'native',
+          originalInput: 'qwen',
+        });
+        const firstChild = createMockChildProcess();
+        const secondChild = createMockChildProcess();
+        const firstStderr = vi.fn();
+        const secondStderr = vi.fn();
+        mockSpawn
+          .mockReturnValueOnce(firstChild)
+          .mockReturnValueOnce(secondChild);
+        new ProcessTransport({
+          pathToQwenExecutable: 'qwen',
+          debug: true,
+          stderr: firstStderr,
+        });
+        new ProcessTransport({
+          pathToQwenExecutable: 'qwen',
+          debug: secondDebug,
+          stderr: secondStderr,
+        });
+        firstStderr.mockClear();
+        secondStderr.mockClear();
+
+        try {
+          firstChild.stderr!.emit('data', Buffer.from('first child'));
+          secondChild.stderr!.emit('data', Buffer.from('second child'));
+          expect(firstStderr).toHaveBeenCalledExactlyOnceWith(
+            expect.stringContaining('first child'),
+          );
+          expect(secondStderr).not.toHaveBeenCalledWith(
+            expect.stringContaining('first child'),
+          );
+          if (secondDebug) {
+            expect(secondStderr).toHaveBeenCalledExactlyOnceWith(
+              expect.stringContaining('second child'),
+            );
+          } else {
+            expect(secondStderr).not.toHaveBeenCalled();
+          }
+        } finally {
+          firstChild.exitCode = 0;
+          secondChild.exitCode = 0;
+          firstChild.emit('close', 0, null);
+          secondChild.emit('close', 0, null);
+        }
+      },
+    );
+
     it('should not add one process exit listener per transport instance', async () => {
       mockPrepareSpawnInfo.mockReturnValue({
         command: 'qwen',

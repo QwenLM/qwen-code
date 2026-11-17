@@ -11,7 +11,7 @@ const DEFAULT_CONTROL_REQUEST_TIMEOUT = 60_000;
 const DEFAULT_STREAM_CLOSE_TIMEOUT = 60_000;
 
 import { randomUUID } from 'node:crypto';
-import { SdkLogger } from '../utils/logger.js';
+import { SdkLogger, type ScopedLogger } from '../utils/logger.js';
 import type {
   SDKMessage,
   SDKUserMessage,
@@ -69,8 +69,6 @@ interface TransportWithEndInput extends Transport {
   endInput(): void;
 }
 
-const logger = SdkLogger.createLogger('Query');
-
 function parseEffortStatus(value: unknown): EffortStatus | undefined {
   if (
     typeof value !== 'object' ||
@@ -116,6 +114,7 @@ function parseWorkflowModeState(
 export class Query implements AsyncIterable<SDKMessage> {
   private transport: Transport;
   private options: QueryOptions;
+  private readonly logger: ScopedLogger;
   private sessionId: string;
   private inputStream: Stream<SDKMessage>;
   private sdkMessages: AsyncGenerator<SDKMessage>;
@@ -145,6 +144,7 @@ export class Query implements AsyncIterable<SDKMessage> {
   ) {
     this.transport = transport;
     this.options = options;
+    this.logger = SdkLogger.createLogger('Query', options);
     // When forkSession is true, sessionId is a fresh UUID (computed in createQuery)
     // that should be used instead of the resume (source) session ID
     this.sessionId = options.forkSession
@@ -180,13 +180,13 @@ export class Query implements AsyncIterable<SDKMessage> {
     if (this.abortController.signal.aborted) {
       this.inputStream.error(new AbortError('Query aborted by user'));
       this.close().catch((err) => {
-        logger.error('Error during abort cleanup:', err);
+        this.logger.error('Error during abort cleanup:', err);
       });
     } else {
       this.abortHandler = () => {
         this.inputStream.error(new AbortError('Query aborted by user'));
         this.close().catch((err) => {
-          logger.error('Error during abort cleanup:', err);
+          this.logger.error('Error during abort cleanup:', err);
         });
       };
       this.abortController.signal.addEventListener('abort', this.abortHandler);
@@ -209,7 +209,7 @@ export class Query implements AsyncIterable<SDKMessage> {
         );
       }
       this.close().catch((cleanupError) => {
-        logger.error('Error during initialization cleanup:', cleanupError);
+        this.logger.error('Error during initialization cleanup:', cleanupError);
       });
     });
 
@@ -239,6 +239,7 @@ export class Query implements AsyncIterable<SDKMessage> {
           this.handleMcpServerResponse(serverName, message);
         },
         serverName,
+        loggerConfig: this.options,
       };
 
       const sdkTransport = new SdkControlServerTransport(transportOptions);
@@ -250,10 +251,12 @@ export class Query implements AsyncIterable<SDKMessage> {
           // Only add to maps after successful connection
           this.sdkMcpServers.set(serverName, server);
           this.sdkMcpTransports.set(serverName, sdkTransport);
-          logger.debug(`SDK MCP server '${serverName}' connected to transport`);
+          this.logger.debug(
+            `SDK MCP server '${serverName}' connected to transport`,
+          );
         })
         .catch((error) => {
-          logger.error(
+          this.logger.error(
             `Failed to connect SDK MCP server '${serverName}' to transport:`,
             error,
           );
@@ -267,7 +270,7 @@ export class Query implements AsyncIterable<SDKMessage> {
     await Promise.all(connectionPromises);
 
     if (this.sdkMcpServers.size > 0) {
-      logger.info(
+      this.logger.info(
         `Initialized ${this.sdkMcpServers.size} SDK MCP server(s): ${Array.from(this.sdkMcpServers.keys()).join(', ')}`,
       );
     }
@@ -288,7 +291,7 @@ export class Query implements AsyncIterable<SDKMessage> {
       const key = `${serverName}:${message.id}`;
       const pending = this.pendingMcpResponses.get(key);
       if (pending) {
-        logger.debug(
+        this.logger.debug(
           `Routing MCP response for server '${serverName}', id: ${message.id}`,
         );
         pending.resolve(message);
@@ -298,7 +301,7 @@ export class Query implements AsyncIterable<SDKMessage> {
     }
 
     // If no pending request found, log a warning (this shouldn't happen normally)
-    logger.warn(
+    this.logger.warn(
       `Received MCP server response with no pending request: server='${serverName}'`,
       message,
     );
@@ -341,7 +344,7 @@ export class Query implements AsyncIterable<SDKMessage> {
 
   private async initialize(): Promise<void> {
     try {
-      logger.debug('Initializing Query');
+      this.logger.debug('Initializing Query');
 
       // Initialize SDK MCP servers and wait for connections
       await this.initializeSdkMcpServers();
@@ -391,11 +394,13 @@ export class Query implements AsyncIterable<SDKMessage> {
           (this.initialEffortStatus.override
             ? `${this.initialEffortStatus.override.source}.${this.initialEffortStatus.override.field} takes precedence`
             : 'thinking may be disabled');
-        logger.warn(`Initial reasoning effort was not applied (${reason})`);
+        this.logger.warn(
+          `Initial reasoning effort was not applied (${reason})`,
+        );
       }
-      logger.info('Query initialized successfully');
+      this.logger.info('Query initialized successfully');
     } catch (error) {
-      logger.error('Initialization error:', error);
+      this.logger.error('Initialization error:', error);
       throw error;
     }
   }
@@ -479,7 +484,7 @@ export class Query implements AsyncIterable<SDKMessage> {
       return;
     }
 
-    logger.warn('Unknown message type:', message);
+    this.logger.warn('Unknown message type:', message);
     this.inputStream.enqueue(message as SDKMessage);
   }
 
@@ -501,7 +506,7 @@ export class Query implements AsyncIterable<SDKMessage> {
     const pendingCount =
       this.pendingControlRequests.size + this.pendingMcpResponses.size;
     if (pendingCount > 0) {
-      logger.error('Transport finalized with pending requests rejected', {
+      this.logger.error('Transport finalized with pending requests rejected', {
         pendingControl: this.pendingControlRequests.size,
         pendingMcp: this.pendingMcpResponses.size,
         error: rejectionError.message,
@@ -537,7 +542,7 @@ export class Query implements AsyncIterable<SDKMessage> {
   ): Promise<void> {
     const { request_id, request: payload } = request;
 
-    logger.debug(`Handling control request: ${payload.subtype}`);
+    this.logger.debug(`Handling control request: ${payload.subtype}`);
     const requestAbortController = new AbortController();
 
     try {
@@ -570,7 +575,10 @@ export class Query implements AsyncIterable<SDKMessage> {
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : String(error);
-      logger.error(`Control request error (${payload.subtype}):`, errorMessage);
+      this.logger.error(
+        `Control request error (${payload.subtype}):`,
+        errorMessage,
+      );
       await this.sendControlResponse(request_id, false, errorMessage);
     }
   }
@@ -633,7 +641,7 @@ export class Query implements AsyncIterable<SDKMessage> {
        */
       const errorMessage =
         error instanceof Error ? error.message : String(error);
-      logger.warn(
+      this.logger.warn(
         'Permission callback error (denying by default):',
         errorMessage,
       );
@@ -725,7 +733,7 @@ export class Query implements AsyncIterable<SDKMessage> {
 
     const pending = this.pendingControlRequests.get(request_id);
     if (!pending) {
-      logger.warn(
+      this.logger.warn(
         'Received response for unknown request:',
         request_id,
         JSON.stringify(payload),
@@ -737,7 +745,7 @@ export class Query implements AsyncIterable<SDKMessage> {
     this.pendingControlRequests.delete(request_id);
 
     if (payload.subtype === 'success') {
-      logger.debug(
+      this.logger.debug(
         `Control response success for request: ${request_id}: ${JSON.stringify(payload.response)}`,
       );
       pending.resolve(payload.response as Record<string, unknown> | null);
@@ -750,7 +758,7 @@ export class Query implements AsyncIterable<SDKMessage> {
         typeof payload.error === 'string'
           ? payload.error
           : (payload.error?.message ?? 'Unknown error');
-      logger.error(
+      this.logger.error(
         `Control response error for request ${request_id}:`,
         errorMessage,
       );
@@ -762,13 +770,13 @@ export class Query implements AsyncIterable<SDKMessage> {
     const { request_id } = request;
 
     if (!request_id) {
-      logger.warn('Received cancel request without request_id');
+      this.logger.warn('Received cancel request without request_id');
       return;
     }
 
     const pending = this.pendingControlRequests.get(request_id);
     if (pending) {
-      logger.debug(`Cancelling control request: ${request_id}`);
+      this.logger.debug(`Cancelling control request: ${request_id}`);
       pending.abortController.abort();
       clearTimeout(pending.timeout);
       this.pendingControlRequests.delete(request_id);
@@ -834,7 +842,7 @@ export class Query implements AsyncIterable<SDKMessage> {
         this.pendingControlRequests.delete(requestId);
       }
       const errorMsg = error instanceof Error ? error.message : String(error);
-      logger.error(`Failed to send control request: ${errorMsg}`);
+      this.logger.error(`Failed to send control request: ${errorMsg}`);
       return Promise.reject(
         new Error(`Failed to send control request: ${errorMsg}`),
       );
@@ -868,7 +876,7 @@ export class Query implements AsyncIterable<SDKMessage> {
     } catch (error) {
       // Write failed - log and ignore since response cannot be delivered
       const errorMsg = error instanceof Error ? error.message : String(error);
-      logger.warn(
+      this.logger.warn(
         `Failed to send control response for request ${requestId}: ${errorMsg}`,
       );
     }
@@ -925,11 +933,11 @@ export class Query implements AsyncIterable<SDKMessage> {
       try {
         await transport.close();
       } catch (error) {
-        logger.error('Error closing MCP transport:', error);
+        this.logger.error('Error closing MCP transport:', error);
       }
     }
     this.sdkMcpTransports.clear();
-    logger.info('Query is closed');
+    this.logger.info('Query is closed');
   }
 
   private async *readSdkMessages(): AsyncGenerator<SDKMessage> {
@@ -994,7 +1002,7 @@ export class Query implements AsyncIterable<SDKMessage> {
 
         const timeoutPromise = new Promise<void>((resolve) => {
           timeoutId = setTimeout(() => {
-            logger.info('streamCloseTimeout resolved');
+            this.logger.info('streamCloseTimeout resolved');
             resolve();
           }, streamCloseTimeout);
         });
@@ -1009,7 +1017,7 @@ export class Query implements AsyncIterable<SDKMessage> {
       this.endInput();
     } catch (error) {
       if (this.abortController.signal.aborted) {
-        logger.info('Aborted during input streaming');
+        this.logger.info('Aborted during input streaming');
         this.inputStream.error(
           new AbortError('Query aborted during input streaming'),
         );

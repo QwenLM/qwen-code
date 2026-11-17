@@ -6,9 +6,7 @@ import type { Transport } from './Transport.js';
 import { parseJsonLinesStream } from '../utils/jsonLines.js';
 import { prepareSpawnInfo } from '../utils/cliPath.js';
 import { AbortError } from '../types/errors.js';
-import { SdkLogger } from '../utils/logger.js';
-
-const logger = SdkLogger.createLogger('ProcessTransport');
+import { SdkLogger, type ScopedLogger } from '../utils/logger.js';
 
 export class ProcessTransport implements Transport {
   private static activeTransports = new Set<ProcessTransport>();
@@ -23,6 +21,7 @@ export class ProcessTransport implements Transport {
   private childStdin: Writable | null = null;
   private childStdout: Readable | null = null;
   private options: TransportOptions;
+  private readonly logger: ScopedLogger;
   private ready = false;
   private _exitError: Error | null = null;
   private closed = false;
@@ -33,13 +32,9 @@ export class ProcessTransport implements Transport {
 
   constructor(options: TransportOptions) {
     this.options = options;
+    this.logger = SdkLogger.createLogger('ProcessTransport', options);
     this.abortController =
       this.options.abortController ?? new AbortController();
-    SdkLogger.configure({
-      debug: options.debug,
-      stderr: options.stderr,
-      logLevel: options.logLevel,
-    });
     this.initialize();
   }
 
@@ -96,7 +91,7 @@ export class ProcessTransport implements Transport {
           forkExecPath = spawnInfo.command;
         } else {
           // Native or other types: cannot use fork, fall back to spawn
-          logger.debug(
+          this.logger.debug(
             `FORK_MODE enabled but CLI type '${spawnInfo.type}' does not support fork. Falling back to spawn.`,
           );
           forkModulePath = '';
@@ -105,7 +100,7 @@ export class ProcessTransport implements Transport {
 
         // Only use fork if we have a valid module path
         if (forkModulePath) {
-          logger.debug(
+          this.logger.debug(
             `Forking CLI (${spawnInfo.type}): ${forkModulePath} ${forkArgs.join(' ')}`,
           );
 
@@ -126,7 +121,7 @@ export class ProcessTransport implements Transport {
           this.childProcess = fork(forkModulePath, forkArgs, forkOptions);
         } else {
           // Fallback to spawn for native/unsupported types
-          logger.debug(
+          this.logger.debug(
             `Spawning CLI (${spawnInfo.type}): ${spawnInfo.command} ${[...spawnInfo.args, ...cliArgs].join(' ')}`,
           );
 
@@ -142,7 +137,7 @@ export class ProcessTransport implements Transport {
           );
         }
       } else {
-        logger.debug(
+        this.logger.debug(
           `Spawning CLI (${spawnInfo.type}): ${spawnInfo.command} ${[...spawnInfo.args, ...cliArgs].join(' ')}`,
         );
 
@@ -163,7 +158,7 @@ export class ProcessTransport implements Transport {
 
       if (this.options.debug || this.options.stderr) {
         this.childProcess.stderr?.on('data', (data) => {
-          logger.debug(data.toString());
+          this.logger.debug(data.toString());
         });
       }
 
@@ -176,7 +171,7 @@ export class ProcessTransport implements Transport {
       this.setupEventHandlers();
 
       this.ready = true;
-      logger.info('CLI process started successfully');
+      this.logger.info('CLI process started successfully');
     } catch (error) {
       this.unregisterForProcessExit();
       if (this.abortHandler) {
@@ -187,7 +182,7 @@ export class ProcessTransport implements Transport {
         this.abortHandler = null;
       }
       this.ready = false;
-      logger.error('Failed to initialize CLI process:', error);
+      this.logger.error('Failed to initialize CLI process:', error);
       throw error;
     }
   }
@@ -280,7 +275,7 @@ export class ProcessTransport implements Transport {
         this._exitError = new AbortError('CLI process aborted by user');
       } else {
         this._exitError = new Error(`CLI process error: ${error.message}`);
-        logger.error(this._exitError.message);
+        this.logger.error(this._exitError.message);
       }
     });
 
@@ -294,7 +289,7 @@ export class ProcessTransport implements Transport {
         const error = this.getProcessExitError(code, signal);
         if (error) {
           this._exitError = error;
-          logger.error(error.message);
+          this.logger.error(error.message);
         }
       }
     });
@@ -537,7 +532,7 @@ export class ProcessTransport implements Transport {
 
     if (this.childStdin.writableEnded || this.childStdin.destroyed) {
       this.inputClosed = true;
-      logger.warn(
+      this.logger.warn(
         `Cannot write to ${this.childStdin.writableEnded ? 'ended' : 'destroyed'} stdin stream`,
       );
       throw new Error('Input stream closed');
@@ -553,18 +548,18 @@ export class ProcessTransport implements Transport {
       );
     }
 
-    logger.debug(
+    this.logger.debug(
       `Writing to stdin (${message.length} bytes): ${message.trim()}`,
     );
 
     try {
       const written = this.childStdin.write(message);
       if (!written) {
-        logger.warn(
+        this.logger.warn(
           `Write buffer full (${message.length} bytes), data queued. Waiting for drain event...`,
         );
       } else {
-        logger.debug(`Write successful (${message.length} bytes)`);
+        this.logger.debug(`Write successful (${message.length} bytes)`);
       }
     } catch (error) {
       // Check if this is a stream-closed error (EPIPE, ERR_STREAM_WRITE_AFTER_END, etc.)
@@ -576,14 +571,14 @@ export class ProcessTransport implements Transport {
 
       if (isStreamClosedError) {
         this.inputClosed = true;
-        logger.warn(`Stream closed, cannot write: ${errorMsg}`);
+        this.logger.warn(`Stream closed, cannot write: ${errorMsg}`);
         throw new Error('Input stream closed');
       }
 
       // For other errors, maintain original behavior
       this.ready = false;
       const fullErrorMsg = `Failed to write to stdin: ${errorMsg}`;
-      logger.error(fullErrorMsg);
+      this.logger.error(fullErrorMsg);
       throw new Error(fullErrorMsg);
     }
   }
@@ -603,6 +598,7 @@ export class ProcessTransport implements Transport {
       for await (const message of parseJsonLinesStream(
         rl,
         'ProcessTransport',
+        this.logger,
       )) {
         yield message;
       }

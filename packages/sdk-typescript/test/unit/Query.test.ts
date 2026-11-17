@@ -291,6 +291,34 @@ describe('Query', () => {
     }
   });
 
+  it('keeps query diagnostics in the callback supplied to that query', async () => {
+    const firstStderr = vi.fn();
+    const secondStderr = vi.fn();
+    const secondTransport = new MockTransport();
+    const first = new Query(transport, {
+      stderr: firstStderr,
+      logLevel: 'warn',
+    });
+    const second = new Query(secondTransport, {
+      stderr: secondStderr,
+      logLevel: 'warn',
+    });
+    try {
+      await respondToInitialize(transport, first);
+      await respondToInitialize(secondTransport, second);
+      transport.simulateMessage(createControlCancel(''));
+      await vi.waitFor(() => {
+        expect(firstStderr).toHaveBeenCalledWith(
+          expect.stringContaining('Received cancel request without request_id'),
+        );
+      });
+      expect(secondStderr).not.toHaveBeenCalled();
+    } finally {
+      await first.close();
+      await second.close();
+    }
+  });
+
   describe('session Workflow mode', () => {
     async function initializeMode(query: Query, expected: boolean) {
       await vi.waitFor(() =>
