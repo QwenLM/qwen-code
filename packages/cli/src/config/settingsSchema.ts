@@ -4895,6 +4895,22 @@ const SETTINGS_SCHEMA = {
           'skipped (no overwrite, no failure).',
         showInDialog: false,
       },
+      maxRetained: {
+        type: 'number',
+        label: 'Maximum Retained Session Worktrees',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: 15,
+        description:
+          'The most recent Web Shell session worktrees kept per repository. ' +
+          'A retention sweep snapshots and deletes the oldest beyond this ' +
+          'limit (active sessions and pinned chats are always protected). ' +
+          'Archiving or deleting a chat also snapshots its worktree before ' +
+          'removal, and reopening the chat offers restore. Set to 0 to ' +
+          'disable count-based auto-deletion. Does not affect tool/agent ' +
+          'worktrees, which keep their existing cleanup semantics.',
+        showInDialog: false,
+      },
     },
   },
 
