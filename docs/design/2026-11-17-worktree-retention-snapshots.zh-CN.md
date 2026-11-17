@@ -58,6 +58,25 @@ worktree** 解除 `worktreeHasWork` 拒绝；工具/agent worktree 保留现有�
 个，超出限制者按最旧优先「先快照再删除」（U3）。保护活跃会话与置顶 chat 的 worktree。
 `0` 关闭按数量清扫。与现有按龄期的临时 agent 清扫（`worktreeCleanup.ts`）不同，后者不变。
 
+实现要点（已调查）：
+
+- **枚举基于 sidecar，而非 `GitWorktreeService.listSessions`。** 该静态方法枚举的是
+  _旧 agent-session_ 布局（`<baseDir>/<sessionId>/config.json` + `worktrees/`），不是
+  Web Shell 会话 worktree。清扫须枚举会话 chats 目录的 `*.worktree.json` sidecar
+  （`WorktreeSession` 记录，经 `SessionService.getWorktreeSessionPath` / chats 目录），
+  按仓库托管根过滤（`sidecar.originalCwd` / `worktreePath` 包含性）。
+- **最后活动**取会话记录的 updated 时间戳（持久化会话元数据），而非 worktree 目录 mtime；
+  会话记录已删时回退 sidecar/快照时间戳。降序排序，保留前 `maxRetained` 个，其余最旧优先清扫。
+- **保护**：跳过会话仍在 bridge 活跃（`bridge.getSessionSummary` 有答）或 chat 置顶
+  （session-organization `isPinned`）的 worktree。活跃/置顶 worktree 绝不计入删除候选。
+- **删除**复用 U3 路径：构造 `WorktreeCleanupPlan` 调 `executeWorktreeCleanup`（先快照再删除，
+  fail-closed）。清扫本身对每个候选取 worktree 所有权锁（`acquireWorktreeOwnershipOp`），
+  以免与 restore/reset 竞态。
+- **触发**：daemon 周期清扫（与会话 reaper 并列），从 workspace 设置读 `worktree.maxRetained`；
+  `0` 短路。保持 fail-closed：任何枚举/读取错误跳过候选，绝不删除。
+- 测试：按数量排序保留最近 N、`0` 关闭、活跃/置顶受保护、超限最旧优先先快照再删除、枚举错误跳过。
+  变异：去保护、去数量上限各击杀一条 committed 用例。
+
 ### U5 — 重开恢复入口
 
 重开 worktree 已删除的 chat 提供恢复：路由重建 worktree（detached 于记录 HEAD 或记录

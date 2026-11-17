@@ -76,6 +76,35 @@ activity, keep the most recent `worktree.maxRetained`, snapshot-then-delete
 pinned chats. `0` disables the count-based sweep. Distinct from the existing
 age-based ephemeral agent sweep (`worktreeCleanup.ts`), which is unchanged.
 
+Implementation notes (investigated):
+
+- **Enumeration is sidecar-based, not `GitWorktreeService.listSessions`.** That
+  static method enumerates the _legacy agent-session_ layout
+  (`<baseDir>/<sessionId>/config.json` + `worktrees/`), not Web Shell session
+  worktrees. The sweep must enumerate the session chats directory's
+  `*.worktree.json` sidecars (the `WorktreeSession` records, via
+  `SessionService.getWorktreeSessionPath` / the chats dir), filtered to the
+  repository's managed root (`sidecar.originalCwd` / `worktreePath` containment).
+- **Last activity** comes from the session record's updated timestamp (the
+  persisted session metadata), not the worktree directory mtime; fall back to
+  the sidecar/snapshot timestamp when the session record is gone. Sort
+  descending, keep the first `maxRetained`, sweep the rest oldest-first.
+- **Protection**: skip a worktree whose session is live on the bridge
+  (`bridge.getSessionSummary` answers) or whose chat is pinned
+  (session-organization `isPinned`). Active/pinned worktrees never count toward
+  the deletion candidates.
+- **Deletion** reuses the U3 path: build a `WorktreeCleanupPlan` and call
+  `executeWorktreeCleanup` (snapshot-then-delete, fail-closed). The sweep itself
+  takes the worktree ownership lock per candidate (`acquireWorktreeOwnershipOp`)
+  so it cannot race a restore/reset.
+- **Trigger**: a daemon periodic sweep (alongside the session reaper) reading
+  `worktree.maxRetained` from the workspace settings; `0` short-circuits. Keep
+  it fail-closed: any enumeration/read error skips the candidate, never deletes.
+- Tests: count ordering keeps the most recent N, `0` disables, active/pinned
+  protected, oldest-first snapshot-then-delete beyond the limit, enumeration
+  error skips. Mutation: dropping the protection and dropping the count cap each
+  kill a committed case.
+
 ### U5 — Restore affordance on reopen
 
 Reopening a chat whose worktree was deleted offers restore: a route recreates
