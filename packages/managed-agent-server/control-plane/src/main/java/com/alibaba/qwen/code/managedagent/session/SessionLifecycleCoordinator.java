@@ -98,13 +98,11 @@ public class SessionLifecycleCoordinator {
     // barrier forever (review round 9, R9-4).
     private static final int SETTLED_COMPLETION_BUDGET_FACTOR = 4;
     // The daemon refuses a lifecycle phase while it is still busy with the
-    // previous prompt: hosted_lifecycle_recovery_required names its cleanup
-    // debt, and hosted_turn_active names a turn, MCP call or hook that is
-    // still draining. Both clear through the daemon's own work, not by
-    // anything the caller changes, so neither is a permanent hook refusal
-    // or spends the close's retry budget.
+    // previous prompt or closing its resident Session. These clear through
+    // the daemon's own work, not by anything the caller changes, so none is
+    // a permanent hook refusal or spends the close's retry budget.
     private static final Set<String> SELF_CLEARING_DAEMON_REFUSALS =
-            Set.of("hosted_lifecycle_recovery_required", "hosted_turn_active");
+            Set.of("hosted_lifecycle_recovery_required", "hosted_turn_active", "hosted_session_closing");
     private final AgentStateStore store;
     private WorkspaceLifecycleStore lifecycle;
 

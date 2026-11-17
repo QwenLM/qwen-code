@@ -1445,8 +1445,10 @@ export interface BridgeClientRequestContext {
   onPromptDispatched?: () => void;
   /** Internal authorization check when dequeuing a prompt and before its ACP write. */
   assertCanDispatch?: () => void;
-  /** Approval mode the trusted ACP child must still have at prompt admission. */
+  /** Approval mode required for the delegated turn. */
   expectedApprovalMode?: ApprovalMode;
+  /** The live mode before the switch. Older children still enforce expectedApprovalMode. */
+  approvalModeBeforeStart?: ApprovalMode;
   /**
    * Internal model input that replaces the public prompt only inside the
    * trusted ACP child. The bridge still echoes and persists `PromptRequest`
@@ -1512,6 +1514,8 @@ export interface BridgeClientRequestContext {
 export const DAEMON_MODEL_PROMPT_META_KEY = 'qwen.daemon.modelPrompt';
 export const DAEMON_EXPECTED_APPROVAL_MODE_META_KEY =
   'qwen.daemon.expectedApprovalMode';
+export const DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY =
+  'qwen.daemon.approvalModeBeforeStart';
 export const DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY =
   'qwen.daemon.restoreAskUserQuestion';
 export const DAEMON_RESTORE_MANAGED_APPROVAL_META_KEY =
