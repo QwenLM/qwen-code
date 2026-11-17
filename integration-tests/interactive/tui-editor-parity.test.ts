@@ -62,9 +62,14 @@ const until = createUntil(WAIT_LOCAL_MS);
 
 // The /permissions cases pin their own ceiling to fail fast on a wedged
 // dialog. It must outrank the boot window plus one stalled wait, or vitest's
-// bare "Test timed out" pre-empts the wait's own label (#17544).
-const PERMISSIONS_CASE_TIMEOUT =
-  readyPromptBudgetMs(process.env) + scaledWait(WAIT_LOCAL_MS) + 60_000;
+// bare "Test timed out" pre-empts the wait's own label (#17544). retry: 0
+// because a wedged dialog repeats in a fresh worker, so the suite's two
+// retries would only triple the cost.
+const PERMISSIONS_CASE_OPTIONS = {
+  timeout:
+    readyPromptBudgetMs(process.env) + scaledWait(WAIT_LOCAL_MS) + 60_000,
+  retry: 0,
+};
 
 function lastUser(server: FakeOpenAIServer): string {
   const messages = server.requests.at(-1)?.body['messages'];
@@ -905,6 +910,7 @@ it('vim-insert-controls-and-disable', () =>
 
 it(
   'permissions-edits-and-completes-without-model',
+  PERMISSIONS_CASE_OPTIONS,
   () =>
     scenario(
       'permissions-edits-and-completes-without-model',
@@ -1034,11 +1040,11 @@ it(
         expect(server.requests).toHaveLength(0);
       },
     ),
-  PERMISSIONS_CASE_TIMEOUT,
 );
 
 it(
   'permissions-clear-undo-replace-without-model',
+  PERMISSIONS_CASE_OPTIONS,
   () =>
     scenario(
       'permissions-clear-undo-replace-without-model',
@@ -1142,11 +1148,11 @@ it(
         expect(server.requests).toHaveLength(0);
       },
     ),
-  PERMISSIONS_CASE_TIMEOUT,
 );
 
 it(
   'permissions-second-control-c-exits-without-model',
+  PERMISSIONS_CASE_OPTIONS,
   () =>
     scenario(
       'permissions-second-control-c-exits-without-model',
@@ -1192,5 +1198,4 @@ it(
         expect(server.requests).toHaveLength(0);
       },
     ),
-  PERMISSIONS_CASE_TIMEOUT,
 );

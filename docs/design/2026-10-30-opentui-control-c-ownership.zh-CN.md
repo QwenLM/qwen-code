@@ -22,7 +22,7 @@
 
 ## 公开验证
 
-复用既有 `tui-editor-parity.test.ts` scenario 与公开 `InteractiveSession`，不新增 driver。新增 `permissions-clear-undo-replace-without-model` 用例沿用 90 秒限制、零重试：进入 `/permissions`，paste `WebFetch`，清空到 placeholder 并观测退出提示，Undo 恢复精确原字段行，在独立的再次清空前观测 guard 到期，替换为 `Read`，实际经过 scope 选择并要求设置只含 `Read`。返回 composer，以 `/quit` 自然 exit 0/signal 0，并要求模型 HTTP 请求为零。
+复用既有 `tui-editor-parity.test.ts` scenario 与公开 `InteractiveSession`，不新增 driver。新增 `permissions-clear-undo-replace-without-model` 用例采用派生的单用例上限（runner 的 ready-prompt 启动预算 + 一次经 CI 放大的 30 秒重绘等待 + 60 秒余量：本地 120 秒、自托管无沙箱通道 240 秒、自托管 docker 档位 330 秒）、零重试：进入 `/permissions`，paste `WebFetch`，清空到 placeholder 并观测退出提示，Undo 恢复精确原字段行，在独立的再次清空前观测 guard 到期，替换为 `Read`，实际经过 scope 选择并要求设置只含 `Read`。返回 composer，以 `/quit` 自然 exit 0/signal 0，并要求模型 HTTP 请求为零。
 
 该用例刻意等到护栏窗口到期后才做下一次清空，因此无法固定「必须仍然退出」的那一半契约。`permissions-second-control-c-exits-without-model` 在同一时限内承担这一半：填满规则字段，两次 Ctrl+C 之间不插入任何轮询帧，断言间隔仍在 `CTRL_EXIT_PROMPT_DURATION_MS` 之内，并要求 exit 0/signal 0、模型请求为零。给字段清空路径加上 `stopPropagation()` 或 `exitGuard.disarm()` 必须使该用例失败。
 
