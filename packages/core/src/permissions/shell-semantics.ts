@@ -533,7 +533,12 @@ function stripCommandPrefixes(words: string[], bares: string[]): string[] {
   if (words[start] === 'time') {
     let next = start + 1;
     if (words[next] === '-p') next++;
-    if (!words[next]?.startsWith('-')) start = next;
+    if (words[next] === '--') {
+      next++;
+      start = next;
+    } else if (!words[next]?.startsWith('-')) {
+      start = next;
+    }
   }
   while (words[start] && isEnvAssignmentToken(words[start]!, bares[start])) {
     start++;
@@ -952,7 +957,10 @@ function getFlagValue(
       return arg.slice(shortName.length).replace(/^=/, '');
     }
     if (hasCombinedShortFlag(arg, shortName.slice(1))) {
-      return args[i + 1];
+      const cluster = arg.slice(1);
+      const flagIndex = cluster.indexOf(shortName.slice(1));
+      const attached = cluster.slice(flagIndex + 1);
+      return attached ? attached.replace(/^=/, '') : args[i + 1];
     }
   }
   return undefined;
@@ -1002,7 +1010,7 @@ function writeOpForFlag(
   longName: string,
 ): ShellOperation | undefined {
   const target = getFlagValue(args, shortName, longName);
-  if (!target) return undefined;
+  if (!target || target === '-') return undefined;
   return pathOperation('write_file', target, cwd);
 }
 
@@ -2007,7 +2015,8 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
 
   patch: (args, cwd) => {
     const output = getFlagValue(args, '-o', '--output');
-    const outputOps = output ? [pathOperation('edit', output, cwd)] : [];
+    const outputOps =
+      output && output !== '-' ? [pathOperation('edit', output, cwd)] : [];
 
     return [
       ...outputOps,
@@ -2517,10 +2526,16 @@ function resolveCdTargetCwd(
   // extractRedirects compacts `words` and `bares` together, so the target and
   // its marking are read from the filtered arrays.
   const redirects = extractRedirects(words, cwd, fdRedirects, fdCloses, bares);
+  const timeOptionTerminator =
+    words[0] === 'time' &&
+    (words[1] === '--' || (words[1] === '-p' && words[2] === '--'));
   const prefixes = stripCommandPrefixes(words, bares);
 
   if (words[0] === 'popd') return { kind: 'dynamic', redirects };
   if (words[0] !== 'cd' && words[0] !== 'pushd') return { kind: 'not-cd' };
+  // Bash 3.2 rejects `time --`, while newer Bash accepts it. Do not certify
+  // either a changed or unchanged cwd when the active shell is not known here.
+  if (timeOptionTerminator) return { kind: 'dynamic', redirects };
 
   if (words[0] === 'pushd') {
     if (words.length === 1) return { kind: 'dynamic', redirects };

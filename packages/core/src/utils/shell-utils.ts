@@ -913,9 +913,14 @@ function shellWordQuoteRemoval(
 
 /** Quote removal applies around expansions too; their syntax stays literal. */
 function resolveShellWord(token: string): string {
-  return (
-    shellWordQuoteRemoval(token)?.text ?? stripSymmetricQuotes(token).value
-  );
+  const removed = shellWordQuoteRemoval(token);
+  const escapedExpansion =
+    removed !== null && /(?:^|[^\\])(?:\\\\)*\\[$`]/.test(removed.text);
+  // A backslash produced by quote removal can escape the expansion marker on
+  // the next parse. Keep the original spelling only for that lossy case.
+  return removed !== null && !(removed.hasExpansion && escapedExpansion)
+    ? removed.text
+    : stripSymmetricQuotes(token).value;
 }
 
 /**

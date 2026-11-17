@@ -1400,7 +1400,7 @@ describe('prefixed directory changes', () => {
     },
   );
 
-  it.each(['A=1 time cd .qwen', 'command time cd .qwen', 'time -- cd .qwen'])(
+  it.each(['A=1 time cd .qwen', 'command time cd .qwen'])(
     'does not treat a non-executed time prefix as a directory change: %s',
     (command) => {
       expect(across(`${command}; printf '{}' > settings.json`)).toEqual([
@@ -1408,6 +1408,29 @@ describe('prefixed directory changes', () => {
       ]);
     },
   );
+
+  it.each(['time -- cd .qwen', 'time -p -- cd .qwen'])(
+    'does not certify a version-dependent time terminator cwd: %s',
+    (command) => {
+      expect(across(`${command}; printf '{}' > settings.json`)).toEqual([
+        {
+          ...write('/repo/settings.json'),
+          cwdUnknown: true,
+          pathMayDependOnCwd: true,
+        },
+      ]);
+    },
+  );
+});
+
+describe('wrapper payload expansion', () => {
+  it('keeps an escaped expansion uncertain through coalesced quote removal', () => {
+    const writes = across(String.raw`sh -c "cat > \\$TARGET"`).filter(
+      (op) => op.virtualTool === 'write_file',
+    );
+    expect(writes).toHaveLength(1);
+    expect(writes[0]!.pathUnknown).toBe(true);
+  });
 });
 
 describe('assignment syntax in directory changes', () => {
@@ -1445,6 +1468,36 @@ describe('find starting-point uncertainty', () => {
   it('retains the default and literal starting-point behavior', () => {
     expect(across('find $D -name x')).toEqual([dir('/repo')]);
     expect(across('find src -name x')).toEqual([dir('/repo/src')]);
+  });
+});
+
+describe('output destinations that are not files', () => {
+  it.each([
+    'curl -o - https://example.com',
+    'wget -O - https://example.com/f.gz',
+    'wget -qO- https://example.com/f.gz',
+  ])('does not invent a download write: %s', (command) => {
+    expect(
+      ops(command).filter((op) => op.virtualTool === 'write_file'),
+    ).toEqual([]);
+  });
+
+  it('keeps a URL-shaped output value as the file curl actually writes', () => {
+    expect(
+      ops('curl -o https://example.com/out file:///etc/hosts'),
+    ).toContainEqual(write(`${CWD}/https:/example.com/out`));
+  });
+
+  it('reads an output value attached inside a short-flag cluster', () => {
+    expect(ops('wget -qO/tmp/file.gz https://example.com/f.gz')).toContainEqual(
+      write('/tmp/file.gz'),
+    );
+  });
+
+  it('does not invent a patch edit for stdout', () => {
+    expect(
+      ops('patch -o - input.patch').filter((op) => op.virtualTool === 'edit'),
+    ).toEqual([edit(`${CWD}/input.patch`)]);
   });
 });
 

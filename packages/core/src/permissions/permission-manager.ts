@@ -1240,7 +1240,9 @@ export class PermissionManager {
       const ops = extractShellOperationsAcrossCommand(command, cwdForOps);
       if (
         ops.some((op) => {
-          if (op.pathUnknown) return true;
+          if (op.pathUnknown && this.hasDenyOrAskRuleForTool(op.virtualTool)) {
+            return true;
+          }
           if (
             op.cwdUnknown &&
             op.pathMayDependOnCwd &&

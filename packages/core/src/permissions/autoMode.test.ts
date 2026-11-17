@@ -931,6 +931,17 @@ describe('evaluateAutoMode — fast-path gating', () => {
     expect(classifyAction).not.toHaveBeenCalled();
   });
 
+  it('routes an escaped wrapper expansion to manual fallback', async () => {
+    vi.mocked(classifyAction).mockClear();
+    const decision = await evaluate({
+      toolName: ToolNames.SHELL,
+      command: String.raw`sh -c "cat > \\$TARGET"`,
+      cwd,
+    });
+    expect(decision).toEqual({ via: 'fallback', reason: 'safety_check' });
+    expect(classifyAction).not.toHaveBeenCalled();
+  });
+
   it('does not treat a literal dollar in a redirect as unresolved', async () => {
     vi.mocked(classifyAction).mockClear();
     const decision = await evaluate({

@@ -3815,6 +3815,28 @@ describe('PermissionManager — compound shell write attribution', () => {
     },
   );
 
+  it.each(['time -- cd .qwen', 'time -p -- cd .qwen'])(
+    'asks instead of certifying a version-dependent time cwd: %s',
+    async (command) => {
+      const pm = repoPm({
+        permissionsAllow: ['Bash(*)'],
+        permissionsDeny: ['Write(.qwen/settings.json)'],
+      });
+      const ctx = sh(`${command} && printf '{}' > settings.json`, '/repo');
+      expect(await pm.evaluate(ctx)).toBe('ask');
+    },
+  );
+
+  it('does not make path uncertainty relevant without permission rules', () => {
+    const pm = repoPm({});
+    expect(pm.hasRelevantRules(sh('cat ./src/*', '/repo'))).toBe(false);
+  });
+
+  it('keeps path uncertainty relevant to a restrictive file rule', () => {
+    const pm = repoPm({ permissionsDeny: ['Read(*)'] });
+    expect(pm.hasRelevantRules(sh('cat ./src/*', '/repo'))).toBe(true);
+  });
+
   it('ordinary writes after `cd` into project subdirs stay unmatched by self-mod rules', () => {
     const ctx = sh("cd src && bash -lc 'echo ok > generated.txt'", '/repo');
     expect(repoPm(denySettings).hasRelevantRules(ctx)).toBe(false);
