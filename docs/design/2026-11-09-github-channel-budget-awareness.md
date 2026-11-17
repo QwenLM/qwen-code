@@ -3,7 +3,7 @@
 [中文版](2026-11-09-github-channel-budget-awareness.zh-CN.md)
 
 - Issue: #16690
-- Status: proposed
+- Status: implemented as #16701 (proposed 2026-11-09). The body below describes the increment as designed; PR B (#17214) later removed the channel's PR-state detection, so the budget gate now protects the comment-watch pass.
 - Related: #16665 (removed redundant CI-aggregate requests), #16691 / #16692 (alternative watch-transport reductions)
 
 ## Problem statement

@@ -2,7 +2,7 @@
 
 [English](2026-11-09-github-channel-conditional-requests.md) | [简体中文](2026-11-09-github-channel-conditional-requests.zh-CN.md)
 
-状态：提案。实现 #16691。基线：`main` 的 `56ea1bc3fbb`。
+状态：已实现（#16741；2026-11-10）。实现 #16691。基线：`main` 的 `56ea1bc3fbb`。下文按该增量当时的设计描述。
 
 ## 问题陈述
 

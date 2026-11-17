@@ -87,3 +87,47 @@ export const BROWSER_NOTIFICATION_MESSAGES_ZH: Record<
   'browserNotifications.error': '无法启用或显示通知，请检查浏览器及系统设置。',
   'browserNotifications.temporary': '设置仅在当前页面有效。',
 };
+
+export const BROWSER_NOTIFICATION_MESSAGES_RU: Record<
+  string,
+  BrowserNotificationMessage
+> = {
+  'browserNotifications.label': 'Уведомления о задачах',
+  'browserNotifications.description':
+    'Уведомлять, когда текущий чат или чат в разделённом виде завершается, завершается с ошибкой, требует подтверждения или ждёт вашего ответа, пока эта страница в фоне или без фокуса. Завершённые ходы показывают фрагменты запроса и ответа; напоминания о действии показывают название сессии и статус ожидания. Сохраняется только для этого сайта в браузере; страница должна оставаться открытой.',
+  'browserNotifications.prompt': (v) => `Запрос: ${v?.text ?? ''}`,
+  'browserNotifications.reply': (v) => `Ответ: ${v?.text ?? ''}`,
+  'browserNotifications.completed': 'Этот ход завершён.',
+  'browserNotifications.failed':
+    'Этот ход завершился с ошибкой. Вернитесь, чтобы посмотреть подробности.',
+  'browserNotifications.ended':
+    'Этот ход закончился. Вернитесь, чтобы проверить результат.',
+  'browserNotifications.approval':
+    'Этой сессии нужно ваше подтверждение. Вернитесь, чтобы просмотреть запрос.',
+  'browserNotifications.question':
+    'Эта сессия ждёт вашего ответа. Вернитесь, чтобы ответить.',
+  'browserNotifications.allow': 'Разрешить уведомления',
+  'browserNotifications.enable': 'Включить уведомления',
+  'browserNotifications.helpEnabled': 'Включено для этого сайта.',
+  'browserNotifications.helpWaiting': 'Уведомления ещё не разрешены.',
+  'browserNotifications.helpWhen':
+    'Пока эта страница в фоне или вы переключились на другую вкладку, приходят напоминания, когда текущий чат требует подтверждения, ждёт ответа, завершается или завершается с ошибкой. Нажатие уведомления возвращает к чату, не подтверждая и не отвечая.',
+  'browserNotifications.helpSystem':
+    'Если напоминания не появляются, выполните шаги ниже, чтобы проверить системные уведомления.',
+  'browserNotifications.helpMac':
+    'Откройте «Системные настройки → Уведомления». Выберите браузер (для Chrome также проверьте Google Chrome Helper (Alerts), если он есть), включите уведомления и баннеры/оповещения на рабочем столе. Проверьте Фокусирование и разрешены ли уведомления при демонстрации экрана.',
+  'browserNotifications.helpWindows':
+    'Откройте «Параметры → Система → Уведомления» (Windows 10: «Уведомления и действия»). Включите уведомления и браузер, включая баннеры. Отключите «Не беспокоить / Фокусировку внимания» или разрешите браузер в её правилах.',
+  'browserNotifications.enabled': 'Включено.',
+  'browserNotifications.disabled': 'Выключено.',
+  'browserNotifications.waiting': 'Ожидание разрешения браузера.',
+  'browserNotifications.denied':
+    'Уведомления заблокированы. Разрешите их в настройках сайта браузера.',
+  'browserNotifications.unavailable':
+    'Уведомления недоступны в этом браузере или контексте страницы.',
+  'browserNotifications.requesting': 'Ожидание вашего разрешения…',
+  'browserNotifications.error':
+    'Не удалось включить или показать уведомления. Проверьте настройки браузера и системы.',
+  'browserNotifications.temporary':
+    'Этот параметр сохраняется только для текущей страницы.',
+};
