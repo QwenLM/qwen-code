@@ -17,6 +17,7 @@ import { useI18n } from '../../i18n';
 import { useManagedRecoveryText } from './managed-recovery-messages';
 import shellStyles from '../../App.module.css';
 import { MessageList } from '../MessageList';
+import type { Message } from '../../adapters/types';
 import {
   ToolDetailsContext,
   type ToolDetailsLoader,
@@ -62,11 +63,6 @@ import { JavaManagedAgentHttpError } from './java-managed-agent-client';
 import type { ManagedLifecycleAction } from './managed-agent-provider';
 import { useManagedRecovery } from './use-managed-recovery';
 import { useManagedTurnCancel } from './use-managed-turn-cancel';
-import { ManagedRecoveryPanel } from './ManagedRecoveryPanel';
-import {
-  buildManagedRecoveryHandoff,
-  type ManagedRecoveryHandoff,
-} from './managed-recovery-handoff';
 import { useManagedSessionRename } from './use-managed-session-rename';
 import { managedActionKey, useManagedActions } from './use-managed-actions';
 import { ManagedQuestionForm } from './ManagedQuestionForm';
@@ -445,7 +441,6 @@ function ManagedSessionsContent({
     interactive && (!hostSessionOnly || cancellationEnabled),
     detail.refreshSummary,
   );
-  const [handoff, setHandoff] = useState<ManagedRecoveryHandoff>();
   const sessionWorkspaceId =
     sessionId && detail.summary?.sessionId === sessionId
       ? (detail.summary.workspace?.workspaceId ?? null)
@@ -818,10 +813,66 @@ function ManagedSessionsContent({
     [provider, sessionId],
   );
   const truncatedLabel = t('managed.truncated');
-  const messages = useMemo(
+  const transcriptMessages = useMemo(
     () => messageProjector(detail.events, truncatedLabel),
     [messageProjector, detail.events, truncatedLabel],
   );
+  const failureMessage = summary?.failure
+    ? (FAILURE_MESSAGES[summary.failure.code]?.[
+        language === 'zh-CN' ? 1 : language === 'ru' ? 2 : 0
+      ] ?? summary.failure.message)
+    : undefined;
+  const recoveryError =
+    recovery.value?.state === 'operator_required'
+      ? recovery.value.reasonCode
+      : undefined;
+  const messages = useMemo<Message[]>(() => {
+    const failures = [
+      ...new Set(
+        [
+          detail.stoppedReason,
+          detail.error,
+          error,
+          pendingHere && !busy && !error ? t('managed.uncertain') : undefined,
+          failureMessage,
+          recoveryError,
+        ].filter((message): message is string => Boolean(message)),
+      ),
+    ];
+    const existingErrors = new Set(
+      transcriptMessages.flatMap((message) =>
+        message.role === 'system' && message.variant === 'error'
+          ? [message.content]
+          : [],
+      ),
+    );
+    return [
+      ...transcriptMessages,
+      ...failures
+        .filter((message) => !existingErrors.has(message))
+        .map(
+          (content): Message => ({
+            id: `managed-error:${sessionId ?? 'new'}:${content}`,
+            role: 'system',
+            variant: 'error',
+            retryable: Boolean(pendingHere),
+            content,
+            timestamp: Date.now(),
+          }),
+        ),
+    ];
+  }, [
+    transcriptMessages,
+    detail.stoppedReason,
+    detail.error,
+    error,
+    failureMessage,
+    recoveryError,
+    sessionId,
+    pendingHere,
+    busy,
+    t,
+  ]);
   const latestSuccessfulTodos = useMemo(
     () => getLatestSuccessfulTodos(messages),
     [messages],
@@ -945,6 +996,41 @@ function ManagedSessionsContent({
   // useCallback would change when their large closures are captured.
   const submitRef = useRef<() => void>(() => {});
   const discardPendingRef = useRef<() => void>(() => {});
+
+  useEffect(() => {
+    if (
+      !interactive ||
+      !pendingHere ||
+      busy ||
+      compression.blocked ||
+      pendingApproval
+    )
+      return;
+    const retry = (event: KeyboardEvent) => {
+      if (
+        event.key !== 'y' ||
+        !event.ctrlKey ||
+        event.metaKey ||
+        event.altKey ||
+        event.shiftKey ||
+        event.defaultPrevented ||
+        event.isComposing
+      )
+        return;
+      const target = event.composedPath()[0];
+      if (
+        !(target instanceof Node) ||
+        (target !== document.body && !pageRef.current?.contains(target)) ||
+        (target instanceof Element &&
+          target.closest('[role="dialog"], [role="alertdialog"]'))
+      )
+        return;
+      event.preventDefault();
+      submitRef.current();
+    };
+    window.addEventListener('keydown', retry);
+    return () => window.removeEventListener('keydown', retry);
+  }, [interactive, pendingHere, busy, compression.blocked, pendingApproval]);
 
   useEffect(() => {
     const intent = pendingElsewhereIntent.current;
@@ -1440,11 +1526,6 @@ function ManagedSessionsContent({
     attachmentCapability.current.enabled =
       summary.capabilities.inputAttachments === true && worktreeReady;
   const { request: requestTurnCancel, busy: turnCancelBusy } = turnCancel;
-  const failureMessage = summary?.failure
-    ? (FAILURE_MESSAGES[summary.failure.code]?.[
-        language === 'zh-CN' ? 1 : language === 'ru' ? 2 : 0
-      ] ?? summary.failure.message)
-    : undefined;
   const cancel = useCallback(async () => {
     const abort = lifetime.current;
     if (
@@ -1563,31 +1644,6 @@ function ManagedSessionsContent({
         triggerClassName="inline-flex h-8 w-8 items-center justify-center rounded-md border border-input bg-background text-muted-foreground hover:bg-accent hover:text-accent-foreground"
       />
     ) : null;
-  function prepareHandoff() {
-    if (
-      !currentSummary ||
-      !recovery.value?.actions.continueInNewSession ||
-      !provider.workspaceBinding?.createSession
-    )
-      return;
-    const draft = buildManagedRecoveryHandoff(
-      { ...currentSummary, recovery: recovery.value },
-      detail.events,
-      {
-        introduction: recoveryText('managed.recovery.handoff.introduction'),
-        source: recoveryText('managed.recovery.handoff.source'),
-        task: recoveryText('managed.recovery.handoff.task'),
-        confirmed: recoveryText('managed.recovery.handoff.confirmed'),
-        uncertain: recoveryText('managed.recovery.handoff.uncertain'),
-        truncated: recoveryText('managed.recovery.handoff.truncated'),
-      },
-      Boolean(detail.olderCursor) ||
-        detail.loading ||
-        detail.events.length === 0,
-    );
-    setHandoff(draft);
-    onSelectSession(undefined, draft.workspaceId);
-  }
   const modelContext = currentSummary?.modelContext;
   const selectedModel = modelChange.selection?.modelId;
   const displayedModel =
@@ -2080,24 +2136,6 @@ function ManagedSessionsContent({
           </Button>
         </div>
       )}
-      {/* One server condition can surface through both channels; announce
-          each distinct message once, keyed by the message so a standing
-          alert keeps its node when a duplicate of it stops rendering. */}
-      {[
-        ...new Set(
-          [detail.stoppedReason, detail.error, error].filter(
-            (message): message is string =>
-              Boolean(message) &&
-              (interactive || message !== error) &&
-              // summary.failure 已在 composer 上方的失败区块渲染，告警通道不再重复。
-              message !== failureMessage,
-          ),
-        ),
-      ].map((message) => (
-        <p key={message} role="alert" className="text-sm text-destructive">
-          {message}
-        </p>
-      ))}
       {pendingRestoreFailed && (
         <div>
           <p role="alert" className="text-sm text-destructive">
@@ -2323,25 +2361,6 @@ function ManagedSessionsContent({
               />
             )}
 
-          {recovery.value && (
-            <ManagedRecoveryPanel
-              recovery={recovery.value}
-              busy={!interactive || recovery.busy || turnCancel.busy}
-              error={recovery.error}
-              errorCode={recovery.errorCode}
-              onRecheck={() => void recovery.recheck()}
-              onCancel={
-                cancellationEnabled && summary?.capabilities.canCancel
-                  ? () => void cancel()
-                  : undefined
-              }
-              onHandoff={
-                provider.workspaceBinding?.createSession
-                  ? prepareHandoff
-                  : undefined
-              }
-            />
-          )}
           {turnCancel.status && (
             <div role="status" className="flex items-center gap-2 text-sm">
               <span>
@@ -2361,20 +2380,8 @@ function ManagedSessionsContent({
           {provider.workspaceBinding &&
             (!sessionId || workspaceCreationOpen) && (
               <WorkspaceBindingCreator
-                key={
-                  !sessionId ? (handoff?.sourceSessionId ?? 'new') : 'workspace'
-                }
+                key={!sessionId ? 'new' : 'workspace'}
                 provider={provider}
-                handoff={!sessionId ? handoff : undefined}
-                onOpenHandoffSource={
-                  handoff
-                    ? () =>
-                        onSelectSession(
-                          handoff.sourceSessionId,
-                          handoff.workspaceId,
-                        )
-                    : undefined
-                }
                 workspaceCreationOpen={workspaceCreationOpen}
                 onWorkspaceCreationOpenChange={onWorkspaceCreationOpenChange}
                 onOpenLocalWorkspace={onOpenLocalWorkspace}
@@ -2395,7 +2402,6 @@ function ManagedSessionsContent({
                   onWorkspaceCreated?.(id);
                 }}
                 onCreated={(createdId, createdWorkspaceId) => {
-                  setHandoff(undefined);
                   setListRevision((current) => current + 1);
                   onSelectSession(createdId, createdWorkspaceId);
                 }}
@@ -2429,6 +2435,10 @@ function ManagedSessionsContent({
               <ToolDetailsContext.Provider value={loadToolDetails}>
                 <MessageList
                   messages={messages}
+                  showRetryHint={
+                    Boolean(pendingHere) && !busy && !compression.blocked
+                  }
+                  onRetryClick={() => void submit()}
                   onToolResultOpen={
                     summary?.capabilities.artifacts && provider.toolResults
                       ? openResult
@@ -2443,8 +2453,6 @@ function ManagedSessionsContent({
                   loadingOlderHistory={detail.loadingOlder}
                   onLoadOlderHistory={detail.loadOlder}
                   hideSessionTimeline
-                  // 空转录仍显示欢迎头；但当会话已有失败态（如服务端已删除）时，
-                  // 由 failure 横幅说明状态，不再叠欢迎文案。
                   welcomeHeader={
                     messages.length === 0 &&
                     !detail.loading &&
@@ -2480,19 +2488,6 @@ function ManagedSessionsContent({
               </ToolDetailsContext.Provider>
             </div>
           )}
-          {/* 会话级状态统一在 composer 上方透出（与 renderComposerHeader 的位置一致），
-              失败与未决提交同区相邻，不再散落在会话信息区。 */}
-          {summary?.failure && (
-            <div
-              role="alert"
-              className="mx-auto mt-auto mb-2 flex w-full max-w-[var(--chat-shell-width)] items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-[10px] text-xs leading-relaxed text-destructive"
-            >
-              <span aria-hidden="true" className="mt-0.5 shrink-0">
-                ⚠
-              </span>
-              <p className="min-w-0 flex-1">{failureMessage}</p>
-            </div>
-          )}
           {pendingElsewhere && !busy && (
             <div
               role="status"
@@ -2525,24 +2520,6 @@ function ManagedSessionsContent({
                   {t('managed.openPendingOwner')}
                 </Button>
               </div>
-            </div>
-          )}
-          {pendingHere && !busy && (
-            <div
-              role="status"
-              className="mx-auto mt-auto mb-2 flex w-full max-w-[var(--chat-shell-width)] items-start justify-between gap-3 rounded-lg border bg-muted/40 px-3 py-[10px] text-xs leading-relaxed text-muted-foreground"
-            >
-              <p className="min-w-0 flex-1">{t('managed.uncertain')}</p>
-              <Button
-                size="sm"
-                disabled={busy || compression.blocked}
-                onClick={() => void submit()}
-              >
-                {t('managed.retry')}
-              </Button>
-              <Button variant="ghost" size="sm" onClick={discardPending}>
-                {t('managed.discard')}
-              </Button>
             </div>
           )}
           {pendingApproval && (
@@ -3250,19 +3227,8 @@ function ManagedSessionsContent({
                     {t('managed.approvalFixed')}
                   </p>
                 )}
-              {((sessionId && !active && summary && !recoveryCanSend) ||
-                (!home && cancelButton) ||
-                Boolean(text.trim())) && (
+              {((!home && cancelButton) || Boolean(text.trim())) && (
                 <div className="flex items-center justify-end gap-2">
-                  {sessionId &&
-                    !active &&
-                    summary &&
-                    !recoveryCanSend &&
-                    !alignManagedChatWithHost && (
-                      <span className="mr-auto text-sm text-muted-foreground">
-                        {t('managed.newRequired')}
-                      </span>
-                    )}
                   {(!home || Boolean(text.trim())) && cancelButton}
                 </div>
               )}
