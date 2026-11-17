@@ -2,7 +2,21 @@
 
 [English](2026-11-16-managed-stateless-harness.md) | [简体中文](2026-11-16-managed-stateless-harness.zh-CN.md)
 
-Status: proposed. Phase 1 (idle Session suspension) is designed for implementation; Phases 2 to 4 define boundaries and interfaces only and will each get their own design before implementation. Phase 1 depends on [#17521](https://github.com/QwenLM/qwen-code/pull/17521) (re-attach when the Harness drops a cached Session reference), which is open and pending CI.
+Status: proposed, not implemented or accepted. Phase 1 (idle Session suspension) has the scope and delivery gates below; it is not ready to enable until the recovery prerequisites, failure tests and measurements pass. Phases 2 to 4 define boundaries and interfaces only and will each get their own design before implementation. [#17521](https://github.com/QwenLM/qwen-code/pull/17521) is a starting point for the Java prerequisite, not evidence that the prerequisite is complete. Current-state claims were checked against code at `4362c4ea85ada5fed3ee837e42ba6301a89efe31`.
+
+## Relationship to the idle parking proposal
+
+The [idle parking proposal](2026-11-08-hosted-idle-parking.md), merged as documentation in [#16564](https://github.com/QwenLM/qwen-code/pull/16564), already specifies Harness-owned idle release. Its status is still a proposal, and its measurements are historical results, not acceptance of an implementation. This document keeps that work as the baseline for idle timing, reference-safe Java recovery, per-Session concurrency and uncertain outcomes, and adds the longer-term stateless target. The two phase numberings describe different plans.
+
+| Decision                     | This proposal                                                                                                                                                                                                                                                                                                                                                         |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Idle clock and concurrency   | Adopt the earlier proposal's activity exclusions, bounded pre-teardown wait and gate covering loads and internal work.                                                                                                                                                                                                                                                |
+| Java recovery                | Adopt its atomic entry/marker updates, admission-only 404 recovery, Turn recovery, pool reselection and heartbeat retirement notice. Land these before any autonomous suspension.                                                                                                                                                                                     |
+| Store protocol               | Start with the existing seal protocol, retain placement and add no schema change. This requires keeping failed or uncertain teardown gated; a timeout does not permit immediate reopening. The earlier proposal's atomic park transaction, receipt and lease counter remain an alternative if bounded automatic recovery cannot be proved with the existing protocol. |
+| MCP, Hooks and deferred work | Keep the broader target, but suspend only configurations with proven teardown and autonomous wake recovery. Unsupported cases remain resident.                                                                                                                                                                                                                        |
+| Defaults and cost            | Keep coordinated upgrades and no configuration switch. Ten minutes and eight concurrent cold opens are candidates, subject to measurements before enabling suspension. A concurrency limit does not make each restore cheaper.                                                                                                                                        |
+
+The stateless goal and Phases 2 to 4 remain unchanged. Reusing the earlier correctness rules does not require adopting its entire Store transaction, or treating its five open questions as accepted decisions.
 
 ## Problem
 
@@ -10,11 +24,11 @@ A Managed Session that a Hosted Harness has attached stays resident in that Harn
 
 While resident, every Session pays for itself continuously:
 
-- **Writer lease and activation renewal.** The Harness renews the Session's writer lease and its activation through the private Session Store, one `/writers:renew` request per Session roughly every `leaseDurationMs / 3` (20 seconds at the 60-second default). Each renewal is one database transaction of roughly eight to ten single-row statements. The cost scales with resident Sessions, not with active Turns.
+- **Writer lease and activation renewal.** The Harness renews the Session's writer lease and its activation through the private Session Store, one `/writers:renew` request per Session roughly every `leaseDurationMs / 3` (20 seconds at the 60-second default). The earlier proposal records 51–56 SQL statements per idle minute per Session on its historical rig. Current statement counts must be measured again; the cost scales with resident Sessions, not with active Turns.
 - **Harness memory and per-Session owner state.** Each resident Session holds its restored journal state, its model context, its MCP and Hook owner state (configuration records, catalogs, grants), its wake scheduler and its timers. The Harness reports `attachedSessions` as a load signal, so idle Sessions consume capacity that active Sessions could use.
 - **Runtime-side connections.** The MCP connections and Hook owners for the Session live in its Tool Runtime and stay open for as long as the Harness keeps the Session attached.
 
-The project has not launched, so there is no production profile and no existing deployment to protect. The design assumes deployments with thousands of attached Sessions of which most are idle. Suspension ships without a switch: there is no configuration key and no capability negotiation.
+Managed Agent is before its first formal release, as reflected in its schema policy. This proposal assumes deployments with thousands of attached Sessions of which most are idle; that is a target, not a measured workload. It retains coordinated Harness/control-plane upgrades and no configuration key or capability negotiation. These choices do not replace the recovery and measurement gates below.
 
 ## Current state
 
@@ -44,8 +58,8 @@ Reusing it for idle Sessions would cancel queued and deferred inputs that the us
 
 ### What already tolerates a Harness letting a Session go
 
-- **Recovery from a sealed writer.** `WakeRecovery` treats a Session whose writer is sealed, or whose lease expired, as unowned. It scans every two seconds, handles up to eight candidate Sessions per pass, accounts for deferred `notBefore`, and calls `recoverForWake`, which performs a passive load. A crashed Harness already leaves exactly this state behind.
-- **Re-attaching a vanished reference.** With #17521, an ordinary verb that the Harness answers `hosted_session_not_found` for a cached reference evicts the entry, attaches again the way a cold cache would, and retries once.
+- **Recovery from an unowned writer.** `WakeRecovery` scans every two seconds, handles up to eight candidates per pass and calls `recoverForWake`, which performs a passive load. It recognizes sealed writers and expired active leases; a crash can leave the latter. Its SQL selection is limited to eligible active public Sessions with an uncompacted journal. Its deferred-input handling specifically preserves future loop inputs and their wake hint. This is not a general durable scheduler for every Session or every `notBefore`.
+- **Re-attaching a vanished reference.** #17521 proposes a 404 retry. Its current revision does not establish the recovery contract required here: plain loads can be refused for resident Sessions, and recovery markers and pool placement need the rules in Reopening.
 - **Transient closing.** `hosted_session_closing` is classified transient (`HarnessConflictCodes`); public routes surface it as a retryable 503, and the session-message, child-result and lifecycle paths already treat it as retryable.
 - **Placement takeover.** A placement may move to another pool member once the writer is sealed or its lease expired and the activation is released; a live writer is refused with `harness_owner_still_live`.
 
@@ -53,16 +67,16 @@ Reusing it for idle Sessions would cancel queued and deferred inputs that the us
 
 Goals:
 
-- Release every per-Session resource of a Session that has been idle for the idle period, without cancelling any of its inputs or changing what the user sees.
-- Reopen a suspended Session transparently on the next request, wake input or lifecycle operation.
+- Release the per-Session resources of an eligible idle Session without cancelling its inputs or losing history.
+- Reopen a cleanly suspended Session on the next request, wake input or lifecycle operation. Expose failed suspension as recovery work, rather than silently reopening an uncertain writer.
 - Add no configuration key and no capability negotiation; the Harness and the control plane are released and upgraded together.
 - Define the target architecture, a Harness that holds no Session between requests, and the boundaries of the steps that lead there.
 
 Non-goals for Phase 1:
 
-- Making cold opens cheaper. Phase 1 accepts today's cold-open cost (journal restore, MCP reinstallation and discovery); Phase 2 addresses it.
+- Redesigning journal restore. Phase 1 measures its current cost before enabling suspension; a failed cost gate requires targeted load improvements first. Phase 2 removes the MCP/Hook reconnect component, not all history-dependent restore cost.
 - Moving the wake scheduler, approval waits or observation loops out of the Harness. Sessions that need them stay resident in Phase 1.
-- Changing the writer lease protocol or the Session Store.
+- Adopting the earlier proposal's Store park transaction or changing the writer lease protocol without evidence that the existing protocol cannot satisfy the failure gates.
 - Releasing placements of suspended Sessions.
 
 ## Target architecture
@@ -86,14 +100,14 @@ After Phase 4 the idle period can shrink toward zero, which is the stateless end
 
 ### Overview
 
-Each resident Session gets an idle timer in the Harness. Every request for the Session and every completion of internal work pushes the timer back. When it fires, the Harness checks whether the Session is idle; if so it suspends the Session: it stops the wake scheduler without settling anything, drains the MCP and Hook owners the same way a detach does, releases its Runtime lease, releases the activation, seals the writer and forgets the Session. Pending inputs stay in the journal. The next request reaches a Harness that no longer has the Session and attaches it again through the existing cold-open path.
+Each resident Session gets an activity-based idle timer. When it fires, the Harness checks eligibility, gates the Session and waits for its in-flight work before checking again. It then stops local scheduling, drains eligible owners, releases Runtime ownership and closes the writer without cancelling inputs. Only confirmed cleanup permits normal reopening. Once teardown starts, a failure cannot return the partially closed object to ordinary service.
 
 ### Idle period
 
-- The idle period is a constant in the Harness, initially 10 minutes. There is no configuration key, environment variable or request field for it, and the Harness advertises no capability for suspension.
+- The candidate idle period is a constant in the Harness, initially 10 minutes. There is no configuration key, environment variable or request field for it, and the Harness advertises no capability for suspension.
 - Unit tests set a shorter period through a constructor option. Real-process integration tests need a short period as well, so the Harness accepts a test-only override that is not part of its documented configuration.
 - The Harness applies a jitter of up to 10 percent to each timer so that Sessions that went idle together do not suspend together.
-- The constant is revisited once cold opens have been measured.
+- Measurements choose the shipping constant before suspension is enabled; ten minutes is not an accepted default merely because it appears here.
 
 ### Idle predicate
 
@@ -101,34 +115,50 @@ When the timer fires, the Harness suspends the Session only if all of the follow
 
 - No Turn is active and no recovered Turn is waiting for a continue or cancel drive.
 - No Turn event stream is open (the control plane opens one only for the duration of a Turn).
-- No input is due. Inputs whose `notBefore` lies in the future do not block suspension, because `WakeRecovery` reloads the Session when they become due.
+- No input is due. A pending future loop input may remain only when the Session is eligible for SQL wake recovery, its journal is uncompacted and its durable wake hint remains reachable after suspension. Other pending inputs block Phase 1 until their autonomous recovery is proved; a future `notBefore` alone is insufficient.
 - No MCP or Hook operation is pending or recovering, no MCP configuration is being installed or refreshed, no session-message operation is in flight, and no context compression is running.
 - No background Shell or Monitor observation loop is live.
+- No channel reply-plan retry is scheduled or running, no post-Turn delivery or reconciliation is owed, and no journal append or activation renewal has an unsettled outcome.
 - No Runtime that a Turn left held remains, no Runtime work is unsettled, and the hosted cleanup debt is zero.
 - No client-files registration is active. The control plane keeps the browser's binding and closes it only when it closes or deletes the Session, so a Harness that dropped the registration on its own would leave the browser showing a connected bridge whose tools the model no longer has. A closed tab ends the binding at once, because its downlink closes; the Session can suspend after that.
 - No lifecycle authority, ownership release or pool quiescing is in progress.
 - The Session is not recovery-blocked. A blocked Session stays resident so that operator recovery keeps working unchanged.
 - The Session is not on a public Workspace Shell profile (`hosted-workspace-shell/1`, `hosted-workspace-shell/3` or `hosted-workspace-shell/4`) with MCP. A plain detach of such a Session requires a lifecycle authority and is refused with `hosted_lifecycle_required`, so Phase 1 never suspends it.
 
-The predicate and the step that marks the Session as suspending run in the same synchronous section, so no request can be admitted between the check and the mark.
+Check persistent blockers before raising the gate. Recheck eligibility and mark the Session in one synchronous section, coordinating with pool drain and lifecycle ownership. A Session excluded by a blocker therefore continues serving without periodic closing refusals.
 
 ### Timer
 
-- Armed when the Session becomes resident and whenever it settles back to idle.
-- Pushed back by every request the `/session/:id` routes accept for the Session, and by the end of every Turn, wake Turn, MCP or Hook operation, compression and observation loop.
-- Cleared when the Session closes, is deleted, is suspended or enters a lifecycle operation.
+- Use the latest admitted mutation, non-renewal journal commit, Turn settlement, completed load and abandoned reversible suspension attempt. A long-running Turn and a read-triggered load both get a full residency period after completion.
+- Heartbeats, read-only polling, activation renewals and rejected requests do not reset the clock. Internal work that produces one of the activity events above does; mere scheduling does not.
+- A failed pre-check or bounded wait re-arms a full idle period. Teardown failure enters the recovery state below, not another ordinary idle attempt.
+- Clear the idle timer on close, delete, suspension or lifecycle handoff. On successful teardown, stop every per-Session timer and publisher, including channel reply-plan retries.
+
+### Admission gate and in-flight work
+
+The gate is keyed by the full Session scope in both single-address and pool modes, and survives removal of the resident object while cleanup is uncertain. It covers every ordinary Session route and every `open()` path before acquiring a writer or reusing a resident: create, ordinary load, passive load, driving recovery and MCP-management load. The load route is registered before the existing Session middleware, so middleware alone cannot provide this guarantee. Private teardown reconciliation remains able to complete under its captured writer identity; an ordinary lifecycle load cannot bypass the gate.
+
+Gated callers receive retryable `409 hosted_session_closing`. Track already-admitted asynchronous work until its own `finally`, including work whose HTTP caller disconnected. Neither response completion nor the instance-wide request counter proves a Session's work has settled. The wake pump, reply planning and other internal mutation sources obey the same gate. Wait for a bounded interval, then check the predicate again. A timeout or failed check may clear the gate only before teardown has started. Renewal shutdown must await in-flight renewal outside the authority's serial queue, avoiding a wait on that queue from inside itself.
 
 ### Suspension sequence
 
-1. Mark the Session suspending. From this point the `/session/:id` middleware answers every request for it with `409 hosted_session_closing`, which callers already treat as transient.
-2. Close the wake scheduler without settling any input.
+1. Raise the gate, wait for admitted work and recheck eligibility as above. Failure here leaves the object intact, clears the gate and re-arms the timer.
+2. Begin irreversible teardown by closing the wake scheduler without settling any input. From the first teardown call, including a call that throws, the object cannot return to ordinary service.
 3. Close the Hook and MCP owners non-terminally, the same calls a detach makes. This drains the Runtime connections and leaves the owners re-acquirable by the next load.
-4. Release the Runtime lease non-terminally with the existing helper, which first retires a settled Turn's owed file-history marker. Retry the hosted cleanup debt; if any remains, abort the suspension.
+4. Release the Runtime lease non-terminally with the existing helper, which first retires a settled Turn's owed file-history marker. Reconcile hosted cleanup debt. Remaining or unknown debt keeps the Session gated; it is not a successful suspension.
 5. Close the Shell and background-lane publishers. No observation loop is live, so nothing is waiting to settle through them, and the next load recreates them.
-6. Call `managed.close()`, which stops renewal, releases the activation and seals the writer.
-7. Remove the Session from the resident map.
+6. Stop renewal and wait for its in-flight work, release the activation and seal the writer. `managed.close()` supplies existing close behavior, not a reversible transaction; suspension needs a local helper that exposes the individual outcomes and preserves the ability to reconcile the same seal.
+7. After resource cleanup, activation release and seal are confirmed, permanently stop the old client and every remaining callback, remove the resident and clear the gate. The next request may cold-open it.
 
-If any step before the seal fails, the Harness clears the suspending mark, keeps the Session resident and re-arms the timer, exactly as a failed detach leaves the Session usable for a retry. A failure after the seal is committed still removes the Session: its durable state is a sealed writer, which the next open takes over.
+### Failed or uncertain teardown
+
+The rollback boundary is the first teardown call, not the seal. `managed.close()` permanently stops activation renewal and attempts seal even if activation release fails. A successful seal with an unconfirmed activation release is recovery work, not a clean suspension. Partially closed Hook/MCP owners, publishers and schedulers are not restored by clearing a flag.
+
+After that boundary, keep ordinary work and loads gated. Reconcile the original operation, preserving its writer id, generation, token and resource-owner identities. Retry only operations whose existing protocol permits an exact retry, with backoff, jitter and an explicit cap. At the cap, stop automatic attempts and expose the blocked cleanup for operator recovery; retain the gate and the evidence needed to finish it. Do not cancel pending inputs or lose durable cleanup obligations. Stop ordinary renewal and business callbacks, but do not call `stopLocal()` while the original client is still needed to reconcile a seal: it disables those requests too.
+
+A seal timeout does not prove absence. Within a live lease, a new client using the same Harness boot id and token can acquire the same writer generation; a delayed old seal can then seal the new attachment. Waiting one lease interval on the local clock is not proof either, because seal checks writer identity and generation without requiring an unexpired lease. Normal reopening requires confirmed completion of the old teardown, or Store-backed proof that a successor generation fences every old operation and owns the remaining recovery obligations. Changing the writer id independently of the Harness boot id is not a workaround. The implementation must demonstrate this transition; if the existing protocol cannot provide the required automatic recovery, revisit the earlier proposal's fencing mechanism before enabling suspension.
+
+A new Harness process uses the existing crash-recovery path and its new boot identity. It must still honor writer fencing and cleanup obligations; restart is not evidence of clean suspension. Lifecycle close/delete racing a failed suspension must reconcile or take over under their existing authority, never enter through an ungated ordinary load.
 
 Suspension skips the ordinary execution authorization a detach requests first: it starts no work, and the seal is fenced by the writer itself. The audit below lists every other difference from detach; tests pin each one.
 
@@ -146,43 +176,50 @@ Every effect of the detach and delete handler (`close` in `packages/cli/src/serv
 | Close the wake scheduler                                                                                                         | Yes                                                                                   | Yes                                                     | Yes, without settling inputs                                          |
 | Retire a settled Turn's owed file-history marker, then release the Runtime lease                                                 | Yes, non-terminal                                                                     | Yes, terminal                                           | Yes, non-terminal                                                     |
 | Stop observation loops, settled `stop_requested` or `runtime_lost`                                                               | Yes                                                                                   | Yes                                                     | Not needed: the predicate requires none live                          |
-| Retry hosted cleanup debt                                                                                                        | Yes                                                                                   | Yes                                                     | Yes; remaining debt aborts the suspension                             |
+| Retry hosted cleanup debt                                                                                                        | Yes                                                                                   | Yes                                                     | Yes; remaining or unknown debt keeps teardown gated                   |
 | Close the Shell and background-lane publishers                                                                                   | Yes                                                                                   | Yes                                                     | Yes                                                                   |
 | Close MCP owners                                                                                                                 | Non-terminal                                                                          | Terminal                                                | Non-terminal, as detach                                               |
 | Close the client-files registration                                                                                              | Yes                                                                                   | Yes                                                     | Not needed: the predicate requires none                               |
 | Settle pending monitor, channel, automation, child, session-message and loop inputs as cancelled, then reconcile automation runs | Yes                                                                                   | Yes                                                     | Never: inputs stay in the journal for the next load or `WakeRecovery` |
 | Release the activation and seal the writer                                                                                       | Yes                                                                                   | Yes                                                     | Yes                                                                   |
-| Stop event streams and remove the Session                                                                                        | After the seal                                                                        | After the seal                                          | After the seal; the predicate requires no open stream                 |
+| Stop event streams and remove the Session                                                                                        | After the seal                                                                        | After the seal                                          | After confirmed teardown; retain the gate on uncertain cleanup        |
 
 When the control plane closes or deletes a Session, its lifecycle coordinator also closes the browser's client-files binding (`closeForSession`); nothing closes it when the Harness drops the registration on its own, which is why an active registration blocks suspension.
 
-No other per-Session component holds a long-lived timer. The remaining Session components have no close or stop of their own, and the only timers among them are short waits inside a single operation.
+The timer audit includes idle and wake timers, activation and writer renewal, channel reply-plan retries and event-stream callbacks. A callback must not restart work on a gated or removed object. The implementation inventories the remaining owner and publisher cleanup paths rather than assuming that the close handler is a complete timer inventory.
 
 ### Reopening
 
-- **Ordinary verbs.** The next verb from the control plane meets `hosted_session_not_found`, evicts the cached reference and re-attaches through its own attachment resolver (#17521). A verb arriving during suspension meets `hosted_session_closing` and is retried by its caller.
-- **Wake inputs.** `WakeRecovery` already reloads unowned Sessions with pending or newly due inputs. The transport path changes in one place: `activateForWake` currently returns without loading when this process still caches an attachment. It must instead evict a cached attachment when the wake fence reports no live writer, and load the Session.
-- **Lifecycle operations.** Close and delete load the Session through the lifecycle attachment when nothing is cached, as they do after a control-plane restart.
-- **Placement.** Phase 1 does not change placement, so the reopen lands on the same pool member.
+- **Admission verbs.** Prompt, approval/question response, channel, automation, message and child admission retry once after an exact `404 hosted_session_not_found` on the reference they used. Admission is the boundary, not the whole operation family: cancellation and committed-stop operations keep their existing recovery semantics. A passive re-attachment handles eligible non-Turn admissions; the Turn path re-enters `recoverManagedRuntime` and the coordinator's recovery handling, including `pendingRecovery`, `bindRecoveredHarness` and event watermarks. A leaf must not discard a returned recovery snapshot and simply resubmit the prompt. Preserve tenant, Workspace and action-specific authorization; setting passive on every new-work load is not a substitute.
+- **Reference and marker ownership.** Publication, removal and marker changes use one atomic step per attachment key, conditional on the reference being changed. Apply this to every connector path, not only the new 404 handler. Do not run network I/O inside a map `compute`. A late 404 or heartbeat notice for an old reference must leave a newer reference and its marker intact. Treat `mcpManagementAttachments` by reference identity as well; never fall through to a known stale entry in the other cache.
+- **Other verbs and heartbeat retirement.** Cancel, rename, Harness streams, context-compression reads, MCP/client-files management, extensions and runtime-skill reads stay outside the blanket 404 retry. The SDK notifies the connector when heartbeat retirement removes a reference, and the connector uses the same atomic rule. With a healthy periodic heartbeat, stale failures are bounded by that notification; disabling heartbeats removes that bound. Keep coded refusals intact instead of converting an evicted, non-loading resolver into a local exception. Lifecycle settlement keeps its rule that absence proves nothing.
+- **Wake inputs.** Retain the durable wake hints for supported pending inputs. When the wake fence proves there is no live writer, `activateForWake` conditionally evicts the stale reference and marker before recovery load; it must not erase a concurrently published live attachment. SQL wake recovery remains the backstop only for its supported Session and input scope. Do not clear wake hints using the in-memory idle predicate.
+- **Lifecycle and status.** Close/delete use their existing authority and recovery path, and wait on a suspension gate without spending the lifecycle retry budget. A recovery/status response must not report success from a missing cache entry or assume it proves an operator failure: establish the durable writer/activation state and follow the recovery view contract. The no-receipt design must prove this status behavior before enabling suspension.
+- **Pool selection and errors.** A retry returns through `HarnessPoolConnector.select` with acquiring allowed and obtains a fresh `PoolCall`, even though a successful Phase 1 suspension retains placement. Preserve `hosted_session_closing`, `hosted_session_open_busy` and placement waits as transient outcomes; do not hide them under the original 404. Generation changes, unknown outcomes and terminal recovery failures retain their own classifications.
 
 ### Cold-open admission
 
 Suspension turns some steady-state work into bursts of cold opens, for example when one automation schedule fires for many suspended Sessions at once, or when a pool member restarts. Each cold open restores the journal and reinstalls MCP configurations, whose connection and discovery each wait up to 25 seconds.
 
-- The Harness limits concurrent cold opens per instance, initially to 8, a constant like the idle period. An open beyond the limit is refused with the new code `409 hosted_session_open_busy`.
+- The Harness limits concurrent cold opens per instance, with 8 as the candidate constant. An open beyond the limit is refused with the new code `409 hosted_session_open_busy`.
 - The limit applies to every cold open, including the bulk reloads that follow a Harness restart, which it also smooths.
 - The control plane classifies `hosted_session_open_busy` as transient in `HarnessConflictCodes` and, in `HarnessCoordinator`, as a code that postpones a Turn without charging its admission budget, alongside the existing pool-ownership wait codes. This classification is a prerequisite: without it, a burst of refusals would exhaust the admission budget of queued Turns and fail them.
 - The control plane's existing bounds stay: the transport wake load pool and `WakeRecovery`'s eight candidates per pass.
-- The Session Store is shared by every pool member, so the per-instance limit does not bound store load. Validation measures cold-open store load, and the limit is revised from it.
+- The Session Store is shared by every pool member, so the per-instance limit does not bound store load or reduce total restore work. Before enabling suspension, measure idle SQL, cold-open SQL/latency/CPU by history size, MCP reconnect cost, reclaimed memory and the reload frequency caused by reads or late wake notices. Compare resident and suspended workloads across multiple pool members. Record the workload and accepted latency/store budgets; revise the constants or reduce load cost if the candidate defaults fail them. The old 51–56 statements/minute and 200-Turn load measurements are baselines to reproduce, not current guarantees.
 
 ### Control-plane changes
 
 All of these land before, or in the same release as, the Harness change (see Rollout).
 
-1. Re-attach a vanished cached reference (#17521).
-2. `activateForWake` evicts a stale cached attachment when the wake fence reports no live writer.
-3. `hosted_session_open_busy` in `HarnessConflictCodes` and in the coordinator's wait codes.
-4. Update the `HarnessCoordinator` comment stating that the control plane never detaches. The budget treatment of `hosted_session_already_attached` stays correct, because a suspended Session answers `hosted_session_not_found` and a plain load of it succeeds.
+1. Rework #17521 around the admission/recovery contract above, with argument-sensitive Harness mocks and a real two-control-plane takeover test. A cached reference's disappearance and a completely absent Session are distinct cases.
+2. Bring every attachment/marker update under the per-key ownership rule and add SDK heartbeat retirement notification. These can be separate prerequisites; #17521 alone is not the whole Java phase from the earlier proposal.
+3. Reselect pool placement on retry; preserve closing, open-busy and ownership waits in coordinator, relay and lifecycle handling. Do not spend admission budgets on these waits.
+4. Fix wake cache invalidation and prove deferred-input eligibility, durable hints and recovery/status behavior.
+5. Update the permanent-residency assumptions in the coordinator only when the above behaviors and their tests land. A green mock-only retry test does not establish them.
+
+### Delivery order
+
+First land the Java/SDK prerequisites, which are useful without suspension. Next implement the Harness clock, admission gate and teardown states with deterministic race and failure tests. Run real-process/MySQL recovery checks and the current-version cost measurements before enabling autonomous suspension. Keep these as reviewable changes; this documentation PR implements none of them. Phases 2 to 4 follow after Phase 1 meets its acceptance criteria.
 
 ### Pool interaction
 
@@ -190,15 +227,16 @@ A suspended Session keeps its placement. If its pool member leaves the pool, the
 
 ### Observability
 
-- Harness: suspensions, suspension aborts by reason, predicate rejections by reason, cold opens and their duration split into store restore and MCP reinstallation, and `hosted_session_open_busy` refusals.
-- Control plane: re-attachments after `hosted_session_not_found`, and wake activations that evicted a stale attachment.
+- Harness: clean suspensions, reversible aborts, gated failed/uncertain teardown and its age/reason, predicate rejections, cold opens split into store restore and MCP reinstallation, and `hosted_session_open_busy` refusals. Failed teardown is not counted as a clean suspension.
+- Control plane: admission re-attachments, heartbeat retirements, preserved recovery snapshots, pool reselections and wake activations that evicted a stale attachment.
 
 ### Failure modes
 
-- **Harness crash during suspension.** Before the seal, the writer lease lapses and the Session is recovered exactly as after any Harness crash. After the seal, the Session is cleanly suspended.
-- **Session Store unavailable during suspension.** The seal or the activation release fails before commit; the suspension aborts and the Session stays resident.
+- **Harness crash during suspension.** Existing crash recovery fences the old writer and reconciles durable obligations. A sealed writer alone does not prove all resource cleanup or activation release completed.
+- **Session Store unavailable during suspension.** Before teardown, abandon the attempt. After teardown starts, keep the Session gated and reconcile; a failed or timed-out request does not prove that the Store did not commit it.
 - **Late wake notification.** A notification for a suspended Session meets `hosted_session_not_found` or a missing attachment and reloads the Session.
-- **Concurrent request.** The suspending mark is set synchronously after the predicate, so a request either arrives first and pushes back the timer, or arrives after and receives `hosted_session_closing`.
+- **Concurrent request or internal work.** Work admitted before the gate is tracked to completion and rechecked; later work, including loads and timer callbacks, cannot enter. Only meaningful activity resets the idle clock.
+- **Late seal after a failed attempt.** Retain the old writer's gate until completion or a proven successor fence. A fresh client with the same boot id is not such a fence.
 
 ### Rollout
 
@@ -206,17 +244,17 @@ Suspension has no switch, and a Harness suspends Sessions on its own. It therefo
 
 - The control-plane changes land before, or in the same release as, the Harness change.
 - The Harness and the control plane are upgraded together. A mixed-version rolling upgrade is not supported, the same boundary other Managed Agent changes set.
-- No schema change is required.
-- Stopping suspension means rolling back the Harness change. Sessions suspended before the rollback reopen on demand as before.
+- The initial design uses no schema change. If its failure/recovery proof needs a Store fencing change, review that explicit change before enabling suspension; do not weaken the gate to preserve this preference.
+- Stopping suspension means rolling back the Harness change through the coordinated deployment procedure. Cleanly suspended Sessions reopen on demand. Failed or uncertain teardown still needs fenced recovery; rollback must not reopen an old in-process object or discard its recovery evidence.
 
 ## Phase 2: Runtime-owned MCP and Hook connection lifetime
 
 Boundary only; a separate design will precede implementation.
 
 - **Today.** The lifetime of a Session's MCP connections and Hook owners equals its Harness attachment: a non-terminal close reconciles every configuration, drains it and dispatches `mcp-release`, and the next load reinstalls the configuration, reconnects and rediscovers.
-- **Target.** The Tool Runtime, through the Broker, keeps a Session's connections across Harness attachments and retires them on its own idle period. A Harness re-acquires them by the durable owner identity and a grant issued to the new writer. The MCP design already advances a configuration's durable revision and issues a grant to a new writer after an idle reload while keeping the catalog and connection pins.
+- **Target.** The Tool Runtime, through the Broker, keeps a Session's connections across Harness attachments and retires them on its own idle period. A Harness re-acquires them by the durable owner identity and a grant issued to the new writer. The [MCP design](2026-09-28-managed-mcp-runtime.md) already advances a configuration's durable revision and issues a grant to a new writer after an idle reload while keeping the catalog and connection pins.
 - **Interfaces to define.** A Broker distinction between suspending and releasing an owner; who retires connections and when; where unknown-outcome holds and their quotas live once the Harness no longer drains.
-- **Effect.** Suspension and reopening no longer drain, reconnect or rediscover, which removes the largest part of the cold-open cost. stdio MCP servers, which are long-lived processes in the Runtime, are the main reason this ownership belongs to the Runtime.
+- **Effect.** Suspension and reopening no longer drain, reconnect or rediscover. This removes that component of cold-open cost; measurements must establish its share, and journal restore remains separate. stdio MCP servers, which are long-lived processes in the Runtime, are the main reason this ownership belongs to the Runtime.
 
 ## Phase 3: wake scheduling and observation in the control plane
 
@@ -235,9 +273,10 @@ Boundary only.
 
 ## Risks
 
-- **Reopen latency.** In Phase 1 every reopen pays the full cold-open cost, including MCP reconnection and discovery. An idle period that is too short trades renewal savings for slow first responses; the initial constant is revised from measurements.
+- **Reopen latency and total cost.** In Phase 1 every reopen pays the current restore and MCP reconnect cost. Candidate constants must pass the cost gate before shipping; journal-load improvements may still be required first.
 - **Cold-open bursts.** Synchronized wakes can overload the shared Session Store even when each Harness limits its own opens.
 - **Close-path coupling.** Suspension reuses parts of the detach path; a later change to detach can silently change suspension. Tests pin every row of the close-path audit.
+- **Failed teardown availability.** With the existing seal protocol, a capped uncertain outcome may require operator recovery while the Session remains gated. The implementation must prove safe convergence or explicitly revise the Store protocol before claiming bounded automatic recovery.
 - **Pool leftovers.** Suspended Sessions on departed members keep their placement until touched.
 - **No kill switch.** A defect in suspension can only be stopped by rolling back the Harness change. The validation plan below is the mitigation.
 
@@ -245,26 +284,31 @@ Boundary only.
 
 Phase 1:
 
-- **Harness unit tests.** Each predicate condition blocks suspension; the timer resets on requests and internal completions; the suspension sequence runs in order; each row of the close-path audit is pinned, in particular that no input is settled as cancelled, no `SessionEnd` or `SessionDelete` Hook runs, the owed file-history marker is retired and the Runtime lease is released non-terminally; aborts before the seal keep the Session resident and retryable; requests during suspension receive `hosted_session_closing`; opens beyond the limit are refused with `hosted_session_open_busy`.
-- **Control-plane unit tests.** `activateForWake` evicts a stale attachment; the new code is transient and postpones Turns without charging their budget.
-- **Real-process and MySQL integration.** Suspend, then prompt: the history is intact and the Turn completes. Suspend, then deliver monitor, channel, automation and child inputs: each is run after a reload through the transport path and through `WakeRecovery`. A deferred loop input becomes due after suspension and runs. A Session with a running background Shell is not suspended. Close and delete of a suspended Session. Pool takeover of a suspended Session after its member leaves.
-- **Fault tests.** Kill the Harness during suspension before and after the seal; make the Session Store unavailable during suspension.
-- **Measurement.** Cold-open duration and store load for Sessions of different sizes and MCP configurations, to revise the idle period and the open limit.
+- **Harness clock and gate.** Heartbeats, polling and renewals never postpone suspension; admitted mutations, Turn settlement and completed loads do. Each blocker leaves the Session serving normally. Force races with load, pool drain, reply-plan timers and a disconnected HTTP caller whose work continues. Gate all load modes and internal admission, track work to completion, bound the reversible wait and avoid renewal/serial-queue deadlock.
+- **Harness teardown.** Pin every close-audit row: no cancelled input, no `SessionEnd`/`SessionDelete` Hook, non-terminal resource release and no surviving callback. Fail each teardown step and verify that only pre-teardown failures resume the original object. Test confirmed seal with failed activation release, unknown seal, capped retries and `stopLocal()` ordering. An old delayed seal must never affect a reopened attachment.
+- **Control-plane recovery.** Force stale-404/new-reference and late-heartbeat/new-reference interleavings and assert the newer recovery snapshot survives. Mock load like the real Harness: reject ordinary loads over a resident Session. Exercise the coordinator's recovered Turn and watermark handling, pool reselection after placement changes, both attachment caches, and the boundary between admission and non-retried operations. Closing/open-busy waits must retain their codes and not consume retry budgets.
+- **Wake and status.** Invalidate only the observed stale attachment on a no-live-writer fence. A supported deferred loop runs after suspension and control-plane restart; unsupported or compacted deferred cases stay resident. Preserve wake hints and verify recovery/status answers for clean suspension, uncertain teardown and genuine recovery failure.
+- **Real-process and MySQL integration.** Two control planes sharing one Harness recover a stale reference. Suspend then prompt with history intact; deliver monitor, channel, automation, message and child inputs through both transport and eligible SQL recovery. Test lifecycle close/delete, disabled heartbeat behavior, pool member departure and a placement change during retry. These cases must run in the required CI tier; a skipped Hosted or MySQL gate is not acceptance.
+- **Fault tests.** Kill the Harness before and after each irreversible boundary; lose Store replies after commit; delay an old seal across a new load; race lifecycle claims and renewal completion with teardown. Verify retained evidence, fencing and convergence without replaying side effects.
+- **Measurement.** Compare resident and suspended workloads by history size, MCP configuration and pool size. Record idle and restore SQL, latency, CPU, reclaimed memory and unnecessary reloads, and choose the shipping constants against explicit budgets.
 
 ## Acceptance criteria
 
 - A Session that is never idle for the idle period behaves as today, and existing test results are unchanged.
-- An idle Session stops renewing within one idle period plus jitter and is no longer counted in `attachedSessions`.
-- No suspension settles an input as cancelled or stops background work; every pending input runs after a reload.
-- Every request to a suspended Session succeeds after at most one transient refusal and one re-attachment.
-- The integration and fault tests above pass in CI.
+- With dependencies healthy and the predicate satisfied, an idle Session starts teardown after one idle period plus jitter; confirmed teardown stops renewals and removes it from `attachedSessions` within the measured teardown budget. Report failed teardown separately.
+- Suspension never settles input as cancelled or stops active background work. Supported pending inputs remain durably reachable and run when due; unsupported cases do not suspend.
+- An eligible admission encountering a vanished reference makes at most one recovery retry in that call. Healthy clean suspensions reopen; transient waits may span multiple dispatches without exhausting admission budgets. Other verbs follow the heartbeat retirement contract, not a universal one-call success promise.
+- A stale reference or heartbeat never erases a newer recovery marker; a stale placement is never reused for the retry; an old teardown cannot mutate a successor writer or owner.
+- No partially closed object resumes service. Every failed or unknown outcome either converges through proven recovery or remains visibly gated for operator recovery with its obligations retained.
+- The specified real-process, MySQL and fault checks pass in CI, and current-version measurements justify the shipping constants. Documentation, mock tests or skipped gates do not satisfy this criterion.
 
 ## Open questions
 
 1. A reaper that releases placements of suspended Sessions on members that left the pool.
-2. The idle period (initially 10 minutes) and the open limit (initially 8), to be revised from cold-open measurements.
+2. The shipping idle period and open limit (candidates: 10 minutes and 8), and the accepted latency/store budgets, chosen before enablement from current-version measurements.
 3. Whether recovery-blocked Sessions should also suspend once operator recovery can reload them.
 4. Re-registering an active client-files binding with the Harness on reload, so that a Session with an open browser bridge can suspend.
 5. Whether every pool member can reach every Workspace mount; Phases 2 to 4 assume any member can open any Session.
 6. Whether a Turn's reload-stable Runtime owners, which a detach leaves running with their release owed (#16579), may stay running across a suspension, so that such Sessions can suspend too.
 7. Suspending Sessions on a public Workspace Shell profile with MCP, whose plain detach requires a lifecycle authority today.
+8. Whether capped uncertain teardown must recover automatically without operator intervention. If required, prove a bounded successor-generation transition with the existing Store or adopt the smallest necessary fencing change from the earlier proposal. This and the recovery/status proof are Phase 1 delivery gates, not follow-up polish.
