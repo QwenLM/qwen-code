@@ -352,7 +352,10 @@
             "prompt_deadline_exceeded",
             "writer_idle_timeout",
             "model_stream_interrupted",
-            "loop_detected"
+            "loop_detected",
+            "readdir_failed",
+            "stat_failed",
+            "symlinked_root"
           ]
         },
         "source": { "type": "string", "minLength": 1, "maxLength": 128 }
@@ -394,7 +397,10 @@
             "prompt_deadline_exceeded",
             "writer_idle_timeout",
             "model_stream_interrupted",
-            "loop_detected"
+            "loop_detected",
+            "readdir_failed",
+            "stat_failed",
+            "symlinked_root"
           ]
         },
         "source": { "type": "string", "minLength": 1, "maxLength": 128 }

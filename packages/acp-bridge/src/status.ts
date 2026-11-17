@@ -56,6 +56,10 @@ export const SERVE_ERROR_KINDS = [
   // Prompt deadline + writer idle timeout
   'prompt_deadline_exceeded',
   'writer_idle_timeout',
+  // Managed auto-memory listing: a root that cannot be listed, and a
+  // project root refused because it is (or resolves through) a symlink.
+  'readdir_failed',
+  'symlinked_root',
 ] as const;
 
 export type ServeErrorKind = (typeof SERVE_ERROR_KINDS)[number];
