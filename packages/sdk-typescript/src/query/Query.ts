@@ -246,7 +246,11 @@ export class Query implements AsyncIterable<SDKMessage> {
       // Connect server to transport and only register on success
       const connectionPromise = server
         .connect(sdkTransport)
-        .then(() => {
+        .then(async () => {
+          if (this.closed) {
+            await sdkTransport.close();
+            return;
+          }
           // Only add to maps after successful connection
           this.sdkMcpServers.set(serverName, server);
           this.sdkMcpTransports.set(serverName, sdkTransport);
