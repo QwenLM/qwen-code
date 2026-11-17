@@ -2006,6 +2006,30 @@ describe('ReadFileTool', () => {
         expect(second.llmContent).not.toContain('Line 6');
       });
 
+      // The omitted parameter is the point: these pin the fast-path's
+      // `offset ?? 0` / `limit ?? undefined` normalizations.
+      it('returns the placeholder on a repeat offset-only ranged Read', async () => {
+        const filePath = await put(
+          'ranged-open.txt',
+          numberedLines(20, 'Line'),
+        );
+
+        await read({ file_path: filePath, offset: 5 });
+        const repeat = await read({ file_path: filePath, offset: 5 });
+        expect(repeat.llmContent).toMatch(PLACEHOLDER);
+      });
+
+      it('returns the placeholder on a repeat limit-only ranged Read', async () => {
+        const filePath = await put(
+          'ranged-limit.txt',
+          numberedLines(20, 'Line'),
+        );
+
+        await read({ file_path: filePath, limit: 3 });
+        const repeat = await read({ file_path: filePath, limit: 3 });
+        expect(repeat.llmContent).toMatch(PLACEHOLDER);
+      });
+
       it('serves content when the ranged request differs from the recorded view', async () => {
         const filePath = await put(
           'ranged-other.txt',
@@ -2128,6 +2152,10 @@ describe('ReadFileTool', () => {
         const repeat = await read({ file_path: filePath, offset: 5, limit: 3 });
         expect(repeat.llmContent).not.toMatch(/unchanged since/);
         expect(repeat.llmContent).toContain('Line 6');
+
+        // And a re-read re-arms the ranged fast-path (slice back in history).
+        const again = await read({ file_path: filePath, offset: 5, limit: 3 });
+        expect(again.llmContent).toMatch(PLACEHOLDER);
       });
 
       it('does not return the placeholder for binary files', async () => {
