@@ -39,6 +39,9 @@ export function useManagedRecovery(
   });
   const summaryRef = useRef(summary);
   summaryRef.current = summary;
+  // A held verdict keeps the gate of the read that produced it. Before any
+  // read is trusted there is no held gate, so the summary's own gate applies.
+  const trustedCanSendDefault = summary?.capabilities.canSend;
   const value = snapshot.key === key ? snapshot.value : undefined;
   currentValue.current = value;
 
@@ -261,7 +264,7 @@ export function useManagedRecovery(
     // produced it, not a canSend recomputed from the distrusted miss.
     canSend:
       pending || valueDiffersFromSummary
-        ? (trustedCanSend.current ?? true)
+        ? (trustedCanSend.current ?? trustedCanSendDefault)
         : undefined,
     busy: snapshot.key === key && snapshot.busy === true,
     error: snapshot.key === key ? snapshot.error : undefined,

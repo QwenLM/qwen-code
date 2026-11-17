@@ -1438,7 +1438,9 @@ describe('ManagedSessionsPage', () => {
       },
     };
     await render('s1');
-    expect(container.textContent).toContain('This Session has ended');
+    expect(messageErrorTexts()).toEqual([
+      'The original Session is closed. Review the retained records, or continue in a new Session.',
+    ]);
     expect(container.querySelector('textarea')?.disabled).toBe(true);
     await act(async () => {
       await mocks.editorProps!.onSubmit('Another turn');
@@ -1446,6 +1448,63 @@ describe('ManagedSessionsPage', () => {
     });
     expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
     expect(command).not.toHaveBeenCalled();
+  });
+
+  it('explains a first unconfirmed replica miss without opening the composer', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: { canSend: false, canCancel: false },
+        recovery: {
+          state: 'operator_required',
+          reasonCode: 'recovery_evidence_unavailable',
+          turnId: 'p1',
+          nextTurnAllowed: false,
+          actions: {
+            recheck: true,
+            cancel: false,
+            continueInNewSession: true,
+          },
+        },
+      }),
+    );
+    provider = {
+      ...provider,
+      recovery: {
+        query: vi.fn().mockReturnValue(new Promise<never>(() => undefined)),
+        recheck: vi.fn(),
+      },
+    };
+    await render('s1');
+    expect(container.querySelector('textarea')?.disabled).toBe(true);
+    await act(async () => {
+      await mocks.editorProps!.onSubmit('Another turn');
+      await flush();
+    });
+    expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+  });
+
+  it('explains a blocked Turn that is still awaiting evidence', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: { canSend: false, canCancel: false },
+        recovery: {
+          state: 'awaiting_evidence',
+          reasonCode: 'input_unsettled',
+          turnId: 'p1',
+          nextTurnAllowed: false,
+          actions: {
+            recheck: true,
+            cancel: false,
+            continueInNewSession: true,
+          },
+        },
+      }),
+    );
+    await render('s1');
+    expect(messageErrorTexts()).toEqual([
+      'The original command may have run. Checking its outcome will not run it again.',
+    ]);
+    expect(container.querySelector('textarea')?.disabled).toBe(true);
   });
 
   it.each([
@@ -3956,6 +4015,67 @@ describe('ManagedSessionsPage', () => {
     await render('s1');
     expect(provider.tasks!.cancel!.query).toHaveBeenCalledOnce();
     expect(provider.tasks!.cancel!.submit).not.toHaveBeenCalled();
+  });
+
+  it('polls tasks with the panel closed only while a cancellation is unsettled', async () => {
+    mocks.client.getSession.mockImplementation(async () =>
+      summary('s1', {
+        capabilities: { canSend: true, canCancel: false, tasks: true },
+      }),
+    );
+    const settled: ManagedTask = {
+      ...task,
+      state: 'cancelled',
+      settledAt: 5,
+      actionCapabilities: [],
+    };
+    const list = vi.fn().mockResolvedValue({ data: [task], hasMore: false });
+    provider = {
+      ...provider,
+      tasks: {
+        list,
+        get: vi.fn().mockResolvedValue(settled),
+        listEvents: vi
+          .fn()
+          .mockResolvedValue({ data: [], hasMore: false, nextCursor: 'floor' }),
+        cancel: {
+          submit: vi.fn().mockResolvedValue(taskOperation),
+          // The operation never reports settlement, so only a task snapshot
+          // can retire the intent.
+          query: vi
+            .fn()
+            .mockResolvedValue({ ...taskOperation, status: 'running' }),
+        },
+      },
+    };
+    const intentKey = `qwen-managed-task-cancel:${JSON.stringify([provider.storageKey, 's1'])}`;
+    await render('s1');
+    // Control: with no outstanding intent the closed panel reads nothing.
+    expect(list).not.toHaveBeenCalled();
+    sessionStorage.setItem(
+      intentKey,
+      JSON.stringify({
+        [task.taskId]: {
+          sessionId: 's1',
+          taskId: task.taskId,
+          idempotencyKey: 'original',
+          operationId: taskOperation.operationId,
+          accepted: true,
+        },
+      }),
+    );
+    list.mockResolvedValue({ data: [settled], hasMore: false });
+    await render('s1', 'en', {
+      ...provider,
+      tasks: { ...provider.tasks!, list },
+    });
+    // The chip renders with the panel closed and only a task snapshot can
+    // retire the intent, so the list must be read without opening the panel.
+    expect(container.textContent).not.toContain('Back to tasks');
+    await vi.waitFor(() => expect(list).toHaveBeenCalled());
+    await vi.waitFor(() =>
+      expect(sessionStorage.getItem(intentKey)).toBeNull(),
+    );
   });
 
   it('keeps the Workspace directory read-only even when an older backend advertises cwd changes', async () => {

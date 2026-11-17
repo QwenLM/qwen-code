@@ -412,7 +412,7 @@ for (const theme of ['light', 'dark'] as const) {
       if (state === 'operator_required') {
         const error = stream
           .locator('pre')
-          .filter({ hasText: 'recovery_evidence_unavailable' });
+          .filter({ hasText: '请运维核对原执行、Workspace 身份和恢复凭证' });
         await expect(error).toBeVisible();
         await expect(error).toHaveCount(1);
         await expect(error.locator('../..')).toHaveClass(/error/);

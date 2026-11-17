@@ -194,6 +194,19 @@ describe('useManagedRecovery', () => {
     expect(provider.recovery!.query).toHaveBeenCalled();
   });
 
+  it('keeps the summary send gate while a first miss is unconfirmed', async () => {
+    // No trusted read exists yet, so the hold must not open sending: the
+    // summary's own restriction is the only authorization on screen.
+    summary.recovery = { ...miss };
+    summary.capabilities = { canSend: false, canCancel: false };
+    vi.mocked(provider.recovery!.query).mockReturnValue(
+      new Promise<never>(() => undefined),
+    );
+    await render();
+    expect(current.value).toBeUndefined();
+    expect(current.canSend).toBe(false);
+  });
+
   it('clears the verdict when a summary drops recovery', async () => {
     interactive = false;
     await render();

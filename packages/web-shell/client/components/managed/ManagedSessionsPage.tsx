@@ -602,7 +602,35 @@ function ManagedSessionsContent({
     },
   );
   const [workspaceRevision, setWorkspaceRevision] = useState(0);
-  const [error, setError] = useState<string>();
+  // A failure is raised on one conversation (or the new-task page). Only its
+  // owner shows it, and only a request failure reads as a conversation turn —
+  // an export or side-command refusal is not a failed turn in this Session.
+  const [raisedError, setRaisedError] = useState<{
+    sessionId?: string;
+    message: string;
+    pageLevel?: boolean;
+  }>();
+  const setError = useCallback(
+    (
+      message?: string,
+      pageLevel = false,
+      owner: string | undefined = sessionId,
+    ) =>
+      setRaisedError(
+        message === undefined
+          ? undefined
+          : { sessionId: owner, message, pageLevel },
+      ),
+    [sessionId],
+  );
+  const error =
+    raisedError && raisedError.sessionId === sessionId
+      ? raisedError.message
+      : undefined;
+  const requestError = raisedError?.pageLevel ? undefined : error;
+  // A request failure is a conversation message; anything else keeps the
+  // page-level alert instead of posing as a failed turn in this Session.
+  const pageError = interactive && raisedError?.pageLevel ? error : undefined;
   const [discarded, setDiscarded] = useState(false);
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
@@ -772,6 +800,8 @@ function ManagedSessionsContent({
                   ? 'managed.exportChanged'
                   : 'managed.exportFailed',
           ),
+          true,
+          id,
         );
     } finally {
       if (!abort.signal.aborted) {
@@ -823,8 +853,14 @@ function ManagedSessionsContent({
       ] ?? summary.failure.message)
     : undefined;
   const recoveryError =
-    recovery.value?.state === 'operator_required'
-      ? recovery.value.reasonCode
+    recovery.value &&
+    recovery.value.state !== 'ready' &&
+    recovery.value.reasonCode !== 'turn_active'
+      ? recoveryText(
+          recovery.value.reasonCode === 'session_not_active'
+            ? 'managed.recovery.explanation.ended'
+            : `managed.recovery.explanation.${recovery.value.state}`,
+        )
       : undefined;
   const messages = useMemo<Message[]>(() => {
     const failures = [
@@ -832,8 +868,10 @@ function ManagedSessionsContent({
         [
           detail.stoppedReason,
           detail.error,
-          error,
-          pendingHere && !busy && !error ? t('managed.uncertain') : undefined,
+          requestError,
+          pendingHere && !busy && !requestError
+            ? t('managed.uncertain')
+            : undefined,
           failureMessage,
           recoveryError,
         ].filter((message): message is string => Boolean(message)),
@@ -855,7 +893,7 @@ function ManagedSessionsContent({
             id: `managed-error:${sessionId ?? 'new'}:${content}`,
             role: 'system',
             variant: 'error',
-            retryable: Boolean(pendingHere),
+            retryable: Boolean(pendingHere) && content !== recoveryError,
             content,
             timestamp: Date.now(),
           }),
@@ -865,7 +903,7 @@ function ManagedSessionsContent({
     transcriptMessages,
     detail.stoppedReason,
     detail.error,
-    error,
+    requestError,
     failureMessage,
     recoveryError,
     sessionId,
@@ -988,7 +1026,7 @@ function ManagedSessionsContent({
     // does not depend on sessionId.
     setError(undefined);
     setDiscarded(false);
-  }, [provider, sessionId, hostSessionOnly]);
+  }, [provider, sessionId, hostSessionOnly, setError]);
 
   // submit and discardPending are recreated on every render, so the intent
   // effect below reads them through refs: depending on them directly would
@@ -996,6 +1034,9 @@ function ManagedSessionsContent({
   // useCallback would change when their large closures are captured.
   const submitRef = useRef<() => void>(() => {});
   const discardPendingRef = useRef<() => void>(() => {});
+  // MessageItem compares this prop by identity, so an inline arrow would
+  // re-render every visible message row on each page render.
+  const retryMessage = useCallback(() => void submitRef.current(), []);
 
   useEffect(() => {
     if (
@@ -1224,7 +1265,7 @@ function ManagedSessionsContent({
     setListRevision((current) => current + 1);
     setWorkspaceRevision((current) => current + 1);
     reloadSession();
-  }, [reloadSession]);
+  }, [reloadSession, setError]);
 
   async function loadMore() {
     const abort = listLifetime.current;
@@ -1288,6 +1329,7 @@ function ManagedSessionsContent({
             : language === 'ru'
               ? 'BTW/обзор недоступны для этой сессии.'
               : 'BTW/recap is unavailable for this session.',
+          true,
         );
         return;
       }
@@ -1302,6 +1344,7 @@ function ManagedSessionsContent({
             : language === 'ru'
               ? 'BTW принимает только текст; /recap не принимает аргументы.'
               : 'BTW accepts text only; /recap accepts no arguments.',
+          true,
         );
         return;
       }
@@ -1317,6 +1360,7 @@ function ManagedSessionsContent({
             : language === 'ru'
               ? 'Генерация BTW/обзора недоступна для этой сессии.'
               : 'BTW/recap generation is unavailable for this session.',
+          true,
         );
         return;
       }
@@ -1379,7 +1423,11 @@ function ManagedSessionsContent({
         input = await encodeManagedInput(prepared.text, images, prepared.files);
         fileReferences.assertCurrent();
       } catch (failure) {
-        setError(failure instanceof Error ? failure.message : String(failure));
+        setError(
+          failure instanceof Error ? failure.message : String(failure),
+          false,
+          ownerSession,
+        );
         return;
       } finally {
         encoding.current = false;
@@ -1411,7 +1459,7 @@ function ManagedSessionsContent({
       encoding.current = false;
       if (abort.signal.aborted) return;
       if (!persisted) {
-        setError(t('managed.workspaceStorageUnavailable'));
+        setError(t('managed.workspaceStorageUnavailable'), false, ownerSession);
         setBusy(false);
         return;
       }
@@ -1510,7 +1558,11 @@ function ManagedSessionsContent({
           restoreManagedAttachments(composerRef.current, attempt.input);
       }
       if (selection.current === selectedAtSubmit)
-        setError(failure instanceof Error ? failure.message : String(failure));
+        setError(
+          failure instanceof Error ? failure.message : String(failure),
+          false,
+          attempt.sessionId,
+        );
     } finally {
       if (!abort.signal.aborted) setBusy(false);
     }
@@ -2076,6 +2128,11 @@ function ManagedSessionsContent({
       <p role="status" className="sr-only">
         {discarded ? t('managed.discarded') : ''}
       </p>
+      {pageError && (
+        <p role="alert" className="text-sm text-destructive">
+          {pageError}
+        </p>
+      )}
       {!hostSessionOnly &&
         home &&
         provider.lifecycle &&
@@ -2149,7 +2206,7 @@ function ManagedSessionsContent({
               const discarded = await persistPending(pendingKey, undefined);
               if (abort.signal.aborted) return;
               if (!discarded) {
-                setError(t('managed.pendingDiscardFailed'));
+                setError(t('managed.pendingDiscardFailed'), true);
                 return;
               }
               pendingRef.current = undefined;
@@ -2438,7 +2495,7 @@ function ManagedSessionsContent({
                   showRetryHint={
                     Boolean(pendingHere) && !busy && !compression.blocked
                   }
-                  onRetryClick={() => void submit()}
+                  onRetryClick={retryMessage}
                   onToolResultOpen={
                     summary?.capabilities.artifacts && provider.toolResults
                       ? openResult
