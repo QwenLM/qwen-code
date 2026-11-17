@@ -1185,6 +1185,7 @@ describe('Session', () => {
       getManagedRuntimeOutcomes: vi.fn().mockReturnValue(undefined),
       getSessionService: vi.fn().mockReturnValue({
         setSessionPrBoundCallback: vi.fn(),
+        setSessionGoalChangedCallback: vi.fn(),
       }),
       getToolRegistry: vi.fn().mockReturnValue(mockToolRegistry),
       getDisabledTools: vi.fn().mockReturnValue(new Set<string>()),

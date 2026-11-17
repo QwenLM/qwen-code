@@ -8225,3 +8225,113 @@ describe('WebShellSidebar standalone grouping', () => {
     });
   });
 });
+
+describe('WebShellSidebar goal markers', () => {
+  const goalSession = (
+    goal: DaemonSessionSummary['goal'],
+  ): DaemonSessionSummary => ({
+    sessionId: 'goal-session',
+    workspaceCwd: '/tmp/project',
+    displayName: 'Goal session',
+    ...(goal ? { goal } : {}),
+  });
+
+  const rowFor = (label: string, root: ParentNode = container) =>
+    Array.from(
+      root.querySelectorAll<HTMLElement>('[class*="sessionRow"]'),
+    ).find((row) => row.textContent?.includes(label));
+
+  it('renders the running marker and opens the session on marker click', async () => {
+    active.sessions.push(
+      goalSession({
+        status: 'active',
+        objective: 'ship it',
+        updatedAt: '2026-11-17T00:00:00.000Z',
+      }),
+    );
+    const onLoadSession = vi.fn();
+    renderSidebar({ onLoadSession });
+    await ensureWorkspaceExpanded('project');
+
+    const row = rowFor('Goal session');
+    expect(row).toBeDefined();
+    const marker = row!.querySelector<HTMLElement>(
+      '[data-testid="session-goal-marker"]',
+    );
+    expect(marker).not.toBeNull();
+    expect(marker!.getAttribute('data-status')).toBe('running');
+    expect(marker!.tagName).toBe('BUTTON');
+    expect(marker!.getAttribute('aria-label')).toBe(
+      'Goal: In progress — ship it',
+    );
+
+    await act(async () => click(marker!));
+    expect(onLoadSession).toHaveBeenCalledOnce();
+    expect(onLoadSession).toHaveBeenCalledWith('goal-session', '/tmp/project');
+  });
+
+  it('paints the attention tone for a paused goal', async () => {
+    active.sessions.push(
+      goalSession({
+        status: 'paused',
+        objective: 'ship it',
+        updatedAt: '2026-11-17T00:00:00.000Z',
+      }),
+    );
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+
+    const marker = rowFor('Goal session')!.querySelector(
+      '[data-testid="session-goal-marker"]',
+    );
+    expect(marker?.getAttribute('data-status')).toBe('attention');
+  });
+
+  it('renders no marker for a completed goal or a goal-less session', async () => {
+    active.sessions.push(
+      goalSession({
+        status: 'complete',
+        objective: 'done',
+        updatedAt: '2026-11-17T00:00:00.000Z',
+      }),
+      {
+        sessionId: 'plain-session',
+        workspaceCwd: '/tmp/project',
+        displayName: 'Plain session',
+      },
+    );
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+
+    expect(
+      rowFor('Goal session')!.querySelector(
+        '[data-testid="session-goal-marker"]',
+      ),
+    ).toBeNull();
+    expect(
+      rowFor('Plain session')!.querySelector(
+        '[data-testid="session-goal-marker"]',
+      ),
+    ).toBeNull();
+  });
+
+  it('renders the archived-row marker as a pure indicator', async () => {
+    archived.sessions.push({
+      ...goalSession({
+        status: 'paused',
+        objective: 'ship it',
+        updatedAt: '2026-11-17T00:00:00.000Z',
+      }),
+      isArchived: true,
+    });
+    renderSidebar();
+    await openArchiveSettings();
+
+    const marker = archivedSessionsTarget.querySelector<HTMLElement>(
+      '[data-testid="session-goal-marker"]',
+    );
+    expect(marker).not.toBeNull();
+    expect(marker!.tagName).toBe('SPAN');
+    expect(marker!.getAttribute('data-status')).toBe('attention');
+  });
+});

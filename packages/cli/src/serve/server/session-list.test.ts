@@ -811,4 +811,115 @@ describe('merged session catalog pagination', () => {
       },
     );
   });
+
+  describe('goal sidecar projection', () => {
+    async function writeGoalSidecar(
+      session: BridgeSessionSummary,
+      content: string,
+      archived = false,
+    ): Promise<void> {
+      const chats = path.join(
+        new Storage(workspaceCwd, runtimeBaseDir).getProjectDir(),
+        'chats',
+        ...(archived ? ['archive'] : []),
+      );
+      await fs.mkdir(chats, { recursive: true });
+      await fs.writeFile(
+        path.join(chats, `${session.sessionId}.goal.json`),
+        content,
+      );
+    }
+
+    const projection = {
+      v: 1,
+      goalId: 'goal-1',
+      status: 'paused',
+      objective: 'ship it',
+      updatedAt: 1_700_000_000_000,
+    };
+
+    it('projects the goal sidecar onto a persisted summary', async () => {
+      const session = summary(0);
+      await persist(session);
+      await writeGoalSidecar(session, JSON.stringify(projection));
+      const { bridge } = bridgeFor([]);
+
+      const result = await listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        {},
+        { runtimeBaseDir },
+      );
+
+      expect(result.sessions[0]?.goal).toEqual({
+        status: 'paused',
+        objective: 'ship it',
+        updatedAt: new Date(1_700_000_000_000).toISOString(),
+      });
+    });
+
+    it('projects the goal sidecar of an archived session', async () => {
+      const session = summary(0);
+      await persist(session, session.createdAt, true);
+      await writeGoalSidecar(session, JSON.stringify(projection), true);
+      const { bridge } = bridgeFor([]);
+
+      const result = await listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        { archiveState: 'archived' },
+        { runtimeBaseDir },
+      );
+
+      expect(result.sessions[0]?.goal?.status).toBe('paused');
+    });
+
+    it.each(['{not json', '{"v":1}'])(
+      'leaves goal unset for a corrupt or absent sidecar: %s',
+      async (content) => {
+        const corrupt = summary(0);
+        const absent = summary(1);
+        await Promise.all([persist(corrupt), persist(absent)]);
+        await writeGoalSidecar(corrupt, content);
+        const { bridge } = bridgeFor([]);
+
+        const result = await listWorkspaceSessionsForResponse(
+          bridge,
+          workspaceCwd,
+          {},
+          { runtimeBaseDir },
+        );
+
+        const byId = new Map(
+          result.sessions.map((session) => [session.sessionId, session]),
+        );
+        expect(byId.get(corrupt.sessionId)?.goal).toBeUndefined();
+        expect(byId.get(absent.sessionId)?.goal).toBeUndefined();
+      },
+    );
+
+    it('keeps the goal projection through the live overlay merge', async () => {
+      // A goal-bearing session always has a transcript: the journal hook
+      // appends the goal_state record before writing the sidecar, so the
+      // persisted list (transcript-driven) always sees it. The live bridge
+      // summary carries no goal field; the overlay must not drop the
+      // sidecar projection enriched onto the persisted entry.
+      const session = summary(0);
+      await persist(session);
+      await writeGoalSidecar(session, JSON.stringify(projection));
+      const { bridge } = bridgeFor([
+        { ...session, clientCount: 2, hasActivePrompt: true },
+      ]);
+
+      const result = await listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        {},
+        { runtimeBaseDir },
+      );
+
+      expect(result.sessions[0]?.goal?.objective).toBe('ship it');
+      expect(result.sessions[0]?.clientCount).toBe(2);
+    });
+  });
 });

@@ -648,6 +648,7 @@ export type {
   DaemonBranchInfo,
   DaemonSessionIssueInfo,
   DaemonSessionPrInfo,
+  DaemonSessionGoalInfo,
   DaemonBranchPoint,
   DaemonSessionExportFormat,
   DaemonSessionExportResult,

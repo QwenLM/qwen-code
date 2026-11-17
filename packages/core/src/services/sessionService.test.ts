@@ -58,6 +58,7 @@ import { CompressionStatus } from '../core/turn.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import { moveSessionPrSidecar } from './session-pr-service.js';
+import { moveSessionGoalSidecar } from './session-goal-sidecar.js';
 import { SessionWriterLostError } from './session-writer-lease.js';
 import {
   content,
@@ -84,6 +85,12 @@ vi.mock('../utils/jsonl-utils.js');
 vi.mock('./session-pr-service.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./session-pr-service.js')>()),
   moveSessionPrSidecar: vi.fn().mockResolvedValue(undefined),
+}));
+// Same rationale: the goal move does real fs/promises I/O this mocked-fs
+// suite cannot host; its semantics are pinned in session-goal-sidecar.test.ts.
+vi.mock('./session-goal-sidecar.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./session-goal-sidecar.js')>()),
+  moveSessionGoalSidecar: vi.fn(() => Promise.resolve()),
 }));
 
 type Line = Record<string, unknown>;
@@ -1621,7 +1628,9 @@ describe('SessionService', () => {
       ).resolves.toBe(true);
 
       expect(assertCanMutate).toHaveBeenCalledOnce();
-      expect(assertCleanupOwned).toHaveBeenCalledTimes(8);
+      // One fence check per cleanup step; the goal sidecar removal added
+      // one alongside the worktree/pr/title/ledger steps.
+      expect(assertCleanupOwned).toHaveBeenCalledTimes(9);
       expect(removeOrganizationSpy).toHaveBeenCalledWith(sessionIdA, {
         assertCanCommit: assertCleanupOwned,
       });
@@ -1741,6 +1750,10 @@ describe('SessionService', () => {
       [
         'should remove pr sidecars in both states when removing a session',
         '.pr.json',
+      ],
+      [
+        'should remove goal sidecars in both states when removing a session',
+        '.goal.json',
       ],
       [
         'should remove prompt ledger sidecars in both archive states',
@@ -1871,13 +1884,19 @@ describe('SessionService', () => {
       existsFor(
         `${sessionIdA}.worktree.json`,
         `${sessionIdA}.pr.json`,
+        `${sessionIdA}.goal.json`,
         `${sessionIdA}.ledger.jsonl`,
       );
       const removeOrganizationSpy = spyOrganizationRemove().mockResolvedValue();
 
       await sessionService.cleanupRemovedSessionState(sessionIdA);
 
-      for (const sidecar of ['.worktree.json', '.pr.json', '.ledger.jsonl']) {
+      for (const sidecar of [
+        '.worktree.json',
+        '.pr.json',
+        '.goal.json',
+        '.ledger.jsonl',
+      ]) {
         expect(unlinkSyncSpy).toHaveBeenCalledWith(
           expect.stringContaining(`${sessionIdA}${sidecar}`),
         );
@@ -2017,6 +2036,35 @@ describe('SessionService', () => {
         ),
       ).toBe(true);
     },
+    movesGoalSidecar: async (kind: MoveKind) => {
+      const m = seeded(kind);
+
+      const result = await m.run();
+
+      expect(result.moved).toEqual([sessionIdA]);
+      expect(result.errors).toEqual([]);
+      expect(moveSessionGoalSidecar).toHaveBeenCalledWith(
+        m.from('.goal.json'),
+        m.to('.goal.json'),
+      );
+    },
+    warnsOnGoalSidecarFailure: async (kind: MoveKind) => {
+      const m = seeded(kind);
+      vi.mocked(moveSessionGoalSidecar).mockRejectedValueOnce(
+        new Error('goal move failed'),
+      );
+      const { service, warnings } = withWarnings();
+
+      const result = await m.run(undefined, service);
+
+      expect(result.moved).toEqual([sessionIdA]);
+      expect(result.errors).toEqual([]);
+      expect(
+        warnings.some((message) =>
+          message.includes('failed to move goal sidecar'),
+        ),
+      ).toBe(true);
+    },
     movesKnownLocation: async (kind: MoveKind) => {
       const m = seeded(kind);
 
@@ -2073,7 +2121,8 @@ describe('SessionService', () => {
         errors: [],
       });
       expect(assertCanMutate).toHaveBeenCalledOnce();
-      expect(assertCleanupOwned).toHaveBeenCalledTimes(4);
+      // The goal sidecar move added one fence check to the conflict path.
+      expect(assertCleanupOwned).toHaveBeenCalledTimes(5);
     },
     warnsOnWorktreeSidecarFailure: async (kind: MoveKind) => {
       const m = seeded(kind, '.worktree.json');
@@ -2219,6 +2268,12 @@ describe('SessionService', () => {
 
     it('should warn but still archive when the pr sidecar move fails', () =>
       mirrored.warnsOnPrSidecarFailure('archive'));
+
+    it('should move the goal sidecar into the archive directory', () =>
+      mirrored.movesGoalSidecar('archive'));
+
+    it('should warn but still archive when the goal sidecar move fails', () =>
+      mirrored.warnsOnGoalSidecarFailure('archive'));
 
     const bothPrSidecarsExist = () => {
       archive.seed();
@@ -2422,6 +2477,12 @@ describe('SessionService', () => {
 
     it('should warn but still unarchive when the pr sidecar move fails', () =>
       mirrored.warnsOnPrSidecarFailure('unarchive'));
+
+    it('should move the goal sidecar back to the active directory', () =>
+      mirrored.movesGoalSidecar('unarchive'));
+
+    it('should warn but still unarchive when the goal sidecar move fails', () =>
+      mirrored.warnsOnGoalSidecarFailure('unarchive'));
 
     it('should unarchive known archived sessions', () =>
       mirrored.movesKnownLocation('unarchive'));
