@@ -561,6 +561,8 @@ export type CompactionTriggerReason =
   | 'model_requested';
 
 export interface ChatCompressionInfo {
+  /** Synthetic prefix length; retained original operations follow it. */
+  summaryPrefixLength?: number;
   originalTokenCount: number;
   newTokenCount: number;
   /**

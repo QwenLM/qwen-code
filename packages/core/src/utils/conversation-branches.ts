@@ -24,6 +24,7 @@ const NEUTRAL_TAIL_SUBTYPES = new Set([
   'session_artifact_event',
   'session_artifact_snapshot',
   'session_sources_snapshot',
+  'generated_ui_state',
   'turn_result',
   'turn_attempt',
   'goal_turn_end',

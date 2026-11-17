@@ -29,7 +29,7 @@
  *
  * Usage:
  *   node scripts/verify-pr-prepare.mjs <pr> --repo <owner>/<repo>
- *   node scripts/verify-pr-prepare.mjs --require-isolation
+ *   node scripts/verify-pr-prepare.mjs --require-isolation [--artifact-dir <round-dir>]
  *
  * Options:
  *   --repo <owner>/<repo>  required for the coordinate path: never inferred
@@ -37,24 +37,31 @@
  *                          same PR number to an unrelated PR
  *   --require-isolation    check the process this runs in and exit 4 when no
  *                          boundary is detected; run it inside the boundary
+ *   --artifact-dir <dir>   with --require-isolation, a pass writes boundary-gate.json
+ *                          into the round's artifact directory — the record the
+ *                          checker requires beside a mode:"container" declaration
  *
  * Exit codes:
  *   0  coordinates resolved, or the boundary check passed
  *   2  usage error
- *   3  metadata, OID, tree-state, or filesystem failure
+ *   3  metadata, OID, tree-state, or filesystem failure (incl. writing the gate record)
  *   4  --require-isolation found no boundary — do not run PR code here
  */
 
 import { spawnSync } from 'node:child_process';
+import { createHash, randomBytes } from 'node:crypto';
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import { isEntryPoint } from './lib/entry-point.js';
 
 const OID = /^[0-9a-f]{40}$/;
@@ -71,7 +78,7 @@ const FIELDS = [
 ].join(',');
 
 const HELP = `Usage: node scripts/verify-pr-prepare.mjs <pr> --repo <owner>/<repo>
-       node scripts/verify-pr-prepare.mjs --require-isolation
+       node scripts/verify-pr-prepare.mjs --require-isolation [--artifact-dir <round-dir>]
 
 Resolves the coordinates a local /verify-pr round needs and writes the
 metadata snapshot the round reads as $QWEN_VERIFY_CONTEXT:
@@ -95,7 +102,11 @@ isolated and must not execute PR code. A container marker alone does not pass:
 the CLI's own Docker/Podman launcher mounts ~/.config/gcloud and the ADC file
 and copies model API keys, so the check also requires the credential-free
 attestation and refuses when a known credential signal is visible. The
-built-in macOS sandbox (SANDBOX=sandbox-exec) never counts.
+built-in macOS sandbox (SANDBOX=sandbox-exec) never counts. With
+--artifact-dir, a pass also writes boundary-gate.json there — the record the
+checker requires alongside a mode:"container" declaration. The artifact tree
+is PR-writable, so the record corroborates an operator who ran the gate; it
+is not proof against a round that forges it.
 `;
 
 /** Returns `{owner, name}` for a GitHub repository slug, or null. */
@@ -198,18 +209,33 @@ export function detectCredentialSignals(
  */
 export function detectIsolation(env = process.env, exists = existsSync) {
   const signals = [];
+  // Observed markers are filesystem facts the process can check, not strings
+  // an operator chooses. A self-chosen `container=<name>` is a DECLARATION;
+  // on its own it cannot distinguish a boundary from a bare host, so the
+  // gate and the checker treat it as insufficient for a container claim.
+  const observed = [];
   if (env.container) signals.push(`container=${env.container}`);
-  if (exists('/.dockerenv')) signals.push('/.dockerenv');
-  if (exists('/run/.containerenv')) signals.push('/run/.containerenv');
+  if (exists('/.dockerenv')) {
+    signals.push('/.dockerenv');
+    observed.push('/.dockerenv');
+  }
+  if (exists('/run/.containerenv')) {
+    signals.push('/run/.containerenv');
+    observed.push('/run/.containerenv');
+  }
   // A boolean-looking value reads as "sandbox disabled"; the CLI's transport
   // writes a container name or `sandbox-exec`, neither of which is a marker.
   const sandbox = (env.SANDBOX ?? '').trim();
-  if (sandbox && !['false', 'true', '0', '1'].includes(sandbox)) {
-    if (sandbox !== SEATBELT) signals.push(`SANDBOX=${sandbox}`);
-  }
+  const sandboxRuntime =
+    sandbox &&
+    !['false', 'true', '0', '1'].includes(sandbox) &&
+    sandbox !== SEATBELT;
+  if (sandboxRuntime) signals.push(`SANDBOX=${sandbox}`);
   return {
     isolated: signals.length > 0,
     signals,
+    observed,
+    sandboxRuntime: sandboxRuntime ? sandbox : null,
     seatbelt: sandbox === SEATBELT,
   };
 }
@@ -315,6 +341,8 @@ export function parseArgs(argv) {
     pr: null,
     repo: null,
     requireIsolation: false,
+    artifactDir: null,
+    contextOut: null,
     help: false,
   };
   for (let index = 0; index < argv.length; index += 1) {
@@ -323,6 +351,16 @@ export function parseArgs(argv) {
       options.help = true;
     } else if (arg === '--require-isolation') {
       options.requireIsolation = true;
+    } else if (arg === '--artifact-dir') {
+      options.artifactDir = argv[(index += 1)] ?? null;
+      if (!options.artifactDir) {
+        return { error: '--artifact-dir needs <round-dir>' };
+      }
+    } else if (arg === '--context-out') {
+      options.contextOut = argv[(index += 1)] ?? null;
+      if (!options.contextOut) {
+        return { error: '--context-out needs <host-snapshot-path>' };
+      }
     } else if (arg === '--repo') {
       options.repo = argv[(index += 1)] ?? null;
       if (!options.repo) return { error: '--repo needs <owner>/<repo>' };
@@ -335,6 +373,9 @@ export function parseArgs(argv) {
     }
   }
   if (options.help || options.requireIsolation) return options;
+  if (options.artifactDir !== null) {
+    return { error: '--artifact-dir only applies with --require-isolation' };
+  }
   if (!Number.isInteger(options.pr) || options.pr <= 0) {
     return { error: 'a PR number is required' };
   }
@@ -529,7 +570,7 @@ function main(argv) {
     process.stdout.write(HELP);
     return 0;
   }
-  if (options.requireIsolation) return requireBoundary();
+  if (options.requireIsolation) return requireBoundary(options.artifactDir);
 
   const { owner, name } = parseRepo(options.repo);
   const slug = `${owner}/${name}`;
@@ -658,6 +699,22 @@ function main(argv) {
   const contextDir = join(root, 'tmp', 'verify-context');
   const contextPath = join(contextDir, `pr${context.pr}.json`);
   const artifacts = join(root, 'tmp', artifactDirName(context.pr));
+  // The tmp/ container is PR-controlled: a PR-committed symlink there would
+  // redirect every mkdir/write below before any leaf guard runs (R5-1). Refuse
+  // it before anything is created. A fresh clone has no tmp/ — that is fine.
+  const tmpDir = join(root, 'tmp');
+  try {
+    if (lstatSync(tmpDir).isSymbolicLink()) {
+      return fail(
+        3,
+        `refusing to write the host snapshot through a symlink: ${tmpDir}`,
+      );
+    }
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      return fail(3, `could not inspect ${tmpDir}: ${error.message}`);
+    }
+  }
   try {
     mkdirSync(contextDir, { recursive: true });
     // Recursive, so a retry within the same second lands in the directory this
@@ -667,7 +724,99 @@ function main(argv) {
   } catch (error) {
     return fail(3, `could not create the artifact directory: ${error.message}`);
   }
-  writeFileSync(contextPath, `${JSON.stringify(snapshot, null, 2)}\n`);
+  // The snapshot dir/file live in the PR-controlled tree: a symlink at either
+  // path redirects the host-side write, and a hard link at the snapshot path
+  // would make writeFileSync truncate a file the round does not own (R5-4).
+  // Refuse both rather than follow them.
+  for (const p of [contextDir, contextPath]) {
+    let st;
+    try {
+      st = lstatSync(p);
+    } catch (error) {
+      if (error.code !== 'ENOENT') {
+        return fail(
+          3,
+          `could not inspect the snapshot path ${p}: ${error.message}`,
+        );
+      }
+      continue; // not created yet (first run) — nothing to redirect
+    }
+    if (st.isSymbolicLink()) {
+      return fail(
+        3,
+        `refusing to write the host snapshot through a symlink: ${p}`,
+      );
+    }
+    if (p === contextPath && (!st.isFile() || st.nlink !== 1)) {
+      return fail(
+        3,
+        `refusing to write the host snapshot through a non-single-link file: ${p}`,
+      );
+    }
+  }
+  // The host-held snapshot carries the slug too: the checker compares a
+  // waiver's approval permalink against these coordinates, and gh's field
+  // selector has no repo member, so it is added where the snapshot is
+  // written, not to FIELDS.
+  const contextBytes = `${JSON.stringify({ ...snapshot, repo: slug }, null, 2)}\n`;
+  writeFileSync(contextPath, contextBytes);
+  // Structural fix (R5-1): the authoritative snapshot also goes to a host
+  // destination outside the clone (--context-out), so the trusted source the
+  // checker reads never depends on the PR-writable in-tree copy, which stays
+  // only as the checker's untrusted no---context default.
+  let reportedContextPath = contextPath;
+  if (options.contextOut) {
+    // The host destination must be outside the PR-writable clone: step 1 runs
+    // with the clone as cwd, so a relative --context-out resolves inside it,
+    // where a PR-committed symlink would redirect this host-side write (R7-1).
+    // Apply the same containment + leaf guards the in-tree snapshot path uses.
+    const outPath = resolve(options.contextOut);
+    const realRoot = realpathSync(root);
+    if (outPath === realRoot || outPath.startsWith(realRoot + sep)) {
+      return fail(
+        3,
+        `refusing to write the host snapshot inside the PR clone: ${outPath}`,
+      );
+    }
+    try {
+      const st = lstatSync(outPath);
+      if (st.isSymbolicLink()) {
+        return fail(
+          3,
+          `refusing to write the host snapshot through a symlink: ${outPath}`,
+        );
+      }
+      if (!st.isFile() || st.nlink !== 1) {
+        return fail(
+          3,
+          `refusing to write the host snapshot through a non-single-link file: ${outPath}`,
+        );
+      }
+    } catch (error) {
+      if (error.code !== 'ENOENT') {
+        return fail(
+          3,
+          `could not inspect the host snapshot path ${outPath}: ${error.message}`,
+        );
+      }
+    }
+    try {
+      mkdirSync(dirname(outPath), { recursive: true });
+      writeFileSync(outPath, contextBytes);
+    } catch (error) {
+      return fail(
+        3,
+        `could not write the host snapshot to ${outPath}: ${error.message}`,
+      );
+    }
+    reportedContextPath = outPath;
+  }
+  // The digest binds the snapshot's content for the checker (--context-sha256):
+  // it is computed here host-side, before the round runs, so a later rewrite of
+  // the clone-side file cannot produce matching bytes (R2-1).
+  const contextSha256 = createHash('sha256')
+    .update(contextBytes, 'utf8')
+    .digest('hex');
   // Best-effort, like the lane: the round reads a missing file as "review
   // state unknown", so an earlier prepare's copy must not outlive a failed
   // fetch.
@@ -698,7 +847,8 @@ function main(argv) {
     `  base       ${context.base}`,
     `  head       ${context.head}`,
     '  tree       at PR head, clean — reuse this tree; verify or refresh its install/build first',
-    `  context    ${contextPath}`,
+    `  context    ${reportedContextPath}`,
+    `  context-sha256  ${contextSha256}`,
     review.state
       ? `  review     ${reviewPath} (${review.state.threads.filter((thread) => !thread.resolved).length} of ${review.state.threads.length} threads unresolved, ${review.state.changeRequests.length} change requests)`
       : `  review     not written — ${printable(review.error)}; the round lists review findings as not covered`,
@@ -715,9 +865,19 @@ function main(argv) {
     '',
     `Next: build the round in ${artifacts}. This preflight ran on the host,`,
     'because resolving the coordinates needs `gh` and `gh` is mutually',
-    'exclusive with the boundary. Before executing PR code, run inside it:',
+    'exclusive with the boundary. Before executing PR code, run inside the',
+    "boundary — the container recipe's spelling (step 5), with the clone",
+    'mounted at /work:',
     '',
-    '  node scripts/verify-pr-prepare.mjs --require-isolation',
+    `  node /trusted-scripts/verify-pr-prepare.mjs --require-isolation --artifact-dir "/work/tmp/${basename(artifacts)}"`,
+    '',
+    'The path is the in-container one: the gate runs from the read-only',
+    "/trusted-scripts mount, never the PR head's own copy of the script,",
+    'and the record lands in the mounted artifact directory so it survives',
+    'the container. A VM boundary runs the same file from its trusted copy',
+    'with its own artifact path. The gate writes boundary-gate.json into',
+    'the artifact directory; the checker requires that record alongside',
+    'the container declaration.',
   ]);
   return 0;
 }
@@ -726,18 +886,59 @@ function main(argv) {
  * The in-boundary check, and the only place its answer means anything: the
  * coordinate path necessarily runs on the host, so a gate there would fire
  * every round and teach the maintainer to ignore it.
+ *
+ * On a pass with `artifactDir`, writes `boundary-gate.json` there: the
+ * record that the gate actually ran and exited 0, which the checker
+ * requires alongside a `mode:"container"` declaration. The declaration is
+ * a value a round can mint for itself; this record ties it to a gate run.
+ * (The artifact tree is PR-writable, so the record corroborates against an
+ * operator who skipped the gate — the incident's shape — not against PR
+ * code that forges it; the CI publisher writes its own lane record.)
  */
-function requireBoundary() {
+function requireBoundary(artifactDir = null) {
+  const recordPath = artifactDir
+    ? join(artifactDir, 'boundary-gate.json')
+    : null;
+  // A failed re-run must not leave an earlier pass's record behind: the
+  // checker would still accept the container declaration against evidence
+  // that predates the refusal. Every non-pass exit invalidates the record.
+  const invalidateRecord = () => {
+    if (!recordPath) return;
+    try {
+      rmSync(recordPath, { force: true });
+    } catch {
+      // Best-effort; the refusal exit is the contract.
+    }
+  };
   const isolation = detectIsolation();
   const credentials = detectCredentialSignals();
   const attested = process.env[CREDENTIAL_FREE_ATTESTATION] === '1';
 
+  // A refusal from OUTSIDE any boundary does not contradict a record minted
+  // INSIDE one: a host-side sanity re-run must not destroy the in-container
+  // gate record (R10-30). Only a refusal that contradicts the record — an
+  // attested boundary leaking credentials, or a failed record write —
+  // invalidates it (below).
   if (!isolation.isolated) {
     const detail = isolation.seatbelt
       ? 'SANDBOX=sandbox-exec is the built-in macOS sandbox, whose default profile still reads host files'
       : 'no container marker was found';
     process.stderr.write(
       `verify-pr boundary: ${detail} — do not execute PR code in this process\n`,
+    );
+    return 4;
+  }
+
+  // A self-chosen `container=<name>` string — or an inherited `SANDBOX=`
+  // string — is a declaration, not an observed boundary: on a bare host it
+  // would mint a container claim with no isolation, and the checker refuses
+  // every non-ci-lane record whose observed list is empty, so such a pass
+  // could never be published anyway (R11-1). The gate needs an OBSERVED
+  // filesystem marker; a launcher container always carries one. An attested
+  // VM uses mode:"vm" with approval, not this path.
+  if (isolation.observed.length === 0) {
+    process.stderr.write(
+      `verify-pr boundary: only a declared marker (${isolation.signals.join(', ')}) — a self-chosen container= or SANDBOX= string is not an observed boundary; run inside a real container, or use mode:"vm" with the maintainer's approval\n`,
     );
     return 4;
   }
@@ -757,7 +958,55 @@ function requireBoundary() {
     process.stderr.write(
       `verify-pr boundary: ${isolation.signals.join(', ')} but ${refusals.join('; ')} — do not execute PR code here\n`,
     );
+    invalidateRecord();
     return 4;
+  }
+  if (artifactDir) {
+    // A per-round nonce ties the declaration to execution inside THIS
+    // container (R16-1). It is written to a container-local path (the
+    // process home, NOT the shared artifact mount) so the round must read
+    // it from inside the container and echo it into its raw harness logs;
+    // step 7 refuses mode:"container" unless the logs carry it. The nonce
+    // also rides the gate record so the host check can read it after the
+    // container stops. Like the record itself, this corroborates an
+    // operator who ran the round in the container — it is not proof
+    // against a round that forges both.
+    const nonce = randomBytes(16).toString('hex');
+    const record = {
+      gate: 'require-isolation',
+      passed: true,
+      at: new Date().toISOString(),
+      signals: isolation.signals,
+      // Observed filesystem markers, kept apart from the declared strings:
+      // the checker requires one to back a container claim.
+      observed: isolation.observed,
+      credentialFree: true,
+      nonce,
+    };
+    try {
+      writeFileSync(join(homedir(), '.qwen-verify-nonce'), `${nonce}\n`);
+    } catch {
+      // Best-effort: the record still carries the nonce; a home that
+      // cannot be written does not fail the gate.
+    }
+    const tmp = `${recordPath}.${process.pid}.tmp`;
+    // A filesystem failure here is the documented exit-3 path, not an
+    // uncaught throw after the pass line: a driver keyed on exit 4 must
+    // not proceed on a pass the record never landed.
+    try {
+      mkdirSync(artifactDir, { recursive: true });
+      writeFileSync(tmp, `${JSON.stringify(record, null, 2)}\n`);
+      renameSync(tmp, recordPath);
+    } catch (error) {
+      try {
+        rmSync(tmp, { force: true });
+      } catch {
+        // Best-effort: force only covers ENOENT, and a cleanup failure
+        // (ENOTDIR on a non-directory parent) must not mask the original.
+      }
+      invalidateRecord();
+      return fail(3, `could not write the gate record: ${error.message}`);
+    }
   }
   report([
     `verify-pr boundary: ${isolation.signals.join(', ')}; credential-free per attestation, no known credential signal`,
