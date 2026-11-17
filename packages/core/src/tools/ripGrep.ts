@@ -9,7 +9,6 @@ import path from 'node:path';
 import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames } from './tool-names.js';
-import { ToolErrorType } from './tool-error.js';
 import {
   resolveAndValidatePath,
   formatDisplayPath,
@@ -457,10 +456,6 @@ class GrepToolInvocation extends BaseToolInvocation<
       return {
         llmContent: `Error during grep search operation: ${errorMessage}`,
         returnDisplay: `Error: ${errorMessage}`,
-        error: {
-          message: errorMessage,
-          type: ToolErrorType.GREP_EXECUTION_ERROR,
-        },
       };
     }
   }

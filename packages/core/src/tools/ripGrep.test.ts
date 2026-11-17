@@ -28,7 +28,6 @@ import { DEFAULT_FILE_FILTERING_OPTIONS } from '../utils/file-filtering-options.
 import { FileReadCache } from '../services/fileReadCache.js';
 import { logRipgrepRuntimeRecovery } from '../telemetry/loggers.js';
 import type { ToolResult } from './tools.js';
-import { ToolErrorType } from './tool-error.js';
 
 // Mock ripgrepUtils
 vi.mock('../utils/ripgrepUtils.js', () => ({
@@ -652,10 +651,6 @@ describe('RipGrepTool', () => {
 
         expectLlm(result, [error.message], ['No matches found']);
         expect(result.returnDisplay).toBe(`Error: ${error.message}`);
-        expect(result.error).toEqual({
-          message: error.message,
-          type: ToolErrorType.GREP_EXECUTION_ERROR,
-        });
         expect(rg).toHaveBeenCalledWith(
           expect.arrayContaining(['--regexp', pattern]),
           abortSignal,
@@ -714,10 +709,6 @@ describe('RipGrepTool', () => {
         llmContent:
           'Error during grep search operation: ripgrep binary not found.',
         returnDisplay: 'Error: ripgrep binary not found.',
-        error: {
-          message: 'ripgrep binary not found.',
-          type: ToolErrorType.GREP_EXECUTION_ERROR,
-        },
       });
     });
 
