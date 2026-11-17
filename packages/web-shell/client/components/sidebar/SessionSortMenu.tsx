@@ -16,6 +16,7 @@ import {
 } from '../ui/dropdown-menu';
 
 export type SessionSort = 'updatedAt' | 'lastUserPromptAt';
+export type SessionGroupBy = 'workspace' | 'activityDate';
 export type WorkspaceFilter = 'all' | 'standalone' | `workspace:${string}`;
 
 export function readSessionSort(host: string): SessionSort {
@@ -32,6 +33,28 @@ export function readSessionSort(host: string): SessionSort {
 export function writeSessionSort(host: string, sort: SessionSort): void {
   try {
     localStorage.setItem(`web-shell:session-sort:${host}`, sort);
+  } catch {
+    // Storage may be disabled by an embedding host.
+  }
+}
+
+export function readSessionGroupBy(host: string): SessionGroupBy {
+  try {
+    return localStorage.getItem(`web-shell:session-group-by:${host}`) ===
+      'activityDate'
+      ? 'activityDate'
+      : 'workspace';
+  } catch {
+    return 'workspace';
+  }
+}
+
+export function writeSessionGroupBy(
+  host: string,
+  groupBy: SessionGroupBy,
+): void {
+  try {
+    localStorage.setItem(`web-shell:session-group-by:${host}`, groupBy);
   } catch {
     // Storage may be disabled by an embedding host.
   }
@@ -65,6 +88,9 @@ export function SessionSortMenu({
   onChange,
   workspaceValue,
   onWorkspaceChange,
+  groupValue,
+  onGroupChange,
+  groupEnabled,
   workspaces,
   sortEnabled = true,
   triggerClassName = 'rounded-lg p-2 hover:bg-accent',
@@ -73,6 +99,9 @@ export function SessionSortMenu({
   onChange: (value: SessionSort) => void;
   workspaceValue: WorkspaceFilter;
   onWorkspaceChange: (value: WorkspaceFilter) => void;
+  groupValue: SessionGroupBy;
+  onGroupChange: (value: SessionGroupBy) => void;
+  groupEnabled: boolean;
   workspaces: readonly DaemonWorkspaceCapability[];
   sortEnabled?: boolean;
   triggerClassName?: string;
@@ -82,6 +111,11 @@ export function SessionSortMenu({
     value === 'lastUserPromptAt'
       ? 'sidebar.sortQuestion'
       : 'sidebar.sortActivity',
+  );
+  const groupLabel = t(
+    groupValue === 'activityDate'
+      ? 'sidebar.groupActivityDate'
+      : 'sidebar.groupWorkspace',
   );
   const selectedWorkspaceCwd = workspaceValue.startsWith('workspace:')
     ? workspaceValue.slice('workspace:'.length)
@@ -113,6 +147,34 @@ export function SessionSortMenu({
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-56">
+        {groupEnabled && (
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger>
+              <span className="flex min-w-0 flex-1 items-center gap-2">
+                <span>{t('sidebar.groupBy')}</span>
+                <span className="ml-auto min-w-0 truncate text-muted-foreground">
+                  {groupLabel}
+                </span>
+              </span>
+            </DropdownMenuSubTrigger>
+            <DropdownMenuSubContent className="w-48">
+              <DropdownMenuRadioGroup
+                value={groupValue}
+                onValueChange={(next) => {
+                  if (next === 'workspace' || next === 'activityDate')
+                    onGroupChange(next);
+                }}
+              >
+                <DropdownMenuRadioItem value="workspace">
+                  {t('sidebar.groupWorkspace')}
+                </DropdownMenuRadioItem>
+                <DropdownMenuRadioItem value="activityDate">
+                  {t('sidebar.groupActivityDate')}
+                </DropdownMenuRadioItem>
+              </DropdownMenuRadioGroup>
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
+        )}
         {sortEnabled && (
           <DropdownMenuSub>
             <DropdownMenuSubTrigger>
@@ -194,6 +256,7 @@ export function SessionSortMenu({
         <DropdownMenuSeparator />
         <DropdownMenuItem
           onSelect={() => {
+            onGroupChange('workspace');
             onWorkspaceChange('all');
             onChange('updatedAt');
           }}
