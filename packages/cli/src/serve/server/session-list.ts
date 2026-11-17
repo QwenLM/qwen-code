@@ -14,7 +14,7 @@ import {
   readWorktreeSessionMarker,
   canonicalSessionPrUrl,
   readSessionPrsDetailed,
-  readSessionArtifactSummarySidecar,
+  readSessionArtifactSummarySidecarAsync,
   toSessionPrInfo,
   type SessionArchiveState,
   type SessionGroupPresetColor,
@@ -570,7 +570,13 @@ async function enrichArtifactSummaries(
         sessionId,
         archiveState,
       );
-      count = readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount;
+      // Awaited per session like the sibling enrichers: the yield keeps a
+      // mid-scan abort observable and lets concurrent requests run between
+      // reads (the organized path can scan up to MAX_ORGANIZED_SESSIONS).
+      const sidecar = signal
+        ? await readSessionArtifactSummarySidecarAsync(sidecarPath, { signal })
+        : await readSessionArtifactSummarySidecarAsync(sidecarPath);
+      count = sidecar?.artifactCount;
     } catch {
       signal?.throwIfAborted();
       count = undefined;

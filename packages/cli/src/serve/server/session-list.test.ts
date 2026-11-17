@@ -25,6 +25,35 @@ import {
   searchWorkspaceSessionsForResponse,
 } from './session-list.js';
 
+// Mid-scan abort harness: the wrapper aborts the caller's signal as the
+// second async sidecar read starts, deterministically landing the abort
+// inside the enrichment loop (no timer race against fast local reads).
+const abortHarness = vi.hoisted(() => ({
+  controller: undefined as AbortController | undefined,
+  reads: 0,
+}));
+
+vi.mock(
+  '@qwen-code/qwen-code-core/services/session-artifact-summary-sidecar.js',
+  async (importOriginal) => {
+    const mod =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/services/session-artifact-summary-sidecar.js')
+      >();
+    return {
+      ...mod,
+      readSessionArtifactSummarySidecarAsync: async (
+        filePath: string,
+        options?: { signal?: AbortSignal },
+      ) => {
+        abortHarness.reads += 1;
+        if (abortHarness.reads === 2) abortHarness.controller?.abort();
+        return mod.readSessionArtifactSummarySidecarAsync(filePath, options);
+      },
+    };
+  },
+);
+
 describe('merged session catalog pagination', () => {
   let directory: string;
   let workspaceCwd: string;
@@ -39,6 +68,7 @@ describe('merged session catalog pagination', () => {
 
   afterEach(async () => {
     vi.restoreAllMocks();
+    abortHarness.controller = undefined;
     await fs.rm(directory, { recursive: true, force: true });
   });
 
@@ -957,6 +987,44 @@ describe('merged session catalog pagination', () => {
         (r) => r.session.sessionId === cold.sessionId,
       );
       expect(hit?.session.artifactCount).toBe(3);
+    });
+
+    it('rejects when the signal aborts mid-scan, after the first sidecar read', async () => {
+      const first = summary(0);
+      const second = summary(1);
+      await persist(first);
+      await persist(second);
+      await writeArtifactSummarySidecar(first, sidecarBody(3));
+      await writeArtifactSummarySidecar(second, sidecarBody(4));
+      const { bridge } = bridgeFor([]);
+      abortHarness.controller = new AbortController();
+      abortHarness.reads = 0;
+
+      await expect(
+        listWorkspaceSessionsForResponse(
+          bridge,
+          workspaceCwd,
+          { view: 'organized' },
+          { runtimeBaseDir, signal: abortHarness.controller.signal },
+        ),
+      ).rejects.toMatchObject({ name: 'AbortError' });
+      expect(abortHarness.reads).toBe(2);
+
+      // A scan interrupted mid-way must not cache a snapshot: the next
+      // request re-scans (two more sidecar reads). A synchronous scan
+      // never calls the async reader, so it never observes the abort,
+      // completes the page, and serves the retry from the cache.
+      const retry = await listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        { view: 'organized' },
+        { runtimeBaseDir },
+      );
+      expect(abortHarness.reads).toBe(4);
+      expect(
+        retry.sessions.map((session) => session.artifactCount).sort(),
+      ).toEqual([3, 4]);
+      abortHarness.controller = undefined;
     });
   });
 });
