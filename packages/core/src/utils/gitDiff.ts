@@ -1626,8 +1626,31 @@ export async function fetchGitLog(
     // Fail closed: an unsafe excluded ref must not degrade into an unscoped
     // walk that re-lists the very commits the exclusion exists to drop.
     if (!excludeRefs.every(isSafeSingleRef)) return null;
+    // Drop safe-but-absent refs instead of failing the whole walk. A bound PR
+    // head can be missing from the local object database (a refreshed
+    // headRefOid, a gc'd head), and a base branch's remote-tracking ref may
+    // not exist (a fork whose integration remote is `upstream`, a clone with
+    // no remote). `git log --not <missing>` dies with `bad object`, which
+    // would otherwise refuse the entire window and — via the caller's
+    // no-exclusion retry — drop the *present* exclusions too, re-listing the
+    // covered commits. Probing each ref keeps the exclusion surgical: only
+    // the absent ref's commits may reappear, the rest stay excluded.
+    const present: string[] = [];
+    for (const ref of excludeRefs) {
+      const sha = await runGit(
+        [
+          'rev-parse',
+          '--verify',
+          '--quiet',
+          '--end-of-options',
+          `${ref}^{commit}`,
+        ],
+        gitRoot,
+      );
+      if (sha !== null) present.push(ref);
+    }
     if (revisions.length === 0) revisions.push('HEAD');
-    revisions.push('--not', ...excludeRefs);
+    if (present.length > 0) revisions.push('--not', ...present);
   }
   const search = options?.search?.trim();
   if (search) {

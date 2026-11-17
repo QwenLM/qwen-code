@@ -87,6 +87,14 @@ search }`；log 路由（`workspace-git-log.ts`）转发 `range`/`search`。无�
   静默无范围运行。前导 `^` 被拒，因为 git 的 `--not ^ref` 把双重否定异或成
   包含（扩大窗口）。hash 前缀搜索臂携带 `--not <refs>` 尾部，使排除在该臂
   同样生效。
+- 安全但**缺失**的 ref 被丢弃，而非致命。绑定 PR head 可能不在本地对象库
+  （刷新后的 `headRefOid`、被 gc 的 head），基线分支的远程跟踪 ref 也可能不
+  存在（整合远端为 `upstream` 的 fork、无远端的克隆）。`git log --not <缺失>`
+  以 `bad object` 失败，会拒绝整个窗口——并经 hook 的无排除重试把**存在的**
+  排除也一起丢掉，重新列出已被覆盖的提交（这正是朴素 `origin/<base>` 猜测
+  引入的回归）。故每个 ref 先以 `rev-parse --verify --quiet <ref>^{commit}`
+  探针校验存在性，仅存在的 ref 进入 `--not`；排除保持外科手术式（仅缺失 ref
+  的提交可能重现）。不安全 ref 仍拒绝取数——存在性丢弃仅适用于白名单安全的 ref。
 - core 的 range 守卫是注入守卫，而非 fail-closed 边界：不安全 `range` 被丢弃
   （绝不传给 git），取数退化为无范围 HEAD 遍历而非拒绝。变更总览的「绝不无范围
   遍历」不变量因此由 hook 自身的客户端白名单（`isSafeRangeRef` /
@@ -109,14 +117,20 @@ search }`；log 路由（`workspace-git-log.ts`）转发 `range`/`search`。无�
   `excludeRefs` 传入。可达性排除统一处理已合并、并行、不可比 head。
 - 基线分支的**远程跟踪 ref** 加入排除集。记录的 `baseBranch`
   （`branch.baseBranch ?? worktree.baseBranch`）是**本地**名（如 `main`），
-  整合上游从不推进它——只有 `origin/main` 推进——故仅排除本地名减不去任何
-  东西。hook 排除 `origin/<baseBranch>`（到达整合上游提交的 ref）连同本地名；
-  会话自身的提交（其子代）存活。worktree 会话无分支元数据，其基线分支携带在
-  `worktree.baseBranch`（sidecar `originalBranch`）。这只收窄窗口；记录的起点
-  commit 仍定界它。（仅祖先/merge-base 探针无效：上游线性推进后起点 commit
-  仍是 HEAD 的祖先。）已知边界：worktree-handoff 流程可能从兄弟检出记录
-  `originalBranch`，其 HEAD 与记录的 base commit 分叉，故该罕见情形下基线收窄
-  可能不精确；起点 commit 窗口仍正确定界会话工作。
+  整合上游从不推进它——只有远程跟踪 ref 推进——故仅排除本地名减不去任何
+  东西。hook 排除**两个文档化远端**下的远程跟踪 ref：`origin/<baseBranch>`
+  （标准克隆）与 `upstream/<baseBranch>`（fork，`origin` 是个人 fork、整合来自
+  `upstream`——CONTRIBUTING 命名的布局）。会话自身的提交（基线的子代）存活。
+  worktree 会话无分支元数据，其基线分支携带在 `worktree.baseBranch`（sidecar
+  `originalBranch`）。这只收窄窗口；记录的起点 commit 仍定界它。（仅祖先/
+  merge-base 探针无效：上游线性推进后起点 commit 仍是 HEAD 的祖先。）本地不
+  存在的远程跟踪 ref（另一远端、或无远端的克隆）由路由的存在性探针丢弃而非
+  使遍历失败，故存在的排除——尤其是绑定 PR head——仍生效。已知残留：命名为
+  `origin`/`upstream` 以外的远端不在覆盖内（其整合提交可能作为松散工作重现）；
+  worktree-handoff 流程可能从兄弟检出记录 `originalBranch`，其 HEAD 与记录的
+  base commit 分叉，故该罕见情形下基线收窄可能不精确；普通会话不记录
+  `baseBranch`，故无基线收窄（起点 commit 窗口仍定界其工作）。任何情形下起点
+  commit 窗口都正确定界会话工作。
 - 保留守卫：任一产出 PR 单元未解析出 head 则抑制兜底（其提交无法被排除，
   故不得重新列出）。
 - capability 偏差：有绑定 PR 单元但**无** exclude 能力（新客户端对旧 daemon）
@@ -124,11 +138,11 @@ search }`；log 路由（`workspace-git-log.ts`）转发 `range`/`search`。无�
   够；兜底本身按 `boundPrs.length === 0 || !prFilesSupported ||
 excludeRefsSupported` 门控。
 - 缺失 head 降级：绑定 `headSha` 是 files 路由从不 fetch 的实时 `gh` 值，可能
-  不在本地对象库（刷新后的 `headRefOid`、被 gc 的 head、跨仓绑定）。`git log
---not <缺失>` 遂永久失败（`bad object` → `available:false`）。排除后的 log
-  不可用时，在**同一边界窗口不带 `excludeRefs`** 重试一次，使总览降级到松散窗口
-  （该 PR 提交可能重复——接受的残留）而非清空全部单元。仅当重试后仍不可用才
-  呈现 `loadFailed`。
+  不在本地对象库（刷新后的 `headRefOid`、被 gc 的 head、跨仓绑定）。路由的存在性
+  探针如今丢弃这类缺失 ref（层 2），故窗口仍可用、仅该 PR 的提交可能重现——
+  存在的排除仍生效。作为兜底，若排除后的 log 仍不可用（如起点 commit 本身不在
+  对象库），hook 在**同一边界窗口不带 `excludeRefs`** 重试一次，使总览降级到
+  松散窗口而非清空全部单元。仅当重试后仍不可用才呈现 `loadFailed`。
 - 退役冗余的祖先启发式：从 files 路由移除 `headIsAncestor` 探针、SDK 字段、
   hook 的祖先 head 选择。若无消费方残留则移除 `isGitAncestorOfHead` 及其测试
   （排除模型已涵盖；保留两者是冗余面）。

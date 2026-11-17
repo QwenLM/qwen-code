@@ -218,8 +218,9 @@ describe('useChangeOverview', () => {
 
   it('excludes the remote-tracking ref of a local base branch (integration advances origin/main, not main)', async () => {
     // The recorded baseBranch is the LOCAL name (main); integrating upstream
-    // only advances origin/main. Excluding main alone subtracts nothing, so the
-    // remote-tracking ref must join the exclusion set.
+    // only advances a remote-tracking ref. Excluding main alone subtracts
+    // nothing, so the remote-tracking refs under both documented remotes
+    // (origin for a standard clone, upstream for a fork) join the exclusion set.
     mock.sessionStatus.mockResolvedValue({
       prs: [{ number: 1, url: 'https://github.com/o/r/pull/1' }],
       branch: { name: 'feat/x', baseBranch: 'main', baseCommit: 'base0' },
@@ -231,7 +232,40 @@ describe('useChangeOverview', () => {
       0,
       '/work',
       'base0..HEAD',
-      { sessionId: 's1', excludeRefs: ['head1', 'main', 'origin/main'] },
+      {
+        sessionId: 's1',
+        excludeRefs: ['head1', 'main', 'origin/main', 'upstream/main'],
+      },
+    );
+  });
+
+  it('excludes upstream/<base> so a fork integrating from upstream is narrowed', async () => {
+    // Fork layout (CONTRIBUTING): origin is the personal fork, integration
+    // comes from upstream/main. Excluding only origin/main would subtract the
+    // fork's stale main, not the integrated upstream commits; upstream/main
+    // must be in the exclusion set. The log route drops whichever remote ref
+    // is absent locally, so the present one still narrows the window.
+    mock.sessionStatus.mockResolvedValue({
+      prs: [{ number: 1, url: 'https://github.com/o/r/pull/1' }],
+      worktree: {
+        slug: 'wt',
+        path: '/work/wt',
+        branch: 'feat',
+        baseBranch: 'main',
+        baseCommit: 'base0',
+      },
+    });
+    await renderAndSettle();
+    const ws = mock.workspaceByCwd.mock.results[0]!.value;
+    expect(ws.workspaceGitLog).toHaveBeenCalledWith(
+      20,
+      0,
+      '/work/wt',
+      'base0..HEAD',
+      {
+        sessionId: 's1',
+        excludeRefs: ['head1', 'main', 'origin/main', 'upstream/main'],
+      },
     );
   });
 

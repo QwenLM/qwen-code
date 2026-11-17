@@ -3,6 +3,7 @@ import type { DaemonGitCommitDetail } from '@qwen-code/sdk/daemon';
 import {
   buildCommitFallbackUnits,
   commitFallbackRange,
+  isSafeSingleRef,
   prRepoFromUrl,
   prUnavailableCauseFromError,
 } from './change-overview';
@@ -216,5 +217,45 @@ describe('buildCommitFallbackUnits binary rows', () => {
       path: 'logo.png',
       isBinary: true,
     });
+  });
+});
+
+// Parity with the daemon's authoritative single-ref whitelist
+// (core/utils/gitDiff.ts isSafeSingleRef, pinned by gitDiff.test.ts on these
+// same samples). web-shell cannot import core across the package boundary, so
+// both predicates are bound to this canonical table: a divergence in either
+// the client mirror or the daemon guard breaks its own suite. The client uses
+// this to gate the base-branch exclusion — a ref the daemon would reject must
+// not be composed into `--not`, and a safe ref must not be silently dropped.
+describe('isSafeSingleRef mirrors the daemon single-ref whitelist', () => {
+  it.each([
+    'main',
+    'origin/main',
+    'upstream/main',
+    'feat/x',
+    'feat-branch',
+    'feat_branch',
+    'v1.2.3',
+    'HEAD',
+    'HEAD~1',
+    'HEAD^',
+    'abc1234',
+    'a'.repeat(40),
+  ])('accepts the safe ref %s', (ref) => {
+    expect(isSafeSingleRef(ref)).toBe(true);
+  });
+
+  it.each([
+    '-n1', // leading '-' clause: git's short --max-count option
+    '--max-count=1', // leading '-' clause: a long option git would accept
+    '--upload-pack=evil', // leading '-' clause
+    '-leading', // leading '-' clause
+    'HEAD..HEAD~1', // '..' clause: a valid revision range
+    'a..b', // '..' clause
+    'feat@2026', // charset clause: '@' is legal in a git branch name
+    'HEAD;rm', // charset clause: shell metacharacter
+    '^HEAD', // leading '^' clause: --not XORs negation into inclusion
+  ])('rejects the unsafe ref %s', (ref) => {
+    expect(isSafeSingleRef(ref)).toBe(false);
   });
 });

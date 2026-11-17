@@ -230,23 +230,34 @@ export function useChangeOverview(
       // heads uniformly — no single-head boundary heuristic. Only passed when
       // the daemon advertises the exclude capability; showFallback above
       // suppresses the window entirely when bound PR heads cannot be excluded.
-      // The base branch's remote-tracking ref joins the exclusion set so
+      // The base branch's remote-tracking refs join the exclusion set so
       // integrating upstream (pull, rebase, merge of the base) does not re-list
       // pre-session commits as loose work. The recorded baseBranch is the LOCAL
-      // name (e.g. main), which integration never advances — only origin/main
-      // does — so excluding the local name alone subtracts nothing. Exclude the
-      // remote-tracking ref (origin/<baseBranch>), which reaches the integrated
-      // upstream commits; the session's own commits (children of it) survive.
-      // The recorded start commit still bounds the window — this only narrows it.
+      // name (e.g. main), which integration never advances — only the
+      // remote-tracking ref does — so excluding the local name alone subtracts
+      // nothing. Exclude the remote-tracking ref under BOTH documented remotes:
+      // `origin/<baseBranch>` (a standard clone) and `upstream/<baseBranch>` (a
+      // fork, where origin is the personal fork and integration comes from
+      // upstream — CONTRIBUTING's layout). The session's own commits (children
+      // of the base) survive; the recorded start commit still bounds the window.
+      // A remote-tracking ref that does not exist locally (the other remote, or
+      // a clone with no remote) is dropped by the log route's existence probe
+      // rather than failing the whole walk, so the present exclusions — bound PR
+      // heads above all — still apply. A remote named other than origin/upstream
+      // is a known residual: its integrated commits may re-list as loose work.
       const baseBranchExclusions =
         baseBranch && baseBranch !== 'HEAD' && isSafeSingleRef(baseBranch)
           ? [
-              ...new Set([
-                baseBranch,
-                baseBranch.startsWith('origin/')
-                  ? baseBranch
-                  : `origin/${baseBranch}`,
-              ]),
+              ...new Set(
+                baseBranch.startsWith('origin/') ||
+                baseBranch.startsWith('upstream/')
+                  ? [baseBranch]
+                  : [
+                      baseBranch,
+                      `origin/${baseBranch}`,
+                      `upstream/${baseBranch}`,
+                    ],
+              ),
             ].filter(isSafeSingleRef)
           : [];
       const excludeRefs = excludeRefsSupported

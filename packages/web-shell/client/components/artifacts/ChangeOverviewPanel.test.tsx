@@ -472,6 +472,21 @@ describe('ChangeOverviewPanel', () => {
     expect(document.activeElement).toBe(chips[0]);
   });
 
+  it('brings the newly selected chip into view on keyboard navigation', () => {
+    renderPanel();
+    const chips = container.querySelectorAll('[role="tab"]');
+    // The chip row scrolls horizontally; navigating past the visible strip
+    // must scroll the selected chip into view or it stays clipped. Spy on the
+    // target chip's scrollIntoView (jsdom's is a no-op) to pin the call.
+    const scrollIntoView = vi.fn();
+    chips[1].scrollIntoView = scrollIntoView;
+    pressKey(chips[0], 'ArrowRight');
+    expect(scrollIntoView).toHaveBeenCalledWith({
+      block: 'nearest',
+      inline: 'nearest',
+    });
+  });
+
   it('moves selection backward with ArrowLeft, wrapping at the start', () => {
     renderPanel();
     const chips = container.querySelectorAll('[role="tab"]');

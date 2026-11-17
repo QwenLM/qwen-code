@@ -105,6 +105,17 @@ _every_ bound head, not intersection against one arbitrarily-ordered head.
   git's `--not ^ref` XORs the two negations into an inclusion (widening the
   window). The hash-prefix search arm carries the `--not <refs>` tail so
   exclusion is honoured there too.
+- A safe-but-**absent** ref is dropped, not fatal. A bound PR head can be
+  missing from the local object database (a refreshed `headRefOid`, a gc'd
+  head), and a base branch's remote-tracking ref may not exist (a fork whose
+  integration remote is `upstream`, a clone with no remote). `git log --not
+<missing>` dies with `bad object`, which would refuse the entire window and
+  — via the hook's no-exclusion retry — drop the _present_ exclusions too,
+  re-listing the covered commits (the regression a naive `origin/<base>` guess
+  introduced). Each ref is therefore probed with `rev-parse --verify --quiet
+<ref>^{commit}` and only the present ones reach `--not`; the exclusion stays
+  surgical (only the absent ref's commits may reappear). An unsafe ref still
+  refuses the fetch — existence-dropping applies only to whitelist-safe refs.
 - The core range guard is an injection guard, not a fail-closed boundary: an
   unsafe `range` is dropped (never passed to git) and the fetch falls back to a
   range-less HEAD walk rather than refusing. The change overview's no-unscoped-
@@ -132,21 +143,29 @@ summary.baseCommit` (plain session) → `<start>..HEAD`; else `baseBranch`
 - When the exclude capability is present and PR heads resolved, pass every
   bound PR `headSha` as `excludeRefs`. Reachability exclusion handles merged,
   parallel, and incomparable heads uniformly.
-- The base branch's **remote-tracking ref** joins the exclusion set. The
+- The base branch's **remote-tracking refs** join the exclusion set. The
   recorded `baseBranch` (`branch.baseBranch ?? worktree.baseBranch`) is the
-  LOCAL name (e.g. `main`), which integrating upstream never advances — only
-  `origin/main` does — so excluding the local name alone subtracts nothing. The
-  hook excludes `origin/<baseBranch>` (the ref that reaches the integrated
-  upstream commits) alongside the local name; the session's own commits
-  (children of it) survive. Worktree sessions have no branch meta, so their base
-  branch is carried on `worktree.baseBranch` (sidecar `originalBranch`). This
-  narrows the window; the recorded start commit still bounds it. (An
-  ancestry/merge-base probe alone would not fix this: after a linear upstream
-  advance the start commit is still an ancestor of HEAD.) Known edge: the
-  worktree-handoff flow can record `originalBranch` from a sibling checkout
-  whose HEAD diverges from the recorded base commit, so in that rare case the
-  base-branch narrowing can be imprecise; the start-commit window still bounds
-  the session's work correctly.
+  LOCAL name (e.g. `main`), which integrating upstream never advances — only a
+  remote-tracking ref does — so excluding the local name alone subtracts
+  nothing. The hook excludes the remote-tracking ref under **both documented
+  remotes**: `origin/<baseBranch>` (a standard clone) and `upstream/<baseBranch>`
+  (a fork, where `origin` is the personal fork and integration comes from
+  `upstream` — the layout CONTRIBUTING names). The session's own commits
+  (children of the base) survive. Worktree sessions have no branch meta, so
+  their base branch is carried on `worktree.baseBranch` (sidecar
+  `originalBranch`). This narrows the window; the recorded start commit still
+  bounds it. (An ancestry/merge-base probe alone would not fix this: after a
+  linear upstream advance the start commit is still an ancestor of HEAD.) A
+  remote-tracking ref that does not exist locally (the other remote, or a clone
+  with no remote) is dropped by the route's existence probe rather than failing
+  the walk, so the present exclusions — bound PR heads above all — still apply.
+  Known residuals: a remote named other than `origin`/`upstream` is not covered
+  (its integrated commits may re-list as loose work); the worktree-handoff flow
+  can record `originalBranch` from a sibling checkout whose HEAD diverges from
+  the recorded base commit, so in that rare case the base-branch narrowing can
+  be imprecise; and plain sessions record no `baseBranch`, so they get no
+  base-branch narrowing (the start-commit window still bounds their work). The
+  start-commit window bounds the session's work correctly in every case.
 - Keep the guard: if any produced PR unit failed to resolve a head, suppress
   the fallback (its commits cannot be excluded, so they must not be re-listed).
 - Capability skew: with bound PR units but **no** exclude capability (a new
@@ -156,12 +175,14 @@ summary.baseCommit` (plain session) → `<start>..HEAD`; else `baseBranch`
   `boundPrs.length === 0 || !prFilesSupported || excludeRefsSupported`.
 - Missing-head degradation: a bound `headSha` is a live `gh` value the files
   route never fetches, so it can be absent from the local object database
-  (refreshed `headRefOid`, a gc'd head, a cross-repo binding). `git log --not
-<missing>` then fails permanently (`bad object` → `available:false`). When
-  the excluded log is unavailable, retry once on the **same boundary window
-  without `excludeRefs`** so the overview degrades to the loose window (this
-  PR's commits may duplicate — the accepted residual) instead of blanking every
-  unit. Only a log still unavailable after that retry surfaces `loadFailed`.
+  (refreshed `headRefOid`, a gc'd head, a cross-repo binding). The route's
+  existence probe now drops such an absent ref (Layer 2), so the window stays
+  available and only that PR's commits may re-list — the present exclusions
+  still apply. As a backstop for an excluded log that is nonetheless unavailable
+  (e.g. the start commit itself missing from the object database), the hook
+  retries once on the **same boundary window without `excludeRefs`** so the
+  overview degrades to the loose window instead of blanking every unit. Only a
+  log still unavailable after that retry surfaces `loadFailed`.
 - Retire the now-redundant ancestry heuristic: remove the `headIsAncestor`
   probe from the files route, the SDK field, and the hook's ancestor-head
   selection. Remove `isGitAncestorOfHead` and its tests if no consumer remains

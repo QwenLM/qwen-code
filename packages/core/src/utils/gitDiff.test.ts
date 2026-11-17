@@ -2083,4 +2083,39 @@ describe('fetchGitLog excludeRefs', () => {
     expect(subjects).toContain('later work');
     expect(subjects).not.toContain('init');
   });
+
+  it('drops a safe-but-absent ref without failing the present exclusions', async () => {
+    const base = await headSha(repo);
+    await git(repo, 'checkout', '-q', '-b', 'pr', base);
+    await commit(repo, { 'pr.txt': 'p' }, 'PR work');
+    const prHead = await headSha(repo);
+    await git(repo, 'checkout', '-q', 'main');
+    await commit(repo, { 'loose.txt': 'l' }, 'loose work');
+    await git(repo, 'merge', '-q', '--no-ff', 'pr', '-m', 'merge PR');
+
+    // `origin/main` does not exist in this clone (no remote). Before the
+    // existence probe it made `git log --not` die with `bad object`, refusing
+    // the whole window; the caller's no-exclusion retry then re-listed the PR
+    // commit. The absent ref is now dropped and the present PR head still
+    // excludes its own commit while the loose commit survives.
+    const result = await fetchGitLog(repo, {
+      range: `${base}..HEAD`,
+      excludeRefs: [prHead, 'origin/main'],
+    });
+    expect(result).not.toBeNull();
+    const subjects = result?.entries.map((e) => e.subject) ?? [];
+    expect(subjects).not.toContain('PR work');
+    expect(subjects).toContain('loose work');
+  });
+
+  it('still walks the window when every excluded ref is absent', async () => {
+    const base = await headSha(repo);
+    await commit(repo, { 'loose.txt': 'l' }, 'loose work');
+    const result = await fetchGitLog(repo, {
+      range: `${base}..HEAD`,
+      excludeRefs: ['f'.repeat(40), 'origin/main'],
+    });
+    expect(result).not.toBeNull();
+    expect(result?.entries.map((e) => e.subject)).toContain('loose work');
+  });
 });
