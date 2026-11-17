@@ -71,7 +71,7 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // Keep the warning close to the measurement and the hard ceiling close above
 // it: a cap left far above the measurement is a ratchet with enough slack for
 // a whole dependency family to come back unnoticed.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 2_188_000;
+const DOCUMENT_RUNTIME_WARNING_BYTES = 2_191_500;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
 // locales plus their mapping) adds 5,139: 2,041,583 against 2,046,722 on main
@@ -109,14 +109,26 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_188_000;
 // the transcript-reachable explain wiring) adds 904 bytes: main d41eda5123
 // measures 2,137,893 (107 below the previous 2,138,000 ceiling) and head
 // d5f6a103a6 measures 2,138,797 in CI, 797 above it.
+// The `/send` command, its composer chip and session tab copy (ten keys
+// across two locales) add 1,283: 2,137,893 against 2,139,176 locally on main
+// 039ed577fb without and with the change. Recording the exchange in the
+// caller (the "To" and "From" lines on a user message, the waiting chip, and
+// the parsing of where a message went; four keys added and one removed,
+// across two locales) adds 1,497 more. Merged with the explain side question
+// above, the branch measured 2,141,606 locally on main 5fc5a98ecc; marking a
+// turn another session's reply starts (its card label, keeping the card in a
+// folded turn, and opening that session from it) brings it to 2,142,326.
 // Adding Arabic transcript strings (ar-transcript.ts, with interactive-only
 // Arabic copy stubbed via ar-interactive.transcript-stub.ts) and RTL direction
-// wiring across exported transcript views measured 2,183,235 bytes on the
-// pre-merge head (+47,120 over the 2,136,115 it was measured against). Merged
-// with main's composer task-explain copy the tree measures 2,187,632 bytes, so
-// both increases are budgeted here. The warning sits 368 above that
-// measurement and the ceiling 1,368 above it.
-const MAX_DOCUMENT_RUNTIME_BYTES = 2_189_000;
+// wiring across exported transcript views measured 2,183,235 bytes locally on
+// head b022a6ab7c (+47,120 over the 2,136,115 it was measured against); merged
+// with main's composer task-explain copy, head df7879d72a measured 2,187,632
+// bytes locally.
+// Merging main's /send exchange above with the Arabic head measures
+// 2,191,098 bytes locally on the merge of head df7879d72a with main
+// b9da38c7bd (Node 22.23.2), so both increases are budgeted here. The
+// warning sits 402 above that measurement and the ceiling 1,402 above it.
+const MAX_DOCUMENT_RUNTIME_BYTES = 2_192_500;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.

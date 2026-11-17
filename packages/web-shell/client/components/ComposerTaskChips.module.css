@@ -57,6 +57,21 @@
   height: 13px;
 }
 
+.chip[data-waiting] {
+  border-color: var(--warning-border, var(--border));
+  background: var(--warning-bg, var(--background));
+}
+
+.chip[data-waiting] .state,
+.waitingTag {
+  color: var(--warning-color, var(--foreground));
+}
+
+.waitingTag {
+  flex-shrink: 0;
+  font-size: 12px;
+}
+
 .chipLabel {
   overflow: hidden;
   white-space: nowrap;

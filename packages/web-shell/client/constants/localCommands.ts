@@ -14,6 +14,8 @@ export function getLocalCommands(
   options: {
     sideTaskAvailable?: boolean;
     subscriptionAvailable?: boolean;
+    /** The daemon accepts `/send` (`session_sub_session_send`). */
+    sendAvailable?: boolean;
   } = {},
 ): CommandInfo[] {
   const commands: CommandInfo[] = [
@@ -103,6 +105,15 @@ export function getLocalCommands(
       description: t('local.goal'),
       argumentHint: '[<condition> | clear]',
     },
+    ...(options.sendAvailable
+      ? [
+          {
+            name: 'send',
+            description: t('local.send'),
+            argumentHint: '[--workspace <name>] [--session-id <id>] <message>',
+          },
+        ]
+      : []),
     { name: 'tasks', description: t('local.tasks') },
     { name: 'recap', description: t('local.recap') },
     { name: 'rewind', description: t('local.rewind') },

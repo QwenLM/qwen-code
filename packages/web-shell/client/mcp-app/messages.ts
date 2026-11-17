@@ -11,7 +11,19 @@ export const MCP_APP_MESSAGES_EN: Record<string, Message> = {
   'mcpApp.generatedUi.reopen': 'Reopen interactive view',
   'mcpApp.generatedUi.openElsewhere': 'Already open elsewhere.',
   'mcpApp.generatedUi.reopenNotice':
-    'Reopening starts from the original content and discards previous interactions. Check the original session first: analysis already sent is not revoked or automatically resent.',
+    'Reopening starts from the original content and any state the view saved; other interactions are discarded. Check the original session first: analysis already sent is not revoked or automatically resent.',
+  'mcpApp.generatedUi.resetNotice':
+    'Resetting clears the state this view saved and starts from the original content. Check the original session first: analysis already sent is not revoked or automatically resent.',
+  'mcpApp.generatedUi.state.saving': 'Saving…',
+  'mcpApp.generatedUi.state.saved': 'Saved in this conversation',
+  'mcpApp.generatedUi.state.stale':
+    'Not saved: this view changed elsewhere. Refresh the page to load the latest state.',
+  'mcpApp.generatedUi.state.too_large':
+    'Not saved: the view state is larger than 16 KiB.',
+  'mcpApp.generatedUi.state.failed':
+    'Not saved: the session could not store the view state.',
+  'mcpApp.generatedUi.state.unavailable':
+    'The saved view state could not be loaded, so changes are not saved.',
   'mcpApp.generatedUi.unavailable':
     'Interactive views are off for this session, so only the summary is shown.',
   'mcpApp.generatedUi.title': 'Interactive view',
@@ -51,7 +63,17 @@ export const MCP_APP_MESSAGES_ZH: Record<string, Message> = {
   'mcpApp.generatedUi.reopen': '重新打开交互视图',
   'mcpApp.generatedUi.openElsewhere': '已在另一处打开。',
   'mcpApp.generatedUi.reopenNotice':
-    '重新打开将从原始内容开始，此前交互不会恢复。请先检查原会话：已发送的分析不会撤销，也不会自动重发。',
+    '重新打开将从原始内容和视图保存的状态开始，其他交互不会恢复。请先检查原会话：已发送的分析不会撤销，也不会自动重发。',
+  'mcpApp.generatedUi.resetNotice':
+    '重置会清除此视图保存的状态，并从原始内容开始。请先检查原会话：已发送的分析不会撤销，也不会自动重发。',
+  'mcpApp.generatedUi.state.saving': '正在保存…',
+  'mcpApp.generatedUi.state.saved': '已保存到此对话',
+  'mcpApp.generatedUi.state.stale':
+    '未保存：此视图已在别处修改。刷新页面即可载入最新状态。',
+  'mcpApp.generatedUi.state.too_large': '未保存：视图状态超过 16 KiB。',
+  'mcpApp.generatedUi.state.failed': '未保存：会话无法保存视图状态。',
+  'mcpApp.generatedUi.state.unavailable':
+    '无法载入已保存的视图状态，因此修改不会被保存。',
   'mcpApp.generatedUi.unavailable': '此会话未开启交互视图，仅显示摘要。',
   'mcpApp.generatedUi.title': '交互视图',
   'mcpApp.generatedUi.contextTag': ({ title } = {}) => `交互视图参数：${title}`,
@@ -84,7 +106,19 @@ export const MCP_APP_MESSAGES_RU: Record<string, Message> = {
   'mcpApp.generatedUi.reopen': 'Снова открыть интерактивный вид',
   'mcpApp.generatedUi.openElsewhere': 'Уже открыто в другом месте.',
   'mcpApp.generatedUi.reopenNotice':
-    'Повторное открытие начинается с исходного содержимого и отбрасывает предыдущие взаимодействия. Сначала проверьте исходную сессию: уже отправленный анализ не отменяется и не пересылается автоматически.',
+    'Повторное открытие начинается с исходного содержимого и сохранённого видом состояния; остальные взаимодействия отбрасываются. Сначала проверьте исходную сессию: уже отправленный анализ не отменяется и не пересылается автоматически.',
+  'mcpApp.generatedUi.resetNotice':
+    'Сброс удаляет сохранённое видом состояние и начинает с исходного содержимого. Сначала проверьте исходную сессию: уже отправленный анализ не отменяется и не пересылается автоматически.',
+  'mcpApp.generatedUi.state.saving': 'Сохранение…',
+  'mcpApp.generatedUi.state.saved': 'Сохранено в этом разговоре',
+  'mcpApp.generatedUi.state.stale':
+    'Не сохранено: вид изменён в другом месте. Обновите страницу, чтобы загрузить последнее состояние.',
+  'mcpApp.generatedUi.state.too_large':
+    'Не сохранено: состояние вида больше 16 КиБ.',
+  'mcpApp.generatedUi.state.failed':
+    'Не сохранено: сессия не смогла сохранить состояние вида.',
+  'mcpApp.generatedUi.state.unavailable':
+    'Не удалось загрузить сохранённое состояние вида, поэтому изменения не сохраняются.',
   'mcpApp.generatedUi.unavailable':
     'Интерактивные виды для этой сессии выключены, поэтому показана только сводка.',
   'mcpApp.generatedUi.title': 'Интерактивный вид',

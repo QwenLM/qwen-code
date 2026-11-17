@@ -49,6 +49,7 @@
 }
 
 .output {
+  direction: ltr;
   margin: 0;
   padding: 8px 14px 10px;
   color: var(--muted-foreground);

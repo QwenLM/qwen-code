@@ -43,6 +43,9 @@
 }
 
 .line {
+  /* lineNo / marker / content are a LTR diff row; RTL would swap the
+     columns and right-align the code. */
+  direction: ltr;
   display: flex;
   padding: 0 8px;
   min-height: 18px;

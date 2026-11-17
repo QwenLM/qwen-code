@@ -35,7 +35,10 @@ import type {
   ReasoningSelection,
 } from '@qwen-code/sdk/daemon';
 import type { CommandDisplayCategoryOrder } from '../utils/commandDisplay';
-import type { SkillInfo } from '../completions/slashCompletion';
+import type {
+  SkillInfo,
+  SlashArgumentCompleter,
+} from '../completions/slashCompletion';
 import { useI18n } from '../i18n';
 import type {
   DaemonReasoningControls,
@@ -252,6 +255,8 @@ interface ChatEditorProps {
   skillsLoadError?: boolean;
   skillsLoaded?: boolean;
   slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
+  /** Completes arguments the static subcommand trees cannot (`/send`). */
+  slashArgumentCompleter?: SlashArgumentCompleter;
   autoSubmitSlashCommands?: boolean;
   queuedMessages?: string[];
   onPopQueuedMessages?: () => boolean;
@@ -1753,6 +1758,7 @@ export const ChatEditor = memo(
       skillsLoadError = false,
       skillsLoaded = false,
       slashCommandCategoryOrder,
+      slashArgumentCompleter,
       autoSubmitSlashCommands = false,
       queuedMessages = [],
       onPopQueuedMessages,
@@ -2017,6 +2023,7 @@ export const ChatEditor = memo(
         Boolean(onSkillsOpenChange) &&
         (!skillsLoaded || skillsLoading || skillsLoadError),
       slashCommandCategoryOrder,
+      slashArgumentCompleter,
       autoSubmitSlashCommands,
       queuedMessages,
       onPopQueuedMessages,

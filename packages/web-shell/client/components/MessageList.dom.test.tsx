@@ -14,7 +14,7 @@ import {
   type WebShellAssistantTurnFooterRenderInfo,
   type WebShellCustomization,
 } from '../customization';
-import { I18nProvider } from '../i18n';
+import { I18nProvider, type WebShellLanguage } from '../i18n';
 import {
   TranscriptRenderModeProvider,
   type TranscriptRenderMode,
@@ -55,6 +55,7 @@ vi.mock('./MessageItem', async () => {
       assistantTurnFooterInfo,
       sendFailed,
       onRetrySend,
+      onEditUserMessage,
       assistantFeedbackPromptId,
     }: {
       message: Message;
@@ -68,6 +69,7 @@ vi.mock('./MessageItem', async () => {
       assistantTurnFooterInfo?: WebShellAssistantTurnFooterRenderInfo;
       sendFailed?: boolean;
       onRetrySend?: () => void;
+      onEditUserMessage?: () => void;
     }) => {
       if (message.role === 'tool_group') {
         messageItemTestState.toolArrays.push(message.tools);
@@ -112,6 +114,17 @@ vi.mock('./MessageItem', async () => {
                 type: 'button',
               },
               'retry',
+            )
+          : null,
+        onEditUserMessage
+          ? React.createElement(
+              'button',
+              {
+                'data-testid': `edit-${message.id}`,
+                onClick: onEditUserMessage,
+                type: 'button',
+              },
+              'edit',
             )
           : null,
         message.role === 'thinking'
@@ -381,6 +394,8 @@ function mount(
     pendingApproval?: PermissionRequest | null;
     failedPromptMessageId?: string;
     onRetryFailedPrompt?: () => void;
+    onEditUserMessage?: (turnIndex: number, content: string) => void;
+    language?: WebShellLanguage;
   } = {},
 ): HTMLElement {
   const container = document.createElement('div');
@@ -388,7 +403,7 @@ function mount(
   const root = createRoot(container);
   act(() => {
     root.render(
-      <I18nProvider language="en">
+      <I18nProvider language={opts.language ?? 'en'}>
         <WebShellCustomizationProvider value={opts.customization ?? {}}>
           <CompactModeContext.Provider value={opts.compactMode ?? false}>
             <TranscriptRenderModeProvider
@@ -422,6 +437,7 @@ function mount(
                 onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
                 failedPromptMessageId={opts.failedPromptMessageId}
                 onRetryFailedPrompt={opts.onRetryFailedPrompt}
+                onEditUserMessage={opts.onEditUserMessage}
               />
             </TranscriptRenderModeProvider>
           </CompactModeContext.Provider>
@@ -711,6 +727,28 @@ describe('MessageList — failed prompt retry', () => {
     );
     expect(onRetry).toHaveBeenCalledTimes(1);
   });
+});
+
+it('keeps Edit on the latest ordinary prompt when send records follow it', () => {
+  const sendRecord = (id: string): UserMessage => ({
+    ...userMsg(id),
+    agentMessage: {
+      kind: 'agent_mention',
+      sentTo: { sessionId: 'target', workspaceCwd: '/work/b' },
+    },
+  });
+  const onEditUserMessage = vi.fn();
+  const container = mount(
+    [userMsg('u1'), sendRecord('s1'), userMsg('u2'), sendRecord('s2')],
+    undefined,
+    { onEditUserMessage },
+  );
+
+  expect(container.querySelector('[data-testid="edit-s2"]')).toBeNull();
+  const edit = container.querySelector('[data-testid="edit-u2"]');
+  expect(edit).not.toBeNull();
+  click(edit!);
+  expect(onEditUserMessage).toHaveBeenCalledWith(1, 'q');
 });
 
 describe('MessageList — compact mode', () => {
@@ -4978,6 +5016,62 @@ describe('MessageList — turn collapse (DOM)', () => {
     }
   });
 
+  it('anchors timeline details from the right edge in Arabic', async () => {
+    const rect = (
+      width: number,
+      height: number,
+      top: number,
+      left = 0,
+    ): DOMRect => ({
+      width,
+      height,
+      top,
+      right: left + width,
+      bottom: top + height,
+      left,
+      x: left,
+      y: top,
+      toJSON: () => ({}),
+    });
+    // The RTL panel sits flush to the window's right edge, so the hovered
+    // button's tick is at its right (rect.right), not its left.
+    const rectSpy = vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockImplementation(function (this: HTMLElement) {
+        if (this.getAttribute('data-testid') === 'session-timeline-detail') {
+          return rect(350, 50, 28, 626);
+        }
+        const item = this.closest('[data-testid="session-timeline-entry"]');
+        if (item) return rect(58, 16, 20, 954);
+        if (this.hasAttribute('data-web-shell-message-row')) {
+          return rect(1072, 600, 0, 64);
+        }
+        return rect(1200, 600, 0);
+      });
+    const c = mount(simpleTurns(4), undefined, { language: 'ar' });
+    await nextFrame();
+
+    try {
+      const firstEntryButton = c.querySelector<HTMLButtonElement>(
+        '[data-turn-id="u1"] button',
+      );
+      expect(firstEntryButton).not.toBeNull();
+      focusIn(firstEntryButton!);
+
+      const detail = document.querySelector<HTMLElement>(
+        '[data-testid="session-timeline-detail"]',
+      );
+      expect(detail).not.toBeNull();
+      // right = innerWidth - (rect.right - 28 - 8) = 1024 - (1012 - 36) = 48,
+      // so the card's right edge lands at 976px, fully inside the viewport.
+      expect(detail?.style.right).toBe('48px');
+      expect(detail?.style.left).toBe('');
+      expect(detail?.style.top).toBe('28px');
+    } finally {
+      rectSpy.mockRestore();
+    }
+  });
+
   it('keeps timeline details during current-turn centering but hides them on user scroll', async () => {
     const rectSpy = mockMessageListWidth(1200);
     const offsetTopSpy = vi
@@ -6843,6 +6937,47 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(has(c, 'a1')).toBe(true);
     expect(assistantActions(c, 'a1')).toBe('true');
   });
+
+  it.each([
+    [true, true],
+    [false, false],
+  ])(
+    'keeps the card of a turn another session started in view: from a session %s',
+    (fromSession, visible) => {
+      const backgroundTurn = {
+        turnId: 'turn-b',
+        taskId: 'kid',
+        kind: 'agent' as const,
+        label: 'projB · Kid',
+        startedAt: 10,
+      };
+      const card: SystemMessage = {
+        id: 'card',
+        role: 'system',
+        variant: 'info',
+        source: 'background_notification_turn_started',
+        content: 'projB · Kid',
+        data: {
+          ...backgroundTurn,
+          backgroundTask: {
+            status: 'completed',
+            ...(fromSession ? { fromSession: { sessionId: 'kid' } } : {}),
+          },
+        },
+        backgroundTurn,
+      };
+      const c = mount([
+        userMsg('u1'),
+        asstMsg('a0'),
+        card,
+        toolMsg('g1'),
+        { ...asstMsg('a1'), backgroundTurn },
+      ]);
+      expect(isCollapsed(c, 'g1')).toBe(true);
+      expect(has(c, 'card')).toBe(visible);
+      expect(has(c, 'a1')).toBe(true);
+    },
+  );
 
   it('gives a turn of only an agent reply no final answer', () => {
     const c = mount([

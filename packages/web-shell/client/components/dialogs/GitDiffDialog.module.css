@@ -105,6 +105,7 @@
 }
 
 .diffLine {
+  direction: ltr;
   display: flex;
   min-height: 18px;
   line-height: 18px;

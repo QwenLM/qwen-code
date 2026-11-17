@@ -570,6 +570,7 @@
 }
 
 .lineOutput {
+  direction: ltr;
   margin-inline-start: 16px;
   font-size: 12px;
   color: var(--muted-foreground);
@@ -734,6 +735,7 @@
 }
 
 .expandedOutput {
+  direction: ltr;
   margin: 0;
   padding: 0;
   font-size: 12px;
