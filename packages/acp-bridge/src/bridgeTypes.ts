@@ -396,9 +396,14 @@ export interface BridgeSpawnRequest {
   sourceId?: string;
   approvalMode?: ApprovalMode;
   /** Worktree isolation metadata, set by the daemon route before spawn. */
-  worktree?: { slug: string; path: string; branch: string };
+  worktree?: {
+    slug: string;
+    path: string;
+    branch: string;
+    baseCommit?: string;
+  };
   /** Branch metadata, set by the daemon route before spawn. */
-  branch?: { name: string; baseBranch: string };
+  branch?: { name: string; baseBranch: string; baseCommit?: string };
   /**
    * Optional caller-supplied session id. When provided, the agent uses this
    * id instead of generating a random UUID. Must be validated at the route
@@ -536,11 +541,16 @@ export interface BridgeSession {
    */
   modelApplied?: boolean;
   /** Present when the session was created with worktree isolation. */
-  worktree?: { slug: string; path: string; branch: string };
+  worktree?: {
+    slug: string;
+    path: string;
+    branch: string;
+    baseCommit?: string;
+  };
   /** Set by the daemon route after durable worktree ownership is verified. */
   worktreeState?: 'persisted-v1';
   /** Present when the session was created with a new branch. */
-  branch?: { name: string; baseBranch: string };
+  branch?: { name: string; baseBranch: string; baseCommit?: string };
 }
 
 export interface BridgeRestoreSessionRequest {
@@ -973,7 +983,12 @@ export interface BridgeBranchSessionRequest {
 export interface BridgeSessionExecutionSnapshot {
   workspaceCwd: string;
   effectiveCwd: string;
-  worktree?: { slug: string; path: string; branch: string };
+  worktree?: {
+    slug: string;
+    path: string;
+    branch: string;
+    baseCommit?: string;
+  };
 }
 
 export interface BridgePersistedBranchedSession {
@@ -1283,9 +1298,14 @@ export interface BridgeSessionSummary {
   /** Quick color grouping tag; mutually exclusive with `groupId` in the UI. */
   color?: SessionGroupPresetColor | null;
   /** Present when the session was created with worktree isolation. */
-  worktree?: { slug: string; path: string; branch: string };
+  worktree?: {
+    slug: string;
+    path: string;
+    branch: string;
+    baseCommit?: string;
+  };
   /** Present when the session was created with a new branch. */
-  branch?: { name: string; baseBranch: string };
+  branch?: { name: string; baseBranch: string; baseCommit?: string };
   /**
    * GitHub PRs bound to the session, in binding order (last = latest). A
    * session can produce several PRs (stacked or follow-up work).
@@ -2147,7 +2167,12 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    */
   setSessionWorktree(
     sessionId: string,
-    worktree: { slug: string; path: string; branch: string },
+    worktree: {
+      slug: string;
+      path: string;
+      branch: string;
+      baseCommit?: string;
+    },
   ): void;
 
   /**

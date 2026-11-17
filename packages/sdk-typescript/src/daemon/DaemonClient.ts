@@ -1724,6 +1724,8 @@ export class DaemonClient {
     if (range) params.set('range', range);
     if (options?.all) params.set('all', '1');
     if (options?.search) params.set('search', options.search);
+    if (options?.excludeRefs?.length)
+      params.set('exclude', options.excludeRefs.join(','));
     const qs = params.toString();
     return await this.jsonRequest<DaemonGitLog>(
       `/workspace/git/log${qs ? `?${qs}` : ''}`,
@@ -8790,6 +8792,8 @@ export class WorkspaceDaemonClient {
     if (range) params.set('range', range);
     if (options?.all) params.set('all', '1');
     if (options?.search) params.set('search', options.search);
+    if (options?.excludeRefs?.length)
+      params.set('exclude', options.excludeRefs.join(','));
     if (options?.sessionId != null) params.set('sessionId', options.sessionId);
     const qs = params.toString();
     return this.client.workspaceJsonRequest<DaemonGitLog>(

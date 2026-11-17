@@ -1544,6 +1544,13 @@ export interface GitLogOptions {
    * of at least four characters also resolves as a commit hash prefix.
    */
   search?: string;
+  /**
+   * Single refs whose reachable commits are excluded from the window
+   * (`git log <range> --not <refs>`). Used to drop commits already covered by
+   * a bound PR. Every ref must pass the single-ref whitelist; an unsafe ref
+   * refuses the whole fetch (`null`) rather than silently running unscoped.
+   */
+  excludeRefs?: string[];
 }
 
 const LOG_ALL_REVISIONS = ['HEAD', '--branches', '--tags', '--remotes'];
@@ -1557,25 +1564,15 @@ function isSafeLogRange(range: string): boolean {
 }
 
 /**
- * Whether `ref` resolves to a commit reachable from HEAD (`git merge-base
- * --is-ancestor`). False when the ref is unsafe, unknown, or git fails —
- * callers gate range composition on this, so a failed probe must refuse the
- * boundary rather than trust it.
+ * A single ref (no range): the log-range whitelist minus any `..`, so an
+ * excluded ref can never smuggle a second revision or a flag into argv.
  */
-export async function isGitAncestorOfHead(
-  cwd: string,
-  ref: string,
-  env?: Readonly<Record<string, string | undefined>>,
-): Promise<boolean> {
-  const gitRoot = findGitRoot(cwd);
-  if (!gitRoot) return false;
-  if (ref.startsWith('-') || !/^[A-Za-z0-9_./~^-]+$/.test(ref)) return false;
-  const stdout = await runGit(
-    ['merge-base', '--is-ancestor', ref, 'HEAD'],
-    gitRoot,
-    env,
+function isSafeSingleRef(ref: string): boolean {
+  return (
+    !ref.startsWith('-') &&
+    !ref.includes('..') &&
+    /^[A-Za-z0-9_./~^-]+$/.test(ref)
   );
-  return stdout !== null;
 }
 
 function parseLogRecords(stdout: string): GitLogEntry[] {
@@ -1610,10 +1607,18 @@ export async function fetchGitLog(
   );
   const skip = Math.max(options?.skip ?? 0, 0);
   const revisions = options?.all
-    ? LOG_ALL_REVISIONS
+    ? [...LOG_ALL_REVISIONS]
     : options?.range && isSafeLogRange(options.range)
       ? [options.range]
       : [];
+  const excludeRefs = options?.excludeRefs ?? [];
+  if (excludeRefs.length > 0) {
+    // Fail closed: an unsafe excluded ref must not degrade into an unscoped
+    // walk that re-lists the very commits the exclusion exists to drop.
+    if (!excludeRefs.every(isSafeSingleRef)) return null;
+    if (revisions.length === 0) revisions.push('HEAD');
+    revisions.push('--not', ...excludeRefs);
+  }
   const search = options?.search?.trim();
   if (search) {
     return searchGitLog(gitRoot, revisions, search, limit, skip);

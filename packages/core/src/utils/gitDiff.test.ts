@@ -17,7 +17,6 @@ import {
   fetchGitLog,
   fetchGitCommitDetail,
   getGitWorkingTreeStatus,
-  isGitAncestorOfHead,
   MAX_DIFF_SIZE_BYTES,
   MAX_FILES,
   MAX_LINES_PER_FILE,
@@ -1956,55 +1955,77 @@ describe('getGitWorkingTreeStatus in a caller’s environment', () => {
   });
 });
 
-describe('isGitAncestorOfHead', () => {
+describe('fetchGitLog excludeRefs', () => {
   useFreshRepo({ 'a.txt': 'a' });
 
-  it('is true for a commit reachable from HEAD', async () => {
-    const first = await headSha(repo);
-    await commit(repo, { 'b.txt': 'b' }, 'second');
-    expect(await isGitAncestorOfHead(repo, first)).toBe(true);
-    expect(await isGitAncestorOfHead(repo, 'HEAD')).toBe(true);
-  });
-
-  it('is false for a divergent branch head', async () => {
+  it('drops commits reachable from an excluded head, keeping the rest', async () => {
     const base = await headSha(repo);
-    await git(repo, 'checkout', '-q', '-b', 'side');
-    await commit(repo, { 'side.txt': 's' }, 'side work');
-    const side = await headSha(repo);
-    await git(repo, 'checkout', '-q', 'main');
-    await commit(repo, { 'main.txt': 'm' }, 'main work');
-    expect(await isGitAncestorOfHead(repo, side)).toBe(false);
-    expect(await isGitAncestorOfHead(repo, base)).toBe(true);
-  });
-
-  it('is false for a squash-merged PR head (the merged-PR shape)', async () => {
-    // A squash merge absorbs the work into a NEW commit on main; the PR's
-    // original head stays reachable in the object database but is not an
-    // ancestor of HEAD — exactly the boundary the fallback must refuse.
-    await git(repo, 'checkout', '-q', '-b', 'pr');
+    // Fork the PR from base so the later loose commit is NOT reachable from
+    // the PR head and must survive the exclusion.
+    await git(repo, 'checkout', '-q', '-b', 'pr', base);
     await commit(repo, { 'pr.txt': 'p' }, 'PR work');
     const prHead = await headSha(repo);
     await git(repo, 'checkout', '-q', 'main');
-    await git(repo, 'merge', '-q', '--squash', 'pr');
-    await git(repo, 'commit', '-qm', 'squash-merge PR');
-    expect(await isGitAncestorOfHead(repo, prHead)).toBe(false);
-    expect(await isGitAncestorOfHead(repo, 'HEAD')).toBe(true);
-  });
+    await commit(repo, { 'loose.txt': 'l' }, 'loose work');
+    await git(repo, 'merge', '-q', '--no-ff', 'pr', '-m', 'merge PR');
 
-  it('is false for an unknown or unsafe ref', async () => {
-    expect(
-      await isGitAncestorOfHead(
-        repo,
-        'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
-      ),
-    ).toBe(false);
-    expect(await isGitAncestorOfHead(repo, '--upload-pack=evil')).toBe(false);
-    expect(await isGitAncestorOfHead(repo, 'HEAD;rm')).toBe(false);
-  });
+    const all = await fetchGitLog(repo, { range: `${base}..HEAD` });
+    expect(all?.entries.map((e) => e.subject)).toContain('PR work');
 
-  it('is false outside a git repository', async () => {
-    await inPlainDir(async (dir) => {
-      expect(await isGitAncestorOfHead(dir, 'HEAD')).toBe(false);
+    const excluded = await fetchGitLog(repo, {
+      range: `${base}..HEAD`,
+      excludeRefs: [prHead],
     });
+    const subjects = excluded?.entries.map((e) => e.subject) ?? [];
+    expect(subjects).not.toContain('PR work');
+    expect(subjects).toContain('loose work');
+  });
+
+  it('excludes the union of multiple incomparable heads (R7-2 shape)', async () => {
+    const base = await headSha(repo);
+    await git(repo, 'checkout', '-q', '-b', 'pr1');
+    await commit(repo, { 'p1.txt': '1' }, 'PR1 work');
+    const head1 = await headSha(repo);
+    await git(repo, 'checkout', '-q', 'main');
+    await git(repo, 'merge', '-q', '--no-ff', 'pr1', '-m', 'merge PR1');
+    await git(repo, 'checkout', '-q', '-b', 'pr2', base);
+    await commit(repo, { 'p2.txt': '2' }, 'PR2 work');
+    const head2 = await headSha(repo);
+    await git(repo, 'checkout', '-q', 'main');
+    await git(repo, 'merge', '-q', '--no-ff', 'pr2', '-m', 'merge PR2');
+
+    // Both heads are ancestors of HEAD but not of each other; excluding only
+    // the last-bound one would leave the sibling's commit in the window.
+    const one = await fetchGitLog(repo, {
+      range: `${base}..HEAD`,
+      excludeRefs: [head2],
+    });
+    expect(one?.entries.map((e) => e.subject)).toContain('PR1 work');
+
+    const both = await fetchGitLog(repo, {
+      range: `${base}..HEAD`,
+      excludeRefs: [head1, head2],
+    });
+    const subjects = both?.entries.map((e) => e.subject) ?? [];
+    expect(subjects).not.toContain('PR1 work');
+    expect(subjects).not.toContain('PR2 work');
+  });
+
+  it('refuses the fetch when an excluded ref is unsafe', async () => {
+    await commit(repo, { 'b.txt': 'b' }, 'second');
+    for (const bad of ['--upload-pack=evil', 'a..b', '-leading', 'HEAD;rm']) {
+      expect(
+        await fetchGitLog(repo, { range: 'HEAD', excludeRefs: [bad] }),
+      ).toBeNull();
+    }
+  });
+
+  it('excludes from HEAD when no range is given', async () => {
+    const base = await headSha(repo);
+    await commit(repo, { 'c.txt': 'c' }, 'later work');
+    const result = await fetchGitLog(repo, { excludeRefs: [base] });
+    const subjects = result?.entries.map((e) => e.subject) ?? [];
+    expect(subjects).toContain('later work');
+    expect(subjects).not.toContain('init');
   });
 });

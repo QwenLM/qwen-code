@@ -42,6 +42,8 @@ export function useChangeOverview(
   const { client, capabilities } = useWorkspace();
   const prFilesSupported =
     capabilities?.features?.includes('workspace_github_pr_files') === true;
+  const excludeRefsSupported =
+    capabilities?.features?.includes('workspace_git_log_exclude_refs') === true;
   const [refreshKey, setRefreshKey] = useState(0);
   const refresh = useCallback(() => setRefreshKey((key) => key + 1), []);
   const [state, setState] = useState<ChangeOverviewState>({
@@ -64,6 +66,7 @@ export function useChangeOverview(
       // session (or on failure) the overview still shows workspace git state.
       let boundPrs: DaemonSessionPrInfo[] = [];
       let baseBranch: string | undefined;
+      let startCommit: string | undefined;
       let gitCwd = workspaceCwd;
       if (sessionId) {
         let summary: DaemonSessionSummary | undefined;
@@ -91,6 +94,11 @@ export function useChangeOverview(
         // Legacy bindings without a source stay included.
         boundPrs = (summary?.prs ?? []).filter((pr) => pr.source !== 'review');
         baseBranch = summary?.branch?.baseBranch;
+        // The immutable commit the session started from (branch base or
+        // worktree base tip). Preferred fallback boundary; absent on legacy
+        // sessions, which fall back to the base branch or suppress.
+        startCommit =
+          summary?.branch?.baseCommit ?? summary?.worktree?.baseCommit;
         gitCwd = summary?.worktree?.path ?? workspaceCwd;
       }
 
@@ -140,10 +148,8 @@ export function useChangeOverview(
 
       // PR units: fetch each bound PR's file list. A failure (gh missing, old
       // daemon without the route) leaves the unit visible but 'unavailable'.
-      let latestPrHeadSha: string | undefined;
       let prResults: Array<{
         headSha: string | undefined;
-        headIsAncestor: boolean;
         unit: ChangeOverviewUnit;
       }> = [];
       if (prFilesSupported && boundPrs.length > 0) {
@@ -171,7 +177,6 @@ export function useChangeOverview(
             if (!result || result.available === false) {
               return {
                 headSha: undefined as string | undefined,
-                headIsAncestor: false,
                 unit: {
                   ...base,
                   state: 'unavailable',
@@ -186,7 +191,6 @@ export function useChangeOverview(
             }
             return {
               headSha: result.headSha || undefined,
-              headIsAncestor: result.headIsAncestor === true,
               unit: {
                 ...base,
                 state: 'ready',
@@ -205,76 +209,45 @@ export function useChangeOverview(
         );
         if (!active) return;
         units.push(...prResults.map((result) => result.unit));
-        // Bound PRs are ordered last = latest. The latest head is a trustworthy
-        // fallback boundary only when EVERY bound PR head is an ancestor of
-        // HEAD: a merged or rewritten PR anywhere in the set means the base
-        // history absorbed its work, and even an older ancestor head's window
-        // (<older>..HEAD) would straddle that history — re-listing main-only
-        // commits and the merged PR's squash commit as loose work. In that
-        // case fall back to the base-branch window (or suppress below when no
-        // baseline is known) instead of skipping to an older ancestor head.
-        if (prResults.every((result) => result.headIsAncestor)) {
-          latestPrHeadSha = prResults[prResults.length - 1]?.headSha;
-        }
       }
 
-      // Commit fallback: the loose window after the latest bound PR head (or
-      // since the base branch when there is no PR). Run only when every PR unit
-      // actually produced resolved a head: with the files capability absent no
-      // PR unit is produced, so the fallback still runs; but if any produced PR
-      // unit failed to resolve its head, that PR's commits could sit inside the
-      // window and be re-listed as loose work, so suppress the fallback.
+      // Commit fallback: the session's loose window — commits since the
+      // session start commit (else its base branch), minus every commit
+      // reachable from any bound PR head. Run only when every produced PR unit
+      // resolved a head: a unit that failed to resolve its head cannot be
+      // excluded, so its commits must not be re-listed as loose work.
       const showFallback = prResults.every(
         (result) => result.headSha !== undefined,
       );
+      // Reachability exclusion handles merged, parallel, and incomparable PR
+      // heads uniformly — no single-head boundary heuristic. Only passed when
+      // the daemon advertises the exclude capability; otherwise the window is
+      // unfiltered (PR units are absent or heads unresolved in that case).
+      const excludeRefs = excludeRefsSupported
+        ? prResults
+            .map((result) => result.headSha)
+            .filter((sha): sha is string => sha !== undefined)
+        : [];
       let commitsTruncated = false;
       if (showFallback) {
-        const range = commitFallbackRange(latestPrHeadSha, baseBranch);
-        // null = the base branch cannot survive the daemon's range whitelist.
-        // undefined with bound PRs = no trustworthy boundary (no head passed
-        // the ancestry probe and no base branch is known). Both skip the fetch
-        // rather than fall through to an unscoped walk that would re-list
-        // pre-session or PR-covered history. With no bound PRs, undefined
-        // keeps the designed "HEAD's recent history" walk. Key on boundPrs,
-        // not prResults: without the files capability no PR unit is produced
-        // even though the session has bindings, and those bindings' commits
-        // must not be re-listed as loose work either.
-        if (range !== null && !(range === undefined && boundPrs.length > 0)) {
-          let log = await ws
+        const range = commitFallbackRange(startCommit, baseBranch);
+        // A real window is required: `null` (unsafe ref) and `undefined` (no
+        // start commit and no base branch) both suppress the fallback. The
+        // overview never issues a range-less walk, which would re-list the
+        // repository's pre-session history as this session's loose work.
+        if (range) {
+          const log = await ws
             .workspaceGitLog(COMMIT_FALLBACK_LIMIT, 0, gitCwd, range, {
               sessionId,
+              ...(excludeRefs.length > 0 ? { excludeRefs } : {}),
             })
             .catch(() => undefined);
           if (!active) return;
-          // A thrown fetch (timeout, 5xx, dropped connection) is a retryable
-          // failure, not "no loose commits"; keep it distinct from a response.
-          let logFailed = log === undefined;
-          // A head that was an ancestor at probe time can still fail the log
-          // (e.g. a shallow clone); retry once with the base-branch window so
-          // the session's loose commits still surface instead of silently
-          // disappearing.
-          if (log && log.available === false && latestPrHeadSha !== undefined) {
-            const baseRange = commitFallbackRange(undefined, baseBranch);
-            // `undefined` is the "no baseline" sentinel, not a retry target:
-            // an omitted range would walk HEAD unscoped. `null` is refused
-            // outright. Only a real window is retried.
-            if (baseRange) {
-              const retry = await ws
-                .workspaceGitLog(COMMIT_FALLBACK_LIMIT, 0, gitCwd, baseRange, {
-                  sessionId,
-                })
-                .catch(() => undefined);
-              if (!active) return;
-              // A rejected retry must not erase the first response's
-              // unavailable verdict; keep the first response and fail below.
-              if (retry) log = retry;
-              else logFailed = true;
-            }
-          }
-          // A log the daemon reports unavailable (e.g. the range's head is not
-          // in the object database) or a thrown fetch is a retryable failure,
+          // A thrown fetch (timeout, 5xx, dropped connection) or a log the
+          // daemon reports unavailable (e.g. an unsafe excluded ref, or the
+          // start commit not in the object database) is a retryable failure,
           // not "no loose commits"; surface it instead of an empty session.
-          if (logFailed || !log || log.available === false) {
+          if (!log || log.available === false) {
             setState({
               gitAvailable: true,
               loadFailed: true,
@@ -347,7 +320,14 @@ export function useChangeOverview(
     return () => {
       active = false;
     };
-  }, [client, workspaceCwd, sessionId, prFilesSupported, refreshKey]);
+  }, [
+    client,
+    workspaceCwd,
+    sessionId,
+    prFilesSupported,
+    excludeRefsSupported,
+    refreshKey,
+  ]);
 
   return useMemo(() => ({ ...state, refresh }), [state, refresh]);
 }

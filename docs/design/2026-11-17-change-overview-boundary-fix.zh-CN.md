@@ -1,0 +1,148 @@
+# 变更总览：可信的 commit 兜底边界 + 加固
+
+语言：[English](./2026-11-17-change-overview-boundary-fix.md) | 中文
+
+#17378（已合入 `6db070d787`）的跟进。消除该 PR「已知限制」中记录的两条
+维护者接受的展示残留，并清理延后的加固清单。单个 PR，有序提交。
+
+## 问题
+
+变更总览的 commit 兜底列出「尚未被任何绑定 PR 覆盖」的提交。#17378 交付了
+两条仅展示的缺陷，作为残留风险接受：
+
+- **R7-1——完全没有边界。** 无绑定 PR 且无记录 `baseBranch` 的会话（默认
+  `POST /session` 形态，以及不记录 `baseBranch` 的 worktree 会话）落到对
+  HEAD 的无范围 `git log`。worktree 分支在基线顶端创建，其 HEAD 携带基线
+  分支历史；至多 `COMMIT_FALLBACK_LIMIT`（20）条会话前提交被渲染成本会话的
+  松散 `commit:` 单元。原始理由（「worktree 会话从零开始」）不成立。
+- **R7-2——绑定时间序非提交图序。** 边界取最后*绑定*的 PR head。两个绑定
+  head 都是 HEAD 祖先但彼此不可比时（绑定列表为「stacked 或互不相关」，按
+  `createdAt` 排序），`<lastBound>..HEAD` 把兄弟 PR 自己的提交重复列为松散
+  工作——这些提交已在该 PR 单元下展示。
+
+两者均为只读展示缺陷（无写入路径、无数据丢失）。所有相邻状态都已拒绝无范围
+遍历；这两条是不自洽的例外。
+
+## 现状（在 `6db070d787` 上核实）
+
+- `useChangeOverview.ts` 经 `commitFallbackRange` 组窗：最新祖先 PR head →
+  `<head>..HEAD`；否则 `baseBranch`（`'HEAD'` detached 哨兵映射为无基线）；
+  否则无绑定 PR 时无范围遍历。抑制以 `boundPrs.length` 与每个产出 PR 单元
+  解析出 head 为判据。
+- files 路由探测 `isGitAncestorOfHead` 并返回 `headIsAncestor`；hook 用它选
+  最新祖先 head。这正是 R7-2 击败的启发式（不可比祖先）。
+- `session.ts` 为分支会话解析 `baseCommit = getHeadCommit(workspaceCwd)`
+  （`:3269`）但仅用于回滚；`DaemonBranchInfo` 为 `{ name, baseBranch }`——
+  起点 commit **未持久化也未投影**。worktree 会话记录 `{ slug, path, branch }`，
+  无基线 commit。
+- `fetchGitLog`（`core/utils/gitDiff.ts`）接受 `{ limit, skip, range, all,
+search }`；log 路由（`workspace-git-log.ts`）转发 `range`/`search`。无法
+  排除从一组 ref 可达的提交。
+
+## 设计方案
+
+### 统一边界模型
+
+以单一规则取代「最新祖先 head」启发式：
+
+> 兜底窗口为 `<start>..HEAD`，`start` 为会话记录的起点 commit（否则其基线
+> 分支），再减去从任一绑定 PR head 可达的每个提交。无可信 `start` 时抑制兜底。
+
+一举修复两条残留：R7-1 因为永不发出无范围遍历（无 start → 抑制）；R7-2 因为
+排除按*每个*绑定 head 的可达性，而非对某个任意排序 head 求交。
+
+### 层 1——持久化会话起点 commit（cli + SDK）
+
+- `DaemonBranchInfo` 增 `baseCommit?: string`；`DaemonWorktreeInfo` 增
+  `baseCommit?: string`。
+- 分支会话：把已解析的 `baseCommit` 随 `branchMeta` 持久化并投影到摘要。
+- worktree 会话：在 `createUserWorktree` 前解析 `getHeadCommit(workspaceCwd)`
+  （worktree 创建所自的基线顶端）并持久化到 `worktreeMeta`。
+- 普通会话：不记录起点 commit（本不存在）。
+- status 路由水合与摘要投影转发新字段；无此字段的 legacy 会话保持 `undefined`。
+
+### 层 2——log 路由的可达性排除（core + cli + SDK）
+
+- `fetchGitLog` 增 `excludeRefs?: string[]`。存在时修订列表在 range 后追加
+  `--not <ref…>`，git 原生返回窗口减去从任一排除 ref 可达的提交。单次 git
+  调用；无逐条目祖先调用。
+- 每个排除 ref 按单 ref 白名单校验（`isSafeLogRange` 字符集、无前导 `-`/`..`）；
+  不安全 ref 使整个排除集落入拒绝（`available:false`）结果，而非静默无范围
+  运行——与 range 守卫相同的 fail-closed 姿态。
+- log 路由增 additive `exclude` 查询参数（逗号分隔 ref）。缺省 → 行为不变。
+  新 capability tag `workspace_git_log_exclude_refs` 声明之；钉死基线
+  （server.test.ts、capability-parity.ts、集成信封）更新。
+- SDK `workspaceGitLog` 增可选 `excludeRefs` 参数，作为 `exclude` 转发。
+
+### 层 3——hook 重写（web-shell）
+
+- 边界优先级：`branch.baseCommit ?? worktree.baseCommit` → `<start>..HEAD`；
+  否则 `baseBranch`（非 `'HEAD'`、白名单安全）→ `<base>..HEAD`；否则**抑制**
+  （永不再无范围遍历）。
+- exclude 能力存在且 PR head 已解析时，把每个绑定 PR `headSha` 作为
+  `excludeRefs` 传入。可达性排除统一处理已合并、并行、不可比 head。
+- 保留守卫：任一产出 PR 单元未解析出 head 则抑制兜底（其提交无法被排除，
+  故不得重新列出）。
+- 退役冗余的祖先启发式：从 files 路由移除 `headIsAncestor` 探针、SDK 字段、
+  hook 的祖先 head 选择。若无消费方残留则移除 `isGitAncestorOfHead` 及其测试
+  （排除模型已涵盖；保留两者是冗余面）。
+- `commitFallbackRange` 由起点 commit 组合器取代，保留三值契约
+  （字符串 / `null` 拒绝 / `undefined` 抑制）。
+
+### 层 4——加固清单（测试 + 小修，无行为变化）
+
+清理廉价且带见证的延后项：
+
+- status 路由：测水合 `catch`（不可读 sidecar 仍提供摘要）；测 files 路由
+  `?cwd=` 正向解析。
+- core：断言 spawn 的 fallback gh binary；SDK 空 slug 抑制测试。
+- 面板：钉住控制字符净化、unavailable-cause 精度、空消息存在、不可用 PR 的
+  totals 省略、失败时 Refresh 可用、badge 抑制臂；为范围选择器实现 ARIA tab
+  契约（`role=tablist/tab`、`aria-selected`、Arrow/Home/End 键盘）（长期 D4-1）。
+- `changeOverviewAvailable` JSDoc 措辞；README 右面板枚举；bridge PR entry
+  `source` 类型。
+
+每个行为守卫配击杀变异见证（字节级还原）。
+
+## 关键设计决策
+
+- **可达性排除优于成对祖先。** `git log <range> --not <heads>` 是单次原生
+  调用，恰好表达「不被任何绑定 PR 覆盖」；成对 `is-ancestor` 探针需 N×M 次
+  调用且仍需边界。排除也使祖先探针冗余，故移除而非保留为死面。
+- **抑制，绝不无范围遍历。** 无 start 情形抑制而非遍历 HEAD。这是所有相邻
+  拒绝的一致延伸，彻底移除 R7-1 的证伪前提。
+- **exclude 参数用新 capability tag。** 声明 `workspace_github_pr_files` 但
+  早于 `exclude` 的 daemon 会忽略该参数返回未过滤条目（偏移窗口内重复回归）；
+  独立 tag 让 hook 按实际支持门控排除。
+- **起点 commit 不可变。** 创建时记录一次；绝不从当前 HEAD（会移动）重算。
+  无此字段的 legacy 会话抑制。
+
+## 涉及文件
+
+- `packages/sdk-typescript/src/daemon/types.ts`、`DaemonClient.ts`、`index.ts`
+  （+ 测试）：`baseCommit` 字段、`excludeRefs` 参数、tag 类型。
+- `packages/core/src/utils/gitDiff.ts`（+ 测试）：`excludeRefs`；若无用则移除
+  `isGitAncestorOfHead`。
+- `packages/cli/src/serve/routes/session.ts`（+ server.test.ts）：持久化/投影
+  起点 commit；水合 catch 测试。
+- `packages/cli/src/serve/routes/workspace-git-log.ts`（+ 测试）：`exclude`。
+- `packages/cli/src/serve/routes/workspace-github-prs.ts`（+ 测试）：移除探针；
+  `?cwd=` 正向测试。
+- `packages/cli/src/serve/capabilities.ts`、`capability-parity.ts`、
+  `server.test.ts`、`integration-tests/cli/qwen-serve-routes.test.ts`：新 tag。
+- `packages/web-shell/client/components/artifacts/`：hook 重写、面板 ARIA +
+  加固测试、`change-overview.ts` 组合器。
+- `packages/web-shell/client/App.tsx`、`main.tsx`、`customization.tsx`、
+  `README.md`：JSDoc/枚举/类型。
+- `packages/acp-bridge/src/bridgeTypes.ts`：PR entry `source` 类型。
+- `docs/design/2026-11-16-web-shell-change-overview*.md`：已知限制 → 已解决。
+
+## 范围边界
+
+- 只读。不新增 stage/commit/push/创建 PR 行为。
+- exclude 参数 additive；既有 log 消费方不受影响。
+- 加固项为测试钉住 + ARIA 契约；无无关重构。
+
+## 待决问题
+
+- 是否额外提供「整个会话」净 diff 范围。仍延后；已确认模型不要求。

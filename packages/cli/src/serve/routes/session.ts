@@ -3101,10 +3101,12 @@ export function registerSessionRoutes(
       }
     }
 
-    let branchMeta: { name: string; baseBranch: string } | undefined;
+    let branchMeta:
+      | { name: string; baseBranch: string; baseCommit?: string }
+      | undefined;
     let branchBaseCommit: string | undefined;
     let worktreeMeta:
-      | { slug: string; path: string; branch: string }
+      | { slug: string; path: string; branch: string; baseCommit?: string }
       | undefined;
     let worktreeDurablyAttached = false;
     let spawnCompleted = false;
@@ -3322,7 +3324,7 @@ export function registerSessionRoutes(
           });
           return;
         }
-        branchMeta = { name: branchName, baseBranch };
+        branchMeta = { name: branchName, baseBranch, baseCommit };
         branchBaseCommit = baseCommit;
         sessionScope = 'thread';
       }
@@ -3385,6 +3387,11 @@ export function registerSessionRoutes(
         const baseBranch = await wtService
           .getCurrentBranch()
           .catch(() => undefined);
+        // The base tip the worktree is created from — the session's start
+        // commit, captured before HEAD moves into the new worktree branch.
+        const worktreeBaseCommit = await getHeadCommit(workspaceCwd).catch(
+          () => undefined,
+        );
         assertRuntimeGenerationOpen?.();
         const wtResult = await wtService.createUserWorktree(slug, baseBranch);
         if (!wtResult.success || !wtResult.worktree) {
@@ -3398,6 +3405,7 @@ export function registerSessionRoutes(
           slug,
           path: wtResult.worktree.path,
           branch: wtResult.worktree.branch,
+          baseCommit: worktreeBaseCommit,
         };
         // Worktree sessions must be independent — never coalesce onto an
         // existing single-scope session that lives in the main checkout.

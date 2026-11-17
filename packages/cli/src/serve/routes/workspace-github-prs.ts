@@ -15,7 +15,6 @@ import {
   type FetchGitHubPullRequestFilesResult,
 } from '@qwen-code/qwen-code-core';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
-import { isGitAncestorOfHead } from '@qwen-code/qwen-code-core/utils/gitDiff.js';
 import type { SendBridgeError } from '../server/error-response.js';
 import { safeBody } from '../server/request-helpers.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
@@ -282,27 +281,14 @@ export function registerWorkspaceQualifiedGitHubPrsRoutes(
           repo,
         );
         switch (result.kind) {
-          case 'ok': {
-            // The client scopes its commit-fallback window to <head>..HEAD;
-            // that boundary is only trustworthy when the head is an ancestor
-            // of HEAD (a merged or rewritten PR's head is not). Probe it here
-            // where git runs; a failed probe refuses the boundary.
-            const headIsAncestor = result.files.headSha
-              ? await isGitAncestorOfHead(
-                  cwd,
-                  result.files.headSha,
-                  runtime.env.effectiveEnv,
-                )
-              : false;
+          case 'ok':
             res.status(200).json({
               v: 1,
               workspaceCwd: runtime.workspaceCwd,
               available: true,
               ...result.files,
-              headIsAncestor,
             });
             return;
-          }
           case 'not_a_repo':
             res.status(200).json({
               v: 1,
@@ -313,7 +299,6 @@ export function registerWorkspaceQualifiedGitHubPrsRoutes(
               additions: 0,
               deletions: 0,
               headSha: '',
-              headIsAncestor: false,
             });
             return;
           case 'cli_unavailable':

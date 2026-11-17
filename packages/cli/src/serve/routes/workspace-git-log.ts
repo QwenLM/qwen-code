@@ -121,12 +121,21 @@ async function handleLogList(
       typeof rawSearch === 'string' && rawSearch.trim()
         ? rawSearch.trim().slice(0, MAX_SEARCH_CHARS)
         : undefined;
+    const rawExclude = req.query['exclude'];
+    const excludeRefs =
+      typeof rawExclude === 'string' && rawExclude.trim()
+        ? rawExclude
+            .split(',')
+            .map((ref) => ref.trim())
+            .filter((ref) => ref.length > 0)
+        : undefined;
     const result = await fetchGitLog(workspaceCwd, {
       limit,
       skip,
       range,
       all: req.query['all'] === '1',
       search,
+      excludeRefs,
     });
     res.status(200).json(buildLogList(workspaceCwd, result));
   } catch (err) {

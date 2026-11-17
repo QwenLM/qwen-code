@@ -748,9 +748,14 @@ interface SessionEntry {
     released: boolean;
   };
   /** Worktree isolation metadata, when created with worktree param. */
-  worktree?: { slug: string; path: string; branch: string };
+  worktree?: {
+    slug: string;
+    path: string;
+    branch: string;
+    baseCommit?: string;
+  };
   /** Branch metadata, when created with branch param. */
-  branch?: { name: string; baseBranch: string };
+  branch?: { name: string; baseBranch: string; baseCommit?: string };
   /** GitHub PRs bound via updateSessionMetadata, in binding order. */
   prs?: SessionPrInfo[];
   channel: AcpChannel;
@@ -5595,8 +5600,13 @@ export function createSessionControlPlane(
     parentSessionId?: string,
     sourceType?: string,
     sourceId?: string,
-    worktree?: { slug: string; path: string; branch: string },
-    branch?: { name: string; baseBranch: string },
+    worktree?: {
+      slug: string;
+      path: string;
+      branch: string;
+      baseCommit?: string;
+    },
+    branch?: { name: string; baseBranch: string; baseCommit?: string },
     requestedSessionId?: string,
     daemonOwnedStandaloneCreation = false,
     onNewSessionDispatch?: () => void,
@@ -7564,8 +7574,13 @@ export function createSessionControlPlane(
       parentSessionId?: string;
       sourceType?: string;
       sourceId?: string;
-      worktree?: { slug: string; path: string; branch: string };
-      branch?: { name: string; baseBranch: string };
+      worktree?: {
+        slug: string;
+        path: string;
+        branch: string;
+        baseCommit?: string;
+      };
+      branch?: { name: string; baseBranch: string; baseCommit?: string };
     } = {},
   ): SessionEntry => {
     const childSnapshot = ci.harness.activeWork?.snapshot;

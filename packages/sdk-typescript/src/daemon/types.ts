@@ -454,6 +454,13 @@ export interface DaemonGitLogOptions {
   all?: boolean;
   /** Keep only commits whose message, author, or hash matches. */
   search?: string;
+  /**
+   * Single refs whose reachable commits are excluded from the window. Used
+   * to drop commits already covered by a bound PR. Requires the
+   * `workspace_git_log_exclude_refs` capability; an unsafe ref makes the
+   * daemon refuse the fetch (`available:false`).
+   */
+  excludeRefs?: string[];
 }
 
 /** Response from `GET /workspace/git/log`. */
@@ -741,13 +748,6 @@ export interface DaemonGitHubPullRequestFiles {
   deletions: number;
   /** The PR head commit (`headRefOid`), for scoping commit fallback. */
   headSha: string;
-  /**
-   * Whether `headSha` is an ancestor of the checkout's HEAD. Only an
-   * ancestor head is a trustworthy commit-fallback boundary; a merged or
-   * rewritten PR's head is not. Absent on daemons that predate the probe —
-   * treat as false.
-   */
-  headIsAncestor?: boolean;
 }
 
 /** Response from `POST /workspaces/:workspace/github/prs/create`. */
@@ -1443,12 +1443,24 @@ export interface DaemonWorktreeInfo {
   slug: string;
   path: string;
   branch: string;
+  /**
+   * The base tip the worktree was created from — the session's start commit.
+   * Immutable; absent on worktrees persisted before this field. The commit
+   * fallback scopes its window to `<baseCommit>..HEAD`.
+   */
+  baseCommit?: string;
 }
 
 /** Branch metadata returned when a session is created with a new branch. */
 export interface DaemonBranchInfo {
   name: string;
   baseBranch: string;
+  /**
+   * The HEAD the branch was created from — the session's start commit.
+   * Immutable; absent on branches persisted before this field. The commit
+   * fallback scopes its window to `<baseCommit>..HEAD`.
+   */
+  baseCommit?: string;
 }
 
 /** GitHub pull request bound to a session (e.g. created from the Web Shell Git dialog). */

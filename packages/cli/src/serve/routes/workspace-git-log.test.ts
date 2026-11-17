@@ -193,6 +193,45 @@ describe('workspace Git log routes', () => {
     });
   });
 
+  it('passes the exclude query parameter through as excludeRefs', async () => {
+    fetchGitLogMock.mockResolvedValue({ entries: [], hasMore: false });
+    const app = express();
+    registerWorkspaceGitLogRoutes(app, {
+      boundWorkspace: '/work/main',
+      sendBridgeError,
+    });
+
+    await request(app).get(
+      '/workspace/git/log?range=main..HEAD&exclude=abc123,def456',
+    );
+
+    expect(fetchGitLogMock).toHaveBeenCalledWith('/work/main', {
+      limit: 50,
+      skip: 0,
+      range: 'main..HEAD',
+      all: false,
+      excludeRefs: ['abc123', 'def456'],
+    });
+  });
+
+  it('trims and drops blank entries in the exclude parameter', async () => {
+    fetchGitLogMock.mockResolvedValue({ entries: [], hasMore: false });
+    const app = express();
+    registerWorkspaceGitLogRoutes(app, {
+      boundWorkspace: '/work/main',
+      sendBridgeError,
+    });
+
+    await request(app).get('/workspace/git/log?exclude=%20abc123%20,,def456,');
+
+    expect(fetchGitLogMock).toHaveBeenCalledWith('/work/main', {
+      limit: 50,
+      skip: 0,
+      all: false,
+      excludeRefs: ['abc123', 'def456'],
+    });
+  });
+
   it('omits range when the query parameter is absent or blank', async () => {
     fetchGitLogMock.mockResolvedValue({ entries: [], hasMore: false });
     const app = express();
