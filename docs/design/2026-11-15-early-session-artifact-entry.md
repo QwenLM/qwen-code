@@ -2,7 +2,8 @@
 
 [English](2026-11-15-early-session-artifact-entry.md) | [简体中文](2026-11-15-early-session-artifact-entry.zh-CN.md)
 
-Status: implemented (scope A); scope B proposed.
+Status: implemented (scopes A and B). Scope B shipped in
+[session-list artifact summary](2026-11-17-session-list-artifact-summary.md).
 
 ## Problem statement
 
@@ -80,9 +81,10 @@ Relevant baseline behavior (before this change):
 
 ## Non-goals / scope boundaries
 
-- Scope A only: embed the artifact list in the `/load` (and `/resume`) response.
-  Scope B (artifact summary in the session-list metadata for click-time display)
-  is a follow-up and is not implemented here.
+- This design covers scope A only: embed the artifact list in the `/load` (and
+  `/resume`) response. Scope B (artifact summary in the session-list metadata
+  for click-time display) shipped separately in
+  [session-list artifact summary](2026-11-17-session-list-artifact-summary.md).
 - The per-turn `TurnOutputs` chips are unchanged; they still wait for the replay.
 - No change to the artifact panel's live-update path (`artifactsVersion` events).
 - No new artifact storage format or sidecar.
@@ -222,5 +224,6 @@ Relevant baseline behavior (before this change):
 
 ## Open questions
 
-- Scope B follow-up: artifact-summary sidecar for click-time display in the
-  session list.
+- None remaining. The scope B follow-up (artifact-summary sidecar for
+  click-time display in the session list) is implemented in
+  [session-list artifact summary](2026-11-17-session-list-artifact-summary.md).

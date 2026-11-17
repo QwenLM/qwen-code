@@ -103,7 +103,8 @@ clicked, using the list data the sidebar already holds.
   directory, shape `{ version: 1, artifactCount: number, updatedAt: string }`.
   Atomic best-effort write (returns boolean), validated read (version, safe
   non-negative integer count capped at `MAX_PERSISTED_ARTIFACTS`, string
-  timestamp), move and remove helpers.
+  timestamp) with sync and async variants sharing one shape check, move and
+  remove helpers.
 - The event payload gains an optional `artifactCount` field: the store's
   authoritative **restorable** count (the same filter as the snapshot payload:
   non-ephemeral, excluding non-snapshot published file URLs), computed in
@@ -129,6 +130,10 @@ clicked, using the list data the sidebar already holds.
   conflict resolution discards the dropped side's sidecar (the kept
   transcript's artifact set is different, so the dropped count must not
   transfer).
+- Working-directory relocation (`Config.getCurrentSessionArtifactMoves`)
+  carries the sidecar with the transcript and the other display sidecars, so
+  a `/cd` neither strands the count in the old project nor re-exposes a
+  stale count beside the transcript on the way back.
 
 ### Server: summaries carry the count
 
@@ -140,9 +145,13 @@ clicked, using the list data the sidebar already holds.
 - `BridgeSessionSummary` and `DaemonSessionSummary` gain optional
   `artifactCount?: number` (wire mirrors, kept synchronized).
 - `session-list.ts` gains `enrichArtifactSummaries`, called beside
-  `enrichPrSidecars` at all three enrichment sites. It reads the sidecar
-  best-effort per session and sets the count when non-zero; an unreadable or
-  absent sidecar leaves the field unset (unknown, not zero).
+  `enrichPrSidecars` at all three enrichment sites. It awaits an async
+  sidecar read per session — like the sibling enrichers, so a mid-scan abort
+  is observable and a large scan (up to `MAX_ORGANIZED_SESSIONS`) does not
+  stall the event loop — and sets the count when non-zero. An unreadable or
+  absent sidecar leaves the field unset on a persisted summary (unknown, not
+  zero); on a live summary, absence means zero because the in-memory store
+  is authoritative.
 
 ### Client: click-time hint, retired by authoritative data
 
@@ -241,11 +250,13 @@ clicked, using the list data the sidebar already holds.
 
 ## Validation plan
 
-- Unit: sidecar read/write validation; event payload count preservation and
-  fork strip; recording-service sidecar writes (event with/without count,
-  snapshot); load seed; library removal update; archive/delete/conflict
-  handling; store `count()`; `toSessionSummary` include/omit; enrichment on
-  all list paths; merge drops stale count; optimistic hint keying and clear;
+- Unit: sidecar read/write validation (sync and async readers); event payload
+  count preservation and fork strip; recording-service sidecar writes (event
+  with/without count, snapshot); load seed; library removal update
+  (remaining-count arithmetic, single and batch); archive/delete/conflict
+  handling; working-directory relocation; store `count()`;
+  `toSessionSummary` include/omit; enrichment on all list paths, including a
+  mid-scan abort; merge drops stale count; optimistic hint keying and clear;
   hook hint validity (cache/snapshot retirement, cross-session keying);
   header count fallback; sidebar threading.
 - Mutation witnesses: revert each load-bearing guard (keying, retirement,

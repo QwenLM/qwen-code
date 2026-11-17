@@ -2,7 +2,8 @@
 
 [English](2026-11-15-early-session-artifact-entry.md) | [简体中文](2026-11-15-early-session-artifact-entry.zh-CN.md)
 
-状态：已实现（范围 A）；范围 B 为提案。
+状态：已实现（范围 A 与范围 B）。范围 B 已在
+[会话列表产物摘要](2026-11-17-session-list-artifact-summary.zh-CN.md)中落地。
 
 ## 问题陈述
 
@@ -64,8 +65,9 @@ replay。只要列表早到，入口就能早显示。
 
 ## 非目标 / 范围边界
 
-- 仅范围 A：把 artifact 列表内嵌进 `/load`（及 `/resume`）响应。范围 B（会话列表
-  元数据中的产物摘要，用于点击即现）是后续，不在本次实现。
+- 本设计仅覆盖范围 A：把 artifact 列表内嵌进 `/load`（及 `/resume`）响应。范围 B
+  （会话列表元数据中的产物摘要，用于点击即现）已在
+  [会话列表产物摘要](2026-11-17-session-list-artifact-summary.zh-CN.md)中单独实现。
 - 按轮 `TurnOutputs` 芯片不变，仍等 replay。
 - 不改变产物面板的 live 更新路径（`artifactsVersion` 事件）。
 - 不新增 artifact 存储格式或 sidecar。
@@ -180,4 +182,5 @@ replay。只要列表早到，入口就能早显示。
 
 ## 开放问题
 
-- 范围 B 后续：用于会话列表点击即现的产物摘要 sidecar。
+- 无遗留。范围 B 后续（用于会话列表点击即现的产物摘要 sidecar）已在
+  [会话列表产物摘要](2026-11-17-session-list-artifact-summary.zh-CN.md)中实现。

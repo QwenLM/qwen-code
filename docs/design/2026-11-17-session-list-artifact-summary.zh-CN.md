@@ -87,7 +87,8 @@
   `<sessionId>.artifacts.json`，形状
   `{ version: 1, artifactCount: number, updatedAt: string }`。原子尽力写入
   （返回 boolean）、带校验的读取（version、安全非负整数且不超过
-  `MAX_PERSISTED_ARTIFACTS`、字符串时间戳）、move 与 remove 助手。
+  `MAX_PERSISTED_ARTIFACTS`、字符串时间戳），同步与异步两个变体共享同一
+  形状校验、move 与 remove 助手。
 - event payload 增加可选 `artifactCount` 字段：store 的权威**可恢复**数量
   （与 snapshot payload 同一过滤条件：非 ephemeral、排除非快照的 published
   file URL），在 `persistChanges` 构造 payload 时计算。
@@ -107,6 +108,9 @@
 - `SessionService` 增加按归档状态的路径助手；archive/unarchive 与其他
   sidecar 一起移动它；会话删除移除它；冲突解决丢弃被丢弃一方的 sidecar
   （保留 transcript 的产物集不同，被丢弃的数量不能转移）。
+- 工作目录搬迁（`Config.getCurrentSessionArtifactMoves`）把 sidecar 与
+  transcript 及其他展示用 sidecar 一起带走，因此 `/cd` 既不会把数量遗留在
+  旧项目，也不会在切回时让陈旧数量重新出现在 transcript 旁。
 
 ### 服务端：摘要携带数量
 
@@ -118,8 +122,11 @@
 - `BridgeSessionSummary` 与 `DaemonSessionSummary` 增加可选
   `artifactCount?: number`（wire 镜像，保持同步）。
 - `session-list.ts` 增加 `enrichArtifactSummaries`，在三处增强点与
-  `enrichPrSidecars` 并列调用。逐会话尽力读取 sidecar，非零时设置数量；
-  sidecar 不可读或缺席时保持字段未设置（未知，而非零）。
+  `enrichPrSidecars` 并列调用。逐会话 await 异步 sidecar 读取——与兄弟
+  增强器一致，使扫描中途的 abort 可被观察，且大扫描（至
+  `MAX_ORGANIZED_SESSIONS`）不会阻塞事件循环——非零时设置数量。sidecar
+  不可读或缺席时，持久化摘要保持字段未设置（未知，而非零）；live 摘要上
+  缺省即为零，因为内存 store 是权威的。
 
 ### 客户端：点击时刻的 hint，被权威数据退役
 
@@ -202,12 +209,13 @@
 
 ## 验证计划
 
-- 单测：sidecar 读写校验；event payload 数量保留与 fork 剥离；
-  recording-service sidecar 写入（带/不带数量的 event、snapshot）；load
-  播种；库删除更新；archive/delete/冲突处理；store `count()`；
-  `toSessionSummary` 携带/省略；全部列表路径的增强；合并丢弃陈旧数量；
-  乐观 hint 键控与清空；hook hint 有效性（缓存/快照退役、跨会话键控）；
-  头部数量回退；侧栏传递。
+- 单测：sidecar 读写校验（同步与异步读取器）；event payload 数量保留与
+  fork 剥离；recording-service sidecar 写入（带/不带数量的 event、
+  snapshot）；load 播种；库删除更新（剩余数量算术，单个与批量）；
+  archive/delete/冲突处理；工作目录搬迁；store `count()`；
+  `toSessionSummary` 携带/省略；全部列表路径的增强（含扫描中途 abort）；
+  合并丢弃陈旧数量；乐观 hint 键控与清空；hook hint 有效性（缓存/快照
+  退役、跨会话键控）；头部数量回退；侧栏传递。
 - 变异见证：回退每个承重守卫（键控、退役、合并丢弃、fork 剥离、播种），
   展示配对测试变红。
 - E2E（真实 daemon + 无头 Chromium，网络时序为承重证据）：冷打开带
