@@ -1,7 +1,14 @@
 {
-  "repo": "/Users/ethanye/Projects/qwen-code",
+  "repo": "qwen-code working tree (15,134 searchable corpus entries at measurement time; tracked plus untracked, so a commit SHA alone does not pin it)",
+  "commit": "9f223d508aa35d61543f00e40d92f84248fd3f99 (PR #17530 head when measured)",
   "date": "2026-11-17T05:18:39.832Z",
-  "note": "main fallback strategies FIXED (git-aware corpus); preview rg unchanged",
+  "engines": {
+    "git": "2.50.1 (Apple Git-155)",
+    "grep": "BSD grep 2.6.0-FreeBSD",
+    "rg": "ripgrep 15.0.0"
+  },
+  "cpu": "Apple M4, 10 cores",
+  "note": "main fallback strategies FIXED (git-aware corpus); preview rg unchanged. Measured argv for 'main:system-grep FIXED' (bench-grep-fixed.mjs, mirroring grepOverFileList): grep -n -H -E --null --ignore-case -e P -- <corpus batched at 128KiB>. The --ignore-case was added by the harness to normalize against git grep and the rg -i group; at measurement time the shipped scoped argv did NOT pass it, which is why the original report's parity claim needed qualifying. During review the flag was added to the shipped argv too, so 50572 now IS the shipped behaviour and matches strategy 1's 50567 modulo binary handling (see report.html section 3(2)). Supplementary re-measurement of 2026-11-17 on this PR's worktree with the then-shipped argv (no -i; corpus 15197 entries vs 15134 here, the tree having since gained files; 8 batches): 47796 matches in 3689ms of grep time, versus 50690 matches in 6884ms with --ignore-case. Note the grep implementation matters for binary files: BSD grep writes 'Binary file <path> matches' to stdout while GNU grep writes it to stderr, so these counts are not portable to Linux. The harness corpus was the raw ls-files output; the lstat filter added during review dropped 0 of the 15197 entries in that re-measurement. 'main:JS-fallback FIXED' needs no case caveat: the JS strategy really does use new RegExp(pattern, 'i'). Its files-searched figure counts readFile calls, not enumeration - the globStream walk still traverses the whole tree (37071 entries yielded on this worktree against a 15197-entry corpus).",
   "results": [
     {
       "pattern": "common word",
