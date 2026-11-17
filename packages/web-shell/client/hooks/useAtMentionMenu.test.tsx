@@ -3054,3 +3054,102 @@ describe('useAtMentionMenu', () => {
     });
   });
 });
+
+describe('cancelled @-mention cache ownership', () => {
+  it('keeps the latest directory query when an older abort settles late', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    let rejectFirst!: (reason: unknown) => void;
+    let firstSignal!: AbortSignal;
+    const listDirectory = vi
+      .fn()
+      .mockImplementationOnce((_path, options) => {
+        firstSignal = options.signal;
+        return new Promise((_resolve, reject) => {
+          rejectFirst = reject;
+        });
+      })
+      .mockResolvedValue({
+        kind: 'list',
+        path: '.',
+        truncated: false,
+        entries: [{ name: 'package.json', kind: 'file', ignored: false }],
+      });
+    try {
+      mount({ actions: { listDirectory } });
+      act(() => latest!.refreshForView(makeView('@pac')));
+      await runDebounce();
+      act(() => latest!.refreshForView(makeView('@pack')));
+      await runDebounce();
+      expect(firstSignal.aborted).toBe(true);
+      await act(async () => {
+        rejectFirst(new DOMException('aborted', 'AbortError'));
+      });
+      expect(latest!.state?.items.map((item) => item.label)).toEqual([
+        'package.json',
+      ]);
+      expect(listDirectory).toHaveBeenCalledTimes(2);
+      act(() => latest!.refreshForView(makeView('@packa')));
+      await runDebounce();
+      expect(latest!.state?.items.map((item) => item.label)).toEqual([
+        'package.json',
+      ]);
+      expect(listDirectory).toHaveBeenCalledTimes(2);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('keeps the latest MCP filter when an older abort settles late', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    let rejectFirst!: (reason: unknown) => void;
+    let firstSignal!: AbortSignal;
+    const loadMcpResources = vi
+      .fn()
+      .mockImplementationOnce((_server, options) => {
+        firstSignal = options.signal;
+        return new Promise((_resolve, reject) => {
+          rejectFirst = reject;
+        });
+      })
+      .mockResolvedValue({ resources: [{ uri: 'res://two', name: 'Two' }] });
+    try {
+      mount({
+        view: makeView('@'),
+        actions: {
+          loadMcpStatus: vi.fn().mockResolvedValue({
+            servers: [
+              {
+                kind: 'mcp_server',
+                name: 'docs',
+                disabled: false,
+                resourceCount: 1,
+              },
+            ],
+          }),
+          loadMcpResources,
+        },
+      });
+      act(() => latest!.refreshForView(makeView('@')));
+      act(() => latest!.enterCategory(2));
+      await runDebounce();
+      act(() => latest!.accept(0));
+      await runDebounce();
+      act(() => latest!.updateSearch('two'));
+      await runDebounce();
+      expect(firstSignal.aborted).toBe(true);
+      await act(async () => {
+        rejectFirst(new DOMException('aborted', 'AbortError'));
+      });
+      expect(latest!.state?.items.map((item) => item.label)).toEqual(['Two']);
+      expect(loadMcpResources).toHaveBeenCalledTimes(2);
+      act(() => latest!.updateSearch('tw'));
+      await runDebounce();
+      expect(latest!.state?.items.map((item) => item.label)).toEqual(['Two']);
+      expect(loadMcpResources).toHaveBeenCalledTimes(2);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});

@@ -7,9 +7,96 @@ import {
   escapeGlobQuery,
   fileReferenceInsertText,
   fileSearchGlobPattern,
+  type AtMentionWorkspaceActions,
 } from './useAtMentionSources';
 
+function globProvider(
+  globWorkspace: AtMentionWorkspaceActions['globWorkspace'],
+) {
+  const cache = createBuiltinProviderCache();
+  return createFileProvider(
+    () => ({ globWorkspace }),
+    () => '.',
+    () => cache,
+    'Files',
+    '',
+    () => null,
+  );
+}
+
 describe('useAtMentionSources helpers', () => {
+  it('restarts an aborted glob lookup without losing its replacement cache', async () => {
+    let rejectFirst!: (error: Error) => void;
+    const globWorkspace = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise((_resolve, reject) => {
+            rejectFirst = reject;
+          }),
+      )
+      .mockResolvedValue({ matches: ['package.json'] });
+    const provider = globProvider(globWorkspace);
+    const first = new AbortController();
+    const second = new AbortController();
+    const stale = provider.search({ query: 'pack', signal: first.signal });
+    first.abort();
+    const current = provider.search({ query: 'pack', signal: second.signal });
+    const settled = Promise.allSettled([stale, current]);
+
+    rejectFirst(new DOMException('Aborted', 'AbortError'));
+    expect(await settled).toMatchObject([
+      { status: 'rejected', reason: { name: 'AbortError' } },
+      { status: 'fulfilled', value: [{ label: 'package.json' }] },
+    ]);
+    second.abort();
+    expect(
+      await provider.search({
+        query: 'pack',
+        signal: new AbortController().signal,
+      }),
+    ).toMatchObject([{ label: 'package.json' }]);
+    expect(globWorkspace).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps completed glob results cached after their query is aborted', async () => {
+    const globWorkspace = vi
+      .fn()
+      .mockResolvedValue({ matches: ['package.json'] });
+    const provider = globProvider(globWorkspace);
+    const first = new AbortController();
+    expect(
+      await provider.search({ query: 'pack', signal: first.signal }),
+    ).toMatchObject([{ label: 'package.json' }]);
+    first.abort();
+    expect(
+      await provider.search({
+        query: 'pack',
+        signal: new AbortController().signal,
+      }),
+    ).toMatchObject([{ label: 'package.json' }]);
+    expect(globWorkspace).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries a failed glob lookup without cancelling its signal', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const globWorkspace = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('Unavailable'))
+      .mockResolvedValue({ matches: ['package.json'] });
+    const provider = globProvider(globWorkspace);
+    const request = { query: 'pack', signal: new AbortController().signal };
+    try {
+      await expect(provider.search(request)).rejects.toThrow('Unavailable');
+      expect(await provider.search(request)).toMatchObject([
+        { label: 'package.json' },
+      ]);
+      expect(globWorkspace).toHaveBeenCalledTimes(2);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('keeps MCP servers referenceable without a resource-reading action', async () => {
     const loadMcpStatus = vi.fn().mockResolvedValue({
       servers: [
