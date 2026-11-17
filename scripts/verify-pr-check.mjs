@@ -23,10 +23,13 @@
  */
 
 import {
+  closeSync,
   existsSync,
   lstatSync,
+  openSync,
   readFileSync,
   readdirSync,
+  readSync,
   realpathSync,
   statSync,
 } from 'node:fs';
@@ -318,6 +321,181 @@ function gateRecordErrors(gateText, { publishLane = false } = {}) {
     }
   }
   return [];
+}
+
+/**
+ * Whether a round log carries a `container-nonce: <value>` line whose value's
+ * sha256 equals the gate record's hash (R16-1). Walks the round dir, skipping
+ * the declaration and gate record themselves, the TOP-LEVEL binary `evidence/`
+ * subtree (the skill's PNG artifacts never carry the nonce, and charging the
+ * byte budget against them would refuse a compliant round with large evidence —
+ * R3-1; a nested dir named evidence is still scanned — R4-5), and any
+ * non-regular file (a symlink is not followed). This is the SINGLE authoritative
+ * matcher (the step-7 shell no longer re-implements it, R1-2/R2-6), so it reads
+ * each log whole — a marker behind earlier output or straddling a chunk boundary
+ * is still found (the partial line is scanned before the carry is capped, R3-3)
+ * — while bounding the AGGREGATE work: one hoisted scratch buffer (R2-5), a
+ * total byte budget, and a visited-entry cap that counts directories too, so a
+ * PR-planted dir of huge no-newline files, many empty files, or a forest of
+ * empty dirs cannot stall the check (R3-3, R4-4). Returns { found, bounded } so
+ * the caller can tell "no marker" from "stopped at the bound" (R4-1). The
+ * plaintext lives only container-local, so a host battery cannot produce a match.
+ */
+function nonceLogMatches(roundDir, expected) {
+  const CHUNK_BYTES = 1024 * 1024;
+  const TOTAL_BUDGET = 64 * 1024 * 1024;
+  // The carry is capped to bound the per-chunk concatenation (a no-newline file
+  // would otherwise grow it quadratically), but the partial line is SCANNED
+  // before capping so a marker at its head is never lost (R3-3).
+  const CARRY_CAP = 256;
+  const MAX_ENTRIES = 20000;
+  const buf = Buffer.alloc(CHUNK_BYTES);
+  let budget = TOTAL_BUDGET;
+  let visited = 0;
+  let bounded = false;
+  const matches = (text) => {
+    for (const line of text.split('\n')) {
+      const match = /container-nonce:[ \t]*(\S+)/.exec(line);
+      if (
+        match &&
+        createHash('sha256').update(match[1]).digest('hex') === expected
+      ) {
+        return true;
+      }
+    }
+    return false;
+  };
+  const walk = (d) => {
+    let entries;
+    try {
+      entries = readdirSync(d, { withFileTypes: true });
+    } catch {
+      return false;
+    }
+    for (const entry of entries) {
+      if (budget <= 0 || visited >= MAX_ENTRIES) {
+        bounded = true;
+        return false;
+      }
+      const p = join(d, entry.name);
+      if (entry.isDirectory()) {
+        // Only the TOP-LEVEL evidence/ subtree (the skill's binary PNG
+        // artifacts) is exempt from the byte budget; a nested directory named
+        // evidence is still scanned, so a log there is not silently lost
+        // (R4-5). Directories count against the entry cap so a planted forest
+        // of empty dirs cannot make the walk unbounded (R4-4).
+        if (d === roundDir && entry.name === 'evidence') continue;
+        visited++;
+        if (walk(p)) return true;
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      if (
+        entry.name === 'boundary.json' ||
+        entry.name === 'boundary-gate.json'
+      ) {
+        continue;
+      }
+      visited++;
+      let fd;
+      try {
+        fd = openSync(p, 'r');
+      } catch {
+        continue;
+      }
+      try {
+        let carry = '';
+        let pos = 0;
+        while (budget > 0) {
+          const toRead = Math.min(CHUNK_BYTES, budget);
+          const n = readSync(fd, buf, 0, toRead, pos);
+          if (n === 0) break;
+          pos += n;
+          budget -= n;
+          // The budget can exhaust on the LAST file, where no next entry would
+          // trip the loop-top check; record the bound here so the caller can
+          // tell exhaustion from a genuine absence (R4-1).
+          if (budget <= 0) bounded = true;
+          const text = carry + buf.toString('utf8', 0, n);
+          const lastNl = text.lastIndexOf('\n');
+          if (lastNl >= 0) {
+            if (matches(text.slice(0, lastNl))) return true;
+            const partial = text.slice(lastNl + 1);
+            if (matches(partial)) return true;
+            carry = partial.slice(-CARRY_CAP);
+          } else {
+            if (matches(text)) return true;
+            carry = text.slice(-CARRY_CAP);
+          }
+          if (n < toRead) break;
+        }
+        if (carry && matches(carry)) return true;
+      } catch {
+        // An unreadable file is skipped, not a crash out of the check.
+      } finally {
+        closeSync(fd);
+      }
+    }
+    return false;
+  };
+  const found = walk(roundDir);
+  return { found, bounded };
+}
+
+/**
+ * The container nonce corroboration (R16-1 / D17-1 / D17-2). The gate record
+ * carries only the nonce hash, never the plaintext, and a mode:"container"
+ * declaration is refused unless a round log line hashes to it. Runs against
+ * the round dir (the checker is the authoritative enforcement point, not the
+ * shell recipe). A missing/invalid gate is left to gateRecordErrors; the
+ * ci-lane record the publish job writes is exempt.
+ */
+export function containerNonceErrors(boundaryText, gateText, roundDir) {
+  let boundary;
+  try {
+    boundary = JSON.parse(boundaryText);
+  } catch {
+    return [];
+  }
+  if (
+    !boundary ||
+    typeof boundary !== 'object' ||
+    boundary.mode !== 'container'
+  ) {
+    return [];
+  }
+  let gate;
+  try {
+    gate = JSON.parse(gateText);
+  } catch {
+    return [];
+  }
+  if (
+    !gate ||
+    typeof gate !== 'object' ||
+    gate.gate !== 'require-isolation' ||
+    gate.passed !== true
+  ) {
+    return [];
+  }
+  const expected = gate.nonceSha256;
+  if (typeof expected !== 'string' || !/^[0-9a-f]{64}$/.test(expected)) {
+    return [
+      'boundary-gate.json records no nonceSha256 (the 64-hex sha256 of the container-local nonce): a mode:"container" declaration must be tied to a nonce the battery echoed from inside the boundary, not a plaintext copied from the PR-writable record',
+    ];
+  }
+  if (roundDir) {
+    const { found, bounded } = nonceLogMatches(roundDir, expected);
+    if (found) return [];
+    if (bounded) {
+      return [
+        'the nonce log scan hit its resource bound (64 MiB total / 20000 entries) before reading a matching container-nonce line: refusing mode:"container" — the marker may exist beyond the bound; reduce the round\'s non-evidence log volume or echo the nonce into an early log; if the battery ran on the host, declare mode:"waived" with the maintainer\'s approval (a waiver is not a free bypass)',
+      ];
+    }
+  }
+  return [
+    'round logs carry no container-nonce line whose sha256 matches boundary-gate.json nonceSha256: refusing mode:"container" — the battery must echo the container-local nonce ($HOME/.qwen-verify-nonce) into its logs; if the battery ran on the host, declare mode:"waived" with the maintainer\'s approval (a waiver is not a free bypass)',
+  ];
 }
 
 // A waiver's approval must be a permalink a reader can open, not free text:
@@ -1311,16 +1489,28 @@ function main(argv) {
   // The CI entry path is defined by $QWEN_VERIFY_CONTEXT; there the publish
   // job owns the declaration, so an absent boundary.json is a warning for
   // the round's own pre-finish self-check, not an error it cannot clear.
+  const publisherOwnsBoundary = !!process.env.QWEN_VERIFY_CONTEXT;
   const result = checkArtifacts({
     files,
     evidence,
     expectedHead,
-    publisherOwnsBoundary: !!process.env.QWEN_VERIFY_CONTEXT,
+    publisherOwnsBoundary,
     publishLane,
     coordinates,
     evidenceUnreadable,
     unreadableKeys,
   });
+  // The container nonce corroboration (R16-1) needs the round dir to scan the
+  // battery's logs, so it lives here rather than in checkArtifacts. It runs
+  // UNCONDITIONALLY: the exemption is the RECORD, not a flag — containerNonceErrors
+  // returns [] for the ci-lane record the publish job writes and for non-container
+  // modes, so neither the --publish-lane flag (R1-7) nor $QWEN_VERIFY_CONTEXT
+  // (R2-7) can switch the binding off for a require-isolation container claim.
+  // publisherOwnsBoundary still governs the absent-declaration tolerance in
+  // checkArtifacts; it does not exempt the nonce binding.
+  result.errors.push(
+    ...containerNonceErrors(files.boundary, files.boundaryGate, dir),
+  );
   result.errors.unshift(...unreadableErrors);
   if (snapshotWarning) result.warnings.unshift(snapshotWarning);
   const lines = [`verify-pr check: ${dir}`];
