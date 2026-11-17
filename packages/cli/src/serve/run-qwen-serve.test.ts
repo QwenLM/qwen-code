@@ -113,7 +113,13 @@ import {
   workspaceRegistrationId,
   WorkspaceRegistrationStore,
 } from './workspace-registration-store.js';
-import { readDaemonDiscoveries } from './daemon-discovery.js';
+import {
+  processStartTime,
+  readDaemonDiscoveries,
+  removeDaemonDiscovery,
+  writeDaemonDiscovery,
+  type DaemonDiscoveryRecord,
+} from './daemon-discovery.js';
 import type { WorkspaceRegistry } from './workspace-registry.js';
 import {
   ENSURE_KEEP_ALIVE_MS,
@@ -22831,6 +22837,71 @@ describe('runQwenServe channel worker supervisor', () => {
     } finally {
       await handle.close();
     }
+  });
+
+  it('fails fast when an explicit port is held by a live qwen serve daemon', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-port-holder-')),
+    );
+    const startedAt = processStartTime(process.pid);
+    expect(startedAt).toBeDefined();
+    const holder: DaemonDiscoveryRecord = {
+      v: 1,
+      pid: process.pid,
+      port: 4170,
+      hostname: '127.0.0.1',
+      url: 'http://127.0.0.1:4170',
+      workspaces: [tmpDir],
+      primaryWorkspace: tmpDir,
+      startedAt: new Date(startedAt!).toISOString(),
+      auth: 'none',
+    };
+    writeDaemonDiscovery(holder);
+    const portsAttempted: number[] = [];
+    const stderrWrites: string[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        stderrWrites.push(String(chunk));
+        return true;
+      });
+    vi.spyOn(serverModule, 'createServeApp').mockReturnValue({
+      locals: {},
+    } as unknown as express.Application);
+    const testServer = createServer();
+    testServer.listen = vi.fn((port: number) => {
+      portsAttempted.push(port);
+      const err = new Error('address in use') as NodeJS.ErrnoException;
+      err.code = 'EADDRINUSE';
+      setImmediate(() => testServer.emit('error', err));
+      return testServer;
+    }) as unknown as typeof testServer.listen;
+
+    try {
+      await expect(
+        runQwenServe(
+          {
+            port: 4170,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            workspace: tmpDir,
+            serveWebShell: false,
+          },
+          {
+            bridge: makeFakeBridge(),
+            httpServerFactory: () => testServer,
+            resolveOnListen: true,
+          },
+        ),
+      ).rejects.toThrow(/held by a live qwen serve daemon/);
+    } finally {
+      stderrSpy.mockRestore();
+      removeDaemonDiscovery(4170);
+    }
+    expect(portsAttempted).toEqual([4170]);
+    expect(
+      stderrWrites.some((w) => w.includes('held by a live qwen serve daemon')),
+    ).toBe(true);
   });
 
   it('keeps the Hosted Harness on its requested port', async () => {

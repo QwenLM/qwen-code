@@ -309,6 +309,8 @@ import {
   DAEMON_DISCOVERY_VERSION,
   currentPidNamespace,
   daemonDiscoveryUrl,
+  listenerIdentityVerified,
+  readDaemonDiscoveryRecord,
   removeDaemonDiscovery,
   removeDaemonToken,
   writeDaemonDiscovery,
@@ -11861,6 +11863,36 @@ async function runQwenServeImpl(
           nextPort <= 65535 &&
           attempt < MAX_PORT_ATTEMPTS - 1
         ) {
+          // An explicit --port is an operator contract: when the holder is a
+          // live qwen serve daemon, silently moving to the next port starts
+          // a duplicate daemon (#17479). Identity is positive-only — a
+          // missing or unverifiable record says nothing about who holds the
+          // port, so the fallback for unrelated squatters still applies.
+          const holder = readDaemonDiscoveryRecord(attemptPort);
+          if (holder && listenerIdentityVerified(holder)) {
+            const holderError = new Error(
+              `qwen serve: port ${attemptPort} is held by a live qwen serve ` +
+                `daemon (pid ${holder.pid}, started at ${holder.startedAt}). ` +
+                `Stop it with 'qwen daemon stop --port ${attemptPort}' or ` +
+                `choose a different --port.`,
+            );
+            writeStderrLine(holderError.message);
+            removeCurrentServePidfile();
+            markServeAppStartupFailed(holderError);
+            void serveAppLifecycle.close().then(
+              () => reject(holderError),
+              (closeError: unknown) =>
+                reject(
+                  closeError instanceof Error
+                    ? new AggregateError(
+                        [holderError, closeError],
+                        holderError.message,
+                      )
+                    : holderError,
+                ),
+            );
+            return;
+          }
           writeStderrLine(
             `qwen serve: port ${attemptPort} is in use, trying ${nextPort}...`,
           );

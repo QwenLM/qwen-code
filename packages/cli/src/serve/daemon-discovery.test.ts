@@ -13,7 +13,9 @@ import {
   daemonDiscoveryUrl,
   daemonTokenFilePath,
   isProcessAlive,
+  listenerIdentityVerified,
   readDaemonDiscoveries,
+  readDaemonDiscoveryRecord,
   readDaemonToken,
   removeDaemonDiscovery,
   removeDaemonToken,
@@ -188,5 +190,37 @@ describe('daemon discovery records', () => {
 
   it('reports liveness for the current process', () => {
     expect(isProcessAlive(process.pid)).toBe(true);
+  });
+
+  it('verifies the identity of a record naming this live process', () => {
+    const live = record({
+      pid: process.pid,
+      startedAt: new Date().toISOString(),
+    });
+    expect(listenerIdentityVerified(live)).toBe(true);
+  });
+
+  describe('readDaemonDiscoveryRecord', () => {
+    it('reads the record published for a port', () => {
+      writeDaemonDiscovery(record(), dir);
+      expect(readDaemonDiscoveryRecord(4170, dir)).toEqual(record());
+    });
+
+    it('returns undefined when no record exists', () => {
+      expect(readDaemonDiscoveryRecord(4170, dir)).toBeUndefined();
+    });
+
+    it('returns undefined for a corrupt record', () => {
+      fs.writeFileSync(daemonDiscoveryFilePath(4170, dir), '{not json');
+      expect(readDaemonDiscoveryRecord(4170, dir)).toBeUndefined();
+    });
+
+    it('returns undefined when the record names another port', () => {
+      fs.writeFileSync(
+        daemonDiscoveryFilePath(4171, dir),
+        JSON.stringify(record()),
+      );
+      expect(readDaemonDiscoveryRecord(4171, dir)).toBeUndefined();
+    });
   });
 });
