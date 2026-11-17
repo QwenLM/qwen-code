@@ -14193,7 +14193,7 @@ export class Session implements SessionContext {
     const backgroundQueue = this.notificationQueue.filter(
       (queued) => queued.kind !== 'peer',
     );
-    while (this.notificationQueue.length >= MAX_BACKGROUND_NOTIFICATION_QUEUE) {
+    while (backgroundQueue.length >= MAX_BACKGROUND_NOTIFICATION_QUEUE) {
       // While the todo-stop guard defers unrelated automatic turns, a queued
       // notification that continues the current work chain is the one thing
       // that can release it — so those are protected and the unrelated ones
@@ -14236,14 +14236,10 @@ export class Session implements SessionContext {
         `Notification queue overflow: evicting task=${evicted?.taskId ?? 'unknown'} kind=${evicted?.kind ?? 'unknown'}`,
       );
       if (evicted) {
-        if (evicted.kind === 'peer') {
-          this.#landUndrainedPeerNotifications([evicted]);
-        } else {
-          this.notificationQueue.splice(
-            this.notificationQueue.indexOf(evicted),
-            1,
-          );
-        }
+        this.notificationQueue.splice(
+          this.notificationQueue.indexOf(evicted),
+          1,
+        );
         this.droppedNotifications.record(toAdmissibleNotification(evicted));
       }
     }
