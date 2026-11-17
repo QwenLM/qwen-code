@@ -88,15 +88,20 @@ max:32768`）加 `enable_thinking`。
 ### A. 模型身份与限额（`core`）
 
 - `tokenLimits.ts`：在 `OUTPUT_PATTERNS` 的 `/^qwen/` 回退之前增
-  `[/^qwen4/, 262_144]`。在 `defaultOutputCeiling` 为 qwen4 tiered 家族豁免
+  `[/^qwen4-max/, 262_144]`。在 `defaultOutputCeiling` 为 `qwen4-max` 豁免
   `OUTPUT_TOKEN_CEILING`（仿 `CLAUDE_OPUS_EXTENDED`），使自动请求可携带完整的
-  思考+回复预算；`clampOutputTokensToWindow` 仍按窗口余量约束每个请求。输入
-  保持 1M。
+  思考+回复预算；`clampOutputTokensToWindow` 仍按窗口余量约束每个请求。**收窄到
+  `qwen4-max` 而非整个 `qwen4` 前缀**：合并上限是 qwen4-max 的契约，其他 `qwen4*`
+  路由保持已发布的 32K 输出上限。输入对整个世代保持 1M。非思考上限导出为
+  `QWEN4_NON_THINKING_OUTPUT_CAP`（131,072）。
 - `pipeline.ts`：262,144 是**思考模式**上限；非思考输出上限为 131,072。由于
-  关闭形状（`reasoning_effort:'none'`）在 pipeline 里于 provider sizing
-  `max_tokens` **之后**才定型，故在 pipeline 中对思考禁用的 qwen4 请求把
-  `max_tokens` 夹到 131,072，避免短 prompt 的关思考请求超出非思考区间而 400。
-  思考模式请求保持完整预算。
+  关闭形状在 pipeline 里于 provider sizing `max_tokens` **之后**才定型，故在
+  pipeline 中对思考禁用的 `qwen4-max` 请求把 `max_tokens` 夹到
+  `QWEN4_NON_THINKING_OUTPUT_CAP`，避免短 prompt 的关思考请求超出非思考区间而
+  400。门控按**最终线协议形状**（`reasoning_effort:'none'` 或
+  `enable_thinking:false`）而非端点：DashScope 经 `reasoning_effort:'none'`
+  关闭、Qwen 订阅经 `enable_thinking:false` 关闭，两者都须夹制。思考模式请求
+  保持完整预算。
 - `modalityDefaults.ts`：在 `MODALITY_PATTERNS` 的 `/^qwen/` 文本回退之前增
   `[/^qwen4-max/, { image:true, video:true }]`。
 - `model-catalog.ts`：把 `PDF_CARVE_OUT_IDS` 扩展到 `qwen4-max`（该模型文档
@@ -111,18 +116,21 @@ max:32768`）加 `enable_thinking`。
 defaultEffort:'high', disableField:'reasoning_effort' }`、
   `modalities:{ image:true, video:true }`。
 - `model-configuration.ts`：增 `'qwen4-max'` manifest 条目（同档位/默认）。
-  修改 `getModelConfiguration` 回退逻辑，使 `qwen4*` 前缀解析 qwen4 档位，而
-  `qwen-latest-series-invite-*` 仍用 `qwen3.8-max` 档位。
-- 复用 `clampReasoningEffort`（`reasoning-effort.ts`）：请求的 `medium` 向上
-  夹到 `high`，`max` 向下夹到 `xhigh`。`none` 关闭已经由 pipeline 送达。核对
-  preset 声明 `efforts` 后 `buildQwenEffortConfig` 不会静默丢弃合法档位。
+  修改 `getModelConfiguration` 前缀回退，使仅 `qwen4-max*` id 解析 qwen4 档位；
+  其他 `qwen4*` 路由与 `qwen-latest-series-invite-*` 仍用 `qwen3.8-max` 档位，
+  既有模型保持已发布的 effort 控制。
+- 超档位处理：声明能力路径通常**丢弃** `efforts` 之外的档位（既有契约）。
+  qwen4-max 是例外：其服务端把持久化的 `medium`/`max` 映射到 `high`/`xhigh`，故
+  `applyConfiguredReasoningEffort` 用 `clampReasoningEffort` 把它们夹到最近的
+  声明档位，而非丢弃后落回服务端默认。其他声明模型（含其他 `qwen4*` 路由）保持
+  丢弃行为。`none` 关闭已由 pipeline 送达。
 
 ### C. 订阅线协议形状（`core`）
 
-- `pipeline.ts` 订阅分支：对 `qwen4*` 线协议模型，把 effort 映射成 qwen4
+- `pipeline.ts` 订阅分支：对 `qwen4-max` 线协议模型，把 effort 映射成 qwen4
   `thinking_budget` 档位（`low→4096`、`high→131072`、`xhigh→262144`），替代
-  qwen3.8 表；保留 `enable_thinking` 开关。门控在 qwen4 前缀，使 qwen3.8 订阅
-  模型保持已发布的预算表。
+  qwen3.8 表；保留 `enable_thinking` 开关。收窄到 `qwen4-max`，使其他 `qwen4*`
+  与 qwen3.8 订阅模型保持已发布的预算表。
 
 ### D. 显式缓存 TTL（`core` + 设置，复用现有旋钮）
 
@@ -147,29 +155,24 @@ ttl:'1h' }`；否则省略 `ttl`（5m 默认）。泛化该设置的文档，使
 - **复用 `cacheRetention` 而非新增 TTL 设置。** 该旋钮已存在、已端到端接通，
   其 `'ephemeral'|'1h'` 值恰好映射 qwen4 的 `5m`/`1h`。并行的 `cacheTtl` 设置
   会重复状态。
-- **为 qwen4 豁免 64K 输出上限。** `qwen3.8-max` 保持 64K `max_tokens`，因为其
-  `max_tokens` 不含 CoT。qwen4-max 的 `max_tokens` 含 CoT，故同样的 64K 会被
+- **qwen4-max 契约收窄到 `qwen4-max`，而非整个 `qwen4` 前缀。** 原生档位、合并
+  输出上限、非思考夹制、遗留档位夹取、订阅预算档位都是 §3.1 的 qwen4-max 契约；
+  无厂商依据表明其他 `qwen4*` 路由共享。其他 `qwen4*` id 与 invite-series 预览
+  保持 qwen3.8-max 档位与已发布的 32K 输出上限，既有模型行为不变。1M 输入窗口与
+  tiered 线协议门仍按 `qwen4` 宽前缀（既有，#15987）；models.dev 一旦发布限额不同
+  的 qwen4 条目，catalog 仍覆盖正则行。（缓存 TTL 门控也仍按 `qwen4` 宽前缀，因
+  厂商文档把显式缓存归于整个「Qwen4 系列」，且仅在 opt-in 的 `'1h'` 设置下激活。）
+- **为 qwen4-max 豁免 64K 输出上限。** `qwen3.8-max` 保持 64K `max_tokens`，因为
+  其 `max_tokens` 不含 CoT。qwen4-max 的 `max_tokens` 含 CoT，故同样的 64K 会被
   思考消耗。豁免沿用现有 `CLAUDE_OPUS_EXTENDED` 先例；窗口夹制仍防止
   `prompt + max_tokens > window`。
-- **非思考预算夹制放在 pipeline 而非 provider。** 上限豁免按思考模式
-  （262,144）sizing `max_tokens`，但非思考上限是 131,072。provider 在 pipeline
-  定型关闭形状之前就 sizing `max_tokens`，故只有 pipeline 知道最终模式；夹制
-  放在那里，门控在 qwen4 前缀加最终的 `reasoning_effort:'none'` /
-  `enable_thinking:false`。
-- **声明 `efforts:['low','high','xhigh']` 并夹取遗留选择。** 服务端也经映射
-  接受 `medium`/`max`，但暴露原生三档让 UI 如实反映模型可区分的档位。
-  声明 capability 的线协议路径对 qwen4 世代经 `clampReasoningEffort` 把遗留
-  档位夹到声明阶梯（`medium→high`、`max→xhigh`）；其他无 profile 声明保持
-  已发布的丢弃回服务端默认语义（遗留不重分级契约）。
-- **订阅预算变更门控在 qwen4 前缀。** 订阅网关的 qwen3.8 预算契约是已发布
-  行为；仅 qwen4 模型采用新档位。
-- **档位、输出预算与订阅预算作用于整个 `qwen4` 前缀，而非仅 `qwen4-max`。**
-  该世代向前共享 §3.1 契约——1M 窗口与 tiered 线协议门已按该前缀门控
-  （#15987）——故未来 `qwen4.x` 发布无需再改码。这有意改变了既有 `qwen4*`
-  自定义路由（如 `qwen4-plus`）的行为：它们此前继承 qwen3.8-max 档位与 32K
-  输出回退，现在采用 qwen4 档位（`low/high/xhigh`、默认 `high`）与思考模式
-  sized 的 262,144 预算。qwen3.8 家族与邀请制 latest-series 预览保持已发布
-  行为；models.dev 一旦发布限额不同的 qwen4 条目，catalog 仍覆盖正则行。
+- **声明 `efforts:['low','high','xhigh']`；仅 qwen4-max 夹取遗留选择。** 暴露原生
+  三档让 UI 如实反映模型可区分的档位。声明 capability 的线协议路径仅对 qwen4-max
+  经 `clampReasoningEffort` 把持久化的 `medium`/`max` 夹到声明阶梯
+  （`medium→high`、`max→xhigh`）；其他无 profile 声明保持已发布的丢弃回服务端
+  默认语义（遗留不重分级契约）。
+- **订阅预算变更收窄到 qwen4-max。** 订阅网关的 qwen3.8 预算契约是已发布行为；
+  仅 qwen4-max 采用新档位。
 - **非思考预算夹制按最终线协议形状门控，而非端点。** 订阅网关
   （`api.qwen.ai`）不被识别为 DashScope，但其关闭路径同样经该 pipeline
   shaping 发出 `enable_thinking:false`；把夹制门控在 `isDashScope` 会让恰恰
@@ -186,12 +189,16 @@ ttl:'1h' }`；否则省略 `ttl`（5m 默认）。泛化该设置的文档，使
 ## 风险
 
 - 订阅网关可能尚未服务 `qwen4-max`，或拒绝 qwen4 预算契约；客户端支持在该处
-  必要但不充分。
+  必要但不充分。订阅非思考 131,072 夹制是依 §3.1 契约推断，未对 `api.qwen.ai`
+  实测（无可用 key）。
 - models.dev 的 `qwen4` catalog 条目会覆盖正则窗口/输出行（catalog 优先）；
   curated 输出行仍约束显式请求。
-- 输出上限豁免与截断升级（`ESCALATED_MAX_TOKENS`）交互：qwen4 请求的初始预算
-  （262,144，经窗口夹制）恒不小于升级后的上限（至多 64K），故
-  `shouldEscalateMaxOutputTokens` 对该家族永不触发，升级路径不被演练。
+- 输出上限豁免实际上**不**与截断升级交互：qwen4-max 的初始预算（262,144，经
+  窗口夹制）恒不小于升级后的上限（至多 64K），故 `shouldEscalateMaxOutputTokens`
+  对它永不触发，升级路径不被演练。
+- `imageDetail` 与 `cacheRetention` 仅在 DashScope 系通道携带；订阅 resolver 两者
+  都不复制、订阅 provider 也不注入 `cache_control`，故二者在 Qwen 订阅上无效。
+  用户文档已相应限定这两项控制的渠道。
 
 ## 验证计划
 
@@ -207,16 +214,18 @@ ttl:'1h' }`；否则省略 `ttl`（5m 默认）。泛化该设置的文档，使
 1. `qwen4-max` 在四个通道出现且可选；effort 选择器显示 `low`/`high`/`xhigh`、
    默认 `high`，`none` 关闭思考。
 2. 自动请求携带思考+回复 sized 的 `max_tokens`（非 32K/64K），并受上下文窗口
-   约束；思考禁用时夹到 131,072 非思考上限。
+   约束；思考禁用时在 DashScope 与 Qwen 订阅上都夹到 131,072 非思考上限。
 3. 图像与视频 part 对 `qwen4-max` 送达线协议。
 4. `cacheRetention:'1h'` 在 qwen4 缓存断点标记 `ttl:'1h'`；默认省略 `ttl`。
    仅限 DashScope 系通道——订阅 provider 不注入 `cache_control` 断点。
 5. `imageDetail:'low'` 向图像 part 注入 `detail:'low'`；默认不注入。仅限
    DashScope 系通道——订阅 resolver 不透传该设置。
-6. qwen3.8-max 行为（档位、默认 `xhigh`、订阅预算表）不变。
-7. 既有 `qwen4*` 路由在 workspace provider 控件中投影世代档位
-   （`none/low/high/xhigh`），邀请制预览与 stable 家族保持 qwen3.8-max 档位；
-   订阅非思考请求发出 `enable_thinking:false` 且 `max_tokens` 夹到 131,072。
+6. qwen3.8-max 与其他 `qwen4*` 路由保持已发布的档位、默认值、输出上限、订阅
+   预算表。
+7. 仅 `qwen4-max` 在 workspace provider 控件中投影原生档位
+   （`none/low/high/xhigh`、默认 `high`）；其他 `qwen4*` 路由、邀请制预览与
+   stable 家族保持 qwen3.8-max 档位；订阅非思考 `qwen4-max` 请求发出
+   `enable_thinking:false` 且 `max_tokens` 夹到 131,072。
 
 ## 待解问题 / 后续工作
 

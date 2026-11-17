@@ -420,12 +420,12 @@ describe('createWorkspaceProvidersStatusProvider', () => {
 
     const result = await provider(workspace, false);
     const models = result.providers.flatMap((entry) => entry.models);
-    // qwen4* routes take the qwen4 generation ladder (low/high/xhigh); the
-    // invitation-only previews and the stable family keep the qwen3.8-max
-    // ladder (low/medium/xhigh).
+    // Only qwen4-max takes the qwen4-max ladder; other qwen4* routes (the
+    // qwen4-plus fixtures here), the invitation-only previews, and the stable
+    // family all keep the qwen3.8-max ladder (low/medium/xhigh).
     const expectedLadders: Record<string, string[]> = {
-      'Qwen4 A': ['none', 'low', 'high', 'xhigh'],
-      'Qwen4 B': ['none', 'low', 'high', 'xhigh'],
+      'Qwen4 A': ['none', 'low', 'medium', 'xhigh'],
+      'Qwen4 B': ['none', 'low', 'medium', 'xhigh'],
       'Invite A': ['none', 'low', 'medium', 'xhigh'],
       'Invite B': ['none', 'low', 'medium', 'xhigh'],
       'Stable A': ['none', 'low', 'medium', 'xhigh'],

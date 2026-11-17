@@ -342,14 +342,15 @@ export function getModelConfiguration(
 
 /**
  * Prefix fallback for tiered Qwen ids without an exact manifest row (dated
- * snapshots, `-latest` aliases). The qwen4 generation takes the qwen4-max
- * ladder (low/high/xhigh, default high); the invitation-only latest-series
- * previews keep the stable qwen3.8-max ladder they inherit from.
+ * snapshots, `-latest` aliases). Only qwen4-max takes the qwen4-max ladder
+ * (low/high/xhigh, default high); other qwen4* routes and the invitation-only
+ * latest-series previews keep the stable qwen3.8-max ladder, so existing models
+ * retain their shipped effort controls.
  */
 function tieredQwenManifest(
   modelId: string,
 ): { readonly reasoning?: ModelReasoningConfiguration } | undefined {
-  return modelId.toLowerCase().startsWith('qwen4')
+  return modelId.toLowerCase().startsWith('qwen4-max')
     ? MODEL_CONFIGURATIONS['qwen4-max']
     : MODEL_CONFIGURATIONS['qwen3.8-max'];
 }

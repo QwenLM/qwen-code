@@ -95,16 +95,23 @@ and Qwen Subscription (OAuth).
 
 ### A. Model identity and limits (`core`)
 
-- `tokenLimits.ts`: add `[/^qwen4/, 262_144]` to `OUTPUT_PATTERNS` before the
-  `/^qwen/` fallback. Exempt the qwen4 tiered family from `OUTPUT_TOKEN_CEILING`
-  in `defaultOutputCeiling` (mirroring `CLAUDE_OPUS_EXTENDED`) so an auto request
+- `tokenLimits.ts`: add `[/^qwen4-max/, 262_144]` to `OUTPUT_PATTERNS` before the
+  `/^qwen/` fallback. Exempt `qwen4-max` from `OUTPUT_TOKEN_CEILING` in
+  `defaultOutputCeiling` (mirroring `CLAUDE_OPUS_EXTENDED`) so an auto request
   can carry the full thinking+answer budget; `clampOutputTokensToWindow` still
-  bounds every request by window room. Input stays 1M.
+  bounds every request by window room. Scoped to `qwen4-max`, not the whole
+  `qwen4` prefix: the combined cap is a qwen4-max contract, and other `qwen4*`
+  routes keep their shipped 32K output limit. Input stays 1M for the generation.
+  The non-thinking cap is exported as `QWEN4_NON_THINKING_OUTPUT_CAP` (131,072).
 - `pipeline.ts`: the 262,144 budget is the **thinking-mode** cap; non-thinking
-  output caps at 131,072. Because the disable shape (`reasoning_effort:'none'`)
-  is finalized in the pipeline _after_ the provider sizes `max_tokens`, clamp a
-  qwen4 request's `max_tokens` to 131,072 there when thinking is disabled, so a
-  short-prompt thinking-off request does not exceed the non-thinking range and 400. Thinking-mode requests keep the full budget.
+  output caps at 131,072. Because the disable shape is finalized in the pipeline
+  _after_ the provider sizes `max_tokens`, clamp a `qwen4-max` request's
+  `max_tokens` to `QWEN4_NON_THINKING_OUTPUT_CAP` there when thinking is disabled,
+  so a short-prompt thinking-off request does not exceed the non-thinking range
+  and 400. Gate on the **final wire shape** (`reasoning_effort:'none'` or
+  `enable_thinking:false`), not the endpoint: DashScope disables via
+  `reasoning_effort:'none'` and Qwen Subscription via `enable_thinking:false`, and
+  both must be clamped. Thinking-mode requests keep the full budget.
 - `modalityDefaults.ts`: add `[/^qwen4-max/, { image:true, video:true }]` to
   `MODALITY_PATTERNS` before the `/^qwen/` text fallback.
 - `model-catalog.ts`: extend `PDF_CARVE_OUT_IDS` to `qwen4-max` (the model's
@@ -120,20 +127,25 @@ and Qwen Subscription (OAuth).
 defaultEffort:'high', disableField:'reasoning_effort' }`,
   `modalities:{ image:true, video:true }`.
 - `model-configuration.ts`: add a `'qwen4-max'` manifest entry with the same
-  ladder/default. Change the `getModelConfiguration` fallback so a `qwen4*`
-  prefix resolves the qwen4 ladder while `qwen-latest-series-invite-*` keeps the
-  `qwen3.8-max` ladder.
-- Reuse `clampReasoningEffort` (`reasoning-effort.ts`): a requested `medium`
-  clamps up to `high`, `max` clamps down to `xhigh`. `none` disable already
-  ships through the pipeline. Verify `buildQwenEffortConfig` does not silently
-  drop a legal tier once the preset declares `efforts`.
+  ladder/default. Change the `getModelConfiguration` prefix fallback so only a
+  `qwen4-max*` id resolves the qwen4 ladder; other `qwen4*` routes and
+  `qwen-latest-series-invite-*` keep the `qwen3.8-max` ladder, so existing models
+  retain their shipped effort controls.
+- Out-of-ladder tiers: the declared-capability path normally **drops** a tier
+  outside `efforts` (the established contract). qwen4-max is the exception: its
+  server maps a persisted `medium`/`max` onto `high`/`xhigh`, so
+  `applyConfiguredReasoningEffort` clamps those to the nearest declared tier
+  (`clampReasoningEffort`) instead of dropping to the server default. Other
+  declared models (including other `qwen4*` routes) keep the drop behavior.
+  `none` disable already ships through the pipeline.
 
 ### C. Subscription wire shape (`core`)
 
-- `pipeline.ts` subscription branch: for a `qwen4*` wire model, map effort to the
-  qwen4 `thinking_budget` ladder (`low→4096`, `high→131072`, `xhigh→262144`)
-  instead of the qwen3.8 table; keep the `enable_thinking` switch. Gate on the
-  qwen4 prefix so qwen3.8 subscription models keep their shipped budget table.
+- `pipeline.ts` subscription branch: for a `qwen4-max` wire model, map effort to
+  the qwen4 `thinking_budget` ladder (`low→4096`, `high→131072`, `xhigh→262144`)
+  instead of the qwen3.8 table; keep the `enable_thinking` switch. Scoped to
+  `qwen4-max` so other `qwen4*` and qwen3.8 subscription models keep their
+  shipped budget table.
 
 ### D. Explicit cache TTL (`core` + settings, reuse existing knob)
 
@@ -159,38 +171,33 @@ ttl:'1h' }`; otherwise omit `ttl` (the 5m default). Generalize the setting's
 - **Reuse `cacheRetention` rather than a new TTL setting.** The knob already
   exists, is plumbed end to end, and its `'ephemeral'|'1h'` values map exactly
   onto qwen4's `5m`/`1h`. A parallel `cacheTtl` setting would duplicate state.
-- **Exempt qwen4 from the 64K output ceiling.** `qwen3.8-max` keeps a 64K
+- **Scope the qwen4-max contracts to `qwen4-max`, not the whole `qwen4` prefix.**
+  The native ladder, the combined output cap, the non-thinking clamp, the
+  legacy-tier clamping, and the subscription budget ladder are qwen4-max
+  contracts from §3.1; there is no vendor evidence that other `qwen4*` routes
+  share them. Other `qwen4*` ids and the invite-series previews keep the
+  qwen3.8-max ladder and their shipped 32K output limit, so existing models
+  retain their shipped behavior. The 1M input window and the tiered wire gate
+  stay `qwen4`-wide (pre-existing, #15987), and the models.dev catalog still
+  overrides the regex rows once it publishes a qwen4 entry with different limits.
+  (The cache TTL gate also stays `qwen4`-wide because the vendor documents
+  explicit cache for the whole "Qwen4 series", and it only activates on the
+  opt-in `'1h'` setting.)
+- **Exempt qwen4-max from the 64K output ceiling.** `qwen3.8-max` keeps a 64K
   `max_tokens` because its `max_tokens` excludes CoT. qwen4-max's `max_tokens`
   includes CoT, so the same 64K would be consumed by thinking. The exemption
   follows the existing `CLAUDE_OPUS_EXTENDED` precedent; the window clamp still
   prevents `prompt + max_tokens > window`.
-- **Clamp the non-thinking budget in the pipeline, not the provider.** The
-  ceiling exemption sizes `max_tokens` for thinking mode (262,144), but the
-  non-thinking cap is 131,072. The provider sizes `max_tokens` before the
-  pipeline finalizes the disable shape, so only the pipeline knows the final
-  mode; the clamp lives there, gated on the qwen4 prefix plus the final
-  `reasoning_effort:'none'` / `enable_thinking:false`.
-- **Declare `efforts:['low','high','xhigh']` and clamp legacy selections.**
-  The server also accepts `medium`/`max` via mapping, but exposing the native
-  three-tier ladder keeps the UI honest about what the model distinguishes.
-  The declared-capability wire path clamps legacy tiers onto the declared
-  ladder for the qwen4 generation (`medium→high`, `max→xhigh`) via
-  `clampReasoningEffort`; other profile-less declarations keep their shipped
-  drop-to-server-default semantics (the legacy no-re-tier contract).
-- **Gate subscription budget changes on the qwen4 prefix.** The subscription
-  gateway's qwen3.8 budget contract is shipped behavior; only qwen4 models take
-  the new ladder.
-- **Apply the ladder, output budget, and subscription budget to the whole
-  `qwen4` prefix, not just `qwen4-max`.** The generation shares the §3.1
-  contract forward — the 1M window and the tiered wire gate already gate on
-  the prefix (#15987) — so a future `qwen4.x` release needs no further code
-  change. This intentionally changes behavior for existing `qwen4*` custom
-  routes (e.g. `qwen4-plus`): they previously inherited the qwen3.8-max ladder
-  and the 32K output fallback, and now take the qwen4 ladder
-  (`low/high/xhigh`, default `high`) and the thinking-sized 262,144 budget.
-  The qwen3.8 family and the invitation-only latest-series previews keep their
-  shipped behavior, and the models.dev catalog still overrides the regex rows
-  once it publishes a qwen4 entry with different limits.
+- **Declare `efforts:['low','high','xhigh']`; clamp legacy selections only for
+  qwen4-max.** Exposing the native three-tier ladder keeps the UI honest about
+  what the model distinguishes. The declared-capability wire path clamps a
+  persisted `medium`/`max` onto the declared ladder (`medium→high`, `max→xhigh`)
+  via `clampReasoningEffort` for qwen4-max only; other profile-less declarations
+  keep their shipped drop-to-server-default semantics (the legacy no-re-tier
+  contract).
+- **Scope subscription budget changes to qwen4-max.** The subscription gateway's
+  qwen3.8 budget contract is shipped behavior; only qwen4-max takes the new
+  ladder.
 - **Clamp the non-thinking budget on the final wire shape, not the endpoint.**
   The subscription gateway (`api.qwen.ai`) is not DashScope-detected, yet its
   disable path ships `enable_thinking:false` through the same pipeline
@@ -208,14 +215,19 @@ ttl:'1h' }`; otherwise omit `ttl` (the 5m default). Generalize the setting's
 ## Risks
 
 - The subscription gateway may not yet serve `qwen4-max` or may reject the qwen4
-  budget contract; client support is necessary but not sufficient there.
+  budget contract; client support is necessary but not sufficient there. The
+  non-thinking 131,072 clamp on subscription is inferred from the §3.1 contract,
+  not measured against `api.qwen.ai` (no key available).
 - A models.dev catalog entry for `qwen4` overrides the regex window/output rows
   (catalog wins); the curated output row still caps explicit requests.
-- The output-ceiling exemption interacts with truncation escalation
-  (`ESCALATED_MAX_TOKENS`): a qwen4 request's initial budget (262,144,
-  window-clamped) is always at least the escalated cap (at most 64K), so
-  `shouldEscalateMaxOutputTokens` never fires for the family and no
-  escalation path is exercised.
+- The output-ceiling exemption does **not** interact with truncation escalation
+  in practice: qwen4-max's initial budget (262,144, window-clamped) is always at
+  least the escalated cap (at most 64K), so `shouldEscalateMaxOutputTokens` never
+  fires for it and no escalation path is exercised.
+- `imageDetail` and `cacheRetention` are carried only on the DashScope-backed
+  channels; the subscription resolver copies neither and the subscription
+  provider injects no `cache_control`, so both are inert on Qwen Subscription.
+  The user docs scope these two controls accordingly.
 
 ## Validation plan
 
@@ -234,7 +246,7 @@ ttl:'1h' }`; otherwise omit `ttl` (the 5m default). Generalize the setting's
    shows `low`/`high`/`xhigh` with default `high`, and `none` disables thinking.
 2. An auto request carries a thinking+answer-sized `max_tokens` (not 32K/64K),
    bounded by the context window; with thinking disabled it is clamped to the
-   131,072 non-thinking cap.
+   131,072 non-thinking cap on both DashScope and Qwen Subscription.
 3. Image and video parts reach the wire for `qwen4-max`.
 4. `cacheRetention:'1h'` stamps `ttl:'1h'` on qwen4 cache breakpoints; default
    omits `ttl`. DashScope-based channels only — the subscription provider
@@ -242,13 +254,13 @@ ttl:'1h' }`; otherwise omit `ttl` (the 5m default). Generalize the setting's
 5. `imageDetail:'low'` injects `detail:'low'` into image parts; default injects
    nothing. DashScope-based channels only — the subscription resolver does
    not forward the setting.
-6. qwen3.8-max behavior (ladder, default `xhigh`, subscription budget table) is
-   unchanged.
-7. Existing `qwen4*` routes project the generation ladder
-   (`none/low/high/xhigh`) in the workspace provider controls, while
-   invitation-only previews and the stable family keep the qwen3.8-max ladder;
-   a subscription non-thinking request ships `enable_thinking:false` with
-   `max_tokens` clamped to 131,072.
+6. qwen3.8-max and other `qwen4*` routes keep their shipped ladder, default,
+   output limit, and subscription budget table.
+7. Only `qwen4-max` projects the native ladder (`none/low/high/xhigh`, default
+   `high`) in the workspace provider controls; other `qwen4*` routes,
+   invitation-only previews, and the stable family keep the qwen3.8-max ladder;
+   a subscription non-thinking `qwen4-max` request ships `enable_thinking:false`
+   with `max_tokens` clamped to 131,072.
 
 ## Open questions / follow-ups
 

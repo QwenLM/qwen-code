@@ -1068,17 +1068,21 @@ The optional `reasoning` field under `generationConfig` controls how aggressivel
 
 `qwen4-max` (ModelStudio Standard, Token Plan, QwenCloud Standard, and Qwen
 Subscription) speaks the tiered `reasoning_effort` contract with its own native
-ladder and defaults:
+ladder and defaults. These behaviors are scoped to `qwen4-max` (and its dated /
+`-latest` aliases); other `qwen4*` routes and the invitation-only
+`qwen-latest-series-invite-*` previews keep the qwen3.8-max ladder and their
+shipped output limits.
 
 - **Effort ladder:** `low` / `high` / `xhigh`, **default `high`** (qwen3.8-max
   defaults to `xhigh`). A configured `medium` is raised to `high` and `max` is
-  clamped to `xhigh`; `none` disables thinking. The invitation-only
-  `qwen-latest-series-invite-*` previews keep the qwen3.8-max ladder.
+  clamped to `xhigh` (matching the server's own mapping); `none` disables
+  thinking.
 - **Output budget:** `max_tokens` equals `max_completion_tokens` and caps
   **thinking + answer together** (262,144 in thinking mode, 131,072 without).
   The automatic output request is sized for that total rather than the flat 64K
   ceiling, still bounded by the context window; with thinking disabled it is
-  clamped to the 131,072 non-thinking cap.
+  clamped to the 131,072 non-thinking cap on both the DashScope channels and
+  Qwen Subscription.
 - **Media:** image and video input are accepted. On the DashScope-based
   channels (ModelStudio Standard, Token Plan, QwenCloud Standard),
   `generationConfig.imageDetail` (`low` / `high` / `auto`) stamps the OpenAI

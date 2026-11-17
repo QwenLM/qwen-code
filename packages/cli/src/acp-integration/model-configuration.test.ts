@@ -743,6 +743,8 @@ describe('model configuration manifest', () => {
   it.each([
     'qwen-latest-series-invite-202610-m6',
     'QWEN-LATEST-SERIES-INVITE-202610-m6',
+    'qwen4',
+    'qwen4-plus',
   ])('registers the stable tiered controls for %s', (modelId) => {
     expect(getModelConfiguration(modelId)).toEqual(
       getModelConfiguration('qwen3.8-max'),
@@ -762,7 +764,7 @@ describe('model configuration manifest', () => {
     });
   });
 
-  it.each(['qwen4', 'qwen4-plus', 'qwen4-max', 'Qwen4-Max-2026-10-01'])(
+  it.each(['qwen4-max', 'Qwen4-Max-2026-10-01'])(
     'registers the qwen4 native controls for %s',
     (modelId) => {
       expect(getModelConfiguration(modelId)).toEqual(
@@ -797,7 +799,8 @@ describe('model configuration manifest', () => {
       'xhigh',
       ['none', 'low', 'medium', 'xhigh'],
     ],
-    ['qwen4-plus', 'high', ['none', 'low', 'high', 'xhigh']],
+    ['qwen4-plus', 'xhigh', ['none', 'low', 'medium', 'xhigh']],
+    ['qwen4-max', 'high', ['none', 'low', 'high', 'xhigh']],
   ] as const)(
     'projects tiered controls for %s on opaque duplicate-endpoint routes',
     (model, currentValue, tiers) => {
@@ -954,10 +957,15 @@ describe('model configuration manifest', () => {
     ['qwen4-plus', 'none', false, true],
     ['qwen4-plus', 'none', true, false],
     ['qwen4-plus', 'low', false, true],
-    ['qwen4-plus', 'high', false, true],
+    ['qwen4-plus', 'medium', false, true],
     ['qwen4-plus', 'xhigh', false, true],
-    ['qwen4-plus', 'medium', false, false],
+    ['qwen4-plus', 'high', false, false],
     ['qwen4-plus', 'max', false, false],
+    ['qwen4-max', 'low', false, true],
+    ['qwen4-max', 'high', false, true],
+    ['qwen4-max', 'xhigh', false, true],
+    ['qwen4-max', 'medium', false, false],
+    ['qwen4-max', 'max', false, false],
     ['qwen3.7-plus', 'default', false, true],
     ['qwen3.7-plus', 'none', false, true],
     ['qwen3.7-plus', 'low', false, false],

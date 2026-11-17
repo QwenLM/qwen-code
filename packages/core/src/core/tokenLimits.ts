@@ -237,15 +237,17 @@ export function normalize(model: string): string {
 const CLAUDE_OPUS_EXTENDED = /^claude-opus-(?:4-(?:6|7|8)|5)/;
 
 /**
- * qwen4 generation: `max_tokens` caps thinking + answer together (262,144 in
- * thinking mode), so the flat 64K auto ceiling would be consumed by thinking
- * alone. Exempt the family from OUTPUT_TOKEN_CEILING like CLAUDE_OPUS_EXTENDED;
- * clampOutputTokensToWindow still bounds every request by window room.
+ * qwen4-max: `max_tokens` caps thinking + answer together (262,144 in thinking
+ * mode), so the flat 64K auto ceiling would be consumed by thinking alone.
+ * Exempt it from OUTPUT_TOKEN_CEILING like CLAUDE_OPUS_EXTENDED;
+ * clampOutputTokensToWindow still bounds every request by window room. Scoped
+ * to qwen4-max (not the whole qwen4 prefix): the combined cap is a qwen4-max
+ * contract, and other qwen4* routes keep their shipped output limit.
  */
-const QWEN4_OUTPUT_EXTENDED = /^qwen4/;
+const QWEN4_OUTPUT_EXTENDED = /^qwen4-max/;
 
 /**
- * qwen4 non-thinking output cap: with thinking disabled the gateway rejects
+ * qwen4-max non-thinking output cap: with thinking disabled the gateway rejects
  * max_tokens above 131,072 (400 range error), while thinking mode allows the
  * full 262,144. The pipeline clamps the final disable shape to this value.
  */
@@ -361,7 +363,7 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^claude-/, LIMITS['64k']], // Claude fallback: 64K
 
   // Alibaba / Qwen
-  [QWEN4_OUTPUT_EXTENDED, LIMITS['256k']], // qwen4: max_tokens caps CoT + answer (262,144 thinking)
+  [QWEN4_OUTPUT_EXTENDED, LIMITS['256k']], // qwen4-max: max_tokens caps CoT + answer (262,144 thinking)
   [/^qwen3\.\d/, LIMITS['64k']],
   [/^coder-model$/, LIMITS['64k']],
   [/^qwen/, LIMITS['32k']], // Qwen fallback (VL, turbo, plus, etc.): 32K
