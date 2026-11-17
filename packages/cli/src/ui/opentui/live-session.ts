@@ -747,10 +747,10 @@ export function ensureConfigInitialized(config: Config): Promise<void> {
       throw err;
     })
     .then(async () => {
-      // Every OpenTUI transcript row is drawn again on change, so reply rows
-      // are offered in both screen modes.
+      // Every OpenTUI transcript row is drawn again on change, so reply and
+      // thinking rows are offered in both screen modes.
       await getInteractiveModSession(config)?.initialize(
-        ['AbovePrompt', 'AssistantMessage'],
+        ['AbovePrompt', 'AssistantMessage', 'Thinking'],
         {
           prompts: true,
           runsPrompts: true,

@@ -15,7 +15,7 @@ class RuntimeBackendSelectionTest {
     void selectsEachPrimaryWithoutAddingOtherBackends() {
         var settings = new ManagedAgentProperties();
         settings.getRuntimeBroker().setEnabled(true);
-        for (String primary : List.of("local-process", "static", "kubernetes-workspace", "external-scratch", "external-workspace")) {
+        for (String primary : List.of("local-process", "static", "external-scratch", "external-workspace")) {
             settings.getRuntimeBroker().setProvisioner(primary);
             assertThat(RuntimeBackendSelection.from(settings).kinds()).containsExactly(primary);
         }
@@ -38,7 +38,7 @@ class RuntimeBackendSelectionTest {
     @Test
     void rejectsSshWithoutNodesAndCombinationsWithOtherPrimaryBackends() {
         var settings = settingsWithNodes();
-        for (String primary : List.of("static", "kubernetes-workspace", "external-scratch", "external-workspace")) {
+        for (String primary : List.of("static", "external-scratch", "external-workspace")) {
             settings.getRuntimeBroker().setProvisioner(primary);
             assertThatThrownBy(() -> RuntimeBackendSelection.from(settings))
                     .isInstanceOf(IllegalStateException.class).hasMessageContaining("local-process or ssh-process");
