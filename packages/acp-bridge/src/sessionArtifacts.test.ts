@@ -427,6 +427,62 @@ describe('SessionArtifactStore', () => {
     expect(events.at(-1)?.artifactCount).toBe(1);
   });
 
+  it('pins the stamped-count lag on the live-only downgrade path and its convergence', async () => {
+    const events: SessionArtifactEventRecordPayload[] = [];
+    let calls = 0;
+    const store = new SessionArtifactStore({
+      sessionId: 's-downgrade-count',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          calls++;
+          if (calls === 2) throw new Error('disk full');
+          events.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    const input = (n: string) => ({
+      title: n,
+      kind: 'link' as const,
+      storage: 'external_url' as const,
+      url: `https://example.com/downgrade-${n}`,
+      retention: 'restorable' as const,
+    });
+    // A lands in the journal (count 1).
+    await store.upsertMany([input('a')], { strict: true });
+    expect(events.at(-1)?.artifactCount).toBe(1);
+    // A's update fails to persist: the live-only downgrade keeps A
+    // ephemeral in the live map while the journal still holds it
+    // restorable. (Metadata, not title: link merges keep the existing
+    // title, so a metadata change is what makes the update durable.)
+    const downgraded = await store.upsertMany([
+      { ...input('a'), metadata: { revision: '2' } },
+    ]);
+    expect(downgraded.warnings).toEqual([
+      'artifact persistence unavailable; durable artifacts kept ephemeral',
+    ]);
+    // B's durable event stamps the LIVE restorable set: the documented
+    // best-effort lag — the journal replays A+B while the stamp says 1 —
+    // until a snapshot converges the journal or the load-time seed heals
+    // the sidecar from the rebuilt snapshot.
+    await store.upsertMany([input('b')], { strict: true });
+    expect(events.at(-1)?.artifactCount).toBe(1);
+    const rebuilt = rebuildSessionArtifactSnapshot(
+      events.map((systemPayload) => ({
+        type: 'system',
+        subtype: 'session_artifact_event',
+        systemPayload,
+      })),
+    )!;
+    expect(rebuilt.artifacts).toHaveLength(2);
+    // Re-journaling A converges the stamp with the journal again.
+    await store.upsertMany([{ ...input('a'), metadata: { revision: '3' } }], {
+      strict: true,
+    });
+    expect(events.at(-1)?.artifactCount).toBe(2);
+  });
+
   it('lists, removes, and idempotently ignores missing artifact deletes', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's1',

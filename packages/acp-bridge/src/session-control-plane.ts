@@ -13946,6 +13946,18 @@ export function createSessionControlPlane(
       const out: BridgeSessionSummary[] = [];
       for (const entry of byId.values()) {
         if (entry.workspaceCwd === key) {
+          // session/load registers the entry before it awaits
+          // artifacts.restore(), so inside that window the store is empty
+          // and the summary would omit artifactCount — which the list
+          // merge reads as zero and uses to drop the sidecar-enriched
+          // count. Leave the row to the persisted summary until the
+          // restore settles (same exclusion the conditional-close path
+          // applies).
+          if (
+            channelInfoForEntry(entry)?.pendingRestoreIds.has(entry.sessionId)
+          ) {
+            continue;
+          }
           out.push(toSessionSummary(entry));
         }
       }

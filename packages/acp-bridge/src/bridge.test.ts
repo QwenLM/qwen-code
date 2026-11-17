@@ -7422,6 +7422,77 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('leaves a restoring session out of the workspace list until its artifact restore settles', async () => {
+    const sessionId = 'restore-window-summary';
+    const artifactUrl = 'https://example.com/restore-window';
+    const artifactId = stableSessionArtifactId(sessionId, `url:${artifactUrl}`);
+    let releaseRestore!: () => void;
+    const restoreGate = new Promise<void>((resolve) => {
+      releaseRestore = resolve;
+    });
+    const originalRestore = SessionArtifactStore.prototype.restore;
+    vi.spyOn(SessionArtifactStore.prototype, 'restore').mockImplementation(
+      async function (this: SessionArtifactStore, ...args) {
+        await restoreGate;
+        return originalRestore.apply(this, args);
+      },
+    );
+    const bridge = makeBridge({
+      channelFactory: async () =>
+        makeChannel({
+          loadSessionImpl: () =>
+            ({
+              artifactSnapshot: {
+                v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+                sessionId,
+                sequence: 7,
+                artifacts: [
+                  {
+                    id: artifactId,
+                    kind: 'link',
+                    storage: 'external_url',
+                    source: 'client',
+                    status: 'available',
+                    title: 'Restore window link',
+                    url: artifactUrl,
+                    retention: 'restorable',
+                    clientRetained: true,
+                    createdAt: '2026-07-04T00:00:00.000Z',
+                    updatedAt: '2026-07-04T00:00:00.000Z',
+                  },
+                ],
+                warnings: [],
+              },
+            }) as LoadSessionResponse,
+        }).channel,
+    });
+
+    const loadPromise = bridge.loadSession({ sessionId, workspaceCwd: WS_A });
+    // session/load registers the entry in byId before it awaits
+    // artifacts.restore(); getSessionSummary stops throwing once that
+    // registration lands, while the gated restore keeps the store empty.
+    await vi.waitFor(() => {
+      expect(() => bridge.getSessionSummary(sessionId)).not.toThrow();
+    });
+    // Inside that window the live summary would omit artifactCount (zero
+    // artifacts), which the list merge reads as zero and uses to drop the
+    // sidecar-enriched count — so the row must be left to the persisted
+    // summary until the restore settles.
+    expect(
+      bridge.listWorkspaceSessions(WS_A).find((s) => s.sessionId === sessionId),
+    ).toBeUndefined();
+
+    releaseRestore();
+    const loaded = await loadPromise;
+    expect(loaded.artifacts).toMatchObject([{ id: artifactId }]);
+    expect(
+      bridge.listWorkspaceSessions(WS_A).find((s) => s.sessionId === sessionId)
+        ?.artifactCount,
+    ).toBe(1);
+
+    await bridge.shutdown();
+  });
+
   it('clears durable artifacts but keeps live ephemerals when rewind returns an empty artifact snapshot', async () => {
     const persistedSnapshots: unknown[] = [];
     const handle = makeChannel({
