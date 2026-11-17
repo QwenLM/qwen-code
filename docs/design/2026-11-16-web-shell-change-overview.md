@@ -282,10 +282,14 @@ which replaces the newest-ancestor-head heuristic with a single
 
 - **Commit-fallback with no bound PR and no recorded base branch** (was R7-1).
   The shipped default walked HEAD's recent history because the "worktree
-  sessions start fresh" premise was false. The follow-up persists the session
-  start commit on branch and worktree sessions and composes
-  `<startCommit>..HEAD`, suppressing the fallback when no trustworthy start
-  exists — a range-less walk is never issued.
+  sessions start fresh" premise was false. The follow-up records the session
+  start commit and composes `<startCommit>..HEAD`, suppressing the fallback
+  when no trustworthy start exists — a range-less walk is never issued. The
+  start commit is **durable for worktree sessions** (the sidecar's
+  `worktreeBase`, else `originalHeadCommit`) but **live-only for branch and
+  plain sessions**: branch metadata is not restored across a daemon restart,
+  so a restored branch/plain session suppresses the fallback rather than
+  walking HEAD.
 - **Binding recency is not commit-graph order** (was R7-2). Two incomparable
   ancestor heads made the last-bound head's window re-list a sibling PR's
   commits. The follow-up excludes every commit reachable from _any_ bound PR

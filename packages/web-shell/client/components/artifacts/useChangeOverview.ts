@@ -230,21 +230,31 @@ export function useChangeOverview(
       // heads uniformly — no single-head boundary heuristic. Only passed when
       // the daemon advertises the exclude capability; showFallback above
       // suppresses the window entirely when bound PR heads cannot be excluded.
-      // The base branch joins the exclusion set so integrating upstream (pull,
-      // rebase, merge of the base) does not re-list pre-session commits as loose
-      // work: they are reachable from the base branch and subtracted, while the
-      // session's own commits (children of it) survive. The recorded start
-      // commit still bounds the window — this only narrows it, never replaces it.
+      // The base branch's remote-tracking ref joins the exclusion set so
+      // integrating upstream (pull, rebase, merge of the base) does not re-list
+      // pre-session commits as loose work. The recorded baseBranch is the LOCAL
+      // name (e.g. main), which integration never advances — only origin/main
+      // does — so excluding the local name alone subtracts nothing. Exclude the
+      // remote-tracking ref (origin/<baseBranch>), which reaches the integrated
+      // upstream commits; the session's own commits (children of it) survive.
+      // The recorded start commit still bounds the window — this only narrows it.
+      const baseBranchExclusions =
+        baseBranch && baseBranch !== 'HEAD' && isSafeSingleRef(baseBranch)
+          ? [
+              ...new Set([
+                baseBranch,
+                baseBranch.startsWith('origin/')
+                  ? baseBranch
+                  : `origin/${baseBranch}`,
+              ]),
+            ].filter(isSafeSingleRef)
+          : [];
       const excludeRefs = excludeRefsSupported
         ? [
             ...prResults
               .map((result) => result.headSha)
               .filter((sha): sha is string => sha !== undefined),
-            ...(baseBranch &&
-            baseBranch !== 'HEAD' &&
-            isSafeSingleRef(baseBranch)
-              ? [baseBranch]
-              : []),
+            ...baseBranchExclusions,
           ]
         : [];
       let commitsTruncated = false;

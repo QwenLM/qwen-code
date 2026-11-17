@@ -216,6 +216,25 @@ describe('useChangeOverview', () => {
     );
   });
 
+  it('excludes the remote-tracking ref of a local base branch (integration advances origin/main, not main)', async () => {
+    // The recorded baseBranch is the LOCAL name (main); integrating upstream
+    // only advances origin/main. Excluding main alone subtracts nothing, so the
+    // remote-tracking ref must join the exclusion set.
+    mock.sessionStatus.mockResolvedValue({
+      prs: [{ number: 1, url: 'https://github.com/o/r/pull/1' }],
+      branch: { name: 'feat/x', baseBranch: 'main', baseCommit: 'base0' },
+    });
+    await renderAndSettle();
+    const ws = mock.workspaceByCwd.mock.results[0]!.value;
+    expect(ws.workspaceGitLog).toHaveBeenCalledWith(
+      20,
+      0,
+      '/work',
+      'base0..HEAD',
+      { sessionId: 's1', excludeRefs: ['head1', 'main', 'origin/main'] },
+    );
+  });
+
   it('excludes commits reachable from every bound PR head when supported', async () => {
     // Reachability exclusion (not a single-head boundary) drops each PR's own
     // commits, including for merged or incomparable heads.

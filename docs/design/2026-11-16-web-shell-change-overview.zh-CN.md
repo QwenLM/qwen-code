@@ -235,8 +235,11 @@ PR 方法保持一致。
 
 - **无绑定 PR 且无记录基线分支时的 commit 兜底**（原 R7-1）。已交付的默认
   行为遍历 HEAD 近期历史，因为「worktree 会话从零开始」的前提不成立。跟进
-  设计在分支与 worktree 会话上持久化会话起点 commit，并组
-  `<startCommit>..HEAD`；无可信起点时抑制兜底——绝不发起无范围遍历。
+  设计记录会话起点 commit 并组 `<startCommit>..HEAD`；无可信起点时抑制兜底
+  ——绝不发起无范围遍历。起点 commit 对 **worktree 会话 durable**（sidecar 的
+  `worktreeBase`，否则 `originalHeadCommit`），但对**分支与普通会话仅 live**：
+  分支元数据不在 daemon 重启后恢复，故恢复的分支/普通会话抑制兜底，而非遍历
+  HEAD。
 - **绑定时间序非提交图序**（原 R7-2）。两个不可比的祖先 head 使最后绑定
   head 的窗口重复列兄弟 PR 的提交。跟进设计用一次原生
   `git log <range> --not <heads>` 排除从*任一*绑定 PR head 可达的所有提交，

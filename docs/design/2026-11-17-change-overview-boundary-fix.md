@@ -101,10 +101,19 @@ _every_ bound head, not intersection against one arbitrarily-ordered head.
 - Each excluded ref is validated against the single-ref whitelist
   (`isSafeSingleRef`: charset, no leading `-` or `^`, no `..`); an unsafe ref
   drops the whole exclusion set into a refused (`available:false`) result
-  rather than silently running unscoped — same fail-closed posture as the
-  range guard. A leading `^` is refused because git's `--not ^ref` XORs the two
-  negations into an inclusion (widening the window). The hash-prefix search arm
-  carries the `--not <refs>` tail so exclusion is honoured there too.
+  rather than silently running unscoped. A leading `^` is refused because
+  git's `--not ^ref` XORs the two negations into an inclusion (widening the
+  window). The hash-prefix search arm carries the `--not <refs>` tail so
+  exclusion is honoured there too.
+- The core range guard is an injection guard, not a fail-closed boundary: an
+  unsafe `range` is dropped (never passed to git) and the fetch falls back to a
+  range-less HEAD walk rather than refusing. The change overview's no-unscoped-
+  walk invariant is therefore kept by the hook's own client-side whitelist
+  (`isSafeRangeRef` / `isSafeSingleRef`), which suppresses the fetch on an unsafe
+  ref before it ever reaches the route. Making the core range guard itself
+  fail-closed would change the contract other SDK consumers rely on (the
+  existing injection-guard tests pin "ignore unsafe range, return the log"), so
+  it is left as-is; the boundary guarantee lives in the hook.
 - The log route gains an additive `exclude` query parameter (comma-separated
   refs). Absent → unchanged behavior. A repeated key, an empty value, or a
   separator-only value (`,,,`) is refused with 400 (fail closed) rather than
@@ -123,16 +132,21 @@ summary.baseCommit` (plain session) → `<start>..HEAD`; else `baseBranch`
 - When the exclude capability is present and PR heads resolved, pass every
   bound PR `headSha` as `excludeRefs`. Reachability exclusion handles merged,
   parallel, and incomparable heads uniformly.
-- The base branch (`branch.baseBranch ?? worktree.baseBranch`, when a
-  whitelist-safe single ref, non-`'HEAD'`) joins the exclusion set. Worktree
-  sessions have no branch meta, so their base branch is carried on
-  `worktree.baseBranch`. Integrating upstream in the session tree (`git pull`,
-  rebase, merge of the base) advances HEAD to commits the start commit does not
-  reach; without this they would re-list as loose work. They are reachable from
-  the base branch and subtracted, while the session's own commits (children of
-  it) survive. This narrows the window; the recorded start commit still bounds
-  it. (An ancestry/merge-base probe alone would not fix this: after a linear
-  upstream advance the start commit is still an ancestor of HEAD.)
+- The base branch's **remote-tracking ref** joins the exclusion set. The
+  recorded `baseBranch` (`branch.baseBranch ?? worktree.baseBranch`) is the
+  LOCAL name (e.g. `main`), which integrating upstream never advances — only
+  `origin/main` does — so excluding the local name alone subtracts nothing. The
+  hook excludes `origin/<baseBranch>` (the ref that reaches the integrated
+  upstream commits) alongside the local name; the session's own commits
+  (children of it) survive. Worktree sessions have no branch meta, so their base
+  branch is carried on `worktree.baseBranch` (sidecar `originalBranch`). This
+  narrows the window; the recorded start commit still bounds it. (An
+  ancestry/merge-base probe alone would not fix this: after a linear upstream
+  advance the start commit is still an ancestor of HEAD.) Known edge: the
+  worktree-handoff flow can record `originalBranch` from a sibling checkout
+  whose HEAD diverges from the recorded base commit, so in that rare case the
+  base-branch narrowing can be imprecise; the start-commit window still bounds
+  the session's work correctly.
 - Keep the guard: if any produced PR unit failed to resolve a head, suppress
   the fallback (its commits cannot be excluded, so they must not be re-listed).
 - Capability skew: with bound PR units but **no** exclude capability (a new

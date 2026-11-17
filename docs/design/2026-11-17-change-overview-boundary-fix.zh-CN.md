@@ -84,9 +84,15 @@ search }`；log 路由（`workspace-git-log.ts`）转发 `range`/`search`。无�
   调用；无逐条目祖先调用。
 - 每个排除 ref 按单 ref 白名单校验（`isSafeSingleRef`：字符集、无前导 `-`/`^`、
   无 `..`）；不安全 ref 使整个排除集落入拒绝（`available:false`）结果，而非
-  静默无范围运行——与 range 守卫相同的 fail-closed 姿态。前导 `^` 被拒，因为
-  git 的 `--not ^ref` 把双重否定异或成包含（扩大窗口）。hash 前缀搜索臂携带
-  `--not <refs>` 尾部，使排除在该臂同样生效。
+  静默无范围运行。前导 `^` 被拒，因为 git 的 `--not ^ref` 把双重否定异或成
+  包含（扩大窗口）。hash 前缀搜索臂携带 `--not <refs>` 尾部，使排除在该臂
+  同样生效。
+- core 的 range 守卫是注入守卫，而非 fail-closed 边界：不安全 `range` 被丢弃
+  （绝不传给 git），取数退化为无范围 HEAD 遍历而非拒绝。变更总览的「绝不无范围
+  遍历」不变量因此由 hook 自身的客户端白名单（`isSafeRangeRef` /
+  `isSafeSingleRef`）保持——它在 unsafe ref 到达路由前就抑制取数。把 core range
+  守卫本身改成 fail-closed 会改变其他 SDK 消费方依赖的契约（现有注入守卫测试
+  钉住「忽略 unsafe range，返回 log」），故保持原样；边界保证落在 hook。
 - log 路由增 additive `exclude` 查询参数（逗号分隔 ref）。缺省 → 行为不变。
   重复键、空值或仅分隔符值（`,,,`）以 400 拒绝（fail closed），而非丢弃排除
   无过滤运行。新 capability tag `workspace_git_log_exclude_refs` 声明之；钉死
@@ -101,13 +107,16 @@ search }`；log 路由（`workspace-git-log.ts`）转发 `range`/`search`。无�
   `<base>..HEAD`；否则**抑制**（永不再无范围遍历）。
 - exclude 能力存在且 PR head 已解析时，把每个绑定 PR `headSha` 作为
   `excludeRefs` 传入。可达性排除统一处理已合并、并行、不可比 head。
-- 基线分支（`branch.baseBranch ?? worktree.baseBranch`，白名单安全的单 ref、
-  非 `'HEAD'`）加入排除集。worktree 会话无分支元数据，其基线分支携带在
-  `worktree.baseBranch`。在会话树中整合上游（`git pull`、rebase、合并基线）使
-  HEAD 到达起点 commit 不可达的提交；若不排除会被重复列为松散工作。它们从
-  基线分支可达而被减去，会话自身的提交（其子代）存活。这只收窄窗口；记录的
-  起点 commit 仍定界它。（仅祖先/merge-base 探针无效：上游线性推进后起点
-  commit 仍是 HEAD 的祖先。）
+- 基线分支的**远程跟踪 ref** 加入排除集。记录的 `baseBranch`
+  （`branch.baseBranch ?? worktree.baseBranch`）是**本地**名（如 `main`），
+  整合上游从不推进它——只有 `origin/main` 推进——故仅排除本地名减不去任何
+  东西。hook 排除 `origin/<baseBranch>`（到达整合上游提交的 ref）连同本地名；
+  会话自身的提交（其子代）存活。worktree 会话无分支元数据，其基线分支携带在
+  `worktree.baseBranch`（sidecar `originalBranch`）。这只收窄窗口；记录的起点
+  commit 仍定界它。（仅祖先/merge-base 探针无效：上游线性推进后起点 commit
+  仍是 HEAD 的祖先。）已知边界：worktree-handoff 流程可能从兄弟检出记录
+  `originalBranch`，其 HEAD 与记录的 base commit 分叉，故该罕见情形下基线收窄
+  可能不精确；起点 commit 窗口仍正确定界会话工作。
 - 保留守卫：任一产出 PR 单元未解析出 head 则抑制兜底（其提交无法被排除，
   故不得重新列出）。
 - capability 偏差：有绑定 PR 单元但**无** exclude 能力（新客户端对旧 daemon）
