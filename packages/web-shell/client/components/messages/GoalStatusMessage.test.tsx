@@ -54,9 +54,16 @@ const budgetCard: SerializedGoalStatusMessage = {
   tokenBudget: 30_000_000,
 };
 
+// The stop reason renders inside the collapsible details; open them first.
+function expandDetails() {
+  const toggle = container!.querySelector('button')!;
+  act(() => toggle.click());
+}
+
 describe('GoalStatusMessage budget stop-reason', () => {
   it('renders the composed RU reason for a threaded budget card', async () => {
     await renderStatus(budgetCard, 'ru');
+    expandDetails();
     expect(container!.textContent).toContain(
       'Цель исчерпала автономный бюджет токенов (30\u00A0000\u00A0000 токенов)',
     );
@@ -64,6 +71,7 @@ describe('GoalStatusMessage budget stop-reason', () => {
 
   it('keeps the composed EN reason byte-identical to the recorded prose', async () => {
     await renderStatus(budgetCard, 'en');
+    expandDetails();
     expect(container!.textContent).toContain(budgetCard.lastReason);
   });
 
@@ -76,6 +84,7 @@ describe('GoalStatusMessage budget stop-reason', () => {
       },
       'ru',
     );
+    expandDetails();
     expect(container!.textContent).toContain('The provider rate-limited us.');
   });
 
@@ -84,4 +93,54 @@ describe('GoalStatusMessage budget stop-reason', () => {
       parseGoalStatusMessage(serializeGoalStatusMessage(budgetCard)),
     ).toEqual(budgetCard);
   });
+});
+
+it('starts compact and toggles the complete objective and check reason', () => {
+  const container = document.createElement('div');
+  document.body.append(container);
+  const root = createRoot(container);
+  const condition = 'Generate ideas\nPreserve the complete objective.';
+  try {
+    act(() => {
+      root.render(
+        <I18nProvider language="zh-CN">
+          <GoalStatusMessage
+            status={{
+              kind: 'achieved',
+              condition,
+              iterations: 4,
+              durationMs: 60_000,
+              lastReason: 'Output was written and read back.',
+            }}
+          />
+        </I18nProvider>,
+      );
+    });
+    const toggle = container.querySelector('button')!;
+    expect(container.textContent).toContain('目标已达成');
+    expect(container.textContent).toContain('4 轮');
+    expect(container.textContent).toContain('1m 0s');
+    expect(toggle.textContent).toBe('展开详情');
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(container.textContent).not.toContain('Output was written');
+
+    act(() => toggle.click());
+    expect(toggle.textContent).toBe('收起详情');
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    const details = document.getElementById(
+      toggle.getAttribute('aria-controls')!,
+    )!;
+    expect(details.firstElementChild?.textContent).toBe(condition);
+    expect(details.textContent).toContain(
+      '上次检查: Output was written and read back.',
+    );
+
+    act(() => toggle.click());
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(container.textContent).not.toContain('Output was written');
+    expect(container.textContent).toContain(condition);
+  } finally {
+    act(() => root.unmount());
+    container.remove();
+  }
 });

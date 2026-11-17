@@ -107,7 +107,8 @@ function buildAdvisorInput(config: Config): string {
     throw new Error('Advisor has no conversation for the active agent.');
   }
   const chat = agentChat ?? config.getGeminiClient().getChat();
-  const generationConfig = chat.getGenerationConfig();
+  const generationConfig =
+    chat.getDispatchedGenerationConfig?.() ?? chat.getGenerationConfig();
   const transcript = transcriptBeforeAdvisorCall(chat.getHistory(true));
   return JSON.stringify({
     executorSystemInstruction: sanitize(generationConfig.systemInstruction),

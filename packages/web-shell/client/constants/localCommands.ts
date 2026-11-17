@@ -177,6 +177,7 @@ const BUILTIN_COMMAND_DESCRIPTION_KEYS: Record<string, string> = {
   init: 'local.init',
   insight: 'local.insight',
   lsp: 'local.lsp',
+  pr: 'local.pr',
   remember: 'local.remember',
   summary: 'local.summary',
   workflows: 'local.workflows',

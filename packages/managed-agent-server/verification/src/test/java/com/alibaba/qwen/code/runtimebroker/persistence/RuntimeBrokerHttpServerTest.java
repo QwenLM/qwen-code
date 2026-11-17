@@ -1,25 +1,26 @@
 package com.alibaba.qwen.code.runtimebroker.persistence;
 
 import com.alibaba.fastjson2.JSON;
-import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
+import com.alibaba.qwen.code.runtimebroker.DelegatingBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.HarnessSessionResolver;
-import com.alibaba.qwen.code.runtimebroker.ResidentWorkspaceProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimePublicationGrant;
 import com.alibaba.qwen.code.runtimebroker.RuntimePublicationVerifier;
-import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
+import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.http.RuntimeBrokerHttpServer;
-import com.alibaba.qwen.code.runtimebroker.managedschema.JdbcRuntimeBrokerSchema;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.provisioning.staticruntime.StaticRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.security.ProtectedSecret;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
@@ -33,7 +34,6 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
-import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.HashMap;
@@ -50,7 +50,6 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -58,7 +57,7 @@ public class RuntimeBrokerHttpServerTest {
     @Test
     void capabilityReadsResolveAdmissionWithoutAllocatingOrAcquiringARuntime() throws Exception {
         var scope = new RuntimeScope("tenant", "workspace", "1", "/workspace",
-                ResidentWorkspaceProfile.CAPABILITY_DIGEST, "workspace");
+                WorkspaceExecutionProfile.MEASURED_CAPABILITY_DIGEST, "workspace");
         var admissions = new AtomicInteger();
         HarnessSessionResolver resolver = new HarnessSessionResolver() {
             @Override public CompletionStage<RuntimeScope> resolve(String id) {
@@ -78,7 +77,7 @@ public class RuntimeBrokerHttpServerTest {
             assertEquals(200, response.statusCode(), response.body());
             var actual = JSON.parseObject(response.body());
             assertEquals(Set.of("protocolVersion", "harnessSessionId", "scope"), actual.keySet());
-            assertEquals(ResidentWorkspaceProfile.CAPABILITY_DIGEST,
+            assertEquals(WorkspaceExecutionProfile.MEASURED_CAPABILITY_DIGEST,
                     actual.getJSONObject("scope").getString("capabilityDigest"));
             assertEquals("workspace", actual.getJSONObject("scope").getString("isolationClass"));
             assertNull(fixture.bindings.findActive(new RuntimeProvisionRequest(scope, null, "static")));
@@ -95,72 +94,12 @@ public class RuntimeBrokerHttpServerTest {
     }
 
     @Test
-    void residentUnsupportedToolsSettleBeforeDispatchAndDoNotBlockAReadOrRelease() throws Exception {
-        var scope = new RuntimeScope("tenant", "workspace", "1", "/workspace",
-                ResidentWorkspaceProfile.CAPABILITY_DIGEST, "workspace");
-        try (Fixture fixture = new Fixture(false, null, scope)) {
-            fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
-            for (String tool : List.of("web_fetch", "run_shell_command", "glob", "managed_mcp_call")) {
-                String payload = JSON.toJSONString(Map.of("toolName", tool, "input", Map.of()));
-                var prepared = prepare(fixture, tool, payload);
-                var refused = fixture.service.startExecution("harness", "runtime", prepared.getExecutionCallId(), payload)
-                        .toCompletableFuture().join();
-                assertTrue(refused.isSettled());
-                assertEquals("not_started", refused.getExecutionStatus());
-                assertEquals(0, refused.getDispatchGeneration());
-                assertTrue(refused.getResult().containsKey("capture"));
-                assertNull(refused.getResult().get("capture"));
-                assertEquals("resident_tool_unsupported", ((Map<?, ?>) refused.getResult().get("error")).get("type"));
-                assertEquals(refused.getVersion(), fixture.service.startExecution(
-                        "harness", "runtime", prepared.getExecutionCallId(), payload).toCompletableFuture().join().getVersion());
-            }
-            assertEquals(0, fixture.transport.executions.get());
-            assertFalse(fixture.executions.hasActiveByRuntimeSession("runtime"));
-            fixture.transport.fail = false;
-            String read = JSON.toJSONString(Map.of("toolName", "read_file", "input", Map.of("file_path", "proof.txt")));
-            var preparedRead = prepare(fixture, "read", read);
-            var result = fixture.service.startExecution("harness", "runtime", preparedRead.getExecutionCallId(), read)
-                    .toCompletableFuture().join();
-            assertEquals("success", result.getExecutionStatus());
-            assertEquals(1, fixture.transport.executions.get());
-            assertTrue(fixture.service.release("harness", "runtime").toCompletableFuture().join());
-        }
-    }
-
-    @Test
-    void residentToolRefusalCannotSettleAnExistingDispatchOrUnknownOutcome() throws Exception {
-        var scope = new RuntimeScope("tenant", "workspace", "1", "/workspace",
-                ResidentWorkspaceProfile.CAPABILITY_DIGEST, "workspace");
-        for (boolean unknown : List.of(false, true)) {
-            try (Fixture fixture = new Fixture(false, null, scope)) {
-                fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
-                String payload = JSON.toJSONString(Map.of("toolName", "web_fetch", "input", Map.of()));
-                var prepared = prepare(fixture, "old", payload);
-                var dispatched = fixture.executions.claimDispatch(prepared.getExecutionCallId(), "old-broker", Duration.ofMinutes(1));
-                var original = unknown ? fixture.executions.compareAndSet(dispatched,
-                        dispatched.withUnknown(), "old-broker", dispatched.getDispatchGeneration()) : dispatched;
-                var observed = fixture.service.startExecution("harness", "runtime", prepared.getExecutionCallId(), payload)
-                        .toCompletableFuture().join();
-                assertSame(original, observed);
-                assertEquals(1, observed.getDispatchGeneration());
-                assertNull(observed.getResult());
-                assertEquals(0, fixture.transport.executions.get());
-                assertTrue(fixture.executions.hasActiveByRuntimeSession("runtime"));
-            }
-        }
-    }
-
-    private static ToolExecutionRecord prepare(Fixture fixture, String key, String payload) throws Exception {
-        String digest = "sha256:" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
-                .digest(payload.getBytes(StandardCharsets.UTF_8)));
-        return fixture.service.prepareExecution("harness", "runtime", key, Map.of(
-                "sessionId", "runtime", "promptId", "turn", "callId", key, "argsDigest", digest))
-                .toCompletableFuture().join();
-    }
-
-    @Test
     void mcpInventoryReadsTheSelectedBindingWithoutAcquiringOrReplacingAnOwner() throws Exception {
-        try (Fixture fixture = new Fixture()) {
+        // Session isolation is the scope whose Harness admission JDBC fences on
+        // drain, so the inventory refusal after requestHarnessDrain is exercised.
+        var sessionScope = new RuntimeScope("tenant", "workspace", "generation",
+                "/workspace", "capability", "session");
+        try (Fixture fixture = new Fixture(false, null, sessionScope)) {
             String path = "/harness-sessions/harness/mcp-definitions";
             var body = new HashMap<String, Object>(Map.of("protocolVersion", 1, "requestId", "inventory", "harnessSessionId", "harness"));
             var first = fixture.post(path, body);
@@ -184,37 +123,12 @@ public class RuntimeBrokerHttpServerTest {
     }
 
     @Test
-    void privateRecoveryReadRejectsIncompleteOrNonIntegralInstalledOwner() throws Exception {
-        try (Fixture fixture = new Fixture()) {
-            Map<String, Object> body = new HashMap<>(Map.of("protocolVersion", 1, "requestId", "read",
-                    "harnessSessionId", "harness", "runtimeSessionId", "runtime", "promptId", "prompt", "batchId", "batch"));
-            Map<String, Object> owner = Map.of("writerId", "writer", "writerGeneration", 2, "activationId", "activation", "activationEpoch", 3);
-            for (String field : owner.keySet()) {
-                var missing = new HashMap<>(owner);
-                missing.remove(field);
-                body.put("recoveryOwner", missing);
-                assertEquals(400, fixture.post("/executions:read-batch", body).statusCode());
-            }
-            for (Object invalid : List.of(0, -1, 1.5, "2", 9007199254740992L)) {
-                for (String field : List.of("writerGeneration", "activationEpoch")) {
-                    var changed = new HashMap<>(owner);
-                    changed.put(field, invalid);
-                    body.put("recoveryOwner", changed);
-                    assertEquals(400, fixture.post("/executions:read-batch", body).statusCode());
-                }
-            }
-            body.put("recoveryOwner", "owner");
-            assertEquals(400, fixture.post("/executions:read-batch", body).statusCode());
-            assertEquals(0, fixture.transport.executions.get());
-            assertFalse(fixture.executions.hasActiveByRuntimeSession("runtime"));
-        }
-    }
-
-    @Test
     void warmAndAcquireExposeTheOriginalScopeIsolationClass() throws Exception {
-        for (String capability : List.of("capability", ResidentWorkspaceProfile.CAPABILITY_DIGEST)) {
-            var scope = new RuntimeScope("tenant", "workspace", "generation", "/workspace", capability,
-                    ResidentWorkspaceProfile.CAPABILITY_DIGEST.equals(capability) ? "workspace" : "session");
+        for (String capability : List.of("capability", WorkspaceExecutionProfile.MEASURED_CAPABILITY_DIGEST)) {
+            // The Workspace arm's admission pins a numeric Workspace generation,
+            // so the scope carries one; the isolation class under test is unchanged.
+            var scope = new RuntimeScope("tenant", "workspace", "1", "/workspace", capability,
+                    WorkspaceExecutionProfile.MEASURED_CAPABILITY_DIGEST.equals(capability) ? "workspace" : "session");
             try (Fixture fixture = new Fixture(false, null, scope)) {
                 HttpResponse<String> warmed = fixture.post("/runtimes:warm", Map.of(
                         "protocolVersion", 1, "requestId", "warm", "harnessSessionId", "harness"));
@@ -1127,7 +1041,7 @@ public class RuntimeBrokerHttpServerTest {
                     "/executions/" + reserved.getExecutionCallId() + ":start", body);
             assertEquals(400, response.statusCode(), response.body());
             assertTrue(response.body().contains("runtime_payload_invalid"), response.body());
-            assertSame(reserved, fixture.executions.findByExecutionCallId(reserved.getExecutionCallId()));
+            assertUnchanged(reserved, fixture.executions.findByExecutionCallId(reserved.getExecutionCallId()));
             assertEquals(ToolExecutionRecord.State.PREPARED, reserved.getState());
             assertEquals(0, fixture.transport.executions.get());
         }
@@ -1149,7 +1063,7 @@ public class RuntimeBrokerHttpServerTest {
                             "runtimeSessionId", "runtime", "payloadJson", payload, "extra", true));
             assertEquals(400, response.statusCode(), response.body());
             assertTrue(response.body().contains("runtime_broker_invalid_request"), response.body());
-            assertSame(reserved, fixture.executions.findByExecutionCallId(reserved.getExecutionCallId()));
+            assertUnchanged(reserved, fixture.executions.findByExecutionCallId(reserved.getExecutionCallId()));
             assertEquals(ToolExecutionRecord.State.PREPARED, reserved.getState());
             assertEquals(0, reserved.getDispatchGeneration());
             assertEquals(0, fixture.transport.executions.get());
@@ -1197,7 +1111,11 @@ public class RuntimeBrokerHttpServerTest {
     @Test
     @SuppressWarnings("unchecked")
     public void answersAStoreFailureAsRetryableServiceUnavailable() throws Exception {
-        InMemoryToolExecutionRepository inner = new InMemoryToolExecutionRepository(Clock.systemUTC());
+        var innerSource = new org.h2.jdbcx.JdbcDataSource();
+        innerSource.setURL("jdbc:h2:mem:broker-http-store-outage-" + java.util.UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        ManagedSchema.initialize(innerSource);
+        ToolExecutionRepository inner = new JdbcToolExecutionRepository(innerSource);
         AtomicBoolean failing = new AtomicBoolean(true);
         AtomicReference<String> failingMethod = new AtomicReference<>("findByIdempotencyKey");
         AtomicReference<Throwable> outage = new AtomicReference<>(
@@ -1218,6 +1136,40 @@ public class RuntimeBrokerHttpServerTest {
                         throw failure.getCause();
                     }
                 });
+        // The JDBC admission guard writes the reservation in its own transaction
+        // on the binding DataSource, so the write outage is injected there while
+        // the gate keeps reading the healthy store. Both share one database.
+        AtomicBoolean writeOutage = new AtomicBoolean();
+        javax.sql.DataSource guardedSource = (javax.sql.DataSource) Proxy.newProxyInstance(
+                RuntimeBrokerHttpServerTest.class.getClassLoader(),
+                new Class<?>[] { javax.sql.DataSource.class },
+                (proxy, method, args) -> {
+                    if (writeOutage.get() && method.getName().equals("getConnection")) {
+                        throw new java.sql.SQLException("simulated write outage");
+                    }
+                    try {
+                        return method.invoke(innerSource, args);
+                    } catch (java.lang.reflect.InvocationTargetException failure) {
+                        throw failure.getCause();
+                    }
+                });
+        var scope = new RuntimeScope("tenant", "workspace", "generation",
+                "/workspace", "capability", "workspace");
+        var healthyBindings = new JdbcRuntimeBindingRepository(innerSource,
+                new AesGcmSecretProtector("test", new byte[32]));
+        var healthySessions = new JdbcRuntimeSessionRepository(innerSource);
+        var guardedBindings = new JdbcRuntimeBindingRepository(guardedSource,
+                new AesGcmSecretProtector("test", new byte[32]));
+        var guardedSessions = new JdbcRuntimeSessionRepository(guardedSource);
+        var guardedExecutions = new JdbcToolExecutionRepository(guardedSource);
+        RuntimeBindingRepository bindings = new GuardedAdmissionBindings(
+                healthyBindings, guardedBindings, guardedSessions, guardedExecutions);
+        var service = new RuntimeBrokerService(
+                id -> CompletableFuture.completedFuture(scope),
+                new StaticRuntimeProvisioner(new RuntimeLease("instance",
+                        URI.create("http://127.0.0.1:1234"), "token", "lease", 1)),
+                new FailingTransport(), bindings, healthySessions, gate,
+                "broker", Duration.ofMinutes(1), Duration.ofMinutes(1));
         String digest = "sha256:" + "b".repeat(64);
         Map<String, Object> body = Map.of(
                 "protocolVersion", 1, "requestId", "prepare", "idempotencyKey", "key",
@@ -1225,7 +1177,7 @@ public class RuntimeBrokerHttpServerTest {
                 "toolCallId", "call", "requestDigest", digest,
                 "reference", Map.of("sessionId", "runtime", "promptId", "turn",
                         "callId", "call", "argsDigest", digest));
-        try (Fixture fixture = new Fixture(gate)) {
+        try (Fixture fixture = new Fixture(service)) {
             fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
             HttpResponse<String> response = fixture.post("/executions:prepare", body);
             assertEquals(503, response.statusCode(), response.body());
@@ -1288,8 +1240,10 @@ public class RuntimeBrokerHttpServerTest {
             assertTrue(acknowledgeError.getBooleanValue("retryable"));
             // A failed write maps the same way and leaves nothing behind:
             // neither the reservation a fresh prepare would create nor a
-            // cancel request on the landed execution.
-            failingMethod.set("findOrCreate");
+            // cancel request on the landed execution. The JDBC write is the
+            // admission transaction, so its connection is what fails here.
+            failing.set(false);
+            writeOutage.set(true);
             Map<String, Object> writeBody = new HashMap<>(body);
             writeBody.put("requestId", "write");
             writeBody.put("idempotencyKey", "write-key");
@@ -1299,6 +1253,8 @@ public class RuntimeBrokerHttpServerTest {
             assertEquals("runtime_broker_store_unavailable", writeError.getString("code"));
             assertTrue(writeError.getBooleanValue("retryable"));
             assertNull(inner.findByIdempotencyKey("write-key"));
+            writeOutage.set(false);
+            failing.set(true);
             failingMethod.set("requestCancel");
             HttpResponse<String> uncancelled = fixture.post(
                     "/executions/" + executionCallId + ":cancel", Map.of(
@@ -1308,7 +1264,7 @@ public class RuntimeBrokerHttpServerTest {
             var cancelWriteError = JSON.parseObject(uncancelled.body());
             assertEquals("runtime_broker_store_unavailable", cancelWriteError.getString("code"));
             assertTrue(cancelWriteError.getBooleanValue("retryable"));
-            assertSame(landed, inner.findByExecutionCallId(executionCallId));
+            assertUnchanged(landed, inner.findByExecutionCallId(executionCallId));
             // A permanent invariant violation is not a store outage: it keeps
             // the non-retryable 500 the HTTP layer gives any other failure.
             outage.set(assertThrows(IllegalStateException.class,
@@ -1326,248 +1282,16 @@ public class RuntimeBrokerHttpServerTest {
             assertFalse(invariant.body().contains("ring-closed-2026"));
             // Nothing landed or changed while the store was failing, and the
             // gate intercepted only the intended call on each route.
-            assertSame(landed, inner.findByExecutionCallId(executionCallId));
+            assertUnchanged(landed, inner.findByExecutionCallId(executionCallId));
             assertEquals(List.of("findByIdempotencyKey", "findByExecutionCallId",
                     "findByExecutionCallId", "findByExecutionCallId", "findByExecutionCallId",
-                    "findByExecutionCallId", "findOrCreate", "requestCancel", "findByIdempotencyKey"),
+                    "findByExecutionCallId", "requestCancel", "findByIdempotencyKey"),
                     intercepted);
             fixture.service.close();
             HttpResponse<String> closed = fixture.post("/runtimes:warm", Map.of(
                     "protocolVersion", 1, "requestId", "closed", "harnessSessionId", "harness"));
             assertEquals(503, closed.statusCode(), closed.body());
             assertEquals("runtime_broker_closed", JSON.parseObject(closed.body()).getString("code"));
-        }
-
-        // The private CSI routes reach the same store through the JDBC binding
-        // repository's own transaction; the same outage maps the same way.
-        String csiSession = "550e8400-e29b-41d4-a716-4466554400ff";
-        var csiRequest = CsiFilesRetirementProfile.request(
-                new com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding(
-                        "tenant", "workspace", 1, "storage", ".",
-                        CsiFilesRetirementProfile.CONTEXT_CONFIG_REF, 1),
-                "/workspace", csiSession);
-        var csiSource = new org.h2.jdbcx.JdbcDataSource();
-        csiSource.setURL("jdbc:h2:mem:csi-outage-" + java.util.UUID.randomUUID()
-                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
-        JdbcRuntimeBrokerSchema.initialize(csiSource);
-        try (var connection = csiSource.getConnection();
-                var statement = connection.prepareStatement(
-                        "INSERT INTO ma_session (tenant_id, session_id, agent_id, tool_profile,"
-                                + " runtime_request_key, workspace_id, workspace_generation,"
-                                + " workspace_storage_id, cwd_relative, context_config_ref,"
-                                + " context_revision, workspace_config_ref, workspace_policy_ref,"
-                                + " gmt_create, gmt_modified) VALUES ('tenant', ?, 'qwen-code', ?, ?,"
-                                + " 'workspace', 1, 'storage', '.', ?, 1, ?, ?, 0, 0)")) {
-            JdbcRepositorySupport.setIdentity(statement, 1, csiSession);
-            statement.setString(2, CsiFilesRetirementProfile.PROFILE);
-            statement.setString(3, csiRequest.requestKey());
-            JdbcRepositorySupport.setIdentity(statement, 4,
-                    CsiFilesRetirementProfile.CONTEXT_CONFIG_REF);
-            JdbcRepositorySupport.setIdentity(statement, 5,
-                    CsiFilesRetirementProfile.CONFIG_REF);
-            JdbcRepositorySupport.setIdentity(statement, 6,
-                    CsiFilesRetirementProfile.POLICY_REF);
-            statement.executeUpdate();
-        }
-        AtomicBoolean csiFailing = new AtomicBoolean();
-        var failingSource = (javax.sql.DataSource) Proxy.newProxyInstance(
-                RuntimeBrokerHttpServerTest.class.getClassLoader(),
-                new Class<?>[] { javax.sql.DataSource.class },
-                (proxy, method, arguments) -> {
-                    if (csiFailing.get() && method.getName().equals("getConnection")) {
-                        throw new java.sql.SQLException("simulated outage");
-                    }
-                    try {
-                        return method.invoke(csiSource, arguments);
-                    } catch (java.lang.reflect.InvocationTargetException failure) {
-                        throw failure.getCause();
-                    }
-                });
-        var csiBindings = new JdbcRuntimeBindingRepository(failingSource,
-                new AesGcmSecretProtector("test", new byte[32]));
-        var csiSessions = new JdbcRuntimeSessionRepository(failingSource);
-        var csiExecutions = new JdbcToolExecutionRepository(failingSource);
-        var csiCreated = csiBindings.findOrCreate(csiRequest);
-        var csiClaimed = csiBindings.claimOperation(csiCreated.getBindingId(), "setup",
-                Duration.ofMinutes(1));
-        var csiSeed = csiClaimed.getProvisionSeed();
-        var csiLease = new RuntimeLease(csiSeed.getProvisionalRuntimeId(),
-                URI.create("http://127.0.0.1:1234"), csiSeed.getToken(),
-                csiSeed.getLeaseId(), csiSeed.getEpoch());
-        var csiBinding = csiBindings.compareAndSet(csiClaimed, csiClaimed.withAttestation(
-                csiLease, new RuntimeResourceHandle(csiRequest.getProvisionerKind(), 1,
-                        Map.of("resource", "original")),
-                java.time.Instant.now(), java.time.Instant.now()));
-        var csiRuntime = new RuntimeSession(csiSession, csiSession, "bootstrap",
-                csiRequest.getScope());
-        var csiSaved = csiSessions.findOrCreate(new RuntimeSessionRecord(csiRuntime,
-                csiBinding.getBindingId(), csiBinding.getGeneration(),
-                RuntimeSessionRecord.State.ACQUIRING, 0, java.time.Instant.now()));
-        csiSessions.compareAndSet(csiSaved, csiSaved.withState(
-                RuntimeSessionRecord.State.READY, java.time.Instant.now()));
-        csiFailing.set(true);
-        try (var csiService = new RuntimeBrokerService(
-                id -> CompletableFuture.completedFuture(csiRequest.getScope()),
-                new StaticRuntimeProvisioner(csiLease), new FailingTransport(), csiBindings,
-                csiSessions, csiExecutions, "broker", Duration.ofMinutes(1),
-                Duration.ofMinutes(1));
-                var csiClient = HttpClient.newHttpClient()) {
-            com.alibaba.qwen.code.runtimebroker.service.BrokerServiceTestAccess.installSession(
-                    csiService, csiRuntime, csiBinding, csiLease);
-            var csiServer = new RuntimeBrokerHttpServer(
-                    new InetSocketAddress("127.0.0.1", 0), "secret", csiService);
-            csiServer.start();
-            try {
-                String csiDigest = "sha256:" + "c".repeat(64);
-                Map<String, Object> csiPrepare = new java.util.LinkedHashMap<>(Map.of(
-                        "protocolVersion", 1, "requestId", "csi-prepare",
-                        "idempotencyKey", "csi-key", "harnessSessionId", csiSession,
-                        "runtimeSessionId", csiSession, "turnId", "turn", "toolCallId",
-                        "call", "requestDigest", csiDigest,
-                        "reference", Map.of("sessionId", csiSession, "promptId", "turn",
-                                "callId", "call", "argsDigest", csiDigest)));
-                csiPrepare.put("inputBytesBase64", java.util.Base64.getEncoder()
-                        .encodeToString("{\"payloadJson\":\"{}\"}"
-                                .getBytes(StandardCharsets.UTF_8)));
-                csiPrepare.put("toolDefinitionBytesBase64", java.util.Base64.getEncoder()
-                        .encodeToString("{\"name\":\"read_file\"}"
-                                .getBytes(StandardCharsets.UTF_8)));
-                HttpResponse<String> csiPrepared = csiClient.send(HttpRequest.newBuilder(
-                        csiServer.getBaseUri().resolve(RuntimeBrokerHttpServer.ROUTE_PREFIX
-                                + "/executions:prepare"))
-                        .header("Authorization", "Bearer secret")
-                        .header("Content-Type", "application/json")
-                        .POST(HttpRequest.BodyPublishers.ofString(JSON.toJSONString(csiPrepare)))
-                        .build(), HttpResponse.BodyHandlers.ofString());
-                assertEquals(503, csiPrepared.statusCode(), csiPrepared.body());
-                var csiPrepareError = JSON.parseObject(csiPrepared.body());
-                assertEquals("runtime_broker_store_unavailable",
-                        csiPrepareError.getString("code"));
-                assertTrue(csiPrepareError.getBooleanValue("retryable"));
-                HttpResponse<String> csiBatch = csiClient.send(HttpRequest.newBuilder(
-                        csiServer.getBaseUri().resolve(RuntimeBrokerHttpServer.ROUTE_PREFIX
-                                + "/executions:read-batch"))
-                        .header("Authorization", "Bearer secret")
-                        .header("Content-Type", "application/json")
-                        .POST(HttpRequest.BodyPublishers.ofString(JSON.toJSONString(Map.of(
-                                "protocolVersion", 1, "requestId", "csi-read",
-                                "harnessSessionId", csiSession,
-                                "runtimeSessionId", csiSession,
-                                "promptId", "turn", "batchId", "batch"))))
-                        .build(), HttpResponse.BodyHandlers.ofString());
-                assertEquals(503, csiBatch.statusCode(), csiBatch.body());
-                var csiBatchError = JSON.parseObject(csiBatch.body());
-                assertEquals("runtime_broker_store_unavailable",
-                        csiBatchError.getString("code"));
-                assertTrue(csiBatchError.getBooleanValue("retryable"));
-            } finally {
-                csiServer.close();
-            }
-        }
-    }
-
-    @Test
-    @SuppressWarnings("unchecked")
-    public void answersAPrivateCsiStoreFailureAsRetryableServiceUnavailable() throws Exception {
-        String session = "550e8400-e29b-41d4-a716-446655440313";
-        RuntimeProvisionRequest request = CsiFilesRetirementProfile.request(
-                new com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding(
-                        "tenant", "workspace", 1, "storage", ".", CsiFilesRetirementProfile.CONTEXT_CONFIG_REF, 1),
-                "/workspace", session);
-        InMemoryRuntimeBindingRepository registry = new InMemoryRuntimeBindingRepository();
-        RuntimeBindingRecord binding = registry.claimOperation(registry.findOrCreate(request).getBindingId(),
-                "setup", Duration.ofMinutes(1));
-        var seed = binding.getProvisionSeed();
-        RuntimeLease lease = new RuntimeLease(seed.getProvisionalRuntimeId(), URI.create("http://127.0.0.1:9"),
-                seed.getToken(), seed.getLeaseId(), seed.getEpoch());
-        binding = registry.compareAndSet(binding, binding.withAttestation(lease,
-                new RuntimeResourceHandle(request.getProvisionerKind(), 1, Map.of("fixture", true)),
-                Instant.now(), Instant.now()));
-        RuntimeSession runtime = new RuntimeSession(session, session, "bootstrap", request.getScope());
-        InMemoryRuntimeSessionRepository sessions = new InMemoryRuntimeSessionRepository();
-        RuntimeSessionRecord saved = sessions.findOrCreate(new RuntimeSessionRecord(runtime, binding.getBindingId(),
-                binding.getGeneration(), RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now()));
-        saved = sessions.compareAndSet(saved, saved.withState(RuntimeSessionRecord.State.READY, Instant.now()));
-        // The private CSI routes need the JDBC binding store, and every route
-        // that checks the ready Session (the publisher install too) reads it
-        // first. Its database is unreachable, so every connection attempt
-        // fails with a real SQLException that JdbcRepositorySupport reports
-        // as a store failure.
-        AtomicInteger connections = new AtomicInteger();
-        AtomicReference<Exception> outage = new AtomicReference<>();
-        javax.sql.DataSource unreachable = (javax.sql.DataSource) Proxy.newProxyInstance(
-                RuntimeBrokerHttpServerTest.class.getClassLoader(),
-                new Class<?>[] { javax.sql.DataSource.class },
-                (proxy, method, args) -> switch (method.getName()) {
-                    case "getConnection" -> {
-                        connections.incrementAndGet();
-                        throw outage.get();
-                    }
-                    case "hashCode" -> System.identityHashCode(proxy);
-                    case "equals" -> proxy == args[0];
-                    case "toString" -> "unreachable";
-                    default -> throw new UnsupportedOperationException(method.getName());
-                });
-        FailingTransport transport = new FailingTransport();
-        RuntimeBrokerService service = new RuntimeBrokerService(
-                id -> CompletableFuture.completedFuture(request.getScope()),
-                new StaticRuntimeProvisioner(lease), transport,
-                new JdbcRuntimeBindingRepository(unreachable, new AesGcmSecretProtector("test", new byte[32])),
-                sessions, new InMemoryToolExecutionRepository(Clock.systemUTC()),
-                "broker", Duration.ofMinutes(1), Duration.ofMinutes(1));
-        // Install the ready Runtime Session the way a completed acquire leaves it.
-        com.alibaba.qwen.code.runtimebroker.service.BrokerServiceTestAccess.installSession(
-                service, runtime, binding, lease);
-        try (RuntimeBrokerHttpServer server = new RuntimeBrokerHttpServer(
-                new InetSocketAddress("127.0.0.1", 0), "secret", service);
-                HttpClient client = HttpClient.newHttpClient()) {
-            server.start();
-            String digest = "sha256:" + "b".repeat(64);
-            Map<String, Object> prepare = new HashMap<>(Map.of(
-                    "protocolVersion", 1, "requestId", "prepare", "idempotencyKey", "key",
-                    "harnessSessionId", session, "runtimeSessionId", session, "turnId", "turn",
-                    "toolCallId", "call", "requestDigest", digest,
-                    "reference", Map.of("sessionId", session, "promptId", "turn",
-                            "callId", "call", "argsDigest", digest)));
-            prepare.put("inputBytesBase64", java.util.Base64.getEncoder().encodeToString(
-                    "{}".getBytes(StandardCharsets.UTF_8)));
-            prepare.put("toolDefinitionBytesBase64", java.util.Base64.getEncoder().encodeToString(
-                    "{\"name\":\"write_file\"}".getBytes(StandardCharsets.UTF_8)));
-            Map<String, Object> readBatch = Map.of("protocolVersion", 1, "requestId", "read-batch",
-                    "harnessSessionId", session, "runtimeSessionId", session,
-                    "promptId", "turn", "batchId", "batch");
-            Map<String, Object> publisher = Map.of("protocolVersion", 1, "requestId", "publisher",
-                    "harnessSessionId", session, "runtimeSessionId", session,
-                    "publisher", Map.of("url", "http://127.0.0.1:1234/internal/hosted-shell-publisher/v1",
-                            "token", "a".repeat(43)));
-            int attempts = 0;
-            // A permanent invariant violation is not a store outage: it keeps
-            // the non-retryable 500 on these routes too.
-            for (Exception failure : List.<Exception>of(new java.sql.SQLException("simulated outage"),
-                    new IllegalStateException("Runtime binding identifier collision"))) {
-                outage.set(failure);
-                boolean storeOutage = failure instanceof java.sql.SQLException;
-                for (Map.Entry<String, Map<String, Object>> route : List.of(
-                        Map.entry("/executions:prepare", prepare),
-                        Map.entry("/executions:read-batch", readBatch),
-                        Map.entry("/tool-sessions/" + session + ":publisher", publisher))) {
-                    HttpResponse<String> response = client.send(HttpRequest.newBuilder(server.getBaseUri()
-                                    .resolve(RuntimeBrokerHttpServer.ROUTE_PREFIX + route.getKey()))
-                            .header("Authorization", "Bearer secret")
-                            .header("Content-Type", "application/json")
-                            .POST(HttpRequest.BodyPublishers.ofString(JSON.toJSONString(route.getValue())))
-                            .build(), HttpResponse.BodyHandlers.ofString());
-                    assertEquals(storeOutage ? 503 : 500, response.statusCode(), route.getKey() + " " + response.body());
-                    var error = JSON.parseObject(response.body());
-                    assertEquals(storeOutage ? "runtime_broker_store_unavailable" : "runtime_broker_internal_error",
-                            error.getString("code"), route.getKey());
-                    assertEquals(storeOutage, error.getBooleanValue("retryable"), route.getKey());
-                    // The failure came from the store, not an earlier refusal.
-                    assertEquals(++attempts, connections.get(), route.getKey());
-                }
-            }
-            assertSame(saved, sessions.findById(request.getScope(), session));
-            assertEquals(0, transport.executions.get());
         }
     }
 
@@ -1764,6 +1488,19 @@ public class RuntimeBrokerHttpServerTest {
                 "callId", "call", "argsDigest", "digest");
     }
 
+    /** JDBC reads deserialize a fresh record, so "unchanged" is identity+version+state. */
+    private static void assertUnchanged(ToolExecutionRecord expected, ToolExecutionRecord actual) {
+        assertTrue(expected.sameIdentity(actual));
+        assertEquals(expected.getVersion(), actual.getVersion());
+        assertEquals(expected.getState(), actual.getState());
+    }
+
+    private static void assertUnchanged(RuntimeSessionRecord expected, RuntimeSessionRecord actual) {
+        assertTrue(RuntimeBrokerTestAccess.sameIdentity(expected, actual));
+        assertEquals(expected.getVersion(), actual.getVersion());
+        assertEquals(expected.getState(), actual.getState());
+    }
+
     // The HTTP face's automatic observation reuses the freshest answer for
     // a short cooldown; a changed Runtime answer is observed once it lapses.
     private static void awaitObservationCooldown() throws InterruptedException {
@@ -1775,7 +1512,7 @@ public class RuntimeBrokerHttpServerTest {
         private final FailingTransport transport = new FailingTransport();
         private final HttpClient client = HttpClient.newHttpClient();
         private final ToolExecutionRepository executions;
-        private final InMemoryRuntimeBindingRepository bindings = new InMemoryRuntimeBindingRepository();
+        private final JdbcRuntimeBindingRepository bindings;
         private final RuntimeBrokerService service;
         private final RuntimeBrokerHttpServer server;
 
@@ -1787,10 +1524,6 @@ public class RuntimeBrokerHttpServerTest {
             this(v3, null);
         }
 
-        private Fixture(ToolExecutionRepository executions) throws Exception {
-            this(false, null, defaultScope(), executions);
-        }
-
         private Fixture(boolean v3, HarnessSessionResolver resolverOverride)
                 throws Exception {
             this(v3, resolverOverride, defaultScope());
@@ -1798,14 +1531,12 @@ public class RuntimeBrokerHttpServerTest {
 
         private Fixture(boolean v3, HarnessSessionResolver resolverOverride,
                 RuntimeScope scope) throws Exception {
-            this(v3, resolverOverride, scope,
-                    new InMemoryToolExecutionRepository(Clock.systemUTC()));
-        }
-
-        private Fixture(boolean v3, HarnessSessionResolver resolverOverride,
-                RuntimeScope scope, ToolExecutionRepository executions)
-                throws Exception {
-            this.executions = executions;
+            var source = new org.h2.jdbcx.JdbcDataSource();
+            source.setURL("jdbc:h2:mem:broker-http-" + java.util.UUID.randomUUID()
+                    + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+            ManagedSchema.initialize(source);
+            bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
+            this.executions = new JdbcToolExecutionRepository(source);
             RuntimePublicationVerifier verifier = v3 ? new RuntimePublicationVerifier() {
                 @Override
                 public RuntimePublicationGrant verify(ToolExecutionRecord execution,
@@ -1835,9 +1566,18 @@ public class RuntimeBrokerHttpServerTest {
                     new StaticRuntimeProvisioner(new RuntimeLease("instance",
                             URI.create("http://127.0.0.1:1234"), "token", "lease", 1)),
                     transport, bindings,
-                    new InMemoryRuntimeSessionRepository(),
-                    executions,
+                    new JdbcRuntimeSessionRepository(source),
+                    this.executions,
                     "broker", Duration.ofMinutes(1), Duration.ofMinutes(1), verifier);
+            server = new RuntimeBrokerHttpServer(new InetSocketAddress("127.0.0.1", 0),
+                    "secret", service);
+            server.start();
+        }
+
+        private Fixture(RuntimeBrokerService service) throws Exception {
+            this.executions = null;
+            this.bindings = null;
+            this.service = service;
             server = new RuntimeBrokerHttpServer(new InetSocketAddress("127.0.0.1", 0),
                     "secret", service);
             server.start();
@@ -1868,6 +1608,33 @@ public class RuntimeBrokerHttpServerTest {
         public void close() {
             server.close();
             client.close();
+        }
+    }
+
+    /**
+     * Reads and ordinary writes stay on the healthy store, while the execution
+     * admission guard runs on a same-schema DataSource whose connection can be
+     * failed, so a write outage is exercised without touching the read paths.
+     */
+    private static final class GuardedAdmissionBindings extends DelegatingBindingRepository {
+        private final JdbcRuntimeBindingRepository guarded;
+        private final JdbcRuntimeSessionRepository guardedSessions;
+        private final JdbcToolExecutionRepository guardedExecutions;
+
+        GuardedAdmissionBindings(RuntimeBindingRepository healthy,
+                JdbcRuntimeBindingRepository guarded,
+                JdbcRuntimeSessionRepository guardedSessions,
+                JdbcToolExecutionRepository guardedExecutions) {
+            super(healthy);
+            this.guarded = guarded;
+            this.guardedSessions = guardedSessions;
+            this.guardedExecutions = guardedExecutions;
+        }
+
+        @Override
+        public ToolExecutionRecord admitExecution(RuntimeSessionRepository sessions,
+                ToolExecutionRepository executions, ToolExecutionRecord candidate) {
+            return guarded.admitExecution(guardedSessions, guardedExecutions, candidate);
         }
     }
 

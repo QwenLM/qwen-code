@@ -204,6 +204,7 @@ function parseListOptions(
   res: Response,
 ):
   | {
+      sortBy?: 'updatedAt' | 'lastUserPromptAt';
       cursor?: string;
       size?: number;
       archiveState?: SessionArchiveState;
@@ -212,10 +213,22 @@ function parseListOptions(
   | undefined {
   if (
     !Object.keys(req.query).every((key) =>
-      ['cursor', 'size', 'archiveState'].includes(key),
+      ['cursor', 'size', 'archiveState', 'sortBy'].includes(key),
     )
   ) {
     sendInvalidRequest(res, 'The request query contains unknown fields.');
+    return undefined;
+  }
+  const sortBy = req.query['sortBy'];
+  if (
+    sortBy !== undefined &&
+    sortBy !== 'updatedAt' &&
+    sortBy !== 'lastUserPromptAt'
+  ) {
+    sendInvalidRequest(
+      res,
+      '`sortBy` must be `updatedAt` or `lastUserPromptAt`.',
+    );
     return undefined;
   }
   const cursor = req.query['cursor'];
@@ -255,6 +268,7 @@ function parseListOptions(
     if (!res.writableFinished) abort();
   });
   return {
+    ...(sortBy !== undefined ? { sortBy } : {}),
     ...(cursor !== undefined ? { cursor } : {}),
     ...(size !== undefined ? { size } : {}),
     ...(archiveState !== undefined ? { archiveState } : {}),

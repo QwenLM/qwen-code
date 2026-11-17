@@ -6,7 +6,7 @@
 
 Issue #12872 FG6a 覆盖打包后的 Hosted Harness 与 Runtime Broker 之间的应答丢失。现有测试覆盖启动应答丢失和状态不可用，但 Workspace 集成夹具即使在 MySQL 任务中也使用 H2。Prepare 当前不会重试丢失的应答。
 
-本次覆盖 acquire、prepare、start、status、cancel 和 release。Store 故障、进程崩溃、通用取消、SSE 断流、Shell、provider 控制和自动续跑仍属于 FG6b–f / W0e。不增加路由或执行契约。
+本次覆盖 acquire、prepare、start、status、cancel、release 与 release-before-forward。Store 故障、进程崩溃、通用取消、SSE 断流、Shell、provider 控制和自动续跑仍属于 FG6b–f / W0e。不增加路由或执行契约。
 
 ## 设计
 
@@ -14,17 +14,18 @@ Issue #12872 FG6a 覆盖打包后的 Hosted Harness 与 Runtime Broker 之间的
 
 代理转发请求并读完 Broker 的真实应答后，关闭下游连接。代理记录请求身份和上游应答，每个用例必须证明故障确实触发。Prepare 仅在传输失败时重试一次，复用原有预留字段。明确的 Broker 拒绝及无效应答不重试。连续丢失 prepare 应答仍保持阻塞。
 
-| 应答         | 预期证据                                                     |
-| ------------ | ------------------------------------------------------------ |
-| acquire      | 没有预留或启动；Session 阻塞；存储所有权保留                 |
-| prepare      | 两次请求、相同预留身份、一次执行和一次启动                   |
-| prepare 两次 | 一个预留、没有启动；Session 阻塞；保留所有权                 |
-| start        | 一次启动，状态只查询原执行；一次副作用                       |
-| status       | 不新增启动或身份；Session 阻塞；模型不继续                   |
-| cancel       | 预留后、启动前取消；即使取消已生效，丢回复仍阻塞；零副作用   |
-| release      | 结果已持久化，没有终态 Turn；当前及冷加载 Session 均拒绝输入 |
+| 应答                   | 预期证据                                                                            |
+| ---------------------- | ----------------------------------------------------------------------------------- |
+| acquire                | 没有预留或启动；Session 阻塞；存储所有权保留                                        |
+| prepare                | 两次请求、相同预留身份、一次执行和一次启动                                          |
+| prepare 两次           | 一个预留、没有启动；Session 阻塞；保留所有权                                        |
+| start                  | 一次启动，状态只查询原执行；一次副作用                                              |
+| status                 | 不新增启动或身份；Session 阻塞；模型不继续                                          |
+| cancel                 | 预留后、启动前取消；即使取消已生效，丢回复仍阻塞；零副作用                          |
+| release                | 结果已持久化，没有终态 Turn；当前及冷加载 Session 均拒绝输入                        |
+| release-before-forward | 回合已 settle；detach 时的终态排空偿还欠下的释放；Session 为 RELEASED，不保留所有权 |
 
-Release 应答可能在**释放已经生效后**丢失，此时 Broker 已关闭准入并清除 Workspace 存储所有权。Harness 无法推断成功，必须保留未结算输入；它无法让已经完成释放的 Broker 继续持有所有权。另设一个 release 转发前失败的用例，验证释放未生效时存储所有权仍被持有。这个区别遵循现有释放协议；FG6a 不引入第二阶段释放确认。
+Release 应答可能在**释放已经生效后**丢失，此时 Broker 已关闭准入并清除 Workspace 存储所有权。Harness 无法推断成功，必须保留未结算输入；它无法让已经完成释放的 Broker 继续持有所有权。反方向的失败——应答在**release 转发前**丢失（`release-before-forward`）——通过另一条路径到达同样的无主状态：该回合已经 settle（`turn_complete` 与 `tool_result` 已持久化），因此 detach 时的终态排空偿还欠下的清理，runtime Session 最终为 `RELEASED`、不再保留存储所有权。两个用例因此都断言 released 状态；`release-before-forward` 钉住的是排空对已 settle 回合的对账，FG6a 仍然不引入第二阶段释放确认。
 
 驱动检查转录结果、模型调用次数、新输入及重新加载被拒绝，以及文件系统副作用。Java 独立核对 SQL 执行记录、派发代数、Runtime Session 和存储所有权。这些检查必须与代理记录的身份和启动次数一致。
 

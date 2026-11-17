@@ -4,7 +4,7 @@ import com.alibaba.qwen.code.managedagent.catalog.ManagedAgentDefinitionService.
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.AgentDefinitionRequest;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentDefinitionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedAgentDefinitionStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedAgentDefinitionStore.Admission;
 import com.alibaba.qwen.code.managedagent.repository.ManagedAgentDefinitionStore.ConcurrentWriteException;
 import com.alibaba.qwen.code.managedagent.repository.ManagedAgentDefinitionStore.DefinitionRevision;
@@ -46,8 +46,8 @@ class ManagedAgentDefinitionServiceTest {
     private static final String UPDATE_DIGEST = new RequestDigests().digest(
             Map.of("operation", "update", "agentId", AGENT_ID, "definition", CONTENT));
 
-    private final ManagedAgentDefinitionStore store =
-            mock(ManagedAgentDefinitionStore.class);
+    private final JdbcManagedAgentDefinitionStore store =
+            mock(JdbcManagedAgentDefinitionStore.class);
     private final ManagedAgentDefinitionService service =
             new ManagedAgentDefinitionService(store, new RequestDigests(),
                     new ObjectMapper());

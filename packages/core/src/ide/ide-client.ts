@@ -169,9 +169,9 @@ export class IdeClient {
     if (this.connectionConfig?.authToken) {
       this.authToken = this.connectionConfig.authToken;
     }
+    const envWorkspacePath = process.env['QWEN_CODE_IDE_WORKSPACE_PATH'];
     const workspacePath =
-      this.connectionConfig?.workspacePath ??
-      process.env['QWEN_CODE_IDE_WORKSPACE_PATH'];
+      this.connectionConfig?.workspacePath ?? envWorkspacePath;
 
     const { isValid, error } = IdeClient.validateWorkspacePath(
       workspacePath,
@@ -187,6 +187,7 @@ export class IdeClient {
       if (this.connectionConfig.port) {
         const connected = await this.establishHttpConnection(
           this.connectionConfig.port,
+          workspacePath,
         );
         if (connected) {
           return;
@@ -199,6 +200,7 @@ export class IdeClient {
       if (this.connectionConfig.stdio) {
         const connected = await this.establishStdioConnection(
           this.connectionConfig.stdio,
+          workspacePath,
         );
         if (connected) {
           return;
@@ -206,9 +208,18 @@ export class IdeClient {
       }
     }
 
+    const envConnectionWorkspacePath = IdeClient.validateWorkspacePath(
+      envWorkspacePath,
+      process.cwd(),
+    ).isValid
+      ? envWorkspacePath
+      : undefined;
     const portFromEnv = this.getPortFromEnv();
     if (portFromEnv && !this.workspaceRejectedPorts.has(portFromEnv)) {
-      const connected = await this.establishHttpConnection(portFromEnv);
+      const connected = await this.establishHttpConnection(
+        portFromEnv,
+        envConnectionWorkspacePath,
+      );
       if (connected) {
         return;
       }
@@ -216,7 +227,10 @@ export class IdeClient {
 
     const stdioConfigFromEnv = this.getStdioConfigFromEnv();
     if (stdioConfigFromEnv) {
-      const connected = await this.establishStdioConnection(stdioConfigFromEnv);
+      const connected = await this.establishStdioConnection(
+        stdioConfigFromEnv,
+        envConnectionWorkspacePath,
+      );
       if (connected) {
         return;
       }
@@ -881,7 +895,10 @@ export class IdeClient {
       if (config.authToken) {
         this.authToken = config.authToken;
       }
-      const connected = await this.establishHttpConnection(port);
+      const connected = await this.establishHttpConnection(
+        port,
+        config.workspacePath,
+      );
       if (connected) {
         this.connectionConfig = config;
         return true;
@@ -931,15 +948,26 @@ export class IdeClient {
     };
   }
 
-  private registerClientHandlers() {
+  private registerClientHandlers(workspacePath: string | undefined) {
     if (!this.client) {
       return;
     }
 
+    const realpath = fs.realpathSync.native ?? fs.realpathSync;
+    const workspaceRoots =
+      workspacePath === undefined
+        ? undefined
+        : IdeClient.parseWorkspacePathEnv(workspacePath).flatMap((root) => {
+            try {
+              return [realpath(root)];
+            } catch {
+              return [];
+            }
+          });
     this.client.setNotificationHandler(
       IdeContextNotificationSchema,
       (notification) => {
-        ideContextStore.set(notification.params);
+        ideContextStore.set(notification.params, workspaceRoots);
         const isTrusted = notification.params.workspaceState?.isTrusted;
         if (isTrusted !== undefined) {
           for (const listener of this.trustChangeListeners) {
@@ -1008,11 +1036,18 @@ export class IdeClient {
     );
   }
 
-  private async establishHttpConnection(port: string): Promise<boolean> {
+  private async establishHttpConnection(
+    port: string,
+    workspacePath: string | undefined,
+  ): Promise<boolean> {
     // Always try localhost first. This covers the most common scenarios:
     // non-container environments, and code-server where the extension runs
     // inside the same container as the CLI.
-    const connected = await this.tryHttpConnect(port, LOCAL_HOST);
+    const connected = await this.tryHttpConnect(
+      port,
+      LOCAL_HOST,
+      workspacePath,
+    );
     if (connected) {
       return true;
     }
@@ -1025,13 +1060,17 @@ export class IdeClient {
       debugLogger.debug(
         `Connection to ${LOCAL_HOST}:${port} failed, retrying with ${CONTAINER_HOST}`,
       );
-      return this.tryHttpConnect(port, CONTAINER_HOST);
+      return this.tryHttpConnect(port, CONTAINER_HOST, workspacePath);
     }
 
     return false;
   }
 
-  private async tryHttpConnect(port: string, host: string): Promise<boolean> {
+  private async tryHttpConnect(
+    port: string,
+    host: string,
+    workspacePath: string | undefined,
+  ): Promise<boolean> {
     let transport: StreamableHTTPClientTransport | undefined;
     try {
       debugLogger.debug(
@@ -1055,10 +1094,10 @@ export class IdeClient {
         },
       );
 
-      this.registerClientHandlers();
+      this.registerClientHandlers(workspacePath);
 
       await this.client.connect(transport);
-      this.registerClientHandlers();
+      this.registerClientHandlers(workspacePath);
       await this.discoverTools();
       this.setState(IDEConnectionStatus.Connected);
       return true;
@@ -1075,10 +1114,10 @@ export class IdeClient {
     }
   }
 
-  private async establishStdioConnection({
-    command,
-    args,
-  }: StdioConfig): Promise<boolean> {
+  private async establishStdioConnection(
+    { command, args }: StdioConfig,
+    workspacePath: string | undefined,
+  ): Promise<boolean> {
     let transport: StdioClientTransport | undefined;
     try {
       debugLogger.debug('Attempting to connect to IDE via stdio');
@@ -1093,7 +1132,7 @@ export class IdeClient {
         args,
       });
       await this.client.connect(transport);
-      this.registerClientHandlers();
+      this.registerClientHandlers(workspacePath);
       await this.discoverTools();
       this.setState(IDEConnectionStatus.Connected);
       return true;

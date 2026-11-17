@@ -42,7 +42,6 @@ import { isSafeModeEnv } from '@qwen-code/qwen-code-core/utils/safe-mode.js';
 import { closeFileWatcher } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
 import { getExtensionDisplayName } from '@qwen-code/qwen-code-core/extension/i18n.js';
 import {
-  AUTO_MEMORY_SKILL_NAME,
   authoredSkillName,
   qualifySkillName,
 } from '@qwen-code/qwen-code-core/skills/types.js';
@@ -109,7 +108,6 @@ type SkillManagerConfigShim = Pick<
   | 'getProjectRoot'
   | 'getActiveExtensions'
   | 'getDisabledSkillLevels'
-  | 'isSkillEnabled'
 >;
 
 interface WorkspaceSkillManagers {
@@ -473,11 +471,6 @@ async function buildWorkspaceSkillsStatus(
       );
       const safeMode =
         (!workspaceTrusted && !includeUntrustedSkills) || isSafeModeEnv();
-      // Mirror loadCliConfig: safe mode turns managed auto-memory off, and the
-      // daemon never runs bare.
-      const managedAutoMemoryEnabled =
-        !isSafeModeEnv() &&
-        settings.merged.memory?.enableManagedAutoMemory !== false;
       let extensionManager: ExtensionManager | undefined;
       const extensionSkillStates = new Map<Extension, Map<string, boolean>>();
       if (workspaceTrusted && !safeMode) {
@@ -534,17 +527,6 @@ async function buildWorkspaceSkillsStatus(
           extensionManager?.getLoadedExtensions().filter((e) => e.isActive) ??
           [],
         getDisabledSkillLevels: () => disabledLevels,
-        // SkillManager asks only about the bundled skills that serve an
-        // optional feature; the catalog applies `skills.disabled` itself.
-        // `auto-memory` follows the child's managed auto-memory switch. The
-        // structured recall protocol, which also hides it, needs a corpus scan
-        // the daemon does not run, so the catalog lists it as legacy does.
-        isSkillEnabled: (skill) =>
-          !(
-            skill.level === 'bundled' &&
-            skill.name === AUTO_MEMORY_SKILL_NAME &&
-            !managedAutoMemoryEnabled
-          ),
       };
       const skillManager = new SkillManager(shim as Config);
       const watchDirectories: string[] = [];

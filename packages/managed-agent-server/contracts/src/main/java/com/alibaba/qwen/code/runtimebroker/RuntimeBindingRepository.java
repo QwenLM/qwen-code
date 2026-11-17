@@ -131,6 +131,9 @@ public interface RuntimeBindingRepository {
         requireHookAdmission(scope, harnessSessionId, authority);
     }
 
+    /** Bindings isolated to one Harness Session ({@code isolation_class = 'session'}),
+     * in any state. Shared Workspace bindings never match; resolve those by
+     * request key ({@link #findActive}) or by id. See {@link HarnessOwnership}. */
     public List<RuntimeBindingRecord> findByHarnessSession(String tenantId, String harnessSessionId,
             String afterBindingId, int limit);
 

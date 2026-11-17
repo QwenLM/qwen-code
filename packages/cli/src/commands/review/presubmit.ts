@@ -252,15 +252,46 @@ interface PresubmitArgs {
  * would be the dangerous outcome (a dropped finding reads as disjoint), so
  * any entry lacking a string `path` — or carrying a non-null, non-string
  * or misshapen `id` — rejects the WHOLE file rather than being skipped.
+ *
+ * This input is deliberately NOT the canonical findings artifact Step 6
+ * writes, and accepting that file was implemented, reviewed and reverted
+ * (#9218). Two of its fields do not mean here what they mean upstream, and
+ * both feed the overlap leg — so adopting them would trade a loud rejection
+ * for a silent one:
+ *
+ *  - `locations[].line` is the agent's CLAIM. The posted line is the one
+ *    `resolve-anchors` computes into `…-anchors-resolved.json`, and nothing
+ *    writes it back into the artifact, so a claimed or absent line would key
+ *    the overlap test on a number the comment was never placed at — a
+ *    duplicate then reads as disjoint.
+ *  - `id` is required on every finding — `isPostable` filters what posts, not
+ *    what carries an id — while `FindingAnchor.id` is the carried-re-post
+ *    signal alone, and the id-less fallback in `classifyExistingComments`
+ *    reads a fresh id at an unambiguous location as one of those signals.
+ *
+ * The skill therefore writes this file from the RESOLVED anchors; the artifact
+ * is what `findings` and `resolve-anchors` read, never what this reads.
+ *
+ * Neither raw resolver file is this list: both input and resolved entries
+ * carry `anchor`, and resolved entries also carry metadata such as `status`
+ * and `claimedLine`. Only the minimal list's keys are accepted, so a missed
+ * `startLine` rename cannot silently collapse a range to a single line.
  */
-export function parseFindingsFile(path: string): FindingAnchor[] | null {
+export function parseFindingsFile(
+  path: string,
+  onInvalid?: (detail: string) => void,
+): FindingAnchor[] | null {
+  const invalid = (detail: string): null => {
+    onInvalid?.(detail);
+    return null;
+  };
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(path, 'utf8'));
   } catch {
-    return null;
+    return invalid('could not read a JSON file');
   }
-  if (!Array.isArray(parsed)) return null;
+  if (!Array.isArray(parsed)) return invalid('expected an array');
   const out: FindingAnchor[] = [];
   for (const entry of parsed) {
     if (
@@ -268,7 +299,7 @@ export function parseFindingsFile(path: string): FindingAnchor[] | null {
       entry === null ||
       typeof (entry as { path?: unknown }).path !== 'string'
     ) {
-      return null;
+      return invalid('each entry needs a string path');
     }
     const e = entry as {
       path: string;
@@ -276,6 +307,31 @@ export function parseFindingsFile(path: string): FindingAnchor[] | null {
       start_line?: unknown;
       id?: unknown;
     };
+    // Null optional fields are absent, as with `id` below; other metadata
+    // must not be silently discarded from either resolver file.
+    const unexpectedKey = Object.entries(entry).find(
+      ([key, value]) =>
+        value != null && !['path', 'line', 'start_line', 'id'].includes(key),
+    )?.[0];
+    if (unexpectedKey !== undefined) {
+      return invalid(`unexpected key ${quoteFindingValue(unexpectedKey)}`);
+    }
+    if (
+      e.line != null &&
+      (typeof e.line !== 'number' || !Number.isInteger(e.line) || e.line < 0)
+    ) {
+      return invalid('line must be a nonnegative integer');
+    }
+    if (
+      e.start_line != null &&
+      (typeof e.start_line !== 'number' ||
+        !Number.isInteger(e.start_line) ||
+        e.start_line <= 0 ||
+        typeof e.line !== 'number' ||
+        e.line <= 0)
+    ) {
+      return invalid('start_line needs a positive integer and a positive line');
+    }
     // Same fail-safe as `path`: an `id` of the wrong type or shape is a
     // malformed file, and silently ignoring it would let a carried re-post
     // read as a fresh duplicate at the very location it belongs (a typo'd
@@ -288,7 +344,9 @@ export function parseFindingsFile(path: string): FindingAnchor[] | null {
       e.id !== null &&
       (typeof e.id !== 'string' || !LEDGER_ID_SHAPE.test(e.id))
     ) {
-      return null;
+      return invalid(
+        `id must be R<round>-<n>${typeof e.id === 'string' ? `: ${quoteFindingValue(e.id, 30)}` : ''}`,
+      );
     }
     out.push({
       path: e.path,
@@ -298,6 +356,17 @@ export function parseFindingsFile(path: string): FindingAnchor[] | null {
     });
   }
   return out;
+}
+
+function quoteFindingValue(value: string, maxLength = 40): string {
+  const quoted = JSON.stringify(value);
+  if (quoted.length <= maxLength) return quoted;
+  let prefix = '';
+  for (const point of value) {
+    if (JSON.stringify(`${prefix}${point}…`).length > maxLength) break;
+    prefix += point;
+  }
+  return JSON.stringify(`${prefix}…`);
 }
 
 /** Best-effort delta between the reviewed SHA and the live head. */
@@ -1010,8 +1079,11 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
   // will not parse, is not an array, or holds an entry without a string
   // `path` collapses to `null` (unknown → fail-safe at-risk), never to a
   // silently-shorter set that could make a real overlap read as disjoint.
+  let invalidFindingsDetail: string | undefined;
   const newFindings = newFindingsPath
-    ? parseFindingsFile(newFindingsPath)
+    ? parseFindingsFile(newFindingsPath, (detail) => {
+        invalidFindingsDetail = detail;
+      })
     : null;
   // A path was given but did not parse into a usable list. The drift path
   // already fails safe (findingPaths=null → anchorsAtRisk true), but the SAME
@@ -1116,6 +1188,7 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
     driftReason,
     metaUnavailable,
     findingsFileInvalid,
+    invalidFindingsDetail,
   });
 }
 
@@ -1145,6 +1218,7 @@ function writePresubmitReport(input: {
   driftReason?: string;
   metaUnavailable: boolean;
   findingsFileInvalid: boolean;
+  invalidFindingsDetail?: string;
 }): void {
   const {
     prNumber,
@@ -1159,6 +1233,7 @@ function writePresubmitReport(input: {
     driftReason,
     metaUnavailable,
     findingsFileInvalid,
+    invalidFindingsDetail,
   } = input;
 
   const downgradeReasons: string[] = [];
@@ -1186,9 +1261,16 @@ function writePresubmitReport(input: {
     );
   }
   if (findingsFileInvalid) {
+    // Parser details bound escaped values so this remedy survives the downstream
+    // 400-code-point per-reason limit without cutting a JSON escape or surrogate.
+    const detail =
+      invalidFindingsDetail === undefined ? '' : ` (${invalidFindingsDetail})`;
     downgradeReasons.push(
-      'the --new-findings file was malformed — overlap dedup was disabled and ' +
-        'anchor-risk defaulted to at-risk; regenerate it and re-run',
+      `the --new-findings file was malformed${detail} — overlap dedup disabled; ` +
+        'anchor-risk at-risk. Expected [{path, line, start_line?, id?}]: use ' +
+        'resolved lines, rename startLine, strip other keys; id only on carried ' +
+        'findings, plus an id-less placeholder per body-only Critical. Not the ' +
+        'artifact or raw anchor files; regenerate and re-run',
     );
   }
 
@@ -1324,8 +1406,11 @@ async function runPresubmitAone(args: PresubmitArgs): Promise<void> {
   // but presubmit does not re-fetch: `compare` stays null, which rules
   // `anchorsAtRisk` true on ANY drift — the fail-safe default that sends
   // the skill back to re-review the amended head.
+  let invalidFindingsDetail: string | undefined;
   const newFindings = newFindingsPath
-    ? parseFindingsFile(newFindingsPath)
+    ? parseFindingsFile(newFindingsPath, (detail) => {
+        invalidFindingsDetail = detail;
+      })
     : null;
   const findingsFileInvalid =
     newFindingsPath !== undefined && newFindings === null;
@@ -1416,6 +1501,7 @@ async function runPresubmitAone(args: PresubmitArgs): Promise<void> {
     driftReason,
     metaUnavailable,
     findingsFileInvalid,
+    invalidFindingsDetail,
   });
 }
 
@@ -1454,7 +1540,7 @@ export const presubmitCommand: CommandModule = {
       .option('new-findings', {
         type: 'string',
         describe:
-          "Path to a JSON file shaped as [{path, line, id?}, ...] — when provided, existing comments are checked for same-(path, line) overlap with the new findings. `id` is the finding's carried ledger id (`R<round>-<n>`) and belongs on CARRIED-forward findings only — omit it on fresh findings of this round: an id-matched own-account comment — a root at the same location, or the pipeline's own carry-reply in that id's thread at any location — is reported in `repost` so the drop rule can exempt the re-post, and a fresh id could only corrupt that match.",
+          "Path to a JSON file shaped as [{path, line, start_line?, id?}] — the anchors of the comments you are about to post, one entry per location plus one id-less placeholder per body-only Critical. `line`/`start_line` come from the RESOLVED anchors (`resolve-anchors` writes them to `…-anchors-resolved.json` and names the range field `startLine`); rename `startLine` to `start_line` and keep only the four listed keys, dropping `anchor` and all other resolver metadata. An unexpected non-null key is refused and named in the report. `line` must be a nonnegative integer (missing/null means 0); `start_line`, when present, must be a positive integer with a positive `line`. `id` is the FINDING's carried ledger id (`R<round>-<n>`, from the carried-ledger set): join an aggregate's `<id>-k` back to the artifact's actual finding IDs, never blindly strip a trailing `-<n>`, and omit id on fresh findings. This is NOT the canonical findings artifact or either raw resolver file. When provided, existing comments are checked for same-(path, line) overlap with the new findings: an id-matched own-account comment — a root at the same location, or the pipeline's own carry-reply in that id's thread at any location — is reported in `repost` so the drop rule can exempt the re-post, and a fresh id could only corrupt that match.",
       }),
   handler: async (argv) => {
     const host = (argv as { host?: string }).host;

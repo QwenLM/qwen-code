@@ -173,6 +173,15 @@ export async function assertTarArchiveLinksAreSafe(
       archiveEntries.set(entryPath, { type: entry.type });
     }
     if (enforceResourceLimits) {
+      if (
+        !REGULAR_FILE_TYPES.has(entry.type) &&
+        !['Directory', 'SymbolicLink', 'Link'].includes(entry.type)
+      ) {
+        failValidation(
+          new Error('Tar archive contains an unsupported resource type.'),
+        );
+        return;
+      }
       entryCount += 1;
       expandedBytes += entry.size;
       if (entryCount > MAX_ARCHIVE_ENTRIES) {

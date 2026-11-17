@@ -54,7 +54,7 @@ mvn -Dtest=ManagedSurfaceCaptureTest -Dcapability.parity.capture=true test
 
 - 矩阵不判断某条路径是否应复制另一条路径。
 - internal writer 路由不在 OpenAPI 文档中。只有注册表列出它们。
-- `managed only` 列由推导得出：列出副本中没有任何 `managed` 行引用的路由标签。排除集合记录某个标签为何不算缺口，且其中每一项都必须指向副本真实记录的标签。新挂载且没有旧标签、也没有排除理由的路由会出现在该列，这正是 #15075 要求的信号。剩余标签由 `MANAGED_ONLY_REPORTED` 固定，因此新增项会使测试失败，直到有人记录其记账方式。该列目前报告十二个标签：九个 `EXTENSION_*` 标签描述包发布、archive 访问、设置、操作查询及 Session 配置。它们按 Session 固定版本的合同与守护进程的扩展 API 不同；登记这些标签不代表旧 API 兼容或平台验收。`SESSION_CONTEXT_COMPRESSION` 压缩会话上下文，`SESSION_RECOVERY_QUERY` 读取会话恢复状态，`SESSION_RECOVERY_RECHECK` 重跑会话恢复检查。
+- `managed only` 列由推导得出：列出副本中没有任何 `managed` 行引用的路由标签。排除集合记录某个标签为何不算缺口，且其中每一项都必须指向副本真实记录的标签。新挂载且没有旧标签、也没有排除理由的路由会出现在该列，这正是 #15075 要求的信号。剩余标签由 `MANAGED_ONLY_REPORTED` 固定，因此新增项会使测试失败，直到有人记录其记账方式。该列目前报告十五个标签：九个 `EXTENSION_*` 标签描述包发布、archive 访问、设置、操作查询及 Session 配置。它们按 Session 固定版本的合同与守护进程的扩展 API 不同；登记这些标签不代表旧 API 兼容或平台验收。`SESSION_CONTEXT_COMPRESSION` 压缩会话上下文，`SESSION_RECOVERY_QUERY` 读取会话恢复状态，`SESSION_RECOVERY_RECHECK` 重跑会话恢复检查。`SESSION_WORKTREE` 管理 Session worktree。`MEMORY_STORE_CREATE` 和 `MEMORY_STORE_LIST` 提供按 Session 不可变绑定的个人 Store，与守护进程的 Workspace 记忆文件 API 不同。仅供 writer 调用的 `STORE_MEMORY_QUERY` 仍不计入客户端能力。
 
 ## 验收
 
