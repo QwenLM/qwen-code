@@ -71,7 +71,7 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // Keep the warning close to the measurement and the hard ceiling close above
 // it: a cap left far above the measurement is a ratchet with enough slack for
 // a whole dependency family to come back unnoticed.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 2_141_000;
+const DOCUMENT_RUNTIME_WARNING_BYTES = 2_142_000;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
 // locales plus their mapping) adds 5,139: 2,041,583 against 2,046,722 on main
@@ -105,12 +105,20 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_141_000;
 // deferred-change notice, across two locales) measures 2,136,115 bytes on
 // head 6286c8cb11 in CI, 115 above the previous 2,136,000 ceiling. The warning
 // sits 885 above that measurement and the ceiling 1,885 above it.
+// The composer task-explain side question (#17398: the explain display line,
+// the "?" aria label and tooltip, and the panel copy, across two locales, plus
+// the transcript-reachable explain wiring) adds 904 bytes: main d41eda5123
+// measures 2,137,893 (107 below the previous 2,138,000 ceiling) and head
+// d5f6a103a6 measures 2,138,797 in CI, 797 above it. The warning sits 203 above
+// that measurement and the ceiling 1,203 above it.
 // The Goal budget stop-reason localization (#17271: the goal.reason.* keys
 // with their unit plurals in en/zh-CN/ru, which land in the transcript
-// entry's i18n table) measures 2,140,380 bytes on the merged tree, 2,380
-// above the previous 2,138,000 ceiling. The warning sits 620 above that
-// merged measurement and the ceiling 4,620 above it.
-const MAX_DOCUMENT_RUNTIME_BYTES = 2_145_000;
+// entry's i18n table) originally measured 2,140,380 bytes on its then-merged
+// tree. Re-measured against main b3291cb932 (which carries the #17398
+// task-explain copy) it measures 2,141,816 bytes locally on Node 22.23.1,
+// 1,816 above the previous 2,140,000 ceiling. The warning sits 184 above that
+// measurement and the ceiling 1,184 above it.
+const MAX_DOCUMENT_RUNTIME_BYTES = 2_143_000;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.

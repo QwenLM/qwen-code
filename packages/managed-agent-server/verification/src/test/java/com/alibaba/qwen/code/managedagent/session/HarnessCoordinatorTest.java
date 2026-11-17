@@ -15,6 +15,7 @@ import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
+import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessAttachmentLostFailure;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessGenerationFailure;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessHttpFailure;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessProtocolFailure;
@@ -53,6 +54,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -706,12 +708,13 @@ class HarnessCoordinatorTest {
         }
     }
 
-    @Test
-    void hostedDrainCutoffOutlivesBothAdmissionBudgets() {
+    @ParameterizedTest
+    @ValueSource(strings = {"hosted_harness_quiescing", "hosted_session_closing"})
+    void hostedDrainCutoffOutlivesBothAdmissionBudgets(String code) {
         for (boolean submitted : List.of(false, true)) {
             var failure = mock(HarnessHttpFailure.class);
             when(failure.getStatusCode()).thenReturn(409);
-            when(failure.getErrorCode()).thenReturn("hosted_harness_quiescing");
+            when(failure.getErrorCode()).thenReturn(code);
             AgentStateStore store = dispatchWithCreateOrLoadFailure(failure, submitted, 100, unboundSessionRecord());
             verify(store).scheduleTurnRetry(eq("tenant"), eq("session"), eq("turn"),
                     anyString(), anyLong(), eq(true));
@@ -4014,6 +4017,137 @@ class HarnessCoordinatorTest {
                 anyString());
         verify(store, never()).recordHarnessEvents(anyString(), anyString(),
                 anyString(), anyString(), anyString(), any());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"submit,false", "continue,false", "submit,true", "continue,true"})
+    void vanishedAdmissionReentersRecoveryAndBindsTheNewWatermark(String path, boolean vanishesAgain) {
+        boolean continuing = "continue".equals(path);
+        var claimed = turn("tenant", "session", "turn", "prompt", continuing ? "epoch-old" : null, 0,
+                continuing, 0);
+        var current = new AtomicReference<>(claimed);
+        var sessionBoot = new AtomicReference<>("boot-old");
+        var sessionEpoch = new AtomicReference<>("epoch-old");
+        var store = mock(AgentStateStore.class);
+        var harness = mock(HarnessConnector.class);
+        var runtime = mock(RuntimeWarmer.class);
+        var recovered = mock(HarnessRuntimeRecovery.class);
+        when(recovered.isContinuationReady()).thenReturn(true);
+        when(recovered.getCheckpointId()).thenReturn("checkpoint-new");
+        when(recovered.getActivationId()).thenReturn("activation-new");
+        var oldRecovery = mock(HarnessRuntimeRecovery.class);
+        when(oldRecovery.isContinuationReady()).thenReturn(true);
+        when(oldRecovery.getCheckpointId()).thenReturn("checkpoint-old");
+        when(oldRecovery.getActivationId()).thenReturn("activation-old");
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"), anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenAnswer(call -> new SessionRecord("tenant", "session",
+                "qwen-code", null, "ACTIVE", sessionBoot.get(), sessionEpoch.get(), 0, 0, 1, 1, null, 1));
+        when(store.findTurn("tenant", "session", "turn")).thenAnswer(call -> Optional.of(current.get()));
+        when(store.bindHarness(eq("tenant"), eq("session"), eq("turn"), anyString(), anyString()))
+                .thenAnswer(call -> {
+                    String boot = call.getArgument(4);
+                    if (boot.equals(sessionBoot.get())) {
+                        return true;
+                    }
+                    if (current.get().submissionAttempted() || current.get().harnessEventEpoch() != null) {
+                        return false;
+                    }
+                    sessionBoot.set(boot);
+                    return true;
+                });
+        when(store.bindRecoveredHarness(eq("tenant"), eq("session"), eq("turn"), anyString(),
+                anyString(), anyString())).thenAnswer(call -> {
+                    if (!current.get().submissionAttempted() || current.get().harnessEventEpoch() == null
+                            || !sessionBoot.get().equals(call.getArgument(4))) {
+                        return false;
+                    }
+                    sessionBoot.set(call.getArgument(5));
+                    return true;
+                });
+        when(store.withdrawSubmissionAttempted(eq("tenant"), eq("session"), eq("turn"), anyString()))
+                .thenAnswer(call -> {
+                    assertThat(current.get().harnessEventEpoch()).isNull();
+                    current.set(turn("tenant", "session", "turn", "prompt", null, 0, false, 0));
+                    return true;
+                });
+        doAnswer(call -> {
+            assertThat(current.get().harnessEventEpoch()).isNull();
+            current.set(turn("tenant", "session", "turn", "prompt", null, 0, true, 0));
+            return null;
+        }).when(store).markSubmissionAttempted(eq("tenant"), eq("session"), eq("turn"), anyString());
+        doAnswer(call -> {
+            TurnRecord row = current.get();
+            assertThat(row.submissionAttempted()).isTrue();
+            assertThat((String) call.getArgument(4)).isEqualTo(row.harnessEventEpoch());
+            assertThat((String) call.getArgument(5)).isEqualTo(sessionEpoch.get());
+            current.set(turn("tenant", "session", "turn", "prompt", call.getArgument(6), call.getArgument(7),
+                    row.status(), row.submissionAttempted(), row.retryCount()));
+            sessionEpoch.set(call.getArgument(6));
+            return null;
+        }).when(store).recordRecoveryAdmission(eq("tenant"), eq("session"), eq("turn"), anyString(),
+                any(), any(), anyString(), anyLong());
+        when(harness.recoverManagedRuntime("tenant", "session", false))
+                .thenReturn(new Attachment("boot-old", continuing ? oldRecovery : null, 0L, "epoch-old"),
+                        new Attachment("boot-new", recovered, 9L, "epoch-new"));
+        var lost = new HarnessAttachmentLostFailure(new HarnessHttpFailure("gone", null, 404,
+                "{\"code\":\"hosted_session_not_found\"}", Map.of("code", "hosted_session_not_found")));
+        var submits = new AtomicInteger();
+        when(harness.submit(eq("tenant"), eq("session"), eq("prompt"), any(), anyString())).thenAnswer(call -> {
+            assertThat(current.get().submissionAttempted()).isTrue();
+            if (submits.getAndIncrement() == 0 || vanishesAgain) {
+                throw lost;
+            }
+            throw new HarnessHttpFailure("already admitted", null, 409,
+                    "{\"code\":\"hosted_prompt_recovery_required\"}", Map.of("code", "hosted_prompt_recovery_required"));
+        });
+        when(harness.continueManagedRuntime("tenant", "session", "prompt", "checkpoint-old", "activation-old"))
+                .thenThrow(lost);
+        when(harness.continueManagedRuntime("tenant", "session", "prompt", "checkpoint-new", "activation-new"))
+                .thenAnswer(call -> {
+                    if (vanishesAgain) {
+                        throw lost;
+                    }
+                    return new Admission(9, "epoch-new");
+                });
+        var stream = mock(SourceStream.class);
+        when(stream.eventEpoch()).thenReturn("epoch-new");
+        when(stream.next()).thenReturn(new SourceEvent(10L, "turn_complete", Map.of("stopReason", "end_turn"),
+                "prompt", Map.of())).thenReturn(null);
+        long consumedWatermark = continuing ? 9 : 0;
+        when(harness.stream("tenant", "session", consumedWatermark, "epoch-new")).thenReturn(stream);
+        var coordinator = new HarnessCoordinator(store, harness, new HarnessEventProjector(), runtime,
+                directExecutor(), Clock.systemUTC(), new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+        }
+        verify(harness, times(2)).recoverManagedRuntime("tenant", "session", false);
+        verify(harness, times(continuing ? 0 : 2)).submit(eq("tenant"), eq("session"), eq("prompt"), any(), anyString());
+        var order = inOrder(store, harness);
+        if (continuing) {
+            order.verify(store).bindRecoveredHarness(eq("tenant"), eq("session"), eq("turn"), anyString(),
+                    eq("boot-old"), eq("boot-new"));
+            order.verify(store).recordRecoveryAdmission(eq("tenant"), eq("session"), eq("turn"), anyString(),
+                    eq("epoch-old"), eq("epoch-old"), eq("epoch-new"), eq(0L));
+            order.verify(harness).continueManagedRuntime("tenant", "session", "prompt", "checkpoint-new", "activation-new");
+        } else {
+            verify(harness, never()).continueManagedRuntime(anyString(), anyString(), anyString(), anyString(), anyString());
+            verify(store, never()).bindRecoveredHarness(anyString(), anyString(), anyString(), anyString(),
+                    anyString(), anyString());
+        }
+        if (vanishesAgain) {
+            verify(store).scheduleTurnRetry(eq("tenant"), eq("session"), eq("turn"),
+                    anyString(), anyLong(), eq(false));
+            verify(harness, never()).stream(anyString(), anyString(), anyLong(), anyString());
+        } else {
+            order.verify(store).recordRecoveryAdmission(eq("tenant"), eq("session"), eq("turn"), anyString(),
+                    eq(continuing ? "epoch-new" : null), eq(continuing ? "epoch-new" : "epoch-old"),
+                    eq("epoch-new"), eq(consumedWatermark));
+            order.verify(harness).stream("tenant", "session", consumedWatermark, "epoch-new");
+        }
+        verify(store, never()).failTurn(anyString(), anyString(), anyString(), anyString(), anyString(), anyString());
     }
 
     @Test
