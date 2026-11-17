@@ -246,3 +246,7 @@ export type {
   ManagedReceipt,
   ManagedChannelControlPlane,
 } from './managed-channel.js';
+export {
+  MANAGED_OUTBOUND_LIMIT,
+  validManagedReceipt,
+} from './managed-channel.js';

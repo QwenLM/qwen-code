@@ -13,7 +13,9 @@ overrides:
   hono: 4.13.18
   '@hono/node-server@2': 2.1.7
   body-parser: 2.4.0
+  express-rate-limit@8: 8.7.2
   dompurify: 3.4.17
+  undici@7: 7.30.2
   brace-expansion@1: 1.1.21
   brace-expansion@2: 2.1.7
   typescript: 5.8.3
@@ -27,7 +29,8 @@ overrides:
   react-dom: ^19.2.4
   '@types/react': ^19.2.0
   '@types/react-dom': ^19.2.0
-  axios: ^1.19.0
+  axios: ^1.20.0
+  '@grpc/grpc-js': ^1.14.5
   '@tybys/wasm-util': 0.10.3
   react-markdown: ^9.0.0
   '@agentclientprotocol/sdk>zod': 4.6.6
@@ -41,7 +44,7 @@ overrides:
   readdir-glob@1: 4.0.0
   openapi-typescript>supports-color: 7.2.0
 
-pnpmfileChecksum: sha256-3b7imv8ATmRczQtGoBMZ/l3GHung5L8OdgCSNoEoXe0=
+pnpmfileChecksum: sha256-L6WVIkt0aoaBgW0r43a/Cft0ZrggZAdngFMy5owyKJo=
 
 importers:
 
@@ -263,8 +266,8 @@ importers:
         specifier: ^1.32.2
         version: 1.32.2(supports-color@7.2.0)(zod@4.6.6)
       undici:
-        specifier: ^7.28.0
-        version: 7.29.0
+        specifier: 7.30.2
+        version: 7.30.2
       zod:
         specifier: ^4.6.6
         version: 4.6.6
@@ -447,6 +450,19 @@ importers:
         specifier: ^4.6.6
         version: 4.6.6
 
+  packages/channels/aone:
+    dependencies:
+      '@qwen-code/channel-base':
+        specifier: workspace:*
+        version: link:../base
+      zod:
+        specifier: ^4.6.6
+        version: 4.6.6
+    devDependencies:
+      typescript:
+        specifier: 5.8.3
+        version: 5.8.3
+
   packages/channels/base:
     dependencies:
       '@agentclientprotocol/sdk':
@@ -481,8 +497,8 @@ importers:
         specifier: ^4.1.2
         version: 4.1.2
       undici:
-        specifier: ^7.28.0
-        version: 7.29.0
+        specifier: 7.30.2
+        version: 7.30.2
     devDependencies:
       '@types/proper-lockfile':
         specifier: ^4.1.4
@@ -547,8 +563,8 @@ importers:
         specifier: workspace:*
         version: link:../base
       undici:
-        specifier: ^7.28.0
-        version: 7.29.0
+        specifier: 7.30.2
+        version: 7.30.2
     devDependencies:
       typescript:
         specifier: 5.8.3
@@ -565,7 +581,16 @@ importers:
       https-proxy-agent:
         specifier: ^7.0.6
         version: 7.0.6(supports-color@7.2.0)
+      proper-lockfile:
+        specifier: ^4.1.2
+        version: 4.1.2
+      undici:
+        specifier: 7.30.2
+        version: 7.30.2
     devDependencies:
+      '@types/proper-lockfile':
+        specifier: ^4.1.4
+        version: 4.1.4
       typescript:
         specifier: 5.8.3
         version: 5.8.3
@@ -646,8 +671,8 @@ importers:
         specifier: 6.0.0
         version: 6.0.0
       undici:
-        specifier: ^7.28.0
-        version: 7.29.0
+        specifier: 7.30.2
+        version: 7.30.2
     devDependencies:
       typescript:
         specifier: 5.8.3
@@ -685,7 +710,7 @@ importers:
     dependencies:
       '@a2a-js/sdk':
         specifier: ^1.1.0
-        version: 1.1.0(@grpc/grpc-js@1.14.4)(express@5.2.1(supports-color@7.2.0))
+        version: 1.1.0(@grpc/grpc-js@1.14.5)(express@5.2.1(supports-color@7.2.0))
       '@agentclientprotocol/sdk':
         specifier: ^0.14.1
         version: 0.14.1(zod@4.6.6)
@@ -768,8 +793,8 @@ importers:
         specifier: ^1.2.9
         version: 1.2.9
       diff:
-        specifier: ^7.0.0
-        version: 7.0.0
+        specifier: ^8.0.3
+        version: 8.0.3
       dotenv:
         specifier: ^17.1.0
         version: 17.4.2
@@ -876,8 +901,8 @@ importers:
         specifier: ^7.5.19
         version: 7.5.22
       undici:
-        specifier: ^7.28.0
-        version: 7.29.0
+        specifier: 7.30.2
+        version: 7.30.2
       unified:
         specifier: ^11.0.0
         version: 11.0.5
@@ -918,9 +943,6 @@ importers:
       '@types/command-exists':
         specifier: ^1.2.3
         version: 1.2.3
-      '@types/diff':
-        specifier: ^7.0.2
-        version: 7.0.2
       '@types/dotenv':
         specifier: ^6.1.1
         version: 6.1.1
@@ -1118,8 +1140,8 @@ importers:
         specifier: ^4.0.3
         version: 4.0.3
       diff:
-        specifier: ^7.0.0
-        version: 7.0.0
+        specifier: ^8.0.3
+        version: 8.0.3
       dotenv:
         specifier: ^17.1.0
         version: 17.4.2
@@ -1205,11 +1227,11 @@ importers:
         specifier: 5.8.3
         version: 5.8.3
       undici:
-        specifier: ^7.28.0
-        version: 7.29.0
+        specifier: 7.30.2
+        version: 7.30.2
       uuid:
-        specifier: ^9.0.1
-        version: 9.0.1
+        specifier: ^11.1.1
+        version: 11.1.1
       web-tree-sitter:
         specifier: ^0.24.7
         version: 0.24.7
@@ -1229,9 +1251,6 @@ importers:
       '@qwen-code/browser-use':
         specifier: workspace:*
         version: link:../browser-use
-      '@types/diff':
-        specifier: ^7.0.2
-        version: 7.0.2
       '@types/dotenv':
         specifier: ^6.1.1
         version: 6.1.1
@@ -1890,7 +1909,7 @@ packages:
     engines: {node: '>=20'}
     peerDependencies:
       '@bufbuild/protobuf': ^2.10.2
-      '@grpc/grpc-js': ^1.11.0
+      '@grpc/grpc-js': ^1.14.5
       express: ^4.21.2 || ^5.1.0
     peerDependenciesMeta:
       '@bufbuild/protobuf':
@@ -2785,8 +2804,8 @@ packages:
   '@grammyjs/types@3.25.0':
     resolution: {integrity: sha512-iN9i5p+8ZOu9OMxWNcguojQfz4K/PDyMPOnL7PPCON+SoA/F8OKMH3uR7CVUkYfdNe0GCz8QOzAWrnqusQYFOg==}
 
-  '@grpc/grpc-js@1.14.4':
-    resolution: {integrity: sha512-k9Dj3DV/itK9D06Y8f190Qgop7/Ui+D0njFV3LHMPwPT75DpXLQohE9Wmz0QElrJnzsjB7KPWiKJbOl7IPDArQ==}
+  '@grpc/grpc-js@1.14.5':
+    resolution: {integrity: sha512-7VZM+SVdEcUUqSQeNI3zM8Qs/BhQKZndPo2h5VkYkAM8Iz0wJIa8mKV5ekQGqG8UUsnkQ0NMxIxwkIHYvj0qOw==}
     engines: {node: '>=12.10.0'}
 
   '@grpc/proto-loader@0.8.1':
@@ -4653,6 +4672,7 @@ packages:
   '@secretlint/secretlint-rule-preset-recommend@10.2.2':
     resolution: {integrity: sha512-K3jPqjva8bQndDKJqctnGfwuAxU2n9XNCPtbXVI5JvC7FnQiNg/yWlQPbMUlBXtBoBGFYp08A94m6fvtc9v+zA==}
     engines: {node: '>=20.0.0'}
+    deprecated: Built into secretlint v14 and later. Remove this package; the rule id still works. https://github.com/secretlint/secretlint/blob/HEAD/docs/rules/preset-recommend.md
 
   '@secretlint/source-creator@10.2.2':
     resolution: {integrity: sha512-h6I87xJfwfUTgQ7irWq7UTdq/Bm1RuQ/fYhA3dtTIAop5BwSFmZyrchph4WcoEvbN460BWKmk4RYSvPElIIvxw==}
@@ -5095,9 +5115,6 @@ packages:
 
   '@types/deep-eql@4.0.2':
     resolution: {integrity: sha512-c9h9dVVMigMPc4bwTvC5dxqtqJZwQPePsWjPlpSOnojbor6pGqdk541lfA7AqFQr5pB1BRdq0juY9db81BwyFw==}
-
-  '@types/diff@7.0.2':
-    resolution: {integrity: sha512-JSWRMozjFKsGlEjiiKajUjIJVKuKdE3oVy2DNtK+fUo8q82nhFZ2CPQwicAIkXrofahDXrWJ7mjelvZphMS98Q==}
 
   '@types/dotenv@6.1.1':
     resolution: {integrity: sha512-ftQl3DtBvqHl9L16tpqqzA4YzCSXZfi7g8cQceTz5rOlYtk/IZbFjAv3mLOQlNIgOaylCQWQoBdDQHPgEBJPHg==}
@@ -5876,8 +5893,8 @@ packages:
     resolution: {integrity: sha512-wvUjBtSGN7+7SjNpq/9M2Tg350UZD3q62IFZLbRAR1bSMlCo1ZaeW+BJ+D090e4hIIZLBcTDWe4Mh4jvUDajzQ==}
     engines: {node: '>= 0.4'}
 
-  axios@1.19.0:
-    resolution: {integrity: sha512-ht/iuYZXEjFxLH/Hkezgd7m6JKlHHXEUSneaDz8uZe1Gj5QZtCnpyDsckvAiEnT89OEbCLmnte4R4sn7P0EKFw==}
+  axios@1.20.0:
+    resolution: {integrity: sha512-r8aOh8j9cGKpgQAqpzrUHnSIc6a59Y3Xf/cv8sy1DrHCkZHzQGEuoq1tARk6qSyDdtQGSDgpb9kFlruzPvrgwg==}
 
   azure-devops-node-api@12.5.0:
     resolution: {integrity: sha512-R5eFskGvOm3U/GzeAuxRkUsAl0hrAwGgWn6zAd2KrZmrEhWZVqLew4OOupbQlXUuojUzpGtq62SmdhJ06N88og==}
@@ -6759,10 +6776,6 @@ packages:
     resolution: {integrity: sha512-EjePK1srD3P08o2j4f0ExnylqRs5B9tJjcp9t1krH2qRi8CCdsYfwe9JgSLurFBWwq4uOlipzfk5fHNvwFKr8Q==}
     engines: {node: ^14.15.0 || ^16.10.0 || >=18.0.0}
 
-  diff@7.0.0:
-    resolution: {integrity: sha512-PJWHUb1RFevKCwaFA9RlG5tCd+FO5iRh9A8HEtkmBH2Li03iJriB6m6JIN4rGz3K3JLawI7/veA1xzRKP6ISBw==}
-    engines: {node: '>=0.3.1'}
-
   diff@8.0.3:
     resolution: {integrity: sha512-qejHi7bcSD4hQAZE0tNAawRK1ZtafHDmMTMkrrIGgSLl7hTnQHmKCeB45xAcbfTqK2zowkM3j3bHt/4b/ARbYQ==}
     engines: {node: '>=0.3.1'}
@@ -7205,8 +7218,8 @@ packages:
   exponential-backoff@3.1.3:
     resolution: {integrity: sha512-ZgEeZXj30q+I0EN+CbSSpIyPaJ5HVQD18Z1m+u1FXbAeT94mr1zw50q4q6jiiC447Nl/YTcIYSAftiGqetwXCA==}
 
-  express-rate-limit@8.5.2:
-    resolution: {integrity: sha512-5Kb34ipNX694DH48vN9irak1Qx30nb0PLYHXfJgw4YEjiC3ZEmZJhwOp+VfiCYwFzvFTdB9QkArYS5kXa2cx2A==}
+  express-rate-limit@8.7.2:
+    resolution: {integrity: sha512-U1ScocxDD9WI09LaBVypvNkOtNR5yWAmZLkuKJdAzIchA4YKFYF6GT5IKER7epG58oXtjvGlV0/6ii0F83EyZg==}
     engines: {node: '>= 16'}
     peerDependencies:
       express: '>= 4.11'
@@ -10876,8 +10889,8 @@ packages:
   undici-types@7.29.0:
     resolution: {integrity: sha512-vamA8dGlzMwhpyYpQp9d8vka3o4D/yn5I7ez7Or+msDA4bZ8Uh+Zy91WvWf3I73gDAkFha9JcYRqm2li0Npfgg==}
 
-  undici@7.29.0:
-    resolution: {integrity: sha512-IDxfleLmmbSskfWSUATiN1nfn2rDuvnMOqb5CWR92iIfojA0Ud+ulOAAEQ57LPr9rWmsreUyf5lwyao+7GNNVw==}
+  undici@7.30.2:
+    resolution: {integrity: sha512-mLyPQnHwUxaM/rideoK/+KL8DaAJLRl4aBCfmX444aCSLnIaomqPLtNRe2jdCYcsk5wZzXrDIQC8ZeYNRAYyIA==}
     engines: {node: '>=20.18.1'}
 
   unicorn-magic@0.1.0:
@@ -10999,11 +11012,6 @@ packages:
 
   uuid@14.0.0:
     resolution: {integrity: sha512-Qo+uWgilfSmAhXCMav1uYFynlQO7fMFiMVZsQqZRMIXp0O7rR7qjkj+cPvBHLgBqi960QCoo/PH2/6ZtVqKvrg==}
-    hasBin: true
-
-  uuid@9.0.1:
-    resolution: {integrity: sha512-b+1eJOlsR9K8HJpow9Ok3fiWOWSIcIzXodvv0rQjVoOVNpWMpxf1wZNpt4y9h10odCNrqnYp1OBzRktckBe3sA==}
-    deprecated: uuid@10 and below is no longer supported.  For ESM codebases, update to uuid@latest.  For CommonJS codebases, use uuid@11 (but be aware this version will likely be deprecated in 2028).
     hasBin: true
 
   v8-to-istanbul@9.3.0:
@@ -11463,11 +11471,11 @@ packages:
 
 snapshots:
 
-  '@a2a-js/sdk@1.1.0(@grpc/grpc-js@1.14.4)(express@5.2.1(supports-color@7.2.0))':
+  '@a2a-js/sdk@1.1.0(@grpc/grpc-js@1.14.5)(express@5.2.1(supports-color@7.2.0))':
     dependencies:
       jose: 6.2.12
     optionalDependencies:
-      '@grpc/grpc-js': 1.14.4
+      '@grpc/grpc-js': 1.14.5
       express: 5.2.1(supports-color@7.2.0)
 
   '@agentclientprotocol/sdk@0.14.1(zod@4.6.6)':
@@ -11937,7 +11945,7 @@ snapshots:
       open: 8.4.2
       picomatch: 4.0.5
       systeminformation: 5.31.16
-      undici: 7.29.0
+      undici: 7.30.2
       which: 4.0.0
       yocto-spinner: 1.2.1
 
@@ -12332,7 +12340,7 @@ snapshots:
 
   '@grammyjs/types@3.25.0': {}
 
-  '@grpc/grpc-js@1.14.4':
+  '@grpc/grpc-js@1.14.5':
     dependencies:
       '@grpc/proto-loader': 0.8.1
       '@js-sdsl/ordered-map': 4.4.2
@@ -12632,7 +12640,7 @@ snapshots:
 
   '@larksuiteoapi/node-sdk@1.73.0(debug@4.4.3(supports-color@7.2.0))(supports-color@7.2.0)':
     dependencies:
-      axios: 1.19.0(debug@4.4.3(supports-color@7.2.0))(supports-color@7.2.0)
+      axios: 1.20.0(debug@4.4.3(supports-color@7.2.0))(supports-color@7.2.0)
       lodash.identity: 3.0.0
       lodash.merge: 4.6.2
       lodash.pickby: 4.6.0
@@ -12768,7 +12776,7 @@ snapshots:
       eventsource: 3.0.7
       eventsource-parser: 3.1.1
       express: 5.2.1(supports-color@7.2.0)
-      express-rate-limit: 8.5.2(express@5.2.1(supports-color@7.2.0))
+      express-rate-limit: 8.7.2(express@5.2.1(supports-color@7.2.0))(supports-color@7.2.0)
       hono: 4.13.18
       jose: 6.2.12
       json-schema-typed: 8.0.2
@@ -12790,7 +12798,7 @@ snapshots:
       eventsource: 3.0.7
       eventsource-parser: 3.1.1
       express: 5.2.1(supports-color@7.2.0)
-      express-rate-limit: 8.5.2(express@5.2.1(supports-color@7.2.0))
+      express-rate-limit: 8.7.2(express@5.2.1(supports-color@7.2.0))(supports-color@7.2.0)
       hono: 4.13.18
       jose: 6.2.12
       json-schema-typed: 8.0.2
@@ -13127,7 +13135,7 @@ snapshots:
 
   '@opentelemetry/otlp-grpc-exporter-base@0.221.0(@opentelemetry/api@1.9.0)':
     dependencies:
-      '@grpc/grpc-js': 1.14.4
+      '@grpc/grpc-js': 1.14.5
       '@opentelemetry/api': 1.9.0
       '@opentelemetry/core': 2.10.0(@opentelemetry/api@1.9.0)
       '@opentelemetry/otlp-exporter-base': 0.221.0(@opentelemetry/api@1.9.0)
@@ -14759,8 +14767,6 @@ snapshots:
 
   '@types/deep-eql@4.0.2': {}
 
-  '@types/diff@7.0.2': {}
-
   '@types/dotenv@6.1.1':
     dependencies:
       '@types/node': 22.20.1
@@ -15490,7 +15496,7 @@ snapshots:
 
   '@wecom/aibot-node-sdk@1.0.7(debug@4.4.3(supports-color@7.2.0))(supports-color@7.2.0)':
     dependencies:
-      axios: 1.19.0(debug@4.4.3(supports-color@7.2.0))(supports-color@7.2.0)
+      axios: 1.20.0(debug@4.4.3(supports-color@7.2.0))(supports-color@7.2.0)
       eventemitter3: 5.0.1
       ws: 8.21.3
     transitivePeerDependencies:
@@ -15843,7 +15849,7 @@ snapshots:
     dependencies:
       possible-typed-array-names: 1.1.0
 
-  axios@1.19.0(debug@4.4.3(supports-color@7.2.0))(supports-color@7.2.0):
+  axios@1.20.0(debug@4.4.3(supports-color@7.2.0))(supports-color@7.2.0):
     dependencies:
       follow-redirects: 1.16.0(debug@4.4.3(supports-color@7.2.0))
       form-data: 4.0.6
@@ -16213,7 +16219,7 @@ snapshots:
       parse5: 7.3.0
       parse5-htmlparser2-tree-adapter: 7.1.0
       parse5-parser-stream: 7.1.2
-      undici: 7.29.0
+      undici: 7.30.2
       whatwg-mimetype: 4.0.0
 
   chokidar@3.6.0:
@@ -16857,8 +16863,6 @@ snapshots:
 
   diff-sequences@29.6.3: {}
 
-  diff@7.0.0: {}
-
   diff@8.0.3: {}
 
   diff@9.0.0: {}
@@ -16873,7 +16877,7 @@ snapshots:
 
   dingtalk-stream-sdk-nodejs@2.0.4(supports-color@7.2.0):
     dependencies:
-      axios: 1.19.0(debug@4.4.3(supports-color@7.2.0))(supports-color@7.2.0)
+      axios: 1.20.0(debug@4.4.3(supports-color@7.2.0))(supports-color@7.2.0)
       debug: 4.4.3(supports-color@7.2.0)
       ws: 8.21.3
     transitivePeerDependencies:
@@ -17581,10 +17585,13 @@ snapshots:
 
   exponential-backoff@3.1.3: {}
 
-  express-rate-limit@8.5.2(express@5.2.1(supports-color@7.2.0)):
+  express-rate-limit@8.7.2(express@5.2.1(supports-color@7.2.0))(supports-color@7.2.0):
     dependencies:
+      debug: 4.4.3(supports-color@7.2.0)
       express: 5.2.1(supports-color@7.2.0)
       ip-address: 10.7.4
+    transitivePeerDependencies:
+      - supports-color
 
   express@5.1.0(supports-color@7.2.0):
     dependencies:
@@ -21205,7 +21212,7 @@ snapshots:
       tailwind-merge: 3.6.0
       ts-morph: 26.0.0
       tsconfig-paths: 4.2.0
-      undici: 7.29.0
+      undici: 7.30.2
       validate-npm-package-name: 7.0.2
       zod: 3.25.76
       zod-to-json-schema: 3.25.2(zod@3.25.76)
@@ -22096,7 +22103,7 @@ snapshots:
 
   undici-types@7.29.0: {}
 
-  undici@7.29.0: {}
+  undici@7.30.2: {}
 
   unicorn-magic@0.1.0: {}
 
@@ -22227,8 +22234,6 @@ snapshots:
   uuid@11.1.1: {}
 
   uuid@14.0.0: {}
-
-  uuid@9.0.1: {}
 
   v8-to-istanbul@9.3.0:
     dependencies:

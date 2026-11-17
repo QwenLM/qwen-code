@@ -104,6 +104,7 @@ export default {
   Auth: 'Аутентификация',
   Model: 'Модель',
   'Fast Model': 'Быстрая модель',
+  'Agent Loop': 'Цикл агента',
   Sandbox: 'Песочница',
   'Session ID': 'ID сессии',
   'Base URL': 'Base URL',

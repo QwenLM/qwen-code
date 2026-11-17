@@ -27,6 +27,7 @@ import type {
   DaemonPerfSnapshot,
   DaemonStartupSnapshot,
 } from './daemon-status.js';
+import { sseMaxConnections } from './daemon-status.js';
 import type {
   ChannelWorkerSnapshot,
   ChannelWorkerSupervisor,
@@ -3943,7 +3944,10 @@ export function createServeApp(
   });
   // The qualified listing lets a multi-workspace Web Shell aggregate every
   // registered project's goals, not just the primary's.
-  registerWorkspaceQualifiedGoalsRoutes(app, { workspaceRegistry });
+  registerWorkspaceQualifiedGoalsRoutes(app, {
+    workspaceRegistry,
+    conversationRuntimeActivity,
+  });
 
   // The primary workspace's /autofix-pr watches, read from the clone's files
   // (as `qwen autofix-pr status` lists them). Read-only.
@@ -4193,6 +4197,10 @@ export function createServeApp(
     workspaceRegistry,
     daemonLog,
     writerIdleTimeoutMs: opts.writerIdleTimeoutMs,
+    // null = unlimited (listener cap disabled or explicit opt-out).
+    maxSseConnections:
+      sseMaxConnections(opts.maxConnections, opts.maxSseConnections) ??
+      undefined,
     sendBridgeError,
     virtualSubagentSessions,
     resolveSubagentSessionRuntime,

@@ -158,7 +158,7 @@ public class WakeRecoveryStoreTest {
     }
 
     @Test
-    void liveWritersAndLifecycleAndCsiAndWrongScopesNeverBecomeCandidates() {
+    void liveWritersAndLifecycleAndWrongScopesNeverBecomeCandidates() {
         assertThat(store.findPending("another-workspace", 8)).isEmpty();
         for (String status : List.of("CLOSING", "CLOSED")) {
             jdbc.update("UPDATE ma_session SET status = ?", status);
@@ -166,9 +166,7 @@ public class WakeRecoveryStoreTest {
         }
         jdbc.update("UPDATE ma_session SET status = 'ACTIVE', retired_at = 1");
         assertThat(store.findPending("workspace", 8)).isEmpty();
-        jdbc.update("UPDATE ma_session SET retired_at = NULL, runtime_request_key = ?", "a".repeat(64));
-        assertThat(store.findPending("workspace", 8)).isEmpty();
-        jdbc.update("UPDATE ma_session SET runtime_request_key = NULL");
+        jdbc.update("UPDATE ma_session SET retired_at = NULL");
         for (String state : List.of("DELETING", "DELETED")) {
             jdbc.update("UPDATE ma_session_head SET state = ?", state);
             assertThat(store.findPending("workspace", 8)).isEmpty();
@@ -179,9 +177,7 @@ public class WakeRecoveryStoreTest {
         var sealed = candidate();
         assertThat(store.claim(sealed)).isTrue();
         jdbc.update("UPDATE ma_session_head SET wake_retry_at = 0");
-        jdbc.update("UPDATE ma_session SET runtime_request_key = ?", "a".repeat(64));
-        assertThat(store.claim(sealed)).isFalse();
-        jdbc.update("UPDATE ma_session SET runtime_request_key = NULL, retired_at = 1");
+        jdbc.update("UPDATE ma_session SET retired_at = 1");
         assertThat(store.claim(sealed)).isFalse();
         jdbc.update("UPDATE ma_session SET retired_at = NULL, session_kind = 'CONTROL'");
         assertThat(store.claim(sealed)).isFalse();
