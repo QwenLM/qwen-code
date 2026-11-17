@@ -263,6 +263,48 @@ describe('createAndAttachSessionForPrompt', () => {
     });
   });
 
+  it.each(['model', 'Plan'])(
+    'does not apply reasoning to a session selected during %s preparation',
+    async (step) => {
+      let currentSessionId = 'session-1';
+      const finishStep = createDeferred<void>();
+      const actions = createActions({
+        setModel: vi.fn(async () => {
+          if (step === 'model') await finishStep.promise;
+          return modelResult;
+        }),
+        setApprovalMode: vi.fn(async () => {
+          if (step === 'Plan') await finishStep.promise;
+          return { mode: 'plan' };
+        }),
+      });
+      const result = prepareSession({
+        sessionActions: actions,
+        modelId: 'qwen3',
+        modeId: 'yolo',
+        planMode: step === 'Plan',
+        reasoningEffort: 'medium',
+        getCurrentSessionId: () => currentSessionId,
+        warn: vi.fn(),
+      });
+      await vi.waitFor(() =>
+        expect(
+          step === 'model' ? actions.setModel : actions.setApprovalMode,
+        ).toHaveBeenCalledOnce(),
+      );
+
+      currentSessionId = 'session-2';
+      finishStep.resolve();
+
+      await expect(result).rejects.toThrow(
+        'Session changed before setting reasoning effort.',
+      );
+      expect(actions.setReasoningEffort).not.toHaveBeenCalled();
+      expect(actions.releaseSession).toHaveBeenCalledWith('session-1');
+      expect(actions.clearSession).not.toHaveBeenCalled();
+    },
+  );
+
   it('releases and clears the session when an explicit reasoning effort cannot be applied', async () => {
     const error = new Error('reasoning failed');
     const warn = vi.fn();

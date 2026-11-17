@@ -324,6 +324,10 @@ export async function createAndAttachSessionForPrompt({
     }
     if (reasoningEffort) {
       preparationStep = 'set reasoning effort';
+      const currentSessionId = getCurrentSessionId();
+      if (currentSessionId !== undefined && currentSessionId !== sessionId) {
+        throw new Error('Session changed before setting reasoning effort.');
+      }
       await sessionActions.setReasoningEffort(reasoningEffort, {
         persist: sessionContext?.kind !== 'standalone',
       });
