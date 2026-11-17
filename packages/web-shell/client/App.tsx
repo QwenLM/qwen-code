@@ -173,7 +173,11 @@ import { MonitorDetailsProvider } from './monitorDetailsContext';
 import { WorkflowDetailsProvider } from './workflowDetailsContext';
 import { createToolRevealStore, ToolRevealProvider } from './toolRevealContext';
 import { findMonitorTaskForTool } from './utils/monitorTasks';
-import { isComposerTask } from './utils/composerTasks';
+import {
+  buildTaskExplainQuestion,
+  explainDisplayLabel,
+  isComposerTask,
+} from './utils/composerTasks';
 import {
   getTaskActivityKey,
   hasActiveTaskActivity,
@@ -14632,7 +14636,10 @@ export function App({
   ]);
 
   const runVisibleBtw = useCallback(
-    (rawQuestion: string) => {
+    // displayQuestion overrides what the panel echoes; the model still
+    // receives the full question. Typed /btw keeps echoing the user's words.
+    // taskId marks a task explanation so the detail panel can mirror it.
+    (rawQuestion: string, displayQuestion?: string, taskId?: string) => {
       if (sessionWriteBlocked) return;
       const question = rawQuestion.trim();
       if (!question) {
@@ -14641,6 +14648,7 @@ export function App({
       }
       if (!requireActiveSessionForLocalCommand()) return;
 
+      const display = displayQuestion ?? question;
       const messageId = `local-btw-${nextBtwMessageIdRef.current++}`;
       const sessionId = connection.sessionId;
       const workspaceCwd = connection.workspaceCwd;
@@ -14650,9 +14658,10 @@ export function App({
       setBtwMessage({
         id: messageId,
         role: 'btw',
-        question,
+        question: display,
         answer: '',
         isPending: true,
+        ...(taskId ? { taskId } : {}),
       });
 
       void (async () => {
@@ -14670,9 +14679,10 @@ export function App({
             setBtwMessage({
               id: messageId,
               role: 'btw',
-              question,
+              question: display,
               answer: event.answer || (done ? t('btw.emptyAnswer') : ''),
               isPending: !done,
+              ...(taskId ? { taskId } : {}),
             });
             if (done) btwAbortControllerRef.current = null;
           }
@@ -14741,6 +14751,66 @@ export function App({
         !e.shiftKey &&
         (key === 'c' || key === 'd');
 
+      // Surfaces that own the keyboard yield the keys they actually consume.
+      // Dialogs/drawers (including component-local confirms portaled into the
+      // shell root) own Escape only — Enter/Space on their body still dismiss
+      // a settled explanation, and on a control still activate it. The waiting
+      // minigame (Space pauses, Enter restarts) and keyboard-scoped status
+      // cards (Enter/Space open/close detail and server actions) consume
+      // Enter/Space as well as Escape, so yield those keys to them too. The
+      // cancel chords are never owned by these surfaces, except Ctrl+C's copy
+      // role on a real text surface under a guard: Ctrl+D never copies, and a
+      // keyboard scope is not itself a text surface (a button inside a status
+      // card still cancels).
+      const inKeyboardScope =
+        target instanceof Element &&
+        target.closest('[data-keyboard-scope]') !== null;
+      const guardApplies =
+        hasOpenModalSurface(portalRoot) ||
+        waitingMinigameOpen ||
+        inKeyboardScope;
+      const guardOwnsActivation =
+        (waitingMinigameOpen || inKeyboardScope) &&
+        (e.key === 'Enter' || e.key === ' ');
+      const textCopy =
+        guardApplies &&
+        isCtrlCancel &&
+        key === 'c' &&
+        target instanceof Element &&
+        target.closest(
+          'input, textarea, select, [contenteditable]:not([contenteditable="false"]), .cm-editor',
+        ) !== null;
+      if (
+        textCopy ||
+        (guardApplies && e.key === 'Escape') ||
+        guardOwnsActivation
+      )
+        return;
+
+      // Enter/Space activate a control — button, link, field, menu item,
+      // tab, grid/tree row, and the like — and Escape inside the chip row or
+      // an open menu/listbox belongs to that widget. Every other key —
+      // Escape anywhere else, Ctrl+C/Ctrl+D — must reach the dismiss/cancel
+      // path below, which is what the panel's key hints advertise. The
+      // composer editor is never exempted: it is the dismiss shortcut's home
+      // surface. Grids and trees activate rows on Enter/Space but do not
+      // universally own Escape (the trajectory grid claims it only with a
+      // row selection), so they appear only in the activation list —
+      // exempting their Escape would leave the key unconsumed and let the
+      // app-level handler arm a surprise turn-cancel behind the panel.
+      if (
+        target instanceof Element &&
+        !target.closest('[data-web-shell-composer-editor]') &&
+        (((e.key === 'Enter' || e.key === ' ') &&
+          target.closest(
+            'button, a[href], [role="button"], [role="menuitem"], [role="option"], [role="tab"], [role="switch"], [role="checkbox"], [role="radio"], [role="grid"], [role="tree"], summary, [contenteditable], input, select, textarea',
+          )) ||
+          (e.key === 'Escape' &&
+            (target.closest('[data-web-shell-composer-task-chips]') ||
+              target.closest('[role="menu"], [role="listbox"]'))))
+      )
+        return;
+
       if (message.isPending) {
         if (!isPlainEscape && !isCtrlCancel) return;
       } else {
@@ -14762,7 +14832,14 @@ export function App({
 
     window.addEventListener('keydown', onBtwShortcut, true);
     return () => window.removeEventListener('keydown', onBtwShortcut, true);
-  }, [interactionBlocked, btwMessage, dismissBtwMessage, pendingApproval]);
+  }, [
+    interactionBlocked,
+    btwMessage,
+    dismissBtwMessage,
+    pendingApproval,
+    portalRoot,
+    waitingMinigameOpen,
+  ]);
 
   // Echo a local command into the transcript, or suppress it while a turn is
   // streaming so the injected user row can't split the active turn (see
@@ -18929,6 +19006,52 @@ export function App({
     ],
   );
 
+  const explainComposerTask = useCallback(
+    (task: DaemonSessionTaskWithWorkflowStatus) => {
+      runVisibleBtw(
+        buildTaskExplainQuestion(task, t),
+        t('tasks.explain.display', { label: explainDisplayLabel(task.label) }),
+        task.id,
+      );
+    },
+    [runVisibleBtw, t],
+  );
+
+  // The detail panel's "?" explains the task shown in the active tab. Shell
+  // and monitor tabs carry their snapshot; a subagent tab resolves through
+  // the registry by its spawning tool call. Workflow tabs name no run.
+  const activeExplainTask = useMemo(() => {
+    const tab = artifactPanelTabs.find(
+      (item) => item.id === activeArtifactPanelTabId,
+    );
+    if (!tab) return null;
+    if (tab.kind === 'shell' || tab.kind === 'monitor') return tab.task;
+    if (tab.kind === 'subagent') {
+      // The open path registers the tab under toolUseId ?? id
+      // (agentTaskAsToolCall), so accept both id domains here.
+      return (
+        sessionTasks.find(
+          (task) =>
+            task.kind === 'agent' &&
+            (task.toolUseId === tab.rootToolCallId ||
+              task.id === tab.rootToolCallId),
+        ) ?? null
+      );
+    }
+    return null;
+  }, [artifactPanelTabs, activeArtifactPanelTabId, sessionTasks]);
+
+  const taskExplanation =
+    btwMessage?.role === 'btw' && btwMessage.taskId
+      ? {
+          messageId: btwMessage.id,
+          taskId: btwMessage.taskId,
+          question: btwMessage.question,
+          answer: btwMessage.answer,
+          isPending: btwMessage.isPending,
+        }
+      : null;
+
   const refreshGoal = useCallback(async () => {
     const owner = sessionOwnerGuard.capture();
     const response = await sessionActions.getGoal();
@@ -21763,6 +21886,18 @@ export function App({
       // behind it, or a second Escape would stop the turn by surprise.
       if (live.waitingMinigameOpen) return;
 
+      // A keyboard-scoped surface (Tasks/Mcp status cards) owns Escape too:
+      // its own delayed window listener collapses the card, and that listener
+      // bails on defaultPrevented. Arming the two-press stream cancel here
+      // would both swallow the card's Escape and stop the turn on a second
+      // press, so yield before deciding the escape intent.
+      const escScopeTarget = e.composedPath()[0] ?? e.target;
+      if (
+        escScopeTarget instanceof Element &&
+        escScopeTarget.closest('[data-keyboard-scope]')
+      )
+        return;
+
       // Streaming takes priority over clearing text (queued prompts stay intact
       // and drain after the turn settles); see decideEscapeIntent for the rules.
       const intent = decideEscapeIntent({
@@ -23494,6 +23629,9 @@ export function App({
     onNestedArtifactsChange: handlePaneArtifactsChange,
     onOpenNestedSubagent: openSubagentPanelForSession,
     agentTasks: tracedEnvironmentAgentTasks,
+    explainTask: activeExplainTask,
+    onExplainTask: explainComposerTask,
+    taskExplanation,
     agentTraceLoading: agentTraceInitialLoading,
     agentTraceError: agentTraceFailed ? t('workflow.loadFailed') : undefined,
     onOpenWorkflowAgent: openEnvironmentAgent,
@@ -25959,6 +26097,7 @@ export function App({
                                     question={btwMessage.question}
                                     answer={btwMessage.answer}
                                     isPending={btwMessage.isPending}
+                                    hidePrefix={Boolean(btwMessage.taskId)}
                                   />
                                 </div>
                               ) : null;
@@ -26408,6 +26547,7 @@ export function App({
                             // their task surfaces.
                             includeAgents={environmentTasksReplacementEnabled}
                             onSelectTask={openComposerTask}
+                            onExplainTask={explainComposerTask}
                             onReturnToInput={handleReturnToEditor}
                           />
                         )}
