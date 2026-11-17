@@ -5574,8 +5574,22 @@ export function registerSessionRoutes(
     withOwnerReadSession(
       'GET /session/:id/status',
       async (_req, res, sessionId, runtime) => {
-        const summary = { ...runtime.bridge.getSessionSummary(sessionId) };
         const service = createWorkspaceRuntimeSessionService(runtime);
+        // Bridge entries are re-created without prs on daemon restart/reload,
+        // so hydrate the persisted binding history before reading the summary;
+        // seedSessionPrs no-ops when bindings already exist, so live state is
+        // never clobbered. Best-effort: an unreadable sidecar omits bindings.
+        try {
+          const hydratedPrs = await readSessionPrs(
+            service.getPrSessionPathForArchiveState(sessionId, 'active'),
+          );
+          if (hydratedPrs && hydratedPrs.length > 0) {
+            runtime.bridge.seedSessionPrs?.(sessionId, hydratedPrs);
+          }
+        } catch {
+          // An unreadable sidecar omits the bindings, not the summary.
+        }
+        const summary = { ...runtime.bridge.getSessionSummary(sessionId) };
         try {
           summary.lastUserPromptAt =
             await service.getLastUserPromptAt(sessionId);

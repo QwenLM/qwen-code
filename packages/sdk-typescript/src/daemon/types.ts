@@ -720,6 +720,36 @@ export interface DaemonGitHubPullRequestList {
   pullRequests: DaemonGitHubPullRequest[];
 }
 
+/** One changed file within a pull request's file list. */
+export interface DaemonGitHubPullRequestFile {
+  path: string;
+  additions: number;
+  deletions: number;
+}
+
+/** Response from `GET /workspaces/:workspace/github/prs/:number/files`. */
+export interface DaemonGitHubPullRequestFiles {
+  v: 1;
+  workspaceCwd: string;
+  /** `false` when the workspace is not a git repository. */
+  available: boolean;
+  files: DaemonGitHubPullRequestFile[];
+  /** Rows dropped because the per-file list is capped. */
+  hiddenCount: number;
+  /** PR-wide totals (cover hidden rows too). */
+  additions: number;
+  deletions: number;
+  /** The PR head commit (`headRefOid`), for scoping commit fallback. */
+  headSha: string;
+  /**
+   * Whether `headSha` is an ancestor of the checkout's HEAD. Only an
+   * ancestor head is a trustworthy commit-fallback boundary; a merged or
+   * rewritten PR's head is not. Absent on daemons that predate the probe —
+   * treat as false.
+   */
+  headIsAncestor?: boolean;
+}
+
 /** Response from `POST /workspaces/:workspace/github/prs/create`. */
 export interface DaemonGitHubPullRequestCreateResult {
   url: string;
@@ -1427,6 +1457,12 @@ export interface DaemonSessionPrInfo {
   url: string;
   /** Snapshot of the PR's state at last bind/refresh; optional. */
   state?: 'open' | 'merged' | 'closed';
+  /**
+   * Binding provenance: `create`/`worktree` are the session's own delivery
+   * units; `review` is a PR merely mentioned in a review/verify command and is
+   * not this session's work. Absent on bindings persisted before provenance.
+   */
+  source?: 'create' | 'worktree' | 'review';
   /**
    * Issues the PR closes (its GitHub closing references), derived by the
    * daemon's refresh sweep; absent until the first sweep after binding.
