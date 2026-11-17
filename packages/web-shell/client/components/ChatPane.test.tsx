@@ -4081,6 +4081,24 @@ describe('ChatPane', () => {
     expect(submitPermission).toHaveBeenCalledWith('perm-yolo', 'allow-1');
   });
 
+  it('keeps a named sub-session approval pending when switching to yolo', async () => {
+    pendingPermission = {
+      id: 'perm-sub-session',
+      toolName: 'create_sub_session',
+      toolKind: 'other',
+      options: [{ id: 'allow-1', label: 'Allow once', kind: 'allow_once' }],
+      rawInput: { workspace: '/repos/b' },
+    };
+    render();
+    await act(async () => {
+      testid('pane-pick-mode')!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      );
+    });
+    expect(setApprovalMode).toHaveBeenCalledWith('yolo', { planMode: false });
+    expect(submitPermission).not.toHaveBeenCalled();
+  });
+
   it('resolves host at mention providers through a pane ChatEditor', () => {
     renderRealChatEditor = true;
     const atProviders = [

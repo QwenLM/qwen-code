@@ -13,11 +13,13 @@
 工作区 git checkout 路径（分支选择器弹层 → SDK `workspaceGitCheckout` →
 `POST /workspace(s)/git/checkout` → core `gitCheckout`）执行的是裸的
 `git checkout <ref> --`。当本地修改或未跟踪文件会被切换覆盖时，git 拒绝。
-路由已经把这两种拒绝形态都归类为 `409 dirty_working_tree`（分类器匹配
-`dirty|uncommitted|would be overwritten`，覆盖 git 的 "Your local changes
-… would be overwritten by checkout" 与 "The following untracked working
-tree files would be overwritten by checkout"），但弹层只是把错误字符串
-渲染在 footer 里——没有任何可操作的出口。
+路由已经把这些拒绝形态都归类为 `409 dirty_working_tree`（分类器匹配
+`dirty|uncommitted|would be overwritten|would lose untracked`，覆盖 git 的
+"Your local changes … would be overwritten by checkout"、"The following
+untracked working tree files would be overwritten by checkout"、以及
+目录碰撞的兄弟形态 "Updating the following directories would lose
+untracked files in them"——未跟踪目录挡住目标分支以文件跟踪的路径），
+但弹层只是把错误字符串渲染在 footer 里——没有任何可操作的出口。
 
 典型成因是早前工作的残留：上一个会话留下的编辑、或构建产生的新文件，
 挡住了切换到另一个分支。pull 路径已经用 stash 或放弃两种解决方式回应同
@@ -108,10 +110,10 @@ tree files would be overwritten by checkout"），但弹层只是把错误字符
 push 前的守卫不 stash 任何东西。
 
 裸 checkout——不带选项——执行与以往完全相同的 git 调用。响应层面的变化
-是 stash checkout 成功时可选的 `stashSha` 字段，以及 auto-stash 条目
-存活且 SHA 可知的失败响应上携带的同名字段——保留恢复后的
-`checkout_failed`、或 push 之后停放 merge 的 `operation_in_progress`
-（见下文）。
+是 stash checkout 成功时可选的 `stashSha` 字段、auto-stash 条目存活且
+SHA 可知的失败响应上携带的同名字段——保留恢复后的 `checkout_failed`、
+或 push 之后停放 merge 的 `operation_in_progress`（见下文）——以及目录
+碰撞拒绝：路由以往回未分类的 500，现在回 `409 dirty_working_tree`。
 
 失败按 core 实际做了什么来分类，而不是匹配 git 的文本：新的
 `GitCheckoutFailure` 携带稳定码 `operation_in_progress`、
@@ -119,7 +121,8 @@ push 前的守卫不 stash 任何东西。
 脱敏后的消息，与它处理 `GitPullFailure` 的方式完全一致。共享 helper
 （`refuseOperationInProgress`、`pushAutoStash`）增加一个动作词参数，
 默认保持 pull 的措辞；`restoreStash` 原样复用，因为它的提示与动作无关。
-既有的正则分类不变，仍覆盖裸 checkout。
+分类器为目录碰撞拒绝新增了 `would lose untracked` 分支；其余分支不变，
+裸 checkout 仍被覆盖。
 
 ## UI
 
@@ -192,8 +195,10 @@ SDK 的 `workspaceGitCheckout`（legacy 与 workspace 限定两个方法）接�
   东西被销毁：条目保留并被点名，修改可恢复。pull 设计出于同样原因只守卫
   其破坏性选项；在这里拒绝 stash 还会让面板在子目录工作区里提供一个永远
   失败的选项。
-- **不做跨请求串行化。** 并发 git 操作会在 git 自己的 `index.lock` 上
-  响亮地失败。stash 捕获在条目 subject 里携带每请求 nonce（文档化的标签
+- **不做跨请求串行化。** 并发的 git 操作——checkout 与 stash 取 git 自己的
+  `index.lock`，建分支取其 ref 与 config 锁——都会响亮地失败；残留
+  `clean -fd` 两把锁都不取（已探针证实），因此并发 clean 在文件本身上
+  竞争——与并发会话风险同属已确认放弃的暴露面。stash 捕获在条目 subject 里携带每请求 nonce（文档化的标签
   保留为其前缀），因此当本请求自己的 push 是空操作——因为并发请求先把
   树 stash 了——它什么都不会认领、也不报告条目；按身份恢复绝不会 apply
   或 drop 别人的条目。pull 流程共用该 helper 与同一保证。
@@ -293,7 +298,8 @@ SDK 的 `workspaceGitCheckout`（legacy 与 workspace 限定两个方法）接�
 
 - 因本地修改被拒的 checkout 提供 stash 与放弃两种解决方式，且都能端到端
   完成切换。
-- 裸 checkout 的调用与响应不变。
+- 裸 checkout 的调用不变；目录碰撞拒绝的响应从无分类 500 变为
+  `409 dirty_working_tree`。
 - 上文列出的每道守卫都有一个"没有它就失败"的测试。
 - 设计文档双语齐备；lint、typecheck、build 与聚焦单测通过。
 

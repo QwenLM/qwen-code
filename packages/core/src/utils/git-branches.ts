@@ -494,11 +494,12 @@ export interface GitCheckoutResult {
   branch: string;
   detached: boolean;
   /**
-   * SHA of the auto-stash entry kept by a `stash` checkout — on success,
-   * and on a GitCheckoutFailure whose entry survives with a known SHA (a
-   * failed restore, or a parked-operation refusal after the push). The
-   * entry holds the user's pre-switch changes; it is never restored
-   * automatically, because switching branches is deliberate.
+   * SHA of the auto-stash entry kept by a successful `stash` checkout.
+   * The entry holds the user's pre-switch changes; it is never restored
+   * automatically, because switching branches is deliberate. A failure
+   * whose entry survives with a known SHA (a failed restore, or a
+   * parked-operation refusal after the push) carries the same field on
+   * GitCheckoutFailure, not on this result.
    */
   stashSha?: string;
 }
@@ -509,7 +510,9 @@ export interface GitCheckoutOptions {
    * The entry is kept after a successful switch and reported by SHA; a
    * failed checkout restores it when HEAD did not move, and keeps it
    * (reporting the completed switch) when a post-checkout hook refused
-   * after the move. Mutually exclusive with `force`.
+   * after the move. A parked-operation refusal after the push succeeded
+   * also keeps the entry and reports its SHA. Mutually exclusive with
+   * `force`.
    */
   stash?: boolean;
   /**
@@ -1551,10 +1554,13 @@ function trackedDiff(
   env?: Readonly<Record<string, string | undefined>>,
 ): Promise<string | null> {
   return new Promise((resolve) => {
+    // Detached so a timed-out probe can kill the whole process group:
+    // the git wrapper may have children of its own (a shim's sleep, a
+    // diff driver), and killing only the wrapper would orphan them.
     const child = spawn(
       'git',
       ['diff', 'HEAD', '--no-ext-diff', '--no-textconv', '--no-color'],
-      { cwd, env: gitEnv(env), windowsHide: true },
+      { cwd, env: gitEnv(env), windowsHide: true, detached: true },
     );
     const hash = createHash('sha256');
     let settled = false;
@@ -1562,7 +1568,11 @@ function trackedDiff(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      child.kill('SIGKILL');
+      try {
+        if (child.pid) process.kill(-child.pid, 'SIGKILL');
+      } catch {
+        child.kill('SIGKILL');
+      }
       resolve(value);
     };
     const timer = setTimeout(() => settle(null), GIT_TIMEOUT_MS);
