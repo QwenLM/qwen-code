@@ -672,8 +672,6 @@ export interface DaemonSessionActions {
     options?: {
       workspaceCwd?: string;
       sessionContext?: DaemonProductSessionContext;
-      /** See loadSession's artifactCountHint. */
-      artifactCountHint?: number;
     },
   ): Promise<void>;
   /**
