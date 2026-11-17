@@ -596,6 +596,77 @@ describe('ToolApproval accessibility', () => {
     expect(command?.textContent).toBe('ls -la');
   });
 
+  it.each(['inline', 'floating'] as const)(
+    'renders the resolved workspace and complete prompt in the %s approval body',
+    (variant) => {
+      const workspace = `/repos/${'nested-directory/'.repeat(20)}destination`;
+      const prompt =
+        'Summarize the README.\n'.repeat(10) + 'Include the version.';
+      const approvalText = `Workspace: "${workspace}"\n\n${prompt}`;
+      const adapted = extractPendingPermission([
+        {
+          id: 'permission-delegation',
+          kind: 'permission',
+          requestId: 'request-delegation',
+          sessionId: 'session-delegation',
+          title: `[first-turn] in "${workspace}": Summarize the README…`,
+          options: [
+            {
+              optionId: 'proceed_once',
+              label: 'Allow once',
+              raw: { kind: 'allow_once' },
+            },
+            {
+              optionId: 'cancel',
+              label: 'Reject',
+              raw: { kind: 'reject_once' },
+            },
+          ],
+          toolCall: {
+            kind: 'other',
+            _meta: { toolName: 'create_sub_session' },
+            rawInput: { workspace: 'repo-b-id', prompt },
+            content: [
+              {
+                type: 'content',
+                content: { type: 'text', text: approvalText },
+              },
+            ],
+          },
+          preview: { kind: 'generic' },
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      ])!;
+      render();
+      act(() =>
+        root!.render(
+          <I18nProvider language="en">
+            <ToolApproval
+              request={adapted}
+              variant={variant}
+              onConfirm={onConfirm}
+            />
+          </I18nProvider>,
+        ),
+      );
+
+      expect(
+        container!.querySelector(`pre.${styles.content}`)?.textContent,
+      ).toBe(approvalText);
+      expect(adapted.rawInput?.workspace).toBe('repo-b-id');
+      act(() =>
+        optionButtons()
+          .find((button) => button.dataset.optionId === 'proceed_once')!
+          .click(),
+      );
+      expect(onConfirm).toHaveBeenCalledExactlyOnceWith(
+        'request-delegation',
+        'proceed_once',
+      );
+    },
+  );
+
   it('neutralises bidi and C0 controls in the rendered command block', () => {
     // Mirrors what `toManagedPermissionRequest` produces for an exec tool
     // (`rawInput: tool.args` + `contentIsInput: true`), i.e. the shape from
@@ -922,6 +993,22 @@ describe('ToolApproval accessibility', () => {
     pressKey(popover, '1');
     pressKey(popover, 'Escape');
     expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it('sizes the explanation popover with a width utility instead of w-72', async () => {
+    render(undefined, execRequest, undefined, 'en', async function* () {});
+
+    await act(async () =>
+      container!
+        .querySelector<HTMLButtonElement>('button[title="Explain"]')
+        ?.click(),
+    );
+
+    const popover = document.body.querySelector<HTMLElement>(
+      '[data-slot="popover-content"]',
+    )!;
+    expect(popover.className).toContain('w-[min(480px,calc(100vw-32px))]');
+    expect(popover.className).not.toContain('w-72');
   });
 
   it('only offers explanations for Shell commands', () => {

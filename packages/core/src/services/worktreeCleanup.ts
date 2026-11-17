@@ -150,6 +150,9 @@ export async function cleanupStaleAgentWorktrees(
 
     const result = await service.removeUserWorktree(entry.name, {
       deleteBranch: true,
+      // Stale agent worktrees were created named, so the slug ref is
+      // theirs even if the agent switched branches before exiting.
+      branchOwned: true,
     });
     if (!result.success) {
       debugLogger.warn(
@@ -157,14 +160,14 @@ export async function cleanupStaleAgentWorktrees(
       );
       continue;
     }
-    if (result.branchPreserved) {
+    if (result.branchPreserved || result.keptBranch) {
       // Race: commits landed between hasUnmergedWorktreeCommits and
-      // git branch -d. The directory is gone but the branch remains so
-      // those commits can still be recovered. Surface it so an operator
-      // grepping logs can spot orphan branches.
+      // git branch -d, or the checkout's own branch survives. The
+      // directory is gone but a branch remains so the work can still be
+      // recovered. Surface it so an operator grepping logs can spot it.
       debugLogger.warn(
         `Removed stale agent worktree ${worktreePath} but kept branch ` +
-          `${worktreeBranchForSlug(entry.name)} (unmerged commits at delete time)`,
+          `${result.keptBranch ?? worktreeBranchForSlug(entry.name)}`,
       );
     } else {
       debugLogger.debug(`Removed stale agent worktree ${worktreePath}`);

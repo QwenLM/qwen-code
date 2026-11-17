@@ -2981,58 +2981,55 @@ export function EnhancedTable({
                   {t('markdownTable.copyTsvHint')}
                 </TooltipContent>
               </Tooltip>
-              {selectionStatistics.numericCount > 0 && (
-                <>
-                  <span
-                    className={`${styles.selectionMetric} ${styles.selectionMetricSecondary}`}
-                  >
-                    {t('markdownTable.selection.sum')}{' '}
-                    <strong className={styles.selectionMetricValue}>
-                      {formatSelectionStatistic(
-                        selectionStatistics.sum,
-                        selectionStatistics,
-                        language,
-                      )}
-                    </strong>
-                  </span>
-                  <span
-                    className={`${styles.selectionMetric} ${styles.selectionMetricSecondary}`}
-                  >
-                    {t('markdownTable.selection.average')}{' '}
-                    <strong className={styles.selectionMetricValue}>
-                      {formatSelectionStatistic(
-                        selectionStatistics.average,
-                        selectionStatistics,
-                        language,
-                      )}
-                    </strong>
-                  </span>
-                  <span
-                    className={`${styles.selectionMetric} ${styles.selectionMetricSecondary}`}
-                  >
-                    {t('markdownTable.selection.min')}{' '}
-                    <strong className={styles.selectionMetricValue}>
-                      {formatSelectionStatistic(
-                        selectionStatistics.min,
-                        selectionStatistics,
-                        language,
-                      )}
-                    </strong>
-                  </span>
-                  <span
-                    className={`${styles.selectionMetric} ${styles.selectionMetricSecondary}`}
-                  >
-                    {t('markdownTable.selection.max')}{' '}
-                    <strong className={styles.selectionMetricValue}>
-                      {formatSelectionStatistic(
-                        selectionStatistics.max,
-                        selectionStatistics,
-                        language,
-                      )}
-                    </strong>
-                  </span>
-                </>
-              )}
+            </div>
+          )}
+          {selectionStatistics && selectionStatistics.numericCount > 0 && (
+            <div
+              className={styles.selectionStatsSecondary}
+              role="group"
+              aria-label={t('markdownTable.selection.statistics')}
+              tabIndex={0}
+            >
+              <span className={styles.selectionMetric}>
+                {t('markdownTable.selection.sum')}{' '}
+                <strong className={styles.selectionMetricValue}>
+                  {formatSelectionStatistic(
+                    selectionStatistics.sum,
+                    selectionStatistics,
+                    language,
+                  )}
+                </strong>
+              </span>
+              <span className={styles.selectionMetric}>
+                {t('markdownTable.selection.average')}{' '}
+                <strong className={styles.selectionMetricValue}>
+                  {formatSelectionStatistic(
+                    selectionStatistics.average,
+                    selectionStatistics,
+                    language,
+                  )}
+                </strong>
+              </span>
+              <span className={styles.selectionMetric}>
+                {t('markdownTable.selection.min')}{' '}
+                <strong className={styles.selectionMetricValue}>
+                  {formatSelectionStatistic(
+                    selectionStatistics.min,
+                    selectionStatistics,
+                    language,
+                  )}
+                </strong>
+              </span>
+              <span className={styles.selectionMetric}>
+                {t('markdownTable.selection.max')}{' '}
+                <strong className={styles.selectionMetricValue}>
+                  {formatSelectionStatistic(
+                    selectionStatistics.max,
+                    selectionStatistics,
+                    language,
+                  )}
+                </strong>
+              </span>
             </div>
           )}
           <span className={styles.toolbarSpacer} />

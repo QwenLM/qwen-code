@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { startHookLifecycle } from '../telemetry/hook-lifecycle.js';
 import { isShellResultDisplay } from '../utils/shell-result.js';
 import type { Config } from '../config/config.js';
 import type { HookPlanner, HookEventContext } from './hookPlanner.js';
@@ -57,6 +58,8 @@ import type {
   InstructionLoadReason,
   BackgroundTaskInfo,
   CronJobInfo,
+  FileChangedInput,
+  FileChangeEvent,
 } from './types.js';
 import {
   createHookOutput,
@@ -216,6 +219,24 @@ export class HookEventHandler {
   private readonly sessionHooksManager: SessionHooksManager;
   /** Optional provider for conversation history */
   private messagesProvider?: MessagesProvider;
+
+  async fireFileChangedEvent(
+    filePath: string,
+    event: FileChangeEvent,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    const input: FileChangedInput = {
+      ...this.createBaseInput(HookEventName.FileChanged),
+      file_path: filePath,
+      event,
+    };
+    return this.executeHooks(
+      HookEventName.FileChanged,
+      input,
+      { filePath },
+      signal,
+    );
+  }
 
   constructor(
     config: Config,
@@ -1064,13 +1085,31 @@ export class HookEventHandler {
       // construction rather than by relying on async context propagation.
       // Same source as the hook input's `agent_id`.
       const agentId = owner.agentId ?? undefined;
+      const lifecycles = new Map<
+        number,
+        ReturnType<typeof startHookLifecycle>
+      >();
       const onHookStart = (config: HookConfig, index: number) => {
+        const lifecycle = signal?.aborted
+          ? undefined
+          : startHookLifecycle(
+              this.config,
+              owner,
+              eventName,
+              config,
+              index,
+              index < registryHookConfigs.length
+                ? (plan?.hookSources?.[index] ?? 'unknown')
+                : 'session',
+            );
+        lifecycles.set(index, lifecycle);
         const hookName = this.getHookName(config);
         debugLogger.debug(
           `Hook ${hookName} started for event ${eventName} (${index + 1}/${totalHooks})`,
         );
         this.publishHookProgress({
           phase: 'start',
+          ...(lifecycle ? { hookLifecycle: lifecycle.started } : {}),
           eventName,
           hookName: getHookDisplayName(config),
           hookType: config.type,
@@ -1095,8 +1134,10 @@ export class HookEventHandler {
         );
         const { outcome, blockedReason } = toProgressOutcome(eventName, result);
         const systemMessage = result.output?.systemMessage;
+        const hookLifecycle = lifecycles.get(index)?.finish(result, outcome);
         this.publishHookProgress({
           phase: 'end',
+          ...(hookLifecycle ? { hookLifecycle } : {}),
           eventName,
           hookName: getHookDisplayName(config),
           hookType: config.type,

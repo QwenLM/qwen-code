@@ -11,6 +11,7 @@
     "tool.intent",
     "action.changed",
     "tool.receipt",
+    "tool.measured",
     "checkpoint.committed",
     "context.compacted",
     "cancel.requested",
@@ -177,6 +178,24 @@
         "eventId": "evt-000107",
         "kind": "action.changed",
         "occurredAt": 1760000000007,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "kind-tool-measured",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 108,
+        "eventId": "evt-000108",
+        "kind": "tool.measured",
+        "occurredAt": 1760000000008,
         "payloadRef": {
           "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
         }

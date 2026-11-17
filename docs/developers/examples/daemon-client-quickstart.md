@@ -204,7 +204,7 @@ for await (const event of client.subscribeEvents(session.sessionId, {
 }
 ```
 
-The daemon retains the last 8000 events per session in a ring buffer; gaps beyond that window won't be re-deliverable.
+The daemon retains up to 8000 events per session, also constrained by the default 8 MiB ring byte budget including the latest full command snapshot. A single oversized newest event or snapshot is the exception. Gaps beyond the retained window require resync; increase both `--event-ring-size` and `--event-ring-max-bytes` when both limits constrain the required reconnect history.
 
 ## Voting on permissions
 

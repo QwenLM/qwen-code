@@ -6,11 +6,15 @@
 
 // Incremental `prepare` build for CI.
 //
-//   key           print a hash of every workspace's build inputs
+//   key [--at <commit>]  print a hash of every workspace's build inputs, in
+//                 the worktree or, with --at, in a commit's tree (the cache key
+//                 a pull request's base saved under)
 //   build <dir>   build the tree, reusing what <dir> holds from an earlier
 //                 run: only workspaces whose inputs changed rebuild
 //   pack <dir>    store the built tree and its input hashes in <dir>
 //   paths         print the built paths, NUL-separated, for `tar -T -`
+//   host-assets   after unpacking a tree built on another host, recopy the
+//                 bundle's platform-specific assets for this host
 //
 // A workspace's hash covers its tracked files (tests excluded: no build
 // reads them), the global inputs every build shares, and the hashes of the
@@ -108,8 +112,14 @@ function listWorkspaces() {
     });
 }
 
-function trackedFiles() {
-  return execFileSync('git', ['ls-files', '-s', '-z'], {
+// `ls-files -s` prints `<mode> <blob> <stage>`, `ls-tree -r` prints
+// `<mode> <type> <blob>`: the same blob ids, so a commit's tree hashes exactly
+// as the worktree did when that commit was checked out.
+function trackedFiles(commit) {
+  const [args, blobField] = commit
+    ? [['ls-tree', '-r', '-z', '--full-tree', commit], 2]
+    : [['ls-files', '-s', '-z'], 1];
+  return execFileSync('git', args, {
     cwd: root,
     encoding: 'utf8',
     maxBuffer: 256 * 1024 * 1024,
@@ -118,7 +128,7 @@ function trackedFiles() {
     .filter(Boolean)
     .map((line) => {
       const [meta, path] = line.split('\t');
-      return { path, blob: meta.split(' ')[1] };
+      return { path, blob: meta.split(' ')[blobField] };
     });
 }
 
@@ -144,19 +154,35 @@ function builtPaths(dirs = []) {
 
 const run = (command) => execSync(command, { cwd: root, stdio: 'inherit' });
 
-function currentHashes() {
-  return hashWorkspaces(listWorkspaces(), trackedFiles());
+/** One key for the whole tree, from the per-workspace hashes. */
+export function combinedKey(hashes) {
+  const combined = createHash('sha256');
+  for (const name of Object.keys(hashes).sort()) {
+    combined.update(`${name}\0${hashes[name]}\n`);
+  }
+  return combined.digest('hex');
 }
 
-export function main(argv) {
+export async function main(argv) {
   const [mode, dir] = argv;
   if (mode === 'key') {
-    const hashes = currentHashes();
-    const combined = createHash('sha256');
-    for (const name of Object.keys(hashes).sort()) {
-      combined.update(`${name}\0${hashes[name]}\n`);
+    if (argv[1] !== undefined && (argv[1] !== '--at' || !argv[2])) {
+      throw new Error('usage: ci-build-cache.mjs key [--at <commit>]');
     }
-    console.log(combined.digest('hex'));
+    // The workspace graph comes from the worktree either way; a commit whose
+    // graph differed changed a package.json, which its own hash covers.
+    console.log(
+      combinedKey(hashWorkspaces(listWorkspaces(), trackedFiles(argv[2]))),
+    );
+    return;
+  }
+  if (mode === 'host-assets') {
+    // Every built path is JavaScript except the renderer's native library,
+    // which the bundle copies for the platform it was installed on.
+    if (existsSync(join(root, 'dist', 'cli.js'))) {
+      const { copyOpenTuiAssets } = await import('./copy_bundle_assets.js');
+      copyOpenTuiAssets({ root, distDir: join(root, 'dist') });
+    }
     return;
   }
   if (mode === 'paths') {
@@ -169,7 +195,7 @@ export function main(argv) {
   }
   if (!dir || (mode !== 'build' && mode !== 'pack')) {
     throw new Error(
-      'usage: ci-build-cache.mjs key | build <dir> | pack <dir> | paths',
+      'usage: ci-build-cache.mjs key [--at <commit>] | build <dir> | pack <dir> | paths | host-assets',
     );
   }
   const cacheDir = resolve(dir);
@@ -239,5 +265,5 @@ if (
   process.argv[1] &&
   import.meta.url === pathToFileURL(process.argv[1]).href
 ) {
-  main(process.argv.slice(2));
+  await main(process.argv.slice(2));
 }

@@ -115,6 +115,10 @@ export class WorkspaceRuntimeCoordinator {
 
   private skillsRevision = 0;
 
+  private skillsUserSettingsRequested = 0;
+
+  private skillsUserSettingsApplied = 0;
+
   private mcpRevision = 0;
 
   private mcpConfigRevision = 0;
@@ -329,7 +333,10 @@ export class WorkspaceRuntimeCoordinator {
     }
   }
 
-  reconcileSkillsConfiguration(): 'deferred' | 'reconciling' {
+  reconcileSkillsConfiguration(
+    options: { userSettings?: boolean } = {},
+  ): 'deferred' | 'reconciling' {
+    if (options.userSettings) this.skillsUserSettingsRequested += 1;
     this.skillsRevision += 1;
     this.skillsRefreshRetryRevision = undefined;
     this.skillsRefreshFailedRevision = undefined;
@@ -338,9 +345,14 @@ export class WorkspaceRuntimeCoordinator {
 
   private scheduleSkillsReconciliation(): 'deferred' | 'reconciling' {
     const snapshot = this.lifecycle();
-    if (!snapshot.runtimeLive || this.admissionPaused || this.disposed) {
-      this.skillsReconcileDeferred ||=
-        snapshot.runtimeLive && this.admissionPaused;
+    const pendingUserSettings =
+      this.skillsUserSettingsRequested > this.skillsUserSettingsApplied;
+    const canRefresh =
+      snapshot.runtimeLive ||
+      (pendingUserSettings &&
+        this.bridge.getWorkspaceRuntimeLifecycleSnapshot().runtimeLive);
+    if (!canRefresh || this.admissionPaused || this.disposed) {
+      this.skillsReconcileDeferred ||= canRefresh && this.admissionPaused;
       if (snapshot.state === 'starting') {
         this.skillsRefreshRetryRevision = this.skillsRevision;
       }
@@ -365,6 +377,15 @@ export class WorkspaceRuntimeCoordinator {
     void this.queueSkillsWork(async () => {
       if (revision !== this.skillsRevision) return;
       await this.refreshSkillsRevision(revision);
+      if (revision !== this.skillsRevision) return;
+      if (pendingUserSettings && !this.lifecycle().runtimeLive) {
+        this.skillsStatus = {
+          state: 'stale',
+          revision,
+          runtimeEpoch: snapshot.runtimeEpoch,
+        };
+        return;
+      }
       await this.prepareSkillsRevision(revision);
     }).catch((error: unknown) => {
       if (this.admissionPaused && !this.disposed)
@@ -439,7 +460,10 @@ export class WorkspaceRuntimeCoordinator {
       ) {
         return;
       }
-      if (this.skillsRefreshRetryRevision === revision) {
+      if (
+        this.skillsRefreshRetryRevision === revision ||
+        this.skillsUserSettingsRequested > this.skillsUserSettingsApplied
+      ) {
         try {
           await this.refreshSkillsRevision(revision);
         } catch (error) {
@@ -457,13 +481,30 @@ export class WorkspaceRuntimeCoordinator {
   }
 
   private async refreshSkillsRevision(revision: number): Promise<void> {
+    const controlWasLive = this.lifecycle().runtimeLive;
+    const userSettingsRequest = this.skillsUserSettingsRequested;
+    const includeUserSettings =
+      userSettingsRequest > this.skillsUserSettingsApplied;
     const result =
       await this.bridge.invokeWorkspaceCommand<ServeWorkspaceSkillsRefreshResult>(
         SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
-        { cwd: this.runtime.workspaceCwd, reason: 'all' },
+        {
+          cwd: this.runtime.workspaceCwd,
+          reason: 'all',
+          ...(includeUserSettings ? { includeUserSettings: true } : {}),
+        },
       );
-    if ((result.configsFailed ?? 0) > 0) {
+    if (
+      (result.configsFailed ?? 0) > 0 ||
+      (includeUserSettings && (result.sessionsFailed ?? 0) > 0)
+    ) {
       throw new Error('Skills runtime refresh failed');
+    }
+    if (includeUserSettings && controlWasLive) {
+      this.skillsUserSettingsApplied = Math.max(
+        this.skillsUserSettingsApplied,
+        userSettingsRequest,
+      );
     }
     if (revision === this.skillsRefreshRetryRevision) {
       this.skillsRefreshRetryRevision = undefined;

@@ -510,6 +510,35 @@ describe('DaemonClient standalone sessions', () => {
     ).toThrow(/expected modelApplied boolean/);
   });
 
+  it('preserves optional last user prompt time through standalone summary validation', async () => {
+    const summary = {
+      ...standaloneSummary(),
+      lastUserPromptAt: '2026-01-02T00:00:00.000Z',
+      updatedAt: '2026-01-03T00:00:00.000Z',
+    };
+    const { fetch } = recordingFetch(({ url }) => {
+      const pathname = new URL(url).pathname;
+      if (pathname === '/capabilities') return capabilityResponse();
+      return jsonResponse(
+        200,
+        pathname === '/standalone/sessions'
+          ? {
+              sessions: [
+                summary,
+                standaloneSummary('660e8400-e29b-41d4-a716-446655440001'),
+              ],
+            }
+          : summary,
+      );
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    expect(await client.getStandaloneSession(SESSION_ID)).toEqual(summary);
+    const page = await client.listStandaloneSessionsPage();
+    expect(page.sessions[0]).toEqual(summary);
+    expect(page.sessions[1]).not.toHaveProperty('lastUserPromptAt');
+  });
+
   it('canonicalizes a caller UUID and exercises the complete route family', async () => {
     const { fetch, calls } = recordingFetch((request) => {
       const url = new URL(request.url);

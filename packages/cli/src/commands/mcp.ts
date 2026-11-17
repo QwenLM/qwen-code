@@ -5,6 +5,7 @@
  */
 
 // File for 'gemini mcp' command
+import { commandMetadata } from './command-metadata.js';
 import type { CommandModule, Argv } from 'yargs';
 import { addCommand } from './mcp/add.js';
 import { removeCommand } from './mcp/remove.js';
@@ -13,8 +14,7 @@ import { reconnectCommand } from './mcp/reconnect.js';
 import { approveCommand, rejectCommand } from './mcp/approve.js';
 
 export const mcpCommand: CommandModule = {
-  command: 'mcp',
-  describe: 'Manage MCP servers',
+  ...commandMetadata.mcp,
   builder: (yargs: Argv) =>
     yargs
       .command(addCommand)

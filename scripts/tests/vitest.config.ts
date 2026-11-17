@@ -24,6 +24,10 @@ export default defineConfig({
             // Bash-driven workflow suites cannot run on Windows; pure
             // YAML-parse workflow suites still do.
             'scripts/tests/qwen-*-workflow.test.js',
+            // Bash-driven too, and its name does not match the glob above:
+            // it runs real guard/checkout bodies against `#!/bin/sh` stubs
+            // joined onto PATH with ':'.
+            'scripts/tests/ci-flaky-rerun-workflow.test.js',
             'scripts/tests/serve-ab-workflow.test.js',
             // Drives a bash script that manages process groups.
             'scripts/tests/rocketmq-lite-broker-script.test.js',

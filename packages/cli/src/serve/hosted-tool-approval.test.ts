@@ -73,8 +73,7 @@ describe('Hosted tool approval settings', () => {
         hostedApprovalAsks({ mode, timeoutMs: 1_000 }, tool, search),
       );
     expect(asked('yolo')).toEqual([]);
-    // `glob` is asked outside the search profiles, including for an
-    // MCP-declared tool of that name; only a search profile pre-approves it.
+    // Only a profile that supports search pre-approves native glob.
     expect(asked('default')).toEqual([
       'write_file',
       'edit',
@@ -92,12 +91,28 @@ describe('Hosted tool approval settings', () => {
     expect(asked('auto', true)).toEqual(asked('default', true));
     expect(asked('yolo', true)).toEqual([]);
     for (const mode of ['default', 'auto-edit', 'auto'] as const)
+      expect(
+        hostedApprovalAsks(
+          { mode, timeoutMs: 1_000 },
+          `mcp_${'a'.repeat(32)}`,
+          true,
+        ),
+      ).toBe(true);
+    for (const mode of ['default', 'auto-edit', 'auto'] as const)
       expect(hostedApprovalAsks({ mode, timeoutMs: 1_000 }, 'new_tool')).toBe(
         true,
       );
     expect(
       hostedApprovalAsks({ mode: 'yolo', timeoutMs: 1_000 }, 'new_tool'),
     ).toBe(false);
+  });
+
+  it('never asks before the loop cron list/cancel arm (D5)', () => {
+    for (const mode of ['default', 'auto-edit', 'auto', 'yolo'] as const)
+      for (const tool of ['cron_list', 'cron_delete'])
+        expect(hostedApprovalAsks({ mode, timeoutMs: 1_000 }, tool)).toBe(
+          false,
+        );
   });
 
   it('retains a persisted human floor through Action parsing and live polling', async () => {

@@ -338,7 +338,7 @@ export async function getUploadUrl(
 export async function uploadToCdn(
   urlOrParam: string,
   filekey: string,
-  encryptedData: Buffer,
+  encryptedData: Buffer<ArrayBuffer>,
 ): Promise<string> {
   const CDN_HOST = 'novac2c.cdn.weixin.qq.com';
 

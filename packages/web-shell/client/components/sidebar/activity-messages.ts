@@ -78,3 +78,43 @@ export const ACTIVITY_MESSAGES_ZH: Record<string, Message> = {
   'activity.today': '今天',
   'activity.yesterday': '昨天',
 };
+
+export const ACTIVITY_MESSAGES_RU: Record<string, Message> = {
+  'activity.title': 'Активность',
+  'activity.open': 'Показать активность',
+  'activity.close': 'Закрыть вид активности',
+  'activity.options': 'Параметры активности',
+  'activity.display': 'Отображение',
+  'activity.priority': 'Приоритет',
+  'activity.priorityOption': 'Раздел приоритета',
+  'activity.pinned': 'Закреплённые',
+  'activity.scheduled': 'Запланированные задачи',
+  'activity.reset': 'Сбросить параметры отображения',
+  'activity.clearRead': 'Очистить прочитанные чаты',
+  'activity.markRead': 'Отметить все как прочитанные',
+  'activity.archive': 'Архивировать чаты',
+  'activity.archiveTitle': 'Архивировать разговоры?',
+  'activity.archiveDescription': (v) =>
+    `Архивировать ${v?.count ?? 0} приоритетных разговоров. Недавние и отдельно закреплённые разговоры не входят.`,
+  'activity.archiveRunning':
+    'Идущая работа в этих разговорах остановится. Отмена восстанавливает разговоры, но не перезапускает работу.',
+  'activity.confirmArchive': 'Архивировать',
+  'activity.confirmStopArchive': 'Остановить и архивировать',
+  'activity.cancel': 'Отмена',
+  'activity.undo': 'Отменить',
+  'activity.result': (v) =>
+    `${v?.succeeded ?? 0} успешно · ${v?.failed ?? 0} с ошибкой`,
+  'activity.actionFailed':
+    'Действие не удалось. Разговоры остаются доступны; повторите попытку.',
+  'activity.readDone': 'Приоритетные разговоры отмечены как прочитанные.',
+  'activity.loading': 'Проверка разговоров…',
+  'activity.unavailable': 'Некоторые разговоры недоступны.',
+  'activity.retry': 'Повторить',
+  'activity.empty': 'Нет разговоров, требующих внимания.',
+  'activity.recentEmpty': 'Нет недавних разговоров.',
+  'activity.more': 'Показать ещё',
+  'activity.previewFailed': 'Предпросмотр недоступен',
+  'activity.previewRetry': 'Повторить предпросмотр',
+  'activity.today': 'Сегодня',
+  'activity.yesterday': 'Вчера',
+};

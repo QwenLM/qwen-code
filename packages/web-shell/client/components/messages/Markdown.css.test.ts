@@ -29,3 +29,37 @@ describe('Mermaid canvas stylesheet', () => {
     expect(wrapper).toMatch(new RegExp(`padding:\\s*${constant}px;`));
   });
 });
+
+describe('Markdown bidirectional text contract', () => {
+  it('isolates block and inline text with automatic direction', () => {
+    const rule = (selector: string) => {
+      const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      return markdownCss.match(new RegExp(`${escaped}\\s*\\{[^}]*\\}`))?.[0];
+    };
+
+    expect(rule('.content')).toMatch(/unicode-bidi:\s*plaintext;/);
+    expect(rule('.codeBlockContent')).toMatch(/unicode-bidi:\s*plaintext;/);
+    expect(rule('.codeBlockContent pre')).toMatch(/unicode-bidi:\s*plaintext;/);
+    expect(rule('.codeBlockContent :global(.shiki) code')).toMatch(
+      /unicode-bidi:\s*plaintext;/,
+    );
+    expect(rule('.inlineCode')).toMatch(/unicode-bidi:\s*isolate;/);
+
+    expect(
+      markdownSource.match(/data-markdown-source=\{source\}\s+dir="auto"/g),
+    ).toHaveLength(2);
+    expect(
+      markdownSource.match(
+        /className=\{styles\.codeBlockContent\}\s+dir="auto"/g,
+      ),
+    ).toHaveLength(1);
+    expect(
+      markdownSource.match(
+        /className=\{`\$\{styles\.codeBlockContent\} \$\{styles\.codeBlockPlain\}`\}\s+dir="auto"/g,
+      ),
+    ).toHaveLength(3);
+    expect(markdownSource).toContain(
+      '<code className={styles.inlineCode} dir="auto">',
+    );
+  });
+});

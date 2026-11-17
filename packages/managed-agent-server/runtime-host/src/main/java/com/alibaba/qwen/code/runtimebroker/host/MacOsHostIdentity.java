@@ -2,7 +2,10 @@ package com.alibaba.qwen.code.runtimebroker.host;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.time.DateTimeException;
 import java.time.Instant;
 import java.util.Locale;
 import java.util.concurrent.TimeUnit;
@@ -30,6 +33,56 @@ public final class MacOsHostIdentity {
         return parseBirthTime(read("/usr/bin/stat", "-f", "%d|%i|%.9FB", "--", root.toString()), device, inode);
     }
 
+    public static String volumeUuid(Path path) throws IOException {
+        var before = Files.readAttributes(path, "unix:dev,ino,creationTime", LinkOption.NOFOLLOW_LINKS);
+        if (!path.isAbsolute() || !path.equals(path.toRealPath())) {
+            throw new IOException("macOS volume path is not canonical");
+        }
+        String device = Files.getFileStore(path).name();
+        if (!device.matches("/dev/disk[0-9]+(?:s[0-9]+)*")) {
+            throw new IOException("macOS volume device is unavailable");
+        }
+        String value = parseVolumeUuid(read("/usr/sbin/diskutil", "info", "-plist", device), device);
+        if (!before.equals(Files.readAttributes(path, "unix:dev,ino,creationTime", LinkOption.NOFOLLOW_LINKS))
+                || !path.equals(path.toRealPath())) {
+            throw new IOException("macOS volume identity changed during its probe");
+        }
+        return value;
+    }
+
+    public static String fileIdentity(Path path) throws IOException {
+        var before = Files.readAttributes(path, "unix:dev,ino,creationTime,isSymbolicLink", LinkOption.NOFOLLOW_LINKS);
+        if (Boolean.TRUE.equals(before.get("isSymbolicLink"))) {
+            throw new IOException("macOS file identity is a symbolic link");
+        }
+        String volume = volumeUuid(path);
+        if (!before.equals(Files.readAttributes(path,
+                "unix:dev,ino,creationTime,isSymbolicLink", LinkOption.NOFOLLOW_LINKS))) {
+            throw new IOException("macOS file identity changed during its probe");
+        }
+        return "macos-volume/1:" + volume + ":"
+                + Long.toUnsignedString(((Number) before.get("ino")).longValue()) + ":" + before.get("creationTime");
+    }
+
+    static String parseVolumeUuid(String output, String device) throws IOException {
+        if (!device.equals(plistString(output, "DeviceNode"))) {
+            throw new IOException("macOS volume device changed");
+        }
+        return uuid(plistString(output, "VolumeUUID")).replace("-", "").toLowerCase(Locale.ROOT);
+    }
+
+    private static String plistString(String output, String key) throws IOException {
+        var matcher = Pattern.compile("<key>" + key + "</key>\\s*<string>([^<]+)</string>").matcher(output);
+        if (!matcher.find()) {
+            throw new IOException("macOS volume " + key + " is unavailable");
+        }
+        String value = matcher.group(1);
+        if (matcher.find()) {
+            throw new IOException("macOS volume " + key + " is ambiguous");
+        }
+        return value;
+    }
+
     static String parseBirthTime(String output, String device, String inode) throws IOException {
         String[] fields = output.split("\\|", -1);
         if (fields.length != 3 || !device.equals(fields[0]) || !inode.equals(fields[1])
@@ -43,7 +96,7 @@ public final class MacOsHostIdentity {
                 throw new IOException("macOS storage birth time is unavailable");
             }
             return birth.toString();
-        } catch (NumberFormatException | java.time.DateTimeException error) {
+        } catch (NumberFormatException | DateTimeException error) {
             throw new IOException("macOS storage birth time is invalid", error);
         }
     }
@@ -74,7 +127,11 @@ public final class MacOsHostIdentity {
         Process process = builder.start();
         try {
             process.getOutputStream().close();
-            if (!process.waitFor(5, TimeUnit.SECONDS) || process.exitValue() != 0) {
+            if (!process.waitFor(5, TimeUnit.SECONDS)) {
+                throw new MacOsIdentityProbeTimeoutException(
+                        "macOS native identity probe timed out");
+            }
+            if (process.exitValue() != 0) {
                 throw new IOException("macOS native identity probe failed");
             }
             byte[] output = process.getInputStream().readNBytes(MAX_BYTES + 1);

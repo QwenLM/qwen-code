@@ -20,9 +20,12 @@ on:
     # Daily Java and Desktop checks report main regressions through the same
     # routing as the nightly CLI checks.
     # The Managed Agent gate's post-merge fast tier rides the push arm.
+    # The Managed loop verification lane covers the same agent loop end to end
+    # on push and nightly, so both of its main-side runs report here too.
     workflows:
       - 'E2E Tests'
       - 'Managed Agent gate'
+      - 'Managed Agent loop verification'
       - 'SDK Java'
       - 'SDK Python'
       - 'Qwen Code CI'
@@ -42,13 +45,19 @@ jobs:
   # finished failure summary to the privileged job as an output.
   analyze:
     name: 'Identify the failing tests'
+    # A job that hits its execution cap concludes `cancelled`, so a
+    # failure-only gate let timed-out main runs hide for weeks (#16214);
+    # the live step keeps a plain concurrency supersede out (#16272).
+    # The schedule arm below is name-scoped, so a watched workflow with a
+    # cron trigger has to appear in its fromJSON list as well — being in
+    # `workflow_run.workflows` alone gets its nightly red filtered out here.
     if: >-
       ${{ github.repository == 'QwenLM/qwen-code' &&
-      github.event.workflow_run.conclusion == 'failure' &&
+      contains(fromJSON('["failure","cancelled"]'), github.event.workflow_run.conclusion) &&
       ((github.event.workflow_run.head_branch == 'main' &&
       (github.event.workflow_run.event == 'push' ||
       (github.event.workflow_run.event == 'schedule' &&
-      contains(fromJSON('["Qwen Code CI","SDK Java","Desktop Checks","tui-parity"]'), github.event.workflow.name)))) ||
+      contains(fromJSON('["E2E Tests","Qwen Code CI","SDK Java","Desktop Checks","tui-parity","Managed Agent loop verification"]'), github.event.workflow.name)))) ||
       (github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow.name == 'SDK Java') ||
       (github.event.workflow.name == 'Managed Agent gate' &&
       contains(fromJSON('["pull_request","pull_request_review"]'), github.event.workflow_run.event))) }}
@@ -97,6 +106,7 @@ jobs:
           EVENT_NAME: '${{ github.event.workflow_run.event }}'
           HEAD_BRANCH: '${{ github.event.workflow_run.head_branch }}'
           HEAD_SHA: '${{ github.event.workflow_run.head_sha }}'
+          RUN_CONCLUSION: '${{ github.event.workflow_run.conclusion }}'
         run: |-
           set -euo pipefail
           superseded=false
@@ -113,6 +123,38 @@ jobs:
           else
             echo "::warning::Could not read run ${WORKFLOW_RUN_ID}; assuming this attempt-${RUN_ATTEMPT} event is current and reporting."
           fi
+          # After the stale-attempt check, so a stale event is attributed to
+          # staleness. PR arms skip the classifier: their annotation text is
+          # contributor-authored and must not decide a PAT-backed filing.
+          if [[ "${superseded}" != 'true' && "${RUN_CONCLUSION}" == 'cancelled' ]]; then
+            if [[ "${EVENT_NAME}" == 'pull_request' || "${EVENT_NAME}" == 'pull_request_review' ]]; then
+              superseded=true
+              echo "::notice::Run ${WORKFLOW_RUN_ID} is a PR-triggered cancellation; not reporting (contributor-authored annotations are untrusted)."
+            else
+              cancel_class="$(bash .github/scripts/ci/classify-cancelled-run.sh "${WORKFLOW_RUN_ID}" "${RUN_ATTEMPT}")"
+              case "${cancel_class}" in
+                concurrency)
+                  superseded=true
+                  echo "::notice::Run ${WORKFLOW_RUN_ID} was cancelled by a concurrency supersede (shutdown/higher-priority annotation, no timeout); not reporting."
+                  ;;
+                nothing-executed)
+                  superseded=true
+                  echo "::notice::Run ${WORKFLOW_RUN_ID} was cancelled before any job ran a step; nothing failed and nothing is reported."
+                  ;;
+                timeout)
+                  echo "::notice::Run ${WORKFLOW_RUN_ID} was cancelled by a job execution-time timeout; reporting it as a failure."
+                  ;;
+                *)
+                  echo "::warning::Run ${WORKFLOW_RUN_ID} was cancelled but a job-timeout could not be ruled out (unreadable or unclassifiable annotations); failing open and reporting."
+                  ;;
+              esac
+            fi
+            if [[ "${superseded}" == 'true' ]]; then
+              echo "superseded=true" >> "${GITHUB_OUTPUT}"
+              echo "provisional=false" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+          fi
           # A post-merge push run reports the commit that was main when it
           # started. When main has since advanced, a newer run of the same
           # workflow at that tip owns the result: filing here would open a
@@ -120,11 +162,11 @@ jobs:
           # #15259 was filed after #15128 fixed its host-lock timeout.
           #
           # Only a SETTLED successor can own the result. The job gate above
-          # admits only `failure` conclusions, so a successor that ends
-          # cancelled, timed_out, skipped or startup_failure never re-enters
-          # this workflow; crediting its mere existence would drop the only
-          # report of a real regression. A completed success means the tree is
-          # green at the tip, and a completed failure reports itself.
+          # admits `failure` and timeout-backed `cancelled` conclusions, but a
+          # successor that ends skipped, startup_failure, or a plain concurrency
+          # cancellation never reports itself; crediting its mere existence would
+          # drop the only report of a real regression. A completed success means
+          # the tree is green at the tip, and a completed failure reports itself.
           #
           # An unsettled successor proves nothing yet, and waiting for it is
           # not possible here: this job runs on a pool that queued it
@@ -151,9 +193,9 @@ jobs:
               if [[ -n "${tip}" && "${tip}" != "${HEAD_SHA}" ]]; then
                 if successor="$(
                   gh api "repos/${REPO}/actions/workflows/${WORKFLOW_ID}/runs?event=push&branch=main&head_sha=${tip}&per_page=1" \
-                    --jq '.workflow_runs[0] // {} | if (.status // "") == "" then "none" else "\(.status) \(.conclusion // "")" end'
+                    --jq '.workflow_runs[0] // {} | if (.status // "") == "" then "none" else "\(.status) \(.conclusion // "") \(.id // "") \(.run_attempt // "")" end'
                 )"; then
-                  read -r successor_status successor_conclusion <<< "${successor}"
+                  read -r successor_status successor_conclusion successor_id successor_attempt <<< "${successor}"
                   successor_owns=false
                   # Complement, not an enumeration: only a settled successor
                   # owns the result, and not-yet-final statuses grow.
@@ -161,6 +203,19 @@ jobs:
                     completed)
                       case "${successor_conclusion}" in
                         success | failure) successor_owns=true ;;
+                        cancelled)
+                          # Defer only to a successor that reports itself: its
+                          # own gate files for `timeout` and for a fail-open
+                          # `unknown`, and skips concurrency/nothing-executed.
+                          # `unreadable` is a failed read, which says nothing
+                          # about the successor's verdict, so it keeps the
+                          # fail-open report here.
+                          if [[ -n "${successor_id}" ]]; then
+                            case "$(bash .github/scripts/ci/classify-cancelled-run.sh "${successor_id}" "${successor_attempt:-1}")" in
+                              timeout | unknown) successor_owns=true ;;
+                            esac
+                          fi
+                          ;;
                       esac
                       ;;
                     none)
@@ -178,7 +233,7 @@ jobs:
                   elif [[ "${successor_status}" == 'none' ]]; then
                     echo "::warning::Run ${WORKFLOW_RUN_ID} tested ${HEAD_SHA} and main is now ${tip}, but workflow ${WORKFLOW_ID} has no newer push run there; reporting this run."
                   else
-                    echo "::warning::Run ${WORKFLOW_RUN_ID} tested ${HEAD_SHA} and main is now ${tip}, but its newer push run is ${successor_status}${successor_conclusion:+ ${successor_conclusion}}, which this workflow does not report; reporting this run."
+                    echo "::warning::Run ${WORKFLOW_RUN_ID} tested ${HEAD_SHA} and main is now ${tip}, but its newer push run is ${successor_status}${successor_conclusion:+ ${successor_conclusion}}, which does not own this result; reporting this run."
                   fi
                 else
                   echo "::warning::Could not list the newer runs of workflow ${WORKFLOW_ID}; reporting this run as though it had no successor."
@@ -298,18 +353,20 @@ jobs:
           # Both bodies read this list; the flag lets them say when it is short.
           echo "jobs_complete=${jobs_complete}" >> "${GITHUB_OUTPUT}"
 
+          # A job that hit its execution cap concludes cancelled; the live gate
+          # only lets such a run reach here, so name and fetch it too (#16272).
           job_ids=()
           while IFS= read -r job_id; do
             job_ids+=("${job_id}")
           done < <(
-            jq -r '.jobs[] | select(.conclusion == "failure") | .id' \
+            jq -r '.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled") | .id' \
               "${jobs_json}" 2>/dev/null
           )
           echo "Failed jobs: ${#job_ids[@]}"
 
           # Even without test results, the jobs payload names the failed job
           # and step. A missing listing costs detail, never the failure report.
-          jq -r '.jobs[] | select(.conclusion == "failure") | [.name] + [.steps[] | select(.conclusion == "failure") | .name] | @tsv' \
+          jq -r '.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled") | [.name] + [.steps[] | select(.conclusion == "failure" or .conclusion == "cancelled") | .name] | @tsv' \
             "${jobs_json}" 2>/dev/null \
             > "${RUNNER_TEMP}/failed-jobs.tsv" || true
 
@@ -338,8 +395,18 @@ jobs:
           # Keep in sync with qwen-autofix.yml's INFRA_FAILURE_SIGNATURES — a
           # test pins the equality. There the same annotation class auto-reruns
           # a PR's red check; here it suppresses the issue failure record.
+          # Deterministic configuration errors are deliberately absent: a
+          # re-run cannot change a repository variable, so they file instead.
           # Full rationale → qwen-autofix.md#af-076
-          INFRA_FAILURE_SIGNATURES: 'lost communication with the server|No space left on device|ENOSPC|received a shutdown signal|The runner has received|Failed to initialize container|runner (was|has been) (lost|terminated)|invalid index-pack output|RPC failed|failed to be acquired|lock not acquired within'
+          # The built-tree handoff is anchored to the RETRY step's name: the
+          # artifact fetch expiring is a host routing fault, not the commit's
+          # code, and clears on a re-run that lands elsewhere (#16927). The
+          # first attempt is continue-on-error and the retry covers it on
+          # failure, so its annotation stays on the check run after a
+          # recovery — admitting it would file nothing for a real assertion
+          # failure carrying that residue. A bare 'has timed out after' would
+          # also swallow a hung test or install step, which must keep filing.
+          INFRA_FAILURE_SIGNATURES: "lost communication with the server|No space left on device|ENOSPC|received a shutdown signal|The runner has received|Failed to initialize container|runner (was|has been) (lost|terminated)|invalid index-pack output|RPC failed|failed to be acquired|lock not acquired within|QWEN_CI_RPC_RETRY must be a non-negative integer|Host load gate breached|Disk floor breached|The action 'Retry downloading the built tree' has timed out"
         run: |-
           jobs_json="${RUNNER_TEMP}/run-jobs.json"
 
@@ -356,6 +423,13 @@ jobs:
           if [[ "${RUN_ATTEMPT}" == '1' ]]; then
             total=0
             infra=0
+            # The gate workflow's reporter job is always() and fails with
+            # only the tier-result error, which carries no infrastructure
+            # signature; excluding it by its failing step keeps a lane's
+            # infra death classifiable. Filtering the step rather than the
+            # job keeps the legitimate rerun: when the reporter's own
+            # runner dies no step has failed, so the job still counts and
+            # its GitHub-generated annotation still matches.
             while IFS=$'\t' read -r job_id check_run_id; do
               total=$((total + 1))
               annotations=''

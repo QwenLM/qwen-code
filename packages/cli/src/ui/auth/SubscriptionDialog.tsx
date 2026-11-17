@@ -58,9 +58,11 @@ export function SubscriptionDialog({
     );
   }
   if (state.status === 'ready') {
-    return flow.connectionError ? (
+    return flow.connectionError !== undefined ? (
       <Box flexDirection="column" marginY={1}>
-        <Text color={theme.status.error}>{flow.connectionError}</Text>
+        {flow.connectionError && (
+          <Text color={theme.status.error}>{flow.connectionError}</Text>
+        )}
         {flow.modelSelectionRequired ? (
           <Text>{t('Esc to go back')}</Text>
         ) : (

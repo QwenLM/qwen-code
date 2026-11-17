@@ -623,6 +623,78 @@
   min-width: 0;
 }
 
+.payloadSections {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.payloadSection {
+  min-width: 0;
+}
+
+.payloadLabel {
+  margin-bottom: 4px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.payloadJson {
+  max-height: 240px;
+  overflow: auto;
+}
+
+.payloadText {
+  margin: 0;
+  padding: 8px 10px;
+  max-height: 240px;
+  overflow: auto;
+  border-radius: 5px;
+  background: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+:global([data-transcript-render-mode='document']) .payloadJson,
+:global([data-transcript-render-mode='document']) .payloadText {
+  max-height: none;
+  overflow: visible;
+}
+
+.payloadEmpty,
+.payloadTruncated {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.payloadTruncated {
+  margin-top: 4px;
+}
+
+.payloadMore {
+  align-self: flex-start;
+  margin-top: 2px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--background);
+  color: var(--foreground);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.payloadMore:hover {
+  background: var(--muted);
+}
+
 .expandedAgentCard {
   background: var(--secondary);
   border: 0.5px solid var(--border);

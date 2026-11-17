@@ -95,6 +95,25 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
     expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain('QWEN_CODE_DESKTOP');
   });
 
+  // Language servers run with the user's permissions, so a cloned repository
+  // must be able neither to turn them on nor to unset the operator's off-switch.
+  it('excludes the LSP opt-in pair so project files cannot start servers', () => {
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain('QWEN_CODE_ENABLE_LSP');
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain('QWEN_CODE_DISABLE_LSP');
+  });
+
+  // The loop-rollout switches are an operator opt-in: a repository's checked-in
+  // .env / settings.env must not force the shared loop or the event-bus kernel
+  // on, nor force the operator's loop off, ahead of the explicit setting.
+  it('excludes the agent-loop rollout pair so project files cannot force a loop', () => {
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
+      'QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP',
+    );
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
+      'QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP',
+    );
+  });
+
   // QWEN_CLI_ENTRY is the spawned session-process entrypoint; a project file
   // fixing it is arbitrary script execution as the daemon.
   // NODE_EXTRA_CA_CERTS adds a TLS trust anchor — the

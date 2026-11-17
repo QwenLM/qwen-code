@@ -23,7 +23,7 @@ class ManagedToolResultCaptureTest {
         var jdbc = mock(JdbcTemplate.class);
         doReturn(1_000L).when(jdbc).queryForObject(anyString(), any(RowMapper.class));
         var store =
-                new ManagedToolResultStore(
+                new JdbcManagedToolResultStore(
                         jdbc, mock(PlatformTransactionManager.class), mock(AgentStateStore.class));
         JsonNode first =
                 JSON.readTree(

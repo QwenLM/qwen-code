@@ -423,6 +423,9 @@ export function EmbeddedApp() {
   const historyButtonRef = useRef<HTMLButtonElement>(null);
   const appRootRef = useRef<HTMLDivElement>(null);
   const shellRef = useRef<WebShellApi | null>(null);
+  const [subscriptionDraft, setSubscriptionDraft] = useState<
+    { modelId: string } | undefined
+  >(undefined);
   const composerRef = useRef<WebShellComposerApi | null>(null);
   const currentModelIdRef = useRef<string | undefined>(undefined);
   const transcriptBlocksRef = useRef<readonly DaemonTranscriptBlock[]>([]);
@@ -440,7 +443,11 @@ export function EmbeddedApp() {
   const daemonClient = useMemo(
     () =>
       daemonBaseUrl
-        ? new DaemonClient({ baseUrl: daemonBaseUrl, token: daemonToken })
+        ? new DaemonClient({
+            baseUrl: daemonBaseUrl,
+            token: daemonToken,
+            subscriptionPaywallScene: 'plugin',
+          })
         : null,
     [daemonBaseUrl, daemonToken],
   );
@@ -468,6 +475,7 @@ export function EmbeddedApp() {
     setAuthConnecting(false);
     setSignedOut(false);
     setSubscriptionFlowId(undefined);
+    setSubscriptionDraft(undefined);
     return () => {
       authRequest.current?.abort();
       subscriptionActivation.current?.reject(
@@ -1040,18 +1048,22 @@ export function EmbeddedApp() {
         const pending = subscriptionActivation.current;
         if (pending && pending.requestId === subscriptionData?.requestId) {
           subscriptionActivation.current = undefined;
-          if (subscriptionData?.error)
+          if (subscriptionData?.error) {
             pending.reject(
               Object.assign(new Error('Subscription activation failed.'), {
                 body: subscriptionData.body,
               }),
             );
-          else if (typeof subscriptionData.modelId === 'string')
+          } else if (typeof subscriptionData.modelId === 'string') {
+            if (subscriptionData.draft === true) {
+              setSubscriptionDraft({ modelId: subscriptionData.modelId });
+            }
             pending.resolve(subscriptionData.modelId);
-          else
+          } else {
             pending.reject(
               new Error('Subscription activation did not return a model.'),
             );
+          }
         }
       } else if (message.type === 'accountInfo' && message.data) {
         setAccountInfo(message.data as AccountInfo);
@@ -1074,6 +1086,7 @@ export function EmbeddedApp() {
         setAuthError(undefined);
         setSubscriptionFlowId(undefined);
         setHostNotice(undefined);
+        setSubscriptionDraft(undefined);
         void shellRef.current?.refreshModels().catch((error: unknown) => {
           console.error('Unable to refresh models after sign-out', error);
         });
@@ -1087,6 +1100,9 @@ export function EmbeddedApp() {
         setAuthConnecting(false);
         setAuthError(undefined);
         if (message.type === 'authSuccess') {
+          if (subscriptionData?.chatProviderConfigured === true) {
+            setSubscriptionDraft(undefined);
+          }
           void shellRef.current?.refreshModels().catch((error: unknown) => {
             console.error('Unable to refresh models after sign-in', error);
           });
@@ -1799,9 +1815,11 @@ export function EmbeddedApp() {
             runtime.sessionId ? undefined : VSCODE_SESSION_SOURCE_TYPE
           }
           shellRef={shellRef}
+          subscriptionDraft={subscriptionDraft}
           header={{ items: [] }}
           onSessionIdChange={(sessionId) => {
             if (switchingSessionId && sessionId !== switchingSessionId) return;
+            if (sessionId) setSubscriptionDraft(undefined);
             webShellPermissionRequestIdRef.current = undefined;
             clearInsight();
             setEditingMessage(undefined);

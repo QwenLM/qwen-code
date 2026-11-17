@@ -586,6 +586,8 @@ describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
       expect(result.code).toBe(1);
       // The `::error::` prefix is what the infra classifier matches: a bare
       // echo would leave the check-run unannotated and the auto-rerun cold.
+      // The call site merges both streams into its `sed` rewrite, so the
+      // signature is demoted whichever stream carries it.
       expect(result.out).toContain(
         '::error::sdk-java host lock not acquired within',
       );
@@ -596,6 +598,48 @@ describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
       expect(readdirSync(queueDir(home)).filter((f) => f !== '.seq')).toEqual(
         [],
       );
+    },
+  );
+
+  it(
+    'returns a timeout so the caller can demote it',
+    { timeout: 30000 },
+    async () => {
+      const home = mkdtempSync(join(tmpdir(), 'lock-demote-'));
+      const held = join(home, 'held');
+      writeFileSync(held, '');
+      const stub = flockStub(parkedFlock(held, join(home, 'order')));
+      const child = spawn(
+        'bash',
+        [
+          '--noprofile',
+          '--norc',
+          '-eo',
+          'pipefail',
+          '-c',
+          [
+            `source "${script}"`,
+            'if ! sdk_java_lock_acquire 3; then echo "demoted"; fi',
+            'echo "reached-end"',
+          ].join('\n'),
+        ],
+        {
+          env: {
+            ...baseEnv,
+            HOME: home,
+            PATH: `${stub}:${process.env.PATH}`,
+          },
+        },
+      );
+      let out = '';
+      child.stdout.on('data', (d) => (out += d));
+      child.stderr.on('data', (d) => (out += d));
+      const code = await new Promise((resolve) => child.on('close', resolve));
+      // A `return 1` reaches the caller's demotion arm; an `exit 1` in the
+      // helper would end the step there, so the demotion could never run.
+      expect(code).toBe(0);
+      expect(out).toContain('demoted');
+      expect(out).toContain('reached-end');
     },
   );
 

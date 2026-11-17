@@ -12,6 +12,7 @@ import { ExtensionStore } from '@qwen-code/qwen-code-core/extension/extension-st
 import { HOOKS_CONFIG_FIELDS } from '@qwen-code/qwen-code-core/hooks/types.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { parseApprovalModeValue } from './approval-mode-value.js';
+import { isLspOptedIn } from './lsp-opt-in.js';
 import { loadProjectMcpServers } from './mcpJson.js';
 import {
   readSettingsSnapshot,
@@ -86,13 +87,16 @@ export async function evaluateManagedCompatibility(
   if (!sameWorkspace) {
     return deferredResult('the session directory is not the runtime workspace');
   }
-  if (runtime.forwardedArgs.includes('--experimental-lsp')) {
-    return deferredResult('the daemon enables LSP for its sessions');
-  }
   if (runtime.forwardedArgs.includes('--restore-ask-user-question')) {
     return deferredResult('the daemon restores unanswered user questions');
   }
-  if (runtime.forwardedArgs.length > 0) {
+  // A forwarded `--experimental-lsp` feeds the LSP decision below together
+  // with the operator kill switch, so it is a known argument rather than an
+  // unclassifiable one.
+  if (
+    runtime.forwardedArgs.filter((arg) => arg !== '--experimental-lsp').length >
+    0
+  ) {
     return unknownResult(
       'the daemon forwards an argument the evaluation does not know',
     );
@@ -136,6 +140,20 @@ export async function evaluateManagedCompatibility(
     return unknownResult('the settings could not be read');
   }
   const merged = settings.merged;
+  // Resolve LSP where the decision applies, from the same snapshot and
+  // environment a spawned session host reads. Nothing is cached between
+  // evaluations, so neither a settings write nor a runtime-env swap can leave
+  // this answer stale. The forwarded flag is the argv entrance that child
+  // receives, and `isLspOptedIn` applies the operator kill switch first.
+  if (
+    isLspOptedIn(
+      runtime.forwardedArgs.includes('--experimental-lsp') ? true : undefined,
+      merged,
+      environment,
+    )
+  ) {
+    return deferredResult('the daemon enables LSP for its sessions');
+  }
   if (Object.keys(merged.mcpServers ?? {}).length > 0) {
     return deferredResult('MCP servers are configured in settings');
   }

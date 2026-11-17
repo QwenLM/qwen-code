@@ -1,11 +1,20 @@
 // @vitest-environment jsdom
-import { act } from 'react';
+import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { DaemonClient, DaemonSessionSummary } from '@qwen-code/sdk/daemon';
-import { RecentSessions } from './RecentSessions';
+import type {
+  DaemonClient,
+  DaemonSessionSummary,
+  DaemonWorkspaceCapability,
+} from '@qwen-code/sdk/daemon';
+import {
+  RecentSessions,
+  sortRecentSessions,
+  type RecentSessionEntry,
+} from './RecentSessions';
 
-vi.mock('../../i18n', () => ({ useI18n: () => ({ t: (key: string) => key }) }));
+const { t } = vi.hoisted(() => ({ t: vi.fn((key: string) => key) }));
+vi.mock('../../i18n', () => ({ useI18n: () => ({ t }) }));
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 const session = (
@@ -30,6 +39,12 @@ let onOpen: ReturnType<typeof vi.fn>;
 async function render(
   currentSessionId = 'standalone',
   refreshPaused = false,
+  renderSessionOverride?: (entry: RecentSessionEntry) => ReactNode,
+  sortBy?: 'updatedAt' | 'lastUserPromptAt',
+  scope?: {
+    workspaces: DaemonWorkspaceCapability[];
+    includeStandalone: boolean;
+  },
   sessionSource?: 'default' | 'channel' | 'scheduled_task',
 ) {
   const client = (stableClient ??= {
@@ -42,31 +57,37 @@ async function render(
         client={client}
         onNewSession={() => {}}
         newSessionDisabled={false}
-        workspaces={[
-          { id: 'p', cwd: '/project', primary: true, trusted: true },
-          { id: 'other', cwd: '/other', primary: false, trusted: true },
-          {
-            id: 'untrusted',
-            cwd: '/untrusted',
-            primary: false,
-            trusted: false,
-          },
-        ]}
-        includeStandalone
+        workspaces={
+          scope?.workspaces ?? [
+            { id: 'p', cwd: '/project', primary: true, trusted: true },
+            { id: 'other', cwd: '/other', primary: false, trusted: true },
+            {
+              id: 'untrusted',
+              cwd: '/untrusted',
+              primary: false,
+              trusted: false,
+            },
+          ]
+        }
+        includeStandalone={scope?.includeStandalone ?? true}
         sourceMetadataEnabled
         sessionSource={sessionSource}
         organizationEnabled
         currentSessionId={currentSessionId}
         refreshKey={0}
         refreshPaused={refreshPaused}
-        renderSession={(entry) => (
-          <button
-            title={`${entry.session.displayName} · ${entry.workspaceCwd?.slice(1) ?? 'sidebar.noWorkspace'}`}
-            onClick={() => onOpen(entry)}
-          >
-            {entry.session.displayName}
-          </button>
-        )}
+        sortBy={sortBy}
+        renderSession={
+          renderSessionOverride ??
+          ((entry) => (
+            <button
+              title={`${entry.session.displayName} · ${entry.workspaceCwd?.slice(1) ?? 'sidebar.noWorkspace'}`}
+              onClick={() => onOpen(entry)}
+            >
+              {entry.session.displayName}
+            </button>
+          ))
+        }
       />,
     ),
   );
@@ -84,6 +105,7 @@ async function click(button: HTMLButtonElement) {
 
 beforeEach(() => {
   stableClient = undefined;
+  t.mockClear();
   window.localStorage.clear();
   container = document.createElement('div');
   document.body.appendChild(container);
@@ -191,7 +213,14 @@ describe('recent sessions', () => {
         session('standalone', '2026-10-23', { sourceType: 'standalone' }),
       ],
     });
-    await render('standalone', false, 'scheduled_task');
+    await render(
+      'standalone',
+      false,
+      undefined,
+      undefined,
+      undefined,
+      'scheduled_task',
+    );
     expect(buttons().map((button) => button.title)).toEqual([
       'bound · project',
     ]);
@@ -200,6 +229,34 @@ describe('recent sessions', () => {
       expect.objectContaining({ sourceType: 'scheduled_task' }),
     );
     expect(listStandaloneSessionsPage).not.toHaveBeenCalled();
+  });
+
+  it('does not render stale rows while the workspace scope changes', async () => {
+    listWorkspaceSessionsPage.mockImplementation(async (cwd: string) => ({
+      sessions: [session(`${cwd}-row`, '2026-10-20T12:00:00Z')],
+    }));
+    listStandaloneSessionsPage.mockResolvedValue({
+      sessions: [session('standalone-row', '2026-10-20T11:00:00Z')],
+    });
+    const renderRows = vi.fn((entry: RecentSessionEntry) => (
+      <button title={entry.workspaceCwd ?? 'standalone'}>
+        {entry.session.displayName}
+      </button>
+    ));
+    await render('standalone', false, renderRows);
+    renderRows.mockClear();
+    listWorkspaceSessionsPage.mockReturnValue(new Promise(() => {}));
+    await render('standalone', false, renderRows, undefined, {
+      workspaces: [
+        { id: 'other', cwd: '/other', primary: false, trusted: true },
+      ],
+      includeStandalone: false,
+    });
+    const renderedScopes = renderRows.mock.calls.map(
+      ([entry]) => entry.workspaceCwd,
+    );
+    expect(renderedScopes).not.toContain('/project');
+    expect(renderedScopes).not.toContain(undefined);
   });
 
   it('keeps existing row nodes visible while a session switch refresh is pending', async () => {
@@ -317,7 +374,7 @@ describe('recent sessions', () => {
     expect(container.textContent).not.toContain('sidebar.loadFailed');
   });
 
-  it('shows five previews, expands to twenty, and refreshes activity order', async () => {
+  it('shows five previews, expands in steps to twenty, and refreshes activity order', async () => {
     vi.useFakeTimers();
     listStandaloneSessionsPage.mockResolvedValue({
       sessions: Array.from({ length: 25 }, (_, i) =>
@@ -328,16 +385,140 @@ describe('recent sessions', () => {
     });
     await render();
     expect(buttons()).toHaveLength(5);
-    await click(
+    const expand = () =>
       [...container.querySelectorAll<HTMLButtonElement>('button')].find(
-        (button) => button.textContent === 'sidebar.showAllSessions',
-      )!,
-    );
+        (button) => button.textContent === 'sidebar.showMoreSessions',
+      )!;
+    await click(expand());
+    expect(buttons()).toHaveLength(15);
+    await click(expand());
     expect(buttons()).toHaveLength(20);
+    expect(expand()).toBeUndefined();
     listStandaloneSessionsPage.mockResolvedValue({
       sessions: [session('newest', '2026-10-26', { sourceType: 'standalone' })],
     });
     await act(async () => vi.advanceTimersByTimeAsync(10_000));
     expect(buttons()[0].title).toBe('newest · sidebar.noWorkspace');
   });
+
+  it('resets the expansion when the Recent section collapses', async () => {
+    vi.useFakeTimers();
+    listStandaloneSessionsPage.mockResolvedValue({
+      sessions: Array.from({ length: 25 }, (_, i) =>
+        session(`chat-${i}`, `2026-10-${String(i + 1).padStart(2, '0')}`, {
+          sourceType: 'standalone',
+        }),
+      ),
+    });
+    await render();
+    const expand = () =>
+      [...container.querySelectorAll<HTMLButtonElement>('button')].find(
+        (button) => button.textContent === 'sidebar.showMoreSessions',
+      );
+    await click(expand()!);
+    expect(buttons()).toHaveLength(15);
+    const header = container.querySelector<HTMLButtonElement>('button')!;
+    await click(header);
+    await click(header);
+    expect(buttons()).toHaveLength(5);
+    expect(expand()).toBeDefined();
+  });
+
+  it('resets the expansion when the sort changes', async () => {
+    vi.useFakeTimers();
+    listStandaloneSessionsPage.mockResolvedValue({
+      sessions: Array.from({ length: 25 }, (_, i) =>
+        session(`chat-${i}`, `2026-10-${String(i + 1).padStart(2, '0')}`, {
+          sourceType: 'standalone',
+        }),
+      ),
+    });
+    await render();
+    const expand = () =>
+      [...container.querySelectorAll<HTMLButtonElement>('button')].find(
+        (button) => button.textContent === 'sidebar.showMoreSessions',
+      );
+    await click(expand()!);
+    expect(buttons()).toHaveLength(15);
+    await render('standalone', false, undefined, 'lastUserPromptAt');
+    expect(buttons()).toHaveLength(5);
+    expect(expand()).toBeDefined();
+  });
+
+  it('omits the expand button when no renderable row is hidden', async () => {
+    listStandaloneSessionsPage.mockResolvedValue({
+      sessions: Array.from({ length: 6 }, (_, i) =>
+        session(`chat-${i}`, `2026-10-${String(20 - i).padStart(2, '0')}`, {
+          sourceType: 'standalone',
+          ...(i === 5 ? { displayName: 'null-me' } : {}),
+        }),
+      ),
+    });
+    await render('standalone', false, (entry) =>
+      entry.session.displayName === 'null-me' ? null : (
+        <button title={entry.session.displayName}>
+          {entry.session.displayName}
+        </button>
+      ),
+    );
+    expect(buttons()).toHaveLength(5);
+    expect(
+      [...container.querySelectorAll('button')].some(
+        (button) => button.textContent === 'sidebar.showMoreSessions',
+      ),
+    ).toBe(false);
+  });
+
+  it('labels the renderable remainder, not the raw entry count', async () => {
+    listStandaloneSessionsPage.mockResolvedValue({
+      sessions: Array.from({ length: 8 }, (_, i) =>
+        session(`chat-${i}`, `2026-10-${String(20 - i).padStart(2, '0')}`, {
+          sourceType: 'standalone',
+          ...(i === 6 ? { displayName: 'null-me' } : {}),
+        }),
+      ),
+    });
+    await render('standalone', false, (entry) =>
+      entry.session.displayName === 'null-me' ? null : (
+        <button title={entry.session.displayName}>
+          {entry.session.displayName}
+        </button>
+      ),
+    );
+    expect(buttons()).toHaveLength(5);
+    expect(t).toHaveBeenCalledWith('sidebar.showMoreSessions', { count: 2 });
+    const expand = () =>
+      [...container.querySelectorAll<HTMLButtonElement>('button')].find(
+        (button) => button.textContent === 'sidebar.showMoreSessions',
+      )!;
+    await click(expand());
+    expect(buttons()).toHaveLength(7);
+    expect(expand()).toBeUndefined();
+  });
+});
+
+it('merges global recent candidates by question time without activity fallback', () => {
+  const entries = [
+    {
+      workspaceCwd: '/a',
+      session: session('a', '2026-10-20T10:10:00Z', {
+        lastUserPromptAt: '2026-10-20T10:00:00Z',
+      }),
+    },
+    {
+      workspaceCwd: '/b',
+      session: session('b', '2026-10-20T10:05:00Z', {
+        lastUserPromptAt: '2026-10-20T10:05:00Z',
+      }),
+    },
+    { session: session('unknown', '2026-10-20T12:00:00Z') },
+  ];
+  expect(
+    sortRecentSessions(entries, 'lastUserPromptAt').map(
+      (entry) => entry.session.sessionId,
+    ),
+  ).toEqual(['b', 'a', 'unknown']);
+  expect(
+    sortRecentSessions(entries).map((entry) => entry.session.sessionId),
+  ).toEqual(['unknown', 'a', 'b']);
 });

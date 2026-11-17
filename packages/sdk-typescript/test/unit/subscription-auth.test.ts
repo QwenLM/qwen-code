@@ -7,7 +7,11 @@ import { describe, expect, it, vi } from 'vitest';
 import { DaemonClient } from '../../src/daemon/DaemonClient.js';
 
 const baseUrl = 'http://127.0.0.1:3131';
-function clientWith(status = 200, body: unknown = {}) {
+function clientWith(
+  status = 200,
+  body: unknown = {},
+  subscriptionPaywallScene?: 'cli' | 'desktop' | 'plugin',
+) {
   const fetch = vi
     .fn<typeof globalThis.fetch>()
     .mockImplementation(
@@ -15,35 +19,44 @@ function clientWith(status = 200, body: unknown = {}) {
         new Response(status === 204 ? null : JSON.stringify(body), { status }),
     );
   return {
-    client: new DaemonClient({ baseUrl, token: 'daemon-token', fetch }),
+    client: new DaemonClient({
+      baseUrl,
+      token: 'daemon-token',
+      fetch,
+      subscriptionPaywallScene,
+    }),
     fetch,
   };
 }
 describe('Subscription transport', () => {
-  it('uses process-global routes and daemon credentials', async () => {
-    const { client, fetch } = clientWith();
-    await client.getSubscriptionConfig();
-    await client.startSubscriptionLogin();
-    await client.getSubscriptionLogin('flow/id');
-    fetch.mockResolvedValueOnce(new Response(null, { status: 204 }));
-    await client.cancelSubscriptionLogin('flow/id');
-    await client.getSubscriptionUserInfo();
-    await client.signOutSubscription();
-    expect(
-      fetch.mock.calls.map(([url, init]) => [url, init?.method ?? 'GET']),
-    ).toEqual([
-      [`${baseUrl}/auth/subscription`, 'GET'],
-      [`${baseUrl}/auth/subscription/flows`, 'POST'],
-      [`${baseUrl}/auth/subscription/flows/flow%2Fid`, 'GET'],
-      [`${baseUrl}/auth/subscription/flows/flow%2Fid`, 'DELETE'],
-      [`${baseUrl}/auth/subscription/userinfo`, 'POST'],
-      [`${baseUrl}/auth/subscription/revoke`, 'POST'],
-    ]);
-    for (const [, init] of fetch.mock.calls)
-      expect(new Headers(init?.headers).get('Authorization')).toBe(
-        'Bearer daemon-token',
-      );
-  });
+  it.each([undefined, 'plugin'] as const)(
+    'uses process-global routes and daemon credentials with paywall scene %s',
+    async (scene) => {
+      const { client, fetch } = clientWith(200, {}, scene);
+      const query = scene ? '?paywallScene=plugin' : '';
+      await client.getSubscriptionConfig();
+      await client.startSubscriptionLogin();
+      await client.getSubscriptionLogin('flow/id');
+      fetch.mockResolvedValueOnce(new Response(null, { status: 204 }));
+      await client.cancelSubscriptionLogin('flow/id');
+      await client.getSubscriptionUserInfo();
+      await client.signOutSubscription();
+      expect(
+        fetch.mock.calls.map(([url, init]) => [url, init?.method ?? 'GET']),
+      ).toEqual([
+        [`${baseUrl}/auth/subscription${query}`, 'GET'],
+        [`${baseUrl}/auth/subscription/flows${query}`, 'POST'],
+        [`${baseUrl}/auth/subscription/flows/flow%2Fid`, 'GET'],
+        [`${baseUrl}/auth/subscription/flows/flow%2Fid`, 'DELETE'],
+        [`${baseUrl}/auth/subscription/userinfo`, 'POST'],
+        [`${baseUrl}/auth/subscription/revoke`, 'POST'],
+      ]);
+      for (const [, init] of fetch.mock.calls)
+        expect(new Headers(init?.headers).get('Authorization')).toBe(
+          'Bearer daemon-token',
+        );
+    },
+  );
   it('preserves safe backend error codes in the standard error body', async () => {
     const { client } = clientWith(502, { code: 'invalid_grant' });
     await expect(client.getSubscriptionUserInfo()).rejects.toMatchObject({
@@ -76,18 +89,55 @@ describe('Subscription transport', () => {
     const controller = new AbortController();
     const result = await client
       .workspaceById('secondary')
-      .activateSubscription({ signal: controller.signal });
+      .activateSubscription({
+        signal: controller.signal,
+        settingsScope: 'user',
+      });
     expect(result.runtimeSync.status).toBe('deferred');
     expect(fetch.mock.calls[0][0]).toBe(
       `${baseUrl}/workspaces/secondary/auth/subscription`,
     );
     const init = fetch.mock.calls[0][1];
     expect(init?.method).toBe('POST');
-    expect(JSON.parse(String(init?.body))).toEqual({});
+    expect(JSON.parse(String(init?.body))).toEqual({ settingsScope: 'user' });
     expect(new Headers(init?.headers).get('Authorization')).toBe(
       'Bearer daemon-token',
     );
     controller.abort();
     expect(init?.signal?.aborted).toBe(true);
+  });
+  it('requests provider settings scope only when standalone activation opts in', async () => {
+    const { client, fetch } = clientWith(200, { modelId: 'qwen3.8-max' });
+    await client.getSubscriptionDefaultModel();
+    fetch.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          modelId: 'qwen3.8-max',
+          runtimeSync: { status: 'failed' },
+        }),
+      ),
+    );
+    const result = await client.getSubscriptionDefaultModel({
+      settingsScope: 'provider',
+    });
+    expect(result.runtimeSync?.status).toBe('failed');
+    expect(
+      fetch.mock.calls.map(([, init]) => JSON.parse(String(init?.body))),
+    ).toEqual([{}, { settingsScope: 'provider' }]);
+  });
+
+  it('can switch a live session without saving defaults again', async () => {
+    const { client, fetch } = clientWith(200, {});
+    const modelId = 'qwen3.8-max(qwen-subscription)';
+    await client.setSessionModel('session', modelId);
+    await client.setSessionModel('session', modelId, undefined, {
+      persistDefault: false,
+    });
+    expect(
+      fetch.mock.calls.map(([, init]) => JSON.parse(String(init?.body))),
+    ).toEqual([
+      { modelId },
+      { modelId, _meta: { 'qwen.session.modelPersistDefault': false } },
+    ]);
   });
 });

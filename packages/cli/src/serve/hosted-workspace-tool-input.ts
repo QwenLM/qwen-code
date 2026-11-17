@@ -4,11 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// #15076: the argument check for the `todo_write` tool only the `/3`
-// profiles declare. It runs before the Runtime is acquired, so a malformed
-// call costs no durable work and its refusal stays model-correctable. The
-// exact rules stay in the core tool (TodoWriteTool); this check keeps the
-// shapes that tool rejects from reaching a Runtime round trip.
+// The argument check for `todo_write`, declared by `files/3` and `shell/1`.
+// Admission rejects malformed shapes before durable work, so the refusal
+// stays model-correctable. Core's todo validation enforces list-level rules when
+// the Harness persists Session todos; this does not require a Runtime call.
 
 const TODO_STATUSES = new Set(['pending', 'in_progress', 'completed']);
 

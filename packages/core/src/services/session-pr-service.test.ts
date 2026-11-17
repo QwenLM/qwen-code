@@ -20,6 +20,7 @@ import {
   readSessionPrs,
   readSessionPrsDetailed,
   replaceSessionPrs,
+  toSessionPrInfo,
   updateSessionPrStates,
   upsertSessionPr,
   upsertSessionPrs,
@@ -56,6 +57,32 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await fs.rm(tmpDir, { recursive: true, force: true });
+});
+
+describe('toSessionPrInfo', () => {
+  const base: SessionPr = {
+    number: 7,
+    url: 'https://github.com/o/r/pull/7',
+    createdAt: '2026-08-20T00:00:00.000Z',
+  };
+
+  it('forwards the binding provenance so consumers can exclude review bindings', () => {
+    const review: SessionPr = { ...base, source: 'review' };
+    expect(toSessionPrInfo(review)).toEqual({
+      number: 7,
+      url: 'https://github.com/o/r/pull/7',
+      source: 'review',
+    });
+    const created: SessionPr = { ...base, source: 'create' };
+    expect(toSessionPrInfo(created).source).toBe('create');
+  });
+
+  it('projects only wire fields, dropping createdAt and absent optionals', () => {
+    expect(toSessionPrInfo(base)).toEqual({
+      number: 7,
+      url: 'https://github.com/o/r/pull/7',
+    });
+  });
 });
 
 type StateUpdate =
@@ -567,6 +594,47 @@ describe('upsertSessionPrs', () => {
     const persisted = await read();
     expect(numbers(persisted)).toEqual([100, 101, 102]);
     expect(persisted?.[0]).toEqual(entry(100));
+  });
+
+  it('repairs a stateless same-URL binding with an explicit state, keeping position and createdAt', async () => {
+    // A manual re-bind resolves state through gh after a stateless degrade:
+    // the snapshot must land in place, not be dropped as "already bound".
+    await seed({ ...entry(100), state: undefined }, entry(101));
+    const result = await offer(cand(100, { state: 'merged' }));
+    expect(result.added).toEqual([]);
+    expect(result.alreadyBound).toEqual([100]);
+    const persisted = await read();
+    expect(numbers(persisted)).toEqual([100, 101]);
+    expect(persisted?.[0]?.state).toBe('merged');
+    expect(persisted?.[0]?.createdAt).toBe(entry(100).createdAt);
+  });
+
+  it('repairs a stale same-URL state in place, keeping position and createdAt', async () => {
+    // The other half of the in-place repair: a persisted state that has gone
+    // stale (open → merged) is refreshed, not left as-is.
+    await seed({ ...entry(100), state: 'open' }, entry(101));
+    const result = await offer(cand(100, { state: 'merged' }));
+    expect(result.added).toEqual([]);
+    expect(result.alreadyBound).toEqual([100]);
+    const persisted = await read();
+    expect(numbers(persisted)).toEqual([100, 101]);
+    expect(persisted?.[0]?.state).toBe('merged');
+    expect(persisted?.[0]?.createdAt).toBe(entry(100).createdAt);
+  });
+
+  it('preserves a terminal state when a same-URL re-bind offers no state', async () => {
+    // The candidate.state !== undefined half of the repair guard: /pr's
+    // degrade arm produces a stateless candidate, and re-binding an already
+    // merged PR while gh is down must NOT erase the known state. Dropping
+    // that clause makes upgraded.state = undefined and reds this test.
+    await seed({ ...entry(100), state: 'merged' }, entry(101));
+    const result = await offer(cand(100));
+    expect(result.added).toEqual([]);
+    expect(result.alreadyBound).toEqual([100]);
+    const persisted = await read();
+    expect(numbers(persisted)).toEqual([100, 101]);
+    expect(persisted?.[0]?.state).toBe('merged');
+    expect(persisted?.[0]?.createdAt).toBe(entry(100).createdAt);
   });
 
   it('re-binds a number whose persisted entry points at another repository', async () => {

@@ -93,7 +93,10 @@ type FlowProps = {
   onClose: () => void;
   onSignedOut?: () => void;
   onOtherProviders: () => void;
-  onActivate?: (signal: AbortSignal) => Promise<string | void>;
+  onActivate?: (
+    signal: AbortSignal,
+    onSettingsSaved: () => void,
+  ) => Promise<string | void>;
   onActivated?: (message?: string) => void;
   onModelsUnavailable?: () => void;
   onAuthError?: (message: string) => void;
@@ -161,9 +164,12 @@ export function QwenSubscriptionFlow(props: FlowProps) {
     activation.current = controller;
     setConnecting(true);
     setConnectionError(undefined);
+    let settingsSaved = false;
     try {
       const signal = AbortSignal.any([owner, controller.signal]);
-      const model = await onActivate(signal);
+      const model = await onActivate(signal, () => {
+        settingsSaved = true;
+      });
       if (!owner.aborted && !controller.signal.aborted && mounted.current) {
         const result = {
           email: account.email,
@@ -208,6 +214,15 @@ export function QwenSubscriptionFlow(props: FlowProps) {
           expire(message);
           return;
         }
+        if (callbacks.current.desktopSuccess && settingsSaved) {
+          if (error instanceof DOMException && error.name === 'AbortError') {
+            return;
+          }
+          callbacks.current.onActivated?.(
+            t('settings.models.runtimeSyncFailed'),
+          );
+          return;
+        }
         if (
           (body?.code === 'subscription_models_unavailable' ||
             body?.code === 'subscription_model_unavailable') &&
@@ -218,20 +233,20 @@ export function QwenSubscriptionFlow(props: FlowProps) {
         }
         setConnectionError(
           message ??
-            t(
-              status === 429
-                ? 'subscription.rateLimited'
-                : body?.errorStage === 'credentials'
-                  ? 'subscription.credentialsFailed'
-                  : body?.code === 'network_error' ||
-                      body?.code === 'request_timeout'
-                    ? 'subscription.networkFailed'
-                    : body?.errorStage === 'refresh'
-                      ? 'subscription.refreshFailed'
-                      : body?.code === 'subscription_models_unavailable'
-                        ? 'subscription.modelsUnavailable'
-                        : 'subscription.connectFailed',
-            ),
+            (status === 429
+              ? t('subscription.rateLimited')
+              : body?.errorStage === 'credentials'
+                ? t('subscription.credentialsFailed')
+                : body?.code === 'network_error' ||
+                    body?.code === 'request_timeout'
+                  ? t('subscription.networkFailed')
+                  : body?.errorStage === 'refresh'
+                    ? t('subscription.refreshFailed')
+                    : body?.code === 'subscription_models_unavailable'
+                      ? t('subscription.modelsUnavailable')
+                      : error instanceof Error
+                        ? error.message
+                        : ''),
         );
       }
     } finally {
@@ -290,7 +305,7 @@ export function QwenSubscriptionFlow(props: FlowProps) {
       ? completed
       : undefined;
   const autoCompleting =
-    canActivate && !props.desktopSuccess && !connectionError;
+    canActivate && !props.desktopSuccess && connectionError === undefined;
   return (
     <QwenSubscriptionView
       dialog={props.dialog}
@@ -327,10 +342,10 @@ export function QwenSubscriptionFlow(props: FlowProps) {
             autoCompleting ||
             (props.desktopSuccess &&
               !activeCompletion &&
-              !connectionError)) && (
+              connectionError === undefined)) && (
             <p role="status">{t('subscription.connecting')}</p>
           )}
-          {connectionError && props.onActivate && (
+          {connectionError !== undefined && props.onActivate && (
             <div className={props.desktopSuccess ? styles.actions : 'contents'}>
               <Button
                 variant={props.desktopSuccess ? 'ghost' : 'default'}

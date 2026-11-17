@@ -6,11 +6,45 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  formatIndexEntry,
   MAX_INDEX_CHARS,
   MAX_INDEX_LINES,
+  parseIndexEntry,
   trimIndexToBudget,
   trimIndexToBudgetDetailed,
 } from './index-budget.js';
+
+describe('index entry format', () => {
+  it.each([
+    { link: '- [Topic](notes/topic.md)', description: 'hook', suffix: '' },
+    {
+      link: '- [Topic — title](notes/a%28b%29.md)',
+      description: undefined,
+      suffix: '',
+    },
+    {
+      link: '- [Topic](notes/topic.md)',
+      description: 'hook',
+      suffix: ' (also: notes/other.md)',
+    },
+    {
+      link: '- [Topic](notes/topic.md)',
+      description: undefined,
+      suffix: ' (also: notes/other.md, notes/third.md)',
+    },
+  ])('round-trips the writer shape %j', (entry) => {
+    expect(parseIndexEntry(formatIndexEntry(entry))).toEqual(entry);
+  });
+
+  it.each([
+    '- **[Topic](notes/topic.md)** — hook',
+    '- [Topic](notes/a(b).md) — hook',
+    '- [Topic](notes/topic.md): hook',
+    '- [Topic](notes/topic.md) — h (also: x.md) note',
+  ])('does not certify an unknown shape: %s', (entry) =>
+    expect(parseIndexEntry(entry)).toBeUndefined(),
+  );
+});
 
 describe('trimIndexToBudget', () => {
   it('keeps empty and within-budget content unchanged', () => {

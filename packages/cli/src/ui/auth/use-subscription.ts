@@ -14,7 +14,7 @@ import {
   type SubscriptionUserInfo,
 } from '@qwen-code/qwen-code-core/qwen/subscription-oauth-client.js';
 import {
-  getQwenOAuthConfig,
+  getQwenSubscriptionAuthorizationUrl,
   getQwenSubscriptionPlansUrl,
 } from '@qwen-code/qwen-code-core/qwen/oauth-config.js';
 import {
@@ -27,10 +27,7 @@ import { t } from '../../i18n/index.js';
 export function subscriptionAuthorizationUrl(
   device: SubscriptionDeviceAuthorization,
 ): string {
-  const url = new URL('/authorize', getQwenOAuthConfig().webOrigin);
-  url.searchParams.set('user_code', device.user_code);
-  url.searchParams.set('client', 'qwen-code');
-  return url.toString();
+  return getQwenSubscriptionAuthorizationUrl(device.user_code, 'cli');
 }
 
 export type SubscriptionState =
@@ -245,7 +242,7 @@ export function useSubscription({
       }
     };
     const run = async () => {
-      plansUrl.current = getQwenSubscriptionPlansUrl();
+      plansUrl.current = getQwenSubscriptionPlansUrl('cli');
       const activeSession = new QwenSubscriptionSession();
       session.current = activeSession;
       const info = await activeSession.signIn((device) => {
@@ -402,7 +399,9 @@ export function useSubscription({
               : error instanceof Error &&
                   error.message.includes(SUBSCRIPTION_MODELS_UNAVAILABLE)
                 ? SUBSCRIPTION_MODELS_UNAVAILABLE
-                : t('Could not connect Qwen Subscription. Please try again.'),
+                : error instanceof Error
+                  ? error.message
+                  : '',
         );
       }
     } finally {

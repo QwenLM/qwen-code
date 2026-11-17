@@ -97,6 +97,8 @@ export interface TranscriptUuidChainResult {
   readonly cycleUuid?: string;
 }
 
+export const GENERATED_UI_STATE_SUBTYPE = 'generated_ui_state';
+
 const RECORD_TYPES = new Set<TranscriptRecordType>([
   'user',
   'assistant',
@@ -118,6 +120,7 @@ const MANAGED_SESSION_RECORD_SUBTYPES = new Set([
 
 const NON_CONVERSATION_RECORD_SUBTYPES = new Set([
   'session_sources_snapshot',
+  GENERATED_UI_STATE_SUBTYPE,
   ...MANAGED_SESSION_RECORD_SUBTYPES,
 ]);
 
@@ -146,6 +149,7 @@ const KNOWN_RECORD_SUBTYPES = new Set([
   'omni_recall',
   'session_execution_engine',
   'session_sources_snapshot',
+  GENERATED_UI_STATE_SUBTYPE,
   'session_approval_mode',
   'session_workflow_mode',
   'branch_checkpoint',
@@ -153,6 +157,7 @@ const KNOWN_RECORD_SUBTYPES = new Set([
   'goal_runtime',
   'goal_turn_end',
   'code_mode_tool_result',
+  'tool_loop_end',
   'turn_result',
   'turn_attempt',
   'user_text_elements',
@@ -302,6 +307,130 @@ export function isTranscriptArtifactRecord(record: {
     typeof record.subtype === 'string' &&
     ARTIFACT_RECORD_SUBTYPES.has(record.subtype)
   );
+}
+
+export function selectActiveSideArtifactRecordUuids(
+  records: ReadonlyArray<{
+    type?: unknown;
+    subtype?: unknown;
+    uuid: string;
+    parentUuid: string | null;
+  }>,
+  activeRecordUuids: readonly string[],
+): string[] {
+  const activeUuids = new Set(activeRecordUuids);
+  const firstActiveUuid = activeRecordUuids[0];
+  const firstActiveIndex =
+    firstActiveUuid === undefined
+      ? -1
+      : records.findIndex((record) => record.uuid === firstActiveUuid);
+  const nextActiveUuidByIndex = new Map<number, string>();
+  const nextBlockingUuidByIndex = new Map<number, string>();
+  let nextActiveUuid: string | undefined;
+  let nextBlockingUuid: string | undefined;
+  for (let index = records.length - 1; index >= 0; index--) {
+    if (nextActiveUuid !== undefined) {
+      nextActiveUuidByIndex.set(index, nextActiveUuid);
+    }
+    if (nextBlockingUuid !== undefined) {
+      nextBlockingUuidByIndex.set(index, nextBlockingUuid);
+    }
+    const record = records[index]!;
+    if (activeUuids.has(record.uuid)) {
+      nextActiveUuid = record.uuid;
+      nextBlockingUuid = undefined;
+    } else if (
+      !isTranscriptArtifactRecord(record) &&
+      !(
+        record.type === 'system' &&
+        (record.subtype === 'custom_title' ||
+          record.subtype === 'session_sources_snapshot' ||
+          record.subtype === GENERATED_UI_STATE_SUBTYPE)
+      )
+    ) {
+      nextBlockingUuid = record.uuid;
+    }
+  }
+
+  const selected: string[] = [];
+  const includedSideArtifactUuids = new Set<string>();
+  let previousActiveUuid: string | undefined;
+  for (let index = 0; index < records.length; index++) {
+    const record = records[index]!;
+    if (activeUuids.has(record.uuid)) {
+      previousActiveUuid = record.uuid;
+      continue;
+    }
+    if (!isTranscriptArtifactRecord(record)) continue;
+
+    const nextUuid = nextActiveUuidByIndex.get(index);
+    const isInActiveSegment =
+      !nextBlockingUuidByIndex.has(index) &&
+      (nextUuid !== undefined
+        ? activeUuids.has(nextUuid)
+        : previousActiveUuid !== undefined &&
+          activeUuids.has(previousActiveUuid));
+    if (
+      record.parentUuid !== null &&
+      (activeUuids.has(record.parentUuid) ||
+        includedSideArtifactUuids.has(record.parentUuid)) &&
+      isInActiveSegment &&
+      (record.parentUuid === previousActiveUuid ||
+        includedSideArtifactUuids.has(record.parentUuid))
+    ) {
+      selected.push(record.uuid);
+      includedSideArtifactUuids.add(record.uuid);
+    } else if (
+      record.parentUuid === null &&
+      index < firstActiveIndex &&
+      isInActiveSegment
+    ) {
+      selected.push(record.uuid);
+      includedSideArtifactUuids.add(record.uuid);
+    }
+  }
+  return selected;
+}
+
+export function isGeneratedUiStateRecord(record: {
+  readonly type?: unknown;
+  readonly subtype?: unknown;
+}): boolean {
+  return (
+    record.type === 'system' && record.subtype === GENERATED_UI_STATE_SUBTYPE
+  );
+}
+
+/**
+ * A side save belongs to the active branch if it hangs from a conversation
+ * record on that branch. Follow any non-conversation parents to that record.
+ */
+export function selectActiveGeneratedUiStateRecordUuids(
+  records: ReadonlyArray<
+    Pick<TranscriptRecordInput, 'type' | 'subtype' | 'uuid' | 'parentUuid'>
+  >,
+  activeRecordUuids: readonly string[],
+): string[] {
+  const saves = records.filter(isGeneratedUiStateRecord);
+  if (saves.length === 0) return [];
+  const active = new Set(activeRecordUuids);
+  const byUuid = new Map<string, (typeof records)[number]>();
+  for (const record of records) {
+    if (!byUuid.has(record.uuid)) byUuid.set(record.uuid, record);
+  }
+  const selected: string[] = [];
+  for (const record of saves) {
+    let parent = record.parentUuid;
+    const seen = new Set<string>();
+    while (parent !== null && !active.has(parent) && !seen.has(parent)) {
+      seen.add(parent);
+      const next = byUuid.get(parent);
+      if (!next || isTranscriptConversationRecord(next)) break;
+      parent = next.parentUuid;
+    }
+    if (parent !== null && active.has(parent)) selected.push(record.uuid);
+  }
+  return selected;
 }
 
 export function isInternalCodeModeToolResult(record: {

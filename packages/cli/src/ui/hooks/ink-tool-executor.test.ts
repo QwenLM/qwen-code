@@ -144,6 +144,38 @@ describe('createInkToolExecutor', () => {
     expect((await run).map(({ request }) => request.callId)).toEqual(['a']);
   });
 
+  it("holds the scheduler's callback until the hold settles, without holding the batch", async () => {
+    let callbackResult: Promise<void> | undefined;
+    const schedule = vi.fn<ScheduleFn>(
+      (requests, _signal, _modelOverride, onBatchComplete) => {
+        const calls = requests as ToolCallRequestInfo[];
+        callbackResult = onBatchComplete?.([completed(calls[0], 'success')]);
+      },
+    );
+    let release!: () => void;
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const executor = createInkToolExecutor(schedule, undefined, vi.fn(), hold);
+
+    const settled = await executor.run(
+      [request('a')],
+      new AbortController().signal,
+      hooks(),
+    );
+    let returned = false;
+    void callbackResult!.then(() => {
+      returned = true;
+    });
+    await Promise.resolve();
+    expect(settled.map(({ request }) => request.callId)).toEqual(['a']);
+    expect(returned).toBe(false);
+
+    release();
+    await callbackResult;
+    expect(returned).toBe(true);
+  });
+
   it('settles the batch when the promise onSettled returns rejects', async () => {
     const schedule = vi.fn<ScheduleFn>(
       (requests, _signal, _modelOverride, onBatchComplete) => {

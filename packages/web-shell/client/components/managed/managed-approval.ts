@@ -51,15 +51,17 @@ export function toManagedPermissionRequest(
   messages: readonly Message[],
 ): PermissionRequest {
   const tool = findManagedApprovalTool(messages, action);
+  const inputPreview =
+    action.kind === 'question' ? undefined : action.inputPreview;
   let rawInput = tool?.args;
   if (
     !rawInput &&
     action.toolName === 'exit_plan_mode' &&
-    action.inputPreview &&
-    !action.inputPreview.truncated
+    inputPreview &&
+    !inputPreview.truncated
   ) {
     try {
-      const preview: unknown = JSON.parse(action.inputPreview.text);
+      const preview: unknown = JSON.parse(inputPreview.text);
       if (preview && typeof preview === 'object' && !Array.isArray(preview)) {
         const input = (preview as Record<string, unknown>)['input'];
         if (
@@ -98,18 +100,20 @@ export function toManagedPermissionRequest(
             ),
           },
         ]
-      : action.inputPreview
-        ? [{ type: 'text', text: escapePreviewText(action.inputPreview.text) }]
+      : inputPreview
+        ? [{ type: 'text', text: escapePreviewText(inputPreview.text) }]
         : [],
     ...(rawInput
       ? { rawInput, contentIsInput: true }
-      : action.inputPreview
+      : inputPreview
         ? { contentIsInput: true }
         : {}),
-    options: action.options.map((option) => ({
-      id: option.id,
-      label: option.label,
-      ...(OPTION_KINDS[option.id] ? { kind: OPTION_KINDS[option.id] } : {}),
-    })),
+    options: (action.kind === 'question' ? [] : action.options).map(
+      (option) => ({
+        id: option.id,
+        label: option.label,
+        ...(OPTION_KINDS[option.id] ? { kind: OPTION_KINDS[option.id] } : {}),
+      }),
+    ),
   };
 }
