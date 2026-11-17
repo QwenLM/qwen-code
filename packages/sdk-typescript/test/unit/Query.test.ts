@@ -1004,8 +1004,14 @@ describe('Query', () => {
     });
 
     it.each([
-      { label: 'allow', result: { behavior: 'allow' as const, updatedInput: {} } },
-      { label: 'deny', result: { behavior: 'deny' as const, message: 'Denied' } },
+      {
+        label: 'allow',
+        result: { behavior: 'allow' as const, updatedInput: {} },
+      },
+      {
+        label: 'deny',
+        result: { behavior: 'deny' as const, message: 'Denied' },
+      },
     ])('clears the permission deadline on $label', async ({ result }) => {
       const query = new Query(transport, {
         cwd: '/test',
