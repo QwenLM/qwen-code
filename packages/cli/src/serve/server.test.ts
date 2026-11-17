@@ -49541,10 +49541,12 @@ describe('HTTPS SSE eviction force-close (TLS regression)', () => {
   }
 
   it('writer-timeout eviction closes the TLS socket and frees the slot', async () => {
-    // Full-send-buffer simulation: after the first stalled write, every
-    // later write (including the reaper's terminal frame) reports
-    // backpressure, so eviction takes the immediate force-close branch —
-    // the exact path that threw ERR_INVALID_HANDLE_TYPE on TLSSocket.
+    // Write-throw simulation: after the first stalled write, the reaper's
+    // terminal-frame write THROWS (socket already errored), so eviction
+    // takes the immediate force-close branch — the exact path that threw
+    // ERR_INVALID_HANDLE_TYPE on TLSSocket. The buffered-frame case (write
+    // returning false) takes the graceful branch and is covered by the
+    // paused-resume regression below.
     const http = await import('node:http');
     type WriteCallback = (error?: Error | null) => void;
     const originalWrite = http.ServerResponse.prototype.write as unknown as (
