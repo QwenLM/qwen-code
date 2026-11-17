@@ -144,6 +144,15 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
   };
 });
 
+vi.mock('../hooks/useComposerWorkspace.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../hooks/useComposerWorkspace.js')>();
+  return {
+    ...actual,
+    useOptionalComposerWorkspace: () => uploadWorkspaceState.current,
+  };
+});
+
 const composerCoreState = vi.hoisted(() => ({
   viewRef: { current: null } as { current: unknown },
   workspaceActionsRef: { current: undefined } as {

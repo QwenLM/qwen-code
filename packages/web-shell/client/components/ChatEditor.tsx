@@ -23,7 +23,7 @@ import type {
   ChangeEvent as ReactChangeEvent,
 } from 'react';
 import { Tooltip as TooltipPrimitive } from 'radix-ui';
-import { useOptionalWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
+import { useOptionalComposerWorkspace } from '../hooks/useComposerWorkspace.js';
 import type { CommandInfo } from '../adapters/types';
 import type { AtMentionWorkspaceActions } from '../hooks/useAtMentionSources';
 import { EXECUTION_APPROVAL_MODES } from '../utils/planMode';
@@ -1881,7 +1881,7 @@ export const ChatEditor = memo(
 
     // Resolve the upload target BEFORE useComposerCore so the @ panel's upload
     // item can be capability-gated (hidden on daemons without the feature).
-    const uploadWorkspace = useOptionalWorkspace();
+    const uploadWorkspace = useOptionalComposerWorkspace();
     const uploadTarget = useMemo(() => {
       // The host switch also applies to an explicitly scoped Managed target;
       // daemon targets require their own capability and trust checks below.

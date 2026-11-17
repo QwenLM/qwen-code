@@ -52,10 +52,8 @@ import {
 } from './useIsTouchComposer';
 import type { CommandInfo } from '../adapters/types';
 import type { PromptFile, PromptImage } from '../adapters/promptTypes';
-import {
-  useOptionalWorkspace,
-  type UseDaemonFollowupSuggestionReturn,
-} from '@qwen-code/web-shell/daemon-react-sdk';
+import type { UseDaemonFollowupSuggestionReturn } from '@qwen-code/web-shell/daemon-react-sdk';
+import { useOptionalComposerWorkspace } from './useComposerWorkspace.js';
 import {
   getImplicitTabCompletion,
   getMissingSlashPrefixCompletion,
@@ -1686,7 +1684,7 @@ export function useComposerCore(
 
   const persistFileReferencesRef = useRef(persistFileReferences);
   persistFileReferencesRef.current = persistFileReferences;
-  const workspace = useOptionalWorkspace();
+  const workspace = useOptionalComposerWorkspace();
   const { language, t } = useI18n();
   const portalRoot = useWebShellPortalRoot();
   const storageScopeKey = composerScopeKey ?? atWorkspaceCwd;
