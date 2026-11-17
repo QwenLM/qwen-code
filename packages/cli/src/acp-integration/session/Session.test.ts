@@ -1706,14 +1706,101 @@ describe('Session', () => {
       session.dispose();
     });
 
+    it('records a dropped tally when a sealed peer report has no recorder', async () => {
+      // A hidden-workspace session has no recording service, so a report that
+      // arrives after the seal used to vanish without trace. The loss is now
+      // at least visible in the dropped summary.
+      const manager = makeFakeTeamManager();
+      session.dispose();
+      vi.mocked(mockConfig.isAgentTeamEnabled).mockReturnValue(true);
+      vi.mocked(mockConfig.getTeamManager).mockReturnValue(manager as never);
+      vi.mocked(mockConfig.getChatRecordingService).mockReturnValue(undefined);
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+      session.beginClose();
+
+      await session.flushPendingPeerNotifications();
+      manager.leaderCallback?.('late report', 'late report', ['security']);
+
+      const internals = session as unknown as {
+        droppedNotifications: {
+          take(): { status: string; modelText: string } | undefined;
+        };
+      };
+      const tally = internals.droppedNotifications.take();
+      expect(tally).toBeDefined();
+      expect(tally!.modelText).toContain('teammate report');
+      session.dispose();
+    });
+
+    it('quiesces the leader inbox before sealing so an in-flight report survives', async () => {
+      // The 500 ms poll marks a mailbox row read as it consumes it, so a
+      // report delivered after the seal is read on disk, landed into a writer
+      // that has stopped accepting records, and lost. The flush therefore has
+      // to stop intake and wait out the poll already in flight before it seals.
+      const manager = makeFakeTeamManager();
+      session.dispose();
+      vi.mocked(mockConfig.isAgentTeamEnabled).mockReturnValue(true);
+      vi.mocked(mockConfig.getTeamManager).mockReturnValue(manager as never);
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+      session.beginClose();
+      vi.mocked(mockChatRecordingService.recordNotification).mockClear();
+      vi.mocked(
+        mockChatRecordingService.recordBackgroundTaskCompleted,
+      ).mockClear();
+
+      let releaseInFlightPoll: () => void = () => {};
+      manager.holdQuiesce = () =>
+        new Promise<void>((resolve) => {
+          releaseInFlightPoll = resolve;
+        });
+      const flushing = session.flushPendingPeerNotifications();
+      await vi.waitFor(() =>
+        expect(manager.intakeCalls).toContain('quiesce:start'),
+      );
+      // The poll that was already running consumes its row and delivers now:
+      // after the flush started, before it is allowed to seal.
+      manager.leaderCallback?.('in-flight report', 'in-flight report', [
+        'security',
+      ]);
+      releaseInFlightPoll();
+      await flushing;
+
+      expect(manager.intakeCalls).toEqual(['quiesce:start', 'quiesce:settled']);
+      // Delivered before the seal, so it took the live path — queued and
+      // accounted as a completion — instead of the cold-copy branch.
+      expect(
+        mockChatRecordingService.recordBackgroundTaskCompleted,
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({ displayText: 'in-flight report' }),
+      );
+      // The same flush then landed it, so a reload still finds the report.
+      expect(mockChatRecordingService.recordNotification).toHaveBeenCalledWith(
+        [
+          expect.objectContaining({
+            text: expect.stringContaining('in-flight report'),
+          }),
+        ],
+        'in-flight report',
+        expect.objectContaining({ kind: 'peer', status: 'message' }),
+      );
+      session.dispose();
+    });
+
     it('un-seals notifications when a reversible close is rolled back', async () => {
-      // `closeStoredSession` can still throw after the flush — a `requireFlush`
-      // failure, or a recorder that kept write ownership — and its `finally`
-      // releases the close: `closing` goes false and the queues drain again, so
-      // the session is deliberately live. A seal left set diverts every later
-      // notification: a peer report is cold-stored and never delivered, any
-      // other kind is dropped without a record or a tally, and only a process
-      // restart recovers.
+      // `beginClose`'s release restores `closing` and re-drains, so the session
+      // is live again. A latch left set diverts every later report to a cold
+      // record: never queued, never delivered, while its mailbox row is
+      // already marked read.
       const manager = makeFakeTeamManager();
       session.dispose();
       vi.mocked(mockConfig.isAgentTeamEnabled).mockReturnValue(true);
@@ -2724,7 +2811,6 @@ describe('Session', () => {
         kind: 'teammate',
       });
       session.dispose();
-
     });
   });
 

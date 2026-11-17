@@ -927,7 +927,11 @@ export class BridgeClient implements Client {
      */
     private readonly mediator: Pick<
       PermissionMediator,
-      'policy' | 'request' | 'cancelForPrompt' | 'cancelWorkflowApproval' | 'vote'
+      | 'policy'
+      | 'request'
+      | 'cancelForPrompt'
+      | 'cancelWorkflowApproval'
+      | 'vote'
     >,
     /**
      * Bd1yh: wall-clock ms before `requestPermission` resolves as cancelled
@@ -1128,7 +1132,8 @@ export class BridgeClient implements Client {
       !appClientId &&
       params.toolCall?._meta?.['workflowApproval'] === true &&
       params.toolCall._meta?.['backgroundWorkflowApproval'] === true;
-    const usesPrompt = !appClientId && !backgroundWorkflowApproval && !sessionOwned;
+    const usesPrompt =
+      !appClientId && !backgroundWorkflowApproval && !sessionOwned;
     const backgroundTurn = usesPrompt
       ? (explicitBackgroundTurn ??
         (entry.promptActive ? undefined : entry.backgroundTurn))
@@ -1136,11 +1141,13 @@ export class BridgeClient implements Client {
     const permissionPromptId = usesPrompt
       ? (backgroundTurn?.turnId ?? entry.activePromptId)
       : undefined;
+    // A session-scoped (teammate) approval still has a prompt originator to
+    // answer to: it was the leader prompt that put the team in motion. Clear
+    // the prompt binding but not the client entitled to vote under a
+    // `designated` policy.
     let permissionOriginator =
       appClientId ??
-      (usesPrompt && !backgroundTurn
-        ? entry.activePromptOriginatorClientId
-        : undefined);
+      (backgroundTurn ? undefined : entry.activePromptOriginatorClientId);
     const workflowOriginatorClientId =
       params._meta?.['workflowOriginatorClientId'];
     if (
