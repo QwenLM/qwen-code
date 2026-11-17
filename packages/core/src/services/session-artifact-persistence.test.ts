@@ -752,3 +752,61 @@ describe('session artifact persistence records', () => {
     expect(warnings).toContain('skipped artifact without id/title');
   });
 });
+
+describe('event payload artifact count (summary sidecar hint)', () => {
+  it('preserves a valid restorable count without warnings', () => {
+    const warnings: string[] = [];
+    const normalized = normalizeEventPayload(
+      { ...hdr(1, 0, 'session-A'), changes: [], artifactCount: 3 },
+      warnings,
+    );
+    expect(normalized?.artifactCount).toBe(3);
+    expect(warnings).toEqual([]);
+  });
+
+  it('preserves a zero count (all artifacts removed)', () => {
+    const normalized = normalizeEventPayload(
+      { ...hdr(1, 0, 'session-A'), changes: [], artifactCount: 0 },
+      [],
+    );
+    expect(normalized?.artifactCount).toBe(0);
+  });
+
+  it('omits the count when absent (older records)', () => {
+    const normalized = normalizeEventPayload(
+      { ...hdr(1, 0, 'session-A'), changes: [] },
+      [],
+    );
+    expect(normalized).toBeDefined();
+    expect(normalized?.artifactCount).toBeUndefined();
+  });
+
+  it.each([-1, 1.5, '3', null, Number.NaN, Number.POSITIVE_INFINITY])(
+    'silently drops malformed count %p without invalidating the record',
+    (bad) => {
+      const warnings: string[] = [];
+      const normalized = normalizeEventPayload(
+        { ...hdr(1, 0, 'session-A'), changes: [], artifactCount: bad },
+        warnings,
+      );
+      expect(normalized).toBeDefined();
+      expect(normalized?.artifactCount).toBeUndefined();
+      expect(warnings).toEqual([]);
+    },
+  );
+
+  it('strips the source count when remapping an event for fork', () => {
+    const remapped = remapSessionArtifactPayloadForFork(
+      {
+        ...hdr(1, 0, 'source-session'),
+        changes: [created(src('counted'))],
+        artifactCount: 5,
+      },
+      'source-session',
+      'forked-session',
+    ) as SessionArtifactEventRecordPayload;
+    expect(remapped.sessionId).toBe('forked-session');
+    expect(remapped.changes).toHaveLength(1);
+    expect(remapped.artifactCount).toBeUndefined();
+  });
+});

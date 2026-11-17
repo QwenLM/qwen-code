@@ -16,7 +16,7 @@ export const WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY = 'qwen.workspace.mtimeMs';
 export const WORKSPACE_CONTENT_SIZE_BYTES_METADATA_KEY =
   'qwen.workspace.sizeBytes';
 export const PUBLISHED_CONTENT_SHA256_METADATA_KEY = 'qwen.published.sha256';
-const MAX_PERSISTED_ARTIFACTS = 500;
+export const MAX_PERSISTED_ARTIFACTS = 500;
 const MAX_PERSISTED_EVENT_CHANGES = 800;
 const MAX_PERSISTED_IDS = 500;
 const MAX_PERSISTED_MARKER_ARTIFACTS = MAX_PERSISTED_IDS * 2;
@@ -166,6 +166,12 @@ export interface SessionArtifactEventRecordPayload {
   sequence: number;
   recordedAt: string;
   changes: SessionArtifactPersistedChange[];
+  /** Authoritative restorable artifact count after this event, stamped by
+   * the store so the summary sidecar can be refreshed without rebuilding the
+   * journal. Derived and optional: older records omit it, and a fork remap
+   * drops it because the forked session's count is unknown until its own
+   * store writes one. */
+  artifactCount?: number;
 }
 
 export interface SessionArtifactSnapshotRecordPayload {
@@ -423,8 +429,12 @@ export function remapSessionArtifactPayloadForFork(
 
   const event = normalizeEventPayload(payload, []);
   if (!event) return payload;
+  // The source's restorable count does not survive the fork: fork-unsafe
+  // artifacts are dropped and ids are remapped, so the forked session's
+  // count is unknown until its own store stamps a fresh one.
+  const { artifactCount: _sourceArtifactCount, ...eventWithoutCount } = event;
   return {
-    ...event,
+    ...eventWithoutCount,
     sessionId: newSessionId,
     changes: event.changes
       .map((change): SessionArtifactPersistedChange | undefined => {
@@ -758,6 +768,9 @@ export function normalizeEventPayload(
       `event change list truncated to ${MAX_PERSISTED_EVENT_CHANGES}`,
     );
   }
+  // Derived summary hint: preserve silently when valid, drop when not. A
+  // malformed count must never invalidate the authoritative journal record.
+  const artifactCount = getNonNegativeInteger(value, 'artifactCount');
   return {
     v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
     sessionId,
@@ -769,6 +782,7 @@ export function normalizeEventPayload(
       .slice(0, MAX_PERSISTED_EVENT_CHANGES)
       .map((change) => normalizePersistedChange(change, warnings))
       .filter((change) => change !== undefined),
+    ...(artifactCount !== undefined ? { artifactCount } : {}),
   };
 }
 

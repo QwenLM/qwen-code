@@ -95,6 +95,13 @@ import {
   type SessionTitleSidecar,
 } from './session-title-sidecar.js';
 import {
+  moveSessionArtifactSummarySidecar,
+  readSessionArtifactSummarySidecar,
+  removeSessionArtifactSummarySidecar,
+  sessionArtifactSummarySidecarPath,
+  writeSessionArtifactSummarySidecar,
+} from './session-artifact-summary-sidecar.js';
+import {
   deleteArtifactSnapshot,
   retainArtifactSnapshot,
 } from '../tools/artifact/artifact-snapshots.js';
@@ -1052,6 +1059,29 @@ export class SessionService {
     return path.join(this.getChatsDirForState(state), `${sessionId}.pr.json`);
   }
 
+  private getArtifactSummaryPathForState(
+    sessionId: string,
+    state: SessionArchiveState,
+  ): string {
+    return sessionArtifactSummarySidecarPath(
+      this.getChatsDirForState(state),
+      sessionId,
+    );
+  }
+
+  /**
+   * Returns the absolute path to the sidecar JSON file that caches the
+   * session's restorable artifact count for the session list. The file may
+   * not exist yet — consumers must handle a missing sidecar as "unknown
+   * count", not as zero artifacts.
+   */
+  getArtifactSummaryPathForArchiveState(
+    sessionId: string,
+    state: SessionArchiveState,
+  ): string {
+    return this.getArtifactSummaryPathForState(sessionId, state);
+  }
+
   private getSessionTitleSidecarPathForState(
     sessionId: string,
     state: SessionArchiveState,
@@ -1876,6 +1906,14 @@ export class SessionService {
     }
   }
 
+  private removeArtifactSummarySidecars(sessionId: string): void {
+    for (const state of ['active', 'archived'] as const) {
+      removeSessionArtifactSummarySidecar(
+        this.getArtifactSummaryPathForState(sessionId, state),
+      );
+    }
+  }
+
   private removePromptLedgers(sessionId: string): void {
     for (const state of ['active', 'archived'] as const) {
       const ledger = this.getPromptLedgerPathForState(sessionId, state);
@@ -2001,9 +2039,12 @@ export class SessionService {
   /**
    * A conflict resolution keeps one transcript and drops the other. The kept
    * transcript's label wins: move the dropped side's sidecar in only when the
-   * kept side has none, and discard it otherwise.
+   * kept side has none, and discard it otherwise. The dropped side's artifact
+   * count is always discarded: the kept transcript has a different artifact
+   * set, so the count must not transfer; the kept side's own sidecar (if any)
+   * stays, and the load-time seed regenerates a missing one.
    */
-  private reconcileTitleSidecarOnConflict(
+  private reconcileSidecarsOnConflict(
     sessionId: string,
     keptState: SessionArchiveState,
     droppedState: SessionArchiveState,
@@ -2018,6 +2059,9 @@ export class SessionService {
     } else {
       moveSessionTitleSidecar(dropped, kept);
     }
+    removeSessionArtifactSummarySidecar(
+      this.getArtifactSummaryPathForState(sessionId, droppedState),
+    );
   }
 
   private async moveArchiveSidecars(
@@ -2094,6 +2138,18 @@ export class SessionService {
       assertCleanupOwned?.();
       this.warn(
         `${action}Sessions: failed to move title sidecar for ${sessionId}: ${error}`,
+      );
+    }
+    try {
+      assertCleanupOwned?.();
+      moveSessionArtifactSummarySidecar(
+        this.getArtifactSummaryPathForState(sessionId, sourceState),
+        this.getArtifactSummaryPathForState(sessionId, destinationState),
+      );
+    } catch (error) {
+      assertCleanupOwned?.();
+      this.warn(
+        `${action}Sessions: failed to move artifact summary sidecar for ${sessionId}: ${error}`,
       );
     }
   }
@@ -3499,6 +3555,15 @@ export class SessionService {
     guards.assertCanMutate();
     this.assertMaintainableSessionUnchanged(sessionId, state.physical);
     jsonl.writeLineSync(state.identity.filePath, record);
+    // Keep the derived list cache in step with the journal edit (this path
+    // bypasses the recording service). Best-effort, like every sidecar write.
+    writeSessionArtifactSummarySidecar(
+      sessionArtifactSummarySidecarPath(
+        path.dirname(state.identity.filePath),
+        sessionId,
+      ),
+      (state.snapshot?.artifacts.length ?? 0) - artifacts.length,
+    );
     const retainedSnapshots = new Set(
       (state.snapshot?.artifacts ?? [])
         .filter((artifact) => !requestedIds.has(artifact.id))
@@ -3723,6 +3788,27 @@ export class SessionService {
       activeBranchRecords,
       firstRecord.sessionId,
     );
+    // Seed the derived list cache so legacy sessions (journal records
+    // predating the sidecar) and forks gain a count on their first open.
+    // Best-effort and only from a complete read: a partial transcript must
+    // not publish an undercount. The journal stays authoritative. Skip the
+    // write when the sidecar already carries this count so a warm load adds
+    // no disk write to the restore path. A zero count heals an existing
+    // stale sidecar (a failed best-effort zero write must not leave a
+    // phantom count forever) but never creates one for an artifact-free
+    // session. An undefined snapshot (no artifact records on the active
+    // branch at all) is a zero count for healing purposes.
+    if (sourceReadComplete) {
+      const count = artifactSnapshot?.artifacts.length ?? 0;
+      const summaryPath = this.getArtifactSummaryPathForState(sessionId, state);
+      const existing = readSessionArtifactSummarySidecar(summaryPath);
+      if (
+        existing?.artifactCount !== count &&
+        (count > 0 || existing !== undefined)
+      ) {
+        writeSessionArtifactSummarySidecar(summaryPath, count);
+      }
+    }
 
     return {
       conversation,
@@ -4148,6 +4234,8 @@ export class SessionService {
     assertCleanupOwned?.();
     this.removeSessionTitleSidecars(sessionId);
     assertCleanupOwned?.();
+    this.removeArtifactSummarySidecars(sessionId);
+    assertCleanupOwned?.();
     this.removePromptLedgers(sessionId);
     assertCleanupOwned?.();
     this.removeFileHistoryBackups(sessionId);
@@ -4235,11 +4323,7 @@ export class SessionService {
           );
           try {
             options.assertCleanupOwned?.();
-            this.reconcileTitleSidecarOnConflict(
-              sessionId,
-              'archived',
-              'active',
-            );
+            this.reconcileSidecarsOnConflict(sessionId, 'archived', 'active');
           } catch (titleSidecarError) {
             options.assertCleanupOwned?.();
             this.warn(
@@ -4397,11 +4481,7 @@ export class SessionService {
           );
           try {
             options.assertCleanupOwned?.();
-            this.reconcileTitleSidecarOnConflict(
-              sessionId,
-              'active',
-              'archived',
-            );
+            this.reconcileSidecarsOnConflict(sessionId, 'active', 'archived');
           } catch (titleSidecarError) {
             options.assertCleanupOwned?.();
             this.warn(
