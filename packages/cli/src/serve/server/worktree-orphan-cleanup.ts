@@ -11,6 +11,7 @@ import {
   GitWorktreeService,
   readWorktreeSessionMarkerStrict,
   readWorktreeSessionStrict,
+  worktreeBranchForSlug,
   worktreeHasWork,
   type SessionService,
   type WorktreeSession,
@@ -443,7 +444,17 @@ export async function executeWorktreeCleanup(
   // checkout.
   const result = await new GitWorktreeService(
     sidecar.originalCwd,
-  ).removeUserWorktree(sidecar.slug, { deleteBranch: true });
+  ).removeUserWorktree(sidecar.slug, {
+    deleteBranch: true,
+    // A sidecar recording the slug-derived branch names a named creation
+    // (which owns its ref); '' or a user branch means detached/in-place,
+    // which never created the slug ref. The recorded base lets the guard
+    // tell agent commits from an unreachable creation base.
+    branchOwned:
+      sidecar.worktreeBranch !== '' &&
+      sidecar.worktreeBranch === worktreeBranchForSlug(sidecar.slug),
+    baseCommit: sidecar.worktreeBase ?? sidecar.originalHeadCommit,
+  });
   if (!result.success) {
     const errorText = result.error ?? 'unknown error';
     if (await checkoutStillPopulated(plan.lockKey)) {
@@ -460,13 +471,13 @@ export async function executeWorktreeCleanup(
     }
     return;
   }
-  if (result.branchPreserved) {
+  if (result.branchPreserved || result.keptBranch) {
     logWarning(
       `worktree cleanup removed checkout but kept branch action=delete session=${safeLogValue(
         sessionId,
       )} slug=${safeLogValue(sidecar.slug)} branch=${safeLogValue(
-        sidecar.worktreeBranch,
-      )} reason=unmerged commits`,
+        result.keptBranch ?? sidecar.worktreeBranch,
+      )} reason=${result.branchPreserved ? 'unmerged commits' : 'branch kept'}`,
     );
   }
 }

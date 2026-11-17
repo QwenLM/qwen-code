@@ -1,5 +1,7 @@
 # Git pull with a dirty working tree
 
+[English](git-pull-dirty-worktree.md) | [简体中文](git-pull-dirty-worktree.zh-CN.md)
+
 ## Goal
 
 Let the Web Shell "Update Project" action succeed when the workspace has
@@ -92,8 +94,17 @@ terminal relying on `git stash pop` order should read `git stash list`
 first.
 
 A plain pull — no option — runs the exact git invocation it always has;
-the only response-level change is that its `output` is now path-redacted
-like every other response. The three options are mutually exclusive:
+its `output` is now path-redacted like every other response. The shared
+route classifier also matches `would lose untracked` (the
+directory-collision refusal; see the
+[checkout dirty-worktree design](2026-11-15-web-shell-git-checkout-dirty-worktree.md)),
+so that shape answers `409 dirty_working_tree` on plain pull too, where
+it previously fell through to an unclassified 500 — when the refusal
+line lands inside the route's 512-character client-message bound: the
+loose keyword branches read the bounded slice, and a plain pull's fetch
+summary on a many-ref update can push the refusal past it (that corner
+stays an unclassified 500, as for the file-collision keywords). The
+three options are mutually exclusive:
 `stash`+`force` and `fetchOnly` combined with either are refused as 400s
 rather than silently dropping one of them.
 
@@ -121,9 +132,13 @@ omission:
   applying or dropping someone else's entry. Nothing is lost in any
   interleaving.
 - **Failures are classified by what the core did, not by matching git's
-  text.** The new codes come from `GitPullFailure`; the pre-existing
-  regex classification in the route is unchanged and still covers the
-  plain pull.
+  text.** The new codes come from `GitPullFailure`; the regex
+  classification in the route is shared with the checkout routes and
+  still covers the plain pull. It gained the `would lose untracked`
+  alternation for the directory-collision refusal (see the
+  [checkout dirty-worktree design](2026-11-15-web-shell-git-checkout-dirty-worktree.md));
+  the stash and force flows type their update failures before the
+  classifier, so their responses are unchanged by it.
 
 ## UI
 

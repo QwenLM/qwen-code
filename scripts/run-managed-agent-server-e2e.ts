@@ -2633,6 +2633,30 @@ async function waitForTerminal(
   return { events, lastSequence: cursor };
 }
 
+// Attests the admission replace path bidirectionally. The caller loop import's
+// marker must be gone (the server replaced it with the profile variant), and a
+// separate probe skill's marker must remain (caller skills reached admission and
+// were published). The loop marker's absence alone has two causes — the replace
+// path ran, or caller skills never arrived — so the preserved probe disambiguates.
+// Kept a top-level pure declaration so the meta-test can extract and execute it.
+function assertCallerImportReplaced(
+  messages: unknown,
+  removedMarker: string,
+  preservedMarker: string,
+): void {
+  const text = JSON.stringify(messages);
+  if (text.includes(removedMarker)) {
+    throw new Error(
+      `Caller loop import survived admission; the replace path did not run. firstRound=${text.slice(0, 1500)}`,
+    );
+  }
+  if (!text.includes(preservedMarker)) {
+    throw new Error(
+      `Caller skills never reached admission; the probe skill marker is absent. firstRound=${text.slice(0, 1500)}`,
+    );
+  }
+}
+
 const failoverFirstMarker = 'MANAGED_SESSION_FAILOVER_FIRST_TURN';
 const failoverSecondMarker = 'MANAGED_SESSION_FAILOVER_SECOND_TURN';
 const bigOutputSource = 'abcdefghijklmnopqrstu长😀'.repeat(
@@ -2943,9 +2967,9 @@ try {
     // a cron tool's own call id in the history means it already executed, so the
     // round after it confirms. The skill tool result alone must not confirm.
     fake = await startFakeOpenAIServer(({ body }) => {
-      // The cron admission classifier (and the loop fire classifier) are
-      // structured side queries delivered as a respond_in_schema synthetic tool.
-      // Answer them with an allow so cron_create is admitted; without this the
+      // cron_create's admission classifies the call through a structured side
+      // query delivered as a respond_in_schema synthetic tool. Answer that
+      // query with an allow so cron_create is admitted; without this the
       // classifier reports unavailable and cron_create is denied unreviewed.
       const tools = Array.isArray(body['tools']) ? body['tools'] : [];
       const schemaTool = tools.find(
@@ -2959,15 +2983,19 @@ try {
             };
           }
         | undefined;
-      if (schemaTool) {
-        // Answer the classifier side query with an allow, matching the stage's
-        // schema exactly: stage 1 permits only shouldBlock (additionalProperties
-        // is false), stage 2 adds thinking/reason. Extra keys fail validation
-        // and report the classifier unavailable, denying cron_create unreviewed.
-        const properties = schemaTool.function?.parameters?.properties ?? {};
+      // Match the block schema, not the tool name: other structured side
+      // queries (title, tool-use summary, next speaker) also emit
+      // respond_in_schema, and a {shouldBlock:false} answer is schema-invalid
+      // for them — it would silently mis-answer a real feature.
+      const blockProperties = schemaTool?.function?.parameters?.properties;
+      if (blockProperties !== undefined && 'shouldBlock' in blockProperties) {
+        // Answer with the stage's own schema exactly: stage 1 permits only
+        // shouldBlock (additionalProperties is false), stage 2 adds
+        // thinking/reason. Extra keys fail validation and report the
+        // classifier unavailable, denying cron_create unreviewed.
         const answer: Record<string, unknown> = { shouldBlock: false };
-        if ('thinking' in properties) answer['thinking'] = '';
-        if ('reason' in properties) answer['reason'] = '';
+        if ('thinking' in blockProperties) answer['thinking'] = '';
+        if ('reason' in blockProperties) answer['reason'] = '';
         return {
           toolCalls: [
             fakeToolCall('respond_in_schema', answer, 'loop-classifier'),
@@ -3366,10 +3394,38 @@ try {
   if (loopSkill) {
     // The managed /loop skill model-turn arm. A creator-bearing definition
     // (files/4) makes the Java admission inject the committed cron loop sidecar
-    // into the Session catalog; the client-initiated skill call loads that body
-    // before the model's first round, and the scripted model drives the real
-    // cron tools (create -> list -> clear). The model is fake, but the skill
-    // loading and tool execution run through the full managed pipeline.
+    // into the Session catalog. The Session-create body carries a caller `loop`
+    // import whose body is the verbatim bundled reference, so admission's
+    // replace path runs as in a real creation: the caller entry is removed and
+    // its invocable flags move onto the variant. The import's description is a
+    // marker the arm asserts is gone, attesting the replace path ran. The
+    // client-initiated skill call loads the variant body before the model's
+    // first round, and the scripted model drives the real cron tools
+    // (create -> list -> clear). The model is fake, but the skill loading and
+    // tool execution run through the full managed pipeline.
+    const contractsDir = path.join(
+      root,
+      'packages/core/src/managed-runtime/contracts',
+    );
+    const readSidecar = (variant: string) =>
+      JSON.parse(
+        readFileSync(
+          path.join(contractsDir, `managed-loop-skill-${variant}.json`),
+          'utf8',
+        ),
+      ) as { description?: string; body: string };
+    const bundledLoopImport = readSidecar('bundled-body');
+    // The caller import's body is the verbatim bundled reference (the exact
+    // bytes isBundledLoop matches, so admission takes the replace path). Its
+    // description carries a marker instead of the bundled prose: the replace
+    // path swaps in the server variant's own description, so the marker leaves
+    // the catalog; a preserve branch would keep the caller entry and its
+    // marker. A second, non-loop probe skill carries another marker the server
+    // does not rewrite: its presence proves caller skills reached admission,
+    // so the loop marker's absence attests the replace path ran rather than
+    // caller skills never arriving. assertCallerImportReplaced checks both.
+    const callerImportMarker = 'CALLER-LOOP-IMPORT-MARKER';
+    const callerProbeMarker = 'CALLER-PROBE-SKILL-MARKER';
     const definitionResponse = await fetch(`${springUrl}/v1/agents`, {
       method: 'POST',
       headers: {
@@ -3403,6 +3459,22 @@ try {
         agent_id: definition.id,
         input: [{ type: 'text', text: '/loop 5m check the deploy' }],
         workspace: { workspace_id: boundWorkspaceId },
+        skills: [
+          {
+            name: 'loop',
+            description: callerImportMarker,
+            body: bundledLoopImport.body,
+            model_invocable: true,
+            user_invocable: true,
+          },
+          {
+            name: 'loopprobe',
+            description: callerProbeMarker,
+            body: 'Probe skill: attests caller skills reached admission.',
+            model_invocable: true,
+            user_invocable: true,
+          },
+        ],
         metadata: { title: 'Managed /loop skill model-turn E2E' },
       }),
     });
@@ -3477,23 +3549,10 @@ try {
     // Discriminate the cron sidecar from the union one with phrases verified
     // against the committed assets: 'requires a fixed interval' is cron-only,
     // 'LoopWakeup' is absent from cron but present in union/wakeup/bundled.
-    const contractsDir = path.join(
-      root,
-      'packages/core/src/managed-runtime/contracts',
-    );
-    const sidecarBody = (variant: string) =>
-      (
-        JSON.parse(
-          readFileSync(
-            path.join(contractsDir, `managed-loop-skill-${variant}.json`),
-            'utf8',
-          ),
-        ) as { body: string }
-      ).body;
     const cronOnlyPhrase = 'requires a fixed interval';
     const unionMarker = 'LoopWakeup';
-    const cronBody = sidecarBody('cron');
-    const unionBody = sidecarBody('union');
+    const cronBody = readSidecar('cron').body;
+    const unionBody = readSidecar('union').body;
     if (
       !cronBody.includes(cronOnlyPhrase) ||
       unionBody.includes(cronOnlyPhrase) ||
@@ -3509,6 +3568,14 @@ try {
         ? loopRequests[0].body['messages']
         : []
     ) as { role?: string }[];
+    // Bidirectional replace-path attestation: the loop import's marker must be
+    // gone (replaced by the server variant) while the probe skill's marker
+    // remains (caller skills reached admission). See assertCallerImportReplaced.
+    assertCallerImportReplaced(
+      firstRoundMessages,
+      callerImportMarker,
+      callerProbeMarker,
+    );
     if (
       JSON.stringify(firstRoundMessages).includes('defaults to session-only')
     ) {
@@ -3565,11 +3632,12 @@ try {
           .map((call) => call.id),
       ),
     );
-    for (const callId of [
+    const cronCallIds = [
       'loop-cron-create',
       'loop-cron-list',
       'loop-cron-delete',
-    ]) {
+    ];
+    for (const callId of cronCallIds) {
       if (!calledIds.has(callId)) {
         throw new Error(`Cron tool ${callId} was never called`);
       }
@@ -3612,7 +3680,12 @@ try {
         sessionId: loopSession.id,
         definitionId: definition.id,
         modelRounds: loopRequests.length,
-        cronToolResults: loopToolResults.length,
+        // The three witnessed calls, not a cumulative tool-message count:
+        // chat-completions bodies repeat every prior result, so the flattened
+        // length grows with the round count instead of the executions.
+        cronToolResults: cronCallIds.filter(
+          (callId) => toolResultFor(callId) !== undefined,
+        ).length,
         managedSkillBody: true,
         cronCreate: true,
         cronList: true,

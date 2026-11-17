@@ -20,6 +20,8 @@ export interface WorkspaceGitStatus {
   branch: string | null;
   /** v2 enriched fields — absent when not a repo or git is unavailable. */
   detached?: boolean;
+  /** false for an unborn HEAD (no commits yet): no worktree base exists. */
+  hasHead?: boolean;
   staged?: number;
   unstaged?: number;
   untracked?: number;
@@ -65,6 +67,7 @@ function sameWorkingTreeStatus(
   const _exhaustive: Record<keyof GitWorkingTreeStatus, true> = {
     branch: true,
     detached: true,
+    hasHead: true,
     hasUpstream: true,
     ahead: true,
     behind: true,
@@ -79,9 +82,13 @@ function sameWorkingTreeStatus(
   // branch is compared even though materialize() overlays the watcher branch:
   // a status.branch delta is the first signal of a checkout the watcher has
   // not yet seen — publishing is intentionally conservative.
+  // hasHead compares with ?? true: the field is optional on the wire and a
+  // one-sided absence must not read as a change (the first-commit transition
+  // false → true is exactly the delta the worktree default waits for).
   return (
     a.branch === b.branch &&
     a.detached === b.detached &&
+    (a.hasHead ?? true) === (b.hasHead ?? true) &&
     a.hasUpstream === b.hasUpstream &&
     a.ahead === b.ahead &&
     a.behind === b.behind &&
@@ -152,6 +159,21 @@ export class WorkspaceGitState {
     // the (possibly stale) summary branch. A missing summary yields the
     // branch-only shape with no `computedAt`, which clients distinguish from
     // "computed and clean".
+    //
+    // Decision (6882263037): the cold-cache shape deliberately omits
+    // `hasHead` (and every other computed field) rather than guessing a
+    // value before the first status refresh lands. Absent `hasHead` means
+    // "not yet computed" — a transient unknown, not a definitive answer.
+    // The worktree default (design D1) intentionally reads this optimistically:
+    // `App.gitModeEligible` arms on `hasHead !== false` and `gitModeIntent`
+    // treats `hasHead === undefined` as transient, so an omitted field keeps
+    // an armed intent alive; only a definitive `hasHead: false` (an unborn
+    // HEAD with no worktree base) clears it. That is the shipped contract,
+    // not a misreading. A consumer that needs a definitive answer before
+    // acting must wait for a payload carrying `computedAt`; the cold-cache
+    // shape is not a reason to fabricate a `hasHead` value. The first payload
+    // after daemon start is branch-only by design; the watcher's refresh
+    // fills the computed fields shortly after.
     if (!status) {
       return { v: 2, workspaceCwd, branch: entry.branch ?? null };
     }
@@ -160,6 +182,7 @@ export class WorkspaceGitState {
       workspaceCwd,
       branch: entry.branch ?? status.branch ?? null,
       detached: status.detached,
+      hasHead: status.hasHead,
       staged: status.staged,
       unstaged: status.unstaged,
       untracked: status.untracked,

@@ -2402,6 +2402,19 @@ export class BridgeClient implements Client {
         'Named sub-sessions require a workspace generation from approval',
       );
     }
+    const sessionId = params['sessionId'];
+    if (
+      sessionId !== undefined &&
+      (!isValidCronTaskRoutingId(sessionId) ||
+        isScheduledTaskRunSource(source) ||
+        params['model'] !== undefined ||
+        params['name'] !== undefined)
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        `\`sessionId\` must be a non-empty string of at most ${MAX_CRON_TASK_ROUTING_ID_LENGTH} characters without control characters, and cannot be combined with \`model\`, \`name\` or a scheduled-task run`,
+      );
+    }
     const model = params['model'];
     const groupId = params['groupId'];
     if (model !== undefined && !isValidCronTaskRoutingId(model)) {
@@ -2429,6 +2442,7 @@ export class BridgeClient implements Client {
       typeof workspaceGeneration === 'string'
         ? { workspace, workspaceGeneration }
         : {}),
+      ...(typeof sessionId === 'string' ? { sessionId } : {}),
       ...source,
       callerSessionId,
     });
@@ -2444,6 +2458,7 @@ export class BridgeClient implements Client {
       ...(result.parentSessionPersisted !== undefined
         ? { parentSessionPersisted: result.parentSessionPersisted }
         : {}),
+      ...(result.taskId !== undefined ? { taskId: result.taskId } : {}),
     };
   }
 

@@ -124,7 +124,10 @@ class MacOsHostIdentityTest {
     @Timeout(10)
     @Test
     void timesOutAndStopsAnUnresponsiveProbe() {
-        assertThrows(IOException.class, () -> MacOsHostIdentity.read("/bin/sleep", "20"));
+        MacOsIdentityProbeTimeoutException timeout = assertThrows(
+                MacOsIdentityProbeTimeoutException.class,
+                () -> MacOsHostIdentity.read("/bin/sleep", "20"));
+        assertEquals("macOS native identity probe timed out", timeout.getMessage());
     }
 
     @EnabledOnOs(OS.MAC)
