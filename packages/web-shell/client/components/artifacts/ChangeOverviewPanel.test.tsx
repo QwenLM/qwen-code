@@ -12,6 +12,7 @@ const mock = vi.hoisted(() => ({
   state: {} as Partial<ChangeOverviewState>,
   refresh: vi.fn(),
   hook: vi.fn(),
+  openExternalLink: vi.fn(),
 }));
 vi.mock('./useChangeOverview', () => ({
   useChangeOverview: (...args: unknown[]) => {
@@ -28,7 +29,7 @@ vi.mock('./useChangeOverview', () => ({
   },
 }));
 vi.mock('../../hooks/useExternalLinkOpener', () => ({
-  useExternalLinkOpener: () => vi.fn(),
+  useExternalLinkOpener: () => mock.openExternalLink,
 }));
 
 const { ChangeOverviewPanel } = await import('./ChangeOverviewPanel');
@@ -94,7 +95,16 @@ beforeEach(() => {
   mock.state = { gitAvailable: true, loading: false, units };
   mock.refresh.mockClear();
   mock.hook.mockClear();
+  mock.openExternalLink.mockClear();
 });
+
+function pressKey(el: Element, key: string) {
+  act(() => {
+    el.dispatchEvent(
+      new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }),
+    );
+  });
+}
 
 afterEach(async () => {
   await act(async () => root.unmount());
@@ -427,5 +437,115 @@ describe('ChangeOverviewPanel', () => {
     expect(
       container.querySelector('button[aria-label="Refresh"]'),
     ).not.toBeNull();
+  });
+
+  it('exposes a roving tabindex, selected state and tabpanel linkage', () => {
+    renderPanel();
+    const chips = container.querySelectorAll('[role="tab"]');
+    expect(chips[0].getAttribute('tabindex')).toBe('0');
+    expect(chips[0].getAttribute('aria-selected')).toBe('true');
+    expect(chips[1].getAttribute('tabindex')).toBe('-1');
+    expect(chips[1].getAttribute('aria-selected')).toBe('false');
+    expect(chips[2].getAttribute('tabindex')).toBe('-1');
+    expect(chips[0].getAttribute('aria-controls')).toBe(
+      'change-overview-tabpanel',
+    );
+    const panel = container.querySelector('[role="tabpanel"]');
+    expect(panel?.id).toBe('change-overview-tabpanel');
+    expect(panel?.getAttribute('aria-labelledby')).toBe(
+      'change-overview-tab-uncommitted',
+    );
+  });
+
+  it('moves selection and focus with ArrowRight, wrapping at the end', () => {
+    renderPanel();
+    const chips = container.querySelectorAll('[role="tab"]');
+    pressKey(chips[0], 'ArrowRight');
+    expect(chips[1].getAttribute('aria-selected')).toBe('true');
+    expect(document.activeElement).toBe(chips[1]);
+    expect(container.textContent).toContain('src/a.ts');
+    pressKey(chips[1], 'ArrowRight');
+    expect(chips[2].getAttribute('aria-selected')).toBe('true');
+    expect(document.activeElement).toBe(chips[2]);
+    pressKey(chips[2], 'ArrowRight');
+    expect(chips[0].getAttribute('aria-selected')).toBe('true');
+    expect(document.activeElement).toBe(chips[0]);
+  });
+
+  it('moves selection backward with ArrowLeft, wrapping at the start', () => {
+    renderPanel();
+    const chips = container.querySelectorAll('[role="tab"]');
+    pressKey(chips[0], 'ArrowLeft');
+    expect(chips[2].getAttribute('aria-selected')).toBe('true');
+    expect(document.activeElement).toBe(chips[2]);
+    pressKey(chips[2], 'ArrowLeft');
+    expect(chips[1].getAttribute('aria-selected')).toBe('true');
+    expect(document.activeElement).toBe(chips[1]);
+  });
+
+  it('jumps to the first and last scope with Home and End', () => {
+    renderPanel();
+    const chips = container.querySelectorAll('[role="tab"]');
+    act(() => {
+      (chips[1] as HTMLButtonElement).click();
+    });
+    pressKey(chips[1], 'Home');
+    expect(chips[0].getAttribute('aria-selected')).toBe('true');
+    expect(document.activeElement).toBe(chips[0]);
+    pressKey(chips[0], 'End');
+    expect(chips[2].getAttribute('aria-selected')).toBe('true');
+    expect(document.activeElement).toBe(chips[2]);
+  });
+
+  it('suppresses the file-count badge for commit scopes but not others', () => {
+    renderPanel();
+    const chips = container.querySelectorAll('[role="tab"]');
+    expect(chips[0].querySelector('[class*="scopeBadge"]')).not.toBeNull();
+    expect(chips[1].querySelector('[class*="scopeBadge"]')).not.toBeNull();
+    expect(chips[2].querySelector('[class*="scopeBadge"]')).toBeNull();
+  });
+
+  it('sanitizes control characters in a commit subject', () => {
+    mock.state = {
+      gitAvailable: true,
+      loadFailed: false,
+      loading: false,
+      units: [
+        {
+          kind: 'commit',
+          id: 'commit:esc',
+          sha: 'esc1234',
+          shortSha: 'esc1234',
+          subject: 'feat:\u001b[31mred',
+          files: [{ path: 'x.ts', additions: 1, deletions: 0 }],
+          additions: 1,
+          deletions: 0,
+          filesCount: 1,
+          hiddenCount: 0,
+        },
+      ],
+    };
+    renderPanel();
+    const title = container.querySelector('[class*="scaleTitle"]');
+    expect(title?.textContent).toContain('\\u001b');
+    expect(title?.textContent).not.toContain('\u001b');
+  });
+
+  it('routes the PR open link through the external-link opener', () => {
+    renderPanel();
+    const chips = container.querySelectorAll('[role="tab"]');
+    act(() => {
+      (chips[1] as HTMLButtonElement).click();
+    });
+    const link = container.querySelector(
+      'a[href="https://github.com/o/r/pull/7"]',
+    ) as HTMLAnchorElement;
+    act(() => {
+      link.click();
+    });
+    expect(mock.openExternalLink).toHaveBeenCalledWith(
+      expect.anything(),
+      'https://github.com/o/r/pull/7',
+    );
   });
 });
