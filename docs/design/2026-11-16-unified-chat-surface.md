@@ -214,8 +214,9 @@ interface SessionChatController {
   readonly sessionId: string;
   readonly storageKey: string;
 
-  // In-flight intents, observable across refresh; `phase: 'cancelling'` is
-  // derived from an unestablished cancel operation (one read path).
+  // In-flight and recently settled intents, observable across refresh;
+  // `phase: 'cancelling'` is derived from an unestablished cancel operation
+  // (one read path). Retention is bounded: see the operations prose below.
   readonly operations: readonly ChatOperation[];
 
   // Transcript: the shared Message model, already projected incrementally.
@@ -247,14 +248,17 @@ interface SessionChatController {
 }
 ```
 
-Long-running intents (submit, cancel, approval, compression, lifecycle, MCP
-commands) are observable contract state: `operations` carries one
-`ChatOperation` per in-flight intent with the generic state above, so the
-surface renders one progress vocabulary for both backends and can restore
-"sent / awaiting outcome" after a refresh. `phase: 'cancelling'` is derived
-from an unestablished cancel operation, not from a resolved `cancel()`
-promise. The contract carries one invariant: **admission is not
-establishment.**
+Long-running intents (submit, cancel, approval, question, compression,
+lifecycle, MCP commands) are observable contract state: `operations` carries
+one `ChatOperation` per intent with the generic state above, so the surface
+renders one progress vocabulary for both backends and can restore "sent /
+awaiting outcome" after a refresh. Terminal entries (`established`,
+`failed`) stay readable until acknowledged — the surface consumes the
+outcome, or a new intent of the same kind supersedes it — and the adapter
+keeps at most the latest terminal entry per kind and target, so `operations`
+never grows without bound. `phase: 'cancelling'` is derived from an
+unestablished cancel operation, not from a resolved `cancel()` promise. The
+contract carries one invariant: **admission is not establishment.**
 
 - A resolved promise or a transport-level acceptance never by itself
   produces `established`; the adapter must hold authoritative evidence
@@ -279,17 +283,22 @@ its sub-controller is present; `ChatCapabilities` flags are derived from the
 same facts and gate auxiliary controls — presence is the single authority.
 
 `ChatCapabilities` mirrors the existing capability style of
-`ManagedAgentSessionSummary.capabilities` and daemon capabilities: the
-surface gates every optional region on a flag, never on `kind`. Each adapter
-owns the mapping from its backend's capability shape (the daemon feature
-list; the managed optional booleans) to `ChatCapabilities`. Omission must be
-a compile error, not a shared blind spot between a hand-written map and a
-hand-written table: the managed map is typed against
-`keyof ManagedAgentSessionSummary['capabilities']` with a key-set assertion
-off a `Required<>` fixture (which also decides the tri-state
-`terminal?: boolean | null`), and the daemon map is pinned against a
-checked-in snapshot of the canonical feature tags, so a tag added by a later
-release fails the snapshot instead of silently hiding a region.
+`ManagedAgentSessionSummary.capabilities` and daemon capabilities. The
+surface never branches on `kind`: a region renders only when its
+sub-controller is present (the single authority, as stated above), and the
+flags — derived from the same facts — gate auxiliary controls within a
+region. Each adapter owns the mapping from its backend's capability shape
+(the daemon feature list; the managed optional booleans) to
+`ChatCapabilities`. Omission must be a compile error, not a shared blind
+spot between a hand-written map and a hand-written table: the managed map is
+typed against `keyof ManagedAgentSessionSummary['capabilities']` with a
+key-set assertion off a `Required<>` fixture (which also decides the
+tri-state `terminal?: boolean | null`), and the daemon map is an exhaustive
+typed record over the canonical feature-tag union — the registry-keyed
+pattern already used by `CAPABILITY_PARITY: Record<ServeFeature, ParityRow>`
+in the CLI serve layer, with the union's shared home settled in slice 1 —
+so a tag added by a later release is a compile error, not a silently hidden
+region.
 
 ### ChatSurface component
 
@@ -374,7 +383,7 @@ separately. Each slice is an independently shippable PR with its own tests.
 
 1. **Contract and characterization pins.** Add `chat-core` with the contract
    types, the capability model, and the capability-mapping guards (typed
-   managed map, `Required<>` key-set fixture, daemon tag snapshot); add
+   managed map, `Required<>` key-set fixture, exhaustive daemon-tag record); add
    DOM-level characterization tests pinning the current behavior of all
    three chat columns (composer submit, approval answering, status display,
    draft restore); pin the admission/outcome truth table as pure-function
@@ -385,12 +394,12 @@ separately. Each slice is an independently shippable PR with its own tests.
 2. **Extract ChatSurface, daemon main column switches.** Move the main chat
    column out of `App.tsx` into `ChatSurface` plus the daemon adapter,
    creating the composer status stack component from the inline JSX. The
-   shared transcript/approval/composer components that `ChatSurface` renders
-   (`MessageList`, `ToolApproval`, `ChatEditor`) are decoupled from daemon
-   value imports here, before the kernel may import them, and the daemon
-   adapter's negative tests land with it. The visual before/after preview
-   must show no unexplained daemon-side difference. Managed and `ChatPane`
-   are untouched.
+   shared approval/composer components that `ChatSurface` renders
+   (`ToolApproval`, `ChatEditor`) are decoupled from daemon value imports
+   here, before the kernel may import them (`MessageList`'s SDK imports are
+   type-only and erased at build), and the daemon adapter's negative tests
+   land with it. The visual before/after preview must show no unexplained
+   daemon-side difference. Managed and `ChatPane` are untouched.
 3. **Managed switches, duplicated orchestration deleted.** Add the managed
    adapter with its negative tests; the managed chat column renders
    `ChatSurface`; delete the replaced transcript/composer/approval/status
@@ -429,7 +438,7 @@ affected region has moved, so the migration does not race feature work.
   `daemon-react-sdk` (which re-exports `daemon/index.ts`, which
   value-exports from `@qwen-code/sdk/daemon`), and shared message components
   such as `SystemMessage.tsx` import `@qwen-code/sdk/daemon` directly. The
-  shared transcript/approval/composer edges are decoupled in slice 2 because
+  shared approval/composer value-import edges are decoupled in slice 2 because
   `ChatSurface` renders them; slice 6 clears the whole remaining graph, not
   a named subset, before the guards land. Until then the no-daemon-import
   constraint applies to `chat-core`'s own modules, not to the whole managed

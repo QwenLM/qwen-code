@@ -190,8 +190,8 @@ interface SessionChatController {
   readonly sessionId: string;
   readonly storageKey: string;
 
-  // 在飞意图，跨刷新可观察；`phase: 'cancelling'` 由未确立的取消操作
-  // 派生（单一读取路径）。
+  // 在飞与近期已结算的意图，跨刷新可观察；`phase: 'cancelling'` 由未确立
+  // 的取消操作派生（单一读取路径）。保留有界：见下文 operations 正文。
   readonly operations: readonly ChatOperation[];
 
   // 转录：共享 Message 模型，已由投影器增量投影。
@@ -222,12 +222,14 @@ interface SessionChatController {
 }
 ```
 
-长时意图（提交、取消、审批、压缩、生命周期、MCP 命令）是可观察的契约
-状态：`operations` 为每个在飞意图携带一个 `ChatOperation`，使用上述通用
+长时意图（提交、取消、审批、提问、压缩、生命周期、MCP 命令）是可观察的
+契约状态：`operations` 为每个意图携带一个 `ChatOperation`，使用上述通用
 状态，使聊天面对两种后端渲染同一套进度语汇，并能在刷新后恢复「已发送 /
-等待结果」。`phase: 'cancelling'` 由未确立的取消操作派生，而不是由
-`cancel()` 的 Promise resolve 派生。契约携带一条不变式：**受理不等于
-确立。**
+等待结果」。终态条目（`established`、`failed`）保持可读直到被确认——
+聊天面消费了结果，或同类新意图取代它——且适配器对每个 kind 与 target
+至多保留最新一条终态条目，因此 `operations` 绝不会无界增长。
+`phase: 'cancelling'` 由未确立的取消操作派生，而不是由 `cancel()` 的
+Promise resolve 派生。契约携带一条不变式：**受理不等于确立。**
 
 - Promise resolve 或传输层受理绝不单独产生 `established`；适配器必须
   持有权威证据（回合结束、结算回执、决定作用于仍当前的
@@ -248,14 +250,17 @@ interface SessionChatController {
 唯一权威。
 
 `ChatCapabilities` 沿用 `ManagedAgentSessionSummary.capabilities` 与 daemon
-capabilities 的既有能力风格：聊天面对每个可选区域的门控只看标志，绝不看
-`kind`。每个适配器拥有从自己后端的能力形状（daemon 特性列表；managed
-可选布尔）到 `ChatCapabilities` 的映射。遗漏必须是编译错误，而不是手写
-映射与手写测试表共享的盲区：managed 映射以
+capabilities 的既有能力风格。聊天面绝不在 `kind` 上分支：区域只有在其
+子控制器存在时才渲染（如上所述，存在性是唯一权威），标志由同一事实
+派生，门控区域内部的辅助控件。每个适配器拥有从自己后端的能力形状
+（daemon 特性列表；managed 可选布尔）到 `ChatCapabilities` 的映射。遗漏
+必须是编译错误，而不是手写映射与手写测试表共享的盲区：managed 映射以
 `keyof ManagedAgentSessionSummary['capabilities']` 定型，并配一个基于
 `Required<>` 夹具的键集断言（同时决定三态 `terminal?: boolean | null` 的
-语义）；daemon 映射以一份入库的规范特性标签快照钉住，使后续版本新增的
-标签打红快照，而不是悄悄隐藏一个区域。
+语义）；daemon 映射是对规范特性标签联合的穷举定型记录——即 CLI serve
+层已在用的 `CAPABILITY_PARITY: Record<ServeFeature, ParityRow>` 注册表
+键控模式，联合的共享归属在切片 1 确定——使后续版本新增的标签成为编译
+错误，而不是悄悄隐藏一个区域。
 
 ### ChatSurface 组件
 
@@ -323,18 +328,19 @@ managed 诊断/任务/恢复/终端）由所属页面以插槽传入。
 的测试。
 
 1. **契约与特征钉桩。** 新增 `chat-core`，含契约类型、能力模型与能力
-   映射守卫（定型 managed 映射、`Required<>` 键集夹具、daemon 标签
-   快照）；新增 DOM 级特征测试，钉住三个聊天列的当前行为（输入框提交、
+   映射守卫（定型 managed 映射、`Required<>` 键集夹具、daemon 标签穷举
+   记录）；新增 DOM 级特征测试，钉住三个聊天列的当前行为（输入框提交、
    审批应答、状态展示、草稿恢复）；以纯函数测试钉住受理/结果真值表。
    证明传输层成功绝不单独产生 `established` 的每适配器负例测试——覆盖
    延迟的回合结果、未结算的取消、被取代的审批——随各适配器在切片 2
    与 3 落地，不在本切片。无行为变化。
 2. **抽取 ChatSurface，daemon 主列切换。** 把主聊天列从 `App.tsx` 迁入
    `ChatSurface` 加 daemon 适配器，并从内联 JSX 创建输入框状态栈组件。
-   `ChatSurface` 渲染的共享转录/审批/输入框组件（`MessageList`、
-   `ToolApproval`、`ChatEditor`）在此与 daemon 值导入解耦——先于内核
-   引入它们；daemon 适配器的负例测试随其落地。视觉 before/after 预览
-   不得出现无法解释的 daemon 侧差异。managed 与 `ChatPane` 不动。
+   `ChatSurface` 渲染的共享审批/输入框组件（`ToolApproval`、
+   `ChatEditor`）在此与 daemon 值导入解耦——先于内核引入它们
+   （`MessageList` 的 SDK 导入是 type-only，构建时擦除）；daemon 适配器
+   的负例测试随其落地。视觉 before/after 预览不得出现无法解释的
+   daemon 侧差异。managed 与 `ChatPane` 不动。
 3. **managed 切换，删除重复编排。** 新增 managed 适配器及其负例测试；
    managed 聊天列渲染 `ChatSurface`；从 `ManagedSessionsPage.tsx` 删除
    被替换的转录/输入框/审批/状态编排。managed 专属面板变为插槽。
@@ -364,7 +370,7 @@ managed 诊断/任务/恢复/终端）由所属页面以插槽传入。
   以下例子是示意，不是穷举清单：`ChatEditor.tsx` 从 `daemon-react-sdk`
   值导入 `useOptionalWorkspace`（后者重导出 `daemon/index.ts`，后者从
   `@qwen-code/sdk/daemon` 值导出），共享消息组件如 `SystemMessage.tsx`
-  直接导入 `@qwen-code/sdk/daemon`。共享转录/审批/输入框的边在切片 2
+  直接导入 `@qwen-code/sdk/daemon`。共享审批/输入框的值导入边在切片 2
   解耦，因为 `ChatSurface` 渲染它们；切片 6 清空整个剩余图，而不是
   点名的子集，然后守卫才落地。在此之前，无 daemon 导入约束适用于
   `chat-core` 自身模块，而非整个 managed 源码图。
