@@ -138,7 +138,6 @@ export async function* parseSseStream(
           // single-frame fallback) which silently dropped events.
           const consumed = consumeFrames(buf);
           for (const raw of consumed.frames) {
-            if (signal?.aborted) return;
             const frame = parseFrame(raw);
             if (frame) yield frame;
           }
@@ -146,7 +145,6 @@ export async function* parseSseStream(
           // legitimate trailing fragment (no `\n\n` ever arrived);
           // try to parse it once as a final attempt.
           if (consumed.tail.length > 0) {
-            if (signal?.aborted) return;
             const frame = parseFrame(consumed.tail);
             if (frame) yield frame;
           }

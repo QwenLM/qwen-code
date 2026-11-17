@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { parseSseStream } from '../../src/daemon/sse.js';
+import { parseSseStream, SseFramingError } from '../../src/daemon/sse.js';
 import type { DaemonEvent } from '../../src/daemon/types.js';
 
 function bodyFromString(s: string): ReadableStream<Uint8Array> {
@@ -81,6 +81,29 @@ describe('parseSseStream', () => {
       },
     });
     expect(await collect(parseSseStream(body, controller.signal))).toEqual([]);
+  });
+
+  it('completes cleanly when an oversized read settles during cancellation', async () => {
+    const controller = new AbortController();
+    let source!: ReadableStreamDefaultController<Uint8Array>;
+    const body = new ReadableStream<Uint8Array>({
+      start(stream) {
+        source = stream;
+      },
+    });
+    const pending = collect(parseSseStream(body, controller.signal));
+    source.enqueue(new Uint8Array(16 * 1024 * 1024 + 1).fill(0x78));
+    controller.abort();
+
+    await expect(pending).resolves.toEqual([]);
+  });
+
+  it('rejects an oversized separator-free read without cancellation', async () => {
+    const body = bodyFromString('x'.repeat(16 * 1024 * 1024 + 1));
+
+    await expect(collect(parseSseStream(body))).rejects.toBeInstanceOf(
+      SseFramingError,
+    );
   });
 
   it('parses a single frame', async () => {
