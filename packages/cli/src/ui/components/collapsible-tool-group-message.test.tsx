@@ -825,6 +825,104 @@ describe('<CollapsibleToolGroupMessage />', () => {
     expect(lastFrame()).toContain('very long result');
   });
 
+  it('keeps one tool group mounted through expand-collapse-expand', () => {
+    vi.useFakeTimers();
+    const view = renderCollapsedTool();
+    const initialMounts = toolGroupMountSpy.mock.calls.length;
+    const click = () => {
+      const handler = vi.mocked(useMouseEvents).mock.calls.at(-1)?.[0];
+      act(() => {
+        handler?.(mouseEvent('left-press', 5));
+        handler?.(mouseEvent('left-release', 5));
+      });
+    };
+
+    click();
+    expect(view.lastFrame()).toContain('very long result');
+    act(() => vi.advanceTimersByTime(MULTI_CLICK_MS + 1));
+    click();
+    act(() => vi.advanceTimersByTime(MULTI_CLICK_MS + 1));
+    expect(view.lastFrame()).toContain('click to expand');
+    click();
+    expect(view.lastFrame()).toContain('very long result');
+    expect(initialMounts).toBeGreaterThan(0);
+    expect(toolGroupMountSpy).toHaveBeenCalledTimes(initialMounts);
+  });
+
+  it.each([
+    'full detail',
+    'show tool details',
+    'required interaction',
+    'pending tool',
+    'externally collapsed batch',
+    'different batch',
+  ])('cancels an armed collapse after switching to %s', (change) => {
+    vi.useFakeTimers();
+    const toggleBatch = vi.fn();
+    const renderGroup = (changed = false) => (
+      <ToolDetailsExpandedProvider
+        value={{
+          expandedBatchIds:
+            changed && change === 'externally collapsed batch'
+              ? new Set<string>()
+              : new Set(['batch-original', 'batch-next']),
+          toggleBatch,
+        }}
+      >
+        <VirtualViewportContext.Provider value={true}>
+          <CollapsibleToolGroupMessage
+            toolCalls={[
+              changed && change === 'required interaction'
+                ? { ...tool, status: ToolCallStatus.Confirming }
+                : tool,
+            ]}
+            groupId={1}
+            contentWidth={96}
+            isPending={changed && change === 'pending tool'}
+            fullDetail={changed && change === 'full detail'}
+            expansionKey={
+              changed && change === 'different batch'
+                ? 'batch-next'
+                : 'batch-original'
+            }
+          />
+        </VirtualViewportContext.Provider>
+      </ToolDetailsExpandedProvider>
+    );
+    const options = { settings: collapsedSettings, config: {} as Config };
+    const view = renderWithProviders(renderGroup(), options);
+    const handler = vi.mocked(useMouseEvents).mock.calls.at(-1)?.[0];
+    act(() => {
+      handler?.(mouseEvent('left-press', 5));
+      handler?.(mouseEvent('left-release', 5));
+    });
+    expect(toggleBatch).not.toHaveBeenCalled();
+
+    const settings =
+      change === 'show tool details'
+        ? new LoadedSettings(
+            emptySettingsFile,
+            emptySettingsFile,
+            {
+              path: '',
+              settings: {
+                ui: { showToolCallDetails: true, useTerminalBuffer: true },
+              },
+              originalSettings: {},
+            },
+            emptySettingsFile,
+            true,
+            new Set(),
+          )
+        : collapsedSettings;
+    view.rerender(withProviders(renderGroup(true), { ...options, settings }));
+    // Restoring the old state before the deadline must not revive the click.
+    view.rerender(withProviders(renderGroup(), options));
+    act(() => vi.advanceTimersByTime(MULTI_CLICK_MS + 1));
+    expect(toggleBatch).not.toHaveBeenCalled();
+    expect(view.lastFrame()).toContain('very long result');
+  });
+
   it('keeps expanded tool state mounted across full-detail changes', () => {
     const renderGroup = (fullDetail = false) => (
       <VirtualViewportContext.Provider value={true}>

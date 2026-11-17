@@ -16,7 +16,7 @@ groups render as one line containing only status, tool name, count, elapsed
 time, and an expansion hint. Arguments, results, images, and notices remain in
 the history item and are only hidden by the renderer.
 
-In Virtualized History with mouse tracking enabled, clicking the collapsed row
+In the Ink renderer's Virtualized History with mouse tracking enabled, clicking the collapsed row
 expands that tool group immediately on release, including the first click of
 multi-click selection. A single click on the first row of a completed expanded
 group collapses it after the multi-click window. A follow-up click in the same
@@ -32,6 +32,12 @@ their mounted lifetime. In append-only terminal mode, the row points to
 `Ctrl+O`, which already opens full transcript detail. Approval prompts,
 user-initiated shell calls, and focused interactive shells stay expanded because
 collapsing them would hide required interaction.
+
+The Ink tool-group shell stays mounted while details expand or collapse. A
+pending collapse is cancelled if full-detail mode, the setting, required
+interaction, pending status, external expansion state, or the target batch changes.
+OpenTUI supports clicking a compact card to expand it; clicking again does not
+collapse that card.
 
 The setting is runtime-only UI state: it does not change tool execution,
 recording, model context, or serialized history.
@@ -54,3 +60,6 @@ recording, model context, or serialized history.
 - Verify a pending group can expand but cannot collapse until it completes.
 - Verify approval prompts and focused/user-initiated shells remain expanded.
 - Verify `Ctrl+O` still forces full detail.
+- Verify expand/collapse preserves the tool-group instance, and state or batch
+  changes cancel an armed collapse even if the previous state is restored before
+  its deadline.

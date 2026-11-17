@@ -301,6 +301,9 @@ export const CollapsibleToolGroupMessage: React.FC<
       setLocallyExpanded((value) => !value);
     }
   }, [expansionKey, toggleBatch]);
+  const canCollapse = isActive && clickable && expanded && !props.isPending;
+  const collapseStateRef = useRef({ canCollapse, expansionKey, toggleBatch });
+  collapseStateRef.current = { canCollapse, expansionKey, toggleBatch };
   const cancelPendingCollapse = useCallback(() => {
     if (collapseTimerRef.current !== null) {
       clearTimeout(collapseTimerRef.current);
@@ -311,11 +314,20 @@ export const CollapsibleToolGroupMessage: React.FC<
     cancelPendingCollapse();
     collapseTimerRef.current = setTimeout(() => {
       collapseTimerRef.current = null;
-      toggleExpanded();
+      const current = collapseStateRef.current;
+      if (!current.canCollapse || current.expansionKey !== expansionKey) return;
+      if (expansionKey) {
+        current.toggleBatch(expansionKey);
+      } else {
+        setLocallyExpanded(false);
+      }
     }, MULTI_CLICK_MS);
-  }, [cancelPendingCollapse, toggleExpanded]);
+  }, [cancelPendingCollapse, expansionKey]);
 
-  useEffect(() => cancelPendingCollapse, [cancelPendingCollapse]);
+  useEffect(
+    () => cancelPendingCollapse,
+    [cancelPendingCollapse, canCollapse, expansionKey],
+  );
 
   useMouseEvents(
     useCallback(
@@ -430,21 +442,21 @@ export const CollapsibleToolGroupMessage: React.FC<
     { isActive: isActive && clickable },
   );
 
-  if (!collapsed) {
-    return (
-      <Box ref={isActive ? ref : undefined} flexDirection="column">
-        <ToolGroupMessage {...props} />
-      </Box>
-    );
-  }
-
   return (
-    <ToolGroupMessage
-      {...props}
-      hideDetails
-      expandHint={clickable ? 'click to expand' : 'ctrl+o to expand'}
-      summaryRef={ref}
-    />
+    <Box ref={!collapsed && isActive ? ref : undefined} flexDirection="column">
+      <ToolGroupMessage
+        {...props}
+        hideDetails={collapsed}
+        expandHint={
+          collapsed
+            ? clickable
+              ? 'click to expand'
+              : 'ctrl+o to expand'
+            : undefined
+        }
+        summaryRef={collapsed ? ref : undefined}
+      />
+    </Box>
   );
 };
 
