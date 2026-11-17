@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { type MutableRefObject, useCallback } from 'react';
+import { type MutableRefObject, useCallback, useEffect, useRef } from 'react';
 import { type DOMElement } from 'ink';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import { useMouseEvents } from '../../hooks/useMouseEvents.js';
@@ -18,6 +18,12 @@ import {
   visualClickToOffset,
   type ClickableBufferState,
 } from '../../utils/input-mouse.js';
+import {
+  TextSelectionController,
+  type SelectionQuery,
+} from '../../selection/use-text-selection.js';
+import { cpSlice } from '../../utils/textUtils.js';
+import type { NormalizedSelection } from '../../selection/selection-state.js';
 
 export interface TextInputMouseControllerProps {
   /** The lines container node (the text area, positioned after the prefix). */
@@ -32,13 +38,10 @@ export interface TextInputMouseControllerProps {
 }
 
 /**
- * Headless mouse layer for the prompt input: a left-click positions the text
- * cursor under the pointer. Rendered only while mouse input is enabled, so its
+ * Headless mouse layer for the prompt input: a click positions the cursor on
+ * release, while a drag selects and copies text. Rendered only while mouse input is enabled, so its
  * provider dependencies (KeypressProvider, via useMouseEvents) are only
  * required then.
- *
- * Only `left-press` is handled — the input has no hover behavior — so this
- * subscribes at the cheaper `'button'` tracking level (no bare-motion stream).
  *
  * Coordinates are taken relative to the measured lines container, so the input
  * border row and the prefix column are accounted for automatically. Like the
@@ -49,15 +52,79 @@ export function TextInputMouseController({
   linesRef,
   buffer,
   visibleLineCount,
-}: TextInputMouseControllerProps): null {
+}: TextInputMouseControllerProps) {
   const { rows: terminalHeight } = useTerminalSize();
   // Quiet while the context menu owns the pointer so a click on the menu
   // overlay can't also move the composer cursor underneath it.
   const { menu: contextMenu } = useContextMenu();
+  const selectionQueryRef = useRef<SelectionQuery | null>(null);
+  const pressRef = useRef<{
+    col: number;
+    row: number;
+    offset: number;
+    dragged: boolean;
+    lines: string[];
+    scrollRow: number;
+  } | null>(null);
+  useEffect(() => {
+    if (contextMenu !== null) pressRef.current = null;
+  }, [contextMenu]);
+
+  const getViewportRect = useCallback(() => {
+    const node = linesRef.current;
+    if (!node) return null;
+    const rect = measureElementPosition(node);
+    return { ...rect, height: Math.min(rect.height, visibleLineCount) };
+  }, [linesRef, visibleLineCount]);
+
+  const getSelectionText = useCallback(
+    (selection: NormalizedSelection) => {
+      const rect = getViewportRect();
+      if (!rect) return '';
+      const start = visualClickToOffset(
+        buffer,
+        buffer.visualScrollRow + selection.sy - rect.y,
+        Math.max(0, selection.sx - rect.x),
+      );
+      const end = visualClickToOffset(
+        buffer,
+        buffer.visualScrollRow + selection.ey - rect.y,
+        Math.max(0, selection.ex - rect.x + 1),
+      );
+      return start !== null && end !== null
+        ? cpSlice(buffer.lines.join('\n'), start, end)
+        : '';
+    },
+    [buffer, getViewportRect],
+  );
 
   const handleMouse = useCallback(
     (event: MouseEvent) => {
+      if (event.name === 'move') {
+        const press = pressRef.current;
+        if (press && (event.col !== press.col || event.row !== press.row)) {
+          press.dragged = true;
+        }
+        return;
+      }
+      if (event.name === 'left-release') {
+        const press = pressRef.current;
+        pressRef.current = null;
+        if (
+          press &&
+          !press.dragged &&
+          event.col === press.col &&
+          event.row === press.row &&
+          buffer.lines === press.lines &&
+          buffer.visualScrollRow === press.scrollRow &&
+          !selectionQueryRef.current?.getRange()
+        ) {
+          buffer.moveToOffset(press.offset);
+        }
+        return;
+      }
       if (event.name !== 'left-press') return;
+      pressRef.current = null;
 
       const lines = linesRef.current;
       if (!lines) return;
@@ -76,7 +143,16 @@ export function TextInputMouseController({
         absoluteVisualRow,
         clickVisualCol,
       );
-      if (offset !== null) buffer.moveToOffset(offset);
+      if (offset !== null) {
+        pressRef.current = {
+          col: event.col,
+          row: event.row,
+          offset,
+          dragged: false,
+          lines: buffer.lines,
+          scrollRow: buffer.visualScrollRow,
+        };
+      }
     },
     [linesRef, buffer, visibleLineCount, terminalHeight],
   );
@@ -86,5 +162,19 @@ export function TextInputMouseController({
     tracking: 'button',
   });
 
-  return null;
+  return (
+    <TextSelectionController
+      isActive={buffer.lines.some((line) => line.length > 0)}
+      eventsPaused={contextMenu !== null}
+      getViewportRect={getViewportRect}
+      getScrollState={() => ({
+        scrollTop: buffer.visualScrollRow,
+        scrollHeight: buffer.allVisualLines.length,
+        innerHeight: visibleLineCount,
+      })}
+      hitTestScrollbar={() => false}
+      selectionQueryRef={selectionQueryRef}
+      getSelectionText={getSelectionText}
+    />
+  );
 }

@@ -72,6 +72,27 @@ describe('ThemeDialog Snapshots', () => {
     vi.restoreAllMocks();
   });
 
+  it('keeps the active theme visible in a short narrow dialog', () => {
+    const settings = createMockSettings({ ui: { theme: DEFAULT_THEME.name } });
+    const { lastFrame } = render(
+      <SettingsContext.Provider value={settings}>
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <ThemeDialog
+            {...baseProps}
+            settings={settings}
+            terminalWidth={40}
+            availableTerminalHeight={11}
+          />
+        </KeypressProvider>
+      </SettingsContext.Provider>,
+    );
+    const frame = lastFrame()!;
+    expect(frame).toContain(DEFAULT_THEME.name);
+    expect(frame).toContain('Enter');
+    expect(frame).not.toContain('fibonacci');
+    expect(frame.split('\n').length).toBeLessThanOrEqual(11);
+  });
+
   it('should render correctly in theme selection mode', () => {
     const settings = createMockSettings();
     const { lastFrame } = render(

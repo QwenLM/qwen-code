@@ -9,7 +9,7 @@ import { Box, Text } from 'ink';
 import { theme } from '../../../semantic-colors.js';
 import { ICON } from '../../../constants.js';
 import { useKeypress } from '../../../hooks/useKeypress.js';
-import { useTerminalSize } from '../../../hooks/useTerminalSize.js';
+import { useDialogSize } from '../../../contexts/DialogSizeContext.js';
 import { keyMatchers, Command } from '../../../keyMatchers.js';
 import { t } from '../../../../i18n/index.js';
 import { stripUnsafeCharacters } from '../../../utils/textUtils.js';
@@ -347,10 +347,10 @@ export const InstalledTab = ({
     return () => removeMCPStatusChangeListener(listener);
   }, []);
 
-  const { rows: terminalRows } = useTerminalSize();
+  const { rows: terminalRows, isDialog } = useDialogSize();
   // One line per display row; reserve space for the dialog border, tab bar,
   // scroll hints, status line (which may wrap) and footer around this tab.
-  const visibleCount = Math.max(6, (terminalRows || 24) - 12);
+  const visibleCount = Math.max(isDialog ? 1 : 6, (terminalRows || 24) - 12);
   const [scrollOffset, setScrollOffset] = useState(0);
 
   // Flatten the grouped list into display rows (headers, items, gaps) so the

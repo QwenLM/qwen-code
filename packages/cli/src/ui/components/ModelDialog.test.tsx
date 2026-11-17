@@ -670,6 +670,30 @@ describe('<ModelDialog />', () => {
     expect(props.maxItemsToShow).toBe(1);
   });
 
+  it('keeps model selection and shortcuts while omitting details on short screens', () => {
+    const { queryByText, getByText } = renderComponent(
+      { availableTerminalHeight: 11 },
+      {
+        getModel: vi.fn(() => 'model-1'),
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'model-1',
+            label: 'Model 1',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'https://example.test/v1',
+          },
+        ]),
+      },
+    );
+    expect(getByText('Select Model')).toBeDefined();
+    expect(
+      getByText('Enter to select, ↑↓ to navigate, Esc to close'),
+    ).toBeDefined();
+    expect(queryByText(/Base URL/)).toBeNull();
+    expect(mockedSelect.mock.calls[0][0].maxItemsToShow).toBeGreaterThan(0);
+  });
+
   it('accounts for the taller two-row option height when descriptions are present', () => {
     renderComponent(
       { availableTerminalHeight: 20 },

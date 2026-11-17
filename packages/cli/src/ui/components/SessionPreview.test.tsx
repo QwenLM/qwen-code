@@ -6,6 +6,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderWithProviders } from '../../test-utils/render.js';
 import { SessionPreview } from './SessionPreview.js';
+import { DialogSizeProvider } from '../contexts/DialogSizeContext.js';
+import { act } from '@testing-library/react';
+import {
+  ContextMenuProvider,
+  useContextMenu,
+} from '../context-menu/ContextMenuContext.js';
+import { ContextMenuOverlay } from '../context-menu/ContextMenuOverlay.js';
 
 beforeEach(() => {
   Object.defineProperty(process.stdout, 'columns', {
@@ -80,6 +87,92 @@ function fakeResumedData(
 }
 
 describe('SessionPreview', () => {
+  it('keeps preview navigation paused while its context menu owns Enter and Escape', async () => {
+    const onExit = vi.fn();
+    const onResume = vi.fn();
+    const onCopy = vi.fn();
+    let openMenu: ReturnType<typeof useContextMenu>['openMenu'] | undefined;
+    function MenuProbe() {
+      openMenu = useContextMenu().openMenu;
+      return null;
+    }
+    const { stdin, lastFrame } = renderWithProviders(
+      <ContextMenuProvider>
+        <DialogSizeProvider value={{ columns: 70, rows: 20 }}>
+          <SessionPreview
+            sessionService={mockService(fakeResumedData())}
+            sessionId="s1"
+            onExit={onExit}
+            onResume={onResume}
+          />
+        </DialogSizeProvider>
+        <MenuProbe />
+        <ContextMenuOverlay />
+      </ContextMenuProvider>,
+    );
+    await wait(150);
+    const showMenu = () =>
+      act(() => {
+        openMenu?.(
+          [{ id: 'copy', label: 'Copy Selection', onSelect: onCopy }],
+          {
+            x: 0,
+            y: 0,
+          },
+        );
+      });
+    showMenu();
+    expect(lastFrame()).toContain('Copy Selection');
+    stdin.write('\r');
+    await wait();
+    expect(onCopy).toHaveBeenCalledOnce();
+    expect(onResume).not.toHaveBeenCalled();
+    showMenu();
+    stdin.write('\u001b');
+    await wait();
+    expect(onExit).not.toHaveBeenCalled();
+    expect(lastFrame()).not.toContain('Copy Selection');
+    stdin.write('\u001b');
+    await wait();
+    expect(onExit).toHaveBeenCalledOnce();
+  });
+
+  it('uses a bounded scrolling viewport inside a popup and preserves the return action', async () => {
+    const svc = mockService(
+      fakeResumedData([
+        {
+          text: Array.from(
+            { length: 50 },
+            (_, index) => `PREVIEW-LINE-${index + 1}`,
+          ).join('\n'),
+        },
+      ]),
+    );
+    const onExit = vi.fn();
+    const { lastFrame, stdin } = renderWithProviders(
+      <DialogSizeProvider value={{ columns: 70, rows: 20 }}>
+        <SessionPreview
+          sessionService={svc}
+          sessionId="s1"
+          sessionTitle="Bounded preview"
+          onExit={onExit}
+          onResume={vi.fn()}
+        />
+      </DialogSizeProvider>,
+    );
+    await wait(150);
+    expect((lastFrame() ?? '').split('\n').length).toBeLessThanOrEqual(20);
+    expect(lastFrame()).toContain('Bounded preview');
+    expect(lastFrame()).not.toContain('PREVIEW-LINE-50');
+    for (let i = 0; i < 6; i++) {
+      stdin.write('\u001b[6~');
+      await wait(20);
+    }
+    expect(lastFrame()).toContain('PREVIEW-LINE-50');
+    stdin.write('\u001b');
+    await wait();
+    expect(onExit).toHaveBeenCalledOnce();
+  });
   it('shows loading state before data arrives', () => {
     const svc = mockService(new Promise(() => {})); // never resolves
     const { lastFrame } = renderWithProviders(

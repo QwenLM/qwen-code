@@ -8,7 +8,7 @@ import { useState, useMemo, useCallback, useEffect } from 'react';
 import { Box, Text } from 'ink';
 import type { HistoryItem, HistoryItemUser } from '../types.js';
 import { theme } from '../semantic-colors.js';
-import { useTerminalSize } from '../hooks/useTerminalSize.js';
+import { useDialogSize } from '../contexts/DialogSizeContext.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../keyMatchers.js';
 import { truncateText } from '../utils/sessionPickerUtils.js';
@@ -159,7 +159,7 @@ export function RewindSelector({
   fileCheckpointingEnabled,
   fileHistoryService,
 }: RewindSelectorProps) {
-  const { columns: width, rows: height } = useTerminalSize();
+  const { columns: width, rows: height, isDialog } = useDialogSize();
   const userTurns = useMemo(() => getUserTurns(history), [history]);
 
   const [selectedIndex, setSelectedIndex] = useState(userTurns.length - 1);
@@ -172,8 +172,16 @@ export function RewindSelector({
   const [loadingDiff, setLoadingDiff] = useState(false);
   const [isRestoring, setIsRestoring] = useState(false);
 
-  const boxWidth = width - 4;
-  const maxVisibleItems = Math.min(MAX_VISIBLE_ITEMS, userTurns.length);
+  const boxWidth = Math.max(4, width - (isDialog ? 0 : 4));
+  const maxVisibleItems = Math.min(
+    MAX_VISIBLE_ITEMS,
+    userTurns.length,
+    isDialog ? Math.max(1, Math.floor((height - 7) / 3)) : MAX_VISIBLE_ITEMS,
+  );
+  const boxHeight = Math.max(
+    1,
+    isDialog ? Math.min(height, maxVisibleItems * 3 + 7) : height - 1,
+  );
 
   const scrollOffset = useMemo(() => {
     if (userTurns.length <= maxVisibleItems) return 0;
@@ -524,7 +532,7 @@ export function RewindSelector({
     <Box
       flexDirection="column"
       width={boxWidth}
-      height={height - 1}
+      height={boxHeight}
       overflow="hidden"
     >
       <Box
@@ -532,7 +540,7 @@ export function RewindSelector({
         borderStyle="round"
         borderColor={theme.border.default}
         width={boxWidth}
-        height={height - 1}
+        height={boxHeight}
         overflow="hidden"
       >
         {/* Header */}

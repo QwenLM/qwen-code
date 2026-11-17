@@ -546,6 +546,36 @@ describe('<Footer />', () => {
     expect(frame).toContain('YOLO mode');
   });
 
+  it('keeps only the cycle hint when an active VP input shows the mode', () => {
+    const { lastFrame } = renderWithWidth(
+      120,
+      createMockUIState({
+        isInputActive: true,
+        useTerminalBuffer: true,
+        streamingState: StreamingState.Responding,
+        showAutoAcceptIndicator: ApprovalMode.YOLO,
+      }),
+    );
+    expect(lastFrame()).toContain('Enter to steer · Ctrl+Q to queue');
+    expect(lastFrame()).toContain('tab to cycle');
+    expect(lastFrame()).not.toContain('YOLO mode');
+  });
+
+  it.each([
+    { isInputActive: false, useTerminalBuffer: true },
+    { isInputActive: true, useTerminalBuffer: false },
+  ])('retains the mode when the input has no mode label: %j', (state) => {
+    const { lastFrame } = renderWithWidth(
+      120,
+      createMockUIState({
+        ...state,
+        showAutoAcceptIndicator: ApprovalMode.YOLO,
+      }),
+    );
+    expect(lastFrame()).toContain('YOLO mode');
+    expect(lastFrame()).toContain('tab to cycle');
+  });
+
   it('shows deferred IDE connection progress', () => {
     const { lastFrame } = renderWithWidth(
       120,

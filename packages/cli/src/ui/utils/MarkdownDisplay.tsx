@@ -5,7 +5,7 @@
  */
 
 import React from 'react';
-import { Text, Box } from 'ink';
+import { Text, Box, useIsScreenReaderEnabled } from 'ink';
 import stringWidth from 'string-width';
 import { theme } from '../semantic-colors.js';
 import { ICON } from '../constants.js';
@@ -927,6 +927,8 @@ const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
 }) => {
   const settings = useSettings();
   const { renderMode } = useRenderMode();
+  const screenReader = useIsScreenReaderEnabled();
+  const backgroundColor = screenReader ? undefined : theme.background.code;
   // Below this many usable rows there is no room for a meaningful code
   // preview, so we fall back to the "... code is being written ..." notice.
   const MIN_PREVIEW_LINES = 1;
@@ -973,7 +975,11 @@ const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
       if (MAX_CODE_LINES_WHEN_PENDING < MIN_PREVIEW_LINES) {
         // Not enough space to even show a truncated preview meaningfully
         return (
-          <Box paddingLeft={CODE_BLOCK_PREFIX_PADDING}>
+          <Box
+            paddingLeft={CODE_BLOCK_PREFIX_PADDING}
+            backgroundColor={backgroundColor}
+            width={contentWidth}
+          >
             <Text color={theme.text.secondary}>
               ... code is being written ...
             </Text>
@@ -989,7 +995,12 @@ const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
         { settings, startLineNumber },
       );
       return (
-        <Box paddingLeft={CODE_BLOCK_PREFIX_PADDING} flexDirection="column">
+        <Box
+          paddingLeft={CODE_BLOCK_PREFIX_PADDING}
+          flexDirection="column"
+          backgroundColor={backgroundColor}
+          width={contentWidth}
+        >
           {colorizedTruncatedCode}
         </Box>
       );
@@ -1010,6 +1021,7 @@ const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
       flexDirection="column"
       width={contentWidth}
       flexShrink={0}
+      backgroundColor={backgroundColor}
     >
       {colorizedCode}
     </Box>

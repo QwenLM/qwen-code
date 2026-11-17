@@ -175,7 +175,7 @@ describe('<ToolGroupMessage />', () => {
         <ToolGroupMessage {...baseProps} toolCalls={readBatch} />,
       );
       const frame = lastFrame() ?? '';
-      expect(frame).toContain('read a.ts, b.ts');
+      expect(frame).toContain('read 2 files');
       expect(frame).not.toContain('MockTool');
     });
 
@@ -191,7 +191,7 @@ describe('<ToolGroupMessage />', () => {
       expect(frame).toContain('MockTool[r1]');
       expect(frame).toContain('MockTool[r2]');
       expect(frame).toContain('MockTool[g1]');
-      expect(frame).not.toContain('read a.ts, b.ts');
+      expect(frame).not.toContain('read 2 files');
     });
 
     it('forwards showToolCallArgs down to each ToolMessage', () => {
@@ -225,7 +225,7 @@ describe('<ToolGroupMessage />', () => {
         <ToolGroupMessage {...baseProps} toolCalls={daemonShaped} />,
       );
       const frame = lastFrame() ?? '';
-      expect(frame).toContain('read a.ts, b.ts');
+      expect(frame).toContain('read 2 files');
       expect(frame).not.toContain('MockTool');
     });
 
@@ -234,7 +234,7 @@ describe('<ToolGroupMessage />', () => {
       const { lastFrame } = renderWithToolCallArgs(
         <ToolGroupMessage {...baseProps} toolCalls={emptyArgs} />,
       );
-      expect(lastFrame() ?? '').toContain('read a.ts, b.ts');
+      expect(lastFrame() ?? '').toContain('read 2 files');
     });
 
     it('expands a memory-only group instead of collapsing to the badge', () => {
@@ -348,7 +348,7 @@ describe('<ToolGroupMessage />', () => {
       const { lastFrame } = renderWithProviders(
         <ToolGroupMessage {...baseProps} toolCalls={readBatch} />,
       );
-      expect(lastFrame() ?? '').toContain('read a.ts, b.ts');
+      expect(lastFrame() ?? '').toContain('read 2 files');
     });
   });
 
@@ -445,8 +445,8 @@ describe('<ToolGroupMessage />', () => {
       );
       const frame = lastFrame() ?? '';
       // CATEGORY_ORDER: search first (capitalized), then read (lowercased)
-      expect(frame).toContain('Searched pattern');
-      expect(frame).toContain('read a.ts, b.ts');
+      expect(frame).toContain('Searched 1 pattern');
+      expect(frame).toContain('read 2 files');
       expect(frame).not.toContain('MockTool');
     });
 
@@ -626,7 +626,7 @@ describe('<ToolGroupMessage />', () => {
         />,
       );
       const frame = lastFrame() ?? '';
-      expect(frame).toContain('Read a.ts, b.ts');
+      expect(frame).toContain('Read 2 files');
       expect(frame).toContain('Recalled 1 memory');
     });
 
@@ -1291,7 +1291,7 @@ describe('<ToolGroupMessage />', () => {
       expect(lastFrame()).toMatchSnapshot();
     });
 
-    it('reserves wrapped compact summary height before sizing tool results', () => {
+    it('reserves one compact summary row before sizing tool results', () => {
       vi.mocked(ToolMessage).mockClear();
       const toolCalls = [
         createToolCall({
@@ -1322,10 +1322,10 @@ describe('<ToolGroupMessage />', () => {
       const call = vi
         .mocked(ToolMessage)
         .mock.calls.find((c) => c[0].callId === 'shell-result');
-      expect(call?.[0].availableTerminalHeight).toBe(8);
+      expect(call?.[0].availableTerminalHeight).toBe(10);
     });
 
-    it('reserves an active compact hint row before sizing tool results', () => {
+    it('keeps an active compact hint inside the summary row', () => {
       vi.mocked(ToolMessage).mockClear();
       const toolCalls = [
         createToolCall({
@@ -1360,7 +1360,7 @@ describe('<ToolGroupMessage />', () => {
       const call = vi
         .mocked(ToolMessage)
         .mock.calls.find((c) => c[0].callId === 'shell-result');
-      // 2 reads inline (no hint row) → summary is 1 row shorter than before.
+      // One summary row and one inter-tool gap leave ten result rows.
       expect(call?.[0].availableTerminalHeight).toBe(10);
     });
   });

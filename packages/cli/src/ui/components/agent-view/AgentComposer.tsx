@@ -34,6 +34,7 @@ import {
 } from '../../contexts/AgentViewContext.js';
 import { useConfig } from '../../contexts/ConfigContext.js';
 import { StreamingContext } from '../../contexts/StreamingContext.js';
+import { useVirtualViewport } from '../../contexts/VirtualViewportContext.js';
 import { StreamingState } from '../../types.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import { useAgentStreamingState } from '../../hooks/useAgentStreamingState.js';
@@ -49,12 +50,17 @@ import { keyMatchers, Command } from '../../keyMatchers.js';
 import { theme } from '../../semantic-colors.js';
 import { usePreferredEditor } from '../../hooks/usePreferredEditor.js';
 import { t } from '../../../i18n/index.js';
-import { getApprovalModePromptStyle } from '../approvalModeVisuals.js';
+import {
+  getApprovalModeIndicatorColor,
+  getApprovalModeLabel,
+  getApprovalModePromptStyle,
+} from '../approvalModeVisuals.js';
 
 // ─── Types ──────────────────────────────────────────────────
 
 interface AgentComposerProps {
   agentId: string;
+  active?: boolean;
 }
 
 // ─── Layout key ─────────────────────────────────────────────
@@ -143,7 +149,10 @@ export function getAgentContextWindowSize(
 // every render.
 const EMPTY_MESSAGE_QUEUE: readonly string[] = [];
 
-export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
+export const AgentComposer: React.FC<AgentComposerProps> = ({
+  agentId,
+  active = true,
+}) => {
   const {
     agents,
     agentTabBarFocused,
@@ -196,6 +205,7 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
     },
     {
       isActive:
+        active &&
         streamingState === StreamingState.Responding &&
         !agentShellFocused &&
         contextMenu === null,
@@ -227,7 +237,7 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
     // itself. This one writes straight through to the agent runtime's
     // tool-scheduling policy, so a Shift+Tab aimed at the menu would silently
     // change the approval mode of the very teammate being decided about.
-    { isActive: !agentShellFocused && contextMenu === null },
+    { isActive: active && !agentShellFocused && contextMenu === null },
   );
 
   // ── Input buffer (independent from main agent) ──
@@ -256,10 +266,10 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
   // but isInputActive stays false throughout, so without this extra
   // dependency the focus would never be restored.
   useEffect(() => {
-    if (!isInputActive) {
+    if (active && !isInputActive) {
       setAgentTabBarFocused(true);
     }
-  }, [isInputActive, streamingState, setAgentTabBarFocused]);
+  }, [active, isInputActive, streamingState, setAgentTabBarFocused]);
 
   // ── Focus management between input and tab bar ──
 
@@ -385,6 +395,7 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
   // ── Approval-mode styling (mirrors main InputPrompt) ──
 
   const approvalModePromptStyle = getApprovalModePromptStyle(agentApprovalMode);
+  const approvalModeInInput = useVirtualViewport();
   const statusColor = approvalModePromptStyle.color;
 
   const inputBorderColor =
@@ -398,6 +409,8 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
     </Text>
   );
   const prefixWidth = 2; // "> " or "* " = 2 chars
+
+  if (!active) return null;
 
   return (
     <StreamingContext.Provider value={streamingState}>
@@ -432,12 +445,21 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
           prefix={prefixNode}
           prefixWidth={prefixWidth}
           borderColor={inputBorderColor}
+          bottomRightLabel={
+            approvalModeInInput
+              ? getApprovalModeLabel(agentApprovalMode)
+              : undefined
+          }
+          bottomRightLabelColor={getApprovalModeIndicatorColor(
+            agentApprovalMode,
+          )}
           isActive={isInputActive && !agentShellFocused}
         />
 
         {/* Footer: approval mode + context usage */}
         <AgentFooter
           approvalMode={agentApprovalMode}
+          showApprovalMode={!approvalModeInInput}
           promptTokenCount={lastPromptTokenCount}
           contextWindowSize={getAgentContextWindowSize(
             config,

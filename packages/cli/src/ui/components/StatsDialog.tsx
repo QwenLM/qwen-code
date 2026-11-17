@@ -5,6 +5,7 @@
  */
 
 import type React from 'react';
+import { useDialogSize } from '../contexts/DialogSizeContext.js';
 import { Box, Text } from 'ink';
 import { useState, useEffect, useCallback } from 'react';
 import { theme } from '../semantic-colors.js';
@@ -128,8 +129,11 @@ export const StatsDialog: React.FC<StatsDialogProps> = ({
   onClose,
   width,
   isFocused = true,
-  availableHeight,
+  availableHeight: requestedHeight,
 }) => {
+  const bounds = useDialogSize();
+  const availableHeight =
+    requestedHeight ?? (bounds.isDialog ? bounds.rows : undefined);
   const [activeTab, setActiveTab] = useState<StatsTab>('session');
   const [rangeIndex, setRangeIndex] = useState(0);
   const [chartMonthOffset, setChartMonthOffset] = useState(0);
@@ -140,7 +144,9 @@ export const StatsDialog: React.FC<StatsDialogProps> = ({
   const config = useConfig();
 
   const range = RANGE_CYCLE[rangeIndex]!;
-  const safeWidth = Math.max(72, width ?? 100);
+  const safeWidth = bounds.isDialog
+    ? Math.max(6, Math.min(bounds.columns, width ?? bounds.columns))
+    : Math.max(72, width ?? 100);
   const bodyWidth = safeWidth - 6;
 
   useEffect(() => {

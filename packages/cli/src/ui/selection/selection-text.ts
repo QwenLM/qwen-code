@@ -6,6 +6,7 @@
 
 import type { FrameBoundary, ReadonlyFrame } from 'ink';
 import type { NormalizedSelection } from './selection-state.js';
+import type { ViewportRect } from './selection-coords.js';
 
 /**
  * Extracts the visual text of a selection from a composited frame.
@@ -18,22 +19,28 @@ import type { NormalizedSelection } from './selection-state.js';
 export function getSelectedText(
   frame: ReadonlyFrame | null,
   selection: NormalizedSelection,
+  bounds?: ViewportRect,
 ): string {
   if (!frame) {
     return '';
   }
   const { sx, sy, ex, ey } = selection;
+  const startY = Math.max(sy, bounds?.y ?? sy);
+  const endY = Math.min(ey, bounds ? bounds.y + bounds.height - 1 : ey);
   let text = '';
-  for (let y = sy; y <= ey; y++) {
+  for (let y = startY; y <= endY; y++) {
     const row = frame.cells[y];
     if (!row) {
-      if (y < ey) {
+      if (y < endY) {
         text += '\n';
       }
       continue;
     }
-    const startX = y === sy ? sx : 0;
-    const endX = y === ey ? ex : row.length - 1;
+    const startX = Math.max(y === sy ? sx : 0, bounds?.x ?? 0);
+    const endX = Math.min(
+      y === ey ? ex : row.length - 1,
+      bounds ? bounds.x + bounds.width - 1 : row.length - 1,
+    );
     let rowText = '';
     let skippedLayoutGap = false;
     for (let x = Math.max(0, startX); x <= endX && x < row.length; x++) {
@@ -55,8 +62,8 @@ export function getSelectedText(
       }
     }
     text += rowText;
-    if (y < ey) {
-      text += boundaryJoiner(frame, selection, y);
+    if (y < endY) {
+      text += boundaryJoiner(frame, selection, y, bounds);
     }
   }
   return text;
@@ -66,10 +73,17 @@ function selectedFlows(
   frame: ReadonlyFrame,
   selection: NormalizedSelection,
   y: number,
+  bounds?: ViewportRect,
 ): Set<number> {
   const row = frame.cells[y] ?? [];
-  const startX = y === selection.sy ? selection.sx : 0;
-  const endX = y === selection.ey ? selection.ex : row.length - 1;
+  const startX = Math.max(
+    y === selection.sy ? selection.sx : 0,
+    bounds?.x ?? 0,
+  );
+  const endX = Math.min(
+    y === selection.ey ? selection.ex : row.length - 1,
+    bounds ? bounds.x + bounds.width - 1 : row.length - 1,
+  );
   const flows = new Set<number>();
   for (let x = Math.max(0, startX); x <= endX && x < row.length; x++) {
     const cell = row[x];
@@ -100,9 +114,10 @@ function boundaryJoiner(
   frame: ReadonlyFrame,
   selection: NormalizedSelection,
   y: number,
+  bounds?: ViewportRect,
 ): string {
-  const currentFlows = selectedFlows(frame, selection, y);
-  const nextFlows = selectedFlows(frame, selection, y + 1);
+  const currentFlows = selectedFlows(frame, selection, y, bounds);
+  const nextFlows = selectedFlows(frame, selection, y + 1, bounds);
   const [currentFlow] = currentFlows;
   const [nextFlow] = nextFlows;
   if (
@@ -114,10 +129,12 @@ function boundaryJoiner(
   }
 
   const flowId = currentFlow!;
-  const claims = (frame.boundaries[y] ?? []).filter(
-    (claim): claim is FrameBoundary =>
-      claim !== null && claim.selectable && claim.flowId === flowId,
-  );
+  const claims = (frame.boundaries[y] ?? [])
+    .slice(bounds?.x ?? 0, bounds ? bounds.x + bounds.width : undefined)
+    .filter(
+      (claim): claim is FrameBoundary =>
+        claim !== null && claim.selectable && claim.flowId === flowId,
+    );
   if (claims.length === 0) {
     return '\n';
   }

@@ -80,6 +80,18 @@ describe('themeManager.loadCustomThemes', () => {
     Gray: '#888',
   };
 
+  it('preserves optional surfaces while leaving legacy themes transparent', () => {
+    const legacy = themeModule.createCustomTheme(baseTheme);
+    expect(legacy.semanticColors.background.surface).toBeUndefined();
+    expect(legacy.semanticColors.background.code).toBeUndefined();
+    const surfaced = themeModule.createCustomTheme({
+      ...baseTheme,
+      background: { surface: '#eeeeee', code: '#f5f5f5' },
+    });
+    expect(surfaced.semanticColors.background.surface).toBe('#eeeeee');
+    expect(surfaced.semanticColors.background.code).toBe('#f5f5f5');
+  });
+
   it('should use values from DEFAULT_THEME when DiffAdded and DiffRemoved are not provided', () => {
     const legacyTheme: Partial<CustomTheme> = { ...baseTheme };
     delete legacyTheme.DiffAdded;

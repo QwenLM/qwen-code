@@ -29,6 +29,7 @@ import { useKeypress, type Key } from '../../hooks/useKeypress.js';
 import { usePreferredEditor } from '../../hooks/usePreferredEditor.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import { StreamingState } from '../../types.js';
+import { VirtualViewportContext } from '../../contexts/VirtualViewportContext.js';
 import { useTextBuffer } from '../shared/text-buffer.js';
 import { AgentComposer, getAgentContextWindowSize } from './AgentComposer.js';
 
@@ -45,15 +46,18 @@ const { baseTextInputProps } = vi.hoisted(() => ({
   baseTextInputProps: {} as {
     onKeypress?: (key: Key) => boolean;
     onSubmit?: (text: string) => void;
+    bottomRightLabel?: string;
   },
 }));
 vi.mock('../BaseTextInput.js', () => ({
   BaseTextInput: (props: {
     onKeypress?: (key: Key) => boolean;
     onSubmit?: (text: string) => void;
+    bottomRightLabel?: string;
   }) => {
     baseTextInputProps.onKeypress = props.onKeypress;
     baseTextInputProps.onSubmit = props.onSubmit;
+    baseTextInputProps.bottomRightLabel = props.bottomRightLabel;
     return null;
   },
 }));
@@ -62,11 +66,18 @@ vi.mock('../QueuedMessageDisplay.js', () => ({
   QueuedMessageDisplay: () => null,
 }));
 const { agentFooterProps } = vi.hoisted(() => ({
-  agentFooterProps: {} as { contextWindowSize?: number },
+  agentFooterProps: {} as {
+    contextWindowSize?: number;
+    showApprovalMode?: boolean;
+  },
 }));
 vi.mock('./AgentFooter.js', () => ({
-  AgentFooter: (props: { contextWindowSize?: number }) => {
+  AgentFooter: (props: {
+    contextWindowSize?: number;
+    showApprovalMode?: boolean;
+  }) => {
     agentFooterProps.contextWindowSize = props.contextWindowSize;
+    agentFooterProps.showApprovalMode = props.showApprovalMode;
     return null;
   },
 }));
@@ -226,6 +237,42 @@ describe('AgentComposer', () => {
     unmount();
 
     expect(setAgentInputBufferText).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])(
+    'moves the agent mode to the input only in VP mode (VP=%s)',
+    (isVp) => {
+      vi.mocked(useAgentViewState).mockReturnValue({
+        ...vi.mocked(useAgentViewState)(),
+        agentApprovalModes: new Map([['agent-1', ApprovalMode.YOLO]]),
+      });
+      const { unmount } = render(
+        <VirtualViewportContext.Provider value={isVp}>
+          <AgentComposer agentId="agent-1" />
+        </VirtualViewportContext.Provider>,
+      );
+      expect(baseTextInputProps.bottomRightLabel).toBe(
+        isVp ? 'YOLO mode' : undefined,
+      );
+      expect(agentFooterProps.showApprovalMode).toBe(!isVp);
+      unmount();
+    },
+  );
+
+  it('keeps its draft while inactive and pauses cancellation and approval shortcuts', () => {
+    const { rerender } = render(<AgentComposer agentId="agent-1" />);
+    expect(setAgentInputBufferText).toHaveBeenCalledWith('draft');
+    capturedKeypressOptions.length = 0;
+    setAgentInputBufferText.mockClear();
+    rerender(<AgentComposer agentId="agent-1" active={false} />);
+    expect(capturedKeypressOptions.every((options) => !options.isActive)).toBe(
+      true,
+    );
+    expect(setAgentInputBufferText).not.toHaveBeenCalled();
+    rerender(<AgentComposer agentId="agent-1" />);
+    expect(vi.mocked(useTextBuffer).mock.results.at(-1)?.value.text).toBe(
+      'draft',
+    );
   });
 
   describe('footer context window', () => {

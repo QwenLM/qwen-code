@@ -5,8 +5,8 @@
  */
 
 import type React from 'react';
-import { useEffect, useMemo, useRef } from 'react';
-import { Box, type DOMElement } from 'ink';
+import { useEffect, useLayoutEffect, useMemo, useRef } from 'react';
+import { Box, Text, measureElement, type DOMElement } from 'ink';
 import { MainContent } from '../components/MainContent.js';
 import {
   ScrollContext,
@@ -34,6 +34,9 @@ import {
   getDialogMaxHeight,
   getBtwAnswerMaxRows,
 } from '../utils/layoutUtils.js';
+import { theme } from '../semantic-colors.js';
+import { getDialogSurfaceColor } from '../utils/theme-background.js';
+import { DialogSizeProvider } from '../contexts/DialogSizeContext.js';
 
 export const DefaultAppLayout: React.FC = () => {
   const uiState = useUIState();
@@ -66,6 +69,35 @@ export const DefaultAppLayout: React.FC = () => {
     !uiState.auth.isAuthDialogOpen &&
     !uiState.auth.authError;
   const dialogHeight = constrainDialogHeight ? dialogMaxHeight : undefined;
+  const floatingDialogMaxHeight =
+    uiState.isSettingsDialogOpen ||
+    uiState.isResumeDialogOpen ||
+    uiState.isDeleteDialogOpen
+      ? Math.min(32, dialogMaxHeight)
+      : dialogMaxHeight;
+  const floatingDialog =
+    uiState.useTerminalBuffer &&
+    uiState.dialogsVisible &&
+    !uiState.auth.isAuthDialogOpen &&
+    !uiState.auth.authError &&
+    !uiState.auth.isAuthenticating;
+  const fillViewport =
+    uiState.useTerminalBuffer &&
+    !uiState.auth.isAuthDialogOpen &&
+    !uiState.auth.authError &&
+    !uiState.auth.isAuthenticating;
+  const dialogWidth = Math.max(
+    1,
+    Math.min(uiState.mainAreaWidth, terminalWidth - 4),
+  );
+  const controlsHeightBeforeDialog = useRef(5);
+  useLayoutEffect(() => {
+    if (!uiState.dialogsVisible && uiState.mainControlsRef.current) {
+      controlsHeightBeforeDialog.current = measureElement(
+        uiState.mainControlsRef.current,
+      ).height;
+    }
+  });
   // The /btw answer viewport only exists in VP mode. Its ScrollableList arms
   // SGR mouse tracking (bypassVpGate), which must not happen on the non-VP
   // main screen where the terminal keeps native scrollback — so the row budget
@@ -91,17 +123,54 @@ export const DefaultAppLayout: React.FC = () => {
     }
   }, [activeView, refreshStatic]);
 
+  const inactiveComposer = (
+    <Box
+      height={Math.min(
+        controlsHeightBeforeDialog.current,
+        Math.max(1, uiState.terminalHeight - 2),
+      )}
+      flexDirection="column"
+      justifyContent="flex-end"
+      paddingX={2}
+    >
+      <Box
+        borderStyle="single"
+        borderLeft={false}
+        borderRight={false}
+        borderColor={theme.border.default}
+      >
+        <Text color={theme.text.secondary} wrap="truncate-end">
+          ❯ {!isAgentTab && (uiState.buffer?.lines.at(-1) ?? '')}
+        </Text>
+      </Box>
+    </Box>
+  );
+
   return (
-    <Box flexDirection="column" width={terminalWidth}>
+    <Box
+      flexDirection="column"
+      width={terminalWidth}
+      height={fillViewport ? uiState.terminalHeight : undefined}
+    >
       {isAgentTab ? (
         <>
           {/* Agent view: chat history + agent-specific composer */}
           <AgentChatView agentId={activeView} />
-          <Box flexDirection="column" ref={uiState.mainControlsRef}>
+          {uiState.useTerminalBuffer && <Box flexGrow={1} />}
+          <Box
+            flexDirection="column"
+            flexShrink={0}
+            ref={uiState.mainControlsRef}
+          >
             {!uiState.dialogsVisible && uiState.updateInfo && (
               <UpdateNotification message={uiState.updateInfo.message} />
             )}
-            <AgentComposer key={activeView} agentId={activeView} />
+            <AgentComposer
+              key={activeView}
+              agentId={activeView}
+              active={!uiState.dialogsVisible}
+            />
+            {floatingDialog && inactiveComposer}
             <ExitWarning />
           </Box>
         </>
@@ -112,11 +181,18 @@ export const DefaultAppLayout: React.FC = () => {
             footerRef={footerRef}
             scrollActionsRef={scrollActionsRef}
           />
-          <Box flexDirection="column" ref={uiState.mainControlsRef}>
+          {uiState.useTerminalBuffer && <Box flexGrow={1} />}
+          <Box
+            flexDirection="column"
+            flexShrink={0}
+            ref={uiState.mainControlsRef}
+          >
             {!uiState.dialogsVisible && uiState.updateInfo && (
               <UpdateNotification message={uiState.updateInfo.message} />
             )}
-            {uiState.dialogsVisible ? (
+            {floatingDialog ? (
+              inactiveComposer
+            ) : uiState.dialogsVisible ? (
               <Box
                 marginX={2}
                 flexDirection="column"
@@ -192,6 +268,38 @@ export const DefaultAppLayout: React.FC = () => {
 
       {/* Tab bar: visible whenever in-process agents exist and input is active */}
       {hasAgents && !uiState.dialogsVisible && <AgentTabBar />}
+
+      {floatingDialog && (
+        <Box
+          position="absolute"
+          top={0}
+          left={0}
+          width={terminalWidth}
+          height={uiState.terminalHeight}
+          alignItems="center"
+          justifyContent="center"
+        >
+          <Box
+            flexDirection="column"
+            width={dialogWidth}
+            maxHeight={floatingDialogMaxHeight}
+            overflow="hidden"
+            // Ink fills the box with unstyled spaces for the default color,
+            // keeping the overlay opaque in NO_COLOR and native themes too.
+            backgroundColor={getDialogSurfaceColor() ?? 'default'}
+          >
+            <DialogSizeProvider
+              value={{ columns: dialogWidth, rows: floatingDialogMaxHeight }}
+            >
+              <DialogManager
+                terminalWidth={dialogWidth}
+                availableTerminalHeight={floatingDialogMaxHeight}
+                addItem={uiState.historyManager.addItem}
+              />
+            </DialogSizeProvider>
+          </Box>
+        </Box>
+      )}
 
       {/* Right-click context menu: absolutely-positioned overlay, drawn last
           so it paints over the transcript. Renders nothing while closed. */}

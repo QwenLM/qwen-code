@@ -10,7 +10,7 @@ import type chalk from 'chalk';
 import stripAnsi from 'strip-ansi';
 import { theme } from '../semantic-colors.js';
 import { subscriptionSuccessMessage } from '../auth/subscription-success.js';
-import { Box, Text } from 'ink';
+import { Box, Text, getFrameController } from 'ink';
 import stringWidth from 'string-width';
 import { HistoryItemDisplay } from './HistoryItemDisplay.js';
 import { type HistoryItem, ToolCallStatus } from '../types.js';
@@ -972,7 +972,7 @@ describe('<HistoryItemDisplay />', () => {
         height: 3,
       });
       vi.mocked(layoutRowForEvent).mockImplementation((_node, row) => row - 1);
-      renderWithProviders(
+      const view = renderWithProviders(
         <ThoughtExpandedProvider
           value={{
             allExpanded: false,
@@ -987,7 +987,10 @@ describe('<HistoryItemDisplay />', () => {
           />
         </ThoughtExpandedProvider>,
       );
-      return vi.mocked(useMouseEvents).mock.calls.at(-1)?.[0];
+      return {
+        handler: vi.mocked(useMouseEvents).mock.calls.at(-1)?.[0],
+        stdout: view.stdout,
+      };
     };
 
     it('subscribes the click handler without bypassVpGate (stays VP-gated)', () => {
@@ -1038,7 +1041,7 @@ describe('<HistoryItemDisplay />', () => {
 
     it('toggles on a complete click', () => {
       const toggle = vi.fn();
-      const handler = renderThoughtWithToggle(toggle);
+      const { handler } = renderThoughtWithToggle(toggle);
 
       handler?.(mouseEvent('left-press', 5));
       expect(toggle).not.toHaveBeenCalled();
@@ -1048,7 +1051,7 @@ describe('<HistoryItemDisplay />', () => {
 
     it('allows clicking a completed staged summary using its stable group id', () => {
       const toggle = vi.fn();
-      const handler = renderThoughtWithToggle(
+      const { handler } = renderThoughtWithToggle(
         toggle,
         { ...thoughtItem, id: 0, thoughtGroupId: -5, isStreaming: false },
         true,
@@ -1063,7 +1066,7 @@ describe('<HistoryItemDisplay />', () => {
 
     it('does not toggle when selecting text by dragging', () => {
       const toggle = vi.fn();
-      const handler = renderThoughtWithToggle(toggle);
+      const { handler } = renderThoughtWithToggle(toggle);
 
       handler?.(mouseEvent('left-press', 5));
       handler?.(mouseEvent('move', 20));
@@ -1072,10 +1075,36 @@ describe('<HistoryItemDisplay />', () => {
       expect(toggle).not.toHaveBeenCalled();
     });
 
+    it.each([
+      { sx: 4, sy: 1, ex: 12, ey: 1 },
+      { sx: 4, sy: 1, ex: 4, ey: 1 },
+      { sx: 0, sy: 1, ex: 40, ey: 1 },
+    ])(
+      'does not toggle on a matching release with renderer selection %j',
+      (selection) => {
+        const toggle = vi.fn();
+        const { handler, stdout } = renderThoughtWithToggle(toggle);
+        const controller = getFrameController(
+          stdout as unknown as NodeJS.WriteStream,
+        )!;
+
+        handler?.(mouseEvent('left-press', 5));
+        controller.setSelection(selection);
+        expect(controller.getSelection()).toEqual(selection);
+        handler?.(mouseEvent('left-release', 5));
+        expect(toggle).not.toHaveBeenCalled();
+
+        controller.setSelection(null);
+        handler?.(mouseEvent('left-press', 5));
+        handler?.(mouseEvent('left-release', 5));
+        expect(toggle).toHaveBeenCalledWith(thoughtItem.id);
+      },
+    );
+
     it('does not toggle on a plain click over an OSC 8 hyperlink (reserved for the link gesture)', () => {
       vi.mocked(hyperlinkAtCell).mockReturnValue('https://example.com');
       const toggle = vi.fn();
-      const handler = renderThoughtWithToggle(toggle);
+      const { handler } = renderThoughtWithToggle(toggle);
 
       handler?.(mouseEvent('left-press', 5));
       handler?.(mouseEvent('left-release', 5));

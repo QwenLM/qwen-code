@@ -6,6 +6,24 @@
 
 import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
 import { theme } from '../semantic-colors.js';
+import { t } from '../../i18n/index.js';
+
+export function getApprovalModeLabel(approvalMode: ApprovalMode): string {
+  switch (approvalMode) {
+    case ApprovalMode.PLAN:
+      return t('plan mode');
+    case ApprovalMode.AUTO_EDIT:
+      return t('auto-accept edits');
+    case ApprovalMode.AUTO:
+      return t('Auto mode');
+    case ApprovalMode.YOLO:
+      return t('YOLO mode');
+    case ApprovalMode.DEFAULT:
+      return `⏸ ${t('Ask permissions')}`;
+    default:
+      return '';
+  }
+}
 
 export function getApprovalModeIndicatorColor(
   approvalMode: ApprovalMode,

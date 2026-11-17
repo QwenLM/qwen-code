@@ -9,7 +9,10 @@ import { Box, Text } from 'ink';
 import { theme } from '../../semantic-colors.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 import { useUIState } from '../../contexts/UIStateContext.js';
-import { useTerminalSize } from '../../hooks/useTerminalSize.js';
+import {
+  DialogSizeProvider,
+  useDialogSize,
+} from '../../contexts/DialogSizeContext.js';
 import { t } from '../../../i18n/index.js';
 import { stripUnsafeCharacters } from '../../utils/textUtils.js';
 import type { ExtensionUpdateState } from '../../state/extensions.js';
@@ -68,7 +71,7 @@ export function ExtensionsManagerDialog({
     pluginChoiceRequests,
     commandContext,
   } = useUIState();
-  const { columns } = useTerminalSize();
+  const { columns, rows, isDialog } = useDialogSize();
   // Cap the width to the app's main content area (AppContainer caps it at 100).
   // Without this the dialog grows to the full terminal width on wide terminals
   // and overflows its container, clipping the right-aligned status column.
@@ -225,46 +228,57 @@ export function ExtensionsManagerDialog({
         <TabBar tabs={TABS} activeTab={activeTab} canSwitch={!tabLocked} />
 
         <Box flexDirection="column">
-          {activeTab === EXTENSIONS_TABS.DISCOVER && (
-            <DiscoverTab
-              config={config}
-              isActive={
-                activeTab === EXTENSIONS_TABS.DISCOVER && !hasPendingRequest
-              }
-              onLockChange={handleLockChange}
-              onStatus={setStatus}
-              onInstalled={bumpReload}
-              marketplaceFilter={discoverFilter ?? undefined}
-              reloadSignal={reloadSignal}
-            />
-          )}
-          {activeTab === EXTENSIONS_TABS.INSTALLED && (
-            <InstalledTab
-              config={config}
-              isActive={
-                activeTab === EXTENSIONS_TABS.INSTALLED && !hasPendingRequest
-              }
-              onLockChange={handleLockChange}
-              onStatus={setStatus}
-              extensionsUpdateState={extensionsUpdateState}
-              reloadSignal={reloadSignal}
-              onUpdateStateChange={handleUpdateStateChange}
-            />
-          )}
-          {activeTab === EXTENSIONS_TABS.SOURCES && (
-            <SourcesTab
-              config={config}
-              isActive={
-                activeTab === EXTENSIONS_TABS.SOURCES && !hasPendingRequest
-              }
-              onLockChange={handleLockChange}
-              onStatus={setStatus}
-              onChanged={bumpReload}
-              onBrowse={handleBrowseSource}
-              onFooter={setTabFooter}
-              reloadSignal={reloadSignal}
-            />
-          )}
+          <DialogSizeProvider
+            value={
+              isDialog
+                ? {
+                    columns: Math.max(1, boxWidth - 4),
+                    rows: Math.max(1, rows - 4),
+                  }
+                : null
+            }
+          >
+            {activeTab === EXTENSIONS_TABS.DISCOVER && (
+              <DiscoverTab
+                config={config}
+                isActive={
+                  activeTab === EXTENSIONS_TABS.DISCOVER && !hasPendingRequest
+                }
+                onLockChange={handleLockChange}
+                onStatus={setStatus}
+                onInstalled={bumpReload}
+                marketplaceFilter={discoverFilter ?? undefined}
+                reloadSignal={reloadSignal}
+              />
+            )}
+            {activeTab === EXTENSIONS_TABS.INSTALLED && (
+              <InstalledTab
+                config={config}
+                isActive={
+                  activeTab === EXTENSIONS_TABS.INSTALLED && !hasPendingRequest
+                }
+                onLockChange={handleLockChange}
+                onStatus={setStatus}
+                extensionsUpdateState={extensionsUpdateState}
+                reloadSignal={reloadSignal}
+                onUpdateStateChange={handleUpdateStateChange}
+              />
+            )}
+            {activeTab === EXTENSIONS_TABS.SOURCES && (
+              <SourcesTab
+                config={config}
+                isActive={
+                  activeTab === EXTENSIONS_TABS.SOURCES && !hasPendingRequest
+                }
+                onLockChange={handleLockChange}
+                onStatus={setStatus}
+                onChanged={bumpReload}
+                onBrowse={handleBrowseSource}
+                onFooter={setTabFooter}
+                reloadSignal={reloadSignal}
+              />
+            )}
+          </DialogSizeProvider>
         </Box>
 
         {status && (

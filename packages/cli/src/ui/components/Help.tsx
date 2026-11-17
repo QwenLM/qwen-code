@@ -19,6 +19,8 @@ import {
 } from '../../services/commandMetadata.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import type { HelpTab } from '../contexts/UIActionsContext.js';
+import { useDialogSize } from '../contexts/DialogSizeContext.js';
+import { ScrollableList } from './shared/ScrollableList.js';
 
 export type { HelpTab };
 
@@ -56,7 +58,10 @@ export const Help: React.FC<HelpProps> = ({
   onClose,
   isInteractive = false,
 }) => {
-  const safeWidth = Math.max(72, width);
+  const bounds = useDialogSize();
+  const safeWidth = bounds.isDialog
+    ? Math.max(6, Math.min(bounds.columns, width))
+    : Math.max(72, width);
   const bodyWidth = safeWidth - 6;
   const handleTabChange = useCallback(
     (direction: 1 | -1) => {
@@ -96,7 +101,20 @@ export const Help: React.FC<HelpProps> = ({
         >
           <HelpTabs activeTab={activeTab} />
           <Box marginTop={1}>
-            {activeTab === 'general' && <GeneralHelp width={bodyWidth} />}
+            {activeTab === 'general' &&
+              (bounds.isDialog ? (
+                <ScrollableList
+                  hasFocus={isInteractive}
+                  data={['general']}
+                  containerHeight={Math.max(1, bounds.rows - 12)}
+                  estimatedItemHeight={() => 20}
+                  keyExtractor={(item) => item}
+                  stickToBottom={false}
+                  renderItem={() => <GeneralHelp width={bodyWidth} />}
+                />
+              ) : (
+                <GeneralHelp width={bodyWidth} />
+              ))}
             {activeTab === 'commands' && (
               <CommandsHelp
                 commands={commands}
@@ -235,6 +253,10 @@ const CommandsHelp: React.FC<{
   customOnly: boolean;
   isInteractive: boolean;
 }> = ({ commands, width, customOnly, isInteractive }) => {
+  const bounds = useDialogSize();
+  const visibleCount = bounds.isDialog
+    ? Math.max(1, Math.min(COMMAND_LIST_VISIBLE_LINES, bounds.rows - 16))
+    : COMMAND_LIST_VISIBLE_LINES;
   const groups = useMemo(
     () => groupCommands(commands, customOnly),
     [commands, customOnly],
@@ -243,7 +265,7 @@ const CommandsHelp: React.FC<{
     () => renderCommandLines(groups, width),
     [groups, width],
   );
-  const maxScroll = Math.max(0, lines.length - COMMAND_LIST_VISIBLE_LINES);
+  const maxScroll = Math.max(0, lines.length - visibleCount);
   const [scrollOffset, setScrollOffset] = useState(0);
 
   useEffect(() => {
@@ -261,13 +283,9 @@ const CommandsHelp: React.FC<{
       } else if (key.name === 'down') {
         setScrollOffset((offset) => Math.min(maxScroll, offset + 1));
       } else if (key.name === 'pageup') {
-        setScrollOffset((offset) =>
-          Math.max(0, offset - COMMAND_LIST_VISIBLE_LINES),
-        );
+        setScrollOffset((offset) => Math.max(0, offset - visibleCount));
       } else if (key.name === 'pagedown') {
-        setScrollOffset((offset) =>
-          Math.min(maxScroll, offset + COMMAND_LIST_VISIBLE_LINES),
-        );
+        setScrollOffset((offset) => Math.min(maxScroll, offset + visibleCount));
       }
     },
     { isActive: isInteractive },
@@ -283,10 +301,7 @@ const CommandsHelp: React.FC<{
     );
   }
 
-  const visibleLines = lines.slice(
-    scrollOffset,
-    scrollOffset + COMMAND_LIST_VISIBLE_LINES,
-  );
+  const visibleLines = lines.slice(scrollOffset, scrollOffset + visibleCount);
 
   return (
     <Box flexDirection="column">
@@ -297,7 +312,7 @@ const CommandsHelp: React.FC<{
             : t('Browse built-in commands:')}
         </Text>
       </Box>
-      <Box flexDirection="column" height={COMMAND_LIST_VISIBLE_LINES}>
+      <Box flexDirection="column" height={visibleCount}>
         {visibleLines.map((line, index) => {
           const stableKey =
             line.type === 'blank'

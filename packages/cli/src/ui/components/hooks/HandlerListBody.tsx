@@ -6,7 +6,7 @@
 
 import { Box, Text } from 'ink';
 import { theme } from '../../semantic-colors.js';
-import { useTerminalSize } from '../../hooks/useTerminalSize.js';
+import { useDialogSize } from '../../contexts/DialogSizeContext.js';
 import { HookType } from '@qwen-code/qwen-code-core/hooks/types.js';
 import type { HookConfigDisplayInfo } from './types.js';
 import { getConfigSourceDisplay } from './sourceLabels.js';
@@ -21,7 +21,7 @@ export function HandlerListBody({
   configs,
   selectedIndex,
 }: HandlerListBodyProps): React.JSX.Element {
-  const { columns: terminalWidth } = useTerminalSize();
+  const { columns: terminalWidth } = useDialogSize();
   const commandWidth = Math.floor(terminalWidth * 0.65);
   const sourceWidth = Math.floor(terminalWidth * 0.3);
 

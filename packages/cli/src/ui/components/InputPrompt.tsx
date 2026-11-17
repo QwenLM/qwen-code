@@ -92,7 +92,11 @@ import { panelDisplayOrder } from './background-view/agent-forest.js';
 import { FEEDBACK_DIALOG_KEYS } from '../FeedbackDialog.js';
 import { BaseTextInput } from './BaseTextInput.js';
 import type { RenderLineOptions } from './BaseTextInput.js';
-import { getApprovalModePromptStyle } from './approvalModeVisuals.js';
+import {
+  getApprovalModeIndicatorColor,
+  getApprovalModeLabel,
+  getApprovalModePromptStyle,
+} from './approvalModeVisuals.js';
 import type { MicrophonePermission } from '../hooks/use-voice-input.js';
 import { usePromptVoiceInput } from '../hooks/use-prompt-voice-input.js';
 import { VoiceIndicator } from './VoiceIndicator.js';
@@ -2462,6 +2466,12 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         prefixWidth={prefixWidth}
         borderColor={borderColor}
         topRightLabel={voiceStatusLabel ?? uiState.sessionName ?? undefined}
+        bottomRightLabel={
+          isVpMode && !shellModeActive
+            ? getApprovalModeLabel(approvalMode)
+            : undefined
+        }
+        bottomRightLabelColor={getApprovalModeIndicatorColor(approvalMode)}
         isActive={!isEmbeddedShellFocused}
         renderLine={renderLineWithHighlighting}
         mouseEnabled={mouseInteractionsEnabled}

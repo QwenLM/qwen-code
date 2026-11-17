@@ -16,7 +16,7 @@ import {
   formatMessageCount,
   truncateText,
 } from '../utils/sessionPickerUtils.js';
-import { useTerminalSize } from '../hooks/useTerminalSize.js';
+import { useDialogSize } from '../contexts/DialogSizeContext.js';
 import { t } from '../../i18n/index.js';
 import { SessionPreview } from './SessionPreview.js';
 
@@ -207,7 +207,7 @@ function SessionListItemView({
         </Text>
       </Box>
       <Box paddingLeft={2}>
-        <Text color={theme.text.secondary}>
+        <Text color={theme.text.secondary} wrap="truncate-end">
           {timeAgo}
           {messageText !== undefined && ` · ${messageText}`}
           {session.gitBranch && ` · ${session.gitBranch}`}
@@ -233,10 +233,11 @@ export function SessionPicker(props: SessionPickerProps) {
     disabledIds,
   } = props;
 
-  const { columns: width, rows: height } = useTerminalSize();
+  const { columns: width, rows: height, isDialog } = useDialogSize();
 
   // Calculate box width (marginX={2})
-  const boxWidth = width - 4;
+  const boxWidth = Math.max(4, width - (isDialog ? 0 : 4));
+  const boxHeight = Math.max(1, height - (isDialog ? 0 : 1));
   // Calculate visible items.
   // Reserved space: header (1), search row (1), footer (1), separators (2),
   // borders (2). The search row is rendered as a thin "Press / to search"
@@ -247,7 +248,7 @@ export function SessionPicker(props: SessionPickerProps) {
   const itemHeight = 3;
   const maxVisibleItems = Math.max(
     1,
-    Math.floor((height - reservedLines) / itemHeight),
+    Math.floor((boxHeight - reservedLines) / itemHeight),
   );
 
   const picker = useSessionPicker({
@@ -296,7 +297,7 @@ export function SessionPicker(props: SessionPickerProps) {
     <Box
       flexDirection="column"
       width={boxWidth}
-      height={height - 1}
+      height={boxHeight}
       overflow="hidden"
     >
       <Box
@@ -304,12 +305,12 @@ export function SessionPicker(props: SessionPickerProps) {
         borderStyle="round"
         borderColor={theme.border.default}
         width={boxWidth}
-        height={height - 1}
+        height={boxHeight}
         overflow="hidden"
       >
         {/* Header row */}
         <Box paddingX={1}>
-          <Text bold color={theme.text.primary}>
+          <Text bold color={theme.text.primary} wrap="truncate-end">
             {title ?? t('Resume Session')}
           </Text>
           {picker.filterByBranch && currentBranch && (
@@ -338,7 +339,7 @@ export function SessionPicker(props: SessionPickerProps) {
           {picker.isSearchActive ? (
             <>
               <Text color={theme.text.secondary}>{t('Search: ')}</Text>
-              <Text color={theme.text.primary}>
+              <Text color={theme.text.primary} wrap="truncate-end">
                 {picker.searchQuery}
                 <Text color={theme.text.secondary}>▌</Text>
               </Text>
@@ -346,7 +347,9 @@ export function SessionPicker(props: SessionPickerProps) {
           ) : picker.searchQuery !== '' ? (
             <>
               <Text color={theme.text.secondary}>{t('Filter: ')}</Text>
-              <Text color={theme.text.primary}>{picker.searchQuery}</Text>
+              <Text color={theme.text.primary} wrap="truncate-end">
+                {picker.searchQuery}
+              </Text>
             </>
           ) : (
             <Text color={theme.text.secondary}>{t('Press / to search')}</Text>
@@ -423,7 +426,7 @@ export function SessionPicker(props: SessionPickerProps) {
 
         {/* Footer */}
         <Box paddingX={1}>
-          <Box flexDirection="row">
+          <Text color={theme.text.secondary} wrap="truncate-end">
             {picker.isSearchActive ? (
               <Text color={theme.text.secondary}>
                 {t('Type to search · Enter to commit · Esc to clear')}
@@ -477,7 +480,7 @@ export function SessionPicker(props: SessionPickerProps) {
                 </Text>
               </>
             )}
-          </Box>
+          </Text>
         </Box>
       </Box>
     </Box>

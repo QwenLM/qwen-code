@@ -8,28 +8,26 @@
  * @fileoverview Shared layout calculation utilities for the terminal UI.
  */
 
+export const getPromptHorizontalMargin = (terminalWidth: number): number =>
+  terminalWidth >= 8 ? 2 : 0;
+
 /**
  * Calculate the widths for the input prompt area based on terminal width.
  *
- * Returns the content width (for the text buffer), the total container width
- * (including border + padding + prefix), the suggestions dropdown width,
- * and the frame overhead constant.
+ * Returns the text-buffer width, the input and suggestions container widths,
+ * and the columns used by the outer gutters and prompt prefix.
  */
 export const calculatePromptWidths = (terminalWidth: number) => {
-  const widthFraction = 0.9;
-  const FRAME_PADDING_AND_BORDER = 4; // Border (2) + padding (2)
+  const OUTER_GUTTER = getPromptHorizontalMargin(terminalWidth) * 2;
   const PROMPT_PREFIX_WIDTH = 2; // '> ' or '! '
   const MIN_CONTENT_WIDTH = 2;
 
-  const innerContentWidth =
-    Math.floor(terminalWidth * widthFraction) -
-    FRAME_PADDING_AND_BORDER -
-    PROMPT_PREFIX_WIDTH;
+  const containerWidth = Math.max(4, terminalWidth - OUTER_GUTTER);
+  const innerContentWidth = containerWidth - PROMPT_PREFIX_WIDTH;
 
   const inputWidth = Math.max(MIN_CONTENT_WIDTH, innerContentWidth);
-  const FRAME_OVERHEAD = FRAME_PADDING_AND_BORDER + PROMPT_PREFIX_WIDTH;
-  const containerWidth = inputWidth + FRAME_OVERHEAD;
-  const suggestionsWidth = Math.max(20, Math.floor(terminalWidth * 1.0));
+  const FRAME_OVERHEAD = OUTER_GUTTER + PROMPT_PREFIX_WIDTH;
+  const suggestionsWidth = containerWidth;
 
   return {
     inputWidth,

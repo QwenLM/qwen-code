@@ -5,7 +5,7 @@
  */
 
 import { Box, Static, Text } from 'ink';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type {
   ResumedSessionData,
   SessionService,
@@ -13,11 +13,22 @@ import type {
 import { theme } from '../semantic-colors.js';
 import { HistoryItemDisplay } from './HistoryItemDisplay.js';
 import { useKeypress } from '../hooks/useKeypress.js';
-import { useTerminalSize } from '../hooks/useTerminalSize.js';
+import { useDialogSize } from '../contexts/DialogSizeContext.js';
 import { buildResumedHistoryItems } from '../utils/resumeHistoryUtils.js';
 import { formatRelativeTime } from '../utils/formatters.js';
 import { formatMessageCount } from '../utils/sessionPickerUtils.js';
 import { t } from '../../i18n/index.js';
+import {
+  ScrollableList,
+  type ScrollableListRef,
+} from './shared/ScrollableList.js';
+import type { HistoryItem } from '../types.js';
+import {
+  TextSelectionController,
+  type SelectionQuery,
+} from '../selection/use-text-selection.js';
+import { ContentMouseController } from '../context-menu/ContentMouseController.js';
+import { useContextMenu } from '../context-menu/ContextMenuContext.js';
 
 export interface SessionPreviewProps {
   sessionService: SessionService;
@@ -44,9 +55,12 @@ export function SessionPreview(props: SessionPreviewProps) {
     onExit,
     onResume,
   } = props;
-  const { columns } = useTerminalSize();
+  const { columns, rows, isDialog } = useDialogSize();
   const [data, setData] = useState<ResumedSessionData | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const scrollRef = useRef<ScrollableListRef<HistoryItem>>(null);
+  const selectionQueryRef = useRef<SelectionQuery | null>(null);
+  const { menu, isMenuOpen } = useContextMenu();
 
   useEffect(() => {
     let cancelled = false;
@@ -97,6 +111,7 @@ export function SessionPreview(props: SessionPreviewProps) {
 
   useKeypress(
     (key) => {
+      if (isMenuOpen()) return;
       const { name, ctrl } = key;
       if (name === 'escape' || (ctrl && name === 'c')) {
         onExit();
@@ -106,12 +121,12 @@ export function SessionPreview(props: SessionPreviewProps) {
         onResume(sessionId);
       }
     },
-    { isActive: true },
+    { isActive: menu === null },
   );
 
   // Clamp to a safe minimum: `'─'.repeat(boxWidth - 2)` would throw RangeError
   // in very narrow terminals (tmux splits, small panes) if boxWidth < 2.
-  const boxWidth = Math.max(10, columns - 4);
+  const boxWidth = Math.max(4, columns - (isDialog ? 0 : 4));
   const separatorWidth = Math.max(0, boxWidth - 2);
 
   const metaParts: string[] = [];
@@ -128,7 +143,11 @@ export function SessionPreview(props: SessionPreviewProps) {
 
   const header = (
     <Box key="header" paddingX={1}>
-      <Text bold color={theme.text.primary}>
+      <Text
+        bold
+        color={theme.text.primary}
+        wrap={isDialog ? 'truncate-end' : 'wrap'}
+      >
         {sessionTitle ?? t('Session Preview')}
       </Text>
     </Box>
@@ -145,7 +164,12 @@ export function SessionPreview(props: SessionPreviewProps) {
   );
   const meta = metaLine ? (
     <Box key="meta" paddingX={1}>
-      <Text color={theme.text.secondary}>{metaLine}</Text>
+      <Text
+        color={theme.text.secondary}
+        wrap={isDialog ? 'truncate-end' : 'wrap'}
+      >
+        {metaLine}
+      </Text>
     </Box>
   ) : null;
   const footer = (
@@ -155,6 +179,77 @@ export function SessionPreview(props: SessionPreviewProps) {
       </Text>
     </Box>
   );
+
+  if (isDialog) {
+    return (
+      <Box
+        flexDirection="column"
+        width={boxWidth}
+        height={rows}
+        borderStyle="round"
+        borderColor={theme.border.default}
+        overflow="hidden"
+      >
+        {header}
+        {topSeparator}
+        <Box flexDirection="column" flexGrow={1} overflow="hidden">
+          {data && !error ? (
+            <ScrollableList
+              key={sessionId}
+              ref={scrollRef}
+              hasFocus={menu === null}
+              data={items}
+              containerHeight={Math.max(1, rows - (meta ? 7 : 6))}
+              estimatedItemHeight={() => 3}
+              keyExtractor={(item) => String(item.id)}
+              stickToBottom={false}
+              renderItem={({ item }) => (
+                <HistoryItemDisplay
+                  item={item}
+                  terminalWidth={boxWidth - 2}
+                  isPending={false}
+                  isFocused={false}
+                  thoughtExpanded={true}
+                />
+              )}
+            />
+          ) : (
+            <Text color={error ? theme.status.error : theme.text.secondary}>
+              {error ?? t('Loading session preview...')}
+            </Text>
+          )}
+        </Box>
+        <TextSelectionController
+          key={`selection-${sessionId}`}
+          isActive={data !== null && error === null}
+          eventsPaused={menu !== null}
+          getViewportRect={() => scrollRef.current?.getViewportRect() ?? null}
+          getScrollState={() =>
+            scrollRef.current?.getScrollState() ?? {
+              scrollTop: 0,
+              scrollHeight: 0,
+              innerHeight: 0,
+            }
+          }
+          hitTestScrollbar={(location) =>
+            scrollRef.current?.hitTestScrollbar(location) ?? false
+          }
+          selectionQueryRef={selectionQueryRef}
+        />
+        <ContentMouseController
+          isActive={data !== null && error === null}
+          getViewportRect={() => scrollRef.current?.getViewportRect() ?? null}
+          hitTestScrollbar={(location) =>
+            scrollRef.current?.hitTestScrollbar(location) ?? false
+          }
+          selectionQueryRef={selectionQueryRef}
+        />
+        {footerSeparator}
+        {meta}
+        {footer}
+      </Box>
+    );
+  }
 
   if (data && !error) {
     return (

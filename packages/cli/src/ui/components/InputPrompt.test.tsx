@@ -57,6 +57,7 @@ import {
   useBackgroundTaskViewState,
 } from '../contexts/BackgroundTaskViewContext.js';
 import { ScrollContext } from '../contexts/ScrollContext.js';
+import { VirtualViewportContext } from '../contexts/VirtualViewportContext.js';
 import {
   clearPromptStash,
   savePromptStash,
@@ -5911,6 +5912,43 @@ describe('InputPrompt', () => {
       expect(frame).not.toContain('←');
       unmount();
     });
+  });
+
+  describe('approval mode bottom border', () => {
+    it.each([
+      [ApprovalMode.DEFAULT, 'Ask permissions'],
+      [ApprovalMode.PLAN, 'plan mode'],
+      [ApprovalMode.AUTO_EDIT, 'auto-accept edits'],
+      [ApprovalMode.AUTO, 'Auto mode'],
+      [ApprovalMode.YOLO, 'YOLO mode'],
+    ])('puts %s on the bottom border in VP mode', async (mode, label) => {
+      props.approvalMode = mode;
+      const { lastFrame, unmount } = renderWithProviders(
+        <VirtualViewportContext.Provider value={true}>
+          <InputPrompt {...props} />
+        </VirtualViewportContext.Provider>,
+      );
+      await wait();
+      const lines = clean(lastFrame()).split('\n');
+      expect(lines.at(-1)).toContain(` ${label} ──`);
+      expect(lines[0]).not.toContain(label);
+      unmount();
+    });
+
+    it.each([false, true])(
+      'keeps the border mode out of native scrollback and shell input (shell=%s)',
+      async (shellMode) => {
+        props.shellModeActive = shellMode;
+        const { lastFrame, unmount } = renderWithProviders(
+          <VirtualViewportContext.Provider value={shellMode}>
+            <InputPrompt {...props} />
+          </VirtualViewportContext.Provider>,
+        );
+        await wait();
+        expect(lastFrame()).not.toContain('Ask permissions');
+        unmount();
+      },
+    );
   });
 
   describe('snapshots', () => {

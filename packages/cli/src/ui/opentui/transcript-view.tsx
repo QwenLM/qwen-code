@@ -895,13 +895,13 @@ function TranscriptItem({
 function UserRow({ text }: { text: string }) {
   const meta = userMessageMeta();
   return (
-    <box flexDirection="row">
+    <box flexDirection="row" backgroundColor={C.surface}>
       {/* A trailing space in the glyph's own text node is squeezed out as soon
           as the sibling needs the full width, so the gap is structural. */}
       <box width={STATUS_INDICATOR_WIDTH}>
         <text fg={meta.color}>{meta.glyph}</text>
       </box>
-      <text fg={meta.color} {...selectionProps()}>
+      <text fg={C.text} {...selectionProps()}>
         {sanitizeTerminalText(text)}
       </text>
     </box>
@@ -1075,11 +1075,11 @@ function ToolCard({
   const status = toolStatusMeta(item);
   if (item.compactToolSummary !== undefined) {
     return (
-      <box flexDirection="row">
+      <box flexDirection="row" height={1}>
         <box width={STATUS_INDICATOR_WIDTH}>
           <text fg={status.color}>{status.glyph}</text>
         </box>
-        <text fg={C.text} attributes={1} flexGrow={1} {...selectionProps()}>
+        <text fg={C.dim} flexGrow={1} wrapMode="none" {...selectionProps()}>
           {item.compactToolSummary}
         </text>
       </box>

@@ -12,7 +12,7 @@ import { RadioButtonSelect } from './shared/RadioButtonSelect.js';
 import type { RadioSelectItem } from './shared/RadioButtonSelect.js';
 import { MaxSizedBox } from './shared/MaxSizedBox.js';
 import { useKeypress } from '../hooks/useKeypress.js';
-import { useTerminalSize } from '../hooks/useTerminalSize.js';
+import { useDialogSize } from '../contexts/DialogSizeContext.js';
 import { useLaunchEditor } from '../hooks/useLaunchEditor.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
@@ -118,7 +118,7 @@ export const SkillReviewDialog = ({
   const launchEditor = useLaunchEditor();
   const settings = useSettings();
   const config = useConfig();
-  const { columns } = useTerminalSize();
+  const { columns } = useDialogSize();
   // The dialog does not span the full terminal: the layout caps the dialog
   // container at min(terminalWidth − 4, 100) (mainAreaWidth in AppContainer;
   // DiffDialog applies the same clamp). MaxSizedBox wraps the preview at this

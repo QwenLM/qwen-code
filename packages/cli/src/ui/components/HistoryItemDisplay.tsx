@@ -39,7 +39,7 @@ import {
   SuccessMessage,
   AwayRecapMessage,
 } from './messages/StatusMessages.js';
-import { Box, Text, useStdout } from 'ink';
+import { Box, Text, getFrameController, useStdout } from 'ink';
 import { theme } from '../semantic-colors.js';
 import {
   MarkdownDisplay,
@@ -133,6 +133,7 @@ interface HistoryItemDisplayProps {
 const ClickableThinkMessage: React.FC<{
   text: string;
   isPending: boolean;
+  isFocused: boolean;
   expanded: boolean;
   availableTerminalHeight?: number;
   contentWidth: number;
@@ -141,6 +142,7 @@ const ClickableThinkMessage: React.FC<{
 }> = ({
   text,
   isPending,
+  isFocused,
   expanded,
   availableTerminalHeight,
   contentWidth,
@@ -159,7 +161,7 @@ const ClickableThinkMessage: React.FC<{
   // Quiet while the context menu owns the pointer so a click on the menu
   // overlay can't also toggle the thought underneath it.
   const { menu: contextMenu } = useContextMenu();
-  const isActive = !isPending && contextMenu === null;
+  const isActive = !isPending && isFocused && contextMenu === null;
 
   useMouseEvents(
     useCallback(
@@ -195,7 +197,12 @@ const ClickableThinkMessage: React.FC<{
         }
         const press = pressRef.current;
         pressRef.current = null;
-        if (isInside && press?.col === event.col && press.row === event.row) {
+        if (
+          isInside &&
+          press?.col === event.col &&
+          press.row === event.row &&
+          !getFrameController(stdout)?.getSelection()
+        ) {
           // 鼠标事件广播给所有订阅者：单击落在 OSC 8 链接上时，
           // ContentMouseController 负责打开链接，这里不再切换折叠，
           // 否则一次单击会既折叠思考块又打开链接。
@@ -273,6 +280,7 @@ export const CollapsibleToolGroupMessage: React.FC<
   const ref = useRef<DOMElement>(null);
   const pressRef = useRef<{ col: number; row: number } | null>(null);
   const { rows: terminalHeight } = useTerminalSize();
+  const { stdout } = useStdout();
   const mouseTrackingEnabled = useMouseTrackingEnabled();
   const clickable =
     useVirtualViewport(settings.merged.ui?.useTerminalBuffer) &&
@@ -318,7 +326,12 @@ export const CollapsibleToolGroupMessage: React.FC<
         }
         const press = pressRef.current;
         pressRef.current = null;
-        if (isInside && press?.col === event.col && press.row === event.row) {
+        if (
+          isInside &&
+          press?.col === event.col &&
+          press.row === event.row &&
+          !getFrameController(stdout)?.getSelection()
+        ) {
           if (expansionKey) {
             expandBatch(expansionKey);
           } else {
@@ -326,9 +339,9 @@ export const CollapsibleToolGroupMessage: React.FC<
           }
         }
       },
-      [collapsed, terminalHeight, expansionKey, expandBatch],
+      [collapsed, terminalHeight, expansionKey, expandBatch, stdout],
     ),
-    { isActive: collapsed && clickable },
+    { isActive: collapsed && clickable && props.isFocused !== false },
   );
 
   if (!collapsed) return <ToolGroupMessage {...props} />;
@@ -542,6 +555,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       {itemForDisplay.type === 'gemini_thought' && (
         <ClickableThinkMessage
           text={itemForDisplay.text.trimEnd()}
+          isFocused={isFocused}
           isPending={isPending && itemForDisplay.isStreaming !== false}
           expanded={resolvedThoughtExpanded}
           availableTerminalHeight={

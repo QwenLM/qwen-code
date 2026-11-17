@@ -6,7 +6,7 @@
 
 import { Box, Text } from 'ink';
 import { theme } from '../../semantic-colors.js';
-import { useTerminalSize } from '../../hooks/useTerminalSize.js';
+import { useDialogSize } from '../../contexts/DialogSizeContext.js';
 import type { HookEventDisplayInfo } from './types.js';
 import { HookEventHeader } from './HookEventHeader.js';
 import { formatSourceLabels } from './sourceLabels.js';
@@ -21,7 +21,7 @@ export function HookEventMatcherListStep({
   hook,
   selectedIndex,
 }: HookEventMatcherListStepProps): React.JSX.Element {
-  const { columns: terminalWidth } = useTerminalSize();
+  const { columns: terminalWidth } = useDialogSize();
   const leftWidth = Math.floor(terminalWidth * 0.6);
   const hasMatchers = hook.matcherGroups.length > 0;
 

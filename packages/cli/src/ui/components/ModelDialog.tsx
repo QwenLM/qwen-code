@@ -29,6 +29,7 @@ import { SettingScope } from '../../config/settings.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { theme } from '../semantic-colors.js';
 import { DescriptiveRadioButtonSelect } from './shared/DescriptiveRadioButtonSelect.js';
+import { DialogFrame } from './shared/DialogFrame.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
 import { UIStateContext, type UIState } from '../contexts/UIStateContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
@@ -577,6 +578,10 @@ export function ModelDialog({
   const errorMessageRows = errorMessage
     ? 2 + errorMessage.split('\n').length
     : 0;
+  const compactDialog =
+    availableTerminalHeight !== undefined && availableTerminalHeight < 20;
+  // Short views omit two padding rows and the six-row model detail panel.
+  const fixedRows = MODEL_DIALOG_FIXED_ROWS - (compactDialog ? 8 : 0);
   const maxModelItemsToShow =
     availableTerminalHeight === undefined
       ? MAX_MODEL_ITEMS_TO_SHOW
@@ -585,9 +590,7 @@ export function ModelDialog({
           Math.min(
             MAX_MODEL_ITEMS_TO_SHOW,
             Math.floor(
-              (availableTerminalHeight -
-                MODEL_DIALOG_FIXED_ROWS -
-                errorMessageRows) /
+              (availableTerminalHeight - fixedRows - errorMessageRows) /
                 modelOptionRowHeight,
             ),
           ),
@@ -1309,13 +1312,7 @@ export function ModelDialog({
   const hasModels = MODEL_OPTIONS.length > 0;
 
   return (
-    <Box
-      borderStyle="round"
-      borderColor={theme.border.default}
-      flexDirection="column"
-      padding={1}
-      width="100%"
-    >
+    <DialogFrame paddingY={compactDialog ? 0 : 1}>
       <Text bold>
         {(isVoiceModelMode
           ? t('Select Voice Model')
@@ -1368,7 +1365,7 @@ export function ModelDialog({
         </Box>
       )}
 
-      {highlightedEntry && (
+      {highlightedEntry && !compactDialog && (
         <Box marginTop={1} flexDirection="column">
           <Box
             borderStyle="single"
@@ -1424,6 +1421,6 @@ export function ModelDialog({
           {t('Enter to select, ↑↓ to navigate, Esc to close')}
         </Text>
       </Box>
-    </Box>
+    </DialogFrame>
   );
 }

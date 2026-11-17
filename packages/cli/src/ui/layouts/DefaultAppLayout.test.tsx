@@ -260,6 +260,49 @@ describe('DefaultAppLayout', () => {
     expect(output).not.toContain('DialogManager 20');
   });
 
+  it('anchors short main and agent conversations to the bottom in VP mode', () => {
+    for (const activeView of ['main', 'agent-1']) {
+      mockedUseAgentViewState.mockReturnValue({
+        activeView,
+        agents: activeView === 'main' ? new Map() : new Map([['agent-1', {}]]),
+      });
+      const { lastFrame } = renderLayout({
+        ...baseUIState,
+        stickyTodos: null,
+        useTerminalBuffer: true,
+        terminalHeight: 24,
+      });
+      const lines = (lastFrame() ?? '').split('\n');
+      expect(lines).toHaveLength(24);
+      expect(
+        lines.findIndex((line) => line.includes('Composer')),
+      ).toBeGreaterThanOrEqual(21);
+    }
+  });
+
+  it('centers a floating dialog while keeping the transcript at the top', () => {
+    mockedUseAgentViewState.mockReturnValue({
+      activeView: 'main',
+      agents: new Map(),
+    });
+    dialogManagerMockState.lineCount = 3;
+    const { lastFrame } = renderLayout({
+      ...baseUIState,
+      dialogsVisible: true,
+      useTerminalBuffer: true,
+      terminalHeight: 24,
+    });
+    const lines = (lastFrame() ?? '').split('\n');
+    expect(lines).toHaveLength(24);
+    expect(lines[0]).toContain('MainContent');
+    const top = lines.findIndex((line) => line.includes('DialogManager 1'));
+    const bottom = lines.findIndex((line) => line.includes('DialogManager 3'));
+    expect(bottom - top).toBe(2);
+    expect(Math.abs(top - (lines.length - bottom - 1))).toBeLessThanOrEqual(1);
+    expect(lines.slice(20).join('\n')).toContain('❯');
+    expect(lastFrame()).not.toContain('Composer');
+  });
+
   it('does not cap a tall dialog when height constraints are disabled', () => {
     mockedUseAgentViewState.mockReturnValue({
       activeView: 'main',
@@ -278,6 +321,31 @@ describe('DefaultAppLayout', () => {
     const output = lastFrame() ?? '';
     expect(frameHeight(output)).toBeGreaterThan(terminalHeight);
     expect(output).toContain('DialogManager 20');
+  });
+
+  it('caps floating settings and session windows on tall terminals', () => {
+    mockedUseAgentViewState.mockReturnValue({
+      activeView: 'main',
+      agents: new Map(),
+    });
+    dialogManagerMockState.lineCount = 50;
+    for (const dialog of [
+      'isSettingsDialogOpen',
+      'isResumeDialogOpen',
+      'isDeleteDialogOpen',
+    ]) {
+      const { lastFrame } = renderLayout({
+        ...baseUIState,
+        useTerminalBuffer: true,
+        dialogsVisible: true,
+        terminalHeight: 70,
+        [dialog]: true,
+      });
+      const output = lastFrame() ?? '';
+      expect(output.split('\n')).toHaveLength(70);
+      expect(output).toContain('DialogManager 32');
+      expect(output).not.toContain('DialogManager 33');
+    }
   });
 
   it.each<Partial<UIState['auth']>>([

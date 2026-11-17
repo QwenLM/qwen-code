@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Box, Text } from 'ink';
+import { Box, Text, useIsScreenReaderEnabled } from 'ink';
+import { getDialogSurfaceColor } from '../utils/theme-background.js';
 import { IdeIntegrationNudge } from '../IdeIntegrationNudge.js';
 import { CommandFormatMigrationNudge } from '../CommandFormatMigrationNudge.js';
 import { LoopDetectionConfirmation } from './LoopDetectionConfirmation.js';
@@ -67,23 +68,31 @@ import { getReasoningEffortsForConfig } from '../../acp-integration/model-config
 interface DialogManagerProps {
   addItem: UseHistoryManagerReturn['addItem'];
   terminalWidth: number;
+  availableTerminalHeight?: number;
 }
 
 // Props for DialogManager
 export const DialogManager = ({
   addItem,
   terminalWidth,
+  availableTerminalHeight,
 }: DialogManagerProps) => {
   const config = useConfig();
   const settings = useSettings();
 
   const uiState = useUIState();
+  const screenReader = useIsScreenReaderEnabled();
   const uiActions = useUIActions();
   const { dialogOpen: bgTasksDialogOpen } = useBackgroundTaskViewState();
-  const { constrainHeight, terminalHeight, staticExtraHeight, mainAreaWidth } =
-    uiState;
-  const dialogMaxHeight = getDialogMaxHeight(terminalHeight, staticExtraHeight);
-  const constrainedDialogHeight = constrainHeight ? dialogMaxHeight : undefined;
+  const { constrainHeight, terminalHeight, staticExtraHeight } = uiState;
+  const mainAreaWidth = Math.min(uiState.mainAreaWidth, terminalWidth);
+  const dialogMaxHeight =
+    availableTerminalHeight ??
+    getDialogMaxHeight(terminalHeight, staticExtraHeight);
+  const constrainedDialogHeight =
+    constrainHeight || availableTerminalHeight !== undefined
+      ? dialogMaxHeight
+      : undefined;
   // Long list-style dialogs use this finite budget for their own internal
   // virtualization even when the outer app layout is not height-constrained.
   const listDialogHeight = dialogMaxHeight;
@@ -491,7 +500,18 @@ export const DialogManager = ({
   }
 
   if (uiState.isPermissionsDialogOpen) {
-    return <PermissionsDialog onExit={uiActions.closePermissionsDialog} />;
+    return (
+      <Box
+        flexDirection="column"
+        backgroundColor={screenReader ? undefined : getDialogSurfaceColor()}
+      >
+        <PermissionsDialog
+          onExit={uiActions.closePermissionsDialog}
+          availableTerminalHeight={listDialogHeight}
+          width={mainAreaWidth}
+        />
+      </Box>
+    );
   }
 
   if (uiState.isSubagentCreateDialogOpen) {
@@ -539,7 +559,11 @@ export const DialogManager = ({
   }
   if (uiState.isStatsDialogOpen) {
     return (
-      <StatsDialog onClose={uiActions.closeStatsDialog} width={mainAreaWidth} />
+      <StatsDialog
+        onClose={uiActions.closeStatsDialog}
+        width={mainAreaWidth}
+        availableHeight={availableTerminalHeight}
+      />
     );
   }
   if (uiState.isMcpDialogOpen) {

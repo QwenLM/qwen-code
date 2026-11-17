@@ -9,22 +9,22 @@ import { darkSemanticColors } from './semantic-tokens.js';
 
 const qwenDarkColors: ColorsTheme = {
   type: 'dark',
-  Background: '#0b0e14',
-  Foreground: '#bfbdb6',
+  Background: '#141414',
+  Foreground: '#e1e1e1',
   LightBlue: '#59C2FF',
   AccentBlue: '#39BAE6',
   AccentPurple: '#D2A6FF',
   AccentCyan: '#95E6CB',
   AccentGreen: '#AAD94C',
-  AccentYellow: '#FFD700',
+  AccentYellow: '#e5c07b',
   AccentRed: '#F26D78',
   AccentYellowDim: '#8B7530',
   AccentRedDim: '#8B3A4A',
   DiffAdded: '#AAD94C',
   DiffRemoved: '#F26D78',
-  Comment: '#646A71',
-  Gray: '#3D4149',
-  GradientColors: ['#FFD700', '#da7959'],
+  Comment: '#787880',
+  Gray: '#92929b',
+  GradientColors: ['#a594e8', '#c4b5fd'],
 };
 
 export const QwenDark: Theme = new Theme(
@@ -111,5 +111,23 @@ export const QwenDark: Theme = new Theme(
     },
   },
   qwenDarkColors,
-  darkSemanticColors,
+  {
+    ...darkSemanticColors,
+    text: {
+      ...darkSemanticColors.text,
+      secondary: qwenDarkColors.Gray,
+    },
+    background: {
+      ...darkSemanticColors.background,
+      primary: qwenDarkColors.Background,
+      surface: '#242424',
+      code: '#1c1c1c',
+    },
+    border: { default: '#44444b', focused: '#77717f' },
+    ui: {
+      ...darkSemanticColors.ui,
+      comment: qwenDarkColors.Comment,
+      gradient: qwenDarkColors.GradientColors,
+    },
+  },
 );

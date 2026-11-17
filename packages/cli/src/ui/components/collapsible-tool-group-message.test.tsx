@@ -6,7 +6,7 @@
 
 import { act } from 'react';
 import { describe, expect, it, vi } from 'vitest';
-import { Box } from 'ink';
+import { Box, getFrameController } from 'ink';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { LoadedSettings } from '../../config/settings.js';
 import { renderWithProviders } from '../../test-utils/render.js';
@@ -223,6 +223,35 @@ describe('<CollapsibleToolGroupMessage />', () => {
     expect(lastFrame()).not.toContain('veryLongSource');
     expect(lastFrame()).not.toContain('very long result');
   });
+
+  it.each([
+    { sx: 4, sy: 0, ex: 12, ey: 0 },
+    { sx: 4, sy: 0, ex: 4, ey: 0 },
+    { sx: 0, sy: 0, ex: 40, ey: 0 },
+  ])(
+    'does not expand on a matching release with renderer selection %j',
+    (selection) => {
+      const { handler, lastFrame, stdout } = renderCollapsedTool();
+      const controller = getFrameController(
+        stdout as unknown as NodeJS.WriteStream,
+      )!;
+
+      act(() => {
+        handler?.(mouseEvent('left-press', 5));
+        controller.setSelection(selection);
+        expect(controller.getSelection()).toEqual(selection);
+        handler?.(mouseEvent('left-release', 5));
+      });
+      expect(lastFrame()).not.toContain('very long result');
+
+      act(() => {
+        controller.setSelection(null);
+        handler?.(mouseEvent('left-press', 5));
+        handler?.(mouseEvent('left-release', 5));
+      });
+      expect(lastFrame()).toContain('very long result');
+    },
+  );
 
   it('falls back to Ctrl+O when viewport clicking is unavailable', () => {
     const { lastFrame } = renderCollapsedTool(false);

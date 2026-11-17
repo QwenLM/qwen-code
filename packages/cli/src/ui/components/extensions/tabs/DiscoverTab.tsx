@@ -9,7 +9,7 @@ import { Box, Text } from 'ink';
 import open from 'open';
 import { theme } from '../../../semantic-colors.js';
 import { useKeypress } from '../../../hooks/useKeypress.js';
-import { useTerminalSize } from '../../../hooks/useTerminalSize.js';
+import { useDialogSize } from '../../../contexts/DialogSizeContext.js';
 import { RadioButtonSelect } from '../../shared/RadioButtonSelect.js';
 import { t } from '../../../../i18n/index.js';
 import {
@@ -87,12 +87,12 @@ export const DiscoverTab = ({
   const [loading, setLoading] = useState(true);
   const [installing, setInstalling] = useState(false);
 
-  const { columns, rows } = useTerminalSize();
+  const { columns, rows, isDialog } = useDialogSize();
   const availableWidth = Math.max(24, columns - 8);
   // Each item renders as 3 lines (title, description, gap). Reserve rows for
   // the tab bar, header, search box, scroll hints, status and footer.
   const visibleCount = Math.max(
-    3,
+    isDialog ? 1 : 3,
     Math.min(6, Math.floor(((rows || 24) - 13) / 3)),
   );
 

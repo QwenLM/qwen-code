@@ -114,6 +114,7 @@ export function DialogFrame(props: {
       borderStyle="rounded"
       border={props.bodyLayout?.border === false ? [] : true}
       borderColor={props.borderColor ?? C.borderDefault}
+      backgroundColor={C.surface}
       paddingLeft={1}
       paddingRight={1}
       paddingTop={props.bodyLayout?.compact ? 0 : 1}

@@ -7,7 +7,10 @@
 import { useState, useCallback, useEffect, useMemo } from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../../semantic-colors.js';
-import { useTerminalSize } from '../../hooks/useTerminalSize.js';
+import {
+  DialogSizeProvider,
+  useDialogSize,
+} from '../../contexts/DialogSizeContext.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../../keyMatchers.js';
 import { useConfig } from '../../contexts/ConfigContext.js';
@@ -127,7 +130,7 @@ export function HooksManagementDialog({
 }: HooksManagementDialogProps): React.JSX.Element {
   const config = useConfig();
   const settings = useSettings();
-  const { columns: width } = useTerminalSize();
+  const { columns: width, rows, isDialog } = useDialogSize();
   const boxWidth = width - 4;
 
   const disableAllHooks = config?.getDisableAllHooks() ?? false;
@@ -593,7 +596,18 @@ export function HooksManagementDialog({
       paddingX={1}
       paddingY={1}
     >
-      {renderContent()}
+      <DialogSizeProvider
+        value={
+          isDialog
+            ? {
+                columns: Math.max(1, boxWidth - 4),
+                rows: Math.max(1, rows - 4),
+              }
+            : null
+        }
+      >
+        {renderContent()}
+      </DialogSizeProvider>
     </Box>
   );
 }
