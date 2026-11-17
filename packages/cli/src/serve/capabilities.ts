@@ -67,6 +67,9 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_info: { since: 'v1' },
   session_source_metadata: { since: 'v1' },
   session_side_task: { since: 'v1' },
+  // `POST /session/:id/sub-sessions`: a person starts or follows up a
+  // sub-session of the open session, in its workspace or another one.
+  session_sub_session_send: { since: 'v1' },
   session_prompt: { since: 'v1' },
   session_turn_status: { since: 'v1' },
   // Prompts and mid-turn messages reference session-scoped image and file

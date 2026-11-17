@@ -233,6 +233,8 @@ interface ChatEditorProps {
   onInputTextChange?: (text: string) => void;
   onAttachmentsChange?: (hasAttachments: boolean) => void;
   btwEnabled?: boolean;
+  /** Opens the "send to another session" dialog; omitted when unavailable. */
+  onSendToSession?: () => void;
   onCycleMode?: () => void;
   cycleModeOnTab?: boolean;
   onToggleShortcuts?: () => void;
@@ -1729,6 +1731,7 @@ export const ChatEditor = memo(
       onInputTextChange,
       onAttachmentsChange,
       btwEnabled = false,
+      onSendToSession,
       onCycleMode,
       cycleModeOnTab = false,
       onToggleShortcuts,
@@ -3400,6 +3403,11 @@ export const ChatEditor = memo(
                         ? t('common.loading')
                         : undefined,
                 }
+              : undefined
+          }
+          sendToSession={
+            !isSimple && onSendToSession
+              ? { onSelect: onSendToSession }
               : undefined
           }
           plan={

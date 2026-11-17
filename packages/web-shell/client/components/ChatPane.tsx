@@ -53,8 +53,10 @@ import { getSubagentDetailsUnavailableReason } from './messages/toolFormatting';
 import { useWebShellCustomization } from '../customization';
 import {
   SESSION_MONITOR_TOOL_CORRELATION_FEATURE,
+  SESSION_SUB_SESSION_SEND_FEATURE,
   SESSION_TRANSCRIPT_PAGINATION_FEATURE,
 } from '../constants/sessions';
+import type { SendToSessionCaller } from './dialogs/SendToSessionDialog';
 import { useAnimationFrameTranscriptSnapshot } from '../hooks/useAnimationFrameTranscriptBlocks';
 import { useMessagesFromBlocks } from '../hooks/useMessages';
 import { useSessionArtifacts } from '../hooks/useSessionArtifacts';
@@ -247,6 +249,8 @@ export interface ChatPaneProps {
   onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
   /** Host slash-command callback shared with the main chat composer. */
   onSlashCommand?: WebShellSlashCommandHandler;
+  /** Opens "send to another session" with this pane's session as caller. */
+  onSendToSession?: (caller: SendToSessionCaller) => void;
   modelManagement?: WebShellModelManagementOptions;
   unavailableModels?: readonly WebShellUnavailableModel[];
   mountUnavailableModelTooltip?: WebShellUnavailableModelTooltipMount;
@@ -304,6 +308,7 @@ export function ChatPane({
   onError,
   onImageIngestionNotice,
   onSlashCommand,
+  onSendToSession,
   modelManagement,
   unavailableModels,
   mountUnavailableModelTooltip,
@@ -346,6 +351,33 @@ export function ChatPane({
   const availableApprovalModes = useApprovalModes(
     paneSettingsCwd,
     allowedApprovalModes,
+  );
+  const paneSessionId = connection.sessionId;
+  const paneClientId = connection.clientId;
+  const sendToSessionAvailable =
+    connection.capabilities?.features.includes(
+      SESSION_SUB_SESSION_SEND_FEATURE,
+    ) === true;
+  const openSendToSession = useMemo(
+    () =>
+      onSendToSession &&
+      paneSessionId &&
+      paneSettingsCwd &&
+      sendToSessionAvailable
+        ? () =>
+            onSendToSession({
+              sessionId: paneSessionId,
+              workspaceCwd: paneSettingsCwd,
+              ...(paneClientId ? { clientId: paneClientId } : {}),
+            })
+        : undefined,
+    [
+      onSendToSession,
+      paneClientId,
+      paneSessionId,
+      paneSettingsCwd,
+      sendToSessionAvailable,
+    ],
   );
   const capacityRecovery = useCapacityRecovery(
     workspace.client,
@@ -2143,6 +2175,7 @@ export function ChatPane({
             modeControlsDisabled={modeControlsBusy}
             planMode={planMode}
             onTogglePlan={handleTogglePlan}
+            onSendToSession={openSendToSession}
             sessionWorkflowEnabled={sessionWorkflowEnabled}
             currentModel={connection.currentModel ?? ''}
             modelRefresh={modelRefresh}

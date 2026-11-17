@@ -150,6 +150,7 @@ import {
   SESSION_LIVE_STATE_FEATURE,
   SESSION_MONITOR_TOOL_CORRELATION_FEATURE,
   SESSION_SIDE_TASK_FEATURE,
+  SESSION_SUB_SESSION_SEND_FEATURE,
   SESSION_TRANSCRIPT_PAGINATION_FEATURE,
   WEB_SHELL_SESSION_SOURCE_TYPE,
   WEB_SHELL_SIDE_TASK_SOURCE_TYPE,
@@ -302,6 +303,11 @@ import {
   BranchSessionDialog,
   type BranchSessionIsolation,
 } from './components/dialogs/BranchSessionDialog';
+import {
+  SendToSessionDialog,
+  type SendToSessionCaller,
+  type SendToSessionRequest,
+} from './components/dialogs/SendToSessionDialog';
 import { SkillsManagerPage } from './components/skills/SkillsManagerPage';
 import {
   DaemonConnectionsSettings,
@@ -5891,6 +5897,11 @@ export function App({
     Boolean(connection.sessionId && connection.workspaceCwd) &&
     connection.capabilities?.features.includes(SESSION_SIDE_TASK_FEATURE) ===
       true;
+  const sendToSessionAvailable =
+    workspaceContextActive &&
+    connection.capabilities?.features.includes(
+      SESSION_SUB_SESSION_SEND_FEATURE,
+    ) === true;
   const sideTaskRestoreAvailable =
     sideTasksAvailable &&
     connection.capabilities?.features.includes('session_archive') === true;
@@ -10545,6 +10556,10 @@ export function App({
   const branchSessionDialogRef = useRef(branchSessionDialog);
   branchSessionDialogRef.current = branchSessionDialog;
   const [branchSessionDialogBusy, setBranchSessionDialogBusy] = useState(false);
+  // The session the "send to another session" dialog was opened from.
+  const [sendToSessionCaller, setSendToSessionCaller] =
+    useState<SendToSessionCaller>();
+  const [sendToSessionBusy, setSendToSessionBusy] = useState(false);
   // Main content view. The scheduled-tasks page replaces the chat pane inline
   // (not a modal overlay), mirroring the reference design; creating or opening
   // a chat returns to 'chat'. (Daemon Status is no longer a boolean dialog — it
@@ -11765,8 +11780,8 @@ export function App({
     [closeUsageTabs, externalSplitControlled],
   );
   const addSessionToSplitView = useCallback(
-    (sessionId: string) => {
-      if (!isLargeScreen || !projectFeaturesAvailable) return;
+    (sessionId: string): boolean => {
+      if (!isLargeScreen || !projectFeaturesAvailable) return false;
       const pending = pendingSplitOpenRef.current;
       // Only merge an opening request that navigation has not superseded.
       const previous =
@@ -11775,21 +11790,18 @@ export function App({
           : mainView === 'split'
             ? splitSessionIds
             : undefined;
-      if (
-        previous &&
-        (previous.includes(sessionId) || previous.length >= MAX_SPLIT_PANES)
-      ) {
-        return;
-      }
+      if (previous?.includes(sessionId)) return true;
+      if (previous && previous.length >= MAX_SPLIT_PANES) return false;
       closeMobileDrawer();
       if (mainView === 'split' && previous) {
         handleSplitPanesChange([...previous, sessionId]);
-        return;
+        return true;
       }
       const requested = Array.from(
         new Set([...(previous ?? splitSeedIds()), sessionId]),
       );
       requestSplitWithIds(requested);
+      return true;
     },
     [
       closeMobileDrawer,
@@ -11800,6 +11812,53 @@ export function App({
       requestSplitWithIds,
       splitSeedIds,
       splitSessionIds,
+    ],
+  );
+  const mainSendToSessionCaller = useMemo<SendToSessionCaller | undefined>(
+    () =>
+      connection.sessionId && connection.workspaceCwd
+        ? {
+            sessionId: connection.sessionId,
+            workspaceCwd: connection.workspaceCwd,
+            ...(connection.clientId ? { clientId: connection.clientId } : {}),
+          }
+        : undefined,
+    [connection.clientId, connection.sessionId, connection.workspaceCwd],
+  );
+  const sendToSessionWorkspaces = useMemo(
+    () => ordinaryWorkspaces.filter((entry) => entry.trusted),
+    [ordinaryWorkspaces],
+  );
+  const sendToSubSession = useCallback(
+    async (caller: SendToSessionCaller, request: SendToSessionRequest) => {
+      const result = await workspace.client.sendToSubSession(
+        caller.sessionId,
+        {
+          prompt: request.prompt,
+          ...(request.workspaceCwd !== caller.workspaceCwd
+            ? { workspace: request.workspaceCwd }
+            : {}),
+          ...(request.targetSessionId
+            ? { targetSessionId: request.targetSessionId }
+            : {}),
+        },
+        caller.clientId,
+      );
+      sessionCatalogController.sessionCreated(
+        result.workspaceCwd ?? caller.workspaceCwd,
+        result.sessionId,
+      );
+      setSendToSessionCaller(undefined);
+      if (!addSessionToSplitView(result.sessionId)) {
+        pushToast('success', t('sendToSession.sent'));
+      }
+    },
+    [
+      addSessionToSplitView,
+      pushToast,
+      sessionCatalogController,
+      t,
+      workspace.client,
     ],
   );
   const notifyControlledSplitClose = useCallback(() => {
@@ -23685,6 +23744,27 @@ export function App({
               onClose={() => setGitDialog(undefined)}
             />
           )}
+          {sendToSessionCaller && (
+              <DialogShell
+                title={t('sendToSession.title')}
+                subtitle={t('sendToSession.subtitle')}
+                size="md"
+                dismissible={!sendToSessionBusy}
+                onClose={() => setSendToSessionCaller(undefined)}
+              >
+                <SendToSessionDialog
+                  client={workspace.client}
+                  callerSessionId={sendToSessionCaller.sessionId}
+                  currentWorkspaceCwd={sendToSessionCaller.workspaceCwd}
+                  workspaces={sendToSessionWorkspaces}
+                  onSend={(request) =>
+                    sendToSubSession(sendToSessionCaller, request)
+                  }
+                  onCancel={() => setSendToSessionCaller(undefined)}
+                  onBusyChange={setSendToSessionBusy}
+                />
+              </DialogShell>
+            )}
           {branchSessionDialog && (
             <DialogShell
               title={t('branch.dialog.title')}
@@ -25545,6 +25625,11 @@ export function App({
                         onError={reportError}
                         onImageIngestionNotice={pushToast}
                         onSlashCommand={onSlashCommand}
+                        onSendToSession={
+                          sendToSessionAvailable
+                            ? setSendToSessionCaller
+                            : undefined
+                        }
                         onOpenGoals={openGoals}
                         onRightPanelOpen={handleTurnOutputOpen}
                         onOpenMonitor={openMonitorPanel}
@@ -26468,6 +26553,14 @@ export function App({
                           btwEnabled={
                             Boolean(connection.sessionId) &&
                             !hiddenCommands.has('btw')
+                          }
+                          onSendToSession={
+                            sendToSessionAvailable && mainSendToSessionCaller
+                              ? () =>
+                                  setSendToSessionCaller(
+                                    mainSendToSessionCaller,
+                                  )
+                              : undefined
                           }
                           onImageIngestionNotice={pushToast}
                           onImagePreview={openImagePanel}

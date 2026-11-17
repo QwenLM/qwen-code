@@ -37,7 +37,11 @@ import type {
 } from '../unavailableModels';
 import type { RegisterContextUsageControls } from '../hooks/useContextUsageControls';
 import { useI18n } from '../i18n';
-import { ChatPane, type PaneHeaderActionsRenderer } from './ChatPane';
+import {
+  ChatPane,
+  type ChatPaneProps,
+  type PaneHeaderActionsRenderer,
+} from './ChatPane';
 import { ErrorBoundary } from './ErrorBoundary';
 import { MAX_SPLIT_PANES } from '../utils/splitUrl';
 import type {
@@ -138,6 +142,7 @@ export interface SplitViewProps {
   onError?: (error: unknown, fallback: string) => void;
   onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
   onSlashCommand?: WebShellSlashCommandHandler;
+  onSendToSession?: ChatPaneProps['onSendToSession'];
   modelManagement?: WebShellModelManagementOptions;
   unavailableModels?: readonly WebShellUnavailableModel[];
   mountUnavailableModelTooltip?: WebShellUnavailableModelTooltipMount;
@@ -197,6 +202,7 @@ export function SplitView({
   onError,
   onImageIngestionNotice,
   onSlashCommand,
+  onSendToSession,
   modelManagement,
   unavailableModels,
   mountUnavailableModelTooltip,
@@ -1057,6 +1063,7 @@ export function SplitView({
                       onError={onError}
                       onImageIngestionNotice={onImageIngestionNotice}
                       onSlashCommand={onSlashCommand}
+                      onSendToSession={onSendToSession}
                       modelManagement={modelManagement}
                       unavailableModels={unavailableModels}
                       mountUnavailableModelTooltip={

@@ -1615,6 +1615,30 @@ describe('sub-session launcher', () => {
     launcher.stop();
   });
 
+  it("sent mode: reports a person's send back to the caller in its own workspace", async () => {
+    const fake = makeFakeBridge({
+      events: (pid) => [chunk('done'), turnComplete(pid)],
+    });
+    // Without notifySentCompletion, only the tool's own launches go unreported.
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+    });
+    const launched = await launcher.launchForPerson({
+      callerSessionId: 'parent-1',
+      prompt: 'research it',
+    });
+    await vi.waitFor(() => expect(fake.notifications).toHaveLength(1));
+    expect(fake.notifications[0]).toMatchObject({
+      sessionId: 'parent-1',
+      notification: { taskId: launched.sessionId, status: 'completed' },
+    });
+    expect(fake.notifications[0]!.notification.modelText).toContain(
+      'The user sent a message from this session to another session (&quot;research it&quot;); it completed.',
+    );
+    launcher.stop();
+  });
+
   it('sent mode: omits the label when the name leaves nothing behind', async () => {
     // `subSessionName` strips bidi and control marks and trims, so a name made
     // only of those yields an empty label -- which the receiving gate rejects
@@ -2438,6 +2462,44 @@ describe('sub-sessions in another workspace', () => {
       expect(b.closes).toEqual(['sub-1']);
     },
   );
+
+  it("a person's send starts the target in its own mode", async () => {
+    // The tool refuses this pair; a person could type into B directly.
+    const { a, b, launcherA } = twoWorkspaces({
+      callerMode: 'auto-edit',
+      childMode: 'auto',
+    });
+    const res = await launcherA.launchForPerson({
+      callerSessionId: 'caller',
+      prompt: 'p',
+      workspace: WS_B,
+    });
+    expect(res).toMatchObject({ sessionId: 'sub-1', workspaceCwd: WS_B });
+    expect(b.modeChanges).toEqual([]);
+    expect(b.prompts).toEqual([
+      expect.objectContaining({
+        sessionId: 'sub-1',
+        expectedApprovalMode: 'auto',
+      }),
+    ]);
+    await vi.waitFor(() => expect(a.notifications).toHaveLength(1));
+    expect(a.notifications[0]).toMatchObject({
+      sessionId: 'caller',
+      notification: { taskId: 'sub-1', status: 'completed' },
+    });
+  });
+
+  it("refuses a person's send to a workspace the index does not name", async () => {
+    const { b, launcherA } = twoWorkspaces();
+    await expect(
+      launcherA.launchForPerson({
+        callerSessionId: 'caller',
+        prompt: 'p',
+        workspace: '/tmp/elsewhere',
+      }),
+    ).rejects.toThrow('No registered workspace matches');
+    expect(b.spawns).toEqual([]);
+  });
 
   it('first-turn: runs in the target workspace and returns its result', async () => {
     const { a, b, launcherA } = twoWorkspaces();
@@ -3485,6 +3547,62 @@ describe('following up a sub-session', () => {
     }
   });
 
+  it("a person's send may name any session but the caller", async () => {
+    const { fake, launcher } = ownChild({
+      parent: 'someone-else',
+      sourceTypes: { kid: 'side_task' },
+    });
+    await expect(followUp(launcher)).rejects.toThrow(
+      'is not a sub-session this session created',
+    );
+    const res = await launcher.launchForPerson({
+      callerSessionId: 'caller',
+      prompt: 'and now?',
+      sessionId: 'kid',
+    });
+    expect(res.sessionId).toBe('kid');
+    // The session keeps its own lineage.
+    expect(fake.resumes).toEqual([
+      expect.objectContaining({
+        sessionId: 'kid',
+        parentSessionId: 'someone-else',
+        sourceType: 'side_task',
+      }),
+    ]);
+    await vi.waitFor(() => expect(fake.notifications).toHaveLength(1));
+    expect(fake.notifications[0]).toMatchObject({ sessionId: 'caller' });
+    await expect(
+      launcher.launchForPerson({
+        callerSessionId: 'caller',
+        prompt: 'p',
+        sessionId: 'caller',
+      }),
+    ).rejects.toThrow('A session cannot send a message to itself.');
+  });
+
+  it("a person's send works from a sub-session's page", async () => {
+    const fake = makeFakeBridge({
+      restoredCallerParents: { caller: 'grandparent' },
+      events: (pid) => [chunk('ok'), turnComplete(pid)],
+    });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+      getArchiveCoordinator,
+    });
+    await expect(
+      launcher.launch({
+        prompt: 'p',
+        completion: 'sent',
+        callerSessionId: 'caller',
+      }),
+    ).rejects.toThrow('nesting is capped at one level');
+    await expect(
+      launcher.launchForPerson({ callerSessionId: 'caller', prompt: 'p' }),
+    ).resolves.toMatchObject({ sessionId: 'sub-1' });
+    launcher.stop();
+  });
+
   it('refuses an unresolved ID before reading transcript metadata', async () => {
     const sessionId = 'unknown/child';
     const fake = makeFakeBridge({ notLive: [sessionId] });
@@ -3858,5 +3976,67 @@ describe('following up a sub-session', () => {
         approvalModeBeforeStart: 'yolo',
       }),
     ]);
+  });
+  it("a person's send keeps the target's mode; the model's next follow-up does not", async () => {
+    const a = makeFakeBridge({ approvalModes: { caller: 'default' } });
+    const b = makeFakeBridge({
+      restoredCallerParents: { kid: 'caller' },
+      approvalModes: { kid: 'yolo' },
+      resumable: ['kid'],
+      events: (pid) => [chunkFor(pid, 'from b'), turnComplete(pid)],
+    });
+    const launcherB = createSubSessionLauncher({
+      getBridge: () => b.bridge,
+      boundWorkspace: WS_B,
+      getArchiveCoordinator,
+    });
+    const launcherA = createSubSessionLauncher({
+      getBridge: () => a.bridge,
+      boundWorkspace: WS,
+      isTrusted: () => true,
+      resolveWorkspace: () => ({
+        kind: 'found',
+        launcher: launcherB,
+        workspaceId: 'ws-b',
+        workspaceCwd: WS_B,
+        workspaceGeneration: 'generation-b',
+        assertCurrent: () => {},
+      }),
+    });
+    const sent = await launcherA.launchForPerson({
+      callerSessionId: 'caller',
+      prompt: 'from the page',
+      workspace: WS_B,
+      sessionId: 'kid',
+    });
+    expect(sent).toMatchObject({ sessionId: 'kid', workspaceCwd: WS_B });
+    await vi.waitFor(() => expect(a.notifications).toHaveLength(1));
+    expect(a.notifications[0]!.notification.modelText).toContain(
+      'The user sent a message from this session to another session',
+    );
+    expect(b.prompts).toEqual([
+      expect.objectContaining({
+        sessionId: 'kid',
+        text: 'from the page',
+        expectedApprovalMode: 'yolo',
+      }),
+    ]);
+    expect(b.prompts[0]).not.toHaveProperty('approvalModeBeforeStart');
+
+    await launcherA.launch({
+      prompt: 'from the model',
+      completion: 'first-turn',
+      workspace: WS_B,
+      workspaceGeneration: 'generation-b',
+      sessionId: 'kid',
+      callerSessionId: 'caller',
+    });
+    expect(b.prompts[1]).toMatchObject({
+      sessionId: 'kid',
+      text: 'from the model',
+      expectedApprovalMode: 'default',
+      approvalModeBeforeStart: 'yolo',
+    });
+    expect(b.modeChanges).toEqual([]);
   });
 });

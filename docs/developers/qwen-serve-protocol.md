@@ -4138,6 +4138,23 @@ whether callers are sharing a default `sessionScope: "single"` session. For
 independent per-thread conversations, create sessions with
 `sessionScope: "thread"` so prompts serialize only within that thread.
 
+### `POST /session/:id/sub-sessions`
+
+A person sends a prompt from the page of session `:id` to a new session or any existing one, in its own workspace or another registered one (capability `session_sub_session_send`). The daemon runs it as a `sent` launch of `create_sub_session` with `:id` as the caller: the same trust and cap checks, and the same completion notification, which `:id` takes as a turn of its own. Unlike the tool, picking the workspace is the approval, so nothing is asked separately; the target keeps its own approval mode; any session but `:id` itself can be the target, keeping its own parent and source; and the delegation depth limit does not apply.
+
+```bash
+curl -X POST http://127.0.0.1:4170/session/$SID/sub-sessions \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"Summarize the open issues","workspace":"/work/other"}'
+# → 202 {"sessionId":"…","workspaceCwd":"/work/other"}
+```
+
+- `prompt` (required): non-empty, at most the `create_sub_session` prompt limit.
+- `workspace`: a registered, trusted workspace path or id. Absent means the caller's own workspace.
+- `targetSessionId`: an existing session to send to instead of starting a new one. Pass `workspace` too when it lives in another workspace.
+
+The response carries `sessionId`, `workspaceCwd` when the session runs in another workspace, and `taskId` when the completion's task id is not the session id (a follow-up). Errors: `400` (`invalid_sub_session_prompt`, `invalid_sub_session_workspace`, `invalid_sub_session_target`), `409 sub_session_send_refused` with the launcher's reason (an untrusted or unknown workspace, an unknown session, `:id` itself as the target, a cap, or a caller that does not record its chat), `501 sub_session_send_unavailable` for a session whose runtime cannot start sub-sessions, and the usual owner-route errors (standalone sessions are refused).
+
 ### `DELETE /session/:id`
 
 Explicitly close a live session. Force-closes even when other clients are attached — cancels any active prompt, resolves pending permissions as cancelled, publishes `session_closed` event, closes the EventBus, and removes the session from daemon maps. On-disk persisted sessions are NOT deleted — they can be reloaded via `POST /session/:id/load`. Pre-flight `caps.features.session_close`.

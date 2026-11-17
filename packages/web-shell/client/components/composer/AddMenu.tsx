@@ -20,6 +20,7 @@ import {
   PaperclipIcon,
   PlugIcon,
   PlusIcon,
+  SendIcon,
   SlashIcon,
   SparklesIcon,
   TerminalIcon,
@@ -102,6 +103,8 @@ export interface AddMenuProps {
   plan?: AddMenuPlanControl;
   workflow?: WorkflowModeControlOptions;
   btw?: { onSelect: () => void; disabledReason?: string };
+  /** Send a message to another session, possibly in another workspace. */
+  sendToSession?: { onSelect: () => void };
   mobileActions?: {
     commands: readonly CommandInfo[];
     categoryOrder?: CommandDisplayCategoryOrder;
@@ -385,6 +388,7 @@ export function AddMenu({
   plan,
   workflow,
   btw,
+  sendToSession,
   mobileActions,
   commandsOnly = false,
   simpleMode = false,
@@ -851,6 +855,26 @@ export function AddMenu({
                       </span>
                     </Button>
                   )}
+                  {!disabled && sendToSession && !simpleMode && (
+                    <Button
+                      variant="ghost"
+                      className={`${mobileRowClass} ${ACTION_ROW_CLASS}`}
+                      data-testid="composer-add-menu-send-to-session"
+                      onClick={() => closeAndRun(sendToSession.onSelect)}
+                    >
+                      <span className={menuStyles.iconTile} aria-hidden="true">
+                        <SendIcon />
+                      </span>
+                      <span className={menuStyles.actionText}>
+                        <span className={menuStyles.actionLabel}>
+                          {t('composerAdd.sendToSession.label')}
+                        </span>
+                        <span className={menuStyles.description}>
+                          {t('composerAdd.sendToSession.description')}
+                        </span>
+                      </span>
+                    </Button>
+                  )}
                   {!disabled && plan && !simpleMode && (
                     <Button
                       variant="ghost"
@@ -1057,7 +1081,7 @@ export function AddMenu({
             }}
           >
             {disabled ? null : !anyAvailable ? (
-              (simpleMode || !btw) &&
+              (simpleMode || (!btw && !sendToSession)) &&
               !workflowControl && (
                 <DropdownMenuLabel data-testid="composer-add-menu-empty">
                   {t('composerAdd.emptyState')}
@@ -1291,6 +1315,30 @@ export function AddMenu({
                     </span>
                   </span>
                   <span className="text-xs text-muted-foreground">/btw</span>
+                </DropdownMenuItem>
+              </>
+            ) : null}
+            {!disabled && sendToSession && !simpleMode ? (
+              <>
+                {!btw && (
+                  <DropdownMenuSeparator className={menuStyles.separator} />
+                )}
+                <DropdownMenuItem
+                  className={ACTION_ROW_CLASS}
+                  data-testid="composer-add-menu-send-to-session"
+                  onSelect={() => closeAndRun(sendToSession.onSelect)}
+                >
+                  <span className={menuStyles.iconTile} aria-hidden="true">
+                    <SendIcon />
+                  </span>
+                  <span className={menuStyles.actionText}>
+                    <span className={menuStyles.actionLabel}>
+                      {t('composerAdd.sendToSession.label')}
+                    </span>
+                    <span className={menuStyles.description}>
+                      {t('composerAdd.sendToSession.description')}
+                    </span>
+                  </span>
                 </DropdownMenuItem>
               </>
             ) : null}

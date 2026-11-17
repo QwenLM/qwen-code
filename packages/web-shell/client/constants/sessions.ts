@@ -23,6 +23,7 @@ export const SESSION_TIMELINE_MIN_VISIBLE_ENTRIES = 4;
 export const SESSION_MONITOR_TOOL_CORRELATION_FEATURE =
   'session_monitor_tool_correlation';
 export const SESSION_SIDE_TASK_FEATURE = 'session_side_task';
+export const SESSION_SUB_SESSION_SEND_FEATURE = 'session_sub_session_send';
 export const WEB_SHELL_SESSION_SOURCE_TYPE = 'default';
 export const WEB_SHELL_SIDE_TASK_SOURCE_TYPE = 'side_task';
 export const WEB_SHELL_HISTORY_PAGE_SIZE = 200;

@@ -111,6 +111,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     'no Managed session source metadata field',
   ),
   session_side_task: NO_MANAGED_EQUIVALENT('no Managed side-task surface'),
+  session_sub_session_send: NO_MANAGED_EQUIVALENT(
+    'no Managed sub-session send surface',
+  ),
   session_prompt: { standing: 'managed', evidence: 'surface:TURN_SUBMIT' },
   session_turn_status: NO_MANAGED_EQUIVALENT(
     'Managed reads Turns by list and get, not a status route',

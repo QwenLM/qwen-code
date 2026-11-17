@@ -2,7 +2,7 @@
 
 [English](2026-11-16-cross-workspace-sub-sessions.md) | [简体中文](2026-11-16-cross-workspace-sub-sessions.zh-CN.md)
 
-Status: steps 1 and 2 implemented; step 3 proposed.
+Status: steps 1, 2 and 3 implemented.
 
 ## Problem
 
@@ -192,16 +192,60 @@ sub-session to report back, which would deliver the result twice.
 Because a child cannot delegate, a caller and its children cannot form a
 cycle, so no daemon-wide delegation record is needed.
 
-## Step 3: Web Shell (proposed)
+## Step 3: Web Shell
 
-A "Send to session" action on a session page opens a picker: a registered
-workspace, then "New session" or one of the sessions this session created
-there, and the message. Sending goes through the same daemon path as the
-tool, with the open session as the caller and `sent` completion. The target
-opens in a split pane, which already supports sessions from other
-workspaces, so its reply streams there. When the turn finishes, the
-originating session receives the completion notification as well, so the
-result shows in both places.
+A person can do from a session page what the model does with the tool:
+start a sub-session in a chosen workspace, or send to a session already
+there, and read the reply.
+
+**Where.** The composer's "+" menu gains "Send to another session", in the
+main chat and in each split pane; the pane's session is then the caller,
+since a send opens the split view and the next one comes from a pane. It opens
+a dialog with three fields: a workspace (trusted registered workspaces,
+including the current one), a target ("New session", or any other
+active session in that workspace, listed from its session catalog), and the
+message. The item is shown only when
+the daemon advertises `session_sub_session_send` and the open session runs
+in a registered workspace. When the daemon refuses a send (an untrusted
+workspace, an unknown session, a cap), the dialog shows its reason and keeps
+the message.
+
+**The route.** Sending calls `POST /session/:id/sub-sessions` with
+`{ prompt, workspace?, targetSessionId? }`; `:id` is the open session, which
+becomes the caller. The route uses the same owner check as `POST
+/session/:id/prompt` and hands the request to the launcher of the caller's
+workspace, which runs it like a `sent` launch from the tool: the same trust and
+cap checks, the same chat-recording requirement, and the same completion
+notification. It answers with `{ sessionId, workspaceCwd?,
+taskId? }`.
+
+Three things differ from the tool, because a person wrote the message and
+chose the target. Each rests on the same point: the person could open the
+target session and type the same message there.
+
+- No separate approval. Picking the workspace and pressing Send is the
+  approval; the route resolves the target and launches it in one request.
+- The target keeps its own approval mode. The caller's mode is not compared
+  with the target's and no pair is refused.
+- Any session can be the target, not only one this session created: a side
+  task, another person's Web Shell session, a sub-session of another session.
+  It keeps its own parent and source. Only the caller itself is refused. The
+  depth limit does not apply either, so a sub-session's page can send too: it
+  exists to stop a model delegating without end, and a person's send does
+  not recurse.
+
+Only the route can ask for these; they are not fields the ACP child can send,
+so a model cannot claim them. The tool keeps its rules, including for a
+session a person created or sent to.
+
+**After sending.** Web Shell refreshes the target workspace's session list and
+opens the target in a split pane, where the turn streams. When split view is
+not available (a narrow screen or the pane limit), it shows a notice
+instead, and the session is in the sidebar. When the turn finishes, the
+caller receives the completion notification and its model answers in a turn
+of its own, as for a `sent` launch from the tool. The caller's model never
+saw this task start, so the notification's summary says the user sent the
+message.
 
 ## Files
 
@@ -219,7 +263,14 @@ result shows in both places.
   routing, and the follow-up path (lineage check, resume, client release,
   task id, prompt-id matching).
 - `packages/cli/src/serve/run-qwen-serve.ts`: register each launcher by
-  workspace and give launchers the resolver.
+  workspace and give launchers the resolver; expose the launcher lookup to
+  the routes.
+- `packages/cli/src/serve/routes/session.ts`, `capabilities.ts`: the
+  `POST /session/:id/sub-sessions` route and its capability tag.
+- `packages/sdk-typescript/src/daemon/`: the client method.
+- `packages/web-shell/client/`: the "+" menu item (main chat and split panes),
+  the dialog, and opening the
+  target in a split pane.
 - User docs for the tool.
 
 ## Out of scope
@@ -264,3 +315,16 @@ result shows in both places.
   `sent` after a daemon restart, and see B answer with the context of its
   earlier turns; follow up while the child runs a long turn and receive only
   the new turn's text; a session the caller did not create is refused.
+- Step 3, unit: the route's validation, owner check and capability tag; a
+  person's launch keeps the target's mode where the tool's would be clamped
+  or refused, reaches a session the caller did not create while the tool is
+  refused, works from a sub-session, and refuses the caller itself; the
+  dialog lists the workspaces it is given and the other sessions there, and
+  sends the right body; a refusal is shown in the dialog; the "+" menu shows
+  the item when it is wired; a split pane offers it only with the capability
+  and sends as its own session.
+- Step 3, end to end: from a Web Shell session in A, send to a new session in
+  B and see it open in a split pane with the reply; send to a session in B
+  that A did not create and see its lineage unchanged; send again to a target
+  already open in the split, and from a split pane; see a completion turn in
+  the caller each time.

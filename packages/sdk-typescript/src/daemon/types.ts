@@ -1764,6 +1764,26 @@ export interface DaemonForkSessionResult {
 }
 
 /**
+ * A person's send from the open session to another session
+ * (`POST /session/:id/sub-sessions`, capability `session_sub_session_send`).
+ */
+export interface SendToSubSessionRequest {
+  prompt: string;
+  /** Registered workspace path or id; absent means the session's own. */
+  workspace?: string;
+  /** Any other active session, to send to instead of starting one. */
+  targetSessionId?: string;
+}
+
+export interface DaemonSubSessionSendResult {
+  sessionId: string;
+  /** Set when the target runs in another workspace. */
+  workspaceCwd?: string;
+  /** The completion's task id, set for a follow-up. */
+  taskId?: string;
+}
+
+/**
  * Wire-format mirror of `BridgePendingInteraction*` in
  * `packages/acp-bridge/src/bridgeTypes.ts`; keep fields synchronized.
  * Session runtime interaction details returned by live session endpoints.

@@ -1216,17 +1216,17 @@ describe('legacy session telemetry route catalog', () => {
   // MCP App calls, attachment uploads, the batch live-state snapshot, shell
   // runtime, worktree, message group, and Generated UI state routes resolve the
   // live session owner in the handler, preserving the two pre-resolved routes.
-  it('contains 91 unique routes with the audited 89/2 attribution split', () => {
+  it('contains 92 unique routes with the audited 90/2 attribution split', () => {
     const keys = legacySessionTelemetryRoutes.map(
       ({ method, path }) => `${method} ${path}`,
     );
-    expect(keys).toHaveLength(91);
-    expect(new Set(keys).size).toBe(91);
+    expect(keys).toHaveLength(92);
+    expect(new Set(keys).size).toBe(92);
     expect(
       legacySessionTelemetryRoutes.filter(
         ({ attribution }) => attribution === 'handler_resolved',
       ),
-    ).toHaveLength(89);
+    ).toHaveLength(90);
     expect(
       legacySessionTelemetryRoutes.filter(
         ({ attribution }) => attribution === 'pre_resolved',

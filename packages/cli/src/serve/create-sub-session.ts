@@ -175,14 +175,34 @@ export interface SubSessionLauncher {
     info: CreateSubSessionInfo,
     caller: RemoteSubSessionCaller,
   ): Promise<CreateSubSessionResult>;
+  /**
+   * A person's send from a session page (`POST /session/:id/sub-sessions`).
+   * Always `sent`, and the person's choice of workspace is the approval. The
+   * target keeps its own approval mode: the person could type the same
+   * message into it directly. Reachable only from the daemon route, never
+   * from the ACP child.
+   */
+  launchForPerson(
+    request: PersonSubSessionRequest,
+  ): Promise<CreateSubSessionResult>;
   /** Stop accepting new sub-sessions (daemon shutdown). Idempotent. */
   stop(reason?: 'workspace_stopped'): void;
+}
+
+/** A person's send: the open session is the caller. */
+export interface PersonSubSessionRequest {
+  callerSessionId: string;
+  prompt: string;
+  workspace?: string;
+  sessionId?: string;
 }
 
 /** What a target launcher needs to know about a caller in another workspace. */
 export interface RemoteSubSessionCaller {
   /** The caller's live approval mode at admission. */
   approvalMode: ApprovalMode;
+  /** A person sent this from the caller's page: keep the target's own mode. */
+  byPerson?: boolean;
   assertCurrent(): void;
   /** Hand a `sent` completion to the caller, on the caller's own bridge. */
   deliverCompletion(notification: BridgeBackgroundNotification): Promise<void>;
@@ -413,6 +433,8 @@ function buildSentCompletionNotification(
   stopReason: string,
   workspaceCwd?: string,
   taskId = sessionId,
+  /** The user sent the prompt from this session's page, not the model. */
+  byPerson = false,
 ) {
   const status = sentCompletionStatus(stopReason);
   const boundedStopReason = truncateCodePoints(stopReason, 128);
@@ -436,7 +458,9 @@ function buildSentCompletionNotification(
     '<task-notification>',
     `<task-id>${escapeXml(modelSessionId)}</task-id>`,
     `<status>${status}</status>`,
-    `<summary>Sub-session &quot;${escapeXml(modelLabel)}&quot; ${escapeXml(statusText)}.</summary>`,
+    byPerson
+      ? `<summary>The user sent a message from this session to another session (&quot;${escapeXml(modelLabel)}&quot;); it ${escapeXml(statusText)}.</summary>`
+      : `<summary>Sub-session &quot;${escapeXml(modelLabel)}&quot; ${escapeXml(statusText)}.</summary>`,
     `<session-link>${escapeXml(sessionUrl)}</session-link>`,
     '<result>',
   ].join('');
@@ -1084,11 +1108,15 @@ export function createSubSessionLauncher(
    * session must carry no source marker. Side tasks and scheduled-task runs
    * also record the session they came from as their parent, but they carry
    * a source, and a person or a schedule started them, not this tool.
+   * A person's send may name any session but the caller itself: the person
+   * could type into it directly. Either way the session keeps its own
+   * lineage.
    */
   const resumeOwnSubSession = async (
     bridge: AcpSessionBridge,
     sessionId: string,
     callerSessionId: string,
+    anySession: boolean,
   ): Promise<BridgeSession> => {
     const notOwn = new Error(
       `Session ${sessionId} is not a sub-session this session created in ` +
@@ -1096,7 +1124,9 @@ export function createSubSessionLauncher(
         '`workspace`.',
     );
     if (sessionId === normalizeSessionIdForLookup(callerSessionId)) {
-      throw notOwn;
+      throw anySession
+        ? new Error('A session cannot send a message to itself.')
+        : notOwn;
     }
     let metadata:
       | { parentSessionId?: string; sourceType?: string; sourceId?: string }
@@ -1123,13 +1153,17 @@ export function createSubSessionLauncher(
         );
       }
     }
+    if (anySession && !metadata) {
+      throw new Error(`No active session ${sessionId} in ${boundWorkspace}.`);
+    }
     if (
-      metadata?.parentSessionId === undefined ||
-      normalizeSessionIdForLookup(metadata.parentSessionId) !==
-        normalizeSessionIdForLookup(callerSessionId) ||
-      (metadata.sourceType !== undefined &&
-        metadata.sourceType !== 'default') ||
-      metadata.sourceId !== undefined
+      !anySession &&
+      (metadata?.parentSessionId === undefined ||
+        normalizeSessionIdForLookup(metadata.parentSessionId) !==
+          normalizeSessionIdForLookup(callerSessionId) ||
+        (metadata.sourceType !== undefined &&
+          metadata.sourceType !== 'default') ||
+        metadata.sourceId !== undefined)
     ) {
       throw notOwn;
     }
@@ -1144,7 +1178,12 @@ export function createSubSessionLauncher(
     info: CreateSubSessionInfo,
     remote?: RemoteSubSessionCaller,
     assertLocalCurrent?: () => void,
+    /** A person sent this from the caller's page (local launches). */
+    byPersonLocal = false,
   ): Promise<CreateSubSessionResult> => {
+    // The caller's tool never saw a person's launch, so the daemon reports
+    // its completion even for a new session in this workspace.
+    const byPerson = byPersonLocal || remote?.byPerson === true;
     if (stopAc.signal.aborted) {
       throw new Error(
         'The daemon is shutting down; cannot create a sub-session.',
@@ -1178,7 +1217,11 @@ export function createSubSessionLauncher(
       if (standalone && !standaloneService) {
         throw new Error('Standalone session service is unavailable.');
       }
-      assertMayDelegate(info.callerSessionId, caller.parentSessionId);
+      // The depth gate stops a model delegating without end; a person's send
+      // does not recurse.
+      if (!byPerson) {
+        assertMayDelegate(info.callerSessionId, caller.parentSessionId);
+      }
       if (info.sessionId !== undefined && (standalone || isolatedWorkspace)) {
         throw new Error('This session cannot follow up a sub-session.');
       }
@@ -1188,14 +1231,14 @@ export function createSubSessionLauncher(
         ? undefined
         : normalizeSessionIdForLookup(info.sessionId);
     const reusing = followUpSessionId !== undefined;
-    if (reusing && !remote && info.completion === 'sent') {
+    if ((reusing || byPerson) && !remote && info.completion === 'sent') {
       // The completion comes back as a background turn, which the caller
       // can only take while it records its chat.
       const callerStatus = await readApprovalMode(bridge, info.callerSessionId);
       if (!callerStatus.canAcceptBackgroundNotifications) {
         throw new Error(
-          'A sent follow-up needs chat recording in the caller to report ' +
-            'back. Use first-turn to wait for the result.',
+          'A sub-session that reports back needs chat recording in the ' +
+            'caller. Use first-turn to wait for the result.',
         );
       }
     }
@@ -1293,6 +1336,7 @@ export function createSubSessionLauncher(
           bridge,
           followUpSessionId,
           info.callerSessionId,
+          byPerson,
         );
         // The bridge keys the session by the id it resumed, which can differ
         // in spelling from the one the caller passed.
@@ -1371,7 +1415,9 @@ export function createSubSessionLauncher(
           );
         }
         remote.assertCurrent();
-        const mode = delegatedApprovalMode(remote.approvalMode, originalMode);
+        const mode = remote.byPerson
+          ? originalMode
+          : delegatedApprovalMode(remote.approvalMode, originalMode);
         if (!reusing && mode !== originalMode) {
           const change = await bridge.setSessionApprovalMode(sessionId, mode, {
             persist: false,
@@ -1609,7 +1655,7 @@ export function createSubSessionLauncher(
                     `concurrency slot (the sub-session may still be running)`,
                 );
               }
-              if (notifySentCompletion || remote || reusing) {
+              if (notifySentCompletion || remote || reusing || byPerson) {
                 notification = buildSentCompletionNotification(
                   sessionId,
                   subSessionName(info.name ?? info.prompt, false),
@@ -1617,11 +1663,14 @@ export function createSubSessionLauncher(
                   completion.stopReason,
                   remote ? boundWorkspace : undefined,
                   completionTaskId,
+                  byPerson,
                 );
               }
             } catch (err) {
               if (stopAc.signal.aborted && !targetStopped()) return;
-              if (!notifySentCompletion && !remote && !reusing) return;
+              if (!notifySentCompletion && !remote && !reusing && !byPerson) {
+                return;
+              }
               const message = err instanceof Error ? err.message : String(err);
               notification = buildSentCompletionNotification(
                 sessionId,
@@ -1630,6 +1679,7 @@ export function createSubSessionLauncher(
                 targetStopped() ? 'shutdown' : 'error',
                 remote ? boundWorkspace : undefined,
                 completionTaskId,
+                byPerson,
               );
             } finally {
               if (remote) {
@@ -1827,7 +1877,11 @@ export function createSubSessionLauncher(
     }
   };
 
-  const getNamedTarget = (callerSessionId: string, workspace: string) => {
+  const getNamedTarget = (
+    callerSessionId: string,
+    workspace: string,
+    byPerson = false,
+  ) => {
     if (stopAc.signal.aborted) {
       throw new Error(
         'The daemon is shutting down; cannot create a sub-session.',
@@ -1846,7 +1900,7 @@ export function createSubSessionLauncher(
         'This session cannot create sub-sessions in another workspace.',
       );
     }
-    assertMayDelegate(callerSessionId, caller.parentSessionId);
+    if (!byPerson) assertMayDelegate(callerSessionId, caller.parentSessionId);
     if (!resolveWorkspace) {
       throw new Error(
         'Sub-sessions in another workspace are not available here.',
@@ -1879,14 +1933,17 @@ export function createSubSessionLauncher(
     };
   };
 
-  const launch = async (
+  const launchAs = async (
     info: CreateSubSessionInfo,
+    byPerson: boolean,
   ): Promise<CreateSubSessionResult> => {
     const { workspace, workspaceGeneration, ...local } = info;
-    if (workspace === undefined) return run(local);
+    if (workspace === undefined)
+      return run(local, undefined, undefined, byPerson);
     const { bridge, target, assertCallerCurrent } = getNamedTarget(
       info.callerSessionId,
       workspace,
+      byPerson,
     );
     if (
       !workspaceGeneration ||
@@ -1899,7 +1956,7 @@ export function createSubSessionLauncher(
       target.assertCurrent();
     };
     if (target.launcher === launcher) {
-      return run(local, undefined, assertTargetCurrent);
+      return run(local, undefined, assertTargetCurrent, byPerson);
     }
     const callerApproval = await readApprovalMode(bridge, info.callerSessionId);
     if (callerApproval.mode === undefined) {
@@ -1930,9 +1987,11 @@ export function createSubSessionLauncher(
     try {
       return await target.launcher.launchForRemoteCaller(local, {
         approvalMode: callerApproval.mode,
+        ...(byPerson ? { byPerson: true } : {}),
         assertCurrent() {
           assertTargetCurrent();
-          callerApproval.assertCurrent();
+          // A person's send does not depend on the caller's mode.
+          if (!byPerson) callerApproval.assertCurrent();
         },
         deliverCompletion: async (notification) => {
           assertCallerCurrent();
@@ -1952,8 +2011,33 @@ export function createSubSessionLauncher(
     }
   };
 
+  const launch = (info: CreateSubSessionInfo) => launchAs(info, false);
+
+  const launchForPerson = async (
+    request: PersonSubSessionRequest,
+  ): Promise<CreateSubSessionResult> => {
+    const { callerSessionId, prompt, workspace, sessionId } = request;
+    // Resolved in the same request: the person picked this workspace.
+    const workspaceGeneration =
+      workspace === undefined
+        ? undefined
+        : getNamedTarget(callerSessionId, workspace, true).target
+            .workspaceGeneration;
+    return launchAs(
+      {
+        prompt,
+        completion: 'sent',
+        callerSessionId,
+        ...(workspace !== undefined ? { workspace, workspaceGeneration } : {}),
+        ...(sessionId !== undefined ? { sessionId } : {}),
+      },
+      true,
+    );
+  };
+
   const launcher: SubSessionLauncher = {
     launch,
+    launchForPerson,
     resolveDestination,
     launchForRemoteCaller: (info, caller) => run(info, caller),
     stop: (reason) => {

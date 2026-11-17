@@ -278,6 +278,8 @@ import type {
   DaemonDeleteMessageGroupsResult,
   DaemonRewindResult,
   ForkSessionRequest,
+  SendToSubSessionRequest,
+  DaemonSubSessionSendResult,
   DaemonSessionHooksStatus,
   DaemonWorkspaceExtensionsStatus,
   DaemonWorkspaceExtensionSummaries,
@@ -4212,6 +4214,40 @@ export class DaemonClient {
         }
         return (await res.json()) as DaemonForkSessionResult;
       },
+    );
+  }
+
+  /**
+   * Send a prompt from `sessionId` to another session: a new one, in its own
+   * workspace or another registered one, or any other active session there.
+   * The target reports back to `sessionId` when its turn finishes.
+   */
+  async sendToSubSession(
+    sessionId: string,
+    req: SendToSubSessionRequest,
+    clientId?: string,
+  ): Promise<DaemonSubSessionSendResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/sub-sessions`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify({
+          prompt: req.prompt,
+          ...(req.workspace !== undefined ? { workspace: req.workspace } : {}),
+          ...(req.targetSessionId !== undefined
+            ? { targetSessionId: req.targetSessionId }
+            : {}),
+        }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /session/:id/sub-sessions');
+        }
+        return (await res.json()) as DaemonSubSessionSendResult;
+      },
+      // The daemon may spawn or restore the session before answering.
+      this.resolveSessionSpawnTimeoutMs(),
     );
   }
 

@@ -2,7 +2,7 @@
 
 [English](2026-11-16-cross-workspace-sub-sessions.md) | [简体中文](2026-11-16-cross-workspace-sub-sessions.zh-CN.md)
 
-状态：第 1、2 步已实现；第 3 步为提议。
+状态：第 1、2、3 步已实现。
 
 ## 问题
 
@@ -70,16 +70,33 @@ standalone 和 Live 调用方不能指定 workspace。它们的子会话位于 d
 
 由于子会话不能再委派，调用方和它的子会话不可能形成环，所以不需要 daemon 级的委派记录。
 
-## 第 3 步：Web Shell（提议）
+## 第 3 步：Web Shell
 
-会话页上的"发送到会话"操作会打开一个选择器：选一个已注册的 workspace，再选"新会话"或本会话在那里建过的某个会话，然后填写消息。发送走与工具相同的 daemon 路径，以当前打开的会话作为调用方，使用 `sent` 模式。目标会话在分屏中打开（分屏已经支持其它 workspace 的会话），它的回复就在那里流式显示。这一轮结束时，发起的会话也会收到完成通知，所以结果在两处都能看到。
+人可以在会话页上做模型用工具做的事：在选定的 workspace 里启动子会话，或者发给那里已有的会话，然后看到回复。
+
+**入口。** 输入框的"+"菜单新增"发送到另一个会话"，主聊天和每个分屏面板里都有；在面板里发起时，调用方就是该面板的会话，因为一次发送会打开分屏，下一次就从面板里发起。它打开一个对话框，有三个字段：workspace（受信的已注册 workspace，包括当前这个）、目标（"新会话"，或该 workspace 里任意其它活跃会话，从它的会话目录列出）以及消息。只有 daemon 声明了 `session_sub_session_send`、且当前会话运行在已注册的 workspace 中时才显示这一项。daemon 拒绝发送时（workspace 不受信、会话不存在、达到上限），对话框显示拒绝原因并保留消息。
+
+**路由。** 发送时调用 `POST /session/:id/sub-sessions`，请求体为 `{ prompt, workspace?, targetSessionId? }`；`:id` 是当前打开的会话，它就是调用方。路由使用和 `POST /session/:id/prompt` 相同的所有者检查，把请求交给调用方所在 workspace 的启动器，按工具发起的 `sent` 启动来执行：相同的信任和并发上限检查，相同的对话记录要求，以及相同的完成通知。返回 `{ sessionId, workspaceCwd?, taskId? }`。
+
+有三点和工具不同，因为消息是人写的、目标是人选的。理由都一样：人本来就可以打开目标会话、在那里输入同一条消息。
+
+- 不再单独批准。选定 workspace 并点击发送就是批准；路由在同一个请求里解析目标并启动。
+- 目标保持它自己的审批模式。不再拿调用方的模式和目标的模式比较，也不会因为模式组合被拒。
+- 任意会话都可以作为目标，不限于本会话建的：side task、别人的 Web Shell 会话、其它会话的子会话都可以。目标保留自己的父会话和来源。只拒绝调用方自己。深度限制也不适用，所以子会话的页面也能发送：深度限制是为了防止模型无休止地委派，人发的消息不会递归。
+
+只有这个路由能提出这些；它们不是 ACP 子进程能发送的字段，所以模型无法冒充。工具保持自己的规则，对人建过或发过消息的会话也一样。
+
+**发送之后。** Web Shell 刷新目标 workspace 的会话列表，并在分屏中打开目标会话，这一轮的输出就在那里流式显示。分屏不可用时（窄屏或窗格已满），改为显示一条提示，会话可在侧边栏找到。这一轮结束时，调用方会收到完成通知，它的模型会在单独的一轮里作答，与工具发起的 `sent` 启动相同。调用方的模型没见过这个任务的开始，所以通知的摘要会写明消息是用户发的。
 
 ## 文件
 
 - `packages/core/src/tools/create-sub-session.ts`：新参数、校验、描述和批准文本，以及后续 prompt 结果的措辞。
 - ACP 会话的派发器和 bridge 的请求校验（`packages/cli/src/acp-integration/session/Session.ts`、`packages/acp-bridge/src/bridgeOptions.ts`、`bridgeClient.ts`）：传递该字段。派发器还会把 daemon 的拒绝原因传给工具：携带原因的 RPC 错误到达会话时是一个普通对象，它的 message 只有 "Internal error"，工具以前会把它打印成 `[object Object]`。
 - `packages/cli/src/serve/create-sub-session.ts`：调用方一侧的检查、交给目标启动器、审批规则、通知路由，以及后续 prompt 的路径（血缘检查、恢复、释放 client、任务 id、按 prompt id 匹配）。
-- `packages/cli/src/serve/run-qwen-serve.ts`：按 workspace 注册每个启动器，并把解析函数交给各启动器。
+- `packages/cli/src/serve/run-qwen-serve.ts`：按 workspace 注册每个启动器，并把解析函数交给各启动器；把启动器查询暴露给路由。
+- `packages/cli/src/serve/routes/session.ts`、`capabilities.ts`：`POST /session/:id/sub-sessions` 路由及其能力标签。
+- `packages/sdk-typescript/src/daemon/`：客户端方法。
+- `packages/web-shell/client/`："+"菜单项（主聊天和分屏面板）、对话框，以及在分屏中打开目标会话。
 - 工具的用户文档。
 
 ## 不在范围内
@@ -100,3 +117,5 @@ standalone 和 Live 调用方不能指定 workspace。它们的子会话位于 d
 - 端到端验证使用两个受信 workspace。从 A 在 B 中新建子会话，通过 `first-turn` 读取 B 的 `QWEN.md`，再验证 `sent` 在 A 中收到通知。通过 A 的子会话链接打开 B。指定不受信目标应收到拒绝与可用 workspace 列表。
 - 第 2 步单元测试：后续 prompt 只返回带有自己 prompt id 的输出；`sent` 后续 prompt 以 `<sessionId>:<promptId>` 回报，并释放它附加的 client；发给忙碌会话的 `sent` 后续 prompt 排进队列就返回，轮到它时被拒的会以失败回报；已回收子会话的血缘从对话记录读取；别的会话、调用方自己、侧任务、定时任务运行、Live 调用方，以及无法接收 `sent` 完成通知的调用方，都在会话被触碰之前被拒绝；失败的后续 prompt 不会关闭会话；在另一个 workspace 的后续 prompt 在该 workspace 的 bridge 上、以委派后的模式运行。
 - 第 2 步端到端：用 `first-turn` 追问 B 里的子会话，再在 daemon 重启后用 `sent` 追问，看到 B 带着之前几轮的上下文作答；在子会话执行长轮次时追问，只拿到新一轮的文本；调用方没有建过的会话会被拒绝。
+- 第 3 步单元测试：路由的校验、所有者检查和能力标签；人发起的启动保持目标的模式，而工具发起的会被收紧或拒绝；人发起的启动能到达不是调用方建的会话（工具发起的会被拒），能从子会话发出，并拒绝调用方自己；对话框列出传给它的 workspace 和其中的其它会话，并发送正确的请求体；拒绝原因显示在对话框里；接上入口时"+"菜单显示该项；分屏面板只在具备该能力时提供该项，并以它自己的会话作为调用方发送。
+- 第 3 步端到端：在 A 的 Web Shell 会话里发送到 B 的新会话，看到它在分屏中打开并给出回复；发送到 B 里不是 A 建的会话，看到它的血缘不变；再次发送到已在分屏中打开的目标，以及从分屏面板发送；每次都看到调用方里的完成轮次。

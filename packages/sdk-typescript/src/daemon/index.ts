@@ -641,6 +641,8 @@ export type {
   DaemonSideTaskSession,
   DaemonForkSessionResult,
   ForkSessionRequest,
+  SendToSubSessionRequest,
+  DaemonSubSessionSendResult,
   SideTaskSessionRequest,
   DaemonRestoredSession,
   DaemonSession,
