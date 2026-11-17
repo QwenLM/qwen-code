@@ -689,8 +689,9 @@ describe('configCommand', () => {
     it('masks customHeaders, scalar and empty credential map values', async () => {
       const { ctx } = createMockContext({
         modelProviders: {
-          gw: [
+          'corp-proxy': [
             {
+              envKey: 'OPENAI_API_KEY',
               generationConfig: {
                 customHeaders: { Authorization: 'Bearer sk-live-123' },
               },
@@ -707,7 +708,7 @@ describe('configCommand', () => {
         type: 'message',
         messageType: 'info',
         content:
-          'modelProviders = {"gw":[{"generationConfig":{"customHeaders":{"Authorization":"Bear****"}}}]}',
+          'modelProviders = {"corp-proxy":[{"envKey":"OPENAI_API_KEY","generationConfig":{"customHeaders":{"Authorization":"Bear****"}}}]}',
       });
       expect(await configCommand.action!(ctx, 'mcpServers')).toEqual({
         type: 'message',
@@ -720,12 +721,18 @@ describe('configCommand', () => {
     it('masks channel webhook URLs and AES keys but keeps their type', async () => {
       const { ctx } = createMockContext({
         channels: {
-          'team-notices': {
+          'ops-webhook': {
             type: 'dingtalk-webhook',
             webhookUrl:
               'https://oapi.dingtalk.com/robot/send?access_token=live-secret',
           },
           wecom: { type: 'wecom', encodingAESKey: 'AAAAbbbbCCCC' },
+          support: {
+            type: 'feishu',
+            webhookPort: 8080,
+            verificationToken: 'verify-tok-123456',
+            encryptKey: 'hmac-key-abcdef',
+          },
         },
       });
 
@@ -733,7 +740,26 @@ describe('configCommand', () => {
         type: 'message',
         messageType: 'info',
         content:
-          'channels = {"team-notices":{"type":"dingtalk-webhook","webhookUrl":"http****"},"wecom":{"type":"wecom","encodingAESKey":"AAAA****"}}',
+          'channels = {"ops-webhook":{"type":"dingtalk-webhook","webhookUrl":"http****"},"wecom":{"type":"wecom","encodingAESKey":"AAAA****"},"support":{"type":"feishu","webhookPort":8080,"verificationToken":"veri****","encryptKey":"hmac****"}}',
+      });
+    });
+
+    it('keeps token budget settings readable', async () => {
+      const { ctx } = createMockContext({
+        model: { sessionTokenLimit: 1000, goalTokenBudget: 2000 },
+      });
+
+      expect(await configCommand.action!(ctx, 'model')).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: 'model = {"sessionTokenLimit":1000,"goalTokenBudget":2000}',
+      });
+      expect(
+        await configCommand.action!(ctx, 'model.sessionTokenLimit'),
+      ).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining('model.sessionTokenLimit = 1000'),
       });
     });
 
@@ -753,6 +779,25 @@ describe('configCommand', () => {
         messageType: 'info',
         content:
           'mcpServers = {"headers":{"command":"npx","url":"http://localhost:3000"},"gh":{"command":"npx","headers":{"Authorization":"Bear****"}}}',
+      });
+    });
+
+    it('masks credential maps of an MCP server named like a free-form map', async () => {
+      const { ctx } = createMockContext({
+        mcpServers: {
+          channels: {
+            command: 'npx',
+            headers: { Authorization: 'Bearer sk-live-123' },
+            env: { GITHUB_TOKEN: 'ghp_live' },
+          },
+        },
+      });
+
+      expect(await configCommand.action!(ctx, 'mcpServers')).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content:
+          'mcpServers = {"channels":{"command":"npx","headers":{"Authorization":"Bear****"},"env":{"GITHUB_TOKEN":"ghp_****"}}}',
       });
     });
 

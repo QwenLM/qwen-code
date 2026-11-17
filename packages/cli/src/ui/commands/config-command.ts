@@ -34,21 +34,24 @@ const SENSITIVE_KEY_PATTERNS = [
   /credential/i,
   /private[_-]?key/i,
   /aes.?key/i,
+  /token$/i,
+  /encrypt.*key/i,
 ];
 
 const SENSITIVE_URL_PATTERNS = [/baseurl/i, /base_url/i, /proxy/i, /webhook/i];
 
 const CREDENTIAL_MAP_KEYS = new Set(['env', 'headers', 'customHeaders']);
 
-// Maps keyed by user-chosen names, e.g. an MCP server called "corp-proxy".
-const FREE_FORM_MAP_KEYS = new Set([
+// Settings paths of maps keyed by user-chosen names, e.g. an MCP server
+// called "corp-proxy".
+const FREE_FORM_MAP_PATHS = new Set([
   'mcpServers',
   'channels',
   'modelProviders',
   'providerProtocol',
   'pluginConfigs',
   'modelPricing',
-  'customThemes',
+  'ui.customThemes',
 ]);
 
 function isSensitiveKey(key: string): boolean {
@@ -206,14 +209,15 @@ function coerceValue(
 function maskTree(
   value: unknown,
   key: string,
-  parentKey = '',
+  path: string,
   maskAll = false,
+  isEntryName = false,
 ): unknown {
-  // Entries of env/header maps are named by the user, so mask every value;
-  // a user-chosen entry name (even one called "headers") is never sensitive.
+  // Entries of env/header maps are named by the user, so mask every value.
+  // The name of an entry placed directly in a free-form map (even one called
+  // "headers") is never sensitive; fields inside that entry still are.
   const sensitive =
-    !FREE_FORM_MAP_KEYS.has(parentKey) &&
-    (CREDENTIAL_MAP_KEYS.has(key) || isSensitiveKey(key));
+    !isEntryName && (CREDENTIAL_MAP_KEYS.has(key) || isSensitiveKey(key));
   if (value === null || typeof value !== 'object') {
     // Only strings hold secrets; null/number/boolean keep their type.
     return (maskAll || sensitive) && typeof value === 'string'
@@ -222,7 +226,8 @@ function maskTree(
   }
   // A sensitive container masks every leaf.
   const maskLeaves = maskAll || sensitive;
-  const mask = (k: string, v: unknown) => maskTree(v, k, key, maskLeaves);
+  const mask = (k: string, v: unknown) =>
+    maskTree(v, k, `${path}.${k}`, maskLeaves, FREE_FORM_MAP_PATHS.has(path));
   return Array.isArray(value)
     ? value.map((v, i) => mask(String(i), v))
     : Object.fromEntries(
@@ -233,7 +238,7 @@ function maskTree(
 function formatValue(value: unknown, key = ''): string {
   if (value === undefined) return t('(not set)');
   if (typeof value === 'string') return value || t('(empty)');
-  return JSON.stringify(maskTree(value, key.split('.').pop()!));
+  return JSON.stringify(maskTree(value, key.split('.').pop()!, key));
 }
 
 function padRight(str: string, len: number): string {
