@@ -5,14 +5,17 @@
  */
 
 import { execFileSync, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   chmodSync,
   existsSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -255,21 +258,30 @@ describe('detectIsolation', () => {
     expect(detectIsolation({}, () => false)).toEqual({
       isolated: false,
       signals: [],
+      observed: [],
+      sandboxRuntime: null,
       seatbelt: false,
     });
+    // A self-chosen container= string is a declaration, not an observed mark.
     expect(detectIsolation({ container: 'podman' }, () => false)).toEqual({
       isolated: true,
       signals: ['container=podman'],
+      observed: [],
+      sandboxRuntime: null,
       seatbelt: false,
     });
     expect(detectIsolation({ SANDBOX: 'docker' }, () => false)).toEqual({
       isolated: true,
       signals: ['SANDBOX=docker'],
+      observed: [],
+      sandboxRuntime: 'docker',
       seatbelt: false,
     });
     expect(detectIsolation({}, (path) => path === '/.dockerenv')).toEqual({
       isolated: true,
       signals: ['/.dockerenv'],
+      observed: ['/.dockerenv'],
+      sandboxRuntime: null,
       seatbelt: false,
     });
     expect(
@@ -277,6 +289,8 @@ describe('detectIsolation', () => {
     ).toEqual({
       isolated: true,
       signals: ['/run/.containerenv'],
+      observed: ['/run/.containerenv'],
+      sandboxRuntime: null,
       seatbelt: false,
     });
   });
@@ -288,12 +302,16 @@ describe('detectIsolation', () => {
     expect(detectIsolation({ SANDBOX: 'sandbox-exec' }, () => false)).toEqual({
       isolated: false,
       signals: [],
+      observed: [],
+      sandboxRuntime: null,
       seatbelt: true,
     });
     // A boolean-looking value reads as "disabled", not as a container name.
     expect(detectIsolation({ SANDBOX: 'false' }, () => false)).toEqual({
       isolated: false,
       signals: [],
+      observed: [],
+      sandboxRuntime: null,
       seatbelt: false,
     });
   });
@@ -619,7 +637,20 @@ describe('parseArgs', () => {
     expect(parseArgs(['--require-isolation'])).toMatchObject({
       requireIsolation: true,
     });
+    expect(
+      parseArgs(['--require-isolation', '--artifact-dir', 'd']),
+    ).toMatchObject({ requireIsolation: true, artifactDir: 'd' });
     expect(parseArgs(['--help'])).toMatchObject({ help: true });
+    // The flag is load-bearing only for the gate: alone it must not
+    // silently succeed on the coordinate path writing nothing.
+    expect(
+      parseArgs(['42', '--repo', REPO, '--artifact-dir', 'd']).error,
+    ).toMatch(/--artifact-dir only applies with --require-isolation/);
+    // R10-9: a valueless --artifact-dir is a usage error, not a silent pass
+    // that writes no gate record.
+    expect(parseArgs(['--require-isolation', '--artifact-dir']).error).toMatch(
+      /--artifact-dir needs <round-dir>/,
+    );
   });
 
   it('rejects a missing PR, a missing repo, and a stray argument', () => {
@@ -727,6 +758,13 @@ describe('reviewState', () => {
 // These cases drive the real CLI through a POSIX `gh` stand-in; a Windows
 // runner cannot express it, and the Linux lane owns that coverage.
 describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
+  // The gate now requires an OBSERVED filesystem marker (R11-1): a SANDBOX=
+  // string alone is a declaration, not a boundary. The passing-gate cases
+  // therefore need a real container marker — they run in the verify job's
+  // container (/.dockerenv) and skip on a bare host; the declared-only
+  // refusal case is the mirror image (it skips where a marker is present).
+  const hasObservedMarker = () => detectIsolation().observed.length > 0;
+
   it('resolves the coordinates and reports a container boundary', () => {
     const { dir, base, head } = makeRepo();
     const env = installFakeGh(snapshotFor({ base, head }));
@@ -756,13 +794,34 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     expect(result.stdout).toContain(
       `isolation  ${isolation.signals.join(', ')}`,
     );
-    expect(result.stdout).toContain('--require-isolation');
+    // The printed next-step command must carry the flag the checker's
+    // gate-record requirement depends on, in the in-container spelling:
+    // the trusted /trusted-scripts mount (never the PR head's own copy)
+    // and the quoted /work artifact path (a host path would die with the
+    // container or fail mkdir; an unquoted path splits on whitespace).
+    expect(result.stdout).toMatch(
+      /node \/trusted-scripts\/verify-pr-prepare\.mjs --require-isolation --artifact-dir "\/work\/tmp\/pr42-verify-\d{8}-\d{6}"/,
+    );
 
     const root = realpathSync(dir);
     const contextPath = join(root, 'tmp', 'verify-context', 'pr42.json');
     const context = JSON.parse(readFileSync(contextPath, 'utf8'));
     expect(context.baseRefOid).toBe(base);
     expect(context.headRefOid).toBe(head);
+    // The host-held snapshot carries the slug: the checker's waiver
+    // coordinate check reads it from --context, and gh's field selector
+    // has no repo member, so prepare adds it where the snapshot is written.
+    expect(context.repo).toBe(REPO);
+    expect(context.number).toBe(42);
+    // The printed digest must be the sha256 of exactly the bytes written to
+    // contextPath, under the two-space label the skill's sed anchors on: the
+    // checker rehashes what it reads back, so a re-aligned label, a renamed
+    // row, or a different serialisation would empty every round's pr.sha256
+    // while the consumer-side pin stayed green (R3-1).
+    const digest = createHash('sha256')
+      .update(readFileSync(contextPath))
+      .digest('hex');
+    expect(result.stdout).toContain(`  context-sha256  ${digest}`);
     const artifacts = result.stdout.match(/artifacts {2}(\S+)/)?.[1];
     expect(artifacts).toMatch(/pr42-verify-\d{8}-\d{6}$/);
     expect(existsSync(join(artifacts, 'evidence'))).toBe(true);
@@ -771,6 +830,150 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     expect(
       JSON.parse(readFileSync(join(artifacts, 'context.json'), 'utf8')),
     ).toEqual({ repo: REPO, pr: 42, baseRefOid: base, headRefOid: head });
+  });
+
+  // A PR-committed symlink at the snapshot path would redirect the host-side
+  // write; prepare must refuse rather than follow it (deferred symlink guard).
+  it('refuses to write the host snapshot through a symlink', () => {
+    const { dir, base, head } = makeRepo();
+    const env = installFakeGh(snapshotFor({ base, head }));
+    const root = realpathSync(dir);
+    const contextDir = join(root, 'tmp', 'verify-context');
+    mkdirSync(contextDir, { recursive: true });
+    // Both the link and its target stay under gitignored tmp/ so the tree is
+    // still clean and the refusal comes from the symlink guard, not tree state.
+    const target = join(root, 'tmp', 'redirect-target.json');
+    writeFileSync(target, '{}');
+    symlinkSync(target, join(contextDir, 'pr42.json'));
+    const result = runPrepare(dir, ['42', '--repo', REPO], env);
+    expect(result.status).toBe(3);
+    expect(result.stderr).toMatch(
+      /refusing to write the host snapshot through a symlink/,
+    );
+    expect(readFileSync(target, 'utf8')).toBe('{}');
+  });
+
+  // R5-1: a symlink one component above the leaves (the tmp/ container) is
+  // followed by mkdirSync before any leaf guard runs; it must be refused before
+  // anything is created. A tracked symlink is unmodified, so the tree gates pass.
+  it('refuses a PR-committed symlink at the tmp container', () => {
+    const { dir, base } = makeRepo();
+    const root = realpathSync(dir);
+    const target = mkdtempSync(join(tmpdir(), 'r5-attacker-'));
+    symlinkSync(target, join(root, 'tmp'));
+    execFileSync('git', ['add', '-f', 'tmp'], { cwd: dir, env: gitEnv });
+    execFileSync('git', ['commit', '--amend', '--no-edit', '-q'], {
+      cwd: dir,
+      env: gitEnv,
+    });
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: dir,
+      env: gitEnv,
+      encoding: 'utf8',
+    }).trim();
+    const env = installFakeGh(snapshotFor({ base, head }));
+    const result = runPrepare(dir, ['42', '--repo', REPO], env);
+    const redirected = existsSync(join(target, 'verify-context'));
+    rmSync(target, { recursive: true, force: true });
+    expect(result.status).toBe(3);
+    expect(result.stderr).toMatch(
+      /refusing to write the host snapshot through a symlink/,
+    );
+    expect(redirected).toBe(false);
+  });
+
+  // R5-4: a hard link at the snapshot path would make writeFileSync truncate a
+  // tracked file the round does not own; the write-side alias rule must refuse.
+  it('refuses a hard link at the snapshot path', () => {
+    const { dir, base, head } = makeRepo();
+    const env = installFakeGh(snapshotFor({ base, head }));
+    const root = realpathSync(dir);
+    const contextDir = join(root, 'tmp', 'verify-context');
+    mkdirSync(contextDir, { recursive: true });
+    const tracked = join(root, 'head.txt');
+    const before = readFileSync(tracked, 'utf8');
+    linkSync(tracked, join(contextDir, 'pr42.json'));
+    const result = runPrepare(dir, ['42', '--repo', REPO], env);
+    expect(result.status).toBe(3);
+    expect(result.stderr).toMatch(/non-single-link file/);
+    expect(readFileSync(tracked, 'utf8')).toBe(before);
+  });
+
+  // R5-1 structural fix: the authoritative snapshot goes straight to a host
+  // destination outside the clone, so it never transits the PR-writable tree.
+  it('writes the authoritative snapshot to --context-out', () => {
+    const { dir, base, head } = makeRepo();
+    const env = installFakeGh(snapshotFor({ base, head }));
+    const hostDir = mkdtempSync(join(tmpdir(), 'r5-context-out-'));
+    const hostPath = join(hostDir, 'pr42.json');
+    const result = runPrepare(
+      dir,
+      ['42', '--repo', REPO, '--context-out', hostPath],
+      env,
+    );
+    expect(result.status).toBe(0);
+    const hostSnap = JSON.parse(readFileSync(hostPath, 'utf8'));
+    expect(hostSnap.headRefOid).toBe(head);
+    expect(hostSnap.repo).toBe(REPO);
+    expect(result.stdout).toContain(`  context    ${hostPath}`);
+    const digest = createHash('sha256')
+      .update(readFileSync(hostPath))
+      .digest('hex');
+    expect(result.stdout).toContain(`  context-sha256  ${digest}`);
+    rmSync(hostDir, { recursive: true, force: true });
+  });
+
+  // R7-1: a relative --context-out resolves inside the PR-writable clone; a
+  // PR-committed symlink there must not redirect the host-side write.
+  it('refuses an in-clone --context-out target', () => {
+    const { dir, base } = makeRepo();
+    const root = realpathSync(dir);
+    const hostDir = mkdtempSync(join(tmpdir(), 'r7-host-'));
+    const hostTarget = join(hostDir, 'host-target.txt');
+    writeFileSync(hostTarget, 'ORIGINAL-HOST-FILE');
+    symlinkSync(hostTarget, join(root, 'snap.json'));
+    execFileSync('git', ['add', '-f', 'snap.json'], { cwd: dir, env: gitEnv });
+    execFileSync('git', ['commit', '--amend', '--no-edit', '-q'], {
+      cwd: dir,
+      env: gitEnv,
+    });
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: dir,
+      env: gitEnv,
+      encoding: 'utf8',
+    }).trim();
+    const env = installFakeGh(snapshotFor({ base, head }));
+    const result = runPrepare(
+      dir,
+      ['42', '--repo', REPO, '--context-out', 'snap.json'],
+      env,
+    );
+    const targetBytes = readFileSync(hostTarget, 'utf8');
+    rmSync(hostDir, { recursive: true, force: true });
+    expect(result.status).toBe(3);
+    expect(result.stderr).toMatch(/inside the PR clone/);
+    expect(targetBytes).toBe('ORIGINAL-HOST-FILE');
+  });
+
+  // R7-1: an outside destination that is a symlink is refused by the leaf guard.
+  it('refuses a symlink at an outside --context-out destination', () => {
+    const { dir, base, head } = makeRepo();
+    const env = installFakeGh(snapshotFor({ base, head }));
+    const hostDir = mkdtempSync(join(tmpdir(), 'r7-out-'));
+    const hostTarget = join(hostDir, 'host-target.txt');
+    writeFileSync(hostTarget, 'ORIGINAL-HOST-FILE');
+    const outPath = join(hostDir, 'pr42.json');
+    symlinkSync(hostTarget, outPath);
+    const result = runPrepare(
+      dir,
+      ['42', '--repo', REPO, '--context-out', outPath],
+      env,
+    );
+    const targetBytes = readFileSync(hostTarget, 'utf8');
+    rmSync(hostDir, { recursive: true, force: true });
+    expect(result.status).toBe(3);
+    expect(result.stderr).toMatch(/through a symlink/);
+    expect(targetBytes).toBe('ORIGINAL-HOST-FILE');
   });
 
   // The CI lane writes the same review state beside its metadata, and a round
@@ -868,6 +1071,20 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
       join(artifacts, 'assertions.json'),
       JSON.stringify({ pass: 1, fail: 0, total: 1 }),
     );
+    writeFileSync(
+      join(artifacts, 'boundary.json'),
+      JSON.stringify({ mode: 'container', detail: 'test boundary' }),
+    );
+    writeFileSync(
+      join(artifacts, 'boundary-gate.json'),
+      JSON.stringify({
+        gate: 'require-isolation',
+        passed: true,
+        observed: ['/.dockerenv'],
+        signals: ['/.dockerenv'],
+        credentialFree: true,
+      }),
+    );
     const writeReport = (oid) =>
       writeFileSync(join(artifacts, 'report.md'), `merge-ready · ${oid}\n`);
     const check = () =>
@@ -938,63 +1155,241 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
   // A marker says a container exists; it cannot say what the container mounts.
   // The CLI's own launcher attaches gcloud config, the ADC file and model
   // keys, so the gate also needs the attestation and a clean signal set.
-  it('does not pass the gate on a container marker alone', () => {
-    const { dir } = makeRepo();
-    const env = {
-      PATH: process.env.PATH ?? '',
-      HOME: makeTmpDir(),
-      SANDBOX: 'docker',
-    };
+  it.skipIf(!hasObservedMarker())(
+    'does not pass the gate on a container marker alone',
+    () => {
+      const { dir } = makeRepo();
+      const env = {
+        PATH: process.env.PATH ?? '',
+        HOME: makeTmpDir(),
+        SANDBOX: 'docker',
+      };
 
-    const markerOnly = runPrepare(dir, ['--require-isolation'], env);
-    expect(markerOnly.status).toBe(4);
-    expect(markerOnly.stderr).toContain(
-      'QWEN_VERIFY_CREDENTIAL_FREE=1 is not set',
-    );
+      const markerOnly = runPrepare(dir, ['--require-isolation'], env);
+      expect(markerOnly.status).toBe(4);
+      expect(markerOnly.stderr).toContain(
+        'QWEN_VERIFY_CREDENTIAL_FREE=1 is not set',
+      );
 
-    const attested = runPrepare(dir, ['--require-isolation'], {
-      ...env,
-      QWEN_VERIFY_CREDENTIAL_FREE: '1',
-    });
-    expect(attested.status).toBe(0);
-    expect(attested.stdout).toContain('credential-free per attestation');
-  });
-
-  it('refuses an attested boundary that still shows credentials', () => {
-    const { dir } = makeRepo();
-    const home = makeTmpDir();
-    const env = {
-      PATH: process.env.PATH ?? '',
-      HOME: home,
-      SANDBOX: 'docker',
-      QWEN_VERIFY_CREDENTIAL_FREE: '1',
-    };
-    mkdirSync(join(home, '.ssh'));
-
-    const mounted = runPrepare(dir, ['--require-isolation'], env);
-    expect(mounted.status).toBe(4);
-    expect(mounted.stderr).toContain('~/.ssh');
-
-    // Persistent forms of the same credentials: `gh auth login` and `npm login`.
-    for (const relative of ['.config/gh', '.npmrc']) {
-      const home = makeTmpDir();
-      mkdirSync(join(home, relative), { recursive: true });
-      const result = runPrepare(dir, ['--require-isolation'], {
+      const attested = runPrepare(dir, ['--require-isolation'], {
         ...env,
-        HOME: home,
+        QWEN_VERIFY_CREDENTIAL_FREE: '1',
       });
-      expect(result.status).toBe(4);
-      expect(result.stderr).toContain(`~/${relative}`);
-    }
+      expect(attested.status).toBe(0);
+      expect(attested.stdout).toContain('credential-free per attestation');
+    },
+  );
 
-    const keyed = runPrepare(dir, ['--require-isolation'], {
-      ...env,
-      HOME: makeTmpDir(),
-      OPENAI_API_KEY: 'sk-test',
-    });
-    expect(keyed.status).toBe(4);
-    expect(keyed.stderr).toContain('OPENAI_API_KEY');
-  });
+  // The gate record ties a container declaration to a gate run: it is
+  // written only on a pass, and only when --artifact-dir is given.
+  it.skipIf(!hasObservedMarker())(
+    'writes boundary-gate.json on a pass with --artifact-dir',
+    () => {
+      const { dir } = makeRepo();
+      const art = makeTmpDir();
+      const env = {
+        PATH: process.env.PATH ?? '',
+        HOME: makeTmpDir(),
+        SANDBOX: 'docker',
+        QWEN_VERIFY_CREDENTIAL_FREE: '1',
+      };
+      const passed = runPrepare(
+        dir,
+        ['--require-isolation', '--artifact-dir', art],
+        env,
+      );
+      expect(passed.status).toBe(0);
+      const record = JSON.parse(
+        readFileSync(join(art, 'boundary-gate.json'), 'utf8'),
+      );
+      expect(record).toMatchObject({
+        gate: 'require-isolation',
+        passed: true,
+        credentialFree: true,
+      });
+      expect(typeof record.at).toBe('string');
+
+      // A failed gate writes no record: the checker must not see a pass.
+      const art2 = makeTmpDir();
+      const failed = runPrepare(
+        dir,
+        ['--require-isolation', '--artifact-dir', art2],
+        { ...env, QWEN_VERIFY_CREDENTIAL_FREE: '' },
+      );
+      expect(failed.status).toBe(4);
+      expect(existsSync(join(art2, 'boundary-gate.json'))).toBe(false);
+
+      // Without --artifact-dir the gate still passes but writes nothing.
+      const noDir = runPrepare(dir, ['--require-isolation'], env);
+      expect(noDir.status).toBe(0);
+    },
+  );
+
+  // R10-20: a self-chosen container= string is a declaration, not an observed
+  // boundary. On a bare host it must not mint a passing gate record.
+  // Reachable only where no observed marker exists; inside the recipe's
+  // own container /.dockerenv is present and the gate rightly passes, so
+  // skip there rather than red against correct code (R11-5).
+  it.skipIf(hasObservedMarker())(
+    'refuses a declared-only container marker with no observed boundary',
+    () => {
+      const { dir } = makeRepo();
+      const art = makeTmpDir();
+      const env = {
+        PATH: process.env.PATH ?? '',
+        HOME: makeTmpDir(),
+        container: 'my-laptop',
+        QWEN_VERIFY_CREDENTIAL_FREE: '1',
+      };
+      const result = runPrepare(
+        dir,
+        ['--require-isolation', '--artifact-dir', art],
+        env,
+      );
+      expect(result.status).toBe(4);
+      expect(result.stderr).toMatch(/declared marker/);
+      expect(existsSync(join(art, 'boundary-gate.json'))).toBe(false);
+    },
+  );
+
+  // R11-1: an inherited SANDBOX= string is a declaration too — the gate must
+  // not mint a record the checker (which requires an observed marker) would
+  // always refuse. Host-only: a real container carries /.dockerenv.
+  it.skipIf(hasObservedMarker())(
+    'refuses a SANDBOX-only marker with no observed boundary',
+    () => {
+      const { dir } = makeRepo();
+      const art = makeTmpDir();
+      const env = {
+        PATH: process.env.PATH ?? '',
+        HOME: makeTmpDir(),
+        SANDBOX: 'docker',
+        QWEN_VERIFY_CREDENTIAL_FREE: '1',
+      };
+      const result = runPrepare(
+        dir,
+        ['--require-isolation', '--artifact-dir', art],
+        env,
+      );
+      expect(result.status).toBe(4);
+      expect(result.stderr).toMatch(/declared marker/);
+      expect(existsSync(join(art, 'boundary-gate.json'))).toBe(false);
+    },
+  );
+
+  // A failed re-run must not leave an earlier pass's record behind: the
+  // checker would still accept the container declaration against evidence
+  // that predates the refusal.
+  it.skipIf(!hasObservedMarker())(
+    'a failed gate re-run invalidates the earlier passing record',
+    () => {
+      const { dir } = makeRepo();
+      const art = makeTmpDir();
+      const env = {
+        PATH: process.env.PATH ?? '',
+        HOME: makeTmpDir(),
+        SANDBOX: 'docker',
+        QWEN_VERIFY_CREDENTIAL_FREE: '1',
+      };
+      const passed = runPrepare(
+        dir,
+        ['--require-isolation', '--artifact-dir', art],
+        env,
+      );
+      expect(passed.status).toBe(0);
+      expect(existsSync(join(art, 'boundary-gate.json'))).toBe(true);
+      // Re-run with a credential signal: exit 4 AND the record is gone.
+      const failed = runPrepare(
+        dir,
+        ['--require-isolation', '--artifact-dir', art],
+        { ...env, OPENAI_API_KEY: 'sk-test' },
+      );
+      expect(failed.status).toBe(4);
+      expect(existsSync(join(art, 'boundary-gate.json'))).toBe(false);
+      // R10-30: a no-marker refusal from OUTSIDE any boundary does NOT
+      // destroy a record minted inside one (skip on an ambiently isolated
+      // host, where removing SANDBOX still leaves a marker).
+      if (!detectIsolation({ ...env, SANDBOX: '' }).isolated) {
+        const passedAgain = runPrepare(
+          dir,
+          ['--require-isolation', '--artifact-dir', art],
+          env,
+        );
+        expect(passedAgain.status).toBe(0);
+        const noMarker = runPrepare(
+          dir,
+          ['--require-isolation', '--artifact-dir', art],
+          { ...env, SANDBOX: '' },
+        );
+        expect(noMarker.status).toBe(4);
+        expect(existsSync(join(art, 'boundary-gate.json'))).toBe(true);
+      }
+    },
+  );
+
+  // A filesystem failure on the record write is the documented exit-3
+  // path, not an uncaught throw after the pass line: a driver keyed on
+  // exit 4 must not proceed on a pass the record never landed.
+  it.skipIf(!hasObservedMarker())(
+    'fails with exit 3 when the gate record cannot be written',
+    () => {
+      const { dir } = makeRepo();
+      const env = {
+        PATH: process.env.PATH ?? '',
+        HOME: makeTmpDir(),
+        SANDBOX: 'docker',
+        QWEN_VERIFY_CREDENTIAL_FREE: '1',
+      };
+      const result = runPrepare(
+        dir,
+        ['--require-isolation', '--artifact-dir', '/dev/null/round'],
+        env,
+      );
+      expect(result.status).toBe(3);
+      expect(result.stderr).toContain('could not write the gate record');
+      // The pass line prints only after the record lands.
+      expect(result.stdout).not.toContain('credential-free per attestation');
+    },
+  );
+
+  it.skipIf(!hasObservedMarker())(
+    'refuses an attested boundary that still shows credentials',
+    () => {
+      const { dir } = makeRepo();
+      const home = makeTmpDir();
+      const env = {
+        PATH: process.env.PATH ?? '',
+        HOME: home,
+        SANDBOX: 'docker',
+        QWEN_VERIFY_CREDENTIAL_FREE: '1',
+      };
+      mkdirSync(join(home, '.ssh'));
+
+      const mounted = runPrepare(dir, ['--require-isolation'], env);
+      expect(mounted.status).toBe(4);
+      expect(mounted.stderr).toContain('~/.ssh');
+
+      // Persistent forms of the same credentials: `gh auth login` and `npm login`.
+      for (const relative of ['.config/gh', '.npmrc']) {
+        const home = makeTmpDir();
+        mkdirSync(join(home, relative), { recursive: true });
+        const result = runPrepare(dir, ['--require-isolation'], {
+          ...env,
+          HOME: home,
+        });
+        expect(result.status).toBe(4);
+        expect(result.stderr).toContain(`~/${relative}`);
+      }
+
+      const keyed = runPrepare(dir, ['--require-isolation'], {
+        ...env,
+        HOME: makeTmpDir(),
+        OPENAI_API_KEY: 'sk-test',
+      });
+      expect(keyed.status).toBe(4);
+      expect(keyed.stderr).toContain('OPENAI_API_KEY');
+    },
+  );
 
   it('strips control characters from an untrusted title', () => {
     const { dir, base, head } = makeRepo();

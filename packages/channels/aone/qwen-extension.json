@@ -1,0 +1,10 @@
+{
+  "name": "qwen-channel-aone",
+  "version": "0.1.0",
+  "channels": {
+    "aone": {
+      "entry": "dist/index.js",
+      "displayName": "Aone Channel"
+    }
+  }
+}

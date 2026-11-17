@@ -139,7 +139,7 @@ the actual namespace/policy/binding identities. The image must contain Node 22+
 and the built CLI. The worker uses UID/GID 1000, a read-only root filesystem,
 no added capabilities or service-account token, a fixed PVC and temporary
 emptyDir, with restartPolicy Never. The application must reach the original
-Kubernetes API and worker endpoint. The [configuration guide](../../deploy/k2-resident/README.md)
+Kubernetes API and worker endpoint. The [configuration guide](../../packages/sdk-java/managed-kubernetes-archive/deploy/k2-resident/README.md)
 contains the template and existing operator invocation. Installing this feature
 does not require a privileged node collector.
 

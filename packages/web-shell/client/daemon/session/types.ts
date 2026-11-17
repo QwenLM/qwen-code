@@ -8,6 +8,8 @@ import type { ReactNode } from 'react';
 import type {
   CreateSessionRequest,
   DaemonBranchSessionRequest,
+  DaemonWorktreeBranchResult,
+  DaemonWorktreeHandoffResult,
   DaemonCapabilities,
   DaemonBackgroundTurn,
   DaemonEvent,
@@ -43,6 +45,7 @@ import type {
   DaemonSessionWorkflowTaskStatus,
   DaemonSessionWorkflowTasksStatus,
   DaemonSessionStatsStatus,
+  DaemonSessionArtifact,
   DaemonSessionArtifactsEnvelope,
   DaemonSessionArtifactInput,
   DaemonSessionArtifactMutationResult,
@@ -177,6 +180,19 @@ export interface DaemonConnectionState {
   loadingTranscript?: boolean;
   /** True while replaying buffered events after a reconnect. */
   catchingUp?: boolean;
+  /**
+   * Restored artifact snapshot embedded in the load response. Available before
+   * the replay renders so a session-level artifact entry can appear early;
+   * live updates still come from the gated artifact fetch.
+   */
+  restoredArtifacts?: DaemonSessionArtifact[];
+  /**
+   * Session the restoredArtifacts snapshot belongs to. The optimistic session
+   * switch moves sessionId before the new restore lands, so consumers must
+   * only use the snapshot when this matches the current sessionId — otherwise
+   * the previous session's artifacts leak under the new one.
+   */
+  restoredArtifactsSessionId?: string;
   error?: string;
   /** Latest HTTP error status kept for diagnostics; use missingSession for UI. */
   errorStatus?: number;
@@ -376,6 +392,8 @@ export type DaemonNoticeOperation =
   | 'generate_session_content'
   | 'btw_session'
   | 'branch_session'
+  | 'create_worktree_branch'
+  | 'handoff_worktree'
   | 'fork_session'
   | 'record_session'
   | 'stream'
@@ -854,6 +872,12 @@ export interface DaemonSessionActions {
     switchStarted: boolean;
     sourceWarnings?: string[];
   }>;
+  /** "Create branch here" on the session's detached managed worktree. */
+  createWorktreeBranch(name: string): Promise<DaemonWorktreeBranchResult>;
+  /** "Hand off" between the managed worktree and the local checkout. */
+  handoffWorktree(
+    to: 'local' | 'worktree',
+  ): Promise<DaemonWorktreeHandoffResult>;
   forkSession(directive: string): Promise<DaemonForkSessionResult>;
 }
 

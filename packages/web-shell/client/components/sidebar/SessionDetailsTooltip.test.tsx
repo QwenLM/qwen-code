@@ -360,6 +360,44 @@ describe('SessionDetailsTooltip', () => {
     act(() => root.unmount());
   });
 
+  it('shows the worktree slug when a detached worktree has no branch', async () => {
+    vi.useFakeTimers();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <SessionDetailsTooltip
+              session={{
+                sessionId: 'session-wt',
+                workspaceCwd: '/work/repo',
+                worktree: {
+                  slug: 'swift-fox',
+                  path: '/wt/swift-fox',
+                  branch: '',
+                },
+              }}
+              label="Detached worktree"
+              time=""
+              completedUnread={false}
+            >
+              <button type="button">Detached worktree</button>
+            </SessionDetailsTooltip>
+          </I18nProvider>,
+        );
+      });
+
+      await openDetails(container);
+
+      const details = document.querySelector('[role="dialog"]');
+      expect(details?.textContent).toContain('swift-fox');
+    } finally {
+      act(() => root.unmount());
+    }
+  });
+
   it('preserves the standalone workspace label from the sidebar', async () => {
     vi.useFakeTimers();
     const container = document.createElement('div');

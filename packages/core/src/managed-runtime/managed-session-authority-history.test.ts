@@ -8,6 +8,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { LocalManagedSessionAuthority } from './managed-session-authority.js';
 import {
   ManagedSessionAppendUnsettledError,
+  ManagedSessionJournalFencedError,
   MANAGED_SESSION_LIMITS,
   type ManagedSessionDurableRef,
 } from './managed-session-records.js';
@@ -30,7 +31,7 @@ const reference: ManagedSessionDurableRef = {
   digest: 'b'.repeat(64),
 };
 
-async function fixture(inputCount = 0) {
+async function fixture(inputCount = 0, now?: () => number) {
   const chunks: Buffer[] = [];
   const visits = { count: 0 };
   let sealed = false;
@@ -75,6 +76,7 @@ async function fixture(inputCount = 0) {
       sessionKey,
       cwd: '/workspace',
       version: 'test',
+      ...(now === undefined ? {} : { now }),
       create: {
         definitionRef: reference,
         rootSnapshotRef: reference,
@@ -254,10 +256,9 @@ describe('managed authority history reads', () => {
   });
 
   it.each(['landed', 'absent'] as const)(
-    'keeps an unknown append invisible until its %s settlement',
+    'resumes an unknown append on the same call when settlement is %s',
     async (outcome) => {
       const harness = await fixture(1);
-      const previous = harness.authority.lastEventOfKind('input.accepted');
       const append = harness.journal.appendTransaction.bind(harness.journal);
       harness.journal.settleAppend = async () => outcome;
       vi.spyOn(harness.journal, 'appendTransaction').mockImplementationOnce(
@@ -266,16 +267,8 @@ describe('managed authority history reads', () => {
           throw new ManagedSessionAppendUnsettledError(new Error('unknown'));
         },
       );
-      await expect(harness.submit(harness.authority, 2)).rejects.toThrow(
-        'unknown',
-      );
-      expect(harness.authority.lastEventOfKind('input.accepted')).toBe(
-        previous,
-      );
-      expect(harness.authority.readEvents({ afterSequence: 2 })).toEqual([]);
-      expect(harness.authority.eventsInSequenceRange(3, 4)).toEqual([]);
       const receipt = await harness.submit(harness.authority, 2);
-      expect(receipt.replayed).toBe(outcome === 'landed');
+      expect(receipt.replayed).toBe(false);
       expect(
         harness.authority.lastEventOfKind('input.accepted')?.sequence,
       ).toBe(3);
@@ -287,6 +280,139 @@ describe('managed authority history reads', () => {
           .readEvents({ afterSequence: 2 })
           .map((event) => event.sequence),
       ).toEqual([3, 4]);
+      await expect(harness.submit(harness.authority, 2)).resolves.toMatchObject(
+        { replayed: true },
+      );
     },
   );
+
+  it('keeps the original events when the same-command resubmit is also unsettled', async () => {
+    const harness = await fixture(1);
+    const previous = harness.authority.lastEventOfKind('input.accepted');
+    const append = harness.journal.appendTransaction.bind(harness.journal);
+    let writes = 0;
+    harness.journal.settleAppend = async () => 'absent';
+    vi.spyOn(harness.journal, 'appendTransaction').mockImplementation(
+      async (records) => {
+        writes += 1;
+        if (writes < 3) {
+          throw new ManagedSessionAppendUnsettledError(new Error('unknown'));
+        }
+        await append(records);
+      },
+    );
+    await expect(harness.submit(harness.authority, 2)).rejects.toThrow(
+      'unknown',
+    );
+    expect(harness.authority.lastEventOfKind('input.accepted')).toBe(previous);
+    expect(harness.authority.readEvents({ afterSequence: 2 })).toEqual([]);
+    const receipt = await harness.submit(harness.authority, 2);
+    expect(receipt.replayed).toBe(true);
+    expect(writes).toBe(3);
+    expect(harness.authority.lastEventOfKind('input.accepted')?.sequence).toBe(
+      3,
+    );
+    expect(
+      harness.authority
+        .readEvents({ afterSequence: 2 })
+        .map((event) => event.sequence),
+    ).toEqual([3, 4]);
+  });
+
+  it('discards a rejected same-call resubmit without stopping later input', async () => {
+    const harness = await fixture(1);
+    harness.journal.settleAppend = async () => 'absent';
+    const append = vi
+      .spyOn(harness.journal, 'appendTransaction')
+      .mockRejectedValueOnce(
+        new ManagedSessionAppendUnsettledError(new Error('unknown')),
+      )
+      .mockRejectedValueOnce(
+        new ManagedSessionCommitRejectedError(new Error('rejected')),
+      );
+    await expect(harness.submit(harness.authority, 2)).rejects.toThrow(
+      'rejected',
+    );
+    expect(harness.authority.readEvents({ afterSequence: 2 })).toEqual([]);
+    await expect(harness.submit(harness.authority, 3)).resolves.toMatchObject({
+      replayed: false,
+    });
+    expect(append).toHaveBeenCalledTimes(3);
+    expect(
+      harness.authority.lastEventOfKind('input.accepted')?.payload['inputId'],
+    ).toBe('input-3');
+    expect(
+      harness.authority
+        .readEvents({ afterSequence: 2 })
+        .map((event) => event.sequence),
+    ).toEqual([3, 4]);
+  });
+
+  it('continues the current input when a previous unsettled resubmit is rejected', async () => {
+    const harness = await fixture(1);
+    harness.journal.settleAppend = async () => 'absent';
+    const append = vi
+      .spyOn(harness.journal, 'appendTransaction')
+      .mockRejectedValueOnce(
+        new ManagedSessionAppendUnsettledError(new Error('unknown')),
+      )
+      .mockRejectedValueOnce(
+        new ManagedSessionAppendUnsettledError(new Error('still unknown')),
+      )
+      .mockRejectedValueOnce(
+        new ManagedSessionCommitRejectedError(new Error('rejected')),
+      );
+    await expect(harness.submit(harness.authority, 2)).rejects.toThrow(
+      'still unknown',
+    );
+    expect(harness.authority.readEvents({ afterSequence: 2 })).toEqual([]);
+    await expect(harness.submit(harness.authority, 3)).resolves.toMatchObject({
+      replayed: false,
+    });
+    expect(append).toHaveBeenCalledTimes(4);
+    expect(
+      harness.authority.lastEventOfKind('input.accepted')?.payload['inputId'],
+    ).toBe('input-3');
+    expect(
+      harness.authority
+        .readEvents({ afterSequence: 2 })
+        .map((event) => event.sequence),
+    ).toEqual([3, 4]);
+  });
+
+  it('stops the writer when settlement finds the journal was fenced', async () => {
+    const harness = await fixture(1);
+    harness.journal.settleAppend = async () => {
+      throw new ManagedSessionJournalFencedError('head moved');
+    };
+    vi.spyOn(harness.journal, 'appendTransaction').mockRejectedValueOnce(
+      new ManagedSessionAppendUnsettledError(new Error('unknown')),
+    );
+    await expect(harness.submit(harness.authority, 2)).rejects.toThrow(
+      'head moved',
+    );
+    await expect(harness.submit(harness.authority, 3)).rejects.toThrow(
+      'writes stopped',
+    );
+    expect(harness.authority.readEvents({ afterSequence: 2 })).toEqual([]);
+  });
+
+  it('allows one settle read after the resume budget without waiting', async () => {
+    let clock = 1_000;
+    const harness = await fixture(1, () => clock);
+    let reads = 0;
+    harness.journal.settleAppend = async () => {
+      reads += 1;
+      clock += 30_000;
+      throw new ManagedSessionAppendUnsettledError(new Error('still unknown'));
+    };
+    vi.spyOn(harness.journal, 'appendTransaction').mockRejectedValue(
+      new ManagedSessionAppendUnsettledError(new Error('still unknown')),
+    );
+    await expect(harness.submit(harness.authority, 2)).rejects.toThrow(
+      'still unknown',
+    );
+    expect(reads).toBe(2);
+    expect(harness.authority.readEvents({ afterSequence: 2 })).toEqual([]);
+  });
 });
