@@ -10,6 +10,7 @@ import com.alibaba.qwen.code.managedagent.contracts.harness.HostedHarnessRecover
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessAttachmentLostFailure;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessCapabilityFailure;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessGenerationFailure;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessHttpFailure;
@@ -300,8 +301,14 @@ public class HarnessCoordinator {
                 claimed.submissionAttempted());
         AtomicBoolean recoveryPath = new AtomicBoolean();
         try {
-            terminal = runClaimed(claimed, leaseLost,
-                    submissionAttempted, recoveryPath);
+            try {
+                terminal = runClaimed(claimed, leaseLost, submissionAttempted, recoveryPath);
+            } catch (HarnessAttachmentLostFailure lost) {
+                requireLease(leaseLost);
+                TurnRecord current = store.findTurn(tenantId, sessionId, turnId).orElseThrow();
+                // Re-enter binding, snapshot and watermark handling; never replay a leaf submit blindly.
+                terminal = runClaimed(current, leaseLost, submissionAttempted, recoveryPath);
+            }
         } catch (HarnessCapabilityFailure error) {
             terminal = failTerminally(claimed, error.getCode(),
                     "Hosted Harness capability policy changed.", error);
@@ -540,7 +547,9 @@ public class HarnessCoordinator {
         TurnRecord current;
         boolean recoveredCancellation = false;
         boolean cancelledOnAttach = false;
-        if (runtimeRecovery != null) {
+        // Unbound submissions reconcile by prompt id, not by adopting a Session snapshot.
+        if (runtimeRecovery != null
+                && (recoveringCancellation || claimed.harnessEventEpoch() != null)) {
             // #14387: continuing a workflow Turn re-runs its deterministic
             // in-process script while the first run's outcome stays
             // unwitnessed — the parked snapshot proves nothing about the
@@ -1849,7 +1858,8 @@ public class HarnessCoordinator {
                             && POOL_OWNERSHIP_WAIT_CODES.contains(managed.getCode());
         }
         return error instanceof HarnessHttpFailure http && http.getStatusCode() == 409
-                && "hosted_harness_quiescing".equals(http.getErrorCode());
+                && ("hosted_harness_quiescing".equals(http.getErrorCode())
+                        || "hosted_session_closing".equals(http.getErrorCode()));
     }
 
     // #14387: refuse the workflow Turn's unwitnessed re-execution — mark
