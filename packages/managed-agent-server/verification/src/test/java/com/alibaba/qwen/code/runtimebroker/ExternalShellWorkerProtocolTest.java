@@ -85,7 +85,10 @@ class ExternalShellWorkerProtocolTest {
     void copiesALargeCaptureBlockByBlockWithoutLosingOrReorderingBytes() throws Exception {
         // Larger than one 32 KiB block, and not a multiple of it, so the last
         // data block is short and the EOF still follows it.
-        var payload = "x".repeat(32 * 1024) + "y".repeat(11) + "\n";
+        // The multi-byte character straddles the first block boundary
+        // (0xC3 ends block 0, 0xA9 starts block 1), so per-block decoding
+        // would mangle a correct capture.
+        var payload = "x".repeat(32 * 1024 - 1) + "é" + "y".repeat(11) + "\n";
         try (var worker = ExternalShellWorkerFixture.start(payload, "")) {
             var transport = worker.transport();
             var channel = begin(worker, transport);
@@ -119,7 +122,13 @@ class ExternalShellWorkerProtocolTest {
                     () -> transport.externalPublicationRenew(worker.lease, worker.request,
                             worker.seed, REVISION, channel, System.currentTimeMillis() - 1_000)
                             .toCompletableFuture().join());
-            assertTrue(staleRenewal.getCause() instanceof RuntimeBrokerException);
+            assertTrue(staleRenewal.getCause() instanceof RuntimeBrokerException closed
+                    && closed.getStatusCode() == 409
+                    && "managed_runtime_publication_closed".equals(closed.getCode()),
+                    "A stale renewal is the worker's closed-lane refusal, not a 400");
+            // Let the original horizon lapse: only a channel that took the
+            // renewal is still live, so an un-renewed channel fails here.
+            Thread.sleep(2_100);
             assertEquals("witness\n", worker.copy(transport, channel, "stdout").bytes());
             worker.copy(transport, channel, "stderr");
             assertEquals("drained", worker.stopDrained(transport));
@@ -136,6 +145,10 @@ class ExternalShellWorkerProtocolTest {
         try (var worker = ExternalShellWorkerFixture.start("witness\n", "")) {
             var transport = worker.transport();
             var channel = begin(worker, transport);
+            // Fully drain stderr first, so stdout's owed EOF is the only
+            // unacknowledged sequence and the refusal cannot pass for
+            // stderr's reason alone.
+            worker.copy(transport, channel, "stderr");
             // Read both of stdout's sequences but acknowledge only the data
             // block. The EOF was delivered and never acked, so the bytes are
             // still owed and the stop must refuse to claim a drained lane.
@@ -161,6 +174,14 @@ class ExternalShellWorkerProtocolTest {
             assertThrows(IllegalArgumentException.class, () ->
                     transport.externalPublicationRead(worker.lease, worker.request, worker.seed,
                             REVISION, channel, "stdout", 0, 1));
+            // The worker's own delivered-cursor rule is the second fence: an
+            // ack for a sequence it never delivered is the closed-lane
+            // refusal, driven here past the transport's local check.
+            var refused = worker.postRefused("read", Map.of("protocolVersion", 2,
+                    "channelId", channel, "streamId", "stdout", "sequence", 1,
+                    "acknowledgedSequence", 0), worker.lease);
+            assertEquals(409, refused.getStatusCode());
+            assertEquals("managed_runtime_publication_closed", refused.getCode());
             assertEquals("undrained", worker.stopDrained(transport));
         }
     }
@@ -231,6 +252,15 @@ class ExternalShellWorkerProtocolTest {
                     worker.seed, REVISION, channel, "stdout", 0, -1).toCompletableFuture().join();
             assertEquals(Map.of("state", "pending"), answer);
 
+            // A pending answer mutates no cursor: the shipped worker returns
+            // pending above both cursor writes, so a following ack for the
+            // never-delivered sequence 0 is still the closed-lane refusal.
+            var refused = worker.postRefused("read", Map.of("protocolVersion", 2,
+                    "channelId", channel, "streamId", "stdout", "sequence", 0,
+                    "acknowledgedSequence", 0), worker.lease);
+            assertEquals(409, refused.getStatusCode());
+            assertEquals("managed_runtime_publication_closed", refused.getCode());
+
             // Nothing was delivered, so the lane still owes every byte.
             assertEquals("undrained", worker.stopDrained(transport));
         }
@@ -239,15 +269,35 @@ class ExternalShellWorkerProtocolTest {
     @Test
     @Timeout(60)
     void anUnreachableWorkerEndsTheExchangeOnTheTransportsOwnDeadline() throws Exception {
-        var worker = ExternalShellWorkerFixture.start("witness\n", "");
-        var transport = worker.transport(Duration.ofSeconds(2));
-        var channel = begin(worker, transport);
-        // A vanished worker mid-copy: the exchange must end on its own timeout
-        // rather than pin the drain's carrier for ever.
-        worker.close();
-        var failure = assertThrows(CompletionException.class, () ->
-                transport.externalPublicationRead(worker.lease, worker.request, worker.seed,
-                        REVISION, channel, "stdout", 0, -1).toCompletableFuture().join());
-        assertNotNull(failure.getCause());
+        try (var worker = ExternalShellWorkerFixture.start("witness\n", "")) {
+            var transport = worker.transport(Duration.ofSeconds(2));
+            var channel = begin(worker, transport);
+            // A live-but-silent worker: the listener accepts and never answers,
+            // so only the transport's own deadline can end the exchange. A
+            // closed port would fail on connect and never exercise it.
+            try (var silent = new java.net.ServerSocket(0, 1,
+                    java.net.InetAddress.getByName("127.0.0.1"))) {
+                var stalled = new RuntimeLease(worker.lease.getRuntimeInstanceId(),
+                        java.net.URI.create("http://127.0.0.1:" + silent.getLocalPort()),
+                        worker.lease.getToken(), worker.lease.getLeaseId(), worker.lease.getEpoch());
+                var seed = new RuntimeProvisionSeed(worker.seed.getProvisionRequestId(),
+                        worker.seed.getProvisionalRuntimeId(), worker.seed.getGatewayIncarnation(),
+                        worker.seed.getLeaseId(), worker.seed.getEpoch(), worker.seed.getToken());
+                long startedAt = System.nanoTime();
+                var failure = assertThrows(CompletionException.class, () ->
+                        transport.externalPublicationRead(stalled, worker.request, seed,
+                                REVISION, channel, "stdout", 0, -1).toCompletableFuture().join());
+                long elapsedMs = (System.nanoTime() - startedAt) / 1_000_000;
+                // The deadline surfaces as the transport's retryable
+                // unavailable answer; a refused connect would fail in
+                // milliseconds instead, so the elapsed bound below is what
+                // pins the timeout itself.
+                assertTrue(failure.getCause() instanceof RuntimeBrokerException ended
+                        && ended.getStatusCode() == 503 && ended.isRetryable(),
+                        "The exchange must end on its own deadline: " + failure.getCause());
+                assertTrue(elapsedMs >= 1_500 && elapsedMs < 30_000,
+                        "The deadline must be the transport's own 2 s, took " + elapsedMs + " ms");
+            }
+        }
     }
 }

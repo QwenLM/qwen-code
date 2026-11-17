@@ -142,10 +142,6 @@ public final class ToolPublicationStore {
         });
     }
 
-    JsonNode producerBindingLocked(String scope, String publicationId, String publicationToken) {
-        return producerBindingLocked(scope, publicationId, publicationToken, Access.DISPATCH).binding();
-    }
-
     private ProducerBinding producerGrantLocked(String scope, String publicationId,
             String publicationToken) {
         return producerBindingWithHashLocked(scope, publicationId,

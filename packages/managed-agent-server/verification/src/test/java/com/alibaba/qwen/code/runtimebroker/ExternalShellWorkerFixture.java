@@ -165,7 +165,7 @@ public final class ExternalShellWorkerFixture implements AutoCloseable {
      * block digest and the EOF carrying no bytes.
      */
     public Copied copy(HttpRuntimeTransport transport, String channel, String stream) {
-        var bytes = new StringBuilder();
+        var bytes = new java.io.ByteArrayOutputStream();
         var eofs = new ArrayList<Boolean>();
         long acked = -1;
         for (long sequence = 0; sequence < 1024; sequence++) {
@@ -173,7 +173,9 @@ public final class ExternalShellWorkerFixture implements AutoCloseable {
                     channel, stream, sequence, acked).toCompletableFuture().join();
             assertEquals("ready", answer.get("state"));
             var block = (byte[]) answer.get("bytes");
-            bytes.append(new String(block, StandardCharsets.UTF_8));
+            // A multi-byte character may straddle a block boundary, so the
+            // bytes are accumulated raw and decoded once at the end.
+            bytes.writeBytes(block);
             boolean eof = (Boolean) answer.get("eof");
             eofs.add(eof);
             assertEquals(block.length == 0, eof, "Only the EOF carries no bytes");
@@ -183,7 +185,7 @@ public final class ExternalShellWorkerFixture implements AutoCloseable {
                 // to be acknowledged, and an EOF arrives as its own sequence.
                 transport.externalPublicationRead(lease, request, seed, revision,
                         channel, stream, sequence, sequence).toCompletableFuture().join();
-                return new Copied(bytes.toString(), eofs);
+                return new Copied(bytes.toString(StandardCharsets.UTF_8), eofs);
             }
             acked = sequence;
         }
@@ -191,8 +193,18 @@ public final class ExternalShellWorkerFixture implements AutoCloseable {
     }
 
     public String stopDrained(HttpRuntimeTransport transport) {
-        return post("stop-drained", Map.of("protocolVersion", 2, "channel", "all"), lease)
-                .get("state").asText();
+        try {
+            transport.stopExternalWorkspaceDrained(lease, request, seed, revision)
+                    .toCompletableFuture().join();
+            return "drained";
+        } catch (java.util.concurrent.CompletionException refused) {
+            if (refused.getCause() instanceof RuntimeBrokerException failure
+                    && failure.getStatusCode() == 503
+                    && "managed_runtime_unavailable".equals(failure.getCode())) {
+                return "undrained";
+            }
+            throw refused;
+        }
     }
 
     public List<JsonNode> routes(String route) {
@@ -208,6 +220,34 @@ public final class ExternalShellWorkerFixture implements AutoCloseable {
 
     /** A direct exchange, for the answers the transport deliberately drops. */
     public JsonNode post(String route, Map<String, Object> body, RuntimeLease used) {
+        var response = exchange(route, body, used);
+        assertEquals(200, response.statusCode(), response.body());
+        try {
+            return JSON.readTree(response.body());
+        } catch (IOException failure) {
+            throw new AssertionError("The worker exchange failed", failure);
+        }
+    }
+
+    /**
+     * A direct exchange that surfaces the worker's own refusal (status and
+     * closed body) instead of asserting 200, for the cursor rules the
+     * transport refuses locally before any request leaves this process.
+     */
+    public RuntimeBrokerException postRefused(String route, Map<String, Object> body,
+            RuntimeLease used) {
+        var response = exchange(route, body, used);
+        try {
+            var fields = JSON.readTree(response.body());
+            return new RuntimeBrokerException(response.statusCode(),
+                    fields.path("code").asText(), fields.path("error").asText(), false);
+        } catch (IOException failure) {
+            throw new AssertionError("The worker exchange failed", failure);
+        }
+    }
+
+    private java.net.http.HttpResponse<String> exchange(String route, Map<String, Object> body,
+            RuntimeLease used) {
         try {
             var exchange = java.net.http.HttpRequest.newBuilder(
                             lease.getEndpoint().resolve(
@@ -223,10 +263,8 @@ public final class ExternalShellWorkerFixture implements AutoCloseable {
                     .POST(java.net.http.HttpRequest.BodyPublishers.ofByteArray(
                             JSON.writeValueAsBytes(body)))
                     .build();
-            var response = java.net.http.HttpClient.newHttpClient().send(exchange,
+            return java.net.http.HttpClient.newHttpClient().send(exchange,
                     java.net.http.HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
-            assertEquals(200, response.statusCode(), response.body());
-            return JSON.readTree(response.body());
         } catch (IOException failure) {
             throw new AssertionError("The worker exchange failed", failure);
         } catch (InterruptedException interrupted) {

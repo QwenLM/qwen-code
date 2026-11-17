@@ -210,16 +210,12 @@ class ExternalShellProducerPublicationTest {
                             lane.grant(), channel, partial).toCompletableFuture().join());
             assertEquals("external_shell_publication_conflict", code(refused));
             assertNull(lane.finishedOrNull(), "A refused drain must not finish the publication");
-            // The copy runs before the finish, so blocks may already have
-            // landed as candidates. What must not happen is the acknowledgement
-            // of either EOF: that is the worker's only drain proof, and without
-            // it the close keeps refusing rather than releasing storage whose
-            // capture was never accepted as complete.
+            // The envelope alone decides the refusal, so it lands before any
+            // block is moved: no read reaches the worker and no segment row is
+            // written for a capture that can never finish.
+            assertTrue(lane.worker.routes("read").isEmpty(),
+                    "A refused drain must not move any block off the worker");
             assertEquals("undrained", lane.stopDrained());
-            assertTrue(lane.worker.routes("read").stream()
-                            .noneMatch(body -> body.get("streamId").asText().equals("stdout")
-                                    && body.get("acknowledgedSequence").asLong() >= 1),
-                    "A refused drain must not acknowledge the stream's EOF");
         }
     }
 
@@ -374,6 +370,8 @@ class ExternalShellProducerPublicationTest {
             var worker = ExternalShellWorkerFixture.start(journal.externalBinding,
                     PublicationJournalFixture.REGISTRATION_REVISION, stdout, stderr, extra);
             RuntimeBindingRecord binding = null;
+            ToolPublicationVerifier verifier = null;
+            ExternalShellPublicationProducer producer = null;
             try {
                 binding = rebind(journal, worker);
                 var properties = new ManagedAgentProperties();
@@ -396,9 +394,9 @@ class ExternalShellProducerPublicationTest {
                                 16 * 1024 * 1024, Duration.ofMinutes(25)));
                 // The real pool, on its own threads: the producer polls the
                 // same operation rows the server's scheduler would drain.
-                var verifier = new ToolPublicationVerifier(publications, 2);
+                verifier = new ToolPublicationVerifier(publications, 2);
                 var registrations = new ExternalStorageRegistrationStore(jdbc, manager);
-                var producer = new ExternalShellPublicationProducer(
+                producer = new ExternalShellPublicationProducer(
                         new HttpRuntimeTransport(), publications, registrations);
                 store.apply(reserveRequest(journal, captureBytes),
                         PublicationJournalFixture.WRITER_TOKEN,
@@ -407,7 +405,17 @@ class ExternalShellProducerPublicationTest {
                 verifier.wake();
                 return new Lane(source, jdbc, journal, publications, verifier, registrations,
                         worker, producer, binding, execution);
-            } catch (RuntimeException failed) {
+            } catch (RuntimeException | Error failed) {
+                // Assertion failures are Errors, and the verifier's platform
+                // threads are non-daemon: everything already created must be
+                // closed here or the fork cannot exit. Both closes are
+                // idempotent, so the success path's Lane.close stays safe.
+                if (producer != null) {
+                    producer.close();
+                }
+                if (verifier != null) {
+                    verifier.close();
+                }
                 worker.close();
                 throw failed;
             }
