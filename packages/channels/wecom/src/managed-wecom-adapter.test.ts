@@ -517,6 +517,14 @@ describe('managed WeCom adapter inbound', () => {
     expect(
       Buffer.byteLength(JSON.stringify(text), 'utf8') - 2,
     ).toBeLessThanOrEqual(64 * 1024 - 4096);
+    // Maximality (lower bound): one more control character would overflow the
+    // escaped-byte budget, so the clamp is the largest fitting prefix. An
+    // over-truncation by even one code point still satisfies the upper bound
+    // above but fails here.
+    expect(
+      Buffer.byteLength(JSON.stringify(text + String.fromCharCode(1)), 'utf8') -
+        2,
+    ).toBeGreaterThan(64 * 1024 - 4096);
     await adapter.disconnect();
   });
 
@@ -2479,5 +2487,37 @@ describe('ManagedWecomAdapter — round-4 review fixes', () => {
       expect(calls).toBeGreaterThanOrEqual(2);
     });
     await adapter.disconnect();
+  });
+
+  it('the policy-branch drop lifts a stall when the held claim leaves', async () => {
+    const cwd = tempCwd();
+    const first = await connectedAdapter(cwd);
+    first.plane.setRefuseSubmit({ status: 404, code: 'workspace_not_found' });
+    first.fake.push('m1', messageData({ msgid: 'm1' }));
+    first.fake.push('m2', messageData({ msgid: 'm2' }));
+    await first.adapter.tick(); // m1 sacrifice, m2 held + stall armed
+    const stallOf = (a: ManagedWecomAdapter) =>
+      (a as unknown as { instanceStalled: boolean }).instanceStalled;
+    expect(stallOf(first.adapter)).toBe(true);
+    await first.adapter.disconnect();
+    // Restart with a policy that no longer allows the held claim's sender: the
+    // policy arm drops the held claim and must lift the stall — no probe remains
+    // and a flag kept armed would gate every later tick.
+    const plane = fakeControlPlane();
+    const fake = fakeDeps();
+    const second = new ManagedWecomAdapter({
+      name: 'wecom-1',
+      cwd,
+      config: { ...CONFIG, allowedUsers: ['other-user'] },
+      controlPlane: plane.controlPlane,
+      deps: fake.deps,
+      pollLoop: false,
+    });
+    await second.connect(); // restores the held claim and the stall
+    expect(stallOf(second)).toBe(true);
+    await second.tick();
+    expect(stallOf(second)).toBe(false);
+    expect(pendingOf(second)).toEqual([]);
+    await second.disconnect();
   });
 });
