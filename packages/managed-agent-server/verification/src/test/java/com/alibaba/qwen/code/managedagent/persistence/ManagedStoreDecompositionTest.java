@@ -156,7 +156,7 @@ class ManagedStoreDecompositionTest {
                 insertTurnCommand/8::REQUIRED:DEFAULT:false insertCancelCommand/7::REQUIRED:DEFAULT:false settleRenameSync/7::REQUIRED:DEFAULT:false beginSessionMutation/8::REQUIRED:DEFAULT:false
                 insertSessionCommand/10::REQUIRED:DEFAULT:false insertSessionCommand/11::REQUIRED:DEFAULT:false insertSessionCommand/12::REQUIRED:DEFAULT:false
                 insertTurnCommand/8::REQUIRED:DEFAULT:false insertCancelCommand/7::REQUIRED:DEFAULT:false settleRenameSync/7::REQUIRED:DEFAULT:false beginSessionMutation/8::REQUIRED:DEFAULT:false
-                listSessions/7:- listOwnedSessions/7:- ownsSession/3:- requireSessionOwnership/3:-
+                listSessions/7:- ownsSession/3:- requireSessionOwnership/3:-
                 requireSessionAuthority/3:- requireSessionReadAuthority/3:- requireSessionReadAuthority/3:-
                 """);
         assertEntries(JdbcManagedSessionStore.class, """
@@ -238,8 +238,7 @@ class ManagedStoreDecompositionTest {
                 "insertCancelCommand/7::REQUIRED:DEFAULT:false",
                 "settleRenameSync/7::REQUIRED:DEFAULT:false",
                 "beginSessionMutation/8::REQUIRED:DEFAULT:false",
-                "listSessions/7:-",
-                "listOwnedSessions/7:-"));
+                "listSessions/7:-"));
     }
 
     private static List<String> entryPopulation(Class<?> type) {

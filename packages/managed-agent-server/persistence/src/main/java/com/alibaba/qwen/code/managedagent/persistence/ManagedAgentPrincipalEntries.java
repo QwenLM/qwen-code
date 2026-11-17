@@ -126,11 +126,4 @@ class ManagedAgentPrincipalEntries {
             String titleQuery) {
         return sessionQueries.listSessions(tenantId, principal, beforeCreatedAt, beforeSessionId, limit, archiveState, titleQuery);
     }
-
-    public SessionPage listOwnedSessions(String tenantId,
-            SessionPrincipal principal, Long beforeCreatedAt,
-            String beforeSessionId, int limit, String archiveState,
-            String titleQuery) {
-        return sessionQueries.listOwnedSessions(tenantId, principal, beforeCreatedAt, beforeSessionId, limit, archiveState, titleQuery);
-    }
 }

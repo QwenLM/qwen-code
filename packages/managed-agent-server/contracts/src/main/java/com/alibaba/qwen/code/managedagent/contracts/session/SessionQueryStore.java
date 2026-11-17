@@ -58,15 +58,6 @@ public interface SessionQueryStore {
                 "Ownership-filtered Session pages are unavailable");
     }
 
-    /** A page restricted to Sessions owned by the principal. */
-    public default SessionPage listOwnedSessions(String tenantId,
-            SessionPrincipal principal, Long beforeCreatedAt,
-            String beforeSessionId, int limit, String archiveState,
-            String titleQuery) {
-        throw new UnsupportedOperationException(
-                "Owner-only Session pages are unavailable");
-    }
-
     public Map<String, WebShellLifecycleOperation> findLatestLifecycleOperations(String tenantId, List<String> sessionIds);
 
     public Optional<TurnRecord> findTurn(String tenantId, String sessionId,

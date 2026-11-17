@@ -228,7 +228,7 @@ final class AgentSessionQueries {
         // subjectless principal would.
         return listSessionPage(tenantId, actorId, false, null,
                 beforeCreatedAt, beforeSessionId, limit, archiveState,
-                titleQuery, false);
+                titleQuery);
     }
 
     /**
@@ -251,29 +251,14 @@ final class AgentSessionQueries {
                 principal != null && principal.actorPresent(),
                 principal == null ? null : principal.actorSubjectId(),
                 beforeCreatedAt, beforeSessionId, limit, archiveState,
-                titleQuery, false);
-    }
-
-    SessionPage listOwnedSessions(String tenantId,
-            SessionPrincipal principal, Long beforeCreatedAt,
-            String beforeSessionId, int limit, String archiveState,
-            String titleQuery) {
-        if (principal != null) {
-            ManagedSessionPrincipal.requireTenant(tenantId, principal);
-        }
-        return listSessionPage(tenantId,
-                principal == null ? null : principal.userId(),
-                principal != null && principal.actorPresent(),
-                principal == null ? null : principal.actorSubjectId(),
-                beforeCreatedAt, beforeSessionId, limit, archiveState,
-                titleQuery, true);
+                titleQuery);
     }
 
     private SessionPage listSessionPage(String tenantId,
             String actorId, boolean actorPresent, String actorSubjectId,
             Long beforeCreatedAt,
             String beforeSessionId, int limit, String archiveState,
-            String titleQuery, boolean ownerOnly) {
+            String titleQuery) {
         List<Object> arguments = new ArrayList<>();
         arguments.add(tenantId);
         arguments.add(actorId == null ? null
@@ -322,22 +307,10 @@ final class AgentSessionQueries {
             ownershipClause = " OR" + legacyUnbound;
         }
         // The owner-only privacy fence is unconditional on the completion base:
-        // a memory-bound Session lists only for the actor that owns it, whether
-        // or not the caller asked for the owner-only scope (ownerOnly stays in
-        // the signature for the explicit-scope arm below).
+        // a memory-bound Session lists only for the actor that owns it.
         arguments.add(actorId == null ? null
                 : com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(
                         tenantId, actorId));
-        String ownerClause = "";
-        if (ownerOnly) {
-            ownerClause = " AND (ma_session.workspace_id IS NULL OR"
-                    + " (? = FALSE AND COALESCE(ma_session.owner_actor_key,"
-                    + " ma_session.creator_actor_key) = ?))";
-            arguments.add(actorId == null || actorPresent);
-            arguments.add(actorId == null ? null
-                    : com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(
-                            tenantId, actorId));
-        }
         String archiveClause = switch (archiveState) {
             case "archived" -> " AND ma_session.status = 'ARCHIVED'";
             case "unarchived" -> " AND ma_session.status <> 'ARCHIVED'";
@@ -390,7 +363,6 @@ final class AgentSessionQueries {
                                 + " AND (ma_session.owner_only = 0 OR"
                                 + " COALESCE(ma_session.owner_actor_key,"
                                 + " ma_session.creator_actor_key) = ?)"
-                                + ownerClause
                                 + archiveClause + titleClause + cursorClause
                                 + " ORDER BY ma_session.gmt_create DESC, ma_session.session_id DESC"
                                 + " LIMIT ?",
