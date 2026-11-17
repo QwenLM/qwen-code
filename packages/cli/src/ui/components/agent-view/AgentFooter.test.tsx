@@ -11,7 +11,7 @@ import { AgentFooter } from './AgentFooter.js';
 
 describe('AgentFooter', () => {
   it.each([false, true])(
-    'preserves the cycle hint and context usage (showMode=%s)',
+    'keeps the cycle hint with its mode and preserves context usage (showMode=%s)',
     (showApprovalMode) => {
       const { lastFrame } = render(
         <AgentFooter
@@ -22,7 +22,7 @@ describe('AgentFooter', () => {
           terminalWidth={100}
         />,
       );
-      expect(lastFrame()).toContain('tab to cycle');
+      expect(lastFrame()?.includes('tab to cycle')).toBe(showApprovalMode);
       expect(lastFrame()).toContain('10.0% context used');
       expect(lastFrame()?.includes('YOLO mode')).toBe(showApprovalMode);
     },

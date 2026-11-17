@@ -32,7 +32,7 @@ export const AgentFooter: React.FC<AgentFooterProps> = ({
   contextWindowSize,
   terminalWidth,
 }) => {
-  const showApproval = approvalMode !== undefined;
+  const showApproval = approvalMode !== undefined && showApprovalMode;
   const showContext = promptTokenCount > 0 && contextWindowSize !== undefined;
 
   if (!showApproval && !showContext) {
@@ -48,10 +48,7 @@ export const AgentFooter: React.FC<AgentFooterProps> = ({
     >
       <Box marginLeft={2}>
         {showApproval ? (
-          <AutoAcceptIndicator
-            approvalMode={approvalMode}
-            showMode={showApprovalMode}
-          />
+          <AutoAcceptIndicator approvalMode={approvalMode} />
         ) : null}
       </Box>
       <Box marginRight={2}>

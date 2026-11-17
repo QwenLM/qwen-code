@@ -8,6 +8,12 @@ import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js'
 import { theme } from '../semantic-colors.js';
 import { t } from '../../i18n/index.js';
 
+export function getApprovalModeCycleHint(): string {
+  return t(
+    process.platform === 'win32' ? '(tab to cycle)' : '(shift + tab to cycle)',
+  );
+}
+
 export function getApprovalModeLabel(approvalMode: ApprovalMode): string {
   switch (approvalMode) {
     case ApprovalMode.PLAN:

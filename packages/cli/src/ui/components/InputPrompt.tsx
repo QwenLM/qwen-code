@@ -93,6 +93,7 @@ import { FEEDBACK_DIALOG_KEYS } from '../FeedbackDialog.js';
 import { BaseTextInput } from './BaseTextInput.js';
 import type { RenderLineOptions } from './BaseTextInput.js';
 import {
+  getApprovalModeCycleHint,
   getApprovalModeIndicatorColor,
   getApprovalModeLabel,
   getApprovalModePromptStyle,
@@ -2468,7 +2469,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         topRightLabel={voiceStatusLabel ?? uiState.sessionName ?? undefined}
         bottomRightLabel={
           isVpMode && !shellModeActive
-            ? getApprovalModeLabel(approvalMode)
+            ? `${getApprovalModeLabel(approvalMode)} ${getApprovalModeCycleHint()}`
             : undefined
         }
         bottomRightLabelColor={getApprovalModeIndicatorColor(approvalMode)}

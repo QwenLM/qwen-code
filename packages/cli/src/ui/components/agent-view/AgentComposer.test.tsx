@@ -252,7 +252,11 @@ describe('AgentComposer', () => {
         </VirtualViewportContext.Provider>,
       );
       expect(baseTextInputProps.bottomRightLabel).toBe(
-        isVp ? 'YOLO mode' : undefined,
+        isVp
+          ? process.platform === 'win32'
+            ? 'YOLO mode (tab to cycle)'
+            : 'YOLO mode (shift + tab to cycle)'
+          : undefined,
       );
       expect(agentFooterProps.showApprovalMode).toBe(!isVp);
       unmount();

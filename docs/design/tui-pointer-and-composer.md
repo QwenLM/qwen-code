@@ -53,11 +53,13 @@ the copied visual selection. This does not add editable replacement ranges to
 the text buffer. Expandable thought/tool/process summaries must ignore release
 while a text selection exists, including drags returning to their start cell.
 
-Place the localized approval mode on the input's lower-right border in both
-main and agent views. Keep voice/session top labels, cursor geometry and input
-height. Truncate labels by terminal-cell width. Retain the mode-switch hint and
-fallback mode display where no visual input border is available. Permission
-policy and mode-switch handlers remain the existing ones.
+Place the localized approval mode and its platform-specific cycle shortcut
+together on the input's lower-right border in both main and agent views.
+Do not repeat the shortcut in the footer. Keep voice/session top labels,
+cursor geometry and input height. Truncate the combined label by terminal-cell
+width, with the mode first. Where no visual input border is available, keep
+the mode and shortcut together in the footer fallback. Permission policy and
+mode-switch handlers remain the existing ones.
 
 ## Scope and files
 

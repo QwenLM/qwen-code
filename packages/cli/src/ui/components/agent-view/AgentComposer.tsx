@@ -51,6 +51,7 @@ import { theme } from '../../semantic-colors.js';
 import { usePreferredEditor } from '../../hooks/usePreferredEditor.js';
 import { t } from '../../../i18n/index.js';
 import {
+  getApprovalModeCycleHint,
   getApprovalModeIndicatorColor,
   getApprovalModeLabel,
   getApprovalModePromptStyle,
@@ -447,7 +448,7 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({
           borderColor={inputBorderColor}
           bottomRightLabel={
             approvalModeInInput
-              ? getApprovalModeLabel(agentApprovalMode)
+              ? `${getApprovalModeLabel(agentApprovalMode)} ${getApprovalModeCycleHint()}`
               : undefined
           }
           bottomRightLabelColor={getApprovalModeIndicatorColor(

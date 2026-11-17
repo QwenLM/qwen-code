@@ -546,7 +546,7 @@ describe('<Footer />', () => {
     expect(frame).toContain('YOLO mode');
   });
 
-  it('keeps only the cycle hint when an active VP input shows the mode', () => {
+  it('keeps the cycle hint with the mode on an active VP input', () => {
     const { lastFrame } = renderWithWidth(
       120,
       createMockUIState({
@@ -557,7 +557,7 @@ describe('<Footer />', () => {
       }),
     );
     expect(lastFrame()).toContain('Enter to steer · Ctrl+Q to queue');
-    expect(lastFrame()).toContain('tab to cycle');
+    expect(lastFrame()).not.toContain('tab to cycle');
     expect(lastFrame()).not.toContain('YOLO mode');
   });
 

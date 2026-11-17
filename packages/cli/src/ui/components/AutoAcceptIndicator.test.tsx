@@ -11,15 +11,14 @@ import { ApprovalMode } from '@qwen-code/qwen-code-core';
 import { setLanguageAsync } from '../../i18n/index.js';
 
 describe('<AutoAcceptIndicator />', () => {
-  it('keeps the cycle shortcut when the mode is shown on the input border', () => {
+  it('keeps the cycle shortcut beside the mode in the footer fallback', () => {
     const { lastFrame } = render(
-      <AutoAcceptIndicator approvalMode={ApprovalMode.YOLO} showMode={false} />,
+      <AutoAcceptIndicator approvalMode={ApprovalMode.YOLO} />,
     );
-    expect(lastFrame()).not.toContain('YOLO mode');
     expect(lastFrame()).toBe(
       process.platform === 'win32'
-        ? '(tab to cycle)'
-        : '(shift + tab to cycle)',
+        ? 'YOLO mode (tab to cycle)'
+        : 'YOLO mode (shift + tab to cycle)',
     );
   });
 

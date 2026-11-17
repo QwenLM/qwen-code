@@ -153,21 +153,15 @@ export const Footer: React.FC<FooterProps> = ({ containerRef }) => {
   ) : uiState.streamingState === StreamingState.Responding ? (
     <Text color={theme.text.secondary}>
       {t('Enter to steer · Ctrl+Q to queue')}
-      {showAutoAcceptIndicator !== undefined && (
+      {showAutoAcceptIndicator !== undefined && !approvalModeInInput && (
         <>
           {' · '}
-          <AutoAcceptIndicator
-            approvalMode={showAutoAcceptIndicator}
-            showMode={!approvalModeInInput}
-          />
+          <AutoAcceptIndicator approvalMode={showAutoAcceptIndicator} />
         </>
       )}
     </Text>
-  ) : showAutoAcceptIndicator !== undefined ? (
-    <AutoAcceptIndicator
-      approvalMode={showAutoAcceptIndicator}
-      showMode={!approvalModeInInput}
-    />
+  ) : showAutoAcceptIndicator !== undefined && !approvalModeInInput ? (
+    <AutoAcceptIndicator approvalMode={showAutoAcceptIndicator} />
   ) : suppressHint ? null : (
     <Text color={theme.text.secondary}>{t('? for shortcuts')}</Text>
   );

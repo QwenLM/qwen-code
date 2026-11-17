@@ -5930,7 +5930,11 @@ describe('InputPrompt', () => {
       );
       await wait();
       const lines = clean(lastFrame()).split('\n');
-      expect(lines.at(-1)).toContain(` ${label} ──`);
+      const cycleHint =
+        process.platform === 'win32'
+          ? '(tab to cycle)'
+          : '(shift + tab to cycle)';
+      expect(lines.at(-1)).toContain(` ${label} ${cycleHint} ──`);
       expect(lines[0]).not.toContain(label);
       unmount();
     });
