@@ -57,6 +57,7 @@ describe('alibabaStandardProvider', () => {
       'deepseek-v4-pro',
       'deepseek-v4.1-flash',
       'deepseek-v4.1-flash-1017',
+      'qwen4-max',
       'qwen3.8-max',
       'qwen3.8-max-0902',
       'qwen3.8-flash',
@@ -141,6 +142,20 @@ describe('alibabaStandardProvider', () => {
           ?.reasoning,
       ).toMatchObject({ efforts: ['low', 'medium', 'high', 'xhigh', 'max'] });
     }
+  });
+
+  it('declares the qwen4-max native ladder, default high, and media', () => {
+    const qwen4 = alibabaStandardProvider.models!.find(
+      (m) => m.id === 'qwen4-max',
+    );
+    expect(qwen4?.capabilities?.reasoning).toMatchObject({
+      thinking: true,
+      efforts: ['low', 'high', 'xhigh'],
+      defaultEffort: 'high',
+      disableField: 'reasoning_effort',
+    });
+    expect(qwen4?.contextWindowSize).toBe(1000000);
+    expect(qwen4?.modalities).toEqual({ image: true, video: true });
   });
 
   it('limits the Alibaba Kimi K3 route to image input', () => {

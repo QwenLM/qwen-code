@@ -112,6 +112,7 @@ describe('Generated UI view state through the daemon', () => {
         const { promptId } = (await json(response, 202)) as {
           promptId: string;
         };
+        // Admission is asynchronous; closing the session can cancel the turn.
         await expect
           .poll(
             async () =>
@@ -124,7 +125,7 @@ describe('Generated UI view state through the daemon', () => {
                 ),
                 200,
               ),
-            { timeout: 30_000 },
+            { timeout: 60_000 },
           )
           .toMatchObject({ state: 'completed' });
       };

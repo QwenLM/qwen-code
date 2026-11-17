@@ -745,7 +745,6 @@ describe('model configuration manifest', () => {
     'QWEN-LATEST-SERIES-INVITE-202610-m6',
     'qwen4',
     'qwen4-plus',
-    'Qwen4-Max-2026-10-01',
   ])('registers the stable tiered controls for %s', (modelId) => {
     expect(getModelConfiguration(modelId)).toEqual(
       getModelConfiguration('qwen3.8-max'),
@@ -765,6 +764,28 @@ describe('model configuration manifest', () => {
     });
   });
 
+  it.each(['qwen4-max', 'Qwen4-Max-2026-10-01'])(
+    'registers the qwen4 native controls for %s',
+    (modelId) => {
+      expect(getModelConfiguration(modelId)).toEqual(
+        getModelConfiguration('qwen4-max'),
+      );
+      expect(buildModelReasoningConfigOption(modelId)).toMatchObject({
+        id: 'reasoning_effort',
+        currentValue: 'high',
+        options: [
+          { value: 'none' },
+          { value: 'low' },
+          { value: 'high' },
+          { value: 'xhigh' },
+        ],
+        _meta: {
+          'qwenCode/reasoning': { defaultEffort: 'high' },
+        },
+      });
+    },
+  );
+
   it.each(['qwen-latest-series-other', 'company-qwen4', 'qwen3.9-max'])(
     'does not register tiered controls for %s',
     (modelId) => {
@@ -772,9 +793,17 @@ describe('model configuration manifest', () => {
     },
   );
 
-  it.each(['qwen4-plus', 'qwen-latest-series-invite-202610-m6'])(
+  it.each([
+    [
+      'qwen-latest-series-invite-202610-m6',
+      'xhigh',
+      ['none', 'low', 'medium', 'xhigh'],
+    ],
+    ['qwen4-plus', 'xhigh', ['none', 'low', 'medium', 'xhigh']],
+    ['qwen4-max', 'high', ['none', 'low', 'high', 'xhigh']],
+  ] as const)(
     'projects tiered controls for %s on opaque duplicate-endpoint routes',
-    (model) => {
+    (model, currentValue, tiers) => {
       const baseUrl =
         'https://llm-a.cn-beijing.maas.aliyuncs.com/compatible-mode/v1';
       const generation = {
@@ -801,13 +830,8 @@ describe('model configuration manifest', () => {
           true,
         )?.[0],
       ).toMatchObject({
-        currentValue: 'xhigh',
-        options: [
-          { value: 'none' },
-          { value: 'low' },
-          { value: 'medium' },
-          { value: 'xhigh' },
-        ],
+        currentValue,
+        options: tiers.map((value) => ({ value })),
       });
     },
   );
@@ -932,6 +956,16 @@ describe('model configuration manifest', () => {
     ['qwen-latest-series-invite-202610-m6', 'max', false, false],
     ['qwen4-plus', 'none', false, true],
     ['qwen4-plus', 'none', true, false],
+    ['qwen4-plus', 'low', false, true],
+    ['qwen4-plus', 'medium', false, true],
+    ['qwen4-plus', 'xhigh', false, true],
+    ['qwen4-plus', 'high', false, false],
+    ['qwen4-plus', 'max', false, false],
+    ['qwen4-max', 'low', false, true],
+    ['qwen4-max', 'high', false, true],
+    ['qwen4-max', 'xhigh', false, true],
+    ['qwen4-max', 'medium', false, false],
+    ['qwen4-max', 'max', false, false],
     ['qwen3.7-plus', 'default', false, true],
     ['qwen3.7-plus', 'none', false, true],
     ['qwen3.7-plus', 'low', false, false],
@@ -1317,7 +1351,7 @@ describe('getReasoningEffortsForConfig', () => {
     { modelId: 'gpt-5-pro', tiers: ['high'] },
     { modelId: 'gpt-5.1', tiers: ['low', 'medium', 'high'] },
     { modelId: 'qwen3.8-max', tiers: ['low', 'medium', 'xhigh'] },
-    { modelId: 'qwen4-max', tiers: ['low', 'medium', 'xhigh'] },
+    { modelId: 'qwen4-max', tiers: ['low', 'high', 'xhigh'] },
   ])(
     'offers the built-in tiers for $modelId with no declaration',
     ({ modelId, tiers }) => {
