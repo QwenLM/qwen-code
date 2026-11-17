@@ -68,7 +68,7 @@ Linux 矩阵增加第三个 `agent-loop` 值 `kernel`，OpenTUI 任务加上它�
 
 1. 环境变量，当它指向该入口时；
 2. 显式设置（`experimental.unifiedAgentLoop` / `experimental.eventBusAgentLoop`），当它被设置时；
-3. 该入口的内置默认值——共享 loop 对 headless 和 Ink TUI 是 `true`，内核对 headless 是 `true`，其余都是 `false`；每个灰度 PR 一次翻转一个入口的默认值，且只翻转那一个。
+3. 该入口的内置默认值——共享 loop 在 headless、Ink TUI 和 AgentCore 默认开启。内核在 headless 默认开启。每个开关在其余入口默认关闭。每个灰度 PR 只翻转一个入口的默认值。
 
 **入口标识符。** `headless`、`acp`、`ink`、`opentui`、`agent-core`、`speculation`、`hosted`。它们命名的是 loop 入口，不是包：Ink TUI 是 `ink`，OpenTUI 渲染器是 `opentui`，跑在 AgentCore 上的子代理是 `agent-core`，Hosted Harness 是 `hosted`——它只开启模型轮，其 journal 化工具派发仍留在 `hosted-harness-model.ts`。
 
@@ -82,7 +82,7 @@ token 去除首尾空白；空 token 忽略；未知入口名忽略并记 debug 
 
 **getter 形状。** `Config.isUnifiedAgentLoopEnabled(surface)` 与 `Config.isEventBusAgentLoopEnabled(surface)` 接收入口标识符；每个调用点写明自己的入口。AgentCore 的 `runtimeContext` 钩子传 `agent-core`。#17029（已合入）的 speculation 读取点传 `speculation`。共享 loop 关闭时内核开关仍然无效——解析按开关各自进行，内核只作用于 `runAgentLoop` 内部。
 
-**设置在运行时变为三态。** CLI 不再把未设置塌缩成 `false`（本切片之前 `packages/cli/src/config/config.ts` 是 `?? false`）；core 参数变为 `boolean | undefined`。合并后的设置对未设置的键本来就保持 undefined——加载器不会物化 schema 默认值（`packages/cli/src/config/settings.test.ts:4679` 钉住了这一点）——所以运行时不需要任何 schema 改动就能区分「未设置」和「显式关闭」。在那之前 schema 条目保留 `default: false`；`experimental.eventBusAgentLoop` 保留到 headless 的内核默认值翻转，现在也声明了 `unsetToggleValue: true`：当 schema 默认值为 undefined 时，`nextBooleanSettingValue`（`packages/cli/src/config/settingsUtils.ts:693`）对未设置布尔值的第一次切换会写入 `false`，这会翻转两个设置对话框「第一次切换即开启」的行为。schema 默认值在第一个入口的内置默认值翻转时一并移除，同时给对话框的未设置态一个呈现方式：该设置声明 `unsetToggleValue: true`，所以在两个对话框和 `/config` 中，对未设置值的第一次切换仍写入 `true`；Web Shell 设置面板读的是生效值而不是 schema 默认值，两种情况下都不受影响。
+**设置在运行时变为三态。** CLI 不再把未设置塌缩成 `false`（本切片之前 `packages/cli/src/config/config.ts` 是 `?? false`）；core 参数变为 `boolean | undefined`。合并后的设置对未设置的键本来就保持 undefined——加载器不会物化 schema 默认值（`packages/cli/src/config/settings.test.ts:4679` 钉住了这一点）——所以运行时不需要任何 schema 改动就能区分「未设置」和「显式关闭」。Headless 内核默认开启时，移除了 `experimental.eventBusAgentLoop` 的 schema 默认值 `false`，并新增 `unsetToggleValue: true`。缺少这个覆盖值时，`nextBooleanSettingValue`（`packages/cli/src/config/settingsUtils.ts:693`）会在首次切换未设置的开关时写入 `false`。有了覆盖值，两个设置对话框和 `/config` 首次切换仍写入 `true`。Web Shell 设置面板读取生效的设置值。
 
 **对拍两臂强制。** 同一 PR 内：ACP 对拍的 off 臂把环境变量设为 `'0'` 而不是删除；TUI off 臂已在切片 1 钉住 `'0'`，切片 2 让 `'0'` 表示强制关闭。headless 对拍保留显式的按臂设置。有了切片 2 的强制关闭语义，`'0'` 无论默认值如何都钉住 off 臂；在切片 2 落地前，`'0'` 是惰性的（只读 `'1'`），所以 ACP 对拍改动可以与机制同 PR 安全落地。
 

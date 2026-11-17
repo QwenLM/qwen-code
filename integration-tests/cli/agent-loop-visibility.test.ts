@@ -58,16 +58,14 @@ describe('agent loop visibility (headless entry marker)', () => {
     await rig?.cleanup();
   });
 
-  async function runHeadless(
-    shared: boolean,
-    kernel: boolean,
-  ): Promise<{ exitCode: number | null; log: string }> {
+  async function runHeadless(experimental?: {
+    unifiedAgentLoop: boolean;
+    eventBusAgentLoop: boolean;
+  }): Promise<string> {
     await server?.close();
     rig = new TestRig();
     await rig.setup('agent-loop-visibility', {
-      settings: {
-        experimental: { unifiedAgentLoop: shared, eventBusAgentLoop: kernel },
-      },
+      settings: experimental ? { experimental } : {},
     });
     const dir = rig.testDir!;
     server = await startFakeOpenAIServer(({ body }) => {
@@ -102,9 +100,13 @@ describe('agent loop visibility (headless entry marker)', () => {
         stdio: 'pipe',
         env: {
           ...process.env,
+          HOME: runtimeDir,
+          USERPROFILE: runtimeDir,
           QWEN_DEBUG_LOG_FILE: '1',
           QWEN_HOME: runtimeDir,
           QWEN_RUNTIME_DIR: runtimeDir,
+          QWEN_CODE_SYSTEM_SETTINGS_PATH: join(dir, 'system-settings.json'),
+          QWEN_CODE_SYSTEM_DEFAULTS_PATH: join(dir, 'system-defaults.json'),
         },
       },
     );
@@ -116,26 +118,44 @@ describe('agent loop visibility (headless entry marker)', () => {
       child.on('close', resolve),
     );
     expect(exitCode, `headless run failed: ${stderr}`).toBe(0);
-    return { exitCode, log: readDebugLogs(runtimeDir) };
+    return readDebugLogs(runtimeDir);
   }
 
+  it('runs headless on the kernel when both switches are unset', async () => {
+    const log = await runHeadless();
+    expect(headlessPaths(log)).toEqual(['kernel']);
+    expect(log).toContain('runAgentLoopOnBus started');
+  });
+
   it('logs the legacy path when both switches are off', async () => {
-    const { log } = await runHeadless(false, false);
+    const log = await runHeadless({
+      unifiedAgentLoop: false,
+      eventBusAgentLoop: false,
+    });
     expect(headlessPaths(log)).toEqual(['legacy']);
   });
 
   it('logs the shared path when only the unified switch is on', async () => {
-    const { log } = await runHeadless(true, false);
+    const log = await runHeadless({
+      unifiedAgentLoop: true,
+      eventBusAgentLoop: false,
+    });
     expect(headlessPaths(log)).toEqual(['shared']);
   });
 
   it('logs the kernel path when both switches are on', async () => {
-    const { log } = await runHeadless(true, true);
+    const log = await runHeadless({
+      unifiedAgentLoop: true,
+      eventBusAgentLoop: true,
+    });
     expect(headlessPaths(log)).toEqual(['kernel']);
   });
 
   it('does not reuse the parity suites counted marker wording', async () => {
-    const { log } = await runHeadless(true, false);
+    const log = await runHeadless({
+      unifiedAgentLoop: true,
+      eventBusAgentLoop: false,
+    });
     // The entry marker must not contain the substrings the parity suites
     // count for arm identity, or it would inflate those counts.
     const entryLines = log

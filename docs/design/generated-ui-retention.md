@@ -12,7 +12,9 @@ same-workspace navigation, New task, and main/split-view handoffs.
 Ordinary MCP Apps and manually installed extensions keep their existing
 lifecycle. Refresh, page closure, export, and session forks do not preserve or
 transfer live activations. No interaction snapshots are persisted, and there
-are no new daemon routes or protocol fields.
+are no new daemon routes or protocol fields. Values a card saves on purpose are
+a separate mechanism; see
+[generated-ui-view-state.md](generated-ui-view-state.md).
 
 ## Identity and ownership
 
