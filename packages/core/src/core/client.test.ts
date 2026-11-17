@@ -12885,25 +12885,26 @@ Other open files:
         expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(false);
       });
 
-      it('excludes a Notification interaction’s unflagged Hook continuation', async () => {
+      it('does not drop a user turn whose prompt id a Notification reuses', async () => {
         retryChat({
           stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
         });
         mockTurnRunFn.mockImplementation(() => textTurn('response'));
 
-        // Notification first send: excluded by messageType and registered.
+        // Notification first send is excluded by messageType. Notification does
+        // not increment the prompt counter, so the next user prompt reuses this
+        // id; the registry must NOT register it (R6-1).
         await run([{ text: 'notify' }], 'session########8', {
           type: SendMessageType.Notification,
         });
         expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(false);
 
-        // Its Stop-hook continuation is resubmitted as Hook under the same
-        // prompt id without a background flag: the registry must still exclude
-        // it, or it would rotate the live turn's ledger key.
-        await run([{ text: 'continue' }], 'session########8', {
-          type: SendMessageType.Hook,
+        // The next user turn reuses the same prompt id and must remain a ledger
+        // member, not be dropped by a stale Notification registration.
+        await run([{ text: 'user' }], 'session########8', {
+          type: SendMessageType.UserQuery,
         });
-        expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(false);
+        expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(true);
       });
 
       it('restores stripped retry entries when only a concurrent send pushes', async () => {

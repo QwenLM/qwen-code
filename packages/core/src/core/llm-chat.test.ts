@@ -8938,8 +8938,11 @@ describe('LlmChat', async () => {
         { status: 401 },
       );
       streamMock().mockRejectedValue(capacityError);
-      // fallback-a emits a chunk, then fails on a non-eligible auth error.
-      fallbackA.mockResolvedValue(
+      // fallback-a emits a chunk, then fails on a non-eligible auth error. A
+      // fresh generator per call (mockImplementation, not mockResolvedValue) so
+      // request 2 genuinely replays the post-output 401 rather than reading an
+      // already-drained stream.
+      fallbackA.mockImplementation(async () =>
         streamThenThrow([textChunk('fallback-a partial')], authError),
       );
       fallbackB.mockImplementation(async () => textStream('fallback-b ok'));
