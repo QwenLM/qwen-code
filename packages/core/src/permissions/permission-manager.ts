@@ -602,6 +602,7 @@ export class PermissionManager {
 
       if (
         op.pathUnknown &&
+        !op.pathGlobOnly &&
         DECISION_PRIORITY[opDecision] < DECISION_PRIORITY.ask
       ) {
         debugLogger.info(

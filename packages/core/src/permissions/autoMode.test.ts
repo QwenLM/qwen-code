@@ -551,6 +551,15 @@ describe('shouldForceAutoModeReviewForAllow', () => {
     expect(forcesReview('git status')).toBe(false);
   });
 
+  it.each([
+    "(cd .qwen; case a in a) :;; esac; printf '{}' > settings.json)",
+    "sh -c 'echo $(pwd)#1; rm .qwen/settings.json'",
+    'echo $(true; rm .qwen/settings.json)',
+    "echo ${x:- #}; cd .qwen; printf '{}' > settings.json",
+  ])('reviews writes through unmodelled shell structure: %s', (command) => {
+    expect(forcesReview(command)).toBe(true);
+  });
+
   it('returns true for nested wrappers writing protected paths after `cd`', () => {
     // Regression guard: without `extractShellOperationsAcrossCommand` doing
     // cross-segment cd tracking AND recursive wrapper unwrapping, this payload
@@ -1005,6 +1014,17 @@ describe('evaluateAutoMode — fast-path gating', () => {
     const decision = await evaluate({
       toolName: ToolNames.SHELL,
       command: 'cd $D; printf x > /tmp/out.txt',
+      cwd,
+    });
+    expect(decision.via).toBe('classifier');
+    expect(classifyAction).toHaveBeenCalledOnce();
+  });
+
+  it('lets an ordinary read-only glob reach the classifier', async () => {
+    vi.mocked(classifyAction).mockClear();
+    const decision = await evaluate({
+      toolName: ToolNames.SHELL,
+      command: 'grep -rn foo src/*.ts',
       cwd,
     });
     expect(decision.via).toBe('classifier');

@@ -936,7 +936,9 @@ export async function evaluateAutoMode(
     const cwd = input.ctx.cwd ?? input.config.getTargetDir?.() ?? process.cwd();
     if (
       extractShellOperationsAcrossCommand(command, cwd).some(
-        (op) => op.pathUnknown || (op.cwdUnknown && op.pathMayDependOnCwd),
+        (op) =>
+          (op.pathUnknown && !op.pathGlobOnly) ||
+          (op.cwdUnknown && op.pathMayDependOnCwd),
       )
     ) {
       return {

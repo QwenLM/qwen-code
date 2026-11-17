@@ -1077,12 +1077,15 @@ function findOperatorBoundaries(
   let inSingle = false;
   let inDouble = false;
   let inAnsiC = false;
+  let inBacktick = false;
   let dollarPending = false;
   let escaped = false;
   // Nesting depth of `$(( … ))` / `(( … ))`. Inside arithmetic a bare `&` is
   // bitwise AND, not the async operator, so `$(( FLAGS & MASK ))` is one word.
   let arithmeticDepth = 0;
   let wordParenDepth = 0;
+  let parameterDepth = 0;
+  let lastWordParenClose = -1;
 
   for (let i = 0; i < command.length; i++) {
     const ch = command[i]!;
@@ -1108,6 +1111,10 @@ function findOperatorBoundaries(
       escaped = true;
       continue;
     }
+    if (inBacktick) {
+      if (ch === '`') inBacktick = false;
+      continue;
+    }
     if (ch === "'" && !inDouble) {
       inAnsiC = inSingle ? false : ansiCIntroducer;
       inSingle = !inSingle;
@@ -1117,7 +1124,14 @@ function findOperatorBoundaries(
       inDouble = !inDouble;
       continue;
     }
-    if (inSingle || inDouble) {
+    if (inSingle) {
+      continue;
+    }
+    if (ch === '`') {
+      inBacktick = true;
+      continue;
+    }
+    if (inDouble) {
       continue;
     }
     if (ch === '$') {
@@ -1128,8 +1142,18 @@ function findOperatorBoundaries(
 
     if (
       includeGroups &&
+      (parameterDepth > 0 || (ch === '{' && command[i - 1] === '$'))
+    ) {
+      if (ch === '{') parameterDepth++;
+      else if (ch === '}') parameterDepth--;
+      continue;
+    }
+
+    if (
+      includeGroups &&
       wordParenDepth === 0 &&
       ch === '#' &&
+      i - 1 !== lastWordParenClose &&
       (i === 0 || /[ \t\n;&|()]/.test(command[i - 1]!))
     ) {
       const newline = command.indexOf('\n', i);
@@ -1140,7 +1164,10 @@ function findOperatorBoundaries(
 
     if (includeGroups && wordParenDepth > 0) {
       if (ch === '(') wordParenDepth++;
-      else if (ch === ')') wordParenDepth--;
+      else if (ch === ')') {
+        wordParenDepth--;
+        if (wordParenDepth === 0) lastWordParenClose = i;
+      }
       continue;
     }
 
@@ -1174,7 +1201,7 @@ function findOperatorBoundaries(
         ch === ')' ||
         ((ch === '{' || ch === '}') &&
           (i === 0 || /[ \t\n;&|()]/.test(command[i - 1]!)) &&
-          (i + 1 === command.length || /[ \t\n;&|()]/.test(command[i + 1]!))))
+          (i + 1 === command.length || /[ \t\n;&|()<>]/.test(command[i + 1]!))))
     ) {
       boundaries.push({ start: i, end: i + 1, operator: ch });
       continue;

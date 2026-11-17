@@ -3493,6 +3493,9 @@ describe('PermissionManager — compound shell write attribution', () => {
     'cp -S.tmp a .qwen/settings.json',
     'cp -St a .qwen/settings.json',
     'f() { cd .qwen; }; printf x > .qwen/settings.json',
+    "(cd .qwen; case a in a) :;; esac; printf '{}' > settings.json)",
+    'if false; then { cd /tmp; }; fi; printf x > .qwen/settings.json',
+    "echo ${x:- #}; cd .qwen; printf '{}' > settings.json",
     'function f { cd .qwen; }; printf x > .qwen/settings.json',
     "A[0'']=1 cd .qwen; printf x > settings.json",
     'A["0"]=1 cd .qwen; printf x > settings.json',
@@ -3501,6 +3504,20 @@ describe('PermissionManager — compound shell write attribution', () => {
     'keeps protected writes visible through shell syntax: %s',
     async (command) => {
       const pm = repoPm({ permissionsAllow: ['Bash(*)'], ...denySettings });
+      expect(await pm.evaluate(sh(command, '/repo'))).toBe('deny');
+    },
+  );
+
+  it.each([
+    "sh -c 'echo $(pwd)#1; rm .qwen/settings.json'",
+    'echo $(true; rm .qwen/settings.json)',
+  ])(
+    'keeps protected removals visible through shell syntax: %s',
+    async (command) => {
+      const pm = repoPm({
+        permissionsAllow: ['Bash(*)'],
+        permissionsDeny: ['Edit(.qwen/settings.json)'],
+      });
       expect(await pm.evaluate(sh(command, '/repo'))).toBe('deny');
     },
   );
@@ -3936,6 +3953,15 @@ describe('PermissionManager — compound shell write attribution', () => {
       expect(await pm.evaluate(ctx)).toBe('ask');
     },
   );
+
+  it('allows an ordinary read-only glob under broad allow rules', async () => {
+    const pm = repoPm({
+      permissionsAllow: ['Bash(*)', 'ReadFileTool(*)', 'WriteFileTool(*)'],
+    });
+    expect(await pm.evaluate(sh('grep -rn foo src/*.ts', '/repo'))).toBe(
+      'allow',
+    );
+  });
 
   it('does not make path uncertainty relevant without permission rules', () => {
     const pm = repoPm({});

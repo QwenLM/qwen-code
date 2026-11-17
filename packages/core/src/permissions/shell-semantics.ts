@@ -83,6 +83,8 @@ export interface ShellOperation {
   pathMayDependOnCwd?: boolean;
   /** True when expansion or undecodable bytes prevent a statically known path. */
   pathUnknown?: boolean;
+  /** True when `pathUnknown` is only ordinary glob/brace expansion on a read. */
+  pathGlobOnly?: boolean;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -376,6 +378,16 @@ function trimShellSyntax(token: string, bare: string): string {
     // A quoted or escaped `)` or `&` is part of the word: `>"x&"` writes
     // `x&`, `>"notes)"` writes `notes)`.
     if ((ch !== ')' && ch !== '&') || bare[end - 1] !== '1') break;
+    // Keep the operator in `>& 2` / `<& 0`: dropping this trailing `&` turns
+    // descriptor duplication into a write to a file named `2` or a read of `0`.
+    if (
+      ch === '&' &&
+      end - start >= 2 &&
+      '<>'.includes(token[end - 2]!) &&
+      bare[end - 2] === '1'
+    ) {
+      break;
+    }
     end--;
   }
 
@@ -428,7 +440,7 @@ function isShellAbsolutePath(p: string): boolean {
  * than '2', so reading only the expansion mark certifies a literal name bash
  * may never open.
  */
-function isUncertainPath(word: string, bare?: string): boolean {
+function hasExpansionUncertainty(word: string, bare?: string): boolean {
   if (bare?.includes('2') || hasUnpairedSurrogate(word)) return true;
   // Outer expansion happens before the payload's own quotes are parsed.
   for (const expansion of wrapperExpansions) {
@@ -454,6 +466,11 @@ function isUncertainPath(word: string, bare?: string): boolean {
       }
     }
   }
+  return false;
+}
+
+function isUncertainPath(word: string, bare?: string): boolean {
+  if (hasExpansionUncertainty(word, bare)) return true;
   if (bare === undefined) return false;
   for (let i = 0; i < word.length && i < bare.length; i++) {
     if (bare[i] !== '1') continue;
@@ -476,6 +493,7 @@ interface ArgumentWord {
 
 let argumentContext: readonly ArgumentWord[] = [];
 let wrapperExpansions: ReadonlySet<string> = new Set();
+let cwdUncertaintyContext = false;
 
 /**
  * The marking of the argument characters `fragment` was taken from.
@@ -527,7 +545,19 @@ function pathOperation(
     virtualTool,
     filePath: resolvePath(path, cwd, inherited),
   };
-  if (isUncertainPath(path, inherited)) operation.pathUnknown = true;
+  if (cwdUncertaintyContext) {
+    operation.pathMayDependOnCwd = !isShellAbsolutePath(path);
+  }
+  if (isUncertainPath(path, inherited)) {
+    operation.pathUnknown = true;
+    if (
+      !hasExpansionUncertainty(path, inherited) &&
+      virtualTool !== 'edit' &&
+      virtualTool !== 'write_file'
+    ) {
+      operation.pathGlobOnly = true;
+    }
+  }
   return operation;
 }
 
@@ -737,9 +767,18 @@ function extractRedirects(
       virtualTool,
       filePath: resolvePath(target, cwd, bare),
     };
+    if (cwdUncertaintyContext) {
+      operation.pathMayDependOnCwd = !isShellAbsolutePath(target);
+    }
     // Keep uncertainty before `..` normalization can remove its source word.
     if (isUncertainPath(target, bare)) {
       operation.pathUnknown = true;
+      if (
+        !hasExpansionUncertainty(target, bare) &&
+        virtualTool === 'read_file'
+      ) {
+        operation.pathGlobOnly = true;
+      }
     }
     (virtualTool === 'read_file' ? readFiles : writeFiles).push(operation);
   };
@@ -779,15 +818,22 @@ function extractRedirects(
       // and drops numbers and `$` words as arguments (`tee >&-2` writes
       // `2`), so the whole word also stays a file operation, as it was
       // before `-` was split off.
+      const separateTarget = tok === fdOp ? tokens[i + 1] : undefined;
       const file = fdCloses.has(i)
         ? `&${tok.slice(fdOp.length)}`
-        : fdRedirectFile(tok.slice(fdOp.length));
+        : fdRedirectFile(separateTarget ?? tok.slice(fdOp.length));
       if (file !== undefined) {
         pushRedirect(
           fdOp === '<&' ? 'read_file' : 'write_file',
           file,
-          tokBare?.slice(fdOp.length),
+          separateTarget === undefined
+            ? tokBare?.slice(fdOp.length)
+            : targetBare(i + 1),
         );
+      }
+      if (separateTarget !== undefined) {
+        toRemove.add(i + 1);
+        i++;
       }
       continue;
     }
@@ -1029,6 +1075,7 @@ function getFlagValue(
 interface TargetDirectory {
   path: string;
   pathUnknown: boolean;
+  pathIsAbsolute: boolean;
 }
 
 function targetDirectoryPath(
@@ -1042,6 +1089,7 @@ function targetDirectoryPath(
   return {
     path: resolvePath(target, cwd, bare),
     pathUnknown: isUncertainPath(target, bare),
+    pathIsAbsolute: isShellAbsolutePath(target),
   };
 }
 
@@ -1057,6 +1105,9 @@ function targetDirectoryWrites(
     };
     // Check the source word before absolute path resolution or `..`
     // normalization can move its expansion marks to different characters.
+    if (cwdUncertaintyContext) {
+      operation.pathMayDependOnCwd = !targetDir.pathIsAbsolute;
+    }
     if (targetDir.pathUnknown || isUncertainPath(base, fragmentBare(base))) {
       operation.pathUnknown = true;
     }
@@ -2578,6 +2629,8 @@ function resolveCdTargetCwd(
   command: string,
   cwd: string,
   cwdUnknown: boolean,
+  homeUnknown = false,
+  cdPathUnknown = false,
 ): CdResolution {
   const fdRedirects = new Set<number>();
   const fdCloses = new Set<number>();
@@ -2634,9 +2687,11 @@ function resolveCdTargetCwd(
   }
   if (
     (words[targetIndex] === undefined &&
-      prefixes.some((prefix) => envAssignmentName(prefix) === 'HOME')) ||
+      (homeUnknown ||
+        prefixes.some((prefix) => envAssignmentName(prefix) === 'HOME'))) ||
     (!isShellAbsolutePath(target) &&
-      prefixes.some((prefix) => envAssignmentName(prefix) === 'CDPATH'))
+      (cdPathUnknown ||
+        prefixes.some((prefix) => envAssignmentName(prefix) === 'CDPATH')))
   ) {
     return { kind: 'dynamic', redirects };
   }
@@ -2749,9 +2804,7 @@ function extractFindExecOps(args: string[], cwd: string): ShellOperation[] {
       .join(' ');
     const innerOps = extractShellOperationsAcrossCommand(innerCommand, cwd);
     ops.push(
-      ...(marker.endsWith('dir')
-        ? markCwdUnknownOps(innerOps, innerCommand, cwd)
-        : innerOps),
+      ...(marker.endsWith('dir') ? markCwdUnknownOps(innerOps) : innerOps),
     );
   }
   return ops;
@@ -2837,6 +2890,223 @@ function getHeredocDelimiters(line: string): string[] {
   return delimiters;
 }
 
+type CommandParen = 'command' | 'subshell' | 'arithmetic';
+
+function commandSubstitutionEnd(command: string, openParen: number): number {
+  const parens: CommandParen[] = ['command'];
+  let inSingle = false;
+  let inDouble = false;
+  let inAnsiC = false;
+  let inBacktick = false;
+  let escaped = false;
+  let dollarPending = false;
+
+  for (let i = openParen + 1; i < command.length; i++) {
+    const ch = command[i]!;
+    const ansiCIntroducer: boolean = dollarPending;
+    dollarPending = false;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (inBacktick) {
+      if (ch === '\\') i++;
+      else if (ch === '`') inBacktick = false;
+      continue;
+    }
+    if (ch === '\\' && (!inSingle || inAnsiC)) {
+      escaped = true;
+      continue;
+    }
+    if (ch === "'" && !inDouble) {
+      inAnsiC = inSingle ? false : ansiCIntroducer;
+      inSingle = !inSingle;
+      continue;
+    }
+    if (ch === '"' && !inSingle) {
+      inDouble = !inDouble;
+      continue;
+    }
+    if (inSingle) continue;
+    if (ch === '`') {
+      inBacktick = true;
+      continue;
+    }
+    if (ch === '$') dollarPending = !ansiCIntroducer;
+
+    const top = parens[parens.length - 1];
+    if (top === 'arithmetic') {
+      if (ch === ')' && command[i + 1] === ')') {
+        parens.pop();
+        i++;
+      }
+      continue;
+    }
+    if (ch === '$' && command[i + 1] === '(') {
+      if (command[i + 2] === '(') {
+        parens.push('arithmetic');
+        i += 2;
+      } else {
+        parens.push('command');
+        i++;
+      }
+      continue;
+    }
+    if (ch === '(' && !inDouble) {
+      parens.push('subshell');
+      continue;
+    }
+    if (ch === ')' && (top === 'command' || !inDouble)) {
+      parens.pop();
+      if (parens.length === 0) return i;
+    }
+  }
+  return -1;
+}
+
+function backtickEnd(command: string, start: number): number {
+  for (let i = start + 1; i < command.length; i++) {
+    if (command[i] === '\\') i++;
+    else if (command[i] === '`') return i;
+  }
+  return -1;
+}
+
+function commandSubstitutionPayloads(command: string): string[] {
+  const payloads: string[] = [];
+  let inSingle = false;
+  let inDouble = false;
+  let inAnsiC = false;
+  let escaped = false;
+  let dollarPending = false;
+
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!;
+    const ansiCIntroducer: boolean = dollarPending;
+    dollarPending = false;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\' && (!inSingle || inAnsiC)) {
+      escaped = true;
+      continue;
+    }
+    if (ch === "'" && !inDouble) {
+      inAnsiC = inSingle ? false : ansiCIntroducer;
+      inSingle = !inSingle;
+      continue;
+    }
+    if (ch === '"' && !inSingle) {
+      inDouble = !inDouble;
+      continue;
+    }
+    if (inSingle) continue;
+    if (ch === '$' && command[i + 1] === '(' && command[i + 2] !== '(') {
+      const end = commandSubstitutionEnd(command, i + 1);
+      if (end >= 0) {
+        payloads.push(command.slice(i + 2, end));
+        i = end;
+        continue;
+      }
+    }
+    if (ch === '`') {
+      const end = backtickEnd(command, i);
+      if (end >= 0) {
+        payloads.push(command.slice(i + 1, end));
+        i = end;
+        continue;
+      }
+    }
+    if (ch === '$') dollarPending = !ansiCIntroducer;
+  }
+  return payloads;
+}
+
+function structuralPrefix(command: string): {
+  first: string | undefined;
+  negated: boolean;
+} {
+  const marks: string[] = [];
+  const words = tokenize(command, undefined, undefined, marks);
+  const bareWord = (index: number): string | undefined => {
+    const word = words[index];
+    return word && marks[index] === '1'.repeat(word.length) ? word : undefined;
+  };
+  let index = 0;
+  let negated = false;
+  for (;;) {
+    const word = bareWord(index);
+    if (word === '!') {
+      negated = true;
+      index++;
+      continue;
+    }
+    if (word === 'time') {
+      index++;
+      if (bareWord(index) === '-p') index++;
+      if (bareWord(index) === '--') index++;
+      continue;
+    }
+    return { first: word, negated };
+  }
+}
+
+function hasComplexParameterExpansion(command: string): boolean {
+  const marks: string[] = [];
+  const words = tokenize(command, undefined, undefined, marks);
+  for (let wordIndex = 0; wordIndex < words.length; wordIndex++) {
+    const word = words[wordIndex]!;
+    const bare = marks[wordIndex] ?? '';
+    for (let i = 0; i + 1 < word.length; i++) {
+      if (word[i] !== '$' || word[i + 1] !== '{' || bare[i] !== '2') continue;
+      if (!/^\$\{[A-Za-z_][A-Za-z0-9_]*\}/.test(word.slice(i))) return true;
+    }
+  }
+  return false;
+}
+
+function unmodeledShellSegments(
+  segments: ReadonlyArray<{ command: string; terminator: string }>,
+): ReadonlySet<number> {
+  const openers: Readonly<Record<string, string>> = {
+    case: 'esac',
+    if: 'fi',
+    while: 'done',
+    until: 'done',
+    for: 'done',
+    select: 'done',
+    '[[': ']]',
+  };
+  const closers = new Set(Object.values(openers));
+  const marked = new Set<number>();
+  const blocks: string[] = [];
+  for (let i = 0; i < segments.length; i++) {
+    const command = segments[i]!.command;
+    const { first, negated } = structuralPrefix(command);
+    const opener = first ? openers[first] : undefined;
+    if (opener) {
+      marked.add(i);
+      blocks.push(opener);
+      continue;
+    }
+    if (blocks.length > 0) {
+      marked.add(i);
+      if (first === blocks[blocks.length - 1]) blocks.pop();
+      continue;
+    }
+    if (
+      (first !== undefined && closers.has(first)) ||
+      negated ||
+      first === 'coproc' ||
+      hasComplexParameterExpansion(command)
+    ) {
+      marked.add(i);
+    }
+  }
+  return marked;
+}
+
 function walkCompoundCommand(
   command: string,
   cwd: string,
@@ -2848,10 +3118,18 @@ function walkCompoundCommand(
     true,
   );
   const ops: ShellOperation[] = [];
-  type CwdScope = { cwd: string; unknown: boolean };
+  type CwdScope = {
+    cwd: string;
+    unknown: boolean;
+    stickyUnknown: boolean;
+    homeUnknown: boolean;
+    cdPathUnknown: boolean;
+  };
+  const unmodeledSegments = unmodeledShellSegments(subCommands);
   const groupEnds = new Map<number, number>();
   const groups: number[] = [];
   for (let i = 0; i < subCommands.length; i++) {
+    if (unmodeledSegments.has(i)) continue;
     const terminator = subCommands[i]!.terminator;
     if (terminator === '(' || terminator === '{') {
       groups.push(i);
@@ -2872,53 +3150,86 @@ function walkCompoundCommand(
 
   const visitSimple = (sub: string, scope: CwdScope) => {
     if (!sub) return;
-    const marks: string[] = [];
-    const words = tokenize(sub, undefined, undefined, marks);
-    if (words[0] === 'case' && marks[0] === '1111') scope.unknown = true;
-    const cdTarget = resolveCdTargetCwd(sub, scope.cwd, scope.unknown);
-    if (cdTarget.kind !== 'not-cd') {
-      const redirects = toRedirectOperations(cdTarget.redirects);
-      ops.push(
-        ...(scope.unknown
-          ? markCwdUnknownOps(redirects, sub, scope.cwd)
-          : redirects),
-      );
-      if (cdTarget.kind === 'static') {
-        scope.cwd = cdTarget.cwd;
-        scope.unknown = cdTarget.cwdUnknown;
-      } else {
-        scope.unknown = true;
+    const outerCwdUncertainty = cwdUncertaintyContext;
+    cwdUncertaintyContext = scope.unknown;
+    try {
+      const expansions = new Set(wrapperExpansions);
+      const unwrapped = stripShellWrapper(sub, expansions);
+      if (depth < MAX_SHELL_UNWRAP_DEPTH && unwrapped === sub) {
+        for (const payload of commandSubstitutionPayloads(sub)) {
+          ops.push(
+            ...walkCompoundCommand(
+              payload,
+              scope.cwd,
+              depth + 1,
+              scope.unknown,
+            ),
+          );
+        }
       }
-      return;
-    }
-    const expansions = new Set(wrapperExpansions);
-    const unwrapped = stripShellWrapper(sub, expansions);
-    if (depth < MAX_SHELL_UNWRAP_DEPTH && unwrapped !== sub) {
-      const outer = wrapperExpansions;
-      wrapperExpansions = expansions;
-      try {
-        ops.push(
-          ...walkCompoundCommand(
-            unwrapped,
-            scope.cwd,
-            depth + 1,
-            scope.unknown,
-          ),
+
+      const cdTarget = resolveCdTargetCwd(
+        sub,
+        scope.cwd,
+        scope.unknown,
+        scope.homeUnknown,
+        scope.cdPathUnknown,
+      );
+      if (cdTarget.kind !== 'not-cd') {
+        const redirects = toRedirectOperations(cdTarget.redirects);
+        ops.push(...(scope.unknown ? markCwdUnknownOps(redirects) : redirects));
+        if (cdTarget.kind === 'static') {
+          scope.cwd = cdTarget.cwd;
+          scope.unknown = scope.stickyUnknown || cdTarget.cwdUnknown;
+        } else {
+          scope.unknown = true;
+        }
+        return;
+      }
+
+      const assignmentMarks: string[] = [];
+      const assignmentWords = tokenize(
+        sub,
+        undefined,
+        undefined,
+        assignmentMarks,
+      );
+      const prefixes = stripCommandPrefixes(assignmentWords, assignmentMarks);
+      if (assignmentWords.length === 0) {
+        for (const prefix of prefixes) {
+          const name = envAssignmentName(prefix);
+          if (name === 'HOME') scope.homeUnknown = true;
+          if (name === 'CDPATH') scope.cdPathUnknown = true;
+        }
+      }
+
+      if (depth < MAX_SHELL_UNWRAP_DEPTH && unwrapped !== sub) {
+        const outer = wrapperExpansions;
+        wrapperExpansions = expansions;
+        try {
+          ops.push(
+            ...walkCompoundCommand(
+              unwrapped,
+              scope.cwd,
+              depth + 1,
+              scope.unknown,
+            ),
+          );
+        } finally {
+          wrapperExpansions = outer;
+        }
+        return;
+      }
+      if (unwrapped !== sub) {
+        shellSemanticsDebugLogger.warn(
+          `Shell wrapper unwrap depth limit reached (${MAX_SHELL_UNWRAP_DEPTH}); analysing remaining command as-is.`,
         );
-      } finally {
-        wrapperExpansions = outer;
       }
-      return;
+      const subOps = extractShellOperations(sub, scope.cwd);
+      ops.push(...(scope.unknown ? markCwdUnknownOps(subOps) : subOps));
+    } finally {
+      cwdUncertaintyContext = outerCwdUncertainty;
     }
-    if (unwrapped !== sub) {
-      shellSemanticsDebugLogger.warn(
-        `Shell wrapper unwrap depth limit reached (${MAX_SHELL_UNWRAP_DEPTH}); analysing remaining command as-is.`,
-      );
-    }
-    const subOps = extractShellOperations(sub, scope.cwd);
-    ops.push(
-      ...(scope.unknown ? markCwdUnknownOps(subOps, sub, scope.cwd) : subOps),
-    );
   };
 
   const unitEnd = (index: number, limit: number) => {
@@ -2984,7 +3295,12 @@ function walkCompoundCommand(
         pipedIn ||
         pipedOut ||
         terminator === '&';
-      const current = isolated ? { ...listScope } : listScope;
+      const unmodeled = unmodeledSegments.has(i);
+      if (unmodeled) {
+        listScope.unknown = true;
+        listScope.stickyUnknown = true;
+      }
+      const current = isolated || unmodeled ? { ...listScope } : listScope;
       if (functionDefinition) current.unknown = true;
       visitSimple(segment.command, current);
       const close = groupEnds.get(i);
@@ -2998,62 +3314,40 @@ function walkCompoundCommand(
       if (
         pipedIn &&
         !pipedOut &&
-        (current.cwd !== listScope.cwd || current.unknown !== listScope.unknown)
+        (current.cwd !== listScope.cwd ||
+          current.unknown !== listScope.unknown ||
+          current.stickyUnknown !== listScope.stickyUnknown)
       ) {
         listScope.unknown = true;
+        listScope.stickyUnknown ||= current.stickyUnknown;
       }
       pipedIn = pipedOut;
       i = last;
     }
   };
-  visit(0, subCommands.length, { cwd, unknown: initialCwdUnknown }, 0);
+  visit(
+    0,
+    subCommands.length,
+    {
+      cwd,
+      unknown: initialCwdUnknown,
+      stickyUnknown: false,
+      homeUnknown: false,
+      cdPathUnknown: false,
+    },
+    0,
+  );
   return ops;
 }
 
-function hasAbsolutePathTokenForOperation(
-  command: string,
-  cwd: string,
-  filePath: string,
-): boolean {
-  for (const token of tokenize(command)) {
-    // `[12]?>&` and `<&` come before `1>`, `>` and `<`, or those would match
-    // first and leave `&/abs/path`. A quoted `&` (`>"&"/tmp/x` writes the
-    // relative `&/tmp/x`) can't match by mistake: the resolved path must
-    // equal the operation's path.
-    const redirectTarget = token.match(
-      // `>|` / `N>|` are the clobber spellings and must be tried before the
-      // bare `>` alternatives, or `>|/abs/p.txt` yields `|/abs/p.txt` — not a
-      // shell-absolute path, so a `cd $D && … >|/abs/p.txt` was flagged
-      // `pathMayDependOnCwd` while the `>` form was not.
-      /^(?:1>>|[12]?>\||[12]?>&|<&|1>|>>|>|2>>|2>|&>>|&>|<)([\s\S]+)$/,
-    )?.[1];
-    const candidate = redirectTarget ?? token;
-    if (
-      looksLikePath(candidate) &&
-      isShellAbsolutePath(candidate) &&
-      resolvePath(candidate, cwd) === filePath
-    ) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function markCwdUnknownOps(
-  ops: ShellOperation[],
-  command: string,
-  cwd: string,
-): ShellOperation[] {
+function markCwdUnknownOps(ops: ShellOperation[]): ShellOperation[] {
   return ops.map((op) => {
     if (!op.filePath) return op;
-    return {
+    const marked: ShellOperation = {
       ...op,
       cwdUnknown: true,
-      pathMayDependOnCwd: !hasAbsolutePathTokenForOperation(
-        command,
-        cwd,
-        op.filePath,
-      ),
+      pathMayDependOnCwd: op.pathMayDependOnCwd ?? true,
     };
+    return marked;
   });
 }

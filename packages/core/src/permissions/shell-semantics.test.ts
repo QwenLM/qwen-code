@@ -528,6 +528,10 @@ describe('extractShellOperations', () => {
     ['df -hT / 2>&1', []],
     ['df -hT / 1>&2', []],
     ['df -hT / >&2', []],
+    ['echo hi >& 2', []],
+    ['echo hi 2>& 1', []],
+    ['cat <& 0', []],
+    ['echo hi > 2', [write(`${CWD}/2`)]],
     ['df -hT / 2>&-', []],
     ['df -hT / >&-', []],
     ['cat <&0', []],
@@ -958,6 +962,74 @@ describe('extractShellOperationsAcrossCommand', () => {
     ],
   ])('%s', (_title, command, expected) => {
     expect(across(command)).toEqual(expected);
+  });
+
+  it('does not let a case arm steal the surrounding cwd', () => {
+    expect(
+      across("(cd .qwen; case a in a) :;; esac; printf '{}' > settings.json)"),
+    ).toEqual([uncertainWrite(REPO_SETTINGS)]);
+  });
+
+  it.each(['time', '!'])(
+    'does not let a %s-prefixed case arm steal the surrounding cwd',
+    (prefix) => {
+      expect(
+        across(
+          `(cd .qwen; ${prefix} case a in a) :;; esac; printf '{}' > settings.json)`,
+        ),
+      ).toEqual([uncertainWrite(REPO_SETTINGS)]);
+    },
+  );
+
+  it('does not treat a command-substitution suffix as a comment', () => {
+    expect(across("sh -c 'echo $(pwd)#1; rm .qwen/settings.json'")).toEqual([
+      edit(REPO_SETTINGS),
+    ]);
+  });
+
+  it('extracts operations from a multi-command substitution', () => {
+    expect(across('echo $(true; rm .qwen/settings.json)')).toEqual([
+      edit(REPO_SETTINGS),
+    ]);
+  });
+
+  it('extracts operations from a backtick command substitution', () => {
+    expect(across('echo `true; rm .qwen/settings.json`')).toEqual([
+      edit(REPO_SETTINGS),
+    ]);
+  });
+
+  it.each([
+    'if false; then { cd /tmp; }; fi; printf x > .qwen/settings.json',
+    "echo ${x:- #}; cd .qwen; printf '{}' > settings.json",
+  ])('keeps unmodelled execution structure fail-closed: %s', (command) => {
+    expect(across(command)).toEqual([uncertainWrite(REPO_SETTINGS)]);
+  });
+
+  it('does not clear structural cwd uncertainty with an absolute cd', () => {
+    expect(
+      across(
+        'if false; then { cd /tmp; }; fi; cd /repo/.qwen; printf x > settings.json',
+      ),
+    ).toEqual([uncertainWrite(REPO_SETTINGS)]);
+  });
+
+  it('does not exempt a relative write via an unrelated absolute argument', () => {
+    expect(across('cd $D; printf /repo/settings.json > settings.json')).toEqual(
+      [uncertainWrite('/repo/settings.json')],
+    );
+  });
+
+  it('does not resolve cd from an earlier HOME assignment', () => {
+    expect(across("HOME=/repo/.qwen; cd; printf '{}' > settings.json")).toEqual(
+      [uncertainWrite('/repo/settings.json')],
+    );
+  });
+
+  it('does not resolve cd from an earlier CDPATH assignment', () => {
+    expect(
+      across("CDPATH=/elsewhere; cd .qwen; printf '{}' > settings.json"),
+    ).toEqual([uncertainWrite('/repo/settings.json')]);
   });
 
   // A backgrounded `cd` runs in a subshell, so the parent's cwd is untouched
@@ -1736,7 +1808,11 @@ describe('find starting-point uncertainty', () => {
     'keeps the marks on a find starting point: %s',
     (target) => {
       expect(across(`find ${target} -name x`)).toEqual([
-        { ...dir(`/repo/${target.slice(2)}`), pathUnknown: true },
+        {
+          ...dir(`/repo/${target.slice(2)}`),
+          pathUnknown: true,
+          ...(target === './*' ? { pathGlobOnly: true } : {}),
+        },
       ]);
     },
   );
@@ -1971,12 +2047,12 @@ describe('unquoted pathname globbing is an expansion', () => {
     ]);
   });
 
-  it('keeps a globbed read argument uncertain', () => {
+  it('keeps a globbed read argument visible without forcing unresolved-path review', () => {
     expect(ops('cat .qwen/settings.jso?')).toEqual([
       {
-        virtualTool: 'read_file',
-        filePath: `${CWD}/.qwen/settings.jso?`,
+        ...read(`${CWD}/.qwen/settings.jso?`),
         pathUnknown: true,
+        pathGlobOnly: true,
       },
     ]);
   });
