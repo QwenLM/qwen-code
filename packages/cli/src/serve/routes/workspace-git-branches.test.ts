@@ -634,6 +634,14 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
       expect(deepRepo.body['error']).not.toBe('not_a_git_repository');
       const deepRef = classify(`${'x'.repeat(600)} invalid reference`);
       expect(deepRef.body['error']).not.toBe('not_a_git_repository');
+      // The directory-collision alternation shares the bound too: a
+      // plain pull's fetch summary can push the refusal past the cap,
+      // and then it stays unclassified (the inside-the-cap control is
+      // the classification-table row for this message).
+      const deepDir = classify(
+        `${'x'.repeat(600)}\nerror: Updating the following directories would lose untracked files in them:\n\td\n\nAborting`,
+      );
+      expect(deepDir.body['error']).not.toBe('dirty_working_tree');
     });
 
     it('anchors the remote-already-exists arm to line 1', () => {

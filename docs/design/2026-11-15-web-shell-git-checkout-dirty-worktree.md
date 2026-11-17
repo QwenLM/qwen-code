@@ -136,9 +136,14 @@ ignored files in the way during the switch, under both resolutions
 ignored is decided at stash time by the current branch's rules, not the
 target's: residue the current branch does not ignore is plain untracked,
 so the stash entry captures it and it survives the switch, recoverable
-from the entry the response names (the force resolution still discards
-it — untracked files in the way are overwritten by the forced checkout
-itself). When the ignore rule is itself an uncommitted `.gitignore`
+from the entry the response names — though on this shape the entry
+cannot be applied onto the switched-to tree: `git stash apply` cannot
+recreate the captured path under what is now a regular file, so extract
+the path from the entry instead (`git show <sha>^3:d/blocker.txt`). The
+kept-entry notice's apply guidance stays correct for the file-collision
+shape. The force resolution still discards such residue — untracked
+files in the way are overwritten by the forced checkout itself. When
+the ignore rule is itself an uncommitted `.gitignore`
 edit, the stash takes the rule away with it: the residue is plain
 untracked at checkout time, the switch is refused with the
 directory-collision message, and the entry is restored — nothing is
