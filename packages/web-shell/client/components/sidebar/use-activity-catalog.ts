@@ -114,13 +114,20 @@ export function useActivityCatalog({
     () => [...initialQueries, ...extraQueries],
     [initialQueries, extraQueries],
   );
+  const pollQueries = useCallback(
+    (_query: SessionCatalogQuery, index: number) =>
+      index < initialQueries.length,
+    [initialQueries.length],
+  );
   const snapshots = useSessionCatalogQueries(
     client,
     enabled ? queries : EMPTY_QUERIES,
     {
       enabled,
       autoLoad: enabled,
-      ...(!liveStateEnabled && enabled ? { pollIntervalMs: 30_000 } : {}),
+      ...(!liveStateEnabled && enabled
+        ? { pollIntervalMs: 30_000, pollQueries }
+        : {}),
     },
   );
   useEffect(() => {
@@ -260,9 +267,17 @@ export function useActivityCatalog({
   );
   const retry = useCallback(() => {
     setPages({ client, scope, queries: [] });
-    for (const query of initialQueries)
-      void store.refresh(query, { interactive: true }).catch(() => undefined);
-  }, [client, initialQueries, scope, store]);
+    queries.forEach((query, index) => {
+      const snapshot = snapshots[index];
+      if (
+        index < initialQueries.length ||
+        snapshot?.error ||
+        snapshot?.page?.truncated ||
+        snapshot?.page?.liveMergeFailed
+      )
+        void store.refresh(query, { interactive: true }).catch(() => undefined);
+    });
+  }, [client, initialQueries.length, queries, scope, snapshots, store]);
   const loading =
     enabled && snapshots.some((snapshot) => !snapshot.page && !snapshot.error);
   const unavailable = snapshots.some(

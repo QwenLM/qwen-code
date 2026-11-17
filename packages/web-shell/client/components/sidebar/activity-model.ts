@@ -69,13 +69,16 @@ export function activityNeedsAttention(entry: ActivityEntry): boolean {
 export function isActivityEligible(
   entry: ActivityEntry,
   preferences: ActivityPreferences,
+  includeChildren = false,
 ): boolean {
   const { session } = entry;
   return (
     !session.isArchived &&
     session.sourceType !== 'qwen-live' &&
     !session.sourceId?.startsWith('realtime_voice:') &&
-    (!session.parentSessionId || session.isPinned === true) &&
+    (includeChildren ||
+      !session.parentSessionId ||
+      session.isPinned === true) &&
     (preferences.scheduled ||
       (session.sourceType !== 'scheduled_task' &&
         !getScheduledTaskSessionGroup(session)))
