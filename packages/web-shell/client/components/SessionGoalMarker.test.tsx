@@ -62,7 +62,9 @@ describe('SessionGoalMarker', () => {
   it('renders the goal glyph with the running tone for an active goal', () => {
     render();
     expect(marker()).not.toBeNull();
-    expect(marker()?.getAttribute('data-status')).toBe('running');
+    expect(marker()?.querySelector('svg')?.getAttribute('data-status')).toBe(
+      'running',
+    );
     expect(marker()?.querySelector('svg')).not.toBeNull();
   });
 
@@ -72,7 +74,9 @@ describe('SessionGoalMarker', () => {
     ['usage_limited', 'attention'],
   ] as const)('maps %s onto the %s tone', (status, tone) => {
     render({ goal: goal({ status }) });
-    expect(marker()?.getAttribute('data-status')).toBe(tone);
+    expect(marker()?.querySelector('svg')?.getAttribute('data-status')).toBe(
+      tone,
+    );
   });
 
   it('renders nothing for a completed goal (Goals listings filter it)', () => {

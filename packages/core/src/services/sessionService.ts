@@ -2078,22 +2078,19 @@ export class SessionService {
     }
   }
 
-  // The kept transcript's Goal wins: a blind rename of the dropped lineage's
-  // projection over the survivor would show the deleted transcript's status.
-  // Mirrors reconcileTitleSidecarOnConflict; presence (not validity) decides,
-  // so a corrupt kept sidecar still wins and repairs from its own transcript.
+  // The kept transcript's Goal is authoritative. Unlike a title label, an
+  // absent goal sidecar is a VALUE: the surviving session's goal may have
+  // been cleared, so adopting the dropped lineage's projection would
+  // resurrect a goal the kept transcript no longer records (and an archived
+  // survivor is never reloaded to repair it). Always discard the dropped
+  // projection; the survivor's marker is rebuilt from its own transcript on
+  // the next transition or restore — a missing marker beats a wrong one.
   private async reconcileGoalSidecarOnConflict(
     sessionId: string,
-    keptState: SessionArchiveState,
     droppedState: SessionArchiveState,
   ): Promise<void> {
-    const kept = this.getGoalSessionPathForState(sessionId, keptState);
     const dropped = this.getGoalSessionPathForState(sessionId, droppedState);
-    if (fs.existsSync(kept)) {
-      await deleteSessionGoalSidecar(dropped);
-    } else {
-      await moveSessionGoalSidecar(dropped, kept);
-    }
+    await deleteSessionGoalSidecar(dropped);
   }
 
   private async moveArchiveSidecars(
@@ -4317,11 +4314,7 @@ export class SessionService {
           }
           try {
             options.assertCleanupOwned?.();
-            await this.reconcileGoalSidecarOnConflict(
-              sessionId,
-              'archived',
-              'active',
-            );
+            await this.reconcileGoalSidecarOnConflict(sessionId, 'active');
           } catch (sidecarError) {
             options.assertCleanupOwned?.();
             this.warn(
@@ -4492,11 +4485,7 @@ export class SessionService {
           }
           try {
             options.assertCleanupOwned?.();
-            await this.reconcileGoalSidecarOnConflict(
-              sessionId,
-              'active',
-              'archived',
-            );
+            await this.reconcileGoalSidecarOnConflict(sessionId, 'archived');
           } catch (sidecarError) {
             options.assertCleanupOwned?.();
             this.warn(

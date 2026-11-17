@@ -89,11 +89,17 @@ test('sidebar shows lifecycle-tinted goal markers from the catalog @smoke', asyn
   const activeMarker = row(page, 'E2E Harness Session').getByTestId(
     'session-goal-marker',
   );
-  await expect(activeMarker).toHaveAttribute('data-status', 'running');
+  await expect(activeMarker.locator('svg')).toHaveAttribute(
+    'data-status',
+    'running',
+  );
   const pausedMarker = row(page, 'Paused Goal Session').getByTestId(
     'session-goal-marker',
   );
-  await expect(pausedMarker).toHaveAttribute('data-status', 'attention');
+  await expect(pausedMarker.locator('svg')).toHaveAttribute(
+    'data-status',
+    'attention',
+  );
 
   // The tones are actually painted and distinct from each other and from
   // the untinted session title.
@@ -178,9 +184,11 @@ test('a goal-changed catalog bump repaints the marker without a reload @smoke', 
   const activeMarker = row(page, 'E2E Harness Session').getByTestId(
     'session-goal-marker',
   );
-  await expect(activeMarker).toHaveAttribute('data-status', 'running', {
-    timeout: 30000,
-  });
+  await expect(activeMarker.locator('svg')).toHaveAttribute(
+    'data-status',
+    'running',
+    { timeout: 30000 },
+  );
 
   // The child's journal hook persisted a paused projection and bumped the
   // catalog clock (the effect of the goal-changed notification). Mutate the
@@ -198,9 +206,11 @@ test('a goal-changed catalog bump repaints the marker without a reload @smoke', 
     revision: scenario.sessionCatalogVersion.revision + 1,
   };
 
-  await expect(activeMarker).toHaveAttribute('data-status', 'attention', {
-    timeout: 30000,
-  });
+  await expect(activeMarker.locator('svg')).toHaveAttribute(
+    'data-status',
+    'attention',
+    { timeout: 30000 },
+  );
   await expect(activeMarker).toHaveAttribute(
     'aria-label',
     'Goal: Paused — keep the loop running',

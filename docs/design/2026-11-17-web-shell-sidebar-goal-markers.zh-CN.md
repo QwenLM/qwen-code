@@ -38,7 +38,7 @@ Goals 页（#17230、#17291、#17349）展示每个已加载会话的目标，�
 ### Core：目标 sidecar 投影
 
 - 新增 `session-goal-sidecar.ts`，与 `session-pr-service.ts` 并列：小 JSON 投影 `{ v: 1, goalId, status, objective, updatedAt }`，原子写、容忍 ENOENT 的读（「无目标」）、归档搬移助手——镜像 PR sidecar 服务的形态。
-- `SessionService` 新增 `getGoalSessionPathForState` / `getGoalSessionPathForArchiveState`，返回 `<chatsDir>/<sessionId>.goal.json`；目标 sidecar 在与 PR sidecar 相同的四个生命周期站点搬移/删除：`removeGoalSidecars`（删除会话，两个归档态）、`moveArchiveSidecars` 中的目标搬移（通用归档/恢复搬移）、以及 `archiveSessions` / `unarchiveSessions` 的归档冲突与恢复冲突分支。两个冲突分支做调和而非盲搬：`reconcileGoalSidecarOnConflict` 保留存活转录的投影（存活方有 sidecar 时删除被丢弃谱系的 sidecar，仅当存活方没有时才搬入），镜像 `reconcileTitleSidecarOnConflict`，使被删除谱系无法覆盖存活方的标记。
+- `SessionService` 新增 `getGoalSessionPathForState` / `getGoalSessionPathForArchiveState`，返回 `<chatsDir>/<sessionId>.goal.json`；目标 sidecar 在与 PR sidecar 相同的四个生命周期站点搬移/删除：`removeGoalSidecars`（删除会话，两个归档态）、`moveArchiveSidecars` 中的目标搬移（通用归档/恢复搬移）、以及 `archiveSessions` / `unarchiveSessions` 的归档冲突与恢复冲突分支。两个冲突分支一律丢弃被丢弃谱系的投影（`reconcileGoalSidecarOnConflict` 删除它）：sidecar 缺席本身就是一种值（存活方目标可能已被清除），采用丢弃谱系的投影会把存活转录已不再记录的目标复活。存活方的标记由其自身转录在下一次状态转换或恢复时重建——缺标记胜过错标记。
 - `ChatRecordingService.recordGoalState` 在严格日志追加成功后写投影：载荷快照有目标 → upsert sidecar；`snapshot.goal === null`（清除）→ 删除。写入尽力而为：sidecar 失败只记日志，绝不让日志失败——转录仍是权威记录，标记滞后或缺失与 PR 徽章已接受的降级模式相同。
 - 恢复本身不写任何东西（运行时的不变量）；改由 `Config.initializeGoalRuntime` 在 `goalRuntimeReady` 落定后经 recorder 的公开方法 `refreshGoalProjection` 刷新一次投影。本特性之前记入日志的会话在下次加载时即获得标记，无需等待下一次状态转换。
 - `SessionService` 新增 `emitSessionGoalChanged` / `setSessionGoalChangedCallback`，镜像 PR 绑定回调对；`Config.relocateWorkingDirectory` 与携带 PR 绑定回调一样把该回调带到替换后的服务实例。

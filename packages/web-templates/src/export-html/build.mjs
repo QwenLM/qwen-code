@@ -111,11 +111,14 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_139_000;
 // measures 2,137,893 (107 below the previous 2,138,000 ceiling) and head
 // d5f6a103a6 measures 2,138,797 in CI, 797 above it. The warning sits 203 above
 // that measurement and the ceiling 1,203 above it.
-// The sidebar goal markers (#17515: SessionGoalMarker, its three-locale labels,
-// and the catalog goal projection) measure 2,138,044 bytes on head 2ef7af8e69,
-// 44 above the previous 2,138,000 ceiling. This is the deliberately added
-// feature payload, not incidental drift, so the budget is raised deliberately:
-// the warning sits 956 above that measurement and the ceiling 1,956 above it.
+// The document runtime measured 2,138,044 bytes on head 2ef7af8e69, 44 above
+// the previous 2,138,000 ceiling. SessionGoalMarker is NOT reachable from the
+// document entry (it is imported only by WebShellSidebar) and the RU catalog
+// is stubbed in transcript mode, so the sidebar goal marker feature (#17515)
+// contributes only its EN/ZH `sidebar.sessionGoal` label strings (~151 bytes)
+// to this bundle; the budget is raised deliberately to make room for that
+// payload and future growth: the warning sits 956 above that measurement and
+// the ceiling 1,956 above it.
 const MAX_DOCUMENT_RUNTIME_BYTES = 2_140_000;
 
 // Modules that must not be reachable from the document entry, checked against

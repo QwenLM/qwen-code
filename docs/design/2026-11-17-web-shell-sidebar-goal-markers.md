@@ -99,12 +99,13 @@ moves; each is resolvable in the file named.
   (session removal, both archive states), the goal move in
   `moveArchiveSidecars` (the generic archive/unarchive move), and the
   archive-conflict and unarchive-conflict branches of `archiveSessions` /
-  `unarchiveSessions`. The two conflict branches reconcile rather than
-  blind-move: `reconcileGoalSidecarOnConflict` keeps the surviving
-  transcript's projection (delete the dropped lineage's sidecar when the
-  survivor has one, move it into place only when the survivor has none),
-  mirroring `reconcileTitleSidecarOnConflict` so a deleted lineage cannot
-  overwrite the survivor's marker.
+  `unarchiveSessions`. The two conflict branches always discard the dropped
+  lineage's projection (`reconcileGoalSidecarOnConflict` deletes it): an
+  absent goal sidecar is a value (the survivor's goal may be cleared), so
+  adopting the dropped projection would resurrect a goal the surviving
+  transcript no longer records. The survivor's marker is rebuilt from its own
+  transcript on the next transition or restore — a missing marker beats a
+  wrong one.
 - `ChatRecordingService.recordGoalState` writes the projection after the
   strict journal append succeeds: payload snapshot has a goal → upsert the
   sidecar; `snapshot.goal === null` (clear) → delete it. The write is

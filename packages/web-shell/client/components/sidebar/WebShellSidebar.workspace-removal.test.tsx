@@ -8259,7 +8259,9 @@ describe('WebShellSidebar goal markers', () => {
       '[data-testid="session-goal-marker"]',
     );
     expect(marker).not.toBeNull();
-    expect(marker!.getAttribute('data-status')).toBe('running');
+    expect(marker!.querySelector('svg')!.getAttribute('data-status')).toBe(
+      'running',
+    );
     expect(marker!.tagName).toBe('BUTTON');
     expect(marker!.getAttribute('aria-label')).toBe(
       'Goal: In progress — ship it',
@@ -8319,7 +8321,9 @@ describe('WebShellSidebar goal markers', () => {
     const marker = rowFor('Goal session')!.querySelector(
       '[data-testid="session-goal-marker"]',
     );
-    expect(marker?.getAttribute('data-status')).toBe('attention');
+    expect(marker?.querySelector('svg')?.getAttribute('data-status')).toBe(
+      'attention',
+    );
   });
 
   it('renders no marker for a completed goal or a goal-less session', async () => {
@@ -8348,6 +8352,15 @@ describe('WebShellSidebar goal markers', () => {
         '[data-testid="session-goal-marker"]',
       ),
     ).toBeNull();
+    // The component already filters `complete`, so the arm that ALSO drives
+    // width reservation gets pinned only here: a completed goal must not
+    // reserve the hover-actions slot either (dropping the arm would shift
+    // every completed row's meta icons left with no red anywhere).
+    for (const name of ['Goal session', 'Plain session']) {
+      expect(
+        rowFor(name)!.querySelector('[class*="sessionMetaSlotReserved"]'),
+      ).toBeNull();
+    }
   });
 
   it('renders the archived-row marker as a pure indicator', async () => {
@@ -8367,6 +8380,8 @@ describe('WebShellSidebar goal markers', () => {
     );
     expect(marker).not.toBeNull();
     expect(marker!.tagName).toBe('SPAN');
-    expect(marker!.getAttribute('data-status')).toBe('attention');
+    expect(marker!.querySelector('svg')!.getAttribute('data-status')).toBe(
+      'attention',
+    );
   });
 });

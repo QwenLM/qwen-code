@@ -2094,7 +2094,11 @@ describe('SessionService', () => {
       );
       expect(moveSessionGoalSidecar).not.toHaveBeenCalled();
 
-      // Kept projection absent: the dropped projection moves into its place.
+      // Kept projection absent: the dropped projection is discarded too, NOT
+      // adopted. Absence is a value here (the survivor's goal may be cleared),
+      // so adopting the dropped lineage would resurrect a goal the kept
+      // transcript no longer records — and an archived survivor never
+      // re-projects to repair it.
       vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
       vi.mocked(moveSessionGoalSidecar).mockClear();
       vi.mocked(deleteSessionGoalSidecar).mockClear();
@@ -2103,11 +2107,10 @@ describe('SessionService', () => {
       const absentResult = await mirror(kind).run({ resolveConflicts: true });
 
       expect(absentResult.resolvedConflicts).toEqual([sessionIdA]);
-      expect(moveSessionGoalSidecar).toHaveBeenCalledWith(
+      expect(deleteSessionGoalSidecar).toHaveBeenCalledWith(
         expect.stringContaining(droppedGoal),
-        expect.stringContaining(keptGoal),
       );
-      expect(deleteSessionGoalSidecar).not.toHaveBeenCalled();
+      expect(moveSessionGoalSidecar).not.toHaveBeenCalled();
     },
     movesKnownLocation: async (kind: MoveKind) => {
       const m = seeded(kind);

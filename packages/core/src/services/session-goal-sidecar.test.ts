@@ -17,9 +17,27 @@ const writeControl = vi.hoisted(() => ({
 }));
 // ESM namespace exports are not spy-able, so mock node:fs/promises with a
 // passthrough unlink spy; every other fs method stays real (temp dirs, io).
+// unlinkControl injects a genuinely slow unlink (or a one-off ENOENT race),
+// so the re-create case can pin the direction that actually loses a clear.
+const unlinkControl = vi.hoisted(() => ({
+  delays: [] as number[],
+  failWith: null as NodeJS.ErrnoException | null,
+}));
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
-  return { ...actual, unlink: vi.fn(actual.unlink) };
+  return {
+    ...actual,
+    unlink: vi.fn(async (...args: Parameters<typeof actual.unlink>) => {
+      if (unlinkControl.failWith) {
+        const error = unlinkControl.failWith;
+        unlinkControl.failWith = null;
+        throw error;
+      }
+      const delay = unlinkControl.delays.shift() ?? 0;
+      if (delay > 0) await new Promise((r) => setTimeout(r, delay));
+      return actual.unlink(...args);
+    }),
+  };
 });
 vi.mock('../utils/atomicFileWrite.js', async (importOriginal) => {
   const actual =
@@ -58,6 +76,8 @@ beforeEach(async () => {
   dir = await fs.mkdtemp(path.join(os.tmpdir(), 'goal-sidecar-'));
   writeControl.delays = [];
   writeControl.failFirst = false;
+  unlinkControl.delays = [];
+  unlinkControl.failWith = null;
 });
 
 afterEach(async () => {
@@ -177,6 +197,17 @@ describe('session-goal-sidecar', () => {
     expect(unlink).not.toHaveBeenCalled();
   });
 
+  it('tolerates ENOENT when an existing file vanishes before unlink', async () => {
+    // existsSync saw the projection, then a racing archive rename removed
+    // it; the unlink's ENOENT must read as already-cleared, not a failure.
+    const file = path.join(dir, 's1.goal.json');
+    await writeSessionGoalSidecar(file, projection);
+    unlinkControl.failWith = Object.assign(new Error('gone'), {
+      code: 'ENOENT',
+    });
+    await expect(deleteSessionGoalSidecar(file)).resolves.toBeUndefined();
+  });
+
   it('move carries the projection and tolerates an absent source', async () => {
     const from = path.join(dir, 'active', 's1.goal.json');
     const to = path.join(dir, 'archived', 's1.goal.json');
@@ -232,9 +263,12 @@ describe('session-goal-sidecar', () => {
   });
 
   it('a queued write lands after a pending delete (re-create wins)', async () => {
+    // The delay belongs on the UNLINK: a genuinely slow delete racing a
+    // re-create is the case that loses the marker. Unqueued, the delete
+    // would finish AFTER the new projection was written and unlink it.
     const file = path.join(dir, 's1.goal.json');
     await writeSessionGoalSidecar(file, projection);
-    writeControl.delays = [40];
+    unlinkControl.delays = [40];
     const clear = deleteSessionGoalSidecar(file);
     const write = writeSessionGoalSidecar(file, {
       ...projection,
