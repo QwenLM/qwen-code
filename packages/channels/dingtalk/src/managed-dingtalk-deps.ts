@@ -304,8 +304,10 @@ async function sendWebhook(
     let delivered = 0;
     for (const chunk of splitChunks(text)) {
       if (segmentExpired) {
-        // The tail is unsent and the provider's state for it is unknown, so
-        // the segment settles unknown (re-drivable), never rejected.
+        // The tail is unsent, so the outcome is unknown rather than a
+        // definitive refusal. Unknown is terminal for the send — only the
+        // receipt replays, never the message — which is why the ceiling sits
+        // at the lease instead of below it.
         throw webhookFailure(
           'DingTalk webhook send exceeded the segment budget; the send outcome is unknown.',
           false,
