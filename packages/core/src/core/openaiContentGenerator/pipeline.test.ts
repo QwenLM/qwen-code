@@ -994,6 +994,66 @@ describe('ContentGenerationPipeline', () => {
       });
     });
 
+    it('clamps a provider output-budget key to the non-thinking cap when thinking is off', async () => {
+      // The budget can travel under max_completion_tokens (samplingParams
+      // escape hatch) instead of max_tokens; the non-thinking clamp must
+      // bound that key too, not just max_tokens.
+      const apiCall = await executeWith(
+        {
+          baseUrl: DASHSCOPE_URL,
+          model: 'qwen4-max',
+          authType: AuthType.QWEN_OAUTH,
+          samplingParams: { max_completion_tokens: 262144 },
+          reasoning: false,
+        },
+        userRequest('qwen4-max'),
+        'prompt-id',
+        DashScopeOpenAICompatibleProvider,
+      );
+      expectFields(apiCall, {
+        reasoning_effort: 'none',
+        max_completion_tokens: 131072,
+      });
+    });
+
+    it('keeps an explicit provider output-budget key below the non-thinking cap', async () => {
+      const apiCall = await executeWith(
+        {
+          baseUrl: DASHSCOPE_URL,
+          model: 'qwen4-max',
+          authType: AuthType.QWEN_OAUTH,
+          samplingParams: { max_completion_tokens: 50000 },
+          reasoning: false,
+        },
+        userRequest('qwen4-max'),
+        'prompt-id',
+        DashScopeOpenAICompatibleProvider,
+      );
+      expectFields(apiCall, {
+        reasoning_effort: 'none',
+        max_completion_tokens: 50000,
+      });
+    });
+
+    it('does not apply the qwen4-max non-thinking cap to other qwen4 routes', async () => {
+      const apiCall = await executeWith(
+        {
+          baseUrl: DASHSCOPE_URL,
+          model: 'qwen4-plus',
+          authType: AuthType.QWEN_OAUTH,
+          samplingParams: { max_completion_tokens: 200000 },
+          reasoning: false,
+        },
+        userRequest('qwen4-plus'),
+        'prompt-id',
+        DashScopeOpenAICompatibleProvider,
+      );
+      expectFields(apiCall, {
+        reasoning_effort: 'none',
+        max_completion_tokens: 200000,
+      });
+    });
+
     it('never ships the max tier to a generic OpenAI-compatible endpoint end to end', async () => {
       // The same persisted-tier failure through the real default provider.
       const apiCall = await executeWith(

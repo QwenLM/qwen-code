@@ -81,8 +81,10 @@ and Qwen Subscription (OAuth).
 
 ## Scope boundaries
 
-- In scope: the five goals above across the four channels; bilingual design;
-  unit tests; user-doc effort table; E2E test plan.
+- In scope: goals 1–3 (effort ladder, output budget, media input) across the
+  four channels; goals 4–5 (cache TTL, image detail) on the DashScope-backed
+  channels only; bilingual design; unit tests; user-doc effort table; E2E test
+  plan.
 - Deferred: CoT summary (`thinking_display` + `encrypted_content` replay) and
   ptc. Both are recorded as follow-ups.
 - Product/server dependency: the Qwen Subscription gateway must serve
@@ -218,8 +220,11 @@ ttl:'1h' }`; otherwise omit `ttl` (the 5m default). Generalize the setting's
   budget contract; client support is necessary but not sufficient there. The
   non-thinking 131,072 clamp on subscription is inferred from the §3.1 contract,
   not measured against `api.qwen.ai` (no key available).
-- A models.dev catalog entry for `qwen4` overrides the regex window/output rows
-  (catalog wins); the curated output row still caps explicit requests.
+- A models.dev catalog entry for `qwen4` overrides the regex **input-window**
+  row (catalog wins for input). For **output**, the curated row wins
+  (`curatedOutputLimit(norm) ?? fromCatalog`), so once the `/^qwen4-max/` output
+  row exists a catalog entry cannot override it; the catalog only supplies an
+  output limit for ids with no curated row.
 - The output-ceiling exemption does **not** interact with truncation escalation
   in practice: qwen4-max's initial budget (262,144, window-clamped) is always at
   least the escalated cap (at most 64K), so `shouldEscalateMaxOutputTokens` never

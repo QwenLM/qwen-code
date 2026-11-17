@@ -1729,6 +1729,10 @@ export class ContentGenerationPipeline {
       ) {
         providerRequest.max_tokens = QWEN4_NON_THINKING_OUTPUT_CAP;
       }
+      // The budget may travel under a provider key instead of max_tokens
+      // (e.g. a samplingParams.max_completion_tokens escape hatch); clamp
+      // those to the same non-thinking cap so that path is not exempt.
+      clampProviderOutputBudgetKeys(typed, QWEN4_NON_THINKING_OUTPUT_CAP);
     }
 
     const requestLimit = request.config?.maxOutputTokens;

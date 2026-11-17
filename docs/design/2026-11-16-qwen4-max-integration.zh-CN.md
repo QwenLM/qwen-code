@@ -75,8 +75,9 @@ max:32768`）加 `enable_thinking`。
 
 ## 范围边界
 
-- 范围内：上述五个目标在四个通道的实现；双语设计；单测；用户文档 effort 表；
-  E2E 测试计划。
+- 范围内：目标 1–3（effort 阶梯、输出预算、媒体输入）在四个通道的实现；
+  目标 4–5（缓存 TTL、图像 detail）仅限 DashScope 系通道；双语设计；单测；
+  用户文档 effort 表；E2E 测试计划。
 - 延后：CoT 摘要（`thinking_display` + `encrypted_content` 回传）与 ptc。
   两者均记录为后续工作。
 - 产品/服务端依赖：Qwen 订阅网关须服务 `qwen4-max` 并接受 qwen4 effort/budget
@@ -191,8 +192,10 @@ ttl:'1h' }`；否则省略 `ttl`（5m 默认）。泛化该设置的文档，使
 - 订阅网关可能尚未服务 `qwen4-max`，或拒绝 qwen4 预算契约；客户端支持在该处
   必要但不充分。订阅非思考 131,072 夹制是依 §3.1 契约推断，未对 `api.qwen.ai`
   实测（无可用 key）。
-- models.dev 的 `qwen4` catalog 条目会覆盖正则窗口/输出行（catalog 优先）；
-  curated 输出行仍约束显式请求。
+- models.dev 的 `qwen4` catalog 条目会覆盖正则**输入窗口**行（输入 catalog
+  优先）。**输出**则是 curated 行优先（`curatedOutputLimit(norm) ?? fromCatalog`），
+  故 `/^qwen4-max/` 输出行存在后 catalog 无法覆盖它；catalog 仅为没有 curated
+  行的 id 提供输出上限。
 - 输出上限豁免实际上**不**与截断升级交互：qwen4-max 的初始预算（262,144，经
   窗口夹制）恒不小于升级后的上限（至多 64K），故 `shouldEscalateMaxOutputTokens`
   对它永不触发，升级路径不被演练。
