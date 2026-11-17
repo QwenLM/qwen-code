@@ -717,6 +717,45 @@ describe('configCommand', () => {
       });
     });
 
+    it('masks channel webhook URLs and AES keys but keeps their type', async () => {
+      const { ctx } = createMockContext({
+        channels: {
+          'team-notices': {
+            type: 'dingtalk-webhook',
+            webhookUrl:
+              'https://oapi.dingtalk.com/robot/send?access_token=live-secret',
+          },
+          wecom: { type: 'wecom', encodingAESKey: 'AAAAbbbbCCCC' },
+        },
+      });
+
+      expect(await configCommand.action!(ctx, 'channels')).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content:
+          'channels = {"team-notices":{"type":"dingtalk-webhook","webhookUrl":"http****"},"wecom":{"type":"wecom","encodingAESKey":"AAAA****"}}',
+      });
+    });
+
+    it('keeps an MCP server named headers readable but masks its headers field', async () => {
+      const { ctx } = createMockContext({
+        mcpServers: {
+          headers: { command: 'npx', url: 'http://localhost:3000' },
+          gh: {
+            command: 'npx',
+            headers: { Authorization: 'Bearer sk-live-123' },
+          },
+        },
+      });
+
+      expect(await configCommand.action!(ctx, 'mcpServers')).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content:
+          'mcpServers = {"headers":{"command":"npx","url":"http://localhost:3000"},"gh":{"command":"npx","headers":{"Authorization":"Bear****"}}}',
+      });
+    });
+
     it('shows an *Env variable name read directly', async () => {
       const { ctx } = createMockContext({
         omni: { delivery: { upload: { apiKeyEnv: 'DASHSCOPE_API_KEY' } } },

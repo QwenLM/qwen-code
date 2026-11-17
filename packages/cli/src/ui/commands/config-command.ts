@@ -33,9 +33,10 @@ const SENSITIVE_KEY_PATTERNS = [
   /password/i,
   /credential/i,
   /private[_-]?key/i,
+  /aes.?key/i,
 ];
 
-const SENSITIVE_URL_PATTERNS = [/baseurl/i, /base_url/i, /proxy/i];
+const SENSITIVE_URL_PATTERNS = [/baseurl/i, /base_url/i, /proxy/i, /webhook/i];
 
 const CREDENTIAL_MAP_KEYS = new Set(['env', 'headers', 'customHeaders']);
 
@@ -209,10 +210,10 @@ function maskTree(
   maskAll = false,
 ): unknown {
   // Entries of env/header maps are named by the user, so mask every value;
-  // a user-chosen entry name must not make its own value sensitive.
+  // a user-chosen entry name (even one called "headers") is never sensitive.
   const sensitive =
-    CREDENTIAL_MAP_KEYS.has(key) ||
-    (!FREE_FORM_MAP_KEYS.has(parentKey) && isSensitiveKey(key));
+    !FREE_FORM_MAP_KEYS.has(parentKey) &&
+    (CREDENTIAL_MAP_KEYS.has(key) || isSensitiveKey(key));
   if (value === null || typeof value !== 'object') {
     // Only strings hold secrets; null/number/boolean keep their type.
     return (maskAll || sensitive) && typeof value === 'string'
