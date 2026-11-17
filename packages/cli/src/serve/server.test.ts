@@ -49485,9 +49485,16 @@ describe('HTTPS SSE eviction force-close (TLS regression)', () => {
     return (handle.server.address() as { port: number }).port;
   }
 
-  function openPausedHttpsStream(port: number, path_: string) {
+  function openPausedHttpsStream(
+    port: number,
+    path_: string,
+    deadlineMs = 2500,
+  ) {
     // Resolves with the first close/abort/error signal the client sees;
-    // 'timeout' means the server never closed the connection.
+    // 'timeout' means the server never closed the connection. The client
+    // stays paused for the whole call (it never resumes), so it holds a
+    // zero receive window; callers that must outlast the 5s force-close
+    // fallback pass a larger deadlineMs.
     return new Promise<string>((resolve) => {
       const req = https.request(
         {
@@ -49511,7 +49518,7 @@ describe('HTTPS SSE eviction force-close (TLS regression)', () => {
       );
       req.on('error', (e) => resolve(`req-error:${e.code}`));
       req.end();
-      setTimeout(() => resolve('timeout'), 2500).unref();
+      setTimeout(() => resolve('timeout'), deadlineMs).unref();
     });
   }
 
@@ -49639,15 +49646,22 @@ describe('HTTPS SSE eviction force-close (TLS regression)', () => {
 
   it('RSTs the underlying TCP socket (_parent) on TLS eviction via the fallback', async () => {
     // Pins the TLS _parent RST fallback specifically (verify-pr F1 / M7).
-    // Real kernel backpressure (8MiB replay) + a client that pauses and does
-    // not resume until AFTER the 5s fallback, so eviction takes the graceful
-    // branch and forceCloseSseResponse runs. On TLS the helper's own
-    // resetAndDestroy() throws (ERR_INVALID_HANDLE_TYPE); the RST must land on
-    // the underlying TCP socket (_parent.resetAndDestroy). Deleting the
-    // _parent fallback (M7) leaves only TLSSocket.destroy(), so no plain
-    // net.Socket is reset — this assertion turns red. (The client-side error
-    // code does NOT discriminate: TLSSocket.destroy() also surfaces
-    // ECONNRESET; the property pinned here is the server-side parent RST.)
+    // Real kernel backpressure (8MiB replay) + a client that stays paused
+    // (never resumes), so eviction takes the graceful branch and the 5s
+    // forceCloseSseResponse fallback is the only thing that can close the
+    // zero-window peer. On TLS the helper's own resetAndDestroy() throws
+    // (ERR_INVALID_HANDLE_TYPE); the RST must land on the underlying TCP
+    // socket (_parent.resetAndDestroy). Deleting the _parent fallback (M7)
+    // leaves only TLSSocket.destroy(), so no plain net.Socket is reset —
+    // this assertion turns red. (The client-side error code does NOT
+    // discriminate: TLSSocket.destroy() also surfaces ECONNRESET; the
+    // property pinned here is the server-side parent RST.)
+    //
+    // The peer is kept paused and we POLL the spy for the parent reset
+    // instead of resuming on a fixed timer (review R4-1): a fixed resume
+    // races the 5s fallback — if a loaded runner delays the reaper tick, the
+    // resume drains the replay first and the graceful close cancels the
+    // fallback, failing correct code. Polling observes the actual RST.
     const net = await import('node:net');
     const tls = await import('node:tls');
     const resetSpy = vi.spyOn(net.Socket.prototype, 'resetAndDestroy');
@@ -49661,48 +49675,35 @@ describe('HTTPS SSE eviction force-close (TLS regression)', () => {
         },
       });
       const port = await startTlsServe({ writerIdleTimeoutMs: 200 }, bridge);
-      // Paused client; the 5s fallback (~5.25s) is what closes it. Resume at
-      // 6s only to let the client socket settle; 10s ceiling > 5s fallback.
-      await new Promise<void>((resolve) => {
-        const req = https.request(
-          {
-            hostname: '127.0.0.1',
-            port,
-            path: '/session/sess-A/events',
-            rejectUnauthorized: false,
-            agent: false,
-          },
-          (res) => {
-            if (res.statusCode !== 200) {
-              res.resume();
-              resolve();
-              return;
-            }
-            res.pause();
-            res.on('data', () => {});
-            res.on('error', () => {});
-            res.on('close', () => resolve());
-            setTimeout(() => {
-              res.resume();
-            }, 6000).unref();
-            setTimeout(() => resolve(), 9000).unref();
-          },
-        );
-        req.on('error', () => resolve());
-        req.end();
-      });
+      // Shared paused-client handshake (review R4-2); it stays paused, and
+      // the deadline sits comfortably past the 5s fallback even if the
+      // reaper tick is delayed on a loaded runner. The client is kept paused
+      // for the whole test (backpressure); afterEach handle.close() reaps it.
+      const outcomePromise = openPausedHttpsStream(
+        port,
+        '/session/sess-A/events',
+        13_000,
+      );
+      const parentReset = () =>
+        resetSpy.mock.instances.some((s) => !(s instanceof tls.TLSSocket));
+      const deadline = Date.now() + 12_000;
+      while (!parentReset() && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
       // The fallback must have RST'd the underlying TCP socket: at least one
       // resetAndDestroy call whose receiver is a plain net.Socket (the
-      // _parent), not the TLSSocket whose own call throws.
-      const parentResets = resetSpy.mock.instances.filter(
-        (s) => !(s instanceof tls.TLSSocket),
-      );
-      expect(parentResets.length).toBeGreaterThan(0);
+      // _parent), not the TLSSocket whose own call throws. This server-side
+      // spy is the authoritative signal — a truly paused zero-window client
+      // does not process the RST until it resumes, so its close/error is not
+      // asserted here.
+      expect(parentReset()).toBe(true);
       await expectCountsReleased(beforeActive);
+      // Let the paused client settle so it does not leak into the next test.
+      await outcomePromise;
     } finally {
       resetSpy.mockRestore();
     }
-  }, 20_000);
+  }, 25_000);
 });
 
 describe('SSE reaper arming and eviction frame delivery (review R1-6/R1-7)', () => {
