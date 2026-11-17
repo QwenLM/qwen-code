@@ -36,6 +36,22 @@ describe('isTransientNetworkError', () => {
       'returns true for error with ECONNRESET in a longer message',
       'read ECONNRESET at TCPReadWrap.afterCall',
     ],
+    [
+      'retries connection refusal at port 14013',
+      'connect ECONNREFUSED 127.0.0.1:14013',
+    ],
+    [
+      'retries connection refusal at port 14030',
+      'connect ECONNREFUSED 127.0.0.1:14030',
+    ],
+    [
+      'retries connection refusal at port 401',
+      'connect ECONNREFUSED 127.0.0.1:401',
+    ],
+    [
+      'retries a reset with an unrelated request id',
+      'read ECONNRESET request-id=job-403-a',
+    ],
   ])('%s', (_title, message) => {
     expect(isTransientNetworkError(new Error(message))).toBe(true);
   });
@@ -43,6 +59,26 @@ describe('isTransientNetworkError', () => {
   it.each<[string, unknown]>([
     ['returns false for 401 Unauthorized', new Error('401 Unauthorized')],
     ['returns false for 403 Forbidden', new Error('403 Forbidden')],
+    [
+      'keeps an HTTP 401 transport error non-retryable',
+      new Error('Streamable HTTP connection failed (HTTP 401)'),
+    ],
+    [
+      'keeps an HTTP response status non-retryable',
+      new Error('transport error: HTTP/1.1 403'),
+    ],
+    [
+      'keeps a status code prefix non-retryable',
+      new Error('transport error: status code: 401'),
+    ],
+    [
+      'keeps a parenthesized SSE status non-retryable',
+      new Error('SSE error: Non-200 status code (403); transport error'),
+    ],
+    [
+      'keeps a structured HTTP status non-retryable',
+      { code: 401, message: 'Streamable HTTP connection failed' },
+    ],
     ['returns false for JSON-RPC Method not found (-32601)', { code: -32601 }],
     ['returns false for JSON-RPC Invalid Request (-32600)', { code: -32600 }],
     ['returns false for JSON-RPC Invalid Params (-32602)', { code: -32602 }],
@@ -107,6 +143,23 @@ describe('retryWithBackoff', () => {
     );
     expect(fn).toHaveBeenCalledTimes(1);
   });
+
+  it.each([14013, 14030, 401])(
+    'recovers from a transient refusal on port %s',
+    async (port) => {
+      const fn = vi
+        .fn<() => Promise<string>>()
+        .mockRejectedValueOnce(
+          new Error(`connect ECONNREFUSED 127.0.0.1:${port}`),
+        )
+        .mockResolvedValue('recovered');
+
+      await expect(
+        retryWithBackoff(fn, 'port-retry', { baseDelayMs: 0 }),
+      ).resolves.toBe('recovered');
+      expect(fn).toHaveBeenCalledTimes(2);
+    },
+  );
 
   it('does not retry on method-not-found (-32601)', async () => {
     const fn = vi.fn().mockRejectedValue({ code: -32601 });

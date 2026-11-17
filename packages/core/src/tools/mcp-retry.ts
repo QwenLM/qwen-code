@@ -41,6 +41,15 @@ const TRANSIENT_HTTP_STATUS_PATTERNS: RegExp[] = [
   /\bHTTP\/\S+\s+(502|503|504)\b/i,
 ];
 
+// Require HTTP status context: ports and request ids can also contain these
+// digits and must not disable recovery from an otherwise transient error.
+const AUTH_HTTP_STATUS_PATTERNS: RegExp[] = [
+  /\b401\s+Unauthorized\b/i,
+  /\b403\s+Forbidden\b/i,
+  /\bstatus\s*(?:code)?\s*[:=]?\s*\(?\s*(401|403)\b/i,
+  /\bHTTP(?:\/\S+)?\s+(401|403)\b/i,
+];
+
 /**
  * Determine whether an error is a transient network error that is
  * worth retrying. Permanent errors (auth failure, invalid config,
@@ -62,11 +71,18 @@ export function isTransientNetworkError(error: unknown): boolean {
   if (error == null) return false;
 
   const code = (error as { code?: unknown } | null)?.code;
-  if (code === -32601 || code === -32600 || code === -32602) return false;
+  if (
+    code === -32601 ||
+    code === -32600 ||
+    code === -32602 ||
+    code === 401 ||
+    code === 403
+  )
+    return false;
 
   const message = getErrorMessage(error);
 
-  if (message.includes('401') || message.includes('403')) return false;
+  if (AUTH_HTTP_STATUS_PATTERNS.some((re) => re.test(message))) return false;
 
   for (const transientCode of TRANSIENT_ERROR_CODES) {
     if (message.includes(transientCode)) return true;
