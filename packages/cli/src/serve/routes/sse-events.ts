@@ -921,14 +921,18 @@ export function registerSseEventsRoutes(
         // differentiator. Write DIRECTLY here
         // (bypassing `writeWithBackpressure`) because the chain may
         // already be stuck on a `drain` that will never come — which
-        // is the exact scenario this timer exists to catch. If the
-        // kernel send buffer has room the client sees the frame; if
-        // not, the client gets EPIPE on next read. Either way the
-        // socket is closed in the next two statements, so any drop
-        // is bounded.
-        let evictionFrameSettled = false;
+        // is the exact scenario this timer exists to catch. The frame
+        // is buffered even when the write returns false; the close
+        // below is bounded so a peer that never resumes cannot pin the
+        // slot indefinitely.
+        // `res.write` returning false does NOT mean the frame was lost:
+        // the chunk is buffered and the buffer is at/above the high-water
+        // mark. Only a THROW means the frame could not be queued. Branch
+        // on the throw so a consumer that resumes reading still receives
+        // the terminal frame (review R1-7).
+        let evictionFrameFailed = false;
         try {
-          evictionFrameSettled = res.write(
+          const evictionFrameSettled = res.write(
             formatSseFrame({
               v: 1,
               type: 'client_evicted',
@@ -940,9 +944,13 @@ export function registerSseEventsRoutes(
               },
             }),
           );
+          // Same accounting as the main write loop's immediate-settle
+          // branch: a true return means the frame flushed below the
+          // high-water mark. A false return still QUEUES the frame
+          // (drain pending), so it is not counted as settled here.
           if (evictionFrameSettled) eventFramesWriteSettled += 1;
         } catch {
-          /* socket already destroyed; nothing to send. */
+          evictionFrameFailed = true;
         }
         // Wrap stderr + res.end so an
         // EPIPE on the stderr pipe (or a synchronous throw from
@@ -987,22 +995,23 @@ export function registerSseEventsRoutes(
         // Closing must actually free the listener slot. A graceful
         // res.end() queues a FIN BEHIND the unsent data in a full kernel
         // send buffer — exactly the state this reaper exists for — so
-        // the FIN can never be sent and the connection lingers until the
-        // peer disconnects. When the terminal frame could not even be
-        // queued (write returned false / threw), destroy the socket
+        // the FIN can never be sent and the connection lingers in
+        // FIN-WAIT-1 until the peer disconnects. When the terminal frame
+        // could not be queued at all (write threw), RST the socket
         // immediately: 'close' → finalize → activeSseCount-- frees the
-        // slot, matching the bus-eviction path above. When the frame DID
-        // queue, end gracefully so a reading client still sees it, with
-        // a bounded destroy fallback in case the buffer refills and the
-        // FIN lingers anyway.
+        // slot, matching the bus-eviction path above. When the frame WAS
+        // buffered (write returned true OR false), end gracefully so a
+        // consumer that resumes reading still sees the terminal frame,
+        // with a bounded RST fallback in case the peer never resumes and
+        // the FIN lingers anyway.
         try {
-          if (evictionFrameSettled) {
+          if (!evictionFrameFailed) {
             if (!res.writableEnded) res.end();
             const forceCloseTimer = setTimeout(() => {
               forceCloseSseResponse(res);
             }, 5_000);
             forceCloseTimer.unref();
-            res.once('finish', () => clearTimeout(forceCloseTimer));
+            res.once('close', () => clearTimeout(forceCloseTimer));
           } else {
             forceCloseSseResponse(res);
           }

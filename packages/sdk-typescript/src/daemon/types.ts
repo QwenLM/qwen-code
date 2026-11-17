@@ -2379,8 +2379,8 @@ export const DAEMON_ERROR_KINDS = [
   // A prompt exceeded the daemon-configured wallclock cap (or the
   // request's own `deadlineMs`, capped at the server flag).
   'prompt_deadline_exceeded',
-  // An SSE writer's last successful flush was older than the daemon's
-  // writer-idle deadline.
+  // An SSE writer's write was stuck waiting for `drain` — the consumer
+  // stopped reading — past the daemon's writer-stall budget.
   'writer_idle_timeout',
   // The model response stream ended before a complete turn could be read.
   'model_stream_interrupted',

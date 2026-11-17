@@ -45850,16 +45850,13 @@ describe('T2.9 SSE writer idle timeout (issue #4514)', () => {
     }
   });
 
-  it('destroys the socket and frees the slot when evicting a stalled writer', async () => {
-    // A graceful res.end() — or even a plain socket destroy(), which the
-    // kernel turns into a graceful FIN when the send buffer holds unsent
-    // data — queues a FIN a stalled peer (zero receive window) never
-    // ACKs: the socket sits in FIN-WAIT-1 and Node still counts it
-    // against server.maxConnections. The eviction must RST the socket
-    // via resetAndDestroy(). The kernel-level linger itself is verified
-    // end-to-end (a write-spy leaves the kernel buffer empty, so it
-    // cannot reproduce a full send buffer); here we pin the RST call
-    // and the counter release it triggers.
+  it('RSTs the socket and frees the slot when the eviction frame write throws', async () => {
+    // When the terminal frame cannot be queued at all (write THROWS —
+    // e.g. the socket already errored), the eviction must RST the socket
+    // via resetAndDestroy() so the slot is freed; a graceful end would
+    // queue a FIN a stalled peer never ACKs (FIN-WAIT-1 linger). The
+    // buffered-frame case (write returns false) is covered by the
+    // paused-resume regression below.
     const http = await import('node:http');
     const net = await import('node:net');
     type WriteCallback = (error?: Error | null) => void;
@@ -45884,10 +45881,11 @@ describe('T2.9 SSE writer idle timeout (issue #4514)', () => {
         return false;
       }
       if (forcedStall) {
-        // Simulate a FULL kernel send buffer: every later write —
-        // including the reaper's terminal client_evicted frame — reports
-        // backpressure and is swallowed, so the graceful-end branch
-        // cannot deliver anything and the reaper must destroy.
+        // The terminal frame cannot be queued at all: the write throws
+        // (socket already errored). That is the immediate-RST branch.
+        if (text.includes('event: client_evicted')) {
+          throw Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
+        }
         return false;
       }
       return typeof encodingOrCb === 'function'
@@ -49568,7 +49566,13 @@ describe('HTTPS SSE eviction force-close (TLS regression)', () => {
         forcedStall = true;
         return false;
       }
-      if (forcedStall) return false;
+      if (forcedStall) {
+        // Terminal frame write throws → immediate-RST branch on TLS.
+        if (text.includes('event: client_evicted')) {
+          throw Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
+        }
+        return false;
+      }
       return typeof encodingOrCb === 'function'
         ? originalWrite.call(this, chunk, encodingOrCb)
         : originalWrite.call(this, chunk, encodingOrCb, cb);
@@ -49629,5 +49633,335 @@ describe('HTTPS SSE eviction force-close (TLS regression)', () => {
     } finally {
       bus.close();
     }
+  });
+});
+
+describe('SSE reaper arming and eviction frame delivery (review R1-6/R1-7)', () => {
+  let handle: RunHandle | undefined;
+  afterEach(async () => {
+    if (handle) {
+      await handle.close();
+      handle = undefined;
+    }
+    vi.restoreAllMocks();
+  });
+
+  async function expectCountReleased(beforeActive: number): Promise<void> {
+    const deadline = Date.now() + 2000;
+    while (Date.now() < deadline) {
+      if (getActiveSseCount() === beforeActive) return;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(getActiveSseCount()).toBe(beforeActive);
+  }
+
+  it('delivers the terminal eviction frame to a client that pauses then resumes', async () => {
+    // Real kernel backpressure: an 8MiB event fills the send buffer while
+    // the client pauses. res.write() returning false means the chunk WAS
+    // buffered — the reaper must end gracefully (bounded RST fallback) so
+    // a consumer that resumes reads event: client_evicted before EOF,
+    // not ECONNRESET (review R1-7).
+    const beforeActive = getActiveSseCount();
+    const blob = 'x'.repeat(8 * 1024 * 1024);
+    const bridge = fakeBridge({
+      async *subscribeImpl(_sessionId, _opts) {
+        yield { id: 1, v: 1, type: 'session_update', data: { blob } };
+        await new Promise(() => {});
+      },
+    });
+    handle = await runQwenServe(
+      {
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        writerIdleTimeoutMs: 200,
+      },
+      { bridge },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+    const http = await import('node:http');
+    const outcome = await new Promise<{
+      sawEvicted: boolean;
+      done: boolean;
+      error?: string;
+    }>((resolve) => {
+      const req = http.request(
+        {
+          hostname: '127.0.0.1',
+          port,
+          path: '/session/sess-A/events',
+          agent: false,
+        },
+        (res) => {
+          if (res.statusCode !== 200) {
+            resolve({
+              sawEvicted: false,
+              done: false,
+              error: `status:${res.statusCode}`,
+            });
+            res.resume();
+            return;
+          }
+          let buf = '';
+          let sawEvicted = false;
+          let resumed = false;
+          res.pause();
+          setTimeout(() => {
+            resumed = true;
+            res.resume();
+          }, 600).unref();
+          res.on('data', (c) => {
+            if (!resumed) return;
+            buf += c.toString();
+            if (
+              buf.includes('event: client_evicted') &&
+              buf.includes('writer_idle_timeout')
+            ) {
+              sawEvicted = true;
+            }
+          });
+          res.on('end', () => resolve({ sawEvicted, done: true }));
+          res.on('error', (e) =>
+            resolve({ sawEvicted, done: false, error: e.code }),
+          );
+        },
+      );
+      req.on('error', (e) =>
+        resolve({ sawEvicted: false, done: false, error: e.code }),
+      );
+      req.end();
+      setTimeout(
+        () => resolve({ sawEvicted: false, done: false, error: 'timeout' }),
+        5000,
+      ).unref();
+    });
+    expect(outcome.error).toBeUndefined();
+    expect(outcome.done).toBe(true);
+    expect(outcome.sawEvicted).toBe(true);
+    await expectCountReleased(beforeActive);
+  });
+
+  it('arms the reaper at the default budget when no flag is set', async () => {
+    // Pins default-on ARMING behaviorally: opening a stream with no
+    // explicit budget must register the reaper's polling interval
+    // (60000/4 = 5000ms), and ticking it under a permanent stall must
+    // evict. Reverting the arm gate to explicit-flag-only ships green
+    // without this test (review R1-6 revert 1).
+    const http = await import('node:http');
+    type WriteCallback = (error?: Error | null) => void;
+    const originalWrite = http.ServerResponse.prototype.write as unknown as (
+      this: ServerResponse,
+      chunk: string | Uint8Array,
+      encodingOrCb?: BufferEncoding | WriteCallback,
+      cb?: WriteCallback,
+    ) => boolean;
+    const writeSpy = vi.spyOn(http.ServerResponse.prototype, 'write');
+    let forcedStall = false;
+    writeSpy.mockImplementation(function (
+      this: ServerResponse,
+      chunk: string | Uint8Array,
+      encodingOrCb?: BufferEncoding | WriteCallback,
+      cb?: WriteCallback,
+    ): boolean {
+      const text = typeof chunk === 'string' ? chunk : chunk.toString();
+      if (!forcedStall && text.includes('event: session_update')) {
+        forcedStall = true;
+        return false;
+      }
+      if (forcedStall && !text.includes('event: client_evicted')) {
+        return false;
+      }
+      return typeof encodingOrCb === 'function'
+        ? originalWrite.call(this, chunk, encodingOrCb)
+        : originalWrite.call(this, chunk, encodingOrCb, cb);
+    });
+    const intervalSpy = vi.spyOn(globalThis, 'setInterval');
+    const beforeActive = getActiveSseCount();
+    const bridge = fakeBridge({
+      async *subscribeImpl(_sessionId, _opts) {
+        yield { id: 1, v: 1, type: 'session_update', data: { tick: 1 } };
+        await new Promise(() => {});
+      },
+    });
+    handle = await runQwenServe(
+      { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+      { bridge },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+    const baseline5k = intervalSpy.mock.calls.filter(
+      (c) => c[1] === 5000,
+    ).length;
+    const idxBeforeOpen = intervalSpy.mock.calls.length;
+
+    const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
+    expect(res.status).toBe(200);
+    const reader = res.body!.getReader();
+    const stallDeadline = Date.now() + 2000;
+    while (!forcedStall && Date.now() < stallDeadline) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(forcedStall).toBe(true);
+
+    const new5k = intervalSpy.mock.calls
+      .slice(idxBeforeOpen)
+      .filter((c) => c[1] === 5000);
+    // The default 60s budget polls at 5000ms; arming must add exactly
+    // one such interval for this stream.
+    expect(new5k.length).toBe(1);
+    expect(intervalSpy.mock.calls.filter((c) => c[1] === 5000).length).toBe(
+      baseline5k + 1,
+    );
+
+    // Advance the reaper's clock past the default budget and tick the
+    // newly armed callback manually (no 60s real-time wait).
+    const nowSpy = vi
+      .spyOn(performance, 'now')
+      .mockReturnValue(performance.now() + 70_000);
+    try {
+      (new5k[0][0] as () => void)();
+    } finally {
+      nowSpy.mockRestore();
+    }
+
+    let sawEvicted = false;
+    const readDeadline = Date.now() + 2000;
+    let buf = '';
+    const WAKE = Symbol('wake');
+    while (Date.now() < readDeadline && !sawEvicted) {
+      const chunk = await Promise.race([
+        reader.read(),
+        new Promise<typeof WAKE>((r) => setTimeout(() => r(WAKE), 200)),
+      ]);
+      if (chunk === WAKE) continue;
+      if (chunk.done) break;
+      buf += new TextDecoder().decode(chunk.value);
+      if (buf.includes('event: client_evicted')) sawEvicted = true;
+    }
+    await reader.cancel().catch(() => undefined);
+    expect(sawEvicted).toBe(true);
+    await expectCountReleased(beforeActive);
+  });
+
+  it('evicts a heartbeat-only stall when no events are ever yielded', async () => {
+    // For a phantom client that yields no events, the 15s heartbeat is
+    // the only write that can ever observe the stall. Routing the
+    // heartbeat through a plain write that bypasses backpressure would
+    // ship green without this test (review R1-6 revert 2).
+    const http = await import('node:http');
+    type WriteCallback = (error?: Error | null) => void;
+    const originalWrite = http.ServerResponse.prototype.write as unknown as (
+      this: ServerResponse,
+      chunk: string | Uint8Array,
+      encodingOrCb?: BufferEncoding | WriteCallback,
+      cb?: WriteCallback,
+    ) => boolean;
+    const writeSpy = vi.spyOn(http.ServerResponse.prototype, 'write');
+    let forcedStall = false;
+    writeSpy.mockImplementation(function (
+      this: ServerResponse,
+      chunk: string | Uint8Array,
+      encodingOrCb?: BufferEncoding | WriteCallback,
+      cb?: WriteCallback,
+    ): boolean {
+      const text = typeof chunk === 'string' ? chunk : chunk.toString();
+      if (!forcedStall && text.startsWith(': heartbeat')) {
+        // Heartbeat reports backpressure and is swallowed: the stall
+        // stamp must be set by the heartbeat itself.
+        forcedStall = true;
+        return false;
+      }
+      if (forcedStall && !text.includes('event: client_evicted')) {
+        return false;
+      }
+      return typeof encodingOrCb === 'function'
+        ? originalWrite.call(this, chunk, encodingOrCb)
+        : originalWrite.call(this, chunk, encodingOrCb, cb);
+    });
+    const beforeActive = getActiveSseCount();
+    const bridge = fakeBridge({
+      // eslint-disable-next-line require-yield
+      async *subscribeImpl(_sessionId, _opts) {
+        await new Promise(() => {});
+      },
+    });
+    handle = await runQwenServe(
+      {
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        writerIdleTimeoutMs: 200,
+      },
+      { bridge },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+    const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
+    expect(res.status).toBe(200);
+    const reader = res.body!.getReader();
+    let sawEvicted = false;
+    let streamEnded = false;
+    let buf = '';
+    // First heartbeat at 15s; eviction within the next poll window.
+    const deadline = Date.now() + 18_000;
+    const WAKE = Symbol('wake');
+    while (Date.now() < deadline && !sawEvicted) {
+      const chunk = await Promise.race([
+        reader.read(),
+        new Promise<typeof WAKE>((r) => setTimeout(() => r(WAKE), 500)),
+      ]);
+      if (chunk === WAKE) continue;
+      if (chunk.done) {
+        streamEnded = true;
+        break;
+      }
+      buf += new TextDecoder().decode(chunk.value);
+      if (
+        buf.includes('event: client_evicted') &&
+        buf.includes('writer_idle_timeout')
+      ) {
+        sawEvicted = true;
+      }
+    }
+    await reader.cancel().catch(() => undefined);
+    // The heartbeat stall must trigger the reaper: the stream closes
+    // (frame delivery to a reading client is pinned by the
+    // paused-resume regression) and the SSE slot is released.
+    expect(forcedStall).toBe(true);
+    expect(sawEvicted || streamEnded).toBe(true);
+    await expectCountReleased(beforeActive);
+  }, 25_000);
+
+  it('honors maxSseConnections: 0 as unlimited', async () => {
+    // The documented opt-out must not start enforcing a cap of 1
+    // (review R1-6 revert 3).
+    const beforeActive = getActiveSseCount();
+    const bridge = fakeBridge({
+      // eslint-disable-next-line require-yield
+      async *subscribeImpl(_sessionId, _opts) {
+        await new Promise(() => {});
+      },
+    });
+    handle = await runQwenServe(
+      {
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        maxSseConnections: 0,
+      },
+      { bridge },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+    const status = (await (
+      await fetch(`http://127.0.0.1:${port}/daemon/status?detail=full`)
+    ).json()) as { limits: { maxSseConnections: number | null } };
+    expect(status.limits.maxSseConnections).toBeNull();
+    const first = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
+    expect(first.status).toBe(200);
+    const second = await fetch(
+      `http://127.0.0.1:${port}/session/sess-B/events`,
+    );
+    expect(second.status).toBe(200);
+    expect(getActiveSseCount()).toBe(beforeActive + 2);
+    await first.body!.cancel();
+    await second.body!.cancel();
   });
 });
