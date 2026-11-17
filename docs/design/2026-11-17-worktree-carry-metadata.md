@@ -99,13 +99,20 @@ array.
 
 `worktreeHasWork` gains an optional second argument
 `carriedEntries?: readonly CarriedEntry[]`. Before either probe, the shared
-predicate refuses any hidden index bit (`hasHiddenIndexBit`, `ls-files -v`), so
-the default no-carry path (core retention sweep, legacy sidecars, no-carry
-creations) is protected too — a session edit hidden under assume-unchanged /
-skip-worktree reads as work, not clean. When `carriedEntries` is present, the
-probe switches to file-level raw output (`status --porcelain --untracked-files=all -z`
-plus `ls-files --others -z`) and computes the carried paths' _current_ identities
-once. A carried entry is waived only when `carriedEntryMatches` holds:
+predicate refuses hidden index bits (`hasHiddenIndexBit`, `ls-files -v`), so the
+default no-carry path (core retention sweep, legacy sidecars, no-carry creations)
+is protected too. assume-unchanged (lowercase tag, never set by sparse-checkout)
+always refuses; skip-worktree (`S`) refuses only when `core.sparseCheckout` is
+not enabled — sparse-checkout legitimately stamps `S` on every out-of-cone path,
+so refusing it unconditionally would strand every worktree of a sparse repository
+(the prepared-worktree gate applies the same carve-out). When `carriedEntries` is
+present, the probe is a single collapsed `status --porcelain
+--untracked-files=all --ignored=matching -z` (non-ignored untracked files stay
+file-level so a carried path matches exactly; ignored entries collapse to
+directories, the base predicate's geometry, so a large `node_modules` does not
+enumerate file-level and overflow the capture buffer) and computes the carried
+paths' _current_ identities once. A carried entry is waived only when
+`carriedEntryMatches` holds:
 
 - carried content (`hash !== null`): status is exactly ` M` (unstaged tracked
   edit) or `??` (untracked), the path is a regular file, and its current blob
@@ -118,10 +125,12 @@ carried content, a restored carried deletion, a symlink replacement, or any
 content/mode drift — is new work and preserves the checkout (the reaper snapshots
 it). Rename/copy records refuse outright. Non-carried entries keep the existing
 session-marker / disposable-output / symlink waivers. The exemption is exact-path,
-not prefix. The content comparison hashes raw working-tree bytes (`git hash-object`
-without `--path`, with a `--` separator so a dash-leading path is not parsed as an
-option) at both carry and cleanup, so it is self-consistent and independent of
-`core.autocrlf`/filters.
+not prefix. The content comparison uses `git hash-object` (with a `--` separator
+so a dash-leading path is not parsed as an option) at both carry and cleanup.
+`hash-object` applies the path's clean filter (e.g. `eol`/`text` normalization),
+so the identity is the clean-filtered blob hash, not the raw worktree bytes; the
+comparison is self-consistent because both sides hash the same way, and a content
+edit still changes the hash. A mode-only change is caught by the exec-bit field.
 
 ### D4 — The reaper passes the sidecar's overlay
 

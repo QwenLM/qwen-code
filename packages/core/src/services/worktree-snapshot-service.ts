@@ -358,6 +358,7 @@ export async function restoreWorktreeSnapshot(
 ): Promise<void> {
   await fs.mkdir(targetWorktreePath, { recursive: true });
   const root = path.resolve(targetWorktreePath);
+  const realRoot = await fs.realpath(root);
   const archived = new Map<string, string>();
   await tar.t({
     file: snapshotPath,
@@ -383,11 +384,30 @@ export async function restoreWorktreeSnapshot(
     }
     return target;
   };
+  // The lexical confine() above is not enough: a committed symlink can make a
+  // lexically-inside path resolve outside the root, and fs.rm follows the
+  // parent symlink (deleting an outside file). Resolve the parent's realpath
+  // and require it under the real root before any removal.
+  const assertRealContained = async (target: string, rel: string) => {
+    const realParent = await fs
+      .realpath(path.dirname(target))
+      .catch(() => null);
+    if (realParent === null) return;
+    if (
+      realParent !== realRoot &&
+      !realParent.startsWith(realRoot + path.sep)
+    ) {
+      throw new Error(
+        `Snapshot path resolves outside worktree root via symlink: ${rel}`,
+      );
+    }
+  };
   for (const [rel, type] of archived) {
     if (type === 'Directory') continue;
     const target = confine(rel);
     const stat = await fs.lstat(target).catch(() => null);
     if (stat?.isDirectory()) {
+      await assertRealContained(target, rel);
       await fs.rm(target, { recursive: true, force: true });
     }
   }
@@ -397,6 +417,7 @@ export async function restoreWorktreeSnapshot(
     if (archived.has(norm)) continue;
     const stat = await fs.lstat(target).catch(() => null);
     if (stat?.isDirectory()) continue;
+    await assertRealContained(target, rel);
     await fs.rm(target, { force: true, recursive: true });
   }
   await tar.extract({

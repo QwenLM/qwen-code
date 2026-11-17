@@ -76,12 +76,16 @@ null-hash 删除，常规文件分批哈希）。计算失败使 `carriedEntries
 
 ### D3 — has-work 门仅豁免原始搬运内容
 
-`worktreeHasWork` 增可选第二参数 `carriedEntries?: readonly CarriedEntry[]`。在两个探针
-之前，共享谓词先拒绝任何隐藏索引位（`hasHiddenIndexBit`，`ls-files -v`），因此缺省无携带
-路径（core 保留清扫、legacy sidecar、无携带创建）也受保护——隐藏在 assume-unchanged /
-skip-worktree 下的会话编辑读作工作而非干净。存在 `carriedEntries` 时，探针切换到文件级
-原始输出（`status --porcelain --untracked-files=all -z` 加 `ls-files --others -z`），并
-一次性计算搬运路径的*当前*身份。仅当 `carriedEntryMatches` 成立时豁免搬运条目：
+`worktreeHasWork` 增可选第二参数 `carriedEntries?: readonly CarriedEntry[]`。在探针之前，
+共享谓词先拒绝隐藏索引位（`hasHiddenIndexBit`，`ls-files -v`），因此缺省无携带路径
+（core 保留清扫、legacy sidecar、无携带创建）也受保护。assume-unchanged（小写标签，
+sparse-checkout 从不设置）恒拒绝；skip-worktree（`S`）仅在 `core.sparseCheckout` 未启用时
+拒绝——sparse-checkout 合法地给每个 cone 外路径打 `S`，无条件拒绝会永久 stranded 稀疏仓库
+的每个 worktree（准备好 worktree 门用同一豁免）。存在 `carriedEntries` 时，探针是单一折叠的
+`status --porcelain --untracked-files=all --ignored=matching -z`（非 ignored 的 untracked
+文件保持文件级使搬运路径精确匹配；ignored 条目折叠为目录，即基础谓词的几何，使大
+`node_modules` 不以文件级枚举而撑爆捕获缓冲），并一次性计算搬运路径的*当前*身份。
+仅当 `carriedEntryMatches` 成立时豁免搬运条目：
 
 - 搬运内容（`hash !== null`）：状态恰为 ` M`（未暂存 tracked 编辑）或 `??`（untracked），
   路径是常规文件，且当前 blob 哈希与可执行位等于搬运时的值；
@@ -90,9 +94,10 @@ skip-worktree 下的会话编辑读作工作而非干净。存在 `carriedEntrie
 搬运路径的任何其他状态——暂存（`M `、`A `、`D `）、删除搬运内容、恢复搬运删除、symlink
 替换、或任何内容/模式漂移——都是新工作并保留 checkout（回收器快照它）。rename/copy 记录
 直接拒绝。非搬运条目保留现有 session-marker / disposable-output / symlink 豁免。豁免是
-精确路径而非前缀。内容比较在搬运与清理两侧都对原始工作树字节哈希（`git hash-object` 不带
-`--path`，并带 `--` 分隔符使以 `-` 开头的路径不被当作选项），因此自洽且独立于
-`core.autocrlf`/过滤器。
+精确路径而非前缀。内容比较在搬运与清理两侧都用 `git hash-object`（带 `--` 分隔符使以 `-`
+开头的路径不被当作选项）。`hash-object` 会应用路径的 clean 过滤器（如 `eol`/`text`
+归一化），故身份是 clean 过滤后的 blob 哈希而非原始工作树字节；比较自洽，因为两侧以同一
+方式哈希，内容编辑仍会改变哈希。仅模式变更由可执行位字段捕获。
 
 ### D4 — 回收器传入 sidecar 的覆盖层
 

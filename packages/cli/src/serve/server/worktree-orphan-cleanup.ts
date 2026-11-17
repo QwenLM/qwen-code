@@ -64,6 +64,10 @@ function logWarning(message: string): void {
   writeStderrLine(`qwen serve: ${message}`);
 }
 
+function logInfo(message: string): void {
+  writeStderrLine(`qwen serve: ${message}`);
+}
+
 export function logWorktreeCleanupPreserve(
   sessionId: string,
   reason: string,
@@ -72,6 +76,19 @@ export function logWorktreeCleanupPreserve(
     `worktree cleanup preserved checkout action=delete session=${safeLogValue(
       sessionId,
     )} reason=${safeLogValue(reason)}`,
+  );
+}
+
+export function logWorktreeCleanupSnapshot(
+  sessionId: string,
+  snapshotPath: string,
+): void {
+  // A successful capture is normal operation, not an alert: keep it out of
+  // the warning channel so log scanners do not treat it as a preserve/failure.
+  logInfo(
+    `worktree cleanup snapshotted checkout action=delete session=${safeLogValue(
+      sessionId,
+    )} snapshot=${safeLogValue(snapshotPath)}`,
   );
 }
 
@@ -465,11 +482,7 @@ export async function executeWorktreeCleanup(
       // sidecar are gone. It is keyed by sessionId in the chats dir; the
       // reopen-restore affordance (P6 U5) reads it back by that key, and the
       // retention sweep (P6 U4) prunes it.
-      logWarning(
-        `worktree cleanup snapshotted checkout action=delete session=${safeLogValue(
-          sessionId,
-        )} snapshot=${safeLogValue(snapshotPath)}`,
-      );
+      logWorktreeCleanupSnapshot(sessionId, snapshotPath);
     } catch (error) {
       logWorktreeCleanupPreserve(
         sessionId,

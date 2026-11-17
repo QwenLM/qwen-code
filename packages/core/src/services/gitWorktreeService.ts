@@ -4990,10 +4990,24 @@ export class GitWorktreeService {
           '-v',
           '-z',
         ]);
-        const hasHiddenIndexBits = hiddenIndexEntries
-          .split('\0')
-          .some((entry) => /^(?:S|[a-z])/.test(entry));
-        if (hasHiddenIndexBits) return false;
+        // Same sparse-checkout carve-out as the managed gate: assume-unchanged
+        // (lowercase) always refuses; skip-worktree `S` is legitimate on
+        // out-of-cone paths when sparse-checkout is enabled, so refuse it only
+        // outside a sparse repository (otherwise every prepared worktree of a
+        // sparse repo strands).
+        let sawSkipWorktree = false;
+        for (const entry of hiddenIndexEntries.split('\0')) {
+          if (entry.length === 0) continue;
+          const tag = entry[0];
+          if (/[a-z]/.test(tag)) return false;
+          if (tag === 'S') sawSkipWorktree = true;
+        }
+        if (sawSkipWorktree) {
+          const sparse = await worktreeGit
+            .raw(['config', '--bool', 'core.sparseCheckout'])
+            .catch(() => 'false');
+          if (sparse.trim() !== 'true') return false;
+        }
         if (await hasPopulatedGitlink()) return false;
         // clean -ndx has no -z form and collapses untracked directories
         // to "dir/", which never matches the file-level carried paths.

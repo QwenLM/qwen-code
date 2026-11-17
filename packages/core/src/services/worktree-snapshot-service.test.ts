@@ -511,6 +511,43 @@ describe('worktreeSnapshotService (P6 U1)', () => {
     }
   });
 
+  it('refuses a deletion that resolves outside the root via a committed symlink (R3-1)', async () => {
+    // A committed symlink points outside the worktree; a deletion path under
+    // it is lexically inside but resolves outside. The guard must refuse and
+    // the outside file must survive (fs.rm would otherwise follow the link).
+    const outside = path.join(root, 'outside');
+    await fs.mkdir(outside);
+    await fs.writeFile(path.join(outside, 'victim.txt'), 'PRECIOUS\n');
+    await fs.symlink(outside, path.join(worktree, 'link'));
+    git(worktree, 'add', 'link');
+    git(worktree, 'commit', '-qm', 'symlink', '--no-verify');
+    const m = await buildWorktreeSnapshotMeta(worktree, {
+      sessionId: 'session-symlink',
+      slug: 'symlink',
+      baseCommit: git(worktree, 'rev-parse', 'HEAD'),
+      branch: 'main',
+    });
+    const { snapshotPath } = await captureWorktreeSnapshot({
+      worktreePath: worktree,
+      snapshotDir,
+      meta: m,
+    });
+    const restored = path.join(root, 'restored-symlink');
+    git(worktree, 'worktree', 'add', '--detach', restored, 'HEAD');
+    const meta = {
+      ...m,
+      version: WORKTREE_SNAPSHOT_SCHEMA_VERSION,
+      createdAt: Date.now(),
+      dirty: { tracked: 0, untracked: 0, deleted: ['link/victim.txt'] },
+    };
+    await expect(
+      restoreWorktreeSnapshot(snapshotPath, restored, meta),
+    ).rejects.toThrow(/via symlink/);
+    await expect(
+      fs.readFile(path.join(outside, 'victim.txt'), 'utf8'),
+    ).resolves.toBe('PRECIOUS\n');
+  });
+
   // F3: the exclusion must match the gate's ignored-only geometry — a
   // tracked or non-ignored file under a regenerable directory name is work
   // and must be archived, not silently dropped.
