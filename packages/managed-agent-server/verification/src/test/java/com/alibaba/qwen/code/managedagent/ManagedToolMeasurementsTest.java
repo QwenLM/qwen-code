@@ -2,7 +2,7 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedToolMeasurements;
-import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
+import com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -35,7 +35,7 @@ class ManagedToolMeasurementsTest {
             }
         }
         ManagedToolMeasurements.requireEvidence(fixture.path("evidence"));
-        assertThat(DigestUtils.sha256Hex(CsiNativeActivationProof.canonical(fixture.path("wire"))))
+        assertThat(DigestUtils.sha256Hex(RuntimeToolMeasurements.canonical(fixture.path("wire"))))
                 .isEqualTo(fixture.path("resultDigest").asText());
         ObjectNode payload = json.createObjectNode().put("executionCallId", "execution");
         payload.putObject("toolOutcomeRef").put("digest", "a".repeat(64));

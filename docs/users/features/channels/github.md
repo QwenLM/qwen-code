@@ -94,7 +94,9 @@ Local `gh` authentication requires an HTTPS `baseUrl` so the daemon host credent
 | `deliverToBoundSessions`  | `false`                  | Deliver events for PRs bound to a live session into that session as a prompt instead of a channel-owned session (daemon-managed channels only)                                                                                                                                                                                                                                                                                                                              |
 | `requireBoundWatch`       | `false`                  | Only deliver bound events to `review`/`verify` sessions while the same session holds an active watch on that PR (an `/autofix-pr` watch or `/verify-pr <n> --watch`). One-shot `/review` and `/verify-pr` sessions stay bound but receive nothing; events with no eligible session retire privately, never as a public reply. `fix` and untyped bindings are unaffected, and an unknown watch state (detection failure) keeps delivering. Requires `deliverToBoundSessions` |
 | `prCommentWatch`          | `true`                   | Poll same-account conversation and inline review comments on bound PRs and deliver each new one to every bound session that did not post it (comments posted under the channel's GitHub account by another session/agent). Other-account comments stay with the notification lanes. Set `false` to disable. Requires `deliverToBoundSessions`                                                                                                                               |
-| `prWatchEvents`           | unset                    | **Deprecated.** The daemon now detects PR-state transitions; configure `serve.sessionPrWatch` in the daemon settings (see the [settings reference](../../configuration/settings.md)). This channel no longer watches bound PRs for them. For one minor release the key is accepted and read as a per-host alias when that setting is unset, for PRs on this channel's web host, and only while `deliverToBoundSessions` is on                                               |
+| `prWatchEvents`           | unset                    | **Deprecated.** The daemon now detects PR-state transitions; configure `serve.sessionPrWatch` in the daemon settings (see the [settings reference](../../configuration/settings.md)). This channel no longer watches bound PRs for them. For one minor release the key is accepted and read as a per-host alias when that setting and its environment override are unset, for PRs on this channel's web host, and only while `deliverToBoundSessions` is on                 |
+| `prWatchLimit`            | unset                    | **Deprecated and ignored.** The old state watch's per-sweep cap. The channel no longer detects PR state, so this has no effect; the pass uses its built-in budget. Accepted with a warning for one minor release, then will be rejected at `connect()`                                                                                                                                                                                                                      |
+| `prWatchBudgetReserve`    | unset                    | **Deprecated and ignored.** The old state watch's REST budget reserve gate. No effect for the same reason; accepted with a warning for one minor release, then will be rejected at `connect()`                                                                                                                                                                                                                                                                              |
 | `boundSessionActions`     | unset                    | Optional operator instruction templates for bound-session delivery, keyed by event class with optional role prefixes (`review:`, `verify:`, `fix:`). Enables role-aware fan-out. The `watch:*` keys are deprecated: configure `serve.sessionPrWatch.actions` for state transitions. Requires `deliverToBoundSessions`                                                                                                                                                       |
 
 Use `reasonFilter` to drop noisy notification classes such as `ci_activity` or `state_change`. Do not use `reasonFilter: ["mention"]` as a replacement for `groups.*.requireMention`: GitHub's `mention` reason is sticky at the thread level, so real new @mentions can arrive later under `comment`, `subscribed`, `author`, or other reasons and would be skipped.
@@ -252,16 +254,22 @@ thread is re-read once the turn settles.
   automatically, and the session may act on GitHub through its own tools.
 - The product-authored text of the injected prompt (the envelope, the
   built-in role guidance, the delivery provenance, and watch summaries)
-  follows the channel's UI language: it is Chinese when `general.language`
-  resolves to Chinese (`zh`, `zh-*`, `中文`), and keeps the previous English
-  wording for every other value. Structural markers (the
+  follows the prompt locale resolved from `general.language`, which is not the
+  UI language actually rendered: the public GitHub lane stays English, and
+  `auto` resolves to English here even when the UI detects another language.
+  It is Chinese when `general.language`'s trimmed, lowercased form with `_`
+  read as `-` is `zh`, starts with `zh-`, or is `chinese` or `中文`, and keeps the
+  previous English wording for every other value. The zh strings are Simplified
+  Chinese, so a `zh-TW` setting renders Simplified too. Structural markers (the
   `Type:`/`Title:`/`URL:`/`Trigger:`/`Event:`/`Author:`/`Role:` data lines, the
   `File:` and `Comment:` labels used by the comment watch, the trusted-block
   label `[Operator instruction — trusted]` and `Source:`) and platform-derived
   values (PR titles, comment bodies, check names) are never translated, and
   operator templates render verbatim in the language they were written in.
-  The language is read at channel startup; a watch summary already detected
-  keeps the language it was rendered with until it is delivered.
+  The channel reads the language at startup for the prompts it composes
+  itself. PR-state watch summaries are composed by the daemon's PR-state
+  watch, which reads the language once at daemon boot; a summary already
+  detected keeps the language it was rendered with until it is delivered.
 - Comment sender, repository and pairing gates still apply before delivery.
   When several sessions are bound to the same PR, the most recently updated
   non-archived session wins; channel-owned sessions are never candidates. With
@@ -383,16 +391,21 @@ or stale check as failing, because it uses core's rollup predicate. Superseded
 runs are cancelled routinely in this repository, so some `ci_failure` events
 will be noise.
 
-For one minor release this channel still accepts both deprecated surfaces and
-logs one warning naming `serve.sessionPrWatch`. When that setting is unset,
-the daemon reads each hosted channel's keys as a per-host alias: the channel's
+For one minor release this channel still accepts all four deprecated keys —
+`prWatchEvents`, the `watch:*` keys of `boundSessionActions`, `prWatchLimit` and
+`prWatchBudgetReserve` — and logs one warning naming `serve.sessionPrWatch` and
+those four keys. Only the first two are read as aliases: the two limit knobs are
+ignored, and the pass uses its built-in budget. When that setting and its
+environment override are unset, the daemon reads each hosted channel's keys as
+a per-host alias: the channel's
 `prWatchEvents` are the event set for PRs on its web host, and its `watch:*`
 templates become the daemon's actions (`watch:<type>` → `<type>`,
 `<role>:watch:<type>` → `<role>:<type>`; `default` and `<role>:default` are
 kept). Two channels on one host take the union of their events; each type
 takes its actions from the first channel by name that can deliver it, with a
-logged conflict. An explicit `serve.sessionPrWatch` wins. The alias ends one
-minor release after this change, when the keys are rejected at `connect()`.
+logged conflict. An explicit `serve.sessionPrWatch`, or a non-blank
+`QWEN_SESSION_PR_WATCH_EVENTS`, wins. The alias ends one minor release after
+this change, when the keys are rejected at `connect()`.
 
 One visible consequence: treat `%title%` in a comment template as
 deprecated. It renders the last title the old state watch recorded and is
@@ -464,8 +477,11 @@ reaches no one in that group.
 
 Comments are fetched on a periodic re-check (about every 2 minutes), and the
 first observation baselines silently — comments that predate the watch are not
-replayed. The channel issues no per-poll `pulls.get`; the comment fetch is the
-only watch call. A rate-limited or credential answer fails fast and aborts the
+replayed. After a downtime gap — or when the deliverable window exceeds the
+per-pass comment cap — the backlog arrives as a compact private digest (newest
+comments first, within the shared prompt body budget) instead of one prompt per
+comment; members that do not fit follow in further digests. The channel issues
+no per-poll `pulls.get`; the comment fetch is the only watch call. A rate-limited or credential answer fails fast and aborts the
 pass, so it never sleep-retries ahead of task recovery and notification intake. Delivery
 reuses the bound-session contract: role-aware templates (`comment` /
 `fix:comment` / `default`), stable comment-id dedupe, backpressure and

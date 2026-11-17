@@ -100,6 +100,7 @@ export default {
   OS: 'OS',
   Model: 'Modèle',
   'Fast Model': 'Modèle rapide',
+  'Agent Loop': 'Boucle agent',
   Sandbox: 'Bac à sable',
   'Session ID': 'ID de session',
   'Base URL': 'Base URL',
