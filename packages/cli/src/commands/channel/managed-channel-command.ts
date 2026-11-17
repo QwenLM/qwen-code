@@ -40,7 +40,7 @@ export interface ManagedChannelCommandSpec {
   /** The yargs command string, e.g. 'managed-dingtalk <name>'. */
   command: string;
   /** The configured channel type this command serves. */
-  adapterType: 'email' | 'dingtalk';
+  adapterType: 'email' | 'dingtalk' | 'github';
   /** Display label used in the type-refusal and running messages. */
   label: string;
   nameDescribe: string;

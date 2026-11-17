@@ -13,7 +13,7 @@
 // See docs/design/2026-11-13-managed-channel-dingtalk-adapter.md.
 
 /** The adapters the managed path enables. */
-export type ManagedChannelAdapter = 'email' | 'dingtalk';
+export type ManagedChannelAdapter = 'email' | 'dingtalk' | 'github';
 
 /** The route policy pinned with the first binding of each route. */
 export interface ManagedChannelPolicy {

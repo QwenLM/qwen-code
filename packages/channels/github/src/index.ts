@@ -74,6 +74,19 @@ const BOUND_ACTION_KEY_OPTIONS = [
 
 export { GithubChannel };
 
+export {
+  ManagedGithubAdapter,
+  githubSettings,
+} from './managed-github-adapter.js';
+export type {
+  GithubReplyContext,
+  GithubSettings,
+  ManagedGithubAdapterDeps,
+  ManagedGithubAdapterOptions,
+  ManagedGithubClient,
+} from './managed-github-adapter.js';
+export { createManagedGithubDeps } from './managed-github-deps.js';
+
 export const plugin: ChannelPlugin = {
   channelType: 'github',
   displayName: 'GitHub',
