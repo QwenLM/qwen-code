@@ -960,11 +960,12 @@ Response shape:
     "maxTotalSessions": 800,
     "maxPendingPromptsPerSession": 5,
     "listenerMaxConnections": 256,
+    "maxSseConnections": 204,
     "eventRingSize": 8000,
     "eventRingMaxBytes": 8388608,
     "compactedReplayMaxBytes": 4194304,
     "promptDeadlineMs": null,
-    "writerIdleTimeoutMs": null,
+    "writerIdleTimeoutMs": 60000,
     "channelIdleTimeoutMs": 0,
     "sessionIdleTimeoutMs": 1800000,
     "acpConnectionCap": 64

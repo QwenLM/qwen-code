@@ -29,6 +29,57 @@ it.each(['', 'Partial answer'])(
   },
 );
 
+it.each([false, true])(
+  'renders the /btw prefix and key hints by default (pending: %s)',
+  (isPending) => {
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    try {
+      act(() =>
+        root.render(
+          <BtwMessage
+            question="Question"
+            answer="Answer"
+            isPending={isPending}
+          />,
+        ),
+      );
+      expect(container.textContent).toContain('/btw Question');
+      expect(container.textContent).toContain(
+        isPending ? 'btw.shortcuts.pending' : 'btw.shortcuts.done',
+      );
+    } finally {
+      act(() => root.unmount());
+    }
+  },
+);
+
+it.each([false, true])(
+  'suppresses the prefix and key hints for the detail-panel mirror (pending: %s)',
+  (isPending) => {
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    try {
+      act(() =>
+        root.render(
+          <BtwMessage
+            question="Question"
+            answer="Answer"
+            isPending={isPending}
+            hidePrefix
+            hideShortcuts
+          />,
+        ),
+      );
+      expect(container.textContent).toContain('Question');
+      expect(container.textContent).not.toContain('/btw');
+      expect(container.textContent).not.toContain('btw.shortcuts');
+    } finally {
+      act(() => root.unmount());
+    }
+  },
+);
+
 it('follows answer growth, pauses when scrolled up, and resumes at the bottom', () => {
   let resize = () => {};
   const disconnect = vi.fn();

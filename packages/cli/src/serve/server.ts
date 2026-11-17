@@ -27,6 +27,7 @@ import type {
   DaemonPerfSnapshot,
   DaemonStartupSnapshot,
 } from './daemon-status.js';
+import { sseMaxConnections } from './daemon-status.js';
 import type {
   ChannelWorkerSnapshot,
   ChannelWorkerSupervisor,
@@ -4207,6 +4208,10 @@ export function createServeApp(
     workspaceRegistry,
     daemonLog,
     writerIdleTimeoutMs: opts.writerIdleTimeoutMs,
+    // null = unlimited (listener cap disabled or explicit opt-out).
+    maxSseConnections:
+      sseMaxConnections(opts.maxConnections, opts.maxSseConnections) ??
+      undefined,
     sendBridgeError,
     virtualSubagentSessions,
     resolveSubagentSessionRuntime,

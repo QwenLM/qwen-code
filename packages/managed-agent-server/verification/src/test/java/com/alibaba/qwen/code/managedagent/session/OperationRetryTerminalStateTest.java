@@ -1402,6 +1402,10 @@ class OperationRetryTerminalStateTest {
     // scan.
     @ParameterizedTest(name = "code = {0}, attemptCount = {1}, wrapped = {2}")
     @CsvSource({
+        "hosted_session_closing, 0, false",
+        "hosted_session_closing, 10, false",
+        "hosted_session_closing, 0, true",
+        "hosted_session_closing, 10, true",
         "hosted_lifecycle_recovery_required, 0, false",
         "hosted_lifecycle_recovery_required, 10, false",
         "hosted_lifecycle_recovery_required, 0, true",
@@ -1436,6 +1440,7 @@ class OperationRetryTerminalStateTest {
                         .put("storeSynthesized", true));
         HarnessHttpFailure refusal = mock(HarnessHttpFailure.class);
         when(refusal.getErrorCode()).thenReturn(refusalCode);
+        when(refusal.getStatusCode()).thenReturn(409);
         // The SDK wraps the daemon's refusal in HarnessMutationUnknownFailure
         // once the non-idempotent detach may have been delivered, so the wire
         // code lives on the cause chain — the reason daemonRefusalCode walks it.

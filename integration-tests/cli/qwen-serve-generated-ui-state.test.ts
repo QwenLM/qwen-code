@@ -190,7 +190,28 @@ describe('Generated UI view state through the daemon', () => {
       );
       expect(JSON.stringify(artifacts)).toContain('https://example.com/notes');
       const second = await promptOf(session, 'second prompt');
-      expect(second.status, await second.text()).toBeLessThan(300);
+      const secondBody = await second.text();
+      expect(second.status, secondBody).toBeLessThan(300);
+      // Admission only returns 202; reloading now cancels the turn before its
+      // user record is written.
+      const { promptId: secondPromptId } = JSON.parse(secondBody) as {
+        promptId: string;
+      };
+      await expect
+        .poll(
+          async () => {
+            const response = await call(
+              'GET',
+              `/session/${session.sessionId}/turns/${secondPromptId}`,
+              undefined,
+              session.clientId,
+            );
+            if (!response.ok) return { status: response.status };
+            return (await response.json()) as Record<string, unknown>;
+          },
+          { timeout: 60_000 },
+        )
+        .toMatchObject({ state: 'completed' });
       await reload();
       expect(
         await json(

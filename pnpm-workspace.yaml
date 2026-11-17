@@ -64,6 +64,7 @@ overrides:
   hono: '4.13.18'
   '@hono/node-server@2': '2.1.7'
   body-parser: '2.4.0'
+  'express-rate-limit@8': '8.7.2'
   dompurify: '3.4.17'
   'undici@7': '7.30.2'
   'brace-expansion@1': '1.1.21'
