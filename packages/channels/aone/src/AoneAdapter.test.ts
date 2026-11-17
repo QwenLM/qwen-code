@@ -325,6 +325,13 @@ describe('AoneChannel', () => {
       expect(
         stderr.mock.calls.some((c) => String(c[0]).includes('any commenter')),
       ).toBe(false);
+      // Nor may it emit the MIXED dead-repo wording — the all-dead and mixed
+      // diagnostics are exclusive (else-if), pinned here (verify-r4 M17).
+      expect(
+        stderr.mock.calls.some((c) =>
+          String(c[0]).includes('no groups entry for'),
+        ),
+      ).toBe(false);
       ch.disconnect();
       stderr.mockRestore();
     });
@@ -447,6 +454,103 @@ describe('AoneChannel', () => {
       ch.disconnect();
       stderr.mockRestore();
     });
+
+    it('mixed allowlist names EVERY dead repo, not just the first (verify-r4 M21)', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const ch = new TestableAoneChannel(
+        'test-aone',
+        makeConfig({
+          groupPolicy: 'allowlist',
+          repos: ['test/a', 'test/b', 'test/c'],
+          groups: {
+            'test/a': { senders: 'allowlist', allowedUsers: ['alice'] },
+          },
+        }),
+        makeBridge(),
+      );
+      await ch.connect();
+      const mixed = stderr.mock.calls
+        .map((c) => String(c[0]))
+        .find((l) => l.includes('no groups entry for'));
+      expect(mixed).toBeDefined();
+      expect(mixed).toContain('test/b');
+      expect(mixed).toContain('test/c');
+      ch.disconnect();
+      stderr.mockRestore();
+    });
+
+    it('senders allowlist with no allowedUsers anywhere warns sender-dead (R4-2)', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const ch = new TestableAoneChannel(
+        'test-aone',
+        makeConfig({
+          groupPolicy: 'open',
+          groups: { 'test/repo': { senders: 'allowlist' } },
+        }),
+        makeBridge(),
+      );
+      await ch.connect();
+      const lines = stderr.mock.calls.map((c) => String(c[0]));
+      const senderDead = lines.find((l) => l.includes('group_sender_denied'));
+      expect(senderDead).toBeDefined();
+      expect(senderDead).toContain('test/repo');
+      ch.disconnect();
+      stderr.mockRestore();
+    });
+
+    it('senders allowlist whose list lives on "*" is NOT sender-dead (R4-2 fallback)', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const ch = new TestableAoneChannel(
+        'test-aone',
+        makeConfig({
+          groupPolicy: 'open',
+          groups: {
+            'test/repo': { senders: 'allowlist' },
+            '*': { allowedUsers: ['alice'] },
+          },
+        }),
+        makeBridge(),
+      );
+      await ch.connect();
+      // resolvedAllowedUsers falls back repo -> "*": the list on "*" admits
+      // alice, so the repo is restricted, not dead. Reading only the repo
+      // entry would falsely warn.
+      expect(
+        stderr.mock.calls.some((c) =>
+          String(c[0]).includes('group_sender_denied'),
+        ),
+      ).toBe(false);
+      ch.disconnect();
+      stderr.mockRestore();
+    });
+
+    it('pairing with open senders warns the post-approval posture (R4-2)', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const ch = new TestableAoneChannel(
+        'test-aone',
+        makeConfig({
+          groupPolicy: 'pairing',
+          groups: { 'test/repo': { senders: 'open' } },
+        }),
+        makeBridge(),
+      );
+      await ch.connect();
+      const pairing = stderr.mock.calls
+        .map((c) => String(c[0]))
+        .find((l) => l.includes('once a group is approved'));
+      expect(pairing).toBeDefined();
+      expect(pairing).toContain('test/repo');
+      ch.disconnect();
+      stderr.mockRestore();
+    });
   });
 
   describe('baseline', () => {
@@ -480,6 +584,29 @@ describe('AoneChannel', () => {
       await channel.testPollOnce();
       expect(channel.inboundEnvelopes).toHaveLength(1);
       channel.disconnect();
+    });
+
+    it('an empty-window baseline (cursor 0) does not over-report aging (R4-1)', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      let events: unknown[] = [];
+      installFakeA1({ events: () => events });
+      await channel.connect();
+      await channel.testPollOnce(); // empty window → cursor 0
+      expect(channel.cursor.repos['test/repo']).toBe(0);
+      // The window fills with post-creation events. cursor 0 can never be
+      // "reached" (no id <= 0), but the whole window was fetched — nothing
+      // aged out; these events dispatch normally, not via an aging jump.
+      events = [makeEvent({ id: 10 }), makeEvent({ id: 20 })];
+      await channel.testPollOnce();
+      channel.disconnect();
+      expect(channel.inboundEnvelopes).toHaveLength(2);
+      expect(channel.cursor.repos['test/repo']).toBe(20);
+      expect(
+        stderr.mock.calls.some((c) => String(c[0]).includes('aged out')),
+      ).toBe(false);
+      stderr.mockRestore();
     });
 
     it('a repo added to the config later baselines without backlog dispatch', async () => {
@@ -1222,6 +1349,53 @@ describe('AoneChannel', () => {
       expect(String(failure.error)).not.toContain('\n');
       expect(String(failure.error)).toContain('FORBIDDEN');
     });
+
+    it('the poll-failure stderr is sanitized: no forged line, bounded (R4-4)', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const cause = 'FORBIDDEN\n[Channel:test-aone] forged\n' + 'x'.repeat(500);
+      installFakeA1({
+        events: (repo) =>
+          repo === 'good/repo' ? [makeEvent({ id: 2001 })] : [],
+      });
+      const ch = new TestableAoneChannel(
+        'test-aone',
+        makeConfig({ repos: ['good/repo', 'bad/repo'] }),
+        makeBridge(),
+      );
+      await ch.connect();
+      await ch.testPollOnce(); // baseline both
+      installFakeA1({
+        events: (repo) => {
+          if (repo === 'bad/repo') {
+            throw {
+              code: 1,
+              stdout: JSON.stringify({
+                schemaVersion: 'a1.error/v1',
+                message: cause,
+              }),
+              stderr: '',
+            };
+          }
+          return [makeEvent({ id: 2002 })];
+        },
+      });
+      await ch.testPollOnce();
+      ch.disconnect();
+      const line = stderr.mock.calls
+        .map((c) => String(c[0]))
+        .find((l) => l.includes('poll failed for bad/repo'));
+      expect(line).toBeDefined();
+      // The a1-derived cause carries newlines; sanitized, they render as
+      // visible escapes, so no forged log line starts at column 0. This is
+      // the adapter-only guard (the journal write path does not cover stderr).
+      expect(/\n\[Channel:/.test(line!)).toBe(false);
+      // Bounded: the raw 537-char cause would overshoot; sanitize caps it.
+      expect(line!.length).toBeLessThanOrEqual(300);
+      expect(line).toContain('FORBIDDEN');
+      stderr.mockRestore();
+    });
   });
 
   describe('pagination', () => {
@@ -1443,6 +1617,29 @@ describe('AoneChannel', () => {
       ).toBe(true);
       expect(channel.inboundEnvelopes).toHaveLength(50);
       expect(channel.cursor.repos['test/repo']).toBe(2050);
+      // The permanent loss leaves a durable journal record (R4-1), not just
+      // a stderr line — the poll itself resolves ok, so the status page must
+      // still see the aging jump.
+      const files = readdirSync(join(tempDir, 'channels'), {
+        recursive: true,
+      }) as string[];
+      const journal = files.find((f) =>
+        String(f).endsWith('-channel-events.jsonl'),
+      );
+      const records = readFileSync(
+        join(tempDir, 'channels', String(journal)),
+        'utf8',
+      )
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l));
+      const aged = records.find(
+        (r) => r.outcome === 'cursor_aged_out' && r.repository === 'test/repo',
+      );
+      expect(aged).toBeDefined();
+      expect(aged.type).toBe('poll');
+      expect(aged.detail.cursor).toBe(1000);
+      expect(aged.detail.resumedFrom).toBe(2001);
       stderr.mockRestore();
     });
 

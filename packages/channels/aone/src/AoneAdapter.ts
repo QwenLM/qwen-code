@@ -217,42 +217,61 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
         `[Channel:${this.name}] warning: groupPolicy is "${cfg.groupPolicy ?? 'disabled'}"; must be "open", "allowlist" (with the repository listed), or "pairing" (after one-time group approval) for comments to be dispatched\n`,
       );
     }
-    // The management UI seeds groupPolicy from the descriptor default
-    // (open, GitLab/GitHub parity); its shared group-sender fields write
-    // groups["*"].senders / allowedUsers (channel-wide) and its allowlist
-    // membership field creates groups[<repo>] entries, but per-repository
-    // SENDERS overrides exist only for github/gitlab. A UI-created channel
-    // is permissive only while the operator leaves Group senders at its
-    // default — warn about the repos that are ACTUALLY open, not the
-    // wildcard entry alone (a per-repo allowlist with no "*" entry is
-    // restricted and must not warn).
+    // Aone is configured by hand in settings.json: it is not in the Web
+    // Shell's SUPPORTED_CHANNEL_TYPES, so the channel editor cannot create
+    // or edit it and the descriptor's groupPolicy default (open) never
+    // seeds an editor draft. An absent groupPolicy in a hand-written config
+    // resolves to disabled (warned above). The diagnostics below therefore
+    // describe the hand-written posture, not a UI-seeded one.
     //
-    // Reachability first: under allowlist, GroupGate.check rejects a repo
-    // with no groups entry (not_allowlisted) BEFORE the sender gate runs,
-    // so such a repo's sender policy is never reached — it is dead, not
-    // open, and must be excluded from the permissive warning. The entry
-    // check mirrors ChannelBase.groupConfigFor (private): exact key, then
-    // normalized-match.
+    // One posture-resolution pass per watched repo, reproducing the base
+    // gate order: GroupGate.check (allowlist membership) runs BEFORE the
+    // sender gate, so a repo the group gate rejects is dead regardless of
+    // its senders. groupConfigFor mirrors ChannelBase.groupConfigFor
+    // (private): exact key, then normalized-match; the allowedUsers chain
+    // mirrors groupAllowedUsersFor (repo -> "*" -> empty, and an empty
+    // allowlist denies everyone — it does not fall through to open).
     const groups = this.config.groups ?? {};
-    const hasGroupsEntry = (repo: string) => {
-      if (Object.hasOwn(groups, repo)) return true;
-      const normalized = this.normalizeGroupId(repo);
-      return Object.keys(groups).some(
-        (key) => this.normalizeGroupId(key) === normalized,
-      );
+    const groupConfigFor = (key: string) => {
+      if (Object.hasOwn(groups, key)) return groups[key];
+      const normalized = this.normalizeGroupId(key);
+      for (const [groupId, group] of Object.entries(groups)) {
+        if (this.normalizeGroupId(groupId) === normalized) return group;
+      }
+      return undefined;
     };
+    const hasGroupsEntry = (repo: string) => groupConfigFor(repo) !== undefined;
+    const resolvedAllowedUsers = (repo: string) =>
+      groupConfigFor(repo)?.allowedUsers ??
+      groupConfigFor('*')?.allowedUsers ??
+      [];
+    const policy = cfg.groupPolicy;
+    // Whether the group gate admits the repo now. Pairing needs a one-time
+    // approval that connect cannot assume, so it is not immediately
+    // reachable (its open-senders note below is conditioned on approval).
+    const groupReachable = (repo: string) =>
+      policy === 'open' || (policy === 'allowlist' && hasGroupsEntry(repo));
+    const sendersFor = (repo: string) => this.groupSendersFor({ chatId: repo });
+
     const allowlistDeadRepos =
-      cfg.groupPolicy === 'allowlist'
+      policy === 'allowlist'
         ? this.repos.filter((repo) => !hasGroupsEntry(repo))
         : [];
     const openRepos = this.repos.filter(
-      (repo) =>
-        this.groupSendersFor({ chatId: repo }) === 'open' &&
-        !allowlistDeadRepos.includes(repo),
+      (repo) => groupReachable(repo) && sendersFor(repo) === 'open',
     );
+    const senderDeadRepos = this.repos.filter(
+      (repo) =>
+        groupReachable(repo) &&
+        sendersFor(repo) === 'allowlist' &&
+        resolvedAllowedUsers(repo).length === 0,
+    );
+    const pairingOpenRepos =
+      policy === 'pairing'
+        ? this.repos.filter((repo) => sendersFor(repo) === 'open')
+        : [];
     const deadAllowlist =
-      cfg.groupPolicy === 'allowlist' &&
-      allowlistDeadRepos.length === this.repos.length;
+      policy === 'allowlist' && allowlistDeadRepos.length === this.repos.length;
     if (deadAllowlist) {
       // Every watched repo is dead: nothing dispatches at all.
       process.stderr.write(
@@ -266,17 +285,28 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
         `[Channel:${this.name}] warning: no groups entry for ${allowlistDeadRepos.join(', ')} under groupPolicy "allowlist" — events on those repositories will be rejected as not_allowlisted (the "*" entry is a default, not a wildcard, under allowlist)\n`,
       );
     }
-    if (
-      (cfg.groupPolicy === 'open' || cfg.groupPolicy === 'allowlist') &&
-      openRepos.length > 0
-    ) {
-      // Permissive posture: open senders on a reachable watched repo —
-      // under groupPolicy open directly, or under allowlist via a
-      // membership entry whose senders fall back to an open "*" default.
-      // openRepos already excludes allowlist-dead repos, so the all-dead
-      // posture never reaches here (nothing dispatches there).
+    if (senderDeadRepos.length > 0) {
+      // Sender-layer dead: the group gate admits these repos but their
+      // effective senders policy is allowlist with an empty resolved list,
+      // so every event dies group_sender_denied while the poll journals ok.
+      process.stderr.write(
+        `[Channel:${this.name}] warning: senders "allowlist" with no allowedUsers on ${senderDeadRepos.join(', ')} — every event will be rejected as group_sender_denied; set groups["<repo>"].allowedUsers (or groups["*"].allowedUsers) to admit specific commenters\n`,
+      );
+    }
+    if ((policy === 'open' || policy === 'allowlist') && openRepos.length > 0) {
+      // Permissive posture: open senders on a reachable watched repo.
+      // openRepos excludes group-dead repos, so the all-dead posture never
+      // reaches here (nothing dispatches there).
       process.stderr.write(
         `[Channel:${this.name}] warning: open group senders on ${openRepos.join(', ')} — any commenter on those repositories can drive the agent as the a1-login account; set groups["<repo>"].senders to "allowlist" with allowedUsers to restrict (see the design doc sample)\n`,
+      );
+    }
+    if (pairingOpenRepos.length > 0) {
+      // Pairing: not immediately reachable (group approval pending), so do
+      // not claim current reachability — warn about the post-approval
+      // posture instead.
+      process.stderr.write(
+        `[Channel:${this.name}] warning: groupPolicy "pairing" with open group senders on ${pairingOpenRepos.join(', ')} — once a group is approved, any commenter on those repositories can drive the agent; set groups["<repo>"].senders to "allowlist" with allowedUsers to restrict\n`,
       );
     }
 
@@ -344,6 +374,14 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
         // it in the watch list (the base loop restarts from repos[0] on a
         // failed poll, so an uncaught throw skips every later repo forever).
         failures.push(err);
+        // Sanitize once for both sinks: the cause is a1-derived text, so a
+        // newline-bearing message must not forge a second stderr log line
+        // and a long one must stay bounded. The journal write path caps too,
+        // but stderr is the adapter's own responsibility.
+        const message = sanitizeLogText(
+          err instanceof Error ? err.message : String(err),
+          200,
+        );
         // Durable trace: a partial failure resolves the round, so the base
         // loop journals it ok — without this record the broken repo would
         // leave no trace the status page can show while its comments age out.
@@ -351,13 +389,10 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
           type: 'poll',
           outcome: 'repo_failed',
           repository: repo,
-          error: sanitizeLogText(
-            err instanceof Error ? err.message : String(err),
-            200,
-          ),
+          error: message,
         });
         process.stderr.write(
-          `[Channel:${this.name}] poll failed for ${repo}: ${err}\n`,
+          `[Channel:${this.name}] poll failed for ${repo}: ${message}\n`,
         );
       }
     }
@@ -424,10 +459,24 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
 
     // The cursor event itself aged out of the 3-day window: events between
     // the cursor and the window's oldest are gone to window aging, and the
-    // cursor will jump over them. Diagnose the jump (only when there is
-    // something to resume to — a dormant repo with an empty window skips
-    // nothing and must not warn every poll).
-    if (!reachedCursor && fresh.length > 0) {
+    // cursor will jump over them. Diagnose the jump only for a real prior
+    // cursor (cursorId > 0): an empty-window baseline writes 0, no event id
+    // can satisfy id <= 0, and the window was fetched whole — those events
+    // are dropped by the creation-time floor, not aging, so warning there
+    // would over-fire. A dormant repo (empty fresh) skips nothing and must
+    // not warn. The loss is permanent, so leave a durable journal record
+    // beside the stderr line (the poll itself resolves ok).
+    if (!reachedCursor && cursorId > 0 && fresh.length > 0) {
+      const resumedFrom = fresh.reduce(
+        (m, e) => Math.min(m, e.id),
+        fresh[0]!.id,
+      );
+      this.recordChannelEvent({
+        type: 'poll',
+        outcome: 'cursor_aged_out',
+        repository: repo,
+        detail: { cursor: cursorId, resumedFrom },
+      });
       process.stderr.write(
         `[Channel:${this.name}] cursor for ${repo} aged out of the events window; events older than the window were lost to aging; resuming from the oldest fetched event\n`,
       );
@@ -460,7 +509,7 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
           await this.dispatchEvent(repo, event);
         } catch (err) {
           process.stderr.write(
-            `[Channel:${this.name}] error processing event ${event.id}: ${err}\n`,
+            `[Channel:${this.name}] error processing event ${event.id}: ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}\n`,
           );
           await this.postErrorComment(repo, event).catch(() => {});
         }
@@ -596,7 +645,7 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
         vars['url'] = view.url;
       } catch (err) {
         process.stderr.write(
-          `[Channel:${this.name}] fetchView failed (metadata only): ${err}\n`,
+          `[Channel:${this.name}] fetchView failed (metadata only): ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}\n`,
         );
         vars['title'] = '';
         vars['url'] = '';

@@ -138,28 +138,33 @@ hosts (it is what the local E2E harness used), not the recommended default.
   `allowedUsers`/`privatePolicy` apply only to DM-shaped traffic, which
   this channel never produces; configuring them alone restricts nothing.
   `groupPolicy` must be `open`/`allowlist`/`pairing` for dispatch (connect
-  warns otherwise); the plugin declares the field with default `open`
-  because the shared injected field defaults to `disabled`, which would
-  dispatch nothing for an editor-created channel. The management UI seeds
-  `groupPolicy` from that default, and its shared group-sender fields DO
-  write `groups["*"].senders` / `groups["*"].allowedUsers` (channel-wide),
-  and its allowlist membership field creates `groups[<repo>]` entries;
-  what it cannot write for this plugin is a per-repository SENDERS
-  override (those rows exist only for the repository-only types
-  github/gitlab), so a membership entry's senders fall back to the
-  channel-wide `*` policy. A UI-created channel is therefore permissive
-  only while the operator leaves Group senders at its default.
-  `connect()` warns about the watched repos that are ACTUALLY open — open
-  senders AND reachable: under `groupPolicy: allowlist` the group gate
-  rejects a repo with no `groups` entry as `not_allowlisted` BEFORE the
-  sender gate runs, so such a repo is dead, not open, and is excluded from
-  the permissive warning (a per-repo allowlist with no `*` entry is
-  likewise restricted and does not warn). It separately diagnoses the dead
-  repos: when EVERY watched repo lacks an entry it warns that nothing
-  dispatches; when only SOME lack entries (a mixed watch list) it names
-  those repos so the operator knows their triggers silently drop while the
-  reachable repos still warn normally. Under allowlist `*` is a default
-  config, not a wildcard allow. The sample below shows the per-repository tightening
+  warns otherwise). Aone is configured by hand in `settings.json`: it is
+  NOT in the Web Shell's `SUPPORTED_CHANNEL_TYPES`, so the channel editor
+  cannot create or edit it, and the descriptor's `default: open` (declared
+  for parity with the shared injected field, which defaults to `disabled`)
+  never seeds an editor draft. An absent `groupPolicy` in a hand-written
+  config resolves to `disabled`, which dispatches nothing — connect warns
+  loudly, so set it explicitly. The shared group-sender / allowlist-
+  membership editor controls (`assignGroupSenders` writes
+  `groups["*"].senders`/`allowedUsers`; `assignGroups` creates
+  `groups[<repo>]` entries) and the github/gitlab-only per-repository
+  SENDERS rows therefore do not apply to this plugin; the operator writes
+  `groups` directly in the config. `connect()` runs one posture-resolution
+  pass per watched repo (reproducing the base `groupConfigFor` key match
+  and the `senders`/`allowedUsers` repo→`*`→empty fallback chains, where an
+  empty allowlist admits nobody) and diagnoses four postures: (1)
+  permissive — open senders on a repo the group gate admits (under
+  allowlist a repo with no `groups` entry is rejected `not_allowlisted`
+  BEFORE the sender gate, so it is dead, not open, and excluded); (2)
+  group-dead — under allowlist, EVERY watched repo lacks an entry (nothing
+  dispatches) or only SOME do (a mixed list names the dead repos so the
+  operator knows their triggers silently drop); (3) sender-dead — a
+  reachable repo whose effective senders is `allowlist` with an empty
+  resolved `allowedUsers` list (every event dies `group_sender_denied`
+  while the poll journals ok); (4) pairing-open — under `groupPolicy:
+pairing`, open senders are warned as a POST-approval posture, not
+  immediate reachability (the group needs one-time approval). Under
+  allowlist `*` is a default config, not a wildcard allow. The sample below shows the per-repository tightening
   a hand-written config must do. `sessionScope` defaults to `chat_thread`
   (one session per repo+MR thread). No `token` field — a1 authenticates
   through its own login on the channel host.
@@ -167,7 +172,8 @@ hosts (it is what the local E2E harness used), not the recommended default.
 ### Inbound pipeline (`pollOnce`)
 
 Each configured repo is polled in its own try/catch: a failing repo logs
-its error, records a durable `repo_failed` journal event (the round
+a sanitized, bounded error (the a1-derived cause cannot forge a stderr
+line), records a durable `repo_failed` journal event (the round
 resolves on partial failure, so the base loop's own poll record would
 otherwise show ok and the broken repo would leave no trace the status
 page can show), and the round CONTINUES with the remaining repos. The
@@ -199,9 +205,14 @@ Per repo:
    unfetched gap WITHIN the window. The invariant is window-scoped: when
    the cursor event itself has aged out of the 3-day window (downtime or
    a drain slower than arrival), the walk ends without meeting it and
-   the cursor jumps over the aged-out ids — the poll LOGS that jump when
-   it resumes with events to dispatch (a dormant repo with an empty
-   window skips nothing and does not warn). Each repo's slice dispatches at most the
+   the cursor jumps over the aged-out ids — the poll LOGS that jump and
+   records a durable `cursor_aged_out` journal event (the loss is
+   permanent; the poll itself resolves ok) when it resumes with events to
+   dispatch. The diagnostic fires only for a real prior cursor
+   (`cursorId > 0`): an empty-window baseline writes 0, which no event id
+   can reach, so a filling window is NOT aging (those events are dropped
+   by the creation-time floor); a dormant repo with an empty window skips
+   nothing and does not warn. Each repo's slice dispatches at most the
    oldest 100 events (`DISPATCH_BUDGET`, universal and monotonic — a
    500-event backlog caps at 100 just like a 1200-event one; a poll's
    worst case is repos.length × 100 dispatches); the remainder drains on
@@ -307,7 +318,8 @@ connect where a rule exists (GitHub `validateRepoFilterConfig` pattern).
   skip, and the per-repo isolation keeps the other watched repos polling
   at the configured interval (only a TOTAL failure backs off).
 - **Event-window loss** — outages > 3 days lose older events (v1 limit);
-  when the cursor itself ages out, the resuming poll logs the jump.
+  when the cursor itself ages out, the resuming poll logs the jump and
+  records a durable `cursor_aged_out` journal event.
 - **Flood bounded in the 100–10 000 band, PER REPO** — each repo's slice
   dispatches at most the oldest 100 events per poll (universal budget,
   monotonic), so a poll's worst case is repos.length × 100 dispatches; a
@@ -355,19 +367,25 @@ connect where a rule exists (GitHub `validateRepoFilterConfig` pattern).
   diagnostics incl. author TYPE drift (no public error comment);
   permissive-config warning scoped to actually-open AND reachable repos
   (allowlist-dead repos excluded) + all-dead and mixed dead-repo
-  diagnostics + case-normalized groups entry; senderName/chatId fallback
-  on sibling-field type drift; empty-string author skip; durable
-  repo_failed journal record on partial failure (error bounded to 200
-  code points, single line — enforced by the journal write path); aged-out
-  cursor jump diagnostic (dormant repo silent); descriptor groupPolicy
-  default; repo-path lowercasing. Mutation-witnessed: dedup, per-repo
-  isolation, overflow walk, cursor-reached break, prune save, whitespace
-  fallback, partial-failure cadence, universal budget, platform ceiling,
-  per-poll cache clear, permissive warning, drift diagnostics, midnight
-  window, aging diagnostic, author type guard, durable failure record,
-  warning scope, dead-posture warning, reachability exclusion, mixed
-  dead-repo naming, warning repo naming, case-normalized entry,
-  senderName fallback, chatId fallback, empty-author guard.
+  diagnostics (every dead repo named) + sender-dead posture (allowlist
+  senders with an empty resolved allowedUsers list, repo→`*` fallback) +
+  pairing-open post-approval note + case-normalized groups entry;
+  senderName/chatId fallback on sibling-field type drift; empty-string
+  author skip; durable repo_failed journal record on partial failure with
+  sanitized bounded stderr (no forged log line); aged-out cursor jump
+  diagnostic gated on cursorId>0 (empty-window baseline silent) with a
+  durable cursor_aged_out journal record (dormant repo silent); descriptor
+  groupPolicy default; repo-path lowercasing. Mutation-witnessed: dedup,
+  per-repo isolation, overflow walk, cursor-reached break, prune save,
+  whitespace fallback, partial-failure cadence, universal budget, platform
+  ceiling, per-poll cache clear, permissive warning, drift diagnostics,
+  midnight window, aging diagnostic, author type guard, durable failure
+  record, warning scope, dead-posture warning, reachability exclusion,
+  mixed dead-repo naming, warning repo naming, case-normalized entry,
+  senderName fallback, chatId fallback, empty-author guard, aging
+  cursorId>0 guard, cursor_aged_out record, sender-dead warning,
+  allowedUsers `*` fallback, pairing-open note, stderr sanitization,
+  all-dead/mixed exclusivity, every-dead-repo naming.
 - Live read-only smoke: real `a1 events repo middleware/tddl5` fetch+parse,
   no dispatch, no writes (env-gated).
 - Full-loop E2E with a stubbed `a1` on PATH (canned whoami/events; comment
