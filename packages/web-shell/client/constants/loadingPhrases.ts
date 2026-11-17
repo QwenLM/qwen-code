@@ -1,3 +1,5 @@
+import { normalizeLanguage } from '../i18n';
+
 export const PHRASE_CHANGE_INTERVAL_MS = 15_000;
 
 export const WITTY_LOADING_PHRASES_EN = [
@@ -107,19 +109,11 @@ const WITTY_LOADING_PHRASES_ZH_TW = [
 ];
 
 export function getLoadingPhrases(language?: string): string[] {
-  const resolvedLanguage = (
-    language ?? (typeof navigator !== 'undefined' ? navigator.language : '')
-  ).toLowerCase();
-  if (
-    resolvedLanguage === 'zh-tw' ||
-    resolvedLanguage.startsWith('zh-tw') ||
-    resolvedLanguage.startsWith('zh-hant') ||
-    resolvedLanguage.startsWith('zh-hk') ||
-    resolvedLanguage.startsWith('zh-mo')
-  ) {
-    return WITTY_LOADING_PHRASES_ZH_TW;
-  }
-  return resolvedLanguage.startsWith('zh')
+  const resolved = normalizeLanguage(
+    language ?? (typeof navigator !== 'undefined' ? navigator.language : ''),
+  );
+  if (resolved === 'zh-TW') return WITTY_LOADING_PHRASES_ZH_TW;
+  return resolved === 'zh-CN'
     ? WITTY_LOADING_PHRASES_ZH
     : WITTY_LOADING_PHRASES_EN;
 }

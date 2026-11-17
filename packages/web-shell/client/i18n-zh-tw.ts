@@ -286,7 +286,7 @@ export const ZH_TW: Record<string, MessageValue> = {
   'managed.question.forbidden':
     '只有會話所有者或工作區操作員可以回答這些問題。',
   'managed.approval.failed':
-    '無法確認審批迴答的結果。請重試同一選項，或重新整理以檢視狀態。',
+    '無法確認審批回答的結果。請重試同一選項，或重新整理以檢視狀態。',
   'managed.approval.loadFailed': '待處理請求載入失敗。',
   'managed.approval.refreshFailed': '待處理請求重新整理失敗。',
   'managed.approval.retry': '重新讀取請求',

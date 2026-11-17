@@ -767,6 +767,7 @@ describe('web-shell zh-TW locale', () => {
     expect(tw('files.title')).toBe('檔案');
     expect(zh('files.title')).toBe('文件');
     expect(tw('files.delete')).toBe('刪除檔案');
+    expect(tw('managed.approval.failed')).toContain('審批回答');
     expect(
       tw(
         "You've used up your weekly credits.{{reset}} Please try again after the reset.",
