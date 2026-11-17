@@ -1492,16 +1492,15 @@ left alone, and so is every key after the swap runs. The last question tab arms 
 at all, clamped as it is, so it gets no lock; a trailing key there still lands on the row
 it reaches.
 
-ink's question dialog reached this leak as well. Its buffer notifies the parent from an
-effect run at commit (`text-buffer.ts`), which delays a trailing key's text by one commit
-rather than dropping it: the answered row stays mounted for the whole pause, so the text
-still reached the state a multi-select answer is rebuilt from, and a model was sent
-`TealX` for a typed `Teal`. ink has since gained the same stop (#17485): for the pause
-its field takes no keys and is remounted from the recorded answer. The remount lands on
-the very commit whose effect would have reported the trailing key, so that key never
-reaches the answer and no separate check is needed. Ours writes through the setter
-synchronously, which is what makes a mid-read submit read the live text at all, so it
-needs the explicit stop.
+ink's question dialog reaches this leak as well, and has no stop for it yet. Its buffer
+notifies the parent from an effect run at commit (`text-buffer.ts`), which delays a
+trailing key's text by one commit rather than dropping it: the answered row stays mounted
+for the whole pause, so the text still reaches the state a multi-select answer is rebuilt
+from, and a model was sent `TealX` for a typed `Teal`. A Space on the answered row inside
+the pause changes a multi-select answer the same way. #17485 gave ink only the lock on a
+second answer; this half stays open in ink and is listed under Follow-ups. Ours writes
+through the setter synchronously, which is what makes a mid-read submit read the live
+text at all, so it needs the explicit stop.
 
 Coverage is eight new unit tests, four in the authentication suite and four in the
 confirmation dialog's, and eight mutations, one per behaviour named below. Each fails
@@ -2930,6 +2929,13 @@ What was verified, and how far the verification reaches:
   the input widget's submit is the only owner of Enter on that row, and a
   second answer inside the pause is dropped as it is here, so the two
   renderers no longer diverge on it.
+- Open: inside ink's 150 ms pause a multi-select answer can still change after
+  it was recorded. A Space on the answered row, or text typed or pasted into
+  its free-text field (also in the same read as the Enter), reaches the state
+  the answer is rebuilt from at Submit (Decision 37). This port refuses those
+  keys while a swap is armed, and settles its free-text field after any
+  accepted submit, single-select included, where ink's single-select field stays
+  editable. ink keeps both for now; the fix is tracked separately from #17485.
 - The stale-read class is closed for cursors and open for everything beside
   them. Decision 41 put the numeric cursors behind a ref mirror — the shared
   select hook and its exposed ref, the composer's completion rows, and each
