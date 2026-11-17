@@ -163,7 +163,12 @@ hosts (it is what the local E2E harness used), not the recommended default.
   resolved `allowedUsers` list (every event dies `group_sender_denied`
   while the poll journals ok); (4) pairing-open — under `groupPolicy:
 pairing`, open senders are warned as a POST-approval posture, not
-  immediate reachability (the group needs one-time approval). Under
+  immediate reachability (the group needs one-time approval); (5)
+  pairing-sender-dead — under pairing, `allowlist` senders with an empty
+  resolved `allowedUsers` list are likewise warned post-approval (the
+  reachable-only sender-dead filter misses pairing because approval is
+  pending, but the empty allowlist still denies every sender once
+  approved). Under
   allowlist `*` is a default config, not a wildcard allow. The sample below shows the per-repository tightening
   a hand-written config must do. `sessionScope` defaults to `chat_thread`
   (one session per repo+MR thread). No `token` field — a1 authenticates
@@ -208,11 +213,17 @@ Per repo:
    the cursor jumps over the aged-out ids — the poll LOGS that jump and
    records a durable `cursor_aged_out` journal event (the loss is
    permanent; the poll itself resolves ok) when it resumes with events to
-   dispatch. The diagnostic fires only for a real prior cursor
-   (`cursorId > 0`): an empty-window baseline writes 0, which no event id
-   can reach, so a filling window is NOT aging (those events are dropped
-   by the creation-time floor); a dormant repo with an empty window skips
-   nothing and does not warn. Each repo's slice dispatches at most the
+   dispatch. The diagnostic fires when the walk missed the cursor and
+   there is something to resume to. For `cursorId > 0` that is always
+   genuine aging. `cursorId === 0` is ambiguous — an empty-window baseline
+   polled recently fills normally (NOT aging; the creation-time floor
+   drops pre-creation events), but a stale empty baseline whose last poll
+   predates the window start DID lose post-creation events to aging — so
+   the two are discriminated by the per-repo last-poll instant
+   (`cursor.lastPoll`), not the cursor value or the channel baseline (a
+   repo added to a mature channel baselines fresh and must not
+   false-positive). A dormant repo with an empty window skips nothing and
+   does not warn. Each repo's slice dispatches at most the
    oldest 100 events (`DISPATCH_BUDGET`, universal and monotonic — a
    500-event backlog caps at 100 just like a 1200-event one; a poll's
    worst case is repos.length × 100 dispatches); the remainder drains on
@@ -245,13 +256,17 @@ Per repo:
      the same trade-off as GitLab's todo-done ordering).
 
 Cursor shape (zod-validated, GitLab pattern):
-`{ baselineAt: string, repos: Record<string, number> }`. `baselineAt` is the
+`{ baselineAt: string, repos: Record<string, number>, lastPoll?: Record<string, string> }`. `baselineAt` is the
 channel creation time (ISO, parseable — an unparseable value fails cursor
 validation and re-baselines). It is a dispatch floor: events created before
 it never dispatch. Without the floor, a repo whose first poll sees an EMPTY
 window baselines to id 0, and the next poll would dispatch the whole 3-day
 window as "new" — a historical backlog. The per-repo entry's presence is the
-"initialized" state; there is no separate flag. Drift-prone fields fail
+"initialized" state; there is no separate flag. `lastPoll` (optional, for
+backward compat with cursors written before it existed) records each repo's
+last-poll instant (ISO); it discriminates the two cursor-0 aging states
+(recent empty baseline vs stale empty baseline older than the window) and
+is persisted every poll, including dormant ones. Drift-prone fields fail
 LOUD: an event whose `createdAt` does not parse, whose author is missing,
 or whose note body is not a string is skipped fail-closed but LOGGED — a
 payload rename would otherwise mute the channel silently while the cursor
@@ -369,23 +384,29 @@ connect where a rule exists (GitHub `validateRepoFilterConfig` pattern).
   (allowlist-dead repos excluded) + all-dead and mixed dead-repo
   diagnostics (every dead repo named) + sender-dead posture (allowlist
   senders with an empty resolved allowedUsers list, repo→`*` fallback) +
-  pairing-open post-approval note + case-normalized groups entry;
-  senderName/chatId fallback on sibling-field type drift; empty-string
-  author skip; durable repo_failed journal record on partial failure with
-  sanitized bounded stderr (no forged log line); aged-out cursor jump
-  diagnostic gated on cursorId>0 (empty-window baseline silent) with a
-  durable cursor_aged_out journal record (dormant repo silent); descriptor
-  groupPolicy default; repo-path lowercasing. Mutation-witnessed: dedup,
-  per-repo isolation, overflow walk, cursor-reached break, prune save,
-  whitespace fallback, partial-failure cadence, universal budget, platform
-  ceiling, per-poll cache clear, permissive warning, drift diagnostics,
-  midnight window, aging diagnostic, author type guard, durable failure
-  record, warning scope, dead-posture warning, reachability exclusion,
-  mixed dead-repo naming, warning repo naming, case-normalized entry,
-  senderName fallback, chatId fallback, empty-author guard, aging
-  cursorId>0 guard, cursor_aged_out record, sender-dead warning,
-  allowedUsers `*` fallback, pairing-open note, stderr sanitization,
-  all-dead/mixed exclusivity, every-dead-repo naming.
+  pairing-open post-approval note + pairing-sender-dead post-approval note
+  - case-normalized groups entry;
+    senderName/chatId fallback on sibling-field type drift; empty-string
+    author skip; durable repo_failed journal record on partial failure;
+    all three stderr sinks sanitized and bounded (poll-failure, per-event
+    dispatch, fetchView — no forged log line); aged-out cursor jump
+    diagnostic (cursor>0 always; cursor-0 discriminated by the last-poll
+    instant — recent empty baseline silent, stale empty baseline diagnosed)
+    with a durable cursor_aged_out journal record (dormant repo silent); a
+    cursor-reached poll reports no aging; descriptor
+    groupPolicy default; repo-path lowercasing. Mutation-witnessed: dedup,
+    per-repo isolation, overflow walk, cursor-reached break, prune save,
+    whitespace fallback, partial-failure cadence, universal budget, platform
+    ceiling, per-poll cache clear, permissive warning, drift diagnostics,
+    midnight window, aging diagnostic, author type guard, durable failure
+    record, warning scope, dead-posture warning, reachability exclusion,
+    mixed dead-repo naming, warning repo naming, case-normalized entry,
+    senderName fallback, chatId fallback, empty-author guard, aging
+    cursorId>0 guard, cursor_aged_out record, sender-dead warning,
+    allowedUsers `*` fallback, pairing-open note, stderr sanitization,
+    all-dead/mixed exclusivity, every-dead-repo naming, pairing-sender-dead
+    note, stale-cursor0 aging, !reachedCursor clause, per-event stderr
+    sanitization, fetchView stderr sanitization.
 - Live read-only smoke: real `a1 events repo middleware/tddl5` fetch+parse,
   no dispatch, no writes (env-gated).
 - Full-loop E2E with a stubbed `a1` on PATH (canned whoami/events; comment

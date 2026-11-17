@@ -40,6 +40,15 @@ interface AoneCursor {
   baselineAt: string;
   /** Per-repo last processed event id. Aone has no server-side mark-read. */
   repos: Record<string, number>;
+  /**
+   * Per-repo instant (ISO) of the last poll. Optional for backward compat
+   * with cursors written before it existed. Discriminates the two cursor-0
+   * states: an empty-window baseline polled recently (the window fills
+   * normally, no aging) vs a stale empty baseline older than the window
+   * start (genuine aging loss). Kept separate from `repos` (a number record)
+   * so adding it does not invalidate existing cursors.
+   */
+  lastPoll?: Record<string, string>;
 }
 
 const cursorSchema = z.object({
@@ -47,6 +56,7 @@ const cursorSchema = z.object({
   // reject it so the channel re-baselines instead.
   baselineAt: z.string().refine((s) => !Number.isNaN(Date.parse(s))),
   repos: z.record(z.string(), z.number()),
+  lastPoll: z.record(z.string(), z.string()).optional(),
 });
 
 /** One `a1 events repo --type comments` entry (the fields we read). */
@@ -270,6 +280,17 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
       policy === 'pairing'
         ? this.repos.filter((repo) => sendersFor(repo) === 'open')
         : [];
+    // Pairing + sender-dead: groupReachable is false under pairing (approval
+    // pending), so the reachable-only senderDeadRepos filter above misses it;
+    // after approval the empty allowlist still denies every sender.
+    const pairingSenderDeadRepos =
+      policy === 'pairing'
+        ? this.repos.filter(
+            (repo) =>
+              sendersFor(repo) === 'allowlist' &&
+              resolvedAllowedUsers(repo).length === 0,
+          )
+        : [];
     const deadAllowlist =
       policy === 'allowlist' && allowlistDeadRepos.length === this.repos.length;
     if (deadAllowlist) {
@@ -307,6 +328,13 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
       // posture instead.
       process.stderr.write(
         `[Channel:${this.name}] warning: groupPolicy "pairing" with open group senders on ${pairingOpenRepos.join(', ')} — once a group is approved, any commenter on those repositories can drive the agent; set groups["<repo>"].senders to "allowlist" with allowedUsers to restrict\n`,
+      );
+    }
+    if (pairingSenderDeadRepos.length > 0) {
+      // Pairing + sender-dead: post-approval framing (the group still needs
+      // approval), and exclusive from pairing-open (allowlist vs open senders).
+      process.stderr.write(
+        `[Channel:${this.name}] warning: groupPolicy "pairing" with senders "allowlist" and no allowedUsers on ${pairingSenderDeadRepos.join(', ')} — once a group is approved, every event on those repositories will be rejected as group_sender_denied; set groups["<repo>"].allowedUsers (or groups["*"].allowedUsers) to admit specific commenters\n`,
       );
     }
 
@@ -421,6 +449,14 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
     const sinceStr = localDate(since);
     const untilStr = localDate(until);
 
+    // Capture the PREVIOUS poll instant before recording this one: it
+    // discriminates a cursor-0 repo's two states (recent empty baseline vs
+    // stale empty baseline older than the window). Unknown (a cursor written
+    // before lastPoll existed) is treated as stale — the safe base behavior.
+    const prevPollIso = this.cursor.lastPoll?.[repo];
+    const prevPollMs = prevPollIso ? Date.parse(prevPollIso) : NaN;
+    (this.cursor.lastPoll ??= {})[repo] = until.toISOString();
+
     const cursorId = this.cursor.repos[repo];
     if (cursorId === undefined) {
       // First observation: baseline to the newest event id, dispatch nothing
@@ -459,14 +495,21 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
 
     // The cursor event itself aged out of the 3-day window: events between
     // the cursor and the window's oldest are gone to window aging, and the
-    // cursor will jump over them. Diagnose the jump only for a real prior
-    // cursor (cursorId > 0): an empty-window baseline writes 0, no event id
-    // can satisfy id <= 0, and the window was fetched whole — those events
-    // are dropped by the creation-time floor, not aging, so warning there
-    // would over-fire. A dormant repo (empty fresh) skips nothing and must
-    // not warn. The loss is permanent, so leave a durable journal record
-    // beside the stderr line (the poll itself resolves ok).
-    if (!reachedCursor && cursorId > 0 && fresh.length > 0) {
+    // cursor will jump over them. Fire when the walk missed the cursor and
+    // there is something to resume to. For cursorId > 0 that is always
+    // genuine aging. cursorId === 0 is ambiguous: an empty-window baseline
+    // polled recently fills normally (no aging — the creation-time floor,
+    // not the window, drops pre-creation events), but a stale empty baseline
+    // older than the window start DID lose post-creation events to aging.
+    // Discriminate by the previous poll instant, not the cursor value or the
+    // channel baseline (a repo added to a mature channel baselines fresh and
+    // must not false-positive). A dormant repo (empty fresh) skips nothing.
+    // The loss is permanent, so leave a durable journal record beside the
+    // stderr line (the poll itself resolves ok).
+    const agedCursor0 =
+      cursorId === 0 &&
+      (Number.isNaN(prevPollMs) || prevPollMs < since.getTime());
+    if (!reachedCursor && fresh.length > 0 && (cursorId > 0 || agedCursor0)) {
       const resumedFrom = fresh.reduce(
         (m, e) => Math.min(m, e.id),
         fresh[0]!.id,
@@ -521,6 +564,9 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
       this.cursor.repos[repo] = event.id;
       this.saveCursor();
     }
+    // Persist the last-poll instant even when no event dispatched (a dormant
+    // repo), so the cursor-0 aging discriminator stays current.
+    this.saveCursor();
   }
 
   private async fetchEventsPage(

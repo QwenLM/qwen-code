@@ -551,6 +551,32 @@ describe('AoneChannel', () => {
       ch.disconnect();
       stderr.mockRestore();
     });
+
+    it('pairing with senders allowlist and no allowedUsers warns sender-dead post-approval (R1-1)', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const ch = new TestableAoneChannel(
+        'test-aone',
+        makeConfig({
+          groupPolicy: 'pairing',
+          groups: { 'test/repo': { senders: 'allowlist' } },
+        }),
+        makeBridge(),
+      );
+      await ch.connect();
+      // groupReachable is false under pairing, so the reachable-only
+      // sender-dead filter misses this; the pairing arm must still diagnose
+      // the empty allowlist (post-approval framing).
+      const line = stderr.mock.calls
+        .map((c) => String(c[0]))
+        .find((l) => l.includes('group_sender_denied'));
+      expect(line).toBeDefined();
+      expect(line).toContain('test/repo');
+      expect(line).toContain('once a group is approved');
+      ch.disconnect();
+      stderr.mockRestore();
+    });
   });
 
   describe('baseline', () => {
@@ -606,6 +632,54 @@ describe('AoneChannel', () => {
       expect(
         stderr.mock.calls.some((c) => String(c[0]).includes('aged out')),
       ).toBe(false);
+      stderr.mockRestore();
+    });
+
+    it('a stale cursor-0 repo (last poll before the window) reports genuine aging (R1-2)', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const ch = new TestableAoneChannel(
+        'test-aone',
+        makeConfig(),
+        makeBridge(),
+      );
+      ch.cursor.baselineAt = '2020-01-01T00:00:00.000Z';
+      ch.cursor.repos['test/repo'] = 0;
+      // The empty baseline was polled long before the 3-day window start, so
+      // post-creation events between then and the window aged out — unlike
+      // the recent-empty-baseline case above, this IS genuine loss.
+      ch.cursor.lastPoll = { 'test/repo': '2020-01-01T00:00:00.000Z' };
+      await ch.connect();
+      installFakeA1({
+        events: pagedEvents([makeEvent({ id: 10 }), makeEvent({ id: 20 })]),
+      });
+      await ch.testPollOnce();
+      ch.disconnect();
+      expect(
+        stderr.mock.calls.some((c) =>
+          String(c[0]).includes('cursor for test/repo aged out'),
+        ),
+      ).toBe(true);
+      const files = readdirSync(join(tempDir, 'channels'), {
+        recursive: true,
+      }) as string[];
+      const journal = files.find((f) =>
+        String(f).endsWith('-channel-events.jsonl'),
+      );
+      const records = readFileSync(
+        join(tempDir, 'channels', String(journal)),
+        'utf8',
+      )
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l));
+      const aged = records.find(
+        (r) => r.outcome === 'cursor_aged_out' && r.repository === 'test/repo',
+      );
+      expect(aged).toBeDefined();
+      expect(aged.detail.cursor).toBe(0);
+      expect(aged.detail.resumedFrom).toBe(10);
       stderr.mockRestore();
     });
 
@@ -1396,6 +1470,59 @@ describe('AoneChannel', () => {
       expect(line).toContain('FORBIDDEN');
       stderr.mockRestore();
     });
+
+    it('the per-event dispatch stderr is sanitized (R1-4)', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const cause = 'FORBIDDEN\n[Channel:test-aone] forged\n' + 'x'.repeat(500);
+      installFakeA1({ events: pagedEvents([makeEvent({ id: 1001 })]) });
+      await channel.connect();
+      await channel.testPollOnce(); // baseline at 1001
+      channel.handleInboundError = new Error(cause);
+      installFakeA1({ events: pagedEvents([makeEvent({ id: 1002 })]) });
+      await channel.testPollOnce();
+      channel.disconnect();
+      const line = stderr.mock.calls
+        .map((c) => String(c[0]))
+        .find((l) => l.includes('error processing event 1002'));
+      expect(line).toBeDefined();
+      expect(/\n\[Channel:/.test(line!)).toBe(false);
+      expect(line!.length).toBeLessThanOrEqual(300);
+      expect(line).toContain('FORBIDDEN');
+      stderr.mockRestore();
+    });
+
+    it('the fetchView stderr is sanitized (R1-4)', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const cause = 'FORBIDDEN\n[Channel:test-aone] forged\n' + 'x'.repeat(500);
+      installFakeA1({ events: pagedEvents([makeEvent({ id: 1001 })]) });
+      const ch = new TestableAoneChannel(
+        'test-aone',
+        makeConfig({ promptTemplate: 'url=%url%' }),
+        makeBridge(),
+      );
+      await ch.connect();
+      await ch.testPollOnce(); // baseline at 1001
+      // A structured a1.error/v1 message passes through runA1Json unchanged
+      // (newlines intact), so fetchView's stderr must sanitize it.
+      installFakeA1({
+        events: pagedEvents([makeEvent({ id: 1002 })]),
+        view: () => ({ schemaVersion: 'a1.error/v1', message: cause }),
+      });
+      await ch.testPollOnce();
+      ch.disconnect();
+      const line = stderr.mock.calls
+        .map((c) => String(c[0]))
+        .find((l) => l.includes('fetchView failed'));
+      expect(line).toBeDefined();
+      expect(/\n\[Channel:/.test(line!)).toBe(false);
+      expect(line!.length).toBeLessThanOrEqual(300);
+      expect(line).toContain('FORBIDDEN');
+      stderr.mockRestore();
+    });
   });
 
   describe('pagination', () => {
@@ -1455,6 +1582,38 @@ describe('AoneChannel', () => {
       expect(pages).toEqual([1, 2]);
       // ids 1000..901 are newer than the cursor at 900 — 100 events.
       expect(ch2.inboundEnvelopes).toHaveLength(100);
+    });
+
+    it('a poll that meets the cursor reports no aging loss (R1-3)', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      installFakeA1({ events: pagedEvents([makeEvent({ id: 1000 })]) });
+      await channel.connect();
+      await channel.testPollOnce(); // baseline at 1000
+      // The next poll serves the cursor event itself plus a newer one: the
+      // walk meets the cursor (reachedCursor), so nothing aged out. Deleting
+      // the !reachedCursor clause would fire aging on this healthy poll.
+      installFakeA1({
+        events: pagedEvents([makeEvent({ id: 1001 }), makeEvent({ id: 1000 })]),
+      });
+      await channel.testPollOnce();
+      channel.disconnect();
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(
+        stderr.mock.calls.some((c) => String(c[0]).includes('aged out')),
+      ).toBe(false);
+      const files = readdirSync(join(tempDir, 'channels'), {
+        recursive: true,
+      }) as string[];
+      const journal = files.find((f) =>
+        String(f).endsWith('-channel-events.jsonl'),
+      );
+      const content = journal
+        ? readFileSync(join(tempDir, 'channels', String(journal)), 'utf8')
+        : '';
+      expect(content).not.toContain('cursor_aged_out');
+      stderr.mockRestore();
     });
 
     it('dispatches each boundary event once when offset pagination repeats it', async () => {

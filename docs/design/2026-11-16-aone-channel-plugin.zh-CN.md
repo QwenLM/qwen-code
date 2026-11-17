@@ -145,7 +145,10 @@ packages/channels/aone/
   丢弃）；(3) sender 层死——可达仓库的生效 senders 为 `allowlist` 但解析
   出的 `allowedUsers` 为空（每条事件都死于 `group_sender_denied` 而轮询
   记 ok）；(4) pairing-open——`groupPolicy: pairing` 下 open 发送者按
-  **批准后**姿态告警，而非当前可达（群组需一次性批准）。allowlist 下
+  **批准后**姿态告警，而非当前可达（群组需一次性批准）；(5)
+  pairing-sender-dead——pairing 下 `allowlist` 发送者而解析 `allowedUsers`
+  为空同样按批准后告警（仅按可达过滤的 sender-dead 会漏掉 pairing，因为
+  批准待定，但批准后空 allowlist 仍拒绝每个发送者）。allowlist 下
   `*` 是缺省配置，不是通配准入。下方示例给出手写配置
   必须做的逐仓库收紧。`sessionScope` 缺省 `chat_thread`（每仓库+MR
   线程一个会话）。无 `token` 字段——a1 用 channel 主机上自己的登录态
@@ -180,9 +183,13 @@ packages/channels/aone/
    以窗口为界：游标事件本身老化出 3 天窗口时（停机或排空慢于到达），
    遍历遇不到它而结束，游标跳过老化的 id——轮询在带着可派发事件恢复
    时**记录这次跳跃**并落持久 `cursor_aged_out` 台账事件（丢失是永久的；
-   轮询本身记 ok）。该诊断仅对真实先前游标（`cursorId > 0`）触发：空窗口
-   基线写 0，没有事件 id 能命中它，故窗口被填满**不是**老化（那些事件由
-   建仓时间下限丢弃）；空窗口的休眠仓库什么都没跳过，不告警。
+   轮询本身记 ok）。该诊断在遍历未命中游标且有可派发事件时触发：
+   `cursorId > 0` 必为真实老化；`cursorId === 0` 有歧义——近期空窗口基线
+   被正常填满**不是**老化（那些事件由建仓时间下限丢弃），但上次轮询早于
+   窗口起点的陈旧空基线**确实**把建仓后事件老化丢失了——故两者按仓库
+   上次轮询时间（`cursor.lastPoll`）区分，而非游标值或频道基线（成熟频道
+   新增的仓库会新鲜基线化，不能误报）。空窗口的休眠仓库什么都没跳过，
+   不告警。
    每仓库的切片至多派发**最旧的 100 条**（`DISPATCH_BUDGET`，通用且
    单调——500 条积压与 1200 条一样封顶 100；单轮最坏是 仓库数 × 100
    次派发）；余量在后续轮次排空。第 100 页仍满——超出平台可寻址
@@ -210,11 +217,14 @@ packages/channels/aone/
      相同的取舍）。
 
 游标形状（zod 校验，GitLab 模式）：
-`{ baselineAt: string, repos: Record<string, number> }`。`baselineAt` 是
+`{ baselineAt: string, repos: Record<string, number>, lastPoll?: Record<string, string> }`。`baselineAt` 是
 channel 创建时刻（ISO，必须可解析——不可解析的值会游标校验失败并重新基线化）。
 它是派发地板：创建时刻之前的事件绝不派发。没有这个地板，首轮看到**空**窗口的
 仓库会基线化到 id 0，下一轮就会把整个 3 天窗口当作「新」事件派发——形成历史
-积压。每仓库条目的存在性即「已初始化」状态，没有单独的标志位。
+积压。每仓库条目的存在性即「已初始化」状态，没有单独的标志位。`lastPoll`
+（可选，向后兼容此前写入的游标）记录每仓库上次轮询时刻（ISO），用于区分
+两种 cursor-0 老化状态（近期空基线 vs 早于窗口的陈旧空基线），每轮都持久化
+（含休眠轮）。
 易漂移字段**响亮失败**：`createdAt` 解析失败、作者缺失、笔记正文不是
 字符串的事件按 fail-closed 跳过但**必须记日志**——否则载荷改名会在
 游标持续推进的同时静默哑掉整个 channel。bot 自身评论与非 MR 笔记是
@@ -310,11 +320,14 @@ descriptor 与 connect 间共享（GitHub `validateRepoFilterConfig` 模式）�
   不发公开错误评论）；宽松告警限定实际 open **且可达**的仓库（排除
   allowlist 死仓库）+ 全死与混合死仓库诊断（点名**每个**死仓库）+
   sender 层死姿态（allowlist 发送者而解析 allowedUsers 为空，repo→`*`
-  回退）+ pairing-open 批准后告警 + 大小写归一化的 groups 条目；兄弟
+  回退）+ pairing-open 批准后告警 + pairing-sender-dead 批准后告警 +
+  大小写归一化的 groups 条目；兄弟
   字段类型漂移时的 senderName/chatId 回落；空串作者跳过；部分失败的
-  持久 repo_failed 台账记录 + 净化有界 stderr（不伪造日志行）；游标
-  老化跳跃诊断（cursorId>0 门控，空窗口基线静默）+ 持久 cursor_aged_out
-  台账记录（休眠仓库静默）；descriptor groupPolicy 缺省；仓库路径
+  持久 repo_failed 台账记录；三处 stderr 均净化有界（轮询失败、逐事件
+  派发、fetchView——不伪造日志行）；游标
+  老化跳跃诊断（cursor>0 必触发；cursor-0 按上次轮询时刻区分——近期空
+  基线静默、陈旧空基线诊断）+ 持久 cursor_aged_out
+  台账记录（休眠仓库静默）；命中游标的轮询不报老化；descriptor groupPolicy 缺省；仓库路径
   小写化。变异见证：去重、逐仓库隔离、溢出走尾、游标命中即停、剪枝
   保存、空白回落、部分失败节奏、通用预算、平台上限、逐轮缓存清空、
   宽松告警、漂移诊断、午夜窗口、老化诊断、作者类型守卫、持久失败
@@ -322,7 +335,8 @@ descriptor 与 connect 间共享（GitHub `validateRepoFilterConfig` 模式）�
   点名、大小写归一化条目、senderName 回落、chatId 回落、空串作者
   守卫、老化 cursorId>0 守卫、cursor_aged_out 记录、sender 层死告警、
   allowedUsers `*` 回退、pairing-open 告警、stderr 净化、全死/混合
-  互斥、每个死仓库点名。
+  互斥、每个死仓库点名、pairing-sender-dead 告警、陈旧 cursor0 老化、
+  !reachedCursor 子句、逐事件 stderr 净化、fetchView stderr 净化。
 - 线上只读冒烟：真实 `a1 events repo middleware/tddl5` 拉取+解析，
   不派发、不写（环境变量门控）。
 - 全链路 E2E（PATH 上打桩 a1： canned whoami/events；comment create
