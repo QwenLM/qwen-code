@@ -40,7 +40,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
-import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
@@ -48,10 +47,7 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -118,21 +114,15 @@ public class HarnessCoordinator {
     private final int batchMaxEvents;
     private final int batchMaxBytes;
     private final boolean sessionCreateWarm;
-    private final String owner = UUID.randomUUID().toString();
-    private final Set<String> active = ConcurrentHashMap.newKeySet();
+    private final LeaseRenewalRunner runner =
+            new LeaseRenewalRunner("managed-agent-dispatch-lease");
+    private final String owner = runner.owner();
     private final Set<String> cancellations = ConcurrentHashMap.newKeySet();
     // See cancelAdmittedTurn: forced cancellation takeover loads are paced
     // per Turn, far below the ~500ms lease-renewal cadence that re-runs
     // the coded-refusal pair (the round-10 hot loop).
     private static final long TAKEOVER_LOAD_MIN_INTERVAL_MS = 5_000;
     private final Map<String, Long> takeoverPace = new ConcurrentHashMap<>();
-    private final ScheduledExecutorService renewer =
-            Executors.newSingleThreadScheduledExecutor(runnable -> {
-                Thread thread = new Thread(runnable,
-                        "managed-agent-dispatch-lease");
-                thread.setDaemon(true);
-                return thread;
-            });
 
     public HarnessCoordinator(AgentStateStore store,
             HarnessConnector harness, HarnessEventProjector projector,
@@ -209,17 +199,8 @@ public class HarnessCoordinator {
     }
 
     public void dispatch(String tenantId, String sessionId, String turnId) {
-        String key = key(tenantId, sessionId, turnId);
-        if (!active.add(key)) {
-            return;
-        }
-        executor.execute(() -> {
-            try {
-                coordinate(tenantId, sessionId, turnId);
-            } finally {
-                active.remove(key);
-            }
-        });
+        runner.dispatchOnce(executor, key(tenantId, sessionId, turnId),
+                () -> coordinate(tenantId, sessionId, turnId));
     }
 
     public void cancel(String tenantId, String sessionId, String turnId) {
@@ -293,7 +274,7 @@ public class HarnessCoordinator {
 
     @PreDestroy
     public void close() {
-        renewer.shutdownNow();
+        runner.close();
     }
 
     private void coordinate(String tenantId, String sessionId,
@@ -303,27 +284,17 @@ public class HarnessCoordinator {
         if (claimed == null) {
             return;
         }
-        AtomicBoolean leaseLost = new AtomicBoolean();
-        ScheduledFuture<?> renewal = renewer.scheduleAtFixedRate(
-                () -> {
-                    try {
-                        if (!store.renewTurn(tenantId, sessionId, turnId,
-                                owner, leaseDuration)) {
-                            leaseLost.set(true);
-                        } else if (!leaseLost.get()) {
-                            executor.execute(() -> cancelAdmittedTurn(
-                                    tenantId, sessionId, turnId, true));
-                        }
-                    } catch (RuntimeException error) {
-                        leaseLost.set(true);
-                        LOG.warn("Managed Turn lease renewal failed tenant={}"
-                                        + " session={} turn={} failure={}",
-                                tenantId, sessionId, turnId,
-                                error.getClass().getSimpleName());
-                    }
-                },
-                renewInterval.toMillis(), renewInterval.toMillis(),
-                TimeUnit.MILLISECONDS);
+        var renewal = runner.startFixedRate(
+                renewInterval.toMillis(),
+                () -> store.renewTurn(tenantId, sessionId, turnId, owner,
+                        leaseDuration),
+                () -> executor.execute(() -> cancelAdmittedTurn(
+                        tenantId, sessionId, turnId, true)),
+                error -> LOG.warn("Managed Turn lease renewal failed tenant={}"
+                                + " session={} turn={} failure={}",
+                        tenantId, sessionId, turnId,
+                        error.getClass().getSimpleName()));
+        AtomicBoolean leaseLost = renewal.leaseLost();
         boolean terminal = false;
         AtomicBoolean submissionAttempted = new AtomicBoolean(
                 claimed.submissionAttempted());
@@ -471,7 +442,7 @@ public class HarnessCoordinator {
             terminal = transientFailure(claimed,
                     submissionAttempted.get(), error, false);
         } finally {
-            renewal.cancel(false);
+            renewal.close();
             if (!terminal) {
                 store.releaseTurnLease(tenantId, sessionId, turnId, owner);
             }
@@ -1244,8 +1215,27 @@ public class HarnessCoordinator {
         }
     }
 
-    private void runtimeWarmResult(SessionRecord session, TurnRecord turn,
+    static boolean identityProbeTimedOut(Throwable error) {
+        // Control-plane does not depend on runtime-host. The probe type is
+        // the stable name of MacOsIdentityProbeTimeoutException.
+        for (Throwable current = error; current != null; current = current.getCause()) {
+            if ("MacOsIdentityProbeTimeoutException"
+                    .equals(current.getClass().getSimpleName())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void runtimeWarmResult(SessionRecord session, TurnRecord turn,
             Throwable error) {
+        if (error != null && identityProbeTimedOut(error)) {
+            LOG.warn(
+                    "Managed Runtime warm probe timed out tenant={} session={} turn={}",
+                    session.tenantId(), session.sessionId(), turn.turnId(),
+                    error);
+            return;
+        }
         String suffix = error == null ? "ready" : "failed";
         String type = "environment." + suffix;
         Map<String, Object> data = error == null ? Map.of()

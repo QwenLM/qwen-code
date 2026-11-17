@@ -449,6 +449,10 @@ type ChatEditorTestProps = {
   }) => void;
   gitBranch?: string;
   gitStatus?: DaemonWorkspaceGitStatus;
+  gitWorktree?: boolean;
+  gitCwd?: string;
+  onCreateWorktreeBranch?: (name: string) => Promise<void>;
+  onHandoff?: (to: 'local' | 'worktree') => Promise<void>;
   onOpenGitDiff?: () => void;
   visibleToolbarActions?: string[];
   tokenCount?: number;
@@ -806,6 +810,18 @@ const {
     addArtifact: vi.fn().mockResolvedValue({}),
     loadSession: vi.fn().mockResolvedValue(undefined),
     reloadSession: vi.fn().mockResolvedValue(undefined),
+    handoffWorktree: vi.fn().mockResolvedValue({
+      sessionId: 'session-1',
+      worktree: null,
+      currentCwd: '/workspace',
+    }),
+    createWorktreeBranch: vi.fn().mockResolvedValue({
+      worktree: {
+        slug: 'feat-a',
+        path: '/workspace/.qwen/worktrees/feat-a',
+        branch: 'feat/new',
+      },
+    }),
   };
   const mockPaneSessionActions = {
     ...mockSessionActions,
@@ -7123,6 +7139,182 @@ describe('task activity key', () => {
     expect(
       mockWorkspace.client.getSessionTranscriptPage,
     ).not.toHaveBeenCalled();
+  });
+
+  it('drops a restored change overview tab when the host stopped listing it', async () => {
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'change_overview',
+          tabs: [
+            {
+              id: 'change_overview',
+              kind: 'change_overview',
+              title: 'Change overview',
+              workspaceCwd: '/tmp/project',
+              sessionId: 'session-1',
+            },
+          ],
+        },
+      }),
+    );
+
+    // A stored tab must not be a second way in for a host that turned the
+    // feature off: it would render the panel and keep fetching git state.
+    const { container } = renderApp({ rightPanel: { items: ['review'] } });
+    await flush();
+    await flush();
+
+    expect(
+      container.querySelector('button[title="Change overview"]'),
+    ).toBeNull();
+  });
+
+  it('round-trips a persisted change overview tab when the host lists it', async () => {
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'change_overview',
+          tabs: [
+            {
+              id: 'change_overview',
+              kind: 'change_overview',
+              title: 'Change overview',
+              workspaceCwd: '/tmp/project',
+              sessionId: 'session-1',
+            },
+          ],
+        },
+      }),
+    );
+
+    const { container } = renderApp({
+      rightPanel: { items: ['review', 'changeOverview'] },
+    });
+    await flush();
+    await flush();
+
+    expect(
+      container.querySelector('button[title="Change overview"]'),
+    ).not.toBeNull();
+  });
+
+  it('stamps the live session onto a change overview tab opened on the new-task page', async () => {
+    // A tab opened before the first prompt has no session; the reconciliation
+    // effect is the only writer that adopts the materialized session id.
+    // Without it the tab runs useChangeOverview(cwd, undefined) forever: no
+    // bound PRs, no base branch, no worktree scoping.
+    // Align the session-less workspace cwd with the session fixture's and
+    // arm the real first-prompt path (createSession materializes the session)
+    // so the draft panel state carries over to the session key.
+    mockConnection.sessionId = undefined;
+    testState.messages = [];
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        { id: 'project', cwd: '/tmp/project', primary: true, trusted: true },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockSessionActions.createSession.mockImplementation(async () => {
+      mockConnection.sessionId = 'session-1';
+      return { sessionId: 'session-1' };
+    });
+    const { container } = renderApp();
+    await flush();
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+    });
+    await flush();
+    const actions = container.querySelector(
+      '[data-testid="right-panel-empty-actions"]',
+    );
+    expect(actions).not.toBeNull();
+    const openButton = Array.from(actions!.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('Change overview'),
+    );
+    expect(openButton).toBeDefined();
+    await act(async () => {
+      openButton!.click();
+    });
+    await flush();
+    expect(
+      container.querySelector('button[title="Change overview"]'),
+    ).not.toBeNull();
+    expect(mockWorkspace.client.sessionStatus).not.toHaveBeenCalled();
+
+    // Materialize the session through the real first-prompt submission, the
+    // way the new-task panel regression harness does: createSession arms the
+    // draft carry-over and reports the session live.
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit(
+        'hello',
+        undefined,
+        undefined,
+        editorCommit,
+      );
+      await Promise.resolve();
+    });
+    await flush();
+    // The draft carry-over persists panel state in a layout effect before the
+    // passive reconciliation effect stamps the session id, so settle through
+    // re-renders rather than asserting on the first flush. Assert on the
+    // persisted tab itself: sessionStatus is a shared mock that sibling
+    // consumers also call once a session is live, so it cannot discriminate
+    // whether THIS tab adopted the session.
+    await vi.waitFor(async () => {
+      await flush();
+      const raw = window.localStorage.getItem(
+        'qwen-code-web-shell-right-panel-state',
+      );
+      const state = JSON.parse(raw ?? '{}') as Record<
+        string,
+        { tabs?: Array<{ kind?: string; sessionId?: string }> }
+      >;
+      const entry = state['/tmp/project\0session-1'];
+      expect(
+        entry?.tabs?.some(
+          (tab) =>
+            tab.kind === 'change_overview' && tab.sessionId === 'session-1',
+        ),
+      ).toBe(true);
+    });
+  });
+
+  it('does not duplicate the change overview tab when opened twice', async () => {
+    mockConnection.sessionId = undefined;
+    const { container } = renderApp();
+    await flush();
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+    });
+    await flush();
+    const actions = container.querySelector(
+      '[data-testid="right-panel-empty-actions"]',
+    );
+    const openButton = Array.from(actions!.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('Change overview'),
+    );
+    expect(openButton).toBeDefined();
+    await act(async () => {
+      openButton!.click();
+      openButton!.click();
+    });
+    await flush();
+    expect(
+      container.querySelectorAll('button[title="Change overview"]'),
+    ).toHaveLength(1);
   });
 
   it('opens one trajectory tab from the panel and reuses it', async () => {
@@ -18595,7 +18787,11 @@ describe('App session callbacks', () => {
   it('hands workspace context from the welcome composer to the session header', async () => {
     mockConnection.sessionId = undefined;
     testState.messages = [];
-    const { container, rerender } = renderApp();
+    // Session-scoped entries only: the workspace-scoped changeOverview default
+    // would otherwise surface the header on the session-less welcome page.
+    const { container, rerender } = renderApp({
+      rightPanel: { items: ['review', 'sideTask'] },
+    });
     await flush();
     expect(testState.latestChatEditorProps?.contextChipPlacement).toBe('below');
     expect(
@@ -20087,7 +20283,11 @@ describe('App session callbacks', () => {
   it('hides the new-task header when nothing workspace-scoped is available', async () => {
     mockConnection.sessionId = undefined;
     testState.messages = [];
-    const { container } = renderApp();
+    // Session-scoped entries only, so nothing workspace-scoped is available on
+    // the new-task page (changeOverview is workspace-scoped and in the default).
+    const { container } = renderApp({
+      rightPanel: { items: ['review', 'sideTask'] },
+    });
     await flush();
 
     expect(
@@ -20366,7 +20566,9 @@ describe('App session callbacks', () => {
   });
 
   it('keeps the right-panel action visible and opens a review-only empty state', () => {
-    const { container } = renderApp();
+    // Scope to review only: the default list also offers the workspace-scoped
+    // changeOverview action, which this review-only assertion does not cover.
+    const { container } = renderApp({ rightPanel: { items: ['review'] } });
     const rightPanelButton = container.querySelector<HTMLButtonElement>(
       'button[aria-label="Toggle right panel"]',
     );
@@ -25631,6 +25833,524 @@ describe('App session callbacks', () => {
     expect(mockSessionActions.createSession).toHaveBeenCalledWith(
       expect.objectContaining({ worktree: { slug: 'feat-a' } }),
     );
+  });
+
+  const worktreeDefaultSetting = (
+    effective: boolean,
+  ): DaemonSettingDescriptor => ({
+    key: 'worktree.defaultForNewSessions',
+    type: 'boolean',
+    label: 'Default Worktree For New Web Shell Sessions',
+    category: 'Advanced',
+    requiresRestart: false,
+    default: true,
+    values: { effective },
+  });
+
+  it('defaults the composer to worktree mode when the setting is on', async () => {
+    mockConnection.sessionId = undefined;
+    testState.settings = [worktreeDefaultSetting(true)];
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    renderApp();
+    await flush();
+    await flush();
+
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+        mode: 'worktree',
+      });
+    });
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('default worktree session');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalled();
+      });
+    });
+
+    const request = mockSessionActions.createSession.mock.calls[0][0];
+    expect(request.worktree).toEqual({});
+    expect(request.branch).toBeUndefined();
+  });
+
+  it('defaults a detached-HEAD workspace to worktree mode', async () => {
+    mockConnection.sessionId = undefined;
+    testState.settings = [worktreeDefaultSetting(true)];
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockResolvedValue({ branch: null, detached: true }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    renderApp();
+    await flush();
+    await flush();
+
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+        mode: 'worktree',
+      });
+    });
+  });
+
+  it('keeps the composer off worktree mode when the workspace has no commits', async () => {
+    mockConnection.sessionId = undefined;
+    testState.settings = [worktreeDefaultSetting(true)];
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi
+        .fn()
+        .mockResolvedValue({ branch: 'main', hasHead: false }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    renderApp();
+    await flush();
+    await flush();
+
+    // An unborn HEAD has no worktree base; the create path would refuse
+    // with worktree_base_unavailable, so the composer must stay current.
+    expect(testState.latestChatEditorProps?.gitModeIntent).toBeUndefined();
+    expect(
+      testState.latestChatEditorProps?.onGitModeIntentChange,
+    ).toBeUndefined();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('unborn head session');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalled();
+      });
+    });
+
+    const request = mockSessionActions.createSession.mock.calls[0][0];
+    expect(request.worktree).toBeUndefined();
+    expect(request.branch).toBeUndefined();
+  });
+
+  it('drops an armed worktree intent when the fresh status reports an unborn HEAD', async () => {
+    mockConnection.sessionId = undefined;
+    testState.settings = [worktreeDefaultSetting(true)];
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    // The fast status omits hasHead (eligible — the default arms); the
+    // fresh status then reports the unborn HEAD. The intent must drop in
+    // the same render the chip hides, or the first prompt requests a
+    // worktree the daemon refuses with no control left to undo it.
+    let status: { branch: string; hasHead?: boolean; workspaceCwd?: string } = {
+      branch: 'main',
+      workspaceCwd: '/workspace',
+    };
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockImplementation(async () => status),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    renderApp();
+    await flush();
+    await flush();
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+        mode: 'worktree',
+      });
+    });
+
+    status = { branch: 'main', hasHead: false, workspaceCwd: '/workspace' };
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await flush();
+
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.gitModeIntent).toBeUndefined();
+    });
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('unborn head session');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalled();
+      });
+    });
+    const request = mockSessionActions.createSession.mock.calls[0][0];
+    expect(request.worktree).toBeUndefined();
+    expect(request.branch).toBeUndefined();
+  });
+
+  it('applies the branch and handoff responses to the worktree association', async () => {
+    mockConnection.sessionId = 'session-1';
+    mockConnection.workspaceCwd = '/workspace';
+    mockSessionActions.createWorktreeBranch.mockResolvedValue({
+      worktree: {
+        slug: 'feat-a',
+        path: '/workspace/.qwen/worktrees/feat-a',
+        branch: 'feat/new',
+      },
+    });
+    mockSessionActions.handoffWorktree.mockResolvedValue({
+      sessionId: 'session-1',
+      worktree: null,
+      currentCwd: '/workspace',
+    });
+    const worktreePath = '/workspace/.qwen/worktrees/feat-a';
+    mockWorkspace.client.sessionStatus.mockResolvedValue({
+      worktree: { slug: 'feat-a', path: worktreePath, branch: '' },
+    });
+    mockWorkspace.capabilities = {
+      features: ['session_worktree_handoff_v1', 'session_worktree_branch_v1'],
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    renderApp();
+    await flush();
+    await flush();
+
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.onHandoff).toBeDefined();
+      expect(testState.latestChatEditorProps?.gitWorktree).toBe(true);
+    });
+    expect(testState.latestChatEditorProps?.gitCwd).toBe(worktreePath);
+    // A detached worktree with the capability offers "Create branch here".
+    expect(
+      testState.latestChatEditorProps?.onCreateWorktreeBranch,
+    ).toBeDefined();
+
+    // The callback's setSessionWorktree update is the only thing that
+    // retires the affordance once the branch exists.
+    await act(async () => {
+      await testState.latestChatEditorProps?.onCreateWorktreeBranch?.(
+        'feat/new',
+      );
+    });
+    await flush();
+    expect(mockSessionActions.createWorktreeBranch).toHaveBeenCalledWith(
+      'feat/new',
+    );
+    expect(
+      testState.latestChatEditorProps?.onCreateWorktreeBranch,
+    ).toBeUndefined();
+
+    // Handoff to local: the null worktree clears the association.
+    await act(async () => {
+      await testState.latestChatEditorProps?.onHandoff?.('local');
+    });
+    await flush();
+    expect(mockSessionActions.handoffWorktree).toHaveBeenCalledWith('local');
+    expect(testState.latestChatEditorProps?.gitWorktree).toBe(false);
+    expect(testState.latestChatEditorProps?.gitCwd).toBeUndefined();
+  });
+
+  it('ignores a handoff response that lands after a session switch', async () => {
+    mockConnection.sessionId = 'session-1';
+    mockConnection.workspaceCwd = '/workspace';
+    mockWorkspace.client.sessionStatus.mockResolvedValue({ worktree: null });
+    mockWorkspace.capabilities = {
+      features: ['session_worktree_handoff_v1'],
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    renderApp();
+    await flush();
+    await flush();
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.onHandoff).toBeDefined();
+    });
+    expect(testState.latestChatEditorProps?.gitWorktree).toBe(false);
+
+    let resolveHandoff!: (value: unknown) => void;
+    mockSessionActions.handoffWorktree.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveHandoff = resolve;
+        }),
+    );
+    let pending: Promise<void> | undefined;
+    act(() => {
+      pending = testState.latestChatEditorProps?.onHandoff?.('worktree');
+    });
+    // The user switches sessions while the request is in flight; the
+    // response belongs to the old session and must not apply.
+    mockConnection.sessionId = 'session-2';
+    resolveHandoff({
+      sessionId: 'session-1',
+      worktree: { slug: 'stale', path: '/stale', branch: '' },
+      currentCwd: '/stale',
+    });
+    await act(async () => {
+      await pending;
+    });
+    await flush();
+    expect(testState.latestChatEditorProps?.gitWorktree).toBe(false);
+    mockConnection.sessionId = 'session-1';
+  });
+
+  it('re-arms the worktree default on New chat from an empty draft', async () => {
+    mockConnection.sessionId = undefined;
+    testState.settings = [worktreeDefaultSetting(true)];
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    const { container } = renderApp();
+    await flush();
+    await flush();
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+        mode: 'worktree',
+      });
+    });
+
+    // "New chat" with sessionId and workspace unchanged produces no
+    // rising edge on the eligibility deps; the default must survive.
+    const newSessionButton = container.querySelector<HTMLButtonElement>(
+      '[data-testid="new-session"]',
+    )!;
+    await act(async () => {
+      newSessionButton.click();
+      await Promise.resolve();
+    });
+    await flush();
+    await flush();
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'worktree',
+    });
+  });
+
+  it('keeps the current-branch default when the setting is off', async () => {
+    mockConnection.sessionId = undefined;
+    testState.settings = [worktreeDefaultSetting(false)];
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    renderApp();
+    await flush();
+    await flush();
+
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'current',
+    });
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('plain session');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalled();
+      });
+    });
+
+    const request = mockSessionActions.createSession.mock.calls[0][0];
+    expect(request.worktree).toBeUndefined();
+    expect(request.branch).toBeUndefined();
+  });
+
+  it('applies the worktree default when settings arrive after the composer renders', async () => {
+    mockConnection.sessionId = undefined;
+    testState.settings = [];
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    // The status setter bails on content-equal statuses (isSameGitStatus),
+    // so the focus refetch must report a changed branch to force the
+    // re-render that reads the late settings (the real hook re-renders on
+    // its own fetch resolution; the mock reads testState directly).
+    let branch = 'main';
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockImplementation(async () => ({ branch })),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    renderApp();
+    await flush();
+    await flush();
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'current',
+    });
+
+    testState.settings = [worktreeDefaultSetting(true)];
+    branch = 'feat/late-settings';
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await flush();
+
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+        mode: 'worktree',
+      });
+    });
+  });
+
+  it('does not override an explicit current-branch choice when settings arrive late', async () => {
+    mockConnection.sessionId = undefined;
+    testState.settings = [];
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    let branch = 'main';
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockImplementation(async () => ({ branch })),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    renderApp();
+    await flush();
+    await flush();
+
+    const intentChange = testState.latestChatEditorProps?.onGitModeIntentChange;
+    expect(intentChange).toBeDefined();
+    act(() => {
+      intentChange?.({ mode: 'current' });
+    });
+    await flush();
+
+    testState.settings = [worktreeDefaultSetting(true)];
+    branch = 'feat/late-settings';
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await flush();
+    await flush();
+
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'current',
+    });
+  });
+
+  it('does not re-apply the worktree default after the user resets to current', async () => {
+    mockConnection.sessionId = undefined;
+    testState.settings = [worktreeDefaultSetting(true)];
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    let branch = 'main';
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockImplementation(async () => ({ branch })),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    renderApp();
+    await flush();
+    await flush();
+
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+        mode: 'worktree',
+      });
+    });
+
+    const intentChange = testState.latestChatEditorProps?.onGitModeIntentChange;
+    act(() => {
+      intentChange?.({ mode: 'current' });
+    });
+    await flush();
+
+    branch = 'feat/after-reset';
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await flush();
+    await flush();
+
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'current',
+    });
+  });
+
+  it('keeps an explicit current-branch choice across a transient git-status failure', async () => {
+    mockConnection.sessionId = undefined;
+    testState.settings = [worktreeDefaultSetting(true)];
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    const workspaceGit = vi.fn().mockResolvedValue({ branch: 'main' });
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit,
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    renderApp();
+    await flush();
+    await flush();
+
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+        mode: 'worktree',
+      });
+    });
+    const intentChange = testState.latestChatEditorProps?.onGitModeIntentChange;
+    act(() => {
+      intentChange?.({ mode: 'current' });
+    });
+    await flush();
+
+    // Both fetch paths of one round fail: eligibility drops transiently.
+    // The touched flag must survive the drop (no draft boundary occurred),
+    // so the recovery round does not re-apply the worktree default.
+    workspaceGit.mockRejectedValueOnce(new Error('daemon busy'));
+    workspaceGit.mockRejectedValueOnce(new Error('daemon busy'));
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await flush();
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await flush();
+    await flush();
+
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'current',
+    });
   });
 
   it('keeps an armed worktree intent across a transient git-status failure', async () => {

@@ -3408,8 +3408,9 @@ describe('managed-agent-server e2e runner', () => {
   // The loop-skill arm attests a managed model-turn lifecycle; its guards
   // must stay load-bearing: a turn.failed terminal, a body that only shows
   // up in a later round, a union body served to a cron profile, a call id
-  // witnessed by substring, or a clear leg that never retires the minted
-  // automation would each forge a pass.
+  // witnessed by substring, a create body without the caller import, or a
+  // clear leg that never retires the minted automation would each forge a
+  // pass.
   it('pins the loop-skill arm terminal, body-scope, and call-id contracts', () => {
     const source = read('scripts/run-managed-agent-server-e2e.ts');
     // Every /loop turn settles as exactly one turn.completed; the check
@@ -3423,6 +3424,56 @@ describe('managed-agent-server e2e runner', () => {
     expect(source).toMatch(
       /\['create', created\],\s*\['list', listed\],\s*\['clear', cleared\],/,
     );
+    // The Session-create body carries a caller loop import whose body is the
+    // verbatim bundled reference (readSidecar('bundled-body')), so admission's
+    // replace path runs; swapping that argument to another sidecar would take
+    // the preserve branch. A second non-loop probe skill carries a marker the
+    // server keeps, so the loop marker's absence attests replacement rather than
+    // caller skills never arriving. assertCallerImportReplaced checks both and
+    // is exercised below as executable code, not just pinned as text.
+    expect(source).toMatch(/skills: \[/);
+    expect(source).toMatch(/readSidecar\('bundled-body'\)/);
+    expect(source).toMatch(/body: bundledLoopImport\.body/);
+    expect(source).toMatch(
+      /const callerImportMarker = 'CALLER-LOOP-IMPORT-MARKER';/,
+    );
+    expect(source).toMatch(
+      /const callerProbeMarker = 'CALLER-PROBE-SKILL-MARKER';/,
+    );
+    expect(source).toMatch(/description: callerImportMarker/);
+    expect(source).toMatch(/name: 'loopprobe'/);
+    expect(source).toMatch(/description: callerProbeMarker/);
+    expect(source).toMatch(/function assertCallerImportReplaced\(/);
+    expect(source).toMatch(
+      /assertCallerImportReplaced\(\s*firstRoundMessages,\s*callerImportMarker,\s*callerProbeMarker,?\s*\)/,
+    );
+    expect(source).toMatch(
+      /Caller loop import survived admission; the replace path did not run\. firstRound=/,
+    );
+    expect(source).toMatch(
+      /Caller skills never reached admission; the probe skill marker is absent\. firstRound=/,
+    );
+    // Execute the guard: a severed guard (false &&, or a never-called closure)
+    // leaves the text pins green but these executable assertions red.
+    const { assertCallerImportReplaced } = load(
+      ['assertCallerImportReplaced'],
+      'assertCallerImportReplaced',
+    )();
+    const removed = 'CALLER-LOOP-IMPORT-MARKER';
+    const preserved = 'CALLER-PROBE-SKILL-MARKER';
+    expect(() =>
+      assertCallerImportReplaced([{ content: removed }], removed, preserved),
+    ).toThrow(/survived admission/);
+    expect(() =>
+      assertCallerImportReplaced(
+        [{ content: 'cron variant' }],
+        removed,
+        preserved,
+      ),
+    ).toThrow(/never reached admission/);
+    expect(() =>
+      assertCallerImportReplaced([{ content: preserved }], removed, preserved),
+    ).not.toThrow();
     // The body checks read the first streamed round, and the positive
     // requires the Skill tool result (role 'tool'), not the session prelude.
     expect(source).toMatch(/loopRequests\[0\]\?\.body\['messages'\]/);
@@ -3437,11 +3488,23 @@ describe('managed-agent-server e2e runner', () => {
     expect(source).toMatch(/const unionMarker = 'LoopWakeup';/);
     expect(source).toMatch(/managed-loop-skill-\$\{variant\}\.json/);
     expect(source).toMatch(/Loop sidecar discriminators drifted/);
+    // The classifier answer matches the block schema, not the tool name, so
+    // other structured side queries are not mis-answered with an invalid allow.
+    expect(source).toMatch(/'shouldBlock' in blockProperties/);
+    // The create -> list lifecycle claim: cron_list must echo the created
+    // prompt; a mere tool result must not pass.
+    expect(source).toMatch(/includes\('\/loop check the deploy'\)/);
+    expect(source).toMatch(/cron_list did not echo the created schedule/);
     // The clear leg retires the id the store minted and the result must state
     // that retirement; a mere tool result is satisfied by a 404 error result.
-    expect(source).toMatch(/const createdId = \/asch_\[0-9a-f\]\{32\}\//);
+    expect(source).toMatch(
+      /const createdScheduleId = \/asch_\[0-9a-f\]\{32\}\//,
+    );
     expect(source).toMatch(/Retired cron schedule \$\{createdScheduleId\}\./);
     expect(source).toMatch(/cron_create printed no automation id/);
+    // The reported count is the witnessed calls, not the cumulative flattened
+    // tool-message length (every chat-completions body repeats prior results).
+    expect(source).toMatch(/cronToolResults: cronCallIds\.filter\(/);
     // Call ids match structured fields on both the fake-model confirmation
     // and the scenario assertions, never serialized substrings.
     expect(source).toMatch(
