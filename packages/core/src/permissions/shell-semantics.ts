@@ -35,6 +35,7 @@ import nodePath from 'node:path';
 import os from 'node:os';
 import {
   stripShellCommandNegation,
+  stripShellCommandPrefixes,
   stripShellWrapper,
 } from '../utils/shell-utils.js';
 import {
@@ -2001,7 +2002,14 @@ export function extractShellOperations(
     tokens.shift();
   }
 
-  const cmdName = tokens[0];
+  let commandIndex = 0;
+  for (;;) {
+    const prefix = getShellPrefixCommand(tokens, commandIndex);
+    if (prefix === undefined) break;
+    commandIndex = prefix.commandIndex;
+  }
+
+  const cmdName = tokens[commandIndex];
   if (!cmdName) {
     // Only assignments and/or redirections were present.
     return toRedirectOperations({
@@ -2012,23 +2020,11 @@ export function extractShellOperations(
 
   const ops: ShellOperation[] = [];
 
-  // ── Transparent prefix commands ───────────────────────────────────────────
-  const prefix = getShellPrefixCommand(tokens);
-  if (prefix !== undefined) {
-    const startIdx = prefix.commandIndex;
-    if (startIdx < tokens.length) {
-      // Reconstruct the inner command and recurse
-      const innerCommand = tokens.slice(startIdx).join(' ');
-      ops.push(...extractShellOperations(innerCommand, cwd));
-    }
-  } else {
-    // ── Dispatch to the known-command handler ─────────────────────────────
-    const handler = COMMANDS[cmdName];
-    if (handler) {
-      const args = tokens.slice(1);
-      ops.push(...handler(args, cwd));
-    }
-    // Unknown commands: return no ops (safe — we don't guess what we don't know)
+  // Prefixes advance through the same argv; reparsing joined words would turn
+  // quoted arguments such as `echo 'hi > file'` into executable redirections.
+  const handler = COMMANDS[cmdName];
+  if (handler) {
+    ops.push(...handler(tokens.slice(commandIndex + 1), cwd));
   }
 
   // Append redirect-derived operations
@@ -2349,10 +2345,15 @@ function walkCompoundCommand(
 
     // Unwrap per segment, after the outer split, so wrapper suffixes like
     // `bash -lc 'safe' && echo > file` are not discarded.
+    const unprefixed = stripShellCommandPrefixes(sub) ?? sub;
     if (depth < MAX_SHELL_UNWRAP_DEPTH) {
-      const subUnwrapped = stripShellWrapper(sub);
-      if (subUnwrapped !== sub) {
+      const subUnwrapped = stripShellWrapper(unprefixed);
+      if (subUnwrapped !== unprefixed) {
+        const outerOps = extractShellOperations(sub, effectiveCwd);
         ops.push(
+          ...(cwdUnknown
+            ? markCwdUnknownOps(outerOps, sub, effectiveCwd)
+            : outerOps),
           ...walkCompoundCommand(
             subUnwrapped,
             effectiveCwd,
@@ -2362,7 +2363,7 @@ function walkCompoundCommand(
         );
         continue;
       }
-    } else if (stripShellWrapper(sub) !== sub) {
+    } else if (stripShellWrapper(unprefixed) !== unprefixed) {
       shellSemanticsDebugLogger.warn(
         `Shell wrapper unwrap depth limit reached (${MAX_SHELL_UNWRAP_DEPTH}); analysing remaining command as-is.`,
       );

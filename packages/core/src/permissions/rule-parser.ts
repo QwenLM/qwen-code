@@ -18,10 +18,12 @@ import { isNodeError } from '../utils/errors.js';
 import {
   detectCommandSubstitution,
   getShellConfiguration,
+  stripShellCommandNegation,
   stripShellCommandPrefixes,
   stripShellWrapper,
 } from '../utils/shell-utils.js';
 import { MAX_SHELL_UNWRAP_DEPTH } from '../utils/shell-command-prefixes.js';
+import { tokenizeShellWords } from '../utils/shell-word-tokenizer.js';
 
 import {
   maskConstantArithmetic,
@@ -1097,6 +1099,7 @@ function findOperatorBoundaries(
   // Nesting depth of `$(( … ))` / `(( … ))`. Inside arithmetic a bare `&` is
   // bitwise AND, not the async operator, so `$(( FLAGS & MASK ))` is one word.
   let arithmeticDepth = 0;
+  const parentheses: Array<'group' | 'substitution' | 'arithmetic'> = [];
 
   for (let i = 0; i < command.length; i++) {
     const ch = command[i]!;
@@ -1126,7 +1129,14 @@ function findOperatorBoundaries(
     }
     // Only the Bash reading may discard comments; the alternative reading
     // can add operator boundaries, but cannot erase executable text.
-    if (respectComments && !inSingle && !inDouble && ch === '#' && wordStart) {
+    if (
+      respectComments &&
+      !inSingle &&
+      !inDouble &&
+      arithmeticDepth === 0 &&
+      ch === '#' &&
+      wordStart
+    ) {
       const newline = command.indexOf('\n', i);
       boundaries.push({
         start: i,
@@ -1160,14 +1170,21 @@ function findOperatorBoundaries(
       continue;
     }
 
-    if (ch === '(' && command[i + 1] === '(') {
-      arithmeticDepth++;
-      i++;
+    if (ch === '(') {
+      parentheses.push(ansiCIntroducer ? 'substitution' : 'group');
+      if (command[i + 1] === '(') {
+        parentheses.push('arithmetic');
+        arithmeticDepth++;
+        i++;
+      }
       continue;
     }
-    if (arithmeticDepth > 0 && ch === ')' && command[i + 1] === ')') {
-      arithmeticDepth--;
-      i++;
+    if (ch === ')') {
+      const kind = parentheses.pop();
+      if (kind === 'arithmetic') arithmeticDepth--;
+      // A substitution is still part of the current word; a subshell is a
+      // complete command. Only the latter can start an adjacent comment.
+      wordStart = kind !== 'substitution';
       continue;
     }
 
@@ -1283,7 +1300,44 @@ export function hasUnsupportedShellSyntax(command: string, depth = 0): boolean {
   for (const segment of splitCompoundCommand(command, true)) {
     const unprefixed = stripShellCommandPrefixes(segment);
     if (unprefixed === undefined) return true;
+    const firstWord = tokenizeShellWords(unprefixed)[0];
+    if (
+      firstWord === 'eval' ||
+      firstWord?.split('/').at(-1) === 'xargs' ||
+      /^(?:[({]|(?:if|then|elif|else|fi|while|until|for|select|case|esac|do|done|function)(?:\s|$))/.test(
+        unprefixed,
+      ) ||
+      (unprefixed !== stripShellCommandNegation(segment).trim() &&
+        (firstWord === 'cd' || firstWord === 'pushd' || firstWord === 'popd'))
+    ) {
+      return true;
+    }
     const inner = stripShellWrapper(unprefixed);
+    if (inner === unprefixed && /[<>]/.test(segment)) {
+      const staticView = staticShellCommand(segment);
+      if (staticView) {
+        // The restrictive view can locate a payload behind redirections that
+        // the raw tracker cannot unwrap. Use it only to veto that mismatch.
+        const redirectFree = staticView.words
+          .split(' ')
+          .map((word) => {
+            const decoded = word.replace(/%([0-9a-f]{4})/g, (_, unit: string) =>
+              String.fromCharCode(Number.parseInt(unit, 16)),
+            );
+            return `'${decoded.replaceAll("'", "'\\''")}'`;
+          })
+          .join(' ');
+        const execution = stripShellCommandPrefixes(redirectFree);
+        if (
+          redirectFree !== segment &&
+          (execution === undefined ||
+            stripShellWrapper(execution) !== execution ||
+            hasUnsupportedShellSyntax(redirectFree, depth))
+        ) {
+          return true;
+        }
+      }
+    }
     if (
       inner !== unprefixed &&
       (depth >= MAX_SHELL_UNWRAP_DEPTH ||
@@ -1301,6 +1355,13 @@ export function hasUnsupportedShellSyntax(command: string, depth = 0): boolean {
     const ansiCQuote =
       character === '$' ? /^\$(?:\\\n)*'/.exec(command.slice(index)) : null;
     if (redirectTarget === 'pending' && !/[ \t\n]/.test(character)) {
+      if (
+        /^~[^/ \t\n'"\\;&|<>(){}]+(?=\/|[ \t\n;&|<>(){}]|$)/.test(
+          command.slice(index),
+        )
+      ) {
+        return true;
+      }
       redirectTarget = 'word';
     }
     if (
@@ -1482,9 +1543,13 @@ function normalizeRedirectSpacing(command: string, pattern = false): string {
 }
 
 /** Compare command words and required file effects, only for deny/ask rules. */
-function matchesStaticShellCommand(pattern: string, command: string): boolean {
-  const expected = staticShellCommand(pattern, true);
-  const actual = staticShellCommand(command);
+function matchesStaticShellCommand(
+  pattern: string,
+  command: string,
+  cwd?: string,
+): boolean {
+  const expected = staticShellCommand(pattern, true, cwd);
+  const actual = staticShellCommand(command, false, cwd);
   if (
     !expected ||
     !actual ||
@@ -2377,6 +2442,7 @@ export function matchesRule(
           specifierMatched ||= matchesStaticShellCommand(
             rule.specifier,
             command,
+            pathContext?.cwd,
           );
         }
         break;

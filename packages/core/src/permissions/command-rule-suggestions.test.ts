@@ -12,7 +12,7 @@ import {
   _resetParser,
   _setParserFailedForTesting,
 } from '../utils/shellAstParser.js';
-import { getShellConfiguration } from '../utils/shell-utils.js';
+import { getShellConfiguration, splitCommands } from '../utils/shell-utils.js';
 
 const makeManager = (
   allow: string[],
@@ -57,6 +57,57 @@ describe.each([
   ['monitor', 'Monitor'],
 ] as const)('%s permission suggestions', (toolName, displayName) => {
   it.each([
+    'git > /tmp/log push origin \\\nmain',
+    'git > /tmp/log push origin "ma\\\n in"',
+    'npm install && git <&- push origin main',
+    'git > /dev/null push origin main',
+  ])('round-trips caller-derived eligible commands for %s', async (command) => {
+    const { permissionRules = [] } = await suggestCommandRules(
+      command,
+      displayName,
+      splitCommands(command),
+    );
+    expect(permissionRules.length).toBeGreaterThan(0);
+    expect(
+      await makeManager(permissionRules).evaluate({ toolName, command }),
+    ).toBe('allow');
+    expect(
+      await makeManager(permissionRules).evaluate({
+        toolName,
+        command: 'git reset --hard',
+      }),
+    ).not.toBe('allow');
+  });
+
+  it.each([
+    '(cd e2e && npm run test:e2e)',
+    '(git push origin main) > out',
+    '(cd e2e && npm run test:e2e) && npm install',
+    '{ cd e2e; npm run test:e2e; } && npm install',
+    'cd /var/www && for f in *.log; do gzip -f "$f"; done',
+    'npm install && git log $(date)',
+  ])(
+    'does not offer partial caller-derived coverage for %s',
+    async (command) => {
+      for (const eligible of [undefined, splitCommands(command)]) {
+        expect(
+          await suggestCommandRules(command, displayName, eligible),
+        ).toEqual({
+          permissionRules: [],
+        });
+      }
+    },
+  );
+
+  it('does not broaden a partially selected compound statement', async () => {
+    expect(
+      await suggestCommandRules('(git status && npm install)', displayName, [
+        'npm install)',
+      ]),
+    ).toEqual({ permissionRules: [] });
+  });
+
+  it.each([
     '*',
     '**',
     'ls -la && *',
@@ -90,43 +141,53 @@ describe.each([
     'for f in *; do echo $f; done; npm test',
     'npm test && cat <<EOF\nrm -rf /tmp/not-a-command\nEOF',
     'cat <<EOF\nrm -rf /tmp/not-a-command\nEOF\nnpm test',
-  ])('retains only independent supported statements in %s', async (command) => {
-    const { permissionRules = [] } = await suggestCommandRules(
-      command,
-      displayName,
-    );
-    expect(permissionRules).toEqual([`${displayName}(npm test)`]);
-    const manager = makeManager(permissionRules);
-    expect(await manager.evaluate({ toolName, command: 'npm test' })).toBe(
-      'allow',
-    );
-    expect(await manager.evaluate({ toolName, command })).not.toBe('allow');
-    expect(await manager.evaluate({ toolName, command: 'echo secret' })).toBe(
-      'ask',
-    );
-    expect(await manager.evaluate({ toolName, command: 'cat' })).toBe('ask');
-    expect(
-      await manager.evaluate({
-        toolName,
-        command: 'rm -rf /tmp/not-a-command',
-      }),
-    ).toBe('ask');
-  });
-
-  it.each([
-    ['git push origin main # && rm -rf ~/Downloads', 'git push *'],
-    ['npm test\n# done', 'npm test'],
-    ["npm test # it's done && rm -rf ~/Downloads", 'npm test'],
   ])(
-    'does not turn comment contents into grants: %s',
-    async (command, rule) => {
+    'does not persist an incomplete set for unsupported statements in %s',
+    async (command) => {
       const { permissionRules = [] } = await suggestCommandRules(
         command,
         displayName,
       );
-      expect(permissionRules).toEqual([`${displayName}(${rule})`]);
+      expect(permissionRules).toEqual([]);
+      const manager = makeManager(permissionRules);
+      expect(await manager.evaluate({ toolName, command })).not.toBe('allow');
+      expect(await manager.evaluate({ toolName, command: 'echo secret' })).toBe(
+        'ask',
+      );
+      expect(await manager.evaluate({ toolName, command: 'cat' })).toBe('ask');
       expect(
-        await makeManager(permissionRules).evaluate({
+        await manager.evaluate({
+          toolName,
+          command: 'rm -rf /tmp/not-a-command',
+        }),
+      ).toBe('ask');
+    },
+  );
+
+  it.each([
+    [
+      'git push origin main # && rm -rf ~/Downloads',
+      displayName === 'Bash' ? [`${displayName}(git push *)`] : [],
+    ],
+    ['npm test\n# done', []],
+    [
+      "npm test # it's done && rm -rf ~/Downloads",
+      [`${displayName}(npm test)`],
+    ],
+  ])(
+    'does not turn comment contents into grants: %s',
+    async (command, expected) => {
+      const { permissionRules = [] } = await suggestCommandRules(
+        command,
+        displayName,
+      );
+      expect(permissionRules).toEqual(expected);
+      const manager = makeManager(permissionRules);
+      if (permissionRules.length > 0) {
+        expect(await manager.evaluate({ toolName, command })).toBe('allow');
+      }
+      expect(
+        await manager.evaluate({
           toolName,
           command: 'rm -rf ~/Downloads',
         }),
@@ -180,11 +241,11 @@ describe.each([
     'git log $(date) && npm install',
     'npm install && git <&- show "*"',
   ])(
-    'keeps the safe suggestions from %s without approving it',
+    'does not offer a persistent choice that leaves %s unapproved',
     async (command) => {
       const suggested = await suggestCommandRules(command, displayName);
       expect(suggested).toEqual({
-        permissionRules: [`${displayName}(npm install)`],
+        permissionRules: [],
       });
       expect(
         await makeManager(suggested.permissionRules ?? []).evaluate({
@@ -260,7 +321,6 @@ describe.each([
     'git > ~/push.log push origin main',
     'git > /tmp/log push origin 中文',
     'git > /tmp/log push origin main # comment',
-    '(git push origin main) > out',
     'git >& file push origin main',
     'git &> /tmp/log push origin main',
     'git &>> /tmp/log push origin main',

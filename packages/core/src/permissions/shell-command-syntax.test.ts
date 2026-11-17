@@ -113,6 +113,10 @@ describe('Bash permission syntax views', () => {
     'git &>/tmp/protected push origin main',
     'git >|/tmp/protected push origin main',
     'git >/tmp/prot\\ected push origin main',
+    'git >/tmp//protected push origin main',
+    'git >/tmp/./protected push origin main',
+    'git >"/tmp//./protected" push origin main',
+    'git >/tmp/prot"ected" push origin main',
     'git >&/tmp/protected push origin main',
     'git 1>&/tmp/protected push origin main',
     'git 2>&1>/tmp/protected push origin main',
@@ -123,6 +127,51 @@ describe('Bash permission syntax views', () => {
     expect(staticShellCommand(command)).toEqual(
       staticShellCommand('git >/tmp/protected push origin main'),
     );
+  });
+
+  it.each([
+    ['protected', '/tmp/protected'],
+    ['./protected', '/tmp/protected'],
+    ['logs//./protected', '/tmp/logs/protected'],
+    ["'~root'/./protected", '/tmp/~root/protected'],
+    ['../protected', '/tmp/../protected'],
+  ])(
+    'resolves the static target %s only from a supplied cwd',
+    (target, path) => {
+      expect(staticShellCommand(`git >${target} push`, false, '/tmp')).toEqual(
+        staticShellCommand(`git >${path} push`),
+      );
+      expect(staticShellCommand(`git >${target} push`)).not.toEqual(
+        staticShellCommand(`git >${path} push`),
+      );
+    },
+  );
+
+  it('preserves wildcard metadata while resolving relative redirect patterns', () => {
+    expect(staticShellCommand('git >logs/* push', true, '/tmp')).toEqual(
+      staticShellCommand('git >/tmp/logs/* push', true),
+    );
+    expect(staticShellCommand("git >'logs/*' push", true, '/tmp')).toEqual(
+      staticShellCommand("git >'/tmp/logs/*' push", true),
+    );
+    expect(staticShellCommand('git >*/protected push', true, '/tmp')).toEqual(
+      staticShellCommand('git >*/protected push', true),
+    );
+    expect(
+      staticShellCommand('git >logs/* push', false, '/tmp'),
+    ).toBeUndefined();
+  });
+
+  it('does not collapse parent traversal, a double-slash root, or bare tilde', () => {
+    expect(staticShellCommand('git >/tmp/link/../protected push')).not.toEqual(
+      staticShellCommand('git >/tmp/protected push'),
+    );
+    expect(staticShellCommand('git >//host/protected push')).not.toEqual(
+      staticShellCommand('git >/host/protected push'),
+    );
+    expect(
+      staticShellCommand('git >~root/protected push', false, '/tmp'),
+    ).toEqual(staticShellCommand('git >~root/protected push'));
   });
 
   it('removes assignments with quoted values but retains quoted command names', () => {

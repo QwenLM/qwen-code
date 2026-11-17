@@ -14,8 +14,12 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import type { ToolExecuteConfirmationDetails } from '../tools/tools.js';
 import {
   hasUnsupportedShellSyntax,
+  matchesRule,
   matchesCommandPattern,
+  parseRule,
 } from './rule-parser.js';
+import { splitCommandForRules } from './permission-manager.js';
+import { removeShellLineContinuations } from './shell-command-syntax.js';
 
 const debugLogger = createDebugLogger('PERMISSIONS');
 
@@ -67,7 +71,13 @@ function isSimpleTrailingHeredoc(redirect: Parser.SyntaxNode): boolean {
   );
 }
 
-async function shellRuleParts(command: string): Promise<string[]> {
+interface CommandPart {
+  text: string;
+  start: number;
+  end: number;
+}
+
+async function shellRuleParts(command: string): Promise<CommandPart[]> {
   try {
     let tree = await parseShellCommand(command);
     let structure = command;
@@ -174,7 +184,7 @@ async function shellRuleParts(command: string): Promise<string[]> {
             end = close.endIndex;
           }
         }
-        return command.slice(start, end).trim();
+        return { text: command.slice(start, end).trim(), start, end };
       });
     } finally {
       tree.delete();
@@ -183,11 +193,18 @@ async function shellRuleParts(command: string): Promise<string[]> {
     // Without the parser, keep the plain-command fallback; never reinterpret
     // control-flow or heredoc fragments as independent commands.
     const parts = command.split('&&').map((part) => part.trim());
-    return parts.every((part) =>
-      /^[A-Za-z0-9_./:@%+=,-]+(?:[ \t]+[A-Za-z0-9_./:@%+=,-]+)*$/.test(part),
+    if (
+      !parts.every((part) =>
+        /^[A-Za-z0-9_./:@%+=,-]+(?:[ \t]+[A-Za-z0-9_./:@%+=,-]+)*$/.test(part),
+      )
     )
-      ? parts
-      : [];
+      return [];
+    let offset = 0;
+    return parts.map((text) => {
+      const start = command.indexOf(text, offset);
+      offset = start + text.length;
+      return { text, start, end: offset };
+    });
   }
 }
 
@@ -198,22 +215,30 @@ export async function suggestCommandRules(
   eligibleCommands?: readonly string[],
 ): Promise<Pick<ToolExecuteConfirmationDetails, 'permissionRules'>> {
   const bash = getShellConfiguration().shell === 'bash';
+  if (bash) command = removeShellLineContinuations(command);
   const allRules: string[] = [];
-  const parts = bash ? await shellRuleParts(command) : splitCommands(command);
-  const rawParts = splitCommands(command);
-  const eligible = eligibleCommands
-    ? (
-        await Promise.all(
-          eligibleCommands
-            .filter((part) => rawParts.includes(part))
-            .map((part) =>
-              bash ? shellRuleParts(part) : Promise.resolve([part]),
-            ),
-        )
-      ).flat()
-    : parts;
-  const selected = parts.filter((part) => eligible.includes(part));
-  for (const part of selected) {
+  const eligible = eligibleCommands?.map((part) =>
+    bash ? removeShellLineContinuations(part) : part,
+  );
+  let offset = 0;
+  const rawParts = splitCommands(command).map((text) => {
+    const start = command.indexOf(text, offset);
+    offset = start + text.length;
+    return { text, start, end: offset };
+  });
+  if (rawParts.some((part) => part.start < 0)) return { permissionRules: [] };
+  const parts = bash ? await shellRuleParts(command) : rawParts;
+  const selected = parts.filter((part) => {
+    if (!eligible) return true;
+    const overlapping = rawParts.filter(
+      (raw) => raw.start < part.end && part.start < raw.end,
+    );
+    return (
+      overlapping.length > 0 &&
+      overlapping.every((raw) => eligible.includes(raw.text))
+    );
+  });
+  for (const { text: part } of selected) {
     if (bash && hasUnsupportedShellSyntax(part)) {
       continue;
     }
@@ -234,9 +259,22 @@ export async function suggestCommandRules(
     }
     allRules.push(...rules);
   }
-  return {
-    permissionRules: [...new Set(allRules)].map(
-      (rule) => `${toolName}(${rule})`,
+  const permissionRules = [...new Set(allRules)].map(
+    (rule) => `${toolName}(${rule})`,
+  );
+  const rules = permissionRules.map(parseRule).filter((rule) => rule !== null);
+  const canonicalTool = toolName === 'Bash' ? 'run_shell_command' : 'monitor';
+  const required = eligible
+    ? rawParts
+        .filter((part) => eligible.includes(part.text))
+        .map((part) => part.text)
+    : [command];
+  // An offered persistent choice must cover the same segments the matcher
+  // will score. Never save a partial set that immediately asks again.
+  const covered = required.every((part) =>
+    splitCommandForRules(part, canonicalTool).every((segment) =>
+      rules.some((rule) => matchesRule(rule, canonicalTool, segment)),
     ),
-  };
+  );
+  return { permissionRules: covered ? permissionRules : [] };
 }

@@ -140,6 +140,7 @@ export interface StaticShellCommand {
 export function staticShellCommand(
   command: string,
   pattern = false,
+  cwd?: string,
 ): StaticShellCommand | undefined {
   const bares: string[] = [];
   const expansions = new Set<number>();
@@ -233,7 +234,7 @@ export function staticShellCommand(
             : piece.operator === '<'
               ? 'read'
               : 'write',
-        target: encodeWord(target, pattern),
+        target: encodeWord(normalizeRedirectTarget(target, cwd), pattern),
       });
     } else {
       // Only unquoted prefix assignments and negation are syntax.
@@ -254,6 +255,44 @@ export function staticShellCommand(
         redirects,
       }
     : undefined;
+}
+
+function normalizeRedirectTarget(word: ShellWord, cwd?: string): ShellWord {
+  if (!word.text || (word.text[0] === '~' && word.bare[0] === '1')) return word;
+  let { text, bare } = word;
+  if (
+    cwd?.startsWith('/') &&
+    !text.startsWith('/') &&
+    // A leading rule wildcard may already match an absolute path.
+    !(text[0] === '*' && bare[0] === '1')
+  ) {
+    text = `${cwd}/${text}`;
+    bare = '0'.repeat(cwd.length + 1) + bare;
+  }
+  // Resolving ".." lexically can change a target after a symlink component.
+  const components = [...text.matchAll(/[^/]+/g)].filter(
+    ([component]) => component !== '.',
+  );
+  const prefix =
+    text.startsWith('//') && !text.startsWith('///')
+      ? '//'
+      : text.startsWith('/')
+        ? '/'
+        : '';
+  const suffix = text.endsWith('/') && components.length > 0 ? '/' : '';
+  return {
+    ...word,
+    text:
+      (prefix + components.map(([component]) => component).join('/') || '.') +
+      suffix,
+    bare:
+      ('0'.repeat(prefix.length) +
+        components
+          .map((match) =>
+            bare.slice(match.index, match.index + match[0].length),
+          )
+          .join('0') || '0') + (suffix ? '0' : ''),
+  };
 }
 
 function encodeWord(word: ShellWord, pattern: boolean): string {

@@ -213,6 +213,10 @@ describe.each(['run_shell_command', 'monitor'])(
         "git > '/tmp/protected' push origin main",
         'git &>/tmp/protected push origin main',
         'git >|/tmp/protected push origin main',
+        'git >/tmp//protected push origin main',
+        'git >/tmp/./protected push origin main',
+        'git >"/tmp//./protected" push origin main',
+        'git >/tmp/prot"ected" push origin main',
         "git push ''#x >/tmp/protected",
         'git push ""#x >/tmp/protected',
         "git push $''#x >/tmp/protected",
@@ -290,6 +294,74 @@ describe.each(['run_shell_command', 'monitor'])(
         expect(asked.hasMatchingAskRule(ctx)).toBe(true);
       },
     );
+
+    it.each([
+      ['Bash(git>/tmp/protected push *)', './protected', '/tmp', undefined],
+      ['Bash(git>/tmp/protected push *)', 'protected', '/elsewhere', '/tmp'],
+      ['Bash(git>./protected push *)', '/tmp/protected', '/tmp', undefined],
+      ['Bash(git>logs/* push *)', '/tmp/logs/protected', '/tmp', undefined],
+      [
+        'Bash(git>*/protected push *)',
+        '/elsewhere/protected',
+        '/tmp',
+        undefined,
+      ],
+      ["Bash(git>'logs/*' push *)", "'/tmp/logs/*'", '/tmp', undefined],
+    ] as const)(
+      'preserves restrictive rule %s for target %s with cwd context',
+      async (rule, target, configuredCwd, cwd) => {
+        const ctx = {
+          toolName,
+          command: `git 2>${target} push origin main`,
+          ...(cwd === undefined ? {} : { cwd }),
+        };
+        const denied = makeManager(['Bash(*)'], [], [rule], configuredCwd);
+        expect(await evaluatePermissionRules(denied, 'ask', ctx)).toEqual({
+          finalPermission: 'deny',
+          pmForcedAsk: false,
+        });
+        expect(denied.findMatchingDenyRule(ctx)).toBe(rule);
+        const asked = makeManager(['Bash(*)'], [rule], [], configuredCwd);
+        expect(await evaluatePermissionRules(asked, 'ask', ctx)).toEqual({
+          finalPermission: 'ask',
+          pmForcedAsk: true,
+        });
+        expect(asked.hasMatchingAskRule(ctx)).toBe(true);
+      },
+    );
+
+    it.each([
+      'git >/tmp//protected push origin main',
+      'git >./protected push origin main',
+    ])(
+      'does not widen an allow rule to an equivalent redirect spelling: %j',
+      async (command) => {
+        const rule = 'Bash(git >/tmp/protected push origin main)';
+        const manager = makeManager([rule], [], [], '/tmp');
+        expect(await manager.evaluate({ toolName, command })).toBe('ask');
+        expect(
+          await manager.evaluate({
+            toolName,
+            command: 'git >/tmp/protected push origin main',
+          }),
+        ).toBe('allow');
+      },
+    );
+
+    it('does not turn a quoted redirect wildcard into a path pattern', async () => {
+      const manager = makeManager(
+        ['Bash(*)'],
+        [],
+        ["Bash(git>'logs/*' push *)"],
+        '/tmp',
+      );
+      expect(
+        await manager.evaluate({
+          toolName,
+          command: 'git 2>/tmp/logs/other push origin main',
+        }),
+      ).toBe('allow');
+    });
 
     it.each([
       'git > /tmp/other push origin main',

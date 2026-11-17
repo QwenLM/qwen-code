@@ -15,6 +15,27 @@ import type { CompoundCommandSegment } from './rule-parser.js';
 // writes a file named `\r`, so the CR stays in the segment instead of being
 // dropped as a line ending. `1>|` and `2>|` name it exactly as `>|` does.
 describe('splitCompoundCommandSegments', () => {
+  it.each([
+    'echo $(date)# ; rm -rf /tmp/x',
+    'echo $((1+2))# ; rm -rf /tmp/x',
+    'echo $((1+(2)))# ; rm -rf /tmp/x',
+    "echo $(printf ')')# ; rm -rf /tmp/x",
+  ])('keeps a substitution-suffix hash literal in %s', (command) => {
+    expect(splitCompoundCommandSegments(command, true)).toEqual([
+      { command: command.slice(0, command.indexOf(' ;')), terminator: ';' },
+      { command: 'rm -rf /tmp/x', terminator: '' },
+    ]);
+  });
+
+  it.each(['(echo hi)#x', '(( 1 ))#x'])(
+    'keeps comments after a complete shell command in %s',
+    (command) => {
+      expect(splitCompoundCommandSegments(command, true)).toEqual([
+        { command: command.slice(0, command.indexOf('#')), terminator: '' },
+      ]);
+    },
+  );
+
   it.each<[string, CompoundCommandSegment[]]>([
     [
       "echo safe # it's a comment\nbash -c 'git push > $X'",
