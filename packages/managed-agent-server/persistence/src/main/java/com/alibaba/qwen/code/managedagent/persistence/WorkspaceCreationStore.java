@@ -203,7 +203,7 @@ public class WorkspaceCreationStore {
             var source = completed.sourceWorkspaceId() == null ? null : verifySource(tenant, actor, completed);
             if (completed.localRoot() != null) {
                 Path root = Path.of(completed.localRoot().root());
-                if (!completed.localRoot().equals(guard.identity(root))) {
+                if (!completed.localRoot().equals(guard.identity(root, completed.localRoot()))) {
                     throw WorkspaceExecutionStore.unavailable();
                 }
                 localDirectories.project(root.resolve(completed.cwdRelative()).toString());
@@ -309,7 +309,7 @@ public class WorkspaceCreationStore {
         String receiptKey = details.workspaceId().substring("workspace-".length());
         Path root = Path.of(details.localRoot().root());
         localDirectories.requireStorageRoot(root);
-        if (!details.localRoot().equals(guard.identity(root))) {
+        if (!details.localRoot().equals(guard.identity(root, details.localRoot()))) {
             throw WorkspaceExecutionStore.unavailable();
         }
         return transaction.execute(status -> {
