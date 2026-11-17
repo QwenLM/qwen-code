@@ -278,7 +278,9 @@ worktree-branch 路由带繁忙门（`branch_while_prompt_active`）。能力标
 v1 限制（成文而非静默）：以「本地干净」要求代替「无其他活跃会话占用本地
 检出」（bridge 无会话列表探针可查占用）；handoff 不实现 `worktree-reset` 的崩溃窗口原子回滚——中途崩溃
 留下可恢复形态（sidecar/marker 仍命名该会话，worktree 管理器可见该检出），
-而非自愈转移。
+而非自愈转移。绑定到子目录的 daemon 以 `handoff_workspace_occupied` 拒绝
+handoff-to-local：`listWorkspaceSessions` 只对绑定的工作区作答，因此无法枚举
+不同 `localCwd` 的占用者，路由失败关闭，而非移动一个它无法检查的共享检出。
 
 ### D7 — 快照是工作归档，恢复重建 worktree
 

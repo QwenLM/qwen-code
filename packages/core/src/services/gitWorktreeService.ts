@@ -3319,14 +3319,17 @@ export class GitWorktreeService {
   /**
    * Force-checkout a branch, discarding tracked working-tree changes.
    * Rollback-only: the caller must know the checkout's prior state was
-   * clean (or a copy it can afford to lose).
+   * clean (or a copy it can afford to lose). Judged by exit status, not
+   * stderr presence (carryApplyErrorDetection): a silent non-zero exit must
+   * reject, so the handoff rollback reports a failed restore truthfully
+   * instead of claiming a force-restore that never happened (round-10 S19).
    */
   async forceCheckoutBranch(
     checkoutPath: string,
     branchName: string,
   ): Promise<void> {
     const { simpleGit } = await loadSimpleGit();
-    await simpleGit(checkoutPath)
+    await simpleGit(checkoutPath, { errors: carryApplyErrorDetection })
       .env(gitEnv())
       .raw(['checkout', '-f', branchName]);
   }

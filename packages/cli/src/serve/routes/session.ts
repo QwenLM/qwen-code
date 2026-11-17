@@ -398,6 +398,14 @@ const ARTIFACT_LIBRARY_CONCURRENCY = 4;
 // Keep a single request from expanding an unbounded number of content blocks.
 const MEDIA_CONTENT_MAX_BLOCKS = 256;
 
+// The two restoreFailed refusal notes for a handoff-to-local snapshot conflict,
+// chosen from rollback()'s actual result. Named so each arm is greppable by its
+// text (the route tests assert on these substrings).
+const HANDOFF_RESTORE_NOTE_RESTORED =
+  ' — the local checkout was force-restored by rollback; inspect it if conflict markers remain';
+const HANDOFF_RESTORE_NOTE_FAILED =
+  ' — the local checkout could not be restored and may still hold conflict markers; inspect it before retrying';
+
 // SVG is allowed as an ordinary file resource but never as an inline image.
 // Compare the normalized media type so spelling variants cannot bypass the
 // image-block check.
@@ -5594,8 +5602,8 @@ export function registerSessionRoutes(
                           : String(error)) +
                         (restoreFailed
                           ? localRestored
-                            ? ' — the local checkout was force-restored by rollback; inspect it if conflict markers remain'
-                            : ' — the local checkout could not be restored and may still hold conflict markers; inspect it before retrying'
+                            ? HANDOFF_RESTORE_NOTE_RESTORED
+                            : HANDOFF_RESTORE_NOTE_FAILED
                           : ''),
                       sessionId: storageSessionId,
                     });

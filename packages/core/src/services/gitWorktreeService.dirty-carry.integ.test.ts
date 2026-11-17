@@ -903,6 +903,38 @@ describe('GitWorktreeService.createUserWorktree() — carryDirtyState', () => {
     expect(await service.createStashSnapshot(repoRoot)).toBe('');
   });
 
+  it('forceCheckoutBranch rejects a silent checkout failure (round-10 S19)', async () => {
+    // The handoff rollback judges its restore by forceCheckoutBranch's result.
+    // A silent non-zero `checkout -f` (exit 1, empty stderr) resolves under
+    // default detection, so the rollback would report a successful restore that
+    // never happened and the refusal would overclaim. Same portable shim class
+    // as R13-1: scan consecutive `checkout -f` args (the loader prepends -c).
+    const realGit = execFileSync('bash', ['-c', 'command -v git'], {
+      encoding: 'utf8',
+    }).trim();
+    const shimDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-git-shim-'));
+    const shim = path.join(shimDir, 'git');
+    await fs.writeFile(
+      shim,
+      `#!/bin/bash\nprev=""\nfor a in "$@"; do\n  if [ "$prev" = "checkout" ] && [ "$a" = "-f" ]; then exit 1; fi\n  prev="$a"\ndone\nexec ${realGit} "$@"\n`,
+    );
+    await fs.chmod(shim, 0o755);
+    const originalPath = process.env['PATH'];
+    process.env['PATH'] = `${shimDir}:${originalPath}`;
+    const service = new GitWorktreeService(repoRoot);
+    try {
+      await expect(
+        service.forceCheckoutBranch(repoRoot, 'main'),
+      ).rejects.toThrow('exited with code 1');
+    } finally {
+      process.env['PATH'] = originalPath;
+      await fs.rm(shimDir, { recursive: true, force: true });
+    }
+    // A healthy force-checkout still succeeds (exit 0): the detector adds
+    // exit-status detection only, it does not treat a clean checkout as failure.
+    await service.forceCheckoutBranch(repoRoot, 'main');
+  });
+
   it('refuses a carry on an unmerged index with a typed merge-in-progress code (R12-1)', async () => {
     // A real conflicted merge: `git stash create` cannot run on an unmerged
     // index. That is a state the user can clear (resolve/abort), not a daemon

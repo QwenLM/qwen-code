@@ -351,7 +351,11 @@ session-list probe to check occupancy); the handoff does not
 implement `worktree-reset`'s crash-window atomic rollback — a crash
 mid-handoff leaves a recoverable shape (the sidecar/marker still name the
 session, and the worktree manager shows the checkout), not a self-healing
-transfer.
+transfer. A daemon bound to a subdirectory refuses handoff-to-local with
+`handoff_workspace_occupied`: `listWorkspaceSessions` only answers for the
+bound workspace, so the occupants of a different `localCwd` cannot be
+enumerated, and the route fails closed rather than move a shared checkout it
+cannot inspect.
 
 ### D7 — Snapshots are work archives, restore recreates the worktree
 
