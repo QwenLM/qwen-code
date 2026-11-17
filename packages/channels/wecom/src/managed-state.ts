@@ -91,6 +91,8 @@ export function validManagedWecomState(
         typeof entry.event === 'object' &&
         entry.event.platformEventId === entry.eventId &&
         typeof entry.event.text === 'string' &&
+        (entry.event.subject === null ||
+          typeof entry.event.subject === 'string') &&
         // The re-drive (resubmitPending) reads these fields; a partial state
         // that loads would drop the already-accepted claim with a misleading
         // line (allowlist) or submit it without chat/scope (open). Fail closed

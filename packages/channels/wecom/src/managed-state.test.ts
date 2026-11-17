@@ -158,6 +158,9 @@ describe('validManagedWecomState', () => {
   it('rejects a bad instanceRefusals but allows it absent', () => {
     expect(validManagedWecomState(baseState())).toBe(true);
     expect(
+      validManagedWecomState({ ...baseState(), instanceRefusals: 0 }),
+    ).toBe(true);
+    expect(
       validManagedWecomState({ ...baseState(), instanceRefusals: -1 }),
     ).toBe(false);
     expect(
@@ -174,6 +177,11 @@ describe('validManagedWecomState', () => {
       validManagedWecomState(
         withPending({ eventId: '', event: inbound('e1') }),
       ),
+    ).toBe(false);
+    // Isolate the eventId length guard: a matching empty platformEventId means
+    // only the non-empty eventId clause can reject this.
+    expect(
+      validManagedWecomState(withPending({ eventId: '', event: inbound('') })),
     ).toBe(false);
     // The persisted event must be the exact admitted event, keyed by id.
     expect(
@@ -350,6 +358,42 @@ describe('validManagedWecomState', () => {
         }),
       ),
     ).toBe(false);
+    // Isolate the chatId guard with a valid senderId so the senderId clause
+    // cannot mask it: missing chatId and empty chatId must each reject on the
+    // chatId clause alone (otherwise deleting that clause stays green).
+    expect(
+      validManagedWecomState(
+        withEvent({
+          ...inbound('e1'),
+          replyContext: { senderId: 's', botId: 'bot-1' },
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      validManagedWecomState(
+        withEvent({
+          ...inbound('e1'),
+          replyContext: { chatId: '', senderId: 's', botId: 'bot-1' },
+        }),
+      ),
+    ).toBe(false);
+    // subject is submitted on re-drive; a non-string/non-null must fail closed.
+    expect(
+      validManagedWecomState(withEvent({ ...inbound('e1'), subject: 42 })),
+    ).toBe(false);
+    expect(
+      validManagedWecomState(withEvent({ ...inbound('e1'), subject: 'x' })),
+    ).toBe(true);
+    // threadId empty string must reject on its own length guard.
+    expect(
+      validManagedWecomState(withEvent({ ...inbound('e1'), threadId: '' })),
+    ).toBe(false);
+    // accountGeneration non-integer must reject on the isSafeInteger half.
+    expect(
+      validManagedWecomState(
+        withEvent({ ...inbound('e1'), accountGeneration: 1.5 }),
+      ),
+    ).toBe(false);
     // No over-rejection: the intact carriers the adapter actually writes load.
     expect(validManagedWecomState(withEvent(inbound('e1')))).toBe(true);
   });
@@ -374,6 +418,9 @@ describe('validManagedWecomState', () => {
     expect(validManagedWecomState(withOutbound({ ...good, ordinal: -1 }))).toBe(
       false,
     );
+    expect(
+      validManagedWecomState(withOutbound({ ...good, ordinal: 1.5 })),
+    ).toBe(false);
     expect(
       validManagedWecomState(withOutbound({ ...good, messageId: '' })),
     ).toBe(false);

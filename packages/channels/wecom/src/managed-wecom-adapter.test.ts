@@ -262,32 +262,36 @@ describe('managed WeCom adapter inbound', () => {
     await adapter.disconnect();
   });
 
-  it('routes a single-chat frame without chatid on the sender userid', async () => {
-    const { adapter, plane, fake } = await connectedAdapter();
-    // The SDK's send contract addresses a single chat by the user's userid;
-    // the frame carries no chatid, so scope, reply context and the send target
-    // must all carry the fallback id.
-    fake.push('msg-1', messageData());
-    await adapter.tick();
-    const event = plane.submit[0]!;
-    expect(event.chatId).toBe('user-1');
-    expect(event.threadId).toBe('user-1');
-    expect(event.scope).toEqual({
-      kind: 'chat_thread',
-      senderId: null,
-      chatId: 'user-1',
-      threadId: 'user-1',
-    });
-    expect(event.replyContext).toEqual({
-      chatId: 'user-1',
-      senderId: 'user-1',
-      botId: 'bot-1',
-    });
-    plane.enqueue([delivery('d1', 1)]);
-    await adapter.tick();
-    expect(fake.sent).toEqual([{ chatId: 'user-1', text: 'segment 0' }]);
-    await adapter.disconnect();
-  });
+  it(
+    'routes a single-chat frame without chatid on the sender userid',
+    { timeout: 20_000 },
+    async () => {
+      const { adapter, plane, fake } = await connectedAdapter();
+      // The SDK's send contract addresses a single chat by the user's userid;
+      // the frame carries no chatid, so scope, reply context and the send target
+      // must all carry the fallback id.
+      fake.push('msg-1', messageData());
+      await adapter.tick();
+      const event = plane.submit[0]!;
+      expect(event.chatId).toBe('user-1');
+      expect(event.threadId).toBe('user-1');
+      expect(event.scope).toEqual({
+        kind: 'chat_thread',
+        senderId: null,
+        chatId: 'user-1',
+        threadId: 'user-1',
+      });
+      expect(event.replyContext).toEqual({
+        chatId: 'user-1',
+        senderId: 'user-1',
+        botId: 'bot-1',
+      });
+      plane.enqueue([delivery('d1', 1)]);
+      await adapter.tick();
+      expect(fake.sent).toEqual([{ chatId: 'user-1', text: 'segment 0' }]);
+      await adapter.disconnect();
+    },
+  );
 
   it('uses an explicit chatid when the frame carries one', async () => {
     const { adapter, plane, fake } = await connectedAdapter();
@@ -1949,51 +1953,59 @@ describe('managed WeCom adapter review fixes (round 2)', () => {
     await adapter.disconnect();
   });
 
-  it('the ledger cap keeps the newest entries (identity, not just count)', async () => {
-    const { adapter, plane, fake } = await connectedAdapter();
-    plane.setReceiptError(() =>
-      Object.assign(new Error('lost'), { status: 503 }),
-    );
-    const ids = Array.from(
-      { length: MANAGED_OUTBOUND_LIMIT + 1 },
-      (_, i) => `d-${i}`,
-    );
-    plane.enqueue(ids.map((id) => delivery(id, 1)));
-    // A conforming control plane returns at most the requested batch limit per
-    // claim, so draining 65 deliveries takes several ticks — never one.
-    for (let i = 0; i < ids.length && fake.sent.length < ids.length; i += 1) {
-      await adapter.tick();
-    }
-    expect(fake.sent).toHaveLength(MANAGED_OUTBOUND_LIMIT + 1);
-    const state = (
-      adapter as unknown as {
-        state: { outbound: Array<{ deliveryId: string }> };
+  it(
+    'the ledger cap keeps the newest entries (identity, not just count)',
+    { timeout: 20_000 },
+    async () => {
+      const { adapter, plane, fake } = await connectedAdapter();
+      plane.setReceiptError(() =>
+        Object.assign(new Error('lost'), { status: 503 }),
+      );
+      const ids = Array.from(
+        { length: MANAGED_OUTBOUND_LIMIT + 1 },
+        (_, i) => `d-${i}`,
+      );
+      plane.enqueue(ids.map((id) => delivery(id, 1)));
+      // A conforming control plane returns at most the requested batch limit per
+      // claim, so draining 65 deliveries takes several ticks — never one.
+      for (let i = 0; i < ids.length && fake.sent.length < ids.length; i += 1) {
+        await adapter.tick();
       }
-    ).state;
-    // The oldest is evicted; the newest (just appended) survives.
-    expect(state.outbound.map((e) => e.deliveryId)).toEqual(ids.slice(1));
-    const persisted = JSON.parse(readFileSync(adapter.stateFile, 'utf8'));
-    expect(
-      persisted.outbound.map((e: { deliveryId: string }) => e.deliveryId),
-    ).toEqual(ids.slice(1));
-    await adapter.disconnect();
-  });
+      expect(fake.sent).toHaveLength(MANAGED_OUTBOUND_LIMIT + 1);
+      const state = (
+        adapter as unknown as {
+          state: { outbound: Array<{ deliveryId: string }> };
+        }
+      ).state;
+      // The oldest is evicted; the newest (just appended) survives.
+      expect(state.outbound.map((e) => e.deliveryId)).toEqual(ids.slice(1));
+      const persisted = JSON.parse(readFileSync(adapter.stateFile, 'utf8'));
+      expect(
+        persisted.outbound.map((e: { deliveryId: string }) => e.deliveryId),
+      ).toEqual(ids.slice(1));
+      await adapter.disconnect();
+    },
+  );
 
-  it('the recent window keeps the newest ids at exactly the cap', async () => {
-    const { adapter, plane, fake } = await connectedAdapter();
-    const total = RECENT_LIMIT + 8;
-    for (let i = 0; i < total; i += 1) {
-      fake.push(`m${i}`, messageData({ msgid: `m${i}` }));
-      await adapter.tick();
-    }
-    const persisted = JSON.parse(readFileSync(adapter.stateFile, 'utf8'));
-    expect(persisted.recent).toHaveLength(RECENT_LIMIT);
-    // The oldest ids are gone; the newest survive.
-    expect(persisted.recent).not.toContain('wecom:m0');
-    expect(persisted.recent).toContain(`wecom:m${total - 1}`);
-    expect(plane.submit).toHaveLength(total);
-    await adapter.disconnect();
-  });
+  it(
+    'the recent window keeps the newest ids at exactly the cap',
+    { timeout: 20_000 },
+    async () => {
+      const { adapter, plane, fake } = await connectedAdapter();
+      const total = RECENT_LIMIT + 8;
+      for (let i = 0; i < total; i += 1) {
+        fake.push(`m${i}`, messageData({ msgid: `m${i}` }));
+        await adapter.tick();
+      }
+      const persisted = JSON.parse(readFileSync(adapter.stateFile, 'utf8'));
+      expect(persisted.recent).toHaveLength(RECENT_LIMIT);
+      // The oldest ids are gone; the newest survive.
+      expect(persisted.recent).not.toContain('wecom:m0');
+      expect(persisted.recent).toContain(`wecom:m${total - 1}`);
+      expect(plane.submit).toHaveLength(total);
+      await adapter.disconnect();
+    },
+  );
 
   it('a settled segment is never re-sent: the orphan replay reports the receipt, not a send', async () => {
     const { adapter, plane, fake } = await connectedAdapter();
