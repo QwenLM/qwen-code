@@ -39,7 +39,16 @@ const SENSITIVE_URL_PATTERNS = [/baseurl/i, /base_url/i, /proxy/i];
 
 const CREDENTIAL_MAP_KEYS = new Set(['env', 'headers', 'customHeaders']);
 
+// Maps keyed by user-chosen names, e.g. an MCP server called "corp-proxy".
+const FREE_FORM_MAP_KEYS = new Set([
+  'mcpServers',
+  'channels',
+  'modelProviders',
+]);
+
 function isSensitiveKey(key: string): boolean {
+  // `*Env` keys hold the name of a variable rather than the secret.
+  if (key.endsWith('Env')) return false;
   return (
     SENSITIVE_KEY_PATTERNS.some((p) => p.test(key)) ||
     SENSITIVE_URL_PATTERNS.some((p) => p.test(key))
@@ -189,25 +198,32 @@ function coerceValue(
   }
 }
 
-function formatValue(value: unknown): string {
+function maskTree(
+  value: unknown,
+  key: string,
+  parentKey = '',
+  maskAll = false,
+): unknown {
+  // Entries of env/header maps are named by the user, so mask every value.
+  const sensitive = CREDENTIAL_MAP_KEYS.has(key) || isSensitiveKey(key);
+  if (value === null || typeof value !== 'object') {
+    return maskAll || sensitive ? maskValue(value) : value;
+  }
+  // A sensitive container masks every leaf, unless it is a free-form entry.
+  const maskLeaves =
+    maskAll || (sensitive && !FREE_FORM_MAP_KEYS.has(parentKey));
+  const mask = (k: string, v: unknown) => maskTree(v, k, key, maskLeaves);
+  return Array.isArray(value)
+    ? value.map((v, i) => mask(String(i), v))
+    : Object.fromEntries(
+        Object.entries(value).map(([k, v]) => [k, mask(k, v)]),
+      );
+}
+
+function formatValue(value: unknown, key = ''): string {
   if (value === undefined) return t('(not set)');
   if (typeof value === 'string') return value || t('(empty)');
-  return JSON.stringify(value, (key, nested) => {
-    // Entries of env/header maps are named by the user, so mask every value.
-    if (CREDENTIAL_MAP_KEYS.has(key)) {
-      return nested !== null && typeof nested === 'object'
-        ? Object.fromEntries(
-            Object.entries(nested).map(([k, v]) => [k, maskValue(v)]),
-          )
-        : maskValue(nested);
-    }
-    // Mask leaves only: a free-form map entry named e.g. "corp-proxy" keeps its
-    // subtree, and `*Env` keys hold a variable name rather than the secret.
-    if (nested !== null && typeof nested === 'object') return nested;
-    return key && !key.endsWith('Env') && isSensitiveKey(key)
-      ? maskValue(nested)
-      : nested;
-  });
+  return JSON.stringify(maskTree(value, key.split('.').pop()!));
 }
 
 function padRight(str: string, len: number): string {
@@ -308,7 +324,7 @@ export const configCommand: SlashCommand = {
     if (isToggle && def.type !== 'boolean') {
       const display = isSensitiveKey(key)
         ? maskValue(currentValue)
-        : formatValue(currentValue);
+        : formatValue(currentValue, key);
       return {
         type: 'message',
         messageType: 'info',
