@@ -746,13 +746,15 @@ export class LlmClient {
   // is bound to its owning interaction: every budget entrypoint below is a
   // no-op for an invocation that does not own it.
   private toolExplorationBudgetPromptId: string | undefined;
-  // Prompt ids claimed by concurrent `/btw` side queries. A side query's
-  // tool-result continuation is resubmitted without isConcurrentSideQuery, so
+  // Prompt ids claimed by background interactions: concurrent `/btw` side
+  // queries, Notification and Teammate sends. Their ToolResult/Hook/Steer
+  // continuations are resubmitted without the background flag, so
   // model-availability ledger membership must exclude the whole interaction by
-  // prompt id, not just the flagged first send. Entries are inert once the side
-  // interaction ends (its prompt id is never reused) and are cleared when the
-  // next main user turn starts.
-  private readonly concurrentSideQueryPromptIds = new Set<string>();
+  // prompt id, not just the first send's messageType. Entries are inert once the
+  // interaction ends (its prompt id is never reused by a foreground turn), so
+  // they persist for the session rather than risking a too-early clear while a
+  // continuation is still draining.
+  private readonly backgroundInteractionPromptIds = new Set<string>();
   private lastPromptId: string | undefined = undefined;
   private activeTodoWorkChainPromptId: string | undefined;
   private readonly activeAutomaticTodoWorkChainPromptIds = new Set<string>();
@@ -4377,16 +4379,17 @@ export class LlmClient {
       // nor take over (or clear) the running turn's exploration phase, which
       // the ownership check below every budget entrypoint enforces for the
       // side turn's tool results too.
-      if (options?.isConcurrentSideQuery) {
-        this.concurrentSideQueryPromptIds.add(prompt_id);
-      } else {
-        // A new user turn ends the previous turn's concurrent side queries, so
-        // their prompt ids no longer need excluding. Only UserQuery clears:
-        // autonomous sends (Cron/Notification/Teammate/Goal) can arrive while a
-        // side query is still draining and must not drop its exclusion.
-        if (messageType === SendMessageType.UserQuery) {
-          this.concurrentSideQueryPromptIds.clear();
-        }
+      // Register background interactions so their unflagged ToolResult/Hook/
+      // Steer continuations stay excluded from the ledger by prompt id (see
+      // backgroundInteractionPromptIds), not just the first send's messageType.
+      if (
+        options?.isConcurrentSideQuery ||
+        messageType === SendMessageType.Notification ||
+        messageType === SendMessageType.Teammate
+      ) {
+        this.backgroundInteractionPromptIds.add(prompt_id);
+      }
+      if (!options?.isConcurrentSideQuery) {
         this.toolExplorationBudget.reset();
         this.toolExplorationBudgetPromptId = prompt_id;
         this.beginTurnBudget(messageType, request, prompt_id);
@@ -5199,14 +5202,15 @@ export class LlmClient {
         workflowModeEligible ? () => onModelRequestDispatched?.() : undefined,
         messageType === SendMessageType.Retry,
         // Ledger membership is decided here, where the sender is known: the
-        // live turn's own sends participate; Notification/Teammate carry fresh
-        // prompt ids and a concurrent side query is not this turn, so they must
-        // not rotate the live turn's key or read its marks. A side query is
-        // excluded by its registered prompt id, which also covers its unflagged
-        // tool-result continuation (the flag itself is only on the first send).
+        // live turn's own sends participate. Notification/Teammate and concurrent
+        // side queries are background interactions, not this turn; they are
+        // excluded by their registered prompt id, which also covers their
+        // unflagged ToolResult/Hook/Steer continuations (the background flag /
+        // messageType is only on the first send). The messageType conjuncts are
+        // a backstop for the first send; the registry carries the continuations.
         messageType !== SendMessageType.Notification &&
           messageType !== SendMessageType.Teammate &&
-          !this.concurrentSideQueryPromptIds.has(prompt_id),
+          !this.backgroundInteractionPromptIds.has(prompt_id),
       );
 
       // Assemble the outgoing request. IDE context is merged into the

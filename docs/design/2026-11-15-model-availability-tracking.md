@@ -85,11 +85,15 @@ no zod / no external deps, so no zod-4 migration is needed for it:
     "went through `Turn`": `LlmClient` constructs the live turn's `Turn` with
     `isSessionTurn` set per `messageType` — true for the turn's own sends
     (user query, retry, tool result, continuations), false for
-    `Notification`/`Teammate` (which carry fresh prompt ids). A concurrent
-    `/btw` side query is excluded by a registry of its interaction's prompt id:
-    the flag is only on its first send, so its unflagged tool-result
-    continuation must be excluded by prompt id too, or it would rotate the live
-    turn's key. `Turn` takes it as a constructor parameter (default unset) and
+    `Notification`/`Teammate` (which carry fresh prompt ids). Background
+    interactions — a concurrent `/btw` side query, `Notification` and
+    `Teammate` — are excluded by a registry of their prompt ids
+    (`backgroundInteractionPromptIds`): the background flag/messageType is only
+    on the first send, so their unflagged ToolResult/Hook/Steer continuations
+    must be excluded by prompt id too, or they would rotate the live turn's key.
+    Entries persist for the session (a background prompt id is never reused by a
+    foreground turn), avoiding a too-early clear while a continuation drains.
+    `Turn` takes it as a constructor parameter (default unset) and
     forwards it to the send options only when set. `turnModelRound` builds its
     `Turn` without it because every production caller is a background round (the
     subagent shared loop and unified-loop speculation) sharing the session

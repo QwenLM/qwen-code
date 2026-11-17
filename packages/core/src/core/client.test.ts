@@ -12885,6 +12885,27 @@ Other open files:
         expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(false);
       });
 
+      it('excludes a Notification interaction’s unflagged Hook continuation', async () => {
+        retryChat({
+          stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
+        });
+        mockTurnRunFn.mockImplementation(() => textTurn('response'));
+
+        // Notification first send: excluded by messageType and registered.
+        await run([{ text: 'notify' }], 'session########8', {
+          type: SendMessageType.Notification,
+        });
+        expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(false);
+
+        // Its Stop-hook continuation is resubmitted as Hook under the same
+        // prompt id without a background flag: the registry must still exclude
+        // it, or it would rotate the live turn's ledger key.
+        await run([{ text: 'continue' }], 'session########8', {
+          type: SendMessageType.Hook,
+        });
+        expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(false);
+      });
+
       it('restores stripped retry entries when only a concurrent send pushes', async () => {
         const orphanedPrompt: Content = userText('retry me');
         const mockChat = retryChat({
