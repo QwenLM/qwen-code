@@ -313,9 +313,11 @@ Session 内部的模型没有任何创建途径。
    回答保留 durable hint，而 `false` 会清掉 hint 并丢弃已武装的
    wakeup）；到期或立即的 loop input 仍回答 `true`。证明的进度保持缓
    存——拒绝的是结论而非已读的页——因此提交在 32 修订证明窗口之外的
-   wake input 仍能被读到；缓存的延迟证明在最早的延迟触发时刻失效，
-   settle 则把该 input 从延迟闩锁中移除。豁免需要 store 内的时钟引
-   用，以及一对 `WakeRecoveryTest`（仅未来 loop input → `isEmpty()`，
+   wake input 仍能被读到。不认证任何 pending 的缓存延迟证明在最早的
+   延迟触发时刻失效；同时携带到期 pending input 的证明则经 complete
+   短路回答 `true`，并在该修订上保持缓存直到 journal 推进。settle 把
+   该 input 从延迟闩锁中移除。豁免需要 store 内的时钟引
+   用，以及一对 `WakeRecoveryStoreTest`（仅未来 loop input → `isEmpty()`，
    不挂载；到期 loop input → `contains(true)`，挂载）。
 2. **fire-time sentinel 的 Java fixture 重放对等。**
    `JdbcWakeRecoveryStore` 的 journal 重放证明必须识别唤醒切片写入的

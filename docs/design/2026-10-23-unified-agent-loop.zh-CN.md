@@ -2,10 +2,11 @@
 
 [English](2026-10-23-unified-agent-loop.md) | [简体中文](2026-10-23-unified-agent-loop.zh-CN.md)
 
-- **状态**：已在 #15343 中通过。headless（PR 1，#15369）、ACP（PR 2，#15509–#16190）、Ink TUI（PR 3，#16206–#16704）与 OpenTUI（PR 4，#16743–#16820）的迁移均已合入；各 surface 的默认开启等待 nightly 统一 loop E2E 门控（#16192）。PR 5（AgentCore）正在进行：5a（#16880）和 5b（#17035）已合入。其余步骤在 #17045 中跟踪。
+- **状态**：已在 #15343 中通过。headless（PR 1，#15369）、ACP（PR 2，#15509–#16190）、Ink TUI（PR 3，#16206–#16704）与 OpenTUI（PR 4，#16743–#16820）的迁移均已合入；各 surface 的默认开启按[迁移计划](#迁移计划)中的阶梯进行，headless 是第一个。PR 5（AgentCore）正在进行：5a（#16880）、5b（#17035）和 5c（#17059）已合入。其余步骤在 #17045 中跟踪；它留出的工作由后续 issue #17284 承载。PR 6a（speculation 的模型轮，#17029）已合入，PR 6b 记录了 speculation 保留自有工具步的决策（#17324）。
 - **日期**：2026-10-23，基于 upstream `779a4d5d0d`。
 - **相关**：
-  - tracking issue #15327；
+  - 跟踪 issue #15327，剩余步骤、灰度和能力台账的跟踪 issue #17045，以及承载其留出工作的后续 issue #17284；
+  - [Agent loop 能力台账](2026-11-15-loop-capability-ledger.zh-CN.md) —— 1.0 loop 的每项行为与 main 的对照，以及对 main 没有的部分的决定；
   - 早先的提案 #8775，它从 AgentCore 和 headless 入手；本设计把它的目标扩展到全部七份 loop，其中 AgentCore 这一步是 PR 5；
   - 对比各 loop 时发现的缺陷：#15324、#15325、#15326；
   - [loop protection 设置](2026-10-21-loop-protection-setting.zh-CN.md)；
@@ -73,7 +74,7 @@ agent loop 指这样一个循环：发送提示、流式接收回复、执行模
 
 目标：
 
-- 在 `packages/core` 中只保留一份 loop 实现，涵盖模型轮、工具批、续发和带类型的结果，所有入口共用。
+- 在 `packages/core` 中只保留一份 loop 实现，涵盖模型轮、工具批、续发和带类型的结果。所有入口共用其模型轮；记录在案的保留自有决策会保留特化的工具步与循环（speculation、Hosted Harness）。
 - 通过一个设置分阶段、可选择地引入。设置关闭时，每个入口保留现有 loop，行为不变。
 - 只有当对拍测试证明某个入口的请求和输出都与它现有的 loop 一致（列出的差异除外），这个入口才算完成迁移。
 - 为 loop 层行为提供唯一的接入点，例如 hook、Mod、loop protection、记录和遥测。
@@ -175,17 +176,17 @@ headless 的主循环以 `maxRounds: 1` 运行。因此它为每一轮做的准�
 
 ### 宿主自持的发送选项
 
-有些入口在迁移前自己做了交互步骤中的一部分工作，迁到共享路径后还会继续自己做一段时间。这时用一个发送选项告诉 client 跳过这部分，避免执行两次。这类选项只是迁移期的过渡手段，不是长期 API。下表逐项列出，并写明由哪一步把它删除或改成输入。
+有些入口在迁移前自己做了交互步骤中的一部分工作，迁到共享路径后还会继续自己做一段时间。这时用一个发送选项告诉 client 跳过这部分，避免执行两次。这类选项只是迁移期的过渡手段，不是长期 API。下面逐项列出，并写明由哪一步把它删除或改成输入。
 
-| 选项                   | 宿主为什么保留这部分                                                                               | 由哪一步移除                                                                                                                                                                                                           |
-| ---------------------- | -------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `toolLoopGuardsByHost` | ACP 的工具步骤运行 daemon 工具循环守卫：每轮工具调用上限、重复调用、探索提醒，以及重复工具失败守卫 | PR 2b 迁移全新 prompt 的工具批：client 的守卫生效，只有 ACP 才有的守卫，即它的参数错误、半截编辑和重复工具失败停止，作为 ACP 的策略保留。带 live 工具的会话和 Agent Host 会话保留 ACP 的工具步骤和这个选项，直到 PR 2d |
+所有过渡期的宿主旁路选项均已移除或替换为显式输入：
 
-#17045 的 ACP 宿主输入改动用调用方持有的 `interactionSpan` 替代 `interactionSpanByHost`，用 `userTurn` 替代 `userTurnRecordedByHost`。移除后者意味着：宿主经 core 的 `recordUserTurn` 在既有时间点写入记录，并以 `userTurn.promptId` 告知 core 不再自行记录该回合；`userTurn` 同时携带 todo 工作链和快照输入。见 [ACP 宿主轮次输入](2026-11-13-acp-host-turn-inputs.zh-CN.md)。
+- PR 2c-1 删除了 `stopHookRunByHost`，ACP 原来用它在自己的 Stop 循环里触发 Stop hook。
+- #17045 的 ACP 宿主输入改动（#17070）用调用方持有的 `interactionSpan` 替代 `interactionSpanByHost`，用 `userTurn` 替代 `userTurnRecordedByHost`（见 [ACP 宿主轮次输入](2026-11-13-acp-host-turn-inputs.zh-CN.md)）。
+- PR 2d（[ACP live 工具与 Agent Host 会话迁到共享工具批](2026-11-14-acp-live-agent-host-shared-batch.zh-CN.md)）把带 live 工具的会话和只读的 Agent Host 会话迁到共享工具批，并删除了 `toolLoopGuardsByHost`。开关关闭时 ACP 的轮次根本不进 client——它经会话自己的 chat 发送——所以没有这个选项也不会重复跑守卫。
 
-`toolCallPreparations`、`memoryRecallQuery`、`stopPolicies` 和 `historyPromptId` 不在表中：第一个只是请求一个额外的事件，第二个把宿主在发送前展开的 prompt 原文交给召回，第三个加入宿主在 stop 点继续的理由（见 [stop 点续发](#stop-点续发)），第四个让 `Retry` 沿用它所替代那次尝试的历史标识；四者都不关闭任何行为。`skipMemoryExtraction` 也不在表中：它确实关闭了 client 的记忆提取与 Dream，但原因是这一轮转发的是 channel 的消息，而不是宿主自己做了这部分工作，因此它是长期输入，而不是过渡步骤。PR 2c-1 删除了 `stopHookRunByHost`，ACP 原来用它在自己的 Stop 循环里触发 Stop hook。
+`toolCallPreparations`、`memoryRecallQuery`、`stopPolicies` 和 `historyPromptId` 是长期输入而非过渡旁路标记：第一个只是请求一个额外的事件，第二个把宿主在发送前展开的 prompt 原文交给召回，第三个加入宿主在 stop 点继续的理由（见 [stop 点续发](#stop-点续发)），第四个让 `Retry` 沿用它所替代那次尝试的历史标识；四者都不关闭任何行为。`skipMemoryExtraction` 同样是长期输入：它关闭 client 的记忆提取与 Dream 是因为这一轮转发的是 channel 的消息，而不是宿主自己做了这部分工作。
 
-新增任何为某个宿主关闭 client 部分工作的选项，都必须在这里登记一行。入口在表中还有未关闭的行时，不修改它的默认值。
+新增任何为某个宿主关闭 client 部分工作的选项，都必须在这份清单里登记一条，并写明由哪一步关闭它。某个入口在这里还有未关闭的选项时，不修改它的默认值。
 
 ### stop 点续发
 
@@ -203,12 +204,12 @@ ACP 只传入一个策略：Todo Stop Guard。当前轮次的后台结果和中�
 
 ### 设置
 
-`experimental.unifiedAgentLoop` 是布尔值，默认 `false`，重启后生效。`QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=1` 可以覆盖它，便于 CI 和脚本在共享 loop 下运行测试。两者沿用 `experimental.agentTeam` / `QWEN_CODE_ENABLE_AGENT_TEAM` 的写法。
+`experimental.unifiedAgentLoop` 是布尔值，没有固定的默认值，重启后生效：未设置时，每个入口使用自己的内置默认值。`QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` 环境变量按入口覆盖它：`1` 强制所有入口开启，`0` 强制所有入口关闭，逗号分隔的列表（如 `headless,acp=0`）强制指定入口。这便于 CI 和脚本在共享 loop 下运行测试，也让操作者能把某个入口强制关回。它在 `experimental.agentTeam` / `QWEN_CODE_ENABLE_AGENT_TEAM` 只强制开启的写法之上，增加了强制关闭与按入口控制；新增 loop 开关应沿用此文法，而非 agentTeam 的写法。
 
-由 `Config.isUnifiedAgentLoopEnabled()` 暴露该设置。每个入口在其 loop 的启动处读取它：
+由 `Config.isUnifiedAgentLoopEnabled(surface)` 暴露该设置。每个入口在其 loop 的启动处读取它并写明自己的入口（`headless`、`acp`、`ink`、`opentui`、`agent-core`、`speculation`、`hosted`）：
 
 ```ts
-if (config.isUnifiedAgentLoopEnabled()) {
+if (config.isUnifiedAgentLoopEnabled('headless')) {
   return runOnSharedLoop(...);
 }
 // 现有 loop，保持不变
@@ -216,7 +217,7 @@ if (config.isUnifiedAgentLoopEnabled()) {
 
 现有 loop 作为 `else` 分支保留，在该设置存在期间不做重构。尚未迁移的入口忽略这个设置，设置的说明会列出它覆盖的入口。`qwen serve` 启动的 ACP 子进程读取同一份设置，所以对已迁移的 ACP 轮次，daemon 和 Web Shell 也会遵循这个设置。从 PR 2a 起，Web Shell 设置面板会列出这个设置。
 
-各入口分别修改默认值之后，这个设置不再有 schema 默认值。`Config.isUnifiedAgentLoopEnabled(surface)` 在设置有值时返回该值，否则返回该入口自己的默认值。环境变量仍然优先于两者。
+按入口解析已在 #17045（B 块）落地：环境变量指向该入口时优先，否则用被设置的显式设置，再否则用该入口的内置默认值（headless、Ink TUI 和 AgentCore 是 `true`，其他入口都是 `false`）。设置在运行时是三态——未设置与显式关闭不同——headless 的默认值翻转后，schema 不再有默认值；设置对话框对未设置值的第一次切换写入 `true`。解析规则与灰度阶梯见 `2026-11-12-loop-rollout-switches.md`。
 
 ### Headless 迁到共享 loop（PR 1）
 
@@ -256,13 +257,13 @@ PR 2 分步迁移 ACP。PR 2a 迁移全新用户 prompt 的模型轮：不是 re
 | 请求失败时的 StopFailure hook 和 429 映射                                   | 仍由 ACP 处理，流中的 `Error` 事件也一样，抛出的是 provider 原本抛出的错误                                                                                                                      |
 | 轮次结束后的托管记忆任务                                                    | 轮次按现有条件结束时由 ACP 通过 client 的 `runManagedAutoMemoryBackgroundTasks` 安排；PR 2c-1 之前，在 `stopHookRunByHost` 下 client 不安排，因为 ACP 的 Stop 循环还可能继续这个轮次            |
 | interaction span                                                            | ACP 开始和结束 span；模型轮通过 `interactionSpan` 传入供 client 加入                                                                                                                            |
-| daemon 工具循环守卫：每轮工具调用上限、重复调用、探索提醒                   | 仍由 ACP 处理；模型轮用 `toolLoopGuardsByHost` 告知 client，client 因此不检查工具调用模式，也不添加探索提醒和 ACP 消息里已有的 todo 提醒                                                        |
+| daemon 工具循环守卫：每轮工具调用上限、重复调用、探索提醒                   | 由 client 处理（新 prompt 的工具批自 PR 2b 起，所有会话种类自 PR 2d 起，该 PR 删除了 `toolLoopGuardsByHost`）；ACP 只保留别处没有的停止作为自己的策略                                           |
 | 没有内容和 thought 循环启发式检测，也没有会话轮数上限                       | `model.skipLoopDetection` 为 false 时启用 client 的内容和 thought 启发式检测，它的 `LoopDetected` 以循环为由拒绝这个 prompt（`LOOP_DETECTED`）；`MaxSessionTurns` 以 `max_turn_requests` 结束它 |
 
 这一步对 core 的改动都是增量的，不使用它们的调用方不受影响：
 
 - `Turn` 给 `Thought` 带上 chunk 的原始 `text`，给 `ToolCallRequest` 带上它所依据的 `functionCall`；发送时用 `toolCallPreparations` 要求后，模型开始流式输出一个调用时会产出 `ToolCallPreparation`；
-- `SendMessageOptions.userTurnRecordedByHost`、`stopHookRunByHost`、`interactionSpanByHost` 和 `toolLoopGuardsByHost`，以及循环检测器的检查选项 `toolCallPatterns`；
+- `SendMessageOptions.userTurnRecordedByHost`、`stopHookRunByHost`、`interactionSpanByHost` 和 `toolLoopGuardsByHost`，以及循环检测器的检查选项 `toolCallPatterns`（均已删除，见 [宿主自持的发送选项](#宿主自持的发送选项)）；
 - `SendMessageOptions.memoryRecallQuery`：`UserQuery` 的记忆召回用它代替请求作为查询；
 - `getStructuredErrorCause` 返回 `Turn` 的 `Error` 事件所依据的原始错误；
 - `admitUserPrompt` 接受 hook 的 `submitted_prompt` 和取消信号；
@@ -287,7 +288,7 @@ ACP 这边只负责翻译 scheduler 的状态变化：
 | PermissionPrompt Notification hook 返回的终端序列                                                                                                                       | hook 由 scheduler 触发；ACP 转发它报告的序列                                                                                                                        |
 | Managed 会话的批次收尾、记忆写入后的记忆刷新                                                                                                                            | 仍由 ACP 处理，在这一批之后                                                                                                                                         |
 
-带 live 工具的会话（ACP 不经权限流程就信任这些工具）和只读的 Agent Host 会话（拒绝一切审批）在 PR 2d 之前保留 ACP 的执行器和 `toolLoopGuardsByHost`。
+在 PR 2d 中，带 live 工具的会话（经 scheduler 的 `isTrustedTool` 选项按工具实例身份授信）和只读的 Agent Host 会话（工作区围栏仍在 `Config.getToolInvocationGuard()` 上，需审批的调用经 scheduler 的 `readOnlyRefusalMessage` 选项拒绝）也迁到共享工具批，并移除 `toolLoopGuardsByHost`。
 
 这一步对 core 的改动都是增量的：
 
@@ -366,6 +367,10 @@ prompt 循环里的共享模型轮改为三个循环共用的方法。prompt 循
 两类轮次都在 Stop hook 之后运行 Todo Stop Guard 作为 stop 策略。排队的输入和现在一样不会打断它们的响应，在工具边界取入；在 stop 点它不再让通知轮次继续，而是启动下一轮，和 PR 2c-1 以来的 prompt 一样。cron 轮次保留 ACP 的交互 span；通知轮次在 ACP 一侧没有 span，改用 client 的。
 
 这一步对 core 的改动：`userTurnRecordedByHost` 也覆盖 `Cron` 和 `Notification` 发送，表示由宿主记录 prompt 或通知。
+
+#17045 的第 3 步让 ACP 轮次的每次模型请求和它的工具批在一次 `runAgentLoop` 调用中运行，prompt、Goal、cron 和后台通知轮次都是如此，与两个 TUI 相同。同时开启 `experimental.eventBusAgentLoop` 时，调用走事件总线内核。轮次仍通过会话的回调报告每个事件，之后做什么仍由轮次决定。工具批在 `onRoundEnd` 中等待，直到轮次交出会话的调度器、历史中已应答的调用、这一批自己的工具 signal、启动检查和结果回调；与之前相同，工具批自己记录它的结果。轮次如果在交接之前离开（因为模型轮结束了轮次，或轮次被取消），就在它的 `finally` 中关闭这一轮的调用，工具批随之跳过。工具批的工具在交接时的 async 上下文中运行，其中带有轮次的 prompt ID、todo 工作链和整轮模型覆盖。模型轮仍在排队输入会中止的 signal 下运行：排队输入会截断响应，或在 stop 点把轮次留给会话。内核把这两种情况都当作取消，模型轮的结束方式与过程式 loop 相同，都在上限之内。这个 signal 只在没有调用的响应前后中止，所以工具批运行时它只会随轮次一起中止，只有被取消的轮次的工具批才可能触及上限。被 UserPromptSubmit 拦下的 prompt 的第一轮不发送任何内容，也在它自己的一次调用中运行。从 PR 2d 起，带 live tools 的会话和只读的 Agent Host 会话也走共享工具批。ACP 对拍套件把每个场景在两个设置都开启时再跑一次，并按 prompt ID 把事件总线适配器的日志与会话的轮次对应起来。
+
+取消达到内核的收尾上限时，ACP 对已结算的工具响应应用输出预算，并只记录一次。这条路径使用已有的输出和恢复文件。尚未完成的调用由现有的历史修复处理。客户端恢复读取后，已结算调用的工具卡片更新可以继续发送。即使这些更新或审批处理仍在等待，ACP 也会释放轮次。
 
 ### Ink TUI 迁到共享 loop（PR 3）
 
@@ -514,7 +519,7 @@ PR 5b 把一轮的调用作为 loop 的 `runToolBatch` 的一个工具批，在 
 
 scheduler 及其事件、审批和 hook 仍是 agent 自己的，因此延后审批照旧恢复 agent 的四个 async-local 上下文帧。工具批不记录结果，因为结果进入 agent 的 chat，而不是会话记录。它保留被中止的工具批的结果，让运行像现在一样在下一轮的中止检查处结束。流中重复的调用 ID 仍只运行并应答一次。headless 套件在调试日志中统计共享 loop 上的子代理工具批，TUI 套件在 TUI 中应答子代理的审批。
 
-PR 5c 让每一轮，即它的模型请求和工具批，在一次 `runAgentLoop` 调用中运行，调用在工具批之后返回，与 headless 主轮次逐轮运行的方式相同。开启 `experimental.eventBusAgentLoop` 时，AgentCore 使用事件总线内核。OpenTUI 是继 headless 和 AgentCore 后的第三个入口。轮与轮之间仍由 agent 自己驱动：在结果之后加入父 agent 的消息、循环提醒和按结果判断的循环守卫、等待和要求最终结果，以及把停止映射到 `terminateMode`。把整个运行交给 loop、不再自己驱动，留给 #17045 的后续 issue。loop 的选项有如下变化，过程式路径和事件总线路径都支持：
+PR 5c 让每一轮，即它的模型请求和工具批，在一次 `runAgentLoop` 调用中运行，调用在工具批之后返回，与 headless 主轮次逐轮运行的方式相同。开启 `experimental.eventBusAgentLoop` 时，AgentCore 使用事件总线内核。OpenTUI 是继 headless 和 AgentCore 后的第三个入口。轮与轮之间仍由 agent 自己驱动：在结果之后加入父 agent 的消息、循环提醒和按结果判断的循环守卫、等待和要求最终结果，以及把停止映射到 `terminateMode`。把整个运行交给 loop、不再自己驱动，留给 #17045 的后续 issue #17284。loop 的选项有如下变化，过程式路径和事件总线路径都支持：
 
 - `runAgentLoop` 接收工具批选项 `keepCancelledResults`、`deferRecording` 和 `duplicateStateForCall`，并按调用返回工具批的结果；
 - 它可以用 `ModelRoundSource` 代替 client；在轮次来源上运行的 loop，其调用不计入会话的工具调用数；
@@ -529,6 +534,21 @@ PR 5c 让每一轮，即它的模型请求和工具批，在一次 `runAgentLoop
 | 它的工具步骤把这一轮的调用作为一个 `runToolBatch` 工具批运行 | 同一个工具批在这次调用中运行，调用返回它的结果                                               |
 
 headless 套件把每个子代理场景在两个设置都开启时再跑一次，并与共享 loop 上的运行比较；调试日志会标出跑在内核上的每个子代理轮次。agent 工具步骤和运行的单元测试覆盖当前 loop、共享 loop 和内核三种情况。
+
+### speculation 迁到共享 loop（PR 6）
+
+speculation 的 `runSpeculativeLoop`（`speculation.ts`）在用户确认前，用带写时复制文件隔离的 forked `LlmChat` 预先运行被接受的建议。它在该 chat 上发出每一轮并自行解析 chunk，再把这一轮的调用交给自己的工具门（boundary/redirect）并直接执行，不经过 scheduler。PR 6a 只迁移模型轮：开启设置时，`runSpeculationModelRound` 经 `turnModelRound(chat, model, { throwErrors: true })` 在 `runModelRound` 上发出，并从这一轮的事件重建可见文本与 function-call parts；工具门、直接执行、overlay 写入与 boundary 处理均不变。`throwErrors` 使失败的请求继续 reject，从而 `startSpeculation` 置 `aborted` 并清理 overlay，与 raw-chunk 路径一致。
+
+| speculation 现状                                      | 开启设置后                                                           |
+| ----------------------------------------------------- | -------------------------------------------------------------------- |
+| 解析每个 chunk 的 parts，保留可见文本与 function call | 这一轮的 `Content` 与 `ToolCallRequest` 事件成为这些 parts           |
+| 重试或回退时保留被放弃尝试的文本与调用                | 全新重试或回退丢弃它们；续传重试保留它要续写的文本                   |
+| 每个流式文本 part 一个文本 part                       | 每个 chunk 一个文本 part，按 `Turn` 的报告                           |
+| 无 id 的 function call 不带 id                        | 调用获得 `Turn` 生成的 id（OpenAI 线路不可达，其已分配 id）          |
+| 无 name 的 function call 被丢弃                       | 同样丢弃：守卫读原始 name，而非 `Turn` 的 `undefined_tool_name` 占位 |
+| 请求不带 abort 信号；取消时返回迭代器                 | 请求带上 abort 信号，取消同时中止在飞请求                            |
+
+`speculation.test.ts` 的单元套件以设置开/关各跑一次纯文本轮、单调用、双调用批与 thought part，比较所得的历史、工具执行与状态；分支标记钉住共享轮仅在开启设置时运行。事件接缝测试覆盖全新重试、不带标志的重试、续传重试、模型回退、失败请求（两臂均 aborted 且清理 overlay）、无 name 调用、无 id 调用、双文本 part 的 chunk，以及请求体（先是建议、后是工具结果）、prompt id 与 abort 信号。speculation 目前在集成对拍套件中尚无条目；该运行在其准备默认开启时加入。
 
 ## 迁移计划
 
@@ -560,25 +580,45 @@ headless 套件把每个子代理场景在两个设置都开启时再跑一次�
 | 5b    | AgentCore：一轮的调用作为一个共享工具批，连同它的延后审批                                                 |
 | 5c    | AgentCore：每一轮及其工具批在一次 `runAgentLoop` 调用中运行，内核开启时跑在事件总线内核上                 |
 | 5d    | AgentCore：默认开启，然后移除现有 loop                                                                    |
-| 6     | speculation                                                                                               |
-| —     | Hosted Harness：单独评估                                                                                  |
+| 6a    | speculation：每一模型轮走 loop 的模型轮，在 forked chat 的 `Turn` 上；speculation 保留其工具门与直接执行  |
+| 6b    | speculation：工具步决策——保留自有工具步；见 [PR 6b 决策](2026-11-15-speculation-tool-step.zh-CN.md)       |
+| 6c    | speculation：默认开启，然后删除其现有模型轮                                                               |
+| —     | Hosted Harness：单独评估——见[迁移评估](2026-11-14-hosted-harness-loop-evaluation.md)                      |
 
-PR 6 之后同样跟随默认开启和删除旧 loop 两步。
+PR 6b 是 speculation 的工具步决策（保留自有工具步）；PR 6c 是其默认开启与删除步骤。
 
-一个入口在设置开启时通过它的对拍测试，并列出了已知差异，才算完成迁移。之后每个入口各自修改默认值，不必等其他入口。修改默认值需要同时满足：
+一个入口分五步迁移，由 #17045 跟踪：
 
-- 该设置对这个入口已经提供了至少一个版本；
-- 在设置开启的情况下运行该入口集成测试的定时任务，已在 main 上连续通过两周；
+1. 共享模型轮和工具批，opt-in（`experimental.unifiedAgentLoop`）。
+2. 默认开启。
+3. 每一轮及其工具批在一次 `runAgentLoop` 调用中运行，同时开启 `experimental.eventBusAgentLoop` 时跑在事件总线内核上；该入口的对拍测试也比较内核开和关。
+4. 内核默认开启。
+5. 删除现有 loop。
+
+默认值早改，删除晚做。现有 loop 在第 2 到第 4 步期间一直保留，作为切回的退路，所以每次修改默认值都只在该入口对拍测试比较过的两条路径之间切换。每个入口各自修改默认值，每次只改按入口默认值表中的一项；`QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` 和 `QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP` 可以对所有入口或列出的入口（例如 `headless=0`）强制开启或关闭，优先于设置（[loop 灰度开关](2026-11-12-loop-rollout-switches.zh-CN.md)）。
+
+第 2 步需要：
+
+- 该设置已在正式版中发布；
+- 在设置开启的情况下运行该入口集成测试的 nightly 组，已在 main 上连续通过 14 晚，其中至少 7 晚在该入口最后一次修改其共享路径（修复除外）之后；
+- 它的对拍测试在不重试的情况下连续通过 20 次，因为 nightly 组会重试失败的测试；
 - 该入口在[宿主自持的发送选项](#宿主自持的发送选项)中没有未关闭的行；
-- release notes 列出了它在[兼容性](#兼容性)中的有意差异。
+- release notes 列出了它在[兼容性](#兼容性)中的有意差异，以及切回的方法；
+- 对 AgentCore 和 ACP，[Managed 任务](2026-11-14-managed-loop-ci.zh-CN.md)在设置开启时通过。
 
-默认值修改发布一个版本之后，再删除该入口的现有 loop。在此之前，把 `experimental.unifiedAgentLoop` 设为 `false` 可以让这个入口回到现有 loop。
+第 4 步需要：
+
+- 在两个设置都开启的情况下运行该入口集成测试的 nightly 组，自它的第 3 步以及内核的取消和有界收尾合入（#17145）以来连续通过 7 晚；
+- 它的对拍测试在比较内核开和关时，不重试连续通过 20 次；
+- 对 AgentCore 和 ACP，Managed 任务在两个设置都开启时通过。
+
+删除要在它所跟随的默认值修改之后等 14 天：一个入口的第 5 步在它的第 2 步之后；所有入口都完成第 5 步、且第 4 步都已开启满 14 天之后，再删除分开调用的模型轮和工具批、`runAgentLoop` 的过程式路径，以及两个设置。有归因于新路径的回归未关闭时，删除不合入。在一个入口完成第 5 步之前，把 `experimental.unifiedAgentLoop` 设为 `false` 可以让它回到现有 loop。有记录在案的保留自有决策的入口只删除其迁移所替换的路径：speculation 的第 5 步删除其现有模型轮，而非其投机循环或工具步（见 [PR 6b 决策](2026-11-15-speculation-tool-step.zh-CN.md)）。
 
 ## 对拍测试
 
 `integration-tests/fake-openai-server.ts` 已经会记录每个请求体。
 
-**运行方式。** 对拍测试把每个脚本化场景在同一入口上跑两次：一次不设置 `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP`，一次设为 `1`。比较两样东西：
+**运行方式。** 对拍测试把每个脚本化场景在同一入口上跑两次：一次强制关闭共享 loop，一次强制开启——ACP 与 TUI 套件按臂把 `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` 设为 `0` 和 `1`，headless 套件按臂强制设置——因此某个入口的默认值开启后，off 臂不会跑到新路径上。比较两样东西：
 
 - 模型看到的请求序列，比较前去掉时间戳、日期提醒、各类 id 和耗时；
 - 入口的输出：headless 是 stream-json 帧；ACP 是 `session/update` 通知和每个 prompt 的停止原因，但不含按自己时机到达的 `available_commands_update`。
@@ -694,7 +734,7 @@ PR 6 之后同样跟随默认开启和删除旧 loop 两步。
   - PostToolUse hook 产生的 artifacts 随工具的结果更新一起发出，不再单独发 `artifact-event` 通知；
   - 从 PR 2c-1 起，当前轮次在最后一个回复之后才到达的后台结果，会开启一个后台通知轮次，而不是让 prompt 继续；Todo Stop Guard 生效时，中途排队的输入成为下一个 prompt，而不是让这一个继续；
   - Todo Stop Guard 只在 Stop hook 允许回复停下后才继续，并且使用单独的请求，不再与 hook 的理由合并；Stop hook 运行期间到达的输入不再作废它的决定；
-  - Stop hook 和 Todo Stop Guard 的续发沿用这一轮的 prompt id，与 TUI 的续发一样运行 UserPromptSubmit；除 Live 和 Agent Host 会话保留 ACP 的工具调用守卫外，运行 client 的守卫；并像任何一批工具一样把工具结果发回；
+  - Stop hook 和 Todo Stop Guard 的续发沿用这一轮的 prompt id，与 TUI 的续发一样运行 UserPromptSubmit；所有 ACP 会话（自 PR 2d 起含 Live 和 Agent Host 会话）都运行 client 的工具调用守卫，并像任何一批工具一样把工具结果发回；
   - 从 PR 2c-2 起，channel prompt 和 Goal 提案轮次在共享路径上得到与全新 prompt 相同的处理，包括日期提醒、系统提醒和 client 的召回；
   - retry、continue 和 restore 会开启 client 的一次交互：循环检测器、探索预算和轮次预算重新开始，它们的第一轮不计入会话轮数上限；
   - continue 的第一条请求一直没有发出时（被取消或失败），被打断的用户输入按原样放回，而不是作为一条合并后的条目保留，合并条目取走的 worktree 提醒也留给下一轮；
@@ -723,6 +763,12 @@ PR 6 之后同样跟随默认开启和删除旧 loop 两步。
   - 从 PR 5a 起，一个流式文本事件承载一个 chunk 的思考文本或正文（[#15327](https://github.com/QwenLM/qwen-code/issues/15327)）。
   - 从 PR 5b 起，在一次推理运行内，即使复用了同一个 provider ID，工具批也会分别记录 agent 不能运行的调用和可执行调用。首次原样重放会收到重复调用的应答，再次重放会终止该批。同一工具批中，重放事件先于拒绝事件（[#15327](https://github.com/QwenLM/qwen-code/issues/15327)）。
 
+- 设置开启后，speculation 与现在有以下预期差异：
+  - 从 PR 6a 起，全新重试或模型回退丢弃被放弃尝试的文本与调用，这一轮只带新尝试的输出；续传重试保留它要续写的文本，与现在一致（[#15327](https://github.com/QwenLM/qwen-code/issues/15327)）；
+  - 从 PR 6a 起，一轮的可见文本按每 chunk 一个 part 到达，而非每个流式文本 part 一个（[#15327](https://github.com/QwenLM/qwen-code/issues/15327)）；
+  - 从 PR 6a 起，无 id 的 function call 在调用及其响应上获得 `Turn` 生成的 id（OpenAI 线路不可达，其已分配 id）（[#15327](https://github.com/QwenLM/qwen-code/issues/15327)）；
+  - 从 PR 6a 起，模型请求带上 abort 信号，取消时除返回迭代器外还中止在飞请求（[#15327](https://github.com/QwenLM/qwen-code/issues/15327)）。
+
 - 之后迁移的入口会带来各自的修复：#15324（ACP）、#15326（OpenTUI）、#14114 与 #12209（ACP）。
 
 - 不删除任何设置、协议字段或文件格式。
@@ -749,11 +795,13 @@ PR 6 之后同样跟随默认开启和删除旧 loop 两步。
 
 | 指标                                         | 现在                                      | 目标 |
 | -------------------------------------------- | ----------------------------------------- | ---- |
-| agent loop 实现数                            | 7 份，另加 headless 与 ACP 内部的额外副本 | 1    |
+| agent loop 实现数                            | 7 份，另加 headless 与 ACP 内部的额外副本 | 3    |
 | 直接调用 `LlmChat.sendMessageStream` 的 loop | 3                                         | 0    |
 | 在 `turn.ts` 之外解析流式 chunk 的 loop      | 3                                         | 0    |
-| 调用 `finalizeToolResponses` 的 loop         | 6                                         | 1    |
-| 会话轮数上限的算法                           | 3                                         | 1    |
+| 调用 `finalizeToolResponses` 的 loop         | 6                                         | 2    |
+| 会话轮数上限的算法                           | 3                                         | 2    |
+
+这些目标假设全部入口完全迁移。保留自有的决策会留下特化副本：speculation 保留其投机循环与自己的 `finalizeToolResponses` 调用（`speculation.ts:607`；见 [PR 6b 决策](2026-11-15-speculation-tool-step.zh-CN.md)），Hosted Harness 保留其 journal 化循环与工具步（见[迁移评估](2026-11-14-hosted-harness-loop-evaluation.zh-CN.md)）。因此「agent loop 实现数」与「调用 `finalizeToolResponses` 的 loop」最终为共享实现加上这些决策保留的副本（speculation 的 finalizer 与共享批在 `agent-loop.ts:715` 的调用并存）；上表目标列已按这些副本计数，其中轮数上限一行保留 Hosted 外层循环的公式与调和后的公式并存（见[迁移评估](2026-11-14-hosted-harness-loop-evaluation.zh-CN.md)）。
 
 ## 待定问题
 
@@ -764,4 +812,5 @@ PR 6 之后同样跟随默认开启和删除旧 loop 两步。
 ## 后续工作
 
 - 会话层调度：用同一处逻辑决定通知、cron、Goal 轮次或 teammate 消息何时启动一轮 loop。
-- Hosted Harness 评估：它写日志的调度是否可以变成符合同一 `schedule` 契约的 scheduler。
+- Hosted Harness 评估：它写日志的调度是否可以变成符合同一 `schedule` 契约的 scheduler。已由[迁移评估](2026-11-14-hosted-harness-loop-evaluation.md)回答：journal 化派发保留，仅模型轮可迁到共享轮。
+- #17045 留出的工作——整轮交给 loop、流式派发、speculation 的门控步骤与调和项、能力台账行：由其后续 issue #17284 跟踪。

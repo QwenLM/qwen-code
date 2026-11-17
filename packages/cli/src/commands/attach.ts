@@ -4,14 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { commandMetadata } from './command-metadata.js';
 import { createInterface } from 'node:readline/promises';
 import { resolve } from 'node:path';
 import type { CommandModule, Argv } from 'yargs';
-import {
-  DaemonClient,
-  DaemonSessionClient,
-  type DaemonEvent,
-} from '@qwen-code/sdk/daemon';
+import type { DaemonSessionClient, DaemonEvent } from '@qwen-code/sdk/daemon';
 import {
   normalizeDaemonEvent,
   sanitizeTerminalText,
@@ -161,13 +158,17 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
   }
   const workspaceCwd = resolveAttachWorkspace(target.record, argv.workspace);
 
-  const client = new DaemonClient({
-    baseUrl: target.record.url,
-    // Empty string suppresses the SDK's ambient QWEN_SERVER_TOKEN fallback.
-    token: resolved.token ?? '',
-  });
   let session: DaemonSessionClient;
   try {
+    const { DaemonClient, DaemonSessionClient } = await import(
+      '@qwen-code/sdk/daemon'
+    );
+    if (shuttingDown) return;
+    const client = new DaemonClient({
+      baseUrl: target.record.url,
+      // Empty string suppresses the SDK's ambient QWEN_SERVER_TOKEN fallback.
+      token: resolved.token ?? '',
+    });
     session = await DaemonSessionClient.load(client, argv.session, {
       ...(workspaceCwd ? { workspaceCwd } : {}),
       signal: startupAbort.signal,
@@ -363,8 +364,7 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
 }
 
 export const attachCommand: CommandModule<unknown, AttachArgs> = {
-  command: 'attach',
-  describe: 'Attach a terminal to a running daemon session',
+  ...commandMetadata.attach,
   builder: (yargs: Argv) =>
     yargs
       .option('port', {

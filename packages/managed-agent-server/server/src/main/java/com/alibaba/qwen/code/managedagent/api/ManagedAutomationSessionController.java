@@ -19,6 +19,12 @@ import org.springframework.web.bind.annotation.RestController;
  * arm's creation path). Authenticated by the writer binding, acting as the
  * bound Session's creator; the public actor-scoped automation controller is
  * unchanged. There is no user principal on this surface.
+ *
+ * <p>Auth boundary: like the sibling internal store controllers, this carries
+ * no Spring Security annotation by convention — the {@code /internal/} route
+ * prefix plus the writer-token header (verified per Session by
+ * {@code authorizeOrdinary}) is the intended authentication boundary, and the
+ * embedded deployment mounts it only through the explicit internal import.
  */
 @RestController
 public class ManagedAutomationSessionController {
