@@ -182,7 +182,7 @@ class ManagedUserMessageStoreTest {
             holder.setAutoCommit(false);
             com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.lockPlacementDomain(holder, TENANT);
             try {
-                messages.startNext(TENANT, session, (principal, key, target, input) -> {
+                messages.startNext(TENANT, session, (actorTenant, principal, actorId, key, target, input) -> {
                     var admission = store.insertTurnCommand(principal.tenantId(), "queue-test", key, "digest", target,
                             first.input(), "sha256:" + "0".repeat(64), principal);
                     return new com.alibaba.qwen.code.managedagent.model.ApiModels.CommandAdmission(
@@ -205,7 +205,7 @@ class ManagedUserMessageStoreTest {
                 Map.of(), List.of()).sessionId();
         Message first = messages.command(TENANT, ACTOR, legacy, "legacy-first",
                 submit("legacy")).messages().getFirst();
-        messages.startNext(TENANT, legacy, (principal, key, target, input) -> {
+        messages.startNext(TENANT, legacy, (actorTenant, principal, actorId, key, target, input) -> {
             var admission = store.insertTurnCommand(principal.tenantId(),
                     "queue-test", key, "digest", target, first.input(),
                     "sha256:" + "0".repeat(64), principal);

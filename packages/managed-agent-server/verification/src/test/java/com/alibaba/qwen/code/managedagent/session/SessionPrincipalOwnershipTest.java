@@ -236,7 +236,8 @@ class SessionPrincipalOwnershipTest {
             denied(() -> messages.queryMessages(
                     SessionPrincipal.of("tenant", "user", "actor-B"), id));
 
-            messages.startNext("tenant", id, f.service::submitTurn);
+            messages.startNext("tenant", id, (actorTenant, principal, actorId, key, target, input) ->
+                    f.service.submitTurn(principal, key, target, input));
 
             assertThat(f.jdbc.queryForObject(
                     "SELECT state FROM ma_user_message WHERE tenant_id = ?"

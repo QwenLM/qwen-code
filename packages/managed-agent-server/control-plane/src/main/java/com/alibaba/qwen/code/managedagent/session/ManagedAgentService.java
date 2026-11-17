@@ -1144,7 +1144,8 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             admission = replayForCreator(tenantId, SUBMIT, idempotencyKey,
                     requestDigest, session, principal, rawActorId);
             if (admission == null) {
-                throw error;
+                throw new ManagedAgentException(409, "idempotency_conflict",
+                        "The idempotency key is already in use.");
             }
         }
         requireReplayedAdmission(tenantId, SUBMIT, idempotencyKey, admission,
@@ -1213,7 +1214,8 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             admission = replayForCreator(tenantId, CANCEL, idempotencyKey,
                     requestDigest, session, principal, rawActorId);
             if (admission == null) {
-                throw error;
+                throw new ManagedAgentException(409, "idempotency_conflict",
+                        "The idempotency key is already in use.");
             }
         }
         requireReplayedAdmission(tenantId, CANCEL, idempotencyKey, admission,
