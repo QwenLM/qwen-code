@@ -177,7 +177,8 @@ export function hasHostedExternalExcludedOptions(
     'lineage',
     'memoryStoreId',
   ];
-  if (!isHostedWorkspaceExternalShellProfile(profile)) keys.push('captureBytes');
+  if (!isHostedWorkspaceExternalShellProfile(profile))
+    keys.push('captureBytes');
   return (
     keys.some((key) => value?.[key] !== undefined) ||
     value?.['childWorkspaces'] === true ||
