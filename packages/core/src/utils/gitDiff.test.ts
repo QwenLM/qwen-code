@@ -2013,7 +2013,17 @@ describe('fetchGitLog excludeRefs', () => {
 
   it('refuses the fetch when an excluded ref is unsafe', async () => {
     await commit(repo, { 'b.txt': 'b' }, 'second');
-    for (const bad of ['--upload-pack=evil', 'a..b', '-leading', 'HEAD;rm']) {
+    // Refs git itself rejects return null via the error path even without the
+    // whitelist. The load-bearing case is a ref git would ACCEPT as an option
+    // (`--max-count` here; `--output=<file>` would write a file): only the
+    // pre-spawn guard refuses it, so an unsafe ref never reaches git's argv.
+    for (const bad of [
+      '--upload-pack=evil',
+      'a..b',
+      '-leading',
+      'HEAD;rm',
+      '--max-count=1',
+    ]) {
       expect(
         await fetchGitLog(repo, { range: 'HEAD', excludeRefs: [bad] }),
       ).toBeNull();
