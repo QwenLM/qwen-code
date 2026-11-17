@@ -8653,20 +8653,47 @@ describe('LlmChat', async () => {
       vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
         service,
       );
+      const fallbackA = vi.fn();
+      const fallbackB = vi.fn();
+      wireFallbacks(
+        ['fallback-a', 'fallback-b'],
+        vi
+          .fn()
+          .mockImplementation(async (modelId: string) =>
+            modelId === 'fallback-a'
+              ? fallbackRoute('fallback-a', fallbackA)
+              : fallbackRoute('fallback-b', fallbackB),
+          ),
+      );
       // The ledger gates only fallback selection. The primary is still attempted
       // each request (it may have recovered), even when the ledger marks it
       // unavailable; a mutant gating the primary on the ledger would skip it.
+      // fallback-a is marked unavailable so request 2 also exercises the skip read.
       service.markTerminal('test-model', 'quota');
-      streamMock().mockImplementation(async () => textStream('primary ok'));
+      service.markTerminal('fallback-a', 'quota');
 
-      const events = await sendSessionCollect(
+      // Request 1: the primary serves despite being marked unavailable.
+      streamMock().mockImplementationOnce(async () => textStream('primary ok'));
+      const events1 = await sendSessionCollect(
         'test',
         'prompt-primary-unavailable',
       );
+      expect(hasChunkText(events1, 'primary ok')).toBe(true);
+      expect(fallbackEvents(events1)).toHaveLength(0);
 
-      expect(hasChunkText(events, 'primary ok')).toBe(true);
-      expectStreamCalls(1);
-      expect(fallbackEvents(events)).toHaveLength(0);
+      // Request 2, same turn: the primary is attempted again (now fails), the
+      // ledger skips fallback-a, and fallback-b serves.
+      streamMock().mockRejectedValueOnce(tpmCapacityError());
+      fallbackB.mockImplementation(async () => textStream('fallback-b ok'));
+      const events2 = await sendSessionCollect(
+        'test',
+        'prompt-primary-unavailable',
+      );
+      expect(hasChunkText(events2, 'fallback-b ok')).toBe(true);
+      expect(fallbackA).not.toHaveBeenCalled();
+      expect(fallbackB).toHaveBeenCalledTimes(1);
+      // The primary was attempted on both requests despite the terminal mark.
+      expectStreamCalls(2);
     });
 
     it('counts only attempted fallbacks in the MODEL_FALLBACK ordinal across a ledger skip (R8-F10)', async () => {

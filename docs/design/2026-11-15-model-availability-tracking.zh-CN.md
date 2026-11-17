@@ -64,7 +64,9 @@ main 的模型 fallback（`core/llm-chat.ts`「Model fallback chain」）是**�
 - `packages/core/src/config/config.ts` — 持有服务的懒加载 getter + `modelAvailabilityTracking` 参数。
 - `packages/core/src/core/llm-chat.ts` — 请求入口的轮边界 + 门控下的 fallback 链查询/标记，会话轮白名单；`LlmChatSendOptions` 上的 `isExplicitRetry`、`isSessionTurn` 与 `ledgerTurnKey`（`beginTurn` 以 `ledgerTurnKey ?? prompt_id` 为键）。
 - `packages/core/src/core/turn.ts` + `packages/core/src/core/client.ts` — 把显式 Retry 标志从 `SendMessageType.Retry` 穿到 send options，并在发送方判定台账成员资格：`LlmClient` 按 `messageType` 置 `isSessionTurn`，`Turn` 从构造参数（默认不设）转发；并发侧问 prompt id 登记表排除侧问不带 flag 的 tool-result 续发。
-- `packages/cli/src/acp-integration/session/Session.ts` — ACP 发送置 `isSessionTurn`，并把轮内续发后缀归一化为 `ledgerTurnKey`（prompt 身份不变）。
+- `packages/cli/src/acp-integration/session/Session.ts` + `packages/cli/src/acp-integration/session/ledger-turn-key.ts` — ACP 发送置 `isSessionTurn`；`deriveLedgerTurnKey` 把轮内续发后缀归一化为 `ledgerTurnKey`（prompt 身份不变）。
+- `packages/cli/src/ui/hooks/use-llm-stream.ts` + `packages/cli/src/ui/contexts/SessionContext.tsx` — prompt-id 铸造计数器（`promptCount`）对每个铸造的顶层轮（用户 query、cron、teammate、notification、goal、retry）递增；用户可见 Prompts 统计（`userPromptCount`）仅用户发起的轮递增，供 `/stats`、反馈阈值与 tip 节奏。
+- `packages/cli/src/nonInteractiveCli.ts` — headless teammate 轮新铸自己的 prompt id；`teammateTurnActive` 标志在该轮及其续发保留它，并为下一前台轮恢复基础 id。
 - `packages/cli/src/config/settingsSchema.ts` + `packages/cli/src/config/config.ts` — `experimental.modelAvailabilityTracking`（默认 false）+ 透传，CLI 接线测试镜像 `unifiedAgentLoop` 的 opt-in/opt-out/unset 形状。
 - `docs/users/configuration/settings.md` + `packages/web-shell/client/settings.ts` / `settings/messages.ts` — 设置参考行、Web Shell alias 与 zh-CN label/description。
 

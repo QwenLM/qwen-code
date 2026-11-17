@@ -191,9 +191,19 @@ reversible; a later PR can flip the default once nightly evidence is in.
   `messageType`, `Turn` forwards it from a constructor parameter (default unset),
   and a registry of concurrent side-query prompt ids excludes a side query's
   unflagged tool-result continuation.
-- `packages/cli/src/acp-integration/session/Session.ts` — the ACP send sets
-  `isSessionTurn` and normalizes mid-turn continuation suffixes into
-  `ledgerTurnKey` (prompt identity unchanged).
+- `packages/cli/src/acp-integration/session/Session.ts` +
+  `packages/cli/src/acp-integration/session/ledger-turn-key.ts` — the ACP send
+  sets `isSessionTurn`; `deriveLedgerTurnKey` normalizes mid-turn continuation
+  suffixes into `ledgerTurnKey` (prompt identity unchanged).
+- `packages/cli/src/ui/hooks/use-llm-stream.ts` +
+  `packages/cli/src/ui/contexts/SessionContext.tsx` — the prompt-id mint counter
+  (`promptCount`) advances for every minting top-level turn (user query, cron,
+  teammate, notification, goal, retry); the user-visible Prompts statistic
+  (`userPromptCount`) advances only for user-initiated turns and feeds `/stats`,
+  the feedback threshold and the tip cadence.
+- `packages/cli/src/nonInteractiveCli.ts` — a headless teammate turn mints its
+  own prompt id; a `teammateTurnActive` flag keeps it for the turn and its
+  continuations and restores the base id for the next foreground turn.
 - `packages/cli/src/config/settingsSchema.ts` + `packages/cli/src/config/config.ts`
   — `experimental.modelAvailabilityTracking` (default false) + propagation, with
   CLI wiring tests mirroring the `unifiedAgentLoop` opt-in/opt-out/unset shape.

@@ -366,6 +366,38 @@ describe('SessionStatsContext', () => {
     uiTelemetryService.reset();
   });
 
+  it('decouples the mint counter from the user-visible Prompts statistic (R9-5)', () => {
+    const { result, unmount } = renderHook(() => useSessionStats(), {
+      wrapper: SessionStatsProvider,
+    });
+    expect(result.current.stats.promptCount).toBe(0);
+    expect(result.current.stats.userPromptCount).toBe(0);
+
+    // A background mint (notification/goal/retry) advances only the mint
+    // counter, so the next minted id is unique without inflating the statistic.
+    act(() => {
+      result.current.startNewPrompt();
+    });
+    expect(result.current.stats.promptCount).toBe(1);
+    expect(result.current.stats.userPromptCount).toBe(0);
+
+    // A user-initiated turn advances both counters.
+    act(() => {
+      result.current.startNewPrompt();
+      result.current.recordUserPrompt();
+    });
+    expect(result.current.stats.promptCount).toBe(2);
+    expect(result.current.stats.userPromptCount).toBe(1);
+
+    // recordUserPrompt alone advances only the user statistic.
+    act(() => {
+      result.current.recordUserPrompt();
+    });
+    expect(result.current.stats.promptCount).toBe(2);
+    expect(result.current.stats.userPromptCount).toBe(2);
+    unmount();
+  });
+
   it('should throw an error when useSessionStats is used outside of a provider', () => {
     // Suppress console.error for this test since we expect an error
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
