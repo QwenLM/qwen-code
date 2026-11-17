@@ -1361,6 +1361,7 @@ const LiveMessageList = memo(
         ref={ref}
         messages={displayMessages}
         transcriptBlockCount={live.blocks.length}
+        pinnedPrompt
       />
     );
   }),
