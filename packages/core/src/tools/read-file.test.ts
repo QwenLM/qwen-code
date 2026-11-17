@@ -2018,6 +2018,22 @@ describe('ReadFileTool', () => {
         expect(other.llmContent).toContain('Line 9');
       });
 
+      it('serves content when only the offset differs from the recorded view', async () => {
+        const filePath = await put(
+          'ranged-offset.txt',
+          numberedLines(20, 'Line'),
+        );
+
+        await read({ file_path: filePath, offset: 5, limit: 3 });
+        const shifted = await read({
+          file_path: filePath,
+          offset: 10,
+          limit: 3,
+        });
+        expect(shifted.llmContent).not.toMatch(PLACEHOLDER);
+        expect(shifted.llmContent).toContain('Line 11');
+      });
+
       it('does not treat a truncated no-args Read as a recorded {offset: 0} view', async () => {
         // 700 lines exceed the mock Config's caps, so the no-args Read is
         // truncated and never arms the full-read half. The explicit
