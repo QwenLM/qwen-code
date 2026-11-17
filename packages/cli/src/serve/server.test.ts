@@ -49636,6 +49636,73 @@ describe('HTTPS SSE eviction force-close (TLS regression)', () => {
       bus.close();
     }
   });
+
+  it('RSTs the underlying TCP socket (_parent) on TLS eviction via the fallback', async () => {
+    // Pins the TLS _parent RST fallback specifically (verify-pr F1 / M7).
+    // Real kernel backpressure (8MiB replay) + a client that pauses and does
+    // not resume until AFTER the 5s fallback, so eviction takes the graceful
+    // branch and forceCloseSseResponse runs. On TLS the helper's own
+    // resetAndDestroy() throws (ERR_INVALID_HANDLE_TYPE); the RST must land on
+    // the underlying TCP socket (_parent.resetAndDestroy). Deleting the
+    // _parent fallback (M7) leaves only TLSSocket.destroy(), so no plain
+    // net.Socket is reset — this assertion turns red. (The client-side error
+    // code does NOT discriminate: TLSSocket.destroy() also surfaces
+    // ECONNRESET; the property pinned here is the server-side parent RST.)
+    const net = await import('node:net');
+    const tls = await import('node:tls');
+    const resetSpy = vi.spyOn(net.Socket.prototype, 'resetAndDestroy');
+    try {
+      const beforeActive = getActiveSseCount();
+      const blob = 'x'.repeat(8 * 1024 * 1024);
+      const bridge = fakeBridge({
+        async *subscribeImpl(_sessionId, _opts) {
+          yield { id: 1, v: 1, type: 'session_update', data: { blob } };
+          await new Promise(() => {});
+        },
+      });
+      const port = await startTlsServe({ writerIdleTimeoutMs: 200 }, bridge);
+      // Paused client; the 5s fallback (~5.25s) is what closes it. Resume at
+      // 6s only to let the client socket settle; 10s ceiling > 5s fallback.
+      await new Promise<void>((resolve) => {
+        const req = https.request(
+          {
+            hostname: '127.0.0.1',
+            port,
+            path: '/session/sess-A/events',
+            rejectUnauthorized: false,
+            agent: false,
+          },
+          (res) => {
+            if (res.statusCode !== 200) {
+              res.resume();
+              resolve();
+              return;
+            }
+            res.pause();
+            res.on('data', () => {});
+            res.on('error', () => {});
+            res.on('close', () => resolve());
+            setTimeout(() => {
+              res.resume();
+            }, 6000).unref();
+            setTimeout(() => resolve(), 9000).unref();
+          },
+        );
+        req.on('error', () => resolve());
+        req.end();
+      });
+      // The fallback must have RST'd the underlying TCP socket: at least one
+      // resetAndDestroy call whose receiver is a plain net.Socket (the
+      // _parent), not the TLSSocket whose own call throws.
+      const parentResets = resetSpy.mock.instances.filter(
+        (s) => !(s instanceof tls.TLSSocket),
+      );
+      expect(parentResets.length).toBeGreaterThan(0);
+      await expectCountsReleased(beforeActive);
+    } finally {
+      resetSpy.mockRestore();
+    }
+  }, 20_000);
 });
 
 describe('SSE reaper arming and eviction frame delivery (review R1-6/R1-7)', () => {
