@@ -2,7 +2,7 @@
 
 [English](2026-11-04-github-channel-bound-session-action-templates.md) | [简体中文](2026-11-04-github-channel-bound-session-action-templates.zh-CN.md)
 
-状态：implemented（2026-11-04 实现于 `feat/github-bound-session-action-templates` 分支，待评审；维护者确认方向：角色感知 fan-out）。建立在已实现的 [GitHub Channel 事件投递到 PR 绑定会话](2026-11-02-github-channel-bound-session-events.zh-CN.md)设计（PR #16117）之上。本提案将该设计的关键决策 4（"一个候选，不广播"）显式泛化为**每角色一个 winner、跨角色 fan-out**，且仅在新字段配置时生效；字段缺省时，基础设计的每一项行为都不变。
+状态：已实现（#16258；2026-11-04；维护者确认方向：角色感知 fan-out）。下文按该增量当时的设计描述。建立在已实现的 [GitHub Channel 事件投递到 PR 绑定会话](2026-11-02-github-channel-bound-session-events.zh-CN.md)设计（PR #16117）之上。本提案将该设计的关键决策 4（"一个候选，不广播"）显式泛化为**每角色一个 winner、跨角色 fan-out**，且仅在新字段配置时生效；字段缺省时，基础设计的每一项行为都不变。
 
 ## 问题
 

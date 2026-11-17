@@ -2829,12 +2829,17 @@ describe('startSessionPrRefreshTimer', { timeout: TIMER_CEILING_MS }, () => {
   it('drainNow delivers nothing when no drain deps are provisioned', async () => {
     const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
     const registry = createWorkspaceRegistry([trustedRuntime]);
+    await seedPendingBinding(trustedRuntime, SESSION_A, 42);
+    // The drain's watch directory has exactly one source — drainDeps.watchDir,
+    // reached only after the deps gate — so a fixture cannot place a file where
+    // a deps-less drain would look. Pin the effects instead, the way the tick's
+    // sibling case does: no owner claim and no watch-file write. A drainNow
+    // that fell back to a default directory and delivered a previous owner's
+    // entry would have to claim and write, and this would redden.
     const getPrDrainDeps = vi.fn(() => undefined);
-    // No observationEnabled and no deps: enablement is deps presence, which
-    // the daemon derives from the operator's subscription. The getter IS
-    // consulted — the gate moved from "never read the seam" to "read it and
-    // find it unprovisioned" — and a resume must still deliver nothing from
-    // watch files a previous owner left behind.
+    const store = await import('./pr-watch-store.js');
+    const claim = vi.spyOn(store, 'claimPrWatchOwnershipSync');
+    const write = vi.spyOn(store, 'writePrWatchStateSync');
     const handle = startSessionPrRefreshTimer({
       workspaceRegistry: registry,
       env: {},
@@ -2843,8 +2848,12 @@ describe('startSessionPrRefreshTimer', { timeout: TIMER_CEILING_MS }, () => {
     try {
       await handle?.drainNow(trustedCwd);
       expect(getPrDrainDeps).toHaveBeenCalled();
+      expect(claim).not.toHaveBeenCalled();
+      expect(write).not.toHaveBeenCalled();
     } finally {
       handle?.dispose();
+      claim.mockRestore();
+      write.mockRestore();
     }
   });
 
@@ -3221,6 +3230,82 @@ describe('startSessionPrRefreshTimer', { timeout: TIMER_CEILING_MS }, () => {
     }
   });
 
+  it('threads the language into the listing write producer', async () => {
+    // The listing write is the second summary producer. Pin the hop directly:
+    // the timer's watchSeam must carry watchDeps.language into prWatch.language
+    // and from there into the detector. A lost hop persists an English
+    // state_change while the view producer persists zh, and the drain passes
+    // the persisted summary through verbatim.
+    const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
+    const registry = createWorkspaceRegistry([trustedRuntime]);
+    await seedPendingBinding(trustedRuntime, SESSION_A, 42);
+    const watchDir = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pr-watch-listing-lang-'),
+    );
+    const identity = { host: 'github.com', repo: 'o/r', number: 42 };
+    const now = () => Date.parse('2026-11-08T00:00:00.000Z');
+    writePrWatchStateSync(watchDir, identity, {
+      pr: identity,
+      state: 'open',
+      headSha: 'a'.repeat(40),
+      checks: 'passing',
+      observedAt: '2026-11-07T00:00:00.000Z',
+    });
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'closed')],
+    });
+    const observation = await import('./pr-watch-observation.js');
+    const detect = vi.spyOn(observation, 'detectPrTransitions');
+    vi.useFakeTimers();
+    const handle = startSessionPrRefreshTimer({
+      workspaceRegistry: registry,
+      env: {},
+      now,
+      observationEnabled: true,
+      getPrWatchDeps: () => ({
+        watchDir,
+        locks: new PathMutexRegistry(),
+        allowedHosts: new Set(['github.com']),
+        language: 'zh' as const,
+        viewPullRequest: async (url: string) => ({
+          kind: 'ok' as const,
+          view: {
+            url,
+            title: 'PR 42',
+            headSha: 'a'.repeat(40),
+            state: 'open' as const,
+            checks: 'passing' as const,
+            failingChecks: [] as string[],
+          },
+        }),
+        now,
+      }),
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.waitFor(() => {
+        expect(detect).toHaveBeenCalled();
+      });
+      // Each listing-write call carries the language. The filter keeps only
+      // the closed-PR observations, which this fixture produces from the
+      // listing alone; the view producer is pinned by
+      // pr-watch-drain.scenario.test.ts.
+      const listingCalls = detect.mock.calls.filter(
+        (c) =>
+          c[2] !== undefined && (c[2] as { state: string }).state === 'closed',
+      );
+      expect(listingCalls.length).toBeGreaterThan(0);
+      for (const call of listingCalls) {
+        expect(call[5]).toBe('zh');
+      }
+    } finally {
+      handle?.dispose();
+      detect.mockRestore();
+      await removeTempTree(watchDir);
+    }
+  });
+
   it('threads the watch log into the listing write seam', async () => {
     const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
     const registry = createWorkspaceRegistry([trustedRuntime]);
@@ -3287,6 +3372,9 @@ describe('startSessionPrRefreshTimer', { timeout: TIMER_CEILING_MS }, () => {
       pullRequests: [pr(42, 'open')],
     });
     const getPrWatchDeps = vi.fn(() => undefined);
+    const store = await import('./pr-watch-store.js');
+    const claim = vi.spyOn(store, 'claimPrWatchOwnershipSync');
+    const write = vi.spyOn(store, 'writePrWatchStateSync');
     vi.useFakeTimers();
 
     const handle = startSessionPrRefreshTimer({
@@ -3294,18 +3382,25 @@ describe('startSessionPrRefreshTimer', { timeout: TIMER_CEILING_MS }, () => {
       env: {},
       getPrWatchDeps,
     });
-    await vi.advanceTimersByTimeAsync(60_000); // crosses the first-run delay
-    await vi.waitFor(() => {
-      expect(fetchGitHubPullRequestsMock).toHaveBeenCalled();
-    });
-    // Enablement is deps presence: the tick consults the seam, finds it
-    // unprovisioned, and does nothing further — no claim, no view, no
-    // watch-file write — while the state refresh below still runs.
-    expect(getPrWatchDeps).toHaveBeenCalled();
-    handle?.dispose();
+    try {
+      await vi.advanceTimersByTimeAsync(60_000); // crosses the first-run delay
+      await vi.waitFor(() => {
+        expect(fetchGitHubPullRequestsMock).toHaveBeenCalled();
+      });
+      // Enablement is deps presence: the tick consults the seam, finds it
+      // unprovisioned, and does nothing further. Pin each named effect, not
+      // just the seam read — a claim or a write would otherwise pass silently.
+      expect(getPrWatchDeps).toHaveBeenCalled();
+      expect(claim).not.toHaveBeenCalled();
+      expect(write).not.toHaveBeenCalled();
+    } finally {
+      handle?.dispose();
+      claim.mockRestore();
+      write.mockRestore();
+    }
   });
 
-  it('stopWatch reads no watch seam while the switch is off', async () => {
+  it('stopWatch reads no watch seam while no watch deps are provisioned', async () => {
     const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
     const registry = createWorkspaceRegistry([trustedRuntime]);
     const getPrWatchDeps = vi.fn(() => undefined);
@@ -3339,7 +3434,7 @@ describe('startSessionPrRefreshTimer', { timeout: TIMER_CEILING_MS }, () => {
     }
   });
 
-  it('stopWatch stops the refresh timer while the switch is off', async () => {
+  it('stopWatch stops the refresh timer while no watch deps are provisioned', async () => {
     // The off path's early return calls the same dispose(); pin it by effect.
     // Stop before any tick runs, like 'stops ticking after dispose' — once a
     // sweep is in flight its `running` guard skips later ticks under fake
@@ -3643,7 +3738,7 @@ describe('startSessionPrRefreshTimer', { timeout: TIMER_CEILING_MS }, () => {
     }
   });
 
-  it('never reads the PR-drain deps while the observation switch is off', async () => {
+  it('never reads the PR-drain deps while no watch deps are provisioned', async () => {
     const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
     const registry = createWorkspaceRegistry([trustedRuntime]);
     await seedPendingBinding(trustedRuntime, SESSION_A);
@@ -3663,8 +3758,8 @@ describe('startSessionPrRefreshTimer', { timeout: TIMER_CEILING_MS }, () => {
     await vi.waitFor(() => {
       expect(fetchGitHubPullRequestsMock).toHaveBeenCalled();
     });
-    // The switch is off: the drain seam is never read (no drain, no admission,
-    // no restore, no deletion), exactly like the observation seam.
+    // No deps are provisioned: the drain seam is never read (no drain, no
+    // admission, no restore, no deletion), exactly like the observation seam.
     expect(getPrDrainDeps).not.toHaveBeenCalled();
     handle?.dispose();
   });

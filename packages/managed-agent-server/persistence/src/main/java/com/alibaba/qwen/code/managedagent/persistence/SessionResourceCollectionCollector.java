@@ -139,7 +139,7 @@ public final class SessionResourceCollectionCollector {
         var rows =
                 jdbc.query(
                         "SELECT s.tenant_id, s.session_id, s.session_scope_key FROM ma_session s"
-                            + " WHERE s.is_csi_guard = FALSE AND s.retired_at <= ? AND NOT EXISTS"
+                            + " WHERE s.retired_at <= ? AND NOT EXISTS"
                             + " (SELECT 1 FROM ma_operation o WHERE o.operation_kind ="
                             + " 'SESSION_RESOURCE_GC' AND o.scope_key = s.session_scope_key AND"
                             + " o.target_key = s.session_scope_key LIMIT 1) ORDER BY s.retired_at"
@@ -182,7 +182,7 @@ public final class SessionResourceCollectionCollector {
     Claim claim() {
         long time = ToolPublicationRetentionStore.now(jdbc);
         var candidates = jdbc.query(
-                        "SELECT scope_key, tenant_id, session_id FROM ma_operation WHERE operation_kind = 'SESSION_RESOURCE_GC' AND NOT EXISTS (SELECT 1 FROM ma_session s WHERE s.tenant_id = ma_operation.tenant_id AND s.session_id = ma_operation.session_id AND s.is_csi_guard = TRUE) AND state <> 'SUCCEEDED' AND available_at >= 0 AND available_at <= ? AND (claim_owner = ? OR claim_until IS NULL OR claim_until <= ?) ORDER BY available_at, operation_key LIMIT 32",
+                        "SELECT scope_key, tenant_id, session_id FROM ma_operation WHERE operation_kind = 'SESSION_RESOURCE_GC' AND state <> 'SUCCEEDED' AND available_at >= 0 AND available_at <= ? AND (claim_owner = ? OR claim_until IS NULL OR claim_until <= ?) ORDER BY available_at, operation_key LIMIT 32",
                 (row, index) -> ManagedSchemaRows.read(row), time, owner, time);
         for (var candidate : candidates) {
             Claim claim =
@@ -194,9 +194,6 @@ public final class SessionResourceCollectionCollector {
                                 String scope = (String) candidate.get("scope_key");
                                 JdbcManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(
                                         jdbc, tenant, JdbcManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
-                                if (ManagedLegacySessionGuard.isPrivate(jdbc, tenant, session)) {
-                                    return null;
-                                }
                                 var head =
                                         ToolPublicationRetentionStore.lockSessionHead(
                                                 jdbc, tenant, session);
@@ -357,7 +354,6 @@ public final class SessionResourceCollectionCollector {
         // Session locks precede the ledger row lock, matching claim()'s order.
         JdbcManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(
                 jdbc, claim.tenant(), JdbcManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
-        ManagedLegacySessionGuard.requireLegacyMutation(jdbc, claim.tenant(), claim.session());
         var head = ToolPublicationRetentionStore.lockSessionHead(jdbc, claim.tenant(), claim.session());
         var row =
                 jdbc.query(
