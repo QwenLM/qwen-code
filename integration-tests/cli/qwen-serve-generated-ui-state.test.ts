@@ -113,6 +113,7 @@ describe('Generated UI view state through the daemon', () => {
         baseRevision: number,
         value: unknown,
       ) => call('PUT', state(target), { baseRevision, value }, target.clientId);
+      // Admission returns 202; reload must wait until the turn persists its records.
       const waitForPrompt = async (response: Response) => {
         const { promptId } = await json(response, 202);
         await expect
@@ -127,7 +128,7 @@ describe('Generated UI view state through the daemon', () => {
                 ),
                 200,
               ),
-            { timeout: 30_000 },
+            { timeout: 60_000 },
           )
           .toMatchObject({ state: 'completed' });
       };

@@ -377,6 +377,7 @@ import {
   DAEMON_CHANNEL_DELIVERY_META_KEY,
   DAEMON_ATTACHMENT_REFERENCES_META_KEY,
   DAEMON_EXPECTED_APPROVAL_MODE_META_KEY,
+  DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY,
   DAEMON_INPUT_ANNOTATIONS_META_KEY,
   DAEMON_PERMISSION_CANCEL_REASON_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
@@ -4379,6 +4380,7 @@ export class Session implements SessionContext {
                 workspaceGeneration: req.workspaceGeneration,
               }
             : {}),
+          ...(req.sessionId ? { sessionId: req.sessionId } : {}),
         });
         if (typeof resp['sessionId'] !== 'string' || !resp['sessionId']) {
           throw new Error(
@@ -4386,7 +4388,13 @@ export class Session implements SessionContext {
           );
         }
         if (req.completion === 'sent') {
-          this.relatedAgentIds.add(resp['sessionId']);
+          // The completion arrives under this id, so the Todo Stop Guard
+          // links it to the work that asked for it.
+          this.relatedAgentIds.add(
+            typeof resp['taskId'] === 'string' && resp['taskId']
+              ? resp['taskId']
+              : resp['sessionId'],
+          );
         }
         return {
           sessionId: resp['sessionId'],
@@ -6011,7 +6019,9 @@ export class Session implements SessionContext {
   }
 
   #assertExpectedApprovalMode(params: PromptRequest): void {
-    const expectedMode = params._meta?.[DAEMON_EXPECTED_APPROVAL_MODE_META_KEY];
+    const expectedMode =
+      params._meta?.[DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY] ??
+      params._meta?.[DAEMON_EXPECTED_APPROVAL_MODE_META_KEY];
     if (
       expectedMode !== undefined &&
       expectedMode !== this.config.getApprovalMode()
@@ -7193,6 +7203,13 @@ export class Session implements SessionContext {
           return { stopReason: 'cancelled' };
         }
         this.#assertExpectedApprovalMode(params);
+        if (
+          params._meta?.[DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY] !==
+          undefined
+        ) {
+          const mode = params._meta[DAEMON_EXPECTED_APPROVAL_MODE_META_KEY];
+          this.#applyApprovalMode(mode as ApprovalMode);
+        }
         if (goalTurn?.origin !== 'runtime') this.notificationsPaused = false;
         // Increment turn counter for each user prompt
         this.turn += 1;
@@ -15416,6 +15433,10 @@ export class Session implements SessionContext {
         `Unknown approval mode: ${params.modeId}`,
       );
     }
+    this.#applyApprovalMode(approvalMode);
+  }
+
+  #applyApprovalMode(approvalMode: ApprovalMode): void {
     const previousApprovalMode = this.config.getApprovalMode();
     this.config.setApprovalMode(approvalMode);
     // Only plan-involving transitions touch the revision: entering PLAN starts
@@ -15442,7 +15463,7 @@ export class Session implements SessionContext {
       .extNotification('qwen/notify/session/mode-update', {
         v: 1,
         sessionId: this.sessionId,
-        currentModeId: params.modeId,
+        currentModeId: approvalMode,
         ...(approvalMode === ApprovalMode.PLAN
           ? {
               planExecutionMode:
