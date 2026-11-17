@@ -267,15 +267,13 @@ command redirected to `prepare.log`, plus the `sed` that captures the snapshot
 digest into `pr.sha256` (step 7 binds the snapshot's bytes to it). It fetches the metadata snapshot, resolves and verifies
 both OIDs against this clone, refuses a tree that is not a clean, fully
 materialised checkout of the PR head (a wrong HEAD names the `git checkout`
-to run — but when the tree sits at a head a watch round has registered,
-distinguish its state: a **verified** head keeps the plain `git checkout` (its
-verdict is already filed); if its round is **still in flight**, let that round
-answer — do not release a live marker or check out under it; if that round is
-**gone**, release its marker
-(`--release --head <head> [--round <r>] --repo <owner>/<repo>`) and start the
-newer head, and do not check it out under the old marker, which would file the
-newer head's evidence under the registered head's verdict; uncommitted changes
-name the entries and a stash
+to run — but if the head prepare names is **newer than this round's registered
+head**, that is the moved-head case: follow the moved-head recovery below
+(release this round's marker; never check out the newer head under the old
+marker, which would file the newer head's evidence under the registered head's
+verdict); otherwise the named head is this round's own and the plain checkout
+is the remedy — checking it out touches no other head's already-filed verdict;
+uncommitted changes name the entries and a stash
 form that clears them; index flags that hide tracked state — a sparse checkout's
 skip-worktree, assume-unchanged — are refused too; the script never stashes
 for you),
@@ -753,18 +751,24 @@ then start the head again
 (`node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <headSha> --round <r+1> --repo <owner>/<repo>`)
 and retry prepare — a release alone leaves the head unregistered (it files only
 a push-order hint, not a deferral) and no probe fire will deliver it again.
-`--repo` is required on both: `--start` recorded it, and every verb refuses an
-omitted `--repo` once a repo is recorded. The restarted round's number (`<r+1>`)
-becomes this round's number — repeat that value in `--complete`. Do not recover
-with `--complete inconclusive` instead — only that verdict increments the retry
-counter whose cap is the terminal not-covered state, so two transient prepare
-failures would retire a head no round examined. If prepare refuses because the
-PR has moved past the delivered head (its message names a newer PR head), that
-head can never prepare: `--release --head <headSha> [--round <r>] --repo
-<owner>/<repo>` it and do not restart it — the newer head is delivered by the
-next fire (the gate cursor tracks the live head), or is already in the deferred
-list the release prints, which you then start. Do not `git checkout` the newer
-head under the old marker.
+A transient prepare failure (the round still runs) leaves the marker intact —
+prepare never reads the watch state — so retrying prepare against it and
+completing at the original round recovers the head with no release; the
+release + restart is for a round that died, and a kill between its two commands
+would re-open the silent drop. `--repo` is required on both: `--start` recorded
+it, and every verb refuses an omitted `--repo` once a repo is recorded. The
+restarted round's number (`<r+1>`) becomes this round's number — repeat that
+value in `--complete`. Do not recover with `--complete inconclusive` instead —
+only that verdict increments the retry counter whose cap is the terminal
+not-covered state, so two transient prepare failures would retire a head no
+round examined. If prepare refuses because the PR has moved past the delivered
+head (its message names a newer PR head), that head can never prepare:
+`--release --head <headSha> [--round <r>] --repo <owner>/<repo>` it and do not
+restart it — the newer head is delivered by the next fire (the gate cursor
+tracks the live head), or is already in the deferred list the release prints,
+which you then start. The started newer head is its own round — repeat its head
+and round in `--complete`, not the released head's. Do not `git checkout` the
+newer head under the old marker.
 The helper runs from the trusted clone — the state root defaults to its
 main worktree, never the round's PR clone. The default resolves from the
 script's own location, so a copy outside the trusted clone — the container
@@ -797,7 +801,12 @@ Exit 3 has several shapes, each with its own reaction:
 - The state belongs to another repository: a PR number is only unique
   within its repo; check `--repo` and the state root. This guard applies to
   `--complete` and `--release` too, and an omitted `--repo` does not disarm
-  it once the state records a repo.
+  it once the state records a repo. Because registration runs ahead of
+  prepare, a mistyped `--repo` is recorded at `--start` before prepare can
+  reject it, and every later verb then refuses the correct slug without naming
+  the file; the reset is to delete the state file
+  `.qwen/tmp/verify-pr-watch-<n>.json` in the trusted clone's main worktree
+  (this drops the PR's dedup history), so check the slug at `--start`.
 
 Record the finished round with the same script's completion form:
 `node <clone>/scripts/verify-pr-watch-state.mjs <n> --complete --head <headSha> --round <r> --verdict <word> [--artifact-dir <dir>] [--comment-id <id>] --repo <owner>/<repo>`
@@ -1001,8 +1010,12 @@ ambiguous rather than verify a guessed PR. Then, in order:
    (`node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <H> --round <r+1> --repo <owner>/<repo>`)
    and retry prepare — a release alone leaves the head unregistered and no
    probe fire will deliver it again (`--repo` is required once `--start`
-   recorded it). The restarted round's number (`<r+1>`) becomes this round's
-   number — repeat that value in `--complete`. Do not recover with `--complete
+   recorded it). A transient prepare failure (the round still runs) leaves the
+   marker intact — prepare never reads the watch state — so retrying prepare
+   against it and completing at the original round recovers `H` with no
+   release; the release + restart is for a round that died. The restarted
+   round's number (`<r+1>`) becomes this round's number — repeat that value in
+   `--complete`. Do not recover with `--complete
 inconclusive` instead: it increments the retry counter whose cap is the
    terminal not-covered state. If prepare refuses because the PR has moved past
    the delivered head (its message names a newer PR head), that head can never

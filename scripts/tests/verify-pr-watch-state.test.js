@@ -3269,6 +3269,33 @@ describe('R17-2 register ahead of prepare', () => {
     expect(verified.artifactDir).toBe('r11');
   });
 
+  // Deferred (round 7): the explicit completion directory wins over the start
+  // directory. Without a case supplying BOTH, a reorder of the chain to
+  // ownFlight?.artifactDir first would file the stale start directory and every
+  // other dir case would stay green.
+  it('--complete with a dir overrides a different start directory', () => {
+    const root = makeRoot();
+    expect(run(root, [...START, '--artifact-dir', 'dirA']).status).toBe(0);
+    const res = run(root, [
+      '16866',
+      '--complete',
+      '--head',
+      HEAD,
+      '--round',
+      '11',
+      '--verdict',
+      'merge-ready',
+      '--artifact-dir',
+      'dirB',
+    ]);
+    expect(res.status).toBe(0);
+    expect(res.stderr).not.toMatch(/no artifact directory/);
+    const verified = readState(root, 16866).verifiedHeads.find((e) =>
+      sameCommit(e.head, HEAD),
+    );
+    expect(verified.artifactDir).toBe('dirB');
+  });
+
   // R2-3: a replayed completion (no in-flight marker) inherits the prior
   // verdict's directory and prints no warning.
   it('a replayed completion inherits the prior verdict directory', () => {

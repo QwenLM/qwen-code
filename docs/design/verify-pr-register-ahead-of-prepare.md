@@ -74,11 +74,17 @@ The watch prompt and the manual re-verification step both change to:
    artifact dir `<dir>`.
 3. **Battery** in `<dir>`.
 4. **Complete**: `verify-pr-watch-state.mjs <n> --complete --head <H> --round
-<r> --verdict <word> --artifact-dir <dir> [--comment-id <id>] --repo
-<owner>/<repo>` — the directory is recorded here.
+<r> --verdict <word> [--artifact-dir <dir>] [--comment-id <id>] --repo
+<owner>/<repo>` — the directory is recorded here (optional: a replayed
+   completion omits it to inherit the recorded directory).
 
 New responsibility: because the marker now exists before prepare, a **prepare
-failure after `--start`** must
+failure after `--start`** is recovered according to the round's state. A
+_transient_ failure (the round still runs) leaves the marker intact — prepare
+never reads the watch state — so retry prepare against it and complete at the
+original round, with no release (round 7); releasing first would leave the head
+unregistered between the release and a restart, re-opening the silent drop if
+the round is killed in that window. A round that _died_ is recovered by
 `--release --head <H> [--round <r>] --repo <owner>/<repo>` **and then start the
 head again** (`--start --head <H> --round <r+1> --repo <owner>/<repo>`) and retry
 prepare. A release alone is not a recovery: `releaseRound` files only a
@@ -99,21 +105,26 @@ tree whose HEAD is not that head), the delivered head can never prepare —
 `--release` it (with the marker's `--round`) and do **not** restart it. In the
 watch prompt the newer head is delivered by the next fire (the gate cursor
 tracks the live head, `next.headSha = pr.headRefOid`), or is already in the
-deferred list the release prints, which you then start; in the ordinary
-moved-head case no fire ran between registration and prepare, so the newer head
-was never deferred and the next fire delivers it (R4-1 round 5 restores this
-two-branch form). In the manual path there is no fire, so re-resolve the newer
+deferred list the release prints, which you then start — the started newer head
+is its own round, and `--complete` repeats its head and round, not the released
+head's (round 7); in the ordinary moved-head case no fire ran between
+registration and prepare, so the newer head was never deferred and the next fire
+delivers it (R4-1 round 5 restores this two-branch form). In the manual path there is no fire, so re-resolve the newer
 head (`gh pr view … --json headRefOid`) and `--start` it; the restarted round is
 now `<newer>` at `<next>`, and `--complete` repeats those values, not the
 original `<H>` and `<r>` (round 6). Do not `git checkout` the newer head under
 the old marker, which would file the newer head's evidence under the delivered
 head's verdict (R1-1 round 3, R4-1). The prepare paragraph's wrong-HEAD checkout
-remedy distinguishes the three states of a registered head (R5-1 round 6): a
-**verified** head keeps the plain `git checkout` (its verdict is already filed);
-a round **still in flight** answers (do not release a live marker or check out
-under it); a **gone** round's marker is released and the newer head started, and
-the newer head is not checked out under the old marker. Both moved-head release
-forms carry `[--round <r>]` like the sibling recovery form.
+remedy is registration-aware (R5-1 round 7): if the head prepare names is
+**newer than this round's registered head**, that is the moved-head case —
+follow the moved-head recovery (release this round's marker; never check out the
+newer head under the old marker); otherwise the named head is this round's own
+and the plain checkout is the remedy. Under register-ahead the only in-flight
+marker during prepare is this round's own, so the round-6 three-state form's
+"still in flight → let that round answer" arm wedged the round and its
+"verified" arm could file newer evidence under the delivered head; keying off
+prepare's target head instead of the tree's head state removes both. Both
+moved-head release forms carry `[--round <r>]` like the sibling recovery form.
 The completion form's `--artifact-dir` is optional: a replayed completion omits
 it to inherit the directory already recorded for the head rather than
 overwriting it. The dead-marker bullet's `--round` is the
@@ -137,11 +148,17 @@ existing dead-round recovery (`--release` for a round that died after
   full `--release … --repo` form (R2-1). Round 6 adds slice-scoped pins so a
   shared sentence's copy in one section is not an alibi for the other: the
   no-`--artifact-dir` invariant and the replay-omission clause are pinned on
-  each section's own slice, the three-state wrong-HEAD exception (R5-1) and the
+  each section's own slice, the wrong-HEAD exception (R5-1) and the
   moved-head completion re-binding are pinned, and the general entry-path
   bullet is pinned to the prepare block (registration is a watch/re-verification
   procedure) with the boundary section qualifying that registration precedes
-  prepare.
+  prepare. Round 7 makes the wrong-HEAD remedy registration-aware (keying off
+  whether prepare names a head newer than this round's registered head, replacing
+  the round-6 three-state form whose in-flight arm wedged on this round's own
+  marker), pins the transient retry-without-release recovery in each section and
+  the watch moved-head completion re-binding, documents the mistyped-`--repo`
+  reset, and adds a CLI witness that an explicit completion directory overrides a
+  different start directory (reordering the resolution chain reds it).
 - `scripts/tests/verify-pr-watch-state.test.js`: new witnesses driven through
   the **CLI** (`run(root, …)`, exercising the helper code this PR changes — the
   `parseArgs` requirement, `completeRound`'s return field, and `main`'s

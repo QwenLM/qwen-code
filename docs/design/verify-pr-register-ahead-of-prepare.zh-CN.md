@@ -61,10 +61,13 @@ watch prompt 与手动复验步骤均改为：
 2. **prepare**：跑受信 prepare 块；它创建并打印产物目录 `<dir>`。
 3. **电池**在 `<dir>`。
 4. **完成**：`verify-pr-watch-state.mjs <n> --complete --head <H> --round <r>
---verdict <word> --artifact-dir <dir> [--comment-id <id>] --repo <owner>/<repo>`
-   ——目录在此记录。
+--verdict <word> [--artifact-dir <dir>] [--comment-id <id>] --repo <owner>/<repo>`
+   ——目录在此记录（可选：重放完成省略它以继承已记录的目录）。
 
-新职责：因标记现在先于 prepare 存在，**`--start` 后 prepare 失败**必须
+新职责：因标记现在先于 prepare 存在，**`--start` 后 prepare 失败**按轮次状态恢复。
+*瞬时*失败（轮次仍在运行）时标记完好——prepare 从不读 watch 状态——故直接对完好
+标记重试 prepare 并按原轮次完成，无需 release（第 7 轮）；先 release 会使 head 在
+release 与重启之间失去记录，若在该窗口被杀则重新打开静默丢弃。*已死*的轮次用
 `--release --head <H> [--round <r>] --repo <owner>/<repo>` **并随后重新启动该
 head**（`--start --head <H> --round <r+1> --repo <owner>/<repo>`）再重试 prepare。
 单独 release 不是恢复：`releaseRound` 只写 `releasedHeads` 推序提示——明确不是
@@ -79,17 +82,21 @@ inconclusive 是唯一增加 head 重试计数的判定，而计数上限即终�
 `headRefOid`，并拒绝 HEAD 不等于该 head 的树），所投递 head 永远无法 prepare——
 `--release` 它（带标记的 `--round`）且**不要**重启。watch prompt 中更新 head 由
 下一次触发投递（gate 游标跟实时 head，`next.headSha = pr.headRefOid`），或已在
-release 打印的 deferred 列表中、由你启动；常规 moved-head 情形注册与 prepare
-之间没有触发运行，故更新 head 从未被 defer、由下一次触发投递（R4-1 第 5 轮恢复
-此两分支写法）。手动路径没有触发，故自行重新解析更新 head（`gh pr view … --json
+release 打印的 deferred 列表中、由你启动——所启动的更新 head 自成一轮，
+`--complete` 重复它的 head 与轮次，而非被释放 head 的（第 7 轮）；常规 moved-head
+情形注册与 prepare 之间没有触发运行，故更新 head 从未被 defer、由下一次触发投递
+（R4-1 第 5 轮恢复此两分支写法）。手动路径没有触发，故自行重新解析更新 head（`gh pr view … --json
 headRefOid`）并 `--start` 它；重启后的轮次现为 `<newer>` 于 `<next>`，`--complete`
 重复这两个值，而非原来的 `<H>` 与 `<r>`（第 6 轮）。不要在旧标记下 `git checkout`
 更新的 head，否则会把更新 head 的证据记到所投递 head 的判定名下（R1-1 第 3 轮、
-R4-1）。prepare 段的错 HEAD checkout 补救区分已注册 head 的三种状态（R5-1 第 6
-轮）：**已验证** head 保持普通 `git checkout`（其判定已登记）；**仍在飞**的轮次
-自行作答（不要释放活标记、也不要在其下 checkout）；**已死**轮次的标记被释放、
-更新 head 被启动，且不在旧标记下 checkout 更新 head。两个 moved-head release
-形式都像兄弟恢复形式一样带 `[--round <r>]`。完成形式的 `--artifact-dir` 可选：重放完成省略它
+R4-1）。prepare 段的错 HEAD checkout 补救是注册感知的（R5-1 第 7 轮）：若 prepare
+点名的 head **比本轮注册的 head 更新**，即 moved-head 情形——按 moved-head 恢复
+（释放本轮标记；绝不在旧标记下 checkout 更新 head）；否则点名的 head 即本轮自己的
+head，普通 checkout 即补救。提前注册下 prepare 期间唯一在飞标记即本轮自己的，故
+第 6 轮三态写法的「仍在飞→让该轮作答」分支会卡死本轮、「已验证」分支可能把更新
+head 的证据记到所投递 head 名下；改以 prepare 的目标 head（而非树的 head 状态）
+为判据即消除两者。两个 moved-head release 形式都像兄弟恢复形式一样带
+`[--round <r>]`。完成形式的 `--artifact-dir` 可选：重放完成省略它
 以继承该 head 已记录的目录，而非覆盖。死标记条目的 `--round` 是
 阻塞标记的轮次，从状态文件的在飞条目读出并传入（读状态允许，只有手写 JSON 被
 禁止）：省略 `--round` 会跳过比对，重试的 release 会删掉同 head 较新轮次的活
@@ -105,8 +112,12 @@ R4-1）。prepare 段的错 HEAD checkout 补救区分已注册 head 的三种�
   （`--start … --round <r+1>`；删任一变红）；watch prompt 的 exit-3 死标记条目
   钉住完整 `--release … --repo` 形式（R2-1）。第 6 轮加按节切片的钉，使共享句在
   一节的副本不为另一节作不在场证明：无 `--artifact-dir` 不变量与重放省略子句各钉
-  在本节切片上，三态错 HEAD 例外（R5-1）与 moved-head 完成重绑定被钉住，通用入口
+  在本节切片上，错 HEAD 例外（R5-1）与 moved-head 完成重绑定被钉住，通用入口
   条目钉到 prepare 块（注册是 watch/复验程序），边界节则限定注册先于 prepare。
+  第 7 轮把错 HEAD 补救改为注册感知（以 prepare 点名的 head 是否比本轮注册的 head
+  更新为判据，取代第 6 轮三态写法——其在飞分支会在本轮自己的标记上卡死），各节钉
+  瞬时「重试不 release」恢复与 watch moved-head 完成重绑定，写明误拼 `--repo` 的
+  重置，并新增 CLI 见证：显式完成目录覆盖不同的 start 目录（重排解析链即变红）。
 - `scripts/tests/verify-pr-watch-state.test.js`：新见证走 **CLI**（`run(root, …)`，
   演练本 PR 改动的助手代码——`parseArgs` 要求、`completeRound` 返回字段、`main`
   告警）——`--start` 不带 `--artifact-dir` 注册在飞且目录 `null`（恢复强制要求

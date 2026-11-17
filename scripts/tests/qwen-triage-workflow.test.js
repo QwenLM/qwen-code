@@ -6660,6 +6660,11 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(manualSlice).toContain(
       'then start the head again (`node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <H> --round <r+1> --repo <owner>/<repo>`) and retry prepare',
     );
+    // Deferred (round 7): a transient prepare failure leaves the marker intact —
+    // retry-without-release recovers `H`; release+restart is for a dead round.
+    expect(manualSlice).toContain(
+      'retrying prepare against it and completing at the original round recovers `H` with no release',
+    );
     // R3-2: the restarted round's number becomes this round's number.
     expect(manualSlice).toContain(
       "The restarted round's number (`<r+1>`) becomes this round's number — repeat that value in `--complete`",
@@ -6821,22 +6826,24 @@ describe('qwen-triage verify hardening round 2', () => {
       'Run the full step-1 prepare block on the host before any work inside the boundary — the watch-state registration precedes it (R17-2)',
     );
     expect(flat).not.toContain('before anything else');
-    // R5-1 (round 6): the wrong-HEAD checkout remedy distinguishes the three
-    // states of a registered head — verified keeps the plain checkout, a live
-    // in-flight round answers (no releasing a live marker), a gone round's
-    // marker is released and the newer head started. Reverting to the
-    // single-state exception reds these pins.
+    // R5-1 (round 7): the wrong-HEAD remedy is registration-aware — it keys off
+    // whether prepare names a head NEWER than this round's registered head (the
+    // moved-head case), not the tree's head state. Under register-ahead the only
+    // in-flight marker during prepare is this round's own, so the round-6
+    // three-state "still in flight → let that round answer" arm wedged the round
+    // and the "verified" arm could file newer evidence under the delivered head.
+    // Reverting to the tree-state form reds these pins.
     expect(flat).toContain(
-      'a wrong HEAD names the `git checkout` to run — but when the tree sits at a head a watch round has registered, distinguish its state',
+      "a wrong HEAD names the `git checkout` to run — but if the head prepare names is **newer than this round's registered head**, that is the moved-head case",
     );
     expect(flat).toContain(
-      'a **verified** head keeps the plain `git checkout` (its verdict is already filed)',
+      "follow the moved-head recovery below (release this round's marker; never check out the newer head under the old marker",
     );
     expect(flat).toContain(
-      'if its round is **still in flight**, let that round answer — do not release a live marker or check out under it',
+      "otherwise the named head is this round's own and the plain checkout is the remedy",
     );
-    expect(flat).toContain(
-      'if that round is **gone**, release its marker (`--release --head <head> [--round <r>] --repo <owner>/<repo>`) and start the newer head, and do not check it out under the old marker',
+    expect(flat).not.toContain(
+      'let that round answer — do not release a live marker or check out under it',
     );
     // R1-1: the watch prompt's prepare-failure recovery carries the full
     // --release form with --repo (the <headSha> variant; the manual section
@@ -6849,6 +6856,12 @@ describe('qwen-triage verify hardening round 2', () => {
     // unregistered. Removing the restart clause reds this pin.
     expect(flat).toContain(
       'then start the head again (`node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <headSha> --round <r+1> --repo <owner>/<repo>`) and retry prepare',
+    );
+    // Deferred (round 7): a transient prepare failure leaves the marker intact
+    // (prepare never reads the watch state) — retry-without-release recovers the
+    // head with no unregistered window; release+restart is for a dead round.
+    expect(promptSlice).toContain(
+      'retrying prepare against it and completing at the original round recovers the head with no release',
     );
     // R4-2: these sentences exist verbatim in both sections — pin the prompt's
     // own copy so deleting it reds this block while the manual stays green.
@@ -6875,6 +6888,21 @@ describe('qwen-triage verify hardening round 2', () => {
     );
     expect(promptSlice).toContain(
       'the newer head is delivered by the next fire (the gate cursor tracks the live head), or is already in the deferred list the release prints, which you then start',
+    );
+    // Deferred (round 7): the watch moved-head branch rebinds the completion to
+    // the started newer head's own round (the manual twin carries the same
+    // clause); a literal completion under the released head would exit 3.
+    expect(promptSlice).toContain(
+      "The started newer head is its own round — repeat its head and round in `--complete`, not the released head's",
+    );
+    // Deferred (round 7): registering ahead records --repo before prepare can
+    // validate it; a mistyped slug poisons the state, and the contract documents
+    // the reset (delete the state file) rather than leaving it undiscoverable.
+    expect(promptSlice).toContain(
+      'a mistyped `--repo` is recorded at `--start` before prepare can reject it',
+    );
+    expect(promptSlice).toContain(
+      "the reset is to delete the state file `.qwen/tmp/verify-pr-watch-<n>.json` in the trusted clone's main worktree",
     );
     // R2-1: the watch prompt's exit-3 dead-marker bullet carries the full
     // --release form with --repo (anchored on the watch-only continuation, so
