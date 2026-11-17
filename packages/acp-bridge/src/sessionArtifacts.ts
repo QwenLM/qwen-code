@@ -19,6 +19,7 @@ import {
   isAdoptableContentFingerprintKey,
   isReservedWorkspaceMetadataKey,
   getWebPreviewSnapshotId,
+  isNonSnapshotPublishedFileUrl,
   MAX_DIRECTORY_ARTIFACT_DEPTH,
   MAX_DIRECTORY_ARTIFACT_FILES,
   PUBLISHED_CONTENT_SHA256_METADATA_KEY,
@@ -3065,21 +3066,17 @@ function isNonSnapshotFileLocator(
   return isFileArtifactUrl(artifact.url) && !getWebPreviewSnapshotId(artifact);
 }
 
-function isNonSnapshotPublishedFileUrl(
-  artifact: Partial<PersistedSessionArtifact>,
-): boolean {
-  return artifact.storage === 'published' && isNonSnapshotFileLocator(artifact);
-}
-
 // The restorable set: what a cold open rebuilds from the journal on the
 // happy path. Shared by the snapshot payload and the event payload's
-// summary count. The count can lag the journal on the designed
-// persistence-failure path: a live-only downgrade keeps a previously
-// journaled artifact restorable in the journal while the live map holds it
-// ephemeral, so a later event stamps the live restorable set (without it)
-// until the next snapshot converges the journal or the load-time seed
-// heals the sidecar from the rebuilt snapshot. Best-effort metadata: the
-// lag costs a list count, never correctness.
+// summary count; the exclusion itself is the core predicate the load-time
+// sidecar seed also calls, so the two counts cannot drift. The count can
+// lag the journal on the designed persistence-failure path: a live-only
+// downgrade keeps a previously journaled artifact restorable in the
+// journal while the live map holds it ephemeral, so a later event stamps
+// the live restorable set (without it) until the next snapshot converges
+// the journal or the load-time seed heals the sidecar from the rebuilt
+// snapshot. Best-effort metadata: the lag costs a list count, never
+// correctness.
 function isRestorableArtifact(artifact: StoredArtifact): boolean {
   return (
     artifact.retention !== 'ephemeral' &&

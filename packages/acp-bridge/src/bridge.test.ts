@@ -7714,6 +7714,74 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('clears the rewind pending marker when the restore rejects', async () => {
+    // A leaked marker would stamp artifactCountPending on every later
+    // summary (the merge keeps the stale sidecar count forever), block
+    // conditional close, and stall the drain predicate.
+    const restoreSpy = vi
+      .spyOn(SessionArtifactStore.prototype, 'restore')
+      .mockRejectedValueOnce(new Error('snapshot directory missing'));
+    onTestFinished(() => restoreSpy.mockRestore());
+    const handle = makeChannel({
+      extMethodImpl: (method) => {
+        if (method === 'qwen/control/session/artifacts/persist') {
+          return {};
+        }
+        expect(method).toBe('qwen/control/session/rewind');
+        return {
+          targetTurnIndex: 0,
+          filesChanged: [],
+          filesFailed: [],
+          artifactSnapshot: {
+            v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+            sessionId: SESS_A,
+            sequence: 9,
+            artifacts: [
+              {
+                id: stableSessionArtifactId(
+                  SESS_A,
+                  'url:https://example.com/rewind-reject',
+                ),
+                kind: 'link',
+                storage: 'external_url',
+                source: 'client',
+                status: 'available',
+                title: 'Rewind reject link',
+                url: 'https://example.com/rewind-reject',
+                retention: 'restorable',
+                clientRetained: true,
+                createdAt: '2026-07-04T00:00:00.000Z',
+                updatedAt: '2026-07-04T00:00:00.000Z',
+              },
+            ],
+            tombstonedIds: [],
+            stickyEphemeralIds: [],
+            warnings: [],
+          },
+        };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await seedRewindTarget(bridge, handle, session.sessionId);
+
+    await expect(
+      bridge.rewindSession(
+        session.sessionId,
+        { promptId: 'prompt-1' },
+        { clientId: session.clientId },
+      ),
+    ).rejects.toThrow('snapshot directory missing');
+
+    const row = bridge
+      .listWorkspaceSessions(WS_A)
+      .find((s) => s.sessionId === session.sessionId);
+    expect(row).toBeDefined();
+    expect(row?.artifactCountPending).toBeUndefined();
+
+    await bridge.shutdown();
+  });
+
   it('clears durable artifacts but keeps live ephemerals when rewind returns an empty artifact snapshot', async () => {
     const persistedSnapshots: unknown[] = [];
     const handle = makeChannel({
