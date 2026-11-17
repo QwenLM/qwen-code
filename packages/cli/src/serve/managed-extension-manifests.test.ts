@@ -429,3 +429,98 @@ createInterface({input:process.stdin}).on("line",line=>{
     }
   },
 );
+
+it('preserves hook display metadata and the HTTP if condition while staging an extension', () => {
+  const workspace = {
+    tenantId: 'tenant',
+    workspaceId: 'workspace',
+    workspaceGeneration: '1',
+  };
+  const stage = (hook: Record<string, unknown>) => {
+    const contributions: ManagedPackageContributions = {
+      skills: [],
+      commands: [],
+      agents: [],
+      context: [],
+      settings: [],
+      mcpServers: {},
+      hooks: {
+        PostToolUse: [{ matcher: '^run_shell_command$', hooks: [hook] }],
+      },
+    };
+    return stageManagedExtensionManifests({
+      ...workspace,
+      runtimeSessionId: 'root',
+      command: {
+        operationId: randomUUID(),
+        actorKey: 'a'.repeat(64),
+        expectedRevision: 0,
+        extensions: [],
+      },
+      packages: [
+        {
+          pin: {
+            extensionId: 'artifact',
+            packageRevision: 1,
+            packageDigest: 'd'.repeat(64),
+            settingsRevision: 1,
+          },
+          assetRoot: '/private/package',
+          contributions,
+        },
+      ],
+      baseMcpServers: [],
+      baseHookCatalog: null,
+      mcp: new ManagedMcpRuntime(workspace, async () => undefined, {
+        version: 1,
+        servers: [],
+      }),
+      hooks: new ManagedHookRuntime(workspace, async () => undefined, {
+        version: 1,
+        catalogs: [],
+      }),
+      hydrated: () => ({ contributions, environment: {} }),
+    });
+  };
+  const command = {
+    type: 'command',
+    name: 'artifact-adapter',
+    command: 'python3 "${extensionPath}/hooks/artifact_hook.py"',
+    timeout: 5000,
+  };
+  const http = {
+    type: 'http',
+    name: 'artifact-adapter',
+    url: 'https://example.com/hooks/artifact',
+    timeout: 5000,
+  };
+  const prompt = {
+    type: 'prompt',
+    name: 'artifact-adapter',
+    prompt: 'Review the tool output.',
+    timeout: 5000,
+  };
+  const metadata = {
+    description: 'Collect tool output as session artifacts',
+    statusMessage: 'Collecting artifacts',
+  };
+  for (const hook of [command, http, prompt]) {
+    expect(
+      stage(hook).hookManifest.catalogs[0]?.hooks[0]?.config,
+    ).toMatchObject(hook);
+    for (const [field, value] of Object.entries(metadata)) {
+      const withMetadata = { ...hook, [field]: value };
+      expect(
+        stage(withMetadata).hookManifest.catalogs[0]?.hooks[0]?.config,
+      ).toMatchObject(withMetadata);
+    }
+    expect(
+      stage({ ...hook, ...metadata }).hookManifest.catalogs[0]?.hooks[0]
+        ?.config,
+    ).toMatchObject({ ...hook, ...metadata });
+  }
+  const conditionalHttp = { ...http, if: 'Bash(git *)' };
+  expect(
+    stage(conditionalHttp).hookManifest.catalogs[0]?.hooks[0]?.config,
+  ).toMatchObject(conditionalHttp);
+});

@@ -282,6 +282,74 @@ describe('SessionArtifactStore', () => {
     }) as typeof fs.lstat);
   }
 
+  it('listRestored returns the current artifacts in insert order for the load response', async () => {
+    const sessionId = 's-early';
+    const store = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+    });
+    const urlA = 'https://example.com/alpha';
+    const urlB = 'https://example.com/beta';
+    const idA = stableSessionArtifactId(sessionId, `url:${urlA}`);
+    const idB = stableSessionArtifactId(sessionId, `url:${urlB}`);
+    const link = (id: string, url: string, title: string) => ({
+      id,
+      kind: 'link' as const,
+      storage: 'external_url' as const,
+      source: 'client' as const,
+      status: 'available' as const,
+      title,
+      url,
+      retention: 'restorable' as const,
+      clientRetained: true,
+      createdAt: '2026-07-04T00:00:00.000Z',
+      updatedAt: '2026-07-04T00:00:00.000Z',
+    });
+    // The repeated identity (idA) is re-set during restore: it keeps its early
+    // Map slot but receives a later insertSeq, so Map iteration order diverges
+    // from insertSeq order. Only a real sort yields ['Beta', 'Alpha final'];
+    // dropping the sort would return the Map order ['Alpha final', 'Beta'].
+    await store.restore({
+      v: 2,
+      sessionId,
+      sequence: 1,
+      artifacts: [
+        link(idA, urlA, 'Alpha'),
+        link(idB, urlB, 'Beta'),
+        link(idA, urlA, 'Alpha final'),
+      ],
+      tombstonedIds: [],
+      stickyEphemeralIds: [],
+      warnings: [],
+    });
+    const restored = await store.listRestored();
+    expect(restored.map((item) => item.title)).toEqual(['Beta', 'Alpha final']);
+    expect(restored).toEqual((await store.list()).artifacts);
+  });
+
+  it('listRestored skips the workspace status refresh that list performs', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's-early-nostat',
+      workspaceCwd: workspace,
+    });
+    await fs.writeFile(path.join(workspace, 'early.txt'), 'content');
+    await store.upsertMany([{ title: 'Early', workspacePath: 'early.txt' }]);
+
+    // Age the recorded stat past the refresh TTL so list() must re-stat.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+    const lstatSpy = spyOnLstatForwarding(() => {});
+    try {
+      await store.listRestored();
+      expect(lstatSpy).not.toHaveBeenCalled();
+      await store.list();
+      expect(lstatSpy).toHaveBeenCalled();
+    } finally {
+      lstatSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it('lists, removes, and idempotently ignores missing artifact deletes', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's1',

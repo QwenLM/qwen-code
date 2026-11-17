@@ -167,6 +167,7 @@ export interface UIState {
     originalCwd: string;
     originalBranch: string;
     originalHeadCommit: string;
+    worktreeBase?: string;
   } | null;
   /** Visibility of WorktreeExitDialog (only shown when activeWorktree != null). */
   showWorktreeExitDialog: boolean;

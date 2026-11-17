@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceTestStorage;
+import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -64,6 +65,14 @@ import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.quote;
 import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.reservePort;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
+import static org.mockito.AdditionalAnswers.delegatesTo;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 
 class HostedPublicWorkspaceIT {
     private static final String TOKEN = "g0-local-fixture";
@@ -96,6 +105,7 @@ class HostedPublicWorkspaceIT {
     private boolean restarted;
     private boolean publicChildFallback;
     private boolean personalMemory;
+    private boolean holdRuntimeStartup;
     private final Map<String, Map<String, Object>> memoryEntries = new java.util.concurrent.ConcurrentHashMap<>();
     private final AtomicInteger memoryRequests = new AtomicInteger();
     private final AtomicInteger memoryWrites = new AtomicInteger();
@@ -537,6 +547,115 @@ class HostedPublicWorkspaceIT {
     @Timeout(150)
     void publicCreationRunsFilesThroughProductionWorkspaceBinding() throws Exception {
         runFiles();
+    }
+
+    @Test
+    @Timeout(90)
+    void workspacePreparationOutlivesAdmissionBudgetOnMySql() throws Exception {
+        assertThat(System.getProperty("mysql.url")).startsWith("jdbc:mysql:");
+        holdRuntimeStartup = true;
+        List<Path> roots = boot();
+        HarnessConnector observed = observePreparationHarness();
+        String session = createPreparingWorkspaceSession();
+        assertPreparationHeld(session, observed);
+
+        Files.writeString(temporary.resolve("worker-release"), "release");
+        awaitTurn(session, null, "child", roots.getFirst());
+
+        String prompt = jdbc.queryForObject("SELECT prompt_id FROM ma_turn WHERE tenant_id = ? AND session_id = ?",
+                String.class, tenant, session);
+        verify(observed).createOrLoad(tenant, session, false);
+        verify(observed).submit(eq(tenant), eq(session), eq(prompt), any(), anyString());
+        assertThat(modelRequests).hasSize(4);
+        assertThat(modelFailure.get()).isNull();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_turn WHERE tenant_id = ? AND session_id = ?"
+                        + " AND status = 'COMPLETED' AND retry_count = 0", Integer.class, tenant, session)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution WHERE harness_session_id = ?"
+                        + " AND execution_state = 'SETTLED'", Integer.class, session)).isEqualTo(3);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution WHERE harness_session_id = ?",
+                Integer.class, session)).isEqualTo(3);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_public_event WHERE tenant_id = ? AND session_id = ?"
+                        + " AND is_terminal = TRUE", Integer.class, tenant, session)).isEqualTo(1);
+        Long ready = jdbc.queryForObject("SELECT MIN(sequence_id) FROM ma_public_event WHERE tenant_id = ?"
+                        + " AND session_id = ? AND event_type = 'environment.ready'", Long.class, tenant, session);
+        Long firstModel = jdbc.queryForObject("SELECT MIN(sequence_id) FROM ma_public_event WHERE tenant_id = ?"
+                        + " AND session_id = ? AND event_type IN ('item.output_text.delta', 'item.reasoning.delta')",
+                Long.class, tenant, session);
+        assertThat(ready).isNotNull();
+        assertThat(firstModel).isNotNull();
+        assertThat(ready).isLessThan(firstModel);
+    }
+
+    @Test
+    @Timeout(90)
+    void cancelDuringWorkspacePreparationNeverAdmitsAfterLateReadyOnMySql() throws Exception {
+        assertThat(System.getProperty("mysql.url")).startsWith("jdbc:mysql:");
+        holdRuntimeStartup = true;
+        boot();
+        HarnessConnector observed = observePreparationHarness();
+        String session = createPreparingWorkspaceSession();
+        assertPreparationHeld(session, observed);
+        String turn = jdbc.queryForObject("SELECT turn_id FROM ma_turn WHERE tenant_id = ? AND session_id = ?",
+                String.class, tenant, session);
+        request("POST", "/v1/agents/sessions/" + session + "/events",
+                Map.of("type", "agent.session.cancel", "turn_id", turn), "cancel-preparation", "actor", 202);
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                assertThat(turnStatus(session, turn)).isEqualTo("CANCELLED"));
+
+        Files.writeString(temporary.resolve("worker-release"), "release");
+        await().atMost(Duration.ofSeconds(20)).untilAsserted(() -> {
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_binding WHERE tenant_id = ?"
+                            + " AND binding_state = 'READY'", Integer.class, tenant)).isEqualTo(1);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_public_event WHERE tenant_id = ?"
+                            + " AND session_id = ? AND event_type = 'environment.ready'", Integer.class, tenant, session)).isEqualTo(1);
+        });
+        await().during(Duration.ofSeconds(1)).atMost(Duration.ofSeconds(3)).untilAsserted(() -> {
+            assertThat(turnStatus(session, turn)).isEqualTo("CANCELLED");
+            assertNoPreparationAdmission(session, observed);
+        });
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_public_event WHERE tenant_id = ? AND session_id = ?"
+                        + " AND is_terminal = TRUE", Integer.class, tenant, session)).isEqualTo(1);
+    }
+
+    private HarnessConnector observePreparationHarness() {
+        HarnessConnector observed = mock(HarnessConnector.class, delegatesTo(spring.getBean(HarnessConnector.class)));
+        ReflectionTestUtils.setField(spring.getBean(HarnessCoordinator.class), "harness", observed);
+        return observed;
+    }
+
+    private String createPreparingWorkspaceSession() throws Exception {
+        register("workspace-0", "storage-0");
+        return request("POST", "/v1/agents/sessions",
+                Map.of("agent_id", "qwen-code", "input", List.of(Map.of("type", "input_text", "text", "G0_FILES")),
+                        "workspace", Map.of("workspace_id", "workspace-0", "cwd_relative", "child")),
+                "preparing-workspace", "actor", 202).path("id").asText();
+    }
+
+    private void assertPreparationHeld(String session, HarnessConnector observed) {
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
+                assertThat(temporary.resolve("worker-started")).exists());
+        long started = System.nanoTime();
+        await().pollInterval(Duration.ofMillis(25)).during(Duration.ofSeconds(2)).atMost(Duration.ofSeconds(5))
+                .untilAsserted(() -> {
+                    assertThat(turnStatus(session, null)).isIn("ACCEPTED", "RUNNING");
+                    assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_binding WHERE tenant_id = ?"
+                                    + " AND binding_state = 'PROVISIONING'", Integer.class, tenant)).isEqualTo(1);
+                    assertNoPreparationAdmission(session, observed);
+                });
+        assertThat(Duration.ofNanos(System.nanoTime() - started)).isGreaterThan(Duration.ofMillis(30));
+    }
+
+    private void assertNoPreparationAdmission(String session, HarnessConnector observed) {
+        verify(observed, never()).createOrLoad(eq(tenant), eq(session), anyBoolean());
+        verify(observed, never()).recoverManagedRuntime(eq(tenant), eq(session), anyBoolean());
+        verify(observed, never()).submit(eq(tenant), eq(session), anyString(), any(), anyString());
+        assertThat(modelRequests).isEmpty();
+        assertThat(modelFailure.get()).isNull();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_turn WHERE tenant_id = ? AND session_id = ?"
+                        + " AND is_submission_attempted = 0 AND retry_count = 0 AND consecutive_failures = 0"
+                        + " AND budget_exempt_failures = 0", Integer.class, tenant, session)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution WHERE harness_session_id = ?",
+                Integer.class, session)).isZero();
     }
 
     @Test
@@ -1164,6 +1283,13 @@ class HostedPublicWorkspaceIT {
         node = System.getProperty("node.executable");
         assertThat(node).as("Pass -Dnode.executable with an absolute Node.js 22+ path").isNotBlank();
         temporary = temporary.toRealPath();
+        if (holdRuntimeStartup) {
+            Path launcher = temporary.resolve("worker-barrier-node");
+            Files.writeString(launcher, "#!/bin/sh\n: > " + quote(temporary.resolve("worker-started").toString())
+                    + "\nwhile [ ! -f " + quote(temporary.resolve("worker-release").toString())
+                    + " ]; do /bin/sleep 0.05; done\nexec " + quote(node) + " \"$@\"\n");
+            Files.setPosixFilePermissions(launcher, PosixFilePermissions.fromString("rwx------"));
+        }
         decoy = Files.createDirectory(temporary.resolve("harness-decoy"));
         if (durableClose || definitionApproval || personalMemory) {
             Files.createDirectory(temporary.resolve("broker"), PosixFilePermissions.asFileAttribute(
@@ -1556,8 +1682,15 @@ class HostedPublicWorkspaceIT {
                 "--qwen.managed-agent.runtime-broker.state-directory=" + temporary.resolve("broker"),
                 "--qwen.managed-agent.runtime-broker.credential-key-id=g0-fixture",
                 "--qwen.managed-agent.runtime-broker.credential-key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-                "--qwen.managed-agent.runtime-broker.node-executable=" + node,
+                "--qwen.managed-agent.runtime-broker.node-executable="
+                        + (holdRuntimeStartup ? temporary.resolve("worker-barrier-node") : node),
                 "--qwen.managed-agent.runtime-broker.worker-entry=" + cli));
+        if (holdRuntimeStartup) {
+            arguments.addAll(List.of("--qwen.managed-agent.dispatch.scan-delay=10ms",
+                    "--qwen.managed-agent.dispatch.retry-initial-delay=10ms",
+                    "--qwen.managed-agent.dispatch.max-pre-admission-retries=2",
+                    "--qwen.managed-agent.harness.load-timeout=20s"));
+        }
         if (approvals) {
             arguments.add("--qwen.managed-agent.harness.approval-mode="
                     + (shell && "deny".equals(shellDecision) ? "auto-edit" : "default"));
@@ -1582,7 +1715,7 @@ class HostedPublicWorkspaceIT {
         }
         arguments.add("--qwen.managed-agent.runtime-broker.durable-local-process=" + (durableClose || definitionApproval || personalMemory));
         arguments.add("--qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled="
-                + (definitionApproval || personalMemory || "Linux".equals(System.getProperty("os.name"))));
+                + (holdRuntimeStartup || definitionApproval || personalMemory || "Linux".equals(System.getProperty("os.name"))));
         for (int i = 0; i < roots.size(); i++) {
             String prefix = "--qwen.managed-agent.runtime-broker.workspace-mounts[" + i + "].";
             arguments.add(prefix + "tenant-id=" + tenant);
@@ -1602,7 +1735,7 @@ class HostedPublicWorkspaceIT {
                 })
                 .run(arguments.toArray(String[]::new));
         jdbc = spring.getBean("managedJdbcTemplate", JdbcTemplate.class);
-        if (!restarted && (definitionApproval || personalMemory || "Linux".equals(System.getProperty("os.name")))) {
+        if (!restarted && (holdRuntimeStartup || definitionApproval || personalMemory || "Linux".equals(System.getProperty("os.name")))) {
             var guard = spring.getBean(com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard.class);
             for (int index = 0; index < roots.size(); index++) {
                 WorkspaceTestStorage.prepareNativeRoot(roots.get(index));
@@ -1762,6 +1895,10 @@ class HostedPublicWorkspaceIT {
         try {
             JsonNode body = json.readTree(exchange.getRequestBody());
             modelRequests.add(body);
+            if (holdRuntimeStartup) {
+                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_public_event WHERE tenant_id = ?"
+                                + " AND event_type = 'environment.ready'", Integer.class, tenant)).isEqualTo(1);
+            }
             if (personalMemory) {
                 memoryModelReply(exchange, body);
                 return;
@@ -2108,6 +2245,11 @@ class HostedPublicWorkspaceIT {
     void stop() throws Exception {
         Throwable failure = null;
         List<org.junit.jupiter.api.function.Executable> cleanup = List.of(
+                () -> {
+                    if (holdRuntimeStartup && temporary != null && Files.isDirectory(temporary)) {
+                        Files.writeString(temporary.resolve("worker-release"), "cleanup");
+                    }
+                },
                 () -> {
                     if (harness != null) {
                         harness.descendants().forEach(ProcessHandle::destroyForcibly);

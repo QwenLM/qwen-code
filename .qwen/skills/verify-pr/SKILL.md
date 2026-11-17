@@ -277,9 +277,11 @@ The boundary check belongs inside: run the trusted copy of the preflight with
 there — a pass writes the `boundary-gate.json` record the checker requires
 beside the declaration — and treat exit 4 as "this is not a boundary". The
 Docker recipe below mounts that copy at
-`/trusted-scripts/verify-pr-prepare.mjs`; a VM boundary runs the same file
-from the trusted checkout instead. A container
-marker alone does not pass: the CLI's own Docker/Podman launcher mounts
+`/trusted-scripts/verify-pr-prepare.mjs`; a VM boundary takes the same trusted
+copy but runs **no `--require-isolation` gate** (a VM carries no observed
+container marker), so there is no in-boundary gate command and no
+`boundary-gate.json` to produce — declare `mode:"vm"` per the VM bullet above.
+A container marker alone does not pass: the CLI's own Docker/Podman launcher mounts
 `~/.config/gcloud`, the ADC file and every model API key it can see, so the
 check also requires `QWEN_VERIFY_CREDENTIAL_FREE=1` — set it only after
 confirming the boundary mounts nothing — and refuses when a known credential
@@ -537,12 +539,19 @@ authority to certify the round.
    tree is PR-writable, so the record corroborates an operator who ran the
    gate; it is not proof against a round that forges it. The gate also
    writes a per-round **nonce** to `$HOME/.qwen-verify-nonce` (container-local,
-   not the shared mount) and into the gate record. The round MUST read that
-   container-local nonce and echo it into its raw harness logs (e.g. a
-   `container-nonce: <nonce>` line at the start of every harness run), so
-   step 7 can tie the `mode:"container"` declaration to execution inside
-   this container — a battery run on the host cannot read the container-local
-   nonce. If the battery cannot run in this container (e.g. a Java-heavy
+   not the shared mount) and stores only its **sha256** in the gate record
+   (`nonceSha256`), never the plaintext. The round MUST read that
+   container-local nonce and echo a line beginning `container-nonce: <nonce>`
+   into a log file under the round dir (e.g. `harness.log`) at the start of
+   every harness run — but NOT under the top-level `evidence/` subtree, which
+   holds the binary PNG artifacts and is skipped by the scan. The checker
+   (step 7's authoritative gate) matches only that prefix and hashes the first
+   whitespace-delimited token after it, so any other spelling (a bare nonce,
+   `verify nonce=<value>`, a separate nonce file) is refused. This ties the
+   `mode:"container"` declaration to execution inside this container — a
+   battery run on the host cannot read the container-local nonce, and the
+   record's hash does not reveal it. If the battery cannot run in this
+   container (e.g. a Java-heavy
    round whose image carries no JDK), do NOT declare `mode:"container"`:
    declare `mode:"waived"` with the maintainer's approval instead.
 
@@ -633,18 +642,15 @@ authority to certify the round.
      rm -rf -- "$rd/boundary.json" || { echo "cannot clear boundary.json" >&2; rc=1; }
    fi
    if [ "$rc" -eq 0 ]; then
-     # The container declaration must be tied to execution INSIDE the
-     # container, not just to a gate that ran there (R16-1). The gate's
-     # per-round nonce (in the gate record) must also appear in the round's
-     # raw harness logs; a battery run on the host cannot read the
-     # container-local nonce, so its logs lack it. Exclude the gate record
-     # and the declaration themselves from the search.
-     nonce="$(sed -n 's/.*"nonce"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$rd/boundary-gate.json" | head -1)"
-     if [ -z "$nonce" ] || ! grep -rqF --exclude=boundary-gate.json --exclude=boundary.json -- "$nonce" "$rd"; then
-       echo "round logs carry no container nonce; refusing mode:container — declare mode:waived with the maintainer's approval if the battery ran on the host" >&2; rc=1
-     fi
-   fi
-   if [ "$rc" -eq 0 ]; then
+     # The container nonce binding (R16-1) is enforced by the checker below —
+     # the SINGLE authoritative implementation, so there is no shell↔checker
+     # parity to drift (R1-2/R2-6) and no second matcher to stall on a
+     # PR-planted log (R1-3). The gate record carries only nonceSha256; the
+     # checker refuses mode:"container" unless a round log carries a
+     # container-nonce: line whose sha256 matches it. The battery echoes the
+     # container-local plaintext ($HOME/.qwen-verify-nonce) into its logs in
+     # step 5; a host battery cannot read that file, and the hash does not
+     # reveal it.
      # Fill in the detail with the image and network policy you used — the
      # checker refuses the skill's <placeholder> template strings.
      printf '%s\n' '{"mode":"container","detail":"<image, network policy, credential-free mount>"}' > "$rd/boundary.json" || rc=1

@@ -136,12 +136,14 @@ final class JournalLifecycleAuthorization {
         }
         var row = rows.getFirst();
         String profile = (String) row.get("tool_profile");
+        int publicChildAgentsVersion = ((Number) row.get("public_child_agents_version")).intValue();
         if (row.get("workspace_id") == null
                 || ("qwen-code".equals(row.get("agent_id"))
                         ? row.get("agent_definition_digest") != null : row.get("agent_definition_digest") == null)
                 || !(com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.EXTERNAL_FILES.equals(profile)
                         ? "qwen-code".equals(row.get("agent_id")) && row.get("agent_definition_digest") == null
-                                && row.get("parent_session_id") == null && ((Number) row.get("public_child_agents_version")).intValue() == 0
+                                && row.get("parent_session_id") == null
+                                && (publicChildAgentsVersion == 0 || publicChildAgentsVersion == 1)
                         : com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.FILES.equals(profile)
                         || com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.FILES_V3.equals(profile)
                         || com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.FILES_V4.equals(profile)
