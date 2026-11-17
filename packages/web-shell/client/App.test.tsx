@@ -925,6 +925,7 @@ const {
         | undefined,
       streamingState: 'idle' as StreamingState,
       sessionHasActivePrompt: false,
+      renderStreamingTrailing: false,
       blocks: [] as unknown[],
       liveBlocks: undefined as unknown[] | undefined,
       snapshotCallOptions: [] as Array<
@@ -2422,17 +2423,23 @@ vi.doMock('./components/StreamingStatus', async () => {
       startedAt,
       hasActivePrompt,
       showPhrase,
+      trailing,
     }: {
       startedAt?: number;
       hasActivePrompt?: boolean;
       showPhrase?: boolean;
+      trailing?: import('react').ReactNode;
     }) =>
-      React.createElement('div', {
-        'data-testid': 'streaming-status',
-        'data-started-at': startedAt,
-        'data-has-active-prompt': String(hasActivePrompt === true),
-        'data-show-phrase': String(showPhrase !== false),
-      }),
+      React.createElement(
+        'div',
+        {
+          'data-testid': 'streaming-status',
+          'data-started-at': startedAt,
+          'data-has-active-prompt': String(hasActivePrompt === true),
+          'data-show-phrase': String(showPhrase !== false),
+        },
+        testState.renderStreamingTrailing ? trailing : null,
+      ),
   };
 });
 vi.doMock('./components/ToastHost', async () => {
@@ -13254,6 +13261,7 @@ beforeEach(() => {
   testState.promptImages = undefined;
   testState.streamingState = 'idle';
   testState.sessionHasActivePrompt = false;
+  testState.renderStreamingTrailing = false;
   testState.blocks = [];
   testState.liveBlocks = undefined;
   testState.snapshotCallOptions = [];
@@ -20252,6 +20260,208 @@ describe('App session callbacks', () => {
     await flush();
     expect(document.querySelector('[class*="btwPanel"]')).toBeNull();
   });
+
+  it.each(['Enter', ' '])(
+    'keeps a settled explanation when %s is consumed by a DialogShell dialog scope',
+    async (key) => {
+      const shell: DaemonSessionShellTaskStatus = {
+        kind: 'shell',
+        id: 'shell-running',
+        label: 'npm run build',
+        description: 'npm run build',
+        status: 'running',
+        startTime: 2,
+        runtimeMs: 20,
+        command: 'npm run build',
+        cwd: '/tmp/project',
+      };
+      const { container } = renderApp();
+      await flush();
+      await act(async () => {
+        testState.latestTaskChipsOnExplainTask?.(shell);
+        await Promise.resolve();
+      });
+      await flush();
+      expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+      testState.prompt = '';
+
+      // DialogShell marks its dialog content a keyboard scope, so a real
+      // dialog keeps Enter/Space (form submit / list actions) — unlike a
+      // drawer or a marker-less dialog, which own Escape only.
+      const dialog = document.createElement('div');
+      dialog.setAttribute('data-slot', 'dialog-content');
+      dialog.setAttribute('data-state', 'open');
+      dialog.setAttribute('data-keyboard-scope', '');
+      container.append(dialog);
+      const event = new KeyboardEvent('keydown', {
+        key,
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => {
+        dialog.dispatchEvent(event);
+      });
+      expect(event.defaultPrevented).toBe(false);
+      expect(document.querySelector('[class*="btwPanel"]')).not.toBeNull();
+    },
+  );
+
+  it('dismisses a settled explanation with Enter on a dialog body without a keyboard scope', async () => {
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+    testState.prompt = '';
+
+    // A modal surface without the scope marker owns Escape only; Enter on
+    // its body still dismisses the settled explanation.
+    const dialog = document.createElement('div');
+    dialog.setAttribute('data-slot', 'dialog-content');
+    dialog.setAttribute('data-state', 'open');
+    container.append(dialog);
+    const event = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      dialog.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(true);
+    expect(document.querySelector('[class*="btwPanel"]')).toBeNull();
+  });
+
+  it('cancels a pending explanation with Ctrl+C on a contenteditable="false" surface under a drawer', async () => {
+    const finish = deferred<void>();
+    mockSessionActions.btwSessionStream.mockImplementationOnce(
+      async function* () {
+        await finish.promise;
+        yield {
+          v: 1,
+          type: 'done',
+          requestId: 'btw-request',
+          answer: 'too late',
+        } as const;
+      },
+    );
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    const { container } = renderApp();
+    await flush();
+    const drawer = document.createElement('div');
+    drawer.setAttribute('data-slot', 'drawer-content');
+    drawer.setAttribute('data-state', 'open');
+    const surface = document.createElement('div');
+    surface.setAttribute('contenteditable', 'false');
+    drawer.append(surface);
+    container.append(drawer);
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestBtwMessageProps?.isPending).toBe(true);
+
+    // An explicit contenteditable="false" is not a text surface, so Ctrl+C
+    // cancels even under a guard (the :not([contenteditable="false"]) half).
+    const event = new KeyboardEvent('keydown', {
+      key: 'c',
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      surface.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(true);
+    expect(document.querySelector('[class*="btwPanel"]')).toBeNull();
+    const signal = mockSessionActions.btwSessionStream.mock.calls.at(-1)?.[1]
+      ?.signal as AbortSignal | undefined;
+    expect(signal?.aborted).toBe(true);
+    await act(async () => {
+      finish.resolve();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(document.querySelector('[class*="btwPanel"]')).toBeNull();
+  });
+
+  it.each(['Enter', ' '])(
+    'keeps a settled explanation when %s is consumed by the waiting minigame',
+    async (key) => {
+      const shell: DaemonSessionShellTaskStatus = {
+        kind: 'shell',
+        id: 'shell-running',
+        label: 'npm run build',
+        description: 'npm run build',
+        status: 'running',
+        startTime: 2,
+        runtimeMs: 20,
+        command: 'npm run build',
+        cwd: '/tmp/project',
+      };
+      // Render the StreamingStatus trailing slot so the real minigame trigger
+      // mounts, and keep the streaming state non-idle so the open flag sticks.
+      testState.streamingState = 'responding';
+      testState.renderStreamingTrailing = true;
+      const { container } = renderApp();
+      await flush();
+      const trigger = container.querySelector(
+        '[data-component="waiting-minigame-trigger"]',
+      );
+      expect(trigger).not.toBeNull();
+      await act(async () => {
+        trigger?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        await Promise.resolve();
+      });
+      await flush();
+      await act(async () => {
+        testState.latestTaskChipsOnExplainTask?.(shell);
+        await Promise.resolve();
+      });
+      await flush();
+      expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+      testState.prompt = '';
+
+      // The open minigame owns Enter/Space (pause/restart); the guard yields,
+      // so the settled explanation survives. Panel survival is decided by the
+      // guard alone, independent of whether the board also prevents default.
+      const event = new KeyboardEvent('keydown', {
+        key,
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => {
+        document.body.dispatchEvent(event);
+      });
+      await flush();
+      expect(document.querySelector('[class*="btwPanel"]')).not.toBeNull();
+    },
+  );
 
   it.each(['switch', 'tab', 'option', 'checkbox', 'radio'])(
     'keeps a settled explanation when Enter activates a %s',
