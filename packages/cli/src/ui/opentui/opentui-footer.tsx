@@ -407,7 +407,7 @@ export function OpenTuiFooter({
             !settings.merged.ui?.hideBuiltinWorktreeIndicator && (
               <text attributes={2}>
                 {truncateToWidth(
-                  `⎇ ${activeWorktree.branch} (${activeWorktree.slug})`,
+                  `⎇ ${activeWorktree.branch || 'detached HEAD'} (${activeWorktree.slug})`,
                   statusWidth,
                 )}
               </text>

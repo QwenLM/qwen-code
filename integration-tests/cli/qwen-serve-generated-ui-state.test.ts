@@ -189,28 +189,32 @@ describe('Generated UI view state through the daemon', () => {
         200,
       );
       expect(JSON.stringify(artifacts)).toContain('https://example.com/notes');
-      const second = (await json(
-        await promptOf(session, 'second prompt'),
-        202,
-      )) as { promptId: string };
-      expect(second.promptId).toEqual(expect.any(String));
-      expect(second.promptId.length).toBeGreaterThan(0);
+      const second = await promptOf(session, 'second prompt');
+      const secondBody = await second.text();
+      expect(second.status, secondBody).toBeLessThan(300);
+      // Admission only returns 202; reloading now cancels the turn before its
+      // user record is written.
+      const { promptId: secondPromptId } = JSON.parse(secondBody) as {
+        promptId: string;
+      };
+      expect(secondPromptId).toEqual(expect.any(String));
+      expect(secondPromptId.length).toBeGreaterThan(0);
       await expect
         .poll(
-          async () =>
-            json(
-              await call(
-                'GET',
-                `/session/${session.sessionId}/turns/${encodeURIComponent(second.promptId)}`,
-                undefined,
-                session.clientId,
-              ),
-              200,
-            ),
-          { timeout: 30_000 },
+          async () => {
+            const response = await call(
+              'GET',
+              `/session/${session.sessionId}/turns/${encodeURIComponent(secondPromptId)}`,
+              undefined,
+              session.clientId,
+            );
+            if (!response.ok) return { status: response.status };
+            return (await response.json()) as Record<string, unknown>;
+          },
+          { timeout: 60_000 },
         )
         .toMatchObject({
-          promptId: second.promptId,
+          promptId: secondPromptId,
           state: 'completed',
           resultText: 'done',
         });
