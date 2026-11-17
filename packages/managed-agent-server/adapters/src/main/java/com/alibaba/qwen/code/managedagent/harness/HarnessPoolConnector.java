@@ -108,8 +108,8 @@ public class HarnessPoolConnector implements HarnessConnector {
         if (settings.getToken().isBlank() || !settings.getCapabilityDigest().matches("sha256:[0-9a-f]{64}")) {
             throw new IllegalStateException("Harness pool requires a token and capability digest");
         }
-        if ("kubernetes".equals(settings.getPool().getDiscovery()) && tls == null) {
-            throw new IllegalStateException("Kubernetes Harness pool requires configured mTLS");
+        if (!"static".equals(settings.getPool().getDiscovery())) {
+            throw new IllegalStateException("Harness pool discovery must be static");
         }
         for (var endpoint : discovery.snapshot().endpoints()) {
             validateEndpoint(endpoint, tls);

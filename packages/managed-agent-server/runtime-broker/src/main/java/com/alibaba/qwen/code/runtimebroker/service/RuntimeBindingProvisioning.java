@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.runtimebroker.service;
 
-import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.HarnessOwnership;
 import com.alibaba.qwen.code.runtimebroker.RuntimeAttestation;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
@@ -296,13 +295,7 @@ final class RuntimeBindingProvisioning {
             // exactly capacity and shutdown.
             boolean busy = failure instanceof RuntimeBrokerException brokerFailure && brokerFailure.isRetryable()
                     && (claimed.getResourceHandle() == null
-                            || RuntimeProvisionFailureHandler.externalRetryable(request, brokerFailure)
-                            || (request.isManagedContext() && brokerFailure.getStatusCode() == 409
-                                    && "workspace_csi_busy".equals(brokerFailure.getCode()))
-                            || (!request.isManagedContext()
-                                    && "kubernetes-scratch".equals(request.getProvisionerKind())
-                                    && brokerFailure.getStatusCode() == 503
-                                    && "runtime_kubernetes_capacity".equals(brokerFailure.getCode())));
+                            || RuntimeProvisionFailureHandler.externalRetryable(request, brokerFailure));
             if (!busy) {
                 blockRecoveryQuietly(claimed, failure);
             }
@@ -838,9 +831,6 @@ final class RuntimeBindingProvisioning {
 
     private CompletionStage<BindingContext> reclaimLostBindingNow(
             RuntimeBindingRecord record, RuntimeProvisionRequest request) {
-        if (CsiFilesRetirementProfile.isProfile(record.getRequest().getScope())) {
-            return failed(CsiFilesRetirementProfile.releaseUnavailable());
-        }
         RuntimeBindingRecord claimed = bindingRepository.claimOperation(
                 record.getBindingId(), brokerOwnerId, operationLeaseDuration);
         if (claimed == null || claimed.getState() != RuntimeBindingRecord.State.LOST) {
@@ -861,9 +851,6 @@ final class RuntimeBindingProvisioning {
     }
 
     private CompletionStage<RuntimeBindingRecord> cleanupLost(RuntimeBindingRecord claimed) {
-        if (CsiFilesRetirementProfile.isProfile(claimed.getRequest().getScope())) {
-            return failed(CsiFilesRetirementProfile.releaseUnavailable());
-        }
         return safeStage(() -> {
             RuntimeBindingRecord recovered = recoverLostDrained(claimed,
                     false);

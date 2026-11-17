@@ -2,7 +2,7 @@
 
 [English](2026-11-14-bound-delivery-startup-backlog.md) | [简体中文](2026-11-14-bound-delivery-startup-backlog.zh-CN.md)
 
-Status: proposed (2026-11-14). Extends [Bound PR Comment Watch](2026-11-08-bound-pr-comment-watch.md); the comment lane's per-comment delivery contract is unchanged outside the digest path. The PR **state** watch is daemon-owned since [the operator-owned watch migration](2026-11-14-daemon-pr-watch-config-migration.md) and is out of scope here.
+Status: implemented as #17199 (proposed 2026-11-14). The body below describes the increment as designed. Extends [Bound PR Comment Watch](2026-11-08-bound-pr-comment-watch.md); the comment lane's per-comment delivery contract is unchanged outside the digest path. The PR **state** watch is daemon-owned since [the operator-owned watch migration](2026-11-14-daemon-pr-watch-config-migration.md) and is out of scope here.
 
 ## Problem statement
 

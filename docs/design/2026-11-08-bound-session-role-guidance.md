@@ -2,7 +2,7 @@
 
 [English](2026-11-08-bound-session-role-guidance.md) | [简体中文](2026-11-08-bound-session-role-guidance.zh-CN.md)
 
-Status: proposed (2026-11-08). Direction confirmed by the maintainer: surface the
+Status: implemented as #16576 (proposed 2026-11-08). Direction confirmed by the maintainer: surface the
 binding role, make machine-authored watch summaries factual, and ship built-in
 per-role guidance — while keeping the single-winner routing of the base design.
 Builds on [GitHub Channel Events to PR-Bound Sessions](2026-11-02-github-channel-bound-session-events.md)

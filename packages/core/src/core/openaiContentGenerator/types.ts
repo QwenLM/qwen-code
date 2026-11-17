@@ -61,6 +61,8 @@ export interface RequestContext {
    * offer that key as the fix (QwenLM/qwen-code#16178).
    */
   modalitiesSourceViaKind?: ContentGeneratorConfigSourceKind;
+  // Optional `detail` stamped on each image_url part (see ContentGeneratorConfig).
+  imageDetail?: 'low' | 'high' | 'auto';
   startTime: number;
   /**
    * Effective output-token ceiling sent on the wire (`max_tokens` or a

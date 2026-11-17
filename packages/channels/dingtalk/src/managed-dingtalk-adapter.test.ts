@@ -22,6 +22,7 @@ import {
 } from '@qwen-code/channel-base';
 import {
   ManagedDingtalkAdapter,
+  dingtalkSettings,
   type ManagedDingtalkAdapterDeps,
   type DingtalkWebhookFailure,
 } from './managed-dingtalk-adapter.js';
@@ -59,6 +60,7 @@ function fakeControlPlane() {
   const receipts: Array<{ deliveryId: string; receipt: unknown }> = [];
   const admitted = new Map<string, string>();
   let queue: ManagedClaimedDelivery[] = [];
+  let disconnectCalls = 0;
   let submitError: (Error & { status?: number; code?: string }) | undefined;
   let refuseSubmit: { status: number; code?: string } | undefined;
   let submitErrorFor:
@@ -76,7 +78,9 @@ function fakeControlPlane() {
     register: async (request) => {
       register.push(request);
     },
-    disconnect: async () => {},
+    disconnect: async () => {
+      disconnectCalls += 1;
+    },
     submitInbound: async (event) => {
       submitAttempts += 1;
       const perEvent = submitErrorFor?.(event.platformEventId);
@@ -112,6 +116,7 @@ function fakeControlPlane() {
     register,
     submit,
     receipts,
+    disconnectCalls: () => disconnectCalls,
     enqueue: (deliveries: ManagedClaimedDelivery[]) => {
       queue = deliveries;
     },
@@ -148,7 +153,9 @@ function fakeControlPlane() {
   };
 }
 
-function fakeDeps() {
+function fakeDeps(
+  hooks: { log?: (line: string) => void; beforeSend?: () => void } = {},
+) {
   let handler: ((messageId: string, data: string) => boolean) | undefined;
   const sent: Array<{ webhook: string; text: string }> = [];
   let behavior: 'ok' | 'definitive' | 'transient' = 'ok';
@@ -159,6 +166,7 @@ function fakeDeps() {
     },
     sendWebhook: async (webhook, text) => {
       sent.push({ webhook, text });
+      hooks.beforeSend?.();
       if (behavior !== 'ok') {
         const error = new Error(
           behavior === 'definitive' ? 'refused' : 'timeout',
@@ -169,7 +177,7 @@ function fakeDeps() {
     },
     lock: async () => async () => {},
     now: () => 1_750_000_000_000,
-    log: () => {},
+    log: hooks.log ?? (() => {}),
   };
   return {
     deps,
@@ -220,9 +228,12 @@ afterEach(() => {
     rmSync(dir, { recursive: true, force: true });
 });
 
-async function connectedAdapter(cwd = tempCwd()) {
+async function connectedAdapter(
+  cwd = tempCwd(),
+  hooks: { log?: (line: string) => void; beforeSend?: () => void } = {},
+) {
   const plane = fakeControlPlane();
-  const fake = fakeDeps();
+  const fake = fakeDeps(hooks);
   const adapter = new ManagedDingtalkAdapter({
     name: 'ding-1',
     cwd,
@@ -373,7 +384,13 @@ describe('managed DingTalk adapter inbound', () => {
     await adapter.disconnect();
   });
 
-  it('a webhook-less frame admitted on the cache refreshes recency (R3-4)', async () => {
+  // The fill drives 780 fsync-backed state writes, so disk latency decides the
+  // runtime: the same sequence measured 1.6ms and 14ms per write minutes apart
+  // on one host, and 38ms per write outlasts the old flat 30s (#17558). No timer
+  // or network wait here, so a generous ceiling costs no fail-fast.
+  it('a webhook-less frame admitted on the cache refreshes recency (R3-4)', async (ctx) => {
+    // Pin the ceiling: a dropped third argument must fail here, not in CI.
+    expect(ctx.task.timeout).toBe(120_000);
     const { adapter, fake } = await connectedAdapter();
     const hook = (session: string): string =>
       `https://oapi.dingtalk.com/robot/sendBySession?session=${session}`;
@@ -419,7 +436,7 @@ describe('managed DingTalk adapter inbound', () => {
     const persisted = JSON.parse(readFileSync(store.file, 'utf8'));
     expect(Object.hasOwn(persisted.webhooks, 'conv-0')).toBe(true);
     await adapter.disconnect();
-  }, 30_000);
+  }, 120_000);
 
   it('a __proto__ conversationId with its own webhook is admitted and cached as an own key (R3-5)', async () => {
     const { adapter, plane, fake } = await connectedAdapter();
@@ -564,11 +581,16 @@ describe('managed DingTalk adapter inbound', () => {
 
   it('clamps a CJK text to the byte envelope even under the character bound', async () => {
     const { adapter, plane, fake } = await connectedAdapter();
-    // 25,000 CJK characters are under the 32,000-character line but ~75 KB in
-    // UTF-8, over the 64 KiB envelope: the byte cut must land on a code point.
+    // The leading ASCII byte makes the 61,440-byte budget land MID-code-point
+    // for the 3-byte CJK char (61,439 is not divisible by 3), so the
+    // code-point walk must actually reject a partial character instead of
+    // landing on an exact boundary (#17173 R2-6).
     fake.push(
       'msg-cjk',
-      messageData({ msgId: 'msg-cjk', text: { content: '中'.repeat(25_000) } }),
+      messageData({
+        msgId: 'msg-cjk',
+        text: { content: 'a' + '中'.repeat(25_000) },
+      }),
     );
     await adapter.tick();
     expect(plane.submit).toHaveLength(1);
@@ -576,8 +598,25 @@ describe('managed DingTalk adapter inbound', () => {
     expect(Buffer.byteLength(text, 'utf8')).toBeLessThanOrEqual(
       64 * 1024 - 4096,
     );
-    expect(text.length).toBeLessThan(25_000);
-    expect(text).toBe('中'.repeat(text.length));
+    expect(text).toBe('a' + '中'.repeat(20_479));
+    await adapter.disconnect();
+  });
+
+  it('the byte cut keeps astral code points whole at a mid-pair budget', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    // 4-byte astral chars at a budget with a 3-byte remainder: the exact
+    // expected string pins the maximal whole-code-point fit, so an off-by-one
+    // in the walk or a miscomputed byte budget reds it (#17173 R2-6).
+    fake.push(
+      'msg-astral',
+      messageData({
+        msgId: 'msg-astral',
+        text: { content: 'a' + '😀'.repeat(20_000) },
+      }),
+    );
+    await adapter.tick();
+    expect(plane.submit).toHaveLength(1);
+    expect(plane.submit[0]!.text).toBe('a' + '😀'.repeat(15_359));
     await adapter.disconnect();
   });
 
@@ -1678,5 +1717,771 @@ describe('managed DingTalk adapter review fixes', () => {
     ]);
     await second.adapter.disconnect();
     await first.adapter.disconnect();
+  });
+});
+
+describe('managed DingTalk webhook cache authority (#17173 round 5)', () => {
+  it('a definitively refused webhook is evicted so admission stops trusting it', async () => {
+    const lines: string[] = [];
+    const { adapter, plane, fake } = await connectedAdapter(tempCwd(), {
+      log: (line) => lines.push(line),
+    });
+    fake.push('seed', messageData({ msgId: 'seed' }));
+    await adapter.tick();
+    fake.setBehavior('definitive');
+    plane.enqueue([delivery('d-evict', 1)]);
+    await adapter.tick();
+    expect((plane.receipts[0]!.receipt as { outcome: string }).outcome).toBe(
+      'rejected',
+    );
+    // The dead target is gone from the persisted cache the gate trusts, and
+    // the eviction itself is visible (R1-1).
+    const persisted = JSON.parse(readFileSync(adapter.stateFile, 'utf8'));
+    expect(Object.hasOwn(persisted.webhooks, 'conv-1')).toBe(false);
+    expect(
+      lines.some(
+        (line) =>
+          line.includes('evicted the cached webhook') &&
+          line.includes('conv-1'),
+      ),
+    ).toBe(true);
+    // A webhook-less frame can no longer be admitted against the dead target;
+    // the acked drop is logged once for the burst, never the webhook (R1-1).
+    fake.push('after', messageData({ msgId: 'after', sessionWebhook: '' }));
+    fake.push('after-2', messageData({ msgId: 'after-2', sessionWebhook: '' }));
+    await adapter.tick();
+    expect(plane.submit.map((event) => event.platformEventId)).toEqual([
+      'dingtalk:seed',
+    ]);
+    const gateDrops = lines.filter(
+      (line) =>
+        line.includes('no sessionWebhook and none cached') &&
+        line.includes('conv-1'),
+    );
+    expect(gateDrops).toHaveLength(1);
+    expect(gateDrops[0]).toContain('after');
+    expect(lines.join('\n')).not.toContain('session=abc');
+    // A fresh webhook re-commits the conversation.
+    fake.push(
+      'recommit',
+      messageData({
+        msgId: 'recommit',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/sendBySession?session=fresh',
+      }),
+    );
+    await adapter.tick();
+    expect(plane.submit.map((event) => event.platformEventId)).toEqual([
+      'dingtalk:seed',
+      'dingtalk:recommit',
+    ]);
+    await adapter.disconnect();
+  });
+
+  it('a transient webhook failure keeps the cached webhook', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    fake.push('seed', messageData({ msgId: 'seed' }));
+    await adapter.tick();
+    fake.setBehavior('transient');
+    plane.enqueue([delivery('d-keep', 1)]);
+    await adapter.tick();
+    expect((plane.receipts[0]!.receipt as { outcome: string }).outcome).toBe(
+      'unknown',
+    );
+    const persisted = JSON.parse(readFileSync(adapter.stateFile, 'utf8'));
+    expect(Object.hasOwn(persisted.webhooks, 'conv-1')).toBe(true);
+    await adapter.disconnect();
+  });
+
+  it('a fresher webhook committed mid-send survives a definitive refusal', async () => {
+    const hooks: { beforeSend?: () => void } = {};
+    const { adapter, plane, fake } = await connectedAdapter(tempCwd(), hooks);
+    fake.push('seed', messageData({ msgId: 'seed' }));
+    await adapter.tick();
+    const fresh = 'https://oapi.dingtalk.com/robot/sendBySession?session=fresh';
+    // A new frame commits a fresher webhook while the send is in flight; the
+    // refusal below used the OLD webhook, so the fresh entry must stay.
+    hooks.beforeSend = () => {
+      fake.push('mid', messageData({ msgId: 'mid', sessionWebhook: fresh }));
+    };
+    fake.setBehavior('definitive');
+    plane.enqueue([delivery('d-mid', 1)]);
+    await adapter.tick();
+    expect((plane.receipts[0]!.receipt as { outcome: string }).outcome).toBe(
+      'rejected',
+    );
+    const persisted = JSON.parse(readFileSync(adapter.stateFile, 'utf8'));
+    expect(persisted.webhooks['conv-1']).toBe(fresh);
+    await adapter.disconnect();
+  });
+});
+
+describe('managed DingTalk admission diagnostics (#17173 R10/R12)', () => {
+  it('the no-claim-slot refusal logs once per outage and re-arms on recovery', async () => {
+    const lines: string[] = [];
+    const { adapter, plane, fake } = await connectedAdapter(tempCwd(), {
+      log: (line) => lines.push(line),
+    });
+    const noSlot = () =>
+      lines.filter((line) => line.includes('no durable claim slot'));
+    plane.setRefuseSubmit({ status: 404, code: 'workspace_not_found' });
+    fake.push('f1', messageData({ msgId: 'f1' }));
+    fake.push('f2', messageData({ msgId: 'f2' }));
+    await adapter.tick();
+    // f1 paid the first-occurrence drop; f2 is held and the stall engaged.
+    expect(fake.push('f3', messageData({ msgId: 'f3' }))).toBe(false);
+    expect(fake.push('f4', messageData({ msgId: 'f4' }))).toBe(false);
+    expect(noSlot()).toHaveLength(1);
+    // The held probe converges and the stall lifts; the next accepted frame
+    // re-arms the line for a future outage.
+    plane.setRefuseSubmit(undefined);
+    await adapter.tick();
+    expect(fake.push('f3', messageData({ msgId: 'f3' }))).toBe(true);
+    plane.setRefuseSubmit({ status: 404, code: 'workspace_not_found' });
+    fake.push('f5', messageData({ msgId: 'f5' }));
+    await adapter.tick();
+    expect(fake.push('f6', messageData({ msgId: 'f6' }))).toBe(false);
+    expect(noSlot()).toHaveLength(2);
+    await adapter.disconnect();
+  });
+
+  it('a reconnect re-arms the no-claim-slot line', async () => {
+    const lines: string[] = [];
+    const { adapter, plane, fake } = await connectedAdapter(tempCwd(), {
+      log: (line) => lines.push(line),
+    });
+    const noSlot = () =>
+      lines.filter((line) => line.includes('no durable claim slot'));
+    plane.setRefuseSubmit({ status: 404, code: 'workspace_not_found' });
+    fake.push('f1', messageData({ msgId: 'f1' }));
+    fake.push('f2', messageData({ msgId: 'f2' }));
+    await adapter.tick();
+    expect(fake.push('f3', messageData({ msgId: 'f3' }))).toBe(false);
+    expect(noSlot()).toHaveLength(1);
+    await adapter.disconnect();
+    await adapter.connect();
+    // The persisted held claim re-arms the stall on connect; the outage line
+    // must be armed again too, not inherited latched from the last session.
+    expect(fake.push('f4', messageData({ msgId: 'f4' }))).toBe(false);
+    expect(noSlot()).toHaveLength(2);
+    await adapter.disconnect();
+  });
+
+  it('a non-text drop leaves a visible log line', async () => {
+    const lines: string[] = [];
+    const { adapter, fake } = await connectedAdapter(tempCwd(), {
+      log: (line) => lines.push(line),
+    });
+    expect(
+      fake.push('pic', messageData({ msgId: 'pic', msgtype: 'picture' })),
+    ).toBe(true);
+    await adapter.tick();
+    // The common trigger — a non-text frame carrying both ids — must be
+    // diagnosed as non-text, not as a malformed frame (R1-4).
+    const picLine = lines.find((line) => line.includes('pic'));
+    expect(picLine).toContain('not a text frame');
+    expect(picLine).toContain('picture');
+    expect(picLine).not.toContain('conversationId');
+    // A genuinely missing field names that field instead.
+    expect(
+      fake.push(
+        'nosender',
+        messageData({ msgId: 'nosender', senderStaffId: '', senderId: '' }),
+      ),
+    ).toBe(true);
+    await adapter.tick();
+    const noSenderLine = lines.find((line) => line.includes('nosender'));
+    expect(noSenderLine).toContain('missing senderId');
+    expect(noSenderLine).not.toContain('not a text frame');
+    await adapter.disconnect();
+  });
+
+  it('a rewritten pollInterval is announced; a valid one is silent', () => {
+    const lines: string[] = [];
+    const fake = fakeDeps({ log: (line) => lines.push(line) });
+    const plane = fakeControlPlane();
+    const make = (pollInterval: unknown) =>
+      new ManagedDingtalkAdapter({
+        name: 'ding-1',
+        cwd: tempCwd(),
+        config: { ...CONFIG, pollInterval },
+        controlPlane: plane.controlPlane,
+        deps: fake.deps,
+        pollLoop: false,
+      });
+    const rewritten = make('fast');
+    expect(rewritten.settings.pollInterval).toBe(2_000);
+    expect(rewritten.settings.pollIntervalRewritten).toBe(true);
+    const announced = lines.filter((line) => line.includes('pollInterval'));
+    expect(announced).toHaveLength(1);
+    // The message must state the bounds the clamp actually enforces: the
+    // production line derives them from the shared constants, so moving a
+    // bound moves the message and reds this pin (R1-3).
+    expect(announced[0]).toContain('[250, 2147483647]');
+    lines.length = 0;
+    expect(make(500).settings.pollInterval).toBe(500);
+    expect(make(500).settings.pollIntervalRewritten).toBe(false);
+    expect(make('2000').settings.pollInterval).toBe(2_000);
+    expect(make('2000').settings.pollIntervalRewritten).toBe(false);
+    expect(lines).toHaveLength(0);
+  });
+
+  it('a failed claim save is logged, not silent', async () => {
+    const lines: string[] = [];
+    const { adapter, fake } = await connectedAdapter(tempCwd(), {
+      log: (line) => lines.push(line),
+    });
+    fake.push('seed', messageData({ msgId: 'seed' }));
+    await adapter.tick();
+    const store = (
+      adapter as unknown as { store: { save: (s: unknown) => void } }
+    ).store;
+    const realSave = store.save.bind(store);
+    let failing = true;
+    const saveSpy = vi
+      .spyOn(store, 'save')
+      .mockImplementation((state: unknown) => {
+        if (failing) throw new Error('disk full');
+        realSave(state);
+      });
+    const acceptFailures = () =>
+      lines.filter((line) => line.includes('could not durably accept'));
+    expect(fake.push('m1', messageData({ msgId: 'm1' }))).toBe(false);
+    expect(acceptFailures()).toHaveLength(1);
+    expect(acceptFailures()[0]).toContain('m1');
+    // A persistent store outage redelivers every frame; the line is latched
+    // to one per episode, not one per redelivery (R1-2).
+    expect(fake.push('m2', messageData({ msgId: 'm2' }))).toBe(false);
+    expect(acceptFailures()).toHaveLength(1);
+    // Recovery re-arms the line: an accepted frame clears the latch, so the
+    // next outage episode logs again.
+    failing = false;
+    expect(fake.push('m3', messageData({ msgId: 'm3' }))).toBe(true);
+    failing = true;
+    expect(fake.push('m4', messageData({ msgId: 'm4' }))).toBe(false);
+    expect(acceptFailures()).toHaveLength(2);
+    saveSpy.mockRestore();
+    await adapter.disconnect();
+  });
+
+  it('the outbound ledger entry is durable before the webhook send (R4)', async () => {
+    const hooks: { beforeSend?: () => void } = {};
+    const { adapter, plane } = await connectedAdapter(tempCwd(), hooks);
+    let ledgerAtSend: Array<{ deliveryId: string; ordinal: number }> = [];
+    hooks.beforeSend = () => {
+      ledgerAtSend = JSON.parse(
+        readFileSync(adapter.stateFile, 'utf8'),
+      ).outbound;
+    };
+    plane.enqueue([delivery('d-pre', 1)]);
+    await adapter.tick();
+    expect(ledgerAtSend).toEqual([
+      expect.objectContaining({ deliveryId: 'd-pre', ordinal: 0 }),
+    ]);
+    await adapter.disconnect();
+  });
+});
+
+describe('managed DingTalk lifecycle pins (#17173 R2-7/R2-9/R4)', () => {
+  it('polls by default when the caller omits pollLoop (R2-7)', async () => {
+    const plane = fakeControlPlane();
+    const fake = fakeDeps();
+    // The production CLI caller omits pollLoop; the adapter must drive its
+    // own tick instead of waiting for a manual one.
+    const adapter = new ManagedDingtalkAdapter({
+      name: 'ding-1',
+      cwd: tempCwd(),
+      config: CONFIG,
+      controlPlane: plane.controlPlane,
+      deps: fake.deps,
+    });
+    await adapter.connect();
+    fake.push('auto', messageData({ msgId: 'auto' }));
+    await vi.waitFor(
+      () => {
+        expect(plane.submit.map((event) => event.platformEventId)).toEqual([
+          'dingtalk:auto',
+        ]);
+      },
+      { timeout: 5_000 },
+    );
+    await adapter.disconnect();
+  }, 10_000);
+
+  it('stop() aborts the in-flight poll delay so a large interval cannot hang shutdown (R2-9)', async () => {
+    vi.useFakeTimers();
+    try {
+      const plane = fakeControlPlane();
+      const fake = fakeDeps();
+      const adapter = new ManagedDingtalkAdapter({
+        name: 'ding-1',
+        cwd: tempCwd(),
+        config: { ...CONFIG, pollInterval: 2_147_483_647 },
+        controlPlane: plane.controlPlane,
+        deps: fake.deps,
+      });
+      await adapter.connect();
+      // Let the loop's first tick finish so it is actually parked in the
+      // poll delay; a disconnect that lands before the first tick completes
+      // would exit the loop without ever exercising the abort.
+      await vi.advanceTimersByTimeAsync(0);
+      // The loop is parked in a ~24.8-day delay; without the abort in stop()
+      // this disconnect never resolves and the test times out.
+      await adapter.disconnect();
+      expect(plane.disconnectCalls()).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 10_000);
+
+  it('disconnect() closes the control plane (R4)', async () => {
+    const { adapter, plane } = await connectedAdapter();
+    expect(plane.disconnectCalls()).toBe(0);
+    await adapter.disconnect();
+    expect(plane.disconnectCalls()).toBe(1);
+  });
+});
+
+describe('managed DingTalk settings pins (#17173 R2-11)', () => {
+  it('rejects credentials with whitespace edges or embedded control characters', () => {
+    const base = { clientId: 'robot-app', clientSecret: 'secret' };
+    expect(() =>
+      dingtalkSettings({ ...base, clientId: 'robot-app\n' }),
+    ).toThrow(/clientId/);
+    expect(() =>
+      dingtalkSettings({ ...base, clientSecret: 'sec\rret' }),
+    ).toThrow(/clientSecret/);
+    expect(() =>
+      dingtalkSettings({ ...base, clientSecret: 'sec\0ret' }),
+    ).toThrow(/clientSecret/);
+    expect(() => dingtalkSettings({ ...base, clientId: '   ' })).toThrow(
+      /clientId/,
+    );
+    expect(() => dingtalkSettings({ ...base, clientSecret: '' })).toThrow(
+      /clientSecret/,
+    );
+    const ok = dingtalkSettings(base);
+    expect(ok.clientId).toBe('robot-app');
+    expect(ok.clientSecret).toBe('secret');
+    // Copy-paste surrounding spaces are trimmed, not rejected.
+    expect(
+      dingtalkSettings({ ...base, clientId: ' robot-app ' }).clientId,
+    ).toBe('robot-app');
+  });
+
+  it('refuses privatePolicy pairing instead of silently coercing it', () => {
+    const plane = fakeControlPlane();
+    const fake = fakeDeps();
+    expect(
+      () =>
+        new ManagedDingtalkAdapter({
+          name: 'ding-1',
+          cwd: tempCwd(),
+          config: { ...CONFIG, privatePolicy: 'pairing' },
+          controlPlane: plane.controlPlane,
+          deps: fake.deps,
+          pollLoop: false,
+        }),
+    ).toThrow(/pairing/);
+  });
+});
+
+describe('managed DingTalk persist-failure guards (#17173 R10)', () => {
+  type StoreLike = {
+    save: (s: unknown) => void;
+    directory: string;
+  };
+  const storeOf = (adapter: ManagedDingtalkAdapter): StoreLike =>
+    (adapter as unknown as { store: StoreLike }).store;
+  const stateOf = (
+    adapter: ManagedDingtalkAdapter,
+  ): { pending: unknown[]; outbound: unknown[] } =>
+    (
+      adapter as unknown as {
+        state: { pending: unknown[]; outbound: unknown[] };
+      }
+    ).state;
+
+  it('a failed settle persist rolls back so the claim re-drives into the replayed answer', async () => {
+    const lines: string[] = [];
+    const { adapter, plane, fake } = await connectedAdapter(tempCwd(), {
+      log: (line) => lines.push(line),
+    });
+    fake.push('m1', messageData({ msgId: 'm1' }));
+    const store = storeOf(adapter);
+    const realSave = store.save.bind(store);
+    let failSettle = false;
+    const spy = vi.spyOn(store, 'save').mockImplementation((state: unknown) => {
+      if (failSettle && (state as { pending: unknown[] }).pending.length === 0)
+        throw new Error('disk full');
+      realSave(state);
+    });
+    failSettle = true;
+    await adapter.tick();
+    // The admission answer arrived but the settle write failed: the claim
+    // must stay in memory AND on disk, not vanish from this process's
+    // re-drive while disk still holds it.
+    expect(stateOf(adapter).pending).toHaveLength(1);
+    expect(
+      JSON.parse(readFileSync(adapter.stateFile, 'utf8')).pending,
+    ).toHaveLength(1);
+    expect(
+      lines.some((line) => line.includes('could not persist the admission')),
+    ).toBe(true);
+    failSettle = false;
+    await adapter.tick();
+    // The re-drive meets the idempotent replayed answer and settles.
+    expect(plane.submitAttempts()).toBe(2);
+    expect(stateOf(adapter).pending).toHaveLength(0);
+    spy.mockRestore();
+    await adapter.disconnect();
+  });
+
+  it('a failed ledger persist abandons the send before the side effect', async () => {
+    const lines: string[] = [];
+    const { adapter, plane, fake } = await connectedAdapter(tempCwd(), {
+      log: (line) => lines.push(line),
+    });
+    const store = storeOf(adapter);
+    const realSave = store.save.bind(store);
+    const spy = vi.spyOn(store, 'save').mockImplementation((state: unknown) => {
+      if ((state as { outbound: unknown[] }).outbound.length > 0)
+        throw new Error('disk full');
+      realSave(state);
+    });
+    plane.enqueue([delivery('d-1', 1)]);
+    await adapter.tick();
+    // No ledger on disk means no send may happen: the entry is the
+    // double-send guard, and the rollback must clear memory too.
+    expect(fake.sent).toHaveLength(0);
+    expect(stateOf(adapter).outbound).toHaveLength(0);
+    expect(
+      JSON.parse(readFileSync(adapter.stateFile, 'utf8')).outbound,
+    ).toHaveLength(0);
+    expect(lines.some((line) => line.includes('outbound ledger'))).toBe(true);
+    spy.mockRestore();
+    await adapter.disconnect();
+  });
+
+  it('a failed receipt persist still reports the outcome to the control plane', async () => {
+    const lines: string[] = [];
+    const { adapter, plane, fake } = await connectedAdapter(tempCwd(), {
+      log: (line) => lines.push(line),
+    });
+    const store = storeOf(adapter);
+    const realSave = store.save.bind(store);
+    const spy = vi.spyOn(store, 'save').mockImplementation((state: unknown) => {
+      const outbound = (state as { outbound: Array<{ receipt?: unknown }> })
+        .outbound;
+      if (outbound.some((entry) => entry.receipt)) throw new Error('disk full');
+      realSave(state);
+    });
+    plane.enqueue([delivery('d-1', 1)]);
+    await adapter.tick();
+    // The send already happened: the server-side settle is the durable
+    // record, so the outcome must still be reported.
+    expect(fake.sent).toHaveLength(1);
+    expect(plane.receipts).toHaveLength(1);
+    expect((plane.receipts[0]!.receipt as { outcome: string }).outcome).toBe(
+      'accepted',
+    );
+    expect(
+      lines.some((line) => line.includes('could not persist the receipt')),
+    ).toBe(true);
+    spy.mockRestore();
+    await adapter.disconnect();
+  });
+
+  it('a failed hold persist keeps the stall armed in memory', async () => {
+    const lines: string[] = [];
+    const { adapter, plane, fake } = await connectedAdapter(tempCwd(), {
+      log: (line) => lines.push(line),
+    });
+    const store = storeOf(adapter);
+    const realSave = store.save.bind(store);
+    const spy = vi.spyOn(store, 'save').mockImplementation((state: unknown) => {
+      const pending = (state as { pending: Array<{ held?: boolean }> }).pending;
+      if (pending.some((entry) => entry.held)) throw new Error('disk full');
+      realSave(state);
+    });
+    plane.setRefuseSubmit({ status: 404, code: 'workspace_not_found' });
+    fake.push('f1', messageData({ msgId: 'f1' }));
+    fake.push('f2', messageData({ msgId: 'f2' }));
+    await adapter.tick();
+    // f1 paid the first-occurrence drop; f2's hold write failed but the
+    // stall must still gate admission in this process.
+    expect(fake.push('f3', messageData({ msgId: 'f3' }))).toBe(false);
+    expect(lines.some((line) => line.includes('held claim'))).toBe(true);
+    expect(lines.some((line) => line.includes('tick failed'))).toBe(false);
+    spy.mockRestore();
+    await adapter.disconnect();
+  });
+
+  it('a failed refusal-drop persist never aborts the tick', async () => {
+    const lines: string[] = [];
+    const { adapter, plane, fake } = await connectedAdapter(tempCwd(), {
+      log: (line) => lines.push(line),
+    });
+    fake.push('f1', messageData({ msgId: 'f1' }));
+    const store = storeOf(adapter);
+    const realSave = store.save.bind(store);
+    let failing = false;
+    const spy = vi.spyOn(store, 'save').mockImplementation((state: unknown) => {
+      if (failing) throw new Error('disk full');
+      realSave(state);
+    });
+    plane.setRefuseSubmit({ status: 400 });
+    failing = true;
+    await adapter.tick();
+    expect(stateOf(adapter).pending).toHaveLength(0);
+    expect(lines.some((line) => line.includes('refused admission'))).toBe(true);
+    expect(lines.some((line) => line.includes('tick failed'))).toBe(false);
+    spy.mockRestore();
+    await adapter.disconnect();
+  });
+
+  it('a failed orphan removal persist continues the remaining orphans', async () => {
+    const lines: string[] = [];
+    const plane = fakeControlPlane();
+    const fake = fakeDeps({ log: (line) => lines.push(line) });
+    const adapter = new ManagedDingtalkAdapter({
+      name: 'ding-1',
+      cwd: tempCwd(),
+      config: CONFIG,
+      controlPlane: plane.controlPlane,
+      deps: fake.deps,
+      pollLoop: false,
+    });
+    const store = storeOf(adapter);
+    mkdirSync(store.directory, { recursive: true });
+    store.save({
+      version: 1,
+      generation: 1,
+      pending: [],
+      outbound: [
+        { deliveryId: 'o-1', ordinal: 0, messageId: 'm-1' },
+        { deliveryId: 'o-2', ordinal: 0, messageId: 'm-2' },
+      ],
+      recent: [],
+      webhooks: {},
+    });
+    const realSave = store.save.bind(store);
+    const spy = vi.spyOn(store, 'save').mockImplementation((state: unknown) => {
+      if ((state as { outbound: unknown[] }).outbound.length === 1)
+        throw new Error('disk full');
+      realSave(state);
+    });
+    await adapter.connect();
+    // The first removal write fails; the second orphan must still be
+    // reported, not abandoned with the escaped throw.
+    expect(plane.receipts.map((receipt) => receipt.deliveryId)).toEqual([
+      'o-1',
+      'o-2',
+    ]);
+    expect(lines.some((line) => line.includes('orphan removal'))).toBe(true);
+    spy.mockRestore();
+    await adapter.disconnect();
+  });
+
+  it('the settle write that removes a held claim carries the streak reset (R1-2)', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    plane.setRefuseSubmit({ status: 404, code: 'workspace_not_found' });
+    fake.push('f1', messageData({ msgId: 'f1' }));
+    fake.push('f2', messageData({ msgId: 'f2' }));
+    await adapter.tick(); // stall armed, f2 held, streak 2
+    const store = storeOf(adapter);
+    const realSave = store.save.bind(store);
+    const settleWrites: Array<{ pending: number; refusals?: number }> = [];
+    const spy = vi.spyOn(store, 'save').mockImplementation((state: unknown) => {
+      const s = state as { pending: unknown[]; instanceRefusals?: number };
+      if (s.pending.length === 0)
+        settleWrites.push({
+          pending: s.pending.length,
+          refusals: s.instanceRefusals,
+        });
+      realSave(state);
+    });
+    plane.setRefuseSubmit(undefined);
+    await adapter.tick(); // held probe admitted fresh
+    // ONE write removes the claim AND carries the reset streak: a split
+    // would let a crash leave disk with pending:[] and the stale streak,
+    // so the first transient refusal after a restart would re-hold at once.
+    expect(settleWrites).toEqual([{ pending: 0, refusals: 0 }]);
+    spy.mockRestore();
+    await adapter.disconnect();
+  });
+
+  it('a failed settle write rolls back the streak and the stall too (R1-2)', async () => {
+    const lines: string[] = [];
+    const { adapter, plane, fake } = await connectedAdapter(tempCwd(), {
+      log: (line) => lines.push(line),
+    });
+    plane.setRefuseSubmit({ status: 404, code: 'workspace_not_found' });
+    fake.push('f1', messageData({ msgId: 'f1' }));
+    fake.push('f2', messageData({ msgId: 'f2' }));
+    await adapter.tick(); // stall armed, f2 held, streak 2
+    const store = storeOf(adapter);
+    const realSave = store.save.bind(store);
+    let failedOnce = false;
+    const spy = vi.spyOn(store, 'save').mockImplementation((state: unknown) => {
+      const s = state as { pending: unknown[] };
+      if (!failedOnce && s.pending.length === 0) {
+        failedOnce = true;
+        throw new Error('disk full');
+      }
+      realSave(state);
+    });
+    plane.setRefuseSubmit(undefined);
+    await adapter.tick(); // the settle write fails
+    // Everything the settle touched is rolled back: the claim stays held,
+    // the streak stands, and the stall still gates admission.
+    const persisted = JSON.parse(readFileSync(adapter.stateFile, 'utf8'));
+    expect(persisted.pending).toHaveLength(1);
+    expect(persisted.instanceRefusals).toBe(2);
+    expect(stateOf(adapter).pending).toHaveLength(1);
+    expect(fake.push('f3', messageData({ msgId: 'f3' }))).toBe(false);
+    spy.mockRestore();
+    await adapter.tick(); // re-drive converges and lifts the stall
+    expect(stateOf(adapter).pending).toHaveLength(0);
+    expect(fake.push('f4', messageData({ msgId: 'f4' }))).toBe(true);
+    await adapter.disconnect();
+  });
+
+  it('the settle-failure line is latched per outage episode (R1-1)', async () => {
+    const lines: string[] = [];
+    const { adapter, fake } = await connectedAdapter(tempCwd(), {
+      log: (line) => lines.push(line),
+    });
+    fake.push('m1', messageData({ msgId: 'm1' }));
+    const store = storeOf(adapter);
+    const realSave = store.save.bind(store);
+    let failing = false;
+    const spy = vi.spyOn(store, 'save').mockImplementation((state: unknown) => {
+      const s = state as { pending: unknown[] };
+      if (failing && s.pending.length === 0) throw new Error('disk full');
+      realSave(state);
+    });
+    const settleLines = () =>
+      lines.filter((line) => line.includes('could not persist the admission'));
+    failing = true;
+    await adapter.tick();
+    await adapter.tick(); // the rollback keeps m1 pending; it re-drives
+    expect(settleLines()).toHaveLength(1);
+    failing = false;
+    await adapter.tick(); // m1 settles; the latch clears
+    fake.push('m2', messageData({ msgId: 'm2' }));
+    failing = true;
+    await adapter.tick(); // a second outage episode logs again
+    expect(settleLines()).toHaveLength(2);
+    spy.mockRestore();
+    await adapter.disconnect();
+  });
+
+  it('a failed policy-drop persist continues with the remaining claims (R1-4)', async () => {
+    const lines: string[] = [];
+    const plane = fakeControlPlane();
+    const fake = fakeDeps({ log: (line) => lines.push(line) });
+    const adapter = new ManagedDingtalkAdapter({
+      name: 'ding-1',
+      cwd: tempCwd(),
+      config: CONFIG, // allowedUsers: ['staff-1']
+      controlPlane: plane.controlPlane,
+      deps: fake.deps,
+      pollLoop: false,
+    });
+    const store = storeOf(adapter);
+    mkdirSync(store.directory, { recursive: true });
+    const claim = (msgId: string, sender: string) => ({
+      eventId: `dingtalk:${msgId}`,
+      event: {
+        accountGeneration: 1,
+        platformEventId: `dingtalk:${msgId}`,
+        semanticRevision: 1,
+        scope: {
+          kind: 'chat_thread',
+          senderId: null,
+          chatId: 'conv-1',
+          threadId: 'conv-1',
+        },
+        senderId: sender,
+        chatId: 'conv-1',
+        threadId: 'conv-1',
+        subject: null,
+        text: 'hello',
+        attachments: [],
+        replyContext: {
+          conversationId: 'conv-1',
+          sessionWebhook:
+            'https://oapi.dingtalk.com/robot/sendBySession?session=abc',
+          senderId: sender,
+          robotCode: 'robot-app',
+        },
+      },
+    });
+    store.save({
+      version: 1,
+      generation: 1,
+      pending: [claim('revoked', 'intruder'), claim('kept', 'staff-1')],
+      outbound: [],
+      recent: [],
+      webhooks: {
+        'conv-1': 'https://oapi.dingtalk.com/robot/sendBySession?session=abc',
+      },
+    });
+    const realSave = store.save.bind(store);
+    let failedOnce = false;
+    await adapter.connect();
+    // Install after connect: the policy-drop write is the first write of the
+    // tick, and connect's own initial persist must succeed.
+    const spy = vi.spyOn(store, 'save').mockImplementation((state: unknown) => {
+      if (!failedOnce) {
+        failedOnce = true;
+        throw new Error('disk full');
+      }
+      realSave(state);
+    });
+    await adapter.tick();
+    // The revoked claim drops in memory despite the failed write, and the
+    // loop CONTINUES: the second claim still reaches the control plane.
+    expect(stateOf(adapter).pending).toHaveLength(0);
+    expect(plane.submit.map((event) => event.platformEventId)).toEqual([
+      'dingtalk:kept',
+    ]);
+    expect(lines.some((line) => line.includes('policy drop'))).toBe(true);
+    expect(lines.some((line) => line.includes('tick failed'))).toBe(false);
+    spy.mockRestore();
+    await adapter.disconnect();
+  });
+
+  it('a failed settled-segment removal persist continues the claimed batch (R1-5)', async () => {
+    const lines: string[] = [];
+    const { adapter, plane, fake } = await connectedAdapter(tempCwd(), {
+      log: (line) => lines.push(line),
+    });
+    const store = storeOf(adapter);
+    const realSave = store.save.bind(store);
+    let failedOnce = false;
+    const spy = vi.spyOn(store, 'save').mockImplementation((state: unknown) => {
+      const s = state as { outbound: unknown[] };
+      // The first removal write shrinks outbound to empty; fail it once.
+      if (!failedOnce && s.outbound.length === 0) {
+        failedOnce = true;
+        throw new Error('disk full');
+      }
+      realSave(state);
+    });
+    plane.enqueue([delivery('d-1', 1), delivery('d-2', 1)]);
+    await adapter.tick();
+    // Both deliveries send and report; the failed removal must not abandon
+    // the second delivery the control plane already moved to sending.
+    expect(fake.sent).toHaveLength(2);
+    expect(plane.receipts.map((receipt) => receipt.deliveryId)).toEqual([
+      'd-1',
+      'd-2',
+    ]);
+    expect(lines.some((line) => line.includes('settled segment'))).toBe(true);
+    expect(lines.some((line) => line.includes('tick failed'))).toBe(false);
+    spy.mockRestore();
+    await adapter.disconnect();
   });
 });

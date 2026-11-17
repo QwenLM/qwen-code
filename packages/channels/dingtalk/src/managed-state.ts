@@ -173,9 +173,13 @@ export class ManagedDingtalkStateStore {
         closeSync(fd);
       }
       renameSync(temporary, this.file);
-    } catch {
+    } catch (error) {
+      // Keep the message (a cross-channel convention shared with the email
+      // store) but preserve the fs error on cause, so the adapter's logs can
+      // distinguish ENOSPC from EACCES from a read-only mount (#17432 R1-3).
       throw new Error(
         'Managed DingTalk state could not be saved; admission stopped.',
+        { cause: error },
       );
     } finally {
       rmSync(temporary, { force: true });
