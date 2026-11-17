@@ -1214,19 +1214,19 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
 
 describe('legacy session telemetry route catalog', () => {
   // MCP App calls, attachment uploads, the batch live-state snapshot, shell
-  // runtime, message groups, and Generated UI state resolve the live session
-  // owner in the handler, preserving the two pre-resolved routes.
-  it('contains 89 unique routes with the audited 87/2 attribution split', () => {
+  // runtime, worktree, message group, and Generated UI state routes resolve the
+  // live session owner in the handler, preserving the two pre-resolved routes.
+  it('contains 91 unique routes with the audited 89/2 attribution split', () => {
     const keys = legacySessionTelemetryRoutes.map(
       ({ method, path }) => `${method} ${path}`,
     );
-    expect(keys).toHaveLength(89);
-    expect(new Set(keys).size).toBe(89);
+    expect(keys).toHaveLength(91);
+    expect(new Set(keys).size).toBe(91);
     expect(
       legacySessionTelemetryRoutes.filter(
         ({ attribution }) => attribution === 'handler_resolved',
       ),
-    ).toHaveLength(87);
+    ).toHaveLength(89);
     expect(
       legacySessionTelemetryRoutes.filter(
         ({ attribution }) => attribution === 'pre_resolved',

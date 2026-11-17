@@ -70,6 +70,17 @@ export interface WorktreeSession {
    */
   originalHeadCommit: string;
   /**
+   * The commit the worktree itself was created at (its detached base or
+   * branch tip). Distinct from `originalHeadCommit`, which is the HEAD of
+   * the checkout named by `originalCwd`: when a branch worktree is created
+   * from a session living in a sibling managed worktree, the two differ.
+   * The beyond-base promotion test, exit_worktree and the orphan reaper
+   * read this (falling back to `originalHeadCommit` when absent, for
+   * sidecars written before the field existed). The handoff's
+   * `local_head_moved` gate keeps reading `originalHeadCommit`.
+   */
+  worktreeBase?: string;
+  /**
    * Set on the superseded session's sidecar by a worktree reset: the
    * replacement session this session's worktree ownership moved to. Readers
    * redirect to it (and self-heal their registry) instead of restoring the
@@ -108,6 +119,8 @@ function isValidWorktreeSession(value: unknown): value is WorktreeSession {
       typeof v['workspaceCwd'] === 'string') &&
     typeof v['originalBranch'] === 'string' &&
     typeof v['originalHeadCommit'] === 'string' &&
+    (v['worktreeBase'] === undefined ||
+      typeof v['worktreeBase'] === 'string') &&
     (v['supersededBy'] === undefined ||
       typeof v['supersededBy'] === 'string') &&
     (v['supersedes'] === undefined || typeof v['supersedes'] === 'string')
@@ -906,10 +919,14 @@ export async function restoreWorktreeContext(
     }
   }
 
+  // '' is the detached managed-worktree convention: no branch to name.
+  const branchFragment = session.worktreeBranch
+    ? `(branch: ${session.worktreeBranch})`
+    : '(detached HEAD)';
   return {
     session,
     contextMessage:
       `[Resumed] Active worktree: "${session.slug}" at ${session.worktreePath} ` +
-      `(branch: ${session.worktreeBranch}). Continue using this path for all file operations.`,
+      `${branchFragment}. Continue using this path for all file operations.`,
   };
 }

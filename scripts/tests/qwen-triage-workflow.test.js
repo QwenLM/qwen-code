@@ -6835,6 +6835,16 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain(
       'The VM path runs **no `--require-isolation` gate**',
     );
+    // R16-4 / R3-4: the preflight VM sentence is scoped to exclude the gate
+    // and names no in-boundary gate command / boundary-gate.json, so it cannot
+    // push a VM operator to run the container gate (or an --artifact-dir
+    // invocation parseArgs refuses) the VM bullet says it skips.
+    expect(flat).toContain(
+      'a VM boundary takes the same trusted copy but runs **no `--require-isolation` gate**',
+    );
+    expect(flat).toContain(
+      'there is no in-boundary gate command and no `boundary-gate.json` to produce — declare `mode:"vm"` per the VM bullet above',
+    );
     expect(flat).toContain(
       'The VM round still runs under a **scratch `HOME`**',
     );
@@ -6843,6 +6853,21 @@ describe('qwen-triage verify hardening round 2', () => {
     );
     // A container declaration is backed by a gate record.
     expect(flat).toContain('backed by `boundary-gate.json`');
+    // R16-1 (residual): the record carries only the nonce hash, never the
+    // plaintext; step 5 says so and the checker — the SINGLE authoritative
+    // matcher (the step-7 shell no longer re-implements it, R1-2/R2-6) —
+    // hash-compares a container-nonce log line against it.
+    expect(flat).toContain('stores only its **sha256** in the gate record');
+    expect(flat).toContain('(`nonceSha256`), never the plaintext');
+    expect(flat).toContain('the SINGLE authoritative implementation');
+    // R6 (deferred): step 5's container-nonce spelling and the checker's
+    // matcher literal are pinned together, so rewording either side cannot
+    // silently refuse every compliant round.
+    expect(flat).toContain('echo a line beginning `container-nonce: <nonce>`');
+    expect(flat).toContain('matches only that prefix');
+    expect(readFileSync('scripts/verify-pr-check.mjs', 'utf8')).toContain(
+      '/container-nonce:[ \\t]*(\\S+)/',
+    );
     // The record and the lane flag corroborate an operator; they are not
     // proof against a round that forges them. The honest wording is the
     // contract — an overclaim ("cannot be minted", "never for a local
@@ -7039,7 +7064,6 @@ describe('qwen-triage verify hardening round 2', () => {
       symlinkRound = false,
       spacesInPath = false,
       slashSuffix = '',
-      noNonce = false,
     } = {}) => {
       const root = mkdtempSync(join(tmpdir(), 'verify-step7-'));
       // R10-48: a round path with a space exercises the quoted expansions.
@@ -7065,26 +7089,11 @@ describe('qwen-triage verify hardening round 2', () => {
       writeFileSync(join(proxyDir, 'proxy.pid'), '424242\n');
       writeFileSync(join(proxyDir, 'proxy.json'), '{"token":"bearer"}');
       writeFileSync(join(proxyDir, 'proxy.err'), '');
-      // R16-1: the gate record carries a per-round nonce; the round's raw
-      // harness logs must echo it for step 7 to declare mode:"container".
-      // noNonce leaves the logs without it (the gate still passed).
-      const nonce = 'n0nce1234567890abcdef';
-      if (!planted && !readOnlyRound && !symlinkRound) {
-        writeFileSync(
-          join(round, 'boundary-gate.json'),
-          JSON.stringify({
-            gate: 'require-isolation',
-            passed: true,
-            observed: ['/.dockerenv'],
-            credentialFree: true,
-            nonce,
-          }),
-        );
-        writeFileSync(
-          join(round, 'harness.log'),
-          noNonce ? 'PASS cell\n' : `container-nonce: ${nonce}\nPASS cell\n`,
-        );
-      }
+      // The nonce binding's accept/refuse/parity witnesses live in the checker
+      // tests (containerNonceErrors), which read a real round dir; this
+      // shimmed-node replay only pins the declaration write + checker
+      // invocation + proxy teardown, so it plants no gate record / nonce log
+      // that nothing here would read (R4-3).
       const calls = join(root, 'calls.log');
       for (const [tool, body] of [
         [
@@ -7161,24 +7170,11 @@ describe('qwen-triage verify hardening round 2', () => {
       }
     });
 
-    // R16-1: the gate record passes but the round logs carry no container
-    // nonce (the battery ran on the host) — step 7 must refuse to mint a
-    // mode:"container" declaration and exit non-zero, proxy still torn down.
-    it('refuses a container declaration when the logs carry no nonce', () => {
-      const { res, log, round, root, proxyDir } = replay({ noNonce: true });
-      try {
-        expect(res.status).toBe(1);
-        expect(res.stderr).toMatch(/round logs carry no container nonce/);
-        expect(existsSync(join(round, 'boundary.json'))).toBe(false);
-        expect(log).not.toMatch(/^node /m);
-        expect(log).toMatch(/kill 424242/);
-        for (const f of ['proxy.pid', 'proxy.json', 'proxy.err']) {
-          expect(existsSync(join(proxyDir, f))).toBe(false);
-        }
-      } finally {
-        rmSync(root, { recursive: true, force: true });
-      }
-    });
+    // The container nonce binding is enforced by the checker, the single
+    // authoritative matcher (R1-2/R2-6) — the step-7 shell no longer
+    // re-implements it, so the nonce accept/refuse/parity witnesses live in
+    // scripts/tests/verify-pr-check.test.js (containerNonceErrors) and the
+    // real-environment round trip, not in this shimmed-node shell replay.
 
     // R10-47: a PR-planted symlink at the round dir is refused, the victim
     // is untouched, and the proxy is still torn down.
