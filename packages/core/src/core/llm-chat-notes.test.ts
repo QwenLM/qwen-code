@@ -347,6 +347,52 @@ describe('notes compaction commit boundary', () => {
     expect(result.strategy).toBe('summary');
     expect(recorder.recordChatCompressionStrict).toHaveBeenCalledOnce();
   });
+
+  it('preserves the retained-operation boundary in a notes recorder summary checkpoint', async () => {
+    const { chat, recorder } = fixture();
+    const retained: Content = {
+      role: 'model',
+      parts: [{ text: 'latest original response' }],
+    };
+    const compressedHistory: Content[] = [
+      { role: 'user', parts: [{ text: 'summary' }] },
+      { role: 'model', parts: [{ text: 'Understood.' }] },
+      { role: 'user', parts: [{ text: 'Recent operation follows.' }] },
+      retained,
+    ];
+    vi.spyOn(ChatCompressionService.prototype, 'compress').mockResolvedValue({
+      newHistory: compressedHistory,
+      postCompactSummary: 'summary',
+      info: {
+        strategy: 'summary',
+        summaryPrefixLength: 3,
+        originalTokenCount: 22000,
+        newTokenCount: 100,
+        compressionStatus: CompressionStatus.COMPRESSED,
+      },
+    });
+    const pending: Content = {
+      role: 'user',
+      parts: [{ text: 'continue with the next change' }],
+    };
+
+    await chat.tryCompress('retained-summary', true, undefined, {
+      customInstructions: 'Preserve recent operations.',
+      pendingUserMessage: pending,
+    });
+
+    expect(recorder.recordChatCompressionStrict).toHaveBeenCalledWith(
+      expect.objectContaining({
+        summaryPrefixLength: 3,
+        compressedHistory: [...compressedHistory, pending],
+      }),
+      undefined,
+      undefined,
+      expect.anything(),
+    );
+    expect(chat.getHistory()).toEqual([...compressedHistory, pending]);
+  });
+
   it('propagates a managed PostCompact hook failure', async () => {
     const { chat, hookSystem, post } = fixture();
     hookSystem.isManaged.mockReturnValue(true);

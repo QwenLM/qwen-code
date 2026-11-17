@@ -570,7 +570,10 @@ import type {
   Message,
   PermissionRequest,
 } from './adapters/types';
-import { isBackgroundSubAgentToolCall } from './adapters/toolClassification';
+import {
+  isBackgroundSubAgentToolCall,
+  isNamedSubSessionApproval,
+} from './adapters/toolClassification';
 import {
   computeTodoDetails,
   computeTodoTimeline,
@@ -1963,10 +1966,12 @@ const DEFAULT_CHAT_HEADER_ITEMS: readonly WebShellChatHeaderItem[] = [
   'title',
   'environment',
   'rightPanel',
+  'artifacts',
 ];
 const DEFAULT_RIGHT_PANEL_ITEMS: readonly WebShellRightPanelItem[] = [
   'review',
   'sideTask',
+  'changeOverview',
 ];
 /**
  * Right-panel entries that work without a session; the empty new-task page
@@ -1976,6 +1981,7 @@ const EMPTY_STATE_RIGHT_PANEL_ITEMS: readonly WebShellRightPanelItem[] = [
   'files',
   'terminal',
   'webPreview',
+  'changeOverview',
 ];
 /**
  * Key prefix backing the empty new-task page's panel state: one draft entry
@@ -2290,6 +2296,10 @@ type PersistedArtifactPanelTab =
       'id' | 'kind' | 'title' | 'sessionId'
     >
   | Pick<
+      Extract<ArtifactPanelTab, { kind: 'change_overview' }>,
+      'id' | 'kind' | 'title' | 'workspaceCwd' | 'workspaceId' | 'sessionId'
+    >
+  | Pick<
       Extract<ArtifactPanelTab, { kind: 'token_usage' }>,
       'id' | 'kind' | 'title' | 'sessionId' | 'closeWithPane'
     >
@@ -2503,6 +2513,17 @@ function parsePersistedArtifactPanelTab(
         kind: 'trajectory',
         sessionId: tab['sessionId'],
       } as PersistedArtifactPanelTab;
+    case 'change_overview':
+      if (typeof tab['workspaceCwd'] !== 'string') return;
+      return {
+        ...common,
+        kind: 'change_overview',
+        workspaceCwd: tab['workspaceCwd'],
+        ...(typeof tab['workspaceId'] === 'string'
+          ? { workspaceId: tab['workspaceId'] }
+          : {}),
+        sessionId: tab['sessionId'],
+      } as PersistedArtifactPanelTab;
     case 'token_usage':
     case 'context_usage':
       if (typeof tab['sessionId'] !== 'string') return;
@@ -2681,6 +2702,19 @@ function serializeArtifactPanelTabs(
           : [];
       case 'workflow':
         return [{ id, kind: tab.kind, title, sessionId: tab.sessionId }];
+      case 'change_overview':
+        // Persist the identity like the neighbouring trajectory/workflow arms;
+        // the panel refetches its content from git on mount.
+        return [
+          {
+            id,
+            kind: tab.kind,
+            title,
+            workspaceCwd: tab.workspaceCwd,
+            workspaceId: tab.workspaceId,
+            sessionId: tab.sessionId,
+          },
+        ];
       case 'pending': {
         const common = {
           id,
@@ -3836,6 +3870,7 @@ export function App({
   const titleHeaderItemVisible = chatHeaderItems.includes('title');
   const environmentHeaderItemVisible = chatHeaderItems.includes('environment');
   const rightPanelHeaderItemVisible = chatHeaderItems.includes('rightPanel');
+  const artifactsHeaderItemVisible = chatHeaderItems.includes('artifacts');
   const tokenUsageHeaderItemVisible = chatHeaderItems.includes('tokenUsage');
   const contextUsageHeaderItemVisible =
     chatHeaderItems.includes('contextUsage');
@@ -6669,6 +6704,51 @@ export function App({
     latestReviewTurnId,
     openReviewPanel,
   ]);
+  const openChangeOverviewPanel = useCallback(() => {
+    const cwd = activeWorkspaceCwd;
+    if (!cwd) return;
+    const workspaceId = resolveArtifactWorkspaceOwner(
+      workspaceCapabilitiesRef.current,
+      cwd,
+    )?.id;
+    const tab: ArtifactPanelTab = {
+      id: 'change_overview',
+      kind: 'change_overview',
+      title: t('changeOverview.title'),
+      workspaceCwd: cwd,
+      ...(workspaceId ? { workspaceId } : {}),
+      ...(connection.sessionId ? { sessionId: connection.sessionId } : {}),
+    };
+    setArtifactPanelTabs((tabs) =>
+      tabs.some((item) => item.id === tab.id)
+        ? tabs.map((item) => (item.id === tab.id ? tab : item))
+        : [tab, ...tabs],
+    );
+    setActiveArtifactPanelTabId(tab.id);
+    setArtifactPanelWidth((width) =>
+      artifactPanelOpenRef.current ? width : getDefaultReviewPanelWidth(),
+    );
+    setArtifactPanelOpen(true);
+  }, [activeWorkspaceCwd, connection.sessionId, getDefaultReviewPanelWidth, t]);
+  // A change-overview tab opened on the new-task page has no session yet; when
+  // the first prompt materializes one, adopt the live session id so the per-PR
+  // units and worktree scoping appear without reopening the tab. Only tabs that
+  // lack a session are touched, so the draft-adoption path stays untouched.
+  useEffect(() => {
+    const liveSessionId = connection.sessionId;
+    if (!liveSessionId) return;
+    setArtifactPanelTabs((tabs) => {
+      let changed = false;
+      const next = tabs.map((tab) => {
+        if (tab.kind === 'change_overview' && !tab.sessionId) {
+          changed = true;
+          return { ...tab, sessionId: liveSessionId };
+        }
+        return tab;
+      });
+      return changed ? next : tabs;
+    });
+  }, [connection.sessionId]);
   const openScheduledTaskPanel = useCallback(
     (
       task: TurnOutputScheduledTask,
@@ -8100,6 +8180,17 @@ export function App({
                       sessionAgentTraceSupported)
                     ? tab
                     : undefined;
+                case 'change_overview':
+                  // A stored tab outlives the host's opt-in, so a host that
+                  // has stopped listing the item must not get the panel back
+                  // — and fetching with it — through the browser profile.
+                  if (!rightPanelItems.includes('changeOverview')) {
+                    return undefined;
+                  }
+                  // Identity only; the panel refetches from git on mount. A
+                  // tab saved without a session picks up the live one via the
+                  // session-id reconciliation effect.
+                  return tab;
               }
             },
           ),
@@ -8209,6 +8300,7 @@ export function App({
     hydrateRestoredAttachmentTab,
     panelStateKey,
     resetEmptyArtifactPanel,
+    rightPanelItems,
     sessionAgentTraceSupported,
     sessionActions,
     trajectoryAvailable,
@@ -15630,6 +15722,7 @@ export function App({
           !planMode &&
           approval &&
           !isExitPlanApprovalRequest(approval) &&
+          !isNamedSubSessionApproval(approval) &&
           (modeId === 'yolo' ||
             (modeId === 'auto-edit' && isEditToolPermission(approval)))
         ) {
@@ -18178,6 +18271,7 @@ export function App({
               sessionId?: unknown;
               workspaceCwd?: unknown;
               sessionContext?: unknown;
+              source?: unknown;
             }
         >
       ).detail;
@@ -18219,6 +18313,13 @@ export function App({
         lockedWorkspaceCwd &&
         (sessionContext?.kind !== 'workspace' ||
           sessionContext.cwd !== lockedWorkspaceCwd)
+      )
+        return;
+      if (
+        lockedWorkspaceCwd &&
+        typeof detail === 'object' &&
+        detail?.source === 'session-link' &&
+        workspaceCwd !== lockedWorkspaceCwd
       )
         return;
       if (typeof sessionId === 'string' && sessionId.trim()) {
@@ -22789,6 +22890,10 @@ export function App({
     sessionWorktree,
     gitStatusTarget,
   ]);
+  // Bumped when the header artifact entry opens the panel, so the panel
+  // expands its artifacts section even if the user had collapsed it (the
+  // panel hides rather than unmounts, so its local section state persists).
+  const [artifactsExpandSignal, setArtifactsExpandSignal] = useState(0);
   const handleEnvironmentPanelOpenChange = useCallback(
     (open: boolean) => {
       persistEnvironmentPanelOpen(open);
@@ -22802,6 +22907,22 @@ export function App({
     },
     [persistEnvironmentPanelOpen],
   );
+  // The count and the opener are derived from one gate so an embedder never
+  // receives a count it cannot act on: the built-in header additionally
+  // requires both props, but the custom renderChatHeader contract does not.
+  const artifactsHeaderEntry =
+    artifactsHeaderItemVisible &&
+    mainView === 'chat' &&
+    environmentPanelItems.includes('artifacts') &&
+    connection.sessionId
+      ? {
+          artifactCount: artifacts.length,
+          onOpenArtifacts: () => {
+            handleEnvironmentPanelOpenChange(true);
+            setArtifactsExpandSignal((value) => value + 1);
+          },
+        }
+      : {};
   const dismissEnvironmentPanel = useCallback(() => {
     preserveEnvironmentPanelOnArtifactOpenRef.current = false;
     persistEnvironmentPanelOpen(false);
@@ -23221,6 +23342,11 @@ export function App({
     onWebPreviewChange: updateWebPreviewTab,
     latestReviewAvailable: latestReviewChanges.length > 0,
     onOpenLatestReview: openLatestReviewPanel,
+    // Available for any workspace; the panel itself reports non-git workspaces.
+    // Deliberately not gated on the branch chip's git status, which is only
+    // fetched while that chip (or the environment panel) is visible.
+    changeOverviewAvailable: Boolean(activeWorkspaceCwd),
+    onOpenChangeOverview: openChangeOverviewPanel,
     onOpenTrajectory: connection.sessionId
       ? () => openTrajectoryPanel(connection.sessionId!)
       : undefined,
@@ -24277,6 +24403,7 @@ export function App({
                                 ),
                             }
                           : {}),
+                        ...artifactsHeaderEntry,
                         onOpenLocalControlSettings:
                           showMobileAccess && workspaceContextActive
                             ? handleOpenLocalControlSettings
@@ -24348,6 +24475,7 @@ export function App({
                               )
                           : undefined
                       }
+                      {...artifactsHeaderEntry}
                       onOpenLocalControlSettings={
                         showMobileAccess && workspaceContextActive
                           ? handleOpenLocalControlSettings
@@ -26187,6 +26315,11 @@ export function App({
                                 onPause={() => runGoalControl('pause')}
                                 onResume={() => runGoalControl('resume')}
                                 onClear={() => runGoalControl('clear')}
+                                onOpenGoals={
+                                  projectFeaturesAvailable
+                                    ? openGoals
+                                    : undefined
+                                }
                               />
                             )}
                           </div>
@@ -26682,6 +26815,7 @@ export function App({
                 }
                 artifacts={artifacts}
                 artifactsLoading={artifactsLoading}
+                artifactsExpandSignal={artifactsExpandSignal}
                 items={environmentPanelItems}
                 onOpenGitDiff={
                   workspaceContextActive && gitDiffWorkspaceCwd

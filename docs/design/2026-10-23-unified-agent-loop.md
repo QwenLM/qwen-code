@@ -2,10 +2,10 @@
 
 [English](2026-10-23-unified-agent-loop.md) | [简体中文](2026-10-23-unified-agent-loop.zh-CN.md)
 
-- **Status**: accepted in #15343. The headless (PR 1, #15369), ACP (PR 2, #15509–#16190), Ink TUI (PR 3, #16206–#16704) and OpenTUI (PR 4, #16743–#16820) migrations are merged; each surface's default flip follows the ladder in [Migration](#migration), and headless is the first. PR 5 (AgentCore) is in progress: 5a (#16880) and 5b (#17035) are merged. The remaining steps are tracked in #17045. PR 6a (speculation's model round, #17029) is merged.
+- **Status**: accepted in #15343. The headless (PR 1, #15369), ACP (PR 2, #15509–#16190), Ink TUI (PR 3, #16206–#16704) and OpenTUI (PR 4, #16743–#16820) migrations are merged; each surface's default flip follows the ladder in [Migration](#migration), and headless is the first. PR 5 (AgentCore) is in progress: 5a (#16880), 5b (#17035) and 5c (#17059) are merged. The remaining steps are tracked in #17045; the work it leaves out is carried by its follow-up #17284. PR 6a (speculation's model round, #17029) is merged, and PR 6b recorded speculation's decision to keep its own tool step (#17324).
 - **Date**: 2026-10-23, against upstream `779a4d5d0d`.
 - **Related**:
-  - tracking issue #15327, and #17045 for the remaining steps, the rollout and the capability ledger;
+  - tracking issue #15327, #17045 for the remaining steps, the rollout and the capability ledger, and its follow-up #17284 for the work it leaves out;
   - [Agent loop capability ledger](2026-11-15-loop-capability-ledger.md) — each behavior of the 1.0 loop mapped to main, with the decisions on what main does not have;
   - the earlier proposal #8775, which starts with AgentCore and headless; this design extends its goal to all seven loops, and its AgentCore step is PR 5;
   - defects found while comparing the loops: #15324, #15325, #15326;
@@ -74,7 +74,7 @@ Not loops, and out of this design: the forked-agent cache path (one request, no 
 
 Goals:
 
-- One implementation of the loop in `packages/core`: model round, tool batch, continuation, and a typed outcome. Every surface uses it.
+- One implementation of the loop in `packages/core`: model round, tool batch, continuation, and a typed outcome. Every surface uses its model round; a recorded keep-its-own decision retains a specialized tool step and loop (speculation, the Hosted Harness).
 - An opt-in rollout behind one setting. With the setting off, every surface keeps its current loop unchanged.
 - A surface moves only when a parity suite shows that its requests and output match its current loop, apart from listed differences.
 - One place to attach loop-level behavior such as hooks, Mods, loop protection, recording and telemetry.
@@ -217,7 +217,7 @@ if (config.isUnifiedAgentLoopEnabled('headless')) {
 
 The current loop stays as the `else` branch and is not refactored while the setting exists. A surface that has not moved yet ignores the setting, and the setting's description names the surfaces it covers. ACP children started by `qwen serve` read the same settings, so the daemon and Web Shell follow the setting for the ACP turns that have moved. The Web Shell settings panel lists the setting from PR 2a on.
 
-Per-surface resolution landed in #17045 (block B): the environment override wins when it addresses the surface, else the explicit setting when set, else the surface's built-in default (`true` for headless and the Ink TUI, `false` for every other surface). The setting is tri-state at runtime — unset is distinct from explicitly off — and its schema has no default since headless's default flipped; a settings dialog's first toggle of the unset value writes `true`. See `2026-11-12-loop-rollout-switches.md` for the resolution rules and the rollout ladder.
+Per-surface resolution landed in #17045 (block B): the environment override wins when it addresses the surface, else the explicit setting when set, else the surface's built-in default (`true` for headless, the Ink TUI and AgentCore, `false` for every other surface). The setting is tri-state at runtime — unset is distinct from explicitly off — and its schema has no default since headless's default flipped; a settings dialog's first toggle of the unset value writes `true`. See `2026-11-12-loop-rollout-switches.md` for the resolution rules and the rollout ladder.
 
 ### Headless on the shared loop (PR 1)
 
@@ -519,7 +519,7 @@ PR 5b runs a round's calls as one batch of the loop's `runToolBatch` on the agen
 
 The scheduler, with its events, approvals and hooks, stays the agent's own, so a deferred approval restores the agent's four async-local frames as it does today. The batch leaves the results unrecorded, since they go to the agent's chat and not to the session's transcript. It keeps the results of an aborted batch, so the run ends at the next round's abort check as it does today. A call id the stream repeats still runs and is answered once. The headless suite counts each subagent batch on the shared loop in the debug log, and the TUI suite answers a subagent's approval in the TUI.
 
-PR 5c runs each round, its model request and its tool batch, in one `runAgentLoop` call that returns after the batch, as headless runs each round of its main turn. With `experimental.eventBusAgentLoop` enabled, AgentCore uses the event-bus kernel. OpenTUI is the third entry point to use it, after headless and AgentCore. The agent keeps its driver between rounds: the parent's messages after the results, the loop reminder and the result-aware loop guard, the wait and the request for a final answer, and the mapping of the stops to `terminateMode`. Handing the whole run to the loop, with no driver of its own, is left to the follow-up issue of #17045. The loop's options change as follows, on the procedural and the event-bus path:
+PR 5c runs each round, its model request and its tool batch, in one `runAgentLoop` call that returns after the batch, as headless runs each round of its main turn. With `experimental.eventBusAgentLoop` enabled, AgentCore uses the event-bus kernel. OpenTUI is the third entry point to use it, after headless and AgentCore. The agent keeps its driver between rounds: the parent's messages after the results, the loop reminder and the result-aware loop guard, the wait and the request for a final answer, and the mapping of the stops to `terminateMode`. Handing the whole run to the loop, with no driver of its own, is left to #17284, the follow-up issue of #17045. The loop's options change as follows, on the procedural and the event-bus path:
 
 - `runAgentLoop` takes the batch options `keepCancelledResults`, `deferRecording` and `duplicateStateForCall`, and returns the batch's results by call;
 - it takes a `ModelRoundSource` in place of the client; the calls of a loop on a round source do not count toward the session's tool calls;
@@ -612,7 +612,7 @@ Step 4 needs:
 - its parity suite passes 20 runs in a row comparing the kernel off and on, with retries off;
 - for AgentCore and ACP, the Managed job passes with both settings on.
 
-A removal waits 14 days after the default it follows: a surface's step 5 after its step 2, and, once every surface has done step 5 and has had step 4 on for 14 days, the separate round and batch calls, the procedural path of `runAgentLoop` and both settings. A removal does not land while a regression attributed to the new path is open. Until a surface's step 5, setting `experimental.unifiedAgentLoop` to `false` brings its current loop back.
+A removal waits 14 days after the default it follows: a surface's step 5 after its step 2, and, once every surface has done step 5 and has had step 4 on for 14 days, the separate round and batch calls, the procedural path of `runAgentLoop` and both settings. A removal does not land while a regression attributed to the new path is open. Until a surface's step 5, setting `experimental.unifiedAgentLoop` to `false` brings its current loop back. A surface with a recorded keep-its-own decision removes only the path its migration replaced: speculation's step 5 removes its current model round, not its speculative loop or tool step ([PR 6b decision](2026-11-15-speculation-tool-step.md)).
 
 ## Parity suite
 
@@ -795,13 +795,13 @@ End state:
 
 | Measure                                              | Today                                            | Target |
 | ---------------------------------------------------- | ------------------------------------------------ | ------ |
-| Agent loop implementations                           | 7, plus the extra copies inside headless and ACP | 1      |
+| Agent loop implementations                           | 7, plus the extra copies inside headless and ACP | 3      |
 | Loops that call `LlmChat.sendMessageStream` directly | 3                                                | 0      |
 | Loops that parse stream chunks outside `turn.ts`     | 3                                                | 0      |
-| Loops that call `finalizeToolResponses`              | 6                                                | 1      |
-| Session turn-cap formulas                            | 3                                                | 1      |
+| Loops that call `finalizeToolResponses`              | 6                                                | 2      |
+| Session turn-cap formulas                            | 3                                                | 2      |
 
-These targets assume full migration. The keep-its-own decisions retain specialized copies: speculation keeps its speculative loop and its `finalizeToolResponses` call (`speculation.ts:607`; [PR 6b decision](2026-11-15-speculation-tool-step.md)), and the Hosted Harness keeps its journaled loop and tool step ([migration evaluation](2026-11-14-hosted-harness-loop-evaluation.md)). "Agent loop implementations" and "Loops that call `finalizeToolResponses`" therefore end at the shared implementation plus the copies these decisions retain (speculation's finalizer sits alongside the shared batch's at `agent-loop.ts:715`); the follow-up #17284 reconciles the exact numbers.
+These targets assume full migration. The keep-its-own decisions retain specialized copies: speculation keeps its speculative loop and its `finalizeToolResponses` call (`speculation.ts:607`; [PR 6b decision](2026-11-15-speculation-tool-step.md)), and the Hosted Harness keeps its journaled loop and tool step ([migration evaluation](2026-11-14-hosted-harness-loop-evaluation.md)). "Agent loop implementations" and "Loops that call `finalizeToolResponses`" therefore end at the shared implementation plus the copies these decisions retain (speculation's finalizer sits alongside the shared batch's at `agent-loop.ts:715`); the Target cells above count those copies, the turn-cap row keeping the Hosted outer loop's formula alongside the reconciled one ([migration evaluation](2026-11-14-hosted-harness-loop-evaluation.md)).
 
 ## Open questions
 
@@ -813,3 +813,4 @@ These targets assume full migration. The keep-its-own decisions retain specializ
 
 - Session-level scheduling: one place that decides when a notification, cron job, Goal turn or teammate message starts a loop.
 - The Hosted Harness evaluation: whether its journaled dispatch becomes a scheduler behind the same `schedule` contract. Answered by the [migration evaluation](2026-11-14-hosted-harness-loop-evaluation.md): the journaled dispatch stays; only the model round can move to the shared round.
+- The work #17045 leaves out — the whole-turn handoff, streaming dispatch, speculation's gated steps and reconciliations, and the capability-ledger rows: tracked in its follow-up #17284.

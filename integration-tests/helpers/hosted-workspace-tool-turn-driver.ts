@@ -275,7 +275,10 @@ const modelReply: FakeOpenAIHandler = ({ body }) => {
     role: string;
     content: unknown;
     tool_call_id?: string;
-    tool_calls?: Array<{ id: string }>;
+    tool_calls?: Array<{
+      id: string;
+      function: { name: string; arguments: string };
+    }>;
   }>;
   const lastPrompt = messages.findLastIndex(
     (message) =>
@@ -410,10 +413,19 @@ const modelReply: FakeOpenAIHandler = ({ body }) => {
     );
     assert.match(JSON.stringify(receipts[0].content), /Successfully created/);
     assert.match(JSON.stringify(receipts[1].content), /before/);
-    assert.match(
-      JSON.stringify(receipts[2].content),
-      /has been updated.*after/s,
-    );
+    assert.match(JSON.stringify(receipts[2].content), /has been updated\./);
+    const editCalls = messages
+      .slice(lastPrompt + 1)
+      .filter((message) => message.role === 'assistant')
+      .flatMap((message) => message.tool_calls ?? [])
+      .filter((call) => call.id === 'edit-proof');
+    assert.equal(editCalls.length, 1);
+    assert.equal(editCalls[0].function.name, 'edit');
+    assert.deepEqual(JSON.parse(editCalls[0].function.arguments), {
+      file_path: 'proof.txt',
+      old_string: 'before',
+      new_string: 'after',
+    });
     return { content: 'TOOLS_DONE', reasoning: 'PRIVATE_REASONING_MARKER' };
   }
   if (current === 'INVALID_FILE_PATH') {
