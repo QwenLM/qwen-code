@@ -6585,6 +6585,115 @@ describe('DaemonSessionProvider', () => {
     expect(streamingState).toBe('idle');
   });
 
+  it.each([
+    [
+      'a message from another client',
+      'user_message_chunk',
+      'waiting',
+      undefined,
+    ],
+    [
+      'an answer from another client',
+      'agent_message_chunk',
+      'responding',
+      undefined,
+    ],
+    [
+      'a /send message recorded here',
+      'user_message_chunk',
+      'idle',
+      {
+        qwenAgentMessage: {
+          kind: 'agent_mention',
+          mentionedAgentIds: [],
+          sentTo: { sessionId: 'kid', workspaceCwd: '/work/b' },
+        },
+      },
+    ],
+  ] as const)(
+    'reads %s (%s) as %s',
+    async (_name, sessionUpdate, expected, meta) => {
+      const hold = createDeferred<void>();
+      const session = createMockSession({
+        events: async function* observedMessage(
+          opts: { signal?: AbortSignal } = {},
+        ) {
+          // This session's own earlier turn, settled: the page is idle.
+          yield {
+            v: 1,
+            id: 8,
+            type: 'session_update',
+            promptId: 'prompt-0',
+            sessionId: 'session-1',
+            data: {
+              update: {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'hello' },
+              },
+            },
+          };
+          yield {
+            v: 1,
+            id: 9,
+            type: 'session_update',
+            promptId: 'prompt-0',
+            sessionId: 'session-1',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'hi' },
+              },
+            },
+          };
+          yield {
+            v: 1,
+            id: 10,
+            type: 'turn_complete',
+            promptId: 'prompt-0',
+            sessionId: 'session-1',
+            data: { promptId: 'prompt-0', stopReason: 'end_turn' },
+          };
+          yield {
+            v: 1,
+            id: 11,
+            type: 'session_update',
+            timestamp: '2025-01-01T00:00:00.000Z',
+            sessionId: 'session-1',
+            data: {
+              update: {
+                sessionUpdate,
+                content: { type: 'text', text: 'look at this' },
+                ...(meta ? { _meta: meta } : {}),
+              },
+            },
+          };
+          await Promise.race([
+            hold.promise,
+            new Promise<void>((resolve) =>
+              opts.signal?.addEventListener('abort', () => resolve(), {
+                once: true,
+              }),
+            ),
+          ]);
+        },
+      });
+      sdkMocks.sessions.push(session);
+      let streamingState: ReturnType<typeof useDaemonStreamingState> = 'idle';
+
+      function Harness() {
+        streamingState = useDaemonStreamingState();
+        return null;
+      }
+
+      await renderWithProvider(<Harness />, { autoConnect: true });
+      await act(async () => {
+        await flushPromises();
+      });
+      expect(streamingState).toBe(expected);
+      hold.resolve();
+    },
+  );
+
   it('settles non-blocking prompts when turn completion arrives before acceptance returns', async () => {
     const accepted = createDeferred<NonBlockingPromptAccepted>();
     const turnComplete = createDeferred<void>();

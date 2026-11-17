@@ -55,6 +55,7 @@ vi.mock('./MessageItem', async () => {
       assistantTurnFooterInfo,
       sendFailed,
       onRetrySend,
+      onEditUserMessage,
       assistantFeedbackPromptId,
     }: {
       message: Message;
@@ -68,6 +69,7 @@ vi.mock('./MessageItem', async () => {
       assistantTurnFooterInfo?: WebShellAssistantTurnFooterRenderInfo;
       sendFailed?: boolean;
       onRetrySend?: () => void;
+      onEditUserMessage?: () => void;
     }) => {
       if (message.role === 'tool_group') {
         messageItemTestState.toolArrays.push(message.tools);
@@ -112,6 +114,17 @@ vi.mock('./MessageItem', async () => {
                 type: 'button',
               },
               'retry',
+            )
+          : null,
+        onEditUserMessage
+          ? React.createElement(
+              'button',
+              {
+                'data-testid': `edit-${message.id}`,
+                onClick: onEditUserMessage,
+                type: 'button',
+              },
+              'edit',
             )
           : null,
         message.role === 'thinking'
@@ -381,6 +394,7 @@ function mount(
     pendingApproval?: PermissionRequest | null;
     failedPromptMessageId?: string;
     onRetryFailedPrompt?: () => void;
+    onEditUserMessage?: (turnIndex: number, content: string) => void;
   } = {},
 ): HTMLElement {
   const container = document.createElement('div');
@@ -422,6 +436,7 @@ function mount(
                 onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
                 failedPromptMessageId={opts.failedPromptMessageId}
                 onRetryFailedPrompt={opts.onRetryFailedPrompt}
+                onEditUserMessage={opts.onEditUserMessage}
               />
             </TranscriptRenderModeProvider>
           </CompactModeContext.Provider>
@@ -711,6 +726,28 @@ describe('MessageList — failed prompt retry', () => {
     );
     expect(onRetry).toHaveBeenCalledTimes(1);
   });
+});
+
+it('keeps Edit on the latest ordinary prompt when send records follow it', () => {
+  const sendRecord = (id: string): UserMessage => ({
+    ...userMsg(id),
+    agentMessage: {
+      kind: 'agent_mention',
+      sentTo: { sessionId: 'target', workspaceCwd: '/work/b' },
+    },
+  });
+  const onEditUserMessage = vi.fn();
+  const container = mount(
+    [userMsg('u1'), sendRecord('s1'), userMsg('u2'), sendRecord('s2')],
+    undefined,
+    { onEditUserMessage },
+  );
+
+  expect(container.querySelector('[data-testid="edit-s2"]')).toBeNull();
+  const edit = container.querySelector('[data-testid="edit-u2"]');
+  expect(edit).not.toBeNull();
+  click(edit!);
+  expect(onEditUserMessage).toHaveBeenCalledWith(1, 'q');
 });
 
 describe('MessageList — compact mode', () => {
@@ -6843,6 +6880,47 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(has(c, 'a1')).toBe(true);
     expect(assistantActions(c, 'a1')).toBe('true');
   });
+
+  it.each([
+    [true, true],
+    [false, false],
+  ])(
+    'keeps the card of a turn another session started in view: from a session %s',
+    (fromSession, visible) => {
+      const backgroundTurn = {
+        turnId: 'turn-b',
+        taskId: 'kid',
+        kind: 'agent' as const,
+        label: 'projB · Kid',
+        startedAt: 10,
+      };
+      const card: SystemMessage = {
+        id: 'card',
+        role: 'system',
+        variant: 'info',
+        source: 'background_notification_turn_started',
+        content: 'projB · Kid',
+        data: {
+          ...backgroundTurn,
+          backgroundTask: {
+            status: 'completed',
+            ...(fromSession ? { fromSession: { sessionId: 'kid' } } : {}),
+          },
+        },
+        backgroundTurn,
+      };
+      const c = mount([
+        userMsg('u1'),
+        asstMsg('a0'),
+        card,
+        toolMsg('g1'),
+        { ...asstMsg('a1'), backgroundTurn },
+      ]);
+      expect(isCollapsed(c, 'g1')).toBe(true);
+      expect(has(c, 'card')).toBe(visible);
+      expect(has(c, 'a1')).toBe(true);
+    },
+  );
 
   it('gives a turn of only an agent reply no final answer', () => {
     const c = mount([
