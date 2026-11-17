@@ -396,7 +396,7 @@ const SETTINGS_SCHEMA = {
         minimum: 1,
         maximum: 1024,
         description:
-          'Workspace-wide ceiling on concurrent in-flight sub-sessions across all callers.',
+          'Workspace-wide ceiling on concurrent in-flight sub-sessions across all callers, including sessions in other workspaces that start sub-sessions in this one.',
         showInDialog: false,
       },
       sessionPrWatch: {
@@ -4856,10 +4856,26 @@ const SETTINGS_SCHEMA = {
     description:
       'Configuration for general-purpose git worktrees created by the ' +
       'CLI (the `enter_worktree` tool, the `agent isolation: "worktree"` ' +
-      'parameter, and the startup `--worktree` flag). Does NOT affect ' +
-      'Agent Arena worktrees — see `agents.arena.worktreeBaseDir` for those.',
+      'parameter, and the startup `--worktree` flag) and for Web Shell ' +
+      'session worktrees. Does NOT affect Agent Arena worktrees — see ' +
+      '`agents.arena.worktreeBaseDir` for those.',
     showInDialog: false,
     properties: {
+      defaultForNewSessions: {
+        type: 'boolean',
+        label: 'Default Worktree For New Web Shell Sessions',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: true,
+        description:
+          'When true (the default), a new Web Shell session in a trusted ' +
+          'Git workspace starts in an isolated worktree: the composer ' +
+          'defaults to Worktree mode and the worktree is created when the ' +
+          'first message is sent. Set to false to default to the current ' +
+          'branch instead. Only affects the Web Shell composer default; ' +
+          'explicit mode selection and the daemon API are unchanged.',
+        showInDialog: false,
+      },
       symlinkDirectories: {
         type: 'array',
         label: 'Symlink Directories Into Worktrees',

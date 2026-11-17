@@ -100,7 +100,11 @@ import {
   CHANNEL_WORKFLOW_ORIGIN_META_KEY,
 } from '@qwen-code/channel-base';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
-import { DAEMON_INPUT_ANNOTATIONS_META_KEY } from '@qwen-code/acp-bridge/bridgeTypes';
+import {
+  DAEMON_EXPECTED_APPROVAL_MODE_META_KEY,
+  DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY,
+  DAEMON_INPUT_ANNOTATIONS_META_KEY,
+} from '@qwen-code/acp-bridge/bridgeTypes';
 import { EventBus } from '@qwen-code/acp-bridge/eventBus';
 import {
   BridgeClient,
@@ -17179,6 +17183,75 @@ describe('Session', () => {
   });
 
   describe('prompt', () => {
+    it('applies the delegated mode only after the prompt can start its turn', async () => {
+      let mode = ApprovalMode.YOLO;
+      vi.mocked(mockConfig.getApprovalMode).mockImplementation(() => mode);
+      vi.mocked(mockConfig.setApprovalMode).mockImplementation((next) => {
+        mode = next;
+      });
+      let enter!: () => void;
+      let admit!: () => void;
+      const entered = new Promise<void>((resolve) => {
+        enter = resolve;
+      });
+      const admitted = new Promise<void>((resolve) => {
+        admit = resolve;
+      });
+      vi.spyOn(session, 'assertCanStartTurn')
+        .mockResolvedValueOnce(undefined)
+        .mockImplementationOnce(() => {
+          enter();
+          return admitted;
+        });
+      mockChat.sendMessageStream = vi.fn(async () => {
+        expect(mode).toBe(ApprovalMode.DEFAULT);
+        return createEmptyStream();
+      });
+      const prompt = session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+        _meta: {
+          [DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY]: ApprovalMode.YOLO,
+          [DAEMON_EXPECTED_APPROVAL_MODE_META_KEY]: ApprovalMode.DEFAULT,
+        },
+      });
+
+      await entered;
+      expect(mockConfig.setApprovalMode).not.toHaveBeenCalled();
+      admit();
+      await expect(prompt).resolves.toMatchObject({ stopReason: 'end_turn' });
+      expect(mockConfig.setApprovalMode).toHaveBeenCalledExactlyOnceWith(
+        ApprovalMode.DEFAULT,
+      );
+    });
+
+    it('rejects a delegated mode mismatch after awaited prompt admission', async () => {
+      let mode = ApprovalMode.DEFAULT;
+      vi.mocked(mockConfig.getApprovalMode).mockImplementation(() => mode);
+      vi.spyOn(session, 'assertCanStartTurn')
+        .mockResolvedValueOnce(undefined)
+        .mockImplementationOnce(async () => {
+          mode = ApprovalMode.YOLO;
+        });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      const prompt = (expectedMode: ApprovalMode) =>
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+          _meta: { [DAEMON_EXPECTED_APPROVAL_MODE_META_KEY]: expectedMode },
+        });
+
+      await expect(prompt(ApprovalMode.DEFAULT)).rejects.toThrow(
+        'The session approval mode changed during delegation',
+      );
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      await expect(prompt(ApprovalMode.YOLO)).resolves.toMatchObject({
+        stopReason: 'end_turn',
+      });
+    });
+
     it('anchors approval state before recording the first real user message', async () => {
       const order: string[] = [];
       mockChatRecordingService.recordSessionApprovalMode.mockImplementation(
@@ -23144,6 +23217,280 @@ describe('Session', () => {
       ).toContainEqual(
         expect.objectContaining({
           taskId: 'worker-related',
+          continuesTodoStopGuardWorkChain: true,
+        }),
+      );
+    });
+
+    it('forwards a target workspace and surfaces the daemon refusal text', async () => {
+      const spawn = vi.mocked(mockConfig.setSubSessionSpawner).mock
+        .calls[0]?.[0];
+      expect(spawn).toBeTypeOf('function');
+      vi.mocked(mockClient.extMethod).mockRejectedValueOnce({
+        code: -32603,
+        message: 'Internal error',
+        data: { details: 'No registered workspace matches "/x".' },
+      });
+      await expect(
+        spawn?.({
+          prompt: 'p',
+          completion: 'first-turn',
+          workspace: '/x',
+          workspaceGeneration: 'generation-x',
+        }),
+      ).rejects.toThrow('No registered workspace matches "/x".');
+      expect(mockClient.extMethod).toHaveBeenLastCalledWith(
+        SERVE_CONTROL_EXT_METHODS.createSubSession,
+        {
+          prompt: 'p',
+          completion: 'first-turn',
+          workspace: '/x',
+          workspaceGeneration: 'generation-x',
+          callerSessionId: 'test-session-id',
+        },
+      );
+    });
+
+    it('returns the resolved workspace from the daemon', async () => {
+      const spawn = vi.mocked(mockConfig.setSubSessionSpawner).mock
+        .calls[0]?.[0];
+      const resolveWorkspace = vi.mocked(mockConfig.setSubSessionSpawner).mock
+        .calls[0]?.[1];
+      expect(resolveWorkspace).toBeTypeOf('function');
+      vi.mocked(mockClient.extMethod)
+        .mockResolvedValueOnce({
+          workspaceId: 'b-id',
+          workspaceCwd: '/repos/b',
+          workspaceGeneration: 'generation-b',
+        })
+        .mockResolvedValueOnce({
+          sessionId: 'child-id',
+          workspaceCwd: '/repos/b',
+        });
+      const destination = await resolveWorkspace?.('b-id');
+      expect(destination).toEqual({
+        workspaceId: 'b-id',
+        workspaceCwd: '/repos/b',
+        workspaceGeneration: 'generation-b',
+      });
+      expect(mockClient.extMethod).toHaveBeenLastCalledWith(
+        SERVE_CONTROL_EXT_METHODS.resolveSubSessionWorkspace,
+        { workspace: 'b-id', callerSessionId: 'test-session-id' },
+      );
+      await expect(
+        spawn?.({
+          prompt: 'p',
+          completion: 'first-turn',
+          workspace: 'b-id',
+          workspaceGeneration: destination?.workspaceGeneration,
+        }),
+      ).resolves.toEqual({ sessionId: 'child-id', workspaceCwd: '/repos/b' });
+    });
+
+    it.each([
+      {
+        label: 'Default',
+        mode: ApprovalMode.DEFAULT,
+        asks: true,
+        launches: true,
+      },
+      {
+        label: 'Auto Edit',
+        mode: ApprovalMode.AUTO_EDIT,
+        asks: true,
+        launches: true,
+      },
+      { label: 'Auto', mode: ApprovalMode.AUTO, asks: true, launches: true },
+      { label: 'YOLO', mode: ApprovalMode.YOLO, asks: true, launches: true },
+      { label: 'Plan', mode: ApprovalMode.PLAN, asks: false, launches: false },
+      {
+        label: 'deny rule on requested selector',
+        mode: ApprovalMode.YOLO,
+        deny: 'repo-b-id',
+        asks: false,
+        launches: false,
+      },
+      {
+        label: 'deny rule on resolved path',
+        mode: ApprovalMode.YOLO,
+        deny: '/repo-b',
+        asks: false,
+        launches: false,
+      },
+      {
+        label: 'deny rule on resolved workspace ID',
+        mode: ApprovalMode.YOLO,
+        selector: '/repo-b',
+        deny: 'repo-b-id',
+        asks: false,
+        launches: false,
+      },
+      {
+        label: 'unoffered persistent selection',
+        mode: ApprovalMode.AUTO,
+        persist: true,
+        asks: true,
+        launches: false,
+      },
+      {
+        label: 'omitted workspace',
+        mode: ApprovalMode.DEFAULT,
+        local: true,
+        asks: false,
+        launches: true,
+      },
+    ])(
+      'honors sub-session approval for $label',
+      async ({ mode, deny, selector, local, persist, asks, launches }) => {
+        const workspace = selector ?? 'repo-b-id';
+        const resolveWorkspace = vi.fn().mockResolvedValue({
+          workspaceId: 'repo-b-id',
+          workspaceCwd: '/repo-b',
+          workspaceGeneration: 'generation-b',
+        });
+        const toolName = core.ToolNames.CREATE_SUB_SESSION;
+        const args = { prompt: 'summarize', ...(local ? {} : { workspace }) };
+        const spawn = vi.fn().mockResolvedValue({ sessionId: 'child-id' });
+        const persistRule = vi.fn();
+        const pm = new core.PermissionManager({
+          getPermissionsAllow: () => [toolName],
+          getPermissionsAsk: () => [],
+          getPermissionsDeny: () =>
+            deny ? [`${toolName}(workspace:${deny})`] : [],
+          getApprovalMode: () => mode,
+        });
+        pm.initialize();
+        mockConfig.getCwd = vi.fn(() => '/repo-a');
+        mockConfig.getApprovalMode = vi.fn(() => mode);
+        mockConfig.getPermissionManager = vi.fn(() => pm);
+        mockConfig.getOnPersistPermissionRule = vi.fn(() => persistRule);
+        mockConfig.getSubSessionSpawner = vi.fn(() => spawn);
+        mockConfig.getSubSessionWorkspaceResolver = vi.fn(
+          () => resolveWorkspace,
+        );
+        mockConfig.getDisableAllHooks = vi.fn(() => false);
+        mockConfig.getMessageBus = vi.fn().mockReturnValue({});
+        vi.spyOn(core, 'firePreToolUseHook').mockResolvedValue({
+          shouldProceed: true,
+        });
+        const permissionHook = vi
+          .spyOn(core, 'firePermissionRequestHook')
+          .mockResolvedValue({ hasDecision: true, shouldAllow: true });
+        mockToolRegistry.getTool.mockReturnValue(
+          new core.CreateSubSessionTool(mockConfig),
+        );
+        const request = vi.mocked(mockClient.requestPermission);
+        request.mockResolvedValueOnce({
+          outcome: {
+            outcome: 'selected',
+            optionId: persist
+              ? core.ToolConfirmationOutcome.ProceedAlwaysProject
+              : core.ToolConfirmationOutcome.ProceedOnce,
+          },
+        });
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  { id: 'call-sub-session', name: toolName, args },
+                ],
+              },
+            },
+          ]),
+        );
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'Delegate' }],
+        });
+
+        expect(permissionHook).toHaveBeenCalledTimes(asks ? 1 : 0);
+        expect(request).toHaveBeenCalledTimes(asks ? 1 : 0);
+        if (deny && deny !== workspace) {
+          expect(resolveWorkspace).toHaveBeenCalledExactlyOnceWith(workspace);
+        }
+        if (asks) {
+          const { options, toolCall } = request.mock.calls[0]![0];
+          expect(toolCall.rawInput).toEqual(args);
+          expect(toolCall.title).toBe('[first-turn] in "/repo-b": summarize');
+          expect(toolCall.content).toContainEqual({
+            type: 'content',
+            content: {
+              type: 'text',
+              text: 'Workspace: "/repo-b"\n\nsummarize',
+            },
+          });
+          expect(resolveWorkspace).toHaveBeenCalledExactlyOnceWith(workspace);
+          expect(resolveWorkspace.mock.invocationCallOrder[0]).toBeLessThan(
+            request.mock.invocationCallOrder[0],
+          );
+          expect(
+            options.map((option: PermissionOption) => option.optionId),
+          ).toEqual([
+            core.ToolConfirmationOutcome.ProceedOnce,
+            core.ToolConfirmationOutcome.Cancel,
+          ]);
+        }
+        if (launches) {
+          expect(spawn).toHaveBeenCalledExactlyOnceWith({
+            ...args,
+            ...(local ? {} : { workspaceGeneration: 'generation-b' }),
+            completion: 'first-turn',
+          });
+          if (asks) {
+            expect(request.mock.invocationCallOrder[0]).toBeLessThan(
+              spawn.mock.invocationCallOrder[0],
+            );
+          }
+        } else {
+          expect(spawn).not.toHaveBeenCalled();
+        }
+        expect(persistRule).not.toHaveBeenCalled();
+      },
+    );
+
+    it('links a follow-up completion by the task id the daemon reports', async () => {
+      (
+        session as unknown as {
+          pendingPrompt: AbortController | null;
+        }
+      ).pendingPrompt = new AbortController();
+      vi.mocked(mockClient.extMethod).mockResolvedValueOnce({
+        sessionId: 'kid',
+        taskId: 'kid:prompt-2',
+      });
+      const spawn = vi.mocked(mockConfig.setSubSessionSpawner).mock
+        .calls[0]?.[0];
+      await spawn?.({
+        prompt: 'again',
+        completion: 'sent',
+        sessionId: 'kid',
+      });
+      expect(mockClient.extMethod).toHaveBeenLastCalledWith(
+        SERVE_CONTROL_EXT_METHODS.createSubSession,
+        expect.objectContaining({ sessionId: 'kid' }),
+      );
+      await session.enqueueBackgroundNotification({
+        displayText: 'Sub-session completed.',
+        modelText: '<task-notification />',
+        taskId: 'kid:prompt-2',
+        status: 'completed',
+        kind: 'agent',
+      });
+      expect(
+        (
+          session as unknown as {
+            notificationQueue: Array<{
+              taskId: string;
+              continuesTodoStopGuardWorkChain: boolean;
+            }>;
+          }
+        ).notificationQueue,
+      ).toContainEqual(
+        expect.objectContaining({
+          taskId: 'kid:prompt-2',
           continuesTodoStopGuardWorkChain: true,
         }),
       );

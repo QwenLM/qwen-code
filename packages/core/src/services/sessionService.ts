@@ -37,6 +37,7 @@ import {
 import { projectUserTranscriptForDisplay } from '../utils/transcript-records.js';
 import type {
   ChatRecord,
+  CustomTitleRecordPayload,
   FileHistorySnapshotRecordPayload,
   TitleSource,
   UiTelemetryRecordPayload,
@@ -80,7 +81,10 @@ import {
   type RebuiltSessionArtifactSnapshot,
 } from './session-artifact-persistence.js';
 import { SessionOrganizationService } from './session-organization-service.js';
-import { moveSessionPrSidecar } from './session-pr-service.js';
+import {
+  moveSessionPrSidecar,
+  readSessionPrsDetailed,
+} from './session-pr-service.js';
 import {
   moveSessionTitleSidecar,
   readSessionTitleSidecar,
@@ -430,6 +434,7 @@ export interface RemoveSessionOptions {
   assertStorageUnchanged?: () => Promise<void>;
   assertCanMutate?: () => void;
   assertCleanupOwned?: () => void;
+  onlyIfSubSessionStartup?: boolean;
 }
 
 export interface ArchiveSessionsResult {
@@ -3749,6 +3754,29 @@ export class SessionService {
     return removed;
   }
 
+  async removeUnusedSubSession(
+    sessionId: string,
+    assertStillClosed: () => void,
+  ): Promise<boolean> {
+    const lease = await this.acquireSessionWriterLease(sessionId, {
+      processKind: 'daemon',
+      reclaimPolicy: 'local',
+    });
+    try {
+      return await this.removeSession(sessionId, {
+        onlyIfSubSessionStartup: true,
+        assertStorageUnchanged: () => lease.assertOwnedAndUnchanged(),
+        assertCanMutate: () => {
+          assertStillClosed();
+          lease.assertCleanupOwned();
+        },
+        assertCleanupOwned: () => lease.assertCleanupOwned(),
+      });
+    } finally {
+      await lease.release();
+    }
+  }
+
   async removeSessionTranscriptForLifecycle(
     sessionId: string,
     expectedLocation: SessionArchiveState,
@@ -3924,6 +3952,76 @@ export class SessionService {
       const physicalSnapshot =
         await this.resolveMaintainableSessionSnapshot(sessionId);
       if (physicalSnapshot.location === undefined) return false;
+      if (options.onlyIfSubSessionStartup) {
+        const [identity] = physicalSnapshot.identities;
+        // A fresh child has only a few small startup records. Preserve any
+        // history we cannot prove consists entirely of those records.
+        if (
+          physicalSnapshot.location !== 'active' ||
+          identity.size > 64 * 1024
+        ) {
+          return false;
+        }
+        let complete = true;
+        const records = await jsonl.read<Partial<ChatRecord> | null>(
+          identity.filePath,
+          { onIncompleteRead: () => (complete = false) },
+        );
+        if (
+          !complete ||
+          !records.length ||
+          records.some((record) => {
+            if (record?.sessionId !== sessionId || record.type !== 'system') {
+              return true;
+            }
+            if (record.subtype === 'custom_title') {
+              const title = record.systemPayload as
+                | CustomTitleRecordPayload
+                | undefined;
+              return title?.titleSource !== 'auto';
+            }
+            return (
+              record.subtype !== 'parent_session' &&
+              record.subtype !== 'session_source' &&
+              record.subtype !== 'session_execution_engine' &&
+              record.subtype !== 'session_model' &&
+              record.subtype !== 'session_approval_mode'
+            );
+          })
+        ) {
+          return false;
+        }
+        const titlePath = this.getSessionTitleSidecarPathForState(
+          sessionId,
+          'active',
+        );
+        if (
+          readSessionTitleSidecar(titlePath)?.source !== 'auto' &&
+          fs.lstatSync(titlePath, { throwIfNoEntry: false })
+        ) {
+          return false;
+        }
+        const organization = Storage.runWithResolvedRuntimeBaseDir(
+          this.storage.getRuntimeBaseDir(),
+          () => new SessionOrganizationService(this.projectRoot),
+        );
+        if (
+          (await organization.hasStoredSessionOrganization(sessionId)) !== false
+        ) {
+          return false;
+        }
+        for (const state of ['active', 'archived'] as const) {
+          const bindings = await readSessionPrsDetailed(
+            this.getPrSessionPathForState(sessionId, state),
+          );
+          if (
+            bindings.status === 'invalid' ||
+            (bindings.status === 'ok' && bindings.prs.length > 0)
+          ) {
+            return false;
+          }
+        }
+      }
       if (
         expectedLocation !== undefined &&
         (physicalSnapshot.location !== expectedLocation ||

@@ -252,6 +252,47 @@ describe('web-shell i18n catalog', () => {
     }
   });
 
+  it('keeps every change-overview translation in both locales', () => {
+    const en = getTranslator('en');
+    const zh = getTranslator('zh-CN');
+    const keys = [
+      'changeOverview.title',
+      'changeOverview.uncommitted',
+      'changeOverview.loading',
+      'changeOverview.notGit',
+      'changeOverview.loadFailed',
+      'changeOverview.empty',
+      'changeOverview.files',
+      'changeOverview.prUnavailable',
+      'changeOverview.prUnavailableCli',
+      'changeOverview.prUnavailableRoute',
+      'changeOverview.refresh',
+      'changeOverview.openPr',
+      'changeOverview.description',
+      'changeOverview.hiddenFiles',
+      'changeOverview.hiddenCommits',
+    ];
+    for (const key of keys) {
+      // zh against en, not against the key: the translator falls back to EN
+      // per key, so a deleted zh entry would otherwise pass silently.
+      expect(en(key, { count: 2 })).not.toBe(key);
+      expect(zh(key, { count: 2 })).not.toBe(key);
+      expect(zh(key, { count: 2 })).not.toBe(en(key, { count: 2 }));
+    }
+  });
+
+  it('pluralises the change-overview count strings at count 1', () => {
+    const en = getTranslator('en');
+    expect(en('changeOverview.files', { count: 1 })).toBe('1 file');
+    expect(en('changeOverview.files', { count: 2 })).toBe('2 files');
+    expect(en('changeOverview.hiddenFiles', { count: 1 })).toBe(
+      '…and 1 more file',
+    );
+    expect(en('changeOverview.hiddenFiles', { count: 3 })).toBe(
+      '…and 3 more files',
+    );
+  });
+
   it.each(WEB_SHELL_LANGUAGES)(
     'keeps shared connection and webhook copy platform-neutral in %s',
     (language) => {
