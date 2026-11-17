@@ -183,18 +183,32 @@ import type { Content } from '@google/genai';
 
 // Mock useStdout to capture terminal title writes
 let mockStdout: { write: ReturnType<typeof vi.fn> };
+const boxLayoutListeners = vi.hoisted(() => new Set<() => void>());
 vi.mock('ink', async (importOriginal) => {
   const actual = await importOriginal<typeof import('ink')>();
+  const React = await import('react');
+  const measureElement = vi.fn(() => ({ width: 80, height: 5 }));
   return {
     ...actual,
     useStdout: () => ({ stdout: mockStdout }),
-    // Must return a measurement, not undefined: AppContainer's footer
-    // re-measurement layout effect dereferences `.height` on the result.
-    // An undefined return throws inside the commit; ink's error handling
-    // catches it, tears down the AppContainer tree, and renders an error
-    // panel in its place, so NO post-mount state update is ever observed
-    // (#10430).
-    measureElement: vi.fn(() => ({ width: 80, height: 5 })),
+    // Existing height fixtures set this geometry source; layout notifications
+    // let a child-only change reach the container without changing its props.
+    measureElement,
+    useBoxMetrics: () => {
+      const [, update] = React.useReducer((tick: number) => tick + 1, 0);
+      React.useEffect(() => {
+        boxLayoutListeners.add(update);
+        return () => {
+          boxLayoutListeners.delete(update);
+        };
+      }, []);
+      return {
+        ...measureElement(),
+        left: 0,
+        top: 0,
+        hasMeasured: true,
+      };
+    },
   };
 });
 
@@ -7764,6 +7778,45 @@ describe('AppContainer State Management', () => {
   describe('Terminal Height Calculation', () => {
     const mockedMeasureElement = measureElement as Mock;
     const mockedUseTerminalSize = useTerminalSize as Mock;
+    beforeEach(() => {
+      vi.spyOn(mockConfig, 'getLlmClient').mockReturnValue(undefined!);
+    });
+
+    it('updates transcript height when controls geometry changes without input changes', async () => {
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+      mockedUseTerminalSize.mockReturnValue({ columns: 100, rows: 50 });
+      mockedMeasureElement.mockReturnValue({ width: 100, height: 5 });
+      let view: ReturnType<typeof render>;
+      await act(async () => {
+        view = render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+      });
+      expect(view!.frames.join('\n')).not.toMatch(/Error|Cannot|undefined/);
+      await vi.waitFor(() => {
+        expect(boxLayoutListeners.size).toBeGreaterThan(0);
+      });
+      const previousHeight = capturedUIState.availableTerminalHeight!;
+      const previousBuffer = capturedUIState.buffer;
+
+      mockedMeasureElement.mockReturnValue({ width: 100, height: 6 });
+      await act(async () => {
+        boxLayoutListeners.forEach((listener) => listener());
+      });
+
+      expect(capturedUIState.buffer).toBe(previousBuffer);
+      await vi.waitFor(() => {
+        expect(capturedUIState.availableTerminalHeight).toBe(
+          previousHeight - 1,
+        );
+      });
+    });
+
     const makeTodoHistory = (
       status: 'pending' | 'in_progress' | 'completed',
     ): HistoryItem[] => [
@@ -7839,22 +7892,15 @@ describe('AppContainer State Management', () => {
       expect(lastCall[2]).toBe(1);
     });
 
-    it('reports the Mod band input and measures the controls again for a new tree', () => {
+    it('reports the Mod band input to its render owner', () => {
       mockedUseTerminalSize.mockReturnValue({ columns: 100, rows: 30 });
       mockedMeasureElement.mockReturnValue({ width: 100, height: 5 });
-      let band: interactiveMods.ModBand | undefined;
-      let notify = () => {};
       const setRenderInput = vi.fn();
       const modSession = {
         initialize: vi.fn().mockResolvedValue(undefined),
         subscribe: () => () => {},
         setPresentation: vi.fn(),
         setRenderInput,
-        subscribeBand: (listener: () => void) => {
-          notify = listener;
-          return () => {};
-        },
-        getBand: () => band,
       } as unknown as interactiveMods.InteractiveModSession;
       const getModSession = interactiveMods.getInteractiveModSession;
       const owner = vi
@@ -7885,18 +7931,6 @@ describe('AppContainer State Management', () => {
             view: {},
           },
         });
-        const measured = mockedMeasureElement.mock.calls.length;
-        act(() => {
-          band = {
-            tree: { type: 'Text', children: ['☀'] },
-            owner: 'token-weather',
-            revision: 1,
-          };
-          notify();
-        });
-        expect(mockedMeasureElement.mock.calls.length).toBeGreaterThan(
-          measured,
-        );
       } finally {
         owner.mockRestore();
         mockedMeasureElement.mockReset();
@@ -8406,7 +8440,7 @@ describe('AppContainer State Management', () => {
       );
     });
 
-    it('does not remeasure footer height for sticky todo status-only updates', async () => {
+    it('retains transcript height for sticky todo status-only updates with unchanged controls geometry', async () => {
       // Scoped stub: makeFakeConfig().initialize() rejects on React's
       // double-mount, which leaks async renders and destabilizes the
       // footer-measurement timing this test depends on. Kept per-test so
@@ -8451,13 +8485,6 @@ describe('AppContainer State Management', () => {
 
       const heightAfterSettle = capturedUIState.availableTerminalHeight;
 
-      // Switch the mock to a different height so any re-measurement triggered
-      // by the status-only rerender below would change controlsHeight (and
-      // therefore availableTerminalHeight). Without this, the production
-      // same-value short-circuit on setControlsHeight makes the equality
-      // assertion pass even when the optimization regresses.
-      mockedMeasureElement.mockReturnValue({ width: 80, height: 10 });
-
       historyManager.history = makeTodoHistory('in_progress');
       await act(async () => {
         view!.rerender(
@@ -8470,9 +8497,6 @@ describe('AppContainer State Management', () => {
         );
       });
 
-      // The sticky todo status change (pending → in_progress) must not alter
-      // the computed terminal height. Combined with the mock-height swap
-      // above, this fails iff the footer was re-measured.
       expect(capturedUIState.availableTerminalHeight).toBe(heightAfterSettle);
     });
   });

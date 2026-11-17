@@ -1756,7 +1756,10 @@ describe('<MainContent />', () => {
       const firstRenderItem =
         scrollableListPropsSpy.mock.calls.at(-1)?.[0].renderItem;
       expect(historyItemDisplayPropsSpy.mock.calls.at(-1)?.[0]).toEqual(
-        expect.objectContaining({ availableTerminalHeight: 12 }),
+        expect.objectContaining({
+          availableTerminalHeight: 12,
+          availableTerminalHeightLlm: 65536,
+        }),
       );
 
       rerender(
@@ -1784,7 +1787,10 @@ describe('<MainContent />', () => {
         scrollableListPropsSpy.mock.calls.at(-1)?.[0].renderItem;
       expect(secondRenderItem).not.toBe(firstRenderItem);
       expect(historyItemDisplayPropsSpy.mock.calls.at(-1)?.[0]).toEqual(
-        expect.objectContaining({ availableTerminalHeight: undefined }),
+        expect.objectContaining({
+          availableTerminalHeight: undefined,
+          availableTerminalHeightLlm: undefined,
+        }),
       );
     });
   });

@@ -237,8 +237,8 @@ export const DefaultAppLayout: React.FC = () => {
               handles the empty-roster case.
 
               The panel renders INSIDE `mainControlsRef` so its rows
-              are picked up by `measureElement` in `AppContainer`'s
-              `controlsHeight` useLayoutEffect — `availableTerminalHeight`
+              are picked up by `useBoxMetrics` in `AppContainer` —
+              `availableTerminalHeight`
               then subtracts the panel's footprint and pending history
               items in MainContent stop racing it for screen real
               estate. (Pre-fix: the panel rendered outside the ref,

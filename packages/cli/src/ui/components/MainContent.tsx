@@ -547,6 +547,9 @@ export const MainContent = ({
             terminalWidth={terminalWidth}
             mainAreaWidth={mainAreaWidth}
             availableTerminalHeight={pendingAvailableTerminalHeight}
+            availableTerminalHeightLlm={
+              uiState.constrainHeight ? MAX_GEMINI_MESSAGE_LINES : undefined
+            }
             item={{ ...item, id: 0 }}
             isPending={true}
             isFocused={!ps.isEditorDialogOpen && !uiState.dialogsVisible}
