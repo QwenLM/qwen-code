@@ -40,7 +40,7 @@ The existing detach and delete handler (`close` in `packages/cli/src/serve/hoste
 - it closes Hooks and MCP (non-terminally for a detach, which drains the Runtime connections but keeps the owner re-acquirable);
 - it releases the activation and seals the writer.
 
-Reusing it for idle Sessions would cancel queued and deferred inputs that the user expects to run. Phase 1 therefore adds a separate suspension path.
+Reusing it for idle Sessions would cancel queued and deferred inputs that the user expects to run. Phase 1 therefore adds a separate suspension path; the close-path audit in Phase 1 lists every effect of the handler and how suspension treats it.
 
 ### What already tolerates a Harness letting a Session go
 
@@ -102,12 +102,13 @@ When the timer fires, the Harness suspends the Session only if all of the follow
 - No Turn is active and no recovered Turn is waiting for a continue or cancel drive.
 - No Turn event stream is open (the control plane opens one only for the duration of a Turn).
 - No input is due. Inputs whose `notBefore` lies in the future do not block suspension, because `WakeRecovery` reloads the Session when they become due.
-- No MCP or Hook operation is pending or recovering, no MCP configuration is being installed or refreshed, and no context compression is running.
+- No MCP or Hook operation is pending or recovering, no MCP configuration is being installed or refreshed, no session-message operation is in flight, and no context compression is running.
 - No background Shell or Monitor observation loop is live.
-- No Runtime work is unsettled and the hosted cleanup debt is zero.
+- No Runtime that a Turn left held remains, no Runtime work is unsettled, and the hosted cleanup debt is zero.
+- No client-files registration is active. The control plane keeps the browser's binding and closes it only when it closes or deletes the Session, so a Harness that dropped the registration on its own would leave the browser showing a connected bridge whose tools the model no longer has. A closed tab ends the binding at once, because its downlink closes; the Session can suspend after that.
 - No lifecycle authority, ownership release or pool quiescing is in progress.
 - The Session is not recovery-blocked. A blocked Session stays resident so that operator recovery keeps working unchanged.
-- The Session's tool profile permits a non-terminal detach today. A `hosted-workspace-shell/1` Session with MCP on lifecycle protocol 1, which the detach route refuses with `hosted_lifecycle_required`, is never suspended.
+- The Session is not on a public Workspace Shell profile (`hosted-workspace-shell/1`, `hosted-workspace-shell/3` or `hosted-workspace-shell/4`) with MCP. A plain detach of such a Session requires a lifecycle authority and is refused with `hosted_lifecycle_required`, so Phase 1 never suspends it.
 
 The predicate and the step that marks the Session as suspending run in the same synchronous section, so no request can be admitted between the check and the mark.
 
@@ -122,14 +123,40 @@ The predicate and the step that marks the Session as suspending run in the same 
 1. Mark the Session suspending. From this point the `/session/:id` middleware answers every request for it with `409 hosted_session_closing`, which callers already treat as transient.
 2. Close the wake scheduler without settling any input.
 3. Close the Hook and MCP owners non-terminally, the same calls a detach makes. This drains the Runtime connections and leaves the owners re-acquirable by the next load.
-4. Release the Runtime lease and drain held Runtime work with the existing helpers. If cleanup debt remains, abort the suspension.
-5. Close the client-files registration.
+4. Release the Runtime lease non-terminally with the existing helper, which first retires a settled Turn's owed file-history marker. Retry the hosted cleanup debt; if any remains, abort the suspension.
+5. Close the Shell and background-lane publishers. No observation loop is live, so nothing is waiting to settle through them, and the next load recreates them.
 6. Call `managed.close()`, which stops renewal, releases the activation and seals the writer.
 7. Remove the Session from the resident map.
 
 If any step before the seal fails, the Harness clears the suspending mark, keeps the Session resident and re-arms the timer, exactly as a failed detach leaves the Session usable for a retry. A failure after the seal is committed still removes the Session: its durable state is a sealed writer, which the next open takes over.
 
-Suspension differs from detach in three ways that the implementation must preserve: it never settles inputs as cancelled, it never stops an observation loop (the predicate guarantees none is live), and it emits nothing that marks the end of the Session. The implementation must audit the close path for any further effect of that kind and leave it out of suspension.
+Suspension skips the ordinary execution authorization a detach requests first: it starts no work, and the seal is fenced by the writer itself. The audit below lists every other difference from detach; tests pin each one.
+
+### Close-path audit
+
+Every effect of the detach and delete handler (`close` in `packages/cli/src/serve/hosted-harness-session.ts`), and how suspension treats it. A Session under a lifecycle-protocol-2 operation runs its resource phases through the control plane and the handler then only seals; suspension never runs under a lifecycle authority, so the full path below applies.
+
+| Effect                                                                                                                           | Detach (`POST`)                                                                       | Delete                                                  | Suspension                                                            |
+| -------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------- | --------------------------------------------------------------------- |
+| Authorization                                                                                                                    | Ordinary `/execution:authorize`                                                       | None                                                    | Skipped                                                               |
+| Wait for in-flight session-message operations                                                                                    | Yes                                                                                   | Yes                                                     | Not needed: the predicate requires none                               |
+| `SessionEnd` and `SessionDelete` Hooks                                                                                           | No                                                                                    | Yes                                                     | Never                                                                 |
+| Drain Runtimes a Turn left held                                                                                                  | Yes, except reload-stable owners, which keep running with their release owed (#16579) | Yes, all                                                | Not needed: the predicate requires none                               |
+| Close Hook owners                                                                                                                | Non-terminal                                                                          | Terminal, plus release of orphaned configuration owners | Non-terminal, as detach                                               |
+| Close the wake scheduler                                                                                                         | Yes                                                                                   | Yes                                                     | Yes, without settling inputs                                          |
+| Retire a settled Turn's owed file-history marker, then release the Runtime lease                                                 | Yes, non-terminal                                                                     | Yes, terminal                                           | Yes, non-terminal                                                     |
+| Stop observation loops, settled `stop_requested` or `runtime_lost`                                                               | Yes                                                                                   | Yes                                                     | Not needed: the predicate requires none live                          |
+| Retry hosted cleanup debt                                                                                                        | Yes                                                                                   | Yes                                                     | Yes; remaining debt aborts the suspension                             |
+| Close the Shell and background-lane publishers                                                                                   | Yes                                                                                   | Yes                                                     | Yes                                                                   |
+| Close MCP owners                                                                                                                 | Non-terminal                                                                          | Terminal                                                | Non-terminal, as detach                                               |
+| Close the client-files registration                                                                                              | Yes                                                                                   | Yes                                                     | Not needed: the predicate requires none                               |
+| Settle pending monitor, channel, automation, child, session-message and loop inputs as cancelled, then reconcile automation runs | Yes                                                                                   | Yes                                                     | Never: inputs stay in the journal for the next load or `WakeRecovery` |
+| Release the activation and seal the writer                                                                                       | Yes                                                                                   | Yes                                                     | Yes                                                                   |
+| Stop event streams and remove the Session                                                                                        | After the seal                                                                        | After the seal                                          | After the seal; the predicate requires no open stream                 |
+
+When the control plane closes or deletes a Session, its lifecycle coordinator also closes the browser's client-files binding (`closeForSession`); nothing closes it when the Harness drops the registration on its own, which is why an active registration blocks suspension.
+
+No other per-Session component holds a long-lived timer. The remaining Session components have no close or stop of their own, and the only timers among them are short waits inside a single operation.
 
 ### Reopening
 
@@ -210,7 +237,7 @@ Boundary only.
 
 - **Reopen latency.** In Phase 1 every reopen pays the full cold-open cost, including MCP reconnection and discovery. An idle period that is too short trades renewal savings for slow first responses; the initial constant is revised from measurements.
 - **Cold-open bursts.** Synchronized wakes can overload the shared Session Store even when each Harness limits its own opens.
-- **Close-path coupling.** Suspension reuses parts of the detach path; a later change to detach can silently change suspension. Tests pin the differences listed under the suspension sequence.
+- **Close-path coupling.** Suspension reuses parts of the detach path; a later change to detach can silently change suspension. Tests pin every row of the close-path audit.
 - **Pool leftovers.** Suspended Sessions on departed members keep their placement until touched.
 - **No kill switch.** A defect in suspension can only be stopped by rolling back the Harness change. The validation plan below is the mitigation.
 
@@ -218,7 +245,7 @@ Boundary only.
 
 Phase 1:
 
-- **Harness unit tests.** Each predicate condition blocks suspension; the timer resets on requests and internal completions; the suspension sequence runs in order; no input is settled as cancelled; aborts before the seal keep the Session resident and retryable; requests during suspension receive `hosted_session_closing`; opens beyond the limit are refused with `hosted_session_open_busy`.
+- **Harness unit tests.** Each predicate condition blocks suspension; the timer resets on requests and internal completions; the suspension sequence runs in order; each row of the close-path audit is pinned, in particular that no input is settled as cancelled, no `SessionEnd` or `SessionDelete` Hook runs, the owed file-history marker is retired and the Runtime lease is released non-terminally; aborts before the seal keep the Session resident and retryable; requests during suspension receive `hosted_session_closing`; opens beyond the limit are refused with `hosted_session_open_busy`.
 - **Control-plane unit tests.** `activateForWake` evicts a stale attachment; the new code is transient and postpones Turns without charging their budget.
 - **Real-process and MySQL integration.** Suspend, then prompt: the history is intact and the Turn completes. Suspend, then deliver monitor, channel, automation and child inputs: each is run after a reload through the transport path and through `WakeRecovery`. A deferred loop input becomes due after suspension and runs. A Session with a running background Shell is not suspended. Close and delete of a suspended Session. Pool takeover of a suspended Session after its member leaves.
 - **Fault tests.** Kill the Harness during suspension before and after the seal; make the Session Store unavailable during suspension.
@@ -237,6 +264,7 @@ Phase 1:
 1. A reaper that releases placements of suspended Sessions on members that left the pool.
 2. The idle period (initially 10 minutes) and the open limit (initially 8), to be revised from cold-open measurements.
 3. Whether recovery-blocked Sessions should also suspend once operator recovery can reload them.
-4. The full list of close-path effects that suspension must omit, beyond input cancellation and observation stops.
+4. Re-registering an active client-files binding with the Harness on reload, so that a Session with an open browser bridge can suspend.
 5. Whether every pool member can reach every Workspace mount; Phases 2 to 4 assume any member can open any Session.
-6. How an interactive client's client-files registration is restored after suspension, and whether a registration should count as activity.
+6. Whether a Turn's reload-stable Runtime owners, which a detach leaves running with their release owed (#16579), may stay running across a suspension, so that such Sessions can suspend too.
+7. Suspending Sessions on a public Workspace Shell profile with MCP, whose plain detach requires a lifecycle authority today.

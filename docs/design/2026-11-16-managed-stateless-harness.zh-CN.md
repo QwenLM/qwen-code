@@ -40,7 +40,7 @@ Hosted Harness attach 了一个 Managed Session 之后，这个 Session 会一�
 - 关闭 Hook 和 MCP（detach 时为非终态关闭：drain Runtime 连接，但保留 owner 可重新获取）；
 - 释放 activation 并 seal 写者。
 
-把它用在空闲 Session 上，会取消用户期望执行的排队输入和延时输入。因此第一阶段新增一条独立的挂起路径。
+把它用在空闲 Session 上，会取消用户期望执行的排队输入和延时输入。因此第一阶段新增一条独立的挂起路径；第一阶段中的"close 路径审查"一节逐项列出了这个处理逻辑的所有副作用，以及挂起如何对待每一项。
 
 ### 已经能容忍"Harness 放手一个 Session"的部分
 
@@ -102,12 +102,13 @@ journal 和 Session Store 仍是唯一的权威。正在运行的 Turn 仍然只
 - 没有活跃的 Turn，也没有等待 continue 或 cancel 驱动的已恢复 Turn。
 - 没有打开的 Turn 事件流（控制面只在一个 Turn 执行期间打开事件流）。
 - 没有已到期的输入。`notBefore` 在未来的输入不阻止挂起，因为它们到期时 `WakeRecovery` 会重新加载 Session。
-- 没有待处理或恢复中的 MCP / Hook 操作，没有正在安装或刷新的 MCP 配置，没有正在进行的上下文压缩。
+- 没有待处理或恢复中的 MCP / Hook 操作，没有正在安装或刷新的 MCP 配置，没有进行中的 session message 操作，没有正在进行的上下文压缩。
 - 没有存活的后台 Shell 或 Monitor 观察循环。
-- 没有未结算的 Runtime 工作，hosted cleanup debt 为零。
+- 没有被 Turn 遗留持有的 Runtime，没有未结算的 Runtime 工作，hosted cleanup debt 为零。
+- 没有活跃的 client-files 注册。浏览器的绑定由控制面保存，控制面只在 close 或 delete 这个 Session 时才关闭它；如果 Harness 自行丢掉注册，浏览器会一直显示桥接已连接，而模型实际上已经没有这些工具了。关闭标签页会立即结束绑定，因为它的下行连接随之关闭；之后 Session 就可以挂起。
 - 没有进行中的 lifecycle 授权、ownership release 或池成员排空。
 - Session 未处于 recovery-blocked 状态。被阻塞的 Session 保持常驻，运维恢复流程保持不变。
-- Session 的工具配置目前允许非终态 detach。对于使用 lifecycle protocol 1 且配置了 MCP 的 `hosted-workspace-shell/1` Session，detach 路由会以 `hosted_lifecycle_required` 拒绝，这类 Session 永远不会被挂起。
+- Session 不是配置了 MCP 的公开 Workspace Shell 档位（`hosted-workspace-shell/1`、`hosted-workspace-shell/3` 或 `hosted-workspace-shell/4`）。这类 Session 的普通 detach 需要 lifecycle 授权，会以 `hosted_lifecycle_required` 拒绝，所以第一阶段永远不会挂起它。
 
 判定和"标记为挂起中"在同一段同步代码中执行，因此判定与标记之间不可能有请求被受理。
 
@@ -122,14 +123,40 @@ journal 和 Session Store 仍是唯一的权威。正在运行的 Turn 仍然只
 1. 把 Session 标记为挂起中。从这一刻起，`/session/:id` 中间件对它的所有请求都返回 `409 hosted_session_closing`，调用方已经把这个码当作暂时性错误处理。
 2. 关闭 wake 调度器，不结算任何输入。
 3. 非终态关闭 Hook 和 MCP owner，调用与 detach 相同。这会 drain Runtime 连接，并保留 owner 供下一次 load 重新获取。
-4. 用现有的辅助逻辑释放 Runtime 租约、drain 被持有的 Runtime 工作。如果仍有 cleanup debt，放弃本次挂起。
-5. 关闭 client-files 注册。
+4. 用现有的辅助逻辑非终态地释放 Runtime 租约，它会先结清已结算 Turn 欠下的文件历史标记。重试 hosted cleanup debt；如果仍有剩余，放弃本次挂起。
+5. 关闭 Shell 和 background lane 的 publisher。此时没有存活的观察循环，没有任何东西在等它们结算，下一次 load 会重新创建它们。
 6. 调用 `managed.close()`：停止续约、释放 activation、seal 写者。
 7. 把 Session 从常驻表中移除。
 
 seal 之前任何一步失败，Harness 清除挂起中标记、保留 Session 常驻并重新计时，这和 detach 失败后 Session 仍可重试的处理方式一样。seal 已提交之后的失败仍然会移除该 Session：它的持久状态是一个已 seal 的写者，下一次打开会接管它。
 
-挂起与 detach 有三点不同，实现时必须保持：挂起永远不把输入结算为 cancelled；永远不停止观察循环（判定条件保证此时没有存活的循环）；不发出任何表示"Session 结束"的信号。实现时必须审查 close 路径中是否还有其他此类副作用，并把它们排除在挂起之外。
+挂起跳过 detach 一开始会请求的普通执行授权：挂起不启动任何工作，而 seal 本身就受写者 fencing 保护。下面的审查列出了与 detach 的其余所有差异，每一项都用测试固定。
+
+### close 路径审查
+
+下表逐项列出 detach 和 delete 处理逻辑（`packages/cli/src/serve/hosted-harness-session.ts` 中的 `close`）的所有副作用，以及挂起如何对待每一项。处于 lifecycle protocol 2 操作中的 Session，其资源阶段由控制面驱动完成，之后这个处理逻辑只做 seal；挂起永远不会在 lifecycle 授权下进行，所以适用下面的完整路径。
+
+| 副作用                                                                                                                  | Detach（`POST`）                                                      | Delete                       | 挂起                                                         |
+| ----------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- | ---------------------------- | ------------------------------------------------------------ |
+| 授权                                                                                                                    | 普通的 `/execution:authorize`                                         | 无                           | 跳过                                                         |
+| 等待进行中的 session message 操作                                                                                       | 是                                                                    | 是                           | 不需要：判定条件要求没有                                     |
+| `SessionEnd` 和 `SessionDelete` Hook                                                                                    | 否                                                                    | 是                           | 永不                                                         |
+| drain 被 Turn 遗留持有的 Runtime                                                                                        | 是，但 reload-stable owner 除外，它们继续运行，释放义务保留（#16579） | 是，全部                     | 不需要：判定条件要求没有                                     |
+| 关闭 Hook owner                                                                                                         | 非终态                                                                | 终态，并释放遗留的配置 owner | 非终态，与 detach 相同                                       |
+| 关闭 wake 调度器                                                                                                        | 是                                                                    | 是                           | 是，且不结算输入                                             |
+| 结清已结算 Turn 欠下的文件历史标记，然后释放 Runtime 租约                                                               | 是，非终态                                                            | 是，终态                     | 是，非终态                                                   |
+| 停止观察循环，结算为 `stop_requested` 或 `runtime_lost`                                                                 | 是                                                                    | 是                           | 不需要：判定条件要求没有存活的循环                           |
+| 重试 hosted cleanup debt                                                                                                | 是                                                                    | 是                           | 是；仍有剩余则放弃挂起                                       |
+| 关闭 Shell 和 background lane 的 publisher                                                                              | 是                                                                    | 是                           | 是                                                           |
+| 关闭 MCP owner                                                                                                          | 非终态                                                                | 终态                         | 非终态，与 detach 相同                                       |
+| 关闭 client-files 注册                                                                                                  | 是                                                                    | 是                           | 不需要：判定条件要求没有                                     |
+| 把待处理的 monitor、channel、automation、子任务、session message 和 loop 输入结算为 cancelled，然后对账 automation 运行 | 是                                                                    | 是                           | 永不：输入留在 journal 中，等待下一次 load 或 `WakeRecovery` |
+| 释放 activation 并 seal 写者                                                                                            | 是                                                                    | 是                           | 是                                                           |
+| 停止事件流并移除 Session                                                                                                | seal 之后                                                             | seal 之后                    | seal 之后；判定条件要求没有打开的事件流                      |
+
+控制面 close 或 delete 一个 Session 时，生命周期协调器还会关闭浏览器的 client-files 绑定（`closeForSession`）；而 Harness 自行丢掉注册时，没有任何一方会关闭它，这就是活跃注册会阻止挂起的原因。
+
+没有其他按 Session 常驻的定时器。其余的 Session 组件没有自己的 close 或 stop，其中仅有的定时器都是单个操作内部的短暂等待。
 
 ### 重新打开
 
@@ -210,7 +237,7 @@ seal 之前任何一步失败，Harness 清除挂起中标记、保留 Session �
 
 - **重新打开的延迟。** 第一阶段每次重新打开都要付出完整的冷打开成本，包括 MCP 重连和 discovery。空闲时长设得太短，会用续约节省换来缓慢的首次响应；初始常量会根据测量结果调整。
 - **冷打开突发。** 即使每个 Harness 限制了自己的并发打开数，同步发生的 wake 仍可能压垮共享的 Session Store。
-- **与 close 路径的耦合。** 挂起复用了 detach 路径的一部分，以后对 detach 的修改可能悄悄改变挂起的行为。用测试固定"挂起流程"一节列出的差异。
+- **与 close 路径的耦合。** 挂起复用了 detach 路径的一部分，以后对 detach 的修改可能悄悄改变挂起的行为。用测试固定"close 路径审查"中的每一行。
 - **池中的残留。** 已离开成员上的挂起 Session 在被访问之前一直保留 placement。
 - **没有紧急开关。** 挂起出现缺陷时，只能通过回滚 Harness 改动来止损。下面的验证计划就是对此的缓解措施。
 
@@ -218,7 +245,7 @@ seal 之前任何一步失败，Harness 清除挂起中标记、保留 Session �
 
 第一阶段：
 
-- **Harness 单元测试。** 每个判定条件都能阻止挂起；定时器在请求和内部工作完成时被重置；挂起流程按顺序执行；没有任何输入被结算为 cancelled；seal 前的放弃会让 Session 保持常驻且可重试；挂起过程中的请求收到 `hosted_session_closing`；超出限制的打开请求以 `hosted_session_open_busy` 拒绝。
+- **Harness 单元测试。** 每个判定条件都能阻止挂起；定时器在请求和内部工作完成时被重置；挂起流程按顺序执行；"close 路径审查"中的每一行都有测试固定，特别是没有任何输入被结算为 cancelled、没有运行 `SessionEnd` 或 `SessionDelete` Hook、欠下的文件历史标记被结清、Runtime 租约以非终态方式释放；seal 前的放弃会让 Session 保持常驻且可重试；挂起过程中的请求收到 `hosted_session_closing`；超出限制的打开请求以 `hosted_session_open_busy` 拒绝。
 - **控制面单元测试。** `activateForWake` 会清掉过期的 attachment；新错误码被归为暂时性错误，推迟 Turn 时不消耗其预算。
 - **真实进程和 MySQL 集成测试。** 挂起后发送 prompt：历史完整，Turn 正常完成。挂起后投递 monitor、channel、automation 和子任务输入：分别经由 transport 路径和 `WakeRecovery` 重新加载后执行。延时 loop 输入在挂起后到期并执行。有后台 Shell 运行的 Session 不会被挂起。对已挂起的 Session 执行 close 和 delete。成员离开池后，已挂起 Session 的 placement 被接管。
 - **故障测试。** 在 seal 之前和之后分别杀掉 Harness；挂起过程中让 Session Store 不可用。
@@ -237,6 +264,7 @@ seal 之前任何一步失败，Harness 清除挂起中标记、保留 Session �
 1. 回收已离开池成员上的挂起 Session 的 placement。
 2. 空闲时长（初始 10 分钟）和打开数限制（初始 8），根据冷打开测量结果调整。
 3. 运维恢复流程能重新加载 recovery-blocked Session 之后，这类 Session 是否也应该挂起。
-4. 除了取消输入和停止观察循环之外，close 路径中挂起必须排除的副作用的完整清单。
+4. 重新加载时把活跃的 client-files 绑定重新注册到 Harness，这样打开着浏览器桥接的 Session 也能挂起。
 5. 每个池成员能否访问所有 Workspace 挂载；第二到第四阶段假设任意成员都能打开任意 Session。
-6. 交互式客户端的 client-files 注册在挂起后如何恢复，以及该注册是否应算作活动。
+6. Turn 的 reload-stable Runtime owner 在 detach 时会继续运行、释放义务保留（#16579）；挂起期间能否也让它们继续运行，从而让这类 Session 也能挂起。
+7. 挂起配置了 MCP 的公开 Workspace Shell 档位的 Session，这类 Session 目前的普通 detach 需要 lifecycle 授权。
