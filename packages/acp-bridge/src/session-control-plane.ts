@@ -11725,46 +11725,55 @@ export function createSessionControlPlane(
         deadlineTimer = setTimeout(onDeadline, deadlineMs);
         deadlineTimer.unref();
       }
-      // Continuation claims and Guard release both use the queued abort state.
+      const releaseGuardWaitWithoutSuccessor = () => {
+        const ownerPromptId =
+          entry.todoStopGuardAwaitingQueuedPromptOwnerPromptId;
+        if (!ownerPromptId) return;
+        const hasSuccessor = entry.pendingPromptList.some(
+          (candidate) =>
+            candidate.promptId !== ownerPromptId &&
+            !candidate.terminalPublished &&
+            !candidate.abortController.signal.aborted,
+        );
+        if (hasSuccessor) return;
+        delete entry.todoStopGuardAwaitingQueuedPromptOwnerPromptId;
+        void entry.connection
+          .extMethod(TODO_STOP_GUARD_QUEUE_RELEASE_METHOD, {
+            sessionId,
+            promptId: ownerPromptId,
+          })
+          .catch((error) => {
+            writeStderrLine(
+              `qwen serve: Todo Stop Guard queued-prompt release failed for ` +
+                `${JSON.stringify(sessionId)}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          });
+      };
+      const publishPromptFailure = (err: unknown) => {
+        publishPromptTerminal(
+          entry,
+          pendingEntry,
+          err instanceof DOMException && err.name === 'AbortError'
+            ? { kind: 'cancelled' }
+            : { kind: 'error', err },
+        );
+      };
       const onQueuedDispatchAbort = () => {
         if (pendingEntry.state === 'queued') {
           pendingAbort.abort(dispatchSignal?.reason);
+          publishPromptFailure(dispatchSignal?.reason);
         }
       };
       if (isQueued) {
         pendingAbort.signal.addEventListener(
           'abort',
           () => {
-            if (pendingEntry.state !== 'queued') return;
-            const waitingOwnerPromptId =
-              entry.todoStopGuardAwaitingQueuedPromptOwnerPromptId;
-            if (!waitingOwnerPromptId) return;
-            const hasAnotherQueuedPrompt = entry.pendingPromptList.some(
-              (candidate) =>
-                candidate !== pendingEntry &&
-                candidate.state === 'queued' &&
-                !candidate.abortController.signal.aborted,
-            );
-            if (hasAnotherQueuedPrompt) return;
-            delete entry.todoStopGuardAwaitingQueuedPromptOwnerPromptId;
-            void entry.connection
-              .extMethod(TODO_STOP_GUARD_QUEUE_RELEASE_METHOD, {
-                sessionId,
-                promptId: waitingOwnerPromptId,
-              })
-              .catch((error) => {
-                writeStderrLine(
-                  `qwen serve: Todo Stop Guard queued-prompt release failed for ` +
-                    `${JSON.stringify(sessionId)}: ${error instanceof Error ? error.message : String(error)}`,
-                );
-              });
+            if (pendingEntry.state === 'queued') {
+              releaseGuardWaitWithoutSuccessor();
+            }
           },
           { once: true },
         );
-        dispatchSignal?.addEventListener('abort', onQueuedDispatchAbort, {
-          once: true,
-        });
-        if (dispatchSignal?.aborted) onQueuedDispatchAbort();
         entry.events.publish({
           type: 'pending_prompt_added',
           promptId: pendingEntry.promptId,
@@ -11776,10 +11785,15 @@ export function createSessionControlPlane(
           },
           ...(originatorClientId ? { originatorClientId } : {}),
         });
+        dispatchSignal?.addEventListener('abort', onQueuedDispatchAbort, {
+          once: true,
+        });
+        if (dispatchSignal?.aborted) onQueuedDispatchAbort();
       }
       // Force the body's sessionId to match the routing id — a client that
       // sent a stale id in the body would otherwise be dispatched to the
       // wrong agent process.
+      let handoffOwnerPromptId: string | undefined;
       const result = entry.promptQueue.then(() =>
         telemetry.runWithContext(capturedContext, async () => {
           const queueWaitMs = Date.now() - queuedAt;
@@ -11817,7 +11831,9 @@ export function createSessionControlPlane(
           // mid-turn message has no client-side row to render.
           if (pendingEntry.state === 'queued' || isPromotedMidTurn) {
             if (pendingEntry.state === 'queued') {
-              delete entry.todoStopGuardAwaitingQueuedPromptOwnerPromptId;
+              // Promotion can still fail before the child receives the prompt.
+              handoffOwnerPromptId =
+                entry.todoStopGuardAwaitingQueuedPromptOwnerPromptId;
               pendingEntry.state = 'running';
             }
             entry.events.publish({
@@ -12312,18 +12328,19 @@ export function createSessionControlPlane(
             kind: 'complete',
             result: promptResult,
           });
+          if (promptResult.stopReason === 'cancelled') {
+            releaseGuardWaitWithoutSuccessor();
+          } else if (
+            handoffOwnerPromptId !== undefined &&
+            entry.todoStopGuardAwaitingQueuedPromptOwnerPromptId ===
+              handoffOwnerPromptId
+          ) {
+            delete entry.todoStopGuardAwaitingQueuedPromptOwnerPromptId;
+          }
         },
         (err) => {
-          if (err instanceof DOMException && err.name === 'AbortError') {
-            // An aborted prompt (queued removal, caller socket close,
-            // deadline…) still owes its formal terminal — fall back to a
-            // `cancelled` turn_complete. Paths that already published one
-            // (removePendingPrompt, onDeadline, flush) are deduped by the
-            // per-prompt latch inside `publishPromptTerminal`.
-            publishPromptTerminal(entry, pendingEntry, { kind: 'cancelled' });
-            return;
-          }
-          publishPromptTerminal(entry, pendingEntry, { kind: 'error', err });
+          publishPromptFailure(err);
+          releaseGuardWaitWithoutSuccessor();
         },
       );
       // Tail swallows failures so subsequent prompts still run. The caller
