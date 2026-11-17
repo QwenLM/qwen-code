@@ -400,6 +400,7 @@ const ThinkBody: React.FC<{
           contentWidth={contentWidth - 2}
           constrainBlockWidth
           textColor={theme.text.secondary}
+          showSourceCopyHints={false}
         />
       </ErrorBoundary>
     </Box>

@@ -5,4 +5,8 @@ import java.nio.file.Path;
 public interface StorageIdentityReader {
     record Identity(String root, String hostId, String device, String inode, String birthTime) { }
     Identity read(Path root) throws IOException;
+
+    default Identity readLegacy(Path root) throws IOException {
+        return read(root);
+    }
 }

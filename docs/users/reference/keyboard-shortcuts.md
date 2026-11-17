@@ -16,6 +16,8 @@ This document lists the available keyboard shortcuts in Qwen Code.
 | `Alt/Option+M`                 | Toggle Markdown output between rich rendered previews and raw/source mode. On macOS, the terminal must send Option as Meta.                                                                                                                        |
 | `Shift+Tab` (`Tab` on Windows) | Cycle approval modes (`plan` → `default` → `auto-edit` → `auto` → `yolo`)                                                                                                                                                                          |
 
+When confirming an exit with `Ctrl+C` or `Ctrl+D`, press the same shortcut again within one second. This confirmation window also applies while the authentication dialog is open. While a sign-in attempt is in progress, `Ctrl+C` is ignored; with an empty input buffer, press `Ctrl+D` twice within the same window to exit.
+
 ## Input Prompt
 
 | Shortcut                                              | Description                                                                                                                                                                                                                                                                                                               |

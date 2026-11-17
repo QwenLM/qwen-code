@@ -10,6 +10,10 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
+import {
+  MANAGED_OUTBOUND_LIMIT,
+  validManagedReceipt,
+} from '@qwen-code/channel-base';
 import type { ManagedReceipt } from '@qwen-code/channel-base';
 import type { EmailSettings } from './config.js';
 import { EmailStateStore, isMessageId, validState } from './state.js';
@@ -80,24 +84,6 @@ const isUid = (value: unknown): value is number =>
   Number(value) > 0 &&
   Number(value) <= 0xffffffff;
 
-function validManagedReceipt(value: unknown): boolean {
-  if (value === undefined) return true;
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  const receipt = value as Partial<ManagedReceipt>;
-  if (receipt.outcome === 'unknown' || receipt.outcome === 'rejected')
-    return Object.keys(receipt).length === 1;
-  return (
-    receipt.outcome === 'accepted' &&
-    Number.isSafeInteger(receipt.ordinal) &&
-    (receipt.ordinal as number) >= 0 &&
-    typeof receipt.providerMessageId === 'string' &&
-    receipt.providerMessageId.length > 0 &&
-    receipt.providerMessageId.length <= 512 &&
-    Number.isSafeInteger(receipt.acceptedAt) &&
-    (receipt.acceptedAt as number) >= 0
-  );
-}
-
 export function validManagedState(value: unknown): value is ManagedEmailState {
   if (!value || typeof value !== 'object') return false;
   const state = value as ManagedEmailState;
@@ -132,7 +118,7 @@ export function validManagedState(value: unknown): value is ManagedEmailState {
         (entry.inputId === undefined || typeof entry.inputId === 'string'),
     ) &&
     Array.isArray(state.outbound) &&
-    state.outbound.length <= 64 &&
+    state.outbound.length <= MANAGED_OUTBOUND_LIMIT &&
     state.outbound.every(
       (entry) =>
         entry &&

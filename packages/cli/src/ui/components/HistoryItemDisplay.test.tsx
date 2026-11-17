@@ -973,6 +973,122 @@ describe('<HistoryItemDisplay />', () => {
     expect(output).toContain('Inspecting the repository');
   });
 
+  it.each(['gemini_thought', 'gemini_thought_content'] as const)(
+    'offers an expanded committed %s to the Mods and draws their text',
+    (type) => {
+      const item: HistoryItem = {
+        id: 7,
+        type,
+        text: 'Inspecting the repository\n\n',
+        durationMs: 1200,
+      };
+      const modRow = vi
+        .spyOn(modRowHooks, 'useModRow')
+        .mockImplementation((_config, _session, input) =>
+          input ? { text: 'Rewritten thought' } : undefined,
+        );
+      try {
+        const collapsed = renderWithProviders(
+          <HistoryItemDisplay
+            item={item}
+            terminalWidth={100}
+            isPending={false}
+            modSessionId="session"
+            isInViewport
+          />,
+        );
+        // A collapsed thought shows no text, so it is not offered.
+        expect(modRow).toHaveBeenLastCalledWith(
+          undefined,
+          'session',
+          undefined,
+          true,
+        );
+        collapsed.unmount();
+
+        const { lastFrame } = renderWithProviders(
+          <HistoryItemDisplay
+            item={item}
+            terminalWidth={100}
+            isPending={false}
+            modSessionId="session"
+            fullDetail
+            isInViewport
+          />,
+        );
+        expect(modRow).toHaveBeenLastCalledWith(
+          undefined,
+          'session',
+          {
+            surface: 'terminal',
+            component: 'Thinking',
+            requestId: '7',
+            props: { text: 'Inspecting the repository' },
+          },
+          true,
+        );
+        expect(lastFrame()).toContain('Rewritten thought');
+        expect(lastFrame()).not.toContain('Inspecting the repository');
+      } finally {
+        modRow.mockRestore();
+      }
+    },
+  );
+
+  it('does not add reply copy hints to rewritten thought Markdown', () => {
+    const modRow = vi
+      .spyOn(modRowHooks, 'useModRow')
+      .mockImplementation((_config, _session, input) =>
+        input
+          ? {
+              text: '$$\nx = 7\n$$\n\n```mermaid\nflowchart LR\n  A[First] --> B[Second]\n```',
+            }
+          : undefined,
+      );
+    try {
+      const { lastFrame } = renderWithProviders(
+        <HistoryItemDisplay
+          item={{ id: 1, type: 'gemini_thought', text: 'Inspect the math.' }}
+          terminalWidth={100}
+          isPending={false}
+          modSessionId="session"
+          fullDetail
+          isInViewport
+        />,
+      );
+      const output = lastFrame();
+      expect(output).toContain('LaTeX block');
+      expect(output).toContain('Second');
+      expect(output).not.toContain('/copy');
+    } finally {
+      modRow.mockRestore();
+    }
+  });
+
+  it('does not offer a pending thought to the Mods', () => {
+    const modRow = vi.spyOn(modRowHooks, 'useModRow');
+    try {
+      renderWithProviders(
+        <HistoryItemDisplay
+          item={{ id: 1, type: 'gemini_thought', text: 'Still thinking' }}
+          terminalWidth={100}
+          isPending
+          modSessionId="session"
+          fullDetail
+          isInViewport
+        />,
+      );
+      expect(modRow).toHaveBeenLastCalledWith(
+        undefined,
+        'session',
+        undefined,
+        true,
+      );
+    } finally {
+      modRow.mockRestore();
+    }
+  });
+
   it('forwards fullDetail to ToolGroupMessage for tool_group items', () => {
     vi.mocked(ToolGroupMessage).mockClear();
     const item: HistoryItem = {
