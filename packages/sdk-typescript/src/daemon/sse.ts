@@ -123,6 +123,7 @@ export async function* parseSseStream(
         if (signal?.aborted) return;
         throw err;
       }
+      if (signal?.aborted) return;
       if (done) {
         // Flush any bytes the decoder is still holding for an incomplete
         // multi-byte UTF-8 sequence at the tail. Without this, the last
@@ -137,6 +138,7 @@ export async function* parseSseStream(
           // single-frame fallback) which silently dropped events.
           const consumed = consumeFrames(buf);
           for (const raw of consumed.frames) {
+            if (signal?.aborted) return;
             const frame = parseFrame(raw);
             if (frame) yield frame;
           }
@@ -144,6 +146,7 @@ export async function* parseSseStream(
           // legitimate trailing fragment (no `\n\n` ever arrived);
           // try to parse it once as a final attempt.
           if (consumed.tail.length > 0) {
+            if (signal?.aborted) return;
             const frame = parseFrame(consumed.tail);
             if (frame) yield frame;
           }
@@ -161,6 +164,7 @@ export async function* parseSseStream(
       const consumed = consumeFrames(buf);
       if (consumed.frames.length > 0) {
         for (const raw of consumed.frames) {
+          if (signal?.aborted) return;
           const frame = parseFrame(raw);
           if (frame) yield frame;
         }

@@ -41,6 +41,48 @@ async function collect(
 }
 
 describe('parseSseStream', () => {
+  it.each(['\n\n', '\r\n\r\n'])(
+    'stops a buffered batch immediately after abort (%j)',
+    async (separator) => {
+      const controller = new AbortController();
+      let cancelled = false;
+      const body = new ReadableStream<Uint8Array>({
+        start(stream) {
+          stream.enqueue(
+            new TextEncoder().encode(
+              [1, 2, 3]
+                .map((id) => `data: ${JSON.stringify({ id, v: 1, type: 'x' })}`)
+                .join(separator) + separator,
+            ),
+          );
+        },
+        cancel() {
+          cancelled = true;
+        },
+      });
+      const events: number[] = [];
+      for await (const event of parseSseStream(body, controller.signal)) {
+        events.push(event.id!);
+        controller.abort();
+      }
+      expect(events).toEqual([1]);
+      expect(cancelled).toBe(true);
+    },
+  );
+
+  it('does not deliver a read that settles during cancellation', async () => {
+    const controller = new AbortController();
+    const body = new ReadableStream<Uint8Array>({
+      pull(stream) {
+        stream.enqueue(
+          new TextEncoder().encode('data: {"v":1,"type":"x"}\n\n'),
+        );
+        controller.abort();
+      },
+    });
+    expect(await collect(parseSseStream(body, controller.signal))).toEqual([]);
+  });
+
   it('parses a single frame', async () => {
     const stream = bodyFromString(
       'id: 1\nevent: session_update\ndata: {"id":1,"v":1,"type":"session_update","data":"hello"}\n\n',
