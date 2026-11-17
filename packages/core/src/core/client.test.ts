@@ -12836,6 +12836,10 @@ Other open files:
         for (const [type, expectedRetryFlag] of [
           [SendMessageType.UserQuery, false],
           [SendMessageType.Retry, true],
+          [SendMessageType.ToolResult, false],
+          [SendMessageType.Hook, false],
+          [SendMessageType.Cron, false],
+          [SendMessageType.Steer, false],
         ] as const) {
           await run([{ text: 'my prompt' }], 'session########5', { type });
           expect(mockTurnConstructorFn.mock.calls.at(-1)?.[9]).toBe(

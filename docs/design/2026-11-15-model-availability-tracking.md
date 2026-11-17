@@ -78,11 +78,12 @@ no zod / no external deps, so no zod-4 migration is needed for it:
   - An explicit user Retry (`SendMessageType.Retry`, threaded as
     `isExplicitRetry` through `LlmClient` → `Turn` → `LlmChatSendOptions`) calls
     `resetTurn()` so a retry re-probes fallbacks the failed attempt consumed,
-    even when the recovered primary serves the retry's first request. On the TUI
-    a retry mints a fresh prompt id (R8-F1), so the new turn boundary already
-    re-probes; `resetTurn()` additionally covers surfaces where a retry reuses
-    the prompt id (e.g. ACP), where `beginTurn` would otherwise be a same-key
-    no-op.
+    even when the recovered primary serves the retry's first request. Both
+    surfaces already mint a fresh prompt id on retry — the TUI via the mint
+    counter (R8-F1), ACP via its per-`prompt()` turn counter — so the new turn
+    boundary re-probes on its own; `resetTurn()` additionally guarantees the
+    re-probe if a retry surface ever reuses the prompt id, where `beginTurn`
+    would be a same-key no-op.
   - Only session-turn sends participate, via an `isSessionTurn` flag the ledger
     gate requires. Membership is decided by the **sender**, not inferred from
     "went through `Turn`": `LlmClient` constructs the live turn's `Turn` with
