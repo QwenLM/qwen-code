@@ -252,8 +252,6 @@ async function sendWebhook(
   ) {
     throw webhookFailure('DingTalk webhook URL rejected.', true);
   }
-  const abort = new AbortController();
-  const timer = setTimeout(() => abort.abort(), WEBHOOK_TIMEOUT_MS);
   // In a proxy-only egress the reply must still leave: route this send through
   // the resolved proxy with a per-send dispatcher (the Legacy sender's shape),
   // destroyed afterwards so it never leaks. Only the webhook send is proxied —
@@ -273,11 +271,14 @@ async function sendWebhook(
     }
     // DingTalk caps one text message at DINGTALK_MAX_CHUNK_LENGTH units, while
     // a ledger segment can be larger; split and send the chunks in order. One
-    // receipt still covers the whole ledger segment. The budget stays armed
-    // across every chunk's header AND body read, so a stalled body cannot
-    // outlive it.
+    // receipt still covers the whole ledger segment. Each chunk gets its own
+    // budget, armed across that chunk's header AND body read: a shared budget
+    // would let the earlier chunks spend it and abort a slow-but-progressing
+    // send mid-batch, settling the tail unknown (#17173 R10).
     let delivered = 0;
     for (const chunk of splitChunks(text)) {
+      const abort = new AbortController();
+      const timer = setTimeout(() => abort.abort(), WEBHOOK_TIMEOUT_MS);
       try {
         await postTextChunk(webhook, chunk, abort.signal, dispatcher);
         delivered += 1;
@@ -291,10 +292,11 @@ async function sendWebhook(
           (error as DingtalkWebhookFailure).definitive = false;
         }
         throw error;
+      } finally {
+        clearTimeout(timer);
       }
     }
   } finally {
-    clearTimeout(timer);
     await dispatcher?.destroy().catch(() => undefined);
   }
 }
