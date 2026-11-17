@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.cli.protocol.message.assistant.block;
 
-import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
@@ -117,6 +116,6 @@ public class ToolUseBlock extends ContentBlock<Map<String, Object>> implements T
      */
     @Override
     public Map<String, Object> getContentOfAssistant() {
-        return Collections.emptyMap();
+        return input;
     }
 }
