@@ -3737,7 +3737,7 @@ export function registerSessionRoutes(
               originalCwd: workspaceCwd,
               workspaceCwd,
               originalBranch: '',
-              originalHeadCommit: '',
+              originalHeadCommit: worktreeMeta.baseCommit ?? '',
             },
           );
           assertRuntimeGenerationOpen?.();
@@ -4507,6 +4507,7 @@ export function registerSessionRoutes(
                       slug: oldSidecar.slug,
                       path: realTarget,
                       branch: oldSidecar.worktreeBranch,
+                      baseCommit: oldSidecar.originalHeadCommit || undefined,
                     },
                     worktreeState: 'persisted-v1',
                     attached: false,
@@ -4557,6 +4558,8 @@ export function registerSessionRoutes(
                     slug: effectiveOldSidecar.slug,
                     path: realTarget,
                     branch: effectiveOldSidecar.worktreeBranch,
+                    baseCommit:
+                      effectiveOldSidecar.originalHeadCommit || undefined,
                   },
                 });
                 spawnedNew = { sessionId: spawned.sessionId };
@@ -4670,6 +4673,8 @@ export function registerSessionRoutes(
                   slug: effectiveOldSidecar.slug,
                   path: realTarget,
                   branch: effectiveOldSidecar.worktreeBranch,
+                  baseCommit:
+                    effectiveOldSidecar.originalHeadCommit || undefined,
                 };
                 runtime.bridge.setSessionWorktree(
                   spawned.sessionId,
@@ -5201,6 +5206,7 @@ export function registerSessionRoutes(
                   slug,
                   path: worktreeResult.worktree.path,
                   branch: worktreeResult.worktree.branch,
+                  baseCommit: base.headCommit,
                 };
                 await createWorktreeSessionMarker(
                   worktree.path,

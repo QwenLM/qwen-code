@@ -3,8 +3,11 @@
 Language: English | [中文](./2026-11-17-change-overview-boundary-fix.zh-CN.md)
 
 Follow-up to #17378 (merged `6db070d787`). Retires the two maintainer-accepted
-display residuals recorded in that PR's Known limitations, and clears the
-deferred hardening ledger. One PR, ordered commits.
+display residuals recorded in that PR's Known limitations, and clears the cheap
+witness-bearing items of the deferred hardening ledger (the status-route perf
+items and the behavior-change items — permanent-400 rendering, stale-state on
+session switch, persisted workspaceId staleness — remain deferred). One PR,
+ordered commits.
 
 ## Problem
 
@@ -100,6 +103,19 @@ _every_ bound head, not intersection against one arbitrarily-ordered head.
   parallel, and incomparable heads uniformly.
 - Keep the guard: if any produced PR unit failed to resolve a head, suppress
   the fallback (its commits cannot be excluded, so they must not be re-listed).
+- Capability skew: with bound PR units but **no** exclude capability (a new
+  client against an older daemon), suppress the fallback too — an unfiltered
+  window would re-list those PRs' own commits as loose. Gating only the
+  parameter is not enough; the fallback itself is gated on
+  `boundPrs.length === 0 || !prFilesSupported || excludeRefsSupported`.
+- Missing-head degradation: a bound `headSha` is a live `gh` value the files
+  route never fetches, so it can be absent from the local object database
+  (refreshed `headRefOid`, a gc'd head, a cross-repo binding). `git log --not
+<missing>` then fails permanently (`bad object` → `available:false`). When
+  the excluded log is unavailable, retry once on the **same boundary window
+  without `excludeRefs`** so the overview degrades to the loose window (this
+  PR's commits may duplicate — the accepted residual) instead of blanking every
+  unit. Only a log still unavailable after that retry surfaces `loadFailed`.
 - Retire the now-redundant ancestry heuristic: remove the `headIsAncestor`
   probe from the files route, the SDK field, and the hook's ancestor-head
   selection. Remove `isGitAncestorOfHead` and its tests if no consumer remains
@@ -147,29 +163,36 @@ Each new behavioral guard gets a killing mutation witness (byte-level restore).
   and removes R7-1's falsified premise entirely.
 - **New capability tag for the exclude param.** A daemon advertising
   `workspace_github_pr_files` but predating `exclude` would ignore the param
-  and return unfiltered entries (duplication regress in the skew window); a
-  distinct tag lets the hook gate exclusion on actual support.
+  and return unfiltered entries; a distinct tag lets the hook detect actual
+  support. The tag alone only stops the daemon silently ignoring the parameter
+  — the hook also gates the fallback itself on the tag (suppress when bound PR
+  heads cannot be excluded), so the skew window does not duplicate PR commits.
 - **Start commit is immutable.** Recorded once at creation; never recomputed
   from current HEAD (which moves). Legacy sessions without it suppress.
 
 ## Files affected
 
-- `packages/sdk-typescript/src/daemon/types.ts`, `DaemonClient.ts`, `index.ts`
-  (+ test): `baseCommit` fields, `excludeRefs` arg, tag type.
-- `packages/core/src/utils/gitDiff.ts` (+ test): `excludeRefs`; remove
-  `isGitAncestorOfHead` if unused.
+- `packages/sdk-typescript/src/daemon/types.ts`, `DaemonClient.ts`
+  (+ `test/unit/DaemonClient.test.ts`): `baseCommit` fields, `excludeRefs` arg
+  and forwarding, empty-repo-slug suppression.
+- `packages/core/src/utils/gitDiff.ts` (+ test): `excludeRefs` with the
+  single-ref whitelist; remove `isGitAncestorOfHead`.
 - `packages/cli/src/serve/routes/session.ts` (+ server.test.ts): persist/projec
-  start commit; hydration catch test.
+  the start commit on branch, worktree, journaled branch-worktree and
+  worktree-reset paths; hydration catch test.
+- `packages/cli/src/serve/server/session-restore.ts`: restore `baseCommit` from
+  the sidecar's `originalHeadCommit`.
 - `packages/cli/src/serve/routes/workspace-git-log.ts` (+ test): `exclude`.
 - `packages/cli/src/serve/routes/workspace-github-prs.ts` (+ test): remove
-  probe; `?cwd=` positive test.
+  probe.
 - `packages/cli/src/serve/capabilities.ts`, `capability-parity.ts`,
   `server.test.ts`, `integration-tests/cli/qwen-serve-routes.test.ts`: new tag.
-- `packages/web-shell/client/components/artifacts/`: hook rewrite, panel ARIA +
-  hardening tests, `change-overview.ts` composer.
-- `packages/web-shell/client/App.tsx`, `main.tsx`, `customization.tsx`,
-  `README.md`: JSDoc/enumeration/typing.
-- `packages/acp-bridge/src/bridgeTypes.ts`: PR entry `source` typing.
+- `packages/web-shell/client/components/artifacts/`: hook rewrite (boundary,
+  exclusion, skew suppression, missing-head retry), panel ARIA + hardening
+  tests, `change-overview.ts` composer; `ArtifactPanel.tsx` JSDoc; `README.md`
+  right-panel enumeration.
+- `packages/acp-bridge/src/bridgeTypes.ts`, `session-control-plane.ts`:
+  `baseCommit` on worktree/branch meta; PR entry `source` typing.
 - `docs/design/2026-11-16-web-shell-change-overview*.md`: Known limitations →
   resolved.
 

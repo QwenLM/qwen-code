@@ -241,6 +241,7 @@ async function reconcileRestoredSessionWorktree({
         slug: sidecar.slug,
         path: realTarget,
         branch: sidecar.worktreeBranch,
+        baseCommit: sidecar.originalHeadCommit || undefined,
       };
       try {
         if (!session.hasActivePrompt) {
@@ -399,6 +400,7 @@ async function reconcileRestoredSessionWorktree({
         slug: sidecar.slug,
         path: realTarget,
         branch: sidecar.worktreeBranch,
+        baseCommit: sidecar.originalHeadCommit || undefined,
       };
       // A parked deferred restore prompt reads inactive here by
       // design (the bridge's restore response excludes it), so the

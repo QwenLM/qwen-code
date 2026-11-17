@@ -15824,6 +15824,60 @@ describe('createServeApp', () => {
       }
     });
 
+    it('records and persists the worktree start commit when HEAD resolves', async () => {
+      // The base tip the worktree is created from is the session's immutable
+      // start commit. It must reach both the live summary (worktree.baseCommit)
+      // and the durable sidecar (originalHeadCommit) so a daemon restart still
+      // scopes the commit fallback to <baseCommit>..HEAD instead of suppressing.
+      mockBranchOps.getHeadCommit = () => Promise.resolve('wtbase123');
+      const bridge = fakeBridge();
+      const createMarker = vi.fn().mockResolvedValue(undefined);
+      const writeSidecar = vi.fn().mockResolvedValue(undefined);
+      const worktreePath = `${WS_BOUND}/.qwen/worktrees/my-task`;
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.impl = () => ({
+        isGitRepository: () => Promise.resolve(true),
+        getCurrentBranch: () => Promise.resolve('main'),
+        createUserWorktree: () =>
+          Promise.resolve({
+            success: true,
+            worktree: { path: worktreePath, branch: 'worktree-my-task' },
+          }),
+      });
+      mockWt.realpath = (p) => p;
+      mockWt.createMarker = createMarker;
+      mockWt.writeSidecar = writeSidecar;
+
+      try {
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ worktree: { slug: 'my-task' } });
+
+        expect(res.status).toBe(200);
+        expect(res.body.worktree).toEqual({
+          slug: 'my-task',
+          path: worktreePath,
+          branch: 'worktree-my-task',
+          baseCommit: 'wtbase123',
+        });
+        expect(writeSidecar).toHaveBeenCalledWith(
+          expect.stringMatching(/fake-0\.worktree\.json$/),
+          expect.objectContaining({ originalHeadCommit: 'wtbase123' }),
+        );
+      } finally {
+        mockBranchOps.getHeadCommit = undefined;
+        mockWt.createMarker = undefined;
+        mockWt.writeSidecar = undefined;
+        mockWt.realpath = undefined;
+        mockWt.impl = undefined;
+      }
+    });
+
     it('persists the canonical worktree path returned by relocation', async () => {
       const createdPath = `${WS_BOUND}/.qwen/worktrees/my-task-link`;
       const canonicalPath = `${WS_BOUND}/.qwen/worktrees/my-task`;
@@ -18993,6 +19047,7 @@ describe('createServeApp', () => {
           slug: 'my-task',
           path: `${WS_BOUND}/.qwen/worktrees/my-task`,
           branch: 'worktree-my-task',
+          baseCommit: 'abc123',
         });
         expect(res.body.worktreeState).toBe('persisted-v1');
         expect(bridge.changeSessionCwdCalls).toHaveLength(1);
@@ -19044,6 +19099,7 @@ describe('createServeApp', () => {
           slug: 'case-task',
           path: `${WS_BOUND}/.qwen/worktrees/case-task`,
           branch: 'worktree-case-task',
+          baseCommit: 'abc123',
         });
         expect(bridge.changeSessionCwdCalls).toHaveLength(1);
       } finally {
@@ -19125,7 +19181,10 @@ describe('createServeApp', () => {
           .send({ cwd: WS_BOUND });
 
         expect(res.status).toBe(200);
-        expect(res.body.worktree).toMatchObject({ path: worktreePath });
+        expect(res.body.worktree).toMatchObject({
+          path: worktreePath,
+          baseCommit: 'abc123',
+        });
         expect(res.body.worktreeState).toBeUndefined();
         expect(bridge.changeSessionCwdCalls[0]?.allowedRoots).toEqual([
           path.join(WS_BOUND, '.qwen', 'worktrees'),
@@ -19356,6 +19415,7 @@ describe('createServeApp', () => {
           slug: 'my-task',
           path: worktreePath,
           branch: 'worktree-my-task',
+          baseCommit: 'abc123',
         });
         expect(res.body.worktreeState).toBeUndefined();
         expect(bridge.loadCalls[0]).not.toHaveProperty(
@@ -19418,6 +19478,7 @@ describe('createServeApp', () => {
           slug: 'my-task',
           path: worktreePath,
           branch: 'worktree-my-task',
+          baseCommit: 'abc123',
         });
         expect(res.body.worktreeState).toBe('persisted-v1');
         expect(bridge.changeSessionCwdCalls).toHaveLength(0);

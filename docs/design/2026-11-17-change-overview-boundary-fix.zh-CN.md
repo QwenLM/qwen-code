@@ -3,7 +3,9 @@
 语言：[English](./2026-11-17-change-overview-boundary-fix.md) | 中文
 
 #17378（已合入 `6db070d787`）的跟进。消除该 PR「已知限制」中记录的两条
-维护者接受的展示残留，并清理延后的加固清单。单个 PR，有序提交。
+维护者接受的展示残留，并清理延后加固清单中廉价且带见证的项（status 路由性能项
+与行为变化项——永久 400 渲染、切换会话陈旧态、持久化 workspaceId 陈旧——仍延后）。
+单个 PR，有序提交。
 
 ## 问题
 
@@ -83,6 +85,16 @@ search }`；log 路由（`workspace-git-log.ts`）转发 `range`/`search`。无�
   `excludeRefs` 传入。可达性排除统一处理已合并、并行、不可比 head。
 - 保留守卫：任一产出 PR 单元未解析出 head 则抑制兜底（其提交无法被排除，
   故不得重新列出）。
+- capability 偏差：有绑定 PR 单元但**无** exclude 能力（新客户端对旧 daemon）
+  时也抑制兜底——无过滤窗口会把这些 PR 自身的提交重复列为松散。仅门控参数不
+  够；兜底本身按 `boundPrs.length === 0 || !prFilesSupported ||
+excludeRefsSupported` 门控。
+- 缺失 head 降级：绑定 `headSha` 是 files 路由从不 fetch 的实时 `gh` 值，可能
+  不在本地对象库（刷新后的 `headRefOid`、被 gc 的 head、跨仓绑定）。`git log
+--not <缺失>` 遂永久失败（`bad object` → `available:false`）。排除后的 log
+  不可用时，在**同一边界窗口不带 `excludeRefs`** 重试一次，使总览降级到松散窗口
+  （该 PR 提交可能重复——接受的残留）而非清空全部单元。仅当重试后仍不可用才
+  呈现 `loadFailed`。
 - 退役冗余的祖先启发式：从 files 路由移除 `headIsAncestor` 探针、SDK 字段、
   hook 的祖先 head 选择。若无消费方残留则移除 `isGitAncestorOfHead` 及其测试
   （排除模型已涵盖；保留两者是冗余面）。
@@ -119,29 +131,33 @@ search }`；log 路由（`workspace-git-log.ts`）转发 `range`/`search`。无�
 - **抑制，绝不无范围遍历。** 无 start 情形抑制而非遍历 HEAD。这是所有相邻
   拒绝的一致延伸，彻底移除 R7-1 的证伪前提。
 - **exclude 参数用新 capability tag。** 声明 `workspace_github_pr_files` 但
-  早于 `exclude` 的 daemon 会忽略该参数返回未过滤条目（偏移窗口内重复回归）；
-  独立 tag 让 hook 按实际支持门控排除。
+  早于 `exclude` 的 daemon 会忽略该参数返回未过滤条目；独立 tag 让 hook 探测
+  实际支持。tag 本身只阻止 daemon 静默忽略参数——hook 还按 tag 门控兜底本身
+  （绑定 PR head 无法被排除时抑制），使偏差窗口不重复 PR 提交。
 - **起点 commit 不可变。** 创建时记录一次；绝不从当前 HEAD（会移动）重算。
   无此字段的 legacy 会话抑制。
 
 ## 涉及文件
 
-- `packages/sdk-typescript/src/daemon/types.ts`、`DaemonClient.ts`、`index.ts`
-  （+ 测试）：`baseCommit` 字段、`excludeRefs` 参数、tag 类型。
-- `packages/core/src/utils/gitDiff.ts`（+ 测试）：`excludeRefs`；若无用则移除
-  `isGitAncestorOfHead`。
-- `packages/cli/src/serve/routes/session.ts`（+ server.test.ts）：持久化/投影
-  起点 commit；水合 catch 测试。
+- `packages/sdk-typescript/src/daemon/types.ts`、`DaemonClient.ts`
+  （+ `test/unit/DaemonClient.test.ts`）：`baseCommit` 字段、`excludeRefs` 参数
+  与转发、空 repo slug 抑制。
+- `packages/core/src/utils/gitDiff.ts`（+ 测试）：带单 ref 白名单的
+  `excludeRefs`；移除 `isGitAncestorOfHead`。
+- `packages/cli/src/serve/routes/session.ts`（+ server.test.ts）：在分支、
+  worktree、日志式 branch-worktree 与 worktree-reset 路径持久化/投影起点
+  commit；水合 catch 测试。
+- `packages/cli/src/serve/server/session-restore.ts`：从 sidecar 的
+  `originalHeadCommit` 恢复 `baseCommit`。
 - `packages/cli/src/serve/routes/workspace-git-log.ts`（+ 测试）：`exclude`。
-- `packages/cli/src/serve/routes/workspace-github-prs.ts`（+ 测试）：移除探针；
-  `?cwd=` 正向测试。
+- `packages/cli/src/serve/routes/workspace-github-prs.ts`（+ 测试）：移除探针。
 - `packages/cli/src/serve/capabilities.ts`、`capability-parity.ts`、
   `server.test.ts`、`integration-tests/cli/qwen-serve-routes.test.ts`：新 tag。
-- `packages/web-shell/client/components/artifacts/`：hook 重写、面板 ARIA +
-  加固测试、`change-overview.ts` 组合器。
-- `packages/web-shell/client/App.tsx`、`main.tsx`、`customization.tsx`、
-  `README.md`：JSDoc/枚举/类型。
-- `packages/acp-bridge/src/bridgeTypes.ts`：PR entry `source` 类型。
+- `packages/web-shell/client/components/artifacts/`：hook 重写（边界、排除、
+  偏差抑制、缺失 head 重试）、面板 ARIA + 加固测试、`change-overview.ts`
+  组合器；`ArtifactPanel.tsx` JSDoc；`README.md` 右面板枚举。
+- `packages/acp-bridge/src/bridgeTypes.ts`、`session-control-plane.ts`：
+  worktree/branch 元数据的 `baseCommit`；PR entry `source` 类型。
 - `docs/design/2026-11-16-web-shell-change-overview*.md`：已知限制 → 已解决。
 
 ## 范围边界

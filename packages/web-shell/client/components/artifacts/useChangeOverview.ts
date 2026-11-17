@@ -214,15 +214,18 @@ export function useChangeOverview(
       // Commit fallback: the session's loose window — commits since the
       // session start commit (else its base branch), minus every commit
       // reachable from any bound PR head. Run only when every produced PR unit
-      // resolved a head: a unit that failed to resolve its head cannot be
-      // excluded, so its commits must not be re-listed as loose work.
-      const showFallback = prResults.every(
-        (result) => result.headSha !== undefined,
-      );
+      // resolved a head (a unit that failed to resolve its head cannot be
+      // excluded, so its commits must not be re-listed as loose work) AND the
+      // heads can actually be excluded: with bound PR units but no exclude
+      // capability (a new client against an older daemon) an unfiltered window
+      // would re-list those PRs' own commits as loose, so suppress instead.
+      const showFallback =
+        prResults.every((result) => result.headSha !== undefined) &&
+        (boundPrs.length === 0 || !prFilesSupported || excludeRefsSupported);
       // Reachability exclusion handles merged, parallel, and incomparable PR
       // heads uniformly — no single-head boundary heuristic. Only passed when
-      // the daemon advertises the exclude capability; otherwise the window is
-      // unfiltered (PR units are absent or heads unresolved in that case).
+      // the daemon advertises the exclude capability; showFallback above
+      // suppresses the window entirely when bound PR heads cannot be excluded.
       const excludeRefs = excludeRefsSupported
         ? prResults
             .map((result) => result.headSha)
@@ -236,17 +239,32 @@ export function useChangeOverview(
         // overview never issues a range-less walk, which would re-list the
         // repository's pre-session history as this session's loose work.
         if (range) {
-          const log = await ws
+          let log = await ws
             .workspaceGitLog(COMMIT_FALLBACK_LIMIT, 0, gitCwd, range, {
               sessionId,
               ...(excludeRefs.length > 0 ? { excludeRefs } : {}),
             })
             .catch(() => undefined);
+          // A bound PR head can be missing from the local object database — a
+          // headRefOid refreshed after a remote update, a force-pushed/gc'd
+          // head, a legacy cross-repo binding. `git log --not <missing>` then
+          // fails permanently (bad object), so the excluded log is unavailable
+          // on every retry. Degrade to the same boundary window WITHOUT
+          // exclusion rather than blanking every unit: re-listing that PR's
+          // commits in this degraded case is the accepted residual.
+          if (log && log.available === false && excludeRefs.length > 0) {
+            log = await ws
+              .workspaceGitLog(COMMIT_FALLBACK_LIMIT, 0, gitCwd, range, {
+                sessionId,
+              })
+              .catch(() => undefined);
+          }
           if (!active) return;
-          // A thrown fetch (timeout, 5xx, dropped connection) or a log the
-          // daemon reports unavailable (e.g. an unsafe excluded ref, or the
-          // start commit not in the object database) is a retryable failure,
-          // not "no loose commits"; surface it instead of an empty session.
+          // A thrown fetch (timeout, 5xx, dropped connection) or a log still
+          // unavailable after the no-exclusion retry (e.g. an unsafe excluded
+          // ref, or the start commit itself not in the object database) is a
+          // retryable failure, not "no loose commits"; surface it instead of an
+          // empty session.
           if (!log || log.available === false) {
             setState({
               gitAvailable: true,

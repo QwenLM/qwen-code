@@ -54,7 +54,10 @@ beforeEach(() => {
   const container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
-  mock.features = ['workspace_github_pr_files'];
+  mock.features = [
+    'workspace_github_pr_files',
+    'workspace_git_log_exclude_refs',
+  ];
   mock.sessionStatus.mockReset().mockResolvedValue({
     prs: [
       { number: 1, url: 'https://github.com/o/r/pull/1' },
@@ -122,6 +125,11 @@ describe('useChangeOverview', () => {
   });
 
   it('scopes the commit fallback to the base branch when no start commit is recorded', async () => {
+    mock.sessionStatus.mockResolvedValue({
+      prs: [],
+      branch: { name: 'feat', baseBranch: 'origin/main' },
+      worktree: { path: '/work/wt' },
+    });
     await renderAndSettle();
     const ws = mock.workspaceByCwd.mock.results[0]!.value;
     expect(ws.workspaceGitLog).toHaveBeenCalledWith(
@@ -634,10 +642,11 @@ describe('useChangeOverview', () => {
     expect(output.units).toEqual([]);
   });
 
-  it('surfaces a retryable failure when the boundary log is unavailable', async () => {
-    // An unavailable log (e.g. the start commit is not in the object database,
-    // or an excluded ref was refused) is a retryable failure, not an empty
-    // session. There is no range-less retry to fall back to.
+  it('surfaces a retryable failure when the boundary log stays unavailable after the no-exclusion retry', async () => {
+    // An unavailable log (e.g. the start commit itself is not in the object
+    // database) is a retryable failure, not an empty session. The hook retries
+    // once without excludeRefs; when that is unavailable too it surfaces the
+    // failure rather than walking HEAD unscoped.
     const ws = {
       workspaceGitDiff: vi.fn().mockResolvedValue(gitDiff),
       workspaceGitHubPullRequestFiles: vi
@@ -655,8 +664,99 @@ describe('useChangeOverview', () => {
     };
     mock.workspaceByCwd.mockReturnValue(ws);
     await renderAndSettle();
-    expect(ws.workspaceGitLog).toHaveBeenCalledTimes(1);
+    expect(ws.workspaceGitLog).toHaveBeenCalledTimes(2);
+    expect(ws.workspaceGitLog).toHaveBeenNthCalledWith(
+      2,
+      20,
+      0,
+      '/work/wt',
+      'origin/main..HEAD',
+      { sessionId: 's1' },
+    );
     expect(output.loadFailed).toBe(true);
     expect(output.units).toEqual([]);
+  });
+
+  it('degrades to the no-exclusion window when a bound PR head is missing locally', async () => {
+    // A bound head absent from the object database (refreshed headRefOid, a
+    // gc'd head, a cross-repo binding) makes `git log --not <head>` fail
+    // permanently. The excluded log is unavailable, so retry the same boundary
+    // window without excludeRefs: the loose commits render (this PR's commits
+    // may duplicate in the degraded window — the accepted residual) instead of
+    // blanking every unit.
+    const ws = {
+      workspaceGitDiff: vi.fn().mockResolvedValue(gitDiff),
+      workspaceGitHubPullRequestFiles: vi
+        .fn()
+        .mockImplementation((number: number) =>
+          Promise.resolve(prFiles(number)),
+        ),
+      workspaceGitLog: vi
+        .fn()
+        .mockResolvedValueOnce({
+          v: 1,
+          available: false,
+          entries: [],
+          hasMore: false,
+        })
+        .mockResolvedValueOnce({
+          v: 1,
+          workspaceCwd: '/work',
+          available: true,
+          entries: [
+            { sha: 'c9', shortSha: 'c9', subject: 'loose', parents: ['head2'] },
+          ],
+          hasMore: false,
+        }),
+      workspaceGitCommitDetail: vi.fn().mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/work',
+        available: true,
+        files: [{ path: 'loose.ts', added: 1, removed: 0, isBinary: false }],
+        filesCount: 1,
+        linesAdded: 1,
+        linesRemoved: 0,
+      }),
+    };
+    mock.workspaceByCwd.mockReturnValue(ws);
+    await renderAndSettle();
+    expect(ws.workspaceGitLog).toHaveBeenCalledTimes(2);
+    expect(ws.workspaceGitLog).toHaveBeenNthCalledWith(
+      1,
+      20,
+      0,
+      '/work/wt',
+      'origin/main..HEAD',
+      { sessionId: 's1', excludeRefs: ['head1', 'head2'] },
+    );
+    expect(ws.workspaceGitLog).toHaveBeenNthCalledWith(
+      2,
+      20,
+      0,
+      '/work/wt',
+      'origin/main..HEAD',
+      { sessionId: 's1' },
+    );
+    expect(output.loadFailed).toBe(false);
+    expect(output.units.map((unit) => unit.id)).toContain('commit:c9');
+    expect(output.units.map((unit) => unit.id)).toContain('uncommitted');
+  });
+
+  it('suppresses the fallback when bound PR heads cannot be excluded (capability skew)', async () => {
+    // A new client against an older daemon: the files capability is present
+    // (PR units render with resolved heads) but the exclude capability is
+    // absent. An unfiltered window would re-list those PRs' own commits as
+    // loose work, so suppress the fallback rather than duplicate them.
+    mock.features = ['workspace_github_pr_files'];
+    await renderAndSettle();
+    const ws = mock.workspaceByCwd.mock.results[0]!.value;
+    expect(ws.workspaceGitHubPullRequestFiles).toHaveBeenCalled();
+    expect(ws.workspaceGitLog).not.toHaveBeenCalled();
+    expect(output.units.map((unit) => unit.kind)).toEqual([
+      'uncommitted',
+      'pr',
+      'pr',
+    ]);
+    expect(output.loadFailed).toBe(false);
   });
 });

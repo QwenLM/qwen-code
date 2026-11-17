@@ -2030,6 +2030,24 @@ describe('fetchGitLog excludeRefs', () => {
     }
   });
 
+  it('refuses git-accepted refs that each single-ref clause rejects', async () => {
+    await commit(repo, { 'b.txt': 'b' }, 'second');
+    await git(repo, 'branch', 'feat@2026');
+    // Each shape is one git ACCEPTS, so only the matching whitelist clause
+    // keeps it out of argv: deleting that one clause turns this red while the
+    // other two stay green. The set-level test above cannot see that — its
+    // refs are ones git rejects via the error path regardless of the guard.
+    for (const bad of [
+      '-n1', // leading '-' clause: git's short --max-count option
+      'HEAD..HEAD~1', // '..' clause: a valid revision range
+      'feat@2026', // charset clause: '@' is legal in a git branch name
+    ]) {
+      expect(
+        await fetchGitLog(repo, { range: 'HEAD', excludeRefs: [bad] }),
+      ).toBeNull();
+    }
+  });
+
   it('excludes from HEAD when no range is given', async () => {
     const base = await headSha(repo);
     await commit(repo, { 'c.txt': 'c' }, 'later work');

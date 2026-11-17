@@ -2245,6 +2245,27 @@ describe('DaemonClient', () => {
       ]);
     });
 
+    it('forwards excludeRefs as the exclude query parameter on both clients', async () => {
+      const ok = { v: 1 as const, workspaceCwd: '/w', available: true };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, ok));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client.workspaceGitLog(50, 0, 'base..HEAD', {
+        excludeRefs: ['abc123', 'def456'],
+      });
+      await client
+        .workspaceByCwd('/work/main')
+        .workspaceGitLog(50, 0, '/wt', 'base..HEAD', {
+          excludeRefs: ['abc123', 'def456'],
+          sessionId: 's1',
+        });
+
+      expect(calls.map((c) => c.url)).toEqual([
+        'http://daemon/workspace/git/log?limit=50&skip=0&range=base..HEAD&exclude=abc123%2Cdef456',
+        'http://daemon/workspaces/%2Fwork%2Fmain/git/log?limit=50&skip=0&cwd=%2Fwt&range=base..HEAD&exclude=abc123%2Cdef456&sessionId=s1',
+      ]);
+    });
+
     it('reads workspace-qualified GitHub pull requests over REST', async () => {
       const list = {
         v: 1 as const,
